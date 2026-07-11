@@ -948,6 +948,22 @@ function ArticleRecords({ records, total, moreTo }: { records: NewsRecord[]; tot
   );
 }
 
+// Period navigation helpers for the Weekly/Monthly editions (Daily is always
+// "today" — its SOP exceptions are live state, not a historical snapshot).
+function ymdToday(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+function shiftYmd(ymd: string, days: number): string {
+  const d = new Date(ymd + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+function shiftMonth(ymd: string, months: number): string {
+  const d = new Date(ymd + "T00:00:00Z");
+  d.setUTCMonth(d.getUTCMonth() + months);
+  return d.toISOString().slice(0, 10);
+}
+
 export default function DailyReportPage() {
   const { data: raw, loading, refresh } =
     useCachedJson<ComplianceResp>("/api/reports/compliance.json");
@@ -979,12 +995,65 @@ export default function DailyReportPage() {
   // Daily / Weekly / Monthly edition toggle. Daily = this page's existing
   // SOP-exception newspaper; Weekly/Monthly = the operations editions.
   const [edition, setEdition] = useState<Edition>("daily");
+  // Anchor date for the Weekly/Monthly editions — lets you page back to an
+  // older week/month and print it. Any day in the target period works.
+  const [anchorYmd, setAnchorYmd] = useState(ymdToday());
 
   if (edition !== "daily") {
+    const today = ymdToday();
+    const stepBack = () =>
+      setAnchorYmd(
+        edition === "monthly" ? shiftMonth(anchorYmd, -1) : shiftYmd(anchorYmd, -7),
+      );
+    const stepFwd = () => {
+      const next =
+        edition === "monthly" ? shiftMonth(anchorYmd, 1) : shiftYmd(anchorYmd, 7);
+      if (next <= today) setAnchorYmd(next);
+    };
+    const atToday =
+      edition === "monthly"
+        ? anchorYmd.slice(0, 7) >= today.slice(0, 7)
+        : anchorYmd >= today;
     return (
       <div className="space-y-6">
         <EditionToggle edition={edition} onChange={setEdition} />
-        <OperationsEdition edition={edition} />
+        <div className="flex items-center justify-center gap-2 print:hidden">
+          <button
+            type="button"
+            onClick={stepBack}
+            className="rounded border border-[#1F1D1B] px-2.5 py-1 font-serif text-sm hover:bg-[#F0ECE9]"
+            title="Previous period"
+          >
+            ◀
+          </button>
+          {edition === "monthly" ? (
+            <input
+              type="month"
+              value={anchorYmd.slice(0, 7)}
+              max={today.slice(0, 7)}
+              onChange={(e) => e.target.value && setAnchorYmd(e.target.value + "-01")}
+              className="rounded border border-[#E2DDD8] px-2 py-1 text-sm focus:border-[#6B5C32] focus:outline-none"
+            />
+          ) : (
+            <input
+              type="date"
+              value={anchorYmd}
+              max={today}
+              onChange={(e) => e.target.value && setAnchorYmd(e.target.value)}
+              className="rounded border border-[#E2DDD8] px-2 py-1 text-sm focus:border-[#6B5C32] focus:outline-none"
+            />
+          )}
+          <button
+            type="button"
+            onClick={stepFwd}
+            disabled={atToday}
+            className="rounded border border-[#1F1D1B] px-2.5 py-1 font-serif text-sm hover:bg-[#F0ECE9] disabled:opacity-30"
+            title="Next period"
+          >
+            ▶
+          </button>
+        </div>
+        <OperationsEdition edition={edition} anchorYmd={anchorYmd} />
       </div>
     );
   }

@@ -139,9 +139,6 @@ function rmK(sen: number): string {
     return "RM " + (v / 1000).toLocaleString("en-MY", { maximumFractionDigits: 1 }) + "k";
   return "RM " + v.toLocaleString("en-MY", { maximumFractionDigits: 0 });
 }
-function todayYmd(): string {
-  return new Date().toISOString().slice(0, 10);
-}
 
 // ── toggle ──────────────────────────────────────────────────────────────────
 
@@ -223,9 +220,15 @@ function Rows({
 
 // ── edition ─────────────────────────────────────────────────────────────────
 
-export function OperationsEdition({ edition }: { edition: Edition }) {
+export function OperationsEdition({
+  edition,
+  anchorYmd,
+}: {
+  edition: Edition;
+  anchorYmd: string;
+}) {
   const { data: raw, loading } = useCachedJson<Resp>(
-    `/api/reports/operations.json?period=${edition}&date=${todayYmd()}`,
+    `/api/reports/operations.json?period=${edition}&date=${anchorYmd}`,
   );
   const r = raw?.data ?? null;
 

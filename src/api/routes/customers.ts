@@ -113,6 +113,8 @@ type CustomerRow = {
   // "HOUZS") marks this customer as one of our group companies. Dual-keyed read.
   groupOrgCode?: string | null;
   group_org_code?: string | null;
+  // OEM product marking JSON ({bedframe,sofa,accessory} → NONE/TAG/LABEL).
+  oem_marking?: string | null;
 };
 
 // Multi-Company Phase 3 — dual-identity column on the customer side. snake_case,
@@ -148,6 +150,59 @@ function normaliseGroupOrgCode(raw: unknown): string {
   return typeof raw === "string" && raw.trim() ? raw.trim().toUpperCase() : "";
 }
 
+// OEM product marking — per finished-goods category, what to attach for this
+// customer: a company TAG, a LABEL, or nothing. Surfaced on the Fab Cut / Fab
+// Sew production stickers so the line knows. Stored as a small JSON blob in a
+// runtime-added TEXT column (deploy does NOT replay migration files). snake_case.
+type OemMark = "NONE" | "TAG" | "LABEL";
+type OemMarking = { bedframe: OemMark; sofa: OemMark; accessory: OemMark };
+const EMPTY_OEM_MARKING: OemMarking = {
+  bedframe: "NONE",
+  sofa: "NONE",
+  accessory: "NONE",
+};
+function normOemMark(v: unknown): OemMark {
+  return v === "TAG" || v === "LABEL" ? v : "NONE";
+}
+function parseOemMarking(raw: string | null | undefined): OemMarking {
+  try {
+    const o = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+    return {
+      bedframe: normOemMark(o.bedframe),
+      sofa: normOemMark(o.sofa),
+      accessory: normOemMark(o.accessory),
+    };
+  } catch {
+    return { ...EMPTY_OEM_MARKING };
+  }
+}
+/** Normalise an incoming oemMarking body value → JSON string for storage. */
+function serialiseOemMarking(raw: unknown): string {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  return JSON.stringify({
+    bedframe: normOemMark(o.bedframe),
+    sofa: normOemMark(o.sofa),
+    accessory: normOemMark(o.accessory),
+  });
+}
+
+let custOemColPromise: Promise<void> | null = null;
+function ensureCustomerOemColumn(db: D1Database): Promise<void> {
+  if (custOemColPromise) return custOemColPromise;
+  custOemColPromise = (async () => {
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE customers ADD COLUMN IF NOT EXISTS oem_marking TEXT NOT NULL DEFAULT '{}'",
+        )
+        .run();
+    } catch {
+      // best-effort — column may already exist
+    }
+  })();
+  return custOemColPromise;
+}
+
 type HubRow = {
   id: string;
   customerId: string;
@@ -179,6 +234,7 @@ function rowToCustomer(row: CustomerRow, hubs: HubRow[] = []) {
     // company selector. Empty string when unmapped (→ HOOKKA fallback).
     defaultCompanyCode: (row.default_company_code ?? "").trim().toUpperCase(),
     groupOrgCode: readCustomerGroupOrgCode(row),
+    oemMarking: parseOemMarking(row.oem_marking),
     deliveryHubs: hubs
       .filter((h) => h.customerId === row.id)
       .map((h) => ({
@@ -242,6 +298,7 @@ app.post("/", async (c) => {
     const dv = await validateDebtorCode(c, body.code, null);
     if (!dv.ok) return c.json({ success: false, error: dv.error }, 400);
     await ensureCustomerGroupColumn(c.var.DB);
+    await ensureCustomerOemColumn(c.var.DB);
     const id = genId();
     const isActive = body.isActive === false ? 0 : 1;
     const groupOrgCode = normaliseGroupOrgCode(body.groupOrgCode);
@@ -258,8 +315,8 @@ app.post("/", async (c) => {
     await c.var.DB.prepare(
       `INSERT INTO customers (id, code, name, ssmNo, companyAddress, creditTerms,
          creditLimitSen, outstandingSen, isActive, contactName, phone, email,
-         default_company_code, group_org_code)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         default_company_code, group_org_code, oem_marking)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -277,6 +334,7 @@ app.post("/", async (c) => {
         // Multi-Company Phase 4 — optional default company ('' = none).
         normalizeDefaultCompany(body.defaultCompanyCode),
         groupOrgCode,
+        serialiseOemMarking(body.oemMarking),
       )
       .run();
 
@@ -323,6 +381,7 @@ app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
     await ensureCustomerGroupColumn(c.var.DB);
+    await ensureCustomerOemColumn(c.var.DB);
     const existing = await c.var.DB.prepare(
       "SELECT * FROM customers WHERE id = ?",
     )
@@ -386,13 +445,20 @@ app.put("/:id", async (c) => {
         body.groupOrgCode === undefined
           ? readCustomerGroupOrgCode(existing)
           : normaliseGroupOrgCode(body.groupOrgCode),
+      // OEM marking — only changes when the body sends oemMarking; otherwise
+      // the existing setting is preserved.
+      oem_marking:
+        body.oemMarking === undefined
+          ? (existing.oem_marking ?? "{}")
+          : serialiseOemMarking(body.oemMarking),
     };
 
     await c.var.DB.prepare(
       `UPDATE customers SET
          code = ?, name = ?, ssmNo = ?, companyAddress = ?, creditTerms = ?,
          creditLimitSen = ?, outstandingSen = ?, isActive = ?,
-         contactName = ?, phone = ?, email = ?, default_company_code = ?, group_org_code = ?
+         contactName = ?, phone = ?, email = ?, default_company_code = ?, group_org_code = ?,
+         oem_marking = ?
        WHERE id = ?`,
     )
       .bind(
@@ -409,6 +475,7 @@ app.put("/:id", async (c) => {
         merged.email,
         merged.default_company_code,
         merged.groupOrgCode,
+        merged.oem_marking,
         id,
       )
       .run();

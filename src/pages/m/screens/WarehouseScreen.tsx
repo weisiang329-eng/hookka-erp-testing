@@ -374,6 +374,10 @@ function RackOverview({
             // RackItemApi) — the old search looked for poNo/poNumber, which the
             // item never carries, so "search by PO" always missed.
             str(it, "customerPOId", "poNo", "poNumber"),
+            // Our own SO number (companySOId, e.g. "SO-2607-062") — joined onto
+            // rack items server-side so a rack can be found by Company SOID
+            // (owner 2026-07-11).
+            str(it, "companySOId", "salesOrderNo"),
             str(it, "sizeLabel"),
           ].join(" "),
         )

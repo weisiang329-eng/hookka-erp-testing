@@ -11,7 +11,7 @@
 //
 // ADDITIVE: pure consumer of existing endpoints + Phase-1 primitives.
 // ===========================================================================
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { Search, SlidersHorizontal, Plus, ScanLine, FileSearch, ListChecks, X, Download, Check, PackageCheck } from "lucide-react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
@@ -20,7 +20,7 @@ import { newSalesOrderSpec, type SOCreatePrefill } from "../config/forms";
 import { SubTabs } from "../components/SubTabs";
 import { FilterSheet } from "../components/FilterSheet";
 import { M } from "../theme";
-import { type ModuleConfig, type ActiveFilter } from "../config/types";
+import { type ModuleConfig, type ActiveFilter, type DataSource, type RawRow } from "../config/types";
 import { useDebounced } from "../lib/use-debounced";
 import { type FormSpec } from "../config/form-types";
 import { createSpecFor } from "../config/forms";
@@ -238,6 +238,34 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
     [data, source],
   );
 
+  // ---- Cross-source search (owner 2026-07-11) -----------------------------
+  // Delivery sets crossSourceSearch so ONE query finds an order whether it's
+  // still a Sales Order (Planning / Pending Delivery) or already a Delivery
+  // Order. The companion SourceSubscriber(s) below fetch the OTHER cross-search
+  // source(s); their rows land here, and when the active tab belongs to a
+  // cross-search source, a query merges matches from every cross-search source.
+  const crossSources = useMemo(
+    () => (config.crossSourceSearch ? config.sources.filter((s) => s.crossSearch) : []),
+    [config],
+  );
+  const [crossRowsByUrl, setCrossRowsByUrl] = useState<Record<string, RawRow[]>>({});
+  const handleCrossRows = useCallback((url: string, rowsForUrl: RawRow[]) => {
+    setCrossRowsByUrl((prev) => (prev[url] === rowsForUrl ? prev : { ...prev, [url]: rowsForUrl }));
+  }, []);
+  const crossActive =
+    !!config.crossSourceSearch && !!source.crossSearch && debouncedSearch.trim().length > 0;
+  const crossResults = useMemo<{ row: RawRow; src: DataSource }[] | null>(() => {
+    if (!crossActive) return null;
+    const out: { row: RawRow; src: DataSource }[] = [];
+    for (const s of crossSources) {
+      const sr = s.url === source.url ? sourceRows : crossRowsByUrl[s.url] ?? [];
+      for (const r of applyFilters(sr, s.columns, {}, debouncedSearch)) {
+        out.push({ row: r, src: s });
+      }
+    }
+    return out;
+  }, [crossActive, crossSources, source.url, sourceRows, crossRowsByUrl, debouncedSearch]);
+
   const rows = useMemo(() => {
     // When there's a search query, look across EVERY sub-tab of this source so
     // a record is findable no matter which status tab it currently sits in
@@ -249,6 +277,18 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
     return applySort(filtered, source.columns, sort);
   }, [sourceRows, source, tab, filters, debouncedSearch, sort]);
 
+  // The list actually painted: cross-source merged {row, src} pairs when a
+  // cross-source search is active, else the single active source's rows tagged
+  // with that source. Downstream (pagination, render) is source-agnostic — each
+  // card uses its OWN source's view-model + detail route.
+  const results = useMemo<{ row: RawRow; src: DataSource }[]>(
+    () =>
+      crossActive && crossResults
+        ? crossResults
+        : rows.map((r) => ({ row: r, src: source })),
+    [crossActive, crossResults, rows, source],
+  );
+
   // Auto-jump to the sub-tab a search lands in (desktop parity, owner
   // 2026-07-04: "bold the term + jump to that page"). If every matching row of
   // this source lives under exactly ONE sub-tab, switch to it so the tab bar
@@ -257,10 +297,11 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
   // reset below) — NOT setState-in-effect — and tracks the last applied target
   // so it jumps only when the target changes, never fighting a manual tap.
   const searchJumpKey = useMemo(() => {
-    if (debouncedSearch.trim().length === 0) return null;
+    // A cross-source search spans sources/tabs by design — never auto-jump then.
+    if (crossActive || debouncedSearch.trim().length === 0) return null;
     const hit = source.subTabs.filter((t) => rows.some((r) => t.match(r)));
     return hit.length === 1 ? hit[0].key : null;
-  }, [debouncedSearch, source, rows]);
+  }, [crossActive, debouncedSearch, source, rows]);
   const [lastJumpKey, setLastJumpKey] = useState<string | null>(null);
   if (searchJumpKey !== lastJumpKey) {
     setLastJumpKey(searchJumpKey);
@@ -281,8 +322,8 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
     setVisibleCount(PAGE_SIZE);
   }
 
-  const visibleRows = rows.slice(0, visibleCount);
-  const hiddenCount = rows.length - visibleRows.length;
+  const visibleResults = results.slice(0, visibleCount);
+  const hiddenCount = results.length - visibleResults.length;
 
   // Per-tab count badges (design source shows a count on each segment pill).
   // Only the active source's tabs get real counts — tabs from other sources
@@ -299,6 +340,13 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
 
   return (
     <>
+      {/* Cross-source search companions — fetch the OTHER order source(s) so a
+          query can merge matches across the Sales-Order ↔ Delivery-Order
+          boundary. Render null; delivery only. */}
+      {crossSources.map((s) => (
+        <SourceSubscriber key={s.url} source={s} onRows={handleCrossRows} />
+      ))}
+
       <MobileHeader
         title={config.title}
         onBack={() => navigate(-1)}
@@ -480,9 +528,9 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
           gap: 11,
         }}
       >
-        {loading && rows.length === 0 ? (
+        {loading && results.length === 0 ? (
           <Msg text="Loading…" />
-        ) : rows.length === 0 ? (
+        ) : results.length === 0 ? (
           <Msg
             text={
               error
@@ -491,13 +539,13 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
             }
           />
         ) : (
-          visibleRows.map((row) => {
-            const vm = source.toVM(row);
+          visibleResults.map(({ row, src }) => {
+            const vm = src.toVM(row);
             const dest = config.detailPath?.(vm, row) ?? null;
             const isSelected = selectedIds.has(vm.id);
             return (
               <div
-                key={vm.id}
+                key={`${src.url}|${vm.id}`}
                 style={{
                   position: "relative",
                   outline: selectMode && isSelected ? `2px solid ${M.taupe}` : "none",
@@ -803,6 +851,27 @@ export function ModuleListScreen({ config }: { config: ModuleConfig }) {
       ) : null}
     </>
   );
+}
+
+// Invisible companion fetcher — subscribes to ONE cross-search source's endpoint
+// (via the shared SWR cache, so it dedupes with the active-source fetch) and
+// lifts its selected rows to the parent. Rendered once per cross-search source
+// only for a crossSourceSearch module (delivery); a no-op elsewhere. The effect
+// fires only when the fetched rows actually change (source.select is memoised on
+// the cached data), so there's no render loop.
+function SourceSubscriber({
+  source,
+  onRows,
+}: {
+  source: DataSource;
+  onRows: (url: string, rows: RawRow[]) => void;
+}) {
+  const { data } = useCachedJson<unknown>(source.url);
+  const rows = useMemo(() => (data ? source.select(data) : []), [data, source]);
+  useEffect(() => {
+    onRows(source.url, rows);
+  }, [source, rows, onRows]);
+  return null;
 }
 
 function Msg({ text }: { text: string }) {

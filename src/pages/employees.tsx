@@ -801,15 +801,17 @@ function NonprodApprovalsCard({
                   Approved adjustments
                 </p>
                 {approvedReqs.map((r) => {
-                  const totalMin = Math.round((r.hours ?? 0) * 60);
-                  const hh = Math.floor(totalMin / 60);
-                  const mm = totalMin % 60;
-                  const durLabel =
-                    totalMin < 60
-                      ? `${totalMin} min`
-                      : mm === 0
-                        ? `${hh}h`
-                        : `${hh}h ${mm}min`;
+                  // Show the APPROVED amount (owner 2026-07-04). If it was a
+                  // partial approve (approved < requested), show "1h (of 1h 20min)"
+                  // so the office sees both. Legacy rows (approvedHours null) show
+                  // the full requested amount — byte-identical to before.
+                  const requestedMin = Math.round((r.hours ?? 0) * 60);
+                  const approvedMin =
+                    r.approvedHours != null ? Math.round(r.approvedHours * 60) : requestedMin;
+                  const partial = r.approvedHours != null && approvedMin < requestedMin;
+                  const durLabel = partial
+                    ? `${fmtMin(approvedMin)} (of ${fmtMin(requestedMin)})`
+                    : fmtMin(approvedMin);
                   return (
                     <div
                       key={r.id}

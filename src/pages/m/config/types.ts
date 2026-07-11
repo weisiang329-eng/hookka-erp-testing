@@ -98,6 +98,15 @@ export type DataSource = {
   subTabs: SubTabDef[];
   /** Default sort: column key + direction. */
   defaultSort?: { key: string; dir: "asc" | "desc" };
+  /**
+   * Include this source in the module's cross-source search merge (see
+   * ModuleConfig.crossSourceSearch). Set on the sources that hold the SAME
+   * business object across its lifecycle (delivery: the Sales-Order source +
+   * the Delivery-Order source) so one query finds it in any status. Sources
+   * that are unrelated entities (packing lists, 3PL providers) leave it off and
+   * are searched only when their own tab is active.
+   */
+  crossSearch?: boolean;
 };
 
 // ===========================================================================
@@ -401,6 +410,16 @@ export type ModuleConfig = {
    * generic list engine while letting one module inject a bespoke section.
    */
   topPanel?: (activeTab: string) => ReactNode;
+  /**
+   * When true, a search query scans EVERY source of the module (not just the
+   * active tab's source) and merges the matches into one result list, each card
+   * rendered through its own source's view-model. Delivery uses this so one
+   * search finds an order whether it's still a Sales Order (Planning / Pending
+   * Delivery) or already a Delivery Order (Pending Dispatch / Dispatched /
+   * Delivered) — owner 2026-07-11. Off by default: single-source modules and
+   * modules whose sources are unrelated entities keep the active-source search.
+   */
+  crossSourceSearch?: boolean;
 };
 
 /** Active filter state for one column. */

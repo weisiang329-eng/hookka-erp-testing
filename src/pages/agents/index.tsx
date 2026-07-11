@@ -599,26 +599,37 @@ export default function AgentConsolePage() {
             </Card>
           )}
 
-          {/* ── Coming-soon agents ── */}
-          {others.map((a) => (
-            <Card key={a.id} className="opacity-70">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-[#1F1D1B]">
-                  <span className="inline-block h-3 w-3 rounded-full bg-[#9CA3AF]" />
-                  {AGENT_LABEL[a.id] ?? a.id}
-                  <span className="text-[11px] font-semibold rounded-full bg-[#F0ECE9] text-[#6B7280] px-2 py-0.5">
-                    COMING SOON
-                  </span>
-                </CardTitle>
-                <p className="mt-1 text-xs text-[#6B7280]">{AGENT_BLURB[a.id] ?? ""}</p>
-              </CardHeader>
-              <CardContent>
-                <div className="text-xs text-[#9CA3AF]">
-                  Planned in the agents blueprint — controls activate when the agent ships.
-                </div>
-              </CardContent>
-            </Card>
-          ))}
+          {/* ── Other agents — v1 surfaces live for Delivery + CS; console
+              controls (pause/run-now per task) wire up in the next round.
+              Procurement stays parked until its data-readiness gate passes. ── */}
+          {others.map((a) => {
+            const v1: Record<string, string> = {
+              DELIVERY:
+                "LIVE v1 — proposals + brief on the Delivery page → “Delivery Agent” tab (load plans, invoice gaps, POD chases). Console controls wire up next.",
+              CS:
+                "LIVE v1 — ask Hookka AI “when can SO-xxx be delivered” (materials → production → delivery reasoning chain), or GET /api/cs-agent/promise. Console controls wire up next.",
+            };
+            const liveV1 = v1[a.id];
+            return (
+              <Card key={a.id} className={liveV1 ? "" : "opacity-70"}>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-[#1F1D1B]">
+                    <span className={`inline-block h-3 w-3 rounded-full ${liveV1 ? "bg-[#4F7C3A]" : "bg-[#9CA3AF]"}`} />
+                    {AGENT_LABEL[a.id] ?? a.id}
+                    <span className={`text-[11px] font-semibold rounded-full px-2 py-0.5 ${liveV1 ? "bg-[#EEF3E4] text-[#4F7C3A]" : "bg-[#F0ECE9] text-[#6B7280]"}`}>
+                      {liveV1 ? "LIVE · v1" : "COMING SOON"}
+                    </span>
+                  </CardTitle>
+                  <p className="mt-1 text-xs text-[#6B7280]">{AGENT_BLURB[a.id] ?? ""}</p>
+                </CardHeader>
+                <CardContent>
+                  <div className={`text-xs ${liveV1 ? "text-[#4B5563]" : "text-[#9CA3AF]"}`}>
+                    {liveV1 ?? "Planned in the agents blueprint — controls activate when the agent ships."}
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
         </div>
       )}
 

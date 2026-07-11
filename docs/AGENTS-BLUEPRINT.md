@@ -182,3 +182,25 @@ PL-first+hub 完整性已上线、Dispatch/Delivered 客户通知邮件已上线
 
 **通用条款**（并入铁规）：所有 Agent 说不知道就是不知道，禁止编造；所有写动作
 提案→批准→留痕；每个答案可溯源（引擎输出/数据行）。
+
+---
+
+## CS Agent v1 — shipped surfaces (2026-07-12)
+
+- **引擎层** `src/api/lib/cs-agent.ts` · `promiseDelivery()` — 料→产→送 三步
+  推理链：① 料 = procurement-agent BOM 需求 vs 库存（缺料只认真实 open-PO
+  expectedDate，否则 UNKNOWN）；② 产 = `computeChainWithAssignments`（Planning
+  同一条链引擎）取本单 PACKING 完成日（不在队列 → promise-date 同口径产能估算，
+  标 ESTIMATE）；③ 送 = 打包完成后下一工作日发货 + 按州运输天数
+  （kv_config `cs-agent` 可在线改）。红线已落码：任何一步 UNKNOWN →
+  promiseDate = null + 说清缺什么；全程只读。
+- **Procurement 骨架** `src/api/lib/procurement-agent.ts` — `procurementReadiness()`
+  (交期覆盖率 / PO expectedDate 纪律 / MRP 新鲜度 三门槛) +
+  `materialAvailability()`（诚实护栏：数据不齐答 insufficient data，不猜料期）。
+- **API** `/api/cs-agent/promise?soId=|productCode=&qty=&state=`（sales-orders:read）
+  + `/api/cs-agent/procurement/readiness`（purchase-orders:read）。
+- **Hookka AI 工具** `get_delivery_promise`（assistant-tools v1.8）— 老板直接问
+  「SO-xxx 几时可以送到」拿到带推理链的承诺日期。
+- v1 无 FE 页面（assistant 聊天 + API 即界面）；无新表、无 migration。
+- 已知简化（v2 待办）：BOM 展开不跑尺寸缩放规则；料期后移用「工作日平移」近似
+  （链引擎暂无 per-order 料期约束输入）；transit 天数是承诺余量不是 3PL 报价。

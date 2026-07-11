@@ -162,27 +162,38 @@ export default function DashboardLayout() {
     <ToastProvider>
       <NewVersionWatcher />
       <div className="h-full">
-        <Sidebar
-          collapsed={isMobile ? false : sidebarCollapsed}
-          onToggleCollapsed={toggleSidebar}
-          mobileOpen={mobileNavOpen}
-          onMobileClose={closeMobileNav}
-        />
-        {/* Full-width on phones (no rail); rail-padded at md+. */}
-        <div className={`pl-0 ${sidebarCollapsed ? "md:pl-14" : "md:pl-60"} transition-all duration-300`}>
-          <Topbar />
-          <Breadcrumbs />
+        {/* App chrome is hidden when printing so a report page prints clean
+            (only the routed <main> content — e.g. the Hookka Report). */}
+        <div className="print:hidden">
+          <Sidebar
+            collapsed={isMobile ? false : sidebarCollapsed}
+            onToggleCollapsed={toggleSidebar}
+            mobileOpen={mobileNavOpen}
+            onMobileClose={closeMobileNav}
+          />
+        </div>
+        {/* Full-width on phones (no rail); rail-padded at md+. Print drops the
+            rail offset so content starts at the page edge. */}
+        <div className={`pl-0 ${sidebarCollapsed ? "md:pl-14" : "md:pl-60"} transition-all duration-300 print:!pl-0`}>
+          <div className="print:hidden">
+            <Topbar />
+            <Breadcrumbs />
+          </div>
           {/* Extra bottom padding on phones so content clears the bottom nav. */}
-          <main className="p-4 pb-24 md:p-6">
+          <main className="p-4 pb-24 md:p-6 print:!p-0">
             <Routes>{DASHBOARD_ROUTE_ELEMENTS}</Routes>
           </main>
         </div>
         {/* Phone-only bottom navigation; "More" opens the sidebar drawer. */}
-        <MobileBottomNav onMore={() => setMobileNavOpen(true)} />
+        <div className="print:hidden">
+          <MobileBottomNav onMore={() => setMobileNavOpen(true)} />
+        </div>
         {/* Hookka AI launch button + slide-over panel. SUPER_ADMIN-only.
             Mounted here so the same instance overlays every authenticated
             dashboard route (state survives in-page navigation). */}
-        <FloatingChatButton />
+        <div className="print:hidden">
+          <FloatingChatButton />
+        </div>
       </div>
       <ScrollRestoration />
     </ToastProvider>

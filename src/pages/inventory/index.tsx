@@ -1325,6 +1325,12 @@ export default function InventoryPage() {
   const [rmBulkTicked, setRmBulkTicked] = useState<Set<string>>(new Set());
   const [rmBulkBusy, setRmBulkBusy] = useState(false);
   const [rmNewVariant, setRmNewVariant] = useState("");
+  // Dedicated Material Categories maintenance (owner 2026-07-11) — a standalone
+  // modal to set up each category's variant list up front (the same lists the
+  // Add RM bulk form reads).
+  const [showMaterialCats, setShowMaterialCats] = useState(false);
+  const [matCatSel, setMatCatSel] = useState<string>("");
+  const [matCatNewVar, setMatCatNewVar] = useState("");
   const rmVariantsAll: Record<string, string[]> =
     (variantsCfg?.materialVariants as Record<string, string[]> | undefined) ?? DEFAULT_MATERIAL_VARIANTS;
   const rmCatVariants: string[] =
@@ -1347,6 +1353,18 @@ export default function InventoryPage() {
   function saveRmVariants(next: Record<string, string[]>) {
     setVariantsCfg((prev) => ({ ...(prev ?? {}), materialVariants: next }) as VariantsConfig);
     patchVariantsConfig({ materialVariants: next });
+  }
+  function catVariants(cat: string): string[] {
+    return rmVariantsAll[cat] ?? DEFAULT_MATERIAL_VARIANTS[cat] ?? [];
+  }
+  function addVariantToCat(cat: string, val: string) {
+    const v = val.trim();
+    const cur = catVariants(cat);
+    if (!v || cur.includes(v)) return;
+    saveRmVariants({ ...rmVariantsAll, [cat]: [...cur, v] });
+  }
+  function removeVariantFromCat(cat: string, val: string) {
+    saveRmVariants({ ...rmVariantsAll, [cat]: catVariants(cat).filter((x) => x !== val) });
   }
   function addRmVariant() {
     const v = rmNewVariant.trim();
@@ -2607,6 +2625,9 @@ export default function InventoryPage() {
             <Button variant="outline" size="sm" onClick={() => setShowBatchImportRM(true)}>
               <Upload className="h-4 w-4" /> Batch Import
             </Button>
+            <Button variant="outline" size="sm" onClick={() => { setMatCatSel(matCatSel || RM_ITEM_GROUPS[0]); setShowMaterialCats(true); }}>
+              <Layers className="h-4 w-4" /> Categories
+            </Button>
             <Button variant="primary" size="sm" onClick={() => setShowCreateRM(true)}>
               <Plus className="h-4 w-4" /> Add RM
             </Button>
@@ -2775,6 +2796,49 @@ export default function InventoryPage() {
                 </div>
               </CardContent>
             </Card>
+          )}
+
+          {/* Material Categories maintenance modal (owner 2026-07-11) — set up
+              each category's variant list up front; Add RM → Bulk reads them. */}
+          {showMaterialCats && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowMaterialCats(false)}>
+              <div className="bg-white rounded-xl shadow-xl w-[560px] max-w-[92vw] max-h-[80vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+                <div className="flex items-center justify-between px-6 py-4 border-b border-[#E2DDD8]">
+                  <div>
+                    <h2 className="text-lg font-bold text-[#111827]">Material Categories</h2>
+                    <p className="text-xs text-gray-500">Each category's variant list — used by Add RM → Bulk generate. Changes save automatically.</p>
+                  </div>
+                  <button onClick={() => setShowMaterialCats(false)} className="p-1 hover:bg-gray-100 rounded"><X className="w-5 h-5 text-gray-400" /></button>
+                </div>
+                <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+                  <div>
+                    <label className="block text-xs text-[#6B7280] mb-1">Category</label>
+                    <select value={matCatSel} onChange={(e) => setMatCatSel(e.target.value)} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none">
+                      {RM_ITEM_GROUPS.map((g) => <option key={g} value={g}>{g}{catVariants(g).length ? ` (${catVariants(g).length})` : ""}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <div className="text-xs text-[#6B7280] mb-1.5">Variants for <span className="font-mono text-[#1F1D1B]">{matCatSel}</span></div>
+                    <div className="flex flex-wrap gap-2 mb-2">
+                      {catVariants(matCatSel).map((v) => (
+                        <span key={v} className="inline-flex items-center gap-1.5 border border-[#E2DDD8] rounded px-2.5 py-1 text-sm bg-[#FAF9F7]">
+                          <span className="font-mono">{v}</span>
+                          <button onClick={() => removeVariantFromCat(matCatSel, v)} className="text-[#9A3A2D]/50 hover:text-[#9A3A2D]" title="Remove"><X className="w-3 h-3" /></button>
+                        </span>
+                      ))}
+                      {catVariants(matCatSel).length === 0 && <span className="text-sm text-gray-400">No variants yet.</span>}
+                    </div>
+                    <div className="flex gap-2">
+                      <input value={matCatNewVar} onChange={(e) => setMatCatNewVar(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addVariantToCat(matCatSel, matCatNewVar); setMatCatNewVar(""); } }} className="flex-1 border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder={`Add a ${matCatSel} variant (e.g. 6mm)`} />
+                      <Button variant="outline" size="sm" onClick={() => { addVariantToCat(matCatSel, matCatNewVar); setMatCatNewVar(""); }} disabled={!matCatNewVar.trim()}><Plus className="h-4 w-4" /> Add</Button>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex justify-end gap-2 px-6 py-4 border-t border-[#E2DDD8]">
+                  <Button variant="primary" size="sm" onClick={() => setShowMaterialCats(false)}>Done</Button>
+                </div>
+              </div>
+            </div>
           )}
 
           {/* DataGrid */}

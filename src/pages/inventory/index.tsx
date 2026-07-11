@@ -26,8 +26,14 @@ import {
 import {
   fetchVariantsConfig,
   getVariantsConfigSync,
+  patchVariantsConfig,
   type VariantsConfig,
 } from "@/lib/kv-config";
+import {
+  DEFAULT_MATERIAL_VARIANTS,
+  materialVariantCode,
+  materialVariantDescription,
+} from "@/lib/material-variants";
 import {
   DEFAULT_BEDFRAME_SIZES,
   DEFAULT_SOFA_COMPARTMENTS,
@@ -1257,10 +1263,124 @@ export default function InventoryPage() {
     }
   }
 
-  // Create RM modal
+  // Create RM modal state (declared here so the bulk-generate helpers below can
+  // read rmForm / drive showCreateRM).
   const [showCreateRM, setShowCreateRM] = useState(false);
   const [rmForm, setRmForm] = useState<CreateRMForm>({ itemCode: "", description: "", baseUOM: "PCS", itemGroup: "PLYWOOD", balanceQty: 0 });
   const [rmSaving, setRmSaving] = useState(false);
+
+  // ---- Add RM bulk-generate (owner 2026-07-11) -----------------------------
+  // Mirrors Add FG: pick a category (itemGroup) + a BASE code, tick the
+  // category's variants, and create one material per tick — code = base/variant
+  // ("NC36/50" + "6mm" → "NC36/50/6mm"). The per-category variant list lives on
+  // variants-config.materialVariants and is edited inline here (this bulk form
+  // doubles as the "Material Categories" maintenance the owner asked for).
+  const [rmBulkMode, setRmBulkMode] = useState(false);
+  const [rmBulkTicked, setRmBulkTicked] = useState<Set<string>>(new Set());
+  const [rmBulkBusy, setRmBulkBusy] = useState(false);
+  const [rmNewVariant, setRmNewVariant] = useState("");
+  const rmVariantsAll: Record<string, string[]> =
+    (variantsCfg?.materialVariants as Record<string, string[]> | undefined) ?? DEFAULT_MATERIAL_VARIANTS;
+  const rmCatVariants: string[] =
+    rmVariantsAll[rmForm.itemGroup] ?? DEFAULT_MATERIAL_VARIANTS[rmForm.itemGroup] ?? [];
+  const rmBulkBase = rmForm.itemCode.trim();
+  const rmBulkPreview = [...rmBulkTicked]
+    .filter((v) => rmCatVariants.includes(v))
+    .map((v) => ({
+      code: materialVariantCode(rmBulkBase, v),
+      description: materialVariantDescription(rmForm.description, v),
+    }));
+  function toggleRmTick(v: string) {
+    setRmBulkTicked((prev) => {
+      const n = new Set(prev);
+      if (n.has(v)) n.delete(v);
+      else n.add(v);
+      return n;
+    });
+  }
+  function saveRmVariants(next: Record<string, string[]>) {
+    setVariantsCfg((prev) => ({ ...(prev ?? {}), materialVariants: next }) as VariantsConfig);
+    patchVariantsConfig({ materialVariants: next });
+  }
+  function addRmVariant() {
+    const v = rmNewVariant.trim();
+    if (!v || rmCatVariants.includes(v)) {
+      setRmNewVariant("");
+      return;
+    }
+    saveRmVariants({ ...rmVariantsAll, [rmForm.itemGroup]: [...rmCatVariants, v] });
+    setRmBulkTicked((prev) => new Set(prev).add(v));
+    setRmNewVariant("");
+  }
+  function removeRmVariant(v: string) {
+    saveRmVariants({ ...rmVariantsAll, [rmForm.itemGroup]: rmCatVariants.filter((x) => x !== v) });
+    setRmBulkTicked((prev) => {
+      const n = new Set(prev);
+      n.delete(v);
+      return n;
+    });
+  }
+  async function runRmBulkGenerate() {
+    if (rmBulkBusy) return;
+    const base = rmForm.itemCode.trim();
+    if (!base || rmBulkPreview.length === 0) return;
+    setRmBulkBusy(true);
+    let created = 0;
+    let skipped = 0;
+    let failed = 0;
+    const newRMs: RawMaterial[] = [];
+    for (const v of rmBulkPreview) {
+      // Client-side dup guard — RM item codes can duplicate at the API, so skip
+      // any code already present rather than create a second copy.
+      if (liveRawMaterials.some((r) => (r.itemCode || "") === v.code)) {
+        skipped++;
+        continue;
+      }
+      try {
+        const res = await fetch("/api/raw-materials", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            itemCode: v.code,
+            description: v.description,
+            baseUOM: rmForm.baseUOM,
+            itemGroup: rmForm.itemGroup,
+            balanceQty: 0,
+          }),
+        });
+        const j = (await res.json().catch(() => ({}))) as {
+          success?: boolean;
+          data?: RawMaterial;
+          error?: string;
+        };
+        if (res.ok && j.success) {
+          created++;
+          if (j.data) newRMs.push(j.data);
+        } else {
+          failed++;
+        }
+      } catch {
+        failed++;
+      }
+    }
+    setRmBulkBusy(false);
+    if (newRMs.length) setLiveRawMaterials((prev) => [...prev, ...newRMs]);
+    invalidateCachePrefix("/api/raw-materials");
+    invalidateCachePrefix("/api/inventory");
+    const parts = [`${created} created`];
+    if (skipped) parts.push(`${skipped} already existed`);
+    if (failed) parts.push(`${failed} failed`);
+    const msg = parts.join(" · ");
+    if (failed) toast.error(msg);
+    else toast.success(msg);
+    if (created > 0 && failed === 0) {
+      setShowCreateRM(false);
+      setRmBulkTicked(new Set());
+      setRmBulkMode(false);
+    }
+  }
+
+  // (Create RM modal state moved up — see near the Add RM bulk-generate helpers.)
 
   // ---- Live data fetched from D1 ----
   //
@@ -2456,6 +2576,69 @@ export default function InventoryPage() {
                 </div>
               </CardHeader>
               <CardContent>
+                {/* Single vs Bulk generate (owner 2026-07-11). Bulk: pick a
+                    category + base code, tick the category's variants, create
+                    one material per tick (code = base/variant). */}
+                <div className="mb-4 inline-flex rounded-md border border-[#E2DDD8] overflow-hidden">
+                  <button onClick={() => setRmBulkMode(false)} className={`px-3.5 py-1.5 text-sm ${!rmBulkMode ? "bg-[#6B5C32] text-white font-medium" : "text-gray-500 hover:bg-[#FAF9F7]"}`}>Single</button>
+                  <button onClick={() => setRmBulkMode(true)} className={`px-3.5 py-1.5 text-sm ${rmBulkMode ? "bg-[#6B5C32] text-white font-medium" : "text-gray-500 hover:bg-[#FAF9F7]"}`}>Bulk generate</button>
+                </div>
+                {rmBulkMode ? (
+                  <div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+                      <div>
+                        <label className="block text-xs text-[#6B7280] mb-1">Item Group (category)</label>
+                        <select value={rmForm.itemGroup} onChange={e => { setRmForm(f => ({ ...f, itemGroup: e.target.value })); setRmBulkTicked(new Set()); }} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none">
+                          {RM_ITEM_GROUPS.map(g => <option key={g} value={g}>{g}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs text-[#6B7280] mb-1">Base Code *</label>
+                        <input value={rmForm.itemCode} onChange={e => setRmForm(f => ({ ...f, itemCode: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="e.g. NC36/50" />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-[#6B7280] mb-1">Base UOM</label>
+                        <select value={rmForm.baseUOM} onChange={e => setRmForm(f => ({ ...f, baseUOM: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none">
+                          {["PCS", "MTR", "ROLL", "BOX", "CTN", "SET", "KG", "PAIR"].map(u => <option key={u} value={u}>{u}</option>)}
+                        </select>
+                      </div>
+                      <div className="sm:col-span-3">
+                        <label className="block text-xs text-[#6B7280] mb-1">Description (base — variant appended per item)</label>
+                        <input value={rmForm.description} onChange={e => setRmForm(f => ({ ...f, description: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="e.g. Foam Sheet" />
+                      </div>
+                    </div>
+
+                    <div className="text-sm font-medium text-[#374151] mb-2">Which {rmForm.itemGroup} variants? <span className="text-xs text-gray-400 font-normal">(tick to include · these are this category's saved list)</span></div>
+                    <div className="flex flex-wrap gap-2 mb-2">
+                      {rmCatVariants.map(v => {
+                        const on = rmBulkTicked.has(v);
+                        return (
+                          <span key={v} className={`inline-flex items-center gap-1.5 border rounded px-2.5 py-1 text-sm ${on ? "border-[#6B5C32] bg-[#F4EFE3]" : "border-[#E2DDD8] bg-white text-gray-600 hover:bg-[#FAF9F7]"}`}>
+                            <button onClick={() => toggleRmTick(v)} className="inline-flex items-center gap-1.5">
+                              <span className={`w-4 h-4 flex-shrink-0 rounded-sm border flex items-center justify-center ${on ? "bg-[#6B5C32] border-[#6B5C32] text-white" : "border-gray-300"}`}>{on ? <Check className="w-3 h-3" /> : null}</span>
+                              <span className="font-mono">{v}</span>
+                            </button>
+                            <button onClick={() => removeRmVariant(v)} className="text-[#9A3A2D]/50 hover:text-[#9A3A2D]" title="Remove this variant from the category">
+                              <X className="w-3 h-3" />
+                            </button>
+                          </span>
+                        );
+                      })}
+                      {rmCatVariants.length === 0 && <span className="text-sm text-gray-400">No variants yet for {rmForm.itemGroup} — add one below.</span>}
+                    </div>
+                    <div className="flex gap-2 mb-4 max-w-sm">
+                      <input value={rmNewVariant} onChange={e => setRmNewVariant(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addRmVariant(); } }} className="flex-1 border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder={`Add a ${rmForm.itemGroup} variant (e.g. 6mm)`} />
+                      <Button variant="outline" size="sm" onClick={addRmVariant} disabled={!rmNewVariant.trim()}><Plus className="h-4 w-4" /> Add</Button>
+                    </div>
+
+                    <div className="bg-[#FAF6EF] border border-[#E2DDD8] rounded-md p-3">
+                      <div className="text-xs text-gray-500 mb-2">Will create <b className="text-[#6B5C32]">{rmBulkPreview.length}</b> material{rmBulkPreview.length === 1 ? "" : "s"} — Balance Qty starts 0</div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {rmBulkPreview.map(v => <span key={v.code} className="text-xs font-mono bg-white border border-[#E2DDD8] rounded px-2 py-0.5" title={v.description}>{v.code}</span>)}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
                     <label className="block text-xs text-[#6B7280] mb-1">Item Code *</label>
@@ -2482,8 +2665,19 @@ export default function InventoryPage() {
                     <input type="number" onFocus={(e) => e.currentTarget.select()} value={rmForm.balanceQty || ""} onChange={e => setRmForm(f => ({ ...f, balanceQty: Number(e.target.value) }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="0" />
                   </div>
                 </div>
+                )}
                 <div className="flex justify-end gap-2 pt-4">
-                  <Button variant="outline" size="sm" onClick={() => setShowCreateRM(false)} disabled={rmSaving}>Cancel</Button>
+                  <Button variant="outline" size="sm" onClick={() => { setShowCreateRM(false); setRmBulkTicked(new Set()); }} disabled={rmSaving || rmBulkBusy}>Cancel</Button>
+                  {rmBulkMode ? (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={!rmForm.itemCode.trim() || rmBulkPreview.length === 0 || rmBulkBusy}
+                    onClick={() => { void runRmBulkGenerate(); }}
+                  >
+                    {rmBulkBusy ? "Generating…" : `Generate ${rmBulkPreview.length} material${rmBulkPreview.length === 1 ? "" : "s"}`}
+                  </Button>
+                  ) : (
                   <Button
                     variant="primary"
                     size="sm"
@@ -2531,6 +2725,7 @@ export default function InventoryPage() {
                   >
                     {rmSaving ? "Saving..." : "Save Material"}
                   </Button>
+                  )}
                 </div>
               </CardContent>
             </Card>

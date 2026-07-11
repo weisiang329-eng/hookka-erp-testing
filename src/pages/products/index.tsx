@@ -62,6 +62,11 @@ import {
   VARIANTS_CONFIG_KEY,
   type VariantsConfig,
 } from "@/lib/kv-config";
+import {
+  DEFAULT_BEDFRAME_SIZES,
+  DEFAULT_SOFA_COMPARTMENTS,
+  type BedframeSize,
+} from "@/lib/fg-variants";
 import { optionPacksSeparately } from "@/lib/leg-packing";
 
 // ---------- Types matching mock-data ----------
@@ -877,9 +882,15 @@ type MaintenanceListKey =
   | "totalHeights"
   | "gaps"
   | "specials"
+  | "bedframeSizes"
   | "sofaLegHeights"
   | "sofaSpecials"
-  | "sofaSizes";
+  | "sofaSizes"
+  | "sofaCompartments";
+
+// BedframeSize (code · label · dimensions) + the seed catalogs live in
+// @/lib/fg-variants (shared with the Add FG bulk-generate flow so they can't
+// drift). Imported above.
 
 // `packSeparately` is OPTIONAL and only meaningful on the leg-height lists
 // (`legHeights` / `sofaLegHeights`). When TICKED the leg ships in its own box
@@ -896,9 +907,14 @@ type MaintenanceConfig = {
   totalHeights: PricedOption[];
   gaps: string[];
   specials: PricedOption[];
+  // Bedframe size catalog (code · label · dimensions) — feeds Add FG bulk-generate.
+  bedframeSizes: BedframeSize[];
   sofaLegHeights: PricedOption[];
   sofaSpecials: PricedOption[];
   sofaSizes: string[];
+  // Sofa compartment pool (1A(LHF), 1A(RHF), 1NA, 2A(LHF)…) — the codes a sofa
+  // model can be split into. Add FG bulk-generate lists these to tick per model.
+  sofaCompartments: string[];
 };
 
 // Variants live in D1 under kv_config('variants-config'); see src/lib/kv-config.ts.
@@ -962,6 +978,7 @@ const DEFAULT_MAINTENANCE_CONFIG: MaintenanceConfig = {
     { value: "Divan A11", priceSen: 0 },
     { value: 'Seat Add On 4"', priceSen: 0 },
   ],
+  bedframeSizes: DEFAULT_BEDFRAME_SIZES,
   sofaLegHeights: [
     { value: "No Leg", priceSen: 0, packSeparately: false },
     { value: '4"', priceSen: 0, packSeparately: true },
@@ -973,6 +990,7 @@ const DEFAULT_MAINTENANCE_CONFIG: MaintenanceConfig = {
     { value: "Separate Backrest Packing", priceSen: 0 },
   ],
   sofaSizes: ["24", "26", "28", "30", "32", "35"],
+  sofaCompartments: DEFAULT_SOFA_COMPARTMENTS,
 };
 
 type MaintenanceTab = MaintenanceListKey | "fabrics";
@@ -993,9 +1011,11 @@ const MAINTENANCE_TABS: { key: MaintenanceTab; label: string; description: strin
   { key: "gaps", label: "Gaps", description: "Bedframe gap height options (inches)", section: "Bedframe" },
   { key: "legHeights", label: "Leg Heights", description: "Bedframe leg height options with surcharge pricing", priced: true, section: "Bedframe" },
   { key: "specials", label: "Specials", description: "Bedframe special order options with surcharge pricing", priced: true, section: "Bedframe" },
+  { key: "bedframeSizes", label: "Bedframe Sizes", description: "Bedframe sizes — code · label · dimensions (e.g. K · 6FT · 183X190CM). Used by Add FG bulk generate + SKU names.", section: "Bedframe" },
   { key: "sofaSizes", label: "Sizes", description: "Available sofa seat height sizes (inches)", section: "Sofa" },
   { key: "sofaLegHeights", label: "Leg Heights", description: "Sofa leg height options with surcharge pricing", priced: true, section: "Sofa" },
   { key: "sofaSpecials", label: "Specials", description: "Sofa special order options with surcharge pricing", priced: true, section: "Sofa" },
+  { key: "sofaCompartments", label: "Compartments", description: "Sofa compartment pool (1A(LHF), 1A(RHF), 1NA, 2A(LHF)…). Add FG bulk generate ticks which a model offers.", section: "Sofa" },
   { key: "fabrics", label: "Fabrics", description: "Fabric price tier assignment — determines Price 1 or Price 2 for bedframe pricing", section: "Common" },
 ];
 
@@ -1019,15 +1039,28 @@ function parseMaintenanceConfig(parsed: VariantsConfig | null): MaintenanceConfi
       return val as string[];
     }
 
+    // Bedframe sizes — coerce legacy/missing to defaults; tolerate rows that
+    // predate the label/dimensions fields (fill blanks so the editor is safe).
+    function ensureBedframeSizes(val: unknown, defaults: BedframeSize[]): BedframeSize[] {
+      if (!Array.isArray(val) || val.length === 0) return defaults;
+      return (val as Record<string, unknown>[]).map((r) => ({
+        code: String(r?.code ?? ""),
+        label: String(r?.label ?? ""),
+        dimensions: String(r?.dimensions ?? ""),
+      }));
+    }
+
     return {
       divanHeights: ensurePriced(parsed.divanHeights, DEFAULT_MAINTENANCE_CONFIG.divanHeights),
       legHeights: ensurePriced(parsed.legHeights, DEFAULT_MAINTENANCE_CONFIG.legHeights),
       totalHeights: ensurePriced(parsed.totalHeights, DEFAULT_MAINTENANCE_CONFIG.totalHeights),
       gaps: ensureStrings(parsed.gaps, DEFAULT_MAINTENANCE_CONFIG.gaps),
       specials: ensurePriced(parsed.specials, DEFAULT_MAINTENANCE_CONFIG.specials),
+      bedframeSizes: ensureBedframeSizes(parsed.bedframeSizes, DEFAULT_MAINTENANCE_CONFIG.bedframeSizes),
       sofaLegHeights: ensurePriced(parsed.sofaLegHeights, DEFAULT_MAINTENANCE_CONFIG.sofaLegHeights),
       sofaSpecials: ensurePriced(parsed.sofaSpecials, DEFAULT_MAINTENANCE_CONFIG.sofaSpecials),
       sofaSizes: ensureStrings(parsed.sofaSizes, DEFAULT_MAINTENANCE_CONFIG.sofaSizes),
+      sofaCompartments: ensureStrings(parsed.sofaCompartments, DEFAULT_MAINTENANCE_CONFIG.sofaCompartments),
     };
   } catch {
     return DEFAULT_MAINTENANCE_CONFIG;
@@ -1047,6 +1080,32 @@ function MaintenanceView() {
   // edit mode is off, the inline RM inputs render as read-only text.
   const [savedConfig, setSavedConfig] = useState<MaintenanceConfig>(DEFAULT_MAINTENANCE_CONFIG);
   const [config, setConfig] = useState<MaintenanceConfig>(DEFAULT_MAINTENANCE_CONFIG);
+  // Per-variant BOM/M3 defaults (owner 2026-07-11) — keyed by size code
+  // (bedframe) / compartment (sofa). Add FG bulk-generate reads these to fill
+  // Unit M3 + clone the chosen source BOM template onto each variant. Stored on
+  // variants-config; patched immediately on change (independent of the Save
+  // Snapshot flow, like the material-variant edits on the RM side).
+  const [variantBomDefaults, setVariantBomDefaults] = useState<
+    Record<string, { defaultBom?: string; unitM3?: number }>
+  >({});
+  const [bomTemplateList, setBomTemplateList] = useState<{ productCode: string; category: string }[]>([]);
+  /* eslint-disable react-hooks/set-state-in-effect -- mount-time hydrate of BOM defaults + template list */
+  useEffect(() => {
+    void fetchVariantsConfig().then((v) => {
+      setVariantBomDefaults(
+        (v?.variantBomDefaults as Record<string, { defaultBom?: string; unitM3?: number }> | undefined) ?? {},
+      );
+    });
+    void cachedFetchJson<{ data?: { productCode: string; category: string }[] }>("/api/bom/templates")
+      .then((d) => setBomTemplateList(d?.data ?? []))
+      .catch(() => {});
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
+  function updateVariantDefault(code: string, patch: { defaultBom?: string; unitM3?: number }) {
+    const next = { ...variantBomDefaults, [code]: { ...variantBomDefaults[code], ...patch } };
+    setVariantBomDefaults(next);
+    patchVariantsConfig({ variantBomDefaults: next });
+  }
   const [tab, setTab] = useState<MaintenanceTab>("divanHeights");
   const [newValue, setNewValue] = useState("");
   const [newPriceSen, setNewPriceSen] = useState(0);
@@ -1162,11 +1221,21 @@ function MaintenanceView() {
   // flag drives whether the leg becomes its own piece on the FG packing
   // sticker (its own box in the X/N count).
   const isLegTab = tab === "legHeights" || tab === "sofaLegHeights";
-  const currentStringList = !isFabricsTab && !isPricedTab ? (config[tab as MaintenanceListKey] as string[]) : [];
+  // Bedframe Sizes is the one object-shaped list (code · label · dimensions);
+  // it gets its own 3-column inline editor instead of the value/price row.
+  const isBedframeSizesTab = tab === "bedframeSizes";
+  const currentStringList = !isFabricsTab && !isPricedTab && !isBedframeSizesTab ? (config[tab as MaintenanceListKey] as string[]) : [];
   const currentPricedList = !isFabricsTab && isPricedTab ? (config[tab as MaintenanceListKey] as PricedOption[]) : [];
+  const currentBedframeSizes = isBedframeSizesTab ? config.bedframeSizes : [];
 
   function addEntry() {
     if (isFabricsTab || !editMode) return;
+    // Bedframe sizes are 3-field rows edited inline — "Add size" appends a blank
+    // row for the operator to fill (code · label · dimensions).
+    if (isBedframeSizesTab) {
+      setConfig(prev => ({ ...prev, bedframeSizes: [...prev.bedframeSizes, { code: "", label: "", dimensions: "" }] }));
+      return;
+    }
     const k = tab as MaintenanceListKey;
     const v = newValue.trim();
     if (!v) return;
@@ -1235,6 +1304,17 @@ function MaintenanceView() {
         [k]: (prev[k] as string[]).map((o, i) => i === idx ? newVal : o),
       }));
     }
+  }
+
+  // Bedframe Sizes inline editor — update one field (code / label / dimensions)
+  // of the row at idx. Kept separate from updateEntryValue (which handles the
+  // string + priced lists) because this list is object-shaped.
+  function updateBedframeSize(idx: number, field: keyof BedframeSize, val: string) {
+    if (!editMode) return;
+    setConfig(prev => ({
+      ...prev,
+      bedframeSizes: prev.bedframeSizes.map((o, i) => (i === idx ? { ...o, [field]: val } : o)),
+    }));
   }
 
   async function handleCancel() {
@@ -1557,13 +1637,17 @@ function MaintenanceView() {
               {/* Add row — only visible while editing. */}
               {editMode && (
                 <div className="flex gap-2 mb-4">
-                  <input
-                    value={newValue}
-                    onChange={(e) => setNewValue(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addEntry(); } }}
-                    placeholder={`Add new ${meta.label.toLowerCase().replace(/s$/, "")}...`}
-                    className="flex-1 text-sm border border-[#E2DDD8] rounded-md px-3 py-2 bg-[#FAF9F7] focus:outline-none focus:border-[#6B5C32] focus:bg-white"
-                  />
+                  {isBedframeSizesTab ? (
+                    <span className="flex-1 text-sm text-gray-400 self-center">Add a size row, then fill code · label · dimensions inline.</span>
+                  ) : (
+                    <input
+                      value={newValue}
+                      onChange={(e) => setNewValue(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addEntry(); } }}
+                      placeholder={`Add new ${meta.label.toLowerCase().replace(/s$/, "")}...`}
+                      className="flex-1 text-sm border border-[#E2DDD8] rounded-md px-3 py-2 bg-[#FAF9F7] focus:outline-none focus:border-[#6B5C32] focus:bg-white"
+                    />
+                  )}
                   {isPricedTab && (
                     <div className="flex items-center gap-1">
                       {/* Surcharge can be negative — some variants are a
@@ -1580,18 +1664,56 @@ function MaintenanceView() {
                   )}
                   <button
                     onClick={addEntry}
-                    disabled={!newValue.trim()}
+                    disabled={!isBedframeSizesTab && !newValue.trim()}
                     className="inline-flex items-center gap-1.5 text-sm px-4 py-2 bg-[#6B5C32] text-white rounded-md hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Plus className="w-4 h-4" />
-                    Add
+                    {isBedframeSizesTab ? "Add size" : "Add"}
                   </button>
                 </div>
               )}
 
               {/* List */}
               <div className="space-y-1.5">
-                {isPricedTab ? (
+                {isBedframeSizesTab ? (
+                  currentBedframeSizes.length === 0 ? (
+                    <div className="text-center py-10 text-sm text-gray-400 bg-[#FAF9F7] rounded-md border border-dashed border-[#E2DDD8]">
+                      {editMode ? "No sizes yet. Click Add size to start." : "No sizes."}
+                    </div>
+                  ) : (
+                    currentBedframeSizes.map((entry, idx) => (
+                      <div
+                        key={`bfsize-${idx}`}
+                        className="flex items-center gap-2 px-3 py-2 bg-[#FAF9F7] border border-[#E2DDD8] rounded-md hover:bg-white transition-colors"
+                      >
+                        <span className="text-[10px] text-gray-400 font-mono w-6 flex-shrink-0">{idx + 1}</span>
+                        {editMode ? (
+                          <>
+                            <input value={entry.code} onChange={(e) => updateBedframeSize(idx, "code", e.target.value)} placeholder="K" className="text-sm font-medium border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32] w-20" />
+                            <input value={entry.label} onChange={(e) => updateBedframeSize(idx, "label", e.target.value)} placeholder="6FT" className="text-sm border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32] w-24" />
+                            <input value={entry.dimensions} onChange={(e) => updateBedframeSize(idx, "dimensions", e.target.value)} placeholder="183X190CM" className="text-sm border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32] flex-1" />
+                            {/* Default BOM to copy from + default Unit M3 — Add FG
+                                bulk-generate applies these per size (owner 2026-07-11). */}
+                            <select value={variantBomDefaults[entry.code]?.defaultBom ?? ""} onChange={(e) => updateVariantDefault(entry.code, { defaultBom: e.target.value || undefined })} title="Default BOM to copy from on Add FG generate" className="text-sm border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32] w-40 flex-shrink-0">
+                              <option value="">BOM: —</option>
+                              {bomTemplateList.filter((t) => (t.category || "").toUpperCase() === "BEDFRAME").map((t) => <option key={t.productCode} value={t.productCode}>{t.productCode}</option>)}
+                            </select>
+                            <input type="number" step="0.001" min={0} onFocus={(e) => e.currentTarget.select()} value={variantBomDefaults[entry.code]?.unitM3 ?? ""} onChange={(e) => updateVariantDefault(entry.code, { unitM3: e.target.value === "" ? undefined : parseFloat(e.target.value) })} placeholder="M³" title="Default Unit M3" className="text-sm border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32] w-20 flex-shrink-0" />
+                            <button onClick={() => removeEntry(idx)} className="p-1.5 text-[#9A3A2D] hover:text-[#7A2E24] hover:bg-[#F9E1DA] rounded flex-shrink-0" title="Remove"><Trash2 className="w-4 h-4" /></button>
+                          </>
+                        ) : (
+                          <span className="text-sm text-[#111827] font-medium">
+                            <span className="font-mono">{entry.code}</span>
+                            <span className="text-gray-400"> · </span>{entry.label}
+                            <span className="text-gray-400"> · </span><span className="text-gray-500">{entry.dimensions}</span>
+                            {variantBomDefaults[entry.code]?.defaultBom ? <span className="text-gray-400"> · BOM <span className="font-mono text-[#6B5C32]">{variantBomDefaults[entry.code]?.defaultBom}</span></span> : null}
+                            {variantBomDefaults[entry.code]?.unitM3 != null ? <span className="text-gray-400"> · M³ {variantBomDefaults[entry.code]?.unitM3}</span> : null}
+                          </span>
+                        )}
+                      </div>
+                    ))
+                  )
+                ) : isPricedTab ? (
                   currentPricedList.length === 0 ? (
                     <div className="text-center py-10 text-sm text-gray-400 bg-[#FAF9F7] rounded-md border border-dashed border-[#E2DDD8]">
                       {editMode ? "No entries yet. Add one above to get started." : "No entries."}

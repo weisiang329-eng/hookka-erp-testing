@@ -14,6 +14,27 @@ import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
+// created_at lets the Operations Report list "products created this month". The
+// products table shipped without it; historical rows stay NULL (creation date
+// is unrecoverable) and only surface from the first stamp forward. Runtime-
+// ensured — migration files are inert on deploy (see CLAUDE.md). Idempotent.
+let productCreatedAtColEnsured = false;
+async function ensureProductCreatedAtColumn(db: D1Database): Promise<void> {
+  if (productCreatedAtColEnsured) return;
+  try {
+    await db
+      .prepare("ALTER TABLE products ADD COLUMN IF NOT EXISTS created_at TEXT")
+      .run();
+    productCreatedAtColEnsured = true;
+  } catch (err) {
+    // Best-effort — read side dual-keys and tolerates a missing/null column.
+    console.warn(
+      "[products] ensureProductCreatedAtColumn:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
 type ProductRow = {
   id: string;
   code: string;
@@ -498,6 +519,8 @@ app.post("/", async (c) => {
       );
     }
 
+    await ensureProductCreatedAtColumn(c.var.DB);
+
     // Duplicate code check
     const dup = await c.var.DB.prepare(
       "SELECT id FROM products WHERE code = ?",
@@ -536,8 +559,9 @@ app.post("/", async (c) => {
         `INSERT INTO products (id, code, name, category, description, baseModel,
            sizeCode, sizeLabel, fabricUsage, unitM3, status, costPriceSen,
            basePriceSen, price1Sen, productionTimeMinutes, subAssemblies,
-           skuCode, fabricColor, pieces, seatHeightPrices, defaultVariants)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           skuCode, fabricColor, pieces, seatHeightPrices, defaultVariants,
+           created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
         body.code,
@@ -560,6 +584,7 @@ app.post("/", async (c) => {
         body.pieces ? JSON.stringify(body.pieces) : null,
         body.seatHeightPrices ? JSON.stringify(body.seatHeightPrices) : null,
         body.defaultVariants ? JSON.stringify(body.defaultVariants) : null,
+        new Date().toISOString(),
       ),
       ...bomComponentsInput.map((comp) =>
         c.var.DB.prepare(

@@ -14,6 +14,11 @@ import { Button } from "@/components/ui/button";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import {
+  OperationsEdition,
+  EditionToggle,
+  type Edition,
+} from "./hookka-report-editions";
+import {
   Loader2,
   ClipboardCheck,
   Truck,
@@ -970,6 +975,19 @@ export default function DailyReportPage() {
   // Settings panel open/closed.
   const [settingsOpen, setSettingsOpen] = useState(false);
 
+  // Daily / Weekly / Monthly edition toggle. Daily = this page's existing
+  // SOP-exception newspaper; Weekly/Monthly = the operations editions.
+  const [edition, setEdition] = useState<Edition>("daily");
+
+  if (edition !== "daily") {
+    return (
+      <div className="space-y-6">
+        <EditionToggle edition={edition} onChange={setEdition} />
+        <OperationsEdition edition={edition} />
+      </div>
+    );
+  }
+
   if (loading && !data) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -1004,6 +1022,7 @@ export default function DailyReportPage() {
 
   return (
     <div className="space-y-6">
+      <EditionToggle edition={edition} onChange={setEdition} />
       {/* ── Masthead ─────────────────────────────────────────────── */}
       <header className="border-y-[3px] border-double border-[#1F1D1B] py-3">
         <div className="flex items-center justify-between px-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#6B7280]">

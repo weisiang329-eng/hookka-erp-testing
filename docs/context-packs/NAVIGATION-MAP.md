@@ -521,30 +521,33 @@ Built to cut token usage: open the named file at the named line range instead of
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/planning/index.tsx` — 4-tab PlanningPage (Capacity Overview / Capacity Loading / Lead Times / Master Tracker) + DrilldownModal (3709) | `src/api/routes/planning-schedule.ts` — per-dept daily schedule data (GET /schedule/fabric-cutting, /schedule/:dept) | `production_orders` (read: active POs, due dates, progress) | `tests/planning-scheduler.test.mjs` |
+| `src/pages/planning/index.tsx` — 5-tab PlanningPage (Capacity Overview / Capacity Loading / Lead Times / Master Tracker / Schedule Proposals) + DrilldownModal (4004) | `src/api/routes/planning-schedule.ts` — per-dept daily schedule data (GET /schedule/fabric-cutting, /schedule/:dept) + `computeChainWithAssignments` (Phase-2 engine assignments) | `production_orders` (read: active POs, due dates, progress) | `tests/planning-scheduler.test.mjs` |
 | `src/pages/planning/mrp.tsx` — MRP view (reads/posts /api/mrp) | `src/api/routes/production-leadtimes.ts` — lead-time config + history (GET /, PUT /settings, PUT /, POST /recalc-all, GET /history, POST /schedule, DELETE /history/:id) | `job_cards` (read: per-PO dept sequence, wipKey, earliest pending due date) | `tests/scheduler.test.mjs` |
 | `src/pages/planning/LeadTimeHistoryDialog.tsx` — lead-time history + scheduled changes | `src/api/routes/mrp.ts` — MRP runs (GET /, GET /runs, GET /runs/:id) | `production_lead_times` (legacy) / `production_lead_times_history` | `tests/scheduling.test.mjs` |
 | `src/pages/planning/dept/_DepartmentSchedulePage.tsx` — shared generic dept-schedule renderer (calendar, by-day lanes, grouped cards) | `src/api/routes/scheduling.ts` — GET /, POST /, GET /capacity | `hookka_dd_buffer_history` (due-date buffer history) | |
 | `src/pages/planning/dept/_PlainDeptSchedulePage.tsx` — plain-table dept variant | `src/api/routes/production-orders.ts` — 7606 lines; Planning READS only (Production-owned) | `mrp_runs` / `mrp_requirements` | |
 | `src/pages/planning/dept/fabric-cutting.tsx` / `fabric-sewing.tsx` / `wood-cutting.tsx` — dept config shells | `src/api/routes/production-folders.ts` — folder grouping (peripheral) | `kv_config` (public_holidays / schedule settings) | |
-| `src/pages/planning/dept/foam-bonding.tsx` / `framing.tsx` / `webbing.tsx` / `upholstery.tsx` / `packing.tsx` — dept config shells | | | |
+| `src/pages/planning/dept/foam-bonding.tsx` / `framing.tsx` / `webbing.tsx` / `upholstery.tsx` / `packing.tsx` — dept config shells | `src/api/routes/schedule-proposals.ts` — Phase-2 due-date proposals (POST /proposals/generate, GET /proposals, POST /proposals/approve|reject) over `src/api/lib/schedule-proposals.ts` | `schedule_proposals` / `plan_snapshots` (runtime self-apply) + `job_cards.dueDate` (approve writes) | |
 
 **Big-file section index**
 - `src/pages/planning/index.tsx`
-  - Constants + TABS def (LOADING_CHART windows, TABS, TabId, DEPT route map) — L154-204
-  - Master Tracker helpers + TrackerSortIcon component — L205-439
-  - PlanningPage component (default export) — state incl activeTab — L440-1862
-  - Tab bar render (isActive = activeTab === tab.id) — L1843-1863
-  - Tab: Capacity Overview panel — L1864-2339
-  - Tab: Capacity Loading (chart) panel — L2340-2594
-  - Tab: Master Tracker panel — L2595-2903
-  - Tab: Lead Times panel (inline Save Lead Times form) — L2904-3211
-  - DrilldownModal component — L3212-3709
+  - Constants + TABS def (LOADING_CHART windows, TABS, TabId, DEPT route map) — L154-205
+  - Master Tracker helpers + TrackerSortIcon component — L206-440
+  - PlanningPage component (default export) — state incl activeTab — L441-1863
+  - Tab bar render (isActive = activeTab === tab.id) — L1851-1871
+  - Tab: Capacity Overview panel — L1876-2361
+  - Tab: Capacity Loading (chart) panel — L2362-2619
+  - Tab: Master Tracker panel — L2620-2927
+  - Tab: Lead Times panel (inline Save Lead Times form) — L2929-3143
+  - Tab: Schedule Proposals mount — L3147; ScheduleProposalsTab component — L3208-3505
+  - DrilldownModal component — L3507-4004
 - `src/api/routes/production-orders.ts`
   - NOTE: 7606-line route — Planning only READS it (production_orders/job_cards for capacity, tracker, lead-time recalc). Not a Planning-owned file; grep targeted handlers rather than reading whole. — L1-7606
 
 **Gotchas**
 - Backend planning logic lives in `src/api/lib` (NOT routes): planning-capacity.ts, planning-chain.ts, planning-scheduler.ts, lead-times.ts — change schedule/capacity math there, the routes are thin.
+- Phase-2 proposals: the chain engine takes an OPTIONAL `collect` callback (ChainInput/SchedulerInput) that emits per-(card, day) assignments — all pre-Phase-2 call sites pass none, so schedules stay byte-identical. Only POST /api/planning/proposals/approve writes job_cards.dueDate; generation is read-only. `schedule_proposals`/`plan_snapshots` are runtime self-apply tables (ensureProposalTables), NOT migration files.
+- planning-chain.ts + planning-scheduler.ts each contain ONE intentional NUL sentinel/separator string (written as the 6-char source escape backslash-u-0000) — never save it as a raw 0x00 byte (a raw NUL makes git/grep treat the file as binary).
 - Lead-time recalc (production-leadtimes.ts POST /recalc-all) walks production_orders + every job_cards row and re-derives wipKey — coupled to the shared deriveTopLevelWipKey formula; don't re-implement wip keys here.
 - All `dept/*` daily-schedule pages are config-only shells over the ONE shared renderer `_DepartmentSchedulePage.tsx`; layout/column changes belong in the shared file, not per-dept copies.
 - index.tsx PlanningPage is one ~3270-line component with TAB-gated render blocks keyed off activeTab — section is selected by the activeTab string, not separate files; edit the matching tab block (line ranges above).

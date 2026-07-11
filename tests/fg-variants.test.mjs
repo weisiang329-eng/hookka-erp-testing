@@ -45,6 +45,28 @@ test("sofaVariantName — base name wins, else SOFA <model> <compartment>", () =
   assert.equal(m.sofaVariantName("ROMA SOFA", "5539", "1A(LHF)"), "ROMA SOFA 1A(LHF)");
 });
 
+test("bedframeVariantDescription — lowercase name + size word + label + (dims)", () => {
+  // Matches live catalog: "hilton bedframe king 6ft (183x190cm)".
+  assert.equal(
+    m.bedframeVariantDescription("HILTON BEDFRAME", { code: "K", label: "6FT", dimensions: "183X190CM" }),
+    "hilton bedframe king 6ft (183x190cm)",
+  );
+  assert.equal(
+    m.bedframeVariantDescription("HILTON BEDFRAME", { code: "SS", label: "3.5FT", dimensions: "107X190CM" }),
+    "hilton bedframe super single 3.5ft (107x190cm)",
+  );
+  // Unknown size code → word dropped, still valid.
+  assert.equal(
+    m.bedframeVariantDescription("ROMA", { code: "ZZ", label: "9FT", dimensions: "" }),
+    "roma 9ft",
+  );
+});
+
+test("sofaVariantDescription — sofa {model} module {compartment}, compartment case kept", () => {
+  assert.equal(m.sofaVariantDescription("5530", "1NA"), "sofa 5530 module 1NA");
+  assert.equal(m.sofaVariantDescription("5539", "1A(LHF)"), "sofa 5539 module 1A(LHF)");
+});
+
 test("seed catalogs — bedframe sizes + sofa compartments present", () => {
   assert.ok(m.DEFAULT_BEDFRAME_SIZES.some((s) => s.code === "K" && s.label === "6FT"));
   assert.ok(m.DEFAULT_BEDFRAME_SIZES.every((s) => s.code && s.dimensions));

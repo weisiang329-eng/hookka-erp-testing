@@ -212,6 +212,8 @@ export interface OperationsReport {
   newProducts: NewProductsSection;
   delivery: DeliverySection;
   receivables: ReceivablesSection;
+  // Per-section failures (staging diagnostics); undefined when all succeeded.
+  _errors?: string[];
 }
 
 export interface DeliverySection {
@@ -729,19 +731,19 @@ async function collectDelivery(
   // the single operating company).
   const rows = await db
     .prepare(
-      `SELECT do.id AS "id",
-              substr(do.dispatched_at::text, 1, 10) AS "dispatchedAt",
-              substr(do.delivered_at::text, 1, 10) AS "deliveredAt",
-              substr(do.hookka_expected_dd::text, 1, 10) AS "expectedDd",
+      `SELECT dord.id AS "id",
+              substr(dord.dispatched_at::text, 1, 10) AS "dispatchedAt",
+              substr(dord.delivered_at::text, 1, 10) AS "deliveredAt",
+              substr(dord.hookka_expected_dd::text, 1, 10) AS "expectedDd",
               MAX(substr(po.completed_date::text, 1, 10)) AS "producedAt"
-         FROM delivery_orders do
-         LEFT JOIN delivery_order_items di ON di.delivery_order_id = do.id
+         FROM delivery_orders dord
+         LEFT JOIN delivery_order_items di ON di.delivery_order_id = dord.id
          LEFT JOIN production_orders po ON po.id = di.production_order_id
-        WHERE do.dispatched_at IS NOT NULL
-          AND do.status IN ('LOADED','DISPATCHED','IN_TRANSIT','SIGNED','DELIVERED','INVOICED')
-          AND substr(do.dispatched_at::text, 1, 10) >= ?
-          AND substr(do.dispatched_at::text, 1, 10) <= ?
-        GROUP BY do.id, do.dispatched_at, do.delivered_at, do.hookka_expected_dd`,
+        WHERE dord.dispatched_at IS NOT NULL
+          AND dord.status IN ('LOADED','DISPATCHED','IN_TRANSIT','SIGNED','DELIVERED','INVOICED')
+          AND substr(dord.dispatched_at::text, 1, 10) >= ?
+          AND substr(dord.dispatched_at::text, 1, 10) <= ?
+        GROUP BY dord.id, dord.dispatched_at, dord.delivered_at, dord.hookka_expected_dd`,
     )
     .bind(p.startYmd, p.endYmd)
     .all<{
@@ -868,6 +870,15 @@ export async function collectOperationsReport(
   anchorYmd: string,
 ): Promise<OperationsReport> {
   const p = resolvePeriod(period, anchorYmd);
+  const errors: string[] = [];
+  const guard = async <T>(name: string, fn: () => Promise<T>, fb: T): Promise<T> => {
+    try {
+      return await fn();
+    } catch (e) {
+      errors.push(`${name}: ${e instanceof Error ? e.message : String(e)}`);
+      return fb;
+    }
+  };
 
   const [
     production,
@@ -882,17 +893,63 @@ export async function collectOperationsReport(
     delivery,
     receivables,
   ] = await Promise.all([
-    collectProduction(db, orgId, p),
-    collectProductionCost(db, orgId, p),
-    collectSales(db, orgId, p),
-    collectPurchasing(db, orgId, p),
-    collectMaterial(db, orgId, p),
-    collectWorkforce(db, orgId, p),
-    collectInventory(db, orgId),
-    collectPeople(db, p),
-    collectNewProducts(db, p),
-    collectDelivery(db, p),
-    collectReceivables(db, p),
+    guard("production", () => collectProduction(db, orgId, p), {
+      bedframeUnits: 0,
+      sofaSets: 0,
+      overdueCount: 0,
+      onTimePct: null,
+    }),
+    guard("productionCost", () => collectProductionCost(db, orgId, p), {
+      labourSen: 0,
+      fabricSen: 0,
+      foamSen: 0,
+      otherMaterialSen: 0,
+      totalSen: 0,
+    }),
+    guard("sales", () => collectSales(db, orgId, p), {
+      totalSen: 0,
+      orderCount: 0,
+      topSellers: [],
+    }),
+    guard("purchasing", () => collectPurchasing(db, orgId, p), {
+      poSpendSen: 0,
+      poCount: 0,
+      topSuppliers: [],
+    }),
+    guard("material", () => collectMaterial(db, orgId, p), {
+      fabricConsumedSen: 0,
+      foamConsumedSen: 0,
+      otherConsumedSen: 0,
+      fabricMetres: 0,
+      fabricCostPerMetreSen: null,
+    }),
+    guard("workforce", () => collectWorkforce(db, orgId, p), {
+      activeWorkers: null,
+      bonusEarned: null,
+      topEfficiency: [],
+      bottomEfficiency: [],
+    }),
+    guard("inventory", () => collectInventory(db, orgId), {
+      rmStockValueSen: 0,
+      lowStockCount: 0,
+      lowStock: [],
+      deadStock: [],
+    }),
+    guard("people", () => collectPeople(db, p), { joined: [], left: [] }),
+    guard("newProducts", () => collectNewProducts(db, p), []),
+    guard("delivery", () => collectDelivery(db, p), {
+      producedToDispatchDays: null,
+      dispatchToDeliveredDays: null,
+      onTimePct: null,
+      stuckOver5Count: 0,
+      sampleSize: 0,
+    }),
+    guard("receivables", () => collectReceivables(db, p), {
+      aging: { currentSen: 0, d30Sen: 0, d60Sen: 0, d90Sen: 0, over90Sen: 0 },
+      totalOutstandingSen: 0,
+      billedSen: 0,
+      collectedSen: 0,
+    }),
   ]);
 
   // On-time % is a delivery-derived figure; surface it on the production
@@ -912,5 +969,6 @@ export async function collectOperationsReport(
     newProducts,
     delivery,
     receivables,
+    _errors: errors.length ? errors : undefined,
   };
 }

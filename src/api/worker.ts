@@ -953,6 +953,10 @@ import payslips from "./routes/payslips";
 import productionLeadtimes from "./routes/production-leadtimes";
 import jobcardSync from "./routes/jobcard-sync";
 import promiseDate from "./routes/promise-date";
+// Customer Service Agent (orchestrator): /api/cs-agent/promise = reasoned
+// promise date, materials → production → delivery (chain engine +
+// procurement readiness, read-only).
+import csAgent from "./routes/cs-agent";
 import qcInspections from "./routes/qc-inspections";
 import qcTemplates from "./routes/qc-templates";
 import qcPending from "./routes/qc-pending";
@@ -1173,6 +1177,9 @@ app.route("/api/production/leadtimes", productionLeadtimes);
 // migrations/0027, 0029 (sofa UPH/PKG backfill).
 app.route("/api/production/sync-jobcards-from-bom", jobcardSync);
 app.route("/api/promise-date", promiseDate);
+// CS Agent orchestrator — GET /promise (SO or product what-if) + GET
+// /procurement/readiness (Procurement Agent's data-prerequisite gate).
+app.route("/api/cs-agent", csAgent);
 // Phase 1 — QC module rebuild (2026-04-28). qc-templates manages checklist
 // definitions; qc-pending owns the time-triggered slot lifecycle (PENDING →
 // IN_PROGRESS → COMPLETED|SKIPPED) plus the cron entry + manual generate.

@@ -23,6 +23,7 @@ import {
   resolveEfficiencyAllowanceSen,
   type WorkerMonthlyEfficiency,
 } from "./efficiency-allowance";
+import { monthsOverdue } from "../../lib/terms";
 
 // Fabric / foam item-group keys (mirror dashboard-overview.ts:43 + the foam
 // split the material section uses). Kept local so this file is self-contained.
@@ -209,9 +210,30 @@ export interface OperationsReport {
   inventory: InventorySection;
   people: PeopleSection;
   newProducts: NewProductsSection;
-  // Filled in the delivery pass — stable placeholders so the contract holds.
-  delivery: null;
-  receivables: null;
+  delivery: DeliverySection;
+  receivables: ReceivablesSection;
+}
+
+export interface DeliverySection {
+  producedToDispatchDays: number | null;
+  dispatchToDeliveredDays: number | null;
+  onTimePct: number | null;
+  stuckOver5Count: number;
+  sampleSize: number;
+}
+
+export interface AgingBuckets {
+  currentSen: number;
+  d30Sen: number;
+  d60Sen: number;
+  d90Sen: number;
+  over90Sen: number;
+}
+export interface ReceivablesSection {
+  aging: AgingBuckets;
+  totalOutstandingSen: number;
+  billedSen: number;
+  collectedSen: number;
 }
 
 type Db = D1Database;
@@ -694,6 +716,149 @@ async function collectNewProducts(
   return out;
 }
 
+async function collectDelivery(
+  db: Db,
+  p: ResolvedPeriod,
+): Promise<DeliverySection> {
+  // Greenfield — the system has no delivery-SLA metric. Two measurable stages:
+  // produced (latest PO completion on the DO's items) → dispatched (LOADED),
+  // and dispatched → delivered. On-time = dispatched on/before the internal
+  // target (hookka_expected_dd). "Ship" and "dispatch" are the same event in
+  // the system (there is no separate shipped timestamp), so it's 2 stages.
+  // delivery_orders has no org_id column, so this is not org-scoped (fine for
+  // the single operating company).
+  const rows = await db
+    .prepare(
+      `SELECT do.id AS "id",
+              substr(do.dispatched_at::text, 1, 10) AS "dispatchedAt",
+              substr(do.delivered_at::text, 1, 10) AS "deliveredAt",
+              substr(do.hookka_expected_dd::text, 1, 10) AS "expectedDd",
+              MAX(substr(po.completed_date::text, 1, 10)) AS "producedAt"
+         FROM delivery_orders do
+         LEFT JOIN delivery_order_items di ON di.delivery_order_id = do.id
+         LEFT JOIN production_orders po ON po.id = di.production_order_id
+        WHERE do.dispatched_at IS NOT NULL
+          AND do.status IN ('LOADED','DISPATCHED','IN_TRANSIT','SIGNED','DELIVERED','INVOICED')
+          AND substr(do.dispatched_at::text, 1, 10) >= ?
+          AND substr(do.dispatched_at::text, 1, 10) <= ?
+        GROUP BY do.id, do.dispatched_at, do.delivered_at, do.hookka_expected_dd`,
+    )
+    .bind(p.startYmd, p.endYmd)
+    .all<{
+      id: string;
+      dispatchedAt: string | null;
+      deliveredAt: string | null;
+      expectedDd: string | null;
+      producedAt: string | null;
+    }>();
+
+  let s1Sum = 0,
+    s1N = 0,
+    s2Sum = 0,
+    s2N = 0,
+    onTime = 0,
+    onTimeN = 0,
+    stuck = 0;
+  const all = rows.results ?? [];
+  for (const r of all) {
+    if (r.producedAt && r.dispatchedAt) {
+      const d = daysBetweenYmd(r.producedAt, r.dispatchedAt);
+      if (d >= 0) {
+        s1Sum += d;
+        s1N += 1;
+        if (d > 5) stuck += 1;
+      }
+    }
+    if (r.dispatchedAt && r.deliveredAt) {
+      const d = daysBetweenYmd(r.dispatchedAt, r.deliveredAt);
+      if (d >= 0) {
+        s2Sum += d;
+        s2N += 1;
+      }
+    }
+    if (r.dispatchedAt && r.expectedDd) {
+      onTimeN += 1;
+      if (r.dispatchedAt <= r.expectedDd) onTime += 1;
+    }
+  }
+
+  const round1 = (n: number) => Math.round(n * 10) / 10;
+  return {
+    producedToDispatchDays: s1N > 0 ? round1(s1Sum / s1N) : null,
+    dispatchToDeliveredDays: s2N > 0 ? round1(s2Sum / s2N) : null,
+    onTimePct: onTimeN > 0 ? Math.round((onTime / onTimeN) * 100) : null,
+    stuckOver5Count: stuck,
+    sampleSize: all.length,
+  };
+}
+
+async function collectReceivables(
+  db: Db,
+  p: ResolvedPeriod,
+): Promise<ReceivablesSection> {
+  // Aging is "as of now" — bucket each open invoice by months-overdue (owner's
+  // monthly payment term; buckets are month-diff, not literal 30/60/90 days,
+  // same as the Accounting aging report). invoices has no org_id column.
+  const invRows = await db
+    .prepare(
+      `SELECT invoice_date AS "invoiceDate",
+              total_sen AS "totalSen",
+              paid_amount AS "paidAmount"
+         FROM invoices
+        WHERE status NOT IN ('DRAFT','CANCELLED','PAID')`,
+    )
+    .bind()
+    .all<{ invoiceDate: string | null; totalSen: number; paidAmount: number }>();
+
+  const aging: AgingBuckets = {
+    currentSen: 0,
+    d30Sen: 0,
+    d60Sen: 0,
+    d90Sen: 0,
+    over90Sen: 0,
+  };
+  let totalOutstandingSen = 0;
+  for (const r of invRows.results ?? []) {
+    const out = Number(r.totalSen ?? 0) - Number(r.paidAmount ?? 0);
+    if (out <= 0) continue;
+    totalOutstandingSen += out;
+    const mo = monthsOverdue(r.invoiceDate);
+    if (mo <= 0) aging.currentSen += out;
+    else if (mo === 1) aging.d30Sen += out;
+    else if (mo === 2) aging.d60Sen += out;
+    else if (mo === 3) aging.d90Sen += out;
+    else aging.over90Sen += out;
+  }
+
+  const billedRow = await db
+    .prepare(
+      `SELECT COALESCE(SUM(total_sen),0) AS v
+         FROM invoices
+        WHERE status NOT IN ('DRAFT','CANCELLED')
+          AND substr(invoice_date::text, 1, 10) >= ?
+          AND substr(invoice_date::text, 1, 10) <= ?`,
+    )
+    .bind(p.startYmd, p.endYmd)
+    .first<{ v: number }>();
+
+  const collectedRow = await db
+    .prepare(
+      `SELECT COALESCE(SUM(amount_sen),0) AS v
+         FROM invoice_payments
+        WHERE substr(date::text, 1, 10) >= ?
+          AND substr(date::text, 1, 10) <= ?`,
+    )
+    .bind(p.startYmd, p.endYmd)
+    .first<{ v: number }>();
+
+  return {
+    aging,
+    totalOutstandingSen,
+    billedSen: Number(billedRow?.v ?? 0),
+    collectedSen: Number(collectedRow?.v ?? 0),
+  };
+}
+
 // -- assembler --------------------------------------------------------------
 
 export async function collectOperationsReport(
@@ -714,6 +879,8 @@ export async function collectOperationsReport(
     inventory,
     people,
     newProducts,
+    delivery,
+    receivables,
   ] = await Promise.all([
     collectProduction(db, orgId, p),
     collectProductionCost(db, orgId, p),
@@ -724,7 +891,13 @@ export async function collectOperationsReport(
     collectInventory(db, orgId),
     collectPeople(db, p),
     collectNewProducts(db, p),
+    collectDelivery(db, p),
+    collectReceivables(db, p),
   ]);
+
+  // On-time % is a delivery-derived figure; surface it on the production
+  // headline too (that's where the report reads it).
+  production.onTimePct = delivery.onTimePct;
 
   return {
     period: p,
@@ -737,7 +910,7 @@ export async function collectOperationsReport(
     inventory,
     people,
     newProducts,
-    delivery: null,
-    receivables: null,
+    delivery,
+    receivables,
   };
 }

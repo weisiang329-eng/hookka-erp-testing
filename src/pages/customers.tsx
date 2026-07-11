@@ -3230,7 +3230,7 @@ export default function CustomersPage() {
 
   // edit customer dialog state
   const [editCustomer, setEditCustomer] = useState<Customer | null>(null);
-  const [editCustForm, setEditCustForm] = useState({ code: "", name: "", ssmNo: "", companyAddress: "", contactName: "", phone: "", email: "", creditTerms: "", creditLimitSen: 0, defaultCompanyCode: "" });
+  const [editCustForm, setEditCustForm] = useState({ code: "", name: "", ssmNo: "", companyAddress: "", contactName: "", phone: "", email: "", creditTerms: "", creditLimitSen: 0, defaultCompanyCode: "", oemMarking: { bedframe: "NONE", sofa: "NONE", accessory: "NONE" } });
   // Guards the Save Changes button so a double-tap on tablet doesn't fire two
   // PUTs. persistCustomer already does the optimistic-update + rollback dance,
   // but without this guard the operator can still hammer the network.
@@ -3373,6 +3373,11 @@ export default function CustomersPage() {
       creditTerms: cust.creditTerms,
       creditLimitSen: cust.creditLimitSen,
       defaultCompanyCode: cust.defaultCompanyCode || "",
+      oemMarking: (() => {
+        const cm = (cust as { oemMarking?: { bedframe?: string; sofa?: string; accessory?: string } }).oemMarking;
+        const norm = (v: string | undefined) => (v === "TAG" || v === "LABEL" ? v : "NONE");
+        return { bedframe: norm(cm?.bedframe), sofa: norm(cm?.sofa), accessory: norm(cm?.accessory) };
+      })(),
     });
   };
 
@@ -4022,6 +4027,34 @@ export default function CustomersPage() {
                     </select>
                   </div>
                 )}
+                {/* OEM product marking — per category, what to attach on this
+                    customer's finished goods. Shows on the Fab Cut / Fab Sew
+                    sticker Notes so the line knows (see customers.ts oem_marking). */}
+                <div>
+                  <label className="block text-xs text-[#6B7280] mb-1">OEM product marking (shows on Fab Cut / Sew sticker)</label>
+                  <div className="space-y-1.5">
+                    {([["bedframe", "Bedframe"], ["sofa", "Sofa"], ["accessory", "Accessory"]] as const).map(([key, label]) => (
+                      <div key={key} className="flex items-center justify-between gap-2">
+                        <span className="text-sm text-[#374151]">{label}</span>
+                        <div className="inline-flex rounded-md border border-[#E2DDD8] overflow-hidden">
+                          {(["NONE", "TAG", "LABEL"] as const).map((opt) => {
+                            const on = editCustForm.oemMarking[key] === opt;
+                            return (
+                              <button
+                                key={opt}
+                                type="button"
+                                onClick={() => setEditCustForm((f) => ({ ...f, oemMarking: { ...f.oemMarking, [key]: opt } }))}
+                                className={`px-3 py-1 text-xs ${opt !== "NONE" ? "border-l border-[#E2DDD8]" : ""} ${on ? "bg-[#6B5C32] text-white" : "bg-white text-gray-600 hover:bg-[#FAF9F7]"}`}
+                              >
+                                {opt === "NONE" ? "None" : opt === "TAG" ? "Tag" : "Label"}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
             <div className="flex justify-end gap-2 px-6 py-4 border-t border-[#E2DDD8]">

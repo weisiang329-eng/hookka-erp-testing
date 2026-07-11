@@ -36,6 +36,17 @@ interface ProposalRow {
   status: string;
   decided_at: string | null;
   decided_by: string | null;
+  // db-pg adapter folds snake_case columns to camelCase in results — every
+  // read below is dual-keyed (r.camelCase ?? r.snake_case), the codebase-wide
+  // column-rename-map rule. Reading only snake made approve write NULL dates.
+  generatedAt?: string;
+  jcId?: string;
+  poId?: string | null;
+  soRef?: string | null;
+  currentDue?: string | null;
+  proposedDue?: string;
+  decidedAt?: string | null;
+  decidedBy?: string | null;
 }
 
 function actorId(c: { get: (k: string) => unknown }): string | null {
@@ -88,19 +99,19 @@ app.get("/proposals", async (c) => {
     .all<ProposalRow>();
   const data = (res.results ?? []).map((r) => ({
     id: r.id,
-    generatedAt: r.generated_at,
-    jcId: r.jc_id,
-    poId: r.po_id ?? "",
+    generatedAt: (r.generatedAt ?? r.generated_at),
+    jcId: (r.jcId ?? r.jc_id),
+    poId: (r.poId ?? r.po_id) ?? "",
     dept: r.dept ?? "",
-    soRef: r.so_ref ?? "",
+    soRef: (r.soRef ?? r.so_ref) ?? "",
     lane: r.lane ?? "",
     fabric: r.fabric ?? "",
-    currentDue: r.current_due,
-    proposedDue: r.proposed_due,
+    currentDue: (r.currentDue ?? r.current_due),
+    proposedDue: (r.proposedDue ?? r.proposed_due),
     reason: r.reason ?? "",
     status: r.status,
-    decidedAt: r.decided_at,
-    decidedBy: r.decided_by,
+    decidedAt: (r.decidedAt ?? r.decided_at),
+    decidedBy: (r.decidedBy ?? r.decided_by),
   }));
   return c.json({ success: true, data });
 });
@@ -142,7 +153,7 @@ app.post("/proposals/approve", async (c) => {
         `UPDATE job_cards SET dueDate = ?, updated_at = ?
           WHERE id = ? AND status = 'WAITING'`,
       )
-      .bind(row.proposed_due, nowIso, row.jc_id)
+      .bind((row.proposedDue ?? row.proposed_due), nowIso, (row.jcId ?? row.jc_id))
       .run();
     await db
       .prepare(
@@ -154,12 +165,12 @@ app.post("/proposals/approve", async (c) => {
       .run();
     applied.push({
       proposalId: id,
-      jcId: row.jc_id,
-      poId: row.po_id,
+      jcId: (row.jcId ?? row.jc_id),
+      poId: (row.poId ?? row.po_id),
       dept: row.dept,
-      soRef: row.so_ref,
-      from: row.current_due,
-      to: row.proposed_due,
+      soRef: (row.soRef ?? row.so_ref),
+      from: (row.currentDue ?? row.current_due),
+      to: (row.proposedDue ?? row.proposed_due),
     });
   }
 

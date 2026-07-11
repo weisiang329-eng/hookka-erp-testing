@@ -143,12 +143,17 @@ export interface PurchasingSection {
   topSuppliers: SupplierSpend[];
 }
 
+export interface MaterialGroupConsumption {
+  itemGroup: string;
+  consumedSen: number;
+}
 export interface MaterialSection {
   fabricConsumedSen: number;
   foamConsumedSen: number;
   otherConsumedSen: number;
   fabricMetres: number;
   fabricCostPerMetreSen: number | null;
+  byGroup: MaterialGroupConsumption[]; // RM category breakdown, highest first
 }
 
 export interface WorkerEff {
@@ -159,6 +164,8 @@ export interface WorkerEff {
 export interface WorkforceSection {
   activeWorkers: number | null;
   bonusEarned: number | null;
+  attendancePct: number | null;
+  serviceOpen: number;
   topEfficiency: WorkerEff[];
   bottomEfficiency: WorkerEff[];
 }
@@ -475,6 +482,22 @@ async function collectMaterial(
       otherSen: number;
     }>();
 
+  // RM category breakdown — consumption cost per item group, highest first.
+  const groupRows = await db
+    .prepare(
+      `SELECT rm.itemGroup AS "itemGroup",
+              COALESCE(SUM(cl.totalCostSen),0) AS "consumedSen"
+         FROM cost_ledger cl
+         JOIN raw_materials rm ON rm.id = cl.itemId
+        WHERE rm.orgId = ? AND cl.type = 'RM_ISSUE'
+          AND substr(cl.date::text, 1, 10) >= ? AND substr(cl.date::text, 1, 10) <= ?
+        GROUP BY rm.itemGroup
+        ORDER BY COALESCE(SUM(cl.totalCostSen),0) DESC
+        LIMIT 8`,
+    )
+    .bind(orgId, p.startYmd, p.endYmd)
+    .all<{ itemGroup: string; consumedSen: number }>();
+
   const fabricConsumedSen = Number(row?.fabricSen ?? 0);
   const fabricMetres = Number(row?.fabricQty ?? 0);
   return {
@@ -484,6 +507,12 @@ async function collectMaterial(
     fabricMetres,
     fabricCostPerMetreSen:
       fabricMetres > 0 ? Math.round(fabricConsumedSen / fabricMetres) : null,
+    byGroup: (groupRows.results ?? [])
+      .filter((g) => g.itemGroup && Number(g.consumedSen) > 0)
+      .map((g) => ({
+        itemGroup: g.itemGroup,
+        consumedSen: Number(g.consumedSen ?? 0),
+      })),
   };
 }
 
@@ -540,9 +569,35 @@ async function collectWorkforce(
   }
   ranked.sort((a, b) => b.pct - a.pct);
 
+  // Attendance % over the window — present days / all punched days.
+  const attRow = await db
+    .prepare(
+      `SELECT
+         COALESCE(SUM(CASE WHEN status = 'PRESENT' THEN 1 ELSE 0 END),0) AS "present",
+         COUNT(*) AS "total"
+         FROM attendance_records
+        WHERE substr(date::text, 1, 10) >= ? AND substr(date::text, 1, 10) <= ?`,
+    )
+    .bind(p.startYmd, p.endYmd)
+    .first<{ present: number; total: number }>();
+  const attTotal = Number(attRow?.total ?? 0);
+  const attendancePct =
+    attTotal > 0 ? Math.round((Number(attRow?.present ?? 0) / attTotal) * 1000) / 10 : null;
+
+  // Open service cases (live snapshot).
+  const svcRow = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM service_cases
+        WHERE status IN ('OPEN','IN_PROGRESS')`,
+    )
+    .bind()
+    .first<{ n: number }>();
+
   return {
     activeWorkers: workers.length,
     bonusEarned,
+    attendancePct,
+    serviceOpen: Number(svcRow?.n ?? 0),
     topEfficiency: ranked.slice(0, 5),
     bottomEfficiency: ranked.slice(-5).reverse(),
   };
@@ -930,10 +985,13 @@ export async function collectOperationsReport(
       otherConsumedSen: 0,
       fabricMetres: 0,
       fabricCostPerMetreSen: null,
+      byGroup: [],
     }),
     guard("workforce", () => collectWorkforce(db, orgId, p), {
       activeWorkers: null,
       bonusEarned: null,
+      attendancePct: null,
+      serviceOpen: 0,
       topEfficiency: [],
       bottomEfficiency: [],
     }),

@@ -18,6 +18,7 @@ import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
 import { requirePermission } from "../lib/rbac";
 import { ensureProposalTables, generateProposals } from "../lib/schedule-proposals";
+import { isAgentPaused, recordAgentRun } from "../lib/agent-console";
 
 const app = new Hono<Env>();
 
@@ -75,7 +76,23 @@ app.post("/proposals/generate", async (c) => {
   const denied = await requirePermission(c, "production-orders", "update");
   if (denied) return denied;
   void getOrgId(c);
-  const counts = await generateProposals(c.var.DB);
+  // Agent Console gate — paused Production agent / global kill switch stops
+  // proposal generation too (P3). The response keeps success:false so the
+  // Planning tab surfaces the reason instead of a silent empty run.
+  if (await isAgentPaused(c.var.DB, "PRODUCTION")) {
+    return c.json({
+      success: false,
+      skipped: "paused",
+      error: "Production agent is paused — resume it in the Agent Console.",
+    });
+  }
+  const counts = await recordAgentRun(c.var.DB, "production-proposals", async (run) => {
+    const r = await generateProposals(c.var.DB);
+    run.setSummary(
+      `proposed ${r.proposed} (unscheduled ${r.unscheduled} · overdue ${r.overdue} · superseded ${r.superseded})`,
+    );
+    return r;
+  });
   return c.json({ success: true, data: counts });
 });
 

@@ -42,6 +42,7 @@ import {
   renderBriefHtml,
   renderBriefEmailText,
 } from "../lib/production-brief";
+import { isAgentPaused, recordAgentRun } from "../lib/agent-console";
 import {
   collectOperationsReport,
   type OperationsPeriodKind,
@@ -397,6 +398,10 @@ async function buildBrief(
     includeAi
       ? (c.env as { ANTHROPIC_API_KEY?: string }).ANTHROPIC_API_KEY
       : undefined,
+    // Full view (includeAi) also runs the Phase-3 learning loop for display —
+    // but a GET must never WRITE, so config proposals are not emitted here.
+    // The fast dashboard-card JSON skips learning entirely.
+    { learning: includeAi, emitConfigProposals: false },
   );
 }
 
@@ -482,9 +487,12 @@ async function authCron(c: {
   return null;
 }
 
-async function dispatchReport(
+// Exported for the Agent Console's "Run now" (routes/agent-console.ts) — the
+// console triggers the SAME send path the cron uses, wrapped in an agent run.
+export async function dispatchReport(
   c: { env: Env["Bindings"]; var: Env["Variables"]; req: { json(): Promise<unknown> } },
   kind: ReportKind,
+  usageSink?: { tokensIn: number; tokensOut: number },
 ): Promise<{
   ok: boolean;
   date: string;
@@ -524,7 +532,7 @@ async function dispatchReport(
     console.warn(`[reports/${kind}-trigger] no recipients — skipping send`);
     return { ok: false, date, sent: 0, failed: 0, errors: ["no recipients"] };
   }
-  return runAndSendReport(c, kind, date, recipients);
+  return runAndSendReport(c, kind, date, recipients, usageSink);
 }
 
 // Crons skip on Sundays + declared public holidays (kv_config['public_holidays']).
@@ -577,7 +585,21 @@ internal.post("/overdue-trigger", async (c) => {
 internal.post("/brief-trigger", async (c) => {
   const gated = await cronGate(c, "brief");
   if (gated) return gated;
-  return c.json(await dispatchReport(c, "brief"));
+  // Agent Console gate — a paused Production agent (or the global kill
+  // switch) silences the automatic morning brief. Manual /brief/send and the
+  // console's Run-now stay available (explicit human actions).
+  if (await isAgentPaused(c.var.DB, "PRODUCTION")) {
+    console.log("[reports/brief-trigger] skipping — agent paused (Agent Console)");
+    return c.json({ ok: true, skipped: "paused", sent: 0, failed: 0 });
+  }
+  const result = await recordAgentRun(c.var.DB, "production-brief", async (run) => {
+    const sink = { tokensIn: 0, tokensOut: 0 };
+    const res = await dispatchReport(c, "brief", sink);
+    run.addTokens(sink.tokensIn, sink.tokensOut);
+    run.setSummary(`${res.date} · sent ${res.sent} · failed ${res.failed}`);
+    return res;
+  });
+  return c.json(result);
 });
 
 // Manual send-now endpoints for schedule + overdue (parallel to /efficiency/send).
@@ -602,6 +624,7 @@ async function runAndSendReport(
   kind: ReportKind,
   date: string,
   recipients: string[],
+  usageSink?: { tokensIn: number; tokensOut: number },
 ): Promise<{
   ok: boolean;
   date: string;
@@ -624,6 +647,9 @@ async function runAndSendReport(
       date,
       prev,
       (c.env as { ANTHROPIC_API_KEY?: string }).ANTHROPIC_API_KEY,
+      // The daily send IS the learning loop's canonical run: full learning
+      // sections + permission to raise config proposals for sustained drift.
+      { learning: true, emitConfigProposals: true, usageSink },
     );
     html = renderBriefHtml(data);
     text = renderBriefEmailText(data);

@@ -36,6 +36,7 @@ import {
   type EfficiencyData,
 } from "./efficiency-report";
 import { loadCapacityConfig, type CapacityConfig } from "./planning-capacity";
+import { runLearning, type LearningData } from "./agent-learning";
 
 // D1-compat DB shape (matches the SupabaseAdapter used across routes).
 interface DbLike {
@@ -90,7 +91,28 @@ export interface BriefData {
   drift: CutRateDrift[];
   /** Phase 2: PENDING due-date proposals awaiting the owner's approval. */
   proposals: { pending: number };
+  /**
+   * Phase 3: the learning loop (plan-vs-actual adherence, flexible-handoff
+   * parameter proposals, forward OT signal). Null when the caller skipped it
+   * (dashboard-card JSON) or when the learner errored — the brief NEVER
+   * fails because learning hiccuped.
+   */
+  learning: LearningData | null;
   aiFocus: string | null;
+}
+
+/** Options for collectBriefData (all default off = Phase-1/2 behaviour). */
+export interface BriefOptions {
+  /** Run the Phase-3 learning loop and add its sections. */
+  learning?: boolean;
+  /**
+   * Let the learning loop WRITE new config_proposals rows for sustained
+   * handoff drift. Only cron / Run-now set this — plain GET renders never
+   * write.
+   */
+  emitConfigProposals?: boolean;
+  /** Filled with the AI-focus call's Anthropic token usage (Agent Console). */
+  usageSink?: { tokensIn: number; tokensOut: number };
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +279,7 @@ const BRIEF_MODEL = "claude-sonnet-4-5-20250929"; // same as the in-app assistan
 async function generateAiFocus(
   apiKey: string | undefined,
   data: Omit<BriefData, "aiFocus">,
+  usageSink?: { tokensIn: number; tokensOut: number },
 ): Promise<string | null> {
   if (!apiKey) return null;
   try {
@@ -299,6 +322,35 @@ async function generateAiFocus(
       },
       cutRateDrift: data.drift.filter((d) => d.flagged),
       pendingScheduleProposals: data.proposals.pending,
+      // Phase 3 learning payload — adherence + parameter drift + humane OT
+      // outlook so the AI focus can point at the day's real lever.
+      learning: data.learning
+        ? {
+            planAdherencePct: data.learning.overallAdherencePct,
+            worstDepts: data.learning.adherence
+              .filter((a) => a.adherencePct != null && a.adherencePct < 80)
+              .slice(0, 3)
+              .map((a) => ({
+                dept: a.dept,
+                adherencePct: a.adherencePct,
+                reason: a.topReason,
+              })),
+            handoffDrift: data.learning.handoffs
+              .filter((h) => h.flagged)
+              .map((h) => ({
+                chain: `${h.fromDepts.join("/")}->${h.toDept}`,
+                configuredDays: h.configuredDays,
+                actualDays: h.actualAvgDays,
+              })),
+            pendingConfigProposals: data.learning.pendingConfigProposals,
+            otOutlook: data.learning.ot.slice(0, 3).map((o) => ({
+              dept: o.dept,
+              mode: o.mode,
+              overloadedDays: o.overloadedDays.length,
+              note: o.note,
+            })),
+          }
+        : null,
     };
     const res = await fetch(ANTHROPIC_URL, {
       method: "POST",
@@ -326,7 +378,13 @@ async function generateAiFocus(
     }
     const j = (await res.json()) as {
       content?: Array<{ type: string; text?: string }>;
+      usage?: { input_tokens?: number; output_tokens?: number };
     };
+    // Surface Anthropic token usage to the Agent Console's run log.
+    if (usageSink && j.usage) {
+      usageSink.tokensIn += Number(j.usage.input_tokens) || 0;
+      usageSink.tokensOut += Number(j.usage.output_tokens) || 0;
+    }
     const text = (j.content ?? [])
       .filter((b) => b.type === "text" && typeof b.text === "string")
       .map((b) => b.text)
@@ -348,16 +406,27 @@ export async function collectBriefData(
   date: string,
   prevDate: string,
   anthropicApiKey?: string,
+  opts: BriefOptions = {},
 ): Promise<BriefData> {
   const cfg = await loadCapacityConfig(db);
-  const [schedule, overdue, efficiency, cnc, drift, pendingProposals] = await Promise.all([
-    collectScheduleData(db as never, date),
-    collectOverdueData(db as never, date),
-    collectEfficiencyData(db as never, prevDate),
-    collectCncQueue(db, cfg.cnc),
-    collectCutRateDrift(db, cfg.cnc, date),
-    collectPendingProposals(db),
-  ]);
+  const [schedule, overdue, efficiency, cnc, drift, pendingProposals, learning] =
+    await Promise.all([
+      collectScheduleData(db as never, date),
+      collectOverdueData(db as never, date),
+      collectEfficiencyData(db as never, prevDate),
+      collectCncQueue(db, cfg.cnc),
+      collectCutRateDrift(db, cfg.cnc, date),
+      collectPendingProposals(db),
+      // Phase 3 — optional + best-effort: a learner error never sinks the brief.
+      opts.learning
+        ? runLearning(db as never, {
+            emitProposals: opts.emitConfigProposals === true,
+          }).catch((err) => {
+            console.warn("[brief/learning] failed:", err);
+            return null;
+          })
+        : Promise.resolve(null),
+    ]);
   const lowWorkers = efficiency.workers
     .filter((w) => w.workingMinutes > 0 && w.efficiencyPct < 60)
     .sort((a, b) => a.efficiencyPct - b.efficiencyPct)
@@ -379,8 +448,9 @@ export async function collectBriefData(
     cncConfig: cfg.cnc,
     drift,
     proposals: { pending: pendingProposals },
+    learning,
   };
-  const aiFocus = await generateAiFocus(anthropicApiKey, base);
+  const aiFocus = await generateAiFocus(anthropicApiKey, base, opts.usageSink);
   return { ...base, aiFocus };
 }
 
@@ -484,10 +554,97 @@ ${d.proposals.pending > 0 ? `<div style="background:#EEF3EA;border:1px solid #CB
 <h2 ${h2}>5 · CNC Speed Check — last 7 days vs configured</h2>
 <table ${table}><tr><th ${th}>Category</th><th ${thR}>Configured</th><th ${thR}>Actual /set</th><th ${thR}>Drift</th></tr>${driftRows}</table>
 <div style="font:11px Arial;color:#9CA3AF;margin-top:6px">⚠ = actual speed is >25% off the configured model — worth updating the CNC settings (Planning → capacity config).</div>
+${renderLearningHtml(d, h2, th, thR, table)}
 <div style="border-top:1px solid #E2DDD8;margin-top:20px;padding-top:10px;font:11px Arial;color:#9CA3AF">
-  Generated ${d.generatedAtIso} · Hookka Production Agent (Phase 1, read-only) · full detail in the ERP dashboard.
+  Generated ${d.generatedAtIso} · Hookka Production Agent · full detail in the ERP dashboard (Agent Console: /agents).
 </div>
 </div></body></html>`;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — learning-loop sections (6 plan-vs-actual · 7 parameter proposals
+// · 8 forward OT outlook). Renders nothing when learning was skipped/failed.
+// ---------------------------------------------------------------------------
+
+function renderLearningHtml(
+  d: BriefData,
+  h2: string,
+  th: string,
+  thR: string,
+  table: string,
+): string {
+  const L = d.learning;
+  if (!L) return "";
+
+  const adherenceRows = L.adherence
+    .map((a) => {
+      const pct = a.adherencePct == null ? "—" : `${a.adherencePct}%`;
+      const color =
+        a.adherencePct == null || a.adherencePct >= 80 ? "#4F7C3A" : "#9A3A2D";
+      return (
+        `<tr><td style="padding:4px 10px;border-bottom:1px solid #eee">${esc(a.dept)}</td>` +
+        `<td style="padding:4px 10px;border-bottom:1px solid #eee;text-align:right">${a.due}</td>` +
+        `<td style="padding:4px 10px;border-bottom:1px solid #eee;text-align:right">${a.onTime}</td>` +
+        `<td style="padding:4px 10px;border-bottom:1px solid #eee;text-align:right">${a.late + a.stillOpen}</td>` +
+        `<td style="padding:4px 10px;border-bottom:1px solid #eee;text-align:right;color:${color};font-weight:600">${pct}</td>` +
+        `<td style="padding:4px 10px;border-bottom:1px solid #eee;font:11px Arial;color:#6B7280">${esc(a.topReason ?? "—")}</td></tr>`
+      );
+    })
+    .join("");
+
+  const handoffRows = L.handoffs
+    .map((h) => {
+      const actual = h.actualAvgDays == null ? "—" : `${h.actualAvgDays}d`;
+      const drift =
+        h.driftDays == null ? "—" : `${h.driftDays > 0 ? "+" : ""}${h.driftDays}d`;
+      const color = h.flagged ? "#9A3A2D" : "#4F7C3A";
+      return (
+        `<tr><td style="padding:4px 10px;border-bottom:1px solid #eee">${esc(h.fromDepts.join("/"))} → ${esc(h.toDept)}</td>` +
+        `<td style="padding:4px 10px;border-bottom:1px solid #eee;text-align:right">${h.configuredDays}d</td>` +
+        `<td style="padding:4px 10px;border-bottom:1px solid #eee;text-align:right">${actual}</td>` +
+        `<td style="padding:4px 10px;border-bottom:1px solid #eee;text-align:right">${h.samples}</td>` +
+        `<td style="padding:4px 10px;border-bottom:1px solid #eee;text-align:right;color:${color};font-weight:600">${drift}${h.flagged ? " ⚠" : ""}</td></tr>`
+      );
+    })
+    .join("");
+
+  const otBlocks = L.ot
+    .map((o) => {
+      const dayRows = o.overloadedDays
+        .slice(0, 10)
+        .map(
+          (day) =>
+            `<tr><td style="padding:4px 10px;border-bottom:1px solid #eee">${day.date}</td>` +
+            `<td style="padding:4px 10px;border-bottom:1px solid #eee;text-align:right;color:#9A3A2D;font-weight:600">${day.overloadPct}%</td>` +
+            `<td style="padding:4px 10px;border-bottom:1px solid #eee;text-align:right">${day.suggestedOtHours > 0 ? `${day.suggestedOtHours}h` : "spread"}</td>` +
+            `<td style="padding:4px 10px;border-bottom:1px solid #eee;font:11px Arial;color:#6B7280">${esc(day.soRefs.join(", ") || "—")}</td></tr>`,
+        )
+        .join("");
+      const delays =
+        o.delayCandidates.length > 0
+          ? `<div style="font:12px Arial;color:#9A3A2D;margin-top:4px">Delay candidates (latest customer DD first): ${esc(
+              o.delayCandidates
+                .map((x) => `${x.soRef}${x.customerDd ? ` (DD ${x.customerDd})` : ""}`)
+                .join(" · "),
+            )}</div>`
+          : "";
+      return `<div style="margin:10px 0">
+<div style="font:600 13px Arial;color:#1F1D1B">${esc(o.dept)} — ${o.mode === "SPREAD" ? "rebalance (no OT)" : o.mode === "OT" ? "early spread OT" : "OT caps insufficient — delay orders"}</div>
+<div style="font:12px Arial;color:#6B7280;margin:2px 0 4px">${esc(o.note)}</div>
+<table ${table}><tr><th ${th}>Date</th><th ${thR}>Load</th><th ${thR}>OT (≤2h)</th><th ${th}>Affected SOs</th></tr>${dayRows}</table>
+${delays}</div>`;
+    })
+    .join("");
+
+  return `
+<h2 ${h2}>6 · Plan vs Actual (${L.prevDate}) — ${L.overallAdherencePct == null ? "nothing was due" : `${L.overallAdherencePct}% adherence`}</h2>
+<table ${table}><tr><th ${th}>Department</th><th ${thR}>Due</th><th ${thR}>On time</th><th ${thR}>Missed</th><th ${thR}>Adherence</th><th ${th}>Top slippage reason</th></tr>${adherenceRows || `<tr><td colspan="6" style="padding:8px 10px;color:#9CA3AF">No job cards were due.</td></tr>`}</table>
+<h2 ${h2}>7 · Handoff Learning — actual vs configured (last 30 days)</h2>
+<table ${table}><tr><th ${th}>Chain step</th><th ${thR}>Configured</th><th ${thR}>Actual avg</th><th ${thR}>Orders</th><th ${thR}>Drift</th></tr>${handoffRows}</table>
+<div style="font:11px Arial;color:#9CA3AF;margin-top:6px">⚠ = sustained drift >1 working day — a parameter proposal is raised for your approval.${L.pendingConfigProposals > 0 ? ` <b style="color:#6B5C32">${L.pendingConfigProposals} parameter proposal(s) pending in the Agent Console.</b>` : ""}</div>
+<h2 ${h2}>8 · Forward OT Outlook — next 21 working days${L.ot.length === 0 ? " — all clear" : ""}</h2>
+${otBlocks || `<div style="font:13px Arial;color:#4F7C3A">No department is overloaded in the window — no OT needed.</div>`}
+<div style="font:11px Arial;color:#9CA3AF;margin-top:6px">Rules: spread to lighter days FIRST; OT only as a fallback, max 2h/day, started early and spread flat — never a last-minute spike. If capped OT still isn't enough, the humane answer is to delay the lowest-priority orders and inform customers early.</div>`;
 }
 
 export function renderBriefEmailText(d: BriefData): string {
@@ -513,6 +670,49 @@ export function renderBriefEmailText(d: BriefData): string {
   }
   if (d.proposals.pending > 0) {
     lines.push(`排产提案: ${d.proposals.pending} 张卡待批准排产 (Planning > Schedule Proposals).`);
+  }
+  const L = d.learning;
+  if (L) {
+    lines.push(
+      `6) Plan vs actual (${L.prevDate}): ` +
+        (L.overallAdherencePct == null
+          ? "nothing was due."
+          : `${L.overallAdherencePct}% adherence.` +
+            (() => {
+              const worst = L.adherence.filter(
+                (a) => a.adherencePct != null && a.adherencePct < 80,
+              );
+              return worst.length > 0
+                ? ` Worst: ${worst
+                    .slice(0, 3)
+                    .map((a) => `${a.dept} ${a.adherencePct}% (${a.topReason ?? "?"})`)
+                    .join("; ")}.`
+                : "";
+            })()),
+    );
+    const flaggedHandoffs = L.handoffs.filter((h) => h.flagged);
+    if (flaggedHandoffs.length > 0 || L.pendingConfigProposals > 0) {
+      lines.push(
+        `7) Handoff learning: ${flaggedHandoffs
+          .map(
+            (h) =>
+              `${h.fromDepts.join("/")}->${h.toDept} actual ${h.actualAvgDays}d vs configured ${h.configuredDays}d`,
+          )
+          .join("; ")}${flaggedHandoffs.length > 0 ? " — " : ""}${L.pendingConfigProposals} parameter proposal(s) pending approval (Agent Console).`,
+      );
+    }
+    if (L.ot.length > 0) {
+      lines.push(
+        `8) Forward OT outlook (21 working days): ${L.ot
+          .map(
+            (o) =>
+              `${o.dept} ${o.mode === "SPREAD" ? "rebalance, no OT" : o.mode === "OT" ? `early spread OT (max 2h/day)` : "OT caps insufficient — delay lowest-priority orders"} — ${o.overloadedDays.length} overloaded day(s)`,
+          )
+          .join("; ")}.`,
+      );
+    } else {
+      lines.push("8) Forward OT outlook: all clear — no OT needed in the window.");
+    }
   }
   return lines.join("\n");
 }

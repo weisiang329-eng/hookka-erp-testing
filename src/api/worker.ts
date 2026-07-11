@@ -1227,6 +1227,13 @@ app.route("/api/internal/reports", reportsInternal);
 import assistant from "./routes/assistant";
 app.route("/api/assistant", assistant);
 
+// Agent Console (Production Agent Phase 3) — SUPER_ADMIN-only status +
+// one-click controls (run-now / pause / kill-all / rollback / approval gate)
+// for every agent. Mounted AFTER reports so ./routes/agent-console.ts can
+// import dispatchReport from ./routes/reports without a cycle at runtime.
+import agentConsole from "./routes/agent-console";
+app.route("/api/agents", agentConsole);
+
 // Catch-all error handler (Sprint 5). Hono's default behaviour is to surface
 // a 500 with the error message — fine for dev, but in prod we want every
 // uncaught route exception to land in Sentry (when configured) so we can

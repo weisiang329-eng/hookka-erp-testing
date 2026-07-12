@@ -242,25 +242,26 @@ app.post("/", async (c) => {
       );
     }
 
-    // Snapshot header info from the source DO (best-effort — a DO always
-    // carries customerName + a salesOrderNo; SO id resolved via items→PO).
-    const doRow = await c.var.DB
-      .prepare(
-        `SELECT id, doNo AS "doNo", customerName AS "customerName",
-                customerPOId AS "customerPOId", salesOrderNos AS "salesOrderNos"
-           FROM delivery_orders WHERE id = ?`,
-      )
-      .bind(doId)
-      .first<{
-        id: string;
-        doNo: string | null;
-        customerName: string | null;
-        customerPOId: string | null;
-        salesOrderNos: string | null;
-      }>();
+    // Snapshot header info from the source DO + resolve the SO. BOTH are
+    // best-effort and wrapped: a missing/renamed column (salesOrderNos is a
+    // computed field, not a stored column) or an un-rewritten JOIN alias must
+    // NOT fail the whole create — the DR header + items still get written.
+    let doNo = "";
+    let customerName = "";
+    let customerPOId = "";
+    try {
+      const doRow = await c.var.DB
+        .prepare(
+          `SELECT doNo AS "doNo", customerName AS "customerName" FROM delivery_orders WHERE id = ?`,
+        )
+        .bind(doId)
+        .first<{ doNo: string | null; customerName: string | null }>();
+      doNo = doRow?.doNo ?? "";
+      customerName = doRow?.customerName ?? "";
+    } catch (e) {
+      console.warn("[delivery-returns] DO snapshot failed:", e instanceof Error ? e.message : e);
+    }
 
-    // Resolve the SO id from the first item's production order (a DR is
-    // per-SO in practice; the source DO items all trace to production_orders).
     let salesOrderId = "";
     let companySOId = "";
     let customerId = "";
@@ -268,20 +269,24 @@ app.post("/", async (c) => {
       (it: { productionOrderId?: string }) => it.productionOrderId,
     );
     if (firstPo?.productionOrderId) {
-      const soRow = await c.var.DB
-        .prepare(
-          `SELECT so.id AS "soId", so.companySOId AS "companySOId",
-                  so.customerId AS "customerId"
-             FROM production_orders po
-             JOIN sales_orders so ON so.id = po.salesOrderId
-            WHERE po.id = ? LIMIT 1`,
-        )
-        .bind(firstPo.productionOrderId)
-        .first<{ soId: string; companySOId: string; customerId: string }>();
-      if (soRow) {
-        salesOrderId = soRow.soId ?? "";
-        companySOId = soRow.companySOId ?? "";
-        customerId = soRow.customerId ?? "";
+      try {
+        const soRow = await c.var.DB
+          .prepare(
+            `SELECT so.id AS "soId", so.companySOId AS "companySOId",
+                    so.customerId AS "customerId"
+               FROM production_orders po
+               JOIN sales_orders so ON so.id = po.salesOrderId
+              WHERE po.id = ? LIMIT 1`,
+          )
+          .bind(firstPo.productionOrderId)
+          .first<{ soId: string; companySOId: string; customerId: string }>();
+        if (soRow) {
+          salesOrderId = soRow.soId ?? "";
+          companySOId = soRow.companySOId ?? "";
+          customerId = soRow.customerId ?? "";
+        }
+      } catch (e) {
+        console.warn("[delivery-returns] SO resolve failed:", e instanceof Error ? e.message : e);
       }
     }
 
@@ -300,12 +305,12 @@ app.post("/", async (c) => {
         id,
         returnNo,
         doId,
-        doRow?.doNo ?? "",
+        doNo,
         salesOrderId,
         companySOId,
         customerId,
-        doRow?.customerName ?? "",
-        doRow?.customerPOId ?? "",
+        customerName,
+        customerPOId,
         String(body.reason ?? ""),
         String(body.notes ?? ""),
         now,

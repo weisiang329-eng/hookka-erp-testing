@@ -162,14 +162,35 @@ export default function DeliveryReturnDetail() {
           )}
 
           <div className="flex gap-2 flex-wrap pt-4 mt-4 border-t border-[#E2DDD8]">
-            {canService && (
-              <Button variant="primary" disabled={busy} onClick={() => call("/spawn-service")}>
-                Open service order · repair &amp; re-deliver
+            {isOpen && (
+              <Button variant="primary" disabled={busy} onClick={() => call("/return-to-stock")}>
+                Return to stock
               </Button>
             )}
             {canService && (
-              <Button variant="outline" disabled={busy} onClick={() => call("/convert-to-cn")}>
-                Convert to CN
+              <Button
+                variant="primary"
+                disabled={busy}
+                onClick={async () => {
+                  await call("/set-outcome", { returnType: "REPAIR_REDELIVER" });
+                  toast.info("Now open a Service Order for this customer to repair & re-deliver.");
+                  navigate("/service-cases");
+                }}
+              >
+                Repair &amp; re-deliver → service order
+              </Button>
+            )}
+            {canService && (
+              <Button
+                variant="outline"
+                disabled={busy}
+                onClick={async () => {
+                  await call("/set-outcome", { returnType: "PURE_RETURN" });
+                  toast.info("Now issue a Credit Note against the invoice for the returned line.");
+                  navigate("/invoices/credit-notes");
+                }}
+              >
+                Pure return → credit note
               </Button>
             )}
             {dr.status === "SERVICE_SPAWNED" && (

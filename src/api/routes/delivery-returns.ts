@@ -352,6 +352,85 @@ app.post("/", async (c) => {
   }
 });
 
+// -- POST /:id/return-to-stock ----------------------------------------------
+// Flags the returned finished-good units RETURNED and moves the DR to
+// RETURNED_TO_STOCK. ⚠️ The COGS / inventory-value reversal (write a reversing
+// cost_ledger row against the DO's FG_DELIVERED + re-increment
+// fg_batches.remaining_qty) is the money-critical NEXT phase — NOT done here;
+// this only sets the physical unit state, which is safe + reversible.
+app.post("/:id/return-to-stock", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "update");
+  if (denied) return denied;
+  await ensureDeliveryReturnTables(c.var.DB);
+  const id = c.req.param("id");
+  const now = new Date().toISOString();
+  const items = await loadItems(c.var.DB, id);
+  const unitIds = items.map((it) => it.fgUnitId).filter((x): x is string => !!x);
+  if (unitIds.length) {
+    const marks = unitIds.map(() => "?").join(",");
+    await c.var.DB
+      .prepare(
+        `UPDATE fg_units SET status='RETURNED', returnedAt=? WHERE id IN (${marks})`,
+      )
+      .bind(now, ...unitIds)
+      .run();
+  }
+  await c.var.DB
+    .prepare(
+      `UPDATE delivery_returns SET status='RETURNED_TO_STOCK', returned_at=?, updated_at=? WHERE id=?`,
+    )
+    .bind(now, now, id)
+    .run();
+  return c.json({ success: true });
+});
+
+// -- POST /:id/set-outcome — record repair-vs-pure-return + status ----------
+// Body: { returnType: 'REPAIR_REDELIVER' | 'PURE_RETURN', serviceOrderId?,
+// creditNoteId? }. The actual Service Order / Credit Note are created via the
+// existing (tested) service-case and credit-note flows; this records the
+// decision + any resulting doc id + advances the DR status.
+app.post("/:id/set-outcome", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "update");
+  if (denied) return denied;
+  await ensureDeliveryReturnTables(c.var.DB);
+  const id = c.req.param("id");
+  const body = await c.req.json().catch(() => ({}));
+  const type = body.returnType === "PURE_RETURN" ? "PURE_RETURN" : "REPAIR_REDELIVER";
+  const status = type === "PURE_RETURN" ? "CN_ISSUED" : "SERVICE_SPAWNED";
+  await c.var.DB
+    .prepare(
+      `UPDATE delivery_returns
+          SET return_type=?, status=?, service_order_id=?, credit_note_id=?, updated_at=?
+        WHERE id=?`,
+    )
+    .bind(
+      type,
+      status,
+      String(body.serviceOrderId ?? ""),
+      String(body.creditNoteId ?? ""),
+      new Date().toISOString(),
+      id,
+    )
+    .run();
+  return c.json({ success: true });
+});
+
+// -- POST /:id/mark-redelivered ---------------------------------------------
+app.post("/:id/mark-redelivered", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "update");
+  if (denied) return denied;
+  await ensureDeliveryReturnTables(c.var.DB);
+  const id = c.req.param("id");
+  const now = new Date().toISOString();
+  await c.var.DB
+    .prepare(
+      `UPDATE delivery_returns SET status='REDELIVERED', updated_at=? WHERE id=?`,
+    )
+    .bind(now, id)
+    .run();
+  return c.json({ success: true });
+});
+
 // -- POST /:id/cancel --------------------------------------------------------
 app.post("/:id/cancel", async (c) => {
   const denied = await requirePermission(c, "delivery-orders", "update");

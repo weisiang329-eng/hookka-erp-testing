@@ -9,6 +9,49 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-13 — 🔵 Delivery Return — driver item-flagging + desktop deliver/DR/SV convert
+Owner ask (4 parts, feature → staging):
+1. **Driver scan** (do-scan.tsx): on "Delivered with issues", show item list → driver
+   ticks the specific damaged items (+ problem) → system AUTO-creates a Delivery
+   Return for the damaged items, and the remaining good items are all marked delivered
+   (good lines invoice normally; DR lines already excluded from invoice via Phase 5
+   computeDoInvoiceLines). Backend: public-do-qr `/advance` accepts `damagedItems`,
+   creates DR BEFORE the delivered cascade so auto-invoice excludes them.
+2. **Desktop DO detail**: support Dispatched → Delivered with the same per-item damaged
+   handling (Mark Delivered → optional flag damaged items → auto DR + deliver rest).
+   (Post-hoc "Convert to Delivery Return" button already exists for DELIVERED/INVOICED.)
+3. **DR → Service Order convert**: DR detail "Repair & re-deliver" should create the SV
+   order carrying the DR's damaged item lines — `/sales/create?fromReturn=<drId>` hydrates
+   the SV from the DR items + links DR.service_order_id (today it makes a bare case from
+   the whole SO, not the specific damaged items).
+Shared backend: extract `createDeliveryReturnRecord()` helper (reused by DR POST +
+driver advance). **Mockup FIRST (UI rule) → owner OK → build.**
+
+**OWNER SIMPLIFIED (2026-07-13) → BUILT + ON STAGING (feat/delivery-return):**
+Driver side = NO item picker. Clean either/or after dispatch: customer received →
+Mark Delivered (normal, invoices); customer did NOT receive → **"Not received —
+return goods"** → whole-DO Delivery Return, NO invoice. Built:
+- `src/api/lib/delivery-return-create.ts` NEW — shared `createDeliveryReturnRecord()`
+  + `loadDoItemsForReturn()` + ensure/nextReturnNo/genId (moved out of the route so
+  office + driver write identical DRs).
+- `delivery-returns.ts` POST refactored onto the shared helper.
+- `public-do-qr.ts` `/advance`: `returnGoods` flag → DO marked DELIVERED +
+  deliveryIncomplete (invoice+notice withheld) + auto full-DO DR (best-effort).
+- `do-scan.tsx`: 2nd button relabelled "Not received — return goods" (PackageX, red),
+  sends `returnGoods`; success screen "Returned"; DoCard/already-done copy updated.
+- Desktop #1: `delivery/detail.tsx` — direct "Mark Delivered" from LOADED (parity;
+  backend already allows LOADED→DELIVERED).
+- Desktop #2: "Convert to Delivery Return" already exists (DELIVERED/INVOICED).
+- Desktop #3: DR detail "Repair & re-deliver" now seeds the service case with the
+  RETURNED items as affectedProducts → the SV order pre-fills just the damaged lines
+  (reuses the existing ?fromCase hydration; no new route).
+build:strict clean. Design note (mark-delivered+hold reuses the tested COGS reversal;
+DO chip shows "Delivered" though driver saw "Returned" — DR is source of truth).
+Owner to test on staging → then prod. Possible follow-up: show a "Return opened" link
+on the DO detail so the office finds the auto-DR without going to the DR list.
+
+---
+
 ## 2026-07-11 — 🔵 Hookka Report program — BUILT + ON STAGING (verified real data)
 Operations Report LIVE on staging (staging.hookka-erp-testing.pages.dev/reports,
 default "Operations" tab). Backend collector src/api/lib/operations-report.ts (11

@@ -201,14 +201,24 @@ export default function DeliveryReturnDetail() {
                   if (busy) return;
                   setBusy(true);
                   try {
-                    // Auto-open a service case from the original SO, link it, then
-                    // jump into the replacement (SV) order create flow.
+                    // Auto-open a service case from the original SO, seeded with
+                    // the RETURNED items (as affectedProducts) so the replacement
+                    // (SV) order the case hands off to is pre-filled with just the
+                    // damaged lines — not the whole order. Then link + jump in.
                     let caseId = "";
                     if (dr.salesOrderId) {
                       const r = await fetch("/api/service-cases", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ sourceType: "SO", sourceId: dr.salesOrderId }),
+                        body: JSON.stringify({
+                          sourceType: "SO",
+                          sourceId: dr.salesOrderId,
+                          affectedProducts: dr.items.map((it) => ({
+                            code: it.productCode,
+                            name: it.productName,
+                            qty: it.quantity,
+                          })),
+                        }),
                       });
                       const j = (await r.json()) as { data?: { id?: string } };
                       caseId = j?.data?.id ?? "";

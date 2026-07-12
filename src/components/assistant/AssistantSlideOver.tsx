@@ -411,6 +411,78 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
+  // Whether the message list is "stuck to bottom". While the user has
+  // scrolled up to re-read something, we must NOT yank them back down on
+  // every streamed token — only auto-scroll when they're already at the end.
+  const stickBottomRef = useRef(true);
+
+  // Desktop panel width — drag the left edge to widen (persisted). Mobile
+  // stays full-width (the inline width is only applied at >= sm).
+  const MIN_W = 360;
+  const MAX_W = 900;
+  const [isDesktop, setIsDesktop] = useState(false);
+  const [panelWidth, setPanelWidth] = useState(400);
+  const resizingRef = useRef(false);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 640px)");
+    const apply = () => setIsDesktop(mq.matches);
+    mq.addEventListener("change", apply);
+    // Sync viewport + restore saved width once on mount (same on-mount
+    // set-state pattern the rest of the app suppresses).
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial mount sync
+    setIsDesktop(mq.matches);
+    try {
+      const saved = Number(localStorage.getItem("hookkaai_panel_width"));
+      if (Number.isFinite(saved) && saved >= MIN_W) {
+        setPanelWidth(Math.min(MAX_W, saved));
+      }
+    } catch {
+      /* localStorage blocked — keep default */
+    }
+    return () => mq.removeEventListener("change", apply);
+  }, []);
+
+  // Left-edge drag to resize. Width = distance from the drag point to the
+  // right screen edge (the panel is right-anchored), clamped and persisted.
+  const startResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    resizingRef.current = true;
+    const onMove = (ev: MouseEvent) => {
+      if (!resizingRef.current) return;
+      const w = Math.min(
+        Math.min(MAX_W, window.innerWidth - 40),
+        Math.max(MIN_W, window.innerWidth - ev.clientX),
+      );
+      setPanelWidth(w);
+    };
+    const onUp = () => {
+      resizingRef.current = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.userSelect = "";
+      setPanelWidth((w) => {
+        try {
+          localStorage.setItem("hookkaai_panel_width", String(Math.round(w)));
+        } catch {
+          /* ignore */
+        }
+        return w;
+      });
+    };
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, []);
+
+  const onScrollerScroll = useCallback(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    // "Near the bottom" (within 80px) counts as stuck — anything above frees
+    // the view so streaming text no longer drags the user down.
+    stickBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  }, []);
+
   // Track which preview URLs are still in use so we can revoke them on
   // unmount. Revocation on individual remove happens in removeAttachment.
   // We keep this in a ref so the cleanup function captures the live set
@@ -433,9 +505,11 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
     };
   }, []);
 
-  // Auto-scroll to bottom on new message / streamed text.
+  // Auto-scroll to bottom on new message / streamed text — but ONLY while the
+  // user is stuck to the bottom. If they've scrolled up to read, leave them
+  // there (fixes: "I can't scroll up while it's typing").
   useEffect(() => {
-    if (scrollerRef.current) {
+    if (stickBottomRef.current && scrollerRef.current) {
       scrollerRef.current.scrollTop = scrollerRef.current.scrollHeight;
     }
   }, [messages]);
@@ -472,6 +546,8 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
     // attachments are present.
     if ((!trimmed && !hasAttachments) || busy) return;
 
+    // Sending a new message always snaps back to the bottom.
+    stickBottomRef.current = true;
     setError(null);
 
     // Capture attachments at send time. We reset state right after so the
@@ -785,10 +861,23 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
       // off-screen when closed; `translate-x-0` brings it on. The hidden
       // state also goes pointer-events-none so it doesn't intercept clicks
       // on the page underneath while collapsed.
-      className={`fixed top-0 right-0 bottom-0 z-50 flex flex-col bg-white shadow-2xl border-l border-[#E2DDD8] w-full sm:w-[400px] transition-transform duration-200 ease-out ${
+      className={`fixed top-0 right-0 bottom-0 z-50 flex flex-col bg-white shadow-2xl border-l border-[#E2DDD8] w-full transition-transform duration-200 ease-out ${
         open ? "translate-x-0" : "translate-x-full pointer-events-none"
       }`}
+      style={isDesktop ? { width: panelWidth } : undefined}
     >
+      {/* Left-edge drag handle — desktop only. Drag to widen the panel. */}
+      {isDesktop && (
+        <div
+          onMouseDown={startResize}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize Hookka AI panel"
+          title="Drag to resize"
+          className="absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-[#6B5C32]/30 active:bg-[#6B5C32]/50 transition-colors"
+        />
+      )}
+
       {/* Header */}
       <div className="flex items-center gap-3 px-4 py-3 border-b border-[#E2DDD8] shrink-0">
         <div className="h-9 w-9 rounded-full bg-[#1F1D1B] text-white flex items-center justify-center">
@@ -811,7 +900,11 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
       </div>
 
       {/* Message list */}
-      <div ref={scrollerRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+      <div
+        ref={scrollerRef}
+        onScroll={onScrollerScroll}
+        className="flex-1 overflow-y-auto px-4 py-4 space-y-4"
+      >
         {messages.length === 0 && (
           <div className="text-center text-[#6B7280] mt-8 text-sm">
             <div className="mx-auto mb-3 h-12 w-12 rounded-full bg-[#F0ECE9] text-[#1F1D1B] flex items-center justify-center">

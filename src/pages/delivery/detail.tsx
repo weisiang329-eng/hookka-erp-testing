@@ -16,6 +16,7 @@ import {
   Phone,
   Truck,
   CheckCircle2,
+  Undo2,
   PackageCheck,
   Send,
   ReceiptText,
@@ -550,6 +551,17 @@ export default function DeliveryDetailPage() {
               >
                 <ReceiptText className="h-4 w-4" />
                 {updating ? "Updating..." : "Convert to Invoice"}
+              </Button>
+            )}
+            {(order.status === "DELIVERED" || order.status === "INVOICED") && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => navigate(`/delivery-returns?createFrom=${order.id}`)}
+                disabled={updating}
+              >
+                <Undo2 className="h-4 w-4" />
+                Convert to Delivery Return
               </Button>
             )}
           </>

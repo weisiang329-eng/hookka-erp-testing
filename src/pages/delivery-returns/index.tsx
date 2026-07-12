@@ -3,8 +3,8 @@
 // status badges + summary cards + search) so it looks native to the app.
 // Reads /api/delivery-returns. Rows open the detail page.
 // ---------------------------------------------------------------------------
-import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -48,7 +48,13 @@ export default function DeliveryReturnsPage() {
   const navigate = useNavigate();
   const { data: raw, loading, refresh } = useCachedJson<Resp>("/api/delivery-returns");
   const rows = useMemo<DeliveryReturn[]>(() => raw?.data ?? [], [raw]);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const createFrom = searchParams.get("createFrom") || "";
   const [showCreate, setShowCreate] = useState(false);
+  // Opened via "Convert to Delivery Return" on a DO → pre-open the create modal.
+  useEffect(() => {
+    if (createFrom) setShowCreate(true);
+  }, [createFrom]);
 
   const counts = useMemo(() => {
     const c = { open: 0, inService: 0, closed: 0 };
@@ -110,9 +116,14 @@ export default function DeliveryReturnsPage() {
 
       {showCreate && (
         <CreateReturnModal
-          onClose={() => setShowCreate(false)}
+          initialDoId={createFrom}
+          onClose={() => {
+            setShowCreate(false);
+            if (createFrom) setSearchParams({});
+          }}
           onCreated={(id) => {
             setShowCreate(false);
+            if (createFrom) setSearchParams({});
             refresh();
             navigate(`/delivery-returns/${id}`);
           }}
@@ -155,9 +166,11 @@ interface DoItem {
 type TickState = Record<string, { on: boolean; problem: string }>;
 
 function CreateReturnModal({
+  initialDoId,
   onClose,
   onCreated,
 }: {
+  initialDoId?: string;
   onClose: () => void;
   onCreated: (id: string) => void;
 }) {
@@ -194,6 +207,11 @@ function CreateReturnModal({
       setLoadingItems(false);
     }
   };
+
+  useEffect(() => {
+    if (initialDoId) void pickDo(initialDoId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialDoId]);
 
   const create = async () => {
     const chosen = items.filter((it) => ticked[it.id]?.on);

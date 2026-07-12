@@ -1244,6 +1244,10 @@ app.route("/api/internal/reports", reportsInternal);
 // Anthropic SSE through to the browser; tool calls execute the read-only
 // query helpers in src/api/lib/assistant-tools.ts. See routes/assistant.ts.
 import assistant from "./routes/assistant";
+import assistantHistory from "./routes/assistant-history";
+// History sub-router first (more specific path) so /conversations/* resolves
+// before the assistant router's own routes. Both share the /api/assistant base.
+app.route("/api/assistant/conversations", assistantHistory);
 app.route("/api/assistant", assistant);
 
 // Agent Console (Production Agent Phase 3) — SUPER_ADMIN-only status +

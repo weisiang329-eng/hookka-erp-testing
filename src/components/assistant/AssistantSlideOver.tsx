@@ -15,7 +15,17 @@
 // ---------------------------------------------------------------------------
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { X, Paperclip, FileText, Image as ImageIcon, FileSpreadsheet } from "lucide-react";
+import {
+  X,
+  Paperclip,
+  FileText,
+  Image as ImageIcon,
+  FileSpreadsheet,
+  History,
+  Plus,
+  Pin,
+  Trash2,
+} from "lucide-react";
 import { HookkaAILogo } from "@/components/assistant/HookkaAILogo";
 import { humanizeError } from "@/lib/humanize-error";
 
@@ -84,6 +94,12 @@ type ChatMessage = {
 
 function uid(): string {
   return `msg-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function newConvId(): string {
+  return typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `conv-${Math.random().toString(36).slice(2)}`;
 }
 
 // Read a File to a base64-encoded string (no data: prefix). Uses FileReader
@@ -482,6 +498,150 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
     // the view so streaming text no longer drags the user down.
     stickBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   }, []);
+
+  // ── Conversation history (per-user, 30-day; see routes/assistant-history) ──
+  // Ref = the id async callbacks (save) read; state mirror = the id render
+  // reads (linter forbids reading refs during render). Lazy-init on mount so
+  // crypto.randomUUID never runs during render.
+  const conversationIdRef = useRef<string>("");
+  const [activeConvId, setActiveConvId] = useState("");
+  const setConversationId = useCallback((id: string) => {
+    conversationIdRef.current = id;
+    setActiveConvId(id);
+  }, []);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time mount init
+    if (!conversationIdRef.current) setConversationId(newConvId());
+  }, [setConversationId]);
+  const messagesRef = useRef<ChatMessage[]>([]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [conversations, setConversations] = useState<
+    Array<{ id: string; title: string; pinned: boolean; updatedAt: string | null }>
+  >([]);
+
+  const loadConversations = useCallback(async () => {
+    try {
+      const r = await fetch("/api/assistant/conversations", { credentials: "include" });
+      const j = (await r.json()) as {
+        success?: boolean;
+        data?: Array<{ id: string; title: string; pinned: boolean; updatedAt: string | null }>;
+      };
+      if (j?.success) setConversations(j.data ?? []);
+    } catch {
+      /* offline / not configured — history just stays empty */
+    }
+  }, []);
+
+  // Save the current conversation (called after each completed turn). Strips
+  // blob preview URLs before persisting — they're useless after reload.
+  const saveConversation = useCallback(async () => {
+    const msgs = messagesRef.current;
+    if (msgs.length === 0) return;
+    const trimmed = msgs.map((m) => ({
+      id: m.id,
+      role: m.role,
+      blocks: m.blocks.map((b) =>
+        b.type === "attachment"
+          ? {
+              type: "attachment" as const,
+              attachment: {
+                name: b.attachment.name,
+                mediaType: b.attachment.mediaType,
+                sizeBytes: b.attachment.sizeBytes,
+              },
+            }
+          : b,
+      ),
+    }));
+    try {
+      await fetch(`/api/assistant/conversations/${conversationIdRef.current}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ messages: trimmed }),
+      });
+      void loadConversations();
+    } catch {
+      /* best-effort */
+    }
+  }, [loadConversations]);
+
+  const newChat = useCallback(() => {
+    setConversationId(newConvId());
+    setMessages([]);
+    setDraft("");
+    setError(null);
+    setHistoryOpen(false);
+    stickBottomRef.current = true;
+  }, [setConversationId]);
+
+  const openConversation = useCallback(async (id: string) => {
+    try {
+      const r = await fetch(`/api/assistant/conversations/${id}`, { credentials: "include" });
+      const j = (await r.json()) as {
+        success?: boolean;
+        data?: { messages?: ChatMessage[] };
+      };
+      if (j?.success && j.data) {
+        setConversationId(id);
+        setMessages(Array.isArray(j.data.messages) ? j.data.messages : []);
+        stickBottomRef.current = true;
+        setHistoryOpen(false);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [setConversationId]);
+
+  const togglePin = useCallback(
+    async (id: string, pinned: boolean) => {
+      try {
+        await fetch(`/api/assistant/conversations/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ pinned: !pinned }),
+        });
+        void loadConversations();
+      } catch {
+        /* ignore */
+      }
+    },
+    [loadConversations],
+  );
+
+  const deleteConversation = useCallback(
+    async (id: string) => {
+      try {
+        await fetch(`/api/assistant/conversations/${id}`, {
+          method: "DELETE",
+          credentials: "include",
+        });
+        if (id === conversationIdRef.current) newChat();
+        void loadConversations();
+      } catch {
+        /* ignore */
+      }
+    },
+    [loadConversations, newChat],
+  );
+
+  // Load the history list when the panel opens.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- async fetch, sets state in a promise
+    if (open) void loadConversations();
+  }, [open, loadConversations]);
+
+  // Persist after each completed turn (busy true → false transition).
+  const prevBusyRef = useRef(false);
+  useEffect(() => {
+    if (prevBusyRef.current && !busy) void saveConversation();
+    prevBusyRef.current = busy;
+  }, [busy, saveConversation]);
 
   // Track which preview URLs are still in use so we can revoke them on
   // unmount. Revocation on individual remove happens in removeAttachment.
@@ -913,6 +1073,31 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
         </div>
         <button
           type="button"
+          onClick={() => {
+            setHistoryOpen((v) => !v);
+            void loadConversations();
+          }}
+          aria-label="Conversation history"
+          title="History"
+          className={`h-8 w-8 rounded-md flex items-center justify-center transition-colors ${
+            historyOpen
+              ? "bg-[#F0ECE9] text-[#1F1D1B]"
+              : "text-[#6B7280] hover:bg-[#F0ECE9] hover:text-[#1F1D1B]"
+          }`}
+        >
+          <History className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          onClick={newChat}
+          aria-label="New chat"
+          title="New chat"
+          className="h-8 w-8 rounded-md flex items-center justify-center text-[#6B7280] hover:bg-[#F0ECE9] hover:text-[#1F1D1B] transition-colors"
+        >
+          <Plus className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
           onClick={onClose}
           aria-label="Close Hookka AI"
           className="h-8 w-8 rounded-md flex items-center justify-center text-[#6B7280] hover:bg-[#F0ECE9] hover:text-[#1F1D1B] transition-colors"
@@ -920,6 +1105,67 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
           <X className="h-4 w-4" />
         </button>
       </div>
+
+      {/* History rail — toggled from the header. Per-user, last 30 days. */}
+      {historyOpen && (
+        <div className="border-b border-[#E2DDD8] bg-[#FAF9F7] max-h-[45%] overflow-y-auto shrink-0">
+          <button
+            type="button"
+            onClick={newChat}
+            className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-[#1F1D1B] hover:bg-[#F0ECE9] border-b border-[#E2DDD8]"
+          >
+            <Plus className="h-4 w-4" /> New chat
+          </button>
+          {conversations.length === 0 ? (
+            <div className="px-4 py-3 text-xs text-[#9CA3AF]">
+              No saved conversations yet. Ask something — it'll appear here (kept 30 days).
+            </div>
+          ) : (
+            <ul className="py-1">
+              {conversations.map((conv) => (
+                <li
+                  key={conv.id}
+                  className={`group flex items-center gap-1.5 px-2 pl-3 pr-2 py-1.5 text-sm cursor-pointer hover:bg-[#F0ECE9] ${
+                    conv.id === activeConvId ? "bg-[#EEF3E4]" : ""
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => void openConversation(conv.id)}
+                    className="flex-1 min-w-0 text-left truncate text-[#1F1D1B]"
+                    title={conv.title}
+                  >
+                    {conv.pinned && (
+                      <Pin className="inline h-3 w-3 mr-1 text-[#6B5C32] align-[-1px]" />
+                    )}
+                    {conv.title || "New chat"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void togglePin(conv.id, conv.pinned)}
+                    aria-label={conv.pinned ? "Unpin" : "Pin"}
+                    title={conv.pinned ? "Unpin" : "Pin"}
+                    className={`h-6 w-6 rounded flex items-center justify-center shrink-0 hover:bg-[#E2DDD8] ${
+                      conv.pinned ? "text-[#6B5C32]" : "text-[#9CA3AF] opacity-0 group-hover:opacity-100"
+                    }`}
+                  >
+                    <Pin className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void deleteConversation(conv.id)}
+                    aria-label="Delete conversation"
+                    title="Delete"
+                    className="h-6 w-6 rounded flex items-center justify-center shrink-0 text-[#9CA3AF] hover:bg-[#E2DDD8] hover:text-[#9A3A2D] opacity-0 group-hover:opacity-100"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       {/* Message list */}
       <div
@@ -1051,7 +1297,7 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
           )}
         </div>
         <p className="mt-2 text-[10px] text-[#6B7280]">
-          Read-only. Chat history clears when you close the panel.
+          Read-only. Conversations are saved to your history for 30 days (only you can see yours).
           Attach photos / PDFs / Excel / CSV (max 10 MB, {MAX_ATTACHMENTS_PER_MESSAGE} files).
         </p>
       </div>

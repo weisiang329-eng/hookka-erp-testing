@@ -98,6 +98,23 @@ type StatusResponse = {
   };
 };
 
+type AgentReview = {
+  windowDays: number;
+  production: {
+    decisions: { approved: number; rejected: number; rolledBack: number };
+    weekOnTime: { total: number; onTime: number; pct: number | null };
+  };
+  delivery: {
+    decisions: { approved: number; rejected: number };
+    threePl: { trips90d: number; onTimePct: number | null; freightVarianceSen: number };
+  };
+  cs: {
+    promises30d: number;
+    enginePromises30d: number;
+    hitRate: { measured: number; hits: number; pct: number | null };
+  };
+};
+
 type ConfigProposal = {
   id: string;
   generatedAt: string | null;
@@ -208,13 +225,15 @@ export default function AgentConsolePage() {
   const [killAll, setKillAll] = useState(false);
   const [agents, setAgents] = useState<AgentStatus[]>([]);
   const [llm, setLlm] = useState<LlmUsage | null>(null);
+  const [review, setReview] = useState<AgentReview | null>(null);
   const [configProposals, setConfigProposals] = useState<ConfigProposal[]>([]);
 
   const load = useCallback(async () => {
     try {
-      const [statusRes, cpRes] = await Promise.all([
+      const [statusRes, cpRes, reviewRes] = await Promise.all([
         fetch("/api/agents/status", { credentials: "include" }),
         fetch("/api/agents/config-proposals?status=PENDING", { credentials: "include" }),
+        fetch("/api/agents/review", { credentials: "include" }),
       ]);
       const sj = (await statusRes.json()) as StatusResponse;
       if (!statusRes.ok || !sj?.success || !sj.data) {
@@ -225,6 +244,12 @@ export default function AgentConsolePage() {
       setLlm(sj.data.llm ?? null);
       const cj = (await cpRes.json()) as { success?: boolean; data?: ConfigProposal[] };
       setConfigProposals(cj?.data ?? []);
+      try {
+        const rj = (await reviewRes.json()) as { success?: boolean; data?: AgentReview };
+        setReview(rj?.data ?? null);
+      } catch {
+        setReview(null);
+      }
     } catch (err) {
       toast.error(`Failed to load agent status: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -399,6 +424,74 @@ export default function AgentConsolePage() {
         <div className="rounded-md border border-[#9A3A2D] bg-[#9A3A2D]/10 px-4 py-2.5 text-sm text-[#9A3A2D] font-medium">
           Global kill switch is ON — all agents are stopped (automatic and manual runs).
         </div>
+      )}
+
+      {/* ── Agent Scorecard — review agents like staff: what they SAID vs what
+          actually HAPPENED, plus the owner's own decision tally on their
+          proposals. Auto-computed from system records; no self-grading. ── */}
+      {!loading && review && (
+        <Card>
+          <CardContent className="p-4">
+            <div className="text-xs font-semibold text-[#6B7280] mb-2">
+              Agent Scorecard — last {review.windowDays} days (said vs happened)
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2">
+                <div className="text-[11px] font-semibold text-[#4B5563] mb-1">Production</div>
+                <div className="text-sm text-[#1F1D1B]">
+                  Cards due last 7d finished on time:{" "}
+                  <span className="font-semibold">
+                    {review.production.weekOnTime.pct == null
+                      ? "no due cards"
+                      : `${review.production.weekOnTime.pct}% (${review.production.weekOnTime.onTime}/${review.production.weekOnTime.total})`}
+                  </span>
+                </div>
+                <div className="mt-1 text-[11px] text-[#6B7280]">
+                  Your verdicts: {review.production.decisions.approved} approved ·{" "}
+                  {review.production.decisions.rejected} rejected ·{" "}
+                  {review.production.decisions.rolledBack} rolled back
+                </div>
+              </div>
+              <div className="rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2">
+                <div className="text-[11px] font-semibold text-[#4B5563] mb-1">Delivery</div>
+                <div className="text-sm text-[#1F1D1B]">
+                  3PL on-time (90d):{" "}
+                  <span className="font-semibold">
+                    {review.delivery.threePl.onTimePct == null
+                      ? "no rated trips"
+                      : `${review.delivery.threePl.onTimePct}%`}
+                  </span>{" "}
+                  <span className="text-[11px] text-[#6B7280]">
+                    over {review.delivery.threePl.trips90d} trips · freight vs card{" "}
+                    {review.delivery.threePl.freightVarianceSen >= 0 ? "+" : "−"}RM{" "}
+                    {(Math.abs(review.delivery.threePl.freightVarianceSen) / 100).toFixed(0)}
+                  </span>
+                </div>
+                <div className="mt-1 text-[11px] text-[#6B7280]">
+                  Your verdicts: {review.delivery.decisions.approved} approved ·{" "}
+                  {review.delivery.decisions.rejected} rejected
+                </div>
+              </div>
+              <div className="rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2">
+                <div className="text-[11px] font-semibold text-[#4B5563] mb-1">
+                  Customer Service
+                </div>
+                <div className="text-sm text-[#1F1D1B]">
+                  Promise hit rate:{" "}
+                  <span className="font-semibold">
+                    {review.cs.hitRate.pct == null
+                      ? "collecting (no delivered promises yet)"
+                      : `${review.cs.hitRate.pct}% (${review.cs.hitRate.hits}/${review.cs.hitRate.measured})`}
+                  </span>
+                </div>
+                <div className="mt-1 text-[11px] text-[#6B7280]">
+                  {review.cs.promises30d} promises given · {review.cs.enginePromises30d}{" "}
+                  engine-grade
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {/* ── LLM spend monitor — per-agent month cost against the RM budget

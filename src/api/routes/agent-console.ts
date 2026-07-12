@@ -45,6 +45,7 @@ import {
 import { generateProposals, ensureProposalTables } from "../lib/schedule-proposals";
 import { dispatchReport } from "./reports";
 import { runDeliveryAgent } from "./delivery-agent";
+import { deliveryLearning } from "../lib/delivery-agent";
 import { DEFAULT_ORG_ID } from "../lib/tenant";
 
 const app = new Hono<Env>();
@@ -264,6 +265,167 @@ app.get("/status", async (c) => {
   const llm = await monthLlmUsage(db).catch(() => null);
 
   return c.json({ success: true, data: { killAll, generatedAt: nowIso, agents, llm } });
+});
+
+// ── GET /review — the agents' scorecard (员工式 review, 数据自动对账) ─────────
+//
+// Reviewing an agent = reviewing an employee: not re-doing their arithmetic,
+// but checking whether what they SAID came TRUE, plus the owner's own
+// decision record on their proposals. Everything here is auto-computed from
+// what the system already logs — no self-grading by the agent, no LLM.
+//
+//   PRODUCTION — did the approved schedule happen? (7-day on-time completion
+//                of due job cards) + the owner's approve/reject/rollback tally.
+//   DELIVERY   — 3PL on-time rate + freight variance the agent's plans are
+//                built on, + the owner's decision tally on its proposals.
+//   CS         — promise hit rate: every logged promise joined against the
+//                actual delivered date (measurable once deliveries land).
+
+app.get("/review", async (c) => {
+  const denied = requireSuperAdmin(c);
+  if (denied) return denied;
+  const db = c.var.DB;
+  await ensureAgentTables(db);
+  await ensureProposalTables(db);
+
+  const cutoff30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const todayYmd = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const weekAgoYmd = new Date(Date.now() + 8 * 60 * 60 * 1000 - 7 * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+
+  const firstSafe = async <T>(sql: string, ...binds: unknown[]): Promise<T | null> => {
+    try {
+      return await db.prepare(sql).bind(...binds).first<T>();
+    } catch {
+      return null;
+    }
+  };
+  const countSafe = async (sql: string, ...binds: unknown[]): Promise<number> => {
+    const r = await firstSafe<{ n: number | string }>(sql, ...binds);
+    return Number(r?.n) || 0;
+  };
+
+  // ── PRODUCTION ──
+  const [prodApproved, prodRejected, prodRolledBack] = await Promise.all([
+    countSafe(
+      "SELECT COUNT(*) AS n FROM schedule_proposals WHERE status = 'APPROVED' AND decided_at >= ?",
+      cutoff30,
+    ),
+    countSafe(
+      "SELECT COUNT(*) AS n FROM schedule_proposals WHERE status = 'REJECTED' AND decided_at >= ?",
+      cutoff30,
+    ),
+    countSafe(
+      "SELECT COUNT(*) AS n FROM schedule_proposals WHERE status = 'ROLLED_BACK' AND decided_at >= ?",
+      cutoff30,
+    ),
+  ]);
+  const adherence = await firstSafe<{
+    ontime?: number | string;
+    onTime?: number | string;
+    total: number | string;
+  }>(
+    `SELECT SUM(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                      AND substr(completedDate::text, 1, 10) <= substr(dueDate::text, 1, 10)
+                     THEN 1 ELSE 0 END) AS onTime,
+            COUNT(*) AS total
+       FROM job_cards
+      WHERE substr(dueDate::text, 1, 10) >= ?
+        AND substr(dueDate::text, 1, 10) < ?
+        AND status <> 'CANCELLED'`,
+    weekAgoYmd,
+    todayYmd,
+  );
+  const adherenceTotal = Number(adherence?.total) || 0;
+  const adherenceOnTime = Number(adherence?.onTime ?? adherence?.ontime) || 0;
+
+  // ── DELIVERY ──
+  const [delApproved, delRejected] = await Promise.all([
+    countSafe(
+      "SELECT COUNT(*) AS n FROM delivery_proposals WHERE status = 'APPROVED' AND decided_at >= ?",
+      cutoff30,
+    ),
+    countSafe(
+      "SELECT COUNT(*) AS n FROM delivery_proposals WHERE status = 'REJECTED' AND decided_at >= ?",
+      cutoff30,
+    ),
+  ]);
+  let threePlOnTimePct: number | null = null;
+  let threePlTrips = 0;
+  let freightVarianceSen = 0;
+  try {
+    const learning = await deliveryLearning(db, DEFAULT_ORG_ID, todayYmd);
+    let rated = 0;
+    let onTime = 0;
+    for (const p of learning) {
+      threePlTrips += p.trips;
+      rated += p.ratedOnTime;
+      onTime += p.onTimeTrips;
+      freightVarianceSen += p.varianceSen;
+    }
+    threePlOnTimePct = rated > 0 ? Math.round((onTime / rated) * 100) : null;
+  } catch {
+    /* best-effort */
+  }
+
+  // ── CS — promise hit rate ──
+  // Direct salesOrderId join only (multi-SO DOs excluded — conservative:
+  // a promise is only graded when its delivery is unambiguous).
+  const [csPromises, csEngine, csHit] = await Promise.all([
+    countSafe("SELECT COUNT(*) AS n FROM cs_promise_log WHERE asked_at >= ?", cutoff30),
+    countSafe(
+      "SELECT COUNT(*) AS n FROM cs_promise_log WHERE asked_at >= ? AND confidence = 'ENGINE'",
+      cutoff30,
+    ),
+    firstSafe<{ measured: number | string; hits: number | string }>(
+      `SELECT COUNT(*) AS measured, SUM(hit) AS hits FROM (
+         SELECT p.id,
+                CASE WHEN MIN(substr(d.deliveredAt::text, 1, 10)) <= p.promise_date
+                     THEN 1 ELSE 0 END AS hit
+           FROM cs_promise_log p
+           JOIN delivery_orders d
+             ON d.salesOrderId = p.so_id
+            AND d.deliveredAt IS NOT NULL AND d.deliveredAt::text <> ''
+          WHERE p.promise_date IS NOT NULL
+          GROUP BY p.id, p.promise_date
+       ) t`,
+    ),
+  ]);
+  const csMeasured = Number(csHit?.measured) || 0;
+  const csHits = Number(csHit?.hits) || 0;
+
+  return c.json({
+    success: true,
+    data: {
+      windowDays: 30,
+      production: {
+        decisions: { approved: prodApproved, rejected: prodRejected, rolledBack: prodRolledBack },
+        weekOnTime: {
+          total: adherenceTotal,
+          onTime: adherenceOnTime,
+          pct: adherenceTotal > 0 ? Math.round((adherenceOnTime / adherenceTotal) * 100) : null,
+        },
+      },
+      delivery: {
+        decisions: { approved: delApproved, rejected: delRejected },
+        threePl: {
+          trips90d: threePlTrips,
+          onTimePct: threePlOnTimePct,
+          freightVarianceSen,
+        },
+      },
+      cs: {
+        promises30d: csPromises,
+        enginePromises30d: csEngine,
+        hitRate: {
+          measured: csMeasured,
+          hits: csHits,
+          pct: csMeasured > 0 ? Math.round((csHits / csMeasured) * 100) : null,
+        },
+      },
+    },
+  });
 });
 
 // ── POST /run-now {agent} ────────────────────────────────────────────────────

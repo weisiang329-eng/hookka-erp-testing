@@ -966,6 +966,7 @@ import scheduling from "./routes/scheduling";
 import planningSchedule from "./routes/planning-schedule";
 import scheduleProposals from "./routes/schedule-proposals";
 import deliveryAgent, { internal as deliveryAgentInternal } from "./routes/delivery-agent";
+import agentHeartbeat from "./routes/agent-heartbeat";
 import scanPo from "./routes/scan-po";
 import scanSupplier from "./routes/scan-supplier";
 import scanFinance from "./routes/scan-finance";
@@ -1201,6 +1202,10 @@ app.route("/api/planning", scheduleProposals);
 // gated (PUBLIC_PREFIXES in auth-middleware), mirroring /api/internal/reports.
 app.route("/api/delivery-agent", deliveryAgent);
 app.route("/api/internal/delivery-agent", deliveryAgentInternal);
+// Agents heartbeat — the dumb 30-min beat behind the agents' SELF-scheduling
+// (lib/agent-scheduler.ts decides who runs; CRON_SECRET-gated like the other
+// /api/internal/* crons; PUBLIC_PREFIXES entry in auth-middleware).
+app.route("/api/internal/agents", agentHeartbeat);
 app.route("/api/scan-po", scanPo);
 app.route("/api/scan-supplier", scanSupplier);
 app.route("/api/scan-finance", scanFinance);

@@ -6243,6 +6243,7 @@ const getDeliveryPromiseTool: ToolDefinition = {
       qty,
       stateCode: strOrNull(args.stateCode),
       orgId,
+      channel: "assistant",
     });
     return {
       ok: true,

@@ -79,6 +79,11 @@ const PUBLIC_PREFIXES = [
   // triggers above: the handler does its own CRON_SECRET constant-time
   // check before any work. See routes/delivery-agent.ts (POST /run-trigger).
   "/api/internal/delivery-agent/",
+  // 2026-07-12 — agents self-scheduling heartbeat (every 30 min). Same
+  // model: routes/agent-heartbeat.ts does its own CRON_SECRET constant-time
+  // check before any work; each beat, lib/agent-scheduler.ts decides which
+  // agents want to run and only those execute.
+  "/api/internal/agents/",
   // 2026-06-12 — QR dispatch/deliver scan flow. Drivers scan the QR printed
   // on a DO / Packing List with a normal phone camera — no session exists.
   // The handler's gate is the unguessable 64-hex qrtoken (migration 0167):

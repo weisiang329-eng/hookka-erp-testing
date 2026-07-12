@@ -42,6 +42,8 @@ import {
 } from "../lib/agent-learning";
 import { generateProposals, ensureProposalTables } from "../lib/schedule-proposals";
 import { dispatchReport } from "./reports";
+import { runDeliveryAgent } from "./delivery-agent";
+import { DEFAULT_ORG_ID } from "../lib/tenant";
 
 const app = new Hono<Env>();
 export default app;
@@ -62,12 +64,20 @@ const PRODUCTION_TASKS: Array<{ agent: string; label: string; nextRun: string }>
   {
     agent: "production-proposals",
     label: "Schedule Proposals",
-    nextRun: "on demand (Planning → Generate / Run now)",
+    nextRun: "self-scheduled (30-min heartbeat; re-runs when new SOs pile up) · on demand",
   },
   {
     agent: "production-learning",
     label: "Learning Loop",
     nextRun: "daily with the 07:00 brief · on demand",
+  },
+];
+
+const DELIVERY_TASKS: Array<{ agent: string; label: string; nextRun: string }> = [
+  {
+    agent: "delivery-run",
+    label: "Daily Run (proposals + learning + brief)",
+    nextRun: "07:30 MYT (cron) + self-scheduled sweeps when deliveries spike · on demand",
   },
 ];
 
@@ -172,40 +182,79 @@ app.get("/status", async (c) => {
       return 0;
     }
   };
-  const [proposalsToday, pendingProposals, pendingConfig] = await Promise.all([
+  const [
+    proposalsToday,
+    pendingProposals,
+    pendingConfig,
+    deliveryPending,
+    deliveryToday,
+    csPromises30d,
+    csEngine30d,
+  ] = await Promise.all([
     countSafe(
       "SELECT COUNT(*) AS n FROM schedule_proposals WHERE substr(generated_at, 1, 10) = ?",
       today,
     ),
     countSafe("SELECT COUNT(*) AS n FROM schedule_proposals WHERE status = 'PENDING'"),
     countSafe("SELECT COUNT(*) AS n FROM config_proposals WHERE status = 'PENDING'"),
+    countSafe("SELECT COUNT(*) AS n FROM delivery_proposals WHERE status = 'PENDING'"),
+    countSafe(
+      "SELECT COUNT(*) AS n FROM delivery_proposals WHERE substr(generated_at, 1, 10) = ?",
+      today,
+    ),
+    countSafe(
+      "SELECT COUNT(*) AS n FROM cs_promise_log WHERE asked_at >= ?",
+      new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    ),
+    countSafe(
+      "SELECT COUNT(*) AS n FROM cs_promise_log WHERE asked_at >= ? AND confidence = 'ENGINE'",
+      new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    ),
   ]);
 
   const controlOf = (agent: string) => controls.find((x) => x.agent === agent);
   const killAll = controlOf("ALL")?.paused === true;
 
+  // PRODUCTION / DELIVERY run full console lifecycles; CS is live but
+  // question-driven (no cron), so it reports KPI counters instead of tasks.
   const agents = AGENT_FAMILIES.map((fam) => {
     const ctl = controlOf(fam);
-    const live = fam === "PRODUCTION";
+    const live = fam === "PRODUCTION" || fam === "DELIVERY" || fam === "CS";
+    const tasks =
+      fam === "PRODUCTION"
+        ? PRODUCTION_TASKS
+        : fam === "DELIVERY"
+          ? DELIVERY_TASKS
+          : [];
     return {
       id: fam,
       live,
       paused: ctl?.paused === true,
       autoApprove: ctl?.autoApprove === true,
-      tasks: live
-        ? PRODUCTION_TASKS.map((t) => ({
-            ...t,
-            lastRun: lastByTask.get(t.agent) ?? null,
-          }))
-        : [],
-      today: live
-        ? { runs: todayRuns, proposalsGenerated: proposalsToday, pendingProposals }
-        : null,
-      pendingConfigProposals: live ? pendingConfig : 0,
-      month: live
-        ? { runs: monthRuns, tokensIn: monthTokensIn, tokensOut: monthTokensOut }
-        : null,
-      recentErrors: live ? (errorRes.results ?? []).map(projectRun) : [],
+      tasks: tasks.map((t) => ({
+        ...t,
+        lastRun: lastByTask.get(t.agent) ?? null,
+      })),
+      today:
+        fam === "PRODUCTION"
+          ? { runs: todayRuns, proposalsGenerated: proposalsToday, pendingProposals }
+          : fam === "DELIVERY"
+            ? {
+                runs: 0,
+                proposalsGenerated: deliveryToday,
+                pendingProposals: deliveryPending,
+              }
+            : null,
+      cs:
+        fam === "CS"
+          ? { promises30d: csPromises30d, enginePromises30d: csEngine30d }
+          : null,
+      pendingConfigProposals: fam === "PRODUCTION" ? pendingConfig : 0,
+      month:
+        fam === "PRODUCTION"
+          ? { runs: monthRuns, tokensIn: monthTokensIn, tokensOut: monthTokensOut }
+          : null,
+      recentErrors: fam === "PRODUCTION" ? (errorRes.results ?? []).map(projectRun) : [],
     };
   });
 
@@ -228,8 +277,11 @@ app.post("/run-now", async (c) => {
     body = {};
   }
   const agent = (body.agent ?? "").toLowerCase();
-  if (!["brief", "proposals", "learning"].includes(agent)) {
-    return c.json({ success: false, error: "agent must be brief | proposals | learning" }, 400);
+  if (!["brief", "proposals", "learning", "delivery"].includes(agent)) {
+    return c.json(
+      { success: false, error: "agent must be brief | proposals | learning | delivery" },
+      400,
+    );
   }
   if (await isKillSwitchOn(db)) {
     return c.json({
@@ -240,7 +292,7 @@ app.post("/run-now", async (c) => {
 
   await emitAudit(c, {
     resource: "agents",
-    resourceId: `production-${agent}`,
+    resourceId: agent === "delivery" ? "delivery-run" : `production-${agent}`,
     action: "run-now",
     source: "admin",
   });
@@ -252,6 +304,21 @@ app.post("/run-now", async (c) => {
       run.addTokens(sink.tokensIn, sink.tokensOut);
       run.setSummary(`${res.date} · sent ${res.sent} · failed ${res.failed} (run-now)`);
       return res;
+    });
+    return c.json({ success: true, data: result });
+  }
+  if (agent === "delivery") {
+    const result = await recordAgentRun(db, "delivery-run", async (run) => {
+      const sink = { tokensIn: 0, tokensOut: 0 };
+      const r = await runDeliveryAgent(db, DEFAULT_ORG_ID, {
+        anthropicApiKey: c.env.ANTHROPIC_API_KEY,
+        usageSink: sink,
+      });
+      run.addTokens(sink.tokensIn, sink.tokensOut);
+      run.setSummary(
+        `${r.date} · plans ${r.proposals.loadPlans} · invoice gaps ${r.proposals.invoiceGaps} · POD ${r.proposals.podChases} · transit drifts ${r.transitDrifts} (run-now)`,
+      );
+      return r;
     });
     return c.json({ success: true, data: result });
   }
@@ -558,18 +625,24 @@ app.post("/config-proposals/decide", async (c) => {
     const proposedRaw = (row.proposedValue ?? row.proposed_value) ?? "";
 
     if (action === "approve") {
-      const field = CONFIG_PROPOSAL_KEYS[paramKey];
+      // Two whitelisted families (reject everything else, never normalize):
+      //   chain.<field>          → kv_config['planning_capacity'].chain.<field>
+      //   cs.transitDays.<STATE> → kv_config['cs-agent'].transitDaysByState.<STATE>
+      const chainField = CONFIG_PROPOSAL_KEYS[paramKey];
+      const csState = /^cs\.transitDays\.([A-Z]{2,3})$/.exec(paramKey)?.[1] ?? null;
       const value = Number(proposedRaw);
-      if (!field || !Number.isFinite(value) || value < 0 || value > 30) {
+      const maxValue = csState ? 10 : 30;
+      if ((!chainField && !csState) || !Number.isFinite(value) || value < 0 || value > maxValue) {
         errors.push(`${paramKey}: not an approvable parameter`);
         continue;
       }
+      const kvKey = csState ? "cs-agent" : "planning_capacity";
       // Merge into the existing override object — never clobber other keys.
       let override: Record<string, unknown> = {};
       try {
         const kv = await db
           .prepare("SELECT value FROM kv_config WHERE key = ?")
-          .bind("planning_capacity")
+          .bind(kvKey)
           .first<{ value: string }>();
         if (kv?.value) {
           const parsed = JSON.parse(kv.value);
@@ -578,12 +651,21 @@ app.post("/config-proposals/decide", async (c) => {
       } catch {
         override = {};
       }
-      const chain =
-        override.chain && typeof override.chain === "object"
-          ? (override.chain as Record<string, unknown>)
-          : {};
-      chain[field] = Math.floor(value);
-      override.chain = chain;
+      if (csState) {
+        const byState =
+          override.transitDaysByState && typeof override.transitDaysByState === "object"
+            ? (override.transitDaysByState as Record<string, unknown>)
+            : {};
+        byState[csState] = Math.floor(value);
+        override.transitDaysByState = byState;
+      } else if (chainField) {
+        const chain =
+          override.chain && typeof override.chain === "object"
+            ? (override.chain as Record<string, unknown>)
+            : {};
+        chain[chainField] = Math.floor(value);
+        override.chain = chain;
+      }
       await db
         .prepare(
           `INSERT INTO kv_config (key, value, updated_at)
@@ -592,7 +674,7 @@ app.post("/config-proposals/decide", async (c) => {
              value = excluded.value,
              updated_at = excluded.updated_at`,
         )
-        .bind("planning_capacity", JSON.stringify(override), nowIso)
+        .bind(kvKey, JSON.stringify(override), nowIso)
         .run();
     }
 

@@ -312,7 +312,7 @@ app.post("/run", async (c) => {
     const data = await recordAgentRun(c.var.DB, "delivery-run", async (run) => {
       const sink = { tokensIn: 0, tokensOut: 0 };
       const r = await runDeliveryAgent(c.var.DB, orgId, {
-        anthropicApiKey: await llmKeyIfBudgetAllows(c.var.DB, c.env.ANTHROPIC_API_KEY),
+        anthropicApiKey: await llmKeyIfBudgetAllows(c.var.DB, c.env.ANTHROPIC_API_KEY, "DELIVERY"),
         usageSink: sink,
       });
       run.addTokens(sink.tokensIn, sink.tokensOut);
@@ -374,7 +374,7 @@ internal.post("/run-trigger", async (c) => {
     const data = await recordAgentRun(c.var.DB, "delivery-run", async (run) => {
       const sink = { tokensIn: 0, tokensOut: 0 };
       const r = await runDeliveryAgent(c.var.DB, DEFAULT_ORG_ID, {
-        anthropicApiKey: await llmKeyIfBudgetAllows(c.var.DB, c.env.ANTHROPIC_API_KEY),
+        anthropicApiKey: await llmKeyIfBudgetAllows(c.var.DB, c.env.ANTHROPIC_API_KEY, "DELIVERY"),
         usageSink: sink,
       });
       run.addTokens(sink.tokensIn, sink.tokensOut);

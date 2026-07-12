@@ -634,10 +634,15 @@ export async function collectDeliveryBrief(
         console.error("[delivery-agent] invoiceGaps failed:", err);
         return [] as DoGapRow[];
       }),
-      loadPodMissing(db, orgId, todayYmd).catch((err) => {
-        console.error("[delivery-agent] podChases failed:", err);
-        return [] as DoGapRow[];
-      }),
+      // POD chasing is opt-in (see podChaseEnabled) — Delivered click = proof.
+      podChaseEnabled(db).then((on) =>
+        on
+          ? loadPodMissing(db, orgId, todayYmd).catch((err) => {
+              console.error("[delivery-agent] podChases failed:", err);
+              return [] as DoGapRow[];
+            })
+          : ([] as DoGapRow[]),
+      ),
       collectOpenServiceCases(db),
       collectPendingProposalCounts(db),
       deliveryLearning(db, orgId, todayYmd).catch((err) => {
@@ -777,6 +782,27 @@ async function insertProposals(
  * delivery_proposals; approving a LOAD_PLAN does NOT create DOs in v1 —
  * the office executes the plan through the existing PL-first flow.
  */
+/**
+ * POD chasing is OPT-IN (kv_config['delivery-agent'].podChase === true).
+ * Owner ruling 2026-07-12: the office clicks Delivered only when the goods
+ * actually arrived — the click itself is the proof, and the factory has no
+ * signature-capture flow, so chasing PODs just manufactures busywork
+ * (253-row backlog on day one). Flip the kv flag if a POD process starts.
+ */
+async function podChaseEnabled(db: DbLike): Promise<boolean> {
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = ?")
+      .bind("delivery-agent")
+      .first<{ value: string }>();
+    if (!row?.value) return false;
+    const parsed = JSON.parse(row.value) as { podChase?: unknown };
+    return parsed?.podChase === true;
+  } catch {
+    return false;
+  }
+}
+
 export async function generateDeliveryProposals(
   db: DbLike,
   orgId: string,
@@ -785,11 +811,12 @@ export async function generateDeliveryProposals(
   await ensureDeliveryAgentTables(db);
   const nowIso = new Date().toISOString();
 
+  const chasePods = await podChaseEnabled(db);
   const [pool, rateCard, invoiceGaps, podChases, doValueMap] = await Promise.all([
     loadReadyPool(db, orgId),
     loadStateRateCard(db, orgId),
     loadDeliveredNotInvoiced(db, orgId, todayYmd),
-    loadPodMissing(db, orgId, todayYmd),
+    chasePods ? loadPodMissing(db, orgId, todayYmd) : Promise.resolve([] as DoGapRow[]),
     loadDoValueMap(db as never, orgId).catch(() => new Map<string, number>()),
   ]);
 

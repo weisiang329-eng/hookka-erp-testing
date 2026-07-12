@@ -74,10 +74,17 @@ type LlmUsage = {
   tokensOut: number;
   estCostUsd: number;
   estCostMyr: number;
-  capTokens: number;
-  spentPctOfCap: number;
-  allowed: boolean;
-  byAgent: Array<{ agent: string; runs: number; tokensIn: number; tokensOut: number }>;
+  budgetMyrPerAgent: number;
+  byFamily: Array<{
+    family: string;
+    runs: number;
+    tokensIn: number;
+    tokensOut: number;
+    estCostMyr: number;
+    budgetMyr: number;
+    pctOfBudget: number;
+    allowed: boolean;
+  }>;
 };
 
 type StatusResponse = {
@@ -394,9 +401,10 @@ export default function AgentConsolePage() {
         </div>
       )}
 
-      {/* ── LLM spend monitor — month tokens per agent, estimated cost, and
-          the budget brake (AI paragraphs pause at the cap; engines keep
-          running). Cap: kv_config['agent_schedule'].llmMonthlyTokenCap. ── */}
+      {/* ── LLM spend monitor — per-agent month cost against the RM budget
+          (owner: RM 150 / agent / month; kv agent_schedule.llmMonthlyBudgetMyr).
+          At an agent's limit only ITS AI paragraphs stop; engines keep
+          running and every other agent keeps talking. ── */}
       {!loading && llm && (
         <Card>
           <CardContent className="p-4">
@@ -413,35 +421,30 @@ export default function AgentConsolePage() {
                   </span>
                 </div>
               </div>
-              <div className="min-w-[220px]">
-                <div className="flex justify-between text-[11px] text-[#6B7280] mb-1">
-                  <span>Budget used</span>
-                  <span>
-                    {llm.spentPctOfCap}% of {(llm.capTokens / 1_000_000).toLocaleString()}M tokens
-                  </span>
-                </div>
-                <div className="h-2 rounded-full bg-[#F0ECE9] overflow-hidden">
-                  <div
-                    className={`h-full rounded-full ${llm.spentPctOfCap >= 80 ? "bg-[#9A3A2D]" : "bg-[#4F7C3A]"}`}
-                    style={{ width: `${Math.min(100, llm.spentPctOfCap)}%` }}
-                  />
-                </div>
-                {!llm.allowed && (
-                  <div className="mt-1 text-[11px] font-medium text-[#9A3A2D]">
-                    Cap reached — AI paragraphs paused; all engines keep running.
-                  </div>
-                )}
+              <div className="text-xs text-[#6B7280]">
+                Limit: RM {llm.budgetMyrPerAgent.toLocaleString()} per agent / month
               </div>
             </div>
-            {llm.byAgent.length > 0 && (
-              <div className="mt-3 flex flex-wrap gap-2">
-                {llm.byAgent.map((b) => (
-                  <span
-                    key={b.agent}
-                    className="text-[11px] rounded-full bg-[#FAF9F7] border border-[#E2DDD8] px-2 py-0.5 text-[#4B5563]"
-                  >
-                    {b.agent}: {b.runs} runs · {(b.tokensIn + b.tokensOut).toLocaleString()} tok
-                  </span>
+            {llm.byFamily.length > 0 && (
+              <div className="mt-3 space-y-1.5">
+                {llm.byFamily.map((b) => (
+                  <div key={b.family} className="flex items-center gap-3">
+                    <span className="w-28 shrink-0 text-[11px] font-medium text-[#4B5563]">
+                      {AGENT_LABEL[b.family]?.replace(" Agent", "") ?? b.family}
+                    </span>
+                    <div className="flex-1 h-2 rounded-full bg-[#F0ECE9] overflow-hidden">
+                      <div
+                        className={`h-full rounded-full ${b.pctOfBudget >= 80 ? "bg-[#9A3A2D]" : "bg-[#4F7C3A]"}`}
+                        style={{ width: `${Math.min(100, b.pctOfBudget)}%` }}
+                      />
+                    </div>
+                    <span className="w-40 shrink-0 text-right text-[11px] text-[#6B7280]">
+                      RM {b.estCostMyr.toFixed(2)} · {b.runs} runs
+                      {!b.allowed && (
+                        <span className="ml-1 font-semibold text-[#9A3A2D]">LIMIT HIT</span>
+                      )}
+                    </span>
+                  </div>
                 ))}
               </div>
             )}

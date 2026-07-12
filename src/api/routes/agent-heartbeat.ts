@@ -58,7 +58,7 @@ app.post("/heartbeat", async (c) => {
             // Token control: fresh AI focus only on the day's first run, and
             // only while the monthly LLM budget cap has headroom.
             anthropicApiKey: d.firstOfDay
-              ? await llmKeyIfBudgetAllows(db, c.env.ANTHROPIC_API_KEY)
+              ? await llmKeyIfBudgetAllows(db, c.env.ANTHROPIC_API_KEY, "DELIVERY")
               : undefined,
             usageSink: sink,
           });

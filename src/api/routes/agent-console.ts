@@ -316,7 +316,7 @@ app.post("/run-now", async (c) => {
     const result = await recordAgentRun(db, "delivery-run", async (run) => {
       const sink = { tokensIn: 0, tokensOut: 0 };
       const r = await runDeliveryAgent(db, DEFAULT_ORG_ID, {
-        anthropicApiKey: await llmKeyIfBudgetAllows(db, c.env.ANTHROPIC_API_KEY),
+        anthropicApiKey: await llmKeyIfBudgetAllows(db, c.env.ANTHROPIC_API_KEY, "DELIVERY"),
         usageSink: sink,
       });
       run.addTokens(sink.tokensIn, sink.tokensOut);

@@ -27,7 +27,22 @@ Owner ask (4 parts, feature → staging):
 Shared backend: extract `createDeliveryReturnRecord()` helper (reused by DR POST +
 driver advance). **Mockup FIRST (UI rule) → owner OK → build.**
 
-**OWNER SIMPLIFIED (2026-07-13) → BUILT + ON STAGING (feat/delivery-return):**
+**CORRECTED (2026-07-13, 2nd pass) — PER-LINE returns:** Owner clarified: NOT whole-DO —
+partial (e.g. 10 items, only 2 returned). Driver "Delivered with Issue" → tick WHICH lines
+are returning → those open a DR, the rest deliver + INVOICE as normal (no invoice hold).
+- `public-do-qr /advance`: replaced whole-DO `returnGoods` with per-DO `returnItems` map
+  (doId→productionOrderId[]). DR for the ticked subset created BEFORE the delivered cascade
+  so computeDoInvoiceLines excludes them; kept lines bill + send the normal notice.
+- DO summary payload now carries `items[]` (productionOrderId/code/name/qty) so the phone
+  renders the return checklist with no extra fetch.
+- `loadDoItemsForReturn(db, doId, onlyProductionOrderIds?)` gained the subset filter.
+- `do-scan.tsx`: 2nd button "Delivered with Issue" (amber) opens a return-picker panel →
+  tick returned lines → "Deliver — return N items"; success stays green "Delivered". Reverted
+  the whole-DO "Returned"/incomplete copy.
+- Desktop "Convert to Delivery Return" (DELIVERED/INVOICED, item picker) already covers the
+  office route-2 (assume delivered → then DR). build:strict clean; 116 do-qr/delivery tests pass.
+
+--- superseded first pass below (whole-DO, WRONG) ---
 Driver side = NO item picker. Clean either/or after dispatch: customer received →
 Mark Delivered (normal, invoices); customer did NOT receive → **"Not received —
 return goods"** → whole-DO Delivery Return, NO invoice. Built:

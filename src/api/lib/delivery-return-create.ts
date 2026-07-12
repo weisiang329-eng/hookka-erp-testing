@@ -90,11 +90,13 @@ export async function nextReturnNo(db: D1Database): Promise<string> {
   return `${prefix}${String(n).padStart(3, "0")}`;
 }
 
-// Load every line on a DO as a DR item — used when the WHOLE delivery comes
-// back (driver "Not received"). No item picking; every good on the DO returns.
+// Load a DO's lines as DR items. Pass `onlyProductionOrderIds` to keep just the
+// ticked subset (driver "Delivered with Issue" → only the returned lines);
+// omit it to take every line on the DO.
 export async function loadDoItemsForReturn(
   db: D1Database,
   doId: string,
+  onlyProductionOrderIds?: Set<string>,
 ): Promise<DRCreateItem[]> {
   const res = await db
     .prepare(
@@ -111,13 +113,20 @@ export async function loadDoItemsForReturn(
       productName: string | null;
       quantity: number | null;
     }>();
-  return (res.results ?? []).map((r) => ({
-    productionOrderId: r.productionOrderId ?? "",
-    poNo: r.poNo ?? "",
-    productCode: r.productCode ?? "",
-    productName: r.productName ?? "",
-    quantity: Number(r.quantity ?? 1),
-  }));
+  return (res.results ?? [])
+    .filter(
+      (r) =>
+        !onlyProductionOrderIds ||
+        (!!r.productionOrderId &&
+          onlyProductionOrderIds.has(r.productionOrderId)),
+    )
+    .map((r) => ({
+      productionOrderId: r.productionOrderId ?? "",
+      poNo: r.poNo ?? "",
+      productCode: r.productCode ?? "",
+      productName: r.productName ?? "",
+      quantity: Number(r.quantity ?? 1),
+    }));
 }
 
 // Create a Delivery Return document from a DO + a set of returned lines.

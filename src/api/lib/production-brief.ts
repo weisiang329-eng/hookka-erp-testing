@@ -38,6 +38,7 @@ import {
 import { loadCapacityConfig, type CapacityConfig } from "./planning-capacity";
 import { runLearning, type LearningData } from "./agent-learning";
 import { askAgentBrain } from "./agent-brain";
+import { activeInstructions } from "./agent-feedback";
 
 // D1-compat DB shape (matches the SupabaseAdapter used across routes).
 interface DbLike {
@@ -277,11 +278,15 @@ async function generateAiFocus(
   apiKey: string | undefined,
   data: Omit<BriefData, "aiFocus">,
   usageSink?: { tokensIn: number; tokensOut: number },
+  ownerInstructions: string[] = [],
 ): Promise<string | null> {
   if (!apiKey) return null;
   try {
     const compact = {
       date: data.date,
+      // Standing teachings the owner gave this agent in chat (agent_feedback
+      // notebook) — the brain must respect these every single day.
+      ownerInstructions,
       todayPlan: {
         jobCards: data.schedule.totals.jobCards,
         departments: data.schedule.byDepartment.map((d) => ({
@@ -354,6 +359,7 @@ async function generateAiFocus(
         "你是 Hookka 家具厂的生产 Agent。根据 JSON 数据用中文写一段《今日焦点》给老板：" +
         "4-6 句话，先讲今天最要紧的事（逾期最严重的单、CNC 排布建议——同布料的排在一起换布最少、" +
         "哪个部门今天最重),再点出昨天的异常（效率低的人、切割速度和配置偏差)。" +
+        "JSON 里 ownerInstructions 是老板亲口教过你的长期规矩——每一条都必须遵守和体现。" +
         "口吻直接、工厂白话、不用技术词。只输出这段话本身，不要标题、不要列表符号。",
       payload: compact,
       maxTokens: 700,
@@ -418,7 +424,10 @@ export async function collectBriefData(
     proposals: { pending: pendingProposals },
     learning,
   };
-  const aiFocus = await generateAiFocus(anthropicApiKey, base, opts.usageSink);
+  const ownerNotes = anthropicApiKey
+    ? await activeInstructions(db as never, "PRODUCTION")
+    : [];
+  const aiFocus = await generateAiFocus(anthropicApiKey, base, opts.usageSink, ownerNotes);
   return { ...base, aiFocus };
 }
 

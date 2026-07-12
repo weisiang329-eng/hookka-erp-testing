@@ -45,6 +45,11 @@ import {
 import { generateProposals } from "./schedule-proposals";
 import { runLearning } from "./agent-learning";
 import { runDeliveryAgent } from "../routes/delivery-agent";
+import {
+  addAgentFeedback,
+  listAgentFeedback,
+  retireAgentFeedback,
+} from "./agent-feedback";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -6467,6 +6472,80 @@ const agentControlTool: ToolDefinition = {
   },
 };
 
+const teachAgentTool: ToolDefinition = {
+  schema: {
+    name: "teach_agent",
+    description:
+      "SUPER_ADMIN ONLY (list is open to admins) — the agents' NOTEBOOK. When the boss corrects an agent or gives it a standing rule in chat ('送货 agent 以后周五不要排东马的车', '生产 agent 焦点里永远先讲逾期'), record it with action=add: the instruction PERSISTS and is injected into that agent's brain on every future run, exactly like telling a staff member once. action=list shows what an agent has been taught; action=retire removes one teaching by id. NOTE: corrections to NUMBERS (capacity, handoff days, transit days) should go through the agent's parameter proposals or the console instead — this notebook teaches judgment and house rules, not arithmetic.",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["add", "list", "retire"] },
+        agent: {
+          type: "string",
+          enum: ["PRODUCTION", "DELIVERY", "CS", "PROCUREMENT"],
+          description:
+            "Which agent the teaching is for (required for add; optional filter for list).",
+        },
+        instruction: {
+          type: "string",
+          description:
+            "For add: the standing rule, written clearly in the boss's own intent (either language). Keep one rule per call.",
+        },
+        id: { type: "string", description: "For retire: the teaching id from list." },
+      },
+      required: ["action"],
+    },
+  },
+  execute: async (c, args) => {
+    const db = c.var.DB;
+    const action = String(args.action ?? "");
+    if (action === "list") {
+      const agent = strOrNull(args.agent)?.toUpperCase();
+      const rows = await listAgentFeedback(db, agent || undefined, "ACTIVE");
+      return { ok: true, teachings: rows };
+    }
+    if (!isSuperAdmin(c)) {
+      return { ok: false, error: "Only the SUPER_ADMIN can teach or retire agent rules." };
+    }
+    if (action === "add") {
+      const agent = String(args.agent ?? "").toUpperCase();
+      const instruction = strOrNull(args.instruction);
+      if (!["PRODUCTION", "DELIVERY", "CS", "PROCUREMENT"].includes(agent) || !instruction) {
+        return { ok: false, error: "add needs agent + instruction." };
+      }
+      const userId =
+        (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+      const id = await addAgentFeedback(db, { agent, instruction, createdBy: userId });
+      await emitAudit(c, {
+        resource: "agents",
+        resourceId: id,
+        action: "teach",
+        after: { agent, instruction },
+        source: "admin",
+      });
+      return {
+        ok: true,
+        id,
+        note: `Recorded. ${agent} will follow this from its next run onward. Confirm back to the boss in one sentence.`,
+      };
+    }
+    if (action === "retire") {
+      const id = strOrNull(args.id);
+      if (!id) return { ok: false, error: "retire needs the teaching id (use action=list)." };
+      await retireAgentFeedback(db, id);
+      await emitAudit(c, {
+        resource: "agents",
+        resourceId: id,
+        action: "teach-retire",
+        source: "admin",
+      });
+      return { ok: true, retired: id };
+    }
+    return { ok: false, error: "action must be add | list | retire" };
+  },
+};
+
 // Autonomy note: batch auto-apply is intentionally NOT a direct chat verb —
 // it is governed by the per-agent gate (auto_on/auto_off above), so "apply
 // them now" = turn the gate on and the next run/heartbeat drains the queue.
@@ -6560,6 +6639,7 @@ export const TOOLS: ToolDefinition[] = [
   // control verbs SUPER_ADMIN-gated inside the tool)
   agentOverviewTool,
   agentControlTool,
+  teachAgentTool,
 ];
 
 const TOOL_BY_NAME = new Map<string, ToolDefinition>(

@@ -37,6 +37,7 @@ import {
   transitDriftLearning,
   autoApproveDeliveryProposals,
 } from "../lib/delivery-agent";
+import { activeInstructions } from "../lib/agent-feedback";
 import {
   isAgentPaused,
   isAutoApproveOn,
@@ -287,10 +288,14 @@ export async function runDeliveryAgent(
     });
   }
   const brief = await collectDeliveryBrief(db, orgId, today);
+  const ownerNotes = opts.anthropicApiKey
+    ? await activeInstructions(db, "DELIVERY")
+    : [];
   brief.aiFocus = await generateDeliveryFocus(
     opts.anthropicApiKey,
     brief,
     opts.usageSink,
+    ownerNotes,
   );
   await storeDeliveryBriefSnapshot(db, brief);
   return {

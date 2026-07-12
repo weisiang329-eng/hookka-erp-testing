@@ -1000,9 +1000,12 @@ export async function generateDeliveryFocus(
   apiKey: string | undefined,
   brief: DeliveryBriefData,
   usageSink?: { tokensIn: number; tokensOut: number },
+  ownerInstructions: string[] = [],
 ): Promise<string | null> {
   const compact = {
     date: brief.date,
+    // Standing teachings from the owner (agent_feedback notebook).
+    ownerInstructions,
     readyPool: { count: brief.pool.count, topBuckets: brief.pool.byStateHub.slice(0, 5) },
     overdueToShip: {
       count: brief.overdueToShip.count,
@@ -1030,7 +1033,9 @@ export async function generateDeliveryFocus(
       "what matters most in deliveries today: the most overdue-to-ship orders, " +
       "which state/hub bucket is worth a truck, invoice gaps or POD chases " +
       "needing closure, and any 3PL whose on-time rate or freight variance " +
-      "looks off. Be direct and specific — name orders and providers.",
+      "looks off. ownerInstructions in the JSON are standing rules the boss " +
+      "personally taught you — obey every one of them. " +
+      "Be direct and specific — name orders and providers.",
     payload: compact,
     maxTokens: 500,
     usageSink,

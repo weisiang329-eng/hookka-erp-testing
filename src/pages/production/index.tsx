@@ -606,6 +606,33 @@ export default function ProductionPage({
   const [datesSeeded, setDatesSeeded] = useState<boolean>(true);
   const { data: workersResp } = useCachedJson<{ success?: boolean; data?: WorkerRec[] }>("/api/workers");
   const { data: warehouseResp } = useCachedJson<{ success?: boolean; data?: Array<{ rack: string; status: string; productCode?: string; customerName?: string }> }>("/api/warehouse");
+  // OEM Tag/Label marking — per customer × category (customers.oem_marking).
+  // Shown on the Fab Cut / Fab Sew sticker Notes so the line knows to attach
+  // the customer's tag or label. Matched by customer NAME + product category,
+  // so SO and Consignment stickers behave identically.
+  const { data: customersResp } = useCachedJson<{ data?: Array<{ name?: string; oemMarking?: { bedframe?: string; sofa?: string; accessory?: string } }> }>("/api/customers");
+  const custOemMap = useMemo(() => {
+    const m = new Map<string, { bedframe: string; sofa: string; accessory: string }>();
+    for (const cst of customersResp?.data ?? []) {
+      if (cst.name)
+        m.set(cst.name, {
+          bedframe: cst.oemMarking?.bedframe ?? "NONE",
+          sofa: cst.oemMarking?.sofa ?? "NONE",
+          accessory: cst.oemMarking?.accessory ?? "NONE",
+        });
+    }
+    return m;
+  }, [customersResp]);
+  const custOemRef = useRef(custOemMap);
+  custOemRef.current = custOemMap;
+  const oemMarkFor = (row: { customerName?: string; itemCategory?: string }): string => {
+    const cat = (row.itemCategory || "").toUpperCase();
+    const key = cat === "BEDFRAME" ? "bedframe" : cat === "SOFA" ? "sofa" : cat === "ACCESSORY" ? "accessory" : "";
+    if (!key) return "";
+    const mk = custOemRef.current.get(row.customerName || "");
+    const v = mk?.[key as "bedframe" | "sofa" | "accessory"];
+    return v === "TAG" || v === "LABEL" ? v : "";
+  };
   const [orders, setOrders] = useState<ProductionOrder[]>([]);
 
   // Phase 2 — baseRows Web Worker state. Declared here (with the other
@@ -4809,7 +4836,7 @@ export default function ProductionPage({
             fontSize: "11px",
             lineHeight: 1.2,
           }}
-        >: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span>
+        >: {oemMarkFor(s) ? <span className="font-bold text-[#6B5C32]">{oemMarkFor(s)} </span> : null}{s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : (oemMarkFor(s) ? null : "—")}</span>
       </div>
       <div className="pt-1 border-t border-dashed border-[#6B5C32]">
         <div className="flex items-end gap-2 pt-1">
@@ -8941,7 +8968,7 @@ export default function ProductionPage({
                               fontSize: "11px",
                               lineHeight: 1.2,
                             }}
-                          >: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span>
+                          >: {oemMarkFor(s) ? <span className="font-bold text-[#6B5C32]">{oemMarkFor(s)} </span> : null}{s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : (oemMarkFor(s) ? null : "—")}</span>
                         </div>
                       </div>
                       {/* Wei Siang 2026-05-15 (revised again): leg moves
@@ -9150,7 +9177,7 @@ export default function ProductionPage({
                   <div className="flex items-start gap-[1mm] flex-1 min-h-0 overflow-hidden" style={{ fontSize: "11pt", lineHeight: 1.2 }}>
                     <span className="font-semibold shrink-0" style={{ width: "35mm", color: "#9A3A2D" }}>Notes</span>
                     <span className="flex-1 min-w-0 whitespace-normal break-words">
-                      : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
+                      : {oemMarkFor(s) ? <span className="font-bold" style={{ color: "#6B5C32" }}>{oemMarkFor(s)} </span> : null}{s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : (oemMarkFor(s) ? null : "—")}
                     </span>
                   </div>
                   {/* Bottom block — dashed top border + QR (left) + Fab Cut/Sew
@@ -9471,7 +9498,7 @@ export default function ProductionPage({
                               lineHeight: 1.2,
                             }}
                           >
-                            : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
+                            : {oemMarkFor(s) ? <span className="font-bold" style={{ color: "#6B5C32" }}>{oemMarkFor(s)} </span> : null}{s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : (oemMarkFor(s) ? null : "—")}
                           </span>
                         </div>
                       )}

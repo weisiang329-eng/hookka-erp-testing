@@ -531,6 +531,14 @@ export default function DeliveryDetailPage() {
                 {flow.icon} {updating ? "Updating..." : flow.label}
               </Button>
             )}
+            {/* A dispatched DO (LOADED) can be marked delivered directly, without
+                the intermediate "In Transit" step — parity with the driver scan,
+                which delivers straight from Dispatched. */}
+            {order.status === "LOADED" && (
+              <Button variant="outline" size="sm" onClick={() => advanceStatus("DELIVERED")} disabled={updating}>
+                <CheckCircle2 className="h-4 w-4" /> Mark Delivered
+              </Button>
+            )}
             {order.status === "DELIVERED" && order.deliveryIncomplete && (
               <Button
                 variant="primary"

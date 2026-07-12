@@ -162,11 +162,11 @@ function DoCard({ d }: { d: PublicDoSummary }) {
         </p>
       </div>
       {d.incomplete && (
-        <div className="flex items-start gap-1.5 rounded-lg bg-[#FBF1DF] px-2.5 py-2 text-xs text-[#9C6F1E]">
+        <div className="flex items-start gap-1.5 rounded-lg bg-[#F9E9E4] px-2.5 py-2 text-xs text-[#9A3A2D]">
           <PackageX className="h-4 w-4 shrink-0 mt-px" />
           <span>
-            Delivered with issues — paperwork incomplete, the office will
-            invoice once resolved.
+            Not received — a delivery return was opened. The office will process
+            the returned goods; no invoice was raised.
           </span>
         </div>
       )}
@@ -457,7 +457,10 @@ export default function DoScanPage() {
     }
     const apiAction: "DISPATCH" | "DELIVER" =
       mode === "DISPATCH" ? "DISPATCH" : "DELIVER";
-    const incomplete = mode === "DELIVER_ISSUE";
+    // The 2nd scan is either/or: received (DELIVER_OK) or NOT received
+    // (DELIVER_ISSUE → returnGoods → the whole DO comes back as a Delivery
+    // Return, no invoice).
+    const returnGoods = mode === "DELIVER_ISSUE";
     setBusy(true);
     setAdvanceError(null);
     try {
@@ -471,7 +474,7 @@ export default function DoScanPage() {
           headers: csrfHeaders(),
           body: JSON.stringify({
             action: apiAction,
-            incomplete,
+            returnGoods,
             // Edited item set per DO (production-order ids) — only sent for a
             // dispatch from the Adjust-load panel; the server rebuilds the
             // trusted items from these ids.
@@ -558,15 +561,29 @@ export default function DoScanPage() {
 
             {/* Success state */}
             {justCompleted && (
-              <div className="rounded-xl bg-[#4F7C3A] text-white p-6 text-center shadow-sm">
-                <CheckCircle2 className="h-14 w-14 mx-auto" strokeWidth={2.5} />
+              <div
+                className={`rounded-xl text-white p-6 text-center shadow-sm ${
+                  justCompleted === "DELIVER_ISSUE" ? "bg-[#9A3A2D]" : "bg-[#4F7C3A]"
+                }`}
+              >
+                {justCompleted === "DELIVER_ISSUE" ? (
+                  <PackageX className="h-14 w-14 mx-auto" strokeWidth={2.5} />
+                ) : (
+                  <CheckCircle2 className="h-14 w-14 mx-auto" strokeWidth={2.5} />
+                )}
                 <p className="text-2xl font-bold mt-2">
-                  {justCompleted === "DISPATCH" ? "Dispatched" : "Delivered"}
+                  {justCompleted === "DISPATCH"
+                    ? "Dispatched"
+                    : justCompleted === "DELIVER_ISSUE"
+                      ? "Returned"
+                      : "Delivered"}
                 </p>
                 <p className="text-sm opacity-90 mt-1">
                   {justCompleted === "DISPATCH"
                     ? "The goods are marked as on the way."
-                    : "Delivery confirmed. Thank you!"}
+                    : justCompleted === "DELIVER_ISSUE"
+                      ? "The goods are coming back. The office will process the return."
+                      : "Delivery confirmed. Thank you!"}
                 </p>
               </div>
             )}
@@ -582,11 +599,11 @@ export default function DoScanPage() {
                   <CheckCircle2 className="h-12 w-12 mx-auto text-[#4F7C3A]" strokeWidth={2.5} />
                 )}
                 <p className="text-xl font-bold text-[#1F1D1B] mt-2">
-                  {anyIncomplete ? "Delivered — paperwork pending" : "Already delivered"}
+                  {anyIncomplete ? "Returned — office processing" : "Already delivered"}
                 </p>
                 <p className="text-sm text-gray-500 mt-1">
                   {anyIncomplete
-                    ? "Delivery is recorded. The office still needs to resolve the paperwork before this can be invoiced."
+                    ? "The goods are coming back. The office will process the delivery return; no invoice was raised."
                     : "Nothing left to do here — every delivery order on this document is delivered."}
                 </p>
               </div>
@@ -655,16 +672,16 @@ export default function DoScanPage() {
                       icon={<CheckCircle2 className="h-5 w-5" />}
                       label="Mark Delivered"
                     />
-                    {/* Delivered but something's wrong — holds the invoice for the
-                        office to resolve (creates / links a Delivery Return). */}
+                    {/* Customer did NOT receive — the goods come back. Opens a
+                        Delivery Return for the whole DO; no invoice is raised. */}
                     <ActionButton
                       mode="DELIVER_ISSUE"
                       armed={armed}
                       busy={busy}
                       onTap={(m) => void handleAdvance(m)}
-                      tone="bg-white border border-[#D89B3A] text-[#8A5A12] active:bg-[#FBF3E4]"
-                      icon={<AlertTriangle className="h-5 w-5" />}
-                      label="Delivered with issues"
+                      tone="bg-white border border-[#C08457] text-[#9A3A2D] active:bg-[#FBF3E4]"
+                      icon={<PackageX className="h-5 w-5" />}
+                      label="Not received — return goods"
                     />
                   </>
                 )}

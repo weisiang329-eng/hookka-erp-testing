@@ -88,6 +88,7 @@ const navigationGroups: NavGroup[] = [
     items: [
       { name: "Sales Orders", href: "/sales", icon: ShoppingCart },
       { name: "Delivery Order", href: "/delivery", icon: Truck },
+      { name: "Delivery Return", href: "/delivery-returns", icon: Truck },
       { name: "Invoices", href: "/invoices", icon: Receipt },
       { name: "Consignment", href: "/consignment", icon: Package, children: [
         { name: "Consignment Order", href: "/consignment", icon: Package },

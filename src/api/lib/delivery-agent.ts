@@ -964,6 +964,36 @@ export async function loadLatestDeliveryAiFocus(
   }
 }
 
+// ── Autonomy: agent-decided approval (auto-approve gate ON) ──────────────────
+//
+// Delivery approval only records the decision — it never creates or
+// dispatches documents (v1 red line stands even in full-auto). So with the
+// DELIVERY gate ON, the agent marks its own proposals APPROVED
+// (decided_by='AGENT_AUTO') and the office executes from the approved list.
+
+export async function autoApproveDeliveryProposals(
+  db: DbLike,
+  decidedBy: string,
+): Promise<number> {
+  await ensureDeliveryAgentTables(db);
+  const nowIso = new Date().toISOString();
+  const before = await db
+    .prepare("SELECT COUNT(*) AS n FROM delivery_proposals WHERE status = 'PENDING'")
+    .bind()
+    .first<{ n: number | string }>();
+  const pending = Number(before?.n) || 0;
+  if (pending === 0) return 0;
+  await db
+    .prepare(
+      `UPDATE delivery_proposals
+          SET status = 'APPROVED', decided_at = ?, decided_by = ?
+        WHERE status = 'PENDING'`,
+    )
+    .bind(nowIso, decidedBy)
+    .run();
+  return pending;
+}
+
 // ── AI focus (agent brain — judgment over the engine's numbers) ─────────────
 
 export async function generateDeliveryFocus(

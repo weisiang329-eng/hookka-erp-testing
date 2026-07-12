@@ -35,9 +35,11 @@ import {
   generateDeliveryFocus,
   loadLatestDeliveryAiFocus,
   transitDriftLearning,
+  autoApproveDeliveryProposals,
 } from "../lib/delivery-agent";
 import {
   isAgentPaused,
+  isAutoApproveOn,
   isKillSwitchOn,
   recordAgentRun,
   llmKeyIfBudgetAllows,
@@ -274,6 +276,16 @@ export async function runDeliveryAgent(
     console.warn("[delivery-agent] transit learning failed:", err);
     return [];
   });
+  // Autonomy: with the DELIVERY auto-approve gate ON, the agent decides its
+  // own proposals (recording-only — the office executes from the approved
+  // list; nothing is created or dispatched). Gate OFF → owner approves.
+  let autoApproved = 0;
+  if (await isAutoApproveOn(db, "DELIVERY")) {
+    autoApproved = await autoApproveDeliveryProposals(db, "AGENT_AUTO").catch((err) => {
+      console.warn("[delivery-agent] auto-approve failed:", err);
+      return 0;
+    });
+  }
   const brief = await collectDeliveryBrief(db, orgId, today);
   brief.aiFocus = await generateDeliveryFocus(
     opts.anthropicApiKey,
@@ -284,6 +296,7 @@ export async function runDeliveryAgent(
   return {
     date: today,
     proposals: counts,
+    autoApproved,
     transitDrifts: transit.filter((t) => t.flagged).length,
     aiFocus: brief.aiFocus != null,
     brief: {

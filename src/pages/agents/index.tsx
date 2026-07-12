@@ -352,11 +352,11 @@ export default function AgentConsolePage() {
   const toggleGate = async (a: AgentStatus) => {
     const next = !a.autoApprove;
     const ok = await confirm({
-      title: next ? "Open the approval gate (full-auto)" : "Close the approval gate",
+      title: next ? "Switch to full-auto" : "Back to propose-then-approve",
       message: next
-        ? "Marks this agent as approved for full-auto mode. NOTE: proposals still require your manual approval today — this flag is the switch the auto-apply step will honour once you ask for it to be wired."
-        : "The agent returns to propose-then-approve mode.",
-      confirmLabel: next ? "Set full-auto flag" : "Back to proposals",
+        ? "The agent will APPLY its own proposals on its scheduled runs (Production: writes due dates on WAITING cards, batch by batch, every batch rollbackable; Delivery: marks its plans approved — it still never creates or sends documents). You keep Pause, Kill all and Rollback."
+        : "The agent goes back to waiting for your approval before anything is applied.",
+      confirmLabel: next ? "Go full-auto" : "Require my approval",
       danger: next,
     });
     if (!ok) return;

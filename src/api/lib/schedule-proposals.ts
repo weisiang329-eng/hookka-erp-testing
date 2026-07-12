@@ -13,9 +13,16 @@
 //      schedule_proposals row per active WAITING job card whose dueDate is
 //      NULL, in the past, or differs from the engine's date. A prior PENDING
 //      proposal for the same jc_id is marked SUPERSEDED first.
+//   3. applyPendingProposals — the AUTONOMY path (owner ruling 2026-07-12:
+//      reversible actions are the agent's own decision). When the console's
+//      auto-approve gate for PRODUCTION is ON, agent-initiated runs call this
+//      to write dueDates themselves (decided_by='AGENT_AUTO'), batch-capped
+//      so one run stays inside the Workers subrequest limit. Same red lines
+//      as the manual approve route: WAITING cards only + ONE rollbackable
+//      plan_snapshots row per batch.
 //
-// NOTHING here writes to job_cards — the owner approves proposals in the
-// Planning > Schedule Proposals tab, and only the approve route applies them.
+// Otherwise NOTHING here writes to job_cards — with the gate OFF, only the
+// owner's approve route applies proposals.
 // All columns are snake_case (no column-rename-map entry needed).
 // ---------------------------------------------------------------------------
 
@@ -219,5 +226,122 @@ export async function generateProposals(db: D1Database): Promise<GenerateProposa
     superseded,
     unscheduled,
     overdue,
+  };
+}
+
+// ── Autonomy: agent-decided apply (auto-approve gate ON) ─────────────────────
+
+interface PendingRow {
+  id: string;
+  jc_id?: string;
+  po_id?: string | null;
+  dept?: string | null;
+  so_ref?: string | null;
+  current_due?: string | null;
+  proposed_due?: string;
+  // db-pg adapter folds snake_case → camelCase; dual-key every read.
+  jcId?: string;
+  poId?: string | null;
+  soRef?: string | null;
+  currentDue?: string | null;
+  proposedDue?: string;
+}
+
+export interface ApplyProposalsResult {
+  approved: number;
+  skipped: number;
+  remainingPending: number;
+}
+
+/**
+ * Apply up to `limit` PENDING proposals in one pass (dueDate write on WAITING
+ * cards only), mark them APPROVED with the given decidedBy, and store ONE
+ * rollbackable plan_snapshots batch row. `limit` keeps a single run within
+ * the Workers subrequest budget AND keeps each batch small enough for the
+ * console's rollback-last-batch to revert safely — a big backlog drains over
+ * several heartbeats instead of one giant write.
+ */
+export async function applyPendingProposals(
+  db: D1Database,
+  opts: { decidedBy: string; limit?: number },
+): Promise<ApplyProposalsResult> {
+  await ensureProposalTables(db);
+  const limit = Math.max(1, Math.min(400, opts.limit ?? 300));
+  const nowIso = new Date().toISOString();
+
+  const res = await db
+    .prepare(
+      `SELECT * FROM schedule_proposals WHERE status = 'PENDING'
+        ORDER BY so_ref, dept, jc_id LIMIT ?`,
+    )
+    .bind(limit)
+    .all<PendingRow>();
+  const rows = res.results ?? [];
+
+  const applied: Array<{
+    proposalId: string;
+    jcId: string;
+    poId: string | null;
+    dept: string | null;
+    soRef: string | null;
+    from: string | null;
+    to: string;
+  }> = [];
+  let skipped = 0;
+
+  for (const row of rows) {
+    const jcId = row.jcId ?? row.jc_id;
+    const proposedDue = row.proposedDue ?? row.proposed_due;
+    if (!jcId || !proposedDue) {
+      skipped++;
+      continue;
+    }
+    await db
+      .prepare(
+        `UPDATE job_cards SET dueDate = ?, updated_at = ?
+          WHERE id = ? AND status = 'WAITING'`,
+      )
+      .bind(proposedDue, nowIso, jcId)
+      .run();
+    await db
+      .prepare(
+        `UPDATE schedule_proposals
+            SET status = 'APPROVED', decided_at = ?, decided_by = ?
+          WHERE id = ?`,
+      )
+      .bind(nowIso, opts.decidedBy, row.id)
+      .run();
+    applied.push({
+      proposalId: row.id,
+      jcId,
+      poId: (row.poId ?? row.po_id) ?? null,
+      dept: row.dept ?? null,
+      soRef: (row.soRef ?? row.so_ref) ?? null,
+      from: (row.currentDue ?? row.current_due) ?? null,
+      to: proposedDue,
+    });
+  }
+
+  if (applied.length > 0) {
+    await db
+      .prepare("INSERT INTO plan_snapshots (id, taken_at, date, payload) VALUES (?,?,?,?)")
+      .bind(
+        crypto.randomUUID(),
+        nowIso,
+        nowIso.slice(0, 10),
+        JSON.stringify({ kind: "PROPOSALS_APPLIED", decidedBy: opts.decidedBy, applied }),
+      )
+      .run();
+  }
+
+  const remain = await db
+    .prepare("SELECT COUNT(*) AS n FROM schedule_proposals WHERE status = 'PENDING'")
+    .bind()
+    .first<{ n: number | string }>();
+
+  return {
+    approved: applied.length,
+    skipped,
+    remainingPending: Number(remain?.n) || 0,
   };
 }

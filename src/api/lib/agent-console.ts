@@ -200,6 +200,34 @@ export async function isAgentPaused(
   }
 }
 
+/**
+ * True when the family's auto-approve gate is ON and nothing pauses it.
+ * This is the AUTONOMY switch (owner ruling 2026-07-12: reversible actions
+ * are the agent's own decision) — agent-initiated runs apply their own
+ * proposals when this returns true. Fails CLOSED (false) on any error:
+ * autonomy must never turn itself on by accident.
+ */
+export async function isAutoApproveOn(
+  db: D1Database,
+  family: AgentFamily,
+): Promise<boolean> {
+  try {
+    await ensureAgentTables(db);
+    const res = await db
+      .prepare(
+        "SELECT agent, paused, auto_approve FROM agent_controls WHERE agent IN ('ALL', ?)",
+      )
+      .bind(family)
+      .all<ControlRow>();
+    const rows = res.results ?? [];
+    if (rows.some((r) => Number(r.paused) === 1)) return false;
+    const fam = rows.find((r) => r.agent === family);
+    return Number(fam?.autoApprove ?? fam?.auto_approve) === 1;
+  } catch {
+    return false;
+  }
+}
+
 /** True when ONLY the global kill switch (agent='ALL') is on. */
 export async function isKillSwitchOn(db: D1Database): Promise<boolean> {
   try {

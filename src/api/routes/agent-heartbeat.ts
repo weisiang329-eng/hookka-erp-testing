@@ -22,9 +22,14 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { DEFAULT_ORG_ID } from "../lib/tenant";
-import { isKillSwitchOn, recordAgentRun, llmKeyIfBudgetAllows } from "../lib/agent-console";
+import {
+  isAutoApproveOn,
+  isKillSwitchOn,
+  recordAgentRun,
+  llmKeyIfBudgetAllows,
+} from "../lib/agent-console";
 import { decideAgentRuns } from "../lib/agent-scheduler";
-import { generateProposals } from "../lib/schedule-proposals";
+import { generateProposals, applyPendingProposals } from "../lib/schedule-proposals";
 import { runDeliveryAgent, constantTimeEqual } from "./delivery-agent";
 
 const app = new Hono<Env>();
@@ -71,7 +76,21 @@ app.post("/heartbeat", async (c) => {
       } else if (d.task === "production-proposals") {
         await recordAgentRun(db, "production-proposals", async (run) => {
           const r = await generateProposals(db);
-          const summary = `proposed ${r.proposed} (unscheduled ${r.unscheduled} · overdue ${r.overdue} · superseded ${r.superseded}) (heartbeat: ${d.reason})`;
+          // Autonomy: with the PRODUCTION gate ON the agent applies its own
+          // dueDates (WAITING cards only, batch-capped, one rollbackable
+          // snapshot per batch — the backlog drains across heartbeats).
+          let autoNote = "";
+          if (await isAutoApproveOn(db, "PRODUCTION")) {
+            const a = await applyPendingProposals(db, {
+              decidedBy: "AGENT_AUTO",
+              limit: 300,
+            }).catch((err) => {
+              console.warn("[agents/heartbeat] auto-apply failed:", err);
+              return null;
+            });
+            if (a) autoNote = ` · auto-applied ${a.approved} (${a.remainingPending} queued)`;
+          }
+          const summary = `proposed ${r.proposed} (unscheduled ${r.unscheduled} · overdue ${r.overdue} · superseded ${r.superseded})${autoNote} (heartbeat: ${d.reason})`;
           run.setSummary(summary);
           ran.push({ task: d.task, reason: d.reason, summary });
           return r;
@@ -83,6 +102,31 @@ app.post("/heartbeat", async (c) => {
       console.error(`[agents/heartbeat] ${d.task} failed:`, err);
       skipped.push({ task: d.task, reason: "run errored (see agent_runs)" });
     }
+  }
+
+  // Backlog drain — autonomy also means finishing what's queued: with the
+  // PRODUCTION gate ON, each beat applies one batch of still-PENDING
+  // proposals even when no fresh generation was warranted this beat (a
+  // 2,000-row backlog drains across the day instead of waiting for the next
+  // generation trigger). No pending rows → no run row, no noise.
+  try {
+    if (await isAutoApproveOn(db, "PRODUCTION")) {
+      const pend = await db
+        .prepare("SELECT COUNT(*) AS n FROM schedule_proposals WHERE status = 'PENDING'")
+        .bind()
+        .first<{ n: number | string }>();
+      if ((Number(pend?.n) || 0) > 0) {
+        await recordAgentRun(db, "production-proposals", async (run) => {
+          const a = await applyPendingProposals(db, { decidedBy: "AGENT_AUTO", limit: 300 });
+          const summary = `auto-applied ${a.approved} queued proposal(s), ${a.remainingPending} remaining (heartbeat drain)`;
+          run.setSummary(summary);
+          ran.push({ task: "production-proposals", reason: "backlog drain", summary });
+          return a;
+        });
+      }
+    }
+  } catch (err) {
+    console.error("[agents/heartbeat] backlog drain failed:", err);
   }
 
   return c.json({ ok: true, ran, skipped });

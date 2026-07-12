@@ -198,9 +198,33 @@ export default function DeliveryReturnDetail() {
                 variant="primary"
                 disabled={busy}
                 onClick={async () => {
-                  await call("/set-outcome", { returnType: "REPAIR_REDELIVER" });
-                  toast.info("Now open a Service Order for this customer to repair & re-deliver.");
-                  navigate("/service-cases");
+                  if (busy) return;
+                  setBusy(true);
+                  try {
+                    // Auto-open a service case from the original SO, link it, then
+                    // jump into the replacement (SV) order create flow.
+                    let caseId = "";
+                    if (dr.salesOrderId) {
+                      const r = await fetch("/api/service-cases", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ sourceType: "SO", sourceId: dr.salesOrderId }),
+                      });
+                      const j = (await r.json()) as { data?: { id?: string } };
+                      caseId = j?.data?.id ?? "";
+                    }
+                    await fetch(`/api/delivery-returns/${id}/set-outcome`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ returnType: "REPAIR_REDELIVER", serviceCaseId: caseId }),
+                    });
+                    toast.success("Service case opened — create the replacement order.");
+                    navigate(caseId ? `/service-order/create?fromCase=${caseId}` : "/service-cases");
+                  } catch {
+                    toast.error("Failed to open the service case");
+                  } finally {
+                    setBusy(false);
+                  }
                 }}
               >
                 Repair &amp; re-deliver → service order

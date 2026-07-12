@@ -429,12 +429,13 @@ app.post("/:id/set-outcome", async (c) => {
   await c.var.DB
     .prepare(
       `UPDATE delivery_returns
-          SET return_type=?, status=?, service_order_id=?, credit_note_id=?, updated_at=?
+          SET return_type=?, status=?, service_case_id=?, service_order_id=?, credit_note_id=?, updated_at=?
         WHERE id=?`,
     )
     .bind(
       type,
       status,
+      String(body.serviceCaseId ?? ""),
       String(body.serviceOrderId ?? ""),
       String(body.creditNoteId ?? ""),
       new Date().toISOString(),

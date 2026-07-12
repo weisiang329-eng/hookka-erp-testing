@@ -68,6 +68,11 @@ const EXPECTED_PREFIXES = [
   // constant-time CRON_SECRET check; no dashboard session exists at cron time.
   // See routes/delivery-agent.ts `internal`.
   "/api/internal/delivery-agent/",
+  // 2026-07-12 — agents self-scheduling heartbeat. Dumb 30-min external beat;
+  // routes/agent-heartbeat.ts does its own constant-time CRON_SECRET check,
+  // then lib/agent-scheduler.ts decides which agents run (owner keeps pause /
+  // kill switch / hard bounds). No session at cron time.
+  "/api/internal/agents/",
   // 2026-06-12 — public QR dispatch/deliver scan flow for DOs/PLs. Drivers
   // scan with a normal phone camera, so no session exists. The handler's
   // gate is the unguessable 64-hex qrtoken (migration 0167); the surface is

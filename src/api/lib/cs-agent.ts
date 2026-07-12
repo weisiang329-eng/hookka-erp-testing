@@ -85,6 +85,8 @@ export interface PromiseDeliveryQuery {
   stateCode?: string | null;
   /** Tenant scope for the SO lookup. */
   orgId: string;
+  /** Where the question came from ("assistant" | "api") — promise-log only. */
+  channel?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -176,7 +178,7 @@ function workingDaysBetween(
 // Transit allowance config (kv_config['cs-agent'] overridable, no deploy).
 // ---------------------------------------------------------------------------
 
-interface CsAgentConfig {
+export interface CsAgentConfig {
   transitDaysByState: Record<string, number>;
   defaultTransitDays: number;
 }
@@ -195,7 +197,10 @@ const DEFAULT_CS_CONFIG: CsAgentConfig = {
   defaultTransitDays: 2,
 };
 
-async function loadCsConfig(db: D1Database): Promise<CsAgentConfig> {
+// Exported: the Delivery Agent's transit-drift learner reads the SAME config
+// to compare promised transit allowances against actual dispatch→delivered
+// durations (cross-agent learning — Delivery teaches CS).
+export async function loadCsConfig(db: D1Database): Promise<CsAgentConfig> {
   const row = await db
     .prepare("SELECT value FROM kv_config WHERE key = ?")
     .bind("cs-agent")
@@ -247,10 +252,93 @@ type ProductRow = {
 };
 
 // ---------------------------------------------------------------------------
+// Promise log — the CS learning-loop foundation. Every answer the agent
+// gives is recorded so promise-vs-actual hit rate becomes computable once
+// deliveries land. Telemetry only: logging failure NEVER blocks an answer,
+// and nothing here touches business tables. Runtime self-apply, snake_case.
+// ---------------------------------------------------------------------------
+
+let _csMig: Promise<void> | null = null;
+export function ensureCsAgentTables(db: D1Database): Promise<void> {
+  if (_csMig) return _csMig;
+  _csMig = (async () => {
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS cs_promise_log (
+           id TEXT PRIMARY KEY,
+           asked_at TEXT NOT NULL,
+           channel TEXT,
+           so_id TEXT,
+           company_so_id TEXT,
+           product_code TEXT,
+           qty INTEGER,
+           state_code TEXT,
+           promise_date TEXT,
+           confidence TEXT NOT NULL
+         )`,
+      )
+      .bind()
+      .run();
+    await db
+      .prepare(
+        "CREATE INDEX IF NOT EXISTS idx_cs_promise_log_asked ON cs_promise_log(asked_at DESC)",
+      )
+      .bind()
+      .run();
+  })();
+  return _csMig;
+}
+
+async function logPromise(
+  db: D1Database,
+  query: PromiseDeliveryQuery,
+  result: PromiseDeliveryResult,
+): Promise<void> {
+  await ensureCsAgentTables(db);
+  await db
+    .prepare(
+      `INSERT INTO cs_promise_log
+         (id, asked_at, channel, so_id, company_so_id, product_code, qty,
+          state_code, promise_date, confidence)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    )
+    .bind(
+      crypto.randomUUID(),
+      new Date().toISOString(),
+      (query.channel ?? "api").slice(0, 40),
+      result.order?.id ?? null,
+      result.order?.companySOId ?? null,
+      query.productCode ?? null,
+      query.qty ?? null,
+      result.stateCode,
+      result.promiseDate,
+      result.confidence,
+    )
+    .run();
+}
+
+// ---------------------------------------------------------------------------
 // The orchestrator
 // ---------------------------------------------------------------------------
 
+/**
+ * Public entry: answer + best-effort promise-log row (the KPI trail). The
+ * reasoning itself stays read-only in promiseDeliveryCore.
+ */
 export async function promiseDelivery(
+  db: D1Database,
+  query: PromiseDeliveryQuery,
+): Promise<PromiseDeliveryResult> {
+  const result = await promiseDeliveryCore(db, query);
+  try {
+    await logPromise(db, query, result);
+  } catch (err) {
+    console.warn("[cs-agent] promise log failed (answer unaffected):", err);
+  }
+  return result;
+}
+
+async function promiseDeliveryCore(
   db: D1Database,
   query: PromiseDeliveryQuery,
 ): Promise<PromiseDeliveryResult> {

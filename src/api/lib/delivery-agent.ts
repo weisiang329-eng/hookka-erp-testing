@@ -37,6 +37,9 @@
 import { resolveStateCode } from "../../lib/malaysia-states";
 import { loadHubStateMap } from "../routes/delivery-orders";
 import { loadDoValueMap } from "./do-value";
+import { askAgentBrain } from "./agent-brain";
+import { proposeConfigParam } from "./agent-learning";
+import { loadCsConfig } from "./cs-agent";
 
 // D1-compat DB shape (matches the SupabaseAdapter used across routes).
 interface DbLike {
@@ -550,6 +553,12 @@ export interface DeliveryBriefData {
   returns: { openServiceCases: number };
   proposals: { pendingByKind: Record<string, number>; pending: number };
   learning: ProviderLearningRow[];
+  /**
+   * Claude-written one-paragraph focus (English — shown on the Delivery
+   * Agent tab). Filled only on cron / run-now paths (the LLM never runs on
+   * a plain GET); null when no API key or the call failed.
+   */
+  aiFocus?: string | null;
 }
 
 async function collectDoStatusCounts(
@@ -898,4 +907,193 @@ export async function storeDeliveryBriefSnapshot(
     )
     .bind(crypto.randomUUID(), data.date, data.generatedAtIso, JSON.stringify(data))
     .run();
+}
+
+/**
+ * Latest stored aiFocus (today first, else most recent). The GET brief path
+ * stays LLM-free and cheap — the tab shows the focus written by the last
+ * cron / run-now execution.
+ */
+export async function loadLatestDeliveryAiFocus(
+  db: DbLike,
+): Promise<{ date: string; aiFocus: string } | null> {
+  try {
+    await ensureDeliveryAgentTables(db);
+    const res = await db
+      .prepare("SELECT date, payload FROM delivery_briefs ORDER BY taken_at DESC LIMIT 10")
+      .bind()
+      .all<{ date: string; payload: string }>();
+    for (const row of res.results ?? []) {
+      try {
+        const p = JSON.parse(row.payload) as { aiFocus?: string | null };
+        if (p?.aiFocus) return { date: s(row.date), aiFocus: p.aiFocus };
+      } catch {
+        /* malformed snapshot — keep scanning */
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// ── AI focus (agent brain — judgment over the engine's numbers) ─────────────
+
+export async function generateDeliveryFocus(
+  apiKey: string | undefined,
+  brief: DeliveryBriefData,
+  usageSink?: { tokensIn: number; tokensOut: number },
+): Promise<string | null> {
+  const compact = {
+    date: brief.date,
+    readyPool: { count: brief.pool.count, topBuckets: brief.pool.byStateHub.slice(0, 5) },
+    overdueToShip: {
+      count: brief.overdueToShip.count,
+      worst: brief.overdueToShip.rows.slice(0, 5).map((r) => ({
+        so: r.soNo,
+        customer: r.customerName,
+        daysLate: r.daysLate,
+      })),
+    },
+    invoiceGaps: brief.invoiceGaps.count,
+    podChases: brief.podChases.count,
+    pendingProposals: brief.proposals.pendingByKind,
+    providers: brief.learning.slice(0, 5).map((p) => ({
+      name: p.providerName,
+      trips: p.trips,
+      onTimePct: p.onTimePct,
+      freightVarianceRm: Math.round(p.varianceSen / 100),
+    })),
+  };
+  return askAgentBrain(apiKey, {
+    system:
+      "You are the Delivery Agent of Hookka, a Malaysian furniture factory. " +
+      "From the JSON numbers, write ONE short paragraph (3-5 sentences, plain " +
+      "English, no jargon, no headings, no bullet points) telling the office " +
+      "what matters most in deliveries today: the most overdue-to-ship orders, " +
+      "which state/hub bucket is worth a truck, invoice gaps or POD chases " +
+      "needing closure, and any 3PL whose on-time rate or freight variance " +
+      "looks off. Be direct and specific — name orders and providers.",
+    payload: compact,
+    maxTokens: 500,
+    usageSink,
+  });
+}
+
+// ── Transit-drift learning (cross-agent: Delivery teaches CS) ────────────────
+//
+// The CS Agent promises "dispatch + N working days" per state. This learner
+// measures the ACTUAL dispatch→delivered duration per state over the last 90
+// days and, when it drifts ≥1 working day from the configured allowance on
+// ≥5 trips, writes a PENDING config proposal (`cs.transitDays.<STATE>`) the
+// owner can approve on the Agent Console. Approval writes
+// kv_config['cs-agent'].transitDaysByState — the CS Agent picks it up on the
+// very next question. Iron rule 1: nothing changes without approval.
+
+export interface TransitDriftFinding {
+  stateCode: string;
+  samples: number;
+  configuredDays: number;
+  actualAvgDays: number;
+  driftDays: number;
+  flagged: boolean;
+  proposedDays: number | null;
+}
+
+/** Working-day steps from `fromYmd` to `toYmd` (Sundays skipped, cap 30). */
+function transitWorkingDays(fromYmd: string, toYmd: string): number | null {
+  if (!fromYmd || !toYmd || toYmd < fromYmd) return null;
+  const d = new Date(`${fromYmd}T00:00:00`);
+  const end = new Date(`${toYmd}T00:00:00`);
+  if (Number.isNaN(d.getTime()) || Number.isNaN(end.getTime())) return null;
+  let steps = 0;
+  while (d < end && steps < 30) {
+    d.setDate(d.getDate() + 1);
+    if (d.getDay() !== 0) steps++;
+  }
+  return steps;
+}
+
+export async function transitDriftLearning(
+  db: DbLike,
+  orgId: string,
+  todayYmd: string,
+  opts: { emitProposals?: boolean } = {},
+  windowDays = 90,
+): Promise<TransitDriftFinding[]> {
+  const cutoff = isoCutoff(todayYmd, windowDays);
+  const res = await db
+    .prepare(
+      `SELECT customerState, hubId, dispatchedAt, deliveredAt
+         FROM delivery_orders
+        WHERE orgId = ?
+          AND status IN ('DELIVERED','INVOICED')
+          AND dispatchedAt IS NOT NULL AND dispatchedAt <> ''
+          AND deliveredAt IS NOT NULL AND deliveredAt <> ''
+          AND deliveredAt >= ?`,
+    )
+    .bind(orgId, cutoff)
+    .all<DoRow>();
+  const rows = res.results ?? [];
+  if (rows.length === 0) return [];
+
+  const hubStates = await loadHubStateMap(
+    db as never,
+    rows.map((r) => s(r.hubId ?? r.hub_id)).filter(Boolean),
+  ).catch(() => new Map<string, string>());
+
+  const byState = new Map<string, { total: number; samples: number }>();
+  for (const r of rows) {
+    const hubId = s(r.hubId ?? r.hub_id);
+    const rawState = s(r.customerState ?? r.customer_state) || (hubStates.get(hubId) ?? "");
+    const stateCode = resolveStateCode(rawState);
+    if (!stateCode) continue;
+    const days = transitWorkingDays(
+      s(r.dispatchedAt ?? r.dispatched_at).slice(0, 10),
+      s(r.deliveredAt ?? r.delivered_at).slice(0, 10),
+    );
+    if (days == null) continue;
+    const agg = byState.get(stateCode) ?? { total: 0, samples: 0 };
+    agg.total += days;
+    agg.samples += 1;
+    byState.set(stateCode, agg);
+  }
+
+  const config = await loadCsConfig(db as never);
+  const findings: TransitDriftFinding[] = [];
+  for (const [stateCode, agg] of byState) {
+    if (agg.samples < 5) continue; // too thin to learn from
+    const actualAvg = Math.round((agg.total / agg.samples) * 10) / 10;
+    const configured =
+      config.transitDaysByState[stateCode] ?? config.defaultTransitDays;
+    const drift = Math.round(actualAvg) - configured;
+    const flagged = Math.abs(drift) >= 1;
+    findings.push({
+      stateCode,
+      samples: agg.samples,
+      configuredDays: configured,
+      actualAvgDays: actualAvg,
+      driftDays: drift,
+      flagged,
+      proposedDays: flagged
+        ? Math.max(0, Math.min(10, Math.round(actualAvg)))
+        : null,
+    });
+  }
+  findings.sort((a, b) => Math.abs(b.driftDays) - Math.abs(a.driftDays));
+
+  if (opts.emitProposals) {
+    for (const f of findings) {
+      if (!f.flagged || f.proposedDays == null) continue;
+      await proposeConfigParam(db as never, {
+        paramKey: `cs.transitDays.${f.stateCode}`,
+        currentValue: String(f.configuredDays),
+        proposedValue: String(f.proposedDays),
+        reason: `${f.stateCode}: actual dispatch->delivered avg ${f.actualAvgDays} working days over ${f.samples} trips (last ${windowDays}d) vs CS promise allowance ${f.configuredDays} — drift ${f.driftDays > 0 ? "+" : ""}${f.driftDays}d`,
+      }).catch((err) => {
+        console.warn(`[delivery-agent] transit proposal ${f.stateCode} failed:`, err);
+      });
+    }
+  }
+  return findings;
 }

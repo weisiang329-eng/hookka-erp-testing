@@ -1,0 +1,47 @@
+name: Delivery Agent — Daily Run
+
+# Fires the Delivery Agent's full daily cycle at 07:30 MYT (23:30 UTC prev
+# day), right after the 07:00 Production Morning Brief:
+#   proposals (LOAD_PLAN / INVOICE_GAP / POD_CHASE)
+#   → transit-drift learning (may file cs.transitDays.* config proposals)
+#   → Claude AI focus paragraph
+#   → brief snapshot (shown on Delivery → Delivery Agent tab).
+#
+# Auth: x-cron-secret header, same CRON_SECRET contract as daily-reports.yml.
+# The endpoint self-skips (ok:true, skipped:"paused") when the DELIVERY agent
+# or the global kill switch is paused in the Agent Console.
+
+on:
+  schedule:
+    - cron: '30 23 * * *'  # 07:30 MYT next day
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST run-trigger
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::CRON_SECRET repo secret is empty"
+            exit 1
+          fi
+          url="https://erp.hookka.com/api/internal/delivery-agent/run-trigger"
+          echo "--- Firing Delivery Agent → $url"
+          response=$(curl --silent --show-error --write-out '\nHTTP_STATUS:%{http_code}' \
+            --max-time 120 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "x-cron-secret: $CRON_SECRET" \
+            --data '{}' \
+            "$url" || true)
+          status=$(echo "$response" | tail -n1 | sed 's/HTTP_STATUS://')
+          body=$(echo "$response" | sed '$d')
+          echo "Status: $status"
+          echo "Body: $body"
+          if [ "$status" != "200" ]; then
+            echo "::error::delivery-agent trigger failed with HTTP $status"
+            exit 1
+          fi

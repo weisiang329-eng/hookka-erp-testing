@@ -62,6 +62,7 @@ type AgentStatus = {
   autoApprove: boolean;
   tasks: AgentTask[];
   today: { runs: number; proposalsGenerated: number; pendingProposals: number } | null;
+  cs?: { promises30d: number; enginePromises30d: number } | null;
   pendingConfigProposals: number;
   month: { runs: number; tokensIn: number; tokensOut: number } | null;
   recentErrors: AgentRun[];
@@ -88,15 +89,42 @@ const AGENT_LABEL: Record<string, string> = {
   DELIVERY: "Delivery Agent",
   CS: "Customer Service Agent",
   PROCUREMENT: "Procurement Agent",
+  FINANCE: "Finance / AR Agent",
+  SALES: "Sales / Quotation Agent",
+  HR: "HR / Payroll Agent",
+  DATA_QUALITY: "Data Quality Agent",
+  INVENTORY: "Inventory Agent",
+  SERVICE: "Service Case Agent",
+  CHIEF_OF_STAFF: "Chief-of-Staff Agent",
 };
 
 const AGENT_BLURB: Record<string, string> = {
   PRODUCTION:
     "Morning brief · schedule proposals · learning loop (plan-vs-actual, flexible handoffs, humane forward OT).",
-  DELIVERY: "Load planning, 3PL vs own truck, POD + invoice closure.",
-  CS: "Promise-date orchestrator across production, materials and delivery.",
+  DELIVERY:
+    "Daily load plans, invoice-gap + POD closure, 3PL learning, transit-drift proposals that tune the CS promise engine.",
+  CS: "Promise-date orchestrator across production, materials and delivery. Every answer is logged for hit-rate learning.",
   PROCUREMENT: "Shortage → PO drafts, expediting, supplier reliability.",
+  FINANCE: "Missed invoices, aging + staged collection drafts, per-customer payment profiles.",
+  SALES: "OCR PO → SO draft, engine-backed promise dates in quotes, price-anomaly interception.",
+  HR: "Attendance/efficiency anomaly digests, pre-payroll checks. Never touches approved pay.",
+  DATA_QUALITY: "The 0711 tally audit, automated nightly: cross-page metric drift, future dates, orphans.",
+  INVENTORY: "Safety-stock triggers, dead-stock lists, batch aging.",
+  SERVICE: "New-case triage against original orders, repair-scope suggestions.",
+  CHIEF_OF_STAFF: "One page of everything awaiting your decision, across all agents.",
 };
+
+// Blueprint agents not yet returned by /status (no runtime yet) — rendered as
+// COMING SOON roster cards so the console shows the full JD lineup.
+const PLANNED_AGENT_IDS = [
+  "FINANCE",
+  "SALES",
+  "HR",
+  "DATA_QUALITY",
+  "INVENTORY",
+  "SERVICE",
+  "CHIEF_OF_STAFF",
+];
 
 const PARAM_LABEL: Record<string, string> = {
   "chain.sewHandoffDays": "Fab Cut → Fab Sew handoff (days)",
@@ -105,6 +133,14 @@ const PARAM_LABEL: Record<string, string> = {
   "chain.foamHandoffDays": "Framing → Foam handoff (days)",
   "chain.uphHandoffDays": "→ Upholstery handoff (days)",
 };
+
+function paramLabel(key: string): string {
+  const fixed = PARAM_LABEL[key];
+  if (fixed) return fixed;
+  const cs = /^cs\.transitDays\.([A-Z]{2,3})$/.exec(key);
+  if (cs) return `CS promise transit to ${cs[1]} (working days)`;
+  return key;
+}
 
 function fmtWhen(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -200,7 +236,7 @@ export default function AgentConsolePage() {
     [load, toast],
   );
 
-  const runNow = async (agent: "brief" | "proposals" | "learning") => {
+  const runNow = async (agent: "brief" | "proposals" | "learning" | "delivery") => {
     await post("run-now", { agent }, `Run started and finished: ${agent}.`, `run-${agent}`);
   };
 
@@ -545,7 +581,7 @@ export default function AgentConsolePage() {
                           {configProposals.map((p) => (
                             <tr key={p.id} className="border-b border-[#E2DDD8]">
                               <td className="px-3 py-2 font-medium text-[#1F1D1B] whitespace-nowrap">
-                                {PARAM_LABEL[p.paramKey] ?? p.paramKey}
+                                {paramLabel(p.paramKey)}
                               </td>
                               <td className="px-3 py-2 text-right">{p.currentValue ?? "—"}</td>
                               <td className="px-3 py-2 text-right font-semibold text-[#4F7C3A]">
@@ -599,37 +635,177 @@ export default function AgentConsolePage() {
             </Card>
           )}
 
-          {/* ── Other agents — v1 surfaces live for Delivery + CS; console
-              controls (pause/run-now per task) wire up in the next round.
-              Procurement stays parked until its data-readiness gate passes. ── */}
+          {/* ── Delivery — full console lifecycle (pause gates its cron, run-now,
+              run log + tokens). CS — live, question-driven (no cron): KPI
+              counters from the promise log. Procurement — parked behind its
+              data-readiness gate. ── */}
           {others.map((a) => {
-            const v1: Record<string, string> = {
-              DELIVERY:
-                "LIVE v1 — proposals + brief on the Delivery page → “Delivery Agent” tab (load plans, invoice gaps, POD chases). Console controls wire up next.",
-              CS:
-                "LIVE v1 — ask Hookka AI “when can SO-xxx be delivered” (materials → production → delivery reasoning chain), or GET /api/cs-agent/promise. Console controls wire up next.",
-            };
-            const liveV1 = v1[a.id];
+            const live = a.live;
+            const lastRun = a.tasks[0]?.lastRun ?? null;
             return (
-              <Card key={a.id} className={liveV1 ? "" : "opacity-70"}>
+              <Card key={a.id} className={live ? "" : "opacity-70"}>
                 <CardHeader>
-                  <CardTitle className="flex items-center gap-2 text-[#1F1D1B]">
-                    <span className={`inline-block h-3 w-3 rounded-full ${liveV1 ? "bg-[#4F7C3A]" : "bg-[#9CA3AF]"}`} />
-                    {AGENT_LABEL[a.id] ?? a.id}
-                    <span className={`text-[11px] font-semibold rounded-full px-2 py-0.5 ${liveV1 ? "bg-[#EEF3E4] text-[#4F7C3A]" : "bg-[#F0ECE9] text-[#6B7280]"}`}>
-                      {liveV1 ? "LIVE · v1" : "COMING SOON"}
-                    </span>
-                  </CardTitle>
-                  <p className="mt-1 text-xs text-[#6B7280]">{AGENT_BLURB[a.id] ?? ""}</p>
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <CardTitle className="flex items-center gap-2 text-[#1F1D1B]">
+                        {(() => {
+                          const l = lightOf(a, killAll);
+                          return (
+                            <span
+                              className={`inline-block h-3 w-3 rounded-full ${LIGHT_STYLE[l].dot}`}
+                              title={LIGHT_STYLE[l].label}
+                            />
+                          );
+                        })()}
+                        {AGENT_LABEL[a.id] ?? a.id}
+                        <span
+                          className={`text-[11px] font-semibold rounded-full px-2 py-0.5 ${live ? "bg-[#EEF3E4] text-[#4F7C3A]" : "bg-[#F0ECE9] text-[#6B7280]"}`}
+                        >
+                          {live ? "LIVE" : "COMING SOON"}
+                        </span>
+                        {a.paused && (
+                          <span className="text-[11px] font-semibold rounded-full bg-[#9A3A2D]/10 text-[#9A3A2D] px-2 py-0.5">
+                            PAUSED
+                          </span>
+                        )}
+                      </CardTitle>
+                      <p className="mt-1 text-xs text-[#6B7280]">{AGENT_BLURB[a.id] ?? ""}</p>
+                    </div>
+                    {a.id === "DELIVERY" && live && (
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void runNow("delivery")}
+                          disabled={busy === "run-delivery" || killAll}
+                        >
+                          {busy === "run-delivery" ? (
+                            <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                          ) : (
+                            <Play className="h-4 w-4 mr-1" />
+                          )}
+                          Run now
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void togglePause(a)}
+                          disabled={busy === `pause-${a.id}`}
+                        >
+                          {a.paused ? (
+                            <Play className="h-4 w-4 mr-1" />
+                          ) : (
+                            <Pause className="h-4 w-4 mr-1" />
+                          )}
+                          {a.paused ? "Resume" : "Pause"}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
                 </CardHeader>
                 <CardContent>
-                  <div className={`text-xs ${liveV1 ? "text-[#4B5563]" : "text-[#9CA3AF]"}`}>
-                    {liveV1 ?? "Planned in the agents blueprint — controls activate when the agent ships."}
-                  </div>
+                  {a.id === "DELIVERY" && live ? (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                        {[
+                          {
+                            label: "Proposals generated today",
+                            value: a.today?.proposalsGenerated ?? 0,
+                          },
+                          {
+                            label: "Pending delivery proposals",
+                            value: a.today?.pendingProposals ?? 0,
+                          },
+                          {
+                            label: "Last run",
+                            value: lastRun
+                              ? `${fmtWhen(lastRun.startedAt)} · ${lastRun.status}`
+                              : "never",
+                          },
+                        ].map((s) => (
+                          <div
+                            key={s.label}
+                            className="rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2"
+                          >
+                            <div className="text-[11px] text-[#6B7280]">{s.label}</div>
+                            <div className="text-base font-semibold text-[#1F1D1B]">{s.value}</div>
+                          </div>
+                        ))}
+                      </div>
+                      {lastRun?.summary && (
+                        <div className="text-xs text-[#6B7280]">{lastRun.summary}</div>
+                      )}
+                      <div className="text-xs text-[#4B5563]">
+                        Working surface: Delivery page → “Delivery Agent” tab (load plans,
+                        invoice gaps, POD chases, AI focus). First run 07:30 MYT, then it
+                        self-schedules extra sweeps when dispatches/deliveries spike — each
+                        run logs its own reason. Transit-drift findings appear above as CS
+                        parameter proposals.
+                      </div>
+                    </div>
+                  ) : a.id === "CS" && live ? (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                        {[
+                          { label: "Promises answered (30d)", value: a.cs?.promises30d ?? 0 },
+                          {
+                            label: "Engine-grade answers (30d)",
+                            value: a.cs?.enginePromises30d ?? 0,
+                          },
+                          {
+                            label: "Answer channel",
+                            value: "Hookka AI · API",
+                          },
+                        ].map((s) => (
+                          <div
+                            key={s.label}
+                            className="rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2"
+                          >
+                            <div className="text-[11px] text-[#6B7280]">{s.label}</div>
+                            <div className="text-base font-semibold text-[#1F1D1B]">{s.value}</div>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="text-xs text-[#4B5563]">
+                        Ask Hookka AI “when can SO-xxx be delivered” — materials → production →
+                        delivery reasoning chain. Every answer is logged; hit-rate KPI activates
+                        as deliveries land against promises.
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-xs text-[#9CA3AF]">
+                      {a.id === "PROCUREMENT"
+                        ? "Parked until the data-readiness gate passes (supplier lead times ≥90%, PO expected dates ≥90%, MRP ≤7 days old) — see GET /api/cs-agent/procurement/readiness."
+                        : "Planned in the agents blueprint — controls activate when the agent ships."}
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             );
           })}
+
+          {/* ── Blueprint roster — designed (JD in docs/AGENTS-BLUEPRINT.md), not
+              yet built. Kept visible so the console always shows the full
+              lineup and what's next. ── */}
+          {PLANNED_AGENT_IDS.map((id) => (
+            <Card key={id} className="opacity-70">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-[#1F1D1B]">
+                  <span className="inline-block h-3 w-3 rounded-full bg-[#9CA3AF]" />
+                  {AGENT_LABEL[id] ?? id}
+                  <span className="text-[11px] font-semibold rounded-full px-2 py-0.5 bg-[#F0ECE9] text-[#6B7280]">
+                    COMING SOON
+                  </span>
+                </CardTitle>
+                <p className="mt-1 text-xs text-[#6B7280]">{AGENT_BLURB[id] ?? ""}</p>
+              </CardHeader>
+              <CardContent>
+                <div className="text-xs text-[#9CA3AF]">
+                  Planned in the agents blueprint — controls activate when the agent ships.
+                </div>
+              </CardContent>
+            </Card>
+          ))}
         </div>
       )}
 

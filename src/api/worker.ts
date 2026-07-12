@@ -840,6 +840,7 @@ import debitNotes from "./routes/debit-notes";
 import eInvoices from "./routes/e-invoices";
 import threeWayMatch from "./routes/three-way-match";
 import deliveryOrders from "./routes/delivery-orders";
+import deliveryReturns from "./routes/delivery-returns";
 import packingLists from "./routes/packing-lists";
 // Public QR dispatch/deliver flow (no login — the unguessable qrtoken IS the
 // credential; auth bypass via PUBLIC_PREFIXES in lib/auth-middleware.ts).
@@ -1030,6 +1031,7 @@ app.route("/api/debit-notes", debitNotes);
 app.route("/api/e-invoices", eInvoices);
 app.route("/api/three-way-match", threeWayMatch);
 app.route("/api/delivery-orders", deliveryOrders);
+app.route("/api/delivery-returns", deliveryReturns);
 app.route("/api/packing-lists", packingLists);
 // Public QR scan flow for DOs/PLs. Registered like any other subapp — the
 // auth bypass happens in authMiddleware (PUBLIC_PREFIXES "/api/public/do-qr/"),

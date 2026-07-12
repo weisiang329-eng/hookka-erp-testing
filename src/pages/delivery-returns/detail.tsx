@@ -12,7 +12,8 @@ import { Button } from "@/components/ui/button";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
-import { Loader2, ArrowLeft } from "lucide-react";
+import { Loader2, ArrowLeft, Printer } from "lucide-react";
+import { generateDeliveryReturnPdf } from "@/lib/generate-delivery-return-pdf";
 
 interface DRItem {
   id: string;
@@ -120,6 +121,31 @@ export default function DeliveryReturnDetail() {
             {dr.returnType === "PURE_RETURN" ? "Pure return" : "Repair & re-deliver"}
           </span>
         )}
+        <Button
+          variant="outline"
+          size="sm"
+          className="ml-auto"
+          onClick={() =>
+            generateDeliveryReturnPdf({
+              returnNo: dr.returnNo,
+              companySOId: dr.companySOId,
+              doNo: dr.doNo,
+              customerName: dr.customerName,
+              customerPOId: dr.customerPOId,
+              returnType: dr.returnType,
+              reason: dr.reason,
+              items: dr.items.map((it) => ({
+                productCode: it.productCode,
+                productName: it.productName,
+                wipLabel: it.wipLabel,
+                quantity: it.quantity,
+                problem: it.problem,
+              })),
+            })
+          }
+        >
+          <Printer className="h-4 w-4" /> Print
+        </Button>
       </div>
 
       <Card>

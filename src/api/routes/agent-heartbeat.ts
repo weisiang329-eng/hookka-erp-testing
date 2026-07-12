@@ -22,7 +22,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { DEFAULT_ORG_ID } from "../lib/tenant";
-import { isKillSwitchOn, recordAgentRun } from "../lib/agent-console";
+import { isKillSwitchOn, recordAgentRun, llmKeyIfBudgetAllows } from "../lib/agent-console";
 import { decideAgentRuns } from "../lib/agent-scheduler";
 import { generateProposals } from "../lib/schedule-proposals";
 import { runDeliveryAgent, constantTimeEqual } from "./delivery-agent";
@@ -55,8 +55,11 @@ app.post("/heartbeat", async (c) => {
         await recordAgentRun(db, "delivery-run", async (run) => {
           const sink = { tokensIn: 0, tokensOut: 0 };
           const r = await runDeliveryAgent(db, DEFAULT_ORG_ID, {
-            // Token control: fresh AI focus only on the day's first run.
-            anthropicApiKey: d.firstOfDay ? c.env.ANTHROPIC_API_KEY : undefined,
+            // Token control: fresh AI focus only on the day's first run, and
+            // only while the monthly LLM budget cap has headroom.
+            anthropicApiKey: d.firstOfDay
+              ? await llmKeyIfBudgetAllows(db, c.env.ANTHROPIC_API_KEY)
+              : undefined,
             usageSink: sink,
           });
           run.addTokens(sink.tokensIn, sink.tokensOut);

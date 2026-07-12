@@ -1,6 +1,7 @@
 name: Agents — Self-Scheduling Heartbeat
 
-# Deliberately DUMB beat, every 30 minutes. The cron carries NO schedule
+# Deliberately DUMB beat, hourly (owner 2026-07-12: 1h cadence). The cron
+# carries NO schedule
 # knowledge — each beat, the endpoint asks lib/agent-scheduler.ts which
 # agents want to run based on the factory's live pulse (delivery events,
 # new sales orders, time since last run, daily caps). Run-or-skip reasons
@@ -16,7 +17,7 @@ name: Agents — Self-Scheduling Heartbeat
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '0 * * * *'
   workflow_dispatch:
 
 jobs:

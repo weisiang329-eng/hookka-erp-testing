@@ -237,6 +237,130 @@ export async function listAgentControls(
   }));
 }
 
+// ── LLM spend monitor + monthly budget brake ─────────────────────────────────
+//
+// Every LLM call already lands its token usage in agent_runs (recordAgentRun
+// handles). These helpers turn that into (a) a per-agent month view for the
+// console and (b) a hard monthly brake: when spend crosses the cap, callers
+// stop passing the API key, so the AI-focus paragraphs pause while every
+// deterministic engine keeps running untouched. Cap lives in
+// kv_config['agent_schedule'].llmMonthlyTokenCap (bounded below).
+
+/** Claude Sonnet 4.5 list prices — for the console's ESTIMATE only. */
+const USD_PER_MTOK_IN = 3;
+const USD_PER_MTOK_OUT = 15;
+const USD_TO_MYR_EST = 4.7;
+
+const DEFAULT_LLM_MONTHLY_TOKEN_CAP = 3_000_000;
+const MIN_LLM_CAP = 100_000;
+const MAX_LLM_CAP = 50_000_000;
+
+export interface LlmMonthUsage {
+  month: string;
+  tokensIn: number;
+  tokensOut: number;
+  estCostUsd: number;
+  estCostMyr: number;
+  capTokens: number;
+  spentPctOfCap: number;
+  /** True while under cap — callers pass the API key only when allowed. */
+  allowed: boolean;
+  byAgent: Array<{ agent: string; runs: number; tokensIn: number; tokensOut: number }>;
+}
+
+export async function monthLlmUsage(db: D1Database): Promise<LlmMonthUsage> {
+  await ensureAgentTables(db);
+  const month = new Date().toISOString().slice(0, 7);
+
+  let capTokens = DEFAULT_LLM_MONTHLY_TOKEN_CAP;
+  try {
+    const kv = await db
+      .prepare("SELECT value FROM kv_config WHERE key = ?")
+      .bind("agent_schedule")
+      .first<{ value: string }>();
+    if (kv?.value) {
+      const parsed = JSON.parse(kv.value) as { llmMonthlyTokenCap?: unknown };
+      const n = Number(parsed?.llmMonthlyTokenCap);
+      if (Number.isFinite(n)) capTokens = Math.min(MAX_LLM_CAP, Math.max(MIN_LLM_CAP, n));
+    }
+  } catch {
+    /* defaults */
+  }
+
+  const byAgent: LlmMonthUsage["byAgent"] = [];
+  let tokensIn = 0;
+  let tokensOut = 0;
+  try {
+    const res = await db
+      .prepare(
+        `SELECT agent,
+                COUNT(*) AS runs,
+                SUM(COALESCE(tokens_in, 0)) AS tokens_in,
+                SUM(COALESCE(tokens_out, 0)) AS tokens_out
+           FROM agent_runs
+          WHERE substr(started_at, 1, 7) = ?
+          GROUP BY agent
+          ORDER BY agent`,
+      )
+      .bind(month)
+      .all<{
+        agent: string;
+        runs: number | string;
+        tokens_in?: number | string;
+        tokens_out?: number | string;
+        tokensIn?: number | string;
+        tokensOut?: number | string;
+      }>();
+    for (const r of res.results ?? []) {
+      const tin = Number(r.tokensIn ?? r.tokens_in) || 0;
+      const tout = Number(r.tokensOut ?? r.tokens_out) || 0;
+      tokensIn += tin;
+      tokensOut += tout;
+      byAgent.push({ agent: r.agent, runs: Number(r.runs) || 0, tokensIn: tin, tokensOut: tout });
+    }
+  } catch {
+    /* table empty / absent — zeros */
+  }
+
+  const estCostUsd =
+    (tokensIn / 1_000_000) * USD_PER_MTOK_IN + (tokensOut / 1_000_000) * USD_PER_MTOK_OUT;
+  const spent = tokensIn + tokensOut;
+  return {
+    month,
+    tokensIn,
+    tokensOut,
+    estCostUsd: Math.round(estCostUsd * 100) / 100,
+    estCostMyr: Math.round(estCostUsd * USD_TO_MYR_EST * 100) / 100,
+    capTokens,
+    spentPctOfCap: Math.round((spent / capTokens) * 1000) / 10,
+    allowed: spent < capTokens,
+    byAgent,
+  };
+}
+
+/**
+ * The budget brake: returns the API key only while month spend is under the
+ * cap. Fails OPEN on error (a broken monitor must never silence the briefs).
+ */
+export async function llmKeyIfBudgetAllows(
+  db: D1Database,
+  apiKey: string | undefined,
+): Promise<string | undefined> {
+  if (!apiKey) return undefined;
+  try {
+    const u = await monthLlmUsage(db);
+    if (!u.allowed) {
+      console.warn(
+        `[agent-llm] monthly token cap reached (${u.tokensIn + u.tokensOut}/${u.capTokens}) — skipping LLM call`,
+      );
+      return undefined;
+    }
+    return apiKey;
+  } catch {
+    return apiKey;
+  }
+}
+
 /** Upsert one control row (only the provided flags change). */
 export async function setAgentControl(
   db: D1Database,

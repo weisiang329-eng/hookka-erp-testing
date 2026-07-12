@@ -36,7 +36,12 @@ import {
   loadLatestDeliveryAiFocus,
   transitDriftLearning,
 } from "../lib/delivery-agent";
-import { isAgentPaused, isKillSwitchOn, recordAgentRun } from "../lib/agent-console";
+import {
+  isAgentPaused,
+  isKillSwitchOn,
+  recordAgentRun,
+  llmKeyIfBudgetAllows,
+} from "../lib/agent-console";
 
 const app = new Hono<Env>();
 
@@ -307,7 +312,7 @@ app.post("/run", async (c) => {
     const data = await recordAgentRun(c.var.DB, "delivery-run", async (run) => {
       const sink = { tokensIn: 0, tokensOut: 0 };
       const r = await runDeliveryAgent(c.var.DB, orgId, {
-        anthropicApiKey: c.env.ANTHROPIC_API_KEY,
+        anthropicApiKey: await llmKeyIfBudgetAllows(c.var.DB, c.env.ANTHROPIC_API_KEY),
         usageSink: sink,
       });
       run.addTokens(sink.tokensIn, sink.tokensOut);
@@ -369,7 +374,7 @@ internal.post("/run-trigger", async (c) => {
     const data = await recordAgentRun(c.var.DB, "delivery-run", async (run) => {
       const sink = { tokensIn: 0, tokensOut: 0 };
       const r = await runDeliveryAgent(c.var.DB, DEFAULT_ORG_ID, {
-        anthropicApiKey: c.env.ANTHROPIC_API_KEY,
+        anthropicApiKey: await llmKeyIfBudgetAllows(c.var.DB, c.env.ANTHROPIC_API_KEY),
         usageSink: sink,
       });
       run.addTokens(sink.tokensIn, sink.tokensOut);

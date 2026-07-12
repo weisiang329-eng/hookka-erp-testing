@@ -31,6 +31,8 @@ import {
   ensureAgentTables,
   isKillSwitchOn,
   listAgentControls,
+  monthLlmUsage,
+  llmKeyIfBudgetAllows,
   recordAgentRun,
   setAgentControl,
   type AgentFamily,
@@ -258,7 +260,10 @@ app.get("/status", async (c) => {
     };
   });
 
-  return c.json({ success: true, data: { killAll, generatedAt: nowIso, agents } });
+  // LLM spend monitor (per-agent month tokens + estimated cost + budget cap).
+  const llm = await monthLlmUsage(db).catch(() => null);
+
+  return c.json({ success: true, data: { killAll, generatedAt: nowIso, agents, llm } });
 });
 
 // ── POST /run-now {agent} ────────────────────────────────────────────────────
@@ -311,7 +316,7 @@ app.post("/run-now", async (c) => {
     const result = await recordAgentRun(db, "delivery-run", async (run) => {
       const sink = { tokensIn: 0, tokensOut: 0 };
       const r = await runDeliveryAgent(db, DEFAULT_ORG_ID, {
-        anthropicApiKey: c.env.ANTHROPIC_API_KEY,
+        anthropicApiKey: await llmKeyIfBudgetAllows(db, c.env.ANTHROPIC_API_KEY),
         usageSink: sink,
       });
       run.addTokens(sink.tokensIn, sink.tokensOut);

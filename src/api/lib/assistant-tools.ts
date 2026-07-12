@@ -33,6 +33,18 @@ import {
 import { computeDeptSchedule } from "../routes/planning-schedule";
 import type { Cell } from "./planning-scheduler";
 import { promiseDelivery } from "./cs-agent";
+import {
+  listAgentControls,
+  monthLlmUsage,
+  recordAgentRun,
+  setAgentControl,
+  isKillSwitchOn,
+  type AgentFamily,
+  AGENT_FAMILIES,
+} from "./agent-console";
+import { generateProposals } from "./schedule-proposals";
+import { runLearning } from "./agent-learning";
+import { runDeliveryAgent } from "../routes/delivery-agent";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -6257,6 +6269,209 @@ const getDeliveryPromiseTool: ToolDefinition = {
 };
 
 // ---------------------------------------------------------------------------
+// v1.9 — Agent management by CONVERSATION (owner: "跟 agent 对话调整").
+// The Hookka AI chat becomes the place to talk TO the agent workforce:
+// status questions for any admin, control verbs for the SUPER_ADMIN only —
+// the same gates and audit trail as the Agent Console buttons.
+// ---------------------------------------------------------------------------
+
+function isSuperAdmin(c: Context<Env>): boolean {
+  const role = (c as unknown as { get: (k: string) => string | undefined })
+    .get("userRole")
+    ?.toUpperCase();
+  return role === "SUPER_ADMIN";
+}
+
+const agentOverviewTool: ToolDefinition = {
+  schema: {
+    name: "agent_overview",
+    description:
+      "Live status of the AI agent workforce (Production / Delivery / CS / Procurement): paused or running, auto-approve (full-auto) gate per agent, global kill switch, last runs with their self-scheduling reasons, pending proposal counts, and this month's LLM spend per agent vs the RM budget. Use when the user asks how the agents are doing, whether they ran, what they decided, or what they cost.",
+    input_schema: { type: "object", properties: {}, required: [] },
+  },
+  execute: async (c) => {
+    const db = c.var.DB;
+    const [controls, llm, killAll] = await Promise.all([
+      listAgentControls(db),
+      monthLlmUsage(db).catch(() => null),
+      isKillSwitchOn(db),
+    ]);
+    let lastRuns: unknown[] = [];
+    try {
+      const res = await db
+        .prepare(
+          "SELECT agent, started_at, status, summary FROM agent_runs ORDER BY started_at DESC LIMIT 12",
+        )
+        .bind()
+        .all<{
+          agent: string;
+          started_at?: string;
+          startedAt?: string;
+          status: string;
+          summary?: string | null;
+        }>();
+      lastRuns = (res.results ?? []).map((r) => ({
+        task: r.agent,
+        at: r.startedAt ?? r.started_at,
+        status: r.status,
+        summary: r.summary ?? null,
+      }));
+    } catch {
+      /* table absent */
+    }
+    const counts = async (sql: string): Promise<number> => {
+      try {
+        const r = await db.prepare(sql).bind().first<{ n: number | string }>();
+        return Number(r?.n) || 0;
+      } catch {
+        return 0;
+      }
+    };
+    const [pendingSchedule, pendingDelivery, pendingParams] = await Promise.all([
+      counts("SELECT COUNT(*) AS n FROM schedule_proposals WHERE status = 'PENDING'"),
+      counts("SELECT COUNT(*) AS n FROM delivery_proposals WHERE status = 'PENDING'"),
+      counts("SELECT COUNT(*) AS n FROM config_proposals WHERE status = 'PENDING'"),
+    ]);
+    return {
+      ok: true,
+      killAll,
+      controls,
+      pending: { scheduleProposals: pendingSchedule, deliveryProposals: pendingDelivery, parameterProposals: pendingParams },
+      lastRuns,
+      llm,
+      note: "Explain in the user's language. paused=stopped automatics; autoApprove=true means that agent applies its own proposals (full-auto).",
+    };
+  },
+};
+
+const agentControlTool: ToolDefinition = {
+  schema: {
+    name: "agent_control",
+    description:
+      "SUPER_ADMIN ONLY — command the agent workforce by conversation, same effect as the Agent Console buttons: pause/resume an agent, turn its full-auto gate on/off (auto_on applies its own proposals from the next run; every batch stays rollbackable), run a task right now, or flip the global kill switch. Confirm intent from the user's own words before calling; every action is audited.",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["pause", "resume", "auto_on", "auto_off", "run_now", "kill_all_on", "kill_all_off"],
+          description: "What to do.",
+        },
+        agent: {
+          type: "string",
+          enum: ["PRODUCTION", "DELIVERY", "CS", "PROCUREMENT"],
+          description: "Target agent family (required for pause/resume/auto_on/auto_off).",
+        },
+        task: {
+          type: "string",
+          enum: ["proposals", "learning", "delivery"],
+          description:
+            "For run_now: proposals = regenerate production schedule proposals; learning = production learning loop; delivery = full delivery agent cycle.",
+        },
+      },
+      required: ["action"],
+    },
+  },
+  execute: async (c, args) => {
+    if (!isSuperAdmin(c)) {
+      return { ok: false, error: "Only the SUPER_ADMIN can command agents. Ask the boss." };
+    }
+    const db = c.var.DB;
+    const action = String(args.action ?? "");
+    const agent = String(args.agent ?? "").toUpperCase() as AgentFamily;
+
+    if (["pause", "resume", "auto_on", "auto_off"].includes(action)) {
+      if (!AGENT_FAMILIES.includes(agent)) {
+        return { ok: false, error: "agent must be PRODUCTION | DELIVERY | CS | PROCUREMENT" };
+      }
+      const patch =
+        action === "pause"
+          ? { paused: true }
+          : action === "resume"
+            ? { paused: false }
+            : { autoApprove: action === "auto_on" };
+      await setAgentControl(db, agent, patch);
+      await emitAudit(c, {
+        resource: "agents",
+        resourceId: agent,
+        action: action,
+        after: patch,
+        source: "admin",
+      });
+      return { ok: true, agent, applied: patch };
+    }
+
+    if (action === "kill_all_on" || action === "kill_all_off") {
+      const on = action === "kill_all_on";
+      await setAgentControl(db, "ALL", { paused: on });
+      await emitAudit(c, {
+        resource: "agents",
+        resourceId: "ALL",
+        action: on ? "kill-all" : "kill-all-off",
+        source: "admin",
+      });
+      return { ok: true, killAll: on };
+    }
+
+    if (action === "run_now") {
+      if (await isKillSwitchOn(db)) {
+        return { ok: false, error: "Global kill switch is ON — lift it first." };
+      }
+      const task = String(args.task ?? "");
+      await emitAudit(c, {
+        resource: "agents",
+        resourceId: `run-now-${task}`,
+        action: "run-now",
+        source: "admin",
+      });
+      if (task === "proposals") {
+        const r = await recordAgentRun(db, "production-proposals", async (run) => {
+          const g = await generateProposals(db);
+          run.setSummary(
+            `proposed ${g.proposed} (unscheduled ${g.unscheduled} · overdue ${g.overdue}) (chat run-now)`,
+          );
+          return g;
+        });
+        return { ok: true, task, result: r };
+      }
+      if (task === "learning") {
+        const r = await recordAgentRun(db, "production-learning", async (run) => {
+          const l = await runLearning(db, { emitProposals: true });
+          run.setSummary(
+            `adherence ${l.overallAdherencePct == null ? "n/a" : `${l.overallAdherencePct}%`} · ${l.pendingConfigProposals} config proposal(s) pending (chat run-now)`,
+          );
+          return {
+            adherencePct: l.overallAdherencePct,
+            pendingConfigProposals: l.pendingConfigProposals,
+            otSignals: l.ot.length,
+          };
+        });
+        return { ok: true, task, result: r };
+      }
+      if (task === "delivery") {
+        const r = await recordAgentRun(db, "delivery-run", async (run) => {
+          const d = await runDeliveryAgent(db, getOrgId(c), {
+            anthropicApiKey: undefined, // chat-triggered runs skip the LLM focus
+          });
+          run.setSummary(
+            `${d.date} · plans ${d.proposals.loadPlans} · invoice gaps ${d.proposals.invoiceGaps} · auto-approved ${d.autoApproved} (chat run-now)`,
+          );
+          return d;
+        });
+        return { ok: true, task, result: r };
+      }
+      return { ok: false, error: "task must be proposals | learning | delivery" };
+    }
+
+    return { ok: false, error: "Unknown action." };
+  },
+};
+
+// Autonomy note: batch auto-apply is intentionally NOT a direct chat verb —
+// it is governed by the per-agent gate (auto_on/auto_off above), so "apply
+// them now" = turn the gate on and the next run/heartbeat drains the queue.
+
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
@@ -6341,6 +6556,10 @@ export const TOOLS: ToolDefinition[] = [
   getProductionScheduleTool,
   // v1.8 — CS Agent reasoned delivery promise (materials → production → delivery)
   getDeliveryPromiseTool,
+  // v1.9 — agent workforce management by conversation (status for admins,
+  // control verbs SUPER_ADMIN-gated inside the tool)
+  agentOverviewTool,
+  agentControlTool,
 ];
 
 const TOOL_BY_NAME = new Map<string, ToolDefinition>(

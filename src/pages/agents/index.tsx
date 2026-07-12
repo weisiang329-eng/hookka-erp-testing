@@ -62,15 +62,57 @@ type AgentStatus = {
   autoApprove: boolean;
   tasks: AgentTask[];
   today: { runs: number; proposalsGenerated: number; pendingProposals: number } | null;
+  cs?: { promises30d: number; enginePromises30d: number } | null;
   pendingConfigProposals: number;
   month: { runs: number; tokensIn: number; tokensOut: number } | null;
   recentErrors: AgentRun[];
 };
 
+type LlmUsage = {
+  month: string;
+  tokensIn: number;
+  tokensOut: number;
+  estCostUsd: number;
+  estCostMyr: number;
+  budgetMyrPerAgent: number;
+  byFamily: Array<{
+    family: string;
+    runs: number;
+    tokensIn: number;
+    tokensOut: number;
+    estCostMyr: number;
+    budgetMyr: number;
+    pctOfBudget: number;
+    allowed: boolean;
+  }>;
+};
+
 type StatusResponse = {
   success?: boolean;
   error?: string;
-  data?: { killAll: boolean; generatedAt: string; agents: AgentStatus[] };
+  data?: {
+    killAll: boolean;
+    generatedAt: string;
+    agents: AgentStatus[];
+    llm?: LlmUsage | null;
+  };
+};
+
+type AgentReview = {
+  windowDays: number;
+  production: {
+    decisions: { approved: number; rejected: number; rolledBack: number };
+    weekOnTime: { total: number; onTime: number; pct: number | null };
+  };
+  delivery: {
+    decisions: { approved: number; rejected: number };
+    threePl: { trips90d: number; onTimePct: number | null; freightVarianceSen: number };
+  };
+  cs: {
+    promises30d: number;
+    enginePromises30d: number;
+    hitRate: { measured: number; hits: number; pct: number | null };
+  };
 };
 
 type ConfigProposal = {
@@ -88,15 +130,42 @@ const AGENT_LABEL: Record<string, string> = {
   DELIVERY: "Delivery Agent",
   CS: "Customer Service Agent",
   PROCUREMENT: "Procurement Agent",
+  FINANCE: "Finance / AR Agent",
+  SALES: "Sales / Quotation Agent",
+  HR: "HR / Payroll Agent",
+  DATA_QUALITY: "Data Quality Agent",
+  INVENTORY: "Inventory Agent",
+  SERVICE: "Service Case Agent",
+  CHIEF_OF_STAFF: "Chief-of-Staff Agent",
 };
 
 const AGENT_BLURB: Record<string, string> = {
   PRODUCTION:
     "Morning brief · schedule proposals · learning loop (plan-vs-actual, flexible handoffs, humane forward OT).",
-  DELIVERY: "Load planning, 3PL vs own truck, POD + invoice closure.",
-  CS: "Promise-date orchestrator across production, materials and delivery.",
+  DELIVERY:
+    "Daily load plans, invoice-gap + POD closure, 3PL learning, transit-drift proposals that tune the CS promise engine.",
+  CS: "Promise-date orchestrator across production, materials and delivery. Every answer is logged for hit-rate learning.",
   PROCUREMENT: "Shortage → PO drafts, expediting, supplier reliability.",
+  FINANCE: "Missed invoices, aging + staged collection drafts, per-customer payment profiles.",
+  SALES: "OCR PO → SO draft, engine-backed promise dates in quotes, price-anomaly interception.",
+  HR: "Attendance/efficiency anomaly digests, pre-payroll checks. Never touches approved pay.",
+  DATA_QUALITY: "The 0711 tally audit, automated nightly: cross-page metric drift, future dates, orphans.",
+  INVENTORY: "Safety-stock triggers, dead-stock lists, batch aging.",
+  SERVICE: "New-case triage against original orders, repair-scope suggestions.",
+  CHIEF_OF_STAFF: "One page of everything awaiting your decision, across all agents.",
 };
+
+// Blueprint agents not yet returned by /status (no runtime yet) — rendered as
+// COMING SOON roster cards so the console shows the full JD lineup.
+const PLANNED_AGENT_IDS = [
+  "FINANCE",
+  "SALES",
+  "HR",
+  "DATA_QUALITY",
+  "INVENTORY",
+  "SERVICE",
+  "CHIEF_OF_STAFF",
+];
 
 const PARAM_LABEL: Record<string, string> = {
   "chain.sewHandoffDays": "Fab Cut → Fab Sew handoff (days)",
@@ -105,6 +174,14 @@ const PARAM_LABEL: Record<string, string> = {
   "chain.foamHandoffDays": "Framing → Foam handoff (days)",
   "chain.uphHandoffDays": "→ Upholstery handoff (days)",
 };
+
+function paramLabel(key: string): string {
+  const fixed = PARAM_LABEL[key];
+  if (fixed) return fixed;
+  const cs = /^cs\.transitDays\.([A-Z]{2,3})$/.exec(key);
+  if (cs) return `CS promise transit to ${cs[1]} (working days)`;
+  return key;
+}
 
 function fmtWhen(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -147,13 +224,16 @@ export default function AgentConsolePage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [killAll, setKillAll] = useState(false);
   const [agents, setAgents] = useState<AgentStatus[]>([]);
+  const [llm, setLlm] = useState<LlmUsage | null>(null);
+  const [review, setReview] = useState<AgentReview | null>(null);
   const [configProposals, setConfigProposals] = useState<ConfigProposal[]>([]);
 
   const load = useCallback(async () => {
     try {
-      const [statusRes, cpRes] = await Promise.all([
+      const [statusRes, cpRes, reviewRes] = await Promise.all([
         fetch("/api/agents/status", { credentials: "include" }),
         fetch("/api/agents/config-proposals?status=PENDING", { credentials: "include" }),
+        fetch("/api/agents/review", { credentials: "include" }),
       ]);
       const sj = (await statusRes.json()) as StatusResponse;
       if (!statusRes.ok || !sj?.success || !sj.data) {
@@ -161,8 +241,15 @@ export default function AgentConsolePage() {
       }
       setKillAll(sj.data.killAll);
       setAgents(sj.data.agents);
+      setLlm(sj.data.llm ?? null);
       const cj = (await cpRes.json()) as { success?: boolean; data?: ConfigProposal[] };
       setConfigProposals(cj?.data ?? []);
+      try {
+        const rj = (await reviewRes.json()) as { success?: boolean; data?: AgentReview };
+        setReview(rj?.data ?? null);
+      } catch {
+        setReview(null);
+      }
     } catch (err) {
       toast.error(`Failed to load agent status: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -200,7 +287,7 @@ export default function AgentConsolePage() {
     [load, toast],
   );
 
-  const runNow = async (agent: "brief" | "proposals" | "learning") => {
+  const runNow = async (agent: "brief" | "proposals" | "learning" | "delivery") => {
     await post("run-now", { agent }, `Run started and finished: ${agent}.`, `run-${agent}`);
   };
 
@@ -265,11 +352,11 @@ export default function AgentConsolePage() {
   const toggleGate = async (a: AgentStatus) => {
     const next = !a.autoApprove;
     const ok = await confirm({
-      title: next ? "Open the approval gate (full-auto)" : "Close the approval gate",
+      title: next ? "Switch to full-auto" : "Back to propose-then-approve",
       message: next
-        ? "Marks this agent as approved for full-auto mode. NOTE: proposals still require your manual approval today — this flag is the switch the auto-apply step will honour once you ask for it to be wired."
-        : "The agent returns to propose-then-approve mode.",
-      confirmLabel: next ? "Set full-auto flag" : "Back to proposals",
+        ? "The agent will APPLY its own proposals on its scheduled runs (Production: writes due dates on WAITING cards, batch by batch, every batch rollbackable; Delivery: marks its plans approved — it still never creates or sends documents). You keep Pause, Kill all and Rollback."
+        : "The agent goes back to waiting for your approval before anything is applied.",
+      confirmLabel: next ? "Go full-auto" : "Require my approval",
       danger: next,
     });
     if (!ok) return;
@@ -337,6 +424,125 @@ export default function AgentConsolePage() {
         <div className="rounded-md border border-[#9A3A2D] bg-[#9A3A2D]/10 px-4 py-2.5 text-sm text-[#9A3A2D] font-medium">
           Global kill switch is ON — all agents are stopped (automatic and manual runs).
         </div>
+      )}
+
+      {/* ── Agent Scorecard — review agents like staff: what they SAID vs what
+          actually HAPPENED, plus the owner's own decision tally on their
+          proposals. Auto-computed from system records; no self-grading. ── */}
+      {!loading && review && (
+        <Card>
+          <CardContent className="p-4">
+            <div className="text-xs font-semibold text-[#6B7280] mb-2">
+              Agent Scorecard — last {review.windowDays} days (said vs happened)
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2">
+                <div className="text-[11px] font-semibold text-[#4B5563] mb-1">Production</div>
+                <div className="text-sm text-[#1F1D1B]">
+                  Cards due last 7d finished on time:{" "}
+                  <span className="font-semibold">
+                    {review.production.weekOnTime.pct == null
+                      ? "no due cards"
+                      : `${review.production.weekOnTime.pct}% (${review.production.weekOnTime.onTime}/${review.production.weekOnTime.total})`}
+                  </span>
+                </div>
+                <div className="mt-1 text-[11px] text-[#6B7280]">
+                  Your verdicts: {review.production.decisions.approved} approved ·{" "}
+                  {review.production.decisions.rejected} rejected ·{" "}
+                  {review.production.decisions.rolledBack} rolled back
+                </div>
+              </div>
+              <div className="rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2">
+                <div className="text-[11px] font-semibold text-[#4B5563] mb-1">Delivery</div>
+                <div className="text-sm text-[#1F1D1B]">
+                  3PL on-time (90d):{" "}
+                  <span className="font-semibold">
+                    {review.delivery.threePl.onTimePct == null
+                      ? "no rated trips"
+                      : `${review.delivery.threePl.onTimePct}%`}
+                  </span>{" "}
+                  <span className="text-[11px] text-[#6B7280]">
+                    over {review.delivery.threePl.trips90d} trips · freight vs card{" "}
+                    {review.delivery.threePl.freightVarianceSen >= 0 ? "+" : "−"}RM{" "}
+                    {(Math.abs(review.delivery.threePl.freightVarianceSen) / 100).toFixed(0)}
+                  </span>
+                </div>
+                <div className="mt-1 text-[11px] text-[#6B7280]">
+                  Your verdicts: {review.delivery.decisions.approved} approved ·{" "}
+                  {review.delivery.decisions.rejected} rejected
+                </div>
+              </div>
+              <div className="rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2">
+                <div className="text-[11px] font-semibold text-[#4B5563] mb-1">
+                  Customer Service
+                </div>
+                <div className="text-sm text-[#1F1D1B]">
+                  Promise hit rate:{" "}
+                  <span className="font-semibold">
+                    {review.cs.hitRate.pct == null
+                      ? "collecting (no delivered promises yet)"
+                      : `${review.cs.hitRate.pct}% (${review.cs.hitRate.hits}/${review.cs.hitRate.measured})`}
+                  </span>
+                </div>
+                <div className="mt-1 text-[11px] text-[#6B7280]">
+                  {review.cs.promises30d} promises given · {review.cs.enginePromises30d}{" "}
+                  engine-grade
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── LLM spend monitor — per-agent month cost against the RM budget
+          (owner: RM 150 / agent / month; kv agent_schedule.llmMonthlyBudgetMyr).
+          At an agent's limit only ITS AI paragraphs stop; engines keep
+          running and every other agent keeps talking. ── */}
+      {!loading && llm && (
+        <Card>
+          <CardContent className="p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-semibold text-[#6B7280]">
+                  AI spend this month ({llm.month}) — estimate
+                </div>
+                <div className="text-xl font-bold text-[#1F1D1B]">
+                  ≈ RM {llm.estCostMyr.toFixed(2)}
+                  <span className="ml-2 text-xs font-normal text-[#6B7280]">
+                    (US${llm.estCostUsd.toFixed(2)} · {llm.tokensIn.toLocaleString()} in /{" "}
+                    {llm.tokensOut.toLocaleString()} out tokens)
+                  </span>
+                </div>
+              </div>
+              <div className="text-xs text-[#6B7280]">
+                Limit: RM {llm.budgetMyrPerAgent.toLocaleString()} per agent / month
+              </div>
+            </div>
+            {llm.byFamily.length > 0 && (
+              <div className="mt-3 space-y-1.5">
+                {llm.byFamily.map((b) => (
+                  <div key={b.family} className="flex items-center gap-3">
+                    <span className="w-28 shrink-0 text-[11px] font-medium text-[#4B5563]">
+                      {AGENT_LABEL[b.family]?.replace(" Agent", "") ?? b.family}
+                    </span>
+                    <div className="flex-1 h-2 rounded-full bg-[#F0ECE9] overflow-hidden">
+                      <div
+                        className={`h-full rounded-full ${b.pctOfBudget >= 80 ? "bg-[#9A3A2D]" : "bg-[#4F7C3A]"}`}
+                        style={{ width: `${Math.min(100, b.pctOfBudget)}%` }}
+                      />
+                    </div>
+                    <span className="w-40 shrink-0 text-right text-[11px] text-[#6B7280]">
+                      RM {b.estCostMyr.toFixed(2)} · {b.runs} runs
+                      {!b.allowed && (
+                        <span className="ml-1 font-semibold text-[#9A3A2D]">LIMIT HIT</span>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
       )}
 
       {loading ? (
@@ -545,7 +751,7 @@ export default function AgentConsolePage() {
                           {configProposals.map((p) => (
                             <tr key={p.id} className="border-b border-[#E2DDD8]">
                               <td className="px-3 py-2 font-medium text-[#1F1D1B] whitespace-nowrap">
-                                {PARAM_LABEL[p.paramKey] ?? p.paramKey}
+                                {paramLabel(p.paramKey)}
                               </td>
                               <td className="px-3 py-2 text-right">{p.currentValue ?? "—"}</td>
                               <td className="px-3 py-2 text-right font-semibold text-[#4F7C3A]">
@@ -599,37 +805,177 @@ export default function AgentConsolePage() {
             </Card>
           )}
 
-          {/* ── Other agents — v1 surfaces live for Delivery + CS; console
-              controls (pause/run-now per task) wire up in the next round.
-              Procurement stays parked until its data-readiness gate passes. ── */}
+          {/* ── Delivery — full console lifecycle (pause gates its cron, run-now,
+              run log + tokens). CS — live, question-driven (no cron): KPI
+              counters from the promise log. Procurement — parked behind its
+              data-readiness gate. ── */}
           {others.map((a) => {
-            const v1: Record<string, string> = {
-              DELIVERY:
-                "LIVE v1 — proposals + brief on the Delivery page → “Delivery Agent” tab (load plans, invoice gaps, POD chases). Console controls wire up next.",
-              CS:
-                "LIVE v1 — ask Hookka AI “when can SO-xxx be delivered” (materials → production → delivery reasoning chain), or GET /api/cs-agent/promise. Console controls wire up next.",
-            };
-            const liveV1 = v1[a.id];
+            const live = a.live;
+            const lastRun = a.tasks[0]?.lastRun ?? null;
             return (
-              <Card key={a.id} className={liveV1 ? "" : "opacity-70"}>
+              <Card key={a.id} className={live ? "" : "opacity-70"}>
                 <CardHeader>
-                  <CardTitle className="flex items-center gap-2 text-[#1F1D1B]">
-                    <span className={`inline-block h-3 w-3 rounded-full ${liveV1 ? "bg-[#4F7C3A]" : "bg-[#9CA3AF]"}`} />
-                    {AGENT_LABEL[a.id] ?? a.id}
-                    <span className={`text-[11px] font-semibold rounded-full px-2 py-0.5 ${liveV1 ? "bg-[#EEF3E4] text-[#4F7C3A]" : "bg-[#F0ECE9] text-[#6B7280]"}`}>
-                      {liveV1 ? "LIVE · v1" : "COMING SOON"}
-                    </span>
-                  </CardTitle>
-                  <p className="mt-1 text-xs text-[#6B7280]">{AGENT_BLURB[a.id] ?? ""}</p>
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <CardTitle className="flex items-center gap-2 text-[#1F1D1B]">
+                        {(() => {
+                          const l = lightOf(a, killAll);
+                          return (
+                            <span
+                              className={`inline-block h-3 w-3 rounded-full ${LIGHT_STYLE[l].dot}`}
+                              title={LIGHT_STYLE[l].label}
+                            />
+                          );
+                        })()}
+                        {AGENT_LABEL[a.id] ?? a.id}
+                        <span
+                          className={`text-[11px] font-semibold rounded-full px-2 py-0.5 ${live ? "bg-[#EEF3E4] text-[#4F7C3A]" : "bg-[#F0ECE9] text-[#6B7280]"}`}
+                        >
+                          {live ? "LIVE" : "COMING SOON"}
+                        </span>
+                        {a.paused && (
+                          <span className="text-[11px] font-semibold rounded-full bg-[#9A3A2D]/10 text-[#9A3A2D] px-2 py-0.5">
+                            PAUSED
+                          </span>
+                        )}
+                      </CardTitle>
+                      <p className="mt-1 text-xs text-[#6B7280]">{AGENT_BLURB[a.id] ?? ""}</p>
+                    </div>
+                    {a.id === "DELIVERY" && live && (
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void runNow("delivery")}
+                          disabled={busy === "run-delivery" || killAll}
+                        >
+                          {busy === "run-delivery" ? (
+                            <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                          ) : (
+                            <Play className="h-4 w-4 mr-1" />
+                          )}
+                          Run now
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void togglePause(a)}
+                          disabled={busy === `pause-${a.id}`}
+                        >
+                          {a.paused ? (
+                            <Play className="h-4 w-4 mr-1" />
+                          ) : (
+                            <Pause className="h-4 w-4 mr-1" />
+                          )}
+                          {a.paused ? "Resume" : "Pause"}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
                 </CardHeader>
                 <CardContent>
-                  <div className={`text-xs ${liveV1 ? "text-[#4B5563]" : "text-[#9CA3AF]"}`}>
-                    {liveV1 ?? "Planned in the agents blueprint — controls activate when the agent ships."}
-                  </div>
+                  {a.id === "DELIVERY" && live ? (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                        {[
+                          {
+                            label: "Proposals generated today",
+                            value: a.today?.proposalsGenerated ?? 0,
+                          },
+                          {
+                            label: "Pending delivery proposals",
+                            value: a.today?.pendingProposals ?? 0,
+                          },
+                          {
+                            label: "Last run",
+                            value: lastRun
+                              ? `${fmtWhen(lastRun.startedAt)} · ${lastRun.status}`
+                              : "never",
+                          },
+                        ].map((s) => (
+                          <div
+                            key={s.label}
+                            className="rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2"
+                          >
+                            <div className="text-[11px] text-[#6B7280]">{s.label}</div>
+                            <div className="text-base font-semibold text-[#1F1D1B]">{s.value}</div>
+                          </div>
+                        ))}
+                      </div>
+                      {lastRun?.summary && (
+                        <div className="text-xs text-[#6B7280]">{lastRun.summary}</div>
+                      )}
+                      <div className="text-xs text-[#4B5563]">
+                        Working surface: Delivery page → “Delivery Agent” tab (load plans,
+                        invoice gaps, POD chases, AI focus). First run 07:30 MYT, then it
+                        self-schedules extra sweeps when dispatches/deliveries spike — each
+                        run logs its own reason. Transit-drift findings appear above as CS
+                        parameter proposals.
+                      </div>
+                    </div>
+                  ) : a.id === "CS" && live ? (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                        {[
+                          { label: "Promises answered (30d)", value: a.cs?.promises30d ?? 0 },
+                          {
+                            label: "Engine-grade answers (30d)",
+                            value: a.cs?.enginePromises30d ?? 0,
+                          },
+                          {
+                            label: "Answer channel",
+                            value: "Hookka AI · API",
+                          },
+                        ].map((s) => (
+                          <div
+                            key={s.label}
+                            className="rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2"
+                          >
+                            <div className="text-[11px] text-[#6B7280]">{s.label}</div>
+                            <div className="text-base font-semibold text-[#1F1D1B]">{s.value}</div>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="text-xs text-[#4B5563]">
+                        Ask Hookka AI “when can SO-xxx be delivered” — materials → production →
+                        delivery reasoning chain. Every answer is logged; hit-rate KPI activates
+                        as deliveries land against promises.
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-xs text-[#9CA3AF]">
+                      {a.id === "PROCUREMENT"
+                        ? "Parked until the data-readiness gate passes (supplier lead times ≥90%, PO expected dates ≥90%, MRP ≤7 days old) — see GET /api/cs-agent/procurement/readiness."
+                        : "Planned in the agents blueprint — controls activate when the agent ships."}
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             );
           })}
+
+          {/* ── Blueprint roster — designed (JD in docs/AGENTS-BLUEPRINT.md), not
+              yet built. Kept visible so the console always shows the full
+              lineup and what's next. ── */}
+          {PLANNED_AGENT_IDS.map((id) => (
+            <Card key={id} className="opacity-70">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-[#1F1D1B]">
+                  <span className="inline-block h-3 w-3 rounded-full bg-[#9CA3AF]" />
+                  {AGENT_LABEL[id] ?? id}
+                  <span className="text-[11px] font-semibold rounded-full px-2 py-0.5 bg-[#F0ECE9] text-[#6B7280]">
+                    COMING SOON
+                  </span>
+                </CardTitle>
+                <p className="mt-1 text-xs text-[#6B7280]">{AGENT_BLURB[id] ?? ""}</p>
+              </CardHeader>
+              <CardContent>
+                <div className="text-xs text-[#9CA3AF]">
+                  Planned in the agents blueprint — controls activate when the agent ships.
+                </div>
+              </CardContent>
+            </Card>
+          ))}
         </div>
       )}
 

@@ -997,3 +997,13 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
   (DocDateCtx.glMemo). Group-level PI chain still serves Stock Summary + closing-stock GL
   posting. Until imports exist COGS is FG/WIP/labour only (GP > sales) — owner-accepted
   interim shape.
+
+## 2026-07-12 (morning) — Agent 再进化 (owner ask)
+- [x] 答概念问题：是否全部基于 LLM / 是否都会自我进化+懂数据 (诚实盘点)
+- [x] Console 补齐全部 blueprint Agent ID (10 个卡片, 未建=COMING SOON)
+- [x] 共用 LLM 大脑抽层 (agent-brain.ts, production-brief 重构复用)
+- [x] Delivery 进化: LLM focus + console pause/run-now 接线 + 学习环→跨 Agent 调参提案 (实际州运输天数 → cs-agent transitDays)
+- [x] CS 进化: promise log 表 + 承诺达成率 KPI 基础
+- [ ] gates → merge main → deploy → prod 验证 → 文档/memory
+
+- [x] 自主排班心跳 (owner 裁定: 节奏 Agent 自己定) — agent-scheduler.ts + heartbeat 30min + 理由留痕

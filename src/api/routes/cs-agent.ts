@@ -67,6 +67,7 @@ app.get("/promise", async (c) => {
     qty,
     stateCode,
     orgId,
+    channel: "api",
   });
   return c.json({ success: true, data });
 });

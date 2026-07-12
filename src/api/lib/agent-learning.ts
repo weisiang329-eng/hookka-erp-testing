@@ -279,6 +279,48 @@ export const CONFIG_PROPOSAL_KEYS: Record<string, keyof ChainConfig & string> = 
   "chain.uphHandoffDays": "uphHandoffDays",
 };
 
+/**
+ * Write ONE PENDING config proposal, skipping when the same param already has
+ * a PENDING row (learners run daily — they must never stack duplicates).
+ * Shared by every agent family's learning loop (production handoffs, delivery
+ * transit drift, ...); the approve-time whitelist in routes/agent-console.ts
+ * decides what a key may actually write. Returns true when a row was created.
+ */
+export async function proposeConfigParam(
+  db: DbLike,
+  p: {
+    paramKey: string;
+    currentValue: string | null;
+    proposedValue: string;
+    reason: string;
+  },
+): Promise<boolean> {
+  await ensureConfigProposalTable(db);
+  const existing = await db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM config_proposals WHERE param_key = ? AND status = 'PENDING'",
+    )
+    .bind(p.paramKey)
+    .first<{ n: number | string }>();
+  if ((Number(existing?.n) || 0) > 0) return false;
+  await db
+    .prepare(
+      `INSERT INTO config_proposals
+         (id, generated_at, param_key, current_value, proposed_value, reason)
+       VALUES (?,?,?,?,?,?)`,
+    )
+    .bind(
+      crypto.randomUUID(),
+      new Date().toISOString(),
+      p.paramKey,
+      p.currentValue,
+      p.proposedValue,
+      p.reason,
+    )
+    .run();
+  return true;
+}
+
 // ── 1 · Plan vs actual ───────────────────────────────────────────────────────
 
 interface AdherenceRawRow {
@@ -518,35 +560,17 @@ async function emitConfigProposals(
   db: DbLike,
   findings: HandoffFinding[],
 ): Promise<number> {
-  await ensureConfigProposalTable(db);
   let created = 0;
   for (const f of findings) {
     if (!f.flagged || f.proposedDays == null) continue;
-    const paramKey = `chain.${f.key}`;
-    const existing = await db
-      .prepare(
-        "SELECT COUNT(*) AS n FROM config_proposals WHERE param_key = ? AND status = 'PENDING'",
-      )
-      .bind(paramKey)
-      .first<{ n: number | string }>();
-    if ((Number(existing?.n) || 0) > 0) continue;
     const drift = f.driftDays ?? 0;
-    await db
-      .prepare(
-        `INSERT INTO config_proposals
-           (id, generated_at, param_key, current_value, proposed_value, reason)
-         VALUES (?,?,?,?,?,?)`,
-      )
-      .bind(
-        crypto.randomUUID(),
-        new Date().toISOString(),
-        paramKey,
-        String(f.configuredDays),
-        String(f.proposedDays),
-        `${f.fromDepts.join("/")} -> ${f.toDept}: actual avg handoff ${f.actualAvgDays} working days over ${f.samples} orders (last ${HANDOFF_LOOKBACK_DAYS}d) vs configured ${f.configuredDays} — drift ${drift > 0 ? "+" : ""}${drift}d sustained`,
-      )
-      .run();
-    created++;
+    const wrote = await proposeConfigParam(db, {
+      paramKey: `chain.${f.key}`,
+      currentValue: String(f.configuredDays),
+      proposedValue: String(f.proposedDays),
+      reason: `${f.fromDepts.join("/")} -> ${f.toDept}: actual avg handoff ${f.actualAvgDays} working days over ${f.samples} orders (last ${HANDOFF_LOOKBACK_DAYS}d) vs configured ${f.configuredDays} — drift ${drift > 0 ? "+" : ""}${drift}d sustained`,
+    });
+    if (wrote) created++;
   }
   return created;
 }

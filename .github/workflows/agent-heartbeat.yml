@@ -1,0 +1,50 @@
+name: Agents — Self-Scheduling Heartbeat
+
+# Deliberately DUMB beat, hourly (owner 2026-07-12: 1h cadence). The cron
+# carries NO schedule
+# knowledge — each beat, the endpoint asks lib/agent-scheduler.ts which
+# agents want to run based on the factory's live pulse (delivery events,
+# new sales orders, time since last run, daily caps). Run-or-skip reasons
+# land in agent_runs and show on the Agent Console.
+#
+# Owner overrides honoured server-side: per-family Pause, global kill
+# switch, hard bounds (max 6 runs/day, min 1h gap). Token control: only the
+# first delivery run of a day writes a fresh AI focus.
+#
+# Auth: x-cron-secret (repo secret CRON_SECRET), same as daily-reports.yml.
+# The punctual 07:00 reports + 07:30 delivery crons stay; the heartbeat
+# self-skips when they already ran and acts as their fallback when they fail.
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  beat:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST heartbeat
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::CRON_SECRET repo secret is empty"
+            exit 1
+          fi
+          url="https://erp.hookka.com/api/internal/agents/heartbeat"
+          response=$(curl --silent --show-error --write-out '\nHTTP_STATUS:%{http_code}' \
+            --max-time 120 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "x-cron-secret: $CRON_SECRET" \
+            --data '{}' \
+            "$url" || true)
+          status=$(echo "$response" | tail -n1 | sed 's/HTTP_STATUS://')
+          body=$(echo "$response" | sed '$d')
+          echo "Status: $status"
+          echo "Body: $body"
+          if [ "$status" != "200" ]; then
+            echo "::error::heartbeat failed with HTTP $status"
+            exit 1
+          fi

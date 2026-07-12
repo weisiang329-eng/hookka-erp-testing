@@ -200,6 +200,34 @@ export async function isAgentPaused(
   }
 }
 
+/**
+ * True when the family's auto-approve gate is ON and nothing pauses it.
+ * This is the AUTONOMY switch (owner ruling 2026-07-12: reversible actions
+ * are the agent's own decision) — agent-initiated runs apply their own
+ * proposals when this returns true. Fails CLOSED (false) on any error:
+ * autonomy must never turn itself on by accident.
+ */
+export async function isAutoApproveOn(
+  db: D1Database,
+  family: AgentFamily,
+): Promise<boolean> {
+  try {
+    await ensureAgentTables(db);
+    const res = await db
+      .prepare(
+        "SELECT agent, paused, auto_approve FROM agent_controls WHERE agent IN ('ALL', ?)",
+      )
+      .bind(family)
+      .all<ControlRow>();
+    const rows = res.results ?? [];
+    if (rows.some((r) => Number(r.paused) === 1)) return false;
+    const fam = rows.find((r) => r.agent === family);
+    return Number(fam?.autoApprove ?? fam?.auto_approve) === 1;
+  } catch {
+    return false;
+  }
+}
+
 /** True when ONLY the global kill switch (agent='ALL') is on. */
 export async function isKillSwitchOn(db: D1Database): Promise<boolean> {
   try {
@@ -235,6 +263,179 @@ export async function listAgentControls(
     autoApprove: Number(r.autoApprove ?? r.auto_approve) === 1,
     updatedAt: (r.updatedAt ?? r.updated_at) ?? null,
   }));
+}
+
+// ── LLM spend monitor + per-agent monthly budget limit ───────────────────────
+//
+// Owner ruling 2026-07-12: no early auto-muting — each agent FAMILY gets a
+// hard monthly LLM budget of RM 150 (kv agent_schedule.llmMonthlyBudgetMyr,
+// bounded 10..10000) and talks freely until it's spent. At the limit only
+// that family's AI paragraphs stop (Console shows it in red); every
+// deterministic engine keeps running untouched. Token usage comes from
+// agent_runs (recordAgentRun writes it on every run).
+
+/** Claude Sonnet 4.5 list prices — for the console's ESTIMATE only. */
+const USD_PER_MTOK_IN = 3;
+const USD_PER_MTOK_OUT = 15;
+const USD_TO_MYR_EST = 4.7;
+
+const DEFAULT_LLM_MONTHLY_BUDGET_MYR = 150; // per agent family, per month
+const MIN_LLM_BUDGET_MYR = 10;
+const MAX_LLM_BUDGET_MYR = 10_000;
+
+function estMyr(tokensIn: number, tokensOut: number): number {
+  const usd =
+    (tokensIn / 1_000_000) * USD_PER_MTOK_IN + (tokensOut / 1_000_000) * USD_PER_MTOK_OUT;
+  return Math.round(usd * USD_TO_MYR_EST * 100) / 100;
+}
+
+/** agent_runs task id → agent family (budget is per FAMILY). */
+export function taskFamily(task: string): AgentFamily | "OTHER" {
+  const t = task.toLowerCase();
+  if (t.startsWith("production")) return "PRODUCTION";
+  if (t.startsWith("delivery")) return "DELIVERY";
+  if (t.startsWith("cs")) return "CS";
+  if (t.startsWith("procurement")) return "PROCUREMENT";
+  return "OTHER";
+}
+
+export interface LlmFamilyUsage {
+  family: string;
+  runs: number;
+  tokensIn: number;
+  tokensOut: number;
+  estCostMyr: number;
+  budgetMyr: number;
+  pctOfBudget: number;
+  /** False once this family has spent its month budget. */
+  allowed: boolean;
+}
+
+export interface LlmMonthUsage {
+  month: string;
+  tokensIn: number;
+  tokensOut: number;
+  estCostUsd: number;
+  estCostMyr: number;
+  /** The per-agent monthly limit (RM). */
+  budgetMyrPerAgent: number;
+  byFamily: LlmFamilyUsage[];
+}
+
+export async function monthLlmUsage(db: D1Database): Promise<LlmMonthUsage> {
+  await ensureAgentTables(db);
+  const month = new Date().toISOString().slice(0, 7);
+
+  let budgetMyr = DEFAULT_LLM_MONTHLY_BUDGET_MYR;
+  try {
+    const kv = await db
+      .prepare("SELECT value FROM kv_config WHERE key = ?")
+      .bind("agent_schedule")
+      .first<{ value: string }>();
+    if (kv?.value) {
+      const parsed = JSON.parse(kv.value) as { llmMonthlyBudgetMyr?: unknown };
+      const n = Number(parsed?.llmMonthlyBudgetMyr);
+      if (Number.isFinite(n)) {
+        budgetMyr = Math.min(MAX_LLM_BUDGET_MYR, Math.max(MIN_LLM_BUDGET_MYR, n));
+      }
+    }
+  } catch {
+    /* defaults */
+  }
+
+  const famMap = new Map<string, { runs: number; tokensIn: number; tokensOut: number }>();
+  let tokensIn = 0;
+  let tokensOut = 0;
+  try {
+    const res = await db
+      .prepare(
+        `SELECT agent,
+                COUNT(*) AS runs,
+                SUM(COALESCE(tokens_in, 0)) AS tokens_in,
+                SUM(COALESCE(tokens_out, 0)) AS tokens_out
+           FROM agent_runs
+          WHERE substr(started_at, 1, 7) = ?
+          GROUP BY agent
+          ORDER BY agent`,
+      )
+      .bind(month)
+      .all<{
+        agent: string;
+        runs: number | string;
+        tokens_in?: number | string;
+        tokens_out?: number | string;
+        tokensIn?: number | string;
+        tokensOut?: number | string;
+      }>();
+    for (const r of res.results ?? []) {
+      const tin = Number(r.tokensIn ?? r.tokens_in) || 0;
+      const tout = Number(r.tokensOut ?? r.tokens_out) || 0;
+      tokensIn += tin;
+      tokensOut += tout;
+      const fam = taskFamily(r.agent);
+      const agg = famMap.get(fam) ?? { runs: 0, tokensIn: 0, tokensOut: 0 };
+      agg.runs += Number(r.runs) || 0;
+      agg.tokensIn += tin;
+      agg.tokensOut += tout;
+      famMap.set(fam, agg);
+    }
+  } catch {
+    /* table empty / absent — zeros */
+  }
+
+  const byFamily: LlmFamilyUsage[] = [...famMap.entries()].map(([family, a]) => {
+    const cost = estMyr(a.tokensIn, a.tokensOut);
+    return {
+      family,
+      runs: a.runs,
+      tokensIn: a.tokensIn,
+      tokensOut: a.tokensOut,
+      estCostMyr: cost,
+      budgetMyr,
+      pctOfBudget: Math.round((cost / budgetMyr) * 1000) / 10,
+      allowed: cost < budgetMyr,
+    };
+  });
+  byFamily.sort((a, b) => b.estCostMyr - a.estCostMyr);
+
+  const estUsd =
+    (tokensIn / 1_000_000) * USD_PER_MTOK_IN + (tokensOut / 1_000_000) * USD_PER_MTOK_OUT;
+  return {
+    month,
+    tokensIn,
+    tokensOut,
+    estCostUsd: Math.round(estUsd * 100) / 100,
+    estCostMyr: estMyr(tokensIn, tokensOut),
+    budgetMyrPerAgent: budgetMyr,
+    byFamily,
+  };
+}
+
+/**
+ * The per-agent budget limit: returns the API key while the FAMILY's month
+ * spend is under RM budget; at the limit the key is withheld so only that
+ * family's AI paragraphs stop. Fails OPEN on monitor errors (a broken
+ * monitor must never silence the briefs).
+ */
+export async function llmKeyIfBudgetAllows(
+  db: D1Database,
+  apiKey: string | undefined,
+  family: AgentFamily,
+): Promise<string | undefined> {
+  if (!apiKey) return undefined;
+  try {
+    const u = await monthLlmUsage(db);
+    const fam = u.byFamily.find((f) => f.family === family);
+    if (fam && !fam.allowed) {
+      console.warn(
+        `[agent-llm] ${family} hit its RM ${fam.budgetMyr} month budget (spent ≈ RM ${fam.estCostMyr}) — withholding LLM key`,
+      );
+      return undefined;
+    }
+    return apiKey;
+  } catch {
+    return apiKey;
+  }
 }
 
 /** Upsert one control row (only the provided flags change). */

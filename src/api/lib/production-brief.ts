@@ -37,6 +37,7 @@ import {
 } from "./efficiency-report";
 import { loadCapacityConfig, type CapacityConfig } from "./planning-capacity";
 import { runLearning, type LearningData } from "./agent-learning";
+import { askAgentBrain } from "./agent-brain";
 
 // D1-compat DB shape (matches the SupabaseAdapter used across routes).
 interface DbLike {
@@ -272,10 +273,6 @@ async function collectCutRateDrift(
 // AI focus — optional, best-effort, never blocks the brief.
 // ---------------------------------------------------------------------------
 
-const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
-const ANTHROPIC_VERSION = "2023-06-01";
-const BRIEF_MODEL = "claude-sonnet-4-5-20250929"; // same as the in-app assistant
-
 async function generateAiFocus(
   apiKey: string | undefined,
   data: Omit<BriefData, "aiFocus">,
@@ -352,45 +349,16 @@ async function generateAiFocus(
           }
         : null,
     };
-    const res = await fetch(ANTHROPIC_URL, {
-      method: "POST",
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": ANTHROPIC_VERSION,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: BRIEF_MODEL,
-        max_tokens: 700,
-        system:
-          "你是 Hookka 家具厂的生产 Agent。根据 JSON 数据用中文写一段《今日焦点》给老板：" +
-          "4-6 句话，先讲今天最要紧的事（逾期最严重的单、CNC 排布建议——同布料的排在一起换布最少、" +
-          "哪个部门今天最重),再点出昨天的异常（效率低的人、切割速度和配置偏差)。" +
-          "口吻直接、工厂白话、不用技术词。只输出这段话本身，不要标题、不要列表符号。",
-        messages: [
-          { role: "user", content: JSON.stringify(compact) },
-        ],
-      }),
+    return await askAgentBrain(apiKey, {
+      system:
+        "你是 Hookka 家具厂的生产 Agent。根据 JSON 数据用中文写一段《今日焦点》给老板：" +
+        "4-6 句话，先讲今天最要紧的事（逾期最严重的单、CNC 排布建议——同布料的排在一起换布最少、" +
+        "哪个部门今天最重),再点出昨天的异常（效率低的人、切割速度和配置偏差)。" +
+        "口吻直接、工厂白话、不用技术词。只输出这段话本身，不要标题、不要列表符号。",
+      payload: compact,
+      maxTokens: 700,
+      usageSink,
     });
-    if (!res.ok) {
-      console.warn(`[brief/ai] Anthropic ${res.status}`);
-      return null;
-    }
-    const j = (await res.json()) as {
-      content?: Array<{ type: string; text?: string }>;
-      usage?: { input_tokens?: number; output_tokens?: number };
-    };
-    // Surface Anthropic token usage to the Agent Console's run log.
-    if (usageSink && j.usage) {
-      usageSink.tokensIn += Number(j.usage.input_tokens) || 0;
-      usageSink.tokensOut += Number(j.usage.output_tokens) || 0;
-    }
-    const text = (j.content ?? [])
-      .filter((b) => b.type === "text" && typeof b.text === "string")
-      .map((b) => b.text)
-      .join("")
-      .trim();
-    return text || null;
   } catch (err) {
     console.warn("[brief/ai] failed:", err);
     return null;

@@ -8,7 +8,7 @@
 //
 // What lives here:
 //   1. Strict MIME / extension allow-list (rejects .exe / .bat / .ps1 etc.)
-//   2. Size guardrails (10 MB per file, 3 files per message)
+//   2. Size guardrails (10 MB per file, 5 files per message)
 //   3. Pure parsers:
 //        - Image     → returns as-is (the model does vision directly)
 //        - PDF       → returns as-is to Anthropic's document content block
@@ -35,7 +35,7 @@ import type { AnthropicContentBlock } from "./anthropic-client";
 // ---------------------------------------------------------------------------
 
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MB per file
-export const MAX_ATTACHMENTS_PER_MESSAGE = 3;
+export const MAX_ATTACHMENTS_PER_MESSAGE = 5;
 export const MAX_EXTRACTED_TEXT_BYTES = 50 * 1024; // 50 KB cap per file
 
 // Allow-listed MIME types. Anything else is rejected at intake.

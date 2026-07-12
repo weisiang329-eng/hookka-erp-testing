@@ -479,8 +479,8 @@ type IncomingBody = {
   messages?: IncomingMessage[];
   /**
    * Attachments accompany the FINAL user message in `messages` (the one
-   * the model is about to respond to). UI clamps to 3 files, server
-   * re-validates. See src/api/lib/attachment-parser.ts.
+   * the model is about to respond to). UI clamps to MAX_ATTACHMENTS_PER_MESSAGE
+   * files, server re-validates. See src/api/lib/attachment-parser.ts.
    */
   attachments?: IncomingAttachment[];
 };

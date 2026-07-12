@@ -23,7 +23,7 @@ import { humanizeError } from "@/lib/humanize-error";
 // src/api/lib/attachment-parser.ts. Defined locally so the UI can refuse
 // oversized files without a round trip.
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MB
-const MAX_ATTACHMENTS_PER_MESSAGE = 3;
+const MAX_ATTACHMENTS_PER_MESSAGE = 5;
 const ACCEPTED_TYPES = [
   "image/*",
   "application/pdf",

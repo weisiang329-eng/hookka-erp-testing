@@ -790,7 +790,36 @@ export async function computeDoInvoiceLines(
   ]);
   const doItems = doItemsRes.results ?? [];
 
-  let invItems: InvItem[] = doItems.map((di) => {
+  // Partial-delivery: a line that went into a Delivery Return is NOT delivered,
+  // so it's excluded from the invoice (the good lines are billed; the returned
+  // ones drop out). Best-effort — if the delivery_return tables don't exist yet
+  // (no returns raised on this deployment), the query throws and we bill all.
+  let returnedPoIds = new Set<string>();
+  try {
+    const retRes = await db
+      .prepare(
+        `SELECT dri.production_order_id AS "poId"
+           FROM delivery_return_items dri
+           JOIN delivery_returns dr ON dr.id = dri.delivery_return_id
+          WHERE dr.delivery_order_id = ? AND dr.status <> 'CANCELLED'`,
+      )
+      .bind(doId)
+      .all<{ poId: string | null }>();
+    returnedPoIds = new Set(
+      (retRes.results ?? [])
+        .map((r) => r.poId)
+        .filter((x): x is string => !!x),
+    );
+  } catch {
+    /* delivery_return tables not present — nothing to exclude */
+  }
+  const activeDoItems = returnedPoIds.size
+    ? doItems.filter(
+        (di) => !di.productionOrderId || !returnedPoIds.has(di.productionOrderId),
+      )
+    : doItems;
+
+  let invItems: InvItem[] = activeDoItems.map((di) => {
     // Identical call to loadDoValueMap → invoice total == DO value.
     const unitPriceSen = priceForItem(
       idx,

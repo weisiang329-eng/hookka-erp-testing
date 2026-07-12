@@ -171,3 +171,98 @@ export async function consumeFGBatchesForDO(
 
   return { skipped: false, statements, totalCogsSen, shortages };
 }
+
+// ---------------------------------------------------------------------------
+// REVERSE — when goods come back on a Delivery Return, undo the COGS + FG
+// consumption for the returned lines. For each returned line we find the
+// original FG_DELIVERED slices for its DO + product, add the returned qty back
+// to those fg_batches (LIFO across the slices), and write a reversing
+// ADJUSTMENT (direction IN) cost_ledger row per slice — refType='DELIVERY_RETURN'
+// so it's idempotent + traceable. Net effect: FG inventory qty + value restored,
+// COGS reduced. Returns statements to append to the caller's batch.
+// ---------------------------------------------------------------------------
+export type DeliveryReturnLineForCogs = {
+  productCode: string | null;
+  quantity: number;
+};
+export async function reverseFGForDeliveryReturn(
+  db: D1Database,
+  drId: string,
+  doId: string,
+  lines: DeliveryReturnLineForCogs[],
+  reversedAtIso: string,
+): Promise<{ skipped: boolean; statements: D1PreparedStatement[]; reversedCogsSen: number }> {
+  // Idempotency — already reversed for this Delivery Return?
+  const existing = await db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM cost_ledger WHERE refType = 'DELIVERY_RETURN' AND refId = ?",
+    )
+    .bind(drId)
+    .first<{ n: number }>();
+  if ((existing?.n ?? 0) > 0) {
+    return { skipped: true, statements: [], reversedCogsSen: 0 };
+  }
+
+  const statements: D1PreparedStatement[] = [];
+  let reversedCogsSen = 0;
+
+  for (const line of lines) {
+    let toReverse = Number(line.quantity) || 0;
+    if (toReverse <= 0) continue;
+    const productCode = line.productCode ?? "";
+    if (!productCode) continue;
+    const product = await db
+      .prepare("SELECT id FROM products WHERE code = ? LIMIT 1")
+      .bind(productCode)
+      .first<{ id: string }>();
+    if (!product) continue;
+
+    // The FG_DELIVERED slices this DO consumed for this product (newest first
+    // so a return unwinds the most recent consumption).
+    const slicesRes = await db
+      .prepare(
+        `SELECT batchId AS "batchId", qty AS "qty", unitCostSen AS "unitCostSen"
+           FROM cost_ledger
+          WHERE refType = 'DELIVERY_ORDER' AND refId = ? AND type = 'FG_DELIVERED'
+            AND itemId = ?
+          ORDER BY date DESC, id DESC`,
+      )
+      .bind(doId, product.id)
+      .all<{ batchId: string; qty: number; unitCostSen: number }>();
+
+    for (const s of slicesRes.results ?? []) {
+      if (toReverse <= 0) break;
+      const take = Math.min(Number(s.qty) || 0, toReverse);
+      if (take <= 0) continue;
+      const unitSen = Number(s.unitCostSen) || 0;
+      const costSen = Math.round(unitSen * take);
+      reversedCogsSen += costSen;
+      toReverse -= take;
+      statements.push(
+        db
+          .prepare("UPDATE fg_batches SET remainingQty = remainingQty + ? WHERE id = ?")
+          .bind(take, s.batchId),
+        db
+          .prepare(
+            `INSERT INTO cost_ledger
+               (id, date, type, itemType, itemId, batchId, qty, direction,
+                unitCostSen, totalCostSen, refType, refId, notes)
+             VALUES (?, ?, 'ADJUSTMENT', 'FG', ?, ?, ?, 'IN', ?, ?, 'DELIVERY_RETURN', ?, ?)`,
+          )
+          .bind(
+            genLedgerId("fgr"),
+            reversedAtIso,
+            product.id,
+            s.batchId,
+            take,
+            unitSen,
+            costSen,
+            drId,
+            `FG returned via ${drId} (${productCode})`,
+          ),
+      );
+    }
+  }
+
+  return { skipped: false, statements, reversedCogsSen };
+}

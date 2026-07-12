@@ -88,6 +88,15 @@ type PublicDoRow = {
   delivery_incomplete: number | null;
 };
 
+// One returnable line the driver can tick on "Delivered with Issue".
+type PublicDoItem = {
+  productionOrderId: string;
+  poNo: string;
+  productCode: string;
+  productName: string;
+  quantity: number;
+};
+
 // Minimal per-DO summary — the ONLY fields the public page ever sees.
 type PublicDoSummary = {
   id: string;
@@ -100,6 +109,9 @@ type PublicDoSummary = {
   // Delivered "with issues" — goods arrived but paperwork incomplete, invoice
   // on hold. Lets the scan page badge it instead of plain "Delivered".
   incomplete: boolean;
+  // Full line list so the phone can show a "which items are being returned?"
+  // checklist when the driver taps "Delivered with Issue".
+  items: PublicDoItem[];
 };
 
 const DO_SUMMARY_COLS =
@@ -113,22 +125,37 @@ async function summarizeDos(
   const ph = rows.map(() => "?").join(",");
   const itemsRes = await db
     .prepare(
-      `SELECT deliveryOrderId, productName, quantity
+      `SELECT deliveryOrderId, productionOrderId, poNo, productCode, productName, quantity
          FROM delivery_order_items WHERE deliveryOrderId IN (${ph})`,
     )
     .bind(...rows.map((r) => r.id))
     .all<{
       deliveryOrderId: string;
+      productionOrderId: string | null;
+      poNo: string | null;
+      productCode: string | null;
       productName: string | null;
       quantity: number | null;
     }>();
-  const byDo = new Map<string, { names: string[]; count: number }>();
+  const byDo = new Map<
+    string,
+    { names: string[]; count: number; items: PublicDoItem[] }
+  >();
   for (const it of itemsRes.results ?? []) {
-    const slot = byDo.get(it.deliveryOrderId) ?? { names: [], count: 0 };
+    const slot = byDo.get(it.deliveryOrderId) ?? { names: [], count: 0, items: [] };
     slot.count += Number(it.quantity) || 0;
     const name = (it.productName || "").trim();
     if (name && slot.names.length < 3 && !slot.names.includes(name)) {
       slot.names.push(name);
+    }
+    if (it.productionOrderId) {
+      slot.items.push({
+        productionOrderId: it.productionOrderId,
+        poNo: (it.poNo || "").trim(),
+        productCode: (it.productCode || "").trim(),
+        productName: name,
+        quantity: Number(it.quantity) || 1,
+      });
     }
     byDo.set(it.deliveryOrderId, slot);
   }
@@ -142,6 +169,7 @@ async function summarizeDos(
       status: r.status,
       itemCount: slot?.count || Number(r.totalItems) || 0,
       productNames: slot?.names ?? [],
+      items: slot?.items ?? [],
       incomplete: !!Number(r.delivery_incomplete),
     };
   });
@@ -683,13 +711,13 @@ app.post("/:token/advance", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as {
     action?: string;
     incomplete?: boolean;
-    // The 2nd scan is a clean either/or: the customer received the goods
-    // (DELIVER) or did NOT (returnGoods → the whole DO comes back). On
-    // returnGoods we mark the DO delivered so the fg_units/COGS cascade runs
-    // (nothing to reconcile if it never delivered), WITHHOLD the invoice +
-    // customer notice, and open a Delivery Return covering every line — the
-    // office then decides restock / repair-&-redeliver / credit note.
-    returnGoods?: boolean;
+    // "Delivered with Issue" (deliver step): per-DO list of the production-order
+    // ids the driver ticked as RETURNED. Those lines open a Delivery Return
+    // (created BEFORE the delivered cascade so the auto-invoice excludes them);
+    // every other line is delivered + invoiced as normal. Map doId → ids[]
+    // (works for a single DO or a packing list); a plain array is treated as
+    // the single-DO shorthand.
+    returnItems?: unknown;
     // Optional edited item set for a DISPATCH — "adjust what's on the lorry,
     // then dispatch". `edits` maps each DO id to the production-order ids that
     // ride the lorry (works for a single DO or every DO under a packing list).
@@ -707,13 +735,31 @@ app.post("/:token/advance", async (c) => {
       400,
     );
   }
-  // Customer did not receive — only meaningful on the deliver step.
-  const returnGoods = action === "DELIVER" && body.returnGoods === true;
-  // Both "returned" and the legacy "incomplete" flag withhold the invoice +
-  // customer notice; the goods are still marked delivered (fg_units/COGS
-  // cascade) so a later Delivery Return can cleanly reverse them.
-  const incomplete =
-    action === "DELIVER" && (body.incomplete === true || returnGoods);
+  // Legacy whole-DO invoice hold — kept for back-compat; the new driver flow
+  // uses per-line returnItems (below) and does NOT hold the invoice (the kept
+  // lines bill; only the returned lines drop out via computeDoInvoiceLines).
+  const incomplete = action === "DELIVER" && body.incomplete === true;
+
+  // Driver "Delivered with Issue" picks: map doId → set of returned
+  // production-order ids. The FE always sends the map form.
+  const returnByDo = new Map<string, Set<string>>();
+  if (
+    action === "DELIVER" &&
+    body.returnItems &&
+    typeof body.returnItems === "object" &&
+    !Array.isArray(body.returnItems)
+  ) {
+    for (const [doId, ids] of Object.entries(
+      body.returnItems as Record<string, unknown>,
+    )) {
+      const set = new Set(
+        (Array.isArray(ids) ? ids : [])
+          .map((x) => (typeof x === "string" ? x : ""))
+          .filter(Boolean),
+      );
+      if (set.size > 0) returnByDo.set(doId, set);
+    }
+  }
 
   try {
     const resolved = await resolveToken(c.var.DB, token);
@@ -858,6 +904,34 @@ app.post("/:token/advance", async (c) => {
         orgId,
       );
 
+      // Delivered with Issue: the driver ticked some lines as returned. Open a
+      // Delivery Return for JUST those lines BEFORE the delivered cascade runs,
+      // so the auto-invoice (computeDoInvoiceLines) excludes them and only the
+      // kept lines are billed. Best-effort — a DR hiccup must not fail the scan
+      // (the office can still "Convert to Delivery Return" from the DO).
+      const returnedIds = returnByDo.get(d.id) ?? null;
+      if (returnedIds && returnedIds.size > 0) {
+        try {
+          const drItems = await loadDoItemsForReturn(
+            c.var.DB,
+            d.id,
+            returnedIds,
+          );
+          if (drItems.length > 0) {
+            await createDeliveryReturnRecord(c.var.DB, orgId, {
+              doId: d.id,
+              items: drItems,
+              reason: "Returned at delivery — driver flagged",
+            });
+          }
+        } catch (drErr) {
+          console.warn(
+            `[public-do-qr] ${d.doNo}: delivery return create failed:`,
+            drErr instanceof Error ? drErr.message : drErr,
+          );
+        }
+      }
+
       // THE office transition path — identical guards + cascades. On a
       // "with issues" deliver, deliveryIncomplete withholds the invoice.
       const editedItems = editsByDo?.get(d.id) ?? null;
@@ -886,33 +960,9 @@ app.post("/:token/advance", async (c) => {
       }
       results.push({ doNo: d.doNo, outcome: "DONE", from, to: step.to });
 
-      // Customer did not receive → open a Delivery Return for the WHOLE DO so
-      // the office can restock / repair-&-redeliver / raise a credit note.
-      // Best-effort: the delivery itself is already committed; a DR hiccup must
-      // not fail the scan (the office can still "Convert to Delivery Return"
-      // from the DO). No item picking — every line on the DO comes back.
-      if (returnGoods) {
-        try {
-          const drItems = await loadDoItemsForReturn(c.var.DB, d.id);
-          if (drItems.length > 0) {
-            await createDeliveryReturnRecord(c.var.DB, orgId, {
-              doId: d.id,
-              items: drItems,
-              reason: "Customer did not receive — returned at delivery",
-            });
-          }
-        } catch (drErr) {
-          console.warn(
-            `[public-do-qr] ${d.doNo}: delivery return create failed:`,
-            drErr instanceof Error ? drErr.message : drErr,
-          );
-        }
-      }
-
-      // Delivered "with issues" / returned → no invoice was created, so there
-      // is no invoice notice to send. The office sends it later on resolve.
-      // Dispatch notices and complete deliveries fall through to the normal
-      // queue.
+      // Legacy whole-DO "with issues" hold → no invoice, so no invoice notice.
+      // (The per-line returnItems path above does NOT set incomplete — the kept
+      // lines invoice + send the normal notice.)
       if (incomplete) continue;
 
       // Queue the SAME customer notice the office click queues (dispatch

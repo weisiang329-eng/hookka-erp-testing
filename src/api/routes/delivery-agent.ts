@@ -38,6 +38,7 @@ import {
   autoApproveDeliveryProposals,
 } from "../lib/delivery-agent";
 import { activeInstructions } from "../lib/agent-feedback";
+import { autoApplyConfigProposals } from "../lib/agent-learning";
 import {
   isAgentPaused,
   isAutoApproveOn,
@@ -281,11 +282,15 @@ export async function runDeliveryAgent(
   // own proposals (recording-only — the office executes from the approved
   // list; nothing is created or dispatched). Gate OFF → owner approves.
   let autoApproved = 0;
+  let autoTunedParams = 0;
   if (await isAutoApproveOn(db, "DELIVERY")) {
     autoApproved = await autoApproveDeliveryProposals(db, "AGENT_AUTO").catch((err) => {
       console.warn("[delivery-agent] auto-approve failed:", err);
       return 0;
     });
+    // Full-auto also self-tunes its cs.transitDays.* parameters (bounded +
+    // logged, no owner approval — owner ruling 2026-07-13).
+    autoTunedParams = await autoApplyConfigProposals(db, "DELIVERY", "AGENT_AUTO").catch(() => 0);
   }
   const brief = await collectDeliveryBrief(db, orgId, today);
   const ownerNotes = opts.anthropicApiKey
@@ -302,6 +307,7 @@ export async function runDeliveryAgent(
     date: today,
     proposals: counts,
     autoApproved,
+    autoTunedParams,
     transitDrifts: transit.filter((t) => t.flagged).length,
     aiFocus: brief.aiFocus != null,
     brief: {

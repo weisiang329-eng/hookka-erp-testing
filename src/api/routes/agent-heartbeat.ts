@@ -30,6 +30,7 @@ import {
 } from "../lib/agent-console";
 import { decideAgentRuns } from "../lib/agent-scheduler";
 import { generateProposals, applyPendingProposals } from "../lib/schedule-proposals";
+import { autoApplyConfigProposals } from "../lib/agent-learning";
 import { runDeliveryAgent, constantTimeEqual } from "./delivery-agent";
 
 const app = new Hono<Env>();
@@ -89,6 +90,12 @@ app.post("/heartbeat", async (c) => {
               return null;
             });
             if (a) autoNote = ` · auto-applied ${a.approved} (${a.remainingPending} queued)`;
+            // Full-auto also self-tunes its chain.* parameters (bounded +
+            // logged) — no owner approval step (owner ruling 2026-07-13).
+            const params = await autoApplyConfigProposals(db, "PRODUCTION", "AGENT_AUTO").catch(
+              () => 0,
+            );
+            if (params > 0) autoNote += ` · self-tuned ${params} param(s)`;
           }
           const summary = `proposed ${r.proposed} (unscheduled ${r.unscheduled} · overdue ${r.overdue} · superseded ${r.superseded})${autoNote} (heartbeat: ${d.reason})`;
           run.setSummary(summary);

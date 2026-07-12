@@ -354,7 +354,7 @@ export default function AgentConsolePage() {
     const ok = await confirm({
       title: next ? "Switch to full-auto" : "Back to propose-then-approve",
       message: next
-        ? "The agent will APPLY its own proposals on its scheduled runs (Production: writes due dates on WAITING cards, batch by batch, every batch rollbackable; Delivery: marks its plans approved — it still never creates or sends documents). You keep Pause, Kill all and Rollback."
+        ? "Full auto — no approvals. The agent applies its own proposals AND self-tunes its own parameters (handoff / transit days, bounded + logged) on its scheduled runs. Production writes due dates on WAITING cards (every batch rollbackable); Delivery marks its plans approved (still never creates or sends documents). You keep Pause, Kill all, Rollback, and every change stays visible on the console."
         : "The agent goes back to waiting for your approval before anything is applied.",
       confirmLabel: next ? "Go full-auto" : "Require my approval",
       danger: next,

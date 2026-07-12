@@ -38,7 +38,7 @@ import {
   type AgentFamily,
 } from "../lib/agent-console";
 import {
-  CONFIG_PROPOSAL_KEYS,
+  applyConfigProposalValue,
   ensureConfigProposalTable,
   runLearning,
 } from "../lib/agent-learning";
@@ -792,57 +792,14 @@ app.post("/config-proposals/decide", async (c) => {
     const proposedRaw = (row.proposedValue ?? row.proposed_value) ?? "";
 
     if (action === "approve") {
-      // Two whitelisted families (reject everything else, never normalize):
-      //   chain.<field>          → kv_config['planning_capacity'].chain.<field>
-      //   cs.transitDays.<STATE> → kv_config['cs-agent'].transitDaysByState.<STATE>
-      const chainField = CONFIG_PROPOSAL_KEYS[paramKey];
-      const csState = /^cs\.transitDays\.([A-Z]{2,3})$/.exec(paramKey)?.[1] ?? null;
-      const value = Number(proposedRaw);
-      const maxValue = csState ? 10 : 30;
-      if ((!chainField && !csState) || !Number.isFinite(value) || value < 0 || value > maxValue) {
+      // Same validate+write the full-auto path uses (single source of truth —
+      // manual and autonomous approvals can never diverge). Rejects (returns
+      // false) on any non-whitelisted key or out-of-bounds value.
+      const ok = await applyConfigProposalValue(db, paramKey, proposedRaw);
+      if (!ok) {
         errors.push(`${paramKey}: not an approvable parameter`);
         continue;
       }
-      const kvKey = csState ? "cs-agent" : "planning_capacity";
-      // Merge into the existing override object — never clobber other keys.
-      let override: Record<string, unknown> = {};
-      try {
-        const kv = await db
-          .prepare("SELECT value FROM kv_config WHERE key = ?")
-          .bind(kvKey)
-          .first<{ value: string }>();
-        if (kv?.value) {
-          const parsed = JSON.parse(kv.value);
-          if (parsed && typeof parsed === "object") override = parsed as Record<string, unknown>;
-        }
-      } catch {
-        override = {};
-      }
-      if (csState) {
-        const byState =
-          override.transitDaysByState && typeof override.transitDaysByState === "object"
-            ? (override.transitDaysByState as Record<string, unknown>)
-            : {};
-        byState[csState] = Math.floor(value);
-        override.transitDaysByState = byState;
-      } else if (chainField) {
-        const chain =
-          override.chain && typeof override.chain === "object"
-            ? (override.chain as Record<string, unknown>)
-            : {};
-        chain[chainField] = Math.floor(value);
-        override.chain = chain;
-      }
-      await db
-        .prepare(
-          `INSERT INTO kv_config (key, value, updated_at)
-           VALUES (?, ?, ?)
-           ON CONFLICT(key) DO UPDATE SET
-             value = excluded.value,
-             updated_at = excluded.updated_at`,
-        )
-        .bind(kvKey, JSON.stringify(override), nowIso)
-        .run();
     }
 
     await db

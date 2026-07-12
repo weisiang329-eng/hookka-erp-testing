@@ -565,7 +565,14 @@ app.post("/chat", async (c) => {
   const quotaUserId = (c.get as unknown as (k: string) => string | undefined)(
     "userId",
   );
-  const dailyLimit = getDailyLimit(c.env);
+  // SUPER_ADMIN (the owner) is exempt from the daily question cap — he manages
+  // the whole agent workforce through this chat and the real cost guardrail is
+  // the per-agent RM budget, not a question count. Other roles keep the limit.
+  const quotaRole = (c.get as unknown as (k: string) => string | undefined)(
+    "userRole",
+  )?.toUpperCase();
+  const quotaExempt = quotaRole === "SUPER_ADMIN";
+  const dailyLimit = quotaExempt ? 0 : getDailyLimit(c.env);
   const nowMs = Date.now();
   if (dailyLimit > 0 && quotaUserId) {
     const usedToday = await getDailyUsage(

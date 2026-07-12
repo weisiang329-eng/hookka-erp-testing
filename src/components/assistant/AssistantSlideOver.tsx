@@ -775,7 +775,7 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
   // per file and reads each to base64. Failures show inline in the
   // composer error slot — never throws to the parent.
   const onPickFiles = useCallback(
-    async (files: FileList | null) => {
+    async (files: FileList | File[] | null) => {
       if (!files || files.length === 0) return;
       setError(null);
 
@@ -824,6 +824,28 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
       }
     },
     [attachments.length],
+  );
+
+  // Paste images straight into the composer (Ctrl/Cmd+V) — supports pasting
+  // several at once (multiple file items on the clipboard). Falls through to
+  // normal text paste when the clipboard has no files.
+  const onPaste = useCallback(
+    (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const files: File[] = [];
+      for (const it of Array.from(items)) {
+        if (it.kind === "file") {
+          const f = it.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      if (files.length > 0) {
+        e.preventDefault(); // keep the raw image out of the text box
+        void onPickFiles(files);
+      }
+    },
+    [onPickFiles],
   );
 
   const removeAttachment = useCallback((localId: string) => {
@@ -1003,7 +1025,8 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder="Ask Hookka AI..."
+            onPaste={onPaste}
+            placeholder="Ask Hookka AI... (paste images with Ctrl/Cmd+V)"
             rows={2}
             className="flex-1 resize-none rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
             disabled={busy}

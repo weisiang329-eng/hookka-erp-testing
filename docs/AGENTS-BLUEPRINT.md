@@ -204,3 +204,30 @@ PL-first+hub 完整性已上线、Dispatch/Delivered 客户通知邮件已上线
 - v1 无 FE 页面（assistant 聊天 + API 即界面）；无新表、无 migration。
 - 已知简化（v2 待办）：BOM 展开不跑尺寸缩放规则；料期后移用「工作日平移」近似
   （链引擎暂无 per-order 料期约束输入）；transit 天数是承诺余量不是 3PL 报价。
+
+---
+
+## Evolution Round 2 — shipped surfaces (2026-07-12 morning)
+
+**Owner ruling（写进铁规）: Agent 的作息由 Agent 自己决定，不由人排。**
+
+- **自主排班（self-scheduling）**: GH Actions 每 30 分钟发一个"哑心跳"
+  (`agent-heartbeat.yml` → `/api/internal/agents/heartbeat`, CRON_SECRET)。
+  节奏知识全在 `lib/agent-scheduler.ts`: 每一跳 Agent 自己看厂里脉搏
+  （上次跑后送达/发车了几单、新 SO 几张、离上次跑多久、今天跑过几次）决定
+  跑不跑；跑/不跑的理由写进 agent_runs → Console 可见。owner 只留三个否决:
+  per-family Pause、全局 kill switch、硬上限（≤6 次/天、≥1h 间隔）。阈值在
+  kv_config['agent_schedule']（有界可调）。07:00 报告 cron + 07:30 delivery
+  cron 保留为"准点档"，心跳看见已跑会自动让路，同时充当它们挂掉时的兜底。
+- **共用大脑** `lib/agent-brain.ts`: 全部 Agent 共用一个 Claude 调用器
+  （best-effort、token 计量进 Console）。production-brief 已重构复用。
+- **Delivery 进化**: ① cron/run 接入 isAgentPaused + recordAgentRun（暂停闸
+  真正管得住、Console 有留痕/费用）；② 每天首跑写英文 AI focus（tab 顶部卡）,
+  加跑纯引擎零 token；③ **跨 Agent 学习**: transitDriftLearning 用 90 天实际
+  dispatch→delivered 工作日 vs CS 承诺余量，漂移≥1 天且≥5 趟 → 写
+  `cs.transitDays.<STATE>` 参数提案，批准落 kv['cs-agent']（Delivery 教 CS）。
+- **CS 进化**: cs_promise_log 承诺台账（每次回答落一行: 渠道/SO/承诺日/置信）
+  → Console CS 卡显示 30 天问答量 + ENGINE 级占比；送达数据积累后开达成率 KPI。
+- **Console 补齐**: 11 张卡全亮相（4 现役 + 7 蓝图 COMING SOON 带 JD 简介）;
+  Delivery 卡有 Run now / Pause / 最近一跑；config-proposals 审批白名单扩展
+  cs.transitDays.*（0-10 天，state 校验，拒绝一切白名单外 key）。

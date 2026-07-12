@@ -42,7 +42,7 @@ import {
   renderBriefHtml,
   renderBriefEmailText,
 } from "../lib/production-brief";
-import { isAgentPaused, recordAgentRun } from "../lib/agent-console";
+import { isAgentPaused, recordAgentRun, llmKeyIfBudgetAllows } from "../lib/agent-console";
 import {
   collectOperationsReport,
   type OperationsPeriodKind,
@@ -396,7 +396,11 @@ async function buildBrief(
     date,
     prev,
     includeAi
-      ? (c.env as { ANTHROPIC_API_KEY?: string }).ANTHROPIC_API_KEY
+      ? await llmKeyIfBudgetAllows(
+          c.var.DB,
+          (c.env as { ANTHROPIC_API_KEY?: string }).ANTHROPIC_API_KEY,
+          "PRODUCTION",
+        )
       : undefined,
     // Full view (includeAi) also runs the Phase-3 learning loop for display —
     // but a GET must never WRITE, so config proposals are not emitted here.
@@ -646,7 +650,13 @@ async function runAndSendReport(
       c.var.DB,
       date,
       prev,
-      (c.env as { ANTHROPIC_API_KEY?: string }).ANTHROPIC_API_KEY,
+      // Per-agent RM budget (owner: RM150/agent/month) — at the limit the
+      // brief still sends, only its AI-focus paragraph is skipped.
+      await llmKeyIfBudgetAllows(
+        c.var.DB,
+        (c.env as { ANTHROPIC_API_KEY?: string }).ANTHROPIC_API_KEY,
+        "PRODUCTION",
+      ),
       // The daily send IS the learning loop's canonical run: full learning
       // sections + permission to raise config proposals for sustained drift.
       { learning: true, emitConfigProposals: true, usageSink },

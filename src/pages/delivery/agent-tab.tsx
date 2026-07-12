@@ -82,6 +82,8 @@ interface BriefData {
   returns: { openServiceCases: number };
   proposals: { pendingByKind: Record<string, number>; pending: number };
   learning: ProviderLearningRow[];
+  /** Claude-written focus paragraph from the latest agent run (may be null). */
+  aiFocus?: string | null;
 }
 
 interface Proposal {
@@ -296,6 +298,22 @@ export default function DeliveryAgentTab() {
           </Button>
         </div>
       </div>
+
+      {/* AI focus — the agent brain's read of today (written on each daily
+          run / Run now; absent until the first run after this ships) */}
+      {brief?.aiFocus && (
+        <Card className="border-[#D9CFA8] bg-[#FBF8EF]">
+          <CardContent className="p-4 flex items-start gap-3">
+            <div className="rounded-lg bg-[#F0E9D2] p-2.5 shrink-0">
+              <Bot className="h-5 w-5 text-[#6B5C32]" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-semibold text-[#6B5C32] mb-1">Agent focus</p>
+              <p className="text-sm text-[#1F1D1B] whitespace-pre-wrap">{brief.aiFocus}</p>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Summary strip */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">

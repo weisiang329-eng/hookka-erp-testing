@@ -32,7 +32,18 @@ import {
   collectDeliveryBrief,
   generateDeliveryProposals,
   storeDeliveryBriefSnapshot,
+  generateDeliveryFocus,
+  loadLatestDeliveryAiFocus,
+  transitDriftLearning,
+  autoApproveDeliveryProposals,
 } from "../lib/delivery-agent";
+import {
+  isAgentPaused,
+  isAutoApproveOn,
+  isKillSwitchOn,
+  recordAgentRun,
+  llmKeyIfBudgetAllows,
+} from "../lib/agent-console";
 
 const app = new Hono<Env>();
 
@@ -107,6 +118,12 @@ app.get("/brief.json", async (c) => {
   const orgId = getOrgId(c);
   try {
     const data = await collectDeliveryBrief(c.var.DB, orgId, todayYmdSgt());
+    // The GET path never calls the LLM — surface the focus written by the
+    // latest cron / run-now snapshot instead (cheap payload read).
+    if (!data.aiFocus) {
+      const latest = await loadLatestDeliveryAiFocus(c.var.DB);
+      if (latest) data.aiFocus = latest.aiFocus;
+    }
     return c.json({ success: true, data });
   } catch (err) {
     console.error("[delivery-agent/brief.json] failed:", err);
@@ -237,23 +254,86 @@ app.post("/proposals/reject", async (c) => {
   });
 });
 
-// ── Run (generate + snapshot) ────────────────────────────────────────────────
+// ── Run (generate + learn + think + snapshot) ────────────────────────────────
+// One full agent cycle: engine proposals → transit-drift learning (may write
+// cross-agent cs.transitDays.* config proposals for the owner to approve) →
+// Claude focus paragraph → brief snapshot. Wrapped in recordAgentRun by every
+// caller so the Agent Console shows the run + its token spend.
 
-async function runAgent(db: Env["Variables"]["DB"], orgId: string) {
+export async function runDeliveryAgent(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+  opts: {
+    anthropicApiKey?: string;
+    usageSink?: { tokensIn: number; tokensOut: number };
+  } = {},
+) {
   const today = todayYmdSgt();
   const counts = await generateDeliveryProposals(db, orgId, today);
+  const transit = await transitDriftLearning(db, orgId, today, {
+    emitProposals: true,
+  }).catch((err) => {
+    console.warn("[delivery-agent] transit learning failed:", err);
+    return [];
+  });
+  // Autonomy: with the DELIVERY auto-approve gate ON, the agent decides its
+  // own proposals (recording-only — the office executes from the approved
+  // list; nothing is created or dispatched). Gate OFF → owner approves.
+  let autoApproved = 0;
+  if (await isAutoApproveOn(db, "DELIVERY")) {
+    autoApproved = await autoApproveDeliveryProposals(db, "AGENT_AUTO").catch((err) => {
+      console.warn("[delivery-agent] auto-approve failed:", err);
+      return 0;
+    });
+  }
   const brief = await collectDeliveryBrief(db, orgId, today);
+  brief.aiFocus = await generateDeliveryFocus(
+    opts.anthropicApiKey,
+    brief,
+    opts.usageSink,
+  );
   await storeDeliveryBriefSnapshot(db, brief);
-  return { date: today, proposals: counts, brief: { pool: brief.pool.count, overdueToShip: brief.overdueToShip.count, invoiceGaps: brief.invoiceGaps.count, podChases: brief.podChases.count } };
+  return {
+    date: today,
+    proposals: counts,
+    autoApproved,
+    transitDrifts: transit.filter((t) => t.flagged).length,
+    aiFocus: brief.aiFocus != null,
+    brief: {
+      pool: brief.pool.count,
+      overdueToShip: brief.overdueToShip.count,
+      invoiceGaps: brief.invoiceGaps.count,
+      podChases: brief.podChases.count,
+    },
+  };
 }
 
-// Manual run from the UI (session + permission gated).
+// Manual run from the UI (session + permission gated). Same console
+// semantics as Production run-now: a family PAUSE stops automatic runs only,
+// but the global kill switch blocks even manual runs.
 app.post("/run", async (c) => {
   const denied = await requirePermission(c, "delivery-orders", "update");
   if (denied) return denied;
   const orgId = getOrgId(c);
+  if (await isKillSwitchOn(c.var.DB)) {
+    return c.json({
+      success: false,
+      error: "Global kill switch is ON — turn it off in the Agent Console first.",
+    });
+  }
   try {
-    const data = await runAgent(c.var.DB, orgId);
+    const data = await recordAgentRun(c.var.DB, "delivery-run", async (run) => {
+      const sink = { tokensIn: 0, tokensOut: 0 };
+      const r = await runDeliveryAgent(c.var.DB, orgId, {
+        anthropicApiKey: await llmKeyIfBudgetAllows(c.var.DB, c.env.ANTHROPIC_API_KEY, "DELIVERY"),
+        usageSink: sink,
+      });
+      run.addTokens(sink.tokensIn, sink.tokensOut);
+      run.setSummary(
+        `${r.date} · plans ${r.proposals.loadPlans} · invoice gaps ${r.proposals.invoiceGaps} · POD ${r.proposals.podChases} · transit drifts ${r.transitDrifts} (run)`,
+      );
+      return r;
+    });
     await emitAudit(c, {
       resource: "delivery-proposals",
       resourceId: "run",
@@ -271,7 +351,8 @@ app.post("/run", async (c) => {
 
 export const internal = new Hono<Env>();
 
-async function constantTimeEqual(a: string, b: string): Promise<boolean> {
+// Shared by the agents heartbeat route (routes/agent-heartbeat.ts).
+export async function constantTimeEqual(a: string, b: string): Promise<boolean> {
   const enc = new TextEncoder();
   const [ha, hb] = await Promise.all([
     crypto.subtle.digest("SHA-256", enc.encode(a)),
@@ -295,10 +376,26 @@ internal.post("/run-trigger", async (c) => {
   if (!(await constantTimeEqual(given, expected))) {
     return c.json({ ok: false, error: "forbidden" }, 403);
   }
+  // Agent Console gate — DELIVERY pause (or the global kill switch) stops the
+  // automatic cron cycle; manual /run and the office pages stay available.
+  if (await isAgentPaused(c.var.DB, "DELIVERY")) {
+    return c.json({ ok: true, skipped: "paused" });
+  }
   try {
     // Cron runs as the single-tenant org (same assumption as the report crons,
     // which run their collectors without a session).
-    const data = await runAgent(c.var.DB, DEFAULT_ORG_ID);
+    const data = await recordAgentRun(c.var.DB, "delivery-run", async (run) => {
+      const sink = { tokensIn: 0, tokensOut: 0 };
+      const r = await runDeliveryAgent(c.var.DB, DEFAULT_ORG_ID, {
+        anthropicApiKey: await llmKeyIfBudgetAllows(c.var.DB, c.env.ANTHROPIC_API_KEY, "DELIVERY"),
+        usageSink: sink,
+      });
+      run.addTokens(sink.tokensIn, sink.tokensOut);
+      run.setSummary(
+        `${r.date} · plans ${r.proposals.loadPlans} · invoice gaps ${r.proposals.invoiceGaps} · POD ${r.proposals.podChases} · transit drifts ${r.transitDrifts} (cron)`,
+      );
+      return r;
+    });
     return c.json({ ok: true, ...data });
   } catch (err) {
     console.error("[delivery-agent/cron] failed:", err);

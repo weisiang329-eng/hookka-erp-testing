@@ -15,6 +15,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
+import { reverseFGForDeliveryReturn } from "../lib/do-cost-cascade";
 
 const app = new Hono<Env>();
 export default app;
@@ -353,35 +354,63 @@ app.post("/", async (c) => {
 });
 
 // -- POST /:id/return-to-stock ----------------------------------------------
-// Flags the returned finished-good units RETURNED and moves the DR to
-// RETURNED_TO_STOCK. ⚠️ The COGS / inventory-value reversal (write a reversing
-// cost_ledger row against the DO's FG_DELIVERED + re-increment
-// fg_batches.remaining_qty) is the money-critical NEXT phase — NOT done here;
-// this only sets the physical unit state, which is safe + reversible.
+// Puts the returned goods back into stock: (1) reverses the COGS / inventory
+// value — for each returned line, adds the qty back to the fg_batches it was
+// delivered from + writes a reversing ADJUSTMENT (IN) cost_ledger row
+// (idempotent per DR via refType='DELIVERY_RETURN'); (2) flags the returned
+// fg_units RETURNED; (3) moves the DR to RETURNED_TO_STOCK. All in one batch so
+// it rolls back together.
 app.post("/:id/return-to-stock", async (c) => {
   const denied = await requirePermission(c, "delivery-orders", "update");
   if (denied) return denied;
   await ensureDeliveryReturnTables(c.var.DB);
   const id = c.req.param("id");
   const now = new Date().toISOString();
+
+  const header = await c.var.DB
+    .prepare(`SELECT delivery_order_id AS "doId" FROM delivery_returns WHERE id = ?`)
+    .bind(id)
+    .first<{ doId: string | null }>();
+  if (!header) return c.json({ success: false, error: "Not found" }, 404);
   const items = await loadItems(c.var.DB, id);
+
+  const statements: D1PreparedStatement[] = [];
+
+  // (1) COGS / FG-value reversal (only if we know the source DO).
+  let reversedCogsSen = 0;
+  if (header.doId) {
+    const rev = await reverseFGForDeliveryReturn(
+      c.var.DB,
+      id,
+      header.doId,
+      items.map((it) => ({ productCode: it.productCode, quantity: it.quantity })),
+      now,
+    );
+    statements.push(...rev.statements);
+    reversedCogsSen = rev.reversedCogsSen;
+  }
+
+  // (2) flag the physical units RETURNED (best-effort — only lines that
+  // captured an fg_unit_id).
   const unitIds = items.map((it) => it.fgUnitId).filter((x): x is string => !!x);
   if (unitIds.length) {
     const marks = unitIds.map(() => "?").join(",");
-    await c.var.DB
-      .prepare(
+    statements.push(
+      c.var.DB.prepare(
         `UPDATE fg_units SET status='RETURNED', returnedAt=? WHERE id IN (${marks})`,
-      )
-      .bind(now, ...unitIds)
-      .run();
+      ).bind(now, ...unitIds),
+    );
   }
-  await c.var.DB
-    .prepare(
+
+  // (3) advance the DR.
+  statements.push(
+    c.var.DB.prepare(
       `UPDATE delivery_returns SET status='RETURNED_TO_STOCK', returned_at=?, updated_at=? WHERE id=?`,
-    )
-    .bind(now, now, id)
-    .run();
-  return c.json({ success: true });
+    ).bind(now, now, id),
+  );
+
+  await c.var.DB.batch(statements);
+  return c.json({ success: true, reversedCogsSen });
 });
 
 // -- POST /:id/set-outcome — record repair-vs-pure-return + status ----------

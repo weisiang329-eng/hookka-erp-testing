@@ -296,9 +296,14 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
         rightText(page, money(it.lineTotalSen ?? 0), xCol5Right, midY, 8, fonts.bold, INK);
       }
       y -= rowH;
-      // dashed row separator
+      // Dashed row separator — sit it in the MIDDLE of the inter-row gap. rowH
+      // carries one full line-height + 6pt of padding beyond the last content
+      // line, so the clear gap below `y` (the next row's top baseline) is a
+      // constant ~15pt. At y+3 the dashes fell only 3pt above the next row's
+      // baseline, cutting through its code + numbers (owner 2026-07-13: "線也
+      //歪了"). y+10 centres them so they clear both rows' text.
       for (let dx = MARGIN; dx < PAGE_W - MARGIN; dx += 4) {
-        page.drawRectangle({ x: dx, y: y + 3, width: 2, height: 0.3, color: RULE });
+        page.drawRectangle({ x: dx, y: y + 10, width: 2, height: 0.3, color: RULE });
       }
     }
   }

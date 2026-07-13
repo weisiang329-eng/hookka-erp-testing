@@ -274,13 +274,14 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
       for (const ln of nameWrapped) { page.drawText(ln, { x: xDesc, y: y - dl * 9.3, size: 7.5, font: fonts.helv, color: INK }); dl++; }
       for (const ln of specWrapped) { page.drawText(ln, { x: xDesc, y: y - dl * 9.3, size: 7.5, font: fonts.helv, color: MUTED }); dl++; }
 
-      // Set / Price / Total are single-line values. The Order cell alone is up
-      // to 4 reference lines, so pinning these to the top line makes the whole
-      // number column float high and read as misaligned against each item's
-      // body (owner 2026-07-04: invoice "歪到完了"). Vertically centre them
-      // against the row's text height so every number sits beside its line item.
-      // DO is left byte-identical (owner: DO is fine) — only the invoice centres.
-      const midY = y - ((rowLines - 1) * 9.3) / 2;
+      // Set / Price / Total are single-line values. Centre them against the
+      // DESCRIPTION block (code + name + spec) — the product identity — NOT the
+      // whole row. The Order column is often 4 lines (PO/SO/REF/CO) that are
+      // mostly "-", which padded the row tall and sank the numbers into the
+      // empty middle, reading as misaligned against each product (owner
+      // 2026-07-13: "數字跟產品編號沒對齊"). Centring on the description keeps
+      // every number beside the item it prices. DO stays top-aligned (fine).
+      const midY = y - ((Math.max(1, descLineCount) - 1) * 9.3) / 2;
       if (isDO) {
         page.drawText(String(it.set), { x: xSet, y, size: 8, font: fonts.helv, color: INK });
         // Pieces breakdown wraps within the Quantity column (a multi-component

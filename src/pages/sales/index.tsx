@@ -242,11 +242,13 @@ export default function SalesPage() {
   const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code?: string; name?: string; isActive?: boolean }> }>("/api/organisations");
   // perf 2026-07-13: the SO list only needs per-SO production PROGRESS (6 fields:
   // salesOrderId/poNo/status/currentDepartment/progress/quantity — see the map
-  // built below + aggregateProgress). The full /api/production-orders payload was
-  // ~1.4MB/13s on every Sales page load; `?fields=minimal` (no jobCards) is the
-  // SAME rows through the proven snapshot-cached minimal projection (~72kb) and
-  // carries all 6 fields as declared MinimalPOOut props, so values are identical.
-  const { data: productionOrdersResp, refresh: refreshProductionOrders } = useCachedJson<{ success?: boolean; data?: { salesOrderId: string; poNo: string; status: string; currentDepartment?: string; progress?: number; quantity?: number }[] }>("/api/production-orders?fields=minimal");
+  // built below + aggregateProgress), NEVER job cards. The full payload was
+  // ~1.4MB/13s on every Sales page load. NOTE the endpoint's include rule
+  // (production-orders.ts ~L5348): `include` ABSENT still inlines jobCards
+  // (~19MB decoded!), so `?fields=minimal` alone is NOT slim — must pass an
+  // EXPLICIT EMPTY `include=` to drop jobCards → ~72kb, same 6 fields, values
+  // byte-identical (declared MinimalPOOut props). Mirrors warehouse.tsx.
+  const { data: productionOrdersResp, refresh: refreshProductionOrders } = useCachedJson<{ success?: boolean; data?: { salesOrderId: string; poNo: string; status: string; currentDepartment?: string; progress?: number; quantity?: number }[] }>("/api/production-orders?fields=minimal&include=");
   const { data: statusChangesResp, refresh: refreshStatusChanges } = useCachedJson<{ success?: boolean; data?: SOStatusChangeEntry[] }>("/api/sales-orders/status-changes");
   // Per-SO delivered quantity (items on a DELIVERED/INVOICED DO), keyed by
   // companySOId. Paired with each SO's own total qty to show partial-delivery

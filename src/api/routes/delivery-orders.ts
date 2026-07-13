@@ -43,6 +43,11 @@ import {
 import { parseRepairScope, type RepairScope } from "../../lib/repair-scope";
 import { formatRacksCompact } from "../../lib/rack-format";
 import { createPackingListCore } from "./packing-lists";
+import { fetchFilteredPOs, attachCustomerSO } from "./production-orders";
+import {
+  buildReadyPlanning,
+  type ReadyPlanningPO,
+} from "../../lib/delivery-pipeline";
 import {
   groupPosByCustomerHub,
   projectCreditFailure,
@@ -1456,6 +1461,142 @@ app.get("/linked-po-ids", async (c) => {
     .map((r) => r.poId)
     .filter((x): x is string => !!x);
   return c.json({ success: true, poIds });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/delivery-orders/ready-planning — server-side Planning / Ready lists.
+//
+// Perf 2026-07-13: the Delivery page used to pull the whole ~1.2MB
+// /api/production-orders?fields=minimal&include=jobCards ONLY to derive its
+// Planning + "Ready for DO" rows client-side. This assembles the SAME inputs
+// server-side and runs the SHARED buildReadyPlanning (src/lib/delivery-pipeline.ts,
+// extracted verbatim from the page's mapPO) → the rows are byte-identical by
+// construction (same code, same data). The page now fetches this small result
+// instead of the 1.2MB payload. Registered BEFORE /:id (Hono static-first).
+// ---------------------------------------------------------------------------
+app.get("/ready-planning", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const db = c.var.DB;
+
+  const [pos, soRes, itemRes, linkedRes, poValMap] = await Promise.all([
+    fetchFilteredPOs(db, orgId, null, true, false, true),
+    db
+      .prepare(
+        "SELECT id, companySOId, customerId, customerSO, customerSOId, customerPO, customerPOId, reference, hookkaExpectedDD FROM sales_orders WHERE orgId = ?",
+      )
+      .bind(orgId)
+      .all<{
+        id: string;
+        companySOId?: string;
+        customerId?: string;
+        customerSO?: string;
+        customerSOId?: string;
+        customerPO?: string;
+        customerPOId?: string;
+        reference?: string;
+        hookkaExpectedDD?: string;
+      }>(),
+    db
+      .prepare(
+        "SELECT salesOrderId, productCode, unitPriceSen FROM sales_order_items WHERE orgId = ?",
+      )
+      .bind(orgId)
+      .all<{
+        salesOrderId: string;
+        productCode?: string;
+        unitPriceSen?: number;
+      }>(),
+    db
+      .prepare(
+        `SELECT DISTINCT doi.productionOrderId AS poId
+           FROM delivery_order_items doi
+           JOIN delivery_orders d ON d.id = doi.deliveryOrderId
+          WHERE doi.orgId = ?
+            AND doi.productionOrderId IS NOT NULL
+            AND doi.productionOrderId <> ''
+            AND d.status <> 'CANCELLED'`,
+      )
+      .bind(orgId)
+      .all<{ poId?: string | null }>(),
+    loadPoValueMap(db, orgId),
+  ]);
+
+  // Enrich customerSO / customerPOId / hookkaExpectedDD onto the POs — the SAME
+  // attachCustomerSO the /api/production-orders payload runs, so the po fields
+  // the row builder reads match the page's poRaw exactly.
+  await attachCustomerSO(
+    db,
+    pos as Array<{
+      salesOrderId: string;
+      consignmentOrderId: string;
+      customerSO: string;
+    }>,
+  );
+
+  const linkedPOIds = new Set(
+    (linkedRes.results ?? [])
+      .map((r) => r.poId)
+      .filter((x): x is string => !!x),
+  );
+
+  const itemsBySo = new Map<
+    string,
+    { productCode?: string; unitPriceSen?: number }[]
+  >();
+  for (const it of itemRes.results ?? []) {
+    const arr = itemsBySo.get(it.salesOrderId);
+    if (arr) arr.push(it);
+    else itemsBySo.set(it.salesOrderId, [it]);
+  }
+
+  const soMap = new Map<
+    string,
+    { hookkaExpectedDD: string; companySOId: string; customerId: string }
+  >();
+  const soRefMap = new Map<
+    string,
+    { customerSO: string; reference: string; customerPO: string }
+  >();
+  const soPriceByProduct = new Map<string, Map<string, number>>();
+  for (const so of soRes.results ?? []) {
+    soMap.set(so.id, {
+      hookkaExpectedDD: so.hookkaExpectedDD || "",
+      companySOId: so.companySOId || "",
+      customerId: so.customerId || "",
+    });
+    // Dual-keyed + *Id-first, mirroring the page's soRefMap builder.
+    const v = {
+      customerSO: so.customerSOId || so.customerSO || "",
+      reference: so.reference || "",
+      customerPO: so.customerPOId || so.customerPO || "",
+    };
+    soRefMap.set(so.id, v);
+    if (so.companySOId) soRefMap.set(so.companySOId, v);
+    const priceMap = new Map<string, number>();
+    for (const it of itemsBySo.get(so.id) ?? []) {
+      if (it.productCode)
+        priceMap.set(it.productCode, Number(it.unitPriceSen) || 0);
+    }
+    soPriceByProduct.set(so.id, priceMap);
+  }
+
+  const productM3Map = await loadProductM3Map(
+    db,
+    (pos as Array<{ productCode?: string }>).map((p) => p.productCode),
+  );
+
+  const { ready, planning } = buildReadyPlanning({
+    allPOs: pos as unknown as ReadyPlanningPO[],
+    linkedPOIds,
+    soMap,
+    soRefMap,
+    poValMap,
+    soPriceByProduct,
+    productM3Map,
+  });
+  return c.json({ success: true, ready, planning });
 });
 
 // ---------------------------------------------------------------------------

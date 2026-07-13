@@ -1,0 +1,77 @@
+name: Warm heavy list snapshots
+
+# perf 2026-07-13 — fires POST /api/internal/warm-lists every 5 min so the
+# Delivery + Production pages never hit the empty-snapshot cold recompute
+# (~25s, 20MB) after a deploy busts the caches. The endpoint recomputes+stores
+# the SAME payload the live handler would (same compute, same snapshot keys) —
+# only the timing of the recompute moves off the request path, no data changes.
+#
+# Auth: x-cron-secret header (shared CRON_SECRET, same as the other internal
+# crons). The scheduled run warms PROD. To warm/verify STAGING, dispatch
+# manually with target=staging:
+#   gh workflow run warm-lists.yml --ref staging -f target=staging
+on:
+  schedule:
+    - cron: '*/5 * * * *' # every 5 minutes
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Which environment to warm"
+        required: false
+        default: prod
+        type: choice
+        options:
+          - prod
+          - staging
+
+# Never overlap — a warm tick can run ~25s on a cold snapshot; if the previous
+# one is still going, skip. The next tick is 5 min away and the store is
+# idempotent (recompute only when a source table changed).
+concurrency:
+  group: warm-lists
+  cancel-in-progress: false
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: POST /api/internal/warm-lists
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          TARGET: ${{ github.event.inputs.target || 'prod' }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::CRON_SECRET repo secret is empty. See warm-lists header."
+            exit 1
+          fi
+
+          if [ "$TARGET" = "staging" ]; then
+            URL='https://staging.hookka-erp-testing.pages.dev/api/internal/warm-lists'
+          else
+            URL='https://hookka-erp-testing.pages.dev/api/internal/warm-lists'
+          fi
+          echo "Warming: $URL"
+
+          # 90s max-time covers a cold ~25s snapshot recompute + connection warm.
+          response=$(curl --silent --show-error --write-out '\nHTTP_STATUS:%{http_code}' \
+            --max-time 90 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "x-cron-secret: $CRON_SECRET" \
+            --data '{}' \
+            "$URL")
+
+          status=$(echo "$response" | tail -n1 | sed 's/HTTP_STATUS://')
+          body=$(echo "$response" | sed '$d')
+
+          echo "Status: $status"
+          echo "Body: $body"
+
+          # Best-effort warming: a failed tick (the very cold-start we're trying
+          # to prevent, or a transient blip) does NOT fail the job — the next
+          # tick is 5 min away. Only a non-200 on manual dispatch is worth a hard
+          # signal, but keep it a warning to avoid CI noise on scheduled ticks.
+          if [ "$status" != "200" ]; then
+            echo "::warning::warm-lists returned HTTP $status (best-effort)"
+          fi

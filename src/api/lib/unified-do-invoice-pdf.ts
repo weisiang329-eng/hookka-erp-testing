@@ -94,12 +94,33 @@ function money(sen: number): string {
   });
 }
 
+// pdf-lib StandardFonts (Helvetica) can only encode WinAnsi (Latin-1) glyphs.
+// A SINGLE non-Latin character anywhere in the data — a Chinese char, an
+// em-dash, smart quotes, a bullet — makes widthOfTextAtSize / drawText THROW,
+// which crashed the entire render and dropped the customer to the ugly
+// simple-table fallback (owner 2026-07-13: "之前發的時候都沒用" — the nice
+// version rarely reached the customer). Sanitise EVERY drawn string: map the
+// common typography to ASCII, collapse odd spaces, and replace anything still
+// outside Latin-1 with "?" so no stray glyph can ever crash the document.
+function winAnsi(s: string): string {
+  if (!s) return s;
+  return s
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
+    .replace(/[\u2013\u2014\u2015]/g, "-")
+    .replace(/\u2026/g, "...")
+    .replace(/[\u2022\u00B7]/g, "-")
+    .replace(/[\u00A0\u2000-\u200B\u202F\u205F\u3000]/g, " ")
+    .replace(/[^\x20-\x7E\u00A1-\u00FF\n]/g, "?");
+}
+
 // Wrap text to fit maxW, matching how the original jsPDF-autotable documents
 // handle overflow (`overflow: "linebreak"`): word-wrap, and break any single
 // token that is itself wider than the column by character. The row grows to fit
 // the wrapped lines — nothing is ever truncated or pushed under the next column
 // (owner 2026-07-02: "照我們的怎麼處理就怎麼處理" — wrap, don't ellipsis).
-function wrapHard(font: PDFFont, text: string, maxW: number, size: number, maxLines = 12): string[] {
+function wrapHard(font: PDFFont, rawText: string, maxW: number, size: number, maxLines = 12): string[] {
+  const text = winAnsi(rawText);
   if (!text) return [];
   const fits = (s: string) => font.widthOfTextAtSize(s, size) <= maxW;
   const out: string[] = [];
@@ -124,7 +145,8 @@ function wrapHard(font: PDFFont, text: string, maxW: number, size: number, maxLi
   return out.slice(0, maxLines);
 }
 
-function wrap(font: PDFFont, text: string, maxW: number, size: number, maxLines = 4): string[] {
+function wrap(font: PDFFont, rawText: string, maxW: number, size: number, maxLines = 4): string[] {
+  const text = winAnsi(rawText);
   if (!text) return [];
   const words = text.split(/\s+/).filter(Boolean);
   const out: string[] = [];
@@ -145,8 +167,9 @@ function wrap(font: PDFFont, text: string, maxW: number, size: number, maxLines 
 interface Fonts { helv: PDFFont; bold: PDFFont }
 
 function rightText(page: PDFPage, text: string, xRight: number, y: number, size: number, font: PDFFont, color = INK) {
-  const w = font.widthOfTextAtSize(text, size);
-  page.drawText(text, { x: xRight - w, y, size, font, color });
+  const t = winAnsi(text);
+  const w = font.widthOfTextAtSize(t, size);
+  page.drawText(t, { x: xRight - w, y, size, font, color });
 }
 
 export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Array> {
@@ -188,7 +211,7 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
   const labelW = 60;
   const colGap = PAGE_W / 2 + 12;
   const drawField = (x: number, yy: number, k: string, v: string, maxW: number): number => {
-    page.drawText(k, { x, y: yy, size: 8, font: fonts.helv, color: MUTED });
+    page.drawText(winAnsi(k), { x, y: yy, size: 8, font: fonts.helv, color: MUTED });
     const lines = wrap(fonts.bold, v || "-", maxW - labelW, 8.5, 3);
     (lines.length ? lines : ["-"]).forEach((ln, i) => {
       page.drawText(ln, { x: x + labelW, y: yy - i * 10, size: 8.5, font: fonts.bold, color: INK });
@@ -245,7 +268,7 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
   for (const g of data.groups) {
     ensureSpace(16);
     page.drawRectangle({ x: MARGIN, y: y - 3, width: PAGE_W - MARGIN * 2, height: 12, color: BAND });
-    page.drawText(g.category, { x: xOrder + 2, y: y, size: 8, font: fonts.bold, color: INK });
+    page.drawText(winAnsi(g.category), { x: xOrder + 2, y: y, size: 8, font: fonts.bold, color: INK });
     y -= 16;
 
     for (const it of g.items) {
@@ -347,7 +370,7 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
     if (data.taxSen) sum("Tax", `RM ${money(data.taxSen)}`);
     sum("Total", `RM ${money(data.totalSen ?? 0)}`, true, true);
     if (data.amountInWords) {
-      page.drawText(data.amountInWords, { x: MARGIN, y: y + 2, size: 8, font: fonts.helv, color: MUTED });
+      page.drawText(winAnsi(data.amountInWords), { x: MARGIN, y: y + 2, size: 8, font: fonts.helv, color: MUTED });
     }
   }
 

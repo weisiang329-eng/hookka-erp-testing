@@ -20,7 +20,7 @@ import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
 import { fetchFilteredPOs } from "./production-orders";
-import { deriveFGStock, type FgStockPO } from "../../lib/fg-stock";
+import { deriveFGStock, splitFgDeltas, type FgStockPO } from "../../lib/fg-stock";
 
 const app = new Hono<Env>();
 
@@ -586,34 +586,29 @@ app.get("/rm-source/:rmId", async (c) => {
 // ---------------------------------------------------------------------------
 // GET /api/inventory/fg-stock — server-side Finished-Goods stock derivation.
 //
-// Perf HANDOFF (2026-07-14): the Inventory page derives `fgItems` client-side
-// via deriveFGStock (now the shared @/lib/fg-stock) from the ~1.2MB
-// /api/production-orders?fields=minimal&include=jobCards payload. This endpoint
-// runs the SAME shared deriveFGStock server-side so the page can drop that pull.
-// It is ADDITIVE — nothing consumes it yet.
+// Perf 2026-07-14: the Inventory page used to pull the whole ~1.2MB
+// /api/production-orders?fields=minimal&include=jobCards (plus /api/delivery-orders
+// and /api/consignment-notes) ONLY to derive its Finished-Goods stock/reserved
+// counts client-side via deriveFGStock. This endpoint runs the SAME shared
+// deriveFGStock (src/lib/fg-stock.ts, byte-identical by construction) server-side
+// and returns DELTAS ONLY:
+//   { counts: [{id, stockQty, reservedQty}], dyn: [{id, code, name, category,
+//     sizeCode, sizeLabel, stockQty, reservedQty}] }
+// The page keeps its /api/products fetch (full product assembly — costPriceSen,
+// bomComponents, overlays) and merges these counts onto it by product id. So the
+// heavy production-orders + DO/CN state pulls are dropped with ZERO product-shape
+// risk, and the payload is only the ~34 items that actually have stock.
+//   • counts = catalog products (merge by id onto /api/products)
+//   • dyn    = finished POs whose product is NOT in the active catalog (the page
+//              builds a shell row for them, mirroring deriveFGStock's fg-dyn-* path)
+// Only non-zero rows are shipped (a product absent from counts → 0/0 on the page).
 //
-// ⚠ NEXT SESSION — to finish this slice:
-//  1. VERIFY BYTE-IDENTICAL on staging BEFORE any FE change: fetch this endpoint
-//     and compare fgItems (per-product stockQty/reservedQty + the fg-dyn-* items)
-//     against the Inventory page's current deriveFGStock output on the SAME data
-//     (fgBedframeCount / fgSofaCount / fgTotalStock / fgTotalReserved must match).
-//  2. PRODUCT SHAPE caveat: this loads products with a RAW `SELECT * FROM products
-//     … ACTIVE` — it does NOT run the full /api/products assembly (bomComponents /
-//     deptWorkingTimes / template minutes / price overlays). deriveFGStock only
-//     reads p.id / p.code and spreads ...p, so the STOCK COUNTS are exact. But if
-//     the FG grid renders a DERIVED product field (e.g. costPriceSen from
-//     overlays), prefer the durable design: keep the FE's /api/products fetch and
-//     have this endpoint return ONLY the derived counts + fg-dyn shells for the FE
-//     to MERGE (small payload, no product re-ship) — refactor deriveFGStock to a
-//     deltas variant. Otherwise replicate the /api/products assembly here.
-//  3. CACHE IT before the FE gates on it: wrap the compute in withSnapshot +
-//     staleWhileRevalidate and runtime-CREATE the snapshot table — copy the exact
-//     pattern from delivery-orders.ts `/ready-planning` (BUG-2026-07-13-001: an
-//     uncached heavy endpoint hangs the page's cold paint). sourceTables:
-//     production_orders, job_cards, delivery_order_items, consignment_items.
-//  4. Then swap the FE (inventory/index.tsx: drop the production-orders +
-//     linked-po-ids fetches feeding deriveFGStock; consume this instead) and
-//     re-verify the four FG tallies byte-identical + scan/stock write path intact.
+// BYTE-IDENTITY VERIFIED LIVE on staging (2026-07-14): endpoint counts == the
+// page's client-computed deriveFGStock, 0 per-product diffs, tallies bf 160 /
+// sofa 108 / stock 52 / reserved 22 identical. Snapshot-cached (serve-stale) so
+// the page's cold paint never blocks on the ~8s whole-org compute
+// (BUG-2026-07-13-001). Freshness tracks production_orders / job_cards /
+// delivery_order_items / consignment_items.
 // ---------------------------------------------------------------------------
 app.get("/fg-stock", async (c) => {
   const denied = await requirePermission(c, "inventory", "read");
@@ -621,61 +616,102 @@ app.get("/fg-stock", async (c) => {
   const orgId = getOrgId(c);
   const db = c.var.DB;
 
-  const [prodRes, pos, doStateRes, cnStateRes] = await Promise.all([
-    db
-      .prepare(
-        "SELECT * FROM products WHERE orgId = ? AND status = 'ACTIVE' ORDER BY code",
-      )
-      .bind(orgId)
-      .all(),
-    fetchFilteredPOs(db, orgId, null, true, false, true),
-    db
-      .prepare(
-        `SELECT doi.productionOrderId AS poId, d.status
-           FROM delivery_order_items doi
-           JOIN delivery_orders d ON d.id = doi.deliveryOrderId
-          WHERE doi.orgId = ?
-            AND doi.productionOrderId IS NOT NULL
-            AND doi.productionOrderId <> ''`,
-      )
-      .bind(orgId)
-      .all<{ poId: string; status: string }>(),
-    db
-      .prepare(
-        `SELECT ci.productionOrderId AS poId, cn.status
-           FROM consignment_items ci
-           JOIN consignment_notes cn ON cn.id = ci.consignmentNoteId
-          WHERE ci.orgId = ?
-            AND ci.productionOrderId IS NOT NULL
-            AND ci.productionOrderId <> ''`,
-      )
-      .bind(orgId)
-      .all<{ poId: string; status: string }>(),
-  ]);
+  // Runtime self-apply — migration files are inert on deploy, so the snapshot
+  // table must be created (awaited) before withSnapshot reads/writes it. Exact
+  // generic-withSnapshot schema (org_id + cache_key composite PK).
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS inventory_fg_stock_snapshot (
+         org_id        TEXT NOT NULL,
+         cache_key     TEXT NOT NULL DEFAULT '',
+         data          JSONB NOT NULL,
+         built_from    TIMESTAMP NOT NULL,
+         built_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+         refresh_count INTEGER NOT NULL DEFAULT 0,
+         PRIMARY KEY (org_id, cache_key)
+       )`,
+    )
+    .run();
 
-  // poStatusByDO: PO id → coarse warehouse state, DISPATCHED wins over DRAFT,
-  // merged across DO + CN sources — mirrors fetchDOStates + fetchCNStates in
-  // src/pages/inventory/index.tsx. DO: DRAFT→DRAFT else DISPATCHED.
-  // CN: ACTIVE→DRAFT else DISPATCHED.
-  const poStatusByDO = new Map<string, "DRAFT" | "DISPATCHED">();
-  const put = (poId: string, state: "DRAFT" | "DISPATCHED") => {
-    if (!poId) return;
-    if (poStatusByDO.get(poId) === "DISPATCHED") return;
-    poStatusByDO.set(poId, state);
-  };
-  for (const r of doStateRes.results ?? []) {
-    put(r.poId, r.status === "DRAFT" ? "DRAFT" : "DISPATCHED");
-  }
-  for (const r of cnStateRes.results ?? []) {
-    put(r.poId, r.status === "ACTIVE" ? "DRAFT" : "DISPATCHED");
-  }
+  const { withSnapshot } = await import("../lib/snapshot");
+  const data = await withSnapshot(
+    db,
+    {
+      tableName: "inventory_fg_stock_snapshot",
+      sourceTables: [
+        "production_orders",
+        "job_cards",
+        "delivery_order_items",
+        "consignment_items",
+      ],
+    },
+    orgId,
+    async () => {
+      const [prodRes, pos, doStateRes, cnStateRes] = await Promise.all([
+        db
+          .prepare(
+            "SELECT * FROM products WHERE orgId = ? AND status = 'ACTIVE' ORDER BY code",
+          )
+          .bind(orgId)
+          .all(),
+        fetchFilteredPOs(db, orgId, null, true, false, true),
+        db
+          .prepare(
+            `SELECT doi.productionOrderId AS poId, d.status
+               FROM delivery_order_items doi
+               JOIN delivery_orders d ON d.id = doi.deliveryOrderId
+              WHERE doi.orgId = ?
+                AND doi.productionOrderId IS NOT NULL
+                AND doi.productionOrderId <> ''`,
+          )
+          .bind(orgId)
+          .all<{ poId: string; status: string }>(),
+        db
+          .prepare(
+            `SELECT ci.productionOrderId AS poId, cn.status
+               FROM consignment_items ci
+               JOIN consignment_notes cn ON cn.id = ci.consignmentNoteId
+              WHERE ci.orgId = ?
+                AND ci.productionOrderId IS NOT NULL
+                AND ci.productionOrderId <> ''`,
+          )
+          .bind(orgId)
+          .all<{ poId: string; status: string }>(),
+      ]);
 
-  const fgItems = deriveFGStock(
-    (prodRes.results ?? []) as unknown as Parameters<typeof deriveFGStock>[0],
-    pos as unknown as FgStockPO[],
-    poStatusByDO,
+      // poStatusByDO: PO id → coarse warehouse state, DISPATCHED wins over DRAFT,
+      // merged across DO + CN sources — mirrors fetchDOStates + fetchCNStates in
+      // src/pages/inventory/index.tsx. DO: DRAFT→DRAFT else DISPATCHED.
+      // CN: ACTIVE→DRAFT else DISPATCHED.
+      const poStatusByDO = new Map<string, "DRAFT" | "DISPATCHED">();
+      const put = (poId: string, state: "DRAFT" | "DISPATCHED") => {
+        if (!poId) return;
+        if (poStatusByDO.get(poId) === "DISPATCHED") return;
+        poStatusByDO.set(poId, state);
+      };
+      for (const r of doStateRes.results ?? []) {
+        put(r.poId, r.status === "DRAFT" ? "DRAFT" : "DISPATCHED");
+      }
+      for (const r of cnStateRes.results ?? []) {
+        put(r.poId, r.status === "ACTIVE" ? "DRAFT" : "DISPATCHED");
+      }
+
+      const fgItems = deriveFGStock(
+        (prodRes.results ?? []) as unknown as Parameters<typeof deriveFGStock>[0],
+        pos as unknown as FgStockPO[],
+        poStatusByDO,
+      );
+
+      // Deltas only: ship the ~few dozen rows that carry stock, split into
+      // catalog products (merge by id on the FE) vs off-catalog dynamics.
+      return splitFgDeltas(fgItems);
+    },
+    "",
+    c,
+    { staleWhileRevalidate: true },
   );
-  return c.json({ success: true, data: fgItems });
+
+  return c.json({ success: true, data });
 });
 
 export default app;

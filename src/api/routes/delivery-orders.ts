@@ -1480,6 +1480,23 @@ app.get("/ready-planning", async (c) => {
   const orgId = getOrgId(c);
   const db = c.var.DB;
 
+  // Runtime self-apply — migration files are inert on deploy, so the snapshot
+  // table must be created here (awaited) before withSnapshot reads/writes it.
+  // Exact generic-withSnapshot schema (org_id + cache_key composite PK).
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS delivery_ready_planning_snapshot (
+         org_id        TEXT NOT NULL,
+         cache_key     TEXT NOT NULL DEFAULT '',
+         data          JSONB NOT NULL,
+         built_from    TIMESTAMP NOT NULL,
+         built_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+         refresh_count INTEGER NOT NULL DEFAULT 0,
+         PRIMARY KEY (org_id, cache_key)
+       )`,
+    )
+    .run();
+
   // Snapshot-cached + serve-stale: the compute below does the whole-org PO+JC
   // load + join (same cost the production-orders list pays), so without a cache
   // the delivery page would block its cold paint on an ~8s request. withSnapshot

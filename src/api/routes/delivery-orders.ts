@@ -4282,11 +4282,15 @@ app.post("/packing-list-first", async (c) => {
 //   - per item      : gap / divan / leg inches + computed total height,
 //                     from production_orders (via di.productionOrderId)
 // Registered BEFORE /:id (Hono matches routes in order).
-app.get("/:id/print-extras", async (c) => {
-  const denied = await requirePermission(c, "delivery-orders", "read");
-  if (denied) return denied;
-  const id = c.req.param("id");
-  const doRow = await c.var.DB.prepare(
+// Extracted so the DELIVERED customer-notice email builds the SAME rich DO
+// the owner downloads/prints (category / per-line refs / spec / pieces).
+// Read-only; returns null when the DO is not found. Same output shape the
+// GET /:id/print-extras endpoint returns.
+async function computeDoPrintExtras(
+  db: Env["Variables"]["DB"],
+  id: string,
+) {
+  const doRow = await db.prepare(
     `SELECT id, salesOrderId, hubId, deliveryAddress, customerState,
             contactPerson, contactPhone
        FROM delivery_orders WHERE id = ?`,
@@ -4302,11 +4306,11 @@ app.get("/:id/print-extras", async (c) => {
       contactPhone: string | null;
     }>();
   if (!doRow) {
-    return c.json({ success: false, error: "Delivery order not found" }, 404);
+    return null;
   }
   let customerSO = "";
   if (doRow.salesOrderId) {
-    const so = await c.var.DB.prepare(
+    const so = await db.prepare(
       "SELECT customerSOId FROM sales_orders WHERE id = ?",
     )
       .bind(doRow.salesOrderId)
@@ -4327,7 +4331,7 @@ app.get("/:id/print-extras", async (c) => {
   let hubContactName = doRow.contactPerson ?? "";
   let hubContactPhone = doRow.contactPhone ?? "";
   if (doRow.hubId) {
-    const hub = await c.var.DB.prepare(
+    const hub = await db.prepare(
       `SELECT shortName, address, state, contactName, phone
          FROM delivery_hubs WHERE id = ?`,
     )
@@ -4355,7 +4359,7 @@ app.get("/:id/print-extras", async (c) => {
   //       query printed everything blank).
   //   (b) sales order       — via di.salesOrderNo = sales_orders.companySOId
   //       (the same path the on-screen items table uses, always present).
-  const itRes = await c.var.DB.prepare(
+  const itRes = await db.prepare(
     `SELECT di.id,
             di.salesOrderNo AS diSalesOrderNo,
             di.productCode,
@@ -4457,7 +4461,7 @@ app.get("/:id/print-extras", async (c) => {
   };
   if (soIds.length > 0) {
     const ph = soIds.map(() => "?").join(",");
-    const soiRes = await c.var.DB.prepare(
+    const soiRes = await db.prepare(
       `SELECT salesOrderId, productCode, fabricCode, sizeLabel,
               itemCategory, gapInches, divanHeightInches,
               legHeightInches, specialOrder
@@ -4514,7 +4518,7 @@ app.get("/:id/print-extras", async (c) => {
   >();
   if (codes.length > 0) {
     const ph = codes.map(() => "?").join(",");
-    const bomRes = await c.var.DB.prepare(
+    const bomRes = await db.prepare(
       `SELECT productCode, baseModel, wipComponents, versionStatus, effectiveFrom
          FROM bom_templates WHERE productCode IN (${ph})`,
     )
@@ -4543,7 +4547,7 @@ app.get("/:id/print-extras", async (c) => {
   // Join key for the per-component PACKING job-card read further down.
   const diPoById = new Map<string, string>();
   {
-    const diRes = await c.var.DB.prepare(
+    const diRes = await db.prepare(
       "SELECT id, salesOrderNo, productionOrderId FROM delivery_order_items WHERE deliveryOrderId = ?",
     )
       .bind(id)
@@ -4578,7 +4582,7 @@ app.get("/:id/print-extras", async (c) => {
   const soRef = new Map<string, SoRef>();
   if (soKeys.length > 0) {
     const ph = soKeys.map(() => "?").join(",");
-    const soRes = await c.var.DB.prepare(
+    const soRes = await db.prepare(
       `SELECT id, companySO, companySOId, customerPO, customerSOId, reference
          FROM sales_orders
         WHERE companySOId IN (${ph}) OR companySO IN (${ph}) OR id IN (${ph})`,
@@ -4621,7 +4625,7 @@ app.get("/:id/print-extras", async (c) => {
     const poIds = Array.from(new Set(diPoById.values()));
     if (poIds.length > 0) {
       const ph = poIds.map(() => "?").join(",");
-      const jcRes = await c.var.DB.prepare(
+      const jcRes = await db.prepare(
         `SELECT productionOrderId, wipType, wipLabel, rackingNumber,
                 completedDate, status
            FROM job_cards
@@ -4649,7 +4653,7 @@ app.get("/:id/print-extras", async (c) => {
     const poIds = Array.from(new Set(diPoById.values()));
     if (poIds.length > 0) {
       const ph = poIds.map(() => "?").join(",");
-      const rsRes = await c.var.DB.prepare(
+      const rsRes = await db.prepare(
         `SELECT * FROM production_orders WHERE id IN (${ph})`,
       )
         .bind(...poIds)
@@ -4828,19 +4832,27 @@ app.get("/:id/print-extras", async (c) => {
       componentRacks,
     };
   }
-  return c.json({
-    success: true,
-    data: {
-      customerSO,
-      customerRef,
-      deliverTo,
-      deliveryAddress,
-      hubState,
-      hubContactName,
-      hubContactPhone,
-      items,
-    },
-  });
+  return {
+    customerSO,
+    customerRef,
+    deliverTo,
+    deliveryAddress,
+    hubState,
+    hubContactName,
+    hubContactPhone,
+    items,
+  };
+}
+
+app.get("/:id/print-extras", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "read");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  const data = await computeDoPrintExtras(c.var.DB, id);
+  if (!data) {
+    return c.json({ success: false, error: "Delivery order not found" }, 404);
+  }
+  return c.json({ success: true, data });
 });
 
 // ---------------------------------------------------------------------------
@@ -5435,21 +5447,33 @@ export async function queueDoCustomerNotice(
         // stays the ULTIMATE fallback so a render bug never kills the notice.
         try {
           const itRes = await c.var.DB.prepare(
-            `SELECT productCode, productName, quantity, rackingNumber
+            `SELECT id, productCode, productName, fabricCode, sizeLabel, quantity, rackingNumber
                FROM delivery_order_items WHERE deliveryOrderId = ?`,
           )
             .bind(id)
             .all<{
+              id: string;
               productCode: string | null;
               productName: string | null;
+              fabricCode: string | null;
+              sizeLabel: string | null;
               quantity: number;
               rackingNumber: string | null;
             }>();
+          // Same per-line enrichment (category / order refs / spec / pieces)
+          // the download path gets, so the emailed DO == what the owner prints
+          // (owner 2026-07-13). Best-effort — a null just degrades to the plain
+          // layout, never blocks the notice.
+          const doExtras = await computeDoPrintExtras(c.var.DB, id).catch(() => null);
           const lineRows = (itRes.results ?? []).map((it) => ({
+            id: String(it.id),
             productCode: it.productCode || "-",
             productName: it.productName || "-",
+            fabricCode: it.fabricCode || "",
+            sizeLabel: it.sizeLabel || "",
             quantity: Number(it.quantity ?? 0),
             rackingNumber: it.rackingNumber || null,
+            extra: doExtras?.items?.[String(it.id)],
           }));
           // Pull customer's billing address for the Bill To block.
           const custRow = await c.var.DB.prepare(
@@ -5465,17 +5489,23 @@ export async function queueDoCustomerNotice(
                   doNo: doRow.doNo,
                   docDate: doRow.dispatchedAt ?? "",
                   customerName: doRow.customerName,
-                  deliverTo: deliverTo || "",
-                  deliveryAddress: custRow?.companyAddress ?? "",
+                  deliverTo: doExtras?.deliverTo || deliverTo || "",
+                  deliveryAddress: doExtras?.deliveryAddress || custRow?.companyAddress || "",
+                  contactName: doExtras?.hubContactName || "",
+                  contactPhone: doExtras?.hubContactPhone || "",
                   driverName: doRow.driverName ?? "",
                   driverPhone: (doRow.driverPhone ?? "").trim(),
                   lorryPlate: doRow.vehicleNo ?? "",
-                  fallbackCustomerSO: doRow.customerSO ?? "",
-                  items: lineRows.map((it, i) => ({
-                    id: String(i),
+                  fallbackCustomerSO: doExtras?.customerSO || doRow.customerSO || "",
+                  fallbackCustomerRef: doExtras?.customerRef || "",
+                  items: lineRows.map((it) => ({
+                    id: it.id,
                     productCode: it.productCode,
                     productName: it.productName,
+                    fabricCode: it.fabricCode,
+                    sizeLabel: it.sizeLabel,
                     quantity: it.quantity,
+                    extra: it.extra,
                   })),
                 },
                 HOOKKA_LOGO_PNG_BASE64,

@@ -18,6 +18,7 @@ import type { Env } from "../worker";
 import { consumeFGBatchesForDO } from "../lib/do-cost-cascade";
 import {
   loadDoValueMap,
+  loadDoValueMapCached,
   loadPoValueMap,
   loadSoLinePriceIndex,
   priceForItem,
@@ -1192,7 +1193,7 @@ app.get("/", async (c) => {
         .prepare("SELECT * FROM delivery_order_items WHERE orgId = ?")
         .bind(orgId)
         .all<DeliveryOrderItemRow>(),
-      loadDoValueMap(db, orgId),
+      loadDoValueMapCached(db, orgId, c),
     ]);
     const itemRows = items.results ?? [];
     const orderRows = orders.results ?? [];
@@ -1284,7 +1285,7 @@ app.get("/", async (c) => {
     await Promise.all([
       loadProductM3Map(db, items.map((i) => i.productCode)),
       loadHubStateMap(db, orderRows.map((o) => o.hubId)),
-      loadDoValueMap(db, orgId),
+      loadDoValueMapCached(db, orgId, c),
       loadDoInvoiceMap(db, orgId),
       loadRepairScopeByPo(db, items.map((i) => i.productionOrderId)),
     ]);

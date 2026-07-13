@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect } from "react";
 import { cachedFetchJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { deriveFGStock, type FGItem } from "@/lib/fg-stock";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -143,7 +144,8 @@ const TABS: { key: Tab; label: string }[] = [
 ];
 
 // --- Finished Products with stock ---
-type FGItem = Product & { stockQty: number; reservedQty: number };
+// FGItem + deriveFGStock now live in the shared @/lib/fg-stock (so the server
+// FG-stock endpoint runs the identical derivation).
 
 // Loose shape that covers the fields WIP/FG derivation reads from a
 // production order. Typed loosely so the live API payload (which matches
@@ -268,79 +270,8 @@ type CreateRMForm = {
 // Mock data generation
 // ============================================================
 
-// Finished Products — stock derived from production orders where all
-// upholstery cards are COMPLETED (meaning the FG is ready / stocked in).
-// Each such PO contributes its quantity to the matching product's stock.
-// Now accepts `products` + `productionOrders` as args (previously closed
-// over mock-data module globals) so it can be driven from live D1 fetches.
-function deriveFGStock(
-  products: Product[],
-  productionOrders: ProductionOrderLike[],
-  poStatusByDO: Map<string, "DRAFT" | "DISPATCHED">,
-): FGItem[] {
-  // Per-PO state from DOs:
-  //   DISPATCHED → out of warehouse, don't count anywhere
-  //   DRAFT      → still ours but earmarked → reservedQty bucket
-  //   (no DO)    → free stock → stockQty bucket
-  const fgMap = new Map<string, FGItem>();
-  for (const p of products) {
-    fgMap.set(p.id, { ...p, stockQty: 0, reservedQty: 0 });
-  }
-
-  const findOrCreate = (po: ProductionOrderLike): FGItem | null => {
-    let fg = fgMap.get(po.productId);
-    if (!fg) {
-      for (const [, item] of fgMap) {
-        if (item.code === po.productCode) { fg = item; break; }
-      }
-    }
-    if (fg) return fg;
-    const id = `fg-dyn-${po.productCode}`;
-    if (!fgMap.has(id)) {
-      const dyn: FGItem = {
-        id,
-        code: po.productCode,
-        name: po.productName || po.productCode,
-        category: po.itemCategory as "BEDFRAME" | "SOFA",
-        description: "",
-        baseModel: po.productCode,
-        sizeCode: po.sizeCode || "",
-        sizeLabel: po.sizeLabel || "",
-        fabricUsage: 0,
-        unitM3: 0,
-        status: "ACTIVE",
-        costPriceSen: 0,
-        productionTimeMinutes: 0,
-        subAssemblies: [],
-        bomComponents: [],
-        deptWorkingTimes: [],
-        stockQty: 0,
-        reservedQty: 0,
-      };
-      fgMap.set(id, dyn);
-    }
-    return fgMap.get(id)!;
-  };
-
-  for (const po of productionOrders) {
-    const uphCards = po.jobCards.filter(jc => jc.departmentCode === "UPHOLSTERY");
-    if (uphCards.length === 0) continue;
-    if (!uphCards.every(jc => jc.status === "COMPLETED" || jc.status === "TRANSFERRED")) continue;
-
-    const doState = poStatusByDO.get(po.id);
-    if (doState === "DISPATCHED") continue; // already out the door
-
-    const fg = findOrCreate(po);
-    if (!fg) continue;
-    if (doState === "DRAFT") {
-      fg.reservedQty += po.quantity;
-    } else {
-      fg.stockQty += po.quantity;
-    }
-  }
-
-  return Array.from(fgMap.values());
-}
+// deriveFGStock now lives in the shared @/lib/fg-stock (imported above) so the
+// server /api/inventory/fg-stock endpoint runs the byte-identical derivation.
 // (fgItems was previously a module-level const seeded from mock data. It is
 // now recomputed inside the component from live fetches — see useMemo below.)
 

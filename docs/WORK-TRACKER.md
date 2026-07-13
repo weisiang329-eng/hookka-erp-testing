@@ -9,6 +9,106 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-14 — 🔵 Durable read-perf rollout (ON STAGING, byte-identical gate) — see docs/PERF-DURABLE-ARCHITECTURE.md
+Owner-approved rebuild: stop shipping whole-org lists to the client; compute
+server-side (shared builder = byte-identical by construction) + snapshot-cache +
+serve-stale. Each slice = own commit → staging → LIVE byte-identical verify →
+(owner) merge to prod. Canonical + deployed branch = `staging` (this branch,
+staging-delivery-ready). NOTE: the older `perf-durable-arch` branch holds the same
+work via a messier revert/reapply history and is now BEHIND on code — treat THIS
+branch (staging) as source of truth; perf-durable-arch is superseded (kept only for
+its doc history, now copied here).
+
+**Slices DONE + LIVE-verified on staging (NOT on prod — await owner merge):**
+- ✅ **Sales SO list** — `?fields=minimal&include=` (empty include drops jobCards).
+  1.2MB→72kb. Sales total RM 1,155,048.95 + "194 of 200" byte-identical.
+- ✅ **Delivery Planning/Ready** — `GET /api/delivery-orders/ready-planning`
+  (shared buildReadyPlanning, withSnapshot+SWR, runtime-CREATE snapshot table). FE
+  drops the 1.2MB PO pull → ~10 KB. Planning 179/RM136,340.35, Ready 52/RM24,982.22,
+  Delivered 265/RM1,004,020.88 byte-identical. (BUG-2026-07-13-001 fixed en route.)
+- ✅ **Mobile Home Pending-Delivery** — reuses /ready-planning; dropped its 1.2MB PO pull.
+- ✅ **Inventory FG-stock (2026-07-14, THIS session)** — `GET /api/inventory/fg-stock`
+  returns DELTAS `{counts, dyn}` via shared `splitFgDeltas` (snapshot-cached
+  `inventory_fg_stock_snapshot` + SWR + runtime CREATE). FE keeps its /api/products
+  and merges by id via shared `mergeFgDeltas` → dropped THREE fetches
+  (production-orders ~1.2MB + delivery-orders + consignment-notes). LIVE-verified:
+  page now calls ONLY /api/inventory/fg-stock (0 production-orders/DO/CN calls);
+  rendered tallies Total SKUs 272 / Available 52 / Reserved 22 / Bedframe 160 —
+  byte-identical (0 per-product diffs in the live compare). Round-trip unit test
+  `tests/fg-stock.test.mjs` (7 cases) proves merge(split(derive))≡derive.
+  Commit ebc4d1b6. build:strict + full suite green.
+
+**Remaining slices (same pattern, each own commit → staging → live gate → FE swap):**
+- ⚪ **Planning** (scheduling board) — pulls the 1.2MB PO+jobCards to compute the
+  schedule client-side. Needs jobCards → server-side aggregate, not slim.
+- ⚪ **Consignment note (UPH)** — same PO+jobCards pull for the UPH picker.
+- ⚪ **Mobile ProductionScreen** (production board) — same.
+Method per slice: extract shared builder (verbatim from FE) → additive server
+endpoint (withSnapshot+SWR+runtime CREATE) → LIVE byte-identical compare (endpoint
+vs current client compute) → swap FE → re-verify tallies + scan/write path intact.
+Golden rule (owner's #1 fear): search/filter/count/money-total ALWAYS server-side
+over the WHOLE dataset; page window is render-only. 11-pt checklist in the arch doc.
+
+---
+
+## 2026-07-13 — 🔵 Delivery Return — driver item-flagging + desktop deliver/DR/SV convert
+Owner ask (4 parts, feature → staging):
+1. **Driver scan** (do-scan.tsx): on "Delivered with issues", show item list → driver
+   ticks the specific damaged items (+ problem) → system AUTO-creates a Delivery
+   Return for the damaged items, and the remaining good items are all marked delivered
+   (good lines invoice normally; DR lines already excluded from invoice via Phase 5
+   computeDoInvoiceLines). Backend: public-do-qr `/advance` accepts `damagedItems`,
+   creates DR BEFORE the delivered cascade so auto-invoice excludes them.
+2. **Desktop DO detail**: support Dispatched → Delivered with the same per-item damaged
+   handling (Mark Delivered → optional flag damaged items → auto DR + deliver rest).
+   (Post-hoc "Convert to Delivery Return" button already exists for DELIVERED/INVOICED.)
+3. **DR → Service Order convert**: DR detail "Repair & re-deliver" should create the SV
+   order carrying the DR's damaged item lines — `/sales/create?fromReturn=<drId>` hydrates
+   the SV from the DR items + links DR.service_order_id (today it makes a bare case from
+   the whole SO, not the specific damaged items).
+Shared backend: extract `createDeliveryReturnRecord()` helper (reused by DR POST +
+driver advance). **Mockup FIRST (UI rule) → owner OK → build.**
+
+**CORRECTED (2026-07-13, 2nd pass) — PER-LINE returns:** Owner clarified: NOT whole-DO —
+partial (e.g. 10 items, only 2 returned). Driver "Delivered with Issue" → tick WHICH lines
+are returning → those open a DR, the rest deliver + INVOICE as normal (no invoice hold).
+- `public-do-qr /advance`: replaced whole-DO `returnGoods` with per-DO `returnItems` map
+  (doId→productionOrderId[]). DR for the ticked subset created BEFORE the delivered cascade
+  so computeDoInvoiceLines excludes them; kept lines bill + send the normal notice.
+- DO summary payload now carries `items[]` (productionOrderId/code/name/qty) so the phone
+  renders the return checklist with no extra fetch.
+- `loadDoItemsForReturn(db, doId, onlyProductionOrderIds?)` gained the subset filter.
+- `do-scan.tsx`: 2nd button "Delivered with Issue" (amber) opens a return-picker panel →
+  tick returned lines → "Deliver — return N items"; success stays green "Delivered". Reverted
+  the whole-DO "Returned"/incomplete copy.
+- Desktop "Convert to Delivery Return" (DELIVERED/INVOICED, item picker) already covers the
+  office route-2 (assume delivered → then DR). build:strict clean; 116 do-qr/delivery tests pass.
+
+--- superseded first pass below (whole-DO, WRONG) ---
+Driver side = NO item picker. Clean either/or after dispatch: customer received →
+Mark Delivered (normal, invoices); customer did NOT receive → **"Not received —
+return goods"** → whole-DO Delivery Return, NO invoice. Built:
+- `src/api/lib/delivery-return-create.ts` NEW — shared `createDeliveryReturnRecord()`
+  + `loadDoItemsForReturn()` + ensure/nextReturnNo/genId (moved out of the route so
+  office + driver write identical DRs).
+- `delivery-returns.ts` POST refactored onto the shared helper.
+- `public-do-qr.ts` `/advance`: `returnGoods` flag → DO marked DELIVERED +
+  deliveryIncomplete (invoice+notice withheld) + auto full-DO DR (best-effort).
+- `do-scan.tsx`: 2nd button relabelled "Not received — return goods" (PackageX, red),
+  sends `returnGoods`; success screen "Returned"; DoCard/already-done copy updated.
+- Desktop #1: `delivery/detail.tsx` — direct "Mark Delivered" from LOADED (parity;
+  backend already allows LOADED→DELIVERED).
+- Desktop #2: "Convert to Delivery Return" already exists (DELIVERED/INVOICED).
+- Desktop #3: DR detail "Repair & re-deliver" now seeds the service case with the
+  RETURNED items as affectedProducts → the SV order pre-fills just the damaged lines
+  (reuses the existing ?fromCase hydration; no new route).
+build:strict clean. Design note (mark-delivered+hold reuses the tested COGS reversal;
+DO chip shows "Delivered" though driver saw "Returned" — DR is source of truth).
+Owner to test on staging → then prod. Possible follow-up: show a "Return opened" link
+on the DO detail so the office finds the auto-DR without going to the DR list.
+
+---
+
 ## 2026-07-11 — 🔵 Hookka Report program — BUILT + ON STAGING (verified real data)
 Operations Report LIVE on staging (staging.hookka-erp-testing.pages.dev/reports,
 default "Operations" tab). Backend collector src/api/lib/operations-report.ts (11
@@ -133,16 +233,6 @@ Owner reviewed /m Delivery & Warehouse. Captured asks (do not drop any):
    a Sales Order (Planning/Pending Delivery) or already a DO (Pending Dispatch/Dispatched/Delivered).
 
 ---
-
-## 2026-07-09 — ✅ /ar-reconciliation shipped; AR −40,000 diagnosed = debtor opening pending (owner defers)
-
-ReconCfg parameterizes the recon algebra (AP defaults untouched); AR route
-feeds 300-0000 legs swapped. Live run itemized the −40,000 exactly: receipts
-Houzs 25,000 + Carress 15,000 paying 23 pre-opening invoices (05-08..05-16,
-isOpening=0 → floored). Owner: 「到时我才提供，顾客群没有录入opening」 — parked
-until the debtor-opening project starts (v5 list is still the baseline; his 23
-re-entered invoices likely overlap it; AR needs a flag-as-opening switch).
-The −40,000 on /ar-control is EXPECTED until then — not a new bug.
 
 ## 2026-07-09 — ✅ Aging snapshot invalidation (BUG-2026-07-09-002)
 

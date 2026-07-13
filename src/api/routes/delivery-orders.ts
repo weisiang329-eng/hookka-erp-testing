@@ -1480,6 +1480,24 @@ app.get("/ready-planning", async (c) => {
   const orgId = getOrgId(c);
   const db = c.var.DB;
 
+  // Snapshot-cached + serve-stale: the compute below does the whole-org PO+JC
+  // load + join (same cost the production-orders list pays), so without a cache
+  // the delivery page would block its cold paint on an ~8s request. withSnapshot
+  // serves the last good {ready,planning} instantly and refreshes in the
+  // background; freshness tracks production_orders / job_cards / delivery_order_items.
+  const { withSnapshot } = await import("../lib/snapshot");
+  const data = await withSnapshot(
+    db,
+    {
+      tableName: "delivery_ready_planning_snapshot",
+      sourceTables: [
+        "production_orders",
+        "job_cards",
+        "delivery_order_items",
+      ],
+    },
+    orgId,
+    async () => {
   const [pos, soRes, itemRes, linkedRes, poValMap] = await Promise.all([
     fetchFilteredPOs(db, orgId, null, true, false, true),
     db
@@ -1596,7 +1614,13 @@ app.get("/ready-planning", async (c) => {
     soPriceByProduct,
     productM3Map,
   });
-  return c.json({ success: true, ready, planning });
+      return { ready, planning };
+    },
+    "",
+    c,
+    { staleWhileRevalidate: true },
+  );
+  return c.json({ success: true, ...data });
 });
 
 // ---------------------------------------------------------------------------

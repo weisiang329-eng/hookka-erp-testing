@@ -66,6 +66,7 @@ import {
   buildUnifiedInvoiceData,
 } from "../../lib/build-unified-doc-data";
 import { HOOKKA_LOGO_PNG_BASE64 } from "../lib/hookka-logo-base64";
+import { computeInvoicePrintExtras } from "../lib/invoice-print-extras";
 import { getOrCreateQrToken, qrScanUrl } from "../lib/do-qr-token";
 // Company office number — the driver-contact fallback on dispatch notices
 // (owner rule: no driver phone on file → give the company's number).
@@ -5594,23 +5595,40 @@ export async function queueDoCustomerNotice(
         // render bug never kills the notice.
         try {
           const itRes = await c.var.DB.prepare(
-            `SELECT productCode, productName, quantity, unitPriceSen, totalSen
+            `SELECT id, productCode, productName, fabricCode, sizeLabel, quantity, unitPriceSen, totalSen
                FROM invoice_items WHERE invoiceId = ?`,
           )
             .bind(inv.id)
             .all<{
+              id: string;
               productCode: string | null;
               productName: string | null;
+              fabricCode: string | null;
+              sizeLabel: string | null;
               quantity: number;
               unitPriceSen: number;
               totalSen: number;
             }>();
+          // Same per-line enrichment (category / order refs / spec) + due date
+          // the download path gets, so the emailed invoice == what the owner
+          // prints (owner 2026-07-13). Best-effort — a null just degrades to
+          // the plain layout, never blocks the notice.
+          const printExtras = await computeInvoicePrintExtras(c.var.DB, inv.id).catch(() => null);
+          const dueRow = await c.var.DB.prepare(
+            "SELECT dueDate FROM invoices WHERE id = ?",
+          )
+            .bind(inv.id)
+            .first<{ dueDate: string | null }>();
           const items = (itRes.results ?? []).map((it) => ({
+            id: String(it.id),
             productCode: it.productCode || "-",
             productName: it.productName || "-",
+            fabricCode: it.fabricCode || "",
+            sizeLabel: it.sizeLabel || "",
             quantity: Number(it.quantity ?? 0),
             unitPriceSen: Number(it.unitPriceSen ?? 0),
             lineTotalSen: Number(it.totalSen ?? 0),
+            extra: printExtras?.items?.[String(it.id)],
           }));
           const subtotalSen = items.reduce((s, it) => s + it.lineTotalSen, 0);
           const totalSen = Number(inv.totalSen) || subtotalSen;
@@ -5629,17 +5647,22 @@ export async function queueDoCustomerNotice(
                   invoiceNo: inv.invoiceNo,
                   doNo: doRow.doNo,
                   docDate: inv.invoiceDate ?? "",
+                  dueDate: dueRow?.dueDate ?? "",
                   terms: "NET 30",
                   customerName: doRow.customerName,
                   billAddress: custRow?.companyAddress ?? "",
-                  fallbackCustomerSO: doRow.customerSO ?? "",
-                  items: items.map((it, i) => ({
-                    id: String(i),
+                  fallbackCustomerSO: printExtras?.customerSO || doRow.customerSO || "",
+                  fallbackCustomerRef: printExtras?.customerRef || "",
+                  items: items.map((it) => ({
+                    id: it.id,
                     productCode: it.productCode,
                     productName: it.productName,
+                    fabricCode: it.fabricCode,
+                    sizeLabel: it.sizeLabel,
                     quantity: it.quantity,
                     priceSen: it.unitPriceSen,
                     lineTotalSen: it.lineTotalSen,
+                    extra: it.extra,
                   })),
                   subtotalSen,
                   taxSen,

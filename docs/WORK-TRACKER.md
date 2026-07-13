@@ -9,6 +9,48 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-14 — 🔵 Durable read-perf rollout (ON STAGING, byte-identical gate) — see docs/PERF-DURABLE-ARCHITECTURE.md
+Owner-approved rebuild: stop shipping whole-org lists to the client; compute
+server-side (shared builder = byte-identical by construction) + snapshot-cache +
+serve-stale. Each slice = own commit → staging → LIVE byte-identical verify →
+(owner) merge to prod. Canonical + deployed branch = `staging` (this branch,
+staging-delivery-ready). NOTE: the older `perf-durable-arch` branch holds the same
+work via a messier revert/reapply history and is now BEHIND on code — treat THIS
+branch (staging) as source of truth; perf-durable-arch is superseded (kept only for
+its doc history, now copied here).
+
+**Slices DONE + LIVE-verified on staging (NOT on prod — await owner merge):**
+- ✅ **Sales SO list** — `?fields=minimal&include=` (empty include drops jobCards).
+  1.2MB→72kb. Sales total RM 1,155,048.95 + "194 of 200" byte-identical.
+- ✅ **Delivery Planning/Ready** — `GET /api/delivery-orders/ready-planning`
+  (shared buildReadyPlanning, withSnapshot+SWR, runtime-CREATE snapshot table). FE
+  drops the 1.2MB PO pull → ~10 KB. Planning 179/RM136,340.35, Ready 52/RM24,982.22,
+  Delivered 265/RM1,004,020.88 byte-identical. (BUG-2026-07-13-001 fixed en route.)
+- ✅ **Mobile Home Pending-Delivery** — reuses /ready-planning; dropped its 1.2MB PO pull.
+- ✅ **Inventory FG-stock (2026-07-14, THIS session)** — `GET /api/inventory/fg-stock`
+  returns DELTAS `{counts, dyn}` via shared `splitFgDeltas` (snapshot-cached
+  `inventory_fg_stock_snapshot` + SWR + runtime CREATE). FE keeps its /api/products
+  and merges by id via shared `mergeFgDeltas` → dropped THREE fetches
+  (production-orders ~1.2MB + delivery-orders + consignment-notes). LIVE-verified:
+  page now calls ONLY /api/inventory/fg-stock (0 production-orders/DO/CN calls);
+  rendered tallies Total SKUs 272 / Available 52 / Reserved 22 / Bedframe 160 —
+  byte-identical (0 per-product diffs in the live compare). Round-trip unit test
+  `tests/fg-stock.test.mjs` (7 cases) proves merge(split(derive))≡derive.
+  Commit ebc4d1b6. build:strict + full suite green.
+
+**Remaining slices (same pattern, each own commit → staging → live gate → FE swap):**
+- ⚪ **Planning** (scheduling board) — pulls the 1.2MB PO+jobCards to compute the
+  schedule client-side. Needs jobCards → server-side aggregate, not slim.
+- ⚪ **Consignment note (UPH)** — same PO+jobCards pull for the UPH picker.
+- ⚪ **Mobile ProductionScreen** (production board) — same.
+Method per slice: extract shared builder (verbatim from FE) → additive server
+endpoint (withSnapshot+SWR+runtime CREATE) → LIVE byte-identical compare (endpoint
+vs current client compute) → swap FE → re-verify tallies + scan/write path intact.
+Golden rule (owner's #1 fear): search/filter/count/money-total ALWAYS server-side
+over the WHOLE dataset; page window is render-only. 11-pt checklist in the arch doc.
+
+---
+
 ## 2026-07-13 — 🔵 Delivery Return — driver item-flagging + desktop deliver/DR/SV convert
 Owner ask (4 parts, feature → staging):
 1. **Driver scan** (do-scan.tsx): on "Delivered with issues", show item list → driver

@@ -18,6 +18,9 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
+import { fetchFilteredPOs } from "./production-orders";
+import { deriveFGStock, type FgStockPO } from "../../lib/fg-stock";
 
 const app = new Hono<Env>();
 
@@ -578,6 +581,101 @@ app.get("/rm-source/:rmId", async (c) => {
     totalRemaining,
     batches, // already FIFO-ordered
   });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/inventory/fg-stock — server-side Finished-Goods stock derivation.
+//
+// Perf HANDOFF (2026-07-14): the Inventory page derives `fgItems` client-side
+// via deriveFGStock (now the shared @/lib/fg-stock) from the ~1.2MB
+// /api/production-orders?fields=minimal&include=jobCards payload. This endpoint
+// runs the SAME shared deriveFGStock server-side so the page can drop that pull.
+// It is ADDITIVE — nothing consumes it yet.
+//
+// ⚠ NEXT SESSION — to finish this slice:
+//  1. VERIFY BYTE-IDENTICAL on staging BEFORE any FE change: fetch this endpoint
+//     and compare fgItems (per-product stockQty/reservedQty + the fg-dyn-* items)
+//     against the Inventory page's current deriveFGStock output on the SAME data
+//     (fgBedframeCount / fgSofaCount / fgTotalStock / fgTotalReserved must match).
+//  2. PRODUCT SHAPE caveat: this loads products with a RAW `SELECT * FROM products
+//     … ACTIVE` — it does NOT run the full /api/products assembly (bomComponents /
+//     deptWorkingTimes / template minutes / price overlays). deriveFGStock only
+//     reads p.id / p.code and spreads ...p, so the STOCK COUNTS are exact. But if
+//     the FG grid renders a DERIVED product field (e.g. costPriceSen from
+//     overlays), prefer the durable design: keep the FE's /api/products fetch and
+//     have this endpoint return ONLY the derived counts + fg-dyn shells for the FE
+//     to MERGE (small payload, no product re-ship) — refactor deriveFGStock to a
+//     deltas variant. Otherwise replicate the /api/products assembly here.
+//  3. CACHE IT before the FE gates on it: wrap the compute in withSnapshot +
+//     staleWhileRevalidate and runtime-CREATE the snapshot table — copy the exact
+//     pattern from delivery-orders.ts `/ready-planning` (BUG-2026-07-13-001: an
+//     uncached heavy endpoint hangs the page's cold paint). sourceTables:
+//     production_orders, job_cards, delivery_order_items, consignment_items.
+//  4. Then swap the FE (inventory/index.tsx: drop the production-orders +
+//     linked-po-ids fetches feeding deriveFGStock; consume this instead) and
+//     re-verify the four FG tallies byte-identical + scan/stock write path intact.
+// ---------------------------------------------------------------------------
+app.get("/fg-stock", async (c) => {
+  const denied = await requirePermission(c, "inventory", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const db = c.var.DB;
+
+  const [prodRes, pos, doStateRes, cnStateRes] = await Promise.all([
+    db
+      .prepare(
+        "SELECT * FROM products WHERE orgId = ? AND status = 'ACTIVE' ORDER BY code",
+      )
+      .bind(orgId)
+      .all(),
+    fetchFilteredPOs(db, orgId, null, true, false, true),
+    db
+      .prepare(
+        `SELECT doi.productionOrderId AS poId, d.status
+           FROM delivery_order_items doi
+           JOIN delivery_orders d ON d.id = doi.deliveryOrderId
+          WHERE doi.orgId = ?
+            AND doi.productionOrderId IS NOT NULL
+            AND doi.productionOrderId <> ''`,
+      )
+      .bind(orgId)
+      .all<{ poId: string; status: string }>(),
+    db
+      .prepare(
+        `SELECT ci.productionOrderId AS poId, cn.status
+           FROM consignment_items ci
+           JOIN consignment_notes cn ON cn.id = ci.consignmentNoteId
+          WHERE ci.orgId = ?
+            AND ci.productionOrderId IS NOT NULL
+            AND ci.productionOrderId <> ''`,
+      )
+      .bind(orgId)
+      .all<{ poId: string; status: string }>(),
+  ]);
+
+  // poStatusByDO: PO id → coarse warehouse state, DISPATCHED wins over DRAFT,
+  // merged across DO + CN sources — mirrors fetchDOStates + fetchCNStates in
+  // src/pages/inventory/index.tsx. DO: DRAFT→DRAFT else DISPATCHED.
+  // CN: ACTIVE→DRAFT else DISPATCHED.
+  const poStatusByDO = new Map<string, "DRAFT" | "DISPATCHED">();
+  const put = (poId: string, state: "DRAFT" | "DISPATCHED") => {
+    if (!poId) return;
+    if (poStatusByDO.get(poId) === "DISPATCHED") return;
+    poStatusByDO.set(poId, state);
+  };
+  for (const r of doStateRes.results ?? []) {
+    put(r.poId, r.status === "DRAFT" ? "DRAFT" : "DISPATCHED");
+  }
+  for (const r of cnStateRes.results ?? []) {
+    put(r.poId, r.status === "ACTIVE" ? "DRAFT" : "DISPATCHED");
+  }
+
+  const fgItems = deriveFGStock(
+    (prodRes.results ?? []) as unknown as Parameters<typeof deriveFGStock>[0],
+    pos as unknown as FgStockPO[],
+    poStatusByDO,
+  );
+  return c.json({ success: true, data: fgItems });
 });
 
 export default app;

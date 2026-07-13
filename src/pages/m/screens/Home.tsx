@@ -64,10 +64,6 @@ import {
   SO_STATUS_COLOR,
   type SemanticStyle,
 } from "@/lib/design-tokens";
-import {
-  poReadyForDelivery,
-  type PipelinePO,
-} from "@/lib/delivery-pipeline";
 import type { SalesOrder, RawMaterial } from "@/types";
 import { MobileCard, StatusPill, FormSheet, Sheet } from "../components";
 import { GlobalSearchSheet } from "../components/GlobalSearchSheet";
@@ -171,21 +167,9 @@ type InventoryResp = {
   success?: boolean;
   data?: { rawMaterials?: RawMaterial[] };
 };
-// Pending Delivery support shapes — mirror the dashboard's fetches.
-type PODeliveryShape = PipelinePO & {
-  salesOrderId?: string;
-  productCode?: string;
-  quantity?: number;
-};
-type POResp = { success?: boolean; data?: PODeliveryShape[] };
-type POValuesResp = { success?: boolean; values?: Record<string, number> };
-type SOItemsResp = {
-  success?: boolean;
-  data?: {
-    id: string;
-    items?: { productCode?: string; unitPriceSen?: number }[];
-  }[];
-};
+// Pending Delivery: the ready-for-DO value comes server-side now (see the
+// /api/delivery-orders/ready-planning fetch below); only the DO dispatch-chain
+// stats shape remains client-side.
 type DoStatsResp = { valueByStatus?: Record<string, number> };
 
 // Statuses excluded from the Orders-due list + on-time derivation (terminal).
@@ -360,18 +344,18 @@ export default function MobileHome() {
   // cached-fetch.ts: a null URL returns data:null/loading:false and the effect
   // early-returns without firing a request). The hooks are ALWAYS called
   // (never conditionally), only the URL flips from null to the real endpoint. ----
-  const { data: poRaw } = useCachedJson<POResp>(
-    pdEnabled ? "/api/production-orders?fields=minimal&include=jobCards" : null,
-  );
-  const { data: linkedRaw } = useCachedJson<{ poIds?: string[] }>(
-    pdEnabled ? "/api/delivery-orders/linked-po-ids" : null,
-  );
-  const { data: poValRaw } = useCachedJson<POValuesResp>(
-    pdEnabled ? "/api/delivery-orders/po-values" : null,
-  );
-  const { data: soItemsRaw } = useCachedJson<SOItemsResp>(
-    pdEnabled ? "/api/sales-orders?fields=price-index" : null,
-  );
+  // perf 2026-07-14: Pending Delivery's "ready-for-DO" value is computed
+  // SERVER-SIDE now (the shared buildReadyPlanning behind
+  // /api/delivery-orders/ready-planning, snapshot-cached). We sum the ready
+  // list's valueSen — byte-identical to the old client loop
+  // (poReadyForDelivery + poValMap ?? SO-price fallback), and it drops the
+  // ~1.2MB production-orders+jobCards pull plus the linked-po-ids / po-values /
+  // price-index fetches that only fed that loop. Mirrors the desktop delivery
+  // page's Ready total.
+  const { data: rpRaw } = useCachedJson<{
+    success?: boolean;
+    ready?: { valueSen?: number }[];
+  }>(pdEnabled ? "/api/delivery-orders/ready-planning" : null);
   const { data: doStatsRaw } = useCachedJson<DoStatsResp>(
     pdEnabled ? "/api/delivery-orders/stats" : null,
   );
@@ -419,49 +403,26 @@ export default function MobileHome() {
   // ---- KPI: Pending Delivery (consolidated, live) — byte-identical to the
   // dashboard: poReadyForDelivery value + DRAFT/LOADED/IN_TRANSIT DO value. ----
   const pendingDeliverySen = useMemo(() => {
-    const pos = poRaw?.success ? poRaw.data ?? [] : [];
-    // Guard the loading flash: until linkedRaw lands, an empty set would wrongly
-    // count every PO as still-pending — bail to 0 (matches the dashboard).
-    if (!linkedRaw) return 0;
-    const linkedPOIds = new Set(linkedRaw.poIds ?? []);
-    const poValMap = new Map<string, number>();
-    for (const [k, v] of Object.entries(poValRaw?.values ?? {}))
-      poValMap.set(k, Number(v) || 0);
-    const soPriceByProduct = new Map<string, Map<string, number>>();
-    const sos = soItemsRaw?.success ? soItemsRaw.data ?? [] : [];
-    for (const s of sos) {
-      const m = new Map<string, number>();
-      for (const it of s.items ?? [])
-        if (it.productCode) m.set(it.productCode, Number(it.unitPriceSen) || 0);
-      soPriceByProduct.set(s.id, m);
-    }
-    let readySen = 0;
-    for (const po of pos) {
-      if (!poReadyForDelivery(po, linkedPOIds)) continue;
-      readySen +=
-        poValMap.get(po.id) ??
-        (soPriceByProduct.get(po.salesOrderId || "")?.get(
-          po.productCode || "",
-        ) ?? 0) * (po.quantity || 0);
-    }
+    // Guard the loading flash: bail to 0 until the server ready list lands.
+    if (!rpRaw?.success) return 0;
+    // readySen = Σ ready[].valueSen — the server ran the SAME poReadyForDelivery
+    // + poValMap ?? SO-price fallback the old client loop did.
+    const readySen = (rpRaw.ready ?? []).reduce(
+      (s, r) => s + (r.valueSen || 0),
+      0,
+    );
     // Dispatch chain (owner 2026-06-11): DRAFT DOs (pending dispatch) +
     // LOADED/IN_TRANSIT (on the road) fold into Pending Delivery.
     const v = doStatsRaw?.valueByStatus ?? {};
     const dispatchChain =
       (v.DRAFT ?? 0) + (v.LOADED ?? 0) + (v.IN_TRANSIT ?? 0);
     return readySen + dispatchChain;
-  }, [poRaw, linkedRaw, poValRaw, soItemsRaw, doStatsRaw]);
+  }, [rpRaw, doStatsRaw]);
 
   // Pending Delivery shows a placeholder until its lazy fetches resolve: true
   // while deferred (pdEnabled false) and while any of the five datasets is
   // still in flight. Once all land, the real value renders (same computation).
-  const pendingDeliveryLoading =
-    !pdEnabled ||
-    !poRaw ||
-    !linkedRaw ||
-    !poValRaw ||
-    !soItemsRaw ||
-    !doStatsRaw;
+  const pendingDeliveryLoading = !pdEnabled || !rpRaw || !doStatsRaw;
 
   // ---- Sales month-over-month delta (This Month Sales card) ----
   const salesDeltaPct = useMemo(() => {

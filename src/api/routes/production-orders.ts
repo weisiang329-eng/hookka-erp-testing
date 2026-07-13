@@ -1406,7 +1406,7 @@ export async function attachCustomerSO(
   }
 }
 
-async function fetchFilteredPOs(
+export async function fetchFilteredPOs(
   db: D1Database,
   orgId: string,
   statuses: string[] | null,

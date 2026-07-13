@@ -1140,13 +1140,7 @@ export default function DeliveryPage() {
   // from the response. include=jobCards keeps the per-PO JC array (DO page
   // needs uph JC statuses to compute Planning vs Pending Delivery). Cuts
   // the response from 2-6 MB to 200-600 KB.
-  // perf 2026-07-13: Planning + "Ready for DO" are now computed SERVER-SIDE
-  // (GET /api/delivery-orders/ready-planning runs the SHARED buildReadyPlanning
-  // from src/lib/delivery-pipeline.ts — the SAME code the client pipeline below
-  // used, so the rows are byte-identical). The page no longer pulls the ~1.2MB
-  // /api/production-orders?fields=minimal&include=jobCards payload just to derive
-  // these two lists — it fetches the small { ready, planning } result instead.
-  const { data: rpRaw, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; ready?: ReadyPORow[]; planning?: ReadyPORow[] }>("/api/delivery-orders/ready-planning");
+  const { data: poRaw, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: ProductionOrderApiShape[] }>("/api/production-orders?fields=minimal&include=jobCards");
   // Slim projection: this page joins Customer PO/SO + reference + expected-DD
   // onto DO rows, plus a per-SO {productCode → unitPriceSen} price map for the
   // PO-based Planning / Pending Delivery Sales-Figure fallback. ?fields=
@@ -1233,17 +1227,7 @@ export default function DeliveryPage() {
     setLoading(anyLoading);
     const dRes = doRaw || { success: false };
     const sRes = doSearchRaw || { success: false };
-    // Planning + Ready come from the server now (rpRaw). The old client-side
-    // pipeline below is kept but INERT (poRes.success stays false so it never
-    // runs) pending a follow-up dead-code cleanup — it's the source the shared
-    // buildReadyPlanning was extracted from, left as a reference for one release.
-    if (rpRaw?.success) {
-      setPlanningPOs(rpRaw.planning ?? []);
-      setReadyPOs(rpRaw.ready ?? []);
-    }
-    const poRes: { success?: boolean; data?: ProductionOrderApiShape[] } = {
-      success: false,
-    };
+    const poRes = poRaw || { success: false };
     const soRes = soRaw || { success: false };
     const custRes = custRaw || { success: false };
     // Exact server-computed value per production order (same resolver as
@@ -1518,7 +1502,7 @@ export default function DeliveryPage() {
         }
       }
     }
-  }, [doRaw, doSearchRaw, rpRaw, soRaw, poValRaw, custRaw, linkedRaw, doLoading, poLoading, soLoading, custLoading]);
+  }, [doRaw, doSearchRaw, poRaw, soRaw, poValRaw, custRaw, linkedRaw, doLoading, poLoading, soLoading, custLoading]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // ----- 3PL Provider helpers -----

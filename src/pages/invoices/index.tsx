@@ -336,7 +336,7 @@ export default function InvoicesPage() {
             body: JSON.stringify({
               kind: "DELIVERED",
               pdfBase64,
-              pdfFilename: `INV-${inv.invoiceNo}.pdf`,
+              pdfFilename: `${/^INV/i.test(inv.invoiceNo) ? inv.invoiceNo : `INV-${inv.invoiceNo}`}.pdf`,
             }),
           }
         );

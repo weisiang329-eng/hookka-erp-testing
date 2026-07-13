@@ -733,7 +733,7 @@ async function renderDeliveredInvoicePdf(
         invoice,
         ej?.success ? ej.data : undefined,
       ),
-      pdfFilename: `INV-${invoice.invoiceNo}.pdf`,
+      pdfFilename: `${/^INV/i.test(invoice.invoiceNo) ? invoice.invoiceNo : `INV-${invoice.invoiceNo}`}.pdf`,
     };
   } catch {
     return {};

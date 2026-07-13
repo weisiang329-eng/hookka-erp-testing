@@ -5580,7 +5580,8 @@ export async function queueDoCustomerNotice(
           {
             filename:
               String(body.pdfFilename ?? "").trim() ||
-              `INV-${inv.invoiceNo}.pdf`,
+              // invoiceNo already carries the "INV-" prefix — don't double it.
+              `${/^INV/i.test(inv.invoiceNo) ? inv.invoiceNo : `INV-${inv.invoiceNo}`}.pdf`,
             contentBase64: pdfBase64,
           },
         ];
@@ -5680,7 +5681,8 @@ export async function queueDoCustomerNotice(
           }
           attachments = [
             {
-              filename: `INV-${inv.invoiceNo}.pdf`,
+              // invoiceNo already carries the "INV-" prefix — don't double it.
+              filename: `${/^INV/i.test(inv.invoiceNo) ? inv.invoiceNo : `INV-${inv.invoiceNo}`}.pdf`,
               contentBase64: bytesToBase64(bytes),
             },
           ];

@@ -102,7 +102,9 @@ function money(sen: number): string {
 // version rarely reached the customer). Sanitise EVERY drawn string: map the
 // common typography to ASCII, collapse odd spaces, and replace anything still
 // outside Latin-1 with "?" so no stray glyph can ever crash the document.
-function winAnsi(s: string): string {
+// Exported so the simple-table fallback (assistant-exports.ts) shares the
+// exact same guard — the last-resort render must be crash-proof too.
+export function winAnsi(s: string): string {
   if (!s) return s;
   return s
     .replace(/[\u2018\u2019\u201A\u201B]/g, "'")

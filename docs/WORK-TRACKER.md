@@ -38,16 +38,30 @@ its doc history, now copied here).
   `tests/fg-stock.test.mjs` (7 cases) proves merge(split(derive))≡derive.
   Commit ebc4d1b6. build:strict + full suite green.
 
-**Remaining slices (same pattern, each own commit → staging → live gate → FE swap):**
-- ⚪ **Planning** (scheduling board) — pulls the 1.2MB PO+jobCards to compute the
-  schedule client-side. Needs jobCards → server-side aggregate, not slim.
-- ⚪ **Consignment note (UPH)** — same PO+jobCards pull for the UPH picker.
-- ⚪ **Mobile ProductionScreen** (production board) — same.
-Method per slice: extract shared builder (verbatim from FE) → additive server
-endpoint (withSnapshot+SWR+runtime CREATE) → LIVE byte-identical compare (endpoint
-vs current client compute) → swap FE → re-verify tallies + scan/write path intact.
-Golden rule (owner's #1 fear): search/filter/count/money-total ALWAYS server-side
-over the WHOLE dataset; page window is render-only. 11-pt checklist in the arch doc.
+**Remaining slices — NOT all the clean derive-and-drop inventory was (scoped 2026-07-14):**
+- ⚪ **Consignment note** (`src/pages/consignment/note.tsx`, 5259 lines) — CLOSEST
+  analog to the done delivery slice: `poRaw` builds Planning + Pending CN tabs the
+  same way DO does, filtered on `consignmentOrderId`. Derive-and-drop feasible via a
+  `GET /api/consignment-notes/ready-planning` mirroring the delivery endpoint. BUT
+  it's a **MONEY PATH** (CN amounts) — the live byte-identical gate must match CN
+  values to the cent, not just row counts. Do this one FIRST of the three (pattern
+  proven, but verify money carefully).
+- ⚪ **Planning** (`src/pages/planning/index.tsx`, 4004 lines) — NOT derive-and-drop.
+  `ordersResp` (the 1.2MB PO+jobCards) drives the interactive scheduling board:
+  drag-drop reorder, bulk-patch WRITES, capacity + lead-time calc, per-dept queues.
+  The board renders/edits individual POs → can't return a small aggregate. Durable
+  path = keyset pagination (Pillar 1, shared keysetList already landed 33ea44e9) or a
+  `jobCards-lite` projection. **Needs an owner approach decision before coding.**
+- ⚪ **Mobile ProductionScreen** (`src/pages/m/screens/ProductionScreen.tsx`, 362
+  lines) — NOT derive-and-drop. Loads ALL POs to the phone then searches + filters +
+  per-dept counts client-side (weak-wifi cost + violates the golden rule of
+  server-side search/count). Durable path = server endpoint doing search + dept
+  filter + per-dept counts + keyset pagination; FE → infinite scroll. Pillar-1 work.
+Method for a derive-and-drop slice (CN note): extract shared builder (verbatim from
+FE) → additive server endpoint (withSnapshot+SWR+runtime CREATE) → LIVE byte-identical
+compare (endpoint vs current client compute, MONEY to the cent) → swap FE → re-verify.
+Golden rule (owner's #1 fear): search/filter/count/money-total ALWAYS server-side over
+the WHOLE dataset; page window is render-only. 11-pt checklist in the arch doc.
 
 ---
 

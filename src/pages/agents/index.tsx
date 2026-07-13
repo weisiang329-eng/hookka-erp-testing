@@ -228,12 +228,25 @@ export default function AgentConsolePage() {
   const [review, setReview] = useState<AgentReview | null>(null);
   const [configProposals, setConfigProposals] = useState<ConfigProposal[]>([]);
 
+  // The Scorecard (/review) is the heavy call — it recomputes 90 days of 3PL
+  // learning + a job-card adherence scan. Load it SEPARATELY so the page
+  // renders as soon as the fast status + proposals arrive; the scorecard fills
+  // in a moment later instead of blocking the whole page open.
+  const loadReview = useCallback(async () => {
+    try {
+      const r = await fetch("/api/agents/review", { credentials: "include" });
+      const rj = (await r.json()) as { success?: boolean; data?: AgentReview };
+      setReview(rj?.data ?? null);
+    } catch {
+      setReview(null);
+    }
+  }, []);
+
   const load = useCallback(async () => {
     try {
-      const [statusRes, cpRes, reviewRes] = await Promise.all([
+      const [statusRes, cpRes] = await Promise.all([
         fetch("/api/agents/status", { credentials: "include" }),
         fetch("/api/agents/config-proposals?status=PENDING", { credentials: "include" }),
-        fetch("/api/agents/review", { credentials: "include" }),
       ]);
       const sj = (await statusRes.json()) as StatusResponse;
       if (!statusRes.ok || !sj?.success || !sj.data) {
@@ -244,12 +257,6 @@ export default function AgentConsolePage() {
       setLlm(sj.data.llm ?? null);
       const cj = (await cpRes.json()) as { success?: boolean; data?: ConfigProposal[] };
       setConfigProposals(cj?.data ?? []);
-      try {
-        const rj = (await reviewRes.json()) as { success?: boolean; data?: AgentReview };
-        setReview(rj?.data ?? null);
-      } catch {
-        setReview(null);
-      }
     } catch (err) {
       toast.error(`Failed to load agent status: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -260,7 +267,8 @@ export default function AgentConsolePage() {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- initial fetch on mount; same pattern as sidebar.tsx / planning
     void load();
-  }, [load]);
+    void loadReview(); // non-blocking — scorecard fills in when ready
+  }, [load, loadReview]);
 
   const post = useCallback(
     async (path: string, body: unknown, okMsg: string, busyKey: string) => {
@@ -396,7 +404,15 @@ export default function AgentConsolePage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              void load();
+              void loadReview();
+            }}
+            disabled={loading}
+          >
             <RefreshCw className="h-4 w-4 mr-1" />
             Refresh
           </Button>

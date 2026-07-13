@@ -18,6 +18,7 @@
 // Planning/Pending Delivery PO values, the invoices, AND the Sales Orders
 // Delivered/Outstanding split — so every surface reconciles to the cent.
 // ---------------------------------------------------------------------------
+import { withSnapshot } from "./snapshot";
 
 export type SoLinePriceIndex = {
   poById: Map<
@@ -166,6 +167,77 @@ export async function loadDoValueMap(
     m.set(di.deliveryOrderId, (m.get(di.deliveryOrderId) ?? 0) + add);
   }
   return m;
+}
+
+// ── Cached DO value map (perf 2026-07-13) ────────────────────────────────────
+// The DO list computed the WHOLE-ORG value map on every read (loadSoLinePrice-
+// Index scans every PO + SO line), so even a 50-row page paid a 27s cold /
+// 1.6-5s warm recompute (owner: "之前 OK、突然變卡"). This wraps the SAME
+// computation in a snapshot + serve-stale-while-revalidate: the read gets the
+// last exact result instantly and the recompute runs in the background off the
+// request path. The number is BYTE-IDENTICAL to loadDoValueMap — accuracy is
+// untouched (owner: "銷售額一定要準確"); only the timing moves. Any snapshot
+// failure falls straight back to the direct computation.
+let _doValSnapMig: Promise<void> | null = null;
+function ensureDoValueSnapshot(db: D1Database): Promise<void> {
+  if (_doValSnapMig) return _doValSnapMig;
+  _doValSnapMig = db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS do_value_map_snapshot (
+         org_id        TEXT NOT NULL,
+         cache_key     TEXT NOT NULL DEFAULT '',
+         data          JSONB NOT NULL,
+         built_from    TIMESTAMP NOT NULL,
+         built_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+         refresh_count INTEGER NOT NULL DEFAULT 0,
+         PRIMARY KEY (org_id, cache_key)
+       )`,
+    )
+    .run()
+    .then(() => undefined)
+    .catch(() => undefined);
+  return _doValSnapMig;
+}
+
+export async function loadDoValueMapCached(
+  db: D1Database,
+  orgId: string,
+  c?: { env: unknown; executionCtx?: { waitUntil(p: Promise<unknown>): void } },
+): Promise<Map<string, number>> {
+  try {
+    await ensureDoValueSnapshot(db);
+    const obj = await withSnapshot<{ m: Record<string, number> }>(
+      db,
+      {
+        tableName: "do_value_map_snapshot",
+        // Any change to a table the value depends on invalidates the snapshot
+        // → the next read recomputes (in the background via SWR). Guarantees
+        // the cached figure never drifts from the live data.
+        sourceTables: [
+          "delivery_orders",
+          "delivery_order_items",
+          "production_orders",
+          "sales_order_items",
+        ],
+      },
+      orgId,
+      async () => {
+        const m = await loadDoValueMap(db, orgId);
+        const rec: Record<string, number> = {};
+        for (const [k, v] of m) rec[k] = v;
+        return { m: rec };
+      },
+      "",
+      c,
+      { staleWhileRevalidate: true },
+    );
+    const out = new Map<string, number>();
+    for (const [k, v] of Object.entries(obj?.m ?? {})) out.set(k, Number(v) || 0);
+    return out;
+  } catch {
+    // Snapshot layer unavailable → direct (still exact) computation.
+    return loadDoValueMap(db, orgId);
+  }
 }
 
 // Per-PO exact value (PO qty × its own SO-line price) — for the

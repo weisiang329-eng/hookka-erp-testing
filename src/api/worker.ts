@@ -414,6 +414,49 @@ app.post("/api/internal/rebuild-dashboard-snapshot", async (c) => {
   }
 });
 
+// Pre-warm the heavy list snapshots so the Delivery + Production pages never hit
+// the empty-snapshot cold recompute (~25s) after a deploy busts the caches. Same
+// CRON_SECRET pattern as the internal endpoints above; .github/workflows/
+// warm-lists.yml hits it every few minutes. Warming stores BYTE-IDENTICAL
+// payloads (same compute, same snapshot keys) — only the timing of the recompute
+// moves off the request path, no figure changes (owner red line: input/output
+// figures must stay exact).
+app.post("/api/internal/warm-lists", async (c) => {
+  const expected = c.env.CRON_SECRET;
+  if (!expected || expected.length < 16) {
+    console.error("[warm-lists] CRON_SECRET unset or too short — refusing");
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  const given = c.req.header("x-cron-secret") || "";
+  if (!(await constantTimeEqual(given, expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  const t0 = Date.now();
+  const { DEFAULT_ORG_ID } = await import("./lib/tenant");
+  const out: Record<string, unknown> = {};
+  // 1. Delivery page's PO list — the 20MB / ~25s cold-recompute one.
+  try {
+    const { warmPoListDeliveryVariant } = await import(
+      "./routes/production-orders"
+    );
+    const r = await warmPoListDeliveryVariant(c, DEFAULT_ORG_ID);
+    out.poList = { ok: true, rows: r.rows };
+  } catch (e) {
+    console.error("[warm-lists] poList failed:", e);
+    out.poList = { ok: false };
+  }
+  // 2. Delivery-orders list value map (keeps the DO list warm post-deploy too).
+  try {
+    const { loadDoValueMapCached } = await import("./lib/do-value");
+    const m = await loadDoValueMapCached(c.var.DB, DEFAULT_ORG_ID, c);
+    out.doValueMap = { ok: true, entries: m.size };
+  } catch (e) {
+    console.error("[warm-lists] doValueMap failed:", e);
+    out.doValueMap = { ok: false };
+  }
+  return c.json({ ok: true, elapsedMs: Date.now() - t0, ...out });
+});
+
 // Sprint 4 — email outbox drain cron entry. Same CRON_SECRET pattern as
 // /api/internal/refresh-mvs above. The cron workflow at
 // .github/workflows/process-email-outbox.yml hits this every 5 min; the

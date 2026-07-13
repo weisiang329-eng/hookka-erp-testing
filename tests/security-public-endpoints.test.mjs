@@ -197,6 +197,11 @@ const EXPECTED_PRE_AUTH_ROUTES = [
   // gated; resets customers/suppliers outstandingSen to document truth so
   // the counters cannot silently drift (same fns as the Recalculate button).
   "POST /api/internal/nightly-counter-rebuild",
+  // Heavy-list snapshot pre-warm (added 2026-07-13). CRON_SECRET-gated like the
+  // rest of /api/internal/*; recomputes+stores the Delivery/Production list
+  // snapshots off the request path so users never hit the empty-snapshot cold
+  // recompute. Stores byte-identical payloads (same compute, same keys).
+  "POST /api/internal/warm-lists",
   "POST /api/qc-pending/trigger",
   "POST /api/mail-center/inbound",
 ];

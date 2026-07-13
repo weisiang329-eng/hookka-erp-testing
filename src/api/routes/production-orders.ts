@@ -5199,6 +5199,73 @@ function schedulePoListBodyRefresh(
   waitUntil(task);
 }
 
+// ── Pre-warm the delivery page's heavy PO-list snapshot (perf 2026-07-13) ─────
+// The delivery page fetches `/api/production-orders?fields=minimal&include=jobCards`.
+// When its snapshot row is EMPTY (right after a deploy busts the caches, or the
+// very first read of the day) the handler cold-computes fetchFilteredPOs over
+// every PO + job card — ~20MB, ~25s — as a BLOCKING request. Once a stale
+// snapshot exists the read is instant (serve-stale + background refresh), so the
+// only 25s hit is the empty-snapshot case. A cron calls this every few minutes
+// so a snapshot always exists and users never hit the empty-blocking recompute.
+//
+// The stored payload is BYTE-IDENTICAL to the live handler: same fetchFilteredPOs
+// with the delivery variant's exact params, same attachCustomerSO, same snapshot
+// table + cache key. No figure changes — only the timing of the recompute moves
+// off the request path (owner red line: input/output figures must stay exact).
+// withSnapshot with
+// no SWR option = compute-fresh-and-store when stale/empty, return cached when
+// already fresh, so a warm tick is a cheap no-op when nothing changed.
+export async function warmPoListDeliveryVariant(
+  c: Context<Env>,
+  orgId: string,
+): Promise<{ rows: number }> {
+  const { withSnapshot } = await import("../lib/snapshot");
+  // Must equal the delivery page's request key. snapshotCacheKey is the sorted
+  // "&"-joined query string of `?fields=minimal&include=jobCards`.
+  const snapshotCacheKey = "fields=minimal&include=jobCards";
+  const result = await withSnapshot<{
+    success: true;
+    data: unknown[];
+    total: number;
+  }>(
+    c.var.DB,
+    {
+      tableName: "production_orders_list_snapshot",
+      sourceTables: ["production_orders", "job_cards"],
+    },
+    orgId,
+    async () => {
+      const data = await fetchFilteredPOs(
+        c.var.DB,
+        orgId,
+        null, // statuses
+        true, // includeJobCards
+        false, // includeArchive
+        true, // minimal
+        null, // deptFilter
+        null, // dueFrom
+        null, // dueTo
+        null, // catFilter
+        false, // excludeCompleted
+      );
+      await attachCustomerSO(
+        c.var.DB,
+        data as Array<{
+          salesOrderId: string;
+          consignmentOrderId: string;
+          customerSO: string;
+        }>,
+      );
+      return { success: true, data, total: data.length };
+    },
+    snapshotCacheKey,
+    c,
+    // No SWR: force the compute+store on the cron (this IS the off-request path).
+    undefined,
+  );
+  return { rows: result?.total ?? 0 };
+}
+
 // After a worker QR scan completes job cards, the operator-facing production
 // dept sheets read from a cache-aside snapshot (production_orders_list_snapshot)
 // plus the KV list cache. The snapshot freshness probe compares MAX(updated_at)

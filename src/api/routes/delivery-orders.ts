@@ -18,6 +18,7 @@ import type { Env } from "../worker";
 import { consumeFGBatchesForDO } from "../lib/do-cost-cascade";
 import {
   loadDoValueMap,
+  loadDoValueMapCached,
   loadPoValueMap,
   loadSoLinePriceIndex,
   priceForItem,
@@ -1373,7 +1374,10 @@ app.get("/stats", async (c) => {
     )
       .bind(orgId)
       .all<{ id: string; status: string }>(),
-    loadDoValueMap(c.var.DB, orgId),
+    // Cached (snapshot + SWR) — same exact per-DO figure as the direct
+    // loadDoValueMap, just off the cold-recompute path so /stats stops
+    // paying the whole-org price-index scan on a cold read.
+    loadDoValueMapCached(c.var.DB, orgId, c),
   ]);
   const byStatus: Record<string, number> = {};
   const valueByStatus: Record<string, number> = {};

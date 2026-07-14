@@ -52,11 +52,29 @@ thread goes idle within a frame of mount, so the deferred fetches still raced th
 **Verified (staging, 390 px viewport):** `/m/production` dropped **5 → 1** API call (only
 the 8 KB board); `/m` Home still loads all 4 warm-up endpoints — zero feature loss. Shipped
 to prod (main 2bbf6d02).
-**Follow-up (separate):** `/api/dashboard/overview` itself is a ~7.6 s cold recompute
-because `cached()` (src/api/lib/kv-cache.ts) BLOCKS on miss and KV deletes the key at its
-60 s TTL — so once/min one Home user eats the full recompute. Fix candidate: warm it in the
-existing `/api/internal/warm-lists` cron (byte-identical, like compliance/brief already are)
-and/or give `cached()` true serve-stale. Money-adjacent (KPI figures) → careful focused pass.
+**Follow-up — DONE (BUG-2026-07-14-008 below):** the `/api/dashboard/overview` ~7.6 s
+cold-recompute stall was fixed by giving `cached()` true serve-stale.
+
+## BUG-2026-07-14-008 — Dashboard cold-load: cached() blocked on every TTL expiry (~7.6 s once/min on Home) `performance` `caching` 🟢
+**Symptom:** the Home dashboard KPI strip stalled ~7.6 s roughly once a minute — one unlucky
+viewer per minute ate a full recompute.
+**Root cause:** `cached()` (src/api/lib/kv-cache.ts) despite its "stale-while-revalidate"
+comment actually **blocked on miss** (`await fetcher()`), and Cloudflare KV **deletes** the key
+at its `expirationTtl`. `/api/dashboard/overview` (the ONLY caller — dynamically imported in
+dashboard-overview.ts, 60 s TTL, ~30 heavy SELECTs incl. a full job_cards scan) therefore
+forced a blocking recompute every 60 s.
+**Fix (src/api/lib/kv-cache.ts):** real serve-stale. Values wrapped `{ __swr, v, soft }` with a
+hard KV TTL = `max(ttl*6, ttl+300)`. A stale-but-not-hard-expired hit is returned IMMEDIATELY
+and revalidated in the background (`waitUntil`); only a true miss (never warmed / hard-expired)
+blocks — once. Bounded staleness: normal ≤ ttl (revalidation refreshes), worst case ≤ hard TTL
+then one blocking recompute. Legacy raw entries served as stale + upgraded in the background (no
+flush). `invalidate()` unchanged (delete → miss → block-fresh) so post-write freshness is intact.
+Audited: `cached()` has exactly one caller and `invalidate()` has zero, so blast radius = the
+dashboard overview only.
+**Verified (staging, logged-in fetch):** cold warm 7.6 s → a hit 90 s later (well past the 60 s
+TTL) returned in **1.7 s** instead of re-blocking 7.2 s; KPI figures byte-identical
+(salesThisMonthSen 13,359,285 across every hit). Shipped to prod (main 5704898e). Owner chose
+this over the warm-cron+TTL-bump option (no staleness increase beyond ~60 s).
 
 ## BUG-2026-07-14-006 — Double invoicing: 64 DOs invoiced 2–4× each (77 extra invoices, ~RM 405k over-billing on staging) `invoices` `accounting` `money` `duplicate` 🟢
 **Symptom:** the same Delivery Order was invoiced multiple times — 64 DOs had 2, 3, or

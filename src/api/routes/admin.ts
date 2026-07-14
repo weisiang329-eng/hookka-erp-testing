@@ -1052,28 +1052,37 @@ app.post("/backfill-so-prices", async (c) => {
   });
 });
 
-// POST /api/admin/backfill-invoice-prices?dryRun=true — maps the total-height
-// under-billed SO lines onto their ALREADY-CREATED (non-cancelled) invoices and
-// reports the EXACT per-invoice-line unit-price correction. Lineage: an invoice's
-// lines are priced from the whole-org SO-line price index (computeDoInvoiceLines →
-// priceForItem), so an under-billed SO line pushed its wrong unit price into the
-// invoice line verbatim → the invoice line's unitPriceSen == the SO line's stored
-// (under-billed) unitPriceSen. We resolve each invoice's DO→SO set, then match its
-// items by (productCode + unitPriceSen) to an under-billed SO line and emit the
-// corrected unit. READ-ONLY planner: the actual re-price is applied through the
-// PROVEN PUT /api/invoices/:id priceEdits path (GL reverse+repost + AR delta),
-// never re-implemented here.
+// POST /api/admin/backfill-invoice-prices?dryRun=true — RE-DERIVES each existing
+// (non-cancelled) invoice through the SYSTEM'S OWN pricer (priceForItem) with a
+// corrected SO-line price index, and reports the exact per-line unit correction.
+//
+// Why re-derivation, not (product,price) matching: invoices are priced by
+// priceForItem(idx, productionOrderId → (soId, productCode, sizeCode, fabricCode))
+// with FIRST-WINS per key — it is NOT height-aware per line, so two SO lines that
+// share (product,size,fabric) but differ in height collapse to one price. Matching
+// invoice lines by (product,unitPrice) is therefore ambiguous (verified: 26 keys
+// map to conflicting surcharges). Re-deriving through priceForItem reproduces EXACTLY
+// what the invoice was priced at, so the before/after delta is unambiguous.
+//
+// SAFETY GATE: an invoice is only planned when its CURRENT lines reproduce byte-for-
+// byte from the pre-fix index (same length, same productCode per position, stored
+// unit == re-derived-before unit for EVERY line). Any invoice that diverges (a manual
+// price-edit, or index drift) is SKIPPED and flagged — never auto-touched.
+//
+// READ-ONLY. The re-price is applied through the PROVEN PUT /api/invoices/:id
+// priceEdits path (GL reverse+repost + AR delta) using the emitted newUnitSen.
 app.post("/backfill-invoice-prices", async (c) => {
   const denied = await requirePermission(c, "users", "create");
   if (denied) return denied;
   const db = c.var.DB;
   const orgId = getOrgId(c);
+  const { priceForItem } = await import("../lib/do-value");
+  const { resolveDoSalesOrderIds } = await import("./delivery-orders");
 
-  // 1. Under-billed SO lines (same detection as backfill-so-prices), grouped by
-  //    salesOrderId → Map<`${productCode}|${storedUnitSen}`, {surchargeSen, correctUnitSen}>.
+  // ---- 1. Under-billed SO lines → correction map keyed by SO-line id. ----
   const soRes = await db
     .prepare(
-      `SELECT soi.salesOrderId, soi.productCode,
+      `SELECT soi.id, soi.salesOrderId, soi.productCode, soi.sizeCode, soi.fabricCode,
               soi.gapInches, soi.divanHeightInches, soi.legHeightInches,
               soi.basePriceSen, soi.divanPriceSen, soi.legPriceSen,
               soi.specialOrderPriceSen, soi.unitPriceSen,
@@ -1086,7 +1095,8 @@ app.post("/backfill-invoice-prices", async (c) => {
     )
     .bind(orgId)
     .all<{
-      salesOrderId: string; productCode: string;
+      id: string; salesOrderId: string; productCode: string;
+      sizeCode: string | null; fabricCode: string | null;
       gapInches: number | null; divanHeightInches: number | null; legHeightInches: number | null;
       basePriceSen: number | null; divanPriceSen: number | null; legPriceSen: number | null;
       specialOrderPriceSen: number | null; unitPriceSen: number | null;
@@ -1112,7 +1122,8 @@ app.post("/backfill-invoice-prices", async (c) => {
     return [] as Array<{ value: string; priceSen: number }>;
   };
 
-  const bySo = new Map<string, Map<string, { surchargeSen: number; correctUnitSen: number }>>();
+  const correctionById = new Map<string, number>(); // soLineId → correct unitPriceSen
+  const affectedSoIds = new Set<string>();
   for (const line of soRes.results ?? []) {
     if (line.isServiceOrder === true || line.isServiceOrder === 1) continue;
     const totalInches =
@@ -1123,16 +1134,53 @@ app.post("/backfill-invoice-prices", async (c) => {
     if (correctTh <= 0) continue;
     const withoutTh =
       (line.basePriceSen || 0) + (line.divanPriceSen || 0) + (line.legPriceSen || 0) + (line.specialOrderPriceSen || 0);
-    // Under-billed ONLY when stored unit == sum WITHOUT total-height (never double-add).
     if ((line.unitPriceSen || 0) === withoutTh) {
-      const key = `${line.productCode}|${line.unitPriceSen}`;
-      const m = bySo.get(line.salesOrderId) ?? new Map();
-      m.set(key, { surchargeSen: correctTh, correctUnitSen: withoutTh + correctTh });
-      bySo.set(line.salesOrderId, m);
+      correctionById.set(line.id, withoutTh + correctTh);
+      affectedSoIds.add(line.salesOrderId);
     }
   }
 
-  // 2. Non-cancelled invoices linked to a DO.
+  // ---- 2. Build before/after price indexes (replicates loadSoLinePriceIndex, FIRST-
+  //         WINS, adding si.id so the correction can be overlaid). ----
+  type Idx = {
+    poById: Map<string, { salesOrderId: string; productCode: string; sizeCode: string; fabricCode: string }>;
+    byFull: Map<string, number>;
+    byCode: Map<string, number>;
+    byAnyCode: Map<string, number>;
+  };
+  const poRes = await db
+    .prepare("SELECT id, salesOrderId, productCode, sizeCode, fabricCode FROM production_orders WHERE orgId = ?")
+    .bind(orgId)
+    .all<{ id: string; salesOrderId: string | null; productCode: string | null; sizeCode: string | null; fabricCode: string | null }>();
+  const poById = new Map<string, { salesOrderId: string; productCode: string; sizeCode: string; fabricCode: string }>();
+  for (const p of poRes.results ?? [])
+    poById.set(p.id, { salesOrderId: p.salesOrderId ?? "", productCode: p.productCode ?? "", sizeCode: p.sizeCode ?? "", fabricCode: p.fabricCode ?? "" });
+  const siRes = await db
+    .prepare(
+      `SELECT si.id AS id, si.salesOrderId AS salesOrderId, si.productCode AS productCode,
+              si.sizeCode AS sizeCode, si.fabricCode AS fabricCode, si.unitPriceSen AS unitPriceSen
+         FROM sales_order_items si JOIN sales_orders s ON s.id = si.salesOrderId
+        WHERE s.orgId = ?`,
+    )
+    .bind(orgId)
+    .all<{ id: string; salesOrderId: string | null; productCode: string | null; sizeCode: string | null; fabricCode: string | null; unitPriceSen: number }>();
+  const buildIdx = (useCorrection: boolean): Idx => {
+    const byFull = new Map<string, number>(), byCode = new Map<string, number>(), byAnyCode = new Map<string, number>();
+    for (const si of siRes.results ?? []) {
+      const so = si.salesOrderId ?? "", code = si.productCode ?? "";
+      const up = useCorrection && correctionById.has(si.id) ? (correctionById.get(si.id) as number) : (si.unitPriceSen || 0);
+      const fk = `${so}|${code}|${si.sizeCode ?? ""}|${si.fabricCode ?? ""}`;
+      if (!byFull.has(fk)) byFull.set(fk, up);
+      const ck = `${so}|${code}`;
+      if (!byCode.has(ck)) byCode.set(ck, up);
+      if (code && !byAnyCode.has(code)) byAnyCode.set(code, up);
+    }
+    return { poById, byFull, byCode, byAnyCode };
+  };
+  const idxBefore = buildIdx(false);
+  const idxAfter = buildIdx(true);
+
+  // ---- 3. Re-derive each affected invoice through priceForItem. ----
   const invRes = await db
     .prepare(
       `SELECT id, invoiceNo, status, deliveryOrderId, salesOrderId, totalSen, paidAmount
@@ -1141,40 +1189,52 @@ app.post("/backfill-invoice-prices", async (c) => {
           AND deliveryOrderId IS NOT NULL AND deliveryOrderId != ''`,
     )
     .bind(orgId)
-    .all<{
-      id: string; invoiceNo: string; status: string;
-      deliveryOrderId: string; salesOrderId: string | null;
-      totalSen: number; paidAmount: number | null;
-    }>();
-
-  const { resolveDoSalesOrderIds } = await import("./delivery-orders");
+    .all<{ id: string; invoiceNo: string; status: string; deliveryOrderId: string; salesOrderId: string | null; totalSen: number; paidAmount: number | null }>();
 
   const plan: Array<Record<string, unknown>> = [];
-  let totalDeltaSen = 0;
-  let lineCount = 0;
+  const skipped: Array<Record<string, unknown>> = [];
+  let totalDeltaSen = 0, lineCount = 0;
   for (const inv of invRes.results ?? []) {
     const soIds = await resolveDoSalesOrderIds(db, inv.deliveryOrderId, inv.salesOrderId);
-    const corr = new Map<string, { surchargeSen: number; correctUnitSen: number }>();
-    for (const so of soIds) {
-      const m = bySo.get(so);
-      if (m) for (const [k, v] of m) corr.set(k, v);
-    }
-    if (corr.size === 0) continue;
-    const itemsRes = await db
-      .prepare(
-        "SELECT id, productCode, quantity, unitPriceSen, discountSen FROM invoice_items WHERE invoiceId = ?",
-      )
+    if (!soIds.some((s) => affectedSoIds.has(s))) continue; // no affected SO on this invoice's DO
+    const doSoId = inv.salesOrderId ?? soIds[0] ?? "";
+    const doItemsRes = await db
+      .prepare("SELECT productionOrderId, productCode, quantity FROM delivery_order_items WHERE deliveryOrderId = ?")
+      .bind(inv.deliveryOrderId)
+      .all<{ productionOrderId: string | null; productCode: string | null; quantity: number }>();
+    const doItems = doItemsRes.results ?? [];
+    const invItemsRes = await db
+      .prepare("SELECT id, productCode, quantity, unitPriceSen, discountSen FROM invoice_items WHERE invoiceId = ? ORDER BY rowid")
       .bind(inv.id)
       .all<{ id: string; productCode: string; quantity: number; unitPriceSen: number; discountSen: number | null }>();
+    const invItems = invItemsRes.results ?? [];
+
+    // GATE: current invoice must reproduce from the pre-fix index, position-for-position.
+    let clean = doItems.length === invItems.length;
+    if (clean) {
+      for (let i = 0; i < doItems.length; i++) {
+        const rb = priceForItem(idxBefore, doItems[i].productionOrderId, doSoId, doItems[i].productCode);
+        if ((invItems[i].productCode ?? "") !== (doItems[i].productCode ?? "") || (invItems[i].unitPriceSen || 0) !== rb) {
+          clean = false;
+          break;
+        }
+      }
+    }
+    if (!clean) {
+      skipped.push({ invoiceNo: inv.invoiceNo, status: inv.status, reason: "current lines don't match the index (manual edit / drift) — needs manual review" });
+      continue;
+    }
+
     const edits: Array<Record<string, unknown>> = [];
-    for (const it of itemsRes.results ?? []) {
-      const fix = corr.get(`${it.productCode}|${it.unitPriceSen}`);
-      if (fix) {
-        const delta = fix.surchargeSen * (it.quantity || 0);
+    for (let i = 0; i < doItems.length; i++) {
+      const ra = priceForItem(idxAfter, doItems[i].productionOrderId, doSoId, doItems[i].productCode);
+      const old = invItems[i].unitPriceSen || 0;
+      if (ra !== old) {
+        const qty = invItems[i].quantity || 0;
         edits.push({
-          itemId: it.id, product: it.productCode, qty: it.quantity,
-          oldUnitSen: it.unitPriceSen, newUnitSen: fix.correctUnitSen,
-          discountSen: it.discountSen || 0, lineDeltaRM: delta / 100,
+          itemId: invItems[i].id, product: invItems[i].productCode, qty,
+          oldUnitSen: old, newUnitSen: ra, discountSen: invItems[i].discountSen || 0,
+          lineDeltaRM: ((ra - old) * qty) / 100,
         });
       }
     }
@@ -1184,11 +1244,8 @@ app.post("/backfill-invoice-prices", async (c) => {
       lineCount += edits.length;
       plan.push({
         invoiceId: inv.id, invoiceNo: inv.invoiceNo, status: inv.status,
-        paidRM: (inv.paidAmount || 0) / 100,
-        oldTotalRM: (inv.totalSen || 0) / 100,
-        deltaRM: invDelta / 100,
-        newTotalRM: ((inv.totalSen || 0) + invDelta) / 100,
-        edits,
+        paidRM: (inv.paidAmount || 0) / 100, oldTotalRM: (inv.totalSen || 0) / 100,
+        deltaRM: invDelta / 100, newTotalRM: ((inv.totalSen || 0) + invDelta) / 100, edits,
       });
     }
   }
@@ -1197,13 +1254,15 @@ app.post("/backfill-invoice-prices", async (c) => {
     success: true,
     dryRun: true,
     note:
-      "READ-ONLY. Apply each invoice's edits via PUT /api/invoices/:id { priceEdits:[{id:itemId, baseSen:newUnitSen, divanSen:0, legSen:0, specialSen:0, discountSen}] } — the proven GL reverse+repost + AR-delta path.",
+      "READ-ONLY. Re-derived through priceForItem (the invoice's own pricer). Apply each edit via PUT /api/invoices/:id { priceEdits:[{id:itemId, baseSen:newUnitSen, divanSen:0, legSen:0, specialSen:0, discountSen}] } — the proven GL reverse+repost + AR-delta path. `skipped` invoices diverge from the index and need manual review.",
     summary: {
       invoicesToReprice: plan.length,
       linesToReprice: lineCount,
       totalUnderBilledRM: (totalDeltaSen / 100).toLocaleString(),
+      invoicesSkipped_needManualReview: skipped.length,
     },
     plan,
+    skipped,
   });
 });
 

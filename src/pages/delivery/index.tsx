@@ -1172,8 +1172,17 @@ export default function DeliveryPage() {
   // Saved packing lists (one per truck run, grouping several DOs). Populates
   // the "Packing List" tab. Defaults to empty if the endpoint/table isn't
   // ready so it never blocks the delivery page.
+  // Perf 2026-07-14: DEFERRED off the default Planning/Pending-Delivery landing.
+  // packingLists feeds only the DO grid's "already in PL" marks (doPackingMap) +
+  // the Packing List tab render + its badge — all governed by activeTab and none
+  // of them on the PO_TABS (planning / pending_delivery). Passing null on those
+  // two tabs skips the ~2.4s /api/packing-lists fetch until the operator leaves
+  // Planning (any DO-grid or Packing-List tab loads it). No dead-data risk — the
+  // PO-based Ready/Planning logic never reads packingLists.
   const { data: plRaw, refresh: refreshPLs } =
-    useCachedJson<{ success?: boolean; data?: PackingListRecord[] }>("/api/packing-lists");
+    useCachedJson<{ success?: boolean; data?: PackingListRecord[] }>(
+      PO_TABS.has(activeTab) ? null : "/api/packing-lists",
+    );
 
   const fetchData = useCallback(() => {
     invalidateCachePrefix("/api/delivery-orders");

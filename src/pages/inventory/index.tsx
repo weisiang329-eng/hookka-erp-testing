@@ -1506,6 +1506,12 @@ export default function InventoryPage() {
   useEffect(() => {
     let cancelled = false;
     const refetch = async () => {
+      // Perf 2026-07-14: only refresh WIP when the WIP tab is actually open —
+      // WIP data feeds only that tab, so a visibility-regain on Finished/Raw
+      // must NOT trigger the ~2.3s /api/inventory/wip fetch (completes the
+      // mount-time WIP deferral). activeTab is in this effect's deps so the
+      // closure sees the current tab.
+      if (activeTab !== "WIP") return;
       try {
         const json = await cachedFetchJson<{
           success?: boolean;
@@ -1536,7 +1542,7 @@ export default function InventoryPage() {
       cancelled = true;
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, []);
+  }, [activeTab]);
 
   // Derived inventory — merge the server FG-stock deltas onto the catalog
   // (byte-identical to the old client-side deriveFGStock, verified live).

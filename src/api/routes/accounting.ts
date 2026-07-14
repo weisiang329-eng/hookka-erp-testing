@@ -437,7 +437,7 @@ app.get("/aging", async (c) => {
       // floor) is saved — not just when invoices/PIs change.
       // supplier_payments included so knocking off an advance rebuilds the
       // snapshot (advances appear as negative rows below).
-      sourceTables: ["invoices", "purchase_invoices", "supplier_payments", "kv_config"],
+      sourceTables: ["invoices", "purchase_invoices", "supplier_payments", "kv_config", "opening_ap_excludes"],
     },
     orgId,
     async () => {

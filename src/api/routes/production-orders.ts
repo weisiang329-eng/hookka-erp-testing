@@ -5263,7 +5263,7 @@ export async function warmPoListDeliveryVariant(
     c.var.DB,
     {
       tableName: "production_orders_list_snapshot",
-      sourceTables: ["production_orders", "job_cards"],
+      sourceTables: ["production_orders", "job_cards", "sales_orders", "consignment_orders"],
     },
     orgId,
     async () => {
@@ -5328,7 +5328,7 @@ export async function warmPoListPlanningVariant(
     c.var.DB,
     {
       tableName: "production_orders_list_snapshot",
-      sourceTables: ["production_orders", "job_cards"],
+      sourceTables: ["production_orders", "job_cards", "sales_orders", "consignment_orders"],
     },
     orgId,
     async () => {
@@ -5567,7 +5567,7 @@ app.get("/", async (c) => {
       c.var.DB,
       {
         tableName: "production_orders_list_snapshot",
-        sourceTables: ["production_orders", "job_cards"],
+        sourceTables: ["production_orders", "job_cards", "sales_orders", "consignment_orders"],
       },
       orgId,
       async () => {

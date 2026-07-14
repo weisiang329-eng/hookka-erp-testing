@@ -1306,6 +1306,7 @@ app.get("/stats", async (c) => {
         "sales_order_items",
         "delivery_orders",
         "delivery_order_items",
+        "production_orders",
       ],
     },
     orgId,

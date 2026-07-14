@@ -134,6 +134,16 @@ Owner reviewed /m Delivery & Warehouse. Captured asks (do not drop any):
 
 ---
 
+## 2026-07-09 — ✅ /ar-reconciliation shipped; AR −40,000 diagnosed = debtor opening pending (owner defers)
+
+ReconCfg parameterizes the recon algebra (AP defaults untouched); AR route
+feeds 300-0000 legs swapped. Live run itemized the −40,000 exactly: receipts
+Houzs 25,000 + Carress 15,000 paying 23 pre-opening invoices (05-08..05-16,
+isOpening=0 → floored). Owner: 「到时我才提供，顾客群没有录入opening」 — parked
+until the debtor-opening project starts (v5 list is still the baseline; his 23
+re-entered invoices likely overlap it; AR needs a flag-as-opening switch).
+The −40,000 on /ar-control is EXPECTED until then — not a new bug.
+
 ## 2026-07-09 — ✅ Aging snapshot invalidation (BUG-2026-07-09-002)
 
 Voiding an advance-only payment writes no probed source table, so the cached

@@ -1428,39 +1428,26 @@ export default function InventoryPage() {
       return { counts: [], dyn: [] };
     };
 
-    // /api/inventory/wip — every wip_items row with stock_qty != 0
-    // already projected to the WIPItem grid shape. Includes both
-    // positive (produced WIP stock) and negative (skipped-upstream
-    // stub) rows in a single uniform list.
-    const fetchWipRows = async (): Promise<BackendWipRow[]> => {
-      try {
-        const json = await cachedFetchJson<{
-          success?: boolean;
-          data?: BackendWipRow[];
-          _stub?: boolean;
-        }>("/api/inventory/wip");
-        if (json && json.success && Array.isArray(json.data) && !json._stub) {
-          return json.data as BackendWipRow[];
-        }
-      } catch { /* fall through */ }
-      return [];
-    };
-
     (async () => {
-      const [inv, fg, wipRows] = await Promise.all([
+      // Perf 2026-07-14: WIP is DEFERRED off the initial mount. /api/inventory/wip
+      // was a ~2.3s fetch that blocked the DEFAULT Finished-Products view even
+      // though `backendWipRows` feeds ONLY the WIP tab (wipItems / filteredWIP /
+      // merged sofa-set view — verified it never touches the FG or RAW tabs). It
+      // now loads the first time the WIP tab is opened (tab-gated effect below);
+      // the visibilitychange effect keeps it fresh thereafter.
+      const [inv, fg] = await Promise.all([
         fetchInventory(),
         fetchFgDeltas(),
-        fetchWipRows(),
       ]);
       if (cancelled) return;
       setProducts(inv.products);
       setLiveRawMaterials(inv.rawMaterials);
       setFgDeltas(fg);
-      setBackendWipRows(wipRows);
       // Remember this dataset so re-entering Inventory paints instantly (SWR)
       // instead of re-blanking through the full reload. Only snapshot a
       // non-empty load — a degraded/stub response must not poison the cache
-      // with blanks (last-known-good philosophy).
+      // with blanks (last-known-good philosophy). Keep any prior WIP snapshot
+      // (it's loaded lazily, not on this mount).
       if (
         inv.products.length ||
         inv.rawMaterials.length ||
@@ -1471,7 +1458,7 @@ export default function InventoryPage() {
           products: inv.products,
           rawMaterials: inv.rawMaterials,
           fgDeltas: fg,
-          backendWipRows: wipRows,
+          backendWipRows: invSnapshot?.backendWipRows ?? [],
         };
       }
       setLoading(false);
@@ -1479,6 +1466,35 @@ export default function InventoryPage() {
 
     return () => { cancelled = true; };
   }, []);
+
+  // Lazy-load WIP the first time the WIP tab is opened (deferred off mount so
+  // the default Finished-Products view isn't blocked by the ~2.3s
+  // /api/inventory/wip fetch for data only this tab reads). Same cachedFetchJson
+  // path the visibilitychange refetch below uses.
+  useEffect(() => {
+    if (activeTab !== "WIP" || backendWipRows.length > 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const json = await cachedFetchJson<{
+          success?: boolean;
+          data?: BackendWipRow[];
+          _stub?: boolean;
+        }>("/api/inventory/wip");
+        if (
+          !cancelled &&
+          json &&
+          json.success &&
+          Array.isArray(json.data) &&
+          !json._stub
+        ) {
+          setBackendWipRows(json.data as BackendWipRow[]);
+        }
+      } catch { /* swallow */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   // Re-fetch wip_items when the tab regains focus. Fixes the stale-data
   // problem where the user marks JCs complete (or clears all completion

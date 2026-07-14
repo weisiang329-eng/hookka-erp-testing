@@ -20,10 +20,41 @@ Do NOT run any money mutation (cancel invoice, set price) without owner sign-off
 - [ ] CLEANUP plan for the 77 existing duplicates: per-case (SENT → cancel; PAID → CN/refund?)
       — propose to owner, do NOT auto-execute. Verify prod scope first.
 
-## Task 2 — SO price backfill
-- [ ] Identify SOs with missing/zero line prices (EXCLUDING legit service/replacement SV orders).
-- [ ] Find the price source ("根据我的价钱"): customer_product_prices / product_prices catalog.
-- [ ] Propose backfill rule (customer-specific price first, else list price) → confirm → execute.
+## Task 2 — SO price backfill (effective-date re-price of OLD orders)
+DONE this session — the CODE bug: `fix(sales): include totalHeightPriceSen` (7e4ed1ad).
+Server unit-price recompute (POST+PUT) dropped `totalHeightPriceSen` → under-billed.
+PRICE AUDIT CONFIRMED: exactly 5 components (base, divan, leg, totalHeight, special/drawer);
+after the fix ALL are included. seatHeight folds into base; modular sofa = 1 line/module.
+Only totalHeight was the gap. Drawer rides specialOrderPriceSen (already billed).
+
+Backfill of EXISTING under-billed orders (owner asked, "根据 effective date"):
+- [ ] Build `POST /api/admin/backfill-so-prices?dryRun=1` (SUPER_ADMIN). For each sales_order_items
+      line: re-derive totalHeightPriceSen from its height config (divanHeightInches + legHeightInches
+      + gapInches → total height label → kv_config maintenance `totalHeights[label].priceSen`) — this
+      is what the FE `calcTotalHeightSurcharge` does. Recompute correct unit =
+      base + divan + leg + totalHeight + special. base uses `resolveCustomerPriceAsOf(product,
+      customer, SO date)` = the EFFECTIVE-DATED customer price (owner's requirement).
+- [ ] Affected = stored unitPriceSen < recomputed. dryRun reports (line, old, new, delta, SO date).
+- [ ] EXECUTION updates sales_order_items.unitPriceSen/lineTotalSen + cascades to DO + invoice.
+- [ ] ⚠ ALREADY-SENT invoices: owner decision — (a) only fix DRAFT/un-invoiced, sent ones get a
+      difference CN; OR (b) re-price all + issue diff CN for the delta. Do NOT auto-touch sent
+      invoices without the owner's per-case call.
+
+## Task 2b — Dedupe tool (prod one-click for the duplicate cleanup)
+Staging already cleaned (35 cancelled, verified 100% dup: items match DO). For PROD:
+- [ ] Build `POST /api/admin/dedupe-invoices?dryRun=1` (SUPER_ADMIN). Group non-cancelled invoices
+      by deliveryOrderId; a group of ≥2 = candidates. Verify 100% dup (same item signature +
+      itemCount == DO itemCount). Keep 1 (paid one if any, else earliest); the rest are extras.
+- [ ] Only CANCEL (status→CANCELLED, GL-void) the UNPAID extras — REUSE the existing invoice-cancel
+      path (extract the PUT :id CANCELLED branch into a shared `cancelInvoice(db,id)` so GL void +
+      hidden legs + DO status are identical; do NOT re-implement GL). Report paid extras, never
+      auto-cancel them.
+- [ ] dryRun reports the full plan (DO, keep, cancel[], amounts). Owner runs execute on prod.
+- [ ] After cleanup: add the UNIQUE partial index invoices(deliveryOrderId) WHERE status!='CANCELLED'
+      (belt-and-suspenders; can only be created once dups are gone).
+
+BOTH tools: money + GL critical. Build CAREFULLY (fresh/focused), dry-run first, owner confirms
+numbers before execute, verify byte-identical on staging, then owner runs on prod.
 
 ## Task 3 — Cancel / Edit / CN flow verification
 - [ ] Verify end-to-end: cancel an invoice, edit (price-edit on SENT), issue a CN — all correct

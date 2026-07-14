@@ -596,3 +596,66 @@ test("poInPlanningConsignment: BEDFRAME HB-only — stranded DIVAN in progress i
   });
   assert.equal(dp.poInPlanningConsignment(p), false);
 });
+
+// ---------------------------------------------------------------------------
+// buildCnReadyPlanning — the shared CN Planning/Pending-CN row builder used by
+// BOTH note.tsx and GET /api/consignment-notes/ready-planning. Guards against
+// the two surfaces drifting: the endpoint's rows must equal what the page would
+// have computed client-side (verified live 2026-07-14; this locks it in).
+// ---------------------------------------------------------------------------
+function cnPo(overrides = {}) {
+  return {
+    id: overrides.id ?? "pord-cn",
+    poNo: overrides.poNo ?? "PO-CN-1",
+    status: overrides.status ?? "IN_PROGRESS",
+    consignmentOrderId:
+      "consignmentOrderId" in overrides ? overrides.consignmentOrderId : "co-1",
+    companyCOId: overrides.companyCOId ?? "",
+    customerId: overrides.customerId,
+    customerName: overrides.customerName ?? "Houzs",
+    customerState: overrides.customerState ?? "KL",
+    productCode: overrides.productCode ?? "P1",
+    itemCategory: overrides.itemCategory ?? "SOFA",
+    quantity: overrides.quantity ?? 1,
+    targetEndDate: overrides.targetEndDate ?? "2026-07-06",
+    jobCards:
+      overrides.jobCards ??
+      [{ departmentCode: "UPHOLSTERY", status: "IN_PROGRESS" }],
+  };
+}
+
+test("buildCnReadyPlanning: splits Planning (in production) vs Pending CN (done, not consigned)", () => {
+  const inProd = cnPo({ id: "a", jobCards: [{ departmentCode: "UPHOLSTERY", status: "IN_PROGRESS" }] });
+  const doneReady = cnPo({ id: "b", productCode: "P2", jobCards: [{ departmentCode: "UPHOLSTERY", status: "COMPLETED", completedDate: "2026-07-05" }] });
+  const doneConsigned = cnPo({ id: "c", jobCards: [{ departmentCode: "UPHOLSTERY", status: "COMPLETED" }] });
+  const soOrigin = cnPo({ id: "d", consignmentOrderId: undefined, jobCards: [{ departmentCode: "UPHOLSTERY", status: "IN_PROGRESS" }] });
+
+  const out = dp.buildCnReadyPlanning({
+    allPOs: [inProd, doneReady, doneConsigned, soOrigin],
+    coMap: new Map([["co-1", { hookkaExpectedDD: "2026-07-10", companyCOId: "CO-2607-002", customerId: "cust-9" }]]),
+    cnLinkedPOIds: new Set(["c"]), // 'c' already on a CN → excluded from ready
+    cnLinkedCustomersLegacy: new Set(),
+    productM3Map: new Map([["P2", 1.5]]),
+  });
+
+  assert.deepEqual(out.planning.map((r) => r.id), ["a"]); // SO-origin 'd' excluded
+  assert.deepEqual(out.ready.map((r) => r.id), ["b"]);    // 'c' deduped out
+  const b = out.ready[0];
+  assert.equal(b.consignmentOrderNo, "CO-2607-002"); // from coMap fallback
+  assert.equal(b.customerId, "cust-9");              // po.customerId absent → coMap
+  assert.equal(b.hookkaExpectedDD, "2026-07-10");    // coMap wins over targetEndDate
+  assert.equal(b.unitM3, 1.5);                       // productM3Map
+  assert.equal(b.uphCompletedDate, "2026-07-05");    // latest UPH completedDate
+});
+
+test("buildCnReadyPlanning: legacy-customer dedup hides an otherwise-ready PO", () => {
+  const done = cnPo({ id: "e", customerId: "legacy-cust", jobCards: [{ departmentCode: "UPHOLSTERY", status: "COMPLETED" }] });
+  const out = dp.buildCnReadyPlanning({
+    allPOs: [done],
+    coMap: new Map(),
+    cnLinkedPOIds: new Set(),
+    cnLinkedCustomersLegacy: new Set(["legacy-cust"]),
+    productM3Map: new Map(),
+  });
+  assert.deepEqual(out.ready.map((r) => r.id), []); // hidden by legacy-customer dedup
+});

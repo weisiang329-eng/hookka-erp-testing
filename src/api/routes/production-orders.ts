@@ -7968,6 +7968,114 @@ app.post("/:id/scan-complete-shared", async (c) => {
 // Gated on the same read permission as the job-cards GET (the nearest sibling
 // that reads this exact data) — production-orders:read, satisfied by *:read.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// GET /api/production-orders/board — the /m mobile Production board (perf
+// 2026-07-14). The mobile board (src/pages/m/screens/ProductionScreen.tsx) used
+// to pull the whole ~1.6MB `?fields=minimal&include=` payload (all 1921 POs) and
+// then hide the ~1543 COMPLETED/CANCELLED ones + strip to ~11 rendered fields
+// client-side. This returns ONLY the live board set server-side, slimmed to the
+// exact fields the board renders — measured live: 1921→378 rows, ~1.6MB→~125KB.
+//
+// Live filter = the board's own client rule VERBATIM: status NOT IN
+// ('COMPLETED','CANCELLED') — keeps TRANSFERRED/ON_HOLD/etc. (so it is NOT the
+// list's excludeCompleted, which also drops TRANSFERRED + keeps 35-day-completed).
+// customerSO is filled via the SAME attachCustomerSO the list payload runs, so the
+// board's search over it is unchanged. companySO + picName are dropped: both are
+// ALWAYS empty on this data (0/378 populated) — the board rendered/searched blanks.
+//
+// NO dead-data risk: the client keeps its search + per-dept counts over the WHOLE
+// returned set (all 378 live rows are loaded — nothing is paginated away). Keyset
+// (src/api/lib/keyset.ts, now in place) is the answer IF the live WIP set ever
+// grows to thousands; at a few hundred, all-loaded-slim is correct + can't hide a
+// record. Snapshot-cached + serve-stale so the phone's cold paint never blocks.
+// ---------------------------------------------------------------------------
+app.get("/board", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const db = c.var.DB;
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS production_board_snapshot (
+         org_id        TEXT NOT NULL,
+         cache_key     TEXT NOT NULL DEFAULT '',
+         data          JSONB NOT NULL,
+         built_from    TIMESTAMP NOT NULL,
+         built_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+         refresh_count INTEGER NOT NULL DEFAULT 0,
+         PRIMARY KEY (org_id, cache_key)
+       )`,
+    )
+    .run();
+
+  const { withSnapshot } = await import("../lib/snapshot");
+  const data = await withSnapshot<{ items: unknown[] }>(
+    db,
+    {
+      tableName: "production_board_snapshot",
+      // POs change the set; sales_orders / consignment_orders feed customerSO
+      // via attachCustomerSO, so a customerSO edit must invalidate too.
+      sourceTables: ["production_orders", "sales_orders", "consignment_orders"],
+    },
+    orgId,
+    async () => {
+      const res = await db
+        .prepare(
+          `SELECT id, poNo, status, productCode, productName, customerName,
+                  companySOId, salesOrderId, consignmentOrderId, quantity,
+                  targetEndDate, currentDepartment, created_at
+             FROM production_orders
+            WHERE orgId = ?
+              AND status NOT IN ('COMPLETED','CANCELLED')
+            ORDER BY created_at DESC, id DESC`,
+        )
+        .bind(orgId)
+        .all<{
+          id: string;
+          poNo: string;
+          status: string;
+          productCode: string | null;
+          productName: string | null;
+          customerName: string | null;
+          companySOId: string | null;
+          salesOrderId: string | null;
+          consignmentOrderId: string | null;
+          quantity: number | null;
+          targetEndDate: string | null;
+          currentDepartment: string | null;
+        }>();
+      const rows = (res.results ?? []).map((r) => ({
+        ...r,
+        salesOrderId: r.salesOrderId ?? "",
+        consignmentOrderId: r.consignmentOrderId ?? "",
+        customerSO: "",
+      }));
+      // Fill customerSO exactly like the list payload does.
+      await attachCustomerSO(db, rows);
+      const items = rows.map((r) => ({
+        id: r.id,
+        poNo: r.poNo,
+        status: r.status,
+        productCode: r.productCode ?? "",
+        productName: r.productName ?? "",
+        customerName: r.customerName ?? "",
+        companySOId: r.companySOId ?? "",
+        customerSO: r.customerSO ?? "",
+        quantity: r.quantity ?? 0,
+        targetEndDate: r.targetEndDate ?? "",
+        currentDepartment: r.currentDepartment ?? "",
+      }));
+      return { items };
+    },
+    "",
+    c,
+    { staleWhileRevalidate: true },
+  );
+
+  return c.json({ success: true, data: data.items });
+});
+
 app.get("/:id", async (c) => {
   if (c.req.query("fresh") === "1") {
     const denied = await requirePermission(c, "production-orders", "read");

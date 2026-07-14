@@ -34,6 +34,30 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-14-003 — AR Aging report bucketed money over the loaded 200-row page only (dropped 141/341 invoices) `invoices` `accounting` `data-quality` `dead-data` 🟡
+**Symptom:** Invoices → AR Aging tab. The per-customer overdue buckets (Current /
+31-60 / 61-90 / 90+) and their totals summed only the invoices on the CURRENTLY
+LOADED page (PAGE_SIZE 200). Measured live on staging: 341 outstanding invoices, but
+the aging saw only 200 → **141 invoices (~41% of receivables) silently missing** from
+the aging report; the numbers shrank further as the user paged. Owner's #1 fear
+(dead-data), on a MONEY report (做账要准).
+**Root cause:** `agingData` (invoices/index.tsx:490) was a `useMemo` over the
+client `invoices` state, which is the server-PAGINATED list
+(`/api/invoices?page=&limit=200`). The KPI cards had already been moved to a
+whole-dataset server aggregate (`/api/invoices/stats`, the 2026-05-26 undercount
+class) but the Aging tab was missed and kept computing over the page.
+**Fix:** new `GET /api/invoices/aging` (invoices.ts, after /stats) — a VERBATIM port
+of the FE bucket logic (exclude PAID/CANCELLED/DRAFT + balance>0; daysOverdue =
+floor((now-dueDate)/day); <=30→current / 31-60 / 61-90 / >90; group by customerName;
+sort total desc) but over the WHOLE table, honoring the page's status/customer/date
+filter. FE fetches it (gated on the Aging tab active) and renders it instead of the
+client computation. Invoice volume is small → plain aggregate, no snapshot.
+**Verified:** [pending live byte-identity — endpoint aging == FE-logic recomputed over
+ALL 341 invoices client-side; aging now covers 341 not 200].
+**Found by:** the 2026-07-14 full-app 13-module FE↔BE↔DB perf audit
+(docs/PERF-AUDIT-2026-07-14.md, finding #1) — the ONLY real correctness bug among 83
+findings; the other 82 are perf/latent, tracked in that doc + WORK-TRACKER, not here.
+
 ## BUG-2026-07-14-002 — withSnapshot served a STALE-SHAPE blob after a payload field was added (CN /ready-planning poLookups blank) `perf` `snapshot` `durable-arch` 🟢
 **Symptom:** Added `poLookups` to the `GET /api/consignment-notes/ready-planning`
 compute output + deployed, but the CN Note detail dialog's lookup columns

@@ -221,7 +221,7 @@ app.get("/summary", async (c) => {
   const orgId = getOrgId(c);
   const snapConfig = {
     tableName: "job_cards_summary_snapshot",
-    sourceTables: ["job_cards"],
+    sourceTables: ["job_cards", "worker_nonprod_requests"],
   };
   const cacheKey = `from=${from}&to=${to}`;
   const _snap_check = await Promise.all([

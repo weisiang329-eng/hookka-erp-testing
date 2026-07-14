@@ -121,7 +121,7 @@ app.get("/", async (c) => {
     // numerator (below), so a new/edited request must invalidate this cache.
     // (Probe uses its created_at — no updated_at column; the Layer-3 nightly
     // rebuild backstops any approval that reuses an existing created_at.)
-    sourceTables: ["job_cards", "working_hour_entries", "worker_nonprod_requests"],
+    sourceTables: ["job_cards", "working_hour_entries", "worker_nonprod_requests", "production_orders", "workers"],
   };
   const cacheKey = `from=${fromStr}&to=${toStr}&dept=${departmentCode ?? ""}&cat=${category ?? ""}`;
   const _snap_check = await Promise.all([

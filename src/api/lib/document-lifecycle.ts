@@ -112,5 +112,14 @@ export async function applyLifecycle(
       .bind(`dl-${crypto.randomUUID().slice(0, 10)}`, primarySourceType, sourceId, target, now, actorUserId, orgId, target, now, actorUserId),
   );
 
+  // NOTE on freshness: accounting_aging_snapshot reads document_lifecycle (via
+  // loadUnappliedSupplierAdvances) ONLY for supplier-advance void state.
+  // document_lifecycle has no updated_at/created_at the freshness probe can
+  // track — BUT every supplier_payments mutation (create/void/restate) also
+  // runs bumpSupplierPaymentsRev(), which bumps kv_config('supplier_payments_rev').
+  // accounting_aging_snapshot lists kv_config in its sourceTables, so a supplier
+  // advance void already invalidates the aging snapshot through that rev bump.
+  // No separate wipe needed here (an in-builder wipe would also mis-order,
+  // running before the caller commits these statements).
   return { statements, newState: target, prevState: cur };
 }

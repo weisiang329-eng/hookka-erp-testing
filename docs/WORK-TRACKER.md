@@ -38,28 +38,36 @@ its doc history, now copied here).
   `tests/fg-stock.test.mjs` (7 cases) proves merge(split(derive))≡derive.
   Commit ebc4d1b6. build:strict + full suite green.
 
-**Remaining slices — NOT all the clean derive-and-drop inventory was (scoped 2026-07-14):**
-- ⚪ **Consignment note** (`src/pages/consignment/note.tsx`, 5259 lines) — CLOSEST
-  analog to the done delivery slice: `poRaw` builds Planning + Pending CN tabs the
-  same way DO does, filtered on `consignmentOrderId`. Derive-and-drop feasible via a
-  `GET /api/consignment-notes/ready-planning` mirroring the delivery endpoint. BUT
-  it's a **MONEY PATH** (CN amounts) — the live byte-identical gate must match CN
-  values to the cent, not just row counts. Do this one FIRST of the three (pattern
-  proven, but verify money carefully).
+- ✅ **Consignment note (2026-07-14, THIS session)** — `GET /api/consignment-notes/ready-planning`
+  returns `{planning, ready, poLookups}` via shared `buildCnReadyPlanning` (verbatim from
+  note.tsx mapPO + poReadyForConsignment/poInPlanningConsignment gates) + `poLookups`
+  (companyCOId/fabricCode/rack for CN-referenced POs, rack via shared
+  aggregateRacksFromPackingCards). Snapshot-cached (`consignment_ready_planning_snapshot`,
+  cache_key **v2**). FE drops THREE fetches (production-orders ~1.2MB + consignment-orders +
+  linked-po-ids) — Planning/Ready rows + the 3 CN-item lookup maps now come from the endpoint.
+  Derived tabs carry NO money (CN amounts live on the CN records, untouched). LIVE-verified:
+  planning 1 / ready 4 / poLookups 22 byte-identical (0 diffs); page calls ONLY /ready-planning.
+  Commits daf711c0 / ab245466 / eadb25c8 / 6909192e.
+  GOTCHA (new rule): adding `poLookups` did NOT surface — `withSnapshot` tracks source-table
+  mtimes, NOT code, so it served the old v1 blob as "fresh" and the FE lookup columns went
+  blank. **A payload-SHAPE change MUST bump the snapshot `cache_key`** (arch-doc rule #3). Fixed 6909192e.
+- ✅ **Mobile ProductionScreen (2026-07-14, THIS session, PARTIAL)** — dropped `include=jobCards`
+  (board reads only currentDepartment+status, never jobCards) → `?fields=minimal&include=`.
+  Byte-identical display, big weak-wifi payload cut. Commit 68e24403. FULL keyset fix (server
+  search + per-dept count + infinite scroll) still QUEUED — this is just the safe cut.
+
+**Remaining:**
 - ⚪ **Planning** (`src/pages/planning/index.tsx`, 4004 lines) — NOT derive-and-drop.
   `ordersResp` (the 1.2MB PO+jobCards) drives the interactive scheduling board:
   drag-drop reorder, bulk-patch WRITES, capacity + lead-time calc, per-dept queues.
   The board renders/edits individual POs → can't return a small aggregate. Durable
   path = keyset pagination (Pillar 1, shared keysetList already landed 33ea44e9) or a
   `jobCards-lite` projection. **Needs an owner approach decision before coding.**
-- ⚪ **Mobile ProductionScreen** (`src/pages/m/screens/ProductionScreen.tsx`, 362
-  lines) — NOT derive-and-drop. Loads ALL POs to the phone then searches + filters +
-  per-dept counts client-side (weak-wifi cost + violates the golden rule of
-  server-side search/count). Durable path = server endpoint doing search + dept
-  filter + per-dept counts + keyset pagination; FE → infinite scroll. Pillar-1 work.
-Method for a derive-and-drop slice (CN note): extract shared builder (verbatim from
-FE) → additive server endpoint (withSnapshot+SWR+runtime CREATE) → LIVE byte-identical
-compare (endpoint vs current client compute, MONEY to the cent) → swap FE → re-verify.
+- ⚪ **Mobile ProductionScreen — full keyset** (server search + per-dept count + keyset
+  pagination + infinite scroll). The jobCards drop above is a stopgap, not the durable fix.
+Method for a derive-and-drop slice: extract shared builder (verbatim from FE) → additive
+server endpoint (withSnapshot+SWR+runtime CREATE, **bump cache_key on any shape change**) →
+LIVE byte-identical compare (endpoint vs current client compute) → swap FE → re-verify.
 Golden rule (owner's #1 fear): search/filter/count/money-total ALWAYS server-side over
 the WHOLE dataset; page window is render-only. 11-pt checklist in the arch doc.
 

@@ -30,6 +30,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission, requireSuperAdmin } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
+import { resolveMaintenanceConfigAsOf } from "./maintenance-config";
 import {
   createProductionOrdersForSO,
   type SalesOrderRow,
@@ -949,6 +950,105 @@ app.post("/dedupe-invoices", async (c) => {
     },
     plan,
     skipped,
+  });
+});
+
+// POST /api/admin/backfill-so-prices?dryRun=true — total-height under-billing PLANNER.
+// The server unit-price recompute used to DROP totalHeightPriceSen (fixed forward in
+// sales-orders.ts calculateUnitPrice calls). This finds EXISTING under-billed lines:
+// for each non-service SO line with a height config (gap+divan+leg > 0), re-derives the
+// total-height surcharge from the maintenance config EFFECTIVE AS OF the SO's date
+// (customer scope first, else master — same precedence as the live quote) and compares.
+// A line is under-billed iff its stored unit price == base+divan+leg+special (i.e. the
+// total-height surcharge was dropped) AND the config has a >0 surcharge for that height.
+// READ-ONLY: reports the exact per-line correction to confirm before the re-price runs.
+app.post("/backfill-so-prices", async (c) => {
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const orgId = getOrgId(c);
+  const dryRun = (c.req.query("dryRun") ?? "true").toLowerCase() !== "false";
+
+  const res = await db
+    .prepare(
+      `SELECT soi.id, soi.salesOrderId, soi.lineNo, soi.productCode,
+              soi.gapInches, soi.divanHeightInches, soi.legHeightInches,
+              soi.basePriceSen, soi.divanPriceSen, soi.legPriceSen,
+              soi.specialOrderPriceSen, soi.unitPriceSen, soi.quantity,
+              so.customerId, so.isServiceOrder, so.companySOId, so.created_at
+         FROM sales_order_items soi
+         JOIN sales_orders so ON so.id = soi.salesOrderId
+        WHERE so.orgId = ?
+          AND (COALESCE(soi.gapInches,0) + COALESCE(soi.divanHeightInches,0)
+               + COALESCE(soi.legHeightInches,0)) > 0`,
+    )
+    .bind(orgId)
+    .all<{
+      id: string; salesOrderId: string; lineNo: number; productCode: string;
+      gapInches: number | null; divanHeightInches: number | null; legHeightInches: number | null;
+      basePriceSen: number | null; divanPriceSen: number | null; legPriceSen: number | null;
+      specialOrderPriceSen: number | null; unitPriceSen: number | null; quantity: number | null;
+      customerId: string | null; isServiceOrder: unknown; companySOId: string | null; created_at: string | null;
+    }>();
+
+  // Resolve maintenance-config totalHeights[] as of a date, customer-scope first then
+  // master. Cached per scope|date so a busy period is one query, not one per line.
+  const cache = new Map<string, Array<{ value: string; priceSen: number }>>();
+  const thTiers = async (customerId: string | null, asOf: string) => {
+    const scopes = customerId ? [`customer:${customerId}`, "master"] : ["master"];
+    for (const scope of scopes) {
+      const key = `${scope}|${asOf}`;
+      let arr = cache.get(key);
+      if (arr === undefined) {
+        const r = await resolveMaintenanceConfigAsOf(db, scope, asOf);
+        const th = (r.config as { totalHeights?: unknown } | null)?.totalHeights;
+        arr = Array.isArray(th)
+          ? (th.filter((x) => x && typeof x === "object" && "value" in x && "priceSen" in x) as Array<{ value: string; priceSen: number }>)
+          : [];
+        cache.set(key, arr);
+      }
+      if (arr.length) return arr;
+    }
+    return [] as Array<{ value: string; priceSen: number }>;
+  };
+
+  const affected: Array<Record<string, unknown>> = [];
+  let totalDeltaSen = 0;
+  for (const line of res.results ?? []) {
+    if (line.isServiceOrder === true || line.isServiceOrder === 1) continue;
+    const totalInches =
+      (line.gapInches || 0) + (line.divanHeightInches || 0) + (line.legHeightInches || 0);
+    const asOf = (line.created_at || "").slice(0, 10) || "9999-12-31";
+    const tiers = await thTiers(line.customerId, asOf);
+    const correctTh = Number(tiers.find((t) => t.value === `${totalInches}"`)?.priceSen || 0);
+    if (correctTh <= 0) continue;
+    const base = line.basePriceSen || 0;
+    const withoutTh = base + (line.divanPriceSen || 0) + (line.legPriceSen || 0) + (line.specialOrderPriceSen || 0);
+    // Under-billed ONLY when the stored unit price is exactly the sum WITHOUT the
+    // total-height surcharge (so we never double-add on a line that already has it).
+    if ((line.unitPriceSen || 0) === withoutTh) {
+      const qty = line.quantity || 0;
+      const lineDelta = correctTh * qty;
+      totalDeltaSen += lineDelta;
+      affected.push({
+        so: line.companySOId, line: line.lineNo, product: line.productCode,
+        totalHeight: `${totalInches}"`, storedUnitRM: (line.unitPriceSen || 0) / 100,
+        correctUnitRM: (withoutTh + correctTh) / 100, surchargeRM: correctTh / 100,
+        qty, lineDeltaRM: lineDelta / 100,
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun,
+    note:
+      "READ-ONLY. Under-billed = stored unit price == base+divan+leg+special (total-height dropped) AND the maintenance config effective on the SO date has a >0 surcharge for that height. Execution (write corrected unitPriceSen/lineTotalSen + regenerate invoices) is the careful follow-up — owner re-sends invoices.",
+    summary: {
+      underBilledLines: affected.length,
+      totalUnderBilledRM: (totalDeltaSen / 100).toLocaleString(),
+    },
+    affected: affected.slice(0, 1000),
   });
 });
 

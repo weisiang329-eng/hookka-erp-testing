@@ -29,6 +29,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission, requireSuperAdmin } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 import {
   createProductionOrdersForSO,
   type SalesOrderRow,
@@ -809,6 +810,145 @@ app.post("/ensure-perf-indexes", async (c) => {
     failCount: failed.length,
     created,
     failed,
+  });
+});
+
+// POST /api/admin/dedupe-invoices?dryRun=true — duplicate-invoice cleanup PLANNER.
+// Groups NON-CANCELLED invoices by deliveryOrderId; a group of >=2 is a duplicate
+// candidate. Verifies it is a 100% duplicate (identical item signature across the
+// group AND each invoice's item count == the DO's item count) so a legit partial /
+// differently-priced invoice is NEVER touched. Keeps ONE (a paid one if present,
+// else the earliest by invoiceNo); the rest are extras. Only UNPAID extras are
+// cancel-eligible; PAID extras are flagged, never auto-cancelled.
+//
+// dryRun (default true) reports the plan only. Execution (status->CANCELLED with the
+// GL reversal + AR reversal) is intentionally NOT wired here — it must reuse the
+// invoice PUT :id void path exactly (shared cancel fn), added carefully as a
+// follow-up. For now this endpoint is READ-ONLY: it produces the exact plan the
+// operator confirms before the cancellations run through the proven PUT path.
+app.post("/dedupe-invoices", async (c) => {
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const orgId = getOrgId(c);
+  const dryRun = (c.req.query("dryRun") ?? "true").toLowerCase() !== "false";
+
+  // 1. All non-cancelled invoices for the org that are linked to a DO.
+  const invRes = await db
+    .prepare(
+      `SELECT id, invoiceNo, deliveryOrderId, doNo, totalSen, paidAmount, status
+         FROM invoices
+        WHERE orgId = ? AND status != 'CANCELLED'
+          AND deliveryOrderId IS NOT NULL AND deliveryOrderId != ''`,
+    )
+    .bind(orgId)
+    .all<{
+      id: string;
+      invoiceNo: string;
+      deliveryOrderId: string;
+      doNo: string | null;
+      totalSen: number;
+      paidAmount: number | null;
+      status: string;
+    }>();
+  const invoices = invRes.results ?? [];
+
+  // 2. Group by DO; keep only groups with >=2 active invoices.
+  const byDo = new Map<string, typeof invoices>();
+  for (const iv of invoices) {
+    const arr = byDo.get(iv.deliveryOrderId);
+    if (arr) arr.push(iv);
+    else byDo.set(iv.deliveryOrderId, [iv]);
+  }
+  const isPaid = (iv: (typeof invoices)[number]) =>
+    (iv.paidAmount ?? 0) > 0 || iv.status === "PAID" || iv.status === "PARTIAL_PAID";
+  const itemSig = async (invoiceId: string) => {
+    const r = await db
+      .prepare(
+        "SELECT productCode, quantity, unitPriceSen FROM invoice_items WHERE invoiceId = ?",
+      )
+      .bind(invoiceId)
+      .all<{ productCode: string; quantity: number; unitPriceSen: number }>();
+    const rows = r.results ?? [];
+    const sig = rows
+      .map((x) => `${x.productCode}:${x.quantity}@${x.unitPriceSen}`)
+      .sort()
+      .join("|");
+    return { sig, count: rows.length };
+  };
+
+  const plan: Array<Record<string, unknown>> = [];
+  const skipped: Array<Record<string, unknown>> = [];
+  let cancelCount = 0;
+  let cancelSen = 0;
+  let paidExtraCount = 0;
+
+  for (const [deliveryOrderId, group] of byDo) {
+    if (group.length < 2) continue;
+    // DO's own item count (the standard).
+    const doCntRow = await db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM delivery_order_items WHERE deliveryOrderId = ?",
+      )
+      .bind(deliveryOrderId)
+      .first<{ n: number }>();
+    const doItemCount = Number(doCntRow?.n ?? 0);
+    // Per-invoice signatures.
+    const sigs = await Promise.all(
+      group.map(async (iv) => ({ iv, ...(await itemSig(iv.id)) })),
+    );
+    const allIdentical = sigs.every((s) => s.sig === sigs[0].sig);
+    const allMatchDO = sigs.every((s) => s.count === doItemCount);
+    const doNo = group[0].doNo ?? deliveryOrderId;
+    // SAFETY GATE: only a group that is 100% identical AND matches the DO item
+    // count is a true duplicate. Anything else is left ALONE for manual review.
+    if (!allIdentical || !allMatchDO) {
+      skipped.push({
+        doNo,
+        reason: !allIdentical
+          ? "invoices differ (not 100% duplicate)"
+          : "invoice item count != DO item count",
+        doItemCount,
+        invoices: sigs.map((s) => ({ no: s.iv.invoiceNo, items: s.count, status: s.iv.status })),
+      });
+      continue;
+    }
+    // Keep a paid one if any (its cash is real), else the earliest invoiceNo.
+    const keep =
+      group.find(isPaid) ??
+      group.slice().sort((a, b) => a.invoiceNo.localeCompare(b.invoiceNo))[0];
+    const extras = group.filter((iv) => iv !== keep);
+    const cancelExtras = extras.filter((iv) => !isPaid(iv));
+    const paidExtras = extras.filter(isPaid);
+    cancelExtras.forEach((iv) => {
+      cancelCount++;
+      cancelSen += iv.totalSen;
+    });
+    paidExtraCount += paidExtras.length;
+    plan.push({
+      doNo,
+      doItemCount,
+      keep: keep.invoiceNo,
+      cancel: cancelExtras.map((iv) => ({ id: iv.id, no: iv.invoiceNo, totalRM: iv.totalSen / 100 })),
+      paidExtrasNeedManualReview: paidExtras.map((iv) => ({ no: iv.invoiceNo, status: iv.status })),
+    });
+  }
+
+  return c.json({
+    success: true,
+    dryRun,
+    note: dryRun
+      ? "READ-ONLY plan. Nothing was changed. Verified: every 'cancel' target is a 100% duplicate (identical items + count == DO)."
+      : "Execution is not wired in this endpoint yet — run the cancellations through the invoice PUT :id void path. This response is still the plan.",
+    summary: {
+      duplicateDOs: plan.length,
+      invoicesToCancel_unpaid: cancelCount,
+      excessBillingRM: (cancelSen / 100).toLocaleString(),
+      paidExtras_needManualReview: paidExtraCount,
+      skippedGroups_notPureDuplicate: skipped.length,
+    },
+    plan,
+    skipped,
   });
 });
 

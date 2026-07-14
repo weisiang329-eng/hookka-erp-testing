@@ -3821,7 +3821,7 @@ function EmployeeMasterTab({
           }
         >
           <div
-            className="w-full max-w-2xl rounded-lg bg-white p-6 shadow-xl"
+            className="w-full max-w-2xl rounded-lg bg-white p-6 shadow-xl max-h-[90vh] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mb-4 flex items-start justify-between">

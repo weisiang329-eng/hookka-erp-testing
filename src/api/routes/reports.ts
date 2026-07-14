@@ -20,6 +20,7 @@
 // ---------------------------------------------------------------------------
 
 import { Hono } from "hono";
+import type { Context } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { sendMail } from "../lib/email";
@@ -457,13 +458,92 @@ app.get("/compliance.json", async (c) => {
   const denied = await requirePermission(c, "sales-orders", "read");
   if (denied) return denied;
   try {
-    const data = await collectComplianceData(c.var.DB, todayYmdSgt());
+    const data = await buildComplianceCached(c, getOrgId(c));
     return c.json({ success: true, data });
   } catch (err) {
     console.error("[reports/compliance.json] failed:", err);
     return c.json({ success: false, error: "report generation failed" }, 500);
   }
 });
+
+// Snapshot-cached + serve-stale wrapper around collectComplianceData (perf
+// 2026-07-14). The Daily Report cold-computes ~6s over the whole order→
+// delivery→invoice + procurement chain on EVERY open; nothing cached it. This
+// serves the last-good report instantly and refreshes in the background so the
+// page never blocks. The stored numbers are BYTE-IDENTICAL (same
+// collectComplianceData) — only the timing of the recompute moves off the
+// request path; a report is point-in-time so a ≤cron-interval-stale serve is
+// expected behaviour, not a data change. Keyed by the SGT date so a new day
+// always recomputes fresh; freshness tracks the transactional tables the report
+// reads (probeMaxSourceUpdatedAt tolerates any that lack updated_at).
+// warmComplianceReport (below, on the warm-lists cron) keeps today's key warm so
+// the first open of the day never hits the 6s cold block.
+const COMPLIANCE_SOURCE_TABLES = [
+  "production_orders",
+  "job_cards",
+  "delivery_orders",
+  "delivery_order_items",
+  "sales_orders",
+  "invoices",
+  "purchase_orders",
+  "purchase_invoices",
+  "grns",
+] as const;
+
+async function ensureComplianceSnapshotTable(db: D1Database) {
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS reports_compliance_snapshot (
+         org_id        TEXT NOT NULL,
+         cache_key     TEXT NOT NULL DEFAULT '',
+         data          JSONB NOT NULL,
+         built_from    TIMESTAMP NOT NULL,
+         built_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+         refresh_count INTEGER NOT NULL DEFAULT 0,
+         PRIMARY KEY (org_id, cache_key)
+       )`,
+    )
+    .run();
+}
+
+async function buildComplianceCached(c: Context<Env>, orgId: string, swr = true) {
+  const db = c.var.DB;
+  const today = todayYmdSgt();
+  await ensureComplianceSnapshotTable(db);
+  const { withSnapshot } = await import("../lib/snapshot");
+  return withSnapshot<Record<string, unknown>>(
+    db,
+    {
+      tableName: "reports_compliance_snapshot",
+      sourceTables: COMPLIANCE_SOURCE_TABLES as unknown as string[],
+    },
+    orgId,
+    async () =>
+      (await collectComplianceData(db, today)) as unknown as Record<
+        string,
+        unknown
+      >,
+    today,
+    c,
+    swr ? { staleWhileRevalidate: true } : undefined,
+  );
+}
+
+// Warm entry — called by the warm-lists cron so today's Daily Report is always
+// pre-computed (no 6s cold block for the first opener of the day). No SWR: force
+// compute-and-store on the off-request path.
+export async function warmComplianceReport(
+  c: Context<Env>,
+  orgId: string,
+): Promise<{ ok: boolean }> {
+  try {
+    await buildComplianceCached(c, orgId, false);
+    return { ok: true };
+  } catch (e) {
+    console.error("[warm] compliance failed:", e);
+    return { ok: false };
+  }
+}
 
 // ---------------------------------------------------------------------------
 // POST /api/internal/reports/efficiency-trigger — cron entry point.

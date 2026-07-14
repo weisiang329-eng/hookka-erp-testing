@@ -466,6 +466,16 @@ app.post("/api/internal/warm-lists", async (c) => {
     console.error("[warm-lists] doValueMap failed:", e);
     out.doValueMap = { ok: false };
   }
+  // 3. Daily Report (compliance) — the ~6s cold-recompute one. Warm today's key
+  // so the first open of the day never blocks.
+  try {
+    const { warmComplianceReport } = await import("./routes/reports");
+    const r = await warmComplianceReport(c, DEFAULT_ORG_ID);
+    out.compliance = r;
+  } catch (e) {
+    console.error("[warm-lists] compliance failed:", e);
+    out.compliance = { ok: false };
+  }
   return c.json({ ok: true, elapsedMs: Date.now() - t0, ...out });
 });
 

@@ -1016,6 +1016,101 @@ app.get("/stats", async (c) => {
   return c.json({ success: true, ...payload });
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/invoices/aging — whole-dataset AR Aging (2026-07-14 bug fix).
+//
+// BUG: the Invoices page's AR Aging tab bucketed per-customer overdue money over
+// the client-loaded page ONLY (PAGE_SIZE 200) — so past page 1 the aging report
+// silently DROPPED invoices (measured live: 341 total, page 200 → 141 missing,
+// ~41% of receivables uncounted). Same class the KPI cards already fixed via
+// /stats; the Aging tab was missed. This computes the SAME buckets the FE did,
+// with the IDENTICAL logic, but over the WHOLE table (owner: 做账要准).
+//
+// Bucket logic is a VERBATIM port of invoices/index.tsx agingData: exclude
+// PAID/CANCELLED/DRAFT + balance>0; daysOverdue = floor((now - dueDate)/day);
+// <=30 -> current, 31-60 -> days31_60, 61-90 -> days61_90, >90 -> days90plus;
+// group by customerName; sort by total desc. Honors the page's customer/date
+// filter (the status filter is subsumed by the not-in-PAID/CANCELLED/DRAFT rule).
+// Invoice volume is small (hundreds) so a plain aggregate is fine — no snapshot.
+// Registered BEFORE /:id (Hono static-first).
+// ---------------------------------------------------------------------------
+app.get("/aging", async (c) => {
+  const denied = await requirePermission(c, "invoices", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+
+  const where: string[] = [
+    "orgId = ?",
+    "status NOT IN ('PAID','CANCELLED','DRAFT')",
+    "(totalSen - paidAmount) > 0",
+  ];
+  const params: unknown[] = [orgId];
+  const fCustomer = c.req.query("customerId");
+  const fStatus = c.req.query("status");
+  const fFrom = c.req.query("from");
+  const fTo = c.req.query("to");
+  if (fCustomer) { where.push("customerId = ?"); params.push(fCustomer); }
+  // The page's status filter also scopes the aging tab (the old client
+  // computation ran over the status-filtered list). Combined with the
+  // NOT IN (PAID/CANCELLED/DRAFT) rule above so e.g. status=PAID -> empty.
+  if (fStatus) { where.push("status = ?"); params.push(fStatus); }
+  if (fFrom) { where.push("invoiceDate >= ?"); params.push(fFrom); }
+  if (fTo) { where.push("invoiceDate <= ?"); params.push(fTo); }
+
+  const res = await c.var.DB
+    .prepare(
+      `SELECT customerName, totalSen, paidAmount, dueDate
+         FROM invoices WHERE ${where.join(" AND ")}`,
+    )
+    .bind(...params)
+    .all<{
+      customerName: string;
+      totalSen: number;
+      paidAmount: number;
+      dueDate: string;
+    }>();
+
+  const today = new Date();
+  const customerMap: Record<
+    string,
+    {
+      customerName: string;
+      current: number;
+      days31_60: number;
+      days61_90: number;
+      days90plus: number;
+      total: number;
+    }
+  > = {};
+  for (const inv of res.results ?? []) {
+    const balance = Number(inv.totalSen) - Number(inv.paidAmount);
+    if (balance <= 0) continue;
+    const dueDate = new Date(inv.dueDate);
+    const daysOverdue = Math.floor(
+      (today.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24),
+    );
+    const name = inv.customerName;
+    if (!customerMap[name]) {
+      customerMap[name] = {
+        customerName: name,
+        current: 0,
+        days31_60: 0,
+        days61_90: 0,
+        days90plus: 0,
+        total: 0,
+      };
+    }
+    const row = customerMap[name];
+    if (daysOverdue <= 30) row.current += balance;
+    else if (daysOverdue <= 60) row.days31_60 += balance;
+    else if (daysOverdue <= 90) row.days61_90 += balance;
+    else row.days90plus += balance;
+    row.total += balance;
+  }
+  const data = Object.values(customerMap).sort((a, b) => b.total - a.total);
+  return c.json({ success: true, data });
+});
+
 // POST /api/invoices — create from a DELIVERED delivery order.
 // 0179 self-apply — Postgres migration files are applied manually (deploy.yml
 // does NOT replay them), so ensure the per-line discount column exists before

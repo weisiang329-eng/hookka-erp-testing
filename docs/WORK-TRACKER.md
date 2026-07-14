@@ -75,8 +75,11 @@ its doc history, now copied here).
   bug class (search must reach the WHOLE dataset) — do with care + owner-aware verification.
 - ⚪ **Warehouse / procurement / service-cases lists + reports slow-queries** (B-class
   server-compute: reports/compliance 6s, brief 4.4s, aging 3s) — snapshot/warm, not slim.
-- ⚪ **Site-wide gzip/brotli** ("white-pickup") — verify Cloudflare compresses these JSON
-  payloads; a 10MB JSON gzips ~5-10×, so this compounds every slice above.
+- ✅ **Site-wide compression ALREADY ON** ("white-pickup" = done) — Cloudflare serves
+  Brotli (`content-encoding: br`) at ~20×; the 5MB planning JSON is only ~255KB over the
+  wire. So the bottleneck was NEVER the wire — it's server COMPUTE (cold snapshot builds)
+  + client PARSE/derive of the decoded JSON. The warm-cron (compute) + payload slims
+  (decoded size → parse) target exactly that; no compression work needed.
 Method for a derive-and-drop slice: extract shared builder (verbatim from FE) → additive
 server endpoint (withSnapshot+SWR+runtime CREATE, **bump cache_key on any shape change**) →
 LIVE byte-identical compare (endpoint vs current client compute) → swap FE → re-verify.

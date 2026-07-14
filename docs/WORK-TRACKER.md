@@ -56,20 +56,43 @@ its doc history, now copied here).
   Byte-identical display, big weak-wifi payload cut. Commit 68e24403. FULL keyset fix (server
   search + per-dept count + infinite scroll) still QUEUED — this is just the safe cut.
 
-**Remaining:**
-- ⚪ **Planning** (`src/pages/planning/index.tsx`, 4004 lines) — NOT derive-and-drop.
-  `ordersResp` (the 1.2MB PO+jobCards) drives the interactive scheduling board:
-  drag-drop reorder, bulk-patch WRITES, capacity + lead-time calc, per-dept queues.
-  The board renders/edits individual POs → can't return a small aggregate. Durable
-  path = keyset pagination (Pillar 1, shared keysetList already landed 33ea44e9) or a
-  `jobCards-lite` projection. **Needs an owner approach decision before coding.**
+- ✅ **Planning (2026-07-14, THIS session)** — the interactive board can't drop the PO
+  rows (drag-drop + bulk-patch writes), so two additive levers instead: (1)
+  `warmPoListPlanningVariant` warms the previously-unwarmed `excludeCompleted=true`
+  snapshot every cron tick → planning serve-stales instantly, no more ~8s cold block
+  (measured live on prod: 10MB/8s cold). (2) `include=jobCards-lite` ships only the 12
+  job-card fields planning reads (audited: every access is jc.X in a local loop) via
+  `slimJobCardsToPlanningLite` (post-pass, no threading; blast radius = the lite request
+  only). LIVE-verified on staging: 0 field-diffs across 14,310 JCs, payload 9.92MB→4.99MB
+  (50%), warm load ~0.7s; the only PO-set delta is 21 old COMPLETED POs at the 35-day
+  rolling-window boundary (NO live/schedulable work dropped — onlyInLite=0). Planning
+  page renders, calls jobCards-lite (0 full-jobCards). Commits e670820d / 9b45c37e.
+
+**Remaining perf (deeper levers, each needs its own careful pass):**
 - ⚪ **Mobile ProductionScreen — full keyset** (server search + per-dept count + keyset
-  pagination + infinite scroll). The jobCards drop above is a stopgap, not the durable fix.
+  pagination + infinite scroll). The jobCards drop (20MB→1.6MB, 12×) is shipped + verified;
+  the keyset would take it to ~40KB/page but is a UX change touching the owner's #1-fear
+  bug class (search must reach the WHOLE dataset) — do with care + owner-aware verification.
+- ⚪ **Warehouse / procurement / service-cases lists + reports slow-queries** (B-class
+  server-compute: reports/compliance 6s, brief 4.4s, aging 3s) — snapshot/warm, not slim.
+- ⚪ **Site-wide gzip/brotli** ("white-pickup") — verify Cloudflare compresses these JSON
+  payloads; a 10MB JSON gzips ~5-10×, so this compounds every slice above.
 Method for a derive-and-drop slice: extract shared builder (verbatim from FE) → additive
 server endpoint (withSnapshot+SWR+runtime CREATE, **bump cache_key on any shape change**) →
 LIVE byte-identical compare (endpoint vs current client compute) → swap FE → re-verify.
 Golden rule (owner's #1 fear): search/filter/count/money-total ALWAYS server-side over
 the WHOLE dataset; page window is render-only. 11-pt checklist in the arch doc.
+
+## 2026-07-14 — ✅ Edit Customer modal — short-screen "can't save" fix (THIS session)
+Owner reported (2nd screenshot): on a short laptop screen the tall single-column
+Edit Customer modal overflowed with no way to scroll to Save — users literally couldn't
+save. Fix (customers.tsx, commit 2b205a51): landscape 2-column layout (Company | Credit)
++ `max-h-[90vh] flex flex-col` with a scrollable middle + PINNED header/footer, so Save is
+always reachable. Pure layout, no data/save-logic change. Sweep of the other ~40 modal
+overlays: the vast majority are short confirm/QR/picker dialogs (max-w-sm/md) that can't
+overflow — only genuinely tall entity-edit forms share the bug. NONE blanket-fixed (risky,
+mostly unnecessary); flag specific tall edit-forms to the owner before reshaping. Add-Customer
+is an inline Card (scrolls with the page — not vulnerable).
 
 ---
 

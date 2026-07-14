@@ -63,13 +63,15 @@ function stageIndexOf(po: PO): number {
 
 export function ProductionScreen() {
   const navigate = useNavigate();
-  // include= (empty) drops the jobCards array — this board keys off
-  // currentDepartment + status only and never reads jobCards, so omitting them
-  // is byte-identical for the display while cutting the bulk of the payload
-  // (weak-wifi phones). NOTE: ?fields=minimal alone still inlines jobCards, the
-  // explicit empty include= is what actually drops them (sales-slim lesson).
+  // Dedicated board endpoint (perf 2026-07-14): returns ONLY the live set
+  // (status NOT IN COMPLETED/CANCELLED — this board's own filter, applied
+  // server-side) slimmed to the ~11 fields the board renders + customerSO.
+  // Measured live: 1921→378 rows, ~1.6MB→108KB decoded, byte-identical (0 diffs
+  // vs the old client live-filter incl. customerSO). The client STILL runs its
+  // search + per-dept counts over the WHOLE returned set (all 378 live rows are
+  // loaded) so nothing becomes unfindable. Snapshot-cached + serve-stale.
   const { data, loading, error } = useCachedJson<Resp>(
-    "/api/production-orders?fields=minimal&include=",
+    "/api/production-orders/board",
   );
   const [query, setQuery] = useState("");
   const dquery = useDebounced(query);

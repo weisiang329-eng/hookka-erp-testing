@@ -35,8 +35,6 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { MALAYSIA_STATES, resolveStateCode } from "@/lib/malaysia-states";
-import { aggregateRacksFromPackingCards } from "@/lib/rack-format";
-import { isHbOnlySpecial, poReadyForConsignment, poInPlanningConsignment } from "@/lib/delivery-pipeline";
 import {
   Package,
   PackageCheck,
@@ -347,55 +345,6 @@ function displayCoId(row: { poNo: string; itemCategory: string }): string {
   }
   return row.poNo;
 }
-
-type ProductionOrderApiShape = {
-  id: string;
-  poNo: string;
-  salesOrderId?: string;
-  salesOrderNo?: string;
-  companySOId?: string;
-  consignmentOrderId?: string;
-  companyCOId?: string;
-  customerId?: string;
-  customerName?: string;
-  customerState?: string;
-  productCode?: string;
-  productName?: string;
-  itemCategory?: string;
-  sizeLabel?: string;
-  fabricCode?: string;
-  quantity?: number;
-  status: string;
-  currentDepartment?: string;
-  progress?: number;
-  completedDate?: string | null;
-  targetEndDate?: string;
-  rackingNumber?: string;
-  // Mirrored from production_orders.specialOrder so the HB-only completion
-  // gate (drop stranded DIVAN packing cards) matches the backend / DO page.
-  specialOrder?: string;
-  // wipType/wipLabel/rackingNumber are the per-PACKING-card fields the Rack
-  // column aggregates — /api/production-orders?fields=minimal&include=jobCards
-  // already emits them per card (rowToMinimalJobCard), so the per-piece rack
-  // ("Rack 3, 4") comes off the payload, not the lossy production_orders mirror.
-  jobCards?: {
-    departmentCode: string;
-    status: string;
-    completedDate?: string | null;
-    wipType?: string;
-    wipLabel?: string;
-    rackingNumber?: string;
-  }[];
-};
-
-// Shape we read from /api/consignment-orders so we can join hookkaExpectedDD
-// onto each Pending-CN row (same trick DO uses with /api/sales-orders).
-type ConsignmentOrderApiShape = {
-  id: string;
-  hookkaExpectedDD?: string;
-  companyCOId?: string;
-  customerId?: string;
-};
 
 // ---------------------------------------------------------------------------
 // Map ConsignmentNote (legacy backend shape) → ConsignmentNoteRow.
@@ -719,25 +668,25 @@ export default function ConsignmentNotePage() {
       : null,
   );
 
-  // Authoritative "already on a non-cancelled CN" PO-id set — the COMPLETE set
-  // from the server, NOT capped by the 200-CN browse page. The readyPOs
-  // computation MUST exclude POs in this set; building it from the loaded
-  // (capped) CN list under-excluded once CN volume passed one page (the CN twin
-  // of the DO BUG-2026-06-27). See GET /api/consignment-notes/linked-po-ids.
-  const { data: cnLinkedRaw } = useCachedJson<{ poIds?: string[] }>(
-    "/api/consignment-notes/linked-po-ids",
-  );
-
-  // Pull POs to build Planning + Pending CN tabs. Same endpoint DO uses,
-  // but we filter for `consignmentOrderId` set instead of `salesOrderId`.
-  const { data: poRaw, loading: poLoading, refresh: refreshPOs } =
-    // ?fields=minimal&include=jobCards — slim PO fields; keep JCs (UPH lookup uses them).
-    useCachedJson<{ success?: boolean; data?: ProductionOrderApiShape[] }>("/api/production-orders?fields=minimal&include=jobCards");
-
-  // Pull CO list for hookkaExpectedDD + companyCOId join (DO uses
-  // /api/sales-orders for the same purpose).
-  const { data: coOrdersRaw, loading: coOrdersLoading, refresh: refreshCOs } =
-    useCachedJson<{ success?: boolean; data?: ConsignmentOrderApiShape[] }>("/api/consignment-orders");
+  // Server-derived Planning + Pending-CN PO lists + the CN item lookup maps
+  // (companyCOId / fabricCode / rack), from GET /api/consignment-notes/ready-planning.
+  // Replaces the old ~1.2MB /api/production-orders + /api/consignment-orders +
+  // /api/consignment-notes/linked-po-ids pulls that existed ONLY to derive these
+  // client-side. Snapshot-cached + serve-stale server-side; the Planning/Ready
+  // rows run the SAME shared buildCnReadyPlanning and the lookups the SAME
+  // aggregateRacksFromPackingCards → byte-identical to the old client math
+  // (verified live 2026-07-14). CN money still lives on the CN records themselves.
+  const { data: rpRaw, loading: rpLoading, refresh: refreshRP } = useCachedJson<{
+    success?: boolean;
+    planning?: ReadyPORow[];
+    ready?: ReadyPORow[];
+    poLookups?: Array<{
+      id: string;
+      companyCOId: string;
+      fabricCode: string;
+      rack: string;
+    }>;
+  }>("/api/consignment-notes/ready-planning");
 
   // Product master for per-unit m³ + sizeLabel — same source DO uses. The
   // sizeLabel join lets the CN row surface "5FT" / "Q" next to each item's
@@ -835,19 +784,19 @@ export default function ConsignmentNotePage() {
 
   const fetchData = useCallback(() => {
     invalidateCachePrefix("/api/consignment-notes");
-    invalidateCachePrefix("/api/consignment-orders");
-    invalidateCachePrefix("/api/production-orders");
     invalidateCachePrefix("/api/products");
     refreshCNs();
-    refreshCOs();
-    refreshPOs();
+    // /ready-planning lives under /api/consignment-notes/* so the prefix
+    // invalidate above already dropped it — refreshRP kicks its background
+    // refetch (Planning/Ready rows + the CN-item lookup maps) immediately.
+    refreshRP();
     refreshProducts();
     // /stats lives under /api/consignment-notes/* so invalidateCachePrefix
     // above already dropped its cached entry — explicit refresh kicks the
     // background refetch immediately so KPI cards + tab badges update
     // without waiting for the next mount/visibility change.
     refreshCNStats();
-  }, [refreshCNs, refreshCOs, refreshPOs, refreshProducts, refreshCNStats]);
+  }, [refreshCNs, refreshRP, refreshProducts, refreshCNStats]);
 
   // Lookup: productCode → unitM3 (mirrors DO's productM3Map).
   const productM3Map = useMemo(() => {
@@ -882,60 +831,28 @@ export default function ConsignmentNotePage() {
   // consignment_items.productionOrderId resolves to the parent CO's
   // companyCOId so the bottom grid can show the SO/CO column even when the
   // CN itself was created from multiple POs.
+  // The three CN-item lookup maps (companyCOId / fabricCode / rack) now arrive
+  // pre-built from the server as `poLookups` (scoped to CN-referenced PO ids) —
+  // the rack aggregation ran server-side through the SAME
+  // aggregateRacksFromPackingCards, so these are byte-identical to the old
+  // client maps that were derived from the 1.2MB production-orders payload.
   const poToCoNoMap = useMemo(() => {
     const m = new Map<string, string>();
-    const arr = poRaw?.success ? poRaw.data : null;
-    if (Array.isArray(arr)) {
-      for (const po of arr) {
-        if (po?.id) m.set(po.id, po.companyCOId || "");
-      }
-    }
+    for (const l of rpRaw?.poLookups ?? []) m.set(l.id, l.companyCOId || "");
     return m;
-  }, [poRaw]);
+  }, [rpRaw]);
 
-  // Lookup: productionOrderId → fabricCode. Same join trick as poToCoNoMap
-  // — the CN Detail dialog's Items table needs a Fabric column to mirror
-  // DO's, but consignment_items doesn't store fabricCode (DO carries it on
-  // delivery_order_items because DO-from-PO creation copies it). For CN, we
-  // resolve it from the linked PO at render time.
   const poToFabricMap = useMemo(() => {
     const m = new Map<string, string>();
-    const arr = poRaw?.success ? poRaw.data : null;
-    if (Array.isArray(arr)) {
-      for (const po of arr) {
-        if (po?.id) m.set(po.id, po.fabricCode || "");
-      }
-    }
+    for (const l of rpRaw?.poLookups ?? []) m.set(l.id, l.fabricCode || "");
     return m;
-  }, [poRaw]);
+  }, [rpRaw]);
 
-  // Lookup: productionOrderId → per-piece rack string ("Rack 3, 4"). Same
-  // rationale as poToFabricMap — the Detail dialog Items table needs a Rack
-  // column. A unit's pieces can sit on DIFFERENT racks (HB on Rack 3, DIVAN on
-  // Rack 4); production_orders.rackingNumber is a LOSSY single-rack mirror, so
-  // we aggregate the distinct racks off the PO's PACKING job cards instead
-  // (same shared helper + dedup/sort the DO PDF + DO list use). HB-only
-  // BEDFRAME specials drop their stranded DIVAN packing card.
   const poToRackMap = useMemo(() => {
     const m = new Map<string, string>();
-    const arr = poRaw?.success ? poRaw.data : null;
-    if (Array.isArray(arr)) {
-      for (const po of arr) {
-        if (!po?.id) continue;
-        const hbOnly =
-          (po.itemCategory || "").toUpperCase() === "BEDFRAME" &&
-          isHbOnlySpecial(po.specialOrder);
-        const packingCards = (po.jobCards ?? []).filter(
-          (j) => j.departmentCode === "PACKING",
-        );
-        m.set(
-          po.id,
-          aggregateRacksFromPackingCards(packingCards, { dropDivan: hbOnly }),
-        );
-      }
-    }
+    for (const l of rpRaw?.poLookups ?? []) m.set(l.id, l.rack || "");
     return m;
-  }, [poRaw]);
+  }, [rpRaw]);
 
   // Fetch per-provider vehicles + drivers when the dispatch dialog's
   // provider picker changes. Mirrors DO's createDialogVehicles /
@@ -1086,7 +1003,7 @@ export default function ConsignmentNotePage() {
   // Mirror SWR data → local state. Same eslint suppression as DO.
   /* eslint-disable react-hooks/set-state-in-effect -- mirror SWR data into mutable local state for optimistic UI */
   useEffect(() => {
-    const anyLoading = cnLoading || poLoading || coOrdersLoading || prodLoading;
+    const anyLoading = cnLoading || rpLoading || prodLoading;
     setLoading(anyLoading);
 
     // Map CN rows. productSizeMap + poToCoNoMap are lookup tables built
@@ -1126,103 +1043,15 @@ export default function ConsignmentNotePage() {
       setCnSearchResults([]);
     }
 
-    // Build PO-based tab data (Planning + Pending CN)
-    if (poRaw?.success && Array.isArray(poRaw.data)) {
-      // CO lookup map for hookkaExpectedDD + companyCOId join.
-      const coMap = new Map<string, { hookkaExpectedDD: string; companyCOId: string; customerId: string }>();
-      if (coOrdersRaw?.success && Array.isArray(coOrdersRaw.data)) {
-        for (const co of coOrdersRaw.data) {
-          coMap.set(co.id, {
-            hookkaExpectedDD: co.hookkaExpectedDD || "",
-            companyCOId: co.companyCOId || "",
-            customerId: co.customerId || "",
-          });
-        }
-      }
-
-      // CN dedup — AUTHORITATIVE source: the COMPLETE production-order-id set
-      // already on a non-cancelled CN, from GET /linked-po-ids (cnLinkedRaw).
-      // This is NOT capped by the 200-CN browse page, so it correctly hides POs
-      // already consigned even once CN volume passes one page (the old set was
-      // built from the loaded cnRaw.data, which under-excluded — CN twin of the
-      // DO BUG-2026-06-27). The endpoint excludes only CANCELLED CNs.
-      const cnLinkedPOIds = new Set<string>(cnLinkedRaw?.poIds ?? []);
-      // Legacy fallback (pre-0066 CNs whose items have no productionOrderId, so
-      // they never appear in the linked-po-ids set): fall back to per-customer
-      // dedup so their POs still hide. Walks the loaded CN page; legacy rows are
-      // few and old, so the browse page covers them.
-      const cnLinkedCustomersLegacy = new Set<string>();
-      if (cnRaw?.success && Array.isArray(cnRaw.data)) {
-        for (const cn of cnRaw.data as ConsignmentNote[]) {
-          if (cn.status === "CLOSED") continue;
-          const foundPoLink = cn.items.some((item) => !!item.productionOrderId);
-          if (
-            !foundPoLink &&
-            (cn.status === "ACTIVE" || cn.status === "PARTIALLY_SOLD")
-          ) {
-            cnLinkedCustomersLegacy.add(cn.customerId);
-          }
-        }
-      }
-
-      const allPOs = poRaw.data as ProductionOrderApiShape[];
-
-      const mapPO = (po: ProductionOrderApiShape): ReadyPORow => {
-        const coInfo = coMap.get(po.consignmentOrderId || "");
-        return {
-          id: po.id,
-          poNo: po.poNo,
-          consignmentOrderId: po.consignmentOrderId || "",
-          consignmentOrderNo: po.companyCOId || coInfo?.companyCOId || "",
-          customerId: po.customerId || coInfo?.customerId || "",
-          customerName: po.customerName || "",
-          customerState: po.customerState || "",
-          productCode: po.productCode || "",
-          productName: po.productName || "",
-          itemCategory: po.itemCategory || "",
-          sizeLabel: po.sizeLabel || "",
-          fabricCode: po.fabricCode || "",
-          quantity: po.quantity || 0,
-          unitM3: productM3Map.get(po.productCode || "") ?? 0,
-          completedDate: po.completedDate || null,
-          uphCompletedDate: (() => {
-            const uphCards = (po.jobCards || []).filter((j) => j.departmentCode === "UPHOLSTERY");
-            if (uphCards.length === 0) return null;
-            const dates = uphCards.map((j) => j.completedDate).filter((d): d is string => !!d);
-            return dates.length > 0 ? dates.sort().reverse()[0] : null;
-          })(),
-          rackingNumber: po.rackingNumber || "",
-          hookkaExpectedDD: coInfo?.hookkaExpectedDD || po.targetEndDate || "",
-          currentDepartment: po.currentDepartment || "",
-          progress: po.progress || 0,
-        };
-      };
-
-      // Planning: CO-origin POs still in production (upholstery not yet
-      // complete). Now shares poInPlanningConsignment with Delivery so it can't
-      // drift from the ready gate again — the old inline copy used the raw
-      // UPHOLSTERY filter and missed pickRelevantUphCards' HB-only DIVAN drop.
-      const planning = allPOs
-        .filter(poInPlanningConsignment)
-        .map(mapPO);
-      setPlanningPOs(planning);
-
-      // Pending CN: CO-origin POs with all upholstery done, no CN yet
-      // for that customer. Mirrors DO's "Ready for DO" — see dedup
-      // caveat above.
-      // Ready-for-CN gate now shared with Delivery via poReadyForConsignment,
-      // which carries the accessory/pillow no-UPHOLSTERY fallback (a COMPLETED
-      // pillow finishes FAB_CUT -> FAB_SEW -> PACKING with no UPHOLSTERY card;
-      // the old inline filter's `uphCards.length === 0 -> drop` hard-excluded it
-      // — BUG-2026-07-01-003). Sofa behaviour is unchanged; the helper also
-      // absorbs the linked-PO dedup, so only the legacy-customer dedup stays.
-      const ready = allPOs
-        .filter((po) => poReadyForConsignment(po, cnLinkedPOIds))
-        .filter((po) => !cnLinkedCustomersLegacy.has(po.customerId || ""))
-        .map(mapPO);
-      setReadyPOs(ready);
+    // Planning + Pending CN tabs — now derived server-side (shared
+    // buildCnReadyPlanning) and delivered pre-mapped by /ready-planning. The
+    // planning/ready gates, the mapPO row shape, and the linked-PO + legacy-
+    // customer dedup all live in the endpoint now; the page just mirrors them.
+    if (rpRaw?.success) {
+      setPlanningPOs(Array.isArray(rpRaw.planning) ? rpRaw.planning : []);
+      setReadyPOs(Array.isArray(rpRaw.ready) ? rpRaw.ready : []);
     }
-  }, [cnRaw, cnSearchRaw, cnLinkedRaw, poRaw, coOrdersRaw, cnLoading, poLoading, coOrdersLoading, prodLoading, productM3Map, productSizeMap, poToCoNoMap, poToFabricMap, poToRackMap]);
+  }, [cnRaw, cnSearchRaw, rpRaw, cnLoading, rpLoading, prodLoading, productM3Map, productSizeMap, poToCoNoMap, poToFabricMap, poToRackMap]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // ---------- One-shot ?focus=<cnId> deep link (global Ctrl+K palette) ----------

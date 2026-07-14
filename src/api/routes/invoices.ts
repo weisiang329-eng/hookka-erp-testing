@@ -1198,6 +1198,28 @@ app.post("/", async (c) => {
         400,
       );
     }
+    // Double-invoice guard (2026-07-14). Root cause of the 64-DO / 77-extra
+    // duplicate-invoice bug: the DO-status check alone is racy (wide read→write
+    // window) and does not cover the case where a prior invoice did not flip the
+    // DO to INVOICED. The auto-invoice-on-delivery path already guards this way;
+    // the manual POST did not. Block if a NON-CANCELLED invoice already exists
+    // for this DO (a CANCELLED one is fine — legitimate re-invoice after a void).
+    const existingDoInvoice = await c.var.DB.prepare(
+      "SELECT id, invoiceNo FROM invoices WHERE deliveryOrderId = ? AND status != 'CANCELLED' LIMIT 1",
+    )
+      .bind(deliveryOrderId)
+      .first<{ id: string; invoiceNo: string }>();
+    if (existingDoInvoice) {
+      return c.json(
+        {
+          success: false,
+          error: `This delivery order is already invoiced (${existingDoInvoice.invoiceNo}). Cancel that invoice before re-invoicing.`,
+          existingInvoiceId: existingDoInvoice.id,
+          existingInvoiceNo: existingDoInvoice.invoiceNo,
+        },
+        409,
+      );
+    }
     // Delivered-with-issues hold: the goods arrived but the paperwork was
     // incomplete, so billing is withheld until an operator resolves it
     // (POST /api/delivery-orders/:id/resolve-incomplete, which itself creates

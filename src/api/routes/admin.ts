@@ -780,11 +780,13 @@ const PERF_INDEXES: string[] = [
   "CREATE INDEX IF NOT EXISTS idx_rd_material_issuances_project ON rd_material_issuances(projectId)",
   "CREATE INDEX IF NOT EXISTS idx_rd_labour_hours_project ON rd_labour_hours(projectId)",
   // Snapshot-freshness probe columns (dashboard/report freshness MAX(updated_at)).
-  "CREATE INDEX IF NOT EXISTS idx_soi_updated ON sales_order_items(updated_at)",
+  // NB: sales_order_items + invoice_items have NO updated_at column (verified —
+  // delivery-snapshot.ts notes it), and cost_ledger's timestamp column is `date`
+  // (not created_at) — the first ensure-run on staging caught all three via the
+  // per-statement try/catch. Corrected here for the prod run.
   "CREATE INDEX IF NOT EXISTS idx_jc_updated ON job_cards(updated_at)",
-  "CREATE INDEX IF NOT EXISTS idx_invoice_items_updated ON invoice_items(updated_at)",
   "CREATE INDEX IF NOT EXISTS idx_whe_created ON working_hour_entries(created_at)",
-  "CREATE INDEX IF NOT EXISTS idx_cost_ledger_created ON cost_ledger(created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_cost_ledger_date ON cost_ledger(\"date\")",
 ];
 
 app.post("/ensure-perf-indexes", async (c) => {

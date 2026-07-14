@@ -34,6 +34,49 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-14-005 — warehouse list shipped a dead `grouped` duplicate that doubled the 2.9MB payload `warehouse` `perf` `payload` 🟢
+**Symptom:** `GET /api/warehouse` (1219 racks) returned both `data[]` and
+`grouped` — the latter a per-rack-name copy of the ENTIRE `data` array — roughly
+doubling a ~2.9MB response. Slow warehouse page load / parse.
+**Root cause:** the handler built `grouped[loc.rack] = [loc]` for every rack, but
+NO consumer reads it (verified across desktop `warehouse.tsx`, `/m WarehouseScreen`,
+and the whole `src` tree). Pure dead weight. Same handler also built each rack via
+`rowToRack(l, ALL items)` whose internal `items.filter(...)` re-scanned every
+rack_item per rack — O(racks × items).
+**Fix:** dropped `grouped` from the response; bucket rack_items by
+`rackLocationId` once into a Map and pass each rack its own scoped list
+(`warehouse.ts` `app.get("/")`). `rowToRack` still filters internally → output
+byte-identical; only the redundant field + the per-rack rescan are gone.
+**Verify:** build:strict + full test suite green; staging deploy; page renders
+identical rack grid. Commit 387840ad.
+
+## BUG-2026-07-14-004 — snapshot caches served STALE stock/planning after a status flip (sourceTables missed the parent table) `perf` `snapshot` `dead-data` `inventory` `delivery` `consignment` 🟢
+**Symptom:** three durable-perf snapshot caches could serve stale results after a
+document's STATUS changed. E.g. dispatch a Delivery Order → the FG-stock page's
+Available/Reserved/Dispatched split would NOT update until some *other* tracked
+table happened to change. Owner's #1 fear (dead-data), reintroduced by the caching
+layer itself.
+**Root cause:** `withSnapshot`'s freshness contract only invalidates when a listed
+`sourceTable`'s `updated_at` advances. Dispatching a DO flips
+`delivery_orders.status` (bumps *its* updated_at) but leaves `delivery_order_items`
+untouched — and the caches read the parent's `.status` while listing only the
+child `_items` table:
+- inventory `/fg-stock` read `delivery_orders.status` + `consignment_notes.status`
+  but tracked only `delivery_order_items` / `consignment_items`.
+- delivery `/ready-planning` read `delivery_orders.status`, `sales_orders`,
+  `sales_order_items`, `consignment_orders` (attachCustomerSO + loadPoValueMap) —
+  none tracked beyond production_orders/job_cards/delivery_order_items.
+- consignment `/ready-planning` read `products.unitM3` — untracked.
+**Fix:** added every status/enrichment table each cache actually reads to its
+`sourceTables` (inventory.ts, delivery-orders.ts, consignment-notes.ts). Freshness
+-only change — output shape unchanged, so no `cache_key` bump. `job_cards` already
+dominates refresh frequency, so the added tables don't hurt the cache hit rate.
+**Verify:** found by the /review correctness pass; swept the whole snapshot family
+for the pattern (fix-then-audit-whole-system). build:strict + full suite green;
+staging deploy. Commit ca9789aa. **Rule reinforced:** a snapshot's `sourceTables`
+MUST include every table whose data (incl. a JOINed parent's status/columns)
+affects the output — not just the table in the FROM clause.
+
 ## BUG-2026-07-14-003 — AR Aging report bucketed money over the loaded 200-row page only (dropped 141/341 invoices) `invoices` `accounting` `data-quality` `dead-data` 🟢
 **Symptom:** Invoices → AR Aging tab. The per-customer overdue buckets (Current /
 31-60 / 61-90 / 90+) and their totals summed only the invoices on the CURRENTLY

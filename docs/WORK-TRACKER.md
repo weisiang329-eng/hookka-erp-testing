@@ -89,9 +89,21 @@ its doc history, now copied here).
   details straight off the list row → slimming blanks the mobile detail. Proper fix = a
   SEPARATE mobile detail endpoint so the list can slim; bigger, deferred. (Snapshot-caching
   it is safe but stores a 5MB JSONB row per refresh — marginal, skipped.)
-- ⚪ **warehouse wip (2.9MB / 1219 rows)** — proportional; investigate safe slim (check /m
-  consumers first) or snapshot-cache. Procurement PO list already small (89KB); its page just
-  also pulls /api/inventory as a sibling — slim that fetch instead.
+- ✅ **warehouse wip (2.9MB / 1219 rows) — DONE (2026-07-14, THIS session).** Two safe wins,
+  no slim/L2 risk: (1) dropped the dead `grouped` field — a per-rack-name copy of the WHOLE
+  `data` array that NO consumer reads (verified desktop warehouse.tsx + /m WarehouseScreen +
+  whole src) → ~halves the payload. (2) Map-bucket rack_items by rackLocationId (was
+  O(racks×items) via per-rack `items.filter`). Byte-identical rack grid. Commit 387840ad,
+  BUG-2026-07-14-005. Procurement PO list already small (89KB); its page also pulls
+  /api/inventory as a sibling — that fetch could be slimmed next if the owner wants it.
+- ✅ **Snapshot freshness sweep (2026-07-14, THIS session) — dead-data guard.** /review
+  correctness pass found inventory /fg-stock tracked delivery_order_items but read the parent
+  delivery_orders.status (dispatch flips the parent, not the item) → stale stock after a
+  dispatch. Swept the whole ready-planning family: added every status/enrichment table each
+  snapshot actually reads to its sourceTables (delivery_orders, sales_orders, sales_order_items,
+  consignment_orders, consignment_notes, products). Freshness-only, no cache_key bump. Commit
+  ca9789aa, BUG-2026-07-14-004. RULE: sourceTables must cover every JOINed parent's
+  status/columns, not just the FROM table.
 - ✅ **Site-wide compression ALREADY ON** ("white-pickup" = done) — Cloudflare serves
   Brotli (`content-encoding: br`) at ~20×; the 5MB planning JSON is only ~255KB over the
   wire. So the bottleneck was NEVER the wire — it's server COMPUTE (cold snapshot builds)

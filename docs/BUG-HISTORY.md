@@ -34,7 +34,7 @@ Entries themselves stay newest-first.
 
 ---
 
-## BUG-2026-07-14-003 — AR Aging report bucketed money over the loaded 200-row page only (dropped 141/341 invoices) `invoices` `accounting` `data-quality` `dead-data` 🟡
+## BUG-2026-07-14-003 — AR Aging report bucketed money over the loaded 200-row page only (dropped 141/341 invoices) `invoices` `accounting` `data-quality` `dead-data` 🟢
 **Symptom:** Invoices → AR Aging tab. The per-customer overdue buckets (Current /
 31-60 / 61-90 / 90+) and their totals summed only the invoices on the CURRENTLY
 LOADED page (PAGE_SIZE 200). Measured live on staging: 341 outstanding invoices, but
@@ -52,8 +52,10 @@ floor((now-dueDate)/day); <=30→current / 31-60 / 61-90 / >90; group by custome
 sort total desc) but over the WHOLE table, honoring the page's status/customer/date
 filter. FE fetches it (gated on the Aging tab active) and renders it instead of the
 client computation. Invoice volume is small → plain aggregate, no snapshot.
-**Verified:** [pending live byte-identity — endpoint aging == FE-logic recomputed over
-ALL 341 invoices client-side; aging now covers 341 not 200].
+**Verified (staging, 7fa5d3f2):** endpoint aging == the FE bucket logic recomputed over
+ALL invoices client-side — 0 field diffs across all 5 customers' 5 buckets; grand total
+RM 1,106,969.12 to the cent; now covers all 267 outstanding invoices (of 341), not the
+200-page subset. NOT yet on prod (owner batches the prod merge).
 **Found by:** the 2026-07-14 full-app 13-module FE↔BE↔DB perf audit
 (docs/PERF-AUDIT-2026-07-14.md, finding #1) — the ONLY real correctness bug among 83
 findings; the other 82 are perf/latent, tracked in that doc + WORK-TRACKER, not here.

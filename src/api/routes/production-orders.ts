@@ -5199,6 +5199,38 @@ function schedulePoListBodyRefresh(
   waitUntil(task);
 }
 
+// ── jobCards-lite: the Planning board's slim job-card projection ─────────────
+// Planning (src/pages/planning/index.tsx) pulls the whole ~10MB
+// ?fields=minimal&include=jobCards&excludeCompleted=true payload but reads ONLY
+// these 12 fields off each job card (audited 2026-07-14: every access is `jc.X`
+// in a local loop — no spread, no destructure, never passed to a helper).
+// `include=jobCards-lite` ships ONLY these → ~half the wire vs the full ~25-field
+// MinimalJobCardOut. Byte-identical FOR PLANNING (its sole consumer); every other
+// page keeps include=jobCards (the full shape) untouched. Applied as a post-pass
+// on the assembled list so it needs no threading through fetchFilteredPOs /
+// rowToMinimalPO / rowToMinimalJobCard (blast radius = the lite request only).
+// (jc.actualMinutes is read too but was never in the payload → already undefined,
+// so it is intentionally NOT added here.)
+function slimJobCardsToPlanningLite(pos: unknown[]): void {
+  for (const po of pos as Array<{ jobCards?: MinimalJobCardOut[] }>) {
+    if (!Array.isArray(po.jobCards)) continue;
+    po.jobCards = po.jobCards.map((jc) => ({
+      id: jc.id,
+      departmentCode: jc.departmentCode,
+      status: jc.status,
+      dueDate: jc.dueDate,
+      completedDate: jc.completedDate,
+      estMinutes: jc.estMinutes,
+      pic1Id: jc.pic1Id,
+      pic1Name: jc.pic1Name,
+      pic2Id: jc.pic2Id,
+      pic2Name: jc.pic2Name,
+      wipLabel: jc.wipLabel,
+      wipQty: jc.wipQty,
+    })) as unknown as MinimalJobCardOut[];
+  }
+}
+
 // ── Pre-warm the delivery page's heavy PO-list snapshot (perf 2026-07-13) ─────
 // The delivery page fetches `/api/production-orders?fields=minimal&include=jobCards`.
 // When its snapshot row is EMPTY (right after a deploy busts the caches, or the
@@ -5285,9 +5317,9 @@ export async function warmPoListPlanningVariant(
 ): Promise<{ rows: number }> {
   const { withSnapshot } = await import("../lib/snapshot");
   // Must equal the planning page's request key: the sorted "&"-joined query
-  // string of `?fields=minimal&include=jobCards&excludeCompleted=true`.
+  // string of `?fields=minimal&include=jobCards-lite&excludeCompleted=true`.
   const snapshotCacheKey =
-    "excludeCompleted=true&fields=minimal&include=jobCards";
+    "excludeCompleted=true&fields=minimal&include=jobCards-lite";
   const result = await withSnapshot<{
     success: true;
     data: unknown[];
@@ -5321,6 +5353,9 @@ export async function warmPoListPlanningVariant(
           customerSO: string;
         }>,
       );
+      // Slim jobCards to the Planning board's 12 read fields — the warmed
+      // snapshot must match the live jobCards-lite request byte-for-byte.
+      slimJobCardsToPlanningLite(data);
       return { success: true, data, total: data.length };
     },
     snapshotCacheKey,
@@ -5412,13 +5447,20 @@ app.get("/", async (c) => {
   const includeParam = c.req.query("include");
   // Backward compat: if `include` is not passed at all, inline jobCards.
   // If it IS passed, only include jobCards when the list contains "jobCards".
-  const includeJobCards =
+  const includeList =
     includeParam === undefined
+      ? null
+      : includeParam.split(",").map((s) => s.trim());
+  // "jobCards-lite" (Planning) also needs the job_cards join — it just ships a
+  // slimmer per-card shape (slimJobCardsToPlanningLite). So both include tokens
+  // turn the JC fetch on; jobCardsLite selects the slim projection afterwards.
+  const includeJobCards =
+    includeList === null
       ? true
-      : includeParam
-          .split(",")
-          .map((s) => s.trim())
-          .includes("jobCards");
+      : includeList.includes("jobCards") ||
+        includeList.includes("jobCards-lite");
+  const jobCardsLite =
+    includeList !== null && includeList.includes("jobCards-lite");
 
   const pageParam = c.req.query("page");
   const limitParam = c.req.query("limit");
@@ -5550,6 +5592,11 @@ app.get("/", async (c) => {
             customerSO: string;
           }>,
         );
+        // Planning's include=jobCards-lite → slim each JC to its 12 read fields
+        // BEFORE the snapshot stores the body (so the cached body is already the
+        // slim shape). Only touches the lite request; the full include=jobCards
+        // path is byte-identical.
+        if (jobCardsLite) slimJobCardsToPlanningLite(data);
         return { success: true, data, total: data.length };
       },
       snapshotCacheKey,

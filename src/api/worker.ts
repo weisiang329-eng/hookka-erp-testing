@@ -445,6 +445,18 @@ app.post("/api/internal/warm-lists", async (c) => {
     console.error("[warm-lists] poList failed:", e);
     out.poList = { ok: false };
   }
+  // 1b. Planning page's PO list variant (excludeCompleted=true) — a DIFFERENT
+  // snapshot key, previously unwarmed → cold ~10MB/~8s block on first load.
+  try {
+    const { warmPoListPlanningVariant } = await import(
+      "./routes/production-orders"
+    );
+    const r = await warmPoListPlanningVariant(c, DEFAULT_ORG_ID);
+    out.poListPlanning = { ok: true, rows: r.rows };
+  } catch (e) {
+    console.error("[warm-lists] poListPlanning failed:", e);
+    out.poListPlanning = { ok: false };
+  }
   // 2. Delivery-orders list value map (keeps the DO list warm post-deploy too).
   try {
     const { loadDoValueMapCached } = await import("./lib/do-value");

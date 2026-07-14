@@ -384,7 +384,11 @@ app.get("/ready-planning", async (c) => {
 
       return { planning, ready, poLookups };
     },
-    "",
+    // cache_key carries the payload-SHAPE version — bump it whenever the compute
+    // output shape changes (added poLookups → v2), else withSnapshot keeps
+    // serving the old cached blob as "fresh" until a source table happens to
+    // change (it tracks source-table mtimes, not code). v1 → v2 = +poLookups.
+    "v2",
     c,
     { staleWhileRevalidate: true },
   );

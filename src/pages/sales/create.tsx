@@ -2681,7 +2681,7 @@ function CopyFromSourceModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="fixed inset-0 bg-black/40" onClick={onClose} />
-      <div className={`relative bg-white rounded-lg shadow-xl border border-[#E2DDD8] w-full mx-4 p-5 space-y-4 ${step === 2 ? "max-w-3xl" : "max-w-md"}`}>
+      <div className={`relative bg-white rounded-lg shadow-xl border border-[#E2DDD8] w-full mx-4 p-5 space-y-4 max-h-[90vh] overflow-y-auto ${step === 2 ? "max-w-3xl" : "max-w-md"}`}>
         <div className="flex items-center justify-between">
           <h3 className="text-base font-semibold text-[#1F1D1B]">
             {step === 1

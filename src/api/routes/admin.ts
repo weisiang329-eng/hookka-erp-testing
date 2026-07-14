@@ -28,7 +28,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
-import { requirePermission } from "../lib/rbac";
+import { requirePermission, requireSuperAdmin } from "../lib/rbac";
 import {
   createProductionOrdersForSO,
   type SalesOrderRow,
@@ -736,6 +736,78 @@ app.post("/rebuild-pos/:soId", async (c) => {
       500,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/ensure-perf-indexes — apply the 2026-07-14 audit's index batch.
+//
+// Migration files (0037/0047_perf_indexes) are INERT on deploy, so hot-query
+// indexes never reached prod. This applies the audited set at runtime, each
+// CREATE INDEX IF NOT EXISTS in its OWN try/catch so a wrong column name (the
+// tables mix snake_case + camelCase) or an already-existing index is logged and
+// SKIPPED, never fatal. Returns per-statement created/skipped/failed so the
+// operator sees exactly what landed. Idempotent — safe to re-run. SUPER_ADMIN.
+// Column names verified against the routes' SELECT/WHERE usage before listing.
+// ---------------------------------------------------------------------------
+const PERF_INDEXES: string[] = [
+  // Procurement — purchase_invoices/_items had ZERO indexes (audit #13).
+  "CREATE INDEX IF NOT EXISTS idx_purchase_invoice_items_pi ON purchase_invoice_items(pi_id)",
+  "CREATE INDEX IF NOT EXISTS idx_purchase_invoices_status ON purchase_invoices(status)",
+  "CREATE INDEX IF NOT EXISTS idx_purchase_invoices_supplier ON purchase_invoices(supplierId)",
+  // Service — sales_orders.caseid scanned on every case load (audit #14).
+  "CREATE INDEX IF NOT EXISTS idx_sales_orders_caseid ON sales_orders(caseid)",
+  // List ORDER BY created_at DESC — composite with orgId so it is an index scan.
+  "CREATE INDEX IF NOT EXISTS idx_sales_orders_org_created ON sales_orders(orgId, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_invoices_org_created ON invoices(orgId, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_do_org_created ON delivery_orders(orgId, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_po_org_created ON purchase_orders(orgId, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_consignment_orders_created ON consignment_orders(created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_payment_records_org_date ON payment_records(orgId, date DESC, id DESC)",
+  // Delivery / consignment child + FK joins.
+  "CREATE INDEX IF NOT EXISTS idx_doi_org ON delivery_order_items(orgId)",
+  "CREATE INDEX IF NOT EXISTS idx_ci_org ON consignment_items(orgId)",
+  // Production hot columns (join / filter targets on the shared PO endpoint).
+  "CREATE INDEX IF NOT EXISTS idx_prod_po_productCode ON production_orders(productCode)",
+  "CREATE INDEX IF NOT EXISTS idx_prod_po_created ON production_orders(created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_prod_po_companySOId ON production_orders(companySOId)",
+  "CREATE INDEX IF NOT EXISTS idx_prod_po_companyCOId ON production_orders(companyCOId)",
+  "CREATE INDEX IF NOT EXISTS idx_jc_org_dept ON job_cards(orgId, departmentCode)",
+  // Products ACTIVE filter + sort.
+  "CREATE INDEX IF NOT EXISTS idx_products_org_status_code ON products(orgId, status, code)",
+  // Service / R&D FK joins.
+  "CREATE INDEX IF NOT EXISTS idx_service_cases_status ON service_cases(status)",
+  "CREATE INDEX IF NOT EXISTS idx_service_orders_caseid ON service_orders(caseId)",
+  "CREATE INDEX IF NOT EXISTS idx_rd_material_issuances_project ON rd_material_issuances(projectId)",
+  "CREATE INDEX IF NOT EXISTS idx_rd_labour_hours_project ON rd_labour_hours(projectId)",
+  // Snapshot-freshness probe columns (dashboard/report freshness MAX(updated_at)).
+  "CREATE INDEX IF NOT EXISTS idx_soi_updated ON sales_order_items(updated_at)",
+  "CREATE INDEX IF NOT EXISTS idx_jc_updated ON job_cards(updated_at)",
+  "CREATE INDEX IF NOT EXISTS idx_invoice_items_updated ON invoice_items(updated_at)",
+  "CREATE INDEX IF NOT EXISTS idx_whe_created ON working_hour_entries(created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_cost_ledger_created ON cost_ledger(created_at)",
+];
+
+app.post("/ensure-perf-indexes", async (c) => {
+  const denied = requireSuperAdmin(c);
+  if (denied) return denied;
+  const created: string[] = [];
+  const failed: Array<{ stmt: string; error: string }> = [];
+  for (const stmt of PERF_INDEXES) {
+    try {
+      await c.var.DB.prepare(stmt).run();
+      created.push(stmt.replace(/^CREATE INDEX IF NOT EXISTS /, "").split(" ON ")[0]);
+    } catch (e) {
+      failed.push({ stmt, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  return c.json({
+    success: true,
+    attempted: PERF_INDEXES.length,
+    okCount: created.length,
+    failCount: failed.length,
+    created,
+    failed,
+  });
 });
 
 export default app;

@@ -260,3 +260,32 @@ test("glBySource families aggregate DR/CR/net", () => {
   assert.equal(fam.other, 5);
   invariant(r);
 });
+
+test("AR config — swapped legs, DR-normal control: invoice + receipt tie; missing receipt GL itemized", () => {
+  // AR mirror: invoice DR 300 fed as CR; receipt CR 300 fed as DR.
+  const cfg = m.AR_RECON_CFG;
+  const clean = m.buildApReconciliation({
+    legs400: [
+      { sourceType: "invoice", sourceId: "inv-1", debitSen: 0, creditSen: 100000 }, // swapped DR 1000
+      { sourceType: "payment_restate_post:9", sourceId: "pay-1", debitSen: 40000, creditSen: 0 }, // swapped CR 400
+    ],
+    pis: [{ id: "inv-1", piNo: "INV-1", supplierName: "HOUZS", status: "PARTIAL_PAID", amountSen: 100000, paidSen: 40000, isOpening: false, preOpeningIncluded: false, floored: false }],
+    paymentRows: [{ paymentNo: "pay-1", purchaseInvoiceId: "inv-1", bookedSen: 40000, amountSen: 40000, method: "BANK_TRANSFER", active: true, supplierName: "HOUZS", date: "2026-06-01" }],
+    pcnPostedSen: 0, cnAllocCtlSen: 0,
+  }, cfg);
+  assert.equal(clean.driftSen, 0);
+  assert.deepEqual(clean.items, []);
+  assert.equal(clean.unexplainedResidualSen, 0);
+
+  // Receipt applied in the subledger but its GL CR missing → -paid drift item.
+  const broken = m.buildApReconciliation({
+    legs400: [{ sourceType: "invoice", sourceId: "inv-1", debitSen: 0, creditSen: 100000 }],
+    pis: [{ id: "inv-1", piNo: "INV-1", supplierName: "HOUZS", status: "PAID", amountSen: 100000, paidSen: 100000, isOpening: false, preOpeningIncluded: false, floored: false }],
+    paymentRows: [{ paymentNo: "pay-1", purchaseInvoiceId: "inv-1", bookedSen: 100000, amountSen: 100000, method: "BANK_TRANSFER", active: true, supplierName: "HOUZS", date: "2026-06-01" }],
+    pcnPostedSen: 0, cnAllocCtlSen: 0,
+  }, cfg);
+  assert.equal(broken.driftSen, 100000); // control kept the full face, subledger says settled
+  assert.equal(broken.items.length, 1);
+  assert.equal(broken.items[0].kind, "payment_gl_mismatch");
+  assert.equal(broken.unexplainedResidualSen, 0);
+});

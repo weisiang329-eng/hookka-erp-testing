@@ -469,12 +469,15 @@ app.post("/api/internal/warm-lists", async (c) => {
   // 3. Daily Report (compliance) — the ~6s cold-recompute one. Warm today's key
   // so the first open of the day never blocks.
   try {
-    const { warmComplianceReport } = await import("./routes/reports");
-    const r = await warmComplianceReport(c, DEFAULT_ORG_ID);
-    out.compliance = r;
+    const { warmComplianceReport, warmBriefReport } = await import(
+      "./routes/reports"
+    );
+    out.compliance = await warmComplianceReport(c, DEFAULT_ORG_ID);
+    out.brief = await warmBriefReport(c, DEFAULT_ORG_ID);
   } catch (e) {
-    console.error("[warm-lists] compliance failed:", e);
+    console.error("[warm-lists] reports failed:", e);
     out.compliance = { ok: false };
+    out.brief = { ok: false };
   }
   return c.json({ ok: true, elapsedMs: Date.now() - t0, ...out });
 });

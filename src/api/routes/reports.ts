@@ -434,7 +434,8 @@ app.get("/brief.json", async (c) => {
   if (denied) return denied;
   try {
     // Dashboard-card variant: NO AI call (fast + free on every page load).
-    const data = await buildBrief(c, false);
+    // Snapshot-cached + serve-stale so the ~4.4s cold compute never blocks.
+    const data = await buildBriefJsonCached(c, getOrgId(c));
     return c.json({ success: true, data });
   } catch (err) {
     console.error("[reports/brief.json] failed:", err);
@@ -490,10 +491,10 @@ const COMPLIANCE_SOURCE_TABLES = [
   "grns",
 ] as const;
 
-async function ensureComplianceSnapshotTable(db: D1Database) {
+async function ensureReportSnapshotTable(db: D1Database, tableName: string) {
   await db
     .prepare(
-      `CREATE TABLE IF NOT EXISTS reports_compliance_snapshot (
+      `CREATE TABLE IF NOT EXISTS ${tableName} (
          org_id        TEXT NOT NULL,
          cache_key     TEXT NOT NULL DEFAULT '',
          data          JSONB NOT NULL,
@@ -509,7 +510,7 @@ async function ensureComplianceSnapshotTable(db: D1Database) {
 async function buildComplianceCached(c: Context<Env>, orgId: string, swr = true) {
   const db = c.var.DB;
   const today = todayYmdSgt();
-  await ensureComplianceSnapshotTable(db);
+  await ensureReportSnapshotTable(db, "reports_compliance_snapshot");
   const { withSnapshot } = await import("../lib/snapshot");
   return withSnapshot<Record<string, unknown>>(
     db,
@@ -541,6 +542,54 @@ export async function warmComplianceReport(
     return { ok: true };
   } catch (e) {
     console.error("[warm] compliance failed:", e);
+    return { ok: false };
+  }
+}
+
+// Snapshot-cached + serve-stale wrapper for the DASHBOARD-CARD brief (buildBrief
+// with includeAi=false — the no-LLM, no-WRITE variant loaded on every page open,
+// ~4.4s cold). Same rationale as compliance: read-only point-in-time report,
+// byte-identical numbers, recompute moved off the request path. Keyed by the
+// resolved date param; freshness tracks the tables collectBriefData reads. The AI
+// HTML variant (/brief) is NOT cached here (LLM output + separate concern).
+const BRIEF_SOURCE_TABLES = [
+  "production_orders",
+  "job_cards",
+  "schedule_proposals",
+] as const;
+
+async function buildBriefJsonCached(
+  c: Context<Env>,
+  orgId: string,
+  swr = true,
+) {
+  const db = c.var.DB;
+  const date = parseDateParam(c.req.query("date"), todayYmdSgt);
+  await ensureReportSnapshotTable(db, "reports_brief_snapshot");
+  const { withSnapshot } = await import("../lib/snapshot");
+  return withSnapshot<Record<string, unknown>>(
+    db,
+    {
+      tableName: "reports_brief_snapshot",
+      sourceTables: BRIEF_SOURCE_TABLES as unknown as string[],
+    },
+    orgId,
+    async () => (await buildBrief(c, false)) as unknown as Record<string, unknown>,
+    date,
+    c,
+    swr ? { staleWhileRevalidate: true } : undefined,
+  );
+}
+
+export async function warmBriefReport(
+  c: Context<Env>,
+  orgId: string,
+): Promise<{ ok: boolean }> {
+  try {
+    await buildBriefJsonCached(c, orgId, false);
+    return { ok: true };
+  } catch (e) {
+    console.error("[warm] brief failed:", e);
     return { ok: false };
   }
 }

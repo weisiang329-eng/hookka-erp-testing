@@ -269,8 +269,17 @@ app.get("/", async (c) => {
       .bind(orgId)
       .all<SupplierMaterialRow>(),
   ]);
+  // Bucket materials by supplierId ONCE (was O(suppliers×materials):
+  // rowToSupplier re-filtered the whole materials array per supplier).
+  // Byte-identical — rowToSupplier still filters, now over the scoped bucket.
+  const matsBySupplier = new Map<string, SupplierMaterialRow[]>();
+  for (const m of materials.results ?? []) {
+    const arr = matsBySupplier.get(m.supplierId);
+    if (arr) arr.push(m);
+    else matsBySupplier.set(m.supplierId, [m]);
+  }
   const data = (suppliers.results ?? []).map((s) =>
-    rowToSupplier(s, materials.results ?? []),
+    rowToSupplier(s, matsBySupplier.get(s.id) ?? []),
   );
   return c.json({ success: true, data });
 });

@@ -77,6 +77,30 @@ endpoint's returned shape MUST bump its `cache_key`. Baked into
 docs/PERF-DURABLE-ARCHITECTURE.md + the durable-perf memory. Applies to every
 future slice (inventory/delivery already shipped clean; this is the standing rule).
 
+## BUG-2026-07-13-003 — `?fields=minimal` alone still inlined jobCards (~19MB) — the slim didn't slim `perf` `production-orders` 🟢
+**Symptom:** Slimmed the Sales SO list to `/api/production-orders?fields=minimal`
+expecting a small payload, but the response was still ~19MB decoded — the jobCards
+array was STILL inlined. The "fix" appeared to do nothing.
+**Root cause:** in the production-orders list handler, `include` being ABSENT is
+back-compat for "inline jobCards" (production-orders.ts L5348-5356). `?fields=minimal`
+only trims PO scalar fields; it does NOT drop jobCards unless `include` is passed and
+does NOT contain "jobCards". So `?fields=minimal` with no `include` kept the full JC tree.
+**Fix (e2efaa38):** pass an EXPLICIT empty `include=` → jobCards dropped, 19MB→~72kb.
+**Rule:** to drop jobCards you must pass `&include=` (empty), not just `?fields=minimal`.
+Baked into every slim since (delivery/inventory/CN/planning).
+
+## BUG-2026-07-13-002 — "Failed to create delivery return" — snapshot SELECT hit a COMPUTED column + a JOIN-aliased column the rename adapter didn't rewrite `delivery-orders` `data-migration` 🟢
+**Symptom:** Creating a Delivery Return errored out ("Failed to create delivery
+return") — the whole create failed, no DR written.
+**Root cause:** the create-DR POST's DO-snapshot lookup SELECTed `salesOrderNos` (a
+COMPUTED/derived field, not a stored column) + `customerPOId`, and the SO-resolve JOIN
+aliased `salesOrderId` — which the d1-compat rename adapter may not rewrite INSIDE a
+JOIN (same camelCase-fold class as BUG-2026-06-10-001). Either query threw and aborted
+the whole create.
+**Fix (bae68564):** both snapshot lookups try/catch-wrapped (best-effort enrichment
+never fails the create); the DO SELECT reads only guaranteed columns (doNo,
+customerName); the DR header + items always write. delivery-returns.ts.
+
 ## BUG-2026-07-13-001 — Delivery /ready-planning FE swap hung the page's cold paint (uncached heavy endpoint) `perf` `snapshot` `durable-arch` 🟢
 **Symptom:** (delivery slice, prior session) swapping the FE to consume the new
 server endpoint left the page stuck blank on a cold load — the ~8s whole-org
@@ -91,6 +115,28 @@ refresh in the background.
 the FE consumes it — never gate a page's cold paint on an uncached whole-org
 compute. Applied to inventory (`inventory_fg_stock_snapshot`) + CN
 (`consignment_ready_planning_snapshot`) this session.
+
+## BUG-2026-07-12-001 — Agent proposal approve wrote NULL dueDate + the list dropped dates (adapter camelCase folding) `data-migration` `agent` 🟢
+**Symptom:** Approving a schedule/config proposal wrote a NULL `dueDate`, and the
+proposals list rendered blank dates.
+**Root cause:** the d1-compat SupabaseAdapter folds explicit camelCase column
+projections to lowercase (BUG-2026-06-10-001 class) — so `dueDate` reads came back
+under `duedate` and the approve write's camelCase binding didn't land. Another
+instance of the recurring camelCase/rename-map class.
+**Fix (7c8f7850 / 41053812):** dual-key row reads (`r.dueDate ?? r.duedate`) + the
+ProposalRow types made dual-key; the approve write uses the adapter-safe column name.
+**Rule (recurring):** new camelCase columns need a column-rename-map entry OR
+dual-keyed reads — see the `data-migration` category note above.
+
+## BUG-2026-07-11-002 — Weekly/Monthly Operations Report: delivery `do` reserved-word SQL alias + one bad section 500'd the whole report `reports` 🟢
+**Symptom:** The Operations Report (weekly/monthly) failed to generate; a single bad
+section aborted the entire newspaper payload.
+**Root cause:** the delivery section aliased a table/column as `do` — a SQL
+RESERVED WORD — which the query rejected; and the collector had no per-section guard,
+so one throwing section 500'd all 15 sections.
+**Fix (c09ed847 + 7d857ac4):** rename the `do` alias; wrap each section in its own
+guard so one bad query DEGRADES (returns partial) instead of 500-ing the report;
+self-apply `products.created_at` for the new-products reader. operations-report.ts.
 
 ## BUG-2026-07-11-001 — Full-system data-accuracy audit: 20+ findings across dashboard/planning/daily-report/OCR (P1-P3 shipped same day) `dashboard` `planning` `data-quality`
 

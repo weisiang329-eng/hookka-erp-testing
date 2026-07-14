@@ -43,19 +43,36 @@ function buildEndpoints(): string[] {
   ];
 }
 
+/** True only on the Home route (basename is /m, Home = the index "/"). */
+function isHomeLanding(): boolean {
+  // pathname is "/m" or "/m/" on Home; "/m/production", "/m/sales", … elsewhere.
+  const p = (globalThis.location?.pathname || "").replace(/\/+$/, "");
+  return p === "/m" || p === "";
+}
+
 /**
- * Fire the Home's first-paint fetches in parallel. Caught errors are silently
- * swallowed — preload is best-effort, never a blocker. Call once at /m shell
- * mount. Module lists + reference data are intentionally NOT preloaded: they
- * fetch on demand (list screen visit) or on search-open.
+ * Warm the Home's first-paint endpoints — but ONLY when the operator actually
+ * LANDED on Home. On any other landing this is pure waste.
+ *
+ * Why route-gate (2026-07-14 mobile-lag fix): the shell mounts this once for the
+ * WHOLE /m session, regardless of landing route. A factory worker who opens
+ * straight to /m/production doesn't need Home's cards — yet the eager warm-up
+ * fired /api/dashboard/overview (a ~7.6s compute-bound query), the full
+ * /api/sales-orders (~100KB) and /api/inventory (~95KB) in parallel, saturating
+ * the phone's link and starving the production board's own fetch. Home fetches
+ * these itself via useCachedJson (and every other screen fetches its own), so
+ * the only value of this warm-up is the Home-landing case — where it coalesces
+ * with Home's own fetch via cachedFetchJson's in-flight dedup. Gating on the
+ * landing route removes the contention on every non-Home screen with zero loss:
+ * navigating TO Home later still triggers Home's own cache-backed fetch.
+ * (Idle-gating was tried first and doesn't help — the main thread goes idle
+ * within a frame of mount, so the deferred fetches still race the board.)
  */
 export function preloadMobileCritical(): void {
+  if (!isHomeLanding()) return;
   for (const url of buildEndpoints()) {
-    // Don't await — let them run in parallel in the background while React
-    // continues to mount the home screen.
-    void cachedFetchJson(url).catch(() => {
-      // Silent — a failed preload just leaves that one endpoint to fetch
-      // on first navigation; the page still works.
-    });
+    // Best-effort background warm-up; a failed one just falls back to an
+    // on-demand fetch on first navigation.
+    void cachedFetchJson(url).catch(() => {});
   }
 }

@@ -377,3 +377,123 @@ export function buildReadyPlanning(inputs: ReadyPlanningInputs): {
     .map(mapPO);
   return { ready, planning };
 }
+
+// ---------------------------------------------------------------------------
+// Consignment-note Ready / Planning row builder (2026-07-14). Extracted VERBATIM
+// from the CN Note page (src/pages/consignment/note.tsx mapPO + the planning/ready
+// filters) so the server can compute the SAME Planning + Pending-CN rows and stop
+// shipping the ~1.2MB /api/production-orders?fields=minimal&include=jobCards to the
+// client just to derive them. Both the FE and the
+// /api/consignment-notes/ready-planning endpoint call this ONE function → the two
+// lists are byte-identical by construction. Unlike the Delivery version these rows
+// carry NO money field (CN amounts live on the CN records themselves), so this is
+// a pure PO-listing derivation. See docs/PERF-DURABLE-ARCHITECTURE.md.
+// ---------------------------------------------------------------------------
+export type CnReadyPlanningPO = PipelinePO & {
+  poNo: string;
+  consignmentOrderId?: string;
+  companyCOId?: string;
+  customerId?: string;
+  customerName?: string;
+  customerState?: string;
+  productCode?: string;
+  productName?: string;
+  sizeLabel?: string;
+  fabricCode?: string;
+  quantity?: number;
+  completedDate?: string | null;
+  rackingNumber?: string;
+  hookkaExpectedDD?: string;
+  currentDepartment?: string;
+  progress?: number;
+  targetEndDate?: string;
+  jobCards?: ReadyPlanningJobCard[];
+};
+
+export type CnReadyPORow = {
+  id: string;
+  poNo: string;
+  consignmentOrderId: string;
+  consignmentOrderNo: string;
+  customerId: string;
+  customerName: string;
+  customerState: string;
+  productCode: string;
+  productName: string;
+  itemCategory: string;
+  sizeLabel: string;
+  fabricCode: string;
+  quantity: number;
+  unitM3: number;
+  completedDate: string | null;
+  uphCompletedDate: string | null;
+  rackingNumber: string;
+  hookkaExpectedDD: string;
+  currentDepartment: string;
+  progress: number;
+};
+
+export type CnReadyPlanningInputs = {
+  allPOs: CnReadyPlanningPO[];
+  // consignmentOrderId → CO join fields (hookkaExpectedDD / companyCOId / customerId)
+  coMap: Map<
+    string,
+    { hookkaExpectedDD: string; companyCOId: string; customerId: string }
+  >;
+  // PO ids already carried on a non-cancelled CN (dedup) — from /linked-po-ids.
+  cnLinkedPOIds: Set<string>;
+  // Legacy fallback: customers with an ACTIVE/PARTIALLY_SOLD CN whose items carry
+  // no productionOrderId (pre-0066). Their POs hide from Pending-CN by customer.
+  cnLinkedCustomersLegacy: Set<string>;
+  productM3Map: Map<string, number>;
+};
+
+export function buildCnReadyPlanning(inputs: CnReadyPlanningInputs): {
+  planning: CnReadyPORow[];
+  ready: CnReadyPORow[];
+} {
+  const { allPOs, coMap, cnLinkedPOIds, cnLinkedCustomersLegacy, productM3Map } =
+    inputs;
+
+  const mapPO = (po: CnReadyPlanningPO): CnReadyPORow => {
+    const coInfo = coMap.get(po.consignmentOrderId || "");
+    return {
+      id: po.id,
+      poNo: po.poNo,
+      consignmentOrderId: po.consignmentOrderId || "",
+      consignmentOrderNo: po.companyCOId || coInfo?.companyCOId || "",
+      customerId: po.customerId || coInfo?.customerId || "",
+      customerName: po.customerName || "",
+      customerState: po.customerState || "",
+      productCode: po.productCode || "",
+      productName: po.productName || "",
+      itemCategory: po.itemCategory || "",
+      sizeLabel: po.sizeLabel || "",
+      fabricCode: po.fabricCode || "",
+      quantity: po.quantity || 0,
+      unitM3: productM3Map.get(po.productCode || "") ?? 0,
+      completedDate: po.completedDate || null,
+      uphCompletedDate: (() => {
+        const uphCards = (po.jobCards || []).filter(
+          (j) => j.departmentCode === "UPHOLSTERY",
+        );
+        if (uphCards.length === 0) return null;
+        const dates = uphCards
+          .map((j) => j.completedDate)
+          .filter((d): d is string => !!d);
+        return dates.length > 0 ? dates.sort().reverse()[0] : null;
+      })(),
+      rackingNumber: po.rackingNumber || "",
+      hookkaExpectedDD: coInfo?.hookkaExpectedDD || po.targetEndDate || "",
+      currentDepartment: po.currentDepartment || "",
+      progress: po.progress || 0,
+    };
+  };
+
+  const planning = allPOs.filter(poInPlanningConsignment).map(mapPO);
+  const ready = allPOs
+    .filter((po) => poReadyForConsignment(po, cnLinkedPOIds))
+    .filter((po) => !cnLinkedCustomersLegacy.has(po.customerId || ""))
+    .map(mapPO);
+  return { planning, ready };
+}

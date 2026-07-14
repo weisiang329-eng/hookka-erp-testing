@@ -68,13 +68,30 @@ its doc history, now copied here).
   rolling-window boundary (NO live/schedulable work dropped — onlyInLite=0). Planning
   page renders, calls jobCards-lite (0 full-jobCards). Commits e670820d / 9b45c37e.
 
-**Remaining perf (deeper levers, each needs its own careful pass):**
-- ⚪ **Mobile ProductionScreen — full keyset** (server search + per-dept count + keyset
-  pagination + infinite scroll). The jobCards drop (20MB→1.6MB, 12×) is shipped + verified;
-  the keyset would take it to ~40KB/page but is a UX change touching the owner's #1-fear
-  bug class (search must reach the WHOLE dataset) — do with care + owner-aware verification.
-- ⚪ **Warehouse / procurement / service-cases lists + reports slow-queries** (B-class
-  server-compute: reports/compliance 6s, brief 4.4s, aging 3s) — snapshot/warm, not slim.
+**Reports (2026-07-14, THIS session) — DONE + verified:**
+- ✅ **Daily Report (compliance.json ~6s)** — snapshot + serve-stale + warm cron
+  (reports_compliance_snapshot, keyed by SGT date; sourceTables = the transactional tables).
+  LIVE: 6.8s cold → **0.87s** warm, data intact (4 sections incl. generatedAtIso), byte-identical.
+- ✅ **Dashboard brief.json (~4.4s)** — same pattern (reports_brief_snapshot, no-AI/no-write
+  variant). AI HTML /brief untouched. warmComplianceReport + warmBriefReport on the cron.
+- 🟡 **aging (3s)** — LEFT ALONE: it's a MONEY report (AR/AP) that ALREADY has a cache +
+  revision-invalidation (BUG-2026-07-09-002 history). Too sensitive to re-cache under the
+  "no past bugs" rule; the 3s is a cold rebuild that the existing rev-bump handles.
+
+**Remaining perf — RISK/REWARD reassessed (2026-07-14):**
+- 🟡 **Mobile ProductionScreen — full keyset — NOT WORTH IT (present to owner).** After the
+  jobCards drop + Brotli the board is **72KB over the wire** (1.6MB decoded @ 22.5×). The
+  keyset would save mainly ~1s of client parse, at the cost of INTRODUCING the dead-data bug
+  class (search must reach the whole table). Poor risk/reward — recommend NOT doing it; the
+  jobCards drop already solved the payload. Await owner's informed call.
+- 🟡 **service-cases (5MB / 19 rows) — CANNOT slim (known trap).** The /m L2 detail
+  (m/config/modules.ts) reads responsibleUnit/preventionStatus/affectedProducts/root-cause
+  details straight off the list row → slimming blanks the mobile detail. Proper fix = a
+  SEPARATE mobile detail endpoint so the list can slim; bigger, deferred. (Snapshot-caching
+  it is safe but stores a 5MB JSONB row per refresh — marginal, skipped.)
+- ⚪ **warehouse wip (2.9MB / 1219 rows)** — proportional; investigate safe slim (check /m
+  consumers first) or snapshot-cache. Procurement PO list already small (89KB); its page just
+  also pulls /api/inventory as a sibling — slim that fetch instead.
 - ✅ **Site-wide compression ALREADY ON** ("white-pickup" = done) — Cloudflare serves
   Brotli (`content-encoding: br`) at ~20×; the 5MB planning JSON is only ~255KB over the
   wire. So the bottleneck was NEVER the wire — it's server COMPUTE (cold snapshot builds)

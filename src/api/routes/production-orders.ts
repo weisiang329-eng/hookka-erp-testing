@@ -5266,6 +5266,71 @@ export async function warmPoListDeliveryVariant(
   return { rows: result?.total ?? 0 };
 }
 
+// ── Pre-warm the PLANNING page's PO-list snapshot (perf 2026-07-14) ───────────
+// Planning fetches `?fields=minimal&include=jobCards&excludeCompleted=true` — a
+// DIFFERENT snapshot key from the delivery variant above (excludeCompleted flips
+// it), so warmPoListDeliveryVariant does NOT keep it warm. Its snapshot went
+// empty/stale between production writes → the first planning load of the window
+// cold-computed ~10MB / ~8s as a BLOCKING request (measured on prod 2026-07-14).
+// Warming this exact variant every cron tick means planning always finds a
+// snapshot → serve-stale (instant) + background refresh, never the 8s block.
+//
+// BYTE-IDENTICAL to the live handler: same fetchFilteredPOs params planning's
+// request drives (excludeCompleted=true) + same attachCustomerSO + same snapshot
+// table + the exact sorted request key. No figure changes — only the timing of
+// the recompute moves off the request path.
+export async function warmPoListPlanningVariant(
+  c: Context<Env>,
+  orgId: string,
+): Promise<{ rows: number }> {
+  const { withSnapshot } = await import("../lib/snapshot");
+  // Must equal the planning page's request key: the sorted "&"-joined query
+  // string of `?fields=minimal&include=jobCards&excludeCompleted=true`.
+  const snapshotCacheKey =
+    "excludeCompleted=true&fields=minimal&include=jobCards";
+  const result = await withSnapshot<{
+    success: true;
+    data: unknown[];
+    total: number;
+  }>(
+    c.var.DB,
+    {
+      tableName: "production_orders_list_snapshot",
+      sourceTables: ["production_orders", "job_cards"],
+    },
+    orgId,
+    async () => {
+      const data = await fetchFilteredPOs(
+        c.var.DB,
+        orgId,
+        null, // statuses
+        true, // includeJobCards
+        false, // includeArchive
+        true, // minimal
+        null, // deptFilter
+        null, // dueFrom
+        null, // dueTo
+        null, // catFilter
+        true, // excludeCompleted — the planning variant
+      );
+      await attachCustomerSO(
+        c.var.DB,
+        data as Array<{
+          salesOrderId: string;
+          consignmentOrderId: string;
+          customerSO: string;
+        }>,
+      );
+      return { success: true, data, total: data.length };
+    },
+    snapshotCacheKey,
+    c,
+    // No SWR: force the compute+store on the cron (this IS the off-request path).
+    undefined,
+  );
+  return { rows: result?.total ?? 0 };
+}
+
 // After a worker QR scan completes job cards, the operator-facing production
 // dept sheets read from a cache-aside snapshot (production_orders_list_snapshot)
 // plus the KV list cache. The snapshot freshness probe compares MAX(updated_at)

@@ -29,8 +29,10 @@ import { cascadeCNCompletionToCO, cascadeCNReversalToCO } from "./production-ord
 import { fetchFilteredPOs } from "./production-orders";
 import {
   buildCnReadyPlanning,
+  isHbOnlySpecial,
   type CnReadyPlanningPO,
 } from "../../lib/delivery-pipeline";
+import { aggregateRacksFromPackingCards } from "../../lib/rack-format";
 import { nextInvoiceNo } from "./invoices";
 import { getOrgId } from "../lib/tenant";
 import { loadCnValueMap, loadCnCustomerRefMap } from "../lib/cn-value";
@@ -231,7 +233,7 @@ app.get("/ready-planning", async (c) => {
     },
     orgId,
     async () => {
-      const [pos, coRes, linkedRes, legacyRes] = await Promise.all([
+      const [pos, coRes, linkedRes, legacyRes, cnRefRes] = await Promise.all([
         fetchFilteredPOs(db, orgId, null, true, false, true),
         db
           .prepare(
@@ -276,6 +278,20 @@ app.get("/ready-planning", async (c) => {
           )
           .bind(orgId)
           .all<{ customerId?: string | null }>(),
+        // Every PO id referenced by a CN item (any status) — the FE builds
+        // poToCoNoMap / poToFabricMap / poToRackMap from these to enrich the CN
+        // Detail/browse item rows with companyCOId / fabricCode / rack. Scoping
+        // the lookups to this set keeps the payload tiny (vs the whole PO list).
+        db
+          .prepare(
+            `SELECT DISTINCT productionOrderId AS poId
+               FROM consignment_items
+              WHERE orgId = ?
+                AND productionOrderId IS NOT NULL
+                AND productionOrderId <> ''`,
+          )
+          .bind(orgId)
+          .all<{ poId?: string | null }>(),
       ]);
 
       const coMap = new Map<
@@ -328,7 +344,45 @@ app.get("/ready-planning", async (c) => {
         cnLinkedCustomersLegacy,
         productM3Map,
       });
-      return { planning, ready };
+
+      // poLookups: companyCOId / fabricCode / rack for every CN-referenced PO,
+      // built from the SAME `pos` the FE's poToCoNoMap / poToFabricMap /
+      // poToRackMap read (rack aggregated per-piece from the PACKING cards with
+      // the HB-only DIVAN drop — byte-identical to the page's inline maps).
+      const posById = new Map(
+        (pos as unknown as CnReadyPlanningPO[]).map((p) => [p.id, p]),
+      );
+      const refIds = new Set(
+        (cnRefRes.results ?? [])
+          .map((r) => r.poId)
+          .filter((x): x is string => !!x),
+      );
+      const poLookups: Array<{
+        id: string;
+        companyCOId: string;
+        fabricCode: string;
+        rack: string;
+      }> = [];
+      for (const id of refIds) {
+        const po = posById.get(id);
+        if (!po) continue;
+        const hbOnly =
+          (po.itemCategory || "").toUpperCase() === "BEDFRAME" &&
+          isHbOnlySpecial(po.specialOrder);
+        const packingCards = (po.jobCards ?? []).filter(
+          (j) => j.departmentCode === "PACKING",
+        );
+        poLookups.push({
+          id,
+          companyCOId: po.companyCOId || "",
+          fabricCode: po.fabricCode || "",
+          rack: aggregateRacksFromPackingCards(packingCards, {
+            dropDivan: hbOnly,
+          }),
+        });
+      }
+
+      return { planning, ready, poLookups };
     },
     "",
     c,

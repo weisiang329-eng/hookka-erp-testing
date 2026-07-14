@@ -480,7 +480,18 @@ app.get("/", async (c) => {
         .all<ConsignmentOrderItemRow>()
     : { results: [] as ConsignmentOrderItemRow[] };
   const items = itemRes.results ?? [];
-  const data = orderRows.map((r) => rowToCOList(r, items));
+  // Bucket items by consignmentOrderId ONCE (was O(orders×items): rowToCOList
+  // -> rowToCO BOTH re-filtered the whole items array per order). Byte-identical
+  // — both still filter, now over the pre-scoped bucket (passthrough + sort).
+  const itemsByOrder = new Map<string, ConsignmentOrderItemRow[]>();
+  for (const it of items) {
+    const arr = itemsByOrder.get(it.consignmentOrderId);
+    if (arr) arr.push(it);
+    else itemsByOrder.set(it.consignmentOrderId, [it]);
+  }
+  const data = orderRows.map((r) =>
+    rowToCOList(r, itemsByOrder.get(r.id) ?? []),
+  );
   return c.json({ success: true, data, total: data.length });
 });
 

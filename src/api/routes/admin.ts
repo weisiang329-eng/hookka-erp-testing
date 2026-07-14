@@ -1052,4 +1052,159 @@ app.post("/backfill-so-prices", async (c) => {
   });
 });
 
+// POST /api/admin/backfill-invoice-prices?dryRun=true — maps the total-height
+// under-billed SO lines onto their ALREADY-CREATED (non-cancelled) invoices and
+// reports the EXACT per-invoice-line unit-price correction. Lineage: an invoice's
+// lines are priced from the whole-org SO-line price index (computeDoInvoiceLines →
+// priceForItem), so an under-billed SO line pushed its wrong unit price into the
+// invoice line verbatim → the invoice line's unitPriceSen == the SO line's stored
+// (under-billed) unitPriceSen. We resolve each invoice's DO→SO set, then match its
+// items by (productCode + unitPriceSen) to an under-billed SO line and emit the
+// corrected unit. READ-ONLY planner: the actual re-price is applied through the
+// PROVEN PUT /api/invoices/:id priceEdits path (GL reverse+repost + AR delta),
+// never re-implemented here.
+app.post("/backfill-invoice-prices", async (c) => {
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const orgId = getOrgId(c);
+
+  // 1. Under-billed SO lines (same detection as backfill-so-prices), grouped by
+  //    salesOrderId → Map<`${productCode}|${storedUnitSen}`, {surchargeSen, correctUnitSen}>.
+  const soRes = await db
+    .prepare(
+      `SELECT soi.salesOrderId, soi.productCode,
+              soi.gapInches, soi.divanHeightInches, soi.legHeightInches,
+              soi.basePriceSen, soi.divanPriceSen, soi.legPriceSen,
+              soi.specialOrderPriceSen, soi.unitPriceSen,
+              so.customerId, so.isServiceOrder, so.created_at
+         FROM sales_order_items soi
+         JOIN sales_orders so ON so.id = soi.salesOrderId
+        WHERE so.orgId = ?
+          AND (COALESCE(soi.gapInches,0) + COALESCE(soi.divanHeightInches,0)
+               + COALESCE(soi.legHeightInches,0)) > 0`,
+    )
+    .bind(orgId)
+    .all<{
+      salesOrderId: string; productCode: string;
+      gapInches: number | null; divanHeightInches: number | null; legHeightInches: number | null;
+      basePriceSen: number | null; divanPriceSen: number | null; legPriceSen: number | null;
+      specialOrderPriceSen: number | null; unitPriceSen: number | null;
+      customerId: string | null; isServiceOrder: unknown; created_at: string | null;
+    }>();
+
+  const cache = new Map<string, Array<{ value: string; priceSen: number }>>();
+  const thTiers = async (customerId: string | null, asOf: string) => {
+    const scopes = customerId ? [`customer:${customerId}`, "master"] : ["master"];
+    for (const scope of scopes) {
+      const key = `${scope}|${asOf}`;
+      let arr = cache.get(key);
+      if (arr === undefined) {
+        const r = await resolveMaintenanceConfigAsOf(db, scope, asOf);
+        const th = (r.config as { totalHeights?: unknown } | null)?.totalHeights;
+        arr = Array.isArray(th)
+          ? (th.filter((x) => x && typeof x === "object" && "value" in x && "priceSen" in x) as Array<{ value: string; priceSen: number }>)
+          : [];
+        cache.set(key, arr);
+      }
+      if (arr.length) return arr;
+    }
+    return [] as Array<{ value: string; priceSen: number }>;
+  };
+
+  const bySo = new Map<string, Map<string, { surchargeSen: number; correctUnitSen: number }>>();
+  for (const line of soRes.results ?? []) {
+    if (line.isServiceOrder === true || line.isServiceOrder === 1) continue;
+    const totalInches =
+      (line.gapInches || 0) + (line.divanHeightInches || 0) + (line.legHeightInches || 0);
+    const asOf = (line.created_at || "").slice(0, 10) || "9999-12-31";
+    const tiers = await thTiers(line.customerId, asOf);
+    const correctTh = Number(tiers.find((t) => t.value === `${totalInches}"`)?.priceSen || 0);
+    if (correctTh <= 0) continue;
+    const withoutTh =
+      (line.basePriceSen || 0) + (line.divanPriceSen || 0) + (line.legPriceSen || 0) + (line.specialOrderPriceSen || 0);
+    // Under-billed ONLY when stored unit == sum WITHOUT total-height (never double-add).
+    if ((line.unitPriceSen || 0) === withoutTh) {
+      const key = `${line.productCode}|${line.unitPriceSen}`;
+      const m = bySo.get(line.salesOrderId) ?? new Map();
+      m.set(key, { surchargeSen: correctTh, correctUnitSen: withoutTh + correctTh });
+      bySo.set(line.salesOrderId, m);
+    }
+  }
+
+  // 2. Non-cancelled invoices linked to a DO.
+  const invRes = await db
+    .prepare(
+      `SELECT id, invoiceNo, status, deliveryOrderId, salesOrderId, totalSen, paidAmount
+         FROM invoices
+        WHERE orgId = ? AND status != 'CANCELLED'
+          AND deliveryOrderId IS NOT NULL AND deliveryOrderId != ''`,
+    )
+    .bind(orgId)
+    .all<{
+      id: string; invoiceNo: string; status: string;
+      deliveryOrderId: string; salesOrderId: string | null;
+      totalSen: number; paidAmount: number | null;
+    }>();
+
+  const { resolveDoSalesOrderIds } = await import("./delivery-orders");
+
+  const plan: Array<Record<string, unknown>> = [];
+  let totalDeltaSen = 0;
+  let lineCount = 0;
+  for (const inv of invRes.results ?? []) {
+    const soIds = await resolveDoSalesOrderIds(db, inv.deliveryOrderId, inv.salesOrderId);
+    const corr = new Map<string, { surchargeSen: number; correctUnitSen: number }>();
+    for (const so of soIds) {
+      const m = bySo.get(so);
+      if (m) for (const [k, v] of m) corr.set(k, v);
+    }
+    if (corr.size === 0) continue;
+    const itemsRes = await db
+      .prepare(
+        "SELECT id, productCode, quantity, unitPriceSen, discountSen FROM invoice_items WHERE invoiceId = ?",
+      )
+      .bind(inv.id)
+      .all<{ id: string; productCode: string; quantity: number; unitPriceSen: number; discountSen: number | null }>();
+    const edits: Array<Record<string, unknown>> = [];
+    for (const it of itemsRes.results ?? []) {
+      const fix = corr.get(`${it.productCode}|${it.unitPriceSen}`);
+      if (fix) {
+        const delta = fix.surchargeSen * (it.quantity || 0);
+        edits.push({
+          itemId: it.id, product: it.productCode, qty: it.quantity,
+          oldUnitSen: it.unitPriceSen, newUnitSen: fix.correctUnitSen,
+          discountSen: it.discountSen || 0, lineDeltaRM: delta / 100,
+        });
+      }
+    }
+    if (edits.length) {
+      const invDelta = edits.reduce((s, e) => s + Number(e.lineDeltaRM) * 100, 0);
+      totalDeltaSen += invDelta;
+      lineCount += edits.length;
+      plan.push({
+        invoiceId: inv.id, invoiceNo: inv.invoiceNo, status: inv.status,
+        paidRM: (inv.paidAmount || 0) / 100,
+        oldTotalRM: (inv.totalSen || 0) / 100,
+        deltaRM: invDelta / 100,
+        newTotalRM: ((inv.totalSen || 0) + invDelta) / 100,
+        edits,
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun: true,
+    note:
+      "READ-ONLY. Apply each invoice's edits via PUT /api/invoices/:id { priceEdits:[{id:itemId, baseSen:newUnitSen, divanSen:0, legSen:0, specialSen:0, discountSen}] } — the proven GL reverse+repost + AR-delta path.",
+    summary: {
+      invoicesToReprice: plan.length,
+      linesToReprice: lineCount,
+      totalUnderBilledRM: (totalDeltaSen / 100).toLocaleString(),
+    },
+    plan,
+  });
+});
+
 export default app;

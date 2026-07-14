@@ -34,6 +34,30 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-14-007 — Mobile lag: /m shell warmed Home's heavy endpoints on EVERY landing (incl. /m/production) `performance` `mobile` `ui-frontend` 🟢
+**Symptom:** the phone app felt laggy the moment a factory worker opened straight to
+`/m/production` (their default screen). The production board itself is already slim
+(8 KB), yet the screen fired **5 API calls**: the board **plus** `/api/dashboard/overview`
+(a compute-bound query up to **7.6 s**), the full `/api/sales-orders` (~100 KB) and
+`/api/inventory` (~95 KB), and `/api/sales-orders/stats` — none of which the board needs.
+On weak factory wifi those four saturated the link and starved the board's own fetch.
+**Root cause:** `preloadMobileCritical()` (src/pages/m/lib/preload.ts) is called once in
+the `/m` shell's mount effect (MobileLayout.tsx) and fired Home's 4 first-paint endpoints
+**unconditionally, regardless of landing route**. Home fetches those 4 itself via
+`useCachedJson`, so the preload is a warm-AHEAD only — but it ran on every screen.
+**Fix (src/pages/m/lib/preload.ts):** gate the warm-up on `isHomeLanding()`
+(`location.pathname === "/m"`) — only warm when the operator actually lands on Home. An
+earlier attempt used `requestIdleCallback`; measured on staging it did NOT help (the main
+thread goes idle within a frame of mount, so the deferred fetches still raced the board).
+**Verified (staging, 390 px viewport):** `/m/production` dropped **5 → 1** API call (only
+the 8 KB board); `/m` Home still loads all 4 warm-up endpoints — zero feature loss. Shipped
+to prod (main 2bbf6d02).
+**Follow-up (separate):** `/api/dashboard/overview` itself is a ~7.6 s cold recompute
+because `cached()` (src/api/lib/kv-cache.ts) BLOCKS on miss and KV deletes the key at its
+60 s TTL — so once/min one Home user eats the full recompute. Fix candidate: warm it in the
+existing `/api/internal/warm-lists` cron (byte-identical, like compliance/brief already are)
+and/or give `cached()` true serve-stale. Money-adjacent (KPI figures) → careful focused pass.
+
 ## BUG-2026-07-14-006 — Double invoicing: 64 DOs invoiced 2–4× each (77 extra invoices, ~RM 405k over-billing on staging) `invoices` `accounting` `money` `duplicate` 🟢
 **Symptom:** the same Delivery Order was invoiced multiple times — 64 DOs had 2, 3, or
 even 4 active (non-cancelled) invoices, each an EXACT duplicate (same DO, same line

@@ -34,6 +34,38 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-14-002 — withSnapshot served a STALE-SHAPE blob after a payload field was added (CN /ready-planning poLookups blank) `perf` `snapshot` `durable-arch` 🟢
+**Symptom:** Added `poLookups` to the `GET /api/consignment-notes/ready-planning`
+compute output + deployed, but the CN Note detail dialog's lookup columns
+(companyCOId / fabric / rack) stayed BLANK on staging. The endpoint code was
+right; the response just never carried the new field.
+**Root cause:** `withSnapshot` invalidates on **source-table mtimes, NOT on code**.
+Because no source table had changed, it kept serving the previously-cached v1 blob
+(which had no `poLookups`) as "fresh" — a new output field is invisible until the
+cache is busted. Same class as the data-visibility checklist item #3 ("payload
+SHAPE change → bump the key"), but for a server snapshot rather than a client cache.
+**Fix (6909192e):** bump the snapshot `cache_key` (`""` → `"v2"`) whenever the
+compute's output SHAPE changes. Verified live: poLookups 22, 0 diffs, columns fill.
+**Guard / rule (do NOT step on this again):** ANY change to a `withSnapshot`
+endpoint's returned shape MUST bump its `cache_key`. Baked into
+docs/PERF-DURABLE-ARCHITECTURE.md + the durable-perf memory. Applies to every
+future slice (inventory/delivery already shipped clean; this is the standing rule).
+
+## BUG-2026-07-13-001 — Delivery /ready-planning FE swap hung the page's cold paint (uncached heavy endpoint) `perf` `snapshot` `durable-arch` 🟢
+**Symptom:** (delivery slice, prior session) swapping the FE to consume the new
+server endpoint left the page stuck blank on a cold load — the ~8s whole-org
+compute blocked first paint. Logged here on the deployed branch so the pattern
+isn't rediscovered.
+**Root cause:** the endpoint ran the full PO+JC load/join on every cold request
+with no cache, so the page awaited ~8s before rendering.
+**Fix:** wrap the compute in `withSnapshot` + `staleWhileRevalidate` + runtime
+CREATE of the snapshot table BEFORE gating the FE on it. Serve last-good instantly,
+refresh in the background.
+**Guard / rule:** a heavy derive-and-drop endpoint MUST be snapshot-cached BEFORE
+the FE consumes it — never gate a page's cold paint on an uncached whole-org
+compute. Applied to inventory (`inventory_fg_stock_snapshot`) + CN
+(`consignment_ready_planning_snapshot`) this session.
+
 ## BUG-2026-07-11-001 — Full-system data-accuracy audit: 20+ findings across dashboard/planning/daily-report/OCR (P1-P3 shipped same day) `dashboard` `planning` `data-quality`
 
 - **Status:** 🟢 Fixed (commits 04fa1593, c1cb3bb0 + prod data repair)

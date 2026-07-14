@@ -229,6 +229,7 @@ app.get("/ready-planning", async (c) => {
         "consignment_items",
         "consignment_notes",
         "consignment_orders",
+        "products",
       ],
     },
     orgId,

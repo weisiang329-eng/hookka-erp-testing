@@ -126,7 +126,10 @@ app.post("/heartbeat", async (c) => {
   // 2,000-row backlog drains across the day instead of waiting for the next
   // generation trigger). No pending rows → no run row, no noise.
   try {
-    if (await isAutoApproveOn(db, "PRODUCTION")) {
+    // Owner 2026-07-15: the drain also clocks off after 8pm MYT (8am–8pm only).
+    const hourMyt = new Date(Date.now() + 8 * 3600 * 1000).getUTCHours();
+    const workingHours = hourMyt >= 8 && hourMyt < 20;
+    if (workingHours && (await isAutoApproveOn(db, "PRODUCTION"))) {
       const pend = await db
         .prepare("SELECT COUNT(*) AS n FROM schedule_proposals WHERE status = 'PENDING'")
         .bind()

@@ -300,29 +300,35 @@ async function persistSoOriginal(
   soId: string,
   scanQueueRowId: string,
   poNo: string | null,
-): Promise<void> {
+): Promise<{ ok: boolean; poNo: string }> {
+  const label = poNo || soId;
   try {
     const bres = await fetch(
       `/api/scan-queue/${encodeURIComponent(scanQueueRowId)}/bytes`,
     );
-    if (!bres.ok) return;
+    if (!bres.ok) throw new Error(`source bytes HTTP ${bres.status}`);
     const blob = await bres.blob();
+    if (!blob.size) throw new Error("source bytes empty");
     const type = blob.type || "application/pdf";
     const ext = type.includes("pdf")
       ? "pdf"
       : type.includes("png")
         ? "png"
         : "jpg";
-    const file = new File([blob], `PO-original-${poNo || soId}.${ext}`, {
-      type,
-    });
+    const file = new File([blob], `PO-original-${label}.${ext}`, { type });
     const fd = new FormData();
     fd.append("file", file);
     fd.append("resourceType", "SO");
     fd.append("resourceId", soId);
-    await fetch("/api/files", { method: "POST", body: fd });
-  } catch {
-    /* best-effort — the SO is already created */
+    const up = await fetch("/api/files", { method: "POST", body: fd });
+    if (!up.ok) throw new Error(`file upload HTTP ${up.status}`);
+    return { ok: true, poNo: label };
+  } catch (e) {
+    // Do NOT swallow — this exact silent-catch is how the original went
+    // unnoticed for a month. Surface it (console + a done-step warning) so a
+    // save failure is caught the same day, not by a customer complaint later.
+    console.error(`[scan] failed to persist original for ${label}:`, e);
+    return { ok: false, poNo: label };
   }
 }
 
@@ -869,7 +875,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     const errs: string[] = [];
     // Source-attachment uploads (fired during the create loop). Awaited before
     // the consume loop below, which nulls the scan_queue bytes they read.
-    const originalUploads: Promise<void>[] = [];
+    const originalUploads: Promise<{ ok: boolean; poNo: string }>[] = [];
 
     // --- Claude-extracted rows ----------------------------------------
     for (const row of selectedClaude) {
@@ -1173,8 +1179,17 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     // accounted for, so a partial create (operator skipped one PO) keeps
     // the un-created doc available on the next session.
     // Ensure every source-attachment copy finished reading the scan_queue bytes
-    // before we consume (which nulls them).
-    await Promise.allSettled(originalUploads);
+    // before we consume (which nulls them), and warn the operator about any that
+    // failed to save — so a missing original is caught NOW (re-scan), never a
+    // month later.
+    const uploadResults = await Promise.all(originalUploads);
+    const failedOriginals = uploadResults.filter((r) => !r.ok).map((r) => r.poNo);
+    if (failedOriginals.length > 0) {
+      setErrors((prev) => [
+        ...prev,
+        `⚠ Couldn't save the original scan for: ${failedOriginals.join(", ")}. The SO was created, but re-scan it so the original PO is kept on record.`,
+      ]);
+    }
     const seenPairs = new Set<string>();
     for (const row of selectedClaude) {
       if (!row.scanQueueRowId) continue;

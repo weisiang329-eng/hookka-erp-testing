@@ -77,9 +77,24 @@ interface ProposalRow {
   decidedAt?: string | null;
   decided_by?: string | null;
   decidedBy?: string | null;
+  due_date?: string | null;
+  dueDate?: string | null;
+  do_count?: number | string | null;
+  doCount?: number | string | null;
+  drop_count?: number | string | null;
+  dropCount?: number | string | null;
+  driver?: string | null;
+  recipients?: string | null;
 }
 
 function rowToProposal(r: ProposalRow) {
+  let recipients: Array<{ customer: string; hub: string; doCount: number; valueSen: number }> = [];
+  try {
+    const raw = r.recipients;
+    if (raw && typeof raw === "string") recipients = JSON.parse(raw);
+  } catch {
+    recipients = [];
+  }
   return {
     id: r.id,
     generatedAt: r.generatedAt ?? r.generated_at ?? "",
@@ -94,6 +109,12 @@ function rowToProposal(r: ProposalRow) {
     status: r.status,
     decidedAt: (r.decidedAt ?? r.decided_at) ?? "",
     decidedBy: (r.decidedBy ?? r.decided_by) ?? "",
+    // Packing-list fields (LOAD_PLAN). Empty/0 for INVOICE_GAP / POD_CHASE.
+    dueDate: (r.dueDate ?? r.due_date) ?? "",
+    doCount: Number(r.doCount ?? r.do_count) || 0,
+    dropCount: Number(r.dropCount ?? r.drop_count) || 0,
+    driver: r.driver ?? "",
+    recipients,
   };
 }
 

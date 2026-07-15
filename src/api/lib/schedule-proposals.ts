@@ -87,6 +87,8 @@ export interface GenerateProposalsResult {
   proposed: number;
   /** Prior PENDING proposals marked SUPERSEDED. */
   superseded: number;
+  /** Stale PENDING proposals (>1 day old, unadopted) marked EXPIRED. */
+  expired: number;
   /** Of the proposed: job cards that had NO dueDate at all. */
   unscheduled: number;
   /** Of the proposed: job cards whose dueDate was already in the past. */
@@ -117,8 +119,44 @@ function localToday(): string {
 // under adapter limits (11 params per inserted row).
 const CHUNK = 40;
 
+/**
+ * Auto-expire stale PENDING proposals not acted on within ~1 day (owner
+ * 2026-07-15: unadopted schedule proposals pile up forever — the per-job-card
+ * supersede only touches cards that reappear as candidates, so a card that drops
+ * out of the plan leaves its PENDING row orphaned). This clears anything PENDING
+ * generated more than 24h ago, keeping the Schedule Proposals table small (it had
+ * grown to 1000+ rows, which is what made the Planning page lag). Marks EXPIRED —
+ * not deleted — so the history stays. Mirrors the delivery agent's expiry.
+ */
+async function expireStalePendingProposals(
+  db: D1Database,
+  nowIso: string,
+): Promise<number> {
+  const cutoff = new Date(Date.parse(nowIso) - 86400000).toISOString();
+  const prev = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM schedule_proposals
+        WHERE status = 'PENDING' AND generated_at < ?`,
+    )
+    .bind(cutoff)
+    .first<{ n: number | string }>();
+  const count = Number(prev?.n) || 0;
+  if (count > 0) {
+    await db
+      .prepare(
+        `UPDATE schedule_proposals SET status = 'EXPIRED', decided_at = ?
+          WHERE status = 'PENDING' AND generated_at < ?`,
+      )
+      .bind(nowIso, cutoff)
+      .run();
+  }
+  return count;
+}
+
 export async function generateProposals(db: D1Database): Promise<GenerateProposalsResult> {
   await ensureProposalTables(db);
+  // Clear proposals the owner never adopted within a day BEFORE regenerating.
+  const expired = await expireStalePendingProposals(db, new Date().toISOString());
 
   const { assignments } = await computeChainWithAssignments(db);
   const today = localToday();
@@ -224,6 +262,7 @@ export async function generateProposals(db: D1Database): Promise<GenerateProposa
     scanned: assignments.length,
     proposed: cands.length,
     superseded,
+    expired,
     unscheduled,
     overdue,
   };

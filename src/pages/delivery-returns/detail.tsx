@@ -106,7 +106,11 @@ export default function DeliveryReturnDetail() {
   }
 
   const isOpen = dr.status === "OPEN";
-  const canService = dr.status === "OPEN" || dr.status === "RETURNED_TO_STOCK";
+  // Outcomes are MUTUALLY EXCLUSIVE — you pick exactly one from OPEN. Once any
+  // outcome is chosen (restock / repair / pure-return) the DR is resolved and
+  // the other buttons disappear. This is what stops "restock (+1 good stock)
+  // then repair (produce a replacement)" from double-counting inventory.
+  const canService = isOpen;
 
   return (
     <div className="space-y-6">
@@ -246,7 +250,7 @@ export default function DeliveryReturnDetail() {
                 disabled={busy}
                 onClick={async () => {
                   await call("/set-outcome", { returnType: "PURE_RETURN" });
-                  toast.info("Now issue a Credit Note against the invoice for the returned line.");
+                  toast.info("Returned to stock — now issue the Credit Note to refund the customer.");
                   navigate("/invoices/credit-notes");
                 }}
               >

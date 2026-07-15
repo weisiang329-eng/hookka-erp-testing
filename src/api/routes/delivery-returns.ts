@@ -217,6 +217,49 @@ app.post("/", async (c) => {
 // (idempotent per DR via refType='DELIVERY_RETURN'); (2) flags the returned
 // fg_units RETURNED; (3) moves the DR to RETURNED_TO_STOCK. All in one batch so
 // it rolls back together.
+// Builds the "put returned goods back into sellable stock" statements:
+//   (1) reverse the COGS / FG value — add qty back to fg_batches + one reversing
+//       ADJUSTMENT (IN) cost_ledger row per slice, idempotent per DR;
+//   (2) flag the physical fg_units RETURNED.
+// SHARED by the "Return to stock" outcome AND the "Pure return → CN" outcome (a
+// pure return = the good comes back to sellable stock AND the money is refunded
+// via a Credit Note), so inventory is credited in ONE step from either. It is
+// safe against double-count: reverseFGForDeliveryReturn no-ops if this DR has
+// already reversed (guard on refType='DELIVERY_RETURN' AND refId=drId).
+async function buildReturnToStockStatements(
+  db: D1Database,
+  drId: string,
+  doId: string | null,
+  items: ReturnItemRow[],
+  now: string,
+): Promise<{ statements: D1PreparedStatement[]; reversedCogsSen: number }> {
+  const statements: D1PreparedStatement[] = [];
+  let reversedCogsSen = 0;
+  if (doId) {
+    const rev = await reverseFGForDeliveryReturn(
+      db,
+      drId,
+      doId,
+      items.map((it) => ({ productCode: it.productCode, quantity: it.quantity })),
+      now,
+    );
+    statements.push(...rev.statements);
+    reversedCogsSen = rev.reversedCogsSen;
+  }
+  const unitIds = items.map((it) => it.fgUnitId).filter((x): x is string => !!x);
+  if (unitIds.length) {
+    const marks = unitIds.map(() => "?").join(",");
+    statements.push(
+      db
+        .prepare(
+          `UPDATE fg_units SET status='RETURNED', returnedAt=? WHERE id IN (${marks})`,
+        )
+        .bind(now, ...unitIds),
+    );
+  }
+  return { statements, reversedCogsSen };
+}
+
 app.post("/:id/return-to-stock", async (c) => {
   const denied = await requirePermission(c, "delivery-orders", "update");
   if (denied) return denied;
@@ -225,41 +268,30 @@ app.post("/:id/return-to-stock", async (c) => {
   const now = new Date().toISOString();
 
   const header = await c.var.DB
-    .prepare(`SELECT delivery_order_id AS "doId" FROM delivery_returns WHERE id = ?`)
+    .prepare(`SELECT delivery_order_id AS "doId", status FROM delivery_returns WHERE id = ?`)
     .bind(id)
-    .first<{ doId: string | null }>();
+    .first<{ doId: string | null; status: string }>();
   if (!header) return c.json({ success: false, error: "Not found" }, 404);
+  // One-and-done: an outcome can only be chosen from OPEN. This is what makes
+  // "restock" and "repair" MUTUALLY EXCLUSIVE — you cannot return-to-stock (+1
+  // good stock) and then also repair-&-remake (produce a replacement), which
+  // would double-count inventory + COGS. Repair leaves the returned unit OUT of
+  // sellable stock; only restock / pure-return credit it back.
+  if (header.status !== "OPEN") {
+    return c.json(
+      { success: false, error: `This return is already resolved (${header.status}).` },
+      409,
+    );
+  }
   const items = await loadItems(c.var.DB, id);
 
-  const statements: D1PreparedStatement[] = [];
-
-  // (1) COGS / FG-value reversal (only if we know the source DO).
-  let reversedCogsSen = 0;
-  if (header.doId) {
-    const rev = await reverseFGForDeliveryReturn(
-      c.var.DB,
-      id,
-      header.doId,
-      items.map((it) => ({ productCode: it.productCode, quantity: it.quantity })),
-      now,
-    );
-    statements.push(...rev.statements);
-    reversedCogsSen = rev.reversedCogsSen;
-  }
-
-  // (2) flag the physical units RETURNED (best-effort — only lines that
-  // captured an fg_unit_id).
-  const unitIds = items.map((it) => it.fgUnitId).filter((x): x is string => !!x);
-  if (unitIds.length) {
-    const marks = unitIds.map(() => "?").join(",");
-    statements.push(
-      c.var.DB.prepare(
-        `UPDATE fg_units SET status='RETURNED', returnedAt=? WHERE id IN (${marks})`,
-      ).bind(now, ...unitIds),
-    );
-  }
-
-  // (3) advance the DR.
+  const { statements, reversedCogsSen } = await buildReturnToStockStatements(
+    c.var.DB,
+    id,
+    header.doId,
+    items,
+    now,
+  );
   statements.push(
     c.var.DB.prepare(
       `UPDATE delivery_returns SET status='RETURNED_TO_STOCK', returned_at=?, updated_at=? WHERE id=?`,
@@ -282,23 +314,52 @@ app.post("/:id/set-outcome", async (c) => {
   const id = c.req.param("id");
   const body = await c.req.json().catch(() => ({}));
   const type = body.returnType === "PURE_RETURN" ? "PURE_RETURN" : "REPAIR_REDELIVER";
+  const now = new Date().toISOString();
+
+  const header = await c.var.DB
+    .prepare(`SELECT delivery_order_id AS "doId", status FROM delivery_returns WHERE id = ?`)
+    .bind(id)
+    .first<{ doId: string | null; status: string }>();
+  if (!header) return c.json({ success: false, error: "Not found" }, 404);
+  // Mutual exclusivity (see return-to-stock): an outcome is settable only from
+  // OPEN, so REPAIR can never follow a RESTOCK (which would book the defective
+  // unit as good stock AND produce a replacement — a double count).
+  if (header.status !== "OPEN") {
+    return c.json(
+      { success: false, error: `This return is already resolved (${header.status}).` },
+      409,
+    );
+  }
+
   const status = type === "PURE_RETURN" ? "CN_ISSUED" : "SERVICE_SPAWNED";
-  await c.var.DB
-    .prepare(
+  const statements: D1PreparedStatement[] = [];
+  // PURE_RETURN = the good comes back to sellable stock (reverse COGS + fg_units)
+  // AND the customer is refunded via a Credit Note. Do the inventory half here so
+  // it is one step, not two. REPAIR_REDELIVER touches NO inventory — the unit is
+  // repaired / remade for the same customer and never re-enters sellable stock.
+  if (type === "PURE_RETURN") {
+    const items = await loadItems(c.var.DB, id);
+    const rts = await buildReturnToStockStatements(c.var.DB, id, header.doId, items, now);
+    statements.push(...rts.statements);
+  }
+  statements.push(
+    c.var.DB.prepare(
       `UPDATE delivery_returns
-          SET return_type=?, status=?, service_case_id=?, service_order_id=?, credit_note_id=?, updated_at=?
+          SET return_type=?, status=?, service_case_id=?, service_order_id=?, credit_note_id=?,
+              returned_at=COALESCE(?, returned_at), updated_at=?
         WHERE id=?`,
-    )
-    .bind(
+    ).bind(
       type,
       status,
       String(body.serviceCaseId ?? ""),
       String(body.serviceOrderId ?? ""),
       String(body.creditNoteId ?? ""),
-      new Date().toISOString(),
+      type === "PURE_RETURN" ? now : null,
+      now,
       id,
-    )
-    .run();
+    ),
+  );
+  await c.var.DB.batch(statements);
   return c.json({ success: true });
 });
 

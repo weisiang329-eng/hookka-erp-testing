@@ -854,6 +854,11 @@ export default function AgentConsolePage() {
                             PAUSED
                           </span>
                         )}
+                        {a.id === "DELIVERY" && a.autoApprove && (
+                          <span className="text-[11px] font-semibold rounded-full bg-[#6B5C32]/10 text-[#6B5C32] px-2 py-0.5">
+                            AUTO-APPROVE FLAG
+                          </span>
+                        )}
                       </CardTitle>
                       <p className="mt-1 text-xs text-[#6B7280]">{AGENT_BLURB[a.id] ?? ""}</p>
                     </div>
@@ -884,6 +889,24 @@ export default function AgentConsolePage() {
                             <Pause className="h-4 w-4 mr-1" />
                           )}
                           {a.paused ? "Resume" : "Pause"}
+                        </Button>
+                        {/* Auto-approve toggle — same control Production has, so
+                            Delivery's autonomy is managed the same way (owner
+                            2026-07-16: unify every agent's controls). Delivery
+                            full-auto only self-tunes its cs.transitDays.* promise
+                            days; it still never creates or sends any document. */}
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void toggleGate(a)}
+                          disabled={busy === `gate-${a.id}`}
+                        >
+                          {a.autoApprove ? (
+                            <ShieldOff className="h-4 w-4 mr-1" />
+                          ) : (
+                            <ShieldCheck className="h-4 w-4 mr-1" />
+                          )}
+                          {a.autoApprove ? "Back to proposals" : "Auto-approve"}
                         </Button>
                       </div>
                     )}

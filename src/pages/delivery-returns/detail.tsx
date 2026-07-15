@@ -24,6 +24,10 @@ interface DRItem {
   problem: string;
   disposition: string;
   wasInvoiced: boolean;
+  fabricCode: string;
+  sizeLabel: string;
+  specialOrder: string;
+  salesOrderNo: string;
 }
 interface DeliveryReturn {
   id: string;
@@ -144,6 +148,10 @@ export default function DeliveryReturnDetail() {
                 wipLabel: it.wipLabel,
                 quantity: it.quantity,
                 problem: it.problem,
+                fabricCode: it.fabricCode,
+                sizeLabel: it.sizeLabel,
+                specialOrder: it.specialOrder,
+                salesOrderNo: it.salesOrderNo,
               })),
             })
           }
@@ -168,14 +176,31 @@ export default function DeliveryReturnDetail() {
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-[11px] uppercase tracking-wide text-[#6B7280] border-b border-[#E2DDD8]">
-                <th className="py-2">Returned item</th><th>WIP</th><th>Qty</th><th>Problem</th><th>Invoiced?</th>
+                <th className="py-2">Returned item</th><th>Size / Fabric</th><th>Qty</th><th>Problem</th><th>Invoiced?</th>
               </tr>
             </thead>
             <tbody>
               {dr.items.map((it) => (
-                <tr key={it.id} className="border-b border-[#F0ECE9]">
-                  <td className="py-2"><b>{it.productCode}</b> <span className="text-[#6B7280]">{it.productName}</span></td>
-                  <td className="font-mono text-xs">{it.wipLabel || "—"}</td>
+                <tr key={it.id} className="border-b border-[#F0ECE9] align-top">
+                  <td className="py-2">
+                    <div>
+                      <b>{it.productCode}</b>{" "}
+                      <span className="text-[#6B7280]">{it.productName}</span>
+                    </div>
+                    {(it.salesOrderNo || it.specialOrder) && (
+                      <div className="text-[11px] text-[#9CA3AF]">
+                        {[
+                          it.salesOrderNo ? `SO ${it.salesOrderNo}` : "",
+                          it.specialOrder,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </div>
+                    )}
+                  </td>
+                  <td className="text-xs text-[#6B7280]">
+                    {[it.sizeLabel, it.fabricCode].filter(Boolean).join(" · ") || "—"}
+                  </td>
                   <td>{it.quantity}</td>
                   <td>{it.problem ? <span className="text-[#9A3A2D] font-medium">{it.problem}</span> : "—"}</td>
                   <td>{it.wasInvoiced ? <span className="text-[#9A3A2D]">Invoiced</span> : <span className="text-[#6B7280]">Not yet</span>}</td>
@@ -232,8 +257,11 @@ export default function DeliveryReturnDetail() {
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({ returnType: "REPAIR_REDELIVER", serviceCaseId: caseId }),
                     });
-                    toast.success("Service case opened — create the replacement order.");
-                    navigate(caseId ? `/service-order/create?fromCase=${caseId}` : "/service-cases");
+                    // Standard step is DR → Service Case → Service Order: land on
+                    // the case so the operator spawns the SV order from there
+                    // (the case detail's "Spawn Service Order" button).
+                    toast.success("Service case opened — spawn the replacement order from the case.");
+                    navigate(caseId ? `/service-cases/${caseId}` : "/service-cases");
                   } catch {
                     toast.error("Failed to open the service case");
                   } finally {
@@ -250,8 +278,8 @@ export default function DeliveryReturnDetail() {
                 disabled={busy}
                 onClick={async () => {
                   await call("/set-outcome", { returnType: "PURE_RETURN" });
-                  toast.info("Returned to stock — now issue the Credit Note to refund the customer.");
-                  navigate("/invoices/credit-notes");
+                  toast.info("Returned to stock — a Credit Note is pre-filled; confirm the refund amount.");
+                  navigate(`/invoices/credit-notes?fromReturn=${id}`);
                 }}
               >
                 Pure return → credit note

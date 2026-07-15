@@ -10,6 +10,10 @@ export type DeliveryReturnPdfItem = {
   wipLabel?: string;
   quantity?: number;
   problem?: string;
+  fabricCode?: string;
+  sizeLabel?: string;
+  specialOrder?: string;
+  salesOrderNo?: string;
 };
 export type DeliveryReturnPdf = {
   returnNo: string;
@@ -66,14 +70,20 @@ export function generateDeliveryReturnPdf(dr: DeliveryReturnPdf): void {
 
   const body: RowInput[] = dr.items.map((it) => [
     it.productCode || "",
-    it.productName || "",
-    it.wipLabel || "",
+    [
+      it.productName || "",
+      it.salesOrderNo ? `SO ${it.salesOrderNo}` : "",
+      it.specialOrder || "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    [it.sizeLabel, it.fabricCode].filter(Boolean).join(" · ") || "",
     String(it.quantity ?? 1),
     it.problem || "",
   ]);
   autoTable(doc, {
     startY: y,
-    head: [["Product", "Description", "WIP", "Qty", "Problem"]],
+    head: [["Product", "Description", "Size / Fabric", "Qty", "Problem"]],
     body,
     theme: "grid",
     styles: { fontSize: 8, textColor: INK, lineColor: [200, 200, 200] },

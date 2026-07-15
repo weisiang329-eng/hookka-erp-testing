@@ -219,6 +219,11 @@ function CreateReturnModal({
       toast.error("Pick a delivered DO and tick at least one problem item.");
       return;
     }
+    // Stamp each returned line "already invoiced?" from the source DO status so
+    // the detail page shows it correctly and the office knows a Credit Note is
+    // needed (an INVOICED DO's returned line was already billed).
+    const wasInvoiced =
+      (dos.find((d) => d.id === doId)?.status || "").toUpperCase() === "INVOICED";
     setCreating(true);
     try {
       const res = await fetch("/api/delivery-returns", {
@@ -233,6 +238,7 @@ function CreateReturnModal({
             productName: it.productName,
             quantity: it.quantity,
             problem: ticked[it.id]?.problem ?? "",
+            wasInvoiced,
           })),
         }),
       });

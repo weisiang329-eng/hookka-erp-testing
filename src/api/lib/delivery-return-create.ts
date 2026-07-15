@@ -23,6 +23,12 @@ export type DRCreateItem = {
   problem?: string;
   fgUnitId?: string;
   wasInvoiced?: boolean;
+  // Rich snapshot so the DR (and the SV order it spawns) carries the SAME detail
+  // as the source DO/SO — spec / variant / fabric / size + the SO reference.
+  fabricCode?: string;
+  sizeLabel?: string;
+  specialOrder?: string;
+  salesOrderNo?: string;
 };
 
 let tablesEnsured = false;
@@ -50,9 +56,28 @@ export async function ensureDeliveryReturnTables(
            production_order_id TEXT, po_no TEXT, product_code TEXT, product_name TEXT,
            wip_label TEXT, quantity DOUBLE PRECISION NOT NULL DEFAULT 1,
            problem TEXT, disposition TEXT, fg_unit_id TEXT,
-           was_invoiced INTEGER NOT NULL DEFAULT 0 )`,
+           was_invoiced INTEGER NOT NULL DEFAULT 0,
+           fabric_code TEXT, size_label TEXT, special_order TEXT, sales_order_no TEXT )`,
       )
       .run();
+    // Rich-snapshot columns for tables created before the enrichment (runtime
+    // self-apply; deploy does not replay migration files).
+    for (const col of [
+      "fabric_code TEXT",
+      "size_label TEXT",
+      "special_order TEXT",
+      "sales_order_no TEXT",
+    ]) {
+      try {
+        await db
+          .prepare(
+            `ALTER TABLE delivery_return_items ADD COLUMN IF NOT EXISTS ${col}`,
+          )
+          .run();
+      } catch {
+        /* column already exists / DDL transiently rejected */
+      }
+    }
     tablesEnsured = true;
   } catch (err) {
     console.warn(
@@ -102,6 +127,8 @@ export async function loadDoItemsForReturn(
     .prepare(
       `SELECT productionOrderId AS "productionOrderId", poNo AS "poNo",
               productCode AS "productCode", productName AS "productName",
+              sizeLabel AS "sizeLabel", fabricCode AS "fabricCode",
+              specialOrder AS "specialOrder", salesOrderNo AS "salesOrderNo",
               quantity AS "quantity"
          FROM delivery_order_items WHERE deliveryOrderId = ?`,
     )
@@ -111,6 +138,10 @@ export async function loadDoItemsForReturn(
       poNo: string | null;
       productCode: string | null;
       productName: string | null;
+      sizeLabel: string | null;
+      fabricCode: string | null;
+      specialOrder: string | null;
+      salesOrderNo: string | null;
       quantity: number | null;
     }>();
   return (res.results ?? [])
@@ -125,6 +156,10 @@ export async function loadDoItemsForReturn(
       poNo: r.poNo ?? "",
       productCode: r.productCode ?? "",
       productName: r.productName ?? "",
+      sizeLabel: r.sizeLabel ?? "",
+      fabricCode: r.fabricCode ?? "",
+      specialOrder: r.specialOrder ?? "",
+      salesOrderNo: r.salesOrderNo ?? "",
       quantity: Number(r.quantity ?? 1),
     }));
 }
@@ -152,7 +187,7 @@ export async function createDeliveryReturnRecord(
   try {
     let doNo = "";
     let customerName = "";
-    const customerPOId = "";
+    let customerPOId = "";
     try {
       const doRow = await db
         .prepare(
@@ -178,17 +213,23 @@ export async function createDeliveryReturnRecord(
         const soRow = await db
           .prepare(
             `SELECT so.id AS "soId", so.companySOId AS "companySOId",
-                    so.customerId AS "customerId"
+                    so.customerId AS "customerId", so.customerPOId AS "customerPOId"
                FROM production_orders po
                JOIN sales_orders so ON so.id = po.salesOrderId
               WHERE po.id = ? LIMIT 1`,
           )
           .bind(firstPo.productionOrderId)
-          .first<{ soId: string; companySOId: string; customerId: string }>();
+          .first<{
+            soId: string;
+            companySOId: string;
+            customerId: string;
+            customerPOId: string;
+          }>();
         if (soRow) {
           salesOrderId = soRow.soId ?? "";
           companySOId = soRow.companySOId ?? "";
           customerId = soRow.customerId ?? "";
+          customerPOId = soRow.customerPOId ?? "";
         }
       } catch (e) {
         console.warn(
@@ -235,8 +276,9 @@ export async function createDeliveryReturnRecord(
           .prepare(
             `INSERT INTO delivery_return_items
                (id, delivery_return_id, production_order_id, po_no, product_code,
-                product_name, wip_label, quantity, problem, disposition, fg_unit_id, was_invoiced)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+                product_name, wip_label, quantity, problem, disposition, fg_unit_id, was_invoiced,
+                fabric_code, size_label, special_order, sales_order_no)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             genItemId(),
@@ -250,6 +292,10 @@ export async function createDeliveryReturnRecord(
             String(it.problem ?? ""),
             String(it.fgUnitId ?? ""),
             it.wasInvoiced ? 1 : 0,
+            String(it.fabricCode ?? ""),
+            String(it.sizeLabel ?? ""),
+            String(it.specialOrder ?? ""),
+            String(it.salesOrderNo ?? ""),
           ),
       );
     }

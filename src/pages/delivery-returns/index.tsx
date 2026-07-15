@@ -162,6 +162,12 @@ interface DoItem {
   productCode: string;
   productName: string;
   quantity: number;
+  // Rich detail carried from the DO so the return + the SV order it spawns show
+  // the same spec/variant/fabric/size + SO reference.
+  sizeLabel?: string;
+  fabricCode?: string;
+  specialOrder?: string;
+  salesOrderNo?: string;
 }
 type TickState = Record<string, { on: boolean; problem: string }>;
 
@@ -239,6 +245,10 @@ function CreateReturnModal({
             quantity: it.quantity,
             problem: ticked[it.id]?.problem ?? "",
             wasInvoiced,
+            sizeLabel: it.sizeLabel ?? "",
+            fabricCode: it.fabricCode ?? "",
+            specialOrder: it.specialOrder ?? "",
+            salesOrderNo: it.salesOrderNo ?? "",
           })),
         }),
       });

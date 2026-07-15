@@ -10,6 +10,7 @@ import { RepairPartsBadge } from "@/components/sales/repair-scope-picker";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { cn, formatDate, formatRM } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useNavigate } from "react-router-dom";
 import {
   Truck,
   Package,
@@ -32,6 +33,7 @@ import {
   QrCode,
   Mail,
   Bot,
+  Undo2,
 } from "lucide-react";
 import DeliveryAgentTab from "./agent-tab";
 import type { DeliveryOrder, ProofOfDelivery, ThreePLProvider, Customer } from "@/types";
@@ -821,6 +823,7 @@ async function sendCustomerNotice(
 export default function DeliveryPage() {
   const { toast } = useToast();
   const { confirm } = useConfirm();
+  const navigate = useNavigate();
   // Top-level "Orders" / "3PL" / "Agent" tab — URL-synced so refresh and
   // back/forward both keep the user where they were.
   const [pageTab, setPageTab] = useUrlState<"orders" | "3pl" | "agent">("section", "orders");
@@ -4352,6 +4355,16 @@ export default function DeliveryPage() {
         disabled:
           row.status !== "DELIVERED" && row.status !== "INVOICED",
       },
+      {
+        // Post-delivery: some goods came back. Opens the Delivery Return
+        // builder pre-selecting this DO so the office ticks the returned lines
+        // (partial). DELIVERED / INVOICED only.
+        label: "Convert to Delivery Return",
+        icon: <Undo2 className="h-3.5 w-3.5" />,
+        action: () => navigate(`/delivery-returns?createFrom=${row.id}`),
+        disabled:
+          row.status !== "DELIVERED" && row.status !== "INVOICED",
+      },
       { label: "", separator: true, action: () => {} },
       {
         label: "Refresh",
@@ -4359,7 +4372,7 @@ export default function DeliveryPage() {
         action: () => fetchData(),
       },
     ],
-    [fetchData]
+    [fetchData, navigate]
   );
 
   // ---------- Tab counts ----------

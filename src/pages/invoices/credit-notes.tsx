@@ -1,4 +1,5 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -116,6 +117,83 @@ export default function CreditNotesPage() {
   });
   const [items, setItems] = useState<CreditNoteItemRow[]>([newCNItem()]);
   const [creating, setCreating] = useState(false);
+
+  // Pure return → land here PRE-FILLED (owner 2026-07-15): open the New CN modal
+  // with reason=RETURN, one line per returned item, and (best-effort) the
+  // customer + the DO's invoice pre-selected, so the operator only confirms the
+  // refund amount instead of starting from a blank list.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const fromReturn = searchParams.get("fromReturn") || "";
+  // customer + invoice captured from the DR; applied to the selects once the
+  // invoices list has loaded (it loads lazily when the modal opens).
+  const pendingPrefill = useRef<{ customerId: string; invoiceNo: string } | null>(null);
+  const prefillRan = useRef(false);
+
+  useEffect(() => {
+    if (!fromReturn || prefillRan.current) return;
+    prefillRan.current = true;
+    void (async () => {
+      try {
+        const drRes = await fetch(
+          `/api/delivery-returns/${encodeURIComponent(fromReturn)}`,
+        );
+        const drJson = (await drRes.json()) as {
+          data?: {
+            returnNo?: string;
+            customerId?: string;
+            deliveryOrderId?: string;
+            items?: Array<{ productCode?: string; productName?: string; quantity?: number }>;
+          };
+        };
+        const dr = drJson?.data;
+        if (!dr) return;
+        setReason("RETURN");
+        setReasonDetail(`Delivery Return ${dr.returnNo ?? ""}`.trim());
+        setItems(
+          (dr.items ?? []).map((it) => ({
+            _uid: crypto.randomUUID(),
+            description: [it.productCode, it.productName].filter(Boolean).join(" "),
+            quantity: Number(it.quantity ?? 1),
+            unitPriceSen: 0,
+          })),
+        );
+        let invoiceNo = "";
+        if (dr.deliveryOrderId) {
+          try {
+            const doRes = await fetch(
+              `/api/delivery-orders/${encodeURIComponent(dr.deliveryOrderId)}`,
+            );
+            const doJson = (await doRes.json()) as { data?: { invoiceNo?: string } };
+            invoiceNo = doJson?.data?.invoiceNo ?? "";
+          } catch {
+            /* best-effort — operator can pick the invoice manually */
+          }
+        }
+        pendingPrefill.current = { customerId: dr.customerId ?? "", invoiceNo };
+        setShowCreateModal(true);
+      } catch {
+        /* best-effort */
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot, ref-guarded
+  }, [fromReturn]);
+
+  // Once the invoices list is loaded, apply the pending customer + invoice.
+  useEffect(() => {
+    const p = pendingPrefill.current;
+    if (!p || invoices.length === 0) return;
+    if (p.customerId) setSelectedCustomerId(p.customerId);
+    if (p.invoiceNo) {
+      const inv = invoices.find((i) => {
+        const r = i as { invoiceNo?: string; invoiceNumber?: string };
+        return r.invoiceNo === p.invoiceNo || r.invoiceNumber === p.invoiceNo;
+      });
+      if (inv) setSelectedInvoiceId(inv.id);
+    }
+    pendingPrefill.current = null;
+    if (fromReturn) setSearchParams({});
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- apply once invoices arrive
+  }, [invoices]);
 
   // Ticked rows for the batch actions bar (print vouchers + Excel/CSV export).
   const [selectedCreditNotes, setSelectedCreditNotes] = useState<CreditNote[]>([]);

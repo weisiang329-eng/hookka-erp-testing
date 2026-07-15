@@ -29,6 +29,7 @@ import { emitAudit } from "../lib/audit";
 import {
   AGENT_FAMILIES,
   ensureAgentTables,
+  isAutoApproveOn,
   isKillSwitchOn,
   listAgentControls,
   monthLlmUsage,
@@ -39,6 +40,7 @@ import {
 } from "../lib/agent-console";
 import {
   applyConfigProposalValue,
+  autoApplyConfigProposals,
   ensureConfigProposalTable,
   runLearning,
 } from "../lib/agent-learning";
@@ -54,6 +56,22 @@ export default app;
 function actorId(c: { get: (k: string) => unknown }): string | null {
   const v = (c as unknown as { get: (k: string) => string | undefined }).get("userId");
   return v ?? null;
+}
+
+// Flag-respecting parameter auto-apply, shared by the learning/proposals
+// "Run now" buttons and the heartbeat sweep. One path for BOTH families so the
+// AUTO-APPROVE flag always MEANS "clear my learned params" — production tunes
+// its chain.* handoffs, delivery tunes its cs.transitDays.* promise dates.
+// Each family is gated only by its own flag (isAutoApproveOn is already false
+// when the family is paused). Returns the count applied across both.
+async function autoTuneFlaggedParams(db: D1Database): Promise<number> {
+  let tuned = 0;
+  for (const fam of ["PRODUCTION", "DELIVERY"] as const) {
+    if (await isAutoApproveOn(db, fam)) {
+      tuned += await autoApplyConfigProposals(db, fam, "AGENT_AUTO").catch(() => 0);
+    }
+  }
+  return tuned;
 }
 
 // The three runnable Production tasks. next-run text is a hardcoded
@@ -492,8 +510,9 @@ app.post("/run-now", async (c) => {
   if (agent === "proposals") {
     const result = await recordAgentRun(db, "production-proposals", async (run) => {
       const r = await generateProposals(db);
+      const tuned = await autoTuneFlaggedParams(db);
       run.setSummary(
-        `proposed ${r.proposed} (unscheduled ${r.unscheduled} · overdue ${r.overdue} · superseded ${r.superseded}) (run-now)`,
+        `proposed ${r.proposed} (unscheduled ${r.unscheduled} · overdue ${r.overdue} · superseded ${r.superseded})${tuned > 0 ? ` · auto-tuned ${tuned} param(s)` : ""} (run-now)`,
       );
       return r;
     });
@@ -502,10 +521,14 @@ app.post("/run-now", async (c) => {
   // learning
   const result = await recordAgentRun(db, "production-learning", async (run) => {
     const r = await runLearning(db, { emitProposals: true });
+    // With the AUTO-APPROVE flag on, clicking Run now clears the freshly-learned
+    // params immediately (same effect the heartbeat sweep gives hourly) — the
+    // flag means "apply", not "queue for me to click".
+    const tuned = await autoTuneFlaggedParams(db);
     run.setSummary(
       `adherence ${r.overallAdherencePct == null ? "n/a" : `${r.overallAdherencePct}%`} · ` +
         `${r.handoffs.filter((h) => h.flagged).length} handoff drift(s) · ` +
-        `${r.pendingConfigProposals} config proposal(s) pending · ${r.ot.length} OT signal(s) (run-now)`,
+        `${r.pendingConfigProposals} config proposal(s) pending${tuned > 0 ? ` · auto-tuned ${tuned}` : ""} · ${r.ot.length} OT signal(s) (run-now)`,
     );
     return r;
   });

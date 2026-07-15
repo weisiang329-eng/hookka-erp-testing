@@ -99,12 +99,6 @@ app.post("/heartbeat", async (c) => {
               return null;
             });
             if (a) autoNote = ` · auto-applied ${a.approved} (${a.remainingPending} queued)`;
-            // Full-auto also self-tunes its chain.* parameters (bounded +
-            // logged) — no owner approval step (owner ruling 2026-07-13).
-            const params = await autoApplyConfigProposals(db, "PRODUCTION", "AGENT_AUTO").catch(
-              () => 0,
-            );
-            if (params > 0) autoNote += ` · self-tuned ${params} param(s)`;
           }
           const summary = `proposed ${r.proposed} (unscheduled ${r.unscheduled} · overdue ${r.overdue} · superseded ${r.superseded})${autoNote} (heartbeat: ${d.reason})`;
           run.setSummary(summary);
@@ -118,6 +112,37 @@ app.post("/heartbeat", async (c) => {
       console.error(`[agents/heartbeat] ${d.task} failed:`, err);
       skipped.push({ task: d.task, reason: "run errored (see agent_runs)" });
     }
+  }
+
+  // Config-param auto-apply sweep (owner 2026-07-15: "flag 亮着参数还躺着").
+  // The AUTO-APPROVE flag must MEAN "the agent applies its own learned params".
+  // This used to be trapped inside the gated production-proposals decision, so
+  // the flag could be ON while params sat PENDING (production is capped at 3
+  // runs/day, and the delivery cs.transitDays.* params were never swept here at
+  // all — only PRODUCTION was). Now it runs every beat, for BOTH families,
+  // gated only by each family's own flag (isAutoApproveOn is already false when
+  // the family is paused) + working hours (clocks off after 8pm like the rest).
+  try {
+    const hourMytSweep = new Date(Date.now() + 8 * 3600 * 1000).getUTCHours();
+    if (hourMytSweep >= 8 && hourMytSweep < 20) {
+      for (const family of ["PRODUCTION", "DELIVERY"] as const) {
+        if (await isAutoApproveOn(db, family)) {
+          const n = await autoApplyConfigProposals(db, family, "AGENT_AUTO").catch((err) => {
+            console.warn(`[agents/heartbeat] ${family} param sweep failed:`, err);
+            return 0;
+          });
+          if (n > 0) {
+            ran.push({
+              task: `${family.toLowerCase()}-param-tune`,
+              reason: "auto-approve flag on",
+              summary: `self-tuned ${n} param(s)`,
+            });
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[agents/heartbeat] param sweep failed:", err);
   }
 
   // Backlog drain — autonomy also means finishing what's queued: with the

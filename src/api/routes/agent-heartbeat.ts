@@ -52,6 +52,15 @@ app.post("/heartbeat", async (c) => {
     return c.json({ ok: true, ran: [], skipped: [{ task: "ALL", reason: "kill switch" }] });
   }
 
+  // Run the beat in the BACKGROUND and return immediately (owner 2026-07-15).
+  // Once the agents were un-paused, one beat does generate ~1600 + apply a
+  // batch synchronously — that ran past the cron's 120s curl timeout, which
+  // returned HTTP 000 and GitHub marked the beat "failed" (looked like the
+  // agents clocked off at night). waitUntil lets the worker finish the beat
+  // after the response, so the cron always sees a fast 200.
+  c.executionCtx.waitUntil(
+    (async () => {
+      try {
   const { decisions, skipped } = await decideAgentRuns(db);
   const ran: Array<{ task: string; reason: string; summary?: string }> = [];
 
@@ -84,7 +93,7 @@ app.post("/heartbeat", async (c) => {
           if (await isAutoApproveOn(db, "PRODUCTION")) {
             const a = await applyPendingProposals(db, {
               decidedBy: "AGENT_AUTO",
-              limit: 300,
+              limit: 150,
             }).catch((err) => {
               console.warn("[agents/heartbeat] auto-apply failed:", err);
               return null;
@@ -124,7 +133,7 @@ app.post("/heartbeat", async (c) => {
         .first<{ n: number | string }>();
       if ((Number(pend?.n) || 0) > 0) {
         await recordAgentRun(db, "production-proposals", async (run) => {
-          const a = await applyPendingProposals(db, { decidedBy: "AGENT_AUTO", limit: 300 });
+          const a = await applyPendingProposals(db, { decidedBy: "AGENT_AUTO", limit: 150 });
           const summary = `auto-applied ${a.approved} queued proposal(s), ${a.remainingPending} remaining (heartbeat drain)`;
           run.setSummary(summary);
           ran.push({ task: "production-proposals", reason: "backlog drain", summary });
@@ -135,6 +144,10 @@ app.post("/heartbeat", async (c) => {
   } catch (err) {
     console.error("[agents/heartbeat] backlog drain failed:", err);
   }
-
-  return c.json({ ok: true, ran, skipped });
+      } catch (beatErr) {
+        console.error("[agents/heartbeat] background beat failed:", beatErr);
+      }
+    })(),
+  );
+  return c.json({ ok: true, background: true });
 });

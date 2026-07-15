@@ -48,6 +48,7 @@ import {
 import { generateProposals, applyPendingProposals, ensureProposalTables } from "../lib/schedule-proposals";
 import { dispatchReport } from "./reports";
 import { runDeliveryAgent } from "./delivery-agent";
+import { runEmployeeDigest } from "../lib/employee-agent";
 import { deliveryLearning } from "../lib/delivery-agent";
 import { DEFAULT_ORG_ID } from "../lib/tenant";
 
@@ -102,6 +103,14 @@ const DELIVERY_TASKS: Array<{ agent: string; label: string; nextRun: string }> =
     agent: "delivery-run",
     label: "Daily Run (proposals + learning + brief)",
     nextRun: "07:30 MYT (cron) + self-scheduled sweeps when deliveries spike · on demand",
+  },
+];
+
+const EMPLOYEE_TASKS: Array<{ agent: string; label: string; nextRun: string }> = [
+  {
+    agent: "employee-agent",
+    label: "Daily Digest (absences · late · pre-payroll · low-efficiency)",
+    nextRun: "07:00 MYT · working days · on demand",
   },
 ];
 
@@ -239,17 +248,33 @@ app.get("/status", async (c) => {
   const controlOf = (agent: string) => controls.find((x) => x.agent === agent);
   const killAll = controlOf("ALL")?.paused === true;
 
-  // PRODUCTION / DELIVERY run full console lifecycles; CS is live but
+  // Employee agent card reads the LAST digest snapshot (cheap kv) rather than
+  // recomputing on every /status — the digest itself runs on its own cadence.
+  let employeeDigest: { date?: string; counts?: Record<string, number> } | null = null;
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = 'employee-digest'")
+      .bind()
+      .first<{ value: string }>();
+    if (row?.value) employeeDigest = JSON.parse(row.value);
+  } catch {
+    employeeDigest = null;
+  }
+
+  // PRODUCTION / DELIVERY / EMPLOYEE run console lifecycles; CS is live but
   // question-driven (no cron), so it reports KPI counters instead of tasks.
   const agents = AGENT_FAMILIES.map((fam) => {
     const ctl = controlOf(fam);
-    const live = fam === "PRODUCTION" || fam === "DELIVERY" || fam === "CS";
+    const live =
+      fam === "PRODUCTION" || fam === "DELIVERY" || fam === "CS" || fam === "EMPLOYEE";
     const tasks =
       fam === "PRODUCTION"
         ? PRODUCTION_TASKS
         : fam === "DELIVERY"
           ? DELIVERY_TASKS
-          : [];
+          : fam === "EMPLOYEE"
+            ? EMPLOYEE_TASKS
+            : [];
     return {
       id: fam,
       live,
@@ -273,6 +298,16 @@ app.get("/status", async (c) => {
       cs:
         fam === "CS"
           ? { promises30d: csPromises30d, enginePromises30d: csEngine30d }
+          : null,
+      employee:
+        fam === "EMPLOYEE"
+          ? {
+              date: employeeDigest?.date ?? null,
+              absent: employeeDigest?.counts?.absent ?? 0,
+              late: employeeDigest?.counts?.late ?? 0,
+              pendingApprovals: employeeDigest?.counts?.pendingApprovals ?? 0,
+              lowEfficiency: employeeDigest?.counts?.lowEfficiency ?? 0,
+            }
           : null,
       pendingConfigProposals: fam === "PRODUCTION" ? pendingConfig : 0,
       month:
@@ -466,9 +501,9 @@ app.post("/run-now", async (c) => {
     body = {};
   }
   const agent = (body.agent ?? "").toLowerCase();
-  if (!["brief", "proposals", "learning", "delivery"].includes(agent)) {
+  if (!["brief", "proposals", "learning", "delivery", "employee"].includes(agent)) {
     return c.json(
-      { success: false, error: "agent must be brief | proposals | learning | delivery" },
+      { success: false, error: "agent must be brief | proposals | learning | delivery | employee" },
       400,
     );
   }
@@ -508,6 +543,25 @@ app.post("/run-now", async (c) => {
         `${r.date} · plans ${r.proposals.loadPlans} · invoice gaps ${r.proposals.invoiceGaps} · POD ${r.proposals.podChases} · transit drifts ${r.transitDrifts} (run-now)`,
       );
       return r;
+    });
+    return c.json({ success: true, data: result });
+  }
+  if (agent === "employee") {
+    const result = await recordAgentRun(db, "employee-agent", async (run) => {
+      const digest = await runEmployeeDigest(db);
+      // Persist a small snapshot so the console card reads counts cheaply.
+      await db
+        .prepare(
+          `INSERT INTO kv_config (key, value) VALUES ('employee-digest', ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        )
+        .bind(JSON.stringify({ date: digest.date, counts: digest.counts, generatedAt: new Date().toISOString() }))
+        .run()
+        .catch((e) => console.warn("[employee-agent] snapshot write failed:", e));
+      run.setSummary(
+        `${digest.date} · absent ${digest.counts.absent} · late ${digest.counts.late} · pending approvals ${digest.counts.pendingApprovals} · low-eff ${digest.counts.lowEfficiency} (run-now)`,
+      );
+      return digest;
     });
     return c.json({ success: true, data: result });
   }

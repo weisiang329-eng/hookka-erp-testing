@@ -23,20 +23,23 @@
 // ---------------------------------------------------------------------------
 
 /** Agent family ids used by agent_controls (plus the 'ALL' kill-switch row). */
-export type AgentFamily = "PRODUCTION" | "DELIVERY" | "CS" | "PROCUREMENT";
+export type AgentFamily = "PRODUCTION" | "DELIVERY" | "CS" | "PROCUREMENT" | "EMPLOYEE" | "SERVICE";
 
 export const AGENT_FAMILIES: AgentFamily[] = [
   "PRODUCTION",
   "DELIVERY",
   "CS",
+  "EMPLOYEE",
   "PROCUREMENT",
 ];
 
-/** Per-task run ids written to agent_runs (all Production for now). */
+/** Per-task run ids written to agent_runs. */
 export type AgentTaskId =
   | "production-brief"
   | "production-proposals"
-  | "production-learning";
+  | "production-learning"
+  | "employee-agent"
+  | "service-agent";
 
 let _agentMig: Promise<void> | null = null;
 export function ensureAgentTables(db: D1Database): Promise<void> {
@@ -365,6 +368,8 @@ export function taskFamily(task: string): AgentFamily | "OTHER" {
   if (t.startsWith("production")) return "PRODUCTION";
   if (t.startsWith("delivery")) return "DELIVERY";
   if (t.startsWith("cs")) return "CS";
+  if (t.startsWith("employee")) return "EMPLOYEE";
+  if (t.startsWith("service")) return "SERVICE";
   if (t.startsWith("procurement")) return "PROCUREMENT";
   return "OTHER";
 }

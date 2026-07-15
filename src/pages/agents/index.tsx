@@ -62,6 +62,13 @@ type AgentStatus = {
   tasks: AgentTask[];
   today: { runs: number; proposalsGenerated: number; pendingProposals: number } | null;
   cs?: { promises30d: number; enginePromises30d: number } | null;
+  employee?: {
+    date: string | null;
+    absent: number;
+    late: number;
+    pendingApprovals: number;
+    lowEfficiency: number;
+  } | null;
   pendingConfigProposals: number;
   month: { runs: number; tokensIn: number; tokensOut: number } | null;
   recentErrors: AgentRun[];
@@ -128,6 +135,7 @@ const AGENT_LABEL: Record<string, string> = {
   PRODUCTION: "Production Agent",
   DELIVERY: "Delivery Agent",
   CS: "Customer Service Agent",
+  EMPLOYEE: "Employee Agent",
   PROCUREMENT: "Procurement Agent",
   FINANCE: "Finance / AR Agent",
   SALES: "Sales / Quotation Agent",
@@ -144,6 +152,7 @@ const AGENT_BLURB: Record<string, string> = {
   DELIVERY:
     "Daily load plans, invoice-gap + POD closure, 3PL learning, transit-drift proposals that tune the CS promise engine.",
   CS: "Promise-date orchestrator across production, materials and delivery. Every answer is logged for hit-rate learning.",
+  EMPLOYEE: "Daily attendance / efficiency anomaly digest and pre-payroll checks. Read-only — never touches approved pay.",
   PROCUREMENT: "Shortage → PO drafts, expediting, supplier reliability.",
   FINANCE: "Missed invoices, aging + staged collection drafts, per-customer payment profiles.",
   SALES: "OCR PO → SO draft, engine-backed promise dates in quotes, price-anomaly interception.",
@@ -159,7 +168,6 @@ const AGENT_BLURB: Record<string, string> = {
 const PLANNED_AGENT_IDS = [
   "FINANCE",
   "SALES",
-  "HR",
   "DATA_QUALITY",
   "INVENTORY",
   "SERVICE",
@@ -294,7 +302,7 @@ export default function AgentConsolePage() {
     [load, toast],
   );
 
-  const runNow = async (agent: "brief" | "proposals" | "learning" | "delivery") => {
+  const runNow = async (agent: "brief" | "proposals" | "learning" | "delivery" | "employee") => {
     await post("run-now", { agent }, `Run started and finished: ${agent}.`, `run-${agent}`);
   };
 
@@ -887,21 +895,24 @@ export default function AgentConsolePage() {
                         the same Pause + Phase selector; Delivery adds Run now. */}
                     {live && (
                       <div className="flex items-center gap-2 flex-wrap">
-                        {a.id === "DELIVERY" && (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => void runNow("delivery")}
-                            disabled={busy === "run-delivery" || killAll}
-                          >
-                            {busy === "run-delivery" ? (
-                              <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                            ) : (
-                              <Play className="h-4 w-4 mr-1" />
-                            )}
-                            Run now
-                          </Button>
-                        )}
+                        {(a.id === "DELIVERY" || a.id === "EMPLOYEE") && (() => {
+                          const k = a.id === "EMPLOYEE" ? "employee" : "delivery";
+                          return (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void runNow(k)}
+                              disabled={busy === `run-${k}` || killAll}
+                            >
+                              {busy === `run-${k}` ? (
+                                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                              ) : (
+                                <Play className="h-4 w-4 mr-1" />
+                              )}
+                              Run now
+                            </Button>
+                          );
+                        })()}
                         <Button
                           variant="outline"
                           size="sm"
@@ -925,7 +936,40 @@ export default function AgentConsolePage() {
                   </div>
                 </CardHeader>
                 <CardContent>
-                  {a.id === "DELIVERY" && live ? (
+                  {a.id === "EMPLOYEE" && live ? (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                        {[
+                          { label: "Absent today", value: a.employee?.absent ?? 0 },
+                          { label: "Late today", value: a.employee?.late ?? 0 },
+                          {
+                            label: "Pending approvals",
+                            value: a.employee?.pendingApprovals ?? 0,
+                          },
+                          { label: "Low efficiency (7d)", value: a.employee?.lowEfficiency ?? 0 },
+                        ].map((s) => (
+                          <div
+                            key={s.label}
+                            className="rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2"
+                          >
+                            <div className="text-[11px] text-[#6B7280]">{s.label}</div>
+                            <div className="text-base font-semibold text-[#1F1D1B]">{s.value}</div>
+                          </div>
+                        ))}
+                      </div>
+                      {lastRun?.summary && (
+                        <div className="text-xs text-[#6B7280]">{lastRun.summary}</div>
+                      )}
+                      <div className="text-xs text-[#4B5563]">
+                        Read-only daily digest{a.employee?.date ? ` · as of ${a.employee.date}` : ""}:
+                        active workers with no clock-in, late arrivals, non-prod / add-prod
+                        requests still awaiting your decision, and workers under{" "}
+                        {"55%"} production efficiency over the last 7 days. It never edits
+                        attendance, hours or pay — it only surfaces. Runs 07:00 MYT on working
+                        days, or on demand.
+                      </div>
+                    </div>
+                  ) : a.id === "DELIVERY" && live ? (
                     <div className="space-y-2">
                       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                         {[

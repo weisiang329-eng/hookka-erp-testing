@@ -23,12 +23,14 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { DEFAULT_ORG_ID } from "../lib/tenant";
 import {
+  isAgentPaused,
   isAutoApproveOn,
   isAutoTuneOn,
   isKillSwitchOn,
   recordAgentRun,
   llmKeyIfBudgetAllows,
 } from "../lib/agent-console";
+import { runEmployeeDigest } from "../lib/employee-agent";
 import { decideAgentRuns } from "../lib/agent-scheduler";
 import { generateProposals, applyPendingProposals } from "../lib/schedule-proposals";
 import { autoApplyConfigProposals } from "../lib/agent-learning";
@@ -144,6 +146,50 @@ app.post("/heartbeat", async (c) => {
     }
   } catch (err) {
     console.error("[agents/heartbeat] param sweep failed:", err);
+  }
+
+  // Employee daily digest — the Employee agent's read-only run (owner 0716).
+  // Fires once per working day after 07:00 MYT: recomputes the anomaly counts
+  // and refreshes the console snapshot. Idempotent (overwrites the snapshot),
+  // so the once-a-day guard need not be exact around midnight.
+  try {
+    const mytE = new Date(Date.now() + 8 * 3600 * 1000);
+    const hourE = mytE.getUTCHours();
+    const todayE = mytE.toISOString().slice(0, 10);
+    if (hourE >= 7 && hourE < 20 && !(await isAgentPaused(db, "EMPLOYEE"))) {
+      const already = await db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM agent_runs WHERE agent = 'employee-agent' AND status <> 'error' AND substr(started_at,1,10) = ?",
+        )
+        .bind(todayE)
+        .first<{ n: number | string }>();
+      if ((Number(already?.n) || 0) === 0) {
+        await recordAgentRun(db, "employee-agent", async (run) => {
+          const digest = await runEmployeeDigest(db);
+          await db
+            .prepare(
+              `INSERT INTO kv_config (key, value) VALUES ('employee-digest', ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+            )
+            .bind(
+              JSON.stringify({
+                date: digest.date,
+                counts: digest.counts,
+                generatedAt: new Date().toISOString(),
+              }),
+            )
+            .run()
+            .catch(() => {});
+          run.setSummary(
+            `${digest.date} · absent ${digest.counts.absent} · late ${digest.counts.late} · pending approvals ${digest.counts.pendingApprovals} · low-eff ${digest.counts.lowEfficiency} (daily)`,
+          );
+          ran.push({ task: "employee-agent", reason: "daily digest", summary: "employee digest" });
+          return digest;
+        });
+      }
+    }
+  } catch (err) {
+    console.error("[agents/heartbeat] employee digest failed:", err);
   }
 
   // Backlog drain — autonomy also means finishing what's queued: with the

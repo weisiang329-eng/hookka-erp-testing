@@ -44,7 +44,7 @@ import {
   ensureConfigProposalTable,
   runLearning,
 } from "../lib/agent-learning";
-import { generateProposals, ensureProposalTables } from "../lib/schedule-proposals";
+import { generateProposals, applyPendingProposals, ensureProposalTables } from "../lib/schedule-proposals";
 import { dispatchReport } from "./reports";
 import { runDeliveryAgent } from "./delivery-agent";
 import { deliveryLearning } from "../lib/delivery-agent";
@@ -508,14 +508,42 @@ app.post("/run-now", async (c) => {
     return c.json({ success: true, data: result });
   }
   if (agent === "proposals") {
+    // With the AUTO-APPROVE flag ON, "Run now" must also WRITE the due dates,
+    // not just regenerate proposals (owner 2026-07-16: "我点了 Run Now，job
+    // card 的 due date 还是空的"). Applying used to happen only on the hourly
+    // heartbeat (≤400/beat), so a click looked like it did nothing. Now the
+    // click applies a first batch synchronously and drains the rest of the
+    // backlog in the background, so one click fills every WAITING card.
+    const flagOn = await isAutoApproveOn(db, "PRODUCTION");
     const result = await recordAgentRun(db, "production-proposals", async (run) => {
       const r = await generateProposals(db);
+      let applyNote = "";
+      if (flagOn) {
+        const a = await applyPendingProposals(db, { decidedBy: "AGENT_AUTO", limit: 400 });
+        applyNote = ` · applied ${a.approved} due date(s)${a.remainingPending > 0 ? ` (${a.remainingPending} draining)` : ""}`;
+      }
       const tuned = await autoTuneFlaggedParams(db);
       run.setSummary(
-        `proposed ${r.proposed} (unscheduled ${r.unscheduled} · overdue ${r.overdue} · superseded ${r.superseded})${tuned > 0 ? ` · auto-tuned ${tuned} param(s)` : ""} (run-now)`,
+        `proposed ${r.proposed} (unscheduled ${r.unscheduled} · overdue ${r.overdue} · superseded ${r.superseded})${applyNote}${tuned > 0 ? ` · auto-tuned ${tuned} param(s)` : ""} (run-now)`,
       );
       return r;
     });
+    // Drain the remaining backlog off the response path — one click clears the
+    // whole queue instead of 400 at a time. Bounded loop so a runaway can't spin.
+    if (flagOn) {
+      c.executionCtx.waitUntil(
+        (async () => {
+          try {
+            for (let i = 0; i < 25; i++) {
+              const a = await applyPendingProposals(db, { decidedBy: "AGENT_AUTO", limit: 400 });
+              if (a.remainingPending <= 0 || a.approved === 0) break;
+            }
+          } catch (err) {
+            console.error("[agents/run-now] proposals drain failed:", err);
+          }
+        })(),
+      );
+    }
     return c.json({ success: true, data: result });
   }
   // learning

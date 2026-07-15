@@ -157,6 +157,23 @@ export async function generateProposals(db: D1Database): Promise<GenerateProposa
   await ensureProposalTables(db);
   // Clear proposals the owner never adopted within a day BEFORE regenerating.
   const expired = await expireStalePendingProposals(db, new Date().toISOString());
+  // Housekeeping (owner 2026-07-16: "过期的没 delete 掉吗?"): expiry only MARKS
+  // rows EXPIRED so recent history stays visible — but terminal rows
+  // (EXPIRED / APPLIED / REJECTED) older than 7 days are dead weight, so
+  // physically delete them here to keep the table lean over time.
+  try {
+    const purgeCut = new Date(Date.now() - 7 * 86400000).toISOString();
+    await db
+      .prepare(
+        `DELETE FROM schedule_proposals
+          WHERE status IN ('EXPIRED','APPLIED','REJECTED')
+            AND COALESCE(decided_at, generated_at) < ?`,
+      )
+      .bind(purgeCut)
+      .run();
+  } catch (err) {
+    console.warn("[schedule-proposals] terminal-row purge failed:", err);
+  }
 
   const { assignments } = await computeChainWithAssignments(db);
   const today = localToday();

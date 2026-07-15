@@ -879,7 +879,7 @@ export default function AgentConsolePage() {
                             PAUSED
                           </span>
                         )}
-                        {live && renderPhaseBadge(a)}
+                        {live && a.id !== "CS" && renderPhaseBadge(a)}
                       </CardTitle>
                       <p className="mt-1 text-xs text-[#6B7280]">{AGENT_BLURB[a.id] ?? ""}</p>
                     </div>
@@ -915,7 +915,11 @@ export default function AgentConsolePage() {
                           )}
                           {a.paused ? "Resume" : "Pause"}
                         </Button>
-                        {renderPhaseSelector(a)}
+                        {/* CS is a single-mode answerer (on / paused) — no
+                            propose→approve→execute lifecycle, so no phases
+                            (owner 2026-07-16). Only lifecycle agents get the
+                            phase selector. */}
+                        {a.id !== "CS" && renderPhaseSelector(a)}
                       </div>
                     )}
                   </div>

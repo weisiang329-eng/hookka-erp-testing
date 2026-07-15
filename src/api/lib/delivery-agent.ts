@@ -809,7 +809,7 @@ async function insertProposals(
   for (let i = 0; i < proposals.length; i += INSERT_CHUNK) {
     const chunk = proposals.slice(i, i + INSERT_CHUNK);
     const valuesSql = chunk
-      .map(() => "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'PENDING')")
+      .map(() => "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'PENDING')")
       .join(",");
     const binds: unknown[] = [];
     for (const p of chunk) {

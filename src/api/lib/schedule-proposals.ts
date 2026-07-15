@@ -161,12 +161,37 @@ export async function generateProposals(db: D1Database): Promise<GenerateProposa
   const { assignments } = await computeChainWithAssignments(db);
   const today = localToday();
 
+  // Protect committed/imminent work (owner 2026-07-15): never PROPOSE a date
+  // change for job cards already SENT to production (distributedAt set) or due
+  // within 3 days — they're locked in. The engine still counts them for
+  // capacity; we only skip proposing to move them.
+  const soon = new Date(today + "T00:00:00Z");
+  soon.setUTCDate(soon.getUTCDate() + 3);
+  const soonYmd = soon.toISOString().slice(0, 10);
+  const protectedJcs = new Set<string>();
+  try {
+    const pr = await db
+      .prepare(
+        `SELECT id FROM job_cards
+          WHERE status = 'WAITING'
+            AND ( (distributedAt IS NOT NULL AND distributedAt <> '')
+               OR ( dueDate IS NOT NULL AND dueDate <> ''
+                    AND substr(dueDate,1,10) >= ? AND substr(dueDate,1,10) <= ? ) )`,
+      )
+      .bind(today, soonYmd)
+      .all<{ id: string }>();
+    for (const r of pr.results ?? []) protectedJcs.add(String(r.id));
+  } catch (e) {
+    console.warn("[schedule-proposals] protected-jc query failed:", e);
+  }
+
   // ONE candidate per job card (each jc appears in exactly one dept's plan).
   const byJc = new Map<string, Candidate>();
   let unscheduled = 0;
   let overdue = 0;
   for (const a of assignments) {
     for (const jcId of a.jcIds) {
+      if (protectedJcs.has(jcId)) continue; // sent / due within 3 days — locked
       const cur = a.currentDue;
       const proposed = a.date;
       let flavor: string | null = null;

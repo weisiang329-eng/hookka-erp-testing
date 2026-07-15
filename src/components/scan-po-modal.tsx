@@ -287,8 +287,44 @@ type ScanCatalog = {
 type CreateSOResponse = {
   success?: boolean;
   error?: string;
-  data?: { companySOId?: string };
+  data?: { companySOId?: string; id?: string };
 };
+
+// Persist the source scan as the SO's permanent attachment (owner 2026-07-15:
+// every SO must keep its original PO on record). The client lost its hold on the
+// File after the background OCR queue, but the SERVER still holds the source
+// bytes in scan_queue until /consume nulls them — so fetch them back and copy to
+// a durable /api/files attachment keyed to the SO id (same resource the SO's
+// Files section reads). Best-effort; never blocks or fails the SO create.
+async function persistSoOriginal(
+  soId: string,
+  scanQueueRowId: string,
+  poNo: string | null,
+): Promise<void> {
+  try {
+    const bres = await fetch(
+      `/api/scan-queue/${encodeURIComponent(scanQueueRowId)}/bytes`,
+    );
+    if (!bres.ok) return;
+    const blob = await bres.blob();
+    const type = blob.type || "application/pdf";
+    const ext = type.includes("pdf")
+      ? "pdf"
+      : type.includes("png")
+        ? "png"
+        : "jpg";
+    const file = new File([blob], `PO-original-${poNo || soId}.${ext}`, {
+      type,
+    });
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("resourceType", "SO");
+    fd.append("resourceId", soId);
+    await fetch("/api/files", { method: "POST", body: fd });
+  } catch {
+    /* best-effort — the SO is already created */
+  }
+}
 
 // An uploaded PDF paired with a stable unique id. Two files can share a
 // name (e.g. both "PO.pdf" dragged from different folders), which used to
@@ -831,6 +867,9 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     setStep("creating");
     const created: { soNo: string; poNo: string; itemCount: number }[] = [];
     const errs: string[] = [];
+    // Source-attachment uploads (fired during the create loop). Awaited before
+    // the consume loop below, which nulls the scan_queue bytes they read.
+    const originalUploads: Promise<void>[] = [];
 
     // --- Claude-extracted rows ----------------------------------------
     for (const row of selectedClaude) {
@@ -1042,6 +1081,13 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
             poNo: po.customerPO,
             itemCount: po.items.length,
           });
+          // Copy the source scan → durable SO attachment BEFORE the queue row is
+          // consumed (below), which nulls the bytes. Best-effort.
+          if (data.data.id && row.scanQueueRowId) {
+            originalUploads.push(
+              persistSoOriginal(data.data.id, row.scanQueueRowId, po.customerPO),
+            );
+          }
         } else {
           errs.push(`${po.customerPO}: ${data.error || "Failed to create SO"}`);
         }
@@ -1126,6 +1172,9 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     // /consume calls; backend stamps consumed_at only once every doc is
     // accounted for, so a partial create (operator skipped one PO) keeps
     // the un-created doc available on the next session.
+    // Ensure every source-attachment copy finished reading the scan_queue bytes
+    // before we consume (which nulls them).
+    await Promise.allSettled(originalUploads);
     const seenPairs = new Set<string>();
     for (const row of selectedClaude) {
       if (!row.scanQueueRowId) continue;

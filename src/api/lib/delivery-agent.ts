@@ -766,36 +766,33 @@ async function supersedePendingOfKinds(
 }
 
 /**
- * Auto-expire stale PENDING proposals whose delivery date has passed (owner
- * 2026-07-15: a proposal past its due date is meaningless — the office either
- * packed it manually or the window closed, so keeping it just clutters the
- * queue). Marks them EXPIRED (not deleted — the audit/history stays). Runs on
- * every agent cycle BEFORE regeneration, so expiry is independent of whether a
- * fresh plan replaces it. due_date is empty for INVOICE_GAP/POD_CHASE, so those
- * are never expired by this rule.
+ * Auto-expire stale PENDING proposals the owner never adopted within ~1 day of
+ * GENERATION (owner 2026-07-15: unadopted plans should clear after a day). Keyed
+ * on generated_at age — NOT the delivery date — because a ready SO whose expected
+ * DD has passed is OVERDUE and must keep surfacing, not be hidden. Marks EXPIRED
+ * (not deleted — the audit/history stays). Runs BEFORE regeneration each cycle.
+ * Mirrors the production schedule-proposals expiry.
  */
 async function expireStalePendingProposals(
   db: DbLike,
-  todayYmd: string,
   nowIso: string,
 ): Promise<number> {
+  const cutoff = new Date(Date.parse(nowIso) - 86400000).toISOString();
   const prev = await db
     .prepare(
       `SELECT COUNT(*) AS n FROM delivery_proposals
-        WHERE status = 'PENDING' AND due_date IS NOT NULL AND due_date <> ''
-          AND due_date < ?`,
+        WHERE status = 'PENDING' AND generated_at < ?`,
     )
-    .bind(todayYmd)
+    .bind(cutoff)
     .first<{ n: number | string }>();
   const count = n(prev?.n);
   if (count > 0) {
     await db
       .prepare(
         `UPDATE delivery_proposals SET status = 'EXPIRED', decided_at = ?
-          WHERE status = 'PENDING' AND due_date IS NOT NULL AND due_date <> ''
-            AND due_date < ?`,
+          WHERE status = 'PENDING' AND generated_at < ?`,
       )
-      .bind(nowIso, todayYmd)
+      .bind(nowIso, cutoff)
       .run();
   }
   return count;
@@ -1002,7 +999,7 @@ export async function generateDeliveryProposals(
   // Expire past-due PENDING proposals first (owner 2026-07-15), then whole-kind
   // supersede + fresh insert — regeneration is idempotent and a decided
   // (APPROVED/REJECTED) proposal is never touched.
-  const expired = await expireStalePendingProposals(db, todayYmd, nowIso);
+  const expired = await expireStalePendingProposals(db, nowIso);
   const superseded = await supersedePendingOfKinds(
     db,
     ["LOAD_PLAN", "INVOICE_GAP", "POD_CHASE"],

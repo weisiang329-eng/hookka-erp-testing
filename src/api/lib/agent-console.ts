@@ -72,6 +72,22 @@ export function ensureAgentTables(db: D1Database): Promise<void> {
          )`,
       )
       .run();
+    // Phase column (owner 2026-07-16): 1 = propose · 2 = auto-tune · 3 =
+    // full-auto. Nullable add + a one-time backfill from the legacy
+    // auto_approve flag (ON = full-auto = 3). The WHERE phase IS NULL guard
+    // makes it idempotent — an explicitly-set phase is never clobbered.
+    try {
+      await db
+        .prepare("ALTER TABLE agent_controls ADD COLUMN IF NOT EXISTS phase INTEGER")
+        .run();
+      await db
+        .prepare(
+          "UPDATE agent_controls SET phase = CASE WHEN auto_approve = 1 THEN 3 ELSE 1 END WHERE phase IS NULL",
+        )
+        .run();
+    } catch (e) {
+      console.warn("[agent-controls] phase migration:", e);
+    }
     // Seed the global kill-switch row so the console always has it to toggle.
     await db
       .prepare(
@@ -170,10 +186,23 @@ interface ControlRow {
   agent: string;
   paused: number | string | null;
   auto_approve?: number | string | null;
+  phase?: number | string | null;
   updated_at?: string | null;
   // db adapter folds snake_case → camelCase; dual-key every read.
   autoApprove?: number | string | null;
   updatedAt?: string | null;
+}
+
+/** Stored automation phase (1 propose · 2 auto-tune · 3 full-auto), falling
+ *  back to the legacy auto_approve flag for rows written before the phase
+ *  column existed (ON = 3, OFF = 1). Does NOT account for pause. */
+export function effectivePhase(r: ControlRow): 1 | 2 | 3 {
+  const raw = r.phase ?? null;
+  if (raw != null && raw !== "") {
+    const n = Math.round(Number(raw));
+    if (n >= 1 && n <= 3) return n as 1 | 2 | 3;
+  }
+  return Number(r.autoApprove ?? r.auto_approve) === 1 ? 3 : 1;
 }
 
 /**
@@ -215,16 +244,54 @@ export async function isAutoApproveOn(
     await ensureAgentTables(db);
     const res = await db
       .prepare(
-        "SELECT agent, paused, auto_approve FROM agent_controls WHERE agent IN ('ALL', ?)",
+        "SELECT agent, paused, auto_approve, phase FROM agent_controls WHERE agent IN ('ALL', ?)",
       )
       .bind(family)
       .all<ControlRow>();
     const rows = res.results ?? [];
     if (rows.some((r) => Number(r.paused) === 1)) return false;
     const fam = rows.find((r) => r.agent === family);
-    return Number(fam?.autoApprove ?? fam?.auto_approve) === 1;
+    return fam ? effectivePhase(fam) >= 3 : false;
   } catch {
     return false;
+  }
+}
+
+/**
+ * True when the family may auto-TUNE its own parameters — phase ≥ 2 and not
+ * paused. This is the softer autonomy gate: the agent applies its learned
+ * params (handoffs / transit days) but does NOT execute the real work (that's
+ * phase 3 = isAutoApproveOn). Fails CLOSED on error.
+ */
+export async function isAutoTuneOn(db: D1Database, family: AgentFamily): Promise<boolean> {
+  try {
+    await ensureAgentTables(db);
+    const res = await db
+      .prepare(
+        "SELECT agent, paused, auto_approve, phase FROM agent_controls WHERE agent IN ('ALL', ?)",
+      )
+      .bind(family)
+      .all<ControlRow>();
+    const rows = res.results ?? [];
+    if (rows.some((r) => Number(r.paused) === 1)) return false;
+    const fam = rows.find((r) => r.agent === family);
+    return fam ? effectivePhase(fam) >= 2 : false;
+  } catch {
+    return false;
+  }
+}
+
+/** Stored phase (1-3) for a family, ignoring pause — for the console display. */
+export async function getAgentPhase(db: D1Database, family: AgentFamily): Promise<1 | 2 | 3> {
+  try {
+    await ensureAgentTables(db);
+    const fam = await db
+      .prepare("SELECT agent, auto_approve, phase FROM agent_controls WHERE agent = ?")
+      .bind(family)
+      .first<ControlRow>();
+    return fam ? effectivePhase(fam) : 1;
+  } catch {
+    return 1;
   }
 }
 
@@ -246,6 +313,8 @@ export interface AgentControlState {
   agent: string;
   paused: boolean;
   autoApprove: boolean;
+  /** Automation phase: 1 propose · 2 auto-tune · 3 full-auto. */
+  phase: 1 | 2 | 3;
   updatedAt: string | null;
 }
 
@@ -260,7 +329,8 @@ export async function listAgentControls(
   return (res.results ?? []).map((r) => ({
     agent: r.agent,
     paused: Number(r.paused) === 1,
-    autoApprove: Number(r.autoApprove ?? r.auto_approve) === 1,
+    autoApprove: effectivePhase(r) >= 3,
+    phase: effectivePhase(r),
     updatedAt: (r.updatedAt ?? r.updated_at) ?? null,
   }));
 }
@@ -442,7 +512,7 @@ export async function llmKeyIfBudgetAllows(
 export async function setAgentControl(
   db: D1Database,
   agent: AgentFamily | "ALL",
-  patch: { paused?: boolean; autoApprove?: boolean },
+  patch: { paused?: boolean; autoApprove?: boolean; phase?: number },
 ): Promise<void> {
   await ensureAgentTables(db);
   const nowIso = new Date().toISOString();
@@ -452,20 +522,28 @@ export async function setAgentControl(
     .first<ControlRow>();
   const paused =
     patch.paused ?? (existing ? Number(existing.paused) === 1 : false);
-  const autoApprove =
-    patch.autoApprove ??
-    (existing
-      ? Number(existing.autoApprove ?? existing.auto_approve) === 1
-      : false);
+  // Phase is the source of truth; auto_approve is kept in sync (phase 3 = ON)
+  // so legacy readers still work. Setting autoApprove directly (old /gate)
+  // maps to phase 3/1. phase takes precedence when both are given.
+  let phase: 1 | 2 | 3;
+  if (patch.phase != null) {
+    phase = Math.max(1, Math.min(3, Math.round(patch.phase))) as 1 | 2 | 3;
+  } else if (patch.autoApprove != null) {
+    phase = patch.autoApprove ? 3 : 1;
+  } else {
+    phase = existing ? effectivePhase(existing) : 1;
+  }
+  const autoApprove = phase >= 3;
   await db
     .prepare(
-      `INSERT INTO agent_controls (agent, paused, auto_approve, updated_at)
-       VALUES (?, ?, ?, ?)
+      `INSERT INTO agent_controls (agent, paused, auto_approve, phase, updated_at)
+       VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(agent) DO UPDATE SET
          paused = excluded.paused,
          auto_approve = excluded.auto_approve,
+         phase = excluded.phase,
          updated_at = excluded.updated_at`,
     )
-    .bind(agent, paused ? 1 : 0, autoApprove ? 1 : 0, nowIso)
+    .bind(agent, paused ? 1 : 0, autoApprove ? 1 : 0, phase, nowIso)
     .run();
 }

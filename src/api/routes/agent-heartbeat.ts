@@ -24,6 +24,7 @@ import type { Env } from "../worker";
 import { DEFAULT_ORG_ID } from "../lib/tenant";
 import {
   isAutoApproveOn,
+  isAutoTuneOn,
   isKillSwitchOn,
   recordAgentRun,
   llmKeyIfBudgetAllows,
@@ -126,7 +127,7 @@ app.post("/heartbeat", async (c) => {
     const hourMytSweep = new Date(Date.now() + 8 * 3600 * 1000).getUTCHours();
     if (hourMytSweep >= 8 && hourMytSweep < 20) {
       for (const family of ["PRODUCTION", "DELIVERY"] as const) {
-        if (await isAutoApproveOn(db, family)) {
+        if (await isAutoTuneOn(db, family)) {
           const n = await autoApplyConfigProposals(db, family, "AGENT_AUTO").catch((err) => {
             console.warn(`[agents/heartbeat] ${family} param sweep failed:`, err);
             return 0;

@@ -27,8 +27,6 @@ import {
   Pause,
   OctagonAlert,
   Undo2,
-  ShieldCheck,
-  ShieldOff,
   RefreshCw,
   CheckCircle2,
   X,
@@ -60,6 +58,7 @@ type AgentStatus = {
   live: boolean;
   paused: boolean;
   autoApprove: boolean;
+  phase?: 1 | 2 | 3;
   tasks: AgentTask[];
   today: { runs: number; proposalsGenerated: number; pendingProposals: number } | null;
   cs?: { promises30d: number; enginePromises30d: number } | null;
@@ -357,22 +356,64 @@ export default function AgentConsolePage() {
     }
   };
 
-  const toggleGate = async (a: AgentStatus) => {
-    const next = !a.autoApprove;
-    const ok = await confirm({
-      title: next ? "Switch to full-auto" : "Back to propose-then-approve",
-      message: next
-        ? "Full auto — no approvals. The agent applies its own proposals AND self-tunes its own parameters (handoff / transit days, bounded + logged) on its scheduled runs. Production writes due dates on WAITING cards (every batch rollbackable); Delivery marks its plans approved (still never creates or sends documents). You keep Pause, Kill all, Rollback, and every change stays visible on the console."
-        : "The agent goes back to waiting for your approval before anything is applied.",
-      confirmLabel: next ? "Go full-auto" : "Require my approval",
-      danger: next,
-    });
-    if (!ok) return;
-    await post(
-      "gate",
-      { agent: a.id, autoApprove: next },
-      next ? "Auto-approve flag ON." : "Auto-approve flag OFF.",
-      `gate-${a.id}`,
+  // Automation phase: 1 propose · 2 auto-tune · 3 full-auto. Switchable any
+  // time. Only raising to phase 3 (the one that writes real work) confirms.
+  const phaseOf = (a: AgentStatus): 1 | 2 | 3 => a.phase ?? (a.autoApprove ? 3 : 1);
+  const PHASE_LABELS: Record<1 | 2 | 3, string> = {
+    1: "Propose",
+    2: "Auto-tune",
+    3: "Full-auto",
+  };
+  const setPhase = async (a: AgentStatus, phase: 1 | 2 | 3) => {
+    if (phase === phaseOf(a)) return;
+    if (phase === 3) {
+      const ok = await confirm({
+        title: "Switch to Phase 3 · Full-auto",
+        message:
+          a.id === "PRODUCTION"
+            ? "Full auto — the agent writes due dates onto WAITING job cards itself (every batch rollbackable) and self-tunes its handoffs. You keep Pause, Kill all and Rollback, and every change stays on the console."
+            : a.id === "DELIVERY"
+              ? "Full auto — the agent will create packing lists itself once a truck is full enough (it still never sends a document) and self-tunes its transit days. Until the truck-loading logic ships it only marks its plans approved."
+              : "Full auto — the agent acts on its own within its remit. Every action stays visible on the console.",
+        confirmLabel: "Go full-auto",
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    await post("phase", { agent: a.id, phase }, `Set to Phase ${phase} · ${PHASE_LABELS[phase]}.`, `phase-${a.id}`);
+  };
+  const renderPhaseSelector = (a: AgentStatus) => {
+    const cur = phaseOf(a);
+    return (
+      <div
+        className="inline-flex rounded-md border border-[#D8CFC4] overflow-hidden"
+        role="group"
+        aria-label="Automation phase"
+      >
+        {([1, 2, 3] as const).map((p, i) => {
+          const on = cur === p;
+          return (
+            <button
+              key={p}
+              type="button"
+              onClick={() => void setPhase(a, p)}
+              disabled={busy === `phase-${a.id}`}
+              title={`Phase ${p} · ${PHASE_LABELS[p]}`}
+              className={`text-xs px-2.5 py-1.5 transition-colors ${i > 0 ? "border-l border-[#D8CFC4]" : ""} ${on ? "bg-[#6B5C32] text-white" : "bg-white text-[#6B5C32] hover:bg-[#F5F1EC]"}`}
+            >
+              {p} · {PHASE_LABELS[p]}
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
+  const renderPhaseBadge = (a: AgentStatus) => {
+    const cur = phaseOf(a);
+    return (
+      <span className="text-[11px] font-semibold rounded-full bg-[#6B5C32]/10 text-[#6B5C32] px-2 py-0.5">
+        PHASE {cur} · {PHASE_LABELS[cur].toUpperCase()}
+      </span>
     );
   };
 
@@ -590,15 +631,11 @@ export default function AgentConsolePage() {
                           PAUSED
                         </span>
                       )}
-                      {production.autoApprove && (
-                        <span className="text-[11px] font-semibold rounded-full bg-[#6B5C32]/10 text-[#6B5C32] px-2 py-0.5">
-                          AUTO-APPROVE FLAG
-                        </span>
-                      )}
+                      {renderPhaseBadge(production)}
                     </CardTitle>
                     <p className="mt-1 text-xs text-[#6B7280]">{AGENT_BLURB.PRODUCTION}</p>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <Button
                       variant="outline"
                       size="sm"
@@ -612,19 +649,7 @@ export default function AgentConsolePage() {
                       )}
                       {production.paused ? "Resume" : "Pause"}
                     </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => void toggleGate(production)}
-                      disabled={busy === `gate-PRODUCTION`}
-                    >
-                      {production.autoApprove ? (
-                        <ShieldOff className="h-4 w-4 mr-1" />
-                      ) : (
-                        <ShieldCheck className="h-4 w-4 mr-1" />
-                      )}
-                      {production.autoApprove ? "Back to proposals" : "Auto-approve"}
-                    </Button>
+                    {renderPhaseSelector(production)}
                     <Button
                       variant="outline"
                       size="sm"
@@ -854,29 +879,29 @@ export default function AgentConsolePage() {
                             PAUSED
                           </span>
                         )}
-                        {a.id === "DELIVERY" && a.autoApprove && (
-                          <span className="text-[11px] font-semibold rounded-full bg-[#6B5C32]/10 text-[#6B5C32] px-2 py-0.5">
-                            AUTO-APPROVE FLAG
-                          </span>
-                        )}
+                        {live && renderPhaseBadge(a)}
                       </CardTitle>
                       <p className="mt-1 text-xs text-[#6B7280]">{AGENT_BLURB[a.id] ?? ""}</p>
                     </div>
-                    {a.id === "DELIVERY" && live && (
-                      <div className="flex items-center gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => void runNow("delivery")}
-                          disabled={busy === "run-delivery" || killAll}
-                        >
-                          {busy === "run-delivery" ? (
-                            <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                          ) : (
-                            <Play className="h-4 w-4 mr-1" />
-                          )}
-                          Run now
-                        </Button>
+                    {/* Unified controls (owner 2026-07-16): every LIVE agent gets
+                        the same Pause + Phase selector; Delivery adds Run now. */}
+                    {live && (
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {a.id === "DELIVERY" && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void runNow("delivery")}
+                            disabled={busy === "run-delivery" || killAll}
+                          >
+                            {busy === "run-delivery" ? (
+                              <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                            ) : (
+                              <Play className="h-4 w-4 mr-1" />
+                            )}
+                            Run now
+                          </Button>
+                        )}
                         <Button
                           variant="outline"
                           size="sm"
@@ -890,24 +915,7 @@ export default function AgentConsolePage() {
                           )}
                           {a.paused ? "Resume" : "Pause"}
                         </Button>
-                        {/* Auto-approve toggle — same control Production has, so
-                            Delivery's autonomy is managed the same way (owner
-                            2026-07-16: unify every agent's controls). Delivery
-                            full-auto only self-tunes its cs.transitDays.* promise
-                            days; it still never creates or sends any document. */}
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => void toggleGate(a)}
-                          disabled={busy === `gate-${a.id}`}
-                        >
-                          {a.autoApprove ? (
-                            <ShieldOff className="h-4 w-4 mr-1" />
-                          ) : (
-                            <ShieldCheck className="h-4 w-4 mr-1" />
-                          )}
-                          {a.autoApprove ? "Back to proposals" : "Auto-approve"}
-                        </Button>
+                        {renderPhaseSelector(a)}
                       </div>
                     )}
                   </div>

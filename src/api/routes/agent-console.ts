@@ -30,6 +30,7 @@ import {
   AGENT_FAMILIES,
   ensureAgentTables,
   isAutoApproveOn,
+  isAutoTuneOn,
   isKillSwitchOn,
   listAgentControls,
   monthLlmUsage,
@@ -67,7 +68,9 @@ function actorId(c: { get: (k: string) => unknown }): string | null {
 async function autoTuneFlaggedParams(db: D1Database): Promise<number> {
   let tuned = 0;
   for (const fam of ["PRODUCTION", "DELIVERY"] as const) {
-    if (await isAutoApproveOn(db, fam)) {
+    // Param self-tuning is a PHASE-2 capability (auto-tune), so it fires at
+    // phase 2 AND 3 — not only full-auto.
+    if (await isAutoTuneOn(db, fam)) {
       tuned += await autoApplyConfigProposals(db, fam, "AGENT_AUTO").catch(() => 0);
     }
   }
@@ -252,6 +255,7 @@ app.get("/status", async (c) => {
       live,
       paused: ctl?.paused === true,
       autoApprove: ctl?.autoApprove === true,
+      phase: ctl?.phase ?? 1,
       tasks: tasks.map((t) => ({
         ...t,
         lastRun: lastByTask.get(t.agent) ?? null,
@@ -642,6 +646,39 @@ app.post("/gate", async (c) => {
     source: "admin",
   });
   return c.json({ success: true, data: { agent, autoApprove } });
+});
+
+// ── POST /phase {agent, phase} ───────────────────────────────────────────────
+// Set an agent's automation phase (1 propose · 2 auto-tune · 3 full-auto).
+// Switchable any time (owner 2026-07-16): the next run/heartbeat reads the new
+// phase. Supersedes the binary /gate — auto_approve stays synced (phase 3 = on)
+// so nothing that still reads the old flag breaks.
+app.post("/phase", async (c) => {
+  const denied = requireSuperAdmin(c);
+  if (denied) return denied;
+  let body: { agent?: string; phase?: number } = {};
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    body = {};
+  }
+  const agent = (body.agent ?? "").toUpperCase() as AgentFamily;
+  if (!AGENT_FAMILIES.includes(agent)) {
+    return c.json({ success: false, error: "unknown agent" }, 400);
+  }
+  const phase = Math.round(Number(body.phase));
+  if (!(phase >= 1 && phase <= 3)) {
+    return c.json({ success: false, error: "phase must be 1, 2 or 3" }, 400);
+  }
+  await setAgentControl(c.var.DB, agent, { phase });
+  await emitAudit(c, {
+    resource: "agents",
+    resourceId: agent,
+    action: "phase",
+    after: { phase },
+    source: "admin",
+  });
+  return c.json({ success: true, data: { agent, phase } });
 });
 
 // ── POST /rollback-last-batch ────────────────────────────────────────────────

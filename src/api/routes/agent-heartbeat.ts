@@ -40,6 +40,42 @@ import { runDeliveryAgent, constantTimeEqual } from "./delivery-agent";
 const app = new Hono<Env>();
 export default app;
 
+// ── POST /run-generate ───────────────────────────────────────────────────────
+// The planning engine on its OWN invocation, so it gets a full CPU budget.
+//
+// Why this exists: the heartbeat used to run every agent inside one waitUntil —
+// one shared budget. The cheap tasks (drain, a 14s delivery run, the digests)
+// spent it, and the heavy generation — a full engine pass over 1000+ WAITING
+// cards — was killed mid-run. It had been dying silently since 15 Jul (five
+// zombie 'running' rows) while the console showed PHASE 3 · FULL-AUTO and the
+// queue grew to 1,715 (owner 2026-07-16). The beat now `await fetch()`es this
+// endpoint: the CPU burns in a separate invocation with its own budget, while
+// the beat only waits on I/O.
+app.post("/run-generate", async (c) => {
+  const expected = c.env.CRON_SECRET;
+  if (!expected || expected.length < 16) {
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  if (!(await constantTimeEqual(c.req.header("x-cron-secret") || "", expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  const db = c.var.DB;
+  const reason = (c.req.query("reason") || "heartbeat").slice(0, 120);
+  try {
+    const result = await recordAgentRun(db, "production-proposals", async (run) => {
+      const r = await generateProposals(db);
+      run.setSummary(
+        `proposed ${r.proposed} (unscheduled ${r.unscheduled} · overdue ${r.overdue} · superseded ${r.superseded}) (${reason})`,
+      );
+      return r;
+    });
+    return c.json({ ok: true, ...result });
+  } catch (err) {
+    console.error("[agents/run-generate] failed:", err);
+    return c.json({ ok: false, error: "generate failed" }, 500);
+  }
+});
+
 app.post("/heartbeat", async (c) => {
   const expected = c.env.CRON_SECRET;
   if (!expected || expected.length < 16) {
@@ -62,6 +98,10 @@ app.post("/heartbeat", async (c) => {
   // returned HTTP 000 and GitHub marked the beat "failed" (looked like the
   // agents clocked off at night). waitUntil lets the worker finish the beat
   // after the response, so the cron always sees a fast 200.
+  // Resolved now: the background block outlives the request, so it can't reach
+  // c.req later. Same origin → the sub-request lands on this same Worker.
+  const generateUrl = new URL("/api/internal/agents/run-generate", c.req.url).toString();
+
   c.executionCtx.waitUntil(
     (async () => {
       try {
@@ -136,18 +176,18 @@ app.post("/heartbeat", async (c) => {
           return r;
         });
       } else if (d.task === "production-proposals") {
-        // GENERATE ONLY. Generation is a full run of the planning engine over
-        // every WAITING card; bolting the apply onto the same invocation blew
-        // the Worker's limits and the run got killed before writing a single
-        // due date (owner 2026-07-16 — backlog hit 1,700 under "full-auto").
-        // The drain at the top of the beat does the applying, on its own.
-        await recordAgentRun(db, "production-proposals", async (run) => {
-          const r = await generateProposals(db);
-          const summary = `proposed ${r.proposed} (unscheduled ${r.unscheduled} · overdue ${r.overdue} · superseded ${r.superseded}) (heartbeat: ${d.reason})`;
-          run.setSummary(summary);
-          ran.push({ task: d.task, reason: d.reason, summary });
-          return r;
+        // Hand the engine to its OWN invocation (see /run-generate above). We
+        // only await the fetch — the CPU burns over there, on a fresh budget,
+        // so nothing this beat already did can starve it.
+        const res = await fetch(generateUrl + `?reason=${encodeURIComponent(`heartbeat: ${d.reason}`)}`, {
+          method: "POST",
+          headers: { "x-cron-secret": expected },
         });
+        const summary = res.ok
+          ? `engine dispatched (heartbeat: ${d.reason})`
+          : `engine dispatch failed HTTP ${res.status}`;
+        ran.push({ task: d.task, reason: d.reason, summary });
+        if (!res.ok) console.error("[agents/heartbeat] generate dispatch:", res.status);
       }
     } catch (err) {
       // One agent's failure never blocks another's beat; the error row is

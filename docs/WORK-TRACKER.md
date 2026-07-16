@@ -9,6 +9,69 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-16 — Handoff tasks 1 + 2 (owner, THIS session) — see docs/HANDOFF-2026-07-16.md
+1. ❌ **Impersonation ("login as user") — OWNER DECLINED 2026-07-16, do NOT build.**
+   Owner ruling: 「這個不需要啊 我去staging用他們的戶口就可以了」 — he reproduces per-user
+   views by logging into their accounts on STAGING, so the feature has no owner demand.
+   All work reverted (nothing left in the tree). **Do not re-propose** unless he asks.
+   Known limit he accepted: a staging account can't reproduce a blank page caused by PROD
+   data (a specific order / dept config). If that case ever bites, revisit then — the spec
+   + the 5 security invariants stay in docs/HANDOFF-2026-07-16.md.
+   Findings worth keeping if it IS ever built (both cost real time to find):
+   - auth-middleware's sliding refresh extends ANY session with <24h left back to 7 days →
+     a 2h impersonation TTL would be silently promoted to 7d on the FIRST request. Gate it
+     on the session's ISSUED length (expiresAt − createdAt), not on a new column.
+   - the middleware SELECT runs on EVERY request, so it must never reference a
+     not-yet-created column: that 503s the whole API *including* the endpoint whose runtime
+     ALTER would create it → total lockout, unrecoverable without DB creds.
+2. 🟡 **/invoices jank — PARKED by owner 2026-07-16 (「那就等」), premise DISPROVEN.**
+   Owner parked it after being shown the evidence + the honest cost: chasing the remaining
+   ~94ms floor means touching the shell EVERY page shares (and likely the monolith-page
+   decomposition), which is high-risk for a 0.1–0.3s-per-navigation win — lower value than
+   the real pain (duplicate invoices, planning cold starts). **Do NOT restart this on a
+   "page feels slow" report alone.** Resume only if the owner asks, or if a page regresses
+   badly enough to matter.
+   Diagnostic headers REMOVED from BOTH prod (50e0904e) and staging (b0d8f0d1) and verified
+   clean — deliberately not left on staging, because staging↔main merge regularly in this
+   repo and a `_headers` line would ride into prod unnoticed. To resume: re-add
+   `Document-Policy: js-profiling` under `/*` in `public/_headers` (one line) and profile on
+   staging — it DOES reproduce once its cache is warm.
+   Evidence below stands. Owner said (before parking):
+   「先抓火焰图再改,别盲改」 — measured first, and the measurement killed the task.
+   Full evidence in docs/HANDOFF-2026-07-16.md (Task 2 block). Short version:
+   - **/invoices is one of the CHEAPEST pages (153/193ms)**, not the worst. There is a
+     **~94ms floor on EVERY route transition** (/notifications, the lightest page, costs 94ms);
+     invoices sits only ~60ms above it. The real hotspots are **/planning (238–384ms)** and
+     **/delivery (377ms)**.
+   - **"/planning = 0ms" — the handoff's entire proof — was measurement error.** Sidebar links
+     don't match on exact text (badge → `Notifications9`), so the click no-ops, nothing
+     navigates, and the observer honestly logs 0ms. Reproduced the false zero.
+     **RULE: assert `location.pathname` changed before trusting a perf number.**
+   - **The block fires BEFORE the data lands** (long task at ~40ms, `/api/invoices*` responds
+     at ~560ms) → it CANNOT be per-row work. Grid = 11 DOM rows (paginated, not mounting all);
+     all array ops during mount = ~17k elements/~50ms (no O(n²)); 1 offsetWidth read (no layout
+     thrash); parsing all 17 localStorage cache entries (1.1MB) = 8.2ms. Every suspect dead.
+   - **FLAME CHART CAPTURED (prod, JS Self-Profiling API).** Enabled `Document-Policy:
+     js-profiling` on prod just long enough to capture, then REVERTED (4a9c21a4 → 50e0904e,
+     verified gone from prod). **Staging keeps the header (51b993e2) — profile there next.**
+     Verdict: **the block is React render/commit, not our code** — 17 of 21 JS self-samples
+     are inside `react-dom`; invoices/data-grid barely appear. There is no hot function of
+     ours to optimise. Sentry is NOT active on prod; the CF beacon never runs during the block.
+     GOTCHA: Chrome CLAMPS `sampleInterval` (asked 1ms, got ~17ms median) → each sample ≈17ms;
+     21 samples ≈364ms ≈ the measured blocks. Don't read sample count as ms.
+   - **⚠️ The "0ms" trap bit me too — same root cause as the handoff's.** Staging looked 0ms on
+     byte-identical src (verified zero src diff main↔staging), which looked like a major clue.
+     Artifact: staging had never visited /invoices → no SWR cache → nothing to render → 0ms.
+     Warm (940 cached rows) staging = **145–284ms = same as prod**. No prod/staging difference.
+     **RULE: a 0ms perf reading is a measurement bug until proven otherwise — assert the route
+     changed AND that there were rows to render.**
+   - **NOT root-caused: the ~94ms floor.** It's React render/commit, app-wide, but the
+     profiler's ~17ms resolution can't attribute it to a component. Next: profile on staging
+     (header already live) or bisect the shell (Sidebar/Topbar/Breadcrumbs/`<Routes>`) — ~94ms
+     of React render for a 1,210-node page is abnormal and the shell is common to every route.
+     (`TabbedOutlet` keep-alive is referenced in stale comments but NO LONGER EXISTS — not it.)
+   NOTHING SHIPPED to app code — the only prod change was the profiling header, now reverted.
+
 ## 2026-07-14 — 🔵 Durable read-perf rollout (ON STAGING, byte-identical gate) — see docs/PERF-DURABLE-ARCHITECTURE.md
 Owner-approved rebuild: stop shipping whole-org lists to the client; compute
 server-side (shared builder = byte-identical by construction) + snapshot-cache +

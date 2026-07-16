@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useDeferredValue, useMemo, useRef, useTransition, createContext, useContext } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useDeferredValue, useMemo, useRef, useTransition, startTransition, createContext, useContext } from "react";
 import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useUrlState, useUrlBatch } from "@/lib/use-url-state";
@@ -7335,7 +7335,7 @@ export default function ProductionPage({
       <div ref={gridSectionRef} className="rounded-lg border border-[#E6E0D9] bg-[#FAF8F4] p-1 overflow-x-auto scroll-mt-4">
         <div className="grid grid-cols-9 gap-1">
           <button
-            onClick={() => setActiveTab("ALL")}
+            onClick={() => startTransition(() => setActiveTab("ALL"))}
             className={`px-3 py-2 rounded text-xs font-semibold transition ${
               activeTab === "ALL"
                 ? "bg-white text-[#1F1D1B] shadow-sm border border-[#E6E0D9]"
@@ -7347,7 +7347,7 @@ export default function ProductionPage({
           {deptFractions.map((d) => (
             <button
               key={d.code}
-              onClick={() => setActiveTab(d.code)}
+              onClick={() => startTransition(() => setActiveTab(d.code))}
               className={`px-2 py-2 rounded text-[11px] font-semibold uppercase tracking-wide transition truncate ${
                 activeTab === d.code
                   ? "bg-white text-[#1F1D1B] shadow-sm border border-[#6B5C32]"

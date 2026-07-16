@@ -188,12 +188,20 @@ export async function loadDoItemsForReturn(
       reference: "",
     }));
 
-  // delivery_order_items carries only the SO number and a thin spec, but the DR
-  // (and its PDF) must show exactly what the DO/SO show. Mirror the DO's
-  // print-extras join — production_orders → its sales_order — to snapshot each
-  // line's OWN refs (customer PO / customer SO / Reference) and the build-spec
-  // inputs that buildSpec() needs. Joining by productionOrderId is exact; the
-  // SO number is just a label. Fails soft: a lookup miss leaves blanks.
+  await enrichItemsWithRefs(db, items);
+  return items;
+}
+
+/**
+ * Fill each line's OWN refs (customer PO / customer SO / Reference) and the
+ * buildSpec inputs, by the DO's own print-extras join: production_orders → its
+ * sales_order, keyed by productionOrderId (exact — the SO number is only a
+ * label). The SERVER owns these: the office "New return" modal only knows what
+ * the DO API gave it (which carries neither), and a client must never be able to
+ * assert a line's order refs. Mutates in place; fails soft (a miss leaves
+ * blanks rather than failing the return).
+ */
+export async function enrichItemsWithRefs(db: D1Database, items: DRCreateItem[]): Promise<void> {
   try {
     const poIds = [...new Set(items.map((i) => i.productionOrderId).filter(Boolean))] as string[];
     for (let i = 0; i < poIds.length; i += 400) {
@@ -237,8 +245,6 @@ export async function loadDoItemsForReturn(
   } catch (err) {
     console.warn("[delivery-return-create] line-ref/spec lookup failed:", err);
   }
-
-  return items;
 }
 
 // Create a Delivery Return document from a DO + a set of returned lines.
@@ -259,6 +265,12 @@ export async function createDeliveryReturnRecord(
   await ensureDeliveryReturnTables(db);
   const doId = String(input.doId ?? "").trim();
   const items = Array.isArray(input.items) ? input.items : [];
+  // The refs are resolved HERE, not taken from the caller: the office modal
+  // posts what the DO API gave it (which carries neither the line's customer PO
+  // nor its Reference), and a client should not be able to assert them anyway.
+  // Both entry points — office "New return" and the driver flow — land here, so
+  // both records come out identical (owner 2026-07-16).
+  await enrichItemsWithRefs(db, items);
   if (!doId || items.length === 0) return null;
 
   try {

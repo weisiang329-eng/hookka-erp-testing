@@ -9,6 +9,41 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-16 — Handoff tasks 1 + 2 (owner, THIS session) — see docs/HANDOFF-2026-07-16.md
+1. ❌ **Impersonation ("login as user") — OWNER DECLINED 2026-07-16, do NOT build.**
+   Owner ruling: 「這個不需要啊 我去staging用他們的戶口就可以了」 — he reproduces per-user
+   views by logging into their accounts on STAGING, so the feature has no owner demand.
+   All work reverted (nothing left in the tree). **Do not re-propose** unless he asks.
+   Known limit he accepted: a staging account can't reproduce a blank page caused by PROD
+   data (a specific order / dept config). If that case ever bites, revisit then — the spec
+   + the 5 security invariants stay in docs/HANDOFF-2026-07-16.md.
+   Findings worth keeping if it IS ever built (both cost real time to find):
+   - auth-middleware's sliding refresh extends ANY session with <24h left back to 7 days →
+     a 2h impersonation TTL would be silently promoted to 7d on the FIRST request. Gate it
+     on the session's ISSUED length (expiresAt − createdAt), not on a new column.
+   - the middleware SELECT runs on EVERY request, so it must never reference a
+     not-yet-created column: that 503s the whole API *including* the endpoint whose runtime
+     ALTER would create it → total lockout, unrecoverable without DB creds.
+2. ⛔ **/invoices jank — PREMISE DISPROVEN on prod, do NOT touch the grid.** Owner said
+   「先抓火焰图再改,别盲改」 — measured first, and the measurement killed the task.
+   Full evidence in docs/HANDOFF-2026-07-16.md (Task 2 block). Short version:
+   - **/invoices is one of the CHEAPEST pages (153/193ms)**, not the worst. There is a
+     **~94ms floor on EVERY route transition** (/notifications, the lightest page, costs 94ms);
+     invoices sits only ~60ms above it. The real hotspots are **/planning (238–384ms)** and
+     **/delivery (377ms)**.
+   - **"/planning = 0ms" — the handoff's entire proof — was measurement error.** Sidebar links
+     don't match on exact text (badge → `Notifications9`), so the click no-ops, nothing
+     navigates, and the observer honestly logs 0ms. Reproduced the false zero.
+     **RULE: assert `location.pathname` changed before trusting a perf number.**
+   - **The block fires BEFORE the data lands** (long task at ~40ms, `/api/invoices*` responds
+     at ~560ms) → it CANNOT be per-row work. Grid = 11 DOM rows (paginated, not mounting all);
+     all array ops during mount = ~17k elements/~50ms (no O(n²)); 1 offsetWidth read (no layout
+     thrash); parsing all 17 localStorage cache entries (1.1MB) = 8.2ms. Every suspect dead.
+   - **NEXT (if owner wants it):** the ~94ms floor + /planning are the real targets. Needs a
+     real flame chart: prod blocks `new Profiler()` ("disabled by Document Policy") → serve
+     `Document-Policy: js-profiling` via `_headers` **on staging** and profile there.
+   NOTHING SHIPPED — no code changed. Awaiting owner's call on whether to chase the floor.
+
 ## 2026-07-14 — 🔵 Durable read-perf rollout (ON STAGING, byte-identical gate) — see docs/PERF-DURABLE-ARCHITECTURE.md
 Owner-approved rebuild: stop shipping whole-org lists to the client; compute
 server-side (shared builder = byte-identical by construction) + snapshot-cache +

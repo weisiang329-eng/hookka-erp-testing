@@ -280,6 +280,114 @@ export const CONFIG_PROPOSAL_KEYS: Record<string, keyof ChainConfig & string> = 
 };
 
 /**
+ * Validate + write ONE config-proposal value into kv_config. Shared by the
+ * manual console approve route AND the full-auto path — identical whitelist
+ * and bounds so autonomy can NEVER write a value a human approve couldn't:
+ *   chain.<field>          → kv['planning_capacity'].chain.<field>   (0..30)
+ *   cs.transitDays.<STATE> → kv['cs-agent'].transitDaysByState.<X>   (0..10)
+ * Returns true when a value was written, false when the key/value is not
+ * approvable (rejected, never normalized).
+ */
+export async function applyConfigProposalValue(
+  db: DbLike,
+  paramKey: string,
+  proposedRaw: string,
+): Promise<boolean> {
+  const chainField = CONFIG_PROPOSAL_KEYS[paramKey];
+  const csState = /^cs\.transitDays\.([A-Z]{2,3})$/.exec(paramKey)?.[1] ?? null;
+  const value = Number(proposedRaw);
+  const maxValue = csState ? 10 : 30;
+  if ((!chainField && !csState) || !Number.isFinite(value) || value < 0 || value > maxValue) {
+    return false;
+  }
+  const kvKey = csState ? "cs-agent" : "planning_capacity";
+  let override: Record<string, unknown> = {};
+  try {
+    const kv = await db
+      .prepare("SELECT value FROM kv_config WHERE key = ?")
+      .bind(kvKey)
+      .first<{ value: string }>();
+    if (kv?.value) {
+      const parsed = JSON.parse(kv.value);
+      if (parsed && typeof parsed === "object") override = parsed as Record<string, unknown>;
+    }
+  } catch {
+    override = {};
+  }
+  if (csState) {
+    const byState =
+      override.transitDaysByState && typeof override.transitDaysByState === "object"
+        ? (override.transitDaysByState as Record<string, unknown>)
+        : {};
+    byState[csState] = Math.floor(value);
+    override.transitDaysByState = byState;
+  } else if (chainField) {
+    const chain =
+      override.chain && typeof override.chain === "object"
+        ? (override.chain as Record<string, unknown>)
+        : {};
+    chain[chainField] = Math.floor(value);
+    override.chain = chain;
+  }
+  await db
+    .prepare(
+      `INSERT INTO kv_config (key, value, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    )
+    .bind(kvKey, JSON.stringify(override), new Date().toISOString())
+    .run();
+  return true;
+}
+
+/**
+ * FULL-AUTO path (owner ruling 2026-07-13: "auto 就是自动，我不要 approve").
+ * With an agent's auto-approve gate ON, it applies its OWN parameter proposals
+ * (decided_by='AGENT_AUTO') — bounded by the SAME whitelist/limits as a manual
+ * approval, every change stamped in config_proposals + kv_config.updated_at so
+ * it stays fully visible and reversible. Family owns its param namespace:
+ *   PRODUCTION → chain.*            DELIVERY → cs.transitDays.*
+ * Returns the number of parameters applied.
+ */
+export async function autoApplyConfigProposals(
+  db: DbLike,
+  family: "PRODUCTION" | "DELIVERY",
+  decidedBy: string,
+): Promise<number> {
+  await ensureConfigProposalTable(db);
+  const prefix = family === "PRODUCTION" ? "chain." : "cs.transitDays.";
+  const res = await db
+    .prepare(
+      "SELECT * FROM config_proposals WHERE status = 'PENDING' ORDER BY generated_at DESC LIMIT 100",
+    )
+    .bind()
+    .all<{
+      id: string;
+      param_key?: string;
+      paramKey?: string;
+      proposed_value?: string;
+      proposedValue?: string;
+    }>();
+  const nowIso = new Date().toISOString();
+  let applied = 0;
+  for (const row of res.results ?? []) {
+    const paramKey = (row.paramKey ?? row.param_key) ?? "";
+    if (!paramKey.startsWith(prefix)) continue;
+    const proposedRaw = (row.proposedValue ?? row.proposed_value) ?? "";
+    const ok = await applyConfigProposalValue(db, paramKey, proposedRaw);
+    if (!ok) continue;
+    await db
+      .prepare(
+        "UPDATE config_proposals SET status = 'APPROVED', decided_at = ?, decided_by = ? WHERE id = ?",
+      )
+      .bind(nowIso, decidedBy, row.id)
+      .run();
+    applied++;
+  }
+  return applied;
+}
+
+/**
  * Write ONE PENDING config proposal, skipping when the same param already has
  * a PENDING row (learners run daily — they must never stack duplicates).
  * Shared by every agent family's learning loop (production handoffs, delivery

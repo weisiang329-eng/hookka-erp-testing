@@ -15,7 +15,17 @@
 // ---------------------------------------------------------------------------
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { X, Paperclip, FileText, Image as ImageIcon, FileSpreadsheet } from "lucide-react";
+import {
+  X,
+  Paperclip,
+  FileText,
+  Image as ImageIcon,
+  FileSpreadsheet,
+  History,
+  Plus,
+  Pin,
+  Trash2,
+} from "lucide-react";
 import { HookkaAILogo } from "@/components/assistant/HookkaAILogo";
 import { humanizeError } from "@/lib/humanize-error";
 
@@ -23,7 +33,7 @@ import { humanizeError } from "@/lib/humanize-error";
 // src/api/lib/attachment-parser.ts. Defined locally so the UI can refuse
 // oversized files without a round trip.
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MB
-const MAX_ATTACHMENTS_PER_MESSAGE = 3;
+const MAX_ATTACHMENTS_PER_MESSAGE = 5;
 const ACCEPTED_TYPES = [
   "image/*",
   "application/pdf",
@@ -84,6 +94,12 @@ type ChatMessage = {
 
 function uid(): string {
   return `msg-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function newConvId(): string {
+  return typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `conv-${Math.random().toString(36).slice(2)}`;
 }
 
 // Read a File to a base64-encoded string (no data: prefix). Uses FileReader
@@ -411,6 +427,222 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
+  // Whether the message list is "stuck to bottom". While the user has
+  // scrolled up to re-read something, we must NOT yank them back down on
+  // every streamed token — only auto-scroll when they're already at the end.
+  const stickBottomRef = useRef(true);
+
+  // Desktop panel width — drag the left edge to widen (persisted). Mobile
+  // stays full-width (the inline width is only applied at >= sm).
+  const MIN_W = 360;
+  const MAX_W = 900;
+  const [isDesktop, setIsDesktop] = useState(false);
+  const [panelWidth, setPanelWidth] = useState(400);
+  const resizingRef = useRef(false);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 640px)");
+    const apply = () => setIsDesktop(mq.matches);
+    mq.addEventListener("change", apply);
+    // Sync viewport + restore saved width once on mount (same on-mount
+    // set-state pattern the rest of the app suppresses).
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial mount sync
+    setIsDesktop(mq.matches);
+    try {
+      const saved = Number(localStorage.getItem("hookkaai_panel_width"));
+      if (Number.isFinite(saved) && saved >= MIN_W) {
+        setPanelWidth(Math.min(MAX_W, saved));
+      }
+    } catch {
+      /* localStorage blocked — keep default */
+    }
+    return () => mq.removeEventListener("change", apply);
+  }, []);
+
+  // Left-edge drag to resize. Width = distance from the drag point to the
+  // right screen edge (the panel is right-anchored), clamped and persisted.
+  const startResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    resizingRef.current = true;
+    const onMove = (ev: MouseEvent) => {
+      if (!resizingRef.current) return;
+      const w = Math.min(
+        Math.min(MAX_W, window.innerWidth - 40),
+        Math.max(MIN_W, window.innerWidth - ev.clientX),
+      );
+      setPanelWidth(w);
+    };
+    const onUp = () => {
+      resizingRef.current = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.userSelect = "";
+      setPanelWidth((w) => {
+        try {
+          localStorage.setItem("hookkaai_panel_width", String(Math.round(w)));
+        } catch {
+          /* ignore */
+        }
+        return w;
+      });
+    };
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, []);
+
+  const onScrollerScroll = useCallback(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    // "Near the bottom" (within 80px) counts as stuck — anything above frees
+    // the view so streaming text no longer drags the user down.
+    stickBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  }, []);
+
+  // ── Conversation history (per-user, 30-day; see routes/assistant-history) ──
+  // Ref = the id async callbacks (save) read; state mirror = the id render
+  // reads (linter forbids reading refs during render). Lazy-init on mount so
+  // crypto.randomUUID never runs during render.
+  const conversationIdRef = useRef<string>("");
+  const [activeConvId, setActiveConvId] = useState("");
+  const setConversationId = useCallback((id: string) => {
+    conversationIdRef.current = id;
+    setActiveConvId(id);
+  }, []);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time mount init
+    if (!conversationIdRef.current) setConversationId(newConvId());
+  }, [setConversationId]);
+  const messagesRef = useRef<ChatMessage[]>([]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [conversations, setConversations] = useState<
+    Array<{ id: string; title: string; pinned: boolean; updatedAt: string | null }>
+  >([]);
+
+  const loadConversations = useCallback(async () => {
+    try {
+      const r = await fetch("/api/assistant/conversations", { credentials: "include" });
+      const j = (await r.json()) as {
+        success?: boolean;
+        data?: Array<{ id: string; title: string; pinned: boolean; updatedAt: string | null }>;
+      };
+      if (j?.success) setConversations(j.data ?? []);
+    } catch {
+      /* offline / not configured — history just stays empty */
+    }
+  }, []);
+
+  // Save the current conversation (called after each completed turn). Strips
+  // blob preview URLs before persisting — they're useless after reload.
+  const saveConversation = useCallback(async () => {
+    const msgs = messagesRef.current;
+    if (msgs.length === 0) return;
+    const trimmed = msgs.map((m) => ({
+      id: m.id,
+      role: m.role,
+      blocks: m.blocks.map((b) =>
+        b.type === "attachment"
+          ? {
+              type: "attachment" as const,
+              attachment: {
+                name: b.attachment.name,
+                mediaType: b.attachment.mediaType,
+                sizeBytes: b.attachment.sizeBytes,
+              },
+            }
+          : b,
+      ),
+    }));
+    try {
+      await fetch(`/api/assistant/conversations/${conversationIdRef.current}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ messages: trimmed }),
+      });
+      void loadConversations();
+    } catch {
+      /* best-effort */
+    }
+  }, [loadConversations]);
+
+  const newChat = useCallback(() => {
+    setConversationId(newConvId());
+    setMessages([]);
+    setDraft("");
+    setError(null);
+    setHistoryOpen(false);
+    stickBottomRef.current = true;
+  }, [setConversationId]);
+
+  const openConversation = useCallback(async (id: string) => {
+    try {
+      const r = await fetch(`/api/assistant/conversations/${id}`, { credentials: "include" });
+      const j = (await r.json()) as {
+        success?: boolean;
+        data?: { messages?: ChatMessage[] };
+      };
+      if (j?.success && j.data) {
+        setConversationId(id);
+        setMessages(Array.isArray(j.data.messages) ? j.data.messages : []);
+        stickBottomRef.current = true;
+        setHistoryOpen(false);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [setConversationId]);
+
+  const togglePin = useCallback(
+    async (id: string, pinned: boolean) => {
+      try {
+        await fetch(`/api/assistant/conversations/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ pinned: !pinned }),
+        });
+        void loadConversations();
+      } catch {
+        /* ignore */
+      }
+    },
+    [loadConversations],
+  );
+
+  const deleteConversation = useCallback(
+    async (id: string) => {
+      try {
+        await fetch(`/api/assistant/conversations/${id}`, {
+          method: "DELETE",
+          credentials: "include",
+        });
+        if (id === conversationIdRef.current) newChat();
+        void loadConversations();
+      } catch {
+        /* ignore */
+      }
+    },
+    [loadConversations, newChat],
+  );
+
+  // Load the history list when the panel opens.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- async fetch, sets state in a promise
+    if (open) void loadConversations();
+  }, [open, loadConversations]);
+
+  // Persist after each completed turn (busy true → false transition).
+  const prevBusyRef = useRef(false);
+  useEffect(() => {
+    if (prevBusyRef.current && !busy) void saveConversation();
+    prevBusyRef.current = busy;
+  }, [busy, saveConversation]);
+
   // Track which preview URLs are still in use so we can revoke them on
   // unmount. Revocation on individual remove happens in removeAttachment.
   // We keep this in a ref so the cleanup function captures the live set
@@ -433,9 +665,11 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
     };
   }, []);
 
-  // Auto-scroll to bottom on new message / streamed text.
+  // Auto-scroll to bottom on new message / streamed text — but ONLY while the
+  // user is stuck to the bottom. If they've scrolled up to read, leave them
+  // there (fixes: "I can't scroll up while it's typing").
   useEffect(() => {
-    if (scrollerRef.current) {
+    if (stickBottomRef.current && scrollerRef.current) {
       scrollerRef.current.scrollTop = scrollerRef.current.scrollHeight;
     }
   }, [messages]);
@@ -472,6 +706,8 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
     // attachments are present.
     if ((!trimmed && !hasAttachments) || busy) return;
 
+    // Sending a new message always snaps back to the bottom.
+    stickBottomRef.current = true;
     setError(null);
 
     // Capture attachments at send time. We reset state right after so the
@@ -699,7 +935,7 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
   // per file and reads each to base64. Failures show inline in the
   // composer error slot — never throws to the parent.
   const onPickFiles = useCallback(
-    async (files: FileList | null) => {
+    async (files: FileList | File[] | null) => {
       if (!files || files.length === 0) return;
       setError(null);
 
@@ -750,6 +986,28 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
     [attachments.length],
   );
 
+  // Paste images straight into the composer (Ctrl/Cmd+V) — supports pasting
+  // several at once (multiple file items on the clipboard). Falls through to
+  // normal text paste when the clipboard has no files.
+  const onPaste = useCallback(
+    (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const files: File[] = [];
+      for (const it of Array.from(items)) {
+        if (it.kind === "file") {
+          const f = it.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      if (files.length > 0) {
+        e.preventDefault(); // keep the raw image out of the text box
+        void onPickFiles(files);
+      }
+    },
+    [onPickFiles],
+  );
+
   const removeAttachment = useCallback((localId: string) => {
     setAttachments((prev) => {
       const out = prev.filter((a) => {
@@ -785,10 +1043,23 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
       // off-screen when closed; `translate-x-0` brings it on. The hidden
       // state also goes pointer-events-none so it doesn't intercept clicks
       // on the page underneath while collapsed.
-      className={`fixed top-0 right-0 bottom-0 z-50 flex flex-col bg-white shadow-2xl border-l border-[#E2DDD8] w-full sm:w-[400px] transition-transform duration-200 ease-out ${
+      className={`fixed top-0 right-0 bottom-0 z-50 flex flex-col bg-white shadow-2xl border-l border-[#E2DDD8] w-full transition-transform duration-200 ease-out ${
         open ? "translate-x-0" : "translate-x-full pointer-events-none"
       }`}
+      style={isDesktop ? { width: panelWidth } : undefined}
     >
+      {/* Left-edge drag handle — desktop only. Drag to widen the panel. */}
+      {isDesktop && (
+        <div
+          onMouseDown={startResize}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize Hookka AI panel"
+          title="Drag to resize"
+          className="absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-[#6B5C32]/30 active:bg-[#6B5C32]/50 transition-colors"
+        />
+      )}
+
       {/* Header */}
       <div className="flex items-center gap-3 px-4 py-3 border-b border-[#E2DDD8] shrink-0">
         <div className="h-9 w-9 rounded-full bg-[#1F1D1B] text-white flex items-center justify-center">
@@ -802,6 +1073,31 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
         </div>
         <button
           type="button"
+          onClick={() => {
+            setHistoryOpen((v) => !v);
+            void loadConversations();
+          }}
+          aria-label="Conversation history"
+          title="History"
+          className={`h-8 w-8 rounded-md flex items-center justify-center transition-colors ${
+            historyOpen
+              ? "bg-[#F0ECE9] text-[#1F1D1B]"
+              : "text-[#6B7280] hover:bg-[#F0ECE9] hover:text-[#1F1D1B]"
+          }`}
+        >
+          <History className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          onClick={newChat}
+          aria-label="New chat"
+          title="New chat"
+          className="h-8 w-8 rounded-md flex items-center justify-center text-[#6B7280] hover:bg-[#F0ECE9] hover:text-[#1F1D1B] transition-colors"
+        >
+          <Plus className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
           onClick={onClose}
           aria-label="Close Hookka AI"
           className="h-8 w-8 rounded-md flex items-center justify-center text-[#6B7280] hover:bg-[#F0ECE9] hover:text-[#1F1D1B] transition-colors"
@@ -810,8 +1106,73 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
         </button>
       </div>
 
+      {/* History rail — toggled from the header. Per-user, last 30 days. */}
+      {historyOpen && (
+        <div className="border-b border-[#E2DDD8] bg-[#FAF9F7] max-h-[45%] overflow-y-auto shrink-0">
+          <button
+            type="button"
+            onClick={newChat}
+            className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-[#1F1D1B] hover:bg-[#F0ECE9] border-b border-[#E2DDD8]"
+          >
+            <Plus className="h-4 w-4" /> New chat
+          </button>
+          {conversations.length === 0 ? (
+            <div className="px-4 py-3 text-xs text-[#9CA3AF]">
+              No saved conversations yet. Ask something — it'll appear here (kept 30 days).
+            </div>
+          ) : (
+            <ul className="py-1">
+              {conversations.map((conv) => (
+                <li
+                  key={conv.id}
+                  className={`group flex items-center gap-1.5 px-2 pl-3 pr-2 py-1.5 text-sm cursor-pointer hover:bg-[#F0ECE9] ${
+                    conv.id === activeConvId ? "bg-[#EEF3E4]" : ""
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => void openConversation(conv.id)}
+                    className="flex-1 min-w-0 text-left truncate text-[#1F1D1B]"
+                    title={conv.title}
+                  >
+                    {conv.pinned && (
+                      <Pin className="inline h-3 w-3 mr-1 text-[#6B5C32] align-[-1px]" />
+                    )}
+                    {conv.title || "New chat"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void togglePin(conv.id, conv.pinned)}
+                    aria-label={conv.pinned ? "Unpin" : "Pin"}
+                    title={conv.pinned ? "Unpin" : "Pin"}
+                    className={`h-6 w-6 rounded flex items-center justify-center shrink-0 hover:bg-[#E2DDD8] ${
+                      conv.pinned ? "text-[#6B5C32]" : "text-[#9CA3AF] opacity-0 group-hover:opacity-100"
+                    }`}
+                  >
+                    <Pin className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void deleteConversation(conv.id)}
+                    aria-label="Delete conversation"
+                    title="Delete"
+                    className="h-6 w-6 rounded flex items-center justify-center shrink-0 text-[#9CA3AF] hover:bg-[#E2DDD8] hover:text-[#9A3A2D] opacity-0 group-hover:opacity-100"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
       {/* Message list */}
-      <div ref={scrollerRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+      <div
+        ref={scrollerRef}
+        onScroll={onScrollerScroll}
+        className="flex-1 overflow-y-auto px-4 py-4 space-y-4"
+      >
         {messages.length === 0 && (
           <div className="text-center text-[#6B7280] mt-8 text-sm">
             <div className="mx-auto mb-3 h-12 w-12 rounded-full bg-[#F0ECE9] text-[#1F1D1B] flex items-center justify-center">
@@ -910,7 +1271,8 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder="Ask Hookka AI..."
+            onPaste={onPaste}
+            placeholder="Ask Hookka AI... (paste images with Ctrl/Cmd+V)"
             rows={2}
             className="flex-1 resize-none rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
             disabled={busy}
@@ -935,7 +1297,7 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
           )}
         </div>
         <p className="mt-2 text-[10px] text-[#6B7280]">
-          Read-only. Chat history clears when you close the panel.
+          Read-only. Conversations are saved to your history for 30 days (only you can see yours).
           Attach photos / PDFs / Excel / CSV (max 10 MB, {MAX_ATTACHMENTS_PER_MESSAGE} files).
         </p>
       </div>

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, startTransition } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -447,17 +447,22 @@ export default function PlanningPage() {
   // rather than window.confirm).
   const { confirm, confirmDialog } = useConfirm();
   const [activeTab, setActiveTab] = useState<TabId>("capacity");
-  // ?fields=minimal&include=jobCards → drops ~20 unused PO fields and the
-  // piece_pics tree. jobCards still arrive (planning iterates order.jobCards
-  // throughout for capacity / scheduling math).
+  // ?fields=minimal&include=jobCards-lite → drops ~20 unused PO fields and the
+  // piece_pics tree, AND ships each job card as only the 12 fields this page
+  // reads (id/departmentCode/status/dueDate/completedDate/estMinutes/pic1Id/
+  // pic1Name/pic2Id/pic2Name/wipLabel/wipQty) instead of the full ~25 — halves
+  // the ~10MB payload (perf 2026-07-14; slimJobCardsToPlanningLite server-side,
+  // byte-identical for this page which is the sole jobCards-lite consumer).
   //
   // 2026-05-25: added &excludeCompleted=true so completed / transferred /
   // cancelled POs don't load. Planning is about FUTURE work — finished
   // POs don't need scheduling. Cuts wire payload ~60% + parse cost on
   // the page-load spinner. Mirrors the Phase 4 fix on the Production
   // dept page. Server-side snapshot cache (Phase 6) also applies for
-  // free since this hits the same /api/production-orders endpoint.
-  const { data: ordersResp, loading: ordersLoading, refresh: refreshOrders } = useCachedJson<{ data?: ProductionOrder[] }>("/api/production-orders?fields=minimal&include=jobCards&excludeCompleted=true");
+  // free since this hits the same /api/production-orders endpoint; the
+  // excludeCompleted=true + jobCards-lite variant is warmed by the
+  // warm-lists cron (warmPoListPlanningVariant) so it never cold-blocks.
+  const { data: ordersResp, loading: ordersLoading, refresh: refreshOrders } = useCachedJson<{ data?: ProductionOrder[] }>("/api/production-orders?fields=minimal&include=jobCards-lite&excludeCompleted=true");
   const { data: workersResp, loading: workersLoading, refresh: refreshWorkers } = useCachedJson<{ data?: Worker[] }>("/api/workers");
   const { data: schedResp, refresh: refreshSched } = useCachedJson<{ data?: ScheduleEntry[] }>("/api/scheduling");
   // Wei Siang 2026-05-15: Capacity Loading lists only production depts.
@@ -1856,7 +1861,7 @@ export default function PlanningPage() {
           return (
             <button
               key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
+              onClick={() => startTransition(() => setActiveTab(tab.id))}
               className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
                 isActive
                   ? "border-[#6B5C32] text-[#6B5C32]"
@@ -3254,10 +3259,15 @@ function ScheduleProposalsTab() {
     "/api/planning/proposals?status=PENDING",
   );
   const rows = useMemo(() => propsResp?.data ?? [], [propsResp]);
+  // Render cap — the engine can propose 1000+ rows; rendering them all at once
+  // is what made this tab lag (owner 2026-07-15). Show a page at a time via a
+  // "Show more" control; select-all / approve still operate over the full set.
+  const [visibleCount, setVisibleCount] = useState(100);
 
   const load = useCallback(() => {
     invalidateCachePrefix("/api/planning/proposals");
     setSelected(new Set());
+    setVisibleCount(100);
     refresh();
   }, [refresh]);
 
@@ -3401,6 +3411,7 @@ function ScheduleProposalsTab() {
               engine over all waiting job cards.
             </div>
           ) : (
+            <>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="bg-[#F0ECE9]">
@@ -3423,7 +3434,7 @@ function ScheduleProposalsTab() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((r) => (
+                  {rows.slice(0, visibleCount).map((r) => (
                     <tr
                       key={r.id}
                       className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] cursor-pointer"
@@ -3467,6 +3478,28 @@ function ScheduleProposalsTab() {
                 </tbody>
               </table>
             </div>
+            {rows.length > visibleCount && (
+              <div className="flex items-center justify-center gap-3 py-3 text-sm">
+                <span className="text-[#6B7280]">
+                  Showing {visibleCount} of {rows.length}
+                </span>
+                <button
+                  type="button"
+                  className="rounded-md border border-[#D2CABA] px-3 py-1 text-[#374151] hover:bg-[#F0ECE9]"
+                  onClick={() => setVisibleCount((n) => n + 200)}
+                >
+                  Show more
+                </button>
+                <button
+                  type="button"
+                  className="text-[#6B5C32] underline hover:text-[#4a3f22]"
+                  onClick={() => setVisibleCount(rows.length)}
+                >
+                  Show all
+                </button>
+              </div>
+            )}
+            </>
           )}
         </CardContent>
       </Card>

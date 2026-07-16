@@ -34,6 +34,218 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-14-005 — warehouse list shipped a dead `grouped` duplicate that doubled the 2.9MB payload `warehouse` `perf` `payload` 🟢
+**Symptom:** `GET /api/warehouse` (1219 racks) returned both `data[]` and
+`grouped` — the latter a per-rack-name copy of the ENTIRE `data` array — roughly
+doubling a ~2.9MB response. Slow warehouse page load / parse.
+**Root cause:** the handler built `grouped[loc.rack] = [loc]` for every rack, but
+NO consumer reads it (verified across desktop `warehouse.tsx`, `/m WarehouseScreen`,
+and the whole `src` tree). Pure dead weight. Same handler also built each rack via
+`rowToRack(l, ALL items)` whose internal `items.filter(...)` re-scanned every
+rack_item per rack — O(racks × items).
+**Fix:** dropped `grouped` from the response; bucket rack_items by
+`rackLocationId` once into a Map and pass each rack its own scoped list
+(`warehouse.ts` `app.get("/")`). `rowToRack` still filters internally → output
+byte-identical; only the redundant field + the per-rack rescan are gone.
+**Verify:** build:strict + full test suite green; staging deploy; page renders
+identical rack grid. Commit 387840ad.
+
+## BUG-2026-07-14-004 — snapshot caches served STALE stock/planning after a status flip (sourceTables missed the parent table) `perf` `snapshot` `dead-data` `inventory` `delivery` `consignment` 🟢
+**Symptom:** three durable-perf snapshot caches could serve stale results after a
+document's STATUS changed. E.g. dispatch a Delivery Order → the FG-stock page's
+Available/Reserved/Dispatched split would NOT update until some *other* tracked
+table happened to change. Owner's #1 fear (dead-data), reintroduced by the caching
+layer itself.
+**Root cause:** `withSnapshot`'s freshness contract only invalidates when a listed
+`sourceTable`'s `updated_at` advances. Dispatching a DO flips
+`delivery_orders.status` (bumps *its* updated_at) but leaves `delivery_order_items`
+untouched — and the caches read the parent's `.status` while listing only the
+child `_items` table:
+- inventory `/fg-stock` read `delivery_orders.status` + `consignment_notes.status`
+  but tracked only `delivery_order_items` / `consignment_items`.
+- delivery `/ready-planning` read `delivery_orders.status`, `sales_orders`,
+  `sales_order_items`, `consignment_orders` (attachCustomerSO + loadPoValueMap) —
+  none tracked beyond production_orders/job_cards/delivery_order_items.
+- consignment `/ready-planning` read `products.unitM3` — untracked.
+**Fix:** added every status/enrichment table each cache actually reads to its
+`sourceTables` (inventory.ts, delivery-orders.ts, consignment-notes.ts). Freshness
+-only change — output shape unchanged, so no `cache_key` bump. `job_cards` already
+dominates refresh frequency, so the added tables don't hurt the cache hit rate.
+**Verify:** found by the /review correctness pass; swept the whole snapshot family
+for the pattern (fix-then-audit-whole-system). build:strict + full suite green;
+staging deploy. Commit ca9789aa. **Rule reinforced:** a snapshot's `sourceTables`
+MUST include every table whose data (incl. a JOINed parent's status/columns)
+affects the output — not just the table in the FROM clause.
+
+## BUG-2026-07-14-003 — AR Aging report bucketed money over the loaded 200-row page only (dropped 141/341 invoices) `invoices` `accounting` `data-quality` `dead-data` 🟢
+**Symptom:** Invoices → AR Aging tab. The per-customer overdue buckets (Current /
+31-60 / 61-90 / 90+) and their totals summed only the invoices on the CURRENTLY
+LOADED page (PAGE_SIZE 200). Measured live on staging: 341 outstanding invoices, but
+the aging saw only 200 → **141 invoices (~41% of receivables) silently missing** from
+the aging report; the numbers shrank further as the user paged. Owner's #1 fear
+(dead-data), on a MONEY report (做账要准).
+**Root cause:** `agingData` (invoices/index.tsx:490) was a `useMemo` over the
+client `invoices` state, which is the server-PAGINATED list
+(`/api/invoices?page=&limit=200`). The KPI cards had already been moved to a
+whole-dataset server aggregate (`/api/invoices/stats`, the 2026-05-26 undercount
+class) but the Aging tab was missed and kept computing over the page.
+**Fix:** new `GET /api/invoices/aging` (invoices.ts, after /stats) — a VERBATIM port
+of the FE bucket logic (exclude PAID/CANCELLED/DRAFT + balance>0; daysOverdue =
+floor((now-dueDate)/day); <=30→current / 31-60 / 61-90 / >90; group by customerName;
+sort total desc) but over the WHOLE table, honoring the page's status/customer/date
+filter. FE fetches it (gated on the Aging tab active) and renders it instead of the
+client computation. Invoice volume is small → plain aggregate, no snapshot.
+**Verified (staging, 7fa5d3f2):** endpoint aging == the FE bucket logic recomputed over
+ALL invoices client-side — 0 field diffs across all 5 customers' 5 buckets; grand total
+RM 1,106,969.12 to the cent; now covers all 267 outstanding invoices (of 341), not the
+200-page subset. NOT yet on prod (owner batches the prod merge).
+**Found by:** the 2026-07-14 full-app 13-module FE↔BE↔DB perf audit
+(docs/PERF-AUDIT-2026-07-14.md, finding #1) — the ONLY real correctness bug among 83
+findings; the other 82 are perf/latent, tracked in that doc + WORK-TRACKER, not here.
+
+## BUG-2026-07-14-002 — withSnapshot served a STALE-SHAPE blob after a payload field was added (CN /ready-planning poLookups blank) `perf` `snapshot` `durable-arch` 🟢
+**Symptom:** Added `poLookups` to the `GET /api/consignment-notes/ready-planning`
+compute output + deployed, but the CN Note detail dialog's lookup columns
+(companyCOId / fabric / rack) stayed BLANK on staging. The endpoint code was
+right; the response just never carried the new field.
+**Root cause:** `withSnapshot` invalidates on **source-table mtimes, NOT on code**.
+Because no source table had changed, it kept serving the previously-cached v1 blob
+(which had no `poLookups`) as "fresh" — a new output field is invisible until the
+cache is busted. Same class as the data-visibility checklist item #3 ("payload
+SHAPE change → bump the key"), but for a server snapshot rather than a client cache.
+**Fix (6909192e):** bump the snapshot `cache_key` (`""` → `"v2"`) whenever the
+compute's output SHAPE changes. Verified live: poLookups 22, 0 diffs, columns fill.
+**Guard / rule (do NOT step on this again):** ANY change to a `withSnapshot`
+endpoint's returned shape MUST bump its `cache_key`. Baked into
+docs/PERF-DURABLE-ARCHITECTURE.md + the durable-perf memory. Applies to every
+future slice (inventory/delivery already shipped clean; this is the standing rule).
+
+## BUG-2026-07-13-003 — `?fields=minimal` alone still inlined jobCards (~19MB) — the slim didn't slim `perf` `production-orders` 🟢
+**Symptom:** Slimmed the Sales SO list to `/api/production-orders?fields=minimal`
+expecting a small payload, but the response was still ~19MB decoded — the jobCards
+array was STILL inlined. The "fix" appeared to do nothing.
+**Root cause:** in the production-orders list handler, `include` being ABSENT is
+back-compat for "inline jobCards" (production-orders.ts L5348-5356). `?fields=minimal`
+only trims PO scalar fields; it does NOT drop jobCards unless `include` is passed and
+does NOT contain "jobCards". So `?fields=minimal` with no `include` kept the full JC tree.
+**Fix (e2efaa38):** pass an EXPLICIT empty `include=` → jobCards dropped, 19MB→~72kb.
+**Rule:** to drop jobCards you must pass `&include=` (empty), not just `?fields=minimal`.
+Baked into every slim since (delivery/inventory/CN/planning).
+
+## BUG-2026-07-13-002 — "Failed to create delivery return" — snapshot SELECT hit a COMPUTED column + a JOIN-aliased column the rename adapter didn't rewrite `delivery-orders` `data-migration` 🟢
+**Symptom:** Creating a Delivery Return errored out ("Failed to create delivery
+return") — the whole create failed, no DR written.
+**Root cause:** the create-DR POST's DO-snapshot lookup SELECTed `salesOrderNos` (a
+COMPUTED/derived field, not a stored column) + `customerPOId`, and the SO-resolve JOIN
+aliased `salesOrderId` — which the d1-compat rename adapter may not rewrite INSIDE a
+JOIN (same camelCase-fold class as BUG-2026-06-10-001). Either query threw and aborted
+the whole create.
+**Fix (bae68564):** both snapshot lookups try/catch-wrapped (best-effort enrichment
+never fails the create); the DO SELECT reads only guaranteed columns (doNo,
+customerName); the DR header + items always write. delivery-returns.ts.
+
+## BUG-2026-07-13-001 — Delivery /ready-planning FE swap hung the page's cold paint (uncached heavy endpoint) `perf` `snapshot` `durable-arch` 🟢
+**Symptom:** (delivery slice, prior session) swapping the FE to consume the new
+server endpoint left the page stuck blank on a cold load — the ~8s whole-org
+compute blocked first paint. Logged here on the deployed branch so the pattern
+isn't rediscovered.
+**Root cause:** the endpoint ran the full PO+JC load/join on every cold request
+with no cache, so the page awaited ~8s before rendering.
+**Fix:** wrap the compute in `withSnapshot` + `staleWhileRevalidate` + runtime
+CREATE of the snapshot table BEFORE gating the FE on it. Serve last-good instantly,
+refresh in the background.
+**Guard / rule:** a heavy derive-and-drop endpoint MUST be snapshot-cached BEFORE
+the FE consumes it — never gate a page's cold paint on an uncached whole-org
+compute. Applied to inventory (`inventory_fg_stock_snapshot`) + CN
+(`consignment_ready_planning_snapshot`) this session.
+
+## BUG-2026-07-12-001 — Agent proposal approve wrote NULL dueDate + the list dropped dates (adapter camelCase folding) `data-migration` `agent` 🟢
+**Symptom:** Approving a schedule/config proposal wrote a NULL `dueDate`, and the
+proposals list rendered blank dates.
+**Root cause:** the d1-compat SupabaseAdapter folds explicit camelCase column
+projections to lowercase (BUG-2026-06-10-001 class) — so `dueDate` reads came back
+under `duedate` and the approve write's camelCase binding didn't land. Another
+instance of the recurring camelCase/rename-map class.
+**Fix (7c8f7850 / 41053812):** dual-key row reads (`r.dueDate ?? r.duedate`) + the
+ProposalRow types made dual-key; the approve write uses the adapter-safe column name.
+**Rule (recurring):** new camelCase columns need a column-rename-map entry OR
+dual-keyed reads — see the `data-migration` category note above.
+
+## BUG-2026-07-11-002 — Weekly/Monthly Operations Report: delivery `do` reserved-word SQL alias + one bad section 500'd the whole report `reports` 🟢
+**Symptom:** The Operations Report (weekly/monthly) failed to generate; a single bad
+section aborted the entire newspaper payload.
+**Root cause:** the delivery section aliased a table/column as `do` — a SQL
+RESERVED WORD — which the query rejected; and the collector had no per-section guard,
+so one throwing section 500'd all 15 sections.
+**Fix (c09ed847 + 7d857ac4):** rename the `do` alias; wrap each section in its own
+guard so one bad query DEGRADES (returns partial) instead of 500-ing the report;
+self-apply `products.created_at` for the new-products reader. operations-report.ts.
+## BUG-2026-07-14-007 — Mobile lag: /m shell warmed Home's heavy endpoints on EVERY landing (incl. /m/production) `performance` `mobile` `ui-frontend` 🟢
+**Symptom:** the phone app felt laggy the moment a factory worker opened straight to
+`/m/production` (their default screen). The production board itself is already slim
+(8 KB), yet the screen fired **5 API calls**: the board **plus** `/api/dashboard/overview`
+(a compute-bound query up to **7.6 s**), the full `/api/sales-orders` (~100 KB) and
+`/api/inventory` (~95 KB), and `/api/sales-orders/stats` — none of which the board needs.
+On weak factory wifi those four saturated the link and starved the board's own fetch.
+**Root cause:** `preloadMobileCritical()` (src/pages/m/lib/preload.ts) is called once in
+the `/m` shell's mount effect (MobileLayout.tsx) and fired Home's 4 first-paint endpoints
+**unconditionally, regardless of landing route**. Home fetches those 4 itself via
+`useCachedJson`, so the preload is a warm-AHEAD only — but it ran on every screen.
+**Fix (src/pages/m/lib/preload.ts):** gate the warm-up on `isHomeLanding()`
+(`location.pathname === "/m"`) — only warm when the operator actually lands on Home. An
+earlier attempt used `requestIdleCallback`; measured on staging it did NOT help (the main
+thread goes idle within a frame of mount, so the deferred fetches still raced the board).
+**Verified (staging, 390 px viewport):** `/m/production` dropped **5 → 1** API call (only
+the 8 KB board); `/m` Home still loads all 4 warm-up endpoints — zero feature loss. Shipped
+to prod (main 2bbf6d02).
+**Follow-up — DONE (BUG-2026-07-14-008 below):** the `/api/dashboard/overview` ~7.6 s
+cold-recompute stall was fixed by giving `cached()` true serve-stale.
+
+## BUG-2026-07-14-008 — Dashboard cold-load: cached() blocked on every TTL expiry (~7.6 s once/min on Home) `performance` `caching` 🟢
+**Symptom:** the Home dashboard KPI strip stalled ~7.6 s roughly once a minute — one unlucky
+viewer per minute ate a full recompute.
+**Root cause:** `cached()` (src/api/lib/kv-cache.ts) despite its "stale-while-revalidate"
+comment actually **blocked on miss** (`await fetcher()`), and Cloudflare KV **deletes** the key
+at its `expirationTtl`. `/api/dashboard/overview` (the ONLY caller — dynamically imported in
+dashboard-overview.ts, 60 s TTL, ~30 heavy SELECTs incl. a full job_cards scan) therefore
+forced a blocking recompute every 60 s.
+**Fix (src/api/lib/kv-cache.ts):** real serve-stale. Values wrapped `{ __swr, v, soft }` with a
+hard KV TTL = `max(ttl*6, ttl+300)`. A stale-but-not-hard-expired hit is returned IMMEDIATELY
+and revalidated in the background (`waitUntil`); only a true miss (never warmed / hard-expired)
+blocks — once. Bounded staleness: normal ≤ ttl (revalidation refreshes), worst case ≤ hard TTL
+then one blocking recompute. Legacy raw entries served as stale + upgraded in the background (no
+flush). `invalidate()` unchanged (delete → miss → block-fresh) so post-write freshness is intact.
+Audited: `cached()` has exactly one caller and `invalidate()` has zero, so blast radius = the
+dashboard overview only.
+**Verified (staging, logged-in fetch):** cold warm 7.6 s → a hit 90 s later (well past the 60 s
+TTL) returned in **1.7 s** instead of re-blocking 7.2 s; KPI figures byte-identical
+(salesThisMonthSen 13,359,285 across every hit). Shipped to prod (main 5704898e). Owner chose
+this over the warm-cron+TTL-bump option (no staleness increase beyond ~60 s).
+
+## BUG-2026-07-14-006 — Double invoicing: 64 DOs invoiced 2–4× each (77 extra invoices, ~RM 405k over-billing on staging) `invoices` `accounting` `money` `duplicate` 🟢
+**Symptom:** the same Delivery Order was invoiced multiple times — 64 DOs had 2, 3, or
+even 4 active (non-cancelled) invoices, each an EXACT duplicate (same DO, same line
+items down to the cent, same total). ~77 extra invoices, ~RM 404,819 of phantom
+receivables/AR inflation on staging. Owner-reported ("有些是 double invoice").
+**Root cause:** the manual create-invoice POST (`invoices.ts app.post("/")`) guarded
+only on `doRow.status !== "DELIVERED"`, whose read→write window is wide, and which
+misses the case where a prior invoice did not flip the DO to INVOICED (auto-invoice
+overlap / concurrent requests). The auto-invoice-on-delivery path (`delivery-orders.ts`)
+already guarded on an existing invoice; the manual POST did not. No DB-level uniqueness
+on `invoices.deliveryOrderId` either.
+**Fix (prevention):** added the existence guard to the manual POST — block (409) if a
+NON-CANCELLED invoice already exists for the `deliveryOrderId` (a CANCELLED one is fine
+= legitimate re-invoice after void). Returns the existing invoice no. Commit 4789cdd2
+(branch fix/invoice-money-path). A DB partial-unique index on
+`invoices(deliveryOrderId) WHERE status != 'CANCELLED'` is the belt-and-suspenders
+follow-up, addable only AFTER the existing dups are cleaned.
+**Cleanup:** every duplicate re-verified 100% identical (item count == DO item count,
+line-for-line identical, 0 PAID duplicates → no CN/refund needed). Cancelled the 35
+SENT-unpaid duplicate extras on STAGING via the standard PUT status=CANCELLED path
+(GL-reversing), keeping 1 invoice per DO → 0 DOs with 2+ active invoices remain.
+**Verify:** post-cleanup scan confirmed 0 duplicate DOs on staging. PROD cleanup +
+guard deploy still pending (owner-gated; prod not accessible from this session).
+
 ## BUG-2026-07-11-001 — Full-system data-accuracy audit: 20+ findings across dashboard/planning/daily-report/OCR (P1-P3 shipped same day) `dashboard` `planning` `data-quality`
 
 - **Status:** 🟢 Fixed (commits 04fa1593, c1cb3bb0 + prod data repair)

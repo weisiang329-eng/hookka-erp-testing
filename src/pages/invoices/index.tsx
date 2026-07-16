@@ -157,6 +157,21 @@ export default function InvoicesPage() {
   // Tabs
   const [activeTab, setActiveTab] = useState<"list" | "aging">("list");
 
+  // AR Aging — computed server-side over the WHOLE table (2026-07-14 bug fix).
+  // Previously bucketed over the loaded 200-row page only, silently dropping
+  // every invoice past page 1 (341 total → 141 missing). Fetched only when the
+  // Aging tab is active; follows the page's status/customer/date filter.
+  const { data: agingResp } = useCachedJson<{
+    success?: boolean;
+    data?: AgingRow[];
+  }>(
+    activeTab === "aging"
+      ? filterQs
+        ? `/api/invoices/aging?${filterQs}`
+        : "/api/invoices/aging"
+      : null,
+  );
+
   // Inline payment
   const [payingInvoiceId, setPayingInvoiceId] = useState<string | null>(null);
   const [paymentAmount, setPaymentAmount] = useState("");
@@ -267,7 +282,6 @@ export default function InvoicesPage() {
     setBatchRunning(true);
     let ok = 0;
     const errors: string[] = [];
-    const { generateInvoicePdfBase64 } = await import("@/lib/generate-invoice-pdf");
     for (const inv of selectedInvoices) {
       if (
         customerEmailById.size > 0 &&
@@ -305,23 +319,25 @@ export default function InvoicesPage() {
           errors.push(`${inv.invoiceNo}: no linked delivery order`);
           continue;
         }
-        // Render the invoice PDF client-side with the SAME jsPDF generator the
-        // detail-page download + the delivered-notice email now use, so the
-        // re-sent email carries the exact document the operator prints.
-        // print-extras adds the per-line spec detail.
+        // Unify on ONE template (owner 2026-07-13): render with the SAME
+        // unified generator the detail-page download uses (renderUnified-
+        // InvoiceBase64 == downloadUnifiedInvoicePdf), so the re-sent email is
+        // byte-identical to the download. print-extras adds the per-line spec.
         let pdfBase64: string | undefined;
         try {
-          const er = await fetch(
-            `/api/invoices/${encodeURIComponent(inv.id)}/print-extras`,
-            { credentials: "include" }
-          );
+          const [{ renderUnifiedInvoiceBase64 }, er] = await Promise.all([
+            import("@/lib/unified-doc-download"),
+            fetch(`/api/invoices/${encodeURIComponent(inv.id)}/print-extras`, {
+              credentials: "include",
+            }),
+          ]);
           const ej = (await er.json().catch(() => ({}))) as {
             success?: boolean;
             data?: unknown;
           };
-          pdfBase64 = generateInvoicePdfBase64(
-            fullInv,
-            ej?.success ? (ej.data as Parameters<typeof generateInvoicePdfBase64>[1]) : undefined
+          pdfBase64 = await renderUnifiedInvoiceBase64(
+            fullInv as Record<string, unknown> & { invoiceNo?: string },
+            ej?.success ? (ej.data as Parameters<typeof renderUnifiedInvoiceBase64>[1]) : undefined
           );
         } catch {
           // Render failed — send without the client PDF; the server renders its
@@ -336,7 +352,7 @@ export default function InvoicesPage() {
             body: JSON.stringify({
               kind: "DELIVERED",
               pdfBase64,
-              pdfFilename: `INV-${inv.invoiceNo}.pdf`,
+              pdfFilename: `${/^INV/i.test(inv.invoiceNo) ? inv.invoiceNo : `INV-${inv.invoiceNo}`}.pdf`,
             }),
           }
         );
@@ -486,50 +502,15 @@ export default function InvoicesPage() {
   // the current page, so the KPI reflects the whole dataset.
   const overdueCount = invStatsByStatus.OVERDUE ?? 0;
 
-  // AR Aging data
-  const agingData = useMemo((): AgingRow[] => {
-    const today = new Date();
-    const customerMap: Record<string, AgingRow> = {};
-
-    invoices
-      .filter((inv) => !["PAID", "CANCELLED", "DRAFT"].includes(inv.status))
-      .forEach((inv) => {
-        const balance = inv.totalSen - inv.paidAmount;
-        if (balance <= 0) return;
-
-        const dueDate = new Date(inv.dueDate);
-        const daysOverdue = Math.floor(
-          (today.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24)
-        );
-
-        if (!customerMap[inv.customerName]) {
-          customerMap[inv.customerName] = {
-            customerName: inv.customerName,
-            current: 0,
-            days31_60: 0,
-            days61_90: 0,
-            days90plus: 0,
-            total: 0,
-          };
-        }
-
-        const row = customerMap[inv.customerName];
-        if (daysOverdue <= 0) {
-          row.current += balance;
-        } else if (daysOverdue <= 30) {
-          row.current += balance;
-        } else if (daysOverdue <= 60) {
-          row.days31_60 += balance;
-        } else if (daysOverdue <= 90) {
-          row.days61_90 += balance;
-        } else {
-          row.days90plus += balance;
-        }
-        row.total += balance;
-      });
-
-    return Object.values(customerMap).sort((a, b) => b.total - a.total);
-  }, [invoices]);
+  // AR Aging data — now WHOLE-dataset (server-computed, /api/invoices/aging).
+  // The old client computation (kept in git history) bucketed only the loaded
+  // page, undercounting AR past page 1; the server endpoint ports the exact
+  // same bucket logic over every matching invoice.
+  const agingData: AgingRow[] = useMemo(
+    () =>
+      agingResp?.success && Array.isArray(agingResp.data) ? agingResp.data : [],
+    [agingResp],
+  );
 
   const agingTotals = useMemo(() => {
     return agingData.reduce(

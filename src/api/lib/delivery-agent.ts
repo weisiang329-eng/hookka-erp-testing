@@ -72,12 +72,28 @@ export function ensureDeliveryAgentTables(db: DbLike): Promise<void> {
          recommendation TEXT,
          status TEXT NOT NULL DEFAULT 'PENDING',
          decided_at TEXT,
-         decided_by TEXT
+         decided_by TEXT,
+         due_date TEXT,
+         do_count INTEGER NOT NULL DEFAULT 0,
+         drop_count INTEGER NOT NULL DEFAULT 0,
+         driver TEXT,
+         recipients TEXT
        )`,
+      // Packing-list columns for existing prod tables (idempotent; the loop
+      // try/catches so "duplicate column" is skipped silently). due_date drives
+      // the auto-expire; do_count/drop_count/driver/recipients feed the new
+      // "one truck run" proposal card.
+      `ALTER TABLE delivery_proposals ADD COLUMN due_date TEXT`,
+      `ALTER TABLE delivery_proposals ADD COLUMN do_count INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE delivery_proposals ADD COLUMN drop_count INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE delivery_proposals ADD COLUMN driver TEXT`,
+      `ALTER TABLE delivery_proposals ADD COLUMN recipients TEXT`,
       `CREATE INDEX IF NOT EXISTS idx_delivery_proposals_status
          ON delivery_proposals(status, generated_at DESC)`,
       `CREATE INDEX IF NOT EXISTS idx_delivery_proposals_kind
          ON delivery_proposals(kind, status)`,
+      `CREATE INDEX IF NOT EXISTS idx_delivery_proposals_due
+         ON delivery_proposals(status, due_date)`,
       // Daily brief snapshots for the cron run (latest per date wins on read).
       `CREATE TABLE IF NOT EXISTS delivery_briefs (
          id TEXT PRIMARY KEY,
@@ -697,6 +713,7 @@ export interface GenerateDeliveryProposalsResult {
   invoiceGaps: number;
   podChases: number;
   superseded: number;
+  expired: number;
 }
 
 function rm(sen: number): string {
@@ -712,9 +729,15 @@ interface ProposalInsert {
   valueSen: number;
   threePlCostSen: number;
   recommendation: string;
+  // Packing-list fields (LOAD_PLAN only; the other kinds leave them at defaults).
+  dueDate?: string; // earliest delivery date across the run → drives auto-expire
+  doCount?: number; // # delivery orders (one per customer+hub) in this truck run
+  dropCount?: number; // # distinct drop locations (hubs)
+  driver?: string; // suggested carrier (cheapest 3PL, or "Own truck")
+  recipients?: string; // JSON [{ customer, hub, doCount, valueSen }]
 }
 
-const INSERT_CHUNK = 40; // 9 binds/row → well under adapter parameter limits
+const INSERT_CHUNK = 30; // 15 binds/row → well under adapter parameter limits
 
 async function supersedePendingOfKinds(
   db: DbLike,
@@ -742,6 +765,39 @@ async function supersedePendingOfKinds(
   return count;
 }
 
+/**
+ * Auto-expire stale PENDING proposals the owner never adopted within ~1 day of
+ * GENERATION (owner 2026-07-15: unadopted plans should clear after a day). Keyed
+ * on generated_at age — NOT the delivery date — because a ready SO whose expected
+ * DD has passed is OVERDUE and must keep surfacing, not be hidden. Marks EXPIRED
+ * (not deleted — the audit/history stays). Runs BEFORE regeneration each cycle.
+ * Mirrors the production schedule-proposals expiry.
+ */
+async function expireStalePendingProposals(
+  db: DbLike,
+  nowIso: string,
+): Promise<number> {
+  const cutoff = new Date(Date.parse(nowIso) - 86400000).toISOString();
+  const prev = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM delivery_proposals
+        WHERE status = 'PENDING' AND generated_at < ?`,
+    )
+    .bind(cutoff)
+    .first<{ n: number | string }>();
+  const count = n(prev?.n);
+  if (count > 0) {
+    await db
+      .prepare(
+        `UPDATE delivery_proposals SET status = 'EXPIRED', decided_at = ?
+          WHERE status = 'PENDING' AND generated_at < ?`,
+      )
+      .bind(nowIso, cutoff)
+      .run();
+  }
+  return count;
+}
+
 async function insertProposals(
   db: DbLike,
   proposals: ProposalInsert[],
@@ -749,7 +805,9 @@ async function insertProposals(
 ): Promise<void> {
   for (let i = 0; i < proposals.length; i += INSERT_CHUNK) {
     const chunk = proposals.slice(i, i + INSERT_CHUNK);
-    const valuesSql = chunk.map(() => "(?,?,?,?,?,?,?,?,?,?,'PENDING')").join(",");
+    const valuesSql = chunk
+      .map(() => "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'PENDING')")
+      .join(",");
     const binds: unknown[] = [];
     for (const p of chunk) {
       binds.push(
@@ -763,13 +821,19 @@ async function insertProposals(
         p.valueSen,
         p.threePlCostSen,
         p.recommendation,
+        p.dueDate ?? "",
+        p.doCount ?? 0,
+        p.dropCount ?? 0,
+        p.driver ?? "",
+        p.recipients ?? "",
       );
     }
     await db
       .prepare(
         `INSERT INTO delivery_proposals
            (id, generated_at, kind, so_refs, state, hub,
-            items_count, value_sen, three_pl_cost_sen, recommendation, status)
+            items_count, value_sen, three_pl_cost_sen, recommendation,
+            due_date, do_count, drop_count, driver, recipients, status)
          VALUES ${valuesSql}`,
       )
       .bind(...binds)
@@ -822,49 +886,79 @@ export async function generateDeliveryProposals(
 
   const proposals: ProposalInsert[] = [];
 
-  // -- LOAD_PLAN: bucket the READY_TO_SHIP pool by (state, hub) --------------
-  // Drops within a bucket honor the PL-first hub-integrity rule: one DO per
-  // (customer, hub), so the 3PL extra-drop count = distinct customers.
-  const buckets = new Map<string, PoolSo[]>();
+  // -- LOAD_PLAN: one proposal per STATE = one packing list (truck run). ------
+  // Multiple DOs (one per customer+hub — the PL-first hub-integrity rule) bundle
+  // into a single truck run dropping at N locations. Owner 2026-07-15: propose by
+  // PACKING LIST, not by DO — the card shows DO count, drop count, recipients,
+  // suggested carrier, and the delivery date (earliest DD across the run), which
+  // also drives auto-expiry. Approval still records only (Phase 1); the office
+  // creates the DOs via Create Packing List.
+  const byState = new Map<string, PoolSo[]>();
   for (const so of pool) {
-    const key = `${so.stateCode}\u0000${so.hubName}\u0000${so.hubId}`;
-    const arr = buckets.get(key);
+    const arr = byState.get(so.stateCode);
     if (arr) arr.push(so);
-    else buckets.set(key, [so]);
+    else byState.set(so.stateCode, [so]);
   }
-  for (const sos of buckets.values()) {
-    const first = sos[0];
-    const drops = new Set(sos.map((x) => `${x.customerId}\u0000${x.hubId}`)).size;
+  for (const [stateCode, sos] of byState) {
+    // One DO per (customer, hub) — each is a stop. Drops = distinct hub locations.
+    const doCount = new Set(sos.map((x) => `${x.customerId}__${x.hubId}`)).size;
+    const dropCount =
+      new Set(sos.map((x) => x.hubId).filter(Boolean)).size || doCount;
     const valueSen = sos.reduce((sum, x) => sum + x.valueSen, 0);
     const soRefs = sos
       .map((x) => x.soNo || x.soId)
       .filter(Boolean)
       .join(",");
-    const cheapest = cheapestForState(rateCard, first.stateCode, drops);
-    const dest = first.hubName
-      ? `${first.stateCode} · hub ${first.hubName}`
-      : first.stateCode;
-    const dropNote =
-      drops > 1
-        ? `${drops} drops (PL-first: one DO per customer+hub)`
-        : "1 drop";
+    // Earliest delivery date across the run — the deliver-by + the expiry floor.
+    const dueDate =
+      sos
+        .map((x) => x.dueDate)
+        .filter(Boolean)
+        .sort()[0] ?? "";
+    // Recipients grouped by (customer, hub), each with its own DO count + value.
+    const recMap = new Map<
+      string,
+      { customer: string; hub: string; doCount: number; valueSen: number }
+    >();
+    for (const x of sos) {
+      const k = `${x.customerId}__${x.hubId}`;
+      const cur = recMap.get(k);
+      if (cur) cur.valueSen += x.valueSen;
+      else
+        recMap.set(k, {
+          customer: x.customerName || "—",
+          hub: x.hubName || "—",
+          doCount: 1,
+          valueSen: x.valueSen,
+        });
+    }
+    const recipients = JSON.stringify([...recMap.values()]);
+    const cheapest = cheapestForState(rateCard, stateCode, doCount);
+    const driver = cheapest ? cheapest.rate.providerName : "Own truck";
+    const dropNote = dropCount > 1 ? `${dropCount} drops` : "1 drop";
+    const byLine = dueDate ? `Deliver by ${dueDate}. ` : "";
     const reco = cheapest
-      ? `Load ${sos.length} SO(s) worth ${rm(valueSen)} to ${dest} as ${dropNote}. ` +
-        `Cheapest 3PL: ${cheapest.rate.providerName} ≈ ${rm(cheapest.costSen)} ` +
-        `(${rm(cheapest.rate.tripSen)}/trip${drops > 1 ? ` + ${drops - 1} × ${rm(cheapest.rate.extraDropSen)}/extra drop` : ""}). ` +
-        `Compare vs own truck before dispatch. Approval records the plan only — create the DOs via Create Packing List.`
-      : `Load ${sos.length} SO(s) worth ${rm(valueSen)} to ${dest} as ${dropNote}. ` +
-        `No 3PL state rate captured for ${first.stateCode} — own truck, or capture a quote in 3PL Providers first. ` +
-        `Approval records the plan only — create the DOs via Create Packing List.`;
+      ? `Packing list — ${stateCode}: ${doCount} DO(s) worth ${rm(valueSen)} to ${dropNote}. ` +
+        `Suggested 3PL: ${cheapest.rate.providerName} ≈ ${rm(cheapest.costSen)} ` +
+        `(${rm(cheapest.rate.tripSen)}/trip${dropCount > 1 ? ` + ${dropCount - 1} × ${rm(cheapest.rate.extraDropSen)}/extra drop` : ""}). ` +
+        `Compare vs own truck. ${byLine}Approval records the plan only — create the DOs via Create Packing List.`
+      : `Packing list — ${stateCode}: ${doCount} DO(s) worth ${rm(valueSen)} to ${dropNote}. ` +
+        `No 3PL state rate for ${stateCode} — own truck, or capture a quote in 3PL Providers first. ` +
+        `${byLine}Approval records the plan only — create the DOs via Create Packing List.`;
     proposals.push({
       kind: "LOAD_PLAN",
       soRefs,
-      state: first.stateCode,
-      hub: first.hubName,
+      state: stateCode,
+      hub: "",
       itemsCount: sos.length,
       valueSen,
       threePlCostSen: cheapest ? cheapest.costSen : 0,
       recommendation: reco,
+      dueDate,
+      doCount,
+      dropCount,
+      driver,
+      recipients,
     });
   }
 
@@ -902,8 +996,10 @@ export async function generateDeliveryProposals(
     });
   }
 
-  // Whole-kind supersede then fresh insert — regeneration is idempotent and
-  // a decided (APPROVED/REJECTED) proposal is never touched.
+  // Expire past-due PENDING proposals first (owner 2026-07-15), then whole-kind
+  // supersede + fresh insert — regeneration is idempotent and a decided
+  // (APPROVED/REJECTED) proposal is never touched.
+  const expired = await expireStalePendingProposals(db, nowIso);
   const superseded = await supersedePendingOfKinds(
     db,
     ["LOAD_PLAN", "INVOICE_GAP", "POD_CHASE"],
@@ -918,6 +1014,7 @@ export async function generateDeliveryProposals(
     invoiceGaps: invoiceGaps.length,
     podChases: podChases.length,
     superseded,
+    expired,
   };
 }
 
@@ -1000,9 +1097,12 @@ export async function generateDeliveryFocus(
   apiKey: string | undefined,
   brief: DeliveryBriefData,
   usageSink?: { tokensIn: number; tokensOut: number },
+  ownerInstructions: string[] = [],
 ): Promise<string | null> {
   const compact = {
     date: brief.date,
+    // Standing teachings from the owner (agent_feedback notebook).
+    ownerInstructions,
     readyPool: { count: brief.pool.count, topBuckets: brief.pool.byStateHub.slice(0, 5) },
     overdueToShip: {
       count: brief.overdueToShip.count,
@@ -1030,7 +1130,9 @@ export async function generateDeliveryFocus(
       "what matters most in deliveries today: the most overdue-to-ship orders, " +
       "which state/hub bucket is worth a truck, invoice gaps or POD chases " +
       "needing closure, and any 3PL whose on-time rate or freight variance " +
-      "looks off. Be direct and specific — name orders and providers.",
+      "looks off. ownerInstructions in the JSON are standing rules the boss " +
+      "personally taught you — obey every one of them. " +
+      "Be direct and specific — name orders and providers.",
     payload: compact,
     maxTokens: 500,
     usageSink,

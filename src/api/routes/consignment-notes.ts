@@ -26,6 +26,13 @@ import {
   CN_VALID_TRANSITIONS,
 } from "../lib/consignment-note-shared";
 import { cascadeCNCompletionToCO, cascadeCNReversalToCO } from "./production-orders";
+import { fetchFilteredPOs } from "./production-orders";
+import {
+  buildCnReadyPlanning,
+  isHbOnlySpecial,
+  type CnReadyPlanningPO,
+} from "../../lib/delivery-pipeline";
+import { aggregateRacksFromPackingCards } from "../../lib/rack-format";
 import { nextInvoiceNo } from "./invoices";
 import { getOrgId } from "../lib/tenant";
 import { loadCnValueMap, loadCnCustomerRefMap } from "../lib/cn-value";
@@ -174,6 +181,220 @@ app.get("/linked-po-ids", async (c) => {
     .map((r) => r.poId)
     .filter((x): x is string => !!x);
   return c.json({ success: true, poIds });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/consignment-notes/ready-planning — server-side Planning / Pending-CN.
+//
+// Perf 2026-07-14: the CN Note page used to pull the whole ~1.2MB
+// /api/production-orders?fields=minimal&include=jobCards (plus /consignment-orders
+// and /linked-po-ids) ONLY to derive its Planning + Pending-CN PO lists
+// client-side. This assembles the SAME inputs server-side and runs the SHARED
+// buildCnReadyPlanning (src/lib/delivery-pipeline.ts, extracted verbatim from the
+// page's mapPO + filters) → the rows are byte-identical by construction. These
+// rows carry NO money (CN amounts live on the CN records), so this is a pure
+// PO-listing derivation. Snapshot-cached + serve-stale so the page's cold paint
+// never blocks on the ~8s whole-org compute (BUG-2026-07-13-001). Freshness tracks
+// production_orders / job_cards / consignment_items / consignment_notes /
+// consignment_orders. Registered BEFORE /:id (Hono static-first).
+// ---------------------------------------------------------------------------
+app.get("/ready-planning", async (c) => {
+  const denied = await requirePermission(c, "consignment-notes", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const db = c.var.DB;
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS consignment_ready_planning_snapshot (
+         org_id        TEXT NOT NULL,
+         cache_key     TEXT NOT NULL DEFAULT '',
+         data          JSONB NOT NULL,
+         built_from    TIMESTAMP NOT NULL,
+         built_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+         refresh_count INTEGER NOT NULL DEFAULT 0,
+         PRIMARY KEY (org_id, cache_key)
+       )`,
+    )
+    .run();
+
+  const { withSnapshot } = await import("../lib/snapshot");
+  const data = await withSnapshot(
+    db,
+    {
+      tableName: "consignment_ready_planning_snapshot",
+      sourceTables: [
+        "production_orders",
+        "job_cards",
+        "consignment_items",
+        "consignment_notes",
+        "consignment_orders",
+        "products",
+      ],
+    },
+    orgId,
+    async () => {
+      const [pos, coRes, linkedRes, legacyRes, cnRefRes] = await Promise.all([
+        fetchFilteredPOs(db, orgId, null, true, false, true),
+        db
+          .prepare(
+            "SELECT id, hookkaExpectedDD, companyCOId, customerId FROM consignment_orders WHERE orgId = ?",
+          )
+          .bind(orgId)
+          .all<{
+            id: string;
+            hookkaExpectedDD?: string;
+            companyCOId?: string;
+            customerId?: string;
+          }>(),
+        // PO ids already on a non-cancelled CN — the dedup set (mirrors
+        // GET /linked-po-ids above). NOT capped by any browse page.
+        db
+          .prepare(
+            `SELECT DISTINCT ci.productionOrderId AS poId
+               FROM consignment_items ci
+               JOIN consignment_notes cn ON cn.id = ci.consignmentNoteId
+              WHERE ci.orgId = ?
+                AND ci.productionOrderId IS NOT NULL
+                AND ci.productionOrderId <> ''
+                AND cn.status <> 'CANCELLED'`,
+          )
+          .bind(orgId)
+          .all<{ poId?: string | null }>(),
+        // Legacy fallback: customers with an ACTIVE/PARTIALLY_SOLD CN whose items
+        // carry NO productionOrderId (pre-0066). Computed over ALL CNs (the page
+        // walked only its loaded 200-CN window — this is the same set, uncapped).
+        db
+          .prepare(
+            `SELECT DISTINCT cn.customerId AS customerId
+               FROM consignment_notes cn
+              WHERE cn.orgId = ?
+                AND cn.status IN ('ACTIVE', 'PARTIALLY_SOLD')
+                AND NOT EXISTS (
+                  SELECT 1 FROM consignment_items ci
+                   WHERE ci.consignmentNoteId = cn.id
+                     AND ci.productionOrderId IS NOT NULL
+                     AND ci.productionOrderId <> ''
+                )`,
+          )
+          .bind(orgId)
+          .all<{ customerId?: string | null }>(),
+        // Every PO id referenced by a CN item (any status) — the FE builds
+        // poToCoNoMap / poToFabricMap / poToRackMap from these to enrich the CN
+        // Detail/browse item rows with companyCOId / fabricCode / rack. Scoping
+        // the lookups to this set keeps the payload tiny (vs the whole PO list).
+        db
+          .prepare(
+            `SELECT DISTINCT productionOrderId AS poId
+               FROM consignment_items
+              WHERE orgId = ?
+                AND productionOrderId IS NOT NULL
+                AND productionOrderId <> ''`,
+          )
+          .bind(orgId)
+          .all<{ poId?: string | null }>(),
+      ]);
+
+      const coMap = new Map<
+        string,
+        { hookkaExpectedDD: string; companyCOId: string; customerId: string }
+      >();
+      for (const co of coRes.results ?? []) {
+        coMap.set(co.id, {
+          hookkaExpectedDD: co.hookkaExpectedDD || "",
+          companyCOId: co.companyCOId || "",
+          customerId: co.customerId || "",
+        });
+      }
+
+      const cnLinkedPOIds = new Set(
+        (linkedRes.results ?? [])
+          .map((r) => r.poId)
+          .filter((x): x is string => !!x),
+      );
+      const cnLinkedCustomersLegacy = new Set(
+        (legacyRes.results ?? [])
+          .map((r) => r.customerId)
+          .filter((x): x is string => !!x),
+      );
+
+      // productCode → unitM3 (mirrors loadProductM3Map; small SELECT).
+      const codes = Array.from(
+        new Set(
+          (pos as Array<{ productCode?: string }>)
+            .map((p) => p.productCode)
+            .filter((x): x is string => !!x),
+        ),
+      );
+      const productM3Map = new Map<string, number>();
+      if (codes.length > 0) {
+        const ph = codes.map(() => "?").join(",");
+        const m3Res = await db
+          .prepare(`SELECT code, unitM3 FROM products WHERE code IN (${ph})`)
+          .bind(...codes)
+          .all<{ code: string; unitM3: number }>();
+        for (const r of m3Res.results ?? []) {
+          productM3Map.set(r.code, Number(r.unitM3) || 0);
+        }
+      }
+
+      const { planning, ready } = buildCnReadyPlanning({
+        allPOs: pos as unknown as CnReadyPlanningPO[],
+        coMap,
+        cnLinkedPOIds,
+        cnLinkedCustomersLegacy,
+        productM3Map,
+      });
+
+      // poLookups: companyCOId / fabricCode / rack for every CN-referenced PO,
+      // built from the SAME `pos` the FE's poToCoNoMap / poToFabricMap /
+      // poToRackMap read (rack aggregated per-piece from the PACKING cards with
+      // the HB-only DIVAN drop — byte-identical to the page's inline maps).
+      const posById = new Map(
+        (pos as unknown as CnReadyPlanningPO[]).map((p) => [p.id, p]),
+      );
+      const refIds = new Set(
+        (cnRefRes.results ?? [])
+          .map((r) => r.poId)
+          .filter((x): x is string => !!x),
+      );
+      const poLookups: Array<{
+        id: string;
+        companyCOId: string;
+        fabricCode: string;
+        rack: string;
+      }> = [];
+      for (const id of refIds) {
+        const po = posById.get(id);
+        if (!po) continue;
+        const hbOnly =
+          (po.itemCategory || "").toUpperCase() === "BEDFRAME" &&
+          isHbOnlySpecial(po.specialOrder);
+        const packingCards = (po.jobCards ?? []).filter(
+          (j) => j.departmentCode === "PACKING",
+        );
+        poLookups.push({
+          id,
+          companyCOId: po.companyCOId || "",
+          fabricCode: po.fabricCode || "",
+          rack: aggregateRacksFromPackingCards(packingCards, {
+            dropDivan: hbOnly,
+          }),
+        });
+      }
+
+      return { planning, ready, poLookups };
+    },
+    // cache_key carries the payload-SHAPE version — bump it whenever the compute
+    // output shape changes (added poLookups → v2), else withSnapshot keeps
+    // serving the old cached blob as "fresh" until a source table happens to
+    // change (it tracks source-table mtimes, not code). v1 → v2 = +poLookups.
+    "v2",
+    c,
+    { staleWhileRevalidate: true },
+  );
+
+  return c.json({ success: true, ...data });
 });
 
 // ---------------------------------------------------------------------------

@@ -632,12 +632,14 @@ test("frontend: bulk + single transition paths fire the notify flow", () => {
   );
   assert.match(pageSrc, /\/notify-customer`,/);
   assert.match(pageSrc, /buildDoComponentBreakdown\(row\.items, extras\)/);
-  // The customer email carries the SAME jsPDF the operator prints/downloads
-  // (fix 2026-07-04 BUG-...-005: the earlier pdf-lib "unified" render was a
-  // second engine that looked different/"歪" → now renders via the print
-  // generators generateDoPdfBase64 / generateInvoicePdfBase64).
-  assert.match(pageSrc, /generateDoPdfBase64\(/);
-  assert.match(pageSrc, /generateInvoicePdfBase64\(/);
+  // The customer email carries the SAME document the operator downloads/prints
+  // (owner 2026-07-13: unify on ONE template). The Download/Print button now
+  // uses the unified pdf-lib generator (its earlier "歪" alignment + dashed-
+  // line issues are fixed), so the email renders via the SAME unified path —
+  // renderUnifiedDoBase64 / renderUnifiedInvoiceBase64 — reversing the stale
+  // 2026-07-04 "use the jsPDF print generator" note.
+  assert.match(pageSrc, /renderUnifiedDoBase64\(/);
+  assert.match(pageSrc, /renderUnifiedInvoiceBase64\(/);
   // runBulkDoTransition (bulk buttons + PL-level bulk reuse) notifies every
   // DO that actually transitioned, mapping LOADED→DISPATCHED.
   assert.match(

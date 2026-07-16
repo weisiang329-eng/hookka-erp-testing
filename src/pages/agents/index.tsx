@@ -27,8 +27,6 @@ import {
   Pause,
   OctagonAlert,
   Undo2,
-  ShieldCheck,
-  ShieldOff,
   RefreshCw,
   CheckCircle2,
   X,
@@ -60,9 +58,23 @@ type AgentStatus = {
   live: boolean;
   paused: boolean;
   autoApprove: boolean;
+  phase?: 1 | 2 | 3;
   tasks: AgentTask[];
   today: { runs: number; proposalsGenerated: number; pendingProposals: number } | null;
   cs?: { promises30d: number; enginePromises30d: number } | null;
+  employee?: {
+    date: string | null;
+    absent: number;
+    late: number;
+    pendingApprovals: number;
+    lowEfficiency: number;
+  } | null;
+  service?: {
+    date: string | null;
+    newCases: number;
+    untriaged: number;
+    qcFails: number;
+  } | null;
   pendingConfigProposals: number;
   month: { runs: number; tokensIn: number; tokensOut: number } | null;
   recentErrors: AgentRun[];
@@ -129,13 +141,14 @@ const AGENT_LABEL: Record<string, string> = {
   PRODUCTION: "Production Agent",
   DELIVERY: "Delivery Agent",
   CS: "Customer Service Agent",
+  EMPLOYEE: "Employee Agent",
   PROCUREMENT: "Procurement Agent",
   FINANCE: "Finance / AR Agent",
   SALES: "Sales / Quotation Agent",
   HR: "HR / Payroll Agent",
   DATA_QUALITY: "Data Quality Agent",
   INVENTORY: "Inventory Agent",
-  SERVICE: "Service Case Agent",
+  SERVICE: "Service Agent",
   CHIEF_OF_STAFF: "Chief-of-Staff Agent",
 };
 
@@ -145,13 +158,14 @@ const AGENT_BLURB: Record<string, string> = {
   DELIVERY:
     "Daily load plans, invoice-gap + POD closure, 3PL learning, transit-drift proposals that tune the CS promise engine.",
   CS: "Promise-date orchestrator across production, materials and delivery. Every answer is logged for hit-rate learning.",
+  EMPLOYEE: "Daily attendance / efficiency anomaly digest and pre-payroll checks. Read-only — never touches approved pay.",
   PROCUREMENT: "Shortage → PO drafts, expediting, supplier reliability.",
   FINANCE: "Missed invoices, aging + staged collection drafts, per-customer payment profiles.",
   SALES: "OCR PO → SO draft, engine-backed promise dates in quotes, price-anomaly interception.",
   HR: "Attendance/efficiency anomaly digests, pre-payroll checks. Never touches approved pay.",
   DATA_QUALITY: "The 0711 tally audit, automated nightly: cross-page metric drift, future dates, orphans.",
   INVENTORY: "Safety-stock triggers, dead-stock lists, batch aging.",
-  SERVICE: "New-case triage against original orders, repair-scope suggestions.",
+  SERVICE: "After-sales daily digest — new service cases, untriaged cases (no matched order), and open QC / quality fails. Read-only.",
   CHIEF_OF_STAFF: "One page of everything awaiting your decision, across all agents.",
 };
 
@@ -160,10 +174,8 @@ const AGENT_BLURB: Record<string, string> = {
 const PLANNED_AGENT_IDS = [
   "FINANCE",
   "SALES",
-  "HR",
   "DATA_QUALITY",
   "INVENTORY",
-  "SERVICE",
   "CHIEF_OF_STAFF",
 ];
 
@@ -228,12 +240,25 @@ export default function AgentConsolePage() {
   const [review, setReview] = useState<AgentReview | null>(null);
   const [configProposals, setConfigProposals] = useState<ConfigProposal[]>([]);
 
+  // The Scorecard (/review) is the heavy call — it recomputes 90 days of 3PL
+  // learning + a job-card adherence scan. Load it SEPARATELY so the page
+  // renders as soon as the fast status + proposals arrive; the scorecard fills
+  // in a moment later instead of blocking the whole page open.
+  const loadReview = useCallback(async () => {
+    try {
+      const r = await fetch("/api/agents/review", { credentials: "include" });
+      const rj = (await r.json()) as { success?: boolean; data?: AgentReview };
+      setReview(rj?.data ?? null);
+    } catch {
+      setReview(null);
+    }
+  }, []);
+
   const load = useCallback(async () => {
     try {
-      const [statusRes, cpRes, reviewRes] = await Promise.all([
+      const [statusRes, cpRes] = await Promise.all([
         fetch("/api/agents/status", { credentials: "include" }),
         fetch("/api/agents/config-proposals?status=PENDING", { credentials: "include" }),
-        fetch("/api/agents/review", { credentials: "include" }),
       ]);
       const sj = (await statusRes.json()) as StatusResponse;
       if (!statusRes.ok || !sj?.success || !sj.data) {
@@ -244,12 +269,6 @@ export default function AgentConsolePage() {
       setLlm(sj.data.llm ?? null);
       const cj = (await cpRes.json()) as { success?: boolean; data?: ConfigProposal[] };
       setConfigProposals(cj?.data ?? []);
-      try {
-        const rj = (await reviewRes.json()) as { success?: boolean; data?: AgentReview };
-        setReview(rj?.data ?? null);
-      } catch {
-        setReview(null);
-      }
     } catch (err) {
       toast.error(`Failed to load agent status: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -260,7 +279,8 @@ export default function AgentConsolePage() {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- initial fetch on mount; same pattern as sidebar.tsx / planning
     void load();
-  }, [load]);
+    void loadReview(); // non-blocking — scorecard fills in when ready
+  }, [load, loadReview]);
 
   const post = useCallback(
     async (path: string, body: unknown, okMsg: string, busyKey: string) => {
@@ -287,7 +307,9 @@ export default function AgentConsolePage() {
     [load, toast],
   );
 
-  const runNow = async (agent: "brief" | "proposals" | "learning" | "delivery") => {
+  const runNow = async (
+    agent: "brief" | "proposals" | "learning" | "delivery" | "employee" | "service",
+  ) => {
     await post("run-now", { agent }, `Run started and finished: ${agent}.`, `run-${agent}`);
   };
 
@@ -349,22 +371,64 @@ export default function AgentConsolePage() {
     }
   };
 
-  const toggleGate = async (a: AgentStatus) => {
-    const next = !a.autoApprove;
-    const ok = await confirm({
-      title: next ? "Switch to full-auto" : "Back to propose-then-approve",
-      message: next
-        ? "The agent will APPLY its own proposals on its scheduled runs (Production: writes due dates on WAITING cards, batch by batch, every batch rollbackable; Delivery: marks its plans approved — it still never creates or sends documents). You keep Pause, Kill all and Rollback."
-        : "The agent goes back to waiting for your approval before anything is applied.",
-      confirmLabel: next ? "Go full-auto" : "Require my approval",
-      danger: next,
-    });
-    if (!ok) return;
-    await post(
-      "gate",
-      { agent: a.id, autoApprove: next },
-      next ? "Auto-approve flag ON." : "Auto-approve flag OFF.",
-      `gate-${a.id}`,
+  // Automation phase: 1 propose · 2 auto-tune · 3 full-auto. Switchable any
+  // time. Only raising to phase 3 (the one that writes real work) confirms.
+  const phaseOf = (a: AgentStatus): 1 | 2 | 3 => a.phase ?? (a.autoApprove ? 3 : 1);
+  const PHASE_LABELS: Record<1 | 2 | 3, string> = {
+    1: "Propose",
+    2: "Auto-tune",
+    3: "Full-auto",
+  };
+  const setPhase = async (a: AgentStatus, phase: 1 | 2 | 3) => {
+    if (phase === phaseOf(a)) return;
+    if (phase === 3) {
+      const ok = await confirm({
+        title: "Switch to Phase 3 · Full-auto",
+        message:
+          a.id === "PRODUCTION"
+            ? "Full auto — the agent writes due dates onto WAITING job cards itself (every batch rollbackable) and self-tunes its handoffs. You keep Pause, Kill all and Rollback, and every change stays on the console."
+            : a.id === "DELIVERY"
+              ? "Full auto — the agent will create packing lists itself once a truck is full enough (it still never sends a document) and self-tunes its transit days. Until the truck-loading logic ships it only marks its plans approved."
+              : "Full auto — the agent acts on its own within its remit. Every action stays visible on the console.",
+        confirmLabel: "Go full-auto",
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    await post("phase", { agent: a.id, phase }, `Set to Phase ${phase} · ${PHASE_LABELS[phase]}.`, `phase-${a.id}`);
+  };
+  const renderPhaseSelector = (a: AgentStatus) => {
+    const cur = phaseOf(a);
+    return (
+      <div
+        className="inline-flex rounded-md border border-[#D8CFC4] overflow-hidden"
+        role="group"
+        aria-label="Automation phase"
+      >
+        {([1, 2, 3] as const).map((p, i) => {
+          const on = cur === p;
+          return (
+            <button
+              key={p}
+              type="button"
+              onClick={() => void setPhase(a, p)}
+              disabled={busy === `phase-${a.id}`}
+              title={`Phase ${p} · ${PHASE_LABELS[p]}`}
+              className={`text-xs px-2.5 py-1.5 transition-colors ${i > 0 ? "border-l border-[#D8CFC4]" : ""} ${on ? "bg-[#6B5C32] text-white" : "bg-white text-[#6B5C32] hover:bg-[#F5F1EC]"}`}
+            >
+              {p} · {PHASE_LABELS[p]}
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
+  const renderPhaseBadge = (a: AgentStatus) => {
+    const cur = phaseOf(a);
+    return (
+      <span className="text-[11px] font-semibold rounded-full bg-[#6B5C32]/10 text-[#6B5C32] px-2 py-0.5">
+        PHASE {cur} · {PHASE_LABELS[cur].toUpperCase()}
+      </span>
     );
   };
 
@@ -396,7 +460,15 @@ export default function AgentConsolePage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              void load();
+              void loadReview();
+            }}
+            disabled={loading}
+          >
             <RefreshCw className="h-4 w-4 mr-1" />
             Refresh
           </Button>
@@ -574,15 +646,11 @@ export default function AgentConsolePage() {
                           PAUSED
                         </span>
                       )}
-                      {production.autoApprove && (
-                        <span className="text-[11px] font-semibold rounded-full bg-[#6B5C32]/10 text-[#6B5C32] px-2 py-0.5">
-                          AUTO-APPROVE FLAG
-                        </span>
-                      )}
+                      {renderPhaseBadge(production)}
                     </CardTitle>
                     <p className="mt-1 text-xs text-[#6B7280]">{AGENT_BLURB.PRODUCTION}</p>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <Button
                       variant="outline"
                       size="sm"
@@ -596,19 +664,7 @@ export default function AgentConsolePage() {
                       )}
                       {production.paused ? "Resume" : "Pause"}
                     </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => void toggleGate(production)}
-                      disabled={busy === `gate-PRODUCTION`}
-                    >
-                      {production.autoApprove ? (
-                        <ShieldOff className="h-4 w-4 mr-1" />
-                      ) : (
-                        <ShieldCheck className="h-4 w-4 mr-1" />
-                      )}
-                      {production.autoApprove ? "Back to proposals" : "Auto-approve"}
-                    </Button>
+                    {renderPhaseSelector(production)}
                     <Button
                       variant="outline"
                       size="sm"
@@ -828,34 +884,53 @@ export default function AgentConsolePage() {
                           );
                         })()}
                         {AGENT_LABEL[a.id] ?? a.id}
-                        <span
-                          className={`text-[11px] font-semibold rounded-full px-2 py-0.5 ${live ? "bg-[#EEF3E4] text-[#4F7C3A]" : "bg-[#F0ECE9] text-[#6B7280]"}`}
-                        >
-                          {live ? "LIVE" : "COMING SOON"}
-                        </span>
+                        {a.id === "PROCUREMENT" ? (
+                          <span className="text-[11px] font-semibold rounded-full px-2 py-0.5 bg-[#FAEEDA] text-[#854F0B]">
+                            GATED
+                          </span>
+                        ) : (
+                          <span
+                            className={`text-[11px] font-semibold rounded-full px-2 py-0.5 ${live ? "bg-[#EEF3E4] text-[#4F7C3A]" : "bg-[#F0ECE9] text-[#6B7280]"}`}
+                          >
+                            {live ? "LIVE" : "COMING SOON"}
+                          </span>
+                        )}
                         {a.paused && (
                           <span className="text-[11px] font-semibold rounded-full bg-[#9A3A2D]/10 text-[#9A3A2D] px-2 py-0.5">
                             PAUSED
                           </span>
                         )}
+                        {live && a.id !== "CS" && renderPhaseBadge(a)}
                       </CardTitle>
                       <p className="mt-1 text-xs text-[#6B7280]">{AGENT_BLURB[a.id] ?? ""}</p>
                     </div>
-                    {a.id === "DELIVERY" && live && (
-                      <div className="flex items-center gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => void runNow("delivery")}
-                          disabled={busy === "run-delivery" || killAll}
-                        >
-                          {busy === "run-delivery" ? (
-                            <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                          ) : (
-                            <Play className="h-4 w-4 mr-1" />
-                          )}
-                          Run now
-                        </Button>
+                    {/* Unified controls (owner 2026-07-16): every LIVE agent gets
+                        the same Pause + Phase selector; Delivery adds Run now. */}
+                    {live && (
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {(a.id === "DELIVERY" || a.id === "EMPLOYEE" || a.id === "SERVICE") && (() => {
+                          const k =
+                            a.id === "EMPLOYEE"
+                              ? "employee"
+                              : a.id === "SERVICE"
+                                ? "service"
+                                : "delivery";
+                          return (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void runNow(k)}
+                              disabled={busy === `run-${k}` || killAll}
+                            >
+                              {busy === `run-${k}` ? (
+                                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                              ) : (
+                                <Play className="h-4 w-4 mr-1" />
+                              )}
+                              Run now
+                            </Button>
+                          );
+                        })()}
                         <Button
                           variant="outline"
                           size="sm"
@@ -869,12 +944,77 @@ export default function AgentConsolePage() {
                           )}
                           {a.paused ? "Resume" : "Pause"}
                         </Button>
+                        {/* CS is a single-mode answerer (on / paused) — no
+                            propose→approve→execute lifecycle, so no phases
+                            (owner 2026-07-16). Only lifecycle agents get the
+                            phase selector. */}
+                        {a.id !== "CS" && renderPhaseSelector(a)}
                       </div>
                     )}
                   </div>
                 </CardHeader>
                 <CardContent>
-                  {a.id === "DELIVERY" && live ? (
+                  {a.id === "SERVICE" && live ? (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-3 gap-3">
+                        {[
+                          { label: "New cases (7d)", value: a.service?.newCases ?? 0 },
+                          { label: "Untriaged", value: a.service?.untriaged ?? 0 },
+                          { label: "QC fails (7d)", value: a.service?.qcFails ?? 0 },
+                        ].map((s) => (
+                          <div
+                            key={s.label}
+                            className="rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2"
+                          >
+                            <div className="text-[11px] text-[#6B7280]">{s.label}</div>
+                            <div className="text-base font-semibold text-[#1F1D1B]">{s.value}</div>
+                          </div>
+                        ))}
+                      </div>
+                      {lastRun?.summary && (
+                        <div className="text-xs text-[#6B7280]">{lastRun.summary}</div>
+                      )}
+                      <div className="text-xs text-[#4B5563]">
+                        Read-only after-sales digest{a.service?.date ? ` · as of ${a.service.date}` : ""}:
+                        new service cases, open cases with no matched original order (need
+                        triage), and open QC / quality fail-tags. It never edits a case or QC
+                        tag — it only surfaces. Runs 07:00 MYT on working days, or on demand.
+                      </div>
+                    </div>
+                  ) : a.id === "EMPLOYEE" && live ? (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                        {[
+                          { label: "Absent today", value: a.employee?.absent ?? 0 },
+                          { label: "Late today", value: a.employee?.late ?? 0 },
+                          {
+                            label: "Pending approvals",
+                            value: a.employee?.pendingApprovals ?? 0,
+                          },
+                          { label: "Low efficiency (7d)", value: a.employee?.lowEfficiency ?? 0 },
+                        ].map((s) => (
+                          <div
+                            key={s.label}
+                            className="rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2"
+                          >
+                            <div className="text-[11px] text-[#6B7280]">{s.label}</div>
+                            <div className="text-base font-semibold text-[#1F1D1B]">{s.value}</div>
+                          </div>
+                        ))}
+                      </div>
+                      {lastRun?.summary && (
+                        <div className="text-xs text-[#6B7280]">{lastRun.summary}</div>
+                      )}
+                      <div className="text-xs text-[#4B5563]">
+                        Read-only daily digest{a.employee?.date ? ` · as of ${a.employee.date}` : ""}:
+                        active workers with no clock-in, late arrivals, non-prod / add-prod
+                        requests still awaiting your decision, and workers under{" "}
+                        {"55%"} production efficiency over the last 7 days. It never edits
+                        attendance, hours or pay — it only surfaces. Runs 07:00 MYT on working
+                        days, or on demand.
+                      </div>
+                    </div>
+                  ) : a.id === "DELIVERY" && live ? (
                     <div className="space-y-2">
                       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                         {[

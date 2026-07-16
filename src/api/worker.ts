@@ -414,6 +414,74 @@ app.post("/api/internal/rebuild-dashboard-snapshot", async (c) => {
   }
 });
 
+// Pre-warm the heavy list snapshots so the Delivery + Production pages never hit
+// the empty-snapshot cold recompute (~25s) after a deploy busts the caches. Same
+// CRON_SECRET pattern as the internal endpoints above; .github/workflows/
+// warm-lists.yml hits it every few minutes. Warming stores BYTE-IDENTICAL
+// payloads (same compute, same snapshot keys) — only the timing of the recompute
+// moves off the request path, no figure changes (owner red line: input/output
+// figures must stay exact).
+app.post("/api/internal/warm-lists", async (c) => {
+  const expected = c.env.CRON_SECRET;
+  if (!expected || expected.length < 16) {
+    console.error("[warm-lists] CRON_SECRET unset or too short — refusing");
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  const given = c.req.header("x-cron-secret") || "";
+  if (!(await constantTimeEqual(given, expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  const t0 = Date.now();
+  const { DEFAULT_ORG_ID } = await import("./lib/tenant");
+  const out: Record<string, unknown> = {};
+  // 1. Delivery page's PO list — the 20MB / ~25s cold-recompute one.
+  try {
+    const { warmPoListDeliveryVariant } = await import(
+      "./routes/production-orders"
+    );
+    const r = await warmPoListDeliveryVariant(c, DEFAULT_ORG_ID);
+    out.poList = { ok: true, rows: r.rows };
+  } catch (e) {
+    console.error("[warm-lists] poList failed:", e);
+    out.poList = { ok: false };
+  }
+  // 1b. Planning page's PO list variant (excludeCompleted=true) — a DIFFERENT
+  // snapshot key, previously unwarmed → cold ~10MB/~8s block on first load.
+  try {
+    const { warmPoListPlanningVariant } = await import(
+      "./routes/production-orders"
+    );
+    const r = await warmPoListPlanningVariant(c, DEFAULT_ORG_ID);
+    out.poListPlanning = { ok: true, rows: r.rows };
+  } catch (e) {
+    console.error("[warm-lists] poListPlanning failed:", e);
+    out.poListPlanning = { ok: false };
+  }
+  // 2. Delivery-orders list value map (keeps the DO list warm post-deploy too).
+  try {
+    const { loadDoValueMapCached } = await import("./lib/do-value");
+    const m = await loadDoValueMapCached(c.var.DB, DEFAULT_ORG_ID, c);
+    out.doValueMap = { ok: true, entries: m.size };
+  } catch (e) {
+    console.error("[warm-lists] doValueMap failed:", e);
+    out.doValueMap = { ok: false };
+  }
+  // 3. Daily Report (compliance) — the ~6s cold-recompute one. Warm today's key
+  // so the first open of the day never blocks.
+  try {
+    const { warmComplianceReport, warmBriefReport } = await import(
+      "./routes/reports"
+    );
+    out.compliance = await warmComplianceReport(c, DEFAULT_ORG_ID);
+    out.brief = await warmBriefReport(c, DEFAULT_ORG_ID);
+  } catch (e) {
+    console.error("[warm-lists] reports failed:", e);
+    out.compliance = { ok: false };
+    out.brief = { ok: false };
+  }
+  return c.json({ ok: true, elapsedMs: Date.now() - t0, ...out });
+});
+
 // Sprint 4 — email outbox drain cron entry. Same CRON_SECRET pattern as
 // /api/internal/refresh-mvs above. The cron workflow at
 // .github/workflows/process-email-outbox.yml hits this every 5 min; the
@@ -1246,6 +1314,10 @@ app.route("/api/internal/reports", reportsInternal);
 // Anthropic SSE through to the browser; tool calls execute the read-only
 // query helpers in src/api/lib/assistant-tools.ts. See routes/assistant.ts.
 import assistant from "./routes/assistant";
+import assistantHistory from "./routes/assistant-history";
+// History sub-router first (more specific path) so /conversations/* resolves
+// before the assistant router's own routes. Both share the /api/assistant base.
+app.route("/api/assistant/conversations", assistantHistory);
 app.route("/api/assistant", assistant);
 
 // Agent Console (Production Agent Phase 3) — SUPER_ADMIN-only status +

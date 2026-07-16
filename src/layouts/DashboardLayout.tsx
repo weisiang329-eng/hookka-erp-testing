@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Navigate, Routes, ScrollRestoration, useLocation } from "react-router-dom";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
+import { prefetchRoutesWhenIdle } from "@/lib/prefetch-routes";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
 import { Breadcrumbs } from "@/components/layout/breadcrumbs";
@@ -94,6 +95,14 @@ export default function DashboardLayout() {
       setSidebarCollapsed(true);
     }
   }, [isNarrowOrPortrait]);
+
+  // Warm the main page chunks while the browser is idle, so the FIRST click on
+  // each page is instant instead of downloading its chunk right then (owner
+  // 2026-07-16: "開很多頁面還是卡，等過了第一次才順"). One chunk at a time, idle
+  // only, skipped on a weak/metered link — see prefetch-routes.ts.
+  useEffect(() => {
+    prefetchRoutesWhenIdle();
+  }, []);
 
   // Defer heavy startup work so first paint / page navigation stays responsive.
   // NOTE: We intentionally avoid static-importing `@/pages/bom` here because

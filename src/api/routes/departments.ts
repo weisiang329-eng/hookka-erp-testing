@@ -12,11 +12,42 @@
 // is set once at create time and locked from updates. id stays stable for
 // row-level FK joins.
 // ---------------------------------------------------------------------------
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
+
+// Explicit snapshot wipe on write. worker_payslips_snapshot,
+// department_performance_snapshot and worker_history_snapshot all derive from
+// departments, but that table has no updated_at/created_at column so the
+// freshness probe cannot auto-invalidate them. Every departments write path
+// must DELETE the affected snapshot rows itself. Wrapped so a wipe failure
+// never breaks the save.
+async function wipeDepartmentSnapshots(c: Context<Env>) {
+  try {
+    const { getOrgId } = await import("../lib/tenant");
+    const { invalidateSnapshot } = await import("../lib/snapshot");
+    const orgId = getOrgId(c);
+    await invalidateSnapshot(
+      c.var.DB,
+      { tableName: "worker_payslips_snapshot", sourceTables: [] },
+      orgId,
+    );
+    await invalidateSnapshot(
+      c.var.DB,
+      { tableName: "department_performance_snapshot", sourceTables: [] },
+      orgId,
+    );
+    await invalidateSnapshot(
+      c.var.DB,
+      { tableName: "worker_history_snapshot", sourceTables: [] },
+      orgId,
+    );
+  } catch (e) {
+    console.warn("[departments-write] snapshot wipe failed:", e);
+  }
+}
 
 type DepartmentRow = {
   id: string;
@@ -175,6 +206,7 @@ app.post("/", async (c) => {
         500,
       );
     }
+    await wipeDepartmentSnapshots(c);
     return c.json({ success: true, data: rowToDepartment(created) }, 201);
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
@@ -291,6 +323,7 @@ app.put("/:id", async (c) => {
     if (!updated) {
       return c.json({ success: false, error: "Department not found" }, 404);
     }
+    await wipeDepartmentSnapshots(c);
     return c.json({ success: true, data: rowToDepartment(updated) });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
@@ -333,6 +366,7 @@ app.delete("/:id", async (c) => {
   }
 
   await c.var.DB.prepare("DELETE FROM departments WHERE id = ?").bind(id).run();
+  await wipeDepartmentSnapshots(c);
   return c.json({ success: true, data: { id } });
 });
 

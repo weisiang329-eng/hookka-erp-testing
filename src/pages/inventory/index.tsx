@@ -1,5 +1,6 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, startTransition } from "react";
 import { cachedFetchJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { type FGItem, type FgDeltas, mergeFgDeltas } from "@/lib/fg-stock";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -143,43 +144,13 @@ const TABS: { key: Tab; label: string }[] = [
 ];
 
 // --- Finished Products with stock ---
-type FGItem = Product & { stockQty: number; reservedQty: number };
+// FGItem + deriveFGStock now live in the shared @/lib/fg-stock (so the server
+// FG-stock endpoint runs the identical derivation).
 
-// Loose shape that covers the fields WIP/FG derivation reads from a
-// production order. Typed loosely so the live API payload (which matches
-// the shape but isn't typed by mock-data anymore) fits without churn.
-type ProductionOrderLike = {
-  id: string;
-  poNo: string;
-  productId: string;
-  productCode: string;
-  productName?: string;
-  itemCategory?: string;
-  sizeCode?: string;
-  sizeLabel?: string;
-  // Fabric code — needed for the sofa-set merge key (SO + fabric).
-  fabricCode?: string;
-  // Bedframe height components — summed into the total-height segment
-  // of the condensed Fab Cut WIP label (matches the Production page's
-  // `fabCutWIP` helper).
-  gapInches?: number;
-  divanHeightInches?: number;
-  legHeightInches?: number;
-  quantity: number;
-  startDate: string;
-  jobCards: Array<{
-    departmentCode: string;
-    status: string;
-    sequence: number;
-    completedDate?: string;
-    productionTimeMinutes?: number;
-    wipKey?: string;
-    wipType?: string;
-    wipLabel?: string;
-    wipCode?: string;
-    wipQty?: number;
-  }>;
-};
+// (ProductionOrderLike removed 2026-07-14 — the FG page no longer pulls
+// /api/production-orders; FG stock now arrives pre-derived from
+// /api/inventory/fg-stock. The commented deriveWIPFromPO reference below is
+// historical only.)
 
 // --- WIP ---
 // WIP items are derived from production orders, grouped by WIP code.
@@ -268,79 +239,8 @@ type CreateRMForm = {
 // Mock data generation
 // ============================================================
 
-// Finished Products — stock derived from production orders where all
-// upholstery cards are COMPLETED (meaning the FG is ready / stocked in).
-// Each such PO contributes its quantity to the matching product's stock.
-// Now accepts `products` + `productionOrders` as args (previously closed
-// over mock-data module globals) so it can be driven from live D1 fetches.
-function deriveFGStock(
-  products: Product[],
-  productionOrders: ProductionOrderLike[],
-  poStatusByDO: Map<string, "DRAFT" | "DISPATCHED">,
-): FGItem[] {
-  // Per-PO state from DOs:
-  //   DISPATCHED → out of warehouse, don't count anywhere
-  //   DRAFT      → still ours but earmarked → reservedQty bucket
-  //   (no DO)    → free stock → stockQty bucket
-  const fgMap = new Map<string, FGItem>();
-  for (const p of products) {
-    fgMap.set(p.id, { ...p, stockQty: 0, reservedQty: 0 });
-  }
-
-  const findOrCreate = (po: ProductionOrderLike): FGItem | null => {
-    let fg = fgMap.get(po.productId);
-    if (!fg) {
-      for (const [, item] of fgMap) {
-        if (item.code === po.productCode) { fg = item; break; }
-      }
-    }
-    if (fg) return fg;
-    const id = `fg-dyn-${po.productCode}`;
-    if (!fgMap.has(id)) {
-      const dyn: FGItem = {
-        id,
-        code: po.productCode,
-        name: po.productName || po.productCode,
-        category: po.itemCategory as "BEDFRAME" | "SOFA",
-        description: "",
-        baseModel: po.productCode,
-        sizeCode: po.sizeCode || "",
-        sizeLabel: po.sizeLabel || "",
-        fabricUsage: 0,
-        unitM3: 0,
-        status: "ACTIVE",
-        costPriceSen: 0,
-        productionTimeMinutes: 0,
-        subAssemblies: [],
-        bomComponents: [],
-        deptWorkingTimes: [],
-        stockQty: 0,
-        reservedQty: 0,
-      };
-      fgMap.set(id, dyn);
-    }
-    return fgMap.get(id)!;
-  };
-
-  for (const po of productionOrders) {
-    const uphCards = po.jobCards.filter(jc => jc.departmentCode === "UPHOLSTERY");
-    if (uphCards.length === 0) continue;
-    if (!uphCards.every(jc => jc.status === "COMPLETED" || jc.status === "TRANSFERRED")) continue;
-
-    const doState = poStatusByDO.get(po.id);
-    if (doState === "DISPATCHED") continue; // already out the door
-
-    const fg = findOrCreate(po);
-    if (!fg) continue;
-    if (doState === "DRAFT") {
-      fg.reservedQty += po.quantity;
-    } else {
-      fg.stockQty += po.quantity;
-    }
-  }
-
-  return Array.from(fgMap.values());
-}
+// deriveFGStock now lives in the shared @/lib/fg-stock (imported above) so the
+// server /api/inventory/fg-stock endpoint runs the byte-identical derivation.
 // (fgItems was previously a module-level const seeded from mock data. It is
 // now recomputed inside the component from live fetches — see useMemo below.)
 
@@ -1098,9 +998,8 @@ const rmColumns: Column<RawMaterial>[] = [
 let invSnapshot: {
   products: Product[];
   rawMaterials: RawMaterial[];
-  poData: ProductionOrderLike[];
+  fgDeltas: FgDeltas;
   backendWipRows: BackendWipRow[];
-  poToDOState: Map<string, "DRAFT" | "DISPATCHED">;
 } | null = null;
 
 // ============================================================
@@ -1443,11 +1342,11 @@ export default function InventoryPage() {
   // a freshly-cleared DB.
   const [products, setProducts] = useState<Product[]>(invSnapshot?.products ?? []);
   const [liveRawMaterials, setLiveRawMaterials] = useState<RawMaterial[]>(invSnapshot?.rawMaterials ?? []);
-  const [poData, setPoData] = useState<ProductionOrderLike[]>(invSnapshot?.poData ?? []);
-  // Map<poId, "DRAFT" | "DISPATCHED"> built from /api/delivery-orders so
-  // deriveFGStock can split completed POs into Available vs Reserved
-  // and exclude already-dispatched ones.
-  const [poToDOState, setPoToDOState] = useState<Map<string, "DRAFT" | "DISPATCHED">>(invSnapshot?.poToDOState ?? new Map());
+  // Server-derived FG stock (counts + off-catalog dynamics) from
+  // /api/inventory/fg-stock — replaces the old client-side deriveFGStock that
+  // pulled the ~1.2MB /api/production-orders + /api/delivery-orders +
+  // /api/consignment-notes just to split completed POs into Available vs Reserved.
+  const [fgDeltas, setFgDeltas] = useState<FgDeltas>(invSnapshot?.fgDeltas ?? { counts: [], dyn: [] });
   // Raw rows from /api/inventory/wip — the wip_items ledger view.
   // Each row corresponds to one wip_items row with stock_qty != 0;
   // negatives are skipped-upstream stubs and live in the same list as
@@ -1501,153 +1400,101 @@ export default function InventoryPage() {
       return { products: [], rawMaterials: [] };
     };
 
-    const fetchPOs = async (): Promise<ProductionOrderLike[]> => {
+    // /api/inventory/fg-stock → server-side deriveFGStock, shipped as deltas
+    // (counts + off-catalog dynamics). Replaces the old trio of client fetches
+    // (production-orders ~1.2MB + delivery-orders + consignment-notes) that
+    // existed ONLY to derive FG stock/reserved counts. Snapshot-cached +
+    // serve-stale server-side, byte-identical to the old client math.
+    const fetchFgDeltas = async (): Promise<FgDeltas> => {
       try {
-        // ?fields=minimal&include=jobCards — drops unused PO fields + piece_pics.
-        // jobCards stay (UPH-cards / wipQty math reads them).
-        const json = await cachedFetchJson<{ success?: boolean; data?: ProductionOrderLike[]; _stub?: boolean }>("/api/production-orders?fields=minimal&include=jobCards");
-        if (json && json.success && Array.isArray(json.data) && !json._stub) {
-          return json.data as ProductionOrderLike[];
+        const json = await cachedFetchJson<{
+          success?: boolean;
+          data?: FgDeltas;
+          _stub?: boolean;
+        }>("/api/inventory/fg-stock");
+        if (
+          json &&
+          json.success &&
+          json.data &&
+          !json._stub &&
+          Array.isArray(json.data.counts)
+        ) {
+          return {
+            counts: json.data.counts,
+            dyn: Array.isArray(json.data.dyn) ? json.data.dyn : [],
+          };
         }
       } catch { /* fall through */ }
-      return [];
-    };
-
-    // /api/delivery-orders → map every PO id appearing in DO items to
-    // its DO state. DRAFT = reserved (still our stock); LOADED /
-    // IN_TRANSIT / DELIVERED / INVOICED = dispatched (off the books).
-    const fetchDOStates = async (): Promise<
-      Map<string, "DRAFT" | "DISPATCHED">
-    > => {
-      try {
-        const json = await cachedFetchJson<{
-          success?: boolean;
-          data?: Array<{
-            status?: string;
-            items?: Array<{ productionOrderId?: string | null }>;
-          }>;
-          _stub?: boolean;
-        }>("/api/delivery-orders");
-        const map = new Map<string, "DRAFT" | "DISPATCHED">();
-        if (json && json.success && Array.isArray(json.data) && !json._stub) {
-          for (const d of json.data) {
-            const state: "DRAFT" | "DISPATCHED" =
-              d.status === "DRAFT" ? "DRAFT" : "DISPATCHED";
-            for (const item of d.items ?? []) {
-              const poId = item.productionOrderId;
-              if (!poId) continue;
-              // DISPATCHED wins over DRAFT — a PO can't appear in two
-              // active DOs at once, but if backend ever returns both,
-              // the harder state should stick.
-              const cur = map.get(poId);
-              if (cur === "DISPATCHED") continue;
-              map.set(poId, state);
-            }
-          }
-        }
-        return map;
-      } catch {
-        return new Map();
-      }
-    };
-
-    // /api/consignment-notes → mirror of fetchDOStates for the CN side
-    // (BUG-2026-04-29-007). Inventory was previously DO-only, so a PO
-    // sitting in a CN (consignment) showed up as Available even when
-    // the CN had been dispatched. Maps every PO to a coarse DO-state-
-    // equivalent so the same deriveFGStock picker can consume both:
-    //   CN ACTIVE                                         → DRAFT
-    //   CN PARTIALLY_SOLD / IN_TRANSIT / FULLY_SOLD /
-    //      RETURNED / CLOSED                              → DISPATCHED
-    // The mapping rule mirrors DO's: anything past the "still in our
-    // warehouse" line counts as dispatched and drops out of inventory.
-    const fetchCNStates = async (): Promise<
-      Map<string, "DRAFT" | "DISPATCHED">
-    > => {
-      try {
-        const json = await cachedFetchJson<{
-          success?: boolean;
-          data?: Array<{
-            status?: string;
-            items?: Array<{ productionOrderId?: string | null }>;
-          }>;
-          _stub?: boolean;
-        }>("/api/consignment-notes");
-        const map = new Map<string, "DRAFT" | "DISPATCHED">();
-        if (json && json.success && Array.isArray(json.data) && !json._stub) {
-          for (const cn of json.data) {
-            const state: "DRAFT" | "DISPATCHED" =
-              cn.status === "ACTIVE" ? "DRAFT" : "DISPATCHED";
-            for (const item of cn.items ?? []) {
-              const poId = item.productionOrderId;
-              if (!poId) continue;
-              // Same conflict resolution as DO map: harder state wins.
-              const cur = map.get(poId);
-              if (cur === "DISPATCHED") continue;
-              map.set(poId, state);
-            }
-          }
-        }
-        return map;
-      } catch {
-        return new Map();
-      }
-    };
-
-    // /api/inventory/wip — every wip_items row with stock_qty != 0
-    // already projected to the WIPItem grid shape. Includes both
-    // positive (produced WIP stock) and negative (skipped-upstream
-    // stub) rows in a single uniform list.
-    const fetchWipRows = async (): Promise<BackendWipRow[]> => {
-      try {
-        const json = await cachedFetchJson<{
-          success?: boolean;
-          data?: BackendWipRow[];
-          _stub?: boolean;
-        }>("/api/inventory/wip");
-        if (json && json.success && Array.isArray(json.data) && !json._stub) {
-          return json.data as BackendWipRow[];
-        }
-      } catch { /* fall through */ }
-      return [];
+      return { counts: [], dyn: [] };
     };
 
     (async () => {
-      const [inv, pos, wipRows, doStates, cnStates] = await Promise.all([
+      // Perf 2026-07-14: WIP is DEFERRED off the initial mount. /api/inventory/wip
+      // was a ~2.3s fetch that blocked the DEFAULT Finished-Products view even
+      // though `backendWipRows` feeds ONLY the WIP tab (wipItems / filteredWIP /
+      // merged sofa-set view — verified it never touches the FG or RAW tabs). It
+      // now loads the first time the WIP tab is opened (tab-gated effect below);
+      // the visibilitychange effect keeps it fresh thereafter.
+      const [inv, fg] = await Promise.all([
         fetchInventory(),
-        fetchPOs(),
-        fetchWipRows(),
-        fetchDOStates(),
-        fetchCNStates(),
+        fetchFgDeltas(),
       ]);
       if (cancelled) return;
-      // Merge DO + CN state maps so deriveFGStock sees a PO regardless
-      // of source-doc class (BUG-2026-04-29-007). Same conflict rule:
-      // DISPATCHED wins over DRAFT — the harder state sticks if the
-      // same PO somehow appears in both.
-      const merged = new Map(doStates);
-      for (const [poId, state] of cnStates) {
-        const cur = merged.get(poId);
-        if (cur === "DISPATCHED") continue;
-        merged.set(poId, state);
-      }
       setProducts(inv.products);
       setLiveRawMaterials(inv.rawMaterials);
-      setPoData(pos);
-      setBackendWipRows(wipRows);
-      setPoToDOState(merged);
+      setFgDeltas(fg);
       // Remember this dataset so re-entering Inventory paints instantly (SWR)
       // instead of re-blanking through the full reload. Only snapshot a
       // non-empty load — a degraded/stub response must not poison the cache
-      // with blanks (last-known-good philosophy).
-      if (inv.products.length || inv.rawMaterials.length || pos.length) {
-        invSnapshot = { products: inv.products, rawMaterials: inv.rawMaterials, poData: pos, backendWipRows: wipRows, poToDOState: merged };
+      // with blanks (last-known-good philosophy). Keep any prior WIP snapshot
+      // (it's loaded lazily, not on this mount).
+      if (
+        inv.products.length ||
+        inv.rawMaterials.length ||
+        fg.counts.length ||
+        fg.dyn.length
+      ) {
+        invSnapshot = {
+          products: inv.products,
+          rawMaterials: inv.rawMaterials,
+          fgDeltas: fg,
+          backendWipRows: invSnapshot?.backendWipRows ?? [],
+        };
       }
       setLoading(false);
     })();
 
     return () => { cancelled = true; };
   }, []);
+
+  // Lazy-load WIP the first time the WIP tab is opened (deferred off mount so
+  // the default Finished-Products view isn't blocked by the ~2.3s
+  // /api/inventory/wip fetch for data only this tab reads). Same cachedFetchJson
+  // path the visibilitychange refetch below uses.
+  useEffect(() => {
+    if (activeTab !== "WIP" || backendWipRows.length > 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const json = await cachedFetchJson<{
+          success?: boolean;
+          data?: BackendWipRow[];
+          _stub?: boolean;
+        }>("/api/inventory/wip");
+        if (
+          !cancelled &&
+          json &&
+          json.success &&
+          Array.isArray(json.data) &&
+          !json._stub
+        ) {
+          setBackendWipRows(json.data as BackendWipRow[]);
+        }
+      } catch { /* swallow */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   // Re-fetch wip_items when the tab regains focus. Fixes the stale-data
   // problem where the user marks JCs complete (or clears all completion
@@ -1659,6 +1506,12 @@ export default function InventoryPage() {
   useEffect(() => {
     let cancelled = false;
     const refetch = async () => {
+      // Perf 2026-07-14: only refresh WIP when the WIP tab is actually open —
+      // WIP data feeds only that tab, so a visibility-regain on Finished/Raw
+      // must NOT trigger the ~2.3s /api/inventory/wip fetch (completes the
+      // mount-time WIP deferral). activeTab is in this effect's deps so the
+      // closure sees the current tab.
+      if (activeTab !== "WIP") return;
       try {
         const json = await cachedFetchJson<{
           success?: boolean;
@@ -1689,12 +1542,13 @@ export default function InventoryPage() {
       cancelled = true;
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, []);
+  }, [activeTab]);
 
-  // Derived inventory — recomputed whenever the fetches resolve.
+  // Derived inventory — merge the server FG-stock deltas onto the catalog
+  // (byte-identical to the old client-side deriveFGStock, verified live).
   const fgItems = useMemo<FGItem[]>(
-    () => deriveFGStock(products, poData, poToDOState),
-    [products, poData, poToDOState],
+    () => mergeFgDeltas(products, fgDeltas),
+    [products, fgDeltas],
   );
   // Inventory WIP table — mirrors Production Order's Fab Cut tab exactly:
   //   - SOFA: one row per (SO, fabric) SET, label "5530-L(LHF)+2A(RHF) | (30)
@@ -2109,7 +1963,7 @@ export default function InventoryPage() {
         {TABS.map(tab => (
           <button
             key={tab.key}
-            onClick={() => setActiveTab(tab.key)}
+            onClick={() => startTransition(() => setActiveTab(tab.key))}
             className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
               activeTab === tab.key
                 ? "border-[#6B5C32] text-[#6B5C32]"

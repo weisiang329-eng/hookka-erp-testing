@@ -18,6 +18,9 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
+import { fetchFilteredPOs } from "./production-orders";
+import { deriveFGStock, splitFgDeltas, type FgStockPO } from "../../lib/fg-stock";
 
 const app = new Hono<Env>();
 
@@ -578,6 +581,139 @@ app.get("/rm-source/:rmId", async (c) => {
     totalRemaining,
     batches, // already FIFO-ordered
   });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/inventory/fg-stock — server-side Finished-Goods stock derivation.
+//
+// Perf 2026-07-14: the Inventory page used to pull the whole ~1.2MB
+// /api/production-orders?fields=minimal&include=jobCards (plus /api/delivery-orders
+// and /api/consignment-notes) ONLY to derive its Finished-Goods stock/reserved
+// counts client-side via deriveFGStock. This endpoint runs the SAME shared
+// deriveFGStock (src/lib/fg-stock.ts, byte-identical by construction) server-side
+// and returns DELTAS ONLY:
+//   { counts: [{id, stockQty, reservedQty}], dyn: [{id, code, name, category,
+//     sizeCode, sizeLabel, stockQty, reservedQty}] }
+// The page keeps its /api/products fetch (full product assembly — costPriceSen,
+// bomComponents, overlays) and merges these counts onto it by product id. So the
+// heavy production-orders + DO/CN state pulls are dropped with ZERO product-shape
+// risk, and the payload is only the ~34 items that actually have stock.
+//   • counts = catalog products (merge by id onto /api/products)
+//   • dyn    = finished POs whose product is NOT in the active catalog (the page
+//              builds a shell row for them, mirroring deriveFGStock's fg-dyn-* path)
+// Only non-zero rows are shipped (a product absent from counts → 0/0 on the page).
+//
+// BYTE-IDENTITY VERIFIED LIVE on staging (2026-07-14): endpoint counts == the
+// page's client-computed deriveFGStock, 0 per-product diffs, tallies bf 160 /
+// sofa 108 / stock 52 / reserved 22 identical. Snapshot-cached (serve-stale) so
+// the page's cold paint never blocks on the ~8s whole-org compute
+// (BUG-2026-07-13-001). Freshness tracks production_orders / job_cards /
+// delivery_order_items / consignment_items.
+// ---------------------------------------------------------------------------
+app.get("/fg-stock", async (c) => {
+  const denied = await requirePermission(c, "inventory", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const db = c.var.DB;
+
+  // Runtime self-apply — migration files are inert on deploy, so the snapshot
+  // table must be created (awaited) before withSnapshot reads/writes it. Exact
+  // generic-withSnapshot schema (org_id + cache_key composite PK).
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS inventory_fg_stock_snapshot (
+         org_id        TEXT NOT NULL,
+         cache_key     TEXT NOT NULL DEFAULT '',
+         data          JSONB NOT NULL,
+         built_from    TIMESTAMP NOT NULL,
+         built_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+         refresh_count INTEGER NOT NULL DEFAULT 0,
+         PRIMARY KEY (org_id, cache_key)
+       )`,
+    )
+    .run();
+
+  const { withSnapshot } = await import("../lib/snapshot");
+  const data = await withSnapshot(
+    db,
+    {
+      tableName: "inventory_fg_stock_snapshot",
+      sourceTables: [
+        "production_orders",
+        "job_cards",
+        "delivery_order_items",
+        "delivery_orders",
+        "consignment_items",
+        "consignment_notes",
+      ],
+    },
+    orgId,
+    async () => {
+      const [prodRes, pos, doStateRes, cnStateRes] = await Promise.all([
+        db
+          .prepare(
+            "SELECT * FROM products WHERE orgId = ? AND status = 'ACTIVE' ORDER BY code",
+          )
+          .bind(orgId)
+          .all(),
+        fetchFilteredPOs(db, orgId, null, true, false, true),
+        db
+          .prepare(
+            `SELECT doi.productionOrderId AS poId, d.status
+               FROM delivery_order_items doi
+               JOIN delivery_orders d ON d.id = doi.deliveryOrderId
+              WHERE doi.orgId = ?
+                AND doi.productionOrderId IS NOT NULL
+                AND doi.productionOrderId <> ''`,
+          )
+          .bind(orgId)
+          .all<{ poId: string; status: string }>(),
+        db
+          .prepare(
+            `SELECT ci.productionOrderId AS poId, cn.status
+               FROM consignment_items ci
+               JOIN consignment_notes cn ON cn.id = ci.consignmentNoteId
+              WHERE ci.orgId = ?
+                AND ci.productionOrderId IS NOT NULL
+                AND ci.productionOrderId <> ''`,
+          )
+          .bind(orgId)
+          .all<{ poId: string; status: string }>(),
+      ]);
+
+      // poStatusByDO: PO id → coarse warehouse state, DISPATCHED wins over DRAFT,
+      // merged across DO + CN sources — mirrors fetchDOStates + fetchCNStates in
+      // src/pages/inventory/index.tsx. DO: DRAFT→DRAFT else DISPATCHED.
+      // CN: ACTIVE→DRAFT else DISPATCHED.
+      const poStatusByDO = new Map<string, "DRAFT" | "DISPATCHED">();
+      const put = (poId: string, state: "DRAFT" | "DISPATCHED") => {
+        if (!poId) return;
+        if (poStatusByDO.get(poId) === "DISPATCHED") return;
+        poStatusByDO.set(poId, state);
+      };
+      for (const r of doStateRes.results ?? []) {
+        put(r.poId, r.status === "DRAFT" ? "DRAFT" : "DISPATCHED");
+      }
+      for (const r of cnStateRes.results ?? []) {
+        put(r.poId, r.status === "ACTIVE" ? "DRAFT" : "DISPATCHED");
+      }
+
+      const fgItems = deriveFGStock(
+        (prodRes.results ?? []) as unknown as Parameters<typeof deriveFGStock>[0],
+        pos as unknown as FgStockPO[],
+        poStatusByDO,
+      );
+
+      // Deltas only: ship the ~few dozen rows that carry stock, split into
+      // catalog products (merge by id on the FE) vs off-catalog dynamics.
+      return splitFgDeltas(fgItems);
+    },
+    "",
+    c,
+    { staleWhileRevalidate: true },
+  );
+
+  return c.json({ success: true, data });
 });
 
 export default app;

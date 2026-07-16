@@ -8,8 +8,9 @@
 //   • v20's mock has 5 stages; Hookka's real pipeline has 8 departments, so the
 //     chips + the pipeline bar use the real 8 depts (design "A": v20 look, real
 //     function — never fabricate the mock's simpler pipeline).
-//   • one GET /api/production-orders (minimal + jobCards), grouped/filtered
-//     client-side. Same endpoint productionConfig.detail uses → no new backend.
+//   • one GET /api/production-orders (minimal, no jobCards — this board reads
+//     only currentDepartment + status), grouped/filtered client-side. Same
+//     endpoint productionConfig.detail uses → no new backend.
 //   • tap a card → /m/production/:id (unchanged DocumentDetailScreen).
 //
 // ADDITIVE: replaces ONLY the /m/production L1 view (CUSTOM_L1 in MobileLayout).
@@ -24,7 +25,6 @@ import { M, M_ACCENT } from "../theme";
 import { resolveStatus, STATUS_MAPS, str, num, dateOnly } from "../config/helpers";
 import { useDebounced } from "../lib/use-debounced";
 
-type JobCard = { id?: string; departmentCode?: string; status?: string };
 type PO = {
   id: string;
   poNo?: string;
@@ -39,7 +39,6 @@ type PO = {
   quantity?: number;
   targetEndDate?: string;
   currentDepartment?: string;
-  jobCards?: JobCard[];
 };
 type Resp = { success?: boolean; data?: PO[] };
 
@@ -64,8 +63,15 @@ function stageIndexOf(po: PO): number {
 
 export function ProductionScreen() {
   const navigate = useNavigate();
+  // Dedicated board endpoint (perf 2026-07-14): returns ONLY the live set
+  // (status NOT IN COMPLETED/CANCELLED — this board's own filter, applied
+  // server-side) slimmed to the ~11 fields the board renders + customerSO.
+  // Measured live: 1921→378 rows, ~1.6MB→108KB decoded, byte-identical (0 diffs
+  // vs the old client live-filter incl. customerSO). The client STILL runs its
+  // search + per-dept counts over the WHOLE returned set (all 378 live rows are
+  // loaded) so nothing becomes unfindable. Snapshot-cached + serve-stale.
   const { data, loading, error } = useCachedJson<Resp>(
-    "/api/production-orders?fields=minimal&include=jobCards",
+    "/api/production-orders/board",
   );
   const [query, setQuery] = useState("");
   const dquery = useDebounced(query);

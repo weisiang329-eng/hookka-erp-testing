@@ -169,8 +169,12 @@ export async function decideAgentRuns(
   const skipped: Array<{ task: string; reason: string }> = [];
 
   // ── Delivery Agent ─────────────────────────────────────────────────────────
+  // Owner 2026-07-15: agents clock off after 8pm MYT — no beats in the evening.
+  const CLOCK_OFF_HOUR = 20; // 8pm MYT
   if (await isAgentPaused(db as never, "DELIVERY")) {
     skipped.push({ task: "delivery-run", reason: "paused (console)" });
+  } else if (hourMyt >= CLOCK_OFF_HOUR) {
+    skipped.push({ task: "delivery-run", reason: `after hours — clocked off (>= ${CLOCK_OFF_HOUR}:00 MYT)` });
   } else {
     const st = await taskStats(db, "delivery-run", todayMyt);
     if (st.runsToday === 0) {
@@ -230,6 +234,8 @@ export async function decideAgentRuns(
   //    report cron — the heartbeat is their fallback via first-run rule) ──────
   if (await isAgentPaused(db as never, "PRODUCTION")) {
     skipped.push({ task: "production-proposals", reason: "paused (console)" });
+  } else if (hourMyt >= CLOCK_OFF_HOUR) {
+    skipped.push({ task: "production-proposals", reason: `after hours — clocked off (>= ${CLOCK_OFF_HOUR}:00 MYT)` });
   } else {
     const st = await taskStats(db, "production-proposals", todayMyt);
     if (st.runsToday === 0) {

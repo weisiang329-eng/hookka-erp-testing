@@ -1306,6 +1306,7 @@ app.get("/stats", async (c) => {
         "sales_order_items",
         "delivery_orders",
         "delivery_order_items",
+        "production_orders",
       ],
     },
     orgId,
@@ -2309,10 +2310,18 @@ app.post("/", async (c) => {
         const divanPriceSen = Number(item.divanPriceSen) || 0;
         const legPriceSen = Number(item.legPriceSen) || 0;
         const specialOrderPriceSen = Number(item.specialOrderPriceSen) || 0;
+        // 2026-07-14 BUG FIX (under-billing): the client DOES send
+        // totalHeightPriceSen (the whole line item is posted), but this recompute
+        // dropped it — so any total-height surcharge (e.g. 26" beds) + anything the
+        // frontend folds into it was silently lost from the stored unit price →
+        // the invoice under-billed vs the quote the customer saw. Trust the client
+        // value exactly like divan/leg/special above (all client-supplied surcharges).
+        const totalHeightPriceSen = Number(item.totalHeightPriceSen) || 0;
         const unitPriceSen = calculateUnitPrice({
           basePriceSen,
           divanPriceSen,
           legPriceSen,
+          totalHeightPriceSen,
           specialOrderPriceSen,
         });
         const quantity = Number(item.quantity) || 0;
@@ -3805,10 +3814,15 @@ app.put("/:id", async (c) => {
         const divanPriceSen = Number(item.divanPriceSen) || 0;
         const legPriceSen = Number(item.legPriceSen) || 0;
         const specialOrderPriceSen = Number(item.specialOrderPriceSen) || 0;
+        // 2026-07-14 BUG FIX (under-billing) — same as the POST path: include the
+        // client-supplied totalHeightPriceSen (was dropped) so an SO EDIT re-prices
+        // the line WITH its total-height surcharge instead of silently zeroing it.
+        const totalHeightPriceSen = Number(item.totalHeightPriceSen) || 0;
         const unitPriceSen = calculateUnitPrice({
           basePriceSen,
           divanPriceSen,
           legPriceSen,
+          totalHeightPriceSen,
           specialOrderPriceSen,
         });
         const quantity = Number(item.quantity) || 0;

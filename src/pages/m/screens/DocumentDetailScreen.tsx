@@ -339,17 +339,9 @@ function Inner({
     if (!primaryCta) return;
     setToast(null);
 
-    if (config.slug === "announcements") {
-      // The per-USER read receipt is a worker-portal endpoint
-      // (POST /api/worker/announcements/:id/ack) gated by X-Worker-Token — not
-      // available on the office mobile session. The only office-side write is
-      // PATCH /api/announcements/:id, which would DEACTIVATE the notice for
-      // everyone (destructive, not a personal "read"). So we acknowledge it
-      // locally instead of broadcasting a deactivation.
-      // TODO: when an office-session per-user ack endpoint exists, call it here.
-      setToast({ kind: "ok", text: "Marked as read." });
-      return;
-    }
+    // Announcements detail is read-only on mobile (hideActionBar) — it shows
+    // the read-receipt roster; there is no office-user "Mark as Read" write
+    // (announcement_acks is worker-keyed), so no CTA branch here.
 
     if (config.slug === "mail-center") {
       // "Reply" opens compose prefilled with the counterparty + subject.

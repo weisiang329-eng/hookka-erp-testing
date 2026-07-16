@@ -275,8 +275,17 @@ app.get("/", async (c) => {
       .bind(orgId)
       .all<HubRow>(),
   ]);
+  // Bucket hubs by customerId ONCE (was O(customers×hubs): rowToCustomer
+  // re-filtered the whole hubs array per customer). Byte-identical output —
+  // rowToCustomer still filters, now over the pre-scoped bucket (passthrough).
+  const hubsByCustomer = new Map<string, HubRow[]>();
+  for (const h of hubs.results ?? []) {
+    const arr = hubsByCustomer.get(h.customerId);
+    if (arr) arr.push(h);
+    else hubsByCustomer.set(h.customerId, [h]);
+  }
   const data = (customers.results ?? []).map((r) =>
-    rowToCustomer(r, hubs.results ?? []),
+    rowToCustomer(r, hubsByCustomer.get(r.id) ?? []),
   );
   return c.json({ success: true, data });
 });

@@ -1406,7 +1406,7 @@ export async function attachCustomerSO(
   }
 }
 
-async function fetchFilteredPOs(
+export async function fetchFilteredPOs(
   db: D1Database,
   orgId: string,
   statuses: string[] | null,
@@ -5199,6 +5199,173 @@ function schedulePoListBodyRefresh(
   waitUntil(task);
 }
 
+// ── jobCards-lite: the Planning board's slim job-card projection ─────────────
+// Planning (src/pages/planning/index.tsx) pulls the whole ~10MB
+// ?fields=minimal&include=jobCards&excludeCompleted=true payload but reads ONLY
+// these 12 fields off each job card (audited 2026-07-14: every access is `jc.X`
+// in a local loop — no spread, no destructure, never passed to a helper).
+// `include=jobCards-lite` ships ONLY these → ~half the wire vs the full ~25-field
+// MinimalJobCardOut. Byte-identical FOR PLANNING (its sole consumer); every other
+// page keeps include=jobCards (the full shape) untouched. Applied as a post-pass
+// on the assembled list so it needs no threading through fetchFilteredPOs /
+// rowToMinimalPO / rowToMinimalJobCard (blast radius = the lite request only).
+// (jc.actualMinutes is read too but was never in the payload → already undefined,
+// so it is intentionally NOT added here.)
+function slimJobCardsToPlanningLite(pos: unknown[]): void {
+  for (const po of pos as Array<{ jobCards?: MinimalJobCardOut[] }>) {
+    if (!Array.isArray(po.jobCards)) continue;
+    po.jobCards = po.jobCards.map((jc) => ({
+      id: jc.id,
+      departmentCode: jc.departmentCode,
+      status: jc.status,
+      dueDate: jc.dueDate,
+      completedDate: jc.completedDate,
+      estMinutes: jc.estMinutes,
+      pic1Id: jc.pic1Id,
+      pic1Name: jc.pic1Name,
+      pic2Id: jc.pic2Id,
+      pic2Name: jc.pic2Name,
+      wipLabel: jc.wipLabel,
+      wipQty: jc.wipQty,
+    })) as unknown as MinimalJobCardOut[];
+  }
+}
+
+// ── Pre-warm the delivery page's heavy PO-list snapshot (perf 2026-07-13) ─────
+// The delivery page fetches `/api/production-orders?fields=minimal&include=jobCards`.
+// When its snapshot row is EMPTY (right after a deploy busts the caches, or the
+// very first read of the day) the handler cold-computes fetchFilteredPOs over
+// every PO + job card — ~20MB, ~25s — as a BLOCKING request. Once a stale
+// snapshot exists the read is instant (serve-stale + background refresh), so the
+// only 25s hit is the empty-snapshot case. A cron calls this every few minutes
+// so a snapshot always exists and users never hit the empty-blocking recompute.
+//
+// The stored payload is BYTE-IDENTICAL to the live handler: same fetchFilteredPOs
+// with the delivery variant's exact params, same attachCustomerSO, same snapshot
+// table + cache key. No figure changes — only the timing of the recompute moves
+// off the request path (owner red line: input/output figures must stay exact).
+// withSnapshot with
+// no SWR option = compute-fresh-and-store when stale/empty, return cached when
+// already fresh, so a warm tick is a cheap no-op when nothing changed.
+export async function warmPoListDeliveryVariant(
+  c: Context<Env>,
+  orgId: string,
+): Promise<{ rows: number }> {
+  const { withSnapshot } = await import("../lib/snapshot");
+  // Must equal the delivery page's request key. snapshotCacheKey is the sorted
+  // "&"-joined query string of `?fields=minimal&include=jobCards`.
+  const snapshotCacheKey = "fields=minimal&include=jobCards";
+  const result = await withSnapshot<{
+    success: true;
+    data: unknown[];
+    total: number;
+  }>(
+    c.var.DB,
+    {
+      tableName: "production_orders_list_snapshot",
+      sourceTables: ["production_orders", "job_cards", "sales_orders", "consignment_orders"],
+    },
+    orgId,
+    async () => {
+      const data = await fetchFilteredPOs(
+        c.var.DB,
+        orgId,
+        null, // statuses
+        true, // includeJobCards
+        false, // includeArchive
+        true, // minimal
+        null, // deptFilter
+        null, // dueFrom
+        null, // dueTo
+        null, // catFilter
+        false, // excludeCompleted
+      );
+      await attachCustomerSO(
+        c.var.DB,
+        data as Array<{
+          salesOrderId: string;
+          consignmentOrderId: string;
+          customerSO: string;
+        }>,
+      );
+      return { success: true, data, total: data.length };
+    },
+    snapshotCacheKey,
+    c,
+    // No SWR: force the compute+store on the cron (this IS the off-request path).
+    undefined,
+  );
+  return { rows: result?.total ?? 0 };
+}
+
+// ── Pre-warm the PLANNING page's PO-list snapshot (perf 2026-07-14) ───────────
+// Planning fetches `?fields=minimal&include=jobCards&excludeCompleted=true` — a
+// DIFFERENT snapshot key from the delivery variant above (excludeCompleted flips
+// it), so warmPoListDeliveryVariant does NOT keep it warm. Its snapshot went
+// empty/stale between production writes → the first planning load of the window
+// cold-computed ~10MB / ~8s as a BLOCKING request (measured on prod 2026-07-14).
+// Warming this exact variant every cron tick means planning always finds a
+// snapshot → serve-stale (instant) + background refresh, never the 8s block.
+//
+// BYTE-IDENTICAL to the live handler: same fetchFilteredPOs params planning's
+// request drives (excludeCompleted=true) + same attachCustomerSO + same snapshot
+// table + the exact sorted request key. No figure changes — only the timing of
+// the recompute moves off the request path.
+export async function warmPoListPlanningVariant(
+  c: Context<Env>,
+  orgId: string,
+): Promise<{ rows: number }> {
+  const { withSnapshot } = await import("../lib/snapshot");
+  // Must equal the planning page's request key: the sorted "&"-joined query
+  // string of `?fields=minimal&include=jobCards-lite&excludeCompleted=true`.
+  const snapshotCacheKey =
+    "excludeCompleted=true&fields=minimal&include=jobCards-lite";
+  const result = await withSnapshot<{
+    success: true;
+    data: unknown[];
+    total: number;
+  }>(
+    c.var.DB,
+    {
+      tableName: "production_orders_list_snapshot",
+      sourceTables: ["production_orders", "job_cards", "sales_orders", "consignment_orders"],
+    },
+    orgId,
+    async () => {
+      const data = await fetchFilteredPOs(
+        c.var.DB,
+        orgId,
+        null, // statuses
+        true, // includeJobCards
+        false, // includeArchive
+        true, // minimal
+        null, // deptFilter
+        null, // dueFrom
+        null, // dueTo
+        null, // catFilter
+        true, // excludeCompleted — the planning variant
+      );
+      await attachCustomerSO(
+        c.var.DB,
+        data as Array<{
+          salesOrderId: string;
+          consignmentOrderId: string;
+          customerSO: string;
+        }>,
+      );
+      // Slim jobCards to the Planning board's 12 read fields — the warmed
+      // snapshot must match the live jobCards-lite request byte-for-byte.
+      slimJobCardsToPlanningLite(data);
+      return { success: true, data, total: data.length };
+    },
+    snapshotCacheKey,
+    c,
+    // No SWR: force the compute+store on the cron (this IS the off-request path).
+    undefined,
+  );
+  return { rows: result?.total ?? 0 };
+}
+
 // After a worker QR scan completes job cards, the operator-facing production
 // dept sheets read from a cache-aside snapshot (production_orders_list_snapshot)
 // plus the KV list cache. The snapshot freshness probe compares MAX(updated_at)
@@ -5280,13 +5447,20 @@ app.get("/", async (c) => {
   const includeParam = c.req.query("include");
   // Backward compat: if `include` is not passed at all, inline jobCards.
   // If it IS passed, only include jobCards when the list contains "jobCards".
-  const includeJobCards =
+  const includeList =
     includeParam === undefined
+      ? null
+      : includeParam.split(",").map((s) => s.trim());
+  // "jobCards-lite" (Planning) also needs the job_cards join — it just ships a
+  // slimmer per-card shape (slimJobCardsToPlanningLite). So both include tokens
+  // turn the JC fetch on; jobCardsLite selects the slim projection afterwards.
+  const includeJobCards =
+    includeList === null
       ? true
-      : includeParam
-          .split(",")
-          .map((s) => s.trim())
-          .includes("jobCards");
+      : includeList.includes("jobCards") ||
+        includeList.includes("jobCards-lite");
+  const jobCardsLite =
+    includeList !== null && includeList.includes("jobCards-lite");
 
   const pageParam = c.req.query("page");
   const limitParam = c.req.query("limit");
@@ -5393,7 +5567,7 @@ app.get("/", async (c) => {
       c.var.DB,
       {
         tableName: "production_orders_list_snapshot",
-        sourceTables: ["production_orders", "job_cards"],
+        sourceTables: ["production_orders", "job_cards", "sales_orders", "consignment_orders"],
       },
       orgId,
       async () => {
@@ -5418,6 +5592,11 @@ app.get("/", async (c) => {
             customerSO: string;
           }>,
         );
+        // Planning's include=jobCards-lite → slim each JC to its 12 read fields
+        // BEFORE the snapshot stores the body (so the cached body is already the
+        // slim shape). Only touches the lite request; the full include=jobCards
+        // path is byte-identical.
+        if (jobCardsLite) slimJobCardsToPlanningLite(data);
         return { success: true, data, total: data.length };
       },
       snapshotCacheKey,
@@ -7789,6 +7968,114 @@ app.post("/:id/scan-complete-shared", async (c) => {
 // Gated on the same read permission as the job-cards GET (the nearest sibling
 // that reads this exact data) — production-orders:read, satisfied by *:read.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// GET /api/production-orders/board — the /m mobile Production board (perf
+// 2026-07-14). The mobile board (src/pages/m/screens/ProductionScreen.tsx) used
+// to pull the whole ~1.6MB `?fields=minimal&include=` payload (all 1921 POs) and
+// then hide the ~1543 COMPLETED/CANCELLED ones + strip to ~11 rendered fields
+// client-side. This returns ONLY the live board set server-side, slimmed to the
+// exact fields the board renders — measured live: 1921→378 rows, ~1.6MB→~125KB.
+//
+// Live filter = the board's own client rule VERBATIM: status NOT IN
+// ('COMPLETED','CANCELLED') — keeps TRANSFERRED/ON_HOLD/etc. (so it is NOT the
+// list's excludeCompleted, which also drops TRANSFERRED + keeps 35-day-completed).
+// customerSO is filled via the SAME attachCustomerSO the list payload runs, so the
+// board's search over it is unchanged. companySO + picName are dropped: both are
+// ALWAYS empty on this data (0/378 populated) — the board rendered/searched blanks.
+//
+// NO dead-data risk: the client keeps its search + per-dept counts over the WHOLE
+// returned set (all 378 live rows are loaded — nothing is paginated away). Keyset
+// (src/api/lib/keyset.ts, now in place) is the answer IF the live WIP set ever
+// grows to thousands; at a few hundred, all-loaded-slim is correct + can't hide a
+// record. Snapshot-cached + serve-stale so the phone's cold paint never blocks.
+// ---------------------------------------------------------------------------
+app.get("/board", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const db = c.var.DB;
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS production_board_snapshot (
+         org_id        TEXT NOT NULL,
+         cache_key     TEXT NOT NULL DEFAULT '',
+         data          JSONB NOT NULL,
+         built_from    TIMESTAMP NOT NULL,
+         built_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+         refresh_count INTEGER NOT NULL DEFAULT 0,
+         PRIMARY KEY (org_id, cache_key)
+       )`,
+    )
+    .run();
+
+  const { withSnapshot } = await import("../lib/snapshot");
+  const data = await withSnapshot<{ items: unknown[] }>(
+    db,
+    {
+      tableName: "production_board_snapshot",
+      // POs change the set; sales_orders / consignment_orders feed customerSO
+      // via attachCustomerSO, so a customerSO edit must invalidate too.
+      sourceTables: ["production_orders", "sales_orders", "consignment_orders"],
+    },
+    orgId,
+    async () => {
+      const res = await db
+        .prepare(
+          `SELECT id, poNo, status, productCode, productName, customerName,
+                  companySOId, salesOrderId, consignmentOrderId, quantity,
+                  targetEndDate, currentDepartment, created_at
+             FROM production_orders
+            WHERE orgId = ?
+              AND status NOT IN ('COMPLETED','CANCELLED')
+            ORDER BY created_at DESC, id DESC`,
+        )
+        .bind(orgId)
+        .all<{
+          id: string;
+          poNo: string;
+          status: string;
+          productCode: string | null;
+          productName: string | null;
+          customerName: string | null;
+          companySOId: string | null;
+          salesOrderId: string | null;
+          consignmentOrderId: string | null;
+          quantity: number | null;
+          targetEndDate: string | null;
+          currentDepartment: string | null;
+        }>();
+      const rows = (res.results ?? []).map((r) => ({
+        ...r,
+        salesOrderId: r.salesOrderId ?? "",
+        consignmentOrderId: r.consignmentOrderId ?? "",
+        customerSO: "",
+      }));
+      // Fill customerSO exactly like the list payload does.
+      await attachCustomerSO(db, rows);
+      const items = rows.map((r) => ({
+        id: r.id,
+        poNo: r.poNo,
+        status: r.status,
+        productCode: r.productCode ?? "",
+        productName: r.productName ?? "",
+        customerName: r.customerName ?? "",
+        companySOId: r.companySOId ?? "",
+        customerSO: r.customerSO ?? "",
+        quantity: r.quantity ?? 0,
+        targetEndDate: r.targetEndDate ?? "",
+        currentDepartment: r.currentDepartment ?? "",
+      }));
+      return { items };
+    },
+    "",
+    c,
+    { staleWhileRevalidate: true },
+  );
+
+  return c.json({ success: true, data: data.items });
+});
+
 app.get("/:id", async (c) => {
   if (c.req.query("fresh") === "1") {
     const denied = await requirePermission(c, "production-orders", "read");

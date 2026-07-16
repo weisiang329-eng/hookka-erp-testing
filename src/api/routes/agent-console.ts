@@ -29,6 +29,8 @@ import { emitAudit } from "../lib/audit";
 import {
   AGENT_FAMILIES,
   ensureAgentTables,
+  isAutoApproveOn,
+  isAutoTuneOn,
   isKillSwitchOn,
   listAgentControls,
   monthLlmUsage,
@@ -38,13 +40,16 @@ import {
   type AgentFamily,
 } from "../lib/agent-console";
 import {
-  CONFIG_PROPOSAL_KEYS,
+  applyConfigProposalValue,
+  autoApplyConfigProposals,
   ensureConfigProposalTable,
   runLearning,
 } from "../lib/agent-learning";
-import { generateProposals, ensureProposalTables } from "../lib/schedule-proposals";
+import { generateProposals, applyPendingProposals, ensureProposalTables } from "../lib/schedule-proposals";
 import { dispatchReport } from "./reports";
 import { runDeliveryAgent } from "./delivery-agent";
+import { runEmployeeDigest } from "../lib/employee-agent";
+import { runServiceDigest } from "../lib/service-agent";
 import { deliveryLearning } from "../lib/delivery-agent";
 import { DEFAULT_ORG_ID } from "../lib/tenant";
 
@@ -54,6 +59,24 @@ export default app;
 function actorId(c: { get: (k: string) => unknown }): string | null {
   const v = (c as unknown as { get: (k: string) => string | undefined }).get("userId");
   return v ?? null;
+}
+
+// Flag-respecting parameter auto-apply, shared by the learning/proposals
+// "Run now" buttons and the heartbeat sweep. One path for BOTH families so the
+// AUTO-APPROVE flag always MEANS "clear my learned params" — production tunes
+// its chain.* handoffs, delivery tunes its cs.transitDays.* promise dates.
+// Each family is gated only by its own flag (isAutoApproveOn is already false
+// when the family is paused). Returns the count applied across both.
+async function autoTuneFlaggedParams(db: D1Database): Promise<number> {
+  let tuned = 0;
+  for (const fam of ["PRODUCTION", "DELIVERY"] as const) {
+    // Param self-tuning is a PHASE-2 capability (auto-tune), so it fires at
+    // phase 2 AND 3 — not only full-auto.
+    if (await isAutoTuneOn(db, fam)) {
+      tuned += await autoApplyConfigProposals(db, fam, "AGENT_AUTO").catch(() => 0);
+    }
+  }
+  return tuned;
 }
 
 // The three runnable Production tasks. next-run text is a hardcoded
@@ -81,6 +104,28 @@ const DELIVERY_TASKS: Array<{ agent: string; label: string; nextRun: string }> =
     agent: "delivery-run",
     label: "Daily Run (proposals + learning + brief)",
     nextRun: "07:30 MYT (cron) + self-scheduled sweeps when deliveries spike · on demand",
+  },
+];
+
+const EMPLOYEE_TASKS: Array<{ agent: string; label: string; nextRun: string }> = [
+  {
+    agent: "employee-agent",
+    label: "Daily Digest (absences · late · pre-payroll · low-efficiency)",
+    nextRun: "07:00 MYT · working days · on demand",
+  },
+];
+
+/** Due-dates applied per invocation. Small on purpose: generating proposals
+ *  already runs the whole planning engine, so a big apply on top kills the
+ *  Worker mid-run (owner 2026-07-16 — the backlog hit 1,700 because every run
+ *  timed out before applying anything). The hourly drain clears the rest. */
+const APPLY_BATCH = 150;
+
+const SERVICE_TASKS: Array<{ agent: string; label: string; nextRun: string }> = [
+  {
+    agent: "service-agent",
+    label: "Daily Digest (new cases · untriaged · QC fails)",
+    nextRun: "07:00 MYT · working days · on demand",
   },
 ];
 
@@ -218,22 +263,60 @@ app.get("/status", async (c) => {
   const controlOf = (agent: string) => controls.find((x) => x.agent === agent);
   const killAll = controlOf("ALL")?.paused === true;
 
-  // PRODUCTION / DELIVERY run full console lifecycles; CS is live but
+  // Employee agent card reads the LAST digest snapshot (cheap kv) rather than
+  // recomputing on every /status — the digest itself runs on its own cadence.
+  let employeeDigest: { date?: string; counts?: Record<string, number> } | null = null;
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = 'employee-digest'")
+      .bind()
+      .first<{ value: string }>();
+    if (row?.value) employeeDigest = JSON.parse(row.value);
+  } catch {
+    employeeDigest = null;
+  }
+  let serviceDigest: { date?: string; counts?: Record<string, number> } | null = null;
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = 'service-digest'")
+      .bind()
+      .first<{ value: string }>();
+    if (row?.value) serviceDigest = JSON.parse(row.value);
+  } catch {
+    serviceDigest = null;
+  }
+
+  // PRODUCTION / DELIVERY / EMPLOYEE run console lifecycles; CS is live but
   // question-driven (no cron), so it reports KPI counters instead of tasks.
   const agents = AGENT_FAMILIES.map((fam) => {
     const ctl = controlOf(fam);
-    const live = fam === "PRODUCTION" || fam === "DELIVERY" || fam === "CS";
+    // PROCUREMENT is "controllable" (Pause + Phase) but its engine is still
+    // gated behind data-readiness — the FE shows it as GATED, not LIVE (owner
+    // 2026-07-16: "先做 pause 功能"). Treating it as live here just renders the
+    // unified controls; nothing schedules a run for it yet.
+    const live =
+      fam === "PRODUCTION" ||
+      fam === "DELIVERY" ||
+      fam === "CS" ||
+      fam === "EMPLOYEE" ||
+      fam === "SERVICE" ||
+      fam === "PROCUREMENT";
     const tasks =
       fam === "PRODUCTION"
         ? PRODUCTION_TASKS
         : fam === "DELIVERY"
           ? DELIVERY_TASKS
-          : [];
+          : fam === "EMPLOYEE"
+            ? EMPLOYEE_TASKS
+            : fam === "SERVICE"
+              ? SERVICE_TASKS
+              : [];
     return {
       id: fam,
       live,
       paused: ctl?.paused === true,
       autoApprove: ctl?.autoApprove === true,
+      phase: ctl?.phase ?? 1,
       tasks: tasks.map((t) => ({
         ...t,
         lastRun: lastByTask.get(t.agent) ?? null,
@@ -251,6 +334,25 @@ app.get("/status", async (c) => {
       cs:
         fam === "CS"
           ? { promises30d: csPromises30d, enginePromises30d: csEngine30d }
+          : null,
+      employee:
+        fam === "EMPLOYEE"
+          ? {
+              date: employeeDigest?.date ?? null,
+              absent: employeeDigest?.counts?.absent ?? 0,
+              late: employeeDigest?.counts?.late ?? 0,
+              pendingApprovals: employeeDigest?.counts?.pendingApprovals ?? 0,
+              lowEfficiency: employeeDigest?.counts?.lowEfficiency ?? 0,
+            }
+          : null,
+      service:
+        fam === "SERVICE"
+          ? {
+              date: serviceDigest?.date ?? null,
+              newCases: serviceDigest?.counts?.newCases ?? 0,
+              untriaged: serviceDigest?.counts?.untriaged ?? 0,
+              qcFails: serviceDigest?.counts?.qcFails ?? 0,
+            }
           : null,
       pendingConfigProposals: fam === "PRODUCTION" ? pendingConfig : 0,
       month:
@@ -444,9 +546,9 @@ app.post("/run-now", async (c) => {
     body = {};
   }
   const agent = (body.agent ?? "").toLowerCase();
-  if (!["brief", "proposals", "learning", "delivery"].includes(agent)) {
+  if (!["brief", "proposals", "learning", "delivery", "employee", "service"].includes(agent)) {
     return c.json(
-      { success: false, error: "agent must be brief | proposals | learning | delivery" },
+      { success: false, error: "agent must be brief | proposals | learning | delivery | employee | service" },
       400,
     );
   }
@@ -489,11 +591,67 @@ app.post("/run-now", async (c) => {
     });
     return c.json({ success: true, data: result });
   }
+  if (agent === "employee") {
+    const result = await recordAgentRun(db, "employee-agent", async (run) => {
+      const digest = await runEmployeeDigest(db);
+      // Persist a small snapshot so the console card reads counts cheaply.
+      await db
+        .prepare(
+          `INSERT INTO kv_config (key, value) VALUES ('employee-digest', ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        )
+        .bind(JSON.stringify({ date: digest.date, counts: digest.counts, generatedAt: new Date().toISOString() }))
+        .run()
+        .catch((e) => console.warn("[employee-agent] snapshot write failed:", e));
+      run.setSummary(
+        `${digest.date} · absent ${digest.counts.absent} · late ${digest.counts.late} · pending approvals ${digest.counts.pendingApprovals} · low-eff ${digest.counts.lowEfficiency} (run-now)`,
+      );
+      return digest;
+    });
+    return c.json({ success: true, data: result });
+  }
+  if (agent === "service") {
+    const result = await recordAgentRun(db, "service-agent", async (run) => {
+      const digest = await runServiceDigest(db);
+      await db
+        .prepare(
+          `INSERT INTO kv_config (key, value) VALUES ('service-digest', ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        )
+        .bind(JSON.stringify({ date: digest.date, counts: digest.counts, generatedAt: new Date().toISOString() }))
+        .run()
+        .catch((e) => console.warn("[service-agent] snapshot write failed:", e));
+      run.setSummary(
+        `${digest.date} · new cases ${digest.counts.newCases} · untriaged ${digest.counts.untriaged} · QC fails ${digest.counts.qcFails} (run-now)`,
+      );
+      return digest;
+    });
+    return c.json({ success: true, data: result });
+  }
   if (agent === "proposals") {
+    // With the AUTO-APPROVE flag ON, "Run now" must also WRITE the due dates,
+    // not just regenerate proposals (owner 2026-07-16: "我点了 Run Now，job
+    // card 的 due date 还是空的"). Applying used to happen only on the hourly
+    // heartbeat (≤400/beat), so a click looked like it did nothing. Now the
+    // click applies a first batch synchronously and drains the rest of the
+    // backlog in the background, so one click fills every WAITING card.
+    // ONE bounded batch per invocation. Generating is already a full run of the
+    // planning engine; piling a 400-row apply + a 25×400 background drain on top
+    // (my earlier version) blew the Worker's limits — the run was killed
+    // mid-flight, so nothing was applied AND the agent_runs row stayed "running"
+    // forever while the backlog grew to 1,700 (owner 2026-07-16). The hourly
+    // drain, which now runs FIRST and on its own, clears the rest.
+    const flagOn = await isAutoApproveOn(db, "PRODUCTION");
     const result = await recordAgentRun(db, "production-proposals", async (run) => {
       const r = await generateProposals(db);
+      let applyNote = "";
+      if (flagOn) {
+        const a = await applyPendingProposals(db, { decidedBy: "AGENT_AUTO", limit: APPLY_BATCH });
+        applyNote = ` · applied ${a.approved} due date(s)${a.remainingPending > 0 ? ` (${a.remainingPending} left — draining hourly)` : ""}`;
+      }
+      const tuned = await autoTuneFlaggedParams(db);
       run.setSummary(
-        `proposed ${r.proposed} (unscheduled ${r.unscheduled} · overdue ${r.overdue} · superseded ${r.superseded}) (run-now)`,
+        `proposed ${r.proposed} (unscheduled ${r.unscheduled} · overdue ${r.overdue} · superseded ${r.superseded})${applyNote}${tuned > 0 ? ` · auto-tuned ${tuned} param(s)` : ""} (run-now)`,
       );
       return r;
     });
@@ -502,10 +660,14 @@ app.post("/run-now", async (c) => {
   // learning
   const result = await recordAgentRun(db, "production-learning", async (run) => {
     const r = await runLearning(db, { emitProposals: true });
+    // With the AUTO-APPROVE flag on, clicking Run now clears the freshly-learned
+    // params immediately (same effect the heartbeat sweep gives hourly) — the
+    // flag means "apply", not "queue for me to click".
+    const tuned = await autoTuneFlaggedParams(db);
     run.setSummary(
       `adherence ${r.overallAdherencePct == null ? "n/a" : `${r.overallAdherencePct}%`} · ` +
         `${r.handoffs.filter((h) => h.flagged).length} handoff drift(s) · ` +
-        `${r.pendingConfigProposals} config proposal(s) pending · ${r.ot.length} OT signal(s) (run-now)`,
+        `${r.pendingConfigProposals} config proposal(s) pending${tuned > 0 ? ` · auto-tuned ${tuned}` : ""} · ${r.ot.length} OT signal(s) (run-now)`,
     );
     return r;
   });
@@ -591,6 +753,39 @@ app.post("/gate", async (c) => {
     source: "admin",
   });
   return c.json({ success: true, data: { agent, autoApprove } });
+});
+
+// ── POST /phase {agent, phase} ───────────────────────────────────────────────
+// Set an agent's automation phase (1 propose · 2 auto-tune · 3 full-auto).
+// Switchable any time (owner 2026-07-16): the next run/heartbeat reads the new
+// phase. Supersedes the binary /gate — auto_approve stays synced (phase 3 = on)
+// so nothing that still reads the old flag breaks.
+app.post("/phase", async (c) => {
+  const denied = requireSuperAdmin(c);
+  if (denied) return denied;
+  let body: { agent?: string; phase?: number } = {};
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    body = {};
+  }
+  const agent = (body.agent ?? "").toUpperCase() as AgentFamily;
+  if (!AGENT_FAMILIES.includes(agent)) {
+    return c.json({ success: false, error: "unknown agent" }, 400);
+  }
+  const phase = Math.round(Number(body.phase));
+  if (!(phase >= 1 && phase <= 3)) {
+    return c.json({ success: false, error: "phase must be 1, 2 or 3" }, 400);
+  }
+  await setAgentControl(c.var.DB, agent, { phase });
+  await emitAudit(c, {
+    resource: "agents",
+    resourceId: agent,
+    action: "phase",
+    after: { phase },
+    source: "admin",
+  });
+  return c.json({ success: true, data: { agent, phase } });
 });
 
 // ── POST /rollback-last-batch ────────────────────────────────────────────────
@@ -792,57 +987,14 @@ app.post("/config-proposals/decide", async (c) => {
     const proposedRaw = (row.proposedValue ?? row.proposed_value) ?? "";
 
     if (action === "approve") {
-      // Two whitelisted families (reject everything else, never normalize):
-      //   chain.<field>          → kv_config['planning_capacity'].chain.<field>
-      //   cs.transitDays.<STATE> → kv_config['cs-agent'].transitDaysByState.<STATE>
-      const chainField = CONFIG_PROPOSAL_KEYS[paramKey];
-      const csState = /^cs\.transitDays\.([A-Z]{2,3})$/.exec(paramKey)?.[1] ?? null;
-      const value = Number(proposedRaw);
-      const maxValue = csState ? 10 : 30;
-      if ((!chainField && !csState) || !Number.isFinite(value) || value < 0 || value > maxValue) {
+      // Same validate+write the full-auto path uses (single source of truth —
+      // manual and autonomous approvals can never diverge). Rejects (returns
+      // false) on any non-whitelisted key or out-of-bounds value.
+      const ok = await applyConfigProposalValue(db, paramKey, proposedRaw);
+      if (!ok) {
         errors.push(`${paramKey}: not an approvable parameter`);
         continue;
       }
-      const kvKey = csState ? "cs-agent" : "planning_capacity";
-      // Merge into the existing override object — never clobber other keys.
-      let override: Record<string, unknown> = {};
-      try {
-        const kv = await db
-          .prepare("SELECT value FROM kv_config WHERE key = ?")
-          .bind(kvKey)
-          .first<{ value: string }>();
-        if (kv?.value) {
-          const parsed = JSON.parse(kv.value);
-          if (parsed && typeof parsed === "object") override = parsed as Record<string, unknown>;
-        }
-      } catch {
-        override = {};
-      }
-      if (csState) {
-        const byState =
-          override.transitDaysByState && typeof override.transitDaysByState === "object"
-            ? (override.transitDaysByState as Record<string, unknown>)
-            : {};
-        byState[csState] = Math.floor(value);
-        override.transitDaysByState = byState;
-      } else if (chainField) {
-        const chain =
-          override.chain && typeof override.chain === "object"
-            ? (override.chain as Record<string, unknown>)
-            : {};
-        chain[chainField] = Math.floor(value);
-        override.chain = chain;
-      }
-      await db
-        .prepare(
-          `INSERT INTO kv_config (key, value, updated_at)
-           VALUES (?, ?, ?)
-           ON CONFLICT(key) DO UPDATE SET
-             value = excluded.value,
-             updated_at = excluded.updated_at`,
-        )
-        .bind(kvKey, JSON.stringify(override), nowIso)
-        .run();
     }
 
     await db

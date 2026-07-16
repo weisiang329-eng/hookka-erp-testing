@@ -87,6 +87,8 @@ export interface GenerateProposalsResult {
   proposed: number;
   /** Prior PENDING proposals marked SUPERSEDED. */
   superseded: number;
+  /** Stale PENDING proposals (>1 day old, unadopted) marked EXPIRED. */
+  expired: number;
   /** Of the proposed: job cards that had NO dueDate at all. */
   unscheduled: number;
   /** Of the proposed: job cards whose dueDate was already in the past. */
@@ -113,15 +115,98 @@ function localToday(): string {
   return `${d.getFullYear()}-${m}-${dd}`;
 }
 
-// Keep chunks small so the flattened bind-parameter count stays comfortably
-// under adapter limits (11 params per inserted row).
-const CHUNK = 40;
+// Bind-parameter budget per statement is 65535; at 11 params per inserted row
+// the real ceiling is ~5,900 rows. CHUNK was 40 — over 100x more conservative
+// than it needed to be, and each chunk costs THREE sequential round-trips
+// (count → supersede → insert). With ~1,500 candidates that was ~38 chunks =
+// ~114 strictly serialized queries, and THAT is what made a generate run take
+// 155s+ and get killed — not the engine, which computes in tens of ms (owner
+// 2026-07-16; measured). 500 rows = 5,500 params, still 12x under the ceiling,
+// and turns ~114 round-trips into ~9.
+const CHUNK = 500;
+
+/**
+ * Auto-expire stale PENDING proposals not acted on within ~1 day (owner
+ * 2026-07-15: unadopted schedule proposals pile up forever — the per-job-card
+ * supersede only touches cards that reappear as candidates, so a card that drops
+ * out of the plan leaves its PENDING row orphaned). This clears anything PENDING
+ * generated more than 24h ago, keeping the Schedule Proposals table small (it had
+ * grown to 1000+ rows, which is what made the Planning page lag). Marks EXPIRED —
+ * not deleted — so the history stays. Mirrors the delivery agent's expiry.
+ */
+async function expireStalePendingProposals(
+  db: D1Database,
+  nowIso: string,
+): Promise<number> {
+  const cutoff = new Date(Date.parse(nowIso) - 86400000).toISOString();
+  const prev = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM schedule_proposals
+        WHERE status = 'PENDING' AND generated_at < ?`,
+    )
+    .bind(cutoff)
+    .first<{ n: number | string }>();
+  const count = Number(prev?.n) || 0;
+  if (count > 0) {
+    await db
+      .prepare(
+        `UPDATE schedule_proposals SET status = 'EXPIRED', decided_at = ?
+          WHERE status = 'PENDING' AND generated_at < ?`,
+      )
+      .bind(nowIso, cutoff)
+      .run();
+  }
+  return count;
+}
 
 export async function generateProposals(db: D1Database): Promise<GenerateProposalsResult> {
   await ensureProposalTables(db);
+  // Clear proposals the owner never adopted within a day BEFORE regenerating.
+  const expired = await expireStalePendingProposals(db, new Date().toISOString());
+  // Housekeeping (owner 2026-07-16: "过期的没 delete 掉吗?"): expiry only MARKS
+  // rows EXPIRED so recent history stays visible — but terminal rows
+  // (EXPIRED / APPLIED / REJECTED) older than 7 days are dead weight, so
+  // physically delete them here to keep the table lean over time.
+  try {
+    const purgeCut = new Date(Date.now() - 7 * 86400000).toISOString();
+    await db
+      .prepare(
+        `DELETE FROM schedule_proposals
+          WHERE status IN ('EXPIRED','APPLIED','REJECTED')
+            AND COALESCE(decided_at, generated_at) < ?`,
+      )
+      .bind(purgeCut)
+      .run();
+  } catch (err) {
+    console.warn("[schedule-proposals] terminal-row purge failed:", err);
+  }
 
   const { assignments } = await computeChainWithAssignments(db);
   const today = localToday();
+
+  // Protect committed/imminent work (owner 2026-07-15): never PROPOSE a date
+  // change for job cards already SENT to production (distributedAt set) or due
+  // within 3 days — they're locked in. The engine still counts them for
+  // capacity; we only skip proposing to move them.
+  const soon = new Date(today + "T00:00:00Z");
+  soon.setUTCDate(soon.getUTCDate() + 3);
+  const soonYmd = soon.toISOString().slice(0, 10);
+  const protectedJcs = new Set<string>();
+  try {
+    const pr = await db
+      .prepare(
+        `SELECT id FROM job_cards
+          WHERE status = 'WAITING'
+            AND ( (distributedAt IS NOT NULL AND distributedAt <> '')
+               OR ( dueDate IS NOT NULL AND dueDate <> ''
+                    AND substr(dueDate,1,10) >= ? AND substr(dueDate,1,10) <= ? ) )`,
+      )
+      .bind(today, soonYmd)
+      .all<{ id: string }>();
+    for (const r of pr.results ?? []) protectedJcs.add(String(r.id));
+  } catch (e) {
+    console.warn("[schedule-proposals] protected-jc query failed:", e);
+  }
 
   // ONE candidate per job card (each jc appears in exactly one dept's plan).
   const byJc = new Map<string, Candidate>();
@@ -129,6 +214,7 @@ export async function generateProposals(db: D1Database): Promise<GenerateProposa
   let overdue = 0;
   for (const a of assignments) {
     for (const jcId of a.jcIds) {
+      if (protectedJcs.has(jcId)) continue; // sent / due within 3 days — locked
       const cur = a.currentDue;
       const proposed = a.date;
       let flavor: string | null = null;
@@ -224,6 +310,7 @@ export async function generateProposals(db: D1Database): Promise<GenerateProposa
     scanned: assignments.length,
     proposed: cands.length,
     superseded,
+    expired,
     unscheduled,
     overdue,
   };

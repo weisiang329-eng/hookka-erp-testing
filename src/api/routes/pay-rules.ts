@@ -5,7 +5,7 @@
 //   DELETE /api/pay-rules/:id  → remove a FUTURE-dated version only (a typo in
 //                                a scheduled change); in-force history is kept.
 // ---------------------------------------------------------------------------
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import {
@@ -19,6 +19,31 @@ import {
 } from "../lib/pay-rules-store";
 
 const app = new Hono<Env>();
+
+// Explicit snapshot wipe on write. worker_payslips_snapshot and
+// worker_history_snapshot both derive from pay_rule_versions, but that table
+// has no updated_at/created_at column so the freshness probe cannot
+// auto-invalidate them. Every pay_rule_versions write path must DELETE the
+// affected snapshot rows itself. Wrapped so a wipe failure never breaks the save.
+async function wipePayRuleSnapshots(c: Context<Env>) {
+  try {
+    const { getOrgId } = await import("../lib/tenant");
+    const { invalidateSnapshot } = await import("../lib/snapshot");
+    const orgId = getOrgId(c);
+    await invalidateSnapshot(
+      c.var.DB,
+      { tableName: "worker_payslips_snapshot", sourceTables: [] },
+      orgId,
+    );
+    await invalidateSnapshot(
+      c.var.DB,
+      { tableName: "worker_history_snapshot", sourceTables: [] },
+      orgId,
+    );
+  } catch (e) {
+    console.warn("[pay-rules-write] snapshot wipe failed:", e);
+  }
+}
 
 app.get("/", async (c) => {
   const denied = await requirePermission(c, "payslips", "read");
@@ -75,6 +100,7 @@ app.post("/", async (c) => {
       (body.changedBy as string) ?? null,
     )
     .run();
+  await wipePayRuleSnapshots(c);
   return c.json({ success: true, data: { id, effectiveFrom, rules } }, 201);
 });
 
@@ -97,6 +123,7 @@ app.delete("/:id", async (c) => {
       400,
     );
   }
+  await wipePayRuleSnapshots(c);
   return c.json({ success: true });
 });
 

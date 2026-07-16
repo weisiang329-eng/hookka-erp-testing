@@ -1322,6 +1322,8 @@ app.get("/history", async (c) => {
         "job_cards",
         "piece_pics",
         "worker_nonprod_requests",
+        "production_orders",
+        "workers",
       ] as const,
       orgId: DEFAULT_ORG_ID,
       cacheKey: `${workerId}:${fromStr}:${toStr}`,
@@ -1843,6 +1845,15 @@ app.get("/payslips", async (c) => {
         "worker_salary_history",
         "job_cards",
         "payslips",
+        // 2026-07-14 freshness fix: the live current-month estimate reads these
+        // too (kv_config public_holidays; workers efficiency allowance/basic;
+        // worker_nonprod_requests ADD_PROD minutes) — all trackable, so add them
+        // so an edit invalidates the payslip snapshot. (departments +
+        // pay_rule_versions also feed it but have no updated_at/created_at column
+        // the freshness probe can read → those are wiped explicitly on write.)
+        "kv_config",
+        "workers",
+        "worker_nonprod_requests",
       ] as const,
       orgId: DEFAULT_ORG_ID,
       cacheKey: `${workerId}:${snapPeriod}`,

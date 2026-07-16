@@ -265,18 +265,31 @@ app.get("/", async (c) => {
       )
       .all<RackItemRow>(),
   ]);
-  const data = (locs.results ?? []).map((l) => rowToRack(l, items.results ?? []));
-  const grouped: Record<string, typeof data> = {};
-  for (const loc of data) grouped[loc.rack] = [loc];
+  // Bucket rack_items by rackLocationId once (O(items)) so each rack does an
+  // O(1) lookup instead of re-scanning the whole items list — the list handler
+  // was O(racks × items) (~1219 racks). rowToRack still filters internally, so
+  // passing the already-scoped bucket is a no-op there (byte-identical output).
+  const itemsByRack = new Map<string, RackItemRow[]>();
+  for (const it of items.results ?? []) {
+    if (!it.rackLocationId) continue;
+    const arr = itemsByRack.get(it.rackLocationId);
+    if (arr) arr.push(it);
+    else itemsByRack.set(it.rackLocationId, [it]);
+  }
+  const data = (locs.results ?? []).map((l) =>
+    rowToRack(l, itemsByRack.get(l.id) ?? []),
+  );
   const total = data.length;
   const occupied = data.filter((l) => l.status === "OCCUPIED").length;
   const empty = data.filter((l) => l.status === "EMPTY").length;
   const reserved = data.filter((l) => l.status === "RESERVED").length;
   const occupancyRate = total > 0 ? Math.round((occupied / total) * 100) : 0;
+  // NOTE: `grouped` (a per-rack-name duplicate of `data`) was dropped — no
+  // consumer reads it (verified across desktop warehouse.tsx + /m WarehouseScreen
+  // + whole src). It doubled this ~2.9MB payload for nothing.
   return c.json({
     success: true,
     data,
-    grouped,
     summary: { total, occupied, empty, reserved, occupancyRate },
   });
 });

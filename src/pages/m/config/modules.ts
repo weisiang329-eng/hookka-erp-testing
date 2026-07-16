@@ -1447,7 +1447,7 @@ const planningCapacitySource: DataSource = {
     const hours = num(r, "totalHours", "hours") || 0;
     const used = num(r, "utilisationPct", "efficiencyPct") || 0;
     return {
-      id: str(r, "departmentCode") || str(r, "code") || "—",
+      id: `cap-${str(r, "departmentCode") || str(r, "code") || "—"}`,
       code: str(r, "departmentName") || str(r, "departmentCode") || "—",
       title: str(r, "departmentName", "name") || str(r, "departmentCode") || "—",
       items: `${workers} worker${workers === 1 ? "" : "s"} · ${hours.toFixed(1)}h`,
@@ -1567,7 +1567,14 @@ const planningMasterSource: DataSource = {
 export const planningConfig: ModuleConfig = {
   slug: "planning",
   title: "Planning",
-  detailPath: (vm) => `/m/production/${encodeURIComponent(vm.id)}`,
+  // Only Master Tracker rows are real production orders that open a detail.
+  // Capacity / Loading / Lead Times are aggregate analytics (synthetic ids
+  // cap-/load-/lead-) with no per-id document — return null so those rows are
+  // non-tappable instead of dead-ending on a 404 "Document not found".
+  detailPath: (vm) =>
+    /^(cap|load|lead)-/.test(vm.id)
+      ? null
+      : `/m/production/${encodeURIComponent(vm.id)}`,
   // v17 (line ~1795): Capacity / Loading / Lead Times / Master Tracker
   sources: [
     planningCapacitySource,
@@ -2754,6 +2761,11 @@ const announcementsSource: DataSource = {
 // carries the full body, so we fetch the list and find the row by id.
 const announcementsDetail: DetailConfig = {
   url: () => "/api/announcements",
+  // Read-only on the office mobile app: this detail SHOWS the read-receipt
+  // (which workers acked / are pending). Office users don't ack their own
+  // notices (announcement_acks is worker-keyed), so there is no real
+  // "Mark as Read" write — hide the action bar rather than fake it.
+  hideActionBar: true,
   selectDoc: selectFromListById(["id"]),
   code: (d) => str(d, "category") || "Notice",
   title: (d) => str(d, "title") || "—",
@@ -2831,7 +2843,6 @@ const announcementsDetail: DetailConfig = {
     }
     return out;
   },
-  primaryCta: () => "Mark as Read",
 };
 
 export const announcementsConfig: ModuleConfig = {

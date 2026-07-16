@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef, startTransition, Fragment } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { humanizeError } from "@/lib/humanize-error";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
@@ -3821,7 +3821,7 @@ function EmployeeMasterTab({
           }
         >
           <div
-            className="w-full max-w-2xl rounded-lg bg-white p-6 shadow-xl"
+            className="w-full max-w-2xl rounded-lg bg-white p-6 shadow-xl max-h-[90vh] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mb-4 flex items-start justify-between">
@@ -10897,7 +10897,7 @@ export default function EmployeesPage() {
           {TABS.map((tab) => (
             <button
               key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
+              onClick={() => startTransition(() => setActiveTab(tab.key))}
               className={`flex items-center gap-1 px-2.5 py-2 text-[11px] font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
                 activeTab === tab.key
                   ? "border-[#6B5C32] text-[#6B5C32]"

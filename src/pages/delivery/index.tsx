@@ -723,19 +723,20 @@ async function renderDeliveredInvoicePdf(
     };
     const invoice = ij?.success ? ij.data : undefined;
     if (!invoice) return {};
-    // Email the SAME jsPDF the operator prints. The pdf-lib "unified" render
-    // was a second engine that looked different from Print ("歪", owner
-    // 2026-07-04); generateInvoicePdfBase64 IS exactly what the Print button
-    // produces, so the customer now receives what the operator sees.
-    const { generateInvoicePdfBase64 } = await import(
-      "@/lib/generate-invoice-pdf"
+    // Unify on ONE template (owner 2026-07-13): the customer email uses the
+    // SAME unified generator the download/print button uses (its earlier "歪"
+    // alignment + dashed-line issues are now fixed). renderUnifiedInvoiceBase64
+    // is exactly what downloadUnifiedInvoicePdf produces — one code path, so
+    // the emailed invoice is byte-identical to the download.
+    const { renderUnifiedInvoiceBase64 } = await import(
+      "@/lib/unified-doc-download"
     );
     return {
-      pdfBase64: generateInvoicePdfBase64(
+      pdfBase64: await renderUnifiedInvoiceBase64(
         invoice,
         ej?.success ? ej.data : undefined,
       ),
-      pdfFilename: `INV-${invoice.invoiceNo}.pdf`,
+      pdfFilename: `${/^INV/i.test(invoice.invoiceNo) ? invoice.invoiceNo : `INV-${invoice.invoiceNo}`}.pdf`,
     };
   } catch {
     return {};
@@ -772,12 +773,14 @@ async function sendCustomerNotice(
       itemsBreakdown = buildDoComponentBreakdown(row.items, extras);
       customerPOIds = collectCustomerPOIds(row.items, extras, row.customerPOId);
       try {
-        // Email the SAME jsPDF the operator prints (owner 2026-07-04: the
-        // pdf-lib email version looked different/"歪"). Same row + extras the
-        // Print-DO handler passes — no delivery QR on the customer email.
-        const { generateDoPdfBase64 } = await import("@/lib/generate-do-pdf");
-        pdfBase64 = generateDoPdfBase64(
-          row as unknown as import("@/types").DeliveryOrder,
+        // Unify on ONE template (owner 2026-07-13): the customer email uses the
+        // SAME unified generator the download-DO button uses (now that its
+        // alignment / dashed-line issues are fixed). renderUnifiedDoBase64 is
+        // exactly what downloadUnifiedDoPdf produces — no delivery QR on the
+        // customer copy; refs/category/pieces come from the DO print-extras.
+        const { renderUnifiedDoBase64 } = await import("@/lib/unified-doc-download");
+        pdfBase64 = await renderUnifiedDoBase64(
+          row as unknown as Record<string, unknown> & { doNo?: string },
           extras,
         );
         pdfFilename = `${row.doNo.startsWith("DO-") ? row.doNo : `DO-${row.doNo}`}.pdf`;
@@ -1140,7 +1143,13 @@ export default function DeliveryPage() {
   // from the response. include=jobCards keeps the per-PO JC array (DO page
   // needs uph JC statuses to compute Planning vs Pending Delivery). Cuts
   // the response from 2-6 MB to 200-600 KB.
-  const { data: poRaw, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: ProductionOrderApiShape[] }>("/api/production-orders?fields=minimal&include=jobCards");
+  // perf 2026-07-13: Planning + "Ready for DO" are now computed SERVER-SIDE
+  // (GET /api/delivery-orders/ready-planning runs the SHARED buildReadyPlanning
+  // from src/lib/delivery-pipeline.ts — the SAME code the client pipeline below
+  // used, so the rows are byte-identical). The page no longer pulls the ~1.2MB
+  // /api/production-orders?fields=minimal&include=jobCards payload just to derive
+  // these two lists — it fetches the small { ready, planning } result instead.
+  const { data: rpRaw, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; ready?: ReadyPORow[]; planning?: ReadyPORow[] }>("/api/delivery-orders/ready-planning");
   // Slim projection: this page joins Customer PO/SO + reference + expected-DD
   // onto DO rows, plus a per-SO {productCode → unitPriceSen} price map for the
   // PO-based Planning / Pending Delivery Sales-Figure fallback. ?fields=
@@ -1169,8 +1178,17 @@ export default function DeliveryPage() {
   // Saved packing lists (one per truck run, grouping several DOs). Populates
   // the "Packing List" tab. Defaults to empty if the endpoint/table isn't
   // ready so it never blocks the delivery page.
+  // Perf 2026-07-14: DEFERRED off the default Planning/Pending-Delivery landing.
+  // packingLists feeds only the DO grid's "already in PL" marks (doPackingMap) +
+  // the Packing List tab render + its badge — all governed by activeTab and none
+  // of them on the PO_TABS (planning / pending_delivery). Passing null on those
+  // two tabs skips the ~2.4s /api/packing-lists fetch until the operator leaves
+  // Planning (any DO-grid or Packing-List tab loads it). No dead-data risk — the
+  // PO-based Ready/Planning logic never reads packingLists.
   const { data: plRaw, refresh: refreshPLs } =
-    useCachedJson<{ success?: boolean; data?: PackingListRecord[] }>("/api/packing-lists");
+    useCachedJson<{ success?: boolean; data?: PackingListRecord[] }>(
+      PO_TABS.has(activeTab) ? null : "/api/packing-lists",
+    );
 
   const fetchData = useCallback(() => {
     invalidateCachePrefix("/api/delivery-orders");
@@ -1227,7 +1245,17 @@ export default function DeliveryPage() {
     setLoading(anyLoading);
     const dRes = doRaw || { success: false };
     const sRes = doSearchRaw || { success: false };
-    const poRes = poRaw || { success: false };
+    // Planning + Ready come from the server now (rpRaw). The old client-side
+    // pipeline below is kept but INERT (poRes.success stays false so it never
+    // runs) pending a follow-up dead-code cleanup — it's the source the shared
+    // buildReadyPlanning was extracted from, left as a reference for one release.
+    if (rpRaw?.success) {
+      setPlanningPOs(rpRaw.planning ?? []);
+      setReadyPOs(rpRaw.ready ?? []);
+    }
+    const poRes: { success?: boolean; data?: ProductionOrderApiShape[] } = {
+      success: false,
+    };
     const soRes = soRaw || { success: false };
     const custRes = custRaw || { success: false };
     // Exact server-computed value per production order (same resolver as
@@ -1502,7 +1530,7 @@ export default function DeliveryPage() {
         }
       }
     }
-  }, [doRaw, doSearchRaw, poRaw, soRaw, poValRaw, custRaw, linkedRaw, doLoading, poLoading, soLoading, custLoading]);
+  }, [doRaw, doSearchRaw, rpRaw, soRaw, poValRaw, custRaw, linkedRaw, doLoading, poLoading, soLoading, custLoading]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // ----- 3PL Provider helpers -----
@@ -4485,9 +4513,16 @@ export default function DeliveryPage() {
             <button
               key={tab.key}
               onClick={() => {
-                setActiveTab(tab.key);
-                setSelectedIds(new Set());
-                setSelectedReadyPOs(new Set());
+                // Mark the tab switch as a non-urgent transition so this huge
+                // page's re-render is interruptible — rapid tab-flicking stays
+                // responsive instead of queueing full re-renders (owner
+                // 2026-07-16: "快速切换 tab 很卡顿"). Pure scheduling; no logic
+                // change. The real cure is decomposing this 7k-line page.
+                React.startTransition(() => {
+                  setActiveTab(tab.key);
+                  setSelectedIds(new Set());
+                  setSelectedReadyPOs(new Set());
+                });
               }}
               className={`flex flex-col items-start gap-0.5 pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
                 activeTab === tab.key

@@ -9,6 +9,125 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-14 — 🔵 Durable read-perf rollout (ON STAGING, byte-identical gate) — see docs/PERF-DURABLE-ARCHITECTURE.md
+Owner-approved rebuild: stop shipping whole-org lists to the client; compute
+server-side (shared builder = byte-identical by construction) + snapshot-cache +
+serve-stale. Each slice = own commit → staging → LIVE byte-identical verify →
+(owner) merge to prod. Canonical + deployed branch = `staging` (this branch,
+staging-delivery-ready). NOTE: the older `perf-durable-arch` branch holds the same
+work via a messier revert/reapply history and is now BEHIND on code — treat THIS
+branch (staging) as source of truth; perf-durable-arch is superseded (kept only for
+its doc history, now copied here).
+
+**Slices DONE + LIVE-verified on staging (NOT on prod — await owner merge):**
+- ✅ **Sales SO list** — `?fields=minimal&include=` (empty include drops jobCards).
+  1.2MB→72kb. Sales total RM 1,155,048.95 + "194 of 200" byte-identical.
+- ✅ **Delivery Planning/Ready** — `GET /api/delivery-orders/ready-planning`
+  (shared buildReadyPlanning, withSnapshot+SWR, runtime-CREATE snapshot table). FE
+  drops the 1.2MB PO pull → ~10 KB. Planning 179/RM136,340.35, Ready 52/RM24,982.22,
+  Delivered 265/RM1,004,020.88 byte-identical. (BUG-2026-07-13-001 fixed en route.)
+- ✅ **Mobile Home Pending-Delivery** — reuses /ready-planning; dropped its 1.2MB PO pull.
+- ✅ **Inventory FG-stock (2026-07-14, THIS session)** — `GET /api/inventory/fg-stock`
+  returns DELTAS `{counts, dyn}` via shared `splitFgDeltas` (snapshot-cached
+  `inventory_fg_stock_snapshot` + SWR + runtime CREATE). FE keeps its /api/products
+  and merges by id via shared `mergeFgDeltas` → dropped THREE fetches
+  (production-orders ~1.2MB + delivery-orders + consignment-notes). LIVE-verified:
+  page now calls ONLY /api/inventory/fg-stock (0 production-orders/DO/CN calls);
+  rendered tallies Total SKUs 272 / Available 52 / Reserved 22 / Bedframe 160 —
+  byte-identical (0 per-product diffs in the live compare). Round-trip unit test
+  `tests/fg-stock.test.mjs` (7 cases) proves merge(split(derive))≡derive.
+  Commit ebc4d1b6. build:strict + full suite green.
+
+- ✅ **Consignment note (2026-07-14, THIS session)** — `GET /api/consignment-notes/ready-planning`
+  returns `{planning, ready, poLookups}` via shared `buildCnReadyPlanning` (verbatim from
+  note.tsx mapPO + poReadyForConsignment/poInPlanningConsignment gates) + `poLookups`
+  (companyCOId/fabricCode/rack for CN-referenced POs, rack via shared
+  aggregateRacksFromPackingCards). Snapshot-cached (`consignment_ready_planning_snapshot`,
+  cache_key **v2**). FE drops THREE fetches (production-orders ~1.2MB + consignment-orders +
+  linked-po-ids) — Planning/Ready rows + the 3 CN-item lookup maps now come from the endpoint.
+  Derived tabs carry NO money (CN amounts live on the CN records, untouched). LIVE-verified:
+  planning 1 / ready 4 / poLookups 22 byte-identical (0 diffs); page calls ONLY /ready-planning.
+  Commits daf711c0 / ab245466 / eadb25c8 / 6909192e.
+  GOTCHA (new rule): adding `poLookups` did NOT surface — `withSnapshot` tracks source-table
+  mtimes, NOT code, so it served the old v1 blob as "fresh" and the FE lookup columns went
+  blank. **A payload-SHAPE change MUST bump the snapshot `cache_key`** (arch-doc rule #3). Fixed 6909192e.
+- ✅ **Mobile ProductionScreen (2026-07-14, THIS session, PARTIAL)** — dropped `include=jobCards`
+  (board reads only currentDepartment+status, never jobCards) → `?fields=minimal&include=`.
+  Byte-identical display, big weak-wifi payload cut. Commit 68e24403. FULL keyset fix (server
+  search + per-dept count + infinite scroll) still QUEUED — this is just the safe cut.
+
+- ✅ **Planning (2026-07-14, THIS session)** — the interactive board can't drop the PO
+  rows (drag-drop + bulk-patch writes), so two additive levers instead: (1)
+  `warmPoListPlanningVariant` warms the previously-unwarmed `excludeCompleted=true`
+  snapshot every cron tick → planning serve-stales instantly, no more ~8s cold block
+  (measured live on prod: 10MB/8s cold). (2) `include=jobCards-lite` ships only the 12
+  job-card fields planning reads (audited: every access is jc.X in a local loop) via
+  `slimJobCardsToPlanningLite` (post-pass, no threading; blast radius = the lite request
+  only). LIVE-verified on staging: 0 field-diffs across 14,310 JCs, payload 9.92MB→4.99MB
+  (50%), warm load ~0.7s; the only PO-set delta is 21 old COMPLETED POs at the 35-day
+  rolling-window boundary (NO live/schedulable work dropped — onlyInLite=0). Planning
+  page renders, calls jobCards-lite (0 full-jobCards). Commits e670820d / 9b45c37e.
+
+**Reports (2026-07-14, THIS session) — DONE + verified:**
+- ✅ **Daily Report (compliance.json ~6s)** — snapshot + serve-stale + warm cron
+  (reports_compliance_snapshot, keyed by SGT date; sourceTables = the transactional tables).
+  LIVE: 6.8s cold → **0.87s** warm, data intact (4 sections incl. generatedAtIso), byte-identical.
+- ✅ **Dashboard brief.json (~4.4s)** — same pattern (reports_brief_snapshot, no-AI/no-write
+  variant). AI HTML /brief untouched. warmComplianceReport + warmBriefReport on the cron.
+- 🟡 **aging (3s)** — LEFT ALONE: it's a MONEY report (AR/AP) that ALREADY has a cache +
+  revision-invalidation (BUG-2026-07-09-002 history). Too sensitive to re-cache under the
+  "no past bugs" rule; the 3s is a cold rebuild that the existing rev-bump handles.
+
+**Remaining perf — RISK/REWARD reassessed (2026-07-14):**
+- 🟡 **Mobile ProductionScreen — full keyset — NOT WORTH IT (present to owner).** After the
+  jobCards drop + Brotli the board is **72KB over the wire** (1.6MB decoded @ 22.5×). The
+  keyset would save mainly ~1s of client parse, at the cost of INTRODUCING the dead-data bug
+  class (search must reach the whole table). Poor risk/reward — recommend NOT doing it; the
+  jobCards drop already solved the payload. Await owner's informed call.
+- 🟡 **service-cases (5MB / 19 rows) — CANNOT slim (known trap).** The /m L2 detail
+  (m/config/modules.ts) reads responsibleUnit/preventionStatus/affectedProducts/root-cause
+  details straight off the list row → slimming blanks the mobile detail. Proper fix = a
+  SEPARATE mobile detail endpoint so the list can slim; bigger, deferred. (Snapshot-caching
+  it is safe but stores a 5MB JSONB row per refresh — marginal, skipped.)
+- ✅ **warehouse wip (2.9MB / 1219 rows) — DONE (2026-07-14, THIS session).** Two safe wins,
+  no slim/L2 risk: (1) dropped the dead `grouped` field — a per-rack-name copy of the WHOLE
+  `data` array that NO consumer reads (verified desktop warehouse.tsx + /m WarehouseScreen +
+  whole src) → ~halves the payload. (2) Map-bucket rack_items by rackLocationId (was
+  O(racks×items) via per-rack `items.filter`). Byte-identical rack grid. Commit 387840ad,
+  BUG-2026-07-14-005. Procurement PO list already small (89KB); its page also pulls
+  /api/inventory as a sibling — that fetch could be slimmed next if the owner wants it.
+- ✅ **Snapshot freshness sweep (2026-07-14, THIS session) — dead-data guard.** /review
+  correctness pass found inventory /fg-stock tracked delivery_order_items but read the parent
+  delivery_orders.status (dispatch flips the parent, not the item) → stale stock after a
+  dispatch. Swept the whole ready-planning family: added every status/enrichment table each
+  snapshot actually reads to its sourceTables (delivery_orders, sales_orders, sales_order_items,
+  consignment_orders, consignment_notes, products). Freshness-only, no cache_key bump. Commit
+  ca9789aa, BUG-2026-07-14-004. RULE: sourceTables must cover every JOINed parent's
+  status/columns, not just the FROM table.
+- ✅ **Site-wide compression ALREADY ON** ("white-pickup" = done) — Cloudflare serves
+  Brotli (`content-encoding: br`) at ~20×; the 5MB planning JSON is only ~255KB over the
+  wire. So the bottleneck was NEVER the wire — it's server COMPUTE (cold snapshot builds)
+  + client PARSE/derive of the decoded JSON. The warm-cron (compute) + payload slims
+  (decoded size → parse) target exactly that; no compression work needed.
+Method for a derive-and-drop slice: extract shared builder (verbatim from FE) → additive
+server endpoint (withSnapshot+SWR+runtime CREATE, **bump cache_key on any shape change**) →
+LIVE byte-identical compare (endpoint vs current client compute) → swap FE → re-verify.
+Golden rule (owner's #1 fear): search/filter/count/money-total ALWAYS server-side over
+the WHOLE dataset; page window is render-only. 11-pt checklist in the arch doc.
+
+## 2026-07-14 — ✅ Edit Customer modal — short-screen "can't save" fix (THIS session)
+Owner reported (2nd screenshot): on a short laptop screen the tall single-column
+Edit Customer modal overflowed with no way to scroll to Save — users literally couldn't
+save. Fix (customers.tsx, commit 2b205a51): landscape 2-column layout (Company | Credit)
++ `max-h-[90vh] flex flex-col` with a scrollable middle + PINNED header/footer, so Save is
+always reachable. Pure layout, no data/save-logic change. Sweep of the other ~40 modal
+overlays: the vast majority are short confirm/QR/picker dialogs (max-w-sm/md) that can't
+overflow — only genuinely tall entity-edit forms share the bug. NONE blanket-fixed (risky,
+mostly unnecessary); flag specific tall edit-forms to the owner before reshaping. Add-Customer
+is an inline Card (scrolls with the page — not vulnerable).
+
+---
+
 ## 2026-07-13 — 🔵 Delivery Return — driver item-flagging + desktop deliver/DR/SV convert
 Owner ask (4 parts, feature → staging):
 1. **Driver scan** (do-scan.tsx): on "Delivered with issues", show item list → driver

@@ -3945,119 +3945,131 @@ export default function CustomersPage() {
       {/* Edit Customer Dialog */}
       {editCustomer && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-lg shadow-xl w-full max-w-lg mx-4">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-[#E2DDD8]">
+          {/* Landscape (two-column) layout + capped height so the header and the
+              Save/Cancel footer stay PINNED and only the middle scrolls — on a
+              short laptop screen the old single-column tall modal overflowed with
+              no way to reach Save (users literally couldn't save). */}
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-3xl mx-4 flex flex-col max-h-[90vh]">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-[#E2DDD8] shrink-0">
               <h2 className="text-lg font-semibold text-[#1F1D1B]">Edit Customer — {editCustomer.code}</h2>
               <button onClick={() => setEditCustomer(null)} className="p-1 rounded hover:bg-[#E2DDD8]">
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <div className="px-6 py-4 space-y-4">
-              <h3 className="text-sm font-semibold text-[#6B5C32]">Company Information</h3>
-              <div className="grid grid-cols-2 gap-4 max-md:grid-cols-1">
-                <div>
-                  <label className="block text-xs text-[#6B7280] mb-1">Creditor Code *</label>
-                  <Input value={editCustForm.code} onChange={(e) => setEditCustForm(f => ({ ...f, code: e.target.value }))} />
-                  <p className="mt-1 text-[10px] text-[#9C6F1E] bg-[#FAEFCB] border border-[#E8D899] rounded px-2 py-1">
-                    ⚠ Changing the code does not rewrite historical SO / DO / Invoice / Maintenance / Customer Products references — those records keep the old code on file. Use only when fixing a typo or migrating accounting numbering.
-                  </p>
-                </div>
-                <div>
-                  <label className="block text-xs text-[#6B7280] mb-1">Customer Name *</label>
-                  <Input value={editCustForm.name} onChange={(e) => setEditCustForm(f => ({ ...f, name: e.target.value }))} />
-                </div>
-                <div>
-                  <label className="block text-xs text-[#6B7280] mb-1">SSM No.</label>
-                  <Input value={editCustForm.ssmNo} onChange={(e) => setEditCustForm(f => ({ ...f, ssmNo: e.target.value }))} placeholder="e.g. 201901012345" />
-                </div>
-                <div className="col-span-2">
-                  <label className="block text-xs text-[#6B7280] mb-1">Company Address</label>
-                  <Input value={editCustForm.companyAddress} onChange={(e) => setEditCustForm(f => ({ ...f, companyAddress: e.target.value }))} placeholder="Registered company address" />
-                </div>
-                <div>
-                  <label className="block text-xs text-[#6B7280] mb-1">PIC</label>
-                  <Input value={editCustForm.contactName} onChange={(e) => setEditCustForm(f => ({ ...f, contactName: e.target.value }))} />
-                </div>
-                <div>
-                  <label className="block text-xs text-[#6B7280] mb-1">Phone</label>
-                  <Input value={editCustForm.phone} onChange={(e) => setEditCustForm(f => ({ ...f, phone: e.target.value }))} />
-                </div>
-                <div className="col-span-2">
-                  <label className="block text-xs text-[#6B7280] mb-1">Email</label>
-                  <Input value={editCustForm.email} onChange={(e) => setEditCustForm(f => ({ ...f, email: e.target.value }))} />
-                </div>
-              </div>
-              <h3 className="text-sm font-semibold text-[#6B5C32] pt-2">Credit & Terms</h3>
-              <div className="grid grid-cols-2 gap-4 max-md:grid-cols-1">
-                <div>
-                  <label className="block text-xs text-[#6B7280] mb-1">Credit Terms</label>
-                  <select
-                    value={editCustForm.creditTerms}
-                    onChange={(e) => setEditCustForm(f => ({ ...f, creditTerms: e.target.value }))}
-                    className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20"
-                  >
-                    <option value="COD">COD</option>
-                    <option value="NET15">NET15</option>
-                    <option value="NET30">NET30</option>
-                    <option value="NET45">NET45</option>
-                    <option value="NET60">NET60</option>
-                    <option value="NET90">NET90</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs text-[#6B7280] mb-1">Credit Limit (RM)</label>
-                  <Input type="number" onFocus={(e) => e.currentTarget.select()} value={editCustForm.creditLimitSen / 100} onChange={(e) => setEditCustForm(f => ({ ...f, creditLimitSen: Math.round(Number(e.target.value) * 100) }))} />
-                </div>
-                {/* Multi-Company Phase 4 — default company for NEW sales orders
-                    from this customer. Empty = no default (falls back to
-                    HOOKKA). Does NOT move existing orders. */}
-                {activeOrgs.length > 0 && (
+            <div className="flex-1 overflow-y-auto min-h-0 px-6 py-4">
+              <div className="grid grid-cols-2 gap-x-6 gap-y-4 max-md:grid-cols-1">
+                {/* LEFT column — Company Information */}
+                <div className="space-y-4">
+                  <h3 className="text-sm font-semibold text-[#6B5C32]">Company Information</h3>
                   <div>
-                    <label className="block text-xs text-[#6B7280] mb-1">Default Company (new orders)</label>
-                    <select
-                      value={editCustForm.defaultCompanyCode}
-                      onChange={(e) => setEditCustForm(f => ({ ...f, defaultCompanyCode: e.target.value }))}
-                      className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20"
-                      aria-label="Default company for new sales orders"
-                    >
-                      <option value="">No default (Hookka)</option>
-                      {activeOrgs.map((o) => (
-                        <option key={o.code} value={o.code}>{o.name || o.code}</option>
-                      ))}
-                    </select>
+                    <label className="block text-xs text-[#6B7280] mb-1">Creditor Code *</label>
+                    <Input value={editCustForm.code} onChange={(e) => setEditCustForm(f => ({ ...f, code: e.target.value }))} />
+                    <p className="mt-1 text-[10px] text-[#9C6F1E] bg-[#FAEFCB] border border-[#E8D899] rounded px-2 py-1">
+                      ⚠ Changing the code does not rewrite historical SO / DO / Invoice / Maintenance / Customer Products references — those records keep the old code on file. Use only when fixing a typo or migrating accounting numbering.
+                    </p>
                   </div>
-                )}
-                {/* OEM product marking — per category, what to attach on this
-                    customer's finished goods. Shows on the Fab Cut / Fab Sew
-                    sticker Notes so the line knows (see customers.ts oem_marking). */}
-                <div>
-                  <label className="block text-xs text-[#6B7280] mb-1">OEM product marking (shows on Fab Cut / Sew sticker)</label>
-                  <div className="space-y-1.5">
-                    {([["bedframe", "Bedframe"], ["sofa", "Sofa"], ["accessory", "Accessory"]] as const).map(([key, label]) => (
-                      <div key={key} className="flex items-center justify-between gap-2">
-                        <span className="text-sm text-[#374151]">{label}</span>
-                        <div className="inline-flex rounded-md border border-[#E2DDD8] overflow-hidden">
-                          {(["NONE", "TAG", "LABEL"] as const).map((opt) => {
-                            const on = editCustForm.oemMarking[key] === opt;
-                            return (
-                              <button
-                                key={opt}
-                                type="button"
-                                onClick={() => setEditCustForm((f) => ({ ...f, oemMarking: { ...f.oemMarking, [key]: opt } }))}
-                                className={`px-3 py-1 text-xs ${opt !== "NONE" ? "border-l border-[#E2DDD8]" : ""} ${on ? "bg-[#6B5C32] text-white" : "bg-white text-gray-600 hover:bg-[#FAF9F7]"}`}
-                              >
-                                {opt === "NONE" ? "None" : opt === "TAG" ? "Tag" : "Label"}
-                              </button>
-                            );
-                          })}
+                  <div>
+                    <label className="block text-xs text-[#6B7280] mb-1">Customer Name *</label>
+                    <Input value={editCustForm.name} onChange={(e) => setEditCustForm(f => ({ ...f, name: e.target.value }))} />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#6B7280] mb-1">SSM No.</label>
+                    <Input value={editCustForm.ssmNo} onChange={(e) => setEditCustForm(f => ({ ...f, ssmNo: e.target.value }))} placeholder="e.g. 201901012345" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#6B7280] mb-1">Company Address</label>
+                    <Input value={editCustForm.companyAddress} onChange={(e) => setEditCustForm(f => ({ ...f, companyAddress: e.target.value }))} placeholder="Registered company address" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs text-[#6B7280] mb-1">PIC</label>
+                      <Input value={editCustForm.contactName} onChange={(e) => setEditCustForm(f => ({ ...f, contactName: e.target.value }))} />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-[#6B7280] mb-1">Phone</label>
+                      <Input value={editCustForm.phone} onChange={(e) => setEditCustForm(f => ({ ...f, phone: e.target.value }))} />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#6B7280] mb-1">Email</label>
+                    <Input value={editCustForm.email} onChange={(e) => setEditCustForm(f => ({ ...f, email: e.target.value }))} />
+                  </div>
+                </div>
+                {/* RIGHT column — Credit & Terms + OEM marking */}
+                <div className="space-y-4">
+                  <h3 className="text-sm font-semibold text-[#6B5C32]">Credit & Terms</h3>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs text-[#6B7280] mb-1">Credit Terms</label>
+                      <select
+                        value={editCustForm.creditTerms}
+                        onChange={(e) => setEditCustForm(f => ({ ...f, creditTerms: e.target.value }))}
+                        className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20"
+                      >
+                        <option value="COD">COD</option>
+                        <option value="NET15">NET15</option>
+                        <option value="NET30">NET30</option>
+                        <option value="NET45">NET45</option>
+                        <option value="NET60">NET60</option>
+                        <option value="NET90">NET90</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs text-[#6B7280] mb-1">Credit Limit (RM)</label>
+                      <Input type="number" onFocus={(e) => e.currentTarget.select()} value={editCustForm.creditLimitSen / 100} onChange={(e) => setEditCustForm(f => ({ ...f, creditLimitSen: Math.round(Number(e.target.value) * 100) }))} />
+                    </div>
+                  </div>
+                  {/* Multi-Company Phase 4 — default company for NEW sales orders
+                      from this customer. Empty = no default (falls back to
+                      HOOKKA). Does NOT move existing orders. */}
+                  {activeOrgs.length > 0 && (
+                    <div>
+                      <label className="block text-xs text-[#6B7280] mb-1">Default Company (new orders)</label>
+                      <select
+                        value={editCustForm.defaultCompanyCode}
+                        onChange={(e) => setEditCustForm(f => ({ ...f, defaultCompanyCode: e.target.value }))}
+                        className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20"
+                        aria-label="Default company for new sales orders"
+                      >
+                        <option value="">No default (Hookka)</option>
+                        {activeOrgs.map((o) => (
+                          <option key={o.code} value={o.code}>{o.name || o.code}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  {/* OEM product marking — per category, what to attach on this
+                      customer's finished goods. Shows on the Fab Cut / Fab Sew
+                      sticker Notes so the line knows (see customers.ts oem_marking). */}
+                  <div>
+                    <label className="block text-xs text-[#6B7280] mb-1">OEM product marking (shows on Fab Cut / Sew sticker)</label>
+                    <div className="space-y-1.5">
+                      {([["bedframe", "Bedframe"], ["sofa", "Sofa"], ["accessory", "Accessory"]] as const).map(([key, label]) => (
+                        <div key={key} className="flex items-center justify-between gap-2">
+                          <span className="text-sm text-[#374151]">{label}</span>
+                          <div className="inline-flex rounded-md border border-[#E2DDD8] overflow-hidden">
+                            {(["NONE", "TAG", "LABEL"] as const).map((opt) => {
+                              const on = editCustForm.oemMarking[key] === opt;
+                              return (
+                                <button
+                                  key={opt}
+                                  type="button"
+                                  onClick={() => setEditCustForm((f) => ({ ...f, oemMarking: { ...f.oemMarking, [key]: opt } }))}
+                                  className={`px-3 py-1 text-xs ${opt !== "NONE" ? "border-l border-[#E2DDD8]" : ""} ${on ? "bg-[#6B5C32] text-white" : "bg-white text-gray-600 hover:bg-[#FAF9F7]"}`}
+                                >
+                                  {opt === "NONE" ? "None" : opt === "TAG" ? "Tag" : "Label"}
+                                </button>
+                              );
+                            })}
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
                 </div>
               </div>
             </div>
-            <div className="flex justify-end gap-2 px-6 py-4 border-t border-[#E2DDD8]">
+            <div className="flex justify-end gap-2 px-6 py-4 border-t border-[#E2DDD8] shrink-0">
               <Button variant="outline" onClick={() => setEditCustomer(null)} disabled={savingEdit}>Cancel</Button>
               <Button variant="primary" onClick={saveEditCustomer} disabled={savingEdit || !editCustForm.name || !editCustForm.code}>{savingEdit ? "Saving…" : "Save Changes"}</Button>
             </div>

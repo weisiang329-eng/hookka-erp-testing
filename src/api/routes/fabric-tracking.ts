@@ -5,7 +5,7 @@
 // fabric_trackings table directly; row columns already match the FabricTracking
 // TS type 1:1 (see schema L169-186).
 // ---------------------------------------------------------------------------
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { computeFabricMetrics } from "../lib/fabric-usage";
@@ -13,6 +13,25 @@ import { getOrgId } from "../lib/tenant";
 import { withSnapshot } from "../lib/snapshot";
 
 const app = new Hono<Env>();
+
+// Explicit snapshot wipe on write. fabric_tracking_snapshot depends on
+// fabric_trackings, but that table has no updated_at/created_at column, so the
+// freshness probe cannot auto-invalidate the snapshot. Every fabric_trackings
+// write path must DELETE the snapshot rows itself. Wrapped so a wipe failure
+// never breaks the save.
+async function wipeFabricSnapshot(c: Context<Env>) {
+  try {
+    const { getOrgId } = await import("../lib/tenant");
+    const { invalidateSnapshot } = await import("../lib/snapshot");
+    await invalidateSnapshot(
+      c.var.DB,
+      { tableName: "fabric_tracking_snapshot", sourceTables: [] },
+      getOrgId(c),
+    );
+  } catch (e) {
+    console.warn("[fabric-write] fabric_tracking_snapshot wipe failed:", e);
+  }
+}
 
 type FabricTrackingRow = {
   id: string;
@@ -142,6 +161,7 @@ app.get("/", async (c) => {
         "purchase_order_items",
         "cost_ledger",
         "bom_templates",
+        "purchase_orders",
       ],
     },
     orgId,
@@ -330,6 +350,7 @@ app.post("/", async (c) => {
       500,
     );
   }
+  await wipeFabricSnapshot(c);
   return c.json({ success: true, data: rowToTracking(created) }, 201);
 });
 
@@ -352,6 +373,7 @@ app.delete("/:id", async (c) => {
   await c.var.DB.prepare("DELETE FROM fabric_trackings WHERE id = ?")
     .bind(id)
     .run();
+  await wipeFabricSnapshot(c);
   return c.json({ success: true, data: rowToTracking(existing) });
 });
 
@@ -434,6 +456,7 @@ app.put("/:id", async (c) => {
         500,
       );
     }
+    await wipeFabricSnapshot(c);
     return c.json({ success: true, data: rowToTracking(updated) });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);

@@ -69,6 +69,12 @@ type AgentStatus = {
     pendingApprovals: number;
     lowEfficiency: number;
   } | null;
+  service?: {
+    date: string | null;
+    newCases: number;
+    untriaged: number;
+    qcFails: number;
+  } | null;
   pendingConfigProposals: number;
   month: { runs: number; tokensIn: number; tokensOut: number } | null;
   recentErrors: AgentRun[];
@@ -142,7 +148,7 @@ const AGENT_LABEL: Record<string, string> = {
   HR: "HR / Payroll Agent",
   DATA_QUALITY: "Data Quality Agent",
   INVENTORY: "Inventory Agent",
-  SERVICE: "Service Case Agent",
+  SERVICE: "Service Agent",
   CHIEF_OF_STAFF: "Chief-of-Staff Agent",
 };
 
@@ -159,7 +165,7 @@ const AGENT_BLURB: Record<string, string> = {
   HR: "Attendance/efficiency anomaly digests, pre-payroll checks. Never touches approved pay.",
   DATA_QUALITY: "The 0711 tally audit, automated nightly: cross-page metric drift, future dates, orphans.",
   INVENTORY: "Safety-stock triggers, dead-stock lists, batch aging.",
-  SERVICE: "New-case triage against original orders, repair-scope suggestions.",
+  SERVICE: "After-sales daily digest — new service cases, untriaged cases (no matched order), and open QC / quality fails. Read-only.",
   CHIEF_OF_STAFF: "One page of everything awaiting your decision, across all agents.",
 };
 
@@ -170,7 +176,6 @@ const PLANNED_AGENT_IDS = [
   "SALES",
   "DATA_QUALITY",
   "INVENTORY",
-  "SERVICE",
   "CHIEF_OF_STAFF",
 ];
 
@@ -302,7 +307,9 @@ export default function AgentConsolePage() {
     [load, toast],
   );
 
-  const runNow = async (agent: "brief" | "proposals" | "learning" | "delivery" | "employee") => {
+  const runNow = async (
+    agent: "brief" | "proposals" | "learning" | "delivery" | "employee" | "service",
+  ) => {
     await post("run-now", { agent }, `Run started and finished: ${agent}.`, `run-${agent}`);
   };
 
@@ -877,11 +884,17 @@ export default function AgentConsolePage() {
                           );
                         })()}
                         {AGENT_LABEL[a.id] ?? a.id}
-                        <span
-                          className={`text-[11px] font-semibold rounded-full px-2 py-0.5 ${live ? "bg-[#EEF3E4] text-[#4F7C3A]" : "bg-[#F0ECE9] text-[#6B7280]"}`}
-                        >
-                          {live ? "LIVE" : "COMING SOON"}
-                        </span>
+                        {a.id === "PROCUREMENT" ? (
+                          <span className="text-[11px] font-semibold rounded-full px-2 py-0.5 bg-[#FAEEDA] text-[#854F0B]">
+                            GATED
+                          </span>
+                        ) : (
+                          <span
+                            className={`text-[11px] font-semibold rounded-full px-2 py-0.5 ${live ? "bg-[#EEF3E4] text-[#4F7C3A]" : "bg-[#F0ECE9] text-[#6B7280]"}`}
+                          >
+                            {live ? "LIVE" : "COMING SOON"}
+                          </span>
+                        )}
                         {a.paused && (
                           <span className="text-[11px] font-semibold rounded-full bg-[#9A3A2D]/10 text-[#9A3A2D] px-2 py-0.5">
                             PAUSED
@@ -895,8 +908,13 @@ export default function AgentConsolePage() {
                         the same Pause + Phase selector; Delivery adds Run now. */}
                     {live && (
                       <div className="flex items-center gap-2 flex-wrap">
-                        {(a.id === "DELIVERY" || a.id === "EMPLOYEE") && (() => {
-                          const k = a.id === "EMPLOYEE" ? "employee" : "delivery";
+                        {(a.id === "DELIVERY" || a.id === "EMPLOYEE" || a.id === "SERVICE") && (() => {
+                          const k =
+                            a.id === "EMPLOYEE"
+                              ? "employee"
+                              : a.id === "SERVICE"
+                                ? "service"
+                                : "delivery";
                           return (
                             <Button
                               variant="outline"
@@ -936,7 +954,34 @@ export default function AgentConsolePage() {
                   </div>
                 </CardHeader>
                 <CardContent>
-                  {a.id === "EMPLOYEE" && live ? (
+                  {a.id === "SERVICE" && live ? (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-3 gap-3">
+                        {[
+                          { label: "New cases (7d)", value: a.service?.newCases ?? 0 },
+                          { label: "Untriaged", value: a.service?.untriaged ?? 0 },
+                          { label: "QC fails (7d)", value: a.service?.qcFails ?? 0 },
+                        ].map((s) => (
+                          <div
+                            key={s.label}
+                            className="rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2"
+                          >
+                            <div className="text-[11px] text-[#6B7280]">{s.label}</div>
+                            <div className="text-base font-semibold text-[#1F1D1B]">{s.value}</div>
+                          </div>
+                        ))}
+                      </div>
+                      {lastRun?.summary && (
+                        <div className="text-xs text-[#6B7280]">{lastRun.summary}</div>
+                      )}
+                      <div className="text-xs text-[#4B5563]">
+                        Read-only after-sales digest{a.service?.date ? ` · as of ${a.service.date}` : ""}:
+                        new service cases, open cases with no matched original order (need
+                        triage), and open QC / quality fail-tags. It never edits a case or QC
+                        tag — it only surfaces. Runs 07:00 MYT on working days, or on demand.
+                      </div>
+                    </div>
+                  ) : a.id === "EMPLOYEE" && live ? (
                     <div className="space-y-2">
                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                         {[

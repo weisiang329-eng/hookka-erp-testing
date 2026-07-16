@@ -49,6 +49,7 @@ import { generateProposals, applyPendingProposals, ensureProposalTables } from "
 import { dispatchReport } from "./reports";
 import { runDeliveryAgent } from "./delivery-agent";
 import { runEmployeeDigest } from "../lib/employee-agent";
+import { runServiceDigest } from "../lib/service-agent";
 import { deliveryLearning } from "../lib/delivery-agent";
 import { DEFAULT_ORG_ID } from "../lib/tenant";
 
@@ -110,6 +111,14 @@ const EMPLOYEE_TASKS: Array<{ agent: string; label: string; nextRun: string }> =
   {
     agent: "employee-agent",
     label: "Daily Digest (absences · late · pre-payroll · low-efficiency)",
+    nextRun: "07:00 MYT · working days · on demand",
+  },
+];
+
+const SERVICE_TASKS: Array<{ agent: string; label: string; nextRun: string }> = [
+  {
+    agent: "service-agent",
+    label: "Daily Digest (new cases · untriaged · QC fails)",
     nextRun: "07:00 MYT · working days · on demand",
   },
 ];
@@ -260,13 +269,32 @@ app.get("/status", async (c) => {
   } catch {
     employeeDigest = null;
   }
+  let serviceDigest: { date?: string; counts?: Record<string, number> } | null = null;
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = 'service-digest'")
+      .bind()
+      .first<{ value: string }>();
+    if (row?.value) serviceDigest = JSON.parse(row.value);
+  } catch {
+    serviceDigest = null;
+  }
 
   // PRODUCTION / DELIVERY / EMPLOYEE run console lifecycles; CS is live but
   // question-driven (no cron), so it reports KPI counters instead of tasks.
   const agents = AGENT_FAMILIES.map((fam) => {
     const ctl = controlOf(fam);
+    // PROCUREMENT is "controllable" (Pause + Phase) but its engine is still
+    // gated behind data-readiness — the FE shows it as GATED, not LIVE (owner
+    // 2026-07-16: "先做 pause 功能"). Treating it as live here just renders the
+    // unified controls; nothing schedules a run for it yet.
     const live =
-      fam === "PRODUCTION" || fam === "DELIVERY" || fam === "CS" || fam === "EMPLOYEE";
+      fam === "PRODUCTION" ||
+      fam === "DELIVERY" ||
+      fam === "CS" ||
+      fam === "EMPLOYEE" ||
+      fam === "SERVICE" ||
+      fam === "PROCUREMENT";
     const tasks =
       fam === "PRODUCTION"
         ? PRODUCTION_TASKS
@@ -274,7 +302,9 @@ app.get("/status", async (c) => {
           ? DELIVERY_TASKS
           : fam === "EMPLOYEE"
             ? EMPLOYEE_TASKS
-            : [];
+            : fam === "SERVICE"
+              ? SERVICE_TASKS
+              : [];
     return {
       id: fam,
       live,
@@ -307,6 +337,15 @@ app.get("/status", async (c) => {
               late: employeeDigest?.counts?.late ?? 0,
               pendingApprovals: employeeDigest?.counts?.pendingApprovals ?? 0,
               lowEfficiency: employeeDigest?.counts?.lowEfficiency ?? 0,
+            }
+          : null,
+      service:
+        fam === "SERVICE"
+          ? {
+              date: serviceDigest?.date ?? null,
+              newCases: serviceDigest?.counts?.newCases ?? 0,
+              untriaged: serviceDigest?.counts?.untriaged ?? 0,
+              qcFails: serviceDigest?.counts?.qcFails ?? 0,
             }
           : null,
       pendingConfigProposals: fam === "PRODUCTION" ? pendingConfig : 0,
@@ -501,9 +540,9 @@ app.post("/run-now", async (c) => {
     body = {};
   }
   const agent = (body.agent ?? "").toLowerCase();
-  if (!["brief", "proposals", "learning", "delivery", "employee"].includes(agent)) {
+  if (!["brief", "proposals", "learning", "delivery", "employee", "service"].includes(agent)) {
     return c.json(
-      { success: false, error: "agent must be brief | proposals | learning | delivery | employee" },
+      { success: false, error: "agent must be brief | proposals | learning | delivery | employee | service" },
       400,
     );
   }
@@ -560,6 +599,24 @@ app.post("/run-now", async (c) => {
         .catch((e) => console.warn("[employee-agent] snapshot write failed:", e));
       run.setSummary(
         `${digest.date} · absent ${digest.counts.absent} · late ${digest.counts.late} · pending approvals ${digest.counts.pendingApprovals} · low-eff ${digest.counts.lowEfficiency} (run-now)`,
+      );
+      return digest;
+    });
+    return c.json({ success: true, data: result });
+  }
+  if (agent === "service") {
+    const result = await recordAgentRun(db, "service-agent", async (run) => {
+      const digest = await runServiceDigest(db);
+      await db
+        .prepare(
+          `INSERT INTO kv_config (key, value) VALUES ('service-digest', ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        )
+        .bind(JSON.stringify({ date: digest.date, counts: digest.counts, generatedAt: new Date().toISOString() }))
+        .run()
+        .catch((e) => console.warn("[service-agent] snapshot write failed:", e));
+      run.setSummary(
+        `${digest.date} · new cases ${digest.counts.newCases} · untriaged ${digest.counts.untriaged} · QC fails ${digest.counts.qcFails} (run-now)`,
       );
       return digest;
     });

@@ -31,6 +31,7 @@ import {
   llmKeyIfBudgetAllows,
 } from "../lib/agent-console";
 import { runEmployeeDigest } from "../lib/employee-agent";
+import { runServiceDigest } from "../lib/service-agent";
 import { decideAgentRuns } from "../lib/agent-scheduler";
 import { generateProposals, applyPendingProposals } from "../lib/schedule-proposals";
 import { autoApplyConfigProposals } from "../lib/agent-learning";
@@ -190,6 +191,47 @@ app.post("/heartbeat", async (c) => {
     }
   } catch (err) {
     console.error("[agents/heartbeat] employee digest failed:", err);
+  }
+
+  // Service (after-sales) daily digest — same once-per-working-day cadence.
+  try {
+    const mytS = new Date(Date.now() + 8 * 3600 * 1000);
+    const hourS = mytS.getUTCHours();
+    const todayS = mytS.toISOString().slice(0, 10);
+    if (hourS >= 7 && hourS < 20 && !(await isAgentPaused(db, "SERVICE"))) {
+      const already = await db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM agent_runs WHERE agent = 'service-agent' AND status <> 'error' AND substr(started_at,1,10) = ?",
+        )
+        .bind(todayS)
+        .first<{ n: number | string }>();
+      if ((Number(already?.n) || 0) === 0) {
+        await recordAgentRun(db, "service-agent", async (run) => {
+          const digest = await runServiceDigest(db);
+          await db
+            .prepare(
+              `INSERT INTO kv_config (key, value) VALUES ('service-digest', ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+            )
+            .bind(
+              JSON.stringify({
+                date: digest.date,
+                counts: digest.counts,
+                generatedAt: new Date().toISOString(),
+              }),
+            )
+            .run()
+            .catch(() => {});
+          run.setSummary(
+            `${digest.date} · new cases ${digest.counts.newCases} · untriaged ${digest.counts.untriaged} · QC fails ${digest.counts.qcFails} (daily)`,
+          );
+          ran.push({ task: "service-agent", reason: "daily digest", summary: "service digest" });
+          return digest;
+        });
+      }
+    }
+  } catch (err) {
+    console.error("[agents/heartbeat] service digest failed:", err);
   }
 
   // Backlog drain — autonomy also means finishing what's queued: with the

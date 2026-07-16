@@ -16,6 +16,9 @@ import { Undo2, Plus, X, Loader2 } from "lucide-react";
 interface ReturnItem {
   problem: string;
   productCode: string;
+  /** Per-line ref — the header carries only ONE customer PO, but a DO can span
+   *  several SOs, so the list shows the first line's Reference. */
+  reference: string;
 }
 interface DeliveryReturn {
   id: string;
@@ -71,6 +74,21 @@ export default function DeliveryReturnsPage() {
     { key: "customerName", label: "Customer", width: "150px", sortable: true },
     { key: "companySOId", label: "From order", width: "130px", sortable: true },
     { key: "doNo", label: "Original DO", width: "130px", sortable: true },
+    // The customer's own numbers — how the office actually finds a return
+    // (owner 2026-07-16 asked for SO / Cust PO / Ref on the list).
+    {
+      key: "customerPOId",
+      label: "Cust PO",
+      width: "130px",
+      sortable: true,
+      render: (_v, row) => row.customerPOId || "—",
+    },
+    {
+      key: "reference",
+      label: "Ref",
+      width: "110px",
+      render: (_v, row) => row.items?.[0]?.reference || "—",
+    },
     {
       key: "returnType",
       label: "Type",

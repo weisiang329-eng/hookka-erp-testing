@@ -290,7 +290,7 @@ export default function DeliveryReturnDetail() {
                   }
                 }}
               >
-                Repair &amp; re-deliver → service order
+                Repair &amp; re-deliver → service case
               </Button>
             )}
             {canService && (

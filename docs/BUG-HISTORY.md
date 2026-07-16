@@ -180,6 +180,71 @@ so one throwing section 500'd all 15 sections.
 **Fix (c09ed847 + 7d857ac4):** rename the `do` alias; wrap each section in its own
 guard so one bad query DEGRADES (returns partial) instead of 500-ing the report;
 self-apply `products.created_at` for the new-products reader. operations-report.ts.
+## BUG-2026-07-14-007 — Mobile lag: /m shell warmed Home's heavy endpoints on EVERY landing (incl. /m/production) `performance` `mobile` `ui-frontend` 🟢
+**Symptom:** the phone app felt laggy the moment a factory worker opened straight to
+`/m/production` (their default screen). The production board itself is already slim
+(8 KB), yet the screen fired **5 API calls**: the board **plus** `/api/dashboard/overview`
+(a compute-bound query up to **7.6 s**), the full `/api/sales-orders` (~100 KB) and
+`/api/inventory` (~95 KB), and `/api/sales-orders/stats` — none of which the board needs.
+On weak factory wifi those four saturated the link and starved the board's own fetch.
+**Root cause:** `preloadMobileCritical()` (src/pages/m/lib/preload.ts) is called once in
+the `/m` shell's mount effect (MobileLayout.tsx) and fired Home's 4 first-paint endpoints
+**unconditionally, regardless of landing route**. Home fetches those 4 itself via
+`useCachedJson`, so the preload is a warm-AHEAD only — but it ran on every screen.
+**Fix (src/pages/m/lib/preload.ts):** gate the warm-up on `isHomeLanding()`
+(`location.pathname === "/m"`) — only warm when the operator actually lands on Home. An
+earlier attempt used `requestIdleCallback`; measured on staging it did NOT help (the main
+thread goes idle within a frame of mount, so the deferred fetches still raced the board).
+**Verified (staging, 390 px viewport):** `/m/production` dropped **5 → 1** API call (only
+the 8 KB board); `/m` Home still loads all 4 warm-up endpoints — zero feature loss. Shipped
+to prod (main 2bbf6d02).
+**Follow-up — DONE (BUG-2026-07-14-008 below):** the `/api/dashboard/overview` ~7.6 s
+cold-recompute stall was fixed by giving `cached()` true serve-stale.
+
+## BUG-2026-07-14-008 — Dashboard cold-load: cached() blocked on every TTL expiry (~7.6 s once/min on Home) `performance` `caching` 🟢
+**Symptom:** the Home dashboard KPI strip stalled ~7.6 s roughly once a minute — one unlucky
+viewer per minute ate a full recompute.
+**Root cause:** `cached()` (src/api/lib/kv-cache.ts) despite its "stale-while-revalidate"
+comment actually **blocked on miss** (`await fetcher()`), and Cloudflare KV **deletes** the key
+at its `expirationTtl`. `/api/dashboard/overview` (the ONLY caller — dynamically imported in
+dashboard-overview.ts, 60 s TTL, ~30 heavy SELECTs incl. a full job_cards scan) therefore
+forced a blocking recompute every 60 s.
+**Fix (src/api/lib/kv-cache.ts):** real serve-stale. Values wrapped `{ __swr, v, soft }` with a
+hard KV TTL = `max(ttl*6, ttl+300)`. A stale-but-not-hard-expired hit is returned IMMEDIATELY
+and revalidated in the background (`waitUntil`); only a true miss (never warmed / hard-expired)
+blocks — once. Bounded staleness: normal ≤ ttl (revalidation refreshes), worst case ≤ hard TTL
+then one blocking recompute. Legacy raw entries served as stale + upgraded in the background (no
+flush). `invalidate()` unchanged (delete → miss → block-fresh) so post-write freshness is intact.
+Audited: `cached()` has exactly one caller and `invalidate()` has zero, so blast radius = the
+dashboard overview only.
+**Verified (staging, logged-in fetch):** cold warm 7.6 s → a hit 90 s later (well past the 60 s
+TTL) returned in **1.7 s** instead of re-blocking 7.2 s; KPI figures byte-identical
+(salesThisMonthSen 13,359,285 across every hit). Shipped to prod (main 5704898e). Owner chose
+this over the warm-cron+TTL-bump option (no staleness increase beyond ~60 s).
+
+## BUG-2026-07-14-006 — Double invoicing: 64 DOs invoiced 2–4× each (77 extra invoices, ~RM 405k over-billing on staging) `invoices` `accounting` `money` `duplicate` 🟢
+**Symptom:** the same Delivery Order was invoiced multiple times — 64 DOs had 2, 3, or
+even 4 active (non-cancelled) invoices, each an EXACT duplicate (same DO, same line
+items down to the cent, same total). ~77 extra invoices, ~RM 404,819 of phantom
+receivables/AR inflation on staging. Owner-reported ("有些是 double invoice").
+**Root cause:** the manual create-invoice POST (`invoices.ts app.post("/")`) guarded
+only on `doRow.status !== "DELIVERED"`, whose read→write window is wide, and which
+misses the case where a prior invoice did not flip the DO to INVOICED (auto-invoice
+overlap / concurrent requests). The auto-invoice-on-delivery path (`delivery-orders.ts`)
+already guarded on an existing invoice; the manual POST did not. No DB-level uniqueness
+on `invoices.deliveryOrderId` either.
+**Fix (prevention):** added the existence guard to the manual POST — block (409) if a
+NON-CANCELLED invoice already exists for the `deliveryOrderId` (a CANCELLED one is fine
+= legitimate re-invoice after void). Returns the existing invoice no. Commit 4789cdd2
+(branch fix/invoice-money-path). A DB partial-unique index on
+`invoices(deliveryOrderId) WHERE status != 'CANCELLED'` is the belt-and-suspenders
+follow-up, addable only AFTER the existing dups are cleaned.
+**Cleanup:** every duplicate re-verified 100% identical (item count == DO item count,
+line-for-line identical, 0 PAID duplicates → no CN/refund needed). Cancelled the 35
+SENT-unpaid duplicate extras on STAGING via the standard PUT status=CANCELLED path
+(GL-reversing), keeping 1 invoice per DO → 0 DOs with 2+ active invoices remain.
+**Verify:** post-cleanup scan confirmed 0 duplicate DOs on staging. PROD cleanup +
+guard deploy still pending (owner-gated; prod not accessible from this session).
 
 ## BUG-2026-07-11-001 — Full-system data-accuracy audit: 20+ findings across dashboard/planning/daily-report/OCR (P1-P3 shipped same day) `dashboard` `planning` `data-quality`
 

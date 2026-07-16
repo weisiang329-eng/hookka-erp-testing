@@ -23,17 +23,58 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { DEFAULT_ORG_ID } from "../lib/tenant";
 import {
+  isAgentPaused,
   isAutoApproveOn,
+  isAutoTuneOn,
   isKillSwitchOn,
   recordAgentRun,
   llmKeyIfBudgetAllows,
 } from "../lib/agent-console";
+import { runEmployeeDigest } from "../lib/employee-agent";
+import { runServiceDigest } from "../lib/service-agent";
 import { decideAgentRuns } from "../lib/agent-scheduler";
 import { generateProposals, applyPendingProposals } from "../lib/schedule-proposals";
+import { autoApplyConfigProposals } from "../lib/agent-learning";
 import { runDeliveryAgent, constantTimeEqual } from "./delivery-agent";
 
 const app = new Hono<Env>();
 export default app;
+
+// ── POST /run-generate ───────────────────────────────────────────────────────
+// The planning engine on its OWN invocation, so it gets a full CPU budget.
+//
+// Why this exists: the heartbeat used to run every agent inside one waitUntil —
+// one shared budget. The cheap tasks (drain, a 14s delivery run, the digests)
+// spent it, and the heavy generation — a full engine pass over 1000+ WAITING
+// cards — was killed mid-run. It had been dying silently since 15 Jul (five
+// zombie 'running' rows) while the console showed PHASE 3 · FULL-AUTO and the
+// queue grew to 1,715 (owner 2026-07-16). The beat now `await fetch()`es this
+// endpoint: the CPU burns in a separate invocation with its own budget, while
+// the beat only waits on I/O.
+app.post("/run-generate", async (c) => {
+  const expected = c.env.CRON_SECRET;
+  if (!expected || expected.length < 16) {
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  if (!(await constantTimeEqual(c.req.header("x-cron-secret") || "", expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  const db = c.var.DB;
+  const reason = (c.req.query("reason") || "heartbeat").slice(0, 120);
+  try {
+    const result = await recordAgentRun(db, "production-proposals", async (run) => {
+      const r = await generateProposals(db);
+      run.setSummary(
+        `proposed ${r.proposed} (unscheduled ${r.unscheduled} · overdue ${r.overdue} · superseded ${r.superseded}) (${reason})`,
+      );
+      return r;
+    });
+    return c.json({ ok: true, ...result });
+  } catch (err) {
+    console.error("[agents/run-generate] failed:", err);
+    return c.json({ ok: false, error: "generate failed" }, 500);
+  }
+});
 
 app.post("/heartbeat", async (c) => {
   const expected = c.env.CRON_SECRET;
@@ -51,8 +92,74 @@ app.post("/heartbeat", async (c) => {
     return c.json({ ok: true, ran: [], skipped: [{ task: "ALL", reason: "kill switch" }] });
   }
 
-  const { decisions, skipped } = await decideAgentRuns(db);
+  // Run the beat in the BACKGROUND and return immediately (owner 2026-07-15).
+  // Once the agents were un-paused, one beat does generate ~1600 + apply a
+  // batch synchronously — that ran past the cron's 120s curl timeout, which
+  // returned HTTP 000 and GitHub marked the beat "failed" (looked like the
+  // agents clocked off at night). waitUntil lets the worker finish the beat
+  // after the response, so the cron always sees a fast 200.
+  // Resolved now: the background block outlives the request, so it can't reach
+  // c.req later. Same origin → the sub-request lands on this same Worker.
+  const generateUrl = new URL("/api/internal/agents/run-generate", c.req.url).toString();
+
+  c.executionCtx.waitUntil(
+    (async () => {
+      try {
   const ran: Array<{ task: string; reason: string; summary?: string }> = [];
+
+  // ── 0 · Reap stuck runs ────────────────────────────────────────────────────
+  // A run killed mid-flight (Worker limits) leaves its agent_runs row at
+  // 'running' forever: the console shows a permanent RUNNING and the row still
+  // counts toward runsToday, starving the real work. Anything still 'running'
+  // after 15 minutes is dead — mark it errored so the console tells the truth.
+  try {
+    const stuckCut = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    await db
+      .prepare(
+        `UPDATE agent_runs SET status = 'error', finished_at = ?,
+                error = 'killed mid-run (exceeded worker limits)'
+          WHERE status = 'running' AND started_at < ?`,
+      )
+      .bind(new Date().toISOString(), stuckCut)
+      .run();
+  } catch (err) {
+    console.warn("[agents/heartbeat] stuck-run reap failed:", err);
+  }
+
+  // ── 1 · Backlog drain FIRST ────────────────────────────────────────────────
+  // Applying queued due dates is the light, high-value work; generating fresh
+  // proposals is the heavy engine run. It used to be the other way round, so a
+  // heavy generation that blew the Worker's limits killed the whole beat before
+  // a single due date was written — the backlog grew to 1,700 while the console
+  // said full-auto (owner 2026-07-16). Drain first: even if generation dies
+  // later this beat, the queue still moved.
+  // NOT clocked off at 8pm, unlike the agents' decision-making. "下班" means the
+  // agent stops DECIDING things overnight — but the drain decides nothing: it
+  // only finishes writing due dates the engine already worked out during the
+  // day. Holding a queued write until 8am just means the owner finds the board
+  // still half-empty in the morning (owner 2026-07-16: "1598條為什麼不是順著
+  // clear，也是要8點?"). Let it finish overnight; the board is complete by then.
+  try {
+    if (await isAutoApproveOn(db, "PRODUCTION")) {
+      const pend = await db
+        .prepare("SELECT COUNT(*) AS n FROM schedule_proposals WHERE status = 'PENDING'")
+        .bind()
+        .first<{ n: number | string }>();
+      if ((Number(pend?.n) || 0) > 0) {
+        await recordAgentRun(db, "production-proposals", async (run) => {
+          const a = await applyPendingProposals(db, { decidedBy: "AGENT_AUTO", limit: 150 });
+          const summary = `auto-applied ${a.approved} queued due date(s), ${a.remainingPending} remaining (heartbeat drain)`;
+          run.setSummary(summary);
+          ran.push({ task: "production-proposals", reason: "backlog drain", summary });
+          return a;
+        });
+      }
+    }
+  } catch (err) {
+    console.error("[agents/heartbeat] backlog drain failed:", err);
+  }
+
+  const { decisions, skipped } = await decideAgentRuns(db);
 
   for (const d of decisions) {
     try {
@@ -74,27 +181,18 @@ app.post("/heartbeat", async (c) => {
           return r;
         });
       } else if (d.task === "production-proposals") {
-        await recordAgentRun(db, "production-proposals", async (run) => {
-          const r = await generateProposals(db);
-          // Autonomy: with the PRODUCTION gate ON the agent applies its own
-          // dueDates (WAITING cards only, batch-capped, one rollbackable
-          // snapshot per batch — the backlog drains across heartbeats).
-          let autoNote = "";
-          if (await isAutoApproveOn(db, "PRODUCTION")) {
-            const a = await applyPendingProposals(db, {
-              decidedBy: "AGENT_AUTO",
-              limit: 300,
-            }).catch((err) => {
-              console.warn("[agents/heartbeat] auto-apply failed:", err);
-              return null;
-            });
-            if (a) autoNote = ` · auto-applied ${a.approved} (${a.remainingPending} queued)`;
-          }
-          const summary = `proposed ${r.proposed} (unscheduled ${r.unscheduled} · overdue ${r.overdue} · superseded ${r.superseded})${autoNote} (heartbeat: ${d.reason})`;
-          run.setSummary(summary);
-          ran.push({ task: d.task, reason: d.reason, summary });
-          return r;
+        // Hand the engine to its OWN invocation (see /run-generate above). We
+        // only await the fetch — the CPU burns over there, on a fresh budget,
+        // so nothing this beat already did can starve it.
+        const res = await fetch(generateUrl + `?reason=${encodeURIComponent(`heartbeat: ${d.reason}`)}`, {
+          method: "POST",
+          headers: { "x-cron-secret": expected },
         });
+        const summary = res.ok
+          ? `engine dispatched (heartbeat: ${d.reason})`
+          : `engine dispatch failed HTTP ${res.status}`;
+        ran.push({ task: d.task, reason: d.reason, summary });
+        if (!res.ok) console.error("[agents/heartbeat] generate dispatch:", res.status);
       }
     } catch (err) {
       // One agent's failure never blocks another's beat; the error row is
@@ -104,30 +202,126 @@ app.post("/heartbeat", async (c) => {
     }
   }
 
-  // Backlog drain — autonomy also means finishing what's queued: with the
-  // PRODUCTION gate ON, each beat applies one batch of still-PENDING
-  // proposals even when no fresh generation was warranted this beat (a
-  // 2,000-row backlog drains across the day instead of waiting for the next
-  // generation trigger). No pending rows → no run row, no noise.
+  // Config-param auto-apply sweep (owner 2026-07-15: "flag 亮着参数还躺着").
+  // The AUTO-APPROVE flag must MEAN "the agent applies its own learned params".
+  // This used to be trapped inside the gated production-proposals decision, so
+  // the flag could be ON while params sat PENDING (production is capped at 3
+  // runs/day, and the delivery cs.transitDays.* params were never swept here at
+  // all — only PRODUCTION was). Now it runs every beat, for BOTH families,
+  // gated only by each family's own flag (isAutoApproveOn is already false when
+  // the family is paused) + working hours (clocks off after 8pm like the rest).
   try {
-    if (await isAutoApproveOn(db, "PRODUCTION")) {
-      const pend = await db
-        .prepare("SELECT COUNT(*) AS n FROM schedule_proposals WHERE status = 'PENDING'")
-        .bind()
+    const hourMytSweep = new Date(Date.now() + 8 * 3600 * 1000).getUTCHours();
+    if (hourMytSweep >= 8 && hourMytSweep < 20) {
+      for (const family of ["PRODUCTION", "DELIVERY"] as const) {
+        if (await isAutoTuneOn(db, family)) {
+          const n = await autoApplyConfigProposals(db, family, "AGENT_AUTO").catch((err) => {
+            console.warn(`[agents/heartbeat] ${family} param sweep failed:`, err);
+            return 0;
+          });
+          if (n > 0) {
+            ran.push({
+              task: `${family.toLowerCase()}-param-tune`,
+              reason: "auto-approve flag on",
+              summary: `self-tuned ${n} param(s)`,
+            });
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[agents/heartbeat] param sweep failed:", err);
+  }
+
+  // Employee daily digest — the Employee agent's read-only run (owner 0716).
+  // Fires once per working day after 07:00 MYT: recomputes the anomaly counts
+  // and refreshes the console snapshot. Idempotent (overwrites the snapshot),
+  // so the once-a-day guard need not be exact around midnight.
+  try {
+    const mytE = new Date(Date.now() + 8 * 3600 * 1000);
+    const hourE = mytE.getUTCHours();
+    const todayE = mytE.toISOString().slice(0, 10);
+    if (hourE >= 7 && hourE < 20 && !(await isAgentPaused(db, "EMPLOYEE"))) {
+      const already = await db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM agent_runs WHERE agent = 'employee-agent' AND status <> 'error' AND substr(started_at,1,10) = ?",
+        )
+        .bind(todayE)
         .first<{ n: number | string }>();
-      if ((Number(pend?.n) || 0) > 0) {
-        await recordAgentRun(db, "production-proposals", async (run) => {
-          const a = await applyPendingProposals(db, { decidedBy: "AGENT_AUTO", limit: 300 });
-          const summary = `auto-applied ${a.approved} queued proposal(s), ${a.remainingPending} remaining (heartbeat drain)`;
-          run.setSummary(summary);
-          ran.push({ task: "production-proposals", reason: "backlog drain", summary });
-          return a;
+      if ((Number(already?.n) || 0) === 0) {
+        await recordAgentRun(db, "employee-agent", async (run) => {
+          const digest = await runEmployeeDigest(db);
+          await db
+            .prepare(
+              `INSERT INTO kv_config (key, value) VALUES ('employee-digest', ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+            )
+            .bind(
+              JSON.stringify({
+                date: digest.date,
+                counts: digest.counts,
+                generatedAt: new Date().toISOString(),
+              }),
+            )
+            .run()
+            .catch(() => {});
+          run.setSummary(
+            `${digest.date} · absent ${digest.counts.absent} · late ${digest.counts.late} · pending approvals ${digest.counts.pendingApprovals} · low-eff ${digest.counts.lowEfficiency} (daily)`,
+          );
+          ran.push({ task: "employee-agent", reason: "daily digest", summary: "employee digest" });
+          return digest;
         });
       }
     }
   } catch (err) {
-    console.error("[agents/heartbeat] backlog drain failed:", err);
+    console.error("[agents/heartbeat] employee digest failed:", err);
   }
 
-  return c.json({ ok: true, ran, skipped });
+  // Service (after-sales) daily digest — same once-per-working-day cadence.
+  try {
+    const mytS = new Date(Date.now() + 8 * 3600 * 1000);
+    const hourS = mytS.getUTCHours();
+    const todayS = mytS.toISOString().slice(0, 10);
+    if (hourS >= 7 && hourS < 20 && !(await isAgentPaused(db, "SERVICE"))) {
+      const already = await db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM agent_runs WHERE agent = 'service-agent' AND status <> 'error' AND substr(started_at,1,10) = ?",
+        )
+        .bind(todayS)
+        .first<{ n: number | string }>();
+      if ((Number(already?.n) || 0) === 0) {
+        await recordAgentRun(db, "service-agent", async (run) => {
+          const digest = await runServiceDigest(db);
+          await db
+            .prepare(
+              `INSERT INTO kv_config (key, value) VALUES ('service-digest', ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+            )
+            .bind(
+              JSON.stringify({
+                date: digest.date,
+                counts: digest.counts,
+                generatedAt: new Date().toISOString(),
+              }),
+            )
+            .run()
+            .catch(() => {});
+          run.setSummary(
+            `${digest.date} · new cases ${digest.counts.newCases} · untriaged ${digest.counts.untriaged} · QC fails ${digest.counts.qcFails} (daily)`,
+          );
+          ran.push({ task: "service-agent", reason: "daily digest", summary: "service digest" });
+          return digest;
+        });
+      }
+    }
+  } catch (err) {
+    console.error("[agents/heartbeat] service digest failed:", err);
+  }
+
+      } catch (beatErr) {
+        console.error("[agents/heartbeat] background beat failed:", beatErr);
+      }
+    })(),
+  );
+  return c.json({ ok: true, background: true });
 });

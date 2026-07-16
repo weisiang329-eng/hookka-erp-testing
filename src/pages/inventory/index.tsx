@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, startTransition } from "react";
 import { cachedFetchJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { type FGItem, type FgDeltas, mergeFgDeltas } from "@/lib/fg-stock";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -1963,7 +1963,7 @@ export default function InventoryPage() {
         {TABS.map(tab => (
           <button
             key={tab.key}
-            onClick={() => setActiveTab(tab.key)}
+            onClick={() => startTransition(() => setActiveTab(tab.key))}
             className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
               activeTab === tab.key
                 ? "border-[#6B5C32] text-[#6B5C32]"

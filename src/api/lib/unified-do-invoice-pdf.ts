@@ -94,12 +94,35 @@ function money(sen: number): string {
   });
 }
 
+// pdf-lib StandardFonts (Helvetica) can only encode WinAnsi (Latin-1) glyphs.
+// A SINGLE non-Latin character anywhere in the data — a Chinese char, an
+// em-dash, smart quotes, a bullet — makes widthOfTextAtSize / drawText THROW,
+// which crashed the entire render and dropped the customer to the ugly
+// simple-table fallback (owner 2026-07-13: "之前發的時候都沒用" — the nice
+// version rarely reached the customer). Sanitise EVERY drawn string: map the
+// common typography to ASCII, collapse odd spaces, and replace anything still
+// outside Latin-1 with "?" so no stray glyph can ever crash the document.
+// Exported so the simple-table fallback (assistant-exports.ts) shares the
+// exact same guard — the last-resort render must be crash-proof too.
+export function winAnsi(s: string): string {
+  if (!s) return s;
+  return s
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
+    .replace(/[\u2013\u2014\u2015]/g, "-")
+    .replace(/\u2026/g, "...")
+    .replace(/[\u2022\u00B7]/g, "-")
+    .replace(/[\u00A0\u2000-\u200B\u202F\u205F\u3000]/g, " ")
+    .replace(/[^\x20-\x7E\u00A1-\u00FF\n]/g, "?");
+}
+
 // Wrap text to fit maxW, matching how the original jsPDF-autotable documents
 // handle overflow (`overflow: "linebreak"`): word-wrap, and break any single
 // token that is itself wider than the column by character. The row grows to fit
 // the wrapped lines — nothing is ever truncated or pushed under the next column
 // (owner 2026-07-02: "照我們的怎麼處理就怎麼處理" — wrap, don't ellipsis).
-function wrapHard(font: PDFFont, text: string, maxW: number, size: number, maxLines = 12): string[] {
+function wrapHard(font: PDFFont, rawText: string, maxW: number, size: number, maxLines = 12): string[] {
+  const text = winAnsi(rawText);
   if (!text) return [];
   const fits = (s: string) => font.widthOfTextAtSize(s, size) <= maxW;
   const out: string[] = [];
@@ -124,7 +147,8 @@ function wrapHard(font: PDFFont, text: string, maxW: number, size: number, maxLi
   return out.slice(0, maxLines);
 }
 
-function wrap(font: PDFFont, text: string, maxW: number, size: number, maxLines = 4): string[] {
+function wrap(font: PDFFont, rawText: string, maxW: number, size: number, maxLines = 4): string[] {
+  const text = winAnsi(rawText);
   if (!text) return [];
   const words = text.split(/\s+/).filter(Boolean);
   const out: string[] = [];
@@ -145,8 +169,9 @@ function wrap(font: PDFFont, text: string, maxW: number, size: number, maxLines 
 interface Fonts { helv: PDFFont; bold: PDFFont }
 
 function rightText(page: PDFPage, text: string, xRight: number, y: number, size: number, font: PDFFont, color = INK) {
-  const w = font.widthOfTextAtSize(text, size);
-  page.drawText(text, { x: xRight - w, y, size, font, color });
+  const t = winAnsi(text);
+  const w = font.widthOfTextAtSize(t, size);
+  page.drawText(t, { x: xRight - w, y, size, font, color });
 }
 
 export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Array> {
@@ -188,7 +213,7 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
   const labelW = 60;
   const colGap = PAGE_W / 2 + 12;
   const drawField = (x: number, yy: number, k: string, v: string, maxW: number): number => {
-    page.drawText(k, { x, y: yy, size: 8, font: fonts.helv, color: MUTED });
+    page.drawText(winAnsi(k), { x, y: yy, size: 8, font: fonts.helv, color: MUTED });
     const lines = wrap(fonts.bold, v || "-", maxW - labelW, 8.5, 3);
     (lines.length ? lines : ["-"]).forEach((ln, i) => {
       page.drawText(ln, { x: x + labelW, y: yy - i * 10, size: 8.5, font: fonts.bold, color: INK });
@@ -245,7 +270,7 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
   for (const g of data.groups) {
     ensureSpace(16);
     page.drawRectangle({ x: MARGIN, y: y - 3, width: PAGE_W - MARGIN * 2, height: 12, color: BAND });
-    page.drawText(g.category, { x: xOrder + 2, y: y, size: 8, font: fonts.bold, color: INK });
+    page.drawText(winAnsi(g.category), { x: xOrder + 2, y: y, size: 8, font: fonts.bold, color: INK });
     y -= 16;
 
     for (const it of g.items) {
@@ -274,13 +299,14 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
       for (const ln of nameWrapped) { page.drawText(ln, { x: xDesc, y: y - dl * 9.3, size: 7.5, font: fonts.helv, color: INK }); dl++; }
       for (const ln of specWrapped) { page.drawText(ln, { x: xDesc, y: y - dl * 9.3, size: 7.5, font: fonts.helv, color: MUTED }); dl++; }
 
-      // Set / Price / Total are single-line values. The Order cell alone is up
-      // to 4 reference lines, so pinning these to the top line makes the whole
-      // number column float high and read as misaligned against each item's
-      // body (owner 2026-07-04: invoice "歪到完了"). Vertically centre them
-      // against the row's text height so every number sits beside its line item.
-      // DO is left byte-identical (owner: DO is fine) — only the invoice centres.
-      const midY = y - ((rowLines - 1) * 9.3) / 2;
+      // Set / Price / Total are single-line values. Centre them against the
+      // DESCRIPTION block (code + name + spec) — the product identity — NOT the
+      // whole row. The Order column is often 4 lines (PO/SO/REF/CO) that are
+      // mostly "-", which padded the row tall and sank the numbers into the
+      // empty middle, reading as misaligned against each product (owner
+      // 2026-07-13: "數字跟產品編號沒對齊"). Centring on the description keeps
+      // every number beside the item it prices. DO stays top-aligned (fine).
+      const midY = y - ((Math.max(1, descLineCount) - 1) * 9.3) / 2;
       if (isDO) {
         page.drawText(String(it.set), { x: xSet, y, size: 8, font: fonts.helv, color: INK });
         // Pieces breakdown wraps within the Quantity column (a multi-component
@@ -295,9 +321,14 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
         rightText(page, money(it.lineTotalSen ?? 0), xCol5Right, midY, 8, fonts.bold, INK);
       }
       y -= rowH;
-      // dashed row separator
+      // Dashed row separator — sit it in the MIDDLE of the inter-row gap. rowH
+      // carries one full line-height + 6pt of padding beyond the last content
+      // line, so the clear gap below `y` (the next row's top baseline) is a
+      // constant ~15pt. At y+3 the dashes fell only 3pt above the next row's
+      // baseline, cutting through its code + numbers (owner 2026-07-13: "線也
+      //歪了"). y+10 centres them so they clear both rows' text.
       for (let dx = MARGIN; dx < PAGE_W - MARGIN; dx += 4) {
-        page.drawRectangle({ x: dx, y: y + 3, width: 2, height: 0.3, color: RULE });
+        page.drawRectangle({ x: dx, y: y + 10, width: 2, height: 0.3, color: RULE });
       }
     }
   }
@@ -341,7 +372,7 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
     if (data.taxSen) sum("Tax", `RM ${money(data.taxSen)}`);
     sum("Total", `RM ${money(data.totalSen ?? 0)}`, true, true);
     if (data.amountInWords) {
-      page.drawText(data.amountInWords, { x: MARGIN, y: y + 2, size: 8, font: fonts.helv, color: MUTED });
+      page.drawText(winAnsi(data.amountInWords), { x: MARGIN, y: y + 2, size: 8, font: fonts.helv, color: MUTED });
     }
   }
 

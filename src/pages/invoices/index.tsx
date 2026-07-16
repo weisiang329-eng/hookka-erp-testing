@@ -282,7 +282,6 @@ export default function InvoicesPage() {
     setBatchRunning(true);
     let ok = 0;
     const errors: string[] = [];
-    const { generateInvoicePdfBase64 } = await import("@/lib/generate-invoice-pdf");
     for (const inv of selectedInvoices) {
       if (
         customerEmailById.size > 0 &&
@@ -320,23 +319,25 @@ export default function InvoicesPage() {
           errors.push(`${inv.invoiceNo}: no linked delivery order`);
           continue;
         }
-        // Render the invoice PDF client-side with the SAME jsPDF generator the
-        // detail-page download + the delivered-notice email now use, so the
-        // re-sent email carries the exact document the operator prints.
-        // print-extras adds the per-line spec detail.
+        // Unify on ONE template (owner 2026-07-13): render with the SAME
+        // unified generator the detail-page download uses (renderUnified-
+        // InvoiceBase64 == downloadUnifiedInvoicePdf), so the re-sent email is
+        // byte-identical to the download. print-extras adds the per-line spec.
         let pdfBase64: string | undefined;
         try {
-          const er = await fetch(
-            `/api/invoices/${encodeURIComponent(inv.id)}/print-extras`,
-            { credentials: "include" }
-          );
+          const [{ renderUnifiedInvoiceBase64 }, er] = await Promise.all([
+            import("@/lib/unified-doc-download"),
+            fetch(`/api/invoices/${encodeURIComponent(inv.id)}/print-extras`, {
+              credentials: "include",
+            }),
+          ]);
           const ej = (await er.json().catch(() => ({}))) as {
             success?: boolean;
             data?: unknown;
           };
-          pdfBase64 = generateInvoicePdfBase64(
-            fullInv,
-            ej?.success ? (ej.data as Parameters<typeof generateInvoicePdfBase64>[1]) : undefined
+          pdfBase64 = await renderUnifiedInvoiceBase64(
+            fullInv as Record<string, unknown> & { invoiceNo?: string },
+            ej?.success ? (ej.data as Parameters<typeof renderUnifiedInvoiceBase64>[1]) : undefined
           );
         } catch {
           // Render failed — send without the client PDF; the server renders its
@@ -351,7 +352,7 @@ export default function InvoicesPage() {
             body: JSON.stringify({
               kind: "DELIVERED",
               pdfBase64,
-              pdfFilename: `INV-${inv.invoiceNo}.pdf`,
+              pdfFilename: `${/^INV/i.test(inv.invoiceNo) ? inv.invoiceNo : `INV-${inv.invoiceNo}`}.pdf`,
             }),
           }
         );

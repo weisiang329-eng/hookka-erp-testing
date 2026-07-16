@@ -723,19 +723,20 @@ async function renderDeliveredInvoicePdf(
     };
     const invoice = ij?.success ? ij.data : undefined;
     if (!invoice) return {};
-    // Email the SAME jsPDF the operator prints. The pdf-lib "unified" render
-    // was a second engine that looked different from Print ("歪", owner
-    // 2026-07-04); generateInvoicePdfBase64 IS exactly what the Print button
-    // produces, so the customer now receives what the operator sees.
-    const { generateInvoicePdfBase64 } = await import(
-      "@/lib/generate-invoice-pdf"
+    // Unify on ONE template (owner 2026-07-13): the customer email uses the
+    // SAME unified generator the download/print button uses (its earlier "歪"
+    // alignment + dashed-line issues are now fixed). renderUnifiedInvoiceBase64
+    // is exactly what downloadUnifiedInvoicePdf produces — one code path, so
+    // the emailed invoice is byte-identical to the download.
+    const { renderUnifiedInvoiceBase64 } = await import(
+      "@/lib/unified-doc-download"
     );
     return {
-      pdfBase64: generateInvoicePdfBase64(
+      pdfBase64: await renderUnifiedInvoiceBase64(
         invoice,
         ej?.success ? ej.data : undefined,
       ),
-      pdfFilename: `INV-${invoice.invoiceNo}.pdf`,
+      pdfFilename: `${/^INV/i.test(invoice.invoiceNo) ? invoice.invoiceNo : `INV-${invoice.invoiceNo}`}.pdf`,
     };
   } catch {
     return {};
@@ -772,12 +773,14 @@ async function sendCustomerNotice(
       itemsBreakdown = buildDoComponentBreakdown(row.items, extras);
       customerPOIds = collectCustomerPOIds(row.items, extras, row.customerPOId);
       try {
-        // Email the SAME jsPDF the operator prints (owner 2026-07-04: the
-        // pdf-lib email version looked different/"歪"). Same row + extras the
-        // Print-DO handler passes — no delivery QR on the customer email.
-        const { generateDoPdfBase64 } = await import("@/lib/generate-do-pdf");
-        pdfBase64 = generateDoPdfBase64(
-          row as unknown as import("@/types").DeliveryOrder,
+        // Unify on ONE template (owner 2026-07-13): the customer email uses the
+        // SAME unified generator the download-DO button uses (now that its
+        // alignment / dashed-line issues are fixed). renderUnifiedDoBase64 is
+        // exactly what downloadUnifiedDoPdf produces — no delivery QR on the
+        // customer copy; refs/category/pieces come from the DO print-extras.
+        const { renderUnifiedDoBase64 } = await import("@/lib/unified-doc-download");
+        pdfBase64 = await renderUnifiedDoBase64(
+          row as unknown as Record<string, unknown> & { doNo?: string },
           extras,
         );
         pdfFilename = `${row.doNo.startsWith("DO-") ? row.doNo : `DO-${row.doNo}`}.pdf`;
@@ -4510,9 +4513,16 @@ export default function DeliveryPage() {
             <button
               key={tab.key}
               onClick={() => {
-                setActiveTab(tab.key);
-                setSelectedIds(new Set());
-                setSelectedReadyPOs(new Set());
+                // Mark the tab switch as a non-urgent transition so this huge
+                // page's re-render is interruptible — rapid tab-flicking stays
+                // responsive instead of queueing full re-renders (owner
+                // 2026-07-16: "快速切换 tab 很卡顿"). Pure scheduling; no logic
+                // change. The real cure is decomposing this 7k-line page.
+                React.startTransition(() => {
+                  setActiveTab(tab.key);
+                  setSelectedIds(new Set());
+                  setSelectedReadyPOs(new Set());
+                });
               }}
               className={`flex flex-col items-start gap-0.5 pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
                 activeTab === tab.key

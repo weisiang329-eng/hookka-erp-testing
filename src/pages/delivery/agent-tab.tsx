@@ -86,6 +86,13 @@ interface BriefData {
   aiFocus?: string | null;
 }
 
+interface Recipient {
+  customer: string;
+  hub: string;
+  doCount: number;
+  valueSen: number;
+}
+
 interface Proposal {
   id: string;
   generatedAt: string;
@@ -98,6 +105,12 @@ interface Proposal {
   threePlCostSen: number;
   recommendation: string;
   status: string;
+  // Packing-list fields (LOAD_PLAN)
+  dueDate?: string;
+  doCount?: number;
+  dropCount?: number;
+  driver?: string;
+  recipients?: Recipient[];
 }
 
 const KIND_LABEL: Record<string, string> = {
@@ -426,71 +439,142 @@ export default function DeliveryAgentTab() {
               against the current ready-to-ship pool.
             </p>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-[#E2DDD8] text-left text-xs text-[#6B7280]">
-                    <th className="py-2 pr-2">
+            <div className="flex flex-col gap-3">
+              <label className="flex items-center gap-2 text-xs text-[#6B7280]">
+                <input
+                  type="checkbox"
+                  checked={allVisibleSelected}
+                  onChange={toggleAll}
+                  aria-label="Select all"
+                />
+                Select all ({visible.length})
+              </label>
+              {visible.map((p) => {
+                const today = new Date().toISOString().slice(0, 10);
+                const isPlan = p.kind === "LOAD_PLAN";
+                const due = p.dueDate || "";
+                const expired = !!due && due < today;
+                const soon = !!due && !expired && due === today;
+                return (
+                  <div
+                    key={p.id}
+                    className="rounded-xl border border-[#E2DDD8] bg-white p-4"
+                  >
+                    <div className="flex items-start gap-3">
                       <input
                         type="checkbox"
-                        checked={allVisibleSelected}
-                        onChange={toggleAll}
-                        aria-label="Select all"
+                        className="mt-1"
+                        checked={selected.has(p.id)}
+                        onChange={() => toggle(p.id)}
+                        aria-label={`Select ${p.soRefs}`}
                       />
-                    </th>
-                    <th className="py-2 pr-3">Kind</th>
-                    <th className="py-2 pr-3">Destination</th>
-                    <th className="py-2 pr-3">Refs</th>
-                    <th className="py-2 pr-3 text-right">Items</th>
-                    <th className="py-2 pr-3 text-right">Value</th>
-                    <th className="py-2 pr-3 text-right">3PL Cost</th>
-                    <th className="py-2">Recommendation</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visible.map((p) => (
-                    <tr
-                      key={p.id}
-                      className="border-b border-[#F0ECE9] align-top hover:bg-[#FAF9F7]"
-                    >
-                      <td className="py-2 pr-2">
-                        <input
-                          type="checkbox"
-                          checked={selected.has(p.id)}
-                          onChange={() => toggle(p.id)}
-                          aria-label={`Select ${p.soRefs}`}
-                        />
-                      </td>
-                      <td className="py-2 pr-3 whitespace-nowrap">
-                        <Badge className={KIND_BADGE[p.kind] ?? "bg-[#F0ECE9] text-[#6B7280]"}>
-                          {KIND_LABEL[p.kind] ?? p.kind}
-                        </Badge>
-                      </td>
-                      <td className="py-2 pr-3 whitespace-nowrap text-[#1F1D1B]">
-                        {p.state || "—"}
-                        {p.hub ? (
-                          <span className="text-xs text-[#6B7280]"> · {p.hub}</span>
-                        ) : null}
-                      </td>
-                      <td className="py-2 pr-3 max-w-[220px]">
-                        <span className="break-words text-xs text-[#4B5563]">
-                          {p.soRefs || "—"}
-                        </span>
-                      </td>
-                      <td className="py-2 pr-3 text-right tabular-nums">{p.itemsCount}</td>
-                      <td className="py-2 pr-3 text-right tabular-nums whitespace-nowrap">
-                        {p.valueSen > 0 ? formatRM(p.valueSen) : "—"}
-                      </td>
-                      <td className="py-2 pr-3 text-right tabular-nums whitespace-nowrap">
-                        {p.threePlCostSen > 0 ? formatRM(p.threePlCostSen) : "—"}
-                      </td>
-                      <td className="py-2 text-xs text-[#4B5563] min-w-[260px]">
-                        {p.recommendation}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                      <div className="min-w-0 flex-1">
+                        <div className="mb-2 flex items-center justify-between gap-2">
+                          <Badge
+                            className={KIND_BADGE[p.kind] ?? "bg-[#F0ECE9] text-[#6B7280]"}
+                          >
+                            {isPlan
+                              ? `Packing list — ${p.state || "—"}`
+                              : KIND_LABEL[p.kind] ?? p.kind}
+                          </Badge>
+                          {isPlan && due ? (
+                            <span
+                              className={
+                                "whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium " +
+                                (expired
+                                  ? "bg-[#FDECEA] text-[#9A3A2D]"
+                                  : soon
+                                    ? "bg-[#FAEFCB] text-[#9C6F1E]"
+                                    : "bg-[#F0ECE9] text-[#6B7280]")
+                              }
+                            >
+                              {expired ? "expired" : soon ? "expires today" : `expires ${due}`}
+                            </span>
+                          ) : null}
+                        </div>
+
+                        {isPlan ? (
+                          <>
+                            <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                              {[
+                                { l: "DOs", v: String(p.doCount ?? 0) },
+                                { l: "Drop points", v: String(p.dropCount ?? 0) },
+                                { l: "Value", v: formatRM(p.valueSen) },
+                                {
+                                  l: "3PL est.",
+                                  v: p.threePlCostSen > 0 ? formatRM(p.threePlCostSen) : "—",
+                                },
+                              ].map((m) => (
+                                <div
+                                  key={m.l}
+                                  className="rounded-lg bg-[#F7F5F2] px-3 py-2"
+                                >
+                                  <div className="text-xs text-[#6B7280]">{m.l}</div>
+                                  <div className="text-lg font-medium tabular-nums text-[#1F1D1B]">
+                                    {m.v}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+
+                            {p.recipients && p.recipients.length > 0 ? (
+                              <div className="mb-2 border-t border-[#F0ECE9] pt-2">
+                                <div className="mb-1 text-xs text-[#6B7280]">
+                                  Delivering to
+                                </div>
+                                <div className="flex flex-col gap-1">
+                                  {p.recipients.map((r, i) => (
+                                    <div
+                                      key={i}
+                                      className="flex items-center gap-2 text-sm"
+                                    >
+                                      <span className="truncate text-[#1F1D1B]">
+                                        {r.customer}
+                                      </span>
+                                      <span className="min-w-0 flex-1 truncate text-xs text-[#6B7280]">
+                                        {r.hub}
+                                      </span>
+                                      <span className="whitespace-nowrap text-xs text-[#6B7280]">
+                                        {r.doCount} DO
+                                      </span>
+                                      <span className="whitespace-nowrap tabular-nums text-[#1F1D1B]">
+                                        {formatRM(r.valueSen)}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : null}
+
+                            <div className="flex flex-wrap gap-x-5 gap-y-1 border-t border-[#F0ECE9] pt-2 text-sm text-[#1F1D1B]">
+                              <span>
+                                <span className="text-[#6B7280]">Driver:</span>{" "}
+                                {p.driver || "—"}
+                              </span>
+                              <span>
+                                <span className="text-[#6B7280]">Deliver by:</span>{" "}
+                                {due || "—"}
+                              </span>
+                              <span className="text-xs text-[#9CA3AF]">
+                                {p.soRefs}
+                              </span>
+                            </div>
+                          </>
+                        ) : (
+                          <div className="text-sm text-[#4B5563]">
+                            <div className="mb-1 text-[#1F1D1B]">
+                              {p.state || "—"}
+                              {p.hub ? ` · ${p.hub}` : ""}
+                              {p.soRefs ? ` · ${p.soRefs}` : ""}
+                            </div>
+                            <div className="text-xs">{p.recommendation}</div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </CardContent>

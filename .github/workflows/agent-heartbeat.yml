@@ -17,7 +17,12 @@ name: Agents — Self-Scheduling Heartbeat
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    # GitHub does NOT honour a schedule punctually — queued runs are delayed or
+    # dropped, and ':00' is the worst minute because every repo on the platform
+    # asks for it. Measured 2026-07-16: a '0 * * * *' heartbeat actually fired
+    # every 2-3 HOURS (23:58 -> 03:27 was a 3.5h gap), starving the agents.
+    # Three off-peak minutes per hour: more chances to land, none on the hour.
+    - cron: '7,27,47 * * * *'
   workflow_dispatch:
 
 jobs:

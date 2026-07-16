@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useNavigate, useParams } from "react-router-dom";
@@ -408,6 +408,41 @@ export default function SalesOrderDetailPage() {
     () => (orderResp?.success ? (orderResp.data as SalesOrder) : null),
     [orderResp],
   );
+  // Source PO scan kept as a durable SO attachment (owner 2026-07-15) so
+  // "View original" works even when the inline customerPOImageB64 render is
+  // absent (every scan after the 2026-06 OCR-queue rewrite lost that render).
+  const [poOriginalUrl, setPoOriginalUrl] = useState<string | null>(null);
+  useEffect(() => {
+    const soId = order?.id;
+    if (!soId) {
+      setPoOriginalUrl(null);
+      return;
+    }
+    let alive = true;
+    void (async () => {
+      try {
+        const r = await fetch(
+          `/api/files?resourceType=SO&resourceId=${encodeURIComponent(soId)}`,
+        );
+        const j = (await r.json().catch(() => null)) as {
+          data?: Array<{ id: string; filename?: string; contentType?: string }>;
+        } | null;
+        const files = j?.data ?? [];
+        const orig =
+          files.find((f) =>
+            (f.filename ?? "").toLowerCase().includes("po-original"),
+          ) ??
+          files.find((f) => /pdf|image/.test(f.contentType ?? "")) ??
+          null;
+        if (alive) setPoOriginalUrl(orig ? `/api/files/${orig.id}/stream` : null);
+      } catch {
+        /* no attachment — falls back to customerPOImageB64 */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [order?.id]);
   const linkedPOs: LinkedPO[] = useMemo(
     () => (orderResp?.success ? orderResp.linkedPOs ?? [] : []),
     [orderResp],
@@ -1396,13 +1431,17 @@ export default function SalesOrderDetailPage() {
                 <p className="text-xs text-[#9CA3AF]">Customer PO</p>
                 <p className="font-medium doc-number">
                   {order.customerPOId || "-"}
-                  {order.customerPOImageB64 && (
+                  {(order.customerPOImageB64 || poOriginalUrl) && (
                     <button
                       type="button"
                       className="ml-2 text-xs text-[#6B5C32] underline hover:text-[#4a3f22]"
                       onClick={() => {
-                        // Pop the original PO image into a new tab so the
-                        // operator can show / download / send to the customer.
+                        // Prefer the durable source attachment (PDF/image kept
+                        // on the SO); fall back to the legacy inline render.
+                        if (poOriginalUrl) {
+                          window.open(poOriginalUrl, "_blank", "noopener");
+                          return;
+                        }
                         const img = order.customerPOImageB64!;
                         const w = window.open();
                         if (w) {
@@ -1411,7 +1450,7 @@ export default function SalesOrderDetailPage() {
                           );
                         }
                       }}
-                      title="Open the original customer PO page in a new tab"
+                      title="Open the original customer PO in a new tab"
                     >
                       View original
                     </button>

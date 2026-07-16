@@ -73,6 +73,7 @@ import {
 } from "../../lib/material-cost-fifo";
 import {
   buildApReconciliation,
+  AR_RECON_CFG,
   type ApReconLeg,
   type ApReconPi,
   type ApReconPaymentRow,
@@ -2716,6 +2717,152 @@ app.get("/ap-reconciliation", async (c) => {
       controls,
       tradeControlSen,
       nonTrade400GapSen: tradeControlSen - report.controlSen,
+      ...report,
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /ar-reconciliation — the AR twin of /ap-reconciliation. Same pure
+// decomposition (ap-recon.ts) with AR_RECON_CFG: the 300-0000 control is
+// DR-normal, so its legs are fed with debit/credit SWAPPED and the algebra
+// holds unchanged (invoice faces ↔ doc family, customer receipts ↔ pay
+// family, opening AR seeds ↔ opening). Read-only.
+// ---------------------------------------------------------------------------
+app.get("/ar-reconciliation", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  await ensureFinanceOrgColumns(c.var.DB);
+  const coFilter = companyFilter(c, "orgId");
+  const legWhere = coFilter.active ? ` AND ${coFilter.sql}` : "";
+  const invWhere = coFilter.active ? ` AND ${coFilter.sql}` : "";
+
+  const [legRes, invRes, recRes] = await Promise.all([
+    c.var.DB.prepare(
+      `SELECT accountCode, sourceType, sourceId, debitSen, creditSen, postedAt FROM ledger_journal_entries WHERE hidden = 0${legWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<{ accountCode: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string }>(),
+    c.var.DB.prepare(
+      `SELECT id, invoiceNo, customerName, status, totalSen, paidAmount, invoiceDate, isOpening FROM invoices WHERE 1=1${invWhere}`,
+    )
+      .bind(...(coFilter.active ? [coFilter.param] : []))
+      .all<{
+        id: string; invoiceNo?: string; invoice_no?: string; customerName?: string; customer_name?: string;
+        status: string; totalSen?: number; total_sen?: number;
+        paidAmount?: number | null; paid_amount?: number | null;
+        invoiceDate?: string | null; invoice_date?: string | null;
+        isOpening?: number | null; is_opening?: number | null;
+      }>(),
+    c.var.DB.prepare(
+      `SELECT pr.id AS id, pr.receiptNumber AS receiptNumber, pr.customerName AS customerName,
+              pr.date AS date, pr.amount AS amount, pr.method AS method, pr.allocations AS allocations,
+              dl.state AS lifecycleState
+         FROM payment_records pr
+         LEFT JOIN document_lifecycle dl
+                ON dl.sourceType = 'payment' AND dl.sourceId = pr.id
+        WHERE 1=1`,
+    ).all<{
+      id: string; receiptNumber?: string; receipt_number?: string; customerName?: string; customer_name?: string;
+      date?: string; amount?: number; method?: string; allocations?: string | unknown[];
+      lifecycleState?: string | null; lifecyclestate?: string | null;
+    }>().catch(() => ({ results: [] as never[] })),
+  ]);
+
+  const { docDate, openingDate: obDateArc } = await loadDocDateResolver(c.var.DB);
+  const resolveArc = await loadAccountResolver(c.var.DB);
+
+  // 300-0000 legs, post-floor, DR/CR SWAPPED so the CR-normal algebra applies.
+  const legs300: ApReconLeg[] = [];
+  const drAllAr = new Map<string, number>();
+  const crAllAr = new Map<string, number>();
+  for (const l of legRes.results ?? []) {
+    if (legBeforeOpening(l.sourceType, docDate(l.sourceType, l.sourceId, l.postedAt), obDateArc)) continue;
+    const code = resolveArc(l.accountCode);
+    drAllAr.set(code, (drAllAr.get(code) ?? 0) + (Number(l.debitSen) || 0));
+    crAllAr.set(code, (crAllAr.get(code) ?? 0) + (Number(l.creditSen) || 0));
+    if (code !== "300-0000") continue;
+    legs300.push({
+      sourceType: String(l.sourceType ?? ""),
+      sourceId: String(l.sourceId ?? ""),
+      debitSen: Number(l.creditSen) || 0, // swapped
+      creditSen: Number(l.debitSen) || 0, // swapped
+    });
+  }
+
+  const invoices: ApReconPi[] = (invRes.results ?? []).map((r) => {
+    const id = String(r.id);
+    const invoiceDate = (r.invoiceDate ?? r.invoice_date ?? null) as string | null;
+    const isOpening = !!(r.isOpening ?? r.is_opening);
+    return {
+      id,
+      piNo: String(r.invoiceNo ?? r.invoice_no ?? ""),
+      supplierName: String(r.customerName ?? r.customer_name ?? ""),
+      status: String(r.status ?? ""),
+      amountSen: Math.round(Number(r.totalSen ?? r.total_sen) || 0),
+      paidSen: Math.round(Number(r.paidAmount ?? r.paid_amount) || 0),
+      isOpening,
+      preOpeningIncluded: false, // AR has no include-pre-existing mechanism
+      floored: rowBeforeOpening(invoiceDate, obDateArc, isOpening),
+    };
+  });
+
+  const receiptRows: ApReconPaymentRow[] = [];
+  for (const r of recRes.results ?? []) {
+    const state = String(r.lifecycleState ?? r.lifecyclestate ?? "") || "ACTIVE";
+    const active = state === "ACTIVE";
+    const recId = String(r.id);
+    const name = String(r.customerName ?? r.customer_name ?? "");
+    const date = String(r.date ?? "").slice(0, 10);
+    let allocs: { invoiceId?: string; amount?: number }[] = [];
+    try {
+      const raw = r.allocations;
+      allocs = Array.isArray(raw) ? raw as never[] : JSON.parse(String(raw ?? "[]"));
+    } catch { allocs = []; }
+    for (const a of allocs) {
+      receiptRows.push({
+        paymentNo: recId,
+        purchaseInvoiceId: String(a.invoiceId ?? "") || null,
+        bookedSen: Math.round(Number(a.amount) || 0),
+        amountSen: Math.round(Number(a.amount) || 0),
+        method: String(r.method ?? ""),
+        active,
+        supplierName: name,
+        date,
+      });
+    }
+    // NOTE: deliberately NO synthetic "unapplied remainder" row — /ar-control
+    // subtracts no advances, so the mirror must not either; a receipt whose GL
+    // exceeds its allocations surfaces as a payment_gl_mismatch item instead.
+  }
+
+  const report = buildApReconciliation(
+    { legs400: legs300, pis: invoices, paymentRows: receiptRows, pcnPostedSen: 0, cnAllocCtlSen: 0 },
+    AR_RECON_CFG,
+  );
+
+  const coaRes = await c.var.DB.prepare(
+    "SELECT code, name FROM chart_of_accounts WHERE specialAccountType = 'SDC'",
+  ).all<{ code: string; name: string }>();
+  const controls = (coaRes.results ?? [])
+    .map((a) => ({
+      code: a.code,
+      name: a.name,
+      balanceSen: (drAllAr.get(a.code) ?? 0) - (crAllAr.get(a.code) ?? 0), // asset: DR-normal
+    }))
+    .sort((a, b) => a.code.localeCompare(b.code));
+  const tradeControlSen = controls
+    .filter((a) => a.code !== "305-0000")
+    .reduce((s, a) => s + a.balanceSen, 0);
+
+  return c.json({
+    success: true,
+    data: {
+      asOf: new Date().toISOString().slice(0, 10),
+      openingDate: obDateArc ?? null,
+      controls,
+      tradeControlSen,
+      nonTrade300GapSen: tradeControlSen - report.controlSen,
       ...report,
     },
   });

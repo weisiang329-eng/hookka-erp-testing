@@ -24,7 +24,19 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
    - the middleware SELECT runs on EVERY request, so it must never reference a
      not-yet-created column: that 503s the whole API *including* the endpoint whose runtime
      ALTER would create it → total lockout, unrecoverable without DB creds.
-2. ⛔ **/invoices jank — PREMISE DISPROVEN on prod, do NOT touch the grid.** Owner said
+2. 🟡 **/invoices jank — PARKED by owner 2026-07-16 (「那就等」), premise DISPROVEN.**
+   Owner parked it after being shown the evidence + the honest cost: chasing the remaining
+   ~94ms floor means touching the shell EVERY page shares (and likely the monolith-page
+   decomposition), which is high-risk for a 0.1–0.3s-per-navigation win — lower value than
+   the real pain (duplicate invoices, planning cold starts). **Do NOT restart this on a
+   "page feels slow" report alone.** Resume only if the owner asks, or if a page regresses
+   badly enough to matter.
+   Diagnostic headers REMOVED from BOTH prod (50e0904e) and staging (b0d8f0d1) and verified
+   clean — deliberately not left on staging, because staging↔main merge regularly in this
+   repo and a `_headers` line would ride into prod unnoticed. To resume: re-add
+   `Document-Policy: js-profiling` under `/*` in `public/_headers` (one line) and profile on
+   staging — it DOES reproduce once its cache is warm.
+   Evidence below stands. Owner said (before parking):
    「先抓火焰图再改,别盲改」 — measured first, and the measurement killed the task.
    Full evidence in docs/HANDOFF-2026-07-16.md (Task 2 block). Short version:
    - **/invoices is one of the CHEAPEST pages (153/193ms)**, not the worst. There is a

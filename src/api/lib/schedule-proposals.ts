@@ -115,9 +115,15 @@ function localToday(): string {
   return `${d.getFullYear()}-${m}-${dd}`;
 }
 
-// Keep chunks small so the flattened bind-parameter count stays comfortably
-// under adapter limits (11 params per inserted row).
-const CHUNK = 40;
+// Bind-parameter budget per statement is 65535; at 11 params per inserted row
+// the real ceiling is ~5,900 rows. CHUNK was 40 — over 100x more conservative
+// than it needed to be, and each chunk costs THREE sequential round-trips
+// (count → supersede → insert). With ~1,500 candidates that was ~38 chunks =
+// ~114 strictly serialized queries, and THAT is what made a generate run take
+// 155s+ and get killed — not the engine, which computes in tens of ms (owner
+// 2026-07-16; measured). 500 rows = 5,500 params, still 12x under the ceiling,
+// and turns ~114 round-trips into ~9.
+const CHUNK = 500;
 
 /**
  * Auto-expire stale PENDING proposals not acted on within ~1 day (owner

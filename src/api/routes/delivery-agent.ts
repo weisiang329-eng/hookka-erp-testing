@@ -568,6 +568,53 @@ app.get("/truck-capacity-analysis", async (c) => {
       void plId;
     }
 
+    // 4b · Data quality — the whole packing calculation is only as good as the
+    //      per-product Unit M³. Count how many shipped line items belong to a
+    //      product with unitM3 <= 0 (those silently understate a truck's load).
+    let itemsTotal = 0;
+    let itemsZeroM3 = 0;
+    const zeroM3Products = new Map<string, number>();
+    try {
+      const codeQty = new Map<string, number>();
+      for (let i = 0; i < idList.length; i += 400) {
+        const chunk = idList.slice(i, i + 400);
+        const placeholders = chunk.map(() => "?").join(",");
+        const r = await db
+          .prepare(
+            `SELECT productCode, quantity FROM delivery_order_items WHERE deliveryOrderId IN (${placeholders})`,
+          )
+          .bind(...chunk)
+          .all<{ productCode?: string; productcode?: string; quantity?: number | string }>();
+        for (const it of r.results ?? []) {
+          const code = (it.productCode ?? it.productcode ?? "") as string;
+          const qty = Number(it.quantity ?? 0) || 0;
+          if (!code) continue;
+          codeQty.set(code, (codeQty.get(code) ?? 0) + qty);
+          itemsTotal += qty;
+        }
+      }
+      const codes = [...codeQty.keys()];
+      const m3ByCode = new Map<string, number>();
+      for (let i = 0; i < codes.length; i += 400) {
+        const chunk = codes.slice(i, i + 400);
+        const placeholders = chunk.map(() => "?").join(",");
+        const r = await db
+          .prepare(`SELECT code, unitM3 FROM products WHERE code IN (${placeholders})`)
+          .bind(...chunk)
+          .all<{ code: string; unitM3?: number | string; unitm3?: number | string }>();
+        for (const p of r.results ?? [])
+          m3ByCode.set(p.code, Number(p.unitM3 ?? p.unitm3 ?? 0) || 0);
+      }
+      for (const [code, qty] of codeQty) {
+        if ((m3ByCode.get(code) ?? 0) <= 0) {
+          itemsZeroM3 += qty;
+          zeroM3Products.set(code, qty);
+        }
+      }
+    } catch (e) {
+      console.warn("[truck-capacity-analysis] data-quality pass failed:", e);
+    }
+
     // 5 · Registered truck capacities (reference — capacity_m3 volume-only).
     const vRes = await db
       .prepare(
@@ -600,6 +647,15 @@ app.get("/truck-capacity-analysis", async (c) => {
       overall: { m3: dist(m3s), units: dist(unitsArr), drops: dist(dosArr) },
       byState: states,
       truckCapacitiesM3: vehicles,
+      dataQuality: {
+        itemsShipped: itemsTotal,
+        itemsWithNoUnitM3: itemsZeroM3,
+        pctVolumeKnown: itemsTotal ? Math.round(((itemsTotal - itemsZeroM3) / itemsTotal) * 100) : 0,
+        worstMissingProducts: [...zeroM3Products.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 15)
+          .map(([code, qty]) => ({ code, shippedQty: qty })),
+      },
       note:
         "carried m³ = Σ member DOs' stored totalM3; products with unit M³ = 0 understate volume. " +
         "Use overall.m3.p90 / per-state p90 as the 'full enough' line; compare to truckCapacitiesM3.",

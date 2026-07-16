@@ -238,8 +238,34 @@ export default function DeliveryReturnDetail() {
           )}
 
           <div className="flex gap-2 flex-wrap pt-4 mt-4 border-t border-[#E2DDD8]">
+            {/* ONE button. "Pure return" and "return to stock" are the same act
+                (owner 2026-07-16: "pure return 就是 return to stocks 的意思，
+                一樣的") — both endpoints already run the SAME inventory half
+                (buildReturnToStockStatements); the only difference is whether a
+                Credit Note follows. So don't ask the operator to choose: the
+                invoice decides. Owner's rule, confirmed: DO already invoiced →
+                raise the CN (money was taken, credit it back); never invoiced →
+                no CN (nothing to credit). */}
             {isOpen && (
-              <Button variant="primary" disabled={busy} onClick={() => call("/return-to-stock")}>
+              <Button
+                variant="primary"
+                disabled={busy}
+                onClick={async () => {
+                  const invoiced = dr.items.some((it) => it.wasInvoiced);
+                  if (invoiced) {
+                    await call("/set-outcome", { returnType: "PURE_RETURN" });
+                    toast.info(
+                      "Returned to stock — this DO was invoiced, so a Credit Note is pre-filled; confirm the refund amount.",
+                    );
+                    navigate(`/invoices/credit-notes?fromReturn=${id}`);
+                  } else {
+                    await call("/return-to-stock");
+                    toast.success(
+                      "Returned to stock. No Credit Note — this DO was never invoiced.",
+                    );
+                  }
+                }}
+              >
                 Return to stock
               </Button>
             )}
@@ -291,19 +317,6 @@ export default function DeliveryReturnDetail() {
                 }}
               >
                 Repair &amp; re-deliver → service case
-              </Button>
-            )}
-            {canService && (
-              <Button
-                variant="outline"
-                disabled={busy}
-                onClick={async () => {
-                  await call("/set-outcome", { returnType: "PURE_RETURN" });
-                  toast.info("Returned to stock — a Credit Note is pre-filled; confirm the refund amount.");
-                  navigate(`/invoices/credit-notes?fromReturn=${id}`);
-                }}
-              >
-                Pure return → credit note
               </Button>
             )}
             {dr.status === "SERVICE_SPAWNED" && (

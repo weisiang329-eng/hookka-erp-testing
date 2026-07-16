@@ -24,16 +24,6 @@
   Cache-Control: no-cache, no-store, must-revalidate
   Pragma: no-cache
   Expires: 0
-  # TEMPORARY diagnostic (2026-07-16) — REMOVE once the route-transition block
-  # is root-caused. Chrome refuses `new Profiler()` (the JS Self-Profiling API)
-  # without this header, which is the only reason the /invoices "jank" hunt had
-  # to guess. It grants nothing else: a page may only profile its OWN
-  # same-origin scripts, and the header is inert unless our code calls Profiler.
-  #
-  # Needed on PROD specifically: staging runs byte-identical src with the same
-  # ~200-row data and blocks 0ms, while prod blocks ~150-340ms on every route
-  # change — so the cause only reproduces here.
-  Document-Policy: js-profiling
 
 # Hashed assets (Vite fingerprints every chunk + stylesheet) — safe to cache
 # forever. `immutable` tells the browser it won't change, skip conditional

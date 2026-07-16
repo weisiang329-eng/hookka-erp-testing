@@ -65,8 +65,56 @@ app.post("/heartbeat", async (c) => {
   c.executionCtx.waitUntil(
     (async () => {
       try {
-  const { decisions, skipped } = await decideAgentRuns(db);
   const ran: Array<{ task: string; reason: string; summary?: string }> = [];
+
+  // ── 0 · Reap stuck runs ────────────────────────────────────────────────────
+  // A run killed mid-flight (Worker limits) leaves its agent_runs row at
+  // 'running' forever: the console shows a permanent RUNNING and the row still
+  // counts toward runsToday, starving the real work. Anything still 'running'
+  // after 15 minutes is dead — mark it errored so the console tells the truth.
+  try {
+    const stuckCut = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    await db
+      .prepare(
+        `UPDATE agent_runs SET status = 'error', finished_at = ?,
+                error = 'killed mid-run (exceeded worker limits)'
+          WHERE status = 'running' AND started_at < ?`,
+      )
+      .bind(new Date().toISOString(), stuckCut)
+      .run();
+  } catch (err) {
+    console.warn("[agents/heartbeat] stuck-run reap failed:", err);
+  }
+
+  // ── 1 · Backlog drain FIRST ────────────────────────────────────────────────
+  // Applying queued due dates is the light, high-value work; generating fresh
+  // proposals is the heavy engine run. It used to be the other way round, so a
+  // heavy generation that blew the Worker's limits killed the whole beat before
+  // a single due date was written — the backlog grew to 1,700 while the console
+  // said full-auto (owner 2026-07-16). Drain first: even if generation dies
+  // later this beat, the queue still moved.
+  try {
+    const hourDrain = new Date(Date.now() + 8 * 3600 * 1000).getUTCHours();
+    if (hourDrain >= 8 && hourDrain < 20 && (await isAutoApproveOn(db, "PRODUCTION"))) {
+      const pend = await db
+        .prepare("SELECT COUNT(*) AS n FROM schedule_proposals WHERE status = 'PENDING'")
+        .bind()
+        .first<{ n: number | string }>();
+      if ((Number(pend?.n) || 0) > 0) {
+        await recordAgentRun(db, "production-proposals", async (run) => {
+          const a = await applyPendingProposals(db, { decidedBy: "AGENT_AUTO", limit: 150 });
+          const summary = `auto-applied ${a.approved} queued due date(s), ${a.remainingPending} remaining (heartbeat drain)`;
+          run.setSummary(summary);
+          ran.push({ task: "production-proposals", reason: "backlog drain", summary });
+          return a;
+        });
+      }
+    }
+  } catch (err) {
+    console.error("[agents/heartbeat] backlog drain failed:", err);
+  }
+
+  const { decisions, skipped } = await decideAgentRuns(db);
 
   for (const d of decisions) {
     try {
@@ -88,23 +136,14 @@ app.post("/heartbeat", async (c) => {
           return r;
         });
       } else if (d.task === "production-proposals") {
+        // GENERATE ONLY. Generation is a full run of the planning engine over
+        // every WAITING card; bolting the apply onto the same invocation blew
+        // the Worker's limits and the run got killed before writing a single
+        // due date (owner 2026-07-16 — backlog hit 1,700 under "full-auto").
+        // The drain at the top of the beat does the applying, on its own.
         await recordAgentRun(db, "production-proposals", async (run) => {
           const r = await generateProposals(db);
-          // Autonomy: with the PRODUCTION gate ON the agent applies its own
-          // dueDates (WAITING cards only, batch-capped, one rollbackable
-          // snapshot per batch — the backlog drains across heartbeats).
-          let autoNote = "";
-          if (await isAutoApproveOn(db, "PRODUCTION")) {
-            const a = await applyPendingProposals(db, {
-              decidedBy: "AGENT_AUTO",
-              limit: 150,
-            }).catch((err) => {
-              console.warn("[agents/heartbeat] auto-apply failed:", err);
-              return null;
-            });
-            if (a) autoNote = ` · auto-applied ${a.approved} (${a.remainingPending} queued)`;
-          }
-          const summary = `proposed ${r.proposed} (unscheduled ${r.unscheduled} · overdue ${r.overdue} · superseded ${r.superseded})${autoNote} (heartbeat: ${d.reason})`;
+          const summary = `proposed ${r.proposed} (unscheduled ${r.unscheduled} · overdue ${r.overdue} · superseded ${r.superseded}) (heartbeat: ${d.reason})`;
           run.setSummary(summary);
           ran.push({ task: d.task, reason: d.reason, summary });
           return r;
@@ -234,33 +273,6 @@ app.post("/heartbeat", async (c) => {
     console.error("[agents/heartbeat] service digest failed:", err);
   }
 
-  // Backlog drain — autonomy also means finishing what's queued: with the
-  // PRODUCTION gate ON, each beat applies one batch of still-PENDING
-  // proposals even when no fresh generation was warranted this beat (a
-  // 2,000-row backlog drains across the day instead of waiting for the next
-  // generation trigger). No pending rows → no run row, no noise.
-  try {
-    // Owner 2026-07-15: the drain also clocks off after 8pm MYT (8am–8pm only).
-    const hourMyt = new Date(Date.now() + 8 * 3600 * 1000).getUTCHours();
-    const workingHours = hourMyt >= 8 && hourMyt < 20;
-    if (workingHours && (await isAutoApproveOn(db, "PRODUCTION"))) {
-      const pend = await db
-        .prepare("SELECT COUNT(*) AS n FROM schedule_proposals WHERE status = 'PENDING'")
-        .bind()
-        .first<{ n: number | string }>();
-      if ((Number(pend?.n) || 0) > 0) {
-        await recordAgentRun(db, "production-proposals", async (run) => {
-          const a = await applyPendingProposals(db, { decidedBy: "AGENT_AUTO", limit: 150 });
-          const summary = `auto-applied ${a.approved} queued proposal(s), ${a.remainingPending} remaining (heartbeat drain)`;
-          run.setSummary(summary);
-          ran.push({ task: "production-proposals", reason: "backlog drain", summary });
-          return a;
-        });
-      }
-    }
-  } catch (err) {
-    console.error("[agents/heartbeat] backlog drain failed:", err);
-  }
       } catch (beatErr) {
         console.error("[agents/heartbeat] background beat failed:", beatErr);
       }

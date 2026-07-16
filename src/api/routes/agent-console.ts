@@ -115,6 +115,12 @@ const EMPLOYEE_TASKS: Array<{ agent: string; label: string; nextRun: string }> =
   },
 ];
 
+/** Due-dates applied per invocation. Small on purpose: generating proposals
+ *  already runs the whole planning engine, so a big apply on top kills the
+ *  Worker mid-run (owner 2026-07-16 — the backlog hit 1,700 because every run
+ *  timed out before applying anything). The hourly drain clears the rest. */
+const APPLY_BATCH = 150;
+
 const SERVICE_TASKS: Array<{ agent: string; label: string; nextRun: string }> = [
   {
     agent: "service-agent",
@@ -629,13 +635,19 @@ app.post("/run-now", async (c) => {
     // heartbeat (≤400/beat), so a click looked like it did nothing. Now the
     // click applies a first batch synchronously and drains the rest of the
     // backlog in the background, so one click fills every WAITING card.
+    // ONE bounded batch per invocation. Generating is already a full run of the
+    // planning engine; piling a 400-row apply + a 25×400 background drain on top
+    // (my earlier version) blew the Worker's limits — the run was killed
+    // mid-flight, so nothing was applied AND the agent_runs row stayed "running"
+    // forever while the backlog grew to 1,700 (owner 2026-07-16). The hourly
+    // drain, which now runs FIRST and on its own, clears the rest.
     const flagOn = await isAutoApproveOn(db, "PRODUCTION");
     const result = await recordAgentRun(db, "production-proposals", async (run) => {
       const r = await generateProposals(db);
       let applyNote = "";
       if (flagOn) {
-        const a = await applyPendingProposals(db, { decidedBy: "AGENT_AUTO", limit: 400 });
-        applyNote = ` · applied ${a.approved} due date(s)${a.remainingPending > 0 ? ` (${a.remainingPending} draining)` : ""}`;
+        const a = await applyPendingProposals(db, { decidedBy: "AGENT_AUTO", limit: APPLY_BATCH });
+        applyNote = ` · applied ${a.approved} due date(s)${a.remainingPending > 0 ? ` (${a.remainingPending} left — draining hourly)` : ""}`;
       }
       const tuned = await autoTuneFlaggedParams(db);
       run.setSummary(
@@ -643,22 +655,6 @@ app.post("/run-now", async (c) => {
       );
       return r;
     });
-    // Drain the remaining backlog off the response path — one click clears the
-    // whole queue instead of 400 at a time. Bounded loop so a runaway can't spin.
-    if (flagOn) {
-      c.executionCtx.waitUntil(
-        (async () => {
-          try {
-            for (let i = 0; i < 25; i++) {
-              const a = await applyPendingProposals(db, { decidedBy: "AGENT_AUTO", limit: 400 });
-              if (a.remainingPending <= 0 || a.approved === 0) break;
-            }
-          } catch (err) {
-            console.error("[agents/run-now] proposals drain failed:", err);
-          }
-        })(),
-      );
-    }
     return c.json({ success: true, data: result });
   }
   // learning

@@ -4500,9 +4500,16 @@ export default function DeliveryPage() {
             <button
               key={tab.key}
               onClick={() => {
-                setActiveTab(tab.key);
-                setSelectedIds(new Set());
-                setSelectedReadyPOs(new Set());
+                // Mark the tab switch as a non-urgent transition so this huge
+                // page's re-render is interruptible — rapid tab-flicking stays
+                // responsive instead of queueing full re-renders (owner
+                // 2026-07-16: "快速切换 tab 很卡顿"). Pure scheduling; no logic
+                // change. The real cure is decomposing this 7k-line page.
+                React.startTransition(() => {
+                  setActiveTab(tab.key);
+                  setSelectedIds(new Set());
+                  setSelectedReadyPOs(new Set());
+                });
               }}
               className={`flex flex-col items-start gap-0.5 pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
                 activeTab === tab.key

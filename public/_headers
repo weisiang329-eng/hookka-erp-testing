@@ -24,13 +24,6 @@
   Cache-Control: no-cache, no-store, must-revalidate
   Pragma: no-cache
   Expires: 0
-  # STAGING-ONLY diagnostic (2026-07-16). Unlocks the JS Self-Profiling API
-  # (`new Profiler()`), which Chrome refuses without this header — profiling
-  # the route-transition block on prod was impossible because of it. Enables
-  # nothing else: a page may only profile its OWN same-origin scripts.
-  # DO NOT MERGE TO main — prod has no reason to carry it. Drop this line once
-  # the ~94ms route-transition floor is root-caused.
-  Document-Policy: js-profiling
 
 # Hashed assets (Vite fingerprints every chunk + stylesheet) — safe to cache
 # forever. `immutable` tells the browser it won't change, skip conditional

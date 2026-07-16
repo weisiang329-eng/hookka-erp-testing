@@ -39,10 +39,26 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
      at ~560ms) → it CANNOT be per-row work. Grid = 11 DOM rows (paginated, not mounting all);
      all array ops during mount = ~17k elements/~50ms (no O(n²)); 1 offsetWidth read (no layout
      thrash); parsing all 17 localStorage cache entries (1.1MB) = 8.2ms. Every suspect dead.
-   - **NEXT (if owner wants it):** the ~94ms floor + /planning are the real targets. Needs a
-     real flame chart: prod blocks `new Profiler()` ("disabled by Document Policy") → serve
-     `Document-Policy: js-profiling` via `_headers` **on staging** and profile there.
-   NOTHING SHIPPED — no code changed. Awaiting owner's call on whether to chase the floor.
+   - **FLAME CHART CAPTURED (prod, JS Self-Profiling API).** Enabled `Document-Policy:
+     js-profiling` on prod just long enough to capture, then REVERTED (4a9c21a4 → 50e0904e,
+     verified gone from prod). **Staging keeps the header (51b993e2) — profile there next.**
+     Verdict: **the block is React render/commit, not our code** — 17 of 21 JS self-samples
+     are inside `react-dom`; invoices/data-grid barely appear. There is no hot function of
+     ours to optimise. Sentry is NOT active on prod; the CF beacon never runs during the block.
+     GOTCHA: Chrome CLAMPS `sampleInterval` (asked 1ms, got ~17ms median) → each sample ≈17ms;
+     21 samples ≈364ms ≈ the measured blocks. Don't read sample count as ms.
+   - **⚠️ The "0ms" trap bit me too — same root cause as the handoff's.** Staging looked 0ms on
+     byte-identical src (verified zero src diff main↔staging), which looked like a major clue.
+     Artifact: staging had never visited /invoices → no SWR cache → nothing to render → 0ms.
+     Warm (940 cached rows) staging = **145–284ms = same as prod**. No prod/staging difference.
+     **RULE: a 0ms perf reading is a measurement bug until proven otherwise — assert the route
+     changed AND that there were rows to render.**
+   - **NOT root-caused: the ~94ms floor.** It's React render/commit, app-wide, but the
+     profiler's ~17ms resolution can't attribute it to a component. Next: profile on staging
+     (header already live) or bisect the shell (Sidebar/Topbar/Breadcrumbs/`<Routes>`) — ~94ms
+     of React render for a 1,210-node page is abnormal and the shell is common to every route.
+     (`TabbedOutlet` keep-alive is referenced in stale comments but NO LONGER EXISTS — not it.)
+   NOTHING SHIPPED to app code — the only prod change was the profiling header, now reverted.
 
 ## 2026-07-14 — 🔵 Durable read-perf rollout (ON STAGING, byte-identical gate) — see docs/PERF-DURABLE-ARCHITECTURE.md
 Owner-approved rebuild: stop shipping whole-org lists to the client; compute

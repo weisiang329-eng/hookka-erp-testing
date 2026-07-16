@@ -133,9 +133,14 @@ app.post("/heartbeat", async (c) => {
   // a single due date was written — the backlog grew to 1,700 while the console
   // said full-auto (owner 2026-07-16). Drain first: even if generation dies
   // later this beat, the queue still moved.
+  // NOT clocked off at 8pm, unlike the agents' decision-making. "下班" means the
+  // agent stops DECIDING things overnight — but the drain decides nothing: it
+  // only finishes writing due dates the engine already worked out during the
+  // day. Holding a queued write until 8am just means the owner finds the board
+  // still half-empty in the morning (owner 2026-07-16: "1598條為什麼不是順著
+  // clear，也是要8點?"). Let it finish overnight; the board is complete by then.
   try {
-    const hourDrain = new Date(Date.now() + 8 * 3600 * 1000).getUTCHours();
-    if (hourDrain >= 8 && hourDrain < 20 && (await isAutoApproveOn(db, "PRODUCTION"))) {
+    if (await isAutoApproveOn(db, "PRODUCTION")) {
       const pend = await db
         .prepare("SELECT COUNT(*) AS n FROM schedule_proposals WHERE status = 'PENDING'")
         .bind()

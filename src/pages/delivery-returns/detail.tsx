@@ -28,6 +28,15 @@ interface DRItem {
   sizeLabel: string;
   specialOrder: string;
   salesOrderNo: string;
+  // The line's OWN order refs + buildSpec inputs — a DO can span several SOs,
+  // so the header's single customer PO can't identify a line.
+  customerPO: string;
+  customerSO: string;
+  reference: string;
+  itemCategory: string;
+  divanHeightInches: number | null;
+  legHeightInches: number | null;
+  gapInches: number | null;
 }
 interface DeliveryReturn {
   id: string;
@@ -152,6 +161,13 @@ export default function DeliveryReturnDetail() {
                 sizeLabel: it.sizeLabel,
                 specialOrder: it.specialOrder,
                 salesOrderNo: it.salesOrderNo,
+                customerPO: it.customerPO,
+                customerSO: it.customerSO,
+                reference: it.reference,
+                itemCategory: it.itemCategory,
+                divanHeightInches: it.divanHeightInches,
+                legHeightInches: it.legHeightInches,
+                gapInches: it.gapInches,
               })),
             })
           }
@@ -187,10 +203,15 @@ export default function DeliveryReturnDetail() {
                       <b>{it.productCode}</b>{" "}
                       <span className="text-[#6B7280]">{it.productName}</span>
                     </div>
-                    {(it.salesOrderNo || it.specialOrder) && (
+                    {/* The line's OWN refs — two identical products on one DO
+                        are otherwise indistinguishable (owner 2026-07-16:
+                        "要不然我怎麼知道要選那個"). */}
+                    {(it.salesOrderNo || it.customerPO || it.reference || it.specialOrder) && (
                       <div className="text-[11px] text-[#9CA3AF]">
                         {[
                           it.salesOrderNo ? `SO ${it.salesOrderNo}` : "",
+                          it.customerPO ? `PO ${it.customerPO}` : "",
+                          it.reference ? `Ref ${it.reference}` : "",
                           it.specialOrder,
                         ]
                           .filter(Boolean)

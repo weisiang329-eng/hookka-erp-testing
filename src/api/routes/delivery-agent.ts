@@ -435,4 +435,179 @@ internal.post("/run-trigger", async (c) => {
   }
 });
 
+// ── GET /truck-capacity-analysis ─────────────────────────────────────────────
+// Read-only. Derives each lorry's realistic "full load" from HISTORY so the
+// owner can set a packing threshold (owner 2026-07-16: "看历史 packing list
+// 通常装多少才算 full load，也看罗里容量"). For every packing list in the
+// window it sums the member DOs' live volume (m³), unit count and drop count,
+// then reports the distribution overall and per destination state, alongside
+// the registered truck capacities. NEVER writes.
+app.get("/truck-capacity-analysis", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const db = c.var.DB;
+  const months = Math.max(1, Math.min(24, Number(c.req.query("months")) || 6));
+  const cutoff = new Date(Date.now() - months * 30 * 86400000).toISOString();
+
+  const pct = (sorted: number[], p: number): number => {
+    if (!sorted.length) return 0;
+    const i = Math.min(sorted.length - 1, Math.max(0, Math.round((p / 100) * (sorted.length - 1))));
+    return Math.round(sorted[i] * 100) / 100;
+  };
+  const dist = (vals: number[]) => {
+    const s = [...vals].sort((a, b) => a - b);
+    const sum = s.reduce((t, v) => t + v, 0);
+    return {
+      runs: s.length,
+      avg: s.length ? Math.round((sum / s.length) * 100) / 100 : 0,
+      p50: pct(s, 50),
+      p90: pct(s, 90),
+      max: s.length ? Math.round(s[s.length - 1] * 100) / 100 : 0,
+    };
+  };
+
+  try {
+    // 1 · Packing lists in window.
+    const plRes = await db
+      .prepare("SELECT id, do_ids, created_at FROM packing_lists WHERE org_id = ? AND created_at >= ?")
+      .bind(orgId, cutoff)
+      .all<{ id: string; do_ids?: string; doIds?: string }>();
+    const pls = plRes.results ?? [];
+
+    // 2 · Collect member DO ids and load their volume/units/state in bulk.
+    const allDoIds = new Set<string>();
+    const plDoIds = new Map<string, string[]>();
+    for (const pl of pls) {
+      let ids: string[] = [];
+      try {
+        const parsed = JSON.parse((pl.doIds ?? pl.do_ids ?? "[]") as string);
+        if (Array.isArray(parsed)) ids = parsed.filter((x) => typeof x === "string");
+      } catch {
+        ids = [];
+      }
+      plDoIds.set(pl.id, ids);
+      ids.forEach((id) => allDoIds.add(id));
+    }
+
+    const doInfo = new Map<string, { m3: number; units: number; state: string; hubId: string }>();
+    const idList = [...allDoIds];
+    for (let i = 0; i < idList.length; i += 400) {
+      const chunk = idList.slice(i, i + 400);
+      const placeholders = chunk.map(() => "?").join(",");
+      const r = await db
+        .prepare(
+          `SELECT id, totalM3, totalItems, customerState, hubId FROM delivery_orders WHERE id IN (${placeholders})`,
+        )
+        .bind(...chunk)
+        .all<{
+          id: string;
+          totalM3?: number | string;
+          totalm3?: number | string;
+          totalItems?: number | string;
+          totalitems?: number | string;
+          customerState?: string;
+          customerstate?: string;
+          hubId?: string;
+          hubid?: string;
+        }>();
+      for (const d of r.results ?? []) {
+        doInfo.set(d.id, {
+          m3: Number(d.totalM3 ?? d.totalm3 ?? 0) || 0,
+          units: Number(d.totalItems ?? d.totalitems ?? 0) || 0,
+          state: ((d.customerState ?? d.customerstate ?? "") as string).toUpperCase(),
+          hubId: (d.hubId ?? d.hubid ?? "") as string,
+        });
+      }
+    }
+
+    // 3 · Hub-state fallback for DOs missing customerState.
+    const hubState = new Map<string, string>();
+    const hubIds = [...new Set([...doInfo.values()].map((d) => d.hubId).filter(Boolean))];
+    for (let i = 0; i < hubIds.length; i += 400) {
+      const chunk = hubIds.slice(i, i + 400);
+      const placeholders = chunk.map(() => "?").join(",");
+      const r = await db
+        .prepare(`SELECT id, state FROM delivery_hubs WHERE id IN (${placeholders})`)
+        .bind(...chunk)
+        .all<{ id: string; state?: string }>();
+      for (const h of r.results ?? []) hubState.set(h.id, (h.state ?? "").toUpperCase());
+    }
+
+    // 4 · Per-PL rollup: carried m³, units, drops, majority state.
+    const m3s: number[] = [];
+    const unitsArr: number[] = [];
+    const dosArr: number[] = [];
+    const byState = new Map<string, { m3: number[]; units: number[]; dos: number[] }>();
+    let plsCounted = 0;
+    for (const [plId, ids] of plDoIds) {
+      if (!ids.length) continue;
+      let m3 = 0;
+      let units = 0;
+      const stateCount = new Map<string, number>();
+      for (const id of ids) {
+        const info = doInfo.get(id);
+        if (!info) continue;
+        m3 += info.m3;
+        units += info.units;
+        const st = info.state || hubState.get(info.hubId) || "UNKNOWN";
+        stateCount.set(st, (stateCount.get(st) ?? 0) + 1);
+      }
+      let majState = "UNKNOWN";
+      let best = -1;
+      for (const [st, n] of stateCount) if (n > best) [majState, best] = [st, n];
+      m3s.push(m3);
+      unitsArr.push(units);
+      dosArr.push(ids.length);
+      if (!byState.has(majState)) byState.set(majState, { m3: [], units: [], dos: [] });
+      const bs = byState.get(majState)!;
+      bs.m3.push(m3);
+      bs.units.push(units);
+      bs.dos.push(ids.length);
+      plsCounted++;
+      void plId;
+    }
+
+    // 5 · Registered truck capacities (reference — capacity_m3 volume-only).
+    const vRes = await db
+      .prepare(
+        "SELECT plate_no, vehicle_type, capacity_m3 FROM three_pl_vehicles WHERE status = 'ACTIVE' ORDER BY capacity_m3 DESC LIMIT 100",
+      )
+      .bind()
+      .all<{
+        plate_no?: string;
+        plateNo?: string;
+        vehicle_type?: string;
+        vehicleType?: string;
+        capacity_m3?: number | string;
+        capacityM3?: number | string;
+        capacitym3?: number | string;
+      }>();
+    const vehicles = (vRes.results ?? []).map((v) => ({
+      plateNo: (v.plateNo ?? v.plate_no ?? "") as string,
+      vehicleType: (v.vehicleType ?? v.vehicle_type ?? "") as string,
+      capacityM3: Math.round((Number(v.capacityM3 ?? v.capacity_m3 ?? v.capacitym3 ?? 0) || 0) * 100) / 100,
+    }));
+
+    const states = [...byState.entries()]
+      .map(([state, v]) => ({ state, m3: dist(v.m3), units: dist(v.units), dos: dist(v.dos) }))
+      .sort((a, b) => b.m3.runs - a.m3.runs);
+
+    return c.json({
+      ok: true,
+      windowMonths: months,
+      packingListsAnalyzed: plsCounted,
+      overall: { m3: dist(m3s), units: dist(unitsArr), drops: dist(dosArr) },
+      byState: states,
+      truckCapacitiesM3: vehicles,
+      note:
+        "carried m³ = Σ member DOs' stored totalM3; products with unit M³ = 0 understate volume. " +
+        "Use overall.m3.p90 / per-state p90 as the 'full enough' line; compare to truckCapacitiesM3.",
+    });
+  } catch (err) {
+    console.error("[delivery-agent/truck-capacity-analysis] failed:", err);
+    return c.json({ ok: false, error: "analysis failed" }, 500);
+  }
+});
+
 export default app;

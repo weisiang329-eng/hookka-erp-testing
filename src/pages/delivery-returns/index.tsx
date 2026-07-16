@@ -186,6 +186,10 @@ interface DoItem {
   fabricCode?: string;
   specialOrder?: string;
   salesOrderNo?: string;
+  // Merged in from /delivery-returns/do-items — the DO's own items don't carry
+  // these, and without them two identical lines are indistinguishable.
+  customerPO?: string;
+  reference?: string;
 }
 type TickState = Record<string, { on: boolean; problem: string }>;
 
@@ -224,7 +228,38 @@ function CreateReturnModal({
     try {
       const res = await fetch(`/api/delivery-orders/${id}`);
       const json = (await res.json()) as { data?: { items?: DoItem[] } };
-      setItems(json?.data?.items ?? []);
+      const base = json?.data?.items ?? [];
+      // The DO's own items carry neither the line's customer PO nor its
+      // Reference, so two identical products look identical here and the
+      // operator can't tell which to tick (owner 2026-07-16). Merge the refs in
+      // from the same loader the create path uses, keyed by productionOrderId.
+      // Display-only: the DO row stays the source of id / qty / tick state, and
+      // the server resolves the refs again on create regardless.
+      try {
+        const r2 = await fetch(
+          `/api/delivery-returns/do-items?doId=${encodeURIComponent(id)}`,
+        );
+        const j2 = (await r2.json()) as {
+          data?: Array<{
+            productionOrderId?: string;
+            customerPO?: string;
+            reference?: string;
+          }>;
+        };
+        const refs = new Map(
+          (j2?.data ?? []).map((x) => [x.productionOrderId ?? "", x]),
+        );
+        setItems(
+          base.map((it) => {
+            const hit = refs.get(it.productionOrderId ?? "");
+            return hit
+              ? { ...it, customerPO: hit.customerPO ?? "", reference: hit.reference ?? "" }
+              : it;
+          }),
+        );
+      } catch {
+        setItems(base); // refs are a nicety — never block the return on them
+      }
     } catch {
       toast.error("Failed to load the delivery order");
     } finally {
@@ -337,6 +372,23 @@ function CreateReturnModal({
                       <b>{it.productCode}</b> <span className="text-[#6B7280]">{it.productName}</span>
                       <span className="text-gray-400 ml-auto">×{it.quantity}</span>
                     </label>
+                    {/* Which line IS this? Two identical products on one DO are
+                        otherwise the same row twice (owner 2026-07-16: "要不然
+                        我怎麼知道要選那個"). Its own order refs + spec tell them
+                        apart. */}
+                    {(it.salesOrderNo || it.customerPO || it.reference || it.fabricCode || it.sizeLabel || it.specialOrder) && (
+                      <div className="mt-1 ml-6 text-[11px] text-[#6B7280]">
+                        {[
+                          it.salesOrderNo ? `SO ${it.salesOrderNo}` : "",
+                          it.customerPO ? `PO ${it.customerPO}` : "",
+                          it.reference ? `Ref ${it.reference}` : "",
+                          [it.fabricCode, it.sizeLabel].filter(Boolean).join(" · "),
+                          it.specialOrder,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </div>
+                    )}
                     {t.on && (
                       <input
                         value={t.problem}

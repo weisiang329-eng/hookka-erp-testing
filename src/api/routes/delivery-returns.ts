@@ -19,6 +19,7 @@ import { reverseFGForDeliveryReturn } from "../lib/do-cost-cascade";
 import {
   createDeliveryReturnRecord,
   ensureDeliveryReturnTables,
+  loadDoItemsForReturn,
 } from "../lib/delivery-return-create";
 
 const app = new Hono<Env>();
@@ -192,6 +193,26 @@ app.get("/:id", async (c) => {
 // Body: { deliveryOrderId, reason?, items: [{ productionOrderId, poNo,
 //   productCode, productName, wipLabel, quantity, problem, fgUnitId?,
 //   wasInvoiced? }] }. Header snapshot (SO/customer) resolved from the DO.
+// -- GET /do-items?doId= — a DO's lines, ENRICHED, for the "New return" picker --
+// The picker used to read the DO API's own items, which carry neither the line's
+// customer PO nor its Reference — so two identical products on one DO looked
+// identical and the operator could not tell which to tick (owner 2026-07-16:
+// "要不然我怎麼知道要選那個"). This returns the same enriched lines the create
+// path persists, from the one loader, so the picker and the record agree.
+app.get("/do-items", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "read");
+  if (denied) return denied;
+  const doId = String(c.req.query("doId") ?? "").trim();
+  if (!doId) return c.json({ success: false, error: "doId is required" }, 400);
+  try {
+    const items = await loadDoItemsForReturn(c.var.DB, doId);
+    return c.json({ success: true, data: items });
+  } catch (err) {
+    console.error("[delivery-returns/do-items] failed:", err);
+    return c.json({ success: false, error: "Failed to load the delivery order's items" }, 500);
+  }
+});
+
 app.post("/", async (c) => {
   const denied = await requirePermission(c, "delivery-orders", "update");
   if (denied) return denied;

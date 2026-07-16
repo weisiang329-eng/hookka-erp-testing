@@ -20,6 +20,14 @@ import {
 import { csrfHeaders } from "@/lib/csrf";
 import { compareDoLinesByCustomerPO } from "@/lib/do-item-order";
 
+type PublicDoLine = {
+  productionOrderId: string;
+  poNo: string;
+  productCode: string;
+  productName: string;
+  quantity: number;
+};
+
 type PublicDoSummary = {
   id: string;
   doNo: string;
@@ -30,6 +38,9 @@ type PublicDoSummary = {
   productNames: string[];
   // Delivered "with issues" — paperwork incomplete, invoice on hold.
   incomplete?: boolean;
+  // Full line list — powers the "which items are returning?" checklist on
+  // Delivered with Issue.
+  items?: PublicDoLine[];
 };
 
 type PublicPayload =
@@ -306,6 +317,19 @@ export default function DoScanPage() {
     {},
   );
 
+  // ── Delivered with Issue — tick which lines are being RETURNED ───────────
+  const [issueOpen, setIssueOpen] = useState(false);
+  // doId → set of production-order ids ticked = "returning" (not delivered).
+  const [returnByDo, setReturnByDo] = useState<Record<string, Set<string>>>({});
+  const toggleReturn = (doId: string, poId: string) => {
+    setReturnByDo((prev) => {
+      const cur = new Set(prev[doId] ?? []);
+      if (cur.has(poId)) cur.delete(poId);
+      else cur.add(poId);
+      return { ...prev, [doId]: cur };
+    });
+  };
+
   // No synchronous setState before the first await — `loading` starts true
   // and every write below lands in the async continuation, so the mount
   // effect's call stack stays setState-free (react-hooks/set-state-in-effect).
@@ -347,6 +371,20 @@ export default function DoScanPage() {
   const action = useMemo(
     () => (payload ? nextAction(payload.dos) : null),
     [payload],
+  );
+
+  // DOs at the deliver step (LOADED/IN_TRANSIT) — the return-picker lists these.
+  const deliverableDos = useMemo(
+    () =>
+      (payload?.dos ?? []).filter((d) => {
+        const s = (d.status || "").toUpperCase();
+        return s === "LOADED" || s === "IN_TRANSIT";
+      }),
+    [payload],
+  );
+  const returnedCount = useMemo(
+    () => deliverableDos.reduce((n, d) => n + (returnByDo[d.id]?.size ?? 0), 0),
+    [deliverableDos, returnByDo],
   );
 
   const allCancelled = useMemo(
@@ -446,18 +484,19 @@ export default function DoScanPage() {
   const handleAdvance = async (
     mode: ActionMode,
     edits?: Record<string, string[]>,
+    returnItems?: Record<string, string[]>,
   ) => {
     if (!token || busy) return;
     // The two-tap arm→confirm guard applies to the big top-level buttons. An
-    // edited dispatch (edits supplied from the Adjust-load panel) is already a
-    // deliberate action with its own button, so it fires immediately.
-    if (!edits && armed !== mode) {
+    // edited dispatch (Adjust-load panel) and a Delivered-with-Issue return
+    // (return-picker panel) are already deliberate actions with their own
+    // confirm button, so they fire immediately.
+    if (!edits && returnItems === undefined && armed !== mode) {
       setArmed(mode);
       return;
     }
     const apiAction: "DISPATCH" | "DELIVER" =
       mode === "DISPATCH" ? "DISPATCH" : "DELIVER";
-    const incomplete = mode === "DELIVER_ISSUE";
     setBusy(true);
     setAdvanceError(null);
     try {
@@ -471,7 +510,10 @@ export default function DoScanPage() {
           headers: csrfHeaders(),
           body: JSON.stringify({
             action: apiAction,
-            incomplete,
+            // Delivered-with-Issue: per-DO production-order ids the driver
+            // ticked as returned → the backend opens a Delivery Return for
+            // just those and delivers/invoices the rest.
+            ...(returnItems ? { returnItems } : {}),
             // Edited item set per DO (production-order ids) — only sent for a
             // dispatch from the Adjust-load panel; the server rebuilds the
             // trusted items from these ids.
@@ -490,6 +532,7 @@ export default function DoScanPage() {
       if (j.data.done > 0) {
         setJustCompleted(mode);
         setEditOpen(false);
+        setIssueOpen(false);
       } else if (j.data.failed > 0) {
         setAdvanceError(
           j.data.results.find((x) => x.outcome === "FAILED")?.note ||
@@ -502,6 +545,21 @@ export default function DoScanPage() {
       setArmed(null);
       setBusy(false);
     }
+  };
+
+  // Confirm the deliver step with the ticked returns. Any ticked → those lines
+  // open a Delivery Return + the rest deliver; none ticked → a plain delivery.
+  const submitIssue = () => {
+    const picks: Record<string, string[]> = {};
+    for (const d of deliverableDos) {
+      const ids = [...(returnByDo[d.id] ?? new Set<string>())];
+      if (ids.length) picks[d.id] = ids;
+    }
+    void handleAdvance(
+      Object.keys(picks).length > 0 ? "DELIVER_ISSUE" : "DELIVER_OK",
+      undefined,
+      picks,
+    );
   };
 
   return (
@@ -556,9 +614,10 @@ export default function DoScanPage() {
               </div>
             )}
 
-            {/* Success state */}
+            {/* Success state — delivery always succeeded (the flagged lines are
+                just recorded as a return); green in every case. */}
             {justCompleted && (
-              <div className="rounded-xl bg-[#4F7C3A] text-white p-6 text-center shadow-sm">
+              <div className="rounded-xl text-white p-6 text-center shadow-sm bg-[#4F7C3A]">
                 <CheckCircle2 className="h-14 w-14 mx-auto" strokeWidth={2.5} />
                 <p className="text-2xl font-bold mt-2">
                   {justCompleted === "DISPATCH" ? "Dispatched" : "Delivered"}
@@ -566,7 +625,9 @@ export default function DoScanPage() {
                 <p className="text-sm opacity-90 mt-1">
                   {justCompleted === "DISPATCH"
                     ? "The goods are marked as on the way."
-                    : "Delivery confirmed. Thank you!"}
+                    : justCompleted === "DELIVER_ISSUE"
+                      ? "The flagged items are set aside as a return — the office will process them."
+                      : "Delivery confirmed. Thank you!"}
                 </p>
               </div>
             )}
@@ -632,7 +693,7 @@ export default function DoScanPage() {
             {/* Action button — one forward step: Mark Dispatched, then Mark
                 Delivered. (The "Delivered with issues" outcome is parked — no
                 downstream process yet; office handles problems manually.) */}
-            {action && !justCompleted && !editOpen && (
+            {action && !justCompleted && !editOpen && !issueOpen && (
               <div className="space-y-3">
                 {action === "DISPATCH" ? (
                   <ActionButton
@@ -645,15 +706,31 @@ export default function DoScanPage() {
                     label="Mark Dispatched"
                   />
                 ) : (
-                  <ActionButton
-                    mode="DELIVER_OK"
-                    armed={armed}
-                    busy={busy}
-                    onTap={(m) => void handleAdvance(m)}
-                    tone="bg-[#4F7C3A] active:bg-[#426832] text-white"
-                    icon={<CheckCircle2 className="h-5 w-5" />}
-                    label="Mark Delivered"
-                  />
+                  <>
+                    <ActionButton
+                      mode="DELIVER_OK"
+                      armed={armed}
+                      busy={busy}
+                      onTap={(m) => void handleAdvance(m)}
+                      tone="bg-[#4F7C3A] active:bg-[#426832] text-white"
+                      icon={<CheckCircle2 className="h-5 w-5" />}
+                      label="Mark Delivered"
+                    />
+                    {/* Some items have a problem and are coming back. Opens the
+                        return-picker: tick the returned lines → they open a
+                        Delivery Return, the rest deliver + invoice as normal. */}
+                    {!armed && (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setIssueOpen(true)}
+                        className="w-full rounded-xl bg-white border border-[#D89B3A] text-[#8A5A12] active:bg-[#FBF3E4] py-4 text-lg font-bold shadow-sm flex items-center justify-center gap-2 disabled:opacity-60"
+                      >
+                        <AlertTriangle className="h-5 w-5" />
+                        Delivered with Issue
+                      </button>
+                    )}
+                  </>
                 )}
                 {armed && !busy && (
                   <button
@@ -683,6 +760,121 @@ export default function DoScanPage() {
                 {editError && (
                   <p className="text-sm text-center text-[#9A3A2D]">{editError}</p>
                 )}
+              </div>
+            )}
+
+            {/* Return-picker panel (Delivered with Issue) — tick the lines that
+                are coming back. Ticked lines open a Delivery Return; every other
+                line is delivered + invoiced. Nothing ticked = a plain delivery. */}
+            {issueOpen && !justCompleted && (
+              <div className="space-y-3">
+                <div className="rounded-xl bg-white shadow-sm border border-[#E6E0D9] p-4 space-y-1">
+                  <p className="text-base font-bold text-[#1F1D1B]">
+                    Which items are coming back?
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    Tick the items with a problem that are being returned. The
+                    rest are delivered as normal. The office processes the return.
+                  </p>
+                </div>
+
+                {deliverableDos.map((d) => {
+                  const picked = returnByDo[d.id] ?? new Set<string>();
+                  const items = d.items ?? [];
+                  return (
+                    <div
+                      key={d.id}
+                      className="rounded-xl bg-white shadow-sm border border-[#E6E0D9] p-4 space-y-3"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="text-sm font-bold text-[#1F1D1B]">{d.doNo}</p>
+                        <span className="truncate text-xs text-gray-500 text-right shrink-0">
+                          {d.customerName}
+                          {d.area ? ` · ${d.area}` : ""}
+                        </span>
+                      </div>
+                      {items.length === 0 ? (
+                        <p className="text-xs text-gray-400">No items on this order.</p>
+                      ) : (
+                        <div className="space-y-1.5">
+                          {items.map((it) => {
+                            const on = picked.has(it.productionOrderId);
+                            return (
+                              <label
+                                key={it.productionOrderId}
+                                className={`flex items-center gap-2.5 rounded-lg border p-2.5 cursor-pointer ${
+                                  on
+                                    ? "border-[#C08457]/60 bg-[#9A3A2D]/5"
+                                    : "border-[#E6E0D9]"
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={on}
+                                  onChange={() =>
+                                    toggleReturn(d.id, it.productionOrderId)
+                                  }
+                                  className="h-4 w-4 accent-[#9A3A2D]"
+                                />
+                                <div className="min-w-0 flex-1">
+                                  <p className="truncate text-sm font-bold text-[#1F1D1B]">
+                                    {it.productCode || it.productName || it.poNo || "Item"}
+                                  </p>
+                                  {it.productName && it.productCode && (
+                                    <p className="truncate text-xs text-gray-400">
+                                      {it.productName}
+                                    </p>
+                                  )}
+                                </div>
+                                <span className="shrink-0 text-xs font-semibold text-[#1F1D1B]">
+                                  ×{it.quantity}
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+
+                <div className="rounded-xl bg-white shadow-sm border border-[#E6E0D9] p-4 space-y-3">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-gray-600">Returning</span>
+                    <span className="font-semibold text-[#9A3A2D]">
+                      {returnedCount} item{returnedCount === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                  {advanceError && (
+                    <p className="text-sm text-[#9A3A2D]">{advanceError}</p>
+                  )}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={submitIssue}
+                    className="w-full rounded-xl bg-[#4F7C3A] active:bg-[#426832] text-white py-3.5 text-base font-bold shadow-sm flex items-center justify-center gap-2 disabled:opacity-60"
+                  >
+                    {busy ? (
+                      <span className="h-5 w-5 rounded-full border-2 border-current border-t-transparent animate-spin" />
+                    ) : (
+                      <CheckCircle2 className="h-5 w-5" />
+                    )}
+                    {returnedCount > 0
+                      ? `Deliver — return ${returnedCount} item${returnedCount === 1 ? "" : "s"}`
+                      : "Mark Delivered"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => {
+                      setIssueOpen(false);
+                      setReturnByDo({});
+                    }}
+                    className="w-full rounded-xl bg-white border border-[#E6E0D9] text-gray-600 py-2.5 text-sm font-medium disabled:opacity-60"
+                  >
+                    Cancel
+                  </button>
+                </div>
               </div>
             )}
 

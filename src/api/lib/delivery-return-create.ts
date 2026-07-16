@@ -29,6 +29,10 @@ export type DRCreateItem = {
   sizeLabel?: string;
   specialOrder?: string;
   salesOrderNo?: string;
+  /** The line's own SO refs — a DO can span several SOs, so the DO header's
+   *  single customer PO can't identify a line (owner 2026-07-16). */
+  customerPO?: string;
+  reference?: string;
 };
 
 let tablesEnsured = false;
@@ -57,7 +61,8 @@ export async function ensureDeliveryReturnTables(
            wip_label TEXT, quantity DOUBLE PRECISION NOT NULL DEFAULT 1,
            problem TEXT, disposition TEXT, fg_unit_id TEXT,
            was_invoiced INTEGER NOT NULL DEFAULT 0,
-           fabric_code TEXT, size_label TEXT, special_order TEXT, sales_order_no TEXT )`,
+           fabric_code TEXT, size_label TEXT, special_order TEXT, sales_order_no TEXT,
+           customer_po TEXT, reference TEXT )`,
       )
       .run();
     // Rich-snapshot columns for tables created before the enrichment (runtime
@@ -67,6 +72,11 @@ export async function ensureDeliveryReturnTables(
       "size_label TEXT",
       "special_order TEXT",
       "sales_order_no TEXT",
+      // Owner 2026-07-16: two identical lines (e.g. the same bedframe twice)
+      // are indistinguishable without their order refs — carry the SO's
+      // customer PO + Reference per line, not just the DO header's single one.
+      "customer_po TEXT",
+      "reference TEXT",
     ]) {
       try {
         await db
@@ -144,7 +154,7 @@ export async function loadDoItemsForReturn(
       salesOrderNo: string | null;
       quantity: number | null;
     }>();
-  return (res.results ?? [])
+  const items: DRCreateItem[] = (res.results ?? [])
     .filter(
       (r) =>
         !onlyProductionOrderIds ||
@@ -161,7 +171,41 @@ export async function loadDoItemsForReturn(
       specialOrder: r.specialOrder ?? "",
       salesOrderNo: r.salesOrderNo ?? "",
       quantity: Number(r.quantity ?? 1),
+      customerPO: "",
+      reference: "",
     }));
+
+  // delivery_order_items only carries the SO NUMBER — look the SO up to get its
+  // customer PO + Reference so each returned line can be told apart (two
+  // identical products on one DO are otherwise identical on screen).
+  try {
+    const soNos = [...new Set(items.map((i) => i.salesOrderNo).filter(Boolean))] as string[];
+    if (soNos.length) {
+      const ph = soNos.map(() => "?").join(",");
+      const so = await db
+        .prepare(
+          `SELECT companySOId AS "companySOId", customerPOId AS "customerPOId",
+                  reference AS "reference"
+             FROM sales_orders WHERE companySOId IN (${ph})`,
+        )
+        .bind(...soNos)
+        .all<{ companySOId: string; customerPOId: string | null; reference: string | null }>();
+      const refs = new Map<string, { po: string; ref: string }>();
+      for (const s of so.results ?? [])
+        refs.set(s.companySOId, { po: s.customerPOId ?? "", ref: s.reference ?? "" });
+      for (const it of items) {
+        const hit = refs.get(it.salesOrderNo ?? "");
+        if (hit) {
+          it.customerPO = hit.po;
+          it.reference = hit.ref;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("[delivery-return-create] SO ref lookup failed:", err);
+  }
+
+  return items;
 }
 
 // Create a Delivery Return document from a DO + a set of returned lines.
@@ -277,8 +321,9 @@ export async function createDeliveryReturnRecord(
             `INSERT INTO delivery_return_items
                (id, delivery_return_id, production_order_id, po_no, product_code,
                 product_name, wip_label, quantity, problem, disposition, fg_unit_id, was_invoiced,
-                fabric_code, size_label, special_order, sales_order_no)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
+                fabric_code, size_label, special_order, sales_order_no,
+                customer_po, reference)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             genItemId(),
@@ -296,6 +341,8 @@ export async function createDeliveryReturnRecord(
             String(it.sizeLabel ?? ""),
             String(it.specialOrder ?? ""),
             String(it.salesOrderNo ?? ""),
+            String(it.customerPO ?? ""),
+            String(it.reference ?? ""),
           ),
       );
     }

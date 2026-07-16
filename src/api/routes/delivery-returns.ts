@@ -63,6 +63,8 @@ type ReturnItemRow = {
   sizeLabel: string | null;
   specialOrder: string | null;
   salesOrderNo: string | null;
+  customerPO: string | null;
+  reference: string | null;
 };
 
 const HEADER_COLS = `id, return_no AS "returnNo", delivery_order_id AS "deliveryOrderId",
@@ -76,7 +78,8 @@ const ITEM_COLS = `id, delivery_return_id AS "deliveryReturnId", production_orde
   po_no AS "poNo", product_code AS "productCode", product_name AS "productName",
   wip_label AS "wipLabel", quantity, problem, disposition, fg_unit_id AS "fgUnitId",
   was_invoiced AS "wasInvoiced", fabric_code AS "fabricCode", size_label AS "sizeLabel",
-  special_order AS "specialOrder", sales_order_no AS "salesOrderNo"`;
+  special_order AS "specialOrder", sales_order_no AS "salesOrderNo",
+  customer_po AS "customerPO", reference AS "reference"`;
 
 function rowToItem(r: ReturnItemRow) {
   return {
@@ -95,6 +98,8 @@ function rowToItem(r: ReturnItemRow) {
     sizeLabel: r.sizeLabel ?? "",
     specialOrder: r.specialOrder ?? "",
     salesOrderNo: r.salesOrderNo ?? "",
+    customerPO: r.customerPO ?? "",
+    reference: r.reference ?? "",
   };
 }
 function rowToReturn(h: ReturnHeaderRow, items: ReturnItemRow[] = []) {

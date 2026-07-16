@@ -64,7 +64,12 @@ type ReturnItemRow = {
   specialOrder: string | null;
   salesOrderNo: string | null;
   customerPO: string | null;
+  customerSO: string | null;
   reference: string | null;
+  itemCategory: string | null;
+  divanHeightInches: number | null;
+  legHeightInches: number | null;
+  gapInches: number | null;
 };
 
 const HEADER_COLS = `id, return_no AS "returnNo", delivery_order_id AS "deliveryOrderId",
@@ -79,7 +84,9 @@ const ITEM_COLS = `id, delivery_return_id AS "deliveryReturnId", production_orde
   wip_label AS "wipLabel", quantity, problem, disposition, fg_unit_id AS "fgUnitId",
   was_invoiced AS "wasInvoiced", fabric_code AS "fabricCode", size_label AS "sizeLabel",
   special_order AS "specialOrder", sales_order_no AS "salesOrderNo",
-  customer_po AS "customerPO", reference AS "reference"`;
+  customer_po AS "customerPO", customer_so AS "customerSO", reference AS "reference",
+  item_category AS "itemCategory", divan_height_inches AS "divanHeightInches",
+  leg_height_inches AS "legHeightInches", gap_inches AS "gapInches"`;
 
 function rowToItem(r: ReturnItemRow) {
   return {
@@ -99,7 +106,12 @@ function rowToItem(r: ReturnItemRow) {
     specialOrder: r.specialOrder ?? "",
     salesOrderNo: r.salesOrderNo ?? "",
     customerPO: r.customerPO ?? "",
+    customerSO: r.customerSO ?? "",
     reference: r.reference ?? "",
+    itemCategory: r.itemCategory ?? "",
+    divanHeightInches: r.divanHeightInches ?? null,
+    legHeightInches: r.legHeightInches ?? null,
+    gapInches: r.gapInches ?? null,
   };
 }
 function rowToReturn(h: ReturnHeaderRow, items: ReturnItemRow[] = []) {

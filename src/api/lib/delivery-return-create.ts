@@ -32,7 +32,14 @@ export type DRCreateItem = {
   /** The line's own SO refs — a DO can span several SOs, so the DO header's
    *  single customer PO can't identify a line (owner 2026-07-16). */
   customerPO?: string;
+  customerSO?: string;
   reference?: string;
+  /** buildSpec() inputs, so the DR PDF renders the SAME variant string as the
+   *  DO/SO instead of a hand-rolled one (owner: "PDF 要根據全部 variant的"). */
+  itemCategory?: string;
+  divanHeightInches?: number | null;
+  legHeightInches?: number | null;
+  gapInches?: number | null;
 };
 
 let tablesEnsured = false;
@@ -76,7 +83,13 @@ export async function ensureDeliveryReturnTables(
       // are indistinguishable without their order refs — carry the SO's
       // customer PO + Reference per line, not just the DO header's single one.
       "customer_po TEXT",
+      "customer_so TEXT",
       "reference TEXT",
+      // buildSpec() inputs so the DR PDF prints the same variant as the DO/SO.
+      "item_category TEXT",
+      "divan_height_inches DOUBLE PRECISION",
+      "leg_height_inches DOUBLE PRECISION",
+      "gap_inches DOUBLE PRECISION",
     ]) {
       try {
         await db
@@ -175,34 +188,54 @@ export async function loadDoItemsForReturn(
       reference: "",
     }));
 
-  // delivery_order_items only carries the SO NUMBER — look the SO up to get its
-  // customer PO + Reference so each returned line can be told apart (two
-  // identical products on one DO are otherwise identical on screen).
+  // delivery_order_items carries only the SO number and a thin spec, but the DR
+  // (and its PDF) must show exactly what the DO/SO show. Mirror the DO's
+  // print-extras join — production_orders → its sales_order — to snapshot each
+  // line's OWN refs (customer PO / customer SO / Reference) and the build-spec
+  // inputs that buildSpec() needs. Joining by productionOrderId is exact; the
+  // SO number is just a label. Fails soft: a lookup miss leaves blanks.
   try {
-    const soNos = [...new Set(items.map((i) => i.salesOrderNo).filter(Boolean))] as string[];
-    if (soNos.length) {
-      const ph = soNos.map(() => "?").join(",");
-      const so = await db
+    const poIds = [...new Set(items.map((i) => i.productionOrderId).filter(Boolean))] as string[];
+    for (let i = 0; i < poIds.length; i += 400) {
+      const chunk = poIds.slice(i, i + 400);
+      const ph = chunk.map(() => "?").join(",");
+      const r = await db
         .prepare(
-          `SELECT companySOId AS "companySOId", customerPOId AS "customerPOId",
-                  reference AS "reference"
-             FROM sales_orders WHERE companySOId IN (${ph})`,
+          `SELECT po.id AS "poId", po.itemCategory AS "itemCategory",
+                  po.gapInches AS "gapInches", po.divanHeightInches AS "divanHeightInches",
+                  po.legHeightInches AS "legHeightInches",
+                  poso.customerPOId AS "customerPOId", poso.customerSOId AS "customerSOId",
+                  poso.reference AS "reference"
+             FROM production_orders po
+             LEFT JOIN sales_orders poso ON poso.id = po.salesOrderId
+            WHERE po.id IN (${ph})`,
         )
-        .bind(...soNos)
-        .all<{ companySOId: string; customerPOId: string | null; reference: string | null }>();
-      const refs = new Map<string, { po: string; ref: string }>();
-      for (const s of so.results ?? [])
-        refs.set(s.companySOId, { po: s.customerPOId ?? "", ref: s.reference ?? "" });
+        .bind(...chunk)
+        .all<{
+          poId: string;
+          itemCategory: string | null;
+          gapInches: number | null;
+          divanHeightInches: number | null;
+          legHeightInches: number | null;
+          customerPOId: string | null;
+          customerSOId: string | null;
+          reference: string | null;
+        }>();
+      const by = new Map((r.results ?? []).map((x) => [x.poId, x]));
       for (const it of items) {
-        const hit = refs.get(it.salesOrderNo ?? "");
-        if (hit) {
-          it.customerPO = hit.po;
-          it.reference = hit.ref;
-        }
+        const hit = by.get(it.productionOrderId ?? "");
+        if (!hit) continue;
+        it.itemCategory = hit.itemCategory ?? "";
+        it.gapInches = hit.gapInches ?? null;
+        it.divanHeightInches = hit.divanHeightInches ?? null;
+        it.legHeightInches = hit.legHeightInches ?? null;
+        it.customerPO = hit.customerPOId ?? "";
+        it.customerSO = hit.customerSOId ?? "";
+        it.reference = hit.reference ?? "";
       }
     }
   } catch (err) {
-    console.warn("[delivery-return-create] SO ref lookup failed:", err);
+    console.warn("[delivery-return-create] line-ref/spec lookup failed:", err);
   }
 
   return items;
@@ -322,8 +355,9 @@ export async function createDeliveryReturnRecord(
                (id, delivery_return_id, production_order_id, po_no, product_code,
                 product_name, wip_label, quantity, problem, disposition, fg_unit_id, was_invoiced,
                 fabric_code, size_label, special_order, sales_order_no,
-                customer_po, reference)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                customer_po, customer_so, reference,
+                item_category, divan_height_inches, leg_height_inches, gap_inches)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             genItemId(),
@@ -342,7 +376,12 @@ export async function createDeliveryReturnRecord(
             String(it.specialOrder ?? ""),
             String(it.salesOrderNo ?? ""),
             String(it.customerPO ?? ""),
+            String(it.customerSO ?? ""),
             String(it.reference ?? ""),
+            String(it.itemCategory ?? ""),
+            it.divanHeightInches ?? null,
+            it.legHeightInches ?? null,
+            it.gapInches ?? null,
           ),
       );
     }

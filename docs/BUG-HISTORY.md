@@ -59,7 +59,19 @@ Entries themselves stay newest-first.
 > HB + Divan as 5000+8000=13000; the real rule caps the pair at **RM 100**
 > (`pricing-options.ts:66`). 10 prod lines hit the combo. **Use 8,060.**
 >
-> **⏭ BACKFILL — OWNER APPROVED, NOT DONE. THIS IS THE NEXT JOB.**
+> **✅ BACKFILL — PHASE 1 EXECUTED ON PROD 2026-07-17.**
+> Ran `POST /api/admin/backfill-special-order-surcharge {confirm:true, scope:"uninvoiced"}`.
+> **78 sales orders / 100 lines / RM 10,640 re-priced.** Rehearsed on staging first
+> (74 SOs / RM 10,090), then prod. Verified: plan went RM 12,670 -> RM 2,030, and the
+> RM 2,030 that remains is exactly the 15 SOs that already have an invoice (correctly
+> skipped). Re-running is a no-op (idempotent). Spot-check SO-2607-043 on prod: both
+> `Divan Full Cover` lines now carry 8000, unit 42500->50500 and 40750->48750, order total
+> re-derived to 99250. No invoice was touched.
+> **TRUE SCOPE WAS BIGGER THAN FIRST REPORTED: RM 12,670 / 93 SOs / 121 lines** (not the
+> RM 8,060 / 66 SOs from the capped list sweep, and not the RM 13,640 first full sweep —
+> that one wrongly included service orders).
+>
+> **⏭ PHASE 2 — THE 15 INVOICED SOs (RM 2,030) — STILL TO DO.**
 >
 > **OWNER'S RULING 2026-07-17, asked twice, verbatim: 「改罷了 然後我們重新法國」**
 > (法國 = 發過 — autocorrect). Meaning: **re-price the old SOs and invoices, and HE re-sends

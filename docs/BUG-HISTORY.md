@@ -71,7 +71,31 @@ Entries themselves stay newest-first.
 > RM 8,060 / 66 SOs from the capped list sweep, and not the RM 13,640 first full sweep —
 > that one wrongly included service orders).
 >
-> **⏭ PHASE 2 — THE 15 INVOICED SOs (RM 2,030) — STILL TO DO.**
+> **✅ PHASE 2 EXECUTED ON PROD 2026-07-17 — 10 invoices + their 10 SOs, RM 1,280.**
+> Sequence (rehearsed on staging first): correct the INVOICE via
+> `PUT /api/invoices/:id {priceEdits}` — the only path that restates the GL on a SENT
+> invoice — THEN re-price just those SOs via the executor's `soNos` allow-list. Verified:
+> `INV-2606-039` now carries Special 32000 (unit 42500 -> 74500, priceEdited=1, still SENT).
+>
+> **THE CONFIG READ EARNED ITS KEEP:** that 32000 is Left+Right Drawer at the OWNER'S
+> `kv_config` price of **16000 each** — the static catalog in `pricing-options.ts` still says
+> 15000 (and Front Drawer 12000 vs the live 13000). Deriving from the static table would have
+> under-charged every drawer by RM 10-20.
+>
+> **⚠️ TRAP CAUGHT ON STAGING — DO NOT REPEAT:** running the executor with `scope:"all"` and
+> no allow-list re-prices ALL invoiced SOs, including ones whose invoice could NOT be
+> corrected. That leaves the SO at RM 80 and its invoice at RM 0 — a SILENT disagreement that
+> is then INVISIBLE, because both planners key off `specialOrderPriceSen = 0`. Always pass
+> `soNos` = exactly the SOs whose invoice actually moved.
+>
+> **⏭ REMAINS: 5 SOs / RM 750 — NEEDS THE OWNER, the planner REFUSED to guess.**
+> `GET /api/admin/backfill-invoiced-plan` → `needsManual`:
+> • **SO-2605-234, SO-2605-185, SO-2606-135** — each has TWO live SENT invoices; which one
+>   carries the surcharge is a business call, not a guess.
+> • **SO-2605-121** (INV-2606-058) and **SO-2605-275** (INV-2606-136) — the owed SO line
+>   (`1007-(Q)|PC151-16` / `1007-(Q)|PC151-01`) has no unmatched line on the invoice.
+> Both sides are UNTOUCHED on these 5 — SO and invoice still agree (both un-surcharged), so
+> nothing is inconsistent; they are simply still under-billed by RM 750 total.
 >
 > **OWNER'S RULING 2026-07-17, asked twice, verbatim: 「改罷了 然後我們重新法國」**
 > (法國 = 發過 — autocorrect). Meaning: **re-price the old SOs and invoices, and HE re-sends

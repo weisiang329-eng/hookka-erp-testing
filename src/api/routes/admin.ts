@@ -39,6 +39,7 @@ import {
 import { deriveSpecialOrderSurchargeSen } from "../../lib/special-order-surcharge";
 import { loadSpecialsConfig } from "../lib/specials-config";
 import { emitAudit } from "../lib/audit";
+import { ensureInvoicePoLinkColumn } from "../lib/invoice-po-link";
 
 const app = new Hono<Env>();
 
@@ -1449,6 +1450,146 @@ app.get("/backfill-special-order-surcharge", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/admin/backfill-invoice-po-link — one-shot; delete once run.
+//
+// BUG-2026-07-17-001. New invoices now store invoice_items.production_order_id
+// (the DO line they were billed from). Existing invoices don't, so their
+// printout still falls back to guessing the customer PO by product code. This
+// re-attaches the link to the invoices already in the system.
+//
+// HOW — and why this is safe rather than another guess:
+// invoice lines are generated FROM the DO's lines, in order, minus any line
+// that went into a Delivery Return (computeDoInvoiceLines). So for an invoice
+// whose surviving DO-line count EQUALS its invoice-line count, position i maps
+// to position i. Verified on prod against DO-2606-001 / INV-2606-082: 9 lines,
+// every position matching on productCode|fabricCode.
+//
+// The guard is what makes it honest: each position must ALSO agree on
+// productCode|fabricCode. Any invoice where the counts differ or a position
+// disagrees is SKIPPED whole and reported — never partially written, never
+// guessed. Those keep the old fallback behaviour, exactly as today.
+//
+// Body: { confirm: true }. Idempotent: only fills rows still NULL.
+// ---------------------------------------------------------------------------
+app.post("/backfill-invoice-po-link", async (c) => {
+  const su = requireSuperAdmin(c);
+  if (su) return su;
+  const db = c.var.DB;
+  const body = await c.req.json().catch(() => ({}));
+  const dryRun = (body as { confirm?: unknown })?.confirm !== true;
+
+  await ensureInvoicePoLinkColumn(db);
+
+  const invs = await db
+    .prepare(
+      `SELECT id, invoiceNo, deliveryOrderId FROM invoices
+        WHERE deliveryOrderId IS NOT NULL AND deliveryOrderId != ''`,
+    )
+    .all<{ id: string; invoiceNo: string | null; deliveryOrderId: string }>();
+
+  let linked = 0;
+  let invoicesLinked = 0;
+  const skipped: Array<{ invoiceNo: string; reason: string }> = [];
+  const stmts: unknown[] = [];
+
+  for (const inv of invs.results ?? []) {
+    const [itemsRes, doRes] = await Promise.all([
+      db
+        .prepare(
+          "SELECT id, productCode, fabricCode, production_order_id FROM invoice_items WHERE invoiceId = ?",
+        )
+        .bind(inv.id)
+        .all<{
+          id: string; productCode: string | null; fabricCode: string | null;
+          production_order_id: string | null;
+        }>(),
+      db
+        .prepare(
+          `SELECT productionOrderId, productCode, fabricCode
+             FROM delivery_order_items WHERE deliveryOrderId = ?`,
+        )
+        .bind(inv.deliveryOrderId)
+        .all<{
+          productionOrderId: string | null;
+          productCode: string | null; fabricCode: string | null;
+        }>(),
+    ]);
+    const items = itemsRes.results ?? [];
+    const doItems = doRes.results ?? [];
+    if (items.length === 0) continue;
+    if (items.every((i) => i.production_order_id)) continue; // already done
+
+    // Returned lines drop out of the invoice, so the counts only line up when
+    // nothing was returned. Anything else is ambiguous → skip whole.
+    if (items.length !== doItems.length) {
+      skipped.push({
+        invoiceNo: inv.invoiceNo ?? inv.id,
+        reason: `line count differs (invoice ${items.length} vs DO ${doItems.length}) — likely a delivery return; refusing to guess`,
+      });
+      continue;
+    }
+    const aligned = items.every(
+      (it, i) =>
+        (it.productCode ?? "").trim() === (doItems[i].productCode ?? "").trim() &&
+        (it.fabricCode ?? "").trim() === (doItems[i].fabricCode ?? "").trim(),
+    );
+    if (!aligned) {
+      skipped.push({
+        invoiceNo: inv.invoiceNo ?? inv.id,
+        reason: "positions disagree on productCode|fabricCode — refusing to guess",
+      });
+      continue;
+    }
+
+    let any = false;
+    items.forEach((it, i) => {
+      const po = doItems[i].productionOrderId;
+      if (!po || it.production_order_id) return;
+      any = true;
+      linked++;
+      stmts.push(
+        db
+          .prepare(
+            "UPDATE invoice_items SET production_order_id = ? WHERE id = ? AND production_order_id IS NULL",
+          )
+          .bind(po, it.id),
+      );
+    });
+    if (any) invoicesLinked++;
+  }
+
+  if (!dryRun && stmts.length > 0) {
+    // Chunked — a single batch of thousands of statements risks the Worker's
+    // subrequest ceiling, and a half-applied batch here is harmless (the column
+    // is additive and the fill is idempotent) but noisy.
+    const CHUNK = 500;
+    for (let i = 0; i < stmts.length; i += CHUNK) {
+      await db.batch(stmts.slice(i, i + CHUNK) as never[]);
+    }
+    await emitAudit(c, {
+      resource: "invoices",
+      resourceId: "backfill-invoice-po-link",
+      action: "backfill-invoice-po-link",
+      source: "admin",
+      after: { invoicesLinked, linesLinked: linked, skipped: skipped.length, bug: "BUG-2026-07-17-001" },
+    });
+  }
+
+  return c.json({
+    success: true,
+    dryRun,
+    invoicesScanned: (invs.results ?? []).length,
+    invoicesLinked,
+    linesLinked: linked,
+    skippedCount: skipped.length,
+    skipped: skipped.slice(0, 40),
+    note: dryRun
+      ? "DRY RUN — nothing written. POST { confirm: true } to apply."
+      : "Linked. Skipped invoices keep the old code-matching fallback.",
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/admin/backfill-invoiced-plan — PHASE 2 planner (read-only)
 //
 // The 15 SOs that phase 1 skipped because they already have an invoice
@@ -1676,6 +1817,22 @@ app.post("/backfill-special-order-surcharge", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const confirm = (body as { confirm?: unknown })?.confirm === true;
   const scope = String((body as { scope?: unknown })?.scope ?? "uninvoiced");
+  // Optional allow-list of companySOId. REQUIRED IN PRACTICE FOR scope:"all".
+  //
+  // Staging rehearsal caught this: scope:"all" re-priced ALL 15 invoiced SOs
+  // while only 10 of their invoices could be corrected (the other 5 were refused
+  // as ambiguous — two live invoices, or no matching invoice line). That leaves
+  // the SO saying RM 80 and its invoice saying RM 0 — a SILENT disagreement, and
+  // worse, invisible afterwards because both planners key off
+  // specialOrderPriceSen = 0. Restricting to the SOs whose invoice actually
+  // moved keeps the two sides in lockstep.
+  const onlySoNos = Array.isArray((body as { soNos?: unknown })?.soNos)
+    ? new Set(
+        ((body as { soNos: unknown[] }).soNos)
+          .map((x) => String(x).trim())
+          .filter(Boolean),
+      )
+    : null;
   if (!confirm) {
     return c.json(
       { success: false, error: "Refusing to write without { confirm: true }." },
@@ -1728,6 +1885,7 @@ app.post("/backfill-special-order-surcharge", async (c) => {
     if (r.isServiceOrder === true || r.isServiceOrder === 1) continue;
     if (String(r.companySOId ?? "").toUpperCase().startsWith("SV-")) continue;
     if ((Number(r.specialOrderPriceSen) || 0) > 0) continue; // idempotent
+    if (onlySoNos && !onlySoNos.has(String(r.companySOId ?? "").trim())) continue;
     const owed = deriveSpecialOrderSurchargeSen(r.specialOrder, null, cfgSpecials);
     if (owed <= 0) continue;
     if (scope === "uninvoiced" && invoicedSoIds.has(r.salesOrderId)) {

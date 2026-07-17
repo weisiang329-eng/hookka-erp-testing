@@ -1477,6 +1477,15 @@ app.post("/backfill-invoice-po-link", async (c) => {
   const db = c.var.DB;
   const body = await c.req.json().catch(() => ({}));
   const dryRun = (body as { confirm?: unknown })?.confirm !== true;
+  // Bounded per call, and RESUMABLE: the write is idempotent (only fills NULLs)
+  // and skips invoices already fully linked, so the caller just re-POSTs until
+  // invoicesLinked comes back 0. Doing all ~2,000 updates in one request had the
+  // client abort mid-flight — and a request that dies halfway through a money
+  // table is exactly what we don't want, even when it's only additive.
+  const maxInvoices = Math.max(
+    1,
+    Math.min(500, Number((body as { limit?: unknown })?.limit) || 60),
+  );
 
   await ensureInvoicePoLinkColumn(db);
 
@@ -1541,9 +1550,19 @@ app.post("/backfill-invoice-po-link", async (c) => {
     // Returned lines drop out of the invoice, so the counts only line up when
     // nothing was returned. Anything else is ambiguous → skip whole.
     if (items.length !== doItems.length) {
+      // Measured on staging (25 skips): 16 have MORE invoice lines than DO
+      // lines — those were billed via computeDoInvoiceLines' fallback, which
+      // bills the SO's lines directly when the DO had nothing priceable, so
+      // there is no DO line behind them and no link to carry (correct to skip,
+      // permanently). 1 had FEWER — a delivery return dropped a line, which
+      // shifts every position after it. Either way: don't guess.
+      const why =
+        items.length > doItems.length
+          ? "billed from the SO lines, not the DO lines (no DO line behind them) — nothing to link"
+          : "a delivery return dropped a line, so positions shift — refusing to guess";
       skipped.push({
         invoiceNo: inv.invoiceNo ?? inv.id,
-        reason: `line count differs (invoice ${items.length} vs DO ${doItems.length}) — likely a delivery return; refusing to guess`,
+        reason: `line count differs (invoice ${items.length} vs DO ${doItems.length}): ${why}`,
       });
       continue;
     }
@@ -1575,6 +1594,8 @@ app.post("/backfill-invoice-po-link", async (c) => {
       );
     });
     if (any) invoicesLinked++;
+    // Bounded per call — re-POST to continue (see maxInvoices).
+    if (!dryRun && invoicesLinked >= maxInvoices) break;
   }
 
   if (!dryRun && stmts.length > 0) {

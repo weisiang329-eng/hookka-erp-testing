@@ -188,7 +188,21 @@ async function resolveRecipients(
       let list: string[] = [];
       try {
         const parsed = JSON.parse(row.value);
-        list = Array.isArray(parsed) ? parsed.map((x) => String(x)) : String(parsed).split(",");
+        // Accept every shape this row can legitimately hold. PUT /api/kv-config/:key
+        // stores `JSON.stringify(WHOLE BODY)`, so a client that posts
+        // { value: [...] } lands `{"value":[...]}` while one that posts the bare
+        // array lands `[...]`. My first cut only handled the bare array, read
+        // `{value:[…]}` as "[object Object]", found no valid emails and fell
+        // through — and the brief went to all 5 SUPER_ADMINs, which is exactly
+        // what this setting exists to prevent. Handle both, and a plain string.
+        const inner =
+          parsed && typeof parsed === "object" && !Array.isArray(parsed) &&
+          "value" in (parsed as Record<string, unknown>)
+            ? (parsed as { value: unknown }).value
+            : parsed;
+        list = Array.isArray(inner)
+          ? inner.map((x) => String(x))
+          : String(inner ?? "").split(",");
       } catch {
         list = String(row.value).split(",");
       }

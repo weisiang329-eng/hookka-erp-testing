@@ -172,6 +172,38 @@ async function resolveRecipients(
       .map((s) => s.trim())
       .filter((s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s));
   }
+  // Owner-set list — kv_config['daily_report_recipients'], a JSON array or a
+  // comma-separated string. Sits between the env override and the SUPER_ADMIN
+  // fallback so the owner can pin WHO gets the brief without a deploy.
+  //
+  // Why the DB and not wrangler.toml / code: this repo is PUBLIC. Staff emails
+  // are personal data and must not be committed. (Owner 2026-07-17, after the
+  // fallback was fixed and would otherwise have started emailing all 5
+  // SUPER_ADMINs incl. an outside party: 「send 我和violet 就行」.)
+  try {
+    const row = await c.var.DB
+      .prepare("SELECT value FROM kv_config WHERE key = 'daily_report_recipients'")
+      .first<{ value: string }>();
+    if (row?.value) {
+      let list: string[] = [];
+      try {
+        const parsed = JSON.parse(row.value);
+        list = Array.isArray(parsed) ? parsed.map((x) => String(x)) : String(parsed).split(",");
+      } catch {
+        list = String(row.value).split(",");
+      }
+      const clean = list
+        .map((s) => s.trim())
+        .filter((s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s));
+      if (clean.length > 0) return clean;
+      console.warn(
+        "[reports/resolveRecipients] kv_config.daily_report_recipients is set but has no valid emails — falling through to SUPER_ADMINs.",
+      );
+    }
+  } catch {
+    /* no kv_config row / unreadable → fall through */
+  }
+
   // Fallback — the SUPER_ADMINs.
   //
   // BUG-2026-07-17-003: this used to be `WHERE roleId = 'SUPER_ADMIN'`, which

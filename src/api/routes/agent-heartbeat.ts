@@ -126,59 +126,22 @@ app.post("/heartbeat", async (c) => {
     console.warn("[agents/heartbeat] stuck-run reap failed:", err);
   }
 
-  // ── 1 · Backlog drain FIRST ────────────────────────────────────────────────
-  // Applying queued due dates is the light, high-value work; generating fresh
-  // proposals is the heavy engine run. It used to be the other way round, so a
-  // heavy generation that blew the Worker's limits killed the whole beat before
-  // a single due date was written — the backlog grew to 1,700 while the console
-  // said full-auto (owner 2026-07-16). Drain first: even if generation dies
-  // later this beat, the queue still moved.
-  // NOT clocked off at 8pm, unlike the agents' decision-making. "下班" means the
-  // agent stops DECIDING things overnight — but the drain decides nothing: it
-  // only finishes writing due dates the engine already worked out during the
-  // day. Holding a queued write until 8am just means the owner finds the board
-  // still half-empty in the morning (owner 2026-07-16: "1598條為什麼不是順著
-  // clear，也是要8點?"). Let it finish overnight; the board is complete by then.
-  try {
-    if (await isAutoApproveOn(db, "PRODUCTION")) {
-      const pend = await db
-        .prepare("SELECT COUNT(*) AS n FROM schedule_proposals WHERE status = 'PENDING'")
-        .bind()
-        .first<{ n: number | string }>();
-      if ((Number(pend?.n) || 0) > 0) {
-        await recordAgentRun(db, "production-proposals", async (run) => {
-          // 150 → 1000 (2026-07-17). The 150 was sized for the old per-row
-          // drain (2 round-trips a row = 300 a beat, which never finished). Now
-          // that it's set-based, 1000 rows is ~10 round-trips — and it MATTERS:
-          // the beat only fires every 1-3.5h in practice (GitHub drops the
-          // schedule), so at 150/beat a backlog like today's 1,022 would take a
-          // full day to clear. One beat should be able to finish the queue.
-          const a = await applyPendingProposals(db, { decidedBy: "AGENT_AUTO", limit: 1000 });
-          const summary = `auto-applied ${a.approved} queued due date(s), ${a.remainingPending} remaining (heartbeat drain)`;
-          run.setSummary(summary);
-          ran.push({ task: "production-proposals", reason: "backlog drain", summary });
-          return a;
-        });
-      }
-    }
-  } catch (err) {
-    console.error("[agents/heartbeat] backlog drain failed:", err);
-  }
-
-  // ── 2 · CHEAP, INDEPENDENT DIGESTS BEFORE THE HEAVY GENERATION ───────────
-  // These two are read-only count queries — milliseconds. They used to sit at
-  // the BOTTOM of the beat, AFTER the proposals generation. The beat runs
-  // sequentially in one Worker invocation, so when that heavy generation blew
-  // the Worker's limits and the whole invocation was killed, these never ran:
-  // on 2026-07-17 the Employee and Service agents had not run for 28 HOURS
-  // while production-proposals sat at status=running (a zombie), and all four
-  // of that day's beats died the same way. A try/catch cannot save them — the
-  // Worker is killed, not thrown.
+  // ── 1 · CHEAP, INDEPENDENT DIGESTS FIRST (before ANY heavy work) ─────────────
+  // These two are read-only count queries — milliseconds each (measured ~1.3s on
+  // prod via run-now). The beat runs sequentially in ONE Worker invocation, so
+  // anything heavier that dies mid-run (Worker CPU/subrequest limit — a kill,
+  // which try/catch cannot save) takes everything AFTER it down too.
   //
-  // Same lesson as the backlog drain above: do the light, high-value work
-  // FIRST, so a heavy generation dying later in the beat costs only itself.
-  // Cost of being wrong here is one cheap digest ahead of proposals; cost of
-  // the old order was two agents silently dead for a day.
+  // History (BUG-2026-07-17-005/-011): these first sat at the BOTTOM, after the
+  // heavy proposals generation, and were dead for 28h. Moving them above the
+  // GENERATION wasn't enough — the backlog DRAIN still sat in front of them, and
+  // while the drain was per-row (BUG-2026-07-17-004, ~300 serialized round-trips)
+  // it killed the beat before the digests EVERY time: Employee + Service ran just
+  // ONCE in all of July while Production ran 48×. The drain is set-based now, but
+  // the durable fix is ordering: the two cheapest, highest-certainty read-only
+  // digests run FIRST — right after the zombie reap — so NOTHING downstream (a
+  // fat drain, a runaway generation) can ever starve them again. The drain and
+  // generation follow; if either dies, it costs only itself.
   // Employee daily digest — the Employee agent's read-only run (owner 0716).
   // Fires once per working day after 07:00 MYT: recomputes the anomaly counts
   // and refreshes the console snapshot. Idempotent (overwrites the snapshot),
@@ -262,6 +225,37 @@ app.post("/heartbeat", async (c) => {
     }
   } catch (err) {
     console.error("[agents/heartbeat] service digest failed:", err);
+  }
+
+  // ── 2 · Backlog drain (after the cheap digests, before the heavy generation) ─
+  // Applying queued due dates is high-value but heavier than the digests, so it
+  // sits BELOW them (they must never be starved by it — see BUG-2026-07-17-011)
+  // and ABOVE the generation (even if generation dies this beat, the queue still
+  // moved — owner 2026-07-16: the board must not sit half-cleared till morning).
+  // NOT clocked off at 8pm: the drain decides nothing, it only finishes writing
+  // due dates the engine already worked out, so it runs overnight and the board
+  // is complete by 8am ("1598條為什麼不是順著 clear，也是要8點?").
+  try {
+    if (await isAutoApproveOn(db, "PRODUCTION")) {
+      const pend = await db
+        .prepare("SELECT COUNT(*) AS n FROM schedule_proposals WHERE status = 'PENDING'")
+        .bind()
+        .first<{ n: number | string }>();
+      if ((Number(pend?.n) || 0) > 0) {
+        await recordAgentRun(db, "production-proposals", async (run) => {
+          // Set-based (BUG-2026-07-17-004): 1000 rows ≈ 10 round-trips, not 2000.
+          // The beat may only fire every 1-3.5h in practice (GitHub drops the
+          // schedule), so one beat should be able to finish a big backlog.
+          const a = await applyPendingProposals(db, { decidedBy: "AGENT_AUTO", limit: 1000 });
+          const summary = `auto-applied ${a.approved} queued due date(s), ${a.remainingPending} remaining (heartbeat drain)`;
+          run.setSummary(summary);
+          ran.push({ task: "production-proposals", reason: "backlog drain", summary });
+          return a;
+        });
+      }
+    }
+  } catch (err) {
+    console.error("[agents/heartbeat] backlog drain failed:", err);
   }
 
   const { decisions, skipped } = await decideAgentRuns(db);

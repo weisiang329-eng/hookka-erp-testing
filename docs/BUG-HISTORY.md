@@ -34,6 +34,16 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-17-010 — resign-date picker clipped out of the Status column `ui-frontend` `employees` 🟢
+**Owner 2026-07-17, screenshot: 「歪了」.** Editing a RESIGNED row on the Employee Master
+stacked a `<select>` plus a native `type="date"` input into a Status column fixed at
+`width: "110px"`. A native date input is ~130px intrinsic, so the resign-date picker
+overflowed and clipped out of the row.
+**Fix (employees.tsx):** Status column → 150px (the read-only view is a compact badge, so
+the extra width is just whitespace); both the select and the date input got
+`w-full min-w-0` so they shrink to the column instead of overflowing; the "Resigned on"
+label moved onto its own line (was inline, competing for the row's width).
+
 ## BUG-2026-07-17-009 — priced drawer surcharges from the STATIC catalog, not the LIVE config `money` `pricing` `self-inflicted` 🟢
 **Caught by read-back before any harm reached the customer**, during the RM 750 special-order
 backfill on the 5 DO-judgment SOs.

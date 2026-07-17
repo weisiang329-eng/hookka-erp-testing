@@ -154,10 +154,26 @@ Cost review himself. **No urgency — the docks only bite when payroll is first 
 Do NOT reach for `POST /settle-period` as a shortcut: it would recompute ALL 42 workers
 (30 other AUTO docks) from today's data and could silently ADD docks nobody approved.
 
-## 2026-07-17 — 🔵 Owner batch (3 asks, screenshots) — Employee Master / payroll
+## 2026-07-17 — ✅ Owner final batch COMPLETE (「其他兩個也處理掉」 + earlier asks)
+All of the owner's 2026-07-17 batch are now shipped or cleanly handed off:
+1. ✅ Brief recipients → you + Violet only (sent:2). 2. ✅ ANN RM 291.91 cleared on prod
+(1 genuine 0.22h kept). 3. ✅ Heartbeat CF Cron Worker deployed (owner owes 1 `wrangler
+secret put CRON_SECRET`). 4. ✅ RM 750 special-order backfill closed via DO-judgment
+(6 Houzs invoices + 5 SOs, reconciled; owner re-sends). 5. ✅ Sticky tick column
+(BUG-008). 6. ✅ Employee Master 「歪了」 (below).
+🟡 **Deferred, NOT in the batch (flagged so it's not lost):** the payslip label
+`(26 x 9)` is hardcoded in generate-payslip-pdf.ts:178 + employees.tsx:~7561 while the
+rate is computed from the worker's real hours (ANN = 2650/(26×7.5) = 13.59). The label
+lies for any non-9h worker. Fix needs `workingHoursPerDay` threaded into the payslip
+payload + PDF — a small payload change, so spun off as its own task rather than
+scope-crept here.
+
+### 2026-07-17 — 🔵 Owner batch (3 asks, screenshots) — Employee Master / payroll
 Logged before working (multi-part rule). Owner's words + what each means:
-1. 「歪了」 — Employee Master INLINE EDIT row is misaligned: the resign-date input
-   (01/07/2026) and the status dropdown overflow / clip out of the row. UI only.
+1. ✅ 「歪了」 — Employee Master INLINE EDIT row was misaligned: the resign-date input
+   (01/07/2026) and the status dropdown overflowed / clipped out of the 110px Status
+   column. FIXED (BUG-2026-07-17-010): widened Status to 150px, both controls
+   w-full min-w-0, "Resigned on" label moved to its own line. Deployed to prod.
 2. 「確保resign了 就payroll 出去」 — once a worker is RESIGNED they must drop out of
    payroll. Verify (resign-lockout.test.mjs + the payroll active-only filter exist —
    check before assuming it's broken).

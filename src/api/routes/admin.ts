@@ -1676,6 +1676,22 @@ app.post("/backfill-special-order-surcharge", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const confirm = (body as { confirm?: unknown })?.confirm === true;
   const scope = String((body as { scope?: unknown })?.scope ?? "uninvoiced");
+  // Optional allow-list of companySOId. REQUIRED IN PRACTICE FOR scope:"all".
+  //
+  // Staging rehearsal caught this: scope:"all" re-priced ALL 15 invoiced SOs
+  // while only 10 of their invoices could be corrected (the other 5 were refused
+  // as ambiguous — two live invoices, or no matching invoice line). That leaves
+  // the SO saying RM 80 and its invoice saying RM 0 — a SILENT disagreement, and
+  // worse, invisible afterwards because both planners key off
+  // specialOrderPriceSen = 0. Restricting to the SOs whose invoice actually
+  // moved keeps the two sides in lockstep.
+  const onlySoNos = Array.isArray((body as { soNos?: unknown })?.soNos)
+    ? new Set(
+        ((body as { soNos: unknown[] }).soNos)
+          .map((x) => String(x).trim())
+          .filter(Boolean),
+      )
+    : null;
   if (!confirm) {
     return c.json(
       { success: false, error: "Refusing to write without { confirm: true }." },
@@ -1728,6 +1744,7 @@ app.post("/backfill-special-order-surcharge", async (c) => {
     if (r.isServiceOrder === true || r.isServiceOrder === 1) continue;
     if (String(r.companySOId ?? "").toUpperCase().startsWith("SV-")) continue;
     if ((Number(r.specialOrderPriceSen) || 0) > 0) continue; // idempotent
+    if (onlySoNos && !onlySoNos.has(String(r.companySOId ?? "").trim())) continue;
     const owed = deriveSpecialOrderSurchargeSen(r.specialOrder, null, cfgSpecials);
     if (owed <= 0) continue;
     if (scope === "uninvoiced" && invoicedSoIds.has(r.salesOrderId)) {

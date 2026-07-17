@@ -34,6 +34,50 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-17-008 — the tick column scrolled away: "2 selected" with no tick in sight `ui-frontend` `data-grid` 🟢
+**Symptom (owner 2026-07-17, Service Orders screenshot):** 「我的 service order 为什么
+明显写着 "2 selected"，可是却没有看到它的勾勾？」 The footer counted 2 selected rows and
+not one tick was visible anywhere on screen.
+**Root cause** — `data-grid.tsx`: the checkbox gutter froze only when a sticky column
+run existed (`stickyOffsets.size > 0 && "sticky left-0 z-20"`). Only **4** grids in the
+whole app declare `sticky: true` (fabrics, production/index, folder-detail, Users). On
+the other **~20 selectable grids** — Service Orders, Sales, Delivery, Invoices,
+Procurement, Products, Accounting… — the gutter was a normal cell, so scrolling right
+carried the ticks off-screen while the footer kept counting them.
+**Fix** — the gutter is now ALWAYS `sticky left-0`. A no-op on grids that never scroll
+sideways; unchanged where a run exists (the offsets already reserved its 32px). The
+`<td>` bg mirror (bg-white / isEven / rowClassName / isSelected) lost the same guard —
+a sticky cell without an opaque row-matched bg lets the scrolling cells bleed through,
+which is exactly what those classes exist to stop.
+**Blast radius checked before shipping** (shared component, ~50 pages): the 4 sticky
+grids are byte-identical; `rowClassName` has 4 consumers (consignment, sales,
+invoices/payments, production) and production already went through the sticky path.
+
+## BUG-2026-07-17-007 — the MONTHLY settle scored ANN against everyone else's day (the half I missed) `payroll` `money` `attendance` 🟢
+**This one is a correction to my own fix**, and worth reading before trusting any
+"fixed" claim in this file.
+BUG-2026-07-17-006 fixed the LIVE PUNCH path (`maybeApplyAutoPunchDock`) so a worker's
+short-hours are scored against her own `workingHoursPerDay`. That fix was real but
+**incomplete**: `POST /payroll-hour-deductions/settle-period` — the path that builds a
+whole month's docks in bulk — ran `toAttendanceRules(resolvePayRulesAsOf(...))`
+straight into `computePunchShortfallHours` with the factory-wide 9h.
+**Why it mattered:** clearing ANN's wrong July docks would have worked exactly once.
+The next settle would have re-created all 13 of them, silently, and the "fixed" note in
+this file would have made the recurrence harder to find, not easier.
+**Fix** — both paths now route rules through the shared pure `rulesForWorkerHours`
+(attendance-deduct.ts): moves only `standardWorkMin` (OT keys off `endMin`), and treats
+0/blank hours as "unset → keep the global day", never "works a zero-hour day".
+`settle-period` now keeps RAW contracted hours instead of pre-defaulting to 9 — the
+To-fill branch wants a 9h fallback, the punch branch wants the effective-dated rules,
+and one pre-defaulted map cannot serve both without letting a stale 9 override a
+changed global shift.
+**Tests** — +5 pinning the helper directly (23/23 in file, 1504 suite-wide), including
+the exact 08:00–16:31 punch, and one asserting the OLD global read still returns 1.5h
+so the regression can't come back unnoticed.
+**RULE (earned twice now):** when a rule is read in more than one place, fix the SHARED
+helper, then grep for every caller. A fix that lands on one of two callers is not a fix
+— it is a fix with a timer on it.
+
 ## BUG-2026-07-17-005 — the Production agent was DEAD: the proposals drain was an I/O storm `agents` `production` `perf` `io-storm` `silent-failure` 🟢
 **Symptom (owner 2026-07-17): 「讓我看一下我們的 production agent 和 delivery agent 今天有如實進行嗎?」**
 Delivery had. Production had NOT — and it had been dead for days while the console

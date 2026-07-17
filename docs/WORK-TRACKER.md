@@ -9,6 +9,46 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-17 — 🔵 RM 720 (not 750): DO-judgment plan BUILT + read-verified — awaiting owner go on the GL writes
+**Owner ask: 「用 DO 判断的方法我已經找到,可以做」.** Cracked it: every invoice carries
+ONE `deliveryOrderId`, and each DO line carries `productionOrderId` = `pord-<soId>-<lineNo>`.
+So the DO deterministically says WHICH invoice a given special SO line shipped on — no
+guessing. Resolved all 9 owed lines across the 5 SOs (all customer = **Houzs Century**,
+inter-company). All 6 target invoices are **SENT, paidAmount 0, 0 payments** → safe to raise
+(no reconciliation break). Prices from live kv_config: Divan Curve 5000, Divan Top Fully
+Cover 5000, Right Drawer 15000, Front Drawer 12000, Left Drawer 15000.
+
+**7 lines → a definite issued invoice (RM 520):**
+| SO | line | option | RM | → invoice (via its DO) |
+|----|------|--------|----|----|
+| SO-2605-234 | 01 Divan Curve | 50 | INV-2606-082 (DO-2606-001) |
+| SO-2605-234 | 03 Divan Curve | 50 | INV-2606-082 (DO-2606-001) |
+| SO-2605-234 | 02 Divan Curve | 50 | INV-2606-087 (DO-2606-007) |
+| SO-2605-185 | 02 Divan Top Fully Cover | 50 | INV-2606-001 (DO-2606-002) |
+| SO-2606-135 | 01 Right Drawer | 150 | INV-2606-163 (DO-2606-088) |
+| SO-2605-121 | 01 Divan Curve (PC151-14) | 50 | INV-2606-057 (DO-2605-053) |
+| SO-2605-275 | 01 Front Drawer (PC151-01) | 120 | INV-2606-136 (DO-2606-062) |
+
+Per-invoice delta: 082 +100, 087 +50, 001 +50, 163 +150, 057 +50, 136 +120.
+(The planner refused these as "two live invoices"/"no unmatched line" because it matched by
+SKU only; the DO line-number + fabric code disambiguate cleanly.)
+
+**2 lines → NEVER delivered, no invoice to correct (RM 200):**
+- SO-2605-121 line 02 (1007-(Q) **PC151-16** Divan Curve, RM 50) — line 01 shipped on
+  DO-2605-053; line 02 never did. SO is INVOICED (closed).
+- SO-2605-275 line 02 (1007-(Q) **PC151-01** Left Drawer, RM 150) — SO is READY_TO_SHIP;
+  only line 01 shipped (INV-2606-136). Line 02 not yet delivered.
+  These have NO issued invoice. Correct action = price the SO LINE only; the forward-fix
+  (production_order_id on invoice_items) makes any FUTURE invoice bill it automatically.
+
+**EXECUTION PATH (per prior phase-2, tested): for each of the 7 lines** → `PUT /api/invoices/
+:id {priceEdits}` (the ONLY GL-restating path on a SENT invoice) to add the surcharge to that
+specific line, THEN re-price the SO via `POST /backfill-special-order-surcharge {scope:"all",
+soNos:[...]}` so SO and invoice stay in lockstep. For the 2 unshipped lines → SO re-price only.
+🔴 **AWAITING OWNER GO** — issued inter-company GL, highest-risk area; every prior phase was
+rehearsed on staging then prod with per-phase approval, and the write hits the permission
+classifier. Read-only investigation is COMPLETE; only the irreversible writes remain.
+
 ## 2026-07-17 — 🟢 Heartbeat made reliable: CF Cron Worker DEPLOYED — owner owes 1 secret command
 **Owner ask: 「心跳每 1-3.5 小时(GitHub 不跑) 做」.**
 Root cause was never the code — it was the DRIVER. GitHub Actions cron drifted

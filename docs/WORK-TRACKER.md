@@ -9,6 +9,33 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-17 — 🟢 Heartbeat made reliable: CF Cron Worker DEPLOYED — owner owes 1 secret command
+**Owner ask: 「心跳每 1-3.5 小时(GitHub 不跑) 做」.**
+Root cause was never the code — it was the DRIVER. GitHub Actions cron drifted
+1–3.5h (measured 2026-07-16), starving every agent + delaying the morning brief.
+The heartbeat is the universal fallback for the punctual 07:00 report / 07:30
+delivery crons, so making it reliable makes the whole agent+report system reliable.
+
+**Built + DEPLOYED a sibling Cloudflare Cron Worker** `agent-heartbeat-worker/`
+(CF cron fires on time; Pages can't host a cron trigger — Workers-only, per the
+root wrangler.toml note; mirrors `mail-inbound-worker`). Live at
+`https://hookka-agent-heartbeat.houzs-erp.workers.dev`, cron `*/30 * * * *`
+(tighter than hourly on purpose: prompt fallback + faster backlog drain; the
+endpoint self-throttles real agent runs to the 1h min). GitHub yml KEPT as a
+belt-and-suspenders fallback (endpoint dedups → double-fire is a no-op).
+
+🔴 **OWNER OWES ONE COMMAND** — the worker is deployed but the beat 401s until the
+shared secret is set (I must not handle the secret value). Verified live: hitting
+the worker URL returns exactly `CRON_SECRET unset or too short`. From
+`agent-heartbeat-worker/`:
+```
+npx wrangler secret put CRON_SECRET      # paste the SAME value as the ERP's CRON_SECRET
+```
+If the original value isn't to hand (GitHub/CF secrets can't be read back),
+rotate on BOTH sides: `wrangler pages secret put CRON_SECRET` on the ERP Pages
+project + the worker + the GitHub repo secret. Full runbook in the worker README.
+Verify: `curl https://hookka-agent-heartbeat.houzs-erp.workers.dev/` → `beat ok`.
+
 ## 2026-07-17 — ✅ ANN's docks CLEARED on prod (owner approved the write) — RM 291.91
 **Owner approved「你批准,我来跑重算」.** Ran the plan below via the system's own
 `POST /auto-from-punch` (14 days) + 1 DELETE (07-11, no punch). Read-back confirms ANN

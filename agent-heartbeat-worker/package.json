@@ -1,0 +1,15 @@
+{
+  "name": "hookka-agent-heartbeat",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Standalone Cloudflare Cron Worker: reliably POSTs the ERP agent heartbeat every 30 min (Cloudflare cron fires on time; GitHub Actions cron drifted 1-3.5h).",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.84.1"
+  }
+}

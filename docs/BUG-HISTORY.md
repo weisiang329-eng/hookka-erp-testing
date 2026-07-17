@@ -34,6 +34,143 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-17-002 — special-order surcharges never charged on SCANNED orders: RM 8,060 under-billed across 66 SOs `money` `pricing` `sales-orders` `invoices` `under-billing` 🟢 code / 🔴 backfill pending
+
+> **STATUS 2026-07-17 — code FIXED + LIVE ON PROD** (merge `efbba63e`).
+> **ROOT CAUSE (confirmed, not inferred):** two clients create SOs and only one prices the
+> options. `sales/create.tsx` (typed form) computes the surcharge and always POSTs
+> `specialOrderPriceSen` — correct, those are the 8 lines on prod that DID charge.
+> `scan-po-modal.tsx` + `m/ScanPOSheet.tsx` (scan a customer PO) POST `/api/sales-orders`
+> **directly, never through the form**, sending only the `specialOrder` TEXT + a
+> `basePriceSen` read off the customer's PDF, and **no** `specialOrderPriceSen` — so
+> `Number(item.specialOrderPriceSen) || 0` stored 0. Same bed, same option: **RM 80 typed,
+> RM 0 scanned.**
+> **FIX:** server derives the surcharge ONLY when the client OMITS the field
+> (`src/lib/special-order-surcharge.ts` pure + `src/api/lib/specials-config.ts` reads the
+> owner-editable `kv_config.variants-config.specials`), wired into sales-orders POST **and**
+> PUT. A supplied value is trusted verbatim — deliberate 0 (Service Orders are free by
+> design) and hand discounts survive. Unknown OCR tokens price at 0 — never invent money.
+> 20 tests in `tests/special-order-surcharge.test.mjs`, registered in `npm test`.
+> **VERIFIED LIVE** (staging, real write path, scan-shaped POST with no surcharge field):
+> `Divan Full Cover` → **8000**; `HB Fully Cover, Divan Full Cover` → **10000** (combo cap
+> held); plain line → 0 untouched. Test SO deleted + confirmed gone.
+>
+> **NUMBER CORRECTED — RM 8,060, not the RM 8,390 first reported.** The first sweep summed
+> HB + Divan as 5000+8000=13000; the real rule caps the pair at **RM 100**
+> (`pricing-options.ts:66`). 10 prod lines hit the combo. **Use 8,060.**
+>
+> **⏭ BACKFILL — REQUESTED BY OWNER, NOT DONE** (「舊的backfill SO 和SI」). Scope: 66 SOs /
+> 82 lines / 84 pieces / **RM 8,060**, plus their invoices. Do NOT start writing before
+> settling these — this touches issued documents and the GL:
+> 1. **Issued invoices are accounting records — no silent amount edits** (the repo already
+>    holds this line: cancelling kept the audit trail because deleting an issued invoice is
+>    an LHDN risk). Precedent worth reusing: on the invoice money-path work the owner's
+>    chosen route was **re-price + he re-sends the invoices**. Confirm which invoices are
+>    already SENT.
+> 2. **PAID / part-paid invoices** — raising the total breaks payment reconciliation; needs
+>    its own decision (credit note vs re-issue vs leave).
+> 3. **GL** — invoice totals post to the GL. Use the existing restate/void path
+>    (`PUT :id` GL-void), **do not re-implement** it.
+> 4. **CONFIRMED/COMPLETED SOs** may cascade on edit (production orders / cost) — check
+>    before touching, and don't override production locks.
+> 5. Build a **DRY-RUN planner first** (the established pattern here — the invoice money-path
+>    work shipped dedupe + backfill dry-run planners before any write), show the owner the
+>    per-SO list + delta, THEN execute.
+> 6. The sweep only read the **first 500 SOs** the endpoint returned — re-run unbounded
+>    before trusting 66/8,060 as the final scope.
+**Symptom (owner, INV-2607-060):** "Divan full cover 也沒有添加錢?" Correct — it was not.
+That invoice under-charges **RM 210**: line 3 `Divan Curve` (RM 50), lines 5 + 6
+`Divan Full Cover` (RM 80 × 2). The invoice is NOT at fault — it faithfully copies the
+sales order, and **the SO already had `specialOrderPriceSen = 0`**.
+
+**Scope (measured live on prod, 500 SOs scanned):** 166 lines carry a special order;
+**82 of them owe money but charged 0**, across **66 sales orders** = **RM 8,390
+under-billed**. By option: HB Fully Cover 24 · Divan Full Cover 18 · Front Drawer 14 ·
+Divan Top Fully Cover 13 · Divan Curve 12 · Left/Right Drawer 16 · No Side Panel 6.
+NOT universal — 84 lines are fine, so a SPECIFIC write path is at fault, not the rule.
+
+**NOT the cause (ruled out, do not "fix" these):**
+- The price list is CORRECT on prod: `kv-config/variants-config.specials` has
+  Divan Full Cover 8000, Divan Curve 5000. Verified live.
+- `calculateUnitPrice` (`src/lib/pricing.ts:21`) DOES add `specialOrderPriceSen`.
+- `calcPredefinedSurcharge` (`sales/create.tsx:1418`) matches config `value` ↔ `opt.name`
+  correctly and falls back to `opt.surcharge`.
+- The product-selection prefill (`create.tsx:1193-1214`) computes the surcharge correctly
+  and joins the text with `"; "`.
+- `buildLinesFromCopyDraft` (`create.tsx:462`) DOES have the bug shape below, **but it is
+  reachable only in Service-Order mode / `?fromCase`, where RM 0 is INTENTIONAL**
+  (see [[arch_service_order_pricing]]). It is NOT the cause of these 66 normal SOs.
+
+**The bug shape to look for** (confirmed present in `buildLinesFromCopyDraft:492-498`):
+`LineItem.specialOrders` must hold CODES (`DIVAN_BTM_COVER`); that code splits the
+*display text* (`"Divan Full Cover"`) on `/[;,]/` and stores NAMES into it, then hardcodes
+`specialOrderPriceSen: 0`. `calcPredefinedSurcharge` does
+`specialOrderOptions.find(o => o.code === c)` — a NAME never equals a CODE → `continue` →
+surcharge stays 0 while the label still renders. **Label shows, money doesn't.**
+
+**Strong lead — the OCR/scan path:** the stored text is comma-joined
+(`"HB Straight, Divan Curve"` on SO-2607-014), but the form's `buildSpecialOrderText`
+joins with `"; "`. The only comma-joiner found is `scan-po.ts:430`
+(`kept.join(", ")`), and `scan-po` only EXTRACTS (no INSERT) — so the extracted
+comma text is handed to a consumer that stores it without pricing it. **Next hand: find
+the consumer of `/api/scan-po/extract` that builds the SO** (`src/components/scan-po-modal.tsx`
+is the likely entry) and confirm before changing anything.
+
+**Fix direction (owner: 「先修 然後再 backfill」):** per the repo's
+FE+BE-unified-validation rule, compute the surcharge **server-side at write time** in
+`sales-orders.ts` POST/PUT from the chosen options, so NO client path can skip it — a pure
+shared helper + tests, on a dedicated branch (money ⇒ isolated branch rule). Must preserve:
+Service-Order mode stays 0; a deliberate operator price edit must not be overridden; the
+HB+Divan combined-cover RM 100 rule (`pricing-options.ts:66`).
+**Then** backfill the 66 SOs — issued invoices are accounting records and must NOT be
+silently edited; re-pricing them needs the owner's call on credit-note vs re-issue.
+
+**Related:** the same invoice also exposed BUG-2026-07-17-001 (wrong per-line PO refs),
+which initially MASKED this one — line 6's `Divan Full Cover` was invisible because the
+line was matched to the wrong SO.
+
+---
+
+## BUG-2026-07-17-001 — invoice prints the WRONG customer PO on consolidated DOs (first-one-wins guess) `invoices` `delivery` `consolidated-do` `print` `data-integrity` 🔴
+**Symptom (owner):** DO-2607-051 vs INV-2607-060 — "為什麼兩個 items details PO number
+不一樣?不對?" Correct. **4 of 12 invoice lines cite the WRONG customer PO.**
+
+| Line | Product | DO (truth) | Invoice (guessed) |
+|---|---|---|---|
+| 3 | 1003(A)-(K) | SO-2607-014 | SO-2606-270 ❌ |
+| 4 | 1003(A)-(K) | SO-2607-030 | SO-2606-270 ❌ |
+| 6 | 1007-(Q) | SO-2607-043 | SO-2607-022 ❌ |
+| 9 | 1007-(SS) | SO-2607-069 | SO-2607-043 ❌ |
+
+SO-2607-014 / -030 / -069's customer PO numbers never appear at all; SO-2606-270's appears
+3×. Customers reconciling the invoice against their own PO will find 4 lines that don't match.
+
+**Root cause:** DO-2607-051 is a CONSOLIDATED DO (12 lines from 12 different SOs).
+`delivery_order_items` stores a real per-line link (`productionOrderId`, `poNo`,
+`salesOrderNo`) — so the DO is right. `invoice_items` stores NO such link (only
+productCode/fabricCode/sizeLabel), so `computeInvoicePrintExtras`
+(`src/api/lib/invoice-print-extras.ts`) RECONSTRUCTS the refs by matching
+`code|fab|size` → `code|fab` → `code`, built **first-one-wins**
+(`if (!refTight.has(tk)) refTight.set(tk, rv)`, lines ~205-209 / 268-271). This DO has
+3 identical `1003(A)-(K)|PC151-01` lines from 3 different SOs — the map keeps only the
+first, so all 3 invoice lines inherit it.
+
+**Only bites:** consolidated (multi-SO) DOs containing repeated product+fabric+size.
+Single-SO DOs are unaffected.
+
+⚠️ **Same first-one-wins map also drives `priceByCode`** (keyed by product code ALONE).
+INV-2607-060 happens to be safe (same code = same price there), but two SOs pricing the
+same code differently would take the FIRST price → a money bug. Unverified; check before
+assuming it's benign.
+
+**Fix options given to owner:** (A) persist the real per-line SO/production-order link on
+`invoice_items` (treats the cause; schema + backfill); (B) resolve refs THROUGH the DO's
+items, which already hold the truth (no schema change) — **recommended**; (C) keep guessing
+but consume each matched SO line once instead of first-one-wins (one-line, still
+order-dependent). Awaiting owner's pick.
+
+---
+
 ## BUG-2026-07-14-005 — warehouse list shipped a dead `grouped` duplicate that doubled the 2.9MB payload `warehouse` `perf` `payload` 🟢
 **Symptom:** `GET /api/warehouse` (1219 racks) returned both `data[]` and
 `grouped` — the latter a per-rack-name copy of the ENTIRE `data` array — roughly

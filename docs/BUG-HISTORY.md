@@ -34,6 +34,19 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-17-012 — payslip "Hourly Rate" formula hardcoded "(26 x 9)" — lied for non-9h workers `payroll` `ui-frontend` `pdf` 🟢
+**Display-only (the rate was always correct), fixed as part of the ANN short-hours work
+(BUG-2026-07-17-006/-007).** The payslip label read `basic / (26 x 9) = hourlyRate`, but the
+rate is computed from each worker's own `workingHoursPerDay`. ANN (7.5h) showed
+`2650 / (26 x 9) = 13.59` — yet 2650/(26×9)=11.32; the shown 13.59 is 2650/(26×7.5). The
+divisor text lied for anyone not on 9h/day.
+**Fix:** label now reads the worker's real hours (`(workingDays x workingHoursPerDay)`).
+- `employees.tsx` Payroll row: hours looked up from the `workers` prop by employeeId (the tab
+  already received it as an unused `_workers`) — no backend change.
+- PDF via `GET /api/payslips/:id`: `workingHoursPerDay` isn't stored on payslips (only the
+  resulting rate is), so it's read off the worker and threaded into `PayslipDetail`; the PDF
+  label uses it. Both fall back to 9 when absent, so older payloads stay safe.
+
 ## BUG-2026-07-17-011 — Employee + Service agents ran ONCE all month: the drain starved them `agents` `heartbeat` `scheduling` 🟢
 **Found while confirming the agents run (owner 2026-07-18 01:46, 「確保 production 還有
 delivery agent 有做到」).** Production ran 48× in July and Delivery 11×, but **Employee and

@@ -1449,6 +1449,197 @@ app.get("/backfill-special-order-surcharge", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/admin/backfill-invoiced-plan — PHASE 2 planner (read-only)
+//
+// The 15 SOs that phase 1 skipped because they already have an invoice
+// (RM 2,030). Each needs BOTH sides moved: the SO re-priced AND the invoice
+// re-priced, then the owner re-sends the invoice.
+//
+// The invoice must go through PUT /api/invoices/:id { priceEdits } — that is the
+// ONLY path that restates the GL for a SENT invoice (wholesale item replacement
+// is blocked on non-DRAFT precisely because it would skip the restate and orphan
+// revenue/AR on a later void). Do NOT hand-roll a GL write.
+//
+// Matching invoice line → SO line is done consume-once on productCode|fabricCode.
+// Anything ambiguous is REFUSED, not guessed:
+//   • more than one non-CANCELLED invoice on the SO (SO-2606-135 has two)
+//   • an owed SO line with no matching invoice line
+// Refused rows come back under `needsManual` for the owner to handle by hand.
+// ---------------------------------------------------------------------------
+type InvoicedFixLine = {
+  invoiceItemId: string; productCode: string; owedSen: number;
+  unitNow: number; unitAfter: number;
+  baseSen: number; divanSen: number; legSen: number; specialSen: number; discountSen: number;
+};
+type InvoicedFix = {
+  salesOrderId: string; companySOId: string; invoiceId: string; invoiceNo: string;
+  invoiceStatus: string; deltaSen: number; lines: InvoicedFixLine[];
+};
+
+async function buildInvoicedFixPlan(
+  db: {
+    prepare: (sql: string) => {
+      bind: (...a: unknown[]) => { all: <T>() => Promise<{ results?: T[] }> };
+    };
+  },
+  cfgSpecials: Awaited<ReturnType<typeof loadSpecialsConfig>>,
+): Promise<{ fixes: InvoicedFix[]; needsManual: Array<Record<string, unknown>> }> {
+  const soRows = await db
+    .prepare(
+      `SELECT i.id AS itemId, i.salesOrderId AS salesOrderId,
+              i.productCode AS productCode, i.fabricCode AS fabricCode,
+              i.specialOrder AS specialOrder,
+              i.specialOrderPriceSen AS specialOrderPriceSen,
+              i.quantity AS quantity,
+              s.companySOId AS companySOId, s.isServiceOrder AS isServiceOrder
+         FROM sales_order_items i
+         JOIN sales_orders s ON s.id = i.salesOrderId
+        WHERE i.specialOrder IS NOT NULL AND i.specialOrder != ''
+          AND (s.isServiceOrder IS NULL OR s.isServiceOrder = false)`,
+    )
+    .bind()
+    .all<{
+      itemId: string; salesOrderId: string; productCode: string | null;
+      fabricCode: string | null; specialOrder: string | null;
+      specialOrderPriceSen: number | null; quantity: number | null;
+      companySOId: string | null; isServiceOrder: boolean | number | null;
+    }>();
+
+  const owedBySo = new Map<string, Array<{ key: string; owed: number; productCode: string }>>();
+  const soNo = new Map<string, string>();
+  for (const r of soRows.results ?? []) {
+    if (r.isServiceOrder === true || r.isServiceOrder === 1) continue;
+    if (String(r.companySOId ?? "").toUpperCase().startsWith("SV-")) continue;
+    if ((Number(r.specialOrderPriceSen) || 0) > 0) continue;
+    const owed = deriveSpecialOrderSurchargeSen(r.specialOrder, null, cfgSpecials);
+    if (owed <= 0) continue;
+    const key = `${(r.productCode ?? "").trim()}|${(r.fabricCode ?? "").trim()}`;
+    if (!owedBySo.has(r.salesOrderId)) owedBySo.set(r.salesOrderId, []);
+    owedBySo.get(r.salesOrderId)!.push({ key, owed, productCode: r.productCode ?? "" });
+    soNo.set(r.salesOrderId, r.companySOId ?? "");
+  }
+  if (owedBySo.size === 0) return { fixes: [], needsManual: [] };
+
+  const soIds = Array.from(owedBySo.keys());
+  const ph = soIds.map(() => "?").join(",");
+  const invs = await db
+    .prepare(
+      `SELECT id, invoiceNo, salesOrderId, status
+         FROM invoices WHERE salesOrderId IN (${ph})`,
+    )
+    .bind(...soIds)
+    .all<{ id: string; invoiceNo: string | null; salesOrderId: string; status: string | null }>();
+
+  const bySo = new Map<string, Array<{ id: string; invoiceNo: string; status: string }>>();
+  for (const v of invs.results ?? []) {
+    if ((v.status ?? "").toUpperCase() === "CANCELLED") continue; // a void doc needs no correction
+    if (!bySo.has(v.salesOrderId)) bySo.set(v.salesOrderId, []);
+    bySo.get(v.salesOrderId)!.push({
+      id: v.id, invoiceNo: v.invoiceNo ?? "", status: v.status ?? "",
+    });
+  }
+
+  const fixes: InvoicedFix[] = [];
+  const needsManual: Array<Record<string, unknown>> = [];
+
+  for (const [sid, owed] of owedBySo) {
+    const list = bySo.get(sid) ?? [];
+    if (list.length === 0) continue; // phase 1 territory (no invoice)
+    if (list.length > 1) {
+      needsManual.push({
+        companySOId: soNo.get(sid), reason: "more than one live invoice on this SO — refusing to guess which one to correct",
+        invoices: list.map((x) => `${x.invoiceNo}:${x.status}`),
+      });
+      continue;
+    }
+    const inv = list[0];
+    const itemsRes = await db
+      .prepare(
+        `SELECT id, productCode, fabricCode, quantity, unitPriceSen,
+                basePriceSen, divanPriceSen, legPriceSen, specialOrderPriceSen, discountSen
+           FROM invoice_items WHERE invoiceId = ?`,
+      )
+      .bind(inv.id)
+      .all<{
+        id: string; productCode: string | null; fabricCode: string | null;
+        quantity: number | null; unitPriceSen: number | null;
+        basePriceSen: number | null; divanPriceSen: number | null;
+        legPriceSen: number | null; specialOrderPriceSen: number | null;
+        discountSen: number | null;
+      }>();
+    const pool = (itemsRes.results ?? []).map((x) => ({ row: x, used: false }));
+
+    const lines: InvoicedFixLine[] = [];
+    let delta = 0;
+    let failed = false;
+    for (const o of owed) {
+      const hit = pool.find(
+        (p) =>
+          !p.used &&
+          `${(p.row.productCode ?? "").trim()}|${(p.row.fabricCode ?? "").trim()}` === o.key &&
+          (Number(p.row.specialOrderPriceSen) || 0) === 0,
+      );
+      if (!hit) {
+        failed = true;
+        needsManual.push({
+          companySOId: soNo.get(sid), invoiceNo: inv.invoiceNo,
+          reason: `no unmatched invoice line for ${o.key} — refusing to guess`,
+        });
+        break;
+      }
+      hit.used = true;
+      const r = hit.row;
+      const unitNow = Number(r.unitPriceSen) || 0;
+      const divan = Number(r.divanPriceSen) || 0;
+      const leg = Number(r.legPriceSen) || 0;
+      const specNow = Number(r.specialOrderPriceSen) || 0;
+      // Residual base keeps whatever else is folded into unit (e.g. the
+      // total-height surcharge, which has no column of its own) — the
+      // priceEdits path recomputes unit as base+divan+leg+special, so the
+      // residual is what stops that recompute from ERASING it.
+      const base = Math.max(0, unitNow - divan - leg - specNow);
+      lines.push({
+        invoiceItemId: r.id, productCode: r.productCode ?? "", owedSen: o.owed,
+        unitNow, unitAfter: unitNow + o.owed,
+        baseSen: base, divanSen: divan, legSen: leg, specialSen: o.owed,
+        discountSen: Number(r.discountSen) || 0,
+      });
+      delta += o.owed * (Number(r.quantity) || 1);
+    }
+    if (failed || lines.length === 0) continue;
+    fixes.push({
+      salesOrderId: sid, companySOId: soNo.get(sid) ?? "",
+      invoiceId: inv.id, invoiceNo: inv.invoiceNo, invoiceStatus: inv.status,
+      deltaSen: delta, lines,
+    });
+  }
+  return { fixes, needsManual };
+}
+
+app.get("/backfill-invoiced-plan", async (c) => {
+  const su = requireSuperAdmin(c);
+  if (su) return su;
+  const cfg = await loadSpecialsConfig(c.var.DB);
+  const { fixes, needsManual } = await buildInvoicedFixPlan(
+    c.var.DB as never,
+    cfg,
+  );
+  return c.json({
+    success: true,
+    readOnly: true,
+    totals: {
+      invoicesToCorrect: fixes.length,
+      linesToCorrect: fixes.reduce((s, f) => s + f.lines.length, 0),
+      deltaSen: fixes.reduce((s, f) => s + f.deltaSen, 0),
+      deltaRM: (fixes.reduce((s, f) => s + f.deltaSen, 0) / 100).toFixed(2),
+      needsManual: needsManual.length,
+    },
+    fixes,
+    needsManual,
+  });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/admin/backfill-special-order-surcharge  — THE WRITE
 //
 // Applies the plan the GET above reports. One-shot; delete once run.
@@ -1485,6 +1676,22 @@ app.post("/backfill-special-order-surcharge", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const confirm = (body as { confirm?: unknown })?.confirm === true;
   const scope = String((body as { scope?: unknown })?.scope ?? "uninvoiced");
+  // Optional allow-list of companySOId. REQUIRED IN PRACTICE FOR scope:"all".
+  //
+  // Staging rehearsal caught this: scope:"all" re-priced ALL 15 invoiced SOs
+  // while only 10 of their invoices could be corrected (the other 5 were refused
+  // as ambiguous — two live invoices, or no matching invoice line). That leaves
+  // the SO saying RM 80 and its invoice saying RM 0 — a SILENT disagreement, and
+  // worse, invisible afterwards because both planners key off
+  // specialOrderPriceSen = 0. Restricting to the SOs whose invoice actually
+  // moved keeps the two sides in lockstep.
+  const onlySoNos = Array.isArray((body as { soNos?: unknown })?.soNos)
+    ? new Set(
+        ((body as { soNos: unknown[] }).soNos)
+          .map((x) => String(x).trim())
+          .filter(Boolean),
+      )
+    : null;
   if (!confirm) {
     return c.json(
       { success: false, error: "Refusing to write without { confirm: true }." },
@@ -1537,6 +1744,7 @@ app.post("/backfill-special-order-surcharge", async (c) => {
     if (r.isServiceOrder === true || r.isServiceOrder === 1) continue;
     if (String(r.companySOId ?? "").toUpperCase().startsWith("SV-")) continue;
     if ((Number(r.specialOrderPriceSen) || 0) > 0) continue; // idempotent
+    if (onlySoNos && !onlySoNos.has(String(r.companySOId ?? "").trim())) continue;
     const owed = deriveSpecialOrderSurchargeSen(r.specialOrder, null, cfgSpecials);
     if (owed <= 0) continue;
     if (scope === "uninvoiced" && invoicedSoIds.has(r.salesOrderId)) {

@@ -30,7 +30,7 @@ const dock = await import(
 // a payslip-lock count, and recorders for what got written. Routes by SQL
 // fingerprint — the helper runs: ALTER (ensure), SELECT existing dock, SELECT
 // payslip lock count, then either a DELETE (clear stale) or a batch(DELETE,INSERT).
-function mockDb({ existingDock = null, lockedCount = 0 } = {}) {
+function mockDb({ existingDock = null, lockedCount = 0, workerHours = null } = {}) {
   const calls = { alters: 0, deletes: [], inserts: [], batches: 0 };
   function stmt(sql) {
     let bound = [];
@@ -49,6 +49,11 @@ function mockDb({ existingDock = null, lockedCount = 0 } = {}) {
           return existingDock; // { id, source } | null
         }
         if (sql.includes("FROM payslips")) return { c: lockedCount };
+        // Per-employee standard day (BUG-2026-07-17-006). null → the helper
+        // keeps the global 9h default, which is what every other test expects.
+        if (sql.includes("FROM workers")) {
+          return workerHours === null ? null : { workingHoursPerDay: workerHours };
+        }
         return null;
       },
       async all() {
@@ -236,4 +241,62 @@ test("full day with NO existing dock → no write at all", async () => {
   assert.equal(res.reason, "no-shortfall");
   assert.equal(db.__calls.deletes.length, 0);
   assert.equal(db.__calls.inserts.length, 0);
+});
+
+
+// ── BUG-2026-07-17-006 — a full day is THIS worker's day ────────────────────
+// ANN (EMP-004) is contracted workingHoursPerDay = 7.5, not the global 9. The
+// pay side already honoured it (hourlyRate = dailyRate / 7.5) and so did the
+// settle-period To-fill path, but this punch path measured her against the
+// global 9 and docked 9 − 7.5 = 1.5h on EVERY full day she worked
+// (−RM233.58 over 13 days in July for a worker who was never short).
+
+test("7.5h worker who works her FULL day is NOT docked", async () => {
+  const db = mockDb({ workerHours: 7.5 });
+  // 08:00–16:30 minus the 1h lunch = 7.5h worked = exactly her full day.
+  const r = await dock.maybeApplyAutoPunchDock(db, {
+    workerId: "w-ann",
+    date: "2026-07-01",
+    clockIn: "08:00",
+    clockOut: "16:30",
+  });
+  assert.equal(r.applied, false, "a full 7.5h day must not be docked");
+  assert.equal(db.__calls.inserts.length, 0, "no dock row written");
+});
+
+test("9h worker is still measured against 9h (no regression)", async () => {
+  const db = mockDb({ workerHours: 9 });
+  const r = await dock.maybeApplyAutoPunchDock(db, {
+    workerId: "w-std",
+    date: "2026-07-01",
+    clockIn: "08:00",
+    clockOut: "16:30",
+  });
+  // 7.5h worked against a 9h day = 1.5h short → still docked.
+  assert.equal(r.applied, true, "a 9h worker leaving at 16:30 IS 1.5h short");
+});
+
+test("a 7.5h worker genuinely short IS still docked", async () => {
+  const db = mockDb({ workerHours: 7.5 });
+  // 08:00–15:30 minus lunch = 6.5h against her 7.5h day = 1h short.
+  const r = await dock.maybeApplyAutoPunchDock(db, {
+    workerId: "w-ann",
+    date: "2026-07-01",
+    clockIn: "08:00",
+    clockOut: "15:30",
+  });
+  assert.equal(r.applied, true, "short vs her OWN day must still dock");
+});
+
+test("missing / zero hours falls back to the global 9h", async () => {
+  for (const h of [null, 0]) {
+    const db = mockDb({ workerHours: h });
+    const r = await dock.maybeApplyAutoPunchDock(db, {
+      workerId: "w-unset",
+      date: "2026-07-01",
+      clockIn: "08:00",
+      clockOut: "16:30",
+    });
+    assert.equal(r.applied, true, `hours=${h} must keep the 9h default`);
+  }
 });

@@ -9,6 +9,27 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-17 — 🔵 Owner batch (3 asks, screenshots) — Employee Master / payroll
+Logged before working (multi-part rule). Owner's words + what each means:
+1. 「歪了」 — Employee Master INLINE EDIT row is misaligned: the resign-date input
+   (01/07/2026) and the status dropdown overflow / clip out of the row. UI only.
+2. 「確保resign了 就payroll 出去」 — once a worker is RESIGNED they must drop out of
+   payroll. Verify (resign-lockout.test.mjs + the payroll active-only filter exist —
+   check before assuming it's broken).
+3. 🔴 **「我記得ann是工作少1.5小時的」「沒有跟?」 — CONFIRMED REAL, and it costs her money.**
+   ANN (EMP-004) has `workingHoursPerDay = 7.5`. The PAY side honours it
+   (`hourlyRate = payrollDailyRateSen / worker.workingHoursPerDay` → RM 2650/(26×7.5) =
+   RM 13.59/hr, payslips.ts:581 + :921). The DOCK side does NOT: short-hours are measured
+   against the GLOBAL constant `HOOKKA_ATTENDANCE.standardWorkMin = 9*60`
+   (attendance-rules.ts:45), which is not per-employee. **9 − 7.5 = 1.5 → she is marked
+   "1.5h short" EVERY working day** (01,02,03,04,06,07,08,09,10,11,13,15 Jul …) and docked
+   −RM 233.58 (13d). Blast radius measured on prod: 42 workers — 38 at 9h (unaffected),
+   3 at 0h (test accts), **ANN the only one at 7.5**. Fix = the dock must read the
+   employee's own hours, same source the hourly rate already uses.
+   Related display bug: "Hourly Rate: RM2650 / **(26 x 9)** = RM13.59" — the `(26 x 9)` is
+   HARDCODED in `generate-payslip-pdf.ts:178` + `employees.tsx:7561` while the number shown
+   is computed from 7.5 (2650/195 = 13.59, NOT 2650/234 = 11.32). The label lies.
+
 ## 2026-07-17 — 🟢 MONEY fix LIVE (RM 8,060) · 🔵 BACKFILL SO+SI = NEXT · 🔴 invoice PO mis-match
 **Code fix SHIPPED + LIVE + verified** (merge `efbba63e`): scanned customer POs never charged
 the special-order surcharge because the scan clients POST /api/sales-orders directly without

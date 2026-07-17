@@ -1492,30 +1492,49 @@ app.post("/backfill-invoice-po-link", async (c) => {
   const skipped: Array<{ invoiceNo: string; reason: string }> = [];
   const stmts: unknown[] = [];
 
+  // THREE queries total, not two per invoice. A per-invoice loop here would be
+  // ~2 × N serialized round-trips (400+ on prod) — the exact I/O-storm shape
+  // that made the schedule engine look "hung" for minutes (its 114 serialized
+  // queries; Workers CPU time excludes I/O wait, so a query storm never trips a
+  // CPU limit, it just never finishes). Load everything, group in memory.
+  const [allItemsRes, allDoItemsRes] = await Promise.all([
+    db
+      .prepare(
+        `SELECT ii.id, ii.invoiceId, ii.productCode, ii.fabricCode, ii.production_order_id
+           FROM invoice_items ii
+           JOIN invoices i ON i.id = ii.invoiceId
+          WHERE i.deliveryOrderId IS NOT NULL AND i.deliveryOrderId != ''`,
+      )
+      .all<{
+        id: string; invoiceId: string; productCode: string | null;
+        fabricCode: string | null; production_order_id: string | null;
+      }>(),
+    db
+      .prepare(
+        `SELECT di.deliveryOrderId, di.productionOrderId, di.productCode, di.fabricCode
+           FROM delivery_order_items di`,
+      )
+      .all<{
+        deliveryOrderId: string; productionOrderId: string | null;
+        productCode: string | null; fabricCode: string | null;
+      }>(),
+  ]);
+  const itemsByInv = new Map<string, typeof allItemsRes.results>();
+  for (const r of allItemsRes.results ?? []) {
+    const arr = itemsByInv.get(r.invoiceId) ?? [];
+    arr.push(r);
+    itemsByInv.set(r.invoiceId, arr);
+  }
+  const doItemsByDo = new Map<string, typeof allDoItemsRes.results>();
+  for (const r of allDoItemsRes.results ?? []) {
+    const arr = doItemsByDo.get(r.deliveryOrderId) ?? [];
+    arr.push(r);
+    doItemsByDo.set(r.deliveryOrderId, arr);
+  }
+
   for (const inv of invs.results ?? []) {
-    const [itemsRes, doRes] = await Promise.all([
-      db
-        .prepare(
-          "SELECT id, productCode, fabricCode, production_order_id FROM invoice_items WHERE invoiceId = ?",
-        )
-        .bind(inv.id)
-        .all<{
-          id: string; productCode: string | null; fabricCode: string | null;
-          production_order_id: string | null;
-        }>(),
-      db
-        .prepare(
-          `SELECT productionOrderId, productCode, fabricCode
-             FROM delivery_order_items WHERE deliveryOrderId = ?`,
-        )
-        .bind(inv.deliveryOrderId)
-        .all<{
-          productionOrderId: string | null;
-          productCode: string | null; fabricCode: string | null;
-        }>(),
-    ]);
-    const items = itemsRes.results ?? [];
-    const doItems = doRes.results ?? [];
+    const items = itemsByInv.get(inv.id) ?? [];
+    const doItems = doItemsByDo.get(inv.deliveryOrderId) ?? [];
     if (items.length === 0) continue;
     if (items.every((i) => i.production_order_id)) continue; // already done
 

@@ -390,11 +390,9 @@ export async function applyPendingProposals(
   // a CPU limit. When a Worker run hangs for minutes, suspect I/O round-trips,
   // not CPU." That fix batched the ENGINE and left this drain untouched.
   //
-  // Build the statements, send them as ONE batch: 300 round-trips → 1. The
-  // batch is a transaction in the Postgres adapter, so the job_card due date and
-  // its proposal's APPROVED stamp still land together or not at all — which is
-  // stronger than the old loop, where a mid-loop death left rows half-applied.
-  const stmts: D1PreparedStatement[] = [];
+  // Collect first, write set-based below (see the note there — batching does
+  // NOT help here; only fewer STATEMENTS do).
+  const pairs: Array<{ jcId: string; proposedDue: string; proposalId: string }> = [];
   for (const row of rows) {
     const jcId = row.jcId ?? row.jc_id;
     const proposedDue = row.proposedDue ?? row.proposed_due;
@@ -402,21 +400,7 @@ export async function applyPendingProposals(
       skipped++;
       continue;
     }
-    stmts.push(
-      db
-        .prepare(
-          `UPDATE job_cards SET dueDate = ?, updated_at = ?
-            WHERE id = ? AND status = 'WAITING'`,
-        )
-        .bind(proposedDue, nowIso, jcId),
-      db
-        .prepare(
-          `UPDATE schedule_proposals
-              SET status = 'APPROVED', decided_at = ?, decided_by = ?
-            WHERE id = ?`,
-        )
-        .bind(nowIso, opts.decidedBy, row.id),
-    );
+    pairs.push({ jcId, proposedDue, proposalId: row.id });
     applied.push({
       proposalId: row.id,
       jcId,
@@ -427,13 +411,45 @@ export async function applyPendingProposals(
       to: proposedDue,
     });
   }
-  if (stmts.length > 0) {
-    // Chunked well under the 65535/param bind ceiling (each statement binds ≤ 3),
-    // and small enough that one chunk is a short transaction rather than a long
-    // lock. 400 statements = 200 proposals per round-trip.
-    const CHUNK = 400;
-    for (let i = 0; i < stmts.length; i += CHUNK) {
-      await db.batch(stmts.slice(i, i + CHUNK));
+  if (pairs.length > 0) {
+    // SET-BASED, and it has to be. ⚠️ `db.batch()` DOES NOT REDUCE ROUND-TRIPS
+    // in this codebase — read SupabaseAdapter.batch (lib/supabase-compat.ts):
+    // it opens ONE transaction and then `await tx.unsafe(...)` per statement, in
+    // a loop. It buys atomicity, NOT fewer round-trips. My first attempt at this
+    // fix "batched" the 300 statements and the beat kept dying — same storm,
+    // now wrapped in a transaction. The only thing that actually removes
+    // round-trips is FEWER STATEMENTS, which is exactly what the 2026-07-16
+    // engine fix did (CHUNK 40 → 500 made each query cover more rows).
+    //
+    // So: two statements per chunk, whatever the row count.
+    //   1. one UPDATE … CASE id WHEN … END over every job card
+    //   2. one UPDATE … WHERE id IN (…) over every proposal
+    // 200 rows/chunk ⇒ ~601 binds, far under the 65535 ceiling.
+    const CHUNK = 200;
+    for (let i = 0; i < pairs.length; i += CHUNK) {
+      const slice = pairs.slice(i, i + CHUNK);
+      const caseSql = slice.map(() => "WHEN ? THEN ?").join(" ");
+      const inSql = slice.map(() => "?").join(",");
+      await db
+        .prepare(
+          `UPDATE job_cards
+              SET dueDate = CASE id ${caseSql} END, updated_at = ?
+            WHERE id IN (${inSql}) AND status = 'WAITING'`,
+        )
+        .bind(
+          ...slice.flatMap((p) => [p.jcId, p.proposedDue]),
+          nowIso,
+          ...slice.map((p) => p.jcId),
+        )
+        .run();
+      await db
+        .prepare(
+          `UPDATE schedule_proposals
+              SET status = 'APPROVED', decided_at = ?, decided_by = ?
+            WHERE id IN (${slice.map(() => "?").join(",")})`,
+        )
+        .bind(nowIso, opts.decidedBy, ...slice.map((p) => p.proposalId))
+        .run();
     }
   }
 

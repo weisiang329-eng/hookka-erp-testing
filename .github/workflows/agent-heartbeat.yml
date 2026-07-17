@@ -22,6 +22,13 @@ on:
     # asks for it. Measured 2026-07-16: a '0 * * * *' heartbeat actually fired
     # every 2-3 HOURS (23:58 -> 03:27 was a 3.5h gap), starving the agents.
     # Three off-peak minutes per hour: more chances to land, none on the hour.
+    #
+    # NOTE (2026-07-17): the RELIABLE driver is now a Cloudflare Cron Worker,
+    # `agent-heartbeat-worker/` (CF cron fires on time; this GitHub schedule
+    # does not). This workflow is kept as a belt-and-suspenders FALLBACK — the
+    # heartbeat endpoint self-throttles/dedups, so both firing is a harmless
+    # no-op. If the CF worker is ever removed, this becomes the sole (drifty)
+    # driver again.
     - cron: '7,27,47 * * * *'
   workflow_dispatch:
 

@@ -34,6 +34,71 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-17-005 — the Production agent was DEAD: the proposals drain was an I/O storm `agents` `production` `perf` `io-storm` `silent-failure` 🟢
+**Symptom (owner 2026-07-17): 「讓我看一下我們的 production agent 和 delivery agent 今天有如實進行嗎?」**
+Delivery had. Production had NOT — and it had been dead for days while the console
+showed it live:
+- `production-proposals` sat at `status='running'`, `finishedAt` NULL after EVERY beat
+  (09:20 → 42min, 11:05 → 42min, both still open when checked). Worker killed mid-run.
+- `production-learning` last ran **43 hours** earlier.
+- `employee-agent` + `service-agent` last ran **28 hours** earlier.
+
+**Root cause:** `applyPendingProposals` awaited **TWO updates PER ROW**. At the
+heartbeat's `limit: 150` that's **~300 strictly serialized DB round-trips**, and the
+drain is the FIRST thing the beat does. It never finished. Because the beat is ONE
+sequential Worker invocation, everything after it starved — a try/catch cannot help,
+the Worker is *killed*, not thrown.
+**Identical root cause to the 2026-07-16 engine fix**, whose own lesson is written in
+this repo: *"~114 strictly serialized DB round-trips, not the engine… Workers CPU time
+EXCLUDES I/O wait, so a query storm can never trip a CPU limit."* That fix batched the
+ENGINE and left this drain — same trap, one file over.
+
+**⚠️ THE TRAP THAT COST ME A DEPLOY — `db.batch()` DOES NOT REDUCE ROUND-TRIPS.**
+My first fix "batched" the 300 statements. It deployed, and the beat kept dying.
+`SupabaseAdapter.batch()` (`lib/supabase-compat.ts`) opens ONE transaction then loops
+`await tx.unsafe(...)` **per statement**. It buys ATOMICITY, not fewer round-trips.
+**Anywhere in this codebase reaching for `db.batch()` expecting a perf win is getting
+none.** Only FEWER STATEMENTS help — which is what CHUNK 40→500 really did.
+
+**Fix:** set-based — `UPDATE job_cards SET dueDate = CASE id WHEN … END WHERE id IN (…)`
+plus one `UPDATE schedule_proposals … WHERE id IN (…)`. Two statements per 200-row
+chunk regardless of row count: 300 round-trips → 2. Then `limit` 150 → 1000 (ceiling
+400 → 2000) — the 150 only existed because the old drain couldn't survive more.
+
+**Verified live on prod, in sequence:**
+1. before: every beat a zombie;
+2. after set-based: `auto-applied 150 queued due date(s), 1022 remaining` — **it FINISHED
+   for the first time**, and revealed the 1,172 backlog the dead drain had piled up;
+3. after the limit raise: **`auto-applied 872 queued due date(s), 0 remaining`** — queue
+   fully cleared in ONE beat, in seconds.
+Employee/Service correctly skipped at 20:11 MYT (they clock off at 20:00), and now run
+BEFORE the heavy generation so a future death can't starve them again.
+
+---
+
+## BUG-2026-07-17-003 — the morning brief emailed NOBODY, every day, and reported ok `agents` `reports` `email` `silent-failure` 🟢 (code) / 🟡 (recipient list = owner's call)
+**Symptom:** every `production-brief` run recorded `status=ok` with summary
+`sent 0 · failed 0`. Nobody ever received the morning brief.
+**Root cause:** `resolveRecipients` fell back to
+`SELECT email FROM users WHERE roleId = 'SUPER_ADMIN'`. But `users.roleId` is a FOREIGN
+KEY into `roles(id)` — seeded ids are `role_super_admin` / `role_read_only` / … — while
+the NAME lives in `users.role` and `roles.name`. **Verified on prod: every user's
+`roleId` is NULL**, and `users.role` holds `SUPER_ADMIN` / `ADMIN` / `READ_ONLY`. So the
+fallback matched ZERO rows, forever. With `DAILY_REPORT_RECIPIENTS` unset, the brief sent
+to nobody — and "no recipients" isn't an error, so the run still reported ok. The silence
+is what hid it.
+**Fix:** match the role NAME through both routes (`users.role` OR `roles.name`), so legacy
+and migrated rows resolve; an empty result now `console.warn`s loudly.
+**⏸ NEEDS THE OWNER before the next 08:00 cron:** the fix resolves to **5 active
+SUPER_ADMINs** — weisiang329@, hookka.manufacturing@, nicochoong93@,
+violet.chan.hookka@, and **chew.acchouzs@gmail.com (appears to be Houzs — a DOWNSTREAM
+fork that copies our system; the brief carries output/overdue/CNC-minute/efficiency
+internals)**. nijammohd12@ is inactive → excluded. Going from "nobody" to "5 people"
+including a possible outsider is the owner's call — offer `DAILY_REPORT_RECIPIENTS` to
+pin the list.
+
+---
+
 ## BUG-2026-07-17-002 — special-order surcharges never charged on SCANNED orders: RM 8,060 under-billed across 66 SOs `money` `pricing` `sales-orders` `invoices` `under-billing` 🟢 code / 🔴 backfill pending
 
 > **STATUS 2026-07-17 — code FIXED + LIVE ON PROD** (merge `efbba63e`).

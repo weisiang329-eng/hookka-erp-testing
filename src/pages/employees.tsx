@@ -6810,9 +6810,19 @@ function RuleDraftExplainer({ d }: { d: Record<string, string> }) {
   );
 }
 
-function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
+function PayrollTab({ workers }: { workers: Worker[] }) {
   const { toast } = useToast();
   const { confirm, confirmDialog } = useConfirm();
+  // Per-worker contracted hours, for the payslip "Hourly Rate" formula label.
+  // The rate itself is already computed from each worker's real hours; only the
+  // "(26 x 9)" divisor text was hardcoded and lied for anyone not on 9h/day
+  // (e.g. ANN at 7.5). Look the hours up by employeeId so the label matches the
+  // number shown. BUG-2026-07-17-012.
+  const hoursByWorkerId = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const w of workers) if (w.id) m.set(w.id, w.workingHoursPerDay);
+    return m;
+  }, [workers]);
   const now = new Date();
   const [selectedYear, setSelectedYear] = useState(now.getFullYear());
   const [selectedMonth, setSelectedMonth] = useState(now.getMonth() + 1);
@@ -7565,7 +7575,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                                 <h4 className="text-xs font-semibold text-[#6B5C32] uppercase tracking-wide">OT Calculation</h4>
                                 <div className="text-xs space-y-1 text-[#374151] bg-white rounded-lg p-3 border border-[#E2DDD8]">
                                   <p className="text-[#6B7280]">
-                                    Hourly Rate: {fmtSen(r.basicSalary)} / (26 x 9) = <span className="font-semibold text-[#1F1D1B]">{fmtSen(r.hourlyRate)}/hr</span>
+                                    Hourly Rate: {fmtSen(r.basicSalary)} / ({r.workingDays} x {hoursByWorkerId.get(r.employeeId) ?? 9}) = <span className="font-semibold text-[#1F1D1B]">{fmtSen(r.hourlyRate)}/hr</span>
                                   </p>
                                   <hr className="border-[#E2DDD8]" />
                                   <p>

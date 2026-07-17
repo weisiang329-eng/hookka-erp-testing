@@ -9,6 +9,51 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-17 — 🟢 MONEY fix LIVE (RM 8,060) · 🔵 BACKFILL SO+SI = NEXT · 🔴 invoice PO mis-match
+**Code fix SHIPPED + LIVE + verified** (merge `efbba63e`): scanned customer POs never charged
+the special-order surcharge because the scan clients POST /api/sales-orders directly without
+`specialOrderPriceSen` while the typed form always sends it (RM 80 typed vs RM 0 scanned).
+Server now derives it ONLY when the field is omitted. Verified live on staging against the
+real write path (Divan Full Cover→8000; HB+Divan→10000 combo cap; plain→0); test SO deleted.
+**Number corrected to RM 8,060** (the first RM 8,390 mis-counted the HB+Divan combo as RM 130
+instead of the RM 100 cap).
+
+🔵 **NEXT — BACKFILL SO + SI. OWNER APPROVED (asked TWICE): 「改罷了 然後我們重新法國」**
+(法國=發過) = **re-price the old SOs + invoices; HE re-sends them.** Same route he chose on
+the invoice money-path work. **The decision is made — execute, don't re-ask.** Only open
+sub-question: PAID / part-paid invoices (raising a total breaks reconciliation) — surface
+that list separately instead of assuming.
+**START HERE:** (1) re-run the sweep UNBOUNDED (the RM 8,060 came from the first 500 SOs —
+the list endpoint caps/paginates, so the real scope may be bigger); (2) dry-run planner →
+per-SO list + delta + invoice status; (3) execute via the existing re-price/GL-restate path
+(`PUT :id`), never a hand-rolled GL write.
+66 SOs / 82 lines / RM 8,060 + their invoices. **Read BUG-2026-07-17-002's backfill block
+before doing anything** — it lists the 6 decisions/traps (issued invoices are accounting
+records → no silent edits, owner's precedent is re-price + he re-sends; paid invoices break
+reconciliation; GL must reuse the existing `PUT :id` GL-void, don't re-implement;
+confirmed SOs may cascade; build a DRY-RUN planner first per this repo's own precedent; and
+re-run the sweep unbounded — it only read the first 500 SOs).
+Deliberately stopped before writing: this touches issued documents + the GL and deserves a
+fresh session, not the tail of a long one.
+
+## 2026-07-17 — (superseded header) MONEY: special-order surcharges + invoice PO mis-match
+Owner spotted both from ONE invoice (DO-2607-051 / INV-2607-060). Full evidence, ruled-out
+causes and fix options in `docs/BUG-HISTORY.md` — **BUG-2026-07-17-002** (money) and
+**BUG-2026-07-17-001** (wrong PO refs). Do not re-derive; read those entries first.
+- **RM 8,390 under-billed** across **66 SOs / 82 lines** (500 SOs scanned live on prod).
+  INV-2607-060 alone = RM 210. Price list + `calculateUnitPrice` are CORRECT — a specific
+  WRITE PATH stores the special-order label without its surcharge (`specialOrderPriceSen=0`).
+- **Owner ruling: 「先修 然後再 backfill」** — fix the code FIRST, backfill the 66 after.
+- 🔵 NEXT (not started): confirm the culprit path — strong lead is the OCR/scan consumer
+  (stored text is COMMA-joined like `scan-po.ts:430`, while the form joins with `"; "`;
+  scan-po only extracts, so its consumer builds the SO). **Verify before coding** — the
+  similar-looking `buildLinesFromCopyDraft` bug is Service-Order-only where RM 0 is correct.
+- Fix must be BACKEND-side at write time (FE+BE unified rule) so no client path can skip it;
+  dedicated branch + tests (money ⇒ isolated-branch rule). Preserve: SV mode = 0, operator
+  price edits not overridden, HB+Divan combined-cover = RM 100.
+- Backfill is SEPARATE and needs an owner decision: issued invoices are accounting records —
+  no silent edits (credit-note vs re-issue). INV-2607-060: ask whether it's already sent.
+
 ## 2026-07-16 — Handoff tasks 1 + 2 (owner, THIS session) — see docs/HANDOFF-2026-07-16.md
 1. ❌ **Impersonation ("login as user") — OWNER DECLINED 2026-07-16, do NOT build.**
    Owner ruling: 「這個不需要啊 我去staging用他們的戶口就可以了」 — he reproduces per-user

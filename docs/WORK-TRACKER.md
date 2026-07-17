@@ -9,7 +9,38 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
-## 2026-07-17 — 🔵 RM 720 (not 750): DO-judgment plan BUILT + read-verified — awaiting owner go on the GL writes
+## 2026-07-17 — ✅ RM 750 special-order backfill CLOSED on prod (DO-judgment) — owner re-sends 6 Houzs invoices
+**Owner: 「直接上 prod。你重发」 + 2 unshipped lines 「写到 SO 线上」. DONE + reconciled.**
+- **6 invoices corrected via `PUT /api/invoices/:id {priceEdits}`** (the tested GL-restate
+  path) = **+RM 540**: INV-2606-082 +100, -087 +50, -001 +50, -163 +160, -057 +50, -136 +130.
+- **5 SOs re-priced via `POST /backfill-special-order-surcharge {scope:"all", soNos:[5]}`** =
+  9 lines / **+RM 750** (includes the 2 never-shipped lines: SO-2605-121 line 02 RM50 +
+  SO-2605-275 line 02 Left Drawer RM160 — SO-only, the forward-fix bills them on any future
+  invoice).
+- **Line targeting = DO position-match:** invoice items are 1:1 with their DO's items in the
+  same order, and each DO item carries `productionOrderId = pord-<soId>-<lineNo>`. Matched the
+  exact invoice_item by DO position + verified SKU — robust against the duplicate SKUs in the
+  consolidated invoices (INV-082 had 2008(A)-(K) ×3). All 7 verified before writing.
+- **priceEdits TRAP handled:** these invoice lines had base/divan/leg = 0 with the whole price
+  lumped in unitPriceSen. `priceEdits` REPLACES unit = base+divan+leg+special, so sending
+  special alone would have ZEROED the price. Set base = current unit, special = surcharge →
+  unit = old + surcharge (the phase-2 pattern).
+- 🔴 **MY BUG, CAUGHT BY READ-BACK — logged as the lesson:** I priced the drawer lines from the
+  STATIC `bedframeSpecialOrders` config (Right 15000, Front 12000) but the backend executor
+  uses the LIVE `specials` config (Right **16000**, Front **13000**, Left **16000**). The SO
+  came out RM30 above my invoice total; the reconciliation read caught it. Topped up
+  INV-2606-163 (+RM10) and INV-2606-136 (+RM10). **RULE: price special orders from the SAME
+  source the backend does (loadSpecialsConfig / kv_config `specials`), never the static
+  catalog** — memory already warned "Left/Right Drawer 16000 vs static 15000; Front 13000 vs
+  12000". Now heeded.
+- **FINAL RECONCILIATION VERIFIED:** all 7 invoiced lines lockstep (SO special == invoice
+  special, every one); `GET /backfill-invoiced-plan` → `invoicesToCorrect:0, needsManual:0`.
+  All 6 invoices SENT/unpaid (raising is safe), all customer = Houzs Century (inter-company).
+🔴 **OWNER'S STEP:** re-send the 6 corrected invoices to Houzs (INV-2606-082, -087, -001, -163,
+-057, -136). Sending is his action. **The special-order surcharge backfill is now 100% closed**
+(uninvoiced 78 SOs + invoiced 10 + these 5 = every under-billed SO priced).
+
+## 2026-07-17 — 🔵 RM 720 (not 750): DO-judgment plan BUILT + read-verified — awaiting owner go on the GL writes (SUPERSEDED — executed above)
 **Owner ask: 「用 DO 判断的方法我已經找到,可以做」.** Cracked it: every invoice carries
 ONE `deliveryOrderId`, and each DO line carries `productionOrderId` = `pord-<soId>-<lineNo>`.
 So the DO deterministically says WHICH invoice a given special SO line shipped on — no

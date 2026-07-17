@@ -24,6 +24,7 @@ import {
   maybeApplyAutoDayDock,
   computePunchShortfallHours,
   computeUnderLoggedShortfallHours,
+  rulesForWorkerHours,
   MANUAL_DOCK_SOURCE,
 } from "../lib/attendance-deduct";
 import { resolvePayRulesAsOf, toAttendanceRules } from "../../lib/pay-rules";
@@ -264,10 +265,14 @@ app.post("/settle-period", async (c) => {
   )
     .bind(`${period}-%`)
     .all<{ id: string; workingHoursPerDay: number | null }>();
-  const expectedByWorker = new Map<string, number>();
+  // RAW contracted hours (0 = unset). Kept raw rather than pre-defaulted because
+  // the two consumers below want different fallbacks: the To-fill expectation
+  // defaults to 9h (matches the UI), while the punch rules fall back to whatever
+  // the effective-dated pay rules say — pre-defaulting to 9 here would let this
+  // map silently override a changed global shift. See BUG-2026-07-17-006.
+  const hoursByWorker = new Map<string, number>();
   for (const w of workersRes.results ?? []) {
-    const h = Number(w.workingHoursPerDay) || 0;
-    expectedByWorker.set(w.id, h > 0 ? h : 9); // default 9h/day (matches the UI)
+    hoursByWorker.set(w.id, Number(w.workingHoursPerDay) || 0);
   }
 
   // The month's punches, keyed per (worker|date). A row with both times present
@@ -317,7 +322,8 @@ app.post("/settle-period", async (c) => {
   let dockedHours = 0;
   let periodLockedHit = false;
 
-  for (const [workerId, expected] of expectedByWorker) {
+  for (const [workerId, contractedHours] of hoursByWorker) {
+    const expected = contractedHours > 0 ? contractedHours : 9; // To-fill default
     for (const date of workingDays) {
       const key = `${workerId}|${date}`;
       const punch = punchByKey.get(key);
@@ -328,9 +334,15 @@ app.post("/settle-period", async (c) => {
       if (!hasPunch && !hasLogged) continue;
 
       // Punch shortfall (shift algorithm) — 0 unless a complete punch is short.
+      // Scored against THIS worker's contracted day, not the factory-wide 9h:
+      // ANN's full 7.5h day read as "1.5h short" every day until this landed
+      // (BUG-2026-07-17-006). This is the path that builds the month.
       let punchShort = 0;
       if (hasPunch) {
-        const rules = toAttendanceRules(resolvePayRulesAsOf(versions, date));
+        const rules = rulesForWorkerHours(
+          toAttendanceRules(resolvePayRulesAsOf(versions, date)),
+          contractedHours,
+        );
         punchShort = computePunchShortfallHours(punch!.clockIn, punch!.clockOut, rules).shortfallHours;
       }
       // Under-logged shortfall — expected − logged on a partial day.
@@ -364,7 +376,7 @@ app.post("/settle-period", async (c) => {
     success: true,
     data: {
       period,
-      workers: expectedByWorker.size,
+      workers: hoursByWorker.size,
       workingDays: workingDays.length,
       ...tally,
       dockedHours: Math.round(dockedHours * 100) / 100,

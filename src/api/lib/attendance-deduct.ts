@@ -78,6 +78,32 @@ export function _resetDeductionSourceMigForTests(): void {
   _sourceColMig = null;
 }
 
+/**
+ * The worker's OWN full day. `rules.standardWorkMin` is a factory-wide 9h, but a
+ * worker can be contracted for fewer — ANN (EMP-004) is 7.5h/day — and scoring
+ * her against everyone else's day marks a full 7.5h as "1.5h short" every single
+ * day (BUG-2026-07-17-006, −RM233.58 on her July payslip).
+ *
+ * Blank / zero hours keep the global default: 0 means "unset", not "works a
+ * zero-hour day". Only standardWorkMin moves — OT keys off `endMin`, so
+ * overtime thresholds are untouched. Pure.
+ *
+ * BOTH auto-dock paths must run rules through this: the live punch
+ * (maybeApplyAutoPunchDock) and the monthly settle (POST /settle-period), which
+ * is the path that actually built ANN's month.
+ */
+export function rulesForWorkerHours(
+  rules: AttendanceRules,
+  workingHoursPerDay: number | null | undefined,
+): AttendanceRules {
+  const h = Number(workingHoursPerDay) || 0;
+  if (h <= 0) return rules;
+  const standardWorkMin = Math.round(h * 60);
+  return standardWorkMin === rules.standardWorkMin
+    ? rules
+    : { ...rules, standardWorkMin };
+}
+
 export type PunchShortfall = {
   /** Both times parsed and clock-out is after clock-in. */
   valid: boolean;
@@ -179,30 +205,17 @@ export async function maybeApplyAutoPunchDock(
   }
 
   // BUG-2026-07-17-006 — a full day is THIS worker's day, not everyone's.
-  // `rules.standardWorkMin` is a GLOBAL 9h. Workers can be contracted for
-  // fewer: ANN (EMP-004) is workingHoursPerDay = 7.5. The PAY side already
-  // honours it (payslips.ts: hourlyRate = payrollDailyRateSen /
-  // worker.workingHoursPerDay → RM2650/(26×7.5) = RM13.59/hr) and so does the
-  // settle-period To-fill path (payroll-hour-deductions.ts:270,
-  // `h > 0 ? h : 9`) — but THIS punch path did not, so every full 7.5h day she
-  // worked was scored 9 − 7.5 = "1.5h short" and auto-docked. On the July
-  // payslip that is a 1.5h dock on EVERY working day (−RM233.58 over 13 days)
-  // for a worker who was never short at all (owner: 「我記得ann是工作少1.5小時
-  // 的」「沒有跟?」).
-  //
-  // Only standardWorkMin is overridden: otMin is derived from clock-out past
-  // `rules.endMin`, so OT thresholds are untouched by this.
-  // Best-effort, same posture as the rules load — a lookup failure keeps the
-  // global default rather than blocking the punch.
+  // The PAY side already honours workingHoursPerDay (payslips.ts: hourlyRate =
+  // payrollDailyRateSen / worker.workingHoursPerDay) and so does the settle
+  // To-fill path (`h > 0 ? h : 9`) — the dock side did not. See
+  // rulesForWorkerHours. Best-effort, same posture as the rules load above: a
+  // lookup failure keeps the global default rather than blocking the punch.
   try {
     const w = await db
       .prepare("SELECT workingHoursPerDay FROM workers WHERE id = ?")
       .bind(workerId)
       .first<{ workingHoursPerDay: number | null }>();
-    const h = Number(w?.workingHoursPerDay) || 0;
-    if (h > 0 && Math.round(h * 60) !== rules.standardWorkMin) {
-      rules = { ...rules, standardWorkMin: Math.round(h * 60) };
-    }
+    rules = rulesForWorkerHours(rules, w?.workingHoursPerDay);
   } catch {
     /* keep the global default */
   }

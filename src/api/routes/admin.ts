@@ -36,6 +36,8 @@ import {
   type SalesOrderRow,
   type SalesOrderItemRow,
 } from "./sales-orders";
+import { deriveSpecialOrderSurchargeSen } from "../../lib/special-order-surcharge";
+import { loadSpecialsConfig } from "../lib/specials-config";
 
 const app = new Hono<Env>();
 
@@ -1263,6 +1265,171 @@ app.post("/backfill-invoice-prices", async (c) => {
     },
     plan,
     skipped,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/backfill-special-order-surcharge  — DRY-RUN PLANNER (read-only)
+//
+// One-shot planner for BUG-2026-07-17-002 (scanned customer POs never charged
+// the special-order surcharge — the scan clients POST without
+// specialOrderPriceSen, so "Divan Full Cover" stored 0 while the same option
+// typed by hand charged RM 80). The forward fix is live; this reports the
+// EXISTING under-billed rows so the owner can approve the correction.
+//
+// READ-ONLY BY CONSTRUCTION — there is no write path in this handler at all.
+// The owner's ruling is to re-price the old SOs + invoices and re-send the
+// invoices himself, but the write is deliberately NOT wired here yet: raising an
+// issued invoice's total touches the GL and payment reconciliation, so the plan
+// gets reviewed first (this repo's own precedent — the invoice money-path work
+// shipped dry-run planners before any write).
+//
+// Sweeps the WHOLE table in SQL — NOT the paginated list endpoint, which caps at
+// 500 rows and produced the first (understated) RM 8,060 estimate.
+//
+// Response: { success, totals, byOption, plan: [ per-SO … ] }
+//   plan[].lines[] carries the exact per-line delta; plan[].invoice carries the
+//   invoice status so PAID / SENT ones can be triaged separately (the owner has
+//   NOT ruled on paid invoices — do not assume).
+// ---------------------------------------------------------------------------
+app.get("/backfill-special-order-surcharge", async (c) => {
+  const su = requireSuperAdmin(c);
+  if (su) return su;
+  const db = c.var.DB;
+
+  const cfgSpecials = await loadSpecialsConfig(db);
+
+  // Every SO line that names a special order. We compute the owed surcharge in
+  // JS (shared helper = same rule the write path now uses) rather than in SQL,
+  // so the combined-cover cap and config overrides can't drift.
+  const rows = await db
+    .prepare(
+      `SELECT i.id AS itemId, i.salesOrderId AS salesOrderId,
+              i.productCode AS productCode, i.fabricCode AS fabricCode,
+              i.specialOrder AS specialOrder,
+              i.specialOrderPriceSen AS specialOrderPriceSen,
+              i.basePriceSen AS basePriceSen, i.unitPriceSen AS unitPriceSen,
+              i.quantity AS quantity,
+              s.companySOId AS companySOId, s.status AS soStatus,
+              s.customerName AS customerName, s.createdAt AS createdAt
+         FROM sales_order_items i
+         JOIN sales_orders s ON s.id = i.salesOrderId
+        WHERE i.specialOrder IS NOT NULL AND i.specialOrder != ''`,
+    )
+    .all<{
+      itemId: string; salesOrderId: string; productCode: string | null;
+      fabricCode: string | null; specialOrder: string | null;
+      specialOrderPriceSen: number | null; basePriceSen: number | null;
+      unitPriceSen: number | null; quantity: number | null;
+      companySOId: string | null; soStatus: string | null;
+      customerName: string | null; createdAt: string | null;
+    }>();
+
+  const bySo = new Map<string, {
+    salesOrderId: string; companySOId: string; customerName: string;
+    soStatus: string; createdAt: string; deltaSen: number;
+    lines: Array<Record<string, unknown>>;
+  }>();
+  const byOption: Record<string, number> = {};
+  let linesAffected = 0;
+  let totalDeltaSen = 0;
+
+  for (const r of rows.results ?? []) {
+    const charged = Number(r.specialOrderPriceSen) || 0;
+    // Trust anything already charged — the typed form priced it correctly, and
+    // a deliberate 0 can't be told apart from a missed one HERE, so we only
+    // touch rows that owe money AND currently sit at 0.
+    if (charged > 0) continue;
+    const owed = deriveSpecialOrderSurchargeSen(r.specialOrder, null, cfgSpecials);
+    if (owed <= 0) continue;
+
+    const qty = Number(r.quantity) || 1;
+    const delta = owed * qty;
+    linesAffected++;
+    totalDeltaSen += delta;
+    for (const t of String(r.specialOrder ?? "").split(/[;,]/).map((s) => s.trim())) {
+      if (t) byOption[t] = (byOption[t] || 0) + 1;
+    }
+
+    const key = r.salesOrderId;
+    if (!bySo.has(key)) {
+      bySo.set(key, {
+        salesOrderId: key,
+        companySOId: r.companySOId ?? "",
+        customerName: r.customerName ?? "",
+        soStatus: r.soStatus ?? "",
+        createdAt: r.createdAt ?? "",
+        deltaSen: 0,
+        lines: [],
+      });
+    }
+    const g = bySo.get(key)!;
+    g.deltaSen += delta;
+    g.lines.push({
+      itemId: r.itemId,
+      productCode: r.productCode,
+      fabricCode: r.fabricCode,
+      specialOrder: r.specialOrder,
+      quantity: qty,
+      chargedSen: charged,
+      owedSurchargeSen: owed,
+      deltaSen: delta,
+      unitPriceSen_now: Number(r.unitPriceSen) || 0,
+      unitPriceSen_after: (Number(r.unitPriceSen) || 0) + owed,
+    });
+  }
+
+  // Attach invoice state per SO — the owner re-sends invoices, but a PAID one
+  // can't just have its total raised (breaks reconciliation) and he hasn't ruled
+  // on those. Surfaced, never assumed.
+  const soIds = Array.from(bySo.keys());
+  if (soIds.length > 0) {
+    const ph = soIds.map(() => "?").join(",");
+    const invs = await db
+      .prepare(
+        `SELECT id, invoiceNo, salesOrderId, status, totalSen, paidAmount
+           FROM invoices WHERE salesOrderId IN (${ph})`,
+      )
+      .bind(...soIds)
+      .all<{
+        id: string; invoiceNo: string | null; salesOrderId: string;
+        status: string | null; totalSen: number | null; paidAmount: number | null;
+      }>();
+    for (const inv of invs.results ?? []) {
+      const g = bySo.get(inv.salesOrderId);
+      if (!g) continue;
+      (g as unknown as { invoices?: unknown[] }).invoices ??= [];
+      ((g as unknown as { invoices: unknown[] }).invoices).push({
+        invoiceNo: inv.invoiceNo,
+        status: inv.status,
+        totalSen: inv.totalSen,
+        paidAmount: inv.paidAmount,
+        isPaid: Number(inv.paidAmount) > 0,
+      });
+    }
+  }
+
+  const plan = Array.from(bySo.values()).sort((a, b) => b.deltaSen - a.deltaSen);
+  const paidCount = plan.filter((p) =>
+    ((p as unknown as { invoices?: Array<{ isPaid?: boolean }> }).invoices ?? [])
+      .some((i) => i.isPaid),
+  ).length;
+
+  return c.json({
+    success: true,
+    dryRun: true,
+    readOnly: true,
+    note:
+      "Planner only — this endpoint never writes. Scope is the WHOLE sales_order_items table (not the 500-row list cap that produced the first estimate).",
+    totals: {
+      salesOrdersAffected: plan.length,
+      linesAffected,
+      totalDeltaSen,
+      totalDeltaRM: (totalDeltaSen / 100).toFixed(2),
+      salesOrdersWithAPaidInvoice: paidCount,
+    },
+    byOption,
+    plan,
   });
 });
 

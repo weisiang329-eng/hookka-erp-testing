@@ -9,7 +9,12 @@
 // This is a 1:1 move of the endpoint logic. Read-only; joins sales_orders /
 // production_orders / delivery_order_items to resolve, per invoice line:
 // category, customer PO / SO / REF / our company SO, and the price build-up.
+//
+// 2026-07-17 (BUG-2026-07-17-001): the order refs are now resolved by the
+// invoice line's OWN production_order_id — see refByPo below. The old
+// code|fabric|size maps remain only as a legacy fallback.
 // ---------------------------------------------------------------------------
+import { readInvoiceItemPoLink } from "./invoice-po-link";
 
 interface DbLike {
   prepare(sql: string): {
@@ -228,10 +233,19 @@ export async function computeInvoicePrintExtras(
   const refTight = new Map<string, RefVal>();
   const refLoose = new Map<string, RefVal>();
   const refByCode = new Map<string, RefVal>();
+  // BUG-2026-07-17-001 — the EXACT map. The three maps above are keyed by
+  // product code/fabric/size and built first-one-wins, which mislabels any
+  // consolidated DO carrying repeated product+fabric lines from DIFFERENT SOs
+  // (INV-2607-060: 4 of 12 lines cited the wrong customer PO; three SOs' POs
+  // never appeared while one appeared 3×). The refs were always sourced from
+  // the DO — only the KEY was a guess. Keyed by productionOrderId there is
+  // nothing to guess: one DO line, one invoice line, one answer.
+  const refByPo = new Map<string, RefVal>();
   if (inv.deliveryOrderId) {
     const dRefRes = await db
       .prepare(
-        `SELECT di.productCode, di.fabricCode, di.sizeLabel, di.salesOrderNo,
+        `SELECT di.productionOrderId, di.productCode, di.fabricCode,
+                di.sizeLabel, di.salesOrderNo,
                 po.customerPOId, po.customerReference,
                 po.salesOrderId, po.companySOId
            FROM delivery_order_items di
@@ -240,6 +254,7 @@ export async function computeInvoicePrintExtras(
       )
       .bind(inv.deliveryOrderId)
       .all<{
+        productionOrderId: string | null;
         productCode: string | null;
         fabricCode: string | null;
         sizeLabel: string | null;
@@ -260,6 +275,8 @@ export async function computeInvoicePrintExtras(
         customerRefLine: d.customerReference || so?.reference || null,
         companySO: so?.companySO || d.companySOId || d.salesOrderNo || null,
       };
+      // Exact, per-line. No first-one-wins: each DO line has its own entry.
+      if (d.productionOrderId) refByPo.set(d.productionOrderId, rv);
       const code = (d.productCode ?? "").trim();
       const fab = (d.fabricCode ?? "").trim();
       const size = (d.sizeLabel ?? "").trim();
@@ -278,7 +295,7 @@ export async function computeInvoicePrintExtras(
     .prepare(
       `SELECT id, productCode, fabricCode, sizeLabel,
               basePriceSen, divanPriceSen, legPriceSen,
-              specialOrderPriceSen, priceEdited
+              specialOrderPriceSen, priceEdited, production_order_id
          FROM invoice_items WHERE invoiceId = ?`,
     )
     .bind(invoiceId)
@@ -299,7 +316,14 @@ export async function computeInvoicePrintExtras(
     const size = (r.sizeLabel ?? "").trim();
     const v =
       tight.get(`${code}|${fab}|${size}`) || loose.get(`${code}|${fab}`) || byCode.get(code);
+    // BUG-2026-07-17-001 — prefer the EXACT link the invoice now carries. The
+    // code-keyed maps below stay ONLY as the fallback for legacy rows written
+    // before invoice_items.production_order_id existed (and for the
+    // bill-the-SO-lines fallback path, which has no DO line behind it). Once
+    // those are backfilled this fallback should never fire.
+    const poLink = readInvoiceItemPoLink(r as unknown as Record<string, unknown>);
     const rf =
+      (poLink ? refByPo.get(poLink) : undefined) ||
       refTight.get(`${code}|${fab}|${size}`) ||
       refLoose.get(`${code}|${fab}`) ||
       refByCode.get(code);

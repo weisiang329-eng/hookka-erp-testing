@@ -17,7 +17,10 @@ import type { Context } from "hono";
 import type { Env } from "../worker";
 import { consumeFGBatchesForDO } from "../lib/do-cost-cascade";
 import {
-  loadDoValueMap,
+  // loadDoValueMap is referenced in the comments below (it's the resolver this
+  // file's pricing mirrors) but every call here goes through the cached variant.
+  // The dead import blocked the commit hook; it's still imported where it's
+  // genuinely used (lib/delivery-agent.ts).
   loadDoValueMapCached,
   loadPoValueMap,
   loadSoLinePriceIndex,
@@ -73,6 +76,7 @@ import {
 } from "../../lib/build-unified-doc-data";
 import { HOOKKA_LOGO_PNG_BASE64 } from "../lib/hookka-logo-base64";
 import { computeInvoicePrintExtras } from "../lib/invoice-print-extras";
+import { ensureInvoicePoLinkColumn } from "../lib/invoice-po-link";
 import { getOrCreateQrToken, qrScanUrl } from "../lib/do-qr-token";
 // Company office number — the driver-contact fallback on dispatch notices
 // (owner rule: no driver phone on file → give the company's number).
@@ -740,6 +744,15 @@ const SO_TERMINAL_FOR_DELIVERED = new Set([
 
 type InvItem = {
   id: string;
+  // The DO line this invoice line was billed FROM (BUG-2026-07-17-001).
+  // delivery_order_items carries the real per-line link (productionOrderId →
+  // its SO + line), but invoice_items used to store only productCode/fabricCode
+  // — so the printout had to RECONSTRUCT the customer PO by matching on code,
+  // first-one-wins. On a consolidated DO with repeated product+fabric lines from
+  // DIFFERENT SOs that mislabels lines: on INV-2607-060, 4 of 12 lines cited the
+  // wrong customer PO, and three SOs' PO numbers never appeared at all.
+  // The answer was never a better guess — the DO already knows. Carry the link.
+  productionOrderId: string | null;
   productCode: string;
   productName: string;
   sizeLabel: string;
@@ -759,6 +772,11 @@ export async function computeDoInvoiceLines(
   doId: string,
   soIds: string[],
 ): Promise<{ invItems: InvItem[]; computedTotal: number }> {
+  // BUG-2026-07-17-001 — the single choke point every invoice INSERT flows
+  // through, so the runtime ALTER lives here: awaited before any caller writes
+  // invoice_items.production_order_id. Deploys don't replay migration files;
+  // this is the load-bearing copy. Memoised per isolate.
+  await ensureInvoicePoLinkColumn(db);
   if (soIds.length === 0) return { invItems: [], computedTotal: 0 };
 
   // BUG-2026-05-18-004 fix. Price every delivered item with the EXACT same
@@ -836,6 +854,7 @@ export async function computeDoInvoiceLines(
     );
     return {
       id: genInvoiceItemId(),
+      productionOrderId: di.productionOrderId ?? null,
       productCode: di.productCode ?? "",
       productName: di.productName ?? "",
       sizeLabel: di.sizeLabel ?? "",
@@ -869,6 +888,11 @@ export async function computeDoInvoiceLines(
     if (sis.length > 0) {
       invItems = sis.map((si) => ({
         id: genInvoiceItemId(),
+        // Fallback path — billing the SO lines directly because the DO had no
+        // priceable items. There IS no DO line behind these, so there is no
+        // production-order link to carry; null is the honest value (the print
+        // path falls back to the invoice-level refs for these).
+        productionOrderId: null,
         productCode: si.productCode ?? "",
         productName: si.productName ?? "",
         sizeLabel: si.sizeLabel ?? "",
@@ -1094,8 +1118,8 @@ async function buildDoDeliveredSoAndInvoice(
           .prepare(
             `INSERT INTO invoice_items (
                id, invoiceId, productCode, productName, sizeLabel, fabricCode,
-               quantity, unitPriceSen, totalSen
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               quantity, unitPriceSen, totalSen, production_order_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             item.id,
@@ -1107,6 +1131,9 @@ async function buildDoDeliveredSoAndInvoice(
             item.quantity,
             item.unitPriceSen,
             item.totalSen,
+            // BUG-2026-07-17-001 — keep the DO's per-line link so the printout
+            // never has to guess the customer PO by product code again.
+            item.productionOrderId,
           ),
       );
     }
@@ -2227,8 +2254,8 @@ app.post("/backfill-fix-underbilled-invoices", async (c) => {
           c.var.DB.prepare(
             `INSERT INTO invoice_items (
                id, invoiceId, productCode, productName, sizeLabel, fabricCode,
-               quantity, unitPriceSen, totalSen
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               quantity, unitPriceSen, totalSen, production_order_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             it.id,
             inv.id,
@@ -2239,6 +2266,8 @@ app.post("/backfill-fix-underbilled-invoices", async (c) => {
             it.quantity,
             it.unitPriceSen,
             it.totalSen,
+            // BUG-2026-07-17-001 — carry the DO's per-line link (see InvItem).
+            it.productionOrderId,
           ),
         );
       }
@@ -2584,8 +2613,8 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
           c.var.DB.prepare(
             `INSERT INTO invoice_items (
                id, invoiceId, productCode, productName, sizeLabel, fabricCode,
-               quantity, unitPriceSen, totalSen
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               quantity, unitPriceSen, totalSen, production_order_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             it.id,
             newId,
@@ -2596,6 +2625,8 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
             it.quantity,
             it.unitPriceSen,
             it.totalSen,
+            // BUG-2026-07-17-001 — carry the DO's per-line link (see InvItem).
+            it.productionOrderId,
           ),
         );
       }

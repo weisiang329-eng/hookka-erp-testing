@@ -59,16 +59,22 @@ Entries themselves stay newest-first.
 > HB + Divan as 5000+8000=13000; the real rule caps the pair at **RM 100**
 > (`pricing-options.ts:66`). 10 prod lines hit the combo. **Use 8,060.**
 >
-> **⏭ BACKFILL — REQUESTED BY OWNER, NOT DONE** (「舊的backfill SO 和SI」). Scope: 66 SOs /
-> 82 lines / 84 pieces / **RM 8,060**, plus their invoices. Do NOT start writing before
-> settling these — this touches issued documents and the GL:
-> 1. **Issued invoices are accounting records — no silent amount edits** (the repo already
->    holds this line: cancelling kept the audit trail because deleting an issued invoice is
->    an LHDN risk). Precedent worth reusing: on the invoice money-path work the owner's
->    chosen route was **re-price + he re-sends the invoices**. Confirm which invoices are
->    already SENT.
-> 2. **PAID / part-paid invoices** — raising the total breaks payment reconciliation; needs
->    its own decision (credit note vs re-issue vs leave).
+> **⏭ BACKFILL — OWNER APPROVED, NOT DONE. THIS IS THE NEXT JOB.**
+>
+> **OWNER'S RULING 2026-07-17, asked twice, verbatim: 「改罷了 然後我們重新法國」**
+> (法國 = 發過 — autocorrect). Meaning: **re-price the old SOs and invoices, and HE re-sends
+> the invoices to customers.** This is the same route he chose on the invoice money-path work
+> ("re-price all + he re-sends"). **The decision is MADE — do not re-ask it. Execute.**
+>
+> Scope: 66 SOs / 82 lines / 84 pieces / **RM 8,060**, plus their invoices (SO **and** SI —
+> he asked for both). Remaining traps to respect while executing:
+> 1. **Don't silently edit an issued invoice's amount** — go through the existing re-price /
+>    restate path so the audit trail and GL stay intact (deleting/rewriting an issued invoice
+>    is an LHDN risk; this repo already cancelled-rather-than-deleted for exactly that). The
+>    owner re-sends afterwards, so the customer always gets the corrected document.
+> 2. **PAID / part-paid invoices** — raising the total breaks payment reconciliation. The
+>    owner has NOT ruled on these specifically; surface the list of paid ones separately
+>    rather than assuming.
 > 3. **GL** — invoice totals post to the GL. Use the existing restate/void path
 >    (`PUT :id` GL-void), **do not re-implement** it.
 > 4. **CONFIRMED/COMPLETED SOs** may cascade on edit (production orders / cost) — check

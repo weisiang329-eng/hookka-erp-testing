@@ -147,7 +147,13 @@ app.post("/heartbeat", async (c) => {
         .first<{ n: number | string }>();
       if ((Number(pend?.n) || 0) > 0) {
         await recordAgentRun(db, "production-proposals", async (run) => {
-          const a = await applyPendingProposals(db, { decidedBy: "AGENT_AUTO", limit: 150 });
+          // 150 → 1000 (2026-07-17). The 150 was sized for the old per-row
+          // drain (2 round-trips a row = 300 a beat, which never finished). Now
+          // that it's set-based, 1000 rows is ~10 round-trips — and it MATTERS:
+          // the beat only fires every 1-3.5h in practice (GitHub drops the
+          // schedule), so at 150/beat a backlog like today's 1,022 would take a
+          // full day to clear. One beat should be able to finish the queue.
+          const a = await applyPendingProposals(db, { decidedBy: "AGENT_AUTO", limit: 1000 });
           const summary = `auto-applied ${a.approved} queued due date(s), ${a.remainingPending} remaining (heartbeat drain)`;
           run.setSummary(summary);
           ran.push({ task: "production-proposals", reason: "backlog drain", summary });

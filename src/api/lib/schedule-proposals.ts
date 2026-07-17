@@ -353,7 +353,12 @@ export async function applyPendingProposals(
   opts: { decidedBy: string; limit?: number },
 ): Promise<ApplyProposalsResult> {
   await ensureProposalTables(db);
-  const limit = Math.max(1, Math.min(400, opts.limit ?? 300));
+  // Raised 400 → 2000 (2026-07-17). The old cap existed because the drain wrote
+  // TWO round-trips PER ROW, so a big limit guaranteed the Worker died mid-run —
+  // which is exactly what was happening. Now it's set-based (2 statements per
+  // 200-row chunk), so 2000 rows costs ~20 round-trips, not 4000. The cap now
+  // bounds the transaction size, not the survivable work.
+  const limit = Math.max(1, Math.min(2000, opts.limit ?? 300));
   const nowIso = new Date().toISOString();
 
   const res = await db

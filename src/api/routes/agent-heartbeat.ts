@@ -159,80 +159,20 @@ app.post("/heartbeat", async (c) => {
     console.error("[agents/heartbeat] backlog drain failed:", err);
   }
 
-  const { decisions, skipped } = await decideAgentRuns(db);
-
-  for (const d of decisions) {
-    try {
-      if (d.task === "delivery-run") {
-        await recordAgentRun(db, "delivery-run", async (run) => {
-          const sink = { tokensIn: 0, tokensOut: 0 };
-          const r = await runDeliveryAgent(db, DEFAULT_ORG_ID, {
-            // Token control: fresh AI focus only on the day's first run, and
-            // only while the monthly LLM budget cap has headroom.
-            anthropicApiKey: d.firstOfDay
-              ? await llmKeyIfBudgetAllows(db, c.env.ANTHROPIC_API_KEY, "DELIVERY")
-              : undefined,
-            usageSink: sink,
-          });
-          run.addTokens(sink.tokensIn, sink.tokensOut);
-          const summary = `${r.date} · plans ${r.proposals.loadPlans} · invoice gaps ${r.proposals.invoiceGaps} · POD ${r.proposals.podChases} · transit drifts ${r.transitDrifts} (heartbeat: ${d.reason})`;
-          run.setSummary(summary);
-          ran.push({ task: d.task, reason: d.reason, summary });
-          return r;
-        });
-      } else if (d.task === "production-proposals") {
-        // Hand the engine to its OWN invocation (see /run-generate above). We
-        // only await the fetch — the CPU burns over there, on a fresh budget,
-        // so nothing this beat already did can starve it.
-        const res = await fetch(generateUrl + `?reason=${encodeURIComponent(`heartbeat: ${d.reason}`)}`, {
-          method: "POST",
-          headers: { "x-cron-secret": expected },
-        });
-        const summary = res.ok
-          ? `engine dispatched (heartbeat: ${d.reason})`
-          : `engine dispatch failed HTTP ${res.status}`;
-        ran.push({ task: d.task, reason: d.reason, summary });
-        if (!res.ok) console.error("[agents/heartbeat] generate dispatch:", res.status);
-      }
-    } catch (err) {
-      // One agent's failure never blocks another's beat; the error row is
-      // already in agent_runs via recordAgentRun.
-      console.error(`[agents/heartbeat] ${d.task} failed:`, err);
-      skipped.push({ task: d.task, reason: "run errored (see agent_runs)" });
-    }
-  }
-
-  // Config-param auto-apply sweep (owner 2026-07-15: "flag 亮着参数还躺着").
-  // The AUTO-APPROVE flag must MEAN "the agent applies its own learned params".
-  // This used to be trapped inside the gated production-proposals decision, so
-  // the flag could be ON while params sat PENDING (production is capped at 3
-  // runs/day, and the delivery cs.transitDays.* params were never swept here at
-  // all — only PRODUCTION was). Now it runs every beat, for BOTH families,
-  // gated only by each family's own flag (isAutoApproveOn is already false when
-  // the family is paused) + working hours (clocks off after 8pm like the rest).
-  try {
-    const hourMytSweep = new Date(Date.now() + 8 * 3600 * 1000).getUTCHours();
-    if (hourMytSweep >= 8 && hourMytSweep < 20) {
-      for (const family of ["PRODUCTION", "DELIVERY"] as const) {
-        if (await isAutoTuneOn(db, family)) {
-          const n = await autoApplyConfigProposals(db, family, "AGENT_AUTO").catch((err) => {
-            console.warn(`[agents/heartbeat] ${family} param sweep failed:`, err);
-            return 0;
-          });
-          if (n > 0) {
-            ran.push({
-              task: `${family.toLowerCase()}-param-tune`,
-              reason: "auto-approve flag on",
-              summary: `self-tuned ${n} param(s)`,
-            });
-          }
-        }
-      }
-    }
-  } catch (err) {
-    console.error("[agents/heartbeat] param sweep failed:", err);
-  }
-
+  // ── 2 · CHEAP, INDEPENDENT DIGESTS BEFORE THE HEAVY GENERATION ───────────
+  // These two are read-only count queries — milliseconds. They used to sit at
+  // the BOTTOM of the beat, AFTER the proposals generation. The beat runs
+  // sequentially in one Worker invocation, so when that heavy generation blew
+  // the Worker's limits and the whole invocation was killed, these never ran:
+  // on 2026-07-17 the Employee and Service agents had not run for 28 HOURS
+  // while production-proposals sat at status=running (a zombie), and all four
+  // of that day's beats died the same way. A try/catch cannot save them — the
+  // Worker is killed, not thrown.
+  //
+  // Same lesson as the backlog drain above: do the light, high-value work
+  // FIRST, so a heavy generation dying later in the beat costs only itself.
+  // Cost of being wrong here is one cheap digest ahead of proposals; cost of
+  // the old order was two agents silently dead for a day.
   // Employee daily digest — the Employee agent's read-only run (owner 0716).
   // Fires once per working day after 07:00 MYT: recomputes the anomaly counts
   // and refreshes the console snapshot. Idempotent (overwrites the snapshot),
@@ -317,6 +257,81 @@ app.post("/heartbeat", async (c) => {
   } catch (err) {
     console.error("[agents/heartbeat] service digest failed:", err);
   }
+
+  const { decisions, skipped } = await decideAgentRuns(db);
+
+  for (const d of decisions) {
+    try {
+      if (d.task === "delivery-run") {
+        await recordAgentRun(db, "delivery-run", async (run) => {
+          const sink = { tokensIn: 0, tokensOut: 0 };
+          const r = await runDeliveryAgent(db, DEFAULT_ORG_ID, {
+            // Token control: fresh AI focus only on the day's first run, and
+            // only while the monthly LLM budget cap has headroom.
+            anthropicApiKey: d.firstOfDay
+              ? await llmKeyIfBudgetAllows(db, c.env.ANTHROPIC_API_KEY, "DELIVERY")
+              : undefined,
+            usageSink: sink,
+          });
+          run.addTokens(sink.tokensIn, sink.tokensOut);
+          const summary = `${r.date} · plans ${r.proposals.loadPlans} · invoice gaps ${r.proposals.invoiceGaps} · POD ${r.proposals.podChases} · transit drifts ${r.transitDrifts} (heartbeat: ${d.reason})`;
+          run.setSummary(summary);
+          ran.push({ task: d.task, reason: d.reason, summary });
+          return r;
+        });
+      } else if (d.task === "production-proposals") {
+        // Hand the engine to its OWN invocation (see /run-generate above). We
+        // only await the fetch — the CPU burns over there, on a fresh budget,
+        // so nothing this beat already did can starve it.
+        const res = await fetch(generateUrl + `?reason=${encodeURIComponent(`heartbeat: ${d.reason}`)}`, {
+          method: "POST",
+          headers: { "x-cron-secret": expected },
+        });
+        const summary = res.ok
+          ? `engine dispatched (heartbeat: ${d.reason})`
+          : `engine dispatch failed HTTP ${res.status}`;
+        ran.push({ task: d.task, reason: d.reason, summary });
+        if (!res.ok) console.error("[agents/heartbeat] generate dispatch:", res.status);
+      }
+    } catch (err) {
+      // One agent's failure never blocks another's beat; the error row is
+      // already in agent_runs via recordAgentRun.
+      console.error(`[agents/heartbeat] ${d.task} failed:`, err);
+      skipped.push({ task: d.task, reason: "run errored (see agent_runs)" });
+    }
+  }
+
+  // Config-param auto-apply sweep (owner 2026-07-15: "flag 亮着参数还躺着").
+  // The AUTO-APPROVE flag must MEAN "the agent applies its own learned params".
+  // This used to be trapped inside the gated production-proposals decision, so
+  // the flag could be ON while params sat PENDING (production is capped at 3
+  // runs/day, and the delivery cs.transitDays.* params were never swept here at
+  // all — only PRODUCTION was). Now it runs every beat, for BOTH families,
+  // gated only by each family's own flag (isAutoApproveOn is already false when
+  // the family is paused) + working hours (clocks off after 8pm like the rest).
+  try {
+    const hourMytSweep = new Date(Date.now() + 8 * 3600 * 1000).getUTCHours();
+    if (hourMytSweep >= 8 && hourMytSweep < 20) {
+      for (const family of ["PRODUCTION", "DELIVERY"] as const) {
+        if (await isAutoTuneOn(db, family)) {
+          const n = await autoApplyConfigProposals(db, family, "AGENT_AUTO").catch((err) => {
+            console.warn(`[agents/heartbeat] ${family} param sweep failed:`, err);
+            return 0;
+          });
+          if (n > 0) {
+            ran.push({
+              task: `${family.toLowerCase()}-param-tune`,
+              reason: "auto-approve flag on",
+              summary: `self-tuned ${n} param(s)`,
+            });
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[agents/heartbeat] param sweep failed:", err);
+  }
+
 
       } catch (beatErr) {
         console.error("[agents/heartbeat] background beat failed:", beatErr);

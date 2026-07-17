@@ -177,6 +177,36 @@ export async function maybeApplyAutoPunchDock(
   } catch {
     rules = HOOKKA_ATTENDANCE;
   }
+
+  // BUG-2026-07-17-006 — a full day is THIS worker's day, not everyone's.
+  // `rules.standardWorkMin` is a GLOBAL 9h. Workers can be contracted for
+  // fewer: ANN (EMP-004) is workingHoursPerDay = 7.5. The PAY side already
+  // honours it (payslips.ts: hourlyRate = payrollDailyRateSen /
+  // worker.workingHoursPerDay → RM2650/(26×7.5) = RM13.59/hr) and so does the
+  // settle-period To-fill path (payroll-hour-deductions.ts:270,
+  // `h > 0 ? h : 9`) — but THIS punch path did not, so every full 7.5h day she
+  // worked was scored 9 − 7.5 = "1.5h short" and auto-docked. On the July
+  // payslip that is a 1.5h dock on EVERY working day (−RM233.58 over 13 days)
+  // for a worker who was never short at all (owner: 「我記得ann是工作少1.5小時
+  // 的」「沒有跟?」).
+  //
+  // Only standardWorkMin is overridden: otMin is derived from clock-out past
+  // `rules.endMin`, so OT thresholds are untouched by this.
+  // Best-effort, same posture as the rules load — a lookup failure keeps the
+  // global default rather than blocking the punch.
+  try {
+    const w = await db
+      .prepare("SELECT workingHoursPerDay FROM workers WHERE id = ?")
+      .bind(workerId)
+      .first<{ workingHoursPerDay: number | null }>();
+    const h = Number(w?.workingHoursPerDay) || 0;
+    if (h > 0 && Math.round(h * 60) !== rules.standardWorkMin) {
+      rules = { ...rules, standardWorkMin: Math.round(h * 60) };
+    }
+  } catch {
+    /* keep the global default */
+  }
+
   const sf = computePunchShortfallHours(input.clockIn, input.clockOut, rules);
 
   // Guard 1: a clock-out is REQUIRED. No clock-out → never dock a full day on a

@@ -34,7 +34,50 @@ Entries themselves stay newest-first.
 
 ---
 
-## BUG-2026-07-17-002 — special-order surcharges never charged: RM 8,390 under-billed across 66 SOs `money` `pricing` `sales-orders` `invoices` `under-billing` 🔴
+## BUG-2026-07-17-002 — special-order surcharges never charged on SCANNED orders: RM 8,060 under-billed across 66 SOs `money` `pricing` `sales-orders` `invoices` `under-billing` 🟢 code / 🔴 backfill pending
+
+> **STATUS 2026-07-17 — code FIXED + LIVE ON PROD** (merge `efbba63e`).
+> **ROOT CAUSE (confirmed, not inferred):** two clients create SOs and only one prices the
+> options. `sales/create.tsx` (typed form) computes the surcharge and always POSTs
+> `specialOrderPriceSen` — correct, those are the 8 lines on prod that DID charge.
+> `scan-po-modal.tsx` + `m/ScanPOSheet.tsx` (scan a customer PO) POST `/api/sales-orders`
+> **directly, never through the form**, sending only the `specialOrder` TEXT + a
+> `basePriceSen` read off the customer's PDF, and **no** `specialOrderPriceSen` — so
+> `Number(item.specialOrderPriceSen) || 0` stored 0. Same bed, same option: **RM 80 typed,
+> RM 0 scanned.**
+> **FIX:** server derives the surcharge ONLY when the client OMITS the field
+> (`src/lib/special-order-surcharge.ts` pure + `src/api/lib/specials-config.ts` reads the
+> owner-editable `kv_config.variants-config.specials`), wired into sales-orders POST **and**
+> PUT. A supplied value is trusted verbatim — deliberate 0 (Service Orders are free by
+> design) and hand discounts survive. Unknown OCR tokens price at 0 — never invent money.
+> 20 tests in `tests/special-order-surcharge.test.mjs`, registered in `npm test`.
+> **VERIFIED LIVE** (staging, real write path, scan-shaped POST with no surcharge field):
+> `Divan Full Cover` → **8000**; `HB Fully Cover, Divan Full Cover` → **10000** (combo cap
+> held); plain line → 0 untouched. Test SO deleted + confirmed gone.
+>
+> **NUMBER CORRECTED — RM 8,060, not the RM 8,390 first reported.** The first sweep summed
+> HB + Divan as 5000+8000=13000; the real rule caps the pair at **RM 100**
+> (`pricing-options.ts:66`). 10 prod lines hit the combo. **Use 8,060.**
+>
+> **⏭ BACKFILL — REQUESTED BY OWNER, NOT DONE** (「舊的backfill SO 和SI」). Scope: 66 SOs /
+> 82 lines / 84 pieces / **RM 8,060**, plus their invoices. Do NOT start writing before
+> settling these — this touches issued documents and the GL:
+> 1. **Issued invoices are accounting records — no silent amount edits** (the repo already
+>    holds this line: cancelling kept the audit trail because deleting an issued invoice is
+>    an LHDN risk). Precedent worth reusing: on the invoice money-path work the owner's
+>    chosen route was **re-price + he re-sends the invoices**. Confirm which invoices are
+>    already SENT.
+> 2. **PAID / part-paid invoices** — raising the total breaks payment reconciliation; needs
+>    its own decision (credit note vs re-issue vs leave).
+> 3. **GL** — invoice totals post to the GL. Use the existing restate/void path
+>    (`PUT :id` GL-void), **do not re-implement** it.
+> 4. **CONFIRMED/COMPLETED SOs** may cascade on edit (production orders / cost) — check
+>    before touching, and don't override production locks.
+> 5. Build a **DRY-RUN planner first** (the established pattern here — the invoice money-path
+>    work shipped dedupe + backfill dry-run planners before any write), show the owner the
+>    per-SO list + delta, THEN execute.
+> 6. The sweep only read the **first 500 SOs** the endpoint returned — re-run unbounded
+>    before trusting 66/8,060 as the final scope.
 **Symptom (owner, INV-2607-060):** "Divan full cover 也沒有添加錢?" Correct — it was not.
 That invoice under-charges **RM 210**: line 3 `Divan Curve` (RM 50), lines 5 + 6
 `Divan Full Cover` (RM 80 × 2). The invoice is NOT at fault — it faithfully copies the

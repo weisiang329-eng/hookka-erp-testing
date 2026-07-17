@@ -9,7 +9,26 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
-## 2026-07-17 — 🔴 MONEY: special-order surcharges never charged (RM 8,390) + invoice PO mis-match
+## 2026-07-17 — 🟢 MONEY fix LIVE (RM 8,060) · 🔵 BACKFILL SO+SI = NEXT · 🔴 invoice PO mis-match
+**Code fix SHIPPED + LIVE + verified** (merge `efbba63e`): scanned customer POs never charged
+the special-order surcharge because the scan clients POST /api/sales-orders directly without
+`specialOrderPriceSen` while the typed form always sends it (RM 80 typed vs RM 0 scanned).
+Server now derives it ONLY when the field is omitted. Verified live on staging against the
+real write path (Divan Full Cover→8000; HB+Divan→10000 combo cap; plain→0); test SO deleted.
+**Number corrected to RM 8,060** (the first RM 8,390 mis-counted the HB+Divan combo as RM 130
+instead of the RM 100 cap).
+
+🔵 **NEXT — BACKFILL SO + SI (owner asked: 「舊的backfill SO 和SI」). NOT STARTED.**
+66 SOs / 82 lines / RM 8,060 + their invoices. **Read BUG-2026-07-17-002's backfill block
+before doing anything** — it lists the 6 decisions/traps (issued invoices are accounting
+records → no silent edits, owner's precedent is re-price + he re-sends; paid invoices break
+reconciliation; GL must reuse the existing `PUT :id` GL-void, don't re-implement;
+confirmed SOs may cascade; build a DRY-RUN planner first per this repo's own precedent; and
+re-run the sweep unbounded — it only read the first 500 SOs).
+Deliberately stopped before writing: this touches issued documents + the GL and deserves a
+fresh session, not the tail of a long one.
+
+## 2026-07-17 — (superseded header) MONEY: special-order surcharges + invoice PO mis-match
 Owner spotted both from ONE invoice (DO-2607-051 / INV-2607-060). Full evidence, ruled-out
 causes and fix options in `docs/BUG-HISTORY.md` — **BUG-2026-07-17-002** (money) and
 **BUG-2026-07-17-001** (wrong PO refs). Do not re-derive; read those entries first.

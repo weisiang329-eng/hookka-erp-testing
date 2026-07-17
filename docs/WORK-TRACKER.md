@@ -9,7 +9,17 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
-## 2026-07-17 — 🔵 ANN's docks: code FIXED + LIVE, the prod DATA write is BLOCKED on owner
+## 2026-07-17 — ✅ ANN's docks CLEARED on prod (owner approved the write) — RM 291.91
+**Owner approved「你批准,我来跑重算」.** Ran the plan below via the system's own
+`POST /auto-from-punch` (14 days) + 1 DELETE (07-11, no punch). Read-back confirms ANN
+now has **exactly ONE dock left: 06-30 = 0.22h (AUTO)** — her real 13-min shortfall.
+**21.48h of wrong docks removed = RM 291.91** (at her 1359 sen/h). That is MORE than the
+RM 233.58 the owner remembered, because 233.58 counted only July's 13 rows; it excluded
+June's 06-29 (0.5h) and the wrong portion of 06-30 (1.72→0.22). No refund needed — no
+payslip was ever generated, so she is simply paid right at the first July run. 06-30 kept
+its AUTO tag so a future settle can still manage it. ✅ DONE.
+
+--- original plan (kept for the audit trail) ---
 **Owner ask: 「ANN 被多扣的 RM 233.58 要」.**
 
 ✅ **Code fixed + on prod** (BUG-2026-07-17-007, commit 80dc540f): the first fix caught

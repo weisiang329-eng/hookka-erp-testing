@@ -67,6 +67,8 @@ import {
   validateSofaSizeLabels,
   unknownSofaSizeLabelError,
 } from "../lib/sofa-size-validation";
+import { resolveSpecialOrderPriceSen } from "../../lib/special-order-surcharge";
+import { loadSpecialsConfig } from "../lib/specials-config";
 import {
   validateRepairScopeInput,
   parseRepairScope,
@@ -2226,6 +2228,12 @@ app.post("/", async (c) => {
       linkedCaseId = caseRow.id;
     }
 
+    // Owner-editable special-order price list, read ONCE for the whole order
+    // (BUG-2026-07-17-002). Only consulted for items that omit
+    // specialOrderPriceSen — i.e. the scan-a-customer-PO paths. null degrades
+    // to the static catalog in src/lib/pricing-options.ts.
+    const cfgSpecialsForPricing = await loadSpecialsConfig(c.var.DB);
+
     // Build items — resolve product basePrice fallback
     const items = await Promise.all(
       rawItems.map(async (item, idx) => {
@@ -2309,7 +2317,21 @@ app.post("/", async (c) => {
 
         const divanPriceSen = Number(item.divanPriceSen) || 0;
         const legPriceSen = Number(item.legPriceSen) || 0;
-        const specialOrderPriceSen = Number(item.specialOrderPriceSen) || 0;
+        // 2026-07-17 BUG FIX (BUG-2026-07-17-002 — under-billing, RM 8,060 over
+        // 66 SOs): this was `Number(item.specialOrderPriceSen) || 0`, which
+        // trusted a field the SCAN clients never send. The typed form
+        // (sales/create.tsx) computes the surcharge and always posts it, but
+        // scan-po-modal.tsx and m/ScanPOSheet.tsx POST here DIRECTLY with only
+        // the specialOrder TEXT — so "Divan Full Cover" stored 0 and the RM 80
+        // was never billed, while the same option typed by hand charged fine.
+        // Same bug class as the totalHeightPriceSen fix noted below.
+        // resolveSpecialOrderPriceSen DERIVES only when the field is OMITTED;
+        // any supplied number is trusted verbatim — including a deliberate 0
+        // (Service Orders are free by design) and a hand-discounted price.
+        const specialOrderPriceSen = resolveSpecialOrderPriceSen(
+          item,
+          cfgSpecialsForPricing,
+        );
         // 2026-07-14 BUG FIX (under-billing): the client DOES send
         // totalHeightPriceSen (the whole line item is posted), but this recompute
         // dropped it — so any total-height surcharge (e.g. 26" beds) + anything the
@@ -3737,6 +3759,10 @@ app.put("/:id", async (c) => {
         );
       }
 
+      // Same owner-editable specials list the POST path uses, read once per
+      // request (BUG-2026-07-17-002). Needed on PUT too — without it, editing a
+      // scanned SO would re-store the surcharge as 0.
+      const cfgSpecialsForPricing = await loadSpecialsConfig(c.var.DB);
       const newItems = await Promise.all(rawItems.map(async (item, idx) => {
         const incomingBase = Number(item.basePriceSen) || 0;
         // SOFA lines ALWAYS re-derive their base from the price list, ignoring
@@ -3813,7 +3839,21 @@ app.put("/:id", async (c) => {
         }
         const divanPriceSen = Number(item.divanPriceSen) || 0;
         const legPriceSen = Number(item.legPriceSen) || 0;
-        const specialOrderPriceSen = Number(item.specialOrderPriceSen) || 0;
+        // 2026-07-17 BUG FIX (BUG-2026-07-17-002 — under-billing, RM 8,060 over
+        // 66 SOs): this was `Number(item.specialOrderPriceSen) || 0`, which
+        // trusted a field the SCAN clients never send. The typed form
+        // (sales/create.tsx) computes the surcharge and always posts it, but
+        // scan-po-modal.tsx and m/ScanPOSheet.tsx POST here DIRECTLY with only
+        // the specialOrder TEXT — so "Divan Full Cover" stored 0 and the RM 80
+        // was never billed, while the same option typed by hand charged fine.
+        // Same bug class as the totalHeightPriceSen fix noted below.
+        // resolveSpecialOrderPriceSen DERIVES only when the field is OMITTED;
+        // any supplied number is trusted verbatim — including a deliberate 0
+        // (Service Orders are free by design) and a hand-discounted price.
+        const specialOrderPriceSen = resolveSpecialOrderPriceSen(
+          item,
+          cfgSpecialsForPricing,
+        );
         // 2026-07-14 BUG FIX (under-billing) — same as the POST path: include the
         // client-supplied totalHeightPriceSen (was dropped) so an SO EDIT re-prices
         // the line WITH its total-height surcharge instead of silently zeroing it.

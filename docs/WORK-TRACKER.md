@@ -9,6 +9,24 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-17 — 🔴 MONEY: special-order surcharges never charged (RM 8,390) + invoice PO mis-match
+Owner spotted both from ONE invoice (DO-2607-051 / INV-2607-060). Full evidence, ruled-out
+causes and fix options in `docs/BUG-HISTORY.md` — **BUG-2026-07-17-002** (money) and
+**BUG-2026-07-17-001** (wrong PO refs). Do not re-derive; read those entries first.
+- **RM 8,390 under-billed** across **66 SOs / 82 lines** (500 SOs scanned live on prod).
+  INV-2607-060 alone = RM 210. Price list + `calculateUnitPrice` are CORRECT — a specific
+  WRITE PATH stores the special-order label without its surcharge (`specialOrderPriceSen=0`).
+- **Owner ruling: 「先修 然後再 backfill」** — fix the code FIRST, backfill the 66 after.
+- 🔵 NEXT (not started): confirm the culprit path — strong lead is the OCR/scan consumer
+  (stored text is COMMA-joined like `scan-po.ts:430`, while the form joins with `"; "`;
+  scan-po only extracts, so its consumer builds the SO). **Verify before coding** — the
+  similar-looking `buildLinesFromCopyDraft` bug is Service-Order-only where RM 0 is correct.
+- Fix must be BACKEND-side at write time (FE+BE unified rule) so no client path can skip it;
+  dedicated branch + tests (money ⇒ isolated-branch rule). Preserve: SV mode = 0, operator
+  price edits not overridden, HB+Divan combined-cover = RM 100.
+- Backfill is SEPARATE and needs an owner decision: issued invoices are accounting records —
+  no silent edits (credit-note vs re-issue). INV-2607-060: ask whether it's already sent.
+
 ## 2026-07-16 — Handoff tasks 1 + 2 (owner, THIS session) — see docs/HANDOFF-2026-07-16.md
 1. ❌ **Impersonation ("login as user") — OWNER DECLINED 2026-07-16, do NOT build.**
    Owner ruling: 「這個不需要啊 我去staging用他們的戶口就可以了」 — he reproduces per-user

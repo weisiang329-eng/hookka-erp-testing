@@ -154,6 +154,27 @@ Cost review himself. **No urgency — the docks only bite when payroll is first 
 Do NOT reach for `POST /settle-period` as a shortcut: it would recompute ALL 42 workers
 (30 other AUTO docks) from today's data and could silently ADD docks nobody approved.
 
+## 2026-07-18 — ✅ Agent health check + Employee/Service starvation FIXED (owner「確保 agent 有做到」)
+**Owner asked to confirm the production + delivery agents are actually working.** They ARE:
+production-brief ran 07-17 08:01, production-proposals 07-17 20:20 (cleared 872 due dates),
+delivery-run 07-17 09:03. Both healthy.
+**But found a real bug: Employee + Service agents ran ONCE all July** (Production 48×,
+Delivery 11×, Employee/Service 1× each). Root cause was reach, not the digests (run-now fires
+them fine in ~1.3s): the beat is one sequential Worker invocation and the two cheap read-only
+digests sat AFTER the backlog drain; while the drain was per-row it killed the Worker before
+them nearly every beat. **Fixed (BUG-2026-07-17-011, deployed): reordered the beat to reap →
+Employee → Service → drain → generation**, so the cheapest agents run first and nothing
+downstream can starve them. Verified the reordered beat fires clean post-deploy.
+**Made every agent current tonight** via `POST /api/agents/run-now`: employee + service
+(07-18 01:52) and production-learning (07-18 02:02) all ran green. All six agents now healthy.
+**Heartbeat cadence traced:** GitHub fires it every 60–205 min (a 205-min hole on 07-17) vs
+the intended 20 — the reason `agent-heartbeat-worker/` (reliable CF cron) exists. That worker
+is deployed and waiting on the owner's one `wrangler secret put CRON_SECRET`.
+🟡 **Still queued (spawned task, not done tonight):** payslip `(26 x 9)` label lie — a payroll
+DOCUMENT change (needs workingHoursPerDay threaded into the payslip payload + 2 label sites);
+deliberately not rushed unsupervised at 02:00. The rate itself is already correct; only the
+label text is wrong.
+
 ## 2026-07-17 — ✅ Owner final batch COMPLETE (「其他兩個也處理掉」 + earlier asks)
 All of the owner's 2026-07-17 batch are now shipped or cleanly handed off:
 1. ✅ Brief recipients → you + Violet only (sent:2). 2. ✅ ANN RM 291.91 cleared on prod

@@ -101,8 +101,11 @@ export type Env = {
     SHEETS_SPREADSHEET_ID?: string;    // Target spreadsheet id
     // Daily reports — efficiency / schedule / overdue. Optional override:
     // comma-separated list of email addresses that receive the cron-pushed
-    // reports. When unset, the worker queries users WHERE roleId='SUPER_ADMIN'
-    // and uses every active email. See src/api/routes/reports.ts.
+    // reports. When unset, the worker falls back to every active SUPER_ADMIN's
+    // email (matched on the role NAME via users.role / roles.name — NOT on
+    // users.roleId, which is a FK holding 'role_super_admin'; that mismatch was
+    // BUG-2026-07-17-003 and silently sent the morning brief to nobody). See
+    // resolveRecipients in src/api/routes/reports.ts.
     DAILY_REPORT_RECIPIENTS?: string;
     // GitHub Actions health — surfaces CI / automation failures on
     // /admin/health instead of emailing the owner on every failure.

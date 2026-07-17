@@ -39,6 +39,7 @@ import {
 import { deriveSpecialOrderSurchargeSen } from "../../lib/special-order-surcharge";
 import { loadSpecialsConfig } from "../lib/specials-config";
 import { emitAudit } from "../lib/audit";
+import { ensureInvoicePoLinkColumn } from "../lib/invoice-po-link";
 
 const app = new Hono<Env>();
 
@@ -1445,6 +1446,186 @@ app.get("/backfill-special-order-surcharge", async (c) => {
     },
     byOption,
     plan,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/backfill-invoice-po-link — one-shot; delete once run.
+//
+// BUG-2026-07-17-001. New invoices now store invoice_items.production_order_id
+// (the DO line they were billed from). Existing invoices don't, so their
+// printout still falls back to guessing the customer PO by product code. This
+// re-attaches the link to the invoices already in the system.
+//
+// HOW — and why this is safe rather than another guess:
+// invoice lines are generated FROM the DO's lines, in order, minus any line
+// that went into a Delivery Return (computeDoInvoiceLines). So for an invoice
+// whose surviving DO-line count EQUALS its invoice-line count, position i maps
+// to position i. Verified on prod against DO-2606-001 / INV-2606-082: 9 lines,
+// every position matching on productCode|fabricCode.
+//
+// The guard is what makes it honest: each position must ALSO agree on
+// productCode|fabricCode. Any invoice where the counts differ or a position
+// disagrees is SKIPPED whole and reported — never partially written, never
+// guessed. Those keep the old fallback behaviour, exactly as today.
+//
+// Body: { confirm: true }. Idempotent: only fills rows still NULL.
+// ---------------------------------------------------------------------------
+app.post("/backfill-invoice-po-link", async (c) => {
+  const su = requireSuperAdmin(c);
+  if (su) return su;
+  const db = c.var.DB;
+  const body = await c.req.json().catch(() => ({}));
+  const dryRun = (body as { confirm?: unknown })?.confirm !== true;
+  // Bounded per call, and RESUMABLE: the write is idempotent (only fills NULLs)
+  // and skips invoices already fully linked, so the caller just re-POSTs until
+  // invoicesLinked comes back 0. Doing all ~2,000 updates in one request had the
+  // client abort mid-flight — and a request that dies halfway through a money
+  // table is exactly what we don't want, even when it's only additive.
+  const maxInvoices = Math.max(
+    1,
+    Math.min(500, Number((body as { limit?: unknown })?.limit) || 60),
+  );
+
+  await ensureInvoicePoLinkColumn(db);
+
+  const invs = await db
+    .prepare(
+      `SELECT id, invoiceNo, deliveryOrderId FROM invoices
+        WHERE deliveryOrderId IS NOT NULL AND deliveryOrderId != ''`,
+    )
+    .all<{ id: string; invoiceNo: string | null; deliveryOrderId: string }>();
+
+  let linked = 0;
+  let invoicesLinked = 0;
+  const skipped: Array<{ invoiceNo: string; reason: string }> = [];
+  const stmts: unknown[] = [];
+
+  // THREE queries total, not two per invoice. A per-invoice loop here would be
+  // ~2 × N serialized round-trips (400+ on prod) — the exact I/O-storm shape
+  // that made the schedule engine look "hung" for minutes (its 114 serialized
+  // queries; Workers CPU time excludes I/O wait, so a query storm never trips a
+  // CPU limit, it just never finishes). Load everything, group in memory.
+  const [allItemsRes, allDoItemsRes] = await Promise.all([
+    db
+      .prepare(
+        `SELECT ii.id, ii.invoiceId, ii.productCode, ii.fabricCode, ii.production_order_id
+           FROM invoice_items ii
+           JOIN invoices i ON i.id = ii.invoiceId
+          WHERE i.deliveryOrderId IS NOT NULL AND i.deliveryOrderId != ''`,
+      )
+      .all<{
+        id: string; invoiceId: string; productCode: string | null;
+        fabricCode: string | null; production_order_id: string | null;
+      }>(),
+    db
+      .prepare(
+        `SELECT di.deliveryOrderId, di.productionOrderId, di.productCode, di.fabricCode
+           FROM delivery_order_items di`,
+      )
+      .all<{
+        deliveryOrderId: string; productionOrderId: string | null;
+        productCode: string | null; fabricCode: string | null;
+      }>(),
+  ]);
+  const itemsByInv = new Map<string, typeof allItemsRes.results>();
+  for (const r of allItemsRes.results ?? []) {
+    const arr = itemsByInv.get(r.invoiceId) ?? [];
+    arr.push(r);
+    itemsByInv.set(r.invoiceId, arr);
+  }
+  const doItemsByDo = new Map<string, typeof allDoItemsRes.results>();
+  for (const r of allDoItemsRes.results ?? []) {
+    const arr = doItemsByDo.get(r.deliveryOrderId) ?? [];
+    arr.push(r);
+    doItemsByDo.set(r.deliveryOrderId, arr);
+  }
+
+  for (const inv of invs.results ?? []) {
+    const items = itemsByInv.get(inv.id) ?? [];
+    const doItems = doItemsByDo.get(inv.deliveryOrderId) ?? [];
+    if (items.length === 0) continue;
+    if (items.every((i) => i.production_order_id)) continue; // already done
+
+    // Returned lines drop out of the invoice, so the counts only line up when
+    // nothing was returned. Anything else is ambiguous → skip whole.
+    if (items.length !== doItems.length) {
+      // Measured on staging (25 skips): 16 have MORE invoice lines than DO
+      // lines — those were billed via computeDoInvoiceLines' fallback, which
+      // bills the SO's lines directly when the DO had nothing priceable, so
+      // there is no DO line behind them and no link to carry (correct to skip,
+      // permanently). 1 had FEWER — a delivery return dropped a line, which
+      // shifts every position after it. Either way: don't guess.
+      const why =
+        items.length > doItems.length
+          ? "billed from the SO lines, not the DO lines (no DO line behind them) — nothing to link"
+          : "a delivery return dropped a line, so positions shift — refusing to guess";
+      skipped.push({
+        invoiceNo: inv.invoiceNo ?? inv.id,
+        reason: `line count differs (invoice ${items.length} vs DO ${doItems.length}): ${why}`,
+      });
+      continue;
+    }
+    const aligned = items.every(
+      (it, i) =>
+        (it.productCode ?? "").trim() === (doItems[i].productCode ?? "").trim() &&
+        (it.fabricCode ?? "").trim() === (doItems[i].fabricCode ?? "").trim(),
+    );
+    if (!aligned) {
+      skipped.push({
+        invoiceNo: inv.invoiceNo ?? inv.id,
+        reason: "positions disagree on productCode|fabricCode — refusing to guess",
+      });
+      continue;
+    }
+
+    let any = false;
+    items.forEach((it, i) => {
+      const po = doItems[i].productionOrderId;
+      if (!po || it.production_order_id) return;
+      any = true;
+      linked++;
+      stmts.push(
+        db
+          .prepare(
+            "UPDATE invoice_items SET production_order_id = ? WHERE id = ? AND production_order_id IS NULL",
+          )
+          .bind(po, it.id),
+      );
+    });
+    if (any) invoicesLinked++;
+    // Bounded per call — re-POST to continue (see maxInvoices).
+    if (!dryRun && invoicesLinked >= maxInvoices) break;
+  }
+
+  if (!dryRun && stmts.length > 0) {
+    // Chunked — a single batch of thousands of statements risks the Worker's
+    // subrequest ceiling, and a half-applied batch here is harmless (the column
+    // is additive and the fill is idempotent) but noisy.
+    const CHUNK = 500;
+    for (let i = 0; i < stmts.length; i += CHUNK) {
+      await db.batch(stmts.slice(i, i + CHUNK) as never[]);
+    }
+    await emitAudit(c, {
+      resource: "invoices",
+      resourceId: "backfill-invoice-po-link",
+      action: "backfill-invoice-po-link",
+      source: "admin",
+      after: { invoicesLinked, linesLinked: linked, skipped: skipped.length, bug: "BUG-2026-07-17-001" },
+    });
+  }
+
+  return c.json({
+    success: true,
+    dryRun,
+    invoicesScanned: (invs.results ?? []).length,
+    invoicesLinked,
+    linesLinked: linked,
+    skippedCount: skipped.length,
+    skipped: skipped.slice(0, 40),
+    note: dryRun
+      ? "DRY RUN — nothing written. POST { confirm: true } to apply."
+      : "Linked. Skipped invoices keep the old code-matching fallback.",
   });
 });
 

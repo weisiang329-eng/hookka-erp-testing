@@ -38,6 +38,7 @@ import {
 } from "./sales-orders";
 import { deriveSpecialOrderSurchargeSen } from "../../lib/special-order-surcharge";
 import { loadSpecialsConfig } from "../lib/specials-config";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -1309,6 +1310,7 @@ app.get("/backfill-special-order-surcharge", async (c) => {
               i.specialOrder AS specialOrder,
               i.specialOrderPriceSen AS specialOrderPriceSen,
               i.basePriceSen AS basePriceSen, i.unitPriceSen AS unitPriceSen,
+              i.discountSen AS discountSen, i.lineTotalSen AS lineTotalSen,
               i.quantity AS quantity,
               s.companySOId AS companySOId, s.status AS soStatus,
               s.customerName AS customerName, s.createdAt AS createdAt,
@@ -1327,7 +1329,8 @@ app.get("/backfill-special-order-surcharge", async (c) => {
       itemId: string; salesOrderId: string; productCode: string | null;
       fabricCode: string | null; specialOrder: string | null;
       specialOrderPriceSen: number | null; basePriceSen: number | null;
-      unitPriceSen: number | null; quantity: number | null;
+      unitPriceSen: number | null; discountSen: number | null;
+      lineTotalSen: number | null; quantity: number | null;
       companySOId: string | null; soStatus: string | null;
       customerName: string | null; createdAt: string | null;
       isServiceOrder: boolean | number | null;
@@ -1442,6 +1445,181 @@ app.get("/backfill-special-order-surcharge", async (c) => {
     },
     byOption,
     plan,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/backfill-special-order-surcharge  — THE WRITE
+//
+// Applies the plan the GET above reports. One-shot; delete once run.
+//
+// Body: { confirm: true, scope?: "uninvoiced" | "all" }
+//   scope "uninvoiced" (DEFAULT, safest) — only SOs that have NO invoice at all.
+//     Nothing has been issued to a customer, so re-pricing is a pure internal
+//     correction: no GL, no document to re-send. This is 78 of the 93 SOs and
+//     RM 10,640 of the RM 12,670.
+//   scope "all" — also re-prices SOs whose invoice already exists. The invoice
+//     itself is NOT touched here (that is the owner's re-price + re-send step);
+//     use only when that follow-up is actually happening, or the SO and its
+//     invoice will disagree.
+//
+// SAFETY:
+//   • IDEMPOTENT — only lines with specialOrderPriceSen = 0 AND a real owed
+//     surcharge are touched. Re-running changes nothing.
+//   • Service orders excluded (free by design) — same guards as the planner.
+//   • ADDS THE DELTA to unitPriceSen; never recomputes it from the parts.
+//     totalHeightPriceSen is NOT a stored column (it is folded into
+//     unitPriceSen at write time), so recomputing base+divan+leg+special would
+//     silently ERASE any total-height surcharge — the exact bug fixed on
+//     2026-07-14. Adding the delta preserves whatever else is in there.
+//   • lineTotal = newUnit × qty − discount, clamped ≥ 0 (per-line discount,
+//     migration 0179).
+//   • SO subtotal/total re-derived as Σ lineTotalSen, matching the POST path.
+//   • Audited per SO with before/after totals.
+// ---------------------------------------------------------------------------
+app.post("/backfill-special-order-surcharge", async (c) => {
+  const su = requireSuperAdmin(c);
+  if (su) return su;
+  const db = c.var.DB;
+
+  const body = await c.req.json().catch(() => ({}));
+  const confirm = (body as { confirm?: unknown })?.confirm === true;
+  const scope = String((body as { scope?: unknown })?.scope ?? "uninvoiced");
+  if (!confirm) {
+    return c.json(
+      { success: false, error: "Refusing to write without { confirm: true }." },
+      400,
+    );
+  }
+  if (scope !== "uninvoiced" && scope !== "all") {
+    return c.json(
+      { success: false, error: 'scope must be "uninvoiced" or "all"' },
+      400,
+    );
+  }
+
+  const cfgSpecials = await loadSpecialsConfig(db);
+
+  const rows = await db
+    .prepare(
+      `SELECT i.id AS itemId, i.salesOrderId AS salesOrderId,
+              i.specialOrder AS specialOrder,
+              i.specialOrderPriceSen AS specialOrderPriceSen,
+              i.unitPriceSen AS unitPriceSen, i.discountSen AS discountSen,
+              i.quantity AS quantity,
+              s.companySOId AS companySOId, s.isServiceOrder AS isServiceOrder
+         FROM sales_order_items i
+         JOIN sales_orders s ON s.id = i.salesOrderId
+        WHERE i.specialOrder IS NOT NULL AND i.specialOrder != ''
+          AND (s.isServiceOrder IS NULL OR s.isServiceOrder = false)`,
+    )
+    .all<{
+      itemId: string; salesOrderId: string; specialOrder: string | null;
+      specialOrderPriceSen: number | null; unitPriceSen: number | null;
+      discountSen: number | null; quantity: number | null;
+      companySOId: string | null; isServiceOrder: boolean | number | null;
+    }>();
+
+  // Which SOs already have an invoice — needed for the default scope.
+  const invoicedSoIds = new Set<string>();
+  const invRes = await db
+    .prepare("SELECT DISTINCT salesOrderId FROM invoices WHERE salesOrderId IS NOT NULL")
+    .all<{ salesOrderId: string }>();
+  for (const r of invRes.results ?? []) invoicedSoIds.add(r.salesOrderId);
+
+  const stmts: unknown[] = [];
+  const touchedSoIds = new Set<string>();
+  let linesUpdated = 0;
+  let deltaSen = 0;
+  const skippedInvoiced = new Set<string>();
+
+  for (const r of rows.results ?? []) {
+    if (r.isServiceOrder === true || r.isServiceOrder === 1) continue;
+    if (String(r.companySOId ?? "").toUpperCase().startsWith("SV-")) continue;
+    if ((Number(r.specialOrderPriceSen) || 0) > 0) continue; // idempotent
+    const owed = deriveSpecialOrderSurchargeSen(r.specialOrder, null, cfgSpecials);
+    if (owed <= 0) continue;
+    if (scope === "uninvoiced" && invoicedSoIds.has(r.salesOrderId)) {
+      skippedInvoiced.add(r.salesOrderId);
+      continue;
+    }
+
+    const qty = Number(r.quantity) || 1;
+    const newUnit = (Number(r.unitPriceSen) || 0) + owed; // DELTA, not recompute
+    const discount = Number(r.discountSen) || 0;
+    const newLineTotal = Math.max(0, newUnit * qty - discount);
+
+    stmts.push(
+      db
+        .prepare(
+          `UPDATE sales_order_items
+              SET specialOrderPriceSen = ?, unitPriceSen = ?, lineTotalSen = ?
+            WHERE id = ? AND specialOrderPriceSen = 0`,
+        )
+        .bind(owed, newUnit, newLineTotal, r.itemId),
+    );
+    linesUpdated++;
+    deltaSen += owed * qty;
+    touchedSoIds.add(r.salesOrderId);
+  }
+
+  if (stmts.length === 0) {
+    return c.json({
+      success: true,
+      scope,
+      linesUpdated: 0,
+      note: "Nothing to do — already backfilled, or no rows in scope.",
+    });
+  }
+
+  await db.batch(stmts as never[]);
+
+  // Re-derive each touched SO's totals from its lines (Σ lineTotalSen), the
+  // same rule the POST path uses.
+  const soIds = Array.from(touchedSoIds);
+  const ph = soIds.map(() => "?").join(",");
+  const sums = await db
+    .prepare(
+      `SELECT salesOrderId, SUM(lineTotalSen) AS s
+         FROM sales_order_items WHERE salesOrderId IN (${ph})
+        GROUP BY salesOrderId`,
+    )
+    .bind(...soIds)
+    .all<{ salesOrderId: string; s: number }>();
+  const totalStmts = (sums.results ?? []).map((x) =>
+    db
+      .prepare("UPDATE sales_orders SET subtotalSen = ?, totalSen = ? WHERE id = ?")
+      .bind(Number(x.s) || 0, Number(x.s) || 0, x.salesOrderId),
+  );
+  if (totalStmts.length > 0) await db.batch(totalStmts as never[]);
+
+  await emitAudit(c, {
+    resource: "sales-orders",
+    resourceId: `backfill-special-order-surcharge:${scope}`,
+    action: "backfill-special-order-surcharge",
+    source: "admin",
+    after: {
+      scope,
+      salesOrdersUpdated: soIds.length,
+      linesUpdated,
+      deltaSen,
+      deltaRM: (deltaSen / 100).toFixed(2),
+      bug: "BUG-2026-07-17-002",
+    },
+  });
+
+  return c.json({
+    success: true,
+    scope,
+    salesOrdersUpdated: soIds.length,
+    linesUpdated,
+    deltaSen,
+    deltaRM: (deltaSen / 100).toFixed(2),
+    skippedBecauseInvoiced: scope === "uninvoiced" ? skippedInvoiced.size : 0,
+    note:
+      scope === "uninvoiced"
+        ? "Only SOs with no invoice were re-priced. Invoiced SOs were skipped — they need the invoice re-priced + re-sent."
+        : "All in-scope SOs re-priced. Their invoices were NOT touched — re-price + re-send those separately.",
   });
 });
 

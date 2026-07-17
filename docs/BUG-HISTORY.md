@@ -34,6 +34,26 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-17-011 — Employee + Service agents ran ONCE all month: the drain starved them `agents` `heartbeat` `scheduling` 🟢
+**Found while confirming the agents run (owner 2026-07-18 01:46, 「確保 production 還有
+delivery agent 有做到」).** Production ran 48× in July and Delivery 11×, but **Employee and
+Service ran exactly ONCE each all month** (last 07-16 14:19, then nothing).
+**Not a code fault in the digests** — firing them by hand (`POST /api/agents/run-now
+{agent:"employee"|"service"}`) succeeded in ~1.3s and returned a full digest. The problem was
+**reach**: the beat is one sequential Worker invocation, and the digests sat AFTER the backlog
+DRAIN. While the drain was per-row (BUG-2026-07-17-004, ~300 serialized round-trips) it killed
+the Worker before the digests on nearly every beat — so the two cheapest, most reliable agents
+were the ones that never ran. BUG-005 moved them above the heavy *generation* but left the
+*drain* in front of them, so the starvation persisted.
+**Fix (agent-heartbeat.ts):** reordered the beat to **reap → Employee digest → Service digest →
+drain → generation**. The two read-only digests now run FIRST (right after the zombie reap),
+so nothing downstream — a fat drain, a runaway generation — can starve them again. The drain
+keeps its overnight/no-8pm-clock behaviour, just below the digests.
+**Also this session:** ran both digests by hand so they're current for 07-18, and traced the
+heartbeat's real firing cadence — GitHub fired it every 60–205 min (a 205-min hole on 07-17)
+vs the intended 20, which is why `agent-heartbeat-worker/` (reliable CF cron) exists. That
+worker still needs the owner's one `wrangler secret put CRON_SECRET`.
+
 ## BUG-2026-07-17-010 — resign-date picker clipped out of the Status column `ui-frontend` `employees` 🟢
 **Owner 2026-07-17, screenshot: 「歪了」.** Editing a RESIGNED row on the Employee Master
 stacked a `<select>` plus a native `type="date"` input into a Status column fixed at

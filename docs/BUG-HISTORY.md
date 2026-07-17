@@ -34,6 +34,26 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-17-009 — priced drawer surcharges from the STATIC catalog, not the LIVE config `money` `pricing` `self-inflicted` 🟢
+**Caught by read-back before any harm reached the customer**, during the RM 750 special-order
+backfill on the 5 DO-judgment SOs.
+**What I did wrong:** built the invoice `priceEdits` using the `bedframeSpecialOrders` array
+read straight off `kv_config.variants-config` (Right Drawer 15000, Front Drawer 12000). But the
+backend's `resolveSpecialOrderPriceSen` / `loadSpecialsConfig` prices from the `specials` key,
+whose LIVE values are Right Drawer **16000**, Front Drawer **13000**, Left Drawer **16000**. So
+the 6 invoices I corrected came out RM30 below the SO the executor then re-priced — a silent
+SO-vs-invoice disagreement of RM10 each on INV-2606-163 and INV-2606-136.
+**How it surfaced:** the executor reported deltaSen 75000 (RM750) while my invoice edits summed
+to RM720. I did NOT trust the round number — the reconciliation read (SO special vs invoice
+special, per line) pinned the two short lines. Topped both up (+RM10 each); final recon shows
+all 7 invoiced lines lockstep and `needsManual:0`.
+**Fix / rule:** when pricing a special order anywhere, read the SAME source the backend writes
+from (`loadSpecialsConfig` → `specials`), never the static `pricing-options.ts` catalog or the
+`bedframeSpecialOrders` display array. Memory `project_invoice_money_path` already warned
+"Left/Right Drawer = 16000 while the static catalog says 15000"; this is that warning coming
+true. The `PUT priceEdits` GL-restate path itself worked correctly — the error was the input
+number, and only read-back verification caught it.
+
 ## BUG-2026-07-17-008 — the tick column scrolled away: "2 selected" with no tick in sight `ui-frontend` `data-grid` 🟢
 **Symptom (owner 2026-07-17, Service Orders screenshot):** 「我的 service order 为什么
 明显写着 "2 selected"，可是却没有看到它的勾勾？」 The footer counted 2 selected rows and

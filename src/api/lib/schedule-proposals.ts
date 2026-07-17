@@ -376,6 +376,25 @@ export async function applyPendingProposals(
   }> = [];
   let skipped = 0;
 
+  // BUG-2026-07-17-004 — this loop used to `await` TWO updates PER ROW. At the
+  // heartbeat's limit of 150 that is ~300 strictly serialized DB round-trips,
+  // and it is the FIRST thing the beat does. It never finished: on prod
+  // production-proposals sat at status='running' with finishedAt NULL after
+  // every single beat (09:20 and 11:05 on 2026-07-17, 40+ min each), the Worker
+  // killed mid-run, and — because the beat is one sequential invocation —
+  // everything after it (Employee + Service digests) never ran for 28 HOURS.
+  //
+  // This is the SAME root cause as the 2026-07-16 engine fix, which the docs
+  // already spell out: "~114 strictly serialized DB round-trips, not the
+  // engine… Workers CPU time EXCLUDES I/O wait, so a query storm can never trip
+  // a CPU limit. When a Worker run hangs for minutes, suspect I/O round-trips,
+  // not CPU." That fix batched the ENGINE and left this drain untouched.
+  //
+  // Build the statements, send them as ONE batch: 300 round-trips → 1. The
+  // batch is a transaction in the Postgres adapter, so the job_card due date and
+  // its proposal's APPROVED stamp still land together or not at all — which is
+  // stronger than the old loop, where a mid-loop death left rows half-applied.
+  const stmts: D1PreparedStatement[] = [];
   for (const row of rows) {
     const jcId = row.jcId ?? row.jc_id;
     const proposedDue = row.proposedDue ?? row.proposed_due;
@@ -383,21 +402,21 @@ export async function applyPendingProposals(
       skipped++;
       continue;
     }
-    await db
-      .prepare(
-        `UPDATE job_cards SET dueDate = ?, updated_at = ?
-          WHERE id = ? AND status = 'WAITING'`,
-      )
-      .bind(proposedDue, nowIso, jcId)
-      .run();
-    await db
-      .prepare(
-        `UPDATE schedule_proposals
-            SET status = 'APPROVED', decided_at = ?, decided_by = ?
-          WHERE id = ?`,
-      )
-      .bind(nowIso, opts.decidedBy, row.id)
-      .run();
+    stmts.push(
+      db
+        .prepare(
+          `UPDATE job_cards SET dueDate = ?, updated_at = ?
+            WHERE id = ? AND status = 'WAITING'`,
+        )
+        .bind(proposedDue, nowIso, jcId),
+      db
+        .prepare(
+          `UPDATE schedule_proposals
+              SET status = 'APPROVED', decided_at = ?, decided_by = ?
+            WHERE id = ?`,
+        )
+        .bind(nowIso, opts.decidedBy, row.id),
+    );
     applied.push({
       proposalId: row.id,
       jcId,
@@ -407,6 +426,15 @@ export async function applyPendingProposals(
       from: (row.currentDue ?? row.current_due) ?? null,
       to: proposedDue,
     });
+  }
+  if (stmts.length > 0) {
+    // Chunked well under the 65535/param bind ceiling (each statement binds ≤ 3),
+    // and small enough that one chunk is a short transaction rather than a long
+    // lock. 400 statements = 200 proposals per round-trip.
+    const CHUNK = 400;
+    for (let i = 0; i < stmts.length; i += CHUNK) {
+      await db.batch(stmts.slice(i, i + CHUNK));
+    }
   }
 
   if (applied.length > 0) {

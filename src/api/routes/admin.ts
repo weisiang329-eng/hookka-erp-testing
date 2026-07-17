@@ -1311,10 +1311,17 @@ app.get("/backfill-special-order-surcharge", async (c) => {
               i.basePriceSen AS basePriceSen, i.unitPriceSen AS unitPriceSen,
               i.quantity AS quantity,
               s.companySOId AS companySOId, s.status AS soStatus,
-              s.customerName AS customerName, s.createdAt AS createdAt
+              s.customerName AS customerName, s.createdAt AS createdAt,
+              s.isServiceOrder AS isServiceOrder
          FROM sales_order_items i
          JOIN sales_orders s ON s.id = i.salesOrderId
-        WHERE i.specialOrder IS NOT NULL AND i.specialOrder != ''`,
+        WHERE i.specialOrder IS NOT NULL AND i.specialOrder != ''
+          -- SERVICE ORDERS ARE FREE BY DESIGN (arch_service_order_pricing — all
+          -- SV invoices are RM 0; the form deliberately posts a 0 surcharge and
+          -- prices repairs via Base Price instead). The first run of this planner
+          -- proposed charging SV-2607-003 RM 640 — a 0 on an SV is CORRECT, not a
+          -- missed charge, so they must never enter the backfill.
+          AND (s.isServiceOrder IS NULL OR s.isServiceOrder = false)`,
     )
     .all<{
       itemId: string; salesOrderId: string; productCode: string | null;
@@ -1323,6 +1330,7 @@ app.get("/backfill-special-order-surcharge", async (c) => {
       unitPriceSen: number | null; quantity: number | null;
       companySOId: string | null; soStatus: string | null;
       customerName: string | null; createdAt: string | null;
+      isServiceOrder: boolean | number | null;
     }>();
 
   const bySo = new Map<string, {
@@ -1335,6 +1343,10 @@ app.get("/backfill-special-order-surcharge", async (c) => {
   let totalDeltaSen = 0;
 
   for (const r of rows.results ?? []) {
+    // Belt-and-braces on the SQL guard above: an SV doc number is a service
+    // order regardless of what the flag column says. Never propose charging one.
+    if (r.isServiceOrder === true || r.isServiceOrder === 1) continue;
+    if (String(r.companySOId ?? "").toUpperCase().startsWith("SV-")) continue;
     const charged = Number(r.specialOrderPriceSen) || 0;
     // Trust anything already charged — the typed form priced it correctly, and
     // a deliberate 0 can't be told apart from a missed one HERE, so we only

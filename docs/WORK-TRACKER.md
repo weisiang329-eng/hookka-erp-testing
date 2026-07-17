@@ -170,10 +170,11 @@ downstream can starve them. Verified the reordered beat fires clean post-deploy.
 **Heartbeat cadence traced:** GitHub fires it every 60–205 min (a 205-min hole on 07-17) vs
 the intended 20 — the reason `agent-heartbeat-worker/` (reliable CF cron) exists. That worker
 is deployed and waiting on the owner's one `wrangler secret put CRON_SECRET`.
-🟡 **Still queued (spawned task, not done tonight):** payslip `(26 x 9)` label lie — a payroll
-DOCUMENT change (needs workingHoursPerDay threaded into the payslip payload + 2 label sites);
-deliberately not rushed unsupervised at 02:00. The rate itself is already correct; only the
-label text is wrong.
+✅ **Payslip `(26 x 9)` label lie — DONE + LIVE-verified (BUG-2026-07-17-012).** Owner asked to
+finish all pending, so completed it: label now reads each worker's real `(workingDays x
+workingHoursPerDay)`. employees.tsx looks hours up from the workers prop (no backend change);
+the PDF path reads it off the worker via GET /:id. Verified live: ANN's May payslip now
+`2650 / (26 x 7.5) = 13.59` (matches the rate); 9h workers still `(26 x 9)`.
 
 ## 2026-07-17 — ✅ Owner final batch COMPLETE (「其他兩個也處理掉」 + earlier asks)
 All of the owner's 2026-07-17 batch are now shipped or cleanly handed off:

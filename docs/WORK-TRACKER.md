@@ -18,7 +18,15 @@ real write path (Divan Full Cover→8000; HB+Divan→10000 combo cap; plain→0)
 **Number corrected to RM 8,060** (the first RM 8,390 mis-counted the HB+Divan combo as RM 130
 instead of the RM 100 cap).
 
-🔵 **NEXT — BACKFILL SO + SI (owner asked: 「舊的backfill SO 和SI」). NOT STARTED.**
+🔵 **NEXT — BACKFILL SO + SI. OWNER APPROVED (asked TWICE): 「改罷了 然後我們重新法國」**
+(法國=發過) = **re-price the old SOs + invoices; HE re-sends them.** Same route he chose on
+the invoice money-path work. **The decision is made — execute, don't re-ask.** Only open
+sub-question: PAID / part-paid invoices (raising a total breaks reconciliation) — surface
+that list separately instead of assuming.
+**START HERE:** (1) re-run the sweep UNBOUNDED (the RM 8,060 came from the first 500 SOs —
+the list endpoint caps/paginates, so the real scope may be bigger); (2) dry-run planner →
+per-SO list + delta + invoice status; (3) execute via the existing re-price/GL-restate path
+(`PUT :id`), never a hand-rolled GL write.
 66 SOs / 82 lines / RM 8,060 + their invoices. **Read BUG-2026-07-17-002's backfill block
 before doing anything** — it lists the 6 decisions/traps (issued invoices are accounting
 records → no silent edits, owner's precedent is re-price + he re-sends; paid invoices break

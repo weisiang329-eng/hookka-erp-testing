@@ -9,6 +9,43 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-17 — 🔵 ANN's docks: code FIXED + LIVE, the prod DATA write is BLOCKED on owner
+**Owner ask: 「ANN 被多扣的 RM 233.58 要」.**
+
+✅ **Code fixed + on prod** (BUG-2026-07-17-007, commit 80dc540f): the first fix caught
+only the live-punch path; the MONTHLY settle still used the global 9h. Both now share
+`rulesForWorkerHours`. **Deleting her docks before this would have let the next settle
+re-create them silently.**
+
+🔴 **The premise is wrong, and the owner needs to hear it: NOTHING HAS BEEN DOCKED YET.**
+`/api/payslips?period=2026-07` → **0 payslips**; 2026-06 → **0 payslips**. No payslip has
+ever been generated for either month, so no money has left. The RM 233.58 is a PENDING
+deduction sitting in `payroll_hour_deductions` waiting for the first payroll run. Remove
+the rows before payroll and she is simply paid right — there is nothing to refund.
+
+**Verified per-day against her real punches (not assumed) — 15 AUTO rows, 0 MANUAL:**
+- **2026-07 (13 rows / 19.48h) — ALL WRONG.** Her punches are 08:00–18:00 → 9h regular →
+  0 short against her 7.5h day. Note: **0 short against the OLD global 9h too** — so
+  these rows are NOT explained by the 7.5-vs-9 bug on today's data. They are STALE:
+  written at punch time from an earlier clock-out, and the attendance was later keyed to
+  18:00 with nothing recomputing the dock. (Today, 07-17, she punched out 16:31 — that IS
+  the shape the 7.5h bug bites, and the fix now returns 0 for it.)
+- **2026-06 (2 rows / 2.22h) — MIXED. This is why a blanket delete was wrong:**
+  - 06-29 docked 0.5h →真 0 → remove.
+  - 06-30 docked 1.72h (08:11–16:32) → **genuinely 0.22h short** → must be CORRECTED to
+    0.22, NOT deleted.
+**Plan (dry-run built + verified, not executed):** 14 days → `POST /auto-from-punch`
+(the system's own guarded self-heal: recomputes with the fixed rules, deletes a 0,
+overwrites 0.22, keeps source=AUTO so a future settle can still manage it — a manual
+POST would tag it MANUAL and permanently freeze it). 1 day (07-11, no punch record at
+all) → plain DELETE: no clock-out = no evidence of shortfall, per the helper's own
+guard; an absence is settled by the monthly salary deduction instead.
+🔴 **BLOCKED:** the prod write was refused by the permission classifier. Not worked
+around. Owner must either approve the write or click Undo on those rows in the Labor
+Cost review himself. **No urgency — the docks only bite when payroll is first run.**
+Do NOT reach for `POST /settle-period` as a shortcut: it would recompute ALL 42 workers
+(30 other AUTO docks) from today's data and could silently ADD docks nobody approved.
+
 ## 2026-07-17 — 🔵 Owner batch (3 asks, screenshots) — Employee Master / payroll
 Logged before working (multi-part rule). Owner's words + what each means:
 1. 「歪了」 — Employee Master INLINE EDIT row is misaligned: the resign-date input

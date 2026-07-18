@@ -199,7 +199,10 @@ the PDF path reads it off the worker via GET /:id. Verified live: ANN's May pays
 
 ## 2026-07-17 — ✅ Owner final batch COMPLETE (「其他兩個也處理掉」 + earlier asks)
 All of the owner's 2026-07-17 batch are now shipped or cleanly handed off:
-1. ✅ Brief recipients → you + Violet only (sent:2). 2. ✅ ANN RM 291.91 cleared on prod
+1. ✅ Brief recipients → you + Violet (sent:2); **owner added Lim 2026-07-18 → now 3**
+(list lives in `kv_config['daily_report_recipients']` as a BARE JSON array — this repo is
+PUBLIC, so staff emails must never be committed here; edit the DB row, not code).
+2. ✅ ANN RM 291.91 cleared on prod
 (1 genuine 0.22h kept). 3. ✅ Heartbeat CF Cron Worker deployed (owner owes 1 `wrangler
 secret put CRON_SECRET`). 4. ✅ RM 750 special-order backfill closed via DO-judgment
 (6 Houzs invoices + 5 SOs, reconciled; owner re-sends). 5. ✅ Sticky tick column

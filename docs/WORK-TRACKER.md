@@ -154,6 +154,27 @@ Cost review himself. **No urgency — the docks only bite when payroll is first 
 Do NOT reach for `POST /settle-period` as a shortcut: it would recompute ALL 42 workers
 (30 other AUTO docks) from today's data and could silently ADD docks nobody approved.
 
+## 2026-07-18 — 🟡 ISO 9001 + MFRS gap analyses DELIVERED (owner「跟著 ISO standard」+「accounting 根據 MFRS」)
+Owner confirmed **ISO 9001** (quality) and wants **accounting per MFRS**; both asked as a **gap
+report first** (not a blind rebuild). Ran 4 parallel read-only Explore agents over the whole
+codebase, synthesized two code-grounded documents:
+- `docs/ISO-9001-GAP-ANALYSIS.md` — 11 clauses mapped. Strong: 8.5.2 doc-chain traceability, 8.4
+  supplier performance/3-way match, 9.1 monitoring. Gaps: QC release gate (8.6), formal NCR (8.7),
+  CAPA effectiveness-verification (10.2), document version/approval control (7.5), calibration
+  (7.1.5), competence/training (7.2), internal-audit program (9.2), management-review record (9.3),
+  risk register (6.1), AVL approval (8.4). Suggested P1: NCR + CAPA closure + doc control + internal
+  audit + mgmt review.
+- `docs/MFRS-GAP-ANALYSIS.md` — accounting is **strong**: hash-chained double-entry GL, revenue on
+  delivery (MFRS 15), FIFO/periodic inventory, all 4 statements, fixed-asset depreciation w/ GL
+  posting, SST to real liability accounts, AP realised FX. Gaps: inventory NRV/obsolescence (102),
+  receivables ECL (9), income/deferred tax (112), warranty provision (137), payroll GL automation +
+  statutory-payable split (119), cash-flow MFRS-107 classification + SOCIE (101), MYR-only AR +
+  no FX retranslation (121), no DB-level ledger immutability trigger. Suggested P1 (the ones that
+  change reported numbers): NRV, ECL, payroll GL, deposit/contract-liability — **to be scoped WITH
+  the accountant** (ERP builds the mechanism, the accountant sets the rates/policy).
+**NOTHING built — assessment only.** Owner picks which gaps to build; each is mockup→approve→
+staging→prod, and the MFRS P1 items need the accountant's rates before coding.
+
 ## 2026-07-18 — ✅ Agent health check + Employee/Service starvation FIXED (owner「確保 agent 有做到」)
 **Owner asked to confirm the production + delivery agents are actually working.** They ARE:
 production-brief ran 07-17 08:01, production-proposals 07-17 20:20 (cleared 872 due dates),

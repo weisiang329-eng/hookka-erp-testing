@@ -1,0 +1,106 @@
+# ---------------------------------------------------------------------------
+# iOS build — Hookka Worker Portal / Hookka ERP
+#
+# The dev machine is Windows, so the iOS project can neither be generated nor
+# compiled locally. This runs the whole native side on a GitHub-hosted macOS
+# runner: scaffold the Capacitor iOS project, inject the permission strings and
+# Apple privacy manifest, install pods, and archive.
+#
+# The generated ios/ project is intentionally NOT committed — it is disposable
+# output. Everything a human authored (capacitor configs, permission strings,
+# privacy manifest, the src/lib/native bridge) lives in git and is reviewable.
+#
+# SIGNING IS NOT WIRED. Certificates are credentials; they are not put in this
+# repo (which is PUBLIC) by anyone. The job produces an UNSIGNED archive. To get
+# a submittable .ipa, either add the signing step with repo secrets once the
+# Apple Developer account exists, or open/export the archive from Xcode.
+# ---------------------------------------------------------------------------
+name: iOS build
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "Which app to build"
+        required: true
+        default: worker
+        type: choice
+        options: [worker, erp]
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Resolve app target
+        id: target
+        run: |
+          if [ "${{ inputs.app }}" = "worker" ]; then
+            echo "config=capacitor.worker.config.ts" >> "$GITHUB_OUTPUT"
+            echo "scheme=Hookka Worker" >> "$GITHUB_OUTPUT"
+          else
+            echo "config=capacitor.erp.config.ts" >> "$GITHUB_OUTPUT"
+            echo "scheme=Hookka ERP" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install mobile deps
+        working-directory: mobile
+        run: npm install --no-audit --no-fund
+
+      - name: Scaffold iOS project
+        working-directory: mobile
+        run: npx cap add ios --config "${{ steps.target.outputs.config }}"
+
+      - name: Inject permission strings + privacy manifest
+        working-directory: mobile
+        # Apple REJECTS (and iOS crashes) when a capability is used without its
+        # usage string. These four are what the two apps actually touch:
+        # camera (QR scan + punch selfie), photo library (attach evidence),
+        # location (soft geofence on punch), and Face ID (fast re-login).
+        run: |
+          PLIST="ios/App/App/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string 'Hookka uses the camera to scan job-card QR codes and to take your clock-in photo.'" "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryAddUsageDescription string 'Hookka saves photos you attach to a job or a service case.'" "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Add :NSLocationWhenInUseUsageDescription string 'Hookka checks you are at the factory when you clock in.'" "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Add :NSFaceIDUsageDescription string 'Hookka uses Face ID to unlock your saved login.'" "$PLIST" || true
+          cp PrivacyInfo.xcprivacy ios/App/App/PrivacyInfo.xcprivacy || true
+
+      - name: Sync web + native config
+        working-directory: mobile
+        run: npx cap sync ios --config "${{ steps.target.outputs.config }}"
+
+      - name: Install CocoaPods
+        working-directory: mobile/ios/App
+        run: pod install --repo-update
+
+      - name: Build (unsigned archive)
+        working-directory: mobile/ios/App
+        run: |
+          xcodebuild \
+            -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Hookka-${{ inputs.app }}.xcarchive" \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            archive
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: hookka-${{ inputs.app }}-ios-archive
+          path: ${{ runner.temp }}/Hookka-${{ inputs.app }}.xcarchive
+          retention-days: 14
+
+      - name: Next steps
+        run: |
+          echo "Unsigned archive built for '${{ inputs.app }}'."
+          echo "To submit: sign it (Apple Developer account + certificates) then"
+          echo "export an .ipa and upload via Transporter or Xcode Organizer."

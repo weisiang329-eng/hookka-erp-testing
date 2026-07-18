@@ -29,6 +29,10 @@ This file organizes key documentation so implementation and operations are easy 
 - `docs/PROGRAM-EXECUTION.md` — legacy 6-task status snapshot. Superseded by PROGRAM-90D-EXECUTION.md for the upgrade window.
 - `docs/REPO-REVIEW-2026-04-24.md` — repository health review and stabilization notes.
 
+## Compliance / Standards
+- `docs/ISO-9001-GAP-ANALYSIS.md` — **assessment (2026-07-18)**. Code-grounded ISO 9001:2015 gap analysis (traceability, QC release, NCR, CAPA, document control, suppliers, internal audit, management review, etc.) + a suggested build order. No code changed.
+- `docs/MFRS-GAP-ANALYSIS.md` — **assessment (2026-07-18)**. Code-grounded MFRS gap analysis of the accounting module (double-entry GL, revenue MFRS 15, inventory MFRS 102, statements MFRS 101, receivables MFRS 9, tax, payroll MFRS 119, PPE MFRS 116, provisions MFRS 137, FX MFRS 121) + a suggested build order. No accounting code/data changed.
+
 ## Product / Domain
 - `docs/MODULES.md` — module-by-module product reference.
 - `docs/API.md` — API endpoint inventory and conventions.

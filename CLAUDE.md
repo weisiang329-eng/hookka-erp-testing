@@ -3,6 +3,11 @@
 This repo has a lightweight **ERP Center of Excellence** that keeps work fast / accurate /
 low-token. **Before any development task, consult it — do not grep the repo blind:**
 
+0. **Current foundation/staging programme** →
+   [`docs/FOUNDATION-EXECUTION-LEDGER.md`](docs/FOUNDATION-EXECUTION-LEDGER.md)
+   — exact staging SHA, merged PRs, active blocker, resume procedure, validation
+   evidence, and remaining FE/BE/DB/performance backlog. It overrides stale
+   routing or status statements in older handoff documents.
 1. **Find the code** → [`docs/context-packs/NAVIGATION-MAP.md`](docs/context-packs/NAVIGATION-MAP.md)
    — all 15 modules → pages / routes / tables / tests + a line-range index for the ~30 big
    files. Jump to the listed lines instead of reading a 10k-line file or grepping.

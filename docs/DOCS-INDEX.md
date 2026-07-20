@@ -22,6 +22,7 @@ This file organizes key documentation so implementation and operations are easy 
 - `docs/AI-CONTEXT-IMPROVEMENT-BACKLOG.md` — prioritized next steps for improving AI context quality without over-documenting.
 
 ## Program / Execution
+- `docs/FOUNDATION-EXECUTION-LEDGER.md` — **active canonical handoff** for the current FE/BE/DB, performance, staging, and production-safety programme; includes exact SHA/run, blockers, evidence, and resume steps.
 - `docs/GITHUB-WORKFLOW-GOVERNANCE.md` — GitHub PR/workflow organization, staging/canary rules, and bug-prevention guidance.
 - `docs/PROGRAM-90D-EXECUTION.md` — **active**. 90-day enterprise upgrade plan (CI gates → RBAC/audit → scheduler → SDK → observability). Updates weekly.
 - `docs/UPGRADE-CONTROL-BOARD.md` — **active**. Single source of truth for status (Backlog / In Progress / Blocked / Done). Update on every state change.

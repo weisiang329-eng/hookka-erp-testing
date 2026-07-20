@@ -34,6 +34,86 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-20-002 — Quick-pay had a second receipt rule and invoice detail could show voided/bounced money `money` `api-contract` `data-integrity` 🟡
+
+**Status:** Fix in progress (stacked staging PR; production unchanged).
+
+**Symptom / risk:** Desktop invoice list, desktop invoice detail, and mobile quick-pay wrote
+`paidAmount` directly through `PUT /api/invoices/:id`. That path created only an
+`invoice_payments` detail row; it did not create the canonical receipt, idempotency claim, GL
+posting, or complete payment audit contract. Separately, those detail rows had no receipt id,
+so a later receipt restate could not replace them and invoice detail could continue showing a
+voided or bounced receipt as if it were active.
+
+**Root cause:** Payment had two backend owners. `payment_records.allocations` was the source for
+lifecycle/GL while `invoice_payments` was a duplicated read model with no stable foreign key.
+The frontend chose a mutation path based on which page it was on.
+
+**Fix:**
+- Migration `0211_invoice_payment_receipt_link.sql` adds nullable `payment_record_id` plus
+  tenant-aware receipt and invoice foreign keys for every new link. It deliberately does not
+  guess a legacy backfill.
+- All three quick-pay UIs now POST the canonical idempotent `/api/payments` request. Direct
+  invoice paid/status mutations return 409, removing the second money rule. Their method list
+  and request schema now exactly match the four values accepted by Postgres.
+- Receipt create stamps the link. Restate verifies the linked detail exactly matches the old
+  allocations, deletes only that receipt's detail, and recreates its corrected allocation
+  rows. Ambiguous legacy receipts fail closed.
+- `/api/payments/linkage-audit` exposes the org-scoped legacy review queue without auto-writing
+  candidates. Invoice detail keeps unlinked legacy rows visible but hides linked rows whose
+  receipt is BOUNCED or lifecycle-inactive. The operations receivables report and assistant
+  order trace apply the same active-receipt rule and tenant scope.
+
+**Regression evidence:** `tests/payment-contract.test.mjs` pins the composite foreign keys,
+no-guess migration rule, linked-only restate, legacy audit queue, active-detail read filter,
+single backend payment owner, and idempotency headers on every quick-pay UI.
+
+---
+
+## BUG-2026-07-20-001 — Payment APIs could cross tenant/party boundaries and split one receipt into contradictory totals `money` `tenant-isolation` `data-integrity` 🟡
+
+**Status:** Fix in progress (staging PR; production unchanged).
+
+**Symptom / risk:** A crafted customer-payment request could name a customer from the active
+org but allocate the receipt to an invoice belonging to another org or another customer. The
+request-level `amount` also did not have to equal the allocation total, so the GL receipt,
+invoice `paidAmount`, and customer `outstandingSen` could move by different values. Supplier
+payments had the equivalent PI/supplier/org gap. Duplicate invoice/PI allocations in one
+request were accepted, and two concurrent payments could both validate against the same stale
+outstanding snapshot.
+
+**Root cause:** The UI supplied internally consistent IDs and totals, so the backend trusted
+those relationships instead of enforcing them as an API/DB contract. Several money queries
+selected by globally-looking `id` only; write rows relied on the legacy default `org_id =
+'hookka'`; and overpayment prevention existed only before the transaction.
+
+**Fix:**
+- `src/lib/schemas/payment-request.ts` is the shared structured request contract for customer
+  and supplier payment creation. It rejects malformed dates, non-positive/non-integer sen,
+  duplicate allocations, and customer receipt/allocation total drift.
+- `src/api/routes/payments.ts` scopes customer, account, invoice, SO, payment, invoice-payment,
+  status-history, and read-back operations by `orgId`; invoices must also belong to the stated
+  customer. The same contract now covers detail, bounce, void/delete/unvoid, and restate paths;
+  restate revalidates every allocation, available headroom, and the replacement cash/bank
+  account instead of trusting the original receipt.
+- `src/api/routes/supplier-payments.ts` scopes the supplier, account, PI, and PI update by
+  `orgId`; each PI must belong to the stated supplier. Knock-off, un-knock, lifecycle,
+  restatement, and absolute truth-recompute repair queries carry the same tenant predicates.
+- `migrations-postgres/0210_payment_balance_guards.sql` adds NOT VALID check constraints so
+  historical exceptions do not block rollout, while new concurrent writes cannot push AR/AP
+  paid amounts below zero or above the document total.
+
+**Regression evidence:** `tests/payment-contract.test.mjs` pins the accepted frontend shapes,
+total equality, duplicate rejection, create/restate/lifecycle/repair tenant-party predicates,
+and both Postgres constraints.
+
+**Known follow-up (do not guess a backfill):** legacy `invoice_payments` rows do not contain a
+stable `payment_record_id`. Until a separate linkage migration is deployed, historical detail
+rows cannot be safely matched to a receipt from date/reference/amount alone. The linkage and an
+explicit audit queue are required before restatement can synchronize those legacy detail rows.
+
+---
+
 ## BUG-2026-07-17-012 — payslip "Hourly Rate" formula hardcoded "(26 x 9)" — lied for non-9h workers `payroll` `ui-frontend` `pdf` 🟢
 **Display-only (the rate was always correct), fixed as part of the ANN short-hours work
 (BUG-2026-07-17-006/-007).** The payslip label read `basic / (26 x 9) = hourlyRate`, but the
@@ -728,7 +808,7 @@ guard deploy still pending (owner-gated; prod not accessible from this session).
 
 ---
 
-## BUG-2026-07-05-001 — Mobile Production / Warehouse / Delivery search couldn't find a record by customer PO / SO / our Company SOID `ui-frontend` `mobile` `search`
+## BUG-2026-07-05-002 — Mobile Production / Warehouse / Delivery search couldn't find a record by customer PO / SO / our Company SOID `ui-frontend` `mobile` `search`
 
 🟢 **Fixed on main**
 

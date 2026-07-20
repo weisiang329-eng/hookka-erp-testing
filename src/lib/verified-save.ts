@@ -65,6 +65,8 @@ export type VerifiedSaveArgs<T> = {
   endpoint: string;
   method: "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
+  /** Additional headers such as Idempotency-Key for money/document writes. */
+  headers?: Record<string, string>;
   /**
    * Readback function called after the mutation succeeds. MUST bypass any
    * caller-side cache (e.g. a fresh `fetch` with `cache: "no-store"` and a
@@ -89,7 +91,7 @@ export async function verifiedSave<T>(args: VerifiedSaveArgs<T>): Promise<SaveRe
   try {
     res = await fetch(args.endpoint, {
       method: args.method,
-      headers: csrfHeaders(),
+      headers: { ...csrfHeaders(), ...(args.headers ?? {}) },
       body: args.body === undefined ? undefined : JSON.stringify(args.body),
       credentials: "include",
     });

@@ -1165,17 +1165,15 @@ export function editSupplierSpec(doc: Record<string, unknown>, id: string): Form
 }
 
 // ===========================================================================
-// RECORD PAYMENT — Invoice. Reuses the EXACT desktop flow (invoices/detail.tsx):
-// PUT /api/invoices/:id { paidAmount: existing + amount, paymentMethod,
-// paymentDate, paymentReference }. The backend derives the delta, writes one
-// invoice_payments row and flips status → PARTIAL_PAID / PAID (invoices.ts:1707).
+// RECORD PAYMENT — Invoice. Desktop and mobile both use POST /api/payments.
+// That one path owns the receipt, allocation, GL, idempotency, audit, and
+// paid/status cascade as one atomic contract.
 // ===========================================================================
 const PAYMENT_METHOD_OPTS: SelectOption[] = [
   { value: "BANK_TRANSFER", label: "Bank Transfer" },
   { value: "CHEQUE", label: "Cheque" },
   { value: "CASH", label: "Cash" },
   { value: "CREDIT_CARD", label: "Credit Card" },
-  { value: "OTHER", label: "Other" },
 ];
 
 export function recordPaymentSpec(doc: Record<string, unknown>, id: string): FormSpec {
@@ -1201,16 +1199,25 @@ export function recordPaymentSpec(doc: Record<string, unknown>, id: string): For
     submit: async (v) => {
       const amountSen = n(v.amount);
       if (amountSen <= 0) return { ok: false, error: "Enter a payment amount." };
+      const customerId = s(doc.customerId);
+      if (!customerId) {
+        return { ok: false, error: "This invoice has no customer id." };
+      }
       const body = {
-        paidAmount: paidSen + amountSen,
-        paymentMethod: s(v.paymentMethod) || "BANK_TRANSFER",
-        paymentDate: s(v.paymentDate) || undefined,
-        paymentReference: s(v.paymentReference),
+        customerId,
+        amount: amountSen,
+        method: s(v.paymentMethod) || "BANK_TRANSFER",
+        date: s(v.paymentDate) || todayISO(),
+        reference: s(v.paymentReference),
+        allocations: [{ invoiceId: id, amount: amountSen }],
       };
-      const res = await mutateJson(`/api/invoices/${encodeURIComponent(id)}`, "PUT", body);
+      const res = await mutateJson("/api/payments", "POST", body, {
+        "Idempotency-Key": uuid(),
+      });
       if (!res.ok) return { ok: false, error: res.error };
       refreshOne(`/api/invoices/${encodeURIComponent(id)}`);
       refreshList("/api/invoices");
+      refreshList("/api/payments");
       return { ok: true };
     },
   };

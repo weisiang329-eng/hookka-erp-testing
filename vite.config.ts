@@ -2,6 +2,22 @@ import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
+import { getReleaseMetadata } from './scripts/lib/release-metadata.mjs'
+
+const release = getReleaseMetadata({ rootDir: __dirname })
+
+function releaseManifest(): Plugin {
+  return {
+    name: 'hookka-release-manifest',
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: 'version.json',
+        source: `${JSON.stringify(release, null, 2)}\n`,
+      })
+    },
+  }
+}
 
 // ───────────────────────────────────────────────────────────────────────────
 // stripCrossorigin — remove the `crossorigin` attribute Vite stamps onto every
@@ -37,15 +53,20 @@ function stripCrossorigin(): Plugin {
 // Workers use the Upload photos path instead (multiple select + batch
 // queue), which works fine over HTTP.
 export default defineConfig({
-  // Build-time identifier injected as a global constant. Used by
-  // src/lib/cached-fetch.ts to namespace localStorage cache entries —
-  // every new build gets a unique namespace so old cached payloads from
-  // a previous deploy automatically orphan instead of haunting users
-  // through the next deploy. No manual cache-clear ever needed.
+  // Deterministic release identity. The previous Date.now() value changed on
+  // every rebuild of the same commit, so logs, caches and deployed artifacts
+  // could not be correlated. SemVer + channel + SHA stays unique per deploy
+  // while identical source produces the same identity.
   define: {
-    __BUILD_ID__: JSON.stringify(Date.now().toString(36)),
+    __APP_VERSION__: JSON.stringify(release.version),
+    __RELEASE_ID__: JSON.stringify(release.releaseId),
+    __RELEASE_CHANNEL__: JSON.stringify(release.channel),
+    __BUILD_BRANCH__: JSON.stringify(release.branch),
+    __BUILD_SHA__: JSON.stringify(release.commitSha),
+    __SCHEMA_VERSION__: JSON.stringify(release.schemaVersion),
+    __BUILD_ID__: JSON.stringify(release.releaseId),
   },
-  plugins: [react(), tailwindcss(), stripCrossorigin()],
+  plugins: [react(), tailwindcss(), stripCrossorigin(), releaseManifest()],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

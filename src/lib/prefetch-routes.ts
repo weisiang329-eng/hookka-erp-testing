@@ -1,80 +1,94 @@
-// ---------------------------------------------------------------------------
-// prefetch-routes.ts — warm the heavy page chunks while the browser is idle.
-//
-// Why: every dashboard page is `lazy(() => import(...))`, so the FIRST visit to
-// each page downloads + parses its own chunk — that is the "第一次卡，之後才順"
-// the owner reported (2026-07-16). The server side is already warmed every 5
-// min by warm-lists.yml, so the lag is purely the browser fetching chunks it
-// has never seen. Keeping a PC open only warms that one browser's cache; it
-// does nothing for anyone else. Prefetching fixes it for every user.
-//
-// How: re-issue the SAME dynamic import() the lazy() route uses. The module
-// graph is keyed by specifier, so this downloads the chunk once and the later
-// lazy() resolves from cache — instant. Failures are swallowed: a prefetch is
-// an optimisation, never a reason for the app to misbehave.
-//
-// Discipline: ONE chunk at a time, only while idle, and skipped entirely on a
-// metered / slow link — the factory's wifi is weak (see the weak-wifi
-// campaign), so we must never race the page the operator is actually waiting
-// for.
-// ---------------------------------------------------------------------------
-
-/** The pages the office actually lives in, in rough order of use. */
-const ROUTES: Array<() => Promise<unknown>> = [
-  () => import("../pages/sales"),
-  () => import("../pages/delivery"),
-  () => import("../pages/production"),
-  () => import("../pages/planning"),
-  () => import("../pages/inventory"),
-  () => import("../pages/invoices"),
-  () => import("../pages/customers"),
-  () => import("../pages/sales/detail"),
-];
+import { prefetchRoute } from "../dashboard-routes";
+import { buildRoutePrefetchPlan } from "./prefetch-policy";
 
 type NetworkInformation = {
   saveData?: boolean;
   effectiveType?: string;
 };
 
-/** True when the link is metered or too slow to spend on speculative work. */
-function linkTooWeak(): boolean {
-  const conn = (navigator as Navigator & { connection?: NetworkInformation }).connection;
-  if (!conn) return false; // unknown → assume fine
-  if (conn.saveData) return true;
-  const t = conn.effectiveType ?? "";
-  return t === "slow-2g" || t === "2g";
+type Scheduling = {
+  isInputPending?: () => boolean;
+};
+
+type PrefetchNavigator = Navigator & {
+  connection?: NetworkInformation;
+  deviceMemory?: number;
+  scheduling?: Scheduling;
+};
+
+type PrefetchOptions = {
+  pathname: string;
+  role?: string | null;
+};
+
+function runtimeAllowsPrefetch(): boolean {
+  if (typeof window === "undefined" || typeof navigator === "undefined") return false;
+  if (window.matchMedia?.("(pointer: coarse)").matches) return false;
+
+  const nav = navigator as PrefetchNavigator;
+  const connection = nav.connection;
+  if (connection?.saveData) return false;
+  if (["slow-2g", "2g", "3g"].includes(connection?.effectiveType ?? "")) return false;
+  if (typeof nav.deviceMemory === "number" && nav.deviceMemory <= 2) return false;
+  return true;
 }
 
-function whenIdle(cb: () => void): void {
-  const w = window as Window & {
-    requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
-  };
-  if (typeof w.requestIdleCallback === "function") w.requestIdleCallback(cb, { timeout: 4000 });
-  else window.setTimeout(cb, 500);
+function inputIsPending(): boolean {
+  return Boolean((navigator as PrefetchNavigator).scheduling?.isInputPending?.());
 }
 
-let started = false;
+function whenIdle(callback: () => void): () => void {
+  if (typeof window.requestIdleCallback === "function") {
+    const id = window.requestIdleCallback(callback);
+    return () => window.cancelIdleCallback(id);
+  }
+  // eslint-disable-next-line no-restricted-syntax -- non-React cancellable fallback for requestIdleCallback
+  const id = window.setTimeout(callback, 1500);
+  return () => window.clearTimeout(id);
+}
 
 /**
- * Kick off idle prefetching of the main page chunks. Safe to call more than
- * once — only the first call does anything.
+ * Prefetch only the next high-probability page chunks for the current workflow.
+ * Route changes cancel the old queue; sidebar hover/focus remains the stronger
+ * intent signal for every other page.
  */
-export function prefetchRoutesWhenIdle(): void {
-  if (started || typeof window === "undefined") return;
-  started = true;
-  if (linkTooWeak()) return;
+export function prefetchRoutesWhenIdle({ pathname, role }: PrefetchOptions): () => void {
+  const routes = buildRoutePrefetchPlan(pathname, role);
+  if (routes.length === 0 || typeof window === "undefined") return () => {};
 
-  let i = 0;
+  let cancelled = false;
+  let cancelScheduled = () => {};
+  let index = 0;
+
   const step = () => {
-    if (i >= ROUTES.length) return;
-    const load = ROUTES[i++];
-    // Re-check between chunks: the operator may have moved onto mobile data.
-    if (linkTooWeak()) return;
-    void load()
-      .catch(() => {
-        /* a stale/removed chunk must never surface to the user */
-      })
-      .then(() => whenIdle(step));
+    if (cancelled || index >= routes.length) return;
+    if (document.visibilityState !== "visible") {
+      document.addEventListener("visibilitychange", startWhenVisible);
+      return;
+    }
+    if (!runtimeAllowsPrefetch()) return;
+    if (inputIsPending()) {
+      cancelScheduled = whenIdle(step);
+      return;
+    }
+    const route = routes[index++];
+    void prefetchRoute(route).finally(() => {
+      if (!cancelled) cancelScheduled = whenIdle(step);
+    });
   };
-  whenIdle(step);
+
+  const startWhenVisible = () => {
+    if (document.visibilityState !== "visible" || cancelled) return;
+    document.removeEventListener("visibilitychange", startWhenVisible);
+    cancelScheduled = whenIdle(step);
+  };
+
+  if (document.visibilityState === "visible") cancelScheduled = whenIdle(step);
+  else document.addEventListener("visibilitychange", startWhenVisible);
+
+  return () => {
+    cancelled = true;
+    cancelScheduled();
+    document.removeEventListener("visibilitychange", startWhenVisible);
+  };
 }

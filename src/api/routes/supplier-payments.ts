@@ -35,6 +35,10 @@ import { issueDocNumber } from "../lib/doc-number-service";
 import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
 import { applyLifecycle } from "../lib/document-lifecycle";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
+import {
+  SupplierPaymentCreateRequestSchema,
+  firstRequestValidationError,
+} from "../../lib/schemas/payment-request";
 
 const AP_CONTROL = "400-0000"; // Trade Creditors
 const FX_GAIN_ACCT = "530-0000"; // GAIN ON FOREIGN EXCHANGE (realised; debit = loss)
@@ -70,7 +74,8 @@ app.get("/", async (c) => {
             pi.supplier_invoice_no AS supplier_invoice_no,
             dl.state        AS lifecycleState
        FROM supplier_payments sp
-       LEFT JOIN purchase_invoices pi ON pi.id = sp.purchase_invoice_id
+       LEFT JOIN purchase_invoices pi
+              ON pi.id = sp.purchase_invoice_id AND pi.org_id = sp.org_id
        LEFT JOIN document_lifecycle dl
               ON dl.sourceType = 'supplier_payment'
              AND dl.sourceId = sp.payment_no
@@ -131,45 +136,46 @@ app.post("/", async (c) => {
         (c as unknown as { get: (k: string) => string | undefined }).get(
           "userId",
         ) ?? null;
-      const body = await c.req.json();
-      const supplierId = String(body.supplierId ?? "");
-      const payFrom = String(body.payFrom ?? "");
-      const date = String(body.date ?? "");
-      const reference: string | undefined = body.reference;
-      const allocations: CreateAllocation[] = Array.isArray(body.allocations)
-        ? body.allocations
-        : [];
+      const parsedBody = SupplierPaymentCreateRequestSchema.safeParse(
+        await c.req.json(),
+      );
+      if (!parsedBody.success) {
+        return c.json(
+          {
+            success: false,
+            error: firstRequestValidationError(parsedBody.error),
+          },
+          400,
+        );
+      }
+      const body = parsedBody.data;
+      const { supplierId, payFrom, date, reference, allocations, advanceSen } =
+        body;
 
       // Supplier advance / prepayment: an amount paid that ISN'T allocated to a
       // PI. Booked as a debit to AP control (400-0000) under the supplier, so it
       // shows as a prepaid (negative) balance on the creditor ledger. The owner
       // knocks it off against invoices MANUALLY later — never auto-applied.
-      const advanceSen = Math.max(0, Math.round(Number(body.advanceSen) || 0));
-
-      if (!supplierId || !payFrom || !date) {
-        return c.json(
-          { success: false, error: "supplierId, payFrom, and date are required" },
-          400,
-        );
-      }
-      if (allocations.length === 0 && advanceSen <= 0) {
-        return c.json(
-          { success: false, error: "at least one allocation or an advance amount is required" },
-          400,
-        );
-      }
-
       // Self-apply the partial-payment schema (migration-7 columns +
       // PARTIAL_PAID status CHECK relax) before any PI read/write — without this
       // the paid_amount_sen write or the PARTIAL_PAID status flip fails on a
       // prod that never ran migration 7 / still has the original 0057 CHECK.
       await ensurePartialPaymentColumns(c.var.DB);
 
+      const supplier = await c.var.DB.prepare(
+        "SELECT id, name FROM suppliers WHERE id = ? AND orgId = ?",
+      )
+        .bind(supplierId, orgId)
+        .first<{ id: string; name: string }>();
+      if (!supplier) {
+        return c.json({ success: false, error: "Supplier not found" }, 404);
+      }
+
       // 1. Validate payFrom is a postable SBK/SCH bank/cash account.
       const acct = await c.var.DB.prepare(
-        "SELECT specialAccountType FROM chart_of_accounts WHERE code = ?",
+        "SELECT specialAccountType FROM chart_of_accounts WHERE code = ? AND orgId = ?",
       )
-        .bind(payFrom)
+        .bind(payFrom, orgId)
         .first<{ specialAccountType: string | null }>();
       if (
         !acct ||
@@ -204,9 +210,10 @@ app.post("/", async (c) => {
         const pi = await c.var.DB.prepare(
           `SELECT id, pi_no, amount_sen, paid_amount_sen, status, currency,
                   fx_rate, supplier_id, supplier_name
-             FROM purchase_invoices WHERE id = ?`,
+             FROM purchase_invoices
+            WHERE id = ? AND orgId = ? AND supplier_id = ?`,
         )
-          .bind(piId)
+          .bind(piId, orgId, supplierId)
           .first<PiRow>();
         if (
           !pi ||
@@ -277,8 +284,15 @@ app.post("/", async (c) => {
                      WHEN paid_amount_sen + ? > 0 THEN 'PARTIAL_PAID'
                      ELSE status
                    END
-             WHERE id = ?`,
-          ).bind(r.bookedSen, r.bookedSen, r.bookedSen, piId),
+             WHERE id = ? AND orgId = ? AND supplier_id = ?`,
+          ).bind(
+            r.bookedSen,
+            r.bookedSen,
+            r.bookedSen,
+            piId,
+            orgId,
+            supplierId,
+          ),
         );
 
         totalBooked += r.bookedSen;
@@ -290,10 +304,6 @@ app.post("/", async (c) => {
       // totals below (DR 400-0000 / CR bank), so it lands on the supplier's
       // creditor ledger as a prepaid (debit) balance to knock off manually later.
       if (advanceSen > 0) {
-        const supRow = await c.var.DB
-          .prepare("SELECT name FROM suppliers WHERE id = ?")
-          .bind(supplierId)
-          .first<{ name: string }>();
         statements.push(
           c.var.DB.prepare(
             `INSERT INTO supplier_payments (
@@ -305,7 +315,7 @@ app.post("/", async (c) => {
             `sp-${crypto.randomUUID().slice(0, 8)}`,
             payNo,
             supplierId,
-            supRow?.name ?? "",
+            supplier.name,
             date,
             advanceSen,
             advanceSen,
@@ -472,9 +482,9 @@ app.post("/knock-off", async (c) => {
     const pi = await c.var.DB
       .prepare(
         `SELECT id, pi_no, amount_sen, paid_amount_sen, status, supplier_id, supplier_name
-           FROM purchase_invoices WHERE id = ?`,
+           FROM purchase_invoices WHERE id = ? AND orgId = ?`,
       )
-      .bind(piId)
+      .bind(piId, orgId)
       .first<{
         id: string; piNo: string | null; pi_no: string | null;
         amountSen: number | null; amount_sen: number | null;
@@ -495,8 +505,8 @@ app.post("/knock-off", async (c) => {
 
     const statements: D1PreparedStatement[] = [
       c.var.DB
-        .prepare(`UPDATE supplier_payments SET amountSen = amountSen - ?, bookedSen = bookedSen - ? WHERE id = ?`)
-        .bind(amountSen, amountSen, advanceRowId),
+        .prepare(`UPDATE supplier_payments SET amountSen = amountSen - ?, bookedSen = bookedSen - ? WHERE id = ? AND orgId = ?`)
+        .bind(amountSen, amountSen, advanceRowId, orgId),
       c.var.DB.prepare(
         `INSERT INTO supplier_payments (
            id, paymentNo, supplierId, supplierName, purchaseInvoiceId,
@@ -526,9 +536,9 @@ app.post("/knock-off", async (c) => {
                    WHEN paid_amount_sen + ? > 0 THEN 'PARTIAL_PAID'
                    ELSE status
                  END
-           WHERE id = ?`,
+           WHERE id = ? AND orgId = ?`,
         )
-        .bind(amountSen, amountSen, amountSen, piId),
+        .bind(amountSen, amountSen, amountSen, piId, orgId),
     ];
     statements.push(bumpSupplierPaymentsRev(c.var.DB));
     await c.var.DB.batch(statements);
@@ -597,14 +607,14 @@ app.post("/un-knock", async (c) => {
 
     await c.var.DB.batch([
       c.var.DB
-        .prepare(`UPDATE supplier_payments SET purchaseInvoiceId = NULL WHERE id = ?`)
-        .bind(rowId),
-      buildPiPaidTruthStatement(c.var.DB, piId),
+        .prepare(`UPDATE supplier_payments SET purchaseInvoiceId = NULL WHERE id = ? AND orgId = ?`)
+        .bind(rowId, orgId),
+      buildPiPaidTruthStatement(c.var.DB, orgId, piId),
       bumpSupplierPaymentsRev(c.var.DB),
     ]);
     const pi = await c.var.DB
-      .prepare("SELECT pi_no, paid_amount_sen, status FROM purchase_invoices WHERE id = ?")
-      .bind(piId)
+      .prepare("SELECT pi_no, paid_amount_sen, status FROM purchase_invoices WHERE id = ? AND orgId = ?")
+      .bind(piId, orgId)
       .first<{ piNo?: string; pi_no?: string; paidAmountSen?: number; paid_amount_sen?: number; status: string }>();
     return c.json({
       success: true,
@@ -649,9 +659,9 @@ async function buildSupplierPaymentLifecycle(
           // Exclude #6 supplier-discount markers (method='CREDIT_NOTE') —
           // they carry a non-zero booked_sen, so a real payment that ever
           // shared this payment_no would double-roll-back the PI. Defensive.
-          "SELECT purchaseInvoiceId, booked_sen FROM supplier_payments WHERE payment_no = ? AND COALESCE(method,'') <> 'CREDIT_NOTE'",
+          "SELECT purchaseInvoiceId, booked_sen FROM supplier_payments WHERE payment_no = ? AND orgId = ? AND COALESCE(method,'') <> 'CREDIT_NOTE'",
         )
-        .bind(paymentNo)
+        .bind(paymentNo, orgId)
         .all<{ purchaseInvoiceId: string | null; bookedSen: number | null; booked_sen: number | null }>()
     ).results ?? [];
   if (rows.length === 0) throw new Error("PAYMENT_NOT_FOUND");
@@ -699,9 +709,9 @@ async function buildSupplierPaymentLifecycle(
                        WHEN paid_amount_sen - ? < amount_sen THEN 'PARTIAL_PAID'
                        ELSE 'PAID'
                      END
-               WHERE id = ?`,
+               WHERE id = ? AND orgId = ?`,
             )
-            .bind(bookedSen, bookedSen, bookedSen, piId),
+            .bind(bookedSen, bookedSen, bookedSen, piId, orgId),
         );
       } else {
         // Re-apply the booked amount (mirrors the create-apply SQL).
@@ -715,9 +725,9 @@ async function buildSupplierPaymentLifecycle(
                        WHEN paid_amount_sen + ? > 0 THEN 'PARTIAL_PAID'
                        ELSE status
                      END
-               WHERE id = ?`,
+               WHERE id = ? AND orgId = ?`,
             )
-            .bind(bookedSen, bookedSen, bookedSen, piId),
+            .bind(bookedSen, bookedSen, bookedSen, piId, orgId),
         );
       }
     }
@@ -747,8 +757,8 @@ async function buildSupplierPaymentRestate(
       await db
         // Exclude #6 supplier-discount markers (method='CREDIT_NOTE') from the
         // rollback set — defensive against a future payment_no collision.
-        .prepare("SELECT purchaseInvoiceId, booked_sen FROM supplier_payments WHERE payment_no = ? AND COALESCE(method,'') <> 'CREDIT_NOTE'")
-        .bind(paymentNo)
+        .prepare("SELECT purchaseInvoiceId, booked_sen FROM supplier_payments WHERE payment_no = ? AND orgId = ? AND COALESCE(method,'') <> 'CREDIT_NOTE'")
+        .bind(paymentNo, orgId)
         .all<{ purchaseInvoiceId: string | null; bookedSen: number | null; booked_sen: number | null }>()
     ).results ?? [];
   if (oldRows.length === 0) throw new Error("PAYMENT_NOT_FOUND");
@@ -779,15 +789,15 @@ async function buildSupplierPaymentRestate(
         .prepare(
           `UPDATE purchase_invoices SET paid_amount_sen = GREATEST(0, paid_amount_sen - ?),
              status = CASE WHEN paid_amount_sen - ? <= 0 THEN 'CONFIRMED' WHEN paid_amount_sen - ? < amount_sen THEN 'PARTIAL_PAID' ELSE 'PAID' END
-           WHERE id = ?`,
+           WHERE id = ? AND orgId = ?`,
         )
-        .bind(b, b, b, r.purchaseInvoiceId),
+        .bind(b, b, b, r.purchaseInvoiceId, orgId),
     );
   }
   // 2. Drop the old sub-ledger rows (never the #6 CREDIT_NOTE markers — those
   // belong to a purchase-CN, not this payment; defensive against a collision).
   statements.push(
-    db.prepare("DELETE FROM supplier_payments WHERE payment_no = ? AND COALESCE(method,'') <> 'CREDIT_NOTE'").bind(paymentNo),
+    db.prepare("DELETE FROM supplier_payments WHERE payment_no = ? AND orgId = ? AND COALESCE(method,'') <> 'CREDIT_NOTE'").bind(paymentNo, orgId),
   );
 
   // 3. Re-run the per-PI FX allocation for the NEW data (mirrors the POST loop).
@@ -797,9 +807,9 @@ async function buildSupplierPaymentRestate(
     if (!piId) continue;
     const pi = await db
       .prepare(
-        `SELECT id, pi_no, amount_sen, paid_amount_sen, status, currency, fx_rate, supplier_id, supplier_name FROM purchase_invoices WHERE id = ?`,
+        `SELECT id, pi_no, amount_sen, paid_amount_sen, status, currency, fx_rate, supplier_id, supplier_name FROM purchase_invoices WHERE id = ? AND orgId = ? AND supplier_id = ?`,
       )
-      .bind(piId)
+      .bind(piId, orgId, supplierId)
       .first<PiRow>();
     const headroom = pi ? restateHeadroom(pi, oldBookedByPi.get(piId) ?? 0) : null;
     if (!pi || !headroom?.payable) {
@@ -834,9 +844,9 @@ async function buildSupplierPaymentRestate(
         .prepare(
           `UPDATE purchase_invoices SET paid_amount_sen = paid_amount_sen + ?,
              status = CASE WHEN paid_amount_sen + ? >= amount_sen THEN 'PAID' WHEN paid_amount_sen + ? > 0 THEN 'PARTIAL_PAID' ELSE status END
-           WHERE id = ?`,
+           WHERE id = ? AND orgId = ? AND supplier_id = ?`,
         )
-        .bind(r.bookedSen, r.bookedSen, r.bookedSen, piId),
+        .bind(r.bookedSen, r.bookedSen, r.bookedSen, piId, orgId, supplierId),
     );
     totalBooked += r.bookedSen;
     totalBank += r.bankSen;
@@ -896,7 +906,9 @@ async function buildSupplierPaymentRestate(
   const touchedPiIds = new Set<string>();
   for (const r of oldRows) if (r.purchaseInvoiceId) touchedPiIds.add(String(r.purchaseInvoiceId));
   for (const a of allocations) if (a.piId) touchedPiIds.add(String(a.piId));
-  for (const piId of touchedPiIds) statements.push(buildPiPaidTruthStatement(db, piId));
+  for (const piId of touchedPiIds) {
+    statements.push(buildPiPaidTruthStatement(db, orgId, piId));
+  }
   statements.push(bumpSupplierPaymentsRev(db));
 
   return statements;
@@ -925,15 +937,21 @@ function bumpSupplierPaymentsRev(db: Env["Variables"]["DB"]): D1PreparedStatemen
 // non-ACTIVE payments excluded via document_lifecycle). Pure snake_case SQL so
 // the adapter passes it through untranslated. Shared by the restate truth
 // guard and POST /recompute-pi-paid.
-function buildPiPaidTruthStatement(db: Env["Variables"]["DB"], piId: string): D1PreparedStatement {
+function buildPiPaidTruthStatement(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+  piId: string,
+): D1PreparedStatement {
   const PAID_SQL = `(
     SELECT COALESCE(SUM(sp.booked_sen), 0) FROM supplier_payments sp
      WHERE sp.purchase_invoice_id = purchase_invoices.id
+       AND sp.org_id = purchase_invoices.org_id
        AND NOT EXISTS (
          SELECT 1 FROM document_lifecycle dl
-          WHERE dl.source_type = 'supplier_payment'
-            AND dl.source_id = sp.payment_no
-            AND dl.state <> 'ACTIVE'
+           WHERE dl.source_type = 'supplier_payment'
+             AND dl.source_id = sp.payment_no
+             AND dl.org_id = sp.org_id
+             AND dl.state <> 'ACTIVE'
        )
   )`;
   return db
@@ -945,9 +963,9 @@ function buildPiPaidTruthStatement(db: Env["Variables"]["DB"], piId: string): D1
            WHEN ${PAID_SQL} > 0 THEN 'PARTIAL_PAID'
            ELSE (CASE WHEN status IN ('PAID','PARTIAL_PAID') THEN 'CONFIRMED' ELSE status END)
          END
-       WHERE id = ?`,
+       WHERE id = ? AND org_id = ?`,
     )
-    .bind(piId);
+    .bind(piId, orgId);
 }
 
 // ---------------------------------------------------------------------------
@@ -1057,19 +1075,20 @@ app.post("/:paymentNo/lifecycle", async (c) => {
 app.post("/recompute-pi-paid", async (c) => {
   const denied = await requirePermission(c, "invoices", "update");
   if (denied) return denied;
+  const orgId = getOrgId(c);
   const body = (await c.req.json().catch(() => ({}))) as { piId?: string };
   const piId = String(body.piId ?? "").trim();
   if (!piId) return c.json({ success: false, error: "piId is required" }, 400);
   const before = await c.var.DB
-    .prepare("SELECT pi_no, amount_sen, paid_amount_sen, status FROM purchase_invoices WHERE id = ?")
-    .bind(piId)
+    .prepare("SELECT pi_no, amount_sen, paid_amount_sen, status FROM purchase_invoices WHERE id = ? AND orgId = ?")
+    .bind(piId, orgId)
     .first<{ pi_no?: string; piNo?: string; amount_sen?: number; amountSen?: number; paid_amount_sen?: number; paidAmountSen?: number; status: string }>();
   if (!before) return c.json({ success: false, error: "PI not found" }, 404);
   await ensurePartialPaymentColumns(c.var.DB);
-  await c.var.DB.batch([buildPiPaidTruthStatement(c.var.DB, piId)]);
+  await c.var.DB.batch([buildPiPaidTruthStatement(c.var.DB, orgId, piId)]);
   const after = await c.var.DB
-    .prepare("SELECT paid_amount_sen, status FROM purchase_invoices WHERE id = ?")
-    .bind(piId)
+    .prepare("SELECT paid_amount_sen, status FROM purchase_invoices WHERE id = ? AND orgId = ?")
+    .bind(piId, orgId)
     .first<{ paid_amount_sen?: number; paidAmountSen?: number; status: string }>();
   return c.json({
     success: true,
@@ -1085,6 +1104,7 @@ app.post("/recompute-pi-paid", async (c) => {
 app.post("/:paymentNo/restate", async (c) => {
   const denied = await requirePermission(c, "invoices", "update");
   if (denied) return denied;
+  const orgId = getOrgId(c);
   const paymentNo = c.req.param("paymentNo");
   let body: {
     supplierId?: string;
@@ -1105,9 +1125,9 @@ app.post("/:paymentNo/restate", async (c) => {
     return c.json({ success: false, error: "at least one allocation is required" }, 400);
   }
   const acct = await c.var.DB.prepare(
-    "SELECT specialAccountType FROM chart_of_accounts WHERE code = ?",
+    "SELECT specialAccountType FROM chart_of_accounts WHERE code = ? AND orgId = ?",
   )
-    .bind(String(body.payFrom))
+    .bind(String(body.payFrom), orgId)
     .first<{ specialAccountType: string | null }>();
   if (!acct || (acct.specialAccountType !== "SBK" && acct.specialAccountType !== "SCH")) {
     return c.json(
@@ -1116,7 +1136,6 @@ app.post("/:paymentNo/restate", async (c) => {
     );
   }
   try {
-    const orgId = getOrgId(c);
     const actorUserId =
       (c as unknown as { get: (k: string) => string | undefined }).get(
         "userId",

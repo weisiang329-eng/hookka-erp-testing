@@ -26,6 +26,12 @@ import { applyLifecycle } from "../lib/document-lifecycle";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
 import { parseDebtorCode } from "../../lib/debtor";
 import { issueDocNumber } from "../lib/doc-number-service";
+import {
+  CustomerPaymentCreateRequestSchema,
+  CustomerPaymentRestateRequestSchema,
+  firstRequestValidationError,
+  type CustomerPaymentRestateRequest,
+} from "../../lib/schemas/payment-request";
 
 // Cash/bank account by payment method (CASH → cash-in-hand, else bank).
 function bankAcct(method: string | null | undefined): string {
@@ -49,7 +55,7 @@ type PaymentRow = {
   allocations: string | null;
 };
 
-type Allocation = { invoiceId: string; invoiceNumber: string; amount: number };
+type Allocation = { invoiceId: string; invoiceNumber?: string; amount: number };
 
 const VALID_TRANSITIONS: Record<string, string[]> = {
   RECEIVED: ["CLEARED", "BOUNCED"],
@@ -73,8 +79,8 @@ async function buildCustomerPaymentLifecycle(
   actorUserId: string | null,
 ): Promise<{ statements: D1PreparedStatement[]; newState: DocState }> {
   const existing = await db
-    .prepare("SELECT * FROM payment_records WHERE id = ?")
-    .bind(id)
+    .prepare("SELECT * FROM payment_records WHERE id = ? AND orgId = ?")
+    .bind(id, orgId)
     .first<PaymentRow>();
   if (!existing) throw new Error("PAYMENT_NOT_FOUND");
   const allocs = parseAllocations(existing.allocations);
@@ -121,9 +127,16 @@ async function buildCustomerPaymentLifecycle(
                        WHEN paidAmount - ? < totalSen THEN 'PARTIAL_PAID'
                        ELSE 'PAID'
                      END
-               WHERE id = ?`,
+               WHERE id = ? AND orgId = ? AND customerId = ?`,
             )
-            .bind(a.amount, a.amount, a.amount, a.invoiceId),
+            .bind(
+              a.amount,
+              a.amount,
+              a.amount,
+              a.invoiceId,
+              orgId,
+              existing.customerId,
+            ),
         );
       } else {
         statements.push(
@@ -136,9 +149,16 @@ async function buildCustomerPaymentLifecycle(
                        WHEN paidAmount + ? > 0 THEN 'PARTIAL_PAID'
                        ELSE status
                      END
-               WHERE id = ?`,
+               WHERE id = ? AND orgId = ? AND customerId = ?`,
             )
-            .bind(a.amount, a.amount, a.amount, a.invoiceId),
+            .bind(
+              a.amount,
+              a.amount,
+              a.amount,
+              a.invoiceId,
+              orgId,
+              existing.customerId,
+            ),
         );
       }
     }
@@ -147,10 +167,10 @@ async function buildCustomerPaymentLifecycle(
         db
           .prepare(
             deactivated
-              ? `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`
-              : `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ?`,
+              ? `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ? AND orgId = ?`
+              : `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ? AND orgId = ?`,
           )
-          .bind(totalAllocSen, existing.customerId),
+          .bind(totalAllocSen, existing.customerId, orgId),
       );
     }
   }
@@ -178,8 +198,8 @@ async function buildCustomerPaymentRestate(
   stamp: number,
 ): Promise<D1PreparedStatement[]> {
   const existing = await db
-    .prepare("SELECT * FROM payment_records WHERE id = ?")
-    .bind(id)
+    .prepare("SELECT * FROM payment_records WHERE id = ? AND orgId = ?")
+    .bind(id, orgId)
     .first<PaymentRow>();
   if (!existing) throw new Error("PAYMENT_NOT_FOUND");
   const oldAllocs = parseAllocations(existing.allocations);
@@ -187,6 +207,98 @@ async function buildCustomerPaymentRestate(
     (a) => a.invoiceId && a.amount > 0,
   );
   const statements: D1PreparedStatement[] = [];
+
+  // Restatement may replace invoice detail rows only when they are linked to
+  // this exact receipt. Legacy rows have no paymentRecordId and can be
+  // ambiguous (same date/reference/amount), so fail closed and send them to
+  // the explicit linkage audit instead of guessing/deleting financial history.
+  const linkedDetails = await db
+    .prepare(
+      `SELECT invoiceId, amountSen FROM invoice_payments
+        WHERE paymentRecordId = ? AND orgId = ?`,
+    )
+    .bind(id, orgId)
+    .all<{ invoiceId: string; amountSen: number }>();
+  const oldDetailByInvoice = new Map<string, number>();
+  const linkedDetailByInvoice = new Map<string, number>();
+  for (const allocation of oldAllocs) {
+    oldDetailByInvoice.set(
+      allocation.invoiceId,
+      (oldDetailByInvoice.get(allocation.invoiceId) ?? 0) + allocation.amount,
+    );
+  }
+  for (const detail of linkedDetails.results ?? []) {
+    linkedDetailByInvoice.set(
+      detail.invoiceId,
+      (linkedDetailByInvoice.get(detail.invoiceId) ?? 0) + detail.amountSen,
+    );
+  }
+  const linkedDetailsMatch =
+    oldDetailByInvoice.size === linkedDetailByInvoice.size &&
+    [...oldDetailByInvoice].every(
+      ([invoiceId, amount]) => linkedDetailByInvoice.get(invoiceId) === amount,
+    );
+  if (!linkedDetailsMatch) throw new Error("PAYMENT_LEGACY_LINK_REQUIRED");
+
+  const newInvoiceIds = [...new Set(newAllocs.map((a) => a.invoiceId))];
+  if (newInvoiceIds.length > 0) {
+    const placeholders = newInvoiceIds.map(() => "?").join(",");
+    const rows = await db.prepare(
+      `SELECT id, paidAmount, totalSen FROM invoices
+        WHERE id IN (${placeholders}) AND orgId = ? AND customerId = ?`,
+    )
+      .bind(...newInvoiceIds, orgId, existing.customerId)
+      .all<{ id: string; paidAmount: number; totalSen: number }>();
+    const invoiceMap = new Map((rows.results ?? []).map((row) => [row.id, row]));
+    const oldByInvoice = new Map<string, number>();
+    for (const allocation of oldAllocs) {
+      oldByInvoice.set(
+        allocation.invoiceId,
+        (oldByInvoice.get(allocation.invoiceId) ?? 0) + allocation.amount,
+      );
+    }
+    for (const allocation of newAllocs) {
+      const invoice = invoiceMap.get(allocation.invoiceId);
+      if (!invoice) throw new Error("PAYMENT_ALLOCATION_SCOPE_MISMATCH");
+      const headroom =
+        invoice.totalSen - invoice.paidAmount +
+        (oldByInvoice.get(allocation.invoiceId) ?? 0);
+      if (allocation.amount > headroom) {
+        throw new Error(`Payment would overpay invoice ${allocation.invoiceId}`);
+      }
+    }
+  }
+
+  if (body.bankAccount) {
+    const account = await db.prepare(
+      "SELECT specialAccountType FROM chart_of_accounts WHERE code = ? AND orgId = ?",
+    )
+      .bind(body.bankAccount, orgId)
+      .first<{ specialAccountType: string | null }>();
+    if (
+      !account ||
+      (account.specialAccountType !== "SBK" &&
+        account.specialAccountType !== "SCH")
+    ) {
+      throw new Error(
+        "bankAccount must be a bank (SBK) or cash (SCH) account",
+      );
+    }
+  }
+
+  const restateDate = /^\d{4}-\d{2}-\d{2}$/.test(String(body.date ?? "").trim())
+    ? String(body.date).trim()
+    : existing.date;
+  const restateMethod = body.method ?? existing.method ?? "BANK_TRANSFER";
+  const restateReference = body.reference ?? existing.reference ?? "";
+
+  statements.push(
+    db
+      .prepare(
+        "DELETE FROM invoice_payments WHERE paymentRecordId = ? AND orgId = ?",
+      )
+      .bind(id, orgId),
+  );
 
   // 1. Roll the OLD allocations off their invoices.
   let oldTotal = 0;
@@ -202,9 +314,16 @@ async function buildCustomerPaymentRestate(
                WHEN paidAmount - ? < totalSen THEN 'PARTIAL_PAID'
                ELSE 'PAID'
              END
-           WHERE id = ?`,
+           WHERE id = ? AND orgId = ? AND customerId = ?`,
         )
-        .bind(a.amount, a.amount, a.amount, a.invoiceId),
+        .bind(
+          a.amount,
+          a.amount,
+          a.amount,
+          a.invoiceId,
+          orgId,
+          existing.customerId,
+        ),
     );
   }
   // 2. Apply the NEW allocations.
@@ -214,15 +333,40 @@ async function buildCustomerPaymentRestate(
     statements.push(
       db
         .prepare(
+          `INSERT INTO invoice_payments (
+             id, invoiceId, paymentRecordId, date, amountSen, method, reference, orgId
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          genInvoicePaymentId(),
+          a.invoiceId,
+          id,
+          restateDate,
+          a.amount,
+          restateMethod,
+          restateReference,
+          orgId,
+        ),
+    );
+    statements.push(
+      db
+        .prepare(
           `UPDATE invoices SET paidAmount = paidAmount + ?,
              status = CASE
                WHEN paidAmount + ? >= totalSen THEN 'PAID'
                WHEN paidAmount + ? > 0 THEN 'PARTIAL_PAID'
                ELSE 'SENT'
              END
-           WHERE id = ?`,
+           WHERE id = ? AND orgId = ? AND customerId = ?`,
         )
-        .bind(a.amount, a.amount, a.amount, a.invoiceId),
+        .bind(
+          a.amount,
+          a.amount,
+          a.amount,
+          a.invoiceId,
+          orgId,
+          existing.customerId,
+        ),
     );
   }
   // 3. Net the customer A/R (reverse old, apply new).
@@ -232,14 +376,14 @@ async function buildCustomerPaymentRestate(
       delta > 0
         ? db
             .prepare(
-              `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`,
+              `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ? AND orgId = ?`,
             )
-            .bind(delta, existing.customerId)
+            .bind(delta, existing.customerId, orgId)
         : db
             .prepare(
-              `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ?`,
+              `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ? AND orgId = ?`,
             )
-            .bind(-delta, existing.customerId),
+            .bind(-delta, existing.customerId, orgId),
     );
   }
 
@@ -269,12 +413,12 @@ async function buildCustomerPaymentRestate(
     orgId,
   }));
   const customer = await db
-    .prepare("SELECT code FROM customers WHERE id = ?")
-    .bind(existing.customerId)
+    .prepare("SELECT code FROM customers WHERE id = ? AND orgId = ?")
+    .bind(existing.customerId, orgId)
     .first<{ code: string | null }>();
   const ctl = parseDebtorCode(customer?.code ?? null);
   const controlCode = ctl.ok ? ctl.controlCode : "300-0000";
-  const depositAcct = body.bankAccount || bankAcct(body.method);
+  const depositAcct = body.bankAccount || bankAcct(restateMethod);
   const postLegs =
     newTotal > 0
       ? [
@@ -320,21 +464,19 @@ async function buildCustomerPaymentRestate(
   // 5. Update the receipt row in place (same id + receiptNumber). The document
   //    date is editable too (owner 2026-07-07) — the GL month follows it via
   //    the doc-date family (payment_records.date), no leg rewrite needed.
-  const restateDate = /^\d{4}-\d{2}-\d{2}$/.test(String(body.date ?? "").trim())
-    ? String(body.date).trim()
-    : existing.date;
   statements.push(
     db
       .prepare(
-        `UPDATE payment_records SET amount = ?, method = ?, reference = ?, allocations = ?, date = ? WHERE id = ?`,
+        `UPDATE payment_records SET amount = ?, method = ?, reference = ?, allocations = ?, date = ? WHERE id = ? AND orgId = ?`,
       )
       .bind(
         newTotal,
-        body.method ?? existing.method,
-        body.reference ?? existing.reference,
+        restateMethod,
+        restateReference,
         JSON.stringify(newAllocs),
         restateDate,
         id,
+        orgId,
       ),
   );
 
@@ -449,23 +591,30 @@ app.post("/", async (c) => {
   const idemKey = readIdempotencyKey(c);
   return withIdempotency(c, "payments", idemKey, async () => {
   try {
-    const body = await c.req.json();
-    const { customerId, amount, method, reference, allocations } = body;
-    if (!customerId || amount === undefined || !method) {
+    const orgId = getOrgId(c);
+    const parsedBody = CustomerPaymentCreateRequestSchema.safeParse(
+      await c.req.json(),
+    );
+    if (!parsedBody.success) {
       return c.json(
-        { success: false, error: "customerId, amount, and method are required" },
+        {
+          success: false,
+          error: firstRequestValidationError(parsedBody.error),
+        },
         400,
       );
     }
+    const body = parsedBody.data;
+    const { customerId, amount, method, reference, allocations } = body;
     // Phase 3 follow-up (owner): the receipt deposits into a SPECIFIC
     // bank/cash account picked in the dialog, not a method-derived
     // default. Falls back to bankAcct(method) for older clients.
     let depositAcct = bankAcct(method);
     if (body.bankAccount) {
       const acct = await c.var.DB.prepare(
-        "SELECT specialAccountType FROM chart_of_accounts WHERE code = ?",
+        "SELECT specialAccountType FROM chart_of_accounts WHERE code = ? AND orgId = ?",
       )
-        .bind(String(body.bankAccount))
+        .bind(String(body.bankAccount), orgId)
         .first<{ specialAccountType: string | null }>();
       if (!acct || (acct.specialAccountType !== "SBK" && acct.specialAccountType !== "SCH")) {
         return c.json(
@@ -477,16 +626,15 @@ app.post("/", async (c) => {
     }
 
     const customer = await c.var.DB.prepare(
-      "SELECT id, name, code FROM customers WHERE id = ?",
+      "SELECT id, name, code FROM customers WHERE id = ? AND orgId = ?",
     )
-      .bind(customerId)
+      .bind(customerId, orgId)
       .first<{ id: string; name: string; code: string }>();
     if (!customer) {
       return c.json({ success: false, error: "Customer not found" }, 404);
     }
 
-    const allocInput: Array<{ invoiceId: string; amount: number }> =
-      Array.isArray(allocations) ? allocations : [];
+    const allocInput: Array<{ invoiceId: string; amount: number }> = allocations;
 
     // Look up each invoice to grab the invoiceNo + current state for the
     // per-allocation side-effects (invoice_payments insert + paid bump).
@@ -508,10 +656,11 @@ app.post("/", async (c) => {
       const ids = allocInput.map((a) => a.invoiceId);
       const placeholders = ids.map(() => "?").join(",");
       const invs = await c.var.DB.prepare(
-        `SELECT id, invoiceNo, paidAmount, totalSen, salesOrderId, deliveryOrderId
-           FROM invoices WHERE id IN (${placeholders})`,
+         `SELECT id, invoiceNo, paidAmount, totalSen, salesOrderId, deliveryOrderId
+           FROM invoices
+          WHERE id IN (${placeholders}) AND orgId = ? AND customerId = ?`,
       )
-        .bind(...ids)
+        .bind(...ids, orgId, customerId)
         .all<{
           id: string;
           invoiceNo: string;
@@ -587,10 +736,7 @@ app.post("/", async (c) => {
     // often lands days before it's keyed in) — falls back to today. Drives the
     // receipt number's month, payment_records/invoice_payments dates and the
     // GL month bucket (doc-date family 'payment' reads payment_records.date).
-    const bodyDate = String(body.date ?? "").trim();
-    const date = /^\d{4}-\d{2}-\d{2}$/.test(bodyDate)
-      ? bodyDate
-      : new Date().toISOString().split("T")[0];
+    const date = body.date ?? new Date().toISOString().split("T")[0];
     const receiptNumber = body.receiptNumber || (await issueDocNumber(c.var.DB, {
       bankAccountCode: depositAcct,
       direction: "in",
@@ -600,10 +746,10 @@ app.post("/", async (c) => {
 
     const statements: D1PreparedStatement[] = [
       c.var.DB.prepare(
-        `INSERT INTO payment_records (
+         `INSERT INTO payment_records (
            id, receiptNumber, customerId, customerName, date, amount, method,
-           reference, status, allocations
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           reference, status, allocations, orgId
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
         receiptNumber,
@@ -615,6 +761,7 @@ app.post("/", async (c) => {
         reference || "",
         "RECEIVED",
         JSON.stringify(parsedAllocations),
+        orgId,
       ),
     ];
 
@@ -653,15 +800,18 @@ app.post("/", async (c) => {
       }
       statements.push(
         c.var.DB.prepare(
-          `INSERT INTO invoice_payments (id, invoiceId, date, amountSen, method, reference)
-             VALUES (?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO invoice_payments (
+             id, invoiceId, paymentRecordId, date, amountSen, method, reference, orgId
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           genInvoicePaymentId(),
           alloc.invoiceId,
+          id,
           date,
           alloc.amount,
           method,
           reference || "",
+          orgId,
         ),
       );
       // PR 0 (2026-05-20) — atomic increment. Original code wrote
@@ -688,7 +838,7 @@ app.post("/", async (c) => {
                    ELSE paymentDate
                  END,
                  updated_at = ?
-           WHERE id = ?`,
+           WHERE id = ? AND orgId = ? AND customerId = ?`,
         ).bind(
           alloc.amount,
           alloc.amount,
@@ -697,6 +847,8 @@ app.post("/", async (c) => {
           date,
           now,
           alloc.invoiceId,
+          orgId,
+          customerId,
         ),
       );
     }
@@ -709,8 +861,8 @@ app.post("/", async (c) => {
     if (totalAllocatedSen > 0) {
       statements.push(
         c.var.DB.prepare(
-          `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ?`,
-        ).bind(totalAllocatedSen, customer.id),
+          `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ? AND orgId = ?`,
+        ).bind(totalAllocatedSen, customer.id, orgId),
       );
     }
 
@@ -718,9 +870,9 @@ app.post("/", async (c) => {
       const uniqueSOIds = [...new Set(fullyPaidSOIds)];
       const placeholders = uniqueSOIds.map(() => "?").join(",");
       const soRows = await c.var.DB.prepare(
-        `SELECT id, status FROM sales_orders WHERE id IN (${placeholders})`,
+        `SELECT id, status FROM sales_orders WHERE id IN (${placeholders}) AND orgId = ?`,
       )
-        .bind(...uniqueSOIds)
+        .bind(...uniqueSOIds, orgId)
         .all<{ id: string; status: string }>();
       for (const so of soRows.results ?? []) {
         // 2026-05-26 audit fix — include SHIPPED. Canonical SO status
@@ -735,12 +887,12 @@ app.post("/", async (c) => {
         ) {
           statements.push(
             c.var.DB.prepare(
-              "UPDATE sales_orders SET status = 'INVOICED', updated_at = ? WHERE id = ?",
-            ).bind(now, so.id),
+              "UPDATE sales_orders SET status = 'INVOICED', updated_at = ? WHERE id = ? AND orgId = ?",
+            ).bind(now, so.id, orgId),
             c.var.DB.prepare(
               `INSERT INTO so_status_changes
-                 (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                 (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions, orgId)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ).bind(
               genStatusChangeId(),
               so.id,
@@ -750,6 +902,7 @@ app.post("/", async (c) => {
               now,
               "Invoice fully paid",
               JSON.stringify([`Payment ${receiptNumber} fully paid linked invoice`]),
+              orgId,
             ),
           );
         }
@@ -776,6 +929,7 @@ app.post("/", async (c) => {
         fp.invoiceId,
         fp.deliveryOrderId,
         now,
+        orgId,
       );
       if (closeStmts.length === 0) continue;
       seenClosedSO.add(soKey);
@@ -786,7 +940,6 @@ app.post("/", async (c) => {
     // the ledger unique key + HTTP idempotency wrapper; never blocks the
     // payment.
     try {
-      const orgId = getOrgId(c);
       const actorUserId =
         (c as unknown as { get: (k: string) => string | undefined }).get(
           "userId",
@@ -847,9 +1000,9 @@ app.post("/", async (c) => {
     await c.var.DB.batch(statements);
 
     const created = await c.var.DB.prepare(
-      "SELECT * FROM payment_records WHERE id = ?",
+      "SELECT * FROM payment_records WHERE id = ? AND orgId = ?",
     )
-      .bind(id)
+      .bind(id, orgId)
       .first<PaymentRow>();
     if (!created) {
       return c.json(
@@ -880,13 +1033,63 @@ app.post("/", async (c) => {
 });
 
 // GET /api/payments/:id — single
+// Legacy invoice-payment rows that cannot be safely assigned to a receipt.
+// This is an operator queue, not a fuzzy backfill: nothing is auto-linked.
+app.get("/linkage-audit", async (c) => {
+  const denied = await requirePermission(c, "payments", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const requestedLimit = Number(c.req.query("limit") ?? 100);
+  const limit = Number.isInteger(requestedLimit)
+    ? Math.min(500, Math.max(1, requestedLimit))
+    : 100;
+
+  const [countRow, rows] = await Promise.all([
+    c.var.DB.prepare(
+      `SELECT COUNT(*) AS total FROM invoice_payments
+        WHERE orgId = ? AND paymentRecordId IS NULL`,
+    )
+      .bind(orgId)
+      .first<{ total: number }>(),
+    c.var.DB.prepare(
+      `SELECT ip.id, ip.invoiceId, i.invoiceNo, i.customerId,
+              ip.date, ip.amountSen, ip.method, ip.reference
+         FROM invoice_payments ip
+         JOIN invoices i ON i.id = ip.invoiceId AND i.orgId = ip.orgId
+        WHERE ip.orgId = ? AND ip.paymentRecordId IS NULL
+        ORDER BY ip.date DESC, ip.id DESC
+        LIMIT ?`,
+    )
+      .bind(orgId, limit)
+      .all<{
+        id: string;
+        invoiceId: string;
+        invoiceNo: string;
+        customerId: string;
+        date: string;
+        amountSen: number;
+        method: string | null;
+        reference: string | null;
+      }>(),
+  ]);
+
+  return c.json({
+    success: true,
+    data: rows.results ?? [],
+    total: Number(countRow?.total ?? 0),
+    limit,
+    autoLinked: false,
+  });
+});
+
 app.get("/:id", async (c) => {
   const denied = await requirePermission(c, "payments", "read");
   if (denied) return denied;
+  const orgId = getOrgId(c);
   const row = await c.var.DB.prepare(
-    "SELECT * FROM payment_records WHERE id = ?",
+    "SELECT * FROM payment_records WHERE id = ? AND orgId = ?",
   )
-    .bind(c.req.param("id"))
+    .bind(c.req.param("id"), orgId)
     .first<PaymentRow>();
   if (!row) {
     return c.json({ success: false, error: "Payment not found" }, 404);
@@ -902,10 +1105,11 @@ app.put("/:id", async (c) => {
   if (denied) return denied;
   const id = c.req.param("id");
   try {
+    const orgId = getOrgId(c);
     const existing = await c.var.DB.prepare(
-      "SELECT * FROM payment_records WHERE id = ?",
+      "SELECT * FROM payment_records WHERE id = ? AND orgId = ?",
     )
-      .bind(id)
+      .bind(id, orgId)
       .first<PaymentRow>();
     if (!existing) {
       return c.json({ success: false, error: "Payment not found" }, 404);
@@ -932,8 +1136,8 @@ app.put("/:id", async (c) => {
     const allocs = parseAllocations(existing.allocations);
     const statements: D1PreparedStatement[] = [
       c.var.DB.prepare(
-        "UPDATE payment_records SET status = ? WHERE id = ?",
-      ).bind(body.status, id),
+        "UPDATE payment_records SET status = ? WHERE id = ? AND orgId = ?",
+      ).bind(body.status, id, orgId),
     ];
 
     if (body.status === "BOUNCED" && currentStatus !== "BOUNCED") {
@@ -947,9 +1151,10 @@ app.put("/:id", async (c) => {
       if (invoiceIds.length > 0) {
         const placeholders = invoiceIds.map(() => "?").join(",");
         const invs = await c.var.DB.prepare(
-          `SELECT id, paidAmount, totalSen FROM invoices WHERE id IN (${placeholders})`,
+          `SELECT id, paidAmount, totalSen FROM invoices
+            WHERE id IN (${placeholders}) AND orgId = ? AND customerId = ?`,
         )
-          .bind(...invoiceIds)
+          .bind(...invoiceIds, orgId, existing.customerId)
           .all<{ id: string; paidAmount: number; totalSen: number }>();
         const invMap = new Map(
           (invs.results ?? []).map((i) => [i.id, i]),
@@ -987,8 +1192,16 @@ app.put("/:id", async (c) => {
                        ELSE 'PAID'
                      END,
                      updated_at = ?
-               WHERE id = ?`,
-            ).bind(delta, delta, delta, now, invoiceId),
+               WHERE id = ? AND orgId = ? AND customerId = ?`,
+            ).bind(
+              delta,
+              delta,
+              delta,
+              now,
+              invoiceId,
+              orgId,
+              existing.customerId,
+            ),
           );
         }
       }
@@ -996,14 +1209,13 @@ app.put("/:id", async (c) => {
       if (totalRolledBack > 0) {
         statements.push(
           c.var.DB.prepare(
-            `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`,
-          ).bind(totalRolledBack, existing.customerId),
+            `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ? AND orgId = ?`,
+          ).bind(totalRolledBack, existing.customerId, orgId),
         );
       }
       // GL reversal of the original receipt: DR debtor control · CR bank.
       // Idempotent — only if the receipt posted and not already reversed.
       try {
-        const orgId = getOrgId(c);
         const actorUserId =
           (c as unknown as { get: (k: string) => string | undefined }).get(
             "userId",
@@ -1018,9 +1230,9 @@ app.put("/:id", async (c) => {
         const amtSen = Math.round(Number(existing.amount) || 0);
         if (posted && !reversed && amtSen > 0) {
           const cust = await c.var.DB.prepare(
-            "SELECT code FROM customers WHERE id = ?",
+            "SELECT code FROM customers WHERE id = ? AND orgId = ?",
           )
-            .bind(existing.customerId)
+            .bind(existing.customerId, orgId)
             .first<{ code: string }>();
           const ctl = parseDebtorCode(cust?.code);
           const controlCode = ctl.ok ? ctl.controlCode : "300-0000";
@@ -1088,9 +1300,9 @@ app.put("/:id", async (c) => {
     await c.var.DB.batch(statements);
 
     const updated = await c.var.DB.prepare(
-      "SELECT * FROM payment_records WHERE id = ?",
+      "SELECT * FROM payment_records WHERE id = ? AND orgId = ?",
     )
-      .bind(id)
+      .bind(id, orgId)
       .first<PaymentRow>();
     return c.json({
       success: true,
@@ -1156,25 +1368,23 @@ app.post("/:id/restate", async (c) => {
   const denied = await requirePermission(c, "payments", "update");
   if (denied) return denied;
   const id = c.req.param("id");
-  let body: {
-    method?: string | null;
-    reference?: string | null;
-    bankAccount?: string;
-    allocations?: Allocation[];
-  };
+  let body: CustomerPaymentRestateRequest;
   try {
-    body = await c.req.json();
+    const parsedBody = CustomerPaymentRestateRequestSchema.safeParse(
+      await c.req.json(),
+    );
+    if (!parsedBody.success) {
+      return c.json(
+        {
+          success: false,
+          error: firstRequestValidationError(parsedBody.error),
+        },
+        400,
+      );
+    }
+    body = parsedBody.data;
   } catch {
     return c.json({ success: false, error: "Invalid body" }, 400);
-  }
-  const allocs = (body.allocations ?? []).filter(
-    (a) => a.invoiceId && a.amount > 0,
-  );
-  if (allocs.length === 0) {
-    return c.json(
-      { success: false, error: "A receipt must allocate to at least one invoice" },
-      400,
-    );
   }
   try {
     const orgId = getOrgId(c);
@@ -1197,6 +1407,25 @@ app.post("/:id/restate", async (c) => {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg === "PAYMENT_NOT_FOUND") {
       return c.json({ success: false, error: `No payment found for ${id}` }, 404);
+    }
+    if (msg === "PAYMENT_ALLOCATION_SCOPE_MISMATCH") {
+      return c.json(
+        {
+          success: false,
+          error: "Every invoice must belong to this receipt's customer and organisation",
+        },
+        400,
+      );
+    }
+    if (msg === "PAYMENT_LEGACY_LINK_REQUIRED") {
+      return c.json(
+        {
+          success: false,
+          error:
+            "This legacy receipt has no deterministic invoice-detail linkage. Review /api/payments/linkage-audit before restating it.",
+        },
+        409,
+      );
     }
     return c.json({ success: false, error: msg }, 400);
   }

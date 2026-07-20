@@ -21,9 +21,10 @@ import {
 import type { Invoice } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
-import { InvoiceSchema } from "@/lib/schemas/invoice";
+import { InvoiceSchema, PaymentSchema } from "@/lib/schemas/invoice";
 
 const InvoiceMutationSchema = mutationWithData(InvoiceSchema);
+const PaymentMutationSchema = mutationWithData(PaymentSchema);
 
 type AgingRow = {
   customerName: string;
@@ -447,15 +448,17 @@ export default function InvoicesPage() {
     if (isNaN(amountSen) || amountSen <= 0) return;
 
     setPaymentSubmitting(true);
-    const totalPaid = inv.paidAmount + amountSen;
     try {
-      const data = await fetchJson(`/api/invoices/${inv.id}`, InvoiceMutationSchema, {
-        method: "PUT",
+      const data = await fetchJson("/api/payments", PaymentMutationSchema, {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
         body: {
-          paidAmount: totalPaid,
-          paymentMethod,
-          paymentDate,
-          paymentReference,
+          customerId: inv.customerId,
+          amount: amountSen,
+          method: paymentMethod,
+          date: paymentDate,
+          reference: paymentReference,
+          allocations: [{ invoiceId: inv.id, amount: amountSen }],
         },
       });
       if (data.success) {
@@ -1018,7 +1021,6 @@ export default function InvoicesPage() {
                         <option value="CHEQUE">Cheque</option>
                         <option value="BANK_TRANSFER">Bank Transfer</option>
                         <option value="CREDIT_CARD">Credit Card</option>
-                        <option value="E_WALLET">E-Wallet</option>
                       </select>
                     </div>
                   </div>

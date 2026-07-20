@@ -1612,13 +1612,27 @@ const traceOrder: ToolDefinition = {
       try {
         const pays = await c.var.DB
           .prepare(
-            `SELECT id, invoiceId, date, amountSen, method
-             FROM invoice_payments
-             WHERE invoiceId IN (${placeholders})
-             ORDER BY date DESC
+            `SELECT ip.id, ip.invoiceId, ip.date, ip.amountSen, ip.method
+             FROM invoice_payments ip
+             LEFT JOIN payment_records pr
+               ON pr.id = ip.paymentRecordId AND pr.orgId = ip.orgId
+             LEFT JOIN document_lifecycle dl
+               ON dl.sourceType = 'payment'
+              AND dl.sourceId = ip.paymentRecordId
+              AND dl.orgId = ip.orgId
+             WHERE ip.orgId = ? AND ip.invoiceId IN (${placeholders})
+               AND (
+                 ip.paymentRecordId IS NULL
+                 OR (
+                   pr.id IS NOT NULL
+                   AND COALESCE(pr.status, 'RECEIVED') <> 'BOUNCED'
+                   AND COALESCE(dl.state, 'ACTIVE') = 'ACTIVE'
+                 )
+               )
+             ORDER BY ip.date DESC
              LIMIT 50`,
           )
-          .bind(...invIds)
+          .bind(orgId, ...invIds)
           .all<{
             id: string;
             invoiceId: string | null;

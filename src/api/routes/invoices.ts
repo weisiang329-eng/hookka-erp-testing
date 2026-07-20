@@ -280,6 +280,7 @@ type InvoiceItemRow = {
 type InvoicePaymentRow = {
   id: string;
   invoiceId: string;
+  paymentRecordId: string | null;
   date: string;
   amountSen: number;
   method: string | null;
@@ -318,6 +319,7 @@ function rowToItem(row: InvoiceItemRow) {
 function rowToPayment(row: InvoicePaymentRow) {
   return {
     id: row.id,
+    paymentRecordId: row.paymentRecordId ?? undefined,
     date: row.date,
     amountSen: row.amountSen,
     method: row.method ?? "BANK_TRANSFER",
@@ -409,10 +411,6 @@ function genInvoiceItemId(): string {
   return `invi-${crypto.randomUUID().slice(0, 8)}`;
 }
 
-function genInvoicePaymentId(): string {
-  return `invpay-${crypto.randomUUID().slice(0, 8)}`;
-}
-
 // INV-YYMM-NNN sequential. Bug fix 2026-04-28: previous random hex tail was
 // not monotonic and could collide. Pulls max-existing-suffix+1 in the
 // (year, month) bucket so new invoices always increment.
@@ -466,18 +464,19 @@ export async function previewCascadeSOClosed(
   invoiceId: string,
   deliveryOrderId: string | null,
   nowIso: string,
+  orgId: string,
   changedBy = "System",
 ): Promise<D1PreparedStatement[]> {
   if (!deliveryOrderId) return [];
   const doRow = await db
-    .prepare("SELECT id, salesOrderId FROM delivery_orders WHERE id = ?")
-    .bind(deliveryOrderId)
+    .prepare("SELECT id, salesOrderId FROM delivery_orders WHERE id = ? AND orgId = ?")
+    .bind(deliveryOrderId, orgId)
     .first<{ id: string; salesOrderId: string | null }>();
   if (!doRow || !doRow.salesOrderId) return [];
 
   const soRow = await db
-    .prepare("SELECT id, status FROM sales_orders WHERE id = ?")
-    .bind(doRow.salesOrderId)
+    .prepare("SELECT id, status FROM sales_orders WHERE id = ? AND orgId = ?")
+    .bind(doRow.salesOrderId, orgId)
     .first<{ id: string; status: string }>();
   if (!soRow) return [];
   if (soRow.status === "CLOSED" || soRow.status === "CANCELLED") return [];
@@ -488,22 +487,23 @@ export async function previewCascadeSOClosed(
     .prepare(
       `SELECT COUNT(*) AS n
          FROM invoices i
-         JOIN delivery_orders d ON d.id = i.deliveryOrderId
+         JOIN delivery_orders d ON d.id = i.deliveryOrderId AND d.orgId = ?
         WHERE d.salesOrderId = ?
+          AND i.orgId = ?
           AND i.id != ?
           AND i.status != 'PAID'
           AND i.status != 'CANCELLED'`,
     )
-    .bind(soRow.id, invoiceId)
+    .bind(orgId, soRow.id, orgId, invoiceId)
     .first<{ n: number }>();
   if ((unpaidProbe?.n ?? 0) > 0) return [];
 
   const stmts: D1PreparedStatement[] = [
     db
       .prepare(
-        "UPDATE sales_orders SET status = 'CLOSED', updated_at = ? WHERE id = ?",
+        "UPDATE sales_orders SET status = 'CLOSED', updated_at = ? WHERE id = ? AND orgId = ?",
       )
-      .bind(nowIso, soRow.id),
+      .bind(nowIso, soRow.id, orgId),
   ];
 
   // Probe for so_status_changes — skip audit insert if the table isn't
@@ -520,8 +520,8 @@ export async function previewCascadeSOClosed(
       db
         .prepare(
           `INSERT INTO so_status_changes
-             (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions, orgId)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           genStatusChangeId(),
@@ -532,6 +532,7 @@ export async function previewCascadeSOClosed(
           nowIso,
           "All invoices fully paid",
           JSON.stringify([`Invoice ${invoiceId} PAID closed SO`]),
+          orgId,
         ),
     );
   }
@@ -539,19 +540,42 @@ export async function previewCascadeSOClosed(
   return stmts;
 }
 
-async function fetchInvoiceWithChildren(db: D1Database, id: string) {
+async function fetchInvoiceWithChildren(
+  db: D1Database,
+  id: string,
+  orgId: string,
+) {
   const [inv, itemsRes, paymentsRes] = await Promise.all([
     db
-      .prepare("SELECT * FROM invoices WHERE id = ?")
-      .bind(id)
+      .prepare("SELECT * FROM invoices WHERE id = ? AND orgId = ?")
+      .bind(id, orgId)
       .first<InvoiceRow>(),
     db
-      .prepare("SELECT * FROM invoice_items WHERE invoiceId = ?")
-      .bind(id)
+      .prepare("SELECT * FROM invoice_items WHERE invoiceId = ? AND orgId = ?")
+      .bind(id, orgId)
       .all<InvoiceItemRow>(),
     db
-      .prepare("SELECT * FROM invoice_payments WHERE invoiceId = ?")
-      .bind(id)
+      .prepare(
+        `SELECT ip.*
+           FROM invoice_payments ip
+           LEFT JOIN payment_records pr
+             ON pr.id = ip.paymentRecordId AND pr.orgId = ip.orgId
+           LEFT JOIN document_lifecycle dl
+             ON dl.sourceType = 'payment'
+            AND dl.sourceId = ip.paymentRecordId
+            AND dl.orgId = ip.orgId
+          WHERE ip.invoiceId = ? AND ip.orgId = ?
+            AND (
+              ip.paymentRecordId IS NULL
+              OR (
+                pr.id IS NOT NULL
+                AND COALESCE(pr.status, 'RECEIVED') <> 'BOUNCED'
+                AND COALESCE(dl.state, 'ACTIVE') = 'ACTIVE'
+              )
+            )
+          ORDER BY ip.date, ip.id`,
+      )
+      .bind(id, orgId)
       .all<InvoicePaymentRow>(),
   ]);
   if (!inv) return null;
@@ -1142,6 +1166,7 @@ app.post("/", async (c) => {
   return withIdempotency(c, "invoices", idemKey, async () => {
   try {
     const body = await c.req.json();
+    const orgId = getOrgId(c);
     const deliveryOrderId: string | undefined = body.deliveryOrderId;
     if (!deliveryOrderId) {
       return c.json(
@@ -1163,9 +1188,9 @@ app.post("/", async (c) => {
       `SELECT id, doNo, salesOrderId, companySOId, customerId, customerName,
               customerState, deliveryAddress, contactPerson, contactPhone,
               customerPOId, hubId, hubName, status, delivery_incomplete
-         FROM delivery_orders WHERE id = ?`,
+         FROM delivery_orders WHERE id = ? AND orgId = ?`,
     )
-      .bind(deliveryOrderId)
+      .bind(deliveryOrderId, orgId)
       .first<{
         id: string;
         doNo: string;
@@ -1205,9 +1230,9 @@ app.post("/", async (c) => {
     // the manual POST did not. Block if a NON-CANCELLED invoice already exists
     // for this DO (a CANCELLED one is fine — legitimate re-invoice after a void).
     const existingDoInvoice = await c.var.DB.prepare(
-      "SELECT id, invoiceNo FROM invoices WHERE deliveryOrderId = ? AND status != 'CANCELLED' LIMIT 1",
+      "SELECT id, invoiceNo FROM invoices WHERE deliveryOrderId = ? AND orgId = ? AND status != 'CANCELLED' LIMIT 1",
     )
-      .bind(deliveryOrderId)
+      .bind(deliveryOrderId, orgId)
       .first<{ id: string; invoiceNo: string }>();
     if (existingDoInvoice) {
       return c.json(
@@ -1283,8 +1308,8 @@ app.post("/", async (c) => {
            customerId, customerName, customerState, customerAddress,
            attention, customerPhone, customerPOId, hubId, hubName,
            subtotalSen, taxSen, totalSen, status, invoiceDate, dueDate, paidAmount,
-           paymentDate, paymentMethod, notes, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           paymentDate, paymentMethod, notes, created_at, updated_at, orgId
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
         invoiceNo,
@@ -1313,13 +1338,14 @@ app.post("/", async (c) => {
         body.notes ?? "",
         now,
         now,
+        orgId,
       ),
       ...items.map((item) =>
         c.var.DB.prepare(
           `INSERT INTO invoice_items (
              id, invoiceId, productCode, productName, sizeLabel, fabricCode,
-             quantity, unitPriceSen, discountSen, totalSen
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             quantity, unitPriceSen, discountSen, totalSen, orgId
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           item.id,
           id,
@@ -1332,12 +1358,13 @@ app.post("/", async (c) => {
           // Auto-created invoices (from DO) carry no discount by default.
           0,
           item.totalSen,
+          orgId,
         ),
       ),
       // Flip DO to INVOICED in the same batch so we roll back together.
       c.var.DB.prepare(
-        `UPDATE delivery_orders SET status = 'INVOICED', overdue = 'INVOICED', updated_at = ? WHERE id = ?`,
-      ).bind(now, doRow.id),
+        `UPDATE delivery_orders SET status = 'INVOICED', overdue = 'INVOICED', updated_at = ? WHERE id = ? AND orgId = ?`,
+      ).bind(now, doRow.id, orgId),
       // Phase 2 (2026-06) — closes a long-noted gap: the auto-created
       // invoice (delivery-orders.ts) bumped customers.outstandingSen on
       // create but this manual path never did, so manually-invoiced
@@ -1345,8 +1372,8 @@ app.post("/", async (c) => {
       // void/cancel/delete already reverse the unpaid portion for both
       // paths.
       c.var.DB.prepare(
-        `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`,
-      ).bind(totalSen, doRow.customerId),
+        `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ? AND orgId = ?`,
+      ).bind(totalSen, doRow.customerId, orgId),
     ];
 
     await c.var.DB.batch(statements);
@@ -1361,7 +1388,7 @@ app.post("/", async (c) => {
     // invoice row is now committed, so queueDoCustomerNotice resolves it.
     fireCustomerNoticeBestEffort(c, doRow.id, "DELIVERED");
 
-    const created = await fetchInvoiceWithChildren(c.var.DB, id);
+    const created = await fetchInvoiceWithChildren(c.var.DB, id, getOrgId(c));
     if (!created) {
       return c.json(
         { success: false, error: "Failed to create invoice" },
@@ -1404,13 +1431,14 @@ app.get("/:id", async (c) => {
   const denied = await requirePermission(c, "invoices", "read");
   if (denied) return denied;
   const id = c.req.param("id");
-  const inv = await fetchInvoiceWithChildren(c.var.DB, id);
+  const orgId = getOrgId(c);
+  const inv = await fetchInvoiceWithChildren(c.var.DB, id, orgId);
   if (!inv) {
     return c.json({ success: false, error: "Invoice not found" }, 404);
   }
   // Lock status (payment recorded / status=PAID?) — surfaced to the
   // detail page so it can render a "credit note required" banner.
-  const lockReason = await checkInvoiceLocked(c.var.DB, id);
+  const lockReason = await checkInvoiceLocked(c.var.DB, id, orgId);
   return c.json({ success: true, data: inv, lockReason });
 });
 
@@ -1425,10 +1453,11 @@ app.put("/:id", async (c) => {
   await ensureDiscountColumn(c.var.DB);
   const id = c.req.param("id");
   try {
+    const orgId = getOrgId(c);
     const existing = await c.var.DB.prepare(
-      "SELECT * FROM invoices WHERE id = ?",
+      "SELECT * FROM invoices WHERE id = ? AND orgId = ?",
     )
-      .bind(id)
+      .bind(id, orgId)
       .first<InvoiceRow>();
     if (!existing) {
       return c.json({ success: false, error: "Invoice not found" }, 404);
@@ -1439,8 +1468,23 @@ app.put("/:id", async (c) => {
     // Status transitions to CANCELLED still need to flow through, so the
     // status-change branch below runs unconditionally; the lock only
     // blocks field-level edits.
-    const lockMsg = await checkInvoiceLocked(c.var.DB, id);
+    const lockMsg = await checkInvoiceLocked(c.var.DB, id, orgId);
     const body = await c.req.json();
+    const attemptsDirectPayment =
+      (body.paidAmount !== undefined &&
+        Number(body.paidAmount) !== Number(existing.paidAmount)) ||
+      (["PAID", "PARTIAL_PAID"].includes(String(body.status)) &&
+        body.status !== existing.status);
+    if (attemptsDirectPayment) {
+      return c.json(
+        {
+          success: false,
+          error:
+            "Record invoice receipts through POST /api/payments. Direct paidAmount/status writes bypass receipt, GL, idempotency, and audit contracts.",
+        },
+        409,
+      );
+    }
     const isStatusOnly =
       body.status &&
       !body.dueDate &&
@@ -1478,33 +1522,9 @@ app.put("/:id", async (c) => {
       }
     }
 
-    // --- handle payment delta (old impl pushed one InvoicePayment per delta) ---
-    let nextPaidAmount = existing.paidAmount;
-    let newInvoicePayment: {
-      id: string;
-      date: string;
-      amountSen: number;
-      method: string;
-      reference: string;
-    } | null = null;
-    if (body.paidAmount !== undefined) {
-      const paymentAmountSen = Number(body.paidAmount) - existing.paidAmount;
-      if (paymentAmountSen > 0) {
-        newInvoicePayment = {
-          id: genInvoicePaymentId(),
-          date: body.paymentDate || now.split("T")[0],
-          amountSen: paymentAmountSen,
-          method: body.paymentMethod || "BANK_TRANSFER",
-          reference: body.paymentReference || "",
-        };
-      }
-      nextPaidAmount = Number(body.paidAmount);
-      if (nextPaidAmount >= existing.totalSen) {
-        nextStatus = "PAID";
-      } else if (nextPaidAmount > 0) {
-        nextStatus = "PARTIAL_PAID";
-      }
-    }
+    // paidAmount/status are owned by /api/payments. Keeping one mutation path
+    // prevents a quick-pay UI from updating the invoice without a receipt/GL.
+    const nextPaidAmount = existing.paidAmount;
 
     const merged = {
       paymentDate:
@@ -1524,7 +1544,7 @@ app.put("/:id", async (c) => {
         `UPDATE invoices SET
            status = ?, paidAmount = ?, paymentDate = ?, paymentMethod = ?,
            notes = ?, dueDate = ?, updated_at = ?
-         WHERE id = ?`,
+         WHERE id = ? AND orgId = ?`,
       ).bind(
         nextStatus,
         nextPaidAmount,
@@ -1534,24 +1554,9 @@ app.put("/:id", async (c) => {
         merged.dueDate,
         now,
         id,
+        orgId,
       ),
     ];
-
-    if (newInvoicePayment) {
-      statements.push(
-        c.var.DB.prepare(
-          `INSERT INTO invoice_payments (id, invoiceId, date, amountSen, method, reference)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-        ).bind(
-          newInvoicePayment.id,
-          id,
-          newInvoicePayment.date,
-          newInvoicePayment.amountSen,
-          newInvoicePayment.method,
-          newInvoicePayment.reference,
-        ),
-      );
-    }
 
     // --- items replacement (optional) ---
     if (Array.isArray(body.items)) {
@@ -1853,6 +1858,7 @@ app.put("/:id", async (c) => {
         id,
         existing.deliveryOrderId,
         now,
+        getOrgId(c),
       );
       statements.push(...cascadeStmts);
     }
@@ -2107,7 +2113,7 @@ app.put("/:id", async (c) => {
       recordAuditCreatedMetric(c, { resource: "invoices", action: "void" });
     }
 
-    const updated = await fetchInvoiceWithChildren(c.var.DB, id);
+    const updated = await fetchInvoiceWithChildren(c.var.DB, id, orgId);
 
     return c.json({ success: true, data: updated });
   } catch (err) {

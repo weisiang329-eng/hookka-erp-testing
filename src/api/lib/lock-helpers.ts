@@ -175,6 +175,7 @@ export async function checkDeliveryOrderLocked(
 export async function checkInvoiceLocked(
   db: D1Database,
   invoiceId: string,
+  orgId: string,
 ): Promise<string | null> {
   // Column is `paid_amount` in the schema (see migration 0001 + the
   // invoices.id query at routes/invoices.ts:285). Pre-2026-04-29 this
@@ -187,9 +188,10 @@ export async function checkInvoiceLocked(
   // invoice flow shipped 2026-04-29).
   const inv = await db
     .prepare(
-      `SELECT invoiceNo, status, paidAmount FROM invoices WHERE id = ?`,
+      `SELECT invoiceNo, status, paidAmount FROM invoices
+        WHERE id = ? AND orgId = ?`,
     )
-    .bind(invoiceId)
+    .bind(invoiceId, orgId)
     .first<{ invoiceNo: string; status: string; paidAmount: number }>();
   if (!inv) return null;
   if (inv.status === "PAID" || (inv.paidAmount ?? 0) > 0) {

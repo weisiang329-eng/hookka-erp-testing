@@ -28,7 +28,9 @@ import { parseDebtorCode } from "../../lib/debtor";
 import { issueDocNumber } from "../lib/doc-number-service";
 import {
   CustomerPaymentCreateRequestSchema,
+  CustomerPaymentRestateRequestSchema,
   firstRequestValidationError,
+  type CustomerPaymentRestateRequest,
 } from "../../lib/schemas/payment-request";
 
 // Cash/bank account by payment method (CASH → cash-in-hand, else bank).
@@ -53,7 +55,7 @@ type PaymentRow = {
   allocations: string | null;
 };
 
-type Allocation = { invoiceId: string; invoiceNumber: string; amount: number };
+type Allocation = { invoiceId: string; invoiceNumber?: string; amount: number };
 
 const VALID_TRANSITIONS: Record<string, string[]> = {
   RECEIVED: ["CLEARED", "BOUNCED"],
@@ -77,8 +79,8 @@ async function buildCustomerPaymentLifecycle(
   actorUserId: string | null,
 ): Promise<{ statements: D1PreparedStatement[]; newState: DocState }> {
   const existing = await db
-    .prepare("SELECT * FROM payment_records WHERE id = ?")
-    .bind(id)
+    .prepare("SELECT * FROM payment_records WHERE id = ? AND orgId = ?")
+    .bind(id, orgId)
     .first<PaymentRow>();
   if (!existing) throw new Error("PAYMENT_NOT_FOUND");
   const allocs = parseAllocations(existing.allocations);
@@ -125,9 +127,16 @@ async function buildCustomerPaymentLifecycle(
                        WHEN paidAmount - ? < totalSen THEN 'PARTIAL_PAID'
                        ELSE 'PAID'
                      END
-               WHERE id = ?`,
+               WHERE id = ? AND orgId = ? AND customerId = ?`,
             )
-            .bind(a.amount, a.amount, a.amount, a.invoiceId),
+            .bind(
+              a.amount,
+              a.amount,
+              a.amount,
+              a.invoiceId,
+              orgId,
+              existing.customerId,
+            ),
         );
       } else {
         statements.push(
@@ -140,9 +149,16 @@ async function buildCustomerPaymentLifecycle(
                        WHEN paidAmount + ? > 0 THEN 'PARTIAL_PAID'
                        ELSE status
                      END
-               WHERE id = ?`,
+               WHERE id = ? AND orgId = ? AND customerId = ?`,
             )
-            .bind(a.amount, a.amount, a.amount, a.invoiceId),
+            .bind(
+              a.amount,
+              a.amount,
+              a.amount,
+              a.invoiceId,
+              orgId,
+              existing.customerId,
+            ),
         );
       }
     }
@@ -151,10 +167,10 @@ async function buildCustomerPaymentLifecycle(
         db
           .prepare(
             deactivated
-              ? `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`
-              : `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ?`,
+              ? `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ? AND orgId = ?`
+              : `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ? AND orgId = ?`,
           )
-          .bind(totalAllocSen, existing.customerId),
+          .bind(totalAllocSen, existing.customerId, orgId),
       );
     }
   }
@@ -182,8 +198,8 @@ async function buildCustomerPaymentRestate(
   stamp: number,
 ): Promise<D1PreparedStatement[]> {
   const existing = await db
-    .prepare("SELECT * FROM payment_records WHERE id = ?")
-    .bind(id)
+    .prepare("SELECT * FROM payment_records WHERE id = ? AND orgId = ?")
+    .bind(id, orgId)
     .first<PaymentRow>();
   if (!existing) throw new Error("PAYMENT_NOT_FOUND");
   const oldAllocs = parseAllocations(existing.allocations);
@@ -191,6 +207,52 @@ async function buildCustomerPaymentRestate(
     (a) => a.invoiceId && a.amount > 0,
   );
   const statements: D1PreparedStatement[] = [];
+
+  const newInvoiceIds = [...new Set(newAllocs.map((a) => a.invoiceId))];
+  if (newInvoiceIds.length > 0) {
+    const placeholders = newInvoiceIds.map(() => "?").join(",");
+    const rows = await db.prepare(
+      `SELECT id, paidAmount, totalSen FROM invoices
+        WHERE id IN (${placeholders}) AND orgId = ? AND customerId = ?`,
+    )
+      .bind(...newInvoiceIds, orgId, existing.customerId)
+      .all<{ id: string; paidAmount: number; totalSen: number }>();
+    const invoiceMap = new Map((rows.results ?? []).map((row) => [row.id, row]));
+    const oldByInvoice = new Map<string, number>();
+    for (const allocation of oldAllocs) {
+      oldByInvoice.set(
+        allocation.invoiceId,
+        (oldByInvoice.get(allocation.invoiceId) ?? 0) + allocation.amount,
+      );
+    }
+    for (const allocation of newAllocs) {
+      const invoice = invoiceMap.get(allocation.invoiceId);
+      if (!invoice) throw new Error("PAYMENT_ALLOCATION_SCOPE_MISMATCH");
+      const headroom =
+        invoice.totalSen - invoice.paidAmount +
+        (oldByInvoice.get(allocation.invoiceId) ?? 0);
+      if (allocation.amount > headroom) {
+        throw new Error(`Payment would overpay invoice ${allocation.invoiceId}`);
+      }
+    }
+  }
+
+  if (body.bankAccount) {
+    const account = await db.prepare(
+      "SELECT specialAccountType FROM chart_of_accounts WHERE code = ? AND orgId = ?",
+    )
+      .bind(body.bankAccount, orgId)
+      .first<{ specialAccountType: string | null }>();
+    if (
+      !account ||
+      (account.specialAccountType !== "SBK" &&
+        account.specialAccountType !== "SCH")
+    ) {
+      throw new Error(
+        "bankAccount must be a bank (SBK) or cash (SCH) account",
+      );
+    }
+  }
 
   // 1. Roll the OLD allocations off their invoices.
   let oldTotal = 0;
@@ -206,9 +268,16 @@ async function buildCustomerPaymentRestate(
                WHEN paidAmount - ? < totalSen THEN 'PARTIAL_PAID'
                ELSE 'PAID'
              END
-           WHERE id = ?`,
+           WHERE id = ? AND orgId = ? AND customerId = ?`,
         )
-        .bind(a.amount, a.amount, a.amount, a.invoiceId),
+        .bind(
+          a.amount,
+          a.amount,
+          a.amount,
+          a.invoiceId,
+          orgId,
+          existing.customerId,
+        ),
     );
   }
   // 2. Apply the NEW allocations.
@@ -224,9 +293,16 @@ async function buildCustomerPaymentRestate(
                WHEN paidAmount + ? > 0 THEN 'PARTIAL_PAID'
                ELSE 'SENT'
              END
-           WHERE id = ?`,
+           WHERE id = ? AND orgId = ? AND customerId = ?`,
         )
-        .bind(a.amount, a.amount, a.amount, a.invoiceId),
+        .bind(
+          a.amount,
+          a.amount,
+          a.amount,
+          a.invoiceId,
+          orgId,
+          existing.customerId,
+        ),
     );
   }
   // 3. Net the customer A/R (reverse old, apply new).
@@ -236,14 +312,14 @@ async function buildCustomerPaymentRestate(
       delta > 0
         ? db
             .prepare(
-              `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`,
+              `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ? AND orgId = ?`,
             )
-            .bind(delta, existing.customerId)
+            .bind(delta, existing.customerId, orgId)
         : db
             .prepare(
-              `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ?`,
+              `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ? AND orgId = ?`,
             )
-            .bind(-delta, existing.customerId),
+            .bind(-delta, existing.customerId, orgId),
     );
   }
 
@@ -273,8 +349,8 @@ async function buildCustomerPaymentRestate(
     orgId,
   }));
   const customer = await db
-    .prepare("SELECT code FROM customers WHERE id = ?")
-    .bind(existing.customerId)
+    .prepare("SELECT code FROM customers WHERE id = ? AND orgId = ?")
+    .bind(existing.customerId, orgId)
     .first<{ code: string | null }>();
   const ctl = parseDebtorCode(customer?.code ?? null);
   const controlCode = ctl.ok ? ctl.controlCode : "300-0000";
@@ -330,7 +406,7 @@ async function buildCustomerPaymentRestate(
   statements.push(
     db
       .prepare(
-        `UPDATE payment_records SET amount = ?, method = ?, reference = ?, allocations = ?, date = ? WHERE id = ?`,
+        `UPDATE payment_records SET amount = ?, method = ?, reference = ?, allocations = ?, date = ? WHERE id = ? AND orgId = ?`,
       )
       .bind(
         newTotal,
@@ -339,6 +415,7 @@ async function buildCustomerPaymentRestate(
         JSON.stringify(newAllocs),
         restateDate,
         id,
+        orgId,
       ),
   );
 
@@ -896,10 +973,11 @@ app.post("/", async (c) => {
 app.get("/:id", async (c) => {
   const denied = await requirePermission(c, "payments", "read");
   if (denied) return denied;
+  const orgId = getOrgId(c);
   const row = await c.var.DB.prepare(
-    "SELECT * FROM payment_records WHERE id = ?",
+    "SELECT * FROM payment_records WHERE id = ? AND orgId = ?",
   )
-    .bind(c.req.param("id"))
+    .bind(c.req.param("id"), orgId)
     .first<PaymentRow>();
   if (!row) {
     return c.json({ success: false, error: "Payment not found" }, 404);
@@ -915,10 +993,11 @@ app.put("/:id", async (c) => {
   if (denied) return denied;
   const id = c.req.param("id");
   try {
+    const orgId = getOrgId(c);
     const existing = await c.var.DB.prepare(
-      "SELECT * FROM payment_records WHERE id = ?",
+      "SELECT * FROM payment_records WHERE id = ? AND orgId = ?",
     )
-      .bind(id)
+      .bind(id, orgId)
       .first<PaymentRow>();
     if (!existing) {
       return c.json({ success: false, error: "Payment not found" }, 404);
@@ -945,8 +1024,8 @@ app.put("/:id", async (c) => {
     const allocs = parseAllocations(existing.allocations);
     const statements: D1PreparedStatement[] = [
       c.var.DB.prepare(
-        "UPDATE payment_records SET status = ? WHERE id = ?",
-      ).bind(body.status, id),
+        "UPDATE payment_records SET status = ? WHERE id = ? AND orgId = ?",
+      ).bind(body.status, id, orgId),
     ];
 
     if (body.status === "BOUNCED" && currentStatus !== "BOUNCED") {
@@ -960,9 +1039,10 @@ app.put("/:id", async (c) => {
       if (invoiceIds.length > 0) {
         const placeholders = invoiceIds.map(() => "?").join(",");
         const invs = await c.var.DB.prepare(
-          `SELECT id, paidAmount, totalSen FROM invoices WHERE id IN (${placeholders})`,
+          `SELECT id, paidAmount, totalSen FROM invoices
+            WHERE id IN (${placeholders}) AND orgId = ? AND customerId = ?`,
         )
-          .bind(...invoiceIds)
+          .bind(...invoiceIds, orgId, existing.customerId)
           .all<{ id: string; paidAmount: number; totalSen: number }>();
         const invMap = new Map(
           (invs.results ?? []).map((i) => [i.id, i]),
@@ -1000,8 +1080,16 @@ app.put("/:id", async (c) => {
                        ELSE 'PAID'
                      END,
                      updated_at = ?
-               WHERE id = ?`,
-            ).bind(delta, delta, delta, now, invoiceId),
+               WHERE id = ? AND orgId = ? AND customerId = ?`,
+            ).bind(
+              delta,
+              delta,
+              delta,
+              now,
+              invoiceId,
+              orgId,
+              existing.customerId,
+            ),
           );
         }
       }
@@ -1009,14 +1097,13 @@ app.put("/:id", async (c) => {
       if (totalRolledBack > 0) {
         statements.push(
           c.var.DB.prepare(
-            `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`,
-          ).bind(totalRolledBack, existing.customerId),
+            `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ? AND orgId = ?`,
+          ).bind(totalRolledBack, existing.customerId, orgId),
         );
       }
       // GL reversal of the original receipt: DR debtor control · CR bank.
       // Idempotent — only if the receipt posted and not already reversed.
       try {
-        const orgId = getOrgId(c);
         const actorUserId =
           (c as unknown as { get: (k: string) => string | undefined }).get(
             "userId",
@@ -1031,9 +1118,9 @@ app.put("/:id", async (c) => {
         const amtSen = Math.round(Number(existing.amount) || 0);
         if (posted && !reversed && amtSen > 0) {
           const cust = await c.var.DB.prepare(
-            "SELECT code FROM customers WHERE id = ?",
+            "SELECT code FROM customers WHERE id = ? AND orgId = ?",
           )
-            .bind(existing.customerId)
+            .bind(existing.customerId, orgId)
             .first<{ code: string }>();
           const ctl = parseDebtorCode(cust?.code);
           const controlCode = ctl.ok ? ctl.controlCode : "300-0000";
@@ -1101,9 +1188,9 @@ app.put("/:id", async (c) => {
     await c.var.DB.batch(statements);
 
     const updated = await c.var.DB.prepare(
-      "SELECT * FROM payment_records WHERE id = ?",
+      "SELECT * FROM payment_records WHERE id = ? AND orgId = ?",
     )
-      .bind(id)
+      .bind(id, orgId)
       .first<PaymentRow>();
     return c.json({
       success: true,
@@ -1169,25 +1256,23 @@ app.post("/:id/restate", async (c) => {
   const denied = await requirePermission(c, "payments", "update");
   if (denied) return denied;
   const id = c.req.param("id");
-  let body: {
-    method?: string | null;
-    reference?: string | null;
-    bankAccount?: string;
-    allocations?: Allocation[];
-  };
+  let body: CustomerPaymentRestateRequest;
   try {
-    body = await c.req.json();
+    const parsedBody = CustomerPaymentRestateRequestSchema.safeParse(
+      await c.req.json(),
+    );
+    if (!parsedBody.success) {
+      return c.json(
+        {
+          success: false,
+          error: firstRequestValidationError(parsedBody.error),
+        },
+        400,
+      );
+    }
+    body = parsedBody.data;
   } catch {
     return c.json({ success: false, error: "Invalid body" }, 400);
-  }
-  const allocs = (body.allocations ?? []).filter(
-    (a) => a.invoiceId && a.amount > 0,
-  );
-  if (allocs.length === 0) {
-    return c.json(
-      { success: false, error: "A receipt must allocate to at least one invoice" },
-      400,
-    );
   }
   try {
     const orgId = getOrgId(c);
@@ -1210,6 +1295,15 @@ app.post("/:id/restate", async (c) => {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg === "PAYMENT_NOT_FOUND") {
       return c.json({ success: false, error: `No payment found for ${id}` }, 404);
+    }
+    if (msg === "PAYMENT_ALLOCATION_SCOPE_MISMATCH") {
+      return c.json(
+        {
+          success: false,
+          error: "Every invoice must belong to this receipt's customer and organisation",
+        },
+        400,
+      );
     }
     return c.json({ success: false, error: msg }, 400);
   }

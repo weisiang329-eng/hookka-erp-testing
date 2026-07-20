@@ -57,15 +57,24 @@ selected by globally-looking `id` only; write rows relied on the legacy default 
   duplicate allocations, and customer receipt/allocation total drift.
 - `src/api/routes/payments.ts` scopes customer, account, invoice, SO, payment, invoice-payment,
   status-history, and read-back operations by `orgId`; invoices must also belong to the stated
-  customer.
+  customer. The same contract now covers detail, bounce, void/delete/unvoid, and restate paths;
+  restate revalidates every allocation, available headroom, and the replacement cash/bank
+  account instead of trusting the original receipt.
 - `src/api/routes/supplier-payments.ts` scopes the supplier, account, PI, and PI update by
-  `orgId`; each PI must belong to the stated supplier.
+  `orgId`; each PI must belong to the stated supplier. Knock-off, un-knock, lifecycle,
+  restatement, and absolute truth-recompute repair queries carry the same tenant predicates.
 - `migrations-postgres/0210_payment_balance_guards.sql` adds NOT VALID check constraints so
   historical exceptions do not block rollout, while new concurrent writes cannot push AR/AP
   paid amounts below zero or above the document total.
 
 **Regression evidence:** `tests/payment-contract.test.mjs` pins the accepted frontend shapes,
-total equality, duplicate rejection, tenant/party predicates, and both Postgres constraints.
+total equality, duplicate rejection, create/restate/lifecycle/repair tenant-party predicates,
+and both Postgres constraints.
+
+**Known follow-up (do not guess a backfill):** legacy `invoice_payments` rows do not contain a
+stable `payment_record_id`. Until a separate linkage migration is deployed, historical detail
+rows cannot be safely matched to a receipt from date/reference/amount alone. The linkage and an
+explicit audit queue are required before restatement can synchronize those legacy detail rows.
 
 ---
 

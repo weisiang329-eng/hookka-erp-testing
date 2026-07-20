@@ -9,6 +9,23 @@ const customerAllocationSchema = z.object({
   amount: positiveSen,
 });
 
+function rejectDuplicateCustomerAllocations(
+  allocations: Array<{ invoiceId: string }>,
+  ctx: z.RefinementCtx,
+): void {
+  const seen = new Set<string>();
+  for (const allocation of allocations) {
+    if (seen.has(allocation.invoiceId)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["allocations"],
+        message: `Invoice ${allocation.invoiceId} is allocated more than once`,
+      });
+    }
+    seen.add(allocation.invoiceId);
+  }
+}
+
 export const CustomerPaymentCreateRequestSchema = z
   .object({
     customerId: nonEmptyId,
@@ -21,17 +38,9 @@ export const CustomerPaymentCreateRequestSchema = z
     allocations: z.array(customerAllocationSchema).min(1),
   })
   .superRefine((body, ctx) => {
-    const seen = new Set<string>();
+    rejectDuplicateCustomerAllocations(body.allocations, ctx);
     let allocatedSen = 0;
     for (const allocation of body.allocations) {
-      if (seen.has(allocation.invoiceId)) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["allocations"],
-          message: `Invoice ${allocation.invoiceId} is allocated more than once`,
-        });
-      }
-      seen.add(allocation.invoiceId);
       allocatedSen += allocation.amount;
     }
     if (body.amount !== allocatedSen) {
@@ -41,6 +50,18 @@ export const CustomerPaymentCreateRequestSchema = z
         message: `Payment amount (${body.amount}) must equal allocation total (${allocatedSen})`,
       });
     }
+  });
+
+export const CustomerPaymentRestateRequestSchema = z
+  .object({
+    method: nonEmptyId.optional(),
+    reference: z.string().nullable().optional(),
+    bankAccount: nonEmptyId.optional(),
+    date: z.iso.date().optional(),
+    allocations: z.array(customerAllocationSchema).min(1),
+  })
+  .superRefine((body, ctx) => {
+    rejectDuplicateCustomerAllocations(body.allocations, ctx);
   });
 
 const supplierAllocationSchema = z
@@ -94,6 +115,9 @@ export type CustomerPaymentCreateRequest = z.infer<
 >;
 export type SupplierPaymentCreateRequest = z.infer<
   typeof SupplierPaymentCreateRequestSchema
+>;
+export type CustomerPaymentRestateRequest = z.infer<
+  typeof CustomerPaymentRestateRequestSchema
 >;
 
 export function firstRequestValidationError(error: z.ZodError): string {

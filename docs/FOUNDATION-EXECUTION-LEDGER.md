@@ -49,7 +49,8 @@ documents that say bug fixes go straight to main.
 
 ## Current P1 delivery candidate
 
-- Branch `agent/high-risk-contracts` closes the first auth/admin contract batch.
+- [PR #77](https://github.com/weisiang329-eng/hookka-erp-testing/pull/77)
+  (`agent/high-risk-contracts`) closes the first auth/admin contract batch.
   Admin create/update/reset/invite and public invite acceptance now use shared,
   strict request schemas; every password write uses the canonical strength
   policy in FE and BE.

@@ -39,6 +39,28 @@ jobs:
 
       - run: npm ci
 
+      - name: Validate release identity
+        run: npm run release:check
+        env:
+          HOOKKA_BUILD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HOOKKA_BUILD_BRANCH: ${{ github.head_ref || github.ref_name }}
+
+      # A production version may identify exactly one commit. Catch a missing
+      # version bump before deployment rather than publishing ambiguous code.
+      - name: Guard production version tag
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git fetch --force --tags
+          version=$(node -p "require('./package.json').version")
+          tag="erp-v${version}"
+          if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+            tagged_sha=$(git rev-list -n 1 "$tag")
+            if [ "$tagged_sha" != "$GITHUB_SHA" ]; then
+              echo "::error::$tag already identifies $tagged_sha. Bump package.json before another production deploy."
+              exit 1
+            fi
+          fi
+
       # Lint — non-blocking (P2). ~92 known errors documented in
       # docs/KNOWN-ISSUES.md (most: react-hooks/set-state-in-effect on the
       # idiomatic fetch->setState pattern, pre-React-Query migration). Until
@@ -68,6 +90,8 @@ jobs:
       - run: npm run build:strict
         env:
           VITE_SENTRY_DSN: https://0b81e5f99dab7b31f74514a5bb9f6f62@o4511302465814528.ingest.us.sentry.io/4511302481346560
+          HOOKKA_BUILD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HOOKKA_BUILD_BRANCH: ${{ github.head_ref || github.ref_name }}
 
       # Bundle size budget (P7.2) — temporarily non-blocking after the
       # foundation-rollup merge introduced a Windows-vs-Linux content-hash
@@ -133,7 +157,7 @@ jobs:
               ``,
               `Preview URL: ${url}`,
               ``,
-              `This branch is wired to the same Hyperdrive (→ Supabase Postgres) and KV bindings as production. (D1 binding was retired 2026-04-27; runtime data path is Postgres.) Test changes here before merging — see [docs/CANARY-DEPLOY.md](../blob/main/docs/CANARY-DEPLOY.md) for the review checklist.`,
+              `Preview hostnames are routed to HYPERDRIVE_STAGING (→ the staging Supabase Postgres project); they do not use the production database. (D1 was retired 2026-04-27.) Test changes here before merging — see [docs/CANARY-DEPLOY.md](../blob/main/docs/CANARY-DEPLOY.md) for the review checklist.`,
               ``,
               `Promote to main = merge this PR.`,
             ].join("\n");
@@ -209,3 +233,25 @@ jobs:
         run: node scripts/check-schema-applied.mjs
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  tag-production:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Tag verified production release
+        run: |
+          git fetch --force --tags
+          version=$(node -p "require('./package.json').version")
+          tag="erp-v${version}"
+          if ! git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$tag" "$GITHUB_SHA" -m "Hookka ERP v${version}"
+            git push origin "$tag"
+          fi

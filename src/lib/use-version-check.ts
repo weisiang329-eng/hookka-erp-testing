@@ -1,29 +1,27 @@
 // useVersionCheck — detect when a new deploy lands while the SPA is open.
 //
 // How it works:
-//   1. On mount, remember the "signature" of the current page: the `src`
-//      hash of the first bundled <script> tag inside index.html. Vite
-//      fingerprints every chunk, so any deploy with real changes produces
-//      a new hash.
-//   2. Every `intervalMs`, refetch `/` (forced past the CDN with a
-//      cache-buster) and parse its first script hash.
-//   3. When the hash differs from the one we remembered, call `onNewVersion`
-//      exactly once. The caller surfaces a toast / banner that offers
-//      "Reload now" — we deliberately do NOT reload automatically because
-//      the user might be mid-form.
-//
-// Why script hash instead of a dedicated /api/version endpoint? No new
-// route to deploy, works with any static-host CDN, and is self-calibrating:
-// the hash is only different when the build is actually different. Vite
-// guarantees stable hashing across identical builds.
+//   1. The running bundle knows its deterministic SemVer/channel/SHA identity.
+//   2. Every `intervalMs`, refetch `/version.json` past the CDN.
+//   3. When the release ID differs, call `onNewVersion` exactly once. The
+//      dashboard offers a reload rather than discarding an in-progress form.
+//   4. During partial CDN propagation, fall back to comparing the first Vite
+//      script hash in index.html so older deployments still self-update.
 
 import { useEffect, useRef } from "react";
+import { RELEASE } from "./release";
 
 function extractFirstScriptHash(html: string): string | null {
   // Matches <script src="/assets/index-<hash>.js"> — both the entry and
   // any preloaded module (whichever comes first).
   const m = html.match(/<script[^>]+src="[^"]*\/assets\/([^"]+)"/);
   return m ? m[1] : null;
+}
+
+export function parseReleaseId(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const releaseId = (value as { releaseId?: unknown }).releaseId;
+  return typeof releaseId === "string" && releaseId.length > 0 ? releaseId : null;
 }
 
 export function useVersionCheck({
@@ -53,7 +51,32 @@ export function useVersionCheck({
       if (stopped || firedRef.current) return;
       if (document.hidden) return;
       try {
-        // Cache-buster query so we always hit origin through CDN revalidation.
+        // The emitted manifest carries SemVer + channel + exact commit SHA.
+        // It is easier to correlate with deploys than an opaque chunk hash.
+        const manifestRes = await fetch(
+          `/version.json?v=${encodeURIComponent(RELEASE.releaseId)}`,
+          {
+            cache: "no-store",
+            credentials: "same-origin",
+          },
+        );
+        if (manifestRes.ok) {
+          let currentReleaseId: string | null = null;
+          try {
+            currentReleaseId = parseReleaseId(await manifestRes.json());
+          } catch {
+            // Cloudflare's SPA fallback can briefly return index.html with a
+            // 200 for a not-yet-propagated manifest. Use the asset fallback.
+          }
+          if (currentReleaseId && currentReleaseId !== RELEASE.releaseId) {
+            firedRef.current = true;
+            onNewVersion();
+          }
+          if (currentReleaseId) return;
+        }
+
+        // Compatibility fallback for a partially propagated deploy where the
+        // new manifest is temporarily unavailable but index.html is live.
         const res = await fetch(`/?v=${Date.now()}`, {
           cache: "no-store",
           credentials: "same-origin",

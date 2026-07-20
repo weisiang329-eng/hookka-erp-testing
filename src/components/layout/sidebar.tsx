@@ -368,25 +368,6 @@ export function Sidebar({
     } catch { /* ignore */ }
   }, []);
 
-  // Warm the Dashboard chunk during the browser's idle time — it's the
-  // default landing route and the most-revisited page, so prefetching it
-  // off the critical path makes the very first navigation back to it
-  // instant. requestIdleCallback yields to anything more urgent first.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const ric = (
-      window as unknown as {
-        requestIdleCallback?: (cb: () => void) => number;
-      }
-    ).requestIdleCallback;
-    if (ric) {
-      ric(() => prefetchRoute("/dashboard"));
-    } else {
-      const t = window.setTimeout(() => prefetchRoute("/dashboard"), 1500);
-      return () => window.clearTimeout(t);
-    }
-  }, []);
-
   const toggleGroup = (label: string) => {
     setCollapsedGroups((prev) => {
       const next = new Set(prev);
@@ -726,7 +707,9 @@ export function Sidebar({
                   return (
                     <div key={item.name}>
                       <button
-                        onMouseEnter={() => prefetchRoute(item.href)}
+                        onMouseEnter={() => void prefetchRoute(item.href)}
+                        onFocus={() => void prefetchRoute(item.href)}
+                        onPointerDown={() => void prefetchRoute(item.href)}
                         onClick={() => {
                           // Icons-only rail (auto-collapsed on tablet/phone):
                           // children NEVER render while collapsed and there's
@@ -772,7 +755,9 @@ export function Sidebar({
                               <Link
                                 key={child.href}
                                 to={child.href}
-                                onMouseEnter={() => prefetchRoute(child.href)}
+                                onMouseEnter={() => void prefetchRoute(child.href)}
+                                onFocus={() => void prefetchRoute(child.href)}
+                                onPointerDown={() => void prefetchRoute(child.href)}
                                 className={cn(
                                   "group relative flex items-center gap-3 rounded-md text-[13px] font-medium transition-colors",
                                   "h-8 px-3",
@@ -796,7 +781,9 @@ export function Sidebar({
                   <Link
                     key={item.href}
                     to={item.href}
-                    onMouseEnter={() => prefetchRoute(item.href)}
+                    onMouseEnter={() => void prefetchRoute(item.href)}
+                    onFocus={() => void prefetchRoute(item.href)}
+                    onPointerDown={() => void prefetchRoute(item.href)}
                     className={cn(
                       "group relative flex items-center gap-3 rounded-md text-sm font-medium transition-colors",
                       "h-9 px-3",

@@ -79,11 +79,16 @@ test("Mail Center FE has the Auto-sent folder backed by the outbox panel", () =>
     /\/api\/mail-center\/outbox/,
     "OutboxPanel must fetch the outbox endpoint",
   );
-  // The reader renders the saved email in a SANDBOXED iframe (these are our own
-  // templates, but sandbox keeps it safe regardless).
+  // The reader renders the saved email in a sandboxed iframe. Links may open,
+  // but message scripts must never execute.
   assert.match(
     PAGE,
-    /sandbox=""/,
-    "the body must render in a sandboxed iframe",
+    /sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"/,
+    "the body must render in the approved sandbox",
+  );
+  assert.doesNotMatch(
+    PAGE,
+    /sandbox="[^"]*allow-scripts[^"]*"/,
+    "the body sandbox must never allow message scripts",
   );
 });

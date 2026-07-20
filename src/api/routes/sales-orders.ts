@@ -1172,6 +1172,138 @@ app.get("/", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/sales-orders/backfill-hub-by-state?execute=1
+// One-shot data fix (2026-07-19). The SO-create blind default stamped every
+// un-matched multi-hub order with the customer's default hub ("Houzs KL") even
+// though the OCR set the correct customerState — so Penang/SBH/SRW orders (and
+// their stickers/DOs) followed the wrong branch. The state IS correct, so we can
+// re-derive the right hub: for each multi-hub-customer SO whose customerState
+// maps to EXACTLY ONE of that customer's hubs, and whose current hub differs,
+// correct sales_orders.hubId/hubName. DRY-RUN by default; ?execute=1 writes.
+// Shipped orders (goods already left the hub) are NEVER auto-changed — they are
+// reported separately for manual review (mirrors the PATCH /:id/hub lock).
+// After executing, run POST /api/fg-units/backfill-hub to push the corrected hub
+// onto in-stock FG stickers, then reprint.
+// (defined BEFORE /:id so the route matches first)
+// ---------------------------------------------------------------------------
+app.post("/backfill-hub-by-state", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "edit");
+  if (denied) return denied;
+  const execute = c.req.query("execute") === "1";
+  const orgId = getOrgId(c);
+
+  // Candidates: multi-hub-customer SOs whose state maps to exactly one hub that
+  // is NOT the current hub. All scoping is in SQL so the payload stays small.
+  const cands =
+    (
+      await c.var.DB.prepare(
+        `SELECT so.id AS "soId", so.companySOId AS "companySOId",
+                so.customerName AS "customerName", so.customerState AS "customerState",
+                so.hubId AS "curHubId", so.hubName AS "curHubName",
+                h.id AS "newHubId", h.shortName AS "newHubName"
+           FROM sales_orders so
+           JOIN delivery_hubs h
+             ON h.customerId = so.customerId
+            AND LOWER(h.state) = LOWER(so.customerState)
+          WHERE so.orgId = ?
+            AND COALESCE(so.customerState, '') <> ''
+            AND (SELECT COUNT(*) FROM delivery_hubs d1 WHERE d1.customerId = so.customerId) >= 2
+            AND (SELECT COUNT(*) FROM delivery_hubs d2
+                  WHERE d2.customerId = so.customerId
+                    AND LOWER(d2.state) = LOWER(so.customerState)) = 1
+            AND (so.hubId IS NULL OR so.hubId <> h.id)`,
+      )
+        .bind(orgId)
+        .all<{
+          soId: string;
+          companySOId: string | null;
+          customerName: string | null;
+          customerState: string | null;
+          curHubId: string | null;
+          curHubName: string | null;
+          newHubId: string;
+          newHubName: string;
+        }>()
+    ).results ?? [];
+
+  // Shipment guard: never auto-change a hub once goods have left (same SHIPPED
+  // set as PATCH /:id/hub). Split candidates into changeable vs manual-review.
+  const soIds = cands.map((r) => r.soId);
+  const shippedSet = new Set<string>();
+  for (let i = 0; i < soIds.length; i += 100) {
+    const chunk = soIds.slice(i, i + 100);
+    if (chunk.length === 0) break;
+    const ph = chunk.map(() => "?").join(",");
+    const shipped =
+      (
+        await c.var.DB.prepare(
+          `SELECT DISTINCT d.salesOrderId AS "soId"
+             FROM delivery_orders d
+            WHERE d.status IN ('LOADED','IN_TRANSIT','DELIVERED','INVOICED')
+              AND d.salesOrderId IN (${ph})`,
+        )
+          .bind(...chunk)
+          .all<{ soId: string | null }>()
+      ).results ?? [];
+    for (const s of shipped) if (s.soId) shippedSet.add(s.soId);
+  }
+
+  const changeable = cands.filter((r) => !shippedSet.has(r.soId));
+  const shippedManual = cands.filter((r) => shippedSet.has(r.soId));
+
+  // old -> new breakdown for a quick sanity-check before executing.
+  const moves: Record<string, number> = {};
+  for (const r of changeable) {
+    const key = `${r.curHubName || "(unset)"} -> ${r.newHubName} [${r.customerState}]`;
+    moves[key] = (moves[key] ?? 0) + 1;
+  }
+
+  if (execute && changeable.length > 0) {
+    const now = new Date().toISOString();
+    const stmts = changeable.map((r) =>
+      c.var.DB
+        .prepare(
+          "UPDATE sales_orders SET hubId = ?, hubName = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(r.newHubId, r.newHubName, now, r.soId),
+    );
+    for (let i = 0; i < stmts.length; i += 50) {
+      await c.var.DB.batch(stmts.slice(i, i + 50));
+    }
+  }
+
+  return c.json({
+    success: true,
+    mode: execute ? "executed" : "dry-run",
+    matched: cands.length,
+    wouldUpdate: changeable.length,
+    skippedShipped: shippedManual.length,
+    moves,
+    // Full per-SO before/after so a dry-run can be saved as a restore point.
+    changeable: changeable.map((r) => ({
+      soId: r.soId,
+      companySOId: r.companySOId,
+      customer: r.customerName,
+      state: r.customerState,
+      from: r.curHubName || "(unset)",
+      to: r.newHubName,
+    })),
+    // Shipped SOs need a manual decision (goods already dispatched to the wrong
+    // branch record) — listed, never auto-touched.
+    shippedNeedsReview: shippedManual.map((r) => ({
+      soId: r.soId,
+      companySOId: r.companySOId,
+      from: r.curHubName || "(unset)",
+      to: r.newHubName,
+    })),
+    next:
+      execute && changeable.length > 0
+        ? "Now POST /api/fg-units/backfill-hub?execute=1 to push the corrected hub onto in-stock FG stickers, then reprint."
+        : "Dry-run only. Re-run with ?execute=1 after reviewing the list.",
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/sales-orders/status-changes — full audit log
 // (defined BEFORE /:id so the route matches first)
 // ---------------------------------------------------------------------------
@@ -2073,11 +2205,37 @@ app.post("/", async (c) => {
         .first<{ id: string; state: string | null; shortName: string }>();
     }
     if (!chosenHub) {
-      chosenHub = await c.var.DB.prepare(
-        "SELECT id, state, shortName FROM delivery_hubs WHERE customerId = ? ORDER BY isDefault DESC LIMIT 1",
-      )
-        .bind(customer.id)
-        .first<{ id: string; state: string | null; shortName: string }>();
+      // The hub must FOLLOW the warehouse the customer asked for — never a blind
+      // guess. Previously an unmatched deliveryHub fell straight through to the
+      // customer's isDefault hub ("Houzs KL"), so Penang/SBH/SRW orders were all
+      // stamped KL even though the OCR set the correct state (owner 2026-07-19:
+      // "state 明明是對的...應該是跟著 OCR 裏面的 warehouse"). Resolve in order:
+      //   1) the order's STATE → the customer's hub in that state. customerState
+      //      is OCR'd independently of the hub and is correct here, and every
+      //      delivery_hub carries its state, so an exactly-one state match is the
+      //      warehouse the customer named. (case-insensitive; skip if 0 or 2+.)
+      //   2) else, only when the customer has EXACTLY ONE hub (nothing to guess).
+      //   3) else leave the hub UNSET — never stamp a wrong branch.
+      const soState =
+        typeof body.customerState === "string" ? body.customerState.trim() : "";
+      if (soState) {
+        const stateHubs = await c.var.DB.prepare(
+          "SELECT id, state, shortName FROM delivery_hubs WHERE customerId = ? AND LOWER(state) = LOWER(?) LIMIT 2",
+        )
+          .bind(customer.id, soState)
+          .all<{ id: string; state: string | null; shortName: string }>();
+        const sh = stateHubs.results ?? [];
+        if (sh.length === 1) chosenHub = sh[0];
+      }
+      if (!chosenHub) {
+        const hubs = await c.var.DB.prepare(
+          "SELECT id, state, shortName FROM delivery_hubs WHERE customerId = ? ORDER BY isDefault DESC LIMIT 2",
+        )
+          .bind(customer.id)
+          .all<{ id: string; state: string | null; shortName: string }>();
+        const hubRows = hubs.results ?? [];
+        if (hubRows.length === 1) chosenHub = hubRows[0];
+      }
     }
 
     const rawItems: Array<Record<string, unknown>> = Array.isArray(body.items)

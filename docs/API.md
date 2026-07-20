@@ -1,5 +1,13 @@
 # API
 
+> **Archived legacy reference — do not implement from this document.**
+> This page describes the retired in-memory/Node API and is retained only for
+> historical context. The live ERP runs Hono in the Cloudflare worker and uses
+> Supabase Postgres through Hyperdrive, with authentication and authorization
+> applied centrally. Until the generated API inventory lands, treat
+> `src/api/worker.ts`, its mounted route modules, shared middleware, and route
+> contract tests as authoritative.
+
 Reference for the Hono API that backs the frontend. Every route file lives in
 `src/api/routes/` and is mounted by `src/api/index.ts`. All routes share the
 same envelope, error format, and data-source (in-memory `mock-data.ts`).

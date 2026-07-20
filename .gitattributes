@@ -1,0 +1,3 @@
+# accounting.ts is a legacy CRLF file. Preserve its existing bytes until the
+# route is split, while still forcing text diffs now that its NUL byte is gone.
+src/api/routes/accounting.ts -text diff whitespace=cr-at-eol

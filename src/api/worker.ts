@@ -28,6 +28,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { isPreviewHostname, runtimeEnvironment } from "./lib/deployment-environment";
+import { RELEASE } from "../lib/release";
 
 export type Env = {
   Bindings: {
@@ -328,6 +329,7 @@ app.get("/api/health", (c) =>
     env: runtimeEnvironment(c.req.url, c.env.ENVIRONMENT),
     isPreview: isPreviewHostname(c.req.url),
     host: new URL(c.req.url).hostname,
+    release: RELEASE,
     ts: Date.now(),
   }),
 );
@@ -342,12 +344,24 @@ app.get("/api/pg-ping", async (c) => {
     if (!url) throw new Error("No database connection string");
     const sql = getSql(url);
     const t0 = Date.now();
-    const rows = (await sql`SELECT NOW() AS now, (SELECT count(*)::int FROM pg_tables WHERE schemaname = 'public') AS table_count`) as unknown as { now: unknown; tableCount: number }[];
+    const rows = (await sql`
+      SELECT NOW() AS now,
+             (SELECT count(*)::int FROM pg_tables WHERE schemaname = 'public') AS table_count,
+             (SELECT MAX(filename) FROM _migrations) AS latest_migration
+    `) as unknown as { now: unknown; tableCount: number; latestMigration: string | null }[];
     const ms = Date.now() - t0;
+    const appliedSchemaVersion = rows[0]?.latestMigration?.match(/^(\d{4})_/)?.[1] ?? "untracked";
     return c.json({
       ok: true,
       elapsedMs: ms,
       via: c.env.HYPERDRIVE ? "hyperdrive" : "direct",
+      release: RELEASE,
+      schema: {
+        expected: RELEASE.schemaVersion,
+        applied: appliedSchemaVersion,
+        latestMigration: rows[0]?.latestMigration ?? null,
+        inSync: appliedSchemaVersion === RELEASE.schemaVersion,
+      },
       ...rows[0],
     });
   } catch (e) {

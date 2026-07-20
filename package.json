@@ -1,7 +1,7 @@
 {
   "name": "hookka-erp-testing",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,6 +10,7 @@
     "bugs:index": "node scripts/bug-history.mjs",
     "bugs:check": "node scripts/bug-history.mjs --check",
     "bugs:search": "node scripts/bug-history.mjs --search",
+    "release:check": "node scripts/check-release.mjs",
     "build": "vite build",
     "build:strict": "npm run typecheck:app && npm run build",
     "typecheck": "tsc -b",

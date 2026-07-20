@@ -9,6 +9,7 @@ import { ToastProvider, useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { fetchVariantsConfig } from "@/lib/kv-config";
 import { useVersionCheck } from "@/lib/use-version-check";
+import { getCurrentUser } from "@/lib/auth";
 import { DASHBOARD_ROUTE_ELEMENTS } from "@/dashboard-routes";
 import { FloatingChatButton } from "@/components/assistant/FloatingChatButton";
 import { MobileBottomNav } from "@/components/layout/mobile-bottom-nav";
@@ -48,6 +49,7 @@ const SIDEBAR_COLLAPSED_KEY = "hookka:sidebar:collapsed";
 
 export default function DashboardLayout() {
   const { pathname } = useLocation();
+  const currentRole = getCurrentUser()?.role;
 
   // Sidebar collapse state lives here (not inside <Sidebar/>) so the main
   // content's left padding can stay synced with the sidebar's actual width.
@@ -96,13 +98,13 @@ export default function DashboardLayout() {
     }
   }, [isNarrowOrPortrait]);
 
-  // Warm the main page chunks while the browser is idle, so the FIRST click on
-  // each page is instant instead of downloading its chunk right then (owner
-  // 2026-07-16: "開很多頁面還是卡，等過了第一次才順"). One chunk at a time, idle
-  // only, skipped on a weak/metered link — see prefetch-routes.ts.
+  // Warm only the next likely route chunks for this page/role. The queue is
+  // cancelled on navigation and skipped for scan terminals, coarse pointers,
+  // weak/metered links and active input. Sidebar hover/focus handles explicit
+  // intent for every other route.
   useEffect(() => {
-    prefetchRoutesWhenIdle();
-  }, []);
+    return prefetchRoutesWhenIdle({ pathname, role: currentRole });
+  }, [pathname, currentRole]);
 
   // Defer heavy startup work so first paint / page navigation stays responsive.
   // NOTE: We intentionally avoid static-importing `@/pages/bom` here because

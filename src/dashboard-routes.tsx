@@ -12,6 +12,7 @@ import { ErrorBoundary } from './components/ui/error-boundary'
 import RequirePermission from './components/auth/RequirePermission'
 import RequireRole from './components/auth/RequireRole'
 import { PageSkeleton } from './components/ui/skeleton'
+import { routeKeyForPrefetch } from './lib/prefetch-policy'
 
 // ── Lazy-loaded pages ─────────────────────────────────────────────────────
 
@@ -601,14 +602,15 @@ const prefetched = new Set<string>()
  * unknown paths (no-op). Errors are swallowed — a failed prefetch just means
  * the chunk loads normally on click.
  */
-export function prefetchRoute(href: string): void {
-  if (prefetched.has(href)) return
-  const loader = ROUTE_CHUNK_LOADERS[href]
-  if (!loader) return
-  prefetched.add(href)
-  loader().catch(() => {
+export function prefetchRoute(href: string): Promise<void> {
+  const routeKey = routeKeyForPrefetch(href)
+  if (prefetched.has(routeKey)) return Promise.resolve()
+  const loader = ROUTE_CHUNK_LOADERS[routeKey]
+  if (!loader) return Promise.resolve()
+  prefetched.add(routeKey)
+  return loader().then(() => undefined).catch(() => {
     // Network error / chunk 404 — drop the dedupe mark so a later
     // navigation can retry via lazy()'s own import.
-    prefetched.delete(href)
+    prefetched.delete(routeKey)
   })
 }

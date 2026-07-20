@@ -51,7 +51,8 @@ documents that say bug fixes go straight to main.
 
 ## Current performance delivery candidate
 
-- Branch `agent/page-loading-budgets` removes page-specific charts and worker
+- [PR #79](https://github.com/weisiang329-eng/hookka-erp-testing/pull/79)
+  (`agent/page-loading-budgets`) removes page-specific charts, PDF, and worker
   UI from the global boot dependency graph.
 - The emitted production build now enforces separate boot, page, worker/mobile,
   core-list, and deferred PDF/Excel/chart gzip budgets in blocking PR CI.
@@ -60,7 +61,7 @@ documents that say bug fixes go straight to main.
   the entry. The corrected static boot graph is now 152.4 KiB gzip across
   seven requests, without deleting page functionality. Regression:
   `tests/performance-budget.test.mjs`; BugHistory `BUG-2026-07-21-001`.
-- PR has not yet been opened. Production remains unchanged.
+- PR is open against staging. Production remains unchanged.
 
 ## Last complete local evidence
 

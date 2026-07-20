@@ -1,7 +1,8 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Look up plywood unit price from raw_materials catalog + recent PO line items.
 import postgres from "postgres";
 const sql = postgres(
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",
+  requiredDatabaseUrl("PROD_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 try {

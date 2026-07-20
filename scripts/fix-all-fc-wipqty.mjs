@@ -1,7 +1,8 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Reset all merged FC JC wipQty to set-count = anchor PO's quantity.
 // BF: each PO is one set (qty=1 typically). SOFA: line qty per PO.
 import postgres from "postgres";
-const sql = postgres("postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres", { ssl: "require", max: 1, idle_timeout: 5 });
+const sql = postgres(requiredDatabaseUrl("STAGING_DATABASE_URL"), { ssl: "require", max: 1, idle_timeout: 5 });
 try {
   console.log("=== Before: distinct FC JC wipQty values ===");
   const before = await sql`

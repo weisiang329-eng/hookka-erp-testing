@@ -9,7 +9,11 @@ test('staging deploy applies only the reviewed migration allow-list', () => {
   assert.match(workflow, /node-version: 22/)
   assert.match(workflow, /github\.ref == 'refs\/heads\/staging'/)
   assert.match(workflow, /secrets\.STAGING_DATABASE_URL/)
-  assert.match(workflow, /vars\.STAGING_SUPABASE_PROJECT_REF/)
+  assert.equal(
+    (workflow.match(/EXPECTED_SUPABASE_PROJECT_REF: zaxygxwadidiqcphibma/g) ?? []).length,
+    3,
+  )
+  assert.doesNotMatch(workflow, /vars\.STAGING_SUPABASE_PROJECT_REF/)
   for (const migration of [
     '0208_api_idempotency.sql',
     '0209_invoice_active_do_unique.sql',

@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Final fix for 5539-1B and 5539-2B prices (Carress + 2990).
 // Wei Siang clarification 2026-05-09:
 //   1B = 5531-1R (= our 5531-1A) actual customer price + RM 150
@@ -51,7 +52,7 @@ async function authedJson(session, method, path, body) {
 }
 
 const sql = postgres(
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",
+  requiredDatabaseUrl("PROD_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

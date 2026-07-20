@@ -1,5 +1,6 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 import postgres from "postgres";
-const sql = postgres("postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres", { ssl: "require", max: 1, idle_timeout: 5 });
+const sql = postgres(requiredDatabaseUrl("PROD_DATABASE_URL"), { ssl: "require", max: 1, idle_timeout: 5 });
 try {
   const c = await sql`SELECT column_name, data_type, column_default FROM information_schema.columns WHERE table_name = 'worker_pins'`;
   for (const x of c) console.log(`${x.column_name.padEnd(15)} type=${x.data_type}  default=${x.column_default ?? "—"}`);

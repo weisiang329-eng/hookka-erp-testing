@@ -15,9 +15,8 @@ name: Sync prod → staging
 #   * STAGING_DATABASE_URL — session pooler URL for staging Supabase
 #   * STAGING_WORKER_PIN_HASH — SHA-256 hash of the private staging test PIN
 #
-# Repository variables required (public Supabase project identifiers):
-#   * PROD_SUPABASE_PROJECT_REF
-#   * STAGING_SUPABASE_PROJECT_REF
+# Public Supabase project identifiers are code-reviewed below. They are kept
+# independent from the secret URLs so a swapped credential fails closed.
 #
 # Both URLs MUST use the session pooler (port 5432 on
 # aws-1-<region>.pooler.supabase.com) because GitHub Actions runners are
@@ -77,8 +76,8 @@ jobs:
         env:
           PROD_DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
           STAGING_DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
-          PROD_SUPABASE_PROJECT_REF: ${{ vars.PROD_SUPABASE_PROJECT_REF }}
-          STAGING_SUPABASE_PROJECT_REF: ${{ vars.STAGING_SUPABASE_PROJECT_REF }}
+          PROD_SUPABASE_PROJECT_REF: vpwdqtsxexpiqxzweivd
+          STAGING_SUPABASE_PROJECT_REF: zaxygxwadidiqcphibma
         run: node scripts/validate-db-sync-targets.mjs
 
       # Check both credentials up front. The previous workflow spent two

@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // ============================================================================
 // clone-prod-to-staging.mjs
 //
@@ -28,8 +29,8 @@
 // ============================================================================
 import postgres from "postgres";
 
-const PROD_URL = "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
-const STAGING_URL = "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
+const PROD_URL = requiredDatabaseUrl("PROD_DATABASE_URL");
+const STAGING_URL = requiredDatabaseUrl("STAGING_DATABASE_URL");
 
 const pgOpts = { ssl: "require", max: 1, idle_timeout: 5, connect_timeout: 15 };
 const BATCH_SIZE = 500;

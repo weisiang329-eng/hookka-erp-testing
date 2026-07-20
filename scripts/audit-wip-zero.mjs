@@ -1,9 +1,10 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Follow-up: 239/242 wip_items have stock_qty=0. Are these all "completed/archived"
 // or is the qty just not getting updated? Break down by type/status, show the 3 positives.
 import postgres from "postgres";
 
 const url =
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
+  requiredDatabaseUrl("STAGING_DATABASE_URL");
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

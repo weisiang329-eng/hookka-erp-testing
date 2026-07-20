@@ -1,10 +1,11 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Read-only audit: for every negative wip_items row, find the upstream
 // WAITING job_cards that need to be marked COMPLETED to resolve the stub.
 // No mutations. Outputs the backfill plan for review.
 import postgres from "postgres";
 
 const url =
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+  requiredDatabaseUrl("PROD_DATABASE_URL");
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

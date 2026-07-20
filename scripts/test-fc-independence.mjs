@@ -1,9 +1,10 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Set FC#1 completedDate=2026-05-05, FC#2 completedDate=2026-05-10. Then
 // confirm each Line's SEW row sees its own group's FC date.
 import postgres from "postgres";
 
 const sql = postgres(
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres",
+  requiredDatabaseUrl("STAGING_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

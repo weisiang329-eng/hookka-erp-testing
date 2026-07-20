@@ -1,6 +1,7 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 import postgres from "postgres";
-const stagingUrl = "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
-const prodUrl = "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+const stagingUrl = requiredDatabaseUrl("STAGING_DATABASE_URL");
+const prodUrl = requiredDatabaseUrl("PROD_DATABASE_URL");
 
 async function dump(label, url) {
   const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });

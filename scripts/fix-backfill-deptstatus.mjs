@@ -1,5 +1,6 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 import postgres from "postgres";
-const sql = postgres("postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres", { ssl: "require", max: 1, idle_timeout: 5 });
+const sql = postgres(requiredDatabaseUrl("STAGING_DATABASE_URL"), { ssl: "require", max: 1, idle_timeout: 5 });
 try {
   // Backfill rows for merged FC have dept_status='PENDING' + status='PENDING'
   // but stock_qty > 0 (positive). For positive FC stock, dept_status should

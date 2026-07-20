@@ -1,5 +1,6 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 import postgres from "postgres";
-const sql = postgres("postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres", { ssl: "require", max: 1, idle_timeout: 5 });
+const sql = postgres(requiredDatabaseUrl("STAGING_DATABASE_URL"), { ssl: "require", max: 1, idle_timeout: 5 });
 try {
   const r = await sql`SELECT id, code, stock_qty, dept_status, status FROM wip_items WHERE code = '1003-(Q) | (5FT) | (28") | (DV 10") | PC151-18 | (FC)';`;
   console.log(JSON.stringify(r, null, 2));

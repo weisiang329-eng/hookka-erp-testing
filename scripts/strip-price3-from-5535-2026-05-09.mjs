@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Strip PRICE_3 entries from Carress (cust-2) + 2990 HOME (cust-f6c80b96)
 // 5535 customer_product_prices. Final-final state per Wei Siang 2026-05-09:
 //
@@ -62,7 +63,7 @@ async function authedJson(session, method, path, body) {
 }
 
 const sql = postgres(
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",
+  requiredDatabaseUrl("PROD_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

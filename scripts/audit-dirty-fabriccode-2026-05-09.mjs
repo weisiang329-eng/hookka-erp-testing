@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Read-only audit — count rows in sales_order_items / consignment_order_items
 // / production_orders whose fabricCode is non-empty but doesn't exist in
 // raw_materials with a fabric itemGroup. Surfaces the data we'd need to clean
@@ -8,7 +9,7 @@
 import postgres from "postgres";
 
 const url =
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+  requiredDatabaseUrl("PROD_DATABASE_URL");
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

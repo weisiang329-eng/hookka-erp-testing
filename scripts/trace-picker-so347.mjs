@@ -1,9 +1,10 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Reproduce the frontend picker logic for SO-2604-347 to confirm whether
 // byDept.get("*") returns the merged FC JC.
 import postgres from "postgres";
 
 const sql = postgres(
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres",
+  requiredDatabaseUrl("STAGING_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

@@ -51,14 +51,16 @@ jobs:
         run: node scripts/preflight-staging-foundation-migrations.mjs
         env:
           DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
-          EXPECTED_SUPABASE_PROJECT_REF: ${{ vars.STAGING_SUPABASE_PROJECT_REF }}
+          # Public, code-reviewed identifier kept independent from the secret URL.
+          # A swapped production URL therefore fails closed before any SQL runs.
+          EXPECTED_SUPABASE_PROJECT_REF: zaxygxwadidiqcphibma
 
       - name: Preview staging database migrations
         if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
         run: npm run db:migrate:supabase:dry
         env:
           DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
-          EXPECTED_SUPABASE_PROJECT_REF: ${{ vars.STAGING_SUPABASE_PROJECT_REF }}
+          EXPECTED_SUPABASE_PROJECT_REF: zaxygxwadidiqcphibma
           MIGRATION_ALLOWED_PENDING: 0208_api_idempotency.sql,0209_invoice_active_do_unique.sql,0210_payment_balance_guards.sql,0211_invoice_payment_receipt_link.sql
 
       - name: Apply reviewed migrations to staging
@@ -66,7 +68,7 @@ jobs:
         run: npm run db:migrate:supabase
         env:
           DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
-          EXPECTED_SUPABASE_PROJECT_REF: ${{ vars.STAGING_SUPABASE_PROJECT_REF }}
+          EXPECTED_SUPABASE_PROJECT_REF: zaxygxwadidiqcphibma
           MIGRATION_ALLOWED_PENDING: 0208_api_idempotency.sql,0209_invoice_active_do_unique.sql,0210_payment_balance_guards.sql,0211_invoice_payment_receipt_link.sql
 
       - name: Validate release identity

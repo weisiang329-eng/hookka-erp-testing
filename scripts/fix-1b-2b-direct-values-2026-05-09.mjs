@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Fix 5539-1B and 5539-2B prices for Carress + 2990 — Wei Siang 2026-05-09
 // clarification: "记得不是死规则0.945 而是直接一个value 写进去".
 //
@@ -59,7 +60,7 @@ async function authedJson(session, method, path, body) {
 }
 
 const sql = postgres(
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",
+  requiredDatabaseUrl("PROD_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

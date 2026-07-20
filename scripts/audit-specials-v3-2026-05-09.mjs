@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Read-only audit v3 — adds rule: tokens starting with `OTHER:` are
 // legitimate (they originate from the customSpecials JSON column and get
 // joined into the specialOrder text column for legacy-reader compat per
@@ -11,7 +12,7 @@
 import postgres from "postgres";
 
 const url =
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+  requiredDatabaseUrl("PROD_DATABASE_URL");
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

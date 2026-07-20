@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Assign 5539-2S + 5539-3S to Carress + 2990, customer prices = 5531
 // equivalents (Wei Siang 2026-05-09 just created 2S/3S in 5539 master).
 // Effective 2026-05-10.
@@ -37,7 +38,7 @@ async function authedJson(session, method, path, body) {
 }
 
 const sql = postgres(
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",
+  requiredDatabaseUrl("PROD_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

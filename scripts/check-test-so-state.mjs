@@ -1,8 +1,9 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Check current state of all test SOs — JC status + wip_items rows
 import postgres from "postgres";
 
 const sql = postgres(
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres",
+  requiredDatabaseUrl("STAGING_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

@@ -1,5 +1,6 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 import postgres from "postgres";
-const sql = postgres("postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres", { ssl: "require", max: 1, idle_timeout: 5 });
+const sql = postgres(requiredDatabaseUrl("STAGING_DATABASE_URL"), { ssl: "require", max: 1, idle_timeout: 5 });
 try {
   // Find all test SOs (5/2-created) and dump their FC + SEW state + wip_items
   for (const soid of ["SO-2605-001", "SO-2605-002", "SO-2605-006", "SO-2605-007", "SO-2605-008"]) {

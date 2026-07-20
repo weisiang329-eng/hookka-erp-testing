@@ -1,5 +1,6 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 import postgres from "postgres";
-const sql = postgres("postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres", { ssl: "require", max: 1, idle_timeout: 5 });
+const sql = postgres(requiredDatabaseUrl("PROD_DATABASE_URL"), { ssl: "require", max: 1, idle_timeout: 5 });
 try {
   const cats = await sql`SELECT category, COUNT(*) AS n, MIN(hours) AS mn, MAX(hours) AS mx FROM working_hour_entries GROUP BY category`;
   console.log("categories in working_hour_entries:");

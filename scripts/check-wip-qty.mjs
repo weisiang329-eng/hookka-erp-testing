@@ -1,7 +1,8 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 import postgres from "postgres";
 
 const sql = postgres(
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres",
+  requiredDatabaseUrl("STAGING_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

@@ -1,6 +1,7 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Seed kv_config['public_holidays'] with 2026-05-01 (Labour Day).
 import postgres from "postgres";
-const sql = postgres("postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres", { ssl: "require", max: 1, idle_timeout: 5 });
+const sql = postgres(requiredDatabaseUrl("PROD_DATABASE_URL"), { ssl: "require", max: 1, idle_timeout: 5 });
 try {
   const existing = await sql`SELECT value FROM kv_config WHERE key = 'public_holidays'`;
   let arr = [];

@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // One-off cleanup of staging Option-C schema:
 //   1. Set merged FC JCs' wip_type = itemCategory (BEDFRAME/SOFA/ACCESSORY)
 //      instead of anchor's per-piece wip_type (DIVAN, SOFA_BASE, ...).
@@ -11,7 +12,7 @@
 import postgres from "postgres";
 
 const sql = postgres(
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres",
+  requiredDatabaseUrl("STAGING_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

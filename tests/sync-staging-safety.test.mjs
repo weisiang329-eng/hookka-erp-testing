@@ -67,9 +67,26 @@ test("staging sync workflow fails closed before destructive work", () => {
   assert.ok(dumpAt >= 0 && dumpAt < dropAt);
   assert.match(workflow, /PROD_SUPABASE_PROJECT_REF/);
   assert.match(workflow, /STAGING_SUPABASE_PROJECT_REF/);
+  assert.match(workflow, /PROD_SUPABASE_PROJECT_REF: vpwdqtsxexpiqxzweivd/);
+  assert.match(workflow, /STAGING_SUPABASE_PROJECT_REF: zaxygxwadidiqcphibma/);
+  assert.doesNotMatch(workflow, /vars\.PROD_SUPABASE_PROJECT_REF/);
+  assert.doesNotMatch(workflow, /vars\.STAGING_SUPABASE_PROJECT_REF/);
   assert.match(workflow, /STAGING_WORKER_PIN_HASH/);
   assert.match(workflow, /TRUNCATE TABLE public\.user_sessions/);
   assert.match(workflow, /TRUNCATE TABLE public\.worker_sessions/);
   assert.doesNotMatch(workflow, /123456/);
   assert.doesNotMatch(workflow, /sample ACTIVE empNos/i);
+});
+
+test("staging deploy validates its reviewed target before every migration step", () => {
+  const workflow = readFileSync(resolve(process.cwd(), ".github/workflows/deploy.yml"), "utf8");
+  const expectedRefAssignments = workflow.match(
+    /EXPECTED_SUPABASE_PROJECT_REF: zaxygxwadidiqcphibma/g,
+  ) ?? [];
+  assert.equal(expectedRefAssignments.length, 3);
+  assert.doesNotMatch(workflow, /vars\.STAGING_SUPABASE_PROJECT_REF/);
+  assert.ok(
+    workflow.indexOf("Preflight staging database migrations")
+      < workflow.indexOf("Apply reviewed migrations to staging"),
+  );
 });

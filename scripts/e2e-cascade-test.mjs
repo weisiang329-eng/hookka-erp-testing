@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // End-to-end cascade test on SO-2605-006 Line 2 (clean PO).
 // Steps:
 //   1. Initial state: FC + SEW all WAITING, no wip_items for FC label
@@ -9,7 +10,7 @@
 import postgres from "postgres";
 
 const sql = postgres(
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres",
+  requiredDatabaseUrl("STAGING_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

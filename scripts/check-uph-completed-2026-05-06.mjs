@@ -1,9 +1,10 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Audit: did UPHOLSTERY really only complete 8 POs on 2026-05-06?
 // Frontend "Production Revenue" only counts a PO when ALL its UPHOLSTERY
 // JCs are COMPLETED/TRANSFERRED with completedDate within [from, to].
 import postgres from "postgres";
 const sql = postgres(
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",
+  requiredDatabaseUrl("PROD_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

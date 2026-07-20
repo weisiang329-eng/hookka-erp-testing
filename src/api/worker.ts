@@ -27,6 +27,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { isPreviewHostname, runtimeEnvironment } from "./lib/deployment-environment";
 
 export type Env = {
   Bindings: {
@@ -289,17 +290,6 @@ app.use("*", async (c, next) => {
 // production is `hookka-erp-testing.pages.dev` exactly; preview deploys
 // are `<commit-hash>.hookka-erp-testing.pages.dev` or
 // `<branch-alias>.hookka-erp-testing.pages.dev`. Detect from there.
-function isPreviewHostname(requestUrl: string): boolean {
-  try {
-    const host = new URL(requestUrl).hostname.toLowerCase();
-    if (host === "hookka-erp-testing.pages.dev") return false; // prod
-    if (host.endsWith(".hookka-erp-testing.pages.dev")) return true; // preview
-    return false; // custom domain → treat as prod
-  } catch {
-    return false;
-  }
-}
-
 function pickDbUrl(env: Env["Bindings"], requestUrl: string): string | undefined {
   if (isPreviewHostname(requestUrl) && env.HYPERDRIVE_STAGING?.connectionString) {
     return env.HYPERDRIVE_STAGING.connectionString;
@@ -333,7 +323,9 @@ app.get("/api/health", (c) =>
   c.json({
     ok: true,
     runtime: "cloudflare-workers",
-    env: c.env.ENVIRONMENT,
+    // Use the same hostname rule as database routing. Cloudflare Pages keeps
+    // the top-level ENVIRONMENT="production" binding on branch deploys.
+    env: runtimeEnvironment(c.req.url, c.env.ENVIRONMENT),
     isPreview: isPreviewHostname(c.req.url),
     host: new URL(c.req.url).hostname,
     ts: Date.now(),

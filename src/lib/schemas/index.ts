@@ -11,3 +11,4 @@ export * from "./sales-order";
 export * from "./invoice";
 export * from "./rd-project";
 export * from "./worker-job";
+export * from "./user-admin";

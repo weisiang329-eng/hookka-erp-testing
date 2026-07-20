@@ -15,6 +15,8 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { setAuth, type AuthUser } from "@/lib/auth";
 import { humanizeError } from "@/lib/humanize-error";
+import { validatePasswordStrength } from "@/api/lib/password-strength";
+import PasswordStrengthMeter from "@/components/PasswordStrengthMeter";
 
 type InviteMeta = {
   email: string;
@@ -78,8 +80,9 @@ export default function InviteAcceptPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    if (password.length < 6) {
-      setError("Password must be at least 6 characters.");
+    const strength = validatePasswordStrength(password, invite?.email);
+    if (!strength.ok) {
+      setError(strength.error ?? "Password is too weak.");
       return;
     }
     if (password !== confirm) {
@@ -195,8 +198,12 @@ export default function InviteAcceptPage() {
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            placeholder="At least 6 characters"
+            placeholder="At least 12 characters"
             autoComplete="new-password"
+          />
+          <PasswordStrengthMeter
+            password={password}
+            email={invite?.email}
           />
         </Field>
 

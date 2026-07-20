@@ -18,9 +18,17 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission, requireSuperAdmin } from "../lib/rbac";
 import { hashPassword } from "../lib/password";
+import { validatePasswordStrength } from "../lib/password-strength";
 import { inviteEmailTemplate, sendMail } from "../lib/email";
 import { enqueueEmail } from "../lib/email-outbox";
 import { emitAudit } from "../lib/audit";
+import {
+  AdminCreateUserRequestSchema,
+  AdminResetPasswordRequestSchema,
+  AdminUpdateUserRequestSchema,
+  InviteUserRequestSchema,
+  firstUserRequestValidationError,
+} from "../../lib/schemas/user-admin";
 
 const app = new Hono<Env>();
 
@@ -163,22 +171,23 @@ app.post("/", async (c) => {
   const su = requireSuperAdmin(c);
   if (su) return su;
   try {
-    const body = await c.req.json();
-    const { email, password, displayName, role } = body as {
-      email?: string;
-      password?: string;
-      displayName?: string;
-      role?: string;
-    };
-    if (!email || !password) {
+    const parsedBody = AdminCreateUserRequestSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsedBody.success) {
       return c.json(
-        { success: false, error: "email and password are required" },
+        {
+          success: false,
+          error: firstUserRequestValidationError(parsedBody.error),
+        },
         400,
       );
     }
-    if (password.length < 6) {
+    const { email, password, displayName, role } = parsedBody.data;
+    const strength = validatePasswordStrength(password, email);
+    if (!strength.ok) {
       return c.json(
-        { success: false, error: "password must be at least 6 characters" },
+        { success: false, error: strength.error ?? "Password too weak" },
         400,
       );
     }
@@ -207,7 +216,7 @@ app.post("/", async (c) => {
         id,
         email.trim(),
         passwordHash,
-        role ?? "STAFF",
+        role,
         createdAt,
         displayName ?? "",
       )
@@ -250,7 +259,19 @@ app.put("/:id", async (c) => {
     if (!existing) {
       return c.json({ success: false, error: "User not found" }, 404);
     }
-    const body = await c.req.json();
+    const parsedBody = AdminUpdateUserRequestSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsedBody.success) {
+      return c.json(
+        {
+          success: false,
+          error: firstUserRequestValidationError(parsedBody.error),
+        },
+        400,
+      );
+    }
+    const body = parsedBody.data;
 
     // Role changes require a separate, narrower permission. Without this
     // gate, anyone with `users:update` (which includes ops staff who set
@@ -275,12 +296,11 @@ app.put("/:id", async (c) => {
     const callerId = (
       c as unknown as { get: (k: string) => string | undefined }
     ).get("userId");
-    // Matches the merge's own semantics below (body.isActive ? 1 : 0): a
-    // disable is any explicit falsy isActive in the body against a row that is
-    // currently active. Using the same falsy test (not a strict === false)
-    // keeps the guard and the write in lockstep.
+    // The shared schema guarantees this field is a real boolean, so values
+    // such as "false" can no longer be treated as truthy and silently enable
+    // an account.
     const wantsDisable =
-      body.isActive !== undefined && !body.isActive && existing.isActive === 1;
+      body.isActive === false && existing.isActive === 1;
     const wantsDemote =
       wantsRoleChange &&
       existing.role === "SUPER_ADMIN" &&
@@ -340,9 +360,7 @@ app.put("/:id", async (c) => {
       isActive:
         body.isActive === undefined
           ? existing.isActive
-          : body.isActive
-            ? 1
-            : 0,
+          : body.isActive ? 1 : 0,
       department:
         body.department === undefined
           ? (existing.department ?? null)
@@ -486,26 +504,33 @@ app.post("/:id/reset-password", async (c) => {
   const su = requireSuperAdmin(c);
   if (su) return su;
   const id = c.req.param("id");
-  const body = await c.req.json().catch(() => ({}));
-  const { newPassword } = body as { newPassword?: string };
-  if (!newPassword) {
+  const parsedBody = AdminResetPasswordRequestSchema.safeParse(
+    await c.req.json().catch(() => null),
+  );
+  if (!parsedBody.success) {
     return c.json(
-      { success: false, error: "newPassword is required" },
+      {
+        success: false,
+        error: firstUserRequestValidationError(parsedBody.error),
+      },
       400,
     );
   }
-  if (newPassword.length < 6) {
-    return c.json(
-      { success: false, error: "newPassword must be at least 6 characters" },
-      400,
-    );
-  }
+  const { newPassword } = parsedBody.data;
 
   const existing = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
     .bind(id)
     .first<UserRow>();
   if (!existing) {
     return c.json({ success: false, error: "User not found" }, 404);
+  }
+
+  const strength = validatePasswordStrength(newPassword, existing.email);
+  if (!strength.ok) {
+    return c.json(
+      { success: false, error: strength.error ?? "Password too weak" },
+      400,
+    );
   }
 
   const newHash = await hashPassword(newPassword);
@@ -631,18 +656,19 @@ app.post("/invite", async (c) => {
   const su = requireSuperAdmin(c);
   if (su) return su;
   try {
-    const body = await c.req.json();
-    const { email, role, displayName } = body as {
-      email?: string;
-      role?: string;
-      displayName?: string;
-    };
-    if (!email || typeof email !== "string" || !email.includes("@")) {
+    const parsedBody = InviteUserRequestSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsedBody.success) {
       return c.json(
-        { success: false, error: "valid email is required" },
+        {
+          success: false,
+          error: firstUserRequestValidationError(parsedBody.error),
+        },
         400,
       );
     }
+    const { email, role, displayName } = parsedBody.data;
 
     const trimmedEmail = email.trim();
     const nowIso = new Date().toISOString();
@@ -708,7 +734,7 @@ app.post("/invite", async (c) => {
       .bind(
         token,
         trimmedEmail,
-        role ?? "STAFF",
+        role,
         displayName ?? null,
         userId,
         nowIso,
@@ -730,7 +756,7 @@ app.post("/invite", async (c) => {
     const invite: InviteRow = {
       token,
       email: trimmedEmail,
-      role: role ?? "STAFF",
+      role,
       displayName: displayName ?? null,
       invitedBy: userId,
       createdAt: nowIso,

@@ -37,6 +37,10 @@ import {
   sessionCookieHeader,
   csrfCookieHeader,
 } from "../lib/session-cookie";
+import {
+  AcceptInviteRequestSchema,
+  firstUserRequestValidationError,
+} from "../../lib/schemas/user-admin";
 
 const app = new Hono<Env>();
 
@@ -457,8 +461,10 @@ app.get("/me", async (c) => {
 // as "allow everything". Cheaper than enumerating the full matrix and aligns
 // with the bypass behavior in src/api/lib/rbac.ts.
 //
-// READ_ONLY fallback: users without a roleId fall through to role_read_only
-// per the same convention as rbac.ts.
+// The legacy users.role TEXT is intentionally the runtime source here because
+// auth-middleware.ts and requirePermission() both authorize from that exact
+// field. Reading users.roleId in this endpoint created a split brain: the UI
+// could show the old role's controls after an admin changed users.role.
 app.get("/me/permissions", async (c) => {
   const userId = (c as unknown as { get: (k: string) => unknown }).get(
     "userId",
@@ -474,17 +480,17 @@ app.get("/me/permissions", async (c) => {
   // ADMIN still get the wildcard. Mutations stay forbidden until the
   // operator re-applies migrations.
   try {
-    // Look up the user's role (id + name). Empty roleId -> READ_ONLY fallback,
-    // mirroring rbac.ts's role resolution.
+    // Resolve the same role text that auth-middleware stamps onto userRole.
+    // Role permissions still come from the normalized RBAC tables; roles.name
+    // bridges the single runtime role value to that matrix.
     const roleRow = await c.var.DB.prepare(
-      `SELECT u.roleId AS roleId, r.name AS "roleName"
+      `SELECT u.role AS role
          FROM users u
-         LEFT JOIN roles r ON r.id = u.roleId
         WHERE u.id = ?
         LIMIT 1`,
     )
       .bind(userId)
-      .first<{ roleId: string | null; roleName: string | null }>();
+      .first<{ role: string | null }>();
 
     if (!roleRow) {
       // Authenticated but no users row — shouldn't happen in practice.
@@ -493,28 +499,29 @@ app.get("/me/permissions", async (c) => {
 
     // SUPER_ADMIN bypass — sentinel list keeps payload tiny + matches the
     // rbac.ts SUPER_ADMIN short-circuit.
-    if (roleRow.roleName === "SUPER_ADMIN") {
+    const roleName = (roleRow.role || "READ_ONLY").toUpperCase();
+    if (roleName === "SUPER_ADMIN" || roleName === "ADMIN") {
       return c.json({
         success: true,
-        role: roleRow.roleName,
+        role: roleName,
         permissions: ["*"],
       });
     }
 
-    const roleId = roleRow.roleId ?? "role_read_only";
-    const roleName = roleRow.roleName ?? "READ_ONLY";
-
     const permsRes = await c.var.DB.prepare(
       `SELECT p.resource AS resource, p.action AS action
          FROM role_permissions rp
+         JOIN roles r ON r.id = rp.roleId
          JOIN permissions p ON rp.permissionId = p.id
-        WHERE rp.roleId = ?`,
+        WHERE r.name = ?`,
     )
-      .bind(roleId)
+      .bind(roleName)
       .all<{ resource: string; action: string }>();
 
     const rows = permsRes.results ?? [];
-    const permissions = rows.map((r) => `${r.resource}:${r.action}`);
+    const permissions = rows.length > 0
+      ? rows.map((r) => `${r.resource}:${r.action}`)
+      : ["*:read"];
 
     return c.json({
       success: true,
@@ -1028,24 +1035,19 @@ app.get("/invite/:token", async (c) => {
 // POST /api/auth/accept-invite
 // Body: { token, password, displayName? }
 app.post("/accept-invite", async (c) => {
-  const body = await c.req.json().catch(() => ({}));
-  const { token, password, displayName } = body as {
-    token?: string;
-    password?: string;
-    displayName?: string;
-  };
-  if (!token || !password) {
+  const parsedBody = AcceptInviteRequestSchema.safeParse(
+    await c.req.json().catch(() => null),
+  );
+  if (!parsedBody.success) {
     return c.json(
-      { success: false, error: "token and password are required" },
+      {
+        success: false,
+        error: firstUserRequestValidationError(parsedBody.error),
+      },
       400,
     );
   }
-  if (password.length < 6) {
-    return c.json(
-      { success: false, error: "password must be at least 6 characters" },
-      400,
-    );
-  }
+  const { token, password, displayName } = parsedBody.data;
 
   const nowIso = new Date().toISOString();
   const invite = await c.var.DB.prepare(
@@ -1055,6 +1057,14 @@ app.post("/accept-invite", async (c) => {
     .first<InviteRow>();
   if (!invite || invite.acceptedAt || invite.expiresAt <= nowIso) {
     return c.json({ success: false, error: "Invalid or expired invite" }, 404);
+  }
+
+  const strength = validatePasswordStrength(password, invite.email);
+  if (!strength.ok) {
+    return c.json(
+      { success: false, error: strength.error ?? "Password too weak" },
+      400,
+    );
   }
 
   // Race condition: someone else (re-)created a user with this email between

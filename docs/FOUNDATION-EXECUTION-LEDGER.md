@@ -47,17 +47,32 @@ documents that say bug fixes go straight to main.
 | [#75](https://github.com/weisiang329-eng/hookka-erp-testing/pull/75) | Removed 113 embedded DB URLs from 109 scripts; fail-closed env injection and secret-scan CI |
 | [#76](https://github.com/weisiang329-eng/hookka-erp-testing/pull/76) | Canonical cross-session execution ledger (documentation-only) |
 
+## Current P1 delivery candidate
+
+- [PR #77](https://github.com/weisiang329-eng/hookka-erp-testing/pull/77)
+  (`agent/high-risk-contracts`) closes the first auth/admin contract batch.
+  Admin create/update/reset/invite and public invite acceptance now use shared,
+  strict request schemas; every password write uses the canonical strength
+  policy in FE and BE.
+- `users.role` is now the single runtime role source for session authorization,
+  backend permission checks, and frontend navigation permissions. The retained
+  `users.roleId` compatibility column no longer contradicts a successful role
+  change in the UI.
+- Regression: `tests/user-admin-contract.test.mjs`; BugHistory
+  `BUG-2026-07-20-004`. Production remains unchanged.
+
 ## Last complete local evidence
 
-- Full suite: **1773 tests / 1772 pass / 0 fail / 1 skip**.
+- Full suite: **1780 tests / 1779 pass / 0 fail / 1 skip**.
 - Strict app typecheck: pass.
 - Production build: pass, **3448 modules** transformed.
 - `npm audit`: **0 vulnerabilities**.
 - Script syntax audit: **110 files / 0 failures**.
 - Repository PostgreSQL credential scan: **0 current-tree findings**.
-- BugHistory: **456 unique entries**, machine policy current.
-- API inventory: **881 endpoints / 531 mutations / 322 JSON-body routes / 3
-  schema-validated routes**. The low schema count is an explicit follow-up,
+- BugHistory: **457 unique entries**, machine policy current.
+- API inventory: **881 endpoints / 531 mutations / 322 JSON-body routes / 8
+  schema-validated routes**. The auth/admin batch raised this from 3. The low
+  overall count is an explicit follow-up,
   not a claim that the API contract work is finished.
 - Latest intended schema version: **0211**. Migrations 0208–0211 have not yet
   been proven/applied by the new staging workflow.

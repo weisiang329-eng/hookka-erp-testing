@@ -34,6 +34,38 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-20-004 — Account-write routes bypassed the password policy and role permissions had two owners `auth-rbac` `api-contract` `data-integrity` `ui-frontend` 🟡
+
+**Status:** Fix in progress (staging PR; production unchanged).
+
+**Symptom / risk:** The self-service change/reset-password routes rejected weak passwords, but
+an operator could still create an account, reset another user's password, or accept an invite
+with the retired six-character rule. `PUT /api/users/:id` also accepted malformed payloads such
+as `isActive: "false"`; JavaScript truthiness could turn that value into an enabled account.
+Separately, the write/readback UI changed `users.role`, while `/api/auth/me/permissions` read
+`users.roleId`. A role change could therefore pass its readback but leave navigation controls
+based on the old role, contradicting the backend authorization result.
+
+**Root cause:** Password strength, request validation, and role resolution were copied into
+individual routes instead of sharing one contract. The RBAC migration retained `users.roleId`
+for transition compatibility, but authentication middleware and `requirePermission()` continued
+authorizing from `users.role`; the frontend permissions endpoint later chose the other column.
+
+**Fix:** `src/lib/schemas/user-admin.ts` defines strict, bounded contracts for create, update,
+admin reset, invite, and invite acceptance. Every path that can write `users.passwordHash` now
+calls `validatePasswordStrength`, including the email-local-part rule, and both affected screens
+use the same validator and strength meter. The permissions endpoint now resolves `users.role`,
+the same runtime source used by authentication and backend RBAC, then joins `roles.name` only to
+load the normalized permission matrix. Unknown lower roles fail to read-only; `SUPER_ADMIN` and
+`ADMIN` retain their documented backend wildcard behavior.
+
+**Regression evidence:** `tests/user-admin-contract.test.mjs` rejects string booleans, empty and
+unknown-field updates, malformed emails, unknown roles, and extra reset fields; it pins all three
+alternate password writes to the canonical strength policy and pins UI/backend role resolution
+to `users.role`. `tests/password-strength.test.mjs` continues to lock every strength rule.
+
+---
+
 ## BUG-2026-07-20-003 — Public repository tracked database URLs with embedded credentials `security` `infrastructure` `data-integrity` 🟡
 
 **Status:** Fix in progress (staging remediation; credential rotation and history response pending).

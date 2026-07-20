@@ -62,6 +62,8 @@ import {
 } from "lucide-react";
 import { getCurrentUser } from "@/lib/auth";
 import { copyText } from "@/lib/copy-text";
+import { validatePasswordStrength } from "@/api/lib/password-strength";
+import PasswordStrengthMeter from "@/components/PasswordStrengthMeter";
 
 // The three assignable roles, shown in BOTH the invite dropdown and the
 // per-row "Change role" dialog. ONE source of truth so the two pickers can
@@ -1106,8 +1108,12 @@ export default function UsersPage() {
   const submitReset = async () => {
     if (!resetForUser) return;
     setResetError(null);
-    if (resetPassword.length < 6) {
-      setResetError("Password must be at least 6 characters");
+    const strength = validatePasswordStrength(
+      resetPassword,
+      resetForUser.email,
+    );
+    if (!strength.ok) {
+      setResetError(strength.error ?? "Password is too weak");
       return;
     }
     setResetSubmitting(true);
@@ -3002,10 +3008,14 @@ export default function UsersPage() {
                 autoFocus
                 value={resetPassword}
                 onChange={(e) => setResetPassword(e.target.value)}
-                placeholder="min 6 characters"
+                placeholder="At least 12 characters"
                 onKeyDown={(e) => {
                   if (e.key === "Enter") submitReset();
                 }}
+              />
+              <PasswordStrengthMeter
+                password={resetPassword}
+                email={resetForUser.email}
               />
               {resetError && (
                 <p className="text-xs text-red-600">{resetError}</p>

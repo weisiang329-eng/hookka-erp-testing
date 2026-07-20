@@ -2,15 +2,39 @@
   "schemaVersion": 1,
   "source": "docs/BUG-HISTORY.md",
   "policyFrom": "2026-07-20",
-  "entryCount": 456,
+  "entryCount": 457,
   "statusCounts": {
-    "Fix in progress": 12,
+    "Fix in progress": 13,
     "Fixed": 428,
     "Partial": 3,
     "Identified": 6,
     "Unknown": 7
   },
   "entries": [
+    {
+      "id": "BUG-2026-07-20-004",
+      "date": "2026-07-20",
+      "title": "Account-write routes bypassed the password policy and role permissions had two owners",
+      "categories": [
+        "auth-rbac",
+        "api-contract",
+        "data-integrity",
+        "ui-frontend"
+      ],
+      "category": "auth-rbac",
+      "status": "Fix in progress",
+      "statusIcon": "🟡",
+      "statusDate": "2026-07-20",
+      "tests": [
+        "tests/user-admin-contract.test.mjs",
+        "tests/password-strength.test.mjs"
+      ],
+      "commits": [],
+      "hasRootCause": true,
+      "hasFix": true,
+      "hasRegression": false,
+      "regressionWaiver": ""
+    },
     {
       "id": "BUG-2026-07-20-003",
       "date": "2026-07-20",

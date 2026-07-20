@@ -1,107 +1,46 @@
-name: Refresh bundle baseline
+name: Verify bundle baseline
 
-# Self-healing bundle-size baseline. Runs on every push to main, builds
-# the bundle from a clean Linux CI environment, regenerates
-# .bundle-baseline.json, and commits the change back to main if (and
-# only if) it actually changed.
+# The baseline is reviewed code, not bot-owned branch state. A previous
+# workflow rewrote main after every push; its timestamp-only diffs produced
+# hundreds of noisy commits and could race real deployments.
 #
-# Why: Vite/rolldown content hashes drift between platforms — Windows
-# local builds sometimes produce 9-char hashes while Linux CI produces
-# 8-char ones. The deploy.yml bundle-size gate is currently
-# `continue-on-error: true` because of that drift. With the regex tweak
-# in scripts/check-bundle-size.mjs (now accepts 6-12 chars) the stem
-# names align across platforms, but the canonical sizes still need to
-# come from a Linux build. This workflow keeps the baseline locked to
-# Linux CI output, so subsequent gate checks compare like-for-like.
-#
-# Once 1-2 main pushes have run this and the baseline looks stable, the
-# bundle gate in deploy.yml can be flipped from `continue-on-error: true`
-# back to blocking — that flip happens in a follow-up PR.
-#
-# The commit message ends with `[skip ci]` so the auto-commit doesn't
-# re-trigger this workflow (or any other workflow that listens to push)
-# in an infinite loop.
+# To accept an intentional increase:
+#   1. npm run build
+#   2. node scripts/check-bundle-size.mjs --write-baseline
+#   3. commit the reviewed baseline in the same PR as the source change
 
 on:
-  push:
-    branches: [main]
+  pull_request:
+    branches: [staging, main]
   workflow_dispatch:
 
-# Avoid two parallel runs racing on the same branch — the second push
-# cancels the first; we only need the latest snapshot.
 concurrency:
-  group: refresh-bundle-baseline
+  group: bundle-baseline-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  refresh:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # Need full history so the auto-commit pushes onto the tip,
-          # not a detached HEAD.
-          fetch-depth: 0
-          # Use the default GITHUB_TOKEN for push back; permissions:
-          # contents: write above is what enables it.
-          persist-credentials: true
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+          cache: npm
 
-      - name: npm ci
+      - name: Install dependencies
         run: npm ci
 
       - name: Build
         run: npm run build
 
-      - name: Regenerate baseline
-        run: node scripts/check-bundle-size.mjs --write-baseline
-
-      - name: Commit baseline to main if changed
-        run: |
-          # Detect a real diff. Exit 0 with no commit if nothing changed.
-          if git diff --quiet -- .bundle-baseline.json; then
-            echo "[bundle-baseline] no change — nothing to commit"
-            exit 0
-          fi
-
-          echo "[bundle-baseline] diff detected, committing to main"
-          git diff --stat -- .bundle-baseline.json
-
-          # GitHub Actions bot identity — the commit shows up under that
-          # account, not whoever pushed to main, so it's clear this is
-          # automation.
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-
-          git add .bundle-baseline.json
-          git commit -m "chore: auto-regen bundle baseline [skip ci]"
-
-          # Main branch protection was removed (2026-05), so the baseline
-          # commits straight back to main instead of opening a PR. The old
-          # PR path failed on every run ("GitHub Actions is not permitted
-          # to create pull requests" — a repo setting), which emailed the
-          # owner a failure notice each push. Pushing GITHUB_TOKEN commits
-          # does NOT re-trigger workflows, and the [skip ci] marker is a
-          # second guard, so there's no deploy loop. Rebase-retry handles a
-          # concurrent push landing first. Never exit non-zero — a transient
-          # race must not spam failure notifications.
-          for i in 1 2 3; do
-            if git push origin HEAD:main; then
-              echo "[bundle-baseline] pushed to main"
-              exit 0
-            fi
-            echo "[bundle-baseline] push rejected — rebasing onto origin/main (attempt $i)"
-            git fetch origin main || true
-            git rebase origin/main || { git rebase --abort || true; break; }
-          done
-          echo "[bundle-baseline] could not push this run — next push will refresh it"
-          exit 0
+      - name: Enforce committed bundle budget
+        run: node scripts/check-bundle-size.mjs

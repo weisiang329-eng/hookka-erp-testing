@@ -2,15 +2,59 @@
   "schemaVersion": 1,
   "source": "docs/BUG-HISTORY.md",
   "policyFrom": "2026-07-20",
-  "entryCount": 453,
+  "entryCount": 455,
   "statusCounts": {
+    "Fix in progress": 11,
     "Fixed": 428,
     "Partial": 3,
     "Identified": 6,
-    "Fix in progress": 9,
     "Unknown": 7
   },
   "entries": [
+    {
+      "id": "BUG-2026-07-20-002",
+      "date": "2026-07-20",
+      "title": "Quick-pay had a second receipt rule and invoice detail could show voided/bounced money",
+      "categories": [
+        "money",
+        "api-contract",
+        "data-integrity"
+      ],
+      "category": "money",
+      "status": "Fix in progress",
+      "statusIcon": "🟡",
+      "statusDate": "2026-07-20",
+      "tests": [
+        "tests/payment-contract.test.mjs"
+      ],
+      "commits": [],
+      "hasRootCause": true,
+      "hasFix": true,
+      "hasRegression": false,
+      "regressionWaiver": ""
+    },
+    {
+      "id": "BUG-2026-07-20-001",
+      "date": "2026-07-20",
+      "title": "Payment APIs could cross tenant/party boundaries and split one receipt into contradictory totals",
+      "categories": [
+        "money",
+        "tenant-isolation",
+        "data-integrity"
+      ],
+      "category": "money",
+      "status": "Fix in progress",
+      "statusIcon": "🟡",
+      "statusDate": "2026-07-20",
+      "tests": [
+        "tests/payment-contract.test.mjs"
+      ],
+      "commits": [],
+      "hasRootCause": true,
+      "hasFix": true,
+      "hasRegression": false,
+      "regressionWaiver": ""
+    },
     {
       "id": "BUG-2026-07-17-012",
       "date": "2026-07-17",

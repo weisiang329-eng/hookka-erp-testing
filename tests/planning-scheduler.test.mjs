@@ -3,7 +3,7 @@
 // (src/api/lib/planning-scheduler.ts), the TypeScript port of the trusted
 // Python cutter.
 //
-// It feeds the sample input shape (scripts/_algo_ref/schedule_rows.json — a
+// It feeds the sample input shape (scripts/schedule_rows.json — a
 // row-array export of WAITING FAB_CUT cards) through scheduleCutting() and
 // asserts the load-bearing invariants:
 //   1. No cut is scheduled before START (the first working day).
@@ -89,7 +89,7 @@ const LANE_CATS = new Set(["BEDFRAME", "SOFA", "ACCESSORY"]);
 
 function loadFixtureCards() {
   const raw = JSON.parse(
-    readFileSync(join(HERE, "..", "scripts", "_algo_ref", "schedule_rows.json"), "utf8"),
+    readFileSync(join(HERE, "..", "scripts", "schedule_rows.json"), "utf8"),
   );
   return raw.map(rowToCard).filter((c) => LANE_CATS.has(c.lane));
 }
@@ -371,7 +371,7 @@ const CHAIN_DEPTS = ["FAB_SEW", "WOOD_CUT", "FRAMING", "WEBBING", "FOAM", "UPHOL
 
 function loadFixtureRows() {
   return JSON.parse(
-    readFileSync(join(HERE, "..", "scripts", "_algo_ref", "schedule_rows.json"), "utf8"),
+    readFileSync(join(HERE, "..", "scripts", "schedule_rows.json"), "utf8"),
   ).filter((r) => LANE_CATS.has(String(r[4]).toUpperCase()));
 }
 

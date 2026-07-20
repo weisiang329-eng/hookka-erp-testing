@@ -172,15 +172,86 @@ async function resolveRecipients(
       .map((s) => s.trim())
       .filter((s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s));
   }
-  // Fallback — query SUPER_ADMIN users. Schema: users(roleId='SUPER_ADMIN',
-  // isActive=1, email NOT NULL).
+  // Owner-set list — kv_config['daily_report_recipients'], a JSON array or a
+  // comma-separated string. Sits between the env override and the SUPER_ADMIN
+  // fallback so the owner can pin WHO gets the brief without a deploy.
+  //
+  // Why the DB and not wrangler.toml / code: this repo is PUBLIC. Staff emails
+  // are personal data and must not be committed. (Owner 2026-07-17, after the
+  // fallback was fixed and would otherwise have started emailing all 5
+  // SUPER_ADMINs incl. an outside party: 「send 我和violet 就行」.)
+  try {
+    const row = await c.var.DB
+      .prepare("SELECT value FROM kv_config WHERE key = 'daily_report_recipients'")
+      .first<{ value: string }>();
+    if (row?.value) {
+      let list: string[] = [];
+      try {
+        const parsed = JSON.parse(row.value);
+        // Accept every shape this row can legitimately hold. PUT /api/kv-config/:key
+        // stores `JSON.stringify(WHOLE BODY)`, so a client that posts
+        // { value: [...] } lands `{"value":[...]}` while one that posts the bare
+        // array lands `[...]`. My first cut only handled the bare array, read
+        // `{value:[…]}` as "[object Object]", found no valid emails and fell
+        // through — and the brief went to all 5 SUPER_ADMINs, which is exactly
+        // what this setting exists to prevent. Handle both, and a plain string.
+        const inner =
+          parsed && typeof parsed === "object" && !Array.isArray(parsed) &&
+          "value" in (parsed as Record<string, unknown>)
+            ? (parsed as { value: unknown }).value
+            : parsed;
+        list = Array.isArray(inner)
+          ? inner.map((x) => String(x))
+          : String(inner ?? "").split(",");
+      } catch {
+        list = String(row.value).split(",");
+      }
+      const clean = list
+        .map((s) => s.trim())
+        .filter((s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s));
+      if (clean.length > 0) return clean;
+      console.warn(
+        "[reports/resolveRecipients] kv_config.daily_report_recipients is set but has no valid emails — falling through to SUPER_ADMINs.",
+      );
+    }
+  } catch {
+    /* no kv_config row / unreadable → fall through */
+  }
+
+  // Fallback — the SUPER_ADMINs.
+  //
+  // BUG-2026-07-17-003: this used to be `WHERE roleId = 'SUPER_ADMIN'`, which
+  // matches NOTHING. `users.roleId` is a FOREIGN KEY into roles(id) — the seeded
+  // ids are 'role_super_admin' / 'role_read_only' / … — while the NAME
+  // 'SUPER_ADMIN' lives in `users.role` (the legacy TEXT column auth-middleware
+  // stamps on the context) and in `roles.name`. So the fallback always returned
+  // ZERO recipients and, with DAILY_REPORT_RECIPIENTS unset, the morning brief
+  // silently sent to nobody every single day — the agent run still recorded
+  // status=ok because "no recipients" isn't an error, only `sent 0 · failed 0`.
+  // Found 2026-07-17 when the owner asked whether the agents had really run.
+  //
+  // Matches on the NAME via both routes, so it works for legacy rows (role TEXT)
+  // and migrated ones (roleId → roles.name) alike.
   type Row = { email: string };
   const r = await c.var.DB
     .prepare(
-      `SELECT email FROM users WHERE roleId = 'SUPER_ADMIN' AND isActive = 1 AND email IS NOT NULL`,
+      `SELECT u.email AS email
+         FROM users u
+         LEFT JOIN roles r ON r.id = u.roleId
+        WHERE u.isActive = 1
+          AND u.email IS NOT NULL AND u.email != ''
+          AND (UPPER(COALESCE(u.role, '')) = 'SUPER_ADMIN'
+               OR UPPER(COALESCE(r.name, '')) = 'SUPER_ADMIN')`,
     )
     .all<Row>();
-  return (r.results ?? []).map((x) => x.email).filter(Boolean);
+  const emails = (r.results ?? []).map((x) => x.email).filter(Boolean);
+  if (emails.length === 0) {
+    // Loud: silence here is what hid the bug for weeks.
+    console.warn(
+      "[reports/resolveRecipients] no SUPER_ADMIN recipients found — the report will send to nobody. Set DAILY_REPORT_RECIPIENTS or check users.role / roles.name.",
+    );
+  }
+  return emails;
 }
 
 // ---------------------------------------------------------------------------

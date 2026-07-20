@@ -49,7 +49,9 @@ jobs:
         run: npm run lint:app
         continue-on-error: true
 
-      - run: npm test
+      # Run every tests/*.test.mjs file discovered at runtime. The previous
+      # hand-maintained list silently skipped newly added regression tests.
+      - run: npm run test:all
 
       # Strict build: runs `typecheck:app && vite build`. The typecheck gate
       # is BLOCKING — any TS error fails the deploy. Paired with `strict: true`

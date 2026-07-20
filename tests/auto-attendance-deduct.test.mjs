@@ -25,12 +25,15 @@ try {
 const dock = await import(
   pathToFileURL(resolve(process.cwd(), "src/api/lib/attendance-deduct.ts")).href
 );
+const { HOOKKA_ATTENDANCE: BASE_RULES } = await import(
+  pathToFileURL(resolve(process.cwd(), "src/lib/attendance-rules.ts")).href
+);
 
 // A stateful mock DB: one optional existing dock for the (worker, date) lookup,
 // a payslip-lock count, and recorders for what got written. Routes by SQL
 // fingerprint — the helper runs: ALTER (ensure), SELECT existing dock, SELECT
 // payslip lock count, then either a DELETE (clear stale) or a batch(DELETE,INSERT).
-function mockDb({ existingDock = null, lockedCount = 0 } = {}) {
+function mockDb({ existingDock = null, lockedCount = 0, workerHours = null } = {}) {
   const calls = { alters: 0, deletes: [], inserts: [], batches: 0 };
   function stmt(sql) {
     let bound = [];
@@ -49,6 +52,11 @@ function mockDb({ existingDock = null, lockedCount = 0 } = {}) {
           return existingDock; // { id, source } | null
         }
         if (sql.includes("FROM payslips")) return { c: lockedCount };
+        // Per-employee standard day (BUG-2026-07-17-006). null → the helper
+        // keeps the global 9h default, which is what every other test expects.
+        if (sql.includes("FROM workers")) {
+          return workerHours === null ? null : { workingHoursPerDay: workerHours };
+        }
         return null;
       },
       async all() {
@@ -236,4 +244,116 @@ test("full day with NO existing dock → no write at all", async () => {
   assert.equal(res.reason, "no-shortfall");
   assert.equal(db.__calls.deletes.length, 0);
   assert.equal(db.__calls.inserts.length, 0);
+});
+
+
+// ── BUG-2026-07-17-006 — a full day is THIS worker's day ────────────────────
+// ANN (EMP-004) is contracted workingHoursPerDay = 7.5, not the global 9. The
+// pay side already honoured it (hourlyRate = dailyRate / 7.5), and so did the
+// settle-period To-fill (expected − logged) branch — but BOTH punch branches
+// measured her against the global 9 and docked 9 − 7.5 = 1.5h on EVERY full day
+// she worked (−RM233.58 over 13 days in July for a worker who was never short).
+//
+// The first fix caught only the LIVE punch path (maybeApplyAutoPunchDock). The
+// monthly POST /settle-period — the path that actually built her July — kept
+// scoring punches against the global 9, so deleting her docks would have let the
+// next settle silently re-create them. Both now go through rulesForWorkerHours;
+// the tests below pin the shared helper so neither caller can drift again.
+
+test("7.5h worker who works her FULL day is NOT docked", async () => {
+  const db = mockDb({ workerHours: 7.5 });
+  // 08:00–16:30 minus the 1h lunch = 7.5h worked = exactly her full day.
+  const r = await dock.maybeApplyAutoPunchDock(db, {
+    workerId: "w-ann",
+    date: "2026-07-01",
+    clockIn: "08:00",
+    clockOut: "16:30",
+  });
+  assert.equal(r.applied, false, "a full 7.5h day must not be docked");
+  assert.equal(db.__calls.inserts.length, 0, "no dock row written");
+});
+
+test("9h worker is still measured against 9h (no regression)", async () => {
+  const db = mockDb({ workerHours: 9 });
+  const r = await dock.maybeApplyAutoPunchDock(db, {
+    workerId: "w-std",
+    date: "2026-07-01",
+    clockIn: "08:00",
+    clockOut: "16:30",
+  });
+  // 7.5h worked against a 9h day = 1.5h short → still docked.
+  assert.equal(r.applied, true, "a 9h worker leaving at 16:30 IS 1.5h short");
+});
+
+test("a 7.5h worker genuinely short IS still docked", async () => {
+  const db = mockDb({ workerHours: 7.5 });
+  // 08:00–15:30 minus lunch = 6.5h against her 7.5h day = 1h short.
+  const r = await dock.maybeApplyAutoPunchDock(db, {
+    workerId: "w-ann",
+    date: "2026-07-01",
+    clockIn: "08:00",
+    clockOut: "15:30",
+  });
+  assert.equal(r.applied, true, "short vs her OWN day must still dock");
+});
+
+test("missing / zero hours falls back to the global 9h", async () => {
+  for (const h of [null, 0]) {
+    const db = mockDb({ workerHours: h });
+    const r = await dock.maybeApplyAutoPunchDock(db, {
+      workerId: "w-unset",
+      date: "2026-07-01",
+      clockIn: "08:00",
+      clockOut: "16:30",
+    });
+    assert.equal(r.applied, true, `hours=${h} must keep the 9h default`);
+  }
+});
+
+// ── rulesForWorkerHours — the shared helper BOTH dock paths run rules through ──
+// Pinned directly (not just via the punch path) because POST /settle-period is
+// the second caller and it builds the whole month in bulk. If this helper is
+// right, both callers are right.
+
+test("rulesForWorkerHours: a 7.5h contract shortens the standard day", () => {
+  const r = dock.rulesForWorkerHours(BASE_RULES, 7.5);
+  assert.equal(r.standardWorkMin, 450, "7.5h = 450 min");
+});
+
+test("rulesForWorkerHours: OT thresholds are NOT touched", () => {
+  const r = dock.rulesForWorkerHours(BASE_RULES, 7.5);
+  // OT keys off endMin, so a 7.5h contract must NOT make 16:30 count as OT.
+  assert.equal(r.endMin, BASE_RULES.endMin, "endMin must not move");
+  assert.equal(r.startMin, BASE_RULES.startMin, "startMin must not move");
+  assert.equal(r.lunchMin, BASE_RULES.lunchMin, "lunch must not move");
+  assert.equal(r.lateGraceMin, BASE_RULES.lateGraceMin, "grace must not move");
+});
+
+test("rulesForWorkerHours: unset hours keep the global day", () => {
+  // 0 means "not configured", never "works a zero-hour day" — the difference
+  // between leaving pay alone and docking someone their entire salary.
+  for (const h of [null, undefined, 0, NaN, ""]) {
+    const r = dock.rulesForWorkerHours(BASE_RULES, h);
+    assert.equal(
+      r.standardWorkMin,
+      BASE_RULES.standardWorkMin,
+      `hours=${String(h)} must keep the global default`,
+    );
+  }
+});
+
+test("rulesForWorkerHours: matching hours return the rules untouched", () => {
+  const r = dock.rulesForWorkerHours(BASE_RULES, 9);
+  assert.equal(r, BASE_RULES, "a 9h contract on a 9h shift is a no-op");
+});
+
+test("rulesForWorkerHours: ANN's real July day scores ZERO shortfall", () => {
+  // The exact case that cost her RM233.58: 08:00–16:30 minus the 1h lunch =
+  // 7.5h = her full contracted day. This is what settle-period now computes.
+  const rules = dock.rulesForWorkerHours(BASE_RULES, 7.5);
+  const sf = dock.computePunchShortfallHours("08:00", "16:30", rules);
+  assert.equal(sf.shortfallHours, 0, "her full day must be 0h short");
+  // ...and the un-fixed global rules are what produced the 1.5h/day dock.
+  const wrong = dock.computePunchShortfallHours("08:00", "16:30", BASE_RULES);
+  assert.equal(wrong.shortfallHours, 1.5, "the old global-9h read = 1.5h short");
 });

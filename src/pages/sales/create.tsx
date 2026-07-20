@@ -2686,7 +2686,15 @@ function CopyFromSourceModal({
           <h3 className="text-base font-semibold text-[#1F1D1B]">
             {step === 1
               ? "Copy from Sales / Consignment Order"
-              : `Pick lines to copy from ${sourceType} ${resolvedSourceNo}`}
+              : // The doc number already carries its own prefix (SO-2604-333 /
+                // CO-…), so prepending sourceType printed "SO SO-2604-333"
+                // (owner 2026-07-17: 「SO SO?」). Only add the type when the
+                // number doesn't already announce it (blank / odd legacy refs).
+                `Pick lines to copy from ${
+                  resolvedSourceNo.toUpperCase().startsWith(`${sourceType}-`)
+                    ? resolvedSourceNo
+                    : `${sourceType} ${resolvedSourceNo}`
+                }`}
           </h3>
           <button
             type="button"

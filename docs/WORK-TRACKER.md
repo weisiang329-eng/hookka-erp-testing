@@ -9,6 +9,234 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-17 — ✅ RM 750 special-order backfill CLOSED on prod (DO-judgment) — owner re-sends 6 Houzs invoices
+**Owner: 「直接上 prod。你重发」 + 2 unshipped lines 「写到 SO 线上」. DONE + reconciled.**
+- **6 invoices corrected via `PUT /api/invoices/:id {priceEdits}`** (the tested GL-restate
+  path) = **+RM 540**: INV-2606-082 +100, -087 +50, -001 +50, -163 +160, -057 +50, -136 +130.
+- **5 SOs re-priced via `POST /backfill-special-order-surcharge {scope:"all", soNos:[5]}`** =
+  9 lines / **+RM 750** (includes the 2 never-shipped lines: SO-2605-121 line 02 RM50 +
+  SO-2605-275 line 02 Left Drawer RM160 — SO-only, the forward-fix bills them on any future
+  invoice).
+- **Line targeting = DO position-match:** invoice items are 1:1 with their DO's items in the
+  same order, and each DO item carries `productionOrderId = pord-<soId>-<lineNo>`. Matched the
+  exact invoice_item by DO position + verified SKU — robust against the duplicate SKUs in the
+  consolidated invoices (INV-082 had 2008(A)-(K) ×3). All 7 verified before writing.
+- **priceEdits TRAP handled:** these invoice lines had base/divan/leg = 0 with the whole price
+  lumped in unitPriceSen. `priceEdits` REPLACES unit = base+divan+leg+special, so sending
+  special alone would have ZEROED the price. Set base = current unit, special = surcharge →
+  unit = old + surcharge (the phase-2 pattern).
+- 🔴 **MY BUG, CAUGHT BY READ-BACK — logged as the lesson:** I priced the drawer lines from the
+  STATIC `bedframeSpecialOrders` config (Right 15000, Front 12000) but the backend executor
+  uses the LIVE `specials` config (Right **16000**, Front **13000**, Left **16000**). The SO
+  came out RM30 above my invoice total; the reconciliation read caught it. Topped up
+  INV-2606-163 (+RM10) and INV-2606-136 (+RM10). **RULE: price special orders from the SAME
+  source the backend does (loadSpecialsConfig / kv_config `specials`), never the static
+  catalog** — memory already warned "Left/Right Drawer 16000 vs static 15000; Front 13000 vs
+  12000". Now heeded.
+- **FINAL RECONCILIATION VERIFIED:** all 7 invoiced lines lockstep (SO special == invoice
+  special, every one); `GET /backfill-invoiced-plan` → `invoicesToCorrect:0, needsManual:0`.
+  All 6 invoices SENT/unpaid (raising is safe), all customer = Houzs Century (inter-company).
+🔴 **OWNER'S STEP:** re-send the 6 corrected invoices to Houzs (INV-2606-082, -087, -001, -163,
+-057, -136). Sending is his action. **The special-order surcharge backfill is now 100% closed**
+(uninvoiced 78 SOs + invoiced 10 + these 5 = every under-billed SO priced).
+
+## 2026-07-17 — 🔵 RM 720 (not 750): DO-judgment plan BUILT + read-verified — awaiting owner go on the GL writes (SUPERSEDED — executed above)
+**Owner ask: 「用 DO 判断的方法我已經找到,可以做」.** Cracked it: every invoice carries
+ONE `deliveryOrderId`, and each DO line carries `productionOrderId` = `pord-<soId>-<lineNo>`.
+So the DO deterministically says WHICH invoice a given special SO line shipped on — no
+guessing. Resolved all 9 owed lines across the 5 SOs (all customer = **Houzs Century**,
+inter-company). All 6 target invoices are **SENT, paidAmount 0, 0 payments** → safe to raise
+(no reconciliation break). Prices from live kv_config: Divan Curve 5000, Divan Top Fully
+Cover 5000, Right Drawer 15000, Front Drawer 12000, Left Drawer 15000.
+
+**7 lines → a definite issued invoice (RM 520):**
+| SO | line | option | RM | → invoice (via its DO) |
+|----|------|--------|----|----|
+| SO-2605-234 | 01 Divan Curve | 50 | INV-2606-082 (DO-2606-001) |
+| SO-2605-234 | 03 Divan Curve | 50 | INV-2606-082 (DO-2606-001) |
+| SO-2605-234 | 02 Divan Curve | 50 | INV-2606-087 (DO-2606-007) |
+| SO-2605-185 | 02 Divan Top Fully Cover | 50 | INV-2606-001 (DO-2606-002) |
+| SO-2606-135 | 01 Right Drawer | 150 | INV-2606-163 (DO-2606-088) |
+| SO-2605-121 | 01 Divan Curve (PC151-14) | 50 | INV-2606-057 (DO-2605-053) |
+| SO-2605-275 | 01 Front Drawer (PC151-01) | 120 | INV-2606-136 (DO-2606-062) |
+
+Per-invoice delta: 082 +100, 087 +50, 001 +50, 163 +150, 057 +50, 136 +120.
+(The planner refused these as "two live invoices"/"no unmatched line" because it matched by
+SKU only; the DO line-number + fabric code disambiguate cleanly.)
+
+**2 lines → NEVER delivered, no invoice to correct (RM 200):**
+- SO-2605-121 line 02 (1007-(Q) **PC151-16** Divan Curve, RM 50) — line 01 shipped on
+  DO-2605-053; line 02 never did. SO is INVOICED (closed).
+- SO-2605-275 line 02 (1007-(Q) **PC151-01** Left Drawer, RM 150) — SO is READY_TO_SHIP;
+  only line 01 shipped (INV-2606-136). Line 02 not yet delivered.
+  These have NO issued invoice. Correct action = price the SO LINE only; the forward-fix
+  (production_order_id on invoice_items) makes any FUTURE invoice bill it automatically.
+
+**EXECUTION PATH (per prior phase-2, tested): for each of the 7 lines** → `PUT /api/invoices/
+:id {priceEdits}` (the ONLY GL-restating path on a SENT invoice) to add the surcharge to that
+specific line, THEN re-price the SO via `POST /backfill-special-order-surcharge {scope:"all",
+soNos:[...]}` so SO and invoice stay in lockstep. For the 2 unshipped lines → SO re-price only.
+🔴 **AWAITING OWNER GO** — issued inter-company GL, highest-risk area; every prior phase was
+rehearsed on staging then prod with per-phase approval, and the write hits the permission
+classifier. Read-only investigation is COMPLETE; only the irreversible writes remain.
+
+## 2026-07-17 — 🟢 Heartbeat made reliable: CF Cron Worker DEPLOYED — owner owes 1 secret command
+**Owner ask: 「心跳每 1-3.5 小时(GitHub 不跑) 做」.**
+Root cause was never the code — it was the DRIVER. GitHub Actions cron drifted
+1–3.5h (measured 2026-07-16), starving every agent + delaying the morning brief.
+The heartbeat is the universal fallback for the punctual 07:00 report / 07:30
+delivery crons, so making it reliable makes the whole agent+report system reliable.
+
+**Built + DEPLOYED a sibling Cloudflare Cron Worker** `agent-heartbeat-worker/`
+(CF cron fires on time; Pages can't host a cron trigger — Workers-only, per the
+root wrangler.toml note; mirrors `mail-inbound-worker`). Live at
+`https://hookka-agent-heartbeat.houzs-erp.workers.dev`, cron `*/30 * * * *`
+(tighter than hourly on purpose: prompt fallback + faster backlog drain; the
+endpoint self-throttles real agent runs to the 1h min). GitHub yml KEPT as a
+belt-and-suspenders fallback (endpoint dedups → double-fire is a no-op).
+
+🔴 **OWNER OWES ONE COMMAND** — the worker is deployed but the beat 401s until the
+shared secret is set (I must not handle the secret value). Verified live: hitting
+the worker URL returns exactly `CRON_SECRET unset or too short`. From
+`agent-heartbeat-worker/`:
+```
+npx wrangler secret put CRON_SECRET      # paste the SAME value as the ERP's CRON_SECRET
+```
+If the original value isn't to hand (GitHub/CF secrets can't be read back),
+rotate on BOTH sides: `wrangler pages secret put CRON_SECRET` on the ERP Pages
+project + the worker + the GitHub repo secret. Full runbook in the worker README.
+Verify: `curl https://hookka-agent-heartbeat.houzs-erp.workers.dev/` → `beat ok`.
+
+## 2026-07-17 — ✅ ANN's docks CLEARED on prod (owner approved the write) — RM 291.91
+**Owner approved「你批准,我来跑重算」.** Ran the plan below via the system's own
+`POST /auto-from-punch` (14 days) + 1 DELETE (07-11, no punch). Read-back confirms ANN
+now has **exactly ONE dock left: 06-30 = 0.22h (AUTO)** — her real 13-min shortfall.
+**21.48h of wrong docks removed = RM 291.91** (at her 1359 sen/h). That is MORE than the
+RM 233.58 the owner remembered, because 233.58 counted only July's 13 rows; it excluded
+June's 06-29 (0.5h) and the wrong portion of 06-30 (1.72→0.22). No refund needed — no
+payslip was ever generated, so she is simply paid right at the first July run. 06-30 kept
+its AUTO tag so a future settle can still manage it. ✅ DONE.
+
+--- original plan (kept for the audit trail) ---
+**Owner ask: 「ANN 被多扣的 RM 233.58 要」.**
+
+✅ **Code fixed + on prod** (BUG-2026-07-17-007, commit 80dc540f): the first fix caught
+only the live-punch path; the MONTHLY settle still used the global 9h. Both now share
+`rulesForWorkerHours`. **Deleting her docks before this would have let the next settle
+re-create them silently.**
+
+🔴 **The premise is wrong, and the owner needs to hear it: NOTHING HAS BEEN DOCKED YET.**
+`/api/payslips?period=2026-07` → **0 payslips**; 2026-06 → **0 payslips**. No payslip has
+ever been generated for either month, so no money has left. The RM 233.58 is a PENDING
+deduction sitting in `payroll_hour_deductions` waiting for the first payroll run. Remove
+the rows before payroll and she is simply paid right — there is nothing to refund.
+
+**Verified per-day against her real punches (not assumed) — 15 AUTO rows, 0 MANUAL:**
+- **2026-07 (13 rows / 19.48h) — ALL WRONG.** Her punches are 08:00–18:00 → 9h regular →
+  0 short against her 7.5h day. Note: **0 short against the OLD global 9h too** — so
+  these rows are NOT explained by the 7.5-vs-9 bug on today's data. They are STALE:
+  written at punch time from an earlier clock-out, and the attendance was later keyed to
+  18:00 with nothing recomputing the dock. (Today, 07-17, she punched out 16:31 — that IS
+  the shape the 7.5h bug bites, and the fix now returns 0 for it.)
+- **2026-06 (2 rows / 2.22h) — MIXED. This is why a blanket delete was wrong:**
+  - 06-29 docked 0.5h →真 0 → remove.
+  - 06-30 docked 1.72h (08:11–16:32) → **genuinely 0.22h short** → must be CORRECTED to
+    0.22, NOT deleted.
+**Plan (dry-run built + verified, not executed):** 14 days → `POST /auto-from-punch`
+(the system's own guarded self-heal: recomputes with the fixed rules, deletes a 0,
+overwrites 0.22, keeps source=AUTO so a future settle can still manage it — a manual
+POST would tag it MANUAL and permanently freeze it). 1 day (07-11, no punch record at
+all) → plain DELETE: no clock-out = no evidence of shortfall, per the helper's own
+guard; an absence is settled by the monthly salary deduction instead.
+🔴 **BLOCKED:** the prod write was refused by the permission classifier. Not worked
+around. Owner must either approve the write or click Undo on those rows in the Labor
+Cost review himself. **No urgency — the docks only bite when payroll is first run.**
+Do NOT reach for `POST /settle-period` as a shortcut: it would recompute ALL 42 workers
+(30 other AUTO docks) from today's data and could silently ADD docks nobody approved.
+
+## 2026-07-18 — 🟡 ISO 9001 + MFRS gap analyses DELIVERED (owner「跟著 ISO standard」+「accounting 根據 MFRS」)
+Owner confirmed **ISO 9001** (quality) and wants **accounting per MFRS**; both asked as a **gap
+report first** (not a blind rebuild). Ran 4 parallel read-only Explore agents over the whole
+codebase, synthesized two code-grounded documents:
+- `docs/ISO-9001-GAP-ANALYSIS.md` — 11 clauses mapped. Strong: 8.5.2 doc-chain traceability, 8.4
+  supplier performance/3-way match, 9.1 monitoring. Gaps: QC release gate (8.6), formal NCR (8.7),
+  CAPA effectiveness-verification (10.2), document version/approval control (7.5), calibration
+  (7.1.5), competence/training (7.2), internal-audit program (9.2), management-review record (9.3),
+  risk register (6.1), AVL approval (8.4). Suggested P1: NCR + CAPA closure + doc control + internal
+  audit + mgmt review.
+- `docs/MFRS-GAP-ANALYSIS.md` — accounting is **strong**: hash-chained double-entry GL, revenue on
+  delivery (MFRS 15), FIFO/periodic inventory, all 4 statements, fixed-asset depreciation w/ GL
+  posting, SST to real liability accounts, AP realised FX. Gaps: inventory NRV/obsolescence (102),
+  receivables ECL (9), income/deferred tax (112), warranty provision (137), payroll GL automation +
+  statutory-payable split (119), cash-flow MFRS-107 classification + SOCIE (101), MYR-only AR +
+  no FX retranslation (121), no DB-level ledger immutability trigger. Suggested P1 (the ones that
+  change reported numbers): NRV, ECL, payroll GL, deposit/contract-liability — **to be scoped WITH
+  the accountant** (ERP builds the mechanism, the accountant sets the rates/policy).
+**NOTHING built — assessment only.** Owner picks which gaps to build; each is mockup→approve→
+staging→prod, and the MFRS P1 items need the accountant's rates before coding.
+
+## 2026-07-18 — ✅ Agent health check + Employee/Service starvation FIXED (owner「確保 agent 有做到」)
+**Owner asked to confirm the production + delivery agents are actually working.** They ARE:
+production-brief ran 07-17 08:01, production-proposals 07-17 20:20 (cleared 872 due dates),
+delivery-run 07-17 09:03. Both healthy.
+**But found a real bug: Employee + Service agents ran ONCE all July** (Production 48×,
+Delivery 11×, Employee/Service 1× each). Root cause was reach, not the digests (run-now fires
+them fine in ~1.3s): the beat is one sequential Worker invocation and the two cheap read-only
+digests sat AFTER the backlog drain; while the drain was per-row it killed the Worker before
+them nearly every beat. **Fixed (BUG-2026-07-17-011, deployed): reordered the beat to reap →
+Employee → Service → drain → generation**, so the cheapest agents run first and nothing
+downstream can starve them. Verified the reordered beat fires clean post-deploy.
+**Made every agent current tonight** via `POST /api/agents/run-now`: employee + service
+(07-18 01:52) and production-learning (07-18 02:02) all ran green. All six agents now healthy.
+**Heartbeat cadence traced:** GitHub fires it every 60–205 min (a 205-min hole on 07-17) vs
+the intended 20 — the reason `agent-heartbeat-worker/` (reliable CF cron) exists. That worker
+is deployed and waiting on the owner's one `wrangler secret put CRON_SECRET`.
+✅ **Payslip `(26 x 9)` label lie — DONE + LIVE-verified (BUG-2026-07-17-012).** Owner asked to
+finish all pending, so completed it: label now reads each worker's real `(workingDays x
+workingHoursPerDay)`. employees.tsx looks hours up from the workers prop (no backend change);
+the PDF path reads it off the worker via GET /:id. Verified live: ANN's May payslip now
+`2650 / (26 x 7.5) = 13.59` (matches the rate); 9h workers still `(26 x 9)`.
+
+## 2026-07-17 — ✅ Owner final batch COMPLETE (「其他兩個也處理掉」 + earlier asks)
+All of the owner's 2026-07-17 batch are now shipped or cleanly handed off:
+1. ✅ Brief recipients → you + Violet (sent:2); **owner added Lim 2026-07-18 → now 3**
+(list lives in `kv_config['daily_report_recipients']` as a BARE JSON array — this repo is
+PUBLIC, so staff emails must never be committed here; edit the DB row, not code).
+2. ✅ ANN RM 291.91 cleared on prod
+(1 genuine 0.22h kept). 3. ✅ Heartbeat CF Cron Worker deployed (owner owes 1 `wrangler
+secret put CRON_SECRET`). 4. ✅ RM 750 special-order backfill closed via DO-judgment
+(6 Houzs invoices + 5 SOs, reconciled; owner re-sends). 5. ✅ Sticky tick column
+(BUG-008). 6. ✅ Employee Master 「歪了」 (below).
+🟡 **Deferred, NOT in the batch (flagged so it's not lost):** the payslip label
+`(26 x 9)` is hardcoded in generate-payslip-pdf.ts:178 + employees.tsx:~7561 while the
+rate is computed from the worker's real hours (ANN = 2650/(26×7.5) = 13.59). The label
+lies for any non-9h worker. Fix needs `workingHoursPerDay` threaded into the payslip
+payload + PDF — a small payload change, so spun off as its own task rather than
+scope-crept here.
+
+### 2026-07-17 — 🔵 Owner batch (3 asks, screenshots) — Employee Master / payroll
+Logged before working (multi-part rule). Owner's words + what each means:
+1. ✅ 「歪了」 — Employee Master INLINE EDIT row was misaligned: the resign-date input
+   (01/07/2026) and the status dropdown overflowed / clipped out of the 110px Status
+   column. FIXED (BUG-2026-07-17-010): widened Status to 150px, both controls
+   w-full min-w-0, "Resigned on" label moved to its own line. Deployed to prod.
+2. 「確保resign了 就payroll 出去」 — once a worker is RESIGNED they must drop out of
+   payroll. Verify (resign-lockout.test.mjs + the payroll active-only filter exist —
+   check before assuming it's broken).
+3. 🔴 **「我記得ann是工作少1.5小時的」「沒有跟?」 — CONFIRMED REAL, and it costs her money.**
+   ANN (EMP-004) has `workingHoursPerDay = 7.5`. The PAY side honours it
+   (`hourlyRate = payrollDailyRateSen / worker.workingHoursPerDay` → RM 2650/(26×7.5) =
+   RM 13.59/hr, payslips.ts:581 + :921). The DOCK side does NOT: short-hours are measured
+   against the GLOBAL constant `HOOKKA_ATTENDANCE.standardWorkMin = 9*60`
+   (attendance-rules.ts:45), which is not per-employee. **9 − 7.5 = 1.5 → she is marked
+   "1.5h short" EVERY working day** (01,02,03,04,06,07,08,09,10,11,13,15 Jul …) and docked
+   −RM 233.58 (13d). Blast radius measured on prod: 42 workers — 38 at 9h (unaffected),
+   3 at 0h (test accts), **ANN the only one at 7.5**. Fix = the dock must read the
+   employee's own hours, same source the hourly rate already uses.
+   Related display bug: "Hourly Rate: RM2650 / **(26 x 9)** = RM13.59" — the `(26 x 9)` is
+   HARDCODED in `generate-payslip-pdf.ts:178` + `employees.tsx:7561` while the number shown
+   is computed from 7.5 (2650/195 = 13.59, NOT 2650/234 = 11.32). The label lies.
+
 ## 2026-07-17 — 🟢 MONEY fix LIVE (RM 8,060) · 🔵 BACKFILL SO+SI = NEXT · 🔴 invoice PO mis-match
 **Code fix SHIPPED + LIVE + verified** (merge `efbba63e`): scanned customer POs never charged
 the special-order surcharge because the scan clients POST /api/sales-orders directly without

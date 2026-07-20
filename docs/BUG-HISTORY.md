@@ -34,6 +34,178 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-17-012 — payslip "Hourly Rate" formula hardcoded "(26 x 9)" — lied for non-9h workers `payroll` `ui-frontend` `pdf` 🟢
+**Display-only (the rate was always correct), fixed as part of the ANN short-hours work
+(BUG-2026-07-17-006/-007).** The payslip label read `basic / (26 x 9) = hourlyRate`, but the
+rate is computed from each worker's own `workingHoursPerDay`. ANN (7.5h) showed
+`2650 / (26 x 9) = 13.59` — yet 2650/(26×9)=11.32; the shown 13.59 is 2650/(26×7.5). The
+divisor text lied for anyone not on 9h/day.
+**Fix:** label now reads the worker's real hours (`(workingDays x workingHoursPerDay)`).
+- `employees.tsx` Payroll row: hours looked up from the `workers` prop by employeeId (the tab
+  already received it as an unused `_workers`) — no backend change.
+- PDF via `GET /api/payslips/:id`: `workingHoursPerDay` isn't stored on payslips (only the
+  resulting rate is), so it's read off the worker and threaded into `PayslipDetail`; the PDF
+  label uses it. Both fall back to 9 when absent, so older payloads stay safe.
+
+## BUG-2026-07-17-011 — Employee + Service agents ran ONCE all month: the drain starved them `agents` `heartbeat` `scheduling` 🟢
+**Found while confirming the agents run (owner 2026-07-18 01:46, 「確保 production 還有
+delivery agent 有做到」).** Production ran 48× in July and Delivery 11×, but **Employee and
+Service ran exactly ONCE each all month** (last 07-16 14:19, then nothing).
+**Not a code fault in the digests** — firing them by hand (`POST /api/agents/run-now
+{agent:"employee"|"service"}`) succeeded in ~1.3s and returned a full digest. The problem was
+**reach**: the beat is one sequential Worker invocation, and the digests sat AFTER the backlog
+DRAIN. While the drain was per-row (BUG-2026-07-17-004, ~300 serialized round-trips) it killed
+the Worker before the digests on nearly every beat — so the two cheapest, most reliable agents
+were the ones that never ran. BUG-005 moved them above the heavy *generation* but left the
+*drain* in front of them, so the starvation persisted.
+**Fix (agent-heartbeat.ts):** reordered the beat to **reap → Employee digest → Service digest →
+drain → generation**. The two read-only digests now run FIRST (right after the zombie reap),
+so nothing downstream — a fat drain, a runaway generation — can starve them again. The drain
+keeps its overnight/no-8pm-clock behaviour, just below the digests.
+**Also this session:** ran both digests by hand so they're current for 07-18, and traced the
+heartbeat's real firing cadence — GitHub fired it every 60–205 min (a 205-min hole on 07-17)
+vs the intended 20, which is why `agent-heartbeat-worker/` (reliable CF cron) exists. That
+worker still needs the owner's one `wrangler secret put CRON_SECRET`.
+
+## BUG-2026-07-17-010 — resign-date picker clipped out of the Status column `ui-frontend` `employees` 🟢
+**Owner 2026-07-17, screenshot: 「歪了」.** Editing a RESIGNED row on the Employee Master
+stacked a `<select>` plus a native `type="date"` input into a Status column fixed at
+`width: "110px"`. A native date input is ~130px intrinsic, so the resign-date picker
+overflowed and clipped out of the row.
+**Fix (employees.tsx):** Status column → 150px (the read-only view is a compact badge, so
+the extra width is just whitespace); both the select and the date input got
+`w-full min-w-0` so they shrink to the column instead of overflowing; the "Resigned on"
+label moved onto its own line (was inline, competing for the row's width).
+
+## BUG-2026-07-17-009 — priced drawer surcharges from the STATIC catalog, not the LIVE config `money` `pricing` `self-inflicted` 🟢
+**Caught by read-back before any harm reached the customer**, during the RM 750 special-order
+backfill on the 5 DO-judgment SOs.
+**What I did wrong:** built the invoice `priceEdits` using the `bedframeSpecialOrders` array
+read straight off `kv_config.variants-config` (Right Drawer 15000, Front Drawer 12000). But the
+backend's `resolveSpecialOrderPriceSen` / `loadSpecialsConfig` prices from the `specials` key,
+whose LIVE values are Right Drawer **16000**, Front Drawer **13000**, Left Drawer **16000**. So
+the 6 invoices I corrected came out RM30 below the SO the executor then re-priced — a silent
+SO-vs-invoice disagreement of RM10 each on INV-2606-163 and INV-2606-136.
+**How it surfaced:** the executor reported deltaSen 75000 (RM750) while my invoice edits summed
+to RM720. I did NOT trust the round number — the reconciliation read (SO special vs invoice
+special, per line) pinned the two short lines. Topped both up (+RM10 each); final recon shows
+all 7 invoiced lines lockstep and `needsManual:0`.
+**Fix / rule:** when pricing a special order anywhere, read the SAME source the backend writes
+from (`loadSpecialsConfig` → `specials`), never the static `pricing-options.ts` catalog or the
+`bedframeSpecialOrders` display array. Memory `project_invoice_money_path` already warned
+"Left/Right Drawer = 16000 while the static catalog says 15000"; this is that warning coming
+true. The `PUT priceEdits` GL-restate path itself worked correctly — the error was the input
+number, and only read-back verification caught it.
+
+## BUG-2026-07-17-008 — the tick column scrolled away: "2 selected" with no tick in sight `ui-frontend` `data-grid` 🟢
+**Symptom (owner 2026-07-17, Service Orders screenshot):** 「我的 service order 为什么
+明显写着 "2 selected"，可是却没有看到它的勾勾？」 The footer counted 2 selected rows and
+not one tick was visible anywhere on screen.
+**Root cause** — `data-grid.tsx`: the checkbox gutter froze only when a sticky column
+run existed (`stickyOffsets.size > 0 && "sticky left-0 z-20"`). Only **4** grids in the
+whole app declare `sticky: true` (fabrics, production/index, folder-detail, Users). On
+the other **~20 selectable grids** — Service Orders, Sales, Delivery, Invoices,
+Procurement, Products, Accounting… — the gutter was a normal cell, so scrolling right
+carried the ticks off-screen while the footer kept counting them.
+**Fix** — the gutter is now ALWAYS `sticky left-0`. A no-op on grids that never scroll
+sideways; unchanged where a run exists (the offsets already reserved its 32px). The
+`<td>` bg mirror (bg-white / isEven / rowClassName / isSelected) lost the same guard —
+a sticky cell without an opaque row-matched bg lets the scrolling cells bleed through,
+which is exactly what those classes exist to stop.
+**Blast radius checked before shipping** (shared component, ~50 pages): the 4 sticky
+grids are byte-identical; `rowClassName` has 4 consumers (consignment, sales,
+invoices/payments, production) and production already went through the sticky path.
+
+## BUG-2026-07-17-007 — the MONTHLY settle scored ANN against everyone else's day (the half I missed) `payroll` `money` `attendance` 🟢
+**This one is a correction to my own fix**, and worth reading before trusting any
+"fixed" claim in this file.
+BUG-2026-07-17-006 fixed the LIVE PUNCH path (`maybeApplyAutoPunchDock`) so a worker's
+short-hours are scored against her own `workingHoursPerDay`. That fix was real but
+**incomplete**: `POST /payroll-hour-deductions/settle-period` — the path that builds a
+whole month's docks in bulk — ran `toAttendanceRules(resolvePayRulesAsOf(...))`
+straight into `computePunchShortfallHours` with the factory-wide 9h.
+**Why it mattered:** clearing ANN's wrong July docks would have worked exactly once.
+The next settle would have re-created all 13 of them, silently, and the "fixed" note in
+this file would have made the recurrence harder to find, not easier.
+**Fix** — both paths now route rules through the shared pure `rulesForWorkerHours`
+(attendance-deduct.ts): moves only `standardWorkMin` (OT keys off `endMin`), and treats
+0/blank hours as "unset → keep the global day", never "works a zero-hour day".
+`settle-period` now keeps RAW contracted hours instead of pre-defaulting to 9 — the
+To-fill branch wants a 9h fallback, the punch branch wants the effective-dated rules,
+and one pre-defaulted map cannot serve both without letting a stale 9 override a
+changed global shift.
+**Tests** — +5 pinning the helper directly (23/23 in file, 1504 suite-wide), including
+the exact 08:00–16:31 punch, and one asserting the OLD global read still returns 1.5h
+so the regression can't come back unnoticed.
+**RULE (earned twice now):** when a rule is read in more than one place, fix the SHARED
+helper, then grep for every caller. A fix that lands on one of two callers is not a fix
+— it is a fix with a timer on it.
+
+## BUG-2026-07-17-005 — the Production agent was DEAD: the proposals drain was an I/O storm `agents` `production` `perf` `io-storm` `silent-failure` 🟢
+**Symptom (owner 2026-07-17): 「讓我看一下我們的 production agent 和 delivery agent 今天有如實進行嗎?」**
+Delivery had. Production had NOT — and it had been dead for days while the console
+showed it live:
+- `production-proposals` sat at `status='running'`, `finishedAt` NULL after EVERY beat
+  (09:20 → 42min, 11:05 → 42min, both still open when checked). Worker killed mid-run.
+- `production-learning` last ran **43 hours** earlier.
+- `employee-agent` + `service-agent` last ran **28 hours** earlier.
+
+**Root cause:** `applyPendingProposals` awaited **TWO updates PER ROW**. At the
+heartbeat's `limit: 150` that's **~300 strictly serialized DB round-trips**, and the
+drain is the FIRST thing the beat does. It never finished. Because the beat is ONE
+sequential Worker invocation, everything after it starved — a try/catch cannot help,
+the Worker is *killed*, not thrown.
+**Identical root cause to the 2026-07-16 engine fix**, whose own lesson is written in
+this repo: *"~114 strictly serialized DB round-trips, not the engine… Workers CPU time
+EXCLUDES I/O wait, so a query storm can never trip a CPU limit."* That fix batched the
+ENGINE and left this drain — same trap, one file over.
+
+**⚠️ THE TRAP THAT COST ME A DEPLOY — `db.batch()` DOES NOT REDUCE ROUND-TRIPS.**
+My first fix "batched" the 300 statements. It deployed, and the beat kept dying.
+`SupabaseAdapter.batch()` (`lib/supabase-compat.ts`) opens ONE transaction then loops
+`await tx.unsafe(...)` **per statement**. It buys ATOMICITY, not fewer round-trips.
+**Anywhere in this codebase reaching for `db.batch()` expecting a perf win is getting
+none.** Only FEWER STATEMENTS help — which is what CHUNK 40→500 really did.
+
+**Fix:** set-based — `UPDATE job_cards SET dueDate = CASE id WHEN … END WHERE id IN (…)`
+plus one `UPDATE schedule_proposals … WHERE id IN (…)`. Two statements per 200-row
+chunk regardless of row count: 300 round-trips → 2. Then `limit` 150 → 1000 (ceiling
+400 → 2000) — the 150 only existed because the old drain couldn't survive more.
+
+**Verified live on prod, in sequence:**
+1. before: every beat a zombie;
+2. after set-based: `auto-applied 150 queued due date(s), 1022 remaining` — **it FINISHED
+   for the first time**, and revealed the 1,172 backlog the dead drain had piled up;
+3. after the limit raise: **`auto-applied 872 queued due date(s), 0 remaining`** — queue
+   fully cleared in ONE beat, in seconds.
+Employee/Service correctly skipped at 20:11 MYT (they clock off at 20:00), and now run
+BEFORE the heavy generation so a future death can't starve them again.
+
+---
+
+## BUG-2026-07-17-003 — the morning brief emailed NOBODY, every day, and reported ok `agents` `reports` `email` `silent-failure` 🟢 (code) / 🟡 (recipient list = owner's call)
+**Symptom:** every `production-brief` run recorded `status=ok` with summary
+`sent 0 · failed 0`. Nobody ever received the morning brief.
+**Root cause:** `resolveRecipients` fell back to
+`SELECT email FROM users WHERE roleId = 'SUPER_ADMIN'`. But `users.roleId` is a FOREIGN
+KEY into `roles(id)` — seeded ids are `role_super_admin` / `role_read_only` / … — while
+the NAME lives in `users.role` and `roles.name`. **Verified on prod: every user's
+`roleId` is NULL**, and `users.role` holds `SUPER_ADMIN` / `ADMIN` / `READ_ONLY`. So the
+fallback matched ZERO rows, forever. With `DAILY_REPORT_RECIPIENTS` unset, the brief sent
+to nobody — and "no recipients" isn't an error, so the run still reported ok. The silence
+is what hid it.
+**Fix:** match the role NAME through both routes (`users.role` OR `roles.name`), so legacy
+and migrated rows resolve; an empty result now `console.warn`s loudly.
+**⏸ NEEDS THE OWNER before the next 08:00 cron:** the fix resolves to **5 active
+SUPER_ADMINs** — weisiang329@, hookka.manufacturing@, nicochoong93@,
+violet.chan.hookka@, and **chew.acchouzs@gmail.com (appears to be Houzs — a DOWNSTREAM
+fork that copies our system; the brief carries output/overdue/CNC-minute/efficiency
+internals)**. nijammohd12@ is inactive → excluded. Going from "nobody" to "5 people"
+including a possible outsider is the owner's call — offer `DAILY_REPORT_RECIPIENTS` to
+pin the list.
+
+---
+
 ## BUG-2026-07-17-002 — special-order surcharges never charged on SCANNED orders: RM 8,060 under-billed across 66 SOs `money` `pricing` `sales-orders` `invoices` `under-billing` 🟢 code / 🔴 backfill pending
 
 > **STATUS 2026-07-17 — code FIXED + LIVE ON PROD** (merge `efbba63e`).

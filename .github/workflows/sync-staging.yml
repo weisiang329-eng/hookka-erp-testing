@@ -7,14 +7,17 @@ name: Sync prod → staging
 # Triggers:
 #   * workflow_dispatch — manual one-shot. Requires typing `SYNC` in the
 #     confirm input to fire (guard against accidental clicks).
-#   * schedule — nightly at 02:00 SGT (18:00 UTC). Note: GitHub Actions only
-#     runs `schedule:` triggers from the DEFAULT branch (main). While this
-#     file lives on the staging branch, only workflow_dispatch is active.
-#     Once proven, merge to main to enable the cron.
+#   * schedule — nightly at 02:00 SGT (18:00 UTC). GitHub Actions runs this
+#     schedule from the default branch (main).
 #
-# Secrets required (already set):
+# Secrets required:
 #   * PROD_DATABASE_URL    — session pooler URL for prod Supabase
 #   * STAGING_DATABASE_URL — session pooler URL for staging Supabase
+#   * STAGING_WORKER_PIN_HASH — SHA-256 hash of the private staging test PIN
+#
+# Repository variables required (public Supabase project identifiers):
+#   * PROD_SUPABASE_PROJECT_REF
+#   * STAGING_SUPABASE_PROJECT_REF
 #
 # Both URLs MUST use the session pooler (port 5432 on
 # aws-1-<region>.pooler.supabase.com) because GitHub Actions runners are
@@ -65,6 +68,31 @@ jobs:
           echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
           /usr/lib/postgresql/17/bin/pg_dump --version
           /usr/lib/postgresql/17/bin/psql --version
+
+      # Fail closed before pg_dump and, most importantly, before DROP SCHEMA.
+      # Pooler URLs must identify two different Supabase projects and must
+      # match the explicit repository variables. This prevents a swapped or
+      # duplicated secret from ever targeting production as "staging".
+      - name: Validate isolated database targets
+        env:
+          PROD_DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+          STAGING_DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          PROD_SUPABASE_PROJECT_REF: ${{ vars.PROD_SUPABASE_PROJECT_REF }}
+          STAGING_SUPABASE_PROJECT_REF: ${{ vars.STAGING_SUPABASE_PROJECT_REF }}
+        run: node scripts/validate-db-sync-targets.mjs
+
+      # Check both credentials up front. The previous workflow spent two
+      # minutes producing a 300 MB dump before discovering that the staging
+      # password was stale. These are read-only probes.
+      - name: Preflight both database connections
+        env:
+          PROD_URL: ${{ secrets.PROD_DATABASE_URL }}
+          STAGING_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          PGCONNECT_TIMEOUT: '30'
+        run: |
+          psql "$PROD_URL" -v ON_ERROR_STOP=1 -tAc "SELECT 1" | grep -qx 1
+          psql "$STAGING_URL" -v ON_ERROR_STOP=1 -tAc "SELECT 1" | grep -qx 1
+          echo "Both database connections passed read-only preflight."
 
       - name: pg_dump prod (public schema, custom format)
         env:
@@ -131,6 +159,33 @@ jobs:
             --dbname="$STAGING_URL" \
             prod.dump
 
+      # A production snapshot must never carry active credentials into the
+      # public staging site. Clear dashboard sessions, worker sessions/tokens,
+      # and password-reset tokens before staging is reopened to testers.
+      - name: Revoke copied production credentials in staging
+        env:
+          STAGING_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          PGCONNECT_TIMEOUT: '30'
+        run: |
+          psql "$STAGING_URL" -v ON_ERROR_STOP=1 <<'SQL'
+            DO $cleanup$
+            BEGIN
+              IF to_regclass('public.user_sessions') IS NOT NULL THEN
+                EXECUTE 'TRUNCATE TABLE public.user_sessions';
+              END IF;
+              IF to_regclass('public.worker_sessions') IS NOT NULL THEN
+                EXECUTE 'TRUNCATE TABLE public.worker_sessions';
+              END IF;
+              IF to_regclass('public.worker_tokens') IS NOT NULL THEN
+                EXECUTE 'TRUNCATE TABLE public.worker_tokens';
+              END IF;
+              IF to_regclass('public.password_reset_tokens') IS NOT NULL THEN
+                EXECUTE 'TRUNCATE TABLE public.password_reset_tokens';
+              END IF;
+            END
+            $cleanup$;
+          SQL
+
       - name: ANALYZE staging (refresh planner stats after restore)
         env:
           STAGING_URL: ${{ secrets.STAGING_DATABASE_URL }}
@@ -154,29 +209,26 @@ jobs:
           echo "=== Staging row counts ==="
           psql "$STAGING_URL" -c "SELECT (SELECT COUNT(*) FROM job_cards) AS jc, (SELECT COUNT(*) FROM audit_events) AS audit, (SELECT MAX(applied_at) FROM _migrations) AS latest_migration;"
 
-      # Staging is a TEST environment — after cloning prod, set every worker's
-      # phone-portal PIN to the shared test value 123456 so the owner / test
-      # team can log into /worker/login with any empNo + 123456 (owner request
-      # 2026-06-14). Staging-only (uses STAGING_DATABASE_URL). worker_pins stores
-      # an UNSALTED SHA-256 hex of the PIN (see src/api/lib/auth-utils.ts
-      # hashPin); we compute it in-shell so there's no pgcrypto dependency.
-      # must_reset=false so the 6-digit force-reset gate (migration 0079) doesn't
-      # block login. Raw psql bypasses the camelCase→snake_case adapter, so the
-      # real snake_case columns are used (worker_id / pin / updated_at).
-      - name: Set all staging worker PINs to the shared test value (123456)
+      # Staging can still use one owner-controlled test PIN, but neither the
+      # PIN nor its hash belongs in this public repository or Actions logs.
+      # STAGING_WORKER_PIN_HASH must be a 64-character lowercase SHA-256 hex.
+      - name: Set private staging worker test PIN
         env:
           STAGING_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          STAGING_WORKER_PIN_HASH: ${{ secrets.STAGING_WORKER_PIN_HASH }}
           PGCONNECT_TIMEOUT: '30'
         run: |
-          HASH=$(printf '123456' | sha256sum | cut -d' ' -f1)
-          echo "SHA-256(123456) = $HASH"
-          psql "$STAGING_URL" -v ON_ERROR_STOP=1 -v pinhash="$HASH" <<'SQL'
+          if [[ ! "$STAGING_WORKER_PIN_HASH" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::STAGING_WORKER_PIN_HASH must be a 64-character lowercase SHA-256 hash."
+            exit 1
+          fi
+          echo "::add-mask::$STAGING_WORKER_PIN_HASH"
+          psql "$STAGING_URL" -v ON_ERROR_STOP=1 -v pinhash="$STAGING_WORKER_PIN_HASH" <<'SQL'
             INSERT INTO worker_pins (worker_id, pin, updated_at, must_reset)
             SELECT id, :'pinhash', now()::text, false FROM workers
             ON CONFLICT (worker_id) DO UPDATE
               SET pin = EXCLUDED.pin, updated_at = EXCLUDED.updated_at, must_reset = false;
           SQL
-          echo "=== worker_pins rows now (= every worker, PIN 123456): ==="
-          psql "$STAGING_URL" -c "SELECT COUNT(*) AS pins FROM worker_pins;"
-          echo "=== sample ACTIVE empNos to log in with (PIN 123456): ==="
-          psql "$STAGING_URL" -c "SELECT emp_no, name, department_code FROM workers WHERE status = 'ACTIVE' ORDER BY emp_no LIMIT 10;"
+          psql "$STAGING_URL" -v ON_ERROR_STOP=1 -tAc \
+            "SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END FROM worker_pins" | grep -qx 1
+          echo "Private staging worker PIN applied; no employee data was printed."

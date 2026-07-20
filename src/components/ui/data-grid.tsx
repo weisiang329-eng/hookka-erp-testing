@@ -2909,10 +2909,16 @@ export function DataGrid<T extends Record<string, any>>({
                 <th
                   className={cn(
                     "px-2 py-1.5 text-center bg-[#F0ECE9]",
-                    // When a sticky column run exists, the gutter is the first
-                    // frozen cell (left:0) — without this it scrolls away and
-                    // the 32px the offsets reserve for it leaks ("走漏风").
-                    stickyOffsets.size > 0 && "sticky left-0 z-20",
+                    // The gutter is ALWAYS the first frozen cell (left:0).
+                    // It used to freeze only when a sticky column run existed,
+                    // but only 4 grids declare one — on the other ~20 selectable
+                    // grids the tick column simply scrolled out of sight, so the
+                    // footer said "2 selected" while the owner could not see a
+                    // single tick (his Service Orders screenshot, 2026-07-17).
+                    // Freezing it is a no-op on grids that never scroll
+                    // sideways, and it also stops the 32px the offsets reserve
+                    // for it from leaking ("走漏风") where a run does exist.
+                    "sticky left-0 z-20",
                   )}
                   style={{ width: "32px", minWidth: "32px", maxWidth: "32px" }}
                 >
@@ -3089,15 +3095,15 @@ export function DataGrid<T extends Record<string, any>>({
                         <td
                           className={cn(
                             "p-2 text-center cursor-pointer",
-                            // Freeze the gutter alongside the sticky run with an
-                            // opaque, row-matched bg — a transparent sticky cell
-                            // lets the scrolling cells show through (the leak the
-                            // owner saw beside Send / SO ID). Mirrors the data
-                            // sticky cells' bg logic below.
-                            stickyOffsets.size > 0 && "sticky left-0 z-10 bg-white",
-                            stickyOffsets.size > 0 && isEven && "bg-[#FAFAFA]",
-                            stickyOffsets.size > 0 && rowClassName?.(row),
-                            stickyOffsets.size > 0 && isSelected && "!bg-[#CCE0FF]",
+                            // Freeze the gutter with an opaque, row-matched bg —
+                            // a transparent sticky cell lets the scrolling cells
+                            // show through (the leak the owner saw beside Send /
+                            // SO ID). Mirrors the data sticky cells' bg logic
+                            // below, and must stay in step with the <th> above.
+                            "sticky left-0 z-10 bg-white",
+                            isEven && "bg-[#FAFAFA]",
+                            rowClassName?.(row),
+                            isSelected && "!bg-[#CCE0FF]",
                           )}
                           style={{ minHeight: "40px", width: "32px", minWidth: "32px", maxWidth: "32px" }}
                           onClick={(e) => {

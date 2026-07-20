@@ -126,19 +126,115 @@ app.post("/heartbeat", async (c) => {
     console.warn("[agents/heartbeat] stuck-run reap failed:", err);
   }
 
-  // ── 1 · Backlog drain FIRST ────────────────────────────────────────────────
-  // Applying queued due dates is the light, high-value work; generating fresh
-  // proposals is the heavy engine run. It used to be the other way round, so a
-  // heavy generation that blew the Worker's limits killed the whole beat before
-  // a single due date was written — the backlog grew to 1,700 while the console
-  // said full-auto (owner 2026-07-16). Drain first: even if generation dies
-  // later this beat, the queue still moved.
-  // NOT clocked off at 8pm, unlike the agents' decision-making. "下班" means the
-  // agent stops DECIDING things overnight — but the drain decides nothing: it
-  // only finishes writing due dates the engine already worked out during the
-  // day. Holding a queued write until 8am just means the owner finds the board
-  // still half-empty in the morning (owner 2026-07-16: "1598條為什麼不是順著
-  // clear，也是要8點?"). Let it finish overnight; the board is complete by then.
+  // ── 1 · CHEAP, INDEPENDENT DIGESTS FIRST (before ANY heavy work) ─────────────
+  // These two are read-only count queries — milliseconds each (measured ~1.3s on
+  // prod via run-now). The beat runs sequentially in ONE Worker invocation, so
+  // anything heavier that dies mid-run (Worker CPU/subrequest limit — a kill,
+  // which try/catch cannot save) takes everything AFTER it down too.
+  //
+  // History (BUG-2026-07-17-005/-011): these first sat at the BOTTOM, after the
+  // heavy proposals generation, and were dead for 28h. Moving them above the
+  // GENERATION wasn't enough — the backlog DRAIN still sat in front of them, and
+  // while the drain was per-row (BUG-2026-07-17-004, ~300 serialized round-trips)
+  // it killed the beat before the digests EVERY time: Employee + Service ran just
+  // ONCE in all of July while Production ran 48×. The drain is set-based now, but
+  // the durable fix is ordering: the two cheapest, highest-certainty read-only
+  // digests run FIRST — right after the zombie reap — so NOTHING downstream (a
+  // fat drain, a runaway generation) can ever starve them again. The drain and
+  // generation follow; if either dies, it costs only itself.
+  // Employee daily digest — the Employee agent's read-only run (owner 0716).
+  // Fires once per working day after 07:00 MYT: recomputes the anomaly counts
+  // and refreshes the console snapshot. Idempotent (overwrites the snapshot),
+  // so the once-a-day guard need not be exact around midnight.
+  try {
+    const mytE = new Date(Date.now() + 8 * 3600 * 1000);
+    const hourE = mytE.getUTCHours();
+    const todayE = mytE.toISOString().slice(0, 10);
+    if (hourE >= 7 && hourE < 20 && !(await isAgentPaused(db, "EMPLOYEE"))) {
+      const already = await db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM agent_runs WHERE agent = 'employee-agent' AND status <> 'error' AND substr(started_at,1,10) = ?",
+        )
+        .bind(todayE)
+        .first<{ n: number | string }>();
+      if ((Number(already?.n) || 0) === 0) {
+        await recordAgentRun(db, "employee-agent", async (run) => {
+          const digest = await runEmployeeDigest(db);
+          await db
+            .prepare(
+              `INSERT INTO kv_config (key, value) VALUES ('employee-digest', ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+            )
+            .bind(
+              JSON.stringify({
+                date: digest.date,
+                counts: digest.counts,
+                generatedAt: new Date().toISOString(),
+              }),
+            )
+            .run()
+            .catch(() => {});
+          run.setSummary(
+            `${digest.date} · absent ${digest.counts.absent} · late ${digest.counts.late} · pending approvals ${digest.counts.pendingApprovals} · low-eff ${digest.counts.lowEfficiency} (daily)`,
+          );
+          ran.push({ task: "employee-agent", reason: "daily digest", summary: "employee digest" });
+          return digest;
+        });
+      }
+    }
+  } catch (err) {
+    console.error("[agents/heartbeat] employee digest failed:", err);
+  }
+
+  // Service (after-sales) daily digest — same once-per-working-day cadence.
+  try {
+    const mytS = new Date(Date.now() + 8 * 3600 * 1000);
+    const hourS = mytS.getUTCHours();
+    const todayS = mytS.toISOString().slice(0, 10);
+    if (hourS >= 7 && hourS < 20 && !(await isAgentPaused(db, "SERVICE"))) {
+      const already = await db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM agent_runs WHERE agent = 'service-agent' AND status <> 'error' AND substr(started_at,1,10) = ?",
+        )
+        .bind(todayS)
+        .first<{ n: number | string }>();
+      if ((Number(already?.n) || 0) === 0) {
+        await recordAgentRun(db, "service-agent", async (run) => {
+          const digest = await runServiceDigest(db);
+          await db
+            .prepare(
+              `INSERT INTO kv_config (key, value) VALUES ('service-digest', ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+            )
+            .bind(
+              JSON.stringify({
+                date: digest.date,
+                counts: digest.counts,
+                generatedAt: new Date().toISOString(),
+              }),
+            )
+            .run()
+            .catch(() => {});
+          run.setSummary(
+            `${digest.date} · new cases ${digest.counts.newCases} · untriaged ${digest.counts.untriaged} · QC fails ${digest.counts.qcFails} (daily)`,
+          );
+          ran.push({ task: "service-agent", reason: "daily digest", summary: "service digest" });
+          return digest;
+        });
+      }
+    }
+  } catch (err) {
+    console.error("[agents/heartbeat] service digest failed:", err);
+  }
+
+  // ── 2 · Backlog drain (after the cheap digests, before the heavy generation) ─
+  // Applying queued due dates is high-value but heavier than the digests, so it
+  // sits BELOW them (they must never be starved by it — see BUG-2026-07-17-011)
+  // and ABOVE the generation (even if generation dies this beat, the queue still
+  // moved — owner 2026-07-16: the board must not sit half-cleared till morning).
+  // NOT clocked off at 8pm: the drain decides nothing, it only finishes writing
+  // due dates the engine already worked out, so it runs overnight and the board
+  // is complete by 8am ("1598條為什麼不是順著 clear，也是要8點?").
   try {
     if (await isAutoApproveOn(db, "PRODUCTION")) {
       const pend = await db
@@ -147,7 +243,10 @@ app.post("/heartbeat", async (c) => {
         .first<{ n: number | string }>();
       if ((Number(pend?.n) || 0) > 0) {
         await recordAgentRun(db, "production-proposals", async (run) => {
-          const a = await applyPendingProposals(db, { decidedBy: "AGENT_AUTO", limit: 150 });
+          // Set-based (BUG-2026-07-17-004): 1000 rows ≈ 10 round-trips, not 2000.
+          // The beat may only fire every 1-3.5h in practice (GitHub drops the
+          // schedule), so one beat should be able to finish a big backlog.
+          const a = await applyPendingProposals(db, { decidedBy: "AGENT_AUTO", limit: 1000 });
           const summary = `auto-applied ${a.approved} queued due date(s), ${a.remainingPending} remaining (heartbeat drain)`;
           run.setSummary(summary);
           ran.push({ task: "production-proposals", reason: "backlog drain", summary });
@@ -233,90 +332,6 @@ app.post("/heartbeat", async (c) => {
     console.error("[agents/heartbeat] param sweep failed:", err);
   }
 
-  // Employee daily digest — the Employee agent's read-only run (owner 0716).
-  // Fires once per working day after 07:00 MYT: recomputes the anomaly counts
-  // and refreshes the console snapshot. Idempotent (overwrites the snapshot),
-  // so the once-a-day guard need not be exact around midnight.
-  try {
-    const mytE = new Date(Date.now() + 8 * 3600 * 1000);
-    const hourE = mytE.getUTCHours();
-    const todayE = mytE.toISOString().slice(0, 10);
-    if (hourE >= 7 && hourE < 20 && !(await isAgentPaused(db, "EMPLOYEE"))) {
-      const already = await db
-        .prepare(
-          "SELECT COUNT(*) AS n FROM agent_runs WHERE agent = 'employee-agent' AND status <> 'error' AND substr(started_at,1,10) = ?",
-        )
-        .bind(todayE)
-        .first<{ n: number | string }>();
-      if ((Number(already?.n) || 0) === 0) {
-        await recordAgentRun(db, "employee-agent", async (run) => {
-          const digest = await runEmployeeDigest(db);
-          await db
-            .prepare(
-              `INSERT INTO kv_config (key, value) VALUES ('employee-digest', ?)
-               ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-            )
-            .bind(
-              JSON.stringify({
-                date: digest.date,
-                counts: digest.counts,
-                generatedAt: new Date().toISOString(),
-              }),
-            )
-            .run()
-            .catch(() => {});
-          run.setSummary(
-            `${digest.date} · absent ${digest.counts.absent} · late ${digest.counts.late} · pending approvals ${digest.counts.pendingApprovals} · low-eff ${digest.counts.lowEfficiency} (daily)`,
-          );
-          ran.push({ task: "employee-agent", reason: "daily digest", summary: "employee digest" });
-          return digest;
-        });
-      }
-    }
-  } catch (err) {
-    console.error("[agents/heartbeat] employee digest failed:", err);
-  }
-
-  // Service (after-sales) daily digest — same once-per-working-day cadence.
-  try {
-    const mytS = new Date(Date.now() + 8 * 3600 * 1000);
-    const hourS = mytS.getUTCHours();
-    const todayS = mytS.toISOString().slice(0, 10);
-    if (hourS >= 7 && hourS < 20 && !(await isAgentPaused(db, "SERVICE"))) {
-      const already = await db
-        .prepare(
-          "SELECT COUNT(*) AS n FROM agent_runs WHERE agent = 'service-agent' AND status <> 'error' AND substr(started_at,1,10) = ?",
-        )
-        .bind(todayS)
-        .first<{ n: number | string }>();
-      if ((Number(already?.n) || 0) === 0) {
-        await recordAgentRun(db, "service-agent", async (run) => {
-          const digest = await runServiceDigest(db);
-          await db
-            .prepare(
-              `INSERT INTO kv_config (key, value) VALUES ('service-digest', ?)
-               ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-            )
-            .bind(
-              JSON.stringify({
-                date: digest.date,
-                counts: digest.counts,
-                generatedAt: new Date().toISOString(),
-              }),
-            )
-            .run()
-            .catch(() => {});
-          run.setSummary(
-            `${digest.date} · new cases ${digest.counts.newCases} · untriaged ${digest.counts.untriaged} · QC fails ${digest.counts.qcFails} (daily)`,
-          );
-          ran.push({ task: "service-agent", reason: "daily digest", summary: "service digest" });
-          return digest;
-        });
-      }
-    }
-  } catch (err) {
-    console.error("[agents/heartbeat] service digest failed:", err);
-  }
 
       } catch (beatErr) {
         console.error("[agents/heartbeat] background beat failed:", beatErr);

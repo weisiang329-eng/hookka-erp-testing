@@ -65,9 +65,9 @@ test('department-performance route is mounted in api worker', () => {
 
 test('deploy workflow runs tests before build', () => {
   const deployWorkflow = read('.github/workflows/deploy.yml');
-  const testStep = deployWorkflow.indexOf('- run: npm test');
+  const testStep = deployWorkflow.indexOf('- run: npm run test:all');
   const buildStep = deployWorkflow.indexOf('- run: npm run build');
-  assert.ok(testStep > -1, 'npm test step should exist');
+  assert.ok(testStep > -1, 'complete test-suite step should exist');
   assert.ok(buildStep > -1, 'npm run build step should exist');
-  assert.ok(testStep < buildStep, 'npm test should run before npm run build');
+  assert.ok(testStep < buildStep, 'complete test suite should run before npm run build');
 });

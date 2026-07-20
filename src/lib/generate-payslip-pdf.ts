@@ -175,7 +175,7 @@ export function generatePayslipHTML(
   </div>
 
   <div class="formula" style="text-align:center; margin-bottom:12px;">
-    Hourly Rate: ${fmt(payslip.basicSalary)} / (26 x 9) = ${fmtRate(payslip.hourlyRate)}/hr
+    Hourly Rate: ${fmt(payslip.basicSalary)} / (${payslip.workingDays || 26} x ${payslip.workingHoursPerDay ?? 9}) = ${fmtRate(payslip.hourlyRate)}/hr
   </div>
 
   ${ytd ? `

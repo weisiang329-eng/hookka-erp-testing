@@ -6447,10 +6447,15 @@ export type PayslipDetail = {
   period: string; // "YYYY-MM"
   basicSalary: number; // sen
   workingDays: number;
+  // Contracted hours/day for THIS worker (default 9). Additive, display-only —
+  // feeds the payslip "Hourly Rate: basic / (days x hours)" formula label so it
+  // matches the rate (which is already per-worker). Optional so older payloads
+  // that omit it fall back to 9. See BUG-2026-07-17-012.
+  workingHoursPerDay?: number;
   otWeekdayHours: number;
   otSundayHours: number;
   otPHHours: number;
-  hourlyRate: number; // sen - calculated: basicSalary / (26 * 9)
+  hourlyRate: number; // sen - calculated: basicSalary / (workingDays * workingHoursPerDay)
   otWeekdayAmount: number; // hourlyRate * 1.5 * hours
   otSundayAmount: number; // hourlyRate * 2.0 * hours
   otPHAmount: number; // hourlyRate * 3.0 * hours

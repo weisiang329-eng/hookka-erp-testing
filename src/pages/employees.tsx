@@ -3184,9 +3184,13 @@ function EmployeeMasterTab({
           ),
       },
       {
+        // 150px (was 110): the edit UI stacks a <select> AND a native date
+        // input, which needs ~130px — at 110 the resign-date picker overflowed
+        // and clipped out of the row (owner 2026-07-17: 「歪了」). The read-only
+        // view is just a compact badge, so the extra width only adds whitespace.
         key: "status",
         label: "Status",
-        width: "110px",
+        width: "150px",
         render: (_value, row) =>
           editingId === row.id ? (
             <div className="flex flex-col gap-1">
@@ -3195,14 +3199,17 @@ function EmployeeMasterTab({
                 onChange={(e) =>
                   setEditForm((f) => ({ ...f, status: e.target.value }))
                 }
-                className="h-8 rounded-md border border-[#E2DDD8] bg-white px-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                className="h-8 w-full min-w-0 rounded-md border border-[#E2DDD8] bg-white px-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
               >
                 <option value="ACTIVE">ACTIVE</option>
                 <option value="INACTIVE">INACTIVE</option>
                 <option value="RESIGNED">Resigned</option>
               </select>
               {editForm.status === "RESIGNED" && (
-                <div className="flex items-center gap-1">
+                // w-full + min-w-0 lets the native date input shrink to the
+                // column instead of overflowing it; the label sits ABOVE (its
+                // own line) so it never competes for the row's width.
+                <label className="flex flex-col gap-0.5">
                   <span className="text-[11px] text-[#6B7280]">Resigned on</span>
                   <input
                     type="date"
@@ -3210,9 +3217,9 @@ function EmployeeMasterTab({
                     onChange={(e) =>
                       setEditForm((f) => ({ ...f, resignedAt: e.target.value }))
                     }
-                    className="h-8 rounded-md border border-[#E2DDD8] bg-white px-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                    className="h-8 w-full min-w-0 rounded-md border border-[#E2DDD8] bg-white px-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
                   />
-                </div>
+                </label>
               )}
             </div>
           ) : (
@@ -6803,9 +6810,19 @@ function RuleDraftExplainer({ d }: { d: Record<string, string> }) {
   );
 }
 
-function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
+function PayrollTab({ workers }: { workers: Worker[] }) {
   const { toast } = useToast();
   const { confirm, confirmDialog } = useConfirm();
+  // Per-worker contracted hours, for the payslip "Hourly Rate" formula label.
+  // The rate itself is already computed from each worker's real hours; only the
+  // "(26 x 9)" divisor text was hardcoded and lied for anyone not on 9h/day
+  // (e.g. ANN at 7.5). Look the hours up by employeeId so the label matches the
+  // number shown. BUG-2026-07-17-012.
+  const hoursByWorkerId = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const w of workers) if (w.id) m.set(w.id, w.workingHoursPerDay);
+    return m;
+  }, [workers]);
   const now = new Date();
   const [selectedYear, setSelectedYear] = useState(now.getFullYear());
   const [selectedMonth, setSelectedMonth] = useState(now.getMonth() + 1);
@@ -7558,7 +7575,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                                 <h4 className="text-xs font-semibold text-[#6B5C32] uppercase tracking-wide">OT Calculation</h4>
                                 <div className="text-xs space-y-1 text-[#374151] bg-white rounded-lg p-3 border border-[#E2DDD8]">
                                   <p className="text-[#6B7280]">
-                                    Hourly Rate: {fmtSen(r.basicSalary)} / (26 x 9) = <span className="font-semibold text-[#1F1D1B]">{fmtSen(r.hourlyRate)}/hr</span>
+                                    Hourly Rate: {fmtSen(r.basicSalary)} / ({r.workingDays} x {hoursByWorkerId.get(r.employeeId) ?? 9}) = <span className="font-semibold text-[#1F1D1B]">{fmtSen(r.hourlyRate)}/hr</span>
                                   </p>
                                   <hr className="border-[#E2DDD8]" />
                                   <p>

@@ -1074,9 +1074,19 @@ app.get("/:id", async (c) => {
     },
   );
 
+  // Contracted hours/day for the payslip "Hourly Rate" formula label. Not stored
+  // on payslips (only the resulting hourlyRate is), so read it from the worker.
+  // Display-only; a missing worker falls back to 9 in the PDF. BUG-2026-07-17-012.
+  const w = await c.var.DB.prepare(
+    "SELECT workingHoursPerDay FROM workers WHERE id = ?",
+  )
+    .bind(payslip.employeeId)
+    .first<{ workingHoursPerDay: number | null }>();
+  const workingHoursPerDay = Number(w?.workingHoursPerDay) || 9;
+
   return c.json({
     success: true,
-    data: rowToPayslip(payslip),
+    data: { ...rowToPayslip(payslip), workingHoursPerDay },
     ytd,
     monthsIncluded: employeeSlips.length,
   });

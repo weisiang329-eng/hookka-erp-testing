@@ -353,7 +353,12 @@ export async function applyPendingProposals(
   opts: { decidedBy: string; limit?: number },
 ): Promise<ApplyProposalsResult> {
   await ensureProposalTables(db);
-  const limit = Math.max(1, Math.min(400, opts.limit ?? 300));
+  // Raised 400 → 2000 (2026-07-17). The old cap existed because the drain wrote
+  // TWO round-trips PER ROW, so a big limit guaranteed the Worker died mid-run —
+  // which is exactly what was happening. Now it's set-based (2 statements per
+  // 200-row chunk), so 2000 rows costs ~20 round-trips, not 4000. The cap now
+  // bounds the transaction size, not the survivable work.
+  const limit = Math.max(1, Math.min(2000, opts.limit ?? 300));
   const nowIso = new Date().toISOString();
 
   const res = await db
@@ -376,6 +381,23 @@ export async function applyPendingProposals(
   }> = [];
   let skipped = 0;
 
+  // BUG-2026-07-17-004 — this loop used to `await` TWO updates PER ROW. At the
+  // heartbeat's limit of 150 that is ~300 strictly serialized DB round-trips,
+  // and it is the FIRST thing the beat does. It never finished: on prod
+  // production-proposals sat at status='running' with finishedAt NULL after
+  // every single beat (09:20 and 11:05 on 2026-07-17, 40+ min each), the Worker
+  // killed mid-run, and — because the beat is one sequential invocation —
+  // everything after it (Employee + Service digests) never ran for 28 HOURS.
+  //
+  // This is the SAME root cause as the 2026-07-16 engine fix, which the docs
+  // already spell out: "~114 strictly serialized DB round-trips, not the
+  // engine… Workers CPU time EXCLUDES I/O wait, so a query storm can never trip
+  // a CPU limit. When a Worker run hangs for minutes, suspect I/O round-trips,
+  // not CPU." That fix batched the ENGINE and left this drain untouched.
+  //
+  // Collect first, write set-based below (see the note there — batching does
+  // NOT help here; only fewer STATEMENTS do).
+  const pairs: Array<{ jcId: string; proposedDue: string; proposalId: string }> = [];
   for (const row of rows) {
     const jcId = row.jcId ?? row.jc_id;
     const proposedDue = row.proposedDue ?? row.proposed_due;
@@ -383,21 +405,7 @@ export async function applyPendingProposals(
       skipped++;
       continue;
     }
-    await db
-      .prepare(
-        `UPDATE job_cards SET dueDate = ?, updated_at = ?
-          WHERE id = ? AND status = 'WAITING'`,
-      )
-      .bind(proposedDue, nowIso, jcId)
-      .run();
-    await db
-      .prepare(
-        `UPDATE schedule_proposals
-            SET status = 'APPROVED', decided_at = ?, decided_by = ?
-          WHERE id = ?`,
-      )
-      .bind(nowIso, opts.decidedBy, row.id)
-      .run();
+    pairs.push({ jcId, proposedDue, proposalId: row.id });
     applied.push({
       proposalId: row.id,
       jcId,
@@ -407,6 +415,47 @@ export async function applyPendingProposals(
       from: (row.currentDue ?? row.current_due) ?? null,
       to: proposedDue,
     });
+  }
+  if (pairs.length > 0) {
+    // SET-BASED, and it has to be. ⚠️ `db.batch()` DOES NOT REDUCE ROUND-TRIPS
+    // in this codebase — read SupabaseAdapter.batch (lib/supabase-compat.ts):
+    // it opens ONE transaction and then `await tx.unsafe(...)` per statement, in
+    // a loop. It buys atomicity, NOT fewer round-trips. My first attempt at this
+    // fix "batched" the 300 statements and the beat kept dying — same storm,
+    // now wrapped in a transaction. The only thing that actually removes
+    // round-trips is FEWER STATEMENTS, which is exactly what the 2026-07-16
+    // engine fix did (CHUNK 40 → 500 made each query cover more rows).
+    //
+    // So: two statements per chunk, whatever the row count.
+    //   1. one UPDATE … CASE id WHEN … END over every job card
+    //   2. one UPDATE … WHERE id IN (…) over every proposal
+    // 200 rows/chunk ⇒ ~601 binds, far under the 65535 ceiling.
+    const CHUNK = 200;
+    for (let i = 0; i < pairs.length; i += CHUNK) {
+      const slice = pairs.slice(i, i + CHUNK);
+      const caseSql = slice.map(() => "WHEN ? THEN ?").join(" ");
+      const inSql = slice.map(() => "?").join(",");
+      await db
+        .prepare(
+          `UPDATE job_cards
+              SET dueDate = CASE id ${caseSql} END, updated_at = ?
+            WHERE id IN (${inSql}) AND status = 'WAITING'`,
+        )
+        .bind(
+          ...slice.flatMap((p) => [p.jcId, p.proposedDue]),
+          nowIso,
+          ...slice.map((p) => p.jcId),
+        )
+        .run();
+      await db
+        .prepare(
+          `UPDATE schedule_proposals
+              SET status = 'APPROVED', decided_at = ?, decided_by = ?
+            WHERE id IN (${slice.map(() => "?").join(",")})`,
+        )
+        .bind(nowIso, opts.decidedBy, ...slice.map((p) => p.proposalId))
+        .run();
+    }
   }
 
   if (applied.length > 0) {

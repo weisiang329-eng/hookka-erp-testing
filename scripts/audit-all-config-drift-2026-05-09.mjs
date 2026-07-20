@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Read-only audit — for every kv_config-backed dropdown that lands on
 // SO/CO line items, check whether the DB-stored values are a strict
 // subset of what's currently in kv_config.
@@ -19,7 +20,7 @@
 import postgres from "postgres";
 
 const url =
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+  requiredDatabaseUrl("PROD_DATABASE_URL");
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

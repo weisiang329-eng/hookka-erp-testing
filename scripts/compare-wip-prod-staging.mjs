@@ -1,10 +1,11 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Compare wip_items rows between prod and staging to see what's missing.
 import postgres from "postgres";
 
 const stagingUrl =
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
+  requiredDatabaseUrl("STAGING_DATABASE_URL");
 const prodUrl =
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+  requiredDatabaseUrl("PROD_DATABASE_URL");
 
 async function summarize(label, url) {
   const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });

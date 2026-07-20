@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Fabric price summary: B.M-FABR (bedframe) + S.M-FABR (sofa) + S-FABRIC.
 // Outputs per-group min/median/max + a CSV with every code.
 import postgres from "postgres";
@@ -5,7 +6,7 @@ import { writeFileSync, mkdirSync } from "fs";
 import { dirname } from "path";
 
 const sql = postgres(
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",
+  requiredDatabaseUrl("PROD_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 const OUT = "scripts/out/fabric-prices-2026-05-09.csv";

@@ -1,9 +1,10 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Verify overdue-counts endpoint output. Run the same SQL the new endpoint
 // runs and compare against the broader set we'd EXPECT to be overdue.
 import postgres from "postgres";
 
 const url =
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+  requiredDatabaseUrl("PROD_DATABASE_URL");
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

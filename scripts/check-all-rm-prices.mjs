@@ -1,7 +1,8 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Dump latest PO unit price for every raw_materials code, grouped by item_group.
 import postgres from "postgres";
 const sql = postgres(
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",
+  requiredDatabaseUrl("PROD_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 try {

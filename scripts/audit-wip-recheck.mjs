@@ -1,9 +1,10 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Recheck wip_items — UI says 597 rows incl negatives. My earlier audit said
 // 242 rows / 0 negatives. Either DB changed or there's another source.
 import postgres from "postgres";
 
 const url =
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
+  requiredDatabaseUrl("STAGING_DATABASE_URL");
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

@@ -1,8 +1,9 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Query BOTH Supabase DBs to figure out which one the testing site uses.
 import postgres from "postgres";
 
-const dbA = "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
-const dbB = "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+const dbA = requiredDatabaseUrl("STAGING_DATABASE_URL");
+const dbB = requiredDatabaseUrl("PROD_DATABASE_URL");
 
 async function check(label, url) {
   const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });

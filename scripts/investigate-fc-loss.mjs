@@ -1,10 +1,11 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // One-off: connect to staging Supabase and investigate which SOs lost
 // their FC JCs after the backfill. Run via:
 //   node scripts/investigate-fc-loss.mjs
 import postgres from "postgres";
 
 const url =
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
+  requiredDatabaseUrl("STAGING_DATABASE_URL");
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

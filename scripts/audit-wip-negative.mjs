@@ -1,9 +1,10 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Read-only audit: scan wip_items for negative or zero stock_qty.
 // Also cross-checks job_cards.wip_qty for negatives just in case.
 import postgres from "postgres";
 
 const url =
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
+  requiredDatabaseUrl("STAGING_DATABASE_URL");
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

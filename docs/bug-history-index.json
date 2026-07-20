@@ -2,15 +2,38 @@
   "schemaVersion": 1,
   "source": "docs/BUG-HISTORY.md",
   "policyFrom": "2026-07-20",
-  "entryCount": 455,
+  "entryCount": 456,
   "statusCounts": {
-    "Fix in progress": 11,
+    "Fix in progress": 12,
     "Fixed": 428,
     "Partial": 3,
     "Identified": 6,
     "Unknown": 7
   },
   "entries": [
+    {
+      "id": "BUG-2026-07-20-003",
+      "date": "2026-07-20",
+      "title": "Public repository tracked database URLs with embedded credentials",
+      "categories": [
+        "security",
+        "infrastructure",
+        "data-integrity"
+      ],
+      "category": "security",
+      "status": "Fix in progress",
+      "statusIcon": "🟡",
+      "statusDate": "2026-07-20",
+      "tests": [
+        "tests/secret-hygiene.test.mjs",
+        "tests/sync-staging-safety.test.mjs"
+      ],
+      "commits": [],
+      "hasRootCause": true,
+      "hasFix": true,
+      "hasRegression": false,
+      "regressionWaiver": ""
+    },
     {
       "id": "BUG-2026-07-20-002",
       "date": "2026-07-20",

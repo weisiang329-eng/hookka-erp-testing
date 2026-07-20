@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // ---------------------------------------------------------------------------
 // Walk each PO's actual BOM template (bom_templates.wip_components JSON) and
 // stamp branchKey on every job_card by tree position — NOT by category /
@@ -21,7 +22,7 @@
 import postgres from "postgres";
 
 const DB_URL =
-  "postgresql://postgres.vpwdqtsxexpiqxzweivd:Hookka%402026@aws-1-ap-southeast-1.pooler.supabase.com:6543/postgres";
+  requiredDatabaseUrl("PROD_DATABASE_URL");
 
 const sql = postgres(DB_URL);
 

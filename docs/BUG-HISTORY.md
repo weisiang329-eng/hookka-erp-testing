@@ -34,6 +34,33 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-20-003 — Public repository tracked database URLs with embedded credentials `security` `infrastructure` `data-integrity` 🟡
+
+**Status:** Fix in progress (staging remediation; credential rotation and history response pending).
+
+**Symptom / risk:** Historical diagnostic and repair scripts embedded production or staging
+PostgreSQL connection URLs directly in tracked source. Anyone able to read the public repository
+or its history could obtain database credentials, and running one of those scripts could silently
+select a live target without an explicit operator choice.
+
+**Root cause:** One-off operational scripts copied connection strings during incident work and
+there was no repository-level secret scanner. The scripts also used a hardcoded fallback instead
+of failing closed when a target environment variable was absent.
+
+**Fix:** Every affected script now requires an explicit `PROD_DATABASE_URL` or
+`STAGING_DATABASE_URL` through one fail-closed helper. CI scans all tracked text without echoing
+matched source, and staging/prod target checks compare secrets with independent, code-reviewed
+public project refs. Removing the current-tree values does not revoke previously exposed
+credentials: both database passwords still require immediate rotation, and Git history cleanup
+requires a separately coordinated decision after rotation.
+
+**Regression evidence:** `tests/secret-hygiene.test.mjs` verifies detection without secret echo,
+permits only explicit fixture placeholders, scans the tracked tree, and pins missing-env refusal.
+`tests/sync-staging-safety.test.mjs` pins distinct production/staging target identities before any
+destructive sync step.
+
+---
+
 ## BUG-2026-07-20-002 — Quick-pay had a second receipt rule and invoice detail could show voided/bounced money `money` `api-contract` `data-integrity` 🟡
 
 **Status:** Fix in progress (stacked staging PR; production unchanged).

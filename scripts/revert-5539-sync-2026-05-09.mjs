@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Revert the 5539 portion of today's sync-5531-5539-discount-2026-05-10.mjs
 // — 5539 master products are incomplete (8 components only, no 1S/2S/3S/
 // 2NA/STOOL), so Wei Siang doesn't want customer-specific 5539 prices yet.
@@ -40,7 +41,7 @@ async function authedJson(session, method, path) {
 }
 
 const sql = postgres(
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",
+  requiredDatabaseUrl("PROD_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

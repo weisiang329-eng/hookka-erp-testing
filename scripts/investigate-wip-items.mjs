@@ -1,8 +1,9 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Verify wip_items state on staging — should be 222 merged FC rows.
 import postgres from "postgres";
 
 const url =
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
+  requiredDatabaseUrl("STAGING_DATABASE_URL");
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

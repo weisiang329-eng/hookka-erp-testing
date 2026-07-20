@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Read-only audit v2 — fixes the previous script's bugs:
 //   1. CSV split now uses BOTH `;` and `,` (data uses semicolon, my v1 only
 //      tried comma → false-positive dirty count).
@@ -13,7 +14,7 @@
 import postgres from "postgres";
 
 const url =
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+  requiredDatabaseUrl("PROD_DATABASE_URL");
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

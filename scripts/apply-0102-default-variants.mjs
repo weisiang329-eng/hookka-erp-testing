@@ -1,10 +1,11 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // One-shot migration applier for 0102_product_default_variants.sql.
 // Adds the column directly + records the migration in _migrations so the
 // incremental applier won't re-run it.
 import postgres from "postgres";
 import fs from "node:fs";
 
-const PROD = "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+const PROD = requiredDatabaseUrl("PROD_DATABASE_URL");
 const sql = postgres(PROD, { ssl: "require", max: 1, idle_timeout: 5, prepare: false });
 
 const FILE = "0102_product_default_variants.sql";

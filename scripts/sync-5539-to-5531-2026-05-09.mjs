@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Sync 5539 customer prices to match 5531 for the 10 common SKU types
 // (1NA, 1A LHF/RHF, 2NA, 2A LHF/RHF, CNR, L LHF/RHF, STOOL).
 // 5539-1B / 5539-2B (LHF + RHF, 4 SKUs) NOT touched — they have no 5531
@@ -56,7 +57,7 @@ async function authedJson(session, method, path, body) {
 }
 
 const sql = postgres(
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",
+  requiredDatabaseUrl("PROD_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

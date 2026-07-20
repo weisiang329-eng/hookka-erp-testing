@@ -1,8 +1,9 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Break the 524 candidate JCs down by status, and show how many negative
 // wip_items rows are pure-cancelled vs pure-waiting vs mixed.
 import postgres from "postgres";
 const url =
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+  requiredDatabaseUrl("PROD_DATABASE_URL");
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 
 try {

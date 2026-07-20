@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Update 5531 customer prices for Carress + 2990 — Wei Siang 2026-05-09 final:
 //   - All components ×0.945 (5.5% off 5535 base)  [includes 1S, 2S now]
 //   - 3S 24" manual override = RM 1512.00
@@ -81,7 +82,7 @@ async function authedJson(session, method, path, body) {
 }
 
 const sql = postgres(
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",
+  requiredDatabaseUrl("PROD_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

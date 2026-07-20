@@ -1,10 +1,11 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Verify the picker pattern: for a BF SO with multiple POs (HB+DV), confirm
 // only ONE of those POs holds the merged FC JC; the others rely on picker
 // fallback. This is what commit 19c7aee fixes for BF/ACC.
 import postgres from "postgres";
 
 const url =
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
+  requiredDatabaseUrl("STAGING_DATABASE_URL");
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

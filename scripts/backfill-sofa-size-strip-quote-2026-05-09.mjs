@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // One-shot backfill — strip trailing inch-quote from SOFA sizeLabel rows
 // in sales_order_items + production_orders so they align with the
 // kv_config.sofaSizes canonical (bare numerics: ["24","26","28","30","32","35"]).
@@ -20,7 +21,7 @@
 import postgres from "postgres";
 
 const url =
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+  requiredDatabaseUrl("PROD_DATABASE_URL");
 
 const APPLY = process.argv.includes("--apply");
 

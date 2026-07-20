@@ -1,8 +1,9 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Check if prod has the same duplicate sales_orders rows as staging.
 import postgres from "postgres";
 
 const url =
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+  requiredDatabaseUrl("PROD_DATABASE_URL");
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

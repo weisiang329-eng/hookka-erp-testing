@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // One-shot — sync customer-specific 5535 prices for Carress (cust-2) and
 // 2990 HOME (cust-f6c80b96) to match the supplier SF 9055 price sheet.
 //
@@ -78,7 +79,7 @@ async function authedJson(session, method, path, body) {
 
 // ---------- DB read for master prices ----------
 const sql = postgres(
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",
+  requiredDatabaseUrl("PROD_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

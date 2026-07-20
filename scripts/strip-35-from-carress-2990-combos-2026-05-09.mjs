@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Create customer-scoped 5535 combos for Carress + 2990 that override
 // the master combos which currently include a 35" entry — Wei Siang
 // 2026-05-09: "Carress 和 2990 的 35 寸 combo 也 remove 掉".
@@ -45,7 +46,7 @@ async function authedJson(session, method, path, body) {
 }
 
 const sql = postgres(
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",
+  requiredDatabaseUrl("PROD_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

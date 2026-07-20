@@ -1,6 +1,7 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Add supplier_description column to supplier_material_bindings.
 import postgres from "postgres";
-const sql = postgres("postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres", { ssl: "require", max: 1, idle_timeout: 5 });
+const sql = postgres(requiredDatabaseUrl("PROD_DATABASE_URL"), { ssl: "require", max: 1, idle_timeout: 5 });
 try {
   await sql`ALTER TABLE supplier_material_bindings ADD COLUMN IF NOT EXISTS supplier_description TEXT`;
   const c = await sql`SELECT column_name FROM information_schema.columns WHERE table_name = 'supplier_material_bindings' AND column_name = 'supplier_description'`;

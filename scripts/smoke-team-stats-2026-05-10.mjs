@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "./lib/required-database-url.mjs";
 // Smoke test for /api/worker/team-stats Operator Leader feature.
 // Run: node scripts/smoke-team-stats-2026-05-10.mjs
 //
@@ -13,7 +14,7 @@ const ADMIN_EMAIL = "weisiang329@gmail.com";
 const ADMIN_PASSWORD = "CbpxqJQpjy3VA5yd3Q";
 
 const sql = postgres(
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",
+  requiredDatabaseUrl("PROD_DATABASE_URL"),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

@@ -1,0 +1,33 @@
+name: Bug history guard
+
+on:
+  pull_request:
+    branches: [staging, main]
+    paths:
+      - docs/BUG-HISTORY.md
+      - docs/bug-history-index.json
+      - scripts/bug-history.mjs
+      - scripts/lib/bug-history.mjs
+      - .github/workflows/bug-history.yml
+  push:
+    branches: [staging, main]
+    paths:
+      - docs/BUG-HISTORY.md
+      - docs/bug-history-index.json
+      - scripts/bug-history.mjs
+      - scripts/lib/bug-history.mjs
+      - .github/workflows/bug-history.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node scripts/bug-history.mjs --check

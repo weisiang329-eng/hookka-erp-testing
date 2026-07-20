@@ -1381,10 +1381,14 @@ app.post("/:id/consume", async (c) => {
 // mount it as a public path. We can't mount /sweep inside this auth-gated
 // sub-app and have it work as a CRON_SECRET-gated public endpoint.
 // ---------------------------------------------------------------------------
+type WaitUntilContext = {
+  waitUntil(promise: Promise<unknown>): void;
+};
+
 export async function sweepStuckScans(
   db: Env["Variables"]["DB"],
   env: Env["Bindings"],
-  ctx: ExecutionContext | undefined,
+  ctx: WaitUntilContext | undefined,
 ): Promise<{ requeued: number; batches: string[] }> {
   await ensureScanQueueTable(db);
   const cutoff = new Date(Date.now() - STUCK_MS).toISOString();
@@ -1465,7 +1469,7 @@ export async function sweepStuckScans(
 async function sweepStuckBatch(
   db: Env["Variables"]["DB"],
   env: Env["Bindings"],
-  ctx: ExecutionContext | undefined,
+  ctx: WaitUntilContext | undefined,
   batchId: string,
 ): Promise<void> {
   const cutoff = new Date(Date.now() - STUCK_MS).toISOString();

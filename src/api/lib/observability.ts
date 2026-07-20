@@ -20,6 +20,7 @@
 // Tune thresholds below. Start loud; turn down once the noisy offenders are fixed.
 // ---------------------------------------------------------------------------
 import type { Context, Next } from "hono";
+import { runtimeEnvironment } from "./deployment-environment";
 
 export const SLOW_REQUEST_MS = 200;
 export const SLOW_QUERY_MS = 100;
@@ -183,8 +184,11 @@ export async function timingMiddleware(c: Context, next: Next): Promise<void> {
   const tpPart = traceparent ? ` traceparent=${traceparent}` : "";
   const line = `[req] method=${method} path=${path} status=${responseStatus} dur_ms=${dur}${tpPart}`;
   // P6.1 — sampling. Slow lines always emit. Normal lines emit at 1% in
-  // prod, 100% otherwise. Gate on c.env.ENVIRONMENT (set in wrangler.toml).
-  const envName = (c.env as { ENVIRONMENT?: string } | undefined)?.ENVIRONMENT;
+  // prod, 100% otherwise. Pages branch deploys inherit the top-level
+  // ENVIRONMENT="production", so use the same hostname rule as DB routing.
+  const configuredEnvironment =
+    (c.env as { ENVIRONMENT?: string } | undefined)?.ENVIRONMENT;
+  const envName = runtimeEnvironment(c.req.url, configuredEnvironment);
   if (dur >= SLOW_REQUEST_MS) {
     console.warn(`[slow-req] ${line.slice(6)}`); // strip "[req] " prefix
   } else if (shouldEmitReqLine(envName, dur)) {

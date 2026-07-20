@@ -11,8 +11,11 @@ documents that say bug fixes go straight to main.
 
 ## Current state — read first
 
-- `origin/staging`: `76687226dc0c01aab9037ffba3db9822f7f0e319`
-  (`security: remove embedded database credentials (#75)`).
+- Foundation runtime candidate: `76687226dc0c01aab9037ffba3db9822f7f0e319`
+  (`security: remove embedded database credentials (#75)`). PR #76 adds this
+  ledger only, so it advances the branch SHA without changing runtime code.
+- Always resolve the exact current head instead of trusting a copied value:
+  `git fetch origin staging && git rev-parse origin/staging`.
 - `main` / production: deliberately untouched by this programme.
 - Latest staging deploy: [run 29754021143](https://github.com/weisiang329-eng/hookka-erp-testing/actions/runs/29754021143),
   stopped in the first read-only DB preflight because the GitHub
@@ -42,6 +45,7 @@ documents that say bug fixes go straight to main.
 | [#73](https://github.com/weisiang329-eng/hookka-erp-testing/pull/73) | Integrated foundation rollup into staging |
 | [#74](https://github.com/weisiang329-eng/hookka-erp-testing/pull/74) | Staging-only migration proving gate and Node 22/Wrangler 4 fix |
 | [#75](https://github.com/weisiang329-eng/hookka-erp-testing/pull/75) | Removed 113 embedded DB URLs from 109 scripts; fail-closed env injection and secret-scan CI |
+| [#76](https://github.com/weisiang329-eng/hookka-erp-testing/pull/76) | Canonical cross-session execution ledger (documentation-only) |
 
 ## Last complete local evidence
 
@@ -176,4 +180,3 @@ A successor can continue when they can state all five facts without guessing:
 3. why production is unchanged;
 4. the current external blocker and who owns it;
 5. the next smallest safe PR and its regression evidence.
-

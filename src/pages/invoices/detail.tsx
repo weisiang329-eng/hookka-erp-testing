@@ -37,7 +37,6 @@ const PAYMENT_METHODS = [
   { value: "CHEQUE", label: "Cheque" },
   { value: "CASH", label: "Cash" },
   { value: "CREDIT_CARD", label: "Credit Card" },
-  { value: "E_WALLET", label: "E-Wallet" },
 ];
 
 export default function InvoiceDetailPage() {
@@ -271,13 +270,16 @@ export default function InvoiceDetailPage() {
     // — a false-green from a stale cache would leave bookkeeping out of
     // sync. Read back and confirm paidAmount actually landed.
     const result = await verifiedSave<Invoice>({
-      endpoint: `/api/invoices/${id}`,
-      method: "PUT",
+      endpoint: "/api/payments",
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
       body: {
-        paidAmount: totalPaid,
-        paymentMethod,
-        paymentDate,
-        paymentReference,
+        customerId: invoice.customerId,
+        amount: amountSen,
+        method: paymentMethod,
+        date: paymentDate,
+        reference: paymentReference,
+        allocations: [{ invoiceId: invoice.id, amount: amountSen }],
       },
       readback: async () => {
         const r = await fetch(`/api/invoices/${id}?_v=${Date.now()}`, {
@@ -294,6 +296,7 @@ export default function InvoiceDetailPage() {
       // Recording payment can cascade to SO → CLOSED when all linked invoices
       // are paid. Conservative: keep SO prefix. DO does not change on payment.
       if (id) invalidateCache(`/api/invoices/${id}`);
+      invalidateCachePrefix("/api/payments");
       invalidateCachePrefix("/api/sales-orders");
       refreshInvoice();
       refreshAllInvoices();

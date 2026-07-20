@@ -146,12 +146,19 @@ function genRmId(): string {
 
 // GET /api/inventory — all three buckets
 app.get("/", async (c) => {
+  const denied = await requirePermission(c, "inventory", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
   const [productsRes, wipRes, rmRes] = await Promise.all([
-    c.var.DB.prepare("SELECT * FROM products ORDER BY code").all<ProductRow>(),
-    c.var.DB.prepare("SELECT * FROM wip_items ORDER BY id").all<WipItemRow>(),
+    c.var.DB.prepare("SELECT * FROM products WHERE orgId = ? ORDER BY code")
+      .bind(orgId)
+      .all<ProductRow>(),
+    c.var.DB.prepare("SELECT * FROM wip_items WHERE orgId = ? ORDER BY id")
+      .bind(orgId)
+      .all<WipItemRow>(),
     c.var.DB.prepare(
-      "SELECT * FROM raw_materials ORDER BY itemCode",
-    ).all<RawMaterialRow>(),
+      "SELECT * FROM raw_materials WHERE orgId = ? ORDER BY itemCode",
+    ).bind(orgId).all<RawMaterialRow>(),
   ]);
 
   // stockQty is always 0 from the API — the real FG inventory is derived
@@ -169,6 +176,31 @@ app.get("/", async (c) => {
     success: true,
     data: { finishedProducts, wipItems, rawMaterials },
   });
+});
+
+// Batch-level FG options for stock corrections. The adjustment write owns
+// fg_batches.remainingQty, so callers must submit a batch id rather than a
+// product-master id. Keeping this endpoint narrow also avoids loading the full
+// inventory aggregate just to populate one picker.
+app.get("/fg-batches", async (c) => {
+  const denied = await requirePermission(c, "inventory", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const res = await c.var.DB
+    .prepare(
+      `SELECT fb.id, fb.productId, fb.productionOrderId, fb.completedDate,
+              fb.remainingQty, fb.unitCostSen,
+              p.code AS productCode, p.name AS productName, p.category
+         FROM fg_batches fb
+         JOIN products p ON p.id = fb.productId AND p.orgId = fb.orgId
+        WHERE fb.orgId = ?
+        ORDER BY CASE WHEN fb.remainingQty > 0 THEN 0 ELSE 1 END,
+                 fb.completedDate DESC, fb.id DESC
+        LIMIT 500`,
+    )
+    .bind(orgId)
+    .all();
+  return c.json({ success: true, data: res.results ?? [] });
 });
 
 // ---------------------------------------------------------------------------

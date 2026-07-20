@@ -1240,6 +1240,7 @@ const ADJUST_REASON_OPTS: SelectOption[] = [
 export function stockAdjustmentSpec(doc: Record<string, unknown>, id: string): FormSpec {
   const balance = n(doc.balanceQty);
   const uom = s(doc.baseUOM);
+  let idempotencyKey = uuid();
   return {
     title: "Reduce Stock",
     submitLabel: "Confirm Adjustment",
@@ -1269,8 +1270,15 @@ export function stockAdjustmentSpec(doc: Record<string, unknown>, id: string): F
         reason: s(v.reason) || "COUNT_CORRECTION",
         notes: s(v.notes) || null,
       };
-      const res = await mutateJson("/api/stock-adjustments", "POST", body);
-      if (!res.ok) return { ok: false, error: res.error };
+      const res = await mutateJson("/api/stock-adjustments", "POST", body, {
+        "Idempotency-Key": idempotencyKey,
+      });
+      if (!res.ok) {
+        // A definite HTTP response can safely start a corrected attempt with a
+        // new key. For an uncertain network failure, retain the key.
+        if (res.status !== 0) idempotencyKey = uuid();
+        return { ok: false, error: res.error };
+      }
       refreshOne(`/api/raw-materials/${encodeURIComponent(id)}`);
       refreshList("/api/raw-materials");
       refreshList("/api/stock-adjustments");

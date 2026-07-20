@@ -2,7 +2,7 @@
 // Service Order detail — header, lines, returns, and actions to advance
 // the lifecycle (status transitions) or log a returned defective unit.
 // ---------------------------------------------------------------------------
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -507,6 +507,7 @@ function ReturnRow({
   currentUserName: string;
   fgList: FgPickerOpt[];
 }) {
+  const scrapIdempotencyKey = useRef(crypto.randomUUID());
   const { toast } = useToast();
   const [scrapFgBatchId, setScrapFgBatchId] = useState("");
   const [editing, setEditing] = useState(false);
@@ -557,15 +558,20 @@ function ReturnRow({
     try {
       const res = await fetch(`/api/service-orders/${svcId}/returns/${ret.id}/scrap`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": scrapIdempotencyKey.current,
+        },
         body: JSON.stringify({
           fgBatchId: scrapFgBatchId,
-          adjustedBy: currentUserId,
-          adjustedByName: currentUserName,
         }),
       });
       const data = (await res.json()) as { success?: boolean; error?: string; adjustmentId?: string };
-      if (!res.ok || !data?.success) throw new Error(data?.error || `HTTP ${res.status}`);
+      if (!res.ok || !data?.success) {
+        scrapIdempotencyKey.current = crypto.randomUUID();
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      scrapIdempotencyKey.current = crypto.randomUUID();
       toast.success(`Scrapped via ${data.adjustmentId}`);
       invalidateCachePrefix("/api/inventory");
       invalidateCachePrefix("/api/stock-adjustments");

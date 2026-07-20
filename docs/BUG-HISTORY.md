@@ -34,6 +34,38 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-20-005 — Stock adjustments mixed product and batch IDs and could cross tenant or double-post `inventory-cascade` `api-contract` `tenant-isolation` `data-integrity` `ui-frontend` 🟡
+
+**Status:** Fix in progress (staging PR; production unchanged).
+
+**Symptom / risk:** Desktop and service-case FG pickers submitted `products.id`, while the
+backend only adjusted `fg_batches.id`, so normal FG corrections returned “batch not found”. The
+write path scoped its history list by organization but looked up and updated RM, WIP, FG, FIFO
+layers, movements, and cost rows without the organization key. A browser could also claim any
+`adjustedBy` identity, retries could post the same physical movement twice, and simultaneous
+stock-outs could both pass the stale pre-check and drive quantity below zero. Mobile history used
+retired response names, leaving reference, quantity, and date blank.
+
+**Root cause:** The UI aggregate and database mutation used different inventory grain, tenant
+rollout added `org_id` defaults without converting this older route, and service-return scrap
+copied the four-ledger write instead of inheriting the later idempotency and actor rules. Stock
+non-negativity existed only as an application pre-check, which is not a concurrency boundary.
+
+**Fix:** A narrow `/api/inventory/fg-batches` contract now supplies real batch IDs and costs to
+both FG callers. Stock adjustment and service-return scrap use strict shared schemas, mandatory
+database-backed idempotency keys, server-derived actors, atomic tenant-scoped document numbers,
+and explicit `orgId` on every affected read/write. Migration 0212 adds PostgreSQL write-time
+nonnegative inventory and adjustment sign/cost constraints; the transaction-backed batch rolls
+back every ledger row if a concurrent writer wins. The inventory aggregate is tenant-scoped and
+mobile history now reads `adjNo`, `qtyDelta`, and `adjustedAt`.
+
+**Regression evidence:** `tests/stock-adjustment-contract.test.mjs` rejects coercion and actor
+spoofing, pins tenant keys on the item/FIFO/ledger paths, verifies batch-level FG identity and all
+idempotency callers, covers the service-return scrap path, checks migration invariants, and locks
+the mobile response mapping.
+
+---
+
 ## BUG-2026-07-20-004 — Account-write routes bypassed the password policy and role permissions had two owners `auth-rbac` `api-contract` `data-integrity` `ui-frontend` 🟡
 
 **Status:** Fix in progress (staging PR; production unchanged).

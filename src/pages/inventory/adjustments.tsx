@@ -25,7 +25,6 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/toast";
 import { formatCurrency } from "@/lib/utils";
-import { getCurrentUser } from "@/lib/auth";
 import { Plus, Trash2, History, Save } from "lucide-react";
 
 type AdjustmentType = "RM" | "WIP" | "FG";
@@ -93,6 +92,8 @@ type FgBatchOpt = {
 type DraftRow = {
   // local-only id so React keys stay stable as rows are added/removed
   uid: string;
+  // Stable across uncertain network retries; rotate after a definite response.
+  idempotencyKey: string;
   type: AdjustmentType;
   itemId: string;
   // Optional category filter for the Item dropdown: itemGroup for RM,
@@ -124,15 +125,14 @@ const REASON_OPTIONS: { value: AdjustmentReason; label: string }[] = [
   { value: "OTHER", label: "Other" },
 ];
 
-// FG removed (cross-audit #10): the FG row passed a product id where the backend
-// expected an fg_batches id (→ 404), and fg_batches isn't the FG system-of-record
-// anyway (on-hand is derived from production + DO / fg_units). The control was
-// dead/misleading. A real FG write-off needs its own grain — out of scope here.
-const TYPE_OPTIONS: AdjustmentType[] = ["RM", "WIP"];
+// FG is batch-grained: the picker submits fg_batches.id, matching the quantity
+// and FIFO-cost owner used by the backend adjustment transaction.
+const TYPE_OPTIONS: AdjustmentType[] = ["RM", "WIP", "FG"];
 
 function newDraftRow(): DraftRow {
   return {
     uid: `r-${Math.random().toString(36).slice(2, 9)}`,
+    idempotencyKey: crypto.randomUUID(),
     type: "RM",
     itemId: "",
     category: "",
@@ -160,38 +160,23 @@ function dateLabel(iso: string): string {
 
 export default function StockAdjustmentsPage() {
   const { toast } = useToast();
-  const user = getCurrentUser();
 
   const [rows, setRows] = useState<DraftRow[]>([newDraftRow()]);
   const [submitting, setSubmitting] = useState(false);
 
-  // ---- always fetch all 3 lists so any row can switch type freely ----
-  // FG comes from /api/inventory's finishedProducts (the product master),
-  // not /api/inventory/fg-batches - that endpoint never existed and was
-  // returning 404 / empty, leaving the FG dropdown blank. Bug fix
-  // 2026-04-28 per user.
+  // The write path adjusts fg_batches, so the picker must use real batch ids.
   const { data: rmResp } = useCachedJson<{ data?: RawMaterialOpt[] }>("/api/raw-materials");
   const { data: wipResp } = useCachedJson<{ data?: WipOpt[] }>("/api/inventory/wip");
-  const { data: invResp } = useCachedJson<{
-    data?: { finishedProducts?: Array<{ id: string; code: string; name: string; category: string; stockQty?: number; basePriceSen?: number }> };
-  }>("/api/inventory");
+  const { data: fgResp } = useCachedJson<{ data?: FgBatchOpt[] }>(
+    "/api/inventory/fg-batches",
+  );
   const { data: historyResp, refresh: refreshHistory } = useCachedJson<{
     data?: AdjustmentRow[];
   }>("/api/stock-adjustments");
 
   const rmList = useMemo(() => rmResp?.data ?? [], [rmResp]);
   const wipList = useMemo(() => wipResp?.data ?? [], [wipResp]);
-  const fgList: FgBatchOpt[] = useMemo(
-    () => (invResp?.data?.finishedProducts ?? []).map((p) => ({
-      id: p.id,
-      productCode: p.code,
-      productName: p.name,
-      remainingQty: p.stockQty ?? 0,
-      unitCostSen: p.basePriceSen ?? 0,
-      category: p.category,
-    })),
-    [invResp],
-  );
+  const fgList = useMemo(() => fgResp?.data ?? [], [fgResp]);
   const history = useMemo(() => historyResp?.data ?? [], [historyResp]);
 
   // Window the adjustment-history table so a long ledger stays light.
@@ -316,7 +301,10 @@ export default function StockAdjustmentsPage() {
         try {
           const res = await fetch("/api/stock-adjustments", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              "Idempotency-Key": row.idempotencyKey,
+            },
             body: JSON.stringify({
               type: row.type,
               itemId: row.itemId,
@@ -324,19 +312,18 @@ export default function StockAdjustmentsPage() {
               unitCostSen: Number(row.unitCost) || 0,
               reason: row.reason,
               notes: row.notes || null,
-              adjustedBy: user?.id ?? null,
-              adjustedByName: user?.displayName ?? user?.email ?? null,
             }),
           });
           const data = (await res.json()) as { success?: boolean; error?: string };
           if (!res.ok || !data?.success) {
-            return { uid: row.uid, ok: false, msg: humanizeError({ status: res.status, message: data?.error }, "Couldn't save. Please try again."), code: sel?.code };
+            return { uid: row.uid, ok: false, rotateKey: true, msg: humanizeError({ status: res.status, message: data?.error }, "Couldn't save. Please try again."), code: sel?.code };
           }
-          return { uid: row.uid, ok: true, code: sel?.code };
+          return { uid: row.uid, ok: true, rotateKey: false, code: sel?.code };
         } catch (e) {
           return {
             uid: row.uid,
             ok: false,
+            rotateKey: false,
             msg: humanizeError(e, "Network problem — please try again."),
             code: sel?.code,
           };
@@ -353,7 +340,12 @@ export default function StockAdjustmentsPage() {
       const surviving = prev.map((r) => {
         if (failedUids.has(r.uid)) {
           const fail = results.find((x) => x.uid === r.uid);
-          return { ...r, status: "error" as const, errorMsg: fail?.msg };
+          return {
+            ...r,
+            idempotencyKey: fail?.rotateKey ? crypto.randomUUID() : r.idempotencyKey,
+            status: "error" as const,
+            errorMsg: fail?.msg,
+          };
         }
         return r;
       });

@@ -50,8 +50,8 @@ documents that say bug fixes go straight to main.
 
 ## Current P1 delivery candidate
 
-- `agent/inventory-adjustment-contract` closes the inventory-adjustment batch;
-  PR creation is the next action after final evidence is committed.
+- [PR #78](https://github.com/weisiang329-eng/hookka-erp-testing/pull/78)
+  (`agent/inventory-adjustment-contract`) closes the inventory-adjustment batch.
 - Desktop/service-case FG pickers now use `fg_batches.id`; direct adjustments
   and service-return scrap share strict schemas, DB idempotency, server actor
   attribution, tenant-scoped reads/writes, and atomic adjustment numbering.

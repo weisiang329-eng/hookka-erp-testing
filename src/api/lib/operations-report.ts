@@ -888,20 +888,21 @@ async function collectDelivery(
 
 async function collectReceivables(
   db: Db,
+  orgId: string,
   p: ResolvedPeriod,
 ): Promise<ReceivablesSection> {
   // Aging is "as of now" — bucket each open invoice by months-overdue (owner's
   // monthly payment term; buckets are month-diff, not literal 30/60/90 days,
-  // same as the Accounting aging report). invoices has no org_id column.
+  // same as the Accounting aging report).
   const invRows = await db
     .prepare(
       `SELECT invoice_date AS "invoiceDate",
               total_sen AS "totalSen",
               paid_amount AS "paidAmount"
          FROM invoices
-        WHERE status NOT IN ('DRAFT','CANCELLED','PAID')`,
+        WHERE org_id = ? AND status NOT IN ('DRAFT','CANCELLED','PAID')`,
     )
-    .bind()
+    .bind(orgId)
     .all<{ invoiceDate: string | null; totalSen: number; paidAmount: number }>();
 
   const aging: AgingBuckets = {
@@ -929,20 +930,36 @@ async function collectReceivables(
       `SELECT COALESCE(SUM(total_sen),0) AS v
          FROM invoices
         WHERE status NOT IN ('DRAFT','CANCELLED')
+          AND org_id = ?
           AND substr(invoice_date::text, 1, 10) >= ?
           AND substr(invoice_date::text, 1, 10) <= ?`,
     )
-    .bind(p.startYmd, p.endYmd)
+    .bind(orgId, p.startYmd, p.endYmd)
     .first<{ v: number }>();
 
   const collectedRow = await db
     .prepare(
-      `SELECT COALESCE(SUM(amount_sen),0) AS v
-         FROM invoice_payments
-        WHERE substr(date::text, 1, 10) >= ?
-          AND substr(date::text, 1, 10) <= ?`,
+      `SELECT COALESCE(SUM(ip.amount_sen),0) AS v
+         FROM invoice_payments ip
+         LEFT JOIN payment_records pr
+           ON pr.id = ip.payment_record_id AND pr.org_id = ip.org_id
+         LEFT JOIN document_lifecycle dl
+           ON dl.source_type = 'payment'
+          AND dl.source_id = ip.payment_record_id
+          AND dl.org_id = ip.org_id
+        WHERE ip.org_id = ?
+          AND substr(ip.date::text, 1, 10) >= ?
+          AND substr(ip.date::text, 1, 10) <= ?
+          AND (
+            ip.payment_record_id IS NULL
+            OR (
+              pr.id IS NOT NULL
+              AND COALESCE(pr.status, 'RECEIVED') <> 'BOUNCED'
+              AND COALESCE(dl.state, 'ACTIVE') = 'ACTIVE'
+            )
+          )`,
     )
-    .bind(p.startYmd, p.endYmd)
+    .bind(orgId, p.startYmd, p.endYmd)
     .first<{ v: number }>();
 
   return {
@@ -1173,7 +1190,7 @@ export async function collectOperationsReport(
       stuckOver5Count: 0,
       sampleSize: 0,
     }),
-    guard("receivables", () => collectReceivables(db, p), {
+    guard("receivables", () => collectReceivables(db, orgId, p), {
       aging: { currentSen: 0, d30Sen: 0, d60Sen: 0, d90Sen: 0, over90Sen: 0 },
       totalOutstandingSen: 0,
       billedSen: 0,

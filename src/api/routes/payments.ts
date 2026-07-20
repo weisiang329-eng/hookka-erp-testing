@@ -208,6 +208,38 @@ async function buildCustomerPaymentRestate(
   );
   const statements: D1PreparedStatement[] = [];
 
+  // Restatement may replace invoice detail rows only when they are linked to
+  // this exact receipt. Legacy rows have no paymentRecordId and can be
+  // ambiguous (same date/reference/amount), so fail closed and send them to
+  // the explicit linkage audit instead of guessing/deleting financial history.
+  const linkedDetails = await db
+    .prepare(
+      `SELECT invoiceId, amountSen FROM invoice_payments
+        WHERE paymentRecordId = ? AND orgId = ?`,
+    )
+    .bind(id, orgId)
+    .all<{ invoiceId: string; amountSen: number }>();
+  const oldDetailByInvoice = new Map<string, number>();
+  const linkedDetailByInvoice = new Map<string, number>();
+  for (const allocation of oldAllocs) {
+    oldDetailByInvoice.set(
+      allocation.invoiceId,
+      (oldDetailByInvoice.get(allocation.invoiceId) ?? 0) + allocation.amount,
+    );
+  }
+  for (const detail of linkedDetails.results ?? []) {
+    linkedDetailByInvoice.set(
+      detail.invoiceId,
+      (linkedDetailByInvoice.get(detail.invoiceId) ?? 0) + detail.amountSen,
+    );
+  }
+  const linkedDetailsMatch =
+    oldDetailByInvoice.size === linkedDetailByInvoice.size &&
+    [...oldDetailByInvoice].every(
+      ([invoiceId, amount]) => linkedDetailByInvoice.get(invoiceId) === amount,
+    );
+  if (!linkedDetailsMatch) throw new Error("PAYMENT_LEGACY_LINK_REQUIRED");
+
   const newInvoiceIds = [...new Set(newAllocs.map((a) => a.invoiceId))];
   if (newInvoiceIds.length > 0) {
     const placeholders = newInvoiceIds.map(() => "?").join(",");
@@ -254,6 +286,20 @@ async function buildCustomerPaymentRestate(
     }
   }
 
+  const restateDate = /^\d{4}-\d{2}-\d{2}$/.test(String(body.date ?? "").trim())
+    ? String(body.date).trim()
+    : existing.date;
+  const restateMethod = body.method ?? existing.method ?? "BANK_TRANSFER";
+  const restateReference = body.reference ?? existing.reference ?? "";
+
+  statements.push(
+    db
+      .prepare(
+        "DELETE FROM invoice_payments WHERE paymentRecordId = ? AND orgId = ?",
+      )
+      .bind(id, orgId),
+  );
+
   // 1. Roll the OLD allocations off their invoices.
   let oldTotal = 0;
   for (const a of oldAllocs) {
@@ -284,6 +330,24 @@ async function buildCustomerPaymentRestate(
   let newTotal = 0;
   for (const a of newAllocs) {
     newTotal += a.amount;
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO invoice_payments (
+             id, invoiceId, paymentRecordId, date, amountSen, method, reference, orgId
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          genInvoicePaymentId(),
+          a.invoiceId,
+          id,
+          restateDate,
+          a.amount,
+          restateMethod,
+          restateReference,
+          orgId,
+        ),
+    );
     statements.push(
       db
         .prepare(
@@ -354,7 +418,7 @@ async function buildCustomerPaymentRestate(
     .first<{ code: string | null }>();
   const ctl = parseDebtorCode(customer?.code ?? null);
   const controlCode = ctl.ok ? ctl.controlCode : "300-0000";
-  const depositAcct = body.bankAccount || bankAcct(body.method);
+  const depositAcct = body.bankAccount || bankAcct(restateMethod);
   const postLegs =
     newTotal > 0
       ? [
@@ -400,9 +464,6 @@ async function buildCustomerPaymentRestate(
   // 5. Update the receipt row in place (same id + receiptNumber). The document
   //    date is editable too (owner 2026-07-07) — the GL month follows it via
   //    the doc-date family (payment_records.date), no leg rewrite needed.
-  const restateDate = /^\d{4}-\d{2}-\d{2}$/.test(String(body.date ?? "").trim())
-    ? String(body.date).trim()
-    : existing.date;
   statements.push(
     db
       .prepare(
@@ -410,8 +471,8 @@ async function buildCustomerPaymentRestate(
       )
       .bind(
         newTotal,
-        body.method ?? existing.method,
-        body.reference ?? existing.reference,
+        restateMethod,
+        restateReference,
         JSON.stringify(newAllocs),
         restateDate,
         id,
@@ -739,11 +800,13 @@ app.post("/", async (c) => {
       }
       statements.push(
         c.var.DB.prepare(
-          `INSERT INTO invoice_payments (id, invoiceId, date, amountSen, method, reference, orgId)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO invoice_payments (
+             id, invoiceId, paymentRecordId, date, amountSen, method, reference, orgId
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           genInvoicePaymentId(),
           alloc.invoiceId,
+          id,
           date,
           alloc.amount,
           method,
@@ -970,6 +1033,55 @@ app.post("/", async (c) => {
 });
 
 // GET /api/payments/:id — single
+// Legacy invoice-payment rows that cannot be safely assigned to a receipt.
+// This is an operator queue, not a fuzzy backfill: nothing is auto-linked.
+app.get("/linkage-audit", async (c) => {
+  const denied = await requirePermission(c, "payments", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const requestedLimit = Number(c.req.query("limit") ?? 100);
+  const limit = Number.isInteger(requestedLimit)
+    ? Math.min(500, Math.max(1, requestedLimit))
+    : 100;
+
+  const [countRow, rows] = await Promise.all([
+    c.var.DB.prepare(
+      `SELECT COUNT(*) AS total FROM invoice_payments
+        WHERE orgId = ? AND paymentRecordId IS NULL`,
+    )
+      .bind(orgId)
+      .first<{ total: number }>(),
+    c.var.DB.prepare(
+      `SELECT ip.id, ip.invoiceId, i.invoiceNo, i.customerId,
+              ip.date, ip.amountSen, ip.method, ip.reference
+         FROM invoice_payments ip
+         JOIN invoices i ON i.id = ip.invoiceId AND i.orgId = ip.orgId
+        WHERE ip.orgId = ? AND ip.paymentRecordId IS NULL
+        ORDER BY ip.date DESC, ip.id DESC
+        LIMIT ?`,
+    )
+      .bind(orgId, limit)
+      .all<{
+        id: string;
+        invoiceId: string;
+        invoiceNo: string;
+        customerId: string;
+        date: string;
+        amountSen: number;
+        method: string | null;
+        reference: string | null;
+      }>(),
+  ]);
+
+  return c.json({
+    success: true,
+    data: rows.results ?? [],
+    total: Number(countRow?.total ?? 0),
+    limit,
+    autoLinked: false,
+  });
+});
+
 app.get("/:id", async (c) => {
   const denied = await requirePermission(c, "payments", "read");
   if (denied) return denied;
@@ -1303,6 +1415,16 @@ app.post("/:id/restate", async (c) => {
           error: "Every invoice must belong to this receipt's customer and organisation",
         },
         400,
+      );
+    }
+    if (msg === "PAYMENT_LEGACY_LINK_REQUIRED") {
+      return c.json(
+        {
+          success: false,
+          error:
+            "This legacy receipt has no deterministic invoice-detail linkage. Review /api/payments/linkage-audit before restating it.",
+        },
+        409,
       );
     }
     return c.json({ success: false, error: msg }, 400);

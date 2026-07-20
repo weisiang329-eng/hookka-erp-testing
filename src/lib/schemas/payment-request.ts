@@ -3,6 +3,12 @@ import { z } from "zod";
 const nonEmptyId = z.string().trim().min(1);
 const positiveSen = z.coerce.number().finite().int().positive();
 const nonNegativeSen = z.coerce.number().finite().int().nonnegative();
+const customerPaymentMethod = z.enum([
+  "BANK_TRANSFER",
+  "CHEQUE",
+  "CASH",
+  "CREDIT_CARD",
+]);
 
 const customerAllocationSchema = z.object({
   invoiceId: nonEmptyId,
@@ -30,7 +36,7 @@ export const CustomerPaymentCreateRequestSchema = z
   .object({
     customerId: nonEmptyId,
     amount: positiveSen,
-    method: nonEmptyId,
+    method: customerPaymentMethod,
     reference: z.string().optional().default(""),
     bankAccount: nonEmptyId.optional(),
     date: z.iso.date().optional(),
@@ -54,7 +60,7 @@ export const CustomerPaymentCreateRequestSchema = z
 
 export const CustomerPaymentRestateRequestSchema = z
   .object({
-    method: nonEmptyId.optional(),
+    method: customerPaymentMethod.optional(),
     reference: z.string().nullable().optional(),
     bankAccount: nonEmptyId.optional(),
     date: z.iso.date().optional(),

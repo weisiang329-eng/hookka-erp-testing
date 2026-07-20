@@ -56,6 +56,31 @@ test("customer payment rejects duplicate invoice allocations", () => {
   );
 });
 
+test("customer payment methods match the Postgres constraint", () => {
+  for (const method of ["BANK_TRANSFER", "CHEQUE", "CASH", "CREDIT_CARD"]) {
+    assert.equal(
+      schemas.CustomerPaymentCreateRequestSchema.safeParse({
+        customerId: "cust-1",
+        amount: 10_000,
+        method,
+        allocations: [{ invoiceId: "inv-1", amount: 10_000 }],
+      }).success,
+      true,
+    );
+  }
+  for (const method of ["E_WALLET", "OTHER", "bank_transfer"]) {
+    assert.equal(
+      schemas.CustomerPaymentCreateRequestSchema.safeParse({
+        customerId: "cust-1",
+        amount: 10_000,
+        method,
+        allocations: [{ invoiceId: "inv-1", amount: 10_000 }],
+      }).success,
+      false,
+    );
+  }
+});
+
 test("customer payment restate validates dates, amounts, and duplicate invoices", () => {
   const valid = schemas.CustomerPaymentRestateRequestSchema.safeParse({
     method: "BANK_TRANSFER",
@@ -117,7 +142,10 @@ test("customer payment create scopes every party and money write to orgId", () =
     /FROM invoices\s+WHERE id IN \([^\n]+\) AND orgId = \? AND customerId = \?/,
   );
   assert.match(source, /allocations, orgId\s+\) VALUES/);
-  assert.match(source, /reference, orgId\)\s+VALUES/);
+  assert.match(
+    source,
+    /id, invoiceId, paymentRecordId, date, amountSen, method, reference, orgId/,
+  );
   assert.match(source, /WHERE id = \? AND orgId = \? AND customerId = \?/);
   assert.match(source, /customers SET outstandingSen[\s\S]+WHERE id = \? AND orgId = \?/);
 });
@@ -196,5 +224,66 @@ test("Postgres rejects concurrent overpayment at the database boundary", () => {
   assert.match(
     migration,
     /CHECK \(paid_amount_sen >= 0 AND paid_amount_sen <= amount_sen\) NOT VALID/,
+  );
+});
+
+test("invoice-payment detail has a tenant-safe receipt foreign key without guessing history", () => {
+  const migration = read(
+    "migrations-postgres/0211_invoice_payment_receipt_link.sql",
+  );
+  assert.match(migration, /ADD COLUMN IF NOT EXISTS payment_record_id TEXT/);
+  assert.match(
+    migration,
+    /FOREIGN KEY \(payment_record_id, org_id\)[\s\S]+REFERENCES payment_records\(id, org_id\)/,
+  );
+  assert.match(
+    migration,
+    /FOREIGN KEY \(invoice_id, org_id\)[\s\S]+REFERENCES invoices\(id, org_id\)/,
+  );
+  assert.match(migration, /No automatic legacy backfill/);
+});
+
+test("receipt restate replaces only exact linked detail and blocks ambiguous legacy rows", () => {
+  const source = read("src/api/routes/payments.ts");
+  assert.match(source, /PAYMENT_LEGACY_LINK_REQUIRED/);
+  assert.match(
+    source,
+    /DELETE FROM invoice_payments WHERE paymentRecordId = \? AND orgId = \?/,
+  );
+  assert.match(source, /app\.get\("\/linkage-audit"/);
+  assert.match(source, /paymentRecordId IS NULL/);
+  assert.match(source, /autoLinked: false/);
+});
+
+test("invoice detail hides linked bounced or inactive receipts but preserves legacy rows", () => {
+  const source = read("src/api/routes/invoices.ts");
+  const report = read("src/api/lib/operations-report.ts");
+  const assistant = read("src/api/lib/assistant-tools.ts");
+  assert.match(source, /ip\.paymentRecordId IS NULL/);
+  assert.match(source, /COALESCE\(pr\.status, 'RECEIVED'\) <> 'BOUNCED'/);
+  assert.match(source, /COALESCE\(dl\.state, 'ACTIVE'\) = 'ACTIVE'/);
+  assert.match(report, /ip\.payment_record_id IS NULL/);
+  assert.match(report, /collectReceivables\(db, orgId, p\)/);
+  assert.match(assistant, /ip\.paymentRecordId IS NULL/);
+  assert.match(assistant, /\.bind\(orgId, \.\.\.invIds\)/);
+});
+
+test("all quick-pay frontends use the canonical idempotent receipt API", () => {
+  const desktopList = read("src/pages/invoices/index.tsx");
+  const desktopDetail = read("src/pages/invoices/detail.tsx");
+  const mobile = read("src/pages/m/config/forms.ts");
+  const invoiceRoute = read("src/api/routes/invoices.ts");
+
+  for (const source of [desktopList, desktopDetail, mobile]) {
+    assert.match(source, /\/api\/payments/);
+    assert.match(source, /Idempotency-Key/);
+    assert.match(source, /allocations:/);
+  }
+  assert.match(invoiceRoute, /attemptsDirectPayment/);
+  assert.match(invoiceRoute, /Direct paidAmount\/status writes bypass receipt/);
+  assert.doesNotMatch(
+    invoiceRoute,
+    /INSERT INTO invoice_payments/,
+    "the invoice route must not remain a second receipt writer",
   );
 });

@@ -280,6 +280,7 @@ type InvoiceItemRow = {
 type InvoicePaymentRow = {
   id: string;
   invoiceId: string;
+  paymentRecordId: string | null;
   date: string;
   amountSen: number;
   method: string | null;
@@ -318,6 +319,7 @@ function rowToItem(row: InvoiceItemRow) {
 function rowToPayment(row: InvoicePaymentRow) {
   return {
     id: row.id,
+    paymentRecordId: row.paymentRecordId ?? undefined,
     date: row.date,
     amountSen: row.amountSen,
     method: row.method ?? "BANK_TRANSFER",
@@ -407,10 +409,6 @@ function genInvoiceId(): string {
 
 function genInvoiceItemId(): string {
   return `invi-${crypto.randomUUID().slice(0, 8)}`;
-}
-
-function genInvoicePaymentId(): string {
-  return `invpay-${crypto.randomUUID().slice(0, 8)}`;
 }
 
 // INV-YYMM-NNN sequential. Bug fix 2026-04-28: previous random hex tail was
@@ -542,19 +540,42 @@ export async function previewCascadeSOClosed(
   return stmts;
 }
 
-async function fetchInvoiceWithChildren(db: D1Database, id: string) {
+async function fetchInvoiceWithChildren(
+  db: D1Database,
+  id: string,
+  orgId: string,
+) {
   const [inv, itemsRes, paymentsRes] = await Promise.all([
     db
-      .prepare("SELECT * FROM invoices WHERE id = ?")
-      .bind(id)
+      .prepare("SELECT * FROM invoices WHERE id = ? AND orgId = ?")
+      .bind(id, orgId)
       .first<InvoiceRow>(),
     db
-      .prepare("SELECT * FROM invoice_items WHERE invoiceId = ?")
-      .bind(id)
+      .prepare("SELECT * FROM invoice_items WHERE invoiceId = ? AND orgId = ?")
+      .bind(id, orgId)
       .all<InvoiceItemRow>(),
     db
-      .prepare("SELECT * FROM invoice_payments WHERE invoiceId = ?")
-      .bind(id)
+      .prepare(
+        `SELECT ip.*
+           FROM invoice_payments ip
+           LEFT JOIN payment_records pr
+             ON pr.id = ip.paymentRecordId AND pr.orgId = ip.orgId
+           LEFT JOIN document_lifecycle dl
+             ON dl.sourceType = 'payment'
+            AND dl.sourceId = ip.paymentRecordId
+            AND dl.orgId = ip.orgId
+          WHERE ip.invoiceId = ? AND ip.orgId = ?
+            AND (
+              ip.paymentRecordId IS NULL
+              OR (
+                pr.id IS NOT NULL
+                AND COALESCE(pr.status, 'RECEIVED') <> 'BOUNCED'
+                AND COALESCE(dl.state, 'ACTIVE') = 'ACTIVE'
+              )
+            )
+          ORDER BY ip.date, ip.id`,
+      )
+      .bind(id, orgId)
       .all<InvoicePaymentRow>(),
   ]);
   if (!inv) return null;
@@ -1367,7 +1388,7 @@ app.post("/", async (c) => {
     // invoice row is now committed, so queueDoCustomerNotice resolves it.
     fireCustomerNoticeBestEffort(c, doRow.id, "DELIVERED");
 
-    const created = await fetchInvoiceWithChildren(c.var.DB, id);
+    const created = await fetchInvoiceWithChildren(c.var.DB, id, getOrgId(c));
     if (!created) {
       return c.json(
         { success: false, error: "Failed to create invoice" },
@@ -1410,13 +1431,14 @@ app.get("/:id", async (c) => {
   const denied = await requirePermission(c, "invoices", "read");
   if (denied) return denied;
   const id = c.req.param("id");
-  const inv = await fetchInvoiceWithChildren(c.var.DB, id);
+  const orgId = getOrgId(c);
+  const inv = await fetchInvoiceWithChildren(c.var.DB, id, orgId);
   if (!inv) {
     return c.json({ success: false, error: "Invoice not found" }, 404);
   }
   // Lock status (payment recorded / status=PAID?) — surfaced to the
   // detail page so it can render a "credit note required" banner.
-  const lockReason = await checkInvoiceLocked(c.var.DB, id);
+  const lockReason = await checkInvoiceLocked(c.var.DB, id, orgId);
   return c.json({ success: true, data: inv, lockReason });
 });
 
@@ -1431,10 +1453,11 @@ app.put("/:id", async (c) => {
   await ensureDiscountColumn(c.var.DB);
   const id = c.req.param("id");
   try {
+    const orgId = getOrgId(c);
     const existing = await c.var.DB.prepare(
-      "SELECT * FROM invoices WHERE id = ?",
+      "SELECT * FROM invoices WHERE id = ? AND orgId = ?",
     )
-      .bind(id)
+      .bind(id, orgId)
       .first<InvoiceRow>();
     if (!existing) {
       return c.json({ success: false, error: "Invoice not found" }, 404);
@@ -1445,8 +1468,23 @@ app.put("/:id", async (c) => {
     // Status transitions to CANCELLED still need to flow through, so the
     // status-change branch below runs unconditionally; the lock only
     // blocks field-level edits.
-    const lockMsg = await checkInvoiceLocked(c.var.DB, id);
+    const lockMsg = await checkInvoiceLocked(c.var.DB, id, orgId);
     const body = await c.req.json();
+    const attemptsDirectPayment =
+      (body.paidAmount !== undefined &&
+        Number(body.paidAmount) !== Number(existing.paidAmount)) ||
+      (["PAID", "PARTIAL_PAID"].includes(String(body.status)) &&
+        body.status !== existing.status);
+    if (attemptsDirectPayment) {
+      return c.json(
+        {
+          success: false,
+          error:
+            "Record invoice receipts through POST /api/payments. Direct paidAmount/status writes bypass receipt, GL, idempotency, and audit contracts.",
+        },
+        409,
+      );
+    }
     const isStatusOnly =
       body.status &&
       !body.dueDate &&
@@ -1484,33 +1522,9 @@ app.put("/:id", async (c) => {
       }
     }
 
-    // --- handle payment delta (old impl pushed one InvoicePayment per delta) ---
-    let nextPaidAmount = existing.paidAmount;
-    let newInvoicePayment: {
-      id: string;
-      date: string;
-      amountSen: number;
-      method: string;
-      reference: string;
-    } | null = null;
-    if (body.paidAmount !== undefined) {
-      const paymentAmountSen = Number(body.paidAmount) - existing.paidAmount;
-      if (paymentAmountSen > 0) {
-        newInvoicePayment = {
-          id: genInvoicePaymentId(),
-          date: body.paymentDate || now.split("T")[0],
-          amountSen: paymentAmountSen,
-          method: body.paymentMethod || "BANK_TRANSFER",
-          reference: body.paymentReference || "",
-        };
-      }
-      nextPaidAmount = Number(body.paidAmount);
-      if (nextPaidAmount >= existing.totalSen) {
-        nextStatus = "PAID";
-      } else if (nextPaidAmount > 0) {
-        nextStatus = "PARTIAL_PAID";
-      }
-    }
+    // paidAmount/status are owned by /api/payments. Keeping one mutation path
+    // prevents a quick-pay UI from updating the invoice without a receipt/GL.
+    const nextPaidAmount = existing.paidAmount;
 
     const merged = {
       paymentDate:
@@ -1530,7 +1544,7 @@ app.put("/:id", async (c) => {
         `UPDATE invoices SET
            status = ?, paidAmount = ?, paymentDate = ?, paymentMethod = ?,
            notes = ?, dueDate = ?, updated_at = ?
-         WHERE id = ?`,
+         WHERE id = ? AND orgId = ?`,
       ).bind(
         nextStatus,
         nextPaidAmount,
@@ -1540,24 +1554,9 @@ app.put("/:id", async (c) => {
         merged.dueDate,
         now,
         id,
+        orgId,
       ),
     ];
-
-    if (newInvoicePayment) {
-      statements.push(
-        c.var.DB.prepare(
-          `INSERT INTO invoice_payments (id, invoiceId, date, amountSen, method, reference)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-        ).bind(
-          newInvoicePayment.id,
-          id,
-          newInvoicePayment.date,
-          newInvoicePayment.amountSen,
-          newInvoicePayment.method,
-          newInvoicePayment.reference,
-        ),
-      );
-    }
 
     // --- items replacement (optional) ---
     if (Array.isArray(body.items)) {
@@ -2114,7 +2113,7 @@ app.put("/:id", async (c) => {
       recordAuditCreatedMetric(c, { resource: "invoices", action: "void" });
     }
 
-    const updated = await fetchInvoiceWithChildren(c.var.DB, id);
+    const updated = await fetchInvoiceWithChildren(c.var.DB, id, orgId);
 
     return c.json({ success: true, data: updated });
   } catch (err) {

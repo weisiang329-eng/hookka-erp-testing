@@ -728,7 +728,7 @@ guard deploy still pending (owner-gated; prod not accessible from this session).
 
 ---
 
-## BUG-2026-07-05-001 — Mobile Production / Warehouse / Delivery search couldn't find a record by customer PO / SO / our Company SOID `ui-frontend` `mobile` `search`
+## BUG-2026-07-05-002 — Mobile Production / Warehouse / Delivery search couldn't find a record by customer PO / SO / our Company SOID `ui-frontend` `mobile` `search`
 
 🟢 **Fixed on main**
 

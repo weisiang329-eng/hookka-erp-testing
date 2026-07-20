@@ -24,10 +24,9 @@ import {
   TrendingUp,
 } from "lucide-react";
 import {
-  parseBugHistory,
   topCategories,
   type BugEntry,
-} from "@/lib/bug-history-parser";
+} from "@/lib/bug-history-index";
 
 // Time-range selector — passed to every /api/admin/health/* endpoint
 // as ?range=. AE retention is 92 days so 30d is the practical max for
@@ -624,20 +623,17 @@ export default function AdminHealthPage() {
     );
   }, [githubRuns]);
 
-  // Past Fixes — lazy-load docs/BUG-HISTORY.md via Vite's ?raw import.
-  // The markdown is ~250KB so we don't bloat the main chunk; the dynamic
-  // import keeps it out of the bundle until SUPER_ADMIN actually opens
-  // /admin/health. parseBugHistory drops the prose body (Symptom / Root
-  // cause / Fix) and keeps only the headline + category + status, which
-  // is all the dashboard panel needs.
+  // Past Fixes — lazy-load the generated metadata index, not the full
+  // BUG-HISTORY markdown. The deterministic index is checked in CI and keeps
+  // the ~790KB prose document out of the admin route bundle.
   const [bugHistory, setBugHistory] = useState<BugEntry[]>([]);
   const [bugHistoryLoading, setBugHistoryLoading] = useState(true);
   useEffect(() => {
     let alive = true;
-    import("../../../docs/BUG-HISTORY.md?raw")
+    import("../../../docs/bug-history-index.json")
       .then((mod) => {
         if (!alive) return;
-        setBugHistory(parseBugHistory(mod.default));
+        setBugHistory(mod.default.entries as BugEntry[]);
         setBugHistoryLoading(false);
       })
       .catch(() => {

@@ -61,6 +61,9 @@ jobs:
             fi
           fi
 
+      - name: API contract inventory is current
+        run: npm run api:contracts:check
+
       # Lint — non-blocking (P2). ~92 known errors documented in
       # docs/KNOWN-ISSUES.md (most: react-hooks/set-state-in-effect on the
       # idiomatic fetch->setState pattern, pre-React-Query migration). Until

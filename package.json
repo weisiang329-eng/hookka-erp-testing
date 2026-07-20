@@ -11,6 +11,8 @@
     "bugs:check": "node scripts/bug-history.mjs --check",
     "bugs:search": "node scripts/bug-history.mjs --search",
     "release:check": "node scripts/check-release.mjs",
+    "api:contracts:check": "node scripts/api-contract-inventory.mjs --check",
+    "api:contracts:write": "node scripts/api-contract-inventory.mjs --write",
     "build": "vite build",
     "build:strict": "npm run typecheck:app && npm run build",
     "typecheck": "tsc -b",

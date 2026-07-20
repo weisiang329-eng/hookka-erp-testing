@@ -6,6 +6,7 @@ const read = (path) => readFileSync(path, 'utf8')
 
 test('staging deploy applies only the reviewed migration allow-list', () => {
   const workflow = read('.github/workflows/deploy.yml')
+  assert.match(workflow, /node-version: 22/)
   assert.match(workflow, /github\.ref == 'refs\/heads\/staging'/)
   assert.match(workflow, /secrets\.STAGING_DATABASE_URL/)
   assert.match(workflow, /vars\.STAGING_SUPABASE_PROJECT_REF/)
@@ -19,7 +20,7 @@ test('staging deploy applies only the reviewed migration allow-list', () => {
   }
   assert.match(workflow, /preflight-staging-foundation-migrations\.mjs/)
   assert.match(workflow, /db:migrate:supabase:dry/)
-  assert.match(workflow, /db:migrate:supabase\n/)
+  assert.match(workflow, /run: npm run db:migrate:supabase(?:\r?\n)/)
 })
 
 test('incremental applier accepts CI secrets but validates target and pending files', () => {

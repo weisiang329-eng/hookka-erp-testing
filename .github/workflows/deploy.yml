@@ -34,7 +34,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Wrangler 4 requires Node >=22. With Node 20 the Cloudflare action
+          # rejects the locked local Wrangler, silently installs Wrangler 3.90,
+          # then fails to parse modern JSON import attributes in the Worker.
+          node-version: 22
           cache: npm
 
       - run: npm ci

@@ -35,6 +35,10 @@ import { issueDocNumber } from "../lib/doc-number-service";
 import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
 import { applyLifecycle } from "../lib/document-lifecycle";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
+import {
+  SupplierPaymentCreateRequestSchema,
+  firstRequestValidationError,
+} from "../../lib/schemas/payment-request";
 
 const AP_CONTROL = "400-0000"; // Trade Creditors
 const FX_GAIN_ACCT = "530-0000"; // GAIN ON FOREIGN EXCHANGE (realised; debit = loss)
@@ -131,45 +135,46 @@ app.post("/", async (c) => {
         (c as unknown as { get: (k: string) => string | undefined }).get(
           "userId",
         ) ?? null;
-      const body = await c.req.json();
-      const supplierId = String(body.supplierId ?? "");
-      const payFrom = String(body.payFrom ?? "");
-      const date = String(body.date ?? "");
-      const reference: string | undefined = body.reference;
-      const allocations: CreateAllocation[] = Array.isArray(body.allocations)
-        ? body.allocations
-        : [];
+      const parsedBody = SupplierPaymentCreateRequestSchema.safeParse(
+        await c.req.json(),
+      );
+      if (!parsedBody.success) {
+        return c.json(
+          {
+            success: false,
+            error: firstRequestValidationError(parsedBody.error),
+          },
+          400,
+        );
+      }
+      const body = parsedBody.data;
+      const { supplierId, payFrom, date, reference, allocations, advanceSen } =
+        body;
 
       // Supplier advance / prepayment: an amount paid that ISN'T allocated to a
       // PI. Booked as a debit to AP control (400-0000) under the supplier, so it
       // shows as a prepaid (negative) balance on the creditor ledger. The owner
       // knocks it off against invoices MANUALLY later — never auto-applied.
-      const advanceSen = Math.max(0, Math.round(Number(body.advanceSen) || 0));
-
-      if (!supplierId || !payFrom || !date) {
-        return c.json(
-          { success: false, error: "supplierId, payFrom, and date are required" },
-          400,
-        );
-      }
-      if (allocations.length === 0 && advanceSen <= 0) {
-        return c.json(
-          { success: false, error: "at least one allocation or an advance amount is required" },
-          400,
-        );
-      }
-
       // Self-apply the partial-payment schema (migration-7 columns +
       // PARTIAL_PAID status CHECK relax) before any PI read/write — without this
       // the paid_amount_sen write or the PARTIAL_PAID status flip fails on a
       // prod that never ran migration 7 / still has the original 0057 CHECK.
       await ensurePartialPaymentColumns(c.var.DB);
 
+      const supplier = await c.var.DB.prepare(
+        "SELECT id, name FROM suppliers WHERE id = ? AND orgId = ?",
+      )
+        .bind(supplierId, orgId)
+        .first<{ id: string; name: string }>();
+      if (!supplier) {
+        return c.json({ success: false, error: "Supplier not found" }, 404);
+      }
+
       // 1. Validate payFrom is a postable SBK/SCH bank/cash account.
       const acct = await c.var.DB.prepare(
-        "SELECT specialAccountType FROM chart_of_accounts WHERE code = ?",
+        "SELECT specialAccountType FROM chart_of_accounts WHERE code = ? AND orgId = ?",
       )
-        .bind(payFrom)
+        .bind(payFrom, orgId)
         .first<{ specialAccountType: string | null }>();
       if (
         !acct ||
@@ -204,9 +209,10 @@ app.post("/", async (c) => {
         const pi = await c.var.DB.prepare(
           `SELECT id, pi_no, amount_sen, paid_amount_sen, status, currency,
                   fx_rate, supplier_id, supplier_name
-             FROM purchase_invoices WHERE id = ?`,
+             FROM purchase_invoices
+            WHERE id = ? AND orgId = ? AND supplier_id = ?`,
         )
-          .bind(piId)
+          .bind(piId, orgId, supplierId)
           .first<PiRow>();
         if (
           !pi ||
@@ -277,8 +283,15 @@ app.post("/", async (c) => {
                      WHEN paid_amount_sen + ? > 0 THEN 'PARTIAL_PAID'
                      ELSE status
                    END
-             WHERE id = ?`,
-          ).bind(r.bookedSen, r.bookedSen, r.bookedSen, piId),
+             WHERE id = ? AND orgId = ? AND supplier_id = ?`,
+          ).bind(
+            r.bookedSen,
+            r.bookedSen,
+            r.bookedSen,
+            piId,
+            orgId,
+            supplierId,
+          ),
         );
 
         totalBooked += r.bookedSen;
@@ -290,10 +303,6 @@ app.post("/", async (c) => {
       // totals below (DR 400-0000 / CR bank), so it lands on the supplier's
       // creditor ledger as a prepaid (debit) balance to knock off manually later.
       if (advanceSen > 0) {
-        const supRow = await c.var.DB
-          .prepare("SELECT name FROM suppliers WHERE id = ?")
-          .bind(supplierId)
-          .first<{ name: string }>();
         statements.push(
           c.var.DB.prepare(
             `INSERT INTO supplier_payments (
@@ -305,7 +314,7 @@ app.post("/", async (c) => {
             `sp-${crypto.randomUUID().slice(0, 8)}`,
             payNo,
             supplierId,
-            supRow?.name ?? "",
+            supplier.name,
             date,
             advanceSen,
             advanceSen,

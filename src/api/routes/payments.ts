@@ -26,6 +26,10 @@ import { applyLifecycle } from "../lib/document-lifecycle";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
 import { parseDebtorCode } from "../../lib/debtor";
 import { issueDocNumber } from "../lib/doc-number-service";
+import {
+  CustomerPaymentCreateRequestSchema,
+  firstRequestValidationError,
+} from "../../lib/schemas/payment-request";
 
 // Cash/bank account by payment method (CASH → cash-in-hand, else bank).
 function bankAcct(method: string | null | undefined): string {
@@ -449,23 +453,30 @@ app.post("/", async (c) => {
   const idemKey = readIdempotencyKey(c);
   return withIdempotency(c, "payments", idemKey, async () => {
   try {
-    const body = await c.req.json();
-    const { customerId, amount, method, reference, allocations } = body;
-    if (!customerId || amount === undefined || !method) {
+    const orgId = getOrgId(c);
+    const parsedBody = CustomerPaymentCreateRequestSchema.safeParse(
+      await c.req.json(),
+    );
+    if (!parsedBody.success) {
       return c.json(
-        { success: false, error: "customerId, amount, and method are required" },
+        {
+          success: false,
+          error: firstRequestValidationError(parsedBody.error),
+        },
         400,
       );
     }
+    const body = parsedBody.data;
+    const { customerId, amount, method, reference, allocations } = body;
     // Phase 3 follow-up (owner): the receipt deposits into a SPECIFIC
     // bank/cash account picked in the dialog, not a method-derived
     // default. Falls back to bankAcct(method) for older clients.
     let depositAcct = bankAcct(method);
     if (body.bankAccount) {
       const acct = await c.var.DB.prepare(
-        "SELECT specialAccountType FROM chart_of_accounts WHERE code = ?",
+        "SELECT specialAccountType FROM chart_of_accounts WHERE code = ? AND orgId = ?",
       )
-        .bind(String(body.bankAccount))
+        .bind(String(body.bankAccount), orgId)
         .first<{ specialAccountType: string | null }>();
       if (!acct || (acct.specialAccountType !== "SBK" && acct.specialAccountType !== "SCH")) {
         return c.json(
@@ -477,16 +488,15 @@ app.post("/", async (c) => {
     }
 
     const customer = await c.var.DB.prepare(
-      "SELECT id, name, code FROM customers WHERE id = ?",
+      "SELECT id, name, code FROM customers WHERE id = ? AND orgId = ?",
     )
-      .bind(customerId)
+      .bind(customerId, orgId)
       .first<{ id: string; name: string; code: string }>();
     if (!customer) {
       return c.json({ success: false, error: "Customer not found" }, 404);
     }
 
-    const allocInput: Array<{ invoiceId: string; amount: number }> =
-      Array.isArray(allocations) ? allocations : [];
+    const allocInput: Array<{ invoiceId: string; amount: number }> = allocations;
 
     // Look up each invoice to grab the invoiceNo + current state for the
     // per-allocation side-effects (invoice_payments insert + paid bump).
@@ -508,10 +518,11 @@ app.post("/", async (c) => {
       const ids = allocInput.map((a) => a.invoiceId);
       const placeholders = ids.map(() => "?").join(",");
       const invs = await c.var.DB.prepare(
-        `SELECT id, invoiceNo, paidAmount, totalSen, salesOrderId, deliveryOrderId
-           FROM invoices WHERE id IN (${placeholders})`,
+         `SELECT id, invoiceNo, paidAmount, totalSen, salesOrderId, deliveryOrderId
+           FROM invoices
+          WHERE id IN (${placeholders}) AND orgId = ? AND customerId = ?`,
       )
-        .bind(...ids)
+        .bind(...ids, orgId, customerId)
         .all<{
           id: string;
           invoiceNo: string;
@@ -587,10 +598,7 @@ app.post("/", async (c) => {
     // often lands days before it's keyed in) — falls back to today. Drives the
     // receipt number's month, payment_records/invoice_payments dates and the
     // GL month bucket (doc-date family 'payment' reads payment_records.date).
-    const bodyDate = String(body.date ?? "").trim();
-    const date = /^\d{4}-\d{2}-\d{2}$/.test(bodyDate)
-      ? bodyDate
-      : new Date().toISOString().split("T")[0];
+    const date = body.date ?? new Date().toISOString().split("T")[0];
     const receiptNumber = body.receiptNumber || (await issueDocNumber(c.var.DB, {
       bankAccountCode: depositAcct,
       direction: "in",
@@ -600,10 +608,10 @@ app.post("/", async (c) => {
 
     const statements: D1PreparedStatement[] = [
       c.var.DB.prepare(
-        `INSERT INTO payment_records (
+         `INSERT INTO payment_records (
            id, receiptNumber, customerId, customerName, date, amount, method,
-           reference, status, allocations
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           reference, status, allocations, orgId
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
         receiptNumber,
@@ -615,6 +623,7 @@ app.post("/", async (c) => {
         reference || "",
         "RECEIVED",
         JSON.stringify(parsedAllocations),
+        orgId,
       ),
     ];
 
@@ -653,8 +662,8 @@ app.post("/", async (c) => {
       }
       statements.push(
         c.var.DB.prepare(
-          `INSERT INTO invoice_payments (id, invoiceId, date, amountSen, method, reference)
-             VALUES (?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO invoice_payments (id, invoiceId, date, amountSen, method, reference, orgId)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           genInvoicePaymentId(),
           alloc.invoiceId,
@@ -662,6 +671,7 @@ app.post("/", async (c) => {
           alloc.amount,
           method,
           reference || "",
+          orgId,
         ),
       );
       // PR 0 (2026-05-20) — atomic increment. Original code wrote
@@ -688,7 +698,7 @@ app.post("/", async (c) => {
                    ELSE paymentDate
                  END,
                  updated_at = ?
-           WHERE id = ?`,
+           WHERE id = ? AND orgId = ? AND customerId = ?`,
         ).bind(
           alloc.amount,
           alloc.amount,
@@ -697,6 +707,8 @@ app.post("/", async (c) => {
           date,
           now,
           alloc.invoiceId,
+          orgId,
+          customerId,
         ),
       );
     }
@@ -709,8 +721,8 @@ app.post("/", async (c) => {
     if (totalAllocatedSen > 0) {
       statements.push(
         c.var.DB.prepare(
-          `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ?`,
-        ).bind(totalAllocatedSen, customer.id),
+          `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ? AND orgId = ?`,
+        ).bind(totalAllocatedSen, customer.id, orgId),
       );
     }
 
@@ -718,9 +730,9 @@ app.post("/", async (c) => {
       const uniqueSOIds = [...new Set(fullyPaidSOIds)];
       const placeholders = uniqueSOIds.map(() => "?").join(",");
       const soRows = await c.var.DB.prepare(
-        `SELECT id, status FROM sales_orders WHERE id IN (${placeholders})`,
+        `SELECT id, status FROM sales_orders WHERE id IN (${placeholders}) AND orgId = ?`,
       )
-        .bind(...uniqueSOIds)
+        .bind(...uniqueSOIds, orgId)
         .all<{ id: string; status: string }>();
       for (const so of soRows.results ?? []) {
         // 2026-05-26 audit fix — include SHIPPED. Canonical SO status
@@ -735,12 +747,12 @@ app.post("/", async (c) => {
         ) {
           statements.push(
             c.var.DB.prepare(
-              "UPDATE sales_orders SET status = 'INVOICED', updated_at = ? WHERE id = ?",
-            ).bind(now, so.id),
+              "UPDATE sales_orders SET status = 'INVOICED', updated_at = ? WHERE id = ? AND orgId = ?",
+            ).bind(now, so.id, orgId),
             c.var.DB.prepare(
               `INSERT INTO so_status_changes
-                 (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                 (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions, orgId)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ).bind(
               genStatusChangeId(),
               so.id,
@@ -750,6 +762,7 @@ app.post("/", async (c) => {
               now,
               "Invoice fully paid",
               JSON.stringify([`Payment ${receiptNumber} fully paid linked invoice`]),
+              orgId,
             ),
           );
         }
@@ -776,6 +789,7 @@ app.post("/", async (c) => {
         fp.invoiceId,
         fp.deliveryOrderId,
         now,
+        orgId,
       );
       if (closeStmts.length === 0) continue;
       seenClosedSO.add(soKey);
@@ -786,7 +800,6 @@ app.post("/", async (c) => {
     // the ledger unique key + HTTP idempotency wrapper; never blocks the
     // payment.
     try {
-      const orgId = getOrgId(c);
       const actorUserId =
         (c as unknown as { get: (k: string) => string | undefined }).get(
           "userId",
@@ -847,9 +860,9 @@ app.post("/", async (c) => {
     await c.var.DB.batch(statements);
 
     const created = await c.var.DB.prepare(
-      "SELECT * FROM payment_records WHERE id = ?",
+      "SELECT * FROM payment_records WHERE id = ? AND orgId = ?",
     )
-      .bind(id)
+      .bind(id, orgId)
       .first<PaymentRow>();
     if (!created) {
       return c.json(

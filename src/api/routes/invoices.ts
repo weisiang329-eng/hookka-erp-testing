@@ -466,18 +466,19 @@ export async function previewCascadeSOClosed(
   invoiceId: string,
   deliveryOrderId: string | null,
   nowIso: string,
+  orgId: string,
   changedBy = "System",
 ): Promise<D1PreparedStatement[]> {
   if (!deliveryOrderId) return [];
   const doRow = await db
-    .prepare("SELECT id, salesOrderId FROM delivery_orders WHERE id = ?")
-    .bind(deliveryOrderId)
+    .prepare("SELECT id, salesOrderId FROM delivery_orders WHERE id = ? AND orgId = ?")
+    .bind(deliveryOrderId, orgId)
     .first<{ id: string; salesOrderId: string | null }>();
   if (!doRow || !doRow.salesOrderId) return [];
 
   const soRow = await db
-    .prepare("SELECT id, status FROM sales_orders WHERE id = ?")
-    .bind(doRow.salesOrderId)
+    .prepare("SELECT id, status FROM sales_orders WHERE id = ? AND orgId = ?")
+    .bind(doRow.salesOrderId, orgId)
     .first<{ id: string; status: string }>();
   if (!soRow) return [];
   if (soRow.status === "CLOSED" || soRow.status === "CANCELLED") return [];
@@ -488,22 +489,23 @@ export async function previewCascadeSOClosed(
     .prepare(
       `SELECT COUNT(*) AS n
          FROM invoices i
-         JOIN delivery_orders d ON d.id = i.deliveryOrderId
+         JOIN delivery_orders d ON d.id = i.deliveryOrderId AND d.orgId = ?
         WHERE d.salesOrderId = ?
+          AND i.orgId = ?
           AND i.id != ?
           AND i.status != 'PAID'
           AND i.status != 'CANCELLED'`,
     )
-    .bind(soRow.id, invoiceId)
+    .bind(orgId, soRow.id, orgId, invoiceId)
     .first<{ n: number }>();
   if ((unpaidProbe?.n ?? 0) > 0) return [];
 
   const stmts: D1PreparedStatement[] = [
     db
       .prepare(
-        "UPDATE sales_orders SET status = 'CLOSED', updated_at = ? WHERE id = ?",
+        "UPDATE sales_orders SET status = 'CLOSED', updated_at = ? WHERE id = ? AND orgId = ?",
       )
-      .bind(nowIso, soRow.id),
+      .bind(nowIso, soRow.id, orgId),
   ];
 
   // Probe for so_status_changes — skip audit insert if the table isn't
@@ -520,8 +522,8 @@ export async function previewCascadeSOClosed(
       db
         .prepare(
           `INSERT INTO so_status_changes
-             (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions, orgId)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           genStatusChangeId(),
@@ -532,6 +534,7 @@ export async function previewCascadeSOClosed(
           nowIso,
           "All invoices fully paid",
           JSON.stringify([`Invoice ${invoiceId} PAID closed SO`]),
+          orgId,
         ),
     );
   }
@@ -1853,6 +1856,7 @@ app.put("/:id", async (c) => {
         id,
         existing.deliveryOrderId,
         now,
+        getOrgId(c),
       );
       statements.push(...cascadeStmts);
     }

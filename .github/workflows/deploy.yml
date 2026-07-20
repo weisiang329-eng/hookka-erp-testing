@@ -61,7 +61,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
           EXPECTED_SUPABASE_PROJECT_REF: zaxygxwadidiqcphibma
-          MIGRATION_ALLOWED_PENDING: 0208_api_idempotency.sql,0209_invoice_active_do_unique.sql,0210_payment_balance_guards.sql,0211_invoice_payment_receipt_link.sql
+          MIGRATION_ALLOWED_PENDING: 0208_api_idempotency.sql,0209_invoice_active_do_unique.sql,0210_payment_balance_guards.sql,0211_invoice_payment_receipt_link.sql,0212_inventory_adjustment_guards.sql
 
       - name: Apply reviewed migrations to staging
         if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
@@ -69,7 +69,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
           EXPECTED_SUPABASE_PROJECT_REF: zaxygxwadidiqcphibma
-          MIGRATION_ALLOWED_PENDING: 0208_api_idempotency.sql,0209_invoice_active_do_unique.sql,0210_payment_balance_guards.sql,0211_invoice_payment_receipt_link.sql
+          MIGRATION_ALLOWED_PENDING: 0208_api_idempotency.sql,0209_invoice_active_do_unique.sql,0210_payment_balance_guards.sql,0211_invoice_payment_receipt_link.sql,0212_inventory_adjustment_guards.sql
 
       - name: Validate release identity
         run: npm run release:check

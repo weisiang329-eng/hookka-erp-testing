@@ -6,7 +6,7 @@
 // any service orders spawned for this case, plus a "Spawn Service Order"
 // button to open a new resolution flow (REPRODUCE / STOCK_SWAP / REPAIR).
 // ---------------------------------------------------------------------------
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useNavGuard } from "@/lib/use-nav-guard";
@@ -2264,9 +2264,8 @@ function AffectedProductsPanel({
 // tagged with this case's id — migration 0164) and lists this case's
 // issues below. No production order, no service order.
 // Item sources mirror the Stock Adjustments page (inventory/adjustments.tsx):
-// RM = /api/raw-materials, WIP = /api/inventory/wip, FG = /api/inventory
-// finishedProducts; unit cost prefill mirrors the same page (RM unitCostSen,
-// FG basePriceSen, WIP unknown → 0).
+// RM = /api/raw-materials, WIP = /api/inventory/wip, and FG uses actual batch
+// ids/cost from /api/inventory/fg-batches. WIP has no direct cost prefill.
 type ReplacementType = "RM" | "WIP" | "FG";
 type ReplacementItemOpt = {
   id: string;
@@ -2303,6 +2302,7 @@ function StockTopUpPanel({
   const [qty, setQtyInput] = useState("1");
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
+  const issueIdempotencyKey = useRef(crypto.randomUUID());
   // Focus drives the browsable dropdown — clicking the box shows the stock
   // list (first N) so the operator can browse without blind-typing.
   const [focused, setFocused] = useState(false);
@@ -2314,9 +2314,15 @@ function StockTopUpPanel({
   const { data: wipResp } = useCachedJson<{
     data?: Array<{ id: string; code: string; type: string; stockQty: number }>;
   }>(type === "WIP" ? "/api/inventory/wip" : null);
-  const { data: invResp } = useCachedJson<{
-    data?: { finishedProducts?: Array<{ id: string; code: string; name: string; stockQty?: number; basePriceSen?: number }> };
-  }>(type === "FG" ? "/api/inventory" : null);
+  const { data: fgResp } = useCachedJson<{
+    data?: Array<{
+      id: string;
+      productCode: string;
+      productName: string;
+      remainingQty: number;
+      unitCostSen: number;
+    }>;
+  }>(type === "FG" ? "/api/inventory/fg-batches" : null);
 
   const itemOptions: ReplacementItemOpt[] = useMemo(() => {
     if (type === "RM") {
@@ -2337,14 +2343,14 @@ function StockTopUpPanel({
         unitCostSen: 0,
       }));
     }
-    return (invResp?.data?.finishedProducts ?? []).map((p) => ({
+    return (fgResp?.data ?? []).map((p) => ({
       id: p.id,
-      code: p.code,
-      name: p.name ?? "",
-      onHand: p.stockQty ?? 0,
-      unitCostSen: p.basePriceSen ?? 0,
+      code: p.productCode,
+      name: p.productName ?? "",
+      onHand: p.remainingQty,
+      unitCostSen: p.unitCostSen,
     }));
-  }, [type, rmResp, wipResp, invResp]);
+  }, [type, rmResp, wipResp, fgResp]);
 
   // Browse-then-pick — an EMPTY query shows the first chunk of the stock list
   // (so clicking the box reveals what's in stock to pick from); typing filters.
@@ -2394,7 +2400,10 @@ function StockTopUpPanel({
     try {
       const res = await fetch("/api/stock-adjustments", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": issueIdempotencyKey.current,
+        },
         body: JSON.stringify({
           type,
           itemId: selected.id,
@@ -2403,12 +2412,14 @@ function StockTopUpPanel({
           reason: "SERVICE_REPLACEMENT",
           notes: `${caseDetail.caseNo}${note.trim() ? " — " + note.trim() : ""}`,
           caseId: caseDetail.id,
-          adjustedBy: user?.id ?? null,
-          adjustedByName: user?.displayName ?? user?.email ?? null,
         }),
       });
       const data = (await res.json()) as { success?: boolean; error?: string };
-      if (!res.ok || !data?.success) throw new Error(data?.error || `HTTP ${res.status}`);
+      if (!res.ok || !data?.success) {
+        issueIdempotencyKey.current = crypto.randomUUID();
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      issueIdempotencyKey.current = crypto.randomUUID();
       // Append to the case's agent action log (same PUT shape the
       // ActionLogPanel persists) so the timeline shows the part went out.
       // Best-effort — the stock deduction above already committed.

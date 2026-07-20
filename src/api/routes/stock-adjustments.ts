@@ -37,17 +37,17 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
+import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
+import { issueStockAdjustmentNumber } from "../lib/stock-adjustment-number";
+import {
+  createStockAdjustmentSchema,
+  type CreateStockAdjustmentInput,
+} from "../../lib/schemas/stock-adjustment";
 
 const app = new Hono<Env>();
 
-type AdjustmentType = "RM" | "WIP" | "FG";
-type AdjustmentReason =
-  | "FOUND"
-  | "DAMAGED"
-  | "COUNT_CORRECTION"
-  | "WRITE_OFF"
-  | "SERVICE_REPLACEMENT"
-  | "OTHER";
+type AdjustmentType = CreateStockAdjustmentInput["type"];
+type AdjustmentReason = CreateStockAdjustmentInput["reason"];
 
 type StockAdjustmentRow = {
   id: string;
@@ -70,16 +70,6 @@ type StockAdjustmentRow = {
   caseId?: string | null;
   caseid?: string | null;
 };
-
-const VALID_TYPES: AdjustmentType[] = ["RM", "WIP", "FG"];
-const VALID_REASONS: AdjustmentReason[] = [
-  "FOUND",
-  "DAMAGED",
-  "COUNT_CORRECTION",
-  "WRITE_OFF",
-  "SERVICE_REPLACEMENT",
-  "OTHER",
-];
 
 // Self-applying migration — 0164. caseid is the optional service_cases.id
 // backlink for SERVICE_REPLACEMENT adjustments (the "Replacement Parts" card
@@ -105,25 +95,6 @@ function genId(): string {
 
 // ADJ-YYMM-NNN sequential, human-readable adjustment number. Added
 // 2026-04-28 — older rows have NULL adjNo until backfilled.
-async function nextAdjNo(db: D1Database): Promise<string> {
-  const now = new Date();
-  const yymm = `${String(now.getFullYear()).slice(2)}${String(
-    now.getMonth() + 1,
-  ).padStart(2, "0")}`;
-  const prefix = `ADJ-${yymm}-`;
-  const res = await db
-    .prepare(
-      "SELECT adjNo FROM stock_adjustments WHERE adjNo LIKE ? ORDER BY adjNo DESC LIMIT 1",
-    )
-    .bind(`${prefix}%`)
-    .first<{ adjNo: string }>();
-  if (!res) return `${prefix}001`;
-  const tail = res.adjNo.replace(prefix, "");
-  const seq = parseInt(tail, 10);
-  if (!Number.isFinite(seq)) return `${prefix}001`;
-  return `${prefix}${String(seq + 1).padStart(3, "0")}`;
-}
-
 function rowToApi(r: StockAdjustmentRow) {
   return {
     id: r.id,
@@ -201,8 +172,6 @@ app.get("/", async (c) => {
 //   unitCostSen: number,    // per-unit cost at adjustment time (from UI prefill)
 //   reason: 'FOUND'|'DAMAGED'|'COUNT_CORRECTION'|'WRITE_OFF'|'SERVICE_REPLACEMENT'|'OTHER',
 //   notes?: string,
-//   adjustedBy?: string,    // user id (frontend pulls from auth)
-//   adjustedByName?: string,
 //   caseId?: string,        // service_cases.id — SERVICE_REPLACEMENT backlink
 // }
 // ---------------------------------------------------------------------------
@@ -210,44 +179,58 @@ app.post("/", async (c) => {
   const denied = await requirePermission(c, "inventory", "create");
   if (denied) return denied;
   await ensureStockAdjustmentColumns(c.var.DB);
-  try {
-    const body = await c.req.json();
-    const type = body.type as AdjustmentType;
-    const itemId = body.itemId as string;
-    const qtyDelta = Number(body.qtyDelta);
-    const unitCostSen = Number(body.unitCostSen) || 0;
-    const reason = body.reason as AdjustmentReason;
 
-    // ---- validate ----
-    if (!type || !VALID_TYPES.includes(type)) {
-      return c.json(
-        { success: false, error: "type must be RM, WIP, or FG" },
-        400,
-      );
-    }
-    if (!itemId) {
-      return c.json({ success: false, error: "itemId is required" }, 400);
-    }
-    if (!Number.isFinite(qtyDelta) || qtyDelta === 0) {
-      return c.json(
-        { success: false, error: "qtyDelta must be non-zero" },
-        400,
-      );
-    }
-    if (!reason || !VALID_REASONS.includes(reason)) {
-      return c.json(
-        {
-          success: false,
-          error:
-            "reason must be one of FOUND/DAMAGED/COUNT_CORRECTION/WRITE_OFF/SERVICE_REPLACEMENT/OTHER",
-        },
-        400,
-      );
-    }
-    const caseId =
-      typeof body.caseId === "string" && body.caseId.trim()
-        ? body.caseId.trim()
+  const idemKey = readIdempotencyKey(c);
+  if (!idemKey) {
+    return c.json(
+      { success: false, error: "A valid Idempotency-Key header is required" },
+      400,
+    );
+  }
+
+  return withIdempotency(c, "stock-adjustments", idemKey, async () => {
+    try {
+      let json: unknown;
+      try {
+        json = await c.req.json();
+      } catch {
+        return c.json({ success: false, error: "Invalid JSON body" }, 400);
+      }
+      const parsed = createStockAdjustmentSchema.safeParse(json);
+      if (!parsed.success) {
+        return c.json(
+          {
+            success: false,
+            error: parsed.error.issues[0]?.message ?? "Invalid request body",
+          },
+          400,
+        );
+      }
+      const body = parsed.data;
+      const { type, itemId, qtyDelta, unitCostSen, reason } = body;
+      const caseId = body.caseId ?? null;
+      const notes = body.notes ?? null;
+      const orgId = getOrgId(c);
+      const userId = (
+        c as unknown as { get: (key: string) => string | undefined }
+      ).get("userId") ?? null;
+      const actor = userId
+        ? await c.var.DB
+            .prepare("SELECT displayName, email FROM users WHERE id = ?")
+            .bind(userId)
+            .first<{ displayName: string | null; email: string | null }>()
         : null;
+      const actorName = actor?.displayName || actor?.email || userId;
+
+      if (caseId) {
+        const serviceCase = await c.var.DB
+          .prepare("SELECT id FROM service_cases WHERE id = ? AND orgId = ?")
+          .bind(caseId, orgId)
+          .first<{ id: string }>();
+        if (!serviceCase) {
+          return c.json({ success: false, error: "Service case not found" }, 404);
+        }
+      }
 
     // ---- look up the item to get itemCode + itemName + current qty ----
     let itemCode = "";
@@ -257,9 +240,10 @@ app.post("/", async (c) => {
     if (type === "RM") {
       const row = await c.var.DB
         .prepare(
-          `SELECT itemCode, itemName, balanceQty FROM raw_materials WHERE id = ?`,
+          `SELECT itemCode, itemName, balanceQty
+             FROM raw_materials WHERE id = ? AND orgId = ?`,
         )
-        .bind(itemId)
+        .bind(itemId, orgId)
         .first<{ itemCode: string; itemName: string | null; balanceQty: number }>();
       if (!row) {
         return c.json({ success: false, error: "Raw material not found" }, 404);
@@ -269,8 +253,8 @@ app.post("/", async (c) => {
       currentQty = row.balanceQty;
     } else if (type === "WIP") {
       const row = await c.var.DB
-        .prepare(`SELECT code, type, stockQty FROM wip_items WHERE id = ?`)
-        .bind(itemId)
+        .prepare(`SELECT code, type, stockQty FROM wip_items WHERE id = ? AND orgId = ?`)
+        .bind(itemId, orgId)
         .first<{ code: string; type: string; stockQty: number }>();
       if (!row) {
         return c.json({ success: false, error: "WIP item not found" }, 404);
@@ -282,16 +266,17 @@ app.post("/", async (c) => {
       // FG: itemId points at fg_batches.id
       const row = await c.var.DB
         .prepare(
-          `SELECT id, productId, remainingQty FROM fg_batches WHERE id = ?`,
+          `SELECT id, productId, remainingQty
+             FROM fg_batches WHERE id = ? AND orgId = ?`,
         )
-        .bind(itemId)
+        .bind(itemId, orgId)
         .first<{ id: string; productId: string; remainingQty: number }>();
       if (!row) {
         return c.json({ success: false, error: "FG batch not found" }, 404);
       }
       const prod = await c.var.DB
-        .prepare(`SELECT code, name FROM products WHERE id = ?`)
-        .bind(row.productId)
+        .prepare(`SELECT code, name FROM products WHERE id = ? AND orgId = ?`)
+        .bind(row.productId, orgId)
         .first<{ code: string; name: string }>();
       itemCode = prod?.code ?? row.productId;
       itemName = prod?.name ?? null;
@@ -311,7 +296,7 @@ app.post("/", async (c) => {
 
     // ---- compose all writes ----
     const id = genId();
-    const adjNo = await nextAdjNo(c.var.DB);
+    const adjNo = await issueStockAdjustmentNumber(c.var.DB, orgId);
     const direction: "IN" | "OUT" = qtyDelta > 0 ? "IN" : "OUT";
     const nowIso = new Date().toISOString();
     const today = nowIso.split("T")[0];
@@ -335,10 +320,10 @@ app.post("/", async (c) => {
         .prepare(
           `SELECT id, remainingQty, unitCostSen
              FROM rm_batches
-            WHERE rmId = ? AND remainingQty > 0
+            WHERE rmId = ? AND orgId = ? AND remainingQty > 0
             ORDER BY receivedDate ASC, id ASC`,
         )
-        .bind(itemId)
+        .bind(itemId, orgId)
         .all<{ id: string; remainingQty: number; unitCostSen: number }>();
       const batches = batchesRes.results ?? [];
       let stillToConsume = remaining;
@@ -389,12 +374,13 @@ app.post("/", async (c) => {
     // pre-fill); totalCostSen is the true cost out of stock.
     stmts.push(
       c.var.DB.prepare(
-        `INSERT INTO stock_adjustments (id, adjNo, type, itemId, itemCode, itemName,
+        `INSERT INTO stock_adjustments (id, orgId, adjNo, type, itemId, itemCode, itemName,
            qtyDelta, unitCostSen, totalCostSen, direction, reason, notes,
            adjustedBy, adjustedByName, adjustedAt, caseid, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
+        orgId,
         adjNo,
         type,
         itemId,
@@ -405,9 +391,9 @@ app.post("/", async (c) => {
         totalCostSen,
         direction,
         reason,
-        (body.notes as string) ?? null,
-        (body.adjustedBy as string) ?? null,
-        (body.adjustedByName as string) ?? null,
+        notes,
+        userId,
+        actorName,
         nowIso,
         caseId,
         nowIso,
@@ -418,17 +404,18 @@ app.post("/", async (c) => {
     const movementType = direction === "IN" ? "STOCK_IN" : "STOCK_OUT";
     stmts.push(
       c.var.DB.prepare(
-        `INSERT INTO stock_movements (id, type, productCode, productName,
+        `INSERT INTO stock_movements (id, orgId, type, productCode, productName,
            quantity, reason, performedBy, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         `mv-${id}`,
+        orgId,
         movementType,
         itemCode,
         itemName,
         Math.abs(qtyDelta),
         `${reason}: stock adjustment ${id}${body.notes ? " — " + body.notes : ""}`,
-        (body.adjustedByName as string) ?? null,
+        actorName,
         nowIso,
       ),
     );
@@ -442,11 +429,12 @@ app.post("/", async (c) => {
         const layer = fifoPlan[i];
         stmts.push(
           c.var.DB.prepare(
-            `INSERT INTO cost_ledger (id, date, type, itemType, itemId, batchId,
+            `INSERT INTO cost_ledger (id, orgId, date, type, itemType, itemId, batchId,
                qty, direction, unitCostSen, totalCostSen, refType, refId, notes)
-             VALUES (?, ?, 'ADJUSTMENT', 'RM', ?, ?, ?, 'OUT', ?, ?, 'STOCK_ADJUSTMENT', ?, ?)`,
+             VALUES (?, ?, ?, 'ADJUSTMENT', 'RM', ?, ?, ?, 'OUT', ?, ?, 'STOCK_ADJUSTMENT', ?, ?)`,
           ).bind(
             `cl-${id}-${i}`,
+            orgId,
             today,
             itemId,
             layer.batchId || null,
@@ -463,11 +451,12 @@ app.post("/", async (c) => {
     } else {
       stmts.push(
         c.var.DB.prepare(
-          `INSERT INTO cost_ledger (id, date, type, itemType, itemId, batchId,
+          `INSERT INTO cost_ledger (id, orgId, date, type, itemType, itemId, batchId,
              qty, direction, unitCostSen, totalCostSen, refType, refId, notes)
-           VALUES (?, ?, 'ADJUSTMENT', ?, ?, ?, ?, ?, ?, ?, 'STOCK_ADJUSTMENT', ?, ?)`,
+           VALUES (?, ?, ?, 'ADJUSTMENT', ?, ?, ?, ?, ?, ?, ?, 'STOCK_ADJUSTMENT', ?, ?)`,
         ).bind(
           `cl-${id}`,
+          orgId,
           today,
           type,
           itemId,
@@ -486,18 +475,20 @@ app.post("/", async (c) => {
     if (type === "RM") {
       stmts.push(
         c.var.DB.prepare(
-          `UPDATE raw_materials SET balanceQty = balanceQty + ? WHERE id = ?`,
-        ).bind(qtyDelta, itemId),
+          `UPDATE raw_materials SET balanceQty = balanceQty + ?
+            WHERE id = ? AND orgId = ?`,
+        ).bind(qtyDelta, itemId, orgId),
       );
       // Positive delta on RM = new FIFO cost layer.
       if (direction === "IN") {
         stmts.push(
           c.var.DB.prepare(
-            `INSERT INTO rm_batches (id, rmId, source, sourceRefId, receivedDate,
+            `INSERT INTO rm_batches (id, orgId, rmId, source, sourceRefId, receivedDate,
                originalQty, remainingQty, unitCostSen, created_at, notes)
-             VALUES (?, ?, 'ADJUSTMENT', ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, 'ADJUSTMENT', ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             `batch-${id}`,
+            orgId,
             itemId,
             id,
             today,
@@ -520,31 +511,34 @@ app.post("/", async (c) => {
           if (!layer.batchId) continue;
           stmts.push(
             c.var.DB.prepare(
-              `UPDATE rm_batches SET remainingQty = remainingQty - ? WHERE id = ?`,
-            ).bind(layer.qty, layer.batchId),
+              `UPDATE rm_batches SET remainingQty = remainingQty - ?
+                WHERE id = ? AND orgId = ?`,
+            ).bind(layer.qty, layer.batchId, orgId),
           );
         }
       }
     } else if (type === "WIP") {
       stmts.push(
         c.var.DB.prepare(
-          `UPDATE wip_items SET stockQty = stockQty + ? WHERE id = ?`,
-        ).bind(qtyDelta, itemId),
+          `UPDATE wip_items SET stockQty = stockQty + ?
+            WHERE id = ? AND orgId = ?`,
+        ).bind(qtyDelta, itemId, orgId),
       );
     } else {
       // FG: adjust the batch's remaining qty
       stmts.push(
         c.var.DB.prepare(
-          `UPDATE fg_batches SET remainingQty = remainingQty + ? WHERE id = ?`,
-        ).bind(qtyDelta, itemId),
+          `UPDATE fg_batches SET remainingQty = remainingQty + ?
+            WHERE id = ? AND orgId = ?`,
+        ).bind(qtyDelta, itemId, orgId),
       );
     }
 
     await c.var.DB.batch(stmts);
 
     const created = await c.var.DB
-      .prepare(`SELECT * FROM stock_adjustments WHERE id = ?`)
-      .bind(id)
+      .prepare(`SELECT * FROM stock_adjustments WHERE id = ? AND orgId = ?`)
+      .bind(id, orgId)
       .first<StockAdjustmentRow>();
     if (!created) {
       return c.json(
@@ -553,15 +547,22 @@ app.post("/", async (c) => {
       );
     }
     return c.json({ success: true, data: rowToApi(created) }, 201);
-  } catch (err) {
-    return c.json(
-      {
-        success: false,
-        error: err instanceof Error ? err.message : "Invalid request body",
-      },
-      400,
-    );
-  }
+    } catch (err) {
+      console.error("[stock-adjustments] atomic write failed", err);
+      const message = err instanceof Error ? err.message : "";
+      const isStockConstraint =
+        /nonnegative|check constraint|remaining_qty|balance_qty|stock_qty/i.test(message);
+      return c.json(
+        {
+          success: false,
+          error: isStockConstraint
+            ? "Stock changed while this adjustment was posting. Refresh and retry with the current quantity."
+            : "Could not post the stock adjustment. Nothing was written.",
+        },
+        isStockConstraint ? 409 : 500,
+      );
+    }
+  });
 });
 
 export default app;

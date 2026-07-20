@@ -31,6 +31,10 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
+import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
+import { issueStockAdjustmentNumber } from "../lib/stock-adjustment-number";
+import { scrapServiceReturnSchema } from "../../lib/schemas/stock-adjustment";
 
 const app = new Hono<Env>();
 
@@ -1367,7 +1371,6 @@ app.put("/:id/returns/:rid", async (c) => {
 //   fgBatchId: string,           // which FG batch the unit is written off against
 //   unitCostSen?: number,        // optional override; defaults to fg_batches.unitCostSen
 //   notes?: string,              // free text (appears on both adjustment + return)
-//   adjustedBy?: string, adjustedByName?: string,
 // }
 //
 // Atomic writes:
@@ -1386,18 +1389,53 @@ app.post("/:id/returns/:rid/scrap", async (c) => {
   if (denied) return denied;
   const id = c.req.param("id");
   const rid = c.req.param("rid");
-  try {
-    const body = (await c.req.json()) as Record<string, unknown>;
-    const fgBatchId = (body.fgBatchId as string) ?? "";
-    if (!fgBatchId) {
-      return c.json({ success: false, error: "fgBatchId is required" }, 400);
-    }
+
+  const idemKey = readIdempotencyKey(c);
+  if (!idemKey) {
+    return c.json(
+      { success: false, error: "A valid Idempotency-Key header is required" },
+      400,
+    );
+  }
+
+  return withIdempotency(c, "service-return-scrap", idemKey, async () => {
+    try {
+      let json: unknown;
+      try {
+        json = await c.req.json();
+      } catch {
+        return c.json({ success: false, error: "Invalid JSON body" }, 400);
+      }
+      const parsed = scrapServiceReturnSchema.safeParse(json);
+      if (!parsed.success) {
+        return c.json(
+          {
+            success: false,
+            error: parsed.error.issues[0]?.message ?? "Invalid request body",
+          },
+          400,
+        );
+      }
+      const body = parsed.data;
+      const fgBatchId = body.fgBatchId;
+      const orgId = getOrgId(c);
+      const userId = (
+        c as unknown as { get: (key: string) => string | undefined }
+      ).get("userId") ?? null;
+      const actor = userId
+        ? await c.var.DB
+            .prepare("SELECT displayName, email FROM users WHERE id = ?")
+            .bind(userId)
+            .first<{ displayName: string | null; email: string | null }>()
+        : null;
+      const actorName = actor?.displayName || actor?.email || userId;
 
     const ret = await c.var.DB
       .prepare(
-        "SELECT * FROM service_order_returns WHERE id = ? AND serviceOrderId = ?",
+        `SELECT * FROM service_order_returns
+          WHERE id = ? AND serviceOrderId = ? AND orgId = ?`,
       )
-      .bind(rid, id)
+      .bind(rid, id, orgId)
       .first<ServiceOrderReturnRow>();
     if (!ret) {
       return c.json({ success: false, error: "Return not found" }, 404);
@@ -1411,9 +1449,10 @@ app.post("/:id/returns/:rid/scrap", async (c) => {
 
     const batch = await c.var.DB
       .prepare(
-        "SELECT id, productId, remainingQty, unitCostSen FROM fg_batches WHERE id = ?",
+        `SELECT id, productId, remainingQty, unitCostSen
+           FROM fg_batches WHERE id = ? AND orgId = ?`,
       )
-      .bind(fgBatchId)
+      .bind(fgBatchId, orgId)
       .first<{ id: string; productId: string; remainingQty: number; unitCostSen: number }>();
     if (!batch) {
       return c.json({ success: false, error: "FG batch not found" }, 404);
@@ -1429,17 +1468,16 @@ app.post("/:id/returns/:rid/scrap", async (c) => {
     }
 
     const prod = await c.var.DB
-      .prepare("SELECT code, name FROM products WHERE id = ?")
-      .bind(batch.productId)
+      .prepare("SELECT code, name FROM products WHERE id = ? AND orgId = ?")
+      .bind(batch.productId, orgId)
       .first<{ code: string; name: string }>();
     const itemCode = prod?.code ?? batch.productId;
     const itemName = prod?.name ?? null;
-    const unitCostSen = Number(body.unitCostSen) || batch.unitCostSen || 0;
-    const notes = (body.notes as string) ?? `Scrapped via Service Order ${id}`;
-    const adjustedBy = (body.adjustedBy as string) ?? null;
-    const adjustedByName = (body.adjustedByName as string) ?? null;
+    const unitCostSen = body.unitCostSen ?? batch.unitCostSen ?? 0;
+    const notes = body.notes ?? `Scrapped via Service Order ${id}`;
 
     const adjId = `adj-${crypto.randomUUID().slice(0, 8)}`;
+    const adjNo = await issueStockAdjustmentNumber(c.var.DB, orgId);
     const totalCostSen = Math.round(unitCostSen);
     const nowIso = new Date().toISOString();
     const today = nowIso.split("T")[0];
@@ -1448,49 +1486,54 @@ app.post("/:id/returns/:rid/scrap", async (c) => {
       // 1. stock_adjustments — the canonical record
       c.var.DB
         .prepare(
-          `INSERT INTO stock_adjustments (id, type, itemId, itemCode, itemName,
+          `INSERT INTO stock_adjustments (id, orgId, adjNo, type, itemId, itemCode, itemName,
              qtyDelta, unitCostSen, totalCostSen, direction, reason, notes,
              adjustedBy, adjustedByName, adjustedAt, created_at)
-           VALUES (?, 'FG', ?, ?, ?, -1, ?, ?, 'OUT', 'DAMAGED', ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, 'FG', ?, ?, ?, -1, ?, ?, 'OUT', 'DAMAGED', ?, ?, ?, ?, ?)`,
         )
         .bind(
           adjId,
+          orgId,
+          adjNo,
           fgBatchId,
           itemCode,
           itemName,
           unitCostSen,
           totalCostSen,
           notes,
-          adjustedBy,
-          adjustedByName,
+          userId,
+          actorName,
           nowIso,
           nowIso,
         ),
       // 2. stock_movements — audit
       c.var.DB
         .prepare(
-          `INSERT INTO stock_movements (id, type, productCode, productName,
+          `INSERT INTO stock_movements (id, orgId, type, productCode, productName,
              quantity, reason, performedBy, created_at)
-           VALUES (?, 'STOCK_OUT', ?, ?, 1, ?, ?, ?)`,
+           VALUES (?, ?, 'STOCK_OUT', ?, ?, 1, ?, ?, ?)`,
         )
         .bind(
           `mv-${adjId}`,
+          orgId,
           itemCode,
           itemName,
           `Scrap from Service Order ${id} (return ${rid})${notes ? " — " + notes : ""}`,
-          adjustedByName,
+          actorName,
           nowIso,
         ),
       // 3. cost_ledger — financial impact
       c.var.DB
         .prepare(
-          `INSERT INTO cost_ledger (id, date, type, itemType, itemId, batchId,
+          `INSERT INTO cost_ledger (id, orgId, date, type, itemType, itemId, batchId,
              qty, direction, unitCostSen, totalCostSen, refType, refId, notes)
-           VALUES (?, ?, 'ADJUSTMENT', 'FG', ?, NULL, 1, 'OUT', ?, ?, 'STOCK_ADJUSTMENT', ?, ?)`,
+           VALUES (?, ?, ?, 'ADJUSTMENT', 'FG', ?, ?, 1, 'OUT', ?, ?, 'STOCK_ADJUSTMENT', ?, ?)`,
         )
         .bind(
           `cl-${adjId}`,
+          orgId,
           today,
+          fgBatchId,
           fgBatchId,
           unitCostSen,
           totalCostSen,
@@ -1499,8 +1542,11 @@ app.post("/:id/returns/:rid/scrap", async (c) => {
         ),
       // 4. UPDATE fg_batches
       c.var.DB
-        .prepare("UPDATE fg_batches SET remainingQty = remainingQty - 1 WHERE id = ?")
-        .bind(fgBatchId),
+        .prepare(
+          `UPDATE fg_batches SET remainingQty = remainingQty - 1
+            WHERE id = ? AND orgId = ?`,
+        )
+        .bind(fgBatchId, orgId),
       // 5. UPDATE the return — SCRAPPED + link
       c.var.DB
         .prepare(
@@ -1508,27 +1554,37 @@ app.post("/:id/returns/:rid/scrap", async (c) => {
              SET condition = 'SCRAPPED',
                  scrappedViaAdjustmentId = ?,
                  notes = COALESCE(?, notes)
-             WHERE id = ?`,
+              WHERE id = ? AND serviceOrderId = ? AND orgId = ?`,
         )
-        .bind(adjId, notes, rid),
+        .bind(adjId, notes, rid, id, orgId),
     ];
 
     await c.var.DB.batch(stmts);
 
     const updated = await c.var.DB
-      .prepare("SELECT * FROM service_order_returns WHERE id = ?")
-      .bind(rid)
+      .prepare("SELECT * FROM service_order_returns WHERE id = ? AND orgId = ?")
+      .bind(rid, orgId)
       .first<ServiceOrderReturnRow>();
     return c.json({
       success: true,
       data: updated,
       adjustmentId: adjId,
     });
-  } catch (err) {
-    console.error("[POST /api/service-orders/:id/returns/:rid/scrap] failed:", err);
-    const message = err instanceof Error ? err.message : "Invalid request body";
-    return c.json({ success: false, error: message }, 400);
-  }
+    } catch (err) {
+      console.error("[POST /api/service-orders/:id/returns/:rid/scrap] failed:", err);
+      const message = err instanceof Error ? err.message : "";
+      const concurrent = /nonnegative|check constraint|remaining_qty/i.test(message);
+      return c.json(
+        {
+          success: false,
+          error: concurrent
+            ? "This FG batch changed while the scrap was posting. Refresh and retry."
+            : "Could not post the scrap adjustment. Nothing was written.",
+        },
+        concurrent ? 409 : 500,
+      );
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

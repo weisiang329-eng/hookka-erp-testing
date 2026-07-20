@@ -4,16 +4,16 @@
 > performance, staging, and production-safety programme. Read this before
 > continuing the programme. Update it in every related PR.
 
-Last verified: **2026-07-20 (Asia/Kuala_Lumpur)**  
+Last verified: **2026-07-21 (Asia/Kuala_Lumpur)**
+
 Owner policy: **all changes prove on `staging` first; production/main remains
 unchanged until the owner accepts staging.** This policy overrides older handoff
 documents that say bug fixes go straight to main.
 
 ## Current state — read first
 
-- Foundation runtime candidate: `76687226dc0c01aab9037ffba3db9822f7f0e319`
-  (`security: remove embedded database credentials (#75)`). PR #76 adds this
-  ledger only, so it advances the branch SHA without changing runtime code.
+- Current staging head: `f7e1b03c39f25007b83fbf29700dd68c116618f6`
+  (`fix(auth): unify admin account contracts (#77)`).
 - Always resolve the exact current head instead of trusting a copied value:
   `git fetch origin staging && git rev-parse origin/staging`.
 - `main` / production: deliberately untouched by this programme.
@@ -46,35 +46,35 @@ documents that say bug fixes go straight to main.
 | [#74](https://github.com/weisiang329-eng/hookka-erp-testing/pull/74) | Staging-only migration proving gate and Node 22/Wrangler 4 fix |
 | [#75](https://github.com/weisiang329-eng/hookka-erp-testing/pull/75) | Removed 113 embedded DB URLs from 109 scripts; fail-closed env injection and secret-scan CI |
 | [#76](https://github.com/weisiang329-eng/hookka-erp-testing/pull/76) | Canonical cross-session execution ledger (documentation-only) |
+| [#77](https://github.com/weisiang329-eng/hookka-erp-testing/pull/77) | Shared auth/admin schemas, password policy, and one runtime role source |
 
 ## Current P1 delivery candidate
 
-- [PR #77](https://github.com/weisiang329-eng/hookka-erp-testing/pull/77)
-  (`agent/high-risk-contracts`) closes the first auth/admin contract batch.
-  Admin create/update/reset/invite and public invite acceptance now use shared,
-  strict request schemas; every password write uses the canonical strength
-  policy in FE and BE.
-- `users.role` is now the single runtime role source for session authorization,
-  backend permission checks, and frontend navigation permissions. The retained
-  `users.roleId` compatibility column no longer contradicts a successful role
-  change in the UI.
-- Regression: `tests/user-admin-contract.test.mjs`; BugHistory
-  `BUG-2026-07-20-004`. Production remains unchanged.
+- `agent/inventory-adjustment-contract` closes the inventory-adjustment batch;
+  PR creation is the next action after final evidence is committed.
+- Desktop/service-case FG pickers now use `fg_batches.id`; direct adjustments
+  and service-return scrap share strict schemas, DB idempotency, server actor
+  attribution, tenant-scoped reads/writes, and atomic adjustment numbering.
+- Migration `0212` enforces nonnegative RM/WIP/FG/FIFO balances and adjustment
+  sign/cost invariants on every new write, while leaving historical drift
+  visible for separate remediation.
+- Regression: `tests/stock-adjustment-contract.test.mjs`; BugHistory
+  `BUG-2026-07-20-005`. Production remains unchanged.
 
 ## Last complete local evidence
 
-- Full suite: **1780 tests / 1779 pass / 0 fail / 1 skip**.
+- Full suite: **1786 tests / 1785 pass / 0 fail / 1 skip**.
 - Strict app typecheck: pass.
 - Production build: pass, **3448 modules** transformed.
 - `npm audit`: **0 vulnerabilities**.
 - Script syntax audit: **110 files / 0 failures**.
 - Repository PostgreSQL credential scan: **0 current-tree findings**.
-- BugHistory: **457 unique entries**, machine policy current.
-- API inventory: **881 endpoints / 531 mutations / 322 JSON-body routes / 8
-  schema-validated routes**. The auth/admin batch raised this from 3. The low
+- BugHistory: **458 unique entries**, machine policy current.
+- API inventory: **882 endpoints / 531 mutations / 322 JSON-body routes / 10
+  schema-validated routes**. The contract batches raised this from 3. The low
   overall count is an explicit follow-up,
   not a claim that the API contract work is finished.
-- Latest intended schema version: **0211**. Migrations 0208–0211 have not yet
+- Latest intended schema version: **0212**. Migrations 0208–0212 have not yet
   been proven/applied by the new staging workflow.
 
 ## Exact resume procedure
@@ -88,11 +88,11 @@ documents that say bug fixes go straight to main.
    - active invoice/DO duplicate groups must be zero;
    - AR/AP historical exception counts are warnings only; do not expose rows.
 4. Confirm the dry-run reports only the explicit allow-list:
-   `0208`, `0209`, `0210`, `0211`. Any other pending migration is a blocker.
-5. Confirm all four apply successfully, then tests/typecheck/build and
+   `0208`, `0209`, `0210`, `0211`, `0212`. Any other pending migration is a blocker.
+5. Confirm all five apply successfully, then tests/typecheck/build and
    Cloudflare deploy complete.
 6. Verify staging, in this order:
-   - `/version.json` identifies the exact staging merge SHA and schema `0211`;
+   - `/version.json` identifies the exact staging merge SHA and schema `0212`;
    - `/api/health` is 200;
    - `/api/pg-ping` is 200 and targets staging;
    - authenticated smoke: login, core lists, one safe read per money flow;
@@ -118,7 +118,7 @@ documents that say bug fixes go straight to main.
 ### P0 — security response and staging proof
 
 - Rotate both DB passwords and update GitHub secrets (owner/external action).
-- Deploy and verify the current staging head through schema 0211.
+- Deploy and verify the current staging head through schema 0212.
 - Decide whether to purge credentials from Git history. This is a coordinated,
   destructive force-rewrite and must happen only after rotation and explicit
   owner approval.
@@ -191,7 +191,7 @@ connection URL.
 A successor can continue when they can state all five facts without guessing:
 
 1. the exact staging SHA and last workflow run;
-2. whether migrations 0208–0211 are pending or applied;
+2. whether migrations 0208–0212 are pending or applied;
 3. why production is unchanged;
 4. the current external blocker and who owns it;
 5. the next smallest safe PR and its regression evidence.

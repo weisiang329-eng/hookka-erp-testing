@@ -12,7 +12,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, Camera, CheckCircle2 } from "lucide-react";
 import { useT } from "@/lib/worker-i18n";
-import { workerFetch } from "@/layouts/WorkerLayout";
+import { workerFetch } from "@/lib/worker-session";
 import { WorkerActionResultSchema } from "@/lib/schemas/worker-job";
 
 const CATEGORIES: Array<{ key: string; id: string }> = [

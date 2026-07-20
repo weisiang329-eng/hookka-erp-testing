@@ -12,8 +12,8 @@ documents that say bug fixes go straight to main.
 
 ## Current state — read first
 
-- Current staging head: `f7e1b03c39f25007b83fbf29700dd68c116618f6`
-  (`fix(auth): unify admin account contracts (#77)`).
+- Current staging head: `4ebc5ce24ba3febaf5260b5027b96662c059f7b4`
+  (`fix(inventory): unify stock adjustment contracts (#78)`).
 - Always resolve the exact current head instead of trusting a copied value:
   `git fetch origin staging && git rev-parse origin/staging`.
 - `main` / production: deliberately untouched by this programme.
@@ -47,29 +47,30 @@ documents that say bug fixes go straight to main.
 | [#75](https://github.com/weisiang329-eng/hookka-erp-testing/pull/75) | Removed 113 embedded DB URLs from 109 scripts; fail-closed env injection and secret-scan CI |
 | [#76](https://github.com/weisiang329-eng/hookka-erp-testing/pull/76) | Canonical cross-session execution ledger (documentation-only) |
 | [#77](https://github.com/weisiang329-eng/hookka-erp-testing/pull/77) | Shared auth/admin schemas, password policy, and one runtime role source |
+| [#78](https://github.com/weisiang329-eng/hookka-erp-testing/pull/78) | Inventory-adjustment FE/API/DB contract, tenant/idempotency guards, and schema 0212 invariants |
 
-## Current P1 delivery candidate
+## Current performance delivery candidate
 
-- [PR #78](https://github.com/weisiang329-eng/hookka-erp-testing/pull/78)
-  (`agent/inventory-adjustment-contract`) closes the inventory-adjustment batch.
-- Desktop/service-case FG pickers now use `fg_batches.id`; direct adjustments
-  and service-return scrap share strict schemas, DB idempotency, server actor
-  attribution, tenant-scoped reads/writes, and atomic adjustment numbering.
-- Migration `0212` enforces nonnegative RM/WIP/FG/FIFO balances and adjustment
-  sign/cost invariants on every new write, while leaving historical drift
-  visible for separate remediation.
-- Regression: `tests/stock-adjustment-contract.test.mjs`; BugHistory
-  `BUG-2026-07-20-005`. Production remains unchanged.
+- Branch `agent/page-loading-budgets` removes page-specific charts and worker
+  UI from the global boot dependency graph.
+- The emitted production build now enforces separate boot, page, worker/mobile,
+  core-list, and deferred PDF/Excel/chart gzip budgets in blocking PR CI.
+- The HTML-only audit initially understated boot at 269.7 KiB; Chrome then
+  proved deprecated recursive chunking also pulled a 306.7 KiB PDF chunk into
+  the entry. The corrected static boot graph is now 152.4 KiB gzip across
+  seven requests, without deleting page functionality. Regression:
+  `tests/performance-budget.test.mjs`; BugHistory `BUG-2026-07-21-001`.
+- PR has not yet been opened. Production remains unchanged.
 
 ## Last complete local evidence
 
-- Full suite: **1786 tests / 1785 pass / 0 fail / 1 skip**.
+- Full suite: **1791 tests / 1790 pass / 0 fail / 1 skip**.
 - Strict app typecheck: pass.
-- Production build: pass, **3448 modules** transformed.
+- Production build: pass, **3449 modules** transformed.
 - `npm audit`: **0 vulnerabilities**.
 - Script syntax audit: **110 files / 0 failures**.
 - Repository PostgreSQL credential scan: **0 current-tree findings**.
-- BugHistory: **458 unique entries**, machine policy current.
+- BugHistory: **459 unique entries**, machine policy current.
 - API inventory: **882 endpoints / 531 mutations / 322 JSON-body routes / 10
   schema-validated routes**. The contract batches raised this from 3. The low
   overall count is an explicit follow-up,
@@ -177,6 +178,7 @@ npm run security:secrets:check
 npm run bugs:check
 npm run api:contracts:check
 npm run release:check
+npm run perf:budgets:check
 npm run test:all
 npm run build:strict
 npm audit --audit-level=high

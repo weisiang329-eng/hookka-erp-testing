@@ -27,7 +27,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { useT, useWorkerLang } from "@/lib/worker-i18n";
-import { workerFetch, WORKER_ME_KEY } from "@/layouts/WorkerLayout";
+import { workerFetch, WORKER_ME_KEY } from "@/lib/worker-session";
 import {
   AnnouncementMedia,
   type Announcement,

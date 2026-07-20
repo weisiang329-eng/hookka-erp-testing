@@ -16,7 +16,7 @@
 // ============================================================
 import { useEffect, useState } from "react";
 import { Bell, Download, Home, PlusSquare, Share, X } from "lucide-react";
-import { getWorkerToken, workerFetch } from "@/layouts/WorkerLayout";
+import { getWorkerToken, workerFetch } from "@/lib/worker-session";
 
 const DISMISS_KEY = "hookka.pwa.install.dismissed";
 // Separate dismiss key for the notification opt-in card so dismissing one

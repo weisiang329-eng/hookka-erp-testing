@@ -14,7 +14,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { useT } from "@/lib/worker-i18n";
-import { workerFetch } from "@/layouts/WorkerLayout";
+import { workerFetch } from "@/lib/worker-session";
 
 // ---------- helpers ----------
 function rm(sen: number | undefined): string {

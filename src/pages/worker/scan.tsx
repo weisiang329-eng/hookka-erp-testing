@@ -44,7 +44,7 @@ import {
 } from "lucide-react";
 import jsQR from "jsqr";
 import { useT } from "@/lib/worker-i18n";
-import { workerFetch, WORKER_ME_KEY } from "@/layouts/WorkerLayout";
+import { workerFetch, WORKER_ME_KEY } from "@/lib/worker-session";
 import {
   parseStickerData,
   parseJobCardBarcode,

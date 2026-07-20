@@ -2,15 +2,37 @@
   "schemaVersion": 1,
   "source": "docs/BUG-HISTORY.md",
   "policyFrom": "2026-07-20",
-  "entryCount": 458,
+  "entryCount": 459,
   "statusCounts": {
-    "Fix in progress": 14,
+    "Fix in progress": 15,
     "Fixed": 428,
     "Partial": 3,
     "Identified": 6,
     "Unknown": 7
   },
   "entries": [
+    {
+      "id": "BUG-2026-07-21-001",
+      "date": "2026-07-21",
+      "title": "Page-specific charts, PDF, and worker UI leaked into every cold boot",
+      "categories": [
+        "performance",
+        "ui-frontend"
+      ],
+      "category": "performance",
+      "status": "Fix in progress",
+      "statusIcon": "🟡",
+      "statusDate": "2026-07-21",
+      "tests": [
+        "tests/performance-budget.test.mjs",
+        "tests/worker-session.test.mjs"
+      ],
+      "commits": [],
+      "hasRootCause": true,
+      "hasFix": true,
+      "hasRegression": false,
+      "regressionWaiver": ""
+    },
     {
       "id": "BUG-2026-07-20-005",
       "date": "2026-07-20",

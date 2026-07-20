@@ -87,7 +87,7 @@ export default defineConfig({
     // up by ~700ms on a typical broadband connection.
     //
     // The `resolveDependencies` hook below removes any chunk filename
-    // matching /pdf-|xlsx-/ from the preload list. The chunks still
+    // matching /pdf-|xlsx-|charts-/ from the preload list. The chunks still
     // exist on disk and are loaded by the dynamic-import call sites the
     // moment a user clicks Export-Excel / Generate-PDF / Scan-PO; we
     // just don't pay for them on every page transition any more.
@@ -99,17 +99,18 @@ export default defineConfig({
     // ─────────────────────────────────────────────────────────────────
     modulePreload: {
       resolveDependencies(_filename, deps) {
-        return deps.filter((d) => !/(^|\/)(pdf|xlsx)-[A-Za-z0-9_-]+\.js$/.test(d));
+        return deps.filter((d) => !/(^|\/)(pdf|xlsx|charts)-[A-Za-z0-9_-]+\.js$/.test(d));
       },
     },
-    rollupOptions: {
+    // Vite 8 uses Rolldown (https://vite.dev/guide/migration.html). Its legacy manualChunks compatibility layer
+    // recursively captures dependencies into a named group; that made the
+    // global entry statically import page-only charts/PDF code. Native
+    // codeSplitting groups keep those heavy libraries behind their import()
+    // boundaries while retaining stable, reviewable vendor chunk names.
+    rolldownOptions: {
       output: {
-        // Manual vendor chunk splitting so the main bundle doesn't
-        // ship heavy libs (recharts, jspdf, xlsx, pdfjs-dist) that
-        // are only needed on specific pages. Everything else stays
-        // in the main chunk.
-        manualChunks: (id) => {
-          if (!id.includes('node_modules')) return
+        codeSplitting: {
+          groups: [
           // Split react-vendor into 3 parallel chunks (owner 2026-06-29: the
           // single 87 KB react-vendor took 38 s on a flaky factory wifi
           // because all of React had to arrive before paint).
@@ -119,47 +120,58 @@ export default defineConfig({
           // On HTTP/2 all 3 stream in parallel; if one stalls the other 2
           // can still finish, and React can boot the moment react-core +
           // react-dom both arrive — router can land slightly after.
-          if (
-            id.includes('node_modules/react/') ||
-            id.includes('node_modules/scheduler/')
-          ) {
-            return 'react-core'
-          }
-          if (id.includes('node_modules/react-dom/')) {
-            return 'react-dom'
-          }
-          if (
-            id.includes('node_modules/react-router-dom/') ||
-            id.includes('node_modules/react-router/')
-          ) {
-            return 'react-router'
-          }
-          if (id.includes('node_modules/recharts/') || id.includes('node_modules/d3-')) {
-            return 'charts'
-          }
-          if (
-            id.includes('node_modules/jspdf/') ||
-            id.includes('node_modules/jspdf-autotable/') ||
-            id.includes('node_modules/html2canvas/') ||
-            id.includes('node_modules/pdfjs-dist/')
-          ) {
-            return 'pdf'
-          }
-          if (id.includes('node_modules/xlsx/')) {
-            return 'xlsx'
-          }
-          if (id.includes('node_modules/@tanstack/react-table/') || id.includes('node_modules/@tanstack/table-core/')) {
-            return 'tanstack'
-          }
-          if (id.includes('node_modules/date-fns/')) {
-            return 'date-fns'
-          }
+            {
+              name: 'react-core',
+              test: /node_modules[\\/](?:react|scheduler)[\\/]/,
+              priority: 100,
+            },
+            {
+              name: 'react-dom',
+              test: /node_modules[\\/]react-dom[\\/]/,
+              priority: 100,
+            },
+            {
+              name: 'react-router',
+              test: /node_modules[\\/]react-router(?:-dom)?[\\/]/,
+              priority: 100,
+            },
+            {
+              name: 'charts',
+              test: /node_modules[\\/](?:recharts|d3-[^\\/]+)[\\/]/,
+              priority: 90,
+              includeDependenciesRecursively: false,
+            },
+            {
+              name: 'pdf',
+              test: /node_modules[\\/](?:jspdf|jspdf-autotable|html2canvas|pdfjs-dist)[\\/]/,
+              priority: 90,
+              includeDependenciesRecursively: false,
+            },
+            {
+              name: 'xlsx',
+              test: /node_modules[\\/]xlsx[\\/]/,
+              priority: 90,
+              includeDependenciesRecursively: false,
+            },
+            {
+              name: 'tanstack',
+              test: /node_modules[\\/]@tanstack[\\/](?:react-table|table-core)[\\/]/,
+              priority: 80,
+            },
+            {
+              name: 'date-fns',
+              test: /node_modules[\\/]date-fns[\\/]/,
+              priority: 80,
+            },
           // Lucide ships each icon as its own ESM module.  Vite's default
           // chunker makes ONE chunk PER icon — 45+ tiny HTTP requests on
           // every page load.  Merge them all into a single `icons` chunk.
-          if (id.includes('node_modules/lucide-react/')) {
-            return 'icons'
-          }
+            {
+              name: 'icons',
+              test: /node_modules[\\/]lucide-react[\\/]/,
+              priority: 80,
+            },
+          ],
         },
       },
     },

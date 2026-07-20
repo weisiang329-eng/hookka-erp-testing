@@ -33,7 +33,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
 
       - name: Install dependencies
@@ -44,3 +44,6 @@ jobs:
 
       - name: Enforce committed bundle budget
         run: node scripts/check-bundle-size.mjs
+
+      - name: Enforce page-aware loading budgets
+        run: npm run perf:budgets:check

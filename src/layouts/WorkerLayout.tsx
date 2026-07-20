@@ -23,86 +23,11 @@ import {
 } from "@/lib/worker-i18n";
 import { useVersionCheck } from "@/lib/use-version-check";
 import PwaInstallPrompt from "@/components/pwa-install-prompt";
-
-// Keys used across the portal. Single source of truth so other
-// pages (e.g. login) can clear / set them consistently.
-export const WORKER_TOKEN_KEY = "hookka.worker.token";
-export const WORKER_ME_KEY = "hookka.worker.me";
-
-export type WorkerMe = {
-  id: string;
-  empNo: string;
-  name: string;
-  departmentCode: string;
-  position?: string;
-  phone?: string;
-  nationality?: string;
-};
-
-// Tiny helper — read the current token synchronously. Used by every
-// /worker page via `workerFetch()` to add the auth header.
-// eslint-disable-next-line react-refresh/only-export-components -- co-located worker auth helpers; HMR penalty is acceptable
-export function getWorkerToken(): string | null {
-  try {
-    return localStorage.getItem(WORKER_TOKEN_KEY);
-  } catch {
-    return null;
-  }
-}
-
-// Clear every piece of worker auth state. Called from logout and
-// from any 401 response.
-// eslint-disable-next-line react-refresh/only-export-components -- co-located worker auth helpers; HMR penalty is acceptable
-export function clearWorkerAuth() {
-  try {
-    localStorage.removeItem(WORKER_TOKEN_KEY);
-    localStorage.removeItem(WORKER_ME_KEY);
-  } catch {
-    /* ignore */
-  }
-}
-
-// Fetch wrapper that auto-attaches the X-Worker-Token header and
-// bounces to login on 401. Every /worker page should use this
-// instead of bare fetch so auth is never accidentally skipped.
-// eslint-disable-next-line react-refresh/only-export-components -- co-located worker auth helpers; HMR penalty is acceptable
-export async function workerFetch(
-  input: string,
-  init: RequestInit = {},
-): Promise<Response> {
-  const token = getWorkerToken();
-  const headers = new Headers(init.headers);
-  if (token) headers.set("X-Worker-Token", token);
-  if (init.body && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
-  }
-  const res = await fetch(input, { ...init, headers });
-  if (res.status === 401) {
-    clearWorkerAuth();
-    // Don't throw — let the caller see the response. WorkerLayout's
-    // storage listener will notice the cleared token and redirect.
-    window.dispatchEvent(new Event("storage"));
-  }
-  return res;
-}
-
-// Read the cached worker profile (set by /api/worker-auth/login) to find
-// out the operator's position. Synchronous so the bottom nav doesn't flash
-// the wrong shape on first render. Returns null when storage is empty or
-// malformed — every caller treats null as "not a leader".
-function readWorkerMeSync(): WorkerMe | null {
-  try {
-    const raw = localStorage.getItem(WORKER_ME_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as WorkerMe;
-    if (parsed && typeof parsed === "object" && parsed.id && parsed.empNo) {
-      return parsed;
-    }
-  } catch {
-    /* malformed → treat as missing */
-  }
-  return null;
-}
+import {
+  getWorkerToken,
+  readWorkerMe,
+  type WorkerMe,
+} from "@/lib/worker-session";
 
 export default function WorkerLayout() {
   const t = useT();
@@ -124,14 +49,14 @@ export default function WorkerLayout() {
   // Cached profile drives the conditional Team tab. Re-reads on the same
   // `storage` event the token watcher uses, so login/logout immediately
   // expands or collapses the bottom nav.
-  const [workerMe, setWorkerMe] = useState<WorkerMe | null>(readWorkerMeSync);
+  const [workerMe, setWorkerMe] = useState<WorkerMe | null>(readWorkerMe);
 
   useEffect(() => {
     // Re-read token + profile from storage whenever another tab (or our own
     // workerFetch 401 handler) changes it.
     const onStorage = () => {
       setToken(getWorkerToken());
-      setWorkerMe(readWorkerMeSync());
+      setWorkerMe(readWorkerMe());
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);

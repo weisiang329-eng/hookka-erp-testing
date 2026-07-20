@@ -34,6 +34,43 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-21-001 — Page-specific charts, PDF, and worker UI leaked into every cold boot `performance` `ui-frontend` 🟡
+
+**Status:** Fix in progress (staging PR; production unchanged).
+
+**Symptom / risk:** Every cold visit, including login and non-dashboard pages, preloaded the
+Recharts/D3 vendor chunk even though charts render only after the Dashboard B KPI summary. The
+worker portal layout was also imported synchronously by the global router, and its token/fetch
+helpers forced every worker page to depend on the UI layout module. The initial HTML-only audit
+counted about 269.7 KiB gzip, but a real Chrome trace proved that understated the cost: the entry
+also statically imported the 306.7 KiB PDF chunk. The existing per-chunk growth gate did not
+detect the regression because no individual chunk had grown beyond its baseline.
+
+**Root cause:** Vite's module-preload exclusion covered PDF and Excel but omitted the separately
+named charts chunk. Session primitives and the Worker React layout had two responsibilities in
+one file, making an otherwise route-specific layout part of the global entry graph. Performance
+checks measured emitted chunk files independently rather than the assets referenced by the
+actual production entry dependency graph. The deprecated Vite 8 `manualChunks` compatibility
+path also recursively captured dependencies into page-specific groups, creating static imports
+from the entry even after their HTML preload hints were removed.
+
+**Fix:** The build now uses native Vite 8/Rolldown `codeSplitting`; charts/PDF/XLSX groups do not
+recursively absorb shared dependencies, and global module preload also excludes them as defense
+in depth. Worker session constants, types, storage, and authenticated fetch live in
+`src/lib/worker-session.ts`; `WorkerLayout` is a lazy route dependency.
+`scripts/check-performance-budgets.mjs` follows static imports from the emitted entry, computes
+gzip cost, and enforces separate boot, login/dashboard, mobile/worker, core-list, and deferred
+interaction budgets. The blocking PR/deploy workflows run this in addition to the historical
+per-chunk baseline gate. The true boot graph is now 152.4 KiB gzip across seven requests; Chrome
+confirms login loads neither charts, PDF, nor WorkerLayout, without deleting those features.
+
+**Regression evidence:** `tests/performance-budget.test.mjs` rejects forbidden global preloads,
+over-budget page/deferred chunks, stale profiles, and synchronous WorkerLayout coupling;
+`tests/worker-session.test.mjs` pins the moved token/header/401-clear contract. A production build
+plus `npm run perf:budgets:check` verifies the emitted dependency graph and all configured profiles.
+
+---
+
 ## BUG-2026-07-20-005 — Stock adjustments mixed product and batch IDs and could cross tenant or double-post `inventory-cascade` `api-contract` `tenant-isolation` `data-integrity` `ui-frontend` 🟡
 
 **Status:** Fix in progress (staging PR; production unchanged).

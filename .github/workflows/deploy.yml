@@ -140,6 +140,11 @@ jobs:
         run: node scripts/check-bundle-size.mjs
         continue-on-error: true
 
+      # Hard loading gate: follows assets referenced by the emitted index.html
+      # and applies separate limits to boot, page, and deferred interactions.
+      - name: Page-aware loading budgets
+        run: npm run perf:budgets:check
+
       # Deploy to Cloudflare Pages — main branch path. Preserves the
       # original behavior: pushes to `main` and `claude/**` deploy to
       # the matching branch slug on Pages.

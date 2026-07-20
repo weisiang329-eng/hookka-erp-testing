@@ -19,7 +19,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, BarChart3 } from "lucide-react";
 import { useT } from "@/lib/worker-i18n";
 import { humanizeError } from "@/lib/humanize-error";
-import { workerFetch } from "@/layouts/WorkerLayout";
+import { workerFetch } from "@/lib/worker-session";
 
 // ---- Response shape (mirrors backend) ----
 type DrillJob = {

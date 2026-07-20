@@ -14,6 +14,7 @@
     "api:contracts:check": "node scripts/api-contract-inventory.mjs --check",
     "api:contracts:write": "node scripts/api-contract-inventory.mjs --write",
     "security:secrets:check": "node scripts/check-hardcoded-secrets.mjs",
+    "perf:budgets:check": "node scripts/check-performance-budgets.mjs",
     "build": "vite build",
     "build:strict": "npm run typecheck:app && npm run build",
     "typecheck": "tsc -b",

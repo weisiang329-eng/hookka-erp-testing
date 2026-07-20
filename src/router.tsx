@@ -1,7 +1,6 @@
 import { lazy, Suspense } from 'react'
 import { createBrowserRouter, Navigate } from 'react-router-dom'
 import DashboardLayout from './layouts/DashboardLayout'
-import WorkerLayout from './layouts/WorkerLayout'
 import { ErrorBoundary, ErrorFallback } from './components/ui/error-boundary'
 import RequireAuth from './components/RequireAuth'
 import { PageSkeleton } from './components/ui/skeleton'
@@ -42,6 +41,7 @@ const ResetPassword = lazy(() => import('./pages/reset-password'))
 const MobileLayout = lazy(() => import('./pages/m/MobileLayout'))
 
 // Worker Portal (mobile, shop floor — uses its own PIN token, not hookka_auth)
+const WorkerLayout = lazy(() => import('./layouts/WorkerLayout'))
 const WorkerLogin = lazy(() => import('./pages/worker/login'))
 const WorkerHome = lazy(() => import('./pages/worker'))
 const WorkerScan = lazy(() => import('./pages/worker/scan'))
@@ -144,7 +144,7 @@ export const router = createBrowserRouter([
   // Worker portal (mobile PIN auth — intentionally NOT behind RequireAuth;
   // uses its own /api/worker-auth token flow).
   {
-    element: <WorkerLayout />,
+    element: <S><WorkerLayout /></S>,
     errorElement: <ErrorFallback error={null} />,
     children: [
       { path: '/worker', element: <S><WorkerHome /></S> },

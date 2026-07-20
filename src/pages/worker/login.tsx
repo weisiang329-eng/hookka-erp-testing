@@ -36,7 +36,7 @@ import {
   WORKER_TOKEN_KEY,
   WORKER_ME_KEY,
   type WorkerMe,
-} from "@/layouts/WorkerLayout";
+} from "@/lib/worker-session";
 
 type Mode = "login" | "setup" | "reset";
 type ThemeName = "dark" | "light";

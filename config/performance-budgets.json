@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "boot": {
+    "maxJavaScriptGzipBytes": 194560,
+    "maxCssGzipBytes": 30720,
+    "maxJavaScriptRequests": 9,
+    "maxCssRequests": 2,
+    "forbiddenInitialStems": ["charts", "pdf", "xlsx"]
+  },
+  "pageBudgets": [
+    {
+      "name": "authentication",
+      "stems": ["login"],
+      "maxEachGzipBytes": 20480
+    },
+    {
+      "name": "dashboard-summary",
+      "stems": ["dashboard-b"],
+      "maxEachGzipBytes": 25600
+    },
+    {
+      "name": "mobile-office-shell",
+      "stems": ["MobileLayout"],
+      "maxEachGzipBytes": 87040
+    },
+    {
+      "name": "worker-portal-shell",
+      "stems": ["WorkerLayout", "worker-session"],
+      "maxEachGzipBytes": 25600
+    },
+    {
+      "name": "core-list-routes",
+      "stems": ["inventory", "planning", "delivery", "accounting", "production", "employees"],
+      "maxEachGzipBytes": 81920
+    }
+  ],
+  "deferredBudgets": [
+    {
+      "name": "dashboard-charts",
+      "stems": ["charts"],
+      "maxEachGzipBytes": 122880
+    },
+    {
+      "name": "excel-interactions",
+      "stems": ["xlsx"],
+      "maxEachGzipBytes": 179200
+    },
+    {
+      "name": "pdf-interactions",
+      "stems": ["pdf"],
+      "maxEachGzipBytes": 368640
+    }
+  ]
+}

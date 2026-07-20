@@ -23,7 +23,7 @@ import {
   clearWorkerAuth,
   WORKER_ME_KEY,
   type WorkerMe,
-} from "@/layouts/WorkerLayout";
+} from "@/lib/worker-session";
 import {
   AnnouncementMedia,
   type Announcement,

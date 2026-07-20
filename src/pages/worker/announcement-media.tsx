@@ -26,7 +26,7 @@ import {
   Download,
   ImageOff,
 } from "lucide-react";
-import { getWorkerToken } from "@/layouts/WorkerLayout";
+import { getWorkerToken } from "@/lib/worker-session";
 
 // One media file attached to a notice (image/video/PDF). The bytes live in the
 // shared /api/files store; render inline by `mime`.

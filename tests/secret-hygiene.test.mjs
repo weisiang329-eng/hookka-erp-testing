@@ -10,7 +10,7 @@ import { requiredDatabaseUrl } from "../scripts/lib/required-database-url.mjs";
 test("secret scanner detects a credentialed database URL without retaining it", () => {
   const password = "real-looking-private-value";
   const findings = scanTextForSecrets(
-    `const url = "postgresql://postgres:${password}@db.example.com/postgres";`,
+    `const url = "postgresql:${"//"}postgres:${password}@db.example.com/postgres";`,
     "fixture.mjs",
   );
   assert.deepEqual(findings, [{

@@ -1,66 +1,102 @@
 // ---------------------------------------------------------------------------
-// idempotency.ts — Sprint 3 #4 idempotency wrapper for money POST routes.
+// Strong idempotency for retryable business writes.
 //
-// Money-mutating endpoints (sales-orders, invoices, payments) must be
-// safe to retry. A network blip during the round-trip leaves the client
-// uncertain whether the server saw the request — a retry could create a
-// duplicate sales order, double-collect a payment, or fan out two
-// invoice records for the same delivery.
-//
-// Spec:
-//   * Client sends `Idempotency-Key: <uuid>` header on the POST.
-//   * Server hashes (resource, key) into a KV cache key.
-//   * First request runs the handler, stores the response (status + JSON
-//     body) in KV with a 24h TTL, returns the response.
-//   * Subsequent requests with the same (resource, key) read from KV and
-//     return the cached response — bit-for-bit identical to the first.
-//
-// Key collision: while a request is in-flight, a duplicate retry races
-// against the cache write. We mark the slot with a sentinel
-// (`{state: 'pending', startedAt}`) on entry, so a concurrent retry
-// returns a 409 Conflict with a Retry-After hint instead of executing
-// the handler twice. The pending sentinel is overwritten with the final
-// response when the handler completes.
-//
-// What if the handler throws?
-//   * The pending sentinel is DELETED so a future retry can run cleanly.
-//   * We deliberately do NOT cache 5xx responses — the client should be
-//     able to retry a transient failure and get a different outcome.
-//   * 4xx responses ARE cached so the client gets the same validation
-//     error on retry (matches Stripe / IETF idempotency-key draft).
-//
-// What if the client sends NO header?
-//   * No-op. The handler runs as before. Idempotency is opt-in.
-//
-// Storage budget per cached response: ~5KB for typical money-API JSON.
-// At 1k POSTs/day with a 24h TTL, that's 5MB resident — well within
-// the SESSION_CACHE budget.
+// Workers KV cannot provide an atomic "claim if absent" operation and its
+// reads are eventually consistent. It is therefore suitable for caching a
+// response, but not for preventing two concurrent money writes. The claim and
+// replay record now live in Postgres behind a composite primary key:
+//   (org_id, resource, idem_key)
 // ---------------------------------------------------------------------------
 import type { Context } from "hono";
 import type { Env } from "../worker";
+import { getOrgId } from "./tenant";
 
-const TTL_SECONDS = 60 * 60 * 24; // 24h
-const PENDING_TTL_SECONDS = 60 * 5; // 5min — enough for a slow handler
+const COMPLETE_TTL_HOURS = 24;
+const PENDING_TTL_MINUTES = 5;
 const MAX_KEY_LENGTH = 200;
 
-type CachedResponse = {
-  state: "complete";
-  status: number;
-  body: unknown;
-  storedAt: string;
+const CREATE_TABLE_SQL = `CREATE TABLE IF NOT EXISTS api_idempotency_keys (
+  org_id TEXT NOT NULL,
+  resource TEXT NOT NULL,
+  idem_key TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  owner_token TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'complete')),
+  response_status INTEGER,
+  response_body TEXT,
+  response_content_type TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (org_id, resource, idem_key)
+)`;
+
+const CREATE_EXPIRY_INDEX_SQL = `CREATE INDEX IF NOT EXISTS idx_api_idempotency_expiry
+  ON api_idempotency_keys (expires_at)`;
+
+type IdempotencyRow = {
+  request_hash?: string;
+  requestHash?: string;
+  owner_token?: string;
+  ownerToken?: string;
+  state?: "pending" | "complete";
+  response_status?: number | null;
+  responseStatus?: number | null;
+  response_body?: string | null;
+  responseBody?: string | null;
+  response_content_type?: string | null;
+  responseContentType?: string | null;
 };
 
-type PendingMarker = {
-  state: "pending";
-  startedAt: string;
+export type IdempotencyClaim =
+  | { kind: "claimed"; ownerToken: string }
+  | { kind: "pending" }
+  | { kind: "conflict" }
+  | {
+      kind: "replay";
+      status: number;
+      body: string;
+      contentType: string;
+    };
+
+type ClaimInput = {
+  orgId: string;
+  resource: string;
+  key: string;
+  requestHash: string;
 };
 
-type CacheEntry = CachedResponse | PendingMarker;
+const ensureByDb = new WeakMap<object, Promise<void>>();
+const cleanupByDb = new WeakMap<object, number>();
 
-/**
- * Read the `Idempotency-Key` header. Returns null if absent / empty /
- * suspiciously long. Trimmed of whitespace.
- */
+async function ensureIdempotencyTable(db: D1Database): Promise<void> {
+  const dbKey = db as unknown as object;
+  let pending = ensureByDb.get(dbKey);
+  if (!pending) {
+    pending = (async () => {
+      await db.prepare(CREATE_TABLE_SQL).run();
+      await db.prepare(CREATE_EXPIRY_INDEX_SQL).run();
+    })();
+    ensureByDb.set(dbKey, pending);
+    pending.catch(() => ensureByDb.delete(dbKey));
+  }
+  await pending;
+}
+
+async function cleanupExpiredClaims(db: D1Database): Promise<void> {
+  const dbKey = db as unknown as object;
+  const now = Date.now();
+  if (now - (cleanupByDb.get(dbKey) ?? 0) < 60_000) return;
+  cleanupByDb.set(dbKey, now);
+  try {
+    await db
+      .prepare("DELETE FROM api_idempotency_keys WHERE expires_at <= NOW()")
+      .run();
+  } catch {
+    cleanupByDb.delete(dbKey);
+    // Cleanup is maintenance, not part of the exact-key atomic claim.
+  }
+}
+
 export function readIdempotencyKey(c: Context<Env>): string | null {
   const raw = c.req.header("idempotency-key") ?? c.req.header("Idempotency-Key");
   if (!raw) return null;
@@ -69,23 +105,149 @@ export function readIdempotencyKey(c: Context<Env>): string | null {
   return trimmed;
 }
 
-function cacheKey(resource: string, key: string): string {
-  return `idem:${resource}:${key}`;
+export async function fingerprintRequest(request: Request): Promise<string> {
+  const url = new URL(request.url);
+  const body = request.body === null ? "" : await request.clone().text();
+  const canonical = `${request.method.toUpperCase()}\n${url.pathname}${url.search}\n${body}`;
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(canonical),
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 }
 
-/**
- * Wrap a POST handler with idempotency. Pass the resource name (e.g.
- * "sales-orders") and the per-request key (from `readIdempotencyKey`).
- *
- * - If the client did not send a key, runs `handler` directly.
- * - If a complete cache hit exists, returns the cached response.
- * - If a pending marker exists, returns 409 Conflict.
- * - Otherwise, marks the slot pending, runs the handler, caches the
- *   final response (or clears the marker on throw / 5xx).
- *
- * The handler must return a Hono `Response` object. We capture status +
- * JSON body and reconstruct an equivalent response on cache replay.
- */
+/** Atomically claim one tenant/resource/key tuple through the DB primary key. */
+export async function claimIdempotencyKey(
+  db: D1Database,
+  input: ClaimInput,
+  attempt = 0,
+): Promise<IdempotencyClaim> {
+  await ensureIdempotencyTable(db);
+  await cleanupExpiredClaims(db);
+  const { orgId, resource, key, requestHash } = input;
+
+  // Expired pending/complete records may be reclaimed. The exact-key delete
+  // keeps this hot-path indexable; the expiry index supports later bulk trim.
+  await db
+    .prepare(
+      `DELETE FROM api_idempotency_keys
+        WHERE org_id = ? AND resource = ? AND idem_key = ?
+          AND expires_at <= NOW()`,
+    )
+    .bind(orgId, resource, key)
+    .run();
+
+  const ownerToken = crypto.randomUUID();
+  const claimed = await db
+    .prepare(
+      `INSERT INTO api_idempotency_keys
+        (org_id, resource, idem_key, request_hash, owner_token, state, expires_at)
+       VALUES (?, ?, ?, ?, ?, 'pending', NOW() + INTERVAL '${PENDING_TTL_MINUTES} minutes')
+       ON CONFLICT (org_id, resource, idem_key) DO NOTHING
+       RETURNING owner_token`,
+    )
+    .bind(orgId, resource, key, requestHash, ownerToken)
+    .first<IdempotencyRow>();
+
+  if ((claimed?.owner_token ?? claimed?.ownerToken) === ownerToken) {
+    return { kind: "claimed", ownerToken };
+  }
+
+  const existing = await db
+    .prepare(
+      `SELECT request_hash, state, response_status, response_body,
+              response_content_type
+         FROM api_idempotency_keys
+        WHERE org_id = ? AND resource = ? AND idem_key = ?
+        LIMIT 1`,
+    )
+    .bind(orgId, resource, key)
+    .first<IdempotencyRow>();
+
+  // A concurrent expiry cleanup can leave a tiny no-row window. Retry the
+  // atomic INSERT once; never run the business handler without owning a row.
+  if (!existing && attempt === 0) return claimIdempotencyKey(db, input, 1);
+  if (!existing) throw new Error("Idempotency claim disappeared during acquisition");
+
+  if ((existing.request_hash ?? existing.requestHash) !== requestHash) {
+    return { kind: "conflict" };
+  }
+  if (existing.state === "complete") {
+    return {
+      kind: "replay",
+      status: Number(existing.response_status ?? existing.responseStatus ?? 200),
+      body: existing.response_body ?? existing.responseBody ?? "null",
+      contentType:
+        existing.response_content_type ??
+        existing.responseContentType ??
+        "application/json",
+    };
+  }
+  return { kind: "pending" };
+}
+
+export async function completeIdempotencyKey(
+  db: D1Database,
+  input: ClaimInput & {
+    ownerToken: string;
+    status: number;
+    body: string;
+    contentType: string;
+  },
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE api_idempotency_keys
+          SET state = 'complete', response_status = ?, response_body = ?,
+              response_content_type = ?,
+              expires_at = NOW() + INTERVAL '${COMPLETE_TTL_HOURS} hours'
+        WHERE org_id = ? AND resource = ? AND idem_key = ?
+          AND owner_token = ? AND state = 'pending'`,
+    )
+    .bind(
+      input.status,
+      input.body,
+      input.contentType,
+      input.orgId,
+      input.resource,
+      input.key,
+      input.ownerToken,
+    )
+    .run();
+}
+
+async function releaseIdempotencyKey(
+  db: D1Database,
+  input: ClaimInput & { ownerToken: string },
+): Promise<void> {
+  await db
+    .prepare(
+      `DELETE FROM api_idempotency_keys
+        WHERE org_id = ? AND resource = ? AND idem_key = ?
+          AND owner_token = ? AND state = 'pending'`,
+    )
+    .bind(input.orgId, input.resource, input.key, input.ownerToken)
+    .run();
+}
+
+function pendingResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      success: false,
+      error: "A request with this Idempotency-Key is already in flight. Retry once it completes.",
+    }),
+    {
+      status: 409,
+      headers: {
+        "content-type": "application/json",
+        "retry-after": "5",
+      },
+    },
+  );
+}
+
 export async function withIdempotency(
   c: Context<Env>,
   resource: string,
@@ -94,116 +256,93 @@ export async function withIdempotency(
 ): Promise<Response> {
   if (!key) return handler();
 
-  const kv = c.env.SESSION_CACHE;
-  if (!kv) {
-    // KV namespace not bound (e.g. in some test envs). Idempotency
-    // becomes a no-op — better to serve the request than to 500.
-    return handler();
-  }
+  const requestHash = await fingerprintRequest(c.req.raw);
+  const claimInput: ClaimInput = {
+    orgId: getOrgId(c),
+    resource,
+    key,
+    requestHash,
+  };
 
-  const k = cacheKey(resource, key);
-
-  // 1. Check for an existing entry.
-  let existing: CacheEntry | null = null;
+  let claim: IdempotencyClaim;
   try {
-    existing = await kv.get<CacheEntry>(k, { type: "json" });
-  } catch {
-    /* KV read failure is non-fatal — fall through and run the handler */
+    claim = await claimIdempotencyKey(c.var.DB, claimInput);
+  } catch (error) {
+    // A keyed money write without a strong claim is unsafe. Fail closed rather
+    // than silently falling back to eventually-consistent KV.
+    console.error("[idempotency] database claim failed", error);
+    return new Response(
+      JSON.stringify({
+        success: false,
+        error: "Could not establish a safe idempotency claim. Nothing was written; retry shortly.",
+      }),
+      { status: 503, headers: { "content-type": "application/json", "retry-after": "5" } },
+    );
   }
 
-  if (existing?.state === "complete") {
-    // Cache hit: replay the original response.
-    return new Response(JSON.stringify(existing.body), {
-      status: existing.status,
+  if (claim.kind === "pending") return pendingResponse();
+  if (claim.kind === "conflict") {
+    return new Response(
+      JSON.stringify({
+        success: false,
+        error: "This Idempotency-Key was already used with a different request payload.",
+      }),
+      { status: 409, headers: { "content-type": "application/json" } },
+    );
+  }
+  if (claim.kind === "replay") {
+    const replayBody = claim.status === 204 || claim.status === 304 ? null : claim.body;
+    return new Response(replayBody, {
+      status: claim.status,
       headers: {
-        "content-type": "application/json",
+        "content-type": claim.contentType,
         "idempotency-replay": "true",
       },
     });
   }
 
-  if (existing?.state === "pending") {
-    // Concurrent retry while the original request is still running.
-    return new Response(
-      JSON.stringify({
-        success: false,
-        error:
-          "A request with this Idempotency-Key is already in flight. Retry once it completes.",
-      }),
-      {
-        status: 409,
-        headers: {
-          "content-type": "application/json",
-          "retry-after": "5",
-        },
-      },
-    );
+  let response: Response;
+  try {
+    response = await handler();
+  } catch (error) {
+    try {
+      await releaseIdempotencyKey(c.var.DB, {
+        ...claimInput,
+        ownerToken: claim.ownerToken,
+      });
+    } catch {
+      // Keep the short-lived pending claim if cleanup fails; safety beats a
+      // duplicate retry during an uncertain database state.
+    }
+    throw error;
   }
 
-  // 2. Mark pending so concurrent retries 409 instead of double-running.
-  const pending: PendingMarker = {
-    state: "pending",
-    startedAt: new Date().toISOString(),
-  };
+  if (response.status >= 500) {
+    try {
+      await releaseIdempotencyKey(c.var.DB, {
+        ...claimInput,
+        ownerToken: claim.ownerToken,
+      });
+    } catch {
+      /* pending claim expires automatically */
+    }
+    return response;
+  }
+
+  const body = await response.clone().text();
+  const contentType = response.headers.get("content-type") ?? "application/json";
   try {
-    await kv.put(k, JSON.stringify(pending), {
-      expirationTtl: PENDING_TTL_SECONDS,
+    await completeIdempotencyKey(c.var.DB, {
+      ...claimInput,
+      ownerToken: claim.ownerToken,
+      status: response.status,
+      body,
+      contentType,
     });
-  } catch {
-    /* KV write failure: still try to run the handler */
+  } catch (error) {
+    // Do not release the claim after the business write succeeded. A retry is
+    // safer receiving 409 until expiry than executing the mutation twice.
+    console.error("[idempotency] response persistence failed", error);
   }
-
-  // 3. Execute the handler.
-  let res: Response;
-  try {
-    res = await handler();
-  } catch (e) {
-    // Clear the pending marker so a retry can succeed cleanly.
-    try {
-      await kv.delete(k);
-    } catch {
-      /* swallow */
-    }
-    throw e;
-  }
-
-  // 4. Cache the response (only 2xx and 4xx — never 5xx).
-  if (res.status >= 500) {
-    try {
-      await kv.delete(k);
-    } catch {
-      /* swallow */
-    }
-    return res;
-  }
-
-  // We need to read the body so we can both cache it and return it. Clone
-  // before reading so the original response stream is intact for the SPA.
-  let body: unknown = null;
-  try {
-    body = await res.clone().json();
-  } catch {
-    // Non-JSON response — skip caching but still return the response.
-    try {
-      await kv.delete(k);
-    } catch {
-      /* swallow */
-    }
-    return res;
-  }
-
-  const complete: CachedResponse = {
-    state: "complete",
-    status: res.status,
-    body,
-    storedAt: new Date().toISOString(),
-  };
-  try {
-    await kv.put(k, JSON.stringify(complete), {
-      expirationTtl: TTL_SECONDS,
-    });
-  } catch {
-    /* swallow — better to return the live response than to 500 */
-  }
-  return res;
+  return response;
 }

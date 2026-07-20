@@ -1142,6 +1142,7 @@ app.post("/", async (c) => {
   return withIdempotency(c, "invoices", idemKey, async () => {
   try {
     const body = await c.req.json();
+    const orgId = getOrgId(c);
     const deliveryOrderId: string | undefined = body.deliveryOrderId;
     if (!deliveryOrderId) {
       return c.json(
@@ -1163,9 +1164,9 @@ app.post("/", async (c) => {
       `SELECT id, doNo, salesOrderId, companySOId, customerId, customerName,
               customerState, deliveryAddress, contactPerson, contactPhone,
               customerPOId, hubId, hubName, status, delivery_incomplete
-         FROM delivery_orders WHERE id = ?`,
+         FROM delivery_orders WHERE id = ? AND orgId = ?`,
     )
-      .bind(deliveryOrderId)
+      .bind(deliveryOrderId, orgId)
       .first<{
         id: string;
         doNo: string;
@@ -1205,9 +1206,9 @@ app.post("/", async (c) => {
     // the manual POST did not. Block if a NON-CANCELLED invoice already exists
     // for this DO (a CANCELLED one is fine — legitimate re-invoice after a void).
     const existingDoInvoice = await c.var.DB.prepare(
-      "SELECT id, invoiceNo FROM invoices WHERE deliveryOrderId = ? AND status != 'CANCELLED' LIMIT 1",
+      "SELECT id, invoiceNo FROM invoices WHERE deliveryOrderId = ? AND orgId = ? AND status != 'CANCELLED' LIMIT 1",
     )
-      .bind(deliveryOrderId)
+      .bind(deliveryOrderId, orgId)
       .first<{ id: string; invoiceNo: string }>();
     if (existingDoInvoice) {
       return c.json(
@@ -1283,8 +1284,8 @@ app.post("/", async (c) => {
            customerId, customerName, customerState, customerAddress,
            attention, customerPhone, customerPOId, hubId, hubName,
            subtotalSen, taxSen, totalSen, status, invoiceDate, dueDate, paidAmount,
-           paymentDate, paymentMethod, notes, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           paymentDate, paymentMethod, notes, created_at, updated_at, orgId
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
         invoiceNo,
@@ -1313,13 +1314,14 @@ app.post("/", async (c) => {
         body.notes ?? "",
         now,
         now,
+        orgId,
       ),
       ...items.map((item) =>
         c.var.DB.prepare(
           `INSERT INTO invoice_items (
              id, invoiceId, productCode, productName, sizeLabel, fabricCode,
-             quantity, unitPriceSen, discountSen, totalSen
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             quantity, unitPriceSen, discountSen, totalSen, orgId
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           item.id,
           id,
@@ -1332,12 +1334,13 @@ app.post("/", async (c) => {
           // Auto-created invoices (from DO) carry no discount by default.
           0,
           item.totalSen,
+          orgId,
         ),
       ),
       // Flip DO to INVOICED in the same batch so we roll back together.
       c.var.DB.prepare(
-        `UPDATE delivery_orders SET status = 'INVOICED', overdue = 'INVOICED', updated_at = ? WHERE id = ?`,
-      ).bind(now, doRow.id),
+        `UPDATE delivery_orders SET status = 'INVOICED', overdue = 'INVOICED', updated_at = ? WHERE id = ? AND orgId = ?`,
+      ).bind(now, doRow.id, orgId),
       // Phase 2 (2026-06) — closes a long-noted gap: the auto-created
       // invoice (delivery-orders.ts) bumped customers.outstandingSen on
       // create but this manual path never did, so manually-invoiced
@@ -1345,8 +1348,8 @@ app.post("/", async (c) => {
       // void/cancel/delete already reverse the unpaid portion for both
       // paths.
       c.var.DB.prepare(
-        `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`,
-      ).bind(totalSen, doRow.customerId),
+        `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ? AND orgId = ?`,
+      ).bind(totalSen, doRow.customerId, orgId),
     ];
 
     await c.var.DB.batch(statements);

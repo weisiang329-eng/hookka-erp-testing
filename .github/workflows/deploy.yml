@@ -34,10 +34,40 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Wrangler 4 requires Node >=22. With Node 20 the Cloudflare action
+          # rejects the locked local Wrangler, silently installs Wrangler 3.90,
+          # then fails to parse modern JSON import attributes in the Worker.
+          node-version: 22
           cache: npm
 
       - run: npm ci
+
+      # Staging is the migration proving ground. Apply only the explicitly
+      # reviewed migration set, after proving the secret points at the public
+      # staging project ref and after read-only financial-integrity preflight.
+      # Main remains manual and is gated on the exact accepted staging SHA.
+      - name: Preflight staging database migrations
+        if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
+        run: node scripts/preflight-staging-foundation-migrations.mjs
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          EXPECTED_SUPABASE_PROJECT_REF: ${{ vars.STAGING_SUPABASE_PROJECT_REF }}
+
+      - name: Preview staging database migrations
+        if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
+        run: npm run db:migrate:supabase:dry
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          EXPECTED_SUPABASE_PROJECT_REF: ${{ vars.STAGING_SUPABASE_PROJECT_REF }}
+          MIGRATION_ALLOWED_PENDING: 0208_api_idempotency.sql,0209_invoice_active_do_unique.sql,0210_payment_balance_guards.sql,0211_invoice_payment_receipt_link.sql
+
+      - name: Apply reviewed migrations to staging
+        if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
+        run: npm run db:migrate:supabase
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          EXPECTED_SUPABASE_PROJECT_REF: ${{ vars.STAGING_SUPABASE_PROJECT_REF }}
+          MIGRATION_ALLOWED_PENDING: 0208_api_idempotency.sql,0209_invoice_active_do_unique.sql,0210_payment_balance_guards.sql,0211_invoice_payment_receipt_link.sql
 
       - name: Validate release identity
         run: npm run release:check

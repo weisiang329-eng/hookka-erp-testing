@@ -24,6 +24,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import postgres from 'postgres'
+import { parseSupabaseTarget } from './validate-db-sync-targets.mjs'
 
 const DRY_RUN = process.argv.includes('--dry-run')
 const DIR = 'migrations-postgres'
@@ -31,27 +32,27 @@ const DIR = 'migrations-postgres'
 // --- env loading ----------------------------------------------------------
 
 const DEV_VARS = new URL('../.dev.vars', import.meta.url)
-let env
-try {
-  const text = fs.readFileSync(DEV_VARS, 'utf8')
-  env = Object.fromEntries(
-    text
-      .split('\n')
-      .filter((l) => l && !l.startsWith('#') && l.includes('='))
-      .map((l) => {
-        const i = l.indexOf('=')
-        return [l.slice(0, i).trim(), l.slice(i + 1).trim()]
-      }),
-  )
-} catch (err) {
-  if (err.code === 'ENOENT') {
-    console.error('\nERROR: .dev.vars not found at repo root.')
-    console.error('       Create it with at minimum a DATABASE_URL line, e.g.')
-    console.error('         DATABASE_URL=postgresql://USER:PASS@HOST:6543/postgres?sslmode=require')
-    console.error('       See docs/SETUP.md and migrations-postgres/README.md.\n')
-    process.exit(1)
+let env = process.env.DATABASE_URL ? { DATABASE_URL: process.env.DATABASE_URL } : null
+if (!env) {
+  try {
+    const text = fs.readFileSync(DEV_VARS, 'utf8')
+    env = Object.fromEntries(
+      text
+        .split('\n')
+        .filter((l) => l && !l.startsWith('#') && l.includes('='))
+        .map((l) => {
+          const i = l.indexOf('=')
+          return [l.slice(0, i).trim(), l.slice(i + 1).trim()]
+        }),
+    )
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      console.error('\nERROR: neither DATABASE_URL nor .dev.vars is available.')
+      console.error('       Local use may put DATABASE_URL in .dev.vars; CI must inject it as a secret.\n')
+      process.exit(1)
+    }
+    throw err
   }
-  throw err
 }
 
 if (!env.DATABASE_URL) {
@@ -60,6 +61,25 @@ if (!env.DATABASE_URL) {
   console.error('         DATABASE_URL=postgresql://USER:PASS@HOST:6543/postgres?sslmode=require')
   console.error('       Use the Supabase Connection Pooler (transaction mode, port 6543).\n')
   process.exit(1)
+}
+
+// CI must prove which Supabase project it is about to mutate. Project refs are
+// public identifiers, so this comparison can be logged without exposing the
+// connection URL, username, or password.
+const expectedProjectRef = String(process.env.EXPECTED_SUPABASE_PROJECT_REF ?? '').trim().toLowerCase()
+if (expectedProjectRef) {
+  let target
+  try {
+    target = parseSupabaseTarget(env.DATABASE_URL, 'DATABASE_URL')
+  } catch (error) {
+    console.error(`\nERROR: migration target validation failed: ${error.message}\n`)
+    process.exit(1)
+  }
+  if (target.projectRef !== expectedProjectRef) {
+    console.error('\nERROR: DATABASE_URL does not match EXPECTED_SUPABASE_PROJECT_REF.\n')
+    process.exit(1)
+  }
+  console.log(`Validated migration target project: ${target.projectRef}`)
 }
 
 const sql = postgres(env.DATABASE_URL, {
@@ -107,6 +127,25 @@ const applied = new Set(
 )
 
 const pending = files.filter((f) => !applied.has(f))
+
+// A staging deploy may opt into an explicit allow-list. This prevents a stale
+// migration tracker or an unrelated future migration from turning an ordinary
+// application deploy into a surprise bulk schema change. Partial retries are
+// safe because any remaining suffix/subset is still in the allow-list.
+const allowedPending = new Set(
+  String(process.env.MIGRATION_ALLOWED_PENDING ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean),
+)
+if (allowedPending.size > 0) {
+  const unexpected = pending.filter((file) => !allowedPending.has(file))
+  if (unexpected.length > 0) {
+    console.error(`\nERROR: pending migration(s) outside MIGRATION_ALLOWED_PENDING: ${unexpected.join(', ')}\n`)
+    await sql.end()
+    process.exit(1)
+  }
+}
 
 console.log(`▸ ${files.length} migration files in ${DIR}/`)
 console.log(`▸ ${applied.size} already applied (per _migrations table)`)

@@ -34,6 +34,50 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-20-001 — Payment APIs could cross tenant/party boundaries and split one receipt into contradictory totals `money` `tenant-isolation` `data-integrity` 🟡
+
+**Status:** Fix in progress (staging PR; production unchanged).
+
+**Symptom / risk:** A crafted customer-payment request could name a customer from the active
+org but allocate the receipt to an invoice belonging to another org or another customer. The
+request-level `amount` also did not have to equal the allocation total, so the GL receipt,
+invoice `paidAmount`, and customer `outstandingSen` could move by different values. Supplier
+payments had the equivalent PI/supplier/org gap. Duplicate invoice/PI allocations in one
+request were accepted, and two concurrent payments could both validate against the same stale
+outstanding snapshot.
+
+**Root cause:** The UI supplied internally consistent IDs and totals, so the backend trusted
+those relationships instead of enforcing them as an API/DB contract. Several money queries
+selected by globally-looking `id` only; write rows relied on the legacy default `org_id =
+'hookka'`; and overpayment prevention existed only before the transaction.
+
+**Fix:**
+- `src/lib/schemas/payment-request.ts` is the shared structured request contract for customer
+  and supplier payment creation. It rejects malformed dates, non-positive/non-integer sen,
+  duplicate allocations, and customer receipt/allocation total drift.
+- `src/api/routes/payments.ts` scopes customer, account, invoice, SO, payment, invoice-payment,
+  status-history, and read-back operations by `orgId`; invoices must also belong to the stated
+  customer. The same contract now covers detail, bounce, void/delete/unvoid, and restate paths;
+  restate revalidates every allocation, available headroom, and the replacement cash/bank
+  account instead of trusting the original receipt.
+- `src/api/routes/supplier-payments.ts` scopes the supplier, account, PI, and PI update by
+  `orgId`; each PI must belong to the stated supplier. Knock-off, un-knock, lifecycle,
+  restatement, and absolute truth-recompute repair queries carry the same tenant predicates.
+- `migrations-postgres/0210_payment_balance_guards.sql` adds NOT VALID check constraints so
+  historical exceptions do not block rollout, while new concurrent writes cannot push AR/AP
+  paid amounts below zero or above the document total.
+
+**Regression evidence:** `tests/payment-contract.test.mjs` pins the accepted frontend shapes,
+total equality, duplicate rejection, create/restate/lifecycle/repair tenant-party predicates,
+and both Postgres constraints.
+
+**Known follow-up (do not guess a backfill):** legacy `invoice_payments` rows do not contain a
+stable `payment_record_id`. Until a separate linkage migration is deployed, historical detail
+rows cannot be safely matched to a receipt from date/reference/amount alone. The linkage and an
+explicit audit queue are required before restatement can synchronize those legacy detail rows.
+
+---
+
 ## BUG-2026-07-17-012 — payslip "Hourly Rate" formula hardcoded "(26 x 9)" — lied for non-9h workers `payroll` `ui-frontend` `pdf` 🟢
 **Display-only (the rate was always correct), fixed as part of the ANN short-hours work
 (BUG-2026-07-17-006/-007).** The payslip label read `basic / (26 x 9) = hourlyRate`, but the

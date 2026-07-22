@@ -38,6 +38,7 @@ import {
 } from "./sales-orders";
 import { deriveSpecialOrderSurchargeSen } from "../../lib/special-order-surcharge";
 import { loadSpecialsConfig } from "../lib/specials-config";
+import { invalidateProductionListCaches } from "../lib/po-list-cache";
 import { emitAudit } from "../lib/audit";
 import { ensureInvoicePoLinkColumn } from "../lib/invoice-po-link";
 
@@ -639,6 +640,18 @@ app.post("/rebuild-all-pos", async (c) => {
       note:
         "Dry run. Pass ?dryRun=false&confirm=YES_REBUILD_ALL to execute. newPOs in breakdown is an ESTIMATE based on item fan-out (sofa=1/item, BF/ACC=quantity/item).",
     });
+  }
+
+  // A rebuild deletes and re-creates production_orders wholesale — the dept
+  // sheets would keep serving the old rows until a TTL expired. See
+  // tests/production-write-invalidation-class.test.mjs.
+  try {
+    await invalidateProductionListCaches(c, getOrgId(c));
+  } catch (err) {
+    console.warn(
+      "[rebuild-all-pos] cache invalidation failed:",
+      err instanceof Error ? err.message : String(err),
+    );
   }
 
   return c.json({

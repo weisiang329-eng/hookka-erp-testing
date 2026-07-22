@@ -27,8 +27,12 @@ test("derives the real prod case: Divan Curve = RM 50", () => {
 
 test("accepts BOTH separators — the two writers disagree", () => {
   // sales/create.tsx joins with "; ", scan-po.ts:430 joins with ", ".
-  assert.equal(deriveSpecialOrderSurchargeSen("Front Drawer; No Side Panel"), 16000);
-  assert.equal(deriveSpecialOrderSurchargeSen("Front Drawer, No Side Panel"), 16000);
+  // 2026-07-23: was 16000, when the static catalog had Front Drawer at
+  // RM 120 and "No Side Panel" as a +RM 40 SURCHARGE. The live config has
+  // RM 130 and −RM 40 (it is a discount), and the catalog now matches it:
+  // 13000 - 4000 = 9000. The old number encoded the sign error.
+  assert.equal(deriveSpecialOrderSurchargeSen("Front Drawer; No Side Panel"), 9000);
+  assert.equal(deriveSpecialOrderSurchargeSen("Front Drawer, No Side Panel"), 9000);
 });
 
 test("HB + Divan full cover combined is capped at RM 100, not 130", () => {
@@ -45,10 +49,12 @@ test("HB + Divan full cover combined is capped at RM 100, not 130", () => {
 });
 
 test("combined cap still adds OTHER options on the same line", () => {
-  // "Divan Full Cover, HB Fully Cover, Front Drawer" = 100 + 120.
+  // "Divan Full Cover, HB Fully Cover, Front Drawer" = 100 + 130.
+  // Front Drawer was RM 120 in the static catalog until 2026-07-23, when it
+  // was realigned to the live config's RM 130.
   assert.equal(
     deriveSpecialOrderSurchargeSen("Divan Full Cover, HB Fully Cover, Front Drawer"),
-    10000 + 12000,
+    10000 + 13000,
   );
 });
 

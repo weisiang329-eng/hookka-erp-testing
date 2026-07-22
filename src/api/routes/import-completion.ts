@@ -43,6 +43,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { invalidateProductionListCaches } from "../lib/po-list-cache";
 import { autofillWorkingHoursFromPunch } from "../lib/punch-autofill";
 import {
   applyWipInventoryChange,
@@ -755,6 +756,21 @@ app.post("/job-card-completion", async (c) => {
           err instanceof Error ? err.message : String(err)
         }`,
       });
+    }
+  }
+
+  // A completion import moves job_cards AND flips production_orders to
+  // COMPLETED in bulk — the dept sheets would keep listing finished work.
+  // Skipped on a dry run, which writes nothing. See
+  // tests/production-write-invalidation-class.test.mjs.
+  if (!dryRun) {
+    try {
+      await invalidateProductionListCaches(c, getOrgId(c));
+    } catch (err) {
+      console.warn(
+        "[import-completion] cache invalidation failed:",
+        err instanceof Error ? err.message : String(err),
+      );
     }
   }
 

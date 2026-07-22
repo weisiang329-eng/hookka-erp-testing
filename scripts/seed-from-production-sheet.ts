@@ -482,16 +482,34 @@ async function main() {
   const existingVcJ = (await existingVcRes.json()) as ApiResp<
     Record<string, unknown>
   >;
+  // 2026-07-23 — do NOT write bedframeSpecialOrders / sofaSpecialOrders.
+  //
+  // Nothing reads them. The live special-order prices are `specials` /
+  // `sofaSpecials`, which is what loadSpecialsConfig() and the frontend
+  // maintenance config both use. These two keys were a THIRD copy that nobody
+  // updated, so they froze at the April prices (Drawer RM 150, Front RM 120)
+  // while the live list moved to RM 160 / RM 130 in May. On 2026-07-17 a
+  // backfill priced from the fossil and had to be topped up RM 30 after
+  // read-back caught it; on 2026-07-22 the fossils were deleted from all five
+  // kv_config rows — and re-running THIS script would have put them straight
+  // back, with the stale prices, undoing the cleanup silently.
+  //
+  // sync-maintenance-config.ts has deleted these two keys for a while (see its
+  // header: "bedframeSpecialOrders (should be specials)"). One script planting
+  // what another script weeds is how the drift survived: whichever ran last
+  // won. Stop writing them at the source instead.
   const merged: Record<string, unknown> = {
     ...(existingVcJ.data ?? {}),
     divanHeights: variants.divanHeights,
     legHeights: variants.legHeights,
     gapHeights: variants.gapHeights,
     sofaSeatSizes: variants.sofaSeatSizes,
-    bedframeSpecialOrders: variants.bedframeSpecialOrders,
-    sofaSpecialOrders: variants.sofaSpecialOrders,
     updatedFromSheet: new Date().toISOString(),
   };
+  // Belt and braces: if the target row still carries the fossils from an older
+  // run, the spread above would preserve them. Drop them on every seed.
+  delete merged.bedframeSpecialOrders;
+  delete merged.sofaSpecialOrders;
   const putVcRes = await fetch(`${PROD}/api/kv-config/variants-config`, {
     method: "PUT",
     headers: auth,

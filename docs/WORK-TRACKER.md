@@ -9,6 +9,157 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-23 — 🔴 STOP before touching invoices: my Group-A scoping was wrong, and there is a much bigger pre-existing gap
+**Executed:** `backfill-height-surcharge-2026-07-22.mjs --execute` — 140 SO lines / 100 SOs,
++RM 10,530, read-back clean (0 line mismatches, 0 total drift). Restore point:
+`scripts/_restore-height-backfill-2026-07-22.json`. **The SO lines are now correct and should
+stay that way** — reverting would put the wrong prices back.
+- 🔴 **MY MISTAKE — the "not yet invoiced" filter was the SO's STATUS, which is not the same
+  test.** An SO sits at READY_TO_SHIP while individual lines have already shipped and been
+  invoiced on a partial DO. Self-check after the write: **104 of the 140 lines are already on a
+  live SENT invoice.** No customer document was altered and nothing was mis-sent — the backfill
+  only ever wrote to `sales_order_items` / `sales_orders` — but the recovery for those 104 now
+  needs an invoice amendment exactly like Group B. Correct test is line-level: does a DO line
+  carry this `production_order_id`, and does that DO have a live invoice?
+- 🔴 **The bigger finding, and it corrects an earlier claim of mine.** I reported "only ONE
+  invoiced line differs from its SO". That was measured through `invoice_items.production_order_id`,
+  which **older invoice rows do not carry** — so it only ever looked at recent invoices.
+  Re-matched through the DO (`delivery_order_items.production_order_id` → DO → invoice → unique
+  SKU+fabric), across 1,269 unambiguous shipped lines: **202 lines where the invoice bills BELOW
+  its SO, RM 17,909.78 total.** RM 7,225 of that is what today's backfill just added, so the
+  **pre-existing gap is ≈ RM 10,685** and has nothing to do with heights (e.g. SO-2605-242 L2
+  SO RM 1,255 vs INV RM 830; SO-2605-131 L5 SO RM 930 vs INV RM 585).
+- **So the owner's premise holds going forward but not retroactively:** SO-correct ⇒
+  invoice-correct is true for invoices raised from a correct SO, but ~200 already-SENT invoices
+  were raised from SO lines that have since been corrected (or were wrong at the time).
+- ⛔ **No invoice has been amended and none will be until the owner decides.** ~RM 18k spread
+  over ~200 SENT invoices is a customer-facing call: re-issue? debit note? absorb the old ones
+  and only bill correctly from here? 336 further lines were skipped as ambiguous (duplicate
+  SKU+fabric on a consolidated invoice) and are not in any total above.
+- Planner for the matched subset: `scripts/plan-height-invoice-fix-2026-07-22.mjs`
+  (18 of 23 Group-B lines matched to an exact invoice line, RM 1,500; 5 still manual).
+
+## 2026-07-22 — ✅ Full pricing-system audit: base prices + sofa combos are SOUND (and my "policy gap" reading was wrong)
+**Owner: 「然後 sofa combo 呢？然後我們的 customer price 呢？全套系統審查然後算價格」** +
+「SO 那邊對的話 invoice 就對了，只是有時候我們 revise invoice 而已」 — **that framing is
+confirmed by the data**: across thousands of invoiced lines exactly ONE differs from its SO
+(INV-2607-089, RM 245). Fixing the SO side really is sufficient.
+Scripts: `audit-so-pricing-vs-list-2026-07-22.mjs`, `audit-sofa-combo-2026-07-22.mjs`.
+
+| component | verdict | money |
+| --- | --- | --- |
+| special order | ✅ correct (07-17 fix holds; re-verified) | RM 0 |
+| **divan / leg height** | 🔴 systemic — fixed today in PR #82 | **RM 12,455** |
+| base price vs customer list | ✅ sound — 46 of 1,261 lines differ | under RM 540 (4 lines) |
+| sofa combo | ✅ sound — 142 groups matched a rule | RM 0 (see correction below) |
+| invoice vs SO | ✅ sound | RM 245 (1 line) |
+
+- **Base prices:** 1,261 non-sofa lines checked against `customer_product_prices` as-of the SO
+  date (→ `customer_products` → `product_prices`). Only 4 lines under-billed, RM 540 — RM 510 of
+  it is one line (SO-2607-086 L1 2006(A)-(SP), charged RM 1,140 vs list RM 1,650). 42 lines are
+  ABOVE list (RM 925.70) and 40 of those were typed by hand — negotiated prices, not defects.
+- **Sofa combos:** 254 groups, 142 matched a `sofa_combo_rules` set. Only **3 groups** billed
+  below their agreed combo price, RM 243.50 total — and **all 3 came in through a scanned PO**.
+- ⚠️ **CORRECTION — I first wrote this up as "the scan path silently lets the customer's price
+  win, which is a policy decision the owner must make". That was wrong, and the owner said so:**
+  「都是跟著 customer 的 price 啊，除非沒有才是跟著我的 price」「你查回去 SO 定價的功能
+  backend 我寫到清清楚楚了啊」. He is right — the rule is deliberate and it is documented on
+  the function itself: `resolveLineBasePriceSen` (`src/api/lib/sofa-combo-pass.ts:57`) —
+  **"Customer seat/base → product seat/base → fallbackSen"**, and the POST path only consults
+  our list when the client posts `basePriceSen = 0` (`sales-orders.ts:2276`). Customer price
+  first, ours only when the customer has none. There is no policy gap. **And the audit above is
+  the proof it works**: 1,261 lines, 4 exceptions.
+- **The distinction that actually matters** (and why the height fix is still right): a base
+  price is a number the CUSTOMER states and we have agreed — their number wins, by design. A
+  divan / leg height surcharge is NOT a customer price at all: the customer's PO says
+  "divan 10 inch", never "divan surcharge RM 55". It is purely OUR variant list, so there is no
+  customer number for it to defer to. A scanned line storing RM 0 was never "the customer's
+  price winning" — it was a lookup that never happened. Plain bug, fixed in PR #82.
+- **Consequently the 3 sofa-combo "shorts" (RM 243.50) are NOT under-billing** — all three came
+  in scanned, so those are the customer's own set prices, which win. Withdrawn.
+- Revised recoverable total: **RM 12,455** (heights) + RM 540 (4 base-price lines, worth an
+  individual look — RM 510 of it is one line) + RM 245 (INV-2607-089) = **RM 13,240**.
+
+## 2026-07-22 — 🔴 RM 12,455 of divan / leg height surcharge NEVER charged — every scanned PO
+**Owner: 「那些之前 special order 和 total heights divan 等等的錢都有算了？」** Special order: yes.
+**Height surcharges: no — and it is still leaking.** Script:
+`scripts/audit-price-components-2026-07-22.mjs`.
+- `unit_price = base + divan + leg + special` (`src/lib/pricing.ts`). Component integrity is
+  otherwise excellent: of thousands of live SO lines, **exactly 1** has a unit price that does
+  not equal the sum of its parts (SO-2607-143 L1, RM 80 OVER), and **exactly 1** invoiced line
+  bills below its SO (INV-2607-089 / SO-2607-113 L2 — **RM 245 short**, invoice already SENT).
+- **The leak is at order entry.** `variants-config` is live and correct — 10"=RM 55,
+  11"/12"=RM 130, 13"/14"=RM 150, 16"=RM 160, leg 5"/7"=RM 160 — but:
+
+  | entry path | divan 10"/12" lines charged | not charged |
+  | --- | --- | --- |
+  | keyed by hand (`sales/create.tsx`) | 104 | 43 |
+  | **scanned PO (OCR modal)** | **0** | **105** |
+
+  Same story for legs (scan: 0 charged / 12 free). April 2026 had 82 charged and 0 free at 10";
+  from May onward most lines are free — the period the scan flow took over.
+- **Root cause:** `src/components/scan-po-modal.tsx:1121` POSTs `divanHeightInches` /
+  `legHeightInches` to `/api/sales-orders` but never `divanPriceSen` / `legPriceSen`, and the
+  API trusts the caller — `const divanPriceSen = Number(item.divanPriceSen) || 0`
+  (`sales-orders.ts:2318` create, `:3840` update). The create page prices the height through
+  `selectDivan`; the scan modal has no such lookup, so the height is recorded for production
+  and priced at zero. The operator can even change the height inside the scan modal
+  (`scan-po-modal.tsx:2356`) and still no price attaches. **Pricing belongs on the server,
+  read from `variants-config`, not taken on trust from whichever screen posted.**
+- **Money, at config rates:** divan **RM 9,895** + leg **RM 2,560** = **RM 12,455**.
+  Still recoverable before invoicing: READY_TO_SHIP RM 7,885 + IN_PRODUCTION RM 405 = **RM 8,290**.
+  Already gone out: INVOICED RM 1,290 · SHIPPED RM 185 · DELIVERED RM 130 — those need the
+  `PUT /api/invoices/:id {priceEdits}` route used in the 2026-07-17 exercise.
+- Not fixed yet. Two pieces: (1) price server-side in the SO create/update path, (2) decide
+  whether to re-price the 128 unshipped lines and correct the 18 invoiced ones.
+
+## 2026-07-22 — 🟡 Billing-readiness audit before chasing customers — Carress AR understated RM 20,000
+**Owner: 「價格全部SO 的SI 都backfill了？我要找顧客收錢了」** (+ 「已經送貨了的就算了」 — no
+backfill of the 15 mislabelled shipped DOs, forward code fix only).
+Scripts: `scripts/audit-billable-2026-07-22.mjs`, `scripts/audit-underbilled-2026-07-22.mjs`.
+- ✅ **The special-order price backfill is genuinely complete — shortfall RM 0.** Five invoice
+  lines fail a naive itemisation check (`special_order_price_sen = 0` while the SO line carries
+  one — INV-2607-089/093/096) but the FULL amount IS billed: the surcharge sits inside
+  `unit_price_sen` with base/divan/leg all 0, and SO unit == invoice unit on every one.
+  *Caveat: the printed invoice therefore cannot show the surcharge breakdown, so "why is this
+  line RM 320 more?" has no line-level answer on the document.*
+- ✅ **All 35 zero-priced lines on live invoices are service / warranty work.** 11 whole
+  invoices at RM 0 are pure `SV-` service orders; the other 21 are repair lines riding along on
+  a normal consolidated invoice — each traces to an `SV-` order through its DO line
+  (SV-2607-007, SV-2606-017, SV-2606-014, SV-2606-019…). Nothing under-billed.
+- 📌 **Shipped but not yet invoiced ≈ RM 35,415.50 across 9 DOs** (all LOADED 07-21/07-22):
+  DO-2607-083 9,635 · -096 8,525 · -097 7,575 · -094 2,509 · -098 2,509 · -095 2,500 ·
+  -092 1,812.50 · -084 325 · -093 25. Billable now.
+- 🔴 **Carress owes RM 20,000 MORE than the app shows.** `customers.outstanding_sen` says
+  RM 121,848.08; recomputing with the app's OWN rule (the AR reconcile at
+  `src/api/routes/accounting.ts:2890` — live invoices dated ≥ `opening_date` 2026-05-22 or
+  `is_opening`, minus `paid_amount`) gives **RM 141,848.08**. Cause: all 21 Carress receipts
+  (RM 35,000) were applied to invoices dated BEFORE the opening date, which sit in the opening
+  balance and are excluded from AR — yet RM 20,000 of them still decremented the denormalized
+  customer balance. **The other five customers match their recompute to the sen** (Houzs
+  495,314.50 · The Conts 64,241.00 · 2990 27,376.50 · SOON 400 · LIM 55), so only Carress is
+  affected. Chasing from the app's figure under-collects RM 20k.
+  **Fix exists, NOT run:** that same reconcile writes the truth back. Needs owner's go — it
+  changes a financial figure.
+
+## 2026-07-22 — 🟡 DO composition guard is holding — only the header label is wrong
+**Owner: 「如果不一樣，Houzs 為什麼可以開成一張 D.O. 呢？」** Answer: it never did.
+- Audited all 315 DOs with resolvable lines (`scripts/audit-do-hub-composition-2026-07-22.mjs`).
+  **25 genuinely mix two hubs — every one predates the 2026-06-11 guard** (newest DO-2605-101,
+  05-29; 19 of them are the 05-05/06 historical import with a NULL header hub). Since the guard
+  landed: **zero**. BUG-2026-06-11-008's fix is doing its job.
+- **55 DOs carry a header hub that disagrees with their (single, consistent) line hub; 15 of
+  those were created AFTER the guard** — DO-2606-029 → DO-2607-083 (07-18, still LOADED). All
+  say "Houzs KL" while every line is PG (11), SRW (2) or SBH (2). Composition is clean; only
+  the label is wrong, because `createDeliveryOrderForPOs` resolves
+  `hubTarget = body.hubId ?? salesOrderRow?.hubId` and a consolidated multi-SO DO has no single
+  `salesOrderId`, so it falls through to the customer's default hub
+  (`delivery-orders.ts:3423` → `:3454`). The printed ADDRESS is correct throughout.
+- Impact is reporting, not delivery: anything grouping by hub/state (delivery planning, 3PL
+  state rates, reports) sees KL.
+- **Owner decision: do NOT backfill the shipped ones** — fix the resolution going forward only.
+  Not yet built.
+
 ## 2026-07-22 — 🟡 ON HOLD looked like it "didn't run" — it did; the dept sheet served a stale SWR snapshot
 **Owner: 「账单明明已经 on hold 了,可是却好像没有 on hold 的 back end 跑动」** (SO-2607-120 /
 PO-009515 / their SO-012637, 11 rows still plain on the Fab Sew sheet). **Not a hold bug.**

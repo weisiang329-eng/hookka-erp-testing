@@ -9,6 +9,36 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-23 — 🔴 STOP before touching invoices: my Group-A scoping was wrong, and there is a much bigger pre-existing gap
+**Executed:** `backfill-height-surcharge-2026-07-22.mjs --execute` — 140 SO lines / 100 SOs,
++RM 10,530, read-back clean (0 line mismatches, 0 total drift). Restore point:
+`scripts/_restore-height-backfill-2026-07-22.json`. **The SO lines are now correct and should
+stay that way** — reverting would put the wrong prices back.
+- 🔴 **MY MISTAKE — the "not yet invoiced" filter was the SO's STATUS, which is not the same
+  test.** An SO sits at READY_TO_SHIP while individual lines have already shipped and been
+  invoiced on a partial DO. Self-check after the write: **104 of the 140 lines are already on a
+  live SENT invoice.** No customer document was altered and nothing was mis-sent — the backfill
+  only ever wrote to `sales_order_items` / `sales_orders` — but the recovery for those 104 now
+  needs an invoice amendment exactly like Group B. Correct test is line-level: does a DO line
+  carry this `production_order_id`, and does that DO have a live invoice?
+- 🔴 **The bigger finding, and it corrects an earlier claim of mine.** I reported "only ONE
+  invoiced line differs from its SO". That was measured through `invoice_items.production_order_id`,
+  which **older invoice rows do not carry** — so it only ever looked at recent invoices.
+  Re-matched through the DO (`delivery_order_items.production_order_id` → DO → invoice → unique
+  SKU+fabric), across 1,269 unambiguous shipped lines: **202 lines where the invoice bills BELOW
+  its SO, RM 17,909.78 total.** RM 7,225 of that is what today's backfill just added, so the
+  **pre-existing gap is ≈ RM 10,685** and has nothing to do with heights (e.g. SO-2605-242 L2
+  SO RM 1,255 vs INV RM 830; SO-2605-131 L5 SO RM 930 vs INV RM 585).
+- **So the owner's premise holds going forward but not retroactively:** SO-correct ⇒
+  invoice-correct is true for invoices raised from a correct SO, but ~200 already-SENT invoices
+  were raised from SO lines that have since been corrected (or were wrong at the time).
+- ⛔ **No invoice has been amended and none will be until the owner decides.** ~RM 18k spread
+  over ~200 SENT invoices is a customer-facing call: re-issue? debit note? absorb the old ones
+  and only bill correctly from here? 336 further lines were skipped as ambiguous (duplicate
+  SKU+fabric on a consolidated invoice) and are not in any total above.
+- Planner for the matched subset: `scripts/plan-height-invoice-fix-2026-07-22.mjs`
+  (18 of 23 Group-B lines matched to an exact invoice line, RM 1,500; 5 still manual).
+
 ## 2026-07-22 — ✅ Full pricing-system audit: base prices + sofa combos are SOUND (and my "policy gap" reading was wrong)
 **Owner: 「然後 sofa combo 呢？然後我們的 customer price 呢？全套系統審查然後算價格」** +
 「SO 那邊對的話 invoice 就對了，只是有時候我們 revise invoice 而已」 — **that framing is

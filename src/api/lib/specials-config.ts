@@ -18,6 +18,7 @@
 // same list the config was seeded from.
 // ---------------------------------------------------------------------------
 import type { CfgSpecial } from "../../lib/special-order-surcharge";
+import type { CfgHeight } from "../../lib/height-surcharge";
 
 const KV_CONFIG_KEY = "variants-config";
 
@@ -55,5 +56,48 @@ export async function loadSpecialsConfig(
     return out.length > 0 ? out : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Load `variants-config.divanHeights` + `.legHeights` — the owner-editable
+ * height price lists the typed form uses (selectDivan / selectLeg in
+ * sales/create.tsx). The scan paths post a height with no price, so the write
+ * path derives from these; see src/lib/height-surcharge.ts for the trust model.
+ *
+ * Unlike the specials list there is NO static fallback catalog for heights, so
+ * an unreadable config degrades to nulls and the write path stores 0 —
+ * i.e. exactly today's behaviour. A wedged config must never block order
+ * creation, and under-charging is recoverable where a wrong charge is not.
+ */
+export async function loadHeightsConfig(db: DbLike): Promise<{
+  divanHeights: CfgHeight[] | null;
+  legHeights: CfgHeight[] | null;
+}> {
+  const empty = { divanHeights: null, legHeights: null };
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = ?")
+      .bind(KV_CONFIG_KEY)
+      .first<{ value: string }>();
+    if (!row?.value) return empty;
+    const cfg = JSON.parse(row.value) as Record<string, unknown>;
+    const pick = (key: string): CfgHeight[] | null => {
+      const raw = cfg[key];
+      if (!Array.isArray(raw)) return null;
+      const out: CfgHeight[] = [];
+      for (const e of raw) {
+        if (!e || typeof e !== "object") continue;
+        const { value, priceSen } = e as { value?: unknown; priceSen?: unknown };
+        if (typeof value !== "string" || !value) continue;
+        const p = Number(priceSen);
+        if (!Number.isFinite(p)) continue;
+        out.push({ value, priceSen: p });
+      }
+      return out.length > 0 ? out : null;
+    };
+    return { divanHeights: pick("divanHeights"), legHeights: pick("legHeights") };
+  } catch {
+    return empty;
   }
 }

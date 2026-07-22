@@ -72,7 +72,8 @@ import {
   unknownSofaSizeLabelError,
 } from "../lib/sofa-size-validation";
 import { resolveSpecialOrderPriceSen } from "../../lib/special-order-surcharge";
-import { loadSpecialsConfig } from "../lib/specials-config";
+import { resolveHeightPriceSen } from "../../lib/height-surcharge";
+import { loadSpecialsConfig, loadHeightsConfig } from "../lib/specials-config";
 import {
   validateRepairScopeInput,
   parseRepairScope,
@@ -2395,6 +2396,10 @@ app.post("/", async (c) => {
     // specialOrderPriceSen — i.e. the scan-a-customer-PO paths. null degrades
     // to the static catalog in src/lib/pricing-options.ts.
     const cfgSpecialsForPricing = await loadSpecialsConfig(c.var.DB);
+    // Owner-editable divan / leg height price lists (2026-07-22). Same
+    // one-read-per-order pattern, consulted only for items that omit the price
+    // — i.e. the scan-a-customer-PO paths.
+    const cfgHeightsForPricing = await loadHeightsConfig(c.var.DB);
 
     // Build items — resolve product basePrice fallback
     const items = await Promise.all(
@@ -2477,8 +2482,27 @@ app.post("/", async (c) => {
           }
         }
 
-        const divanPriceSen = Number(item.divanPriceSen) || 0;
-        const legPriceSen = Number(item.legPriceSen) || 0;
+        // 2026-07-22 BUG FIX (under-billing, RM 12,455 across divan + leg):
+        // these were `Number(item.divanPriceSen) || 0` — the same trust-the-
+        // client shape the 07-14 and 07-17 fixes below already repaired for
+        // their own columns, left unrepaired here. The scan-a-customer-PO
+        // paths post divanHeightInches / legHeightInches with NO price, so on
+        // prod every one of the 105 scanned lines carrying a 10"/12" divan was
+        // stored at 0 while the 104 typed by hand charged correctly.
+        // resolveHeightPriceSen DERIVES only when the field is OMITTED; any
+        // supplied number is trusted verbatim — including a deliberate 0.
+        const divanPriceSen = resolveHeightPriceSen(
+          item.divanPriceSen as number | string | null | undefined,
+          item.divanHeightInches as number | string | null | undefined,
+          cfgHeightsForPricing.divanHeights,
+          isServiceOrder,
+        );
+        const legPriceSen = resolveHeightPriceSen(
+          item.legPriceSen as number | string | null | undefined,
+          item.legHeightInches as number | string | null | undefined,
+          cfgHeightsForPricing.legHeights,
+          isServiceOrder,
+        );
         // 2026-07-17 BUG FIX (BUG-2026-07-17-002 — under-billing, RM 8,060 over
         // 66 SOs): this was `Number(item.specialOrderPriceSen) || 0`, which
         // trusted a field the SCAN clients never send. The typed form
@@ -3925,6 +3949,11 @@ app.put("/:id", async (c) => {
       // request (BUG-2026-07-17-002). Needed on PUT too — without it, editing a
       // scanned SO would re-store the surcharge as 0.
       const cfgSpecialsForPricing = await loadSpecialsConfig(c.var.DB);
+      // Ditto for the divan / leg height price lists (2026-07-22). Same
+      // reasoning: an edit that omits the price must not zero a height that the
+      // owner's list prices.
+      const cfgHeightsForPricing = await loadHeightsConfig(c.var.DB);
+      const isServiceOrder = existing.isServiceOrder === true;
       const newItems = await Promise.all(rawItems.map(async (item, idx) => {
         const incomingBase = Number(item.basePriceSen) || 0;
         // SOFA lines ALWAYS re-derive their base from the price list, ignoring
@@ -3999,8 +4028,27 @@ app.put("/:id", async (c) => {
             // Non-fatal — leave at 0; the unpriced gate below surfaces it.
           }
         }
-        const divanPriceSen = Number(item.divanPriceSen) || 0;
-        const legPriceSen = Number(item.legPriceSen) || 0;
+        // 2026-07-22 BUG FIX (under-billing, RM 12,455 across divan + leg):
+        // these were `Number(item.divanPriceSen) || 0` — the same trust-the-
+        // client shape the 07-14 and 07-17 fixes below already repaired for
+        // their own columns, left unrepaired here. The scan-a-customer-PO
+        // paths post divanHeightInches / legHeightInches with NO price, so on
+        // prod every one of the 105 scanned lines carrying a 10"/12" divan was
+        // stored at 0 while the 104 typed by hand charged correctly.
+        // resolveHeightPriceSen DERIVES only when the field is OMITTED; any
+        // supplied number is trusted verbatim — including a deliberate 0.
+        const divanPriceSen = resolveHeightPriceSen(
+          item.divanPriceSen as number | string | null | undefined,
+          item.divanHeightInches as number | string | null | undefined,
+          cfgHeightsForPricing.divanHeights,
+          isServiceOrder,
+        );
+        const legPriceSen = resolveHeightPriceSen(
+          item.legPriceSen as number | string | null | undefined,
+          item.legHeightInches as number | string | null | undefined,
+          cfgHeightsForPricing.legHeights,
+          isServiceOrder,
+        );
         // 2026-07-17 BUG FIX (BUG-2026-07-17-002 — under-billing, RM 8,060 over
         // 66 SOs): this was `Number(item.specialOrderPriceSen) || 0`, which
         // trusted a field the SCAN clients never send. The typed form

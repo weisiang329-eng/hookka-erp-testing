@@ -30,6 +30,35 @@ export async function poListCacheVersion(
   }
 }
 
+/**
+ * Invalidate EVERY cached read of GET /api/production-orders for one org:
+ *   (1) bump the KV version key so the Layer-1 edge body is skipped, AND
+ *   (2) DELETE the Layer-2 dept-sheet snapshot rows so the next read does a
+ *       COLD recompute and returns FRESH data.
+ *
+ * Both layers, always. Doing only the KV bump leaves the snapshot stale for
+ * minutes (BUG-2026-06-09-005); doing only the snapshot leaves a warm KV body
+ * serving X-Cache: HIT for the rest of its TTL (2026-07-22, the ON_HOLD that
+ * the shop floor could not see).
+ *
+ * Lives here rather than inside production-orders.ts because the writers are
+ * spread across six route modules — see
+ * tests/production-write-invalidation-class.test.mjs, which enumerates them
+ * and fails when a new one forgets. Best-effort by contract: callers own the
+ * try/catch, because a failed cache wipe must never roll back a committed
+ * business write.
+ */
+export async function invalidateProductionListCaches(
+  c: Context<Env>,
+  orgId: string,
+): Promise<void> {
+  await bumpPoListCacheVersion(c, orgId);
+  await c.var.DB
+    .prepare(`DELETE FROM production_orders_list_snapshot WHERE org_id = ?`)
+    .bind(orgId)
+    .run();
+}
+
 export async function bumpPoListCacheVersion(
   c: Context<Env>,
   orgId: string,

@@ -30,9 +30,15 @@ const SRC = readFileSync(
 );
 
 test("invalidateProductionListCaches DELETEs the snapshot (not mark-stale)", () => {
-  const start = SRC.indexOf("async function invalidateProductionListCaches");
+  // 2026-07-23: the helper moved to src/api/lib/po-list-cache.ts so all six
+  // route modules that write production_orders share one implementation.
+  const LIB = readFileSync(
+    resolve(process.cwd(), "src/api/lib/po-list-cache.ts"),
+    "utf8",
+  );
+  const start = LIB.indexOf("export async function invalidateProductionListCaches");
   assert.ok(start >= 0, "invalidateProductionListCaches must exist");
-  const body = SRC.slice(start, start + 700);
+  const body = LIB.slice(start, start + 700);
   assert.match(
     body,
     /DELETE FROM production_orders_list_snapshot WHERE org_id = \?/,

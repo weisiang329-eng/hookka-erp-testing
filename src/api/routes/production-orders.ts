@@ -53,6 +53,7 @@ import { getOrgId, tryGetOrgId, DEFAULT_ORG_ID } from "../lib/tenant";
 import {
   poListCacheVersion,
   bumpPoListCacheVersion,
+  invalidateProductionListCaches,
 } from "../lib/po-list-cache";
 // Phase 6 — parallel event sourcing for JC mutations. appendJobCardEvent
 // writes go after the UPDATE lands so the source-of-truth row is committed
@@ -5391,16 +5392,10 @@ function scanOrgId(c: Context<Env>): string {
 // do BOTH steps; doing only the KV bump leaves the snapshot stale for ~1-3 min
 // (the operator-visible flicker, BUG-2026-06-09-005). Callers pass their own
 // resolved orgId (dashboard: getOrgId; scan: scanOrgId) and own the try/catch.
-async function invalidateProductionListCaches(
-  c: Context<Env>,
-  orgId: string,
-): Promise<void> {
-  await bumpPoListCacheVersion(c, orgId);
-  await c.var.DB
-    .prepare(`DELETE FROM production_orders_list_snapshot WHERE org_id = ?`)
-    .bind(orgId)
-    .run();
-}
+// 2026-07-23: the implementation moved to src/api/lib/po-list-cache.ts and is
+// imported at the top of this file. Six route modules write production_orders;
+// they now share ONE helper instead of each carrying a copy that can drift.
+// tests/production-write-invalidation-class.test.mjs enumerates them.
 
 async function invalidateProductionCachesAfterScan(
   c: Context<Env>,

@@ -9,6 +9,53 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-22 — 🟡 Billing-readiness audit before chasing customers — Carress AR understated RM 20,000
+**Owner: 「價格全部SO 的SI 都backfill了？我要找顧客收錢了」** (+ 「已經送貨了的就算了」 — no
+backfill of the 15 mislabelled shipped DOs, forward code fix only).
+Scripts: `scripts/audit-billable-2026-07-22.mjs`, `scripts/audit-underbilled-2026-07-22.mjs`.
+- ✅ **The special-order price backfill is genuinely complete — shortfall RM 0.** Five invoice
+  lines fail a naive itemisation check (`special_order_price_sen = 0` while the SO line carries
+  one — INV-2607-089/093/096) but the FULL amount IS billed: the surcharge sits inside
+  `unit_price_sen` with base/divan/leg all 0, and SO unit == invoice unit on every one.
+  *Caveat: the printed invoice therefore cannot show the surcharge breakdown, so "why is this
+  line RM 320 more?" has no line-level answer on the document.*
+- ✅ **All 35 zero-priced lines on live invoices are service / warranty work.** 11 whole
+  invoices at RM 0 are pure `SV-` service orders; the other 21 are repair lines riding along on
+  a normal consolidated invoice — each traces to an `SV-` order through its DO line
+  (SV-2607-007, SV-2606-017, SV-2606-014, SV-2606-019…). Nothing under-billed.
+- 📌 **Shipped but not yet invoiced ≈ RM 35,415.50 across 9 DOs** (all LOADED 07-21/07-22):
+  DO-2607-083 9,635 · -096 8,525 · -097 7,575 · -094 2,509 · -098 2,509 · -095 2,500 ·
+  -092 1,812.50 · -084 325 · -093 25. Billable now.
+- 🔴 **Carress owes RM 20,000 MORE than the app shows.** `customers.outstanding_sen` says
+  RM 121,848.08; recomputing with the app's OWN rule (the AR reconcile at
+  `src/api/routes/accounting.ts:2890` — live invoices dated ≥ `opening_date` 2026-05-22 or
+  `is_opening`, minus `paid_amount`) gives **RM 141,848.08**. Cause: all 21 Carress receipts
+  (RM 35,000) were applied to invoices dated BEFORE the opening date, which sit in the opening
+  balance and are excluded from AR — yet RM 20,000 of them still decremented the denormalized
+  customer balance. **The other five customers match their recompute to the sen** (Houzs
+  495,314.50 · The Conts 64,241.00 · 2990 27,376.50 · SOON 400 · LIM 55), so only Carress is
+  affected. Chasing from the app's figure under-collects RM 20k.
+  **Fix exists, NOT run:** that same reconcile writes the truth back. Needs owner's go — it
+  changes a financial figure.
+
+## 2026-07-22 — 🟡 DO composition guard is holding — only the header label is wrong
+**Owner: 「如果不一樣，Houzs 為什麼可以開成一張 D.O. 呢？」** Answer: it never did.
+- Audited all 315 DOs with resolvable lines (`scripts/audit-do-hub-composition-2026-07-22.mjs`).
+  **25 genuinely mix two hubs — every one predates the 2026-06-11 guard** (newest DO-2605-101,
+  05-29; 19 of them are the 05-05/06 historical import with a NULL header hub). Since the guard
+  landed: **zero**. BUG-2026-06-11-008's fix is doing its job.
+- **55 DOs carry a header hub that disagrees with their (single, consistent) line hub; 15 of
+  those were created AFTER the guard** — DO-2606-029 → DO-2607-083 (07-18, still LOADED). All
+  say "Houzs KL" while every line is PG (11), SRW (2) or SBH (2). Composition is clean; only
+  the label is wrong, because `createDeliveryOrderForPOs` resolves
+  `hubTarget = body.hubId ?? salesOrderRow?.hubId` and a consolidated multi-SO DO has no single
+  `salesOrderId`, so it falls through to the customer's default hub
+  (`delivery-orders.ts:3423` → `:3454`). The printed ADDRESS is correct throughout.
+- Impact is reporting, not delivery: anything grouping by hub/state (delivery planning, 3PL
+  state rates, reports) sees KL.
+- **Owner decision: do NOT backfill the shipped ones** — fix the resolution going forward only.
+  Not yet built.
+
 ## 2026-07-22 — 🟡 ON HOLD looked like it "didn't run" — it did; the dept sheet served a stale SWR snapshot
 **Owner: 「账单明明已经 on hold 了,可是却好像没有 on hold 的 back end 跑动」** (SO-2607-120 /
 PO-009515 / their SO-012637, 11 rows still plain on the Fab Sew sheet). **Not a hold bug.**

@@ -35,7 +35,11 @@ import { emitAudit, buildAuditStatement } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { getOrgId } from "../lib/tenant";
-import { invalidateHubChangeSnapshots } from "../lib/snapshot";
+import {
+  invalidateHubChangeSnapshots,
+  invalidateOrderCascadeSnapshots,
+} from "../lib/snapshot";
+import { bumpPoListCacheVersion } from "../lib/po-list-cache";
 import {
   consumeEditLockOverrideToken,
   createEditLockOverride,
@@ -1977,6 +1981,7 @@ app.put("/:id", async (c) => {
     // Tier A fix 2026-05-21: also triggers on ON_HOLD and RESUME
     // transitions (the function now handles all 3 branches; the
     // ON_HOLD cascade gap was the silent-bug Agent A audit flagged).
+    let cascadedPoCount = 0;
     if (
       merged.status !== existing.status &&
       (merged.status === "CANCELLED" ||
@@ -1993,9 +1998,29 @@ app.put("/:id", async (c) => {
         existing.status,
       );
       stmts.push(...cascade.statements);
+      cascadedPoCount = cascade.affectedPoCount;
     }
 
     await c.var.DB.batch(stmts);
+
+    // Same reason as the SO side (sales-orders.ts, the ON_HOLD cascade
+    // comment): the dept sheets serve a cache-aside snapshot behind a KV body,
+    // and neither notices a production_orders.status write made from this
+    // module. Without this the CO hold stays invisible on the floor — the very
+    // symptom quoted in cascadeCOStatusToPOs ("my CO 设 ON_HOLD 但…"). Wipe both
+    // layers; best-effort, the cascade has already committed.
+    if (cascadedPoCount > 0) {
+      try {
+        const orgId = getOrgId(c);
+        await invalidateOrderCascadeSnapshots(c.var.DB, orgId, "consignment");
+        await bumpPoListCacheVersion(c, orgId);
+      } catch (err) {
+        console.warn(
+          "[co-status-cascade] cache invalidation failed:",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
 
     const [updated, items] = await Promise.all([
       c.var.DB.prepare("SELECT * FROM consignment_orders WHERE id = ?")

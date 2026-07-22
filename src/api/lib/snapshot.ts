@@ -453,3 +453,17 @@ export async function invalidateHubChangeSnapshots(
     }),
   );
 }
+
+// Same wipe set, different trigger — kept as a named alias so the call site
+// reads honestly instead of claiming a hub change happened.
+//
+// An SO/CO status cascade (ON_HOLD / CANCELLED / RESUME, cascadeSOStatusToPOs)
+// rewrites production_orders.status for every downstream PO. The dept sheets
+// render that status (amber ON HOLD row + reason), the SO list renders the SO
+// status, and the dashboard counts both — exactly the tables this set wipes.
+// Without it the freshness probe is the only thing standing between the hold
+// and the shop floor, and it is documented above as unreliable: on 2026-07-22
+// SO-2607-120 went ON_HOLD at 14:22 while the Fab Sew snapshot (built 06:19)
+// kept serving PENDING rows, so the sheet showed no hold at all on first load.
+// A hold that the floor cannot see is a hold that did not happen.
+export const invalidateOrderCascadeSnapshots = invalidateHubChangeSnapshots;

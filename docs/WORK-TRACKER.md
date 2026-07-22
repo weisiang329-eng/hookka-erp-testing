@@ -9,6 +9,39 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-22 — 🔴 RM 12,455 of divan / leg height surcharge NEVER charged — every scanned PO
+**Owner: 「那些之前 special order 和 total heights divan 等等的錢都有算了？」** Special order: yes.
+**Height surcharges: no — and it is still leaking.** Script:
+`scripts/audit-price-components-2026-07-22.mjs`.
+- `unit_price = base + divan + leg + special` (`src/lib/pricing.ts`). Component integrity is
+  otherwise excellent: of thousands of live SO lines, **exactly 1** has a unit price that does
+  not equal the sum of its parts (SO-2607-143 L1, RM 80 OVER), and **exactly 1** invoiced line
+  bills below its SO (INV-2607-089 / SO-2607-113 L2 — **RM 245 short**, invoice already SENT).
+- **The leak is at order entry.** `variants-config` is live and correct — 10"=RM 55,
+  11"/12"=RM 130, 13"/14"=RM 150, 16"=RM 160, leg 5"/7"=RM 160 — but:
+
+  | entry path | divan 10"/12" lines charged | not charged |
+  | --- | --- | --- |
+  | keyed by hand (`sales/create.tsx`) | 104 | 43 |
+  | **scanned PO (OCR modal)** | **0** | **105** |
+
+  Same story for legs (scan: 0 charged / 12 free). April 2026 had 82 charged and 0 free at 10";
+  from May onward most lines are free — the period the scan flow took over.
+- **Root cause:** `src/components/scan-po-modal.tsx:1121` POSTs `divanHeightInches` /
+  `legHeightInches` to `/api/sales-orders` but never `divanPriceSen` / `legPriceSen`, and the
+  API trusts the caller — `const divanPriceSen = Number(item.divanPriceSen) || 0`
+  (`sales-orders.ts:2318` create, `:3840` update). The create page prices the height through
+  `selectDivan`; the scan modal has no such lookup, so the height is recorded for production
+  and priced at zero. The operator can even change the height inside the scan modal
+  (`scan-po-modal.tsx:2356`) and still no price attaches. **Pricing belongs on the server,
+  read from `variants-config`, not taken on trust from whichever screen posted.**
+- **Money, at config rates:** divan **RM 9,895** + leg **RM 2,560** = **RM 12,455**.
+  Still recoverable before invoicing: READY_TO_SHIP RM 7,885 + IN_PRODUCTION RM 405 = **RM 8,290**.
+  Already gone out: INVOICED RM 1,290 · SHIPPED RM 185 · DELIVERED RM 130 — those need the
+  `PUT /api/invoices/:id {priceEdits}` route used in the 2026-07-17 exercise.
+- Not fixed yet. Two pieces: (1) price server-side in the SO create/update path, (2) decide
+  whether to re-price the 128 unshipped lines and correct the 18 invoiced ones.
+
 ## 2026-07-22 — 🟡 Billing-readiness audit before chasing customers — Carress AR understated RM 20,000
 **Owner: 「價格全部SO 的SI 都backfill了？我要找顧客收錢了」** (+ 「已經送貨了的就算了」 — no
 backfill of the 15 mislabelled shipped DOs, forward code fix only).

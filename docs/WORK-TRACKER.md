@@ -9,7 +9,7 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
-## 2026-07-22 — ✅ Full pricing-system audit: base prices + sofa combos are SOUND; every leak is the scan path
+## 2026-07-22 — ✅ Full pricing-system audit: base prices + sofa combos are SOUND (and my "policy gap" reading was wrong)
 **Owner: 「然後 sofa combo 呢？然後我們的 customer price 呢？全套系統審查然後算價格」** +
 「SO 那邊對的話 invoice 就對了，只是有時候我們 revise invoice 而已」 — **that framing is
 confirmed by the data**: across thousands of invoiced lines exactly ONE differs from its SO
@@ -21,7 +21,7 @@ Scripts: `audit-so-pricing-vs-list-2026-07-22.mjs`, `audit-sofa-combo-2026-07-22
 | special order | ✅ correct (07-17 fix holds; re-verified) | RM 0 |
 | **divan / leg height** | 🔴 systemic — fixed today in PR #82 | **RM 12,455** |
 | base price vs customer list | ✅ sound — 46 of 1,261 lines differ | under RM 540 (4 lines) |
-| sofa combo | ✅ sound — 142 groups matched a rule | under RM 243.50 (3 groups) |
+| sofa combo | ✅ sound — 142 groups matched a rule | RM 0 (see correction below) |
 | invoice vs SO | ✅ sound | RM 245 (1 line) |
 
 - **Base prices:** 1,261 non-sofa lines checked against `customer_product_prices` as-of the SO
@@ -30,16 +30,25 @@ Scripts: `audit-so-pricing-vs-list-2026-07-22.mjs`, `audit-sofa-combo-2026-07-22
   ABOVE list (RM 925.70) and 40 of those were typed by hand — negotiated prices, not defects.
 - **Sofa combos:** 254 groups, 142 matched a `sofa_combo_rules` set. Only **3 groups** billed
   below their agreed combo price, RM 243.50 total — and **all 3 came in through a scanned PO**.
-- 🔴 **The systemic finding — one root, not four bugs.** The scan-PO path treats the CUSTOMER'S
-  document as the source of truth for price; the typed path uses OUR price list. The API only
-  consults the customer price list when the client posts `basePriceSen = 0`
-  (`sales-orders.ts:2276`), and the scan modal always posts a price read off the PDF. Same for
-  the combo pass, which is deliberately one-way (it discounts a set DOWN to the combo total but
-  never lifts a cheaper one back UP). So every leak found today lands on the same path:
-  118 of 163 height lines, 3 of 3 combo shorts, and 100% of the scanned height lines.
-  **This is a policy decision as much as a code one: when the customer's PO price disagrees
-  with our agreed price, which wins?** Today the customer's does, silently. Needs the owner.
-- Total recoverable across everything: **RM 13,483.50**.
+- ⚠️ **CORRECTION — I first wrote this up as "the scan path silently lets the customer's price
+  win, which is a policy decision the owner must make". That was wrong, and the owner said so:**
+  「都是跟著 customer 的 price 啊，除非沒有才是跟著我的 price」「你查回去 SO 定價的功能
+  backend 我寫到清清楚楚了啊」. He is right — the rule is deliberate and it is documented on
+  the function itself: `resolveLineBasePriceSen` (`src/api/lib/sofa-combo-pass.ts:57`) —
+  **"Customer seat/base → product seat/base → fallbackSen"**, and the POST path only consults
+  our list when the client posts `basePriceSen = 0` (`sales-orders.ts:2276`). Customer price
+  first, ours only when the customer has none. There is no policy gap. **And the audit above is
+  the proof it works**: 1,261 lines, 4 exceptions.
+- **The distinction that actually matters** (and why the height fix is still right): a base
+  price is a number the CUSTOMER states and we have agreed — their number wins, by design. A
+  divan / leg height surcharge is NOT a customer price at all: the customer's PO says
+  "divan 10 inch", never "divan surcharge RM 55". It is purely OUR variant list, so there is no
+  customer number for it to defer to. A scanned line storing RM 0 was never "the customer's
+  price winning" — it was a lookup that never happened. Plain bug, fixed in PR #82.
+- **Consequently the 3 sofa-combo "shorts" (RM 243.50) are NOT under-billing** — all three came
+  in scanned, so those are the customer's own set prices, which win. Withdrawn.
+- Revised recoverable total: **RM 12,455** (heights) + RM 540 (4 base-price lines, worth an
+  individual look — RM 510 of it is one line) + RM 245 (INV-2607-089) = **RM 13,240**.
 
 ## 2026-07-22 — 🔴 RM 12,455 of divan / leg height surcharge NEVER charged — every scanned PO
 **Owner: 「那些之前 special order 和 total heights divan 等等的錢都有算了？」** Special order: yes.

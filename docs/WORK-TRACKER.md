@@ -9,6 +9,73 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-22 — 🟡 ON HOLD looked like it "didn't run" — it did; the dept sheet served a stale SWR snapshot
+**Owner: 「账单明明已经 on hold 了,可是却好像没有 on hold 的 back end 跑动」** (SO-2607-120 /
+PO-009515 / their SO-012637, 11 rows still plain on the Fab Sew sheet). **Not a hold bug.**
+- **The cascade ran correctly.** `sales_orders` ON_HOLD + reason + held_by/held_at stamped
+  14:22:26.229Z, and all **6 production orders → ON_HOLD at the identical timestamp**
+  (`cascadeSOStatusToPOs`, `src/api/routes/sales-orders.ts:665`). Verified directly on prod.
+- **What the operator saw was cache lag.** `production_orders_list_snapshot` for
+  `dept=FAB_SEW&excludeCompleted=true&fields=minimal` was `built_at` 06:19:24Z / `built_from`
+  06:11:11Z — **~8 h before the hold**. The dept sheet runs `staleWhileRevalidate`
+  (`production-orders.ts:5612`), so the first read after the hold returns the pre-hold body and
+  only kicks the refresh in the background. Live proof: first `GET /api/production-orders?
+  dept=FAB_SEW…` returned `status:"PENDING", holdReason:""`; the next call returned
+  `status:"ON_HOLD"` + the reason. `X-Cache: MISS` both times — it is the snapshot layer, not KV.
+- **Confirmed fixed-by-refresh in the real UI:** /production/fab-sew search "12637" now renders
+  all 11 rows amber with an **ON HOLD** badge + reason.
+- **Root cause of the lag:** the SO status-change path never invalidates the production
+  snapshot. The hub-change path already does exactly this (`invalidateHubChangeSnapshots`,
+  `src/api/lib/snapshot.ts:432`, wired at `sales-orders.ts:5259`) *because the freshness probe
+  is known to lie*. **Proposed fix:** call the same wipe after an ON_HOLD / CANCELLED / RESUME
+  cascade so the shop floor sees a hold on the first render, not the second. Not yet built.
+- Script: `scripts/audit-hold-cache-2026-07-22.mjs` (read-only).
+
+## 2026-07-22 — 🟡 Hub audit vs Houzs "PO chasing list 20260722" — 7 wrong hubs + 20 mislabelled PG DOs
+**Ask (owner): 「幫我查看我的顧客 hubs 全部對嗎？有哪些錯的」** — assessment only, nothing changed.
+Script: `scripts/audit-hok-hubs-2026-07-22.mjs` (read-only, prod). Join key = their
+`Doc No` (PO-0096xx) → `sales_orders.customer_po_id`. 74/74 POs matched; **66 hubs agree**.
+- **7 SOs carry the wrong hub** (all stamped `Houzs KL`, customer says otherwise):
+  PO-009401→PG, PO-009442→**SRW** (INVOICED), PO-009467→PG, PO-009495→PG (DO-2607-084 LOADED),
+  PO-009529→PG, PO-009544→PG (INVOICED), PO-009567→**SRW** (SHIPPED). 30 FG units stamped
+  "Houzs KL" follow the SO, so box stickers are wrong too.
+- **PO-009631 (their SO-012060, KL) is on their chasing list but not in our ERP** — never keyed in.
+- **20 delivery orders labelled "Houzs KL" whose lines are 100 % Houzs PG SOs** (DO-2605-037 →
+  DO-2607-083, the last one LOADED 07-21). Address printed is the correct Penang one; only the
+  hub label is wrong. **Root cause:** `createDeliveryOrderForPOs`
+  (`src/api/routes/delivery-orders.ts:3423`) resolves `hubTarget = body.hubId ?? salesOrderRow?.hubId`,
+  and on a consolidated multi-SO DO `salesOrderRow` is NULL → falls through to
+  `ORDER BY isDefault DESC LIMIT 1` = Houzs KL (line 3454). Same default-hub class as
+  BUG-2026-06-05-003 (FG stickers) and BUG-2026-06-11-009 (service DOs).
+- **Hub master data (`delivery_hubs`, 7 rows) — owner confirmed CORRECT, do not "fix":**
+  Houzs SRW + SBH really do deliver to the KL Balakong address (consolidated, Houzs ships
+  onward themselves), same for `2990 KL`; **LIM + SOON genuinely have no hub** (walk-in
+  customers) so their blank Deliver-To is expected, not a bug.
+- **The 55 blank-hub DOs are explained, not a live bug:** 51 are the 2026-05-05/06 historical
+  import batch (rows came in with `hubId` set but `hubName` + `deliveryAddress` NULL — the
+  importer never populated the snapshot; all DELIVERED long ago). DO-2606-004 + DO-2606-030 are
+  the BUG-2026-06-11-008 blank-address quirk, fixed 06-11. DO-2606-086 (SOON) + DO-2607-060
+  (LIM) are the no-hub customers above. **Zero blank DOs created since 2026-07-14.**
+- **Legacy `customer_hubs` table disagrees with `delivery_hubs`** (different ids, missing 2990/
+  LIM/SOON). No page reads it, but `src/lib/api/resources/customers.ts` exposes
+  create/update/delete against the GET-only route — dead code pointing at stale data.
+- ✅ **DONE 2026-07-22 — the 3 unshipped SOs corrected to Houzs PG on prod** via the UI's
+  Change Delivery Hub modal (owner's own logged-in Chrome; the committed script credentials all
+  401 now — password was rotated, stale creds in the old one-shot `scripts/*.mjs` should be
+  stripped). SO-2607-010 (PO-009401), SO-2607-087 (PO-009467), SO-2607-108 (PO-009529).
+  **Verified on prod** with `scripts/verify-houzs-hubs-2026-07-22.mjs`: all three
+  `hubName=Houzs PG`, `customerState=PG`, and `production_orders.customer_state` cascaded to PG.
+  `fg_units.customer_hub` still stores "Houzs KL" on the 8 units — cosmetic only, the sticker
+  reads the live `COALESCE(so.hubName, co.hubName) AS resolvedHub` join
+  (`src/api/routes/fg-units.ts:550`, the BUG-2026-06-05-003 fix); `POST /api/fg-units/backfill-hub`
+  can restamp if a stored value is ever wanted.
+- **4 left alone — already shipped, guard refuses (owner's rule):** SO-2607-074 (PO-009495,
+  DO-2607-084 LOADED + DO-2607-058 INVOICED), SO-2607-040 (PO-009442, SRW), SO-2607-115
+  (PO-009544), SO-2607-130 (PO-009567, SRW). These 4 were physically sent to the KL address
+  while Houzs's own list says PG/SRW — a commercial question for the owner, not a data fix.
+- **Still open:** the DO default-hub fallback fix (line 3423/3454) — 20 mislabelled PG DOs;
+  and PO-009631 never keyed into the ERP.
+
 ## 2026-07-17 — ✅ RM 750 special-order backfill CLOSED on prod (DO-judgment) — owner re-sends 6 Houzs invoices
 **Owner: 「直接上 prod。你重发」 + 2 unshipped lines 「写到 SO 线上」. DONE + reconciled.**
 - **6 invoices corrected via `PUT /api/invoices/:id {priceEdits}`** (the tested GL-restate

@@ -50,6 +50,10 @@ import {
 import { pickPackingCard } from "../lib/packing-card-resolve";
 import { applyPackingRack } from "../lib/packing-rack-write";
 import { getOrgId, tryGetOrgId, DEFAULT_ORG_ID } from "../lib/tenant";
+import {
+  poListCacheVersion,
+  bumpPoListCacheVersion,
+} from "../lib/po-list-cache";
 // Phase 6 — parallel event sourcing for JC mutations. appendJobCardEvent
 // writes go after the UPDATE lands so the source-of-truth row is committed
 // before we narrate what changed; a write failure here does NOT roll the
@@ -5089,35 +5093,11 @@ app.get("/overdue-counts", async (c) => {
 //      data within ~50ms. Operator never sees their own write delayed.
 //   2. Other operators in the same org see staleness up to 60s. Phase 2.5-D
 //      (Supabase Realtime) closes that gap.
-async function poListCacheVersion(c: Context<Env>, orgId: string): Promise<string> {
-  const kv = c.env.SESSION_CACHE;
-  if (!kv) return "0";
-  try {
-    return (await kv.get(`pos:version:${orgId}`)) ?? "0";
-  } catch {
-    return "0";
-  }
-}
-
-async function bumpPoListCacheVersion(c: Context<Env>, orgId: string): Promise<void> {
-  const kv = c.env.SESSION_CACHE;
-  if (!kv) return;
-  const v = String(Date.now());
-  // BUG-2026-05-12: original implementation fired the kv.put via waitUntil so
-  // the response would return faster, but that meant the operator's NEXT GET
-  // (typically <100 ms later when the auto-refresh kicks in or they navigate
-  // away + back) could still read the OLD version key, build the OLD cache
-  // key, and hit the OLD cached payload — i.e. the date the operator just
-  // saved looked "missing". Contributes to the operator-reported "set then
-  // gone" symptom. Block on the put to guarantee the very next read sees the
-  // new version. KV writes are ~10–30 ms at the writing edge, which is well
-  // below the Worker request budget, so the latency cost is acceptable.
-  try {
-    await kv.put(`pos:version:${orgId}`, v, { expirationTtl: 86400 });
-  } catch (err) {
-    console.error("[bumpPoListCacheVersion] kv write failed", err);
-  }
-}
+//
+// 2026-07-22: poListCacheVersion / bumpPoListCacheVersion moved verbatim to
+// src/api/lib/po-list-cache.ts (imported at the top of this file) so writers
+// outside this module can invalidate too — the SO ON_HOLD / CANCELLED cascade
+// rewrites production_orders.status and has to reach these same dept sheets.
 
 function buildPoListCacheKey(orgId: string, version: string, url: URL): string {
   // Canonicalise query params (sorted) so semantically-identical URLs share

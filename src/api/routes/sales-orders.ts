@@ -42,7 +42,11 @@ import {
   readCompanyCode,
   classifyBatchReassign,
 } from "../../lib/company-dimension";
-import { invalidateHubChangeSnapshots } from "../lib/snapshot";
+import {
+  invalidateHubChangeSnapshots,
+  invalidateOrderCascadeSnapshots,
+} from "../lib/snapshot";
+import { bumpPoListCacheVersion } from "../lib/po-list-cache";
 import { loadDeliveredItemsValueSen } from "../lib/do-value";
 import {
   createProductionOrdersForOrder,
@@ -4448,6 +4452,45 @@ app.put("/:id", async (c) => {
     }
 
     await c.var.DB.batch(statements);
+
+    // ---------------------------------------------------------------------
+    // Cache invalidation for the ON_HOLD / CANCELLED / RESUME cascade.
+    //
+    // cascadeSOStatusToPOs has just rewritten production_orders.status for
+    // every downstream PO, but the dept sheets do NOT read that table live —
+    // they read (1) the production_orders_list_snapshot cache-aside layer and
+    // (2) a KV body keyed by a per-org version. Neither notices a write made
+    // from THIS module, so the shop floor kept seeing the pre-hold rows:
+    //
+    //   2026-07-22 — SO-2607-120 went ON_HOLD at 14:22:26Z and all 6 POs
+    //   followed in the same batch, yet the Fab Sew sheet (snapshot built
+    //   06:19Z) still rendered 11 plain PENDING rows with no ON HOLD badge.
+    //   The owner reasonably read that as "the hold didn't run". A hold the
+    //   floor cannot see is a hold that did not happen — production keeps
+    //   cutting fabric on an order the customer may be cancelling.
+    //
+    // The snapshot layer's own freshness probe is documented as unreliable
+    // (mixed TEXT/TIMESTAMP updated_at compares — see snapshot.ts), which is
+    // why the hub-change path already wipes explicitly rather than trusting
+    // it. Do the same here, and bump the KV version too: wiping only the
+    // snapshot still leaves a warm KV body serving X-Cache: HIT for the rest
+    // of its 5-minute TTL (BUG-2026-06-09-005, "doing only one layer").
+    //
+    // Gated on the cascade actually touching POs so an ordinary field edit
+    // pays nothing. Best-effort — the cascade has already committed, so a
+    // failed wipe must not fail the request.
+    if (cascade && cascade.affectedPoCount > 0) {
+      try {
+        const orgId = getOrgId(c);
+        await invalidateOrderCascadeSnapshots(c.var.DB, orgId, "sales");
+        await bumpPoListCacheVersion(c, orgId);
+      } catch (err) {
+        console.warn(
+          "[so-status-cascade] cache invalidation failed:",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
 
     // ---------------------------------------------------------------------
     // Option D — pre-production rebuild (2026-05-06).

@@ -1,7 +1,11 @@
-# Hookka ERP — Navigation Map
+# Hookka ERP — Codebase Map (the single authoritative map)
 
-Look up the module here BEFORE searching the repo — go straight to the listed files and line ranges.
-Built to cut token usage: open the named file at the named line range instead of grepping the codebase.
+**This is THE code map — read it before touching any module; there is no other.** Look up the
+module here and go straight to the listed files and line ranges. `Grep`/`Glob` over the whole
+repo **time out** (large tree + many worktrees), so use the file:line entries below with
+`Read offset/limit` instead of searching. Formerly `docs/context-packs/NAVIGATION-MAP.md`.
+Retired duplicates now pointing here: `docs/code-map.md`; the code-location role of
+`docs/MODULES.md` (MODULES stays as the higher-level *product* reference).
 
 > **Keeping it fresh (update-on-touch):** line numbers drift as files grow — when you edit a
 > module, refresh its entry here as a byproduct. The section *names* stay stable even when the

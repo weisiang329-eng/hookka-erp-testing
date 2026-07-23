@@ -1,5 +1,7 @@
 # Modules
 
+> **For code locations (file:line) use [`CODEBASE-MAP.md`](CODEBASE-MAP.md) — the authoritative map.** This file stays as the higher-level *product* reference.
+
 Per-module reference — what each screen does, what API it talks to, and what
 entity in `mock-data.ts` it touches. Modules are listed in the order they
 appear in the left sidebar.

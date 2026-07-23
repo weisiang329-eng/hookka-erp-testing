@@ -89,7 +89,7 @@ Extends the CAPA shape that already exists on service cases; adds the missing cl
 3. **build:strict** typecheck + unit tests (money-grade discipline even though no money here).
 4. **Staging** first (features → staging, house rule) → live-verify the read AND write path.
 5. **You merge to prod** on explicit OK (never auto-merge a feature).
-6. Log in BUG-HISTORY if any bug found; refresh the NAVIGATION-MAP entry.
+6. Log in BUG-HISTORY if any bug found; refresh the CODEBASE-MAP entry.
 
 ---
 

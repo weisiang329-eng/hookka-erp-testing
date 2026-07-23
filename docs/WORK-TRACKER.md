@@ -1253,7 +1253,7 @@ Built via parallel worktree subagents, each reviewed + cherry-picked onto `stagi
 
 **✅ QR canonical domain (2026-06-26)** — prod's legacy `hookka-erp-testing.pages.dev` now renders as `erp.hookka.com` on EVERY QR / printed link / invite (new `src/lib/app-origin.ts` `canonicalizeOrigin`/`appOrigin`, applied to rackScanUrl / generateStickerData family / packingStickerUrl / dept-QR cards / invite link / DO+PL `qrScanUrl`); staging / preview / localhost keep their own origin so their QRs still resolve against their own DB. Scanning stays path-based so old pages.dev stickers still work. `fb31ab80`, +6 tests (owner "比较好看").
 
-**✅ CoE docs + CLAUDE.md refreshed** (2026-06-26) for this session — NAVIGATION-MAP (warehouse rack→occupancy, `packingPieceIdentity`, FG-sticker batch), HOOKKA-GOTCHAS (+CSRF global interceptor, QR-follows-origin + canonicalization, rack-occupancy identity, codes-always-scannable), CLAUDE.md (CSRF-is-automatic + QR-origin non-negotiables).
+**✅ CoE docs + CLAUDE.md refreshed** (2026-06-26) for this session — CODEBASE-MAP (warehouse rack→occupancy, `packingPieceIdentity`, FG-sticker batch), HOOKKA-GOTCHAS (+CSRF global interceptor, QR-follows-origin + canonicalization, rack-occupancy identity, codes-always-scannable), CLAUDE.md (CSRF-is-automatic + QR-origin non-negotiables).
 
 **❌ Code 3-day lifecycle rule — DECLINED by owner (2026-06-26).** Owner chose **(A) always-scannable, NO time limit** after learning the old "expiry" was structural resolution failures, not a timer. NOT building a time-based expiry; the structural fixes (archive-aware resolve + pickPackingCard + token re-read) already shipped are the whole ask. See [[project_qr_no_3day_expiry]].
 
@@ -1418,12 +1418,12 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
   overflow/overlap); swapped for a plain `getStatusColor(state).hex` dot. (2) Header only showed
   "Create GRN" though create.tsx already defaults to PO mode → added explicit **From PO / Manual
   Receipt (`?manual=1`) / Scan GRN**. tsc clean, shipped `5bcbbcd3`, **verified live** (chips clean,
-  3 buttons present). Found via owner screenshot; fixed via NAVIGATION-MAP (Procurement module).
+  3 buttons present). Found via owner screenshot; fixed via CODEBASE-MAP (Procurement module).
 
 ## 2026-06-20
 
 - ✅ **CoE / Dev-Efficiency System built** — the "big plan" ([DEV-EFFICIENCY-SYSTEM.md](DEV-EFFICIENCY-SYSTEM.md)):
-  Layer 4 **Navigation** = [NAVIGATION-MAP.md](context-packs/NAVIGATION-MAP.md) (**15 modules = full system
+  Layer 4 **Navigation** = [CODEBASE-MAP.md](CODEBASE-MAP.md) (**15 modules = full system
   coverage**, line-range index for ~30 monster files, spot-verified); Layer 5 **Methodology** = [PLAYBOOKS.md](PLAYBOOKS.md)
   (8 procedures); 9 Codex docs tailored; DOCS-INDEX surfaces all. **Still optional:** light docs reorg
   (merge UI-DATA-DOCUMENT-STANDARDS→UI-CONVENTIONS), Data-dictionary/glossary, ERD map, Test-selection matrix.
@@ -1433,7 +1433,7 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
   correctly** (was "" before the fix), name clean, deleted 200. GRN arrival reads dual-keyed too.
 - ✅ **Employees summary stale-on-date FIX** (task #55) — wired all 6 date-bearing tabs
   (handleSummaryDateChange + onDateChange prop on Efficiency/Dept-Labor/Employee-Detail/
-  Dept-Performance/Labor-Cost). Done myself via NAVIGATION-MAP (read ~250 lines not 10,951).
+  Dept-Performance/Labor-Cost). Done myself via CODEBASE-MAP (read ~250 lines not 10,951).
   tsc clean, shipped `4157cf88`, verified-live (renders clean). **SWEEP DONE (2026-06-21, CLEAN):**
   audited dashboard-b month switcher, reports, daily-report, analytics, ~10 accounting date-tabs,
   planning — all correctly put the date in the URL/deps → react. **Employees was the only real

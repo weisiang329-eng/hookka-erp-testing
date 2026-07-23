@@ -3,17 +3,20 @@
 This file organizes key documentation so implementation and operations are easy to navigate.
 
 ## Start Here
+- `docs/CODEBASE-MAP.md` — **THE code map**: find any module by file:line. Read before touching code; never `grep`/`glob` the whole repo (it times out).
+- `docs/HOME.md` — Obsidian home note: open `docs/` as a vault and navigate the graph via `[[wikilinks]]`.
 - `README.md` — project overview, local run commands, module map.
 - `docs/SETUP.md` — development environment setup and troubleshooting.
 - `docs/ARCHITECTURE.md` — current system architecture and extension points.
+- `docs/archive/` — retired one-off docs (audits, handoffs, dated readouts); kept for history, out of the hot path.
 
 
 ## AI / LLM Context Management
 - `docs/DEV-EFFICIENCY-SYSTEM.md` — **the big plan**: the 6-layer ERP Center-of-Excellence (Governance/Knowledge/Reliability/Navigation/Methodology/Data-model), what we have vs need, and the build roadmap.
-- `docs/context-packs/NAVIGATION-MAP.md` — **find code fast (no searching)**: every module → pages / API routes / tables / tests + a line-range section index for the 16 monster files. Look here BEFORE grepping.
+- `docs/CODEBASE-MAP.md` — **find code fast (no searching)**: every module → pages / API routes / tables / tests + a line-range section index for the 16 monster files. Look here BEFORE grepping.
 - `docs/PLAYBOOKS.md` — **fixed steps for recurring tasks** (add a field, fix a camelCase read bug, ship+verify, money field, fix-then-sweep, new grid/PDF, touching a monster file). Follow the playbook instead of re-deriving.
 - `docs/DEV-OPERATING-FRAMEWORK.md` — **the operating manual (read first)**: when to review-all vs not (快·准·省 + risk tiers), the high-risk areas that always need deep review, and the durable task-tracking cadence.
-- `docs/HOOKKA-GOTCHAS.md` — hard-won Hookka-specific traps (migration self-apply, snake_case rename-map, build:strict). Read before any schema/money/SQL/ship work — these are the real time-savers.
+- `docs/context-packs/HOOKKA-GOTCHAS.md` — hard-won Hookka-specific traps (migration self-apply, snake_case rename-map, build:strict). Read before any schema/money/SQL/ship work — these are the real time-savers.
 - `docs/WORK-TRACKER.md` — living list of assigned / in-progress / shipped work so nothing is forgotten across a long session.
 - `docs/LLM-CONTEXT-STRATEGY.md` — token-saving workflow for Claude/Codex sessions; start here before asking an assistant to inspect the repo.
 - `docs/context-packs/` — small task-specific file maps so AI sessions can load only the relevant frontend, backend, DB, or security slice.
@@ -26,8 +29,8 @@ This file organizes key documentation so implementation and operations are easy 
 - `docs/PROGRAM-90D-EXECUTION.md` — **active**. 90-day enterprise upgrade plan (CI gates → RBAC/audit → scheduler → SDK → observability). Updates weekly.
 - `docs/UPGRADE-CONTROL-BOARD.md` — **active**. Single source of truth for status (Backlog / In Progress / Blocked / Done). Update on every state change.
 - `docs/ENTERPRISE-ERP-ARCHITECTURE.md` — target enterprise architecture blueprint (SAP/Oracle reference shape).
-- `docs/PROGRAM-EXECUTION.md` — legacy 6-task status snapshot. Superseded by PROGRAM-90D-EXECUTION.md for the upgrade window.
-- `docs/REPO-REVIEW-2026-04-24.md` — repository health review and stabilization notes.
+- `docs/archive/PROGRAM-EXECUTION.md` — (archived) legacy 6-task status snapshot. Superseded by PROGRAM-90D-EXECUTION.md.
+- `docs/archive/REPO-REVIEW-2026-04-24.md` — (archived) repository health review and stabilization notes.
 
 ## Compliance / Standards
 - `docs/ISO-9001-GAP-ANALYSIS.md` — **assessment (2026-07-18)**. Code-grounded ISO 9001:2015 gap analysis (traceability, QC release, NCR, CAPA, document control, suppliers, internal audit, management review, etc.) + a suggested build order. No code changed.

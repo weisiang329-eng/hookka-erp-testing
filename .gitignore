@@ -54,3 +54,6 @@ scripts/dryrun-*.ts
 scripts/count-*.ts
 scripts/debug-*.ts
 scripts/verify-*.ts
+
+# Obsidian vault config (docs/ opened as a vault)
+.obsidian/

@@ -18,7 +18,7 @@ test('core project files exist', () => {
 
 test('enterprise architecture and review docs exist', () => {
   assert.ok(existsSync(resolve(root, 'docs/ENTERPRISE-ERP-ARCHITECTURE.md')));
-  assert.ok(existsSync(resolve(root, 'docs/REPO-REVIEW-2026-04-24.md')));
+  assert.ok(existsSync(resolve(root, 'docs/CODEBASE-MAP.md'))); // REPO-REVIEW-2026-04-24 removed in the #101 docs restructure
 });
 
 test('cloudflare pages output configured', () => {

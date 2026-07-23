@@ -39,6 +39,8 @@ import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { parseDebtorCode } from "../../lib/debtor";
 import { nextMonthDueDate } from "../../lib/terms";
 import { readGstRatePct } from "../lib/note-ledger";
+import { ensureInvoicePoLinkColumn, readInvoiceItemPoLink } from "../lib/invoice-po-link";
+import { matchInvoiceLinesToDoLines, type BackfillInvLine, type BackfillDoLine } from "../../lib/invoice-po-backfill";
 
 const app = new Hono<Env>();
 
@@ -584,6 +586,115 @@ async function fetchInvoiceWithChildren(db: D1Database, id: string) {
 //
 //   ?dry=1 → preview only. Idempotent (only fills blank fields). Temporary.
 // Registered BEFORE /:id (Hono static-before-wildcard ordering).
+// POST /api/invoices/backfill-po-links
+//
+// One-shot legacy repair completing BUG-2026-07-17-001. Pre-fix invoices never
+// stored invoice_items.production_order_id, so their printouts reconstruct the
+// per-line customer PO by product|fabric|size guessing — the 2026-07-23 audit
+// found 77 invoices (~179 lines) printing the wrong PO. This aligns each
+// invoice's items to its DO's items via the STRICT pure matcher
+// (src/lib/invoice-po-backfill.ts — refuses any invoice whose line groups
+// don't match exactly) and writes ONLY production_order_id. Amounts,
+// quantities, prices and statuses are untouched by construction (owner
+// 2026-07-23: 「切记不要动到金额」).
+//
+// DEFAULTS TO DRY-RUN. Pass ?execute=1 to write (lesson of 2026-07-03: a
+// query-param dry flag nobody noticed ran a live backfill — so this one
+// requires an explicit OPT-IN to write, never an opt-out).
+// Registered BEFORE /:id (Hono static-before-wildcard ordering).
+app.post("/backfill-po-links", async (c) => {
+  const denied = await requirePermission(c, "invoices", "update");
+  if (denied) return denied;
+  const execute = c.req.query("execute") === "1";
+  await ensureInvoicePoLinkColumn(c.var.DB as never);
+
+  // Invoices with a DO and at least one unlinked line.
+  const invRes = await c.var.DB.prepare(
+    `SELECT DISTINCT i.id, i.invoiceNo, i.deliveryOrderId
+       FROM invoices i
+       JOIN invoice_items ii ON ii.invoiceId = i.id
+      WHERE i.deliveryOrderId IS NOT NULL AND i.deliveryOrderId <> ''
+        AND (ii.production_order_id IS NULL OR ii.production_order_id = '')`,
+  ).all<{ id: string; invoiceNo?: string; invoice_no?: string; deliveryOrderId?: string; delivery_order_id?: string }>();
+  const invoices = invRes.results ?? [];
+
+  const statements: D1PreparedStatement[] = [];
+  const skipped: { invoiceNo: string; reason: string }[] = [];
+  let linkedInvoices = 0;
+  let linkedLines = 0;
+  let unlinkableLines = 0;
+
+  for (const inv of invoices) {
+    const invoiceNo = String(inv.invoiceNo ?? inv.invoice_no ?? inv.id);
+    const doId = String(inv.deliveryOrderId ?? inv.delivery_order_id ?? "");
+    const [itemsRes, doRes] = await Promise.all([
+      c.var.DB.prepare(
+        `SELECT id, productCode, fabricCode, sizeLabel, production_order_id
+           FROM invoice_items WHERE invoiceId = ? ORDER BY id`,
+      ).bind(inv.id).all<{
+        id: string; productCode?: string | null; product_code?: string | null;
+        fabricCode?: string | null; fabric_code?: string | null;
+        sizeLabel?: string | null; size_label?: string | null;
+      }>(),
+      c.var.DB.prepare(
+        `SELECT productionOrderId, productCode, fabricCode, sizeLabel
+           FROM delivery_order_items WHERE deliveryOrderId = ? ORDER BY id`,
+      ).bind(doId).all<{
+        productionOrderId?: string | null; production_order_id?: string | null;
+        productCode?: string | null; product_code?: string | null;
+        fabricCode?: string | null; fabric_code?: string | null;
+        sizeLabel?: string | null; size_label?: string | null;
+      }>(),
+    ]);
+    const invLines: BackfillInvLine[] = (itemsRes.results ?? []).map((r) => ({
+      id: String(r.id),
+      productCode: (r.productCode ?? r.product_code ?? null) as string | null,
+      fabricCode: (r.fabricCode ?? r.fabric_code ?? null) as string | null,
+      sizeLabel: (r.sizeLabel ?? r.size_label ?? null) as string | null,
+      productionOrderId: readInvoiceItemPoLink(r as Record<string, unknown>),
+    }));
+    const doLines: BackfillDoLine[] = (doRes.results ?? []).map((r) => ({
+      productCode: (r.productCode ?? r.product_code ?? null) as string | null,
+      fabricCode: (r.fabricCode ?? r.fabric_code ?? null) as string | null,
+      sizeLabel: (r.sizeLabel ?? r.size_label ?? null) as string | null,
+      productionOrderId: (r.productionOrderId ?? r.production_order_id ?? null) as string | null,
+    }));
+    const match = matchInvoiceLinesToDoLines(invLines, doLines);
+    if (!match.ok) { skipped.push({ invoiceNo, reason: match.reason }); continue; }
+    if (match.assignments.length === 0) continue;
+    linkedInvoices++;
+    linkedLines += match.assignments.length;
+    unlinkableLines += match.unlinkableLines;
+    for (const a of match.assignments) {
+      statements.push(
+        c.var.DB.prepare(
+          `UPDATE invoice_items SET production_order_id = ?
+            WHERE id = ? AND (production_order_id IS NULL OR production_order_id = '')`,
+        ).bind(a.productionOrderId, a.invoiceItemId),
+      );
+    }
+  }
+
+  if (execute && statements.length) {
+    // Chunked batches — 77 invoices ≈ a few hundred single-column UPDATEs.
+    for (let i = 0; i < statements.length; i += 100) {
+      await c.var.DB.batch(statements.slice(i, i + 100));
+    }
+  }
+
+  return c.json({
+    success: true,
+    data: {
+      dry: !execute,
+      scannedInvoices: invoices.length,
+      linkedInvoices,
+      linkedLines,
+      unlinkableLines,
+      skipped,
+    },
+  });
+});
+
 app.post("/backfill-customer-fields", async (c) => {
   const denied = await requirePermission(c, "invoices", "update");
   if (denied) return denied;

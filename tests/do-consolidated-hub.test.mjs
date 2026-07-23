@@ -17,10 +17,15 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const SRC = readFileSync(
-  resolve(process.cwd(), "src/api/routes/delivery-orders.ts"),
-  "utf8",
-);
+// `delivery-orders.ts` had its module-level helpers extracted to
+// delivery-orders/_helpers.ts (2026-07-23 refactor). The hub-derivation logic
+// this guard greps for moved with them, so read BOTH files.
+const SRC = [
+  "src/api/routes/delivery-orders.ts",
+  "src/api/routes/delivery-orders/_helpers.ts",
+]
+  .map((f) => readFileSync(resolve(process.cwd(), f), "utf8"))
+  .join("\n\n");
 
 test("the DO hub is derived from the SO lines before the default-hub fallback", () => {
   const deriveAt = SRC.indexOf("SELECT DISTINCT hubId FROM sales_orders");

@@ -52,7 +52,15 @@ test("service orders stay free when omitted", () => {
 });
 
 test("both SO write paths store + derive total-height (structural)", () => {
-  const SRC = readFileSync(resolve(process.cwd(), "src/api/routes/sales-orders.ts"), "utf8");
+  // sales-orders.ts had its module-level helpers (incl. ensurePendingMigrations,
+  // which holds the total_height_price_sen ALTER) extracted to
+  // sales-orders/_helpers.ts (2026-07-23 refactor). Read BOTH files.
+  const SRC = [
+    "src/api/routes/sales-orders.ts",
+    "src/api/routes/sales-orders/_helpers.ts",
+  ]
+    .map((f) => readFileSync(resolve(process.cwd(), f), "utf8"))
+    .join("\n\n");
   const derives = SRC.match(/resolveTotalHeightPriceSen\(/g) ?? [];
   assert.ok(derives.length >= 2, "POST + PUT loops must both resolve total-height");
   assert.doesNotMatch(

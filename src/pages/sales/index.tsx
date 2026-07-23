@@ -814,7 +814,7 @@ export default function SalesPage() {
       icon: <Printer className="h-3.5 w-3.5" />,
       action: async () => {
         const { generateSOPdf } = await import("@/lib/generate-so-pdf");
-        generateSOPdf(row, customers.find(c => c.id === row.customerId) ?? null);
+        await generateSOPdf(row, customers.find(c => c.id === row.customerId) ?? null);
       },
     },
     {

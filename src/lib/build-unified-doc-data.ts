@@ -280,3 +280,100 @@ export function buildUnifiedInvoiceData(input: UnifiedInvoiceInput, logoPngBase6
     logoPngBase64,
   };
 }
+
+export interface UnifiedSalesOrderInput {
+  soNo: string;
+  docDate: string;
+  customerName: string;
+  billAddress?: string;
+  customerPOId?: string;
+  customerSOId?: string;
+  terms?: string;
+  items: Array<{
+    id: string;
+    productCode: string;
+    productName: string;
+    fabricCode?: string;
+    sizeLabel?: string;
+    quantity: number;
+    priceSen: number;
+    lineTotalSen: number;
+    extra?: DocLineExtra;
+  }>;
+  subtotalSen: number;
+  totalSen: number;
+}
+
+// A Sales Order rendered with the SAME unified template as the invoice — the
+// itemised Price column (Base + Divan + Leg + T.Height + Special = unit) and
+// all. It reuses the INVOICE-style layout (kind:"INVOICE") but overrides the
+// header title / footer to read "SALES ORDER". The SO's own item columns carry
+// the components, so no print-extras lookup is needed.
+export function buildUnifiedSalesOrderData(
+  input: UnifiedSalesOrderInput,
+  logoPngBase64?: string,
+): UnifiedDocData {
+  const ordered = input.items
+    .map((it, i) => ({ it, i }))
+    .sort((a, b) => {
+      const cr = catRank(a.it.extra?.itemCategory) - catRank(b.it.extra?.itemCategory);
+      return cr !== 0 ? cr : a.i - b.i;
+    })
+    .map((x) => x.it);
+
+  const groups: UnifiedDocGroup[] = [];
+  let cur: UnifiedDocGroup | null = null;
+  let totalSets = 0;
+  for (const it of ordered) {
+    const ex = it.extra;
+    const catL = catLabel(ex?.itemCategory);
+    if (!cur || cur.category !== catL) {
+      cur = { category: catL, items: [] };
+      groups.push(cur);
+    }
+    totalSets += it.quantity;
+    const spec = buildSpec({ fabricCode: it.fabricCode || "", sizeLabel: it.sizeLabel || "" }, ex);
+    cur.items.push({
+      // One SO = one set of refs, repeated per line so the Order column matches
+      // the invoice layout.
+      orderRefs: [
+        `PO: ${input.customerPOId || "-"}`,
+        `SO: ${input.customerSOId || "-"}`,
+      ],
+      code: it.productCode || "",
+      name: it.productName || "",
+      specLines: spec ? [spec] : [],
+      set: it.quantity,
+      priceSen: it.priceSen,
+      lineTotalSen: it.lineTotalSen,
+      priceBreakdown: invoicePriceBreakdown(ex, it.priceSen),
+    });
+  }
+
+  return {
+    kind: "INVOICE",
+    docTitle: "SALES ORDER",
+    footerLabel: "sales order",
+    docNo: input.soNo,
+    docDate: fmtDocDate(input.docDate),
+    statusText: input.terms || "NET 30",
+    leftFields: [
+      ["Bill To", input.customerName || "-"],
+      ["Address", input.billAddress || "-"],
+    ],
+    rightFields: [
+      ["Sales Order", input.soNo],
+      ["Customer PO", input.customerPOId || "-"],
+      ["Customer SO", input.customerSOId || "-"],
+      ["Date", fmtDocDate(input.docDate)],
+      ["Terms", input.terms || "NET 30"],
+    ],
+    groups,
+    totalSets,
+    subtotalSen: input.subtotalSen,
+    taxSen: 0,
+    totalSen: input.totalSen,
+    amountInWords: amountInWords(input.totalSen),
+    logoPngBase64,
+  };
+}

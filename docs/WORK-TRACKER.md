@@ -9,6 +9,14 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-23 — ✅ Legacy invoice PO-link backfill (77 mislabeled printouts → 2 residual)
+
+Audit + repair, owner-approved. /api/invoices/backfill-po-links executed:
+355 invoices / 2,244 lines linked (only production_order_id written).
+Residual for human eyes: INV-2606-121, INV-2607-024 (line-count mismatch
+vs DO). Aging exports, payment-edit bug (pending login that day), OneDrive
+relocation check, sales-invoice duplicate audit (clean) — same day.
+
 ## 2026-07-23 — ✅ SESSION CLOSE — under-billing fully recovered (RM 26,010), guardrails shipped, GL verified balanced
 **One-screen handoff. Everything below is DONE + verified on prod unless marked ⏳/🔴.**
 

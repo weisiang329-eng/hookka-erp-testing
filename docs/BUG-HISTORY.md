@@ -635,6 +635,20 @@ guard deploy still pending (owner-gated; prod not accessible from this session).
   June payslips 37/0 TEST, reconciled badge). Full audit archive:
   memory/project_data_accuracy_audit_0711.md.
 
+## BUG-2026-07-17-001 完成注记 (2026-07-23) — legacy po-link backfill executed `invoices` `pdf`
+
+🟢 The 07-17 fix only covered NEW invoices. 2026-07-23 audit: 77 legacy
+invoices (~179 lines) still printed collapsed per-line customer POs.
+Shipped POST /api/invoices/backfill-po-links (STRICT pure matcher,
+tests/invoice-po-backfill.test.mjs; dry-run by default, ?execute=1 to
+write; writes ONLY invoice_items.production_order_id — owner directive
+「切记不要动到金额」). Executed on prod: 355 invoices / 2,244 lines
+linked; verified INV-2606-126 restored to its DO's exact PO multiset
+and a full re-scan shows 75/77 fixed. Residual: INV-2606-121 +
+INV-2607-024 (invoice/DO line-count mismatch — matcher refuses, needs
+human review); INV-2605-087/109 now print CORRECT POs that the old DO
+detail modal itself cannot resolve (April-era DO display gap, cosmetic).
+
 ## BUG-2026-07-09-002 — Voiding an advance-only supplier payment left it in the CACHED aging (snapshot never invalidated) `accounting` `supplier-payments` `snapshot`
 
 🟢 **Fixed — bumpSupplierPaymentsRev() in every payment mutation batch**

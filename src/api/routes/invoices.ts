@@ -1134,11 +1134,36 @@ function ensureDiscountColumn(db: D1Database): Promise<void> {
   return _invDiscountColMig;
 }
 
+// 0208 self-apply — the DB-level guarantee that one delivery order can have at
+// most ONE active (non-cancelled) invoice. See migrations-postgres/0208.
+// BUG-2026-07-14-006: the application check-then-write guard has a race window;
+// two concurrent create requests both pass it and both INSERT. This partial-
+// unique index makes the second INSERT fail at the storage layer, so the race
+// can never produce a duplicate. Idempotent (IF NOT EXISTS), once per isolate.
+// Failure is swallowed (e.g. a lingering duplicate would make CREATE fail) so a
+// wedged index build never blocks invoicing — but the dups were cleaned first.
+let _invDedupeIndexMig: Promise<void> | null = null;
+function ensureInvoiceDedupeIndex(db: D1Database): Promise<void> {
+  if (!_invDedupeIndexMig) {
+    _invDedupeIndexMig = db
+      .prepare(
+        `CREATE UNIQUE INDEX IF NOT EXISTS uniq_invoice_active_delivery_order
+           ON invoices (delivery_order_id)
+           WHERE status <> 'CANCELLED' AND delivery_order_id IS NOT NULL`,
+      )
+      .run()
+      .then(() => undefined)
+      .catch(() => undefined);
+  }
+  return _invDedupeIndexMig;
+}
+
 app.post("/", async (c) => {
   // RBAC gate (P3.3-followup) — invoices:create.
   const denied = await requirePermission(c, "invoices", "create");
   if (denied) return denied;
   await ensureDiscountColumn(c.var.DB);
+  await ensureInvoiceDedupeIndex(c.var.DB);
   // Sprint 3 #4 — idempotency. POSTing an invoice for the same DO twice
   // produces two distinct invoice rows today (the only guard is DO status
   // = DELIVERED, which the first request flips to INVOICED — but the
@@ -1355,7 +1380,36 @@ app.post("/", async (c) => {
       ).bind(totalSen, doRow.customerId),
     ];
 
-    await c.var.DB.batch(statements);
+    try {
+      await c.var.DB.batch(statements);
+    } catch (batchErr) {
+      // The 0208 partial-unique index (uniq_invoice_active_delivery_order) is
+      // the last line of defence against the double-invoice race: if a
+      // concurrent request already created the active invoice for this DO
+      // between our guard check above and this INSERT, Postgres rejects the
+      // second row. Turn that storage-layer rejection into the SAME graceful
+      // 409 the guard returns, pointing at the invoice that won the race —
+      // instead of a raw 500. Any other batch failure re-throws.
+      const m = batchErr instanceof Error ? batchErr.message : String(batchErr);
+      if (/uniq_invoice_active_delivery_order|duplicate key|23505/i.test(m)) {
+        const existing = await c.var.DB
+          .prepare(
+            "SELECT id, invoiceNo FROM invoices WHERE deliveryOrderId = ? AND status != 'CANCELLED' LIMIT 1",
+          )
+          .bind(deliveryOrderId)
+          .first<{ id: string; invoiceNo: string }>();
+        return c.json(
+          {
+            success: false,
+            error: `An invoice (${existing?.invoiceNo ?? "unknown"}) already exists for this delivery order.`,
+            existingInvoiceId: existing?.id ?? null,
+            existingInvoiceNo: existing?.invoiceNo ?? null,
+          },
+          409,
+        );
+      }
+      throw batchErr;
+    }
 
     // BACKEND customer-notice trigger (BUG-2026-06-23 safety net). The manual
     // "Generate Invoice" button (DELIVERED → INVOICED via this POST) does NOT

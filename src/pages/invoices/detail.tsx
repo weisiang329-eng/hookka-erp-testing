@@ -77,7 +77,7 @@ export default function InvoiceDetailPage() {
   const [editingPrices, setEditingPrices] = useState(false);
   const [savingPrices, setSavingPrices] = useState(false);
   const [priceDraft, setPriceDraft] = useState<
-    Record<string, { base: string; divan: string; leg: string; special: string }>
+    Record<string, { base: string; divan: string; leg: string; special: string; totalHeight: string }>
   >({});
   const [discountDraft, setDiscountDraft] = useState<Record<string, number>>({});
   const rm = (sen: number) => (Math.round(Number(sen) || 0) / 100).toFixed(2);
@@ -92,7 +92,7 @@ export default function InvoiceDetailPage() {
     if (!invoice) return;
     const d: Record<
       string,
-      { base: string; divan: string; leg: string; special: string }
+      { base: string; divan: string; leg: string; special: string; totalHeight: string }
     > = {};
     const dd: Record<string, number> = {};
     for (const it of invoice.items) {
@@ -106,6 +106,7 @@ export default function InvoiceDetailPage() {
         divan: rm(ex?.divanSen || 0),
         leg: rm(ex?.legSen || 0),
         special: rm(ex?.specialSen || 0),
+        totalHeight: rm(ex?.totalHeightSen || 0),
       };
       // Per-line discount (migration 0179). Pre-fill from stored value.
       dd[it.id] = Number(it.discountSen) || 0;
@@ -124,6 +125,7 @@ export default function InvoiceDetailPage() {
         divan: "0",
         leg: "0",
         special: "0",
+        totalHeight: "0",
       };
       return {
         id: it.id,
@@ -131,6 +133,7 @@ export default function InvoiceDetailPage() {
         divanSen: sen(d.divan),
         legSen: sen(d.leg),
         specialSen: sen(d.special),
+        totalHeightSen: sen(d.totalHeight),
         // Per-line discount (migration 0179).
         discountSen: discountDraft[it.id] ?? 0,
       };
@@ -139,7 +142,7 @@ export default function InvoiceDetailPage() {
     // Backend recomputes identically; comparing on totalAmount catches stale reads.
     const expectedTotal = invoice.items.reduce((sum, it) => {
       const e = priceEdits.find((p) => p.id === it.id);
-      const unit = (e?.baseSen ?? 0) + (e?.divanSen ?? 0) + (e?.legSen ?? 0) + (e?.specialSen ?? 0);
+      const unit = (e?.baseSen ?? 0) + (e?.divanSen ?? 0) + (e?.legSen ?? 0) + (e?.specialSen ?? 0) + (e?.totalHeightSen ?? 0);
       const discount = e?.discountSen ?? 0;
       return sum + Math.max(0, unit * (Number(it.quantity) || 0) - discount);
     }, 0);
@@ -710,7 +713,7 @@ export default function InvoiceDetailPage() {
                             .join(" / ")
                         : "";
                       const setDraft = (
-                        k: "base" | "divan" | "leg" | "special",
+                        k: "base" | "divan" | "leg" | "special" | "totalHeight",
                         v: string,
                       ) =>
                         setPriceDraft((p) => ({
@@ -721,13 +724,14 @@ export default function InvoiceDetailPage() {
                               divan: "0",
                               leg: "0",
                               special: "0",
+                              totalHeight: "0",
                             }),
                             [k]: v,
                           },
                         }));
                       const priceInput = (
                         label: string,
-                        k: "base" | "divan" | "leg" | "special",
+                        k: "base" | "divan" | "leg" | "special" | "totalHeight",
                       ) => (
                         <div className="flex items-center justify-end gap-1.5">
                           <span className="text-[10px] text-[#9CA3AF] w-12 text-right">
@@ -787,6 +791,7 @@ export default function InvoiceDetailPage() {
                                 {priceInput("Base", "base")}
                                 {priceInput("Divan", "divan")}
                                 {priceInput("Leg", "leg")}
+                                {priceInput("T.Height", "totalHeight")}
                                 {priceInput("Special", "special")}
                                 <p className="text-[11px] text-[#6B5C32] font-medium pt-1">
                                   Unit {formatCurrency(liveUnit)}
@@ -808,7 +813,7 @@ export default function InvoiceDetailPage() {
                                 </div>
                               </div>
                             ) : ex &&
-                              (ex.divanSen || ex.legSen || ex.specialSen) ? (
+                              (ex.divanSen || ex.legSen || ex.totalHeightSen || ex.specialSen) ? (
                               <div className="text-xs leading-relaxed tabular-nums">
                                 <div>Base {formatCurrency(ex.baseSen)}</div>
                                 {!!ex.divanSen && (
@@ -816,6 +821,9 @@ export default function InvoiceDetailPage() {
                                 )}
                                 {!!ex.legSen && (
                                   <div>+ Leg {formatCurrency(ex.legSen)}</div>
+                                )}
+                                {!!ex.totalHeightSen && (
+                                  <div>+ T.Height {formatCurrency(ex.totalHeightSen)}</div>
                                 )}
                                 {!!ex.specialSen && (
                                   <div>

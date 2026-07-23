@@ -73,6 +73,7 @@ import {
 } from "../lib/sofa-size-validation";
 import { resolveSpecialOrderPriceSen } from "../../lib/special-order-surcharge";
 import { resolveHeightPriceSen } from "../../lib/height-surcharge";
+import { resolveTotalHeightPriceSen } from "../../lib/total-height-surcharge";
 import { loadSpecialsConfig, loadHeightsConfig } from "../lib/specials-config";
 import {
   validateRepairScopeInput,
@@ -155,6 +156,7 @@ export type SalesOrderItemRow = {
   legPriceSen: number;
   specialOrder: string | null;
   specialOrderPriceSen: number;
+  totalHeightPriceSen: number;
   // Free-text custom specials per line. Stored as JSON string of
   // Array<{ description: string; surchargeSen: number }>. NULL/empty when
   // the operator hasn't attached any. The aggregate surcharge is folded
@@ -281,6 +283,7 @@ function rowToItem(r: SalesOrderItemRow) {
     legPriceSen: r.legPriceSen,
     specialOrder: r.specialOrder ?? "",
     specialOrderPriceSen: r.specialOrderPriceSen,
+    totalHeightPriceSen: r.totalHeightPriceSen ?? 0,
     // Hand the parsed array to the frontend, not the raw JSON string.
     // The form pages mutate this list directly; serialization back to
     // JSON happens on the POST/PUT path.
@@ -2090,6 +2093,14 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       "ALTER TABLE sales_order_items ADD COLUMN IF NOT EXISTS discount_sen INTEGER NOT NULL DEFAULT 0",
       "ALTER TABLE consignment_order_items ADD COLUMN IF NOT EXISTS discount_sen INTEGER NOT NULL DEFAULT 0",
       "ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS discount_sen INTEGER NOT NULL DEFAULT 0",
+      // 0209 — total-height surcharge (gap+divan+leg → variants-config.totalHeights)
+      // gets its own stored column so it is derivable server-side, itemised on
+      // the PDF, and editable on the invoice — the 4th price component finally
+      // treated like the others. Was folded into unitPriceSen with no column,
+      // so it landed in 0/125 eligible lines (BUG-CLASSES C1).
+      "ALTER TABLE sales_order_items ADD COLUMN IF NOT EXISTS total_height_price_sen INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE consignment_order_items ADD COLUMN IF NOT EXISTS total_height_price_sen INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS total_height_price_sen INTEGER NOT NULL DEFAULT 0",
       // 0185 — ON HOLD reason capture. When an SO is put on hold the operator
       // must enter a reason; it is stored here (+ who put it on hold and when)
       // so the production grid can surface "why is this paused" at-a-glance.
@@ -2518,13 +2529,20 @@ app.post("/", async (c) => {
           item,
           cfgSpecialsForPricing,
         );
-        // 2026-07-14 BUG FIX (under-billing): the client DOES send
-        // totalHeightPriceSen (the whole line item is posted), but this recompute
-        // dropped it — so any total-height surcharge (e.g. 26" beds) + anything the
-        // frontend folds into it was silently lost from the stored unit price →
-        // the invoice under-billed vs the quote the customer saw. Trust the client
-        // value exactly like divan/leg/special above (all client-supplied surcharges).
-        const totalHeightPriceSen = Number(item.totalHeightPriceSen) || 0;
+        // 2026-07-23: total-height (gap+divan+leg) now derives server-side like
+        // divan/leg — the typed form sends it, the scan/import paths never did,
+        // and it now has its own stored column (total_height_price_sen). Was
+        // `Number(item.totalHeightPriceSen) || 0`, which is why it landed in
+        // 0/125 eligible lines (RM 10,240 uncharged). Trusts a supplied number;
+        // derives from variants-config.totalHeights only when the field is omitted.
+        const totalHeightPriceSen = resolveTotalHeightPriceSen(
+          item.totalHeightPriceSen as number | string | null | undefined,
+          item.gapInches as number | string | null | undefined,
+          item.divanHeightInches as number | string | null | undefined,
+          item.legHeightInches as number | string | null | undefined,
+          cfgHeightsForPricing.totalHeights,
+          isServiceOrder,
+        );
         const unitPriceSen = calculateUnitPrice({
           basePriceSen,
           divanPriceSen,
@@ -2610,6 +2628,7 @@ app.post("/", async (c) => {
           legPriceSen,
           specialOrder: (item.specialOrder as string) || "",
           specialOrderPriceSen,
+          totalHeightPriceSen,
           customSpecials: cleanedCustomSpecials,
           basePriceSen,
           unitPriceSen,
@@ -2759,8 +2778,8 @@ app.post("/", async (c) => {
              productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
              fabricCode, quantity, gapInches, divanHeightInches,
              divanPriceSen, legHeightInches, legPriceSen, specialOrder,
-             specialOrderPriceSen, customSpecials, basePriceSen, unitPriceSen, discountSen, lineTotalSen, notes, repairScope)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             specialOrderPriceSen, totalHeightPriceSen, customSpecials, basePriceSen, unitPriceSen, discountSen, lineTotalSen, notes, repairScope)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           item.id,
           soId,
@@ -2781,6 +2800,7 @@ app.post("/", async (c) => {
           item.legPriceSen,
           item.specialOrder,
           item.specialOrderPriceSen,
+          item.totalHeightPriceSen,
           serializeCustomSpecials(item.customSpecials),
           item.basePriceSen,
           item.unitPriceSen,
@@ -4064,10 +4084,17 @@ app.put("/:id", async (c) => {
           item,
           cfgSpecialsForPricing,
         );
-        // 2026-07-14 BUG FIX (under-billing) — same as the POST path: include the
-        // client-supplied totalHeightPriceSen (was dropped) so an SO EDIT re-prices
-        // the line WITH its total-height surcharge instead of silently zeroing it.
-        const totalHeightPriceSen = Number(item.totalHeightPriceSen) || 0;
+        // 2026-07-23 — same as the POST path: derive total-height server-side so
+        // an SO EDIT re-prices the line WITH its total-height surcharge (stored
+        // in its own column) instead of zeroing it. Trusts a supplied number.
+        const totalHeightPriceSen = resolveTotalHeightPriceSen(
+          item.totalHeightPriceSen as number | string | null | undefined,
+          item.gapInches as number | string | null | undefined,
+          item.divanHeightInches as number | string | null | undefined,
+          item.legHeightInches as number | string | null | undefined,
+          cfgHeightsForPricing.totalHeights,
+          isServiceOrder,
+        );
         const unitPriceSen = calculateUnitPrice({
           basePriceSen,
           divanPriceSen,
@@ -4157,6 +4184,7 @@ app.put("/:id", async (c) => {
           legPriceSen,
           specialOrder: (item.specialOrder as string) || "",
           specialOrderPriceSen,
+          totalHeightPriceSen,
           customSpecials: cleanedCustomSpecials,
           basePriceSen,
           unitPriceSen,
@@ -4204,8 +4232,8 @@ app.put("/:id", async (c) => {
                productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
                fabricCode, quantity, gapInches, divanHeightInches,
                divanPriceSen, legHeightInches, legPriceSen, specialOrder,
-               specialOrderPriceSen, customSpecials, basePriceSen, unitPriceSen, discountSen, lineTotalSen, notes, repairScope)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               specialOrderPriceSen, totalHeightPriceSen, customSpecials, basePriceSen, unitPriceSen, discountSen, lineTotalSen, notes, repairScope)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             item.id,
             id,
@@ -4226,6 +4254,7 @@ app.put("/:id", async (c) => {
             item.legPriceSen,
             item.specialOrder,
             item.specialOrderPriceSen,
+            item.totalHeightPriceSen,
             serializeCustomSpecials(item.customSpecials),
             item.basePriceSen,
             item.unitPriceSen,
@@ -4365,6 +4394,7 @@ app.put("/:id", async (c) => {
             legPriceSen: Number(item.legPriceSen) || 0,
             specialOrder: (item.specialOrder as string) || "",
             specialOrderPriceSen: Number(item.specialOrderPriceSen) || 0,
+            totalHeightPriceSen: Number(item.totalHeightPriceSen) || 0,
             customSpecials: serializeCustomSpecials(
               sanitizeCustomSpecials(item.customSpecials),
             ),
@@ -4442,6 +4472,7 @@ app.put("/:id", async (c) => {
             legPriceSen: Number(item.legPriceSen) || 0,
             specialOrder: (item.specialOrder as string) || "",
             specialOrderPriceSen: Number(item.specialOrderPriceSen) || 0,
+            totalHeightPriceSen: Number(item.totalHeightPriceSen) || 0,
             customSpecials: serializeCustomSpecials(
               sanitizeCustomSpecials(item.customSpecials),
             ),
@@ -5918,6 +5949,7 @@ app.post("/copy-for-service-order", async (c) => {
         legPriceSen: 0,
         specialOrder: it.specialOrder,
         specialOrderPriceSen: 0,
+        totalHeightPriceSen: 0,
         // Carry the descriptions through but zero out the surcharge sen —
         // the line items themselves come over (Fabricolor / Saffa /
         // Bigfoot etc. are encoded in `specialOrder` text + customSpecials

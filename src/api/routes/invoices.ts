@@ -1122,7 +1122,13 @@ function ensureDiscountColumn(db: D1Database): Promise<void> {
     _invDiscountColMig = db
       .prepare("ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS discount_sen INTEGER NOT NULL DEFAULT 0")
       .run()
-      .then(() => undefined)
+      .then(() =>
+        db
+          // 0209 — total-height component column (see sales-orders self-apply).
+          .prepare("ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS total_height_price_sen INTEGER NOT NULL DEFAULT 0")
+          .run()
+          .then(() => undefined),
+      )
       .catch(() => undefined);
   }
   return _invDiscountColMig;
@@ -1654,7 +1660,7 @@ app.put("/:id", async (c) => {
       }
       const editById = new Map<
         string,
-        { base: number; divan: number; leg: number; special: number; discount: number }
+        { base: number; divan: number; leg: number; special: number; totalHeight: number; discount: number }
       >();
       for (const e of body.priceEdits as Array<Record<string, unknown>>) {
         const lid = String(e.id || "");
@@ -1664,6 +1670,8 @@ app.put("/:id", async (c) => {
           divan: Math.max(0, Math.round(Number(e.divanSen) || 0)),
           leg: Math.max(0, Math.round(Number(e.legSen) || 0)),
           special: Math.max(0, Math.round(Number(e.specialSen) || 0)),
+          // Total-height surcharge (0209) — the 4th component, editable like the rest.
+          totalHeight: Math.max(0, Math.round(Number(e.totalHeightSen) || 0)),
           // Per-line discount (migration 0179). Clamped ≥ 0.
           discount: Math.max(0, Math.round(Number(e.discountSen) || 0)),
         });
@@ -1680,7 +1688,7 @@ app.put("/:id", async (c) => {
         const ed = editById.get(r.id);
         if (ed) {
           touched++;
-          const unit = ed.base + ed.divan + ed.leg + ed.special;
+          const unit = ed.base + ed.divan + ed.leg + ed.special + ed.totalHeight;
           // Line total = max(0, unit × qty − discount).
           const lineTotal = Math.max(0, unit * q - ed.discount);
           newSubtotal += lineTotal;
@@ -1688,7 +1696,7 @@ app.put("/:id", async (c) => {
             c.var.DB.prepare(
               `UPDATE invoice_items SET
                  basePriceSen = ?, divanPriceSen = ?, legPriceSen = ?,
-                 specialOrderPriceSen = ?, unitPriceSen = ?, discountSen = ?,
+                 specialOrderPriceSen = ?, totalHeightPriceSen = ?, unitPriceSen = ?, discountSen = ?,
                  totalSen = ?, priceEdited = 1
                WHERE id = ?`,
             ).bind(
@@ -1696,6 +1704,7 @@ app.put("/:id", async (c) => {
               ed.divan,
               ed.leg,
               ed.special,
+              ed.totalHeight,
               unit,
               ed.discount,
               lineTotal,

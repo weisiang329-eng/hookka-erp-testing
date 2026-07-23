@@ -154,7 +154,7 @@ export function generatePurchaseOrderPdf(
   // --- Reference block (DO/SI lblVal two-column style) ---
   // Label in muted 8pt normal, value in INK bold; left column ~55% of the
   // content width, right column starts at pageW/2 + 12. Identical to
-  // generate-do-pdf / generate-invoice-pdf / generate-order-pdf.
+  // generate-do-pdf / generate-invoice-pdf.
   const labelW = 24;
   const lblVal = (
     x: number,
@@ -350,8 +350,7 @@ export function generatePurchaseOrderPdf(
   }
   y += 6;
 
-  // --- Signature strip (mirrors SO 3-sig layout: Prepared By / Checked By /
-  //     Authorized Signature). Matches generate-order-pdf.ts exactly. ---
+  // --- Signature strip: Prepared By / Checked By / Authorized Signature. ---
   if (y + 26 > pageH - 18) {
     doc.addPage();
     y = 36;

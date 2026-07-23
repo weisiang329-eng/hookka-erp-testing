@@ -43,6 +43,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { invalidateProductionListCaches } from "../lib/po-list-cache";
 import { autofillWorkingHoursFromPunch } from "../lib/punch-autofill";
 import {
   applyWipInventoryChange,
@@ -755,6 +756,21 @@ app.post("/job-card-completion", async (c) => {
           err instanceof Error ? err.message : String(err)
         }`,
       });
+    }
+  }
+
+  // A completion import moves job_cards AND flips production_orders to
+  // COMPLETED in bulk — the dept sheets would keep listing finished work.
+  // Skipped on a dry run, which writes nothing. See
+  // tests/production-write-invalidation-class.test.mjs.
+  if (!dryRun) {
+    try {
+      await invalidateProductionListCaches(c, getOrgId(c));
+    } catch (err) {
+      console.warn(
+        "[import-completion] cache invalidation failed:",
+        err instanceof Error ? err.message : String(err),
+      );
     }
   }
 
@@ -7162,6 +7178,14 @@ app.post("/recompute-so-sofa-prices", async (c) => {
   //    re-distributed so the GROUP SUM == comboTotal (rule price for that
   //    seatHeight). Without this pass, recompute restores full-retail
   //    per-piece prices and silently strips the combo discount.
+  //
+  // ⚠️ DRIFT WARNING — canonical engine is applySofaCombos
+  //    (src/api/lib/sofa-combo.ts), pinned by
+  //    tests/sofa-combo-drift-guard.test.mjs. This inline copy re-implements the
+  //    same maths and now ALSO loops so multiple identical sets in one order
+  //    each get the combo (2026-07-23, matching applySofaCombos). It is still a
+  //    SEPARATE copy — keep it in sync with any change to applySofaCombos (or
+  //    refactor this manual repricer to call it directly).
   type ComboRule = {
     baseModel: string;
     componentSizes: unknown; // string[] | string[][]
@@ -7256,23 +7280,6 @@ app.post("/recompute-so-sofa-prices", async (c) => {
       // (1A(LHF), 2NA, etc.) token used by combo rule matching. Pair
       // each variant with its plan so findComboSubset can return the
       // matched plans directly.
-      const groupItems = group.map((g) => {
-        const code = g.productCode || "";
-        const dash = code.indexOf("-");
-        return { variant: dash >= 0 ? code.slice(dash + 1) : "", plan: g };
-      }).filter((x) => x.variant);
-      // For each candidate rule, attempt to find a satisfying SUBSET of
-      // the group. Rules whose pieces can't be filled get dropped.
-      // Priority customer+tier > customer+ANY > master+tier > master+ANY
-      // (mirrors create.tsx).
-      const candidates = comboRules
-        .filter((r) =>
-          r.baseModel === baseModel
-            && (r.effectiveFrom <= (so.companySODate || so.createdAt || today)),
-        )
-        .map((r) => ({ r, subset: findComboSubset(r.componentSizes, groupItems) }))
-        .filter((x): x is { r: ComboRule; subset: ChangePlan[] } => x.subset !== null);
-      if (candidates.length === 0) continue;
       const priorityOf = (r: ComboRule): number => {
         const isCustomer = r.customerId === so.customerId && so.customerId;
         const tierMatch = r.fabricTier === groupTier;
@@ -7282,60 +7289,83 @@ app.post("/recompute-so-sofa-prices", async (c) => {
         if (!r.customerId && r.fabricTier === "ANY") return 1;
         return 0;
       };
-      const best = candidates
-        .map(({ r, subset }) => ({ r, subset, p: priorityOf(r) }))
-        .filter((x) => x.p > 0)
-        .sort((a, b) =>
-          b.p - a.p || (a.r.effectiveFrom < b.r.effectiveFrom ? 1 : -1),
-        )[0];
-      if (!best) continue;
-      const comboTotalRM = (best.r.pricesByHeight[seatHeight] ?? 0) / 100;
-      if (comboTotalRM <= 0) continue;
-      // Subset sum only — extras (non-subset plans in the group) keep
-      // their full master price, no discount bleed.
-      const subsetSumRM = best.subset.reduce((s, p) => s + (p.newLineRM ?? 0), 0);
-      if (subsetSumRM <= comboTotalRM) continue;
-      const ratio = comboTotalRM / subsetSumRM;
-      // Distribute proportionally across the SUBSET only.
-      let runningGroupSumSen = 0;
-      const adjusted: ChangePlan[] = [];
-      for (const p of best.subset) {
-        const it = items.find(i => i.id === p.itemId)!;
-        const oldLineSen = (p.newLineRM ?? 0) * 100;
-        const adjustedLineSen = Math.floor(oldLineSen * ratio);
-        const surchargesPerUnit =
-          it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
-        const adjustedUnitSen = Math.max(
-          0, Math.round(adjustedLineSen / Math.max(1, it.quantity)),
-        );
-        const newBaseSen = Math.max(0, adjustedUnitSen - surchargesPerUnit);
-        const newUnitSen = newBaseSen + surchargesPerUnit;
-        const newLineSen = newUnitSen * it.quantity;
-        p.newBaseRM = newBaseSen / 100;
-        p.newUnitRM = newUnitSen / 100;
-        p.newLineRM = newLineSen / 100;
-        runningGroupSumSen += newLineSen;
-        adjusted.push(p);
+      // A group can hold MULTIPLE complete sets (a customer ordering two
+      // identical combos). Re-match on the REMAINING pieces until none is left
+      // so EVERY set gets the discount — matches the canonical applySofaCombos
+      // (which loops). Before this the recompute only combo'd the first set and
+      // left the 2nd+ at full retail (the over-charge PR #95 fixed live).
+      let remaining = group.map((g) => {
+        const code = g.productCode || "";
+        const dash = code.indexOf("-");
+        return { variant: dash >= 0 ? code.slice(dash + 1) : "", plan: g };
+      }).filter((x) => x.variant);
+      for (let guard = remaining.length; guard > 0 && remaining.length >= 2; guard--) {
+        const candidates = comboRules
+          .filter((r) =>
+            r.baseModel === baseModel
+              && (r.effectiveFrom <= (so.companySODate || so.createdAt || today)),
+          )
+          .map((r) => ({ r, subset: findComboSubset(r.componentSizes, remaining) }))
+          .filter((x): x is { r: ComboRule; subset: ChangePlan[] } => x.subset !== null);
+        if (candidates.length === 0) break;
+        const best = candidates
+          .map(({ r, subset }) => ({ r, subset, p: priorityOf(r) }))
+          .filter((x) => x.p > 0)
+          .sort((a, b) =>
+            b.p - a.p || (a.r.effectiveFrom < b.r.effectiveFrom ? 1 : -1),
+          )[0];
+        if (!best) break;
+        // Consume this set from `remaining` regardless of discount so a
+        // following identical set can still be matched.
+        const consumedIds = new Set(best.subset.map((p) => p.itemId));
+        remaining = remaining.filter((x) => !consumedIds.has(x.plan.itemId));
+        const comboTotalRM = (best.r.pricesByHeight[seatHeight] ?? 0) / 100;
+        if (comboTotalRM <= 0) continue;
+        // Subset sum only — extras (non-subset plans) keep full master price.
+        const subsetSumRM = best.subset.reduce((s, p) => s + (p.newLineRM ?? 0), 0);
+        if (subsetSumRM <= comboTotalRM) continue; // already at/below combo total
+        const ratio = comboTotalRM / subsetSumRM;
+        // Distribute proportionally across the SUBSET only.
+        let runningGroupSumSen = 0;
+        const adjusted: ChangePlan[] = [];
+        for (const p of best.subset) {
+          const it = items.find(i => i.id === p.itemId)!;
+          const oldLineSen = (p.newLineRM ?? 0) * 100;
+          const adjustedLineSen = Math.floor(oldLineSen * ratio);
+          const surchargesPerUnit =
+            it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
+          const adjustedUnitSen = Math.max(
+            0, Math.round(adjustedLineSen / Math.max(1, it.quantity)),
+          );
+          const newBaseSen = Math.max(0, adjustedUnitSen - surchargesPerUnit);
+          const newUnitSen = newBaseSen + surchargesPerUnit;
+          const newLineSen = newUnitSen * it.quantity;
+          p.newBaseRM = newBaseSen / 100;
+          p.newUnitRM = newUnitSen / 100;
+          p.newLineRM = newLineSen / 100;
+          runningGroupSumSen += newLineSen;
+          adjusted.push(p);
+        }
+        // Rounding residual → push into highest-base line in the subset.
+        const residualSen = (comboTotalRM * 100) - runningGroupSumSen;
+        if (residualSen !== 0 && adjusted.length > 0) {
+          const target = adjusted.slice().sort(
+            (a, b) => (b.newBaseRM ?? 0) - (a.newBaseRM ?? 0),
+          )[0];
+          const it = items.find(i => i.id === target.itemId)!;
+          const surchargesPerUnit =
+            it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
+          const cur = (target.newBaseRM ?? 0) * 100;
+          const adj = cur + Math.round(residualSen / Math.max(1, it.quantity));
+          const newBase = Math.max(0, adj);
+          const newUnit = newBase + surchargesPerUnit;
+          const newLine = newUnit * it.quantity;
+          target.newBaseRM = newBase / 100;
+          target.newUnitRM = newUnit / 100;
+          target.newLineRM = newLine / 100;
+        }
+        comboMatches++;
       }
-      // Rounding residual → push into highest-base line in group.
-      const residualSen = (comboTotalRM * 100) - runningGroupSumSen;
-      if (residualSen !== 0 && adjusted.length > 0) {
-        const target = adjusted.slice().sort(
-          (a, b) => (b.newBaseRM ?? 0) - (a.newBaseRM ?? 0),
-        )[0];
-        const it = items.find(i => i.id === target.itemId)!;
-        const surchargesPerUnit =
-          it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
-        const cur = (target.newBaseRM ?? 0) * 100;
-        const adj = cur + Math.round(residualSen / Math.max(1, it.quantity));
-        const newBase = Math.max(0, adj);
-        const newUnit = newBase + surchargesPerUnit;
-        const newLine = newUnit * it.quantity;
-        target.newBaseRM = newBase / 100;
-        target.newUnitRM = newUnit / 100;
-        target.newLineRM = newLine / 100;
-      }
-      comboMatches++;
     }
   }
 
@@ -7678,16 +7708,6 @@ app.post("/recompute-co-sofa-prices", async (c) => {
       if (heights.size > 1) continue;
       const seatHeight = [...heights][0]!;
       const groupTier = [...tiers][0]!;
-      const groupItems = group.map((g) => {
-        const code = g.productCode || "";
-        const dash = code.indexOf("-");
-        return { variant: dash >= 0 ? code.slice(dash + 1) : "", plan: g };
-      }).filter((x) => x.variant);
-      const candidates = comboRules
-        .filter((r) => r.baseModel === baseModel && r.effectiveFrom <= (co.companyCODate || co.createdAt || today))
-        .map((r) => ({ r, subset: findComboSubsetCo(r.componentSizes, groupItems) }))
-        .filter((x): x is { r: ComboRule; subset: ChangePlan2[] } => x.subset !== null);
-      if (candidates.length === 0) continue;
       const priorityOf = (r: ComboRule): number => {
         const isCustomer = r.customerId === co.customerId && co.customerId;
         const tierMatch = r.fabricTier === groupTier;
@@ -7697,43 +7717,60 @@ app.post("/recompute-co-sofa-prices", async (c) => {
         if (!r.customerId && r.fabricTier === "ANY") return 1;
         return 0;
       };
-      const best = candidates
-        .map(({ r, subset }) => ({ r, subset, p: priorityOf(r) }))
-        .filter((x) => x.p > 0)
-        .sort((a, b) => b.p - a.p || (a.r.effectiveFrom < b.r.effectiveFrom ? 1 : -1))[0];
-      if (!best) continue;
-      const comboTotalRM = (best.r.pricesByHeight[seatHeight] ?? 0) / 100;
-      if (comboTotalRM <= 0) continue;
-      const subsetSumRM = best.subset.reduce((s, p) => s + (p.newLineRM ?? 0), 0);
-      if (subsetSumRM <= comboTotalRM) continue;
-      const ratio = comboTotalRM / subsetSumRM;
-      let runningGroupSumSen = 0;
-      const adjusted: ChangePlan2[] = [];
-      for (const p of best.subset) {
-        const it = items.find(i => i.id === p.itemId)!;
-        const oldLineSen = (p.newLineRM ?? 0) * 100;
-        const adjustedLineSen = Math.floor(oldLineSen * ratio);
-        const surchargesPerUnit = it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
-        const adjustedUnitSen = Math.max(0, Math.round(adjustedLineSen / Math.max(1, it.quantity)));
-        const newBaseSen = Math.max(0, adjustedUnitSen - surchargesPerUnit);
-        const newUnitSen = newBaseSen + surchargesPerUnit;
-        const newLineSen = newUnitSen * it.quantity;
-        p.newBaseRM = newBaseSen / 100; p.newUnitRM = newUnitSen / 100; p.newLineRM = newLineSen / 100;
-        runningGroupSumSen += newLineSen; adjusted.push(p);
+      // Multi-set: re-match on the REMAINING pieces so every complete set in the
+      // group gets the combo (matches applySofaCombos; was only combo'ing the
+      // first set — over-charging the 2nd+, the bug PR #95 fixed live).
+      let remaining = group.map((g) => {
+        const code = g.productCode || "";
+        const dash = code.indexOf("-");
+        return { variant: dash >= 0 ? code.slice(dash + 1) : "", plan: g };
+      }).filter((x) => x.variant);
+      for (let guard = remaining.length; guard > 0 && remaining.length >= 2; guard--) {
+        const candidates = comboRules
+          .filter((r) => r.baseModel === baseModel && r.effectiveFrom <= (co.companyCODate || co.createdAt || today))
+          .map((r) => ({ r, subset: findComboSubsetCo(r.componentSizes, remaining) }))
+          .filter((x): x is { r: ComboRule; subset: ChangePlan2[] } => x.subset !== null);
+        if (candidates.length === 0) break;
+        const best = candidates
+          .map(({ r, subset }) => ({ r, subset, p: priorityOf(r) }))
+          .filter((x) => x.p > 0)
+          .sort((a, b) => b.p - a.p || (a.r.effectiveFrom < b.r.effectiveFrom ? 1 : -1))[0];
+        if (!best) break;
+        const consumedIds = new Set(best.subset.map((p) => p.itemId));
+        remaining = remaining.filter((x) => !consumedIds.has(x.plan.itemId));
+        const comboTotalRM = (best.r.pricesByHeight[seatHeight] ?? 0) / 100;
+        if (comboTotalRM <= 0) continue;
+        const subsetSumRM = best.subset.reduce((s, p) => s + (p.newLineRM ?? 0), 0);
+        if (subsetSumRM <= comboTotalRM) continue;
+        const ratio = comboTotalRM / subsetSumRM;
+        let runningGroupSumSen = 0;
+        const adjusted: ChangePlan2[] = [];
+        for (const p of best.subset) {
+          const it = items.find(i => i.id === p.itemId)!;
+          const oldLineSen = (p.newLineRM ?? 0) * 100;
+          const adjustedLineSen = Math.floor(oldLineSen * ratio);
+          const surchargesPerUnit = it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
+          const adjustedUnitSen = Math.max(0, Math.round(adjustedLineSen / Math.max(1, it.quantity)));
+          const newBaseSen = Math.max(0, adjustedUnitSen - surchargesPerUnit);
+          const newUnitSen = newBaseSen + surchargesPerUnit;
+          const newLineSen = newUnitSen * it.quantity;
+          p.newBaseRM = newBaseSen / 100; p.newUnitRM = newUnitSen / 100; p.newLineRM = newLineSen / 100;
+          runningGroupSumSen += newLineSen; adjusted.push(p);
+        }
+        const residualSen = (comboTotalRM * 100) - runningGroupSumSen;
+        if (residualSen !== 0 && adjusted.length > 0) {
+          const target = adjusted.slice().sort((a, b) => (b.newBaseRM ?? 0) - (a.newBaseRM ?? 0))[0];
+          const it = items.find(i => i.id === target.itemId)!;
+          const surchargesPerUnit = it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
+          const cur = (target.newBaseRM ?? 0) * 100;
+          const adj = cur + Math.round(residualSen / Math.max(1, it.quantity));
+          const newBase = Math.max(0, adj);
+          const newUnit = newBase + surchargesPerUnit;
+          const newLine = newUnit * it.quantity;
+          target.newBaseRM = newBase / 100; target.newUnitRM = newUnit / 100; target.newLineRM = newLine / 100;
+        }
+        comboMatches++;
       }
-      const residualSen = (comboTotalRM * 100) - runningGroupSumSen;
-      if (residualSen !== 0 && adjusted.length > 0) {
-        const target = adjusted.slice().sort((a, b) => (b.newBaseRM ?? 0) - (a.newBaseRM ?? 0))[0];
-        const it = items.find(i => i.id === target.itemId)!;
-        const surchargesPerUnit = it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
-        const cur = (target.newBaseRM ?? 0) * 100;
-        const adj = cur + Math.round(residualSen / Math.max(1, it.quantity));
-        const newBase = Math.max(0, adj);
-        const newUnit = newBase + surchargesPerUnit;
-        const newLine = newUnit * it.quantity;
-        target.newBaseRM = newBase / 100; target.newUnitRM = newUnit / 100; target.newLineRM = newLine / 100;
-      }
-      comboMatches++;
     }
   }
 

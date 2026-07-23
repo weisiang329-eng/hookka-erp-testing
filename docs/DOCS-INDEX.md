@@ -16,6 +16,7 @@ This file organizes key documentation so implementation and operations are easy 
 - `docs/CODEBASE-MAP.md` — **find code fast (no searching)**: every module → pages / API routes / tables / tests + a line-range section index for the 16 monster files. Look here BEFORE grepping.
 - `docs/PLAYBOOKS.md` — **fixed steps for recurring tasks** (add a field, fix a camelCase read bug, ship+verify, money field, fix-then-sweep, new grid/PDF, touching a monster file). Follow the playbook instead of re-deriving.
 - `docs/DEV-OPERATING-FRAMEWORK.md` — **the operating manual (read first)**: when to review-all vs not (快·准·省 + risk tiers), the high-risk areas that always need deep review, and the durable task-tracking cadence.
+- `docs/BUG-CLASSES.md` — **the recurring bug CLASSES and every known instance**. `BUG-HISTORY` is by date, so "the same class" lived only in memory — and three classes were each "fixed" three times, repairing one instance at a time. Read this before fixing any bug; fix every open row in the class, not just yours.
 - `docs/context-packs/HOOKKA-GOTCHAS.md` — hard-won Hookka-specific traps (migration self-apply, snake_case rename-map, build:strict). Read before any schema/money/SQL/ship work — these are the real time-savers.
 - `docs/WORK-TRACKER.md` — living list of assigned / in-progress / shipped work so nothing is forgotten across a long session.
 - `docs/LLM-CONTEXT-STRATEGY.md` — token-saving workflow for Claude/Codex sessions; start here before asking an assistant to inspect the repo.

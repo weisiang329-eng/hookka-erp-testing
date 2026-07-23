@@ -13,6 +13,10 @@ repo: they TIME OUT on this repo's size (~1,600 tracked files). Use the map's fi
    new grid / PDF, touching a monster file).
 3. **Avoid the traps** → [`docs/context-packs/HOOKKA-GOTCHAS.md`](docs/context-packs/HOOKKA-GOTCHAS.md) — read before any
    schema / money / SQL / ship work.
+3b. **Before fixing ANY bug** → [`docs/BUG-CLASSES.md`](docs/BUG-CLASSES.md) — the recurring
+   classes and every known instance. Three classes have each been "fixed" three times because
+   each fix repaired only the instance in front of the author. Find your bug's class, fix every
+   open row, extend the class test.
 4. **How deep to review** → [`docs/DEV-OPERATING-FRAMEWORK.md`](docs/DEV-OPERATING-FRAMEWORK.md)
    — fast-lane vs focused vs deep; the high-risk areas that always need deep review.
 

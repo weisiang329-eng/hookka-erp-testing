@@ -11,7 +11,7 @@ try {
   const adminLogin = await fetch(`${API}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email: "weisiang329@gmail.com", password: "CbpxqJQpjy3VA5yd3Q" }),
+    body: JSON.stringify({ email: process.env.HOOKKA_EMAIL ?? "", password: process.env.HOOKKA_PASSWORD ?? "" }),
   });
   const aJ = await adminLogin.json();
   const cookieHeader = (adminLogin.headers.getSetCookie?.() ?? []).map((c) => c.split(";")[0]).join("; ");

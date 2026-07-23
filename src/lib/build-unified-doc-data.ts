@@ -29,7 +29,43 @@ export type DocLineExtra = BuildSpecExtra & {
   customerSO?: string | null;
   customerRef?: string | null;
   repairNote?: string | null;
+  // Invoice price build-up (from computeInvoicePrintExtras) — used to itemise
+  // the Price column (Base + Divan + Leg + T.Height + Special). Restores the
+  // breakdown the pre-unified jsPDF invoice printed; dropped in 4aa6b1fa.
+  baseSen?: number | null;
+  divanSen?: number | null;
+  legSen?: number | null;
+  specialSen?: number | null;
+  totalHeightSen?: number | null;
 };
+
+/**
+ * The invoice Price-column build-up: Base + each non-zero surcharge + "=" unit.
+ * Returns undefined (→ render the single price) when there is no surcharge, or
+ * when the stored components do NOT reconcile to the charged price — so a
+ * breakdown that doesn't add up (e.g. combo-redistributed sofa base) is never
+ * printed. Mirrors the old generate-invoice-pdf.ts priceLines exactly.
+ */
+export function invoicePriceBreakdown(
+  ex: DocLineExtra | undefined,
+  priceSen: number,
+): Array<{ label: string; sen: number }> | undefined {
+  if (!ex) return undefined;
+  const base = Number(ex.baseSen) || 0;
+  const divan = Number(ex.divanSen) || 0;
+  const leg = Number(ex.legSen) || 0;
+  const th = Number(ex.totalHeightSen) || 0;
+  const special = Number(ex.specialSen) || 0;
+  if (!(divan || leg || th || special)) return undefined;
+  if (base + divan + leg + th + special !== priceSen) return undefined;
+  const rows: Array<{ label: string; sen: number }> = [{ label: "Base", sen: base }];
+  if (divan) rows.push({ label: "+ Divan", sen: divan });
+  if (leg) rows.push({ label: "+ Leg", sen: leg });
+  if (th) rows.push({ label: "+ T.Height", sen: th });
+  if (special) rows.push({ label: "+ Special", sen: special });
+  rows.push({ label: "=", sen: priceSen });
+  return rows;
+}
 
 export interface UnifiedDoInput {
   doNo: string;
@@ -214,6 +250,7 @@ export function buildUnifiedInvoiceData(input: UnifiedInvoiceInput, logoPngBase6
       set: it.quantity,
       priceSen: it.priceSen,
       lineTotalSen: it.lineTotalSen,
+      priceBreakdown: invoicePriceBreakdown(ex, it.priceSen),
     });
   }
 
@@ -242,4 +279,173 @@ export function buildUnifiedInvoiceData(input: UnifiedInvoiceInput, logoPngBase6
     amountInWords: input.amountInWords || amountInWords(input.totalSen),
     logoPngBase64,
   };
+}
+
+export interface UnifiedSalesOrderInput {
+  soNo: string;
+  docDate: string;
+  customerName: string;
+  billAddress?: string;
+  customerPOId?: string;
+  customerSOId?: string;
+  reference?: string;
+  terms?: string;
+  items: Array<{
+    id: string;
+    productCode: string;
+    productName: string;
+    fabricCode?: string;
+    sizeLabel?: string;
+    quantity: number;
+    priceSen: number;
+    lineTotalSen: number;
+    extra?: DocLineExtra;
+  }>;
+  subtotalSen: number;
+  totalSen: number;
+}
+
+// Shared builder for a PRICED order (Sales Order / Consignment Order) rendered
+// with the SAME unified template + itemised Price column as the invoice. The
+// per-line Order column follows the DELIVERY ORDER standard — "Our SO/CO"
+// (the ordering number) first, then customer PO / SO-or-CO / REF — so SO, CO,
+// DO and Invoice all read consistently. The order's own item columns carry
+// every price component, so no print-extras lookup is needed.
+type PricedOrderMeta = {
+  docTitle: string; // "SALES ORDER" | "CONSIGNMENT ORDER"
+  footerLabel: string; // "sales order" | "consignment order"
+  ourRefLabel: string; // "Our SO" | "Our CO"  (per-line, first — the ordering number)
+  headerNoLabel: string; // "Sales Order" | "Consignment Order"  (header right block)
+  custRefLabel: string; // "SO" | "CO"  (customer's own reference line)
+};
+type PricedOrderInput = {
+  docNo: string;
+  docDate: string;
+  customerName: string;
+  billAddress?: string;
+  customerPOId?: string;
+  customerRef2?: string; // customer SO / customer CO
+  reference?: string;
+  terms?: string;
+  items: UnifiedSalesOrderInput["items"];
+  subtotalSen: number;
+  totalSen: number;
+};
+
+function buildUnifiedPricedOrderData(
+  meta: PricedOrderMeta,
+  input: PricedOrderInput,
+  logoPngBase64?: string,
+): UnifiedDocData {
+  const ordered = input.items
+    .map((it, i) => ({ it, i }))
+    .sort((a, b) => {
+      const cr = catRank(a.it.extra?.itemCategory) - catRank(b.it.extra?.itemCategory);
+      return cr !== 0 ? cr : a.i - b.i;
+    })
+    .map((x) => x.it);
+
+  const groups: UnifiedDocGroup[] = [];
+  let cur: UnifiedDocGroup | null = null;
+  let totalSets = 0;
+  for (const it of ordered) {
+    const ex = it.extra;
+    const catL = catLabel(ex?.itemCategory);
+    if (!cur || cur.category !== catL) {
+      cur = { category: catL, items: [] };
+      groups.push(cur);
+    }
+    totalSets += it.quantity;
+    const spec = buildSpec({ fabricCode: it.fabricCode || "", sizeLabel: it.sizeLabel || "" }, ex);
+    cur.items.push({
+      // DO ref standard: ordering number first, then customer PO / SO-or-CO /
+      // REF. One order = one set of refs, repeated per line.
+      orderRefs: [
+        `${meta.ourRefLabel}: ${input.docNo || "-"}`,
+        `PO: ${input.customerPOId || "-"}`,
+        `${meta.custRefLabel}: ${input.customerRef2 || "-"}`,
+        `REF: ${input.reference || "-"}`,
+      ],
+      code: it.productCode || "",
+      name: it.productName || "",
+      specLines: spec ? [spec] : [],
+      set: it.quantity,
+      priceSen: it.priceSen,
+      lineTotalSen: it.lineTotalSen,
+      priceBreakdown: invoicePriceBreakdown(ex, it.priceSen),
+    });
+  }
+
+  return {
+    kind: "INVOICE",
+    docTitle: meta.docTitle,
+    footerLabel: meta.footerLabel,
+    docNo: input.docNo,
+    docDate: fmtDocDate(input.docDate),
+    statusText: input.terms || "NET 30",
+    leftFields: [
+      ["Bill To", input.customerName || "-"],
+      ["Address", input.billAddress || "-"],
+    ],
+    rightFields: [
+      [meta.headerNoLabel, input.docNo],
+      ["Customer PO", input.customerPOId || "-"],
+      [`Customer ${meta.custRefLabel}`, input.customerRef2 || "-"],
+      ["Date", fmtDocDate(input.docDate)],
+      ["Terms", input.terms || "NET 30"],
+    ],
+    groups,
+    totalSets,
+    subtotalSen: input.subtotalSen,
+    taxSen: 0,
+    totalSen: input.totalSen,
+    amountInWords: amountInWords(input.totalSen),
+    logoPngBase64,
+  };
+}
+
+export function buildUnifiedSalesOrderData(
+  input: UnifiedSalesOrderInput,
+  logoPngBase64?: string,
+): UnifiedDocData {
+  return buildUnifiedPricedOrderData(
+    { docTitle: "SALES ORDER", footerLabel: "sales order", ourRefLabel: "Our SO", headerNoLabel: "Sales Order", custRefLabel: "SO" },
+    {
+      docNo: input.soNo, docDate: input.docDate, customerName: input.customerName,
+      billAddress: input.billAddress, customerPOId: input.customerPOId,
+      customerRef2: input.customerSOId, reference: input.reference, terms: input.terms,
+      items: input.items, subtotalSen: input.subtotalSen, totalSen: input.totalSen,
+    },
+    logoPngBase64,
+  );
+}
+
+export interface UnifiedConsignmentOrderInput {
+  coNo: string;
+  docDate: string;
+  customerName: string;
+  billAddress?: string;
+  customerPOId?: string;
+  customerCOId?: string;
+  reference?: string;
+  terms?: string;
+  items: UnifiedSalesOrderInput["items"];
+  subtotalSen: number;
+  totalSen: number;
+}
+
+export function buildUnifiedConsignmentOrderData(
+  input: UnifiedConsignmentOrderInput,
+  logoPngBase64?: string,
+): UnifiedDocData {
+  return buildUnifiedPricedOrderData(
+    { docTitle: "CONSIGNMENT ORDER", footerLabel: "consignment order", ourRefLabel: "Our CO", headerNoLabel: "Consignment Order", custRefLabel: "CO" },
+    {
+      docNo: input.coNo, docDate: input.docDate, customerName: input.customerName,
+      billAddress: input.billAddress, customerPOId: input.customerPOId,
+      customerRef2: input.customerCOId, reference: input.reference, terms: input.terms,
+      items: input.items, subtotalSen: input.subtotalSen, totalSen: input.totalSen,
+    },
+    logoPngBase64,
+  );
 }

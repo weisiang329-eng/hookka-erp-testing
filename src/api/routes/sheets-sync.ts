@@ -27,6 +27,8 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { invalidateProductionListCaches } from "../lib/po-list-cache";
+import { tryGetOrgId, DEFAULT_ORG_ID } from "../lib/tenant";
 import { DEPT_ORDER } from "../lib/lead-times";
 import {
   backfillAllJobCards,
@@ -275,6 +277,19 @@ app.post("/apps-script-webhook", async (c) => {
     console.error(
       "[sheets-sync/webhook] PO progress recompute failed",
       err instanceof Error ? err.message : err,
+    );
+  }
+
+  // The webhook just moved a job card and recomputed its PO's progress /
+  // currentDepartment / status — the operator's dept sheet must show it on the
+  // next open, not after a TTL. See
+  // tests/production-write-invalidation-class.test.mjs.
+  try {
+    await invalidateProductionListCaches(c, tryGetOrgId(c) ?? DEFAULT_ORG_ID);
+  } catch (err) {
+    console.warn(
+      "[sheets-sync/webhook] cache invalidation failed:",
+      err instanceof Error ? err.message : String(err),
     );
   }
 

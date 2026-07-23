@@ -29,6 +29,10 @@ import {
   collectEfficiencyData,
   type WorkerSummary,
 } from "./efficiency-report";
+import {
+  checkPricingIntegrity,
+  type PricingIssueRow,
+} from "./pricing-integrity";
 
 // D1-compat shape (the SupabaseAdapter installed in worker.ts exposes this).
 // `first` is used to read the single kv_config row (mirrors kv-config.ts).
@@ -261,6 +265,9 @@ export interface ComplianceCounts {
   missingWipTimes: number;
   incompleteBoms: number;
   rdStalled: number;
+  /** Money invariants (src/api/lib/pricing-integrity.ts). Three price defects
+   *  ran for months unseen because nothing checked the DATA daily. */
+  pricingIssues: number;
 }
 
 export interface ComplianceGroups {
@@ -276,6 +283,7 @@ export interface ComplianceGroups {
   missingWipTimes: MissingWipTimeRow[];
   incompleteBoms: IncompleteBomRow[];
   rdStalled: RdStalledRow[];
+  pricingIssues: PricingIssueRow[];
 }
 
 export interface ComplianceData {
@@ -1237,6 +1245,7 @@ export async function collectComplianceData(
     missingWipTimes,
     incompleteBoms,
     rdStalled,
+    pricingIssues,
   ] = await Promise.all([
     checkDoPendingDispatch(db, todayYmd, graceDays.doPendingDispatch),
     checkDoNotDelivered(db, todayYmd, graceDays.doNotDelivered),
@@ -1250,6 +1259,7 @@ export async function collectComplianceData(
     checkMissingWipTimes(db),
     checkIncompleteBoms(db),
     checkRdStalled(db, todayYmd),
+    checkPricingIntegrity(db),
   ]);
 
   const counts: ComplianceCounts = {
@@ -1265,6 +1275,7 @@ export async function collectComplianceData(
     missingWipTimes: missingWipTimes.length,
     incompleteBoms: incompleteBoms.length,
     rdStalled: rdStalled.length,
+    pricingIssues: pricingIssues.length,
     total:
       doPendingDispatch.length +
       doNotDelivered.length +
@@ -1277,7 +1288,8 @@ export async function collectComplianceData(
       processSkips.length +
       missingWipTimes.length +
       incompleteBoms.length +
-      rdStalled.length,
+      rdStalled.length +
+      pricingIssues.length,
   };
 
   return {
@@ -1297,6 +1309,7 @@ export async function collectComplianceData(
       missingWipTimes,
       incompleteBoms,
       rdStalled,
+      pricingIssues,
     },
   };
 }

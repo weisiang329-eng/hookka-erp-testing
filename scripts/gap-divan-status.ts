@@ -4,7 +4,7 @@ async function main() {
   const r = await fetch(`${PROD}/api/auth/login`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email: "weisiang329@gmail.com", password: "CbpxqJQpjy3VA5yd3Q" }),
+    body: JSON.stringify({ email: process.env.HOOKKA_EMAIL ?? "", password: process.env.HOOKKA_PASSWORD ?? "" }),
   });
   const { data: { token } } = await r.json() as any;
   const auth = { Authorization: `Bearer ${token}` };

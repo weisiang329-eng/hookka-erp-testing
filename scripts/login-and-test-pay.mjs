@@ -5,7 +5,7 @@ const API = "https://hookka-erp-testing.pages.dev";
 const adminLogin = await fetch(`${API}/api/auth/login`, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ email: "weisiang329@gmail.com", password: "CbpxqJQpjy3VA5yd3Q" }),
+  body: JSON.stringify({ email: process.env.HOOKKA_EMAIL ?? "", password: process.env.HOOKKA_PASSWORD ?? "" }),
 });
 const adminJ = await adminLogin.json();
 const adminCookies = adminLogin.headers.getSetCookie?.() ?? [];

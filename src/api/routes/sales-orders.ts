@@ -42,7 +42,11 @@ import {
   readCompanyCode,
   classifyBatchReassign,
 } from "../../lib/company-dimension";
-import { invalidateHubChangeSnapshots } from "../lib/snapshot";
+import {
+  invalidateHubChangeSnapshots,
+  invalidateOrderCascadeSnapshots,
+} from "../lib/snapshot";
+import { bumpPoListCacheVersion } from "../lib/po-list-cache";
 import { loadDeliveredItemsValueSen } from "../lib/do-value";
 import {
   createProductionOrdersForOrder,
@@ -68,7 +72,9 @@ import {
   unknownSofaSizeLabelError,
 } from "../lib/sofa-size-validation";
 import { resolveSpecialOrderPriceSen } from "../../lib/special-order-surcharge";
-import { loadSpecialsConfig } from "../lib/specials-config";
+import { resolveHeightPriceSen } from "../../lib/height-surcharge";
+import { resolveTotalHeightPriceSen } from "../../lib/total-height-surcharge";
+import { loadSpecialsConfig, loadHeightsConfig } from "../lib/specials-config";
 import {
   validateRepairScopeInput,
   parseRepairScope,
@@ -150,6 +156,7 @@ export type SalesOrderItemRow = {
   legPriceSen: number;
   specialOrder: string | null;
   specialOrderPriceSen: number;
+  totalHeightPriceSen: number;
   // Free-text custom specials per line. Stored as JSON string of
   // Array<{ description: string; surchargeSen: number }>. NULL/empty when
   // the operator hasn't attached any. The aggregate surcharge is folded
@@ -276,6 +283,7 @@ function rowToItem(r: SalesOrderItemRow) {
     legPriceSen: r.legPriceSen,
     specialOrder: r.specialOrder ?? "",
     specialOrderPriceSen: r.specialOrderPriceSen,
+    totalHeightPriceSen: r.totalHeightPriceSen ?? 0,
     // Hand the parsed array to the frontend, not the raw JSON string.
     // The form pages mutate this list directly; serialization back to
     // JSON happens on the POST/PUT path.
@@ -1172,6 +1180,138 @@ app.get("/", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/sales-orders/backfill-hub-by-state?execute=1
+// One-shot data fix (2026-07-19). The SO-create blind default stamped every
+// un-matched multi-hub order with the customer's default hub ("Houzs KL") even
+// though the OCR set the correct customerState — so Penang/SBH/SRW orders (and
+// their stickers/DOs) followed the wrong branch. The state IS correct, so we can
+// re-derive the right hub: for each multi-hub-customer SO whose customerState
+// maps to EXACTLY ONE of that customer's hubs, and whose current hub differs,
+// correct sales_orders.hubId/hubName. DRY-RUN by default; ?execute=1 writes.
+// Shipped orders (goods already left the hub) are NEVER auto-changed — they are
+// reported separately for manual review (mirrors the PATCH /:id/hub lock).
+// After executing, run POST /api/fg-units/backfill-hub to push the corrected hub
+// onto in-stock FG stickers, then reprint.
+// (defined BEFORE /:id so the route matches first)
+// ---------------------------------------------------------------------------
+app.post("/backfill-hub-by-state", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "edit");
+  if (denied) return denied;
+  const execute = c.req.query("execute") === "1";
+  const orgId = getOrgId(c);
+
+  // Candidates: multi-hub-customer SOs whose state maps to exactly one hub that
+  // is NOT the current hub. All scoping is in SQL so the payload stays small.
+  const cands =
+    (
+      await c.var.DB.prepare(
+        `SELECT so.id AS "soId", so.companySOId AS "companySOId",
+                so.customerName AS "customerName", so.customerState AS "customerState",
+                so.hubId AS "curHubId", so.hubName AS "curHubName",
+                h.id AS "newHubId", h.shortName AS "newHubName"
+           FROM sales_orders so
+           JOIN delivery_hubs h
+             ON h.customerId = so.customerId
+            AND LOWER(h.state) = LOWER(so.customerState)
+          WHERE so.orgId = ?
+            AND COALESCE(so.customerState, '') <> ''
+            AND (SELECT COUNT(*) FROM delivery_hubs d1 WHERE d1.customerId = so.customerId) >= 2
+            AND (SELECT COUNT(*) FROM delivery_hubs d2
+                  WHERE d2.customerId = so.customerId
+                    AND LOWER(d2.state) = LOWER(so.customerState)) = 1
+            AND (so.hubId IS NULL OR so.hubId <> h.id)`,
+      )
+        .bind(orgId)
+        .all<{
+          soId: string;
+          companySOId: string | null;
+          customerName: string | null;
+          customerState: string | null;
+          curHubId: string | null;
+          curHubName: string | null;
+          newHubId: string;
+          newHubName: string;
+        }>()
+    ).results ?? [];
+
+  // Shipment guard: never auto-change a hub once goods have left (same SHIPPED
+  // set as PATCH /:id/hub). Split candidates into changeable vs manual-review.
+  const soIds = cands.map((r) => r.soId);
+  const shippedSet = new Set<string>();
+  for (let i = 0; i < soIds.length; i += 100) {
+    const chunk = soIds.slice(i, i + 100);
+    if (chunk.length === 0) break;
+    const ph = chunk.map(() => "?").join(",");
+    const shipped =
+      (
+        await c.var.DB.prepare(
+          `SELECT DISTINCT d.salesOrderId AS "soId"
+             FROM delivery_orders d
+            WHERE d.status IN ('LOADED','IN_TRANSIT','DELIVERED','INVOICED')
+              AND d.salesOrderId IN (${ph})`,
+        )
+          .bind(...chunk)
+          .all<{ soId: string | null }>()
+      ).results ?? [];
+    for (const s of shipped) if (s.soId) shippedSet.add(s.soId);
+  }
+
+  const changeable = cands.filter((r) => !shippedSet.has(r.soId));
+  const shippedManual = cands.filter((r) => shippedSet.has(r.soId));
+
+  // old -> new breakdown for a quick sanity-check before executing.
+  const moves: Record<string, number> = {};
+  for (const r of changeable) {
+    const key = `${r.curHubName || "(unset)"} -> ${r.newHubName} [${r.customerState}]`;
+    moves[key] = (moves[key] ?? 0) + 1;
+  }
+
+  if (execute && changeable.length > 0) {
+    const now = new Date().toISOString();
+    const stmts = changeable.map((r) =>
+      c.var.DB
+        .prepare(
+          "UPDATE sales_orders SET hubId = ?, hubName = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(r.newHubId, r.newHubName, now, r.soId),
+    );
+    for (let i = 0; i < stmts.length; i += 50) {
+      await c.var.DB.batch(stmts.slice(i, i + 50));
+    }
+  }
+
+  return c.json({
+    success: true,
+    mode: execute ? "executed" : "dry-run",
+    matched: cands.length,
+    wouldUpdate: changeable.length,
+    skippedShipped: shippedManual.length,
+    moves,
+    // Full per-SO before/after so a dry-run can be saved as a restore point.
+    changeable: changeable.map((r) => ({
+      soId: r.soId,
+      companySOId: r.companySOId,
+      customer: r.customerName,
+      state: r.customerState,
+      from: r.curHubName || "(unset)",
+      to: r.newHubName,
+    })),
+    // Shipped SOs need a manual decision (goods already dispatched to the wrong
+    // branch record) — listed, never auto-touched.
+    shippedNeedsReview: shippedManual.map((r) => ({
+      soId: r.soId,
+      companySOId: r.companySOId,
+      from: r.curHubName || "(unset)",
+      to: r.newHubName,
+    })),
+    next:
+      execute && changeable.length > 0
+        ? "Now POST /api/fg-units/backfill-hub?execute=1 to push the corrected hub onto in-stock FG stickers, then reprint."
+        : "Dry-run only. Re-run with ?execute=1 after reviewing the list.",
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/sales-orders/status-changes — full audit log
 // (defined BEFORE /:id so the route matches first)
 // ---------------------------------------------------------------------------
@@ -1953,6 +2093,14 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       "ALTER TABLE sales_order_items ADD COLUMN IF NOT EXISTS discount_sen INTEGER NOT NULL DEFAULT 0",
       "ALTER TABLE consignment_order_items ADD COLUMN IF NOT EXISTS discount_sen INTEGER NOT NULL DEFAULT 0",
       "ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS discount_sen INTEGER NOT NULL DEFAULT 0",
+      // 0209 — total-height surcharge (gap+divan+leg → variants-config.totalHeights)
+      // gets its own stored column so it is derivable server-side, itemised on
+      // the PDF, and editable on the invoice — the 4th price component finally
+      // treated like the others. Was folded into unitPriceSen with no column,
+      // so it landed in 0/125 eligible lines (BUG-CLASSES C1).
+      "ALTER TABLE sales_order_items ADD COLUMN IF NOT EXISTS total_height_price_sen INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE consignment_order_items ADD COLUMN IF NOT EXISTS total_height_price_sen INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS total_height_price_sen INTEGER NOT NULL DEFAULT 0",
       // 0185 — ON HOLD reason capture. When an SO is put on hold the operator
       // must enter a reason; it is stored here (+ who put it on hold and when)
       // so the production grid can surface "why is this paused" at-a-glance.
@@ -2073,11 +2221,37 @@ app.post("/", async (c) => {
         .first<{ id: string; state: string | null; shortName: string }>();
     }
     if (!chosenHub) {
-      chosenHub = await c.var.DB.prepare(
-        "SELECT id, state, shortName FROM delivery_hubs WHERE customerId = ? ORDER BY isDefault DESC LIMIT 1",
-      )
-        .bind(customer.id)
-        .first<{ id: string; state: string | null; shortName: string }>();
+      // The hub must FOLLOW the warehouse the customer asked for — never a blind
+      // guess. Previously an unmatched deliveryHub fell straight through to the
+      // customer's isDefault hub ("Houzs KL"), so Penang/SBH/SRW orders were all
+      // stamped KL even though the OCR set the correct state (owner 2026-07-19:
+      // "state 明明是對的...應該是跟著 OCR 裏面的 warehouse"). Resolve in order:
+      //   1) the order's STATE → the customer's hub in that state. customerState
+      //      is OCR'd independently of the hub and is correct here, and every
+      //      delivery_hub carries its state, so an exactly-one state match is the
+      //      warehouse the customer named. (case-insensitive; skip if 0 or 2+.)
+      //   2) else, only when the customer has EXACTLY ONE hub (nothing to guess).
+      //   3) else leave the hub UNSET — never stamp a wrong branch.
+      const soState =
+        typeof body.customerState === "string" ? body.customerState.trim() : "";
+      if (soState) {
+        const stateHubs = await c.var.DB.prepare(
+          "SELECT id, state, shortName FROM delivery_hubs WHERE customerId = ? AND LOWER(state) = LOWER(?) LIMIT 2",
+        )
+          .bind(customer.id, soState)
+          .all<{ id: string; state: string | null; shortName: string }>();
+        const sh = stateHubs.results ?? [];
+        if (sh.length === 1) chosenHub = sh[0];
+      }
+      if (!chosenHub) {
+        const hubs = await c.var.DB.prepare(
+          "SELECT id, state, shortName FROM delivery_hubs WHERE customerId = ? ORDER BY isDefault DESC LIMIT 2",
+        )
+          .bind(customer.id)
+          .all<{ id: string; state: string | null; shortName: string }>();
+        const hubRows = hubs.results ?? [];
+        if (hubRows.length === 1) chosenHub = hubRows[0];
+      }
     }
 
     const rawItems: Array<Record<string, unknown>> = Array.isArray(body.items)
@@ -2233,6 +2407,10 @@ app.post("/", async (c) => {
     // specialOrderPriceSen — i.e. the scan-a-customer-PO paths. null degrades
     // to the static catalog in src/lib/pricing-options.ts.
     const cfgSpecialsForPricing = await loadSpecialsConfig(c.var.DB);
+    // Owner-editable divan / leg height price lists (2026-07-22). Same
+    // one-read-per-order pattern, consulted only for items that omit the price
+    // — i.e. the scan-a-customer-PO paths.
+    const cfgHeightsForPricing = await loadHeightsConfig(c.var.DB);
 
     // Build items — resolve product basePrice fallback
     const items = await Promise.all(
@@ -2315,8 +2493,27 @@ app.post("/", async (c) => {
           }
         }
 
-        const divanPriceSen = Number(item.divanPriceSen) || 0;
-        const legPriceSen = Number(item.legPriceSen) || 0;
+        // 2026-07-22 BUG FIX (under-billing, RM 12,455 across divan + leg):
+        // these were `Number(item.divanPriceSen) || 0` — the same trust-the-
+        // client shape the 07-14 and 07-17 fixes below already repaired for
+        // their own columns, left unrepaired here. The scan-a-customer-PO
+        // paths post divanHeightInches / legHeightInches with NO price, so on
+        // prod every one of the 105 scanned lines carrying a 10"/12" divan was
+        // stored at 0 while the 104 typed by hand charged correctly.
+        // resolveHeightPriceSen DERIVES only when the field is OMITTED; any
+        // supplied number is trusted verbatim — including a deliberate 0.
+        const divanPriceSen = resolveHeightPriceSen(
+          item.divanPriceSen as number | string | null | undefined,
+          item.divanHeightInches as number | string | null | undefined,
+          cfgHeightsForPricing.divanHeights,
+          isServiceOrder,
+        );
+        const legPriceSen = resolveHeightPriceSen(
+          item.legPriceSen as number | string | null | undefined,
+          item.legHeightInches as number | string | null | undefined,
+          cfgHeightsForPricing.legHeights,
+          isServiceOrder,
+        );
         // 2026-07-17 BUG FIX (BUG-2026-07-17-002 — under-billing, RM 8,060 over
         // 66 SOs): this was `Number(item.specialOrderPriceSen) || 0`, which
         // trusted a field the SCAN clients never send. The typed form
@@ -2332,13 +2529,20 @@ app.post("/", async (c) => {
           item,
           cfgSpecialsForPricing,
         );
-        // 2026-07-14 BUG FIX (under-billing): the client DOES send
-        // totalHeightPriceSen (the whole line item is posted), but this recompute
-        // dropped it — so any total-height surcharge (e.g. 26" beds) + anything the
-        // frontend folds into it was silently lost from the stored unit price →
-        // the invoice under-billed vs the quote the customer saw. Trust the client
-        // value exactly like divan/leg/special above (all client-supplied surcharges).
-        const totalHeightPriceSen = Number(item.totalHeightPriceSen) || 0;
+        // 2026-07-23: total-height (gap+divan+leg) now derives server-side like
+        // divan/leg — the typed form sends it, the scan/import paths never did,
+        // and it now has its own stored column (total_height_price_sen). Was
+        // `Number(item.totalHeightPriceSen) || 0`, which is why it landed in
+        // 0/125 eligible lines (RM 10,240 uncharged). Trusts a supplied number;
+        // derives from variants-config.totalHeights only when the field is omitted.
+        const totalHeightPriceSen = resolveTotalHeightPriceSen(
+          item.totalHeightPriceSen as number | string | null | undefined,
+          item.gapInches as number | string | null | undefined,
+          item.divanHeightInches as number | string | null | undefined,
+          item.legHeightInches as number | string | null | undefined,
+          cfgHeightsForPricing.totalHeights,
+          isServiceOrder,
+        );
         const unitPriceSen = calculateUnitPrice({
           basePriceSen,
           divanPriceSen,
@@ -2424,6 +2628,7 @@ app.post("/", async (c) => {
           legPriceSen,
           specialOrder: (item.specialOrder as string) || "",
           specialOrderPriceSen,
+          totalHeightPriceSen,
           customSpecials: cleanedCustomSpecials,
           basePriceSen,
           unitPriceSen,
@@ -2573,8 +2778,8 @@ app.post("/", async (c) => {
              productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
              fabricCode, quantity, gapInches, divanHeightInches,
              divanPriceSen, legHeightInches, legPriceSen, specialOrder,
-             specialOrderPriceSen, customSpecials, basePriceSen, unitPriceSen, discountSen, lineTotalSen, notes, repairScope)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             specialOrderPriceSen, totalHeightPriceSen, customSpecials, basePriceSen, unitPriceSen, discountSen, lineTotalSen, notes, repairScope)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           item.id,
           soId,
@@ -2595,6 +2800,7 @@ app.post("/", async (c) => {
           item.legPriceSen,
           item.specialOrder,
           item.specialOrderPriceSen,
+          item.totalHeightPriceSen,
           serializeCustomSpecials(item.customSpecials),
           item.basePriceSen,
           item.unitPriceSen,
@@ -3763,6 +3969,11 @@ app.put("/:id", async (c) => {
       // request (BUG-2026-07-17-002). Needed on PUT too — without it, editing a
       // scanned SO would re-store the surcharge as 0.
       const cfgSpecialsForPricing = await loadSpecialsConfig(c.var.DB);
+      // Ditto for the divan / leg height price lists (2026-07-22). Same
+      // reasoning: an edit that omits the price must not zero a height that the
+      // owner's list prices.
+      const cfgHeightsForPricing = await loadHeightsConfig(c.var.DB);
+      const isServiceOrder = existing.isServiceOrder === true;
       const newItems = await Promise.all(rawItems.map(async (item, idx) => {
         const incomingBase = Number(item.basePriceSen) || 0;
         // SOFA lines ALWAYS re-derive their base from the price list, ignoring
@@ -3837,8 +4048,27 @@ app.put("/:id", async (c) => {
             // Non-fatal — leave at 0; the unpriced gate below surfaces it.
           }
         }
-        const divanPriceSen = Number(item.divanPriceSen) || 0;
-        const legPriceSen = Number(item.legPriceSen) || 0;
+        // 2026-07-22 BUG FIX (under-billing, RM 12,455 across divan + leg):
+        // these were `Number(item.divanPriceSen) || 0` — the same trust-the-
+        // client shape the 07-14 and 07-17 fixes below already repaired for
+        // their own columns, left unrepaired here. The scan-a-customer-PO
+        // paths post divanHeightInches / legHeightInches with NO price, so on
+        // prod every one of the 105 scanned lines carrying a 10"/12" divan was
+        // stored at 0 while the 104 typed by hand charged correctly.
+        // resolveHeightPriceSen DERIVES only when the field is OMITTED; any
+        // supplied number is trusted verbatim — including a deliberate 0.
+        const divanPriceSen = resolveHeightPriceSen(
+          item.divanPriceSen as number | string | null | undefined,
+          item.divanHeightInches as number | string | null | undefined,
+          cfgHeightsForPricing.divanHeights,
+          isServiceOrder,
+        );
+        const legPriceSen = resolveHeightPriceSen(
+          item.legPriceSen as number | string | null | undefined,
+          item.legHeightInches as number | string | null | undefined,
+          cfgHeightsForPricing.legHeights,
+          isServiceOrder,
+        );
         // 2026-07-17 BUG FIX (BUG-2026-07-17-002 — under-billing, RM 8,060 over
         // 66 SOs): this was `Number(item.specialOrderPriceSen) || 0`, which
         // trusted a field the SCAN clients never send. The typed form
@@ -3854,10 +4084,17 @@ app.put("/:id", async (c) => {
           item,
           cfgSpecialsForPricing,
         );
-        // 2026-07-14 BUG FIX (under-billing) — same as the POST path: include the
-        // client-supplied totalHeightPriceSen (was dropped) so an SO EDIT re-prices
-        // the line WITH its total-height surcharge instead of silently zeroing it.
-        const totalHeightPriceSen = Number(item.totalHeightPriceSen) || 0;
+        // 2026-07-23 — same as the POST path: derive total-height server-side so
+        // an SO EDIT re-prices the line WITH its total-height surcharge (stored
+        // in its own column) instead of zeroing it. Trusts a supplied number.
+        const totalHeightPriceSen = resolveTotalHeightPriceSen(
+          item.totalHeightPriceSen as number | string | null | undefined,
+          item.gapInches as number | string | null | undefined,
+          item.divanHeightInches as number | string | null | undefined,
+          item.legHeightInches as number | string | null | undefined,
+          cfgHeightsForPricing.totalHeights,
+          isServiceOrder,
+        );
         const unitPriceSen = calculateUnitPrice({
           basePriceSen,
           divanPriceSen,
@@ -3947,6 +4184,7 @@ app.put("/:id", async (c) => {
           legPriceSen,
           specialOrder: (item.specialOrder as string) || "",
           specialOrderPriceSen,
+          totalHeightPriceSen,
           customSpecials: cleanedCustomSpecials,
           basePriceSen,
           unitPriceSen,
@@ -3994,8 +4232,8 @@ app.put("/:id", async (c) => {
                productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
                fabricCode, quantity, gapInches, divanHeightInches,
                divanPriceSen, legHeightInches, legPriceSen, specialOrder,
-               specialOrderPriceSen, customSpecials, basePriceSen, unitPriceSen, discountSen, lineTotalSen, notes, repairScope)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               specialOrderPriceSen, totalHeightPriceSen, customSpecials, basePriceSen, unitPriceSen, discountSen, lineTotalSen, notes, repairScope)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             item.id,
             id,
@@ -4016,6 +4254,7 @@ app.put("/:id", async (c) => {
             item.legPriceSen,
             item.specialOrder,
             item.specialOrderPriceSen,
+            item.totalHeightPriceSen,
             serializeCustomSpecials(item.customSpecials),
             item.basePriceSen,
             item.unitPriceSen,
@@ -4155,6 +4394,7 @@ app.put("/:id", async (c) => {
             legPriceSen: Number(item.legPriceSen) || 0,
             specialOrder: (item.specialOrder as string) || "",
             specialOrderPriceSen: Number(item.specialOrderPriceSen) || 0,
+            totalHeightPriceSen: Number(item.totalHeightPriceSen) || 0,
             customSpecials: serializeCustomSpecials(
               sanitizeCustomSpecials(item.customSpecials),
             ),
@@ -4232,6 +4472,7 @@ app.put("/:id", async (c) => {
             legPriceSen: Number(item.legPriceSen) || 0,
             specialOrder: (item.specialOrder as string) || "",
             specialOrderPriceSen: Number(item.specialOrderPriceSen) || 0,
+            totalHeightPriceSen: Number(item.totalHeightPriceSen) || 0,
             customSpecials: serializeCustomSpecials(
               sanitizeCustomSpecials(item.customSpecials),
             ),
@@ -4290,6 +4531,45 @@ app.put("/:id", async (c) => {
     }
 
     await c.var.DB.batch(statements);
+
+    // ---------------------------------------------------------------------
+    // Cache invalidation for the ON_HOLD / CANCELLED / RESUME cascade.
+    //
+    // cascadeSOStatusToPOs has just rewritten production_orders.status for
+    // every downstream PO, but the dept sheets do NOT read that table live —
+    // they read (1) the production_orders_list_snapshot cache-aside layer and
+    // (2) a KV body keyed by a per-org version. Neither notices a write made
+    // from THIS module, so the shop floor kept seeing the pre-hold rows:
+    //
+    //   2026-07-22 — SO-2607-120 went ON_HOLD at 14:22:26Z and all 6 POs
+    //   followed in the same batch, yet the Fab Sew sheet (snapshot built
+    //   06:19Z) still rendered 11 plain PENDING rows with no ON HOLD badge.
+    //   The owner reasonably read that as "the hold didn't run". A hold the
+    //   floor cannot see is a hold that did not happen — production keeps
+    //   cutting fabric on an order the customer may be cancelling.
+    //
+    // The snapshot layer's own freshness probe is documented as unreliable
+    // (mixed TEXT/TIMESTAMP updated_at compares — see snapshot.ts), which is
+    // why the hub-change path already wipes explicitly rather than trusting
+    // it. Do the same here, and bump the KV version too: wiping only the
+    // snapshot still leaves a warm KV body serving X-Cache: HIT for the rest
+    // of its 5-minute TTL (BUG-2026-06-09-005, "doing only one layer").
+    //
+    // Gated on the cascade actually touching POs so an ordinary field edit
+    // pays nothing. Best-effort — the cascade has already committed, so a
+    // failed wipe must not fail the request.
+    if (cascade && cascade.affectedPoCount > 0) {
+      try {
+        const orgId = getOrgId(c);
+        await invalidateOrderCascadeSnapshots(c.var.DB, orgId, "sales");
+        await bumpPoListCacheVersion(c, orgId);
+      } catch (err) {
+        console.warn(
+          "[so-status-cascade] cache invalidation failed:",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
 
     // ---------------------------------------------------------------------
     // Option D — pre-production rebuild (2026-05-06).
@@ -5669,6 +5949,7 @@ app.post("/copy-for-service-order", async (c) => {
         legPriceSen: 0,
         specialOrder: it.specialOrder,
         specialOrderPriceSen: 0,
+        totalHeightPriceSen: 0,
         // Carry the descriptions through but zero out the surcharge sen —
         // the line items themselves come over (Fabricolor / Saffa /
         // Bigfoot etc. are encoded in `specialOrder` text + customSpecials

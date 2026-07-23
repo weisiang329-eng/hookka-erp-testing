@@ -2,8 +2,8 @@
 // BOMs. Sheet puts them in ACCESSORIES; user requested SOFA category so
 // they surface in the Sofa module and share the sofa master BOM pickers.
 const PROD = "https://hookka-erp-testing.pages.dev";
-const EMAIL = "weisiang329@gmail.com";
-const PASSWORD = "CbpxqJQpjy3VA5yd3Q";
+const EMAIL = process.env.HOOKKA_EMAIL ?? "";
+const PASSWORD = process.env.HOOKKA_PASSWORD ?? "";
 
 const rows = [
   {

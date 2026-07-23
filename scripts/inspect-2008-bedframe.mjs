@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Inspect why SO-2604-285's 2008(A)-(K) HB sticker shows 1/1 instead of 1/3.
 const BASE = "https://hookka-erp-testing.pages.dev";
-const EMAIL = "weisiang329@gmail.com";
-const PASSWORD = "CbpxqJQpjy3VA5yd3Q";
+const EMAIL = process.env.HOOKKA_EMAIL ?? "";
+const PASSWORD = process.env.HOOKKA_PASSWORD ?? "";
 
 async function login() {
   const r = await fetch(`${BASE}/api/auth/login`, {

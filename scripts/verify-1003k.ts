@@ -5,7 +5,7 @@ async function main() {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       email: "weisiang329@gmail.com",
-      password: "CbpxqJQpjy3VA5yd3Q",
+      password: process.env.HOOKKA_PASSWORD ?? "",
     }),
   });
   const j = (await r.json()) as { data?: { token?: string } };

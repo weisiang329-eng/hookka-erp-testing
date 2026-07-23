@@ -47,31 +47,38 @@ export type LegHeightOption = {
   surcharge: number; // in sen
 };
 
+// 2026-07-23: realigned to kv_config `variants-config`, which is what the
+// backend actually prices from. This table is the FALLBACK used whenever the
+// live config fails to load, and it had drifted a full price increase behind
+// it — every height RM 5–10 low, and "No Side Panel" carried +RM 40 where the
+// live config has −RM 40 (a discount stored as a surcharge, an RM 80 swing).
+// A silent fallback that under-charges is worse than no fallback.
+// tests/price-component-class.test.mjs pins the two together.
 export const divanHeightOptions: DivanHeightOption[] = [
   { height: '4"', surcharge: 0 },
   { height: '5"', surcharge: 0 },
   { height: '6"', surcharge: 0 },
   { height: '8"', surcharge: 0 },
-  { height: '10"', surcharge: 5000 },
-  { height: '11"', surcharge: 12000 },
-  { height: '12"', surcharge: 12000 },
-  { height: '13"', surcharge: 14000 },
-  { height: '14"', surcharge: 14000 },
-  { height: '16"', surcharge: 15000 },
+  { height: '10"', surcharge: 5500 },
+  { height: '11"', surcharge: 13000 },
+  { height: '12"', surcharge: 13000 },
+  { height: '13"', surcharge: 15000 },
+  { height: '14"', surcharge: 15000 },
+  { height: '16"', surcharge: 16000 },
 ];
 
 export const specialOrderOptions: SpecialOrderOption[] = [
   { code: "HB_FULL_COVER", name: "HB Fully Cover", surcharge: 5000, notes: "" },
   { code: "DIVAN_TOP_COVER", name: "Divan Top Fully Cover", surcharge: 5000, notes: "" },
   { code: "DIVAN_BTM_COVER", name: "Divan Full Cover", surcharge: 8000, notes: "If HB & divan full cover combined = RM100 total" },
-  { code: "LEFT_DRAWER", name: "Left Drawer", surcharge: 15000, notes: "" },
-  { code: "RIGHT_DRAWER", name: "Right Drawer", surcharge: 15000, notes: "" },
-  { code: "FRONT_DRAWER", name: "Front Drawer", surcharge: 12000, notes: "" },
+  { code: "LEFT_DRAWER", name: "Left Drawer", surcharge: 16000, notes: "" },
+  { code: "RIGHT_DRAWER", name: "Right Drawer", surcharge: 16000, notes: "" },
+  { code: "FRONT_DRAWER", name: "Front Drawer", surcharge: 13000, notes: "" },
   { code: "HB_STRAIGHT", name: "HB Straight", surcharge: 0, notes: "" },
   { code: "DIVAN_TOP_W", name: "Divan Top(W)", surcharge: 0, notes: "" },
   { code: "ONE_PIECE_DIVAN", name: "1 Piece Divan", surcharge: 25000, notes: "" },
   { code: "DIVAN_CURVE", name: "Divan Curve", surcharge: 5000, notes: "" },
-  { code: "NO_SIDE_PANEL", name: "No Side Panel", surcharge: 4000, notes: "" },
+  { code: "NO_SIDE_PANEL", name: "No Side Panel", surcharge: -4000, notes: "" },
   { code: "HEADBOARD_ONLY", name: "Headboard Only", surcharge: 0, notes: "Base price ÷ 2" },
   { code: "NYLON_FABRIC", name: "Nylon Fabric", surcharge: 0, notes: "" },
   { code: "5537_BACKREST", name: "5537 Backrest", surcharge: 0, notes: "" },

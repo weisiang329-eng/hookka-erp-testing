@@ -401,13 +401,20 @@ export async function generateFGUnitsForPO(
   // the customer's KL default regardless of where the order actually ships —
   // BUG-2026-06-05: Houzs SBH / SRW / PG stickers all printed "Houzs KL".
   if (!hubShort && parentCustomerId) {
-    const hub = await db
+    // Only auto-fill the customer's default hub when they have EXACTLY ONE hub.
+    // A multi-hub customer (Houzs = KL/PG/SRW/SBH) must NEVER be guessed:
+    // blind-defaulting stamped every unset-hub order's sticker as "Houzs KL"
+    // (BUG-2026-06-05, root-caused 2026-07-19 to the SO-create blind default —
+    // fixed there too). With 2+ hubs and no order hub, leave it null so the
+    // sticker shows the customer NAME rather than a wrong branch.
+    const hubs = await db
       .prepare(
-        "SELECT shortName FROM delivery_hubs WHERE customerId = ? ORDER BY isDefault DESC, id ASC LIMIT 1",
+        "SELECT shortName FROM delivery_hubs WHERE customerId = ? ORDER BY isDefault DESC, id ASC LIMIT 2",
       )
       .bind(parentCustomerId)
-      .first<DeliveryHubMini>();
-    hubShort = hub?.shortName ?? null;
+      .all<DeliveryHubMini>();
+    const hubRows = hubs.results ?? [];
+    if (hubRows.length === 1) hubShort = hubRows[0].shortName ?? null;
   }
 
   const pad = (n: number, w: number) => String(n).padStart(w, "0");

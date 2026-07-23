@@ -30,9 +30,15 @@ const SRC = readFileSync(
 );
 
 test("invalidateProductionListCaches DELETEs the snapshot (not mark-stale)", () => {
-  const start = SRC.indexOf("async function invalidateProductionListCaches");
+  // 2026-07-23: the helper moved to src/api/lib/po-list-cache.ts so all six
+  // route modules that write production_orders share one implementation.
+  const LIB = readFileSync(
+    resolve(process.cwd(), "src/api/lib/po-list-cache.ts"),
+    "utf8",
+  );
+  const start = LIB.indexOf("export async function invalidateProductionListCaches");
   assert.ok(start >= 0, "invalidateProductionListCaches must exist");
-  const body = SRC.slice(start, start + 700);
+  const body = LIB.slice(start, start + 700);
   assert.match(
     body,
     /DELETE FROM production_orders_list_snapshot WHERE org_id = \?/,
@@ -50,6 +56,69 @@ test("invalidateProductionListCaches DELETEs the snapshot (not mark-stale)", () 
     /bumpPoListCacheVersion\(c, orgId\)/,
     "Must also bump the 60s KV list-cache version.",
   );
+});
+
+// ---------------------------------------------------------------------------
+// 2026-07-22 — the same class of bug, one module over.
+//
+// SO-2607-120 went ON_HOLD at 14:22:26Z and cascadeSOStatusToPOs flipped all 6
+// downstream production_orders to ON_HOLD in the same batch. The Fab Sew sheet
+// still rendered 11 plain PENDING rows: its snapshot had been built at 06:19Z
+// and NOTHING in sales-orders.ts invalidated it. The owner read that as "the
+// hold didn't run in the backend".
+//
+// The SO/CO status cascade writes production_orders.status from OUTSIDE
+// production-orders.ts, so it must invalidate both dept-sheet layers itself:
+// the snapshot rows AND the KV body version. Wiping only one leaves the other
+// serving the pre-hold rows (snapshot only → warm KV body keeps X-Cache: HIT
+// for its 5-minute TTL; KV only → the snapshot re-serves stale, the 2026-06-24
+// WOOD_CUT incident above).
+// ---------------------------------------------------------------------------
+const CASCADE_SOURCES = [
+  ["src/api/routes/sales-orders.ts", "sales", "cascade && cascade.affectedPoCount > 0"],
+  ["src/api/routes/consignment-orders.ts", "consignment", "cascadedPoCount > 0"],
+];
+
+for (const [file, kind, gate] of CASCADE_SOURCES) {
+  test(`${kind} status cascade (ON_HOLD / CANCELLED / RESUME) invalidates both dept-sheet cache layers`, () => {
+    const src = readFileSync(resolve(process.cwd(), file), "utf8");
+    assert.match(
+      src,
+      new RegExp(`invalidateOrderCascadeSnapshots\\(c\\.var\\.DB, orgId, "${kind}"\\)`),
+      `${file} must wipe the snapshot rows after a status cascade — the freshness ` +
+        `probe is documented as unreliable, so a hold stayed invisible on the ` +
+        `Fab Sew sheet (SO-2607-120, 2026-07-22).`,
+    );
+    assert.match(
+      src,
+      /bumpPoListCacheVersion\(c, orgId\)/,
+      `${file} must ALSO bump the KV list-cache version — wiping only the snapshot ` +
+        `leaves a warm KV body serving the pre-hold rows for the rest of its TTL.`,
+    );
+    assert.ok(
+      src.includes(gate),
+      `${file} must gate the invalidation on the cascade actually touching POs ` +
+        `(\`${gate}\`) so an ordinary field edit pays nothing.`,
+    );
+  });
+}
+
+test("po-list-cache lib stays the single home of the KV version key", () => {
+  const lib = readFileSync(
+    resolve(process.cwd(), "src/api/lib/po-list-cache.ts"),
+    "utf8",
+  );
+  assert.match(lib, /export async function bumpPoListCacheVersion/);
+  assert.match(lib, /pos:version:\$\{orgId\}/);
+  // production-orders.ts must import it, not redeclare a second copy that
+  // could drift from the key format the read path uses.
+  assert.doesNotMatch(
+    SRC,
+    /async function bumpPoListCacheVersion/,
+    "production-orders.ts must import bumpPoListCacheVersion from ../lib/po-list-cache " +
+      "rather than keeping a private duplicate.",
+  );
+  assert.match(SRC, /from "\.\.\/lib\/po-list-cache"/);
 });
 
 test("applyPoUpdate invalidates the production list caches on every edit", () => {

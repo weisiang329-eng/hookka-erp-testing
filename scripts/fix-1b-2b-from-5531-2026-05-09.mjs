@@ -11,8 +11,8 @@
 import postgres from "postgres";
 
 const API_BASE = "https://hookka-erp-testing.pages.dev";
-const EMAIL = "weisiang329@gmail.com";
-const PASSWORD = "CbpxqJQpjy3VA5yd3Q";
+const EMAIL = process.env.HOOKKA_EMAIL ?? "";
+const PASSWORD = process.env.HOOKKA_PASSWORD ?? "";
 const APPLY = process.argv.includes("--apply");
 const EFFECTIVE_FROM = "2026-05-10";
 const DELTA_SEN = 15000; // +RM 150

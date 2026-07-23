@@ -777,6 +777,7 @@
   "specialAccountType": "special_account_type",
   "specialOrder": "special_order",
   "specialOrderPriceSen": "special_order_price_sen",
+  "totalHeightPriceSen": "total_height_price_sen",
   "ssmNo": "ssm_no",
   "startDate": "start_date",
   "statementType": "statement_type",

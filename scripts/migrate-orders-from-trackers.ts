@@ -29,8 +29,8 @@ const xl = require("xlsx") as typeof import("xlsx");
 
 const SHEET = "C:/Users/User/Downloads/Production Sheet (9).xlsx";
 const PROD = "https://hookka-erp-testing.pages.dev";
-const EMAIL = "weisiang329@gmail.com";
-const PASSWORD = "CbpxqJQpjy3VA5yd3Q";
+const EMAIL = process.env.HOOKKA_EMAIL ?? "";
+const PASSWORD = process.env.HOOKKA_PASSWORD ?? "";
 // BF uses sheet row 11 (0-indexed 10) as the header row.
 // SF has a double header: row 10 (0-indexed 9) has the SF-specific labels
 //   (Gap/Divan/Size) while row 11 (0-indexed 10) is an alias header with

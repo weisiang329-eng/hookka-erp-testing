@@ -31,8 +31,8 @@ const xl = require("xlsx") as typeof import("xlsx");
 
 const SHEET = "C:/Users/User/Downloads/raw material.xlsx";
 const PROD = "https://hookka-erp-testing.pages.dev";
-const EMAIL = "weisiang329@gmail.com";
-const PASSWORD = "CbpxqJQpjy3VA5yd3Q";
+const EMAIL = process.env.HOOKKA_EMAIL ?? "";
+const PASSWORD = process.env.HOOKKA_PASSWORD ?? "";
 
 // Fabric item groups — these codes live in the Fab Maint tab of Production
 // Sheet, not in raw material.xlsx. NEVER delete them even if they're missing

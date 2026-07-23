@@ -31,6 +31,8 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { invalidateProductionListCaches } from "../lib/po-list-cache";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -931,6 +933,18 @@ app.put("/:id/status", async (c) => {
     }
 
     await c.var.DB.batch(stmts);
+
+    // The cascade above can flip resolution production_orders to CANCELLED —
+    // the dept sheets must stop showing them as live work. See
+    // tests/production-write-invalidation-class.test.mjs.
+    try {
+      await invalidateProductionListCaches(c, getOrgId(c));
+    } catch (err) {
+      console.warn(
+        "[service-order-cascade] cache invalidation failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
 
     const updated = await c.var.DB
       .prepare("SELECT * FROM service_orders WHERE id = ?")

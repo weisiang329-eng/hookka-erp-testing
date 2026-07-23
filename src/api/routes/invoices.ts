@@ -1122,10 +1122,40 @@ function ensureDiscountColumn(db: D1Database): Promise<void> {
     _invDiscountColMig = db
       .prepare("ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS discount_sen INTEGER NOT NULL DEFAULT 0")
       .run()
-      .then(() => undefined)
+      .then(() =>
+        db
+          // 0209 — total-height component column (see sales-orders self-apply).
+          .prepare("ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS total_height_price_sen INTEGER NOT NULL DEFAULT 0")
+          .run()
+          .then(() => undefined),
+      )
       .catch(() => undefined);
   }
   return _invDiscountColMig;
+}
+
+// 0208 self-apply — the DB-level guarantee that one delivery order can have at
+// most ONE active (non-cancelled) invoice. See migrations-postgres/0208.
+// BUG-2026-07-14-006: the application check-then-write guard has a race window;
+// two concurrent create requests both pass it and both INSERT. This partial-
+// unique index makes the second INSERT fail at the storage layer, so the race
+// can never produce a duplicate. Idempotent (IF NOT EXISTS), once per isolate.
+// Failure is swallowed (e.g. a lingering duplicate would make CREATE fail) so a
+// wedged index build never blocks invoicing — but the dups were cleaned first.
+let _invDedupeIndexMig: Promise<void> | null = null;
+function ensureInvoiceDedupeIndex(db: D1Database): Promise<void> {
+  if (!_invDedupeIndexMig) {
+    _invDedupeIndexMig = db
+      .prepare(
+        `CREATE UNIQUE INDEX IF NOT EXISTS uniq_invoice_active_delivery_order
+           ON invoices (delivery_order_id)
+           WHERE status <> 'CANCELLED' AND delivery_order_id IS NOT NULL`,
+      )
+      .run()
+      .then(() => undefined)
+      .catch(() => undefined);
+  }
+  return _invDedupeIndexMig;
 }
 
 app.post("/", async (c) => {
@@ -1133,6 +1163,7 @@ app.post("/", async (c) => {
   const denied = await requirePermission(c, "invoices", "create");
   if (denied) return denied;
   await ensureDiscountColumn(c.var.DB);
+  await ensureInvoiceDedupeIndex(c.var.DB);
   // Sprint 3 #4 — idempotency. POSTing an invoice for the same DO twice
   // produces two distinct invoice rows today (the only guard is DO status
   // = DELIVERED, which the first request flips to INVOICED — but the
@@ -1349,7 +1380,36 @@ app.post("/", async (c) => {
       ).bind(totalSen, doRow.customerId),
     ];
 
-    await c.var.DB.batch(statements);
+    try {
+      await c.var.DB.batch(statements);
+    } catch (batchErr) {
+      // The 0208 partial-unique index (uniq_invoice_active_delivery_order) is
+      // the last line of defence against the double-invoice race: if a
+      // concurrent request already created the active invoice for this DO
+      // between our guard check above and this INSERT, Postgres rejects the
+      // second row. Turn that storage-layer rejection into the SAME graceful
+      // 409 the guard returns, pointing at the invoice that won the race —
+      // instead of a raw 500. Any other batch failure re-throws.
+      const m = batchErr instanceof Error ? batchErr.message : String(batchErr);
+      if (/uniq_invoice_active_delivery_order|duplicate key|23505/i.test(m)) {
+        const existing = await c.var.DB
+          .prepare(
+            "SELECT id, invoiceNo FROM invoices WHERE deliveryOrderId = ? AND status != 'CANCELLED' LIMIT 1",
+          )
+          .bind(deliveryOrderId)
+          .first<{ id: string; invoiceNo: string }>();
+        return c.json(
+          {
+            success: false,
+            error: `An invoice (${existing?.invoiceNo ?? "unknown"}) already exists for this delivery order.`,
+            existingInvoiceId: existing?.id ?? null,
+            existingInvoiceNo: existing?.invoiceNo ?? null,
+          },
+          409,
+        );
+      }
+      throw batchErr;
+    }
 
     // BACKEND customer-notice trigger (BUG-2026-06-23 safety net). The manual
     // "Generate Invoice" button (DELIVERED → INVOICED via this POST) does NOT
@@ -1654,7 +1714,7 @@ app.put("/:id", async (c) => {
       }
       const editById = new Map<
         string,
-        { base: number; divan: number; leg: number; special: number; discount: number }
+        { base: number; divan: number; leg: number; special: number; totalHeight: number; discount: number }
       >();
       for (const e of body.priceEdits as Array<Record<string, unknown>>) {
         const lid = String(e.id || "");
@@ -1664,6 +1724,8 @@ app.put("/:id", async (c) => {
           divan: Math.max(0, Math.round(Number(e.divanSen) || 0)),
           leg: Math.max(0, Math.round(Number(e.legSen) || 0)),
           special: Math.max(0, Math.round(Number(e.specialSen) || 0)),
+          // Total-height surcharge (0209) — the 4th component, editable like the rest.
+          totalHeight: Math.max(0, Math.round(Number(e.totalHeightSen) || 0)),
           // Per-line discount (migration 0179). Clamped ≥ 0.
           discount: Math.max(0, Math.round(Number(e.discountSen) || 0)),
         });
@@ -1680,7 +1742,7 @@ app.put("/:id", async (c) => {
         const ed = editById.get(r.id);
         if (ed) {
           touched++;
-          const unit = ed.base + ed.divan + ed.leg + ed.special;
+          const unit = ed.base + ed.divan + ed.leg + ed.special + ed.totalHeight;
           // Line total = max(0, unit × qty − discount).
           const lineTotal = Math.max(0, unit * q - ed.discount);
           newSubtotal += lineTotal;
@@ -1688,7 +1750,7 @@ app.put("/:id", async (c) => {
             c.var.DB.prepare(
               `UPDATE invoice_items SET
                  basePriceSen = ?, divanPriceSen = ?, legPriceSen = ?,
-                 specialOrderPriceSen = ?, unitPriceSen = ?, discountSen = ?,
+                 specialOrderPriceSen = ?, totalHeightPriceSen = ?, unitPriceSen = ?, discountSen = ?,
                  totalSen = ?, priceEdited = 1
                WHERE id = ?`,
             ).bind(
@@ -1696,6 +1758,7 @@ app.put("/:id", async (c) => {
               ed.divan,
               ed.leg,
               ed.special,
+              ed.totalHeight,
               unit,
               ed.discount,
               lineTotal,

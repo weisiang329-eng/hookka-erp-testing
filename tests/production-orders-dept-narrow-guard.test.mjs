@@ -25,13 +25,20 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-const SRC = resolve(
-  process.cwd(),
+// `fetchFilteredPOs` (which holds the jcWhereDept template + the warning
+// comment below) moved from production-orders.ts to
+// production-orders/_helpers.ts in the 2026-07-23 helper-extraction refactor.
+// Read BOTH files so this guard keeps finding the invariant wherever the code
+// lives — the lock is on the SQL shape, not on which file it sits in.
+const SRC_FILES = [
   'src/api/routes/production-orders.ts',
-);
+  'src/api/routes/production-orders/_helpers.ts',
+];
 
 function read() {
-  return readFileSync(SRC, 'utf8');
+  return SRC_FILES
+    .map((f) => readFileSync(resolve(process.cwd(), f), 'utf8'))
+    .join('\n\n');
 }
 
 function extractJcWhereDept(src) {

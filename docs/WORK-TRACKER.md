@@ -9,6 +9,36 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-23 — ✅ SESSION CLOSE — under-billing fully recovered (RM 26,010), guardrails shipped, GL verified balanced
+**One-screen handoff. Everything below is DONE + verified on prod unless marked ⏳/🔴.**
+
+### Money recovered (all read-back / GL verified)
+| what | amount | how |
+|---|---|---|
+| Height surcharge on un-shipped SOs (A-group, 140 lines) | RM 10,530 | `backfill-height-surcharge-2026-07-22.mjs` → SO lines |
+| Height on shipped SO lines (21 lines) + SO-2607-135 | RM ~1,175 | `fix-shipped-so-heights-2026-07-23.mjs`, `fix-so135-height-2026-07-23.mjs` |
+| **Invoice top-up (65 SENT invoices / 154 lines)** | **RM 15,480** | driven via the owner's authenticated browser session through `PUT /api/invoices {priceEdits}` — the GL-restating path, NOT raw SQL |
+| **Total** | **≈ RM 26,010** | |
+
+- **GL verified BALANCED after the 65 invoice edits**: `ledger_journal_entries` debit == credit (RM 8.167M each); today's 507 `invoice_restate` legs debit == credit (RM 1,181,771.56 each). The reversal+repost hash-chain worked; books are correct. This is why invoices MUST go through the app PUT and never raw SQL (it reverses+reposts hash-chained journal legs + moves `customers.outstandingSen` — `invoices.ts:1712`).
+- **priceEdits trap (again):** the contract is `{id, baseSen, divanSen, legSen, specialSen, discountSen}` and the server computes unit = sum; sending `unitPriceSen` is a silent no-op. The committed executor was fixed to the component shape (#90) and the plan carries each line's SO-mirrored split (`_plan-invoice-topup-components-2026-07-23.json`). Existing invoice-line discounts preserved.
+
+### 🔴 Owner / IT — still open
+1. **RE-SEND the 65 corrected invoices to customers** — the amounts are right in the system; sending is the owner's action.
+2. **RM 380 residual** the daily check still flags, deliberately NOT auto-fixed: 7 INVOICE_BELOW_SO lines on consolidated invoices with **duplicate SKUs** (can't pick the right line without eyes — biggest is SO-2607-135 L2 = RM 130 on INV-2607-089) + SO-2607-143 L1 which is RM 80 OVER on the SO (over-, not under-billed — confirm intent).
+3. **Rotate the prod DB password** — `docs/SECURITY-ROTATION-TODO.md`. ~109 scripts carry the live Supabase string in git history; only rotation remediates. Dead login password already scrubbed (#87).
+4. **Base-price gap RM 540** (4 lines, RM 510 is SO-2607-086 L1 — likely a negotiated special; confirm before changing).
+5. **PO-009631** on Houzs's chasing list was never keyed into the ERP — someone must create the SO.
+
+### Guardrails shipped so this class can't silently recur
+- `docs/BUG-CLASSES.md` — the recurring classes + every known instance; P5 now points at it (was skipped 3× because BUG-HISTORY is by date). Read before fixing any bug.
+- `tests/price-component-class.test.mjs` + `tests/production-write-invalidation-class.test.mjs` — class tests; a new price component or a new `production_orders` writer fails CI until wired.
+- `src/api/lib/pricing-integrity.ts` — the daily money-invariant check (unit=sum, priced height at 0, invoice<SO), on the Daily Report. Had two Postgres-dialect bugs on first ship; both fixed (#89) and RE-VERIFIED live (it now correctly reports the RM 380 residual above).
+- Fossil price lists deleted + seeder stopped re-planting them (#85); static catalog realigned to live config (drawers 160/130, divan 10"=55).
+- DO consolidated-hub label now derived from SO lines (#86); ON_HOLD cascade invalidates dept-sheet caches (#80).
+
+### PRs this session (all merged): #80–#90.
+
 ## 2026-07-23 — 🔴 STOP before touching invoices: my Group-A scoping was wrong, and there is a much bigger pre-existing gap
 **Executed:** `backfill-height-surcharge-2026-07-22.mjs --execute` — 140 SO lines / 100 SOs,
 +RM 10,530, read-back clean (0 line mismatches, 0 total drift). Restore point:

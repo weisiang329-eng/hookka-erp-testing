@@ -188,7 +188,10 @@ test("credit: exactly AT the limit passes (gate is strictly greater-than)", () =
 // ═════════════════════════════════════════════════════════════════════════
 
 const root = process.cwd();
-const doSrc = readFileSync(resolve(root, "src/api/routes/delivery-orders.ts"), "utf8");
+const doSrc =
+  readFileSync(resolve(root, "src/api/routes/delivery-orders.ts"), "utf8") +
+  "\n\n" +
+  readFileSync(resolve(root, "src/api/routes/delivery-orders/_helpers.ts"), "utf8");
 const plSrc = readFileSync(resolve(root, "src/api/routes/packing-lists.ts"), "utf8");
 
 function count(haystack, regex) {

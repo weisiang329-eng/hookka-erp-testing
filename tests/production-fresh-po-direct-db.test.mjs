@@ -26,8 +26,19 @@ import { resolve } from "node:path";
 const SRC = resolve(process.cwd(), "src/api/routes/production-orders.ts");
 const FE = resolve(process.cwd(), "src/pages/production/index.tsx");
 
+// production-orders.ts keeps its module-level helpers in a sibling
+// production-orders/_helpers.ts (moved verbatim by a refactor). Source-grep
+// guards must see BOTH the route file and its _helpers.ts, so read()
+// concatenates them for the split route files only.
+const SPLIT_ROUTE_RE =
+  /src[\\/]api[\\/]routes[\\/](sales-orders|production-orders|delivery-orders)\.ts$/;
+
 function read(p) {
-  return readFileSync(p, "utf8");
+  let src = readFileSync(p, "utf8");
+  if (SPLIT_ROUTE_RE.test(p)) {
+    src += "\n\n" + readFileSync(p.replace(/\.ts$/, "/_helpers.ts"), "utf8");
+  }
+  return src;
 }
 
 // Isolate the fetchFreshMinimalPO helper body so the cache-bypass assertions
@@ -36,9 +47,11 @@ function extractFreshHelper(src) {
   const start = src.indexOf("async function fetchFreshMinimalPO(");
   if (start < 0) return null;
   // The helper ends at the next top-level `async function ` / `function `
-  // declaration after it.
+  // declaration after it. The moved helpers now live in a sibling _helpers.ts
+  // where the sibling declarations are `export`-prefixed, so the terminator
+  // must also recognize `export (async) function`.
   const after = src.slice(start + 1);
-  const nextDecl = after.search(/\n(?:async function |function )/);
+  const nextDecl = after.search(/\n(?:export )?(?:async function |function )/);
   return nextDecl < 0 ? src.slice(start) : src.slice(start, start + 1 + nextDecl);
 }
 

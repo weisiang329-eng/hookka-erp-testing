@@ -18,7 +18,10 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const SCAN = readFileSync(resolve(process.cwd(), 'src/pages/worker/scan.tsx'), 'utf8');
-const PO = readFileSync(resolve(process.cwd(), 'src/api/routes/production-orders.ts'), 'utf8');
+const PO =
+  readFileSync(resolve(process.cwd(), 'src/api/routes/production-orders.ts'), 'utf8') +
+  '\n\n' +
+  readFileSync(resolve(process.cwd(), 'src/api/routes/production-orders/_helpers.ts'), 'utf8');
 
 test('per-piece duplicate guard uses ONLY the piece slot (no card-level fallback)', () => {
   // For a per-piece scan (result.piece set) the guard must read the piece slot,

@@ -345,6 +345,26 @@ line was matched to the wrong SO.
 
 ---
 
+## BUG-2026-07-23-001 — Editing a supplier payment that carried an ADVANCE row silently dropped the advance (restate rebuilt allocations only) `supplier-payments` `money`
+
+🟢 **Fixed + verified live (HPV-2607-020)**
+
+- **Symptom**: owner's Edit Payment on HPV-2607-020 (SUNMAT, RM 17,667.90 =
+  14 allocations + RM 1,619 advance) errored with the generic toast; worse,
+  had it succeeded pre-fix, the advance row would have been DELETED from the
+  subledger and the re-posted GL bank/control legs shrunk by 1,619.
+- **Root cause**: the edit form is allocations-only (advance is create-only),
+  and buildSupplierPaymentRestate deleted ALL payment rows then rebuilt only
+  the allocations sent by the form.
+- **Fix** (supplier-payments.ts): restate now PRESERVES no-PI rows — the
+  DELETE keeps them, their remaining unapplied amount is added back into the
+  re-posted GL totals (DR 400-0000 / CR bank exactly as at creation), and
+  their date follows the edited voucher date. FE shows an "advance kept"
+  banner in edit mode.
+- **Verify**: exact-value restate of HPV-2607-020 on prod → 200; GL identical
+  (17,667.90 both legs), 15 rows kept incl. advance 1,619, PI paids unchanged,
+  /ap-reconciliation residual 0.00.
+
 ## BUG-2026-07-17-001 — invoice prints the WRONG customer PO on consolidated DOs (first-one-wins guess) `invoices` `delivery` `consolidated-do` `print` `data-integrity` 🔴
 **Symptom (owner):** DO-2607-051 vs INV-2607-060 — "為什麼兩個 items details PO number
 不一樣?不對?" Correct. **4 of 12 invoice lines cite the WRONG customer PO.**

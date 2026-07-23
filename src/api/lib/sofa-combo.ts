@@ -158,15 +158,6 @@ export function applySofaCombos(
     if (heights.size > 1) continue;
     const seatHeight = [...heights][0];
 
-    const candidates = rules
-      .filter((r) => r.baseModel === baseModel && r.effectiveFrom <= todayDateStr)
-      .map((r) => ({ r, subset: findComboSubset(r.componentSizes, group) }))
-      .filter(
-        (x): x is { r: ComboRuleInput; subset: ComboLineInput[] } =>
-          x.subset !== null,
-      );
-    if (candidates.length === 0) continue;
-
     // Priority: (customer+tier) > (customer+ANY) > (company+tier) > (company+ANY).
     const priorityOf = (r: ComboRuleInput): number => {
       const isCustomer = r.customerId === customerId && customerId !== "";
@@ -177,28 +168,53 @@ export function applySofaCombos(
       if (!r.customerId && r.fabricTier === "ANY") return 1;
       return 0;
     };
-    const best = candidates
-      .map(({ r, subset }) => ({ r, subset, p: priorityOf(r) }))
-      .filter((x) => x.p > 0)
-      .sort((a, b) => b.p - a.p || (a.r.effectiveFrom < b.r.effectiveFrom ? 1 : -1))[0];
-    if (!best) continue;
 
-    const comboTotal = best.r.pricesByHeight[seatHeight];
-    if (typeof comboTotal !== "number" || comboTotal <= 0) continue;
-    const subsetSum = best.subset.reduce((s, g) => s + lineTotalOf(g), 0);
-    const discount = subsetSum - comboTotal;
-    if (discount <= 0) continue;
+    // A group can hold MULTIPLE complete sets (a customer ordering two identical
+    // sofa combos). findComboSubset consumes ONE set per call, so we re-match on
+    // the REMAINING lines until no combo is left — otherwise only the first set
+    // gets the discount and the rest stay full-retail, i.e. the 2nd+ set is
+    // OVER-charged (owner 2026-07-23: "买第二 set 不可能更贵"). Bounded by
+    // group.length: every pass consumes ≥1 line via `remaining`.
+    let remaining: ComboLineInput[] = group.slice();
+    for (let guard = group.length; guard > 0 && remaining.length > 0; guard--) {
+      const candidates = rules
+        .filter((r) => r.baseModel === baseModel && r.effectiveFrom <= todayDateStr)
+        .map((r) => ({ r, subset: findComboSubset(r.componentSizes, remaining) }))
+        .filter(
+          (x): x is { r: ComboRuleInput; subset: ComboLineInput[] } =>
+            x.subset !== null,
+        );
+      if (candidates.length === 0) break;
 
-    matches.push({
-      baseModel,
-      seatHeight,
-      fabricTier: best.r.fabricTier,
-      customerSpecific: best.r.customerId === customerId && customerId !== "",
-      discountSen: discount,
-      comboTotalSen: comboTotal,
-      components: best.subset.map((l) => l.sizeCode),
-      affectedKeys: best.subset.map((l) => l.key),
-    });
+      const best = candidates
+        .map(({ r, subset }) => ({ r, subset, p: priorityOf(r) }))
+        .filter((x) => x.p > 0)
+        .sort((a, b) => b.p - a.p || (a.r.effectiveFrom < b.r.effectiveFrom ? 1 : -1))[0];
+      if (!best) break;
+
+      // Consume this set from `remaining` regardless of discount so a following
+      // identical set can still be matched (and an already-combo'd first set
+      // doesn't block a discountable second one).
+      const consumed = new Set(best.subset.map((l) => l.key));
+      remaining = remaining.filter((l) => !consumed.has(l.key));
+
+      const comboTotal = best.r.pricesByHeight[seatHeight];
+      if (typeof comboTotal !== "number" || comboTotal <= 0) continue;
+      const subsetSum = best.subset.reduce((s, g) => s + lineTotalOf(g), 0);
+      const discount = subsetSum - comboTotal;
+      if (discount <= 0) continue; // already at/below combo total — no re-price
+
+      matches.push({
+        baseModel,
+        seatHeight,
+        fabricTier: best.r.fabricTier,
+        customerSpecific: best.r.customerId === customerId && customerId !== "",
+        discountSen: discount,
+        comboTotalSen: comboTotal,
+        components: best.subset.map((l) => l.sizeCode),
+        affectedKeys: best.subset.map((l) => l.key),
+      });
+    }
   }
 
   // Distribute each combo's total back onto the affected lines' basePriceSen.

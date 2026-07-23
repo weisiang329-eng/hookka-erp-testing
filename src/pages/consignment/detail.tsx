@@ -858,7 +858,7 @@ export default function SalesOrderDetailPage() {
             <Button variant="outline" size="sm" onClick={async () => {
               if (!order) return;
               const { generateCOPdf } = await import("@/lib/generate-co-pdf");
-              generateCOPdf(order, customer);
+              await generateCOPdf(order, customer);
             }}><Download className="h-4 w-4" /> PDF</Button>
             <Button variant="outline" size="sm" onClick={handleClone}><Copy className="h-4 w-4" /> Clone</Button>
             {canEdit && (

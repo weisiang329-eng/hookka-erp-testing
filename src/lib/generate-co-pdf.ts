@@ -1,22 +1,32 @@
-// Consignment Order PDF — thin wrapper over the shared renderer.
-//
-// Implementation lives in src/lib/generate-order-pdf.ts (closes DUP-005 in
-// bug_audit_duplicate_logic.md — this file used to be a 460-line copy of
-// generate-so-pdf.ts with 8 lines of meaningful diff). All layout / surcharge
-// rendering / letterhead / totals tweaks should be made in the shared file
-// so SO + CO never drift.
+// Consignment Order PDF — rendered by the SHARED unified generator (pdf-lib),
+// identical layout to the Sales Order / Invoice / DO: itemised Price column
+// (Base + Divan + Leg + T.Height + Special = unit) and the DO ref standard
+// (Our CO / PO / CO / REF). Previously wrapped the jsPDF generate-order-pdf.ts.
 import type { Customer } from "@/lib/mock-data";
 import type { ConsignmentOrder } from "@/types";
-import { generateOrderPdf } from "./generate-order-pdf";
+import {
+  downloadUnifiedConsignmentOrderPdf,
+  downloadCombinedUnifiedConsignmentOrderPdf,
+} from "./unified-doc-download";
 
-export function generateCOPdf(order: ConsignmentOrder, customer?: Customer | null) {
-  generateOrderPdf(order, customer ?? null, {
-    title: "CONSIGNMENT ORDER",
-    documentNumber: order.companyCOId ?? "",
-    documentDate: order.companyCODate,
-    customerRefRows: [
-      ["Customer CO", order.customerCOId || "-"],
-    ],
-    filename: order.companyCOId ?? order.id,
-  });
+type LooseOrder = Parameters<typeof downloadUnifiedConsignmentOrderPdf>[0];
+const addrOf = (c?: Customer | null): string | undefined =>
+  (c as { companyAddress?: string } | null | undefined)?.companyAddress;
+
+export async function generateCOPdf(
+  order: ConsignmentOrder,
+  customer?: Customer | null,
+): Promise<void> {
+  await downloadUnifiedConsignmentOrderPdf(order as unknown as LooseOrder, addrOf(customer));
+}
+
+export async function generateCombinedCOPdf(
+  items: { order: ConsignmentOrder; customer?: Customer | null }[],
+  filename = "ConsignmentOrders.pdf",
+): Promise<void> {
+  if (items.length === 0) return;
+  await downloadCombinedUnifiedConsignmentOrderPdf(
+    items.map((i) => ({ order: i.order as unknown as LooseOrder, billAddress: addrOf(i.customer) })),
+    filename,
+  );
 }

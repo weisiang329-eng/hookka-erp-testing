@@ -460,7 +460,7 @@ export default function SalesPage() {
       icon: <Printer className="h-3.5 w-3.5" />,
       action: async () => {
         const { generateCOPdf } = await import("@/lib/generate-co-pdf");
-        generateCOPdf(row, customers.find(c => c.id === row.customerId) ?? null);
+        await generateCOPdf(row, customers.find(c => c.id === row.customerId) ?? null);
       },
     },
     {
@@ -829,7 +829,7 @@ export default function SalesPage() {
                     try {
                       const { generateCOPdf } = await import("@/lib/generate-co-pdf");
                       for (const so of selectedRows) {
-                        generateCOPdf(so, customers.find(c => c.id === so.customerId) ?? null);
+                        await generateCOPdf(so, customers.find(c => c.id === so.customerId) ?? null);
                         // Tiny pacing delay between PDFs so the browser doesn't
                         // queue all download dialogs in the same tick. Inside
                         // an async event handler, not a React effect.

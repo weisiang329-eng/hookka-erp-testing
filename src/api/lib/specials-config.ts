@@ -73,8 +73,9 @@ export async function loadSpecialsConfig(
 export async function loadHeightsConfig(db: DbLike): Promise<{
   divanHeights: CfgHeight[] | null;
   legHeights: CfgHeight[] | null;
+  totalHeights: CfgHeight[] | null;
 }> {
-  const empty = { divanHeights: null, legHeights: null };
+  const empty = { divanHeights: null, legHeights: null, totalHeights: null };
   try {
     const row = await db
       .prepare("SELECT value FROM kv_config WHERE key = ?")
@@ -96,7 +97,11 @@ export async function loadHeightsConfig(db: DbLike): Promise<{
       }
       return out.length > 0 ? out : null;
     };
-    return { divanHeights: pick("divanHeights"), legHeights: pick("legHeights") };
+    return {
+      divanHeights: pick("divanHeights"),
+      legHeights: pick("legHeights"),
+      totalHeights: pick("totalHeights"),
+    };
   } catch {
     return empty;
   }

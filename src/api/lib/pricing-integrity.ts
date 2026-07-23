@@ -106,13 +106,14 @@ async function checkUnitNotSumOfParts(db: DbLike): Promise<PricingIssueRow[]> {
       .prepare(
         `SELECT so.companySOId, soi.lineNo, soi.productCode, soi.quantity,
                 soi.unitPriceSen, soi.basePriceSen, soi.divanPriceSen,
-                soi.legPriceSen, soi.specialOrderPriceSen
+                soi.legPriceSen, soi.specialOrderPriceSen, soi.totalHeightPriceSen
            FROM sales_order_items soi
            JOIN sales_orders so ON so.id = soi.salesOrderId
           WHERE so.status <> 'CANCELLED'
             AND COALESCE(soi.unitPriceSen,0) <>
                 COALESCE(soi.basePriceSen,0) + COALESCE(soi.divanPriceSen,0)
                 + COALESCE(soi.legPriceSen,0) + COALESCE(soi.specialOrderPriceSen,0)
+                + COALESCE(soi.totalHeightPriceSen,0)
           LIMIT 200`,
       )
       .bind()
@@ -120,7 +121,8 @@ async function checkUnitNotSumOfParts(db: DbLike): Promise<PricingIssueRow[]> {
     return (res.results ?? []).map((r) => {
       const parts =
         Number(r.basePriceSen ?? 0) + Number(r.divanPriceSen ?? 0) +
-        Number(r.legPriceSen ?? 0) + Number(r.specialOrderPriceSen ?? 0);
+        Number(r.legPriceSen ?? 0) + Number(r.specialOrderPriceSen ?? 0) +
+        Number(r.totalHeightPriceSen ?? 0);
       const unit = Number(r.unitPriceSen ?? 0);
       return {
         kind: "UNIT_NOT_SUM_OF_PARTS" as const,

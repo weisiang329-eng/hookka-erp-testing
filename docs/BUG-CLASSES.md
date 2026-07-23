@@ -98,11 +98,14 @@ share one hub, so the lookup is safe.
 | 1 | FG sticker `customerHub` | 2026-06-05 | every box label printed "Houzs KL", incl. Sabah / Sarawak |
 | 2 | service-order DO | 2026-06-11 | service DO printed a blank / wrong Deliver-To |
 | 3 | SO create hub resolution | — | correct: `body.hubId` → customer default only when absent |
-| 4 | **consolidated DO header** (`delivery-orders.ts:3423` → `:3454`) | ⬜ **OPEN** | 15 post-guard DOs whose lines are 100% PG/SRW/SBH are labelled "Houzs KL" |
+| 4 | **consolidated DO header** (`delivery-orders.ts`) | ✅ 2026-07-23 | 15 post-guard DOs whose lines are 100% PG/SRW/SBH were labelled "Houzs KL" |
 
-Row 4 is known and deliberately left: the owner's call is **fix forward, do not relabel
-already-shipped DOs**. The printed address was always correct; only the header label is wrong,
-so the damage is to reporting (delivery planning, 3PL state rates), not deliveries.
+Row 4 is now derived from the SO lines (DISTINCT hub across the DO's SOs, accepted only when
+there is exactly one — the composition guard's invariant), before the default-hub fallback.
+The 15 already-shipped DOs were deliberately left as-is per the owner: **fix forward, do not
+relabel shipped documents**. The printed address was always correct; only the header label was
+wrong, so the damage was to reporting (delivery planning, 3PL state rates), not deliveries.
+Pinned by `tests/do-consolidated-hub.test.mjs`.
 
 **Not the same as** a mixed-hub DO. Different hubs on one DO is blocked by the composition
 guard (BUG-2026-06-11-008) and that guard works — zero mixed DOs since it landed.

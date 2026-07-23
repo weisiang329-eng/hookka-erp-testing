@@ -3443,6 +3443,34 @@ async function createDeliveryOrderForPOs(
         }
       }
     }
+    // Consolidated multi-SO DO: salesOrderRow is NULL (no single SO), so the
+    // else-branch below would fall back to the customer's DEFAULT hub and stamp
+    // "Houzs KL" on a DO whose lines all ship to Penang. The address came out
+    // right (it is bound per-line further down), but the hub LABEL was wrong on
+    // 15 post-guard DOs — the header said KL while every line was PG/SRW/SBH,
+    // breaking every hub/state grouping (delivery planning, 3PL state rates).
+    //
+    // The lines themselves know the hub: read the DISTINCT hubId across the SOs
+    // in this DO. The one-customer/one-hub composition guard already ran above,
+    // so a well-formed selection has exactly ONE — use it. If somehow more than
+    // one survives, do NOT guess: leave hubTarget null and let the existing
+    // default-hub fallback stand (no worse than before). BUG-CLASSES.md C3.
+    if (!hubTarget && poRowsForItems.length > 0) {
+      const soIdsForHub = [
+        ...new Set(poRowsForItems.map((r) => r.salesOrderId ?? "").filter((x) => x)),
+      ];
+      if (soIdsForHub.length > 0) {
+        const ph = soIdsForHub.map(() => "?").join(",");
+        const hubRes = await c.var.DB.prepare(
+          `SELECT DISTINCT hubId FROM sales_orders
+            WHERE id IN (${ph}) AND hubId IS NOT NULL AND hubId <> ''`,
+        )
+          .bind(...soIdsForHub)
+          .all<{ hubId: string }>();
+        const distinctHubs = (hubRes.results ?? []).map((r) => r.hubId);
+        if (distinctHubs.length === 1) hubTarget = distinctHubs[0];
+      }
+    }
     if (hubTarget) {
       defaultHub = await c.var.DB.prepare(
         "SELECT id, shortName, address FROM delivery_hubs WHERE id = ?",

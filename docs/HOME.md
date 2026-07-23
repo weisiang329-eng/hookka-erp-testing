@@ -21,3 +21,12 @@ any folder.
 ## History
 - `archive/` holds retired one-off docs (audits, handoffs, dated readouts). Kept for git history,
   out of the hot path so agents don't wade through them.
+
+## Module deep guides (L2) — open FIRST for any module
+Verified, kept-fresh; each has function→line, flows, gotchas, common tasks.
+
+[[sales]] · [[procurement]] · [[delivery]] · [[accounting]] · [[production]] · [[inventory]] · [[products]] · [[customers]] · [[employees]] · [[planning]] · [[dashboard]] · [[service-repair]] · [[reports]] · [[rnd]] · [[quality-warehouse]]
+
+## Find fast
+- [[ONBOARDING-PATH]] — how to get productive without grepping (the reading order)
+- [[SYMBOLS]] — API endpoint index; Ctrl-F the path instead of grepping

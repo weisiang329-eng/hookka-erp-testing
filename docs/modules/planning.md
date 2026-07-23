@@ -1,0 +1,86 @@
+# Planning — Module Guide
+
+> Self-navigating docs (L2). Repo-wide map: [[CODEBASE-MAP]]. Never grep the whole repo — use the file:line below.
+
+## What it does
+Owns production **planning, scheduling, MRP and lead times** — the read-mostly analytics layer that sits on top of Production. The `/planning` page is a 5-tab console (Capacity Overview / Capacity Loading / Lead Times / Master Tracker / Schedule Proposals) that READS `production_orders` + `job_cards` and never mutates production. The real scheduling math lives in `src/api/lib` (capacity, chain engine, cutting scheduler, lead-times), and the routes are thin. **Lead times** are configurable per department with a history + scheduled-change trail and a due-date (DD) buffer. **MRP** explodes active POs into material requirements. **Schedule Proposals** (Phase-2) are read-only due-date suggestions an agent generates; only the human approve action writes back `job_cards.dueDate`.
+
+## Entry points
+- Pages
+  - `/planning` → `src/pages/planning/index.tsx:441` (`PlanningPage` — one ~3600-line component, 5 tab-gated render blocks)
+  - MRP view → `src/pages/planning/mrp.tsx` (reads/posts `/api/mrp`)
+  - Lead-time history + scheduled changes → `src/pages/planning/LeadTimeHistoryDialog.tsx`
+  - Per-dept daily schedule (shared renderer) → `src/pages/planning/dept/_DepartmentSchedulePage.tsx` (+ `_PlainDeptSchedulePage.tsx` plain-table variant)
+  - Dept config shells (one per dept, no logic) → `src/pages/planning/dept/{fabric-cutting,fabric-sewing,wood-cutting,foam-bonding,framing,webbing,upholstery,packing}.tsx`
+  - Agent Console (SUPER_ADMIN) → `src/pages/agents/index.tsx`
+- API routes (mounts in `src/api/worker.ts`)
+  - Lead-time config + history → `src/api/routes/production-leadtimes.ts` (mounted at BOTH `/api/production-leadtimes` and `/api/production/leadtimes` — FE uses the latter)
+  - Per-dept daily schedule data → `src/api/routes/planning-schedule.ts` (mounted `/api/planning`)
+  - Phase-2 due-date proposals → `src/api/routes/schedule-proposals.ts` (mounted `/api/planning`, so `/api/planning/proposals/*`)
+  - MRP runs → `src/api/routes/mrp.ts` (`/api/mrp`)
+  - Legacy scheduling snapshot → `src/api/routes/scheduling.ts` (`/api/scheduling`)
+  - Agent console → `src/api/routes/agent-console.ts` (`/api/agents`, `requireSuperAdmin`)
+  - Backend math libs → `src/api/lib/{planning-capacity,planning-chain,planning-scheduler,lead-times,schedule-proposals}.ts`
+- Production READS only: `src/api/routes/production-orders.ts` (7606 lines, Production-owned — grep targeted handlers, never read whole)
+
+## Data model
+- `production_orders` — active POs, due dates, progress (READ only from Planning).
+- `job_cards` — per-PO dept sequence, `wipKey`, earliest-pending due date; `job_cards.dueDate` is the ONLY thing a proposal approve writes.
+- `production_lead_times` — **legacy** single-row config; the history/buffer tables below are the live source.
+- `production_lead_times_history` — lead-time change history + future scheduled changes.
+- `hookka_dd_buffer_history` — due-date buffer history (days added between production-done and customer DD).
+- `mrp_runs` / `mrp_requirements` — MRP run headers + exploded material requirements.
+- `schedule_proposals` / `plan_snapshots` — Phase-2 proposals + approved-batch snapshots; **runtime self-apply** via `ensureProposalTables` (NOT migration files).
+- `agent_runs` / `agent_controls` / `config_proposals` — agent workforce runtime state (self-apply).
+- `kv_config` — `public_holidays`, schedule settings, `lead-time-settings`, `planning_capacity` config.
+
+## Core flows
+1. **Capacity / loading / tracker read** — `PlanningPage` (`index.tsx:441`) fetches POs/JCs and renders tab-gated blocks: Capacity Overview (`:1881`), Capacity Loading chart (`:2367`), Master Tracker (`:2625`), Lead Times inline form (`:2934`), Schedule Proposals (`:3152` → `ScheduleProposalsTab` `:3248`). `DrilldownModal` (`:3540`) shows per-cell detail.
+2. **Lead-time save / recalc** — inline Save form (`index.tsx:2934`) → `PUT /api/production/leadtimes` (`production-leadtimes.ts:230`) + `PUT /settings` (`:202`); `POST /recalc-all` (`:310`) walks every PO + `job_cards` row and re-derives due dates from lead times + DD buffer. Gated OFF when `autoScheduleEnabled` is false so hand-entered due dates are never clobbered.
+3. **Per-dept daily schedule** — `GET /api/planning/schedule/:dept` (`planning-schedule.ts:505`, plus the `fabric-cutting` special `:104`) runs the cutting scheduler and returns per-day lanes rendered by `_DepartmentSchedulePage.tsx`.
+4. **Phase-2 proposals (read-only → approve writes)** — `POST /api/planning/proposals/generate` (`schedule-proposals.ts:75`) is pause-gated (`isAgentPaused`) + agent-run-logged (`recordAgentRun`) and calls `generateProposals` (`lib/schedule-proposals.ts:162`) — pure read, no writes. `POST /proposals/approve` (`:138`) is the ONLY path that writes `job_cards.dueDate` and stores one `plan_snapshots` row; `/proposals/reject` (`:213`) just flips status.
+5. **MRP run** — `POST /api/mrp` (`mrp.ts:538`) explodes active POs into `mrp_requirements`; `GET /` (`:399`), `GET /runs` (`:460`), `GET /runs/:id` (`:481`) read them.
+
+## Key functions / sections (locate-to-function)
+| Symbol / section | file:line | Role |
+|---|---|---|
+| `PlanningPage` | `src/pages/planning/index.tsx:441` | Default export; 5 tab-gated render blocks keyed off `activeTab` |
+| `TABS` def / `TabId` | `src/pages/planning/index.tsx:196 / 204` | capacity · loading · leadtimes · tracker · proposals |
+| Tab blocks | `index.tsx:1881 / 2367 / 2625 / 2934 / 3152` | Capacity Overview / Loading / Master Tracker / Lead Times / Proposals |
+| `ScheduleProposalsTab` | `src/pages/planning/index.tsx:3248` | Proposals list + approve/reject UI |
+| `DrilldownModal` | `src/pages/planning/index.tsx:3540` | Per-cell schedule drilldown |
+| `computeChainWithAssignments` | `src/api/routes/planning-schedule.ts:468` | Phase-2 chain engine with per-(card,day) assignment collector |
+| `GET /schedule/:dept` | `src/api/routes/planning-schedule.ts:505` | Per-dept daily schedule data (`fabric-cutting` special at `:104`) |
+| `computeChain` | `src/api/lib/planning-chain.ts:1775` | Pure chain engine; takes OPTIONAL `collect` callback |
+| `scheduleCutting` / `runCutting` | `src/api/lib/planning-scheduler.ts:814 / 519` | Cutting-queue scheduler snapshot |
+| `loadCapacityConfig` / `mergeCapacityConfig` | `src/api/lib/planning-capacity.ts:368 / 280` | Per-dept capacity config from `kv_config` |
+| `loadLeadTimes` / `leadDaysFor` | `src/api/lib/lead-times.ts:99 / 139` | Lead-time load + per-category day lookup |
+| `loadHookkaDDBuffer` / `hookkaDDBufferFor` | `src/api/lib/lead-times.ts:185 / 212` | DD-buffer load + lookup |
+| `loadLeadTimeSettings` / `saveLeadTimeSettings` | `src/api/lib/lead-times.ts:250 / 277` | Auto-schedule toggle in `kv_config` |
+| `POST /recalc-all` | `src/api/routes/production-leadtimes.ts:310` | Re-derive due dates across all POs/JCs (gated) |
+| `generateProposals` | `src/api/lib/schedule-proposals.ts:162` | Read-only proposal generation |
+| `applyPendingProposals` / `ensureProposalTables` | `src/api/lib/schedule-proposals.ts:351 / 34` | Apply approved batch / self-apply tables |
+| `POST /proposals/approve` | `src/api/routes/schedule-proposals.ts:138` | ONLY writer of `job_cards.dueDate` + `plan_snapshots` |
+| `recordAgentRun` / `isAgentPaused` | `src/api/lib/agent-console.ts:124 / 217` | Agent-run logging + pause gate |
+
+## Gotchas
+- **Backend math is in `src/api/lib`, NOT the routes.** Change schedule/capacity/lead-time math in `planning-capacity.ts`, `planning-chain.ts`, `planning-scheduler.ts`, `lead-times.ts` — the routes are thin passthroughs.
+- **Proposals are read-only until approved.** `computeChain`'s optional `collect` callback emits per-(card,day) assignments; every pre-Phase-2 call site passes none, so schedules stay byte-identical. Generation writes nothing — only `POST /api/planning/proposals/approve` writes `job_cards.dueDate`. `schedule_proposals` / `plan_snapshots` are runtime self-apply (`ensureProposalTables`), NOT migration files.
+- **NUL sentinel in the engines.** `planning-chain.ts` and `planning-scheduler.ts` each contain ONE intentional NUL separator written as the 6-char source escape `\u0000` — never save it as a raw `0x00` byte (a raw NUL makes git/grep treat the file as binary).
+- **`production_lead_times` is legacy.** History/buffer tables are the live source. The inline Save Lead Times form (`index.tsx:2934`) and `LeadTimeHistoryDialog.tsx` both hit `/api/production/leadtimes` — keep them consistent (dialog comment flags this).
+- **`recalc-all` is server-gated.** It no-ops when `autoScheduleEnabled` is false (`production-leadtimes.ts:317`), regardless of UI state, so manually-entered due dates are never overwritten. It reads existing `job_cards.wipKey` — do not re-implement the shared `deriveTopLevelWipKey` formula here.
+- **Dept pages are config-only shells** over the ONE shared renderer `_DepartmentSchedulePage.tsx`. Layout/column changes belong in the shared file, not the per-dept copies.
+- **`PlanningPage` is one ~3600-line component** with TAB-gated render blocks selected by the `activeTab` string, not separate files — edit the matching block (line ranges above).
+- **Capacity Loading uses working-day windows** (Mon–Sat, Sundays excluded): 14 past / 21 future days (`index.tsx:193-194`), not calendar days.
+- **Planning never mutates Production.** `production-orders.ts` (7606 lines) is Production-owned; Planning only READS it. Grep targeted handlers, never read the whole file.
+- **Root-level `*.xlsx` and `scripts/*.py`** (`build_*_xlsx.py`, `dept_flow_scheduler.py`) are throwaway export/planning-data tooling, NOT part of this module — ignore them.
+
+## Common tasks (mini-playbook)
+- **Change schedule/capacity math** → edit the `src/api/lib` engine (`planning-scheduler.ts` / `planning-chain.ts` / `planning-capacity.ts`), never the thin route. Verify with `tests/planning-scheduler.test.mjs`, `tests/scheduler.test.mjs`, `tests/scheduling.test.mjs`.
+- **Adjust a lead time or DD buffer** → math in `lead-times.ts` (`leadDaysFor:139`, `hookkaDDBufferFor:212`); persist via `PUT /api/production/leadtimes` (`production-leadtimes.ts:230`); after config changes fire `POST /recalc-all` (`:310`). Keep the inline form + `LeadTimeHistoryDialog` in sync.
+- **Add a proposal field / rule** → change `generateProposals` (`lib/schedule-proposals.ts:162`); it must stay read-only. Only extend the writer inside `POST /proposals/approve` (`schedule-proposals.ts:138`). Tables self-apply in `ensureProposalTables` (`:34`).
+- **Add a Planning tab** → add to `TABS` (`index.tsx:196`) + a `{activeTab === "x" && (...)}` block; back it with a thin `app.get` in `planning-schedule.ts` calling a `src/api/lib` helper.
+- **Touch MRP** → run/read handlers in `mrp.ts` (run `POST /:538`, reads `:399/:460/:481`); page `mrp.tsx`.
+
+## Related modules
+[[production]] [[sales]] [[procurement]] [[inventory]] [[delivery]]

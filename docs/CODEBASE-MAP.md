@@ -7,9 +7,27 @@ repo **time out** (large tree + many worktrees), so use the file:line entries be
 Retired duplicates now pointing here: `docs/code-map.md`; the code-location role of
 `docs/MODULES.md` (MODULES stays as the higher-level *product* reference).
 
-> **Keeping it fresh (update-on-touch):** line numbers drift as files grow — when you edit a
-> module, refresh its entry here as a byproduct. The section *names* stay stable even when the
-> exact line moves, so grep the named function/section near the listed line if it's off by a bit.
+## 📖 Per-module deep guides — open these FIRST
+
+Every module has a verified, kept-fresh guide (function→line, core flows, gotchas, common tasks).
+**The detailed section-indexes further down this file drift as files grow — the guides are the
+authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOARDING-PATH.md).
+
+| Module | Guide | | Module | Guide |
+|---|---|---|---|---|
+| Sales | [modules/sales.md](modules/sales.md) | | Planning | [modules/planning.md](modules/planning.md) |
+| Procurement | [modules/procurement.md](modules/procurement.md) | | Dashboard | [modules/dashboard.md](modules/dashboard.md) |
+| Delivery & Consignment | [modules/delivery.md](modules/delivery.md) | | Service & Repair | [modules/service-repair.md](modules/service-repair.md) |
+| Accounting & Invoicing | [modules/accounting.md](modules/accounting.md) | | Reports & Analytics | [modules/reports.md](modules/reports.md) |
+| Production & BOM | [modules/production.md](modules/production.md) | | R&D | [modules/rnd.md](modules/rnd.md) |
+| Inventory | [modules/inventory.md](modules/inventory.md) | | Quality/Warehouse/Platform | [modules/quality-warehouse.md](modules/quality-warehouse.md) |
+| Products & MDM | [modules/products.md](modules/products.md) | | Employees & Payroll | [modules/employees.md](modules/employees.md) |
+| Customers & Platform | [modules/customers.md](modules/customers.md) | | | |
+
+> **Keeping it fresh (update-on-touch):** file sizes / line numbers below drift as files grow.
+> When you edit a module, refresh its `docs/modules/*.md` guide (the authoritative detail) as a
+> byproduct. Section *names* stay stable, so grep the named function/section near the listed line
+> if the number is off.
 
 ---
 
@@ -57,7 +75,7 @@ Retired duplicates now pointing here: `docs/code-map.md`; the code-location role
   - CopyMasterCombosButton (copy-to-company) — L1755-1852
 
 **Gotchas**
-- Sofa combo pricing is BACKEND-unified: `applySofaCombos` (`src/api/lib/sofa-combo.ts`) wired into sales-orders POST+PUT — never re-implement combo pricing in the frontend. Piece code = productCode (stored sizeCode is the SEAT size); tier null disqualifies; discount<=0 is idempotent no-op. Old full-price combo SOs re-price down on next edit.
+- Sofa combo pricing is BACKEND-unified: sales-orders.ts imports `runSofaComboPass` (`src/api/lib/sofa-combo-pass.ts:114`), called at POST (~L2449) and PUT (~L3974); that wrapper calls `applySofaCombos` (`src/api/lib/sofa-combo.ts:121`). Do NOT grep `sales-orders.ts` for `applySofaCombos` — it's indirect now (moved 2026-06-11). Never re-implement combo pricing in the frontend. Piece code = productCode (stored sizeCode is the SEAT size); tier null disqualifies; discount<=0 is idempotent no-op. Old full-price combo SOs re-price down on next edit.
 - `so_status_changes` / `co_status_changes` store an autoActions JSON blob and drive cascades to production_orders/job_cards/fg_units/DO/invoices — status transitions are not just label changes.
 - sales-orders.ts uses item-catalog-snap on POST (OCR/scan-PO back-door risk; SO PUT + CO POST/PUT historically less covered). `sales_orders_list_snapshot` is cache-aside (filtered fetches bypass cache).
 - CN is the consignment DO-equivalent. Owner rulings: CNs NEVER have invoices; 3PL stays DO-side. Amount on CN/CO list derives from CO value, not a stored field. Dispatch/delivered emails idempotent via folded-lowercase dispatchemailat/deliveredemailat.
@@ -190,7 +208,7 @@ Retired duplicates now pointing here: `docs/code-map.md`; the code-location role
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/accounting/index.tsx` — mega-page, ~25 tabs (7945) | `src/api/routes/accounting.ts` — the accounting engine (~8147) | `chart_of_accounts` / `account_aliases` | `tests/cashflow-engine.test.mjs` |
+| `src/pages/accounting/index.tsx` — mega-page, ~25 tabs (10627) | `src/api/routes/accounting.ts` — the accounting engine (11525) | `chart_of_accounts` / `account_aliases` | `tests/cashflow-engine.test.mjs` |
 | `src/pages/accounting/cash-flow.tsx` — standalone cash-flow | `src/api/routes/invoices.ts` — sales invoices (~2310) | `journal_entries` / `journal_lines` / `ledger_journal_entries` | `tests/other-party-payment.test.mjs` |
 | `src/pages/invoices/index.tsx` — sales invoice list | `src/api/routes/payments.ts` — customer receipts | `document_lifecycle` | `tests/supplier-payment-alloc.test.mjs` |
 | `src/pages/invoices/detail.tsx` — invoice editor (per-line discount) | `src/api/routes/supplier-payments.ts` — pay PIs (money-critical) | `invoices` / `invoice_items` / `invoice_payments` / `payment_records` | |
@@ -204,7 +222,7 @@ Retired duplicates now pointing here: `docs/code-map.md`; the code-location role
 - `src/pages/accounting/index.tsx`
   - TYPES — L48-77
   - AccountPicker — L78-212
-  - Audit Log tab (document lifecycle trail, F3) — L213-321
+  - Audit Log tab (document lifecycle trail, F3) — EXTRACTED to `src/pages/accounting/tabs/AuditLogTab.tsx` (no longer inline in index.tsx)
   - MAIN PAGE (tab host / nav) — L322-426
   - Overview tab + cards (Cleanup, Contra, LandedCost, DocNumbering, GstRate, Fye, StockMap, Aging) — L427-1320
   - Chart of Accounts tab (COATab) — L1321-1905
@@ -245,7 +263,7 @@ Retired duplicates now pointing here: `docs/code-map.md`; the code-location role
 - Other-Party Bills edit-in-place (2026-07-09): `PUT /other-party-bills/:billNo` — restate pattern (reverse visible GL `other_party_bill_restate_rev:<stamp>` + post `_restate_post:<stamp>` + collapse), same number, party FIXED, new total ≥ paidAmountSen (pure `editedBillStatus`). ⚠️ void/delete/unvoid MUST pass the whole leg family via `otherPartyBillLegFamily` (applyLifecycle exact-matches sourceTypes; plain `['other_party_bill']` would leave an edited bill's restate legs visible after void). Previously-voided-then-restored bills refuse edit (void trail pinned to old figures — Copy instead).
 - AR drift diagnosis (2026-07-09): `GET /ar-reconciliation` — same pure decomposition via ReconCfg (300-0000 legs fed debit/credit-SWAPPED; invoices=doc family, payment_records allocations=pay family; no advances — /ar-control subtracts none). Known standing item: debtor opening NOT yet entered → −40,000 drift (2 receipts paying 23 un-flagged pre-opening invoices) is EXPECTED until the owner runs the debtor-opening project (v5 list + flag-as-opening switch to build).
 - AP drift diagnosis (2026-07-08): `GET /ap-reconciliation` (accounting.ts, right after /ap-control) — read-only, itemizes `driftControlVsPiSen` into per-document items (opening coverage, per-PI GL vs face, per-payment GL vs claim incl. void leaks, voided-advance rows, paid_amount drift, overpaid clamps, CN block, stray sources on 400-0000) whose contributions sum EXACTLY to the drift (pure `src/lib/ap-recon.ts`, tests/ap-recon.test.mjs asserts the identity). Use it BEFORE hand-reconciling any control-vs-subledger gap.
-- Two huge files (index.tsx 7945, accounting.ts 8147) — use the `// =============== TAB:` banners as jump anchors; never read either end-to-end.
+- Two huge files (index.tsx ~10627, accounting.ts ~11525) — index.tsx has `// =============== TAB:` banners; accounting.ts uses `// ----` section headers (NOT TAB banners), so anchor on `app.get/post` handler + `function` lines. Never read either end-to-end. ⚠️ The `index.tsx` section-index line numbers below drift 2-3k lines — grep the named symbol/tab near the listed line.
 - `e-invoices.invoiceId` is intentionally NOT FK-enforced — legacy/standalone e-invoices reference invoices that may not exist; don't add a hard FK.
 - Service-order invoices price RM 0 by owner ruling; locked SOs (production COMPLETED + DO delivered) refuse header changes — don't override production locks for cosmetic invoice fixes.
 

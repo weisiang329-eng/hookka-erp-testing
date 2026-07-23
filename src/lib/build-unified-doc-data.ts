@@ -29,7 +29,43 @@ export type DocLineExtra = BuildSpecExtra & {
   customerSO?: string | null;
   customerRef?: string | null;
   repairNote?: string | null;
+  // Invoice price build-up (from computeInvoicePrintExtras) — used to itemise
+  // the Price column (Base + Divan + Leg + T.Height + Special). Restores the
+  // breakdown the pre-unified jsPDF invoice printed; dropped in 4aa6b1fa.
+  baseSen?: number | null;
+  divanSen?: number | null;
+  legSen?: number | null;
+  specialSen?: number | null;
+  totalHeightSen?: number | null;
 };
+
+/**
+ * The invoice Price-column build-up: Base + each non-zero surcharge + "=" unit.
+ * Returns undefined (→ render the single price) when there is no surcharge, or
+ * when the stored components do NOT reconcile to the charged price — so a
+ * breakdown that doesn't add up (e.g. combo-redistributed sofa base) is never
+ * printed. Mirrors the old generate-invoice-pdf.ts priceLines exactly.
+ */
+export function invoicePriceBreakdown(
+  ex: DocLineExtra | undefined,
+  priceSen: number,
+): Array<{ label: string; sen: number }> | undefined {
+  if (!ex) return undefined;
+  const base = Number(ex.baseSen) || 0;
+  const divan = Number(ex.divanSen) || 0;
+  const leg = Number(ex.legSen) || 0;
+  const th = Number(ex.totalHeightSen) || 0;
+  const special = Number(ex.specialSen) || 0;
+  if (!(divan || leg || th || special)) return undefined;
+  if (base + divan + leg + th + special !== priceSen) return undefined;
+  const rows: Array<{ label: string; sen: number }> = [{ label: "Base", sen: base }];
+  if (divan) rows.push({ label: "+ Divan", sen: divan });
+  if (leg) rows.push({ label: "+ Leg", sen: leg });
+  if (th) rows.push({ label: "+ T.Height", sen: th });
+  if (special) rows.push({ label: "+ Special", sen: special });
+  rows.push({ label: "=", sen: priceSen });
+  return rows;
+}
 
 export interface UnifiedDoInput {
   doNo: string;
@@ -214,6 +250,7 @@ export function buildUnifiedInvoiceData(input: UnifiedInvoiceInput, logoPngBase6
       set: it.quantity,
       priceSen: it.priceSen,
       lineTotalSen: it.lineTotalSen,
+      priceBreakdown: invoicePriceBreakdown(ex, it.priceSen),
     });
   }
 

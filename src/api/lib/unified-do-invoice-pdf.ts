@@ -48,6 +48,9 @@ export interface UnifiedLineItem {
   // Invoice: price + line total (already sen).
   priceSen?: number;
   lineTotalSen?: number;
+  // Invoice: itemised Price-column build-up (Base + Divan + … + "=" unit).
+  // Absent → the Price column shows the single price.
+  priceBreakdown?: Array<{ label: string; sen: number }>;
 }
 
 export interface UnifiedDocGroup {
@@ -286,7 +289,8 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
       for (const s of it.specLines) specWrapped.push(...wrapHard(fonts.helv, s, wDesc, 7.5, 3));
       const qtyWrapped = isDO ? wrapHard(fonts.helv, it.qtyBreakdown || "-", qtyColW, 7.5, 4) : [];
       const descLineCount = codeWrapped.length + nameWrapped.length + specWrapped.length;
-      const rowLines = Math.max(refWrapped.length, descLineCount, qtyWrapped.length, 1);
+      const priceBreakdownLines = !isDO && it.priceBreakdown ? it.priceBreakdown.length : 0;
+      const rowLines = Math.max(refWrapped.length, descLineCount, qtyWrapped.length, priceBreakdownLines, 1);
       const rowH = rowLines * 9.3 + 6;
       ensureSpace(rowH);
 
@@ -315,6 +319,26 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
           rightText(page, ln, xCol4Right, y - i * 9.3, 7.5, fonts.helv, INK);
         });
         rightText(page, String(it.totalQty ?? ""), xCol5Right, y, 8, fonts.helv, INK);
+      } else if (it.priceBreakdown && it.priceBreakdown.length) {
+        // Itemised Price column (restored from the pre-unified jsPDF invoice):
+        // Base / + surcharge / = unit, stacked from the row top. The line-total
+        // aligns to the "=" (unit) row so the two right-hand numbers read as a
+        // pair. Surcharge rows are muted; the "=" and total are bold.
+        page.drawText(String(it.set), { x: xSet, y: midY, size: 8, font: fonts.helv, color: INK });
+        it.priceBreakdown.forEach((r, i) => {
+          const isTotal = r.label === "=";
+          rightText(
+            page,
+            `${r.label} ${money(r.sen)}`,
+            xCol4Right,
+            y - i * 9.3,
+            7,
+            isTotal ? fonts.bold : fonts.helv,
+            isTotal ? INK : MUTED,
+          );
+        });
+        const lastY = y - (it.priceBreakdown.length - 1) * 9.3;
+        rightText(page, money(it.lineTotalSen ?? 0), xCol5Right, lastY, 8, fonts.bold, INK);
       } else {
         page.drawText(String(it.set), { x: xSet, y: midY, size: 8, font: fonts.helv, color: INK });
         rightText(page, money(it.priceSen ?? 0), xCol4Right, midY, 8, fonts.helv, INK);

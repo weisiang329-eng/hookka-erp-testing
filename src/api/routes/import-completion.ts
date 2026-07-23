@@ -7178,6 +7178,15 @@ app.post("/recompute-so-sofa-prices", async (c) => {
   //    re-distributed so the GROUP SUM == comboTotal (rule price for that
   //    seatHeight). Without this pass, recompute restores full-retail
   //    per-piece prices and silently strips the combo discount.
+  //
+  // ⚠️ DRIFT WARNING — canonical engine is applySofaCombos
+  //    (src/api/lib/sofa-combo.ts), pinned by
+  //    tests/sofa-combo-drift-guard.test.mjs. As of 2026-07-23 this inline copy
+  //    is BEHIND it: applySofaCombos now loops so MULTIPLE identical sets in one
+  //    order each get the combo; this copy still matches a single set per group.
+  //    It's a manual repricer (rarely run), but if you run it on an order with
+  //    two identical combo sets it will over-charge the 2nd. TODO: refactor this
+  //    route to call applySofaCombos instead of re-implementing the maths.
   type ComboRule = {
     baseModel: string;
     componentSizes: unknown; // string[] | string[][]

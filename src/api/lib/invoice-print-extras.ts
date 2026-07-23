@@ -36,6 +36,7 @@ export interface InvoiceLineExtra {
   divanSen: number;
   legSen: number;
   specialSen: number;
+  totalHeightSen: number;
   unitSen: number;
   customerPOId?: string | null;
   customerSOLine?: string | null;
@@ -48,7 +49,7 @@ export interface InvoicePrintExtras {
   customerRef: string;
   priceByCode: Record<
     string,
-    { baseSen: number; divanSen: number; legSen: number; specialSen: number; unitSen: number }
+    { baseSen: number; divanSen: number; legSen: number; specialSen: number; totalHeightSen: number; unitSen: number }
   >;
   items: Record<string, InvoiceLineExtra>;
 }
@@ -164,7 +165,7 @@ export async function computeInvoicePrintExtras(
         `SELECT productCode, fabricCode, sizeLabel, itemCategory,
                 gapInches, divanHeightInches, legHeightInches, specialOrder,
                 basePriceSen, divanPriceSen, legPriceSen,
-                specialOrderPriceSen, unitPriceSen
+                specialOrderPriceSen, totalHeightPriceSen, unitPriceSen
            FROM sales_order_items WHERE salesOrderId IN (${ph})`,
       )
       .bind(...ids)
@@ -181,6 +182,7 @@ export async function computeInvoicePrintExtras(
         divanPriceSen: number;
         legPriceSen: number;
         specialOrderPriceSen: number;
+        totalHeightPriceSen: number;
         unitPriceSen: number;
       }>();
     for (const r of siRes.results ?? []) {
@@ -204,6 +206,7 @@ export async function computeInvoicePrintExtras(
         divanSen: Number(r.divanPriceSen) || 0,
         legSen: Number(r.legPriceSen) || 0,
         specialSen: Number(r.specialOrderPriceSen) || 0,
+        totalHeightSen: Number(r.totalHeightPriceSen) || 0,
         unitSen: Number(r.unitPriceSen) || 0,
       };
       if (code) {
@@ -218,6 +221,7 @@ export async function computeInvoicePrintExtras(
             divanSen: v.divanSen,
             legSen: v.legSen,
             specialSen: v.specialSen,
+            totalHeightSen: v.totalHeightSen,
             unitSen: v.unitSen,
           };
       }
@@ -295,7 +299,7 @@ export async function computeInvoicePrintExtras(
     .prepare(
       `SELECT id, productCode, fabricCode, sizeLabel,
               basePriceSen, divanPriceSen, legPriceSen,
-              specialOrderPriceSen, priceEdited, production_order_id
+              specialOrderPriceSen, totalHeightPriceSen, priceEdited, production_order_id
          FROM invoice_items WHERE invoiceId = ?`,
     )
     .bind(invoiceId)
@@ -308,6 +312,7 @@ export async function computeInvoicePrintExtras(
       divanPriceSen: number | null;
       legPriceSen: number | null;
       specialOrderPriceSen: number | null;
+      totalHeightPriceSen: number | null;
       priceEdited: number | null;
     }>();
   for (const r of invItemsRes.results ?? []) {
@@ -333,6 +338,7 @@ export async function computeInvoicePrintExtras(
     const invDivan = Number(r.divanPriceSen) || 0;
     const invLeg = Number(r.legPriceSen) || 0;
     const invSpecial = Number(r.specialOrderPriceSen) || 0;
+    const invTotalHeight = Number(r.totalHeightPriceSen) || 0;
     if (v || rf || edited) {
       items[r.id] = {
         itemCategory: v?.itemCategory ?? null,
@@ -345,7 +351,8 @@ export async function computeInvoicePrintExtras(
         divanSen: edited ? invDivan : (v?.divanSen ?? 0),
         legSen: edited ? invLeg : (v?.legSen ?? 0),
         specialSen: edited ? invSpecial : (v?.specialSen ?? 0),
-        unitSen: edited ? invBase + invDivan + invLeg + invSpecial : (v?.unitSen ?? 0),
+        totalHeightSen: edited ? invTotalHeight : (v?.totalHeightSen ?? 0),
+        unitSen: edited ? invBase + invDivan + invLeg + invSpecial + invTotalHeight : (v?.unitSen ?? 0),
         customerPOId: rf?.customerPOId ?? null,
         customerSOLine: rf?.customerSOLine ?? null,
         customerRefLine: rf?.customerRefLine ?? null,

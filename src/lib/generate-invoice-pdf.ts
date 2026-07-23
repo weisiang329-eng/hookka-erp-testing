@@ -22,6 +22,7 @@ export type InvoiceLineExtra = {
   divanSen: number;
   legSen: number;
   specialSen: number;
+  totalHeightSen?: number;
   unitSen: number;
   // Per-line customer references (a consolidated invoice carries a
   // different PO / customer SO / our company SO on every line).
@@ -162,6 +163,7 @@ function priceLines(
   const rows: string[] = [`Base ${fmtCurrency(ex.baseSen || 0)}`];
   if (ex.divanSen) rows.push(`+ Divan ${fmtCurrency(ex.divanSen)}`);
   if (ex.legSen) rows.push(`+ Leg ${fmtCurrency(ex.legSen)}`);
+  if (ex.totalHeightSen) rows.push(`+ T.Height ${fmtCurrency(ex.totalHeightSen)}`);
   if (ex.specialSen) rows.push(`+ Special ${fmtCurrency(ex.specialSen)}`);
   if (rows.length === 1) {
     // No separately-priced add-ons — the divan / leg are built into the

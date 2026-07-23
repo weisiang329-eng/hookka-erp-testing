@@ -60,6 +60,10 @@ export interface UnifiedDocGroup {
 
 export interface UnifiedDocData {
   kind: "DO" | "INVOICE";
+  // Override the big header title / footer noun. Lets a Sales Order reuse the
+  // INVOICE-style price rendering (kind:"INVOICE") while reading "SALES ORDER".
+  docTitle?: string;
+  footerLabel?: string;
   docNo: string;
   docDate: string;
   statusText: string; // "C.O.D." | "NET 30"
@@ -192,7 +196,7 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
   const logoW = logoH * LOGO_ASPECT;
   const textX = logo ? MARGIN + logoW + 8 : MARGIN;
 
-  const title = data.kind === "DO" ? "DELIVERY ORDER" : "INVOICE";
+  const title = data.docTitle ?? (data.kind === "DO" ? "DELIVERY ORDER" : "INVOICE");
 
   // ── Letterhead ──────────────────────────────────────────────────────────
   const drawLetterhead = (): number => {
@@ -263,7 +267,7 @@ export async function buildUnifiedDocPdf(data: UnifiedDocData): Promise<Uint8Arr
 
   const drawFooterLine = () => {
     page.drawRectangle({ x: MARGIN, y: 40, width: PAGE_W - MARGIN * 2, height: 0.4, color: RULE });
-    page.drawText(`${HOOKKA_NAME} · Computer-generated ${isDO ? "delivery order" : "invoice"}`, {
+    page.drawText(`${HOOKKA_NAME} · Computer-generated ${data.footerLabel ?? (isDO ? "delivery order" : "invoice")}`, {
       x: MARGIN, y: 31, size: 7, font: fonts.helv, color: FAINT,
     });
   };

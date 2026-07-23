@@ -8,8 +8,10 @@
 import {
   buildUnifiedDoData,
   buildUnifiedInvoiceData,
+  buildUnifiedSalesOrderData,
   type UnifiedDoInput,
   type UnifiedInvoiceInput,
+  type UnifiedSalesOrderInput,
   type DocLineExtra,
 } from "./build-unified-doc-data";
 import { buildUnifiedDocPdf } from "../api/lib/unified-do-invoice-pdf";
@@ -186,6 +188,82 @@ export async function downloadCombinedUnifiedInvoicePdf(
   const merged = await PDFDocument.create();
   for (const { invoice, extras } of items) {
     const bytes = await renderUnifiedInvoiceBytes(invoice, extras);
+    const src = await PDFDocument.load(bytes);
+    const pages = await merged.copyPages(src, src.getPageIndices());
+    for (const p of pages) merged.addPage(p);
+  }
+  triggerDownload(await merged.save(), filename);
+}
+
+// ── Sales Order — reuse the invoice-style unified template ────────────────
+// The SO's own item columns already carry every price component, so no
+// print-extras lookup is needed — we build `extra` straight off the item.
+export function salesOrderInputFromOrder(order: AnyOrder): UnifiedSalesOrderInput {
+  const o = order as Record<string, unknown>;
+  return {
+    soNo: s(o.companySOId ?? o.companySO),
+    docDate: s(o.companySODate ?? o.createdAt),
+    customerName: s(o.customerName),
+    billAddress: s(o.companyAddress ?? o.billingAddress ?? o.customerAddress),
+    customerPOId: s(o.customerPOId),
+    customerSOId: s(o.customerSOId ?? o.customerSO),
+    terms: "NET 30",
+    items: ((o.items as Array<Record<string, unknown>>) || []).map((it) => {
+      const gap = Number(it.gapInches) || 0;
+      const dv = Number(it.divanHeightInches) || 0;
+      const lg = Number(it.legHeightInches) || 0;
+      return {
+        id: s(it.id),
+        productCode: s(it.productCode),
+        productName: s(it.productName),
+        fabricCode: s(it.fabricCode),
+        sizeLabel: s(it.sizeLabel),
+        quantity: Number(it.quantity) || 1,
+        priceSen: Number(it.unitPriceSen) || 0,
+        lineTotalSen:
+          Number(it.lineTotalSen) ||
+          (Number(it.unitPriceSen) || 0) * (Number(it.quantity) || 1),
+        extra: {
+          itemCategory: (it.itemCategory as string) ?? null,
+          gapInches: gap || null,
+          divanHeightInches: dv || null,
+          legHeightInches: lg || null,
+          totalHeightInches: gap + dv + lg || null,
+          specialOrder: (it.specialOrder as string) ?? null,
+          baseSen: Number(it.basePriceSen) || 0,
+          divanSen: Number(it.divanPriceSen) || 0,
+          legSen: Number(it.legPriceSen) || 0,
+          specialSen: Number(it.specialOrderPriceSen) || 0,
+          totalHeightSen: Number(it.totalHeightPriceSen) || 0,
+        } as DocLineExtra,
+      };
+    }),
+    subtotalSen: Number(o.subtotalSen) || Number(o.totalSen) || 0,
+    totalSen: Number(o.totalSen) || 0,
+  };
+}
+
+export async function renderUnifiedSalesOrderBytes(order: AnyOrder): Promise<Uint8Array> {
+  return buildUnifiedDocPdf(
+    buildUnifiedSalesOrderData(salesOrderInputFromOrder(order), HOOKKA_LOGO_PNG_BASE64),
+  );
+}
+
+export async function downloadUnifiedSalesOrderPdf(order: AnyOrder): Promise<void> {
+  const bytes = await renderUnifiedSalesOrderBytes(order);
+  triggerDownload(
+    bytes,
+    `${s((order as Record<string, unknown>).companySOId) || "SO"}.pdf`,
+  );
+}
+
+export async function downloadCombinedUnifiedSalesOrderPdf(
+  orders: AnyOrder[],
+  filename: string,
+): Promise<void> {
+  const merged = await PDFDocument.create();
+  for (const order of orders) {
+    const bytes = await renderUnifiedSalesOrderBytes(order);
     const src = await PDFDocument.load(bytes);
     const pages = await merged.copyPages(src, src.getPageIndices());
     for (const p of pages) merged.addPage(p);

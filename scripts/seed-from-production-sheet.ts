@@ -19,8 +19,8 @@ const xl = require("xlsx") as typeof import("xlsx");
 
 const SHEET = "C:/Users/User/Downloads/Production Sheet (9).xlsx";
 const PROD = "https://hookka-erp-testing.pages.dev";
-const EMAIL = "weisiang329@gmail.com";
-const PASSWORD = "CbpxqJQpjy3VA5yd3Q";
+const EMAIL = process.env.HOOKKA_EMAIL ?? "";
+const PASSWORD = process.env.HOOKKA_PASSWORD ?? "";
 
 // Department name → code mapping (departments table codes).
 const DEPT_NAME_TO_CODE: Record<string, string> = {

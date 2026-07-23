@@ -8,8 +8,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 const PROD = "https://hookka-erp-testing.pages.dev";
-const EMAIL = "weisiang329@gmail.com";
-const PASSWORD = "CbpxqJQpjy3VA5yd3Q";
+const EMAIL = process.env.HOOKKA_EMAIL ?? "";
+const PASSWORD = process.env.HOOKKA_PASSWORD ?? "";
 const DRY = process.argv.includes("--dry-run");
 
 type Row = {

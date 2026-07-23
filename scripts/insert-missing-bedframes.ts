@@ -2,8 +2,8 @@
 // not yet in D1, plus create empty bom_templates rows so the bulk reapply
 // script can later overlay the right K/Q or SS/S master onto them.
 const PROD = "https://hookka-erp-testing.pages.dev";
-const EMAIL = "weisiang329@gmail.com";
-const PASSWORD = "CbpxqJQpjy3VA5yd3Q";
+const EMAIL = process.env.HOOKKA_EMAIL ?? "";
+const PASSWORD = process.env.HOOKKA_PASSWORD ?? "";
 
 type NewProduct = {
   code: string;

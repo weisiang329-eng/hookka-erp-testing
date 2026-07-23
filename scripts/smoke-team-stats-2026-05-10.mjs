@@ -9,8 +9,8 @@ import postgres from "postgres";
 const API = "https://hookka-erp-testing.pages.dev";
 const FROM = "2026-04-15";
 const TO = "2026-05-10";
-const ADMIN_EMAIL = "weisiang329@gmail.com";
-const ADMIN_PASSWORD = "CbpxqJQpjy3VA5yd3Q";
+const ADMIN_EMAIL = process.env.HOOKKA_EMAIL ?? "";
+const ADMIN_PASSWORD = process.env.HOOKKA_PASSWORD ?? "";
 
 const sql = postgres(
   "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",

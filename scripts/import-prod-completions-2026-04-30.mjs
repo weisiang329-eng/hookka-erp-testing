@@ -19,8 +19,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 const PROD = "https://hookka-erp-testing.pages.dev";
-const EMAIL = "weisiang329@gmail.com";
-const PASSWORD = "CbpxqJQpjy3VA5yd3Q";
+const EMAIL = process.env.HOOKKA_EMAIL ?? "";
+const PASSWORD = process.env.HOOKKA_PASSWORD ?? "";
 
 const FILES = [
   ["FRAMING",    "C:/Users/User/Downloads/FRAMING-production-2026-04-30.csv"],

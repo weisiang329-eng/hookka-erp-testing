@@ -57,8 +57,8 @@ except ImportError:
 # Config
 # ---------------------------------------------------------------------------
 DEFAULT_API_BASE = "https://hookka-erp-testing.pages.dev"
-DEFAULT_EMAIL = "weisiang329@gmail.com"
-DEFAULT_PASSWORD = "CbpxqJQpjy3VA5yd3Q"
+DEFAULT_EMAIL = process.env.HOOKKA_EMAIL ?? ""
+DEFAULT_PASSWORD = process.env.HOOKKA_PASSWORD ?? ""
 
 ITEMS_XLSX = Path("C:/Users/User/Downloads/items.xlsx")
 SUPPLIER_ITEM_XLSX = Path("C:/Users/User/Downloads/supplier item.xlsx")

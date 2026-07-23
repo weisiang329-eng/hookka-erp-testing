@@ -18,7 +18,9 @@ const root = process.cwd();
 const read = (p) => readFileSync(resolve(root, p), "utf8");
 
 const publicRoute = read("src/api/routes/public-do-qr.ts");
-const doRoute = read("src/api/routes/delivery-orders.ts");
+const doRoute =
+  read("src/api/routes/delivery-orders.ts") +
+  read("src/api/routes/delivery-orders/_helpers.ts");
 const plRoute = read("src/api/routes/packing-lists.ts");
 const workerSrc = read("src/api/worker.ts");
 const tokenLib = read("src/api/lib/do-qr-token.ts");

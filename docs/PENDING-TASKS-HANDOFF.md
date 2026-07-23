@@ -238,5 +238,5 @@ fails. Items reference `docs/WORK-TRACKER.md`.
   tests): **[`docs/PACKING-SCAN-HANDOFF.md`](PACKING-SCAN-HANDOFF.md)** — single source of truth;
   TASK 1 above is the mint-endpoint half of that effort surfaced here because it lives in
   `production-orders.ts`.
-- **Find the code:** `docs/context-packs/NAVIGATION-MAP.md`. **How to do recurring tasks:**
+- **Find the code:** `docs/CODEBASE-MAP.md`. **How to do recurring tasks:**
   `docs/PLAYBOOKS.md`. **Traps:** `docs/context-packs/HOOKKA-GOTCHAS.md`.

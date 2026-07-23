@@ -14,7 +14,7 @@ that makes every future task start *fast, without long searching*. Read `docs/DO
 | 1 | **Governance** | when to review-all vs not; 快准省; risk tiers | ✅ have | `DEV-OPERATING-FRAMEWORK`, `AI-DEVELOPMENT-MODES`, `LLM-CONTEXT-STRATEGY` |
 | 2 | **Knowledge** | the traps + standards, don't relearn | ✅ strong | `HOOKKA-GOTCHAS`, `BUG-HISTORY` (by date), **`BUG-CLASSES` (by class — makes P5 executable)**, `UI-CONVENTIONS`, MEMORY |
 | 3 | **Reliability / Tracking** | never forget an ask, never skip a message | ⚠️ exists — must be USED (see below) | `WORK-TRACKER` + intake discipline |
-| 4 | **Navigation** | go straight to the files — **no searching** | ✅ built | `context-packs/NAVIGATION-MAP.md` (**15 modules = whole system** + line-range index for ~30 monster files) |
+| 4 | **Navigation** | go straight to the files — **no searching** | ✅ built | `CODEBASE-MAP.md` (**15 modules = whole system** + line-range index for ~30 monster files) |
 | 5 | **Methodology** | fixed steps for recurring tasks | ✅ built | `PLAYBOOKS.md` (8 procedures) |
 | 6 | **Data model** | entities/relationships + business glossary | ⚪ optional | ERD map + glossary |
 
@@ -54,7 +54,7 @@ This is non-negotiable and overrides the urge to "just start coding the first th
 The CoE is **not** a one-time snapshot — it stays current by two no-cost mechanisms (chosen
 over a token-burning scheduled re-scan):
 
-1. **Update-on-touch.** Whenever you work a module, refresh its `NAVIGATION-MAP` entry as a
+1. **Update-on-touch.** Whenever you work a module, refresh its `CODEBASE-MAP` entry as a
    byproduct — you're already in those files. Line numbers drift as files grow; the section
    *names* stay stable, so grep the named function near the listed line if it's off by a bit.
 2. **Knowledge self-growth.** Every bug → `BUG-HISTORY.md` + a regression test; a task done

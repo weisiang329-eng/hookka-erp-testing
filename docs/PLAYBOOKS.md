@@ -2,7 +2,7 @@
 
 Fixed step-by-step procedures for recurring dev tasks. **Pick the playbook, follow the
 steps — don't re-derive the approach each time.** Each cites the exact files/helpers.
-Pair with `docs/context-packs/NAVIGATION-MAP.md` (where the code is) and
+Pair with `docs/CODEBASE-MAP.md` (where the code is) and
 `docs/HOOKKA-GOTCHAS.md` (the traps).
 
 ---
@@ -42,7 +42,7 @@ Store **sen integer** (RM×100). Input via `MoneyInput` (value `number|null` in 
 
 ## P5 — Fix one → sweep the whole system (fix-then-audit)
 *When fixing a data bug/inconsistency for ONE case:*
-1. Grep EVERY site touching the pattern (helpers / routes / pages / validation / cascades) — use `NAVIGATION-MAP.md` to find them.
+1. Grep EVERY site touching the pattern (helpers / routes / pages / validation / cascades) — use `CODEBASE-MAP.md` to find them.
 2. List authoritative vs stale; state explicitly what you are NOT touching.
 3. Fix all instances of the same class, not just the flagged one — **the classes and their known instances are indexed in [`BUG-CLASSES.md`](BUG-CLASSES.md); this step is not doable from memory, which is why it kept being skipped.**
 4. Any input-reject rule must fail at BOTH the FE Save handler AND the backend POST/PUT with the same error.
@@ -57,7 +57,7 @@ Never hand-roll header/footer/fonts. Use the shared helpers in `src/lib/pdf-util
 *Refs: `arch_letterhead_unified`, `pdf-utils.ts`.*
 
 ## P8 — Touching a monster file (10k-line page)
-1. Open `NAVIGATION-MAP.md`, find the file's **section index**, jump to the line range — never read end-to-end.
+1. Open `CODEBASE-MAP.md`, find the file's **section index**, jump to the line range — never read end-to-end.
 2. These pages branch on `activeTab` / `viewMode`; confirm WHICH code path your change is in (one tab ≠ all).
 3. Keep denormalized snapshots in sync if you change a write (`*_list_snapshot` tables).
-*Refs: `NAVIGATION-MAP.md`.*
+*Refs: `CODEBASE-MAP.md`.*

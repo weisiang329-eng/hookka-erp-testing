@@ -1,9 +1,11 @@
 # Hookka ERP — Start Here (read before any task)
 
 This repo has a lightweight **ERP Center of Excellence** that keeps work fast / accurate /
-low-token. **Before any development task, consult it — do not grep the repo blind:**
+low-token. **Before any development task, consult the map — do NOT `grep`/`glob` the whole
+repo: they TIME OUT on this repo's size (~1,600 tracked files). Use the map's file:line +
+`Read offset/limit` to jump straight in:**
 
-1. **Find the code** → [`docs/context-packs/NAVIGATION-MAP.md`](docs/context-packs/NAVIGATION-MAP.md)
+1. **Find the code** → [`docs/CODEBASE-MAP.md`](docs/CODEBASE-MAP.md)
    — all 15 modules → pages / routes / tables / tests + a line-range index for the ~30 big
    files. Jump to the listed lines instead of reading a 10k-line file or grepping.
 2. **How to do it** → [`docs/PLAYBOOKS.md`](docs/PLAYBOOKS.md) — fixed steps for recurring
@@ -43,4 +45,4 @@ Doc map: [`docs/DOCS-INDEX.md`](docs/DOCS-INDEX.md). The big picture: [`docs/DEV
 - Classify each task → use the SMALLEST mode. Don't spawn agents / broad-grep for small fixes.
 - **Log every ask from a multi-part message into `docs/WORK-TRACKER.md` FIRST**, before working
   — don't skip asks. Re-read it at session start and before reporting done.
-- **Update-on-touch:** when you edit a module, refresh its `NAVIGATION-MAP` entry as a byproduct.
+- **Update-on-touch:** when you edit a module, refresh its `CODEBASE-MAP` entry as a byproduct.

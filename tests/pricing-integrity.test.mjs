@@ -100,7 +100,10 @@ test("an invoice line below its SO line is reported", async () => {
   const out = await checkPricingIntegrity(
     fakeDb({
       invoiceRows: [
-        { invoiceNo: "INV-2607-089", status: "SENT", companySOId: "SO-2607-113", lineNo: 2, productCode: "1003(A)-(Q)", soUnit: 83000, invUnit: 58500, quantity: 1 },
+        // keys match what the SupabaseAdapter returns for `AS so_unit_sen` /
+        // `AS inv_unit_sen` — snake_case alias → camelCase key. On prod these
+        // came back undefined until 2026-07-23 because the alias was `AS soUnit`.
+        { invoiceNo: "INV-2607-089", status: "SENT", companySOId: "SO-2607-113", lineNo: 2, productCode: "1003(A)-(Q)", soUnitSen: 83000, invUnitSen: 58500, quantity: 1 },
       ],
     }),
   );

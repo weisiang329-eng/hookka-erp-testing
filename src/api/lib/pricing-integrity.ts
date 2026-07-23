@@ -20,6 +20,18 @@
 // try/catch returning [] so one bad query cannot take down the daily report
 // (the house style in compliance-report.ts).
 //
+// TWO Postgres-dialect traps this file was born with and now guards against
+// (both found only by running it on prod — the unit tests use a stub and can
+// never catch SQL-dialect issues):
+//   1. Column ALIASES must be snake_case (`AS so_unit_sen`). Postgres folds an
+//      unquoted alias to lowercase, and the SupabaseAdapter only camelCases
+//      keys that contain an underscore — so `AS soUnit` comes back as `sounit`,
+//      and `r.soUnit` reads undefined → the amount silently computes to 0.
+//   2. `isServiceOrder` is a BOOLEAN. `COALESCE(x, 0) <> 1` is a boolean-vs-int
+//      type error that throws, gets swallowed by the catch, and the whole check
+//      returns [] — i.e. it misses everything, silently. Use
+//      `NOT COALESCE(x, false)`, the same idiom the SO routes use.
+//
 // Deliberately CHEAP — this runs with the rest of the daily sweep:
 //   * live, non-service sales-order lines only
 //   * the invoice comparison uses the direct production_order_id join, not the
@@ -137,7 +149,7 @@ async function checkHeightChosenButFree(db: DbLike): Promise<PricingIssueRow[]> 
            FROM sales_order_items soi
            JOIN sales_orders so ON so.id = soi.salesOrderId
           WHERE so.status NOT IN ('CANCELLED')
-            AND COALESCE(so.isServiceOrder, 0) <> 1
+            AND NOT COALESCE(so.isServiceOrder, false)
             AND (COALESCE(soi.divanPriceSen,0) = 0 OR COALESCE(soi.legPriceSen,0) = 0)
           LIMIT 2000`,
       )
@@ -175,7 +187,7 @@ async function checkInvoiceBelowSo(db: DbLike): Promise<PricingIssueRow[]> {
     const res = await db
       .prepare(
         `SELECT i.invoiceNo, i.status, so.companySOId, soi.lineNo, soi.productCode,
-                soi.unitPriceSen AS soUnit, ii.unitPriceSen AS invUnit, ii.quantity
+                soi.unitPriceSen AS so_unit_sen, ii.unitPriceSen AS inv_unit_sen, ii.quantity
            FROM invoice_items ii
            JOIN invoices i ON i.id = ii.invoiceId
            JOIN sales_orders so ON ii.productionOrderId LIKE 'pord-' || so.id || '-%'
@@ -192,9 +204,9 @@ async function checkInvoiceBelowSo(db: DbLike): Promise<PricingIssueRow[]> {
     return (res.results ?? []).map((r) => ({
       kind: "INVOICE_BELOW_SO" as const,
       ref: `${r.invoiceNo} ← ${r.companySOId} L${r.lineNo}`,
-      detail: `${r.productCode}: invoice ${r.invUnit} vs SO ${r.soUnit} (${r.status})`,
+      detail: `${r.productCode}: invoice ${r.invUnitSen} vs SO ${r.soUnitSen} (${r.status})`,
       amountSen:
-        (Number(r.soUnit ?? 0) - Number(r.invUnit ?? 0)) * (Number(r.quantity) || 1),
+        (Number(r.soUnitSen ?? 0) - Number(r.invUnitSen ?? 0)) * (Number(r.quantity) || 1),
     }));
   } catch (err) {
     console.error("[pricing-integrity] invoiceBelowSo failed:", err);

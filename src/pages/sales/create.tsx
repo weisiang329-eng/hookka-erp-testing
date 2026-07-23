@@ -1680,14 +1680,6 @@ function CreateSalesOrderPage() {
       // group that satisfies the rule's componentSizes. Rules whose pieces
       // can't be fully filled by this group are dropped. Extras (lines
       // outside the matched subset) keep their per-piece master price.
-      const candidates = sofaCombos
-        .filter(
-          (r) =>
-            r.baseModel === baseModel && r.effectiveFrom <= todayDateStr,
-        )
-        .map((r) => ({ r, subset: findComboSubset(r.componentSizes, group) }))
-        .filter((x): x is { r: SofaComboRule; subset: LineItem[] } => x.subset !== null);
-      if (candidates.length === 0) continue;
       // Priority: (customer + tier) > (customer + ANY) > (company + tier) > (company + ANY).
       const priorityOf = (r: SofaComboRule): number => {
         const isCustomer = r.customerId === customerId && customerId !== "";
@@ -1698,27 +1690,45 @@ function CreateSalesOrderPage() {
         if (!r.customerId && r.fabricTier === "ANY") return 1;
         return 0;
       };
-      const best = candidates
-        .map(({ r, subset }) => ({ r, subset, p: priorityOf(r) }))
-        .filter((x) => x.p > 0)
-        .sort((a, b) => b.p - a.p || (a.r.effectiveFrom < b.r.effectiveFrom ? 1 : -1))[0];
-      if (!best) continue;
-      const comboTotal = best.r.pricesByHeight[seatHeight];
-      if (typeof comboTotal !== "number" || comboTotal <= 0) continue;
-      // Subset sum (not full group). Extras stay at master price entirely.
-      const subsetSum = best.subset.reduce((s, g) => s + getLineTotal(g), 0);
-      const discount = subsetSum - comboTotal;
-      if (discount <= 0) continue;
-      out.push({
-        baseModel,
-        seatHeight,
-        fabricTier: best.r.fabricTier,
-        customerSpecific: best.r.customerId === customerId && customerId !== "",
-        discountSen: discount,
-        comboTotalSen: comboTotal,
-        components: best.subset.map((l) => l.sizeCode),
-        affectedLineUids: best.subset.map((l) => l._uid),
-      });
+      // A group can hold MULTIPLE complete sets (a customer ordering two
+      // identical sofa combos). findComboSubset consumes one set per call, so
+      // re-match on the REMAINING lines until none is left — otherwise the
+      // preview only discounts the first set and the 2nd+ looks full-retail.
+      // Mirrors the backend applySofaCombos (src/api/lib/sofa-combo.ts), which
+      // is what actually saves; this keeps the entry-time preview honest.
+      let remaining: LineItem[] = group.slice();
+      for (let guard = group.length; guard > 0 && remaining.length > 0; guard--) {
+        const candidates = sofaCombos
+          .filter((r) => r.baseModel === baseModel && r.effectiveFrom <= todayDateStr)
+          .map((r) => ({ r, subset: findComboSubset(r.componentSizes, remaining) }))
+          .filter((x): x is { r: SofaComboRule; subset: LineItem[] } => x.subset !== null);
+        if (candidates.length === 0) break;
+        const best = candidates
+          .map(({ r, subset }) => ({ r, subset, p: priorityOf(r) }))
+          .filter((x) => x.p > 0)
+          .sort((a, b) => b.p - a.p || (a.r.effectiveFrom < b.r.effectiveFrom ? 1 : -1))[0];
+        if (!best) break;
+        // Consume this set from `remaining` regardless of discount so a
+        // following identical set can still be matched.
+        const consumed = new Set(best.subset.map((l) => l._uid));
+        remaining = remaining.filter((l) => !consumed.has(l._uid));
+        const comboTotal = best.r.pricesByHeight[seatHeight];
+        if (typeof comboTotal !== "number" || comboTotal <= 0) continue;
+        // Subset sum (not full group). Extras stay at master price entirely.
+        const subsetSum = best.subset.reduce((s, g) => s + getLineTotal(g), 0);
+        const discount = subsetSum - comboTotal;
+        if (discount <= 0) continue;
+        out.push({
+          baseModel,
+          seatHeight,
+          fabricTier: best.r.fabricTier,
+          customerSpecific: best.r.customerId === customerId && customerId !== "",
+          discountSen: discount,
+          comboTotalSen: comboTotal,
+          components: best.subset.map((l) => l.sizeCode),
+          affectedLineUids: best.subset.map((l) => l._uid),
+        });
+      }
     }
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- getLineTotal is stable

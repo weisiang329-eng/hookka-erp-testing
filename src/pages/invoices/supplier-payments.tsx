@@ -182,6 +182,10 @@ export default function SupplierPaymentsPage() {
   const [posting, setPosting] = useState(false);
   // Edit mode: when set, the form is editing this payment in place (same number).
   const [editingNo, setEditingNo] = useState<string | null>(null);
+  // Advance rows on the voucher being edited — PRESERVED server-side (the edit
+  // form is allocations-only), surfaced here so the operator sees the full
+  // voucher total and knows the advance is untouched.
+  const [editAdvanceKeptSen, setEditAdvanceKeptSen] = useState(0);
 
   const loadOpenPIs = (
     supplierId: string,
@@ -368,6 +372,7 @@ export default function SupplierPaymentsPage() {
       if (res.ok && j.success) {
         toast.success(editingNo ? "Payment updated" : j.data?.paymentNo ? `Payment ${j.data.paymentNo} recorded` : "Payment recorded");
         setEditingNo(null);
+        setEditAdvanceKeptSen(0);
         resetForm();
         invalidateCachePrefix("/api/supplier-payments");
         invalidateCachePrefix("/api/purchase-invoices");
@@ -418,6 +423,7 @@ export default function SupplierPaymentsPage() {
   const editPayment = (p: PaymentGroup) => {
     setDetail(null);
     setEditingNo(p.paymentNo);
+    setEditAdvanceKeptSen(p.lines.filter((l) => !l.purchaseInvoiceId).reduce((acc, l) => acc + (l.amountSen || 0), 0));
     setDate(p.date || today);
     const sup = suppliers.find((s) => s.name === p.supplierName);
     if (sup) {
@@ -437,6 +443,7 @@ export default function SupplierPaymentsPage() {
 
   const cancelEdit = () => {
     setEditingNo(null);
+    setEditAdvanceKeptSen(0);
     setSelectedSupplierId("");
     setRows({});
     setOpenPIs([]);
@@ -658,6 +665,11 @@ export default function SupplierPaymentsPage() {
             </div>
           </div>
 
+          {editingNo && editAdvanceKeptSen > 0 && (
+            <p className="text-xs text-[#6B5C32] bg-[#F6F1E7] rounded-md px-3 py-2">
+              This voucher also carries an unapplied advance of <strong>RM {(editAdvanceKeptSen / 100).toFixed(2)}</strong> — it is kept as-is by this edit (voucher total = lines below + advance).
+            </p>
+          )}
           {/* Supplier advance / prepayment — create-only. Pay before any invoice. */}
           {!editingNo && (
             <div>

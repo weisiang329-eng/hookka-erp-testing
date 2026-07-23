@@ -747,11 +747,23 @@ async function buildSupplierPaymentRestate(
       await db
         // Exclude #6 supplier-discount markers (method='CREDIT_NOTE') from the
         // rollback set — defensive against a future payment_no collision.
-        .prepare("SELECT purchaseInvoiceId, booked_sen FROM supplier_payments WHERE payment_no = ? AND COALESCE(method,'') <> 'CREDIT_NOTE'")
+        .prepare("SELECT purchaseInvoiceId, booked_sen, amount_sen FROM supplier_payments WHERE payment_no = ? AND COALESCE(method,'') <> 'CREDIT_NOTE'")
         .bind(paymentNo)
-        .all<{ purchaseInvoiceId: string | null; bookedSen: number | null; booked_sen: number | null }>()
+        .all<{ purchaseInvoiceId: string | null; bookedSen: number | null; booked_sen: number | null; amountSen?: number | null; amount_sen?: number | null }>()
     ).results ?? [];
   if (oldRows.length === 0) throw new Error("PAYMENT_NOT_FOUND");
+
+  // ADVANCE rows (no PI) are PRESERVED, not rebuilt — the edit form is
+  // allocations-only ("Advance is create-only"), so without this a restate of
+  // a payment that carried an advance silently DROPPED the advance row from
+  // the subledger and shrank the GL bank/control legs by its amount
+  // (HPV-2607-020: RM 1,619 would have vanished). The rows stay untouched
+  // except their date follows the edited voucher date; their REMAINING
+  // unapplied amount rides along into the re-posted GL so the ledger keeps
+  // matching the true bank outflow.
+  const advanceKeepSen = oldRows
+    .filter((r) => !r.purchaseInvoiceId)
+    .reduce((s, r) => s + (Number(r.amountSen ?? r.amount_sen) || 0), 0);
 
   const payFrom = String(body.payFrom ?? "");
   const date = String(body.date ?? "");
@@ -784,11 +796,18 @@ async function buildSupplierPaymentRestate(
         .bind(b, b, b, r.purchaseInvoiceId),
     );
   }
-  // 2. Drop the old sub-ledger rows (never the #6 CREDIT_NOTE markers — those
-  // belong to a purchase-CN, not this payment; defensive against a collision).
+  // 2. Drop the old ALLOCATION rows only (never the #6 CREDIT_NOTE markers,
+  // and never the advance rows — those are preserved, see advanceKeepSen).
   statements.push(
-    db.prepare("DELETE FROM supplier_payments WHERE payment_no = ? AND COALESCE(method,'') <> 'CREDIT_NOTE'").bind(paymentNo),
+    db.prepare("DELETE FROM supplier_payments WHERE payment_no = ? AND COALESCE(method,'') <> 'CREDIT_NOTE' AND purchaseInvoiceId IS NOT NULL").bind(paymentNo),
   );
+  if (advanceKeepSen > 0 && date) {
+    // The preserved advance follows the voucher's edited date (aging buckets
+    // advances by their payment date — owner rule 2026-07-08).
+    statements.push(
+      db.prepare("UPDATE supplier_payments SET date = ? WHERE payment_no = ? AND purchaseInvoiceId IS NULL AND COALESCE(method,'') <> 'CREDIT_NOTE'").bind(date, paymentNo),
+    );
+  }
 
   // 3. Re-run the per-PI FX allocation for the NEW data (mirrors the POST loop).
   let totalBooked = 0, totalBank = 0, totalFx = 0;
@@ -842,6 +861,10 @@ async function buildSupplierPaymentRestate(
     totalBank += r.bankSen;
     totalFx += r.fxDiffSen;
   }
+  // The preserved advance's remaining amount stays part of the voucher's GL
+  // (DR 400-0000 · CR bank), exactly as it was posted at creation.
+  totalBooked += advanceKeepSen;
+  totalBank += advanceKeepSen;
   if (totalBooked <= 0) throw new Error("no allocations");
 
   // 4. GL: reverse the live legs + post the corrected legs in ONE call, collapse.

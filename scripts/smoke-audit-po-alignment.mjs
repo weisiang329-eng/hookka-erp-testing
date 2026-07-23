@@ -4,8 +4,8 @@
 // cookie+CSRF, hits the endpoint for SO-2604-307, dumps the JSON.
 
 const BASE = "https://hookka-erp-testing.pages.dev";
-const EMAIL = "weisiang329@gmail.com";
-const PASSWORD = "CbpxqJQpjy3VA5yd3Q";
+const EMAIL = process.env.HOOKKA_EMAIL ?? "";
+const PASSWORD = process.env.HOOKKA_PASSWORD ?? "";
 
 async function main() {
   // 1. Login (sets http-only cookie, returns CSRF token).

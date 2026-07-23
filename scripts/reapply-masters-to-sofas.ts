@@ -19,8 +19,8 @@
 // reapply-masters-to-bedframes.ts).
 
 const PROD = "https://hookka-erp-testing.pages.dev";
-const EMAIL = "weisiang329@gmail.com";
-const PASSWORD = "CbpxqJQpjy3VA5yd3Q";
+const EMAIL = process.env.HOOKKA_EMAIL ?? "";
+const PASSWORD = process.env.HOOKKA_PASSWORD ?? "";
 
 async function login(): Promise<string> {
   const res = await fetch(`${PROD}/api/auth/login`, {

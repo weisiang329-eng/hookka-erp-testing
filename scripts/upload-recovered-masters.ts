@@ -10,8 +10,8 @@ const repoRoot = path.resolve(__dirname, "..");
 const recoveredFile = path.join(repoRoot, "recovered-bom-templates.json");
 
 const PROD = "https://hookka-erp-testing.pages.dev";
-const EMAIL = "weisiang329@gmail.com";
-const PASSWORD = "CbpxqJQpjy3VA5yd3Q";
+const EMAIL = process.env.HOOKKA_EMAIL ?? "";
+const PASSWORD = process.env.HOOKKA_PASSWORD ?? "";
 
 type Entry = {
   profile: string;

@@ -10,8 +10,8 @@
 // Usage: node scripts/assign-5539-to-carress-2990-2026-05-09.mjs
 
 const API_BASE = "https://hookka-erp-testing.pages.dev";
-const EMAIL = "weisiang329@gmail.com";
-const PASSWORD = "CbpxqJQpjy3VA5yd3Q";
+const EMAIL = process.env.HOOKKA_EMAIL ?? "";
+const PASSWORD = process.env.HOOKKA_PASSWORD ?? "";
 
 async function loginAndGetSession() {
   const res = await fetch(`${API_BASE}/api/auth/login`, {

@@ -6,7 +6,7 @@
 // in D1 are PUT-updated; missing ones are POSTed.
 //
 // Run:   npx tsx scripts/import-suppliers.ts
-// Creds: weisiang329@gmail.com / CbpxqJQpjy3VA5yd3Q
+// Creds: from env HOOKKA_EMAIL / HOOKKA_PASSWORD
 // ---------------------------------------------------------------------------
 import { createRequire } from "node:module";
 
@@ -17,8 +17,8 @@ const xl = require("xlsx") as typeof import("xlsx");
 
 const SHEET = "C:/Users/User/Downloads/supp.xlsx";
 const PROD = "https://hookka-erp-testing.pages.dev";
-const EMAIL = "weisiang329@gmail.com";
-const PASSWORD = "CbpxqJQpjy3VA5yd3Q";
+const EMAIL = process.env.HOOKKA_EMAIL ?? "";
+const PASSWORD = process.env.HOOKKA_PASSWORD ?? "";
 
 // ---------------------------------------------------------------------------
 // Helpers

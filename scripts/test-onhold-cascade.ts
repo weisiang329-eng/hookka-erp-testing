@@ -22,7 +22,7 @@
 
 const BASE_URL = process.env.BASE_URL ?? "https://hookka-erp-testing.pages.dev";
 const EMAIL = process.env.ADMIN_EMAIL ?? "weisiang329@gmail.com";
-const PASSWORD = process.env.ADMIN_PASSWORD ?? "CbpxqJQpjy3VA5yd3Q";
+const PASSWORD = process.env.ADMIN_PASSWORD ?? "";
 
 type AnyRec = Record<string, unknown>;
 

@@ -44,7 +44,7 @@ Store **sen integer** (RM×100). Input via `MoneyInput` (value `number|null` in 
 *When fixing a data bug/inconsistency for ONE case:*
 1. Grep EVERY site touching the pattern (helpers / routes / pages / validation / cascades) — use `NAVIGATION-MAP.md` to find them.
 2. List authoritative vs stale; state explicitly what you are NOT touching.
-3. Fix all instances of the same class, not just the flagged one.
+3. Fix all instances of the same class, not just the flagged one — **the classes and their known instances are indexed in [`BUG-CLASSES.md`](BUG-CLASSES.md); this step is not doable from memory, which is why it kept being skipped.**
 4. Any input-reject rule must fail at BOTH the FE Save handler AND the backend POST/PUT with the same error.
 *Refs: memory fix-then-audit, scan-module-before-edit, validation-unified.*
 

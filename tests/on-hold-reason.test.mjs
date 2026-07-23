@@ -42,8 +42,19 @@ const PROD_FE = resolve(process.cwd(), "src/pages/production/index.tsx");
 const BASEROWS = resolve(process.cwd(), "src/pages/production/baserows-core.ts");
 const PROD_TYPES = resolve(process.cwd(), "src/pages/production/types.ts");
 
+// The sales-orders / production-orders / delivery-orders route files keep their
+// module-level helpers in a sibling <route>/_helpers.ts (moved verbatim by a
+// refactor). Source-grep guards must see BOTH the route file and its _helpers.ts,
+// so read() concatenates them for those three routes only.
+const SPLIT_ROUTE_RE =
+  /src[\\/]api[\\/]routes[\\/](sales-orders|production-orders|delivery-orders)\.ts$/;
+
 function read(p) {
-  return readFileSync(p, "utf8");
+  let src = readFileSync(p, "utf8");
+  if (SPLIT_ROUTE_RE.test(p)) {
+    src += "\n\n" + readFileSync(p.replace(/\.ts$/, "/_helpers.ts"), "utf8");
+  }
+  return src;
 }
 
 // Collapse whitespace so multi-line SQL / JSX still matches a single regex.

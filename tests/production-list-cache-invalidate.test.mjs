@@ -24,10 +24,16 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const SRC = readFileSync(
-  resolve(process.cwd(), "src/api/routes/production-orders.ts"),
-  "utf8",
-);
+const SRC =
+  readFileSync(
+    resolve(process.cwd(), "src/api/routes/production-orders.ts"),
+    "utf8",
+  ) +
+  "\n\n" +
+  readFileSync(
+    resolve(process.cwd(), "src/api/routes/production-orders/_helpers.ts"),
+    "utf8",
+  );
 
 test("invalidateProductionListCaches DELETEs the snapshot (not mark-stale)", () => {
   // 2026-07-23: the helper moved to src/api/lib/po-list-cache.ts so all six
@@ -81,7 +87,18 @@ const CASCADE_SOURCES = [
 
 for (const [file, kind, gate] of CASCADE_SOURCES) {
   test(`${kind} status cascade (ON_HOLD / CANCELLED / RESUME) invalidates both dept-sheet cache layers`, () => {
-    const src = readFileSync(resolve(process.cwd(), file), "utf8");
+    let src = readFileSync(resolve(process.cwd(), file), "utf8");
+    // sales-orders.ts keeps its module-level helpers in a sibling
+    // sales-orders/_helpers.ts (moved verbatim); include it so the source-grep
+    // guards still see the moved code. consignment-orders.ts was NOT split.
+    if (file === "src/api/routes/sales-orders.ts") {
+      src +=
+        "\n\n" +
+        readFileSync(
+          resolve(process.cwd(), "src/api/routes/sales-orders/_helpers.ts"),
+          "utf8",
+        );
+    }
     assert.match(
       src,
       new RegExp(`invalidateOrderCascadeSnapshots\\(c\\.var\\.DB, orgId, "${kind}"\\)`),

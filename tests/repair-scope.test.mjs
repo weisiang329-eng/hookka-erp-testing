@@ -667,10 +667,16 @@ const builderSrc = readFileSync(
   new URL("../src/api/routes/_shared/production-builder.ts", import.meta.url),
   "utf8",
 );
-const soSrc = readFileSync(
-  new URL("../src/api/routes/sales-orders.ts", import.meta.url),
-  "utf8",
-);
+const soSrc =
+  readFileSync(
+    new URL("../src/api/routes/sales-orders.ts", import.meta.url),
+    "utf8",
+  ) +
+  "\n\n" +
+  readFileSync(
+    new URL("../src/api/routes/sales-orders/_helpers.ts", import.meta.url),
+    "utf8",
+  );
 const cascadeSrc = readFileSync(
   new URL("../src/api/lib/po-cost-cascade.ts", import.meta.url),
   "utf8",

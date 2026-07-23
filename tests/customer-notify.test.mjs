@@ -472,10 +472,16 @@ const emailSrc = readFileSync(
   new URL("../src/api/lib/email.ts", import.meta.url),
   "utf8",
 );
-const doRouteSrc = readFileSync(
-  new URL("../src/api/routes/delivery-orders.ts", import.meta.url),
-  "utf8",
-);
+const doRouteSrc =
+  readFileSync(
+    new URL("../src/api/routes/delivery-orders.ts", import.meta.url),
+    "utf8",
+  ) +
+  "\n\n" +
+  readFileSync(
+    new URL("../src/api/routes/delivery-orders/_helpers.ts", import.meta.url),
+    "utf8",
+  );
 const pageSrc = readFileSync(
   new URL("../src/pages/delivery/index.tsx", import.meta.url),
   "utf8",

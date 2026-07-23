@@ -19,10 +19,16 @@ const svcSrc = readFileSync(
   new URL("../src/api/routes/service-orders.ts", import.meta.url),
   "utf8",
 );
-const doSrc = readFileSync(
-  new URL("../src/api/routes/delivery-orders.ts", import.meta.url),
-  "utf8",
-);
+const doSrc =
+  readFileSync(
+    new URL("../src/api/routes/delivery-orders.ts", import.meta.url),
+    "utf8",
+  ) +
+  "\n\n" +
+  readFileSync(
+    new URL("../src/api/routes/delivery-orders/_helpers.ts", import.meta.url),
+    "utf8",
+  );
 
 function count(haystack, regex) {
   return (haystack.match(regex) ?? []).length;

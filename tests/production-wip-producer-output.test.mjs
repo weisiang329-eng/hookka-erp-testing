@@ -28,9 +28,16 @@ const SRC = resolve(
   process.cwd(),
   'src/api/routes/production-orders.ts',
 );
+// production-orders.ts keeps its module-level helpers in a sibling
+// production-orders/_helpers.ts (moved verbatim by a refactor); source-grep
+// guards must see BOTH files, so read() concatenates them.
+const SRC_HELPERS = resolve(
+  process.cwd(),
+  'src/api/routes/production-orders/_helpers.ts',
+);
 
 function read() {
-  return readFileSync(SRC, 'utf8');
+  return readFileSync(SRC, 'utf8') + '\n\n' + readFileSync(SRC_HELPERS, 'utf8');
 }
 
 test('applyWipInventoryChange synthesises wipLabel when jcRow.wipLabel is null', () => {

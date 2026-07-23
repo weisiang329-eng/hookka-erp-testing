@@ -1,24 +1,34 @@
-// EXECUTOR for the invoice top-up (option A). Reads the frozen plan
-// scripts/_plan-invoice-topup-2026-07-23.json (154 lines / 65 invoices /
-// RM 15,480) and raises each invoice line to its sales-order price.
+// EXECUTOR for the invoice top-up (option A). Raises 65 SENT/unpaid invoices to
+// their sales-order price and marks each edited line so it is not touched twice.
 //
-// Goes through the TESTED path — PUT /api/invoices/:id {priceEdits} — NOT raw
-// SQL, because that route restates the GL (AR + revenue) in lockstep. A raw
-// UPDATE on invoice_items would change the invoice total while leaving the GL
-// behind — the books would not balance. This is the same path the 2026-07-17
-// correction used for exactly this reason.
+// Uses the TESTED path — PUT /api/invoices/:id {priceEdits} — which restates
+// the GL (AR + revenue) in lockstep. NOT raw SQL (that would move the invoice
+// total without the ledger).
 //
-// BLOCKED until a working login exists: the committed script password was
-// rotated (it 401s). Provide HOOKKA_EMAIL / HOOKKA_PASSWORD in the environment.
+// ─── THE priceEdits CONTRACT (invoices.ts:1659) — READ THIS ───────────────
+// The backend does NOT accept a unit price. Each edit is:
+//     { id, baseSen, divanSen, legSen, specialSen, discountSen }
+// and the server computes  unit = base + divan + leg + special , then
+//     lineTotal = max(0, unit*qty - discount) ,  and sets priceEdited = 1.
+// Sending `unitPriceSen` (as an earlier draft of this file did) makes the
+// server read id="" and SKIP the edit — a silent no-op. Worse, sending a bare
+// component would ZERO the others. So we mirror the SO line's FULL breakdown,
+// which the plan below already carries, and we preserve the invoice line's
+// existing discount. (Same "priceEdits replaces the whole split" trap the
+// 2026-07-17 correction hit. Verified end-to-end via a canary on 2026-07-23:
+// INV-2606-095 line 72500 -> 85500, priceEdited 0 -> 1, invoice total +130.)
+//
+// The plan `_plan-invoice-topup-components-2026-07-23.json` is:
+//   { invoiceId: { no, e: [ { id, baseSen, divanSen, legSen, specialSen } ] } }
+// built from the SO lines (each verified base+divan+leg+special == SO unit).
+//
+// Re-verifies EVERY line live before writing: invoice still SENT + unpaid, the
+// line still under-bills, and price_edited is 0. Idempotent — a re-run skips
+// anything already at target (priceEdited=1), so a mid-run stop is safe.
 //
 //   $env:HOOKKA_EMAIL="…"; $env:HOOKKA_PASSWORD="…"
 //   node scripts/exec-invoice-topup-2026-07-23.mjs            # dry run
 //   node scripts/exec-invoice-topup-2026-07-23.mjs --execute
-//
-// Re-verifies EVERY line live before writing: the invoice is still live and
-// unpaid, the item still under-bills, and the line was not deliberately
-// revised (price_edited=1). Anything that no longer matches is skipped and
-// reported, never forced.
 import fs from "node:fs";
 
 const BASE = "https://hookka-erp-testing.pages.dev";
@@ -27,8 +37,8 @@ const PASSWORD = process.env.HOOKKA_PASSWORD ?? "";
 const EXECUTE = process.argv.includes("--execute");
 const rm = (s) => `RM ${(Number(s || 0) / 100).toLocaleString("en-MY", { minimumFractionDigits: 2 })}`;
 
-const plan = JSON.parse(
-  fs.readFileSync(new URL("./_plan-invoice-topup-2026-07-23.json", import.meta.url), "utf8"),
+const PLAN = JSON.parse(
+  fs.readFileSync(new URL("./_plan-invoice-topup-components-2026-07-23.json", import.meta.url), "utf8"),
 );
 
 if (!EMAIL || !PASSWORD) {
@@ -52,47 +62,38 @@ async function login() {
 const auth = await login();
 console.log(EXECUTE ? "MODE: EXECUTE\n" : "MODE: DRY RUN\n");
 
-// Group plan lines by invoice — one PUT per invoice carries all its edits.
-const byInvoice = new Map();
-for (const p of plan) {
-  if (!byInvoice.has(p.invoiceId)) byInvoice.set(p.invoiceId, { invoiceNo: p.invoiceNo, lines: [] });
-  byInvoice.get(p.invoiceId).lines.push(p);
-}
-
-let done = 0, skipped = 0, applied = 0;
-for (const [invoiceId, { invoiceNo, lines }] of byInvoice) {
-  const cur = await fetch(`${BASE}/api/invoices/${invoiceId}`, { headers: { cookie: auth.cookies } })
-    .then((r) => r.json()).catch(() => null);
-  const inv = cur?.data;
-  if (!inv || inv.status === "CANCELLED" || Number(inv.paidAmount) > 0) {
-    console.log(`⏭  ${invoiceNo}: ${!inv ? "not found" : inv.status === "CANCELLED" ? "cancelled" : "part-paid"} — skipped`);
-    skipped += lines.length;
+let appliedInv = 0, appliedLines = 0, addSen = 0;
+const skipped = [], errors = [];
+for (const [id, inv] of Object.entries(PLAN)) {
+  const before = (await fetch(`${BASE}/api/invoices/${id}`, { headers: { cookie: auth.cookies } })
+    .then((r) => r.json()).catch(() => null))?.data;
+  if (!before) { errors.push(`${inv.no}: fetch failed`); continue; }
+  if (before.status !== "SENT" || Number(before.paidAmount) > 0) {
+    skipped.push(`${inv.no}: ${before.status}/paid${before.paidAmount}`);
     continue;
   }
-  const priceEdits = [];
-  for (const l of lines) {
-    const item = (inv.items ?? []).find((it) => it.id === l.itemId);
-    if (!item) { console.log(`   ${invoiceNo} ${l.so} L${l.lineNo}: item gone — skip`); skipped++; continue; }
-    if (Number(item.priceEdited) === 1) { console.log(`   ${invoiceNo} ${l.so} L${l.lineNo}: revised (price_edited) — skip`); skipped++; continue; }
-    if (Number(item.unitPriceSen) >= l.soUnitSen) { console.log(`   ${invoiceNo} ${l.so} L${l.lineNo}: already ≥ SO — skip`); skipped++; continue; }
-    priceEdits.push({ itemId: l.itemId, unitPriceSen: l.soUnitSen });
+  const edits = [];
+  for (const e of inv.e) {
+    const it = (before.items ?? []).find((x) => x.id === e.id);
+    if (!it) { errors.push(`${inv.no} ${e.id} missing`); continue; }
+    const target = e.baseSen + e.divanSen + e.legSen + e.specialSen;
+    if (Number(it.priceEdited) === 1 || Number(it.unitPriceSen) >= target) continue; // done / not under
+    edits.push({ ...e, discountSen: Number(it.discountSen) || 0 });
+    addSen += (target - Number(it.unitPriceSen)) * (Number(it.quantity) || 1);
   }
-  if (!priceEdits.length) continue;
-  if (!EXECUTE) {
-    console.log(`   ${invoiceNo}: would raise ${priceEdits.length} line(s), +${rm(lines.reduce((t, x) => t + x.deltaSen, 0))}`);
-    done += priceEdits.length;
-    continue;
-  }
-  const r = await fetch(`${BASE}/api/invoices/${invoiceId}`, {
+  if (!edits.length) { skipped.push(`${inv.no}: no-op`); continue; }
+  if (!EXECUTE) { console.log(`  ${inv.no}: would raise ${edits.length} line(s)`); appliedInv++; appliedLines += edits.length; continue; }
+  const put = await fetch(`${BASE}/api/invoices/${id}`, {
     method: "PUT",
     headers: { "content-type": "application/json", cookie: auth.cookies, "x-csrf-token": auth.csrf },
-    body: JSON.stringify({ priceEdits }),
+    body: JSON.stringify({ priceEdits: edits }),
   });
-  const j = await r.json().catch(() => ({}));
-  if (r.ok && j.success !== false) { console.log(`✅ ${invoiceNo}: ${priceEdits.length} line(s) raised`); applied += priceEdits.length; }
-  else { console.log(`⛔ ${invoiceNo}: ${r.status} ${j.error ?? ""}`); skipped += priceEdits.length; }
+  const pj = await put.json().catch(() => ({}));
+  if (put.ok && pj.success !== false) { console.log(`✅ ${inv.no}: ${edits.length} line(s)`); appliedInv++; appliedLines += edits.length; }
+  else { errors.push(`${inv.no}: ${put.status} ${pj.error ?? ""}`); }
 }
 
-console.log(`\n${EXECUTE ? "APPLIED" : "WOULD APPLY"}: ${EXECUTE ? applied : done} lines | skipped: ${skipped}`);
-console.log("After executing, re-run scripts/audit-billable-2026-07-22.mjs to confirm the gap closed,");
-console.log("then RE-SEND the corrected invoices to the customer (that step is the owner's).");
+console.log(`\n${EXECUTE ? "APPLIED" : "WOULD APPLY"}: ${appliedInv} invoices / ${appliedLines} lines / +${rm(addSen)}`);
+if (skipped.length) console.log(`skipped: ${skipped.join(" | ")}`);
+if (errors.length) console.log(`ERRORS: ${errors.join(" | ")}`);
+console.log("\nThen re-run scripts/audit-billable-2026-07-22.mjs to confirm, and RE-SEND the corrected invoices (owner's step).");

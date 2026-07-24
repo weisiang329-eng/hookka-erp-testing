@@ -32,6 +32,7 @@ import {
 import {
   buildJournalEntryStatements,
   ledgerHasSource,
+  type LedgerEntryInput,
 } from "../lib/journal-hash";
 import { getOrgId } from "../lib/tenant";
 import { checkInvoiceLocked, lockedResponse } from "../lib/lock-helpers";
@@ -542,6 +543,68 @@ export async function previewCascadeSOClosed(
   return stmts;
 }
 
+// Build the GL statements that neutralise a cancelled invoice: mirror-reverse
+// whatever the invoice's doc family (invoice / invoice_restate_* / prior
+// invoice_void legs) currently nets VISIBLY, per account. Org-agnostic read —
+// the legs' own orgId is authoritative (BUG-2026-07-23-002: five cancels
+// skipped their reversal because the old posted-check ran under a fallback
+// org and read "never posted"). Naturally idempotent: once net is zero there
+// is nothing to reverse.
+async function buildCancelReversalStatements(
+  db: D1Database,
+  invoiceId: string,
+  actorUserId: string | null,
+  fallbackOrgId: string,
+): Promise<{ statements: D1PreparedStatement[]; reversedNetSen: number }> {
+  const cur =
+    (
+      await db
+        .prepare(
+          `SELECT accountCode, debitSen, creditSen, orgId FROM ledger_journal_entries
+            WHERE sourceId = ? AND hidden = 0 AND sourceType LIKE 'invoice%'`,
+        )
+        .bind(invoiceId)
+        .all<{ accountCode: string; debitSen: number; creditSen: number; orgId?: string | null }>()
+    ).results ?? [];
+  const net = new Map<string, number>(); // account → DR−CR
+  let legOrg: string | null = null;
+  for (const l of cur) {
+    net.set(l.accountCode, (net.get(l.accountCode) ?? 0) + (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0));
+    if (!legOrg && l.orgId) legOrg = String(l.orgId);
+  }
+  // Continue leg numbering after any existing invoice_void legs — the ledger
+  // is UNIQUE(orgId, sourceType, sourceId, legNo), and a partially-reversed
+  // invoice already owns the low leg numbers.
+  const maxRow = await db
+    .prepare(
+      "SELECT COALESCE(MAX(legNo), 0) AS m FROM ledger_journal_entries WHERE sourceType = 'invoice_void' AND sourceId = ?",
+    )
+    .bind(invoiceId)
+    .first<{ m: number }>();
+  const legs: LedgerEntryInput[] = [];
+  let legNo = (Number(maxRow?.m) || 0) + 1;
+  let reversedNetSen = 0;
+  for (const [acct, n] of net) {
+    if (n === 0) continue;
+    reversedNetSen += Math.abs(n);
+    legs.push({
+      id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+      sourceType: "invoice_void",
+      sourceId: invoiceId,
+      legNo: legNo++,
+      accountCode: acct,
+      debitSen: n < 0 ? -n : 0,
+      creditSen: n > 0 ? n : 0,
+      description: `Void reversal · ${invoiceId}`,
+      actorUserId,
+      orgId: legOrg ?? fallbackOrgId,
+    });
+  }
+  if (legs.length === 0) return { statements: [], reversedNetSen: 0 };
+  const { statements } = await buildJournalEntryStatements(db, legOrg ?? fallbackOrgId, legs);
+  return { statements, reversedNetSen };
+}
+
 // Order invoice items the way the DELIVERY ORDER prints (owner 2026-07-23
 // 「invoice 的顺序要和 DO 一样，别太散」): customer PO ascending with natural
 // numbers, blank POs LAST, then our SO — the SAME shared comparator print-do
@@ -739,6 +802,47 @@ app.post("/backfill-po-links", async (c) => {
       skipped,
     },
   });
+});
+
+// Nightly-callable sweep for BUG-2026-07-23-002 — shared by the manual
+// backfill endpoint below and /api/internal/nightly-gl-selfheal.
+export async function sweepCancelledInvoiceReversals(
+  db: D1Database,
+  execute: boolean,
+): Promise<{ scanned: number; needingReversal: number; fixed: { invoiceNo: string; reversedNetSen: number }[] }> {
+  const cancelled = await db.prepare(
+    "SELECT id, invoiceNo, orgId FROM invoices WHERE status = 'CANCELLED'",
+  ).all<{ id: string; invoiceNo?: string; invoice_no?: string; orgId?: string | null }>();
+  const fixed: { invoiceNo: string; reversedNetSen: number }[] = [];
+  const statements: D1PreparedStatement[] = [];
+  for (const inv of cancelled.results ?? []) {
+    const r = await buildCancelReversalStatements(db, inv.id, null, String(inv.orgId ?? 'hookka'));
+    if (r.statements.length === 0) continue;
+    fixed.push({ invoiceNo: String(inv.invoiceNo ?? inv.invoice_no ?? inv.id), reversedNetSen: r.reversedNetSen });
+    statements.push(...r.statements);
+  }
+  if (execute && statements.length) {
+    for (let i = 0; i < statements.length; i += 100) {
+      await db.batch(statements.slice(i, i + 100));
+    }
+  }
+  return { scanned: (cancelled.results ?? []).length, needingReversal: fixed.length, fixed };
+}
+
+// POST /api/invoices/backfill-cancel-reversals
+//
+// One-shot + nightly-callable repair for BUG-2026-07-23-002: CANCELLED
+// invoices whose GL was never reversed (the old void path's posted-check
+// could skip under an orgId mismatch). Mirror-reverses each cancelled
+// invoice's VISIBLE doc-family net via buildCancelReversalStatements —
+// org-agnostic, idempotent (net 0 → nothing to post). DEFAULTS TO DRY-RUN;
+// ?execute=1 writes. Registered BEFORE /:id.
+app.post("/backfill-cancel-reversals", async (c) => {
+  const denied = await requirePermission(c, "invoices", "update");
+  if (denied) return denied;
+  const execute = c.req.query("execute") === "1";
+  const r = await sweepCancelledInvoiceReversals(c.var.DB, execute);
+  return c.json({ success: true, data: { dry: !execute, ...r } });
 });
 
 app.post("/backfill-customer-fields", async (c) => {
@@ -2236,34 +2340,19 @@ app.put("/:id", async (c) => {
           (
             c as unknown as { get: (k: string) => string | undefined }
           ).get("userId") ?? null;
-        const posted = await ledgerHasSource(c.var.DB, orgId, "invoice", id);
-        const reversed = await ledgerHasSource(
+        // BUG-2026-07-23-002 — mirror-reverse whatever the invoice's doc
+        // family VISIBLY nets, per account, org-agnostic. The old
+        // posted/reversed gate + recompute skipped the reversal whenever
+        // the legs sat under a different orgId than the fallback (five
+        // Carress cancels left +31,677.52 live on 300-0000), and a
+        // recompute could drift from edited invoices' actual legs.
+        const { statements: revStmts } = await buildCancelReversalStatements(
           c.var.DB,
-          orgId,
-          "invoice_void",
           id,
+          actorUserId,
+          orgId,
         );
-        if (posted && !reversed) {
-          const { legs } = await buildInvoiceLedgerLegs(
-            c.var.DB,
-            orgId,
-            {
-              id,
-              invoiceNo: existing.invoiceNo,
-              customerId:
-                (existing as unknown as { customerId?: string })
-                  .customerId ?? "",
-              subtotalSen: existing.subtotalSen,
-            },
-            actorUserId,
-            true,
-            // Phase 2 — reverse EXACTLY what was posted (stored tax).
-            existing.taxSen ?? 0,
-          );
-          const { statements: ledgerStmts } =
-            await buildJournalEntryStatements(c.var.DB, orgId, legs);
-          statements.push(...ledgerStmts);
-        }
+        statements.push(...revStmts);
       } catch (e) {
         // Phase 1 (2026-06) — abort: a void must reverse the original
         // posting or the ledger keeps revenue/AR for a cancelled invoice.

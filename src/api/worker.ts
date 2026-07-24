@@ -583,7 +583,28 @@ app.post("/api/internal/nightly-pi-gl-backfill", async (c) => {
     if (result.failed > 0) {
       console.error("[nightly-pi-gl-backfill] some PIs failed to post:", result.failures);
     }
-    return c.json({ ok: true, ...result });
+    // GL self-heal sweeps (owner rule 2026-07-23 「以后不要有这个原因」):
+    // cancelled invoices whose reversal never landed (BUG-2026-07-23-002)
+    // and other-party bills whose creation GL never landed
+    // (BUG-2026-07-23-003). Both idempotent; best-effort so a sweep error
+    // never kills the PI backfill result.
+    let cancelSweep: unknown = null;
+    let opbSweep: unknown = null;
+    try {
+      const { sweepCancelledInvoiceReversals } = await import("./routes/invoices");
+      cancelSweep = await sweepCancelledInvoiceReversals(c.var.DB, true);
+    } catch (e) {
+      console.error("[nightly-gl-selfheal] cancel-reversal sweep failed:", e);
+      cancelSweep = { error: String(e) };
+    }
+    try {
+      const { sweepOtherPartyBillGl } = await import("./routes/accounting");
+      opbSweep = await sweepOtherPartyBillGl(c.var.DB, "hookka", true);
+    } catch (e) {
+      console.error("[nightly-gl-selfheal] other-party-bill sweep failed:", e);
+      opbSweep = { error: String(e) };
+    }
+    return c.json({ ok: true, ...result, cancelSweep, opbSweep });
   } catch (e) {
     console.error("[nightly-pi-gl-backfill] error:", e);
     return c.json({ ok: false, error: "backfill failed" }, 500);

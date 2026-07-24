@@ -3760,6 +3760,91 @@ app.put("/other-party-bills/:billNo", async (c) => {
   }
 });
 
+// POST /other-party-bills/backfill-gl
+//
+// One-shot + nightly-callable repair for BUG-2026-07-23-003: ACTIVE
+// other-party bills whose creation-time GL never landed (405-0000 went to a
+// DEBIT balance because every payment posted but ~14k of bill CRs were
+// missing). For each ACTIVE bill with NO visible other_party_bill-family GL,
+// re-posts buildBillLegs exactly as creation would have (idempotent via the
+// visible-net check). DEFAULTS TO DRY-RUN; ?execute=1 writes.
+// Nightly-callable sweep — shared by the manual endpoint below and
+// /api/internal/nightly-gl-selfheal (BUG-2026-07-23-003).
+export async function sweepOtherPartyBillGl(
+  db: Env["Variables"]["DB"],
+  defaultOrgId: string,
+  execute: boolean,
+): Promise<{ scanned: number; missingGl: number; fixed: { billNo: string; totalSen: number }[]; skipped: { billNo: string; reason: string }[] }> {
+  const orgIdOb = defaultOrgId;
+  const actorUserId: string | null = null;
+  const billsRes = await db.prepare(
+    `SELECT b.id, b.billNo, b.partyType, b.partyName, b.taxSen, b.orgId
+       FROM other_party_bills b
+       LEFT JOIN document_lifecycle dl
+         ON dl.sourceType = 'other_party_bill' AND dl.sourceId = b.billNo AND dl.orgId = b.orgId
+      WHERE (dl.state IS NULL OR dl.state = 'ACTIVE')`,
+  ).all<{ id: string; billNo: string; partyType: string; partyName: string; taxSen: number; orgId?: string | null }>();
+  const fixed: { billNo: string; totalSen: number }[] = [];
+  const skippedOb: { billNo: string; reason: string }[] = [];
+  const statements: D1PreparedStatement[] = [];
+  for (const b of billsRes.results ?? []) {
+    const legRes = await db.prepare(
+      `SELECT COALESCE(SUM(debitSen),0) AS d, COALESCE(SUM(creditSen),0) AS cr FROM ledger_journal_entries
+        WHERE sourceId = ? AND hidden = 0 AND sourceType LIKE 'other_party_bill%'`,
+    ).bind(b.billNo).first<{ d: number; cr: number }>();
+    if ((Number(legRes?.d) || 0) !== 0 || (Number(legRes?.cr) || 0) !== 0) continue; // has GL — untouched
+    const itemsRes = await db.prepare(
+      "SELECT counterAccount, amountSen, description FROM other_party_bill_items WHERE billId = ? ORDER BY lineNo",
+    ).bind(b.id).all<{ counterAccount: string; amountSen: number; description?: string | null }>();
+    const items = (itemsRes.results ?? []).map((it) => ({
+      counterAccount: String(it.counterAccount),
+      amountSen: Math.round(Number(it.amountSen) || 0),
+      description: it.description ?? "",
+    }));
+    if (items.length === 0) { skippedOb.push({ billNo: b.billNo, reason: "no line items" }); continue; }
+    try {
+      const legs = buildBillLegs({
+        partyType: b.partyType as PartyType,
+        billNo: b.billNo,
+        partyName: b.partyName,
+        items,
+        taxSen: Math.round(Number(b.taxSen) || 0),
+      }).map((l) => ({
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "other_party_bill",
+        sourceId: b.billNo,
+        legNo: l.legNo,
+        accountCode: l.accountCode,
+        debitSen: l.debitSen,
+        creditSen: l.creditSen,
+        description: l.description,
+        actorUserId,
+        orgId: String(b.orgId ?? orgIdOb),
+      }));
+      const totalSen = legs.reduce((s, l) => s + l.debitSen, 0);
+      const { statements: ls } = await buildJournalEntryStatements(db, String(b.orgId ?? orgIdOb), legs);
+      statements.push(...ls);
+      fixed.push({ billNo: b.billNo, totalSen });
+    } catch (e) {
+      skippedOb.push({ billNo: b.billNo, reason: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  if (execute && statements.length) {
+    for (let i = 0; i < statements.length; i += 100) {
+      await db.batch(statements.slice(i, i + 100));
+    }
+  }
+  return { scanned: (billsRes.results ?? []).length, missingGl: fixed.length, fixed, skipped: skippedOb };
+}
+
+app.post("/other-party-bills/backfill-gl", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const execute = c.req.query("execute") === "1";
+  const r = await sweepOtherPartyBillGl(c.var.DB, getOrgId(c), execute);
+  return c.json({ success: true, data: { dry: !execute, ...r } });
+});
+
 app.get("/other-party-bills", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;

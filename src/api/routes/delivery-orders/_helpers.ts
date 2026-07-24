@@ -42,6 +42,7 @@ import {
 } from "../../../lib/build-unified-doc-data";
 import { HOOKKA_LOGO_PNG_BASE64 } from "../../lib/hookka-logo-base64";
 import { computeInvoicePrintExtras } from "../../lib/invoice-print-extras";
+import { compareDoLinesByCustomerPO } from "../../../lib/do-item-order";
 import { ensureInvoicePoLinkColumn } from "../../lib/invoice-po-link";
 
 // Status transitions allowed by the mock-data impl. Preserved here so the

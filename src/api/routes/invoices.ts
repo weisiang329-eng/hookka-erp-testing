@@ -41,6 +41,7 @@ import { nextMonthDueDate } from "../../lib/terms";
 import { readGstRatePct } from "../lib/note-ledger";
 import { ensureInvoicePoLinkColumn, readInvoiceItemPoLink } from "../lib/invoice-po-link";
 import { matchInvoiceLinesToDoLines, type BackfillInvLine, type BackfillDoLine } from "../../lib/invoice-po-backfill";
+import { compareDoLinesByCustomerPO } from "../../lib/do-item-order";
 
 const app = new Hono<Env>();
 
@@ -541,6 +542,51 @@ export async function previewCascadeSOClosed(
   return stmts;
 }
 
+// Order invoice items the way the DELIVERY ORDER prints (owner 2026-07-23
+// 「invoice 的顺序要和 DO 一样，别太散」): customer PO ascending with natural
+// numbers, blank POs LAST, then our SO — the SAME shared comparator print-do
+// uses, resolved through each line's production_order_id link. Ordering only:
+// nothing stored moves, amounts untouched; unlinked lines keep their relative
+// order at the end (stable sort).
+async function orderInvoiceItemsLikeDo(
+  db: D1Database,
+  items: InvoiceItemRow[],
+): Promise<InvoiceItemRow[]> {
+  const ids = [
+    ...new Set(
+      items
+        .map((r) => readInvoiceItemPoLink(r as unknown as Record<string, unknown>))
+        .filter((v): v is string => !!v),
+    ),
+  ];
+  if (ids.length === 0) return items;
+  const refs = new Map<string, { customerPOId: string; salesOrderNo: string }>();
+  try {
+    const marks = ids.map(() => "?").join(",");
+    const res = await db
+      .prepare(
+        `SELECT id, customerPOId, companySOId, salesOrderId FROM production_orders WHERE id IN (${marks})`,
+      )
+      .bind(...ids)
+      .all<{ id: string; customerPOId?: string | null; companySOId?: string | null; salesOrderId?: string | null }>();
+    for (const r of res.results ?? []) {
+      refs.set(String(r.id), {
+        customerPOId: String(r.customerPOId ?? ""),
+        salesOrderNo: String(r.companySOId ?? r.salesOrderId ?? ""),
+      });
+    }
+  } catch {
+    return items; // refs unavailable — keep the original order rather than guess
+  }
+  return items
+    .map((it) => ({
+      it,
+      k: refs.get(readInvoiceItemPoLink(it as unknown as Record<string, unknown>) ?? "") ?? { customerPOId: "", salesOrderNo: "" },
+    }))
+    .sort((a, b) => compareDoLinesByCustomerPO(a.k, b.k))
+    .map((x) => x.it);
+}
+
 async function fetchInvoiceWithChildren(db: D1Database, id: string) {
   const [inv, itemsRes, paymentsRes] = await Promise.all([
     db
@@ -559,7 +605,7 @@ async function fetchInvoiceWithChildren(db: D1Database, id: string) {
   if (!inv) return null;
   return rowToInvoice(
     inv,
-    itemsRes.results ?? [],
+    await orderInvoiceItemsLikeDo(db, itemsRes.results ?? []),
     paymentsRes.results ?? [],
   );
 }

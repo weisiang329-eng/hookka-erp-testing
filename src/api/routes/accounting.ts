@@ -10553,10 +10553,14 @@ async function openingControlSums(db: Env["Variables"]["DB"]): Promise<{
   arByControl: Map<string, number>;
   arTotalSen: number;
   apTotalSen: number;
+  opb405Sen: number;
+  opb305Sen: number;
 }> {
   const arByControl = new Map<string, number>();
   let arTotalSen = 0;
   let apTotalSen = 0;
+  let opb405Sen = 0;
+  let opb305Sen = 0;
   try {
     const inv = await db
       .prepare(
@@ -10604,7 +10608,37 @@ async function openingControlSums(db: Env["Variables"]["DB"]): Promise<{
   } catch {
     /* opening date not set or excludes table unavailable — no auto-include */
   }
-  return { arByControl, arTotalSen, apTotalSen };
+  // Other-party (405/305) opening coverage (BUG-2026-07-23-003): pre-opening
+  // dated other-party bills self-posted their GL at creation, but those legs
+  // sit behind the opening floor — invisible to every report — while their
+  // post-opening PAYMENTS show, driving 405-0000 into a debit balance
+  // (−12,871.80 vs subledger 1,200 on 2026-07-23). Auto-derive the opening
+  // control legs from the pre-opening ACTIVE bills, exactly like 400-0000
+  // does for pre-opening PIs.
+  try {
+    const od = await getOpeningDate(db);
+    if (od) {
+      const opb = await db
+        .prepare(
+          `SELECT b.partyType AS t, COALESCE(SUM(b.totalSen),0) AS s
+             FROM other_party_bills b
+             LEFT JOIN document_lifecycle dl
+               ON dl.sourceType = 'other_party_bill' AND dl.sourceId = b.billNo AND dl.orgId = b.orgId
+            WHERE (dl.state IS NULL OR dl.state = 'ACTIVE')
+              AND b.billDate < ?
+            GROUP BY b.partyType`,
+        )
+        .bind(od)
+        .all<{ t: string; s: number }>();
+      for (const r of opb.results ?? []) {
+        if (r.t === "CREDITOR") opb405Sen += Number(r.s) || 0;
+        else if (r.t === "DEBTOR") opb305Sen += Number(r.s) || 0;
+      }
+    }
+  } catch {
+    /* other_party tables unavailable — no auto-include */
+  }
+  return { arByControl, arTotalSen, apTotalSen, opb405Sen, opb305Sen };
 }
 
 app.get("/opening-balance", async (c) => {
@@ -10707,6 +10741,8 @@ app.get("/opening-balance", async (c) => {
       arByControl: Object.fromEntries(sums.arByControl),
       arTotalSen: sums.arTotalSen,
       apTotalSen: sums.apTotalSen,
+      opb405Sen: sums.opb405Sen,
+      opb305Sen: sums.opb305Sen,
     },
   });
 });
@@ -11062,6 +11098,14 @@ app.post("/opening-balance/post", async (c) => {
     }
     if (sums.apTotalSen !== 0) {
       cleaned.push({ code: "400-0000", debitSen: 0, creditSen: sums.apTotalSen });
+    }
+    // Other-party controls — auto-derived from pre-opening bills, mirroring
+    // 400-0000 (BUG-2026-07-23-003).
+    if (sums.opb405Sen !== 0) {
+      cleaned.push({ code: "405-0000", debitSen: 0, creditSen: sums.opb405Sen });
+    }
+    if (sums.opb305Sen !== 0) {
+      cleaned.push({ code: "305-0000", debitSen: sums.opb305Sen, creditSen: 0 });
     }
     if (cleaned.length === 0) {
       return c.json({ success: false, error: "Nothing to post — every line is zero" }, 400);

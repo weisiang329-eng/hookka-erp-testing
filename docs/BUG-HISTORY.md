@@ -345,6 +345,14 @@ line was matched to the wrong SO.
 
 ---
 
+## BUG-2026-07-23-002 — Cancelled invoices kept their GL alive (void reversal silently skipped on orgId mismatch) `invoices` `gl`
+
+🟢 Fixed + backlog repaired (5 Carress invoices, +31,677.52 cleared; verified via /ar-reconciliation). Void now mirror-reverses the VISIBLE doc-family net per account, org-agnostic (buildCancelReversalStatements); POST /invoices/backfill-cancel-reversals (dry default) repairs; nightly self-heal sweeps it forever.
+
+## BUG-2026-07-23-003 — 405-0000 driven to a DEBIT balance: pre-opening other-party bills' GL sits behind the opening floor `accounting` `opening`
+
+🟢 Root-fixed. Seven pre-opening OPB bills (14,071.80) had posted GL, but the opening floor hides pre-opening legs while their post-opening payments show → 405 read −12,871.80 vs subledger 1,200. openingControlSums now auto-derives 405-0000 CR / 305-0000 DR from ACTIVE pre-opening other-party bills (mirror of 400-0000); GET /opening-balance returns opb405Sen/opb305Sen (verified 14,071.80 live). ⏳ Owner to re-post opening with the matching expense DRs (200-0050 +990 / 702-0010 +3,570 / 900-S002 +361.80 / 900-T003 +9,150) → 405 ties at 1,200. Also POST /other-party-bills/backfill-gl guards the truly-missing-GL case (0 found) and runs nightly.
+
 ## BUG-2026-07-23-001 — Editing a supplier payment that carried an ADVANCE row silently dropped the advance (restate rebuilt allocations only) `supplier-payments` `money`
 
 🟢 **Fixed + verified live (HPV-2607-020)**

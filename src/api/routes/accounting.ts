@@ -10618,21 +10618,29 @@ async function openingControlSums(db: Env["Variables"]["DB"]): Promise<{
   try {
     const od = await getOpeningDate(db);
     if (od) {
+      // Same proven query shape as sweepOtherPartyBillGl; the date filter and
+      // type split run in JS (an SQL aggregate over the adapter's renamed
+      // columns read back empty here).
       const opb = await db
         .prepare(
-          `SELECT b.partyType AS t, COALESCE(SUM(b.totalSen),0) AS s
+          `SELECT b.billNo, b.partyType, b.totalSen, b.billDate
              FROM other_party_bills b
              LEFT JOIN document_lifecycle dl
                ON dl.sourceType = 'other_party_bill' AND dl.sourceId = b.billNo AND dl.orgId = b.orgId
-            WHERE (dl.state IS NULL OR dl.state = 'ACTIVE')
-              AND b.billDate < ?
-            GROUP BY b.partyType`,
+            WHERE (dl.state IS NULL OR dl.state = 'ACTIVE')`,
         )
-        .bind(od)
-        .all<{ t: string; s: number }>();
+        .all<{
+          billNo: string; partyType?: string; party_type?: string;
+          totalSen?: number; total_sen?: number;
+          billDate?: string | null; bill_date?: string | null;
+        }>();
       for (const r of opb.results ?? []) {
-        if (r.t === "CREDITOR") opb405Sen += Number(r.s) || 0;
-        else if (r.t === "DEBTOR") opb305Sen += Number(r.s) || 0;
+        const d = String(r.billDate ?? r.bill_date ?? "").slice(0, 10);
+        if (!d || d >= od) continue;
+        const amt = Math.round(Number(r.totalSen ?? r.total_sen) || 0);
+        const t = String(r.partyType ?? r.party_type ?? "");
+        if (t === "CREDITOR") opb405Sen += amt;
+        else if (t === "DEBTOR") opb305Sen += amt;
       }
     }
   } catch {

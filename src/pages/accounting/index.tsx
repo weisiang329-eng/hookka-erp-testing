@@ -9548,6 +9548,9 @@ type ObState = {
   arByControl: Record<string, number>;
   arTotalSen: number;
   apTotalSen: number;
+  // Other-party controls auto-derived from pre-opening bills (BUG-2026-07-23-003).
+  opb405Sen?: number;
+  opb305Sen?: number;
 };
 
 function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh: () => void }) {
@@ -9624,8 +9627,12 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
 
   const userDr = glAccounts.reduce((s, a) => s + toSen(amounts[a.code]?.dr ?? ""), 0);
   const userCr = glAccounts.reduce((s, a) => s + toSen(amounts[a.code]?.cr ?? ""), 0);
-  const totalDr = userDr + (data?.arTotalSen ?? 0);
-  const totalCr = userCr + (data?.apTotalSen ?? 0);
+  // Derived controls: 300-x/305 (DR) and 400/405 (CR) ride alongside the
+  // manual rows — must mirror /opening-balance/post exactly or the preview
+  // difference lies (405 was missing → the grid showed a smaller gap than
+  // the server would enforce).
+  const totalDr = userDr + (data?.arTotalSen ?? 0) + (data?.opb305Sen ?? 0);
+  const totalCr = userCr + (data?.apTotalSen ?? 0) + (data?.opb405Sen ?? 0);
   const diff = totalDr - totalCr;
 
   // Save just the opening date (self-service, no posting required) — sets when
@@ -10006,6 +10013,28 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
                   </td>
                   <td className="px-3 py-1.5 text-right text-[#9CA3AF]">—</td>
                   <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(data!.apTotalSen)}</td>
+                </tr>
+              )}
+              {(data?.opb405Sen ?? 0) !== 0 && (
+                <tr className="border-b border-[#F0ECE9] bg-[#F7F4EF]">
+                  <td className="px-3 py-1.5">
+                    <span className="tabular-nums text-xs text-[#6B7280] mr-1">405-0000</span>
+                    {accounts.find((a) => a.code === "405-0000")?.name ?? "OTHER CREDITOR"}
+                    <span className="ml-2 text-[11px] text-[#9CA3AF]">auto — Σ pre-opening other-creditor bills</span>
+                  </td>
+                  <td className="px-3 py-1.5 text-right text-[#9CA3AF]">—</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(data!.opb405Sen ?? 0)}</td>
+                </tr>
+              )}
+              {(data?.opb305Sen ?? 0) !== 0 && (
+                <tr className="border-b border-[#F0ECE9] bg-[#F7F4EF]">
+                  <td className="px-3 py-1.5">
+                    <span className="tabular-nums text-xs text-[#6B7280] mr-1">305-0000</span>
+                    {accounts.find((a) => a.code === "305-0000")?.name ?? "OTHER DEBTOR"}
+                    <span className="ml-2 text-[11px] text-[#9CA3AF]">auto — Σ pre-opening other-debtor bills</span>
+                  </td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(data!.opb305Sen ?? 0)}</td>
+                  <td className="px-3 py-1.5 text-right text-[#9CA3AF]">—</td>
                 </tr>
               )}
               {glAccounts.map((a) => (

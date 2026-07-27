@@ -34,6 +34,42 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-27-002 — customer-save replace-diff WIPED delivery hubs; OCR create silently hub-less → State = raw PDF text `sales-orders` `data-integrity` `ui-frontend` 🟢
+
+**Symptom:** Owner created a Selangor hub for Houzs Century — it kept disappearing（「create
+HUB 又不见了」）. Meanwhile every OCR-scanned Houzs SO landed with NO hub but State showing
+"Selangor"（「明明没有hub可是可以显示selangor」）: 34 hub-less SO-2607-* on prod (32 with
+raw-text state 'Selangor', 2 blank), 45 stale production_orders rows, 2 DOs cut via the
+default-hub fallback.
+
+**Root causes (three stacked):**
+1. `customers.ts` PUT hub sync was a REPLACE-DIFF: it deleted every `delivery_hubs` row
+   missing from the incoming array — so a customer save from any stale tab / cached page
+   (customers page uses cached fetch) silently wiped hubs added elsewhere.
+2. `scan-po-modal.tsx` create loop proceeded silently when no hub matched; SO POST then
+   stores `customerState = chosenHub?.state ?? body.customerState` — the raw OCR text off
+   the PDF — with `hubId` NULL (`sales-orders.ts` ~2065-2081/~2479).
+3. Both hub forms' state dropdowns had NO Selangor option (canonical code `SGR` per
+   `src/lib/malaysia-states.ts`; the KL/PG/JB… list is legacy city shorthand).
+
+**Fix:** hub deletions are now EXPLICIT-ONLY — FE sends `deletedHubIds` (delete button),
+backend deletes only those (scoped to the customer) and otherwise UPSERTs, never drops;
+hub INSERT inherits the customer's org (org-scoped catalog readers see new hubs); `SGR`
+added to both hub state pickers; `handleCreateSOs` now lists every hub-less PO in an
+explicit confirm gate BEFORE creating (operator can cancel, pick a hub, or knowingly
+proceed). Pinned by `tests/hub-wipe-guard.test.mjs`.
+
+**Verified:** typecheck + eslint clean on the three touched files; structural test green;
+full suite via pre-commit hook. Read-only prod investigation script:
+`scripts/investigate-houzs-century-hub-2026-07-27.mjs`.
+
+**Data repair (separate step, owner decision pending):** assign the batch to the existing
+default hub `hub-h1` "Houzs KL" (its address IS the Balakong Selangor DC; 126 historical
+rows + both already-cut DOs use it) vs create a true Houzs SGR hub. See WORK-TRACKER
+2026-07-27 item 2.
+
+---
+
 ## BUG-2026-07-27-001 — sofa seat-size pick silently reset on unpriced models → order impossible to save `sales-orders` `ui-frontend` 🟢
 
 **Symptom:** Owner added seat size 20" (Maintenance → Sofa "Sizes") for model 5549, picked it

@@ -9,6 +9,31 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-27 — Owner-reported batch (morning): seat-size fix shipped; hub/state root-caused; chat-write approved
+1. ✅ **Sofa seat 20" un-orderable (BUG-2026-07-27-001)** — silent seat-pick reset on
+   unpriced models removed in all 4 line editors (sales+consignment create/edit); RM0 /
+   manual Base Price flow per owner 「应该要可以开单先」. Regression test
+   `tests/sofa-seat-no-tier.test.mjs`. Follow-up ⚪: Products sofa price columns are
+   hardcoded 24/28/30/32/35 (`products/index.tsx:246`) — make dynamic from Maintenance
+   `sofaSizes` so 20"/26" can be priced in the grid.
+2. 🟡 **OCR scan-PO hub/state (SO-2607-19x..222 Houzs Century)** — root-caused, fix pending
+   owner go. State = independent snapshot; scan falls back to RAW PDF text ("Selangor") when
+   no hub matches (`scan-po-modal.tsx` ~1039 → `sales-orders.ts` POST ~2479); hub lookup
+   silently NULLs when the id isn't in `delivery_hubs` (~2065-2081). Hub "disappeared":
+   customers PUT REPLACE-SYNC deletes any hub missing from a stale client array
+   (`customers.ts` 492-535; cached pages make stale saves likely) + Add-Hub state dropdown
+   has NO Selangor option (`customers.tsx` ~3895). PLAN: add state option → rebuild hub →
+   batch-assign via existing `PATCH /:id/hub` cascade (fixes State on the whole batch);
+   code-fix the replace-sync wipe + loud hub-less warning on scan create. Related earlier
+   work: 2026-07-22 Houzs PG re-hub batch below + still-open DO default-hub fallback.
+3. ⚪ **Chat assistant write access — owner ruling 2026-07-27 「聊天全部可以更改的，我现在的
+   人就是去做 training 的」** — assistant.ts is STRICTLY READ-ONLY today (L74). Build
+   chat-write in phases: Phase 1 = scheduling — chat drafts a schedule proposal → in-chat
+   confirm → approves through the EXISTING audited `/proposals/approve` path (writes
+   `job_cards.dueDate`), RBAC-scoped to the chatting user, rollback via Agent Console.
+   Feature ⇒ staging first. Phase-1 scope confirmed with owner before build.
+4. ❌ 「2024年的project数量对齐」 — mis-send, cancelled by owner (「发错了」).
+
 ## 2026-07-23 — ✅ Legacy invoice PO-link backfill (77 mislabeled printouts → 2 residual)
 
 Audit + repair, owner-approved. /api/invoices/backfill-po-links executed:

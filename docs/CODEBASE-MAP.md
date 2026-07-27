@@ -84,6 +84,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 - `sales_orders.caseid` links service-repair SOs onto a service_case; SVs price 0 by default (auto-pricing skipped) — don't reintroduce auto-pricing for service orders.
 - Production locks: COMPLETED job_cards / non-PENDING fg_units / cost_ledger refs are inviolate — don't override for cosmetic edits.
 - wipKey must use shared `deriveTopLevelWipKey` (one formula); component-level repair picks drop unowned material lines.
+- Sofa seat-size dropdown options come from Maintenance `sofaSizes` config; a product with NO seatHeightPrices matrix KEEPS the picked seat with manual Base Price (RM0 allowed) — do NOT reintroduce the silent reset (BUG-2026-07-27-001, pinned by `tests/sofa-seat-no-tier.test.mjs`, same logic in all 4 line editors: sales+consignment create/edit). Products SKU-Master sofa price columns are still hardcoded 24/28/30/32/35 (`products/index.tsx:246`) — new sizes can't be priced in the grid until the dynamic-columns follow-up.
 
 **Start here:** Open `src/api/routes/sales-orders.ts` (the 5318-line backend owning SO CRUD, status cascades, snapshot logic) first; pair with `src/pages/sales/create.tsx` for UI or `src/api/lib/sofa-combo.ts` for any pricing work.
 

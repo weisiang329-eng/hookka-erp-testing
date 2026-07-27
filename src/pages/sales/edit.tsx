@@ -681,6 +681,7 @@ export default function EditSalesOrderPage() {
     // scroll the freshly added card into view once React commits it.
     const newIdx = items.length;
     setItems([...items, { ...EMPTY_LINE, _uid: crypto.randomUUID() }]);
+    // eslint-disable-next-line no-restricted-syntax -- one-shot scroll-into-view delay inside add-item event handler
     window.setTimeout(() => {
       document
         .getElementById(`line-item-card-${newIdx}`)
@@ -740,8 +741,15 @@ export default function EditSalesOrderPage() {
   const selectSeatHeight = (idx: number, value: string) => {
     const item = items[idx];
     const prod = products.find(p => p.id === item.productId);
-    if (!value || !prod?.seatHeightPrices) {
+    if (!value) {
       updateItem(idx, { seatHeight: "", basePriceSen: 0 });
+      return;
+    }
+    if (!prod?.seatHeightPrices) {
+      // No seat-price matrix on this product — keep the operator's pick and
+      // leave Base Price manual (RM0 allowed; BUG-2026-07-27-001).
+      const sizeCode = value.replace(/"/g, "").trim();
+      updateItem(idx, { seatHeight: value, sizeLabel: value, sizeCode });
       return;
     }
     const tier = prod.seatHeightPrices.find(t => t.height === value);

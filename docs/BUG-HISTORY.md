@@ -34,6 +34,39 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-27-001 — sofa seat-size pick silently reset on unpriced models → order impossible to save `sales-orders` `ui-frontend` 🟢
+
+**Symptom:** Owner added seat size 20" (Maintenance → Sofa "Sizes") for model 5549, picked it
+on Create SO — the dropdown snapped back to "Select size..." with no error（「选择了…没有反
+应」）, and Save was then blocked by "Please select a seat size for all sofa items"（「save 不
+到」）. Same latent bug in SO edit + both consignment editors.
+
+**Root cause:** all four line editors' `selectSeatHeight` treated "product has NO
+seatHeightPrices matrix" the same as "field cleared": `if (!value || !tiers)` → reset
+seatHeight to "" + price 0. 5549 has no seat prices at all (its sizes 20"/26" have no column
+in the hardcoded Products sofa price grid — separate follow-up below), so EVERY pick was
+discarded before it could render. The backend explicitly allows RM0 lines (owner 2026-06-11
+no-RM0-gate ruling), so the discard was FE-only.
+
+**Fix (owner 2026-07-27 「应该要可以开单先，之后我在 edit 价格 / 或者送货 edit SI」):** split
+the guard — `!value` (clearing) still resets; a MISSING price matrix now KEEPS the operator's
+pick (seatHeight + sizeLabel + sizeCode) and leaves Base Price manual (the sofa-line Base
+Price input was already editable). Files: `src/pages/sales/create.tsx`,
+`src/pages/sales/edit.tsx`, `src/pages/consignment/create.tsx`,
+`src/pages/consignment/edit.tsx` (selectSeatHeight in each). Regression:
+`tests/sofa-seat-no-tier.test.mjs` (structural pins across all 4 files) added to the npm
+test list.
+
+**Verified:** typecheck:app clean + new structural test green locally; full suite gates the
+PR in CI. Live end-to-end check = the owner's real 5549 seat-20 order (price typed manually
+at create, or edited later on the SO / invoice — both are existing, tested paths).
+
+**Follow-up queued (deliberately NOT in this fix):** Products SKU-Master sofa price columns
+are hardcoded h24/28/30/32/35 (`products/index.tsx:246`) — derive them from Maintenance
+`sofaSizes` so new sizes (20"/26") can be priced in the grid.
+
+---
+
 ## BUG-2026-07-17-012 — payslip "Hourly Rate" formula hardcoded "(26 x 9)" — lied for non-9h workers `payroll` `ui-frontend` `pdf` 🟢
 **Display-only (the rate was always correct), fixed as part of the ANN short-hours work
 (BUG-2026-07-17-006/-007).** The payslip label read `basic / (26 x 9) = hourlyRate`, but the

@@ -438,8 +438,15 @@ export default function EditSalesOrderPage() {
   const selectSeatHeight = (idx: number, value: string) => {
     const item = items[idx];
     const prod = products.find(p => p.id === item.productId);
-    if (!value || !prod?.seatHeightPrices) {
+    if (!value) {
       updateItem(idx, { seatHeight: "", basePriceSen: 0 });
+      return;
+    }
+    if (!prod?.seatHeightPrices) {
+      // No seat-price matrix on this product — keep the operator's pick and
+      // leave Base Price manual (RM0 allowed; BUG-2026-07-27-001).
+      const sizeCode = value.replace(/"/g, "").trim();
+      updateItem(idx, { seatHeight: value, sizeLabel: value, sizeCode });
       return;
     }
     const tier = prod.seatHeightPrices.find(t => t.height === value);

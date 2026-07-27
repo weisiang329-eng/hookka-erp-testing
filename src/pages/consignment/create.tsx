@@ -651,10 +651,19 @@ function CreateConsignmentOrderPage() {
     const tiers = (cachedTiers && cachedTiers.length > 0)
       ? cachedTiers
       : prod?.seatHeightPrices;
-    if (!value || !tiers) {
+    if (!value) {
       // propagateSofaVariant handles the basePrice reset on other lines via
       // its per-line seatHeightPrices lookup (here `undefined tier`).
       propagateSofaVariant(idx, { seatHeight: "", basePriceSen: 0 });
+      return;
+    }
+    if (!tiers) {
+      // No seat-price matrix on this product (e.g. a new model nobody has
+      // priced yet) — keep the operator's pick and leave Base Price manual.
+      // Discarding the pick here made such orders impossible to save
+      // (BUG-2026-07-27-001); the backend allows RM0 lines by owner ruling.
+      const sizeCode = value.replace(/"/g, "").trim();
+      propagateSofaVariant(idx, { seatHeight: value, sizeLabel: value, sizeCode });
       return;
     }
     const tier = tiers.find(t => t.height === value);

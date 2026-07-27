@@ -17,16 +17,28 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
    columns now DYNAMIC from Maintenance `sofaSizes` (numerically sorted; 20"/26" get
    their own price columns) — `buildBaseCols`/`sofaHeightsFromConfig` in
    `products/index.tsx`, pinned by `tests/sofa-size-columns.test.mjs`.
-2. 🟡 **OCR scan-PO hub/state (SO-2607-19x..222 Houzs Century)** — root-caused, fix pending
-   owner go. State = independent snapshot; scan falls back to RAW PDF text ("Selangor") when
-   no hub matches (`scan-po-modal.tsx` ~1039 → `sales-orders.ts` POST ~2479); hub lookup
-   silently NULLs when the id isn't in `delivery_hubs` (~2065-2081). Hub "disappeared":
-   customers PUT REPLACE-SYNC deletes any hub missing from a stale client array
-   (`customers.ts` 492-535; cached pages make stale saves likely) + Add-Hub state dropdown
-   has NO Selangor option (`customers.tsx` ~3895). PLAN: add state option → rebuild hub →
-   batch-assign via existing `PATCH /:id/hub` cascade (fixes State on the whole batch);
-   code-fix the replace-sync wipe + loud hub-less warning on scan create. Related earlier
-   work: 2026-07-22 Houzs PG re-hub batch below + still-open DO default-hub fallback.
+2. 🟡 **OCR scan-PO hub/state (SO-2607-19x Houzs Century) — CODE FIXES SHIPPED
+   (BUG-2026-07-27-002); batch data repair awaits ONE owner choice.** Root causes (all
+   code-confirmed): State = independent snapshot falling back to RAW PDF text when no hub
+   matches; customers PUT REPLACE-SYNC deleted any hub missing from a stale client array
+   (how the owner's new hub kept vanishing); hub forms had NO Selangor option; scan create
+   proceeded silently hub-less. Shipped: explicit-only hub deletions (`deletedHubIds`
+   contract, customers.ts + customers.tsx), hub INSERT now inherits customer org, SGR
+   (Selangor, canonical `malaysia-states.ts` code) in both hub state pickers, loud confirm
+   gate before creating hub-less SOs (`scan-po-modal.tsx` handleCreateSOs). Pinned by
+   `tests/hub-wipe-guard.test.mjs`.
+   **Prod investigation (read-only, `scripts/investigate-houzs-century-hub-2026-07-27.mjs`):**
+   34 hub-less SO-2607-* (185 CANCELLED, 193-235; 32 × customer_state 'Selangor', 2 blank —
+   operators were STILL creating them the morning of 07-27), 45 production_orders rows
+   stale, 2 DOs already cut labelled via default-hub fallback (DO-2607-111 LOADED /
+   DO-2607-113 DRAFT, both hub-h1). Houzs Century (cust-1) has 4 surviving hubs — and the
+   DEFAULT hub "Houzs KL" (hub-h1)'s address IS the Balakong SELANGOR DC; 126 historical
+   SO-2607 rows carry state 'KL' through it. **Owner decision A/B:** (A) assign hub-h1
+   Houzs KL to the batch (consistent with the 126 historical rows + the 2 cut DOs;
+   customer_state becomes 'KL') — repair script ready to write; (B) create a true
+   "Houzs SGR/Selangor" hub (needs owner's hub code/details + a 3PL SGR rate row, and
+   diverges from history). Recommended: A. Still open from 07-22: DO default-hub fallback
+   fix (20 mislabelled PG DOs).
 3. ⚪ **Chat assistant write access — owner ruling 2026-07-27 「聊天全部可以更改的，我现在的
    人就是去做 training 的」** — assistant.ts is STRICTLY READ-ONLY today (L74). Build
    chat-write in phases: Phase 1 = scheduling — chat drafts a schedule proposal → in-chat

@@ -566,6 +566,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
         let res: Response;
         const controller = new AbortController();
+        // eslint-disable-next-line no-restricted-syntax -- fetch abort timer inside an async retry helper, not a React render timer
         const abortTimer = setTimeout(() => controller.abort(), PER_ATTEMPT_TIMEOUT_MS);
         try {
           res = await fetch("/api/scan-po/extract", {
@@ -583,6 +584,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
               ? err.message
               : "network error";
           if (attempt < MAX_ATTEMPTS - 1) {
+            // eslint-disable-next-line no-restricted-syntax -- backoff sleep inside an async retry loop, not a React render timer
             await new Promise((r) => setTimeout(r, BASE_DELAYS[attempt] * 1000));
             continue;
           }
@@ -623,6 +625,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
         }
         const headerWait = Number(res.headers.get("retry-after") || "0");
         const waitSec = headerWait > 0 ? Math.min(60, headerWait) : BASE_DELAYS[attempt];
+        // eslint-disable-next-line no-restricted-syntax -- retry-after backoff sleep inside an async retry loop, not a React render timer
         await new Promise((r) => setTimeout(r, waitSec * 1000));
       }
       return { kind: "fail", job, error: lastError || "retry exhausted" };
@@ -868,6 +871,31 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
       (_, i) => selectedPOs.has(claudeRows.length + i),
     );
     if (selectedClaude.length + selectedFallback.length === 0) return;
+
+    // Hub gate (BUG-2026-07-27-002): a PO that resolves NO delivery hub
+    // creates a hub-less SO whose State silently falls back to the raw PDF
+    // text — the whole SO-2607-19x Houzs batch shipped that way unnoticed.
+    // Surface it loudly BEFORE creating; the operator must explicitly accept.
+    const hubless: string[] = [];
+    for (const row of selectedClaude) {
+      const po = row.extracted;
+      const hub = mapDeliveryHub(po.customerName, po.customerState ?? "");
+      if (!(po.deliveryHubId || hub.hubId)) hubless.push(po.customerPO || "(no PO no.)");
+    }
+    for (const po of selectedFallback) {
+      const hub = mapDeliveryHub(po.customerName, po.deliveryHub);
+      if (!hub.hubId) hubless.push(po.poNo || "(no PO no.)");
+    }
+    if (hubless.length > 0) {
+      const ok = window.confirm(
+        `${hubless.length} PO(s) matched NO delivery hub:\n\n${hubless.join(", ")}\n\n` +
+          `Their SOs would be created WITHOUT a hub — State falls back to the raw PDF text, ` +
+          `and DO grouping / 3PL rates won't resolve it. Pick a hub in the Delivery Hub ` +
+          `dropdown (or add the hub under Customers, then re-open this scan) before creating.\n\n` +
+          `Create WITHOUT hub anyway?`,
+      );
+      if (!ok) return;
+    }
 
     setCreating(true);
     setStep("creating");
@@ -1211,13 +1239,13 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     void (async () => {
       const pending = await fetchScanQueuePending();
       if (cancelled || !pending?.batchId) return;
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+       
       setActiveBatchId(pending.batchId);
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+       
       setQueueItems(pending.items);
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+       
       setStep("preview");
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+       
       setUsedClaude(true);
     })();
     return () => {
@@ -1234,11 +1262,11 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
       const r = await fetchScanQueueBatch(activeBatchId);
       if (cancelled) return;
       if (!r.ok) {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- poll-result write
+         
         setErrors([`Queue poll failed: ${r.error}`]);
         return;
       }
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- poll-result write
+       
       setQueueItems(r.data.items);
       const ready = r.data.items.filter(
         (it) =>

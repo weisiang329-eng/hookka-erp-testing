@@ -3314,7 +3314,11 @@ export default function CustomersPage() {
   // Returns true on success, false on failure. Caller is responsible for
   // rolling back local optimistic state on false (we already applied it
   // before the network round-trip).
-  const persistCustomer = async (updated: Customer): Promise<boolean> => {
+  // deletedHubIds: hub deletions must be named explicitly — the backend no
+  // longer diff-deletes hubs missing from the array (BUG-2026-07-27-002).
+  const persistCustomer = async (
+    updated: Customer & { deletedHubIds?: string[] },
+  ): Promise<boolean> => {
     const previousData = data;
     setData((prev) => prev.map((c) => c.id === updated.id ? updated : c));
     // 2026-05-27 verifiedSave migration. Compares name + state on
@@ -3794,7 +3798,7 @@ export default function CustomersPage() {
                           <div>
                             <label className="block text-xs text-[#6B7280] mb-1">State *</label>
                             <select value={hubForm.state} onChange={(e) => setHubForm(f => ({ ...f, state: e.target.value }))} className="w-full h-8 rounded border border-[#E2DDD8] px-2 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20">
-                              {["KL","PG","JB","SRW","SBH","IPH","MLK","KCH","KB","KT"].map(s => <option key={s} value={s}>{s}</option>)}
+                              {["KL","SGR","PG","JB","SRW","SBH","IPH","MLK","KCH","KB","KT"].map(s => <option key={s} value={s}>{s}</option>)}
                             </select>
                           </div>
                           <div>
@@ -3859,7 +3863,7 @@ export default function CustomersPage() {
                               if (!(await confirm({ title: "Delete hub?", message: `Delete hub "${hub.shortName}"?`, danger: true }))) return;
                               const cust = data.find(c => c.id === expandedCustomer);
                               if (!cust) return;
-                              await persistCustomer({ ...cust, deliveryHubs: cust.deliveryHubs.filter(h => h.id !== hub.id) });
+                              await persistCustomer({ ...cust, deliveryHubs: cust.deliveryHubs.filter(h => h.id !== hub.id), deletedHubIds: [hub.id] });
                               // persistCustomer toasts + rolls back on failure; nothing else to do here.
                             }}
                             className="p-1.5 rounded hover:bg-[#F9E1DA] transition-opacity"
@@ -3893,6 +3897,7 @@ export default function CustomersPage() {
                         className="w-full h-8 rounded border border-[#E2DDD8] px-2 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20"
                       >
                         <option value="KL">KL</option>
+                        <option value="SGR">SGR</option>
                         <option value="PG">PG</option>
                         <option value="JB">JB</option>
                         <option value="SRW">SRW</option>

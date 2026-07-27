@@ -517,28 +517,42 @@ app.put("/:id", async (c) => {
       const incoming = (body.deliveryHubs as IncomingHub[]).filter(
         (h) => typeof h?.id === "string" && h.id.length > 0,
       );
-      const incomingIds = new Set(incoming.map((h) => h.id as string));
 
-      const existingHubsRes = await c.var.DB.prepare(
-        "SELECT id FROM delivery_hubs WHERE customerId = ?",
+      // Deletions are EXPLICIT-ONLY (BUG-2026-07-27-002). The old diff
+      // strategy deleted every hub missing from the incoming array — so a
+      // save from any stale tab / cached page silently wiped hubs added
+      // elsewhere (the owner's newly created hub kept vanishing). The FE
+      // now names deletions in body.deletedHubIds; hubs are otherwise only
+      // UPSERTed, never dropped. FK refs stay ON DELETE SET NULL.
+      const deletedHubIds = Array.isArray(
+        (body as { deletedHubIds?: unknown }).deletedHubIds,
       )
-        .bind(id)
-        .all<{ id: string }>();
-      const existingIds = (existingHubsRes.results ?? []).map((r) => r.id);
-
-      for (const oldId of existingIds) {
-        if (!incomingIds.has(oldId)) {
-          await c.var.DB.prepare("DELETE FROM delivery_hubs WHERE id = ?")
-            .bind(oldId)
-            .run();
-        }
+        ? ((body as { deletedHubIds?: unknown[] }).deletedHubIds ?? []).filter(
+            (v): v is string => typeof v === "string" && v.length > 0,
+          )
+        : [];
+      for (const delId of deletedHubIds) {
+        await c.var.DB.prepare(
+          "DELETE FROM delivery_hubs WHERE id = ? AND customerId = ?",
+        )
+          .bind(delId, id)
+          .run();
       }
 
+      // New hubs inherit the customer's org so org-scoped readers (scan-PO
+      // catalog, customers list join) can see them instead of relying on
+      // the column DEFAULT.
+      const custOrgId =
+        (existing as { orgId?: string | null; org_id?: string | null }).orgId ??
+        (existing as { orgId?: string | null; org_id?: string | null }).org_id ??
+        "hookka";
+
       for (const h of incoming) {
+        if (deletedHubIds.includes(h.id as string)) continue;
         await c.var.DB.prepare(
           `INSERT INTO delivery_hubs
-             (id, customerId, code, shortName, state, address, contactName, phone, email, isDefault)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             (id, customerId, code, shortName, state, address, contactName, phone, email, isDefault, orgId)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              code = excluded.code,
              shortName = excluded.shortName,
@@ -560,6 +574,7 @@ app.put("/:id", async (c) => {
             h.phone ?? null,
             h.email ?? null,
             h.isDefault ? 1 : 0,
+            custOrgId,
           )
           .run();
       }

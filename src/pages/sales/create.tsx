@@ -313,7 +313,6 @@ function CreateSalesOrderPage() {
     effectiveFrom: string;
   };
   const [sofaCombos, setSofaCombos] = useState<SofaComboRule[]>([]);
-  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     let cancelled = false;
     const loads: Promise<SofaComboRule[]>[] = [];
@@ -349,7 +348,6 @@ function CreateSalesOrderPage() {
       cancelled = true;
     };
   }, [customerId]);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Customer-specific assigned product list. Populated from
   // /api/customer-products?customerId=X whenever a customer is selected.
@@ -937,6 +935,7 @@ function CreateSalesOrderPage() {
     // the fresh card into view once React has committed it.
     const newIdx = items.length;
     setItems([...items, makeEmptyLine()]);
+    // eslint-disable-next-line no-restricted-syntax -- one-shot scroll-into-view delay inside add-item event handler
     window.setTimeout(() => {
       document
         .getElementById(`line-item-card-${newIdx}`)

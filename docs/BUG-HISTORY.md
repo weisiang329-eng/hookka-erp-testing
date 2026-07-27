@@ -34,6 +34,40 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-07-27-003 — chat assistant refused every agent/scheduling command: SYSTEM_PROMPT predated the v1.9 agent tools `assistant` `agents` 🟡 (fix on PR canary, merges after supervisor's live test)
+
+**Symptom:** Production supervisor asked Hookka AI to re-arrange the framing schedule and
+change due dates; it replied "I'm strictly read-only — I cannot change due dates" and told
+him to do it himself（owner: 「教导了他…那个agent不做？罢工？」）. Teaching it standing
+rules was refused the same way.
+
+**Root cause:** the capabilities ALREADY EXISTED — `assistant-tools.ts` v1.9 ships
+`agent_overview`, `agent_control` (incl. run_now task=proposals = regenerate the production
+due-date proposals) and `teach_agent` (the persistent teaching notebook, injected into every
+future agent run). But the SYSTEM_PROMPT in `assistant.ts` was never updated when v1.9
+landed: its blanket "You are STRICTLY READ-ONLY… say you can't" clause outranked everything,
+so the model refused before ever considering those tools, and none of them were listed in
+the prompt's module map / tool reference either.
+
+**Fix (phase 1 of owner ruling 2026-07-27 「聊天全部可以更改的」):**
+1. Prompt rewritten: read-only stays for BUSINESS DOCUMENTS; explicit agent-workforce
+   exception + a 4-step scheduling flow (regenerate → list → user's explicit yes → decide);
+   v1.9+v2.0 tools added to the module map, intent table, and full tool reference.
+2. New tools `list_schedule_proposals` + `decide_schedule_proposals` (SUPER_ADMIN, hard
+   `confirmed:true` consent contract — the tool errors politely unless the operator
+   explicitly approved the exact shown set in-conversation).
+3. Both chat decide + the Planning tab route now share ONE core: new
+   `decideProposals` in `src/api/lib/schedule-proposals.ts` (route refactored onto it,
+   responses byte-identical; WAITING-only dueDate writes + one rollbackable
+   plan_snapshots batch, Agent Console rollback works on chat approvals too).
+
+**Verified:** `tests/assistant-schedule-decide.test.mjs` (prompt doctrine + registry +
+consent guard + route delegation) green; typecheck + eslint clean; full suite via hook.
+Live: supervisor tests on the PR canary URL (same DB as prod — approvals are real) before
+the merge to main.
+
+---
+
 ## BUG-2026-07-27-002 — customer-save replace-diff WIPED delivery hubs; OCR create silently hub-less → State = raw PDF text `sales-orders` `data-integrity` `ui-frontend` 🟢
 
 **Symptom:** Owner created a Selangor hub for Houzs Century — it kept disappearing（「create

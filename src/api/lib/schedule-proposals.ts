@@ -323,6 +323,9 @@ interface PendingRow {
   jc_id?: string;
   po_id?: string | null;
   dept?: string | null;
+  lane?: string | null;
+  fabric?: string | null;
+  reason?: string | null;
   so_ref?: string | null;
   current_due?: string | null;
   proposed_due?: string;
@@ -480,4 +483,107 @@ export async function applyPendingProposals(
     skipped,
     remainingPending: Number(remain?.n) || 0,
   };
+}
+
+// ── Decide SPECIFIC proposals by id (human decision paths) ───────────────────
+
+export interface DecideProposalsResult {
+  decided: number;
+  skipped: number;
+  applied: Array<{
+    proposalId: string;
+    jcId: string;
+    poId: string | null;
+    dept: string | null;
+    soRef: string | null;
+    from: string | null;
+    to: string;
+  }>;
+}
+
+/**
+ * Approve or reject SPECIFIC proposals by id — the shared core behind the
+ * Planning tab's approve/reject endpoints AND the chat assistant's
+ * decide_schedule_proposals tool (owner ruling 2026-07-27: chat may decide
+ * proposals, but only after the operator's explicit in-chat confirmation).
+ *
+ * Approve mirrors the original route behaviour exactly: unknown / already
+ * decided ids are skipped silently; the new due date lands only on a
+ * still-WAITING job card; ONE plan_snapshots batch row records the applied
+ * set (same shape the Agent Console's rollback-last-batch reads). Reject
+ * flips PENDING rows to REJECTED and never touches job cards.
+ */
+export async function decideProposals(
+  db: D1Database,
+  opts: { action: "approve" | "reject"; ids: string[]; decidedBy: string | null },
+): Promise<DecideProposalsResult> {
+  await ensureProposalTables(db);
+  const ids = opts.ids.filter((x) => typeof x === "string" && x.length > 0).slice(0, 500);
+  const nowIso = new Date().toISOString();
+
+  if (opts.action === "reject") {
+    if (ids.length === 0) return { decided: 0, skipped: 0, applied: [] };
+    const ph = ids.map(() => "?").join(",");
+    await db
+      .prepare(
+        `UPDATE schedule_proposals
+            SET status = 'REJECTED', decided_at = ?, decided_by = ?
+          WHERE status = 'PENDING' AND id IN (${ph})`,
+      )
+      .bind(nowIso, opts.decidedBy, ...ids)
+      .run();
+    return { decided: ids.length, skipped: 0, applied: [] };
+  }
+
+  const applied: DecideProposalsResult["applied"] = [];
+  for (const id of ids) {
+    const row = await db
+      .prepare("SELECT * FROM schedule_proposals WHERE id = ? AND status = 'PENDING'")
+      .bind(id)
+      .first<PendingRow>();
+    if (!row) continue; // unknown / already decided — skip silently
+    const jcId = row.jcId ?? row.jc_id;
+    const proposedDue = row.proposedDue ?? row.proposed_due;
+    if (!jcId || !proposedDue) continue;
+    // Apply ONLY to a still-open card; a card completed/cancelled since
+    // generation keeps its dates untouched.
+    await db
+      .prepare(
+        `UPDATE job_cards SET dueDate = ?, updated_at = ?
+          WHERE id = ? AND status = 'WAITING'`,
+      )
+      .bind(proposedDue, nowIso, jcId)
+      .run();
+    await db
+      .prepare(
+        `UPDATE schedule_proposals
+            SET status = 'APPROVED', decided_at = ?, decided_by = ?
+          WHERE id = ?`,
+      )
+      .bind(nowIso, opts.decidedBy, id)
+      .run();
+    applied.push({
+      proposalId: id,
+      jcId,
+      poId: (row.poId ?? row.po_id) ?? null,
+      dept: row.dept ?? null,
+      soRef: (row.soRef ?? row.so_ref) ?? null,
+      from: (row.currentDue ?? row.current_due) ?? null,
+      to: proposedDue,
+    });
+  }
+
+  if (applied.length > 0) {
+    await db
+      .prepare("INSERT INTO plan_snapshots (id, taken_at, date, payload) VALUES (?,?,?,?)")
+      .bind(
+        crypto.randomUUID(),
+        nowIso,
+        nowIso.slice(0, 10),
+        JSON.stringify({ kind: "PROPOSALS_APPLIED", decidedBy: opts.decidedBy, applied }),
+      )
+      .run();
+  }
+
+  return { decided: applied.length, skipped: ids.length - applied.length, applied };
 }

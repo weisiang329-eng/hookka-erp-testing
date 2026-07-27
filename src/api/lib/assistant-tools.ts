@@ -42,7 +42,11 @@ import {
   type AgentFamily,
   AGENT_FAMILIES,
 } from "./agent-console";
-import { generateProposals } from "./schedule-proposals";
+import {
+  generateProposals,
+  ensureProposalTables,
+  decideProposals,
+} from "./schedule-proposals";
 import { runLearning } from "./agent-learning";
 import { runDeliveryAgent } from "../routes/delivery-agent";
 import {
@@ -6546,9 +6550,156 @@ const teachAgentTool: ToolDefinition = {
   },
 };
 
-// Autonomy note: batch auto-apply is intentionally NOT a direct chat verb —
-// it is governed by the per-agent gate (auto_on/auto_off above), so "apply
-// them now" = turn the gate on and the next run/heartbeat drains the queue.
+// ---------------------------------------------------------------------------
+// Schedule proposals in chat (owner ruling 2026-07-27 「聊天全部可以更改的」).
+//
+// Historical note: batch auto-apply was originally NOT a chat verb (governed
+// only by the per-agent auto gate). The owner's 2026-07-27 ruling added a
+// DIRECT decide path with a hard consent contract: the model must SHOW the
+// proposals (list tool) and receive the operator's explicit yes in the same
+// conversation before calling decide with confirmed:true. The write itself
+// reuses the SAME lib core as the Planning tab buttons (decideProposals →
+// WAITING-only dueDate writes + one rollbackable plan_snapshots batch), so
+// chat approvals stay inside the audited, reversible pipeline.
+// ---------------------------------------------------------------------------
+
+const listScheduleProposalsTool: ToolDefinition = {
+  schema: {
+    name: "list_schedule_proposals",
+    description:
+      "List the Production agent's due-date proposals. Default status PENDING = the queue waiting for a human decision. Each row: proposal id, SO ref, department, current due → proposed due, and the reason. ALWAYS call this and show the user the rows BEFORE any decide_schedule_proposals call. If it returns 0 pending, offer to regenerate via agent_control (action=run_now, task=proposals).",
+    input_schema: {
+      type: "object",
+      properties: {
+        status: {
+          type: "string",
+          enum: ["PENDING", "APPROVED", "REJECTED"],
+          description: "Default PENDING.",
+        },
+        limit: { type: "number", description: "Max rows (1-100, default 50)." },
+      },
+      required: [],
+    },
+  },
+  execute: async (c, args) => {
+    const db = c.var.DB;
+    await ensureProposalTables(db);
+    const status = (strOrNull(args.status) ?? "PENDING").toUpperCase();
+    const limit = clampLimit(args.limit, 50);
+    const res = await db
+      .prepare(
+        `SELECT * FROM schedule_proposals WHERE status = ?
+          ORDER BY so_ref, dept, jc_id LIMIT ?`,
+      )
+      .bind(status, limit)
+      .all<{
+        id: string;
+        dept?: string | null;
+        lane?: string | null;
+        fabric?: string | null;
+        reason?: string | null;
+        so_ref?: string | null;
+        current_due?: string | null;
+        proposed_due?: string;
+        soRef?: string | null;
+        currentDue?: string | null;
+        proposedDue?: string;
+      }>();
+    const rows = (res.results ?? []).map((r) => ({
+      id: r.id,
+      soRef: (r.soRef ?? r.so_ref) ?? "",
+      dept: r.dept ?? "",
+      lane: r.lane ?? "",
+      fabric: r.fabric ?? "",
+      currentDue: (r.currentDue ?? r.current_due) ?? null,
+      proposedDue: (r.proposedDue ?? r.proposed_due) ?? null,
+      reason: r.reason ?? "",
+    }));
+    const pending = await db
+      .prepare("SELECT COUNT(*) AS n FROM schedule_proposals WHERE status = 'PENDING'")
+      .bind()
+      .first<{ n: number | string }>();
+    return {
+      ok: true,
+      status,
+      rows,
+      totalPending: Number(pending?.n) || 0,
+      note:
+        "Show the user a compact table (SO / dept / current due → proposed due / reason). Before approving, restate the count and get an explicit yes.",
+    };
+  },
+};
+
+const decideScheduleProposalsTool: ToolDefinition = {
+  schema: {
+    name: "decide_schedule_proposals",
+    description:
+      "SUPER_ADMIN ONLY — approve or reject specific schedule proposals BY ID, same effect as the Planning tab buttons: approve writes each proposal's new due date onto its still-open job card and stores one rollbackable batch snapshot; reject changes nothing on the cards. HARD CONSENT RULE: call ONLY after you have SHOWN the user the exact proposals (list_schedule_proposals) and they explicitly said yes in THIS conversation — then pass confirmed:true. Never invent ids. If the user wants specific calendar dates the proposals don't match, do NOT approve — explain the agent computes dates from capacity and offer to regenerate or point to Planning.",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["approve", "reject"] },
+        ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "Proposal ids from list_schedule_proposals (1-500).",
+        },
+        confirmed: {
+          type: "boolean",
+          description:
+            "MUST be true, and ONLY after the user's explicit yes to the exact set in this conversation.",
+        },
+      },
+      required: ["action", "ids", "confirmed"],
+    },
+  },
+  execute: async (c, args) => {
+    if (!isSuperAdmin(c)) {
+      return { ok: false, error: "Only the SUPER_ADMIN can decide schedule proposals. Ask the boss." };
+    }
+    if (args.confirmed !== true) {
+      return {
+        ok: false,
+        error:
+          "Not confirmed — show the user the proposals and get an explicit yes first, then call again with confirmed:true.",
+      };
+    }
+    const action =
+      args.action === "approve" ? "approve" : args.action === "reject" ? "reject" : null;
+    if (!action) return { ok: false, error: "action must be approve | reject" };
+    const ids = Array.isArray(args.ids)
+      ? args.ids.filter((x): x is string => typeof x === "string" && x.length > 0).slice(0, 500)
+      : [];
+    if (ids.length === 0) {
+      return { ok: false, error: "ids[] required — take them from list_schedule_proposals." };
+    }
+    const db = c.var.DB;
+    if (await isKillSwitchOn(db)) {
+      return { ok: false, error: "Global kill switch is ON — lift it first (agent_control)." };
+    }
+    const userId =
+      (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+    const r = await decideProposals(db, { action, ids, decidedBy: userId });
+    await emitAudit(c, {
+      resource: "agents",
+      resourceId: `proposals-${action}`,
+      action: `proposals-${action}`,
+      after: { ids: ids.slice(0, 50), decided: r.decided, skipped: r.skipped },
+      source: "admin",
+    });
+    return {
+      ok: true,
+      action,
+      decided: r.decided,
+      skipped: r.skipped,
+      applied: r.applied.slice(0, 50),
+      note:
+        action === "approve"
+          ? "Due dates written to the still-open job cards; the batch is rollbackable from the Agent Console. Confirm back to the user in one sentence with the count."
+          : "Marked rejected — no dates changed.",
+    };
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Registry
@@ -6640,6 +6791,10 @@ export const TOOLS: ToolDefinition[] = [
   agentOverviewTool,
   agentControlTool,
   teachAgentTool,
+  // v2.0 — schedule proposals decided in chat (owner ruling 2026-07-27:
+  // list → explicit user confirm → decide; same lib core as the Planning tab)
+  listScheduleProposalsTool,
+  decideScheduleProposalsTool,
 ];
 
 const TOOL_BY_NAME = new Map<string, ToolDefinition>(

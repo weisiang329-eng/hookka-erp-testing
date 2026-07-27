@@ -197,41 +197,51 @@ type BaseCol = {
   frozen?: boolean; // Code column — always on, sticky-left
   alwaysOn?: boolean; // cannot be hidden via the chooser
 };
-const BASE_COLS: Record<ProdCat, BaseCol[]> = {
-  BEDFRAME: [
-    { key: "code", label: "Product Code", width: "minmax(120px,1.3fr)", align: "left", frozen: true, alwaysOn: true },
-    { key: "description", label: "Description", width: "minmax(160px,1.8fr)", align: "left" },
-    { key: "category", label: "Category", width: "minmax(90px,0.8fr)", align: "left" },
-    { key: "size", label: "Size", width: "minmax(90px,0.8fr)", align: "left" },
-    { key: "price2", label: "Price 2", width: "minmax(100px,1fr)", align: "right" },
-    { key: "price1", label: "Price 1", width: "minmax(100px,1fr)", align: "right" },
-    { key: "unitM3", label: "Unit (m³)", width: "minmax(80px,0.7fr)", align: "right" },
-    { key: "fabric", label: "Fabric (m)", width: "minmax(80px,0.7fr)", align: "right" },
-    { key: "totalMin", label: "Total Min", width: "minmax(84px,0.9fr)", align: "right" },
-    { key: "variants", label: "Variants", width: "minmax(84px,0.8fr)", align: "center" },
-  ],
-  SOFA: [
-    { key: "code", label: "Product Code", width: "minmax(120px,1.3fr)", align: "left", frozen: true, alwaysOn: true },
-    { key: "description", label: "Description", width: "minmax(150px,1.2fr)", align: "left" },
-    { key: "model", label: "Model", width: "minmax(80px,0.55fr)", align: "left" },
-    { key: "h24", label: '24"', width: "minmax(95px,0.95fr)", align: "right" },
-    { key: "h28", label: '28"', width: "minmax(95px,0.95fr)", align: "right" },
-    { key: "h30", label: '30"', width: "minmax(95px,0.95fr)", align: "right" },
-    { key: "h32", label: '32"', width: "minmax(95px,0.95fr)", align: "right" },
-    { key: "h35", label: '35"', width: "minmax(95px,0.95fr)", align: "right" },
-    { key: "unitM3", label: "Unit (m³)", width: "minmax(72px,0.6fr)", align: "right" },
-    { key: "fabric", label: "Fabric (m)", width: "minmax(72px,0.5fr)", align: "right" },
-    { key: "totalMin", label: "Total Min", width: "minmax(84px,0.9fr)", align: "right" },
-    { key: "variants", label: "Variants", width: "minmax(84px,0.7fr)", align: "center" },
-  ],
-  ACCESSORY: [
-    { key: "code", label: "Product Code", width: "minmax(120px,1.3fr)", align: "left", frozen: true, alwaysOn: true },
-    { key: "description", label: "Description", width: "minmax(180px,2.5fr)", align: "left" },
-    { key: "basePrice", label: "Base Price", width: "minmax(100px,1fr)", align: "right" },
-    { key: "unitM3", label: "Unit (m³)", width: "minmax(80px,0.7fr)", align: "right" },
-    { key: "fabric", label: "Fabric (m)", width: "minmax(95px,1fr)", align: "right" },
-  ],
-};
+// Sofa seat-price columns are DYNAMIC: one per Maintenance "Sizes" entry
+// (kv variants-config `sofaSizes` — the same list the Create-SO seat dropdown
+// reads), numerically sorted. A size added in Maintenance (e.g. 20") gets its
+// price column here without a code change (BUG-2026-07-27-001 follow-up).
+// BEDFRAME / ACCESSORY column sets stay static.
+const SOFA_HEIGHT_COL = (n: string): BaseCol => ({
+  key: `h${n}`,
+  label: `${n}"`,
+  width: "minmax(95px,0.95fr)",
+  align: "right",
+});
+const H_COL_RE = /^h(\d+(?:\.\d+)?)$/;
+function buildBaseCols(sofaHeights: string[]): Record<ProdCat, BaseCol[]> {
+  return {
+    BEDFRAME: [
+      { key: "code", label: "Product Code", width: "minmax(120px,1.3fr)", align: "left", frozen: true, alwaysOn: true },
+      { key: "description", label: "Description", width: "minmax(160px,1.8fr)", align: "left" },
+      { key: "category", label: "Category", width: "minmax(90px,0.8fr)", align: "left" },
+      { key: "size", label: "Size", width: "minmax(90px,0.8fr)", align: "left" },
+      { key: "price2", label: "Price 2", width: "minmax(100px,1fr)", align: "right" },
+      { key: "price1", label: "Price 1", width: "minmax(100px,1fr)", align: "right" },
+      { key: "unitM3", label: "Unit (m³)", width: "minmax(80px,0.7fr)", align: "right" },
+      { key: "fabric", label: "Fabric (m)", width: "minmax(80px,0.7fr)", align: "right" },
+      { key: "totalMin", label: "Total Min", width: "minmax(84px,0.9fr)", align: "right" },
+      { key: "variants", label: "Variants", width: "minmax(84px,0.8fr)", align: "center" },
+    ],
+    SOFA: [
+      { key: "code", label: "Product Code", width: "minmax(120px,1.3fr)", align: "left", frozen: true, alwaysOn: true },
+      { key: "description", label: "Description", width: "minmax(150px,1.2fr)", align: "left" },
+      { key: "model", label: "Model", width: "minmax(80px,0.55fr)", align: "left" },
+      ...sofaHeights.map(SOFA_HEIGHT_COL),
+      { key: "unitM3", label: "Unit (m³)", width: "minmax(72px,0.6fr)", align: "right" },
+      { key: "fabric", label: "Fabric (m)", width: "minmax(72px,0.5fr)", align: "right" },
+      { key: "totalMin", label: "Total Min", width: "minmax(84px,0.9fr)", align: "right" },
+      { key: "variants", label: "Variants", width: "minmax(84px,0.7fr)", align: "center" },
+    ],
+    ACCESSORY: [
+      { key: "code", label: "Product Code", width: "minmax(120px,1.3fr)", align: "left", frozen: true, alwaysOn: true },
+      { key: "description", label: "Description", width: "minmax(180px,2.5fr)", align: "left" },
+      { key: "basePrice", label: "Base Price", width: "minmax(100px,1fr)", align: "right" },
+      { key: "unitM3", label: "Unit (m³)", width: "minmax(80px,0.7fr)", align: "right" },
+      { key: "fabric", label: "Fabric (m)", width: "minmax(95px,1fr)", align: "right" },
+    ],
+  };
+}
 // Human labels for the column chooser, keyed by column key. Shared across
 // categories so the chooser shows a clean name even where a category renders
 // the column slightly differently (e.g. sofa height cells).
@@ -243,16 +253,18 @@ const BASE_COL_CHOOSER_LABEL: Record<string, string> = {
   price2: "Price 2",
   price1: "Price 1",
   basePrice: "Base Price",
-  h24: 'Seat 24"',
-  h28: 'Seat 28"',
-  h30: 'Seat 30"',
-  h32: 'Seat 32"',
-  h35: 'Seat 35"',
   unitM3: "Unit (m³)",
   fabric: "Fabric (m)",
   totalMin: "Total Min",
   variants: "Variants",
 };
+// Chooser/header label for a base column. Dynamic sofa height keys (h20, h24…)
+// aren't in the static map — derive their "Seat N"" label from the key.
+function baseColChooserLabel(col: { key: string; label: string }): string {
+  const m = H_COL_RE.exec(col.key);
+  if (m) return `Seat ${m[1]}"`;
+  return BASE_COL_CHOOSER_LABEL[col.key] ?? col.label;
+}
 
 type DeptWorkingTime = {
   departmentCode: string;
@@ -993,6 +1005,19 @@ const DEFAULT_MAINTENANCE_CONFIG: MaintenanceConfig = {
   sofaCompartments: DEFAULT_SOFA_COMPARTMENTS,
 };
 
+// Numeric seat sizes for the SOFA price columns, from the Maintenance config.
+// Cleans stray inch marks, dedupes, sorts numerically; falls back to the
+// default list when the config is empty/malformed so the grid never loses
+// its price columns.
+function sofaHeightsFromConfig(cfg: MaintenanceConfig): string[] {
+  const cleaned = (cfg.sofaSizes ?? [])
+    .map((s) => String(s).replace(/"/g, "").trim())
+    .filter((s) => /^\d+(?:\.\d+)?$/.test(s));
+  const uniq = [...new Set(cleaned)];
+  const base = uniq.length > 0 ? uniq : DEFAULT_MAINTENANCE_CONFIG.sofaSizes;
+  return [...base].sort((a, b) => Number(a) - Number(b));
+}
+
 type MaintenanceTab = MaintenanceListKey | "fabrics";
 
 type FabricTrackingItem = {
@@ -1089,7 +1114,6 @@ function MaintenanceView() {
     Record<string, { defaultBom?: string; unitM3?: number }>
   >({});
   const [bomTemplateList, setBomTemplateList] = useState<{ productCode: string; category: string }[]>([]);
-  /* eslint-disable react-hooks/set-state-in-effect -- mount-time hydrate of BOM defaults + template list */
   useEffect(() => {
     void fetchVariantsConfig().then((v) => {
       setVariantBomDefaults(
@@ -1100,7 +1124,6 @@ function MaintenanceView() {
       .then((d) => setBomTemplateList(d?.data ?? []))
       .catch(() => {});
   }, []);
-  /* eslint-enable react-hooks/set-state-in-effect */
   function updateVariantDefault(code: string, patch: { defaultBom?: string; unitM3?: number }) {
     const next = { ...variantBomDefaults, [code]: { ...variantBomDefaults[code], ...patch } };
     setVariantBomDefaults(next);
@@ -1921,6 +1944,13 @@ export default function ProductsPage() {
   // value the operator adds in the Maintenance tab is immediately
   // selectable as a default.
   const [maintenanceConfig, setMaintenanceConfig] = useState<MaintenanceConfig>(DEFAULT_MAINTENANCE_CONFIG);
+  // Sofa seat-price columns follow the Maintenance "Sizes" list (numerically
+  // sorted) — a size added there (e.g. 20") immediately gets its own column.
+  const sofaHeightList = useMemo(
+    () => sofaHeightsFromConfig(maintenanceConfig),
+    [maintenanceConfig],
+  );
+  const baseCols = useMemo(() => buildBaseCols(sofaHeightList), [sofaHeightList]);
   // Fabric list. Variant editor uses this for the Default Fabric
   // dropdown — same source as Sales Order's fabric picker so codes align.
   const [fabricList, setFabricList] = useState<{ code: string; description?: string }[]>([]);
@@ -3004,6 +3034,9 @@ export default function ProductsPage() {
         toast.error("Catalogue export failed.");
       }
     })();
+    // One-shot deep-link export — the param is stripped above, so re-runs
+    // no-op; export handler + toast identities deliberately not tracked.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, products.length]);
 
 
@@ -3219,18 +3252,12 @@ export default function ProductsPage() {
             (p.defaultVariants?.seatHeight ? 1 : 0) +
             ((p.defaultVariants?.specials?.length ?? 0) > 0 ? 1 : 0)
           );
-        case "h24":
-          return seat("24");
-        case "h28":
-          return seat("28");
-        case "h30":
-          return seat("30");
-        case "h32":
-          return seat("32");
-        case "h35":
-          return seat("35");
-        default:
+        default: {
+          // Dynamic sofa height columns (h20, h24, … from Maintenance Sizes).
+          const m = H_COL_RE.exec(key);
+          if (m) return seat(m[1]);
           return 0;
+        }
       }
     },
     [configMap, sofaTier, analyticValueFor],
@@ -3289,19 +3316,6 @@ export default function ProductsPage() {
             ((p.defaultVariants?.specials?.length ?? 0) > 0 ? 1 : 0);
           return n > 0 ? `${n} set` : "Configure";
         }
-        case "h24":
-        case "h28":
-        case "h30":
-        case "h32":
-        case "h35": {
-          const h = key.slice(1);
-          const sh = (p.seatHeightPrices || []).find(
-            (s) =>
-              String(s.height ?? "").replace('"', "").trim() === h &&
-              entryTier(s.tier) === sofaTier,
-          );
-          return sh && sh.priceSen > 0 ? formatCurrency(sh.priceSen) : "";
-        }
         case "labor":
         case "marginP2":
         case "marginP1":
@@ -3314,8 +3328,19 @@ export default function ProductsPage() {
           if (key === "labor") return formatCurrency(v);
           return formatCurrency(v); // margins
         }
-        default:
+        default: {
+          // Dynamic sofa height columns (h20, h24, … from Maintenance Sizes).
+          const hm = H_COL_RE.exec(key);
+          if (hm) {
+            const sh = (p.seatHeightPrices || []).find(
+              (s) =>
+                String(s.height ?? "").replace('"', "").trim() === hm[1] &&
+                entryTier(s.tier) === sofaTier,
+            );
+            return sh && sh.priceSen > 0 ? formatCurrency(sh.priceSen) : "";
+          }
           return "";
+        }
       }
     },
     [configMap, sofaTier, analyticValueFor],
@@ -3335,7 +3360,7 @@ export default function ProductsPage() {
           ? "ACCESSORY"
           : "BEDFRAME";
     const keys = new Set<string>();
-    for (const col of BASE_COLS[cat]) {
+    for (const col of baseCols[cat]) {
       // Inline of isBaseColVisible so this memo depends only on baseColVis
       // (frozen / always-on columns are always shown; others unless toggled off).
       if (col.alwaysOn || col.frozen || baseColVis[col.key] !== false)
@@ -3345,7 +3370,7 @@ export default function ProductsPage() {
       if (c.applies(cat) && analyticColVis[c.key]) keys.add(c.key);
     }
     return keys;
-  }, [categoryFilter, baseColVis, analyticColVis]);
+  }, [categoryFilter, baseColVis, analyticColVis, baseCols]);
 
   // Apply the per-column filter row on top of the category/search result.
   // A row survives only if it matches EVERY active filter on a currently-
@@ -3401,6 +3426,7 @@ export default function ProductsPage() {
   // no layout jitter on scroll. Bumping or shrinking estimateSize would
   // reintroduce a one-frame shift each time a new window mounts.
   const productsScrollRef = useRef<HTMLDivElement>(null);
+  // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Virtual is the repo-standard windowing lib (same usage as inventory/adjustments, invoices/e-invoice, bom); React Compiler skips memoizing it
   const catalogRowVirtualizer = useVirtualizer({
     count: filtered.length,
     getScrollElement: () => productsScrollRef.current,
@@ -3636,7 +3662,7 @@ export default function ProductsPage() {
                 : categoryFilter === "ACCESSORY"
                   ? "ACCESSORY"
                   : "BEDFRAME";
-            const toggleableBase = BASE_COLS[catX].filter(
+            const toggleableBase = baseCols[catX].filter(
               (col) => !col.frozen && !col.alwaysOn,
             );
             const analyticForCat = ANALYTIC_COLS.filter((c) => c.applies(catX));
@@ -3716,7 +3742,7 @@ export default function ProductsPage() {
                             className="rounded border-[#D1D5DB] text-[#6B5C32] focus:ring-[#6B5C32]"
                           />
                           <span className="text-xs text-[#374151]">
-                            {BASE_COL_CHOOSER_LABEL[col.key] ?? col.label}
+                            {baseColChooserLabel(col)}
                           </span>
                         </label>
                       ))}
@@ -3931,7 +3957,7 @@ export default function ProductsPage() {
         const cat: ProdCat = isSofa ? "SOFA" : isAccessory ? "ACCESSORY" : "BEDFRAME";
         // The base columns this category defines, filtered to the ones the
         // owner currently has shown. The Code column is always present (frozen).
-        const visibleBaseCols = BASE_COLS[cat].filter((col) =>
+        const visibleBaseCols = baseCols[cat].filter((col) =>
           isBaseColVisible(col),
         );
         // A hidden base / analytic column simply isn't in orderedCols (built
@@ -3972,7 +3998,7 @@ export default function ProductsPage() {
         const naturalCols: OrderedCol[] = [
           ...visibleBaseCols.map((col) => ({
             key: col.key,
-            label: BASE_COL_CHOOSER_LABEL[col.key] ?? col.label,
+            label: baseColChooserLabel(col),
             frozen: !!col.frozen,
             fallbackWidth: col.width,
           })),
@@ -4523,10 +4549,11 @@ export default function ProductsPage() {
                             ),
                           };
                           // Sofa per-seat-height price cells (one per height key).
-                          // Identical edit behaviour as before; keyed h24..h35 so
-                          // they slot into orderedCols like any other column.
+                          // Identical edit behaviour as before; keys follow the
+                          // dynamic Maintenance Sizes list (h20, h24, …) so they
+                          // slot into orderedCols like any other column.
                           if (isSofa) {
-                            for (const h of ['24"', '28"', '30"', '32"', '35"'] as const) {
+                            for (const h of sofaHeightList.map((n) => `${n}"`)) {
                               const hNum = h.replace('"', '');
                               // Cell read: scope by (height, current tier). Legacy
                               // entries with no `tier` resolve to P2 via entryTier(),

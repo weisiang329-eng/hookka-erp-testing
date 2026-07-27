@@ -61,9 +61,12 @@ test list.
 PR in CI. Live end-to-end check = the owner's real 5549 seat-20 order (price typed manually
 at create, or edited later on the SO / invoice — both are existing, tested paths).
 
-**Follow-up queued (deliberately NOT in this fix):** Products SKU-Master sofa price columns
-are hardcoded h24/28/30/32/35 (`products/index.tsx:246`) — derive them from Maintenance
-`sofaSizes` so new sizes (20"/26") can be priced in the grid.
+**Follow-up SHIPPED (same day, second PR):** Products SKU-Master sofa price columns now
+derive from Maintenance `sofaSizes` (`buildBaseCols` + `sofaHeightsFromConfig` in
+`products/index.tsx`; cleaned/deduped/numerically sorted, default-list fallback). Sort,
+per-column filter, column chooser, and the editable price cells all follow the dynamic
+`h<size>` keys (shared `H_COL_RE`) — adding a size in Maintenance (20"/26") immediately
+gets a price column, per tier, no code change. Pinned by `tests/sofa-size-columns.test.mjs`.
 
 ---
 

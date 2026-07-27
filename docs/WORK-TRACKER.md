@@ -13,9 +13,10 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 1. ✅ **Sofa seat 20" un-orderable (BUG-2026-07-27-001)** — silent seat-pick reset on
    unpriced models removed in all 4 line editors (sales+consignment create/edit); RM0 /
    manual Base Price flow per owner 「应该要可以开单先」. Regression test
-   `tests/sofa-seat-no-tier.test.mjs`. Follow-up ⚪: Products sofa price columns are
-   hardcoded 24/28/30/32/35 (`products/index.tsx:246`) — make dynamic from Maintenance
-   `sofaSizes` so 20"/26" can be priced in the grid.
+   `tests/sofa-seat-no-tier.test.mjs`. Follow-up ✅ (same day): Products sofa price
+   columns now DYNAMIC from Maintenance `sofaSizes` (numerically sorted; 20"/26" get
+   their own price columns) — `buildBaseCols`/`sofaHeightsFromConfig` in
+   `products/index.tsx`, pinned by `tests/sofa-size-columns.test.mjs`.
 2. 🟡 **OCR scan-PO hub/state (SO-2607-19x..222 Houzs Century)** — root-caused, fix pending
    owner go. State = independent snapshot; scan falls back to RAW PDF text ("Selangor") when
    no hub matches (`scan-po-modal.tsx` ~1039 → `sales-orders.ts` POST ~2479); hub lookup

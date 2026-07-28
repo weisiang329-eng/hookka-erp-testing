@@ -82,6 +82,27 @@ Regression: `tests/hub-vanishes-guard.test.mjs` (3 structural pins). Verified: b
 clean + full suite green (1555/1554/0). Live read+write prod verification pending (DB
 unreachable from dev) — checklist in PR #112.
 
+**Prod verification + data repair (2026-07-28, via owner's authenticated Chrome ERP session,
+browser MCP — dev DB is IPv6-unreachable).** Snapshot of the Houzs Century SO-2607 batch on prod:
+- **28 SOs hub-less** (26 with raw `customer_state='Selangor'`, 2 blank). The 2026-07-27 rehub
+  script was **never executed** (the rows were still hub-less).
+- **The goods were NOT mis-delivered.** Every one of the 11 already-SHIPPED/INVOICED hub-less SOs
+  has its DO carrying the CORRECT `hub-h1 "Houzs KL"` (Balakong Selangor DC), `any_wrong_hub=false`.
+  Proof of mechanism: the one-hub-per-DO rule (`validateDoComposition`) means consolidated DOs
+  (DO-2607-113/114/118) could only bundle these SOs if they were all Houzs KL AT DO-CREATE TIME.
+  So the hub was present when the DO was cut, then the SO's `hubId` was wiped AFTERWARD (the
+  customer-save replace-diff, root cause #1). Corrupted SO records, not wrong shipments.
+- **Repaired 13** not-yet-shipped SOs (IN_PRODUCTION / READY_TO_SHIP, no locked DO) → `PATCH
+  /:id/hub {hubId:'hub-h1'}` → Houzs KL, read-back verified. **15 unrepairable** and left as-is:
+  11 SHIPPED/INVOICED + 3 on LOADED consolidated DOs (guard: "Hub cannot be changed once goods
+  have left the hub") + 1 CANCELLED — all with correct DOs, so no delivery impact.
+- **Owner-reported systemic symptom:** the hub is wrong through the WHOLE chain (OCR correct →
+  SO create / production / DO / **FG sticker** wrong). Confirmed same root: `production_orders`
+  has NO hub column (only denormalized `customer_state`, BUG-2026-05-30-006), so production — and
+  the FG sticker that reads it — inherit whatever the SO carries. Fixing the SO source (this PR)
+  fixes the whole chain for new orders. **Data patching is a stopgap; deploying this PR is the
+  actual fix for the recurrence.**
+
 ---
 
 ## BUG-2026-07-27-001 — sofa seat-size pick silently reset on unpriced models → order impossible to save `sales-orders` `ui-frontend` 🟢

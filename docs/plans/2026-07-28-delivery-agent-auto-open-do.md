@@ -45,6 +45,27 @@ for each clean group. Gated by phase 3 (default OFF). The human approve-button p
 (`decideProposals`) stays record-only for now (unchanged office workflow); if the owner later
 wants the manual button to create too, it calls the same shared function — one-line addition.
 
+## Build-ready implementation notes (traced 2026-07-28)
+
+- **Granularity:** `loadReadyPool(db, orgId)` returns SO-level `PoolSo` (READY_TO_SHIP, not yet
+  on a non-cancelled DO), grouped by `stateCode` into one LOAD_PLAN per state. A DO is created
+  per **(customerId, hubId)** group within that state (delivery-agent.ts:896-904). So the create
+  step: re-run `loadReadyPool` at approve time (current-ready is correct — plans auto-expire in
+  ~1 day and regenerate), filter to the approved proposal's `state`, group by (customerId, hubId).
+- **Per group → one DO.** For each clean group, gather the group's SO ids → their ready
+  production_order ids, then call `createDeliveryOrderForPOs(shimC, { productionOrderIds, hubId,
+  salesOrderId? })`. VERIFY whether passing `salesOrderId` alone lets it derive the SO's POs
+  (line ~1489 seeds from productionOrderIds; confirm the salesOrderId-only path before relying on it).
+- **Shim:** `const shimC = { var: { DB: db } } as unknown as Context<Env>` — confirmed sufficient
+  (the fn only touches `c.var.DB`, returns a plain `DoCreateOutcome`, does no requirePermission).
+  Pass `body.createdBy='AGENT_AUTO'` / doNo auto-gen (genNextDoNo).
+- **Re-derive at approve, NOT a stored snapshot** (simpler, no schema change; matches the office
+  "Create Packing List" semantics — deliver what's ready now). Drop the earlier
+  `production_order_ids` column idea unless drift proves to matter.
+- **Wire point:** after `autoApproveDeliveryProposals` flips a clean LOAD_PLAN to APPROVED
+  (delivery-agent.ts:1071), call the new shared `createDosForApprovedLoadPlan`. Only under the
+  DELIVERY phase-3 gate (`isAutoApproveOn`), which the caller already checks (routes/delivery-agent.ts:307).
+
 ## Guardrails (must all hold before an auto-create fires)
 
 - **Only "clean" plans auto-open.** A bucket auto-creates a DO ONLY when it is a single

@@ -1876,6 +1876,11 @@ function CreateSalesOrderPage() {
         },
         body: JSON.stringify({
           customerId, customerPOId, customerSOId, reference,
+          // BUG hub-vanishes (2026-07-28): the operator's picked hub was held in
+          // `deliveryHubId` but never sent — so every created SO lost its hub and
+          // the create->confirm chain landed a hub-less order. Send it; the server
+          // resolves the hub (and derives customer_state from it).
+          deliveryHubId,
           companySODate, customerDeliveryDate, hookkaExpectedDD, notes,
           // Multi-Company Phase 2 — company this SO is booked under.
           salesOrgCode,

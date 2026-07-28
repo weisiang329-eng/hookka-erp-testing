@@ -16,13 +16,17 @@
 //        x-cron-secret gated (mirrors /api/internal/reports/*; the path is a
 //        PUBLIC_PREFIX in auth-middleware so external cron can reach it).
 //
-// RED LINE (JD): approval NEVER auto-creates or dispatches delivery orders in
-// v1 — it only flips the proposal to APPROVED so the office executes it via
-// the existing Create Packing List / invoice flows. Nothing here writes to
-// delivery_orders, sales_orders, or invoices. Every decision emits an
-// audit_events row.
+// RED LINE (JD): at phase 1-2, approval NEVER auto-creates DOs — it only flips
+// the proposal to APPROVED for the OFFICE to execute via Create Packing List.
+// At PHASE 3 (full-auto, owner-enabled) the agent ALSO auto-opens the DO for
+// CLEAN groups (single customer + resolved hub) via the SAME guarded
+// createDeliveryOrderForPOs the office uses — owner red-line move 2026-07-28
+// (see autoCreateDosForApprovedLoadPlans + docs/plans/2026-07-28-...). It STILL
+// never auto-invoices, auto-dispatches, or marks delivered (those stay human);
+// ambiguous groups (missing hub) stay APPROVED proposals for the office. Every
+// decision emits an audit_events row.
 // ---------------------------------------------------------------------------
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { Env } from "../worker";
 import { getOrgId, DEFAULT_ORG_ID } from "../lib/tenant";
 import { requirePermission } from "../lib/rbac";
@@ -36,7 +40,9 @@ import {
   loadLatestDeliveryAiFocus,
   transitDriftLearning,
   autoApproveDeliveryProposals,
+  loadReadyPool,
 } from "../lib/delivery-agent";
+import { createDeliveryOrderForPOs } from "./delivery-orders/_helpers";
 import { activeInstructions } from "../lib/agent-feedback";
 import { autoApplyConfigProposals } from "../lib/agent-learning";
 import {
@@ -283,6 +289,102 @@ app.post("/proposals/reject", async (c) => {
 // Claude focus paragraph → brief snapshot. Wrapped in recordAgentRun by every
 // caller so the Agent Console shows the run + its token spend.
 
+// Phase-3 autonomy: after the agent auto-APPROVES its LOAD_PLANs, open the DOs
+// for the CLEAN groups. "Clean" = a (customer, hub) group where the hub is
+// resolved; ambiguous groups (no hub) are LEFT as approved proposals for the
+// office (never guess a destination — the hub-integrity red line). Goes through
+// the SAME guarded createDeliveryOrderForPOs the office uses (via a minimal
+// {var:{DB}} shim — that fn only touches c.var.DB and never reads orgId off the
+// context, exactly like the office DO INSERT which omits orgId too). Opens the
+// DO ONLY — no invoice, dispatch, or POD (those stay human). Idempotent: the
+// ready pool excludes SOs already on a DO, and validateDoComposition (inside
+// createDeliveryOrderForPOs) rejects any PO already delivered, so a re-run can't
+// double-create. Owner red-line move 2026-07-28.
+export async function autoCreateDosForApprovedLoadPlans(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+): Promise<{ created: number; skippedNoHub: number; failed: number }> {
+  // Only act on states that have a just-approved AGENT_AUTO LOAD_PLAN.
+  const planStates = await db
+    .prepare(
+      `SELECT DISTINCT state FROM delivery_proposals
+        WHERE kind = 'LOAD_PLAN' AND status = 'APPROVED' AND decided_by = 'AGENT_AUTO'`,
+    )
+    .bind()
+    .all<{ state: string | null }>();
+  const states = new Set(
+    (planStates.results ?? []).map((r) => r.state).filter((s): s is string => !!s),
+  );
+  if (states.size === 0) return { created: 0, skippedNoHub: 0, failed: 0 };
+
+  // Ready pool = READY_TO_SHIP SOs not yet on a DO (same source the LOAD_PLAN
+  // was built from). Group by (customer, hub) within a plan's state.
+  const pool = await loadReadyPool(db, orgId);
+  const groups = new Map<
+    string,
+    { customerId: string; hubId: string; soIds: string[] }
+  >();
+  let skippedNoHub = 0;
+  for (const so of pool) {
+    if (!states.has(so.stateCode)) continue;
+    if (!so.hubId || !so.hubId.trim()) {
+      skippedNoHub++; // no resolved hub -> leave for the office, never guess
+      continue;
+    }
+    const key = `${so.customerId}__${so.hubId}`;
+    const g = groups.get(key) ?? {
+      customerId: so.customerId,
+      hubId: so.hubId,
+      soIds: [],
+    };
+    g.soIds.push(so.soId);
+    groups.set(key, g);
+  }
+
+  // Minimal shim: createDeliveryOrderForPOs only reads c.var.DB.
+  const shim = { var: { DB: db } } as unknown as Context<Env>;
+  const MAX_PER_RUN = 40; // runaway backstop (agents also cap runs/day)
+  let created = 0;
+  let failed = 0;
+  for (const g of groups.values()) {
+    if (created >= MAX_PER_RUN) break;
+    // Deliverable POs of the group's SOs. validateDoComposition (called inside
+    // createDeliveryOrderForPOs) enforces one-customer / one-hub / delivered-once.
+    const ph = g.soIds.map(() => "?").join(",");
+    const poRes = await db
+      .prepare(
+        `SELECT id FROM production_orders
+          WHERE salesOrderId IN (${ph}) AND status <> 'CANCELLED'`,
+      )
+      .bind(...g.soIds)
+      .all<{ id: string }>();
+    const productionOrderIds = (poRes.results ?? [])
+      .map((r) => r.id)
+      .filter((x): x is string => !!x);
+    if (productionOrderIds.length === 0) continue;
+    try {
+      const outcome = await createDeliveryOrderForPOs(shim, {
+        productionOrderIds,
+        remarks: "Auto-opened by Delivery Agent (phase 3)",
+      });
+      if (outcome.ok) {
+        created++;
+      } else {
+        // A guard rejected the group (e.g. mixed hub, already-delivered PO) —
+        // leave it for the office; never force.
+        failed++;
+        console.warn(
+          `[delivery-agent] auto-DO skipped for customer ${g.customerId}/${g.hubId}: ${outcome.body?.error ?? "unknown"}`,
+        );
+      }
+    } catch (err) {
+      failed++;
+      console.warn("[delivery-agent] auto-DO error:", err);
+    }
+  }
+  return { created, skippedNoHub, failed };
+}
+
 export async function runDeliveryAgent(
   db: Env["Variables"]["DB"],
   orgId: string,
@@ -304,10 +406,18 @@ export async function runDeliveryAgent(
   // list; nothing is created or dispatched). Gate OFF → owner approves.
   let autoApproved = 0;
   let autoTunedParams = 0;
+  let autoOpenedDos = { created: 0, skippedNoHub: 0, failed: 0 };
   if (await isAutoApproveOn(db, "DELIVERY")) {
     autoApproved = await autoApproveDeliveryProposals(db, "AGENT_AUTO").catch((err) => {
       console.warn("[delivery-agent] auto-approve failed:", err);
       return 0;
+    });
+    // Phase-3 red-line move (owner 2026-07-28): after self-approving, open the
+    // DOs for the clean groups via the office's own guarded path. Ambiguous
+    // groups stay approved proposals. Never invoices/dispatches.
+    autoOpenedDos = await autoCreateDosForApprovedLoadPlans(db, orgId).catch((err) => {
+      console.warn("[delivery-agent] auto-open DOs failed:", err);
+      return { created: 0, skippedNoHub: 0, failed: 0 };
     });
     // Full-auto also self-tunes its cs.transitDays.* parameters (bounded +
     // logged, no owner approval — owner ruling 2026-07-13).
@@ -328,6 +438,7 @@ export async function runDeliveryAgent(
     date: today,
     proposals: counts,
     autoApproved,
+    autoOpenedDos,
     autoTunedParams,
     transitDrifts: transit.filter((t) => t.flagged).length,
     aiFocus: brief.aiFocus != null,

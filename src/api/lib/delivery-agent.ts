@@ -187,7 +187,7 @@ export interface PoolSo {
   valueSen: number;
 }
 
-async function loadReadyPool(db: DbLike, orgId: string): Promise<PoolSo[]> {
+export async function loadReadyPool(db: DbLike, orgId: string): Promise<PoolSo[]> {
   const res = await db
     .prepare(
       `SELECT id, companySOId, customerId, customerName, customerState,

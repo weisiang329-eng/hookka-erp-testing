@@ -160,8 +160,13 @@ PL-first+hub 完整性已上线、Dispatch/Delivered 客户通知邮件已上线
 - **职责**：每日派车/拼车提案（同州同hub、PL-first、3PL vs 自车算钱）；dispatch→
   delivered 跟踪与 POD 提醒；delivered 即查发票、漏开票闭环；delivery return 走
   return DO 接 service case；3PL 准时率/运费学习。
-- **禁区**：不自动确认发货（提案制）；CN 永不开发票；不改已 INVOICED 单据；
-  不越过 hub 完整性规则。
+- **禁区**：CN 永不开发票；不改已 INVOICED 单据；不越过 hub 完整性规则；
+  发票/派车/POD 永远人工（agent 不开发票、不派车、不签收）。
+  - **红线移动（owner 2026-07-28「B」）**：phase 1-2 仍是提案制（不自动开 DO）；**phase 3
+    起,agent 自批准后会自动开 DO**——但**只开"干净单"**(单客户+已解析 hub;模糊/无 hub 退回
+    人工提案),走 office 同一条 `createDeliveryOrderForPOs`(含 `validateDoComposition`),
+    **只开到 DO 为止**,不碰发票/派车/POD。gate 默认关。见
+    `autoCreateDosForApprovedLoadPlans` + `docs/plans/2026-07-28-delivery-agent-auto-open-do.md`。
 - **KPI**：漏开票数→0；准时交付率；每单运费 vs 报价差；退货处理时长。
 
 ## Customer Service Agent（总调度）· JD

@@ -57,6 +57,7 @@ import { cn } from "@/lib/utils";
 import { getCurrentUser } from "@/lib/auth";
 import { usePermissions } from "@/lib/use-permission";
 import { prefetchRoute } from "@/dashboard-routes";
+import { markWorkspaceOpenIntent } from "@/lib/workspaceTabs";
 
 interface NavItem {
   name: string;
@@ -773,6 +774,10 @@ export function Sidebar({
                                 key={child.href}
                                 to={child.href}
                                 onMouseEnter={() => prefetchRoute(child.href)}
+                                onClick={(e) => {
+                                  if (e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey)
+                                    markWorkspaceOpenIntent();
+                                }}
                                 className={cn(
                                   "group relative flex items-center gap-3 rounded-md text-[13px] font-medium transition-colors",
                                   "h-8 px-3",
@@ -797,6 +802,10 @@ export function Sidebar({
                     key={item.href}
                     to={item.href}
                     onMouseEnter={() => prefetchRoute(item.href)}
+                    onClick={(e) => {
+                      if (e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey)
+                        markWorkspaceOpenIntent();
+                    }}
                     className={cn(
                       "group relative flex items-center gap-3 rounded-md text-sm font-medium transition-colors",
                       "h-9 px-3",

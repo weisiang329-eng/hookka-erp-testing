@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Bell, ChevronDown, LogOut, User, Building2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { GlobalSearch } from "./global-search";
+import { WorkspaceTabs } from "./workspace-tabs";
 import { clearAuth, getCurrentUser } from "@/lib/auth";
 
 interface TopbarProps {
@@ -54,8 +55,9 @@ export function Topbar({ user }: TopbarProps) {
 
   return (
     <header className="sticky top-0 z-30 flex h-16 items-center gap-4 border-b border-[#E2DDD8] bg-white px-6">
-      {/* Breadcrumb area */}
-      <div className="flex-1" />
+      {/* Workspace tab strip (open pages persist as browser-style tabs).
+          Renders a plain flex spacer until a 2nd tab exists. */}
+      <WorkspaceTabs />
 
       {/* Global Search (command palette) */}
       <GlobalSearch />

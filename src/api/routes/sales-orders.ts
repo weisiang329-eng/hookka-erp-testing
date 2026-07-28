@@ -75,12 +75,7 @@ import { resolveSpecialOrderPriceSen } from "../../lib/special-order-surcharge";
 import { resolveHeightPriceSen } from "../../lib/height-surcharge";
 import { resolveTotalHeightPriceSen } from "../../lib/total-height-surcharge";
 import { loadSpecialsConfig, loadHeightsConfig } from "../lib/specials-config";
-import {
-  validateRepairScopeInput,
-  parseRepairScope,
-  serializeRepairScope,
-  canonicalizeComponentPicks,
-} from "../../lib/repair-scope";
+import { validateRepairScopeInput } from "../../lib/repair-scope";
 
 import {
   parseCustomSpecials,
@@ -1666,10 +1661,14 @@ app.post("/", async (c) => {
     const soId = genSoId();
     const today = now.split("T")[0];
 
-    const customerState =
-      chosenHub?.state ??
-      (typeof body.customerState === "string" ? body.customerState : "") ??
-      "";
+    // Invariant (BUG hub-vanishes, 2026-07-28): customer_state is authoritative
+    // ONLY when it derives from the resolved hub. NEVER persist the raw OCR /
+    // body state on its own — that produced "state present, hub NULL" orphan
+    // rows (e.g. state "Selangor" with no hub) that shipped to the wrong place.
+    // body.customerState is still read ABOVE to RESOLVE the hub (state -> the
+    // customer's single hub in that state); it just never lands as stored state
+    // without a hub behind it. No hub => no state (consistent, and catchable).
+    const customerState = chosenHub?.state ?? "";
 
     // Auto-derive Hookka Expected DD = customer DD - per-category buffer.
     // Filled at create time so the SO list / detail page show it right
@@ -1867,6 +1866,30 @@ app.post("/:id/confirm", async (c) => {
     .first<SalesOrderRow>();
   if (!existing) {
     return c.json({ success: false, error: "Order not found" }, 404);
+  }
+
+  // Hub guard (BUG hub-vanishes, 2026-07-28): confirming an SO fans out
+  // production + delivery orders, so a confirmed SO MUST carry a delivery hub
+  // or the goods ship to the wrong (or no) address. A DRAFT may sit hub-less
+  // (operator saves progress); confirm may NOT. Only enforced when the customer
+  // actually HAS hubs configured — external / hub-less customers are exempt
+  // (nothing to pick). Owner rule 2026-07-28: "without hub 不可以 confirm; draft 可以".
+  const hubMissing = !existing.hubId || String(existing.hubId).trim() === "";
+  if (hubMissing) {
+    const anyHub = await c.var.DB.prepare(
+      "SELECT id FROM delivery_hubs WHERE customerId = ? LIMIT 1",
+    )
+      .bind(existing.customerId)
+      .first<{ id: string }>();
+    if (anyHub) {
+      return c.json(
+        {
+          success: false,
+          error: `Order ${existing.companySOId ?? id} has no delivery hub. Select a hub before confirming (you can keep it as a draft).`,
+        },
+        400,
+      );
+    }
   }
 
   // DRAFT / PENDING orders are confirmable. CONFIRMED or IN_PRODUCTION

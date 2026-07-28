@@ -19,23 +19,31 @@ auto-create DOs from approved LOAD_PLANs.
 or auto-mark-delivered — those are physical/irreversible events a human confirms (there is
 no auto-POD by design). "Open the DO" is the agent's realistic digital end-of-work.
 
-## Two real architectural challenges (why this is not a 5-line change)
+## Design (simplified after code check — the owner's "just submit + self-approve")
 
-1. **LOAD_PLAN proposals do NOT store the PO list.** `delivery_proposals` carries only
-   `so_refs` (display string), `state`, `hub`, `recipients` (JSON {customer,hub,doCount,valueSen})
-   — no `productionOrderId`s. So at execution the agent must **re-derive the ready POs** for
-   each (customer, hub) bucket, exactly the way the office's "Create Packing List" does.
-   → Reuse the SAME ready-PO derivation the LOAD_PLAN generator uses (delivery-agent.ts
-   ~889-949) so proposal-time and execution-time see the same set. Snapshot the derived PO
-   set on the proposal at approval time so what gets created is auditable.
+Conceptually it is exactly: the agent **submits** a LOAD_PLAN and, at phase 3, **approves it
+itself** — and the approve action now **creates the DO** (for clean plans). Two facts from the
+code make this tractable WITHOUT refactoring the office path:
 
-2. **`createDeliveryOrderForPOs(c, body)` needs a Hono request `Context`**, but the agent
-   runs headless (heartbeat/run-now → `runDeliveryAgent(db,...)`, no `c`).
-   → Extract a **context-free core** `createDeliveryOrderForPOsCore(db, orgId, actorId, body)`
-   from the existing route helper; the route wraps it (byte-identical behaviour for the
-   office path — regression-guarded), and the agent calls the core directly with the
-   agent's orgId + `actorId='AGENT_AUTO'`. Do NOT fork the logic; the office and the agent
-   MUST create DOs through the exact same guarded code.
+1. **`createDeliveryOrderForPOs` uses `c` almost only as `c.var.DB`** (no requirePermission
+   inside; it returns a plain `DoCreateOutcome`, not `c.json`). → the headless agent can call
+   it through a **minimal context shim** `{ var: { DB: db } }` (+ orgId + `actorId='AGENT_AUTO'`).
+   **No fork, no risky refactor of the office DO-create path.** Office and agent hit the exact
+   same guarded function.
+
+2. **LOAD_PLAN proposals don't store the PO list** (`delivery_proposals` has `so_refs` display
+   string / `state` / `hub` / `recipients`, no `productionOrderId`s). → **snapshot the derived
+   PO ids onto the proposal at GENERATION time** (new self-applied column
+   `delivery_proposals.production_order_ids` JSON). Then "approve = create exactly the POs you
+   saw" — deterministic and auditable, no re-derivation drift.
+
+**Where the create hangs:** on the **phase-3 approve path** (`autoApproveDeliveryProposals`,
+delivery-agent.ts:1071) — after it flips a clean LOAD_PLAN to APPROVED, it calls the shared
+`createDosForApprovedLoadPlan(db, orgId, proposal)` which reads the snapshotted POs, groups by
+customer+hub, runs `validateDoComposition`, and calls `createDeliveryOrderForPOs` via the shim
+for each clean group. Gated by phase 3 (default OFF). The human approve-button path
+(`decideProposals`) stays record-only for now (unchanged office workflow); if the owner later
+wants the manual button to create too, it calls the same shared function — one-line addition.
 
 ## Guardrails (must all hold before an auto-create fires)
 

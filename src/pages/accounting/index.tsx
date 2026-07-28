@@ -6872,6 +6872,15 @@ function PartyLedgerTab({ side }: { side: "DEBTOR" | "CREDITOR" }) {
 
   const fmtType = (t: string) => t.replace(/_/g, " ").toLowerCase();
 
+  // Owner 2026-07-24 (「purchase/sales ledger 没有 total」): per-party DR/CR
+  // subtotals + a grand TOTAL DR / TOTAL CR / net Balance across all parties.
+  // A one-sided subledger is NOT supposed to balance, so no Balanced badge.
+  const partyDr = (pl: PartyLedgerData["parties"][number]) => pl.rows.reduce((s, r) => s + (r.debitSen || 0), 0);
+  const partyCr = (pl: PartyLedgerData["parties"][number]) => pl.rows.reduce((s, r) => s + (r.creditSen || 0), 0);
+  const grandDrSen = data?.parties.reduce((s, pl) => s + partyDr(pl), 0) ?? 0;
+  const grandCrSen = data?.parties.reduce((s, pl) => s + partyCr(pl), 0) ?? 0;
+  const grandBalSen = data?.parties.reduce((s, pl) => s + pl.closingSen, 0) ?? 0;
+
   const printLedger = () => {
     if (!data) return;
     const w = window.open("", "_blank");
@@ -6888,11 +6897,13 @@ function PartyLedgerTab({ side }: { side: "DEBTOR" | "CREDITOR" }) {
                 `<tr><td>${r.date}</td><td>${r.ref}</td><td>${fmtType(r.type)}</td><td style="text-align:right">${r.debitSen ? formatCurrency(r.debitSen) : ""}</td><td style="text-align:right">${r.creditSen ? formatCurrency(r.creditSen) : ""}</td><td style="text-align:right">${formatCurrency(r.runningSen)}</td></tr>`,
             )
             .join("") +
-          `<tr style="border-top:1px solid #000;font-weight:bold"><td colspan="5">Balance c/f</td><td style="text-align:right">${formatCurrency(pl.closingSen)}</td></tr></tbody></table>`,
+          `<tr style="border-top:1px solid #000;font-weight:bold"><td colspan="3">TOTAL</td><td style="text-align:right">${formatCurrency(partyDr(pl))}</td><td style="text-align:right">${formatCurrency(partyCr(pl))}</td><td></td></tr>` +
+          `<tr style="font-weight:bold"><td colspan="5">Balance c/f</td><td style="text-align:right">${formatCurrency(pl.closingSen)}</td></tr></tbody></table>`,
       )
       .join("");
+    const grandLine = `<p style="margin-top:16px;font-size:12px;font-weight:bold;text-align:right">TOTAL DR ${formatCurrency(grandDrSen)} &nbsp;·&nbsp; TOTAL CR ${formatCurrency(grandCrSen)} &nbsp;·&nbsp; Balance ${formatCurrency(grandBalSen)}</p>`;
     w.document.write(
-      `<html><head><title>${title}</title></head><body><h2>HOOKKA MANUFACTURING SDN BHD</h2><p>${title}${data.from || data.to ? ` · ${data.from || "…"} → ${data.to || "…"}` : ""}</p>${sections}</body></html>`,
+      `<html><head><title>${title}</title></head><body><h2>HOOKKA MANUFACTURING SDN BHD</h2><p>${title}${data.from || data.to ? ` · ${data.from || "…"} → ${data.to || "…"}` : ""}</p>${sections}${grandLine}</body></html>`,
     );
     w.document.close();
     w.print();
@@ -6917,6 +6928,13 @@ function PartyLedgerTab({ side }: { side: "DEBTOR" | "CREDITOR" }) {
         <div className="py-12 text-center text-[#6B7280] text-sm">No activity.</div>
       ) : (
         <div className="space-y-4">
+          <Card>
+            <CardContent className="px-3 py-2 flex justify-end gap-8 text-sm font-semibold text-[#1F1D1B] tabular-nums">
+              <span>TOTAL DR {formatCurrency(grandDrSen)}</span>
+              <span>TOTAL CR {formatCurrency(grandCrSen)}</span>
+              <span>Balance {formatCurrency(grandBalSen)}</span>
+            </CardContent>
+          </Card>
           {data.parties.map((pl) => (
             <Card key={pl.party.id}>
               <CardContent className="p-4">
@@ -6944,12 +6962,25 @@ function PartyLedgerTab({ side }: { side: "DEBTOR" | "CREDITOR" }) {
                           <td className="py-1 px-2 text-right tabular-nums font-medium">{formatCurrency(r.runningSen)}</td>
                         </tr>
                       ))}
+                      <tr className="border-t border-[#E2DDD8] bg-[#F0ECE9]/60 font-semibold text-[#1F1D1B]">
+                        <td className="py-1.5 px-2" colSpan={3}>TOTAL</td>
+                        <td className="py-1.5 px-2 text-right tabular-nums">{formatCurrency(partyDr(pl))}</td>
+                        <td className="py-1.5 px-2 text-right tabular-nums">{formatCurrency(partyCr(pl))}</td>
+                        <td className="py-1.5 px-2 text-right tabular-nums bg-[#EAF3DE]">{formatCurrency(pl.closingSen)}</td>
+                      </tr>
                     </tbody>
                   </table>
                 </div>
               </CardContent>
             </Card>
           ))}
+          <Card>
+            <CardContent className="px-3 py-2 flex justify-end gap-8 text-sm font-semibold text-[#1F1D1B] tabular-nums">
+              <span>TOTAL DR {formatCurrency(grandDrSen)}</span>
+              <span>TOTAL CR {formatCurrency(grandCrSen)}</span>
+              <span>Balance {formatCurrency(grandBalSen)}</span>
+            </CardContent>
+          </Card>
         </div>
       )}
     </div>

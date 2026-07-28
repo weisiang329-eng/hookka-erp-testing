@@ -135,6 +135,26 @@ static catalog against the live values. If the owner changes a price in Settings
 
 ---
 
+## C5 — A leg whose identity carries a suffix, read by exact match
+
+**Shape.** Correction/restate legs reuse their document's identity **plus a suffix** —
+sourceType `invoice_restate_post:<stamp>`, sourceId `pi-xxx:edit-<stamp>`. Any reader that
+matches the RAW value misses them, and the miss is silent: the leg simply falls into whatever
+the fallback is (postedAt dating, "no legs to reverse", "nothing to hide").
+
+| # | reader | matched on | state |
+|---|---|---|---|
+| 1 | sourceTYPE suffixes everywhere (`stripLegSuffix`) | stripped | ✅ handled since the restate pattern; `tests/doc-date.test.mjs` |
+| 2 | `ap-recon.ts` doc attribution | strips `:edit-` | ✅ born correct |
+| 3 | `loadDocDateResolver` (dates every leg for /gl, P&L windows, **the opening floor**) | raw sourceId → postedAt fallback | ✅ fixed 2026-07-24 (BUG-2026-07-24-001: two May PI tax-edits dated as July, escaped the floor, +407.04 drift) |
+| 4 | `applyLifecycle` reversal SELECT + hidden UPDATEs | raw sourceId | ⬜ latent — unreachable today (PIs don't use lifecycle; PI delete is DRAFT-only = no legs). Warning comment in place; widen the matches if a `:<tag>`-legged doc type is ever wired in |
+
+**Enforced by** the `stripSourceIdSuffix` cases in `tests/doc-date.test.mjs`. When adding a NEW
+suffixed identity (a second `:<tag>` writer), grep every `sourceId = ?` / `.get(sourceId)`
+against ledger legs first.
+
+---
+
 ## What tests cannot catch — and what covers it
 
 None of C1–C4's money leaks were introduced by a code change on the day they started leaking:

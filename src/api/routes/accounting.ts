@@ -39,7 +39,7 @@ import { applyOpeningSlice, windowCoversMonth } from "../../lib/opening-slice";
 import { buildDeliveredAsOf, fgClosingSen } from "../../lib/fg-closing";
 import { costAsOfByPo } from "../../lib/cost-attribution";
 import { STOCK_TAKE_ITEM_ALIAS_SEED_2026_05 } from "../lib/stock-take-item-alias-seed-2026-05";
-import { DOC_DATE_FAMILIES, stripLegSuffix, parseSourceIdDate } from "../../lib/doc-date";
+import { DOC_DATE_FAMILIES, stripLegSuffix, stripSourceIdSuffix, parseSourceIdDate } from "../../lib/doc-date";
 import {
   prefixForPartyType,
   computeBillTotals,
@@ -10501,7 +10501,12 @@ async function loadDocDateResolver(
     if (isOpeningSource(sourceType)) {
       return openingDate ?? String(postedAt ?? "").slice(0, 10);
     }
-    const d = maps.get(stripLegSuffix(sourceType))?.get(String(sourceId));
+    const fam = maps.get(stripLegSuffix(sourceType));
+    // Edit-correction legs carry 'docId:edit-<stamp>' sourceIds — the raw
+    // lookup missed, fell back to postedAt, and a post-opening edit to a
+    // pre-opening PI escaped the opening floor and double-counted against
+    // the opening entry (BUG-2026-07-24-001: +312/+95.04 drift on 400-0000).
+    const d = fam?.get(String(sourceId)) ?? fam?.get(stripSourceIdSuffix(sourceId));
     if (d) return d;
     // Period-end bookkeeping (depreciation / closing_stock / year_close) encode
     // their own date in the sourceId; everything else falls back to postedAt.

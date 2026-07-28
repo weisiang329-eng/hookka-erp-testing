@@ -417,6 +417,10 @@ line was matched to the wrong SO.
 
 ---
 
+## BUG-2026-07-24-001 — PI edit-correction legs (`sourceId 'docId:edit-<stamp>'`) escaped document-dating and the opening floor `accounting` `gl` `opening`
+
+🟢 Fixed (class C5 in BUG-CLASSES). loadDocDateResolver looked the sourceId up RAW, missed the `:edit-` suffixed correction legs, and fell back to postedAt — so a post-opening EDIT to a pre-opening PI dated as the edit day, stayed visible above the opening floor, and double-counted against the (coverage-complete) opening entry. Live instance: NLY PI-2605-008/-009 SST edits (+312/+95.04 drift on 400-0000 right after the 2026-07-24 re-post). Fix = `stripSourceIdSuffix` (doc-date.ts, unit-tested) retried in the resolver; side effect (correct by design): edit legs now report in the DOCUMENT's month everywhere (~RM 1,545 of small corrections moved Jul→May/Jun; the RM 16,531.57 edit was same-month, unmoved). applyLifecycle's exact-match cousin is latent-unreachable and comment-guarded.
+
 ## BUG-2026-07-23-002 — Cancelled invoices kept their GL alive (void reversal silently skipped on orgId mismatch) `invoices` `gl`
 
 🟢 Fixed + backlog repaired (5 Carress invoices, +31,677.52 cleared; verified via /ar-reconciliation). Void now mirror-reverses the VISIBLE doc-family net per account, org-agnostic (buildCancelReversalStatements); POST /invoices/backfill-cancel-reversals (dry default) repairs; nightly self-heal sweeps it forever.

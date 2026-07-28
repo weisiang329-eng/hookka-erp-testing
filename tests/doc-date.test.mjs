@@ -4,6 +4,7 @@ import {
   stripLegSuffix,
   familyOf,
   parseSourceIdDate,
+  stripSourceIdSuffix,
   DOC_DATE_FAMILIES,
 } from "../src/lib/doc-date.ts";
 
@@ -87,6 +88,23 @@ test("parseSourceIdDate — same-day / mapped / unknown types → null (postedAt
   assert.equal(parseSourceIdDate("fund_transfer", "HLBB-OUT-2606-001"), null);
   assert.equal(parseSourceIdDate("invoice", "inv-uuid"), null);
   assert.equal(parseSourceIdDate("opening_balance", "ob-1"), null);
+});
+
+// BUG-2026-07-24-001: purchase-invoice EDIT legs post sourceId
+// 'docId:edit-<stamp>'. The date resolver's raw-id lookup missed them, fell
+// back to postedAt, and a post-opening edit to a pre-opening PI escaped the
+// opening floor — double-counting against the opening entry (+312/+95.04 on
+// 400-0000). The resolver now retries with the suffix stripped.
+test("stripSourceIdSuffix — ':edit-<stamp>' correction ids reach the base doc id", () => {
+  assert.equal(stripSourceIdSuffix("pi-47dff213:edit-1753340000000"), "pi-47dff213");
+  assert.equal(stripSourceIdSuffix("inv-abc123:edit-42"), "inv-abc123");
+  // ids without a suffix pass through unchanged
+  assert.equal(stripSourceIdSuffix("pi-47dff213"), "pi-47dff213");
+  assert.equal(stripSourceIdSuffix("PI-2605-008"), "PI-2605-008");
+  // null/undefined/empty safe
+  assert.equal(stripSourceIdSuffix(null), "");
+  assert.equal(stripSourceIdSuffix(undefined), "");
+  assert.equal(stripSourceIdSuffix(""), "");
 });
 
 test("DOC_DATE_FAMILIES — every entry has table/noCol/dateCol", () => {

@@ -53,6 +53,14 @@ export async function applyLifecycle(
 
   const statements: D1PreparedStatement[] = [];
 
+  // ⚠️ LATENT (BUG-2026-07-24-001 class): every sourceId match below is EXACT.
+  // Purchase-invoice EDITS post correction legs under sourceId
+  // '<docId>:edit-<stamp>' — exact matches would neither reverse nor hide
+  // them. Unreachable today (PIs don't use applyLifecycle; PI delete is
+  // DRAFT-only = no legs). If a doc type with ':<tag>' sourceId legs is ever
+  // wired here, widen the reversal SELECT and both hidden UPDATEs with
+  // `OR sourceId LIKE '<id>:%'` and renumber reversal legNos.
+
   // 1. ensure reversal exists (void/delete only; idempotent via ledgerHasSource)
   if (needsReversal(action) && !(await ledgerHasSource(db, orgId, voidSourceType, sourceId))) {
     const placeholders = baseSourceTypes.map(() => "?").join(", ");

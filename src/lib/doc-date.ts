@@ -63,6 +63,15 @@ export function familyOf(sourceType: string | null | undefined): DocFamily | nul
   return DOC_DATE_FAMILIES[stripLegSuffix(sourceType)] ?? null;
 }
 
+// Correction legs reuse their document's sourceId plus a ':<tag>' suffix
+// (e.g. a purchase-invoice edit posts sourceId 'pi-47dff213:edit-1753...').
+// Strip to the base document id so those legs date to the SOURCE DOCUMENT
+// like every other leg. Document ids/numbers never contain ':', so stripping
+// can only recover a match, never change one.
+export function stripSourceIdSuffix(sourceId: string | null | undefined): string {
+  return String(sourceId ?? "").split(":")[0];
+}
+
 // Last calendar day of a 1-indexed month, as 'YYYY-MM-DD' (handles leap Feb).
 function lastDayOfMonth(year: number, month1to12: number): string {
   const d = new Date(year, month1to12, 0).getDate(); // day 0 of next month = last day of this one

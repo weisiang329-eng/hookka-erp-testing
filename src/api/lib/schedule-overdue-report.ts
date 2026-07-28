@@ -248,7 +248,42 @@ export async function collectOverdueData(
        AND status IN ('DRAFT','CONFIRMED','IN_PRODUCTION','ON_HOLD')
      ORDER BY customerDeliveryDate ASC`;
   const soRes = await db.prepare(soSql).bind(dateYmd).all<OverdueSoRawRow>();
-  const sos = soRes.results ?? [];
+  const candidateSos = soRes.results ?? [];
+
+  // Cross-check REAL delivery (fix 2026-07-28). The status filter above trusts
+  // the denormalized sales_orders.status, which goes STALE: an SO can be
+  // physically delivered while its status is never advanced past IN_PRODUCTION
+  // (e.g. SV-2606-002 — production CANCELLED, then delivered on an INVOICED DO;
+  // status stayed IN_PRODUCTION and it leaked into this "still in production"
+  // report). So drop any candidate whose goods have actually gone out: it has a
+  // DELIVERED / INVOICED delivery order. Same DELIVERED/INVOICED signal the
+  // delivered-cascade backfill uses. Two-step (headers then this filter) to
+  // stay inside the minimal DbLike interface, like the items query below.
+  const deliveredSoNos = new Set<string>();
+  if (candidateSos.length > 0) {
+    const soNos = candidateSos
+      .map((s) => s.companySOId)
+      .filter((n): n is string => !!n);
+    if (soNos.length > 0) {
+      const placeholders = soNos.map(() => "?").join(",");
+      const delRes = await db
+        .prepare(
+          `SELECT DISTINCT di.salesOrderNo AS soNo
+             FROM delivery_order_items di
+             JOIN delivery_orders d ON d.id = di.deliveryOrderId
+            WHERE d.status IN ('DELIVERED','INVOICED')
+              AND di.salesOrderNo IN (${placeholders})`,
+        )
+        .bind(...soNos)
+        .all<{ soNo: string | null }>();
+      for (const r of delRes.results ?? []) {
+        if (r.soNo) deliveredSoNos.add(r.soNo);
+      }
+    }
+  }
+  const sos = candidateSos.filter(
+    (s) => !s.companySOId || !deliveredSoNos.has(s.companySOId),
+  );
 
   // Items per SO. Single IN-list query if any SOs matched.
   const itemsBySoId = new Map<string, OverdueItemRawRow[]>();

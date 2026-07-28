@@ -68,6 +68,20 @@ default hub `hub-h1` "Houzs KL" (its address IS the Balakong Selangor DC; 126 hi
 rows + both already-cut DOs use it) vs create a true Houzs SGR hub. See WORK-TRACKER
 2026-07-27 item 2.
 
+**Follow-up SHIPPED (2026-07-28, PR #112) — closes the 3 remaining gaps.** The 07-27 fix
+stopped the hub-WIPE and added a FRONTEND confirm gate in the scan flow, but three holes
+let a hub-less SO still be born and confirmed: (a) root cause #2 was left in place — POST
+`customerState = chosenHub?.state ?? body.customerState` still persisted the raw OCR text
+with `hubId` NULL; (b) the MANUAL `sales/create.tsx` create body never sent the operator's
+picked `deliveryHubId` (only the scan modal was patched), so create→confirm dropped the hub;
+(c) the 07-27 confirm gate was FRONTEND-only and bypassable ("knowingly proceed"). Fixes:
+- `sales/create.tsx` — create body now sends `deliveryHubId` (server resolves hub + derives state).
+- `sales-orders.ts` POST — `customerState = chosenHub?.state ?? ""` (invariant: no hub ⇒ no state; body.customerState still RESOLVES the hub, never lands as orphan state).
+- `sales-orders.ts` `/:id/confirm` — BACKEND guard: confirm is rejected when the SO has no hub AND the customer has hubs (external/hub-less customers exempt; DRAFT stays hub-less). Owner rule 2026-07-28: "without hub cannot confirm; draft can" — non-bypassable, unlike the FE gate.
+Regression: `tests/hub-vanishes-guard.test.mjs` (3 structural pins). Verified: build:strict
+clean + full suite green (1555/1554/0). Live read+write prod verification pending (DB
+unreachable from dev) — checklist in PR #112.
+
 ---
 
 ## BUG-2026-07-27-001 — sofa seat-size pick silently reset on unpriced models → order impossible to save `sales-orders` `ui-frontend` 🟢

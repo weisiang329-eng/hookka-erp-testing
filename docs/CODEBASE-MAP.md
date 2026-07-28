@@ -233,7 +233,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
   - P&L report tabs (CostStructure, CostExpenseClasses, MonthlyTrend, MonthlyPl, PLStatement + ExportButtons) — L3082-3806
   - Other Debtors/Creditors tab — L3807-4579
   - GL Phase 1: Trial Balance tab — L4580-4714
-  - GL Phase 2: GeneralLedgerTab — L4715-5172
+  - GL Phase 2: GeneralLedgerTab — L6962-7466 as of 2026-07-24 (BackToTopButton at L6962; grand-totals strip also at TOP of grouped view; neighbouring entries' line numbers predate the file's growth — anchor by function name)
   - Payment / Expense tab (PaymentsTab) — L5173-5524
   - Official Receipt tab (ReceiptsTab) — L5525-5760
   - Fund Transfer tab — L5761-5968

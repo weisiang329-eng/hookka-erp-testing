@@ -6956,6 +6956,30 @@ function PartyLedgerTab({ side }: { side: "DEBTOR" | "CREDITOR" }) {
   );
 }
 
+// Floating back-to-top button (owner 2026-07-24: 「一键返顶」— the ledger
+// runs thousands of rows and the walk back up is a chore). Window-scroll
+// driven; appears after one screen's worth of scroll.
+function BackToTopButton() {
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    const onScroll = () => setShow(window.scrollY > 600);
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+  if (!show) return null;
+  return (
+    <button
+      onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+      title="Back to top"
+      aria-label="Back to top"
+      className="fixed bottom-6 right-6 z-50 h-11 w-11 rounded-full bg-[#6B5C32] text-white shadow-lg hover:bg-[#1F1D1B] cursor-pointer text-lg leading-none"
+    >
+      ↑
+    </button>
+  );
+}
+
 function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
   // Multi-account review (owner): 0 picked = full ledger; 1 picked =
   // inquiry mode with running balance; 2+ picked = listing filtered to
@@ -7080,6 +7104,7 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
           </CardContent>
         </Card>
         <PartyLedgerTab side={ledger === "sales" ? "DEBTOR" : "CREDITOR"} />
+        <BackToTopButton />
       </div>
     );
   }
@@ -7167,7 +7192,7 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
         <p className="text-sm text-[#6B7280]">
           <span className="tabular-nums text-xs mr-1">{gl.account.code}</span>
           <span className="font-medium text-[#1F1D1B]">{gl.account.name}</span>
-          {" · "}Opening {formatCurrency(gl.openingSen)} · Closing {formatCurrency(gl.closingSen)} ({gl.account.type})
+          {" · "}Opening {formatCurrency(gl.openingSen)} · Total DR {formatCurrency(gl.totalDebitSen ?? 0)} · Total CR {formatCurrency(gl.totalCreditSen ?? 0)} · Closing {formatCurrency(gl.closingSen)} ({gl.account.type})
         </p>
       )}
       {!account && view === "flat" && all && (
@@ -7186,6 +7211,19 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
           <div className="space-y-3">
             {report.capped && (
               <p className="text-xs text-[#9A3A2D]">Report capped at 4,000 rows — narrow the date range to see every account.</p>
+            )}
+            {/* Owner 2026-07-24: the grand DR/CR totals also live UP HERE —
+                the bottom card alone meant scrolling past the whole report. */}
+            {report.accounts.length > 0 && (
+              <Card>
+                <CardContent className="px-3 py-2 flex justify-end gap-8 text-sm font-semibold text-[#1F1D1B] tabular-nums">
+                  <span>TOTAL DR {formatCurrency(report.grandDr)}</span>
+                  <span>TOTAL CR {formatCurrency(report.grandCr)}</span>
+                  <span className={report.grandDr - report.grandCr !== 0 ? "text-[#9A3A2D]" : "text-[#27500A]"}>
+                    {report.grandDr - report.grandCr === 0 ? "Balanced ✓" : `Diff ${formatCurrency(report.grandDr - report.grandCr)}`}
+                  </span>
+                </CardContent>
+              </Card>
             )}
             {report.accounts.map((a) => {
               const open = !collapsedAccts[a.code];
@@ -7421,6 +7459,7 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
         </CardContent>
       </Card>
       )}
+      <BackToTopButton />
     </div>
   );
 }

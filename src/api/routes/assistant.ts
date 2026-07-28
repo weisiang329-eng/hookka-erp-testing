@@ -71,7 +71,12 @@ const MAX_TOKENS = 4096;
 // ships. Keep it interpolation-free so it stays importable without a DB/env.
 export const SYSTEM_PROMPT = `You are Hookka AI, an embedded assistant inside the Hookka Manufacturing ERP. You help Wei Siang (the factory owner) and his super-admins look up data: sales orders, customer orders, delivery orders, invoices, payments, products, customers, suppliers, and the daily reports.
 
-You are STRICTLY READ-ONLY. You cannot create, update, or delete anything. If asked to make a change, say you can't and suggest where in the ERP UI to do it.
+You are READ-ONLY for ERP DATA — you cannot create, update, or delete sales orders, invoices, payments, products, customers, etc. If asked to change ERP data, say you can't and point to where in the ERP UI to do it.
+
+EXCEPTION — you CAN command and teach the AI AGENTS (Production / Delivery / CS / Procurement) when the user asks. Do NOT refuse these:
+- \`agent_control\` — pause/resume an agent, turn its auto mode on/off, or run it now (proposals / learning / delivery).
+- \`teach_agent\` (action "add") — record a STANDING correction the user teaches you ("you did X wrong — do Y instead / here's why / here's how"). It persists and is injected into that agent's brain on every future run, so the agent re-does its work the taught way. Use "list"/"retire" to review or remove a rule.
+When the user corrects an agent or tells it how to work, DO IT via these tools — don't say you can't.
 
 Available tools let you query the live database. Always use the tools instead of guessing. When you don't know something or a query returns nothing, say so honestly.
 
@@ -524,14 +529,22 @@ app.post("/chat", async (c) => {
     });
   }
 
-  // SUPER_ADMIN gate. The global authMiddleware ensures the user is logged
-  // in; we additionally require the role.
+  // Access (owner 2026-07-28 "开放命令/教 agent 给全部员工"): the AI chat is open
+  // to any logged-in staff, but NON-super-admins may ONLY use the agent-management
+  // tools (command + teach the agents). Every data / SQL / financial tool stays
+  // owner-only — enforced by the tool-schema filter + the dispatch guard below,
+  // so staff can correct/teach agents without seeing salaries/costs or the raw
+  // SQL tool. authMiddleware already guarantees the user is logged in.
   const role = (c as unknown as { get: (k: string) => unknown }).get(
     "userRole",
   ) as string | undefined;
-  if (role !== "SUPER_ADMIN") {
-    return c.json({ success: false, error: "forbidden" }, 403);
-  }
+  const isSuperAdminRole = role === "SUPER_ADMIN";
+  // Tools a non-super-admin may see + call. Keep in sync with the dispatch guard.
+  const STAFF_TOOL_NAMES = new Set([
+    "agent_overview",
+    "agent_control",
+    "teach_agent",
+  ]);
 
   const apiKey = c.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -721,7 +734,9 @@ app.post("/chat", async (c) => {
     );
   }
 
-  const tools = getToolSchemas();
+  const tools = isSuperAdminRole
+    ? getToolSchemas()
+    : getToolSchemas().filter((t) => STAFF_TOOL_NAMES.has(t.name));
 
   // ----- Prompt caching --------------------------------------------------
   // The tool definitions (~20K tokens) and the system prompt (~5K tokens)
@@ -891,7 +906,14 @@ app.post("/chat", async (c) => {
               source: "ui",
             });
 
-            const res = await runTool(c, tu.name, tu.input);
+            // Defense-in-depth: even if the model somehow calls a tool a
+            // non-super-admin isn't allowed (it shouldn't — the schemas were
+            // filtered), the dispatcher refuses it. Owner-only data/SQL/finance
+            // tools can never run for staff.
+            const res =
+              isSuperAdminRole || STAFF_TOOL_NAMES.has(tu.name)
+                ? await runTool(c, tu.name, tu.input)
+                : { ok: false as const, error: "This tool is restricted to the owner." };
             const content = res.ok
               ? JSON.stringify(res.result)
               : JSON.stringify({ error: res.error });

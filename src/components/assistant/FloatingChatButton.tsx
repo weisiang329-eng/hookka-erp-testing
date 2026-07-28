@@ -23,11 +23,12 @@ export function FloatingChatButton() {
   const user = getCurrentUser();
   const [open, setOpen] = useState(false);
 
-  // Gate the entire feature on SUPER_ADMIN. Non-admins never see the
-  // button OR the panel, matching the backend role check on
-  // /api/assistant/chat. Three layers of the same fence: route guard
-  // (formerly /assistant), this UI gate, API role check.
-  if (!user || user.role !== "SUPER_ADMIN") return null;
+  // Open to any logged-in staff (owner 2026-07-28 "开放命令/教 agent 给全部员工").
+  // Non-super-admins get a restricted chat — only the agent command/teach tools;
+  // data / SQL / financial tools stay owner-only, enforced server-side in
+  // /api/assistant/chat (schema filter + dispatch guard). This UI gate only
+  // hides the button from logged-out users.
+  if (!user) return null;
 
   return (
     <>

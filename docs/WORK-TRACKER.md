@@ -1815,3 +1815,13 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
 - [ ] gates → merge main → deploy → prod 验证 → 文档/memory
 
 - [x] 自主排班心跳 (owner 裁定: 节奏 Agent 自己定) — agent-scheduler.ts + heartbeat 30min + 理由留痕
+
+## 2026-07-28 (session: opening re-post + GL totals + supplier-payment advance)
+- [x] Opening 页预览补 405/305（BUG-003 前端半截）→ owner 重按开账成功，405=1,200 达标
+- [x] CLM 1,150 + NLY PI-2605-008 3,432 放行进开账（owner 逐笔拍板）
+- [x] BUG-2026-07-24-001：edit 腿 sourceId 尾巴逃开账地板（+407.04）→ stripSourceIdSuffix 根治，AP recon 首次全零
+- [x] GL：一键返顶 + By-Account 顶部总计条 + 单科目 DR/CR 总额
+- [x] Debtor/Creditor Ledger：每家 TOTAL 行 + 顶/底总计卡 + 打印同步
+- [x] PV-2607-001 编辑报错调查：restate 加 VOID 守卫 + 技术报错持久化(kv+debug端点)；顺手修 BUG-2026-07-24-002（unvoid 复活旧分录）
+- [x] 「double 开 PV」检查：无系统复制，全是作废+重录对子 → 根因=预付款不可编辑
+- [x] 预付款可编辑（owner 拍板）：Edit=批量 knock-off 工作台，Advance 自动缩减，restate 接受 advanceSen

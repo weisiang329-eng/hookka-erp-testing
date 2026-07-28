@@ -182,6 +182,11 @@ export default function SupplierPaymentsPage() {
   const [posting, setPosting] = useState(false);
   // Edit mode: when set, the form is editing this payment in place (same number).
   const [editingNo, setEditingNo] = useState<string | null>(null);
+  // Edit-mode advance bookkeeping: the voucher's ORIGINAL bank total anchors
+  // the auto-balance (typing invoice amounts shrinks the Advance field so the
+  // total stays put), until the operator edits the Advance field manually.
+  const [editOriginalBankSen, setEditOriginalBankSen] = useState(0);
+  const [advanceTouched, setAdvanceTouched] = useState(false);
   // Advance rows on the voucher being edited — PRESERVED server-side (the edit
   // form is allocations-only), surfaced here so the operator sees the full
   // voucher total and knows the advance is untouched.
@@ -233,15 +238,27 @@ export default function SupplierPaymentsPage() {
 
   const getRow = (id: string): RowState => rows[id] ?? emptyRow();
   const setRow = (id: string, patch: Partial<RowState>) => {
-    setRows((prev) => ({ ...prev, [id]: { ...(prev[id] ?? emptyRow()), ...patch } }));
+    const next = { ...rows, [id]: { ...(rows[id] ?? emptyRow()), ...patch } };
+    setRows(next);
+    // Auto-balance (edit mode, owner 2026-07-24): typing invoice amounts
+    // consumes the advance, so the voucher total stays anchored at the
+    // original bank figure. Editing the Advance field by hand takes over
+    // (advanceTouched) — the deliberate "change what left the bank" case.
+    if (editingNo && !advanceTouched && editAdvanceKeptSen > 0) {
+      const rowsSen = openPIs.reduce(
+        (sum, pi) => sum + rowBankSenWith(pi, next[pi.id] ?? emptyRow()),
+        0,
+      );
+      const remain = Math.max(0, editOriginalBankSen - rowsSen);
+      setAdvanceStr(remain > 0 ? (remain / 100).toFixed(2) : "0.00");
+    }
   };
 
   const outstandingOf = (pi: OpenPI) => pi.amountSen - pi.paidAmountSen;
 
   // Bank-MYR contributed by a single row (MYR rows: the RM typed; foreign rows:
   // foreign × rate). Returns sen.
-  const rowBankSen = (pi: OpenPI): number => {
-    const row = getRow(pi.id);
+  const rowBankSenWith = (pi: OpenPI, row: RowState): number => {
     if (isMyr(pi.currency)) {
       if (row.full) return outstandingOf(pi);
       const rm = parseFloat(row.amountStr);
@@ -261,12 +278,12 @@ export default function SupplierPaymentsPage() {
     if (!(Number.isFinite(rate) && rate > 0)) return 0;
     return Math.round(foreign * rate * 100);
   };
+  const rowBankSen = (pi: OpenPI): number => rowBankSenWith(pi, getRow(pi.id));
 
-  // Advance is create-only (editing / knock-off goes through /restate — part 3),
-  // so it's zeroed in edit mode and the input is hidden below.
-  const advanceSen = editingNo
-    ? 0
-    : Math.max(0, Math.round((parseFloat(advanceStr) || 0) * 100));
+  // Advance is editable in BOTH modes (owner 2026-07-24: Edit is his bulk
+  // knock-off workbench — the invoice grid shows everything at once, typing
+  // amounts uses the advance up; before this he had to void + re-record).
+  const advanceSen = Math.max(0, Math.round((parseFloat(advanceStr) || 0) * 100));
 
   const totalBankSen = useMemo(
     () => openPIs.reduce((sum, pi) => sum + rowBankSen(pi), 0) + advanceSen,
@@ -365,7 +382,9 @@ export default function SupplierPaymentsPage() {
           date,
           reference: reference || undefined,
           allocations,
-          ...(advanceSen > 0 ? { advanceSen } : {}),
+          // Edit mode ALWAYS sends advanceSen — 0 is meaningful there (the
+          // advance was fully allocated to invoices in this edit).
+          ...(editingNo ? { advanceSen } : (advanceSen > 0 ? { advanceSen } : {})),
         }),
       });
       const j = (await res.json()) as { success?: boolean; error?: string; data?: { paymentNo?: string; totalBankSen?: number } };
@@ -373,6 +392,8 @@ export default function SupplierPaymentsPage() {
         toast.success(editingNo ? "Payment updated" : j.data?.paymentNo ? `Payment ${j.data.paymentNo} recorded` : "Payment recorded");
         setEditingNo(null);
         setEditAdvanceKeptSen(0);
+        setEditOriginalBankSen(0);
+        setAdvanceTouched(false);
         resetForm();
         invalidateCachePrefix("/api/supplier-payments");
         invalidateCachePrefix("/api/purchase-invoices");
@@ -423,7 +444,11 @@ export default function SupplierPaymentsPage() {
   const editPayment = (p: PaymentGroup) => {
     setDetail(null);
     setEditingNo(p.paymentNo);
-    setEditAdvanceKeptSen(p.lines.filter((l) => !l.purchaseInvoiceId).reduce((acc, l) => acc + (l.amountSen || 0), 0));
+    const advRemainSen = p.lines.filter((l) => !l.purchaseInvoiceId).reduce((acc, l) => acc + (l.amountSen || 0), 0);
+    setEditAdvanceKeptSen(advRemainSen);
+    setAdvanceStr(advRemainSen > 0 ? (advRemainSen / 100).toFixed(2) : "");
+    setEditOriginalBankSen(p.totalBankSen || 0);
+    setAdvanceTouched(false);
     setDate(p.date || today);
     const sup = suppliers.find((s) => s.name === p.supplierName);
     if (sup) {
@@ -444,6 +469,8 @@ export default function SupplierPaymentsPage() {
   const cancelEdit = () => {
     setEditingNo(null);
     setEditAdvanceKeptSen(0);
+    setEditOriginalBankSen(0);
+    setAdvanceTouched(false);
     setSelectedSupplierId("");
     setRows({});
     setOpenPIs([]);
@@ -667,29 +694,29 @@ export default function SupplierPaymentsPage() {
 
           {editingNo && editAdvanceKeptSen > 0 && (
             <p className="text-xs text-[#6B5C32] bg-[#F6F1E7] rounded-md px-3 py-2">
-              This voucher also carries an unapplied advance of <strong>RM {(editAdvanceKeptSen / 100).toFixed(2)}</strong> — it is kept as-is by this edit (voucher total = lines below + advance).
+              This voucher carries an unapplied advance of <strong>RM {(editAdvanceKeptSen / 100).toFixed(2)}</strong> — typing amounts into the invoices below uses it up (the Advance field shrinks by itself, voucher total stays put). Edit the Advance field yourself only to change what actually left the bank.
             </p>
           )}
-          {/* Supplier advance / prepayment — create-only. Pay before any invoice. */}
-          {!editingNo && (
-            <div>
-              <label className="block text-sm font-medium text-[#6B7280] mb-1">
-                Advance / Prepayment (RM)
-              </label>
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                className="w-full md:w-1/3 border border-[#E2DDD8] rounded-md px-3 py-2 text-sm text-right tabular-nums"
-                value={advanceStr}
-                onChange={(e) => setAdvanceStr(e.target.value)}
-                placeholder="0.00"
-              />
-              <p className="text-xs text-[#6B7280] mt-1">
-                Pay a supplier <strong>before any invoice</strong> — posts to Trade Creditors (400-0000) as a prepayment you can knock off invoices later. Leave blank for a normal payment.
-              </p>
-            </div>
-          )}
+          {/* Supplier advance / prepayment — editable in create AND edit. */}
+          <div>
+            <label className="block text-sm font-medium text-[#6B7280] mb-1">
+              Advance / Prepayment (RM)
+            </label>
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              className="w-full md:w-1/3 border border-[#E2DDD8] rounded-md px-3 py-2 text-sm text-right tabular-nums"
+              value={advanceStr}
+              onChange={(e) => { setAdvanceStr(e.target.value); if (editingNo) setAdvanceTouched(true); }}
+              placeholder="0.00"
+            />
+            <p className="text-xs text-[#6B7280] mt-1">
+              {editingNo
+                ? "The voucher's unapplied advance after this edit — auto-fills as you allocate invoices below."
+                : <>Pay a supplier <strong>before any invoice</strong> — posts to Trade Creditors (400-0000) as a prepayment you can knock off invoices later. Leave blank for a normal payment.</>}
+            </p>
+          </div>
 
           {/* Open-PI allocation table */}
           {selectedSupplierId && (

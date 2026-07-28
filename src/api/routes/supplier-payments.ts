@@ -771,7 +771,7 @@ async function buildSupplierPaymentRestate(
   db: Env["Variables"]["DB"],
   orgId: string,
   paymentNo: string,
-  body: { supplierId?: string; payFrom?: string; date?: string; reference?: string; allocations?: CreateAllocation[] },
+  body: { supplierId?: string; payFrom?: string; date?: string; reference?: string; allocations?: CreateAllocation[]; advanceSen?: number },
   actorUserId: string | null,
   stamp: number,
 ): Promise<D1PreparedStatement[]> {
@@ -794,23 +794,29 @@ async function buildSupplierPaymentRestate(
       await db
         // Exclude #6 supplier-discount markers (method='CREDIT_NOTE') from the
         // rollback set — defensive against a future payment_no collision.
-        .prepare("SELECT purchaseInvoiceId, booked_sen, amount_sen FROM supplier_payments WHERE payment_no = ? AND COALESCE(method,'') <> 'CREDIT_NOTE'")
+        .prepare("SELECT purchaseInvoiceId, booked_sen, amount_sen, supplierId, supplierName FROM supplier_payments WHERE payment_no = ? AND COALESCE(method,'') <> 'CREDIT_NOTE'")
         .bind(paymentNo)
-        .all<{ purchaseInvoiceId: string | null; bookedSen: number | null; booked_sen: number | null; amountSen?: number | null; amount_sen?: number | null }>()
+        .all<{ purchaseInvoiceId: string | null; bookedSen: number | null; booked_sen: number | null; amountSen?: number | null; amount_sen?: number | null; supplierId?: string | null; supplier_id?: string | null; supplierName?: string | null; supplier_name?: string | null }>()
     ).results ?? [];
   if (oldRows.length === 0) throw new Error("PAYMENT_NOT_FOUND");
 
-  // ADVANCE rows (no PI) are PRESERVED, not rebuilt — the edit form is
-  // allocations-only ("Advance is create-only"), so without this a restate of
-  // a payment that carried an advance silently DROPPED the advance row from
-  // the subledger and shrank the GL bank/control legs by its amount
-  // (HPV-2607-020: RM 1,619 would have vanished). The rows stay untouched
-  // except their date follows the edited voucher date; their REMAINING
-  // unapplied amount rides along into the re-posted GL so the ledger keeps
-  // matching the true bank outflow.
-  const advanceKeepSen = oldRows
-    .filter((r) => !r.purchaseInvoiceId)
-    .reduce((s, r) => s + (Number(r.amountSen ?? r.amount_sen) || 0), 0);
+  // ADVANCE rows (no PI): two modes.
+  //  - body.advanceSen ABSENT (legacy callers): rows PRESERVED untouched —
+  //    without this a restate silently DROPPED the advance and shrank the GL
+  //    bank/control legs (HPV-2607-020: RM 1,619 would have vanished).
+  //  - body.advanceSen PRESENT (edit form, owner 2026-07-24): it is the
+  //    voucher's unapplied-advance REMAINDER after this edit — the form's
+  //    invoice grid doubles as a bulk knock-off workbench, so allocating
+  //    invoices shrinks the advance (0 = fully applied). Rows are replaced by
+  //    ONE fresh advance row at the new remainder (or none at 0).
+  const advTargetSen =
+    body.advanceSen === undefined ? null : Math.max(0, Math.round(Number(body.advanceSen) || 0));
+  const advanceKeepSen =
+    advTargetSen !== null
+      ? advTargetSen
+      : oldRows
+          .filter((r) => !r.purchaseInvoiceId)
+          .reduce((s, r) => s + (Number(r.amountSen ?? r.amount_sen) || 0), 0);
 
   const payFrom = String(body.payFrom ?? "");
   const date = String(body.date ?? "");
@@ -843,12 +849,41 @@ async function buildSupplierPaymentRestate(
         .bind(b, b, b, r.purchaseInvoiceId),
     );
   }
-  // 2. Drop the old ALLOCATION rows only (never the #6 CREDIT_NOTE markers,
-  // and never the advance rows — those are preserved, see advanceKeepSen).
+  // 2. Drop the old ALLOCATION rows (never the #6 CREDIT_NOTE markers). The
+  // advance rows: replaced when the edit sets a new remainder, preserved
+  // (date-following) otherwise.
   statements.push(
     db.prepare("DELETE FROM supplier_payments WHERE payment_no = ? AND COALESCE(method,'') <> 'CREDIT_NOTE' AND purchaseInvoiceId IS NOT NULL").bind(paymentNo),
   );
-  if (advanceKeepSen > 0 && date) {
+  if (advTargetSen !== null) {
+    statements.push(
+      db.prepare("DELETE FROM supplier_payments WHERE payment_no = ? AND COALESCE(method,'') <> 'CREDIT_NOTE' AND purchaseInvoiceId IS NULL").bind(paymentNo),
+    );
+    if (advTargetSen > 0) {
+      const anyRow = oldRows[0] ?? {};
+      statements.push(
+        db.prepare(
+          `INSERT INTO supplier_payments (
+             id, paymentNo, supplierId, supplierName, purchaseInvoiceId,
+             date, amountSen, bookedSen, foreignSen, payFxRate,
+             method, reference, notes, orgId
+           ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
+        ).bind(
+          `sp-${crypto.randomUUID().slice(0, 8)}`,
+          paymentNo,
+          anyRow.supplierId ?? anyRow.supplier_id ?? supplierId,
+          anyRow.supplierName ?? anyRow.supplier_name ?? "",
+          date,
+          advTargetSen,
+          advTargetSen,
+          "BANK_TRANSFER",
+          reference ?? "",
+          `Advance ${paymentNo}`,
+          orgId,
+        ),
+      );
+    }
+  } else if (advanceKeepSen > 0 && date) {
     // The preserved advance follows the voucher's edited date (aging buckets
     // advances by their payment date — owner rule 2026-07-08).
     statements.push(
@@ -1162,6 +1197,7 @@ app.post("/:paymentNo/restate", async (c) => {
     date?: string;
     reference?: string;
     allocations?: CreateAllocation[];
+    advanceSen?: number;
   };
   try {
     body = await c.req.json();
@@ -1171,8 +1207,15 @@ app.post("/:paymentNo/restate", async (c) => {
   if (!body.payFrom || !body.date) {
     return c.json({ success: false, error: "payFrom and date are required" }, 400);
   }
-  if (!Array.isArray(body.allocations) || body.allocations.length === 0) {
-    return c.json({ success: false, error: "at least one allocation is required" }, 400);
+  // advanceSen present = the edit sets the voucher's unapplied-advance
+  // REMAINDER (0 = fully allocated below). An advance-only voucher is
+  // therefore editable with zero allocations (owner 2026-07-24 — before this,
+  // such vouchers could only be voided + re-recorded, minting twin PVs).
+  const advanceEditSen =
+    body.advanceSen === undefined ? undefined : Math.max(0, Math.round(Number(body.advanceSen) || 0));
+  if (!Array.isArray(body.allocations)) body.allocations = [];
+  if (body.allocations.length === 0 && !(advanceEditSen !== undefined && advanceEditSen > 0)) {
+    return c.json({ success: false, error: "at least one allocation (or an advance amount) is required" }, 400);
   }
   const acct = await c.var.DB.prepare(
     "SELECT specialAccountType FROM chart_of_accounts WHERE code = ?",

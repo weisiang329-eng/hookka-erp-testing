@@ -93,6 +93,26 @@ export function restateHeadroom(
 }
 
 // ---------------------------------------------------------------------------
+// The GL family that is LIVE for an edited payment: each restate collapses the
+// older families to hidden, so the newest supplier_payment_restate_post:<stamp>
+// wins over the base supplier_payment legs. Pure so the unvoid repair
+// (BUG-2026-07-24-002) is unit-testable.
+// ---------------------------------------------------------------------------
+export function latestRestatePostType(sourceTypes: string[]): string | null {
+  let best: string | null = null;
+  let bestStamp = -1;
+  for (const t of sourceTypes) {
+    if (!t.startsWith("supplier_payment_restate_post:")) continue;
+    const stamp = Number(t.split(":")[1]) || 0;
+    if (stamp > bestStamp) {
+      bestStamp = stamp;
+      best = t;
+    }
+  }
+  return best;
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/supplier-payments row grouping — pure so it's directly testable
 // with the camelCase-only shape the live adapter actually produces (see
 // BUG-2026-07-01-003: the old inline loop read snake_case and silently

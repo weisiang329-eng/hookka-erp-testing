@@ -127,3 +127,30 @@ test("restateHeadroom — CANCELLED/DRAFT are never payable", () => {
   assert.equal(m.restateHeadroom({ amountSen: 100, paidAmountSen: 0, status: "CANCELLED" }, 100).payable, false);
   assert.equal(m.restateHeadroom({ amountSen: 100, paidAmountSen: 0, status: "DRAFT" }, 0).payable, false);
 });
+
+// BUG-2026-07-24-002: unvoid must restore the payment's LIVE GL family — the
+// newest restate_post:<stamp> when the payment was ever edited, else the base.
+test("latestRestatePostType — newest stamp wins", () => {
+  assert.equal(
+    m.latestRestatePostType([
+      "supplier_payment",
+      "supplier_payment_void",
+      "supplier_payment_restate_rev:1700000000001",
+      "supplier_payment_restate_post:1700000000001",
+      "supplier_payment_restate_post:1700000000999",
+    ]),
+    "supplier_payment_restate_post:1700000000999",
+  );
+});
+
+test("latestRestatePostType — never-edited payment → null (base legs stay live)", () => {
+  assert.equal(m.latestRestatePostType(["supplier_payment", "supplier_payment_void"]), null);
+  assert.equal(m.latestRestatePostType([]), null);
+});
+
+test("latestRestatePostType — restate_rev families are not live candidates", () => {
+  assert.equal(
+    m.latestRestatePostType(["supplier_payment_restate_rev:42", "supplier_payment"]),
+    null,
+  );
+});

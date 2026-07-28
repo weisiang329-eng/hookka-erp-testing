@@ -29,11 +29,13 @@ import {
   readBookedSen,
   restateHeadroom,
   groupSupplierPaymentRows,
+  latestRestatePostType,
   type RawSupplierPaymentRow,
 } from "../../lib/supplier-payment-alloc";
+import { looksTechnical } from "../../lib/humanize-error";
 import { issueDocNumber } from "../lib/doc-number-service";
 import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
-import { applyLifecycle } from "../lib/document-lifecycle";
+import { applyLifecycle, getDocState } from "../lib/document-lifecycle";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
 
 const AP_CONTROL = "400-0000"; // Trade Creditors
@@ -681,6 +683,40 @@ async function buildSupplierPaymentLifecycle(
         .bind(paymentNo, orgId),
     );
   }
+  if (reactivated) {
+    // BUG-2026-07-24-002 (class C5): an EDITED payment's live legs are its
+    // newest supplier_payment_restate_post:<stamp> family — applyLifecycle's
+    // exact match above just unhid the ORIGINAL (pre-edit) legs instead, so an
+    // unvoid after an edit resurrected the STALE pre-edit numbers in the GL
+    // while the subledger carried the edited ones. Re-hide the whole family,
+    // then unhide the true live set.
+    const fams =
+      (
+        await db
+          .prepare(
+            `SELECT DISTINCT sourceType FROM ledger_journal_entries WHERE sourceId = ? AND orgId = ? AND sourceType LIKE 'supplier_payment_restate_post:%'`,
+          )
+          .bind(paymentNo, orgId)
+          .all<{ sourceType: string }>()
+      ).results ?? [];
+    const live = latestRestatePostType(fams.map((f) => String(f.sourceType)));
+    if (live) {
+      statements.push(
+        db
+          .prepare(
+            `UPDATE ledger_journal_entries SET hidden = 1 WHERE sourceId = ? AND orgId = ? AND sourceType LIKE 'supplier_payment%'`,
+          )
+          .bind(paymentNo, orgId),
+      );
+      statements.push(
+        db
+          .prepare(
+            `UPDATE ledger_journal_entries SET hidden = 0 WHERE sourceId = ? AND orgId = ? AND sourceType = ?`,
+          )
+          .bind(paymentNo, orgId, live),
+      );
+    }
+  }
   if (deactivated || reactivated) {
     for (const row of rows) {
       const piId = row.purchaseInvoiceId;
@@ -742,6 +778,17 @@ async function buildSupplierPaymentRestate(
   // Restate rolls PI paid amounts to PARTIAL_PAID/APPROVED → ensure the schema
   // (migration-7 columns + relaxed status CHECK) before those writes.
   await ensurePartialPaymentColumns(db);
+  // Lifecycle guard: restating a VOID/DELETED payment would post live GL legs
+  // while every subledger reader excludes the payment's rows (document_lifecycle
+  // filter, incl. the truth guard below) — instant control-vs-subledger drift.
+  const lcState = await getDocState(db, orgId, "supplier_payment", paymentNo);
+  if (lcState !== "ACTIVE") {
+    throw new Error(
+      lcState === "VOID"
+        ? `Payment ${paymentNo} is voided — press Restore first, then edit it.`
+        : `Payment ${paymentNo} is deleted — record a new payment instead.`,
+    );
+  }
   const oldRows =
     (
       await db
@@ -1163,8 +1210,44 @@ app.post("/:paymentNo/restate", async (c) => {
         404,
       );
     }
+    if (looksTechnical(msg)) {
+      // The operator toast deliberately hides technical text (owner directive
+      // 2026-06-08), which made the 2026-07-24 PV-2607-001 edit failure
+      // undiagnosable ("Something went wrong" ×2, real reason lost). Persist
+      // the raw failure where support can read it back.
+      console.error("[supplier-payment restate]", paymentNo, msg);
+      try {
+        await c.var.DB
+          .prepare(
+            `INSERT INTO kv_config (key, value, updated_at) VALUES ('last_supplier_restate_error', ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+          )
+          .bind(
+            JSON.stringify({ paymentNo, msg: msg.slice(0, 2000), at: new Date().toISOString() }),
+            new Date().toISOString(),
+          )
+          .run();
+      } catch {
+        /* diagnostic only — never mask the real failure */
+      }
+      return c.json(
+        { success: false, error: "The update couldn't be saved — nothing was changed. The details were logged for support." },
+        500,
+      );
+    }
     return c.json({ success: false, error: msg }, 400);
   }
+});
+
+// The raw text of the last failed edit (restate) — written by the catch above.
+// Support-facing: the operator toast intentionally shows only a clean line.
+app.get("/debug/last-restate-error", async (c) => {
+  const denied = await requirePermission(c, "invoices", "read");
+  if (denied) return denied;
+  const row = await c.var.DB
+    .prepare("SELECT value, updated_at FROM kv_config WHERE key = 'last_supplier_restate_error'")
+    .first<{ value: string; updated_at: string }>();
+  return c.json({ success: true, data: row ?? null });
 });
 
 export default app;

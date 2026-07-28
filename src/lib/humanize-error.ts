@@ -58,7 +58,7 @@ const SPECIFIC_STATUSES = new Set([401, 403, 404, 409, 413, 429]);
 const TECHNICAL =
   /(\bHTTP\s*\d{3}\b|\b\d{3}\s+from\s+\/|Invalid JSON from|did not match schema|Network error while requesting|Request timeout after|\bNOT NULL\b|null value in column|violates \w+ constraint|violates unique|duplicate key value|foreign key constraint|syntax error at|relation "\w+"|column "\w+"|is not a function|cannot read propert|is not defined|unexpected token|\.[jt]sx?:\d+:\d+|\bTypeError\b|\bReferenceError\b|ECONNREFUSED|ETIMEDOUT)/i;
 
-function looksTechnical(msg: string): boolean {
+export function looksTechnical(msg: string): boolean {
   const m = msg.trim();
   if (!m) return true;
   if (TECHNICAL.test(m)) return true;

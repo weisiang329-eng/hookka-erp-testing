@@ -417,6 +417,14 @@ line was matched to the wrong SO.
 
 ---
 
+## BUG-2026-07-24-002 — Unvoiding an EDITED supplier payment resurrected its pre-edit GL legs `supplier-payments` `gl` `money`
+
+🟢 Fixed (found by inspection while investigating -003; class C5). Void hides the whole `supplier_payment%` family (right), but unvoid's applyLifecycle exact-match unhid only the base `supplier_payment` legs — for an edited payment those carry the STALE pre-edit numbers (live set = newest `restate_post:<stamp>`, which stayed hidden) → GL shows old amounts, subledger the new ones. Unvoid now re-hides the family and unhides `latestRestatePostType(...)` (pure, unit-tested). Not yet hit in prod (no voided-after-edit payment existed).
+
+## BUG-2026-07-24-003 — Supplier-payment EDIT failed with an unreadable toast; restate had no lifecycle guard `supplier-payments` `dx`
+
+🟡 Diagnostics shipped; root cause of the owner's PV-2607-001 (OCEAN SKY 34,060.14) edit failure still unidentified — the toast safety net (owner directive: no technical text) swallowed the real error and nothing persisted it. Now: ① restate refuses VOID/DELETED payments with a clean message (restating a voided payment would post live GL while every reader excludes its rows = instant drift); ② technical restate failures persist to kv `last_supplier_restate_error` (+console.error) and the toast says a clean "nothing was changed" line; ③ GET /supplier-payments/debug/last-restate-error reads it back. Data verified clean post-void: 15 PIs back to CONFIRMED/0 paid, no stray GL. Await next occurrence for the raw text.
+
 ## BUG-2026-07-24-001 — PI edit-correction legs (`sourceId 'docId:edit-<stamp>'`) escaped document-dating and the opening floor `accounting` `gl` `opening`
 
 🟢 Fixed (class C5 in BUG-CLASSES). loadDocDateResolver looked the sourceId up RAW, missed the `:edit-` suffixed correction legs, and fell back to postedAt — so a post-opening EDIT to a pre-opening PI dated as the edit day, stayed visible above the opening floor, and double-counted against the (coverage-complete) opening entry. Live instance: NLY PI-2605-008/-009 SST edits (+312/+95.04 drift on 400-0000 right after the 2026-07-24 re-post). Fix = `stripSourceIdSuffix` (doc-date.ts, unit-tested) retried in the resolver; side effect (correct by design): edit legs now report in the DOCUMENT's month everywhere (~RM 1,545 of small corrections moved Jul→May/Jun; the RM 16,531.57 edit was same-month, unmoved). applyLifecycle's exact-match cousin is latent-unreachable and comment-guarded.

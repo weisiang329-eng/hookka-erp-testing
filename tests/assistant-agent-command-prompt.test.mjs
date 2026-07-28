@@ -62,3 +62,72 @@ test("tool-lib header no longer claims it never exposes a write tool", () => {
     "header must acknowledge the agent-management write tools",
   );
 });
+
+// --- Access RBAC (owner 2026-07-28: open command/teach to staff, data stays owner) ---
+
+test("chat is open to logged-in staff (no blanket super-admin reject)", () => {
+  assert.doesNotMatch(
+    assistantSrc,
+    /if \(role !== "SUPER_ADMIN"\) \{\s*\n\s*return c\.json\(\{ success: false, error: "forbidden" \}, 403\);/,
+    "the blanket SUPER_ADMIN-only chat gate must be removed",
+  );
+  assert.match(assistantSrc, /STAFF_TOOL_NAMES = new Set/, "must define the staff-allowed tool set");
+});
+
+test("non-super-admins get ONLY the agent tools — data/SQL/finance stay owner-only", () => {
+  // Schema filter + dispatch guard both key off the same set.
+  assert.match(
+    assistantSrc,
+    /getToolSchemas\(\)\.filter\(\(t\) => STAFF_TOOL_NAMES\.has\(t\.name\)\)/,
+    "tool schemas must be filtered to STAFF_TOOL_NAMES for non-super-admins",
+  );
+  assert.match(
+    assistantSrc,
+    /isSuperAdminRole \|\| STAFF_TOOL_NAMES\.has\(tu\.name\)/,
+    "the dispatcher must refuse non-staff tools for non-super-admins (defense-in-depth)",
+  );
+  // The staff set must contain ONLY the agent tools — never a data/SQL tool.
+  const i = assistantSrc.indexOf("STAFF_TOOL_NAMES = new Set");
+  const setBlock = assistantSrc.slice(i, i + 220);
+  for (const t of ["agent_overview", "agent_control", "teach_agent"]) {
+    assert.match(setBlock, new RegExp(t), `staff set must include ${t}`);
+  }
+  for (const forbidden of ["run_select_query", "list_sales_orders", "get_invoice", "payslip"]) {
+    assert.doesNotMatch(setBlock, new RegExp(forbidden), `staff set must NOT include ${forbidden}`);
+  }
+});
+
+test("global kill switch stays owner-only even though staff can command agents", () => {
+  assert.match(
+    toolsSrc,
+    /\(action === "kill_all_on" \|\| action === "kill_all_off"\) && !isSuperAdmin\(c\)/,
+    "the global kill switch must remain super-admin-only",
+  );
+  // The old blanket 'only super-admin can command agents' gate must be gone.
+  assert.doesNotMatch(
+    toolsSrc,
+    /Only the SUPER_ADMIN can command agents/,
+    "staff may command agents now (kill switch aside)",
+  );
+});
+
+test("teach_agent is open to staff (no super-admin gate on add/retire)", () => {
+  assert.doesNotMatch(
+    toolsSrc,
+    /Only the SUPER_ADMIN can teach or retire agent rules/,
+    "staff may teach/retire agent rules",
+  );
+});
+
+test("chat button shows for any logged-in user, not just super-admin", () => {
+  const fe = readFileSync(
+    new URL("../src/components/assistant/FloatingChatButton.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(fe, /if \(!user\) return null;/, "button gates only on logged-in");
+  assert.doesNotMatch(
+    fe,
+    /user\.role !== "SUPER_ADMIN"/,
+    "the super-admin-only button gate must be removed",
+  );
+});

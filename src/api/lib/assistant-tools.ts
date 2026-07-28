@@ -6381,12 +6381,16 @@ const agentControlTool: ToolDefinition = {
     },
   },
   execute: async (c, args) => {
-    if (!isSuperAdmin(c)) {
-      return { ok: false, error: "Only the SUPER_ADMIN can command agents. Ask the boss." };
-    }
     const db = c.var.DB;
     const action = String(args.action ?? "");
     const agent = String(args.agent ?? "").toUpperCase() as AgentFamily;
+    // Staff may command agents (pause / resume / auto_on / auto_off / run_now) —
+    // owner 2026-07-28 "开放命令/教 agent 给全部员工". The GLOBAL kill switch stays
+    // owner-only. (Chat access to this tool is already role-gated in
+    // assistant.ts; this per-action check is defense-in-depth.)
+    if ((action === "kill_all_on" || action === "kill_all_off") && !isSuperAdmin(c)) {
+      return { ok: false, error: "Only the owner can use the global kill switch." };
+    }
 
     if (["pause", "resume", "auto_on", "auto_off"].includes(action)) {
       if (!AGENT_FAMILIES.includes(agent)) {
@@ -6508,9 +6512,9 @@ const teachAgentTool: ToolDefinition = {
       const rows = await listAgentFeedback(db, agent || undefined, "ACTIVE");
       return { ok: true, teachings: rows };
     }
-    if (!isSuperAdmin(c)) {
-      return { ok: false, error: "Only the SUPER_ADMIN can teach or retire agent rules." };
-    }
+    // Staff may teach / retire agent rules — owner 2026-07-28 "开放...给全部员工".
+    // Chat access to this tool is role-gated in assistant.ts; every add/retire
+    // is audited below, and rules are RETIRED (never hard-deleted).
     if (action === "add") {
       const agent = String(args.agent ?? "").toUpperCase();
       const instruction = strOrNull(args.instruction);

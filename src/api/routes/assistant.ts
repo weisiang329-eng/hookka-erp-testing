@@ -529,14 +529,22 @@ app.post("/chat", async (c) => {
     });
   }
 
-  // SUPER_ADMIN gate. The global authMiddleware ensures the user is logged
-  // in; we additionally require the role.
+  // Access (owner 2026-07-28 "开放命令/教 agent 给全部员工"): the AI chat is open
+  // to any logged-in staff, but NON-super-admins may ONLY use the agent-management
+  // tools (command + teach the agents). Every data / SQL / financial tool stays
+  // owner-only — enforced by the tool-schema filter + the dispatch guard below,
+  // so staff can correct/teach agents without seeing salaries/costs or the raw
+  // SQL tool. authMiddleware already guarantees the user is logged in.
   const role = (c as unknown as { get: (k: string) => unknown }).get(
     "userRole",
   ) as string | undefined;
-  if (role !== "SUPER_ADMIN") {
-    return c.json({ success: false, error: "forbidden" }, 403);
-  }
+  const isSuperAdminRole = role === "SUPER_ADMIN";
+  // Tools a non-super-admin may see + call. Keep in sync with the dispatch guard.
+  const STAFF_TOOL_NAMES = new Set([
+    "agent_overview",
+    "agent_control",
+    "teach_agent",
+  ]);
 
   const apiKey = c.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -726,7 +734,9 @@ app.post("/chat", async (c) => {
     );
   }
 
-  const tools = getToolSchemas();
+  const tools = isSuperAdminRole
+    ? getToolSchemas()
+    : getToolSchemas().filter((t) => STAFF_TOOL_NAMES.has(t.name));
 
   // ----- Prompt caching --------------------------------------------------
   // The tool definitions (~20K tokens) and the system prompt (~5K tokens)
@@ -896,7 +906,14 @@ app.post("/chat", async (c) => {
               source: "ui",
             });
 
-            const res = await runTool(c, tu.name, tu.input);
+            // Defense-in-depth: even if the model somehow calls a tool a
+            // non-super-admin isn't allowed (it shouldn't — the schemas were
+            // filtered), the dispatcher refuses it. Owner-only data/SQL/finance
+            // tools can never run for staff.
+            const res =
+              isSuperAdminRole || STAFF_TOOL_NAMES.has(tu.name)
+                ? await runTool(c, tu.name, tu.input)
+                : { ok: false as const, error: "This tool is restricted to the owner." };
             const content = res.ok
               ? JSON.stringify(res.result)
               : JSON.stringify({ error: res.error });

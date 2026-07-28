@@ -3,10 +3,13 @@
 //
 // Every tool the Anthropic model can call lives here. Strict invariants:
 //
-//   1. READ ONLY. No INSERT / UPDATE / DELETE — period. The assistant route
-//      gates on SUPER_ADMIN already, but defense-in-depth: we never even
-//      EXPOSE a write tool. If the model invents one (or a future tool
-//      maintainer adds one), it 404s on the dispatcher.
+//   1. READ-ONLY for ERP DATA. No INSERT / UPDATE / DELETE on business records
+//      (sales orders, invoices, payments, products, …) — period. EXCEPTION:
+//      the agent-management tools `agent_control` + `teach_agent` DO write
+//      agent control-state / `agent_feedback` — that is the "command + teach
+//      the agents by conversation" capability (v1.9), NOT an ERP-data write.
+//      No other write tool is exposed; if the model invents an ERP-data
+//      mutation, it 404s on the dispatcher.
 //
 //   2. EVERY list query is hard-capped to 100 rows regardless of the
 //      caller-supplied `limit`. Payload size + Anthropic-context cost.

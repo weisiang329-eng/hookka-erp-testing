@@ -1108,6 +1108,119 @@ async function resolveCustomerPrice(
   return resolveCustomerPriceAsOf(db, productId, customerId, todayIso());
 }
 
+// Batched form of resolveCustomerPriceAsOf for a whole product set (the
+// quotation / catalogue export). resolveCustomerPriceAsOf runs ~5 sequential
+// DB reads PER product, so a 375-SKU customer serialised ~1875 round-trips and
+// the request aborted at 30s (owner 2026-07-29 — "The Conts" quotation would
+// not download). This resolves the entire set in 4 bulk queries. Semantics MUST
+// match resolveCustomerPriceAsOf exactly — the only change is fan-in, not the
+// price math (resolvePrices is the single shared coalescer). Postgres param
+// limit (65535) comfortably covers real customer catalogues.
+export async function resolveCustomerPricesAsOfBatch(
+  db: D1Database,
+  productIds: string[],
+  customerId: string,
+  isoDate: string,
+): Promise<
+  Map<
+    string,
+    {
+      basePriceSen: number | null;
+      price1Sen: number | null;
+      seatHeightPrices: SeatHeightPrice[];
+      hasCustomerOverride: boolean;
+    }
+  >
+> {
+  const out = new Map<
+    string,
+    {
+      basePriceSen: number | null;
+      price1Sen: number | null;
+      seatHeightPrices: SeatHeightPrice[];
+      hasCustomerOverride: boolean;
+    }
+  >();
+  const ids = Array.from(new Set(productIds.filter(Boolean)));
+  if (ids.length === 0) return out;
+  const ph = ids.map(() => "?").join(",");
+
+  // Q1 — product master baseline (the final fallback in resolveProductPriceAsOf).
+  const prodRes = await db
+    .prepare(
+      `SELECT id, basePriceSen, price1Sen, seatHeightPrices FROM products WHERE id IN (${ph})`,
+    )
+    .bind(...ids)
+    .all<{ id: string; basePriceSen: number | null; price1Sen: number | null; seatHeightPrices: string | null }>();
+  const prodById = new Map((prodRes.results ?? []).map((r) => [r.id, r]));
+
+  // Q2 — newest master effective-dated price per product (effectiveFrom <= asOf).
+  // ORDER matches resolveProductPriceAsOf; first row seen per productId wins.
+  const mpRes = await db
+    .prepare(
+      `SELECT productId, basePriceSen, price1Sen, seatHeightPrices
+         FROM product_prices
+        WHERE productId IN (${ph}) AND effectiveFrom <= ?
+        ORDER BY productId, effectiveFrom DESC, created_at DESC`,
+    )
+    .bind(...ids, isoDate)
+    .all<{ productId: string; basePriceSen: number | null; price1Sen: number | null; seatHeightPrices: string | null }>();
+  const masterHistById = new Map<string, { basePriceSen: number | null; price1Sen: number | null; seatHeightPrices: string | null }>();
+  for (const r of mpRes.results ?? []) if (!masterHistById.has(r.productId)) masterHistById.set(r.productId, r);
+
+  // Q3 — customer override row (customer_products) + its id, per product.
+  const cpRes = await db
+    .prepare(
+      `SELECT id AS "cpId", productId AS "productId",
+              basePriceSen AS "cpBasePriceSen", price1Sen AS "cpPrice1Sen",
+              seatHeightPrices AS "cpSeatHeightPrices"
+         FROM customer_products
+        WHERE customerId = ? AND productId IN (${ph})`,
+    )
+    .bind(customerId, ...ids)
+    .all<{ cpId: string; productId: string; cpBasePriceSen: number | null; cpPrice1Sen: number | null; cpSeatHeightPrices: string | null }>();
+  const cpByProduct = new Map((cpRes.results ?? []).map((r) => [r.productId, r]));
+
+  // Q4 — newest customer_product_prices history per customer_product (effectiveFrom <= asOf).
+  const cpIds = Array.from(cpByProduct.values()).map((c) => c.cpId).filter(Boolean);
+  const cppNewestByCp = new Map<string, { basePriceSen: number | null; price1Sen: number | null; seatHeightPrices: string | null }>();
+  if (cpIds.length > 0) {
+    const cph = cpIds.map(() => "?").join(",");
+    const cppRes = await db
+      .prepare(
+        `SELECT customerProductId, basePriceSen, price1Sen, seatHeightPrices
+           FROM customer_product_prices
+          WHERE customerProductId IN (${cph}) AND effectiveFrom <= ?
+          ORDER BY customerProductId, effectiveFrom DESC, created_at DESC`,
+      )
+      .bind(...cpIds, isoDate)
+      .all<{ customerProductId: string; basePriceSen: number | null; price1Sen: number | null; seatHeightPrices: string | null }>();
+    for (const r of cppRes.results ?? []) if (!cppNewestByCp.has(r.customerProductId)) cppNewestByCp.set(r.customerProductId, r);
+  }
+
+  // Resolve each product in-memory — mirrors resolveCustomerPriceAsOf step-for-step.
+  for (const pid of ids) {
+    const prod = prodById.get(pid);
+    if (!prod) continue; // product missing → per-product version returns null (skipped)
+
+    const mHist = masterHistById.get(pid);
+    const masterBase = mHist?.basePriceSen ?? prod.basePriceSen;
+    const masterP1 = mHist?.price1Sen ?? prod.price1Sen;
+    const masterSeatRaw = mHist?.seatHeightPrices ?? prod.seatHeightPrices;
+
+    const cp = cpByProduct.get(pid);
+    const cpHist = cp?.cpId ? cppNewestByCp.get(cp.cpId) : undefined;
+    const hasHistory = !!cpHist;
+    const baseOverride = hasHistory ? (cpHist as { basePriceSen: number | null }).basePriceSen : (cp?.cpBasePriceSen ?? null);
+    const price1Override = hasHistory ? (cpHist as { price1Sen: number | null }).price1Sen : (cp?.cpPrice1Sen ?? null);
+    const seatOverride = hasHistory ? (cpHist as { seatHeightPrices: string | null }).seatHeightPrices : (cp?.cpSeatHeightPrices ?? null);
+
+    const prices = resolvePrices(baseOverride, price1Override, seatOverride, masterBase, masterP1, masterSeatRaw);
+    out.set(pid, { ...prices, hasCustomerOverride: cp?.cpId != null });
+  }
+  return out;
+}
+
 app.get("/price-for/:productId/:customerId", async (c) => {
   const productId = c.req.param("productId");
   const customerId = c.req.param("customerId");

@@ -4699,21 +4699,22 @@ function CostStructureTab() {
           <table className="text-[13px] whitespace-nowrap">
             <thead>
               <tr className="border-b border-[#E2DDD8] text-[11px] text-[#6B7280]">
-                <th className="px-2 py-1.5 text-left sticky left-0 bg-white">MONTH</th>
-                <th className="px-2 py-1.5 text-right">SALES</th>
+                <th className="px-3 py-2 text-left sticky left-0 bg-white">MONTH</th>
+                <th className="px-3 py-2 text-right">SALES</th>
                 {grps.map((g) => (
-                  <th key={g.group} colSpan={4} className="px-2 py-1.5 text-center border-l border-[#E2DDD8]">{g.description}</th>
+                  <th key={g.group} colSpan={5} className="px-3 py-2 text-center border-l border-[#E2DDD8]">{g.description}</th>
                 ))}
-                <th className="px-2 py-1.5 text-right border-l border-[#E2DDD8]">SPEND % SALES</th>
+                <th className="px-3 py-2 text-right border-l border-[#E2DDD8]">SPEND % SALES</th>
               </tr>
               <tr className="border-b border-[#E2DDD8] text-[10px] text-[#9CA3AF]">
                 <th className="sticky left-0 bg-white" /><th />
                 {grps.map((g) => (
                   <React.Fragment key={g.group}>
-                    <th className="px-1.5 py-1 text-right border-l border-[#E2DDD8]">O/P</th>
-                    <th className="px-1.5 py-1 text-right">PUR</th>
-                    <th className="px-1.5 py-1 text-right">C/L</th>
-                    <th className="px-1.5 py-1 text-right">SPEND</th>
+                    <th className="px-2.5 py-1.5 text-right border-l border-[#E2DDD8]">O/P</th>
+                    <th className="px-2.5 py-1.5 text-right">PUR</th>
+                    <th className="px-2.5 py-1.5 text-right">C/L</th>
+                    <th className="px-2.5 py-1.5 text-right">SPEND</th>
+                    <th className="px-2.5 py-1.5 text-right">%</th>
                   </React.Fragment>
                 ))}
                 <th className="border-l border-[#E2DDD8]" />
@@ -4724,19 +4725,23 @@ function CostStructureTab() {
                 const monthSpend = grps.reduce((s, g) => s + g.months[i].spend, 0);
                 const s = salesArr[i] || 0;
                 const pctTxt = s > 0 ? `${((monthSpend / s) * 100).toFixed(1)}%` : "-";
+                // Per-group spend as % of the SAME section's sales (owner
+                // 2026-07-28: 「spend 旁边放 percentage,就是 spend / sales」).
+                const gPct = (spend: number) => (s > 0 && spend !== 0 ? `${((spend / s) * 100).toFixed(1)}%` : "-");
                 return (
                   <tr key={m} className="border-b border-[#F0ECE9]">
-                    <td className="px-2 py-1 text-left sticky left-0 bg-white">{m}</td>
-                    <td className="px-2 py-1 text-right tabular-nums">{n(s)}</td>
+                    <td className="px-3 py-1.5 text-left sticky left-0 bg-white">{m}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{n(s)}</td>
                     {grps.map((g) => (
                       <React.Fragment key={g.group}>
-                        <td className="px-1.5 py-1 text-right tabular-nums border-l border-[#F0ECE9]">{n(g.months[i].opening)}</td>
-                        <td className="px-1.5 py-1 text-right tabular-nums">{n(g.months[i].purchase)}</td>
-                        <td className="px-1.5 py-1 text-right tabular-nums">{n(g.months[i].closing)}</td>
-                        <td className="px-1.5 py-1 text-right tabular-nums font-medium">{n(g.months[i].spend)}</td>
+                        <td className="px-2.5 py-1.5 text-right tabular-nums border-l border-[#F0ECE9]">{n(g.months[i].opening)}</td>
+                        <td className="px-2.5 py-1.5 text-right tabular-nums">{n(g.months[i].purchase)}</td>
+                        <td className="px-2.5 py-1.5 text-right tabular-nums">{n(g.months[i].closing)}</td>
+                        <td className="px-2.5 py-1.5 text-right tabular-nums font-medium">{n(g.months[i].spend)}</td>
+                        <td className="px-2.5 py-1.5 text-right tabular-nums text-[#9A3A2D]">{gPct(g.months[i].spend)}</td>
                       </React.Fragment>
                     ))}
-                    <td className="px-2 py-1 text-right tabular-nums text-[#9A3A2D] border-l border-[#F0ECE9]">{pctTxt}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-[#9A3A2D] border-l border-[#F0ECE9]">{pctTxt}</td>
                   </tr>
                 );
               })}
@@ -4761,11 +4766,12 @@ function CostStructureTab() {
           {data && (
             <ExportButtons
               build={() => {
-                const head = ["MONTH", "SALES", ...exportGroups.flatMap((g) => [`${g.description} O/P`, "PUR", "C/L", "SPEND"]), "SPEND % SALES"];
+                const head = ["MONTH", "SALES", ...exportGroups.flatMap((g) => [`${g.description} O/P`, "PUR", "C/L", "SPEND", "%"]), "SPEND % SALES"];
                 const body: Aoa = data.cols.map((m, i) => {
                   const monthSpend = exportGroups.reduce((s, g) => s + g.months[i].spend, 0);
                   const s = exportSales[i] || 0;
-                  return [m, (s / 100).toFixed(2), ...exportGroups.flatMap((g) => [(g.months[i].opening / 100).toFixed(2), (g.months[i].purchase / 100).toFixed(2), (g.months[i].closing / 100).toFixed(2), (g.months[i].spend / 100).toFixed(2)]), s > 0 ? `${((monthSpend / s) * 100).toFixed(1)}%` : "-"];
+                  const gp = (spend: number) => (s > 0 && spend !== 0 ? `${((spend / s) * 100).toFixed(1)}%` : "-");
+                  return [m, (s / 100).toFixed(2), ...exportGroups.flatMap((g) => [(g.months[i].opening / 100).toFixed(2), (g.months[i].purchase / 100).toFixed(2), (g.months[i].closing / 100).toFixed(2), (g.months[i].spend / 100).toFixed(2), gp(g.months[i].spend)]), s > 0 ? `${((monthSpend / s) * 100).toFixed(1)}%` : "-"];
                 });
                 return [head, ...body];
               }}

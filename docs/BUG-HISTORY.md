@@ -141,6 +141,38 @@ gets a price column, per tier, no code change. Pinned by `tests/sofa-size-column
 
 ---
 
+## BUG-2026-07-29-001 — FG box sticker showed `5530-2S+2S+2S+2S+2S` for a 1-sofa SO — stale physical print, DB already correct (non-bug) `production` `fg-sticker` 🟢
+**Owner-reported (2026-07-29, 「那么多 2S?」) on a Houzs KL box — SO-2607-089, model 5530-2S.**
+The FG sticker's WIP line read `5530-2S+2S+2S+2S+2S` (five 2S), but the SO has exactly **one**
+sofa (`5530-2S`, qty 1) plus 2 long pillows (accessory). Owner's instinct — "this was fixed
+before, and OCR only opens the SO, it can't touch this" — was correct.
+
+**Not a live bug — verified against prod DB (read-only direct connect, 2026-07-29):**
+- The sofa's FAB_CUT job card (`jc-fc-so-SO-2607-089-5530-M2402-6`) currently stores the CORRECT
+  collapsed label `5530-2S | (28) | M2402-6 | (FC)` — single entry, not inflated.
+- `SELECT COUNT(*) FROM job_cards WHERE wip_label LIKE '%+2S+2S%'` = **0** across the entire prod
+  DB. No inflated FC label survives anywhere.
+
+**Root cause of the paper sticker:** the FG sticker copies the job card's stored `wip_label` at
+print time (`generate-sticker-pdf.ts` reads `jc.wipLabel || jc.wipCode`). This sticker was
+printed while the label was still in the older, un-collapsed form — one entry per fabric-cut
+sub-WIP (Base + Cushion + Armrest…), each tagged with the parent code `5530-2S`, joined into
+`5530-2S+2S+2S+2S+2S`. The label was later corrected in the DB (the "collapse sub-WIPs to
+one-per-PO before joining" rule), but a physical sticker already on the box is a point-in-time
+print and does not auto-reprint.
+
+**Where the recurrence-preventing fix lives:** `src/api/routes/_shared/production-builder.ts:259`
+— `aggregateFcSlots` builds `labelSlots` by de-duping the group by `poId` **before**
+`joinModelLabel`, so a 1-PO sofa collapses to a single `5530-2S` regardless of how many sub-WIP
+cut nodes it has. The import-completion backfill path mirrors the same collapse
+(`fg-fabric.ts:136`, `perPoRows`). This class of FC-label inflation had **no standalone
+BUG-HISTORY entry before** — this entry backfills it.
+
+**Action:** reprint the one box sticker → it reads the current correct label `5530-2S`. No code or
+data change needed; DB is already clean.
+**Verification:** direct prod read confirmed the stored label + 0 inflated rows DB-wide. Owner to
+reprint the single box to physically close.
+
 ## BUG-2026-07-17-012 — payslip "Hourly Rate" formula hardcoded "(26 x 9)" — lied for non-9h workers `payroll` `ui-frontend` `pdf` 🟢
 **Display-only (the rate was always correct), fixed as part of the ANN short-hours work
 (BUG-2026-07-17-006/-007).** The payslip label read `basic / (26 x 9) = hourlyRate`, but the

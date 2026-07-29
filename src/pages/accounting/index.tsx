@@ -2881,15 +2881,26 @@ function JournalsTab({
   onRefresh: () => void;
 }) {
   const { confirm } = useConfirm();
+  const { toast } = useToast();
   const [showForm, setShowForm] = useState(false);
   const [selectedJvs, setSelectedJvs] = useState<JournalEntry[]>([]);
 
+  // Owner 2026-07-28 (JE-2607-0001): this used to ignore the response entirely
+  // — a rejected/aborted Post showed NOTHING and the entry silently stayed
+  // DRAFT. Success and failure both speak now.
   const handlePost = async (id: string) => {
-    await fetch(`/api/accounting/journals/${id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "POSTED" }),
-    });
+    try {
+      const res = await fetch(`/api/accounting/journals/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "POSTED" }),
+      });
+      const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+      if (res.ok && j?.success) toast.success("Journal entry posted");
+      else toast.error(j?.error || "Couldn't post the journal entry — please try again.");
+    } catch {
+      toast.error("Couldn't post the journal entry — connection hiccup, please try again.");
+    }
     onRefresh();
   };
 
@@ -4641,26 +4652,42 @@ type CsGroup = { group: string; description: string; months: { opening: number; 
 
 function CostStructureTab() {
   const yrNow = new Date().getUTCFullYear();
-  const [fy, setFy] = useState(yrNow);
+  // fy=null → the SERVER picks the financial year containing today (owner
+  // 2026-07-28: the old `yrNow` default pointed Jan–Aug users at the NEXT,
+  // still-empty FY because the FYE is August). A number = user's pick.
+  const [fy, setFy] = useState<number | null>(null);
   const [line, setLine] = useState<"all" | "sofa" | "bedframe">("all");
   const [data, setData] = useState<{ fyLabel: string; cols: string[]; groups: CsGroup[]; salesSofa: number[]; salesBed: number[]; salesAll: number[] } | null>(null);
   const loading = data === null;
   useEffect(() => {
     let stale = false;
-    fetch(`/api/accounting/cost-structure?fy=${fy}`)
+    fetch(`/api/accounting/cost-structure${fy !== null ? `?fy=${fy}` : ""}`)
       .then((r) => r.json() as Promise<{ success?: boolean; data?: NonNullable<typeof data> }>)
       .then((j) => { if (!stale && j?.success && j.data) setData(j.data); })
       .catch(() => {});
     return () => { stale = true; };
   }, [fy]);
+  // The FY the data on screen belongs to (start year), parsed from the label
+  // — drives the selector display when the user hasn't picked yet.
+  const fyShown = fy ?? (data ? parseInt((/FY (\d{4})/.exec(data.fyLabel) ?? [])[1] ?? `${yrNow}`, 10) : yrNow);
 
   // Amounts shown WITHOUT the RM prefix (the section title carries "(RM)")
   // and slightly larger, so the table reads without scrolling far right.
   const n = (v: number) => (v === 0 ? "-" : (v / 100).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
   const groupsFor = (pred: (g: CsGroup) => boolean) => (data?.groups ?? []).filter(pred);
-  const bedGroups = groupsFor((g) => g.group.startsWith("B."));
-  const sofaGroups = groupsFor((g) => g.group.startsWith("S."));
-  const sharedGroups = groupsFor((g) => !g.group.startsWith("B.") && !g.group.startsWith("S."));
+  // Rows are keyed by PURCHASE ACCOUNT now (same source as the P&L); the
+  // bed/sofa/shared split reads the account NAME ("PURCHASE - B.M FABRIC" →
+  // bedframe, "… S.FILLER"/"… S FABRIC" → sofa, PLYWOOD etc. → shared).
+  // Legacy itemGroup keys ("B.M-FABR") still match via the same prefixes.
+  const csSection = (g: CsGroup): "bedframe" | "sofa" | "shared" => {
+    const t = `${g.group} ${g.description}`.toUpperCase();
+    if (/(^|[^A-Z])B\./.test(t)) return "bedframe";
+    if (/(^|[^A-Z])S[.\s-]/.test(t)) return "sofa";
+    return "shared";
+  };
+  const bedGroups = groupsFor((g) => csSection(g) === "bedframe");
+  const sofaGroups = groupsFor((g) => csSection(g) === "sofa");
+  const sharedGroups = groupsFor((g) => csSection(g) === "shared");
 
   // One Cost-Structure table for a set of groups + that line's sales.
   const renderCsTable = (title: string, grps: CsGroup[], salesArr: number[]) => {
@@ -4742,13 +4769,13 @@ function CostStructureTab() {
                 });
                 return [head, ...body];
               }}
-              filenameBase={`CostStructure-${line}-FY${fy}`}
+              filenameBase={`CostStructure-${line}-FY${fyShown}`}
               title={`Cost Structure (${line})`}
               subtitle={data.fyLabel}
             />
           )}
-          <select value={fy} onChange={(e) => setFy(parseInt(e.target.value, 10))} className="rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
-            {[yrNow, yrNow - 1, yrNow - 2].map((y) => <option key={y} value={y}>FY {y}</option>)}
+          <select value={fyShown} onChange={(e) => setFy(parseInt(e.target.value, 10))} className="rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
+            {[...new Set([yrNow, yrNow - 1, yrNow - 2, fyShown])].sort((a, b) => b - a).map((y) => <option key={y} value={y}>FY {y}</option>)}
           </select>
         </div>
       </div>

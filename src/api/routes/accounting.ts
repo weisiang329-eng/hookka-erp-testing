@@ -7237,77 +7237,64 @@ app.get("/cost-structure", async (c) => {
   const anchorDate = fyParam ? new Date(Date.UTC(parseInt(fyParam, 10), fyeMonth % 12, 15)) : new Date();
   const fyWin = fyWindowFor(anchorDate, fyeMonth);
   const startYm = fyWin.startIso.slice(0, 7);
-  const endYm = fyWin.endIso.slice(0, 7);
   const cols: string[] = [];
   {
     let [y, m] = startYm.split("-").map((n) => parseInt(n, 10));
     for (let i = 0; i < 12; i++) { cols.push(`${y}-${String(m).padStart(2, "0")}`); m += 1; if (m > 12) { m = 1; y += 1; } }
   }
-  const [clRes, rmRes] = await Promise.all([
-    db.prepare("SELECT type, itemType, itemId, direction, totalCostSen, date FROM cost_ledger").all<{ type: string; itemType: string; itemId: string; direction: string; totalCostSen: number; date: string }>(),
-    db.prepare("SELECT id, itemGroup FROM raw_materials").all<{ id: string; itemGroup: string }>(),
+  // Owner rule 2026-07-28 (「cost structure 其实就和 P&L 一样拿数据」): this
+  // report now takes every month's numbers from THE SAME per-month window the
+  // P&L uses — GL purchases by purchase account, engine/stock-take inventory,
+  // historical swap for pre-opening months — replacing the cost_ledger
+  // RM_RECEIPT/RM_ISSUE feed, which stopped being fed after 2026-03 (PUR read
+  // blank from April even though the GL had the purchases).
+  await ensurePnlHistorical(db);
+  const nowYm = new Date().toISOString().slice(0, 7);
+  const orgIdCs = getOrgId(c);
+  const overrideCs = await getPnlSectionMap(db);
+  const lastComputeYm = cols[0] > nowYm ? null : (nowYm < cols[11] ? nowYm : cols[11]);
+  const [matDataCs, dcCs] = lastComputeYm
+    ? await Promise.all([loadMaterialCostData(db, orgIdCs, lastComputeYm), loadDocDateResolver(db)])
+    : [null, null];
+  const [historicalCs, openingDateRawCs] = await Promise.all([
+    loadHistoricalPnl(db, orgIdCs),
+    getOpeningDate(db),
   ]);
-  const grp = new Map<string, string>();
-  for (const r of rmRes.results ?? []) grp.set(r.id, r.itemGroup || "OTHER");
-  // group → { openingBeforeFy, perMonth: [{purchase,consumed}] }
-  type GM = { openingBeforeFy: number; purchase: number[]; consumed: number[] };
-  const groups = new Map<string, GM>();
-  const ensure = (g: string): GM => {
-    let x = groups.get(g);
-    if (!x) { x = { openingBeforeFy: 0, purchase: new Array(12).fill(0), consumed: new Array(12).fill(0) }; groups.set(g, x); }
-    return x;
+  const openingMonthCs = openingDateRawCs ? openingDateRawCs.slice(0, 7) : null;
+
+  type CsMonth = { opening: number; purchase: number; closing: number; spend: number };
+  const groups = new Map<string, { description: string; months: CsMonth[] }>();
+  const ensureG = (code: string, desc: string) => {
+    let g = groups.get(code);
+    if (!g) { g = { description: desc, months: cols.map(() => ({ opening: 0, purchase: 0, closing: 0, spend: 0 })) }; groups.set(code, g); }
+    return g;
   };
-  for (const l of clRes.results ?? []) {
-    if (l.itemType !== "RM") continue;
-    const g = grp.get(l.itemId) || "OTHER";
-    const x = ensure(g);
-    const ym = String(l.date ?? "").slice(0, 7);
-    const v = Number(l.totalCostSen) || 0;
-    const signed = l.direction === "IN" ? v : -v;
-    if (ym < startYm) { x.openingBeforeFy += signed; continue; }
-    if (ym > endYm) continue;
-    const idx = cols.indexOf(ym);
-    if (idx < 0) continue;
-    if (l.type === "RM_RECEIPT") x.purchase[idx] += v;
-    else if (l.type === "RM_ISSUE") x.consumed[idx] += v;
-    else x.purchase[idx] += signed; // ADJUSTMENT etc.
-  }
-  // Sales per month by line.
   const salesSofa = new Array(12).fill(0);
   const salesBed = new Array(12).fill(0);
-  try {
-    const [invRes, itemRes, prodRes] = await Promise.all([
-      db.prepare(`SELECT id, invoiceDate, status FROM invoices WHERE status NOT IN ('DRAFT','CANCELLED')`).all<{ id: string; invoiceDate: string | null; status: string }>(),
-      db.prepare(`SELECT invoiceId, productCode, totalSen FROM invoice_items`).all<{ invoiceId: string; productCode: string | null; totalSen: number }>(),
-      db.prepare(`SELECT code, category FROM products`).all<{ code: string; category: string | null }>(),
-    ]);
-    const invYm = new Map<string, string>();
-    for (const i of invRes.results ?? []) invYm.set(i.id, String(i.invoiceDate ?? "").slice(0, 7));
-    const cat = new Map<string, string>();
-    for (const p of prodRes.results ?? []) cat.set(p.code, String(p.category ?? "").toUpperCase());
-    for (const it of itemRes.results ?? []) {
-      const ym = invYm.get(it.invoiceId);
-      if (!ym) continue;
-      const idx = cols.indexOf(ym);
-      if (idx < 0) continue;
-      const v = Number(it.totalSen) || 0;
-      if (cat.get(it.productCode ?? "") === "BEDFRAME") salesBed[idx] += v;
-      else salesSofa[idx] += v;
+  const CS_BEDFRAME_SALES_CODE = "500-0000";
+  for (let i = 0; i < 12; i++) {
+    const ym = cols[i];
+    if (ym > nowYm) continue; // future months stay blank
+    const hist = selectHistoricalWindow(historicalCs, openingMonthCs, ym, "all");
+    const w = hist ?? (matDataCs && dcCs
+      ? await computePnlWindow(db, orgIdCs, ym, ym, "all", matDataCs, dcCs, overrideCs)
+      : null);
+    if (!w) continue;
+    for (const g of w.rmGroups) {
+      const row = ensureG(g.group, g.description);
+      const purchase = Number(g.purchasesSen) || 0;
+      const opening = Number(g.openingSen) || 0;
+      const closing = Number(g.closingSen) || 0;
+      row.months[i] = { opening, purchase, closing, spend: opening + purchase - closing };
     }
-  } catch { /* absent */ }
-  // Build per-group rows with running opening/closing.
-  const out = [...groups.entries()].map(([g, x]) => {
-    let running = x.openingBeforeFy;
-    const months = cols.map((_, i) => {
-      const opening = running;
-      const purchase = x.purchase[i];
-      const consumed = x.consumed[i];
-      const closing = opening + purchase - consumed;
-      running = closing;
-      return { opening, purchase, closing, spend: consumed };
-    });
-    return { group: g, description: GROUP_DESCRIPTIONS[g] ?? g, months };
-  }).filter((r) => r.months.some((m) => m.opening || m.purchase || m.closing || m.spend))
+    for (const r of w.revLines) {
+      if (r.code === CS_BEDFRAME_SALES_CODE) salesBed[i] += r.amountSen;
+      else salesSofa[i] += r.amountSen;
+    }
+  }
+  const out = [...groups.entries()]
+    .map(([code, g]) => ({ group: code, description: g.description, months: g.months }))
+    .filter((r) => r.months.some((m) => m.opening || m.purchase || m.closing || m.spend))
     .sort((a, b) => a.group.localeCompare(b.group));
   return c.json({
     success: true,

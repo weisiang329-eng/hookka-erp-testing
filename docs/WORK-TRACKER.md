@@ -9,6 +9,14 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-07-29 — FG sticker `+2S+2S` investigated → non-bug (stale print); logged to BUG-HISTORY
+- ✅ **Sticker `5530-2S+2S+2S+2S+2S` on SO-2607-089 (Houzs KL) — NOT a bug (BUG-2026-07-29-001).**
+  Owner「那么多 2S?」. SO has 1 sofa (`5530-2S` ×1) + 2 pillows. Direct prod-DB read confirmed the
+  sofa's FAB_CUT job card now stores the correct collapsed label `5530-2S | (28) | M2402-6 | (FC)`,
+  and `job_cards WHERE wip_label LIKE '%+2S+2S%'` = 0 DB-wide. The paper sticker is a pre-fix print
+  (FG sticker copies `jc.wipLabel` at print time). Collapse fix that prevents recurrence:
+  `production-builder.ts:259`. 🟡 Owner to reprint the one box to physically close.
+
 ## 2026-07-27 — Owner-reported batch (morning): seat-size fix shipped; hub/state root-caused; chat-write approved
 1. ✅ **Sofa seat 20" un-orderable (BUG-2026-07-27-001)** — silent seat-pick reset on
    unpriced models removed in all 4 line editors (sales+consignment create/edit); RM0 /

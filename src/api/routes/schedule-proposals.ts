@@ -167,8 +167,12 @@ app.post("/proposals/approve", async (c) => {
     // generation keeps its dates untouched.
     await db
       .prepare(
+        // Sent-lock (owner 2026-07-29): a card already SENT to the floor
+        // (distributedAt set) keeps its due date — mirrors the auto-approve
+        // drain + the generation-time guard.
         `UPDATE job_cards SET dueDate = ?, updated_at = ?
-          WHERE id = ? AND status = 'WAITING'`,
+          WHERE id = ? AND status = 'WAITING'
+            AND (distributedAt IS NULL OR distributedAt = '')`,
       )
       .bind((row.proposedDue ?? row.proposed_due), nowIso, (row.jcId ?? row.jc_id))
       .run();

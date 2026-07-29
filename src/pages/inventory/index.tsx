@@ -1781,6 +1781,38 @@ export default function InventoryPage() {
     setRmBatchesLoading(false);
   };
 
+  // Soft-delete a FG SKU (owner 2026-07-29: the UI had no delete action at all
+  // — only View/Edit/Refresh). Calls the guarded DELETE /api/products/:id,
+  // which marks the product INACTIVE (kept in history) and 409s if it is still
+  // referenced by an active SO/CO line, active production order, or active BOM.
+  const handleDeleteFG = async (row: FGItem) => {
+    const ok = await confirm({
+      title: "Delete this SKU?",
+      message: `Delete "${row.code}"? It is marked INACTIVE (kept in history, not erased). Blocked if the SKU is still on an active order, production order, or BOM.`,
+      danger: true,
+      confirmLabel: "Delete SKU",
+    });
+    if (!ok) return;
+    try {
+      const res = await fetch(`/api/products/${row.id}`, { method: "DELETE" });
+      if (res.status === 409) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        toast.error(j.error || "Can't delete — still referenced by active records.");
+        return;
+      }
+      if (!res.ok) {
+        toast.error(`Delete failed (HTTP ${res.status}).`);
+        return;
+      }
+      toast.success(`SKU ${row.code} deleted.`);
+      invalidateCachePrefix("/api/products");
+      invalidateCachePrefix("/api/inventory");
+      window.location.reload();
+    } catch {
+      toast.error("Delete failed. Please try again.");
+    }
+  };
+
   // Context menus per tab. Each Edit/View action opens the same dialog the
   // double-click handler does — right-click was previously stubbed
   // (`action: () => {}`) which made the menu look unresponsive to
@@ -1789,6 +1821,7 @@ export default function InventoryPage() {
   const fgContextMenu: ContextMenuItem[] = [
     { label: "View", action: (row: FGItem) => { void handleDoubleClickFG(row); } },
     { label: "Edit", action: (row: FGItem) => { void handleDoubleClickFG(row); } },
+    { label: "Delete", action: (row: FGItem) => { void handleDeleteFG(row); } },
     { separator: true, label: "", action: () => {} },
     { label: "Refresh", action: () => { invalidateCachePrefix("/api/products"); invalidateCachePrefix("/api/inventory"); window.location.reload(); } },
   ];

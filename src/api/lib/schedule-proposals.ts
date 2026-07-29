@@ -437,9 +437,14 @@ export async function applyPendingProposals(
       const inSql = slice.map(() => "?").join(",");
       await db
         .prepare(
+          // Sent-lock (owner 2026-07-29): never move the due date of a card
+          // already SENT to the floor (distributedAt set). Re-checked HERE, not
+          // just at generation — a proposal made while the card was un-sent can
+          // otherwise auto-apply after the operator ticks Sent (≤24h window).
           `UPDATE job_cards
               SET dueDate = CASE id ${caseSql} END, updated_at = ?
-            WHERE id IN (${inSql}) AND status = 'WAITING'`,
+            WHERE id IN (${inSql}) AND status = 'WAITING'
+              AND (distributedAt IS NULL OR distributedAt = '')`,
         )
         .bind(
           ...slice.flatMap((p) => [p.jcId, p.proposedDue]),

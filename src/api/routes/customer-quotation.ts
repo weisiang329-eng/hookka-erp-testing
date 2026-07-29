@@ -21,7 +21,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
-import { resolveCustomerPriceAsOf } from "./customer-products";
+import { resolveCustomerPricesAsOfBatch } from "./customer-products";
 import { resolveMaintenanceConfigAsOf } from "./maintenance-config";
 
 const app = new Hono<Env>();
@@ -151,36 +151,30 @@ app.get("/", async (c) => {
     price1Sen: number | null;
     seatHeightPrices: Array<{ height: string; priceSen: number; tier?: string }>;
   }> = [];
-  // resolveCustomerPriceAsOf does 2+ sequential DB reads per product, so a
-  // plain per-row `await` serialised 750+ round-trips for a 375-SKU customer
-  // (The Conts) — the request hung/aborted and "Export Quotation PDF" never
-  // produced a file (owner-reported 2026-07-29, AbortError in console). Resolve
-  // in bounded-concurrency chunks: identical per-product logic and output
-  // order, but 375 products complete in ~25 rounds instead of 375. Chunked
-  // (not one big Promise.all) to cap concurrent DB connections.
-  const PRICE_CHUNK = 15;
-  for (let i = 0; i < cpRows.length; i += PRICE_CHUNK) {
-    const slice = cpRows.slice(i, i + PRICE_CHUNK);
-    const resolvedSlice = await Promise.all(
-      slice.map((r) =>
-        resolveCustomerPriceAsOf(c.var.DB, r.productId, customerId, asOf),
-      ),
-    );
-    for (let j = 0; j < slice.length; j++) {
-      const r = slice[j];
-      const resolved = resolvedSlice[j];
-      productsOut.push({
-        productId: r.productId,
-        code: r.productCode,
-        name: r.productName,
-        category: r.productCategory,
-        sizeCode: r.sizeCode,
-        sizeLabel: r.sizeLabel,
-        basePriceSen: resolved?.basePriceSen ?? null,
-        price1Sen: resolved?.price1Sen ?? null,
-        seatHeightPrices: resolved?.seatHeightPrices ?? [],
-      });
-    }
+  // resolveCustomerPriceAsOf does ~5 sequential DB reads PER product, so a
+  // 375-SKU customer (The Conts) serialised ~1875 round-trips and the request
+  // aborted at 30s — "Export Quotation PDF" never produced a file (owner
+  // 2026-07-29). Resolve the whole set in 4 bulk queries instead: same price
+  // math (shared resolvePrices), same output, just fan-in.
+  const priceMap = await resolveCustomerPricesAsOfBatch(
+    c.var.DB,
+    cpRows.map((r) => r.productId),
+    customerId,
+    asOf,
+  );
+  for (const r of cpRows) {
+    const resolved = priceMap.get(r.productId);
+    productsOut.push({
+      productId: r.productId,
+      code: r.productCode,
+      name: r.productName,
+      category: r.productCategory,
+      sizeCode: r.sizeCode,
+      sizeLabel: r.sizeLabel,
+      basePriceSen: resolved?.basePriceSen ?? null,
+      price1Sen: resolved?.price1Sen ?? null,
+      seatHeightPrices: resolved?.seatHeightPrices ?? [],
+    });
   }
 
   // ---------------------------------------------------------------

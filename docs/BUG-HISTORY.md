@@ -484,6 +484,10 @@ line was matched to the wrong SO.
 
 ---
 
+## BUG-2026-07-29-001 — PARTIAL_PAID rejected by prod since go-live: the constraint relaxer dropped the WRONG NAME `supplier-payments` `money` `schema`
+
+🟢 Fixed. ensurePartialPaymentColumns dropped `purchase_invoices_status_check` (the auto-generated name), but the LIVE constraint is `purchase_invoices_status_chk` — IF EXISTS made the mismatch silent, so EVERY partial supplier payment failed its batch with a check-constraint violation from day one (owner reported "partial payment 会报错" 2026-07-15; PV-2607-001's edit death; finally caught verbatim by the 07-24 restate error trap on PV-2607-006: `new row … violates check constraint "purchase_invoices_status_chk"`). Fix: drop BOTH names + re-add permissive NAMED `purchase_invoices_status_chk_v2` (all app statuses incl. PARTIAL_PAID; outside the drop list so repeat self-applies stay no-ops). Lesson for the class: a runtime `DROP CONSTRAINT IF EXISTS` must name the constraint from the LIVE schema (query pg_constraint when in doubt), and the error trap that captured the raw text is what cracked a two-week-old ghost in minutes.
+
 ## BUG-2026-07-24-002 — Unvoiding an EDITED supplier payment resurrected its pre-edit GL legs `supplier-payments` `gl` `money`
 
 🟢 Fixed (found by inspection while investigating -003; class C5). Void hides the whole `supplier_payment%` family (right), but unvoid's applyLifecycle exact-match unhid only the base `supplier_payment` legs — for an edited payment those carry the STALE pre-edit numbers (live set = newest `restate_post:<stamp>`, which stayed hidden) → GL shows old amounts, subledger the new ones. Unvoid now re-hides the family and unhides `latestRestatePostType(...)` (pure, unit-tested). Not yet hit in prod (no voided-after-edit payment existed).

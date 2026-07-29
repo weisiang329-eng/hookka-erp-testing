@@ -704,7 +704,13 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
     // Allow attachment-only messages — the user might just want to drop a
     // photo and let the AI describe what it sees. Send if EITHER text or
     // attachments are present.
-    if ((!trimmed && !hasAttachments) || busy) return;
+    if (!trimmed && !hasAttachments) return;
+
+    // ChatGPT-style interrupt: sending while the assistant is still streaming
+    // aborts the in-flight turn and starts the new one. The partial reply stays
+    // in the thread; the superseded turn's finally is guarded (by
+    // `abortRef.current === ctrl` below) so it can't clobber this turn's state.
+    if (busy) abortRef.current?.abort();
 
     // Sending a new message always snaps back to the bottom.
     stickBottomRef.current = true;
@@ -926,8 +932,12 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
       if ((err as { name?: string })?.name === "AbortError") return;
       setError(humanizeError(err, "The assistant couldn't respond. Please try again."));
     } finally {
-      setBusy(false);
-      abortRef.current = null;
+      // Only the ACTIVE turn resets shared state — a superseded (interrupted)
+      // turn must NOT clobber the newer turn's busy / abortRef.
+      if (abortRef.current === ctrl) {
+        setBusy(false);
+        abortRef.current = null;
+      }
     }
   }, [draft, busy, messages, attachments]);
 
@@ -1256,7 +1266,7 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            disabled={busy || attachments.length >= MAX_ATTACHMENTS_PER_MESSAGE}
+            disabled={attachments.length >= MAX_ATTACHMENTS_PER_MESSAGE}
             aria-label="Attach files"
             title={
               attachments.length >= MAX_ATTACHMENTS_PER_MESSAGE
@@ -1275,9 +1285,8 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
             placeholder="Ask Hookka AI... (paste images with Ctrl/Cmd+V)"
             rows={2}
             className="flex-1 resize-none rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-            disabled={busy}
           />
-          {busy ? (
+          {busy && !draft.trim() && attachments.length === 0 ? (
             <button
               type="button"
               onClick={stop}
@@ -1290,6 +1299,7 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
               type="button"
               onClick={() => void sendMessage()}
               disabled={!draft.trim() && attachments.length === 0}
+              title={busy ? "Send now — interrupts the current reply" : undefined}
               className="h-10 px-4 rounded-md bg-[#1F1D1B] text-white text-sm font-medium hover:bg-[#3a3633] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               Send

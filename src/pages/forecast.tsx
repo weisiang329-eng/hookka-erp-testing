@@ -74,7 +74,7 @@ export default function ForecastPage() {
   // ---- Line structure (same classification as the real P&L) ----
   const lines = useMemo(() => {
     const postable = accounts.filter((a) => a.isPostable !== false);
-    const materials = postable
+    const materialAccts = postable
       .filter(
         (a) =>
           a.type === "COST" &&
@@ -84,6 +84,20 @@ export default function ForecastPage() {
           !/STOCK|PROGRESS/i.test(a.name),
       )
       .sort((a, b) => a.code.localeCompare(b.code));
+    // Owner 2026-07-29: materials forecast by TYPE, not by sofa/bedframe —
+    // "PURCHASE - B.M FABRIC" / "S FABRIC" / "S.M FABRIC" fold into ONE
+    // FABRIC row (likewise FILLER / WEBBING / …). Percentages store under a
+    // stable `cat:<TYPE>` key, so a future sofa/bedframe split can add
+    // per-line rows without clashing with what was keyed here.
+    const catOf = (name: string): string => {
+      const stripped = name.replace(/^PURCHASE\s*-\s*/i, "").trim();
+      const cat = stripped.replace(/^(B\.M|S\.M|B|S)[.\s]+/i, "").trim();
+      return cat || stripped;
+    };
+    const catNames = [...new Set(materialAccts.map((a) => catOf(a.name)))].sort();
+    const materials = catNames.map(
+      (n) => ({ code: `cat:${n}`, name: n, type: "COST" }) as CoaAcct,
+    );
     const byBucket = (bucket: string) =>
       postable
         .filter((a) => pnlBucketFor(a.code, a.type, override) === bucket)
@@ -190,7 +204,9 @@ export default function ForecastPage() {
   const acctRow = (a: CoaAcct, indent = true) => (
     <tr key={a.code} className="border-b border-[#F0ECE9]">
       <td className={`px-3 py-1 sticky left-0 bg-white whitespace-nowrap ${indent ? "pl-7" : ""}`}>
-        <span className="tabular-nums text-[11px] text-[#9CA3AF] mr-1.5">{a.code}</span>
+        {!a.code.startsWith("cat:") && (
+          <span className="tabular-nums text-[11px] text-[#9CA3AF] mr-1.5">{a.code}</span>
+        )}
         <span className="text-[#1F1D1B]">{a.name}</span>
       </td>
       {yms.map((ym) => {

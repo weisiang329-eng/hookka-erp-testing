@@ -137,6 +137,7 @@ const RDMaintenance = lazy(() => import('./pages/rd/maintenance'))
 
 // Reports, Notifications, Maintenance
 const Reports = lazy(() => import('./pages/reports'))
+const ForecastPnl = lazy(() => import('./pages/forecast'))
 const DailyReport = lazy(() => import('./pages/daily-report'))
 const Notifications = lazy(() => import('./pages/notifications'))
 // Announcements — office posts that every worker sees on their phone home
@@ -438,6 +439,8 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
 
   // Reports, Notifications, Maintenance
   { path: '/reports', element: <S><Reports /></S> },
+  // Forecast P&L — owner-keyed sales + % lines (2026-07-29).
+  { path: '/forecast', element: <S><ForecastPnl /></S> },
   // Daily Report — process / SOP exceptions ("what needs attention today").
   { path: '/daily-report', element: <S><DailyReport /></S> },
   { path: '/notifications', element: <S><Notifications /></S> },
@@ -583,6 +586,7 @@ const ROUTE_CHUNK_LOADERS: Record<string, () => Promise<unknown>> = {
   '/accounting': () => import('./pages/accounting'),
   '/accounting/cash-flow': () => import('./pages/accounting/cash-flow'),
   '/reports': () => import('./pages/reports'),
+  '/forecast': () => import('./pages/forecast'),
   '/employees': () => import('./pages/employees'),
   '/maintenance': () => import('./pages/maintenance'),
   '/settings': () => import('./pages/settings'),

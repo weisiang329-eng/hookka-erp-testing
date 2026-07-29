@@ -262,6 +262,12 @@ const navigationGroups: NavGroup[] = [
     ],
   },
   {
+    // Owner 2026-07-29: standalone planning section — keyed sales + %-driven
+    // cost lines, months owner-created. Zero contact with the books.
+    label: "FORECASTING",
+    items: [{ name: "Forecast P&L", href: "/forecast", icon: TrendingUp }],
+  },
+  {
     label: "HR & OPERATIONS",
     items: [
       { name: "Employees", href: "/employees", icon: Users },

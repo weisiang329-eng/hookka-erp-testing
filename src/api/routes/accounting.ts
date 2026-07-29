@@ -9440,6 +9440,65 @@ app.put("/bs/section-map", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// FORECAST P&L (owner 2026-07-29) — planning surface, zero contact with the
+// books. The owner creates months himself (a month exists only once added),
+// keys the month's projected SALES, and maintains every P&L line as a % of
+// sales (stored in basis points); a new month inherits the previous month's
+// percentages client-side. kv `forecast_pnl` = { months: { "2026-08":
+// { salesSen, pct: { [accountCode]: bp } } } }.
+// ---------------------------------------------------------------------------
+app.get("/forecast", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const row = await c.var.DB
+    .prepare("SELECT value FROM kv_config WHERE key = 'forecast_pnl'")
+    .first<{ value: string }>();
+  let months: Record<string, unknown> = {};
+  try {
+    months = (JSON.parse(row?.value ?? "{}") as { months?: Record<string, unknown> }).months ?? {};
+  } catch {
+    /* fresh / corrupt → empty */
+  }
+  return c.json({ success: true, data: { months } });
+});
+
+app.put("/forecast", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    const body = (await c.req.json()) as {
+      months?: Record<string, { salesSen?: number; pct?: Record<string, number> }>;
+    };
+    if (!body.months || typeof body.months !== "object") {
+      return c.json({ success: false, error: "months required" }, 400);
+    }
+    const months: Record<string, { salesSen: number; pct: Record<string, number> }> = {};
+    for (const [ym, m] of Object.entries(body.months)) {
+      if (!/^\d{4}-\d{2}$/.test(ym) || !m || typeof m !== "object") continue;
+      const pct: Record<string, number> = {};
+      for (const [code, bp] of Object.entries(m.pct ?? {})) {
+        const v = Math.round(Number(bp) || 0);
+        if (v !== 0) pct[code] = v;
+      }
+      months[ym] = { salesSen: Math.max(0, Math.round(Number(m.salesSen) || 0)), pct };
+    }
+    await c.var.DB.prepare(
+      `INSERT INTO kv_config (key, value, updated_at) VALUES ('forecast_pnl', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    ).bind(JSON.stringify({ months }), new Date().toISOString()).run();
+    await emitAudit(c, {
+      resource: "accounting",
+      resourceId: "forecast_pnl",
+      action: "update",
+      after: { months: Object.keys(months) },
+    });
+    return c.json({ success: true, data: { months } });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // LANDED COST (Phase 3.7, 2026-06) — allocate import charges (freight /
 // duty / clearance; the owner gets BOTH separate forwarder PIs and FEE
 // lines on the goods PI) onto a GRN's rm_batches, proportional to batch

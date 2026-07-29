@@ -204,9 +204,7 @@ const navigationGroups: NavGroup[] = [
           { name: "Balance Sheet", href: "/accounting?tab=bs", icon: Scale },
           { name: "Trial Balance", href: "/accounting?tab=tb", icon: Scale },
           { name: "General Ledger", href: "/accounting?tab=gl", icon: BookOpen },
-          { name: "Monthly Trend", href: "/accounting?tab=trend", icon: TrendingUp },
           { name: "Monthly P&L", href: "/accounting?tab=plmonthly", icon: BarChart3 },
-          { name: "Cost / Expense Classes", href: "/accounting?tab=ceclass", icon: BarChart3 },
         ],
       },
       {
@@ -258,7 +256,9 @@ const navigationGroups: NavGroup[] = [
           { name: "Settings", href: "/accounting?tab=maint", icon: Wrench },
         ],
       },
-      { name: "Reports", href: "/reports", icon: BarChart3 },
+      // Owner 2026-07-29: the legacy /reports hub (pre-finance-module era,
+      // superseded by the accounting tabs) is retired from the menu — the
+      // route/page stay in the codebase for easy restore.
     ],
   },
   {

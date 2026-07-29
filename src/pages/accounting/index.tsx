@@ -462,9 +462,10 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode; group: string }
   { key: "bs", label: "Balance Sheet", icon: <Scale className="h-4 w-4" />, group: "Monthly Report" },
   { key: "tb", label: "Trial Balance", icon: <Scale className="h-4 w-4" />, group: "Monthly Report" },
   { key: "gl", label: "General Ledger", icon: <FileText className="h-4 w-4" />, group: "Monthly Report" },
-  { key: "trend", label: "Monthly Trend", icon: <TrendingUp className="h-4 w-4" />, group: "Monthly Report" },
+  // Owner 2026-07-29: Monthly Trend + Cost / Expense Classes retired from the
+  // tab bar (unused; components + endpoints stay — re-adding a registry line
+  // here restores either instantly).
   { key: "plmonthly", label: "Monthly P&L", icon: <BarChart3 className="h-4 w-4" />, group: "Monthly Report" },
-  { key: "ceclass", label: "Cost / Expense Classes", icon: <BarChart3 className="h-4 w-4" />, group: "Monthly Report" },
   // Daily Operation
   { key: "payments", label: "Expense Payment", icon: <BookOpen className="h-4 w-4" />, group: "Daily Operation" },
   { key: "receipts", label: "Receipts", icon: <BookOpen className="h-4 w-4" />, group: "Daily Operation" },

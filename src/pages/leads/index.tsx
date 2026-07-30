@@ -40,6 +40,14 @@ const STAGES = [
 
 const SOURCES = ["Walk-in", "Referral", "Facebook", "WhatsApp", "Website", "Exhibition", "Other"];
 
+// Approval-gate option lists (full system-wide standardization is slice 4).
+const TERMS = ["CASH", "NET30", "NET60", "NET90"];
+const MY_STATES = [
+  "Johor", "Kedah", "Kelantan", "Melaka", "Negeri Sembilan", "Pahang", "Perak",
+  "Perlis", "Pulau Pinang", "Sabah", "Sarawak", "Selangor", "Terengganu",
+  "W.P. Kuala Lumpur", "W.P. Labuan", "W.P. Putrajaya",
+];
+
 const EMPTY = { name: "", company: "", phone: "", email: "", source: "Referral", estValue: "", nextFollowUp: "", notes: "" };
 
 // Shared e-mail shape check (full standardization is slice 4). Empty is allowed
@@ -369,7 +377,9 @@ function LeadDetailDrawer({
     notes: lead.notes ?? "",
   });
   const [saving, setSaving] = useState(false);
+  const [showConvert, setShowConvert] = useState(false);
   const stageMeta = STAGES.find((s) => s.key === lead.stage) ?? STAGES[0];
+  const alreadyCustomer = !!lead.won_customer_id;
 
   const saveFields = async () => {
     if (!emailValid(draft.email)) return;
@@ -416,8 +426,28 @@ function LeadDetailDrawer({
               </select>
             </div>
           </div>
-          <button onClick={onClose} className="text-[#9CA3AF] hover:text-[#1F1D1B]"><X className="w-5 h-5" /></button>
+          <div className="flex items-center gap-2">
+            {alreadyCustomer ? (
+              <span className="text-[11px] font-medium px-2.5 py-1 rounded-full bg-[#E7F4EC] text-[#15803D]">✓ Converted to customer</span>
+            ) : (
+              <button
+                onClick={() => setShowConvert(true)}
+                className="text-xs font-medium px-3 py-1.5 rounded-lg bg-[#6B5C32] text-white hover:bg-[#5A4D2A]"
+              >
+                Convert to customer →
+              </button>
+            )}
+            <button onClick={onClose} className="text-[#9CA3AF] hover:text-[#1F1D1B]"><X className="w-5 h-5" /></button>
+          </div>
         </div>
+
+        {showConvert && (
+          <ConvertLeadDialog
+            lead={lead}
+            onClose={() => setShowConvert(false)}
+            onDone={async () => { setShowConvert(false); await onSaved(); }}
+          />
+        )}
 
         <div className="p-5 space-y-4">
           {/* Editable lead fields */}
@@ -462,6 +492,174 @@ function LeadDetailDrawer({
           <CrmPanel customerId={lead.id} customerName={lead.company || lead.name || "Lead"} />
           <WishlistPanel customerId={lead.id} />
           <KycPanel customerId={lead.id} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Convert a WON lead into a formal customer. The approval gate the owner
+// requires (Credit Code, Name, Delivery Hub, PIC, PIC Contact, Terms, Credit
+// Limit) is collected here. Flow, so customer-creation logic stays in one place:
+//   1. POST /api/customers      → create the debtor (validates the code, mints id)
+//   2. PUT  /api/customers/:id  → attach the delivery hub (if given)
+//   3. POST /api/sales-leads/:id/convert → re-point the lead's CRM record + WON
+// ---------------------------------------------------------------------------
+function ConvertLeadDialog({
+  lead,
+  onClose,
+  onDone,
+}: {
+  lead: Lead;
+  onClose: () => void;
+  onDone: () => Promise<void> | void;
+}) {
+  const [f, setF] = useState({
+    code: "",
+    name: lead.company || lead.name || "",
+    ssmNo: "",
+    creditTerms: "NET30",
+    creditLimit: "",
+    contactName: lead.name || "",
+    phone: lead.phone || "",
+    email: lead.email || "",
+    hubShortName: "",
+    hubCode: "",
+    hubState: "",
+    hubAddress: "",
+  });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const set = (k: keyof typeof f, v: string) => setF((p) => ({ ...p, [k]: v }));
+  const canSubmit = f.code.trim() && f.name.trim() && emailValid(f.email);
+
+  const submit = async () => {
+    if (!canSubmit) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      // 1) create the customer via the canonical endpoint.
+      const createRes = await fetch("/api/customers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code: f.code.trim(),
+          name: f.name.trim(),
+          ssmNo: f.ssmNo.trim(),
+          creditTerms: f.creditTerms,
+          creditLimitSen: Math.round((parseFloat(f.creditLimit) || 0) * 100),
+          contactName: f.contactName.trim(),
+          phone: f.phone.trim(),
+          email: f.email.trim(),
+        }),
+      });
+      const createJson = (await createRes.json().catch(() => ({}))) as { success?: boolean; error?: string; data?: { id: string } };
+      if (!createRes.ok || !createJson.success || !createJson.data?.id) {
+        setErr(createJson.error || `Could not create customer (HTTP ${createRes.status}).`);
+        return;
+      }
+      const customerId = createJson.data.id;
+
+      // 2) attach a delivery hub (optional) via the customer PUT.
+      if (f.hubShortName.trim() && f.hubCode.trim()) {
+        await fetch(`/api/customers/${customerId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...createJson.data,
+            deliveryHubs: [{
+              id: `hub-${customerId}-1`,
+              code: f.hubCode.trim(),
+              shortName: f.hubShortName.trim(),
+              state: f.hubState,
+              address: f.hubAddress.trim(),
+              contactName: f.contactName.trim(),
+              phone: f.phone.trim(),
+              email: f.email.trim(),
+              isDefault: true,
+            }],
+          }),
+        });
+      }
+
+      // 3) re-point the lead's CRM record onto the new customer + mark WON.
+      await fetch(`/api/sales-leads/${lead.id}/convert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ customerId }),
+      });
+
+      window.alert(`Converted. New customer ${f.code.trim()} — ${f.name.trim()} created; the lead's contacts, activity, wishlist and KYC moved over.`);
+      await onDone();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-1">
+          <h2 className="text-lg font-semibold text-[#1F1D1B]">Convert to customer</h2>
+          <button onClick={onClose} className="text-[#9CA3AF] hover:text-[#1F1D1B]"><X className="w-5 h-5" /></button>
+        </div>
+        <p className="text-xs text-[#6B7280] mb-4">Fill the account-opening details. The lead's contacts, activity, wishlist and KYC move over automatically.</p>
+
+        <div className="space-y-4">
+          <div>
+            <div className="text-xs font-semibold text-[#6B5C32] uppercase tracking-wide mb-2">Account</div>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="text-xs text-[#6B7280] flex flex-col gap-1">Credit Code *
+                <input value={f.code} onChange={(e) => set("code", e.target.value)} className="border border-[#E2DDD8] rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" /></label>
+              <label className="text-xs text-[#6B7280] flex flex-col gap-1">Terms
+                <select value={f.creditTerms} onChange={(e) => set("creditTerms", e.target.value)} className="border border-[#E2DDD8] rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]">
+                  {TERMS.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select></label>
+              <label className="text-xs text-[#6B7280] flex flex-col gap-1 col-span-2">Customer Name *
+                <input value={f.name} onChange={(e) => set("name", e.target.value)} className="border border-[#E2DDD8] rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" /></label>
+              <label className="text-xs text-[#6B7280] flex flex-col gap-1">SSM No.
+                <input value={f.ssmNo} onChange={(e) => set("ssmNo", e.target.value)} className="border border-[#E2DDD8] rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" /></label>
+              <label className="text-xs text-[#6B7280] flex flex-col gap-1">Credit Limit (RM)
+                <input type="number" value={f.creditLimit} onChange={(e) => set("creditLimit", e.target.value)} className="border border-[#E2DDD8] rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" /></label>
+            </div>
+          </div>
+
+          <div>
+            <div className="text-xs font-semibold text-[#6B5C32] uppercase tracking-wide mb-2">Person in charge (PIC)</div>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="text-xs text-[#6B7280] flex flex-col gap-1">PIC name
+                <input value={f.contactName} onChange={(e) => set("contactName", e.target.value)} className="border border-[#E2DDD8] rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" /></label>
+              <label className="text-xs text-[#6B7280] flex flex-col gap-1">PIC contact
+                <input value={f.phone} onChange={(e) => set("phone", e.target.value)} className="border border-[#E2DDD8] rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" /></label>
+              <label className="text-xs text-[#6B7280] flex flex-col gap-1 col-span-2">Email
+                <input value={f.email} onChange={(e) => set("email", e.target.value)} className={`border rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32] ${!emailValid(f.email) ? "border-[#9A3A2D]" : "border-[#E2DDD8]"}`} /></label>
+            </div>
+          </div>
+
+          <div>
+            <div className="text-xs font-semibold text-[#6B5C32] uppercase tracking-wide mb-2">Delivery hub <span className="text-[#9CA3AF] normal-case font-normal">(optional — add more on the customer page)</span></div>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="text-xs text-[#6B7280] flex flex-col gap-1">Hub name
+                <input value={f.hubShortName} onChange={(e) => set("hubShortName", e.target.value)} placeholder="e.g. KL" className="border border-[#E2DDD8] rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" /></label>
+              <label className="text-xs text-[#6B7280] flex flex-col gap-1">Hub code
+                <input value={f.hubCode} onChange={(e) => set("hubCode", e.target.value)} placeholder="e.g. KL" className="border border-[#E2DDD8] rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" /></label>
+              <label className="text-xs text-[#6B7280] flex flex-col gap-1">State
+                <select value={f.hubState} onChange={(e) => set("hubState", e.target.value)} className="border border-[#E2DDD8] rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]">
+                  <option value="">—</option>
+                  {MY_STATES.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select></label>
+              <label className="text-xs text-[#6B7280] flex flex-col gap-1">Address
+                <input value={f.hubAddress} onChange={(e) => set("hubAddress", e.target.value)} className="border border-[#E2DDD8] rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" /></label>
+            </div>
+          </div>
+
+          {err ? <div className="text-xs text-[#9A3A2D] bg-[#F9E7E3] border border-[#E8B2A1] rounded-lg px-3 py-2">{err}</div> : null}
+        </div>
+
+        <div className="mt-5 flex justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-2 rounded-lg border border-[#E2DDD8] text-sm text-[#6B7280] hover:bg-[#F0ECE9]">Cancel</button>
+          <button disabled={busy || !canSubmit} onClick={() => void submit()} className="px-4 py-2 rounded-lg bg-[#6B5C32] text-white text-sm font-medium disabled:opacity-50 hover:bg-[#5A4D2A]">{busy ? "Converting…" : "Convert"}</button>
         </div>
       </div>
     </div>

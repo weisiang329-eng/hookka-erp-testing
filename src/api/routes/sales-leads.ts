@@ -184,6 +184,54 @@ app.put("/:id/stage", async (c) => {
   return c.json({ success: true, data: { id, stage } });
 });
 
+// POST /api/sales-leads/:id/convert — link a lead to a freshly-created customer
+// and MOVE its CRM record over. The customer itself is created via the canonical
+// POST /api/customers first (client passes the resulting customerId here); this
+// endpoint only re-points the lead's entity-keyed CRM side-tables (contacts,
+// activities, wishlist, onboarding) from the lead id to the new customer id and
+// stamps the lead WON. Keeps all customer-creation logic (debtor-code
+// validation, id format, company columns) in exactly one place.
+const CRM_ENTITY_TABLES = [
+  "customer_contacts",
+  "customer_activities",
+  "customer_wishlist",
+  "customer_onboarding",
+] as const;
+
+app.post("/:id/convert", async (c) => {
+  const denied = await requirePermission(c, "customers", "update");
+  if (denied) return denied;
+  await ensureTable(c.var.DB);
+  const leadId = c.req.param("id");
+  const b = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const customerId = String(b.customerId ?? b.customer_id ?? "").trim();
+  if (!customerId) return c.json({ success: false, error: "customerId required" }, 400);
+  const org = getOrgId(c);
+  // Re-point every entity-keyed CRM side-table from lead id → customer id. Table
+  // names come from a fixed allowlist (never user input), so interpolating them
+  // is injection-safe. A missing table (lead never opened that panel) just
+  // throws and is ignored — there is nothing to move in that case.
+  const now = new Date().toISOString();
+  for (const table of CRM_ENTITY_TABLES) {
+    try {
+      await c.var.DB.prepare(
+        `UPDATE ${table} SET customer_id = ? WHERE customer_id = ? AND org_id = ?`,
+      )
+        .bind(customerId, leadId, org)
+        .run();
+    } catch {
+      // table absent or nothing to move — safe to skip
+    }
+  }
+  await c.var.DB.prepare(
+    `UPDATE sales_leads SET stage = 'WON', won_customer_id = ?, updated_at = ?
+      WHERE id = ? AND org_id = ?`,
+  )
+    .bind(customerId, now, leadId, org)
+    .run();
+  return c.json({ success: true, data: { leadId, customerId } });
+});
+
 // DELETE /api/sales-leads/:id
 app.delete("/:id", async (c) => {
   const denied = await requirePermission(c, "customers", "delete");

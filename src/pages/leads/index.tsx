@@ -43,15 +43,29 @@ async function getLeads(): Promise<Lead[]> {
   }
 }
 
+type FollowUp = { id: string; summary: string | null; customer_name?: string | null; contact_name: string | null; next_follow_up: string | null };
+async function getFollowUps(): Promise<FollowUp[]> {
+  try {
+    const r = await fetch("/api/customer-crm/follow-ups");
+    const j = (await r.json()) as { success: boolean; data?: FollowUp[] };
+    return j.success && j.data ? j.data : [];
+  } catch {
+    return [];
+  }
+}
+
 export default function LeadsPage() {
   const [leads, setLeads] = useState<Lead[]>([]);
+  const [followUps, setFollowUps] = useState<FollowUp[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({ ...EMPTY });
   const [saving, setSaving] = useState(false);
 
   const reload = useCallback(async () => {
-    setLeads(await getLeads());
+    const [ls, fu] = await Promise.all([getLeads(), getFollowUps()]);
+    setLeads(ls);
+    setFollowUps(fu);
     setLoaded(true);
   }, []);
 
@@ -143,6 +157,26 @@ export default function LeadsPage() {
           </button>
         </div>
       </div>
+
+      {/* Follow-ups due — who to contact now (from customer activity timelines) */}
+      {followUps.length > 0 && (
+        <div className="mb-6 rounded-xl border border-[#E7DFC9] bg-[#FBF7EA] p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <CalendarClock className="w-4 h-4 text-[#6B5C32]" />
+            <span className="text-sm font-semibold text-[#1F1D1B]">{followUps.length} follow-up{followUps.length > 1 ? "s" : ""} due</span>
+            <span className="text-xs text-[#9CA3AF]">— who to contact now</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {followUps.slice(0, 12).map((f) => (
+              <div key={f.id} className="text-xs bg-white border border-[#E2DDD8] rounded-lg px-3 py-1.5">
+                <span className="font-medium text-[#1F1D1B]">{f.customer_name ?? "—"}</span>
+                {f.summary ? <span className="text-[#6B7280]"> · {f.summary}</span> : null}
+                <span className="ml-2 text-[#6B5C32]">{f.next_follow_up?.slice(0, 10)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Board */}
       <div className="flex gap-4 overflow-x-auto pb-4">

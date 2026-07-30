@@ -225,9 +225,9 @@ export default function ForecastPage() {
   };
 
   // ---- Render helpers ----
-  // One cell = [ % ] + [ RM ] — key EITHER; the empty box shows the derived
-  // value as a grey placeholder (10% of 50,000 → RM box hints 5,000.00; keyed
-  // RM 3,000 on 50,000 sales → % box hints 6).
+  // One cell = [ RM ] + [ % ] (owner 2026-07-29: amount on the LEFT) — key
+  // EITHER; the empty box shows the derived value as a grey placeholder
+  // (RM 3,000 on 50,000 sales → % box hints 6.0; 10% → RM box hints 5,000.00).
   const cellInputs = (ym: string, code: string) => {
     const e = months[ym]?.pct[code] ?? {};
     const c = calc(ym);
@@ -241,17 +241,6 @@ export default function ForecastPage() {
     return (
       <span className="inline-flex items-center gap-1">
         <span className="inline-flex items-center rounded border border-[#E2DDD8] bg-white px-1">
-          <input
-            type="number"
-            step="0.1"
-            value={e.p ?? ""}
-            onChange={(ev) => setPctStr(ym, code, ev.target.value)}
-            placeholder={derivedPct || "-"}
-            className="w-12 py-0.5 text-right text-[12px] tabular-nums outline-none placeholder:text-[#C7C1BA]"
-          />
-          <span className="text-[10px] text-[#9CA3AF] ml-0.5">%</span>
-        </span>
-        <span className="inline-flex items-center rounded border border-[#E2DDD8] bg-white px-1">
           <span className="text-[10px] text-[#9CA3AF] mr-0.5">RM</span>
           <input
             type="number"
@@ -262,9 +251,32 @@ export default function ForecastPage() {
             className="w-20 py-0.5 text-right text-[12px] tabular-nums outline-none placeholder:text-[#C7C1BA]"
           />
         </span>
+        <span className="inline-flex items-center rounded border border-[#E2DDD8] bg-white px-1">
+          <input
+            type="number"
+            step="0.1"
+            value={e.p ?? ""}
+            onChange={(ev) => setPctStr(ym, code, ev.target.value)}
+            placeholder={derivedPct || "-"}
+            className="w-12 py-0.5 text-right text-[12px] tabular-nums outline-none placeholder:text-[#C7C1BA]"
+          />
+          <span className="text-[10px] text-[#9CA3AF] ml-0.5">%</span>
+        </span>
       </span>
     );
   };
+  // Computed rows carry their own % of sales beside the amount (owner
+  // 2026-07-29: gross profit / net profit etc. auto-show the percentage).
+  const pctOfSales = (sen: number, salesSen: number): string =>
+    salesSen > 0 ? `${((sen / salesSen) * 100).toFixed(1)}%` : "-";
+  const amtWithPct = (sen: number, salesSen: number, muted = false) => (
+    <>
+      <span className="tabular-nums">{fmtRM(sen)}</span>
+      <span className={`ml-2 text-[11px] tabular-nums ${muted ? "text-[#9CA3AF]" : "text-[#9A3A2D]"}`}>
+        {pctOfSales(sen, salesSen)}
+      </span>
+    </>
+  );
   const acctRow = (a: CoaAcct, indent = true) => (
     <tr key={a.code} className="border-b border-[#F0ECE9]">
       <td className={`px-3 py-1 sticky left-0 bg-white whitespace-nowrap ${indent ? "pl-7" : ""}`}>
@@ -310,8 +322,8 @@ export default function ForecastPage() {
             const c = calc(ym);
             const tot = rows.reduce((s, r) => s + c.amt(r.code), 0);
             return (
-              <td key={ym} className="px-2 py-1.5 text-right tabular-nums font-semibold text-[#6B5C32] border-l border-[#F0ECE9]">
-                {fmtRM(tot)}
+              <td key={ym} className="px-2 py-1.5 text-right font-semibold text-[#6B5C32] border-l border-[#F0ECE9]">
+                {amtWithPct(tot, c.salesSen, true)}
               </td>
             );
           })}
@@ -326,10 +338,11 @@ export default function ForecastPage() {
         {label}
       </td>
       {yms.map((ym) => {
-        const v = val(calc(ym));
+        const c = calc(ym);
+        const v = val(c);
         return (
-          <td key={ym} className={`px-2 py-1.5 text-right tabular-nums border-l border-[#F0ECE9] ${v < 0 ? "text-[#9A3A2D]" : ""}`}>
-            {fmtRM(v)}
+          <td key={ym} className={`px-2 py-1.5 text-right border-l border-[#F0ECE9] ${v < 0 ? "text-[#9A3A2D]" : ""}`}>
+            {amtWithPct(v, c.salesSen, true)}
           </td>
         );
       })}

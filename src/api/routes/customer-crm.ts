@@ -71,6 +71,21 @@ async function ensureTables(db: D1Database): Promise<void> {
        )`,
     )
     .run();
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS customer_onboarding (
+         customer_id TEXT PRIMARY KEY,
+         tin_number TEXT,
+         einvoice_id TEXT,
+         consent_received INTEGER DEFAULT 0,
+         consent_date TEXT,
+         docs_requested_at TEXT,
+         notes TEXT,
+         org_id TEXT,
+         updated_at TEXT
+       )`,
+    )
+    .run();
   tablesEnsured = true;
 }
 
@@ -274,6 +289,61 @@ app.get("/follow-ups", async (c) => {
     .bind(getOrgId(c), through)
     .all<ActivityRow & { customer_name: string | null }>();
   return c.json({ success: true, data: res.results ?? [] });
+});
+
+// ── Onboarding / KYC ─────────────────────────────────────────────────────────
+// Account-opening docs needed before extending credit: consent letter + TIN +
+// e-Invoice id + SSM (SSM already lives on the customers row). Owner 2026-07-30.
+
+// GET /api/customer-crm/onboarding?customerId=cust-3
+app.get("/onboarding", async (c) => {
+  const denied = await requirePermission(c, "customers", "read");
+  if (denied) return denied;
+  await ensureTables(c.var.DB);
+  const customerId = c.req.query("customerId");
+  if (!customerId) return c.json({ success: false, error: "customerId required" }, 400);
+  const row = await c.var.DB.prepare(
+    "SELECT * FROM customer_onboarding WHERE customer_id = ? AND org_id = ?",
+  )
+    .bind(customerId, getOrgId(c))
+    .first();
+  return c.json({ success: true, data: row ?? null });
+});
+
+// PUT /api/customer-crm/onboarding — upsert the customer's KYC block
+app.put("/onboarding", async (c) => {
+  const denied = await requirePermission(c, "customers", "update");
+  if (denied) return denied;
+  await ensureTables(c.var.DB);
+  const b = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const customerId = String(b.customerId ?? b.customer_id ?? "");
+  if (!customerId) return c.json({ success: false, error: "customerId required" }, 400);
+  await c.var.DB.prepare(
+    `INSERT INTO customer_onboarding
+       (customer_id, tin_number, einvoice_id, consent_received, consent_date, docs_requested_at, notes, org_id, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(customer_id) DO UPDATE SET
+       tin_number = excluded.tin_number,
+       einvoice_id = excluded.einvoice_id,
+       consent_received = excluded.consent_received,
+       consent_date = excluded.consent_date,
+       docs_requested_at = excluded.docs_requested_at,
+       notes = excluded.notes,
+       updated_at = excluded.updated_at`,
+  )
+    .bind(
+      customerId,
+      (b.tinNumber as string) ?? (b.tin_number as string) ?? null,
+      (b.einvoiceId as string) ?? (b.einvoice_id as string) ?? null,
+      b.consentReceived || b.consent_received ? 1 : 0,
+      (b.consentDate as string) ?? (b.consent_date as string) ?? null,
+      (b.docsRequestedAt as string) ?? (b.docs_requested_at as string) ?? null,
+      (b.notes as string) ?? null,
+      getOrgId(c),
+      new Date().toISOString(),
+    )
+    .run();
+  return c.json({ success: true, data: { customerId } });
 });
 
 export default app;

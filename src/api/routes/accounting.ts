@@ -9530,10 +9530,47 @@ app.get("/dashboard", async (c) => {
     materials: 0, labour: 0, overhead: 0, stockMovement: 0, staffCost: 0, otherOpex: 0,
   });
   const pnlByMonth = new Map<string, PnlSlice>();
+  // Cost-structure feed (owner 2026-07-29): per month,每个料别 spend /
+  // purchase / closing + that month's bedframe-vs-sofa sales split, so the
+  // card can show either line with SHARED materials pro-rated by sales —
+  // exactly how the Sofa/Bedframe P&L apportions them.
+  type CsCat = { line: "bedframe" | "sofa" | "shared"; spend: number; purchase: number; closing: number };
+  const csByMonth = new Map<string, Map<string, CsCat>>();
+  const salesSplitByMonth = new Map<string, { bedframe: number; sofa: number }>();
+  const BEDFRAME_SALES = "500-0000";
+  const csLineOf = (name: string): "bedframe" | "sofa" | "shared" => {
+    const t = name.toUpperCase();
+    if (/(^|[^A-Z])B\./.test(t)) return "bedframe";
+    if (/(^|[^A-Z])S[.\s-]/.test(t)) return "sofa";
+    return "shared";
+  };
+  const csCatOf = (name: string): string => {
+    const stripped = name.replace(/^PURCHASE\s*-\s*/i, "").trim();
+    return stripped.replace(/^(B\.M|S\.M|B|S)[.\s-]+/i, "").trim() || stripped;
+  };
   for (const ym of allMonths) {
     if (ym > nowYm) continue;
     const hist = selectHistoricalWindow(historicalDash, openingMonthDash, ym, "all");
     const w = hist ?? (await computePnlWindow(db, orgIdDash, ym, ym, "all", matDataDash, dcDash, overrideDash));
+    {
+      const cats = new Map<string, CsCat>();
+      for (const g of w.rmGroups ?? []) {
+        const name = g.description || g.group;
+        const cat = csCatOf(name);
+        const cur = cats.get(cat) ?? { line: csLineOf(name), spend: 0, purchase: 0, closing: 0 };
+        cur.purchase += g.purchasesSen;
+        cur.closing += g.closingSen;
+        cur.spend += g.openingSen + g.purchasesSen - g.closingSen;
+        cats.set(cat, cur);
+      }
+      csByMonth.set(ym, cats);
+      let bed = 0, sofa = 0;
+      for (const r of w.revLines ?? []) {
+        if (r.code === BEDFRAME_SALES) bed += r.amountSen;
+        else sofa += r.amountSen;
+      }
+      salesSplitByMonth.set(ym, { bedframe: bed, sofa });
+    }
     const materials = w.rmConsumedSen + w.carriageSen + w.sstSen;
     const staffCost = (w.expenseLines ?? []).filter((l) => l.salary).reduce((s, l) => s + l.amountSen, 0);
     pnlByMonth.set(ym, {
@@ -9705,12 +9742,33 @@ app.get("/dashboard", async (c) => {
       },
       { operating: 0, investing: 0, financing: 0, net: 0 },
     );
+    // Cost structure for the bucket: categories summed over its months, plus
+    // the bucket's own sales split (shared materials are apportioned on the
+    // client with this ratio, so the same payload serves All/Bedframe/Sofa).
+    const csCats = new Map<string, CsCat>();
+    let bedSales = 0, sofaSales = 0;
+    for (const ym of b.months) {
+      for (const [cat, v] of csByMonth.get(ym) ?? []) {
+        const cur = csCats.get(cat) ?? { line: v.line, spend: 0, purchase: 0, closing: 0 };
+        cur.spend += v.spend; cur.purchase += v.purchase; cur.closing += v.closing;
+        csCats.set(cat, cur);
+      }
+      const s = salesSplitByMonth.get(ym);
+      if (s) { bedSales += s.bedframe; sofaSales += s.sofa; }
+    }
     return {
       key: b.key,
       label: b.label,
       partial: b.partial || b.months.some((m) => m === nowYm),
       actual,
       forecast,
+      costStructure: {
+        salesSplit: { bedframe: bedSales, sofa: sofaSales },
+        categories: [...csCats.entries()]
+          .map(([name, v]) => ({ name, ...v }))
+          .filter((v) => v.spend !== 0 || v.purchase !== 0 || v.closing !== 0)
+          .sort((x, y) => x.name.localeCompare(y.name)),
+      },
       cashFlow: { ...cf, freeCashFlow: cf.operating }, // owner: treat as no fixed assets
       balanceSheet: bs,
       ratios: {

@@ -48,12 +48,14 @@ const PL_TABS: { key: keyof Slice; label: string }[] = [
   { key: "otherOpex", label: "Other Expenses" },
   { key: "net", label: "Net Profit" },
 ];
+type CsCat = { name: string; line: "bedframe" | "sofa" | "shared"; spend: number; purchase: number; closing: number };
 type Row = {
   key: string;
   label: string;
   partial: boolean;
   actual: Slice | null;
   forecast: Slice | null;
+  costStructure?: { salesSplit: { bedframe: number; sofa: number }; categories: CsCat[] };
   cashFlow: { operating: number; investing: number; financing: number; net: number; freeCashFlow: number };
   balanceSheet: { assets: number; liabilities: number; equity: number; currentAssets: number; currentLiabilities: number; inventory: number } | null;
   ratios: {
@@ -186,6 +188,12 @@ export default function FinanceDashboardPage() {
   const [ratioTab, setRatioTab] = useState<
     "grossMarginPct" | "netMarginPct" | "currentRatio" | "quickRatio" | "roePct" | "roaPct"
   >("grossMarginPct");
+  // Cost-structure card controls: which measure, which product line, amount
+  // or share of sales, and which single material the trend card focuses on.
+  const [csMeasure, setCsMeasure] = useState<"spend" | "purchase" | "closing">("spend");
+  const [csLine, setCsLine] = useState<"all" | "bedframe" | "sofa">("all");
+  const [csMode, setCsMode] = useState<"amount" | "pct">("amount");
+  const [csFocus, setCsFocus] = useState<string>("");
 
   // The loading state is cleared by the toggle handler (a user action), not
   // here — setting state synchronously inside an effect cascades renders.
@@ -246,6 +254,61 @@ export default function FinanceDashboardPage() {
   const ratioData = useMemo(
     () => (rows ?? []).map((r) => ({ label: r.label + (r.partial ? " *" : ""), value: r.ratios[ratioTab] })),
     [rows, ratioTab],
+  );
+
+  // ---- Cost structure (owner 2026-07-29) --------------------------------
+  // Shared materials are apportioned to a line by that period's share of
+  // sales — the same rule the Sofa/Bedframe P&L uses.
+  const csCats = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of rows ?? []) for (const cc of r.costStructure?.categories ?? []) set.add(cc.name);
+    return [...set].sort();
+  }, [rows]);
+  const csAmount = (r: Row, cat: string): number => {
+    const cc = (r.costStructure?.categories ?? []).find((x) => x.name === cat);
+    if (!cc) return 0;
+    const raw = cc[csMeasure];
+    if (csLine === "all" || cc.line === csLine) return raw;
+    if (cc.line === "shared") {
+      const s = r.costStructure!.salesSplit;
+      const tot = s.bedframe + s.sofa;
+      if (tot <= 0) return 0;
+      return Math.round(raw * ((csLine === "bedframe" ? s.bedframe : s.sofa) / tot));
+    }
+    return 0; // the other line's own material
+  };
+  const csLineSales = (r: Row): number => {
+    const s = r.costStructure?.salesSplit;
+    if (!s) return r.actual?.sales ?? 0;
+    return csLine === "all" ? s.bedframe + s.sofa : csLine === "bedframe" ? s.bedframe : s.sofa;
+  };
+  const csData = useMemo(
+    () =>
+      (rows ?? []).map((r) => {
+        const point: Record<string, number | string | null> = { label: r.label + (r.partial ? " *" : "") };
+        const sales = csLineSales(r);
+        for (const cat of csCats) {
+          const amt = csAmount(r, cat);
+          point[cat] = csMode === "amount" ? amt : sales > 0 ? Math.round((amt / sales) * 10000) / 100 : null;
+        }
+        return point;
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows, csCats, csLine, csMeasure, csMode],
+  );
+  const csTrend = useMemo(
+    () =>
+      (rows ?? []).map((r) => {
+        const amt = csAmount(r, csFocus);
+        const sales = csLineSales(r);
+        return {
+          label: r.label + (r.partial ? " *" : ""),
+          amount: amt,
+          pct: sales > 0 ? Math.round((amt / sales) * 10000) / 100 : null,
+        };
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows, csFocus, csLine, csMeasure],
   );
 
   const th = "px-2 py-1 text-right text-[11px] text-[#6B7280] whitespace-nowrap";
@@ -385,6 +448,92 @@ export default function FinanceDashboardPage() {
             }
           />
           {ratioIsMoney && null}
+
+          {/* ---- Cost structure: composition + single-material trend ---- */}
+          {csCats.length > 0 && (
+            <Card>
+              <CardContent className="p-4 space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-sm font-semibold text-[#1F1D1B] mr-2">Cost Structure</h3>
+                  {([["spend", "Spend"], ["purchase", "Purchase"], ["closing", "Closing Stock"]] as const).map(([k, l]) => (
+                    <button key={k} onClick={() => setCsMeasure(k)}
+                      className={`rounded-md border px-2.5 py-1 text-xs cursor-pointer ${csMeasure === k ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>{l}</button>
+                  ))}
+                  <span className="mx-1 text-[#E2DDD8]">|</span>
+                  {([["all", "All"], ["bedframe", "Bedframe"], ["sofa", "Sofa"]] as const).map(([k, l]) => (
+                    <button key={k} onClick={() => setCsLine(k)}
+                      className={`rounded-md border px-2.5 py-1 text-xs cursor-pointer ${csLine === k ? "bg-[#3E6570] text-white border-[#3E6570]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>{l}</button>
+                  ))}
+                  <span className="mx-1 text-[#E2DDD8]">|</span>
+                  {([["amount", "RM"], ["pct", "% of sales"]] as const).map(([k, l]) => (
+                    <button key={k} onClick={() => setCsMode(k)}
+                      className={`rounded-md border px-2.5 py-1 text-xs cursor-pointer ${csMode === k ? "bg-[#9A3A2D] text-white border-[#9A3A2D]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>{l}</button>
+                  ))}
+                </div>
+                {csLine !== "all" && (
+                  <p className="text-[11px] text-[#9CA3AF]">
+                    Shared materials (plywood, packaging, …) are split into this line by its share of that period's sales — the
+                    same rule the Sofa / Bedframe P&amp;L uses.
+                  </p>
+                )}
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={csData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                      <CartesianGrid stroke="#F0ECE9" vertical={false} />
+                      <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false} />
+                      <YAxis tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false}
+                        tickFormatter={(v: number) => (csMode === "amount" ? rm(v) : `${v}%`)} />
+                      <Tooltip content={<ChartTip money={csMode === "amount"} />} />
+                      {csCats.map((cat, i) => (
+                        <Bar key={cat} dataKey={cat} name={cat} stackId="cs" maxBarSize={44}
+                          fill={["#6B5C32", "#9C6F1E", "#C9B98A", "#3E6570", "#7A9EA7", "#9A3A2D", "#C58B7F", "#4F7C3A", "#8FB07A", "#6B7280", "#A9A29B", "#D8CFC4"][i % 12]} />
+                      ))}
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <tbody>
+                      {csCats.map((cat) => (
+                        <tr key={cat} className="border-b border-[#F0ECE9]">
+                          <td className={`${td} text-left font-medium`}>
+                            <button onClick={() => setCsFocus(cat)} className="cursor-pointer hover:underline" title="Show this material's trend below">{cat}</button>
+                          </td>
+                          {csData.map((d) => (
+                            <td key={String(d.label)} className={td}>
+                              {d[cat] === null || d[cat] === 0 ? "-" : csMode === "amount" ? rm(d[cat] as number) : `${(d[cat] as number).toFixed(2)}%`}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                      <tr><td className={th} />{csData.map((d) => <td key={String(d.label)} className={th}>{d.label}</td>)}</tr>
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {csCats.length > 0 && (
+            <ChartCard
+              title={`Material Trend — ${csFocus || csCats[0]}`}
+              tabs={csCats.map((c) => ({ key: c, label: c }))}
+              active={csFocus || csCats[0]}
+              onTab={(k) => setCsFocus(k)}
+              data={csTrend}
+              bars={[{ key: "amount", name: csMeasure === "spend" ? "Spend" : csMeasure === "purchase" ? "Purchase" : "Closing stock", color: GOLD }]}
+              line={{ key: "pct", name: "% of sales", color: RUST, axis: "right" }}
+              footer={
+                <table className="w-full">
+                  <tbody>
+                    <tr><td className={`${td} text-left font-medium`}>Amount</td>{csTrend.map((d) => <td key={d.label} className={td}>{rm(d.amount)}</td>)}</tr>
+                    <tr><td className={`${td} text-left font-medium text-[#9A3A2D]`}>% of sales</td>{csTrend.map((d) => <td key={d.label} className={`${td} text-[#9A3A2D]`}>{d.pct === null ? "-" : `${d.pct.toFixed(2)}%`}</td>)}</tr>
+                    <tr><td className={th} />{csTrend.map((d) => <td key={d.label} className={th}>{d.label}</td>)}</tr>
+                  </tbody>
+                </table>
+              }
+            />
+          )}
         </>
       )}
     </div>

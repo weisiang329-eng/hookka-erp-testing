@@ -9700,9 +9700,20 @@ app.get("/dashboard", async (c) => {
     };
   });
 
+  // Trim the empty run at the front — buckets before the business has any
+  // figure at all would otherwise draw as blank bars (quarterly reaches two
+  // years back to fill its 8 columns).
+  const hasAny = (r: (typeof rows)[number]) =>
+    (r.actual && (r.actual.sales !== 0 || r.actual.net !== 0)) ||
+    r.forecast !== null ||
+    r.balanceSheet !== null ||
+    r.cashFlow.net !== 0;
+  let first = 0;
+  while (first < rows.length - 1 && !hasAny(rows[first])) first++;
+
   return c.json({
     success: true,
-    data: { granularity: quarterly ? "quarter" : "month", openingDate: openingRawDash, rows },
+    data: { granularity: quarterly ? "quarter" : "month", openingDate: openingRawDash, rows: rows.slice(first) },
   });
 });
 

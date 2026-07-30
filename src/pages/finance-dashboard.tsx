@@ -206,10 +206,18 @@ export default function FinanceDashboardPage() {
         const pick = (s: Slice | null) => (s ? s[plTab] : null);
         const a = pick(cur);
         const p = pick(prev);
+        // Owner 2026-07-29: every line also reads as a % of that period's
+        // revenue — the cost-structure view of the same figure.
+        const sales = cur?.sales ?? null;
+        const fcSales = r.forecast?.sales ?? null;
+        const share = (v: number | null, base: number | null) =>
+          v !== null && base !== null && base !== 0 ? Math.round((v / base) * 10000) / 100 : null;
         return {
           label: r.label + (r.partial ? " *" : ""),
           actual: a,
           forecast: pick(r.forecast),
+          pctOfRevenue: share(a, sales),
+          forecastPctOfRevenue: share(pick(r.forecast), fcSales),
           mom: a !== null && p !== null && p !== 0 ? Math.round(((a - p) / Math.abs(p)) * 10000) / 100 : null,
         };
       }),
@@ -285,7 +293,9 @@ export default function FinanceDashboardPage() {
               <table className="w-full">
                 <tbody>
                   <tr><td className={`${td} text-left font-medium`}>Actual</td>{plData.map((d) => <td key={d.label} className={td}>{rm(d.actual as number)}</td>)}</tr>
+                  <tr><td className={`${td} text-left font-medium text-[#6B5C32]`}>% of revenue</td>{plData.map((d) => <td key={d.label} className={`${td} text-[#6B5C32]`}>{d.pctOfRevenue === null ? "-" : `${d.pctOfRevenue.toFixed(2)}%`}</td>)}</tr>
                   <tr><td className={`${td} text-left font-medium text-[#9A3A2D]`}>Forecast</td>{plData.map((d) => <td key={d.label} className={`${td} text-[#9A3A2D]`}>{rm(d.forecast as number)}</td>)}</tr>
+                  <tr><td className={`${td} text-left font-medium text-[#9A3A2D]`}>Forecast % of revenue</td>{plData.map((d) => <td key={d.label} className={`${td} text-[#9A3A2D]`}>{d.forecastPctOfRevenue === null ? "-" : `${d.forecastPctOfRevenue.toFixed(2)}%`}</td>)}</tr>
                   <tr><td className={`${td} text-left font-medium`}>vs last period</td>{plData.map((d) => <td key={d.label} className={`${td} ${(d.mom ?? 0) < 0 ? "text-[#9A3A2D]" : "text-[#27500A]"}`}>{d.mom === null ? "-" : `${d.mom > 0 ? "+" : ""}${d.mom.toFixed(1)}%`}</td>)}</tr>
                   <tr><td className={th} /> {plData.map((d) => <td key={d.label} className={th}>{d.label}</td>)}</tr>
                 </tbody>

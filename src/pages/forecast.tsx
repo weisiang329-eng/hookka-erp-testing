@@ -32,7 +32,6 @@ const SST = "706-0000";
 // two widths, so both columns line up down the whole grid.
 const AMT_SLOT = "w-28";
 const PCT_SLOT = "w-20"; // fits "100.00 %" at two decimals
-const CELL_W = "w-[200px]"; // AMT_SLOT + gap + PCT_SLOT
 
 const fmtRM = (sen: number) =>
   sen === 0 ? "-" : (sen / 100).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -190,6 +189,9 @@ export default function ForecastPage() {
   );
 
   const yms = useMemo(() => Object.keys(months).sort(), [months]);
+  // "2026-08" → "Aug 2026" (header reads at a glance).
+  const monthLabel = (ym: string) =>
+    new Date(`${ym}-01T00:00:00Z`).toLocaleString("en", { month: "short", year: "numeric", timeZone: "UTC" });
 
   // ---- Per-month computed figures ----
   const calc = (ym: string) => {
@@ -444,16 +446,22 @@ export default function ForecastPage() {
                 <tr className="border-b border-[#E2DDD8] text-[11px] text-[#6B7280]">
                   <th className="px-3 py-2 text-left sticky left-0 bg-white">LINE</th>
                   {yms.map((ym) => (
-                    <th key={ym} className="px-2 py-2 text-right border-l border-[#E2DDD8]">
-                      <span className="font-semibold text-[#1F1D1B]">{ym}</span>
-                      <button
-                        onClick={() => removeMonth(ym)}
-                        title="Remove this month (takes effect on Save)"
-                        className="ml-2 text-[#9A3A2D] hover:text-[#791F1F] cursor-pointer"
-                      >
-                        <X className="h-3 w-3 inline" />
-                      </button>
-                      <div className="text-[10px] font-normal text-[#9CA3AF]">% · RM</div>
+                    <th key={ym} className="px-2 py-2 text-right border-l border-[#E2DDD8] bg-[#F0ECE9]/70">
+                      <div className="flex items-center justify-end gap-2">
+                        <span className="text-sm font-bold text-[#1F1D1B] tracking-wide">{monthLabel(ym)}</span>
+                        <button
+                          onClick={() => removeMonth(ym)}
+                          title="Remove this month (takes effect on Save)"
+                          className="text-[#9A3A2D] hover:text-[#791F1F] cursor-pointer"
+                        >
+                          <X className="h-3.5 w-3.5 inline" />
+                        </button>
+                      </div>
+                      {/* Column legend — matches the on-screen order (amount first). */}
+                      <div className="mt-0.5 inline-flex items-center justify-end gap-1">
+                        <span className={`${AMT_SLOT} px-1 text-right text-[10px] font-semibold text-[#6B5C32]`}>AMOUNT (RM)</span>
+                        <span className={`${PCT_SLOT} px-1 text-right text-[10px] font-semibold text-[#6B5C32]`}>% SALES</span>
+                      </div>
                     </th>
                   ))}
                 </tr>
@@ -463,12 +471,19 @@ export default function ForecastPage() {
                   <td className="px-3 py-1.5 sticky left-0 bg-[#F6F1E7] font-semibold">SALES (keyed)</td>
                   {yms.map((ym) => (
                     <td key={ym} className="px-2 py-1.5 text-right border-l border-[#F0ECE9]">
-                      <AmountInput
-                        value={months[ym]?.salesStr ?? ""}
-                        onChange={(v) => setSales(ym, v)}
-                        placeholder="0.00"
-                        className={`${CELL_W} rounded border border-[#E2DDD8] px-2 py-0.5 text-right tabular-nums`}
-                      />
+                      {/* Sales carries its own 100% marker so the percent column
+                          reads continuously from the very first row. */}
+                      <span className="inline-flex items-center justify-end gap-1">
+                        <AmountInput
+                          value={months[ym]?.salesStr ?? ""}
+                          onChange={(v) => setSales(ym, v)}
+                          placeholder="0.00"
+                          className={`${AMT_SLOT} rounded border border-[#E2DDD8] px-2 py-0.5 text-right tabular-nums`}
+                        />
+                        <span className={`${PCT_SLOT} px-1 text-right text-[11px] tabular-nums text-[#9CA3AF]`}>
+                          {(months[ym]?.salesStr ?? "") === "" ? "-" : "100.00%"}
+                        </span>
+                      </span>
                     </td>
                   ))}
                 </tr>

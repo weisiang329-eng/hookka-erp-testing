@@ -4689,6 +4689,32 @@ function CostStructureTab() {
   const bedGroups = groupsFor((g) => csSection(g) === "bedframe");
   const sofaGroups = groupsFor((g) => csSection(g) === "sofa");
   const sharedGroups = groupsFor((g) => csSection(g) === "shared");
+  // Owner 2026-07-29: on a single-line view the SHARED materials are
+  // apportioned into that line by ITS share of that month's sales — the same
+  // rule the Sofa/Bedframe P&L uses. Overall keeps them as their own section
+  // (allocating there would just double-show the same money).
+  const lineShare = (i: number): number => {
+    const bed = data?.salesBed[i] ?? 0;
+    const sofa = data?.salesSofa[i] ?? 0;
+    const tot = bed + sofa;
+    if (tot <= 0) return 0;
+    return line === "bedframe" ? bed / tot : sofa / tot;
+  };
+  const allocateShared = (g: CsGroup): CsGroup => ({
+    ...g,
+    description: `${g.description} (shared)`,
+    months: g.months.map((m, i) => {
+      const s = lineShare(i);
+      return {
+        opening: Math.round(m.opening * s),
+        purchase: Math.round(m.purchase * s),
+        closing: Math.round(m.closing * s),
+        spend: Math.round(m.spend * s),
+      };
+    }),
+  });
+  const bedView = [...bedGroups, ...sharedGroups.map(allocateShared)];
+  const sofaView = [...sofaGroups, ...sharedGroups.map(allocateShared)];
 
   // One Cost-Structure table for a set of groups + that line's sales.
   const renderCsTable = (title: string, grps: CsGroup[], salesArr: number[]) => {
@@ -4753,8 +4779,9 @@ function CostStructureTab() {
     );
   };
 
-  // Export covers whatever sections are visible for the current line.
-  const exportGroups = line === "sofa" ? sofaGroups : line === "bedframe" ? bedGroups : data?.groups ?? [];
+  // Export covers whatever sections are visible for the current line —
+  // including the apportioned shared materials.
+  const exportGroups = line === "sofa" ? sofaView : line === "bedframe" ? bedView : data?.groups ?? [];
   const exportSales = data ? (line === "sofa" ? data.salesSofa : line === "bedframe" ? data.salesBed : data.salesAll) : [];
 
   return (
@@ -4789,9 +4816,9 @@ function CostStructureTab() {
       {loading ? (
         <Card><CardContent className="py-12 text-center text-[#6B7280] text-sm">Loading…</CardContent></Card>
       ) : line === "sofa" ? (
-        renderCsTable("SOFA COST STRUCTURE", sofaGroups, data!.salesSofa)
+        renderCsTable("SOFA COST STRUCTURE", sofaView, data!.salesSofa)
       ) : line === "bedframe" ? (
-        renderCsTable("BEDFRAME COST STRUCTURE", bedGroups, data!.salesBed)
+        renderCsTable("BEDFRAME COST STRUCTURE", bedView, data!.salesBed)
       ) : (
         // Overall — stacked: Bedframe on top, Sofa below, then shared.
         <>
@@ -4800,7 +4827,13 @@ function CostStructureTab() {
           {renderCsTable("SHARED / COMMON MATERIALS", sharedGroups, data!.salesAll)}
         </>
       )}
-      <p className="text-[11px] text-[#9CA3AF]">O/P = opening stock, PUR = purchases, C/L = closing stock, SPEND = consumed (O/P + PUR − C/L). % = month spend ÷ that line's sales. Shared materials (no B./S. prefix) shown as their own section under Overall.</p>
+      <p className="text-[11px] text-[#9CA3AF]">
+        O/P = opening stock, PUR = purchases, C/L = closing stock, SPEND = consumed (O/P + PUR − C/L). % = month spend ÷ that
+        line's sales.{" "}
+        {line === "all"
+          ? "Shared materials (no B./S. prefix) are listed as their own section here — pick Sofa or Bedframe to see them apportioned."
+          : "Rows marked (shared) are common materials apportioned into this line by its share of that month's sales — the same rule the Sofa / Bedframe P&L uses."}
+      </p>
     </div>
   );
 }

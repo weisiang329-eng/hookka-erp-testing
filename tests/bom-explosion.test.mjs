@@ -198,8 +198,8 @@ test("breakBomIntoWips: null wipComponents → single FG_MAIN fallback WIP", () 
   assert.equal(fg.wipLabel, "5531-1A(LHF) (main)");
   assert.equal(fg.wipKey, "5531-1A(LHF)::FG_MAIN");
   assert.equal(fg.quantityMultiplier, 1);
-  // Fallback FG WIP walks the full DEPT_ORDER (8 depts).
-  assert.equal(fg.processes.length, 8);
+  // Fallback FG WIP walks the full DEPT_ORDER (9 depts incl. FOAM_CUTTING).
+  assert.equal(fg.processes.length, 9);
 });
 
 test("breakBomIntoWips: empty-string wipComponents → FG_MAIN fallback", () => {
@@ -474,6 +474,7 @@ test("breakBomIntoWips: WIP with no processes falls back to wipType default chai
   const depts = wips[0].processes.map((p) => p.deptCode);
   assert.deepEqual(depts, [
     "WOOD_CUT",
+    "FOAM_CUTTING",
     "FOAM",
     "FRAMING",
     "WEBBING",
@@ -490,7 +491,7 @@ test("breakBomIntoWips: zero-process WIP of unknown wipType falls back to full D
     { wipCode: "X", wipType: "MYSTERY", quantity: 1, processes: [] },
   ]);
   const wips = breakBomIntoWips(raw, "P");
-  assert.equal(wips[0].processes.length, 8); // full DEPT_ORDER
+  assert.equal(wips[0].processes.length, 9); // full DEPT_ORDER (incl. FOAM_CUTTING)
 });
 
 test("breakBomIntoWips: SOFA_CUSHION default chain matches DEFAULT_WIP_DEPT_CHAINS", () => {
@@ -500,7 +501,7 @@ test("breakBomIntoWips: SOFA_CUSHION default chain matches DEFAULT_WIP_DEPT_CHAI
   const wips = breakBomIntoWips(raw, "5531-1A(LHF)");
   assert.deepEqual(
     wips[0].processes.map((p) => p.deptCode),
-    ["FAB_CUT", "FAB_SEW", "FOAM", "UPHOLSTERY", "PACKING"],
+    ["FAB_CUT", "FAB_SEW", "FOAM_CUTTING", "FOAM", "UPHOLSTERY", "PACKING"],
   );
 });
 

@@ -48,6 +48,7 @@ export const REPAIR_DEPT_CODES = [
   "FAB_CUT",
   "FAB_SEW",
   "WOOD_CUT",
+  "FOAM_CUTTING",
   "FOAM",
   "FRAMING",
   "WEBBING",

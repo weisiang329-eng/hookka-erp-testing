@@ -1290,7 +1290,8 @@ function hasDept(r: RawRow, code: string): boolean {
 const DEPT_TABS: { key: string; label: string; code: string }[] = [
   { key: "fab_cut", label: "Fab Cut", code: "FAB_CUT" },
   { key: "fab_sew", label: "Fab Sew", code: "FAB_SEW" },
-  { key: "foam", label: "Foam", code: "FOAM" },
+  { key: "foam_cutting", label: "Foam Cut", code: "FOAM_CUTTING" },
+  { key: "foam", label: "Foam Bonding", code: "FOAM" },
   { key: "wood_cut", label: "Wood Cut", code: "WOOD_CUT" },
   { key: "framing", label: "Framing", code: "FRAMING" },
   { key: "webbing", label: "Webbing", code: "WEBBING" },

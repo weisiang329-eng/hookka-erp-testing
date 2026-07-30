@@ -191,7 +191,7 @@ export default function ProductionFolderDetailPage() {
               if (["WOOD_CUT", "FRAMING", "WEBBING"].includes(deptCode) && divanInches) {
                 return `${divanInches}" Divan-${po.sizeLabel || po.sizeCode || ""}`;
               }
-              if (["FAB_CUT", "FAB_SEW", "FOAM", "UPHOLSTERY", "PACKING"].includes(deptCode) && totalH > 0) {
+              if (["FAB_CUT", "FAB_SEW", "FOAM_CUTTING", "FOAM", "UPHOLSTERY", "PACKING"].includes(deptCode) && totalH > 0) {
                 return `${po.productCode}-HB${totalH}"`;
               }
             }

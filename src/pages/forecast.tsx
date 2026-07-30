@@ -18,7 +18,11 @@ import { TrendingUp, Plus, X, Save } from "lucide-react";
 import { pnlBucketFor } from "@/lib/pnl-bucket";
 
 type CoaAcct = { code: string; name: string; type: string; isPostable?: boolean };
-type MonthState = { salesStr: string; pct: Record<string, string> }; // pct value = "%" as typed, e.g. "15.4"
+// Per line-month the owner keys ONE of the two (owner 2026-07-29): a % of
+// sales ("15.4") OR a direct RM amount ("3000") — typing one clears the
+// other; the empty box shows the derived value as a grey placeholder.
+type CellEntry = { p?: string; a?: string };
+type MonthState = { salesStr: string; pct: Record<string, CellEntry> };
 
 const CARRIAGE = "700-1015";
 const SST = "706-0000";
@@ -55,12 +59,20 @@ export default function ForecastPage() {
         const coa = (coaJ?.data ?? coaJ ?? []) as CoaAcct[];
         setAccounts(Array.isArray(coa) ? coa : []);
         setOverride(((mapJ?.data as { map?: Record<string, string> } | undefined)?.map ?? {}) as Record<string, string>);
-        const saved = ((fcJ?.data as { months?: Record<string, { salesSen?: number; pct?: Record<string, number> }> } | undefined)?.months ?? {});
+        const saved = ((fcJ?.data as { months?: Record<string, { salesSen?: number; pct?: Record<string, number | { bp?: number; amtSen?: number }> }> } | undefined)?.months ?? {});
         const next: Record<string, MonthState> = {};
         for (const [ym, m] of Object.entries(saved)) {
-          const pct: Record<string, string> = {};
-          for (const [code, bp] of Object.entries(m.pct ?? {})) pct[code] = bpToStr(Number(bp) || 0);
-          next[ym] = { salesStr: m.salesSen ? (Number(m.salesSen) / 100 / 1).toFixed(2) : "", pct };
+          const pct: Record<string, CellEntry> = {};
+          for (const [code, v] of Object.entries(m.pct ?? {})) {
+            // Legacy shape = bare bp number; new shape = { bp } or { amtSen }.
+            if (typeof v === "number") pct[code] = { p: bpToStr(v) };
+            else if (v && typeof v === "object") {
+              const o = v as { bp?: number; amtSen?: number };
+              if (o.amtSen) pct[code] = { a: (Number(o.amtSen) / 100).toString() };
+              else if (o.bp) pct[code] = { p: bpToStr(Number(o.bp) || 0) };
+            }
+          }
+          next[ym] = { salesStr: m.salesSen ? (Number(m.salesSen) / 100).toFixed(2) : "", pct };
         }
         setMonths(next);
         setLoaded(true);
@@ -125,7 +137,12 @@ export default function ForecastPage() {
   const calc = (ym: string) => {
     const m = months[ym];
     const salesSen = Math.max(0, Math.round((parseFloat(m?.salesStr ?? "") || 0) * 100));
-    const amt = (code: string) => Math.round((salesSen * strToBp(m?.pct[code] ?? "")) / 10000);
+    // Amount-keyed cells win; %-keyed cells derive from sales.
+    const amt = (code: string) => {
+      const e = m?.pct[code];
+      if (e?.a !== undefined && e.a !== "") return Math.round((parseFloat(e.a) || 0) * 100);
+      return Math.round((salesSen * strToBp(e?.p ?? "")) / 10000);
+    };
     const sum = (rows: CoaAcct[]) => rows.reduce((s, r) => s + amt(r.code), 0);
     const cogs = sum(cogsRows);
     const oi = sum(lines.otherIncome);
@@ -134,8 +151,11 @@ export default function ForecastPage() {
     return { salesSen, amt, cogs, gp, oi, exp, np: gp + oi - exp };
   };
 
-  const setPct = (ym: string, code: string, v: string) =>
-    setMonths((prev) => ({ ...prev, [ym]: { ...prev[ym], pct: { ...prev[ym].pct, [code]: v } } }));
+  // Keying one side CLEARS the other (owner: "就是其中一个").
+  const setPctStr = (ym: string, code: string, v: string) =>
+    setMonths((prev) => ({ ...prev, [ym]: { ...prev[ym], pct: { ...prev[ym].pct, [code]: v === "" ? {} : { p: v } } } }));
+  const setAmtStr = (ym: string, code: string, v: string) =>
+    setMonths((prev) => ({ ...prev, [ym]: { ...prev[ym], pct: { ...prev[ym].pct, [code]: v === "" ? {} : { a: v } } } }));
   const setSales = (ym: string, v: string) =>
     setMonths((prev) => ({ ...prev, [ym]: { ...prev[ym], salesStr: v } }));
 
@@ -167,12 +187,17 @@ export default function ForecastPage() {
   const save = async () => {
     setSaving(true);
     try {
-      const payload: Record<string, { salesSen: number; pct: Record<string, number> }> = {};
+      const payload: Record<string, { salesSen: number; pct: Record<string, { bp?: number; amtSen?: number }> }> = {};
       for (const [ym, m] of Object.entries(months)) {
-        const pct: Record<string, number> = {};
-        for (const [code, s] of Object.entries(m.pct)) {
-          const bp = strToBp(s);
-          if (bp !== 0) pct[code] = bp;
+        const pct: Record<string, { bp?: number; amtSen?: number }> = {};
+        for (const [code, e] of Object.entries(m.pct)) {
+          if (e.a !== undefined && e.a !== "") {
+            const sen = Math.round((parseFloat(e.a) || 0) * 100);
+            if (sen !== 0) pct[code] = { amtSen: sen };
+          } else if (e.p !== undefined && e.p !== "") {
+            const bp = strToBp(e.p);
+            if (bp !== 0) pct[code] = { bp };
+          }
         }
         payload[ym] = { salesSen: Math.max(0, Math.round((parseFloat(m.salesStr) || 0) * 100)), pct };
       }
@@ -191,16 +216,46 @@ export default function ForecastPage() {
   };
 
   // ---- Render helpers ----
-  const pctInput = (ym: string, code: string) => (
-    <input
-      type="number"
-      step="0.1"
-      value={months[ym]?.pct[code] ?? ""}
-      onChange={(e) => setPct(ym, code, e.target.value)}
-      placeholder="-"
-      className="w-14 rounded border border-[#E2DDD8] px-1 py-0.5 text-right text-[12px] tabular-nums"
-    />
-  );
+  // One cell = [ % ] + [ RM ] — key EITHER; the empty box shows the derived
+  // value as a grey placeholder (10% of 50,000 → RM box hints 5,000.00; keyed
+  // RM 3,000 on 50,000 sales → % box hints 6).
+  const cellInputs = (ym: string, code: string) => {
+    const e = months[ym]?.pct[code] ?? {};
+    const c = calc(ym);
+    const amtKeyed = e.a !== undefined && e.a !== "";
+    const pctKeyed = e.p !== undefined && e.p !== "";
+    const derivedPct =
+      amtKeyed && c.salesSen > 0
+        ? ((Math.round((parseFloat(e.a as string) || 0) * 100) / c.salesSen) * 100).toFixed(1)
+        : "";
+    const derivedAmt = pctKeyed ? (c.amt(code) / 100).toFixed(2) : "";
+    return (
+      <span className="inline-flex items-center gap-1">
+        <span className="inline-flex items-center rounded border border-[#E2DDD8] bg-white px-1">
+          <input
+            type="number"
+            step="0.1"
+            value={e.p ?? ""}
+            onChange={(ev) => setPctStr(ym, code, ev.target.value)}
+            placeholder={derivedPct || "-"}
+            className="w-12 py-0.5 text-right text-[12px] tabular-nums outline-none placeholder:text-[#C7C1BA]"
+          />
+          <span className="text-[10px] text-[#9CA3AF] ml-0.5">%</span>
+        </span>
+        <span className="inline-flex items-center rounded border border-[#E2DDD8] bg-white px-1">
+          <span className="text-[10px] text-[#9CA3AF] mr-0.5">RM</span>
+          <input
+            type="number"
+            step="0.01"
+            value={e.a ?? ""}
+            onChange={(ev) => setAmtStr(ym, code, ev.target.value)}
+            placeholder={derivedAmt || "-"}
+            className="w-20 py-0.5 text-right text-[12px] tabular-nums outline-none placeholder:text-[#C7C1BA]"
+          />
+        </span>
+      </span>
+    );
+  };
   const acctRow = (a: CoaAcct, indent = true) => (
     <tr key={a.code} className="border-b border-[#F0ECE9]">
       <td className={`px-3 py-1 sticky left-0 bg-white whitespace-nowrap ${indent ? "pl-7" : ""}`}>
@@ -209,15 +264,11 @@ export default function ForecastPage() {
         )}
         <span className="text-[#1F1D1B]">{a.name}</span>
       </td>
-      {yms.map((ym) => {
-        const c = calc(ym);
-        return (
-          <td key={ym} className="px-2 py-1 text-right whitespace-nowrap border-l border-[#F0ECE9]">
-            {pctInput(ym, a.code)}
-            <span className="inline-block w-24 text-right tabular-nums text-[13px]">{fmtRM(c.amt(a.code))}</span>
-          </td>
-        );
-      })}
+      {yms.map((ym) => (
+        <td key={ym} className="px-2 py-1 text-right whitespace-nowrap border-l border-[#F0ECE9]">
+          {cellInputs(ym, a.code)}
+        </td>
+      ))}
     </tr>
   );
   const sectionHead = (title: string) => (

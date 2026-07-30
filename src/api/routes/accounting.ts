@@ -9467,18 +9467,28 @@ app.put("/forecast", async (c) => {
   if (denied) return denied;
   try {
     const body = (await c.req.json()) as {
-      months?: Record<string, { salesSen?: number; pct?: Record<string, number> }>;
+      months?: Record<string, { salesSen?: number; pct?: Record<string, number | { bp?: number; amtSen?: number }> }>;
     };
     if (!body.months || typeof body.months !== "object") {
       return c.json({ success: false, error: "months required" }, 400);
     }
-    const months: Record<string, { salesSen: number; pct: Record<string, number> }> = {};
+    // A line entry is EITHER { bp } (percent of sales, basis points) OR
+    // { amtSen } (fixed RM amount — owner 2026-07-29: rent-style lines are
+    // keyed as money, not %). Bare numbers = legacy bp payloads.
+    const months: Record<string, { salesSen: number; pct: Record<string, { bp?: number; amtSen?: number }> }> = {};
     for (const [ym, m] of Object.entries(body.months)) {
       if (!/^\d{4}-\d{2}$/.test(ym) || !m || typeof m !== "object") continue;
-      const pct: Record<string, number> = {};
-      for (const [code, bp] of Object.entries(m.pct ?? {})) {
-        const v = Math.round(Number(bp) || 0);
-        if (v !== 0) pct[code] = v;
+      const pct: Record<string, { bp?: number; amtSen?: number }> = {};
+      for (const [code, v] of Object.entries(m.pct ?? {})) {
+        if (typeof v === "number") {
+          const bp = Math.round(v) || 0;
+          if (bp !== 0) pct[code] = { bp };
+        } else if (v && typeof v === "object") {
+          const amtSen = Math.round(Number(v.amtSen) || 0);
+          const bp = Math.round(Number(v.bp) || 0);
+          if (amtSen !== 0) pct[code] = { amtSen };
+          else if (bp !== 0) pct[code] = { bp };
+        }
       }
       months[ym] = { salesSen: Math.max(0, Math.round(Number(m.salesSen) || 0)), pct };
     }

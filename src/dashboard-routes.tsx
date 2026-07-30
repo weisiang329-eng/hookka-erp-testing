@@ -51,6 +51,7 @@ const FGScan = lazy(() => import('./pages/production/fg-scan'))
 const Delivery = lazy(() => import('./pages/delivery'))
 const DeliveryDetail = lazy(() => import('./pages/delivery/detail'))
 const DeliveryReturns = lazy(() => import('./pages/delivery-returns'))
+const PurchaseReturns = lazy(() => import('./pages/purchase-returns'))
 const DeliveryReturnDetail = lazy(() => import('./pages/delivery-returns/detail'))
 
 // Invoices
@@ -276,6 +277,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   // Delivery
   { path: '/delivery', element: <S><Delivery /></S> },
   { path: '/delivery-returns', element: <S><DeliveryReturns /></S> },
+  { path: '/purchase-returns', element: <S><PurchaseReturns /></S> },
   { path: '/delivery-returns/:id', element: <S><DeliveryReturnDetail /></S> },
   { path: '/delivery/:id', element: <S><DeliveryDetail /></S> },
   { path: '/delivery-test', element: <Navigate to="/delivery" replace /> },

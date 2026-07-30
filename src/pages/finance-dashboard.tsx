@@ -264,18 +264,21 @@ export default function FinanceDashboardPage() {
     for (const r of rows ?? []) for (const cc of r.costStructure?.categories ?? []) set.add(cc.name);
     return [...set].sort();
   }, [rows]);
+  // A category can exist on more than one line (B.M FABRIC and S FABRIC are
+  // both FABRIC) — sum every matching entry under the current line filter.
   const csAmount = (r: Row, cat: string): number => {
-    const cc = (r.costStructure?.categories ?? []).find((x) => x.name === cat);
-    if (!cc) return 0;
-    const raw = cc[csMeasure];
-    if (csLine === "all" || cc.line === csLine) return raw;
-    if (cc.line === "shared") {
-      const s = r.costStructure!.salesSplit;
-      const tot = s.bedframe + s.sofa;
-      if (tot <= 0) return 0;
-      return Math.round(raw * ((csLine === "bedframe" ? s.bedframe : s.sofa) / tot));
+    const s = r.costStructure?.salesSplit;
+    const tot = (s?.bedframe ?? 0) + (s?.sofa ?? 0);
+    let out = 0;
+    for (const cc of r.costStructure?.categories ?? []) {
+      if (cc.name !== cat) continue;
+      const raw = cc[csMeasure];
+      if (csLine === "all" || cc.line === csLine) out += raw;
+      else if (cc.line === "shared" && tot > 0) {
+        out += Math.round(raw * ((csLine === "bedframe" ? s!.bedframe : s!.sofa) / tot));
+      }
     }
-    return 0; // the other line's own material
+    return out;
   };
   const csLineSales = (r: Row): number => {
     const s = r.costStructure?.salesSplit;

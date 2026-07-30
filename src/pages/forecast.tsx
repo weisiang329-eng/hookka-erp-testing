@@ -27,8 +27,57 @@ type MonthState = { salesStr: string; pct: Record<string, CellEntry> };
 const CARRIAGE = "700-1015";
 const SST = "706-0000";
 
+// Fixed column slots (owner 2026-07-29: 「amount 一个 column 对齐，percentage
+// 整个 column 对齐」) — keyable cells AND computed rows render into the same
+// two widths, so both columns line up down the whole grid.
+const AMT_SLOT = "w-28";
+const PCT_SLOT = "w-16";
+const CELL_W = "w-[184px]"; // AMT_SLOT + gap + PCT_SLOT
+
 const fmtRM = (sen: number) =>
   sen === 0 ? "-" : (sen / 100).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+// Thousand-separated RM entry (owner 2026-07-29: 「我要千位数的」). A native
+// number input can't render separators, so this is a text input that shows the
+// grouped value when blurred and the raw draft while focused — the same
+// no-reformatting-mid-keystroke rule MoneyInput uses. State stays raw
+// ("400000.00"); commas are stripped on the way in. Module-level so its focus
+// state survives the parent's re-renders.
+const group = (s: string): string => {
+  if (s === "") return "";
+  const n = parseFloat(s);
+  return Number.isFinite(n)
+    ? n.toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    : s;
+};
+function AmountInput({
+  value,
+  onChange,
+  placeholder,
+  className,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  className?: string;
+}) {
+  const [focused, setFocused] = useState(false);
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={focused ? value : group(value)}
+      placeholder={placeholder}
+      onFocus={(e) => {
+        setFocused(true);
+        e.currentTarget.select();
+      }}
+      onBlur={() => setFocused(false)}
+      onChange={(e) => onChange(e.target.value.replace(/,/g, ""))}
+      className={className}
+    />
+  );
+}
 
 // "15.4" → 1540 basis points (int); blank/garbage → 0.
 const strToBp = (s: string): number => {
@@ -239,26 +288,24 @@ export default function ForecastPage() {
         : "";
     const derivedAmt = pctKeyed ? (c.amt(code) / 100).toFixed(2) : "";
     return (
-      <span className="inline-flex items-center gap-1">
-        <span className="inline-flex items-center rounded border border-[#E2DDD8] bg-white px-1">
+      <span className="inline-flex items-center justify-end gap-1">
+        <span className={`${AMT_SLOT} inline-flex items-center rounded border border-[#E2DDD8] bg-white px-1`}>
           <span className="text-[10px] text-[#9CA3AF] mr-0.5">RM</span>
-          <input
-            type="number"
-            step="0.01"
+          <AmountInput
             value={e.a ?? ""}
-            onChange={(ev) => setAmtStr(ym, code, ev.target.value)}
-            placeholder={derivedAmt || "-"}
-            className="w-20 py-0.5 text-right text-[12px] tabular-nums outline-none placeholder:text-[#C7C1BA]"
+            onChange={(v) => setAmtStr(ym, code, v)}
+            placeholder={derivedAmt ? group(derivedAmt) : "-"}
+            className="w-full min-w-0 py-0.5 text-right text-[12px] tabular-nums outline-none placeholder:text-[#C7C1BA]"
           />
         </span>
-        <span className="inline-flex items-center rounded border border-[#E2DDD8] bg-white px-1">
+        <span className={`${PCT_SLOT} inline-flex items-center rounded border border-[#E2DDD8] bg-white px-1`}>
           <input
             type="number"
             step="0.1"
             value={e.p ?? ""}
             onChange={(ev) => setPctStr(ym, code, ev.target.value)}
             placeholder={derivedPct || "-"}
-            className="w-12 py-0.5 text-right text-[12px] tabular-nums outline-none placeholder:text-[#C7C1BA]"
+            className="w-full min-w-0 py-0.5 text-right text-[12px] tabular-nums outline-none placeholder:text-[#C7C1BA]"
           />
           <span className="text-[10px] text-[#9CA3AF] ml-0.5">%</span>
         </span>
@@ -270,12 +317,12 @@ export default function ForecastPage() {
   const pctOfSales = (sen: number, salesSen: number): string =>
     salesSen > 0 ? `${((sen / salesSen) * 100).toFixed(1)}%` : "-";
   const amtWithPct = (sen: number, salesSen: number, muted = false) => (
-    <>
-      <span className="tabular-nums">{fmtRM(sen)}</span>
-      <span className={`ml-2 text-[11px] tabular-nums ${muted ? "text-[#9CA3AF]" : "text-[#9A3A2D]"}`}>
+    <span className="inline-flex items-center justify-end gap-1">
+      <span className={`${AMT_SLOT} px-1 text-right tabular-nums`}>{fmtRM(sen)}</span>
+      <span className={`${PCT_SLOT} px-1 text-right text-[11px] tabular-nums ${muted ? "text-[#9CA3AF]" : "text-[#9A3A2D]"}`}>
         {pctOfSales(sen, salesSen)}
       </span>
-    </>
+    </span>
   );
   const acctRow = (a: CoaAcct, indent = true) => (
     <tr key={a.code} className="border-b border-[#F0ECE9]">
@@ -416,13 +463,11 @@ export default function ForecastPage() {
                   <td className="px-3 py-1.5 sticky left-0 bg-[#F6F1E7] font-semibold">SALES (keyed)</td>
                   {yms.map((ym) => (
                     <td key={ym} className="px-2 py-1.5 text-right border-l border-[#F0ECE9]">
-                      <input
-                        type="number"
-                        step="0.01"
+                      <AmountInput
                         value={months[ym]?.salesStr ?? ""}
-                        onChange={(e) => setSales(ym, e.target.value)}
+                        onChange={(v) => setSales(ym, v)}
                         placeholder="0.00"
-                        className="w-32 rounded border border-[#E2DDD8] px-2 py-0.5 text-right tabular-nums"
+                        className={`${CELL_W} rounded border border-[#E2DDD8] px-2 py-0.5 text-right tabular-nums`}
                       />
                     </td>
                   ))}

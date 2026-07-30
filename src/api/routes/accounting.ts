@@ -9440,6 +9440,263 @@ app.put("/bs/section-map", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// FINANCIAL DASHBOARD (owner 2026-07-29) — one call feeds all four cards:
+// income statement (with the owner's forecast overlay), cash flow, balance
+// sheet and the ratio set. Buckets are MONTHS or CALENDAR QUARTERS (owner's
+// pick — his FY ends August, so quarters can straddle the year end; partial
+// buckets are flagged so a half-quarter is never read as a trend).
+//
+// Every figure comes from the SAME engines the reports use, so a card can
+// never disagree with its report:
+//   • P&L per month  → computePnlWindow + the pre-opening historical swap
+//     (identical to Monthly P&L), then summed into the bucket.
+//   • Balance sheet  → one ledger walk, snapshotted at each bucket end
+//     (post-opening only — pre-opening balances don't exist in the ledger).
+//   • Cash flow      → net movement of SBK/SCH accounts per bucket, split
+//     operating / investing / financing by the account on the other side.
+//   • Forecast       → kv forecast_pnl, evaluated with the same
+//     percent-or-amount rule the Forecast page uses.
+// ---------------------------------------------------------------------------
+app.get("/dashboard", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const quarterly = (c.req.query("granularity") ?? "month") === "quarter";
+  const wanted = Math.min(24, Math.max(2, parseInt(c.req.query("periods") ?? "12", 10) || 12));
+  const nowYm = new Date().toISOString().slice(0, 7);
+
+  // --- bucket list (oldest → newest), each with its member months ----------
+  const monthsBack = quarterly ? wanted * 3 : wanted;
+  const allMonths: string[] = [];
+  {
+    let [y, m] = nowYm.split("-").map((n) => parseInt(n, 10));
+    for (let i = 0; i < monthsBack; i++) {
+      allMonths.unshift(`${y}-${String(m).padStart(2, "0")}`);
+      m -= 1;
+      if (m === 0) { m = 12; y -= 1; }
+    }
+  }
+  type Bucket = { key: string; label: string; months: string[]; partial: boolean };
+  const buckets: Bucket[] = [];
+  if (quarterly) {
+    const byQ = new Map<string, string[]>();
+    for (const ym of allMonths) {
+      const [y, m] = ym.split("-").map((n) => parseInt(n, 10));
+      const q = Math.floor((m - 1) / 3) + 1;
+      const k = `${y}-Q${q}`;
+      byQ.set(k, [...(byQ.get(k) ?? []), ym]);
+    }
+    for (const [key, ms] of byQ) {
+      buckets.push({ key, label: key.replace("-", "/"), months: ms, partial: ms.length < 3 });
+    }
+  } else {
+    for (const ym of allMonths) buckets.push({ key: ym, label: ym, months: [ym], partial: false });
+  }
+
+  // --- P&L per month (Monthly-P&L-identical), then summed per bucket -------
+  await ensurePnlHistorical(db);
+  const orgIdDash = getOrgId(c);
+  const overrideDash = await getPnlSectionMap(db);
+  const matDataDash = await loadMaterialCostData(db, orgIdDash, allMonths[allMonths.length - 1]);
+  const dcDash = await loadDocDateResolver(db);
+  const [historicalDash, openingRawDash] = await Promise.all([
+    loadHistoricalPnl(db, orgIdDash),
+    getOpeningDate(db),
+  ]);
+  const openingMonthDash = openingRawDash ? openingRawDash.slice(0, 7) : null;
+  type PnlSlice = { sales: number; cogs: number; gross: number; otherIncome: number; expenses: number; net: number };
+  const zero = (): PnlSlice => ({ sales: 0, cogs: 0, gross: 0, otherIncome: 0, expenses: 0, net: 0 });
+  const pnlByMonth = new Map<string, PnlSlice>();
+  for (const ym of allMonths) {
+    if (ym > nowYm) continue;
+    const hist = selectHistoricalWindow(historicalDash, openingMonthDash, ym, "all");
+    const w = hist ?? (await computePnlWindow(db, orgIdDash, ym, ym, "all", matDataDash, dcDash, overrideDash));
+    pnlByMonth.set(ym, {
+      sales: w.netSalesSen,
+      cogs: w.cogsSen,
+      gross: w.grossProfitSen,
+      otherIncome: w.otherIncomeSen,
+      expenses: w.expenseSen,
+      net: w.netProfitSen,
+    });
+  }
+
+  // --- Balance sheet: one ledger walk, snapshot per bucket end -------------
+  const bsMap = await getBsSectionMap(db);
+  const resolveDash = await loadAccountResolver(db);
+  const coaDash = new Map<string, { name: string; type: string; sat: string | null }>();
+  {
+    const rs = await db
+      .prepare("SELECT code, name, type, specialAccountType FROM chart_of_accounts")
+      .all<{ code: string; name: string; type: string; specialAccountType: string | null }>();
+    for (const a of rs.results ?? []) coaDash.set(resolveDash(a.code), { name: a.name, type: a.type, sat: a.specialAccountType ?? null });
+  }
+  const legRows = await db
+    .prepare("SELECT accountCode, sourceType, sourceId, debitSen, creditSen, postedAt FROM ledger_journal_entries WHERE hidden = 0")
+    .all<{ accountCode: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string }>();
+  const legsDash = (legRows.results ?? [])
+    .map((l) => ({
+      code: resolveDash(l.accountCode),
+      sourceType: l.sourceType,
+      sourceId: l.sourceId,
+      dr: Number(l.debitSen) || 0,
+      cr: Number(l.creditSen) || 0,
+      day: dcDash.docDate(l.sourceType, l.sourceId, l.postedAt),
+    }))
+    .filter((l) => !legBeforeOpening(l.sourceType, l.day, dcDash.openingDate))
+    .sort((a, b) => a.day.localeCompare(b.day));
+  const sectionOf = (code: string): BsSection | null => {
+    const meta = coaDash.get(code);
+    return meta ? bsSectionFor(code, meta.type, bsMap as Record<string, string>) : null;
+  };
+  const bucketEnd = (b: Bucket) => `${b.months[b.months.length - 1]}-31`;
+  const running = new Map<string, number>(); // account → dr−cr
+  const bsByBucket = new Map<string, { assets: number; liabilities: number; equity: number; currentAssets: number; currentLiabilities: number; inventory: number }>();
+  {
+    let i = 0;
+    for (const b of buckets) {
+      const end = bucketEnd(b);
+      while (i < legsDash.length && legsDash[i].day <= end) {
+        const l = legsDash[i];
+        running.set(l.code, (running.get(l.code) ?? 0) + l.dr - l.cr);
+        i++;
+      }
+      let assets = 0, liabilities = 0, equity = 0, curA = 0, curL = 0, inv = 0;
+      for (const [code, net] of running) {
+        const sec = sectionOf(code);
+        if (!sec) continue;
+        if (sec === "FIXED_ASSET" || sec === "CURRENT_ASSET") {
+          assets += net;
+          if (sec === "CURRENT_ASSET") curA += net;
+          if (/^33\d/.test(code)) inv += net; // 330-x stock accounts
+        } else if (sec === "EQUITY") {
+          equity += -net;
+        } else {
+          liabilities += -net;
+          if (sec === "CURRENT_LIABILITY") curL += -net;
+        }
+      }
+      bsByBucket.set(b.key, { assets, liabilities, equity, currentAssets: curA, currentLiabilities: curL, inventory: inv });
+    }
+  }
+
+  // --- Cash flow: bank/cash movement per bucket, split by the other side ---
+  const bankCodesDash = new Set<string>();
+  for (const [code, meta] of coaDash) if (meta.sat === "SBK" || meta.sat === "SCH") bankCodesDash.add(code);
+  const byEntryDash = new Map<string, typeof legsDash>();
+  for (const l of legsDash) {
+    const k = `${l.sourceType}::${l.sourceId}`;
+    byEntryDash.set(k, [...(byEntryDash.get(k) ?? []), l]);
+  }
+  const monthOf = (day: string) => day.slice(0, 7);
+  const cfByMonth = new Map<string, { operating: number; investing: number; financing: number; net: number }>();
+  for (const legs of byEntryDash.values()) {
+    const bank = legs.filter((l) => bankCodesDash.has(l.code));
+    if (bank.length === 0) continue;
+    if (legs.some((l) => isOpeningSource(l.sourceType))) continue; // opening seed, not a cash movement
+    const movement = bank.reduce((s, l) => s + l.dr - l.cr, 0);
+    if (movement === 0) continue;
+    // Section from the biggest non-bank counter-leg: fixed assets → investing,
+    // equity / long-term liabilities → financing, everything else → operating.
+    const others = legs.filter((l) => !bankCodesDash.has(l.code));
+    let bestCode = "", best = -1;
+    for (const l of others) {
+      const w = Math.abs(l.dr - l.cr);
+      if (w > best) { best = w; bestCode = l.code; }
+    }
+    const sec = bestCode ? sectionOf(bestCode) : null;
+    const kind = sec === "FIXED_ASSET" ? "investing" : sec === "EQUITY" || sec === "LONG_TERM_LIABILITY" ? "financing" : "operating";
+    const ym = monthOf(bank[0].day);
+    const cur = cfByMonth.get(ym) ?? { operating: 0, investing: 0, financing: 0, net: 0 };
+    cur[kind] += movement;
+    cur.net += movement;
+    cfByMonth.set(ym, cur);
+  }
+
+  // --- Forecast overlay (same percent-or-amount rule as the Forecast page) --
+  const fcRow = await db.prepare("SELECT value FROM kv_config WHERE key = 'forecast_pnl'").first<{ value: string }>();
+  type FcMonth = { salesSen?: number; pct?: Record<string, number | { bp?: number; amtSen?: number }> };
+  let fcMonths: Record<string, FcMonth> = {};
+  try {
+    fcMonths = (JSON.parse(fcRow?.value ?? "{}") as { months?: Record<string, FcMonth> }).months ?? {};
+  } catch { /* none yet */ }
+  const fcLineAmt = (m: FcMonth, v: number | { bp?: number; amtSen?: number }): number => {
+    const salesSen = Math.max(0, Math.round(Number(m.salesSen) || 0));
+    if (typeof v === "number") return Math.round((salesSen * v) / 10000);
+    if (v?.amtSen) return Math.round(Number(v.amtSen) || 0);
+    return Math.round((salesSen * (Number(v?.bp) || 0)) / 10000);
+  };
+  const fcByMonth = new Map<string, PnlSlice>();
+  for (const [ym, m] of Object.entries(fcMonths)) {
+    const slice = zero();
+    slice.sales = Math.max(0, Math.round(Number(m.salesSen) || 0));
+    for (const [code, v] of Object.entries(m.pct ?? {})) {
+      const amt = fcLineAmt(m, v);
+      const meta = code.startsWith("cat:") ? { type: "COST" } : coaDash.get(code);
+      if (!meta) { slice.cogs += amt; continue; }
+      const bucket = code.startsWith("cat:") ? null : pnlBucketFor(code, meta.type, overrideDash);
+      if (bucket === "OTHER_INCOME") slice.otherIncome += amt;
+      else if (bucket === "OPERATING_EXPENSE" || bucket === "OPEX_SALARIES") slice.expenses += amt;
+      else slice.cogs += amt; // materials (incl. cat:) + labour + overhead
+    }
+    slice.gross = slice.sales - slice.cogs;
+    slice.net = slice.gross + slice.otherIncome - slice.expenses;
+    fcByMonth.set(ym, slice);
+  }
+
+  // --- assemble per bucket -------------------------------------------------
+  const sumSlices = (src: Map<string, PnlSlice>, months: string[]): PnlSlice | null => {
+    let any = false;
+    const acc = zero();
+    for (const ym of months) {
+      const s = src.get(ym);
+      if (!s) continue;
+      any = true;
+      acc.sales += s.sales; acc.cogs += s.cogs; acc.gross += s.gross;
+      acc.otherIncome += s.otherIncome; acc.expenses += s.expenses; acc.net += s.net;
+    }
+    return any ? acc : null;
+  };
+  const pct = (num: number, den: number) => (den > 0 ? Math.round((num / den) * 10000) / 100 : null);
+  const rows = buckets.map((b) => {
+    const actual = sumSlices(pnlByMonth, b.months);
+    const forecast = sumSlices(fcByMonth, b.months);
+    const bs = bsByBucket.get(b.key) ?? null;
+    const cf = b.months.reduce(
+      (acc, ym) => {
+        const m = cfByMonth.get(ym);
+        if (m) { acc.operating += m.operating; acc.investing += m.investing; acc.financing += m.financing; acc.net += m.net; }
+        return acc;
+      },
+      { operating: 0, investing: 0, financing: 0, net: 0 },
+    );
+    return {
+      key: b.key,
+      label: b.label,
+      partial: b.partial || b.months.some((m) => m === nowYm),
+      actual,
+      forecast,
+      cashFlow: { ...cf, freeCashFlow: cf.operating }, // owner: treat as no fixed assets
+      balanceSheet: bs,
+      ratios: {
+        grossMarginPct: actual ? pct(actual.gross, actual.sales) : null,
+        netMarginPct: actual ? pct(actual.net, actual.sales) : null,
+        currentRatio: bs && bs.currentLiabilities > 0 ? Math.round((bs.currentAssets / bs.currentLiabilities) * 100) / 100 : null,
+        quickRatio: bs && bs.currentLiabilities > 0 ? Math.round(((bs.currentAssets - bs.inventory) / bs.currentLiabilities) * 100) / 100 : null,
+        debtToAssetPct: bs && bs.assets > 0 ? pct(bs.liabilities, bs.assets) : null,
+        roePct: bs && bs.equity > 0 && actual ? pct(actual.net, bs.equity) : null,
+        roaPct: bs && bs.assets > 0 && actual ? pct(actual.net, bs.assets) : null,
+      },
+    };
+  });
+
+  return c.json({
+    success: true,
+    data: { granularity: quarterly ? "quarter" : "month", openingDate: openingRawDash, rows },
+  });
+});
+
+// ---------------------------------------------------------------------------
 // FORECAST P&L (owner 2026-07-29) — planning surface, zero contact with the
 // books. The owner creates months himself (a month exists only once added),
 // keys the month's projected SALES, and maintains every P&L line as a % of

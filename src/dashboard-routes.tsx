@@ -98,6 +98,7 @@ const CncTemplates = lazy(() => import('./pages/cnc-templates'))
 
 // Single-page modules
 const Customers = lazy(() => import('./pages/customers'))
+const Leads = lazy(() => import('./pages/leads'))
 const Employees = lazy(() => import('./pages/employees'))
 const Warehouse = lazy(() => import('./pages/warehouse'))
 
@@ -385,6 +386,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
 
   // Single-page modules
   { path: '/customers', element: <S><Customers /></S> },
+  { path: '/leads', element: <S><Leads /></S> },
   { path: '/employees', element: <S><Employees /></S> },
   { path: '/warehouse', element: <S><Warehouse /></S> },
 

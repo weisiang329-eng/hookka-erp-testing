@@ -9704,9 +9704,12 @@ app.get("/dashboard", async (c) => {
   // figure at all would otherwise draw as blank bars (quarterly reaches two
   // years back to fill its 8 columns).
   const hasAny = (r: (typeof rows)[number]) =>
-    (r.actual && (r.actual.sales !== 0 || r.actual.net !== 0)) ||
+    (r.actual !== null && (r.actual.sales !== 0 || r.actual.net !== 0)) ||
     r.forecast !== null ||
-    r.balanceSheet !== null ||
+    // A balance-sheet snapshot exists for every bucket; only a NON-ZERO one
+    // counts as data (before the opening date every account reads zero).
+    (r.balanceSheet !== null &&
+      (r.balanceSheet.assets !== 0 || r.balanceSheet.liabilities !== 0 || r.balanceSheet.equity !== 0)) ||
     r.cashFlow.net !== 0;
   let first = 0;
   while (first < rows.length - 1 && !hasAny(rows[first])) first++;

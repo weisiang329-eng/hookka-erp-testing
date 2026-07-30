@@ -10,6 +10,7 @@ import {
   Boxes,
   Truck,
   Users,
+  Target,
   ShieldCheck,
   Warehouse,
   Settings,
@@ -97,6 +98,7 @@ const navigationGroups: NavGroup[] = [
         { name: "Consignment Return", href: "/consignment/return", icon: Ship },
       ]},
       { name: "Customers", href: "/customers", icon: Users },
+      { name: "Sales Pipeline", href: "/leads", icon: Target },
     ],
   },
   {

@@ -31,8 +31,8 @@ const SST = "706-0000";
 // 整个 column 对齐」) — keyable cells AND computed rows render into the same
 // two widths, so both columns line up down the whole grid.
 const AMT_SLOT = "w-28";
-const PCT_SLOT = "w-16";
-const CELL_W = "w-[184px]"; // AMT_SLOT + gap + PCT_SLOT
+const PCT_SLOT = "w-20"; // fits "100.00 %" at two decimals
+const CELL_W = "w-[200px]"; // AMT_SLOT + gap + PCT_SLOT
 
 const fmtRM = (sen: number) =>
   sen === 0 ? "-" : (sen / 100).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -284,7 +284,7 @@ export default function ForecastPage() {
     const pctKeyed = e.p !== undefined && e.p !== "";
     const derivedPct =
       amtKeyed && c.salesSen > 0
-        ? ((Math.round((parseFloat(e.a as string) || 0) * 100) / c.salesSen) * 100).toFixed(1)
+        ? ((Math.round((parseFloat(e.a as string) || 0) * 100) / c.salesSen) * 100).toFixed(2)
         : "";
     const derivedAmt = pctKeyed ? (c.amt(code) / 100).toFixed(2) : "";
     return (
@@ -301,7 +301,7 @@ export default function ForecastPage() {
         <span className={`${PCT_SLOT} inline-flex items-center rounded border border-[#E2DDD8] bg-white px-1`}>
           <input
             type="number"
-            step="0.1"
+            step="0.01"
             value={e.p ?? ""}
             onChange={(ev) => setPctStr(ym, code, ev.target.value)}
             placeholder={derivedPct || "-"}
@@ -315,7 +315,7 @@ export default function ForecastPage() {
   // Computed rows carry their own % of sales beside the amount (owner
   // 2026-07-29: gross profit / net profit etc. auto-show the percentage).
   const pctOfSales = (sen: number, salesSen: number): string =>
-    salesSen > 0 ? `${((sen / salesSen) * 100).toFixed(1)}%` : "-";
+    salesSen > 0 ? `${((sen / salesSen) * 100).toFixed(2)}%` : "-";
   const amtWithPct = (sen: number, salesSen: number, muted = false) => (
     <span className="inline-flex items-center justify-end gap-1">
       <span className={`${AMT_SLOT} px-1 text-right tabular-nums`}>{fmtRM(sen)}</span>

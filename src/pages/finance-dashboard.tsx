@@ -302,10 +302,13 @@ export default function FinanceDashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [rows, csCats, csLine, csMeasure],
   );
+  // The focus falls back to the first category until the operator picks one —
+  // the trend read a blank key before this and drew a flat zero line.
+  const csFocusEff = csFocus || csCats[0] || "";
   const csTrend = useMemo(
     () =>
       (rows ?? []).map((r) => {
-        const amt = csAmount(r, csFocus);
+        const amt = csAmount(r, csFocusEff);
         const sales = csLineSales(r);
         return {
           label: r.label + (r.partial ? " *" : ""),
@@ -314,11 +317,20 @@ export default function FinanceDashboardPage() {
         };
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [rows, csFocus, csLine, csMeasure],
+    [rows, csFocusEff, csLine, csMeasure],
   );
 
-  const th = "px-2 py-1 text-right text-[11px] text-[#6B7280] whitespace-nowrap";
   const td = "px-2 py-1 text-right tabular-nums text-[12px] whitespace-nowrap";
+  // Period header (owner 2026-07-29: 「月份能移上去上面…明显一点」) — the
+  // months now open every figures table in bold instead of trailing it in grey.
+  const periodHead = (labels: string[]) => (
+    <tr className="border-b-2 border-[#E2DDD8] bg-[#F7F4EF]">
+      <td className="px-2 py-1.5 text-left text-[11px] font-bold text-[#6B5C32] tracking-wide">PERIOD</td>
+      {labels.map((l) => (
+        <td key={l} className="px-2 py-1.5 text-right text-[12px] font-bold text-[#1F1D1B] whitespace-nowrap">{l}</td>
+      ))}
+    </tr>
+  );
 
   return (
     <div className="space-y-4 p-1">
@@ -361,12 +373,12 @@ export default function FinanceDashboardPage() {
             footer={
               <table className="w-full">
                 <tbody>
+                  {periodHead(plData.map((d) => d.label))}
                   <tr><td className={`${td} text-left font-medium`}>Actual</td>{plData.map((d) => <td key={d.label} className={td}>{rm(d.actual as number)}</td>)}</tr>
                   <tr><td className={`${td} text-left font-medium text-[#6B5C32]`}>% of revenue</td>{plData.map((d) => <td key={d.label} className={`${td} text-[#6B5C32]`}>{d.pctOfRevenue === null ? "-" : `${d.pctOfRevenue.toFixed(2)}%`}</td>)}</tr>
                   <tr><td className={`${td} text-left font-medium text-[#9A3A2D]`}>Forecast</td>{plData.map((d) => <td key={d.label} className={`${td} text-[#9A3A2D]`}>{rm(d.forecast as number)}</td>)}</tr>
                   <tr><td className={`${td} text-left font-medium text-[#9A3A2D]`}>Forecast % of revenue</td>{plData.map((d) => <td key={d.label} className={`${td} text-[#9A3A2D]`}>{d.forecastPctOfRevenue === null ? "-" : `${d.forecastPctOfRevenue.toFixed(2)}%`}</td>)}</tr>
                   <tr><td className={`${td} text-left font-medium`}>vs last period</td>{plData.map((d) => <td key={d.label} className={`${td} ${(d.mom ?? 0) < 0 ? "text-[#9A3A2D]" : "text-[#27500A]"}`}>{d.mom === null ? "-" : `${d.mom > 0 ? "+" : ""}${d.mom.toFixed(1)}%`}</td>)}</tr>
-                  <tr><td className={th} /> {plData.map((d) => <td key={d.label} className={th}>{d.label}</td>)}</tr>
                 </tbody>
               </table>
             }
@@ -413,6 +425,7 @@ export default function FinanceDashboardPage() {
                 <div className="overflow-x-auto">
                   <table className="w-full">
                     <tbody>
+                      {periodHead(csData.map((d) => String(d.label)))}
                       {csCats.map((cat) => (
                         <tr key={cat} className="border-b border-[#F0ECE9]">
                           <td className={`${td} text-left font-medium`}>
@@ -436,7 +449,6 @@ export default function FinanceDashboardPage() {
                           })}
                         </tr>
                       ))}
-                      <tr><td className={th} />{csData.map((d) => <td key={String(d.label)} className={th}>{d.label}</td>)}</tr>
                     </tbody>
                   </table>
                 </div>
@@ -446,9 +458,9 @@ export default function FinanceDashboardPage() {
 
           {csCats.length > 0 && (
             <ChartCard
-              title={`Material Trend — ${csFocus || csCats[0]}`}
+              title={`Material Trend — ${csFocusEff}`}
               tabs={csCats.map((c) => ({ key: c, label: c }))}
-              active={csFocus || csCats[0]}
+              active={csFocusEff}
               onTab={(k) => setCsFocus(k)}
               data={csTrend}
               bars={[{ key: "amount", name: csMeasure === "spend" ? "Spend" : csMeasure === "purchase" ? "Purchase" : "Closing stock", color: GOLD }]}
@@ -456,9 +468,9 @@ export default function FinanceDashboardPage() {
               footer={
                 <table className="w-full">
                   <tbody>
+                    {periodHead(csTrend.map((d) => d.label))}
                     <tr><td className={`${td} text-left font-medium`}>Amount</td>{csTrend.map((d) => <td key={d.label} className={td}>{rm(d.amount)}</td>)}</tr>
                     <tr><td className={`${td} text-left font-medium text-[#9A3A2D]`}>% of sales</td>{csTrend.map((d) => <td key={d.label} className={`${td} text-[#9A3A2D]`}>{d.pct === null ? "-" : `${d.pct.toFixed(2)}%`}</td>)}</tr>
-                    <tr><td className={th} />{csTrend.map((d) => <td key={d.label} className={th}>{d.label}</td>)}</tr>
                   </tbody>
                 </table>
               }
@@ -481,9 +493,9 @@ export default function FinanceDashboardPage() {
             footer={
               <table className="w-full">
                 <tbody>
+                  {periodHead(cfData.map((d) => d.label))}
                   <tr><td className={`${td} text-left font-medium`}>Amount</td>{cfData.map((d) => <td key={d.label} className={`${td} ${(d.value as number) < 0 ? "text-[#9A3A2D]" : ""}`}>{rm(d.value as number)}</td>)}</tr>
                   <tr><td className={`${td} text-left font-medium`}>Net change</td>{cfData.map((d) => <td key={d.label} className={`${td} ${(d.net as number) < 0 ? "text-[#9A3A2D]" : ""}`}>{rm(d.net as number)}</td>)}</tr>
-                  <tr><td className={th} />{cfData.map((d) => <td key={d.label} className={th}>{d.label}</td>)}</tr>
                 </tbody>
               </table>
             }
@@ -506,10 +518,10 @@ export default function FinanceDashboardPage() {
               ) : (
                 <table className="w-full">
                   <tbody>
+                    {periodHead(bsData.map((d) => d.label))}
                     <tr><td className={`${td} text-left font-medium`}>Total assets</td>{bsData.map((d) => <td key={d.label} className={td}>{rm(d.assets)}</td>)}</tr>
                     <tr><td className={`${td} text-left font-medium`}>Total liabilities</td>{bsData.map((d) => <td key={d.label} className={td}>{rm(d.liabilities)}</td>)}</tr>
                     <tr><td className={`${td} text-left font-medium text-[#9A3A2D]`}>Debt to assets</td>{bsData.map((d) => <td key={d.label} className={`${td} text-[#9A3A2D]`}>{d.debtPct === null ? "-" : `${d.debtPct.toFixed(2)}%`}</td>)}</tr>
-                    <tr><td className={th} />{bsData.map((d) => <td key={d.label} className={th}>{d.label}</td>)}</tr>
                   </tbody>
                 </table>
               )
@@ -533,6 +545,7 @@ export default function FinanceDashboardPage() {
             footer={
               <table className="w-full">
                 <tbody>
+                  {periodHead(ratioData.map((d) => d.label))}
                   <tr>
                     <td className={`${td} text-left font-medium`}>{/Pct$/.test(ratioTab) ? "Percent" : "Ratio"}</td>
                     {ratioData.map((d) => (
@@ -541,7 +554,6 @@ export default function FinanceDashboardPage() {
                       </td>
                     ))}
                   </tr>
-                  <tr><td className={th} />{ratioData.map((d) => <td key={d.label} className={th}>{d.label}</td>)}</tr>
                 </tbody>
               </table>
             }

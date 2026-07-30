@@ -7572,12 +7572,15 @@ app.get("/pl-monthly", async (c) => {
   return c.json({ success: true, data: { fyLabel: fy.label, line, anchor: anchorYm, columns: matrix.columns, rows: matrix.rows } });
 });
 
-app.get("/cashflow-statement", async (c) => {
-  const denied = await requirePermission(c, "accounting", "read");
-  if (denied) return denied;
-  const period = c.req.query("period") || new Date().toISOString().slice(0, 7);
-  const editable = c.req.query("editable") === "1";
-
+// The cash-flow statement computation, shared by GET /cashflow-statement and
+// the dashboard card — one engine, so the two can never disagree.
+async function computeCashflowStatement(
+  db: Env["Variables"]["DB"],
+  period: string,
+  editable: boolean,
+) {
+  // Local alias so the extracted body reads exactly as it did in the route.
+  const c: { var: { DB: Env["Variables"]["DB"] } } = { var: { DB: db } };
   const resolveAcct = await loadAccountResolver(c.var.DB);
   const fyeMonth = await getFyeMonth(c.var.DB);
   const { docDate, openingDate: obDate } = await loadDocDateResolver(c.var.DB);
@@ -7662,10 +7665,18 @@ app.get("/cashflow-statement", async (c) => {
     }
   }
 
-  const statement = buildStatement({
+  return buildStatement({
     classified, bankLegs, coa, map, rmSplit, stockGroupOverride: sgOverride,
     fyeMonth, period, editable,
   });
+}
+
+app.get("/cashflow-statement", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const period = c.req.query("period") || new Date().toISOString().slice(0, 7);
+  const editable = c.req.query("editable") === "1";
+  const statement = await computeCashflowStatement(c.var.DB, period, editable);
   return c.json({ success: true, data: { period, ...statement } });
 });
 
@@ -9580,37 +9591,36 @@ app.get("/dashboard", async (c) => {
     }
   }
 
-  // --- Cash flow: bank/cash movement per bucket, split by the other side ---
-  const bankCodesDash = new Set<string>();
-  for (const [code, meta] of coaDash) if (meta.sat === "SBK" || meta.sat === "SCH") bankCodesDash.add(code);
-  const byEntryDash = new Map<string, typeof legsDash>();
-  for (const l of legsDash) {
-    const k = `${l.sourceType}::${l.sourceId}`;
-    byEntryDash.set(k, [...(byEntryDash.get(k) ?? []), l]);
-  }
-  const monthOf = (day: string) => day.slice(0, 7);
+  // --- Cash flow: THE Cash Flow report's own engine, read per month --------
+  // One call per financial year touched by the window (its columns span the
+  // FY), so every figure on the card is the same number the report prints.
   const cfByMonth = new Map<string, { operating: number; investing: number; financing: number; net: number }>();
-  for (const legs of byEntryDash.values()) {
-    const bank = legs.filter((l) => bankCodesDash.has(l.code));
-    if (bank.length === 0) continue;
-    if (legs.some((l) => isOpeningSource(l.sourceType))) continue; // opening seed, not a cash movement
-    const movement = bank.reduce((s, l) => s + l.dr - l.cr, 0);
-    if (movement === 0) continue;
-    // Section from the biggest non-bank counter-leg: fixed assets → investing,
-    // equity / long-term liabilities → financing, everything else → operating.
-    const others = legs.filter((l) => !bankCodesDash.has(l.code));
-    let bestCode = "", best = -1;
-    for (const l of others) {
-      const w = Math.abs(l.dr - l.cr);
-      if (w > best) { best = w; bestCode = l.code; }
+  {
+    const fyKeys = new Map<string, string>(); // fy label → an anchor month
+    const fyeM = await getFyeMonth(db);
+    for (const ym of allMonths) {
+      if (ym > nowYm) continue;
+      const w = fyWindowFor(new Date(`${ym}-15T00:00:00Z`), fyeM);
+      fyKeys.set(w.startIso, ym);
     }
-    const sec = bestCode ? sectionOf(bestCode) : null;
-    const kind = sec === "FIXED_ASSET" ? "investing" : sec === "EQUITY" || sec === "LONG_TERM_LIABILITY" ? "financing" : "operating";
-    const ym = monthOf(bank[0].day);
-    const cur = cfByMonth.get(ym) ?? { operating: 0, investing: 0, financing: 0, net: 0 };
-    cur[kind] += movement;
-    cur.net += movement;
-    cfByMonth.set(ym, cur);
+    const rowVal = (
+      rowsCf: { kind: string; label: string; section?: string; values: (number | null)[] }[],
+      idx: number,
+      pred: (r: { kind: string; label: string; section?: string }) => boolean,
+    ) => rowsCf.filter(pred).reduce((s, r) => s + (Number(r.values[idx]) || 0), 0);
+    for (const anchor of fyKeys.values()) {
+      const st = await computeCashflowStatement(db, anchor, false);
+      const cols = (st.columns ?? []) as { key: string; accum?: boolean }[];
+      const rowsCf = (st.rows ?? []) as { kind: string; label: string; section?: string; values: (number | null)[] }[];
+      cols.forEach((col, i) => {
+        if (col.accum || !/^\d{4}-\d{2}$/.test(col.key) || cfByMonth.has(col.key)) return;
+        const operating = rowVal(rowsCf, i, (r) => r.kind === "result" && /operation surplus/i.test(r.label));
+        const investing = rowVal(rowsCf, i, (r) => r.kind === "subtotal" && r.section === "CAPEX");
+        const financing = rowVal(rowsCf, i, (r) => r.kind === "subtotal" && (r.section === "LOAN" || r.section === "DEPOSIT" || r.section === "FINANCE_COST"));
+        const net = rowVal(rowsCf, i, (r) => r.kind === "total" && /Cash Surplus/i.test(r.label));
+        cfByMonth.set(col.key, { operating, investing, financing, net });
+      });
+    }
   }
 
   // --- Forecast overlay (same percent-or-amount rule as the Forecast page) --

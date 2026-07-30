@@ -372,89 +372,6 @@ export default function FinanceDashboardPage() {
             }
           />
 
-          <ChartCard
-            title="Cash Flow"
-            tabs={[
-              { key: "operating", label: "Operating" },
-              { key: "investing", label: "Investing" },
-              { key: "financing", label: "Financing" },
-              { key: "freeCashFlow", label: "Free Cash Flow" },
-            ]}
-            active={cfTab}
-            onTab={(k) => setCfTab(k as typeof cfTab)}
-            data={cfData}
-            bars={[{ key: "value", name: "Amount", color: TEAL }]}
-            line={{ key: "net", name: "Net change", color: RUST }}
-            footer={
-              <table className="w-full">
-                <tbody>
-                  <tr><td className={`${td} text-left font-medium`}>Amount</td>{cfData.map((d) => <td key={d.label} className={`${td} ${(d.value as number) < 0 ? "text-[#9A3A2D]" : ""}`}>{rm(d.value as number)}</td>)}</tr>
-                  <tr><td className={`${td} text-left font-medium`}>Net change</td>{cfData.map((d) => <td key={d.label} className={`${td} ${(d.net as number) < 0 ? "text-[#9A3A2D]" : ""}`}>{rm(d.net as number)}</td>)}</tr>
-                  <tr><td className={th} />{cfData.map((d) => <td key={d.label} className={th}>{d.label}</td>)}</tr>
-                </tbody>
-              </table>
-            }
-          />
-
-          <ChartCard
-            title="Balance Sheet"
-            tabs={[]}
-            active=""
-            onTab={() => {}}
-            data={bsData}
-            bars={[
-              { key: "assets", name: "Total assets", color: GOLD },
-              { key: "liabilities", name: "Total liabilities", color: "#C9B98A" },
-            ]}
-            line={{ key: "debtPct", name: "Debt to assets %", color: RUST, axis: "right" }}
-            footer={
-              bsData.length === 0 ? (
-                <p className="text-xs text-[#9CA3AF]">Balances start at the opening date — nothing before it.</p>
-              ) : (
-                <table className="w-full">
-                  <tbody>
-                    <tr><td className={`${td} text-left font-medium`}>Total assets</td>{bsData.map((d) => <td key={d.label} className={td}>{rm(d.assets)}</td>)}</tr>
-                    <tr><td className={`${td} text-left font-medium`}>Total liabilities</td>{bsData.map((d) => <td key={d.label} className={td}>{rm(d.liabilities)}</td>)}</tr>
-                    <tr><td className={`${td} text-left font-medium text-[#9A3A2D]`}>Debt to assets</td>{bsData.map((d) => <td key={d.label} className={`${td} text-[#9A3A2D]`}>{d.debtPct === null ? "-" : `${d.debtPct.toFixed(2)}%`}</td>)}</tr>
-                    <tr><td className={th} />{bsData.map((d) => <td key={d.label} className={th}>{d.label}</td>)}</tr>
-                  </tbody>
-                </table>
-              )
-            }
-          />
-
-          <ChartCard
-            title="Financial Ratios"
-            tabs={[
-              { key: "grossMarginPct", label: "Gross margin" },
-              { key: "netMarginPct", label: "Net margin" },
-              { key: "currentRatio", label: "Current ratio" },
-              { key: "quickRatio", label: "Quick ratio" },
-              { key: "roePct", label: "ROE" },
-              { key: "roaPct", label: "ROA" },
-            ]}
-            active={ratioTab}
-            onTab={(k) => setRatioTab(k as typeof ratioTab)}
-            data={ratioData}
-            bars={[{ key: "value", name: /Pct$/.test(ratioTab) ? "%" : "Ratio", color: TEAL }]}
-            footer={
-              <table className="w-full">
-                <tbody>
-                  <tr>
-                    <td className={`${td} text-left font-medium`}>{/Pct$/.test(ratioTab) ? "Percent" : "Ratio"}</td>
-                    {ratioData.map((d) => (
-                      <td key={d.label} className={`${td} ${(d.value ?? 0) < 0 ? "text-[#9A3A2D]" : ""}`}>
-                        {d.value === null ? "-" : `${(d.value as number).toFixed(2)}${/Pct$/.test(ratioTab) ? "%" : ""}`}
-                      </td>
-                    ))}
-                  </tr>
-                  <tr><td className={th} />{ratioData.map((d) => <td key={d.label} className={th}>{d.label}</td>)}</tr>
-                </tbody>
-              </table>
-            }
-          />
-          {ratioIsMoney && null}
-
           {/* ---- Cost structure: composition + single-material trend ---- */}
           {csCats.length > 0 && (
             <Card>
@@ -547,6 +464,90 @@ export default function FinanceDashboardPage() {
               }
             />
           )}
+
+          <ChartCard
+            title="Cash Flow"
+            tabs={[
+              { key: "operating", label: "Operating" },
+              { key: "investing", label: "Investing" },
+              { key: "financing", label: "Financing" },
+              { key: "freeCashFlow", label: "Free Cash Flow" },
+            ]}
+            active={cfTab}
+            onTab={(k) => setCfTab(k as typeof cfTab)}
+            data={cfData}
+            bars={[{ key: "value", name: "Amount", color: TEAL }]}
+            line={{ key: "net", name: "Net change", color: RUST }}
+            footer={
+              <table className="w-full">
+                <tbody>
+                  <tr><td className={`${td} text-left font-medium`}>Amount</td>{cfData.map((d) => <td key={d.label} className={`${td} ${(d.value as number) < 0 ? "text-[#9A3A2D]" : ""}`}>{rm(d.value as number)}</td>)}</tr>
+                  <tr><td className={`${td} text-left font-medium`}>Net change</td>{cfData.map((d) => <td key={d.label} className={`${td} ${(d.net as number) < 0 ? "text-[#9A3A2D]" : ""}`}>{rm(d.net as number)}</td>)}</tr>
+                  <tr><td className={th} />{cfData.map((d) => <td key={d.label} className={th}>{d.label}</td>)}</tr>
+                </tbody>
+              </table>
+            }
+          />
+
+          <ChartCard
+            title="Balance Sheet"
+            tabs={[]}
+            active=""
+            onTab={() => {}}
+            data={bsData}
+            bars={[
+              { key: "assets", name: "Total assets", color: GOLD },
+              { key: "liabilities", name: "Total liabilities", color: "#C9B98A" },
+            ]}
+            line={{ key: "debtPct", name: "Debt to assets %", color: RUST, axis: "right" }}
+            footer={
+              bsData.length === 0 ? (
+                <p className="text-xs text-[#9CA3AF]">Balances start at the opening date — nothing before it.</p>
+              ) : (
+                <table className="w-full">
+                  <tbody>
+                    <tr><td className={`${td} text-left font-medium`}>Total assets</td>{bsData.map((d) => <td key={d.label} className={td}>{rm(d.assets)}</td>)}</tr>
+                    <tr><td className={`${td} text-left font-medium`}>Total liabilities</td>{bsData.map((d) => <td key={d.label} className={td}>{rm(d.liabilities)}</td>)}</tr>
+                    <tr><td className={`${td} text-left font-medium text-[#9A3A2D]`}>Debt to assets</td>{bsData.map((d) => <td key={d.label} className={`${td} text-[#9A3A2D]`}>{d.debtPct === null ? "-" : `${d.debtPct.toFixed(2)}%`}</td>)}</tr>
+                    <tr><td className={th} />{bsData.map((d) => <td key={d.label} className={th}>{d.label}</td>)}</tr>
+                  </tbody>
+                </table>
+              )
+            }
+          />
+
+          <ChartCard
+            title="Financial Ratios"
+            tabs={[
+              { key: "grossMarginPct", label: "Gross margin" },
+              { key: "netMarginPct", label: "Net margin" },
+              { key: "currentRatio", label: "Current ratio" },
+              { key: "quickRatio", label: "Quick ratio" },
+              { key: "roePct", label: "ROE" },
+              { key: "roaPct", label: "ROA" },
+            ]}
+            active={ratioTab}
+            onTab={(k) => setRatioTab(k as typeof ratioTab)}
+            data={ratioData}
+            bars={[{ key: "value", name: /Pct$/.test(ratioTab) ? "%" : "Ratio", color: TEAL }]}
+            footer={
+              <table className="w-full">
+                <tbody>
+                  <tr>
+                    <td className={`${td} text-left font-medium`}>{/Pct$/.test(ratioTab) ? "Percent" : "Ratio"}</td>
+                    {ratioData.map((d) => (
+                      <td key={d.label} className={`${td} ${(d.value ?? 0) < 0 ? "text-[#9A3A2D]" : ""}`}>
+                        {d.value === null ? "-" : `${(d.value as number).toFixed(2)}${/Pct$/.test(ratioTab) ? "%" : ""}`}
+                      </td>
+                    ))}
+                  </tr>
+                  <tr><td className={th} />{ratioData.map((d) => <td key={d.label} className={th}>{d.label}</td>)}</tr>
+                </tbody>
+              </table>
+            }
+          />
+          {ratioIsMoney && null}
+
         </>
       )}
     </div>

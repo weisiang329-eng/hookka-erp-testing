@@ -12,6 +12,9 @@ import { formatCurrency } from "@/lib/utils";
 import { CrmPanel } from "@/components/customer/CrmPanel";
 import { WishlistPanel } from "@/components/customer/WishlistPanel";
 import { KycPanel } from "@/components/customer/KycPanel";
+import { PhoneInput } from "@/components/ui/phone-input";
+import { StateSelect } from "@/components/ui/state-select";
+import { isValidEmail } from "@/lib/contact-format";
 
 type Lead = {
   id: string;
@@ -40,21 +43,16 @@ const STAGES = [
 
 const SOURCES = ["Walk-in", "Referral", "Facebook", "WhatsApp", "Website", "Exhibition", "Other"];
 
-// Approval-gate option lists (full system-wide standardization is slice 4).
+// Credit terms for the convert approval gate. Phone / state / email use the
+// shared system-wide inputs (PhoneInput / StateSelect / isValidEmail).
 const TERMS = ["CASH", "NET30", "NET60", "NET90"];
-const MY_STATES = [
-  "Johor", "Kedah", "Kelantan", "Melaka", "Negeri Sembilan", "Pahang", "Perak",
-  "Perlis", "Pulau Pinang", "Sabah", "Sarawak", "Selangor", "Terengganu",
-  "W.P. Kuala Lumpur", "W.P. Labuan", "W.P. Putrajaya",
-];
 
 const EMPTY = { name: "", company: "", phone: "", email: "", source: "Referral", estValue: "", nextFollowUp: "", notes: "" };
 
-// Shared e-mail shape check (full standardization is slice 4). Empty is allowed
-// (email is optional on a lead); a non-empty value must look like an address.
+// Email shape check — delegates to the system-wide shared validator so every
+// form (Leads, Customers, Suppliers, Hubs) accepts identically.
 function emailValid(v: string): boolean {
-  const t = v.trim();
-  return t === "" || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(t);
+  return isValidEmail(v);
 }
 
 async function getLeads(): Promise<Lead[]> {
@@ -316,11 +314,15 @@ export default function LeadsPage() {
               ] as const).map(([k, label, cls]) => (
                 <label key={k} className={`text-xs text-[#6B7280] flex flex-col gap-1 ${cls}`}>
                   {label}
-                  <input
-                    value={form[k]}
-                    onChange={(e) => setForm({ ...form, [k]: e.target.value })}
-                    className={`border rounded-lg px-2.5 py-2 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32] ${k === "email" && !emailValid(form.email) ? "border-[#9A3A2D]" : "border-[#E2DDD8]"}`}
-                  />
+                  {k === "phone" ? (
+                    <PhoneInput value={form.phone} onChange={(v) => setForm({ ...form, phone: v })} />
+                  ) : (
+                    <input
+                      value={form[k]}
+                      onChange={(e) => setForm({ ...form, [k]: e.target.value })}
+                      className={`border rounded-lg px-2.5 py-2 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32] ${k === "email" && !emailValid(form.email) ? "border-[#9A3A2D]" : "border-[#E2DDD8]"}`}
+                    />
+                  )}
                   {k === "email" && !emailValid(form.email) ? <span className="text-[10px] text-[#9A3A2D]">Enter a valid email address</span> : null}
                 </label>
               ))}
@@ -464,12 +466,16 @@ function LeadDetailDrawer({
               ] as const).map(([k, label, cls, type]) => (
                 <label key={k} className={`text-xs text-[#6B7280] flex flex-col gap-1 ${cls}`}>
                   {label}
-                  <input
-                    type={type}
-                    value={draft[k]}
-                    onChange={(e) => setDraft({ ...draft, [k]: e.target.value })}
-                    className={`border rounded-lg px-2.5 py-2 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32] ${k === "email" && !emailValid(draft.email) ? "border-[#9A3A2D]" : "border-[#E2DDD8]"}`}
-                  />
+                  {k === "phone" ? (
+                    <PhoneInput value={draft.phone} onChange={(v) => setDraft({ ...draft, phone: v })} />
+                  ) : (
+                    <input
+                      type={type}
+                      value={draft[k]}
+                      onChange={(e) => setDraft({ ...draft, [k]: e.target.value })}
+                      className={`border rounded-lg px-2.5 py-2 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32] ${k === "email" && !emailValid(draft.email) ? "border-[#9A3A2D]" : "border-[#E2DDD8]"}`}
+                    />
+                  )}
                 </label>
               ))}
               <label className="text-xs text-[#6B7280] flex flex-col gap-1">
@@ -631,7 +637,7 @@ function ConvertLeadDialog({
               <label className="text-xs text-[#6B7280] flex flex-col gap-1">PIC name
                 <input value={f.contactName} onChange={(e) => set("contactName", e.target.value)} className="border border-[#E2DDD8] rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" /></label>
               <label className="text-xs text-[#6B7280] flex flex-col gap-1">PIC contact
-                <input value={f.phone} onChange={(e) => set("phone", e.target.value)} className="border border-[#E2DDD8] rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" /></label>
+                <PhoneInput value={f.phone} onChange={(v) => set("phone", v)} /></label>
               <label className="text-xs text-[#6B7280] flex flex-col gap-1 col-span-2">Email
                 <input value={f.email} onChange={(e) => set("email", e.target.value)} className={`border rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32] ${!emailValid(f.email) ? "border-[#9A3A2D]" : "border-[#E2DDD8]"}`} /></label>
             </div>
@@ -645,10 +651,7 @@ function ConvertLeadDialog({
               <label className="text-xs text-[#6B7280] flex flex-col gap-1">Hub code
                 <input value={f.hubCode} onChange={(e) => set("hubCode", e.target.value)} placeholder="e.g. KL" className="border border-[#E2DDD8] rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" /></label>
               <label className="text-xs text-[#6B7280] flex flex-col gap-1">State
-                <select value={f.hubState} onChange={(e) => set("hubState", e.target.value)} className="border border-[#E2DDD8] rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]">
-                  <option value="">—</option>
-                  {MY_STATES.map((s) => <option key={s} value={s}>{s}</option>)}
-                </select></label>
+                <StateSelect value={f.hubState} onChange={(v) => set("hubState", v)} /></label>
               <label className="text-xs text-[#6B7280] flex flex-col gap-1">Address
                 <input value={f.hubAddress} onChange={(e) => set("hubAddress", e.target.value)} className="border border-[#E2DDD8] rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" /></label>
             </div>

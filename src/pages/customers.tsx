@@ -3,6 +3,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { CrmPanel } from "@/components/customer/CrmPanel";
 import { KycPanel } from "@/components/customer/KycPanel";
 import { WishlistPanel } from "@/components/customer/WishlistPanel";
+import { PhoneInput } from "@/components/ui/phone-input";
+import { StateSelect } from "@/components/ui/state-select";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -3784,7 +3786,7 @@ export default function CustomersPage() {
               </div>
               <div>
                 <label className="text-xs font-medium text-[#374151] mb-1 block">PIC Contact</label>
-                <Input value={addForm.phone} onChange={(e) => setAddForm({ ...addForm, phone: e.target.value })} placeholder="011-6151 1613" />
+                <PhoneInput value={addForm.phone} onChange={(v) => setAddForm({ ...addForm, phone: v })} />
               </div>
               <div>
                 <label className="text-xs font-medium text-[#374151] mb-1 block">PIC Email</label>
@@ -3907,9 +3909,7 @@ export default function CustomersPage() {
                           </div>
                           <div>
                             <label className="block text-xs text-[#6B7280] mb-1">State *</label>
-                            <select value={hubForm.state} onChange={(e) => setHubForm(f => ({ ...f, state: e.target.value }))} className="w-full h-8 rounded border border-[#E2DDD8] px-2 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20">
-                              {["KL","SGR","PG","JB","SRW","SBH","IPH","MLK","KCH","KB","KT"].map(s => <option key={s} value={s}>{s}</option>)}
-                            </select>
+                            <StateSelect value={hubForm.state} onChange={(v) => setHubForm(f => ({ ...f, state: v }))} className="w-full h-8" />
                           </div>
                           <div>
                             <label className="block text-xs text-[#6B7280] mb-1">Contact Name</label>
@@ -3917,7 +3917,7 @@ export default function CustomersPage() {
                           </div>
                           <div>
                             <label className="block text-xs text-[#6B7280] mb-1">Phone</label>
-                            <Input value={hubForm.phone} onChange={(e) => setHubForm(f => ({ ...f, phone: e.target.value }))} className="h-8" />
+                            <PhoneInput value={hubForm.phone} onChange={(v) => setHubForm(f => ({ ...f, phone: v }))} />
                           </div>
                           <div>
                             <label className="block text-xs text-[#6B7280] mb-1">Email</label>
@@ -4001,23 +4001,7 @@ export default function CustomersPage() {
                     </div>
                     <div>
                       <label className="block text-xs text-[#6B7280] mb-1">State *</label>
-                      <select
-                        value={hubForm.state}
-                        onChange={(e) => setHubForm(f => ({ ...f, state: e.target.value }))}
-                        className="w-full h-8 rounded border border-[#E2DDD8] px-2 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20"
-                      >
-                        <option value="KL">KL</option>
-                        <option value="SGR">SGR</option>
-                        <option value="PG">PG</option>
-                        <option value="JB">JB</option>
-                        <option value="SRW">SRW</option>
-                        <option value="SBH">SBH</option>
-                        <option value="IPH">IPH</option>
-                        <option value="MLK">MLK</option>
-                        <option value="KCH">KCH</option>
-                        <option value="KB">KB</option>
-                        <option value="KT">KT</option>
-                      </select>
+                      <StateSelect value={hubForm.state} onChange={(v) => setHubForm(f => ({ ...f, state: v }))} className="w-full h-8" />
                     </div>
                     <div>
                       <label className="block text-xs text-[#6B7280] mb-1">Contact Name</label>
@@ -4025,7 +4009,7 @@ export default function CustomersPage() {
                     </div>
                     <div>
                       <label className="block text-xs text-[#6B7280] mb-1">Phone</label>
-                      <Input value={hubForm.phone} onChange={(e) => setHubForm(f => ({ ...f, phone: e.target.value }))} placeholder="e.g. 012-345 6789" className="h-8" />
+                      <PhoneInput value={hubForm.phone} onChange={(v) => setHubForm(f => ({ ...f, phone: v }))} />
                     </div>
                     <div>
                       <label className="block text-xs text-[#6B7280] mb-1">Email</label>
@@ -4105,7 +4089,7 @@ export default function CustomersPage() {
                     </div>
                     <div>
                       <label className="block text-xs text-[#6B7280] mb-1">Phone</label>
-                      <Input value={editCustForm.phone} onChange={(e) => setEditCustForm(f => ({ ...f, phone: e.target.value }))} />
+                      <PhoneInput value={editCustForm.phone} onChange={(v) => setEditCustForm(f => ({ ...f, phone: v }))} />
                     </div>
                   </div>
                   <div>

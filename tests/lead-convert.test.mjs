@@ -60,8 +60,8 @@ test("convert dialog collects the full approval gate", () => {
   assert.match(feFlat, /Credit Limit \(RM\)/);
   assert.match(feFlat, /Person in charge \(PIC\)/);
   assert.match(feFlat, /Delivery hub/);
-  // State is a dropdown (standardization begins here; system-wide is slice 4).
-  assert.match(feFlat, /MY_STATES\.map/);
+  // State uses the shared hub-state-code picker (system-wide standardization).
+  assert.match(feFlat, /<StateSelect value=\{f\.hubState\}/);
 });
 
 test("convert runs the 3-step flow: create customer → attach hub → re-point", () => {

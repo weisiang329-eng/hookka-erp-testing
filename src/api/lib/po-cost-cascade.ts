@@ -391,20 +391,93 @@ async function resolveBomMaterials(
   return [];
 }
 
+// Parse the leading inch value from a leg-height option label.
+//   `6"` → 6,  `7"` → 7,  `4.5"` → 4.5,  "No Leg" → null.
+// Tolerates surrounding spaces and a missing inch mark.
+function parseLegInches(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  const m = value.match(/(\d+(?:\.\d+)?)/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Resolve the raw_materials.itemCode a leg-height is EXPLICITLY bound to in the
+// Maintenance → Leg Heights catalog. Owner 2026-07-30: each leg-height option
+// in kv_config['variants-config'].legHeights / .sofaLegHeights can carry a
+// `legSku` (the exact leg's internal code). When present it is authoritative —
+// the shop binds e.g. "脚 6寸" → its precise SKU so consumption never guesses.
+//
+// SOFA orders consult sofaLegHeights first; everything else (bedframe) consults
+// legHeights first; the other list is a fallback for shops keeping one shared
+// catalog. Match is by the numeric inch value parsed from the option's `value`
+// label (`6"` → 6) against po.legHeightInches. Returns null when no binding
+// exists → the caller then falls back to the legacy fuzzy description match.
+async function resolveBoundLegSku(
+  db: D1Database,
+  itemCategory: string | null,
+  legHeightInches: number,
+): Promise<string | null> {
+  const row = await db
+    .prepare("SELECT value FROM kv_config WHERE key = ?")
+    .bind("variants-config")
+    .first<{ value: string }>();
+  if (!row?.value) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.value);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const cfg = parsed as { legHeights?: unknown; sofaLegHeights?: unknown };
+  const isSofa = (itemCategory ?? "").toUpperCase() === "SOFA";
+  const primary = isSofa ? cfg.sofaLegHeights : cfg.legHeights;
+  const secondary = isSofa ? cfg.legHeights : cfg.sofaLegHeights;
+  const fromList = (list: unknown): string | null => {
+    if (!Array.isArray(list)) return null;
+    for (const o of list) {
+      if (!o || typeof o !== "object") continue;
+      const opt = o as { value?: unknown; legSku?: unknown };
+      const inches = parseLegInches(opt.value);
+      if (inches != null && inches === legHeightInches) {
+        const sku = typeof opt.legSku === "string" ? opt.legSku.trim() : "";
+        return sku.length > 0 ? sku : null;
+      }
+    }
+    return null;
+  };
+  return fromList(primary) ?? fromList(secondary);
+}
+
 // Bind autoDetect lines to a concrete inventory key from the PO snapshot.
 //   FABRIC: po.fabricCode IS raw_materials.itemCode for the SO's chosen
 //           fabric — set inventoryCode and let the normal lookup chain run.
-//   LEG:    SO line carries legHeightInches; the shop names leg inventory
-//           with the inch height inline (e.g. `SOFA LEG PLASTIC (ROUND) 2"`).
-//           Match raw_materials.description LIKE `%<N>"%` AND `%LEG%`,
-//           case-insensitive, first by itemCode ASC. Misses fall through
-//           and the caller records a shortage with the original name.
+//   LEG:    SO line carries legHeightInches. Resolution order:
+//           1. EXPLICIT binding — the leg-height's `legSku` from the
+//              Maintenance Leg Heights catalog (resolveBoundLegSku). Owner's
+//              chosen source of truth; wins whenever set.
+//           2. Legacy fuzzy fallback — the shop names leg inventory with the
+//              inch height inline (e.g. `SOFA LEG PLASTIC (ROUND) 2"`); match
+//              raw_materials.description LIKE `%<N>"%` AND `%LEG%`,
+//              case-insensitive, first by itemCode ASC.
+//           Both miss → falls through, caller records a shortage with the
+//           original "Leg (from order)" name. Quantity always stays the BOM
+//           line's qty (the binding only decides WHICH SKU, not how many).
 // Lines without an autoDetect tag are passed through unchanged.
 async function substituteAutoDetectMaterials(
   db: D1Database,
   lines: MaterialLine[],
   po: ProductionOrderRow,
 ): Promise<MaterialLine[]> {
+  // Resolve the explicit leg SKU binding ONCE — po is fixed, and a BOM can
+  // carry more than one LEG line (nested WIPs), so we avoid re-reading
+  // kv_config per line.
+  const boundLegSku =
+    po.legHeightInches != null && po.legHeightInches > 0
+      ? await resolveBoundLegSku(db, po.itemCategory, po.legHeightInches)
+      : null;
+
   const out: MaterialLine[] = [];
   for (const line of lines) {
     if (!line.autoDetect) {
@@ -416,6 +489,12 @@ async function substituteAutoDetectMaterials(
       continue;
     }
     if (line.autoDetect === "LEG" && po.legHeightInches != null && po.legHeightInches > 0) {
+      // 1) Explicit Maintenance binding wins.
+      if (boundLegSku) {
+        out.push({ ...line, inventoryCode: boundLegSku, code: boundLegSku });
+        continue;
+      }
+      // 2) Legacy fuzzy fallback — description contains the inch height + LEG.
       const heightStr = `${po.legHeightInches}"`;
       const hit = await db
         .prepare(

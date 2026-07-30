@@ -28,7 +28,26 @@ import {
 import { Card, CardContent } from "@/components/ui/card";
 import { BarChart3 } from "lucide-react";
 
-type Slice = { sales: number; cogs: number; gross: number; otherIncome: number; expenses: number; net: number };
+type Slice = {
+  sales: number; cogs: number; gross: number; otherIncome: number; expenses: number; net: number;
+  materials: number; labour: number; overhead: number; stockMovement: number;
+  staffCost: number; otherOpex: number;
+};
+// Income-card tabs (owner 2026-07-29: not just sales — break the cost side
+// down). materials + labour + overhead + stock movement = COGS;
+// staff cost + other opex = operating expenses.
+const PL_TABS: { key: keyof Slice; label: string }[] = [
+  { key: "sales", label: "Revenue" },
+  { key: "cogs", label: "COGS" },
+  { key: "materials", label: "Raw Material" },
+  { key: "labour", label: "Production Salary" },
+  { key: "overhead", label: "Factory Overhead" },
+  { key: "stockMovement", label: "Stock Movement" },
+  { key: "gross", label: "Gross Profit" },
+  { key: "staffCost", label: "Staff Cost" },
+  { key: "otherOpex", label: "Other Expenses" },
+  { key: "net", label: "Net Profit" },
+];
 type Row = {
   key: string;
   label: string;
@@ -162,7 +181,7 @@ function ChartCard({
 export default function FinanceDashboardPage() {
   const [granularity, setGranularity] = useState<"month" | "quarter">("month");
   const [rows, setRows] = useState<Row[] | null>(null);
-  const [plTab, setPlTab] = useState<"sales" | "gross" | "net">("sales");
+  const [plTab, setPlTab] = useState<keyof Slice>("sales");
   const [cfTab, setCfTab] = useState<"operating" | "investing" | "financing" | "freeCashFlow">("operating");
   const [ratioTab, setRatioTab] = useState<
     "grossMarginPct" | "netMarginPct" | "currentRatio" | "quickRatio" | "roePct" | "roaPct"
@@ -184,7 +203,7 @@ export default function FinanceDashboardPage() {
       (rows ?? []).map((r, i, arr) => {
         const prev = i > 0 ? arr[i - 1].actual : null;
         const cur = r.actual;
-        const pick = (s: Slice | null) => (s ? (plTab === "sales" ? s.sales : plTab === "gross" ? s.gross : s.net) : null);
+        const pick = (s: Slice | null) => (s ? s[plTab] : null);
         const a = pick(cur);
         const p = pick(prev);
         return {
@@ -256,13 +275,9 @@ export default function FinanceDashboardPage() {
         <>
           <ChartCard
             title="Income Statement"
-            tabs={[
-              { key: "sales", label: "Revenue" },
-              { key: "gross", label: "Gross Profit" },
-              { key: "net", label: "Net Profit" },
-            ]}
-            active={plTab}
-            onTab={(k) => setPlTab(k as typeof plTab)}
+            tabs={PL_TABS.map((t) => ({ key: String(t.key), label: t.label }))}
+            active={String(plTab)}
+            onTab={(k) => setPlTab(k as keyof Slice)}
             data={plData}
             bars={[{ key: "actual", name: "Actual", color: GOLD }]}
             line={{ key: "forecast", name: "Forecast", color: RUST, dashed: true }}

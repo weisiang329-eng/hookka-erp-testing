@@ -9515,13 +9515,27 @@ app.get("/dashboard", async (c) => {
     getOpeningDate(db),
   ]);
   const openingMonthDash = openingRawDash ? openingRawDash.slice(0, 7) : null;
-  type PnlSlice = { sales: number; cogs: number; gross: number; otherIncome: number; expenses: number; net: number };
-  const zero = (): PnlSlice => ({ sales: 0, cogs: 0, gross: 0, otherIncome: 0, expenses: 0, net: 0 });
+  // Owner 2026-07-29: the income card breaks the cost side down, so every
+  // slice carries the components too. materials + labour + overhead +
+  // stockMovement sums to COGS exactly (stockMovement is the WIP/FG swing the
+  // manufacturing account contributes), and staffCost + otherOpex sums to
+  // operating expenses.
+  type PnlSlice = {
+    sales: number; cogs: number; gross: number; otherIncome: number; expenses: number; net: number;
+    materials: number; labour: number; overhead: number; stockMovement: number;
+    staffCost: number; otherOpex: number;
+  };
+  const zero = (): PnlSlice => ({
+    sales: 0, cogs: 0, gross: 0, otherIncome: 0, expenses: 0, net: 0,
+    materials: 0, labour: 0, overhead: 0, stockMovement: 0, staffCost: 0, otherOpex: 0,
+  });
   const pnlByMonth = new Map<string, PnlSlice>();
   for (const ym of allMonths) {
     if (ym > nowYm) continue;
     const hist = selectHistoricalWindow(historicalDash, openingMonthDash, ym, "all");
     const w = hist ?? (await computePnlWindow(db, orgIdDash, ym, ym, "all", matDataDash, dcDash, overrideDash));
+    const materials = w.rmConsumedSen + w.carriageSen + w.sstSen;
+    const staffCost = (w.expenseLines ?? []).filter((l) => l.salary).reduce((s, l) => s + l.amountSen, 0);
     pnlByMonth.set(ym, {
       sales: w.netSalesSen,
       cogs: w.cogsSen,
@@ -9529,6 +9543,12 @@ app.get("/dashboard", async (c) => {
       otherIncome: w.otherIncomeSen,
       expenses: w.expenseSen,
       net: w.netProfitSen,
+      materials,
+      labour: w.labourSen,
+      overhead: w.overheadSen,
+      stockMovement: w.cogsSen - materials - w.labourSen - w.overheadSen,
+      staffCost,
+      otherOpex: w.expenseSen - staffCost,
     });
   }
 
@@ -9643,11 +9663,14 @@ app.get("/dashboard", async (c) => {
     for (const [code, v] of Object.entries(m.pct ?? {})) {
       const amt = fcLineAmt(m, v);
       const meta = code.startsWith("cat:") ? { type: "COST" } : coaDash.get(code);
-      if (!meta) { slice.cogs += amt; continue; }
+      if (!meta) { slice.materials += amt; slice.cogs += amt; continue; }
       const bucket = code.startsWith("cat:") ? null : pnlBucketFor(code, meta.type, overrideDash);
       if (bucket === "OTHER_INCOME") slice.otherIncome += amt;
-      else if (bucket === "OPERATING_EXPENSE" || bucket === "OPEX_SALARIES") slice.expenses += amt;
-      else slice.cogs += amt; // materials (incl. cat:) + labour + overhead
+      else if (bucket === "OPEX_SALARIES") { slice.staffCost += amt; slice.expenses += amt; }
+      else if (bucket === "OPERATING_EXPENSE") { slice.otherOpex += amt; slice.expenses += amt; }
+      else if (bucket === "DIRECT_LABOUR") { slice.labour += amt; slice.cogs += amt; }
+      else if (bucket === "FACTORY_OVERHEAD") { slice.overhead += amt; slice.cogs += amt; }
+      else { slice.materials += amt; slice.cogs += amt; } // materials incl. cat: rows
     }
     slice.gross = slice.sales - slice.cogs;
     slice.net = slice.gross + slice.otherIncome - slice.expenses;
@@ -9664,6 +9687,8 @@ app.get("/dashboard", async (c) => {
       any = true;
       acc.sales += s.sales; acc.cogs += s.cogs; acc.gross += s.gross;
       acc.otherIncome += s.otherIncome; acc.expenses += s.expenses; acc.net += s.net;
+      acc.materials += s.materials; acc.labour += s.labour; acc.overhead += s.overhead;
+      acc.stockMovement += s.stockMovement; acc.staffCost += s.staffCost; acc.otherOpex += s.otherOpex;
     }
     return any ? acc : null;
   };

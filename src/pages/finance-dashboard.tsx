@@ -192,7 +192,6 @@ export default function FinanceDashboardPage() {
   // or share of sales, and which single material the trend card focuses on.
   const [csMeasure, setCsMeasure] = useState<"spend" | "purchase" | "closing">("spend");
   const [csLine, setCsLine] = useState<"all" | "bedframe" | "sofa">("all");
-  const [csMode, setCsMode] = useState<"amount" | "pct">("amount");
   const [csFocus, setCsFocus] = useState<string>("");
 
   // The loading state is cleared by the toggle handler (a user action), not
@@ -285,6 +284,9 @@ export default function FinanceDashboardPage() {
     if (!s) return r.actual?.sales ?? 0;
     return csLine === "all" ? s.bedframe + s.sofa : csLine === "bedframe" ? s.bedframe : s.sofa;
   };
+  // Chart plots the amounts; the table under it carries the amount AND its
+  // share of sales side by side (owner 2026-07-29: 「把 percentage 和 RM 做在
+  // 一起…% 在 spend 旁边」), so the toggle is gone.
   const csData = useMemo(
     () =>
       (rows ?? []).map((r) => {
@@ -292,12 +294,13 @@ export default function FinanceDashboardPage() {
         const sales = csLineSales(r);
         for (const cat of csCats) {
           const amt = csAmount(r, cat);
-          point[cat] = csMode === "amount" ? amt : sales > 0 ? Math.round((amt / sales) * 10000) / 100 : null;
+          point[cat] = amt;
+          point[`__pct__${cat}`] = sales > 0 ? Math.round((amt / sales) * 10000) / 100 : null;
         }
         return point;
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [rows, csCats, csLine, csMeasure, csMode],
+    [rows, csCats, csLine, csMeasure],
   );
   const csTrend = useMemo(
     () =>
@@ -467,11 +470,7 @@ export default function FinanceDashboardPage() {
                     <button key={k} onClick={() => setCsLine(k)}
                       className={`rounded-md border px-2.5 py-1 text-xs cursor-pointer ${csLine === k ? "bg-[#3E6570] text-white border-[#3E6570]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>{l}</button>
                   ))}
-                  <span className="mx-1 text-[#E2DDD8]">|</span>
-                  {([["amount", "RM"], ["pct", "% of sales"]] as const).map(([k, l]) => (
-                    <button key={k} onClick={() => setCsMode(k)}
-                      className={`rounded-md border px-2.5 py-1 text-xs cursor-pointer ${csMode === k ? "bg-[#9A3A2D] text-white border-[#9A3A2D]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>{l}</button>
-                  ))}
+                  <span className="ml-1 text-[11px] text-[#9CA3AF]">RM + % of sales</span>
                 </div>
                 {csLine !== "all" && (
                   <p className="text-[11px] text-[#9CA3AF]">
@@ -485,8 +484,8 @@ export default function FinanceDashboardPage() {
                       <CartesianGrid stroke="#F0ECE9" vertical={false} />
                       <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false} />
                       <YAxis tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false}
-                        tickFormatter={(v: number) => (csMode === "amount" ? rm(v) : `${v}%`)} />
-                      <Tooltip content={<ChartTip money={csMode === "amount"} />} />
+                        tickFormatter={(v: number) => rm(v)} />
+                      <Tooltip content={<ChartTip />} />
                       {csCats.map((cat, i) => (
                         <Bar key={cat} dataKey={cat} name={cat} stackId="cs" maxBarSize={44}
                           fill={["#6B5C32", "#9C6F1E", "#C9B98A", "#3E6570", "#7A9EA7", "#9A3A2D", "#C58B7F", "#4F7C3A", "#8FB07A", "#6B7280", "#A9A29B", "#D8CFC4"][i % 12]} />
@@ -502,11 +501,22 @@ export default function FinanceDashboardPage() {
                           <td className={`${td} text-left font-medium`}>
                             <button onClick={() => setCsFocus(cat)} className="cursor-pointer hover:underline" title="Show this material's trend below">{cat}</button>
                           </td>
-                          {csData.map((d) => (
-                            <td key={String(d.label)} className={td}>
-                              {d[cat] === null || d[cat] === 0 ? "-" : csMode === "amount" ? rm(d[cat] as number) : `${(d[cat] as number).toFixed(2)}%`}
-                            </td>
-                          ))}
+                          {csData.map((d) => {
+                            const amt = d[cat] as number | null;
+                            const p = d[`__pct__${cat}`] as number | null;
+                            return (
+                              <td key={String(d.label)} className={td}>
+                                {amt === null || amt === 0 ? (
+                                  "-"
+                                ) : (
+                                  <>
+                                    {rm(amt)}
+                                    <span className="ml-1.5 text-[10px] text-[#9A3A2D]">{p === null ? "" : `${p.toFixed(2)}%`}</span>
+                                  </>
+                                )}
+                              </td>
+                            );
+                          })}
                         </tr>
                       ))}
                       <tr><td className={th} />{csData.map((d) => <td key={String(d.label)} className={th}>{d.label}</td>)}</tr>

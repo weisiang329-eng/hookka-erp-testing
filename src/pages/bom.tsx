@@ -115,7 +115,7 @@ const DEPT_COLORS: Record<string, string> = {
   PACKING: "#06B6D4",
 };
 
-const DEPT_ORDER = ["FAB_CUT", "FAB_SEW", "WOOD_CUT", "FOAM", "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING"];
+const DEPT_ORDER = ["FAB_CUT", "FAB_SEW", "WOOD_CUT", "FOAM_CUTTING", "FOAM", "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING"];
 
 const DEPT_LABELS: Record<string, string> = {
   FAB_CUT: "Fab Cut",

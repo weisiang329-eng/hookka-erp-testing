@@ -25,6 +25,7 @@ import ProductionPage from "./index";
 const VALID_DEPTS = new Set([
   "FAB_CUT",
   "FAB_SEW",
+  "FOAM_CUTTING",
   "FOAM",
   "WOOD_CUT",
   "FRAMING",

@@ -112,7 +112,8 @@ const navigationGroups: NavGroup[] = [
         { name: "Overview", href: "/production", icon: Layers },
         { name: "Fab Cut", href: "/production/fab-cut", icon: Scissors },
         { name: "Fab Sew", href: "/production/fab-sew", icon: Shirt },
-        { name: "Foam", href: "/production/foam", icon: Box },
+        { name: "Foam Cutting", href: "/production/foam-cutting", icon: Scissors },
+        { name: "Foam Bonding", href: "/production/foam", icon: Box },
         { name: "Wood Cut", href: "/production/wood-cut", icon: Axe },
         { name: "Framing", href: "/production/framing", icon: Frame },
         { name: "Webbing", href: "/production/webbing", icon: Grid3x3 },
@@ -567,6 +568,7 @@ export function Sidebar({
     if (
       href === "/production/fab-cut" ||
       href === "/production/fab-sew" ||
+      href === "/production/foam-cutting" ||
       href === "/production/foam" ||
       href === "/production/wood-cut" ||
       href === "/production/framing" ||

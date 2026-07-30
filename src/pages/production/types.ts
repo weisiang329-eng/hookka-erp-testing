@@ -230,6 +230,7 @@ export type DeptRow = {
   sched_FAB_SEW: DeptSched;
   sched_FOAM: DeptSched;
   sched_WOOD_CUT: DeptSched;
+  sched_FOAM_CUTTING: DeptSched;
   sched_FRAMING: DeptSched;
   sched_WEBBING: DeptSched;
   sched_UPHOLSTERY: DeptSched;

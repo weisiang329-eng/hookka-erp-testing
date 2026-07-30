@@ -413,7 +413,7 @@ export const buildBaseRows = (
               return `${o.divanHeightInches}" Divan-${o.sizeLabel || o.sizeCode || ""}`;
             }
             // HB-producing depts
-            if (["FAB_CUT", "FAB_SEW", "FOAM", "UPHOLSTERY", "PACKING"].includes(jc.departmentCode) && totalH > 0) {
+            if (["FAB_CUT", "FAB_SEW", "FOAM_CUTTING", "FOAM", "UPHOLSTERY", "PACKING"].includes(jc.departmentCode) && totalH > 0) {
               return `${o.productCode}-HB${totalH}"`;
             }
           }
@@ -543,6 +543,7 @@ export const buildBaseRows = (
               sched_FAB_CUT:    buildSchedAgg(o.jobCards.filter((j) => j.departmentCode === "FAB_CUT"),    today, o.id),
               sched_FAB_SEW:    buildSchedAgg(o.jobCards.filter((j) => j.departmentCode === "FAB_SEW"),    today, o.id),
               sched_FOAM:       buildSchedAgg(o.jobCards.filter((j) => j.departmentCode === "FOAM"),       today, o.id),
+              sched_FOAM_CUTTING: buildSchedAgg(o.jobCards.filter((j) => j.departmentCode === "FOAM_CUTTING"), today, o.id),
               sched_WOOD_CUT:   buildSchedAgg(o.jobCards.filter((j) => j.departmentCode === "WOOD_CUT"),   today, o.id),
               sched_FRAMING:    buildSchedAgg(o.jobCards.filter((j) => j.departmentCode === "FRAMING"),    today, o.id),
               sched_WEBBING:    buildSchedAgg(o.jobCards.filter((j) => j.departmentCode === "WEBBING"),    today, o.id),
@@ -553,6 +554,7 @@ export const buildBaseRows = (
               sched_FAB_CUT:    buildSched(picker("FAB_CUT"),    today, o.id, poJobCards),
               sched_FAB_SEW:    buildSched(picker("FAB_SEW"),    today, o.id, poJobCards),
               sched_FOAM:       buildSched(picker("FOAM"),       today, o.id, poJobCards),
+              sched_FOAM_CUTTING: buildSched(picker("FOAM_CUTTING"), today, o.id, poJobCards),
               sched_WOOD_CUT:   buildSched(picker("WOOD_CUT"),   today, o.id, poJobCards),
               sched_FRAMING:    buildSched(picker("FRAMING"),    today, o.id, poJobCards),
               sched_WEBBING:    buildSched(picker("WEBBING"),    today, o.id, poJobCards),

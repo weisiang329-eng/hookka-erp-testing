@@ -1,0 +1,20 @@
+{
+  "generatedAt": "2026-07-30",
+  "department": "Foam Cutting",
+  "sheets": {
+    "Summary & Notes": [
+      ["Foam Cutting - Day-by-Day Schedule"],
+      ["Foam Cutting is a tracking / scheduling / labor step that runs immediately before Foam Bonding."],
+      ["Raw material is still consumed at Fab Cut - this stage touches no RM."],
+      [""],
+      ["A dedicated forward-capacity schedule endpoint for Foam Cutting is not built yet."],
+      ["Until it lands, this page shows the saved snapshot (empty) and the live Recalculate button is inert."]
+    ],
+    "Foam Cutting Calendar": [
+      ["Cut Date", "Lane", "SO ID", "Model", "Item", "Pieces", "Mins", "Customer DD", "Upstream"]
+    ],
+    "By Day": [
+      ["Date", "Day", "Lane", "SOs that day", "SOs", "Cut h", "Cap h"]
+    ]
+  }
+}

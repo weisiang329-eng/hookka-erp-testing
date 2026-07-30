@@ -14,7 +14,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
-import { TrendingUp, Plus, X, Save } from "lucide-react";
+import { TrendingUp, Plus, X, Save, Eye, EyeOff, ChevronDown, ChevronRight } from "lucide-react";
 import { pnlBucketFor } from "@/lib/pnl-bucket";
 
 type CoaAcct = { code: string; name: string; type: string; isPostable?: boolean };
@@ -45,6 +45,12 @@ export default function ForecastPage() {
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [newYm, setNewYm] = useState("");
+  // Owner 2026-07-29: parent sections collapse, and lines with no figure in
+  // ANY month hide once saved data exists (toggle reveals them for keying —
+  // a line stays visible the moment it carries a number, and totals always
+  // sum EVERY line, hidden or not).
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [showEmpty, setShowEmpty] = useState(true);
 
   useEffect(() => {
     let stale = false;
@@ -75,6 +81,9 @@ export default function ForecastPage() {
           next[ym] = { salesStr: m.salesSen ? (Number(m.salesSen) / 100).toFixed(2) : "", pct };
         }
         setMonths(next);
+        // Saved figures exist → start with empty lines hidden (owner rule);
+        // a fresh page shows everything so the first month can be keyed.
+        setShowEmpty(!Object.values(next).some((mm) => Object.keys(mm.pct).length > 0));
         setLoaded(true);
       })
       .catch(() => setLoaded(true));
@@ -271,16 +280,46 @@ export default function ForecastPage() {
       ))}
     </tr>
   );
-  const sectionHead = (title: string) => (
-    <tr className="bg-[#F7F4EF]">
-      <td className="px-3 py-1 sticky left-0 bg-[#F7F4EF] text-[11px] font-semibold text-[#6B5C32]" colSpan={1}>
-        {title}
-      </td>
-      {yms.map((ym) => (
-        <td key={ym} className="border-l border-[#F0ECE9]" />
-      ))}
-    </tr>
-  );
+  // A line "has a figure" when any month carries a keyed % or RM.
+  const rowHasData = (code: string) =>
+    yms.some((ym) => {
+      const e = months[ym]?.pct[code];
+      return !!e && ((e.p !== undefined && e.p !== "") || (e.a !== undefined && e.a !== ""));
+    });
+  // Parent section row: collapse toggle + per-month section totals.
+  const section = (key: string, title: string, rows: CoaAcct[]) => {
+    if (rows.length === 0) return null;
+    const open = !collapsed[key];
+    const visible = showEmpty ? rows : rows.filter((r) => rowHasData(r.code));
+    return (
+      <>
+        <tr key={`sec-${key}`} className="bg-[#F7F4EF] border-b border-[#E2DDD8]">
+          <td className="px-3 py-1.5 sticky left-0 bg-[#F7F4EF] whitespace-nowrap">
+            <button
+              onClick={() => setCollapsed((p) => ({ ...p, [key]: open }))}
+              className="text-[11px] font-semibold text-[#6B5C32] cursor-pointer inline-flex items-center gap-1"
+            >
+              {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+              {title}
+              {!showEmpty && visible.length < rows.length && (
+                <span className="font-normal text-[#9CA3AF]">({rows.length - visible.length} empty hidden)</span>
+              )}
+            </button>
+          </td>
+          {yms.map((ym) => {
+            const c = calc(ym);
+            const tot = rows.reduce((s, r) => s + c.amt(r.code), 0);
+            return (
+              <td key={ym} className="px-2 py-1.5 text-right tabular-nums font-semibold text-[#6B5C32] border-l border-[#F0ECE9]">
+                {fmtRM(tot)}
+              </td>
+            );
+          })}
+        </tr>
+        {open && visible.map((a) => acctRow(a))}
+      </>
+    );
+  };
   const totalRow = (label: string, val: (c: ReturnType<typeof calc>) => number, strong = false) => (
     <tr className={`border-b border-[#E2DDD8] ${strong ? "bg-[#EAF3DE] font-bold" : "bg-[#F0ECE9]/60 font-semibold"}`}>
       <td className="px-3 py-1.5 sticky left-0 whitespace-nowrap" style={{ background: strong ? "#EAF3DE" : "#F5F2EE" }}>
@@ -316,6 +355,10 @@ export default function ForecastPage() {
           />
           <Button variant="outline" size="sm" onClick={addMonth}>
             <Plus className="h-4 w-4 mr-1" /> Add month
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setShowEmpty((v) => !v)} title="Lines without a figure hide once saved — toggle to key new ones">
+            {showEmpty ? <EyeOff className="h-4 w-4 mr-1" /> : <Eye className="h-4 w-4 mr-1" />}
+            {showEmpty ? "Hide empty lines" : "Show empty lines"}
           </Button>
           <Button size="sm" onClick={save} disabled={saving || !loaded}>
             <Save className="h-4 w-4 mr-1" /> {saving ? "Saving…" : "Save"}
@@ -371,19 +414,13 @@ export default function ForecastPage() {
                     </td>
                   ))}
                 </tr>
-                {sectionHead("RAW MATERIALS / PURCHASES")}
-                {lines.materials.map((a) => acctRow(a))}
-                {lines.direct.map((a) => acctRow(a))}
-                {sectionHead("DIRECT LABOUR")}
-                {lines.labour.map((a) => acctRow(a))}
-                {sectionHead("FACTORY OVERHEAD")}
-                {lines.overhead.map((a) => acctRow(a))}
+                {section("mat", "RAW MATERIALS / PURCHASES", [...lines.materials, ...lines.direct])}
+                {section("lab", "DIRECT LABOUR", lines.labour)}
+                {section("ovh", "FACTORY OVERHEAD", lines.overhead)}
                 {totalRow("TOTAL COGS", (c) => c.cogs)}
                 {totalRow("GROSS PROFIT", (c) => c.gp, true)}
-                {lines.otherIncome.length > 0 && sectionHead("OTHER INCOME")}
-                {lines.otherIncome.map((a) => acctRow(a))}
-                {sectionHead("OPERATING EXPENSES")}
-                {lines.expenses.map((a) => acctRow(a))}
+                {section("oi", "OTHER INCOME", lines.otherIncome)}
+                {section("exp", "OPERATING EXPENSES", lines.expenses)}
                 {totalRow("TOTAL EXPENSES", (c) => c.exp)}
                 {totalRow("NET PROFIT", (c) => c.np, true)}
               </tbody>

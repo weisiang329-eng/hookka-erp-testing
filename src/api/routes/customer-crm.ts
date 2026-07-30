@@ -19,6 +19,7 @@ import type { Context } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
+import { sendMail } from "../lib/email";
 
 const app = new Hono<Env>();
 
@@ -83,6 +84,25 @@ async function ensureTables(db: D1Database): Promise<void> {
          notes TEXT,
          org_id TEXT,
          updated_at TEXT
+       )`,
+    )
+    .run();
+  // Wishlist — styles / models a customer has shown interest in (outbound
+  // sales: "what to pitch next"). product_id is optional so a free-text style
+  // the shop hasn't turned into a SKU yet can still be captured.
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS customer_wishlist (
+         id TEXT PRIMARY KEY,
+         customer_id TEXT NOT NULL,
+         product_id TEXT,
+         product_code TEXT,
+         product_name TEXT,
+         interest TEXT,
+         note TEXT,
+         created_by TEXT,
+         org_id TEXT,
+         created_at TEXT
        )`,
     )
     .run();
@@ -345,5 +365,177 @@ app.put("/onboarding", async (c) => {
     .run();
   return c.json({ success: true, data: { customerId } });
 });
+
+// ── Wishlist ─────────────────────────────────────────────────────────────────
+// Styles / models a customer likes — the outbound "what to pitch next" list.
+
+type WishlistRow = {
+  id: string;
+  customer_id: string;
+  product_id: string | null;
+  product_code: string | null;
+  product_name: string | null;
+  interest: string | null;
+  note: string | null;
+  created_by: string | null;
+  created_at: string | null;
+};
+
+// GET /api/customer-crm/wishlist?customerId=cust-3
+app.get("/wishlist", async (c) => {
+  const denied = await requirePermission(c, "customers", "read");
+  if (denied) return denied;
+  await ensureTables(c.var.DB);
+  const customerId = c.req.query("customerId");
+  if (!customerId) return c.json({ success: false, error: "customerId required" }, 400);
+  const res = await c.var.DB.prepare(
+    `SELECT * FROM customer_wishlist WHERE customer_id = ? AND org_id = ?
+      ORDER BY created_at DESC`,
+  )
+    .bind(customerId, getOrgId(c))
+    .all<WishlistRow>();
+  return c.json({ success: true, data: res.results ?? [] });
+});
+
+// POST /api/customer-crm/wishlist
+app.post("/wishlist", async (c) => {
+  const denied = await requirePermission(c, "customers", "update");
+  if (denied) return denied;
+  await ensureTables(c.var.DB);
+  const b = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const customerId = String(b.customerId ?? b.customer_id ?? "");
+  if (!customerId) return c.json({ success: false, error: "customerId required" }, 400);
+  const productName = String(b.productName ?? b.product_name ?? "").trim();
+  const productCode = String(b.productCode ?? b.product_code ?? "").trim();
+  if (!productName && !productCode) {
+    return c.json({ success: false, error: "a product/style is required" }, 400);
+  }
+  const id = genId("cw");
+  await c.var.DB.prepare(
+    `INSERT INTO customer_wishlist
+       (id, customer_id, product_id, product_code, product_name, interest, note, created_by, org_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      id,
+      customerId,
+      (b.productId as string) ?? (b.product_id as string) ?? null,
+      productCode || null,
+      productName || null,
+      (b.interest as string) ?? null,
+      (b.note as string) ?? null,
+      actingUserId(c),
+      getOrgId(c),
+      new Date().toISOString(),
+    )
+    .run();
+  return c.json({ success: true, data: { id } });
+});
+
+// DELETE /api/customer-crm/wishlist/:id
+app.delete("/wishlist/:id", async (c) => {
+  const denied = await requirePermission(c, "customers", "delete");
+  if (denied) return denied;
+  await ensureTables(c.var.DB);
+  const id = c.req.param("id");
+  await c.var.DB.prepare("DELETE FROM customer_wishlist WHERE id = ? AND org_id = ?")
+    .bind(id, getOrgId(c))
+    .run();
+  return c.json({ success: true });
+});
+
+// ── One-click send (quote / catalog) ─────────────────────────────────────────
+// The quotation PDF is generated in the browser (jsPDF); the client base64-
+// encodes it and POSTs it here. We attach it to an email via the shared sender
+// (Brevo/Resend) and log a QUOTE_SENT activity on the timeline so the follow-up
+// history shows what went out. Sending outward is an explicit user action (a
+// confirm dialog gates the button); this route only performs what the operator
+// clicked. When no email provider is configured the send returns ok:false and
+// the UI surfaces it — the activity is NOT logged in that case.
+
+// POST /api/customer-crm/send-quote
+app.post("/send-quote", async (c) => {
+  const denied = await requirePermission(c, "customers", "update");
+  if (denied) return denied;
+  await ensureTables(c.var.DB);
+  const b = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const customerId = String(b.customerId ?? b.customer_id ?? "");
+  const to = String(b.to ?? b.email ?? "").trim();
+  const pdfBase64 = String(b.pdfBase64 ?? "").trim();
+  const filename = String(b.filename ?? "Quotation.pdf").trim() || "Quotation.pdf";
+  if (!customerId) return c.json({ success: false, error: "customerId required" }, 400);
+  if (!to || !/.+@.+\..+/.test(to)) {
+    return c.json({ success: false, error: "a valid recipient email is required" }, 400);
+  }
+  if (!pdfBase64) return c.json({ success: false, error: "pdfBase64 required" }, 400);
+  // Guard against oversized payloads (Workers body + provider limits). ~5 MB of
+  // raw PDF ≈ 6.8 MB base64 — cap a little above that.
+  if (pdfBase64.length > 7_500_000) {
+    return c.json({ success: false, error: "attachment too large (max ~5 MB)" }, 413);
+  }
+
+  const subject = String(b.subject ?? "").trim() || "Your quotation from Hookka";
+  const note = String(b.note ?? "").trim();
+  const html =
+    `<p>Hi,</p><p>Please find your latest quotation attached.</p>` +
+    (note ? `<p>${escapeHtmlLite(note)}</p>` : "") +
+    `<p>Thank you.</p>`;
+
+  const env = c.env as unknown as {
+    RESEND_API_KEY?: string;
+    BREVO_API_KEY?: string;
+    RESEND_FROM_EMAIL?: string;
+  };
+  const from = env.RESEND_FROM_EMAIL || "Hookka Manufacturing <noreply@hookka.com>";
+  const result = await sendMail(env, from, {
+    to,
+    subject,
+    html,
+    attachments: [{ filename, contentBase64: pdfBase64 }],
+  });
+  if (!result.ok) {
+    return c.json(
+      { success: false, error: result.error || "email send failed" },
+      502,
+    );
+  }
+
+  // Log a QUOTE_SENT activity so the follow-up timeline records the send.
+  const actId = genId("ca");
+  await c.var.DB.prepare(
+    `INSERT INTO customer_activities
+       (id, customer_id, activity_type, summary, detail, contact_id, contact_name,
+        next_follow_up, outcome, created_by, org_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      actId,
+      customerId,
+      "QUOTE_SENT",
+      `Emailed quotation to ${to}`,
+      note || filename,
+      null,
+      null,
+      null,
+      "SENT",
+      actingUserId(c),
+      getOrgId(c),
+      new Date().toISOString(),
+    )
+    .run();
+
+  return c.json({ success: true, data: { id: result.id ?? null, activityId: actId } });
+});
+
+// Minimal HTML escaper for the note we inline into the email body (no external
+// dep in this route). Covers the five characters that matter for injection.
+function escapeHtmlLite(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
 export default app;

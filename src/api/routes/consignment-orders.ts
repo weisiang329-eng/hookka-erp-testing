@@ -40,6 +40,7 @@ import {
   invalidateOrderCascadeSnapshots,
 } from "../lib/snapshot";
 import { bumpPoListCacheVersion } from "../lib/po-list-cache";
+import { ensureCoStatusChangesTable } from "./production-orders/_helpers";
 import {
   consumeEditLockOverrideToken,
   createEditLockOverride,
@@ -891,24 +892,50 @@ app.get("/stats", async (c) => {
 // blow the response.
 // ---------------------------------------------------------------------------
 app.get("/status-changes", async (c) => {
-  const res = await c.var.DB
-    .prepare(
-      `SELECT id, coId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions
-         FROM co_status_changes
-        ORDER BY timestamp DESC, id DESC
-        LIMIT 500`,
-    )
-    .all<{
-      id: string;
-      coId: string;
-      fromStatus: string | null;
-      toStatus: string;
-      changedBy: string | null;
-      timestamp: string;
-      notes: string | null;
-      autoActions: string | null;
-    }>();
-  const data = (res.results ?? []).map((r) => ({
+  // Migrations are inert on deploy, so co_status_changes may not exist yet on
+  // this DB — ensure it (idempotent) or the SELECT 500s with
+  // relation "co_status_changes" does not exist (prod 2026-08-01). Columns are
+  // spelled snake_case: `coId` is NOT in column-rename-map.json, so the compat
+  // layer would pass it through verbatim and Postgres would fold it to `coid`
+  // ≠ the physical `co_id` — a second, latent 500 the missing table masked.
+  // The result columns come back camelCase via the adapter's output transform,
+  // so the mapping below (r.coId, r.fromStatus, …) is unchanged.
+  await ensureCoStatusChangesTable(c.var.DB);
+  let rows: Array<{
+    id: string;
+    coId: string;
+    fromStatus: string | null;
+    toStatus: string;
+    changedBy: string | null;
+    timestamp: string;
+    notes: string | null;
+    autoActions: string | null;
+  }> = [];
+  try {
+    const res = await c.var.DB
+      .prepare(
+        `SELECT id, co_id, from_status, to_status, changed_by, timestamp, notes, auto_actions
+           FROM co_status_changes
+          ORDER BY timestamp DESC, id DESC
+          LIMIT 500`,
+      )
+      .all<{
+        id: string;
+        coId: string;
+        fromStatus: string | null;
+        toStatus: string;
+        changedBy: string | null;
+        timestamp: string;
+        notes: string | null;
+        autoActions: string | null;
+      }>();
+    rows = res.results ?? [];
+  } catch {
+    // A never-created table (or transient DDL failure) must degrade to an empty
+    // audit list, never a 500 on the CO detail page.
+    rows = [];
+  }
+  const data = rows.map((r) => ({
     id: r.id,
     coId: r.coId,
     fromStatus: r.fromStatus ?? "",

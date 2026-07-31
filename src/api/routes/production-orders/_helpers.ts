@@ -2254,6 +2254,56 @@ export function ensurePiecePicsRackingColumn(db: D1Database): Promise<void> {
   return piecePicsRackingColumnEnsured;
 }
 
+// co_status_changes — the Consignment Order status audit log (migration 0104).
+// Migrations are INERT on deploy, and unlike so_status_changes (seeded in the
+// initial schema) this table has NO runtime self-apply — so on prod it simply
+// never existed. Every CO cascade below writes to it inside a db.batch()
+// alongside the CO status UPDATE, so a missing table failed the WHOLE batch and
+// the swallowed error left COs stuck (never auto-advancing to READY_TO_SHIP),
+// and GET /api/consignment-orders/status-changes 500'd with
+// relation "co_status_changes" does not exist (found on prod 2026-08-01).
+// Create it lazily (idempotent) before any read or write touches it. Snake_case
+// columns matching the migration + the cascade INSERTs; org_id defaults so the
+// writers (which don't set it) still satisfy NOT NULL. FK omitted so the DDL
+// can never fail on a schema quirk — the audit log doesn't need it.
+export let coStatusChangesTableEnsured: Promise<void> | null = null;
+export function ensureCoStatusChangesTable(db: D1Database): Promise<void> {
+  if (coStatusChangesTableEnsured) return coStatusChangesTableEnsured;
+  coStatusChangesTableEnsured = (async () => {
+    try {
+      await db
+        .prepare(
+          `CREATE TABLE IF NOT EXISTS co_status_changes (
+             id           TEXT PRIMARY KEY,
+             co_id        TEXT,
+             from_status  TEXT,
+             to_status    TEXT,
+             changed_by   TEXT,
+             timestamp    TEXT NOT NULL,
+             notes        TEXT,
+             auto_actions TEXT,
+             org_id       TEXT NOT NULL DEFAULT 'hookka'
+           )`,
+        )
+        .run();
+      await db
+        .prepare(
+          "CREATE INDEX IF NOT EXISTS idx_co_status_changes_co_id ON co_status_changes(co_id)",
+        )
+        .run();
+      await db
+        .prepare(
+          "CREATE INDEX IF NOT EXISTS idx_co_status_changes_timestamp ON co_status_changes(timestamp)",
+        )
+        .run();
+    } catch {
+      // ignore — table may already exist or DDL transiently rejected; callers
+      // read-guard so a still-missing table degrades to an empty list, never 500.
+    }
+  })();
+  return coStatusChangesTableEnsured;
+}
+
 export async function ensurePiecePicsForJc(
   db: D1Database,
   jc: JobCardRow,
@@ -3321,6 +3371,10 @@ export async function cascadeUpholsteryToCO(
   db: D1Database,
   poId: string,
 ): Promise<void> {
+  // The status UPDATE below is batched with an INSERT into co_status_changes;
+  // ensure that table exists (idempotent, memoized) or the whole batch fails
+  // and the CO never advances. See ensureCoStatusChangesTable.
+  await ensureCoStatusChangesTable(db);
   const po = await db
     .prepare("SELECT * FROM production_orders WHERE id = ?")
     .bind(poId)
@@ -3616,6 +3670,7 @@ export async function cascadePoCompletionToCO(
   consignmentOrderId: string | null,
 ): Promise<void> {
   if (!consignmentOrderId) return;
+  await ensureCoStatusChangesTable(db);
   const co = await db
     .prepare("SELECT id, status FROM consignment_orders WHERE id = ?")
     .bind(consignmentOrderId)
@@ -3677,6 +3732,7 @@ export async function cascadeCNCompletionToCO(
   consignmentOrderId: string | null,
 ): Promise<void> {
   if (!consignmentOrderId) return;
+  await ensureCoStatusChangesTable(db);
   const co = await db
     .prepare("SELECT id, status FROM consignment_orders WHERE id = ?")
     .bind(consignmentOrderId)
@@ -3737,6 +3793,7 @@ export async function cascadeCNReversalToCO(
   consignmentOrderId: string | null,
 ): Promise<void> {
   if (!consignmentOrderId) return;
+  await ensureCoStatusChangesTable(db);
   const co = await db
     .prepare("SELECT id, status FROM consignment_orders WHERE id = ?")
     .bind(consignmentOrderId)

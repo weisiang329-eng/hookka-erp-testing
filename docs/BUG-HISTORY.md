@@ -34,6 +34,18 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-01-002 — production dept page 503'd on the day's first (cold) load; client never retried the server's retriable 503 `production-orders` `infrastructure` `ui-frontend` 🟢
+
+**Symptom.** QA on prod (2026-08-01) found `GET /api/production-orders?fields=minimal&dept=FAB_CUT&excludeCompleted=true&dueFrom=2026-08-01&dueTo=2026-08-01` returning **503**, while the same query *without* `dueFrom/dueTo` returned 200. Reproduced deterministically on a fresh load (FAB_CUT and PACKING both). Re-requesting the URL directly returned 200 with correct data, so the query is sound — the failure is on the cold path only. No console error (the page silently carried on with the non-date-ranged fetch), but the "due today" query was failing and the page paid for a fallback.
+
+**Root cause.** Two compounding factors: (1) the `dueFrom=<today>` snapshot cache key is **new every day**, so the day's first dept-page load is always a cold snapshot miss; (2) under the dept grid's burst of ~12 concurrent requests on load, with the DB adapter's `max:1 socket/request`, a session-verify DB query loses the connection race and `auth-middleware.ts` returns a **retriable 503** ("Auth service busy — please retry"). But the SWR fetch layer (`joinInflight` in `src/lib/cached-fetch.ts`) threw on the *first* non-2xx with **no retry** — so the server's documented "keep your session and retry" never happened.
+
+**Fix** (`src/lib/cached-fetch.ts`). Add a bounded automatic retry (2 attempts, jittered 200–550ms backoff) for transient statuses 502/503/504 inside `joinInflight`, before it throws. Every URL through this path is an idempotent GET (SWR reads — writes use raw `fetch()`), so a retry can never double-apply a mutation. The abort signal short-circuits the backoff so an unmount/url-change still cancels cleanly. Non-retriable statuses (4xx/500) still throw on the first try, preserving the blank-page guard that keeps last-known-good cached data.
+
+**Verified.** `npx tsc -p tsconfig.app.json --noEmit` clean; `npx eslint` clean; behavioral test `tests/cached-fetch-503-retry.test.mjs` (503×2→200 retries and resolves; persistent 503 stops after the cap; 404 not retried; 200 no retry); full pre-commit suite green. PR to follow. Deeper root cause (cold daily snapshot key + concurrent-load connection pressure) noted for a later server-side pass — the client retry makes the symptom invisible to users now.
+
+---
+
 ## BUG-2026-07-27-002 — customer-save replace-diff WIPED delivery hubs; OCR create silently hub-less → State = raw PDF text `sales-orders` `data-integrity` `ui-frontend` 🟢
 
 **Symptom:** Owner created a Selangor hub for Houzs Century — it kept disappearing（「create

@@ -255,6 +255,35 @@ type InflightEntry = {
 };
 const inflight = new Map<string, InflightEntry>();
 
+// Transient status codes worth one automatic retry. The backend returns a
+// RETRIABLE 503 ("Auth service busy — please retry") when a session-verify DB
+// query momentarily fails under the request burst a page fires on load — the
+// dept grid alone fetches ~12 endpoints at once and, with the DB adapter's
+// max:1 socket/request, one can lose the connection race (auth-middleware.ts).
+// 502/504 are the CF-edge/gateway equivalents. Without a retry the server's
+// documented "keep your session and retry" never happened: the fetch surfaced
+// as an error and, e.g., the dept page's "due today" query 503'd every morning
+// (its dueFrom=<today> snapshot key is cold on the day's first load).
+const RETRIABLE_STATUS = new Set([502, 503, 504]);
+const MAX_FETCH_RETRIES = 2;
+
+// Backoff that resolves early if the request is aborted (unmount / url change),
+// so a cancelled fetch never lingers through the retry wait.
+function retryDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const onAbort = () => {
+      globalThis.clearTimeout(timer);
+      resolve();
+    };
+    const timer = globalThis.setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 function joinInflight<T>(url: string): Promise<T> {
   const existing = inflight.get(url);
   if (existing) {
@@ -262,25 +291,43 @@ function joinInflight<T>(url: string): Promise<T> {
     return existing.promise as Promise<T>;
   }
   const controller = new AbortController();
-  const promise: Promise<T> = fetch(url, {
-    signal: controller.signal,
-    // P6.1 — W3C Trace Context. trace_id is sticky for the page session
-    // so the worker can stitch every fetch from this tab onto one trace.
-    headers: { traceparent: buildTraceparent() },
-  })
-    .then((r) => {
-      // Treat any non-2xx as a HARD failure so the caller KEEPS its
-      // last-known-good cached data instead of overwriting a populated
-      // list with the parsed error body. A transient 500/503 (DB
-      // connection contention under load) must never blank a page that
-      // was already showing data. Wei Siang 2026-06-04 ("我的系统为什么
-      // 东西空去了"): a load-induced 500 on /api/sales-orders was wiping
-      // the list AND poisoning localStorage with the empty error envelope,
-      // so the page stayed blank even after navigating away and back.
-      if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
-      return r.json();
-    })
-    .then((j) => {
+
+  // Every URL routed through here is an idempotent GET (SWR reads), so an
+  // automatic retry can NEVER double-apply a write — writes use raw fetch(),
+  // not this path. Retry only the transient statuses above, bounded, with a
+  // jittered backoff so a burst of deduped callers doesn't thunder back in
+  // lockstep. Non-retriable non-2xx still throw on the first try so the caller
+  // keeps its last-known-good cached data (blank-page guard, Wei Siang
+  // 2026-06-04 "我的系统为什么东西空去了").
+  const run = async (): Promise<T> => {
+    let attempt = 0;
+    for (;;) {
+      const r = await fetch(url, {
+        signal: controller.signal,
+        // P6.1 — W3C Trace Context. trace_id is sticky for the page session
+        // so the worker can stitch every fetch from this tab onto one trace.
+        headers: { traceparent: buildTraceparent() },
+      });
+      if (!r.ok) {
+        if (RETRIABLE_STATUS.has(r.status) && attempt < MAX_FETCH_RETRIES) {
+          attempt++;
+          await retryDelay(
+            200 * attempt + Math.floor(Math.random() * 150),
+            controller.signal,
+          );
+          if (controller.signal.aborted) {
+            throw new DOMException("Aborted", "AbortError");
+          }
+          continue;
+        }
+        // Treat any non-2xx as a HARD failure so the caller KEEPS its
+        // last-known-good cached data instead of overwriting a populated
+        // list with the parsed error body. A transient 500/503 (DB
+        // connection contention under load) must never blank a page that
+        // was already showing data.
+        throw new Error(`HTTP ${r.status} for ${url}`);
+      }
+      const j = (await r.json()) as T;
       // Catch-all stub guard (2026-04-26): the backend's /api/* fallback in
       // worker.ts returns `{success:true, data:[], _stub:true, path}` for
       // any unrouted endpoint. Without surfacing this, a typo'd or
@@ -296,13 +343,15 @@ function joinInflight<T>(url: string): Promise<T> {
           `[cached-fetch] STUB RESPONSE for ${url} — backend route is not mounted (returned the catch-all _stub envelope from worker.ts). Frontend will see empty data. Check the route is registered in src/api/worker.ts.`,
         );
       }
-      return j as T;
-    })
-    .finally(() => {
-      // Drop the entry once settled — refs no longer matter after resolution.
-      // Late releaseInflight() calls become no-ops.
-      inflight.delete(url);
-    }) as Promise<T>;
+      return j;
+    }
+  };
+
+  const promise: Promise<T> = run().finally(() => {
+    // Drop the entry once settled — refs no longer matter after resolution.
+    // Late releaseInflight() calls become no-ops.
+    inflight.delete(url);
+  }) as Promise<T>;
   inflight.set(url, { promise, controller, refs: 1 });
   return promise;
 }

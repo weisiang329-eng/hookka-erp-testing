@@ -633,6 +633,24 @@ app.get("/fg-stock", async (c) => {
     )
     .run();
 
+  // Runtime self-apply of the fg-stock hot-path indexes (also inert as a
+  // migration file — see migrations/0209_inventory_perf_indexes.sql). They
+  // remove the full scans on job_cards / piece_pics / products and the
+  // per-request MAX(updated_at) freshness probe that push the cold whole-org
+  // compute past the frontend's 30s abort → 504 (which then crashes the
+  // Inventory page on any refetch). Built in the background so the one-time
+  // index build never blocks this request; until built the endpoint keeps
+  // using today's path. The executionCtx getter throws outside a Worker isolate
+  // (tests / local node), so guard it and fall back to fire-and-forget.
+  const { ensureInventoryPerfIndexes } = await import(
+    "../lib/ensure-inventory-perf-indexes"
+  );
+  try {
+    c.executionCtx.waitUntil(ensureInventoryPerfIndexes(db));
+  } catch {
+    void ensureInventoryPerfIndexes(db);
+  }
+
   const { withSnapshot } = await import("../lib/snapshot");
   const data = await withSnapshot(
     db,

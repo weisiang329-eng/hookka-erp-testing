@@ -14,17 +14,69 @@ import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
-import { TrendingUp, Plus, X, Save } from "lucide-react";
+import { TrendingUp, Plus, X, Save, Eye, EyeOff, ChevronDown, ChevronRight } from "lucide-react";
 import { pnlBucketFor } from "@/lib/pnl-bucket";
 
 type CoaAcct = { code: string; name: string; type: string; isPostable?: boolean };
-type MonthState = { salesStr: string; pct: Record<string, string> }; // pct value = "%" as typed, e.g. "15.4"
+// Per line-month the owner keys ONE of the two (owner 2026-07-29): a % of
+// sales ("15.4") OR a direct RM amount ("3000") — typing one clears the
+// other; the empty box shows the derived value as a grey placeholder.
+type CellEntry = { p?: string; a?: string };
+type MonthState = { salesStr: string; pct: Record<string, CellEntry> };
 
 const CARRIAGE = "700-1015";
 const SST = "706-0000";
 
+// Fixed column slots (owner 2026-07-29: 「amount 一个 column 对齐，percentage
+// 整个 column 对齐」) — keyable cells AND computed rows render into the same
+// two widths, so both columns line up down the whole grid.
+const AMT_SLOT = "w-28";
+const PCT_SLOT = "w-20"; // fits "100.00 %" at two decimals
+
 const fmtRM = (sen: number) =>
   sen === 0 ? "-" : (sen / 100).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+// Thousand-separated RM entry (owner 2026-07-29: 「我要千位数的」). A native
+// number input can't render separators, so this is a text input that shows the
+// grouped value when blurred and the raw draft while focused — the same
+// no-reformatting-mid-keystroke rule MoneyInput uses. State stays raw
+// ("400000.00"); commas are stripped on the way in. Module-level so its focus
+// state survives the parent's re-renders.
+const group = (s: string): string => {
+  if (s === "") return "";
+  const n = parseFloat(s);
+  return Number.isFinite(n)
+    ? n.toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    : s;
+};
+function AmountInput({
+  value,
+  onChange,
+  placeholder,
+  className,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  className?: string;
+}) {
+  const [focused, setFocused] = useState(false);
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={focused ? value : group(value)}
+      placeholder={placeholder}
+      onFocus={(e) => {
+        setFocused(true);
+        e.currentTarget.select();
+      }}
+      onBlur={() => setFocused(false)}
+      onChange={(e) => onChange(e.target.value.replace(/,/g, ""))}
+      className={className}
+    />
+  );
+}
 
 // "15.4" → 1540 basis points (int); blank/garbage → 0.
 const strToBp = (s: string): number => {
@@ -41,6 +93,12 @@ export default function ForecastPage() {
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [newYm, setNewYm] = useState("");
+  // Owner 2026-07-29: parent sections collapse, and lines with no figure in
+  // ANY month hide once saved data exists (toggle reveals them for keying —
+  // a line stays visible the moment it carries a number, and totals always
+  // sum EVERY line, hidden or not).
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [showEmpty, setShowEmpty] = useState(true);
 
   useEffect(() => {
     let stale = false;
@@ -55,14 +113,25 @@ export default function ForecastPage() {
         const coa = (coaJ?.data ?? coaJ ?? []) as CoaAcct[];
         setAccounts(Array.isArray(coa) ? coa : []);
         setOverride(((mapJ?.data as { map?: Record<string, string> } | undefined)?.map ?? {}) as Record<string, string>);
-        const saved = ((fcJ?.data as { months?: Record<string, { salesSen?: number; pct?: Record<string, number> }> } | undefined)?.months ?? {});
+        const saved = ((fcJ?.data as { months?: Record<string, { salesSen?: number; pct?: Record<string, number | { bp?: number; amtSen?: number }> }> } | undefined)?.months ?? {});
         const next: Record<string, MonthState> = {};
         for (const [ym, m] of Object.entries(saved)) {
-          const pct: Record<string, string> = {};
-          for (const [code, bp] of Object.entries(m.pct ?? {})) pct[code] = bpToStr(Number(bp) || 0);
-          next[ym] = { salesStr: m.salesSen ? (Number(m.salesSen) / 100 / 1).toFixed(2) : "", pct };
+          const pct: Record<string, CellEntry> = {};
+          for (const [code, v] of Object.entries(m.pct ?? {})) {
+            // Legacy shape = bare bp number; new shape = { bp } or { amtSen }.
+            if (typeof v === "number") pct[code] = { p: bpToStr(v) };
+            else if (v && typeof v === "object") {
+              const o = v as { bp?: number; amtSen?: number };
+              if (o.amtSen) pct[code] = { a: (Number(o.amtSen) / 100).toString() };
+              else if (o.bp) pct[code] = { p: bpToStr(Number(o.bp) || 0) };
+            }
+          }
+          next[ym] = { salesStr: m.salesSen ? (Number(m.salesSen) / 100).toFixed(2) : "", pct };
         }
         setMonths(next);
+        // Saved figures exist → start with empty lines hidden (owner rule);
+        // a fresh page shows everything so the first month can be keyed.
+        setShowEmpty(!Object.values(next).some((mm) => Object.keys(mm.pct).length > 0));
         setLoaded(true);
       })
       .catch(() => setLoaded(true));
@@ -120,12 +189,20 @@ export default function ForecastPage() {
   );
 
   const yms = useMemo(() => Object.keys(months).sort(), [months]);
+  // "2026-08" → "Aug 2026" (header reads at a glance).
+  const monthLabel = (ym: string) =>
+    new Date(`${ym}-01T00:00:00Z`).toLocaleString("en", { month: "short", year: "numeric", timeZone: "UTC" });
 
   // ---- Per-month computed figures ----
   const calc = (ym: string) => {
     const m = months[ym];
     const salesSen = Math.max(0, Math.round((parseFloat(m?.salesStr ?? "") || 0) * 100));
-    const amt = (code: string) => Math.round((salesSen * strToBp(m?.pct[code] ?? "")) / 10000);
+    // Amount-keyed cells win; %-keyed cells derive from sales.
+    const amt = (code: string) => {
+      const e = m?.pct[code];
+      if (e?.a !== undefined && e.a !== "") return Math.round((parseFloat(e.a) || 0) * 100);
+      return Math.round((salesSen * strToBp(e?.p ?? "")) / 10000);
+    };
     const sum = (rows: CoaAcct[]) => rows.reduce((s, r) => s + amt(r.code), 0);
     const cogs = sum(cogsRows);
     const oi = sum(lines.otherIncome);
@@ -134,8 +211,11 @@ export default function ForecastPage() {
     return { salesSen, amt, cogs, gp, oi, exp, np: gp + oi - exp };
   };
 
-  const setPct = (ym: string, code: string, v: string) =>
-    setMonths((prev) => ({ ...prev, [ym]: { ...prev[ym], pct: { ...prev[ym].pct, [code]: v } } }));
+  // Keying one side CLEARS the other (owner: "就是其中一个").
+  const setPctStr = (ym: string, code: string, v: string) =>
+    setMonths((prev) => ({ ...prev, [ym]: { ...prev[ym], pct: { ...prev[ym].pct, [code]: v === "" ? {} : { p: v } } } }));
+  const setAmtStr = (ym: string, code: string, v: string) =>
+    setMonths((prev) => ({ ...prev, [ym]: { ...prev[ym], pct: { ...prev[ym].pct, [code]: v === "" ? {} : { a: v } } } }));
   const setSales = (ym: string, v: string) =>
     setMonths((prev) => ({ ...prev, [ym]: { ...prev[ym], salesStr: v } }));
 
@@ -167,12 +247,17 @@ export default function ForecastPage() {
   const save = async () => {
     setSaving(true);
     try {
-      const payload: Record<string, { salesSen: number; pct: Record<string, number> }> = {};
+      const payload: Record<string, { salesSen: number; pct: Record<string, { bp?: number; amtSen?: number }> }> = {};
       for (const [ym, m] of Object.entries(months)) {
-        const pct: Record<string, number> = {};
-        for (const [code, s] of Object.entries(m.pct)) {
-          const bp = strToBp(s);
-          if (bp !== 0) pct[code] = bp;
+        const pct: Record<string, { bp?: number; amtSen?: number }> = {};
+        for (const [code, e] of Object.entries(m.pct)) {
+          if (e.a !== undefined && e.a !== "") {
+            const sen = Math.round((parseFloat(e.a) || 0) * 100);
+            if (sen !== 0) pct[code] = { amtSen: sen };
+          } else if (e.p !== undefined && e.p !== "") {
+            const bp = strToBp(e.p);
+            if (bp !== 0) pct[code] = { bp };
+          }
         }
         payload[ym] = { salesSen: Math.max(0, Math.round((parseFloat(m.salesStr) || 0) * 100)), pct };
       }
@@ -191,15 +276,55 @@ export default function ForecastPage() {
   };
 
   // ---- Render helpers ----
-  const pctInput = (ym: string, code: string) => (
-    <input
-      type="number"
-      step="0.1"
-      value={months[ym]?.pct[code] ?? ""}
-      onChange={(e) => setPct(ym, code, e.target.value)}
-      placeholder="-"
-      className="w-14 rounded border border-[#E2DDD8] px-1 py-0.5 text-right text-[12px] tabular-nums"
-    />
+  // One cell = [ RM ] + [ % ] (owner 2026-07-29: amount on the LEFT) — key
+  // EITHER; the empty box shows the derived value as a grey placeholder
+  // (RM 3,000 on 50,000 sales → % box hints 6.0; 10% → RM box hints 5,000.00).
+  const cellInputs = (ym: string, code: string) => {
+    const e = months[ym]?.pct[code] ?? {};
+    const c = calc(ym);
+    const amtKeyed = e.a !== undefined && e.a !== "";
+    const pctKeyed = e.p !== undefined && e.p !== "";
+    const derivedPct =
+      amtKeyed && c.salesSen > 0
+        ? ((Math.round((parseFloat(e.a as string) || 0) * 100) / c.salesSen) * 100).toFixed(2)
+        : "";
+    const derivedAmt = pctKeyed ? (c.amt(code) / 100).toFixed(2) : "";
+    return (
+      <span className="inline-flex items-center justify-end gap-1">
+        <span className={`${AMT_SLOT} inline-flex items-center rounded border border-[#E2DDD8] bg-white px-1`}>
+          <span className="text-[10px] text-[#9CA3AF] mr-0.5">RM</span>
+          <AmountInput
+            value={e.a ?? ""}
+            onChange={(v) => setAmtStr(ym, code, v)}
+            placeholder={derivedAmt ? group(derivedAmt) : "-"}
+            className="w-full min-w-0 py-0.5 text-right text-[12px] tabular-nums outline-none placeholder:text-[#C7C1BA]"
+          />
+        </span>
+        <span className={`${PCT_SLOT} inline-flex items-center rounded border border-[#E2DDD8] bg-white px-1`}>
+          <input
+            type="number"
+            step="0.01"
+            value={e.p ?? ""}
+            onChange={(ev) => setPctStr(ym, code, ev.target.value)}
+            placeholder={derivedPct || "-"}
+            className="w-full min-w-0 py-0.5 text-right text-[12px] tabular-nums outline-none placeholder:text-[#C7C1BA]"
+          />
+          <span className="text-[10px] text-[#9CA3AF] ml-0.5">%</span>
+        </span>
+      </span>
+    );
+  };
+  // Computed rows carry their own % of sales beside the amount (owner
+  // 2026-07-29: gross profit / net profit etc. auto-show the percentage).
+  const pctOfSales = (sen: number, salesSen: number): string =>
+    salesSen > 0 ? `${((sen / salesSen) * 100).toFixed(2)}%` : "-";
+  const amtWithPct = (sen: number, salesSen: number, muted = false) => (
+    <span className="inline-flex items-center justify-end gap-1">
+      <span className={`${AMT_SLOT} px-1 text-right tabular-nums`}>{fmtRM(sen)}</span>
+      <span className={`${PCT_SLOT} px-1 text-right text-[11px] tabular-nums ${muted ? "text-[#9CA3AF]" : "text-[#9A3A2D]"}`}>
+        {pctOfSales(sen, salesSen)}
+      </span>
+    </span>
   );
   const acctRow = (a: CoaAcct, indent = true) => (
     <tr key={a.code} className="border-b border-[#F0ECE9]">
@@ -209,37 +334,64 @@ export default function ForecastPage() {
         )}
         <span className="text-[#1F1D1B]">{a.name}</span>
       </td>
-      {yms.map((ym) => {
-        const c = calc(ym);
-        return (
-          <td key={ym} className="px-2 py-1 text-right whitespace-nowrap border-l border-[#F0ECE9]">
-            {pctInput(ym, a.code)}
-            <span className="inline-block w-24 text-right tabular-nums text-[13px]">{fmtRM(c.amt(a.code))}</span>
-          </td>
-        );
-      })}
-    </tr>
-  );
-  const sectionHead = (title: string) => (
-    <tr className="bg-[#F7F4EF]">
-      <td className="px-3 py-1 sticky left-0 bg-[#F7F4EF] text-[11px] font-semibold text-[#6B5C32]" colSpan={1}>
-        {title}
-      </td>
       {yms.map((ym) => (
-        <td key={ym} className="border-l border-[#F0ECE9]" />
+        <td key={ym} className="px-2 py-1 text-right whitespace-nowrap border-l border-[#F0ECE9]">
+          {cellInputs(ym, a.code)}
+        </td>
       ))}
     </tr>
   );
+  // A line "has a figure" when any month carries a keyed % or RM.
+  const rowHasData = (code: string) =>
+    yms.some((ym) => {
+      const e = months[ym]?.pct[code];
+      return !!e && ((e.p !== undefined && e.p !== "") || (e.a !== undefined && e.a !== ""));
+    });
+  // Parent section row: collapse toggle + per-month section totals.
+  const section = (key: string, title: string, rows: CoaAcct[]) => {
+    if (rows.length === 0) return null;
+    const open = !collapsed[key];
+    const visible = showEmpty ? rows : rows.filter((r) => rowHasData(r.code));
+    return (
+      <>
+        <tr key={`sec-${key}`} className="bg-[#F7F4EF] border-b border-[#E2DDD8]">
+          <td className="px-3 py-1.5 sticky left-0 bg-[#F7F4EF] whitespace-nowrap">
+            <button
+              onClick={() => setCollapsed((p) => ({ ...p, [key]: open }))}
+              className="text-[11px] font-semibold text-[#6B5C32] cursor-pointer inline-flex items-center gap-1"
+            >
+              {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+              {title}
+              {!showEmpty && visible.length < rows.length && (
+                <span className="font-normal text-[#9CA3AF]">({rows.length - visible.length} empty hidden)</span>
+              )}
+            </button>
+          </td>
+          {yms.map((ym) => {
+            const c = calc(ym);
+            const tot = rows.reduce((s, r) => s + c.amt(r.code), 0);
+            return (
+              <td key={ym} className="px-2 py-1.5 text-right font-semibold text-[#6B5C32] border-l border-[#F0ECE9]">
+                {amtWithPct(tot, c.salesSen, true)}
+              </td>
+            );
+          })}
+        </tr>
+        {open && visible.map((a) => acctRow(a))}
+      </>
+    );
+  };
   const totalRow = (label: string, val: (c: ReturnType<typeof calc>) => number, strong = false) => (
     <tr className={`border-b border-[#E2DDD8] ${strong ? "bg-[#EAF3DE] font-bold" : "bg-[#F0ECE9]/60 font-semibold"}`}>
       <td className="px-3 py-1.5 sticky left-0 whitespace-nowrap" style={{ background: strong ? "#EAF3DE" : "#F5F2EE" }}>
         {label}
       </td>
       {yms.map((ym) => {
-        const v = val(calc(ym));
+        const c = calc(ym);
+        const v = val(c);
         return (
-          <td key={ym} className={`px-2 py-1.5 text-right tabular-nums border-l border-[#F0ECE9] ${v < 0 ? "text-[#9A3A2D]" : ""}`}>
-            {fmtRM(v)}
+          <td key={ym} className={`px-2 py-1.5 text-right border-l border-[#F0ECE9] ${v < 0 ? "text-[#9A3A2D]" : ""}`}>
+            {amtWithPct(v, c.salesSen, true)}
           </td>
         );
       })}
@@ -266,6 +418,10 @@ export default function ForecastPage() {
           <Button variant="outline" size="sm" onClick={addMonth}>
             <Plus className="h-4 w-4 mr-1" /> Add month
           </Button>
+          <Button variant="outline" size="sm" onClick={() => setShowEmpty((v) => !v)} title="Lines without a figure hide once saved — toggle to key new ones">
+            {showEmpty ? <EyeOff className="h-4 w-4 mr-1" /> : <Eye className="h-4 w-4 mr-1" />}
+            {showEmpty ? "Hide empty lines" : "Show empty lines"}
+          </Button>
           <Button size="sm" onClick={save} disabled={saving || !loaded}>
             <Save className="h-4 w-4 mr-1" /> {saving ? "Saving…" : "Save"}
           </Button>
@@ -290,16 +446,22 @@ export default function ForecastPage() {
                 <tr className="border-b border-[#E2DDD8] text-[11px] text-[#6B7280]">
                   <th className="px-3 py-2 text-left sticky left-0 bg-white">LINE</th>
                   {yms.map((ym) => (
-                    <th key={ym} className="px-2 py-2 text-right border-l border-[#E2DDD8]">
-                      <span className="font-semibold text-[#1F1D1B]">{ym}</span>
-                      <button
-                        onClick={() => removeMonth(ym)}
-                        title="Remove this month (takes effect on Save)"
-                        className="ml-2 text-[#9A3A2D] hover:text-[#791F1F] cursor-pointer"
-                      >
-                        <X className="h-3 w-3 inline" />
-                      </button>
-                      <div className="text-[10px] font-normal text-[#9CA3AF]">% · RM</div>
+                    <th key={ym} className="px-2 py-2 text-right border-l border-[#E2DDD8] bg-[#F0ECE9]/70">
+                      <div className="flex items-center justify-end gap-2">
+                        <span className="text-sm font-bold text-[#1F1D1B] tracking-wide">{monthLabel(ym)}</span>
+                        <button
+                          onClick={() => removeMonth(ym)}
+                          title="Remove this month (takes effect on Save)"
+                          className="text-[#9A3A2D] hover:text-[#791F1F] cursor-pointer"
+                        >
+                          <X className="h-3.5 w-3.5 inline" />
+                        </button>
+                      </div>
+                      {/* Column legend — matches the on-screen order (amount first). */}
+                      <div className="mt-0.5 inline-flex items-center justify-end gap-1">
+                        <span className={`${AMT_SLOT} px-1 text-right text-[10px] font-semibold text-[#6B5C32]`}>AMOUNT (RM)</span>
+                        <span className={`${PCT_SLOT} px-1 text-right text-[10px] font-semibold text-[#6B5C32]`}>% SALES</span>
+                      </div>
                     </th>
                   ))}
                 </tr>
@@ -309,30 +471,29 @@ export default function ForecastPage() {
                   <td className="px-3 py-1.5 sticky left-0 bg-[#F6F1E7] font-semibold">SALES (keyed)</td>
                   {yms.map((ym) => (
                     <td key={ym} className="px-2 py-1.5 text-right border-l border-[#F0ECE9]">
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={months[ym]?.salesStr ?? ""}
-                        onChange={(e) => setSales(ym, e.target.value)}
-                        placeholder="0.00"
-                        className="w-32 rounded border border-[#E2DDD8] px-2 py-0.5 text-right tabular-nums"
-                      />
+                      {/* Sales carries its own 100% marker so the percent column
+                          reads continuously from the very first row. */}
+                      <span className="inline-flex items-center justify-end gap-1">
+                        <AmountInput
+                          value={months[ym]?.salesStr ?? ""}
+                          onChange={(v) => setSales(ym, v)}
+                          placeholder="0.00"
+                          className={`${AMT_SLOT} rounded border border-[#E2DDD8] px-2 py-0.5 text-right tabular-nums`}
+                        />
+                        <span className={`${PCT_SLOT} px-1 text-right text-[11px] tabular-nums text-[#9CA3AF]`}>
+                          {(months[ym]?.salesStr ?? "") === "" ? "-" : "100.00%"}
+                        </span>
+                      </span>
                     </td>
                   ))}
                 </tr>
-                {sectionHead("RAW MATERIALS / PURCHASES")}
-                {lines.materials.map((a) => acctRow(a))}
-                {lines.direct.map((a) => acctRow(a))}
-                {sectionHead("DIRECT LABOUR")}
-                {lines.labour.map((a) => acctRow(a))}
-                {sectionHead("FACTORY OVERHEAD")}
-                {lines.overhead.map((a) => acctRow(a))}
+                {section("mat", "RAW MATERIALS / PURCHASES", [...lines.materials, ...lines.direct])}
+                {section("lab", "DIRECT LABOUR", lines.labour)}
+                {section("ovh", "FACTORY OVERHEAD", lines.overhead)}
                 {totalRow("TOTAL COGS", (c) => c.cogs)}
                 {totalRow("GROSS PROFIT", (c) => c.gp, true)}
-                {lines.otherIncome.length > 0 && sectionHead("OTHER INCOME")}
-                {lines.otherIncome.map((a) => acctRow(a))}
-                {sectionHead("OPERATING EXPENSES")}
-                {lines.expenses.map((a) => acctRow(a))}
+                {section("oi", "OTHER INCOME", lines.otherIncome)}
+                {section("exp", "OPERATING EXPENSES", lines.expenses)}
                 {totalRow("TOTAL EXPENSES", (c) => c.exp)}
                 {totalRow("NET PROFIT", (c) => c.np, true)}
               </tbody>

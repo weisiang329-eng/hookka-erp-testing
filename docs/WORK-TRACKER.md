@@ -1847,3 +1847,10 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
   - BOM editor shows a read-only `+ kit` hint on any material line whose SKU has a kit (module-level KIT_PARENT_CODES, loaded from /api/component-boms).
   - Tests: `component-kit-subbom.test.mjs` — functional (saveKit self-guard, explodeKits qty math / parent-kept / no-op) + structural wiring. Full suite 1691 pass; build:strict clean.
   - branch `feat/mechanism-subbom` off staging.
+## 2026-07-29 owner rulings — do NOT re-raise
+- [x] Forecast P&L 全套上线（%/RM 双填、按类型归并、父子折叠+段合计、空行自动藏、千位逗号、% 两位小数、表头 Aug 2026 + AMOUNT/% SALES 图例、SALES 行 100%）
+- [x] BUG-2026-07-29-001 partial payment 约束名破案并修复
+- [x] Edit Payment「不预填」实测无 bug（PV-2607-012 25 行全预填）— 结案
+- [ ] ⛔ 完工重复记 318 件 / DO 出货短记 63 件 → **owner: 会有别人处理**，不要动
+- [ ] ⛔ 收货流水断线（RM_RECEIPT 4月起为 0）→ **owner: 到时才提供开货量，时间未定**；他每月自行 import closing stock（stock_take_only 口径成立），不要修管道
+- [ ] ⛔ 客户期初 60,000 / 20 笔供应商预付款对销 → **owner: 到时我会解决**

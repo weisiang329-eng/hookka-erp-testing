@@ -1857,3 +1857,19 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
 
 ## 2026-07-31 (session: BOM per-material wastage %, owner "跟行业标准")
 - [x] BOM material lines now carry an optional **% waste** (industry-standard scrap factor). Added `wastePct?` to WIPMaterial + a waste input at all 6 material-row editor contexts (updateWIPMaterial / onUpdateMaterial / updateL1Material / updateMaterialAtPath). Engine already applied `× (1 + waste%/100)`; backend stores wipComponents JSON as-is so it persists end-to-end. Guidance in tooltip: cut/bulk (fabric/foam/wood) carry waste, discrete parts (screws/legs/mechanism) stay 0. Tests: bom-wastage.test.mjs. → branch feat/bom-wastage off staging.
+
+## 2026-08-01 (session: Sales Pipeline stage relabel — owner "New / Won / Lost 这些名词要换掉")
+- [x] Stage LABELS renamed to match the Customer module's vocabulary (a lead enters as
+  Potential and becomes a Confirmed customer): New→**Potential**, Won→**Confirmed**,
+  Lost→**Dropped**. Contacted / Quoted / Negotiating unchanged.
+- [x] Stored `key` values (NEW / WON / LOST) are UNTOUCHED, as is `LEAD_STAGES` in
+  `api/routes/sales-leads.ts` — display-only change, no migration, existing rows unaffected.
+- [x] `STAGES` in `src/pages/leads/index.tsx:35` is the single label source (kanban columns,
+  card stage picker, drawer badge, move menu all read it). Two hardcoded strings outside it
+  also fixed: the "Won" summary header → "Confirmed", and the card's "Lost: <reason>" →
+  "Dropped: <reason>". The stage-change prompt now reads "Why is this lead being dropped?".
+- [x] Regression test in `sales-leads.test.mjs`: asserts the exact key→label pairs AND that
+  no stale label ("New" / "Won" / "Lost") survives on the page. Guards both halves — a future
+  edit that renames a KEY instead of a label would orphan every sales_leads.stage row.
+- [ ] NOT renamed: the "+ New Lead" create button. That is the create action, not the stage —
+  say the word if it should read "New Potential" / "Add Lead" instead.

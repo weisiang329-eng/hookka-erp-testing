@@ -193,7 +193,7 @@ export default function LeadsPage() {
             onClick={() => setShowAdd(true)}
             className="h-10 px-4 rounded-lg bg-[#1F1D1B] text-white text-sm font-medium hover:bg-[#3a3633] flex items-center gap-2 shadow-sm transition-colors"
           >
-            <Plus className="w-4 h-4" /> New Lead
+            <Plus className="w-4 h-4" /> New Potential
           </button>
         </div>
       </div>
@@ -310,7 +310,7 @@ export default function LeadsPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setShowAdd(false)}>
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-[#1F1D1B]">New Lead</h2>
+              <h2 className="text-lg font-semibold text-[#1F1D1B]">New potential customer</h2>
               <button onClick={() => setShowAdd(false)} className="text-[#9CA3AF] hover:text-[#1F1D1B]"><X className="w-5 h-5" /></button>
             </div>
             <div className="grid grid-cols-2 gap-3">
@@ -348,7 +348,7 @@ export default function LeadsPage() {
             </div>
             <div className="mt-5 flex justify-end gap-2">
               <button onClick={() => setShowAdd(false)} className="px-4 py-2 rounded-lg border border-[#E2DDD8] text-sm text-[#6B7280] hover:bg-[#F0ECE9]">Cancel</button>
-              <button disabled={saving || (!form.name.trim() && !form.company.trim()) || !emailValid(form.email)} onClick={() => void addLead()} className="px-4 py-2 rounded-lg bg-[#1F1D1B] text-white text-sm font-medium disabled:opacity-50 hover:bg-[#3a3633]">Add lead</button>
+              <button disabled={saving || (!form.name.trim() && !form.company.trim()) || !emailValid(form.email)} onClick={() => void addLead()} className="px-4 py-2 rounded-lg bg-[#1F1D1B] text-white text-sm font-medium disabled:opacity-50 hover:bg-[#3a3633]">Add potential</button>
             </div>
           </div>
         </div>

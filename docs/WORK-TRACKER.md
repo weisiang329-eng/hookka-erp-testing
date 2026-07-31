@@ -1892,3 +1892,24 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
   edit that renames a KEY instead of a label would orphan every sales_leads.stage row.
 - [ ] NOT renamed: the "+ New Lead" create button. That is the create action, not the stage —
   say the word if it should read "New Potential" / "Add Lead" instead.
+
+## 2026-08-01 (session: close out the open items — owner "把还没做的都做完")
+- [x] **Component Kits multi-create** — the kit editor can now bind ONE component list to
+  several parent SKUs in a single save ("Also apply to these SKUs", create-mode only;
+  editing still targets one kit). A mechanism usually comes in several sizes / handings
+  that take the identical screw set, and re-entering the list per SKU was the actual chore.
+  Targets are de-duplicated; the Save button states how many kits the click will write.
+  Writes are SEQUENTIAL with a per-parent catch so a partial failure reports
+  "3 of 4 saved, X failed" and keeps the editor open — a rejected `Promise.all` would have
+  hidden which parents landed. Self-reference (a parent listed in its own components) is
+  caught up front, because the backend rejects per parent and one bad pick would otherwise
+  half-apply the save.
+- [x] **`+ New Lead` → `+ New Potential`** (dialog: "New potential customer", submit:
+  "Add potential"). Adding a card now also mints a POTENTIAL customer, so the old label
+  matched neither the first pipeline column nor the Customer module.
+- [ ] ⛔ **`customer_wishlist` table NOT dropped.** The feature is retired (UI + routes gone)
+  but the rows are kept. Dropping data is irreversible and the owner asked to remove a
+  feature, not to wipe records — needs an explicit instruction before anyone touches it.
+- [ ] Owner data check (not a code task): the BOM line `NLY-D30-1.5"` has BLANK cut L×W, so
+  qty 1 consumes ONE WHOLE SHEET rather than one cut piece. Worth auditing how many filler
+  lines are in that state.

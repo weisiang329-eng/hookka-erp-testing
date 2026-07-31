@@ -260,3 +260,43 @@ test("Component Kits page + route + sidebar are wired", () => {
   assert.match(flat("src/dashboard-routes.tsx"), /path: '\/bom\/component-kits'/);
   assert.match(flat("src/components/layout/sidebar.tsx"), /name: "Component Kits", href: "\/bom\/component-kits"/);
 });
+
+// ---- Multi-create: one component list, several parent SKUs ------------------
+// Owner ask. A mechanism usually comes in several sizes / handings that take the
+// identical screw set, so re-entering the list per SKU was the real chore.
+
+test("kit editor can bind one component list to several parent SKUs", () => {
+  const f = flat("src/pages/component-kits/index.tsx");
+  // Offered on CREATE only — editing targets one specific kit.
+  assert.match(f, /allowMultiParent=\{isNewKit\}/);
+  assert.match(f, /\{allowMultiParent && \(/);
+  assert.match(f, /Also apply to these SKUs/);
+  // De-duplicated, so picking the same SKU twice doesn't PUT it twice.
+  assert.match(f, /if \(c && !targets\.some\(\(t\) => t\.code === c\)\) targets\.push/);
+  // The button states how many kits the click will actually write.
+  assert.match(f, /targetCount > 1 \? `Save \$\{targetCount\} kits` : "Save kit"/);
+});
+
+test("multi-parent save reports partial failure instead of hiding it", () => {
+  const f = flat("src/pages/component-kits/index.tsx");
+  // Sequential writes with a per-parent catch: "3 of 4 saved, X failed" tells
+  // the operator which parents landed; one rejected Promise.all would not.
+  assert.match(f, /const failed: string\[\] = \[\];/);
+  assert.match(f, /failed\.push\(`\$\{t\.code\} \(\$\{humanizeError\(e\)\}\)`\)/);
+  assert.match(f, /\$\{saved\} of \$\{targets\.length\} saved\. Failed:/);
+  // The editor stays open on partial failure so the operator can retry.
+  assert.match(f, /\} else \{ \/\/ Keep the editor open/);
+  // Self-reference is caught UP FRONT — the backend rejects per parent, so one
+  // bad pick would otherwise half-apply a multi-parent save.
+  assert.match(f, /const selfRef = targets\.find\(/);
+  assert.match(f, /is in its own component list/);
+});
+
+test("Sales Pipeline create button speaks the stage vocabulary", () => {
+  const f = flat("src/pages/leads/index.tsx");
+  // Adding a card also mints a POTENTIAL customer, so "New Lead" no longer
+  // matched either the first column or the Customer module.
+  assert.match(f, /New Potential/);
+  assert.match(f, /New potential customer<\/h2>/);
+  assert.ok(!/> New Lead/.test(f), "the old 'New Lead' button label must be gone");
+});

@@ -1858,6 +1858,25 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
 ## 2026-07-31 (session: BOM per-material wastage %, owner "跟行业标准")
 - [x] BOM material lines now carry an optional **% waste** (industry-standard scrap factor). Added `wastePct?` to WIPMaterial + a waste input at all 6 material-row editor contexts (updateWIPMaterial / onUpdateMaterial / updateL1Material / updateMaterialAtPath). Engine already applied `× (1 + waste%/100)`; backend stores wipComponents JSON as-is so it persists end-to-end. Guidance in tooltip: cut/bulk (fabric/foam/wood) carry waste, discrete parts (screws/legs/mechanism) stay 0. Tests: bom-wastage.test.mjs. → branch feat/bom-wastage off staging.
 
+## 2026-08-01 (session: owner bug report — Component Kits + Foam relabel completion)
+- [x] **Component Kits saved but never appeared** (owner screenshot: toast "Kit saved — SL 13.5(E) → 1 component(s)", list still "No component kits yet").
+  ROOT CAUSE = the repo's camelCase read-bug class. `db-pg.ts` installs `transform.column.from` on the postgres.js client, so `SELECT *` on the runtime-created `component_bom_lines` returns **camelCase** keys (parentCode / childCode / qtyPer / wastePct), but `component-bom.ts` read snake_case only → `r.parent_code` was always `undefined`.
+  - `listKits()` skipped EVERY row → empty list (the visible symptom).
+  - `explodeKits()` built an empty kit map → **the screws never reached consumption / costing at all**. Silent money-path hole, worse than the reported symptom.
+  Fixed by reading DUAL-KEYED (`str()` / `dualNum()` helpers) in both functions.
+- [x] Component Kits page no longer swallows a failed list read — `if (!kRes.success) throw` instead of falling through to the "no kits yet" empty state (that silence is exactly why the bug looked like "it only saves one").
+- [x] Regression tests: `component-kit-subbom.test.mjs` gained a camelCase-returning D1 stub (the old stub fed snake_case, which is why the suite was green while prod was broken) covering both listKits and explodeKits.
+- [x] **Foam relabel finished across the system.** The 2026-07-30 rollout updated some label maps and missed others. Owner-visible symptom: the BOM process-dept `<select>` rendered a BLANK option (FOAM_CUTTING was in DEPT_ORDER but absent from DEPT_LABELS) and still showed "Foam" instead of "Foam Bonding".
+  - `bom.tsx`: added FOAM_CUTTING to DEPT_LABELS + DEPT_COLORS; FOAM → "Foam Bonding"; 3 master-template seed rows `dept: "Foam"` → "Foam Bonding".
+  - FOAM → "Foam Bonding" in: `production/utils.ts`, `production/tracker.tsx`, `service-cases/detail.tsx`, `m/config/forms.ts`, `m/screens/ProductionScreen.tsx`, `m/screens/ProductionDetailScreen.tsx`, `lib/repair-scope.ts`, `planning/index.tsx` (shortName), `lib/mock-data.ts` (shortName).
+  - FOAM_CUTTING was missing ENTIRELY from 5 dept lists (tracker, both mobile production screens, service-cases depts, mobile working-hours dept picker) — added, ordered immediately before FOAM to match `production/utils.ts`.
+  - `wip-times.tsx`: kept legacy label aliases ("foam" / "foam cut") in DEPT_CODE_BY_LABEL so spreadsheets exported before the relabel still import.
+  - `repair-scope.test.mjs` badge expectation updated to "Custom: Foam Bonding + Packing".
+  - New regression tests in `foam-cutting-department.test.mjs`: DEPT_LABELS must cover every DEPT_ORDER code (blank-option guard) + no label map may still spell FOAM as bare "Foam".
+- [x] BOM toolbar (owner): removed **Production Categories Editor** + **Production Times** buttons (the dedicated WIP Times module supersedes both); added a **Component Kits** button in their place. The Production Times LOOKUP is untouched — BOM rows still auto-fill minutes from that matrix. Sidebar entry kept.
+- [x] Answered: foam usage = qty is the PIECE COUNT; required = qty x poQty x (1+waste%), then **only if cut L x W AND the RM sheet size are both present** it becomes x (cutArea / sheetArea). Blank cut size => qty 1 consumes ONE WHOLE SHEET, not one cut piece.
+- [x] Sales Pipeline stage relabel (owner: "New / Won / Lost 这些名词要换掉") — owner chose Potential / Confirmed / Dropped; shipped in the session below (PR #153).
+
 ## 2026-08-01 (session: Sales Pipeline stage relabel — owner "New / Won / Lost 这些名词要换掉")
 - [x] Stage LABELS renamed to match the Customer module's vocabulary (a lead enters as
   Potential and becomes a Confirmed customer): New→**Potential**, Won→**Confirmed**,

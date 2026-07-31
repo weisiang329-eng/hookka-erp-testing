@@ -140,6 +140,80 @@ test("explodeKits is a no-op when no line matches a kit parent", async () => {
   assert.equal(out[0].code, "FOAM-D35");
 });
 
+// ---- REGRESSION: rows come back camelCase from Supabase Postgres ------------
+// db-pg.ts installs `transform.column.from` on the postgres.js client, so every
+// SELECT returns camelCase keys (parentCode / childCode / qtyPer / wastePct) —
+// NOT the snake_case names the runtime DDL declares. component-bom.ts read only
+// snake_case, so on prod:
+//   - listKits() skipped EVERY row  → "Kit saved" toast, page still says
+//     "No component kits yet" (owner report 2026-08-01).
+//   - explodeKits() found NO kit    → the screws never reached consumption /
+//     costing at all — a silent money-path hole.
+// The stub above feeds snake_case (the DDL shape); these feed camelCase (the
+// shape the live driver actually returns). Both must work — repo rule is to
+// read rows DUAL-KEYED.
+const camelSeed = [
+  { id: "k1", orgId: "org1", parentCode: "MECH-PB", parentName: "PB", childCode: "SCR-M6", childName: "M6", qtyPer: 4, wastePct: 0 },
+  { id: "k2", orgId: "org1", parentCode: "MECH-PB", parentName: "PB", childCode: "SCR-M8", childName: "M8", qtyPer: 2, wastePct: 10 },
+];
+
+// camelCase-returning variant of the stub: same SQL, driver-transformed keys.
+function makeCamelDb(seed) {
+  const db = makeDb([]);
+  const rows = seed.map((r) => ({ ...r }));
+  return {
+    prepare(sql) {
+      const s = sql.trim().replace(/\s+/g, " ");
+      let bound = [];
+      const obj = {
+        bind(...args) { bound = args; return obj; },
+        async run() { return { success: true }; },
+        async all() {
+          if (/FROM component_bom_lines WHERE \(org_id = \? OR org_id IS NULL\)/i.test(s)) {
+            const [org] = bound;
+            return { results: rows.filter((r) => r.orgId === org || r.orgId == null) };
+          }
+          if (/FROM component_bom_lines WHERE parent_code IN/i.test(s)) {
+            const set = new Set(bound);
+            return { results: rows.filter((r) => set.has(r.parentCode)) };
+          }
+          return { results: [] };
+        },
+        async first() { return null; },
+      };
+      return obj;
+    },
+    batch: db.batch,
+  };
+}
+
+test("listKits reads camelCase rows (Supabase driver transform) — not just snake_case", async () => {
+  const { listKits } = await import("../src/api/lib/component-bom.ts");
+  const kits = await listKits(makeCamelDb(camelSeed), "org1");
+  assert.equal(kits.length, 1, "the kit must not be skipped when keys are camelCase");
+  assert.equal(kits[0].parentCode, "MECH-PB");
+  assert.equal(kits[0].parentName, "PB");
+  assert.equal(kits[0].children.length, 2);
+  const m8 = kits[0].children.find((c) => c.childCode === "SCR-M8");
+  assert.equal(m8.qtyPer, 2);
+  assert.equal(m8.wastePct, 10);
+  assert.equal(m8.childName, "M8");
+});
+
+test("explodeKits reads camelCase rows — screws still reach consumption / costing", async () => {
+  const { explodeKits } = await import("../src/api/lib/component-bom.ts");
+  const out = await explodeKits(makeCamelDb(camelSeed), [
+    { code: "MECH-PB", inventoryCode: "MECH-PB", name: "Pushback", qtyPerUnit: 3, wastePct: 0 },
+  ]);
+  assert.equal(out.length, 3, "parent line + 2 exploded screws");
+  const m6 = out.find((l) => l.code === "SCR-M6");
+  assert.equal(m6.qtyPerUnit, 12); // 3 × 4
+  assert.equal(m6.name, "M6");
+  const m8 = out.find((l) => l.code === "SCR-M8");
+  assert.equal(m8.qtyPerUnit, 6); // 3 × 2
+  assert.equal(m8.wastePct, 10);
+});
+
 // ---- Structural: wiring is present -----------------------------------------
 const read = (p) => readFileSync(resolve(process.cwd(), p), "utf8");
 const flat = (p) => read(p).replace(/\s+/g, " ");

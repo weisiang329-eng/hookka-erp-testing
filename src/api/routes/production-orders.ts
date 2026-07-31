@@ -23,74 +23,27 @@
 // its own table in the schema.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
-import type { Context } from "hono";
 import type { Env } from "../worker";
 import { postProductionOrderCompletion } from "../lib/fg-completion";
-import { archiveUnionSource } from "../lib/archive-union";
-import {
-  consumeRawMaterialsForPO,
-  postJobCardLabor,
-} from "../lib/po-cost-cascade";
-import {
-  computeFcFabricUsageMeters,
-  fetchBomWipComponentsByCode,
-  fetchSofaSiblingsByGroupKey,
-  sofaSiblingGroupKey,
-  type SiblingPo,
-} from "../lib/fabric-usage";
+import { postJobCardLabor } from "../lib/po-cost-cascade";
 import { resolveWorkerToken } from "./worker-auth";
 import { workerCoversDept } from "../../lib/worker";
-import { checkProductionOrderLocked, lockedResponse } from "../lib/lock-helpers";
-import { emitAudit } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
 import {
   ensureJobCardQrTokenColumn,
   getOrCreateJobCardQrToken,
 } from "../lib/jobcard-qr-token";
 import { pickPackingCard } from "../lib/packing-card-resolve";
-import { applyPackingRack } from "../lib/packing-rack-write";
-import { getOrgId, tryGetOrgId, DEFAULT_ORG_ID } from "../lib/tenant";
+import { getOrgId } from "../lib/tenant";
 import {
   poListCacheVersion,
   bumpPoListCacheVersion,
-  invalidateProductionListCaches,
 } from "../lib/po-list-cache";
-// Phase 6 — parallel event sourcing for JC mutations. appendJobCardEvent
-// writes go after the UPDATE lands so the source-of-truth row is committed
-// before we narrate what changed; a write failure here does NOT roll the
-// UPDATE back (events are audit-only, not the transactional source).
-import {
-  buildJobCardEventStatement,
-  diffJobCardEvents,
-} from "../lib/job-card-events";
-// Google Sheets sync (fire-and-forget). Helper silently no-ops when
-// GOOGLE_SHEETS_SA_KEY is missing — see docs/SHEETS-SYNC.md.
-import { syncJobCardToSheet } from "../lib/sheets-sync";
-import { planCompletionPieceStamps } from "../lib/completion-piece-stamp";
-// Per-request leadtime map → expectedDueDate computation. The Production
-// overview cell flips its text colour to teal when a JC's persisted
-// dueDate doesn't match what the *current* leadtime config says it
-// should be (operator manually moved it, OR config changed underneath
-// it). Computed at read time, never persisted — purely derived.
-import {
-  loadLeadTimes,
-  leadDaysFor,
-  addDays,
-  DEPT_ORDER,
-  type LeadTimeMap,
-} from "../lib/lead-times";
+import { DEPT_ORDER } from "../lib/lead-times";
 import {
   validateFabricCodes,
   unknownFabricCodeError,
 } from "../lib/fabric-validation";
-// HB-only completion gate (commit 9086352 + this commit). When a BEDFRAME PO
-// carries specialOrder "Headboard Only", the SO/CO line really is HB-only —
-// any DIVAN job_cards are either (a) filtered out at PO creation by the
-// production-builder forward-only fix, or (b) legacy stragglers from before
-// that fix that we don't touch (per memory feedback_protect_completed_work).
-// Either way, completion math must ignore wipType=DIVAN so the HB pack alone
-// can flip the PO to COMPLETED → SO/CO to READY_TO_SHIP.
-import { isHeadboardOnlySpecial } from "./fg-units";
 // Helpers extracted to ./production-orders/_helpers (behaviour-preserving split).
 import {
   PO_LIST_BODY_TTL_S,
@@ -3026,6 +2979,50 @@ app.get("/board", async (c) => {
   );
 
   return c.json({ success: true, data: data.items });
+});
+
+// GET /api/production-orders/scan-lookup?code=X — resolve a scanned code (a
+// job-card id, a PO number, or a PO id) to the ONE matching order + its job
+// cards, instead of downloading the whole ~22MB list just to find one (perf
+// 2026-07-31). Returns the same { success, data: [order] } shape the scan page
+// already iterates, so its matching logic is untouched. An exact-key lookup
+// still finds ANY order incl. completed, so the scan flow is unchanged.
+// Registered BEFORE /:id so "scan-lookup" isn't captured as an :id.
+app.get("/scan-lookup", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const code = (c.req.query("code") ?? "").trim();
+  if (!code) return c.json({ success: true, data: [] });
+  let poId: string | null = null;
+  // 1) a scanned job-card sticker → its production order
+  const jc = await db
+    .prepare("SELECT productionOrderId FROM job_cards WHERE id = ? LIMIT 1")
+    .bind(code)
+    .first<{ productionOrderId: string }>();
+  if (jc?.productionOrderId) poId = jc.productionOrderId;
+  // 2) a PO number (case-insensitive) or a PO id
+  if (!poId) {
+    const po = await db
+      .prepare(
+        "SELECT id FROM production_orders WHERE id = ? OR LOWER(poNo) = LOWER(?) LIMIT 1",
+      )
+      .bind(code, code)
+      .first<{ id: string }>();
+    if (po?.id) poId = po.id;
+  }
+  if (!poId) return c.json({ success: true, data: [] });
+  const order = await fetchPO(db, poId);
+  if (!order) return c.json({ success: true, data: [] });
+  await attachCustomerSO(
+    db,
+    [order] as unknown as Array<{
+      salesOrderId: string;
+      consignmentOrderId: string;
+      customerSO: string;
+    }>,
+  );
+  return c.json({ success: true, data: [order] });
 });
 
 app.get("/:id", async (c) => {

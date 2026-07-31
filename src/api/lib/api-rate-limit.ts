@@ -89,6 +89,21 @@ function isExempt(path: string, exempt: string[]): boolean {
  *
  * Returns the middleware, not a Promise — safe to register at module load.
  */
+// Isolate-local backstop for AUTHENTICATED GET requests (perf audit
+// 2026-07-31). The KV limiter costs ~2 round-trips (2 reads + 2 blocking
+// writes) per request and — since it ships WARN-ONLY by default — doesn't even
+// block on the read hot path. So authed GETs skip KV entirely and use this
+// free in-memory counter instead: it still catches a runaway client hammering
+// the same isolate (a fetch-loop → the same few isolates), which is the real
+// risk, while removing the latency. Loose across isolates by design; writes /
+// login / unauthenticated traffic keep the full KV limiter below. The window
+// is generous enough that normal human use never trips it (600 GETs / 10s per
+// user per isolate ≈ 60/s).
+const GET_BACKSTOP_WINDOW_MS = 10_000;
+const GET_BACKSTOP_MAX = 600;
+const GET_BACKSTOP_CAP = 5000;
+const _getBackstop = new Map<string, { windowStart: number; count: number }>();
+
 export function apiRateLimit(opts: ApiRateLimitOpts = {}): MiddlewareHandler<Env> {
   const exempt = [...DEFAULT_EXEMPT, ...(opts.exempt ?? [])];
 
@@ -113,6 +128,35 @@ export function apiRateLimit(opts: ApiRateLimitOpts = {}): MiddlewareHandler<Env
     // the IP when there's no session yet (login, forgot-password, etc.).
     const userId = (c.get as unknown as (k: string) => string | undefined)("userId");
     const ident = userId ?? `ip:${clientIp(c)}`;
+
+    // Fast path: an authenticated GET skips the KV limiter (~2 round-trips) and
+    // uses the free isolate-local backstop instead. Only a runaway loop trips
+    // it; a tripped backstop honours the same warn-only/enforce switch as KV.
+    if (userId && c.req.method === "GET") {
+      const nowB = Date.now();
+      let b = _getBackstop.get(userId);
+      if (!b || nowB - b.windowStart > GET_BACKSTOP_WINDOW_MS) {
+        if (_getBackstop.size > GET_BACKSTOP_CAP) _getBackstop.clear();
+        b = { windowStart: nowB, count: 0 };
+        _getBackstop.set(userId, b);
+      }
+      b.count += 1;
+      if (b.count > GET_BACKSTOP_MAX) {
+        const enforcing =
+          (c.env as { API_RATE_LIMIT_MODE?: string }).API_RATE_LIMIT_MODE === "enforce";
+        console.warn(
+          `[api-rate-limit] ${enforcing ? "429" : "WOULD-429"} isolate-backstop user=${userId} path=${path} count=${b.count}/${GET_BACKSTOP_MAX} per ${GET_BACKSTOP_WINDOW_MS}ms`,
+        );
+        if (enforcing) {
+          c.res.headers.set("Retry-After", "10");
+          return c.json(
+            { success: false, error: "Too many requests. Try again shortly.", retryAfterSec: 10 },
+            429,
+          );
+        }
+      }
+      return next();
+    }
 
     const kv = c.env.SESSION_CACHE;
     // Without KV (test env, KV outage), fall through. We never let a KV

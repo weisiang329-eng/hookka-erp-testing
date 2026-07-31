@@ -5060,62 +5060,6 @@ export async function warmPoListPlanningVariant(
   return { rows: result?.total ?? 0 };
 }
 
-// Warm ONE per-DEPT sheet snapshot (Fab Cut / Fab Sew / … / Packing). Each dept
-// page requests `?fields=minimal&dept=<DEPT>&excludeCompleted=true` (no date
-// window — see index.tsx), a DISTINCT snapshot key the delivery/planning warmers
-// don't cover, so the first operator to open a dept sheet after a deploy paid a
-// ~5–8s cold recompute (owner-reported "打开卡很久" on Fab Cut). Pre-building it
-// here (cron, off the request path) removes that spike. The key MUST equal the
-// handler's sorted "&"-joined query string for that request.
-export async function warmPoListDeptVariant(
-  c: Context<Env>,
-  orgId: string,
-  dept: string,
-): Promise<{ rows: number }> {
-  const { withSnapshot } = await import("../../lib/snapshot");
-  const snapshotCacheKey = `dept=${dept}&excludeCompleted=true&fields=minimal`;
-  const result = await withSnapshot<{
-    success: true;
-    data: unknown[];
-    total: number;
-  }>(
-    c.var.DB,
-    {
-      tableName: "production_orders_list_snapshot",
-      sourceTables: ["production_orders", "job_cards", "sales_orders", "consignment_orders"],
-    },
-    orgId,
-    async () => {
-      const data = await fetchFilteredPOs(
-        c.var.DB,
-        orgId,
-        null, // statuses
-        true, // includeJobCards — the dept sheet inlines full jobCards
-        false, // includeArchive
-        true, // minimal
-        dept, // deptFilter
-        null, // dueFrom
-        null, // dueTo
-        null, // catFilter
-        true, // excludeCompleted — dept pages always send it
-      );
-      await attachCustomerSO(
-        c.var.DB,
-        data as Array<{
-          salesOrderId: string;
-          consignmentOrderId: string;
-          customerSO: string;
-        }>,
-      );
-      return { success: true, data, total: data.length };
-    },
-    snapshotCacheKey,
-    c,
-    undefined, // no SWR — force compute+store on the cron
-  );
-  return { rows: result?.total ?? 0 };
-}
-
 // After a worker QR scan completes job cards, the operator-facing production
 // dept sheets read from a cache-aside snapshot (production_orders_list_snapshot)
 // plus the KV list cache. The snapshot freshness probe compares MAX(updated_at)

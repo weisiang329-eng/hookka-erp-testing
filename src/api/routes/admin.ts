@@ -806,6 +806,18 @@ const PERF_INDEXES: string[] = [
   "CREATE INDEX IF NOT EXISTS idx_jc_updated ON job_cards(updated_at)",
   "CREATE INDEX IF NOT EXISTS idx_whe_created ON working_hour_entries(created_at)",
   "CREATE INDEX IF NOT EXISTS idx_cost_ledger_date ON cost_ledger(\"date\")",
+  // Snapshot-freshness probe prefers updated_at (snapshot-freshness.ts) — these
+  // tables had NO updated_at index, so the MAX(updated_at) probe was a seq scan
+  // every request AND the cache read stale → full recompute. Reviving the
+  // snapshot cache for production-orders / delivery-orders / po-values /
+  // ready-planning / dept-category-summary (owner perf audit 2026-07-31).
+  "CREATE INDEX IF NOT EXISTS idx_prod_po_updated ON production_orders(updated_at)",
+  "CREATE INDEX IF NOT EXISTS idx_do_updated ON delivery_orders(updated_at)",
+  "CREATE INDEX IF NOT EXISTS idx_whe_updated ON working_hour_entries(updated_at)",
+  // Audit logs that grow forever, ORDER BY their time column with no index.
+  "CREATE INDEX IF NOT EXISTS idx_so_status_changes_ts ON so_status_changes(\"timestamp\" DESC)",
+  // /products (2.2s): full price-history read+sort per call, unsupported.
+  "CREATE INDEX IF NOT EXISTS idx_product_prices_pid_eff ON product_prices(productId, effectiveFrom DESC, created_at DESC)",
 ];
 
 app.post("/ensure-perf-indexes", async (c) => {

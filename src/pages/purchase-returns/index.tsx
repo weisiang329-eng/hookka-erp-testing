@@ -12,6 +12,8 @@ type PurchaseReturn = {
   id: string;
   return_no: string;
   pi_no: string | null;
+  purchase_invoice_id?: string | null;
+  grn_no?: string | null;
   supplier_name: string | null;
   status: string | null;
   resolution: string | null;
@@ -47,13 +49,14 @@ async function getJson<T>(url: string): Promise<T | null> {
 export default function PurchaseReturnsPage() {
   const [rows, setRows] = useState<PurchaseReturn[]>([]);
   const [loaded, setLoaded] = useState(false);
-  // ?pi=<id> (from the "Create Purchase Return" button on a PI) preselects that
-  // PI and opens the New dialog straight away (slice 4).
-  const initialPiId = useMemo(() => {
-    if (typeof window === "undefined") return "";
-    return new URLSearchParams(window.location.search).get("pi") ?? "";
+  // ?pi=<id> / ?grn=<id> (from the "Create Purchase Return" button on a PI or a
+  // goods receipt) preselects that source and opens the New dialog straight away.
+  const { initialPiId, initialGrnId } = useMemo(() => {
+    if (typeof window === "undefined") return { initialPiId: "", initialGrnId: "" };
+    const q = new URLSearchParams(window.location.search);
+    return { initialPiId: q.get("pi") ?? "", initialGrnId: q.get("grn") ?? "" };
   }, []);
-  const [showNew, setShowNew] = useState(!!initialPiId);
+  const [showNew, setShowNew] = useState(!!initialPiId || !!initialGrnId);
 
   const reload = useCallback(async () => {
     const data = await getJson<PurchaseReturn[]>("/api/purchase-returns");
@@ -137,9 +140,11 @@ export default function PurchaseReturnsPage() {
                       <button onClick={() => void del(r.id)} className="text-[#9A3A2D] hover:bg-[#F9E1DA] rounded p-1 align-middle"><Trash2 className="w-4 h-4" /></button>
                     </>
                   )}
-                  {(r.status ?? "OPEN") === "STOCK_OUT" && (
+                  {(r.status ?? "OPEN") === "STOCK_OUT" && (r.purchase_invoice_id ? (
                     <button onClick={() => void issueDn(r)} className="text-xs font-medium px-2.5 py-1 rounded-md bg-[#6B4A6D] text-white hover:bg-[#573C58]">Issue Debit Note</button>
-                  )}
+                  ) : (
+                    <span className="text-[11px] text-[#9CA3AF]">GRN return · stock reversed</span>
+                  ))}
                 </td>
               </tr>
             ))}
@@ -147,14 +152,18 @@ export default function PurchaseReturnsPage() {
         </table>
       </div>
 
-      {showNew && <NewPurchaseReturnDialog initialPiId={initialPiId} onClose={() => setShowNew(false)} onDone={async () => { setShowNew(false); await reload(); }} />}
+      {showNew && <NewPurchaseReturnDialog initialPiId={initialPiId} initialGrnId={initialGrnId} onClose={() => setShowNew(false)} onDone={async () => { setShowNew(false); await reload(); }} />}
     </div>
   );
 }
 
-function NewPurchaseReturnDialog({ initialPiId, onClose, onDone }: { initialPiId?: string; onClose: () => void; onDone: () => Promise<void> | void }) {
+function NewPurchaseReturnDialog({ initialPiId, initialGrnId, onClose, onDone }: { initialPiId?: string; initialGrnId?: string; onClose: () => void; onDone: () => Promise<void> | void }) {
   const [pis, setPis] = useState<PIOption[]>([]);
   const [piId, setPiId] = useState("");
+  // GRN-source mode (deep-linked from a goods receipt) — no PI, so no Debit Note.
+  const grnId = initialGrnId ?? "";
+  const [grnNo, setGrnNo] = useState("");
+  const grnMode = !!initialGrnId;
   const [lines, setLines] = useState<PickLine[]>([]);
   const [reason, setReason] = useState("");
   const [notes, setNotes] = useState("");
@@ -193,20 +202,29 @@ function NewPurchaseReturnDialog({ initialPiId, onClose, onDone }: { initialPiId
     })));
   };
 
-  // Deep-linked from a PI ("Create Purchase Return"): preselect it + load lines.
-  // Fires once on a user-driven prop (initialPiId), not a render loop, so the
+  // Load a GRN's received lines (deep-linked from a goods receipt).
+  const loadGrn = async (id: string) => {
+    const src = await getJson<{ grnNo?: string; items: SourceLine[] }>(`/api/purchase-returns/source/grn/${id}`);
+    setGrnNo(src?.grnNo ?? "");
+    const items = src?.items ?? [];
+    setLines(items.map((it) => ({ ...it, on: false, retQty: String(it.quantity ?? 0), retCostRM: ((it.unitCostSen ?? 0) / 100).toFixed(2), problem: "" })));
+  };
+
+  // Deep-linked from a PI or GRN ("Create Purchase Return"): preselect + load.
+  // Fires once on a user-driven prop, not a render loop, so the
   // cascading-render concern set-state-in-effect warns about doesn't apply.
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    if (initialPiId) void loadLines(initialPiId);
-  }, [initialPiId]);
+    if (initialGrnId) void loadGrn(initialGrnId);
+    else if (initialPiId) void loadLines(initialPiId);
+  }, [initialPiId, initialGrnId]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const patch = (idx: number, p: Partial<PickLine>) => setLines((prev) => prev.map((l, i) => (i === idx ? { ...l, ...p } : l)));
 
   const submit = async () => {
     const picked = lines.filter((l) => l.on && (parseFloat(l.retQty) || 0) > 0);
-    if (!piId) { setErr("Pick a Purchase Invoice."); return; }
+    if (!grnMode && !piId) { setErr("Pick a Purchase Invoice."); return; }
     if (picked.length === 0) { setErr("Tick at least one line with a quantity."); return; }
     setBusy(true);
     setErr(null);
@@ -215,7 +233,7 @@ function NewPurchaseReturnDialog({ initialPiId, onClose, onDone }: { initialPiId
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          purchaseInvoiceId: piId,
+          ...(grnMode ? { grnId } : { purchaseInvoiceId: piId }),
           reason,
           notes,
           resolution,
@@ -249,17 +267,29 @@ function NewPurchaseReturnDialog({ initialPiId, onClose, onDone }: { initialPiId
         </div>
 
         <div className="grid grid-cols-2 gap-3 mb-4">
-          <label className="text-xs text-[#6B7280] flex flex-col gap-1 col-span-2">Purchase Invoice
-            <select value={piId} onChange={(e) => void loadLines(e.target.value)} className="border border-[#E2DDD8] rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]">
-              <option value="">— pick a PI —</option>
-              {pis.map((p) => <option key={p.id} value={p.id}>{p.piNo} · {p.supplierName}{p.status ? ` · ${p.status}` : ""}</option>)}
-            </select>
-          </label>
-          {selectedPi && (selectedPi.paidAmountSen ?? 0) > 0 ? (
-            <div className="col-span-2 text-xs text-[#9C6F1E] bg-[#FAEFCB] border border-[#E8D597] rounded-lg px-3 py-2">
-              This PI shows a payment on file — a return here is a supplier <b>refund</b> claim (Debit Note posts in slice 3).
+          {grnMode ? (
+            <div className="col-span-2">
+              <div className="text-xs text-[#6B7280] mb-1">Goods Receipt</div>
+              <div className="text-sm font-medium text-[#1F1D1B] font-mono">{grnNo || "—"}</div>
+              <div className="mt-2 text-xs text-[#3E6570] bg-[#E0EDF0] border border-[#A8CAD2] rounded-lg px-3 py-2">
+                From a goods receipt (not invoiced) — this reverses stock only. <b>No supplier Debit Note</b> is issued.
+              </div>
             </div>
-          ) : null}
+          ) : (
+            <>
+              <label className="text-xs text-[#6B7280] flex flex-col gap-1 col-span-2">Purchase Invoice
+                <select value={piId} onChange={(e) => void loadLines(e.target.value)} className="border border-[#E2DDD8] rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]">
+                  <option value="">— pick a PI —</option>
+                  {pis.map((p) => <option key={p.id} value={p.id}>{p.piNo} · {p.supplierName}{p.status ? ` · ${p.status}` : ""}</option>)}
+                </select>
+              </label>
+              {selectedPi && (selectedPi.paidAmountSen ?? 0) > 0 ? (
+                <div className="col-span-2 text-xs text-[#9C6F1E] bg-[#FAEFCB] border border-[#E8D597] rounded-lg px-3 py-2">
+                  This PI shows a payment on file — a return here is a supplier <b>refund</b> claim.
+                </div>
+              ) : null}
+            </>
+          )}
         </div>
 
         {lines.length > 0 && (

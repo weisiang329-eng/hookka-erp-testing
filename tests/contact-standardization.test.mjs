@@ -80,3 +80,12 @@ test("Customers page uses the shared inputs; inline hub-state array is gone", ()
   // The duplicated inline code arrays were removed in favour of StateSelect.
   assert.doesNotMatch(f, /\["KL","SGR","PG","JB","SRW","SBH","IPH","MLK","KCH","KB","KT"\]/);
 });
+
+test("Supplier form uses the shared phone input + email validation", () => {
+  const f = readFileSync(resolve(process.cwd(), "src/pages/procurement/supplier-form-dialog.tsx"), "utf8").replace(/\s+/g, " ");
+  assert.match(f, /import \{ PhoneInput \} from "@\/components\/ui\/phone-input"/);
+  assert.match(f, /import \{ isValidEmail \} from "@\/lib\/contact-format"/);
+  assert.match(f, /<PhoneInput value=\{phone\}/);
+  // Malformed email blocks save.
+  assert.match(f, /if \(!isValidEmail\(email\)\) return;/);
+});

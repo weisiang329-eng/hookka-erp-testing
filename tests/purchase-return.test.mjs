@@ -41,7 +41,7 @@ test("PR numbering is PR-YYMM-NNN, sequential", () => {
 
 test("line total is derived qty × unit cost; CREATE itself moves no ledger", () => {
   const f = flat(CREATE);
-  assert.match(f, /VALUES \(\?, \?, \?, \?, \?, \?, 'OPEN', \?, \?, \?, \?, \?, \?, \?, \?\)/);
+  assert.match(f, /VALUES \(\?, \?, \?, \?, \?, \?, \?, \?, 'OPEN', \?, \?, \?, \?, \?, \?, \?, \?\)/);
   assert.match(f, /Math\.round\(qty \* unit\)/);
   // createPurchaseReturn ITSELF only writes the header + items — the stock/AP
   // moves live in the separate applyPurchaseReturnStockOut (slice 2) so a plain
@@ -145,8 +145,9 @@ test("PI detail has a Create Purchase Return button that deep-links with the PI"
 
 test("Purchase Returns page reads ?pi= and preselects that PI", () => {
   const page = flat(PAGE);
-  assert.match(page, /URLSearchParams\(window\.location\.search\)\.get\("pi"\)/);
-  assert.match(page, /useState\(!!initialPiId\)/);
+  assert.match(page, /new URLSearchParams\(window\.location\.search\)/);
+  assert.match(page, /q\.get\("pi"\)/);
+  assert.match(page, /useState\(!!initialPiId \|\| !!initialGrnId\)/);
   assert.match(page, /initialPiId=\{initialPiId\}/);
   // The dialog auto-loads the PI's returnable lines when deep-linked.
   assert.match(page, /if \(initialPiId\) void loadLines\(initialPiId\)/);
@@ -184,6 +185,32 @@ test("issue-DN reduces the supplier AP subledger + writes the DN document", () =
   assert.match(f, /CREATE TABLE IF NOT EXISTS supplier_debit_notes/);
   assert.match(f, /`SDN-\$\{yy\}\$\{mm\}-`/);
   assert.match(f, /INSERT INTO supplier_debit_notes/);
+});
+
+// ===========================================================================
+// Create from a GRN (goods receipt), not just a PI — owner "convert from PI or GR"
+// ===========================================================================
+
+test("a Purchase Return can be sourced from a GRN (stock only, no DN)", () => {
+  const f = flat(CREATE);
+  // GRN loader + self-applied grn_id/grn_no columns on the header.
+  assert.match(f, /export async function loadGrnItemsForReturn/);
+  assert.match(f, /ALTER TABLE purchase_returns ADD COLUMN IF NOT EXISTS \$\{col\}/);
+  assert.match(f, /"grn_id TEXT", "grn_no TEXT"/);
+  // A GRN-sourced return (no PI) is blocked from issuing a Debit Note.
+  assert.match(f, /this return is from a Goods Receipt \(not invoiced\) — no supplier Debit Note/);
+});
+
+test("routes accept a GRN source; GRN detail + page deep-link it", () => {
+  const f = flat(ROUTES);
+  assert.match(f, /app\.get\("\/source\/grn\/:grnId"/);
+  assert.match(f, /a source purchaseInvoiceId or grnId is required/);
+  assert.match(f, /loadGrnItemsForReturn\(c\.var\.DB, grnId\)/);
+  const page = flat(PAGE);
+  assert.match(page, /q\.get\("grn"\)/, "page reads ?grn=");
+  assert.match(page, /grnMode \? \{ grnId \} : \{ purchaseInvoiceId: piId \}/, "submit posts the right source");
+  const grn = readFileSync(resolve(process.cwd(), "src/pages/procurement/grn-detail.tsx"), "utf8").replace(/\s+/g, " ");
+  assert.match(grn, /navigate\(`\/purchase-returns\?grn=\$\{encodeURIComponent\(grn\.id\)\}`\)/);
 });
 
 test("issue-DN route + UI action exist, RBAC-gated", () => {

@@ -1833,3 +1833,8 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
 - [x] PV-2607-001 编辑报错调查：restate 加 VOID 守卫 + 技术报错持久化(kv+debug端点)；顺手修 BUG-2026-07-24-002（unvoid 复活旧分录）
 - [x] 「double 开 PV」检查：无系统复制，全是作废+重录对子 → 根因=预付款不可编辑
 - [x] 预付款可编辑（owner 拍板）：Edit=批量 knock-off 工作台，Advance 自动缩减，restate 接受 advanceSen
+
+## 2026-07-31 (session: purchasing follow-ups ①②③ + mechanism sub-BOM)
+- [x] ① Supplier phone/email standardization — supplier-form-dialog: PhoneInput (+60/intl) + isValidEmail gate (mirrors customer/lead forms)
+- [x] ② Purchase Return convert-from-GRN (not just PI) — loadGrnItemsForReturn, GET /source/grn/:id, POST branches PI|GRN, GRN-detail "Create Purchase Return" btn, dialog grnMode; DN step gated OFF for GRN returns (not invoiced → no AP)
+- [ ] ③ Mechanism→screw binding — owner chose **乙 (reusable sub-BOM / multi-level BOM)** over 甲 (lightweight binding table). "更正统 ERP,但重". Mechanism/leg SKU gets its OWN BOM listing required screws+qty; parent BOM references the mechanism; consumption auto-explodes the sub-BOM. BOM sizes in inches. → BUILD NOW

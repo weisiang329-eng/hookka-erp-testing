@@ -29,8 +29,12 @@ export type PRCreateItem = {
 };
 
 export type PRCreateInput = {
-  purchaseInvoiceId: string;
+  // Source is EITHER a PI or a GRN (goods receipt). A GRN-sourced return reverses
+  // stock but can't issue a supplier Debit Note (nothing invoiced yet).
+  purchaseInvoiceId?: string;
   piNo?: string;
+  grnId?: string;
+  grnNo?: string;
   supplierId?: string;
   supplierName?: string;
   reason?: string;
@@ -74,6 +78,17 @@ export async function ensurePurchaseReturnTables(db: D1Database): Promise<void> 
            problem TEXT )`,
       )
       .run();
+    // A return can also be sourced from a Goods Receipt (GRN) — owner 2026-07-30
+    // "convert from PI or GR". These columns are self-applied on the existing
+    // table. A GRN-sourced return reverses stock but issues NO supplier Debit
+    // Note (nothing was invoiced yet → no AP to debit).
+    for (const col of ["grn_id TEXT", "grn_no TEXT"]) {
+      try {
+        await db.prepare(`ALTER TABLE purchase_returns ADD COLUMN IF NOT EXISTS ${col}`).run();
+      } catch {
+        /* column already exists */
+      }
+    }
     tablesEnsured = true;
   } catch (err) {
     console.warn(
@@ -143,6 +158,38 @@ export async function loadPiItemsForReturn(
       grnItemId: (pick(r, "grn_item_id", "grnItemId") ?? null) as string | null,
       quantity: Number(pick(r, "qty", "qty") ?? 0),
       unitCostSen: Number(pick(r, "unit_price_sen", "unitPriceSen") ?? 0),
+      problem: "",
+    });
+  }
+  return out;
+}
+
+// Load a GRN's received lines as return candidates (owner 2026-07-30 — "convert
+// from PI or GR"). SELECT * + dual-keyed read (runtime-added columns). Any line
+// with a material code is returnable; qty seeds from the accepted/received qty.
+export async function loadGrnItemsForReturn(
+  db: D1Database,
+  grnId: string,
+): Promise<PRCreateItem[]> {
+  const res = await db
+    .prepare(`SELECT * FROM grn_items WHERE grnId = ? ORDER BY id ASC`)
+    .bind(grnId)
+    .all<Record<string, unknown>>();
+  const pick = (r: Record<string, unknown>, ...keys: string[]): unknown => {
+    for (const k of keys) if (r[k] != null) return r[k];
+    return undefined;
+  };
+  const out: PRCreateItem[] = [];
+  for (const r of res.results ?? []) {
+    const materialCode = (pick(r, "material_code", "materialCode") ?? null) as string | null;
+    if (!materialCode) continue;
+    out.push({
+      grnItemId: String(r.id ?? ""),
+      materialCode,
+      materialName: String(pick(r, "material_name", "materialName") ?? ""),
+      supplierSku: (pick(r, "supplier_sku", "supplierSku", "supplierSKU") ?? null) as string | null,
+      quantity: Number(pick(r, "accepted_qty", "acceptedQty", "received_qty", "receivedQty") ?? 0),
+      unitCostSen: Number(pick(r, "unit_cost_sen", "unitCostSen", "unit_price_sen", "unitPriceSen") ?? 0),
       problem: "",
     });
   }
@@ -320,6 +367,11 @@ export async function issuePurchaseReturnDebitNote(
     return { ok: false, error: "confirm the stock reversal first (must be STOCK_OUT)" };
   }
   if (header.debit_note_id) return { ok: false, error: "a debit note was already issued" };
+  // A GRN-sourced return (no PI) was never invoiced — there is no supplier AP to
+  // debit, so no Debit Note is issued (the stock reversal already happened).
+  if (!String(header.purchase_invoice_id ?? "").trim()) {
+    return { ok: false, error: "this return is from a Goods Receipt (not invoiced) — no supplier Debit Note to issue" };
+  }
 
   const agg = await db
     .prepare("SELECT COALESCE(SUM(line_total_sen),0) AS total FROM purchase_return_items WHERE purchase_return_id = ?")
@@ -404,16 +456,18 @@ export async function createPurchaseReturn(
   await db
     .prepare(
       `INSERT INTO purchase_returns
-         (id, return_no, purchase_invoice_id, pi_no, supplier_id, supplier_name,
-          status, resolution, reason, notes, returned_at, created_by,
-          created_at, updated_at, org_id)
-       VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, return_no, purchase_invoice_id, pi_no, grn_id, grn_no,
+          supplier_id, supplier_name, status, resolution, reason, notes,
+          returned_at, created_by, created_at, updated_at, org_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       id,
       returnNo,
-      input.purchaseInvoiceId,
+      input.purchaseInvoiceId ?? "",
       input.piNo ?? "",
+      input.grnId ?? "",
+      input.grnNo ?? "",
       input.supplierId ?? "",
       input.supplierName ?? "",
       input.resolution ?? "REFUND",

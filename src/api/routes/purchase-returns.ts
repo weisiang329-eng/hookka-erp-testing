@@ -18,6 +18,7 @@ import {
   ensurePurchaseReturnTables,
   createPurchaseReturn,
   loadPiItemsForReturn,
+  loadGrnItemsForReturn,
   applyPurchaseReturnStockOut,
   issuePurchaseReturnDebitNote,
   type PRCreateItem,
@@ -71,6 +72,33 @@ app.get("/source/pi/:piId", async (c) => {
   });
 });
 
+// GET /api/purchase-returns/source/grn/:grnId — a GRN header + its received
+// lines, so a return can be created straight from a goods receipt.
+app.get("/source/grn/:grnId", async (c) => {
+  const denied = await requirePermission(c, "purchase-invoices", "read");
+  if (denied) return denied;
+  await ensurePurchaseReturnTables(c.var.DB);
+  const grnId = c.req.param("grnId");
+  const grn = await c.var.DB.prepare("SELECT * FROM grns WHERE id = ?")
+    .bind(grnId)
+    .first<Record<string, unknown>>();
+  if (!grn) return c.json({ success: false, error: "Goods receipt not found" }, 404);
+  const items = await loadGrnItemsForReturn(c.var.DB, grnId);
+  return c.json({
+    success: true,
+    data: {
+      grnId,
+      grnNo: String(pick(grn, "grnNumber", "grn_number") ?? ""),
+      supplierId: String(pick(grn, "supplier_id", "supplierId") ?? ""),
+      supplierName: String(pick(grn, "supplier_name", "supplierName") ?? ""),
+      status: String(grn.status ?? ""),
+      // A GRN return is not invoiced → no supplier Debit Note step.
+      fromGrn: true,
+      items,
+    },
+  });
+});
+
 // GET /api/purchase-returns/:id — header + items
 app.get("/:id", async (c) => {
   const denied = await requirePermission(c, "purchase-invoices", "read");
@@ -98,8 +126,9 @@ app.post("/", async (c) => {
   await ensurePurchaseReturnTables(c.var.DB);
   const b = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const purchaseInvoiceId = String(b.purchaseInvoiceId ?? b.purchase_invoice_id ?? "").trim();
-  if (!purchaseInvoiceId) {
-    return c.json({ success: false, error: "purchaseInvoiceId required" }, 400);
+  const grnId = String(b.grnId ?? b.grn_id ?? "").trim();
+  if (!purchaseInvoiceId && !grnId) {
+    return c.json({ success: false, error: "a source purchaseInvoiceId or grnId is required" }, 400);
   }
   const rawItems = Array.isArray(b.items) ? (b.items as Record<string, unknown>[]) : [];
   const items: PRCreateItem[] = rawItems
@@ -117,16 +146,40 @@ app.post("/", async (c) => {
   if (items.length === 0) {
     return c.json({ success: false, error: "at least one line with quantity > 0 is required" }, 400);
   }
-  // Snapshot the supplier / PI no from the source PI header.
-  const pi = await c.var.DB.prepare("SELECT * FROM purchase_invoices WHERE id = ?")
-    .bind(purchaseInvoiceId)
-    .first<Record<string, unknown>>();
-  if (!pi) return c.json({ success: false, error: "Purchase invoice not found" }, 404);
+  // Snapshot the supplier + source-doc no from the source header (PI or GRN).
+  let src: {
+    purchaseInvoiceId?: string;
+    piNo?: string;
+    grnId?: string;
+    grnNo?: string;
+    supplierId: string;
+    supplierName: string;
+  };
+  if (purchaseInvoiceId) {
+    const pi = await c.var.DB.prepare("SELECT * FROM purchase_invoices WHERE id = ?")
+      .bind(purchaseInvoiceId)
+      .first<Record<string, unknown>>();
+    if (!pi) return c.json({ success: false, error: "Purchase invoice not found" }, 404);
+    src = {
+      purchaseInvoiceId,
+      piNo: String(pick(pi, "pi_no", "piNo") ?? ""),
+      supplierId: String(pick(pi, "supplier_id", "supplierId") ?? ""),
+      supplierName: String(pick(pi, "supplier_name", "supplierName") ?? ""),
+    };
+  } else {
+    const grn = await c.var.DB.prepare("SELECT * FROM grns WHERE id = ?")
+      .bind(grnId)
+      .first<Record<string, unknown>>();
+    if (!grn) return c.json({ success: false, error: "Goods receipt not found" }, 404);
+    src = {
+      grnId,
+      grnNo: String(pick(grn, "grnNumber", "grn_number") ?? ""),
+      supplierId: String(pick(grn, "supplier_id", "supplierId") ?? ""),
+      supplierName: String(pick(grn, "supplier_name", "supplierName") ?? ""),
+    };
+  }
   const created = await createPurchaseReturn(c.var.DB, {
-    purchaseInvoiceId,
-    piNo: String(pick(pi, "pi_no", "piNo") ?? ""),
-    supplierId: String(pick(pi, "supplier_id", "supplierId") ?? ""),
-    supplierName: String(pick(pi, "supplier_name", "supplierName") ?? ""),
+    ...src,
     reason: String(b.reason ?? ""),
     notes: String(b.notes ?? ""),
     resolution: b.resolution ? String(b.resolution) : "REFUND",

@@ -62,6 +62,7 @@ import {
   repairComponentScale,
 } from "../../lib/repair-scope";
 import { deriveTopLevelWipKey } from "./bom-wip-breakdown";
+import { explodeKits } from "./component-bom";
 
 type RMBatchRow = {
   id: string;
@@ -129,6 +130,14 @@ type MaterialLine = {
   qtyPerUnit: number;
   wastePct: number;          // 0..100
   inventoryCode?: string;    // preferred mapping to raw_materials.itemCode
+  // FILLER (sponge) area-based consumption (owner 2026-07-30). When a BOM
+  // material line carries a cut size (inches), the resolved RM's sheet size
+  // converts qtyPerUnit (cut-piece count) into a FRACTION of a sheet:
+  //   sheets consumed = qtyPerUnit × (cutL×cutW) ÷ (sheetL×sheetW).
+  // Thickness cancels (the piece is cut the full thickness of the sheet), so
+  // area is enough. No cut size → consumes by qtyPerUnit as before.
+  cutLengthIn?: number;
+  cutWidthIn?: number;
   // When set, this BOM line is bound to a per-SO field rather than a
   // fixed inventory item. resolveBomMaterials substitutes inventoryCode
   // with the PO's snapshotted SO value before FIFO lookup runs:
@@ -227,6 +236,12 @@ function collectTreeMaterials(
         row.autoDetect === "FABRIC" || row.autoDetect === "LEG"
           ? row.autoDetect
           : undefined;
+      // FILLER (sponge) cut size, if the BOM author entered one (inches). Read
+      // dual-keyed so both camelCase (editor) and snake_case survive.
+      const cutLenRaw = (row.cutLengthIn ?? row.cut_length_in) as unknown;
+      const cutWidRaw = (row.cutWidthIn ?? row.cut_width_in) as unknown;
+      const cutLengthIn = Number(cutLenRaw) > 0 ? Number(cutLenRaw) : undefined;
+      const cutWidthIn = Number(cutWidRaw) > 0 ? Number(cutWidRaw) : undefined;
       // autoDetect lines may have empty code/name at authoring time — keep
       // them so the substitution step downstream can resolve them. The
       // (code || name) guard would otherwise drop them silently.
@@ -238,6 +253,8 @@ function collectTreeMaterials(
           wastePct: waste,
           inventoryCode,
           autoDetect,
+          cutLengthIn,
+          cutWidthIn,
           ownerDeptCodes,
           ownerWipKey: owner?.wipKey,
           ownerWipQty: owner?.wipQty,
@@ -268,7 +285,21 @@ function collectTreeMaterials(
 // without a data migration. Returns [] if nothing is found. Dimensions
 // snapshot is used by the JSON-tree paths to expand per-material scaling
 // rules at extraction time.
+// Resolve the BOM material lines for a PO, THEN explode any reusable kit
+// sub-BOMs (a mechanism / leg SKU that drags in its required screws — owner
+// 2026-07-31). Explosion runs on the FINAL resolved lines so a mechanism bound
+// via autoDetect=LEG also pulls its screws. Every consumer (consumption,
+// costing, shortage report) goes through here, so the kit is intrinsic to the
+// BOM everywhere. See component-bom.ts.
 async function resolveBomMaterials(
+  db: D1Database,
+  po: ProductionOrderRow,
+): Promise<MaterialLine[]> {
+  const lines = await resolveBomMaterialsRaw(db, po);
+  return explodeKits(db, lines);
+}
+
+async function resolveBomMaterialsRaw(
   db: D1Database,
   po: ProductionOrderRow,
 ): Promise<MaterialLine[]> {
@@ -391,20 +422,93 @@ async function resolveBomMaterials(
   return [];
 }
 
+// Parse the leading inch value from a leg-height option label.
+//   `6"` → 6,  `7"` → 7,  `4.5"` → 4.5,  "No Leg" → null.
+// Tolerates surrounding spaces and a missing inch mark.
+function parseLegInches(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  const m = value.match(/(\d+(?:\.\d+)?)/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Resolve the raw_materials.itemCode a leg-height is EXPLICITLY bound to in the
+// Maintenance → Leg Heights catalog. Owner 2026-07-30: each leg-height option
+// in kv_config['variants-config'].legHeights / .sofaLegHeights can carry a
+// `legSku` (the exact leg's internal code). When present it is authoritative —
+// the shop binds e.g. "脚 6寸" → its precise SKU so consumption never guesses.
+//
+// SOFA orders consult sofaLegHeights first; everything else (bedframe) consults
+// legHeights first; the other list is a fallback for shops keeping one shared
+// catalog. Match is by the numeric inch value parsed from the option's `value`
+// label (`6"` → 6) against po.legHeightInches. Returns null when no binding
+// exists → the caller then falls back to the legacy fuzzy description match.
+async function resolveBoundLegSku(
+  db: D1Database,
+  itemCategory: string | null,
+  legHeightInches: number,
+): Promise<string | null> {
+  const row = await db
+    .prepare("SELECT value FROM kv_config WHERE key = ?")
+    .bind("variants-config")
+    .first<{ value: string }>();
+  if (!row?.value) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.value);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const cfg = parsed as { legHeights?: unknown; sofaLegHeights?: unknown };
+  const isSofa = (itemCategory ?? "").toUpperCase() === "SOFA";
+  const primary = isSofa ? cfg.sofaLegHeights : cfg.legHeights;
+  const secondary = isSofa ? cfg.legHeights : cfg.sofaLegHeights;
+  const fromList = (list: unknown): string | null => {
+    if (!Array.isArray(list)) return null;
+    for (const o of list) {
+      if (!o || typeof o !== "object") continue;
+      const opt = o as { value?: unknown; legSku?: unknown };
+      const inches = parseLegInches(opt.value);
+      if (inches != null && inches === legHeightInches) {
+        const sku = typeof opt.legSku === "string" ? opt.legSku.trim() : "";
+        return sku.length > 0 ? sku : null;
+      }
+    }
+    return null;
+  };
+  return fromList(primary) ?? fromList(secondary);
+}
+
 // Bind autoDetect lines to a concrete inventory key from the PO snapshot.
 //   FABRIC: po.fabricCode IS raw_materials.itemCode for the SO's chosen
 //           fabric — set inventoryCode and let the normal lookup chain run.
-//   LEG:    SO line carries legHeightInches; the shop names leg inventory
-//           with the inch height inline (e.g. `SOFA LEG PLASTIC (ROUND) 2"`).
-//           Match raw_materials.description LIKE `%<N>"%` AND `%LEG%`,
-//           case-insensitive, first by itemCode ASC. Misses fall through
-//           and the caller records a shortage with the original name.
+//   LEG:    SO line carries legHeightInches. Resolution order:
+//           1. EXPLICIT binding — the leg-height's `legSku` from the
+//              Maintenance Leg Heights catalog (resolveBoundLegSku). Owner's
+//              chosen source of truth; wins whenever set.
+//           2. Legacy fuzzy fallback — the shop names leg inventory with the
+//              inch height inline (e.g. `SOFA LEG PLASTIC (ROUND) 2"`); match
+//              raw_materials.description LIKE `%<N>"%` AND `%LEG%`,
+//              case-insensitive, first by itemCode ASC.
+//           Both miss → falls through, caller records a shortage with the
+//           original "Leg (from order)" name. Quantity always stays the BOM
+//           line's qty (the binding only decides WHICH SKU, not how many).
 // Lines without an autoDetect tag are passed through unchanged.
 async function substituteAutoDetectMaterials(
   db: D1Database,
   lines: MaterialLine[],
   po: ProductionOrderRow,
 ): Promise<MaterialLine[]> {
+  // Resolve the explicit leg SKU binding ONCE — po is fixed, and a BOM can
+  // carry more than one LEG line (nested WIPs), so we avoid re-reading
+  // kv_config per line.
+  const boundLegSku =
+    po.legHeightInches != null && po.legHeightInches > 0
+      ? await resolveBoundLegSku(db, po.itemCategory, po.legHeightInches)
+      : null;
+
   const out: MaterialLine[] = [];
   for (const line of lines) {
     if (!line.autoDetect) {
@@ -416,6 +520,12 @@ async function substituteAutoDetectMaterials(
       continue;
     }
     if (line.autoDetect === "LEG" && po.legHeightInches != null && po.legHeightInches > 0) {
+      // 1) Explicit Maintenance binding wins.
+      if (boundLegSku) {
+        out.push({ ...line, inventoryCode: boundLegSku, code: boundLegSku });
+        continue;
+      }
+      // 2) Legacy fuzzy fallback — description contains the inch height + LEG.
       const heightStr = `${po.legHeightInches}"`;
       const hit = await db
         .prepare(
@@ -445,41 +555,54 @@ async function substituteAutoDetectMaterials(
 // (fabric / wood / foam — see src/lib/repair-scope.ts). It is a
 // rename-map-known identifier, so the adapter translates it in the
 // explicit projection (unlike the BUG-2026-06-10-001 runtime-column case).
-async function resolveRmFromBom(
-  db: D1Database,
-  line: MaterialLine,
-): Promise<{
+type ResolvedRm = {
   id: string;
   itemCode: string;
   description: string;
   itemGroup: string | null;
-} | null> {
+  // Sheet dims for FILLER area-based consumption (owner 2026-07-30). Read
+  // dual-keyed off SELECT * — the columns are runtime-added and may be absent
+  // on a fresh DB, so we must NOT name them in the SELECT (that would throw).
+  sheetLengthIn: number | null;
+  sheetWidthIn: number | null;
+};
+function toResolvedRm(row: Record<string, unknown> | null): ResolvedRm | null {
+  if (!row) return null;
+  const sl = (row.sheet_length_in ?? row.sheetLengthIn) as number | null | undefined;
+  const sw = (row.sheet_width_in ?? row.sheetWidthIn) as number | null | undefined;
+  return {
+    id: String(row.id ?? ""),
+    itemCode: String(row.itemCode ?? ""),
+    description: String(row.description ?? ""),
+    itemGroup: (row.itemGroup ?? null) as string | null,
+    sheetLengthIn: sl != null ? Number(sl) : null,
+    sheetWidthIn: sw != null ? Number(sw) : null,
+  };
+}
+async function resolveRmFromBom(
+  db: D1Database,
+  line: MaterialLine,
+): Promise<ResolvedRm | null> {
   if (line.inventoryCode) {
     const hit = await db
-      .prepare(
-        "SELECT id, itemCode, description, itemGroup FROM raw_materials WHERE itemCode = ? LIMIT 1",
-      )
+      .prepare("SELECT * FROM raw_materials WHERE itemCode = ? LIMIT 1")
       .bind(line.inventoryCode)
-      .first<{ id: string; itemCode: string; description: string; itemGroup: string | null }>();
-    if (hit) return hit;
+      .first<Record<string, unknown>>();
+    if (hit) return toResolvedRm(hit);
   }
   if (line.code) {
     const hit = await db
-      .prepare(
-        "SELECT id, itemCode, description, itemGroup FROM raw_materials WHERE itemCode = ? LIMIT 1",
-      )
+      .prepare("SELECT * FROM raw_materials WHERE itemCode = ? LIMIT 1")
       .bind(line.code)
-      .first<{ id: string; itemCode: string; description: string; itemGroup: string | null }>();
-    if (hit) return hit;
+      .first<Record<string, unknown>>();
+    if (hit) return toResolvedRm(hit);
   }
   if (line.name) {
     const hit = await db
-      .prepare(
-        "SELECT id, itemCode, description, itemGroup FROM raw_materials WHERE description = ? COLLATE NOCASE LIMIT 1",
-      )
+      .prepare("SELECT * FROM raw_materials WHERE description = ? COLLATE NOCASE LIMIT 1")
       .bind(line.name)
-      .first<{ id: string; itemCode: string; description: string; itemGroup: string | null }>();
-    if (hit) return hit;
+      .first<Record<string, unknown>>();
+    if (hit) return toResolvedRm(hit);
   }
   return null;
 }
@@ -501,6 +624,50 @@ function genLedgerId(prefix: string): string {
 // refType='PRODUCTION_ORDER' ensures a PO only consumes once even when
 // multiple FAB_CUT JCs in the same PO sequentially complete.
 // ---------------------------------------------------------------------------
+// Category default sheet size for FILLER area-based consumption. Owner
+// 2026-07-30: default 96×48 inch (= an 8ft×4ft sheet), overridable. A FILLER material with no per-SKU
+// sheet size falls back to its item-group default from
+// kv_config['variants-config'].sheetDefaults, then to a hardcoded 8×4 for any
+// FILLER group. Units don't matter to the ratio (cutArea ÷ sheetArea) as long
+// as the BOM cut size uses the same unit as the sheet.
+const HARDCODED_FILLER_SHEET = { length: 96, width: 48 };
+async function loadSheetDefaults(
+  db: D1Database,
+): Promise<Record<string, { length: number; width: number }>> {
+  const out: Record<string, { length: number; width: number }> = {};
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = ?")
+      .bind("variants-config")
+      .first<{ value: string }>();
+    if (row?.value) {
+      const parsed = JSON.parse(row.value) as {
+        sheetDefaults?: Record<string, { length?: unknown; width?: unknown }>;
+      };
+      const sd = parsed?.sheetDefaults;
+      if (sd && typeof sd === "object") {
+        for (const [k, v] of Object.entries(sd)) {
+          const l = Number((v as { length?: unknown }).length);
+          const w = Number((v as { width?: unknown }).width);
+          if (l > 0 && w > 0) out[k.toUpperCase()] = { length: l, width: w };
+        }
+      }
+    }
+  } catch {
+    /* fall through to the hardcoded FILLER default */
+  }
+  return out;
+}
+function categoryDefaultSheet(
+  itemGroup: string | null,
+  defaults: Record<string, { length: number; width: number }>,
+): { length: number; width: number } | null {
+  const g = (itemGroup ?? "").toUpperCase();
+  if (defaults[g]) return defaults[g];
+  if (/FILLER/.test(g)) return HARDCODED_FILLER_SHEET;
+  return null;
+}
+
 export async function consumeRawMaterialsForPO(
   db: D1Database,
   poId: string,
@@ -538,6 +705,9 @@ export async function consumeRawMaterialsForPO(
     // No BOM → nothing to consume; also no FG materialCost.
     return { skipped: false, materialCostSen: 0, linesConsumed: 0, shortages: [] };
   }
+
+  // FILLER sheet-size defaults, loaded once (config overrides, else 8×4).
+  const sheetDefaults = await loadSheetDefaults(db);
 
   // ---- Repair Scope material filter (0160) -------------------------------
   // A scoped (non-FULL) repair must NEVER consume the full BOM. The scope
@@ -584,7 +754,7 @@ export async function consumeRawMaterialsForPO(
       ? repairComponentScale(line, repairScope)
       : 1;
     if (componentScale === null) continue;
-    const required =
+    let required =
       line.qtyPerUnit *
       po.quantity *
       (1 + Math.max(0, line.wastePct || 0) / 100) *
@@ -592,6 +762,26 @@ export async function consumeRawMaterialsForPO(
     if (required <= 0) continue;
 
     const rm = await resolveRmFromBom(db, line);
+
+    // FILLER (sponge) area-based consumption (owner 2026-07-30): a BOM line
+    // with a cut size (inches) consumes a FRACTION of a sheet, not whole
+    // pieces — sheets = (cut area ÷ sheet area) × qty. Applied only when BOTH
+    // the line's cut size and the resolved RM's sheet size are present; any
+    // gap falls back to the plain qtyPerUnit path (no regression). Guard
+    // against a zero/absent sheet area (would otherwise divide by zero).
+    if (rm && line.cutLengthIn && line.cutWidthIn) {
+      // Per-SKU sheet size wins; else the category default (config, else the
+      // hardcoded FILLER 8×4). Only FILLER-group materials get a default.
+      const catDef = categoryDefaultSheet(rm.itemGroup, sheetDefaults);
+      const sheetL = rm.sheetLengthIn ?? catDef?.length ?? 0;
+      const sheetW = rm.sheetWidthIn ?? catDef?.width ?? 0;
+      const sheetArea = sheetL * sheetW;
+      const cutArea = line.cutLengthIn * line.cutWidthIn;
+      if (sheetArea > 0 && cutArea > 0) {
+        required = required * (cutArea / sheetArea);
+      }
+    }
+    if (required <= 0) continue;
 
     // Repair Scope: out-of-scope material → skip before any consumption.
     // Class lookup needs the resolved itemGroup, hence after resolveRmFromBom

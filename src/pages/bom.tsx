@@ -33,6 +33,11 @@ type WIPMaterial = {
   name: string;
   qty: number;
   unit: string;
+  // Wastage % (industry-standard scrap factor). Consumption expands the line by
+  // (1 + wastePct/100) — see po-cost-cascade.ts. Meaningful for cut / bulk
+  // materials (fabric / foam / wood offcuts + defects); discrete parts (screws,
+  // legs, mechanism) stay 0. Optional; absent / 0 = no wastage (unchanged).
+  wastePct?: number;
   inventoryCode?: string;
   autoDetect?: "FABRIC" | "LEG"; // auto-filled from SO item at production time
   // Optional dimension scaling rules — multiple rules stack across
@@ -43,6 +48,12 @@ type WIPMaterial = {
   // (floor: orders smaller than baseline still consume baseQty per rule).
   // See src/api/lib/material-scaling.ts for the apply helpers.
   scaling?: MaterialScaling[];
+  // FILLER (sponge) cut size in inches (owner 2026-07-30). When this material
+  // resolves to a sheet raw material (with a sheet size), consumption deducts
+  // cutArea ÷ sheetArea of a sheet per piece instead of whole pieces. Only
+  // shown/used for FILLER-group materials.
+  cutLengthIn?: number;
+  cutWidthIn?: number;
 };
 
 type CodeSegment = {
@@ -115,7 +126,7 @@ const DEPT_COLORS: Record<string, string> = {
   PACKING: "#06B6D4",
 };
 
-const DEPT_ORDER = ["FAB_CUT", "FAB_SEW", "WOOD_CUT", "FOAM", "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING"];
+const DEPT_ORDER = ["FAB_CUT", "FAB_SEW", "WOOD_CUT", "FOAM_CUTTING", "FOAM", "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING"];
 
 const DEPT_LABELS: Record<string, string> = {
   FAB_CUT: "Fab Cut",
@@ -135,6 +146,32 @@ const DEPT_LABELS: Record<string, string> = {
 // Data lives in D1 under kv_config('variants-config'); the in-memory cache is
 // primed at dashboard mount (see DashboardLayout.tsx) so this sync API stays
 // ergonomic for the dozens of call sites here.
+// A BOM material is a FILLER (sponge / sheet) when the raw material it points
+// to belongs to a FILLER item group — then its consumption is area-based
+// (cut size ÷ sheet size). autoDetect (fabric / leg) lines are never filler.
+function isFillerMaterial(m: WIPMaterial, rawMaterials: RawMaterialOption[]): boolean {
+  if (m.autoDetect) return false;
+  const code = m.code || m.inventoryCode;
+  if (!code) return false;
+  const rm = rawMaterials.find((o) => o.itemCode === code);
+  return !!rm && /FILLER/i.test(rm.itemGroup || "");
+}
+
+// Reusable kit sub-BOMs (owner 2026-07-31). A mechanism / leg SKU can be bound
+// (on the Component Kits page) to the screws it always needs; any BOM line that
+// picks such a SKU auto-explodes the screws at consumption time. We surface a
+// small read-only "auto-adds screws" hint on those lines so the author knows
+// the screws are covered WITHOUT re-listing them (the whole point of 乙). The
+// parent-code set is loaded once from /api/component-boms into this module-level
+// set; the top-level BOM page load re-renders the tree after populating it, so
+// the hint appears on first paint after data arrives. It is purely advisory —
+// consumption reads the kit server-side regardless.
+const KIT_PARENT_CODES = new Set<string>();
+function materialHasKit(m: WIPMaterial): boolean {
+  const code = m.code || m.inventoryCode;
+  return !!code && KIT_PARENT_CODES.has(code);
+}
+
 function getProductionMinutes(deptCode: string, category: string): number {
   if (typeof window === "undefined") return 0;
   const cfg = getVariantsConfigSync();
@@ -2246,7 +2283,21 @@ function CreateBOMDialog({
                             />
                           )}
                           <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
+                          <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.wastePct ?? ""} onChange={(e) => updateWIPMaterial(wi, mi, "wastePct", parseFloat(e.target.value) || 0)} placeholder="0" title="Wastage % — cut / bulk materials (fabric / foam / wood) have offcut + defect waste; leave 0 for discrete parts (screws / legs / mechanism)" className="text-xs border border-gray-200 rounded px-1.5 py-1 w-12" />
+                          <span className="text-[10px] text-gray-400 whitespace-nowrap" title="Wastage % — cut / bulk materials (fabric / foam / wood) have offcut + defect waste; leave 0 for discrete parts (screws / legs / mechanism)">% waste</span>
                           <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
+                          {materialHasKit(m) && (
+                            <span className="text-[10px] text-[#1D4ED8] whitespace-nowrap" title="This SKU has a Component Kit — its bound screws/parts are auto-added to consumption. Manage them on the Component Kits page.">+ kit</span>
+                          )}
+                          {isFillerMaterial(m, rawMaterials) && (
+                            <span className="flex items-center gap-0.5 text-[10px] text-[#B8601A] whitespace-nowrap" title="Cut size in INCHES (length × width) — consumes cutArea ÷ sheetArea of a sheet">
+                              cut
+                              <input type="number" placeholder="L" onFocus={(e) => e.currentTarget.select()} value={m.cutLengthIn ?? ""} onChange={(e) => updateWIPMaterial(wi, mi, "cutLengthIn", parseFloat(e.target.value) || 0)} className="w-11 border border-[#E8B786] rounded px-1 py-0.5" />
+                              ×
+                              <input type="number" placeholder="W" onFocus={(e) => e.currentTarget.select()} value={m.cutWidthIn ?? ""} onChange={(e) => updateWIPMaterial(wi, mi, "cutWidthIn", parseFloat(e.target.value) || 0)} className="w-11 border border-[#E8B786] rounded px-1 py-0.5" />
+                              in
+                            </span>
+                          )}
                           <button onClick={() => removeWIPMaterial(wi, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
                             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
                           </button>
@@ -2398,6 +2449,8 @@ function SubWIPTree({
   onWrap,
   onMoveUp,
   onMoveDown,
+  onMoveProcessUp,
+  onMoveProcessDown,
   fabricOptions,
   variantCategories,
   rawMaterials,
@@ -2421,6 +2474,8 @@ function SubWIPTree({
   onWrap?: (path: number[], si: number) => void;
   onMoveUp?: (path: number[], si: number) => void;
   onMoveDown?: (path: number[], si: number) => void;
+  onMoveProcessUp?: (path: number[], pi: number) => void;
+  onMoveProcessDown?: (path: number[], pi: number) => void;
   fabricOptions: string[];
   variantCategories: VariantCategoryInfo[];
   rawMaterials: RawMaterialOption[];
@@ -2510,7 +2565,13 @@ function SubWIPTree({
                 </select>
                 <span className="text-xs text-gray-700 bg-gray-50 border border-gray-200 rounded px-1.5 py-1 w-14 text-center tabular-nums">{p.minutes}</span>
                 <span className="text-[10px] text-gray-400">min</span>
-                <button onClick={() => onRemoveProcess(childPath, pi)} className="ml-auto text-[#9A3A2D] hover:text-[#7A2E24]">
+                {onMoveProcessUp && (
+                  <button onClick={() => onMoveProcessUp(childPath, pi)} disabled={pi === 0} className="ml-auto text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded hover:bg-[#A8CAD2] disabled:opacity-30 disabled:cursor-not-allowed" title="Move process up">↑</button>
+                )}
+                {onMoveProcessDown && (
+                  <button onClick={() => onMoveProcessDown(childPath, pi)} disabled={pi === sub.processes.length - 1} className={`text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded hover:bg-[#A8CAD2] disabled:opacity-30 disabled:cursor-not-allowed ${onMoveProcessUp ? "" : "ml-auto"}`} title="Move process down">↓</button>
+                )}
+                <button onClick={() => onRemoveProcess(childPath, pi)} className={`text-[#9A3A2D] hover:text-[#7A2E24] ${onMoveProcessUp || onMoveProcessDown ? "" : "ml-auto"}`}>
                   <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
                 </button>
               </div>
@@ -2542,7 +2603,21 @@ function SubWIPTree({
                     />
                   )}
                   <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.qty} onChange={(e) => onUpdateMaterial(childPath, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
+                  <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.wastePct ?? ""} onChange={(e) => onUpdateMaterial(childPath, mi, "wastePct", parseFloat(e.target.value) || 0)} placeholder="0" title="Wastage % — cut / bulk materials (fabric / foam / wood) have offcut + defect waste; leave 0 for discrete parts (screws / legs / mechanism)" className="text-xs border border-gray-200 rounded px-1.5 py-1 w-12" />
+                  <span className="text-[10px] text-gray-400 whitespace-nowrap" title="Wastage % — cut / bulk materials (fabric / foam / wood) have offcut + defect waste; leave 0 for discrete parts (screws / legs / mechanism)">% waste</span>
                   <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
+                  {materialHasKit(m) && (
+                    <span className="text-[10px] text-[#1D4ED8] whitespace-nowrap" title="This SKU has a Component Kit — its bound screws/parts are auto-added to consumption. Manage them on the Component Kits page.">+ kit</span>
+                  )}
+                  {isFillerMaterial(m, rawMaterials) && (
+                    <span className="flex items-center gap-0.5 text-[10px] text-[#B8601A] whitespace-nowrap" title="Cut size in INCHES (length × width) — consumes cutArea ÷ sheetArea of a sheet">
+                      cut
+                      <input type="number" placeholder="L" onFocus={(e) => e.currentTarget.select()} value={m.cutLengthIn ?? ""} onChange={(e) => onUpdateMaterial(childPath, mi, "cutLengthIn", parseFloat(e.target.value) || 0)} className="w-11 border border-[#E8B786] rounded px-1 py-0.5" />
+                      ×
+                      <input type="number" placeholder="W" onFocus={(e) => e.currentTarget.select()} value={m.cutWidthIn ?? ""} onChange={(e) => onUpdateMaterial(childPath, mi, "cutWidthIn", parseFloat(e.target.value) || 0)} className="w-11 border border-[#E8B786] rounded px-1 py-0.5" />
+                      in
+                    </span>
+                  )}
                   <button onClick={() => onRemoveMaterial(childPath, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
                     <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
                   </button>
@@ -2578,6 +2653,8 @@ function SubWIPTree({
               onWrap={onWrap}
               onMoveUp={onMoveUp}
               onMoveDown={onMoveDown}
+              onMoveProcessUp={onMoveProcessUp}
+              onMoveProcessDown={onMoveProcessDown}
               fabricOptions={fabricOptions}
               variantCategories={variantCategories}
               rawMaterials={rawMaterials}
@@ -2947,6 +3024,84 @@ function EditBOMDialog({
     );
   }
 
+  // --- Reordering (owner 2026-07-30: "工序要能插在中间") ---------------------
+  // The editor only ever APPENDS a new process / WIP to the end of its list, so
+  // to place one in the middle you add it then step it up. dir = -1 (up) / +1
+  // (down); the swap is a no-op at a list boundary. All use the same
+  // updateAtPath spine as every other mutation so nesting depth is irrelevant.
+
+  // Move a process within a nested WIP node's processes[].
+  function moveProcessAtPath(wi: number, path: number[], pi: number, dir: -1 | 1) {
+    setWipComponents((prev) =>
+      prev.map((w, idx) => idx !== wi ? w : updateAtPath(w, path, (node) => {
+        const list = [...node.processes];
+        const j = pi + dir;
+        if (pi < 0 || pi >= list.length || j < 0 || j >= list.length) return node;
+        [list[pi], list[j]] = [list[j], list[pi]];
+        return { ...node, processes: list };
+      }))
+    );
+  }
+  // Move a sub-WIP among its siblings (the children[] of the node at path).
+  function moveSubWIPAtPath(wi: number, path: number[], si: number, dir: -1 | 1) {
+    setWipComponents((prev) =>
+      prev.map((w, idx) => idx !== wi ? w : updateAtPath(w, path, (node) => {
+        const list = [...(node.children || [])];
+        const j = si + dir;
+        if (si < 0 || si >= list.length || j < 0 || j >= list.length) return node;
+        [list[si], list[j]] = [list[j], list[si]];
+        return { ...node, children: list };
+      }))
+    );
+  }
+  // Wrap sibling si inside a new empty parent WIP (an upstream grouping level),
+  // so a new stage can be inserted ABOVE an existing one in the hierarchy.
+  function wrapSubWIPAtPath(wi: number, path: number[], si: number) {
+    setWipComponents((prev) =>
+      prev.map((w, idx) => idx !== wi ? w : updateAtPath(w, path, (node) => {
+        const list = node.children || [];
+        const target = list[si];
+        if (!target) return node;
+        const wrapper: WIPComponent = {
+          id: `sub-wip-${Date.now()}`,
+          wipCode: "",
+          codeSegments: [{ type: "word" as const, value: "" }],
+          wipType: (product.category === "SOFA" ? "SOFA_BASE" : "DIVAN") as WIPComponent["wipType"],
+          quantity: 1,
+          processes: [],
+          materials: [],
+          children: [target],
+        };
+        const next = [...list];
+        next.splice(si, 1, wrapper);
+        return { ...node, children: next };
+      }))
+    );
+  }
+  // Move a top-level (L1) WIP component among the roots.
+  function moveWIP(wi: number, dir: -1 | 1) {
+    setWipComponents((prev) => {
+      const j = wi + dir;
+      if (wi < 0 || wi >= prev.length || j < 0 || j >= prev.length) return prev;
+      const next = [...prev];
+      [next[wi], next[j]] = [next[j], next[wi]];
+      return next;
+    });
+  }
+  // Move a process within a top-level (L1) WIP component's processes[].
+  function moveWIPProcess(wi: number, pi: number, dir: -1 | 1) {
+    setWipComponents((prev) =>
+      prev.map((w, idx) => {
+        if (idx !== wi) return w;
+        const list = [...w.processes];
+        const j = pi + dir;
+        if (pi < 0 || pi >= list.length || j < 0 || j >= list.length) return w;
+        [list[pi], list[j]] = [list[j], list[pi]];
+        return { ...w, processes: list };
+      })
+    );
+  }
+
   // Material operations at path
   function addMaterialAtPath(wi: number, path: number[]) {
     setWipComponents((prev) =>
@@ -3244,6 +3399,8 @@ function EditBOMDialog({
                         />
                       )}
                       <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.qty} onChange={(e) => updateL1Material(i, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-[#C6DBA8] rounded px-1.5 py-1 w-14 bg-white" />
+                      <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.wastePct ?? ""} onChange={(e) => updateL1Material(i, "wastePct", parseFloat(e.target.value) || 0)} placeholder="0" title="Wastage % — cut / bulk materials (fabric / foam / wood) have offcut + defect waste; leave 0 for discrete parts (screws / legs / mechanism)" className="text-xs border border-[#C6DBA8] rounded px-1.5 py-1 w-12 bg-white" />
+                      <span className="text-[10px] text-gray-400 whitespace-nowrap" title="Wastage % — cut / bulk materials (fabric / foam / wood) have offcut + defect waste; leave 0 for discrete parts (screws / legs / mechanism)">% waste</span>
                       <span className="text-[10px] text-gray-500 w-8">{m.unit || "PCS"}</span>
                       <button onClick={() => removeL1Material(i)} className="ml-auto p-1 hover:bg-[#F9E1DA] rounded text-[#9A3A2D]">
                         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
@@ -3286,7 +3443,9 @@ function EditBOMDialog({
                       </select>
                       <input type="number" onFocus={(e) => e.currentTarget.select()} value={w.quantity} onChange={(e) => updateWIP(wi, "quantity", parseInt(e.target.value) || 1)} className="text-sm border border-[#A8CAD2] rounded px-2 py-1 w-16 bg-white" min={1} />
                       <span className="text-xs text-gray-500">PCS</span>
-                      <button onClick={() => removeWIP(wi)} className="ml-auto p-1 hover:bg-[#F9E1DA] rounded text-[#9A3A2D]">
+                      <button onClick={() => moveWIP(wi, -1)} disabled={wi === 0} className="ml-auto text-[11px] px-1.5 py-0.5 bg-white border border-[#A8CAD2] text-[#3E6570] rounded hover:bg-[#E0EDF0] disabled:opacity-30 disabled:cursor-not-allowed" title="Move WIP up">↑</button>
+                      <button onClick={() => moveWIP(wi, 1)} disabled={wi === wipComponents.length - 1} className="text-[11px] px-1.5 py-0.5 bg-white border border-[#A8CAD2] text-[#3E6570] rounded hover:bg-[#E0EDF0] disabled:opacity-30 disabled:cursor-not-allowed" title="Move WIP down">↓</button>
+                      <button onClick={() => removeWIP(wi)} className="p-1 hover:bg-[#F9E1DA] rounded text-[#9A3A2D]">
                         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
                       </button>
                     </div>
@@ -3318,7 +3477,9 @@ function EditBOMDialog({
                         </select>
                         <span className="text-xs text-gray-700 bg-gray-50 border border-gray-200 rounded px-1.5 py-1 w-14 text-center tabular-nums">{p.minutes}</span>
                         <span className="text-[10px] text-gray-400">min</span>
-                        <button onClick={() => removeWIPProcess(wi, pi)} className="ml-auto text-[#9A3A2D] hover:text-[#7A2E24]">
+                        <button onClick={() => moveWIPProcess(wi, pi, -1)} disabled={pi === 0} className="ml-auto text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded hover:bg-[#A8CAD2] disabled:opacity-30 disabled:cursor-not-allowed" title="Move process up">↑</button>
+                        <button onClick={() => moveWIPProcess(wi, pi, 1)} disabled={pi === w.processes.length - 1} className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded hover:bg-[#A8CAD2] disabled:opacity-30 disabled:cursor-not-allowed" title="Move process down">↓</button>
+                        <button onClick={() => removeWIPProcess(wi, pi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
                           <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
                         </button>
                       </div>
@@ -3350,7 +3511,21 @@ function EditBOMDialog({
                             />
                           )}
                           <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
+                          <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.wastePct ?? ""} onChange={(e) => updateWIPMaterial(wi, mi, "wastePct", parseFloat(e.target.value) || 0)} placeholder="0" title="Wastage % — cut / bulk materials (fabric / foam / wood) have offcut + defect waste; leave 0 for discrete parts (screws / legs / mechanism)" className="text-xs border border-gray-200 rounded px-1.5 py-1 w-12" />
+                          <span className="text-[10px] text-gray-400 whitespace-nowrap" title="Wastage % — cut / bulk materials (fabric / foam / wood) have offcut + defect waste; leave 0 for discrete parts (screws / legs / mechanism)">% waste</span>
                           <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
+                          {materialHasKit(m) && (
+                            <span className="text-[10px] text-[#1D4ED8] whitespace-nowrap" title="This SKU has a Component Kit — its bound screws/parts are auto-added to consumption. Manage them on the Component Kits page.">+ kit</span>
+                          )}
+                          {isFillerMaterial(m, rawMaterials) && (
+                            <span className="flex items-center gap-0.5 text-[10px] text-[#B8601A] whitespace-nowrap" title="Cut size in INCHES (length × width) — consumes cutArea ÷ sheetArea of a sheet">
+                              cut
+                              <input type="number" placeholder="L" onFocus={(e) => e.currentTarget.select()} value={m.cutLengthIn ?? ""} onChange={(e) => updateWIPMaterial(wi, mi, "cutLengthIn", parseFloat(e.target.value) || 0)} className="w-11 border border-[#E8B786] rounded px-1 py-0.5" />
+                              ×
+                              <input type="number" placeholder="W" onFocus={(e) => e.currentTarget.select()} value={m.cutWidthIn ?? ""} onChange={(e) => updateWIPMaterial(wi, mi, "cutWidthIn", parseFloat(e.target.value) || 0)} className="w-11 border border-[#E8B786] rounded px-1 py-0.5" />
+                              in
+                            </span>
+                          )}
                           <button onClick={() => removeWIPMaterial(wi, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
                             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
                           </button>
@@ -3383,6 +3558,11 @@ function EditBOMDialog({
                       onSelectMaterial={(path, mi, rm) => selectMaterialAtPath(wi, path, mi, rm)}
                       onSelectMaterialAutoDetect={(path, mi, kind) => setMaterialAutoDetectAtPath(wi, path, mi, kind)}
                       onUpdateMaterial={(path, mi, field, value) => updateMaterialAtPath(wi, path, mi, field, value)}
+                      onWrap={(path, si) => wrapSubWIPAtPath(wi, path, si)}
+                      onMoveUp={(path, si) => moveSubWIPAtPath(wi, path, si, -1)}
+                      onMoveDown={(path, si) => moveSubWIPAtPath(wi, path, si, 1)}
+                      onMoveProcessUp={(path, pi) => moveProcessAtPath(wi, path, pi, -1)}
+                      onMoveProcessDown={(path, pi) => moveProcessAtPath(wi, path, pi, 1)}
                       fabricOptions={fabricOptions}
                       variantCategories={productVariantCategories}
                       rawMaterials={rawMaterials}
@@ -3590,6 +3770,15 @@ function MasterTemplatesDialog({
   }
   function removeL1Process(i: number) {
     setCurrent((prev) => ({ ...prev, l1Processes: prev.l1Processes.filter((_, idx) => idx !== i) }));
+  }
+  function moveL1Process(i: number, dir: -1 | 1) {
+    setCurrent((prev) => {
+      const list = [...prev.l1Processes];
+      const j = i + dir;
+      if (i < 0 || i >= list.length || j < 0 || j >= list.length) return prev;
+      [list[i], list[j]] = [list[j], list[i]];
+      return { ...prev, l1Processes: list };
+    });
   }
   function updateL1Process(i: number, field: keyof BOMProcess, value: string | number) {
     setCurrent((prev) => ({
@@ -3799,6 +3988,16 @@ function MasterTemplatesDialog({
   }
   function removeProcessAtPath(wi: number, path: number[], pi: number) {
     mutateWIP(wi, path, (node) => ({ ...node, processes: node.processes.filter((_, i) => i !== pi) }));
+  }
+  // Reorder a process within a nested WIP node (owner 2026-07-30: insert-in-middle).
+  function moveProcessAtPath(wi: number, path: number[], pi: number, dir: -1 | 1) {
+    mutateWIP(wi, path, (node) => {
+      const list = [...node.processes];
+      const j = pi + dir;
+      if (pi < 0 || pi >= list.length || j < 0 || j >= list.length) return node;
+      [list[pi], list[j]] = [list[j], list[pi]];
+      return { ...node, processes: list };
+    });
   }
   function updateProcessAtPath(wi: number, path: number[], pi: number, field: string, value: string | number | MaterialScaling[] | undefined) {
     mutateWIP(wi, path, (node) => ({
@@ -4092,7 +4291,9 @@ function MasterTemplatesDialog({
                   </select>
                   <span className="text-sm text-gray-700 bg-[#FAEFCB] border border-[#E8D597] rounded px-2 py-1 w-20 text-center tabular-nums">{p.minutes}</span>
                   <span className="text-xs text-gray-400">min</span>
-                  <button onClick={() => removeL1Process(i)} className="ml-auto p-1 hover:bg-[#F9E1DA] rounded text-[#9A3A2D]">
+                  <button onClick={() => moveL1Process(i, -1)} disabled={i === 0} className="ml-auto text-xs px-1.5 py-0.5 bg-white border border-[#E8D597] text-[#9C6F1E] rounded hover:bg-[#FAEFCB] disabled:opacity-30 disabled:cursor-not-allowed" title="Move process up">↑</button>
+                  <button onClick={() => moveL1Process(i, 1)} disabled={i === current.l1Processes.length - 1} className="text-xs px-1.5 py-0.5 bg-white border border-[#E8D597] text-[#9C6F1E] rounded hover:bg-[#FAEFCB] disabled:opacity-30 disabled:cursor-not-allowed" title="Move process down">↓</button>
+                  <button onClick={() => removeL1Process(i)} className="p-1 hover:bg-[#F9E1DA] rounded text-[#9A3A2D]">
                     <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
                   </button>
                 </div>
@@ -4142,6 +4343,8 @@ function MasterTemplatesDialog({
                     <option value="LEG">Auto: Leg</option>
                   </select>
                   <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.qty} onChange={(e) => updateL1Material(i, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-[#C6DBA8] rounded px-1.5 py-1 w-14 bg-white" />
+                  <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.wastePct ?? ""} onChange={(e) => updateL1Material(i, "wastePct", parseFloat(e.target.value) || 0)} placeholder="0" title="Wastage % — cut / bulk materials (fabric / foam / wood) have offcut + defect waste; leave 0 for discrete parts (screws / legs / mechanism)" className="text-xs border border-[#C6DBA8] rounded px-1.5 py-1 w-12 bg-white" />
+                  <span className="text-[10px] text-gray-400 whitespace-nowrap" title="Wastage % — cut / bulk materials (fabric / foam / wood) have offcut + defect waste; leave 0 for discrete parts (screws / legs / mechanism)">% waste</span>
                   <span className="text-[10px] text-gray-500 w-8">{m.unit || "PCS"}</span>
                   <button onClick={() => removeL1Material(i)} className="ml-auto p-1 hover:bg-[#F9E1DA] rounded text-[#9A3A2D]">
                     <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
@@ -4272,6 +4475,8 @@ function MasterTemplatesDialog({
                           <option value="LEG">Auto: Leg</option>
                         </select>
                         <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.qty} onChange={(e) => updateMaterialAtPath(wi, [], mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
+                        <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.wastePct ?? ""} onChange={(e) => updateMaterialAtPath(wi, [], mi, "wastePct", parseFloat(e.target.value) || 0)} placeholder="0" title="Wastage % — cut / bulk materials (fabric / foam / wood) have offcut + defect waste; leave 0 for discrete parts (screws / legs / mechanism)" className="text-xs border border-gray-200 rounded px-1.5 py-1 w-12" />
+                        <span className="text-[10px] text-gray-400 whitespace-nowrap" title="Wastage % — cut / bulk materials (fabric / foam / wood) have offcut + defect waste; leave 0 for discrete parts (screws / legs / mechanism)">% waste</span>
                         <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
                         <button onClick={() => removeMaterialAtPath(wi, [], mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
                           <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
@@ -4308,6 +4513,8 @@ function MasterTemplatesDialog({
                     onWrap={(path, si) => wrapSubWIPAtPath(wi, path, si)}
                     onMoveUp={(path, si) => moveSubWIPUpAtPath(wi, path, si)}
                     onMoveDown={(path, si) => moveSubWIPDownAtPath(wi, path, si)}
+                    onMoveProcessUp={(path, pi) => moveProcessAtPath(wi, path, pi, -1)}
+                    onMoveProcessDown={(path, pi) => moveProcessAtPath(wi, path, pi, 1)}
                     fabricOptions={fabricOptions}
                     variantCategories={variantCategories}
                     rawMaterials={rawMaterials}
@@ -6796,11 +7003,20 @@ export default function BOMManagementPage() {
   useEffect(() => {
     async function load() {
       try {
-        const [pData, tData, invData] = await Promise.all([
+        const [pData, tData, invData, kitData] = await Promise.all([
           cachedFetchJson<{ success?: boolean; data?: unknown }>("/api/products"),
           cachedFetchJson<{ success?: boolean; data?: unknown }>("/api/bom/templates"),
           cachedFetchJson<{ success?: boolean; data?: { rawMaterials?: unknown[] } }>("/api/inventory"),
+          cachedFetchJson<{ success?: boolean; data?: { parentCode?: string }[] }>("/api/component-boms"),
         ]);
+
+        // Populate the reusable-kit hint set (module-level; see materialHasKit).
+        if (kitData && kitData.success && Array.isArray(kitData.data)) {
+          KIT_PARENT_CODES.clear();
+          for (const k of kitData.data) {
+            if (k?.parentCode) KIT_PARENT_CODES.add(k.parentCode);
+          }
+        }
 
         if (pData && pData.success) setProducts(pData.data as Product[]);
         if (tData && tData.success) {

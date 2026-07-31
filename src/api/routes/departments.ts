@@ -93,6 +93,60 @@ function genId(): string {
   return `dept-${crypto.randomUUID().slice(0, 8)}`;
 }
 
+// ---------------------------------------------------------------------------
+// Runtime self-apply for the FOAM_CUTTING department + the FOAM relabel.
+//
+// Departments live in the DB and migrations are INERT on deploy (see
+// CLAUDE.md), so the ONLY way this reaches existing prod is a runtime, awaited,
+// idempotent apply on a hot read path. GET /api/departments is hit on nearly
+// every page load (sidebar / employee dropdowns), so we run it there.
+//
+// FOAM_CUTTING is a tracking/scheduling/labor stage placed immediately BEFORE
+// FOAM (Foam Bonding) in the line order. Raw material stays consumed at
+// FAB_CUT — this step touches no RM.
+//
+// Insert is guarded on "FOAM_CUTTING absent" so the one-time sequence shift
+// (open a slot right before FOAM, preserving any admin-customised ordering of
+// the other depts) runs exactly once. The FOAM shortName relabel is a separate
+// always-safe idempotent UPDATE.
+// ---------------------------------------------------------------------------
+async function ensureFoamCuttingDept(c: Context<Env>): Promise<void> {
+  try {
+    const existing = await c.var.DB.prepare(
+      "SELECT id FROM departments WHERE code = 'FOAM_CUTTING'",
+    ).first<{ id: string }>();
+    if (!existing) {
+      const foam = await c.var.DB.prepare(
+        "SELECT sequence FROM departments WHERE code = 'FOAM'",
+      ).first<{ sequence: number }>();
+      const foamSeq = foam?.sequence ?? 4;
+      // Shift FOAM and everything after it up by one so FOAM_CUTTING can take
+      // FOAM's old slot — relative order of every existing dept is preserved.
+      await c.var.DB.prepare(
+        "UPDATE departments SET sequence = sequence + 1 WHERE sequence >= ?",
+      )
+        .bind(foamSeq)
+        .run();
+      await c.var.DB.prepare(
+        `INSERT INTO departments (id, code, name, shortName, sequence, color, workingHoursPerDay, isProduction)
+         VALUES (?, 'FOAM_CUTTING', 'Foam Cutting', 'Foam Cut', ?, '#A78BFA', 9, 1)`,
+      )
+        .bind(genId(), foamSeq)
+        .run();
+    }
+    // Owner request: FOAM must DISPLAY as "Foam Bonding". Idempotent — only
+    // writes when it isn't already set.
+    await c.var.DB.prepare(
+      "UPDATE departments SET shortName = 'Foam Bonding' WHERE code = 'FOAM' AND shortName <> 'Foam Bonding'",
+    ).run();
+  } catch (e) {
+    // Never let the self-apply break the read — a fresh DB whose departments
+    // table predates isProduction, or a transient error, just falls through
+    // and the caller returns whatever rows exist.
+    console.warn("[departments] ensureFoamCuttingDept failed:", e);
+  }
+}
+
 // Code is used as a soft FK in workers.departmentCode (and historical rows),
 // so we lock it to uppercase + underscores to match the existing seed
 // convention (FAB_CUT, R_AND_D, etc.). Numeric chars allowed for future-
@@ -101,6 +155,10 @@ const CODE_PATTERN = /^[A-Z][A-Z0-9_]*$/;
 
 // GET /api/departments
 app.get("/", async (c) => {
+  // Runtime self-apply — reaches existing prod because migrations are inert on
+  // deploy. Awaited BEFORE the read so the new FOAM_CUTTING row + FOAM relabel
+  // are in the returned set.
+  await ensureFoamCuttingDept(c);
   const res = await c.var.DB.prepare(
     "SELECT * FROM departments ORDER BY sequence",
   ).all<DepartmentRow>();

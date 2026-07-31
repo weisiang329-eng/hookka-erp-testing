@@ -22,6 +22,7 @@ export const DEPT_ORDER = [
   "FAB_CUT",
   "FAB_SEW",
   "WOOD_CUT",
+  "FOAM_CUTTING",
   "FOAM",
   "FRAMING",
   "WEBBING",
@@ -29,11 +30,17 @@ export const DEPT_ORDER = [
   "PACKING",
 ] as const;
 
+// FOAM_CUTTING runs the SAME DAY as FOAM (Foam Bonding) — owner 2026-07-30:
+// "foamcutting 放在 foambonding 同一天, 标准跟 foambonding 一样先". So it adds 0
+// days to the sequence (the cut happens within Foam Bonding's day), keeping the
+// BEDFRAME footprint at the 11-day total the header comment describes. When the
+// owner later gives its own throughput, bump this off 0.
 const DEFAULT_LEAD_DAYS: LeadTimeMap = {
   BEDFRAME: {
     FAB_CUT: 1,
     FAB_SEW: 1,
     WOOD_CUT: 2,
+    FOAM_CUTTING: 0,
     FOAM: 1,
     FRAMING: 2,
     WEBBING: 1,
@@ -44,6 +51,7 @@ const DEFAULT_LEAD_DAYS: LeadTimeMap = {
     FAB_CUT: 1,
     FAB_SEW: 1,
     WOOD_CUT: 2,
+    FOAM_CUTTING: 0,
     FOAM: 1,
     FRAMING: 2,
     WEBBING: 1,

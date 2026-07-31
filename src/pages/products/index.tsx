@@ -911,7 +911,12 @@ type MaintenanceListKey =
 // sticker then falls back to the legacy >1" height rule so existing configs
 // behave exactly as before. Set once per leg-height here in the catalog; it
 // applies to every order that uses that leg height.
-type PricedOption = { value: string; priceSen: number; packSeparately?: boolean };
+// `legSku` (OPTIONAL, leg-height rows only) binds this leg height to the exact
+// raw_materials.itemCode the shop consumes for that leg. When set, RM
+// consumption deducts THIS SKU (× the BOM leg line's qty) instead of guessing
+// from the leg's inch height. Empty/undefined = not bound → consumption falls
+// back to the legacy fuzzy description match. Owner 2026-07-30.
+type PricedOption = { value: string; priceSen: number; packSeparately?: boolean; legSku?: string };
 
 type MaintenanceConfig = {
   divanHeights: PricedOption[];
@@ -1114,6 +1119,10 @@ function MaintenanceView() {
     Record<string, { defaultBom?: string; unitM3?: number }>
   >({});
   const [bomTemplateList, setBomTemplateList] = useState<{ productCode: string; category: string }[]>([]);
+  // Active raw materials for the leg-height → SKU picker (Leg Heights tabs).
+  // Fetched once; the picker filters to leg-like items (description/itemCode
+  // contains "LEG") plus whatever a row is already bound to.
+  const [rawMaterials, setRawMaterials] = useState<{ itemCode: string; description: string }[]>([]);
   useEffect(() => {
     void fetchVariantsConfig().then((v) => {
       setVariantBomDefaults(
@@ -1122,6 +1131,9 @@ function MaintenanceView() {
     });
     void cachedFetchJson<{ data?: { productCode: string; category: string }[] }>("/api/bom/templates")
       .then((d) => setBomTemplateList(d?.data ?? []))
+      .catch(() => {});
+    void cachedFetchJson<{ data?: { itemCode: string; description: string }[] }>("/api/raw-materials?status=ACTIVE")
+      .then((d) => setRawMaterials((d?.data ?? []).map((r) => ({ itemCode: r.itemCode, description: r.description }))))
       .catch(() => {});
   }, []);
   function updateVariantDefault(code: string, patch: { defaultBom?: string; unitM3?: number }) {
@@ -1244,6 +1256,16 @@ function MaintenanceView() {
   // flag drives whether the leg becomes its own piece on the FG packing
   // sticker (its own box in the X/N count).
   const isLegTab = tab === "legHeights" || tab === "sofaLegHeights";
+  // Leg-height → SKU picker options. The shop names leg raw materials with
+  // "LEG" (that's what the old fuzzy consumption match keyed on), so we filter
+  // the active raw-materials list to leg-like items. Sorted by itemCode.
+  const legSkuCandidates = useMemo(
+    () =>
+      rawMaterials
+        .filter((r) => /leg/i.test(r.description) || /leg/i.test(r.itemCode))
+        .sort((a, b) => a.itemCode.localeCompare(b.itemCode)),
+    [rawMaterials],
+  );
   // Bedframe Sizes is the one object-shaped list (code · label · dimensions);
   // it gets its own 3-column inline editor instead of the value/price row.
   const isBedframeSizesTab = tab === "bedframeSizes";
@@ -1313,6 +1335,21 @@ function MaintenanceView() {
     setConfig(prev => ({
       ...prev,
       [k]: (prev[k] as PricedOption[]).map((o, i) => i === idx ? { ...o, packSeparately } : o),
+    }));
+  }
+
+  // Bind (or clear) the raw-material SKU a leg-height row consumes. Leg tabs
+  // only. Empty string clears the binding (falls back to fuzzy match at
+  // consumption time). Stored on the PricedOption at idx as `legSku`.
+  function updateLegSku(idx: number, legSku: string) {
+    if (isFabricsTab || !editMode) return;
+    const k = tab as MaintenanceListKey;
+    const clean = legSku.trim();
+    setConfig(prev => ({
+      ...prev,
+      [k]: (prev[k] as PricedOption[]).map((o, i) =>
+        i === idx ? { ...o, legSku: clean.length > 0 ? clean : undefined } : o,
+      ),
     }));
   }
 
@@ -1810,6 +1847,39 @@ function MaintenanceView() {
                           )}
                         </div>
                         <div className="flex items-center gap-3 flex-shrink-0">
+                          {/* Leg SKU binding — leg-height tabs only. Binds this
+                              leg height to the exact raw material consumed for
+                              it. When set, RM consumption deducts THIS SKU (×
+                              the BOM leg line's qty) instead of guessing from
+                              the inch height. Empty = fall back to fuzzy match. */}
+                          {isLegTab && (
+                            editMode ? (
+                              <select
+                                value={entry.legSku ?? ""}
+                                onChange={(e) => updateLegSku(idx, e.target.value)}
+                                title="Raw material consumed for this leg height"
+                                className="text-xs border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32] w-56"
+                              >
+                                <option value="">SKU: — not bound —</option>
+                                {/* Keep a bound-but-non-leg-named SKU visible. */}
+                                {entry.legSku && !legSkuCandidates.some((r) => r.itemCode === entry.legSku) && (
+                                  <option value={entry.legSku}>{entry.legSku}</option>
+                                )}
+                                {legSkuCandidates.map((r) => (
+                                  <option key={r.itemCode} value={r.itemCode}>
+                                    {r.itemCode} — {r.description}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : (
+                              <span
+                                className={`text-xs whitespace-nowrap ${entry.legSku ? "text-[#6B5C32] font-medium" : "text-gray-400"}`}
+                                title="Raw material consumed for this leg height"
+                              >
+                                {entry.legSku ? `SKU ${entry.legSku}` : "SKU —"}
+                              </span>
+                            )
+                          )}
                           {/* Pack leg separately — leg-height tabs only. When
                               ticked the leg ships in its own box and shows as
                               its own piece on the FG packing sticker. Legacy

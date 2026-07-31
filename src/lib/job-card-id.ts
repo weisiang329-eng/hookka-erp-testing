@@ -38,6 +38,10 @@ export const DEPT_CODE2: Record<string, string> = {
   FAB_CUT: "01",
   FAB_SEW: "02",
   WOOD_CUT: "03",
+  // FOAM_CUTTING sits between WOOD_CUT and FOAM in the line order but keeps a
+  // free 2-digit code ("14") — the numeric codes are identity tokens, NOT the
+  // line sequence, so existing codes 01-08 stay pinned to their depts.
+  FOAM_CUTTING: "14",
   FOAM: "04",
   FRAMING: "05",
   WEBBING: "06",

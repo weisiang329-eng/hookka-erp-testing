@@ -1834,6 +1834,19 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
 - [x] 「double 开 PV」检查：无系统复制，全是作废+重录对子 → 根因=预付款不可编辑
 - [x] 预付款可编辑（owner 拍板）：Edit=批量 knock-off 工作台，Advance 自动缩减，restate 接受 advanceSen
 
+## 2026-07-31 (session: purchasing follow-ups ①② + mechanism sub-BOM ③ + FILLER inches)
+- [x] ① Supplier phone/email standardization — supplier-form-dialog: PhoneInput (+60/intl) + isValidEmail gate (mirrors customer/lead forms) — PR #141
+- [x] ② Purchase Return convert-from-GRN (not just PI) — loadGrnItemsForReturn, GET /source/grn/:id, POST branches PI|GRN, GRN-detail "Create Purchase Return" btn, dialog grnMode; DN step gated OFF for GRN returns (not invoiced → no AP) — PR #141
+- [x] FILLER sponge sheet default = **96 × 48 INCHES**; every cut/sheet/category-default input labelled inches (owner confirmed "48×96 inches, 全部 usage 用 inches") — PR #140
+## 2026-07-31 (session: mechanism→screw reusable sub-BOM, owner 乙)
+- [x] ③ Mechanism→screw binding — owner chose **乙 (reusable sub-BOM / multi-level BOM)** over 甲 (lightweight per-BOM binding). "更正统 ERP,但重".
+  - `component_bom_lines` table (parent SKU → child SKU + qty_per + waste_pct), runtime self-applied (component-bom.ts).
+  - `explodeKits()` runs INSIDE `resolveBomMaterials` on the FINAL resolved lines (after autoDetect), so a mechanism bound via LEG also pulls its screws. Parent line kept (mechanism still consumes on its own); children appended with qty = parentQty × qtyPer, inheriting the parent's repair-scope tags; self/loop-guarded, one level deep.
+  - API `/api/component-boms` (GET / GET:code / PUT / DELETE), RBAC `bom`.
+  - Maintenance page **Component Kits** at `/bom/component-kits` (MaterialPicker for parent + children; sidebar under BOM).
+  - BOM editor shows a read-only `+ kit` hint on any material line whose SKU has a kit (module-level KIT_PARENT_CODES, loaded from /api/component-boms).
+  - Tests: `component-kit-subbom.test.mjs` — functional (saveKit self-guard, explodeKits qty math / parent-kept / no-op) + structural wiring. Full suite 1691 pass; build:strict clean.
+  - branch `feat/mechanism-subbom` off staging.
 ## 2026-07-29 owner rulings — do NOT re-raise
 - [x] Forecast P&L 全套上线（%/RM 双填、按类型归并、父子折叠+段合计、空行自动藏、千位逗号、% 两位小数、表头 Aug 2026 + AMOUNT/% SALES 图例、SALES 行 100%）
 - [x] BUG-2026-07-29-001 partial payment 约束名破案并修复
@@ -1841,3 +1854,6 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
 - [ ] ⛔ 完工重复记 318 件 / DO 出货短记 63 件 → **owner: 会有别人处理**，不要动
 - [ ] ⛔ 收货流水断线（RM_RECEIPT 4月起为 0）→ **owner: 到时才提供开货量，时间未定**；他每月自行 import closing stock（stock_take_only 口径成立），不要修管道
 - [ ] ⛔ 客户期初 60,000 / 20 笔供应商预付款对销 → **owner: 到时我会解决**
+
+## 2026-07-31 (session: BOM per-material wastage %, owner "跟行业标准")
+- [x] BOM material lines now carry an optional **% waste** (industry-standard scrap factor). Added `wastePct?` to WIPMaterial + a waste input at all 6 material-row editor contexts (updateWIPMaterial / onUpdateMaterial / updateL1Material / updateMaterialAtPath). Engine already applied `× (1 + waste%/100)`; backend stores wipComponents JSON as-is so it persists end-to-end. Guidance in tooltip: cut/bulk (fabric/foam/wood) carry waste, discrete parts (screws/legs/mechanism) stay 0. Tests: bom-wastage.test.mjs. → branch feat/bom-wastage off staging.

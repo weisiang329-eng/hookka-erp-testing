@@ -95,13 +95,16 @@ export type WipBreakdownItem = {
 };
 
 // Fallback dept chains for each known wipType when the BOM has no process data.
+// FOAM_CUTTING is inserted immediately before FOAM in every chain that has a
+// FOAM step — it is a tracking/scheduling/labor stage that precedes foam
+// bonding (raw material is still consumed at FAB_CUT; this step touches no RM).
 const DEFAULT_WIP_DEPT_CHAINS: Record<string, string[]> = {
-  DIVAN:         ["WOOD_CUT", "FOAM", "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING"],
-  HEADBOARD:     ["FAB_CUT", "FAB_SEW", "FOAM", "FRAMING", "UPHOLSTERY", "PACKING"],
-  SOFA_BASE:     ["WOOD_CUT", "FOAM", "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING"],
-  SOFA_CUSHION:  ["FAB_CUT", "FAB_SEW", "FOAM", "UPHOLSTERY", "PACKING"],
-  SOFA_ARMREST:  ["WOOD_CUT", "FOAM", "UPHOLSTERY", "PACKING"],
-  SOFA_HEADREST: ["FAB_CUT", "FAB_SEW", "FOAM", "UPHOLSTERY", "PACKING"],
+  DIVAN:         ["WOOD_CUT", "FOAM_CUTTING", "FOAM", "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING"],
+  HEADBOARD:     ["FAB_CUT", "FAB_SEW", "FOAM_CUTTING", "FOAM", "FRAMING", "UPHOLSTERY", "PACKING"],
+  SOFA_BASE:     ["WOOD_CUT", "FOAM_CUTTING", "FOAM", "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING"],
+  SOFA_CUSHION:  ["FAB_CUT", "FAB_SEW", "FOAM_CUTTING", "FOAM", "UPHOLSTERY", "PACKING"],
+  SOFA_ARMREST:  ["WOOD_CUT", "FOAM_CUTTING", "FOAM", "UPHOLSTERY", "PACKING"],
+  SOFA_HEADREST: ["FAB_CUT", "FAB_SEW", "FOAM_CUTTING", "FOAM", "UPHOLSTERY", "PACKING"],
 };
 
 // ---------------------------------------------------------------------------
@@ -269,13 +272,14 @@ const PRODUCTION_ORDER_BY_WIP_TYPE: Record<string, readonly string[]> = {
   // No FOAM in Divan (the "Foam"-named WIP node's actual dept is WEBBING).
   DIVAN:         ["FAB_CUT", "FAB_SEW", "WOOD_CUT", "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING"],
   // BF Headboard BOM: FAB_CUT->FAB_SEW->FOAM (foam branch) || WOOD_CUT->FRAMING->WEBBING (webbing branch) -> UPH -> PACK.
-  HEADBOARD:     ["FAB_CUT", "FAB_SEW", "FOAM", "WOOD_CUT", "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING"],
+  HEADBOARD:     ["FAB_CUT", "FAB_SEW", "FOAM_CUTTING", "FOAM", "WOOD_CUT", "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING"],
   // Sofa BOM: FAB_CUT->FAB_SEW (fabric branch) || WOOD_CUT->FRAMING->WEBBING->FOAM (foam branch) -> UPH -> PACK.
   // FOAM is downstream of WEBBING in sofa, opposite of BF Headboard.
-  SOFA_BASE:     ["FAB_CUT", "FAB_SEW", "WOOD_CUT", "FRAMING", "WEBBING", "FOAM", "UPHOLSTERY", "PACKING"],
-  SOFA_CUSHION:  ["FAB_CUT", "FAB_SEW", "WOOD_CUT", "FRAMING", "WEBBING", "FOAM", "UPHOLSTERY", "PACKING"],
-  SOFA_ARMREST:  ["FAB_CUT", "FAB_SEW", "WOOD_CUT", "FRAMING", "WEBBING", "FOAM", "UPHOLSTERY", "PACKING"],
-  SOFA_HEADREST: ["FAB_CUT", "FAB_SEW", "WOOD_CUT", "FRAMING", "WEBBING", "FOAM", "UPHOLSTERY", "PACKING"],
+  // FOAM_CUTTING rides immediately in front of FOAM in every chain (tracking step).
+  SOFA_BASE:     ["FAB_CUT", "FAB_SEW", "WOOD_CUT", "FRAMING", "WEBBING", "FOAM_CUTTING", "FOAM", "UPHOLSTERY", "PACKING"],
+  SOFA_CUSHION:  ["FAB_CUT", "FAB_SEW", "WOOD_CUT", "FRAMING", "WEBBING", "FOAM_CUTTING", "FOAM", "UPHOLSTERY", "PACKING"],
+  SOFA_ARMREST:  ["FAB_CUT", "FAB_SEW", "WOOD_CUT", "FRAMING", "WEBBING", "FOAM_CUTTING", "FOAM", "UPHOLSTERY", "PACKING"],
+  SOFA_HEADREST: ["FAB_CUT", "FAB_SEW", "WOOD_CUT", "FRAMING", "WEBBING", "FOAM_CUTTING", "FOAM", "UPHOLSTERY", "PACKING"],
 };
 
 // Sort a set of process entries by per-wipType chain when known, falling

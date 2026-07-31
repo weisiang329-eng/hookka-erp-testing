@@ -51,6 +51,7 @@ const FGScan = lazy(() => import('./pages/production/fg-scan'))
 const Delivery = lazy(() => import('./pages/delivery'))
 const DeliveryDetail = lazy(() => import('./pages/delivery/detail'))
 const DeliveryReturns = lazy(() => import('./pages/delivery-returns'))
+const PurchaseReturns = lazy(() => import('./pages/purchase-returns'))
 const DeliveryReturnDetail = lazy(() => import('./pages/delivery-returns/detail'))
 
 // Invoices
@@ -98,6 +99,7 @@ const CncTemplates = lazy(() => import('./pages/cnc-templates'))
 
 // Single-page modules
 const Customers = lazy(() => import('./pages/customers'))
+const Leads = lazy(() => import('./pages/leads'))
 const Employees = lazy(() => import('./pages/employees'))
 const Warehouse = lazy(() => import('./pages/warehouse'))
 
@@ -115,6 +117,7 @@ const PlanningFabricCutting = lazy(() => import('./pages/planning/dept/fabric-cu
 const PlanningFabricSewing = lazy(() => import('./pages/planning/dept/fabric-sewing'))
 const PlanningWoodCutting = lazy(() => import('./pages/planning/dept/wood-cutting'))
 const PlanningFraming = lazy(() => import('./pages/planning/dept/framing'))
+const PlanningFoamCutting = lazy(() => import('./pages/planning/dept/foam-cutting'))
 const PlanningFoamBonding = lazy(() => import('./pages/planning/dept/foam-bonding'))
 const PlanningUpholstery = lazy(() => import('./pages/planning/dept/upholstery'))
 const PlanningPacking = lazy(() => import('./pages/planning/dept/packing'))
@@ -149,6 +152,7 @@ const MailCenter = lazy(() => import('./pages/mail-center'))
 const MailCenterDetail = lazy(() => import('./pages/mail-center/detail'))
 const Maintenance = lazy(() => import('./pages/maintenance'))
 const MaintenanceSofaCombos = lazy(() => import('./pages/maintenance/sofa-combos'))
+const ComponentKits = lazy(() => import('./pages/component-kits'))
 
 // Settings
 const Settings = lazy(() => import('./pages/settings'))
@@ -252,6 +256,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   // with mode="dept" and narrows the backend fetch to that dept's JCs only.
   { path: '/production/fab-cut', element: <S><ProductionDeptPage /></S> },
   { path: '/production/fab-sew', element: <S><ProductionDeptPage /></S> },
+  { path: '/production/foam-cutting', element: <S><ProductionDeptPage /></S> },
   { path: '/production/foam', element: <S><ProductionDeptPage /></S> },
   { path: '/production/wood-cut', element: <S><ProductionDeptPage /></S> },
   { path: '/production/framing', element: <S><ProductionDeptPage /></S> },
@@ -274,6 +279,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   // Delivery
   { path: '/delivery', element: <S><Delivery /></S> },
   { path: '/delivery-returns', element: <S><DeliveryReturns /></S> },
+  { path: '/purchase-returns', element: <S><PurchaseReturns /></S> },
   { path: '/delivery-returns/:id', element: <S><DeliveryReturnDetail /></S> },
   { path: '/delivery/:id', element: <S><DeliveryDetail /></S> },
   { path: '/delivery-test', element: <Navigate to="/delivery" replace /> },
@@ -386,6 +392,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
 
   // Single-page modules
   { path: '/customers', element: <S><Customers /></S> },
+  { path: '/leads', element: <S><Leads /></S> },
   { path: '/employees', element: <S><Employees /></S> },
   { path: '/warehouse', element: <S><Warehouse /></S> },
 
@@ -417,6 +424,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/planning/dept/fabric-sewing', element: <S><PlanningFabricSewing /></S> },
   { path: '/planning/dept/wood-cutting', element: <S><PlanningWoodCutting /></S> },
   { path: '/planning/dept/framing', element: <S><PlanningFraming /></S> },
+  { path: '/planning/dept/foam-cutting', element: <S><PlanningFoamCutting /></S> },
   { path: '/planning/dept/foam-bonding', element: <S><PlanningFoamBonding /></S> },
   { path: '/planning/dept/upholstery', element: <S><PlanningUpholstery /></S> },
   { path: '/planning/dept/packing', element: <S><PlanningPacking /></S> },
@@ -452,6 +460,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/mail-center/:id', element: <S><MailCenterDetail /></S> },
   { path: '/maintenance', element: <S><Maintenance /></S> },
   { path: '/maintenance/sofa-combos', element: <S><MaintenanceSofaCombos /></S> },
+  { path: '/bom/component-kits', element: <S><ComponentKits /></S> },
 
   // Settings
   { path: '/settings', element: <S><Settings /></S> },
@@ -548,6 +557,7 @@ const ROUTE_CHUNK_LOADERS: Record<string, () => Promise<unknown>> = {
   '/production': () => import('./pages/production/overview'),
   '/production/fab-cut': () => import('./pages/production/dept'),
   '/production/fab-sew': () => import('./pages/production/dept'),
+  '/production/foam-cutting': () => import('./pages/production/dept'),
   '/production/foam': () => import('./pages/production/dept'),
   '/production/wood-cut': () => import('./pages/production/dept'),
   '/production/framing': () => import('./pages/production/dept'),
@@ -562,6 +572,7 @@ const ROUTE_CHUNK_LOADERS: Record<string, () => Promise<unknown>> = {
   '/planning/dept/fabric-sewing': () => import('./pages/planning/dept/fabric-sewing'),
   '/planning/dept/wood-cutting': () => import('./pages/planning/dept/wood-cutting'),
   '/planning/dept/framing': () => import('./pages/planning/dept/framing'),
+  '/planning/dept/foam-cutting': () => import('./pages/planning/dept/foam-cutting'),
   '/planning/dept/foam-bonding': () => import('./pages/planning/dept/foam-bonding'),
   '/planning/dept/upholstery': () => import('./pages/planning/dept/upholstery'),
   '/planning/dept/packing': () => import('./pages/planning/dept/packing'),
@@ -570,6 +581,7 @@ const ROUTE_CHUNK_LOADERS: Record<string, () => Promise<unknown>> = {
   '/cnc-templates': () => import('./pages/cnc-templates'),
   '/bom': () => import('./pages/bom'),
   '/bom/wip-times': () => import('./pages/production/wip-times'),
+  '/bom/component-kits': () => import('./pages/component-kits'),
   '/maintenance/sofa-combos': () => import('./pages/maintenance/sofa-combos'),
   '/inventory': () => import('./pages/inventory'),
   '/inventory/fabrics': () => import('./pages/inventory/fabrics'),

@@ -10,6 +10,7 @@ import {
   Boxes,
   Truck,
   Users,
+  Target,
   ShieldCheck,
   Warehouse,
   Settings,
@@ -34,6 +35,7 @@ import {
   TrendingUp,
   Lightbulb,
   ClipboardList,
+  Undo2,
   FileX,
   FilePlus,
   CreditCard,
@@ -97,6 +99,7 @@ const navigationGroups: NavGroup[] = [
         { name: "Consignment Return", href: "/consignment/return", icon: Ship },
       ]},
       { name: "Customers", href: "/customers", icon: Users },
+      { name: "Sales Pipeline", href: "/leads", icon: Target },
     ],
   },
   {
@@ -110,7 +113,8 @@ const navigationGroups: NavGroup[] = [
         { name: "Overview", href: "/production", icon: Layers },
         { name: "Fab Cut", href: "/production/fab-cut", icon: Scissors },
         { name: "Fab Sew", href: "/production/fab-sew", icon: Shirt },
-        { name: "Foam", href: "/production/foam", icon: Box },
+        { name: "Foam Cutting", href: "/production/foam-cutting", icon: Scissors },
+        { name: "Foam Bonding", href: "/production/foam", icon: Box },
         { name: "Wood Cut", href: "/production/wood-cut", icon: Axe },
         { name: "Framing", href: "/production/framing", icon: Frame },
         { name: "Webbing", href: "/production/webbing", icon: Grid3x3 },
@@ -136,6 +140,9 @@ const navigationGroups: NavGroup[] = [
       // WIP catalog — dedup'd per (wipLabel × dept) view of every WIP that's
       // ever run, with avg production time. Reference for planners.
       { name: "WIP Times", href: "/bom/wip-times", icon: Clock },
+      // Reusable kit sub-BOMs: bind a mechanism / leg SKU to its screws once,
+      // every BOM that uses it auto-explodes them (owner 2026-07-31).
+      { name: "Component Kits", href: "/bom/component-kits", icon: Wrench },
       { name: "Sofa Combos", href: "/maintenance/sofa-combos", icon: Tag },
     ],
   },
@@ -155,6 +162,7 @@ const navigationGroups: NavGroup[] = [
       { name: "Purchase Order", href: "/procurement", icon: ShoppingCart },
       { name: "Goods Receipt", href: "/procurement/grn", icon: ClipboardList },
       { name: "Purchase Invoice", href: "/procurement/pi", icon: CreditCard },
+      { name: "Purchase Return", href: "/purchase-returns", icon: Undo2 },
       { name: "MRP", href: "/planning/mrp", icon: Layers },
       { name: "Suppliers", href: "/procurement/maintenance", icon: Building2 },
     ],
@@ -568,6 +576,7 @@ export function Sidebar({
     if (
       href === "/production/fab-cut" ||
       href === "/production/fab-sew" ||
+      href === "/production/foam-cutting" ||
       href === "/production/foam" ||
       href === "/production/wood-cut" ||
       href === "/production/framing" ||

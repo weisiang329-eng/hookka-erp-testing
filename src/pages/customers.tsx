@@ -1,5 +1,10 @@
 import { useState, useEffect, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { CrmPanel } from "@/components/customer/CrmPanel";
+import { KycPanel } from "@/components/customer/KycPanel";
+import { WishlistPanel } from "@/components/customer/WishlistPanel";
+import { PhoneInput } from "@/components/ui/phone-input";
+import { StateSelect } from "@/components/ui/state-select";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -466,6 +471,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
   };
 
   const [exportingQuotation, setExportingQuotation] = useState(false);
+  const [emailingQuotation, setEmailingQuotation] = useState(false);
   const [exportingCatalogue, setExportingCatalogue] = useState(false);
 
   // Customer catalogue export — generates a photo-first lookbook PDF for this
@@ -640,6 +646,98 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
     }
   };
 
+  // One-click send (CRM slice 6): generate the SAME quotation PDF in the
+  // browser, base64-encode it, and hand it to /api/customer-crm/send-quote which
+  // emails it + logs a QUOTE_SENT activity. Sending is an outward action, so a
+  // confirm dialog gates it and the operator can correct the recipient first.
+  const handleEmailQuotationV2 = async () => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(quotationAsOf)) {
+      toast.error("Effective date must be YYYY-MM-DD.");
+      return;
+    }
+    setEmailingQuotation(true);
+    try {
+      const res = await fetch(
+        `/api/customer-quotation?customerId=${encodeURIComponent(customerId)}&asOf=${encodeURIComponent(quotationAsOf)}`,
+      );
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        toast.error(
+          (j as { error?: string }).error ||
+            `Failed to fetch quotation (HTTP ${res.status})`,
+        );
+        return;
+      }
+      const json = (await res.json()) as
+        | { success: true; data: import("@/lib/generate-customer-quotation-pdf-v2").QuotationEnvelope }
+        | { success: false; error?: string };
+      if (!json.success) {
+        toast.error(json.error || "Quotation API returned an error.");
+        return;
+      }
+      const defaultEmail = json.data.customer.email?.trim() || "";
+      // Let the operator confirm / correct the recipient before anything is sent.
+      const to = window.prompt(
+        `Email this quotation to which address?`,
+        defaultEmail,
+      );
+      if (to === null) return; // cancelled
+      const recipient = to.trim();
+      if (!/.+@.+\..+/.test(recipient)) {
+        toast.error("That doesn't look like a valid email address.");
+        return;
+      }
+      const ok = await confirm({
+        title: "Send quotation?",
+        message: `Email the ${quotationAsOf} quotation for ${customerName} to ${recipient}?`,
+      });
+      if (!ok) return;
+
+      let letterhead: import("@/lib/generate-customer-quotation-pdf-v2").LetterheadConfig =
+        null;
+      try {
+        const lhRes = await fetch("/api/kv-config/org-letterhead");
+        if (lhRes.ok) {
+          const lhJson = (await lhRes.json()) as { success: boolean; data: unknown };
+          if (lhJson.success && lhJson.data && typeof lhJson.data === "object") {
+            letterhead = lhJson.data as import("@/lib/generate-customer-quotation-pdf-v2").LetterheadConfig;
+          }
+        }
+      } catch {
+        /* fallback letterhead */
+      }
+      const { default: generateCustomerQuotationPdfV2 } = await import(
+        "@/lib/generate-customer-quotation-pdf-v2"
+      );
+      const doc = generateCustomerQuotationPdfV2({ ...json.data, letterhead });
+      const safeCode = (json.data.customer.code || customerName).replace(
+        /[^a-zA-Z0-9_-]+/g,
+        "_",
+      );
+      const filename = `Quotation-${safeCode}-${quotationAsOf}.pdf`;
+      // doc.output('datauristring') → "data:application/pdf;base64,AAAA…"; the
+      // send endpoint wants the bare base64, so strip the data-URI prefix.
+      const dataUri = doc.output("datauristring");
+      const base64 = dataUri.slice(dataUri.indexOf(",") + 1);
+      const sendRes = await fetch("/api/customer-crm/send-quote", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ customerId, to: recipient, filename, pdfBase64: base64 }),
+      });
+      const sendJson = (await sendRes.json().catch(() => ({}))) as {
+        success?: boolean;
+        error?: string;
+      };
+      if (!sendRes.ok || !sendJson.success) {
+        toast.error(sendJson.error || `Send failed (HTTP ${sendRes.status})`);
+        return;
+      }
+      toast.success(`Quotation emailed to ${recipient}.`);
+    } finally {
+      setEmailingQuotation(false);
+    }
+  };
+
   // ---------- Layout helpers (mirror Products page) ----------
   const isSofaView = categoryTab === "SOFA";
   const isAccessoryView = categoryTab === "ACCESSORY";
@@ -708,6 +806,20 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
                 <FileDown className="h-4 w-4 mr-1" />
               )}
               Export Quotation PDF
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={rows.length === 0 || emailingQuotation}
+              onClick={handleEmailQuotationV2}
+              title="Generate the quotation PDF and email it to the customer (one click)"
+            >
+              {emailingQuotation ? (
+                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+              ) : (
+                <Mail className="h-4 w-4 mr-1" />
+              )}
+              Email Quotation
             </Button>
             <Button
               variant="outline"
@@ -3674,7 +3786,7 @@ export default function CustomersPage() {
               </div>
               <div>
                 <label className="text-xs font-medium text-[#374151] mb-1 block">PIC Contact</label>
-                <Input value={addForm.phone} onChange={(e) => setAddForm({ ...addForm, phone: e.target.value })} placeholder="011-6151 1613" />
+                <PhoneInput value={addForm.phone} onChange={(v) => setAddForm({ ...addForm, phone: v })} />
               </div>
               <div>
                 <label className="text-xs font-medium text-[#374151] mb-1 block">PIC Email</label>
@@ -3797,9 +3909,7 @@ export default function CustomersPage() {
                           </div>
                           <div>
                             <label className="block text-xs text-[#6B7280] mb-1">State *</label>
-                            <select value={hubForm.state} onChange={(e) => setHubForm(f => ({ ...f, state: e.target.value }))} className="w-full h-8 rounded border border-[#E2DDD8] px-2 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20">
-                              {["KL","SGR","PG","JB","SRW","SBH","IPH","MLK","KCH","KB","KT"].map(s => <option key={s} value={s}>{s}</option>)}
-                            </select>
+                            <StateSelect value={hubForm.state} onChange={(v) => setHubForm(f => ({ ...f, state: v }))} className="w-full h-8" />
                           </div>
                           <div>
                             <label className="block text-xs text-[#6B7280] mb-1">Contact Name</label>
@@ -3807,7 +3917,7 @@ export default function CustomersPage() {
                           </div>
                           <div>
                             <label className="block text-xs text-[#6B7280] mb-1">Phone</label>
-                            <Input value={hubForm.phone} onChange={(e) => setHubForm(f => ({ ...f, phone: e.target.value }))} className="h-8" />
+                            <PhoneInput value={hubForm.phone} onChange={(v) => setHubForm(f => ({ ...f, phone: v }))} />
                           </div>
                           <div>
                             <label className="block text-xs text-[#6B7280] mb-1">Email</label>
@@ -3891,23 +4001,7 @@ export default function CustomersPage() {
                     </div>
                     <div>
                       <label className="block text-xs text-[#6B7280] mb-1">State *</label>
-                      <select
-                        value={hubForm.state}
-                        onChange={(e) => setHubForm(f => ({ ...f, state: e.target.value }))}
-                        className="w-full h-8 rounded border border-[#E2DDD8] px-2 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20"
-                      >
-                        <option value="KL">KL</option>
-                        <option value="SGR">SGR</option>
-                        <option value="PG">PG</option>
-                        <option value="JB">JB</option>
-                        <option value="SRW">SRW</option>
-                        <option value="SBH">SBH</option>
-                        <option value="IPH">IPH</option>
-                        <option value="MLK">MLK</option>
-                        <option value="KCH">KCH</option>
-                        <option value="KB">KB</option>
-                        <option value="KT">KT</option>
-                      </select>
+                      <StateSelect value={hubForm.state} onChange={(v) => setHubForm(f => ({ ...f, state: v }))} className="w-full h-8" />
                     </div>
                     <div>
                       <label className="block text-xs text-[#6B7280] mb-1">Contact Name</label>
@@ -3915,7 +4009,7 @@ export default function CustomersPage() {
                     </div>
                     <div>
                       <label className="block text-xs text-[#6B7280] mb-1">Phone</label>
-                      <Input value={hubForm.phone} onChange={(e) => setHubForm(f => ({ ...f, phone: e.target.value }))} placeholder="e.g. 012-345 6789" className="h-8" />
+                      <PhoneInput value={hubForm.phone} onChange={(v) => setHubForm(f => ({ ...f, phone: v }))} />
                     </div>
                     <div>
                       <label className="block text-xs text-[#6B7280] mb-1">Email</label>
@@ -3940,6 +4034,9 @@ export default function CustomersPage() {
               )}
             </CardContent>
           </Card>
+          <CrmPanel customerId={cust.id} customerName={cust.name} />
+          <WishlistPanel customerId={cust.id} />
+          <KycPanel customerId={cust.id} />
           <CustomerProductsPanel customerId={cust.id} customerName={cust.name} customer={cust} />
           <CustomerMaintenancePanel customerId={cust.id} customerName={cust.name} />
           <CustomerSofaCombosPanel customerId={cust.id} customerName={cust.name} />
@@ -3992,7 +4089,7 @@ export default function CustomersPage() {
                     </div>
                     <div>
                       <label className="block text-xs text-[#6B7280] mb-1">Phone</label>
-                      <Input value={editCustForm.phone} onChange={(e) => setEditCustForm(f => ({ ...f, phone: e.target.value }))} />
+                      <PhoneInput value={editCustForm.phone} onChange={(v) => setEditCustForm(f => ({ ...f, phone: v }))} />
                     </div>
                   </div>
                   <div>

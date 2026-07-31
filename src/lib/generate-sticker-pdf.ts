@@ -6,6 +6,7 @@ const DEPT_COLORS: Record<string, [number, number, number]> = {
   FAB_CUT: [59, 130, 246],
   FAB_SEW: [99, 102, 241],
   WOOD_CUT: [245, 158, 11],
+  FOAM_CUTTING: [167, 139, 250],
   FOAM: [139, 92, 246],
   FRAMING: [249, 115, 22],
   WEBBING: [16, 185, 129],
@@ -17,6 +18,7 @@ const DEPT_NAMES: Record<string, string> = {
   FAB_CUT: "Fabric Cutting",
   FAB_SEW: "Fabric Sewing",
   WOOD_CUT: "Wood Cutting",
+  FOAM_CUTTING: "Foam Cut",
   FOAM: "Foam Bonding",
   FRAMING: "Framing",
   WEBBING: "Webbing",
@@ -227,6 +229,18 @@ function getDeptSpecificFields(
       fields.push({
         label: "Fab Cut CD",
         value: fabCutJC?.completedDate ? fmtDate(fabCutJC.completedDate) : "Pending",
+      });
+      break;
+    }
+
+    case "FOAM_CUTTING": {
+      // FOAM_CUTTING mirrors FOAM's upstream reference — the fabric-sew
+      // completion date. It is a tracking/scheduling step (raw material is
+      // still consumed at FAB_CUT), so it carries no material fields.
+      const fabSewJC = findJC("FAB_SEW");
+      fields.push({
+        label: "Fab Sew CD",
+        value: fabSewJC?.completedDate ? fmtDate(fabSewJC.completedDate) : "Pending",
       });
       break;
     }

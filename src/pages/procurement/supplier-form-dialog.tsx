@@ -8,6 +8,8 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PhoneInput } from "@/components/ui/phone-input";
+import { isValidEmail } from "@/lib/contact-format";
 import { X } from "lucide-react";
 
 export type SupplierStatus = "ACTIVE" | "INACTIVE" | "BLACKLISTED";
@@ -81,6 +83,7 @@ export function SupplierFormDialog({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isValidEmail(email)) return; // block save on a malformed email
     onSave({ code, name, contactPerson, phone, email, address, paymentTerms, rating, status, purchaseOrgCode });
   };
 
@@ -124,12 +127,13 @@ export function SupplierFormDialog({
             </div>
             <div>
               <label className="block text-sm font-medium text-[#374151] mb-1">Phone</label>
-              <Input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+60 12-XXX XXXX" />
+              <PhoneInput value={phone} onChange={(v) => setPhone(v)} />
             </div>
           </div>
           <div>
             <label className="block text-sm font-medium text-[#374151] mb-1">Email</label>
-            <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="email@example.com" />
+            <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="email@example.com" className={!isValidEmail(email) ? "border-[#9A3A2D]" : undefined} />
+            {!isValidEmail(email) ? <span className="text-[11px] text-[#9A3A2D]">Enter a valid email address</span> : null}
           </div>
           <div>
             <label className="block text-sm font-medium text-[#374151] mb-1">Address</label>

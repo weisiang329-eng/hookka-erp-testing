@@ -1252,6 +1252,23 @@ export default function InventoryPage() {
     setVariantsCfg((prev) => ({ ...(prev ?? {}), materialVariants: next }) as VariantsConfig);
     patchVariantsConfig({ materialVariants: next });
   }
+  // Per-category DEFAULT sheet size for FILLER area-based consumption (owner
+  // 2026-07-30). Set once here; individual sponge SKUs override in the RM edit
+  // dialog. Backend falls back to 8×4 for any FILLER group when unset.
+  const sheetDefaultsAll: Record<string, { length?: number; width?: number }> =
+    (variantsCfg?.sheetDefaults as Record<string, { length?: number; width?: number }> | undefined) ?? {};
+  function catSheetDefault(cat: string): { length?: number; width?: number } {
+    // Seed S.FILLER to 8×4 in the UI so the "unified default" is visible.
+    if (sheetDefaultsAll[cat]) return sheetDefaultsAll[cat];
+    return /FILLER/i.test(cat) ? { length: 96, width: 48 } : {};
+  }
+  function saveSheetDefault(cat: string, dim: { length?: number; width?: number }) {
+    const cur = sheetDefaultsAll[cat] ?? catSheetDefault(cat);
+    const merged = { ...cur, ...dim };
+    const next = { ...sheetDefaultsAll, [cat]: merged };
+    setVariantsCfg((prev) => ({ ...(prev ?? {}), sheetDefaults: next }) as VariantsConfig);
+    patchVariantsConfig({ sheetDefaults: next });
+  }
   function catVariants(cat: string): string[] {
     return rmVariantsAll[cat] ?? DEFAULT_MATERIAL_VARIANTS[cat] ?? [];
   }
@@ -1734,7 +1751,7 @@ export default function InventoryPage() {
 
   // Edit RM dialog state
   const [editRM, setEditRM] = useState<RawMaterial | null>(null);
-  const [editRMForm, setEditRMForm] = useState({ itemCode: "", description: "", baseUOM: "", itemGroup: "", balanceQty: 0 });
+  const [editRMForm, setEditRMForm] = useState({ itemCode: "", description: "", baseUOM: "", itemGroup: "", balanceQty: 0, sheetLengthIn: "", sheetWidthIn: "" });
   const [savingRM, setSavingRM] = useState(false);
   // Delete-in-flight flag so the dialog footer can disable both buttons while
   // DELETE /api/raw-materials/:id is in transit. Mirrors the rmSaving / busy
@@ -1766,6 +1783,8 @@ export default function InventoryPage() {
       baseUOM: row.baseUOM,
       itemGroup: row.itemGroup,
       balanceQty: row.balanceQty,
+      sheetLengthIn: row.sheetLengthIn != null ? String(row.sheetLengthIn) : "",
+      sheetWidthIn: row.sheetWidthIn != null ? String(row.sheetWidthIn) : "",
     });
     setRmBatches([]);
     setRmBatchesLoading(true);
@@ -2695,6 +2714,22 @@ export default function InventoryPage() {
                       <Button variant="outline" size="sm" onClick={() => { addVariantToCat(matCatSel, matCatNewVar); setMatCatNewVar(""); }} disabled={!matCatNewVar.trim()}><Plus className="h-4 w-4" /> Add</Button>
                     </div>
                   </div>
+
+                  {/* Default sheet size — FILLER (sponge) area-based consumption.
+                      Set once per category; individual SKUs override in the RM
+                      edit dialog. Bare numbers (a ratio — same unit as the BOM
+                      cut size); backend falls back to 8×4 for FILLER groups. */}
+                  <div className="pt-3 border-t border-[#E2DDD8]">
+                    <div className="text-xs text-[#6B7280] mb-1.5">
+                      Default sheet size for <span className="font-mono text-[#1F1D1B]">{matCatSel}</span>{" "}
+                      <span className="text-[#9CA3AF]">(sponge / sheet materials — length × width in INCHES, e.g. 96 × 48; special SKUs override in their own edit)</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Input type="number" placeholder="Length" onFocus={(e) => e.currentTarget.select()} value={catSheetDefault(matCatSel).length ?? ""} onChange={(e) => saveSheetDefault(matCatSel, { length: e.target.value === "" ? undefined : Number(e.target.value) })} className="w-28" />
+                      <span className="text-[#9CA3AF]">×</span>
+                      <Input type="number" placeholder="Width" onFocus={(e) => e.currentTarget.select()} value={catSheetDefault(matCatSel).width ?? ""} onChange={(e) => saveSheetDefault(matCatSel, { width: e.target.value === "" ? undefined : Number(e.target.value) })} className="w-28" />
+                    </div>
+                  </div>
                 </div>
                 <div className="flex justify-end gap-2 px-6 py-4 border-t border-[#E2DDD8]">
                   <Button variant="primary" size="sm" onClick={() => setShowMaterialCats(false)}>Done</Button>
@@ -3089,6 +3124,21 @@ export default function InventoryPage() {
                 <Input value={editRMForm.itemGroup} onChange={(e) => setEditRMForm(f => ({ ...f, itemGroup: e.target.value }))} />
               </div>
 
+              {/* Sheet size (inches) — used for FILLER / sponge area-based
+                  consumption. One sheet's area = length × width; a BOM cut piece
+                  consumes cutArea ÷ sheetArea of a sheet. Leave blank for
+                  non-sheet materials (consumption then uses the plain qty). */}
+              <div>
+                <label className="block text-xs text-[#6B7280] mb-1">
+                  Sheet size <span className="text-[#9CA3AF]">(INCHES — length × width, e.g. 96 × 48; blank = use this category's default)</span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <Input type="number" placeholder="Length" onFocus={(e) => e.currentTarget.select()} value={editRMForm.sheetLengthIn} onChange={(e) => setEditRMForm(f => ({ ...f, sheetLengthIn: e.target.value }))} />
+                  <span className="text-[#9CA3AF]">×</span>
+                  <Input type="number" placeholder="Width" onFocus={(e) => e.currentTarget.select()} value={editRMForm.sheetWidthIn} onChange={(e) => setEditRMForm(f => ({ ...f, sheetWidthIn: e.target.value }))} />
+                </div>
+              </div>
+
               {/* Source batches in FIFO order — backed by rm_batches joined
                   to grns to recover the originating Purchase Order No. The
                   FIFO ordering matches what the cost-cascade uses to consume
@@ -3211,6 +3261,8 @@ export default function InventoryPage() {
                             baseUOM: editRMForm.baseUOM,
                             itemGroup: editRMForm.itemGroup.trim(),
                             balanceQty: editRMForm.balanceQty,
+                            sheetLengthIn: editRMForm.sheetLengthIn.trim() === "" ? null : Number(editRMForm.sheetLengthIn),
+                            sheetWidthIn: editRMForm.sheetWidthIn.trim() === "" ? null : Number(editRMForm.sheetWidthIn),
                           }),
                         },
                       );
@@ -3244,6 +3296,8 @@ export default function InventoryPage() {
                                 baseUOM: editRMForm.baseUOM,
                                 itemGroup: editRMForm.itemGroup.trim(),
                                 balanceQty: editRMForm.balanceQty,
+                                sheetLengthIn: editRMForm.sheetLengthIn.trim() === "" ? null : Number(editRMForm.sheetLengthIn),
+                                sheetWidthIn: editRMForm.sheetWidthIn.trim() === "" ? null : Number(editRMForm.sheetWidthIn),
                               }
                             : r,
                         ),

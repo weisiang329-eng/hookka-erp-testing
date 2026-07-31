@@ -754,7 +754,10 @@ test("cascade: material filter runs before consumption, keyed off the PO's stamp
   assert.ok(filterIdx > 0, "materialLineInScope call must exist");
   assert.ok(fifoIdx > filterIdx, "scope filter must run before fifoConsume");
   // Class lookup source: raw_materials.itemGroup rides on resolveRmFromBom.
-  assert.match(cascadeSrc, /SELECT id, itemCode, description, itemGroup FROM raw_materials/);
+  // resolveRmFromBom now SELECT *'s (column-safe for the runtime-added FILLER
+  // sheet-size columns) and maps itemGroup through toResolvedRm.
+  assert.match(cascadeSrc, /SELECT \* FROM raw_materials WHERE itemCode = \? LIMIT 1/);
+  assert.match(cascadeSrc, /itemGroup: \(row\.itemGroup \?\? null\)/);
   // Owning-node depts captured for the CUSTOM branch rule.
   assert.match(cascadeSrc, /ownerDeptCodes/);
 });

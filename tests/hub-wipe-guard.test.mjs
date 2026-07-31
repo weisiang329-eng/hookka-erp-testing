@@ -53,12 +53,16 @@ test("customers.tsx: delete names the hub id; SGR selectable in both hub forms",
     /deletedHubIds: \[hub\.id\]/,
     "the delete button must send the explicit id",
   );
-  assert.match(page, /"KL","SGR","PG"/, "edit-form state list must include SGR");
-  assert.match(
-    page,
-    /<option value="SGR">SGR<\/option>/,
-    "add-form state dropdown must include SGR",
+  // Hub state is now the shared StateSelect (canonical hub state-CODE picker,
+  // system-wide standardisation 2026-07-30). Both hub forms use it, and SGR
+  // lives in the shared HUB_STATE_CODES list — so Selangor stays selectable.
+  const stateSelects = (page.match(/<StateSelect value=\{hubForm\.state\}/g) || []).length;
+  assert.ok(stateSelects >= 2, "both hub forms must use the shared StateSelect");
+  const contactFmt = readFileSync(
+    new URL("../src/lib/contact-format.ts", import.meta.url),
+    "utf8",
   );
+  assert.match(contactFmt, /"SGR"/, "SGR must be a shared hub state code");
 });
 
 test("scan-po-modal.tsx: hub-less create requires explicit operator confirm", () => {

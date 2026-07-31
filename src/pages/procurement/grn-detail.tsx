@@ -615,6 +615,12 @@ export default function GRNDetailPage() {
             <Button type="button" variant="outline" size="sm" onClick={printPdf} disabled={busy}>
               <Printer className="h-3.5 w-3.5" /> Print
             </Button>
+            {/* Return received goods straight from this GRN (reverses stock; no
+                Debit Note since it's not invoiced). Deep-links to the Purchase
+                Returns page with this GRN preselected. */}
+            <Button type="button" variant="outline" size="sm" onClick={() => navigate(`/purchase-returns?grn=${encodeURIComponent(grn.id)}`)} disabled={busy}>
+              <PackageCheck className="h-3.5 w-3.5" /> Create Purchase Return
+            </Button>
             {/* Arrival advance button — contextual, hidden when ARRIVED */}
             {advanceTarget && (
               <Button type="button" variant="outline" size="sm" onClick={advanceArrival} disabled={busy}>

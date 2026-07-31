@@ -214,13 +214,14 @@ function todayISO(): string {
 // eff% = production minutes ÷ (production-dept clocked hours × 60). Only the
 // eight production departments count toward the denominator.
 const PROD_DEPTS = new Set([
-  "FAB_CUT", "FAB_SEW", "WOOD_CUT", "FOAM",
+  "FAB_CUT", "FAB_SEW", "WOOD_CUT", "FOAM_CUTTING", "FOAM",
   "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING",
 ]);
 const DEPT_LABEL: Record<string, string> = {
   FAB_CUT: "Fabric Cutting",
   FAB_SEW: "Fabric Sewing",
   WOOD_CUT: "Wood Cutting",
+  FOAM_CUTTING: "Foam Cutting",
   FOAM: "Foam Bonding",
   FRAMING: "Framing",
   WEBBING: "Webbing",

@@ -922,6 +922,8 @@ import customerHubs from "./routes/customer-hubs";
 import customerProducts from "./routes/customer-products";
 import customerMaintenance from "./routes/customer-maintenance";
 import customerQuotation from "./routes/customer-quotation";
+import customerCrm from "./routes/customer-crm";
+import salesLeads from "./routes/sales-leads";
 import sofaCombos from "./routes/sofa-combos";
 import organisations from "./routes/organisations";
 import salesOrders from "./routes/sales-orders";
@@ -933,6 +935,8 @@ import eInvoices from "./routes/e-invoices";
 import threeWayMatch from "./routes/three-way-match";
 import deliveryOrders from "./routes/delivery-orders";
 import deliveryReturns from "./routes/delivery-returns";
+import purchaseReturns from "./routes/purchase-returns";
+import componentBoms from "./routes/component-boms";
 import packingLists from "./routes/packing-lists";
 // Public QR dispatch/deliver flow (no login — the unguessable qrtoken IS the
 // credential; auth bypass via PUBLIC_PREFIXES in lib/auth-middleware.ts).
@@ -1114,6 +1118,8 @@ app.route("/api/customer-hubs", customerHubs);
 app.route("/api/customer-products", customerProducts);
 app.route("/api/customer-maintenance", customerMaintenance);
 app.route("/api/customer-quotation", customerQuotation);
+app.route("/api/customer-crm", customerCrm);
+app.route("/api/sales-leads", salesLeads);
 app.route("/api/sofa-combos", sofaCombos);
 app.route("/api/organisations", organisations);
 app.route("/api/sales-orders", salesOrders);
@@ -1125,6 +1131,8 @@ app.route("/api/e-invoices", eInvoices);
 app.route("/api/three-way-match", threeWayMatch);
 app.route("/api/delivery-orders", deliveryOrders);
 app.route("/api/delivery-returns", deliveryReturns);
+app.route("/api/purchase-returns", purchaseReturns);
+app.route("/api/component-boms", componentBoms);
 app.route("/api/packing-lists", packingLists);
 // Public QR scan flow for DOs/PLs. Registered like any other subapp — the
 // auth bypass happens in authMiddleware (PUBLIC_PREFIXES "/api/public/do-qr/"),

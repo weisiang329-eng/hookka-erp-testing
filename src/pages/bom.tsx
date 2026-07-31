@@ -152,6 +152,21 @@ function isFillerMaterial(m: WIPMaterial, rawMaterials: RawMaterialOption[]): bo
   return !!rm && /FILLER/i.test(rm.itemGroup || "");
 }
 
+// Reusable kit sub-BOMs (owner 2026-07-31). A mechanism / leg SKU can be bound
+// (on the Component Kits page) to the screws it always needs; any BOM line that
+// picks such a SKU auto-explodes the screws at consumption time. We surface a
+// small read-only "auto-adds screws" hint on those lines so the author knows
+// the screws are covered WITHOUT re-listing them (the whole point of 乙). The
+// parent-code set is loaded once from /api/component-boms into this module-level
+// set; the top-level BOM page load re-renders the tree after populating it, so
+// the hint appears on first paint after data arrives. It is purely advisory —
+// consumption reads the kit server-side regardless.
+const KIT_PARENT_CODES = new Set<string>();
+function materialHasKit(m: WIPMaterial): boolean {
+  const code = m.code || m.inventoryCode;
+  return !!code && KIT_PARENT_CODES.has(code);
+}
+
 function getProductionMinutes(deptCode: string, category: string): number {
   if (typeof window === "undefined") return 0;
   const cfg = getVariantsConfigSync();
@@ -2264,6 +2279,9 @@ function CreateBOMDialog({
                           )}
                           <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
                           <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
+                          {materialHasKit(m) && (
+                            <span className="text-[10px] text-[#1D4ED8] whitespace-nowrap" title="This SKU has a Component Kit — its bound screws/parts are auto-added to consumption. Manage them on the Component Kits page.">+ kit</span>
+                          )}
                           {isFillerMaterial(m, rawMaterials) && (
                             <span className="flex items-center gap-0.5 text-[10px] text-[#B8601A] whitespace-nowrap" title="Cut size in INCHES (length × width) — consumes cutArea ÷ sheetArea of a sheet">
                               cut
@@ -2579,6 +2597,9 @@ function SubWIPTree({
                   )}
                   <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.qty} onChange={(e) => onUpdateMaterial(childPath, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
                   <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
+                  {materialHasKit(m) && (
+                    <span className="text-[10px] text-[#1D4ED8] whitespace-nowrap" title="This SKU has a Component Kit — its bound screws/parts are auto-added to consumption. Manage them on the Component Kits page.">+ kit</span>
+                  )}
                   {isFillerMaterial(m, rawMaterials) && (
                     <span className="flex items-center gap-0.5 text-[10px] text-[#B8601A] whitespace-nowrap" title="Cut size in INCHES (length × width) — consumes cutArea ÷ sheetArea of a sheet">
                       cut
@@ -3480,6 +3501,9 @@ function EditBOMDialog({
                           )}
                           <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
                           <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
+                          {materialHasKit(m) && (
+                            <span className="text-[10px] text-[#1D4ED8] whitespace-nowrap" title="This SKU has a Component Kit — its bound screws/parts are auto-added to consumption. Manage them on the Component Kits page.">+ kit</span>
+                          )}
                           {isFillerMaterial(m, rawMaterials) && (
                             <span className="flex items-center gap-0.5 text-[10px] text-[#B8601A] whitespace-nowrap" title="Cut size in INCHES (length × width) — consumes cutArea ÷ sheetArea of a sheet">
                               cut
@@ -6962,11 +6986,20 @@ export default function BOMManagementPage() {
   useEffect(() => {
     async function load() {
       try {
-        const [pData, tData, invData] = await Promise.all([
+        const [pData, tData, invData, kitData] = await Promise.all([
           cachedFetchJson<{ success?: boolean; data?: unknown }>("/api/products"),
           cachedFetchJson<{ success?: boolean; data?: unknown }>("/api/bom/templates"),
           cachedFetchJson<{ success?: boolean; data?: { rawMaterials?: unknown[] } }>("/api/inventory"),
+          cachedFetchJson<{ success?: boolean; data?: { parentCode?: string }[] }>("/api/component-boms"),
         ]);
+
+        // Populate the reusable-kit hint set (module-level; see materialHasKit).
+        if (kitData && kitData.success && Array.isArray(kitData.data)) {
+          KIT_PARENT_CODES.clear();
+          for (const k of kitData.data) {
+            if (k?.parentCode) KIT_PARENT_CODES.add(k.parentCode);
+          }
+        }
 
         if (pData && pData.success) setProducts(pData.data as Product[]);
         if (tData && tData.success) {

@@ -62,6 +62,7 @@ import {
   repairComponentScale,
 } from "../../lib/repair-scope";
 import { deriveTopLevelWipKey } from "./bom-wip-breakdown";
+import { explodeKits } from "./component-bom";
 
 type RMBatchRow = {
   id: string;
@@ -284,7 +285,21 @@ function collectTreeMaterials(
 // without a data migration. Returns [] if nothing is found. Dimensions
 // snapshot is used by the JSON-tree paths to expand per-material scaling
 // rules at extraction time.
+// Resolve the BOM material lines for a PO, THEN explode any reusable kit
+// sub-BOMs (a mechanism / leg SKU that drags in its required screws — owner
+// 2026-07-31). Explosion runs on the FINAL resolved lines so a mechanism bound
+// via autoDetect=LEG also pulls its screws. Every consumer (consumption,
+// costing, shortage report) goes through here, so the kit is intrinsic to the
+// BOM everywhere. See component-bom.ts.
 async function resolveBomMaterials(
+  db: D1Database,
+  po: ProductionOrderRow,
+): Promise<MaterialLine[]> {
+  const lines = await resolveBomMaterialsRaw(db, po);
+  return explodeKits(db, lines);
+}
+
+async function resolveBomMaterialsRaw(
   db: D1Database,
   po: ProductionOrderRow,
 ): Promise<MaterialLine[]> {

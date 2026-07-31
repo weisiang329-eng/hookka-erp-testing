@@ -151,6 +151,7 @@ const MailCenter = lazy(() => import('./pages/mail-center'))
 const MailCenterDetail = lazy(() => import('./pages/mail-center/detail'))
 const Maintenance = lazy(() => import('./pages/maintenance'))
 const MaintenanceSofaCombos = lazy(() => import('./pages/maintenance/sofa-combos'))
+const ComponentKits = lazy(() => import('./pages/component-kits'))
 
 // Settings
 const Settings = lazy(() => import('./pages/settings'))
@@ -457,6 +458,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/mail-center/:id', element: <S><MailCenterDetail /></S> },
   { path: '/maintenance', element: <S><Maintenance /></S> },
   { path: '/maintenance/sofa-combos', element: <S><MaintenanceSofaCombos /></S> },
+  { path: '/bom/component-kits', element: <S><ComponentKits /></S> },
 
   // Settings
   { path: '/settings', element: <S><Settings /></S> },
@@ -577,6 +579,7 @@ const ROUTE_CHUNK_LOADERS: Record<string, () => Promise<unknown>> = {
   '/cnc-templates': () => import('./pages/cnc-templates'),
   '/bom': () => import('./pages/bom'),
   '/bom/wip-times': () => import('./pages/production/wip-times'),
+  '/bom/component-kits': () => import('./pages/component-kits'),
   '/maintenance/sofa-combos': () => import('./pages/maintenance/sofa-combos'),
   '/inventory': () => import('./pages/inventory'),
   '/inventory/fabrics': () => import('./pages/inventory/fabrics'),

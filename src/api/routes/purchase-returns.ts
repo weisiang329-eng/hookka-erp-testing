@@ -19,6 +19,7 @@ import {
   createPurchaseReturn,
   loadPiItemsForReturn,
   applyPurchaseReturnStockOut,
+  issuePurchaseReturnDebitNote,
   type PRCreateItem,
 } from "../lib/purchase-return-create";
 
@@ -152,6 +153,24 @@ app.post("/:id/confirm", async (c) => {
     return c.json({ success: false, error: result.error || "confirm failed" }, code);
   }
   return c.json({ success: true, data: { id, status: "STOCK_OUT", reversedItems: result.reversedItems } });
+});
+
+// POST /api/purchase-returns/:id/issue-dn — slice 3: issue the supplier Debit
+// Note. Reduces our AP + posts a balanced GL journal (reversing the PI's own
+// accounts). Only from STOCK_OUT; idempotent (flips to DN_ISSUED). AP + GL →
+// owner verifies on staging before prod.
+app.post("/:id/issue-dn", async (c) => {
+  const denied = await requirePermission(c, "purchase-invoices", "update");
+  if (denied) return denied;
+  await ensurePurchaseReturnTables(c.var.DB);
+  const id = c.req.param("id");
+  const userId = (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+  const result = await issuePurchaseReturnDebitNote(c.var.DB, id, getOrgId(c), userId);
+  if (!result.ok) {
+    const code = result.error === "not found" ? 404 : 409;
+    return c.json({ success: false, error: result.error || "issue failed" }, code);
+  }
+  return c.json({ success: true, data: { id, status: "DN_ISSUED", noteNumber: result.noteNumber, amountSen: result.amountSen } });
 });
 
 // DELETE /api/purchase-returns/:id — only while still OPEN (no ledger to unwind

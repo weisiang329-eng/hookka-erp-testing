@@ -151,3 +151,47 @@ test("Purchase Returns page reads ?pi= and preselects that PI", () => {
   // The dialog auto-loads the PI's returnable lines when deep-linked.
   assert.match(page, /if \(initialPiId\) void loadLines\(initialPiId\)/);
 });
+
+// ===========================================================================
+// Slice 3 — supplier Debit Note + AP + balanced GL (accounting; owner-verified)
+// ===========================================================================
+
+test("issue-DN is STOCK_OUT-only, once, atomic, and flips to DN_ISSUED", () => {
+  const f = flat(CREATE);
+  assert.match(f, /export async function issuePurchaseReturnDebitNote/);
+  assert.match(f, /must be STOCK_OUT/);
+  assert.match(f, /a debit note was already issued/);
+  assert.match(f, /UPDATE purchase_returns SET debit_note_id = \?, status = 'DN_ISSUED'/);
+  assert.match(f, /await db\.batch\(stmts\)/);
+});
+
+test("GL reverses the PI's OWN accounts and is balanced by construction", () => {
+  const f = flat(CREATE);
+  // Read the PI's non-hidden legs; AP-control = its credit leg, expense = its
+  // biggest debit leg.
+  assert.match(f, /sourceType = 'purchase_invoice' AND sourceId = \? AND orgId = \? AND \(hidden IS NULL OR hidden = 0\)/);
+  assert.match(f, /if \(Number\(l\.creditSen\) > 0 && !apCode\) apCode = String\(l\.accountCode\)/);
+  // Two legs, BOTH = amountSen → balanced. DR AP-control, CR expense.
+  assert.match(f, /accountCode: apCode, debitSen: amountSen, creditSen: 0/);
+  assert.match(f, /accountCode: expenseCode, debitSen: 0, creditSen: amountSen/);
+  // Guarded from double-posting.
+  assert.match(f, /ledgerHasSource\(db, org, "purchase_return", returnId\)/);
+});
+
+test("issue-DN reduces the supplier AP subledger + writes the DN document", () => {
+  const f = flat(CREATE);
+  assert.match(f, /UPDATE suppliers SET outstandingSen = outstandingSen - \? WHERE id = \?/);
+  assert.match(f, /CREATE TABLE IF NOT EXISTS supplier_debit_notes/);
+  assert.match(f, /`SDN-\$\{yy\}\$\{mm\}-`/);
+  assert.match(f, /INSERT INTO supplier_debit_notes/);
+});
+
+test("issue-DN route + UI action exist, RBAC-gated", () => {
+  const f = flat(ROUTES);
+  assert.match(f, /app\.post\("\/:id\/issue-dn"/);
+  assert.match(f, /issuePurchaseReturnDebitNote\(c\.var\.DB, id, getOrgId\(c\), userId\)/);
+  assert.match(f, /app\.post\("\/:id\/issue-dn"[\s\S]*?requirePermission\(c, "purchase-invoices", "update"\)/);
+  const page = flat(PAGE);
+  assert.match(page, /\/api\/purchase-returns\/\$\{r\.id\}\/issue-dn/);
+  assert.match(page, /Issue Debit Note/);
+});

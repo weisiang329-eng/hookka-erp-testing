@@ -8,6 +8,11 @@
 // Tables are self-applied at runtime (deploy does not replay migration files).
 // snake_case columns; every write is org-scoped by the caller.
 // ---------------------------------------------------------------------------
+import {
+  buildJournalEntryStatements,
+  ledgerHasSource,
+  type LedgerEntryInput,
+} from "./journal-hash";
 
 export type PRCreateItem = {
   purchaseInvoiceItemId?: string;
@@ -251,6 +256,139 @@ export async function applyPurchaseReturnStockOut(
   );
   await db.batch(stmts);
   return { ok: true, reversedItems };
+}
+
+// ---------------------------------------------------------------------------
+// Slice 3 — supplier Debit Note + AP. Owner 2026-07-30. Once a return's stock is
+// reversed (STOCK_OUT), issuing the DN debits the supplier: it reduces our AP
+// AND posts a balanced GL journal. The GL posting is the SAFE kind — it reuses
+// the source PI's OWN accounts: DR the PI's AP-control account, CR the PI's main
+// expense/inventory account, both = the DN amount. Because it uses the accounts
+// the PI actually posted to and both legs equal the same amount, the journal is
+// balanced by construction (no invented accounts, no rounding drift). If the PI
+// never hit the GL (e.g. a DRAFT PI), the GL step is skipped and only the AP
+// subledger + DN record move. Idempotent: fires only from STOCK_OUT, flips to
+// DN_ISSUED, and the journal is guarded by ledgerHasSource. All in one db.batch.
+async function ensureSupplierDebitNoteTable(db: D1Database): Promise<void> {
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS supplier_debit_notes (
+         id TEXT PRIMARY KEY, note_number TEXT, purchase_return_id TEXT,
+         supplier_id TEXT, supplier_name TEXT, purchase_invoice_id TEXT,
+         amount_sen INTEGER, status TEXT NOT NULL DEFAULT 'ISSUED',
+         created_by TEXT, org_id TEXT, created_at TEXT )`,
+    )
+    .run();
+}
+
+async function nextSupplierDnNo(db: D1Database): Promise<string> {
+  const now = new Date();
+  const yy = String(now.getUTCFullYear()).slice(2);
+  const mm = String(now.getUTCMonth() + 1).padStart(2, "0");
+  const prefix = `SDN-${yy}${mm}-`;
+  const row = await db
+    .prepare(
+      `SELECT note_number AS "noteNumber" FROM supplier_debit_notes
+        WHERE note_number LIKE ? ORDER BY note_number DESC LIMIT 1`,
+    )
+    .bind(`${prefix}%`)
+    .first<{ noteNumber: string }>();
+  let n = 1;
+  if (row?.noteNumber) {
+    const tail = Number(row.noteNumber.slice(prefix.length));
+    if (Number.isFinite(tail)) n = tail + 1;
+  }
+  return `${prefix}${String(n).padStart(3, "0")}`;
+}
+
+export async function issuePurchaseReturnDebitNote(
+  db: D1Database,
+  returnId: string,
+  orgId: string | null,
+  actorUserId: string | null,
+): Promise<{ ok: boolean; error?: string; noteNumber?: string; amountSen?: number }> {
+  await ensurePurchaseReturnTables(db);
+  await ensureSupplierDebitNoteTable(db);
+  const header = await db
+    .prepare(
+      "SELECT * FROM purchase_returns WHERE id = ? AND (org_id = ? OR org_id IS NULL)",
+    )
+    .bind(returnId, orgId)
+    .first<Record<string, unknown>>();
+  if (!header) return { ok: false, error: "not found" };
+  if (String(header.status ?? "OPEN") !== "STOCK_OUT") {
+    return { ok: false, error: "confirm the stock reversal first (must be STOCK_OUT)" };
+  }
+  if (header.debit_note_id) return { ok: false, error: "a debit note was already issued" };
+
+  const agg = await db
+    .prepare("SELECT COALESCE(SUM(line_total_sen),0) AS total FROM purchase_return_items WHERE purchase_return_id = ?")
+    .bind(returnId)
+    .first<{ total: number }>();
+  const amountSen = Math.round(Number(agg?.total ?? 0));
+  if (!(amountSen > 0)) return { ok: false, error: "nothing to debit (0 amount)" };
+
+  const piId = String(header.purchase_invoice_id ?? "");
+  const supplierId = String(header.supplier_id ?? "");
+  const supplierName = String(header.supplier_name ?? "");
+  const org = orgId ?? "";
+  const now = new Date().toISOString();
+  const dnId = `sdn-${crypto.randomUUID().slice(0, 8)}`;
+  const noteNumber = await nextSupplierDnNo(db);
+  const stmts: D1PreparedStatement[] = [];
+
+  // GL — reverse the PI's posting via its OWN accounts (balanced by construction).
+  if (piId && !(await ledgerHasSource(db, org, "purchase_return", returnId))) {
+    const piLegs =
+      (
+        await db
+          .prepare(
+            "SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries WHERE sourceType = 'purchase_invoice' AND sourceId = ? AND orgId = ? AND (hidden IS NULL OR hidden = 0)",
+          )
+          .bind(piId, org)
+          .all<{ accountCode: string; debitSen: number; creditSen: number }>()
+      ).results ?? [];
+    let apCode = "";
+    let expenseCode = "";
+    let maxDebit = -1;
+    for (const l of piLegs) {
+      if (Number(l.creditSen) > 0 && !apCode) apCode = String(l.accountCode); // AP-control = the PI's credit leg
+      if (Number(l.debitSen) > maxDebit) { maxDebit = Number(l.debitSen); expenseCode = String(l.accountCode); }
+    }
+    if (apCode && expenseCode && apCode !== expenseCode) {
+      const legs: LedgerEntryInput[] = [
+        { id: `lje-${crypto.randomUUID().slice(0, 12)}`, sourceType: "purchase_return", sourceId: returnId, legNo: 1, accountCode: apCode, debitSen: amountSen, creditSen: 0, description: `${noteNumber} · AP debit (goods returned)`, actorUserId, orgId: org },
+        { id: `lje-${crypto.randomUUID().slice(0, 12)}`, sourceType: "purchase_return", sourceId: returnId, legNo: 2, accountCode: expenseCode, debitSen: 0, creditSen: amountSen, description: `${noteNumber} · purchase return`, actorUserId, orgId: org },
+      ];
+      const { statements: ls } = await buildJournalEntryStatements(db, org, legs);
+      stmts.push(...ls);
+    }
+  }
+
+  // AP subledger — reduce what we owe the supplier by the DN amount.
+  if (supplierId) {
+    stmts.push(
+      db.prepare("UPDATE suppliers SET outstandingSen = outstandingSen - ? WHERE id = ?").bind(amountSen, supplierId),
+    );
+  }
+  // The DN document.
+  stmts.push(
+    db
+      .prepare(
+        `INSERT INTO supplier_debit_notes
+           (id, note_number, purchase_return_id, supplier_id, supplier_name,
+            purchase_invoice_id, amount_sen, status, created_by, org_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'ISSUED', ?, ?, ?)`,
+      )
+      .bind(dnId, noteNumber, returnId, supplierId, supplierName, piId, amountSen, actorUserId, org, now),
+  );
+  // Stamp the return + flip status (idempotency).
+  stmts.push(
+    db.prepare("UPDATE purchase_returns SET debit_note_id = ?, status = 'DN_ISSUED', updated_at = ? WHERE id = ?").bind(dnId, now, returnId),
+  );
+
+  await db.batch(stmts);
+  return { ok: true, noteNumber, amountSen };
 }
 
 // Write a Purchase Return header + its item snapshot. Returns the new id +

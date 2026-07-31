@@ -4,7 +4,6 @@
 // declarations (types, mappers, cascades, cache + id helpers). All route
 // handlers remain in production-orders.ts, which imports/re-exports from here.
 // ---------------------------------------------------------------------------
-import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "../../worker";
 import { postProductionOrderCompletion } from "../../lib/fg-completion";
@@ -20,21 +19,12 @@ import {
   sofaSiblingGroupKey,
   type SiblingPo,
 } from "../../lib/fabric-usage";
-import { resolveWorkerToken } from "../worker-auth";
-import { workerCoversDept } from "../../../lib/worker";
 import { checkProductionOrderLocked, lockedResponse } from "../../lib/lock-helpers";
 import { emitAudit } from "../../lib/audit";
-import { requirePermission } from "../../lib/rbac";
-import {
-  ensureJobCardQrTokenColumn,
-  getOrCreateJobCardQrToken,
-} from "../../lib/jobcard-qr-token";
-import { pickPackingCard } from "../../lib/packing-card-resolve";
 import { applyPackingRack } from "../../lib/packing-rack-write";
 import { getOrgId, tryGetOrgId, DEFAULT_ORG_ID } from "../../lib/tenant";
 import {
   poListCacheVersion,
-  bumpPoListCacheVersion,
   invalidateProductionListCaches,
 } from "../../lib/po-list-cache";
 // Phase 6 — parallel event sourcing for JC mutations. appendJobCardEvent
@@ -61,10 +51,6 @@ import {
   DEPT_ORDER,
   type LeadTimeMap,
 } from "../../lib/lead-times";
-import {
-  validateFabricCodes,
-  unknownFabricCodeError,
-} from "../../lib/fabric-validation";
 // HB-only completion gate (commit 9086352 + this commit). When a BEDFRAME PO
 // carries specialOrder "Headboard Only", the SO/CO line really is HB-only —
 // any DIVAN job_cards are either (a) filtered out at PO creation by the
@@ -5070,6 +5056,62 @@ export async function warmPoListPlanningVariant(
     c,
     // No SWR: force the compute+store on the cron (this IS the off-request path).
     undefined,
+  );
+  return { rows: result?.total ?? 0 };
+}
+
+// Warm ONE per-DEPT sheet snapshot (Fab Cut / Fab Sew / … / Packing). Each dept
+// page requests `?fields=minimal&dept=<DEPT>&excludeCompleted=true` (no date
+// window — see index.tsx), a DISTINCT snapshot key the delivery/planning warmers
+// don't cover, so the first operator to open a dept sheet after a deploy paid a
+// ~5–8s cold recompute (owner-reported "打开卡很久" on Fab Cut). Pre-building it
+// here (cron, off the request path) removes that spike. The key MUST equal the
+// handler's sorted "&"-joined query string for that request.
+export async function warmPoListDeptVariant(
+  c: Context<Env>,
+  orgId: string,
+  dept: string,
+): Promise<{ rows: number }> {
+  const { withSnapshot } = await import("../../lib/snapshot");
+  const snapshotCacheKey = `dept=${dept}&excludeCompleted=true&fields=minimal`;
+  const result = await withSnapshot<{
+    success: true;
+    data: unknown[];
+    total: number;
+  }>(
+    c.var.DB,
+    {
+      tableName: "production_orders_list_snapshot",
+      sourceTables: ["production_orders", "job_cards", "sales_orders", "consignment_orders"],
+    },
+    orgId,
+    async () => {
+      const data = await fetchFilteredPOs(
+        c.var.DB,
+        orgId,
+        null, // statuses
+        true, // includeJobCards — the dept sheet inlines full jobCards
+        false, // includeArchive
+        true, // minimal
+        dept, // deptFilter
+        null, // dueFrom
+        null, // dueTo
+        null, // catFilter
+        true, // excludeCompleted — dept pages always send it
+      );
+      await attachCustomerSO(
+        c.var.DB,
+        data as Array<{
+          salesOrderId: string;
+          consignmentOrderId: string;
+          customerSO: string;
+        }>,
+      );
+      return { success: true, data, total: data.length };
+    },
+    snapshotCacheKey,
+    c,
+    undefined, // no SWR — force compute+store on the cron
   );
   return { rows: result?.total ?? 0 };
 }

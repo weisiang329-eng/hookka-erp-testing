@@ -3,7 +3,8 @@
 // formal customer (owner 2026-07-30). The approval gate (Credit Code, Name,
 // Delivery Hub, PIC, PIC Contact, Terms, Credit Limit) is collected, the
 // customer is created via the canonical endpoint, and the lead's CRM record
-// (contacts, activity, wishlist, KYC) is MOVED onto the new customer.
+// (contacts, activity, KYC) is MOVED onto the new customer. Wishlist was
+// retired 2026-08-01; its table is still re-pointed so old rows stay coherent.
 // See docs/plans/2026-07-30-crm-unified-customer.md.
 // ---------------------------------------------------------------------------
 import test from "node:test";

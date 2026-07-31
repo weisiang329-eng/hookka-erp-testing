@@ -1,8 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { CrmPanel } from "@/components/customer/CrmPanel";
 import { KycPanel } from "@/components/customer/KycPanel";
-import { WishlistPanel } from "@/components/customer/WishlistPanel";
 import { PhoneInput } from "@/components/ui/phone-input";
 import { StateSelect } from "@/components/ui/state-select";
 import { Button } from "@/components/ui/button";
@@ -4034,8 +4032,11 @@ export default function CustomersPage() {
               )}
             </CardContent>
           </Card>
-          <CrmPanel customerId={cust.id} customerName={cust.name} />
-          <WishlistPanel customerId={cust.id} />
+          {/* CRM (contacts + activity) lives in the Sales Pipeline lead drawer,
+              not here — owner 2026-08-01: the Pipeline is where the whole contact
+              history is kept, and this page is for what you DO with an account
+              (SKUs, maintenance, combos, quotations). Wishlist was retired
+              outright in the same pass; assigning SKUs covers that need. */}
           <KycPanel customerId={cust.id} />
           <CustomerProductsPanel customerId={cust.id} customerName={cust.name} customer={cust} />
           <CustomerMaintenancePanel customerId={cust.id} customerName={cust.name} />

@@ -2,7 +2,7 @@
 // Sales Pipeline (Leads) — the pre-sale funnel board (owner 2026-07-30).
 // Columns per stage; cards move NEW → … → WON / LOST by DRAG or the stage
 // dropdown. Clicking a card opens a full Lead detail drawer that mounts the
-// same CRM panels a Customer has (Contacts, Activity timeline, Wishlist, KYC)
+// same CRM panels a Customer has (Contacts, Activity timeline, KYC)
 // keyed on the lead id — so a lead holds every detail and ANY salesperson can
 // take over. See docs/plans/2026-07-30-crm-unified-customer.md.
 // ---------------------------------------------------------------------------
@@ -10,7 +10,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Plus, Phone, Mail, Trash2, CalendarClock, X, GripVertical, Tag } from "lucide-react";
 import { formatCurrency } from "@/lib/utils";
 import { CrmPanel } from "@/components/customer/CrmPanel";
-import { WishlistPanel } from "@/components/customer/WishlistPanel";
 import { KycPanel } from "@/components/customer/KycPanel";
 import { PhoneInput } from "@/components/ui/phone-input";
 import { StateSelect } from "@/components/ui/state-select";
@@ -353,7 +352,7 @@ export default function LeadsPage() {
 // ---------------------------------------------------------------------------
 // Lead detail drawer — right-side panel. Top: editable lead fields + stage.
 // Below: the SAME CRM panels a Customer has, keyed on the lead id, so a lead
-// carries contacts, a follow-up timeline, a wishlist and KYC — everything a
+// carries contacts, a follow-up timeline and KYC — everything a
 // new salesperson needs to take over. On convert (slice 2) these rows are
 // re-pointed to the new customer id.
 // ---------------------------------------------------------------------------
@@ -495,8 +494,11 @@ function LeadDetailDrawer({
           </div>
 
           {/* Full CRM record — same panels a Customer has, keyed on the lead id. */}
+          {/* Wishlist retired 2026-08-01 (owner: "整个功能删掉，我们 assign SKU 就行了").
+              The activity timeline above plus the catalogue/SKU assignment below
+              cover what it was for. The customer_wishlist TABLE is deliberately
+              left in place — the feature is gone, the historical rows are not. */}
           <CrmPanel customerId={lead.id} customerName={lead.company || lead.name || "Lead"} />
-          <WishlistPanel customerId={lead.id} />
           <LeadCatalogPanel leadId={lead.id} />
           <KycPanel customerId={lead.id} />
         </div>
@@ -597,7 +599,7 @@ function ConvertLeadDialog({
         body: JSON.stringify({ customerId }),
       });
 
-      window.alert(`Converted. New customer ${f.code.trim()} — ${f.name.trim()} created; the lead's contacts, activity, wishlist and KYC moved over.`);
+      window.alert(`Converted. New customer ${f.code.trim()} — ${f.name.trim()} created; the lead's contacts, activity and KYC moved over.`);
       await onDone();
     } finally {
       setBusy(false);
@@ -611,7 +613,7 @@ function ConvertLeadDialog({
           <h2 className="text-lg font-semibold text-[#1F1D1B]">Convert to customer</h2>
           <button onClick={onClose} className="text-[#9CA3AF] hover:text-[#1F1D1B]"><X className="w-5 h-5" /></button>
         </div>
-        <p className="text-xs text-[#6B7280] mb-4">Fill the account-opening details. The lead's contacts, activity, wishlist and KYC move over automatically.</p>
+        <p className="text-xs text-[#6B7280] mb-4">Fill the account-opening details. The lead's contacts, activity and KYC move over automatically.</p>
 
         <div className="space-y-4">
           <div>

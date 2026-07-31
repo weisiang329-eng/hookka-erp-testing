@@ -176,3 +176,56 @@ test("planning drill-in page + snapshot exist for foam-cutting", () => {
   const snap = read("src/data/foamcutting-schedule-snapshot.json");
   assert.ok(snap.includes("Foam Cutting"), "foam-cutting snapshot missing");
 });
+
+// ---------------------------------------------------------------------------
+// REGRESSION (owner report 2026-08-01): the relabel was applied to SOME label
+// maps and not others, so the BOM process-dept <select> rendered a BLANK option
+// for FOAM_CUTTING (present in DEPT_ORDER, absent from DEPT_LABELS) and still
+// showed "Foam" instead of "Foam Bonding".
+// ---------------------------------------------------------------------------
+test("BOM DEPT_LABELS covers every code in DEPT_ORDER (no blank <option>)", () => {
+  const src = read("src/pages/bom.tsx");
+  const order = src.match(/const DEPT_ORDER = \[([^\]]+)\]/);
+  assert.ok(order, "DEPT_ORDER not found in bom.tsx");
+  const codes = [...order[1].matchAll(/"([A-Z_]+)"/g)].map((m) => m[1]);
+  assert.ok(codes.length >= 9, `DEPT_ORDER looks wrong: ${codes.join()}`);
+  const labels = src.match(/const DEPT_LABELS: Record<string, string> = \{([^}]+)\}/);
+  assert.ok(labels, "DEPT_LABELS not found in bom.tsx");
+  for (const code of codes) {
+    assert.ok(
+      new RegExp(`\\b${code}:`).test(labels[1]),
+      `DEPT_ORDER lists ${code} but DEPT_LABELS has no entry — renders a blank option`,
+    );
+  }
+  assert.match(labels[1], /FOAM: "Foam Bonding"/);
+  assert.match(labels[1], /FOAM_CUTTING: "Foam Cutting"/);
+});
+
+test("no user-facing dept label map still spells FOAM as bare \"Foam\"", () => {
+  // Every map that pairs the FOAM code with a display string must say
+  // "Foam Bonding". Bare "Foam" here is the stale pre-relabel spelling.
+  const files = [
+    "src/pages/bom.tsx",
+    "src/pages/production/utils.ts",
+    "src/pages/production/tracker.tsx",
+    "src/pages/service-cases/detail.tsx",
+    "src/pages/m/config/forms.ts",
+    "src/pages/m/screens/ProductionScreen.tsx",
+    "src/pages/m/screens/ProductionDetailScreen.tsx",
+    "src/lib/repair-scope.ts",
+  ];
+  // Matches: FOAM: "Foam"  |  code: "FOAM", label: "Foam"  |  { name: "Foam", code: "FOAM" }
+  const stale = [
+    /FOAM:\s*"Foam"/,
+    /code:\s*"FOAM",\s*(label|name):\s*"Foam"/,
+    /(label|name|value):\s*"Foam"\s*,\s*code:\s*"FOAM"/,
+    /value:\s*"FOAM",\s*label:\s*"Foam"/,
+    /\{\s*name:\s*"Foam",/,
+  ];
+  for (const f of files) {
+    const src = read(f);
+    for (const re of stale) {
+      assert.ok(!re.test(src), `${f} still labels FOAM as bare "Foam" (${re}) — must be "Foam Bonding"`);
+    }
+  }
+});

@@ -62,10 +62,15 @@ export default function ComponentKitsPage() {
     setLoading(true);
     try {
       const [kRes, iRes] = await Promise.all([
-        fetch("/api/component-boms").then((r) => r.json()) as Promise<{ success?: boolean; data?: Kit[] }>,
+        fetch("/api/component-boms").then((r) => r.json()) as Promise<{ success?: boolean; error?: string; data?: Kit[] }>,
         fetch("/api/inventory").then((r) => r.json()) as Promise<{ data?: { rawMaterials?: RawMaterial[] } }>,
       ]);
-      if (kRes?.success) setKits(Array.isArray(kRes.data) ? kRes.data : []);
+      // A failed list read used to fall through here silently, leaving the page
+      // on its "No component kits yet" empty state — indistinguishable from a
+      // genuinely empty list, which is exactly how the camelCase read bug in
+      // component-bom.ts stayed invisible after a successful save. Fail loud.
+      if (!kRes?.success) throw new Error(kRes?.error || "could not load kits");
+      setKits(Array.isArray(kRes.data) ? kRes.data : []);
       const raw = (iRes?.data?.rawMaterials ?? []) as RawMaterial[];
       setCatalog(
         raw.map((m) => ({ itemCode: String(m.itemCode ?? ""), description: String(m.description ?? "") })),

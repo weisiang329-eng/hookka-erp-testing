@@ -18,11 +18,15 @@ test("folder /:id/rows endpoint exists, RBAC-gated, org-scoped", () => {
   assert.match(route, /FROM production_folders WHERE id = \? AND org_id = \?/);
 });
 
-test("it resolves folder → job-card ids → distinct POs → fetchPO", () => {
+test("it resolves folder → job-card ids → distinct POs → batched build", () => {
   const f = route.replace(/\s+/g, " ");
   assert.match(f, /FROM folder_job_cards WHERE folder_id = \?/);
   assert.match(f, /SELECT DISTINCT productionOrderId FROM job_cards WHERE id IN/);
-  assert.match(f, /const po = await fetchPO\(db, poId\)/);
+  // batched (no fetchPO-per-PO N+1): 3 IN-list queries + rowsToPOsBatch
+  assert.match(f, /SELECT \* FROM production_orders WHERE id IN/);
+  assert.match(f, /SELECT \* FROM job_cards WHERE productionOrderId IN/);
+  assert.match(f, /const out = rowsToPOsBatch\(poRows, jcAll, picAll, leadTimeMap\)/);
+  assert.doesNotMatch(f, /await fetchPO\(/);
   assert.match(route, /from "\.\/production-orders\/_helpers"/);
 });
 

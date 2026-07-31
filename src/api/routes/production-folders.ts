@@ -29,7 +29,14 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
-import { fetchPO, attachCustomerSO } from "./production-orders/_helpers";
+import {
+  attachCustomerSO,
+  rowsToPOsBatch,
+  type ProductionOrderRow,
+  type JobCardRow,
+  type PiecePicRow,
+} from "./production-orders/_helpers";
+import { loadLeadTimes } from "../lib/lead-times";
 
 const app = new Hono<Env>();
 
@@ -247,12 +254,40 @@ app.get("/:id/rows", async (c) => {
     .bind(...jcIds)
     .all<{ productionOrderId: string }>();
   const poIds = (poRes.results ?? []).map((r) => r.productionOrderId).filter(Boolean);
-  // 3) build each PO + its job cards (minimal), reusing the shared fetchPO
-  const out: NonNullable<Awaited<ReturnType<typeof fetchPO>>>[] = [];
-  for (const poId of poIds) {
-    const po = await fetchPO(db, poId);
-    if (po) out.push(po);
+  if (poIds.length === 0) return c.json({ success: true, data: [] });
+  // 3) batch-load the POs + all their job cards + pics in 3 queries (not
+  //    fetchPO-per-PO — that N+1 made a 47-JC folder take ~19s), then build the
+  //    same minimal shape via the shared rowsToPOsBatch (field-identical to the
+  //    list endpoint).
+  const poPh = poIds.map(() => "?").join(",");
+  const poRows =
+    (
+      await db
+        .prepare(`SELECT * FROM production_orders WHERE id IN (${poPh})`)
+        .bind(...poIds)
+        .all<ProductionOrderRow>()
+    ).results ?? [];
+  const jcAll =
+    (
+      await db
+        .prepare(`SELECT * FROM job_cards WHERE productionOrderId IN (${poPh})`)
+        .bind(...poIds)
+        .all<JobCardRow>()
+    ).results ?? [];
+  let picAll: PiecePicRow[] = [];
+  const jcAllIds = jcAll.map((j) => j.id).filter(Boolean);
+  if (jcAllIds.length > 0) {
+    const jcPh = jcAllIds.map(() => "?").join(",");
+    picAll =
+      (
+        await db
+          .prepare(`SELECT * FROM piece_pics WHERE jobCardId IN (${jcPh})`)
+          .bind(...jcAllIds)
+          .all<PiecePicRow>()
+      ).results ?? [];
   }
+  const leadTimeMap = await loadLeadTimes(db).catch(() => null);
+  const out = rowsToPOsBatch(poRows, jcAll, picAll, leadTimeMap);
   await attachCustomerSO(
     db,
     out as unknown as Array<{

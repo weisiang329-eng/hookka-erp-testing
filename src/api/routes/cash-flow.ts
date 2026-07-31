@@ -74,11 +74,20 @@ type PoRow = {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-function getWeekStart(dateStr: string): string {
+// Returns the Monday (YYYY-MM-DD) of the week containing dateStr, or null when
+// the date is missing/unparseable. An invoice with no dueDate (or a PO with no
+// expectedDate) previously reached `new Date(NaN).toISOString()`, which throws
+// "Invalid time value" and 500'd the WHOLE cash-flow forecast (owner 2026-07-31,
+// live bug). Undated items simply can't be placed on a week, so they're skipped
+// by the callers rather than crashing the endpoint.
+function getWeekStart(dateStr: string | null | undefined): string | null {
+  if (!dateStr) return null;
   const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return null;
   const day = d.getDay();
   const diff = d.getDate() - day + (day === 0 ? -6 : 1);
   const monday = new Date(d.setDate(diff));
+  if (Number.isNaN(monday.getTime())) return null;
   return monday.toISOString().split("T")[0];
 }
 
@@ -192,6 +201,7 @@ app.get("/", async (c) => {
     const remaining = (inv.totalSen || 0) - (inv.paidAmount || 0);
     if (remaining <= 0) return;
     const wk = getWeekStart(inv.dueDate);
+    if (!wk) return; // undated invoice → can't bucket into a week; skip
     arByWeek[wk] = (arByWeek[wk] || 0) + remaining;
   });
 
@@ -199,6 +209,7 @@ app.get("/", async (c) => {
   pos.forEach((po) => {
     if (po.status === "RECEIVED" || po.status === "CANCELLED") return;
     const wk = getWeekStart(po.expectedDate);
+    if (!wk) return; // undated PO → can't bucket into a week; skip
     apByWeek[wk] = (apByWeek[wk] || 0) + (po.totalSen || 0);
   });
 

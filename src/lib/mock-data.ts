@@ -46,7 +46,7 @@ export const departments: Department[] = [
   { id: "dept-1", code: "FAB_CUT", name: "Fabric Cutting", shortName: "Fab Cut", sequence: 1, color: "#3B82F6", workingHoursPerDay: 9, isProduction: true },
   { id: "dept-2", code: "FAB_SEW", name: "Fabric Sewing", shortName: "Fab Sew", sequence: 2, color: "#6366F1", workingHoursPerDay: 9, isProduction: true },
   { id: "dept-3", code: "WOOD_CUT", name: "Wood Cutting", shortName: "Wood Cut", sequence: 3, color: "#F59E0B", workingHoursPerDay: 9, isProduction: true },
-  { id: "dept-4", code: "FOAM", name: "Foam Bonding", shortName: "Foam", sequence: 4, color: "#8B5CF6", workingHoursPerDay: 9, isProduction: true },
+  { id: "dept-4", code: "FOAM", name: "Foam Bonding", shortName: "Foam Bonding", sequence: 4, color: "#8B5CF6", workingHoursPerDay: 9, isProduction: true },
   { id: "dept-5", code: "FRAMING", name: "Framing", shortName: "Framing", sequence: 5, color: "#F97316", workingHoursPerDay: 9, isProduction: true },
   { id: "dept-6", code: "WEBBING", name: "Webbing", shortName: "Webbing", sequence: 6, color: "#10B981", workingHoursPerDay: 9, isProduction: true },
   { id: "dept-7", code: "UPHOLSTERY", name: "Upholstery", shortName: "Upholstery", sequence: 7, color: "#F43F5E", workingHoursPerDay: 9, isProduction: true },

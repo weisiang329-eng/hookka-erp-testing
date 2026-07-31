@@ -4,8 +4,8 @@ import type { Cell, CellState, ProductionOrder } from "./types";
 export const DEPARTMENTS = [
   { name: "Fab Cut",    code: "FAB_CUT" },
   { name: "Fab Sew",    code: "FAB_SEW" },
-  { name: "Foam Cut",   code: "FOAM_CUTTING" },
-  { name: "Foam",       code: "FOAM" },
+  { name: "Foam Cutting", code: "FOAM_CUTTING" },
+  { name: "Foam Bonding", code: "FOAM" },
   { name: "Wood Cut",   code: "WOOD_CUT" },
   { name: "Framing",    code: "FRAMING" },
   { name: "Webbing",    code: "WEBBING" },

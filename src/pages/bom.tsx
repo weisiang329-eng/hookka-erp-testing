@@ -1,19 +1,9 @@
-import React, { useState, useEffect, useMemo, useDeferredValue, useRef } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import React, { useState, useEffect, useMemo, useDeferredValue } from "react";
+import { useNavigate } from "react-router-dom";
 import { cachedFetchJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
-import {
-  fetchVariantsConfig,
-  flushKvConfig,
-  getKvConfigSyncState,
-  getVariantsConfigSync,
-  patchVariantsConfig,
-  subscribeKvConfigSyncState,
-  VARIANTS_CONFIG_KEY,
-  type KvSyncState,
-  type VariantsConfig,
-} from "@/lib/kv-config";
+import { getVariantsConfigSync } from "@/lib/kv-config";
 import { resolveWipTokens, type BomVariantContext } from "@/api/lib/bom-wip-breakdown";
 import type {
   MaterialScaling,
@@ -119,6 +109,7 @@ const DEPT_COLORS: Record<string, string> = {
   FAB_CUT: "#3B82F6",
   FAB_SEW: "#6366F1",
   WOOD_CUT: "#F59E0B",
+  FOAM_CUTTING: "#A78BFA",
   FOAM: "#8B5CF6",
   FRAMING: "#F97316",
   WEBBING: "#10B981",
@@ -128,11 +119,17 @@ const DEPT_COLORS: Record<string, string> = {
 
 const DEPT_ORDER = ["FAB_CUT", "FAB_SEW", "WOOD_CUT", "FOAM_CUTTING", "FOAM", "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING"];
 
+// Labels MUST cover every code in DEPT_ORDER — the process-dept <select> renders
+// DEPT_ORDER and looks each code up here, so a missing entry shipped a BLANK
+// option (FOAM_CUTTING did exactly that). FOAM displays as "Foam Bonding"
+// system-wide (owner 2026-07-30); FOAM_CUTTING is the separate tracking stage
+// that runs immediately before it. Matches departments.ts's runtime self-apply.
 const DEPT_LABELS: Record<string, string> = {
   FAB_CUT: "Fab Cut",
   FAB_SEW: "Fab Sew",
   WOOD_CUT: "Wood Cut",
-  FOAM: "Foam",
+  FOAM_CUTTING: "Foam Cutting",
+  FOAM: "Foam Bonding",
   FRAMING: "Framing",
   WEBBING: "Webbing",
   UPHOLSTERY: "Upholstery",
@@ -459,7 +456,7 @@ function buildFallbackMasterTemplate(cat: BOMCategory): MasterTemplate {
       l1Processes: [
         { dept: "Fab Cut", deptCode: "FAB_CUT", category: "CAT 3", minutes: 50 },
         { dept: "Fab Sew", deptCode: "FAB_SEW", category: "CAT 3", minutes: 120 },
-        { dept: "Foam", deptCode: "FOAM", category: "CAT 3", minutes: 25 },
+        { dept: "Foam Bonding", deptCode: "FOAM", category: "CAT 3", minutes: 25 },
       ],
       l1Materials: [
         { code: "", name: "Fabric (from order)", qty: 1, unit: "MTR", autoDetect: "FABRIC" },
@@ -540,7 +537,7 @@ function buildFallbackMasterTemplate(cat: BOMCategory): MasterTemplate {
         quantity: 1,
         processes: [
           { dept: "Fab Sew", deptCode: "FAB_SEW", category: "CAT 4", minutes: 150 },
-          { dept: "Foam", deptCode: "FOAM", category: "CAT 4", minutes: 30 },
+          { dept: "Foam Bonding", deptCode: "FOAM", category: "CAT 4", minutes: 30 },
           { dept: "Wood Cut", deptCode: "WOOD_CUT", category: "CAT 4", minutes: 30 },
           { dept: "Framing", deptCode: "FRAMING", category: "CAT 4", minutes: 40 },
           { dept: "Webbing", deptCode: "WEBBING", category: "CAT 4", minutes: 20 },
@@ -560,7 +557,7 @@ function buildFallbackMasterTemplate(cat: BOMCategory): MasterTemplate {
         quantity: 1,
         processes: [
           { dept: "Fab Sew", deptCode: "FAB_SEW", category: "CAT 1", minutes: 40 },
-          { dept: "Foam", deptCode: "FOAM", category: "CAT 1", minutes: 15 },
+          { dept: "Foam Bonding", deptCode: "FOAM", category: "CAT 1", minutes: 15 },
           { dept: "Wood Cut", deptCode: "WOOD_CUT", category: "CAT 1", minutes: 15 },
           { dept: "Framing", deptCode: "FRAMING", category: "CAT 1", minutes: 15 },
           { dept: "Webbing", deptCode: "WEBBING", category: "CAT 1", minutes: 15 },
@@ -4546,485 +4543,28 @@ function MasterTemplatesDialog({
   );
 }
 
-// ---------- Production Times Dialog ----------
-// Inline version of the Production Times matrix from /settings/variants.
-// Reads/writes the same localStorage key so BOM process rows pick up changes.
+// ---------- Production Times ----------
+// The inline Production Times matrix DIALOG was removed 2026-08-01 per owner —
+// the dedicated WIP Times module is the single place those minutes are edited
+// now. The read-side lookup (getProductionMinutes, near the top of this file)
+// is untouched: BOM process rows still auto-fill minutes from the same
+// variants-config matrix when a category is picked.
 
-type ProductionTimes = Record<string, Record<string, number>>;
-
-function buildDefaultProductionTimes(cats: string[]): ProductionTimes {
-  const out: ProductionTimes = {};
-  for (const d of DEPT_ORDER) {
-    out[d] = {};
-    for (const c of cats) out[d][c] = 0;
-  }
-  return out;
-}
-
-// Production times + fabricGroups are persisted in D1 under kv_config('variants-config').
-// We hydrate through the shared kv-config cache so the Products maintenance page and
-// this dialog never disagree about what's stored.
-
-// Small inline indicator that visualises the kv-config sync state. Replaces
-// the old "Saved" / "Failed" toast spam with a passive dot — green when
-// synced, yellow spinner during write/retry, red on terminal failure.
-// (KvSyncIndicator removed per user feedback — sync state still drives
-// the Save button label/disable in the dialog footer, but the explicit
-// dot indicator is gone. Resilient sync layer in kv-config.ts is
-// unchanged and still auto-retries / backs up to localStorage.)
-
-// After the owner saves Production Times, the new standard minutes must take
-// effect on orders STILL IN PRODUCTION (the owner's rule: "一改就对未完成单生效").
-// est_minutes / productionTimeMinutes were snapshotted onto each job card at
-// creation, so a config change does NOT reach existing orders on its own — this
-// drives /api/bom/resync-job-card-times, which (by default) rewrites ONLY
-// not-yet-COMPLETED/TRANSFERRED job cards from the new master. Completed work
-// keeps its historical time. The endpoint is cursored (500/batch) to stay under
-// the Workers wall-clock; we loop the cursor to the end. Best-effort: a failure
-// is surfaced as a toast and the saved config still stands.
-async function runProductionTimeResync(): Promise<{ updated: number }> {
-  let cursor: string | null = null;
-  let updated = 0;
-  let guard = 0;
-  do {
-    const qs = new URLSearchParams({ limit: "500" });
-    if (cursor) qs.set("cursor", cursor);
-    const res = await fetch(`/api/bom/resync-job-card-times?${qs.toString()}`, {
-      method: "POST",
-    });
-    if (!res.ok) throw new Error(`resync HTTP ${res.status}`);
-    const json = (await res.json()) as {
-      success?: boolean;
-      updated?: number;
-      cursor?: { nextCursor?: string | null };
-    };
-    if (!json?.success) throw new Error("resync returned not-ok");
-    updated += json.updated ?? 0;
-    cursor = json.cursor?.nextCursor ?? null;
-  } while (cursor && ++guard < 100);
-  return { updated };
-}
-
-function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { confirm } = useConfirm();
-  const [categories, setCategories] = useState<string[]>([]);
-  const [times, setTimes] = useState<ProductionTimes>({});
-  const [dirty, setDirty] = useState(false);
-  const [toastMsg, setToastMsg] = useState("");
-  const [editingCat, setEditingCat] = useState<{ index: number; value: string } | null>(null);
-  // syncState mirrors the kv-config sync state for variants-config. The
-  // resilient sync layer auto-retries transient failures and keeps a
-  // localStorage backup, so the user just needs a passive indicator
-  // instead of repeated "save failed" toasts.
-  const [syncState, setSyncStateLocal] = useState<KvSyncState>(() =>
-    getKvConfigSyncState(VARIANTS_CONFIG_KEY),
-  );
-  // Toast-after-confirm: when the user clicks Save we set this flag, then
-  // emit "Saved" the moment syncState reaches `idle` (auth-error / error
-  // states get their own toast).
-  const pendingUserSaveRef = React.useRef(false);
-  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
-
-  // Hydrate from D1 (via the kv-config cache) whenever the dialog opens.
-  /* eslint-disable react-hooks/set-state-in-effect -- one-shot hydrate of categories + times when dialog opens */
-  useEffect(() => {
-    if (!open) return;
-    const defaults = ["CAT 1", "CAT 2", "CAT 3", "CAT 4", "CAT 5", "CAT 6", "CAT 7"];
-    const applyConfig = (cfg: VariantsConfig | null) => {
-      const fg = cfg?.fabricGroups;
-      const cats = Array.isArray(fg) && fg.length > 0 ? fg : defaults;
-      const pt =
-        cfg?.productionTimes && Object.keys(cfg.productionTimes).length > 0
-          ? cfg.productionTimes
-          : buildDefaultProductionTimes(cats);
-      setCategories(cats);
-      setTimes(pt);
-    };
-
-    // Optimistic render from the in-memory cache if already hydrated.
-    applyConfig(getVariantsConfigSync());
-    // Always re-fetch to pick up any changes since last hydrate.
-    void fetchVariantsConfig().then(applyConfig);
-    setDirty(false);
-  }, [open]);
-  /* eslint-enable react-hooks/set-state-in-effect */
-
-  // Subscribe to sync state transitions while the dialog is open. The
-  // sync layer drives terminal toasts (Saved / Re-login / Saved locally)
-  // off these transitions so we don't lie about success and don't spam
-  // failure toasts during transient retries.
-  /* eslint-disable react-hooks/set-state-in-effect -- on dialog open we
-     need to re-sync local syncState with the kv-config layer, since the
-     module-level state may have changed while the dialog was closed
-     (e.g. a background retry from a previous session settled). The
-     subscriber callback is the steady-state path; the initial set is a
-     one-shot bootstrap. */
-  useEffect(() => {
-    if (!open) return undefined;
-    setSyncStateLocal(getKvConfigSyncState(VARIANTS_CONFIG_KEY));
-    const off = subscribeKvConfigSyncState(VARIANTS_CONFIG_KEY, (state) => {
-      setSyncStateLocal(state);
-      if (state === "idle" && pendingUserSaveRef.current) {
-        pendingUserSaveRef.current = false;
-        setDirty(false);
-        showToast("Production times saved — applying to in-progress orders…");
-        // Propagate the new standard times onto orders still in production so
-        // the change takes effect immediately (completed orders untouched).
-        void runProductionTimeResync()
-          .then(({ updated }) => {
-            showToast(
-              updated > 0
-                ? `Applied to in-progress orders (${updated} updated)`
-                : "Saved — no in-progress orders needed updating",
-            );
-          })
-          .catch(() => {
-            showToast(
-              "Saved — couldn't auto-apply to in-progress orders; reopen and Save to retry",
-            );
-          });
-      } else if (state === "auth-error") {
-        pendingUserSaveRef.current = false;
-        showToast("Please re-login — change is saved locally and will retry");
-      } else if (state === "error") {
-        pendingUserSaveRef.current = false;
-        showToast("Saved locally — will retry on next page load");
-      }
-    });
-    return off;
-  }, [open]);
-  /* eslint-enable react-hooks/set-state-in-effect */
-
-  // Best-effort flush when the user closes the tab / navigates away
-  // mid-debounce. Even with the localStorage backup catching us, this
-  // shrinks the "wait until next page load" recovery window to zero in
-  // the common case.
-  useEffect(() => {
-    if (!open || typeof window === "undefined") return undefined;
-    const handler = () => {
-      void flushKvConfig(VARIANTS_CONFIG_KEY);
-    };
-    window.addEventListener("beforeunload", handler);
-    return () => window.removeEventListener("beforeunload", handler);
-  }, [open]);
-
-  function showToast(msg: string) {
-    setToastMsg(msg);
-    // Fire-and-forget toast clear from event-style callback (Save click).
-    // eslint-disable-next-line no-restricted-syntax -- one-shot toast timer from event handler
-    setTimeout(() => setToastMsg(""), 2500);
-  }
-
-  function updateTime(deptCode: string, category: string, value: number) {
-    setTimes((prev) => ({
-      ...prev,
-      [deptCode]: { ...(prev[deptCode] || {}), [category]: value },
-    }));
-    setDirty(true);
-  }
-
-  function handleSave() {
-    // Resilient sync flow:
-    //   1. patchVariantsConfig writes to the in-memory cache + localStorage
-    //      backup (synchronous, can't fail).
-    //   2. It schedules a 500ms-debounced PUT and flips syncState to
-    //      `syncing`.
-    //   3. flushKvConfig cancels the debounce and fires the PUT now.
-    //   4. The PUT either succeeds (state → idle), enters retry backoff
-    //      (state → retrying, auto-flush 1s/2s/4s), or terminally fails
-    //      (state → error / auth-error).
-    //   5. The state-transition listener above turns terminal states into
-    //      toasts and clears `dirty` only on success.
-    // We never await here — the user gets immediate UI feedback via
-    // syncState, and the pendingUserSaveRef flag tells the listener that
-    // the next `idle` should fire the success toast.
-    pendingUserSaveRef.current = true;
-    patchVariantsConfig({ productionTimes: times, fabricGroups: categories });
-    void flushKvConfig(VARIANTS_CONFIG_KEY);
-  }
-
-  function addCategory() {
-    const nextNum = categories.length + 1;
-    const newCat = `CAT ${nextNum}`;
-    setCategories((prev) => [...prev, newCat]);
-    setTimes((prev) => {
-      const next = { ...prev };
-      for (const d of DEPT_ORDER) {
-        next[d] = { ...(next[d] || {}), [newCat]: 0 };
-      }
-      return next;
-    });
-    setDirty(true);
-  }
-
-  async function deleteCategory(catIndex: number) {
-    if (categories.length <= 1) return;
-    const catName = categories[catIndex];
-    if (!(await confirm({ title: "Delete category?", message: `Delete "${catName}"? All times for this category will be lost.`, danger: true }))) return;
-    setCategories((prev) => prev.filter((_, i) => i !== catIndex));
-    setTimes((prev) => {
-      const next = { ...prev };
-      for (const d of DEPT_ORDER) {
-        const deptTimes = { ...(next[d] || {}) };
-        delete deptTimes[catName];
-        next[d] = deptTimes;
-      }
-      return next;
-    });
-    setDirty(true);
-  }
-
-  function commitRename(catIndex: number, newName: string) {
-    const trimmed = newName.trim();
-    const oldName = categories[catIndex];
-    if (!trimmed || trimmed === oldName) {
-      setEditingCat(null);
-      return;
-    }
-    setCategories((prev) => prev.map((c, i) => (i === catIndex ? trimmed : c)));
-    setTimes((prev) => {
-      const next = { ...prev };
-      for (const d of DEPT_ORDER) {
-        const deptTimes = { ...(next[d] || {}) };
-        deptTimes[trimmed] = deptTimes[oldName] ?? 0;
-        delete deptTimes[oldName];
-        next[d] = deptTimes;
-      }
-      return next;
-    });
-    setEditingCat(null);
-    setDirty(true);
-  }
-
-  function exportCSV() {
-    const header = ["Department", ...categories].join(",");
-    const lines = DEPT_ORDER.map((d) => {
-      const row = [DEPT_LABELS[d], ...categories.map((c) => String(times[d]?.[c] ?? 0))];
-      return row.join(",");
-    });
-    const csv = [header, ...lines].join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `production-times-${new Date().toISOString().slice(0, 10)}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    showToast("CSV exported");
-  }
-
-  function importCSV(file: File) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const text = String(reader.result || "");
-        const rows = text.split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
-        if (rows.length < 2) { showToast("CSV is empty"); return; }
-        const header = rows[0].split(",").map((s) => s.trim());
-        const cats = header.slice(1).filter(Boolean);
-        const labelToCode: Record<string, string> = {};
-        for (const code of DEPT_ORDER) labelToCode[DEPT_LABELS[code].toLowerCase()] = code;
-        const nextTimes: ProductionTimes = buildDefaultProductionTimes(cats);
-        for (let i = 1; i < rows.length; i++) {
-          const cells = rows[i].split(",").map((s) => s.trim());
-          const deptLabel = (cells[0] || "").toLowerCase();
-          const code = labelToCode[deptLabel];
-          if (!code) continue;
-          for (let j = 0; j < cats.length; j++) {
-            const v = parseInt(cells[j + 1] || "0", 10);
-            nextTimes[code][cats[j]] = isNaN(v) ? 0 : v;
-          }
-        }
-        // Also update categories in config (D1 via shared kv-config cache).
-        if (cats.length > 0) patchVariantsConfig({ fabricGroups: cats });
-        setCategories(cats.length > 0 ? cats : categories);
-        setTimes(nextTimes);
-        setDirty(true);
-        showToast("CSV imported — review and Save");
-      } catch {
-        showToast("Failed to parse CSV");
-      }
-    };
-    reader.readAsText(file);
-  }
-
-  if (!open) return null;
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
-      <div className="bg-white rounded-xl shadow-2xl w-[900px] max-w-[95vw] max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
-        {/* Header */}
-        <div className="px-6 py-4 border-b border-[#E2DDD8] flex items-center justify-between">
-          <div>
-            <h2 className="text-lg font-bold text-[#111827]">Production Times</h2>
-            <p className="text-xs text-gray-500 mt-0.5">
-              Minutes per department x category. BOM picks a category and the minutes are auto-filled.
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            {dirty && (
-              <span className="inline-flex items-center gap-1.5 text-xs text-[#9C6F1E] bg-[#FAEFCB] border border-[#E8D597] rounded-md px-2 py-1">
-                Unsaved
-              </span>
-            )}
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".csv,text/csv"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) importCSV(f);
-                e.target.value = "";
-              }}
-            />
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 border border-[#E2DDD8] rounded-md text-gray-600 hover:bg-[#FAF9F7]"
-            >
-              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M17 8l-5-5m0 0L7 8m5-5v12" />
-              </svg>
-              Import CSV
-            </button>
-            <button
-              onClick={exportCSV}
-              className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 border border-[#E2DDD8] rounded-md text-gray-600 hover:bg-[#FAF9F7]"
-            >
-              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V4" />
-              </svg>
-              Export CSV
-            </button>
-            <button onClick={onClose} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-md">
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-        </div>
-
-        {/* Matrix */}
-        <div className="flex-1 overflow-auto p-6">
-          <table className="w-full text-sm border border-[#E2DDD8] rounded-md overflow-hidden">
-            <thead className="bg-[#FAF9F7]">
-              <tr>
-                <th className="text-left px-3 py-2 text-xs font-semibold text-gray-600 border-b border-[#E2DDD8]">Department</th>
-                {categories.map((cat, catIdx) => (
-                  <th key={cat} className="text-center px-2 py-2 text-xs font-semibold text-gray-600 border-b border-[#E2DDD8] min-w-[90px]">
-                    <div className="flex items-center justify-center gap-1 group">
-                      {editingCat?.index === catIdx ? (
-                        <input
-                          autoFocus
-                          type="text"
-                          value={editingCat.value}
-                          onChange={(e) => setEditingCat({ index: catIdx, value: e.target.value })}
-                          onBlur={() => commitRename(catIdx, editingCat.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") commitRename(catIdx, editingCat.value);
-                            if (e.key === "Escape") setEditingCat(null);
-                          }}
-                          className="w-16 text-xs border border-[#6B5C32] rounded px-1 py-0.5 text-center focus:outline-none bg-white"
-                        />
-                      ) : (
-                        <span
-                          className="cursor-pointer hover:text-[#6B5C32] hover:underline"
-                          title="Click to rename"
-                          onClick={() => setEditingCat({ index: catIdx, value: cat })}
-                        >
-                          {cat}
-                        </span>
-                      )}
-                      {categories.length > 1 && (
-                        <button
-                          onClick={() => deleteCategory(catIdx)}
-                          title={`Delete ${cat}`}
-                          className="text-gray-400 hover:text-[#9A3A2D] leading-none"
-                        >
-                          ×
-                        </button>
-                      )}
-                    </div>
-                  </th>
-                ))}
-                <th className="text-center px-2 py-2 border-b border-[#E2DDD8] min-w-[90px]">
-                  <button
-                    onClick={addCategory}
-                    title="Add new category"
-                    className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-dashed border-[#6B5C32] text-[#6B5C32] rounded hover:bg-[#6B5C32]/10 transition-colors"
-                  >
-                    <span className="text-base leading-none">+</span>
-                    Add
-                  </button>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {DEPT_ORDER.map((d) => (
-                <tr key={d} className="hover:bg-[#FAF9F7]/50">
-                  <td className="px-3 py-2 text-xs font-medium text-[#111827] border-b border-[#E2DDD8]">{DEPT_LABELS[d]}</td>
-                  {categories.map((cat) => {
-                    const val = times[d]?.[cat] ?? 0;
-                    return (
-                      <td key={cat} className="border-b border-[#E2DDD8] p-1">
-                        <div className="flex items-center justify-center gap-1">
-                          <input
-                            type="number" onFocus={(e) => e.currentTarget.select()}
-                            value={val}
-                            onChange={(e) => updateTime(d, cat, parseInt(e.target.value) || 0)}
-                            className="w-14 text-xs border border-[#E2DDD8] rounded px-1 py-1 bg-white text-center focus:outline-none focus:border-[#6B5C32]"
-                            min={0}
-                          />
-                          <span className="text-[9px] text-gray-400">m</span>
-                        </div>
-                      </td>
-                    );
-                  })}
-                  <td className="border-b border-[#E2DDD8]" />
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <p className="text-[11px] text-gray-400 mt-3">
-            When you set a process&apos;s category in BOM, the minutes are auto-filled from this matrix.
-          </p>
-        </div>
-
-        {/* Footer — restored to the pre-PR-#27 layout per user feedback.
-            The kv-config resilient sync layer (auto-retry + localStorage
-            backup) still runs underneath; we just don't render the
-            indicator dot in the footer. The Save button still uses
-            syncState to disable while a write is in flight, but the
-            label stays minimal ("Save Times" / "Saving…"). */}
-        <div className="px-6 py-4 border-t border-[#E2DDD8] flex justify-end gap-2">
-          <button onClick={onClose} className="px-4 py-2 text-sm border border-[#E2DDD8] rounded-lg text-gray-600 hover:bg-gray-50">
-            Close
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={!dirty || syncState === "syncing" || syncState === "retrying"}
-            className="px-4 py-2 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {syncState === "syncing" || syncState === "retrying"
-              ? "Saving…"
-              : "Save Times"}
-          </button>
-        </div>
-
-        {/* Toast */}
-        {toastMsg && (
-          <div className="fixed bottom-6 right-6 inline-flex items-center gap-2 px-4 py-2.5 bg-[#4F7C3A] text-white rounded-lg shadow-lg text-sm z-[60]">
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-            </svg>
-            {toastMsg}
-          </div>
-        )}
-      </div>
-    </div>
-  );
+// Sample variant context for token resolution in catalog-level views. There is
+// no SO line driving variant values here, so we fall back to the same defaults
+// `buildWipCodeDisplay` uses for the BOM Structure tree (DIVAN_HEIGHT=8",
+// LEG_HEIGHT=2"). Product fields override where present.
+function buildSampleVariantCtx(p: Product | undefined, t: BOMTemplate): BomVariantContext {
+  return {
+    productCode: p?.code || t.productCode,
+    model: p?.baseModel || t.baseModel,
+    sizeLabel: p?.sizeLabel || (t.category === "SOFA" ? "3-Seater" : "6FT"),
+    sizeCode: p?.sizeCode || "",
+    fabricCode: "PC151-01",
+    divanHeightInches: 8,
+    legHeightInches: 2,
+    gapInches: 0,
+  };
 }
 
 // ---------- RawMaterial Batch Editor Dialog ----------
@@ -6284,698 +5824,6 @@ function BatchEditMaterialsDialog({
   );
 }
 
-// ---------- Dept-Pivot Category Editor Dialog ----------
-// Pick a department (e.g. "Fab Sew"); the dialog lists every process row
-// across every per-product BOM template that touches that dept. The user
-// edits Category inline, minutes auto-fill from the variants-config matrix
-// via getProductionMinutes(deptCode, category). Save once → POSTs every
-// dirty row to /api/bom/templates/bulk-process-edit.
-//
-// Out of scope here: master templates (bom_master_templates), production
-// orders, job cards. Only bom_templates are touched.
-type DeptPivotRow = {
-  rowKey: string;        // unique React key
-  templateId: string;
-  productCode: string;
-  baseModel: string;
-  bomCategory: BOMCategory;
-  // Path through wipComponents to the WIP node owning this process. [] for L1.
-  path: number[];
-  // Resolved label for the LEAF WIP node owning this process (or "L1 / FG"
-  // when path === []). Tokens like {DIVAN_HEIGHT}/{SIZE} are resolved
-  // against the matching product so the cell reads "8" Divan- 6FT (WD)"
-  // instead of the raw template.
-  branchLabel: string;
-  // Full ancestor chain ("Top / Mid / Leaf"), resolved. Shown on hover only.
-  branchAncestry: string;
-  processIndex: number;
-  // Initial values, captured when the row was built.
-  initialCategory: string;
-  initialMinutes: number;
-  // User-edited values (start === initial).
-  category: string;
-  minutes: number;
-};
-
-// Build a sample variant context for token resolution. The dept-pivot is a
-// catalog-level view — there is no SO line driving variant values — so we
-// fall back to the same defaults `buildWipCodeDisplay` uses for the BOM
-// Structure tree (DIVAN_HEIGHT=8", LEG_HEIGHT=2"). Product fields
-// (productCode, baseModel, sizeLabel/sizeCode) override where present.
-function buildSampleVariantCtx(p: Product | undefined, t: BOMTemplate): BomVariantContext {
-  return {
-    productCode: p?.code || t.productCode,
-    model: p?.baseModel || t.baseModel,
-    sizeLabel: p?.sizeLabel || (t.category === "SOFA" ? "3-Seater" : "6FT"),
-    sizeCode: p?.sizeCode || "",
-    fabricCode: "PC151-01",
-    divanHeightInches: 8,
-    legHeightInches: 2,
-    gapInches: 0,
-  };
-}
-
-function buildDeptPivotRows(
-  templates: BOMTemplate[],
-  deptCode: string,
-  products: Product[],
-): DeptPivotRow[] {
-  const rows: DeptPivotRow[] = [];
-  const productByCode = new Map(products.map((p) => [p.code, p]));
-
-  function pushRow(
-    t: BOMTemplate,
-    path: number[],
-    leafLabel: string,
-    ancestry: string,
-    processIndex: number,
-    p: BOMProcess,
-  ) {
-    rows.push({
-      rowKey: `${t.id}|${path.join(".")}|${processIndex}`,
-      templateId: t.id,
-      productCode: t.productCode,
-      baseModel: t.baseModel,
-      bomCategory: t.category,
-      path,
-      branchLabel: leafLabel,
-      branchAncestry: ancestry,
-      processIndex,
-      initialCategory: p.category || "",
-      initialMinutes: p.minutes || 0,
-      category: p.category || "",
-      minutes: p.minutes || 0,
-    });
-  }
-
-  function walk(
-    wips: WIPComponent[],
-    parentPath: number[],
-    parentAncestry: string,
-    ctx: BomVariantContext,
-    t: BOMTemplate,
-  ) {
-    wips.forEach((w, idx) => {
-      const path = [...parentPath, idx];
-      const rawLabel = w.wipCode || WIP_TYPE_LABELS[w.wipType]?.label || w.wipType;
-      const ownLabel = resolveWipTokens(rawLabel, ctx) || rawLabel;
-      const ancestry = parentAncestry ? `${parentAncestry} / ${ownLabel}` : ownLabel;
-      w.processes.forEach((p, pi) => {
-        if (p.deptCode === deptCode) {
-          // Leaf == the node owning this process. Use the leaf's own label,
-          // not the full ancestor chain — see Bug 2 in the dept-pivot editor.
-          pushRow(t, path, ownLabel, ancestry, pi, p);
-        }
-      });
-      if (w.children && w.children.length > 0) {
-        walk(w.children, path, ancestry, ctx, t);
-      }
-    });
-  }
-
-  for (const t of templates) {
-    const ctx = buildSampleVariantCtx(productByCode.get(t.productCode), t);
-    t.l1Processes.forEach((p, pi) => {
-      if (p.deptCode === deptCode) {
-        pushRow(t, [], "L1 / FG", "L1 / FG", pi, p);
-      }
-    });
-    walk(t.wipComponents, [], "", ctx, t);
-  }
-
-  // Sort: productCode, then branchLabel, then processIndex.
-  rows.sort((a, b) => {
-    if (a.productCode !== b.productCode) {
-      return a.productCode.localeCompare(b.productCode);
-    }
-    if (a.branchLabel !== b.branchLabel) {
-      return a.branchLabel.localeCompare(b.branchLabel);
-    }
-    return a.processIndex - b.processIndex;
-  });
-
-  return rows;
-}
-
-function DeptPivotCategoryDialog({
-  open,
-  onClose,
-  templates,
-  products,
-  onTemplatesUpdated,
-}: {
-  open: boolean;
-  onClose: () => void;
-  templates: BOMTemplate[];
-  products: Product[];
-  onTemplatesUpdated: (updated: BOMTemplate[]) => void;
-}) {
-  const { toast } = useToast();
-  const [deptCode, setDeptCode] = useState<string>(DEPT_ORDER[0]);
-  const [rows, setRows] = useState<DeptPivotRow[]>([]);
-  const [search, setSearch] = useState("");
-  // Defer search so the filteredRows useMemo doesn't re-run on every keystroke.
-  const searchDeferred = useDeferredValue(search);
-  const [modelFilter, setModelFilter] = useState<string>("");
-  const [branchFilter, setBranchFilter] = useState<string>("");
-  const [saving, setSaving] = useState(false);
-  // Multi-select for bulk-apply. Lets the user pick many rows and smash
-  // them all to the same category in one move (matches the Batch Edit
-  // dialog's UX). Selection is keyed by rowKey, independent of the
-  // inline edit state in `rows`.
-  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
-  const [bulkFillCat, setBulkFillCat] = useState("");
-
-  // Rebuild rows whenever the dialog opens, the dept changes, or the
-  // upstream template/products list changes (e.g. after a save).
-  // Reset MODEL & BRANCH dropdowns to "All" when dept changes, since the
-  // available options are scoped to the new dept's row set.
-  /* eslint-disable react-hooks/set-state-in-effect -- rebuild rows when inputs change */
-  useEffect(() => {
-    if (!open) return;
-    // Only show ACTIVE versions. Some products carry a parallel DRAFT v2.0
-    // alongside their live v1.0 — surfacing both made every process row
-    // appear twice. The rest of the BOM page still sees the unfiltered list.
-    const activeOnly = templates.filter((t) => (t.versionStatus ?? "ACTIVE") === "ACTIVE");
-    setRows(buildDeptPivotRows(activeOnly, deptCode, products));
-    setSearch("");
-    setModelFilter("");
-    setBranchFilter("");
-    setSelectedKeys(new Set());
-    setBulkFillCat("");
-  }, [open, deptCode, templates, products]);
-  /* eslint-enable react-hooks/set-state-in-effect */
-
-  const categoryOptions = useMemo(() => getCategoryOptions(), []);
-
-  // A row is dirty if EITHER its category changed OR its minutes drifted
-  // from the initial value. The minutes path catches Resync-stale: an old
-  // BOM row stores `Fab Cut × CAT 3 = 90` because that was the matrix value
-  // months ago, but the current matrix has `Fab Cut × CAT 3 = 25`. Without
-  // the minutes branch, Resync would silently update r.minutes but the
-  // dirty count + Save button + bulk-process-edit payload would all
-  // ignore the change and the user would never persist it.
-  function isRowDirty(r: DeptPivotRow): boolean {
-    return r.category !== r.initialCategory || r.minutes !== r.initialMinutes;
-  }
-
-  const dirtyCount = useMemo(
-    () => rows.filter(isRowDirty).length,
-    [rows],
-  );
-
-  // Unique MODEL options, scoped to the current dept-filtered row set.
-  const modelOptions = useMemo(() => {
-    const set = new Set<string>();
-    for (const r of rows) set.add(r.productCode);
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [rows]);
-
-  // Unique BRANCH/CODE options, scoped to the current dept-filtered row set.
-  const branchOptions = useMemo(() => {
-    const set = new Set<string>();
-    for (const r of rows) set.add(r.branchLabel);
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [rows]);
-
-  const filteredRows = useMemo(() => {
-    const q = searchDeferred.trim().toLowerCase();
-    return rows.filter((r) => {
-      if (modelFilter && r.productCode !== modelFilter) return false;
-      if (branchFilter && r.branchLabel !== branchFilter) return false;
-      if (q) {
-        const hit =
-          r.productCode.toLowerCase().includes(q) ||
-          r.baseModel.toLowerCase().includes(q) ||
-          r.branchLabel.toLowerCase().includes(q) ||
-          r.branchAncestry.toLowerCase().includes(q);
-        if (!hit) return false;
-      }
-      return true;
-    });
-  }, [rows, searchDeferred, modelFilter, branchFilter]);
-
-  // ── Row virtualization for the dept-pivot process table ────────────────
-  // A busy department's pivot can list every process row across every BOM
-  // (hundreds of rows, each with a category <select>). Rendering them all
-  // janks the dialog open and every keystroke. Keep only the visible window
-  // mounted; measureElement covers the 2-line Model cell height variance.
-  const pivotScrollRef = useRef<HTMLDivElement>(null);
-  const pivotRowVirtualizer = useVirtualizer({
-    count: filteredRows.length,
-    getScrollElement: () => pivotScrollRef.current,
-    estimateSize: () => 48,
-    overscan: 10,
-  });
-
-  // (Stale-row detection + Resync helper removed per user feedback —
-  // they were the visible UI of PR #28. The bug-fix logic for
-  // "minutes-only changes count as dirty" lives in `isRowDirty` above
-  // and stays intact. If you want to bring the Resync UX back later,
-  // the git history at PR #28 has the full implementation.)
-
-  function handleCategoryChange(rowKey: string, newCat: string) {
-    setRows((prev) =>
-      prev.map((r) => {
-        if (r.rowKey !== rowKey) return r;
-        const newMinutes = getProductionMinutes(deptCode, newCat);
-        return { ...r, category: newCat, minutes: newMinutes };
-      }),
-    );
-  }
-
-  // Multi-select helpers
-  const allFilteredSelected = filteredRows.length > 0 && filteredRows.every((r) => selectedKeys.has(r.rowKey));
-  function toggleAllFiltered() {
-    if (allFilteredSelected) {
-      setSelectedKeys((prev) => {
-        const next = new Set(prev);
-        for (const r of filteredRows) next.delete(r.rowKey);
-        return next;
-      });
-    } else {
-      setSelectedKeys((prev) => {
-        const next = new Set(prev);
-        for (const r of filteredRows) next.add(r.rowKey);
-        return next;
-      });
-    }
-  }
-  function toggleOne(rowKey: string) {
-    setSelectedKeys((prev) => {
-      const next = new Set(prev);
-      if (next.has(rowKey)) next.delete(rowKey);
-      else next.add(rowKey);
-      return next;
-    });
-  }
-
-  // Bulk-fill: writes bulkFillCat into every targeted row's category +
-  // auto-fills minutes from the dept x category matrix. Targets are
-  // selected rows when there is selection, otherwise all visible rows.
-  function handleBulkFill() {
-    if (!bulkFillCat) {
-      toast.warning("Pick a category first.");
-      return;
-    }
-    const targetKeys = selectedKeys.size > 0
-      ? new Set(filteredRows.filter((r) => selectedKeys.has(r.rowKey)).map((r) => r.rowKey))
-      : new Set(filteredRows.map((r) => r.rowKey));
-    if (targetKeys.size === 0) {
-      toast.warning("No rows to apply to.");
-      return;
-    }
-    const newMinutes = getProductionMinutes(deptCode, bulkFillCat);
-    setRows((prev) =>
-      prev.map((r) => {
-        if (!targetKeys.has(r.rowKey)) return r;
-        return { ...r, category: bulkFillCat, minutes: newMinutes };
-      }),
-    );
-    const scope = selectedKeys.size > 0 ? `${selectedKeys.size} selected` : `${targetKeys.size} visible`;
-    toast.success(`Filled ${targetKeys.size} row${targetKeys.size !== 1 ? "s" : ""} -> ${bulkFillCat} (${scope}). Click Save 0 to commit.`.replace("Save 0", `Save`));
-  }
-
-  async function handleSave() {
-    const dirty = rows.filter(isRowDirty);
-    if (dirty.length === 0) {
-      toast.warning("No changes to save.");
-      return;
-    }
-    setSaving(true);
-    try {
-      const res = await fetch("/api/bom/templates/bulk-process-edit", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          edits: dirty.map((r) => ({
-            templateId: r.templateId,
-            path: r.path,
-            processIndex: r.processIndex,
-            newCategory: r.category,
-            newMinutes: r.minutes,
-          })),
-        }),
-      });
-      const json = (await res.json().catch(() => null)) as
-        | { success?: boolean; updated?: number; failed?: Array<{ templateId: string; error: string }>; error?: string }
-        | null;
-      if (!res.ok || !json?.success) {
-        throw new Error(json?.error || `HTTP ${res.status}`);
-      }
-
-      // Mirror the server change back into the local templates state so the
-      // rest of the BOM page renders the new categories without a refetch.
-      const dirtyByTemplate = new Map<string, DeptPivotRow[]>();
-      for (const d of dirty) {
-        const arr = dirtyByTemplate.get(d.templateId);
-        if (arr) arr.push(d);
-        else dirtyByTemplate.set(d.templateId, [d]);
-      }
-
-      const failedIds = new Set((json.failed || []).map((f) => f.templateId));
-
-      const nextTemplates = templates.map((t) => {
-        const tEdits = dirtyByTemplate.get(t.id);
-        if (!tEdits || failedIds.has(t.id)) return t;
-        // Deep clone the JSON-ish bits we're about to mutate.
-        const clone: BOMTemplate = {
-          ...t,
-          l1Processes: JSON.parse(JSON.stringify(t.l1Processes)) as BOMProcess[],
-          wipComponents: JSON.parse(JSON.stringify(t.wipComponents)) as WIPComponent[],
-        };
-        for (const e of tEdits) {
-          let target: BOMProcess | undefined;
-          if (e.path.length === 0) {
-            target = clone.l1Processes[e.processIndex];
-          } else {
-            let node: WIPComponent | undefined = clone.wipComponents[e.path[0]];
-            for (let i = 1; i < e.path.length && node; i++) {
-              node = node.children?.[e.path[i]];
-            }
-            target = node?.processes[e.processIndex];
-          }
-          if (target) {
-            target.category = e.category;
-            target.minutes = e.minutes;
-          }
-        }
-        return clone;
-      });
-      onTemplatesUpdated(nextTemplates);
-      invalidateCachePrefix("/api/bom");
-
-      const updated = json.updated ?? 0;
-      const failedCount = (json.failed || []).length;
-      if (failedCount > 0) {
-        toast.warning(
-          `Updated ${updated} template${updated !== 1 ? "s" : ""}; ${failedCount} failed.`,
-        );
-      } else {
-        toast.success(
-          `Updated ${updated} template${updated !== 1 ? "s" : ""}.`,
-        );
-      }
-      onClose();
-    } catch (err) {
-      toast.error(
-        `Failed to save: ${err instanceof Error ? err.message : "unknown error"}`,
-      );
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  if (!open) return null;
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
-      <div
-        className="bg-white rounded-xl shadow-2xl w-[1080px] max-w-[97vw] max-h-[92vh] flex flex-col"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="px-6 py-4 border-b border-[#E2DDD8]">
-          <h2 className="text-lg font-bold text-[#111827]">Dept-Pivot Category Editor</h2>
-          <p className="text-xs text-gray-500 mt-0.5">
-            Pick a department → edit category on every per-product BOM process row that touches it.
-            Minutes auto-fill from Production Times. Saves directly to bom_templates.
-          </p>
-        </div>
-
-        {/* Body */}
-        <div className="px-6 py-4 overflow-y-auto flex-1 space-y-3">
-          <div className="flex gap-3 items-end flex-wrap">
-            <div className="w-48">
-              <label className="block text-xs font-medium text-gray-700 mb-1">Department</label>
-              <select
-                value={deptCode}
-                onChange={(e) => setDeptCode(e.target.value)}
-                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
-              >
-                {DEPT_ORDER.map((d) => (
-                  <option key={d} value={d}>{DEPT_LABELS[d]}</option>
-                ))}
-              </select>
-            </div>
-            <div className="flex-1 min-w-[200px]">
-              <label className="block text-xs font-medium text-gray-700 mb-1">Search</label>
-              <input
-                type="text"
-                placeholder="Filter by code / model / branch..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
-              />
-            </div>
-            <div className="w-48">
-              <label className="block text-xs font-medium text-gray-700 mb-1">Model</label>
-              <select
-                value={modelFilter}
-                onChange={(e) => setModelFilter(e.target.value)}
-                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
-              >
-                <option value="">All Models</option>
-                {modelOptions.map((m) => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
-            </div>
-            <div className="w-48">
-              <label className="block text-xs font-medium text-gray-700 mb-1">Branch / Code</label>
-              <select
-                value={branchFilter}
-                onChange={(e) => setBranchFilter(e.target.value)}
-                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
-              >
-                <option value="">All Branches</option>
-                {branchOptions.map((b) => (
-                  <option key={b} value={b}>{b}</option>
-                ))}
-              </select>
-            </div>
-            <div className="text-xs text-gray-500 pb-2">
-              {filteredRows.length} of {rows.length} rows · {dirtyCount} dirty · {selectedKeys.size} selected
-            </div>
-          </div>
-
-          {/* Bulk fill bar - apply one category to many rows in one click. */}
-          <div className="flex items-end gap-3 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2">
-            <div className="flex-1">
-              <label className="block text-xs font-medium text-gray-700 mb-1">
-                Bulk fill: {selectedKeys.size > 0 ? `${selectedKeys.size} selected` : `all ${filteredRows.length} visible`} -&gt; ...
-              </label>
-              <div className="flex gap-2">
-                <select
-                  value={bulkFillCat}
-                  onChange={(e) => setBulkFillCat(e.target.value)}
-                  className="flex-1 border border-[#E2DDD8] rounded-lg px-3 py-1.5 text-sm bg-white focus:outline-none focus:border-[#6B5C32]"
-                >
-                  <option value="">Pick category...</option>
-                  {categoryOptions.map((c) => {
-                    const m = getProductionMinutes(deptCode, c);
-                    const label = m > 0 ? `${c} (${m} min)` : c;
-                    return <option key={c} value={c}>{label}</option>;
-                  })}
-                </select>
-                <button
-                  onClick={handleBulkFill}
-                  disabled={!bulkFillCat}
-                  className="px-3 py-1.5 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
-                >
-                  Fill
-                </button>
-              </div>
-            </div>
-            <div className="flex items-center gap-3 text-xs pb-1">
-              <button
-                onClick={toggleAllFiltered}
-                className="text-[#6B5C32] hover:underline font-medium whitespace-nowrap"
-              >
-                {allFilteredSelected ? `Deselect All ${filteredRows.length}` : `Select All ${filteredRows.length}`}
-              </button>
-              {selectedKeys.size > 0 && (
-                <button
-                  onClick={() => setSelectedKeys(new Set())}
-                  className="text-[#9A3A2D] hover:underline whitespace-nowrap"
-                >
-                  Clear
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Resync stale-row banner removed per user feedback (revert
-              of PR #28). isRowStale / staleCount / handleResyncStale
-              still exist below for the bug-fix logic — they just don't
-              render a banner or color rows yellow now. The dirty
-              detection still catches minutes-only changes so manual
-              edits persist correctly. */}
-
-          {/* Pivot table */}
-          <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
-            <div ref={pivotScrollRef} className="max-h-[60vh] overflow-y-auto overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="bg-[#FAF9F7] sticky top-0 z-10">
-                  <tr className="text-left text-xs text-gray-500 uppercase tracking-wider">
-                    <th className="px-3 py-2 font-medium w-8">
-                      <input
-                        type="checkbox"
-                        checked={allFilteredSelected}
-                        onChange={toggleAllFiltered}
-                        className="rounded border-gray-300 text-[#6B5C32] focus:ring-[#6B5C32]"
-                        title={allFilteredSelected ? "Deselect all visible" : "Select all visible"}
-                      />
-                    </th>
-                    <th className="px-3 py-2 font-medium">Model</th>
-                    <th className="px-3 py-2 font-medium">Branch / Code</th>
-                    <th className="px-3 py-2 font-medium">Process</th>
-                    <th className="px-3 py-2 font-medium w-32">Category</th>
-                    <th className="px-3 py-2 font-medium w-20 text-right">Minutes</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredRows.length === 0 && (
-                    <tr>
-                      <td colSpan={6} className="px-3 py-8 text-center text-gray-400">
-                        {rows.length === 0
-                          ? `No process rows on any BOM touch ${DEPT_LABELS[deptCode]}.`
-                          : "No rows match the search."}
-                      </td>
-                    </tr>
-                  )}
-                  {(() => {
-                    const vItems = pivotRowVirtualizer.getVirtualItems();
-                    const padTop = vItems.length > 0 ? vItems[0].start : 0;
-                    const padBottom =
-                      vItems.length > 0
-                        ? pivotRowVirtualizer.getTotalSize() -
-                          vItems[vItems.length - 1].end
-                        : 0;
-                    return (
-                      <>
-                        {padTop > 0 && (
-                          <tr aria-hidden="true">
-                            <td colSpan={6} style={{ height: padTop, padding: 0, border: 0 }} />
-                          </tr>
-                        )}
-                        {vItems.map((vi) => {
-                    const r = filteredRows[vi.index];
-                    if (!r) return null;
-                    const dirty = isRowDirty(r);
-                    const isSelected = selectedKeys.has(r.rowKey);
-                    // Reverted (PR #28 → restore pre-#28 format): no
-                    // yellow stale-row tone. Only dirty (green) and
-                    // selected (yellow tint) tones remain.
-                    const rowTone = dirty
-                      ? "bg-[#EEF3E4]"
-                      : isSelected
-                      ? "bg-[#FAEFCB]/60"
-                      : "hover:bg-[#FAF9F7]";
-                    return (
-                      <tr
-                        key={r.rowKey}
-                        data-index={vi.index}
-                        ref={pivotRowVirtualizer.measureElement}
-                        className={`border-t border-[#E2DDD8] ${rowTone}`}
-                      >
-                        <td className="px-3 py-2">
-                          <input
-                            type="checkbox"
-                            checked={isSelected}
-                            onChange={() => toggleOne(r.rowKey)}
-                            className="rounded border-gray-300 text-[#6B5C32] focus:ring-[#6B5C32]"
-                          />
-                        </td>
-                        <td className="px-3 py-2">
-                          <div className="font-medium text-[#111827]">{r.productCode}</div>
-                          <div className="text-[10px] text-gray-400">{r.baseModel}</div>
-                        </td>
-                        <td
-                          className="px-3 py-2 text-gray-600"
-                          title={r.branchAncestry !== r.branchLabel ? r.branchAncestry : undefined}
-                        >
-                          {r.branchLabel}
-                        </td>
-                        <td className="px-3 py-2 text-gray-600">
-                          <span
-                            className="inline-block text-[10px] font-medium px-1.5 py-0.5 rounded"
-                            style={{
-                              backgroundColor: `${DEPT_COLORS[deptCode] || "#9CA3AF"}22`,
-                              color: DEPT_COLORS[deptCode] || "#374151",
-                            }}
-                          >
-                            {DEPT_LABELS[deptCode]}
-                          </span>
-                          <span className="ml-2 text-[10px] text-gray-400">#{r.processIndex}</span>
-                        </td>
-                        <td className="px-3 py-2">
-                          <select
-                            value={r.category}
-                            onChange={(e) => handleCategoryChange(r.rowKey, e.target.value)}
-                            className={`w-full border rounded px-2 py-1 text-xs focus:outline-none focus:border-[#6B5C32] ${
-                              dirty ? "border-[#4F7C3A] bg-white font-semibold text-[#4F7C3A]" : "border-[#E2DDD8] bg-white"
-                            }`}
-                          >
-                            {/* If the current value isn't in the canonical list (legacy data),
-                                still show it so the dropdown reflects reality. */}
-                            {!categoryOptions.includes(r.category) && r.category && (
-                              <option value={r.category}>{r.category}</option>
-                            )}
-                            {categoryOptions.map((c) => (
-                              <option key={c} value={c}>{c}</option>
-                            ))}
-                          </select>
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums text-gray-600">
-                          {r.minutes} min
-                        </td>
-                      </tr>
-                    );
-                        })}
-                        {padBottom > 0 && (
-                          <tr aria-hidden="true">
-                            <td colSpan={6} style={{ height: padBottom, padding: 0, border: 0 }} />
-                          </tr>
-                        )}
-                      </>
-                    );
-                  })()}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-between">
-          <span className="text-xs text-gray-500">
-            {dirtyCount > 0
-              ? `${dirtyCount} row${dirtyCount !== 1 ? "s" : ""} pending — affects ${new Set(rows.filter(isRowDirty).map((r) => r.templateId)).size} template${dirtyCount !== 1 ? "s" : ""}`
-              : "No pending changes"}
-          </span>
-          <div className="flex gap-2">
-            <button
-              onClick={onClose}
-              disabled={saving}
-              className="px-4 py-2 text-sm border border-[#E2DDD8] rounded-lg text-gray-600 hover:bg-gray-50 disabled:opacity-50"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={handleSave}
-              disabled={dirtyCount === 0 || saving}
-              className="px-4 py-2 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {saving ? "Saving..." : `Save ${dirtyCount}`}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ---------- Main Page ----------
 export default function BOMManagementPage() {
   const { toast } = useToast();
@@ -6992,13 +5840,9 @@ export default function BOMManagementPage() {
   // have a BOM template (i.e. code not in `existingCodes`).
   const [pendingOnly, setPendingOnly] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
+  const navigate = useNavigate();
   const [showMaster, setShowMaster] = useState(false);
-  const [showProductionTimes, setShowProductionTimes] = useState(false);
-  // Batch Edit Categories button removed 2026-04-29 per user request —
-  // the Production Categories Editor (Dept-Pivot) covers the same use
-  // case at higher granularity (per-dept rather than per-template).
   const [showBatchEditMat, setShowBatchEditMat] = useState(false);
-  const [showDeptPivot, setShowDeptPivot] = useState(false);
 
   useEffect(() => {
     async function load() {
@@ -7260,25 +6104,20 @@ export default function BOMManagementPage() {
             </svg>
             RawMaterial Batch Editor
           </button>
+          {/* Production Categories Editor + Production Times buttons removed
+              2026-08-01 per owner — the dedicated WIP Times module covers both
+              use cases, so these BOM-local duplicates were redundant surface.
+              The Production Times LOOKUP (getProductionTimes) is untouched:
+              BOM process rows still auto-fill minutes from that matrix. */}
           <button
-            onClick={() => setShowDeptPivot(true)}
-            title="Production Categories Editor — edit every process row in a department across all BOMs"
+            onClick={() => navigate("/bom/component-kits")}
+            title="Component Kits — bind a mechanism / leg SKU to the screws it always needs"
             className="flex items-center gap-2 px-3 py-2 bg-white border border-[#E2DDD8] rounded-lg text-sm text-gray-700 hover:bg-[#FAF9F7]"
           >
             <svg className="w-4 h-4 text-[#6B5C32]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M3 10h18M3 14h18M9 6v12M15 6v12" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M11 5.882V19.24a1.76 1.76 0 01-3.417.592l-2.147-6.15M18 13a3 3 0 100-6M5.436 13.683A4.001 4.001 0 017 6h1.832c4.1 0 7.625-1.234 9.168-3v14c-1.543-1.766-5.067-3-9.168-3H7a3.988 3.988 0 01-1.564-.317z" />
             </svg>
-            Production Categories Editor
-          </button>
-          <button
-            onClick={() => setShowProductionTimes(true)}
-            title="Production Times — minutes per department x category"
-            className="flex items-center gap-2 px-3 py-2 bg-white border border-[#E2DDD8] rounded-lg text-sm text-gray-700 hover:bg-[#FAF9F7]"
-          >
-            <svg className="w-4 h-4 text-[#6B5C32]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            Production Times
+            Component Kits
           </button>
           <button
             onClick={() => setShowMaster(true)}
@@ -7294,19 +6133,11 @@ export default function BOMManagementPage() {
         </div>
       </div>
       <MasterTemplatesDialog open={showMaster} onClose={handleMasterClosed} rawMaterials={rawMaterials} fabricOptions={fabricOptions} />
-      <ProductionTimesDialog open={showProductionTimes} onClose={() => setShowProductionTimes(false)} />
       <BatchEditMaterialsDialog
         open={showBatchEditMat}
         onClose={() => setShowBatchEditMat(false)}
         templates={templates}
         rawMaterials={rawMaterials}
-        products={products}
-        onTemplatesUpdated={(updated) => setTemplates(updated)}
-      />
-      <DeptPivotCategoryDialog
-        open={showDeptPivot}
-        onClose={() => setShowDeptPivot(false)}
-        templates={templates}
         products={products}
         onTemplatesUpdated={(updated) => setTemplates(updated)}
       />

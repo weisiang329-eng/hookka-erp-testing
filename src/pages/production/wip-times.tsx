@@ -452,6 +452,11 @@ export default function WipTimesPage() {
       m.set(d.name.toLowerCase(), d.code);
       m.set(d.code.toLowerCase(), d.code);
     }
+    // Legacy labels: FOAM was exported as "Foam" and FOAM_CUTTING as "Foam Cut"
+    // before the 2026-07-30 relabel. A spreadsheet exported then and imported
+    // now must still resolve, so keep the old spellings as aliases.
+    m.set("foam", "FOAM");
+    m.set("foam cut", "FOAM_CUTTING");
     return m;
   }, []);
 

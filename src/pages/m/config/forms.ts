@@ -1633,7 +1633,8 @@ export function addAffectedProductSpec(
 const WH_DEPT_OPTS: SelectOption[] = [
   { value: "FAB_CUT", label: "Fab Cut" },
   { value: "FAB_SEW", label: "Fab Sew" },
-  { value: "FOAM", label: "Foam" },
+  { value: "FOAM_CUTTING", label: "Foam Cutting" },
+  { value: "FOAM", label: "Foam Bonding" },
   { value: "WOOD_CUT", label: "Wood Cut" },
   { value: "FRAMING", label: "Framing" },
   { value: "WEBBING", label: "Webbing" },

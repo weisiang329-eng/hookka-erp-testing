@@ -62,7 +62,7 @@ export const REPAIR_DEPT_LABELS: Record<RepairDeptCode, string> = {
   FAB_SEW: "Fabric Sewing",
   WOOD_CUT: "Wood Cutting",
   FOAM_CUTTING: "Foam Cutting",
-  FOAM: "Foam",
+  FOAM: "Foam Bonding",
   FRAMING: "Framing",
   WEBBING: "Webbing",
   UPHOLSTERY: "Upholstery",

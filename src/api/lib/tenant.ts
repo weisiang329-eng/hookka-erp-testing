@@ -46,6 +46,19 @@ export const tenantMiddleware: MiddlewareHandler<Env> = async (c, next) => {
   // Public / non-API paths — never need a tenant scope.
   if (!path.startsWith("/api/")) return next();
 
+  // Fast path (perf audit 2026-07-31): authMiddleware now carries orgId on the
+  // KV-cached session row and stashes it here, so the common case needs NO DB
+  // round-trip at all. Only fall back to the live `SELECT orgId FROM users`
+  // when it's absent (an old pre-change cached session, or a path that set
+  // userId without a session). Same fail-closed posture as before.
+  const preresolvedOrgId = (c.get as unknown as (k: string) => string | undefined)(
+    "orgId",
+  );
+  if (preresolvedOrgId) {
+    await next();
+    return;
+  }
+
   const userId = (c.get as unknown as (k: string) => string | undefined)(
     "userId",
   );

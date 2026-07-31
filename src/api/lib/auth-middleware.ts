@@ -158,6 +158,14 @@ type SessionJoinRow = {
   expiresAt: string;
   role: string;
   isActive: number;
+  // Carried on the session (KV-cached) so tenantMiddleware doesn't re-query
+  // `SELECT orgId FROM users` on EVERY request — that was the only uncached
+  // per-request DB round-trip (perf audit 2026-07-31). orgId is as stable as
+  // role (also cached here) and the session cache already invalidates on
+  // user/role/password change, so the freshness contract is identical.
+  // Optional: an old cached row (pre-this-change) has no orgId → tenant falls
+  // back to its live query, so this is fully backward-compatible.
+  orgId?: string | null;
 };
 
 // KV session cache (Phase 2.6a).  Key = "sess:" + sha256(token) to avoid
@@ -384,7 +392,7 @@ export const authMiddleware: MiddlewareHandler<Env> = async (c, next) => {
     try {
       row = await c.var.DB.prepare(
         `SELECT s.userId AS userId, s.expiresAt AS expiresAt,
-                u.role AS role, u.isActive AS isActive
+                u.role AS role, u.isActive AS isActive, u.orgId AS orgId
            FROM user_sessions s
            JOIN users u ON u.id = s.userId
           WHERE s.token = ?
@@ -481,6 +489,17 @@ export const authMiddleware: MiddlewareHandler<Env> = async (c, next) => {
     "userRole",
     row.role,
   );
+  // Hand the resolved orgId to tenantMiddleware so it can skip its own
+  // `SELECT orgId FROM users` DB round-trip (perf audit 2026-07-31). Only set
+  // when the (possibly KV-cached) session row actually carries it; an old
+  // cached row without orgId leaves this unset and tenant falls back to its
+  // live query — fail-closed and backward-compatible.
+  if (row.orgId) {
+    (c as unknown as { set: (k: string, v: unknown) => void }).set(
+      "orgId",
+      row.orgId,
+    );
+  }
 
   await next();
 };

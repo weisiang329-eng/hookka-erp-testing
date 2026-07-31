@@ -78,13 +78,14 @@ function makeKv(opts = {}) {
 // next() resolves true so callers can tell whether the middleware allowed
 // the request or short-circuited it.
 
-function makeCtx({ path = "/api/customers", userId, ip = "1.2.3.4", kv } = {}) {
+function makeCtx({ path = "/api/customers", userId, ip = "1.2.3.4", kv, method } = {}) {
   const headers = new Map();
   if (ip) headers.set("cf-connecting-ip", ip);
   const resHeaders = new Map();
   return {
     req: {
       path,
+      method,
       header(name) {
         return headers.get(name.toLowerCase()) ?? headers.get(name);
       },
@@ -289,4 +290,37 @@ test("per-hour ceiling (10000) trips even when minute count is low", async () =>
   assert.equal(nextCalled, false);
   assert.equal(out.status, 429);
   assert.equal(out.body.retryAfterSec, 3600);
+});
+
+// ---- Authenticated-GET isolate backstop (perf audit 2026-07-31) -----------
+
+test("authenticated GET skips the KV limiter (uses the free isolate backstop)", async () => {
+  const kv = makeKv();
+  const mw = apiRateLimit();
+  const ctx = makeCtx({ userId: "get-user-1", kv, method: "GET" });
+  const { nextCalled } = await callMw(mw, ctx);
+  assert.equal(nextCalled, true);
+  // No KV rate-limit keys written — the ~2-round-trip KV path was bypassed.
+  const keys = [...kv.store.keys()].filter((k) => k.includes(":m:") || k.includes(":h:"));
+  assert.equal(keys.length, 0);
+});
+
+test("authenticated POST still goes through the KV limiter (writes stay protected)", async () => {
+  const kv = makeKv();
+  const mw = apiRateLimit();
+  const ctx = makeCtx({ userId: "post-user-1", kv, method: "POST" });
+  await callMw(mw, ctx);
+  assert.equal([...kv.store.keys()].filter((k) => k.includes(":m:")).length, 1);
+});
+
+test("isolate backstop still catches a runaway authenticated GET loop (enforce mode)", async () => {
+  const kv = makeKv();
+  const mw = apiRateLimit();
+  let last;
+  for (let i = 0; i < 602; i++) {
+    last = await callMw(mw, makeCtx({ userId: "runaway-user", kv, method: "GET" }));
+  }
+  // Over the 600/10s cap → 429 in enforce mode, and STILL zero KV traffic.
+  assert.equal(last.nextCalled, false);
+  assert.equal([...kv.store.keys()].length, 0);
 });

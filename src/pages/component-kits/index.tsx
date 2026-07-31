@@ -89,10 +89,21 @@ export default function ComponentKitsPage() {
     void reload();
   }, []);
 
+  // Extra parent SKUs to bind the SAME component list to in one save (owner
+  // ask: "Multi-create"). A mechanism usually comes in several sizes/handings
+  // that all take the identical screw set, so re-typing the list per SKU was
+  // the actual chore. Only offered when CREATING — editing targets one kit.
+  const [extraParents, setExtraParents] = useState<{ code: string; name: string }[]>([]);
+  const [isNewKit, setIsNewKit] = useState(false);
+
   function startNew() {
+    setExtraParents([]);
+    setIsNewKit(true);
     setEditing({ parentCode: "", parentName: "", children: [] });
   }
   function startEdit(kit: Kit) {
+    setExtraParents([]);
+    setIsNewKit(false);
     // deep copy so cancel discards
     setEditing({ ...kit, children: kit.children.map((c) => ({ ...c })) });
   }
@@ -109,16 +120,53 @@ export default function ComponentKitsPage() {
       toast.error("Add at least one component with a quantity");
       return;
     }
+    // The primary parent plus any extras, de-duplicated (picking the same SKU
+    // twice would just PUT the same kit twice).
+    const targets = [{ code, name: editing.parentName }];
+    for (const p of extraParents) {
+      const c = p.code.trim();
+      if (c && !targets.some((t) => t.code === c)) targets.push({ code: c, name: p.name });
+    }
+    // A kit may not contain its own parent — the backend rejects that per
+    // parent, so with several targets one bad pick would half-apply the save.
+    // Catch it up front and name the offender instead.
+    const selfRef = targets.find((t) => children.some((ch) => ch.childCode.trim() === t.code));
+    if (selfRef) {
+      toast.error(`${selfRef.code} is in its own component list — remove it or drop that parent`);
+      return;
+    }
+
     setSaving(true);
     try {
-      const res = await fetch(`/api/component-boms/${encodeURIComponent(code)}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ parentName: editing.parentName, children }),
-      }).then((r) => r.json()) as { success?: boolean; error?: string };
-      if (!res?.success) throw new Error(res?.error || "save failed");
-      toast.success(`Kit saved — ${code} → ${children.length} component(s)`);
-      setEditing(null);
+      // Sequential, not Promise.all: these are independent writes and reporting
+      // "3 of 4 saved, X failed" is far more useful to the operator than one
+      // rejected promise hiding which parents actually landed.
+      const failed: string[] = [];
+      for (const t of targets) {
+        try {
+          const res = await fetch(`/api/component-boms/${encodeURIComponent(t.code)}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ parentName: t.name, children }),
+          }).then((r) => r.json()) as { success?: boolean; error?: string };
+          if (!res?.success) throw new Error(res?.error || "save failed");
+        } catch (e) {
+          failed.push(`${t.code} (${humanizeError(e)})`);
+        }
+      }
+      const saved = targets.length - failed.length;
+      if (failed.length === 0) {
+        toast.success(
+          targets.length === 1
+            ? `Kit saved — ${code} → ${children.length} component(s)`
+            : `${targets.length} kits saved — ${children.length} component(s) each`,
+        );
+        setEditing(null);
+        setExtraParents([]);
+      } else {
+        // Keep the editor open so the operator can retry the ones that failed.
+        toast.error(`${saved} of ${targets.length} saved. Failed: ${failed.join("; ")}`);
+      }
       await reload();
     } catch (e) {
       toast.error(`Save failed: ${humanizeError(e)}`);
@@ -173,9 +221,12 @@ export default function ComponentKitsPage() {
           options={options}
           nameByCode={nameByCode}
           saving={saving}
+          allowMultiParent={isNewKit}
+          extraParents={extraParents}
+          onExtraParentsChange={setExtraParents}
           onChange={setEditing}
           onSave={save}
-          onCancel={() => setEditing(null)}
+          onCancel={() => { setEditing(null); setExtraParents([]); }}
         />
       )}
 
@@ -240,6 +291,9 @@ function KitEditor({
   options,
   nameByCode,
   saving,
+  allowMultiParent,
+  extraParents,
+  onExtraParentsChange,
   onChange,
   onSave,
   onCancel,
@@ -248,10 +302,22 @@ function KitEditor({
   options: MaterialOption[];
   nameByCode: Map<string, string>;
   saving: boolean;
+  allowMultiParent: boolean;
+  extraParents: { code: string; name: string }[];
+  onExtraParentsChange: (v: { code: string; name: string }[]) => void;
   onChange: (k: Kit) => void;
   onSave: () => void;
   onCancel: () => void;
 }) {
+  // How many kits this save will write: the primary parent plus each DISTINCT
+  // non-blank extra. Mirrors the de-dup in save() so the button never promises
+  // a number the save won't deliver.
+  const targetCount = allowMultiParent
+    ? new Set(
+        [kit.parentCode.trim(), ...extraParents.map((p) => p.code.trim())].filter(Boolean),
+      ).size
+    : 1;
+
   function setParent(code: string, name: string) {
     onChange({ ...kit, parentCode: code, parentName: name });
   }
@@ -290,6 +356,73 @@ function KitEditor({
             <p className="text-xs text-muted-foreground mt-1">{kit.parentName}</p>
           )}
         </div>
+
+        {/* Multi-create: bind the SAME component list to several parent SKUs in
+            one save. A mechanism usually comes in several sizes / handings that
+            take the identical screw set, and re-entering the list per SKU was
+            the real chore. Offered on CREATE only — editing targets one kit. */}
+        {allowMultiParent && (
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-sm font-medium">
+                Also apply to these SKUs{" "}
+                <span className="font-normal text-muted-foreground">(optional)</span>
+              </label>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => onExtraParentsChange([...extraParents, { code: "", name: "" }])}
+              >
+                <Plus className="h-4 w-4 mr-1" /> Add SKU
+              </Button>
+            </div>
+            {extraParents.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                Only the parent above gets this kit. Add more SKUs to give them the
+                identical component list in one go.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {extraParents.map((p, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <div className="flex-1 min-w-0 max-w-md">
+                      <MaterialPicker
+                        value={p.code}
+                        options={options}
+                        onPick={(o) =>
+                          onExtraParentsChange(
+                            extraParents.map((x, j) =>
+                              j === i ? { code: o.itemCode, name: o.description } : x,
+                            ),
+                          )
+                        }
+                        onTyped={(t) =>
+                          onExtraParentsChange(
+                            extraParents.map((x, j) =>
+                              j === i ? { code: t, name: nameByCode.get(t) ?? x.name } : x,
+                            ),
+                          )
+                        }
+                        placeholder="Search another mechanism / leg…"
+                      />
+                      {p.name && (
+                        <p className="text-xs text-muted-foreground mt-0.5 truncate">{p.name}</p>
+                      )}
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => onExtraParentsChange(extraParents.filter((_, j) => j !== i))}
+                      aria-label="Remove this SKU"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         <div>
           <div className="flex items-center justify-between mb-2">
@@ -352,7 +485,9 @@ function KitEditor({
         <div className="flex gap-2 pt-1">
           <Button onClick={onSave} disabled={saving}>
             {saving && <Loader2 className="h-4 w-4 mr-1 animate-spin" />}
-            Save kit
+            {/* Say how many kits this writes — with extra parents picked, one
+                click creates several, and the button should admit that. */}
+            {targetCount > 1 ? `Save ${targetCount} kits` : "Save kit"}
           </Button>
           <Button variant="ghost" onClick={onCancel} disabled={saving}>
             Cancel

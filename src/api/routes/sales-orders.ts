@@ -13,6 +13,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { assertCustomerBillable } from "../lib/customer-stage";
 import { emitAudit, buildAuditStatement } from "../lib/audit";
 import { calculateUnitPrice, calculateLineTotal } from "../../lib/pricing";
 import {
@@ -1143,6 +1144,21 @@ app.post("/", async (c) => {
       .first<{ id: string; name: string }>();
     if (!customer) {
       return c.json({ success: false, error: "Customer not found" }, 400);
+    }
+
+    // A POTENTIAL customer (created from the Sales Pipeline, not yet through the
+    // Confirm gate) has no creditor code / terms / credit limit and must never
+    // reach a money document. Enforced here rather than only in the picker —
+    // a UI-only filter is a convenience, not a control.
+    {
+      const billable = await assertCustomerBillable(
+        c.var.DB,
+        body.customerId,
+        "a sales order",
+      );
+      if (!billable.ok) {
+        return c.json({ success: false, error: billable.error }, 400);
+      }
     }
 
     // Duplicate-document guard (owner 2026-07): a customer PO/SO reference

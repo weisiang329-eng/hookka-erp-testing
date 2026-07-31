@@ -2,8 +2,9 @@
 // customer-crm-wishlist-send.test.mjs — CRM slices 5 (wishlist) + 6 (one-click
 // send). Owner 2026-07-30.
 //
-//   ⑤ Wishlist — styles/models a customer likes ("what to pitch next"). New
-//     customer_wishlist table (runtime self-applied) + GET/POST/DELETE.
+//   ⑤ Wishlist — RETIRED 2026-08-01 (owner: "整个功能删掉，我们 assign SKU 就行了").
+//     The tests below now pin the REMOVAL: no routes, no panel, no mounts. The
+//     customer_wishlist TABLE is deliberately kept so historical rows survive.
 //   ⑥ One-click send — the browser generates the quotation PDF, base64-encodes
 //     it, and POSTs to /send-quote, which emails it via the shared sender and
 //     logs a QUOTE_SENT activity on the timeline.
@@ -12,11 +13,10 @@
 // ---------------------------------------------------------------------------
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 const CRM = resolve(process.cwd(), "src/api/routes/customer-crm.ts");
-const WISHLIST_FE = resolve(process.cwd(), "src/components/customer/WishlistPanel.tsx");
 const CUSTOMERS_FE = resolve(process.cwd(), "src/pages/customers.tsx");
 
 const read = (p) => readFileSync(p, "utf8");
@@ -26,30 +26,44 @@ const flat = (p) => read(p).replace(/\s+/g, " ");
 // ⑤ Wishlist — backend
 // ===========================================================================
 
-test("customer_wishlist table is runtime self-applied (CREATE IF NOT EXISTS)", () => {
+test("wishlist routes are GONE (feature retired) but the table is preserved", () => {
+  const f = flat(CRM);
+  // The feature is withdrawn: nothing may read or write the wishlist any more.
+  assert.ok(!/app\.get\("\/wishlist"/.test(f), "wishlist GET route must be removed");
+  assert.ok(!/app\.post\("\/wishlist"/.test(f), "wishlist POST route must be removed");
+  assert.ok(!/app\.delete\("\/wishlist\/:id"/.test(f), "wishlist DELETE route must be removed");
+  assert.ok(!/INSERT INTO customer_wishlist/.test(f), "nothing may still write wishlist rows");
+  assert.ok(!/SELECT \* FROM customer_wishlist/.test(f), "nothing may still read wishlist rows");
+  // …but the table itself stays. Retiring a feature must not destroy history:
+  // dropping it would be irreversible, and the owner asked to remove the
+  // feature, not to wipe the records.
   assert.match(
-    flat(CRM),
+    f,
     /CREATE TABLE IF NOT EXISTS customer_wishlist \(/,
-    "wishlist table must be created at runtime — a migration file alone is inert on deploy.",
+    "the customer_wishlist table must be preserved so historical rows survive",
   );
 });
 
-test("wishlist GET/POST/DELETE routes exist, RBAC-gated + tenant-scoped", () => {
-  const f = flat(CRM);
-  assert.match(f, /app\.get\("\/wishlist"/);
-  assert.match(f, /app\.post\("\/wishlist"/);
-  assert.match(f, /app\.delete\("\/wishlist\/:id"/);
-  // read gate on GET, update gate on POST, delete gate on DELETE.
-  assert.match(f, /app\.get\("\/wishlist"[\s\S]*?requirePermission\(c, "customers", "read"\)/);
-  assert.match(f, /app\.post\("\/wishlist"[\s\S]*?requirePermission\(c, "customers", "update"\)/);
-  // Every wishlist query is org-scoped.
-  assert.match(f, /FROM customer_wishlist WHERE customer_id = \? AND org_id = \?/);
+test("WishlistPanel is deleted and no page mounts it", () => {
+  assert.ok(
+    !existsSync(resolve(process.cwd(), "src/components/customer/WishlistPanel.tsx")),
+    "WishlistPanel.tsx must be deleted",
+  );
+  for (const p of ["src/pages/customers.tsx", "src/pages/leads/index.tsx"]) {
+    const f = flat(resolve(process.cwd(), p));
+    assert.ok(!/<WishlistPanel/.test(f), `${p} still mounts WishlistPanel`);
+    assert.ok(!/import \{ WishlistPanel \}/.test(f), `${p} still imports WishlistPanel`);
+  }
 });
 
-test("wishlist POST requires a product/style and accepts an optional SKU link", () => {
-  const f = flat(CRM);
-  assert.match(f, /a product\/style is required/);
-  assert.match(f, /INSERT INTO customer_wishlist/);
+test("CRM contacts+activity live in the Sales Pipeline drawer, NOT the customer page", () => {
+  // Owner 2026-08-01: the Pipeline owns the whole contact history; the customer
+  // page is for what you DO with an account (SKUs, maintenance, combos, quotes).
+  const leads = flat(resolve(process.cwd(), "src/pages/leads/index.tsx"));
+  assert.match(leads, /<CrmPanel customerId=\{lead\.id\}/, "Pipeline drawer must keep CrmPanel");
+  const customers = flat(CUSTOMERS_FE);
+  assert.ok(!/<CrmPanel/.test(customers), "customers page must no longer mount CrmPanel");
+  assert.ok(!/import \{ CrmPanel \}/.test(customers), "customers page must not import CrmPanel");
 });
 
 // ===========================================================================
@@ -92,17 +106,6 @@ test("send-quote logs a QUOTE_SENT activity ONLY after a successful send", () =>
 // Frontend wiring
 // ===========================================================================
 
-test("WishlistPanel fetches + mutates /api/customer-crm/wishlist", () => {
-  const f = flat(WISHLIST_FE);
-  assert.match(f, /\/api\/customer-crm\/wishlist\?customerId=/);
-  assert.match(f, /method: "POST"[\s\S]*?\/api\/customer-crm\/wishlist|\/api\/customer-crm\/wishlist[\s\S]*?method: "POST"/);
-});
-
-test("customers page mounts WishlistPanel", () => {
-  const f = flat(CUSTOMERS_FE);
-  assert.match(f, /import \{ WishlistPanel \} from "@\/components\/customer\/WishlistPanel"/);
-  assert.match(f, /<WishlistPanel customerId=\{cust\.id\} \/>/);
-});
 
 test("Email Quotation button generates PDF base64 and POSTs to /send-quote, gated by confirm", () => {
   const f = flat(CUSTOMERS_FE);

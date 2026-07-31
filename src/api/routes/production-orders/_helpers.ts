@@ -4,7 +4,6 @@
 // declarations (types, mappers, cascades, cache + id helpers). All route
 // handlers remain in production-orders.ts, which imports/re-exports from here.
 // ---------------------------------------------------------------------------
-import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "../../worker";
 import { postProductionOrderCompletion } from "../../lib/fg-completion";
@@ -20,21 +19,12 @@ import {
   sofaSiblingGroupKey,
   type SiblingPo,
 } from "../../lib/fabric-usage";
-import { resolveWorkerToken } from "../worker-auth";
-import { workerCoversDept } from "../../../lib/worker";
 import { checkProductionOrderLocked, lockedResponse } from "../../lib/lock-helpers";
 import { emitAudit } from "../../lib/audit";
-import { requirePermission } from "../../lib/rbac";
-import {
-  ensureJobCardQrTokenColumn,
-  getOrCreateJobCardQrToken,
-} from "../../lib/jobcard-qr-token";
-import { pickPackingCard } from "../../lib/packing-card-resolve";
 import { applyPackingRack } from "../../lib/packing-rack-write";
 import { getOrgId, tryGetOrgId, DEFAULT_ORG_ID } from "../../lib/tenant";
 import {
   poListCacheVersion,
-  bumpPoListCacheVersion,
   invalidateProductionListCaches,
 } from "../../lib/po-list-cache";
 // Phase 6 — parallel event sourcing for JC mutations. appendJobCardEvent
@@ -61,10 +51,6 @@ import {
   DEPT_ORDER,
   type LeadTimeMap,
 } from "../../lib/lead-times";
-import {
-  validateFabricCodes,
-  unknownFabricCodeError,
-} from "../../lib/fabric-validation";
 // HB-only completion gate (commit 9086352 + this commit). When a BEDFRAME PO
 // carries specialOrder "Headboard Only", the SO/CO line really is HB-only —
 // any DIVAN job_cards are either (a) filtered out at PO creation by the

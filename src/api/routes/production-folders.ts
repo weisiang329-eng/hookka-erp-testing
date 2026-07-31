@@ -29,6 +29,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
+import { fetchPO, attachCustomerSO } from "./production-orders/_helpers";
 
 const app = new Hono<Env>();
 
@@ -212,6 +213,55 @@ app.get("/:id", async (c) => {
       jobCardIds: (members.results ?? []).map((m) => m.jobCardId).filter(Boolean),
     },
   });
+});
+
+// GET /api/production-folders/:id/rows — the production orders (with job cards)
+// that this folder's job cards belong to, in the SAME minimal PO+jobCards shape
+// the list endpoint returns. folder-detail used to pull the whole ~22MB PO list
+// just to filter it down to a folder's members (perf 2026-07-31); now the server
+// resolves the folder → its job-card ids → their distinct POs and returns only
+// those. Includes completed orders — a folder legitimately holds finished work.
+app.get("/:id/rows", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+  await ensureSchema(c.var.DB);
+  const db = c.var.DB;
+  const id = c.req.param("id");
+  const orgId = getOrgId(c);
+  const folder = await db
+    .prepare("SELECT id FROM production_folders WHERE id = ? AND org_id = ? LIMIT 1")
+    .bind(id, orgId)
+    .first<{ id: string }>();
+  if (!folder) return c.json({ success: false, error: "folder not found" }, 404);
+  // 1) the folder's job-card ids
+  const mem = await db
+    .prepare('SELECT job_card_id AS "jobCardId" FROM folder_job_cards WHERE folder_id = ?')
+    .bind(id)
+    .all<{ jobCardId: string }>();
+  const jcIds = (mem.results ?? []).map((m) => m.jobCardId).filter(Boolean);
+  if (jcIds.length === 0) return c.json({ success: true, data: [] });
+  // 2) the distinct production orders those job cards belong to
+  const ph = jcIds.map(() => "?").join(",");
+  const poRes = await db
+    .prepare(`SELECT DISTINCT productionOrderId FROM job_cards WHERE id IN (${ph})`)
+    .bind(...jcIds)
+    .all<{ productionOrderId: string }>();
+  const poIds = (poRes.results ?? []).map((r) => r.productionOrderId).filter(Boolean);
+  // 3) build each PO + its job cards (minimal), reusing the shared fetchPO
+  const out: NonNullable<Awaited<ReturnType<typeof fetchPO>>>[] = [];
+  for (const poId of poIds) {
+    const po = await fetchPO(db, poId);
+    if (po) out.push(po);
+  }
+  await attachCustomerSO(
+    db,
+    out as unknown as Array<{
+      salesOrderId: string;
+      consignmentOrderId: string;
+      customerSO: string;
+    }>,
+  );
+  return c.json({ success: true, data: out });
 });
 
 // PATCH /api/production-folders/:id — rename / description.

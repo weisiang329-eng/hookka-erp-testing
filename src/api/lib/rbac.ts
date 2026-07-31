@@ -28,6 +28,11 @@ import type { Context } from "hono";
 import type { Env } from "../worker";
 
 const PERM_CACHE_TTL_S = 300;
+// In-isolate memo for role→permission sets (perf audit 2026-07-31). 5s TTL,
+// far fresher than the KV cache above; fronts it to remove the per-request KV
+// read. Keyed by role text (low cardinality).
+const PERM_MEMO_TTL_MS = 5000;
+const _permMemo = new Map<string, { set: Set<string>; expMs: number }>();
 
 // Role-name → set of "resource:action" tuples.  Loaded lazily per role and
 // cached in KV.  Empty Set means the role has no granted permissions
@@ -121,9 +126,22 @@ export async function getRolePermissions(
   const kv = c.env.SESSION_CACHE;
   const key = permKey(role);
 
+  // In-isolate memo (5s) in FRONT of the KV permission cache — removes the KV
+  // read on the hot path. Roles are low-cardinality (~10), so this Map stays
+  // tiny. TTL 5s is far fresher than the KV cache's own PERM_CACHE_TTL_S, and
+  // not refreshed on a hit → staleness hard-capped at 5s (perf audit
+  // 2026-07-31). A returned Set is CLONED so callers can't mutate the cache.
+  const nowMemo = Date.now();
+  const memoHit = _permMemo.get(role);
+  if (memoHit && memoHit.expMs > nowMemo) return new Set(memoHit.set);
+
   if (kv) {
     const cached = await kv.get(key, { type: "json" });
-    if (Array.isArray(cached)) return new Set(cached as string[]);
+    if (Array.isArray(cached)) {
+      const set = new Set(cached as string[]);
+      _permMemo.set(role, { set, expMs: nowMemo + PERM_MEMO_TTL_MS });
+      return new Set(set);
+    }
   }
 
   const set = await loadRolePermissions(c.var.DB, role);
@@ -133,6 +151,7 @@ export async function getRolePermissions(
       kv.put(key, JSON.stringify([...set]), { expirationTtl: PERM_CACHE_TTL_S }),
     );
   }
+  _permMemo.set(role, { set: new Set(set), expMs: nowMemo + PERM_MEMO_TTL_MS });
   return set;
 }
 

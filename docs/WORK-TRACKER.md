@@ -1875,4 +1875,20 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
   - New regression tests in `foam-cutting-department.test.mjs`: DEPT_LABELS must cover every DEPT_ORDER code (blank-option guard) + no label map may still spell FOAM as bare "Foam".
 - [x] BOM toolbar (owner): removed **Production Categories Editor** + **Production Times** buttons (the dedicated WIP Times module supersedes both); added a **Component Kits** button in their place. The Production Times LOOKUP is untouched — BOM rows still auto-fill minutes from that matrix. Sidebar entry kept.
 - [x] Answered: foam usage = qty is the PIECE COUNT; required = qty x poQty x (1+waste%), then **only if cut L x W AND the RM sheet size are both present** it becomes x (cutArea / sheetArea). Blank cut size => qty 1 consumes ONE WHOLE SHEET, not one cut piece.
-- [ ] Sales Pipeline stage relabel (owner: "New / Won / Lost 这些名词要换掉") — `STAGES` in `src/pages/leads/index.tsx:35`; `key` is the stored value, `label` is display-only, so a label-only change needs no migration. Awaiting owner's chosen wording.
+- [x] Sales Pipeline stage relabel (owner: "New / Won / Lost 这些名词要换掉") — owner chose Potential / Confirmed / Dropped; shipped in the session below (PR #153).
+
+## 2026-08-01 (session: Sales Pipeline stage relabel — owner "New / Won / Lost 这些名词要换掉")
+- [x] Stage LABELS renamed to match the Customer module's vocabulary (a lead enters as
+  Potential and becomes a Confirmed customer): New→**Potential**, Won→**Confirmed**,
+  Lost→**Dropped**. Contacted / Quoted / Negotiating unchanged.
+- [x] Stored `key` values (NEW / WON / LOST) are UNTOUCHED, as is `LEAD_STAGES` in
+  `api/routes/sales-leads.ts` — display-only change, no migration, existing rows unaffected.
+- [x] `STAGES` in `src/pages/leads/index.tsx:35` is the single label source (kanban columns,
+  card stage picker, drawer badge, move menu all read it). Two hardcoded strings outside it
+  also fixed: the "Won" summary header → "Confirmed", and the card's "Lost: <reason>" →
+  "Dropped: <reason>". The stage-change prompt now reads "Why is this lead being dropped?".
+- [x] Regression test in `sales-leads.test.mjs`: asserts the exact key→label pairs AND that
+  no stale label ("New" / "Won" / "Lost") survives on the page. Guards both halves — a future
+  edit that renames a KEY instead of a label would orphan every sales_leads.stage row.
+- [ ] NOT renamed: the "+ New Lead" create button. That is the create action, not the stage —
+  say the word if it should read "New Potential" / "Add Lead" instead.

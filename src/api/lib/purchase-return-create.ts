@@ -144,6 +144,115 @@ export async function loadPiItemsForReturn(
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Slice 2 — inventory reversal. On confirm, the returned goods LEAVE stock: for
+// each item we FIFO-consume the material's rm_batches (oldest first — same
+// costing basis as normal consumption), drop raw_materials.balanceQty, and emit
+// one cost_ledger OUT row per layer. This mirrors stock-adjustments.ts's RM-OUT
+// path exactly so sum(rm_batches.remainingQty) stays in lockstep with
+// balanceQty. The whole thing runs in ONE db.batch (atomic) and is idempotent:
+// it only fires while status = 'OPEN', flipping to 'STOCK_OUT'. The supplier
+// Debit Note + AP posting (at the negotiated price) is slice 3 — this slice
+// values the stock leaving at its FIFO batch cost only.
+export async function applyPurchaseReturnStockOut(
+  db: D1Database,
+  returnId: string,
+  orgId: string | null,
+): Promise<{ ok: boolean; error?: string; reversedItems?: number }> {
+  await ensurePurchaseReturnTables(db);
+  const header = await db
+    .prepare(
+      "SELECT id, status FROM purchase_returns WHERE id = ? AND (org_id = ? OR org_id IS NULL)",
+    )
+    .bind(returnId, orgId)
+    .first<{ id: string; status: string | null }>();
+  if (!header) return { ok: false, error: "not found" };
+  if ((header.status ?? "OPEN") !== "OPEN") {
+    return { ok: false, error: "already processed — stock reverses only once" };
+  }
+  const itemsRes = await db
+    .prepare("SELECT * FROM purchase_return_items WHERE purchase_return_id = ?")
+    .bind(returnId)
+    .all<Record<string, unknown>>();
+  const items = itemsRes.results ?? [];
+  const now = new Date().toISOString();
+  const today = now.slice(0, 10);
+  const stmts: D1PreparedStatement[] = [];
+  let ledgerN = 0;
+  let reversedItems = 0;
+  for (const it of items) {
+    const materialCode = String((it.material_code ?? it.materialCode) ?? "").trim();
+    const qty = Number(it.quantity ?? 0);
+    if (!materialCode || !(qty > 0)) continue;
+    const rm = await db
+      .prepare("SELECT id FROM raw_materials WHERE itemCode = ? LIMIT 1")
+      .bind(materialCode)
+      .first<{ id: string }>();
+    if (!rm) continue; // unresolvable material — skip (never guess which stock to move)
+
+    // FIFO plan: oldest batches first, same as consumption.
+    const batchesRes = await db
+      .prepare(
+        "SELECT id, remainingQty, unitCostSen FROM rm_batches WHERE rmId = ? AND remainingQty > 0 ORDER BY receivedDate ASC, id ASC",
+      )
+      .bind(rm.id)
+      .all<{ id: string; remainingQty: number; unitCostSen: number }>();
+    const plan: { batchId: string; qty: number; unitCostSen: number; totalCostSen: number }[] = [];
+    let still = qty;
+    for (const b of batchesRes.results ?? []) {
+      if (still <= 0) break;
+      const take = Math.min(b.remainingQty, still);
+      if (take <= 0) continue;
+      plan.push({ batchId: b.id, qty: take, unitCostSen: b.unitCostSen, totalCostSen: Math.round(take * b.unitCostSen) });
+      still -= take;
+    }
+    // Residual (stock drifted below the return qty) — ledger-only, no batch
+    // mutation, valued at the return's own unit cost. Mirrors stock-adjustments.
+    if (still > 0) {
+      const unit = Math.round(Number(it.unit_cost_sen ?? it.unitCostSen ?? 0));
+      plan.push({ batchId: "", qty: still, unitCostSen: unit, totalCostSen: Math.round(still * unit) });
+    }
+
+    for (const layer of plan) {
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO cost_ledger (id, date, type, itemType, itemId, batchId,
+               qty, direction, unitCostSen, totalCostSen, refType, refId, notes)
+             VALUES (?, ?, 'ADJUSTMENT', 'RM', ?, ?, ?, 'OUT', ?, ?, 'PURCHASE_RETURN', ?, ?)`,
+          )
+          .bind(
+            `cl-pr-${returnId}-${ledgerN++}`,
+            today,
+            rm.id,
+            layer.batchId || null,
+            layer.qty,
+            layer.unitCostSen,
+            layer.totalCostSen,
+            returnId,
+            `Purchase Return — goods returned to supplier${layer.batchId ? "" : " (residual, no batch)"}`,
+          ),
+      );
+    }
+    stmts.push(
+      db.prepare("UPDATE raw_materials SET balanceQty = balanceQty - ? WHERE id = ?").bind(qty, rm.id),
+    );
+    for (const layer of plan) {
+      if (!layer.batchId) continue;
+      stmts.push(
+        db.prepare("UPDATE rm_batches SET remainingQty = remainingQty - ? WHERE id = ?").bind(layer.qty, layer.batchId),
+      );
+    }
+    reversedItems++;
+  }
+  // Idempotency + status flip in the SAME atomic batch as the stock moves.
+  stmts.push(
+    db.prepare("UPDATE purchase_returns SET status = 'STOCK_OUT', updated_at = ? WHERE id = ?").bind(now, returnId),
+  );
+  await db.batch(stmts);
+  return { ok: true, reversedItems };
+}
+
 // Write a Purchase Return header + its item snapshot. Returns the new id +
 // return_no. No ledger movement (slice 1).
 export async function createPurchaseReturn(

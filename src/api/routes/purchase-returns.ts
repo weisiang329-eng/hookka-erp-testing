@@ -18,6 +18,7 @@ import {
   ensurePurchaseReturnTables,
   createPurchaseReturn,
   loadPiItemsForReturn,
+  applyPurchaseReturnStockOut,
   type PRCreateItem,
 } from "../lib/purchase-return-create";
 
@@ -133,6 +134,24 @@ app.post("/", async (c) => {
     items,
   });
   return c.json({ success: true, data: created });
+});
+
+// POST /api/purchase-returns/:id/confirm — slice 2: reverse the stock (the
+// goods leave inventory). FIFO-consumes the material's batches + drops
+// balanceQty + emits cost_ledger OUT rows, all in one atomic batch. Idempotent:
+// fires only while OPEN, flips to STOCK_OUT. The supplier Debit Note + AP is
+// slice 3. Inventory-critical → owner verifies on staging before prod.
+app.post("/:id/confirm", async (c) => {
+  const denied = await requirePermission(c, "purchase-invoices", "update");
+  if (denied) return denied;
+  await ensurePurchaseReturnTables(c.var.DB);
+  const id = c.req.param("id");
+  const result = await applyPurchaseReturnStockOut(c.var.DB, id, getOrgId(c));
+  if (!result.ok) {
+    const code = result.error === "not found" ? 404 : 409;
+    return c.json({ success: false, error: result.error || "confirm failed" }, code);
+  }
+  return c.json({ success: true, data: { id, status: "STOCK_OUT", reversedItems: result.reversedItems } });
 });
 
 // DELETE /api/purchase-returns/:id — only while still OPEN (no ledger to unwind

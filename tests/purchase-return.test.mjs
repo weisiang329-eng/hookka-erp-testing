@@ -39,12 +39,17 @@ test("PR numbering is PR-YYMM-NNN, sequential", () => {
   assert.match(f, /FROM purchase_returns WHERE return_no LIKE \? ORDER BY return_no DESC/);
 });
 
-test("line total is derived qty × unit cost; slice-1 status is OPEN, no ledger", () => {
+test("line total is derived qty × unit cost; CREATE itself moves no ledger", () => {
   const f = flat(CREATE);
   assert.match(f, /VALUES \(\?, \?, \?, \?, \?, \?, 'OPEN', \?, \?, \?, \?, \?, \?, \?, \?\)/);
   assert.match(f, /Math\.round\(qty \* unit\)/);
-  // No stock / AP writes in the create lib (slice 1).
-  assert.doesNotMatch(f, /rm_batches|balanceQty|cost_ledger|accounts_payable/i);
+  // createPurchaseReturn ITSELF only writes the header + items — the stock/AP
+  // moves live in the separate applyPurchaseReturnStockOut (slice 2) so a plain
+  // create never touches inventory or the cost ledger.
+  const src = read(CREATE);
+  const start = src.indexOf("export async function createPurchaseReturn");
+  const body = src.slice(start);
+  assert.doesNotMatch(body, /rm_batches|balanceQty|cost_ledger|accounts_payable/i);
 });
 
 test("returnable lines come from the PI, SELECT * dual-keyed, stocked-only", () => {
@@ -90,4 +95,40 @@ test("page + sidebar + route are wired", () => {
   assert.match(page, /Supplier refund/, "resolution choice surfaced");
   assert.match(flat(SIDEBAR), /name: "Purchase Return", href: "\/purchase-returns"/);
   assert.match(flat(ROUTESX), /path: '\/purchase-returns'/);
+});
+
+// ===========================================================================
+// Slice 2 — inventory reversal (owner-verified; mirrors stock-adjustments RM-OUT)
+// ===========================================================================
+
+test("stock reversal is FIFO oldest-first, idempotent, atomic", () => {
+  const f = flat(CREATE);
+  assert.match(f, /export async function applyPurchaseReturnStockOut/);
+  // Idempotent: only fires while OPEN, flips to STOCK_OUT.
+  assert.match(f, /already processed — stock reverses only once/);
+  assert.match(f, /UPDATE purchase_returns SET status = 'STOCK_OUT'/);
+  // FIFO oldest-first (same costing basis as consumption).
+  assert.match(f, /FROM rm_batches WHERE rmId = \? AND remainingQty > 0 ORDER BY receivedDate ASC/);
+  // Whole thing is one atomic batch (status flip + stock moves together).
+  assert.match(f, /await db\.batch\(stmts\)/);
+});
+
+test("stock reversal drops balanceQty + batch remainingQty + emits OUT ledger", () => {
+  const f = flat(CREATE);
+  assert.match(f, /UPDATE raw_materials SET balanceQty = balanceQty - \? WHERE id = \?/);
+  assert.match(f, /UPDATE rm_batches SET remainingQty = remainingQty - \? WHERE id = \?/);
+  // cost_ledger OUT, tagged to the return so the trail is auditable.
+  assert.match(f, /'OUT', \?, \?, 'PURCHASE_RETURN', \?, \?/);
+  // Residual (stock drifted below the return qty) → ledger-only, no batch move.
+  assert.match(f, /residual, no batch/);
+});
+
+test("confirm route fires the reversal, RBAC-gated; UI has the confirm action", () => {
+  const f = flat(ROUTES);
+  assert.match(f, /app\.post\("\/:id\/confirm"/);
+  assert.match(f, /applyPurchaseReturnStockOut\(c\.var\.DB, id, getOrgId\(c\)\)/);
+  assert.match(f, /app\.post\("\/:id\/confirm"[\s\S]*?requirePermission\(c, "purchase-invoices", "update"\)/);
+  const page = flat(PAGE);
+  assert.match(page, /\/api\/purchase-returns\/\$\{r\.id\}\/confirm/);
+  assert.match(page, /Confirm \(remove stock\)/);
 });

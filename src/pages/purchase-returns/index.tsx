@@ -65,6 +65,14 @@ export default function PurchaseReturnsPage() {
     await reload();
   };
 
+  const confirmStock = async (r: PurchaseReturn) => {
+    if (!window.confirm(`Confirm ${r.return_no} and REMOVE the returned goods from stock?\n\nThis reverses inventory (FIFO). The supplier Debit Note is a later step.`)) return;
+    const res = await fetch(`/api/purchase-returns/${r.id}/confirm`, { method: "POST" });
+    const j = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string };
+    if (!res.ok || !j.success) { window.alert(j.error || `Confirm failed (HTTP ${res.status})`); return; }
+    await reload();
+  };
+
   return (
     <div className="p-6">
       <div className="flex items-center justify-between mb-6">
@@ -98,11 +106,18 @@ export default function PurchaseReturnsPage() {
                 <td className="px-4 py-2.5 text-[#6B7280]">{r.pi_no || "—"}</td>
                 <td className="px-4 py-2.5 text-[#1F1D1B]">{r.supplier_name || "—"}</td>
                 <td className="px-4 py-2.5"><span className="text-xs px-2 py-0.5 rounded-full bg-[#F0ECE9] text-[#6B5C32]">{r.resolution === "CREDIT_NEXT_PI" ? "Credit next PI" : "Refund"}</span></td>
-                <td className="px-4 py-2.5"><span className="text-xs px-2 py-0.5 rounded-full bg-[#EAF1FE] text-[#2563EB]">{r.status || "OPEN"}</span></td>
+                <td className="px-4 py-2.5">
+                  <span className={`text-xs px-2 py-0.5 rounded-full ${(r.status ?? "OPEN") === "STOCK_OUT" ? "bg-[#E7F4EC] text-[#15803D]" : "bg-[#EAF1FE] text-[#2563EB]"}`}>
+                    {(r.status ?? "OPEN") === "STOCK_OUT" ? "Stock removed" : (r.status || "OPEN")}
+                  </span>
+                </td>
                 <td className="px-4 py-2.5 text-[#6B7280] max-w-[220px] truncate">{r.reason || "—"}</td>
-                <td className="px-4 py-2.5 text-right">
+                <td className="px-4 py-2.5 text-right whitespace-nowrap">
                   {(r.status ?? "OPEN") === "OPEN" && (
-                    <button onClick={() => void del(r.id)} className="text-[#9A3A2D] hover:bg-[#F9E1DA] rounded p-1"><Trash2 className="w-4 h-4" /></button>
+                    <>
+                      <button onClick={() => void confirmStock(r)} className="text-xs font-medium px-2.5 py-1 rounded-md bg-[#6B5C32] text-white hover:bg-[#5A4D2A] mr-2">Confirm (remove stock)</button>
+                      <button onClick={() => void del(r.id)} className="text-[#9A3A2D] hover:bg-[#F9E1DA] rounded p-1 align-middle"><Trash2 className="w-4 h-4" /></button>
+                    </>
                   )}
                 </td>
               </tr>

@@ -358,9 +358,16 @@ function rowToApi(
   row: ServiceCaseRow,
   orders: ServiceOrderRow[] = [],
   svOrders: SvOrderRow[] = [],
+  // issue_photos is a JSON array of base64 data URIs — 500 cases of these is
+  // ~13 MB on the LIST endpoint (perf audit 2026-07-31), and the list never
+  // renders full photos (only the detail page does). omitPhotos drops them from
+  // the list payload (a photoCount is still surfaced so the UI can show "N
+  // photos" if it wants). The detail endpoint calls rowToApi WITHOUT this, so
+  // the full photos still load when a case is opened.
+  opts: { omitPhotos?: boolean } = {},
 ) {
   let photos: string[] = [];
-  if (row.issuePhotos) {
+  if (!opts.omitPhotos && row.issuePhotos) {
     try {
       const parsed = JSON.parse(row.issuePhotos);
       if (Array.isArray(parsed)) photos = parsed.map(String);
@@ -506,7 +513,9 @@ app.get("/", async (c) => {
     loadSvOrdersForCases(c.var.DB),
   ]);
   const data = (caseRes.results ?? []).map((r) =>
-    rowToApi(r, orderRes.results ?? [], svOrders),
+    // omitPhotos: the list never renders full photos (only the detail page
+    // does), and 500 cases of base64 issue_photos was ~13 MB (perf 2026-07-31).
+    rowToApi(r, orderRes.results ?? [], svOrders, { omitPhotos: true }),
   );
   return c.json({ success: true, data, total: data.length });
 });

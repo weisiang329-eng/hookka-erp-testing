@@ -2,7 +2,8 @@
 
 **Owner ask:** 2026-08-01 (WhatsApp, 5 screenshots)
 **Branch:** `feat/customer-potential-confirmed` off `staging`
-**Status:** PLAN — not implemented. Three decisions below block the build.
+**Status:** IMPLEMENTED (PR #154). All four phases shipped; see the table in §6.
+Not yet observed on a live deploy — this environment has no database credentials.
 
 ---
 
@@ -180,12 +181,25 @@ boundary and must be enforced **server-side**, not just hidden in the UI.
 
 | Phase | Content | Ships |
 | --- | --- | --- |
-| 1 | `customer_stage` column + runtime self-apply + list filter + KPI scoping + **server-side money-path guard** | independently useful |
-| 2 | `salesperson_user_id` + grid column + edit-dialog picker | independent of phase 1 |
-| 3 | Remove CrmPanel + WishlistPanel mounts from `customers.tsx` | trivial, no deps |
-| 4 | Rework Convert → Confirm per D2; create POTENTIAL customer at lead entry per D3 | **depends on D2 + D3** |
+| 1 | `customer_stage` + runtime self-apply + list filter + KPI scoping + **server-side money-path guard** | ✅ done |
+| 2 | `salesperson_user_id` + grid column + edit-dialog picker | ✅ done |
+| 3 | Remove CrmPanel + WishlistPanel mounts from `customers.tsx` | ✅ done |
+| 4 | Convert → Confirm; POTENTIAL customer created at lead entry | ✅ done |
 
-Phases 1–3 can start the moment D1 is answered. Phase 4 is the one that needs D2 and D3.
+Implementation notes worth keeping:
+
+- `assertCustomerBillable()` is wired into **sales-order create only**. Invoices and
+  DOs take no `customerId` of their own — they derive from SOs/POs — so that one
+  call covers the whole downstream money chain.
+- The lead → customer link is a NEW `sales_leads.customer_id`, not the legacy
+  `won_customer_id` (which is only set at conversion). Reads should prefer
+  `customer_id` and fall back, so pre-2026-08-01 leads still resolve.
+- Minting the customer at lead entry is **best-effort**: it is wrapped in
+  try/catch so a failure can never cost the salesperson their typed-in lead.
+  A lead without `customer_id` simply takes the legacy create path at Confirm.
+- CRM records stay keyed on the **lead id**, so the existing re-point at convert
+  is unchanged. Re-keying them onto the customer id would be tidier but would
+  break any lead whose best-effort customer create failed.
 
 ## 7. Tests
 

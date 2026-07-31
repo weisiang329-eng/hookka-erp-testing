@@ -10,6 +10,7 @@ import type { Context } from "hono";
 import type { Env } from "../worker";
 import { checkCustomerDeleteLocked, lockedResponse } from "../lib/lock-helpers";
 import { requirePermission } from "../lib/rbac";
+import { ensureCustomerStageColumns } from "../lib/customer-stage";
 import { getOrgId } from "../lib/tenant";
 import { parseDebtorCode } from "../../lib/debtor";
 import { resolveCompanyCode } from "../../lib/company-dimension";
@@ -223,32 +224,6 @@ function ensureCustomerOemColumn(db: D1Database): Promise<void> {
 // ---------------------------------------------------------------------------
 export const CUSTOMER_STAGES = ["POTENTIAL", "CONFIRMED"] as const;
 export type CustomerStage = (typeof CUSTOMER_STAGES)[number];
-
-let custStageColPromise: Promise<void> | null = null;
-function ensureCustomerStageColumns(db: D1Database): Promise<void> {
-  if (custStageColPromise) return custStageColPromise;
-  custStageColPromise = (async () => {
-    try {
-      await db
-        .prepare(
-          "ALTER TABLE customers ADD COLUMN IF NOT EXISTS customer_stage TEXT NOT NULL DEFAULT 'CONFIRMED'",
-        )
-        .run();
-    } catch {
-      // best-effort — column may already exist
-    }
-    try {
-      await db
-        .prepare(
-          "ALTER TABLE customers ADD COLUMN IF NOT EXISTS salesperson_user_id TEXT",
-        )
-        .run();
-    } catch {
-      // best-effort — column may already exist
-    }
-  })();
-  return custStageColPromise;
-}
 
 // Rows come back from Supabase with the driver's snake_case → camelCase
 // transform applied (db-pg.ts), so read DUAL-KEYED. A snake-only read here

@@ -17,6 +17,36 @@
 // to quote a potential customer is the entire point of the feature.
 // ---------------------------------------------------------------------------
 
+/**
+ * Runtime self-apply for both customer columns. Migrations are inert on deploy
+ * (CLAUDE.md), so this is the ONLY way they reach prod. Lives here rather than
+ * in customers.ts because sales-leads.ts also inserts a customer row and needs
+ * the same guarantee before it writes customer_stage.
+ */
+let custStageColPromise: Promise<void> | null = null;
+export function ensureCustomerStageColumns(db: D1Database): Promise<void> {
+  if (custStageColPromise) return custStageColPromise;
+  custStageColPromise = (async () => {
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE customers ADD COLUMN IF NOT EXISTS customer_stage TEXT NOT NULL DEFAULT 'CONFIRMED'",
+        )
+        .run();
+    } catch {
+      // best-effort — column may already exist
+    }
+    try {
+      await db
+        .prepare("ALTER TABLE customers ADD COLUMN IF NOT EXISTS salesperson_user_id TEXT")
+        .run();
+    } catch {
+      // best-effort — column may already exist
+    }
+  })();
+  return custStageColPromise;
+}
+
 /** Stage as stored. Anything unrecognised is treated as CONFIRMED — existing
  *  rows predate the column and every one of them is a real account. */
 export function stageOf(row: Record<string, unknown> | null | undefined): "POTENTIAL" | "CONFIRMED" {

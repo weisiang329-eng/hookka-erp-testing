@@ -103,10 +103,16 @@ test("sales order create is gated — the single choke point for the money chain
 });
 
 test("customer_stage + salesperson_user_id are runtime self-applied", () => {
-  const f = flat("src/api/routes/customers.ts");
+  // The ensure lives in the shared lib because sales-leads.ts also inserts a
+  // customer row and needs the same guarantee before writing customer_stage.
+  const lib = flat("src/api/lib/customer-stage.ts");
   // Migrations are inert on deploy — a column reaches prod ONLY this way.
-  assert.match(f, /ALTER TABLE customers ADD COLUMN IF NOT EXISTS customer_stage TEXT NOT NULL DEFAULT 'CONFIRMED'/);
-  assert.match(f, /ALTER TABLE customers ADD COLUMN IF NOT EXISTS salesperson_user_id TEXT/);
+  assert.match(lib, /ALTER TABLE customers ADD COLUMN IF NOT EXISTS customer_stage TEXT NOT NULL DEFAULT 'CONFIRMED'/);
+  assert.match(lib, /ALTER TABLE customers ADD COLUMN IF NOT EXISTS salesperson_user_id TEXT/);
+  const f = flat("src/api/routes/customers.ts");
+  assert.match(f, /import \{ ensureCustomerStageColumns \} from "\.\.\/lib\/customer-stage"/);
+  // sales-leads must ensure them too before it mints a POTENTIAL customer.
+  assert.match(flat("src/api/routes/sales-leads.ts"), /await ensureCustomerStageColumns\(c\.var\.DB\)/);
   // Awaited on the read AND both write paths.
   assert.match(f, /app\.get\("\/", async \(c\) => \{[\s\S]*?ensureCustomerStageColumns/);
   assert.match(f, /app\.post\("\/", async \(c\) => \{[\s\S]*?ensureCustomerStageColumns/);
@@ -134,4 +140,67 @@ test("the API surfaces customerStage + salespersonUserId on every customer read"
   const f = flat("src/api/routes/customers.ts");
   assert.match(f, /customerStage: readCustomerStage\(/);
   assert.match(f, /salespersonUserId: readSalespersonUserId\(/);
+});
+
+// ---- Customers page UI ------------------------------------------------------
+
+test("customers list filters by stage and scopes the KPI tiles to it", () => {
+  const f = flat("src/pages/customers.tsx");
+  // Defaults to CONFIRMED: a salesperson filling the pipeline must not quietly
+  // change what the accounts team sees on this page.
+  assert.match(f, /useState<"CONFIRMED" \| "POTENTIAL" \| "ALL">\("CONFIRMED"\)/);
+  // Rows with no stage (pre-migration) count as CONFIRMED.
+  assert.match(f, /data\.filter\(\(c\) => \(c\.customerStage \?\? "CONFIRMED"\) === stageFilter\)/);
+  // The money tiles read the SCOPED list, not the raw one — a potential
+  // customer has no A/R and would misstate Total Outstanding / Credit Limit.
+  for (const k of ["totalCustomers", "totalHubs", "totalOutstanding", "totalCreditLimit"]) {
+    assert.match(
+      f,
+      new RegExp(`const ${k} = stageScoped`),
+      `${k} must be computed from stageScoped, not the unfiltered list`,
+    );
+  }
+  // The grid too.
+  assert.match(f, /: stageScoped;/);
+});
+
+test("salesperson is stored as users.id and rendered as a name", () => {
+  const f = flat("src/pages/customers.tsx");
+  assert.match(f, /useCachedJson<[\s\S]*?>\("\/api\/users"\)/);
+  // publicUser() exposes displayName + email — NOT name/fullName/username.
+  assert.match(f, /u\.displayName \|\| ""/);
+  assert.match(f, /String\(u\.email \|\| ""\)/);
+  // Column renders through the id→name map.
+  assert.match(f, /key: "salespersonUserId", label: "Salesperson"/);
+  assert.match(f, /salespersonName\.get\(row\.salespersonUserId\)/);
+  // A deactivated user's assignment must survive an unrelated dialog save.
+  assert.match(f, /!salespeople\.some\(\(s\) => s\.id === editCustForm\.salespersonUserId\)/);
+});
+
+// ---- Phase 4: the lead IS the potential customer ----------------------------
+
+test("creating a lead also mints its POTENTIAL customer — best-effort", () => {
+  const f = flat("src/api/routes/sales-leads.ts");
+  assert.match(f, /ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS customer_id TEXT/);
+  assert.match(f, /'POTENTIAL'\)`/, "the minted customer must be born POTENTIAL");
+  // No creditor code at this point — that is the Confirm gate's job.
+  assert.match(f, /INSERT INTO customers \(id, code, name,[\s\S]*?VALUES \(\?, '',/);
+  assert.match(f, /UPDATE sales_leads SET customer_id = \?/);
+  // Wrapped in try/catch on purpose: losing the salesperson's typed-in lead
+  // because a customer insert hiccuped would be far worse than a lead whose
+  // account gets created later at Confirm.
+  assert.match(f, /catch \(e\) \{ console\.warn\("\[sales-leads\] potential-customer create failed/);
+});
+
+test("Confirm promotes the EXISTING customer instead of minting a second one", () => {
+  const f = flat("src/pages/leads/index.tsx");
+  // Promoting the same row is what keeps the SKU assignments, combos and
+  // quotations that were attached while the account was potential.
+  assert.match(f, /customerStage: "CONFIRMED" as const/);
+  assert.match(f, /const existingCustomerId = String\(lead\.customer_id \?\? ""\)\.trim\(\)/);
+  assert.match(f, /if \(existingCustomerId\) \{ const res = await fetch\(`\/api\/customers\/\$\{existingCustomerId\}`, \{ method: "PUT"/);
+  // Legacy leads (pre-2026-08-01, or whose best-effort create failed) have no
+  // customer_id and must still be convertible.
+  assert.match(f, /\} else \{ const createRes = await fetch\("\/api\/customers", \{ method: "POST"/);
+  assert.match(f, /Confirm customer<\/h2>/);
 });

@@ -28,6 +28,8 @@ type Lead = {
   next_follow_up: string | null;
   lost_reason: string | null;
   won_customer_id?: string | null;
+  /** The POTENTIAL customer minted with this lead (owner 2026-08-01). */
+  customer_id?: string | null;
   created_at?: string | null;
 };
 
@@ -548,27 +550,50 @@ function ConvertLeadDialog({
     setBusy(true);
     setErr(null);
     try {
-      // 1) create the customer via the canonical endpoint.
-      const createRes = await fetch("/api/customers", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          code: f.code.trim(),
-          name: f.name.trim(),
-          ssmNo: f.ssmNo.trim(),
-          creditTerms: f.creditTerms,
-          creditLimitSen: Math.round((parseFloat(f.creditLimit) || 0) * 100),
-          contactName: f.contactName.trim(),
-          phone: f.phone.trim(),
-          email: f.email.trim(),
-        }),
-      });
-      const createJson = (await createRes.json().catch(() => ({}))) as { success?: boolean; error?: string; data?: { id: string } };
-      if (!createRes.ok || !createJson.success || !createJson.data?.id) {
-        setErr(createJson.error || `Could not create customer (HTTP ${createRes.status}).`);
-        return;
+      // 1) CONFIRM the account (owner 2026-08-01). The customer row already
+      //    exists — it was created as POTENTIAL the moment this lead was
+      //    entered, and has been carrying its SKU assignments, combos and
+      //    quotations ever since. So this promotes that SAME row rather than
+      //    minting a second one, which would strand everything assigned to it.
+      //    A lead from before this change (or whose best-effort customer create
+      //    failed) has no customer_id — those still take the create path.
+      const accountFields = {
+        code: f.code.trim(),
+        name: f.name.trim(),
+        ssmNo: f.ssmNo.trim(),
+        creditTerms: f.creditTerms,
+        creditLimitSen: Math.round((parseFloat(f.creditLimit) || 0) * 100),
+        contactName: f.contactName.trim(),
+        phone: f.phone.trim(),
+        email: f.email.trim(),
+        customerStage: "CONFIRMED" as const,
+      };
+      const existingCustomerId = String(lead.customer_id ?? "").trim();
+      let customerId = existingCustomerId;
+      if (existingCustomerId) {
+        const res = await fetch(`/api/customers/${existingCustomerId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: existingCustomerId, ...accountFields }),
+        });
+        const j = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string };
+        if (!res.ok || !j.success) {
+          setErr(j.error || `Could not confirm the customer (HTTP ${res.status}).`);
+          return;
+        }
+      } else {
+        const createRes = await fetch("/api/customers", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(accountFields),
+        });
+        const createJson = (await createRes.json().catch(() => ({}))) as { success?: boolean; error?: string; data?: { id: string } };
+        if (!createRes.ok || !createJson.success || !createJson.data?.id) {
+          setErr(createJson.error || `Could not create customer (HTTP ${createRes.status}).`);
+          return;
+        }
+        customerId = createJson.data.id;
       }
-      const customerId = createJson.data.id;
 
       // 2) attach a delivery hub (optional) via the customer PUT.
       if (f.hubShortName.trim() && f.hubCode.trim()) {
@@ -576,7 +601,8 @@ function ConvertLeadDialog({
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            ...createJson.data,
+            id: customerId,
+            ...accountFields,
             deliveryHubs: [{
               id: `hub-${customerId}-1`,
               code: f.hubCode.trim(),
@@ -599,7 +625,7 @@ function ConvertLeadDialog({
         body: JSON.stringify({ customerId }),
       });
 
-      window.alert(`Converted. New customer ${f.code.trim()} — ${f.name.trim()} created; the lead's contacts, activity and KYC moved over.`);
+      window.alert(`Confirmed. ${f.code.trim()} — ${f.name.trim()} is now a confirmed customer and can be used on sales orders. Its SKU assignments and quotations carried over.`);
       await onDone();
     } finally {
       setBusy(false);
@@ -610,10 +636,10 @@ function ConvertLeadDialog({
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-1">
-          <h2 className="text-lg font-semibold text-[#1F1D1B]">Convert to customer</h2>
+          <h2 className="text-lg font-semibold text-[#1F1D1B]">Confirm customer</h2>
           <button onClick={onClose} className="text-[#9CA3AF] hover:text-[#1F1D1B]"><X className="w-5 h-5" /></button>
         </div>
-        <p className="text-xs text-[#6B7280] mb-4">Fill the account-opening details. The lead's contacts, activity and KYC move over automatically.</p>
+        <p className="text-xs text-[#6B7280] mb-4">Fill the account-opening details. This confirms the account that already exists for this lead — everything assigned to it is kept.</p>
 
         <div className="space-y-4">
           <div>

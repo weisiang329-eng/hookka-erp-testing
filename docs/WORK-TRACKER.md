@@ -1854,3 +1854,6 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
 - [ ] ⛔ 完工重复记 318 件 / DO 出货短记 63 件 → **owner: 会有别人处理**，不要动
 - [ ] ⛔ 收货流水断线（RM_RECEIPT 4月起为 0）→ **owner: 到时才提供开货量，时间未定**；他每月自行 import closing stock（stock_take_only 口径成立），不要修管道
 - [ ] ⛔ 客户期初 60,000 / 20 笔供应商预付款对销 → **owner: 到时我会解决**
+
+## 2026-07-31 (session: BOM per-material wastage %, owner "跟行业标准")
+- [x] BOM material lines now carry an optional **% waste** (industry-standard scrap factor). Added `wastePct?` to WIPMaterial + a waste input at all 6 material-row editor contexts (updateWIPMaterial / onUpdateMaterial / updateL1Material / updateMaterialAtPath). Engine already applied `× (1 + waste%/100)`; backend stores wipComponents JSON as-is so it persists end-to-end. Guidance in tooltip: cut/bulk (fabric/foam/wood) carry waste, discrete parts (screws/legs/mechanism) stay 0. Tests: bom-wastage.test.mjs. → branch feat/bom-wastage off staging.

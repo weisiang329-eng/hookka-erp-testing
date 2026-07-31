@@ -61,8 +61,9 @@ test("consumption deducts cutArea ÷ sheetArea, guarded, with a plain-qty fallba
   const i = src.indexOf("FILLER (sponge) area-based consumption (owner 2026-07-30): a BOM line");
   assert.ok(i !== -1, "the area-ratio block must exist in the consume loop");
   const block = src.slice(i, i + 1100);
-  // Only when BOTH the line's cut size AND the RM's sheet size are present.
-  assert.match(block, /line\.cutLengthIn &&\s*line\.cutWidthIn &&\s*rm\.sheetLengthIn &&\s*rm\.sheetWidthIn/);
+  // Fires when the line has a cut size (the sheet size comes from the RM or its
+  // category default — resolved just below).
+  assert.match(block, /if \(rm && line\.cutLengthIn && line\.cutWidthIn\)/);
   assert.match(block, /required = required \* \(cutArea \/ sheetArea\)/);
   // Divide-by-zero guard.
   assert.match(block, /sheetArea > 0 && cutArea > 0/);
@@ -86,4 +87,25 @@ test("Raw Materials edit dialog has the sheet-size inputs + saves them", () => {
   assert.match(f, /Sheet size/);
   assert.match(f, /sheetLengthIn: editRMForm\.sheetLengthIn/);
   assert.match(f, /sheetWidthIn: editRMForm\.sheetWidthIn\.trim\(\) === "" \? null : Number/);
+});
+
+// ── Category default (owner: "set once, unified 8×4; special per-SKU") ───────
+test("consumption falls back per-SKU → category default → hardcoded 8×4", () => {
+  const f = flat(CASCADE);
+  assert.match(f, /const HARDCODED_FILLER_SHEET = \{ length: 8, width: 4 \}/);
+  assert.match(f, /async function loadSheetDefaults/);
+  assert.match(f, /parsed\?\.sheetDefaults/);
+  assert.match(f, /if \(\/FILLER\/\.test\(g\)\) return HARDCODED_FILLER_SHEET/);
+  // The area block prefers the per-SKU size, else the category default.
+  assert.match(f, /const sheetL = rm\.sheetLengthIn \?\? catDef\?\.length \?\? 0/);
+  assert.match(f, /const sheetW = rm\.sheetWidthIn \?\? catDef\?\.width \?\? 0/);
+});
+
+test("Material Categories dialog sets a per-category default sheet size", () => {
+  const f = flat(INV);
+  assert.match(f, /Default sheet size for/);
+  assert.match(f, /function saveSheetDefault/);
+  assert.match(f, /patchVariantsConfig\(\{ sheetDefaults: next \}\)/);
+  // S.FILLER shows the unified 8×4 default in the UI.
+  assert.match(f, /\/FILLER\/i\.test\(cat\) \? \{ length: 8, width: 4 \}/);
 });

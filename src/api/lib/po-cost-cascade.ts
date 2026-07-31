@@ -609,6 +609,50 @@ function genLedgerId(prefix: string): string {
 // refType='PRODUCTION_ORDER' ensures a PO only consumes once even when
 // multiple FAB_CUT JCs in the same PO sequentially complete.
 // ---------------------------------------------------------------------------
+// Category default sheet size for FILLER area-based consumption. Owner
+// 2026-07-30: "backend 统一 8×4, 特别的自己调". A FILLER material with no per-SKU
+// sheet size falls back to its item-group default from
+// kv_config['variants-config'].sheetDefaults, then to a hardcoded 8×4 for any
+// FILLER group. Units don't matter to the ratio (cutArea ÷ sheetArea) as long
+// as the BOM cut size uses the same unit as the sheet.
+const HARDCODED_FILLER_SHEET = { length: 8, width: 4 };
+async function loadSheetDefaults(
+  db: D1Database,
+): Promise<Record<string, { length: number; width: number }>> {
+  const out: Record<string, { length: number; width: number }> = {};
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = ?")
+      .bind("variants-config")
+      .first<{ value: string }>();
+    if (row?.value) {
+      const parsed = JSON.parse(row.value) as {
+        sheetDefaults?: Record<string, { length?: unknown; width?: unknown }>;
+      };
+      const sd = parsed?.sheetDefaults;
+      if (sd && typeof sd === "object") {
+        for (const [k, v] of Object.entries(sd)) {
+          const l = Number((v as { length?: unknown }).length);
+          const w = Number((v as { width?: unknown }).width);
+          if (l > 0 && w > 0) out[k.toUpperCase()] = { length: l, width: w };
+        }
+      }
+    }
+  } catch {
+    /* fall through to the hardcoded FILLER default */
+  }
+  return out;
+}
+function categoryDefaultSheet(
+  itemGroup: string | null,
+  defaults: Record<string, { length: number; width: number }>,
+): { length: number; width: number } | null {
+  const g = (itemGroup ?? "").toUpperCase();
+  if (defaults[g]) return defaults[g];
+  if (/FILLER/.test(g)) return HARDCODED_FILLER_SHEET;
+  return null;
+}
+
 export async function consumeRawMaterialsForPO(
   db: D1Database,
   poId: string,
@@ -646,6 +690,9 @@ export async function consumeRawMaterialsForPO(
     // No BOM → nothing to consume; also no FG materialCost.
     return { skipped: false, materialCostSen: 0, linesConsumed: 0, shortages: [] };
   }
+
+  // FILLER sheet-size defaults, loaded once (config overrides, else 8×4).
+  const sheetDefaults = await loadSheetDefaults(db);
 
   // ---- Repair Scope material filter (0160) -------------------------------
   // A scoped (non-FULL) repair must NEVER consume the full BOM. The scope
@@ -707,14 +754,13 @@ export async function consumeRawMaterialsForPO(
     // the line's cut size and the resolved RM's sheet size are present; any
     // gap falls back to the plain qtyPerUnit path (no regression). Guard
     // against a zero/absent sheet area (would otherwise divide by zero).
-    if (
-      rm &&
-      line.cutLengthIn &&
-      line.cutWidthIn &&
-      rm.sheetLengthIn &&
-      rm.sheetWidthIn
-    ) {
-      const sheetArea = rm.sheetLengthIn * rm.sheetWidthIn;
+    if (rm && line.cutLengthIn && line.cutWidthIn) {
+      // Per-SKU sheet size wins; else the category default (config, else the
+      // hardcoded FILLER 8×4). Only FILLER-group materials get a default.
+      const catDef = categoryDefaultSheet(rm.itemGroup, sheetDefaults);
+      const sheetL = rm.sheetLengthIn ?? catDef?.length ?? 0;
+      const sheetW = rm.sheetWidthIn ?? catDef?.width ?? 0;
+      const sheetArea = sheetL * sheetW;
       const cutArea = line.cutLengthIn * line.cutWidthIn;
       if (sheetArea > 0 && cutArea > 0) {
         required = required * (cutArea / sheetArea);

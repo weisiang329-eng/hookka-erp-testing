@@ -537,6 +537,11 @@ export type VariantsConfig = {
   sofaCompartments?: string[];
   // Add RM bulk-generate: raw-material category (itemGroup) → variant suffixes.
   materialVariants?: Record<string, string[]>;
+  // FILLER (sponge) area-based consumption: per item-group DEFAULT sheet size
+  // (owner 2026-07-30 — "set once, special ones per-SKU"). A material with no
+  // per-SKU sheet size uses its group default here (backend falls back to 8×4
+  // for any FILLER group). length/width share the same unit as the BOM cut size.
+  sheetDefaults?: Record<string, { length?: number; width?: number }>;
   // Add FG bulk-generate per-variant defaults, keyed by size code (bedframe:
   // K/Q/…) or compartment code (sofa: 1A(LHF)/…). defaultBom = the source BOM
   // template productCode to copy from on generate (its {PRODUCT_CODE} etc.

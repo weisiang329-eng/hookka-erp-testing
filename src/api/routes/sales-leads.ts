@@ -52,6 +52,25 @@ async function ensureTable(db: D1Database): Promise<void> {
        )`,
     )
     .run();
+  // Provisional catalog assignments on a lead (owner 2026-07-30): products the
+  // lead is being quoted, with an optional target price. Kept in its OWN table
+  // (never customer_products — that joins into pricing/quotations) so an
+  // unconfirmed lead can't leak into the pricing engine; on convert these are
+  // copied into customer_products for the real customer.
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS lead_products (
+         id TEXT PRIMARY KEY,
+         lead_id TEXT NOT NULL,
+         product_id TEXT,
+         product_code TEXT,
+         product_name TEXT,
+         price_sen INTEGER,
+         org_id TEXT,
+         created_at TEXT
+       )`,
+    )
+    .run();
   tableEnsured = true;
 }
 
@@ -223,6 +242,35 @@ app.post("/:id/convert", async (c) => {
       // table absent or nothing to move — safe to skip
     }
   }
+  // Copy the lead's PROVISIONAL catalog into the real customer_products (the
+  // "merged into customer on convert" step). Only rows linked to a real product
+  // (free-text styles can't map to a SKU) — price_sen becomes the base price.
+  // INSERT OR IGNORE keeps it idempotent against the UNIQUE(customerId,productId).
+  try {
+    const lps = await c.var.DB.prepare(
+      "SELECT product_id AS productId, price_sen AS priceSen FROM lead_products WHERE lead_id = ? AND org_id = ? AND product_id IS NOT NULL AND product_id <> ''",
+    )
+      .bind(leadId, org)
+      .all<{ productId: string; priceSen: number | null }>();
+    for (const lp of lps.results ?? []) {
+      await c.var.DB.prepare(
+        `INSERT OR IGNORE INTO customer_products
+           (id, customerId, productId, basePriceSen, price1Sen, seatHeightPrices, notes)
+         VALUES (?, ?, ?, ?, NULL, NULL, ?)`,
+      )
+        .bind(
+          `cp-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
+          customerId,
+          lp.productId,
+          lp.priceSen ?? null,
+          "From lead catalog",
+        )
+        .run();
+    }
+  } catch {
+    // customer_products absent / nothing to copy — safe to skip
+  }
+
   await c.var.DB.prepare(
     `UPDATE sales_leads SET stage = 'WON', won_customer_id = ?, updated_at = ?
       WHERE id = ? AND org_id = ?`,
@@ -238,6 +286,74 @@ app.delete("/:id", async (c) => {
   if (denied) return denied;
   await ensureTable(c.var.DB);
   await c.var.DB.prepare("DELETE FROM sales_leads WHERE id = ? AND org_id = ?")
+    .bind(c.req.param("id"), getOrgId(c))
+    .run();
+  return c.json({ success: true });
+});
+
+// ── Lead catalog (provisional product assignments) ──────────────────────────
+// Products a lead is being quoted + an optional target price. Provisional only
+// (its own table); merged into customer_products on convert.
+
+// GET /api/sales-leads/lead-products?leadId=lead-xxx
+app.get("/lead-products", async (c) => {
+  const denied = await requirePermission(c, "customers", "read");
+  if (denied) return denied;
+  await ensureTable(c.var.DB);
+  const leadId = c.req.query("leadId");
+  if (!leadId) return c.json({ success: false, error: "leadId required" }, 400);
+  const res = await c.var.DB.prepare(
+    "SELECT * FROM lead_products WHERE lead_id = ? AND org_id = ? ORDER BY created_at DESC",
+  )
+    .bind(leadId, getOrgId(c))
+    .all<Record<string, unknown>>();
+  return c.json({ success: true, data: res.results ?? [] });
+});
+
+// POST /api/sales-leads/lead-products
+app.post("/lead-products", async (c) => {
+  const denied = await requirePermission(c, "customers", "update");
+  if (denied) return denied;
+  await ensureTable(c.var.DB);
+  const b = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const leadId = String(b.leadId ?? b.lead_id ?? "");
+  if (!leadId) return c.json({ success: false, error: "leadId required" }, 400);
+  const productName = String(b.productName ?? b.product_name ?? "").trim();
+  const productCode = String(b.productCode ?? b.product_code ?? "").trim();
+  if (!productName && !productCode) {
+    return c.json({ success: false, error: "a product is required" }, 400);
+  }
+  const priceRm = b.priceRm ?? b.price_rm;
+  const priceSen =
+    b.priceSen != null ? Math.round(Number(b.priceSen))
+      : priceRm != null && priceRm !== "" ? Math.round(Number(priceRm) * 100)
+      : null;
+  const id = `lp-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+  await c.var.DB.prepare(
+    `INSERT INTO lead_products
+       (id, lead_id, product_id, product_code, product_name, price_sen, org_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      id,
+      leadId,
+      (b.productId as string) ?? (b.product_id as string) ?? null,
+      productCode || null,
+      productName || null,
+      priceSen,
+      getOrgId(c),
+      new Date().toISOString(),
+    )
+    .run();
+  return c.json({ success: true, data: { id } });
+});
+
+// DELETE /api/sales-leads/lead-products/:id
+app.delete("/lead-products/:id", async (c) => {
+  const denied = await requirePermission(c, "customers", "delete");
+  if (denied) return denied;
+  await ensureTable(c.var.DB);
+  await c.var.DB.prepare("DELETE FROM lead_products WHERE id = ? AND org_id = ?")
     .bind(c.req.param("id"), getOrgId(c))
     .run();
   return c.json({ success: true });

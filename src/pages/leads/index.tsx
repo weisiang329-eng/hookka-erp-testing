@@ -7,7 +7,7 @@
 // take over. See docs/plans/2026-07-30-crm-unified-customer.md.
 // ---------------------------------------------------------------------------
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Plus, Phone, Mail, Trash2, CalendarClock, X, GripVertical } from "lucide-react";
+import { Plus, Phone, Mail, Trash2, CalendarClock, X, GripVertical, Tag } from "lucide-react";
 import { formatCurrency } from "@/lib/utils";
 import { CrmPanel } from "@/components/customer/CrmPanel";
 import { WishlistPanel } from "@/components/customer/WishlistPanel";
@@ -497,6 +497,7 @@ function LeadDetailDrawer({
           {/* Full CRM record — same panels a Customer has, keyed on the lead id. */}
           <CrmPanel customerId={lead.id} customerName={lead.company || lead.name || "Lead"} />
           <WishlistPanel customerId={lead.id} />
+          <LeadCatalogPanel leadId={lead.id} />
           <KycPanel customerId={lead.id} />
         </div>
       </div>
@@ -665,6 +666,107 @@ function ConvertLeadDialog({
           <button disabled={busy || !canSubmit} onClick={() => void submit()} className="px-4 py-2 rounded-lg bg-[#6B5C32] text-white text-sm font-medium disabled:opacity-50 hover:bg-[#5A4D2A]">{busy ? "Converting…" : "Convert"}</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Lead catalog — provisional product assignments + target prices on a lead
+// (CRM slice 3, owner 2026-07-30). Stored in its own lead_products table (never
+// customer_products), and copied into the real customer on convert. Lets a
+// salesperson line up what they're quoting BEFORE the lead becomes a customer.
+// ---------------------------------------------------------------------------
+type LeadProduct = { id: string; product_code: string | null; product_name: string | null; price_sen: number | null };
+type ProductLite = { id: string; code: string; name: string };
+
+function LeadCatalogPanel({ leadId }: { leadId: string }) {
+  const [items, setItems] = useState<LeadProduct[]>([]);
+  const [products, setProducts] = useState<ProductLite[]>([]);
+  const [pick, setPick] = useState("");
+  const [priceRm, setPriceRm] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const reload = async () => {
+    try {
+      const r = await fetch(`/api/sales-leads/lead-products?leadId=${encodeURIComponent(leadId)}`);
+      const j = (await r.json()) as { success: boolean; data?: LeadProduct[] };
+      setItems(j.success && j.data ? j.data : []);
+    } catch { setItems([]); }
+  };
+
+  /* eslint-disable react-hooks/exhaustive-deps, react-hooks/set-state-in-effect */
+  useEffect(() => {
+    void reload();
+    void (async () => {
+      try {
+        const r = await fetch("/api/products");
+        const j = (await r.json()) as { success: boolean; data?: ProductLite[] };
+        const list = j.success && j.data ? j.data : [];
+        setProducts(list.filter((p) => p && p.code).map((p) => ({ id: p.id, code: p.code, name: p.name })));
+      } catch { /* leave empty */ }
+    })();
+  }, [leadId]);
+  /* eslint-enable react-hooks/exhaustive-deps, react-hooks/set-state-in-effect */
+
+  const add = async () => {
+    const raw = pick.trim();
+    if (!raw) return;
+    const code = raw.includes("—") ? raw.split("—")[0].trim() : raw;
+    const match = products.find((p) => p.code.toLowerCase() === code.toLowerCase());
+    setSaving(true);
+    try {
+      await fetch("/api/sales-leads/lead-products", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          leadId,
+          productId: match?.id ?? null,
+          productCode: match?.code ?? (raw.includes("—") ? code : null),
+          productName: match?.name ?? (raw.includes("—") ? raw.split("—")[1]?.trim() : raw),
+          priceRm: priceRm.trim() === "" ? null : priceRm,
+        }),
+      });
+      setPick("");
+      setPriceRm("");
+      await reload();
+    } finally { setSaving(false); }
+  };
+
+  const del = async (id: string) => {
+    await fetch(`/api/sales-leads/lead-products/${id}`, { method: "DELETE" });
+    await reload();
+  };
+
+  return (
+    <div className="rounded-lg border border-[#E2DDD8] bg-white p-4">
+      <div className="flex items-center gap-2 text-sm font-semibold text-[#1F1D1B] mb-1">
+        <Tag className="h-4 w-4 text-[#3E6570]" /> Catalog &amp; target prices ({items.length})
+      </div>
+      <p className="text-[11px] text-[#9CA3AF] mb-3">What you&apos;re quoting this lead. Copied onto the customer when you convert.</p>
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <input list={`leadcat-${leadId}`} value={pick} onChange={(e) => setPick(e.target.value)} placeholder="Pick a SKU…" className="flex-1 min-w-[180px] text-sm border border-[#E2DDD8] rounded px-2 py-1.5 bg-white focus:outline-none focus:border-[#6B5C32]" />
+        <datalist id={`leadcat-${leadId}`}>
+          {products.slice(0, 2000).map((p) => <option key={p.id} value={`${p.code} — ${p.name}`} />)}
+        </datalist>
+        <input value={priceRm} onChange={(e) => setPriceRm(e.target.value)} type="number" placeholder="Target RM" className="w-28 text-sm border border-[#E2DDD8] rounded px-2 py-1.5 bg-white focus:outline-none focus:border-[#6B5C32]" />
+        <button onClick={() => void add()} disabled={saving || !pick.trim()} className="text-sm px-3 py-1.5 bg-[#6B5C32] text-white rounded-md hover:bg-[#5A4D2A] disabled:opacity-40">{saving ? "…" : "Add"}</button>
+      </div>
+      {items.length === 0 ? (
+        <p className="text-xs text-gray-400 py-1">No SKUs yet.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {items.map((it) => (
+            <div key={it.id} className="flex items-center gap-2 px-2.5 py-2 bg-[#FAF9F7] border border-[#E2DDD8] rounded-md">
+              <span className="text-sm font-medium text-[#1F1D1B]">
+                {it.product_code ? <span className="font-mono text-[#6B5C32]">{it.product_code}</span> : null}
+                {it.product_code && it.product_name ? " · " : ""}{it.product_name}
+              </span>
+              {it.price_sen != null ? <span className="text-xs text-[#3E6570] font-medium">{formatCurrency(it.price_sen / 100)}</span> : null}
+              <button onClick={() => void del(it.id)} className="ml-auto p-1 text-[#9A3A2D] hover:bg-[#F9E1DA] rounded" title="Remove"><Trash2 className="h-3.5 w-3.5" /></button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

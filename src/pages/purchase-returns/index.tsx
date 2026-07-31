@@ -47,7 +47,13 @@ async function getJson<T>(url: string): Promise<T | null> {
 export default function PurchaseReturnsPage() {
   const [rows, setRows] = useState<PurchaseReturn[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const [showNew, setShowNew] = useState(false);
+  // ?pi=<id> (from the "Create Purchase Return" button on a PI) preselects that
+  // PI and opens the New dialog straight away (slice 4).
+  const initialPiId = useMemo(() => {
+    if (typeof window === "undefined") return "";
+    return new URLSearchParams(window.location.search).get("pi") ?? "";
+  }, []);
+  const [showNew, setShowNew] = useState(!!initialPiId);
 
   const reload = useCallback(async () => {
     const data = await getJson<PurchaseReturn[]>("/api/purchase-returns");
@@ -126,12 +132,12 @@ export default function PurchaseReturnsPage() {
         </table>
       </div>
 
-      {showNew && <NewPurchaseReturnDialog onClose={() => setShowNew(false)} onDone={async () => { setShowNew(false); await reload(); }} />}
+      {showNew && <NewPurchaseReturnDialog initialPiId={initialPiId} onClose={() => setShowNew(false)} onDone={async () => { setShowNew(false); await reload(); }} />}
     </div>
   );
 }
 
-function NewPurchaseReturnDialog({ onClose, onDone }: { onClose: () => void; onDone: () => Promise<void> | void }) {
+function NewPurchaseReturnDialog({ initialPiId, onClose, onDone }: { initialPiId?: string; onClose: () => void; onDone: () => Promise<void> | void }) {
   const [pis, setPis] = useState<PIOption[]>([]);
   const [piId, setPiId] = useState("");
   const [lines, setLines] = useState<PickLine[]>([]);
@@ -171,6 +177,15 @@ function NewPurchaseReturnDialog({ onClose, onDone }: { onClose: () => void; onD
       problem: "",
     })));
   };
+
+  // Deep-linked from a PI ("Create Purchase Return"): preselect it + load lines.
+  // Fires once on a user-driven prop (initialPiId), not a render loop, so the
+  // cascading-render concern set-state-in-effect warns about doesn't apply.
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (initialPiId) void loadLines(initialPiId);
+  }, [initialPiId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const patch = (idx: number, p: Partial<PickLine>) => setLines((prev) => prev.map((l, i) => (i === idx ? { ...l, ...p } : l)));
 

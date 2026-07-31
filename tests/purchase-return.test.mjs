@@ -132,3 +132,22 @@ test("confirm route fires the reversal, RBAC-gated; UI has the confirm action", 
   assert.match(page, /\/api\/purchase-returns\/\$\{r\.id\}\/confirm/);
   assert.match(page, /Confirm \(remove stock\)/);
 });
+
+// ===========================================================================
+// Slice 4 — create straight from a PI (deep link)
+// ===========================================================================
+
+test("PI detail has a Create Purchase Return button that deep-links with the PI", () => {
+  const pi = readFileSync(resolve(process.cwd(), "src/pages/procurement/PurchaseInvoiceDetail.tsx"), "utf8").replace(/\s+/g, " ");
+  assert.match(pi, /Create Purchase Return/);
+  assert.match(pi, /navigate\(`\/purchase-returns\?pi=\$\{encodeURIComponent\(pi\.id\)\}`\)/);
+});
+
+test("Purchase Returns page reads ?pi= and preselects that PI", () => {
+  const page = flat(PAGE);
+  assert.match(page, /URLSearchParams\(window\.location\.search\)\.get\("pi"\)/);
+  assert.match(page, /useState\(!!initialPiId\)/);
+  assert.match(page, /initialPiId=\{initialPiId\}/);
+  // The dialog auto-loads the PI's returnable lines when deep-linked.
+  assert.match(page, /if \(initialPiId\) void loadLines\(initialPiId\)/);
+});

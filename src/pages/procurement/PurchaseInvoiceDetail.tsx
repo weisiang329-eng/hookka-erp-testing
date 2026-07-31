@@ -15,7 +15,7 @@
 // ---------------------------------------------------------------------------
 import { useMemo, useState } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, FileText, Package, Pencil, Plus, Printer, Trash2 } from "lucide-react";
+import { ArrowLeft, FileText, Package, Pencil, Plus, Printer, Trash2, Undo2 } from "lucide-react";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -501,6 +501,14 @@ export default function PurchaseInvoiceDetailPage() {
             {!editing && (
               <Button type="button" variant="outline" size="sm" onClick={printPdf} disabled={busy}>
                 <Printer className="h-3.5 w-3.5" /> Print
+              </Button>
+            )}
+            {!editing && pi.status !== "DRAFT" && (
+              // Create a supplier Purchase Return straight from this PI — jumps
+              // to the Purchase Returns page with this PI preselected + its
+              // returnable lines loaded (slice 4).
+              <Button type="button" variant="outline" size="sm" onClick={() => navigate(`/purchase-returns?pi=${encodeURIComponent(pi.id)}`)} disabled={busy}>
+                <Undo2 className="h-3.5 w-3.5" /> Create Purchase Return
               </Button>
             )}
             {!editing && isPiEditable(pi.status) && (

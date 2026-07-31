@@ -140,6 +140,9 @@ const navigationGroups: NavGroup[] = [
       // WIP catalog — dedup'd per (wipLabel × dept) view of every WIP that's
       // ever run, with avg production time. Reference for planners.
       { name: "WIP Times", href: "/bom/wip-times", icon: Clock },
+      // Reusable kit sub-BOMs: bind a mechanism / leg SKU to its screws once,
+      // every BOM that uses it auto-explodes them (owner 2026-07-31).
+      { name: "Component Kits", href: "/bom/component-kits", icon: Wrench },
       { name: "Sofa Combos", href: "/maintenance/sofa-combos", icon: Tag },
     ],
   },

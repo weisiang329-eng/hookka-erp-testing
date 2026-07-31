@@ -1833,3 +1833,13 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
 - [x] PV-2607-001 编辑报错调查：restate 加 VOID 守卫 + 技术报错持久化(kv+debug端点)；顺手修 BUG-2026-07-24-002（unvoid 复活旧分录）
 - [x] 「double 开 PV」检查：无系统复制，全是作废+重录对子 → 根因=预付款不可编辑
 - [x] 预付款可编辑（owner 拍板）：Edit=批量 knock-off 工作台，Advance 自动缩减，restate 接受 advanceSen
+
+## 2026-07-31 (session: mechanism→screw reusable sub-BOM, owner 乙)
+- [x] ③ Mechanism→screw binding — owner chose **乙 (reusable sub-BOM / multi-level BOM)** over 甲 (lightweight per-BOM binding). "更正统 ERP,但重".
+  - `component_bom_lines` table (parent SKU → child SKU + qty_per + waste_pct), runtime self-applied (component-bom.ts).
+  - `explodeKits()` runs INSIDE `resolveBomMaterials` on the FINAL resolved lines (after autoDetect), so a mechanism bound via LEG also pulls its screws. Parent line kept (mechanism still consumes on its own); children appended with qty = parentQty × qtyPer, inheriting the parent's repair-scope tags; self/loop-guarded, one level deep.
+  - API `/api/component-boms` (GET / GET:code / PUT / DELETE), RBAC `bom`.
+  - Maintenance page **Component Kits** at `/bom/component-kits` (MaterialPicker for parent + children; sidebar under BOM).
+  - BOM editor shows a read-only `+ kit` hint on any material line whose SKU has a kit (module-level KIT_PARENT_CODES, loaded from /api/component-boms).
+  - Tests: `component-kit-subbom.test.mjs` — functional (saveKit self-guard, explodeKits qty math / parent-kept / no-op) + structural wiring. Full suite 1691 pass; build:strict clean.
+  - branch `feat/mechanism-subbom` off staging.

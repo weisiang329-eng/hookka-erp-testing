@@ -1260,7 +1260,7 @@ export default function InventoryPage() {
   function catSheetDefault(cat: string): { length?: number; width?: number } {
     // Seed S.FILLER to 8×4 in the UI so the "unified default" is visible.
     if (sheetDefaultsAll[cat]) return sheetDefaultsAll[cat];
-    return /FILLER/i.test(cat) ? { length: 8, width: 4 } : {};
+    return /FILLER/i.test(cat) ? { length: 96, width: 48 } : {};
   }
   function saveSheetDefault(cat: string, dim: { length?: number; width?: number }) {
     const cur = sheetDefaultsAll[cat] ?? catSheetDefault(cat);
@@ -2722,7 +2722,7 @@ export default function InventoryPage() {
                   <div className="pt-3 border-t border-[#E2DDD8]">
                     <div className="text-xs text-[#6B7280] mb-1.5">
                       Default sheet size for <span className="font-mono text-[#1F1D1B]">{matCatSel}</span>{" "}
-                      <span className="text-[#9CA3AF]">(sponge / sheet materials — length × width in FEET; special SKUs override in their own edit)</span>
+                      <span className="text-[#9CA3AF]">(sponge / sheet materials — length × width in INCHES, e.g. 96 × 48; special SKUs override in their own edit)</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <Input type="number" placeholder="Length" onFocus={(e) => e.currentTarget.select()} value={catSheetDefault(matCatSel).length ?? ""} onChange={(e) => saveSheetDefault(matCatSel, { length: e.target.value === "" ? undefined : Number(e.target.value) })} className="w-28" />
@@ -3130,7 +3130,7 @@ export default function InventoryPage() {
                   non-sheet materials (consumption then uses the plain qty). */}
               <div>
                 <label className="block text-xs text-[#6B7280] mb-1">
-                  Sheet size <span className="text-[#9CA3AF]">(FEET — length × width; blank = use this category's default)</span>
+                  Sheet size <span className="text-[#9CA3AF]">(INCHES — length × width, e.g. 96 × 48; blank = use this category's default)</span>
                 </label>
                 <div className="flex items-center gap-2">
                   <Input type="number" placeholder="Length" onFocus={(e) => e.currentTarget.select()} value={editRMForm.sheetLengthIn} onChange={(e) => setEditRMForm(f => ({ ...f, sheetLengthIn: e.target.value }))} />

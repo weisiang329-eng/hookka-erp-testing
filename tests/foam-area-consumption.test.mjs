@@ -92,7 +92,7 @@ test("Raw Materials edit dialog has the sheet-size inputs + saves them", () => {
 // ── Category default (owner: "set once, unified 8×4; special per-SKU") ───────
 test("consumption falls back per-SKU → category default → hardcoded 8×4", () => {
   const f = flat(CASCADE);
-  assert.match(f, /const HARDCODED_FILLER_SHEET = \{ length: 8, width: 4 \}/);
+  assert.match(f, /const HARDCODED_FILLER_SHEET = \{ length: 96, width: 48 \}/);
   assert.match(f, /async function loadSheetDefaults/);
   assert.match(f, /parsed\?\.sheetDefaults/);
   assert.match(f, /if \(\/FILLER\/\.test\(g\)\) return HARDCODED_FILLER_SHEET/);
@@ -107,5 +107,5 @@ test("Material Categories dialog sets a per-category default sheet size", () => 
   assert.match(f, /function saveSheetDefault/);
   assert.match(f, /patchVariantsConfig\(\{ sheetDefaults: next \}\)/);
   // S.FILLER shows the unified 8×4 default in the UI.
-  assert.match(f, /\/FILLER\/i\.test\(cat\) \? \{ length: 8, width: 4 \}/);
+  assert.match(f, /\/FILLER\/i\.test\(cat\) \? \{ length: 96, width: 48 \}/);
 });

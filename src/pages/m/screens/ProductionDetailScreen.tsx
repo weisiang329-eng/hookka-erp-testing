@@ -27,7 +27,8 @@ type AuditResp = { data?: RawRow[] };
 const DEPTS: { code: string; label: string }[] = [
   { code: "FAB_CUT", label: "Fab Cut" },
   { code: "FAB_SEW", label: "Fab Sew" },
-  { code: "FOAM", label: "Foam" },
+  { code: "FOAM_CUTTING", label: "Foam Cutting" },
+  { code: "FOAM", label: "Foam Bonding" },
   { code: "WOOD_CUT", label: "Wood Cut" },
   { code: "FRAMING", label: "Framing" },
   { code: "WEBBING", label: "Webbing" },

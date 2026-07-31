@@ -71,6 +71,20 @@ const num = (v: unknown): number => {
   return Number.isFinite(n) ? n : 0;
 };
 
+// Rows come back from Supabase Postgres with the driver's snake_case →
+// camelCase transform already applied (db-pg.ts `transform.column.from`), so
+// `SELECT *` on this runtime-created table yields parentCode / childCode /
+// qtyPer / wastePct — NOT the snake_case names the DDL declares. Reading only
+// snake_case silently returned undefined for every column, which made
+// listKits() skip every row (kits saved but the page showed "no kits yet")
+// AND made explodeKits() find no kit at all (the screws never reached
+// consumption / costing). Repo rule: read rows DUAL-KEYED. See CLAUDE.md
+// "Read rows dual-keyed: r.camelCase ?? r.snake_case".
+const str = (r: Record<string, unknown>, camel: string, snake: string): string =>
+  String(r[camel] ?? r[snake] ?? "");
+const dualNum = (r: Record<string, unknown>, camel: string, snake: string): number =>
+  num(r[camel] ?? r[snake]);
+
 export async function listKits(db: D1Database, orgId: string | null): Promise<Kit[]> {
   await ensureComponentBomTable(db);
   const res = await db
@@ -83,18 +97,18 @@ export async function listKits(db: D1Database, orgId: string | null): Promise<Ki
     .all<Record<string, unknown>>();
   const byParent = new Map<string, Kit>();
   for (const r of res.results ?? []) {
-    const parentCode = String(r.parent_code ?? "");
+    const parentCode = str(r, "parentCode", "parent_code");
     if (!parentCode) continue;
     let kit = byParent.get(parentCode);
     if (!kit) {
-      kit = { parentCode, parentName: String(r.parent_name ?? ""), children: [] };
+      kit = { parentCode, parentName: str(r, "parentName", "parent_name"), children: [] };
       byParent.set(parentCode, kit);
     }
     kit.children.push({
-      childCode: String(r.child_code ?? ""),
-      childName: String(r.child_name ?? ""),
-      qtyPer: num(r.qty_per),
-      wastePct: num(r.waste_pct),
+      childCode: str(r, "childCode", "child_code"),
+      childName: str(r, "childName", "child_name"),
+      qtyPer: dualNum(r, "qtyPer", "qty_per"),
+      wastePct: dualNum(r, "wastePct", "waste_pct"),
     });
   }
   return [...byParent.values()];
@@ -213,7 +227,7 @@ export async function explodeKits<T extends ExplodableLine>(
   // parent_code → its child rows.
   const kitByParent = new Map<string, Record<string, unknown>[]>();
   for (const r of rows) {
-    const p = String(r.parent_code ?? "");
+    const p = str(r, "parentCode", "parent_code");
     if (!p) continue;
     const arr = kitByParent.get(p) ?? [];
     arr.push(r);
@@ -226,18 +240,18 @@ export async function explodeKits<T extends ExplodableLine>(
     const kit = key ? kitByParent.get(key) : undefined;
     if (!kit) continue;
     for (const r of kit) {
-      const childCode = String(r.child_code ?? "").trim();
+      const childCode = str(r, "childCode", "child_code").trim();
       if (!childCode || childCode === key) continue; // self-guard
-      const qtyPer = num(r.qty_per);
+      const qtyPer = dualNum(r, "qtyPer", "qty_per");
       if (qtyPer <= 0) continue;
       out.push({
         ...line,
         code: childCode,
         inventoryCode: childCode,
-        name: String(r.child_name ?? "") || childCode,
+        name: str(r, "childName", "child_name") || childCode,
         // per-FG qty of the screw = per-FG qty of the mechanism × screws-each
         qtyPerUnit: line.qtyPerUnit * qtyPer,
-        wastePct: num(r.waste_pct),
+        wastePct: dualNum(r, "wastePct", "waste_pct"),
         // clear FILLER cut sizes if the parent line carried any — a screw is
         // a discrete count, never area-based.
         cutLengthIn: undefined,

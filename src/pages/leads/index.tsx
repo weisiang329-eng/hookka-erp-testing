@@ -33,13 +33,21 @@ type Lead = {
   created_at?: string | null;
 };
 
+// Stage LABELS are display-only; `key` is the value persisted in sales_leads.stage
+// (and the LEAD_STAGES contract in api/routes/sales-leads.ts), so renaming a label
+// never needs a data migration. Owner 2026-08-01: the funnel now speaks the same
+// language as the Customer module — a lead enters as Potential and becomes a
+// Confirmed customer, so "New/Won/Lost" became "Potential/Confirmed/Dropped".
+// This array is the single source of every stage label on the page (kanban
+// columns, the card stage picker, the drawer badge, the move menu) — change it
+// here and nowhere else.
 const STAGES = [
-  { key: "NEW", label: "New", accent: "#6B7280", soft: "#F3F4F6" },
+  { key: "NEW", label: "Potential", accent: "#6B7280", soft: "#F3F4F6" },
   { key: "CONTACTED", label: "Contacted", accent: "#2563EB", soft: "#EAF1FE" },
   { key: "QUOTED", label: "Quoted", accent: "#B45309", soft: "#FBF0E0" },
   { key: "NEGOTIATING", label: "Negotiating", accent: "#7C3AED", soft: "#F1EBFD" },
-  { key: "WON", label: "Won", accent: "#15803D", soft: "#E7F4EC" },
-  { key: "LOST", label: "Lost", accent: "#9A3A2D", soft: "#F9E7E3" },
+  { key: "WON", label: "Confirmed", accent: "#15803D", soft: "#E7F4EC" },
+  { key: "LOST", label: "Dropped", accent: "#9A3A2D", soft: "#F9E7E3" },
 ] as const;
 
 const SOURCES = ["Walk-in", "Referral", "Facebook", "WhatsApp", "Website", "Exhibition", "Other"];
@@ -146,7 +154,7 @@ export default function LeadsPage() {
     if (lead.stage === stage) return;
     let lostReason: string | null = null;
     if (stage === "LOST") {
-      lostReason = window.prompt("Reason for losing this lead? (price / lead time / style / …)") || "";
+      lostReason = window.prompt("Why is this lead being dropped? (price / lead time / style / …)") || "";
     }
     // Optimistic move so the drag feels instant; reconcile from the server after.
     setLeads((prev) => prev.map((l) => (l.id === lead.id ? { ...l, stage, lost_reason: lostReason ?? l.lost_reason } : l)));
@@ -178,7 +186,7 @@ export default function LeadsPage() {
             <div className="text-lg font-semibold text-[#1F1D1B]">{formatCurrency(openValueSen / 100)}</div>
           </div>
           <div className="text-right">
-            <div className="text-[11px] uppercase tracking-wide text-[#9CA3AF]">Won</div>
+            <div className="text-[11px] uppercase tracking-wide text-[#9CA3AF]">Confirmed</div>
             <div className="text-lg font-semibold text-[#15803D]">{formatCurrency(wonValueSen / 100)}</div>
           </div>
           <button
@@ -269,7 +277,7 @@ export default function LeadsPage() {
                     {l.source ? <span className="px-1.5 py-0.5 rounded bg-[#F0ECE9] text-[#6B5C32]">{l.source}</span> : null}
                     {l.next_follow_up ? <span className="flex items-center gap-1 text-[#6B5C32]"><CalendarClock className="w-3 h-3" />{l.next_follow_up}</span> : null}
                   </div>
-                  {l.lost_reason ? <div className="mt-1 text-[11px] text-[#9A3A2D] italic pl-5">Lost: {l.lost_reason}</div> : null}
+                  {l.lost_reason ? <div className="mt-1 text-[11px] text-[#9A3A2D] italic pl-5">Dropped: {l.lost_reason}</div> : null}
                   <div className="mt-2 flex items-center justify-between opacity-0 group-hover:opacity-100 transition-opacity pl-5" onClick={(e) => e.stopPropagation()}>
                     <select
                       value={l.stage}

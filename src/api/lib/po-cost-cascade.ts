@@ -610,12 +610,12 @@ function genLedgerId(prefix: string): string {
 // multiple FAB_CUT JCs in the same PO sequentially complete.
 // ---------------------------------------------------------------------------
 // Category default sheet size for FILLER area-based consumption. Owner
-// 2026-07-30: "backend 统一 8×4, 特别的自己调". A FILLER material with no per-SKU
+// 2026-07-30: default 96×48 inch (= an 8ft×4ft sheet), overridable. A FILLER material with no per-SKU
 // sheet size falls back to its item-group default from
 // kv_config['variants-config'].sheetDefaults, then to a hardcoded 8×4 for any
 // FILLER group. Units don't matter to the ratio (cutArea ÷ sheetArea) as long
 // as the BOM cut size uses the same unit as the sheet.
-const HARDCODED_FILLER_SHEET = { length: 8, width: 4 };
+const HARDCODED_FILLER_SHEET = { length: 96, width: 48 };
 async function loadSheetDefaults(
   db: D1Database,
 ): Promise<Record<string, { length: number; width: number }>> {

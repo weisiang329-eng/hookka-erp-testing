@@ -148,8 +148,14 @@ function ScannerPage() {
     setSelectedWorkerId("");
 
     try {
-      // ?fields=minimal&include=jobCards — slim PO fields; keep JCs (scan lookup reads order.jobCards).
-      const data = await fetchJson("/api/production-orders?fields=minimal&include=jobCards", ProductionOrderListSchema);
+      // Targeted scan-lookup (perf 2026-07-31): resolve the scanned code (JC id
+      // / PO number / PO id) to the ONE matching order server-side, instead of
+      // downloading the whole ~22MB list to find it. Same { data: [order] }
+      // shape, so the matching loop below is unchanged (now over 0–1 orders).
+      const data = await fetchJson(
+        `/api/production-orders/scan-lookup?code=${encodeURIComponent(searchTerm)}`,
+        ProductionOrderListSchema,
+      );
       if (!data.success) {
         setLookupError("Failed to fetch production orders.");
         setLoading(false);

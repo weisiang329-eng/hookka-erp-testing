@@ -35,9 +35,12 @@ test("lead-times: DEPT_ORDER + DEFAULT_LEAD_DAYS carry FOAM_CUTTING before FOAM"
   const iCut = src.indexOf('"FOAM_CUTTING"');
   const iFoam = src.indexOf('"FOAM"');
   assert.ok(iCut !== -1 && iFoam !== -1 && iCut < iFoam, "FOAM_CUTTING must precede FOAM in DEPT_ORDER");
-  // Both BEDFRAME + SOFA lead-day maps carry a FOAM_CUTTING entry.
-  const count = (src.match(/FOAM_CUTTING:\s*1/g) || []).length;
+  // Both BEDFRAME + SOFA lead-day maps carry a FOAM_CUTTING entry. Its value is
+  // 0 — Foam Cutting runs the same day as Foam Bonding (owner 2026-07-30), so it
+  // adds no extra day to the sequence.
+  const count = (src.match(/FOAM_CUTTING:\s*\d/g) || []).length;
   assert.ok(count >= 2, "both BEDFRAME + SOFA default lead maps need FOAM_CUTTING");
+  assert.ok(/FOAM_CUTTING:\s*0/.test(src), "FOAM_CUTTING is same-day as Foam Bonding (0 lead days)");
 });
 
 test("departments route: runtime self-apply inserts FOAM_CUTTING + relabels FOAM", () => {

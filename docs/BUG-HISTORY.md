@@ -34,6 +34,18 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-01-001 — boot-time stale-chunk recovery blocked by a 30s time gate → users stranded on the "Loading…" splash after a deploy `infrastructure` `pwa` 🟢
+
+**Symptom.** During QA right after two quick successive deploys, the app got stuck on the boot splash (blank dim "Loading…"). The console showed `[stale-chunk] hard-reloading: vite:preloadError` once, then nothing — a manual service-worker unregister + `caches.delete()` + reload was the only thing that unstuck it. `curl` confirmed the live bundle was stable and 200 (not a bad deploy).
+
+**Root cause.** `src/main.tsx`'s `recoverFromStaleChunk` — the ONLY recovery path when the failing chunk is one React needs to *mount* (the React ErrorBoundary never mounts in that case) — used a blunt `if (Date.now() - lastTs < 30_000) return` cooldown with **no attempt counter**. During CDN edge propagation after a deploy, the first stale chunk recovered (reload + SW purge), but the reload pulled a build that referenced a *second distinct* stale chunk still propagating; that second `preloadError` fired within the 30s window and was silently swallowed → the app never re-attempted recovery and sat on the splash.
+
+**Fix** (`src/main.tsx`). Replace the time gate with the same bounded-attempt model the ErrorBoundary already uses: a short 3s debounce collapses the burst of `preloadError` events from one failed render into a single reload, while a hard 3-attempt cap (`STALE_MAX_ATTEMPTS`, shared `hookka-stale-chunk-attempts` key, reset by the ErrorBoundary on the first successful render) — *not* a time window — is what prevents an infinite loop. Successive deploys seconds apart now each recover. Healthy boots are untouched: the helper only ever runs for a tab already in a stale-chunk failure.
+
+**Verified.** `npx tsc -p tsconfig.app.json --noEmit` clean; structural regression test `tests/pwa-stale-chunk-recovery.test.mjs` (5 assertions: attempt cap present, old 30s gate gone, debounce present, counter key shared with ErrorBoundary, SW+cache purge retained); full pre-commit suite green. The failure mode can't be forced live, but every production page (list, folders, fab-cut, packing, upholstery) reloads clean on prod. PR #158.
+
+---
+
 ## BUG-2026-08-01-002 — production dept page 503'd on the day's first (cold) load; client never retried the server's retriable 503 `production-orders` `infrastructure` `ui-frontend` 🟢
 
 **Symptom.** QA on prod (2026-08-01) found `GET /api/production-orders?fields=minimal&dept=FAB_CUT&excludeCompleted=true&dueFrom=2026-08-01&dueTo=2026-08-01` returning **503**, while the same query *without* `dueFrom/dueTo` returned 200. Reproduced deterministically on a fresh load (FAB_CUT and PACKING both). Re-requesting the URL directly returned 200 with correct data, so the query is sound — the failure is on the cold path only. No console error (the page silently carried on with the non-date-ranged fetch), but the "due today" query was failing and the page paid for a fallback.

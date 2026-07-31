@@ -12,6 +12,7 @@ import type { Context } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
+import { ensureCustomerStageColumns } from "../lib/customer-stage";
 
 const app = new Hono<Env>();
 
@@ -111,7 +112,47 @@ app.get("/", async (c) => {
   return c.json({ success: true, data: res.results ?? [] });
 });
 
-// POST /api/sales-leads
+// `sales_leads.customer_id` — the POTENTIAL customer created alongside the lead.
+// Distinct from the legacy `won_customer_id` (set only at conversion): reads
+// should prefer customer_id and fall back, so leads that converted before
+// 2026-08-01 still resolve. Runtime self-apply — migrations are inert on deploy.
+let leadCustomerColPromise: Promise<void> | null = null;
+function ensureLeadCustomerColumn(db: D1Database): Promise<void> {
+  if (leadCustomerColPromise) return leadCustomerColPromise;
+  leadCustomerColPromise = (async () => {
+    try {
+      await db
+        .prepare("ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS customer_id TEXT")
+        .run();
+    } catch {
+      // best-effort — column may already exist
+    }
+  })();
+  return leadCustomerColPromise;
+}
+
+// Mints the POTENTIAL customer that backs a lead. Deliberately writes the same
+// columns customers.ts POST does, minus everything that only the Confirm gate
+// can decide: no creditor code, terms default, zero credit limit, zero A/R.
+async function createPotentialCustomerForLead(
+  db: D1Database,
+  f: { name: string; contactName: string; phone: string; email: string },
+): Promise<string | null> {
+  if (!f.name) return null;
+  const id = `cust-${crypto.randomUUID().slice(0, 8)}`;
+  await db
+    .prepare(
+      `INSERT INTO customers (id, code, name, ssmNo, companyAddress, creditTerms,
+         creditLimitSen, outstandingSen, isActive, contactName, phone, email,
+         customer_stage)
+       VALUES (?, '', ?, '', '', 'NET30', 0, 0, 1, ?, ?, ?, 'POTENTIAL')`,
+    )
+    .bind(id, f.name, f.contactName, f.phone, f.email)
+    .run();
+  return id;
+}
+
+// POST /api/sales-leads — creates the lead AND its POTENTIAL customer account.
 app.post("/", async (c) => {
   const denied = await requirePermission(c, "customers", "update");
   if (denied) return denied;
@@ -146,7 +187,42 @@ app.post("/", async (c) => {
       now,
     )
     .run();
-  return c.json({ success: true, data: { id } });
+
+  // A lead IS a potential customer (owner 2026-08-01). Creating the customer
+  // row here — not at conversion — is what lets the salesperson assign SKUs, set
+  // a sofa combo and export a quotation before anything is agreed, which is the
+  // whole point of the change ("要不然我不习惯").
+  //
+  // The account is born POTENTIAL, which means: no creditor code required, and
+  // the sales-order guard refuses it outright. It becomes billable only through
+  // the Confirm gate, where the code / terms / credit limit are set.
+  //
+  // Best-effort ON PURPOSE: if this fails, the LEAD must still exist. Losing the
+  // salesperson's typed-in lead because a customer insert hiccuped would be a
+  // far worse outcome than a lead without its account yet — and Confirm can
+  // create the account later either way.
+  let customerId: string | null = null;
+  try {
+    await ensureLeadCustomerColumn(c.var.DB);
+    await ensureCustomerStageColumns(c.var.DB);
+    customerId = await createPotentialCustomerForLead(c.var.DB, {
+      name: String(b.company ?? "").trim() || String(b.name ?? "").trim(),
+      contactName: String(b.name ?? "").trim(),
+      phone: String(b.phone ?? "").trim(),
+      email: String(b.email ?? "").trim(),
+    });
+    if (customerId) {
+      await c.var.DB.prepare(
+        "UPDATE sales_leads SET customer_id = ? WHERE id = ? AND org_id = ?",
+      )
+        .bind(customerId, id, getOrgId(c))
+        .run();
+    }
+  } catch (e) {
+    console.warn("[sales-leads] potential-customer create failed for lead", id, e);
+  }
+
+  return c.json({ success: true, data: { id, customerId } });
 });
 
 // PUT /api/sales-leads/:id  — edit fields

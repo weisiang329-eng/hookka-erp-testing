@@ -1,8 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { CrmPanel } from "@/components/customer/CrmPanel";
 import { KycPanel } from "@/components/customer/KycPanel";
-import { WishlistPanel } from "@/components/customer/WishlistPanel";
 import { PhoneInput } from "@/components/ui/phone-input";
 import { StateSelect } from "@/components/ui/state-select";
 import { Button } from "@/components/ui/button";
@@ -3331,9 +3329,36 @@ export default function CustomersPage() {
     () => (customersResp?.success ? customersResp.data ?? [] : Array.isArray(customersResp) ? customersResp : []),
     [customersResp]
   );
+  // Salespeople come from user management — we store users.id and render the
+  // name, so a rename never rots the assignment.
+  // /api/users returns publicUser(): { id, email, displayName, isActive, … }.
+  // displayName is optional, so fall back to the email before the raw id —
+  // an id in a dropdown is unreadable.
+  const { data: usersResp } = useCachedJson<{ success?: boolean; data?: Array<{ id?: string; displayName?: string; email?: string; isActive?: boolean }> }>("/api/users");
+  const salespeople = useMemo(
+    () =>
+      (usersResp?.data ?? [])
+        .filter((u) => u.id && u.isActive !== false)
+        .map((u) => ({
+          id: String(u.id),
+          name: String(u.displayName || "").trim() || String(u.email || "").trim() || String(u.id),
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [usersResp],
+  );
+  const salespersonName = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const s of salespeople) m.set(s.id, s.name);
+    return m;
+  }, [salespeople]);
+
   const [data, setData] = useState<Customer[]>([]);
   const [expandedCustomer, setExpandedCustomer] = useState<string | null>(null);
   const [customerSearch, setCustomerSearch] = useState("");
+  // Confirmed | Potential | All. Defaults to CONFIRMED so this page looks and
+  // behaves exactly as it did before potential accounts existed — a salesperson
+  // filling the pipeline must not quietly change what the accounts team sees.
+  const [stageFilter, setStageFilter] = useState<"CONFIRMED" | "POTENTIAL" | "ALL">("CONFIRMED");
 
   // add-form state
   const [showAdd, setShowAdd] = useState(false);
@@ -3342,7 +3367,7 @@ export default function CustomersPage() {
 
   // edit customer dialog state
   const [editCustomer, setEditCustomer] = useState<Customer | null>(null);
-  const [editCustForm, setEditCustForm] = useState({ code: "", name: "", ssmNo: "", companyAddress: "", contactName: "", phone: "", email: "", creditTerms: "", creditLimitSen: 0, defaultCompanyCode: "", oemMarking: { bedframe: "NONE", sofa: "NONE", accessory: "NONE" } });
+  const [editCustForm, setEditCustForm] = useState({ code: "", name: "", ssmNo: "", companyAddress: "", contactName: "", phone: "", email: "", creditTerms: "", creditLimitSen: 0, defaultCompanyCode: "", salespersonUserId: "", oemMarking: { bedframe: "NONE", sofa: "NONE", accessory: "NONE" } });
   // Guards the Save Changes button so a double-tap on tablet doesn't fire two
   // PUTs. persistCustomer already does the optimistic-update + rollback dance,
   // but without this guard the operator can still hammer the network.
@@ -3489,6 +3514,7 @@ export default function CustomersPage() {
       creditTerms: cust.creditTerms,
       creditLimitSen: cust.creditLimitSen,
       defaultCompanyCode: cust.defaultCompanyCode || "",
+      salespersonUserId: cust.salespersonUserId || "",
       oemMarking: (() => {
         const cm = (cust as { oemMarking?: { bedframe?: string; sofa?: string; accessory?: string } }).oemMarking;
         const norm = (v: string | undefined) => (v === "TAG" || v === "LABEL" ? v : "NONE");
@@ -3519,10 +3545,26 @@ export default function CustomersPage() {
   };
 
   // ---------- KPI calculations ----------
-  const totalCustomers = data.length;
-  const totalHubs = data.reduce((s, c) => s + (c.deliveryHubs?.length || 0), 0);
-  const totalOutstanding = data.reduce((s, c) => s + c.outstandingSen, 0);
-  const totalCreditLimit = data.reduce((s, c) => s + c.creditLimitSen, 0);
+  // Stage-scoped view of the account list. Everything below — the KPI tiles and
+  // the grid — reads THIS, not `data`. A potential customer has no A/R and no
+  // approved credit line, so counting one into Total Outstanding / Total Credit
+  // Limit would misstate the numbers the accounts team reads off this page.
+  const stageScoped = useMemo(
+    () =>
+      stageFilter === "ALL"
+        ? data
+        : data.filter((c) => (c.customerStage ?? "CONFIRMED") === stageFilter),
+    [data, stageFilter],
+  );
+  const potentialCount = useMemo(
+    () => data.filter((c) => c.customerStage === "POTENTIAL").length,
+    [data],
+  );
+
+  const totalCustomers = stageScoped.length;
+  const totalHubs = stageScoped.reduce((s, c) => s + (c.deliveryHubs?.length || 0), 0);
+  const totalOutstanding = stageScoped.reduce((s, c) => s + c.outstandingSen, 0);
+  const totalCreditLimit = stageScoped.reduce((s, c) => s + c.creditLimitSen, 0);
 
   // ---------- Columns ----------
   const columns: Column<Customer>[] = [
@@ -3540,10 +3582,35 @@ export default function CustomersPage() {
       sortable: true,
       render: (_value, row) => (
         <div>
-          <p className="font-medium text-[#1F1D1B]">{row.name}</p>
+          <p className="font-medium text-[#1F1D1B] flex items-center gap-1.5">
+            {row.name}
+            {/* Only POTENTIAL is badged. Confirmed is the norm and badging every
+                row would be noise the operator has to read past. */}
+            {row.customerStage === "POTENTIAL" && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-[#F3F4F6] text-[#6B7280] border border-[#E2DDD8]">
+                Potential
+              </span>
+            )}
+          </p>
           <p className="text-xs text-[#9CA3AF]">{row.contactName}</p>
         </div>
       ),
+    },
+    {
+      key: "salespersonUserId",
+      label: "Salesperson",
+      width: "140px",
+      sortable: true,
+      // Stored as users.id, rendered as the name — so renaming a user in User
+      // Management never orphans the assignment.
+      render: (_value, row) => {
+        const name = row.salespersonUserId ? salespersonName.get(row.salespersonUserId) : "";
+        return name ? (
+          <span className="text-[#1F1D1B]">{name}</span>
+        ) : (
+          <span className="text-[#C9C3BC]">—</span>
+        );
+      },
     },
     {
       key: "deliveryHubs" as keyof Customer,
@@ -3689,7 +3756,7 @@ export default function CustomersPage() {
   ];
 
   const filteredData = customerSearch.trim()
-    ? data.filter((c) => {
+    ? stageScoped.filter((c) => {
         const q = customerSearch.toLowerCase();
         return (
           (c.code ?? "").toLowerCase().includes(q) ||
@@ -3698,7 +3765,7 @@ export default function CustomersPage() {
           (c.phone ?? "").toLowerCase().includes(q)
         );
       })
-    : data;
+    : stageScoped;
 
   return (
     <div className="space-y-6">
@@ -3710,7 +3777,41 @@ export default function CustomersPage() {
             Manage customer accounts, delivery hubs, and credit
           </p>
         </div>
+        {/* Confirmed | Potential | All. Potential accounts come from the Sales
+            Pipeline and are not billable, so they stay out of the default view. */}
+        <div className="flex items-center rounded-lg border border-[#E2DDD8] bg-white p-0.5">
+          {([
+            { key: "CONFIRMED", label: "Confirmed" },
+            { key: "POTENTIAL", label: "Potential" },
+            { key: "ALL", label: "All" },
+          ] as const).map((opt) => (
+            <button
+              key={opt.key}
+              onClick={() => setStageFilter(opt.key)}
+              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                stageFilter === opt.key
+                  ? "bg-[#1F1D1B] text-white"
+                  : "text-[#6B7280] hover:bg-[#FAF9F7]"
+              }`}
+            >
+              {opt.label}
+              {opt.key === "POTENTIAL" && potentialCount > 0 && (
+                <span className={`ml-1.5 tabular-nums ${stageFilter === opt.key ? "text-white/70" : "text-[#9CA3AF]"}`}>
+                  {potentialCount}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
       </div>
+
+      {stageFilter !== "CONFIRMED" && potentialCount > 0 && (
+        <div className="rounded-lg border border-[#E7DFC9] bg-[#FBF7EA] px-4 py-2.5 text-xs text-[#6B5C32]">
+          Potential customers come from the Sales Pipeline. You can assign SKUs,
+          maintenance and combos to them and quote from them — but they cannot be
+          used on a sales order until they are confirmed.
+        </div>
+      )}
 
       {/* KPI Cards */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
@@ -4034,8 +4135,11 @@ export default function CustomersPage() {
               )}
             </CardContent>
           </Card>
-          <CrmPanel customerId={cust.id} customerName={cust.name} />
-          <WishlistPanel customerId={cust.id} />
+          {/* CRM (contacts + activity) lives in the Sales Pipeline lead drawer,
+              not here — owner 2026-08-01: the Pipeline is where the whole contact
+              history is kept, and this page is for what you DO with an account
+              (SKUs, maintenance, combos, quotations). Wishlist was retired
+              outright in the same pass; assigning SKUs covers that need. */}
           <KycPanel customerId={cust.id} />
           <CustomerProductsPanel customerId={cust.id} customerName={cust.name} customer={cust} />
           <CustomerMaintenancePanel customerId={cust.id} customerName={cust.name} />
@@ -4140,6 +4244,31 @@ export default function CustomersPage() {
                       </select>
                     </div>
                   )}
+                  {/* Salesperson who owns the account. Sourced from User
+                      Management; we store users.id and render the name, so a
+                      rename in Settings never orphans the assignment. */}
+                  <div>
+                    <label className="block text-xs text-[#6B7280] mb-1">Salesperson</label>
+                    <select
+                      value={editCustForm.salespersonUserId}
+                      onChange={(e) => setEditCustForm(f => ({ ...f, salespersonUserId: e.target.value }))}
+                      className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20"
+                      aria-label="Salesperson who owns this account"
+                    >
+                      <option value="">Unassigned</option>
+                      {salespeople.map((s) => (
+                        <option key={s.id} value={s.id}>{s.name}</option>
+                      ))}
+                      {/* An assignment whose user was deactivated must stay
+                          visible, or saving the dialog would silently clear it. */}
+                      {editCustForm.salespersonUserId &&
+                        !salespeople.some((s) => s.id === editCustForm.salespersonUserId) && (
+                          <option value={editCustForm.salespersonUserId}>
+                            {salespersonName.get(editCustForm.salespersonUserId) ?? "(inactive user)"}
+                          </option>
+                        )}
+                    </select>
+                  </div>
                   {/* OEM product marking — per category, what to attach on this
                       customer's finished goods. Shows on the Fab Cut / Fab Sew
                       sticker Notes so the line knows (see customers.ts oem_marking). */}

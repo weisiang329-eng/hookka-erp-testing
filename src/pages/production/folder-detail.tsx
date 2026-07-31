@@ -121,11 +121,11 @@ export default function ProductionFolderDetailPage() {
       setFolder(fJson.data);
       const memberSet = new Set(fJson.data.jobCardIds);
 
-      // 2. Pull production-orders matrix (minimal payload) and pick out the
-      //    JCs whose id is in this folder. Could be optimised with a
-      //    dedicated /folder-rows endpoint later, but this reuses the
-      //    matrix's KV cache so it's fast.
-      const poRes = await fetch("/api/production-orders?fields=minimal&include=jobCards", { credentials: "include" });
+      // 2. Pull ONLY the production orders this folder's job cards belong to
+      //    (perf 2026-07-31: the dedicated /rows endpoint replaced pulling the
+      //    whole ~22MB PO matrix just to filter it down). Same minimal
+      //    PO+jobCards shape, so the member-JC filter below is unchanged.
+      const poRes = await fetch(`/api/production-folders/${encodeURIComponent(folderId)}/rows`, { credentials: "include" });
       const poJson = (await poRes.json()) as {
         success: boolean;
         data: Array<{

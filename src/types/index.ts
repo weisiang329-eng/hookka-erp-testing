@@ -178,6 +178,11 @@ export type RawMaterial = {
   // the shipping wire format coerces null→0 anyway.
   minStock?: number;
   maxStock?: number;
+  // Sheet dimensions (inches) for FILLER (sponge) area-based consumption
+  // (owner 2026-07-30). One sheet's area = length × width; a BOM cut piece
+  // consumes cutArea ÷ sheetArea of a sheet.
+  sheetLengthIn?: number | null;
+  sheetWidthIn?: number | null;
 };
 
 // --- Workers ---

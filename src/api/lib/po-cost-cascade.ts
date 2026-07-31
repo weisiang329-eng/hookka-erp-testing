@@ -129,6 +129,14 @@ type MaterialLine = {
   qtyPerUnit: number;
   wastePct: number;          // 0..100
   inventoryCode?: string;    // preferred mapping to raw_materials.itemCode
+  // FILLER (sponge) area-based consumption (owner 2026-07-30). When a BOM
+  // material line carries a cut size (inches), the resolved RM's sheet size
+  // converts qtyPerUnit (cut-piece count) into a FRACTION of a sheet:
+  //   sheets consumed = qtyPerUnit × (cutL×cutW) ÷ (sheetL×sheetW).
+  // Thickness cancels (the piece is cut the full thickness of the sheet), so
+  // area is enough. No cut size → consumes by qtyPerUnit as before.
+  cutLengthIn?: number;
+  cutWidthIn?: number;
   // When set, this BOM line is bound to a per-SO field rather than a
   // fixed inventory item. resolveBomMaterials substitutes inventoryCode
   // with the PO's snapshotted SO value before FIFO lookup runs:
@@ -227,6 +235,12 @@ function collectTreeMaterials(
         row.autoDetect === "FABRIC" || row.autoDetect === "LEG"
           ? row.autoDetect
           : undefined;
+      // FILLER (sponge) cut size, if the BOM author entered one (inches). Read
+      // dual-keyed so both camelCase (editor) and snake_case survive.
+      const cutLenRaw = (row.cutLengthIn ?? row.cut_length_in) as unknown;
+      const cutWidRaw = (row.cutWidthIn ?? row.cut_width_in) as unknown;
+      const cutLengthIn = Number(cutLenRaw) > 0 ? Number(cutLenRaw) : undefined;
+      const cutWidthIn = Number(cutWidRaw) > 0 ? Number(cutWidRaw) : undefined;
       // autoDetect lines may have empty code/name at authoring time — keep
       // them so the substitution step downstream can resolve them. The
       // (code || name) guard would otherwise drop them silently.
@@ -238,6 +252,8 @@ function collectTreeMaterials(
           wastePct: waste,
           inventoryCode,
           autoDetect,
+          cutLengthIn,
+          cutWidthIn,
           ownerDeptCodes,
           ownerWipKey: owner?.wipKey,
           ownerWipQty: owner?.wipQty,
@@ -524,41 +540,54 @@ async function substituteAutoDetectMaterials(
 // (fabric / wood / foam — see src/lib/repair-scope.ts). It is a
 // rename-map-known identifier, so the adapter translates it in the
 // explicit projection (unlike the BUG-2026-06-10-001 runtime-column case).
-async function resolveRmFromBom(
-  db: D1Database,
-  line: MaterialLine,
-): Promise<{
+type ResolvedRm = {
   id: string;
   itemCode: string;
   description: string;
   itemGroup: string | null;
-} | null> {
+  // Sheet dims for FILLER area-based consumption (owner 2026-07-30). Read
+  // dual-keyed off SELECT * — the columns are runtime-added and may be absent
+  // on a fresh DB, so we must NOT name them in the SELECT (that would throw).
+  sheetLengthIn: number | null;
+  sheetWidthIn: number | null;
+};
+function toResolvedRm(row: Record<string, unknown> | null): ResolvedRm | null {
+  if (!row) return null;
+  const sl = (row.sheet_length_in ?? row.sheetLengthIn) as number | null | undefined;
+  const sw = (row.sheet_width_in ?? row.sheetWidthIn) as number | null | undefined;
+  return {
+    id: String(row.id ?? ""),
+    itemCode: String(row.itemCode ?? ""),
+    description: String(row.description ?? ""),
+    itemGroup: (row.itemGroup ?? null) as string | null,
+    sheetLengthIn: sl != null ? Number(sl) : null,
+    sheetWidthIn: sw != null ? Number(sw) : null,
+  };
+}
+async function resolveRmFromBom(
+  db: D1Database,
+  line: MaterialLine,
+): Promise<ResolvedRm | null> {
   if (line.inventoryCode) {
     const hit = await db
-      .prepare(
-        "SELECT id, itemCode, description, itemGroup FROM raw_materials WHERE itemCode = ? LIMIT 1",
-      )
+      .prepare("SELECT * FROM raw_materials WHERE itemCode = ? LIMIT 1")
       .bind(line.inventoryCode)
-      .first<{ id: string; itemCode: string; description: string; itemGroup: string | null }>();
-    if (hit) return hit;
+      .first<Record<string, unknown>>();
+    if (hit) return toResolvedRm(hit);
   }
   if (line.code) {
     const hit = await db
-      .prepare(
-        "SELECT id, itemCode, description, itemGroup FROM raw_materials WHERE itemCode = ? LIMIT 1",
-      )
+      .prepare("SELECT * FROM raw_materials WHERE itemCode = ? LIMIT 1")
       .bind(line.code)
-      .first<{ id: string; itemCode: string; description: string; itemGroup: string | null }>();
-    if (hit) return hit;
+      .first<Record<string, unknown>>();
+    if (hit) return toResolvedRm(hit);
   }
   if (line.name) {
     const hit = await db
-      .prepare(
-        "SELECT id, itemCode, description, itemGroup FROM raw_materials WHERE description = ? COLLATE NOCASE LIMIT 1",
-      )
+      .prepare("SELECT * FROM raw_materials WHERE description = ? COLLATE NOCASE LIMIT 1")
       .bind(line.name)
-      .first<{ id: string; itemCode: string; description: string; itemGroup: string | null }>();
-    if (hit) return hit;
+      .first<Record<string, unknown>>();
+    if (hit) return toResolvedRm(hit);
   }
   return null;
 }
@@ -663,7 +692,7 @@ export async function consumeRawMaterialsForPO(
       ? repairComponentScale(line, repairScope)
       : 1;
     if (componentScale === null) continue;
-    const required =
+    let required =
       line.qtyPerUnit *
       po.quantity *
       (1 + Math.max(0, line.wastePct || 0) / 100) *
@@ -671,6 +700,27 @@ export async function consumeRawMaterialsForPO(
     if (required <= 0) continue;
 
     const rm = await resolveRmFromBom(db, line);
+
+    // FILLER (sponge) area-based consumption (owner 2026-07-30): a BOM line
+    // with a cut size (inches) consumes a FRACTION of a sheet, not whole
+    // pieces — sheets = (cut area ÷ sheet area) × qty. Applied only when BOTH
+    // the line's cut size and the resolved RM's sheet size are present; any
+    // gap falls back to the plain qtyPerUnit path (no regression). Guard
+    // against a zero/absent sheet area (would otherwise divide by zero).
+    if (
+      rm &&
+      line.cutLengthIn &&
+      line.cutWidthIn &&
+      rm.sheetLengthIn &&
+      rm.sheetWidthIn
+    ) {
+      const sheetArea = rm.sheetLengthIn * rm.sheetWidthIn;
+      const cutArea = line.cutLengthIn * line.cutWidthIn;
+      if (sheetArea > 0 && cutArea > 0) {
+        required = required * (cutArea / sheetArea);
+      }
+    }
+    if (required <= 0) continue;
 
     // Repair Scope: out-of-scope material → skip before any consumption.
     // Class lookup needs the resolved itemGroup, hence after resolveRmFromBom

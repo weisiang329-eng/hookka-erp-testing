@@ -1734,7 +1734,7 @@ export default function InventoryPage() {
 
   // Edit RM dialog state
   const [editRM, setEditRM] = useState<RawMaterial | null>(null);
-  const [editRMForm, setEditRMForm] = useState({ itemCode: "", description: "", baseUOM: "", itemGroup: "", balanceQty: 0 });
+  const [editRMForm, setEditRMForm] = useState({ itemCode: "", description: "", baseUOM: "", itemGroup: "", balanceQty: 0, sheetLengthIn: "", sheetWidthIn: "" });
   const [savingRM, setSavingRM] = useState(false);
   // Delete-in-flight flag so the dialog footer can disable both buttons while
   // DELETE /api/raw-materials/:id is in transit. Mirrors the rmSaving / busy
@@ -1766,6 +1766,8 @@ export default function InventoryPage() {
       baseUOM: row.baseUOM,
       itemGroup: row.itemGroup,
       balanceQty: row.balanceQty,
+      sheetLengthIn: row.sheetLengthIn != null ? String(row.sheetLengthIn) : "",
+      sheetWidthIn: row.sheetWidthIn != null ? String(row.sheetWidthIn) : "",
     });
     setRmBatches([]);
     setRmBatchesLoading(true);
@@ -3089,6 +3091,21 @@ export default function InventoryPage() {
                 <Input value={editRMForm.itemGroup} onChange={(e) => setEditRMForm(f => ({ ...f, itemGroup: e.target.value }))} />
               </div>
 
+              {/* Sheet size (inches) — used for FILLER / sponge area-based
+                  consumption. One sheet's area = length × width; a BOM cut piece
+                  consumes cutArea ÷ sheetArea of a sheet. Leave blank for
+                  non-sheet materials (consumption then uses the plain qty). */}
+              <div>
+                <label className="block text-xs text-[#6B7280] mb-1">
+                  Sheet size <span className="text-[#9CA3AF]">(inches — for sponge / sheet materials; blank = not used)</span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <Input type="number" placeholder="Length" onFocus={(e) => e.currentTarget.select()} value={editRMForm.sheetLengthIn} onChange={(e) => setEditRMForm(f => ({ ...f, sheetLengthIn: e.target.value }))} />
+                  <span className="text-[#9CA3AF]">×</span>
+                  <Input type="number" placeholder="Width" onFocus={(e) => e.currentTarget.select()} value={editRMForm.sheetWidthIn} onChange={(e) => setEditRMForm(f => ({ ...f, sheetWidthIn: e.target.value }))} />
+                </div>
+              </div>
+
               {/* Source batches in FIFO order — backed by rm_batches joined
                   to grns to recover the originating Purchase Order No. The
                   FIFO ordering matches what the cost-cascade uses to consume
@@ -3211,6 +3228,8 @@ export default function InventoryPage() {
                             baseUOM: editRMForm.baseUOM,
                             itemGroup: editRMForm.itemGroup.trim(),
                             balanceQty: editRMForm.balanceQty,
+                            sheetLengthIn: editRMForm.sheetLengthIn.trim() === "" ? null : Number(editRMForm.sheetLengthIn),
+                            sheetWidthIn: editRMForm.sheetWidthIn.trim() === "" ? null : Number(editRMForm.sheetWidthIn),
                           }),
                         },
                       );
@@ -3244,6 +3263,8 @@ export default function InventoryPage() {
                                 baseUOM: editRMForm.baseUOM,
                                 itemGroup: editRMForm.itemGroup.trim(),
                                 balanceQty: editRMForm.balanceQty,
+                                sheetLengthIn: editRMForm.sheetLengthIn.trim() === "" ? null : Number(editRMForm.sheetLengthIn),
+                                sheetWidthIn: editRMForm.sheetWidthIn.trim() === "" ? null : Number(editRMForm.sheetWidthIn),
                               }
                             : r,
                         ),

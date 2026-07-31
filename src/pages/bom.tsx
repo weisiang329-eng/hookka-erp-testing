@@ -43,6 +43,12 @@ type WIPMaterial = {
   // (floor: orders smaller than baseline still consume baseQty per rule).
   // See src/api/lib/material-scaling.ts for the apply helpers.
   scaling?: MaterialScaling[];
+  // FILLER (sponge) cut size in inches (owner 2026-07-30). When this material
+  // resolves to a sheet raw material (with a sheet size), consumption deducts
+  // cutArea ÷ sheetArea of a sheet per piece instead of whole pieces. Only
+  // shown/used for FILLER-group materials.
+  cutLengthIn?: number;
+  cutWidthIn?: number;
 };
 
 type CodeSegment = {
@@ -135,6 +141,17 @@ const DEPT_LABELS: Record<string, string> = {
 // Data lives in D1 under kv_config('variants-config'); the in-memory cache is
 // primed at dashboard mount (see DashboardLayout.tsx) so this sync API stays
 // ergonomic for the dozens of call sites here.
+// A BOM material is a FILLER (sponge / sheet) when the raw material it points
+// to belongs to a FILLER item group — then its consumption is area-based
+// (cut size ÷ sheet size). autoDetect (fabric / leg) lines are never filler.
+function isFillerMaterial(m: WIPMaterial, rawMaterials: RawMaterialOption[]): boolean {
+  if (m.autoDetect) return false;
+  const code = m.code || m.inventoryCode;
+  if (!code) return false;
+  const rm = rawMaterials.find((o) => o.itemCode === code);
+  return !!rm && /FILLER/i.test(rm.itemGroup || "");
+}
+
 function getProductionMinutes(deptCode: string, category: string): number {
   if (typeof window === "undefined") return 0;
   const cfg = getVariantsConfigSync();
@@ -2247,6 +2264,15 @@ function CreateBOMDialog({
                           )}
                           <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
                           <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
+                          {isFillerMaterial(m, rawMaterials) && (
+                            <span className="flex items-center gap-0.5 text-[10px] text-[#B8601A] whitespace-nowrap" title="Cut size (inches) — consumes cutArea ÷ sheetArea of a sheet">
+                              cut
+                              <input type="number" placeholder="L" onFocus={(e) => e.currentTarget.select()} value={m.cutLengthIn ?? ""} onChange={(e) => updateWIPMaterial(wi, mi, "cutLengthIn", parseFloat(e.target.value) || 0)} className="w-11 border border-[#E8B786] rounded px-1 py-0.5" />
+                              ×
+                              <input type="number" placeholder="W" onFocus={(e) => e.currentTarget.select()} value={m.cutWidthIn ?? ""} onChange={(e) => updateWIPMaterial(wi, mi, "cutWidthIn", parseFloat(e.target.value) || 0)} className="w-11 border border-[#E8B786] rounded px-1 py-0.5" />
+                              in
+                            </span>
+                          )}
                           <button onClick={() => removeWIPMaterial(wi, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
                             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
                           </button>
@@ -2553,6 +2579,15 @@ function SubWIPTree({
                   )}
                   <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.qty} onChange={(e) => onUpdateMaterial(childPath, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
                   <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
+                  {isFillerMaterial(m, rawMaterials) && (
+                    <span className="flex items-center gap-0.5 text-[10px] text-[#B8601A] whitespace-nowrap" title="Cut size (inches) — consumes cutArea ÷ sheetArea of a sheet">
+                      cut
+                      <input type="number" placeholder="L" onFocus={(e) => e.currentTarget.select()} value={m.cutLengthIn ?? ""} onChange={(e) => onUpdateMaterial(childPath, mi, "cutLengthIn", parseFloat(e.target.value) || 0)} className="w-11 border border-[#E8B786] rounded px-1 py-0.5" />
+                      ×
+                      <input type="number" placeholder="W" onFocus={(e) => e.currentTarget.select()} value={m.cutWidthIn ?? ""} onChange={(e) => onUpdateMaterial(childPath, mi, "cutWidthIn", parseFloat(e.target.value) || 0)} className="w-11 border border-[#E8B786] rounded px-1 py-0.5" />
+                      in
+                    </span>
+                  )}
                   <button onClick={() => onRemoveMaterial(childPath, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
                     <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
                   </button>
@@ -3445,6 +3480,15 @@ function EditBOMDialog({
                           )}
                           <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
                           <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
+                          {isFillerMaterial(m, rawMaterials) && (
+                            <span className="flex items-center gap-0.5 text-[10px] text-[#B8601A] whitespace-nowrap" title="Cut size (inches) — consumes cutArea ÷ sheetArea of a sheet">
+                              cut
+                              <input type="number" placeholder="L" onFocus={(e) => e.currentTarget.select()} value={m.cutLengthIn ?? ""} onChange={(e) => updateWIPMaterial(wi, mi, "cutLengthIn", parseFloat(e.target.value) || 0)} className="w-11 border border-[#E8B786] rounded px-1 py-0.5" />
+                              ×
+                              <input type="number" placeholder="W" onFocus={(e) => e.currentTarget.select()} value={m.cutWidthIn ?? ""} onChange={(e) => updateWIPMaterial(wi, mi, "cutWidthIn", parseFloat(e.target.value) || 0)} className="w-11 border border-[#E8B786] rounded px-1 py-0.5" />
+                              in
+                            </span>
+                          )}
                           <button onClick={() => removeWIPMaterial(wi, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
                             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
                           </button>

@@ -76,9 +76,18 @@ type RawMaterialRow = {
   itemType: string | null;
   stockControl: number | null;
   mainSupplierCode: string | null;
+  // Sheet dimensions for FILLER (sponge) area-based consumption (owner
+  // 2026-07-30). snake_case runtime-added columns; SELECT * returns them
+  // lowercase, read dual-keyed. Area per piece = length × width (inches).
+  sheet_length_in?: number | null;
+  sheet_width_in?: number | null;
+  sheetLengthIn?: number | null;
+  sheetWidthIn?: number | null;
 };
 
 type RawMaterialBody = {
+  sheetLengthIn?: number | null;
+  sheetWidthIn?: number | null;
   itemCode?: string;
   description?: string;
   baseUOM?: string;
@@ -116,7 +125,31 @@ function rowToApi(r: RawMaterialRow) {
     itemType: r.itemType ?? null,
     stockControl: (r.stockControl ?? 1) === 1,
     mainSupplierCode: r.mainSupplierCode ?? null,
+    // Read dual-keyed — runtime-added columns come back snake_case from SELECT *.
+    sheetLengthIn: (r.sheet_length_in ?? r.sheetLengthIn) ?? null,
+    sheetWidthIn: (r.sheet_width_in ?? r.sheetWidthIn) ?? null,
   };
+}
+
+// Sheet-dimension columns are self-applied at runtime (deploy does not replay
+// migration files). Awaited at the top of POST / PUT before the first write.
+let sheetDimColsEnsured = false;
+async function ensureSheetDimCols(db: D1Database): Promise<void> {
+  if (sheetDimColsEnsured) return;
+  for (const col of ["sheet_length_in DOUBLE PRECISION", "sheet_width_in DOUBLE PRECISION"]) {
+    try {
+      await db.prepare(`ALTER TABLE raw_materials ADD COLUMN IF NOT EXISTS ${col}`).run();
+    } catch {
+      /* column already exists / DDL transiently rejected */
+    }
+  }
+  sheetDimColsEnsured = true;
+}
+
+function numOrNull(v: unknown): number | null {
+  if (v === undefined || v === null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 function stockControlFromBody(body: RawMaterialBody, fallback = 1): number {
@@ -218,6 +251,7 @@ app.post("/", async (c) => {
   const denied = await requirePermission(c, "raw-materials", "create");
   if (denied) return denied;
   await ensureDupCodesUnlocked(c.var.DB);
+  await ensureSheetDimCols(c.var.DB);
   let body: RawMaterialBody;
   try {
     body = (await c.req.json()) as RawMaterialBody;
@@ -264,8 +298,9 @@ app.post("/", async (c) => {
     `INSERT INTO raw_materials
        (id, itemCode, description, baseUOM, itemGroup, isActive, balanceQty,
         minStock, maxStock, status, notes, created_at, updated_at,
-        uomCount, itemType, stockControl, mainSupplierCode)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        uomCount, itemType, stockControl, mainSupplierCode,
+        sheet_length_in, sheet_width_in)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
     id,
     itemCode,
@@ -284,6 +319,8 @@ app.post("/", async (c) => {
     itemType,
     stockControl,
     mainSupplierCode,
+    numOrNull(body.sheetLengthIn),
+    numOrNull(body.sheetWidthIn),
   );
 
   // If this row is a fabric group, cascade into fabrics + fabric_trackings
@@ -373,16 +410,27 @@ app.put("/:id", async (c) => {
             ? body.mainSupplierCode.trim()
             : null)
         : existing.mainSupplierCode,
+    // Sheet dims — keep the existing value when the body omits the key.
+    sheetLengthIn:
+      body.sheetLengthIn !== undefined
+        ? numOrNull(body.sheetLengthIn)
+        : (existing.sheet_length_in ?? existing.sheetLengthIn ?? null),
+    sheetWidthIn:
+      body.sheetWidthIn !== undefined
+        ? numOrNull(body.sheetWidthIn)
+        : (existing.sheet_width_in ?? existing.sheetWidthIn ?? null),
   };
   const isActive = merged.status === "ACTIVE" ? 1 : 0;
   const nowIso = new Date().toISOString();
+  await ensureSheetDimCols(c.var.DB);
 
   const updateStmt = c.var.DB.prepare(
     `UPDATE raw_materials SET
        itemCode = ?, description = ?, baseUOM = ?, itemGroup = ?,
        isActive = ?, balanceQty = ?, minStock = ?, maxStock = ?,
        status = ?, notes = ?, updated_at = ?,
-       uomCount = ?, itemType = ?, stockControl = ?, mainSupplierCode = ?
+       uomCount = ?, itemType = ?, stockControl = ?, mainSupplierCode = ?,
+       sheet_length_in = ?, sheet_width_in = ?
      WHERE id = ?`,
   ).bind(
     merged.itemCode,
@@ -400,6 +448,8 @@ app.put("/:id", async (c) => {
     merged.itemType,
     merged.stockControl,
     merged.mainSupplierCode,
+    merged.sheetLengthIn,
+    merged.sheetWidthIn,
     id,
   );
 

@@ -1753,6 +1753,61 @@ export default app;
 
 // The tables our slowest endpoints hydrate from, and the columns they filter
 // or join on. Derived from the slow-SQL snippets, not from guesswork.
+/**
+ * camelCase -> snake_case, matching the column translation the D1-compat shim
+ * applies. Already-snake_case input passes through unchanged, so it is safe to
+ * run over both sides of the comparison.
+ */
+/**
+ * The name of an index that serves `table(columns...)`, or null.
+ *
+ * Two things this must get right, both learned the hard way:
+ *  - Postgres holds these columns in SNAKE_CASE (the D1-compat shim translates
+ *    on the way in), so an expectation written as `salesOrderId` has to be
+ *    compared against `sales_order_id`. Skipping that is how the first version
+ *    of this endpoint reported 12 of 14 indexes "missing" on a database that
+ *    had every one of them.
+ *  - Postgres can use a composite index for a PREFIX of its columns, so
+ *    `(org_id, posted_at)` also serves a plain `(orgId)` need. Requiring an
+ *    exact match would invent missing indexes that are already covered.
+ */
+export function indexSatisfying(
+  indexes: readonly { tablename: string; indexname: string; indexdef: string }[],
+  table: string,
+  columns: readonly string[],
+): string | null {
+  const norm = (s: string) => snakeCase(s.replace(/"/g, "").trim());
+  // An indexdef column carries its sort direction, null placement and opclass
+  // ("posted_at DESC", "name varchar_pattern_ops", "x NULLS LAST"). None of
+  // that changes which column it is, and leaving it attached made
+  // (org_id, posted_at DESC) fail to match an (orgId, postedAt) expectation —
+  // inventing a missing index that has existed all along.
+  const normIndexCol = (s: string) =>
+    norm(
+      s
+        .replace(/\s+(asc|desc)\b/gi, "")
+        .replace(/\s+nulls\s+(first|last)\b/gi, "")
+        .trim()
+        .split(/\s+/)[0] ?? "",
+    );
+  const want = columns.map(norm).join(",");
+  for (const idx of indexes) {
+    if (norm(idx.tablename) !== norm(table)) continue;
+    const m = idx.indexdef.match(/\(([^)]*)\)\s*$/);
+    if (!m) continue;
+    const cols = m[1].split(",").map(normIndexCol);
+    if (cols.slice(0, columns.length).join(",") === want) return idx.indexname;
+  }
+  return null;
+}
+
+export function snakeCase(s: string): string {
+  return s
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .toLowerCase();
+}
+
 const INDEX_EXPECTATIONS: { table: string; columns: string[]; why: string }[] = [
   { table: "sales_orders", columns: ["orgId"], why: "list queries scope by org" },
   { table: "sales_order_items", columns: ["salesOrderId"], why: "SELECT * FROM sales_order_items WHERE salesOrderId IN (...) — 15,298 rows at p95 33.0s" },
@@ -1811,18 +1866,8 @@ app.get("/db-indexes", async (c) => {
   // An expectation is satisfied when SOME index leads with the expected
   // columns in order. Postgres can use a composite index for a prefix of its
   // columns, so `(orgId, postedAt)` also covers a plain `(orgId)` need.
-  const norm = (s: string) => s.toLowerCase().replace(/"/g, "").trim();
-  const satisfied = (table: string, columns: string[]): string | null => {
-    const want = columns.map(norm).join(",");
-    for (const idx of indexRows) {
-      if (norm(idx.tablename) !== norm(table)) continue;
-      const m = idx.indexdef.match(/\(([^)]*)\)\s*$/);
-      if (!m) continue;
-      const cols = m[1].split(",").map(norm);
-      if (cols.slice(0, columns.length).join(",") === want) return idx.indexname;
-    }
-    return null;
-  };
+  const satisfied = (table: string, columns: string[]): string | null =>
+    indexSatisfying(indexRows, table, columns);
 
   const checks = INDEX_EXPECTATIONS.map((e) => {
     const by = satisfied(e.table, e.columns);
@@ -1849,7 +1894,7 @@ app.get("/db-indexes", async (c) => {
         table: t,
         approxRows: counts.get(t) ?? null,
         indexes: indexRows
-          .filter((r) => norm(r.tablename) === norm(t))
+          .filter((r) => snakeCase(r.tablename) === snakeCase(t))
           .map((r) => r.indexname),
       })),
     },

@@ -20,21 +20,31 @@
 // connects" without each page rebuilding the chain.
 //
 // The production strip is expanded by default (owner's call). Each station is a
-// job card: department, who worked it, when it finished, and estimate-vs-actual.
-// A station running over its estimate is flagged, because the point of showing
-// the flow is to see where it is stuck and whose hands it is in.
+// DEPARTMENT — job cards are raised per component, so they are rolled up by
+// `groupJobCardsByDept` and shown as one tile carrying done/total, who worked
+// it, when it finished, and estimate-vs-actual. A station running over its
+// estimate is flagged, because the point of showing the flow is to see where it
+// is stuck and whose hands it is in.
 // ---------------------------------------------------------------------------
 import { useMemo, useState } from "react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { ChevronDown, ChevronRight, Truck, User } from "lucide-react";
+import {
+  groupJobCardsByDept,
+  prettyDept,
+  type JobCard,
+} from "@/lib/job-card-stations";
 
 // --- palette ---------------------------------------------------------------
 // Matches the app's existing tokens; kept here so a node's meaning and its
 // colour are defined in one place.
+// Owner 2026-08-02:「这个UI 太软了」— the first pass sat at ~1.4:1 against the
+// card, so a wall of stations read as one grey smear. Borders and secondary
+// text are pulled darker; the three MEANINGS are unchanged.
 const C = {
-  linked: { dot: "#2F6E62", border: "#CFE0DB", bg: "#F3F8F6", text: "#1F1D1B" },
-  current: { dot: "#6B5C32", border: "#6B5C32", bg: "#FAF6EC", text: "#1F1D1B" },
-  pending: { dot: "#D1D5DB", border: "#E2DDD8", bg: "#FAFAF9", text: "#9CA3AF" },
+  linked: { dot: "#2F6E62", border: "#A9CCC3", bg: "#F1F7F5", text: "#1F1D1B" },
+  current: { dot: "#6B5C32", border: "#6B5C32", bg: "#F8F2E4", text: "#1F1D1B" },
+  pending: { dot: "#C2BDB6", border: "#D5CFC8", bg: "#F7F6F4", text: "#8A8577" },
 } as const;
 
 type NodeState = "linked" | "current" | "pending";
@@ -161,28 +171,6 @@ function Arrow({ solid }: { solid: boolean }) {
 
 // --- production ------------------------------------------------------------
 
-type JobCard = {
-  id: string;
-  departmentCode?: string | null;
-  departmentName?: string | null;
-  sequence?: number | null;
-  status?: string | null;
-  completedDate?: string | null;
-  pic1Name?: string | null;
-  pic2Name?: string | null;
-  estMinutes?: number | null;
-  actualMinutes?: number | null;
-};
-
-const JC_STATE: Record<string, NodeState> = {
-  COMPLETED: "linked",
-  TRANSFERRED: "linked",
-  IN_PROGRESS: "current",
-  PAUSED: "current",
-  BLOCKED: "current",
-  WAITING: "pending",
-};
-
 function StationStrip({ poId }: { poId: string }) {
   // Fetched only when the production order is expanded — a SO can carry several
   // POs of 6-8 cards each, and pulling every one up front would cost more than
@@ -190,14 +178,11 @@ function StationStrip({ poId }: { poId: string }) {
   const { data } = useCachedJson<{ success?: boolean; data?: { jobCards?: JobCard[] } }>(
     `/api/production-orders/${poId}`,
   );
-  const cards = useMemo(
-    () =>
-      [...(data?.data?.jobCards ?? [])].sort(
-        (a, b) => (a.sequence ?? 0) - (b.sequence ?? 0),
-      ),
+  const stations = useMemo(
+    () => groupJobCardsByDept(data?.data?.jobCards ?? []),
     [data],
   );
-  if (cards.length === 0) {
+  if (stations.length === 0) {
     return (
       <div className="px-3 py-2 text-xs text-[#9CA3AF]">
         No job cards on this production order yet.
@@ -206,40 +191,49 @@ function StationStrip({ poId }: { poId: string }) {
   }
   return (
     <div className="flex flex-wrap gap-1.5 px-3 pb-3">
-      {cards.map((jc) => {
-        const state = JC_STATE[(jc.status ?? "").toUpperCase()] ?? "pending";
-        const c = C[state];
-        const who = [jc.pic1Name, jc.pic2Name].filter(Boolean).join(", ");
-        const est = Number(jc.estMinutes) || 0;
-        const act = Number(jc.actualMinutes) || 0;
-        // Only worth flagging once the station actually finished — an
-        // in-progress card hasn't had its chance yet.
-        const over = state === "linked" && est > 0 && act > est;
+      {stations.map((s) => {
+        const c = C[s.state];
+        const who = s.who.join(", ");
+        // Only worth flagging once the station actually finished — a station
+        // still running hasn't had its chance yet.
+        const over =
+          s.state === "linked" && s.estMinutes > 0 && s.actualMinutes > s.estMinutes;
         return (
           <a
-            key={jc.id}
+            key={s.code}
             href={`/production/${poId}`}
-            className="block min-w-[132px] rounded-md px-2.5 py-2 hover:opacity-90"
+            className="block min-w-[136px] rounded-md px-2.5 py-2 hover:opacity-90"
             style={{
               background: c.bg,
-              border: `1px ${state === "pending" ? "dashed" : "solid"} ${c.border}`,
+              border: `1px ${s.state === "pending" ? "dashed" : "solid"} ${c.border}`,
             }}
-            title={`${jc.departmentName ?? jc.departmentCode ?? ""} — ${jc.status ?? ""}`}
+            title={`${s.name} — ${s.done}/${s.total} job card(s) done`}
           >
             <div className="mb-0.5 flex items-center gap-1.5">
-              <StateDot state={state} />
+              <StateDot state={s.state} />
               <span
-                className="truncate text-[11px] font-medium"
-                style={{ color: state === "pending" ? C.pending.text : "#1F1D1B" }}
+                className="truncate text-[11px] font-semibold"
+                style={{ color: s.state === "pending" ? C.pending.text : "#1F1D1B" }}
               >
-                {jc.departmentName || jc.departmentCode || "—"}
+                {s.name}
               </span>
+              {/* The roll-up must stay honest about what it merged — an
+                  operator who sees one tile still needs to know it stands for
+                  four cards. */}
+              {s.total > 1 && (
+                <span
+                  className="ml-auto flex-shrink-0 rounded px-1 text-[10px] font-semibold"
+                  style={{ background: "#fff", color: c.dot, border: `1px solid ${c.border}` }}
+                >
+                  {s.done}/{s.total}
+                </span>
+              )}
             </div>
-            <div className="text-[10px]" style={{ color: "#9A9384" }}>
-              {state === "linked"
-                ? jc.completedDate || "done"
-                : state === "current"
-                  ? (jc.status ?? "").replace(/_/g, " ").toLowerCase()
+            <div className="text-[10px]" style={{ color: "#8A8577" }}>
+              {s.state === "linked"
+                ? s.completedDate || "done"
+                : s.state === "current"
+                  ? `in progress${s.done > 0 ? ` · ${s.done} done` : ""}`
                   : "waiting"}
             </div>
             {who && (
@@ -248,12 +242,13 @@ function StationStrip({ poId }: { poId: string }) {
                 <span className="truncate">{who}</span>
               </div>
             )}
-            {est > 0 && (
+            {s.estMinutes > 0 && (
               <div
                 className="text-[10px]"
-                style={{ color: over ? "#9A3A2D" : "#9A9384" }}
+                style={{ color: over ? "#9A3A2D" : "#8A8577" }}
               >
-                {act > 0 ? `${act}m` : "—"} / est {est}m{over ? " ⚠" : ""}
+                {s.actualMinutes > 0 ? `${s.actualMinutes}m` : "—"} / est{" "}
+                {s.estMinutes}m{over ? " ⚠" : ""}
               </div>
             )}
           </a>
@@ -473,9 +468,15 @@ export function DocumentChainMap({
                         className="font-medium"
                         style={{ color: state === "pending" ? "#9CA3AF" : "#1F1D1B" }}
                       >
+                        {/* `currentDepartment` is the raw code (`WOOD_CUT`).
+                            Owner 2026-08-02:「为什么show fab cut呢」— the code
+                            is internal, and next to the station names it reads
+                            like a different thing entirely. */}
                         {done
                           ? po.completedDate || "Completed"
-                          : po.currentDepartment || "Not started"}
+                          : po.currentDepartment
+                            ? `At ${prettyDept(po.currentDepartment)}`
+                            : "Not started"}
                       </span>
                     </span>
                   </div>

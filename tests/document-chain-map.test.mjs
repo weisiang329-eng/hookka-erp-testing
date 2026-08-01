@@ -200,11 +200,13 @@ test("job cards are fetched per production order, only when expanded", () => {
 });
 
 test("a station that ran over its estimate is only flagged once it finished", () => {
-  // An in-progress card hasn't had its chance yet — flagging it would cry wolf
-  // on every job the moment it starts.
+  // An in-progress station hasn't had its chance yet — flagging it would cry
+  // wolf on every job the moment it starts. The rule is unchanged since
+  // 2026-08-01; only the operands moved, from one job card to the DEPARTMENT
+  // roll-up that replaced it (see tests/job-card-stations.test.mjs).
   assert.match(
     map,
-    /const over = state === "linked" && est > 0 && act > est;/,
+    /s\.state === "linked" && s\.estMinutes > 0 && s\.actualMinutes > s\.estMinutes/,
     "the over-estimate flag must require a completed station",
   );
 });

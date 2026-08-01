@@ -9,6 +9,60 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-02 — Houzs-ERP bug sweep: 「他们 fix 过的我们有没有类似的」
+
+Owner asked me to read Houzs-ERP's recent fixes + COEs and check Hookka for the same
+defects. Two agents mined 11 COE docs and ~200 commits; every "applicable" call below was
+confirmed by reading Hookka code, not inferred.
+
+### ✅ Shipped
+1. **SQL identifiers Postgres was folding out from under us** (#210) — one dropped column
+   still selected (hard 500 on the PO backfill route), 6 columns missing from
+   column-rename-map (both assistant tools 500'd), and **46 aliases reading back
+   `undefined`** including the DO print's entire second resolution path and every dashboard
+   KPI. Guard: `scripts/audit-sql-aliases.mjs` + `tests/sql-identifier-safety.test.mjs`.
+2. **A missing build asset returned the app shell at 200 with a 1-YEAR immutable header**
+   (#211 staging → #213 main) — measured on prod, fixed with a scoped
+   `functions/assets/[[path]].ts`, verified on staging before promotion.
+3. **Self-applied DDL swallowed every error AND memoised the failure** — one transient blip
+   on the first write after an isolate boot left a column unapplied and never retried for
+   the life of that isolate. `src/api/lib/self-apply.ts` + `tests/self-apply-retry.test.mjs`.
+
+### ⚪ Queued (verified real, not yet fixed)
+- **26 more self-apply sites** still carry the swallow-and-memoise loop. The canonical one
+  (sales-orders) is converted; the shapes vary too much for a blind script, so the rest need
+  doing by hand. Highest first: grn, invoices, purchase-orders, users.
+- **FG COGS shortfall is computed and then dropped** — `do-cost-cascade.ts:163` returns
+  `shortages`, `delivery-orders/_helpers.ts:4282` consumes only `statements`, and there is
+  NO reconcile path anywhere. Goods ship with RM0 COGS / 100% margin, permanently. Same in
+  `po-cost-cascade.ts:800`. **Read-only detector first** to size it — that sequencing is the
+  whole lesson of Houzs's inventory-costing-oversell COE.
+- **Swallowed cascades that still return 200** — `production-orders/_helpers.ts:4557`
+  (material consumption + cost ledger silently skipped, job card reports success),
+  `purchase-orders.ts:629` (intercompany mirror). Fix is additive: `movementErrors: string[]`.
+- **`scripts/clone-prod-to-staging.mjs`** hardcodes plaintext prod AND staging connection
+  strings as adjacent literals, then TRUNCATEs every shared table on the target. No
+  allow-list, no dry-run, no dump. 🟡 **Owner: rotate that credential.**
+- **`app.onError` returns 500 + the raw driver message** for every uncaught error — no
+  transient/503 branch, and it echoes internals the pg-ping endpoint deliberately refuses to.
+  `withConnRetry` matches only connection-establishment signatures.
+  `docs/INFRA-RESILIENCE-PLAYBOOK.md:53` already lists this as "written, not deployed".
+- **`three_pl_vehicles.plate_no`** has neither canonicalization nor a unique index, and
+  `delivery_orders` denormalizes `vehicleId` — one truck's history splits across spellings.
+- **`migrations-postgres/0178`** declares `supplier_scan_samples` all-camelCase; production is
+  mixed. Harmless today (CREATE IF NOT EXISTS no-ops), wrong for a fresh DB.
+- **CI**: merging a PR into `staging` produced NO push run at all, and `workflow_dispatch`
+  skips the deploy step, so staging sat undeployed until an empty commit was pushed.
+
+### ❌ Checked and NOT applicable (verified, so nobody re-checks)
+Shared-isolate `c.env.DB` mutation (we use per-request `c.set`), supabase-js 1000-row cap (no
+such dependency), the pg loader's dropped DEFAULTs (ours is a text transform; all 51
+`ADD COLUMN NOT NULL` sites carry a DEFAULT), deploy-collision (no concurrency group to
+collide), cross-company 404 (single-tenant), users→staff trigger (zero DB triggers),
+`(company_id, code)` scoping (org_id defaults to one value), doc-number truncation
+(their px measurements, our grid is different).
+
+
 ## 2026-08-01 (evening) — Render sweep beyond finance: /quality and /mail-center were worse than accounting
 
 Owner: 「finance 都解决了就去其他 module 不常开的，例如 sofa combo」. Every sidebar-reachable

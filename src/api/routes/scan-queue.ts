@@ -126,7 +126,8 @@ async function ensureScanQueueTable(
            started_at      TEXT,
            completed_at    TEXT,
            org_id          TEXT,
-           consumed_at     TIMESTAMP
+           consumed_at     TIMESTAMP,
+           sample_id       TEXT
          )`,
       )
       .run();
@@ -153,6 +154,17 @@ async function ensureScanQueueTable(
     await db
       .prepare(
         "ALTER TABLE scan_queue ADD COLUMN IF NOT EXISTS consumed_at TIMESTAMP",
+      )
+      .run();
+    // The engine writes a po_scan_samples / supplier_scan_samples row per
+    // extraction and returns its id, but the queue never stored it — so the
+    // wizards had no real sampleId to confirm against and `correctedJson` was
+    // NEVER written. That single gap starved the OCR accuracy dashboard (its
+    // query is `WHERE correctedJson IS NOT NULL`) AND the distill gold pool.
+    // Added 2026-08-01.
+    await db
+      .prepare(
+        "ALTER TABLE scan_queue ADD COLUMN IF NOT EXISTS sample_id TEXT",
       )
       .run();
     // Per-doc consumed tracking added 2026-06-30. A single queue row can
@@ -211,6 +223,8 @@ type ScanQueueRow = {
   completedAt: string | null;
   orgId: string | null;
   consumedAt: string | null;
+  /** The scan-sample row the engine wrote for this extraction. */
+  sampleId: string | null;
   consumedDocIdxs: number[];
 };
 
@@ -260,6 +274,7 @@ function hydrateRow(r: Record<string, unknown>): ScanQueueRow {
     batchId: String(r.batchId ?? r.batch_id ?? ""),
     kind: String(r.kind ?? "po") as ScanKind,
     fileHash: String(r.fileHash ?? r.file_hash ?? ""),
+    sampleId: (r.sampleId ?? r.sample_id ?? null) as string | null,
     fileName: String(r.fileName ?? r.file_name ?? ""),
     mimeType: String(r.mimeType ?? r.mime_type ?? ""),
     fileSize: Number(r.fileSize ?? r.file_size ?? 0),
@@ -361,7 +376,13 @@ async function processOneAtATime(
     // decision in the result writer below.
     const attemptNo = (next.attempts ?? 0) + 1;
 
-    let result: { ok: true; data: unknown } | { ok: false; error: string };
+    // `sampleId` rides along so the completion UPDATE can persist it — the
+    // wizards need a REAL scan-sample id to confirm against (see the sample_id
+    // column above). Optional because the auto-split path sets `data: null`
+    // without an extraction of its own.
+    let result:
+      | { ok: true; data: unknown; sampleId?: string | null }
+      | { ok: false; error: string };
     // When the row was auto-split into N child rows, set this so the result
     // writer below knows to mark the parent 'split' instead of 'done' and
     // NOT to write the rawJson (children own that). Stored on the parent's
@@ -608,11 +629,17 @@ async function processOneAtATime(
             `UPDATE scan_queue
                 SET status = 'done',
                     raw_json = ?,
+                    sample_id = ?,
                     completed_at = ?,
                     error = NULL
               WHERE id = ?`,
           )
-          .bind(JSON.stringify(result.data), completedAt, next.id)
+          .bind(
+            JSON.stringify(result.data),
+            result.sampleId ?? null,
+            completedAt,
+            next.id,
+          )
           .run();
       } else if (attemptNo < MAX_OCR_ATTEMPTS) {
         // Transient miss (AI call timed out, bad page, isolate hiccup) — put
@@ -888,6 +915,7 @@ app.get("/batch/:batchId", async (c) => {
       rawJson: row.rawJson,
       error: row.error,
       cached: row.status === "cached",
+      sampleId: row.sampleId ?? null,
       cacheSourceId: row.cacheSourceId,
       fileHash: row.fileHash,
       createdAt: row.createdAt,
@@ -1021,6 +1049,7 @@ app.get("/pending", async (c) => {
       rawJson: row.rawJson,
       error: row.error,
       cached: row.status === "cached",
+      sampleId: row.sampleId ?? null,
       cacheSourceId: row.cacheSourceId,
       fileHash: row.fileHash,
       createdAt: row.createdAt,
@@ -1088,6 +1117,7 @@ app.get("/:id", async (c) => {
       rawJson: hydrated.rawJson,
       error: hydrated.error,
       cached: hydrated.status === "cached",
+      sampleId: hydrated.sampleId ?? null,
       cacheSourceId: hydrated.cacheSourceId,
       fileHash: hydrated.fileHash,
       createdAt: hydrated.createdAt,

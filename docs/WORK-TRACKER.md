@@ -1956,3 +1956,39 @@ state 还是渲染期派生值；再确认建单 payload 读的是同一批 stat
   **不碰任何抽取逻辑** — 提取准确度由 scan-engine 的 prompt 决定，与 picker 匹配无关。
 - [ ] **修法（根治）**：4 套匹配器统一到 `matchByCompanyName` + 新增 `party_name_aliases`
   表（原始 OCR 名 → partyId），操作员手改一次即永久记住。见本文件 learning-loop 段。
+
+### 2026-08-01 staging 实测 QA（owner: 「你可以chromemcp去看啊 做qa啊 不要什么都要我检查」）
+
+在 staging（prod 每晚克隆）用登录态实测，非推论。测试数据已全部清理，无残留。
+
+**① ADD WOOD 匹配不到 — 根因是主档拼错，不是匹配器口径**
+供应商档案存的是 **`ADD WOORD TRADING SDN. BHD.`（code 400-A002）**— 比发票上的
+`ADD WOOD TRADING SDN BHD` 多一个 R。实测三套算法对同一输入的结果：
+
+| 算法 | 结果 |
+|---|---|
+| `pickSupplierFromName`（供应商现行） | exact 0 / normEq 0 / containing 0 → **null** |
+| `matchByCompanyName`（本来打算统一过去的那套） | **0 → null** |
+| 编辑距离排序 | **第 1 名 ADD WOORD… 距离 1；第 2 名距离 8** |
+
+⚠️ **推翻先前建议**：把供应商侧统一到 `matchByCompanyName`「顺带解决 ADD WOOD」是**错的**，
+两套都归零。主档一个字母的拼写差异只有**模糊排序**能跨过去，而这个案子第一名与第二名
+差 8 倍，预选零风险 —— 印证 owner「找最像的就好」的判断。
+→ 结论：候选排序不是 UX 优化，是这一类（主档拼错 / OCR 误读 / 缩写）的**唯一解**。
+   alias 表负责「改一次永久记住」，模糊排序负责「第一次就猜中」，两者都要。
+
+**② SO draft 删不掉 — 后端完全正常，是前端没有入口**
+- `DELETE /api/sales-orders/<不存在的id>` → **404**（不是 403）⇒ Super Admin 有 delete 权限、
+  路由正常。
+- 实建一张 DRAFT 再删 → **200 `{"success":true}`**。纯 draft 无子记录，外键不挡。
+- 真正原因：**列表页没有任何删除入口**。行右键菜单 = View / Edit / Print / Transfer to DO /
+  Transfer to Invoice / 状态log / Refresh（sales/index.tsx:798-878，无 Delete）；
+  Draft 分页工具栏只有 Convert to Confirmed + Re-assign company。
+  唯一能删的地方是**进单据详情页右上角 Delete**。
+- [ ] TODO：Draft 行菜单加 Delete（仅 DRAFT 显示）+ 选中后批量删除；后端 DELETE 端点
+  同时补状态守卫（现在 CONFIRMED 只要没子记录也照删，比删不掉危险）。
+
+**③ 编号回收 — 实测证实**
+建 `SO-2608-001` → 删掉 → 再建 → **又拿到 `SO-2608-001`**。
+证实 `generateCompanySOId` 的 MAX+1 语义：删当月最大号会被重新发放；删中间号则永久空洞。
+（对照：财务单走 `doc_no_counters` 原子计数器，只增不回收 —— 两套语义不一致。）

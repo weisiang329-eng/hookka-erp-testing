@@ -64,41 +64,6 @@ jobs:
       # runners. Mirrors the wrangler.toml `[vars] SENTRY_DSN` for the
       # worker side.
       # ---------------------------------------------------------------------
-      # Stale-chunk root cause: a Pages deployment serves ONLY its own files.
-      # Vite fingerprints every chunk, so the moment a deploy lands, the chunk
-      # names the currently-open browsers are still holding stop existing —
-      # Pages answers with the SPA fallback (index.html, text/html) and the
-      # browser refuses it as a module. Every open tab breaks, and a lazy route
-      # loaded minutes later breaks too.
-      #
-      # Client-side recovery exists (main.tsx + ErrorBoundary hard-reload), but
-      # it is a net, not a fix: the user still sees a flash or an error card.
-      # The real fix is to stop deleting the old files. Content-hashed names
-      # cannot collide, so carrying previous builds' assets alongside the new
-      # ones is safe — an old tab keeps resolving its chunks until it next
-      # reloads, and nothing breaks at all.
-      #
-      # The history is a rolling cache, pruned by age so it cannot grow forever.
-      - name: Restore previous builds' assets
-        uses: actions/cache/restore@v4
-        with:
-          path: .asset-history
-          key: asset-history-${{ github.ref_name }}-${{ github.run_id }}
-          restore-keys: |
-            asset-history-${{ github.ref_name }}-
-
-      - run: npm run build:strict
-        env:
-          VITE_SENTRY_DSN: https://0b81e5f99dab7b31f74514a5bb9f6f62@o4511302465814528.ingest.us.sentry.io/4511302481346560
-
-      # Bundle size budget (P7.2) — temporarily non-blocking after the
-      # foundation-rollup merge introduced a Windows-vs-Linux content-hash
-      # length artifact (9 vs 8 chars splitting/merging the same stem
-      # differently across platforms). The baseline written from a local
-      # Windows build doesn't match what CI's Linux build emits. Re-flip
-      # to blocking after regenerating the baseline cleanly from a CI run.
-      # TODO: write a workflow step that snapshots baseline on `main`
-      # pushes only, so this stays self-healing.
       - name: Bundle size budget
         run: node scripts/check-bundle-size.mjs
         continue-on-error: true
@@ -110,26 +75,6 @@ jobs:
       # Fill in every asset a previous deploy served that this build no longer
       # emits. `cp -n` never overwrites, so the new build always wins for names
       # it does emit; only genuinely-retired files are carried.
-      - name: Carry previous assets into this deployment
-        run: |
-          mkdir -p .asset-history dist/assets
-          # ORDER MATTERS. Record this build FIRST, prune, and only then carry
-          # survivors into the deployment.
-          #
-          # Doing it the other way round — carry, then copy dist back into the
-          # history — silently disables the prune: `cp` does not preserve mtime,
-          # so every carried file is re-stamped with today's date on every
-          # deploy and nothing is ever 14 days old. The history would grow
-          # without bound.
-          cp -R dist/assets/. .asset-history/ 2>/dev/null || true
-          pruned=$(find .asset-history -type f -mtime +14 | wc -l)
-          find .asset-history -type f -mtime +14 -delete 2>/dev/null || true
-          before=$(find dist/assets -type f | wc -l)
-          cp -Rn .asset-history/. dist/assets/ 2>/dev/null || true
-          after=$(find dist/assets -type f | wc -l)
-          echo "this build: $before file(s); carried forward $((after - before)) retired; serving $after"
-          echo "history: $(find .asset-history -type f | wc -l) file(s), $(du -sh .asset-history | cut -f1), pruned $pruned older than 14d"
-
       - name: Deploy to Cloudflare Pages (main / branch push)
         if: github.event_name == 'push'
         uses: cloudflare/wrangler-action@v3
@@ -138,13 +83,6 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy dist --project-name=hookka-erp-testing --branch=${{ github.ref_name }}
 
-
-      - name: Save assets for the next deploy
-        if: github.event_name == 'push'
-        uses: actions/cache/save@v4
-        with:
-          path: .asset-history
-          key: asset-history-${{ github.ref_name }}-${{ github.run_id }}
 
       # ---------------------------------------------------------------------
       # Phase B.5 — Canary deploy on PR.

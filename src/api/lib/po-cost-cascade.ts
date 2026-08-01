@@ -44,7 +44,7 @@
 //     Legacy pre-0011 rows may still exist as ADJUSTMENT with a
 //     "WIP_COMPLETED" notes prefix — the idempotency check covers both.
 // ---------------------------------------------------------------------------
-import { fifoConsume } from "../../lib/costing";
+import { fifoConsume, QTY_EPSILON } from "../../lib/costing";
 import {
   productionCostRatePerMinuteSen,
   costingWorkerOrDefault,
@@ -860,6 +860,14 @@ export async function consumeRawMaterialsForPO(
     // × 1-2 slices each, that's ~5 extra round-trips per completion.
     // Acceptable given the consequence (silent inventory corruption).
     for (const slice of result.slices) {
+      // Defence in depth (2026-08-01). fifoConsume no longer emits float-dust
+      // slices, but ANY dust reaching the guard below turns into a bogus
+      // "race lost" throw: a drained batch has remainingQty 0, and
+      // `0 >= 6.9e-77` is false, so the UPDATE no-ops and a worker's scan
+      // fails with a concurrency error that never happened. A sub-epsilon
+      // consumption is not physically real - skip it rather than fail the
+      // whole PO completion over it.
+      if (slice.qty <= QTY_EPSILON) continue;
       const updateRes = await db
         .prepare(
           "UPDATE rm_batches SET remainingQty = remainingQty - ? WHERE id = ? AND remainingQty >= ?",

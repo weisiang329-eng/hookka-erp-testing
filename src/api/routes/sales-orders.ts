@@ -94,6 +94,8 @@ import {
   genOverrideId,
   createProductionOrdersForSO,
   generateCompanySOId,
+  ensureCompanySOIdUnique,
+  isDuplicateSoIdError,
   fetchSOWithItems,
   cascadeSOStatusToPOs,
   VALID_TRANSITIONS,
@@ -1669,6 +1671,11 @@ app.post("/", async (c) => {
       typeof body.companySODate === "string" && body.companySODate
         ? body.companySODate
         : now.split("T")[0];
+    // Storage-level uniqueness for the number about to be minted. The MAX+1
+    // read-then-write in generateCompanySOId has a race window; this index is
+    // what makes a collision fail loudly at INSERT instead of silently
+    // producing two orders with the same number (see _helpers.ts).
+    await ensureCompanySOIdUnique(c.var.DB);
     const companySOId = await generateCompanySOId(
       c.var.DB,
       isServiceOrder,
@@ -1728,7 +1735,9 @@ app.post("/", async (c) => {
     // clients). Stored uppercased to match the organisations.code convention.
     const salesOrgCode = resolveCompanyCode(body.salesOrgCode);
 
-    const statements = [
+    // Built as a factory so a lost number race can re-mint and rebuild just
+    // this statement (see the retry below) without duplicating 30 bindings.
+    const rebuildSoInsert = (soNo: string) =>
       c.var.DB.prepare(
         `INSERT INTO sales_orders (id, customerPO, customerPOId, customerPODate,
            customerSO, customerSOId, reference, customerId, customerName,
@@ -1751,8 +1760,8 @@ app.post("/", async (c) => {
         chosenHub?.id ?? null,
         chosenHub?.shortName ?? null,
         body.companySO ??
-          `${isServiceOrder ? "Service Order" : "Sales Order"} ${companySOId.split("-").pop()}`,
-        companySOId,
+          `${isServiceOrder ? "Service Order" : "Sales Order"} ${soNo.split("-").pop()}`,
+        soNo,
         body.companySODate ?? today,
         body.customerDeliveryDate ?? "",
         resolvedHookkaExpectedDD,
@@ -1768,7 +1777,10 @@ app.post("/", async (c) => {
         salesOrgCode,
         now,
         now,
-      ),
+      );
+
+    const statements = [
+      rebuildSoInsert(companySOId),
       ...items.map((item) =>
         c.var.DB.prepare(
           // repairScope: unquoted camelCase folds to the runtime-added
@@ -1812,7 +1824,29 @@ app.post("/", async (c) => {
       ),
     ];
 
-    await c.var.DB.batch(statements);
+    try {
+      await c.var.DB.batch(statements);
+    } catch (e) {
+      // Lost the MAX+1 race: another request minted this number between our
+      // read and our write, and the unique index rejected the INSERT. Nothing
+      // is persisted (the batch is atomic), so re-mint and retry once — by now
+      // the winner's row is visible, so the second read returns the next free
+      // number. A single retry is enough for realistic concurrency; a second
+      // collision surfaces rather than looping.
+      if (!isDuplicateSoIdError(e)) throw e;
+      const retryId = await generateCompanySOId(
+        c.var.DB,
+        isServiceOrder,
+        orderDateForId,
+      );
+      console.warn(
+        `[POST /api/sales-orders] ${companySOId} was taken mid-create — retrying as ${retryId}`,
+      );
+      statements[0] = rebuildSoInsert(retryId);
+      await c.var.DB.batch(statements);
+      // The response re-reads the row (fetchSOWithItems below), so the caller
+      // receives the retried number without any further plumbing.
+    }
 
     const created = await fetchSOWithItems(c.var.DB, soId);
     if (!created) {
@@ -4512,14 +4546,52 @@ app.delete("/:id", async (c) => {
   if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
-    "SELECT id FROM sales_orders WHERE id = ?",
+    "SELECT id, companySOId, status FROM sales_orders WHERE id = ?",
   )
     .bind(id)
-    .first<{ id: string }>();
+    .first<{ id: string; companySOId: string | null; status: string | null }>();
   if (!existing) {
     return c.json({ success: false, error: "Order not found" }, 404);
   }
-  await c.var.DB.prepare("DELETE FROM sales_orders WHERE id = ?").bind(id).run();
+
+  // Status guard (owner 2026-08-01). This endpoint had NO status check: any SO
+  // with no child rows could be deleted outright, CONFIRMED and shipped ones
+  // included — a far worse failure than a draft that won't delete. Deleting a
+  // draft is just discarding a keying mistake; deleting a live order destroys
+  // the audit trail for something the business already acted on. Cancel those
+  // instead (status → CANCELLED keeps the record and its number).
+  const status = (existing.status ?? "").toUpperCase();
+  if (status !== "DRAFT") {
+    return c.json(
+      {
+        success: false,
+        error: `${existing.companySOId ?? "This order"} is ${status || "not a draft"} — only DRAFT orders can be deleted. Cancel it instead to keep the record.`,
+      },
+      409,
+    );
+  }
+
+  // A never-confirmed draft has no production orders / DOs / invoices (those
+  // are created on confirm), so the FK-restricted children can't exist. If one
+  // somehow does, Postgres rejects the DELETE and the raw error surfaced as a
+  // bare "HTTP 500" with nothing actionable — translate it instead.
+  try {
+    await c.var.DB.prepare("DELETE FROM sales_orders WHERE id = ?")
+      .bind(id)
+      .run();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/foreign key|violates|constraint/i.test(msg)) {
+      return c.json(
+        {
+          success: false,
+          error: `${existing.companySOId ?? "This order"} still has linked documents (production order, delivery order or invoice) — remove those first, or cancel the order instead.`,
+        },
+        409,
+      );
+    }
+    throw e;
+  }
   return c.json({ success: true });
 });
 

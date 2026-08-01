@@ -574,6 +574,16 @@ export async function generateCompanySOId(
     yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}`;
   }
   const prefix = isServiceOrder ? `SV-${yymm}-` : `SO-${yymm}-`;
+  // MAX+1 read-then-write. Two concurrent creates both read the same maximum
+  // and both mint the same number — the same race class as the double-invoice
+  // bug (BUG-2026-07-14-006), which was closed with a storage-level unique
+  // index. `ensureCompanySOIdUnique` below is that index for this column; the
+  // INSERT is what actually fails on a collision, and the caller retries.
+  //
+  // Sorting is LEXICOGRAPHIC on the whole id, which is why the sequence is
+  // zero-padded to 3. It stays correct to 999 per month; beyond that
+  // "SO-2608-1000" would sort below "SO-2608-999". Highest month to date is
+  // well under that — noted so it isn't a silent cliff.
   const res = await db
     .prepare(
       "SELECT companySOId FROM sales_orders WHERE companySOId LIKE ? ORDER BY companySOId DESC LIMIT 1",
@@ -584,6 +594,36 @@ export async function generateCompanySOId(
     ? Number(res.companySOId.split("-").pop()) + 1
     : 1;
   return `${prefix}${String(seq).padStart(3, "0")}`;
+}
+
+// Storage-level guard for the MAX+1 race above (owner 2026-08-01). Without it
+// the DB happily accepts two orders carrying the same companySOId — measured:
+// the column had only a plain index, never a unique one. Idempotent, once per
+// isolate, failure swallowed so a lingering duplicate can't block order entry.
+let _soIdUniqueMig: Promise<void> | null = null;
+export function ensureCompanySOIdUnique(db: D1Database): Promise<void> {
+  if (!_soIdUniqueMig) {
+    _soIdUniqueMig = db
+      .prepare(
+        `CREATE UNIQUE INDEX IF NOT EXISTS uniq_sales_orders_company_so_id
+           ON sales_orders (company_so_id)
+           WHERE company_so_id IS NOT NULL`,
+      )
+      .run()
+      .then(() => undefined)
+      .catch(() => undefined);
+  }
+  return _soIdUniqueMig;
+}
+
+/** True when an error is the unique-violation from the index above. */
+export function isDuplicateSoIdError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return (
+    /uniq_sales_orders_company_so_id/i.test(msg) ||
+    (/duplicate key|unique constraint|23505/i.test(msg) &&
+      /company_so_id|companySOId/i.test(msg))
+  );
 }
 
 export async function fetchSOWithItems(

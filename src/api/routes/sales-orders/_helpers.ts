@@ -6,7 +6,6 @@
 // prefixes, one-level-deeper relative import paths, and this header were added).
 // The route module re-exports the ones external importers / tests depend on.
 // ---------------------------------------------------------------------------
-import { withOrgScope } from "../../lib/tenant";
 import { readCompanyCode } from "../../../lib/company-dimension";
 import {
   createProductionOrdersForOrder,
@@ -580,13 +579,18 @@ export async function generateCompanySOId(
   // index. `ensureCompanySOIdUnique` below is that index for this column; the
   // INSERT is what actually fails on a collision, and the caller retries.
   //
-  // Sorting is LEXICOGRAPHIC on the whole id, which is why the sequence is
-  // zero-padded to 3. It stays correct to 999 per month; beyond that
-  // "SO-2608-1000" would sort below "SO-2608-999". Highest month to date is
-  // well under that — noted so it isn't a silent cliff.
+  // Order by the sequence NUMERICALLY, not by the whole id as text. The ids are
+  // zero-padded to 3, so a lexicographic sort agreed with a numeric one only up
+  // to 999 — at the 1000th order in a month "SO-2608-1000" sorts BELOW
+  // "SO-2608-999" and the next mint would collide with an existing number
+  // instead of moving past it. Padding stays at 3 so existing ids are unchanged
+  // and a 4-digit tail simply sorts after them.
   const res = await db
     .prepare(
-      "SELECT companySOId FROM sales_orders WHERE companySOId LIKE ? ORDER BY companySOId DESC LIMIT 1",
+      `SELECT companySOId FROM sales_orders
+        WHERE companySOId LIKE ?
+        ORDER BY CAST(NULLIF(regexp_replace(companySOId, '^.*-', ''), '') AS INTEGER) DESC
+        LIMIT 1`,
     )
     .bind(`${prefix}%`)
     .first<{ companySOId: string }>();

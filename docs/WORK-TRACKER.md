@@ -1921,3 +1921,38 @@ Owner asks logged verbatim before work (multi-part message, CLAUDE.md rule):
   by customer × category SOFA/BEDFRAME/ACCESSORY，逻辑在 ocr-accuracy-core.ts）和
   Supplier（只 by supplier）。owner 要 **PI / GR 分开**，但两者共用 supplier_scan_samples
   且没有区分列 —— 需要先决定怎么标记来源（docType？还是建单时回写）。
+
+### 2026-08-01 全 OCR 面「显示值 vs state」审计（owner: 「确认看全部OCR功能 这个很重要」）
+
+范围 = 全部 4 个 OCR 面。方法：列出每个受控输入的 `value={...}` 绑定，逐个判定它读的是
+state 还是渲染期派生值；再确认建单 payload 读的是同一批 state。
+
+| OCR 面 | 入口 | picker 绑定 | 建单读取 | 结论 |
+|---|---|---|---|---|
+| Customer PO → SO/CO | ScanPOModal（sales + consignment 两页共用） | **customer picker = `matchId`（派生）**，其余 20 个全 `po.*`/`item.*` | create 自己再算一次宽松匹配 | ❌ **唯一病灶** |
+| Purchase Invoice | ScanSupplierModal · CreatePIWizard | 17 个绑定全 `card.*`/`line.*` | `supplierById(card.supplierId)` (:1560) | ✅ 一致 |
+| GRN | ScanSupplierModal · CreateGRNWizard | 16 个绑定全 `card.*`/`line.*` | `supplierById(card.supplierId)` (:3736) | ✅ 一致 |
+| Finance bill / voucher | accounting/index.tsx `applyScan` | `scanNameMatch` → **立刻 `setForm({partyId})`** | 读 form state | ✅ 一致（且未匹配时弹「建档」对话框，UX 最好） |
+| legacy POCard（模板路，非 AI） | scan-po-modal:2599 | 只有一个 checkbox，无 picker | — | ✅ 不涉及 |
+
+**结论：这个 bug class 全库只有 1 个实例** — scan-po-modal.tsx:2112 `value={matchId ?? ""}`。
+`matchId` 在 :2094 算出来后从不 `onUpdate`，所以 `po.customerId` 保持 null。
+唯一的下游受害者是 hub picker (:2180) —— 它是全库唯一直接读原始 `po.customerId` 的地方，
+读到 null → `hubs=[]` → picker 不渲染 → 退化成纯文字 Badge → `deliveryHubId` 永远 null。
+（客户本身没事：create 路 :1041 有自己的宽松再解析兜底，所以 SO 上客户是对的。）
+
+**顺带发现：全库有 4 套各自为政的公司名匹配器**（这才是 ADD WOOD / Houzs 的共同病根）
+1. `matchByCompanyName`（lib/company-name-match.ts）— 剥 SDN BHD/BERHAD/BHD/PLT，正规化全等，
+   歧义→null。用于 scan-po 后端 + customer picker。**唯一处理法定后缀的一套。**
+2. `pickSupplierFromName`（scan-supplier-modal.tsx:203）— **不剥后缀**，exact→正规化全等→
+   前后缀包含三级，歧义→null。用于 PI/GRN。
+3. `scanNameMatch`（accounting/index.tsx:5912）— 不剥后缀，双向 substring，`.find()`
+   **首个命中即返回、无歧义保护**（最松，有静默选错家的风险）。用于财务单。
+4. scan-supplier.ts:180 的 SQL `regexp_replace(...) LIKE ... || '%'` — Postgres 前缀匹配。
+   用于 gold→distill 的供应商反查。
+
+- [ ] **修法（最小面）**：scan-po-modal 只需 (a) `matchId` 算出后写回 state，
+  (b) hub picker 改读同一个 id 并用 `po.deliveryHub` 文本比 `hubs[].shortName` 预选。
+  **不碰任何抽取逻辑** — 提取准确度由 scan-engine 的 prompt 决定，与 picker 匹配无关。
+- [ ] **修法（根治）**：4 套匹配器统一到 `matchByCompanyName` + 新增 `party_name_aliases`
+  表（原始 OCR 名 → partyId），操作员手改一次即永久记住。见本文件 learning-loop 段。

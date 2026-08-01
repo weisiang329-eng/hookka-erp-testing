@@ -26,6 +26,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatCurrency, formatDate, formatDateDMY, formatHours, formatRM, roundSen, distributeRoundSen, todayYmdMY } from "@/lib/utils";
 import { printReport, type PrintColumn, type PrintCard, type PrintSection } from "@/lib/print-report";
+import { MALAYSIAN_BANKS, PAYMENT_METHODS, normalizePaymentMethod, paymentDestinationLabel } from "@/lib/payment-method";
 import { asArray } from "@/lib/safe-json";
 import {
   Users,
@@ -115,6 +116,10 @@ type Worker = {
    *  = bonus in sen paid when efficiency over the period >= threshold. */
   efficiencyAllowanceSen?: number;
   efficiencyThresholdPct?: number;
+  // How this worker is paid (default; a payroll run snapshots it per month).
+  paymentMethod?: string | null;
+  bankName?: string | null;
+  bankAccount?: string | null;
 };
 
 // Day-typed OT for the COST side — mirrors the engine so logged labor cost
@@ -2157,6 +2162,9 @@ type WorkerFormData = {
   /** Efficiency bonus config — allowance in sen, threshold percent (0–100). */
   efficiencyAllowanceSen: number;
   efficiencyThresholdPct: number;
+  paymentMethod: string;
+  bankName: string;
+  bankAccount: string;
 };
 
 // Next Emp No = the highest existing EMP-### + 1, same prefix + zero-padding.
@@ -2196,6 +2204,12 @@ const emptyForm: WorkerFormData = {
   resignedAt: "",
   efficiencyAllowanceSen: 0,
   efficiencyThresholdPct: 0,
+  // Bank transfer is the default; the bank fields stay blank until the office
+  // fills them, and the payslip then says so rather than printing a made-up
+  // account (which is what the old code did).
+  paymentMethod: "TRANSFER",
+  bankName: "",
+  bankAccount: "",
 };
 
 // PIN-modal state. The single-worker dialog has two phases:
@@ -2584,6 +2598,9 @@ function EmployeeMasterTab({
       resignedAt: w.resignedAt ?? "",
       efficiencyAllowanceSen: w.efficiencyAllowanceSen ?? 0,
       efficiencyThresholdPct: w.efficiencyThresholdPct ?? 0,
+      paymentMethod: normalizePaymentMethod(w.paymentMethod),
+      bankName: w.bankName ?? "",
+      bankAccount: w.bankAccount ?? "",
     });
   };
 
@@ -3082,6 +3099,85 @@ function EmployeeMasterTab({
             <span title="Efficiency % required to earn the allowance">
               {pct ? `${pct}%` : "—"}
             </span>
+          );
+        },
+      },
+      {
+        // How this worker is paid. Cash hides the bank fields entirely rather
+        // than greying them: a stale account left visible next to "Cash" is
+        // exactly how someone gets paid twice.
+        key: "paymentMethod",
+        label: "Pay By",
+        align: "center",
+        width: "110px",
+        render: (_value, row) =>
+          editingId === row.id ? (
+            <select
+              value={editForm.paymentMethod}
+              onChange={(e) => setEditForm((f) => ({ ...f, paymentMethod: e.target.value }))}
+              className="h-8 w-[104px] rounded-md border border-[#D8D2CC] bg-white px-1.5 text-xs"
+            >
+              {PAYMENT_METHODS.map((m) => (
+                <option key={m.value} value={m.value}>{m.label}</option>
+              ))}
+            </select>
+          ) : (
+            <span className="text-xs">
+              {normalizePaymentMethod(row.paymentMethod) === "CASH" ? "Cash" : "Transfer"}
+            </span>
+          ),
+      },
+      {
+        key: "bankName",
+        label: "Bank",
+        width: "150px",
+        render: (_value, row) => {
+          const isCash = normalizePaymentMethod(
+            editingId === row.id ? editForm.paymentMethod : row.paymentMethod,
+          ) === "CASH";
+          if (editingId === row.id) {
+            return isCash ? (
+              <span className="text-xs text-[#9CA3AF]">—</span>
+            ) : (
+              <select
+                value={editForm.bankName}
+                onChange={(e) => setEditForm((f) => ({ ...f, bankName: e.target.value }))}
+                className="h-8 w-[142px] rounded-md border border-[#D8D2CC] bg-white px-1.5 text-xs"
+              >
+                <option value="">Select bank…</option>
+                {MALAYSIAN_BANKS.map((b) => (
+                  <option key={b} value={b}>{b}</option>
+                ))}
+              </select>
+            );
+          }
+          return (
+            <span className="text-xs" title="Where this worker's pay is sent">
+              {paymentDestinationLabel(row.paymentMethod, row.bankName, row.bankAccount)}
+            </span>
+          );
+        },
+      },
+      {
+        key: "bankAccount",
+        label: "Account No",
+        width: "140px",
+        render: (_value, row) => {
+          const isCash = normalizePaymentMethod(
+            editingId === row.id ? editForm.paymentMethod : row.paymentMethod,
+          ) === "CASH";
+          if (editingId !== row.id) {
+            return <span className="text-xs">{isCash ? "—" : row.bankAccount || "—"}</span>;
+          }
+          return isCash ? (
+            <span className="text-xs text-[#9CA3AF]">—</span>
+          ) : (
+            <Input
+              value={editForm.bankAccount}
+              onChange={(e) => setEditForm((f) => ({ ...f, bankAccount: e.target.value }))}
+              className="h-8 w-[132px] text-xs"
+              placeholder="Account number"
+            />
           );
         },
       },

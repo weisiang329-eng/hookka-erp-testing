@@ -59,6 +59,7 @@ type PayData = {
     absentDates?: string[];
     otDays?: Array<{ date: string; hours: number }>;
     lateDays?: Array<{ date: string; hours: number }>;
+    payslipStatus?: string;
   };
   history: Array<{
     id: string;
@@ -172,6 +173,7 @@ function asPayData(v: unknown): PayData | null {
       absentDates,
       otDays,
       lateDays,
+      payslipStatus: typeof v.current.payslipStatus === "string" ? v.current.payslipStatus : "NONE",
     },
     history: v.history
       .map(asPayslipRow)
@@ -446,12 +448,33 @@ function CurrentMonthBreakdown({
       Number.isInteger(d.hours) ? d.hours : d.hours.toFixed(1)
     }h`,
   }));
+  // A month is only a DOCUMENT once the office has approved it. Until then the
+  // figures move as attendance comes in, so the phone shows them as an estimate
+  // and offers nothing to save — a worker holding a mid-month PDF that later
+  // changed is exactly the argument this whole screen exists to prevent
+  // (owner 2026-08-01: 只有 approved 才能 print).
+  const finalised = c.payslipStatus === "APPROVED" || c.payslipStatus === "PAID";
+  const openPayslip = () => {
+    // Same document the office prints — one payslip, one layout.
+    window.open(`/api/worker/payslip/${encodeURIComponent(c.period)}`, "_blank");
+  };
   return (
     <div className="bg-[#1F1D1B] text-white rounded-xl p-4">
-      <p className="text-[11px] text-[#B0AAA3]">{t("pay.estimate")}</p>
+      <p className="text-[11px] text-[#B0AAA3]">
+        {finalised ? "FINAL" : t("pay.estimate")}
+      </p>
       <p className="text-4xl font-bold tracking-tight mt-1">
         {rm(c.estimatedGrossSen)}
       </p>
+      {finalised && (
+        <button
+          type="button"
+          onClick={openPayslip}
+          className="mt-3 w-full rounded-lg bg-white/10 py-2.5 text-sm font-semibold text-white active:bg-white/20"
+        >
+          Save payslip as PDF
+        </button>
+      )}
 
       <div className="mt-4 pt-4 border-t border-white/10 space-y-2 text-sm">
         <Row label={t("pay.fullSalary")} value={rm(c.fullSalarySen)} />

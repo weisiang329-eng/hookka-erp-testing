@@ -543,6 +543,8 @@ const dict: Dict = {
     zh: '缺勤 · {n} 天',
     my: 'မလာ · {n}ရက်',
   },
+  // Payslip label — the bare noun, without the "· {n}d" the in-app row adds.
+  'pay.absence': { en: 'Absence', ms: 'Tidak hadir', zh: '缺勤', my: 'မလာခြင်း' },
   'pay.efficiencyAllowance': {
     en: 'Efficiency allowance',
     ms: 'Elaun kecekapan',
@@ -1147,6 +1149,18 @@ const dict: Dict = {
     my: 'ထပ်စမ်းပါ',
   },
 };
+
+/**
+ * Translate OUTSIDE React — the payslip document is built as a plain HTML
+ * string, not a component tree, so it cannot use the useT() hook. Same table,
+ * same English fallback; the caller passes the language explicitly because the
+ * office prints a worker's payslip from its own session.
+ */
+export function translateFor(lang: WorkerLang, id: string): string {
+  const row = dict[id];
+  if (!row) return id;
+  return row[lang] || row.en || id;
+}
 
 // Translate helper: t("home.hello") → lookup in chosen language with
 // fallback to English if a string is missing in the chosen language.

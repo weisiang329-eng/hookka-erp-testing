@@ -218,6 +218,11 @@ export type Worker = {
   passportNumber: string;
   nationality: string;
   otMultiplier?: number;  // OT premium, default 1.5×; 1.0 = no premium
+  // How this worker is paid. The DEFAULT — a payroll run snapshots it onto the
+  // payslip, so changing it later never rewrites a month already generated.
+  paymentMethod?: string | null;
+  bankName?: string | null;
+  bankAccount?: string | null;
 };
 
 // --- Sales Orders ---

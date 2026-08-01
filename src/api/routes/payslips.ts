@@ -34,6 +34,8 @@ import {
   type PayRulesConfig,
 } from "../../lib/pay-rules";
 import { loadPayRuleVersions } from "../lib/pay-rules-store";
+import { normalizePaymentMethod } from "../../lib/payment-method";
+import { ensurePaymentColumns } from "../lib/payment-columns";
 
 // Data-entry grace before an unrecorded working day is treated as a confirmed
 // absence. Spec (Wei Siang, 2026-06-02): the office keys Working Hours a few
@@ -72,6 +74,10 @@ type WorkerRow = {
   // legacy rows ⇒ no bonus.
   efficiencyAllowanceSen?: number | null;
   efficiencyThresholdPct?: number | null;
+  // How this worker is paid — the DEFAULT; a payslip may override it per month.
+  paymentMethod?: string | null;
+  bankName?: string | null;
+  bankAccount?: string | null;
 };
 
 type PayslipRow = {
@@ -105,6 +111,8 @@ type PayslipRow = {
   totalDeductionsSen: number;
   netPaySen: number;
   bankAccount: string;
+  paymentMethod: string | null;
+  bankName: string | null;
   payrollRunId: string | null;
   status: "DRAFT" | "APPROVED" | "PAID";
   createdAt: string;
@@ -146,6 +154,8 @@ function rowToPayslip(r: PayslipRow) {
     totalDeductions: r.totalDeductionsSen,
     netPay: r.netPaySen,
     bankAccount: r.bankAccount,
+    paymentMethod: normalizePaymentMethod(r.paymentMethod),
+    bankName: r.bankName ?? "",
     status: r.status,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
@@ -339,6 +349,7 @@ async function buildDayDetailForPeriod(
 // GET /api/payslips?period=&employeeId=
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
+  await ensurePaymentColumns(c.var.DB);
   // RBAC gate (P3.3-followup) — payslips:read.
   const denied = await requirePermission(c, "payslips", "read");
   if (denied) return denied;
@@ -473,7 +484,7 @@ app.get("/projected", async (c) => {
 
   // Same worker scope as POST: ACTIVE, plus RESIGNED in their final month.
   const wres = await c.var.DB.prepare(
-    "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate, efficiencyAllowanceSen, efficiencyThresholdPct FROM workers WHERE (status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)) AND empNo NOT LIKE 'TEST%'",
+    "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate, efficiencyAllowanceSen, efficiencyThresholdPct, paymentMethod, bankName, bankAccount FROM workers WHERE (status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)) AND empNo NOT LIKE 'TEST%'",
   )
     .bind(`${period}-%`)
     .all<WorkerRow>();
@@ -676,7 +687,9 @@ app.get("/projected", async (c) => {
       pcb: stat.pcb,
       totalDeductions,
       netPay: grossPay - totalDeductions,
-      bankAccount: "",
+      bankAccount: worker.bankAccount ?? "",
+      paymentMethod: normalizePaymentMethod(worker.paymentMethod),
+      bankName: worker.bankName ?? "",
       // Reuse the existing DRAFT status (the response's top-level `projected:true`
       // flag is what the UI keys on to render these as a read-only estimate).
       status: "DRAFT" as const,
@@ -703,6 +716,9 @@ app.post("/", async (c) => {
   // RBAC gate (P3.3-followup) — payslips:create (generate).
   const denied = await requirePermission(c, "payslips", "create");
   if (denied) return denied;
+  // Migrations are inert on deploy — the payment columns exist only because
+  // this runs and is AWAITED before the first write below.
+  await ensurePaymentColumns(c.var.DB);
   try {
     const body = await c.req.json();
     const { period, regenerate } = body;
@@ -764,7 +780,7 @@ app.post("/", async (c) => {
       // partial, month) — the existing absence math prorates the days after
       // they left. Later months exclude them because resignedAt no longer
       // matches the period. Earlier months were generated while still ACTIVE.
-      "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate, efficiencyAllowanceSen, efficiencyThresholdPct FROM workers WHERE (status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)) AND empNo NOT LIKE 'TEST%'",
+      "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate, efficiencyAllowanceSen, efficiencyThresholdPct, paymentMethod, bankName, bankAccount FROM workers WHERE (status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)) AND empNo NOT LIKE 'TEST%'",
     )
       .bind(`${period}-%`)
       .all<WorkerRow>();
@@ -971,7 +987,20 @@ app.post("/", async (c) => {
       const totalDeductions =
         stat.epfEmployee + stat.socsoEmployee + stat.eisEmployee + stat.pcb;
       const netPay = grossPay - totalDeductions;
-      const bankAccount = `CIMB-${worker.empNo.replace("EMP-", "")}XXXX`;
+      // Where the money actually goes. This used to be
+      //   `CIMB-${empNo}XXXX`
+      // — a placeholder MANUFACTURED from the employee number, printed on every
+      // payslip as if it were the worker's account. All 67 existing rows carry
+      // one. A fabricated bank account on a payslip is worse than a blank: it
+      // looks authoritative and nobody questions it.
+      //
+      // The real values come from Employee Master (the default) and may be
+      // overridden for THIS month on the Payroll row. Empty until the office
+      // fills them in, and the payslip says "Bank details not set" rather than
+      // showing a blank line.
+      const paymentMethod = normalizePaymentMethod(worker.paymentMethod);
+      const bankName = paymentMethod === "CASH" ? null : (worker.bankName ?? null);
+      const bankAccount = paymentMethod === "CASH" ? "" : (worker.bankAccount ?? "");
 
       // Base hourly rate (full salary ÷ 26 ÷ hours/day) for the payslip's
       // OT-calculation display, day-typed (owner spec 2026-06-10): the engine
@@ -992,7 +1021,7 @@ app.post("/", async (c) => {
            hourlyRateSen, otWeekdayAmtSen, otSundayAmtSen, otPhAmtSen, totalOtSen,
            allowancesSen, grossPaySen, epfEmployeeSen, epfEmployerSen,
            socsoEmployeeSen, socsoEmployerSen, eisEmployeeSen, eisEmployerSen, pcbSen,
-           totalDeductionsSen, netPaySen, bankAccount, status
+           totalDeductionsSen, netPaySen, bankAccount, paymentMethod, bankName, status
          ) VALUES (
            ?, ?, ?, ?, ?, ?,
            ?, ?, ?, ?,
@@ -1034,6 +1063,8 @@ app.post("/", async (c) => {
           totalDeductions,
           netPay,
           bankAccount,
+          paymentMethod,
+          bankName,
         )
         .run();
 
@@ -1144,9 +1175,53 @@ app.get("/:id", async (c) => {
     .first<{ workingHoursPerDay: number | null }>();
   const workingHoursPerDay = Number(w?.workingHoursPerDay) || 9;
 
+  // Per-day detail for the payslip document. Without it the printed slip shows
+  // "Absence (5 days)" but not WHICH days — and the whole point of the document
+  // is that a worker can check the dates against their own memory.
+  let dayDetail: { absentDates: string[]; otDays: Array<{ date: string; hours: number }> } = {
+    absentDates: [],
+    otDays: [],
+  };
+  const lateDays: Array<{ date: string; hours: number }> = [];
+  let absenceDeductionSen = Number(payslip.absenceDeductionSen) || 0;
+  let shortHourDeductionSen = 0;
+  try {
+    const detail = await buildDayDetailForPeriod(c.var.DB, payslip.period, [payslip.employeeId]);
+    dayDetail = detail.get(payslip.employeeId) ?? dayDetail;
+    const ded = await c.var.DB.prepare(
+      "SELECT date, hours FROM payroll_hour_deductions WHERE workerId = ? AND date LIKE ? ORDER BY date",
+    )
+      .bind(payslip.employeeId, `${payslip.period}-%`)
+      .all<{ date: string; hours: number }>();
+    const cfg = resolvePayRulesAsOf(await loadPayRuleVersions(c.var.DB), `${payslip.period}-28`);
+    const dayRate = payrollDayRateSen(
+      Number(payslip.basicSalarySen) || 0,
+      { workingDaysPerMonth: Number(payslip.workingDays) || 26, calendarDays: 30, workingDaysInMonth: 26 },
+      cfg,
+    );
+    const hourRate = dayRate / payrollHourDivisor(workingHoursPerDay, cfg);
+    for (const d of ded.results ?? []) {
+      const h = Number(d.hours) || 0;
+      if (h <= 0) continue;
+      lateDays.push({ date: d.date, hours: Math.round(h * 100) / 100 });
+      shortHourDeductionSen += Math.round(h * hourRate);
+    }
+  } catch (e) {
+    console.warn("[payslips/:id] day detail skipped:", e);
+    absenceDeductionSen = absenceDeductionSen || 0;
+  }
+
   return c.json({
     success: true,
-    data: { ...rowToPayslip(payslip), workingHoursPerDay },
+    data: {
+      ...rowToPayslip(payslip),
+      workingHoursPerDay,
+      absentDates: dayDetail.absentDates,
+      otDays: dayDetail.otDays,
+      lateDays,
+      absenceDeductionSen,
+      shortHourDeductionSen,
+    },
     ytd,
     monthsIncluded: employeeSlips.length,
   });

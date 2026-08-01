@@ -15,6 +15,8 @@ import {
   hhmmToMinutes,
 } from "../../lib/attendance-rules";
 import { computeMonthlyEfficiencyByWorker } from "./efficiency-allowance";
+import { resolvePayRulesAsOf } from "../../lib/pay-rules";
+import { loadPayRuleVersions } from "./pay-rules-store";
 import { ensureNonprodRequests } from "../routes/worker";
 
 /** Efficiency below this (%) over the trailing week flags a worker. */
@@ -91,10 +93,19 @@ export async function runEmployeeDigest(
     console.warn("[employee-agent] absence query failed:", e);
   }
 
-  // 2 · Late punches — clock-in after 08:00 + grace (global rule; the pay-rule
-  //     version override is a refinement we can layer later).
+  // 2 · Late punches — clock-in after the shift start + grace, read from the
+  //     EFFECTIVE-DATED rules like every other lateness figure. It used to use
+  //     the built-in constants ("a refinement we can layer later"), which agree
+  //     with today's configuration by coincidence: change the grace in Pay Rules
+  //     and this digest would quietly keep flagging people at the old threshold.
   const late: EmployeeDigest["late"] = [];
-  const lateThreshold = HOOKKA_ATTENDANCE.startMin + HOOKKA_ATTENDANCE.lateGraceMin;
+  let lateThreshold = HOOKKA_ATTENDANCE.startMin + HOOKKA_ATTENDANCE.lateGraceMin;
+  try {
+    const cfg = resolvePayRulesAsOf(await loadPayRuleVersions(db), todayYmd);
+    lateThreshold = cfg.shiftStartMin + cfg.lateGraceMin;
+  } catch {
+    /* unreadable rules → the built-in defaults, same as before */
+  }
   try {
     const r = await db
       .prepare(

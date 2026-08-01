@@ -8,6 +8,8 @@
 import { Hono, type Context } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { normalizePaymentMethod } from "../../lib/payment-method";
+import { ensurePaymentColumns } from "../lib/payment-columns";
 import { effectiveSalarySenForMonth } from "../../lib/labor-engine";
 import { emitAudit } from "../lib/audit";
 import { hashPin } from "../lib/auth-utils";
@@ -58,6 +60,10 @@ type WorkerRow = {
   // amount. The Payroll entitlement engine (Phase 2) consumes these.
   efficiencyAllowanceSen: number;
   efficiencyThresholdPct: number | null;
+  // How this worker is paid — the DEFAULT the payroll run copies each month.
+  paymentMethod: string | null;
+  bankName: string | null;
+  bankAccount: string | null;
 };
 
 type DepartmentRow = {
@@ -126,6 +132,9 @@ function rowToWorker(row: WorkerRow) {
     resignedAt: row.resignedAt ?? "",
     efficiencyAllowanceSen: row.efficiencyAllowanceSen ?? 0,
     efficiencyThresholdPct: row.efficiencyThresholdPct ?? 0,
+    paymentMethod: normalizePaymentMethod(row.paymentMethod),
+    bankName: row.bankName ?? "",
+    bankAccount: row.bankAccount ?? "",
   };
 }
 
@@ -137,6 +146,7 @@ function genId(): string {
 //   ?departmentCode=FAB_CUT — alternative when caller has the code (e.g.
 //   the Service Case root-cause form picks dept by code, not id).
 app.get("/", async (c) => {
+  await ensurePaymentColumns(c.var.DB);
   // RBAC gate (P3.3-followup) — workers:read.
   const denied = await requirePermission(c, "workers", "read");
   if (denied) return denied;
@@ -161,6 +171,7 @@ app.get("/", async (c) => {
 
 // POST /api/workers — create
 app.post("/", async (c) => {
+  await ensurePaymentColumns(c.var.DB);
   // RBAC gate (P3.3-followup) — workers:create.
   const denied = await requirePermission(c, "workers", "create");
   if (denied) return denied;
@@ -181,6 +192,9 @@ app.post("/", async (c) => {
       pcbEnabled,
       efficiencyAllowanceSen,
       efficiencyThresholdPct,
+      paymentMethod,
+      bankName,
+      bankAccount,
     } = body;
 
     if (!name || !empNo) {
@@ -249,8 +263,9 @@ app.post("/", async (c) => {
          phone, status, basicSalarySen, workingHoursPerDay, workingDaysPerMonth, otMultiplier,
          epfEnabled, socsoEnabled, eisEnabled, pcbEnabled,
          joinDate, icNumber, passportNumber, nationality,
-         efficiencyAllowanceSen, efficiencyThresholdPct)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         efficiencyAllowanceSen, efficiencyThresholdPct,
+         paymentMethod, bankName, bankAccount)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -280,6 +295,11 @@ app.post("/", async (c) => {
         "",
         effAllowanceSen,
         effThresholdPct,
+        // Cash needs no bank; storing them anyway leaves a stale account behind
+        // the moment someone is switched to cash.
+        normalizePaymentMethod(paymentMethod),
+        normalizePaymentMethod(paymentMethod) === "CASH" ? null : (typeof bankName === "string" ? bankName.trim() : null),
+        normalizePaymentMethod(paymentMethod) === "CASH" ? null : (typeof bankAccount === "string" ? bankAccount.trim() : null),
       )
       .run();
 
@@ -302,6 +322,7 @@ app.post("/", async (c) => {
 
 // GET /api/workers/:id
 app.get("/:id", async (c) => {
+  await ensurePaymentColumns(c.var.DB);
   const denied = await requirePermission(c, "workers", "read");
   if (denied) return denied;
   const id = c.req.param("id");
@@ -453,6 +474,11 @@ app.put("/:id", async (c) => {
     }
 
     const merged = {
+      // Payment defaults — an omitted field keeps what is already stored, so a
+      // partial PUT from another screen can't silently blank someone's bank.
+      paymentMethod: body.paymentMethod ?? existing.paymentMethod,
+      bankName: body.bankName ?? existing.bankName,
+      bankAccount: body.bankAccount ?? existing.bankAccount,
       name: body.name ?? existing.name,
       empNo: body.empNo ?? existing.empNo,
       departmentId: nextDepartmentId,
@@ -501,7 +527,8 @@ app.put("/:id", async (c) => {
          workingHoursPerDay = ?, workingDaysPerMonth = ?, otMultiplier = ?,
          epfEnabled = ?, socsoEnabled = ?, eisEnabled = ?, pcbEnabled = ?,
          joinDate = ?, icNumber = ?, passportNumber = ?, nationality = ?, resignedAt = ?,
-         efficiencyAllowanceSen = ?, efficiencyThresholdPct = ?
+         efficiencyAllowanceSen = ?, efficiencyThresholdPct = ?,
+         paymentMethod = ?, bankName = ?, bankAccount = ?
        WHERE id = ?`,
     )
       .bind(
@@ -529,6 +556,9 @@ app.put("/:id", async (c) => {
         merged.resignedAt,
         merged.efficiencyAllowanceSen,
         merged.efficiencyThresholdPct,
+        normalizePaymentMethod(merged.paymentMethod),
+        normalizePaymentMethod(merged.paymentMethod) === "CASH" ? null : (merged.bankName || null),
+        normalizePaymentMethod(merged.paymentMethod) === "CASH" ? null : (merged.bankAccount || null),
         id,
       )
       .run();

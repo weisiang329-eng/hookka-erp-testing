@@ -254,8 +254,12 @@ test("BOTH payslips paths (projected + stored) gate the allowance, neither hardc
 });
 
 test("payslips loads the per-worker bonus config from the workers table", () => {
-  assert.ok(
-    PAYSLIPS.includes("efficiencyAllowanceSen, efficiencyThresholdPct FROM workers"),
-    "the worker SELECT must pull efficiencyAllowanceSen + efficiencyThresholdPct",
-  );
+  // Assert the columns are SELECTED, not that they sit last in the list — the
+  // list grows (payment method / bank landed after them) and a positional match
+  // fails on an unrelated change while the behaviour is untouched.
+  const workerSelect = /SELECT [^"]*FROM workers WHERE \(status = 'ACTIVE'/.exec(PAYSLIPS)?.[0] ?? "";
+  assert.ok(workerSelect, "the projected/generate worker SELECT should be findable");
+  for (const col of ["efficiencyAllowanceSen", "efficiencyThresholdPct"]) {
+    assert.ok(workerSelect.includes(col), `the worker SELECT must pull ${col}`);
+  }
 });

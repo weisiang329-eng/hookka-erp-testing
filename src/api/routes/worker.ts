@@ -2113,6 +2113,22 @@ app.get("/payslips", async (c) => {
     effCfg?.efficiencyThresholdPct,
   );
 
+  // The stored payslip for this period, if the office has generated one.
+  // DRAFT (or none) → the numbers above are an estimate.
+  let payslipStatus: "NONE" | "DRAFT" | "APPROVED" | "PAID" = "NONE";
+  try {
+    const ps = await c.var.DB.prepare(
+      "SELECT status FROM payslips WHERE employeeId = ? AND period = ?",
+    )
+      .bind(workerId, period)
+      .first<{ status: string }>();
+    if (ps?.status === "APPROVED" || ps?.status === "PAID" || ps?.status === "DRAFT") {
+      payslipStatus = ps.status;
+    }
+  } catch {
+    /* unreadable → treated as not finalised, which is the safe direction */
+  }
+
       return {
         current: {
           period,
@@ -2131,6 +2147,12 @@ app.get("/payslips", async (c) => {
           absentDates: dayDetail.absentDates,
           otDays: dayDetail.otDays,
           lateDays,
+          // Whether the office has FINALISED this month. Everything above is a
+          // live estimate that moves as attendance comes in; only an approved
+          // month is a document the worker can keep (owner 2026-08-01: 只有
+          // approved 才能 print). The phone hides Save-as-PDF until then, so a
+          // mid-month figure can never be mistaken for the final one.
+          payslipStatus,
         },
         history,
       };

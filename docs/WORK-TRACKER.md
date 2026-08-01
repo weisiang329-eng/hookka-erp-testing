@@ -1913,3 +1913,25 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
 - [ ] Owner data check (not a code task): the BOM line `NLY-D30-1.5"` has BLANK cut L×W, so
   qty 1 consumes ONE WHOLE SHEET rather than one cut piece. Worth auditing how many filler
   lines are in that state.
+
+## 2026-08-01 (session: System Health was monitoring NOTHING — owner "如果是假的你就应该做成真的")
+- [x] **Diagnosed: the whole /admin/health dashboard was deterministic mock data.** The page
+  banner said so ("No live data yet…") but the headline card still read "All systems normal ·
+  P50 41ms · P95 241ms · No 5xx" — i.e. it looked green while measuring nothing. Every question
+  of the form "which page crashed / lagged / failed" had no answer because nothing was recorded
+  on the READ side.
+- [x] Root cause via `GET /api/admin/health/kpis-diag`: `ERP_METRICS_bound:true`,
+  `AE_QUERY_TOKEN_set:true`, **`CF_ACCOUNT_ID_set:false`**. The AE SQL endpoint is
+  `…/accounts/{CF_ACCOUNT_ID}/analytics_engine/sql`, so without the id the fetch cannot be
+  addressed and the route falls back to `_mock:true`. ONE missing variable. Write side has been
+  healthy since P6.2, so **historical data already exists** and appears the moment this lands.
+- [x] Fixed by adding `CF_ACCOUNT_ID` to `wrangler.toml [vars]` (value read from
+  `npx wrangler whoami`; an account id is not a credential — this file already carries KV
+  namespace ids, the D1 id and the Sentry DSN). `AE_QUERY_TOKEN` stays a Pages secret.
+  `wrangler pages secret put` was tried first and is refused under an OAuth login (API 10000),
+  which is also why this must not depend on a manual dashboard step.
+- [ ] AFTER DEPLOY: re-check `kpis-diag` shows `CF_ACCOUNT_ID_set:true`, then confirm
+  /admin/health drops the mock banner and shows real numbers. Then measure page load — the
+  dashboard fans out to many AE SQL calls and may need caching.
+- [ ] Then sweep module-by-module (devtools) for slow fetches / console errors, now that there
+  is real telemetry to cross-check against.

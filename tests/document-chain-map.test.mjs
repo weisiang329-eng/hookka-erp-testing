@@ -250,3 +250,38 @@ test("each station card opens its production order", () => {
   // real destination.
   assert.match(src, /href=\{`\/production\/\$\{poId\}`\}/);
 });
+
+// --- layout (owner: 「这个排版也是不好看啊」) --------------------------------
+
+test("a long worker list can never crush the production order number", () => {
+  const src = readFileSync("src/components/ui/document-chain-map.tsx", "utf8");
+  // A finished order carries a dozen names. On one row that list was
+  // flex-shrink-0, so it took the space and wrapped `SO-2607-231-01` down four
+  // lines. The identity line is unbreakable; the names sit on their own row.
+  assert.match(
+    src,
+    /flex-shrink-0 whitespace-nowrap text-sm font-semibold/,
+    "the PO number must never wrap",
+  );
+  assert.match(
+    src,
+    /min-w-0 flex-1 truncate text-xs/,
+    "the product name is what gives way — and needs min-w-0 for truncate to engage",
+  );
+  const headerAt = src.indexOf("Open production order");
+  const namesAt = src.indexOf("line-clamp-2");
+  assert.ok(
+    headerAt > 0 && namesAt > headerAt,
+    "the worker list must render BELOW the identity line, not inside it",
+  );
+});
+
+test("stations lay out as an even grid, not ragged chips", () => {
+  const src = readFileSync("src/components/ui/document-chain-map.tsx", "utf8");
+  assert.match(src, /grid grid-cols-2 gap-1\.5 px-3 pb-3 sm:grid-cols-3/);
+  assert.doesNotMatch(
+    src,
+    /flex flex-wrap gap-1\.5 px-3 pb-3/,
+    "the ragged flex-wrap strip must not return",
+  );
+});

@@ -176,13 +176,29 @@ Everything else measured clean (all under 260ms of long task): `/dashboard`
 `/planning/mrp` 950n · `/service-cases` 1,901n · `/service-order` 2,251n ·
 `/maintenance` 961n · `/settings/users` 1,712n · `/agents` 1,266n · `/settings` 914n.
 
-### Sofa Combos — reported slow, measures fast
-Owner reported `/maintenance/sofa-combos` as laggy. On HOOKKA INDUSTRIES it is
-1,054 nodes / 92ms: the list, expand-all (6 model groups, 27 rows), New Combo,
-opening an existing combo and Copy-to-customer were each exercised and none
-exceeded 92ms. `/api/sofa-combos` answers in 50-71ms. **The page has zero RUM
-rows in 7 days**, so health cannot say which company or action was slow either.
-Needs the owner to say which company / which click.
+### Sofa Combos — reported slow; the page is fine, the PICKER was not
+Owner reported "sofa combo 那边也是卡". `/maintenance/sofa-combos` itself is
+clean on HOOKKA: 1,054 nodes / 92ms, and the list, expand-all (6 model groups,
+27 rows), New Combo, opening an existing combo, Copy-to-customer and both
+filter dropdowns were each exercised — nothing above 100ms, API 50-71ms.
+
+The lag was one step earlier, where a sofa is actually chosen: the **product
+picker on `/sales/create`**. `SearchableSelect` rendered ALL 360 products into
+its `max-h-60` dropdown — 11,528px of buttons inside a 240px box — rebuilt from
+scratch on every keystroke:
+
+| | before | after (#203) |
+|---|---|---|
+| opening the picker | 1,383ms | 498ms |
+| typing into it | 1,024ms | 341ms |
+| options built | 360 | 60 + "300 more — scroll or keep typing" |
+
+That component backs **16 screens** (products, customers, fabrics, accounts,
+suppliers, parties), so every picker in the app was paying it. This is the
+single highest-leverage render fix in the sweep.
+
+Note the page still has **zero RUM rows in 7 days** — health could not have
+pointed at any of this. See the fe-perf coverage gap in §5.
 
 ### Measurement caveat worth keeping
 Driving the browser from a hidden window silently corrupts this kind of work:

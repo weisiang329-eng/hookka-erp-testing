@@ -23,10 +23,13 @@ page opened and measured.
   scroll), so this added `useIncrementalList`: newest 40, extend by 40 on scroll. Verified
   on prod: **2,510 nodes, 769ms**, sentinel `Loading older conversations… (40 of 300)`,
   `beforeprint` still expands to all 300.
-- 🟡 **`/maintenance/sofa-combos` — reported slow, does not reproduce.** 1,054 nodes / 92ms
-  on HOOKKA INDUSTRIES; list, expand-all, New Combo, edit and Copy-to-customer all ≤92ms;
-  API 50-71ms. **Zero RUM rows in 7 days**, so health cannot say either. Needs the owner to
-  say which company / which action.
+- ✅ **"Sofa combo 卡" — found and fixed (#203), but not where it was reported.** The Sofa
+  Combo page itself is clean on HOOKKA (1,054 nodes / 92ms; list, expand-all, New Combo,
+  edit, Copy-to-customer, both filters — nothing over 100ms). The lag is one step earlier,
+  in the **`/sales/create` product picker** where the sofa is chosen: `SearchableSelect`
+  built all 360 products into a 240px dropdown (11,528px of buttons), 1,383ms to open and
+  1,024ms per keystroke burst. Now 498ms / 341ms, 60 options + a "300 more" footer, extend
+  on scroll. **That component backs 16 screens**, so this fixed every picker in the app.
 - ⚪ **Owner decision:** 2,839 pending QC inspections back to 2026-04-28 is a data signal,
   not just a rendering one — the 12:00/16:00 cron keeps generating slots and nothing clears
   them. Should the screen default to recent slots?

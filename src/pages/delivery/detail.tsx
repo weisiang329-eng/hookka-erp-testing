@@ -8,7 +8,7 @@ import { RepairPartsBadge } from "@/components/sales/repair-scope-picker";
 import { formatDate, formatDateTime } from "@/lib/utils";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { LockBanner } from "@/components/ui/lock-banner";
-import { SoDocumentRelationship } from "@/components/ui/so-document-relationship";
+import { DocumentChainMap } from "@/components/ui/document-chain-map";
 import { ObjectPageHeader } from "@/components/ui/object-page-header";
 import {
   User,
@@ -1038,7 +1038,7 @@ export default function DeliveryDetailPage() {
           order?.items?.find((i) => i.salesOrderNo)?.salesOrderNo ||
           "";
         return anchor ? (
-          <SoDocumentRelationship soId={anchor} currentDocNo={order.doNo} />
+          <DocumentChainMap soId={anchor} currentDocNo={order.doNo} />
         ) : null;
       })()}
 

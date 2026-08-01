@@ -2,7 +2,7 @@ import { useState, useMemo, useCallback, useEffect } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useNavigate, useParams } from "react-router-dom";
-import { useSOMode, soBasePath, soSingularNoun } from "@/lib/so-mode";
+import { useSOMode, soBasePath } from "@/lib/so-mode";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -22,7 +22,7 @@ import { CreateServiceCaseModal } from "@/pages/service-cases";
 import { HubEditModal } from "@/components/orders/HubEditModal";
 // generateSOPdf is dynamic-imported at the click handler so the 1MB jspdf
 // vendor chunk only ships when the user actually prints.
-import DocumentFlowDiagram, { type DocNode } from "@/components/ui/document-flow-diagram";
+import { DocumentChainMap } from "@/components/ui/document-chain-map";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { LockBanner } from "@/components/ui/lock-banner";
 import { ObjectPageHeader } from "@/components/ui/object-page-header";
@@ -455,17 +455,11 @@ export default function SalesOrderDetailPage() {
     () => (orderResp?.success ? orderResp.priceOverrides ?? [] : []),
     [orderResp],
   );
-  // Real downstream documents for the Document Relationship diagram.
+  // Real delivery orders — still needed by OrderProgressCard. The invoice /
+  // payment legs of the chain are no longer derived here: DocumentChainMap
+  // reads them off the same (cached) /api/sales-orders/:id response itself.
   const linkedDOs = useMemo(
     () => (orderResp?.success ? orderResp.linkedDOs ?? [] : []),
-    [orderResp],
-  );
-  const linkedInvoices = useMemo(
-    () => (orderResp?.success ? orderResp.linkedInvoices ?? [] : []),
-    [orderResp],
-  );
-  const linkedPayments = useMemo(
-    () => (orderResp?.success ? orderResp.linkedPayments ?? [] : []),
     [orderResp],
   );
 
@@ -1751,83 +1745,10 @@ export default function SalesOrderDetailPage() {
       {/* Status Timeline */}
       <StatusTimeline history={statusHistory} />
 
-      {/* Document Relationship Diagram */}
-      <DocumentFlowDiagram
-        title={`Document Relationship — ${order.companySOId}`}
-        salesFlow={(() => {
-          // DB stores DO status as internal codes; show the same friendly
-          // labels the Delivery page uses (DRAFT = "Pending Dispatch", etc.).
-          const doStatusLabel: Record<string, string> = {
-            DRAFT: "Pending Dispatch",
-            LOADED: "Dispatched",
-            IN_TRANSIT: "In Transit",
-            DELIVERED: "Delivered",
-            INVOICED: "Invoiced",
-            CLOSED: "Closed",
-          };
-          const nodes: DocNode[] = [
-            {
-              type: "SO",
-              label: soSingularNoun(mode),
-              docNo: order.companySOId,
-              status: order.status,
-              isCurrent: true,
-              href: `/sales/${order.id}`,
-            },
-          ];
-          // Real delivery order(s) this SO shipped on — resolved server-side
-          // so consolidated DOs (one DO, many SOs) connect too.
-          for (const d of linkedDOs) {
-            nodes.push({
-              type: "DO",
-              label: "Delivery Order",
-              docNo: d.doNo,
-              status: doStatusLabel[d.status] ?? d.status,
-              href: `/delivery`,
-            });
-          }
-          // Real invoice(s) raised for this SO.
-          for (const inv of linkedInvoices) {
-            nodes.push({
-              type: "INVOICE",
-              label: "Invoice",
-              docNo: inv.invoiceNo,
-              status: inv.status,
-              href: `/invoices`,
-            });
-          }
-          // Real payment receipt(s) collected against those invoices.
-          for (const p of linkedPayments) {
-            nodes.push({
-              type: "AR_PAYMENT",
-              label: "AR Payment",
-              docNo: p.receiptNumber,
-              status: p.status,
-              href: `/invoices/payments`,
-            });
-          }
-          return nodes;
-        })()}
-        purchaseFlow={linkedPOs.length > 0 ? (() => {
-          // Show first linked PO as representative
-          const po = linkedPOs[0];
-          // Production-detail page is gone; node is informational only.
-          // docNo follows the same display rule as the linked-PO table
-          // (sofa drops -NN suffix, BF/ACC keep it).
-          const nodes: DocNode[] = [
-            {
-              type: "PRODUCTION",
-              label: "Production Order",
-              docNo: displaySoId(po),
-              status: po.status,
-            },
-          ];
-          return nodes;
-        })() : undefined}
-        crossLinks={linkedPOs.length > 0 ? [
-          { fromRow: "sales", fromIdx: 0, toRow: "purchase", toIdx: 0, type: "full" },
-        ] : undefined}
-      />
+      {/* Relationship map — replaces the old flow diagram. Same chain, but
+          grey-vs-colour says what does NOT exist yet, and the production strip
+          says which station each part is sitting at and whose hands it's in. */}
+      <DocumentChainMap soId={order.id} currentDocNo={order.companySOId} />
 
       {/* Per-record audit trail — feeds off audit_events. Status flips,
           field edits, item-list changes all show up here with the actor,

@@ -208,3 +208,30 @@ test("a station that ran over its estimate is only flagged once it finished", ()
     "the over-estimate flag must require a completed station",
   );
 });
+
+// --- clickable nodes (owner: 「还可以点的 点的就会直接跳到那边去」) ----------
+
+test("an existing document node links to its page; a pending one does not", () => {
+  const src = readFileSync("src/components/ui/document-chain-map.tsx", "utf8");
+  // The link is gated on state — a grey node has nothing to open, and a click
+  // that goes nowhere is worse than no affordance.
+  assert.match(src, /node\.href && node\.state !== "pending" \? \(/);
+  assert.match(src, /title=\{`Open \$\{node\.docNo\}`\}/);
+});
+
+test("the production order number navigates, the chevron only expands", () => {
+  const src = readFileSync("src/components/ui/document-chain-map.tsx", "utf8");
+  assert.match(src, /href=\{`\/production\/\$\{po\.id\}`\}/);
+  assert.match(src, /aria-label=\{open \? "Collapse stations" : "Expand stations"\}/);
+  // They must be two separate elements: if the whole row were the link, trying
+  // to see the stations would navigate away instead.
+  const rowIsButton = /onClick=\{\(\) =>\s*setOpenPOs[\s\S]{0,120}className="flex w-full/.test(src);
+  assert.ok(!rowIsButton, "the whole row must not be the toggle");
+});
+
+test("each station card opens its production order", () => {
+  const src = readFileSync("src/components/ui/document-chain-map.tsx", "utf8");
+  // Job cards have no detail page of their own, so the order is the closest
+  // real destination.
+  assert.match(src, /href=\{`\/production\/\$\{poId\}`\}/);
+});

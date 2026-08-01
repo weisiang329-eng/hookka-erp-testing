@@ -102,8 +102,10 @@ function Node({ node }: { node: ChainNode }) {
       )}
     </div>
   );
+  // Only a document that EXISTS gets a link. A pending node stays inert —
+  // offering a click that goes nowhere is worse than no affordance at all.
   return node.href && node.state !== "pending" ? (
-    <a href={node.href} className="flex flex-1 hover:opacity-90">
+    <a href={node.href} className="flex flex-1 hover:opacity-90" title={`Open ${node.docNo}`}>
       {inner}
     </a>
   ) : (
@@ -190,9 +192,10 @@ function StationStrip({ poId }: { poId: string }) {
         // in-progress card hasn't had its chance yet.
         const over = state === "linked" && est > 0 && act > est;
         return (
-          <div
+          <a
             key={jc.id}
-            className="min-w-[132px] rounded-md px-2.5 py-2"
+            href={`/production/${poId}`}
+            className="block min-w-[132px] rounded-md px-2.5 py-2 hover:opacity-90"
             style={{
               background: c.bg,
               border: `1px ${state === "pending" ? "dashed" : "solid"} ${c.border}`,
@@ -229,7 +232,7 @@ function StationStrip({ poId }: { poId: string }) {
                 {act > 0 ? `${act}m` : "—"} / est {est}m{over ? " ⚠" : ""}
               </div>
             )}
-          </div>
+          </a>
         );
       })}
     </div>
@@ -381,22 +384,33 @@ export function DocumentChainMap({
                   className="rounded-lg"
                   style={{ background: c.bg, border: `1px solid ${c.border}` }}
                 >
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setOpenPOs((p) => ({ ...p, [po.id]: !(p[po.id] ?? true) }))
-                    }
-                    className="flex w-full items-center gap-2 px-3 py-2 text-left"
-                  >
-                    {open ? (
-                      <ChevronDown className="h-3.5 w-3.5 text-[#6B7280]" />
-                    ) : (
-                      <ChevronRight className="h-3.5 w-3.5 text-[#6B7280]" />
-                    )}
+                  <div className="flex w-full items-center gap-2 px-3 py-2 text-left">
+                    {/* Expand and open are SEPARATE targets on purpose: the row
+                        is both a disclosure and a link, and one click cannot
+                        mean both — merging them would navigate away every time
+                        the operator tried to see the stations. */}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOpenPOs((p) => ({ ...p, [po.id]: !(p[po.id] ?? true) }))
+                      }
+                      aria-label={open ? "Collapse stations" : "Expand stations"}
+                      className="flex-shrink-0 text-[#6B7280] hover:text-[#1F1D1B]"
+                    >
+                      {open ? (
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      ) : (
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      )}
+                    </button>
                     <StateDot state={state} />
-                    <span className="text-sm font-semibold text-[#1F1D1B]">
+                    <a
+                      href={`/production/${po.id}`}
+                      className="text-sm font-semibold text-[#1F1D1B] hover:underline"
+                      title={`Open production order ${po.poNo}`}
+                    >
                       {po.poNo}
-                    </span>
+                    </a>
                     <span className="truncate text-xs text-[#6B7280]">
                       {po.productName}
                       {po.quantity ? ` × ${po.quantity}` : ""}
@@ -426,7 +440,7 @@ export function DocumentChainMap({
                           : po.currentDepartment || "Not started"}
                       </span>
                     </span>
-                  </button>
+                  </div>
                   {open && <StationStrip poId={po.id} />}
                 </div>
               );

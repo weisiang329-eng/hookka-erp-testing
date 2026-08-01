@@ -29,6 +29,8 @@ import {
 import {
   DEFAULT_PAY_RULES,
   resolvePayRulesAsOf,
+  payrollDayRateSen,
+  payrollHourDivisor,
   type PayRulesConfig,
 } from "../../lib/pay-rules";
 import { loadPayRuleVersions } from "../lib/pay-rules-store";
@@ -377,9 +379,67 @@ app.get("/", async (c) => {
         period,
         rows.map((r) => r.employeeId),
       );
+      // Late / short-hour detail, same shape the projected path returns.
+      // Without this a GENERATED payroll — the one HR is actually handed —
+      // showed absences and OT but NO late/short line, while the in-progress
+      // estimate showed all three. The deduction was still IN the money (it is
+      // baked into the stored gross), just invisible; on the printed sheet it
+      // even surfaced under "Part-month", because `payslips` has no column for
+      // it and the residual had to land somewhere. The figures live in
+      // payroll_hour_deductions, so read them straight from there.
+      const lateByWorker = new Map<string, Array<{ date: string; hours: number }>>();
+      const lateSenByWorker = new Map<string, number>();
+      try {
+        const dedRes = await c.var.DB.prepare(
+          "SELECT workerId, date, hours FROM payroll_hour_deductions WHERE date LIKE ? ORDER BY date",
+        )
+          .bind(`${period}-%`)
+          .all<{ workerId: string; date: string; hours: number }>();
+        // Priced with the SAME rate the engine docks at: the contractual day
+        // rate over the worker's day SPAN (hours + lunch), resolved per period.
+        const wRes = await c.var.DB.prepare(
+          "SELECT id, basicSalarySen, workingDaysPerMonth, workingHoursPerDay FROM workers",
+        ).all<{ id: string; basicSalarySen: number; workingDaysPerMonth: number; workingHoursPerDay: number }>();
+        const wById = new Map((wRes.results ?? []).map((w) => [w.id, w]));
+        const cfg = resolvePayRulesAsOf(
+          await loadPayRuleVersions(c.var.DB),
+          `${period}-28`,
+        );
+        for (const d of dedRes.results ?? []) {
+          const h = Number(d.hours) || 0;
+          if (h <= 0) continue;
+          const arr = lateByWorker.get(d.workerId) ?? [];
+          arr.push({ date: d.date, hours: Math.round(h * 100) / 100 });
+          lateByWorker.set(d.workerId, arr);
+          const w = wById.get(d.workerId);
+          if (!w) continue;
+          const dayRate = payrollDayRateSen(
+            Number(w.basicSalarySen) || 0,
+            {
+              workingDaysPerMonth: Number(w.workingDaysPerMonth) || 26,
+              calendarDays: 30,
+              workingDaysInMonth: 26,
+            },
+            cfg,
+          );
+          const hourRate = dayRate / payrollHourDivisor(Number(w.workingHoursPerDay) || 0, cfg);
+          lateSenByWorker.set(
+            d.workerId,
+            (lateSenByWorker.get(d.workerId) ?? 0) + Math.round(h * hourRate),
+          );
+        }
+      } catch (e) {
+        console.warn("[payslips] late/short detail skipped:", e);
+      }
       const data: PayslipWithDayDetail[] = rows.map((r) => {
         const d = detail.get(r.employeeId);
-        return { ...r, absentDates: d?.absentDates ?? [], otDays: d?.otDays ?? [] };
+        return {
+          ...r,
+          absentDates: d?.absentDates ?? [],
+          otDays: d?.otDays ?? [],
+          lateDays: lateByWorker.get(r.employeeId) ?? [],
+          shortHourDeductionSen: lateSenByWorker.get(r.employeeId) ?? 0,
+        };
       });
       return c.json({ success: true, data, total: data.length });
     } catch (e) {

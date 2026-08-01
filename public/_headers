@@ -19,7 +19,9 @@
 # /dashboard's HTML, kept pointing at OLD hashed asset names, and after a
 # deploy that rotated the CSS/JS hash the page rendered fully unstyled /
 # ChunkLoadError. `/*` covers every route; the more-specific `/assets/*` rule
-# below overrides Cache-Control back to immutable for fingerprinted assets.
+# below re-declares Cache-Control for fingerprinted assets (it must FIRST drop
+# the inherited value with `! Cache-Control` — Pages appends, it does not
+# replace; see the note on that rule).
 /*
   Cache-Control: no-cache, no-store, must-revalidate
   Pragma: no-cache
@@ -27,18 +29,41 @@
 
 # Hashed assets (Vite fingerprints every chunk + stylesheet) — safe to cache
 # forever. `immutable` tells the browser it won't change, skip conditional
-# revalidation. One-year max-age. More specific than `/*` above, so this
-# Cache-Control wins for /assets/* requests.
+# revalidation. One-year max-age.
+#
+# BUG-2026-08-01: the comment here used to claim "more specific than /* above,
+# so this Cache-Control wins". It does not. Cloudflare Pages APPENDS the headers
+# of every matching rule instead of replacing them, so /assets/* was served as:
+#
+#   cache-control: no-cache, no-store, must-revalidate, public, max-age=31536000, immutable
+#
+# — self-contradictory. Browsers honour `no-store`, so the fingerprinted assets
+# that are safe to cache for a year were cached for zero seconds, and
+# cf-cache-status came back BYPASS: every page load re-downloaded every chunk
+# over the factory wifi. `! Cache-Control` drops the inherited value first, so
+# the immutable policy is the ONLY one left on these paths.
 /assets/*
+  ! Cache-Control
+  ! Pragma
+  ! Expires
   Cache-Control: public, max-age=31536000, immutable
 
 # Static public files (no hash) — short cache with must-revalidate so a new
 # favicon/icon still propagates within minutes.
 /favicon.svg
+  ! Cache-Control
+  ! Pragma
+  ! Expires
   Cache-Control: public, max-age=300, must-revalidate
 
 /icons.svg
+  ! Cache-Control
+  ! Pragma
+  ! Expires
   Cache-Control: public, max-age=300, must-revalidate
 
 /pdf.worker.min.mjs
+  ! Cache-Control
+  ! Pragma
+  ! Expires
   Cache-Control: public, max-age=31536000, immutable

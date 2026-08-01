@@ -94,6 +94,15 @@ export type PrintReportOptions = {
   filterSummary: string;
   /** Paper orientation. Defaults to "portrait". Use "landscape" for wide tables. */
   orientation?: "portrait" | "landscape";
+  /**
+   * Tighten type + padding for column-heavy tables (owner 2026-08-01: the
+   * 18-column Payroll sheet). Landscape A4 is ~1000px of usable width; past
+   * roughly a dozen numeric columns the default 11px/9px-padding cells stop
+   * fitting and the table either wraps or overflows the page. Use with
+   * `orientation: "landscape"`. Ordinary reports should leave it off — smaller
+   * type is a cost, only worth paying when the alternative is an unreadable row.
+   */
+  dense?: boolean;
   /** Optional KPI cards drawn as a dashboard strip above the sections. */
   cards?: PrintCard[];
   /** One or more titled sections. Preferred over `columns` + `rows`. */
@@ -200,6 +209,7 @@ function renderCards(cards: PrintCard[]): string {
 export function buildReportHTML(opts: PrintReportOptions): string {
   const { title, subtitle, filterSummary, cards } = opts;
   const orientation = opts.orientation === "landscape" ? "landscape" : "portrait";
+  const dense = opts.dense === true;
   const printedAt = new Date().toLocaleDateString("en-MY", {
     day: "2-digit",
     month: "long",
@@ -247,12 +257,27 @@ export function buildReportHTML(opts: PrintReportOptions): string {
     h2 { font-size: 12px; margin: 16px 0 6px; font-weight: 700; color: #1F1D1B; letter-spacing: 0.5px; text-transform: uppercase; }
     p.note { font-size: 10px; color: #6B7280; margin-bottom: 6px; }
     table { width: 100%; border-collapse: collapse; margin-bottom: 4px; }
-    th, td { padding: 5px 9px; border-bottom: 1px solid #E2DDD8; word-break: break-word; overflow-wrap: anywhere; }
-    th { background: #1F1D1B; color: #fff; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+    /* Wrapping (owner 2026-08-01: 「很多都去2排…有些地方爆掉了」). The old rule
+       was "overflow-wrap: anywhere" on EVERY cell, which lets the browser break
+       inside a word — so a wide payroll table printed "RM 2,0 / 50.00",
+       "−RM 78.8 / 5 (1d)", "DRA / FT" and a PCB header stacked as "P/C/B".
+       A number split across two lines is not a formatting nit; it is unreadable
+       on a payslip. So: headers and every non-text column NEVER break, and text
+       columns break only at word boundaries. If a numeric column truly cannot
+       fit, we would rather it push the layout (visible, fixable) than silently
+       cut a figure in half. */
+    th, td { padding: 5px 9px; border-bottom: 1px solid #E2DDD8; }
+    th { background: #1F1D1B; color: #fff; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; }
     td { font-size: 11px; }
+    ${dense ? `
+    th, td { padding: 3px 5px; }
+    th { font-size: 8.5px; letter-spacing: 0.2px; }
+    td { font-size: 9.5px; }
+    ` : ""}
     th.left, td.left { text-align: left; }
-    th.right, td.right { text-align: right; font-variant-numeric: tabular-nums; }
-    th.center, td.center { text-align: center; }
+    td.left { overflow-wrap: break-word; }
+    th.right, td.right { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    th.center, td.center { text-align: center; white-space: nowrap; }
     tbody tr:nth-child(even) td { background: #FAF9F7; }
     tr.group td { background: #F4EFE3 !important; font-size: 9.5px; font-weight: 700; color: #6B5C32; letter-spacing: 1px; text-transform: uppercase; }
     tr.total td { border-top: 2px solid #000; border-bottom: none; font-weight: 700; background: #fff !important; }

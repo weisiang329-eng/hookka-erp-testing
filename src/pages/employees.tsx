@@ -7232,6 +7232,10 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
   };
 
   const fmtSen = (sen: number) => `RM ${(sen / 100).toFixed(2)}`;
+  // Print-only money: no "RM " prefix. Ten money columns x ~22px of repeated
+  // prefix is what pushed the payroll sheet off the page; the unit is stated
+  // once in the report subtitle instead.
+  const printMoney = (sen: number) => formatCurrency(sen).replace(/^RM\s*/, "");
 
   // Print Report — mirrors the on-screen payroll columns (Employee, Basic,
   // Days, Absence, Part-month, OT hours, OT Amt, Gross, statutory, Net Pay,
@@ -7239,24 +7243,48 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
   // filter line so a printed estimate is never mistaken for an approved run.
   const handlePrint = useCallback(() => {
     const columns: PrintColumn[] = [
-      { header: "Employee", value: (r) => { const p = r as PayslipData; return `${p.employeeNo} — ${p.employeeName} (${p.departmentCode.replace(/_/g, " ")})`; } },
-      { header: "Basic (RM)", align: "right", value: (r) => formatCurrency((r as PayslipData).basicSalary) },
+      // Print layout (owner 2026-08-01: 「很多都去2排…有些地方爆掉了」). Eighteen
+      // columns on landscape A4 leaves ~55px each; "RM 2,050.00" needs ~70px, so
+      // every money cell wrapped — and the shared CSS was breaking mid-number
+      // ("RM 2,0 / 50.00", "DRA / FT"). That CSS is fixed in print-report.ts;
+      // here we buy back the width: the repeated "RM " prefix moves OUT of ten
+      // columns and into the subtitle, department gets its own narrow column
+      // instead of forcing the name to wrap, and zeros print as "-".
+      { header: "Employee", width: "13%", value: (r) => { const p = r as PayslipData; return `${p.employeeNo} ${p.employeeName}`; } },
+      { header: "Dept", width: "7%", value: (r) => (r as PayslipData).departmentCode.replace(/_/g, " ") },
+      { header: "Basic", align: "right", value: (r) => printMoney((r as PayslipData).basicSalary) },
       { header: "Days", align: "center", value: (r) => (r as PayslipData).workingDays },
-      { header: "Absence", align: "right", value: (r) => { const p = r as PayslipData; return p.absenceDeductionSen > 0 ? `−${formatCurrency(p.absenceDeductionSen)} (${p.absentDays}d)` : "-"; } },
-      { header: "Part-month", align: "right", value: (r) => { const v = prorationSenOf(r as PayslipData); return v > 1 ? `−${formatCurrency(v)}` : "-"; } },
-      { header: "OT Wk", align: "right", value: (r) => `${(r as PayslipData).otWeekdayHours}h` },
+      { header: "Absent", align: "center", value: (r) => { const p = r as PayslipData; return p.absentDays > 0 ? `${p.absentDays}d` : "-"; } },
+      { header: "Absence", align: "right", value: (r) => { const p = r as PayslipData; return p.absenceDeductionSen > 0 ? `−${printMoney(p.absenceDeductionSen)}` : "-"; } },
+      // Was labelled "Part-month". On a STORED payslip that figure is not a
+      // proration at all: the payslips table has no short-hour column, so the
+      // late/short deduction lands in this residual — EI PHOO WEI 2026-07 printed
+      // −33.35 under "Part-month" and that IS her late/short dock. Naming it for
+      // what it is stops HR reading a deduction as a pro-rata.
+      // Prefer the REAL field (the backend now attaches it to stored payslips
+      // too, not just the in-progress estimate); prorationSenOf is the fallback
+      // for a row that predates that. Day count mirrors the Absent column so
+      // both deductions read the same way.
+      { header: "Late/Short", align: "right", value: (r) => {
+        const p = r as PayslipData;
+        const v = p.shortHourDeductionSen ?? prorationSenOf(p);
+        if (!(v > 1)) return "-";
+        const n = p.lateDays?.length ?? 0;
+        return n > 0 ? `−${printMoney(v)} (${n}d)` : `−${printMoney(v)}`;
+      } },
+      { header: "OT Wk", align: "right", value: (r) => { const h = (r as PayslipData).otWeekdayHours; return h > 0 ? `${h}h` : "-"; } },
       { header: "OT Sun", align: "right", value: (r) => { const h = (r as PayslipData).otSundayHours; return h > 0 ? `${h}h` : "-"; } },
       { header: "OT PH", align: "right", value: (r) => { const h = (r as PayslipData).otPHHours; return h > 0 ? `${h}h` : "-"; } },
-      { header: "OT Amt", align: "right", value: (r) => formatCurrency((r as PayslipData).totalOT) },
-      { header: "Allowance", align: "right", value: (r) => { const v = (r as PayslipData).allowances || 0; return v > 0 ? formatCurrency(v) : "-"; } },
-      { header: "Gross", align: "right", value: (r) => formatCurrency((r as PayslipData).grossPay) },
-      { header: "EPF EE", align: "right", value: (r) => formatCurrency((r as PayslipData).epfEmployee) },
-      { header: "EPF ER", align: "right", value: (r) => formatCurrency((r as PayslipData).epfEmployer) },
-      { header: "SOCSO", align: "right", value: (r) => formatCurrency((r as PayslipData).socsoEmployee) },
-      { header: "EIS", align: "right", value: (r) => formatCurrency((r as PayslipData).eisEmployee) },
-      { header: "PCB", align: "right", value: (r) => { const p = r as PayslipData; return p.pcb > 0 ? formatCurrency(p.pcb) : "-"; } },
-      { header: "Net Pay", align: "right", value: (r) => ({ text: formatCurrency((r as PayslipData).netPay), bold: true }) },
-      { header: "Status", value: (r) => (r as PayslipData).status },
+      { header: "OT Amt", align: "right", value: (r) => { const v = (r as PayslipData).totalOT; return v > 0 ? printMoney(v) : "-"; } },
+      { header: "Allow", align: "right", value: (r) => { const v = (r as PayslipData).allowances || 0; return v > 0 ? printMoney(v) : "-"; } },
+      { header: "Gross", align: "right", value: (r) => printMoney((r as PayslipData).grossPay) },
+      { header: "EPF EE", align: "right", value: (r) => { const v = (r as PayslipData).epfEmployee; return v > 0 ? printMoney(v) : "-"; } },
+      { header: "EPF ER", align: "right", value: (r) => { const v = (r as PayslipData).epfEmployer; return v > 0 ? printMoney(v) : "-"; } },
+      { header: "SOCSO", align: "right", value: (r) => { const v = (r as PayslipData).socsoEmployee; return v > 0 ? printMoney(v) : "-"; } },
+      { header: "EIS", align: "right", value: (r) => { const v = (r as PayslipData).eisEmployee; return v > 0 ? printMoney(v) : "-"; } },
+      { header: "PCB", align: "right", value: (r) => { const p = r as PayslipData; return p.pcb > 0 ? printMoney(p.pcb) : "-"; } },
+      { header: "Net Pay", align: "right", value: (r) => ({ text: printMoney((r as PayslipData).netPay), bold: true }) },
+      { header: "Status", align: "center", value: (r) => (r as PayslipData).status },
     ];
     const cards: PrintCard[] = [
       { label: "Total Payroll Cost", value: formatCurrency(totalPayrollCost) },
@@ -7267,8 +7295,10 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
     ];
     printReport({
       title: "Payroll",
+      subtitle: "All amounts in RM",
       filterSummary: `${months[selectedMonth - 1]} ${selectedYear}${isProjected ? " · Estimate (month in progress)" : ""}`,
       orientation: "landscape",
+      dense: true,
       cards,
       sections: [{ columns, rows: payslipData }],
     });

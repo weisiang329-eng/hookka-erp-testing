@@ -67,7 +67,6 @@ attendance/payroll suite green. Re-ran the engine offline against prod: the "pun
 counted absent" anomaly list for 2026-07 is now empty and all 36 rows reconcile.
 
 ---
-
 ## BUG-2026-08-01-001 — Forgotten punch-out closed the attendance row but wrote NO working hours → the day silently docked a FULL day's pay `payroll` `data-integrity` 🟡
 
 **Symptom:** Owner: 「Eiphoowei 为什么扣那么多钱」. Her 2026-07 estimate showed 7 absent days,
@@ -104,6 +103,9 @@ window, inverted window still writes, per-worker 7.5h day, tagging, never-overwr
 normal-punch paths unchanged). Full attendance/payroll suite 142/142. Re-ran the payroll
 engine offline against prod: the 29 days no longer appear as absences.
 
+**Still open (needs an office decision, NOT auto-fixed):** 3 days where the worker punched in
+and out in the same minute (18:01–18:01) — THI THI AYE 7/01, YE YINT AUNG 7/02, KYAW ZIN OO
+7/01. Zero-length window ⇒ 0 hours ⇒ absence. Too ambiguous to credit automatically.
 **Related:** the 3 same-minute-punch days it surfaced became BUG-2026-08-01-002.
 
 ---

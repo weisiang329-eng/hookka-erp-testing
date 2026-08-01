@@ -209,3 +209,68 @@ permanently blank. Also: rapid programmatic clicking through the sidebar
 outruns the in-app tab system and leaves the URL changing while the content
 stays put — at human speed (3.5s between clicks) navigation is correct. Neither
 is an application bug; both produced false readings before being caught.
+
+## 7. Round 2 — beyond the sidebar, and the backend (2026-08-02)
+
+Owner: 「每一个模块再走过一下，特别是之前我们没做过、没修过的模块」+ frontend / backend /
+database each to be looked at.
+
+### Frontend: the remaining render costs
+
+| Page | DOM nodes | worst long task | status |
+|---|---|---|---|
+| `/sales/create` product picker | 906 → 2,354 on open | **1,383ms open, 1,024ms typing** | ✅ fixed #203 → 498ms / 341ms |
+| `/planning/dept/packing` | 3,815 (249 rows) | 541ms | open, borderline |
+| `/production/upholstery` | 3,174 (14 rows) | 3,405ms in one reading | ⚠️ needs a clean re-measure — 14 rows cannot cost 3.4s, and the sibling dept pages read 190–490ms |
+| `/production/fab-cut … wood-cut` | 1,900–3,000 (14 rows) | 190–490ms | open, all similar |
+| `/planning/dept/fabric-cutting` | 2,615 (100 rows) | 400ms | fine |
+| `/production`, `/production/tracker`, `/consignment` | 1,183–1,904 | ≤290ms | fine |
+
+The production dept pages costing 200–500ms for **14 rendered rows** is
+disproportionate and points at the API payload, not the DOM — see the backend
+section: `/api/production-orders` reads 77,594 rows at p95 23.8s.
+
+### Backend: it is NOT an indexing problem
+
+`GET /api/admin/health/db-indexes` (#209, corrected in #212) now reports what
+the LIVE Postgres has. Result: **missing = 0 of 14, 97 indexes across the 8 hot
+tables.** Every index the slow queries need is present.
+
+| table | indexes | approx rows |
+|---|---|---|
+| job_cards | 16 | 32,319 |
+| ledger_journal_entries | 7 | 3,635 |
+| production_orders | 22 | 2,256 |
+| delivery_order_items | 5 | 1,992 |
+| sales_order_items | 4 | 1,928 |
+| sales_orders | 16 | 1,233 |
+| invoices | 14 | 426 |
+| delivery_orders | 13 | 348 |
+
+Yet slow-SQL over 7 days still shows:
+
+| endpoint | rows read | p95 | n |
+|---|---|---|---|
+| `/api/production-orders` | 77,594 | 23,820ms | 441 |
+| `/api/delivery-orders/ready-planning` | 17,707 | 24,567ms | 100 |
+| `/api/sales-orders` | 15,298 | 33,008ms | 8 |
+| `/api/internal/warm-lists` | **9** | **38,880ms** | 1 |
+
+**That last row settles it.** A 9-row primary-key `IN` lookup taking 38.9s is
+not a query-plan problem — no index changes it. The tables are small (largest
+32k rows) and fully indexed. What is left is connection acquisition: cold
+Hyperdrive connections, pool exhaustion, or queueing behind a long transaction.
+**That is the next backend investigation**, and it is worth more than any
+further query tuning.
+
+⚠️ The first version of the index audit reported "12 of 14 missing" — that was
+a bug in the matcher (camelCase expectations vs snake_case Postgres columns,
+plus `DESC` left attached to indexdef columns), not a finding. Corrected in
+#212 with 9 tests and three mutation checks. Recorded here because it was one
+step away from a migration adding a dozen indexes that already exist.
+
+### Front-end errors still open (unchanged from §3 H2)
+`/worker/scan` — "The associated Track is in an invalid state" ×65,
+"Unsupported focusMode" ×30, "setPhotoOptions failed" ×4. Camera teardown race,
+still unfixed. `signal is aborted without reason` on `/customers` ×6 and
+`/employees` ×3 is a navigation abort, not a bug.

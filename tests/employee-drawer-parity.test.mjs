@@ -65,3 +65,18 @@ test("the drawer and the grid offer the SAME departments and categories", () => 
   assert.match(PAGE, /departments=\{allDepts\.map/);
   assert.match(PAGE, /categories=\{CATEGORIES\}/);
 });
+
+test("the drawer's Save cannot sit under the toast stack", () => {
+  // Toasts render fixed bottom-6 right-6 at z-[9999]; the drawer is z-50. A
+  // right-aligned action bar puts Save under them, and a toast from the
+  // previous save eats the next click — the edit looks applied on screen and
+  // never reaches the server. Reproduced in the live app on 2026-08-02.
+  const toast = readFileSync("src/components/ui/toast.tsx", "utf8");
+  assert.match(toast, /fixed bottom-6 right-6/, "toast corner changed — recheck this");
+  const footer = DRAWER.slice(DRAWER.indexOf("border-t border-[#E2DDD8] px-4 py-3"));
+  assert.doesNotMatch(
+    footer.slice(0, 120),
+    /justify-end/,
+    "the drawer's action bar must not right-align into the toast corner",
+  );
+});

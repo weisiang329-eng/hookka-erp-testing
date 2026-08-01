@@ -386,7 +386,12 @@ export function EmployeeDrawer({
           </Section>
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t border-[#E2DDD8] px-4 py-3">
+        {/* Buttons sit LEFT. The toast container is fixed bottom-6 right-6 at
+            z-[9999] — the same corner a right-aligned Save would occupy, and
+            above this drawer's z-50, so a toast from the previous save silently
+            swallowed the next click on Save. The edit looked applied (the field
+            was cleared on screen) and nothing reached the server. */}
+        <div className="flex items-center gap-2 border-t border-[#E2DDD8] px-4 py-3">
           <Button variant="outline" onClick={onClose} disabled={saving}>
             Cancel
           </Button>

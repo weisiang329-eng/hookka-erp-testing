@@ -1958,3 +1958,188 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
   dashboard fans out to many AE SQL calls and may need caching.
 - [ ] Then sweep module-by-module (devtools) for slow fetches / console errors, now that there
   is real telemetry to cross-check against.
+## 2026-08-01 (session: OCR re-upload hint + OCR observability asks)
+
+Owner asks logged verbatim before work (multi-part message, CLAUDE.md rule):
+1. 「OCR upload 的是之前就 upload 过了的会怎么样？」→ 调查
+2. 「cached 只提醒不 block，只要有 OCR 的功能都这样，frontend 提示而已」→ 实作
+3. 「OCR scan 了很久，OCR dashboard 东西全部没看到了」→ 调查
+4. 「要有平均 scan 一张 PO/PI/GR 等等文件的时间」→ 未建
+5. 「每个种类的 accurate rate 是多少 %？by customer、by category (sofa/bedframe)，PI/SO/GR」→ 部分已有，未分单据类型
+6. 「第二张 PO 明明 scan 到 customer + hub，create as draft 就没有了」→ 定位到根因
+7. 「明明还在 loading 很多突然全部跑出来」→ 队列轮询行为，见 4
+8. 「Draft(2) 但列表 by default 是空的」→ 定位到根因（旧 bug class 复发）
+
+- [x] **(2) Cached-scan 提示上线（纯 UI，绝不 block）** — `src/components/scan-cached-hint.tsx`
+  新增 `ReusedScanBadge` +「Already scanned · reused」/ `CachedScanNotice`「N of M files had
+  been uploaded before」。接进**全部三个 OCR wizard**：scan-po-modal（Customer PO→SO）、
+  scan-supplier-modal 的 CreatePIWizard + CreateGRNWizard，收合态与展开态都有徽章。
+  后端本来就回传 `items[].cached` + `summary.cached`，前端从来没渲染 → 只补前端。
+  build:strict clean。branch `feat/scan-cached-reused-hint` off staging.
+  文案同时点出两件不明显的事：replay 是**原始 OCR**（上次手改的 correctedJson 不会回写
+  scan_queue.raw_json）、cache hit 跳过 prompt 所以新学的 ocrPromptRules 不生效。
+
+- [ ] **(3) OCR Accuracy dashboard 永远空 — 根因已定位，未修**
+  `GET /api/ocr-accuracy` 只算 `correctedJson IS NOT NULL` 的样本。自 2026-06-30 队列流程
+  成为默认后，两条路都不再回写 correctedJson：
+  · **SO 路**：scan-po-modal 给队列卡片编造 `sampleId = \`queue-${rowId}-${docIdx}\``
+    (scan-po-modal.tsx:1308)，create 时 POST 到 `/api/scan-po/samples/<假id>/confirm`
+    (:921) → UPDATE 命中 0 行，correctedJson 永远 NULL。
+  · **供应商路**：队列卡片 `sampleId = null` (scan-supplier-modal.tsx:1816 注释自陈
+    "Gold/correction confirm skipped in that case") → confirm 整个跳过。
+  队列 worker 其实**有**写真样本（scan-queue.ts:560 `recordSample: true`，
+  scan-engine.ts:997 / :1199 生成 id），但那个 id 从没回传给前端。
+  修法：把 engine 生成的 sampleId 存进 scan_queue 一列并随 batch 回传，前端改用真 id。
+  （附带：dashboard 卡片按 Command Center 的 period 走，选到 2026-08 时今天才 8/1，
+  即使修好也几乎没样本 — 先看 All-time。）
+
+- [ ] **(6) Claude 路 delivery hub 解析不出来 → SO 建成没有 hub**
+  `resolvedHubId = po.deliveryHubId || mapDeliveryHub(po.customerName, po.customerState).hubId`
+  (scan-po-modal.tsx:944-945)。`mapDeliveryHub` (src/lib/po-parser.ts:564) 是**硬编码表**：
+  要求 `customerName === "Houzs Century"` 完全相等、且第二参数是 `"KL"/"PG"/"SRW"/"SBH"`。
+  实际传进去的是 `po.customerState = "Selangor"`，而 customerName 是 OCR 读到的
+  "Houzs Century Sdn Bhd" → 两个条件都不成立 → hubId = ""。
+  **OCR 其实读到了 hub**（`po.deliveryHub` = "Houzs KL"/"Houzs PG"，就是卡片上那颗灰徽章），
+  但 Claude 路的 hub 解析**从不看这个字段**（只有 legacy 路 :1137 才传 po.deliveryHub）。
+  另外硬编码的 `hub-h1..h4` 是否还等于 delivery_hubs 真实 id 也要核。
+  → 应改成拿 `po.deliveryHub` 去 `catalog.customers[].hubs[].shortName` 匹配拿真 id。
+
+- [ ] **(8) Sales Orders「Draft (2)」但表格 0 of 2 records · 1 filter active**
+  `valueFilterKey={filterStatus || "all"}` (sales/index.tsx:1415) **没有把 `tab` 算进去**，
+  而 tab 是独立的 url state (:311)。data-grid 的持久化 key 是
+  `datagrid-filters-<gridId>-<valueFilterKey>-<user>` (data-grid.tsx:2080) → DRAFT 与
+  CONFIRMED 两个 tab 共用同一个 key。种子逻辑 (:2154) 只把**当前 data 里出现过的** status
+  值勾选进来；在 CONFIRMED tab 种下的集合里没有 "DRAFT"，切到 DRAFT tab 沿用该集合 →
+  两张 draft 全被过滤掉。
+  ⚠️ **这是 BUG 2026-05-16 的同类复发**（:1409-1414 注释就是上次的修复说明，当时只补了
+  filterStatus 没补 tab）→ 依 BUG-CLASSES 纪律，修的时候要把这一类的每个实例都扫一遍。
+
+- [ ] **(4)(7) 缺 OCR 耗时可观测性** — scan_queue 已有 created_at / completed_at，够算
+  每份文件的实际耗时，但没有任何地方聚合或展示。owner 要：按单据类型（PO/PI/GR）的平均
+  scan 时间。待定：放 OCR Accuracy 卡旁边还是独立卡。
+- [ ] **(5) accuracy 未按单据类型拆** — 现有 API 只有两大类：Sales Orders（已细分
+  by customer × category SOFA/BEDFRAME/ACCESSORY，逻辑在 ocr-accuracy-core.ts）和
+  Supplier（只 by supplier）。owner 要 **PI / GR 分开**，但两者共用 supplier_scan_samples
+  且没有区分列 —— 需要先决定怎么标记来源（docType？还是建单时回写）。
+
+### 2026-08-01 全 OCR 面「显示值 vs state」审计（owner: 「确认看全部OCR功能 这个很重要」）
+
+范围 = 全部 4 个 OCR 面。方法：列出每个受控输入的 `value={...}` 绑定，逐个判定它读的是
+state 还是渲染期派生值；再确认建单 payload 读的是同一批 state。
+
+| OCR 面 | 入口 | picker 绑定 | 建单读取 | 结论 |
+|---|---|---|---|---|
+| Customer PO → SO/CO | ScanPOModal（sales + consignment 两页共用） | **customer picker = `matchId`（派生）**，其余 20 个全 `po.*`/`item.*` | create 自己再算一次宽松匹配 | ❌ **唯一病灶** |
+| Purchase Invoice | ScanSupplierModal · CreatePIWizard | 17 个绑定全 `card.*`/`line.*` | `supplierById(card.supplierId)` (:1560) | ✅ 一致 |
+| GRN | ScanSupplierModal · CreateGRNWizard | 16 个绑定全 `card.*`/`line.*` | `supplierById(card.supplierId)` (:3736) | ✅ 一致 |
+| Finance bill / voucher | accounting/index.tsx `applyScan` | `scanNameMatch` → **立刻 `setForm({partyId})`** | 读 form state | ✅ 一致（且未匹配时弹「建档」对话框，UX 最好） |
+| legacy POCard（模板路，非 AI） | scan-po-modal:2599 | 只有一个 checkbox，无 picker | — | ✅ 不涉及 |
+
+**结论：这个 bug class 全库只有 1 个实例** — scan-po-modal.tsx:2112 `value={matchId ?? ""}`。
+`matchId` 在 :2094 算出来后从不 `onUpdate`，所以 `po.customerId` 保持 null。
+唯一的下游受害者是 hub picker (:2180) —— 它是全库唯一直接读原始 `po.customerId` 的地方，
+读到 null → `hubs=[]` → picker 不渲染 → 退化成纯文字 Badge → `deliveryHubId` 永远 null。
+（客户本身没事：create 路 :1041 有自己的宽松再解析兜底，所以 SO 上客户是对的。）
+
+**顺带发现：全库有 4 套各自为政的公司名匹配器**（这才是 ADD WOOD / Houzs 的共同病根）
+1. `matchByCompanyName`（lib/company-name-match.ts）— 剥 SDN BHD/BERHAD/BHD/PLT，正规化全等，
+   歧义→null。用于 scan-po 后端 + customer picker。**唯一处理法定后缀的一套。**
+2. `pickSupplierFromName`（scan-supplier-modal.tsx:203）— **不剥后缀**，exact→正规化全等→
+   前后缀包含三级，歧义→null。用于 PI/GRN。
+3. `scanNameMatch`（accounting/index.tsx:5912）— 不剥后缀，双向 substring，`.find()`
+   **首个命中即返回、无歧义保护**（最松，有静默选错家的风险）。用于财务单。
+4. scan-supplier.ts:180 的 SQL `regexp_replace(...) LIKE ... || '%'` — Postgres 前缀匹配。
+   用于 gold→distill 的供应商反查。
+
+- [ ] **修法（最小面）**：scan-po-modal 只需 (a) `matchId` 算出后写回 state，
+  (b) hub picker 改读同一个 id 并用 `po.deliveryHub` 文本比 `hubs[].shortName` 预选。
+  **不碰任何抽取逻辑** — 提取准确度由 scan-engine 的 prompt 决定，与 picker 匹配无关。
+- [ ] **修法（根治）**：4 套匹配器统一到 `matchByCompanyName` + 新增 `party_name_aliases`
+  表（原始 OCR 名 → partyId），操作员手改一次即永久记住。见本文件 learning-loop 段。
+
+### 2026-08-01 staging 实测 QA（owner: 「你可以chromemcp去看啊 做qa啊 不要什么都要我检查」）
+
+在 staging（prod 每晚克隆）用登录态实测，非推论。测试数据已全部清理，无残留。
+
+**① ADD WOOD 匹配不到 — 根因是主档拼错，不是匹配器口径**
+供应商档案存的是 **`ADD WOORD TRADING SDN. BHD.`（code 400-A002）**— 比发票上的
+`ADD WOOD TRADING SDN BHD` 多一个 R。实测三套算法对同一输入的结果：
+
+| 算法 | 结果 |
+|---|---|
+| `pickSupplierFromName`（供应商现行） | exact 0 / normEq 0 / containing 0 → **null** |
+| `matchByCompanyName`（本来打算统一过去的那套） | **0 → null** |
+| 编辑距离排序 | **第 1 名 ADD WOORD… 距离 1；第 2 名距离 8** |
+
+⚠️ **推翻先前建议**：把供应商侧统一到 `matchByCompanyName`「顺带解决 ADD WOOD」是**错的**，
+两套都归零。主档一个字母的拼写差异只有**模糊排序**能跨过去，而这个案子第一名与第二名
+差 8 倍，预选零风险 —— 印证 owner「找最像的就好」的判断。
+→ 结论：候选排序不是 UX 优化，是这一类（主档拼错 / OCR 误读 / 缩写）的**唯一解**。
+   alias 表负责「改一次永久记住」，模糊排序负责「第一次就猜中」，两者都要。
+
+**② SO draft 删不掉 — 后端完全正常，是前端没有入口**
+- `DELETE /api/sales-orders/<不存在的id>` → **404**（不是 403）⇒ Super Admin 有 delete 权限、
+  路由正常。
+- 实建一张 DRAFT 再删 → **200 `{"success":true}`**。纯 draft 无子记录，外键不挡。
+- 真正原因：**列表页没有任何删除入口**。行右键菜单 = View / Edit / Print / Transfer to DO /
+  Transfer to Invoice / 状态log / Refresh（sales/index.tsx:798-878，无 Delete）；
+  Draft 分页工具栏只有 Convert to Confirmed + Re-assign company。
+  唯一能删的地方是**进单据详情页右上角 Delete**。
+- [ ] TODO：Draft 行菜单加 Delete（仅 DRAFT 显示）+ 选中后批量删除；后端 DELETE 端点
+  同时补状态守卫（现在 CONFIRMED 只要没子记录也照删，比删不掉危险）。
+
+**③ 编号回收 — 实测证实**
+建 `SO-2608-001` → 删掉 → 再建 → **又拿到 `SO-2608-001`**。
+证实 `generateCompanySOId` 的 MAX+1 语义：删当月最大号会被重新发放；删中间号则永久空洞。
+（对照：财务单走 `doc_no_counters` 原子计数器，只增不回收 —— 两套语义不一致。）
+
+### 2026-08-01 供应商改名的影响 — staging 前后对照实测
+
+Owner 在 prod 把 `400-A002` 从 `ADD WOORD TRADING SDN. BHD.` 改成 `ADD WOOD TRADING SDN. BHD.`，
+问「旧单会不会全部跟着变」。在 staging 做同一次改名，改名前後各读一次：
+
+| | 改名前 | 改名后 |
+|---|---|---|
+| suppliers 主档 | ADD **WOORD** … | ADD **WOOD** … ✅ |
+| 24 张 PI 的 `supplierName` | ADD **WOORD** … | ADD **WOORD** … （不变）|
+| 13 张 PO 的 `supplierName` | ADD **WOORD** … | ADD **WOORD** … （不变）|
+
+**结论：旧单据保留建单当下的名字快照，不会回溯。** 存快照的表：`purchase_orders` /
+`grns` / `purchase_invoices` / `supplier_payments` / `purchase_credit_notes` /
+`ap_aging` / `three_way_matches` / `goods_in_transit`，读取端不 JOIN suppliers。
+✅ **不会把一家拆成两家**：AP 账龄/对账按 `supplierId` 分组（accounting.ts:526/2455），
+不按名字，所以金额与归属不受影响；只有旧单据上显示的字样还是旧拼写。
+
+**副作用（好的）**：改名后 `pickSupplierFromName` 实测 normEq=1 → 直接命中
+`ADD WOOD TRADING SDN. BHD.`。即这一家**靠修主档就已经解决**，不需要等模糊匹配上线。
+但这是「把资料改成配合演算法」，不是系统学会了 —— 见下。
+
+- [ ] ⚠️ **仍未解决（owner 反复强调）**：手动改正供应商/客户之后，系统学不到。
+  三层都断：confirm 只写 `correctedJson`+`isGold`（不回写改正后的 supplierId）→
+  queue 流程连 confirm 都没调（假 sampleId）→ distill 取样要 `correctedJson IS NOT NULL`
+  所以池子恒空。且 distill 本质是「已知是哪家之後学它的单据长相」，天生学不了身份。
+  → 下一个 PR：真 sampleId 回传 + confirm 回写 partyId + `party_name_aliases` 表
+    （OCR 原始名 → partyId，改一次即时生效，不等周日 cron）+ 模糊候选排序预选第一名。
+
+### 2026-08-01 staging 部署后验证（PR #166 已合入 staging）
+
+全部在 staging 用真实资料实测，不是推论。
+
+**① 改名传播 / backfill — 通过**
+- 单家 `{supplierId: sup-20d0fa1f}`：50 列（purchase_invoices 24 + purchase_orders 13
+  + supplier_payments 13），重跑 = 0（幂等成立）。
+- 读取端复验：24 张 PI + 13 张 PO 全部变 `ADD WOOD TRADING SDN. BHD.`，WOORD 残留 = 0。
+  ⚠️ 第一次复验读到旧值是**快取**（详情端点当下已是新值）；带 cache-buster 重读即一致。
+- 全量供应商 backfill 另外修正 **34 列 purchase_orders** —— 即 ADD WOOD 以外还有别家
+  历史改名留下的漂移，一并对齐。
+- 全量客户 backfill：0 列（staging 无待修漂移），7 张无 id 表如预期回报 notBackfillable。
+- ⚠️ 副作用：部分 PO 原本存的是 `400-A002 - ADD WOORD TRADING SDN. BHD.`（含代码前缀），
+  backfill 后统一成主档名字，前缀被抹掉。属于把不一致资料正规化，但要知道有这回事。
+
+**② hub 修复 — 用真实 catalog 验证通过**
+Houzs Century 在 catalog 里有 4 个 hub（KL/PG/SRW/SBH）。喂入你那 9 张单的实况
+（customerId=null、name="Houzs Century Sdn Bhd"、state="Selangor"、OCR hub="Houzs KL"）：
+`customerId → cust-1`、`hubs.length = 4`（下拉会渲染）、`hubId → hub-h1`（已预选）。
+修复前这三个分别是 null / 0 / null。
+顺带证实硬编码表的 `hub-h1..h4` **确实是真 id**，它失败纯粹因为比对条件错
+（要求名字完全相等，且传的是 customerState 而非文件上的 hub 名）。

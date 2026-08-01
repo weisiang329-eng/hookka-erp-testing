@@ -1087,6 +1087,7 @@ import deliveryAgent, { internal as deliveryAgentInternal } from "./routes/deliv
 import agentHeartbeat from "./routes/agent-heartbeat";
 import scanPo from "./routes/scan-po";
 import scanSupplier from "./routes/scan-supplier";
+import partyAliases from "./routes/party-aliases";
 import scanFinance from "./routes/scan-finance";
 import scanQueue, { sweepStuckScans } from "./routes/scan-queue";
 // One-shot historical job_card completion importer (Wei Siang's GS migration).
@@ -1331,6 +1332,9 @@ app.route("/api/internal/delivery-agent", deliveryAgentInternal);
 app.route("/api/internal/agents", agentHeartbeat);
 app.route("/api/scan-po", scanPo);
 app.route("/api/scan-supplier", scanSupplier);
+// Scanner memory: OCR-read name → the party the operator filed it under.
+// Shared by every OCR surface (customer PO, PI, GRN, finance bill/voucher).
+app.route("/api/party-aliases", partyAliases);
 app.route("/api/scan-finance", scanFinance);
 // Background scan queue (async OCR). Upload returns a batchId IMMEDIATELY;
 // processBatch() drives Claude calls under waitUntil() so the user can

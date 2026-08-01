@@ -1788,11 +1788,11 @@ function CreatePIWizard({
     void (async () => {
       const pending = await fetchScanQueuePending("supplier");
       if (cancelled || !pending?.batchId) return;
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+       
       setActiveBatchId(pending.batchId);
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+       
       setQueueItems(pending.items);
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+       
       setStep("preview");
     })();
     return () => {
@@ -1812,11 +1812,11 @@ function CreatePIWizard({
       const r = await fetchScanQueueBatch(activeBatchId);
       if (cancelled) return;
       if (!r.ok) {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- poll-result write
+         
         setErrors([`Queue poll failed: ${r.error}`]);
         return;
       }
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- poll-result write
+       
       setQueueItems(r.data.items);
       // Promote freshly-finished, un-consumed rows into preview cards.
       const ready = r.data.items.filter(
@@ -3904,11 +3904,11 @@ function CreateGRNWizard({
     void (async () => {
       const pending = await fetchScanQueuePending("supplier");
       if (cancelled || !pending?.batchId) return;
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+       
       setActiveBatchId(pending.batchId);
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+       
       setQueueItems(pending.items);
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional
+       
       setStep("preview");
     })();
     return () => {
@@ -3924,11 +3924,11 @@ function CreateGRNWizard({
       const r = await fetchScanQueueBatch(activeBatchId);
       if (cancelled) return;
       if (!r.ok) {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- poll-result write
+         
         setErrors([`Queue poll failed: ${r.error}`]);
         return;
       }
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- poll-result write
+       
       setQueueItems(r.data.items);
       const ready = r.data.items.filter(
         (it) =>

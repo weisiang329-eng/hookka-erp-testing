@@ -51,3 +51,24 @@ test("nextIncrementalCount — repeated calls always reach the end and stop", ()
   assert.equal(c, 300, "must converge on the full list");
   assert.equal(iw.nextIncrementalCount(c, 40, 300), 300, "and stay there");
 });
+
+test("optionSliceCount — a fresh dropdown renders one page, not the whole list", () => {
+  assert.equal(iw.optionSliceCount(360, 60, 0, 15), 60);
+});
+
+test("optionSliceCount — the slice stays ahead of the keyboard highlight", () => {
+  // Holding ArrowDown walks the highlight through the FULL filtered list. If
+  // the slice does not follow, scrollIntoView finds nothing and the selection
+  // appears to freeze while Enter still commits an unseen option.
+  assert.equal(iw.optionSliceCount(360, 60, 100, 15), 115);
+  assert.ok(iw.optionSliceCount(360, 60, 200, 15) > 200, "highlight must be rendered");
+});
+
+test("optionSliceCount — never renders more than the list holds", () => {
+  assert.equal(iw.optionSliceCount(12, 60, 0, 15), 12);
+  assert.equal(iw.optionSliceCount(360, 60, 359, 15), 360);
+});
+
+test("optionSliceCount — an empty list renders nothing", () => {
+  assert.equal(iw.optionSliceCount(0, 60, 0, 15), 0);
+});

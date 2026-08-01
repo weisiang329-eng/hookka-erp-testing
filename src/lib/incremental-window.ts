@@ -24,3 +24,24 @@ export function nextIncrementalCount(
   const safeStep = Math.max(1, Math.floor(step));
   return Math.min(total, safeCurrent + safeStep);
 }
+
+/**
+ * How many options a keyboard-navigable dropdown must render.
+ *
+ * The scroll position asks for `shown`, but arrow keys move a highlight
+ * through the FULL filtered list — so the slice has to stay ahead of the
+ * highlight too. Without the lead, holding ArrowDown walks the highlight past
+ * the last rendered option: `scrollIntoView` finds no element, the list stops
+ * following, and the selection appears to freeze while Enter still commits an
+ * option the user cannot see.
+ */
+export function optionSliceCount(
+  total: number,
+  shown: number,
+  highlight: number,
+  lead: number,
+): number {
+  if (total <= 0) return 0;
+  const needed = Math.max(0, highlight) + Math.max(0, lead);
+  return Math.min(total, Math.max(1, Math.max(shown, needed)));
+}

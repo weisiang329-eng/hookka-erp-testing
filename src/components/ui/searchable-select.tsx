@@ -16,6 +16,7 @@
 import * as React from "react";
 import { ChevronDown, Check, Search as SearchIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { nextIncrementalCount, optionSliceCount } from "@/lib/incremental-window";
 
 export type SearchableOption = {
   value: string;
@@ -38,6 +39,16 @@ export interface SearchableSelectProps {
   /** Override for empty-state message. */
   emptyMessage?: string;
 }
+
+// One page of options. The dropdown is 240px tall — about six rows — so a
+// page is already far more than fits; it exists so scrolling feels continuous
+// rather than paged.
+const OPTION_PAGE = 60;
+// Keep this many rendered ahead of the keyboard highlight, so holding
+// ArrowDown never outruns the DOM.
+const OPTION_KEYBOARD_LEAD = 15;
+// Extend once the scroll gets this close to the bottom.
+const OPTION_SCROLL_SLACK = 80;
 
 export const SearchableSelect: React.FC<SearchableSelectProps> = ({
   value,
@@ -97,6 +108,49 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
     if (highlight >= filtered.length) setHighlight(Math.max(0, filtered.length - 1));
   }, [filtered.length, highlight]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  // ── How many options are actually put in the DOM ────────────────────────
+  // The dropdown is 240px tall (max-h-60) — about six rows — but it used to
+  // build EVERY option. On prod (2026-08-01) the Sales Order product picker
+  // holds 360 products: opening it froze the main thread for 1,383ms and 11.5k
+  // pixels of buttons went into a 240px box, then every keystroke rebuilt all
+  // 360 for another ~1,024ms. This component backs 16 screens, so that cost
+  // was being paid by every picker in the app.
+  //
+  // Render a page at a time and extend on scroll. Filtering, keyboard
+  // navigation and Enter still run over the FULL filtered array — only what
+  // reaches the DOM is capped.
+  const [shown, setShown] = React.useState(OPTION_PAGE);
+
+  // Rewind to the first page when the query changes or the dropdown reopens.
+  // Adjusted during render (React's "reset state when a prop changes"
+  // pattern) rather than in an effect, so no frame shows the previous term's
+  // scroll depth.
+  const sliceKey = `${open ? "1" : "0"}|${query}`;
+  const [seenSliceKey, setSeenSliceKey] = React.useState(sliceKey);
+  if (seenSliceKey !== sliceKey) {
+    setSeenSliceKey(sliceKey);
+    setShown(OPTION_PAGE);
+  }
+
+  // Arrow keys walk the full list, so the slice has to keep up with the
+  // highlight or holding ArrowDown would run off the end of what is rendered
+  // and scrollIntoView would find nothing.
+  const visibleCount = optionSliceCount(
+    filtered.length,
+    shown,
+    highlight,
+    OPTION_KEYBOARD_LEAD,
+  );
+  const hiddenCount = filtered.length - visibleCount;
+
+  const onListScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    if (hiddenCount <= 0) return;
+    const el = e.currentTarget;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - OPTION_SCROLL_SLACK) {
+      setShown((s) => nextIncrementalCount(s, OPTION_PAGE, filtered.length));
+    }
+  };
 
   // Close on outside click.
   React.useEffect(() => {
@@ -188,7 +242,11 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
           </div>
 
           {/* Options list */}
-          <div ref={listRef} className="max-h-60 overflow-y-auto py-1">
+          <div
+            ref={listRef}
+            onScroll={onListScroll}
+            className="max-h-60 overflow-y-auto py-1"
+          >
             {allowClear && (
               <button
                 type="button"
@@ -205,7 +263,7 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
                 {emptyMessage}
               </div>
             ) : (
-              filtered.map((opt, i) => (
+              filtered.slice(0, visibleCount).map((opt, i) => (
                 <button
                   type="button"
                   key={opt.value}
@@ -234,6 +292,11 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
                   <span className="truncate">{opt.label}</span>
                 </button>
               ))
+            )}
+            {hiddenCount > 0 && (
+              <div className="px-3 py-1.5 text-xs text-center text-[#9CA3AF]">
+                {hiddenCount} more — scroll or keep typing
+              </div>
             )}
           </div>
         </div>

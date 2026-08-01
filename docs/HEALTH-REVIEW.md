@@ -142,3 +142,54 @@ The Stock tab fires the last three together — ~2.3s of backend before it paint
    edit and Copy-to-customer all ≤57ms), so either it is another company's data
    or another action — and health cannot tell us which, because it never
    recorded the route.
+
+## 6. System-wide render sweep beyond finance (2026-08-01)
+
+Owner: 「finance 都解决了就去其他 module 不常开的」. Every page reachable from the
+sidebar was opened and measured the same way. **Two non-finance screens turned
+out to be worse than anything in accounting.**
+
+| Page | DOM nodes | page height | worst long task | fixed in |
+|---|---|---|---|---|
+| `/quality` (Pending Inspections) | **30,303** | **272,943px** | 712ms | #201 → 1,747 nodes / 73ms |
+| `/mail-center` | **11,543** | 24,564px | **3,745ms** | #199 → 2,510 nodes / 769ms |
+| `/employees` | 5,425 | 6,792px | 541ms | open — under 1s, not urgent |
+| `/admin/health` | 3,292 | 6,145px | 781ms | open — 238 rows, ironic but minor |
+| `/production/folders` | 2,861 | 7,666px | 304ms | fine |
+| `/analytics/forecast` | 2,161 | 6,630px | 274ms | fine |
+
+`/quality` renders **167 QC slot cards holding 2,839 pending inspections** — the
+12:00/16:00 cron keeps generating slots back to 2026-04-28 and nothing clears
+them. The rendering is fixed; whether the screen should default to recent slots
+is an owner decision, logged in WORK-TRACKER.
+
+`/mail-center` rendered all 300 threads the API caps at, at 81px each.
+
+Everything else measured clean (all under 260ms of long task): `/dashboard`
+1,473n · `/daily-report` 1,154n · `/sales` 1,950n · `/delivery` 2,063n ·
+`/delivery-returns` 904n · `/customers` 1,246n · `/leads` 842n · `/planning`
+1,642n · `/products` 1,344n · `/cnc-templates` 1,193n · `/bom` 1,327n ·
+`/bom/wip-times` 1,521n · `/bom/component-kits` 860n · `/maintenance/sofa-combos`
+1,054n · `/inventory` 1,436n · `/inventory/fabrics` 1,474n ·
+`/inventory/stock-value` 894n · `/warehouse` 1,158n · `/procurement` 1,471n ·
+`/procurement/grn` 1,489n · `/procurement/pi` 1,784n · `/purchase-returns` 875n ·
+`/planning/mrp` 950n · `/service-cases` 1,901n · `/service-order` 2,251n ·
+`/maintenance` 961n · `/settings/users` 1,712n · `/agents` 1,266n · `/settings` 914n.
+
+### Sofa Combos — reported slow, measures fast
+Owner reported `/maintenance/sofa-combos` as laggy. On HOOKKA INDUSTRIES it is
+1,054 nodes / 92ms: the list, expand-all (6 model groups, 27 rows), New Combo,
+opening an existing combo and Copy-to-customer were each exercised and none
+exceeded 92ms. `/api/sofa-combos` answers in 50-71ms. **The page has zero RUM
+rows in 7 days**, so health cannot say which company or action was slow either.
+Needs the owner to say which company / which click.
+
+### Measurement caveat worth keeping
+Driving the browser from a hidden window silently corrupts this kind of work:
+`setTimeout` is throttled to ~1/minute, `window.innerHeight` reads 0 (so any
+`vh` container measures 0 and a virtualizer sees a zero-height viewport), and
+**IntersectionObserver never fires**, which makes lazily-mounted content look
+permanently blank. Also: rapid programmatic clicking through the sidebar
+outruns the in-app tab system and leaves the URL changing while the content
+stays put — at human speed (3.5s between clicks) navigation is correct. Neither
+is an application bug; both produced false readings before being caught.

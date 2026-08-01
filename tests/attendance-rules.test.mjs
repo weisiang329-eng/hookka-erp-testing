@@ -166,3 +166,30 @@ test("leave BEFORE lunch (08:00 -> 11:00) -> no lunch deducted (none taken)", ()
   const d = day("08:00", "11:00");
   assert.equal(d.regularWorkMin, 3 * 60);
 });
+
+// ── One OT minimum for the whole system (owner 2026-08-01: 「全系统统一」) ───
+//
+// Overtime was derived independently on four surfaces — the punch, the payroll
+// engine's logged-hours path, the worker's own My Pay screen and the office
+// attendance grid — and only the punch applied the 30-minute minimum. A worker
+// could see 0.02h of overtime on their phone for a day the payslip paid nothing.
+test("otMinutesAtLeastMinimum: below 30 minutes earns nothing", () => {
+  assert.equal(A.otMinutesAtLeastMinimum(1), 0);
+  assert.equal(A.otMinutesAtLeastMinimum(29), 0);
+  assert.equal(A.otMinutesAtLeastMinimum(0), 0);
+  assert.equal(A.otMinutesAtLeastMinimum(-5), 0);
+});
+
+test("otMinutesAtLeastMinimum: 30 minutes and up is paid in full", () => {
+  assert.equal(A.otMinutesAtLeastMinimum(30), 30);
+  assert.equal(A.otMinutesAtLeastMinimum(45), 45);
+  assert.equal(A.otMinutesAtLeastMinimum(120), 120);
+});
+
+test("otMinutesAtLeastMinimum agrees with the punch path at the boundary", () => {
+  // 18:29 punch-out → 0 OT; 18:30 → 30 min. The two must not disagree.
+  assert.equal(A.computeAttendanceDay(8 * 60, 18 * 60 + 29).otMin, 0);
+  assert.equal(A.otMinutesAtLeastMinimum(29), 0);
+  assert.equal(A.computeAttendanceDay(8 * 60, 18 * 60 + 30).otMin, 30);
+  assert.equal(A.otMinutesAtLeastMinimum(30), 30);
+});

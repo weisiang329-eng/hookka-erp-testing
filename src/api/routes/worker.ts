@@ -42,7 +42,7 @@ import {
 } from "../lib/punch-autofill";
 import { loadPayRuleVersions } from "../lib/pay-rules-store";
 import { resolvePayRulesAsOf, toAttendanceRules } from "../../lib/pay-rules";
-import { computeAttendanceDay, hhmmToMinutes } from "../../lib/attendance-rules";
+import { computeAttendanceDay, hhmmToMinutes, otMinutesAtLeastMinimum } from "../../lib/attendance-rules";
 import {
   rowToMinimalPO,
   // Aliased: worker.ts already has its own slimmer local ProductionOrderRow /
@@ -1178,7 +1178,7 @@ app.post("/clock", async (c) => {
     efficiencyPct = standardMinutes > 0
       ? Math.round((productionTimeMinutes / standardMinutes) * 100)
       : 0;
-    overtimeMinutes = Math.max(0, total - standardMinutes);
+    overtimeMinutes = otMinutesAtLeastMinimum(total - standardMinutes);
   }
   await c.var.DB.prepare(
     `UPDATE attendance_records
@@ -1469,7 +1469,10 @@ app.get("/history", async (c) => {
     let overtimeMinutes = r.overtimeMinutes;
     if (wheMins != null) {
       workingMinutes = Math.min(wheMins, standardMins);
-      overtimeMinutes = Math.max(0, wheMins - standardMins);
+      // One OT minimum for the whole system (OT_MIN_MINUTES, owner 2026-07-04:
+      // 「OT 要30分鐘才算」). Without it this screen showed a worker 0.02h of
+      // overtime on a day payroll pays nothing for.
+      overtimeMinutes = otMinutesAtLeastMinimum(wheMins - standardMins);
     }
     let lateMinutes = 0;
     if (r.clockIn) {
@@ -1784,7 +1787,7 @@ app.get("/history", async (c) => {
     const wheMins = wheMinutesByDate.get(d);
     if (wheMins != null) {
       workedMinutes += Math.min(wheMins, standardMins);
-      overtimeMinutes += Math.max(0, wheMins - standardMins);
+      overtimeMinutes += otMinutesAtLeastMinimum(wheMins - standardMins);
     } else {
       const row = attRowByDate.get(d);
       workedMinutes += row?.workingMinutes ?? 0;

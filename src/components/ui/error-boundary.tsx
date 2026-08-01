@@ -129,13 +129,10 @@ export function ErrorFallback({ error, errorInfo, onReset, reset }: ErrorFallbac
     void purgeServiceWorkerAndCaches().finally(() => window.location.reload());
   }, [error]);
 
-  // Once a successful render happens (no stale-chunk crash), reset the
-  // attempt counter so the next future stale-chunk hit starts fresh.
-  React.useEffect(() => {
-    if (!error) {
-      sessionStorage.removeItem("hookka-stale-chunk-attempts");
-    }
-  }, [error]);
+  // NOTE: the reset of the attempt counter deliberately does NOT live here.
+  // This component is only mounted BY a crash, so `error` is never null and a
+  // `if (!error) clear()` effect here never fires — which is exactly how the
+  // budget came to leak (see main.tsx, where a successful 10s run clears it).
 
   const handleReset = reset ?? onReset;
 

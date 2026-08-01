@@ -40,10 +40,24 @@ test("a short debounce collapses a burst of preloadError events", () => {
 });
 
 test("main.tsx and ErrorBoundary share the same attempt-counter key", () => {
-  // The counter must be the exact key the ErrorBoundary clears on a successful
-  // render, so a recovered app resets its budget for the next deploy.
   assert.match(main, /hookka-stale-chunk-attempts/);
-  assert.match(boundary, /removeItem\("hookka-stale-chunk-attempts"\)/);
+  assert.match(boundary, /hookka-stale-chunk-attempts/);
+});
+
+test("the recovery budget is cleared where a SUCCESSFUL run can observe it", () => {
+  // It used to be cleared inside ErrorFallback via `if (!error) removeItem(...)`
+  // — a component only ever mounted BY a crash, so `error` is never null and the
+  // effect never fired. The budget only incremented, and after two recoveries in
+  // one session every later stale chunk went straight to "Something went wrong"
+  // (owner hit exactly that on the second deploy of 2026-08-01).
+  assert.doesNotMatch(
+    boundary,
+    /if \(!error\)\s*\{?\s*sessionStorage\.removeItem/,
+    "ErrorFallback cannot clear the budget — it only renders when there IS an error",
+  );
+  // main.tsx clears both keys once the app has been alive long enough that a
+  // stale chunk (which fails at boot or at a lazy route load) would have fired.
+  assert.match(main, /setTimeout\(\(\)\s*=>\s*\{[\s\S]*?removeItem\(STALE_ATTEMPTS_KEY\)[\s\S]*?removeItem\(STALE_RELOAD_KEY\)[\s\S]*?\}, *10_000\)/);
 });
 
 test("recovery still purges the service worker + caches before reloading", () => {

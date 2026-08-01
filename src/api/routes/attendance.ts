@@ -1,3 +1,4 @@
+import { otMinutesAtLeastMinimum } from "../../lib/attendance-rules";
 // ---------------------------------------------------------------------------
 // D1-backed attendance route.
 //
@@ -331,7 +332,8 @@ app.post("/", async (c) => {
         productionTimeMinutes = Math.max(0, Math.round(total * 0.85));
         const standardMinutes = (worker.workingHoursPerDay ?? 9) * 60;
         efficiencyPct = Math.round((productionTimeMinutes / standardMinutes) * 100);
-        overtimeMinutes = Math.max(0, total - standardMinutes);
+        // Same 30-minute OT minimum the payroll engine and the punch use.
+        overtimeMinutes = otMinutesAtLeastMinimum(total - standardMinutes);
         deptBreakdown = JSON.stringify([
           {
             deptCode: worker.departmentCode ?? "",

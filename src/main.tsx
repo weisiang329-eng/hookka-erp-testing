@@ -112,6 +112,25 @@ if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   })
 }
 
+// Clear the stale-chunk recovery budget once the app has actually been RUNNING
+// for a while.
+//
+// This used to live in ErrorFallback as `useEffect(() => { if (!error) clear() })`
+// — which never ran: ErrorFallback is only mounted BY a crash, so `error` is
+// never null there. The budget therefore only ever incremented, and after two
+// recoveries in one session every later stale chunk went straight to
+// "Something went wrong" with no reload (owner hit exactly this on the second
+// deploy of 2026-08-01, on /sales/so-…).
+//
+// Ten seconds of a live app is the signal we were missing: a stale chunk fails
+// at boot or at a lazy route load, both of which are over long before this
+// fires. A user who navigates into a dead chunk half an hour later then still
+// gets a full, fresh recovery budget.
+setTimeout(() => {
+  sessionStorage.removeItem(STALE_ATTEMPTS_KEY)
+  sessionStorage.removeItem(STALE_RELOAD_KEY)
+}, 10_000)
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ConfirmProvider>

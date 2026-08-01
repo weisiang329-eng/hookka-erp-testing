@@ -163,3 +163,17 @@ export function computeAttendanceDay(
 
   return { lateMin, isLate, regularWorkMin, shortfallMin, otMin };
 }
+
+/**
+ * Minutes of overtime that actually COUNT, given a raw surplus over the
+ * standard day. Below the factory minimum nothing is earned.
+ *
+ * Shared so every surface agrees — the payroll engine, the worker's own My Pay
+ * screen, and the office attendance grid each derived overtime independently
+ * and only the punch path applied the minimum. A worker could see 0.02h of
+ * overtime on their phone for a day the payslip paid nothing for.
+ */
+export function otMinutesAtLeastMinimum(surplusMinutes: number): number {
+  const m = Math.max(0, Math.round(Number(surplusMinutes) || 0));
+  return m >= OT_MIN_MINUTES ? m : 0;
+}

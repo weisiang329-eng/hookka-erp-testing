@@ -146,7 +146,7 @@ app.get("/", async (c) => {
     binds.push(materialCode);
   }
   const sql = `
-    SELECT b.*, s.name AS _supplierName, s.code AS _supplierCode
+    SELECT b.*, s.name AS _supplier_name, s.code AS _supplier_code
     FROM supplier_material_bindings b
     LEFT JOIN suppliers s ON s.id = b.supplierId
     WHERE ${where.join(" AND ")}

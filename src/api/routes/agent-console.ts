@@ -430,7 +430,7 @@ app.get("/review", async (c) => {
   }>(
     `SELECT SUM(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
                       AND substr(completedDate::text, 1, 10) <= substr(dueDate::text, 1, 10)
-                     THEN 1 ELSE 0 END) AS onTime,
+                     THEN 1 ELSE 0 END) AS on_time,
             COUNT(*) AS total
        FROM job_cards
       WHERE substr(dueDate::text, 1, 10) >= ?

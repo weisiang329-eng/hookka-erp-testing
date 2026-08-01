@@ -363,7 +363,7 @@ async function loadStateRateCard(
         `SELECT r.providerId AS providerId, r.state AS state,
                 r.ratePerTripSen AS ratePerTripSen,
                 r.ratePerExtraDropSen AS ratePerExtraDropSen,
-                d.name AS providerName, d.status AS providerStatus
+                d.name AS provider_name, d.status AS provider_status
            FROM three_pl_state_rates r
            JOIN drivers d ON d.id = r.providerId
           WHERE r.orgId = ?`,

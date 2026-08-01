@@ -123,7 +123,7 @@ app.get("/schedule/fabric-cutting", async (c) => {
            po.sizeLabel     AS sizeLabel,
            po.fabricCode    AS fabricCode,
            po.customerName  AS customerName,
-           po.status        AS orderStatus,
+           po.status        AS order_status,
            po.salesOrderId  AS salesOrderId,
            so.customerDeliveryDate AS customerDeliveryDate,
            so.hookkaExpectedDD     AS hookkaExpectedDD
@@ -355,7 +355,7 @@ async function loadChainInputs(db: D1Database): Promise<LoadedChainInputs> {
            po.fabricCode     AS fabricCode,
            po.productCode    AS productCode,
            po.customerName   AS customerName,
-           po.status         AS orderStatus,
+           po.status         AS order_status,
            po.salesOrderId   AS salesOrderId,
            so.customerDeliveryDate AS customerDeliveryDate,
            so.hookkaExpectedDD     AS hookkaExpectedDD

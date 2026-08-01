@@ -66,3 +66,79 @@ Every week, on prod (erp.hookka.com/admin/health, range=7d):
 |---|---|---|---|
 | 2026-08-01 | 409ms / 1389ms (24h) | 26 | Baseline — first real read ever. H1–H5 opened. |
 | 2026-08-01 (later) | — | — | H1/H3/H6/H7 fixed (#167 #174 #177 #170 #169). H2 partly misdiagnosed — see row. Two 500s (cash-flow, consignment) found ALREADY fixed by others and deliberately left alone. Next read must verify: scan-complete 500s → 0, production-orders P50 down from 8s. |
+
+## 5. Finance module — full tab-by-tab measurement (2026-08-01)
+
+Owner: 「我发现 finance 的模块很卡」/「每个 module submodule 都应该要点进去检查」.
+**All 33 accounting tabs and all 9 standalone finance pages were opened one at a
+time on erp.hookka.com**, each on a cold full page load, and measured for DOM
+nodes, rendered `<tbody>` rows, page height, long-task total/max and slowest
+APIs. Org = HOOKKA INDUSTRIES SDN BHD, super-admin session.
+
+**The headline: loading was never the problem.** Every finance API answered in
+under half a second except the four listed in "backend" below. What the owner
+feels is the browser building thousands of DOM nodes for rows that are not on
+screen.
+
+### The screens that freeze the main thread
+
+| Tab / page | rows | DOM nodes | page height | long task (max) | its slowest API |
+|---|---|---|---|---|---|
+| `?tab=openstock` Opening Stock | 423 | 4,552 | 21,102px | **5,795ms** | 59ms |
+| `?tab=gl` General Ledger (grouped) | 1,798 | 17,413 | 63,538px | **2,494ms** | 301ms |
+| `?tab=opening` Opening Balance | 246 | 2,728 | 10,488px | **951ms** | 247ms |
+| `?tab=coa` Chart of Accounts | 0 (div rows) | 5,121 | 8,291px | 218ms | 76ms |
+| `?tab=plmonthly` Monthly P&L | 130 | 4,306 | 4,310px | 159ms | — |
+
+Opening Stock is the worst case because every row carries TWO controlled inputs
+(qty + `MoneyInput`) — 423 materials mount 846 inputs. Typing the fourth
+character into its search box blocked the thread for **2,271ms** in one task.
+
+The General Ledger grouped view is 59 per-account `<Card>`s (one `<table>`
+each), which is why row windowing alone could not fix it.
+
+**Not a real freeze:** `?tab=ocreditorbills` first measured at 524ms, but on a
+clean re-measure it is **57ms** — the first reading picked up the app's own
+cold-start work, not the tab's. It is left alone; only screens that reproduce
+were changed.
+
+### Everything else measured clean
+
+`pl` 819n · `coststruct` 2,039n · `cashflow` 1,189n · `bs` 849n · `tb` 1,094n ·
+`payments` 1,535n · `receipts` 674n · `transfer` 741n · `journals` 883n ·
+`cashbook` 739n · `assets` 749n · `ar` 1,150n · `ap` 1,143n ·
+`supplier-discount` 749n · `odebtor` 764n · `odebtorbills` 737n · `odebtorpay`
+749n · `ocreditor` 926n · `ocreditorpay` 1,197n · `labor` 763n · `stock` 786n ·
+`stockmap` 1,170n · `stocktake` 859n · `audit` 1,076n · `maint` 802n ·
+`overview` 970n — all under 260ms of long task.
+
+Standalone pages: `/invoices` 1,214n/78ms · `/invoices/payments` 1,018n ·
+`/invoices/supplier-payments` 2,091n · `/invoices/credit-notes` 852n ·
+`/invoices/debit-notes` 853n · `/invoices/e-invoice` 781n ·
+`/finance-dashboard` 1,352n · `/forecast` 1,798n · `/accounting/cash-flow` 892n.
+
+### Backend follow-ups (no DOM problem, real server time)
+
+| Endpoint | Time | Seen on |
+|---|---|---|
+| `/api/accounting/dashboard` | **2,010ms** | `/finance-dashboard` |
+| `/api/accounting/stock-summary` | 990ms | `?tab=stock` |
+| `/api/accounting/cost-by-line` | 745ms | `?tab=stock` |
+| `/api/accounting/wip-detail` | 594ms | `?tab=stock` |
+
+The Stock tab fires the last three together — ~2.3s of backend before it paints.
+
+### NEW monitoring gaps this exercise exposed
+
+1. **`/fe-perf` only ever returns the `longtask` metric.** There is no
+   page-load, interactive or LCP series in the response at all, so "which page
+   is slow to load" cannot be answered from the dashboard — only "which page
+   janks".
+2. **`/by-endpoint` returns only the top 10 routes by hit count.** Not one
+   accounting endpoint appears, so the four slow APIs above are invisible to
+   health; they were found by hand. It ignores a `limit` param.
+3. **`/maintenance/sofa-combos` has zero RUM rows** in 7d. The owner reports it
+   as slow; on HOOKKA INDUSTRIES it measures fast (list, expand-all, New Combo,
+   edit and Copy-to-customer all ≤57ms), so either it is another company's data
+   or another action — and health cannot tell us which, because it never
+   recorded the route.

@@ -9,6 +9,52 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-01 — Finance module lag: every tab measured on prod, the four real freezes fixed
+
+Owner: 「我发现 finance 的模块很卡」/「每个 module submodule 都应该要点进去检查」, plus
+「数据越来越大的也要做到像 SO DO 那样 loading」and「search 的功能?」.
+
+**All 33 accounting tabs + the standalone finance pages were opened one by one on
+erp.hookka.com and measured** (DOM nodes, rendered rows, page height, long-task total and
+max, slowest APIs). Raw numbers in `docs/HEALTH-REVIEW.md`. Loading was NOT the problem —
+every tab's APIs answered in well under a second except the Stock tab. Four screens
+freeze the main thread building DOM:
+
+| Tab | rows | DOM nodes | page height | worst freeze |
+|---|---|---|---|---|
+| Opening Stock (`openstock`) | 423 | 4,552 | 21,102px | **5,795ms** (and 2,271ms on the 4th keystroke in its search box) |
+| General Ledger (`gl`) | 1,798 | 17,413 | 63,538px | **2,494ms** |
+| Opening Balance (`opening`) | 246 | 2,728 | 10,488px | **951ms** |
+
+A fourth candidate, Other Creditor Bills, first measured at 524ms but came back at
+**57ms** on a clean re-measure — the first reading caught the app's cold start, not the
+tab. Left alone; only the screens that reproduce were touched.
+
+🔵 **Shipped in this PR (client-side windowing — no API or schema change):**
+- New primitive `useVirtualRows` (`src/components/ui/virtual-rows.tsx`) + its pure math
+  `src/lib/virtual-window.ts`, unit-tested and mutation-verified
+  (`tests/virtual-window.test.mjs`). This is the *grouped*-table case `<DataGrid>`
+  explicitly deferred, so the accounting screens finally have a windowing path.
+- New `DeferredBlock` (`src/components/ui/deferred-block.tsx`) for card-per-group reports
+  (the GL grouped ledger is 59 per-account `<Card>`s, not one table).
+- Applied to: Opening Stock, Opening Balance GL grid, General Ledger (grouped cards +
+  both flat listings). Search on Opening Stock is now `useDeferredValue`d.
+
+⚪ **Queued, deliberately not in this PR:**
+- **Server-side paging + search for the ledger, SO/DO style** (owner's「像 SO DO 那样」).
+  `GET /api/accounting/gl` currently `SELECT`s EVERY `ledger_journal_entries` row with no
+  LIMIT and filters in JS, because a leg's effective date comes from `loadDocDateResolver`
+  (opening legs date at the KV opening date, not `postedAt`) — SQL cannot filter or
+  keyset-paginate on a date it doesn't store. Doing this properly needs a persisted
+  effective-date column (write-path + backfill + index), which is a money-path schema
+  change and wants its own PR.
+- Chart of Accounts tab: 5,121 nodes / 8,291px but only a 218ms long task — heaviest DOM
+  left, no measured freeze. Windowing it is cheap once the primitive is proven in prod.
+- **System Health gaps found while measuring:** `fe-perf` only records the `longtask`
+  metric (no page-load/interactive series at all), and `/by-endpoint` returns only the top
+  10 routes by hit count — so not a single accounting endpoint's server timing is visible.
+  `/maintenance/sofa-combos` has zero RUM rows.
+
 ## 2026-07-29 — FG sticker `+2S+2S` investigated → non-bug (stale print); logged to BUG-HISTORY
 - ✅ **Sticker `5530-2S+2S+2S+2S+2S` on SO-2607-089 (Houzs KL) — NOT a bug (BUG-2026-07-29-001).**
   Owner「那么多 2S?」. SO has 1 sofa (`5530-2S` ×1) + 2 pillows. Direct prod-DB read confirmed the

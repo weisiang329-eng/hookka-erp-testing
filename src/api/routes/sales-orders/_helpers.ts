@@ -12,6 +12,7 @@ import {
   type CreatedProductionOrder,
 } from "../_shared/production-builder";
 import { breakBomIntoWips } from "../../lib/bom-wip-breakdown";
+import { runSelfApply, memoizeSelfApply } from "../../lib/self-apply";
 import {
   parseRepairScope,
   serializeRepairScope,
@@ -1031,11 +1032,21 @@ export async function canonicalizeRepairScopesAgainstBom(
 // isolate boot, not per request.
 export let pendingMigrations: Promise<void> | null = null;
 export function ensurePendingMigrations(db: D1Database): Promise<void> {
-  if (pendingMigrations) return pendingMigrations;
-  pendingMigrations = (async () => {
-    // Each ALTER runs independently so a permission failure on one doesn't
-    // mask the others. Best-effort: a real schema-mismatch error will
-    // resurface on the INSERT below with a clearer message.
+  // Each ALTER runs independently so a permission failure on one doesn't mask
+  // the others, and a real schema-mismatch error still resurfaces on the INSERT
+  // below with a clearer message.
+  //
+  // What changed 2026-08-02: the round used to swallow EVERY error and still
+  // mark itself resolved, so one transient DB blip on the first write after an
+  // isolate boot left the column unapplied and NEVER retried for the life of
+  // that isolate. runSelfApply now logs the exact statement that failed, and
+  // memoizeSelfApply drops the memo so the next request tries again.
+  return memoizeSelfApply(
+    () => pendingMigrations,
+    (p) => {
+      pendingMigrations = p;
+    },
+    async () => {
     const stmts = [
       // 0108 — customer PO PNG attachment for dispute proof.
       "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS customerPOImageB64 TEXT",
@@ -1109,15 +1120,9 @@ export function ensurePendingMigrations(db: D1Database): Promise<void> {
       "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS sales_org_code TEXT NOT NULL DEFAULT 'HOOKKA'",
       "UPDATE sales_orders SET sales_org_code = 'HOOKKA' WHERE sales_org_code IS NULL OR sales_org_code = ''",
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).run();
-      } catch {
-        // ignore — column may already exist or DDL transiently rejected
-      }
-    }
-  })();
-  return pendingMigrations;
+      await runSelfApply(db, "sales-orders", stmts);
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------

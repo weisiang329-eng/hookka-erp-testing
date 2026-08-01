@@ -113,15 +113,22 @@ jobs:
       - name: Carry previous assets into this deployment
         run: |
           mkdir -p .asset-history dist/assets
+          # ORDER MATTERS. Record this build FIRST, prune, and only then carry
+          # survivors into the deployment.
+          #
+          # Doing it the other way round — carry, then copy dist back into the
+          # history — silently disables the prune: `cp` does not preserve mtime,
+          # so every carried file is re-stamped with today's date on every
+          # deploy and nothing is ever 14 days old. The history would grow
+          # without bound.
+          cp -R dist/assets/. .asset-history/ 2>/dev/null || true
+          pruned=$(find .asset-history -type f -mtime +14 | wc -l)
+          find .asset-history -type f -mtime +14 -delete 2>/dev/null || true
           before=$(find dist/assets -type f | wc -l)
           cp -Rn .asset-history/. dist/assets/ 2>/dev/null || true
           after=$(find dist/assets -type f | wc -l)
-          echo "carried forward $((after - before)) retired asset(s); serving $after"
-          # Refresh the history with this build, then drop anything older than
-          # 14 days — long past any tab still holding it.
-          cp -R dist/assets/. .asset-history/ 2>/dev/null || true
-          find .asset-history -type f -mtime +14 -delete 2>/dev/null || true
-          echo "history now $(find .asset-history -type f | wc -l) file(s), $(du -sh .asset-history | cut -f1)"
+          echo "this build: $before file(s); carried forward $((after - before)) retired; serving $after"
+          echo "history: $(find .asset-history -type f | wc -l) file(s), $(du -sh .asset-history | cut -f1), pruned $pruned older than 14d"
 
       - name: Deploy to Cloudflare Pages (main / branch push)
         if: github.event_name == 'push'

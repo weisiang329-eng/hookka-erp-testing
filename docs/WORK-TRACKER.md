@@ -1992,3 +1992,31 @@ state 还是渲染期派生值；再确认建单 payload 读的是同一批 stat
 建 `SO-2608-001` → 删掉 → 再建 → **又拿到 `SO-2608-001`**。
 证实 `generateCompanySOId` 的 MAX+1 语义：删当月最大号会被重新发放；删中间号则永久空洞。
 （对照：财务单走 `doc_no_counters` 原子计数器，只增不回收 —— 两套语义不一致。）
+
+### 2026-08-01 供应商改名的影响 — staging 前后对照实测
+
+Owner 在 prod 把 `400-A002` 从 `ADD WOORD TRADING SDN. BHD.` 改成 `ADD WOOD TRADING SDN. BHD.`，
+问「旧单会不会全部跟着变」。在 staging 做同一次改名，改名前後各读一次：
+
+| | 改名前 | 改名后 |
+|---|---|---|
+| suppliers 主档 | ADD **WOORD** … | ADD **WOOD** … ✅ |
+| 24 张 PI 的 `supplierName` | ADD **WOORD** … | ADD **WOORD** … （不变）|
+| 13 张 PO 的 `supplierName` | ADD **WOORD** … | ADD **WOORD** … （不变）|
+
+**结论：旧单据保留建单当下的名字快照，不会回溯。** 存快照的表：`purchase_orders` /
+`grns` / `purchase_invoices` / `supplier_payments` / `purchase_credit_notes` /
+`ap_aging` / `three_way_matches` / `goods_in_transit`，读取端不 JOIN suppliers。
+✅ **不会把一家拆成两家**：AP 账龄/对账按 `supplierId` 分组（accounting.ts:526/2455），
+不按名字，所以金额与归属不受影响；只有旧单据上显示的字样还是旧拼写。
+
+**副作用（好的）**：改名后 `pickSupplierFromName` 实测 normEq=1 → 直接命中
+`ADD WOOD TRADING SDN. BHD.`。即这一家**靠修主档就已经解决**，不需要等模糊匹配上线。
+但这是「把资料改成配合演算法」，不是系统学会了 —— 见下。
+
+- [ ] ⚠️ **仍未解决（owner 反复强调）**：手动改正供应商/客户之后，系统学不到。
+  三层都断：confirm 只写 `correctedJson`+`isGold`（不回写改正后的 supplierId）→
+  queue 流程连 confirm 都没调（假 sampleId）→ distill 取样要 `correctedJson IS NOT NULL`
+  所以池子恒空。且 distill 本质是「已知是哪家之後学它的单据长相」，天生学不了身份。
+  → 下一个 PR：真 sampleId 回传 + confirm 回写 partyId + `party_name_aliases` 表
+    （OCR 原始名 → partyId，改一次即时生效，不等周日 cron）+ 模糊候选排序预选第一名。

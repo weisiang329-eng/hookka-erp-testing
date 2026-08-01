@@ -1,5 +1,5 @@
 ﻿import * as React from "react";
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { humanizeError } from "@/lib/humanize-error";
@@ -13,6 +13,8 @@ import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { MoneyInput } from "@/components/ui/money-input";
+import { useVirtualRows } from "@/components/ui/virtual-rows";
+import { DeferredBlock } from "@/components/ui/deferred-block";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
 import { exportReportCsv, exportReportXlsx, exportReportPdf, type Aoa, type PdfExportOpts } from "@/lib/export-report";
 import { buildAgingExportAoa, agingRowKind } from "@/lib/aging-export";
@@ -1880,6 +1882,12 @@ function StockTakeTab() {
   );
 }
 
+// Measured height of one Opening Stock row on prod (py-1 around an h-10
+// input). The windowing spacers are computed from this, so it must match the
+// rendered row — the row carries it as an explicit `height` to keep them
+// locked together.
+const OPENING_STOCK_ROW_PX = 49;
+
 function OpeningStockTab() {
   const { toast } = useToast();
   // Per-row editable state, keyed by raw-material id. qty/costRm are the live
@@ -1897,6 +1905,14 @@ function OpeningStockTab() {
   const [asOfDate, setAsOfDate] = useState("");
   const [search, setSearch] = useState("");
   const [saving, setSaving] = useState(false);
+  // Every row carries two controlled inputs (qty + MoneyInput), so this table
+  // is the most expensive in the module per row: 423 active materials meant
+  // 846 mounted inputs, a 5.8s freeze on open and a 2.3s freeze on the FOURTH
+  // keystroke in the search box (measured on prod 2026-08-01). The search term
+  // is deferred so keystrokes paint immediately, and the body is windowed so
+  // only the visible rows exist.
+  const deferredSearch = useDeferredValue(search);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let stale = false;
@@ -1932,7 +1948,7 @@ function OpeningStockTab() {
 
   const filtered = useMemo(() => {
     if (!rows) return [];
-    const q = search.trim().toLowerCase();
+    const q = deferredSearch.trim().toLowerCase();
     if (!q) return rows;
     return rows.filter(
       (r) =>
@@ -1940,7 +1956,17 @@ function OpeningStockTab() {
         r.description.toLowerCase().includes(q) ||
         r.itemGroup.toLowerCase().includes(q),
     );
-  }, [rows, search]);
+  }, [rows, deferredSearch]);
+
+  // 49px is the measured height of one row (py-1 around an h-10 input). It has
+  // to match the rendered height or the spacer math drifts and the scrollbar
+  // lies about how much is left.
+  const virt = useVirtualRows({
+    count: filtered.length,
+    rowHeight: OPENING_STOCK_ROW_PX,
+    scrollRef,
+    colSpan: 6,
+  });
 
   const save = async () => {
     if (!rows) return;
@@ -2023,9 +2049,10 @@ function OpeningStockTab() {
               {rows.length === 0 ? "No active raw materials found." : "No materials match your search."}
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <>
+            <div ref={scrollRef} className="overflow-auto max-h-[70vh]">
               <table className="text-sm w-full">
-                <thead>
+                <thead className="sticky top-0 z-10 bg-white">
                   <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
                     <th className="px-3 py-2 text-left">Item Code</th>
                     <th className="px-3 py-2 text-left">Description</th>
@@ -2036,8 +2063,10 @@ function OpeningStockTab() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((r) => (
-                    <tr key={r.id} className="border-b border-[#F0ECE9]">
+                  {virt.topSpacer}
+                  {(virt.active ? virt.indices.map((i) => filtered[i]) : filtered).map((r) =>
+                    !r ? null : (
+                    <tr key={r.id} className="border-b border-[#F0ECE9]" style={{ height: OPENING_STOCK_ROW_PX }}>
                       <td className="px-3 py-1.5 font-medium text-[#1F1D1B] whitespace-nowrap">{r.itemCode}</td>
                       <td className="px-3 py-1.5 text-[#1F1D1B]">{r.description}</td>
                       <td className="px-3 py-1.5 text-[#6B7280] whitespace-nowrap">{r.itemGroup || "—"}</td>
@@ -2064,10 +2093,20 @@ function OpeningStockTab() {
                         />
                       </td>
                     </tr>
-                  ))}
+                    ),
+                  )}
+                  {virt.bottomSpacer}
                 </tbody>
               </table>
             </div>
+            {/* Edits live in `rows`, never in the DOM, so windowing cannot lose
+                a typed quantity: scrolling a row out of view unmounts its input
+                but the value stays in state and still goes out on Save. */}
+            <p className="text-xs text-[#9CA3AF]">
+              {filtered.length} material{filtered.length === 1 ? "" : "s"}
+              {search.trim() ? ` matching “${search.trim()}”` : ""}
+            </p>
+            </>
           )}
         </CardContent>
       </Card>
@@ -7127,6 +7166,14 @@ function BackToTopButton() {
   );
 }
 
+// Grouped-ledger geometry, measured on prod. GL_ROW_PX is one leg row;
+// GL_CARD_CHROME_PX is everything else in an account card (the clickable
+// account header, the table header, the BALANCE B/F row and the per-account
+// totals row). Together they size the placeholder that holds a card's space
+// while it is off-screen.
+const GL_ROW_PX = 29;
+const GL_CARD_CHROME_PX = 128;
+
 function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
   // Multi-account review (owner): 0 picked = full ledger; 1 picked =
   // inquiry mode with running balance; 2+ picked = listing filtered to
@@ -7169,9 +7216,27 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
     }[];
   } | null>(null);
   const [collapsedAccts, setCollapsedAccts] = useState<Record<string, boolean>>({});
+  // The two FLAT listings (all-accounts listing and single-account inquiry)
+  // are capped server-side at 1,000 rows; both are windowed so the cap stops
+  // being a browser-protection measure and becomes just a data limit.
+  const flatScrollRef = useRef<HTMLDivElement>(null);
+  const inquiryScrollRef = useRef<HTMLDivElement>(null);
   const account = picked.length === 1 ? picked[0] : "";
   const loading = account ? gl === null : view === "grouped" ? report === null : all === null;
   const nameOf = (code: string) => accounts.find((a) => a.code === code)?.name ?? "";
+  const flatVirt = useVirtualRows({
+    count: all?.rows.length ?? 0,
+    rowHeight: GL_ROW_PX,
+    scrollRef: flatScrollRef,
+    colSpan: 6,
+  });
+  const inquiryVirt = useVirtualRows({
+    count: gl?.rows.length ?? 0,
+    rowHeight: GL_ROW_PX,
+    scrollRef: inquiryScrollRef,
+    colSpan: 6,
+  });
+
   const inLedgerScope = (a: ChartOfAccount): boolean => {
     switch (ledger) {
       case "sales":
@@ -7374,8 +7439,14 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
             )}
             {report.accounts.map((a) => {
               const open = !collapsedAccts[a.code];
+              // Height to hold while the card is off-screen: the account
+              // header + the table's own header, B/F and totals rows, plus one
+              // GL_ROW_PX per leg. Only used to keep the scrollbar steady —
+              // being a few pixels out costs a small jump, nothing more.
+              const estimated = open ? GL_CARD_CHROME_PX + a.rows.length * GL_ROW_PX : GL_CARD_CHROME_PX;
               return (
-                <Card key={a.code}>
+                <DeferredBlock key={a.code} estimatedHeight={estimated}>
+                <Card>
                   <CardContent className="p-0 overflow-x-auto">
                     <button
                       onClick={() => setCollapsedAccts({ ...collapsedAccts, [a.code]: open })}
@@ -7437,6 +7508,7 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
                     )}
                   </CardContent>
                 </Card>
+                </DeferredBlock>
               );
             })}
             <Card>
@@ -7508,8 +7580,9 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
           {loading ? (
             <div className="py-12 text-center text-[#6B7280] text-sm">Loading ledger…</div>
           ) : account && gl ? (
+            <div ref={inquiryScrollRef} className="overflow-auto max-h-[75vh]">
             <table className="w-full text-sm">
-              <thead>
+              <thead className="sticky top-0 z-10 bg-white">
                 <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
                   <th className="px-3 py-2 text-left">Date</th>
                   <th className="px-3 py-2 text-left">Description</th>
@@ -7520,14 +7593,20 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
                 </tr>
               </thead>
               <tbody>
-                <tr className="border-b border-[#F0ECE9] text-[#6B7280]">
+                {/* The B/F line stays mounted above the window rather than
+                    becoming item 0 — an opening balance that scrolls away is
+                    worse than the one-row coordinate offset it introduces,
+                    which the 10-row overscan absorbs. */}
+                <tr className="border-b border-[#F0ECE9] text-[#6B7280]" style={{ height: GL_ROW_PX }}>
                   <td className="px-3 py-1.5" colSpan={5}>Opening balance</td>
                   <td className="px-3 py-1.5 text-right font-medium">{formatCurrency(gl.openingSen)}</td>
                 </tr>
-                {gl.rows.map((r) => {
+                {inquiryVirt.topSpacer}
+                {(inquiryVirt.active ? inquiryVirt.indices.map((i) => gl.rows[i]) : gl.rows).map((r) => {
+                  if (!r) return null;
                   const href = sourceHref(r.sourceType, r.sourceId);
                   return (
-                    <tr key={r.id} className="border-b border-[#F0ECE9]">
+                    <tr key={r.id} className="border-b border-[#F0ECE9]" style={{ height: GL_ROW_PX }}>
                       <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{String(r.postedAt).slice(0, 10)}</td>
                       <td className="px-3 py-1.5 text-[#1F1D1B]">{r.description}</td>
                       <td className="px-3 py-1.5 text-xs">
@@ -7545,6 +7624,7 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
                     </tr>
                   );
                 })}
+                {inquiryVirt.bottomSpacer}
                 {/* Owner: window totals — total DR / total CR within the
                     picked date range, with the closing balance alongside. */}
                 <tr className="bg-[#F0ECE9]/60 font-semibold text-[#1F1D1B]">
@@ -7555,10 +7635,11 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
                 </tr>
               </tbody>
             </table>
+            </div>
           ) : all ? (
-            <div className="overflow-x-auto">
+            <div ref={flatScrollRef} className="overflow-auto max-h-[75vh]">
             <table className="w-full text-sm">
-              <thead>
+              <thead className="sticky top-0 z-10 bg-white">
                 <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
                   <th className="px-3 py-2 text-left">Date</th>
                   <th className="px-3 py-2 text-left">Account</th>
@@ -7569,10 +7650,12 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
                 </tr>
               </thead>
               <tbody>
-                {all.rows.map((r) => {
+                {flatVirt.topSpacer}
+                {(flatVirt.active ? flatVirt.indices.map((i) => all.rows[i]) : all.rows).map((r) => {
+                  if (!r) return null;
                   const href = sourceHref(r.sourceType, r.sourceId);
                   return (
-                    <tr key={r.id} className="border-b border-[#F0ECE9]">
+                    <tr key={r.id} className="border-b border-[#F0ECE9]" style={{ height: GL_ROW_PX }}>
                       <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{String(r.postedAt).slice(0, 10)}</td>
                       <td className="px-3 py-1.5">
                         <button
@@ -7599,6 +7682,7 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
                     </tr>
                   );
                 })}
+                {flatVirt.bottomSpacer}
               </tbody>
             </table>
             </div>
@@ -9739,6 +9823,17 @@ type ObState = {
   opb305Sen?: number;
 };
 
+// One row of the Opening Balance GL grid: either a derived control row the
+// server computes, or an account the owner types a figure into.
+type ObGridItem =
+  | { kind: "auto"; code: string; name: string; note: string; drSen?: number; crSen?: number }
+  | { kind: "account"; code: string; name: string };
+
+// Measured height of one GL-grid row on prod. Derived rows are naturally a few
+// pixels shorter, so they are pinned to the same height — a uniform row height
+// is what makes the spacer arithmetic exact.
+const OPENING_BALANCE_ROW_PX = 42;
+
 function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh: () => void }) {
   const { toast } = useToast();
   const [data, setData] = useState<ObState | null>(null);
@@ -9813,6 +9908,56 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
 
   const userDr = glAccounts.reduce((s, a) => s + toSen(amounts[a.code]?.dr ?? ""), 0);
   const userCr = glAccounts.reduce((s, a) => s + toSen(amounts[a.code]?.cr ?? ""), 0);
+
+  // The GL grid carries TWO text inputs per account — ~200 accounts meant 400
+  // mounted inputs, a 951ms freeze on open and a re-render of all 400 on every
+  // keystroke (measured on prod 2026-08-01). It is windowed below.
+  //
+  // The derived control rows live in the SAME item array as the editable
+  // account rows rather than in a static block above the window: the
+  // virtualizer measures offsets from the top of the scroll container, so a
+  // static block above it would shift every row by the block's height and the
+  // window would drift off by that many rows.
+  const obGridItems = useMemo<ObGridItem[]>(() => {
+    const auto: ObGridItem[] = [];
+    for (const [ctl, amt] of Object.entries(data?.arByControl ?? {})) {
+      auto.push({
+        kind: "auto", code: ctl, name: accounts.find((a) => a.code === ctl)?.name ?? "",
+        note: "auto — Σ debtor opening invoices", drSen: amt,
+      });
+    }
+    if ((data?.apTotalSen ?? 0) !== 0) {
+      auto.push({
+        kind: "auto", code: "400-0000",
+        name: accounts.find((a) => a.code === "400-0000")?.name ?? "TRADE CREDITORS",
+        note: "auto — Σ creditor opening + included pre-opening invoices", crSen: data!.apTotalSen,
+      });
+    }
+    if ((data?.opb405Sen ?? 0) !== 0) {
+      auto.push({
+        kind: "auto", code: "405-0000",
+        name: accounts.find((a) => a.code === "405-0000")?.name ?? "OTHER CREDITOR",
+        note: "auto — Σ pre-opening other-creditor bills", crSen: data!.opb405Sen ?? 0,
+      });
+    }
+    if ((data?.opb305Sen ?? 0) !== 0) {
+      auto.push({
+        kind: "auto", code: "305-0000",
+        name: accounts.find((a) => a.code === "305-0000")?.name ?? "OTHER DEBTOR",
+        note: "auto — Σ pre-opening other-debtor bills", drSen: data!.opb305Sen ?? 0,
+      });
+    }
+    return [...auto, ...glAccounts.map((a) => ({ kind: "account" as const, code: a.code, name: a.name }))];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, accounts, glAccounts.length]);
+
+  const obScrollRef = useRef<HTMLDivElement>(null);
+  const obVirt = useVirtualRows({
+    count: obGridItems.length,
+    rowHeight: OPENING_BALANCE_ROW_PX,
+    scrollRef: obScrollRef,
+    colSpan: 3,
+  });
   // Derived controls: 300-x/305 (DR) and 400/405 (CR) ride alongside the
   // manual rows — must mirror /opening-balance/post exactly or the preview
   // difference lies (405 was missing → the grid showed a smaller gap than
@@ -10169,9 +10314,10 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
 
       {/* GL grid — all postable accounts (BS + P&L, mid-year opening); controls are derived read-only rows */}
       <Card>
-        <CardContent className="p-0 overflow-x-auto">
+        <CardContent className="p-0">
+          <div ref={obScrollRef} className="overflow-auto max-h-[70vh]">
           <table className="w-full text-sm">
-            <thead>
+            <thead className="sticky top-0 z-10 bg-white">
               <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
                 <th className="px-3 py-2 text-left">Account (balance sheet &amp; P&amp;L)</th>
                 <th className="px-3 py-2 text-right w-40">Debit (RM)</th>
@@ -10179,61 +10325,33 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
               </tr>
             </thead>
             <tbody>
-              {Object.entries(data?.arByControl ?? {}).map(([ctl, amt]) => (
-                <tr key={ctl} className="border-b border-[#F0ECE9] bg-[#F7F4EF]">
+              {obVirt.topSpacer}
+              {(obVirt.active ? obVirt.indices.map((i) => obGridItems[i]) : obGridItems).map((it) =>
+                !it ? null : it.kind === "auto" ? (
+                <tr key={`auto-${it.code}`} className="border-b border-[#F0ECE9] bg-[#F7F4EF]" style={{ height: OPENING_BALANCE_ROW_PX }}>
                   <td className="px-3 py-1.5">
-                    <span className="tabular-nums text-xs text-[#6B7280] mr-1">{ctl}</span>
-                    {accounts.find((a) => a.code === ctl)?.name ?? ""}
-                    <span className="ml-2 text-[11px] text-[#9CA3AF]">auto — Σ debtor opening invoices</span>
+                    <span className="tabular-nums text-xs text-[#6B7280] mr-1">{it.code}</span>
+                    {it.name}
+                    <span className="ml-2 text-[11px] text-[#9CA3AF]">{it.note}</span>
                   </td>
-                  <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(amt)}</td>
-                  <td className="px-3 py-1.5 text-right text-[#9CA3AF]">—</td>
-                </tr>
-              ))}
-              {(data?.apTotalSen ?? 0) !== 0 && (
-                <tr className="border-b border-[#F0ECE9] bg-[#F7F4EF]">
-                  <td className="px-3 py-1.5">
-                    <span className="tabular-nums text-xs text-[#6B7280] mr-1">400-0000</span>
-                    {accounts.find((a) => a.code === "400-0000")?.name ?? "TRADE CREDITORS"}
-                    <span className="ml-2 text-[11px] text-[#9CA3AF]">auto — Σ creditor opening + included pre-opening invoices</span>
+                  <td className="px-3 py-1.5 text-right tabular-nums">
+                    {it.drSen != null ? formatCurrency(it.drSen) : <span className="text-[#9CA3AF]">—</span>}
                   </td>
-                  <td className="px-3 py-1.5 text-right text-[#9CA3AF]">—</td>
-                  <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(data!.apTotalSen)}</td>
-                </tr>
-              )}
-              {(data?.opb405Sen ?? 0) !== 0 && (
-                <tr className="border-b border-[#F0ECE9] bg-[#F7F4EF]">
-                  <td className="px-3 py-1.5">
-                    <span className="tabular-nums text-xs text-[#6B7280] mr-1">405-0000</span>
-                    {accounts.find((a) => a.code === "405-0000")?.name ?? "OTHER CREDITOR"}
-                    <span className="ml-2 text-[11px] text-[#9CA3AF]">auto — Σ pre-opening other-creditor bills</span>
+                  <td className="px-3 py-1.5 text-right tabular-nums">
+                    {it.crSen != null ? formatCurrency(it.crSen) : <span className="text-[#9CA3AF]">—</span>}
                   </td>
-                  <td className="px-3 py-1.5 text-right text-[#9CA3AF]">—</td>
-                  <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(data!.opb405Sen ?? 0)}</td>
                 </tr>
-              )}
-              {(data?.opb305Sen ?? 0) !== 0 && (
-                <tr className="border-b border-[#F0ECE9] bg-[#F7F4EF]">
+              ) : (
+                <tr key={it.code} className="border-b border-[#F0ECE9]" style={{ height: OPENING_BALANCE_ROW_PX }}>
                   <td className="px-3 py-1.5">
-                    <span className="tabular-nums text-xs text-[#6B7280] mr-1">305-0000</span>
-                    {accounts.find((a) => a.code === "305-0000")?.name ?? "OTHER DEBTOR"}
-                    <span className="ml-2 text-[11px] text-[#9CA3AF]">auto — Σ pre-opening other-debtor bills</span>
-                  </td>
-                  <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(data!.opb305Sen ?? 0)}</td>
-                  <td className="px-3 py-1.5 text-right text-[#9CA3AF]">—</td>
-                </tr>
-              )}
-              {glAccounts.map((a) => (
-                <tr key={a.code} className="border-b border-[#F0ECE9]">
-                  <td className="px-3 py-1.5">
-                    <span className="tabular-nums text-xs text-[#6B7280] mr-1">{a.code}</span>
-                    <span className="text-[#1F1D1B]">{a.name}</span>
+                    <span className="tabular-nums text-xs text-[#6B7280] mr-1">{it.code}</span>
+                    <span className="text-[#1F1D1B]">{it.name}</span>
                   </td>
                   <td className="px-3 py-1">
                     <input
                       type="text"
-                      value={amounts[a.code]?.dr ?? ""}
-                      onChange={(e) => setAmounts({ ...amounts, [a.code]: { dr: e.target.value, cr: "" } })}
+                      value={amounts[it.code]?.dr ?? ""}
+                      onChange={(e) => setAmounts({ ...amounts, [it.code]: { dr: e.target.value, cr: "" } })}
                       placeholder=""
                       className={inputCls}
                     />
@@ -10241,14 +10359,16 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
                   <td className="px-3 py-1">
                     <input
                       type="text"
-                      value={amounts[a.code]?.cr ?? ""}
-                      onChange={(e) => setAmounts({ ...amounts, [a.code]: { dr: "", cr: e.target.value } })}
+                      value={amounts[it.code]?.cr ?? ""}
+                      onChange={(e) => setAmounts({ ...amounts, [it.code]: { dr: "", cr: e.target.value } })}
                       placeholder=""
                       className={inputCls}
                     />
                   </td>
                 </tr>
-              ))}
+                ),
+              )}
+              {obVirt.bottomSpacer}
               <tr className="bg-[#F0ECE9]/60 font-semibold text-[#1F1D1B]">
                 <td className="px-3 py-2">TOTAL (incl. auto control rows)</td>
                 <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(totalDr)}</td>
@@ -10256,6 +10376,7 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
               </tr>
             </tbody>
           </table>
+          </div>
         </CardContent>
       </Card>
       <p className="text-[11px] text-[#9CA3AF]">

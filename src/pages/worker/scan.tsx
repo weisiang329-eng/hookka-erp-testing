@@ -314,6 +314,26 @@ async function probeCameraState(): Promise<CameraPermState> {
   }
 }
 
+// 2026-08-01 — camera constraint calls are FIRE-AND-FORGET PROMISES.
+//
+// Health reported these as unhandled JS errors on /worker/scan over 24h:
+//     "The associated Track is in an invalid state"  x16
+//     "Unsupported focusMode."                        x5
+//
+// Every call site looked guarded:
+//     try { void track.applyConstraints({...}); } catch { /* best-effort */ }
+// but applyConstraints() returns a Promise. try/catch only sees a SYNCHRONOUS
+// throw, so the catch block could never fire for these — the rejection escaped
+// as an unhandled rejection and landed in the error feed. The guards were
+// decorative.
+//
+// Both messages are normal on real hardware: focusMode is unsupported on many
+// lenses (iOS Safari especially), and the track goes "invalid" whenever the
+// camera is torn down while a constraint call is still in flight — switching
+// modes, backgrounding the tab, ending the scan. They are not bugs to fix,
+// they are conditions to absorb. Each call now carries .catch() so they stay
+// best-effort in fact, not just in comment.
+
 export default function WorkerScanPage() {
   const t = useT();
   const [params] = useSearchParams();
@@ -469,7 +489,11 @@ export default function WorkerScanPage() {
     try {
       void track.applyConstraints({
         advanced: [{ zoom: range.min } as unknown as MediaTrackConstraintSet],
-      });
+      }).catch(() => {
+          /* best-effort — a rejected applyConstraints (Unsupported
+             focusMode, Track in an invalid state) must not surface as
+             an unhandled rejection; see the header note. */
+        });
     } catch {
       /* best-effort */
     }
@@ -1421,6 +1445,10 @@ export default function WorkerScanPage() {
       try {
         void zoomTrack.applyConstraints({
           advanced: [{ zoom: zoomRange.min } as unknown as MediaTrackConstraintSet],
+        }).catch(() => {
+          /* best-effort — a rejected applyConstraints (Unsupported
+             focusMode, Track in an invalid state) must not surface as
+             an unhandled rejection; see the header note. */
         });
       } catch {
         /* best-effort */
@@ -1633,7 +1661,11 @@ export default function WorkerScanPage() {
           try {
             void zoomTrack.applyConstraints({
               advanced: [{ zoom: curZoomRef.current } as unknown as MediaTrackConstraintSet],
-            });
+            }).catch(() => {
+          /* best-effort — a rejected applyConstraints (Unsupported
+             focusMode, Track in an invalid state) must not surface as
+             an unhandled rejection; see the header note. */
+        });
           } catch {
             /* zoom is best-effort; never break the scan loop */
           }
@@ -1661,7 +1693,11 @@ export default function WorkerScanPage() {
           try {
             void zoomTrack.applyConstraints({
               advanced: [{ zoom: target } as unknown as MediaTrackConstraintSet],
-            });
+            }).catch(() => {
+          /* best-effort — a rejected applyConstraints (Unsupported
+             focusMode, Track in an invalid state) must not surface as
+             an unhandled rejection; see the header note. */
+        });
           } catch {
             /* zoom not exposed (iOS Safari often) — fall through to AF re-assert */
           }
@@ -1671,7 +1707,11 @@ export default function WorkerScanPage() {
             advanced: [
               { focusMode: "continuous" } as unknown as MediaTrackConstraintSet,
             ],
-          });
+          }).catch(() => {
+          /* best-effort — a rejected applyConstraints (Unsupported
+             focusMode, Track in an invalid state) must not surface as
+             an unhandled rejection; see the header note. */
+        });
         } catch {
           /* focusMode not controllable — best-effort */
         }

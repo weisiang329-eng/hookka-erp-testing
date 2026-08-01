@@ -25,6 +25,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { DataGrid, type Column } from "@/components/ui/data-grid";
+import { DeferredBlock } from "@/components/ui/deferred-block";
 import { formatDateDMY } from "@/lib/utils";
 import { getCurrentUser } from "@/lib/auth";
 import {
@@ -269,7 +270,11 @@ function PendingTab() {
         </Card>
       ) : (
         grouped.map(([slot, list]) => (
-          <Card key={slot}>
+          <DeferredBlock
+            key={slot}
+            estimatedHeight={QC_SLOT_CHROME_PX + list.length * QC_ROW_PX}
+          >
+          <Card>
             <CardHeader>
               <CardTitle className="text-base">
                 Slot: <span className="font-mono">{fmtSlot(slot)}</span>
@@ -293,11 +298,20 @@ function PendingTab() {
               </div>
             </CardContent>
           </Card>
+          </DeferredBlock>
         ))
       )}
     </div>
   );
 }
+
+// Slot-card geometry, measured on prod 2026-08-01: one pending-inspection row
+// is 85px, and a card's own chrome (title + the "N item(s)" line + borders) is
+// about 90px. The QC backlog is 167 slot cards holding 2,839 rows — 30,303 DOM
+// nodes and a 272,943px page, the heaviest screen in the system — so the cards
+// hold their space with a placeholder until they are near the viewport.
+const QC_ROW_PX = 85;
+const QC_SLOT_CHROME_PX = 90;
 
 function PendingRow({
   insp, expanded, onToggle, onRefresh,

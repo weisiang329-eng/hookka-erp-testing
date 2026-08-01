@@ -1816,6 +1816,18 @@ app.put("/:id", async (c) => {
     }
 
     const updated = await fetchGRN(c.var.DB, id);
+    // GRN create and delete were audited; the edit path — which owns the
+    // DRAFT → POSTED flip that writes rm_batches and cost_ledger, the un-post
+    // that restores the PO's receivedQty, and the compensating stock movements
+    // for a qty edit on an already-POSTED GRN — was not. This is where received
+    // stock actually changes, so snapshot both sides.
+    await emitAudit(c, {
+      resource: "grn",
+      resourceId: id,
+      action: "update",
+      before: existing,
+      after: updated,
+    });
     return c.json({
       success: true,
       data: updated,
@@ -1932,6 +1944,17 @@ app.put("/:id/arrival", async (c) => {
       .run();
 
     const updated = await fetchGRN(c.var.DB, id);
+    // The arrival pipeline carries the landed-cost inputs — shipping cost,
+    // customs duty, exchange rate, landed_cost_sen — which feed the costing of
+    // received stock. Editing them was unaudited, so a changed FX rate or duty
+    // figure left no trace of who moved it.
+    await emitAudit(c, {
+      resource: "grn",
+      resourceId: id,
+      action: "arrival-update",
+      before: existing,
+      after: updated,
+    });
     return c.json({ success: true, data: updated });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

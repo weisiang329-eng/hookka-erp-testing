@@ -294,6 +294,16 @@ app.post("/", async (c) => {
         500,
       );
     }
+    // Creating a worker sets the opening salary and the EPF/SOCSO/EIS/PCB
+    // statutory flags that every future payroll run is computed from. Delete
+    // and the PIN actions were audited; the creation of the payroll record
+    // itself was not.
+    await emitAudit(c, {
+      resource: "workers",
+      resourceId: id,
+      action: "create",
+      after: rowToWorker(created),
+    });
     return c.json({ success: true, data: rowToWorker(created) }, 201);
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
@@ -591,6 +601,18 @@ app.put("/:id", async (c) => {
     if (!updated) {
       return c.json({ success: false, error: "Worker not found" }, 404);
     }
+    // This is the pay-rate edit path: basicSalarySen, the EPF / SOCSO / EIS /
+    // PCB statutory toggles and the efficiency-bonus allowance + threshold all
+    // change here, and each one feeds straight into what a person is paid. It
+    // even writes worker_salary_history inline. Snapshot both sides so a
+    // changed rate is attributable.
+    await emitAudit(c, {
+      resource: "workers",
+      resourceId: id,
+      action: "update",
+      before: rowToWorker(existing),
+      after: rowToWorker(updated),
+    });
     return c.json({ success: true, data: rowToWorker(updated) });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);

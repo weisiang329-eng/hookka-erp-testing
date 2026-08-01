@@ -2756,21 +2756,64 @@ app.get("/:id/qr-token", async (c) => {
   });
 });
 
-// GET /api/delivery-orders/:id — single
+// GET /api/delivery-orders/:id — single + downstream documents
+//
+// Reverse link (owner 2026-08-01): delivery_returns.delivery_order_id points
+// AT the DO, so a return was only discoverable from the Delivery Returns list.
+// The DO page never mentioned returns at all — a delivery could have goods
+// coming back (stock reversed, a credit note or a repair service order raised
+// off it) and the DO it came from showed a clean DELIVERED/INVOICED document.
+// idx_delivery_returns_do already exists (0207), so this is one index seek.
+// Same `Promise.all` + `linkedX` shape as sales-orders.ts GET /:id.
 app.get("/:id", async (c) => {
   // RBAC gate — single-record reads also require delivery-orders:read.
   const denied = await requirePermission(c, "delivery-orders", "read");
   if (denied) return denied;
 
   const id = c.req.param("id");
-  const order = await fetchOrderWithItems(c.var.DB, id);
+  const [order, lockReason, returnsRes] = await Promise.all([
+    fetchOrderWithItems(c.var.DB, id),
+    // Lock status (Invoice exists?) — surfaced to the DO detail page so the
+    // edit form can disable + render a "locked because Invoice X exists" banner.
+    checkDeliveryOrderLocked(c.var.DB, id),
+    // return_no / return_type have NO column-rename-map.json entry, so the
+    // physical snake_case names are spelled out with quoted camelCase aliases
+    // (same convention as delivery-returns.ts HEADER_COLS). Best-effort: the
+    // table is runtime-created by the delivery-returns route, so a site that
+    // has never opened that module simply reports no returns.
+    c.var.DB.prepare(
+      `SELECT id, return_no AS "returnNo", status,
+              return_type AS "returnType", reason,
+              returned_at AS "returnedAt", created_at AS "createdAt"
+         FROM delivery_returns
+        WHERE delivery_order_id = ?
+        ORDER BY created_at DESC`,
+    )
+      .bind(id)
+      .all<{
+        id: string;
+        returnNo: string | null;
+        status: string | null;
+        returnType: string | null;
+        reason: string | null;
+        returnedAt: string | null;
+        createdAt: string | null;
+      }>()
+      .catch(() => ({ results: [] })),
+  ]);
   if (!order) {
     return c.json({ success: false, error: "Delivery order not found" }, 404);
   }
-  // Lock status (Invoice exists?) — surfaced to the DO detail page so the
-  // edit form can disable + render a "locked because Invoice X exists" banner.
-  const lockReason = await checkDeliveryOrderLocked(c.var.DB, id);
-  return c.json({ success: true, data: order, lockReason });
+  const linkedReturns = (returnsRes.results ?? []).map((r) => ({
+    id: r.id,
+    returnNo: r.returnNo ?? "",
+    status: r.status ?? "",
+    returnType: r.returnType ?? "",
+    reason: r.reason ?? "",
+    returnedAt: r.returnedAt ?? null,
+    createdAt: r.createdAt ?? null,
+  }));
+  return c.json({ success: true, data: order, lockReason, linkedReturns });
 });
 
 // PUT /api/delivery-orders/:id — update (supports status transitions, PoD,

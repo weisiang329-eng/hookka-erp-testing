@@ -94,6 +94,24 @@ type PurchaseInvoiceItem = {
   grnItemId?: string | number | null;
 };
 
+// Linked documents, returned by GET /api/purchase-invoices/:id alongside the
+// PI itself. No list download — both are keyed lookups server-side.
+type LinkedGrn = {
+  id: string;
+  grnNumber: string;
+  status: string;
+  receiveDate: string | null;
+  totalAmount: number;
+};
+type LinkedSupplierPayment = {
+  id: string;
+  paymentNo: string;
+  date: string;
+  amountSen: number;
+  method: string;
+  reference: string;
+};
+
 type PurchaseInvoiceDetail = {
   id: string;
   piNo: string;
@@ -140,10 +158,17 @@ export default function PurchaseInvoiceDetailPage() {
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const [busy, setBusy] = useState(false);
+  // GET /api/purchase-invoices/:id now returns the linked documents with the PI
+  // itself: linkedGRNs (the GRN this PI was raised from, resolved from the PI's
+  // own grn_id) and linkedPayments (supplier_payments.purchaseInvoiceId — the
+  // cash-out that settles it, previously invisible from this page entirely).
+  // The whole-/api/grn-list download this page used to do is gone.
   const { data: resp, loading, error: fetchError, refresh } = useCachedJson<{
     success?: boolean;
     data?: PurchaseInvoiceDetail;
     error?: string;
+    linkedGRNs?: LinkedGrn[];
+    linkedPayments?: LinkedSupplierPayment[];
   }>(id ? `/api/purchase-invoices/${id}` : null);
 
   // Purchase Company letterhead — print the PI under the supplier's buying
@@ -166,13 +191,6 @@ export default function PurchaseInvoiceDetailPage() {
         .map((rm) => ({ itemCode: rm.itemCode, description: rm.description })),
     [invResp],
   );
-
-  // Lineage: GRNs linked to the same PO (matched client-side by poId).
-  // Same /api/grn endpoint the PO detail page uses — useCachedJson dedupes.
-  const { data: grnListResp } = useCachedJson<{
-    success?: boolean;
-    data?: Array<{ id: string; grnNumber?: string; poId: string | null; status?: string | null }>;
-  }>("/api/grn");
 
   const pi: PurchaseInvoiceDetail | null = useMemo(
     () => (resp?.success ? resp.data ?? null : null),
@@ -200,14 +218,14 @@ export default function PurchaseInvoiceDetailPage() {
   const taxDisplay = headerTax || (perLineTax + legacyTaxLineAmount);
   const totalAmount = subtotalDisplay + taxDisplay;
 
-  // GRNs linked to the same PO as this PI — derived client-side.
-  const relatedGrns = useMemo(
-    () =>
-      pi?.purchaseOrderId
-        ? (grnListResp?.data ?? []).filter((g) => g.poId === pi.purchaseOrderId)
-        : [],
-    [grnListResp, pi],
+  // The GRN this PI was raised from + the supplier payments that settle it —
+  // both resolved server-side off the PI's own keys.
+  const relatedGrns: LinkedGrn[] = useMemo(() => resp?.linkedGRNs ?? [], [resp]);
+  const relatedPayments: LinkedSupplierPayment[] = useMemo(
+    () => resp?.linkedPayments ?? [],
+    [resp],
   );
+  const paidToDateSen = relatedPayments.reduce((s, p) => s + (p.amountSen || 0), 0);
 
   // Status transition (PUT {status}) — surfaces failures incl. the backend's
   // GL-posting errors on APPROVED/PAID (do NOT optimistically flip the badge).
@@ -1010,6 +1028,57 @@ export default function PurchaseInvoiceDetailPage() {
               },
             ]}
           />
+        </CardContent>
+      </Card>
+
+      {/* Supplier payments settling this PI. supplier_payments.purchaseInvoiceId
+          only pointed one way, so a PI could be fully paid and this page gave
+          no indication a payment existed — AP had to open the Supplier Payments
+          screen to find out. */}
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-medium text-[#6B7280]">
+            Supplier Payments ({relatedPayments.length})
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {relatedPayments.length === 0 ? (
+            <p className="text-sm text-[#9CA3AF]">No payments recorded against this invoice yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {relatedPayments.map((p) => (
+                <div
+                  key={p.id}
+                  className="flex flex-wrap items-center justify-between gap-2 border border-[#E2DDD8] rounded-md px-3 py-2"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Link
+                      to="/invoices/supplier-payments"
+                      className="text-sm font-medium text-[#6B5C32] hover:underline"
+                    >
+                      {p.paymentNo || p.id}
+                    </Link>
+                    <span className="text-xs text-[#6B7280]">{formatDate(p.date)}</span>
+                    {p.method && (
+                      <Badge className="bg-[#F0ECE9] text-[#6B5C32]">
+                        {p.method.replace(/_/g, " ")}
+                      </Badge>
+                    )}
+                    {p.reference && (
+                      <span className="text-xs text-[#9CA3AF] truncate">Ref: {p.reference}</span>
+                    )}
+                  </div>
+                  <span className="text-sm font-medium tabular-nums">
+                    {formatCurrency(p.amountSen)}
+                  </span>
+                </div>
+              ))}
+              <div className="flex justify-between pt-1 text-sm font-semibold">
+                <span>Paid to date</span>
+                <span className="tabular-nums">{formatCurrency(paidToDateSen)}</span>
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
 

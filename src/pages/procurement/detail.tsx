@@ -63,6 +63,23 @@ type EditLine = {
   receivedQty: number;
 };
 
+// Downstream documents, returned by GET /api/purchase-orders/:id alongside the
+// PO itself (grns.poId / purchase_invoices.purchaseOrderId reverse lookups).
+type LinkedGrn = {
+  id: string;
+  grnNumber: string;
+  status: string;
+  receiveDate: string | null;
+  totalAmount: number;
+};
+type LinkedPi = {
+  id: string;
+  piNo: string;
+  status: string;
+  invoiceDate: string | null;
+  amountSen: number;
+};
+
 function poItemToEditLine(it: POItem): EditLine {
   // Prefer the real materialCode field for new POs; split for old rows.
   let rmCode: string;
@@ -96,7 +113,18 @@ export default function PurchaseOrderDetailPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const { confirm } = useConfirm();
-  const { data: resp, loading, error: fetchError, refresh: fetchPO } = useCachedJson<{ success?: boolean; data?: PurchaseOrder; error?: string }>(id ? `/api/purchase-orders/${id}` : null);
+  // GET /api/purchase-orders/:id now returns the downstream documents with the
+  // PO itself (linkedGRNs / linkedPIs — two indexed reverse lookups server-side).
+  // This page used to download the ENTIRE /api/grn and /api/purchase-invoices
+  // lists and filter them client-side just to answer "what came off this PO";
+  // both fetches are gone.
+  const { data: resp, loading, error: fetchError, refresh: fetchPO } = useCachedJson<{
+    success?: boolean;
+    data?: PurchaseOrder;
+    error?: string;
+    linkedGRNs?: LinkedGrn[];
+    linkedPIs?: LinkedPi[];
+  }>(id ? `/api/purchase-orders/${id}` : null);
   const po: PurchaseOrder | null = useMemo(
     () => (resp?.success ? resp.data ?? null : null),
     [resp]
@@ -112,22 +140,17 @@ export default function PurchaseOrderDetailPage() {
   const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code?: string; name?: string; regNo?: string; tin?: string; address?: string; phone?: string; email?: string }> }>("/api/organisations");
   const { data: invResp } = useCachedJson<{ success?: boolean; data?: { rawMaterials?: RawMaterial[] } }>("/api/inventory");
   const { data: bindingsResp } = useCachedJson<{ success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]>("/api/supplier-materials");
-  // 2.3 — GRN list, used to gate the Mark Received button. Endpoint is
-  // singular /api/grn (NOT /api/grns).
-  const { data: grnResp } = useCachedJson<{ success?: boolean; data?: Array<{ id: string; grnNumber?: string; poId: string | null; status: string | null; totalAmount?: number }> }>("/api/grn");
-  // Lineage: PIs raised against this PO. The PI list has no poId filter, so we
-  // pull the list and match client-side on purchaseOrderId (small dataset).
-  const { data: piListResp } = useCachedJson<{ success?: boolean; data?: Array<{ id: string; piNo?: string; purchaseOrderId?: string | null; status?: string | null; amountSen?: number }> }>("/api/purchase-invoices");
 
   // Document lineage for this PO: the GRNs received against it + the PIs raised
-  // from it (clickable chips → their detail pages).
-  const relatedGrns = useMemo(
-    () => (grnResp?.data ?? []).filter((g) => g.poId === po?.id),
-    [grnResp, po?.id],
+  // from it (clickable chips → their detail pages). Straight off the detail
+  // response — no list download, no client-side filtering.
+  const relatedGrns: LinkedGrn[] = useMemo(
+    () => resp?.linkedGRNs ?? [],
+    [resp],
   );
-  const relatedPis = useMemo(
-    () => (piListResp?.data ?? []).filter((p) => p.purchaseOrderId === po?.id),
-    [piListResp, po?.id],
+  const relatedPis: LinkedPi[] = useMemo(
+    () => resp?.linkedPIs ?? [],
+    [resp],
   );
 
   const allSuppliers: Supplier[] = useMemo(
@@ -142,19 +165,15 @@ export default function PurchaseOrderDetailPage() {
     const bindings = (bindingsResp as { data?: SupplierMaterialBinding[] } | undefined)?.data ?? bindingsResp;
     return Array.isArray(bindings) ? bindings : [];
   }, [bindingsResp]);
-  const grns = useMemo(
-    () => (grnResp?.success ? grnResp.data ?? [] : []),
-    [grnResp],
-  );
   // Has a posted (or confirmed) GRN attached to this PO? Drives 2.3 —
   // gate the Mark Received button + show a Create GRN CTA when the
-  // operator's at CONFIRMED / PARTIAL_RECEIVED with no GRN yet.
-  const hasPostedGrn = useMemo(() => {
-    if (!po) return false;
-    return grns.some(
-      (g) => g.poId === po.id && (g.status === "POSTED" || g.status === "CONFIRMED"),
-    );
-  }, [grns, po]);
+  // operator's at CONFIRMED / PARTIAL_RECEIVED with no GRN yet. Reads the
+  // server-side reverse lookup, which is already scoped to this PO.
+  const hasPostedGrn = useMemo(
+    () =>
+      relatedGrns.some((g) => g.status === "POSTED" || g.status === "CONFIRMED"),
+    [relatedGrns],
+  );
 
   // ------- Edit mode state -------
   const [editing, setEditing] = useState(false);
@@ -637,9 +656,7 @@ export default function PurchaseOrderDetailPage() {
               // One live (non-cancelled) PI per PO — the convert copies every line
               // at full qty, so a second one is a full-value duplicate. Disable
               // when an invoice already exists; the backend also 409s this.
-              const hasLivePi = relatedPis.some(
-                (p) => ((p as { status?: string }).status ?? "") !== "CANCELLED",
-              );
+              const hasLivePi = relatedPis.some((p) => p.status !== "CANCELLED");
               return (
                 <Button
                   variant="outline"

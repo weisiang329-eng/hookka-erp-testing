@@ -270,6 +270,23 @@ function ensureCaseLinkColumns(db: D1Database): Promise<void> {
     } catch {
       // ignore — column may already exist or DDL transiently rejected
     }
+    try {
+      // PERFORMANCE (owner 2026-08-01) — caseid was added above with no index,
+      // so loadSvOrdersForCases() below full-scanned sales_orders on EVERY
+      // case-detail load (and again, unfiltered, for the case list). On a table
+      // that grows with every order this is the most expensive read on the
+      // page, to return the handful of SV orders on one case. Runtime
+      // self-applied because Postgres migration files are not replayed on
+      // deploy; idempotent, and failure is swallowed so a rejected DDL can
+      // never take the Service Cases module down.
+      await db
+        .prepare(
+          "CREATE INDEX IF NOT EXISTS idx_sales_orders_caseid ON sales_orders (caseid)",
+        )
+        .run();
+    } catch (err) {
+      console.warn("[service-cases] idx_sales_orders_caseid:", err);
+    }
   })();
   return caseLinkColumns;
 }

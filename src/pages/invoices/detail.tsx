@@ -40,11 +40,25 @@ const PAYMENT_METHODS = [
   { value: "E_WALLET", label: "E-Wallet" },
 ];
 
+// Credit / debit notes raised against this invoice, returned by
+// GET /api/invoices/:id (credit_notes.invoiceId / debit_notes.invoiceId reverse
+// lookups). Before this the adjustment was only visible from the notes lists,
+// so an invoice could be half credited back while its own page still showed
+// the original total.
+type LinkedNote = {
+  id: string;
+  noteNumber: string;
+  date: string;
+  reason: string;
+  totalAmount: number;
+  status: string;
+};
+
 export default function InvoiceDetailPage() {
   const { confirm } = useConfirm();
   const { id } = useParams();
   const navigate = useNavigate();
-  const { data: invResp, loading: invLoading, refresh: refreshInvoice } = useCachedJson<{ success?: boolean; data?: Invoice; lockReason?: string | null }>(id ? `/api/invoices/${id}` : null);
+  const { data: invResp, loading: invLoading, refresh: refreshInvoice } = useCachedJson<{ success?: boolean; data?: Invoice; lockReason?: string | null; linkedCreditNotes?: LinkedNote[]; linkedDebitNotes?: LinkedNote[] }>(id ? `/api/invoices/${id}` : null);
   const invoice: Invoice | null = useMemo(() => {
     if (!invResp) return null;
     if (invResp.success && invResp.data) return invResp.data;
@@ -378,6 +392,15 @@ export default function InvoiceDetailPage() {
   // Cascade lock — surfaced from /api/invoices/:id. Non-null when payment
   // is recorded against this invoice (status=PAID or paidAmountSen > 0).
   const lockReason = (invResp as { lockReason?: string | null } | undefined)?.lockReason ?? null;
+  // Adjustments raised against this invoice — server-side reverse lookups.
+  const linkedCreditNotes: LinkedNote[] = invResp?.linkedCreditNotes ?? [];
+  const linkedDebitNotes: LinkedNote[] = invResp?.linkedDebitNotes ?? [];
+  const creditedSen = linkedCreditNotes
+    .filter((n) => n.status !== "DRAFT")
+    .reduce((s, n) => s + (n.totalAmount || 0), 0);
+  const debitedSen = linkedDebitNotes
+    .filter((n) => n.status !== "DRAFT")
+    .reduce((s, n) => s + (n.totalAmount || 0), 0);
 
   return (
     <div className="space-y-6 max-md:space-y-4">
@@ -1312,6 +1335,71 @@ export default function InvoiceDetailPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Adjustments raised against this invoice. Rendered only when there are
+          any — a posted credit note moves the amount actually receivable, which
+          this page had no way to show. */}
+      {(linkedCreditNotes.length > 0 || linkedDebitNotes.length > 0) && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <FileText className="h-4 w-4 text-[#6B5C32]" />
+              Adjustments
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {([
+              { title: "Credit Notes", notes: linkedCreditNotes, total: creditedSen, href: "/invoices/credit-notes", sign: "−" },
+              { title: "Debit Notes", notes: linkedDebitNotes, total: debitedSen, href: "/invoices/debit-notes", sign: "+" },
+            ] as const)
+              .filter((g) => g.notes.length > 0)
+              .map((g) => (
+                <div key={g.title} className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-medium text-[#4B5563]">
+                      {g.title} ({g.notes.length})
+                    </p>
+                    <p className="text-sm font-semibold text-[#1F1D1B] tabular-nums">
+                      {g.sign}
+                      {formatCurrency(g.total)}
+                    </p>
+                  </div>
+                  {g.notes.map((n) => (
+                    <div
+                      key={n.id}
+                      className="flex flex-wrap items-center justify-between gap-2 border border-[#E2DDD8] rounded-md px-3 py-2"
+                    >
+                      <div className="flex flex-wrap items-center gap-2 min-w-0">
+                        <button
+                          type="button"
+                          onClick={() => navigate(g.href)}
+                          className="text-sm font-medium text-[#6B5C32] hover:underline"
+                        >
+                          {n.noteNumber || n.id}
+                        </button>
+                        <Badge variant="status" status={n.status}>
+                          {n.status}
+                        </Badge>
+                        {n.reason && (
+                          <span className="text-xs text-[#9CA3AF] truncate">
+                            {n.reason.replace(/_/g, " ")}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="text-xs text-[#9CA3AF]">{n.date ? formatDate(n.date) : ""}</span>
+                        <span className="text-sm tabular-nums">{formatCurrency(n.totalAmount)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            <p className="text-xs text-[#9CA3AF]">
+              Net of posted adjustments: {formatCurrency(invoice.totalSen - creditedSen + debitedSen)}
+            </p>
+          </CardContent>
+        </Card>
       )}
 
       {/* Document Relationship — same chain graph as the SO page, so you can

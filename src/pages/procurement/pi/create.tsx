@@ -519,6 +519,10 @@ function CreatePurchaseInvoicePage() {
         return;
       }
       invalidateCachePrefix("/api/purchase-invoices");
+      // The source PO's detail page lists its invoices
+      // (GET /api/purchase-orders/:id → linkedPIs), so its cached response is
+      // stale the moment a PI is raised off it.
+      invalidateCachePrefix("/api/purchase-orders");
       toast.success(
         j.data?.piNo
           ? `Invoice ${j.data.piNo} created`
@@ -1062,6 +1066,7 @@ function CreatePurchaseInvoicePage() {
         onCreated={(ids) => {
           if (ids.length > 0) {
             invalidateCachePrefix("/api/purchase-invoices");
+            invalidateCachePrefix("/api/purchase-orders");
             toast.success(
               ids.length === 1
                 ? "Purchase invoice created"

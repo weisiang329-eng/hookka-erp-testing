@@ -6861,6 +6861,7 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
       sundayOtMultiplier: String(c.sundayOtMultiplier),
       holidayOtMultiplier: String(c.holidayOtMultiplier),
       absenceGraceWorkingDays: String(c.absenceGraceWorkingDays),
+      brokenPunchCreditsFullDay: c.brokenPunchCreditsFullDay === false ? "false" : "true",
       epfEmployeePct: String(c.epfEmployeePct),
       epfEmployerPct: String(c.epfEmployerPct),
       socsoEmployee: (c.socsoEmployeeSen / 100).toFixed(2),
@@ -6904,6 +6905,7 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
             sundayOtMultiplier: Number(d.sundayOtMultiplier),
             holidayOtMultiplier: Number(d.holidayOtMultiplier),
             absenceGraceWorkingDays: Number(d.absenceGraceWorkingDays),
+            brokenPunchCreditsFullDay: d.brokenPunchCreditsFullDay !== "false",
             epfEmployeePct: Number(d.epfEmployeePct),
             epfEmployerPct: Number(d.epfEmployerPct),
             socsoEmployeeSen: Math.round(Number(d.socsoEmployee) * 100),
@@ -8022,6 +8024,29 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
                             </label>
                           ))}
                         </div>
+                        {/* Leniency toggle (owner 2026-08-01). Effective-dated
+                            like every other rule: leave it on while the floor
+                            is still learning the punch app, then create a new
+                            version with it off from the date you want strict. */}
+                        <label className="mt-2 flex items-start gap-2 text-[11px] text-[#6B7280]">
+                          <input
+                            type="checkbox"
+                            checked={ruleDraft.brokenPunchCreditsFullDay !== "false"}
+                            onChange={(e) =>
+                              ruleDraftField("brokenPunchCreditsFullDay", e.target.checked ? "true" : "false")
+                            }
+                            className="mt-0.5"
+                          />
+                          <span>
+                            <span className="font-medium text-[#1F1D1B]">
+                              Forgot to punch IN → still count the day
+                            </span>
+                            <br />
+                            A worker who taps in and out in the same minute at knock-off gets a normal
+                            shift instead of an absence. Off = the day is an absence (charged once, never
+                            also hour-docked).
+                          </span>
+                        </label>
                       </div>
 
                       {/* Statutory follows the law (owner: "Statutory 是跟着

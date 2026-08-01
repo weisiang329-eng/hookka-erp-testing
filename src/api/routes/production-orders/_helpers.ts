@@ -2254,6 +2254,56 @@ export function ensurePiecePicsRackingColumn(db: D1Database): Promise<void> {
   return piecePicsRackingColumnEnsured;
 }
 
+// co_status_changes — the Consignment Order status audit log (migration 0104).
+// Migrations are INERT on deploy, and unlike so_status_changes (seeded in the
+// initial schema) this table has NO runtime self-apply — so on prod it simply
+// never existed. Every CO cascade below writes to it inside a db.batch()
+// alongside the CO status UPDATE, so a missing table failed the WHOLE batch and
+// the swallowed error left COs stuck (never auto-advancing to READY_TO_SHIP),
+// and GET /api/consignment-orders/status-changes 500'd with
+// relation "co_status_changes" does not exist (found on prod 2026-08-01).
+// Create it lazily (idempotent) before any read or write touches it. Snake_case
+// columns matching the migration + the cascade INSERTs; org_id defaults so the
+// writers (which don't set it) still satisfy NOT NULL. FK omitted so the DDL
+// can never fail on a schema quirk — the audit log doesn't need it.
+export let coStatusChangesTableEnsured: Promise<void> | null = null;
+export function ensureCoStatusChangesTable(db: D1Database): Promise<void> {
+  if (coStatusChangesTableEnsured) return coStatusChangesTableEnsured;
+  coStatusChangesTableEnsured = (async () => {
+    try {
+      await db
+        .prepare(
+          `CREATE TABLE IF NOT EXISTS co_status_changes (
+             id           TEXT PRIMARY KEY,
+             co_id        TEXT,
+             from_status  TEXT,
+             to_status    TEXT,
+             changed_by   TEXT,
+             timestamp    TEXT NOT NULL,
+             notes        TEXT,
+             auto_actions TEXT,
+             org_id       TEXT NOT NULL DEFAULT 'hookka'
+           )`,
+        )
+        .run();
+      await db
+        .prepare(
+          "CREATE INDEX IF NOT EXISTS idx_co_status_changes_co_id ON co_status_changes(co_id)",
+        )
+        .run();
+      await db
+        .prepare(
+          "CREATE INDEX IF NOT EXISTS idx_co_status_changes_timestamp ON co_status_changes(timestamp)",
+        )
+        .run();
+    } catch {
+      // ignore — table may already exist or DDL transiently rejected; callers
+      // read-guard so a still-missing table degrades to an empty list, never 500.
+    }
+  })();
+  return coStatusChangesTableEnsured;
+}
+
 export async function ensurePiecePicsForJc(
   db: D1Database,
   jc: JobCardRow,
@@ -3321,6 +3371,10 @@ export async function cascadeUpholsteryToCO(
   db: D1Database,
   poId: string,
 ): Promise<void> {
+  // The status UPDATE below is batched with an INSERT into co_status_changes;
+  // ensure that table exists (idempotent, memoized) or the whole batch fails
+  // and the CO never advances. See ensureCoStatusChangesTable.
+  await ensureCoStatusChangesTable(db);
   const po = await db
     .prepare("SELECT * FROM production_orders WHERE id = ?")
     .bind(poId)
@@ -3616,6 +3670,7 @@ export async function cascadePoCompletionToCO(
   consignmentOrderId: string | null,
 ): Promise<void> {
   if (!consignmentOrderId) return;
+  await ensureCoStatusChangesTable(db);
   const co = await db
     .prepare("SELECT id, status FROM consignment_orders WHERE id = ?")
     .bind(consignmentOrderId)
@@ -3677,6 +3732,7 @@ export async function cascadeCNCompletionToCO(
   consignmentOrderId: string | null,
 ): Promise<void> {
   if (!consignmentOrderId) return;
+  await ensureCoStatusChangesTable(db);
   const co = await db
     .prepare("SELECT id, status FROM consignment_orders WHERE id = ?")
     .bind(consignmentOrderId)
@@ -3737,6 +3793,7 @@ export async function cascadeCNReversalToCO(
   consignmentOrderId: string | null,
 ): Promise<void> {
   if (!consignmentOrderId) return;
+  await ensureCoStatusChangesTable(db);
   const co = await db
     .prepare("SELECT id, status FROM consignment_orders WHERE id = ?")
     .bind(consignmentOrderId)
@@ -5056,6 +5113,101 @@ export async function warmPoListPlanningVariant(
     c,
     // No SWR: force the compute+store on the cron (this IS the off-request path).
     undefined,
+  );
+  return { rows: result?.total ?? 0 };
+}
+
+// Today's date in Malaysia (UTC+8, no DST) — mirrors todayISO() in
+// src/pages/production/utils.ts. The dept page seeds its cold-start date
+// window from that exact function, so the warmer must agree on the day or the
+// key drifts by one at the UTC boundary.
+export function todayMytISO(): string {
+  return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+// The snapshot key for a dept sheet's cold open. Built the same way the
+// handler builds it: sorted, "&"-joined query params. Exported so the
+// regression test can compare it against the FE's URL construction.
+export function deptWarmCacheKey(dept: string, today: string): string {
+  return [
+    `fields=minimal`,
+    `dept=${encodeURIComponent(dept)}`,
+    `excludeCompleted=true`,
+    `dueFrom=${encodeURIComponent(today)}`,
+    `dueTo=${encodeURIComponent(today)}`,
+  ]
+    .sort()
+    .join("&");
+}
+
+// Warm ONE per-DEPT sheet snapshot (Fab Cut / Fab Sew / … / Packing), so the
+// first operator to open a dept sheet doesn't pay the ~5-8s cold recompute
+// (owner-reported "打开卡很久" on Fab Cut; health 2026-08-01 measured
+// /api/production-orders at P50 8s / P95 30s).
+//
+// ATTEMPT 1 (be17d4b4) SHIPPED A KEY THAT NEVER MATCHED and was reverted in
+// 071fcee7. It assumed the dept page sends no date window. It does: on a cold
+// open `useColdStartTodayFallback` seeds dueFrom=dueTo=todayISO() (MYT), so the
+// live request is
+//   fields=minimal&dept=<D>&excludeCompleted=true&dueFrom=<today>&dueTo=<today>
+// while the warmer stored `dept=<D>&excludeCompleted=true&fields=minimal`.
+// Result: a snapshot nobody ever read, plus wasted cron time per dept.
+//
+// The key here is now built by the SAME rule the handler uses — the request's
+// query string, sorted and "&"-joined (see production-orders.ts:
+// `new URL(c.req.url).searchParams.toString().split("&").sort().join("&")`) —
+// with the same today-MYT window the page seeds. deptWarmCacheKey() below is
+// the single place that shape is defined, and the test asserts it against the
+// FE's own construction so this cannot silently drift a third time.
+//
+// The rows we compute MUST also be filtered by that same window, or the
+// snapshot would hold more rows than the key promises.
+export async function warmPoListDeptVariant(
+  c: Context<Env>,
+  orgId: string,
+  dept: string,
+): Promise<{ rows: number }> {
+  const { withSnapshot } = await import("../../lib/snapshot");
+  const today = todayMytISO();
+  const snapshotCacheKey = deptWarmCacheKey(dept, today);
+  const result = await withSnapshot<{
+    success: true;
+    data: unknown[];
+    total: number;
+  }>(
+    c.var.DB,
+    {
+      tableName: "production_orders_list_snapshot",
+      sourceTables: ["production_orders", "job_cards", "sales_orders", "consignment_orders"],
+    },
+    orgId,
+    async () => {
+      const data = await fetchFilteredPOs(
+        c.var.DB,
+        orgId,
+        null, // statuses
+        true, // includeJobCards — the dept sheet inlines full jobCards
+        false, // includeArchive
+        true, // minimal
+        dept, // deptFilter
+        today, // dueFrom — MUST mirror the key's window (cold open seeds today)
+        today, // dueTo
+        null, // catFilter
+        true, // excludeCompleted — dept pages always send it
+      );
+      await attachCustomerSO(
+        c.var.DB,
+        data as Array<{
+          salesOrderId: string;
+          consignmentOrderId: string;
+          customerSO: string;
+        }>,
+      );
+      return { success: true, data, total: data.length };
+    },
+    snapshotCacheKey,
+    c,
+    undefined, // no SWR — force compute+store on the cron
   );
   return { rows: result?.total ?? 0 };
 }

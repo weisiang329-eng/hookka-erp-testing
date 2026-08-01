@@ -954,7 +954,7 @@ async function autoCloseForgottenPunch(
     )
     .run();
 
-  // BUG-2026-08-01-001 — closing the punch was never enough. Pay reads
+  // BUG-2026-08-01-004 — closing the punch was never enough. Pay reads
   // working_hour_entries, NOT attendance_records: a day with no entries is an
   // ABSENCE and docks a full day (salary ÷ 26). Both auto-close paths used to
   // stop at the UPDATE above, so every forgotten punch-out silently cost the
@@ -1211,10 +1211,38 @@ app.post("/clock", async (c) => {
     // Never overwrites office-keyed rows; best-effort like the dock.
     //
     // MUST run BEFORE the dock. The dock's "never charge an absent day twice"
-    // guard (BUG-2026-08-01-002) reads this day's logged hours — with the old
+    // guard (BUG-2026-08-01-005) reads this day's logged hours — with the old
     // order those rows didn't exist yet, so every live punch-out would look
     // like an absent day and no short-hour dock would ever apply again.
     try {
+      // BROKEN PUNCH (owner 2026-08-01, 「前期我们松一点通融点」). A worker who
+      // forgot the morning punch and tapped in AND out at knock-off leaves a
+      // window with no payable minutes (18:01 in / 18:02 out). The normal path
+      // writes nothing for it, so the day logs 0h and counts as a full absence
+      // — for someone who was demonstrably at the factory to punch at all.
+      // When `brokenPunchCreditsFullDay` is on, credit the contracted shift
+      // instead, exactly as a forgotten punch-OUT already is. Flip the rule
+      // off from a chosen date (it is effective-dated) to go back to
+      // "absence, charged once".
+      const brokenIn = hhmmToMinutes(existing.clockIn);
+      const brokenOut = hhmmToMinutes(time);
+      let credit = 0;
+      try {
+        const cfg = resolvePayRulesAsOf(await loadPayRuleVersions(c.var.DB), date);
+        if (cfg.brokenPunchCreditsFullDay) {
+          const broken =
+            brokenIn == null ||
+            brokenOut == null ||
+            brokenOut <= brokenIn ||
+            (() => {
+              const day = computeAttendanceDay(brokenIn, brokenOut, toAttendanceRules(cfg));
+              return day.regularWorkMin <= 0 && day.otMin <= 0;
+            })();
+          if (broken) credit = worker.workingHoursPerDay || 9;
+        }
+      } catch {
+        /* rules unreadable → no credit, the pre-rule behaviour */
+      }
       await autofillWorkingHoursFromPunch(c.var.DB, {
         attendanceId: existing.id,
         workerId: worker.id,
@@ -1222,6 +1250,7 @@ app.post("/clock", async (c) => {
         clockIn: existing.clockIn,
         clockOut: time,
         homeDeptCode: worker.departmentCode,
+        fixedHours: credit || null,
       });
     } catch (e) {
       console.warn("[worker/clock] working-hours auto-fill skipped:", e);

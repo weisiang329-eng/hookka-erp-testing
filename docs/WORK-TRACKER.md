@@ -1913,6 +1913,51 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
 - [ ] Owner data check (not a code task): the BOM line `NLY-D30-1.5"` has BLANK cut L×W, so
   qty 1 consumes ONE WHOLE SHEET rather than one cut piece. Worth auditing how many filler
   lines are in that state.
+
+## 2026-08-01 (session: System Health — MISDIAGNOSED, corrected below)
+- [x] **CORRECTION.** I reported that System Health was "monitoring nothing" and shipped a
+  `CF_ACCOUNT_ID` into `wrangler.toml [vars]`. **Both were wrong.**
+  - PRODUCTION (`erp.hookka.com`) health has been **LIVE all along**: `kpis-diag` returns
+    `CF_ACCOUNT_ID_set:true`, and the live AE probes return 200 with real data (smoke = 25,526
+    rows; spark = real hourly counts 416 / 118 / 1144 / 762 …).
+  - What I actually tested was **staging**, which is a Pages *preview* environment. Pages keeps
+    production and preview env vars SEPARATE, and only preview is missing `CF_ACCOUNT_ID`.
+    The mock banner is correct behaviour for preview, not a production defect.
+  - Worse, the value I added was the account from `wrangler whoami` on this machine
+    (`816e4573…`, hello@houzscentury.com) — a DIFFERENT Cloudflare account from the one
+    production actually uses (`27cd35…`). Even had it been needed, it was the wrong value.
+  - The deploy then failed outright: `Binding name 'CF_ACCOUNT_ID' already in use` — Pages
+    already had it, which was the clue that production was fine.
+  - Lesson for next time: `/admin/health` shows mock data on ANY preview deploy. Diagnose
+    environment-scoped config against the environment you actually mean to fix, and treat
+    "the dashboard says mock" on staging as expected, not as an incident.
+- [ ] Remaining, genuinely open: staging's preview env has no `CF_ACCOUNT_ID`, so health on
+  staging stays mocked. Decide whether that's worth fixing (it needs the PROD account id set
+  on the Pages *preview* environment) or whether health is a production-only concern.
+- [ ] Still to do (unchanged by the correction): measure /admin/health page load on prod, then
+  the module-by-module devtools sweep for slow fetches / console errors.
+
+### [SUPERSEDED — see the correction above] 2026-08-01 first pass
+- [x] **Diagnosed: the whole /admin/health dashboard was deterministic mock data.** The page
+  banner said so ("No live data yet…") but the headline card still read "All systems normal ·
+  P50 41ms · P95 241ms · No 5xx" — i.e. it looked green while measuring nothing. Every question
+  of the form "which page crashed / lagged / failed" had no answer because nothing was recorded
+  on the READ side.
+- [x] Root cause via `GET /api/admin/health/kpis-diag`: `ERP_METRICS_bound:true`,
+  `AE_QUERY_TOKEN_set:true`, **`CF_ACCOUNT_ID_set:false`**. The AE SQL endpoint is
+  `…/accounts/{CF_ACCOUNT_ID}/analytics_engine/sql`, so without the id the fetch cannot be
+  addressed and the route falls back to `_mock:true`. ONE missing variable. Write side has been
+  healthy since P6.2, so **historical data already exists** and appears the moment this lands.
+- [x] Fixed by adding `CF_ACCOUNT_ID` to `wrangler.toml [vars]` (value read from
+  `npx wrangler whoami`; an account id is not a credential — this file already carries KV
+  namespace ids, the D1 id and the Sentry DSN). `AE_QUERY_TOKEN` stays a Pages secret.
+  `wrangler pages secret put` was tried first and is refused under an OAuth login (API 10000),
+  which is also why this must not depend on a manual dashboard step.
+- [ ] AFTER DEPLOY: re-check `kpis-diag` shows `CF_ACCOUNT_ID_set:true`, then confirm
+  /admin/health drops the mock banner and shows real numbers. Then measure page load — the
+  dashboard fans out to many AE SQL calls and may need caching.
+- [ ] Then sweep module-by-module (devtools) for slow fetches / console errors, now that there
+  is real telemetry to cross-check against.
 ## 2026-08-01 (session: OCR re-upload hint + OCR observability asks)
 
 Owner asks logged verbatim before work (multi-part message, CLAUDE.md rule):

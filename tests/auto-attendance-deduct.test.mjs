@@ -37,7 +37,7 @@ const { HOOKKA_ATTENDANCE: BASE_RULES } = await import(
 // logged day because that is the only state in which a short-hour dock is even
 // meaningful: a day with ZERO logged hours is an ABSENCE, already charged in
 // full by the payroll engine, and the "never charge one day twice" guard
-// (BUG-2026-08-01-002) refuses to dock it. Set loggedHours: 0 to exercise that.
+// (BUG-2026-08-01-005) refuses to dock it. Set loggedHours: 0 to exercise that.
 function mockDb({ existingDock = null, lockedCount = 0, workerHours = null, loggedHours = 8 } = {}) {
   const calls = { alters: 0, deletes: [], inserts: [], batches: 0 };
   function stmt(sql) {

@@ -362,6 +362,21 @@ export default function GRNPage() {
   const [filterDateTo, setFilterDateTo] = useState("");
   const [filterArrivalState, setFilterArrivalState] = useState<ArrivalState | "">("");
   const [showFilters, setShowFilters] = useState(false);
+  // Search-safe server pagination (mirrors procurement/index.tsx). The grid
+  // shows one 200-row page UNLESS a filter/search is active — then it drops
+  // pagination and loads the whole dataset so a search sees EVERY GRN, not just
+  // the current page. Widgets read the /stats payload for whole-dataset counts.
+  const GRN_PAGE_SIZE = 200;
+  const [grnPage, setGrnPage] = useState(1);
+  const [gridSearch, setGridSearch] = useState("");
+  const grnFiltersActive = !!(
+    filterStatus ||
+    filterSupplier ||
+    filterDateFrom ||
+    filterDateTo ||
+    filterArrivalState ||
+    gridSearch.trim()
+  );
 
   // Bulk "Download PDF" — merge every selected GRN into one file. Rows come
   // back from the DataGrid via `onSelectionChange`.
@@ -369,7 +384,16 @@ export default function GRNPage() {
   const [downloadingPdf, setDownloadingPdf] = useState(false);
   const [bulkArrivalBusy, setBulkArrivalBusy] = useState(false);
 
-  const { data: grnResp, loading: grnLoading, refresh: refreshGrns } = useCachedJson<{ success?: boolean; data?: GoodsReceiptNote[] } | GoodsReceiptNote[]>("/api/grn");
+  const { data: grnResp, loading: grnLoading, refresh: refreshGrns } = useCachedJson<{ success?: boolean; data?: GoodsReceiptNote[]; total?: number } | GoodsReceiptNote[]>(
+    grnFiltersActive
+      ? "/api/grn"
+      : `/api/grn?page=${grnPage}&limit=${GRN_PAGE_SIZE}`,
+  );
+  // Whole-dataset GRN header rows (no items) — drives the summary widgets so
+  // their counts never shrink to the current page.
+  const { data: grnStatsResp } = useCachedJson<{ success?: boolean; data?: GoodsReceiptNote[]; total?: number }>(
+    "/api/grn/stats",
+  );
   const { loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: PurchaseOrder[] } | PurchaseOrder[]>("/api/purchase-orders");
   // Purchase Company letterhead — print each GRN under its supplier's buying
   // company (HOOKKA / OHANA / any sister co); accounting stays HOOKKA.
@@ -380,6 +404,18 @@ export default function GRNPage() {
     () => ((grnResp as { data?: GoodsReceiptNote[] } | undefined)?.data ?? (Array.isArray(grnResp) ? grnResp : [])),
     [grnResp]
   );
+  // Whole-dataset header rows for the summary widgets (counts + arrival tallies)
+  // so a paginated grid page never shrinks the widget numbers.
+  const grnStatsRows: GoodsReceiptNote[] = useMemo(
+    () => (grnStatsResp?.success ? grnStatsResp.data ?? [] : grns),
+    [grnStatsResp, grns],
+  );
+  const grnTotalCount = grnStatsResp?.total ?? grnStatsRows.length;
+  const grnTotalPages = Math.max(1, Math.ceil(grnTotalCount / GRN_PAGE_SIZE));
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- clamp only; guarded so it self-terminates
+    if (grnPage > grnTotalPages) setGrnPage(grnTotalPages);
+  }, [grnPage, grnTotalPages]);
   const loading = grnLoading || poLoading;
 
   const fetchData = useCallback(() => {
@@ -431,12 +467,12 @@ export default function GRNPage() {
 
   // Tab badge counts come from the whole list, not the current filter.
   const draftCount = useMemo(
-    () => grns.filter(g => g.status === "DRAFT").length,
-    [grns],
+    () => grnStatsRows.filter(g => g.status === "DRAFT").length,
+    [grnStatsRows],
   );
   const tabConfirmedCount = useMemo(
-    () => grns.filter(g => g.status !== "DRAFT").length,
-    [grns],
+    () => grnStatsRows.filter(g => g.status !== "DRAFT").length,
+    [grnStatsRows],
   );
 
   // ---- Export CSV ----
@@ -922,11 +958,11 @@ export default function GRNPage() {
             <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
               !filterArrivalState ? "bg-[#6B5C32] text-white" : "bg-[#F0ECE9] text-[#6B7280]"
             }`}>
-              {grns.length}
+              {grnTotalCount}
             </span>
           </button>
           {(["NOT_ARRIVED", "IN_TRANSIT", "AT_CUSTOMS", "ARRIVED"] as ArrivalState[]).map((state) => {
-            const count = grns.filter(g => g.arrival_state === state).length;
+            const count = grnStatsRows.filter(g => g.arrival_state === state).length;
             const isActive = filterArrivalState === state;
             return (
               <button
@@ -971,7 +1007,7 @@ export default function GRNPage() {
               )}
               {hasActiveFilters && (
                 <span className="text-sm text-[#6B7280]">
-                  Showing {filteredGRNs.length} of {grns.length} GRNs
+                  Showing {filteredGRNs.length} of {grnTotalCount} GRNs
                 </span>
               )}
             </div>
@@ -1131,7 +1167,33 @@ export default function GRNPage() {
             contextMenuItems={grnGridContextMenu}
             maxHeight="calc(100vh - 300px)"
             emptyMessage={tab === "DRAFT" ? "No draft GRNs." : "No GRNs found."}
+            onSearchChange={setGridSearch}
           />
+          {/* Server-side page controls — only in the default (unfiltered) view.
+              A filter/search loads the whole dataset, so paging is hidden. */}
+          {!grnFiltersActive && grnTotalPages > 1 && (
+            <div className="flex items-center justify-center gap-3 py-3 border-t border-[#F0ECE9]">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={grnPage <= 1 || grnLoading}
+                onClick={() => setGrnPage((p) => Math.max(1, p - 1))}
+              >
+                ← Prev
+              </Button>
+              <span className="text-sm text-[#6B7280]">
+                Page {grnPage} / {grnTotalPages}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={grnPage >= grnTotalPages || grnLoading}
+                onClick={() => setGrnPage((p) => Math.min(grnTotalPages, p + 1))}
+              >
+                Next →
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
 

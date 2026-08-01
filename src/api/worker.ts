@@ -460,6 +460,27 @@ app.post("/api/internal/warm-lists", async (c) => {
     console.error("[warm-lists] poListPlanning failed:", e);
     out.poListPlanning = { ok: false };
   }
+  // 1c. Per-DEPT sheet snapshots (Fab Cut / Fab Sew / … / Packing) — each is a
+  // DISTINCT snapshot key the two variants above don't cover, so the first
+  // operator to open a dept sheet post-deploy paid a ~5–8s cold recompute
+  // ("打开卡很久"). Pre-build each here (best-effort per dept). 2026-07-31.
+  try {
+    const { warmPoListDeptVariant } = await import("./routes/production-orders");
+    const { DEPT_ORDER } = await import("./lib/lead-times");
+    const deptRows: Record<string, number> = {};
+    for (const dept of DEPT_ORDER) {
+      try {
+        const r = await warmPoListDeptVariant(c, DEFAULT_ORG_ID, dept);
+        deptRows[dept] = r.rows;
+      } catch (e) {
+        console.error(`[warm-lists] poListDept ${dept} failed:`, e);
+      }
+    }
+    out.poListDept = { ok: true, depts: deptRows };
+  } catch (e) {
+    console.error("[warm-lists] poListDept failed:", e);
+    out.poListDept = { ok: false };
+  }
   // 2. Delivery-orders list value map (keeps the DO list warm post-deploy too).
   try {
     const { loadDoValueMapCached } = await import("./lib/do-value");

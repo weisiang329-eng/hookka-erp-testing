@@ -210,7 +210,15 @@ export default function EditSalesOrderPage() {
   // legacy FabricItem at the boundary so downstream picker logic is
   // unchanged.
   const { data: fabricsTrackingForPickerResp } = useCachedJson<{ data?: { id: string; fabricCode: string; fabricDescription?: string; fabricCategory?: string }[] }>("/api/fabric-tracking", 300, CAT_OPTS);
-  const customers: Customer[] = useMemo(() => customersResp?.data || [], [customersResp]);
+  // Same CONFIRMED-only rule as sales/create.tsx - an edit must not be able to
+  // re-point an order at an unbillable account either.
+  const customers: Customer[] = useMemo(
+    () =>
+      (customersResp?.data || []).filter(
+        (c) => (c.customerStage ?? "CONFIRMED") !== "POTENTIAL",
+      ),
+    [customersResp],
+  );
   const products: Product[] = useMemo(() => productsResp?.data || [], [productsResp]);
   const fabrics: FabricItem[] = useMemo(
     () => (fabricsTrackingForPickerResp?.data || []).map(t => ({

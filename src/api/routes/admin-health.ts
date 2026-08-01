@@ -403,10 +403,17 @@ app.get("/kpis-diag", async (c) => {
   // approach: SELECT the raw double1 rows the percentile math runs over.
   // Percentiles + longTaskCount are then derived in JS by /kpis, never in
   // SQL — there is no QUANTILE call to fail.
+  // 2026-08-01: probes must mirror the REAL /kpis SQL exactly. The previous
+  // probes were simplified cousins (pct had LIMIT 1, spark aliased AS hour)
+  // and all passed while the real path — same shape, no LIMIT, AS bucket —
+  // fell back to mock on prod. A diagnostic that tests a friendlier query
+  // than production runs is worse than none: it certifies the wrong thing.
+  // pct_full is the exact percentile source (no LIMIT — the row volume is
+  // part of what can fail); spark_bucket is the exact sparkline SQL.
   const queries: Record<string, string> = {
     smoke: "SELECT count() AS n FROM hookka_erp_metrics WHERE timestamp > NOW() - INTERVAL '1' DAY",
-    pct: `SELECT double1 FROM hookka_erp_metrics WHERE blob1 = 'req' AND timestamp > NOW() - INTERVAL '1' DAY LIMIT 1`,
-    spark: `SELECT toStartOfInterval(timestamp, INTERVAL '1' HOUR) AS hour, count() AS n FROM hookka_erp_metrics WHERE blob1 = 'req' AND timestamp > NOW() - INTERVAL '1' DAY GROUP BY hour ORDER BY hour ASC`,
+    pct_full: `SELECT double1 FROM hookka_erp_metrics WHERE blob1 = 'req' AND timestamp > NOW() - INTERVAL '1' DAY`,
+    spark_bucket: `SELECT toStartOfInterval(timestamp, INTERVAL '1' HOUR) AS bucket, count() AS n FROM hookka_erp_metrics WHERE blob1 = 'req' AND timestamp > NOW() - INTERVAL '1' DAY GROUP BY bucket ORDER BY bucket ASC`,
   };
   const liveCalls: Record<string, unknown> = {};
   if (env.CF_ACCOUNT_ID && env.AE_QUERY_TOKEN) {
@@ -468,13 +475,16 @@ app.get("/kpis", async (c) => {
   } catch (err) {
     // Any error path — bad token, AE temporarily down, SQL syntax we
     // somehow broke, dataset just created with no rows yet — falls
-    // back to mock so the dashboard still loads. Logged so we can see
-    // why in `wrangler tail`.
-    console.warn(
-      "[admin-health] AE SQL failed, falling back to mock:",
-      err instanceof Error ? err.message : String(err),
-    );
-    return c.json({ success: true, data: mockKpis() });
+    // back to mock so the dashboard still loads. Logged AND carried on
+    // the response as _mockReason: we cannot `wrangler tail` this Pages
+    // project from the dev machine (different Cloudflare account), and
+    // 2026-08-01 proved the cost of a silent fallback — prod ran mock
+    // data indefinitely while the diag probes (which use SIMPLER SQL
+    // than the real path) all passed. The reason string is an AE API
+    // error message; it never contains the token.
+    const reason = err instanceof Error ? err.message : String(err);
+    console.warn("[admin-health] AE SQL failed, falling back to mock:", reason);
+    return c.json({ success: true, data: { ...mockKpis(), _mockReason: reason } });
   }
 });
 

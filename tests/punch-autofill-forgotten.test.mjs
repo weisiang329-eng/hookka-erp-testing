@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// punch-autofill-forgotten.test.mjs — BUG-2026-08-01-001.
+// punch-autofill-forgotten.test.mjs — BUG-2026-08-01-004.
 //
 // Pay reads working_hour_entries, NOT attendance_records. Both forgotten-punch
 // auto-close paths (midnight cron + next clock-in self-heal) used to close the

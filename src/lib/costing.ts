@@ -123,6 +123,26 @@ export type ConsumeResult = {
  * This function mutates — if you want to simulate without committing, pass
  * a deep copy of the batches.
  */
+/**
+ * Smallest quantity we treat as real.
+ *
+ * FIFO walks subtract float quantities batch by batch, so `remaining` rarely
+ * lands on exactly 0 - it lands on residue like 6.9e-77. The old
+ * `if (remaining <= 0) break` never fired on positive residue, so the walk
+ * continued and minted a SLICE for that residue. Downstream, po-cost-cascade
+ * guards each slice with `WHERE remainingQty >= ?`; a drained batch has
+ * remainingQty 0, and `0 >= 6.9e-77` is false, so the UPDATE no-ops and the
+ * code throws "race lost" - reporting a concurrency race that never happened
+ * and failing the whole PO completion. That is what blocked worker scans on
+ * 2026-08-01 (observed: "tried to consume 6.90893484407556e-77").
+ *
+ * 1e-9 is far below any physically meaningful quantity here (metres of fabric,
+ * pieces) and far above the residue float subtraction produces at these
+ * magnitudes, so it separates dust from real demand without hiding a genuine
+ * shortage.
+ */
+export const QTY_EPSILON = 1e-9;
+
 export function fifoConsume(
   batches: RMBatch[],
   requestedQty: number,
@@ -139,9 +159,11 @@ export function fifoConsume(
   let totalCostSen = 0;
 
   for (const batch of sorted) {
-    if (remaining <= 0) break;
+    // Dust guard: `remaining` is float residue, not demand, once it drops
+    // below QTY_EPSILON. Breaking on `<= 0` alone let residue mint a slice.
+    if (remaining <= QTY_EPSILON) break;
     const take = Math.min(batch.remainingQty, remaining);
-    if (take <= 0) continue;
+    if (take <= QTY_EPSILON) continue;
 
     const slice: ConsumeSlice = {
       batchId: batch.id,
@@ -157,12 +179,15 @@ export function fifoConsume(
     remaining -= take;
   }
 
-  const consumedQty = requestedQty - remaining;
+  // Residue is not a shortage either - reporting 6.9e-77 short would put a
+  // phantom line on the shortage report.
+  const shortageQty = remaining > QTY_EPSILON ? remaining : 0;
+  const consumedQty = requestedQty - shortageQty;
   return {
     slices,
     consumedQty,
     totalCostSen,
-    shortageQty: Math.max(0, remaining),
+    shortageQty,
   };
 }
 
@@ -238,16 +263,21 @@ export function fifoConsumeFG(
   let remaining = requestedQty;
   let totalCostSen = 0;
   for (const b of sorted) {
-    if (remaining <= 0) break;
+    // Same dust guard as fifoConsume - this walk had the identical shape.
+    if (remaining <= QTY_EPSILON) break;
     const take = Math.min(b.remainingQty, remaining);
-    if (take <= 0) continue;
+    if (take <= QTY_EPSILON) continue;
     const totalSen = Math.round(take * b.unitCostSen);
     slices.push({ batchId: b.id, qty: take, unitCostSen: b.unitCostSen, totalCostSen: totalSen });
     totalCostSen += totalSen;
     b.remainingQty -= take;
     remaining -= take;
   }
-  return { slices, totalCostSen, shortageQty: Math.max(0, remaining) };
+  return {
+    slices,
+    totalCostSen,
+    shortageQty: remaining > QTY_EPSILON ? remaining : 0,
+  };
 }
 
 // ---- Ledger entry builder -------------------------------------------------

@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// punch-degenerate-window.test.mjs — BUG-2026-08-01-002.
+// punch-degenerate-window.test.mjs — BUG-2026-08-01-005.
 //
 // A worker who forgets the MORNING punch and does both at knock-off leaves a
 // window like 18:01 IN / 18:02 OUT. That is technically "valid" (out > in), and

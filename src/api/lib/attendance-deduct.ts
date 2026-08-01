@@ -286,7 +286,7 @@ export async function maybeApplyAutoDayDock(
     return { applied: false, reason: "manual-exists" };
   }
 
-  // Guard: NEVER charge one day twice (BUG-2026-08-01-002, the class).
+  // Guard: NEVER charge one day twice (BUG-2026-08-01-005, the class).
   // The payroll engine defines an absence as "an elapsed working day with no
   // LOGGED HOURS" and docks the full ÷26 day rate for it. So a day with zero
   // logged hours is ALREADY fully charged — any hour dock on top is a second

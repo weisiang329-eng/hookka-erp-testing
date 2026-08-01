@@ -107,13 +107,21 @@ test("send-quote logs a QUOTE_SENT activity ONLY after a successful send", () =>
 // ===========================================================================
 
 
-test("Email Quotation button generates PDF base64 and POSTs to /send-quote, gated by confirm", () => {
+test("Email button generates PDF base64 and POSTs to /send-quote, gated by confirm", () => {
   const f = flat(CUSTOMERS_FE);
   assert.match(f, /handleEmailQuotationV2/);
   // Reuses the same generator, then strips the data-URI prefix to bare base64.
   assert.match(f, /doc\.output\("datauristring"\)/);
   assert.match(f, /\/api\/customer-crm\/send-quote/);
-  // Outward action is confirm-gated.
-  assert.match(f, /confirm\(\{[\s\S]*?Send quotation\?/);
-  assert.match(f, /Email Quotation/);
+  // Outward action is confirm-gated. The confirm title is now built from the
+  // document kind ("Send quotation?" / "Send catalogue?") since the same
+  // control sends both - see potential-customer-followups.test.mjs.
+  assert.match(f, /title: `Send \$\{label\}\?`/);
+  // The standalone "Email Quotation" button became a Quotation/Catalogue
+  // picker beside one "Email" button (owner 2026-08-01).
+  assert.match(f, /<option value="QUOTATION">Quotation<\/option>/);
+  assert.ok(
+    !/Email Quotation<\/Button>/.test(f),
+    "the old single-purpose Email Quotation button should be gone",
+  );
 });

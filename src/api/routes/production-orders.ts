@@ -3425,6 +3425,7 @@ export {
   rowToMinimalPO,
   warmPoListDeliveryVariant,
   warmPoListPlanningVariant,
+  warmPoListDeptVariant,
 } from "./production-orders/_helpers";
 export {
   applyWipInventoryChange,

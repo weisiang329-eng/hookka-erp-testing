@@ -34,45 +34,50 @@ Entries themselves stay newest-first.
 
 ---
 
-## BUG-2026-08-01-002 — A broken punch (in and out in the same minute) was docked a FULL day's hours ON TOP of that day's absence `payroll` `data-integrity` 🟡
+## BUG-2026-08-01-005 — A broken punch (in and out in the same minute) was docked a FULL day's hours ON TOP of that day's absence `payroll` `data-integrity` 🟡
 
 **Symptom:** KYAW ZIN OO (EMP-022) 2026-07-01 punched 18:01 IN / 18:02 OUT — he forgot the
 morning punch and did both at knock-off. The day was charged **twice**: absence RM78.85 (no
 logged hours) *and* a 9h short-hour dock RM70.96 = **RM149.81 for a day he was at the
-factory**. Two more days had the same shape with the window exactly equal (18:01–18:01):
-THI THI AYE 7/01, YE YINT AUNG 7/02.
+factory**. Three more days had the same shape (THI THI AYE 7/01, YE YINT AUNG 7/02,
+NYEIN CHAN AUNG 6/22).
 
-**Root cause:** two independent gaps that compound.
+**Root cause:** two gaps that compound.
 1. `computePunchShortfallHours` treated any `out > in` window as valid evidence. An 18:01→18:02
    window puts `effectiveIn` (after the 15-min late blocks) past the shift end, so
-   `regularWorkMin` is 0 and the shortfall comes out as the whole 9h day.
+   `regularWorkMin` is 0 and the shortfall came out as the whole 9h day.
 2. `POST /settle-period` skipped a day only when it had NEITHER a punch NOR logged hours. A day
    with a punch but zero logged hours is an ABSENCE to the payroll engine (which defines absence
    purely by logged hours) — yet the dock path still ran on it, stacking a second deduction.
 
-**Fix:**
-- `src/api/lib/attendance-deduct.ts` — a window yielding no payable minutes at all
-  (`regularWorkMin <= 0 && otMin <= 0`) is a BROKEN PUNCH, not a zero-hour day: returns
-  `valid: false`, docks nothing, leaves the day to the absence rule / the office.
-- `src/api/routes/payroll-hour-deductions.ts` — `shortfall = hasLogged ? max(...) : 0`. Routed
-  through `maybeApplyAutoDayDock` rather than `continue` so stale AUTO rows written before this
-  fix are CLEARED on the next settle. The absence is always the larger of the two charges, so
-  this can never under-charge.
-- Owner decision 2026-08-01 (「忘了打卡算他们有来吧那三天」): the 3 days backfilled as attended
-  standard shifts, note `Backfill: broken punch — counted as attended, standard shift`.
+**Fix (the CLASS, not the instance — see BUG-CLASSES C6):**
+- `src/api/lib/attendance-deduct.ts` — (a) a window yielding no payable minutes at all is a
+  BROKEN PUNCH, not a zero-hour day → `valid: false`, no evidence, no dock. (b) the invariant
+  itself, in `maybeApplyAutoDayDock` (reason `absent-day`): **a day with zero logged hours is an
+  absence, already charged in full, and never also carries an automatic hour dock.** All three
+  auto paths funnel through that helper, so the live punch-out, the office re-apply endpoint and
+  the monthly settle are covered at once; it also DELETES stale AUTO rows, so old damage
+  self-heals. An owner's MANUAL dock is untouched.
+- `src/api/routes/worker.ts` — the clock-out handler now runs `autofillWorkingHoursFromPunch`
+  BEFORE `maybeApplyAutoPunchDock`. With the old order the new guard would see a day with no
+  hours yet and skip every legitimate dock.
+- Prod sweep: 4 double-charged AUTO docks deleted; the 4 broken-punch days credited as attended
+  standard shifts per the owner's call (「忘了打卡算他们有来」/「前期我们松一点通融点」).
 
-**Verification:** `tests/punch-degenerate-window.test.mjs` (6 cases — broken windows dock
-nothing; a REAL short day, a real late arrival and a full day are all unchanged). Full
-attendance/payroll suite green. Re-ran the engine offline against prod: the "punched but
-counted absent" anomaly list for 2026-07 is now empty and all 36 rows reconcile.
+**Verification:** `tests/punch-degenerate-window.test.mjs` (10 cases — broken windows dock
+nothing, the invariant holds, stale rows clear, MANUAL still wins, and a REAL short day / late
+arrival / full day are all unchanged). The mock DBs in `auto-attendance-deduct.test.mjs` and
+`settle-period-punch.test.mjs` now return a day's logged hours. Suite green; re-ran the payroll
+engine offline against prod for 2026-05/06/07 — zero "punched but counted absent" anomalies,
+every row reconciles.
 
 ---
-## BUG-2026-08-01-001 — Forgotten punch-out closed the attendance row but wrote NO working hours → the day silently docked a FULL day's pay `payroll` `data-integrity` 🟡
 
-**Symptom:** Owner: 「Eiphoowei 为什么扣那么多钱」. Her 2026-07 estimate showed 7 absent days,
-3 of which (7/04, 7/08, 7/10) she had actually come in and punched for. Factory-wide, 29
-worker-days across 2026-05/06/07 were affected — ANN (EMP-004) lost **9 of her 9** July days
-(RM917.31). Total wrongly deducted: **RM2,336.54**.
+## BUG-2026-08-01-004 — Forgotten punch-out closed the attendance row but wrote NO working hours → the day silently docked a FULL day's pay `payroll` `data-integrity` 🟡
+
+**Symptom:** Owner: 「Eiphoowei 为什么扣那么多钱」. Her 2026-07 estimate showed 7 absent days she
+had actually come in and punched for. Factory-wide, **35 worker-days** across 2026-05/06/07 —
+EI PHOO WEI and KYAR TUN HLA 7 days each. Total wrongly deducted: **RM2,467.31**.
 
 **Root cause:** Pay reads `working_hour_entries`, NOT `attendance_records`. A day with no
 entries is an ABSENCE and docks salary ÷ 26. Both forgotten-punch auto-close paths — the
@@ -80,33 +85,70 @@ entries is an ABSENCE and docks salary ÷ 26. Both forgotten-punch auto-close pa
 `autoCloseForgottenPunch`, which only UPDATEd `attendance_records` (clockOut, workingMinutes,
 notes) and stopped there. The `autofillWorkingHoursFromPunch` call that a REAL punch-out makes
 was never wired in, despite the self-heal's own comment claiming it ran "the SAME … Working-
-Hours autofill a manual clock-out does". So the row said "auto-counted as a normal shift"
-while the money said "absent". Exactly inverted from the stated intent, and from
-`attendance-deduct.ts`'s "a forgotten clock-out must not cost the worker a full day's pay".
+Hours autofill a manual clock-out does". So the row said "auto-counted as a normal shift" while
+the money said "absent" — inverted from the stated intent, and from `attendance-deduct.ts`'s
+"a forgotten clock-out must not cost the worker a full day's pay".
 
-Compounding it: from 2026-07 the office stopped keying Working Hours by hand (July = 632
-auto-from-punch rows, **0** office-keyed; June = 755 office-keyed). The manual backstop that
-had been hiding this since May was gone.
+Compounding it: from 2026-07 the office stopped keying Working Hours by hand (July: 632
+auto-from-punch rows, **0** office-keyed; June: 755 office-keyed). The manual backstop that had
+been hiding this since May was gone.
 
 **Fix:**
 - `src/api/lib/punch-autofill.ts` — `autofillWorkingHoursFromPunch` takes `fixedHours`: the
-  CONTRACTED shift, used instead of the punch-derived figure, and relaxing the window gate so
-  a missing/INVERTED window still writes (EMP-001 7/04 punched in at 18:03, closed at 18:00 —
+  CONTRACTED shift, used instead of the punch-derived figure, and relaxing the window gate so a
+  missing/INVERTED window still writes (EMP-001 7/04 punched in at 18:03, closed at 18:00 —
   `outMin <= inMin` made the normal path bail). Rows tagged "(no punch-out — standard shift)".
-- `src/api/routes/worker.ts` — `autoCloseForgottenPunch` now calls it with
-  `fixedHours = stdMin / 60`, best-effort, after the UPDATE. One helper ⇒ both paths fixed.
-- Backfill: 43 `working_hour_entries` rows over 29 worker-days, note
-  `Backfill: no punch-out — standard shift (BUG-2026-08-01-001)` (one DELETE undoes it).
+- `src/api/routes/worker.ts` — `autoCloseForgottenPunch` calls it with `fixedHours = stdMin / 60`,
+  best-effort, after the UPDATE. One shared helper ⇒ both auto-close paths fixed.
+- Prod backfill: 53 `working_hour_entries` rows over 35 worker-days, note
+  `Backfill: no punch-out — standard shift (BUG-2026-08-01-004)` (one DELETE undoes it).
 
 **Verification:** `tests/punch-autofill-forgotten.test.mjs` (7 cases: fixedHours beats the
 window, inverted window still writes, per-worker 7.5h day, tagging, never-overwrite, and both
-normal-punch paths unchanged). Full attendance/payroll suite 142/142. Re-ran the payroll
-engine offline against prod: the 29 days no longer appear as absences.
+normal-punch paths unchanged). Full attendance/payroll suite green.
 
-**Still open (needs an office decision, NOT auto-fixed):** 3 days where the worker punched in
-and out in the same minute (18:01–18:01) — THI THI AYE 7/01, YE YINT AUNG 7/02, KYAW ZIN OO
-7/01. Zero-length window ⇒ 0 hours ⇒ absence. Too ambiguous to credit automatically.
-**Related:** the 3 same-minute-punch days it surfaced became BUG-2026-08-01-002.
+**Related:** the same investigation surfaced BUG-2026-08-01-005.
+
+---
+
+## BUG-2026-08-01-003 — co_status_changes table never created in prod → CO history 500'd AND CO auto-transitions silently failed `consignment-orders` `production` `data-integrity` `infrastructure` 🟢
+
+**Symptom.** QA on prod (2026-08-01): `GET /api/consignment-orders/status-changes` → **500** `relation "co_status_changes" does not exist` (its sales sibling `/api/sales-orders/status-changes` returns 200). The CO detail page's status history was blank/error — matching the owner's earlier "CO Detail 页一直显示空白历史" report that a 2026-05-21 code fix was supposed to close.
+
+**Root cause (three layers).**
+1. **Table never created.** Migrations are inert on deploy. Unlike `so_status_changes` (in the initial schema), `co_status_changes` (migration 0104) had **no runtime self-apply**, so on prod the table simply never existed.
+2. **Writers fail silently.** Four CO cascades (`cascadeUpholsteryToCO`, `cascadePoCompletionToCO`, `cascadeCNCompletionToCO`, `cascadeCNReversalToCO` in `production-orders/_helpers.ts`) each `INSERT INTO co_status_changes` **inside a `db.batch()` alongside the CO `UPDATE ... status='READY_TO_SHIP'`**. A missing table failed the whole batch, and the scan handler's outer try/catch swallowed it — so COs never auto-advanced and no audit row was written. (Silent, because scans still succeeded.)
+3. **Latent column bug.** Even with the table, the reader's `SELECT ... coId ...` would 500: `coId` is not in `column-rename-map.json`, so the compat layer passes it through and Postgres folds it to `coid` ≠ the physical `co_id`. The missing-table error masked this.
+
+**Fix.** Added an idempotent memoized `ensureCoStatusChangesTable(db)` (`production-orders/_helpers.ts`) that `CREATE TABLE IF NOT EXISTS co_status_changes (…)` + indexes. All four CO cascades call it before their batched write; the read handler calls it too, switches the SELECT to snake_case columns, and wraps the query so a still-missing table degrades to `[]` instead of 500.
+
+**Impact note.** This RESTORES CO auto-advance to READY_TO_SHIP on upholstery/PO/CN completion — behavior that has been silently broken in prod. Owner confirmed (2026-08-01) the auto-advance is the intended behavior → merged.
+
+**Verified.** `tsc`/`eslint` clean; structural test `tests/co-status-changes-table.test.mjs` (ensure helper exists + idempotent; all 4 cascades ensure-before-INSERT; reader ensures + snake_case + try/catch guard); full pre-commit suite green. PR #160.
+
+---
+
+## BUG-2026-08-01-001 — boot-time stale-chunk recovery blocked by a 30s time gate → users stranded on the "Loading…" splash after a deploy `infrastructure` `pwa` 🟢
+
+**Symptom.** During QA right after two quick successive deploys, the app got stuck on the boot splash (blank dim "Loading…"). The console showed `[stale-chunk] hard-reloading: vite:preloadError` once, then nothing — a manual service-worker unregister + `caches.delete()` + reload was the only thing that unstuck it. `curl` confirmed the live bundle was stable and 200 (not a bad deploy).
+
+**Root cause.** `src/main.tsx`'s `recoverFromStaleChunk` — the ONLY recovery path when the failing chunk is one React needs to *mount* (the React ErrorBoundary never mounts in that case) — used a blunt `if (Date.now() - lastTs < 30_000) return` cooldown with **no attempt counter**. During CDN edge propagation after a deploy, the first stale chunk recovered (reload + SW purge), but the reload pulled a build that referenced a *second distinct* stale chunk still propagating; that second `preloadError` fired within the 30s window and was silently swallowed → the app never re-attempted recovery and sat on the splash.
+
+**Fix** (`src/main.tsx`). Replace the time gate with the same bounded-attempt model the ErrorBoundary already uses: a short 3s debounce collapses the burst of `preloadError` events from one failed render into a single reload, while a hard 3-attempt cap (`STALE_MAX_ATTEMPTS`, shared `hookka-stale-chunk-attempts` key, reset by the ErrorBoundary on the first successful render) — *not* a time window — is what prevents an infinite loop. Successive deploys seconds apart now each recover. Healthy boots are untouched: the helper only ever runs for a tab already in a stale-chunk failure.
+
+**Verified.** `npx tsc -p tsconfig.app.json --noEmit` clean; structural regression test `tests/pwa-stale-chunk-recovery.test.mjs` (5 assertions: attempt cap present, old 30s gate gone, debounce present, counter key shared with ErrorBoundary, SW+cache purge retained); full pre-commit suite green. The failure mode can't be forced live, but every production page (list, folders, fab-cut, packing, upholstery) reloads clean on prod. PR #158.
+
+---
+
+## BUG-2026-08-01-002 — production dept page 503'd on the day's first (cold) load; client never retried the server's retriable 503 `production-orders` `infrastructure` `ui-frontend` 🟢
+
+**Symptom.** QA on prod (2026-08-01) found `GET /api/production-orders?fields=minimal&dept=FAB_CUT&excludeCompleted=true&dueFrom=2026-08-01&dueTo=2026-08-01` returning **503**, while the same query *without* `dueFrom/dueTo` returned 200. Reproduced deterministically on a fresh load (FAB_CUT and PACKING both). Re-requesting the URL directly returned 200 with correct data, so the query is sound — the failure is on the cold path only. No console error (the page silently carried on with the non-date-ranged fetch), but the "due today" query was failing and the page paid for a fallback.
+
+**Root cause.** Two compounding factors: (1) the `dueFrom=<today>` snapshot cache key is **new every day**, so the day's first dept-page load is always a cold snapshot miss; (2) under the dept grid's burst of ~12 concurrent requests on load, with the DB adapter's `max:1 socket/request`, a session-verify DB query loses the connection race and `auth-middleware.ts` returns a **retriable 503** ("Auth service busy — please retry"). But the SWR fetch layer (`joinInflight` in `src/lib/cached-fetch.ts`) threw on the *first* non-2xx with **no retry** — so the server's documented "keep your session and retry" never happened.
+
+**Fix** (`src/lib/cached-fetch.ts`). Add a bounded automatic retry (2 attempts, jittered 200–550ms backoff) for transient statuses 502/503/504 inside `joinInflight`, before it throws. Every URL through this path is an idempotent GET (SWR reads — writes use raw `fetch()`), so a retry can never double-apply a mutation. The abort signal short-circuits the backoff so an unmount/url-change still cancels cleanly. Non-retriable statuses (4xx/500) still throw on the first try, preserving the blank-page guard that keeps last-known-good cached data.
+
+**Verified.** `npx tsc -p tsconfig.app.json --noEmit` clean; `npx eslint` clean; behavioral test `tests/cached-fetch-503-retry.test.mjs` (503×2→200 retries and resolves; persistent 503 stops after the cap; 404 not retried; 200 no retry); full pre-commit suite green. PR to follow. Deeper root cause (cold daily snapshot key + concurrent-load connection pressure) noted for a later server-side pass — the client retry makes the symptom invisible to users now.
 
 ---
 

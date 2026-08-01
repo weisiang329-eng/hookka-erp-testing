@@ -113,7 +113,7 @@ export async function autofillWorkingHoursFromPunch(
     clockOut: string;
     homeDeptCode: string | null | undefined;
     /**
-     * FORGOTTEN-PUNCH path (BUG-2026-08-01-001). A day closed by the
+     * FORGOTTEN-PUNCH path (BUG-2026-08-01-004). A day closed by the
      * auto-clockout (worker punched in, never out) pays as a NORMAL shift —
      * standard hours, no OT, no short dock — so the caller passes that fixed
      * figure instead of letting the punch window decide. Set, it also relaxes

@@ -36,7 +36,7 @@ const dock = await import(
 // loggedByKey — "worker|date" → the day's working_hour_entries total. Anything
 // not listed defaults to a normal logged day, because a day with ZERO logged
 // hours is an ABSENCE (already charged in full by the payroll engine) and the
-// "never charge one day twice" guard refuses to dock it — see BUG-2026-08-01-002.
+// "never charge one day twice" guard refuses to dock it — see BUG-2026-08-01-005.
 function mockDb({ locked = false, loggedByKey = null } = {}) {
   const docks = new Map(); // "worker|date" -> { id, workerId, date, hours, source }
   const audit = { inserts: 0, deletes: 0 };

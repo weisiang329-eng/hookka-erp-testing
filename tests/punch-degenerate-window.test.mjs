@@ -65,3 +65,90 @@ test("a full day is still zero", () => {
   assert.equal(r.valid, true);
   assert.equal(r.shortfallHours, 0);
 });
+
+// ---------------------------------------------------------------------------
+// The CLASS guard: one day, one charge.
+//
+// The payroll engine calls a day an ABSENCE when it has no LOGGED HOURS, and
+// docks the full ÷26 day rate for it. So an hour dock on a zero-logged day is
+// always a SECOND deduction for the same day. The rule is enforced once, in
+// maybeApplyAutoDayDock, because all three auto paths funnel through it: the
+// live punch-out, the office re-apply-from-punch endpoint, and the monthly
+// settle. Pinning it here means none of them can grow the bug back.
+// ---------------------------------------------------------------------------
+const { maybeApplyAutoDayDock, _resetDeductionSourceMigForTests } = await import(
+  pathToFileURL(resolve(process.cwd(), "src/api/lib/attendance-deduct.ts")).href
+);
+
+function dockDb({ loggedHours = 0, existingDock = null } = {}) {
+  const calls = { deletes: [], inserts: [], batches: 0 };
+  const stmt = (sql) => {
+    let bound = [];
+    const api = {
+      __sql: sql,
+      bound: () => bound,
+      bind(...a) { bound = a; return api; },
+      async first() {
+        if (sql.includes("FROM payroll_hour_deductions")) return existingDock;
+        if (sql.includes("FROM working_hour_entries")) return { h: loggedHours };
+        if (sql.includes("FROM payslips")) return { c: 0 };
+        return null;
+      },
+      async all() { return { results: [] }; },
+      async run() { if (sql.startsWith("DELETE")) calls.deletes.push(bound); return {}; },
+    };
+    return api;
+  };
+  return {
+    __calls: calls,
+    prepare: stmt,
+    async batch(stmts) {
+      calls.batches++;
+      for (const s of stmts) if (s.__sql.startsWith("INSERT")) calls.inserts.push(s.bound());
+      return [];
+    },
+  };
+}
+
+test("zero logged hours = ABSENCE: never also docked", async () => {
+  _resetDeductionSourceMigForTests();
+  const db = dockDb({ loggedHours: 0 });
+  const r = await maybeApplyAutoDayDock(db, {
+    workerId: "w1", date: "2026-07-01", shortfallHours: 9, note: "Auto: short 9h",
+  });
+  assert.equal(r.applied, false);
+  assert.equal(r.reason, "absent-day");
+  assert.equal(db.__calls.inserts.length, 0);
+});
+
+test("an absent day's stale AUTO dock is CLEARED (self-heals old rows)", async () => {
+  _resetDeductionSourceMigForTests();
+  const db = dockDb({ loggedHours: 0, existingDock: { id: "phd-old", source: "AUTO" } });
+  const r = await maybeApplyAutoDayDock(db, {
+    workerId: "w1", date: "2026-07-01", shortfallHours: 9, note: "Auto: short 9h",
+  });
+  assert.equal(r.reason, "absent-day");
+  assert.equal(db.__calls.deletes.length, 1);
+  assert.deepEqual(db.__calls.deletes[0], ["phd-old"]);
+});
+
+test("an owner's MANUAL dock on an absent day still wins", async () => {
+  _resetDeductionSourceMigForTests();
+  const db = dockDb({ loggedHours: 0, existingDock: { id: "phd-m", source: "MANUAL" } });
+  const r = await maybeApplyAutoDayDock(db, {
+    workerId: "w1", date: "2026-07-01", shortfallHours: 9, note: "Auto: short 9h",
+  });
+  assert.equal(r.reason, "manual-exists");
+  assert.equal(db.__calls.deletes.length, 0); // untouched
+});
+
+test("a day WITH logged hours is still docked normally", async () => {
+  _resetDeductionSourceMigForTests();
+  const db = dockDb({ loggedHours: 7.5 });
+  const r = await maybeApplyAutoDayDock(db, {
+    workerId: "w1", date: "2026-07-02", shortfallHours: 1.5, note: "Auto: short 1.5h",
+  });
+  assert.equal(r.applied, true);
+  assert.equal(r.hours, 1.5);
+  assert.equal(db.__calls.inserts.length, 1);
+});

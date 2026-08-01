@@ -12,6 +12,7 @@ import { Upload, FileText, CheckCircle, AlertTriangle, X, ChevronDown, ChevronRi
 import { ReusedScanBadge, CachedScanNotice } from "@/components/scan-cached-hint";
 import { postScanQueueConsume } from "@/lib/scan-queue-client";
 import { resolveScanParty } from "@/lib/scan-party-resolve";
+import { usePartyAliases, teachPartyAlias } from "@/lib/party-alias-client";
 
 // Background scan queue dispatch — shared with scan-supplier-modal. >2-file
 // drops POST to /api/scan-queue/upload + navigate to /scan-queue/<batchId>
@@ -381,6 +382,9 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
   const [createdSOs, setCreatedSOs] = useState<{ soNo: string; poNo: string; itemCount: number }[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
   const [catalog, setCatalog] = useState<ScanCatalog | null>(null);
+  // Taught aliases (OCR letterhead → customerId). Loaded while the modal is
+  // open so a name taught on an earlier scan resolves immediately.
+  const customerAliases = usePartyAliases("CUSTOMER", open);
   const { confirm } = useConfirm();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -888,7 +892,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
       // Same resolver the preview picker and the create payload use, so this
       // warning can never disagree with what the operator sees or with what
       // actually lands on the SO.
-      const { hubId } = resolveScanParty(catalog?.customers, po);
+      const { hubId } = resolveScanParty(catalog?.customers, po, customerAliases);
       const legacyHubId = mapDeliveryHub(po.customerName, po.customerState ?? "").hubId;
       if (!(hubId || legacyHubId)) hubless.push(po.customerPO || "(no PO no.)");
     }
@@ -957,7 +961,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
         //      found nothing.
         const hub = mapDeliveryHub(po.customerName, po.customerState ?? "");
         const resolvedHubId =
-          resolveScanParty(catalog?.customers, po).hubId || hub.hubId || null;
+          resolveScanParty(catalog?.customers, po, customerAliases).hubId || hub.hubId || null;
 
         // OCR rule: only productCode + variant numerics + fabricCode +
         // specialOrder go into the SO body. EVERYTHING ELSE (productName,
@@ -1053,7 +1057,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
         // the PO (OUR identifier). Unique-guarded — never guesses between two
         // companies. Same `resolveScanParty` the preview <select> renders from,
         // so the created SO carries exactly the customer the operator saw.
-        const resolvedCustomerId = resolveScanParty(catalog?.customers, po).customerId;
+        const resolvedCustomerId = resolveScanParty(catalog?.customers, po, customerAliases).customerId;
         // If null, the SO create call will fail — surface a clearer error.
         if (!resolvedCustomerId) {
           errs.push(`${po.customerPO}: Customer "${po.customerName}" not in catalog. Add the customer first, then re-scan.`);
@@ -1119,6 +1123,17 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
             soNo: data.data.companySOId,
             poNo: po.customerPO,
             itemCount: po.items.length,
+          });
+          // TEACH: this letterhead (`po.customerName`, exactly as OCR read it)
+          // belongs to `resolvedCustomerId` — whether the matcher got it right
+          // or the operator corrected it in the picker. Remembering it here is
+          // what makes the correction stick; the weekly distill only learns a
+          // known party's document layout, never who the party is.
+          void teachPartyAlias({
+            partyType: "CUSTOMER",
+            partyId: resolvedCustomerId,
+            rawName: po.customerName,
+            knownMap: customerAliases,
           });
           // Copy the source scan → durable SO attachment BEFORE the queue row is
           // consumed (below), which nulls the bytes. Best-effort.
@@ -1461,6 +1476,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
               selectedPOs={selectedPOs}
               expandedPO={expandedPO}
               queueItems={queueItems}
+              customerAliases={customerAliases}
               onTogglePO={togglePO}
               onExpandPO={setExpandedPO}
               onRemoveClaudeRow={(i) => void removeClaudeRow(i)}
@@ -1666,7 +1682,7 @@ function InfoCard({ icon, title, desc }: { icon: string; title: string; desc: st
 }
 
 function PreviewStep({
-  claudeRows, setClaudeRows, usedClaude, result, selectedPOs, expandedPO, queueItems, onTogglePO, onExpandPO, onRemoveClaudeRow, onClearAll, onBack, onConfirm, catalog,
+  claudeRows, setClaudeRows, usedClaude, result, selectedPOs, expandedPO, queueItems, customerAliases, onTogglePO, onExpandPO, onRemoveClaudeRow, onClearAll, onBack, onConfirm, catalog,
 }: {
   claudeRows: ClaudeScanRow[];
   setClaudeRows: React.Dispatch<React.SetStateAction<ClaudeScanRow[]>>;
@@ -1675,6 +1691,7 @@ function PreviewStep({
   selectedPOs: Set<number>;
   expandedPO: number | null;
   queueItems: QueueItem[];
+  customerAliases: Record<string, string>;
   onTogglePO: (i: number) => void;
   onExpandPO: (i: number | null) => void;
   onRemoveClaudeRow: (i: number) => void;
@@ -1917,6 +1934,7 @@ function PreviewStep({
               !!row.scanQueueRowId && cachedRowIds.has(row.scanQueueRowId)
             }
             catalog={catalog}
+            customerAliases={customerAliases}
             selected={selectedPOs.has(idx)}
             // Per-card `expanded` field overrides the legacy one-at-a-time
             // expandedPO index. The fallback POCard below still uses the
@@ -1971,12 +1989,14 @@ function PreviewStep({
 }
 
 function ClaudePOCard({
-  row, reused, catalog, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem, onAddItem, onRemoveItem, onMoveItem, onToggleGold, onRemoveCard,
+  row, reused, catalog, customerAliases, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem, onAddItem, onRemoveItem, onMoveItem, onToggleGold, onRemoveCard,
 }: {
   row: ClaudeScanRow;
   /** This card came from a cache-hit queue row (same file scanned before). */
   reused?: boolean;
   catalog: ScanCatalog | null;
+  /** Taught aliases (OCR letterhead → customerId). */
+  customerAliases?: Record<string, string> | null;
   selected: boolean;
   expanded: boolean;
   onToggle: () => void;
@@ -1999,8 +2019,8 @@ function ClaudePOCard({
   // never disagree. An explicit operator pick lands in po.customerId /
   // po.deliveryHubId and wins inside the resolver.
   const resolved = useMemo(
-    () => resolveScanParty(catalog?.customers, po),
-    [catalog, po],
+    () => resolveScanParty(catalog?.customers, po, customerAliases),
+    [catalog, po, customerAliases],
   );
 
   // Collapsed strip — h ~48px summary. Clicking the strip (not the checkbox

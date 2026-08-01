@@ -34,6 +34,23 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-01-003 — co_status_changes table never created in prod → CO history 500'd AND CO auto-transitions silently failed `consignment-orders` `production` `data-integrity` `infrastructure` 🟢
+
+**Symptom.** QA on prod (2026-08-01): `GET /api/consignment-orders/status-changes` → **500** `relation "co_status_changes" does not exist` (its sales sibling `/api/sales-orders/status-changes` returns 200). The CO detail page's status history was blank/error — matching the owner's earlier "CO Detail 页一直显示空白历史" report that a 2026-05-21 code fix was supposed to close.
+
+**Root cause (three layers).**
+1. **Table never created.** Migrations are inert on deploy. Unlike `so_status_changes` (in the initial schema), `co_status_changes` (migration 0104) had **no runtime self-apply**, so on prod the table simply never existed.
+2. **Writers fail silently.** Four CO cascades (`cascadeUpholsteryToCO`, `cascadePoCompletionToCO`, `cascadeCNCompletionToCO`, `cascadeCNReversalToCO` in `production-orders/_helpers.ts`) each `INSERT INTO co_status_changes` **inside a `db.batch()` alongside the CO `UPDATE ... status='READY_TO_SHIP'`**. A missing table failed the whole batch, and the scan handler's outer try/catch swallowed it — so COs never auto-advanced and no audit row was written. (Silent, because scans still succeeded.)
+3. **Latent column bug.** Even with the table, the reader's `SELECT ... coId ...` would 500: `coId` is not in `column-rename-map.json`, so the compat layer passes it through and Postgres folds it to `coid` ≠ the physical `co_id`. The missing-table error masked this.
+
+**Fix.** Added an idempotent memoized `ensureCoStatusChangesTable(db)` (`production-orders/_helpers.ts`) that `CREATE TABLE IF NOT EXISTS co_status_changes (…)` + indexes. All four CO cascades call it before their batched write; the read handler calls it too, switches the SELECT to snake_case columns, and wraps the query so a still-missing table degrades to `[]` instead of 500.
+
+**Impact note.** This RESTORES CO auto-advance to READY_TO_SHIP on upholstery/PO/CN completion — behavior that has been silently broken in prod. Owner confirmed (2026-08-01) the auto-advance is the intended behavior → merged.
+
+**Verified.** `tsc`/`eslint` clean; structural test `tests/co-status-changes-table.test.mjs` (ensure helper exists + idempotent; all 4 cascades ensure-before-INSERT; reader ensures + snake_case + try/catch guard); full pre-commit suite green. PR #160.
+
+---
+
 ## BUG-2026-08-01-001 — boot-time stale-chunk recovery blocked by a 30s time gate → users stranded on the "Loading…" splash after a deploy `infrastructure` `pwa` 🟢
 
 **Symptom.** During QA right after two quick successive deploys, the app got stuck on the boot splash (blank dim "Loading…"). The console showed `[stale-chunk] hard-reloading: vite:preloadError` once, then nothing — a manual service-worker unregister + `caches.delete()` + reload was the only thing that unstuck it. `curl` confirmed the live bundle was stable and 200 (not a bad deploy).

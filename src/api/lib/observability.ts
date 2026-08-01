@@ -203,6 +203,44 @@ export async function timingMiddleware(c: Context, next: Next): Promise<void> {
     c.res.headers.set("Server-Timing", parts.join(", "));
   } catch { /* ignore */ }
 
+  // 2026-08-01 — recover the error text for RETURNED 5xx responses.
+  //
+  // The catch above only fires when a handler THROWS. 137 call sites across
+  // src/api do `return c.json({ success:false, error: "..." }, 500)` instead,
+  // which never throws — so errMsg stayed "" and every one of those 5xx rows
+  // landed in Analytics Engine with no text. That is exactly what the health
+  // dashboard showed on 2026-08-01: 26 five-hundreds in 24h, every single
+  // errMsg empty, so no 500 could be root-caused without wrangler tail (which
+  // is not reachable from the dev machine — different Cloudflare account).
+  //
+  // Fixing 137 handlers would be large, easy to miss one, and would regress
+  // the moment someone adds the 138th. Recovering it centrally here covers
+  // every current and future site.
+  //
+  // Only runs on 5xx with no message already captured, so the happy path and
+  // 4xx are untouched. c.res.clone() leaves the response the client receives
+  // intact. Everything is best-effort: metrics must never break a response.
+  if (!errMsg && responseStatus >= 500) {
+    try {
+      const body = await c.res.clone().text();
+      let extracted = "";
+      try {
+        const parsed = JSON.parse(body) as Record<string, unknown>;
+        const cand = parsed.error ?? parsed.message ?? parsed.err;
+        if (typeof cand === "string") extracted = cand;
+        else if (cand) extracted = JSON.stringify(cand);
+      } catch {
+        // Non-JSON body (HTML error page, plain text) — keep a raw snippet.
+        extracted = body;
+      }
+      // Same 200-char budget as the thrown path: column budget + PII safety,
+      // since error strings can echo user-typed values.
+      errMsg = extracted.trim().slice(0, 200);
+    } catch {
+      /* body unreadable (already-consumed stream, streaming response) — leave "" */
+    }
+  }
+
   // P6.2 — Analytics Engine timing event (req).  No-op when binding absent.
   // 2026-05-27: extended to capture HTTP method (blob5) + truncated
   // error message (blob6). Operator can drill from "5xx spike on

@@ -25,7 +25,10 @@ freeze the main thread building DOM:
 | Opening Stock (`openstock`) | 423 | 4,552 | 21,102px | **5,795ms** (and 2,271ms on the 4th keystroke in its search box) |
 | General Ledger (`gl`) | 1,798 | 17,413 | 63,538px | **2,494ms** |
 | Opening Balance (`opening`) | 246 | 2,728 | 10,488px | **951ms** |
-| Other Creditor Bills (`ocreditorbills`) | 33 | 1,490 | 2,477px | 524ms |
+
+A fourth candidate, Other Creditor Bills, first measured at 524ms but came back at
+**57ms** on a clean re-measure — the first reading caught the app's cold start, not the
+tab. Left alone; only the screens that reproduce were touched.
 
 🔵 **Shipped in this PR (client-side windowing — no API or schema change):**
 - New primitive `useVirtualRows` (`src/components/ui/virtual-rows.tsx`) + its pure math

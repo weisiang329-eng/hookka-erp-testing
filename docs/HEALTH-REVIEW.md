@@ -87,7 +87,6 @@ screen.
 | `?tab=openstock` Opening Stock | 423 | 4,552 | 21,102px | **5,795ms** | 59ms |
 | `?tab=gl` General Ledger (grouped) | 1,798 | 17,413 | 63,538px | **2,494ms** | 301ms |
 | `?tab=opening` Opening Balance | 246 | 2,728 | 10,488px | **951ms** | 247ms |
-| `?tab=ocreditorbills` Other Creditor Bills | 33 | 1,490 | 2,477px | 524ms | 84ms |
 | `?tab=coa` Chart of Accounts | 0 (div rows) | 5,121 | 8,291px | 218ms | 76ms |
 | `?tab=plmonthly` Monthly P&L | 130 | 4,306 | 4,310px | 159ms | — |
 
@@ -97,6 +96,11 @@ character into its search box blocked the thread for **2,271ms** in one task.
 
 The General Ledger grouped view is 59 per-account `<Card>`s (one `<table>`
 each), which is why row windowing alone could not fix it.
+
+**Not a real freeze:** `?tab=ocreditorbills` first measured at 524ms, but on a
+clean re-measure it is **57ms** — the first reading picked up the app's own
+cold-start work, not the tab's. It is left alone; only screens that reproduce
+were changed.
 
 ### Everything else measured clean
 

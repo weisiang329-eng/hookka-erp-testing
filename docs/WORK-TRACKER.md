@@ -2143,3 +2143,43 @@ Houzs Century 在 catalog 里有 4 个 hub（KL/PG/SRW/SBH）。喂入你那 9 �
 修复前这三个分别是 null / 0 / null。
 顺带证实硬编码表的 `hub-h1..h4` **确实是真 id**，它失败纯粹因为比对条件错
 （要求名字完全相等，且传的是 customerState 而非文件上的 hub 名）。
+
+### 2026-08-01 (晚) — 全批次 staging 验证结果
+
+四个 PR（#173 学习循环 / #175 SO draft 删除+编号 / #176 accuracy sampleId / #179 耗时修正）
+全部合入 staging 并实测。
+
+**① 学习循环 — 通过**
+- `party_name_aliases` runtime 建表成功；`GET /api/party-aliases?type=SUPPLIER` 200。
+- 教一次 `ADD WOOD TRADING SDN BHD → sup-20d0fa1f`：`recorded:true`，key `ADDWOODTRADING`。
+- 三种写法变体（`SDN. BHD.` / `add-wood-trading-sdn-bhd` / 多空格）**全部命中同一个 key**
+  —— 印证 normalizeCompanyName 的连字号修正是必要的。
+- 重教成别家 → **覆盖**（keys 仍为 1，不累积矛盾列）；DELETE → 清空。语义符合设计。
+
+**② 扫描耗时 — 修正后数字才可信**
+初版量「入队 → 完成」，实测 Customer PO 平均 **22 分钟**、供应商 **24 小时**、p90 **3.9 天**。
+改量 `started_at → completed_at` 后：
+
+| 类型 | 平均 | p90 | 笔数 |
+|---|---|---|---|
+| Customer PO | **11.7s** | 14.9s | 144 |
+| 供应商单据 | **8.8s** | 15.4s | 53 |
+
+⇒ **单张扫描本身是健康的（~10 秒）**。owner 反映的「scan 了很久」是**排队等待**，
+不是扫描成本 —— 一次传 9 个档 + PDF 自动切分出更多子档，全部排队等 worker。
+- [ ] 待议：要不要在卡片上同时显示「实际等待（入队→完成）」当第二栏，因为那才对应
+  操作员的体感；目前只显示处理成本。
+
+**③ 两个只有实跑才会暴露的 bug（单元测试全绿）**
+- 量错区间（见上）—— 测试无法判断「哪个时间戳才有意义」。
+- **静默空**：`sample_id` 栏位挂在 scan-queue 路由的 lazy ensure 上，accuracy 端点在新
+  isolate 上 JOIN 失败 → 被 catch 吞掉 → 回传空阵列，**看起来跟「还没有资料」一模一样**。
+  直到我碰巧打了 `/api/scan-queue/pending` 才有数字。已改成端点自己 ensure。
+  ⚠️ 教训：`catch → return []` 会把「坏掉」伪装成「没资料」。
+
+**④ accuracy dashboard — 有资料，但要选 All-time**
+全期 121 笔样本、45 笔零修改 = **37.2%**（Sales Orders 120 笔 37.5%）。
+owner 看到「No scans yet」是因为卡片跟着 Command Center 的期间走，选到 2026-08 而今天才 8/1。
+- docTypes 目前只有 1 笔 `Other / unclassified` —— 因为历史样本几乎都来自
+  po_scan_samples（客户 PO），供应商样本的 correctedJson 直到本次修好才会开始累积。
+  PI / GR 的分项要等新的扫描进来才有意义。

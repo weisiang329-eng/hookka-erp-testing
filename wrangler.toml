@@ -225,6 +225,27 @@ dataset = "hookka_erp_metrics"
 [vars]
 ENVIRONMENT = "production"
 
+# CF_ACCOUNT_ID — REQUIRED for /admin/health live data, and it must live HERE.
+#
+# History (2026-08-01, in order, all in one afternoon):
+#   1. This value originally lived as a Pages dashboard var, and prod health
+#      was LIVE (kpis-diag: set:true, prefix 27cd35, AE probes 200).
+#   2. PR #161 tried to add a WRONG account id here (816e… — the dev
+#      machine's wrangler login, a different Cloudflare account). That
+#      deploy FAILED with "Binding name 'CF_ACCOUNT_ID' already in use"
+#      because the dashboard var existed.
+#   3. PR #162 reverted the toml entry. That deploy SUCCEEDED — and because
+#      this project's bindings are managed through wrangler.toml, the sync
+#      DELETED the dashboard var. Prod health silently fell back to mock.
+#      (kpis-diag after: set:false.)
+# So: dashboard vars for this project do not survive deploys once [vars]
+# exists here. The id must be in this file, and it must be THIS id —
+# the production account (weisiang329@gmail.com), recorded in
+# docs/CLOUDFLARE_MIGRATION.md, matching the 27cd35 prefix diag showed
+# while prod was still live. An account id is not a credential; the real
+# secret (AE_QUERY_TOKEN) stays in Pages secrets.
+CF_ACCOUNT_ID = "27cd35c9d93a9f81daa809d0b800b059"
+
 # 2026-05-27 — Custom-domain cutover to erp.hookka.com. Multi-origin
 # allowlist so BOTH the new prod domain AND the legacy pages.dev URL
 # work in parallel. Once everyone (employees, integrations, bookmarks)

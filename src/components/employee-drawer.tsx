@@ -41,15 +41,24 @@ export type EmployeeDraft = {
   pcbEnabled: boolean;
   joinDate: string;
   nationality: string;
+  /** Every department the person works in; the FIRST is their primary/home. */
+  departmentCodes: string[];
+  /** Production lines they cover. Empty = all. */
+  categories: string[];
+  resignedAt: string;
   paymentMethod: string;
   bankName: string;
   bankAccount: string;
 };
 
+export type DepartmentOption = { code: string; name: string };
+
 type Props = {
   employee: EmployeeDraft | null;
-  /** Department label for the header — the grid owns the department editor. */
-  departmentLabel?: string;
+  /** Departments to choose from — the SAME list the grid uses. */
+  departments: DepartmentOption[];
+  /** Production lines to choose from. */
+  categories: readonly string[];
   saving?: boolean;
   onClose: () => void;
   onSave: (draft: EmployeeDraft) => void;
@@ -90,7 +99,8 @@ function Field({
 
 export function EmployeeDrawer({
   employee,
-  departmentLabel,
+  departments,
+  categories,
   saving,
   onClose,
   onSave,
@@ -117,7 +127,7 @@ export function EmployeeDrawer({
             </div>
             <div className="mt-0.5 text-[11px] text-[#6B7280]">
               {draft.empNo}
-              {departmentLabel ? ` · ${departmentLabel}` : ""}
+              {draft.departmentCodes[0] ? ` · ${draft.departmentCodes[0].replace(/_/g, " ")}` : ""}
               {draft.position ? ` · ${draft.position}` : ""}
             </div>
           </div>
@@ -162,6 +172,78 @@ export function EmployeeDrawer({
                 className="mt-0.5 h-8 text-xs"
               />
             </Field>
+            <Field label="Departments" hint="First one ticked is their primary department." full>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                {departments.map((d) => {
+                  const on = draft.departmentCodes.includes(d.code);
+                  return (
+                    <label key={d.code} className="flex items-center gap-1 text-[11px] text-[#374151]">
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        onChange={() =>
+                          set(
+                            "departmentCodes",
+                            on
+                              ? draft.departmentCodes.filter((c) => c !== d.code)
+                              : [...draft.departmentCodes, d.code],
+                          )
+                        }
+                      />
+                      {d.name}
+                    </label>
+                  );
+                })}
+              </div>
+            </Field>
+            <Field label="Category" hint="Leave all unticked to cover every line." full>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                {categories.map((cat) => {
+                  const on = draft.categories.includes(cat);
+                  return (
+                    <label key={cat} className="flex items-center gap-1 text-[11px] text-[#374151]">
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        onChange={() =>
+                          set(
+                            "categories",
+                            on
+                              ? draft.categories.filter((c) => c !== cat)
+                              : [...draft.categories, cat],
+                          )
+                        }
+                      />
+                      {cat}
+                    </label>
+                  );
+                })}
+              </div>
+            </Field>
+            <Field label="Status">
+              <select
+                value={draft.status}
+                onChange={(e) => set("status", e.target.value)}
+                className="mt-0.5 h-8 w-full rounded-md border border-[#D8D2CC] bg-white px-2 text-xs"
+              >
+                <option value="ACTIVE">ACTIVE</option>
+                <option value="INACTIVE">INACTIVE</option>
+                <option value="RESIGNED">RESIGNED</option>
+              </select>
+            </Field>
+            {/* Required when resigned — the payroll engine scopes a resigned
+                worker's final month by this date, so saving without it would
+                pay them for months they were gone. */}
+            {draft.status === "RESIGNED" && (
+              <Field label="Resigned on">
+                <Input
+                  type="date"
+                  value={draft.resignedAt || ""}
+                  onChange={(e) => set("resignedAt", e.target.value)}
+                  className="mt-0.5 h-8 text-xs"
+                />
+              </Field>
+            )}
             <Field label="Join date">
               <Input
                 type="date"

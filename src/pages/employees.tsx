@@ -2631,6 +2631,14 @@ function EmployeeMasterTab({
       pcbEnabled: w.pcbEnabled !== false,
       joinDate: w.joinDate ?? "",
       nationality: w.nationality ?? "",
+      departmentCodes:
+        Array.isArray(w.departmentCodes) && w.departmentCodes.length > 0
+          ? w.departmentCodes
+          : w.departmentCode
+            ? [w.departmentCode]
+            : [],
+      categories: Array.isArray(w.categories) ? w.categories : [],
+      resignedAt: w.resignedAt ?? "",
       paymentMethod: normalizePaymentMethod(w.paymentMethod),
       bankName: w.bankName ?? "",
       bankAccount: w.bankAccount ?? "",
@@ -2638,12 +2646,36 @@ function EmployeeMasterTab({
   }, [workers, drawerId]);
 
   const saveDrawer = async (draft: EmployeeDraft) => {
+    // Same guards the inline editor enforces — the drawer is a second door to
+    // the same record, and a rule that only one door checks is not a rule.
+    if (!draft.name.trim() || !draft.empNo.trim()) {
+      toast.error("Employee number and name are required.");
+      return;
+    }
+    if (draft.status === "RESIGNED" && !/^\d{4}-\d{2}-\d{2}$/.test(draft.resignedAt || "")) {
+      toast.error("A resignation date is required when status is Resigned.");
+      return;
+    }
+    if (draft.efficiencyThresholdPct < 0 || draft.efficiencyThresholdPct > 100) {
+      toast.error("Efficiency threshold must be between 0 and 100.");
+      return;
+    }
+    if (draft.efficiencyAllowanceSen < 0) {
+      toast.error("Efficiency allowance cannot be negative.");
+      return;
+    }
     setDrawerSaving(true);
     try {
       const res = await fetch(`/api/workers/${draft.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(draft),
+        // departmentCode is the PRIMARY; the backend derives the rest from
+        // departmentCodes. Sending only the array would leave the primary stale.
+        body: JSON.stringify({
+          ...draft,
+          departmentCode: draft.departmentCodes[0] ?? "",
+          resignedAt: draft.status === "RESIGNED" ? draft.resignedAt : "",
+        }),
       });
       const body = (await res.json().catch(() => ({}))) as { error?: string };
       if (!res.ok) {
@@ -3729,9 +3761,8 @@ function EmployeeMasterTab({
       <EmployeeDrawer
         key={drawerId ?? "none"}
         employee={drawerEmployee}
-        departmentLabel={
-          workers.find((w) => w.id === drawerId)?.departmentCode?.replace(/_/g, " ") ?? ""
-        }
+        departments={allDepts.map((d) => ({ code: d.code, name: d.name }))}
+        categories={CATEGORIES}
         saving={drawerSaving}
         onClose={() => setDrawerId(null)}
         onSave={saveDrawer}

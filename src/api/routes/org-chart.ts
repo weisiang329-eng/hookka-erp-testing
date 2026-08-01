@@ -121,14 +121,26 @@ async function loadPeople(db: D1Database): Promise<OrgPerson[]> {
   }
 
   // Explicit edges win over the legacy users.reportsTo fallback.
-  const eRes = await db
-    .prepare("SELECT person_key, manager_key FROM org_reporting")
-    .all<{
-      personKey?: string;
-      person_key?: string;
-      managerKey?: string | null;
-      manager_key?: string | null;
-    }>();
+  //
+  // Read through batch() — i.e. inside `sql.begin` — ON PURPOSE. Hyperdrive
+  // caches plain read queries, and `SELECT person_key, manager_key FROM
+  // org_reporting` is about as cacheable as a query gets: same text every
+  // time, tiny result. Measured on staging 2026-08-02: after a PUT that
+  // returned 200, GET flapped between the new value and the old one for tens
+  // of seconds across otherwise identical requests. To an operator that is
+  // 「完全没有反应」— they set a manager, the chart does not move, they set it
+  // again. Hyperdrive does not cache inside an explicit transaction, so the
+  // one read that MUST be read-your-writes goes through one.
+  type EdgeRow = {
+    personKey?: string;
+    person_key?: string;
+    managerKey?: string | null;
+    manager_key?: string | null;
+  };
+  const eBatch = await db.batch<EdgeRow>([
+    db.prepare("SELECT person_key, manager_key FROM org_reporting"),
+  ]);
+  const eRes = { results: eBatch[0]?.results ?? [] };
   const edges = new Map<string, string | null>();
   // DUAL-KEY. db-pg's columnFrom camelCases every column it returns, so these
   // rows arrive as personKey / managerKey — reading `e.person_key` gave

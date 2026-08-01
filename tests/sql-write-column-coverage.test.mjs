@@ -144,3 +144,27 @@ test("org-chart reads its edge rows DUAL-KEYED", () => {
     "the snake_case-only read must not return",
   );
 });
+
+// ---------------------------------------------------------------------------
+// …and the THIRD thing wrong with the same endpoint: the read was stale.
+//
+// After the dual-key fix, staging still flapped — a PUT returned 200 and the
+// following GET returned the OLD managerKey for tens of seconds, across
+// otherwise identical requests. Hyperdrive caches plain read queries, and
+// `SELECT person_key, manager_key FROM org_reporting` is maximally cacheable:
+// identical text every time, tiny result. It does NOT cache inside an explicit
+// transaction, which is what batch() (sql.begin) gives us.
+// ---------------------------------------------------------------------------
+test("org-chart reads its edges inside a transaction, so a write is visible", () => {
+  const route = readFileSync("src/api/routes/org-chart.ts", "utf8");
+  assert.match(
+    route,
+    /db\.batch<EdgeRow>\(\[\s*db\.prepare\("SELECT person_key, manager_key FROM org_reporting"\),\s*\]\)/,
+    "the edge read must go through batch() — a plain .all() is Hyperdrive-cacheable",
+  );
+  assert.doesNotMatch(
+    route,
+    /\.prepare\("SELECT person_key, manager_key FROM org_reporting"\)\s*\n\s*\.all</,
+    "the cacheable plain read must not return",
+  );
+});

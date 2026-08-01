@@ -464,7 +464,7 @@ export async function computeFabricMetrics(
   const baseModelByProductCode = siblingsIdx.baseModelByProductCode;
   const jcsRes = await db
     .prepare(
-      `SELECT jc.id AS jcId, jc.dueDate, jc.wipType, jc.departmentCode,
+      `SELECT jc.id AS jc_id, jc.dueDate, jc.wipType, jc.departmentCode,
               po.id AS poId, po.fabricCode, po.quantity, po.productCode,
               po.itemCategory, po.gapInches, po.divanHeightInches,
               po.legHeightInches, po.sizeCode, po.sizeLabel,
@@ -643,7 +643,7 @@ export async function computeFabricNext30ByCategory(
 
   const jcsRes = await db
     .prepare(
-      `SELECT jc.id AS jcId, jc.dueDate, jc.wipType, jc.departmentCode,
+      `SELECT jc.id AS jc_id, jc.dueDate, jc.wipType, jc.departmentCode,
               po.id AS poId, po.fabricCode, po.quantity, po.productCode,
               po.itemCategory, po.gapInches, po.divanHeightInches,
               po.legHeightInches, po.sizeCode, po.sizeLabel,

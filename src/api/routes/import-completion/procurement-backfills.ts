@@ -2,7 +2,6 @@ import { Hono } from "hono";
 import type { Env } from "../../worker";
 import { requirePermission } from "../../lib/rbac";
 import { recomputePoStatusAndProgress } from "../production-orders";
-import { createProductionOrdersForOrder } from "../_shared/production-builder";
 import { createProductionOrdersForSO, type SalesOrderRow, type SalesOrderItemRow } from "../sales-orders";
 import { getOrgId } from "../../lib/tenant";
 import { type SuppliersFromHistoryBody, type BindingsFromHistoryBody, type BackfillBody, type BackfillBindingsBody, type BackfillBindingsMultiBody, type BackfillPhantomGrnsBody, type BackfillExpectedUnit, type LinenoFixRow } from "./_shared";
@@ -1738,7 +1737,6 @@ app.post("/backfill-po-from-so-lines", async (c) => {
       >;
     }>;
     error?: string;
-    isProjectOrder?: boolean;
   };
   const processed: ProcessResult[] = [];
   const allUpdateStatements: D1PreparedStatement[] = [];
@@ -1747,17 +1745,17 @@ app.post("/backfill-po-from-so-lines", async (c) => {
     // Resolve to internal id
     let soRow = await db
       .prepare(
-        "SELECT id, companySOId, isProjectOrder FROM sales_orders WHERE id = ? LIMIT 1",
+        "SELECT id, companySOId FROM sales_orders WHERE id = ? LIMIT 1",
       )
       .bind(soIdRaw)
-      .first<{ id: string; companySOId: string | null; isProjectOrder: number | null }>();
+      .first<{ id: string; companySOId: string | null }>();
     if (!soRow) {
       soRow = await db
         .prepare(
-          "SELECT id, companySOId, isProjectOrder FROM sales_orders WHERE companySOId = ? LIMIT 1",
+          "SELECT id, companySOId FROM sales_orders WHERE companySOId = ? LIMIT 1",
         )
         .bind(soIdRaw)
-        .first<{ id: string; companySOId: string | null; isProjectOrder: number | null }>();
+        .first<{ id: string; companySOId: string | null }>();
     }
     if (!soRow) {
       processed.push({
@@ -1768,7 +1766,6 @@ app.post("/backfill-po-from-so-lines", async (c) => {
       continue;
     }
     const soId = soRow.id;
-    const isProject = !!soRow.isProjectOrder;
 
     // Load SO line items
     const linesRes = await db
@@ -1800,13 +1797,20 @@ app.post("/backfill-po-from-so-lines", async (c) => {
       }>();
     const lines = linesRes.results ?? [];
 
-    // Expand into per-PO unit list — mirrors createProductionOrdersForOrder:
-    //   SOFA non-project: 1 entry per line (line.quantity carried on the PO)
-    //   BEDFRAME/ACC + project SOFA: line.quantity entries per line
+    // Expand into per-PO unit list — mirrors createProductionOrdersForOrder
+    // (production-builder.ts:519), which this route exists to detect drift
+    // against, so the two conditions MUST stay identical:
+    //   SOFA:          1 entry per line (line.quantity carried on the PO)
+    //   BEDFRAME/ACC:  line.quantity entries per line
     const expected: BackfillExpectedUnit[] = [];
     for (const line of lines) {
       const isSofa = (line.itemCategory ?? "BEDFRAME") === "SOFA";
-      const isSetItem = isSofa && !isProject;
+      // Was `isSofa && !isProject`. `sales_orders.is_project_order` was DROPPED
+      // by migration 0114 (0 of 444 SOs ever had it; SOFA qty is forced to 1, so
+      // the per-piece/merged distinction collapsed). The column is gone from the
+      // rename map on purpose, so selecting `isProjectOrder` folded to
+      // `isprojectorder` and this whole route died on `column does not exist`.
+      const isSetItem = isSofa;
       const pieceCount = isSetItem ? 1 : Math.max(1, line.quantity || 1);
       const perPoQty = isSetItem ? line.quantity || 1 : 1;
       for (let p = 0; p < pieceCount; p++) {
@@ -1868,7 +1872,6 @@ app.post("/backfill-po-from-so-lines", async (c) => {
         status: "skipped",
         expectedPoCount: expected.length,
         actualPoCount: pos.length,
-        isProjectOrder: isProject,
         error: `PO count mismatch (expected ${expected.length}, got ${pos.length}) — needs CREATE/DELETE which is out of scope for this backfill. Operator must investigate manually.`,
       });
       continue;
@@ -1936,7 +1939,6 @@ app.post("/backfill-po-from-so-lines", async (c) => {
       status: "ok",
       expectedPoCount: expected.length,
       actualPoCount: pos.length,
-      isProjectOrder: isProject,
       changes,
     });
   }

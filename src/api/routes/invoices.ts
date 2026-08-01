@@ -996,8 +996,8 @@ app.post("/backfill-date-from-delivery", async (c) => {
   const dry = c.req.query("dry") === "1" || c.req.query("dry") === "true";
 
   const invRes = await c.var.DB.prepare(
-    `SELECT i.id, i.invoiceNo, i.invoiceDate AS oldDate,
-            d.deliveredAt, d.deliveryDate, d.status AS doStatus
+    `SELECT i.id, i.invoiceNo, i.invoiceDate AS old_date,
+            d.deliveredAt, d.deliveryDate, d.status AS do_status
        FROM invoices i
        JOIN delivery_orders d ON d.id = i.deliveryOrderId
       WHERE i.orgId = ?

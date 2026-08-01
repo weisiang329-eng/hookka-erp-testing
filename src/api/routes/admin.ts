@@ -1338,7 +1338,7 @@ app.get("/backfill-special-order-surcharge", async (c) => {
               i.basePriceSen AS basePriceSen, i.unitPriceSen AS unitPriceSen,
               i.discountSen AS discountSen, i.lineTotalSen AS lineTotalSen,
               i.quantity AS quantity,
-              s.companySOId AS companySOId, s.status AS soStatus,
+              s.companySOId AS companySOId, s.status AS so_status,
               s.customerName AS customerName, s.createdAt AS createdAt,
               s.isServiceOrder AS isServiceOrder
          FROM sales_order_items i

@@ -456,13 +456,13 @@ async function collectAdherence(
       `SELECT jc.departmentCode AS dept,
               COUNT(*) AS due,
               SUM(CASE WHEN jc.status IN ('COMPLETED','TRANSFERRED')
-                        AND substr(jc.completedDate::text,1,10) <= ? THEN 1 ELSE 0 END) AS onTime,
+                        AND substr(jc.completedDate::text,1,10) <= ? THEN 1 ELSE 0 END) AS on_time,
               SUM(CASE WHEN jc.status IN ('COMPLETED','TRANSFERRED')
                         AND substr(jc.completedDate::text,1,10) > ? THEN 1 ELSE 0 END) AS late,
-              SUM(CASE WHEN jc.status NOT IN ('COMPLETED','TRANSFERRED','CANCELLED') THEN 1 ELSE 0 END) AS stillOpen,
+              SUM(CASE WHEN jc.status NOT IN ('COMPLETED','TRANSFERRED','CANCELLED') THEN 1 ELSE 0 END) AS still_open,
               SUM(CASE WHEN jc.departmentCode = 'FAB_CUT'
                        THEN COALESCE(jc.estMinutes, 0)
-                       ELSE COALESCE(jc.productionTimeMinutes, 0) * COALESCE(jc.wipQty, 1) END) AS dueMinutes
+                       ELSE COALESCE(jc.productionTimeMinutes, 0) * COALESCE(jc.wipQty, 1) END) AS due_minutes
          FROM job_cards jc
         WHERE substr(jc.dueDate::text,1,10) = ?
           AND jc.status <> 'CANCELLED'
@@ -594,7 +594,7 @@ async function collectHandoffFindings(
     .prepare(
       `SELECT jc.productionOrderId AS poId,
               jc.departmentCode AS dept,
-              MAX(substr(jc.completedDate::text,1,10)) AS doneDate
+              MAX(substr(jc.completedDate::text,1,10)) AS done_date
          FROM job_cards jc
         WHERE jc.status IN ('COMPLETED','TRANSFERRED')
           AND substr(jc.completedDate::text,1,10) >= ?
@@ -751,8 +751,8 @@ async function collectOtSignals(
     .prepare(
       `SELECT jc.departmentCode AS dept,
               substr(jc.dueDate::text,1,10) AS day,
-              po.companySOId AS soRef,
-              so.customerDeliveryDate AS customerDd,
+              po.companySOId AS so_ref,
+              so.customerDeliveryDate AS customer_dd,
               CASE WHEN COALESCE(jc.productionTimeMinutes, 0) > 0
                    THEN jc.productionTimeMinutes * COALESCE(jc.wipQty, 1)
                    ELSE COALESCE(jc.estMinutes, 0) END AS minutes

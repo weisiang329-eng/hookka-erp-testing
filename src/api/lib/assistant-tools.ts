@@ -1337,7 +1337,7 @@ const getDashboardStats: ToolDefinition = {
       c.var.DB
         .prepare(
           `SELECT COALESCE(SUM(totalSen), 0) AS totalSen,
-                  COALESCE(SUM(COALESCE(paidAmount,0)), 0) AS paidSen
+                  COALESCE(SUM(COALESCE(paidAmount,0)), 0) AS paid_sen
            FROM invoices
            WHERE orgId = ? AND UPPER(status) <> 'VOID'${invDate.clause}`,
         )
@@ -2012,8 +2012,8 @@ const getProduct360: ToolDefinition = {
         .first<{ n: number }>(),
       c.var.DB
         .prepare(
-          `SELECT COUNT(DISTINCT soi.salesOrderId) AS orderCount,
-                  COALESCE(SUM(soi.quantity), 0) AS unitCount
+          `SELECT COUNT(DISTINCT soi.salesOrderId) AS order_count,
+                  COALESCE(SUM(soi.quantity), 0) AS unit_count
            FROM sales_order_items soi
            JOIN sales_orders so ON so.id = soi.salesOrderId
            WHERE so.orgId = ? AND soi.productCode = ?
@@ -3939,7 +3939,7 @@ const predictReorderNeeds: ToolDefinition = {
     // Per-fabric required meters from active SOs.
     const demand = await c.var.DB.prepare(
       `SELECT soi.fabricCode AS fabricCode,
-              COALESCE(SUM(soi.quantity * COALESCE(p.fabricUsage, 0)), 0) AS metersRequired
+              COALESCE(SUM(soi.quantity * COALESCE(p.fabricUsage, 0)), 0) AS meters_required
        FROM sales_order_items soi
        JOIN sales_orders so ON so.id = soi.salesOrderId
        LEFT JOIN products p ON p.code = soi.productCode AND p.orgId = so.orgId
@@ -4120,8 +4120,8 @@ const getDepartmentEfficiency: ToolDefinition = {
     const to = ymdOrNull(args.periodTo);
     if (!dept || !from || !to) return { error: "department, periodFrom, periodTo are required" };
     const agg = await c.var.DB.prepare(
-      `SELECT COUNT(*) AS jobs, COALESCE(SUM(estMinutes),0) AS plannedMin,
-              COALESCE(SUM(actualMinutes),0) AS actualMin
+      `SELECT COUNT(*) AS jobs, COALESCE(SUM(estMinutes),0) AS planned_min,
+              COALESCE(SUM(actualMinutes),0) AS actual_min
        FROM job_cards WHERE orgId = ? AND UPPER(departmentCode) = ? AND UPPER(status) = 'COMPLETED'
          AND completedDate >= ? AND completedDate <= ?`,
     ).bind(orgId, dept.toUpperCase(), from, to).first<{ jobs: number; plannedMin: number; actualMin: number }>();
@@ -4326,27 +4326,27 @@ const getDashboardKpis: ToolDefinition = {
     const dateTo = ymdOrNull(args.dateTo) ?? todayStr;
 
     const [soAgg, coAgg, invAgg, doStats, overdueSO, overduePO, overdueDO, overdueInv, wipAgg, ar, topCust, topProd] = await Promise.all([
-      c.var.DB.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(totalSen), 0) AS sumSen FROM sales_orders WHERE orgId = ? AND created_at >= ? AND created_at <= ?`).bind(orgId, dateFrom, `${dateTo} 23:59:59`).first<{ n: number; sumSen: number }>(),
+      c.var.DB.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(totalSen), 0) AS sum_sen FROM sales_orders WHERE orgId = ? AND created_at >= ? AND created_at <= ?`).bind(orgId, dateFrom, `${dateTo} 23:59:59`).first<{ n: number; sumSen: number }>(),
       c.var.DB.prepare(`SELECT COUNT(*) AS n FROM consignment_orders WHERE orgId = ? AND created_at >= ? AND created_at <= ?`).bind(orgId, dateFrom, `${dateTo} 23:59:59`).first<{ n: number }>(),
-      c.var.DB.prepare(`SELECT COALESCE(SUM(totalSen), 0) AS totalSen, COALESCE(SUM(COALESCE(paidAmount,0)),0) AS paidSen FROM invoices WHERE orgId = ? AND UPPER(status) <> 'VOID' AND invoiceDate >= ? AND invoiceDate <= ?`).bind(orgId, dateFrom, dateTo).first<{ totalSen: number; paidSen: number }>(),
+      c.var.DB.prepare(`SELECT COALESCE(SUM(totalSen), 0) AS totalSen, COALESCE(SUM(COALESCE(paidAmount,0)),0) AS paid_sen FROM invoices WHERE orgId = ? AND UPPER(status) <> 'VOID' AND invoiceDate >= ? AND invoiceDate <= ?`).bind(orgId, dateFrom, dateTo).first<{ totalSen: number; paidSen: number }>(),
       // on-time = delivered (have a deliveredAt timestamp) AND deliveredAt
       // is on/before scheduled deliveryDate. Earlier version compared
       // deliveryDate to itself (snake/camel rewrite collision) which made
       // every delivered row count as on-time.
-      c.var.DB.prepare(`SELECT COUNT(*) AS total, SUM(CASE WHEN UPPER(status) IN ('DELIVERED','SIGNED','INVOICED') AND deliveredAt IS NOT NULL AND SUBSTR(deliveredAt, 1, 10) <= deliveryDate THEN 1 ELSE 0 END) AS onTime FROM delivery_orders WHERE orgId = ? AND deliveryDate >= ? AND deliveryDate <= ?`).bind(orgId, dateFrom, dateTo).first<{ total: number; onTime: number }>().catch(() => null),
+      c.var.DB.prepare(`SELECT COUNT(*) AS total, SUM(CASE WHEN UPPER(status) IN ('DELIVERED','SIGNED','INVOICED') AND deliveredAt IS NOT NULL AND SUBSTR(deliveredAt, 1, 10) <= deliveryDate THEN 1 ELSE 0 END) AS on_time FROM delivery_orders WHERE orgId = ? AND deliveryDate >= ? AND deliveryDate <= ?`).bind(orgId, dateFrom, dateTo).first<{ total: number; onTime: number }>().catch(() => null),
       c.var.DB.prepare(`SELECT COUNT(*) AS n FROM sales_orders WHERE orgId = ? AND customerDeliveryDate IS NOT NULL AND customerDeliveryDate < ? AND UPPER(status) NOT IN ('DELIVERED','INVOICED','CANCELLED','CLOSED')`).bind(orgId, todayStr).first<{ n: number }>(),
       c.var.DB.prepare(`SELECT COUNT(*) AS n FROM production_orders WHERE orgId = ? AND targetEndDate IS NOT NULL AND targetEndDate < ? AND UPPER(status) NOT IN ('COMPLETED','CANCELLED')`).bind(orgId, todayStr).first<{ n: number }>(),
       c.var.DB.prepare(`SELECT COUNT(*) AS n FROM delivery_orders WHERE orgId = ? AND deliveryDate IS NOT NULL AND deliveryDate < ? AND UPPER(status) NOT IN ('DELIVERED','SIGNED','INVOICED','CANCELLED')`).bind(orgId, todayStr).first<{ n: number }>(),
-      c.var.DB.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(totalSen - COALESCE(paidAmount,0)),0) AS outSen FROM invoices WHERE orgId = ? AND UPPER(status) IN ('ISSUED','OVERDUE','PARTIAL') AND dueDate IS NOT NULL AND dueDate < ?`).bind(orgId, todayStr).first<{ n: number; outSen: number }>(),
+      c.var.DB.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(totalSen - COALESCE(paidAmount,0)),0) AS out_sen FROM invoices WHERE orgId = ? AND UPPER(status) IN ('ISSUED','OVERDUE','PARTIAL') AND dueDate IS NOT NULL AND dueDate < ?`).bind(orgId, todayStr).first<{ n: number; outSen: number }>(),
       c.var.DB.prepare(`SELECT COALESCE(SUM(stockQty), 0) AS units FROM wip_items WHERE orgId = ?`).bind(orgId).first<{ units: number }>(),
-      c.var.DB.prepare(`SELECT COALESCE(SUM(totalSen - COALESCE(paidAmount,0)), 0) AS outSen FROM invoices WHERE orgId = ? AND UPPER(status) IN ('ISSUED','OVERDUE','PARTIAL') AND totalSen > COALESCE(paidAmount,0)`).bind(orgId).first<{ outSen: number }>(),
-      c.var.DB.prepare(`SELECT customerName, COALESCE(SUM(totalSen),0) AS revSen FROM invoices WHERE orgId = ? AND UPPER(status) <> 'VOID' AND invoiceDate >= ? AND invoiceDate <= ? GROUP BY customerName ORDER BY revSen DESC LIMIT 5`).bind(orgId, dateFrom, dateTo).all<{ customerName: string | null; revSen: number }>(),
+      c.var.DB.prepare(`SELECT COALESCE(SUM(totalSen - COALESCE(paidAmount,0)), 0) AS out_sen FROM invoices WHERE orgId = ? AND UPPER(status) IN ('ISSUED','OVERDUE','PARTIAL') AND totalSen > COALESCE(paidAmount,0)`).bind(orgId).first<{ outSen: number }>(),
+      c.var.DB.prepare(`SELECT customerName, COALESCE(SUM(totalSen),0) AS rev_sen FROM invoices WHERE orgId = ? AND UPPER(status) <> 'VOID' AND invoiceDate >= ? AND invoiceDate <= ? GROUP BY customerName ORDER BY revSen DESC LIMIT 5`).bind(orgId, dateFrom, dateTo).all<{ customerName: string | null; revSen: number }>(),
       c.var.DB.prepare(`SELECT ii.productCode AS productCode, COALESCE(SUM(ii.quantity), 0) AS units FROM invoice_items ii JOIN invoices i ON i.id = ii.invoiceId WHERE i.orgId = ? AND UPPER(i.status) <> 'VOID' AND i.invoiceDate >= ? AND i.invoiceDate <= ? GROUP BY ii.productCode ORDER BY units DESC LIMIT 5`).bind(orgId, dateFrom, dateTo).all<{ productCode: string | null; units: number }>(),
     ]);
 
     // Blended GP% — same shape as get_gp_analysis but a single number.
     const gpRows = await c.var.DB.prepare(
-      `SELECT COALESCE(SUM(ii.totalSen), 0) AS revSen,
+      `SELECT COALESCE(SUM(ii.totalSen), 0) AS rev_sen,
               COALESCE(SUM(ii.quantity * COALESCE(p.costPriceSen,0)), 0) AS costSen
        FROM invoice_items ii
        JOIN invoices i ON i.id = ii.invoiceId
@@ -4356,7 +4356,7 @@ const getDashboardKpis: ToolDefinition = {
     ).bind(orgId, dateFrom, dateTo).first<{ revSen: number; costSen: number }>();
 
     const ar90 = await c.var.DB.prepare(
-      `SELECT COALESCE(SUM(totalSen - COALESCE(paidAmount,0)), 0) AS outSen
+      `SELECT COALESCE(SUM(totalSen - COALESCE(paidAmount,0)), 0) AS out_sen
        FROM invoices WHERE orgId = ? AND UPPER(status) IN ('ISSUED','OVERDUE','PARTIAL')
          AND totalSen > COALESCE(paidAmount,0)
          AND dueDate IS NOT NULL AND dueDate < ?`,
@@ -4437,7 +4437,7 @@ const listOverdueOrders: ToolDefinition = {
              ORDER BY deliveryDate ASC LIMIT ${limit}`;
     } else if (type === "INVOICE") {
       sql = `SELECT id, invoiceNo AS code, customerName, status, dueDate AS date,
-                    totalSen - COALESCE(paidAmount,0) AS outSen
+                    totalSen - COALESCE(paidAmount,0) AS out_sen
              FROM invoices WHERE orgId = ? AND dueDate IS NOT NULL
                AND dueDate < ?
                AND UPPER(status) IN ('ISSUED','OVERDUE','PARTIAL')
@@ -5851,7 +5851,7 @@ async function runEntityExportQuery(
              ORDER BY created_at DESC LIMIT ${MAX_EXPORT_ROWS}`;
       break;
     case "consignment_orders":
-      sql = `SELECT companyCOId AS coId, customerName, customerCOId AS customerPO,
+      sql = `SELECT companyCOId AS co_id, customerName, customerCOId AS customerPO,
                     status, hub, totalSen, created_at AS createdAt
              FROM consignment_orders WHERE ${whereSql}
              ORDER BY created_at DESC LIMIT ${MAX_EXPORT_ROWS}`;
@@ -5870,7 +5870,7 @@ async function runEntityExportQuery(
       break;
     case "invoices":
       sql = `SELECT invoiceNo, customerName, status, totalSen, paidAmount,
-                    dueDate, issueDate, created_at AS createdAt
+                    dueDate, invoiceDate, created_at AS createdAt
              FROM invoices WHERE ${whereSql}
              ORDER BY created_at DESC LIMIT ${MAX_EXPORT_ROWS}`;
       break;

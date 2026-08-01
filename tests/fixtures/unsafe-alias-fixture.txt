@@ -1,0 +1,11 @@
+// Fixture for tests/sql-identifier-safety.test.mjs — proves the alias auditor
+// fires. Deliberately contains ONE unsafe alias plus the shapes it must NOT
+// flag, so a regression in the filters shows up as a count mismatch.
+const q = `SELECT so2.id AS soId2,
+                  di.qty AS qty,
+                  x.created_at AS createdAt,
+                  CAST(v AS INTEGER) AS n
+             FROM t`;
+// AS soIgnored -- a comment, must not count
+const ae = `SELECT blob2 AS routeName FROM hookka_erp_metrics`;
+const cte = `WITH recent AS (SELECT 1)`;

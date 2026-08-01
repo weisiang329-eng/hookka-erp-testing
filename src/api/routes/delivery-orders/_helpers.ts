@@ -42,7 +42,6 @@ import {
 } from "../../../lib/build-unified-doc-data";
 import { HOOKKA_LOGO_PNG_BASE64 } from "../../lib/hookka-logo-base64";
 import { computeInvoicePrintExtras } from "../../lib/invoice-print-extras";
-import { compareDoLinesByCustomerPO } from "../../../lib/do-item-order";
 import { ensureInvoicePoLinkColumn } from "../../lib/invoice-po-link";
 
 // Status transitions allowed by the mock-data impl. Preserved here so the
@@ -2326,9 +2325,17 @@ export async function computeDoPrintExtras(
   //       query printed everything blank).
   //   (b) sales order       — via di.salesOrderNo = sales_orders.companySOId
   //       (the same path the on-screen items table uses, always present).
+  //
+  // Every alias here is snake_case ON PURPOSE. Postgres folds an UNQUOTED
+  // identifier to lower case, and db-pg.ts's `columnFrom` only re-camelCases
+  // names it can find in the inverse rename map or that contain an underscore.
+  // `AS soId2` therefore came back as `soid2`, so `r.soId2` at :2403/:2703 was
+  // ALWAYS undefined — path (b), the entire reason this query was widened, never
+  // resolved a single row. Same trap already documented in pricing-integrity.ts.
+  // `scripts/audit-sql-aliases.mjs` now fails the build on a new one.
   const itRes = await db.prepare(
     `SELECT di.id,
-            di.salesOrderNo AS diSalesOrderNo,
+            di.salesOrderNo AS di_sales_order_no,
             di.productCode,
             di.fabricCode,
             di.sizeLabel,
@@ -2343,15 +2350,15 @@ export async function computeDoPrintExtras(
             po.gapInches AS gapInches,
             po.divanHeightInches AS divanHeightInches,
             po.legHeightInches AS legHeightInches,
-            poso.customerSOId AS lineCustomerSO,
-            poso.customerPO AS posoCustomerPO,
-            poso.customerPOId AS posoCustomerPOId,
-            poso.reference AS posoReference,
-            so2.id AS soId2,
-            so2.customerPO AS soCustomerPO,
-            so2.customerPOId AS soCustomerPOId,
-            so2.customerSOId AS soCustomerSO,
-            so2.reference AS soReference
+            poso.customerSOId AS line_customer_so,
+            poso.customerPO AS poso_customer_po,
+            poso.customerPOId AS poso_customer_po_id,
+            poso.reference AS poso_reference,
+            so2.id AS so_id2,
+            so2.customerPO AS so_customer_po,
+            so2.customerPOId AS so_customer_po_id,
+            so2.customerSOId AS so_customer_so,
+            so2.reference AS so_reference
        FROM delivery_order_items di
        LEFT JOIN production_orders po ON po.id = di.productionOrderId
        LEFT JOIN sales_orders poso ON poso.id = po.salesOrderId
@@ -2378,14 +2385,14 @@ export async function computeDoPrintExtras(
       gapInches: number | null;
       divanHeightInches: number | null;
       legHeightInches: number | null;
-      lineCustomerSO: string | null;
-      posoCustomerPO: string | null;
-      posoCustomerPOId: string | null;
+      lineCustomerSo: string | null;
+      posoCustomerPo: string | null;
+      posoCustomerPoId: string | null;
       posoReference: string | null;
       soId2: string | null;
-      soCustomerPO: string | null;
-      soCustomerPOId: string | null;
-      soCustomerSO: string | null;
+      soCustomerPo: string | null;
+      soCustomerPoId: string | null;
+      soCustomerSo: string | null;
       soReference: string | null;
     }>();
 

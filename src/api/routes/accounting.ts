@@ -9906,7 +9906,7 @@ async function landedBatchesForGrn(
   const res = await db
     .prepare(
       `SELECT b.id, b.rmId, b.originalQty, b.remainingQty, b.unitCostSen,
-              r.itemCode, r.name AS rmName
+              r.itemCode, r.name AS rm_name
          FROM rm_batches b LEFT JOIN raw_materials r ON r.id = b.rmId
         WHERE b.source = 'GRN' AND b.sourceRefId = ?
         ORDER BY b.id`,
@@ -10993,7 +10993,7 @@ async function openingControlSums(db: Env["Variables"]["DB"]): Promise<{
   try {
     const inv = await db
       .prepare(
-        `SELECT i.totalSen AS totalSen, c.code AS custCode
+        `SELECT i.totalSen AS totalSen, c.code AS cust_code
            FROM invoices i LEFT JOIN customers c ON c.id = i.customerId
           WHERE i.isOpening = 1 AND i.status NOT IN ('DRAFT','CANCELLED')`,
       )

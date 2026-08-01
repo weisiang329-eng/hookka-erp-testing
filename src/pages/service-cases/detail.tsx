@@ -20,6 +20,7 @@ import { parseRepairScope, repairScopeBadgeLabel } from "@/lib/repair-scope";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ObjectPageHeader } from "@/components/ui/object-page-header";
+import { DocumentChainMap } from "@/components/ui/document-chain-map";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -330,6 +331,20 @@ export default function ServiceCaseDetailPage() {
     }
     return { po, ref };
   }, [casePos]);
+
+  // Which SO anchors the relationship map. A case is not itself a document in
+  // the sales chain, so it borrows one: the first spawned SV order (a
+  // sales_orders row — the LIVE repair, whose production/delivery the case is
+  // actually chasing), falling back to the source SO when nothing has been
+  // spawned yet. CO-sourced and EXTERNAL cases have no sales_orders row to
+  // anchor on, so they render no map.
+  const chainAnchorSoId = useMemo(() => {
+    const sv = (caseDetail?.orders ?? []).find((o) => o.isSv);
+    if (sv?.id) return sv.id;
+    if (caseDetail?.sourceType === "SO" && caseDetail.sourceId)
+      return caseDetail.sourceId;
+    return "";
+  }, [caseDetail]);
 
   const [advancing, setAdvancing] = useState(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
@@ -739,6 +754,13 @@ export default function ServiceCaseDetailPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Relationship map for the order this case is chasing. No currentDocNo:
+          the case itself is not a node in the sales chain, so nothing here is
+          "the document you're looking at" — every node just shows its own
+          state, and the production strip answers "which part isn't produced
+          yet and whose hands is it in". */}
+      <DocumentChainMap soId={chainAnchorSoId} />
 
       {/* Stock top-up — short-shipped or missing parts (legs, woven fabric
           etc.); deducts stock via the standard stock-adjustments path, no

@@ -1731,3 +1731,127 @@ app.get("/fe-stuck", async (c) => {
 });
 
 export default app;
+
+// ---------------------------------------------------------------------------
+// GET /db-indexes — what indexes the LIVE Postgres actually has, and which of
+// the ones our hot queries need are missing.
+//
+// WHY THIS EXISTS
+// `migrations/*.sql` is NOT evidence. This project's migrations do not
+// auto-apply (see CLAUDE.md), and the D1 → Supabase cutover in 2026-04 moved
+// the runtime to a different engine entirely — so a `CREATE INDEX` sitting in
+// 0001_init.sql proves only that SQLite once had it.
+//
+// The slow-SQL feed says this matters: over 7 days /api/production-orders read
+// 77,594 rows at p95 23.8s, /api/delivery-orders/ready-planning 17,707 rows at
+// 24.6s and /api/sales-orders 15,298 rows at 33.0s — all of them
+// `WHERE <fk> IN (...)` hydration queries, exactly the shape an index decides.
+//
+// Read-only: it queries pg_indexes / pg_class and writes nothing. The table
+// list is a fixed allow-list, so no caller-supplied identifier reaches SQL.
+// ---------------------------------------------------------------------------
+
+// The tables our slowest endpoints hydrate from, and the columns they filter
+// or join on. Derived from the slow-SQL snippets, not from guesswork.
+const INDEX_EXPECTATIONS: { table: string; columns: string[]; why: string }[] = [
+  { table: "sales_orders", columns: ["orgId"], why: "list queries scope by org" },
+  { table: "sales_order_items", columns: ["salesOrderId"], why: "SELECT * FROM sales_order_items WHERE salesOrderId IN (...) — 15,298 rows at p95 33.0s" },
+  { table: "production_orders", columns: ["salesOrderId"], why: "PO → SO hydration" },
+  { table: "production_orders", columns: ["status"], why: "dept boards filter by status" },
+  { table: "production_orders", columns: ["currentDepartment"], why: "dept boards filter by department" },
+  { table: "job_cards", columns: ["productionOrderId"], why: "job cards hydrate per PO" },
+  { table: "job_cards", columns: ["departmentCode"], why: "dept board scope" },
+  { table: "job_cards", columns: ["status"], why: "dept board scope" },
+  { table: "delivery_orders", columns: ["salesOrderId"], why: "DO → SO hydration (ready-planning, 17,707 rows at p95 24.6s)" },
+  { table: "delivery_order_items", columns: ["deliveryOrderId"], why: "DO line hydration" },
+  { table: "invoices", columns: ["customerId"], why: "debtor aging + statements" },
+  { table: "ledger_journal_entries", columns: ["orgId", "postedAt"], why: "GL / trial balance scan order" },
+  { table: "ledger_journal_entries", columns: ["accountCode", "postedAt"], why: "single-account ledger inquiry" },
+  { table: "ledger_journal_entries", columns: ["sourceType", "sourceId"], why: "every leg → source document lookup" },
+];
+
+app.get("/db-indexes", async (c) => {
+  const tables = [...new Set(INDEX_EXPECTATIONS.map((e) => e.table))];
+  const placeholders = tables.map(() => "?").join(",");
+
+  let indexRows: { tablename: string; indexname: string; indexdef: string }[] = [];
+  try {
+    const res = await c.var.DB.prepare(
+      `SELECT tablename, indexname, indexdef
+         FROM pg_indexes
+        WHERE schemaname = 'public' AND tablename IN (${placeholders})`,
+    )
+      .bind(...tables)
+      .all<{ tablename: string; indexname: string; indexdef: string }>();
+    indexRows = res.results ?? [];
+  } catch (err) {
+    // Not Postgres (or no permission) → say so rather than reporting "0 indexes",
+    // which would read as "everything is missing".
+    return c.json({
+      success: false,
+      error: `index introspection unavailable: ${err instanceof Error ? err.message : "unknown"}`,
+    });
+  }
+
+  // Approximate row counts from the planner's statistics — free, and precise
+  // enough to rank which missing index hurts most. A negative reltuples means
+  // the table has never been analysed.
+  const counts = new Map<string, number>();
+  try {
+    const res = await c.var.DB.prepare(
+      `SELECT relname, reltuples FROM pg_class WHERE relname IN (${placeholders})`,
+    )
+      .bind(...tables)
+      .all<{ relname: string; reltuples: number }>();
+    for (const r of res.results ?? []) counts.set(r.relname, Math.max(0, Math.round(Number(r.reltuples) || 0)));
+  } catch {
+    /* stats unavailable → counts stay empty, the report still works */
+  }
+
+  // An expectation is satisfied when SOME index leads with the expected
+  // columns in order. Postgres can use a composite index for a prefix of its
+  // columns, so `(orgId, postedAt)` also covers a plain `(orgId)` need.
+  const norm = (s: string) => s.toLowerCase().replace(/"/g, "").trim();
+  const satisfied = (table: string, columns: string[]): string | null => {
+    const want = columns.map(norm).join(",");
+    for (const idx of indexRows) {
+      if (norm(idx.tablename) !== norm(table)) continue;
+      const m = idx.indexdef.match(/\(([^)]*)\)\s*$/);
+      if (!m) continue;
+      const cols = m[1].split(",").map(norm);
+      if (cols.slice(0, columns.length).join(",") === want) return idx.indexname;
+    }
+    return null;
+  };
+
+  const checks = INDEX_EXPECTATIONS.map((e) => {
+    const by = satisfied(e.table, e.columns);
+    return {
+      table: e.table,
+      columns: e.columns,
+      why: e.why,
+      present: by !== null,
+      servedBy: by,
+      approxRows: counts.get(e.table) ?? null,
+    };
+  });
+  const missing = checks.filter((x) => !x.present);
+
+  return c.json({
+    success: true,
+    data: {
+      // Sorted so the biggest table with a missing index is the first thing read.
+      missing: missing.sort((a, b) => (b.approxRows ?? 0) - (a.approxRows ?? 0)),
+      missingCount: missing.length,
+      checked: checks.length,
+      indexesFound: indexRows.length,
+      byTable: tables.map((t) => ({
+        table: t,
+        approxRows: counts.get(t) ?? null,
+        indexes: indexRows
+          .filter((r) => norm(r.tablename) === norm(t))
+          .map((r) => r.indexname),
+      })),
+    },
+  });
+});

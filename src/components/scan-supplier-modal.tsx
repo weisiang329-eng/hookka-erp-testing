@@ -51,6 +51,12 @@ import {
   ReusedScanBadge,
   CachedScanNotice,
 } from "@/components/scan-cached-hint";
+import { bestMatch } from "@/lib/party-fuzzy-match";
+import {
+  resolveAlias,
+  usePartyAliases,
+  teachPartyAlias,
+} from "@/lib/party-alias-client";
 import {
   postScanQueueConsume,
   uploadScanQueueRowAsSourceDoc,
@@ -203,9 +209,19 @@ function autoLinkPoId(
 function pickSupplierFromName(
   rawName: string | null | undefined,
   suppliers: Supplier[],
+  /** Taught aliases: normalised OCR name → supplierId. Checked FIRST. */
+  aliasMap?: Record<string, string> | null,
 ): Supplier | null {
   const guess = (rawName ?? "").trim();
   if (!guess) return null;
+  // 0) A human already told us who this name is. Nothing outranks that — it's
+  //    the only signal that survives a typo in the supplier master (400-A002
+  //    was registered as "ADD WOORD…", which every string heuristic missed).
+  const taughtId = resolveAlias(aliasMap, guess);
+  if (taughtId) {
+    const taught = suppliers.find((s) => s.id === taughtId);
+    if (taught) return taught;
+  }
   const guessUpper = guess.toUpperCase();
   // 1) exact name/code
   const exact = suppliers.filter(
@@ -232,7 +248,11 @@ function pickSupplierFromName(
     );
   });
   if (containing.length === 1) return containing[0];
-  return null;
+  // 4) Nothing matched exactly — rank by edit distance and take the clear
+  //    winner. This is the only step that crosses a typo in the master data
+  //    (owner 2026-08-01: 「找到最像的都可以用啊」). bestMatch refuses a
+  //    near-tie, so a coin-flip is still left to the operator.
+  return bestMatch(suppliers, guess)?.party ?? null;
 }
 
 // Fix A (owner 2026-06-30): when a line came back with unitPrice 0 (supplier
@@ -956,6 +976,9 @@ function CreatePIWizard({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [step, setStep] = useState<StepState>("upload");
+  // Taught aliases (OCR name → supplierId). Loaded while the modal is open so
+  // a name a colleague taught earlier resolves without a page reload.
+  const supplierAliases = usePartyAliases("SUPPLIER", open);
   const [files, setFiles] = useState<{ id: string; file: File }[]>([]);
   const [parsing, setParsing] = useState(false);
   const [fileProgress, setFileProgress] = useState<
@@ -1158,7 +1181,7 @@ function CreatePIWizard({
       // (a different supplier matched), trust the OCR — the operator opened
       // the modal from one supplier's context but scanned a different
       // supplier's doc, the OCR is the authoritative signal.
-      const matched = pickSupplierFromName(ex.supplierName, suppliers);
+      const matched = pickSupplierFromName(ex.supplierName, suppliers, supplierAliases);
       const sId = matched?.id ?? defaultSupplierId ?? "";
       const sup = supplierById(sId);
       const orgCode = sup?.purchaseOrgCode ?? activeOrgs[0]?.code ?? "HOOKKA";
@@ -1272,7 +1295,7 @@ function CreatePIWizard({
         originalExtraction: ex,
       };
     },
-    [suppliers, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, materialByCode],
+    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, materialByCode],
   );
 
   // ─── Drag-drop + multi-file extract ────────────────────────────────────
@@ -1690,6 +1713,18 @@ function CreatePIWizard({
             creating: false,
             createdPiNo: j.data?.piNo ?? "(created)",
             createError: null,
+          });
+          // TEACH: the operator just filed a document read as
+          // `originalExtraction.supplierName` under `card.supplierId`. Whether
+          // the matcher got it right or they corrected it by hand, that pairing
+          // is now ground truth — remember it so the next scan of this
+          // letterhead resolves instantly, without waiting for the weekly
+          // distill (which learns document LAYOUT, never identity).
+          void teachPartyAlias({
+            partyType: "SUPPLIER",
+            partyId: card.supplierId,
+            rawName: card.originalExtraction.supplierName,
+            knownMap: supplierAliases,
           });
           if (j.data?.id) createdIds.push(j.data.id);
           else if (j.data?.piNo) createdIds.push(j.data.piNo);
@@ -3227,6 +3262,9 @@ function CreateGRNWizard({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [step, setStep] = useState<StepState>("upload");
+  // Taught aliases (OCR name → supplierId). Loaded while the modal is open so
+  // a name a colleague taught earlier resolves without a page reload.
+  const supplierAliases = usePartyAliases("SUPPLIER", open);
   const [files, setFiles] = useState<{ id: string; file: File }[]>([]);
   const [parsing, setParsing] = useState(false);
   const [fileProgress, setFileProgress] = useState<
@@ -3391,7 +3429,7 @@ function CreateGRNWizard({
       // Fix B (owner 2026-06-30): auto-resolve supplier from OCR'd name
       // using the shared layered matcher (exact → normalised → contains).
       // OCR signal trumps host default when they disagree.
-      const matched = pickSupplierFromName(ex.supplierName, suppliers);
+      const matched = pickSupplierFromName(ex.supplierName, suppliers, supplierAliases);
       const sId = matched?.id ?? defaultSupplierId ?? "";
       const sup = supplierById(sId);
       const orgCode = sup?.purchaseOrgCode ?? activeOrgs[0]?.code ?? "HOOKKA";
@@ -3469,7 +3507,7 @@ function CreateGRNWizard({
         originalExtraction: ex,
       };
     },
-    [suppliers, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, materialByCode],
+    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, materialByCode],
   );
 
   const handleFiles = useCallback(
@@ -3802,6 +3840,15 @@ function CreateGRNWizard({
             creating: false,
             createdGrnNo: grnNo,
             createError: null,
+          });
+          // TEACH — see the identical call in the PI wizard. Aliases are shared
+          // across document types, so a supplier taught here also resolves on
+          // the next Purchase Invoice or PO scan.
+          void teachPartyAlias({
+            partyType: "SUPPLIER",
+            partyId: card.supplierId,
+            rawName: card.originalExtraction.supplierName,
+            knownMap: supplierAliases,
           });
           if (j.data?.id) createdIds.push(j.data.id);
           else if (grnNo !== "(created)") createdIds.push(grnNo);

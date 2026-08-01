@@ -34,6 +34,39 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-01-002 — A broken punch (in and out in the same minute) was docked a FULL day's hours ON TOP of that day's absence `payroll` `data-integrity` 🟡
+
+**Symptom:** KYAW ZIN OO (EMP-022) 2026-07-01 punched 18:01 IN / 18:02 OUT — he forgot the
+morning punch and did both at knock-off. The day was charged **twice**: absence RM78.85 (no
+logged hours) *and* a 9h short-hour dock RM70.96 = **RM149.81 for a day he was at the
+factory**. Two more days had the same shape with the window exactly equal (18:01–18:01):
+THI THI AYE 7/01, YE YINT AUNG 7/02.
+
+**Root cause:** two independent gaps that compound.
+1. `computePunchShortfallHours` treated any `out > in` window as valid evidence. An 18:01→18:02
+   window puts `effectiveIn` (after the 15-min late blocks) past the shift end, so
+   `regularWorkMin` is 0 and the shortfall comes out as the whole 9h day.
+2. `POST /settle-period` skipped a day only when it had NEITHER a punch NOR logged hours. A day
+   with a punch but zero logged hours is an ABSENCE to the payroll engine (which defines absence
+   purely by logged hours) — yet the dock path still ran on it, stacking a second deduction.
+
+**Fix:**
+- `src/api/lib/attendance-deduct.ts` — a window yielding no payable minutes at all
+  (`regularWorkMin <= 0 && otMin <= 0`) is a BROKEN PUNCH, not a zero-hour day: returns
+  `valid: false`, docks nothing, leaves the day to the absence rule / the office.
+- `src/api/routes/payroll-hour-deductions.ts` — `shortfall = hasLogged ? max(...) : 0`. Routed
+  through `maybeApplyAutoDayDock` rather than `continue` so stale AUTO rows written before this
+  fix are CLEARED on the next settle. The absence is always the larger of the two charges, so
+  this can never under-charge.
+- Owner decision 2026-08-01 (「忘了打卡算他们有来吧那三天」): the 3 days backfilled as attended
+  standard shifts, note `Backfill: broken punch — counted as attended, standard shift`.
+
+**Verification:** `tests/punch-degenerate-window.test.mjs` (6 cases — broken windows dock
+nothing; a REAL short day, a real late arrival and a full day are all unchanged). Full
+attendance/payroll suite green. Re-ran the engine offline against prod: the "punched but
+counted absent" anomaly list for 2026-07 is now empty and all 36 rows reconcile.
+
+---
 ## BUG-2026-08-01-001 — Forgotten punch-out closed the attendance row but wrote NO working hours → the day silently docked a FULL day's pay `payroll` `data-integrity` 🟡
 
 **Symptom:** Owner: 「Eiphoowei 为什么扣那么多钱」. Her 2026-07 estimate showed 7 absent days,
@@ -73,6 +106,7 @@ engine offline against prod: the 29 days no longer appear as absences.
 **Still open (needs an office decision, NOT auto-fixed):** 3 days where the worker punched in
 and out in the same minute (18:01–18:01) — THI THI AYE 7/01, YE YINT AUNG 7/02, KYAW ZIN OO
 7/01. Zero-length window ⇒ 0 hours ⇒ absence. Too ambiguous to credit automatically.
+**Related:** the 3 same-minute-punch days it surfaced became BUG-2026-08-01-002.
 
 ---
 

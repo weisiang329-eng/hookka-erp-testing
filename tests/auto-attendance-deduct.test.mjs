@@ -33,7 +33,12 @@ const { HOOKKA_ATTENDANCE: BASE_RULES } = await import(
 // a payslip-lock count, and recorders for what got written. Routes by SQL
 // fingerprint — the helper runs: ALTER (ensure), SELECT existing dock, SELECT
 // payslip lock count, then either a DELETE (clear stale) or a batch(DELETE,INSERT).
-function mockDb({ existingDock = null, lockedCount = 0, workerHours = null } = {}) {
+// loggedHours — the day's working_hour_entries total. Defaults to a normal
+// logged day because that is the only state in which a short-hour dock is even
+// meaningful: a day with ZERO logged hours is an ABSENCE, already charged in
+// full by the payroll engine, and the "never charge one day twice" guard
+// (BUG-2026-08-01-002) refuses to dock it. Set loggedHours: 0 to exercise that.
+function mockDb({ existingDock = null, lockedCount = 0, workerHours = null, loggedHours = 8 } = {}) {
   const calls = { alters: 0, deletes: [], inserts: [], batches: 0 };
   function stmt(sql) {
     let bound = [];
@@ -51,6 +56,7 @@ function mockDb({ existingDock = null, lockedCount = 0, workerHours = null } = {
         ) {
           return existingDock; // { id, source } | null
         }
+        if (sql.includes("FROM working_hour_entries")) return { h: loggedHours };
         if (sql.includes("FROM payslips")) return { c: lockedCount };
         // Per-employee standard day (BUG-2026-07-17-006). null → the helper
         // keeps the global 9h default, which is what every other test expects.

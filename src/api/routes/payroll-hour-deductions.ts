@@ -356,6 +356,11 @@ app.post("/settle-period", async (c) => {
         ? computeUnderLoggedShortfallHours(logged ?? 0, expected)
         : 0;
 
+      // A day with ZERO logged hours is an ABSENCE — already charged in full by
+      // the engine — and must never also carry an hour dock. That rule is NOT
+      // enforced here: it lives in maybeApplyAutoDayDock (reason "absent-day")
+      // so the live punch path and the office re-apply endpoint are covered by
+      // the same guard. See BUG-2026-08-01-002.
       const shortfall = Math.max(punchShort, loggedShort);
       const source = punchShort >= loggedShort ? "from punch" : "from unlogged hours";
       const r = await maybeApplyAutoDayDock(c.var.DB, {

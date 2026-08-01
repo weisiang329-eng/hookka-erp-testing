@@ -2075,3 +2075,26 @@ Owner 在 prod 把 `400-A002` 从 `ADD WOORD TRADING SDN. BHD.` 改成 `ADD WOOD
   所以池子恒空。且 distill 本质是「已知是哪家之後学它的单据长相」，天生学不了身份。
   → 下一个 PR：真 sampleId 回传 + confirm 回写 partyId + `party_name_aliases` 表
     （OCR 原始名 → partyId，改一次即时生效，不等周日 cron）+ 模糊候选排序预选第一名。
+
+### 2026-08-01 staging 部署后验证（PR #166 已合入 staging）
+
+全部在 staging 用真实资料实测，不是推论。
+
+**① 改名传播 / backfill — 通过**
+- 单家 `{supplierId: sup-20d0fa1f}`：50 列（purchase_invoices 24 + purchase_orders 13
+  + supplier_payments 13），重跑 = 0（幂等成立）。
+- 读取端复验：24 张 PI + 13 张 PO 全部变 `ADD WOOD TRADING SDN. BHD.`，WOORD 残留 = 0。
+  ⚠️ 第一次复验读到旧值是**快取**（详情端点当下已是新值）；带 cache-buster 重读即一致。
+- 全量供应商 backfill 另外修正 **34 列 purchase_orders** —— 即 ADD WOOD 以外还有别家
+  历史改名留下的漂移，一并对齐。
+- 全量客户 backfill：0 列（staging 无待修漂移），7 张无 id 表如预期回报 notBackfillable。
+- ⚠️ 副作用：部分 PO 原本存的是 `400-A002 - ADD WOORD TRADING SDN. BHD.`（含代码前缀），
+  backfill 后统一成主档名字，前缀被抹掉。属于把不一致资料正规化，但要知道有这回事。
+
+**② hub 修复 — 用真实 catalog 验证通过**
+Houzs Century 在 catalog 里有 4 个 hub（KL/PG/SRW/SBH）。喂入你那 9 张单的实况
+（customerId=null、name="Houzs Century Sdn Bhd"、state="Selangor"、OCR hub="Houzs KL"）：
+`customerId → cust-1`、`hubs.length = 4`（下拉会渲染）、`hubId → hub-h1`（已预选）。
+修复前这三个分别是 null / 0 / null。
+顺带证实硬编码表的 `hub-h1..h4` **确实是真 id**，它失败纯粹因为比对条件错
+（要求名字完全相等，且传的是 customerState 而非文件上的 hub 名）。

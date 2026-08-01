@@ -27,7 +27,18 @@
 // Pure + dependency-free so it's unit-tested (scan-party-resolve.test.mjs) and
 // reusable from the backend (scan-po validateAndEnrichPO) later.
 // ---------------------------------------------------------------------------
-import { matchByCompanyName } from "./company-name-match";
+import { matchByCompanyName, normalizeCompanyName } from "./company-name-match";
+import { bestMatch } from "./party-fuzzy-match";
+
+/** Resolve a scanned name against a taught alias map (normalised key). */
+function resolveAlias(
+  aliasMap: Record<string, string> | null | undefined,
+  rawName: string | null | undefined,
+): string | null {
+  if (!aliasMap) return null;
+  const key = normalizeCompanyName(rawName);
+  return key ? (aliasMap[key] ?? null) : null;
+}
 
 export type CatalogHub = { id: string; shortName: string; state: string | null };
 
@@ -77,10 +88,19 @@ export function normalizeHubName(s: string | null | undefined): string {
 export function resolveScanParty(
   customers: readonly CatalogCustomer[] | null | undefined,
   po: ScannedParty,
+  /** Taught aliases: normalised OCR name → customerId. Checked FIRST. */
+  aliasMap?: Record<string, string> | null,
 ): ResolvedParty {
   let customerId = po.customerId ?? null;
   if (!customerId && customers && customers.length > 0) {
-    let hit = matchByCompanyName(customers, po.customerName ?? "");
+    // 0) A human already told us who this letterhead is. Outranks every
+    //    heuristic — it is the only signal that survives a typo in the master
+    //    record or a name OCR reads differently every time.
+    const taughtId = resolveAlias(aliasMap, po.customerName);
+    let hit = taughtId
+      ? (customers.find((c) => c.id === taughtId) ?? null)
+      : null;
+    if (!hit) hit = matchByCompanyName(customers, po.customerName ?? "");
     if (!hit && po.deliveryHub) {
       const target = normalizeHubName(po.deliveryHub);
       if (target) {
@@ -90,6 +110,10 @@ export function resolveScanParty(
         if (byHub.length === 1) hit = byHub[0];
       }
     }
+    // 3) Still nothing — rank by edit distance and take the clear winner, so a
+    //    typo in the master record (or an OCR misread) no longer dead-ends.
+    //    bestMatch refuses a near-tie, leaving genuine ambiguity to the operator.
+    if (!hit) hit = bestMatch(customers, po.customerName)?.party ?? null;
     if (hit) customerId = hit.id;
   }
 

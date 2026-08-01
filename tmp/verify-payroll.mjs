@@ -25,7 +25,7 @@ import { calcStatutory } from "../src/api/routes/payslips.ts";
 const period = process.argv[2] || "2026-07";
 const outPath = process.argv[3] || `tmp/payroll-${period}-verified.csv`;
 const url =
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
+  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
 // Same client config as src/api/lib/db-pg.ts getSql() — in particular the
 // snake_case → camelCase column transform, without which every camelCase read
 // in the route code silently reads undefined. (ssl relaxed to `require` because

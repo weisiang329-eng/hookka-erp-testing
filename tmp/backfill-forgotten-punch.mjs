@@ -12,7 +12,7 @@ import { buildDeptBuckets, prorateHours } from "../src/lib/dept-scan-split.ts";
 
 const APPLY = process.argv.includes("--apply");
 const url =
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
+  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 
 const NOTE = "Backfill: no punch-out — standard shift (BUG-2026-08-01-001)";

@@ -10,6 +10,17 @@
 //
 // We aggregate by (product × period × customer) where period = YYYY-MM.
 // Cancelled invoices are excluded; everything else counts as "sold".
+//
+// 2026-08-01 — productName / customerName are wrapped in MAX() rather than
+// added to GROUP BY. Under D1 (SQLite) a bare non-aggregated column was legal
+// and returned an arbitrary row's value; Postgres rejects it outright:
+//   column "ii.product_name" must appear in the GROUP BY clause
+//   or be used in an aggregate function
+// so this endpoint has 500'd for every caller since the Postgres cutover.
+// MAX() reproduces the old "pick one" behaviour and, unlike widening the
+// GROUP BY, cannot split one product/customer into several rows when the
+// stored display name differs between invoices — which would silently change
+// the numbers the forecast page reads.
 // Response shape matches the original (raw array, not envelope-wrapped).
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
@@ -80,9 +91,9 @@ app.get("/", async (c) => {
   const sql = `
     SELECT substr(i.invoiceDate, 1, 7) AS period,
            ii.productCode              AS "productCode",
-           ii.productName              AS "productName",
+           MAX(ii.productName)         AS "productName",
            i.customerId                AS "customerId",
-           i.customerName              AS "customerName",
+           MAX(i.customerName)         AS "customerName",
            SUM(ii.quantity)            AS quantity,
            SUM(ii.totalSen)            AS revenue
       FROM invoices i

@@ -21,6 +21,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { appOrigin } from "@/lib/app-origin";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { OrgChart } from "@/components/org-chart";
 import { humanizeError } from "@/lib/humanize-error";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { Tabs, type TabItem } from "@/components/ui/tabs";
@@ -58,7 +59,7 @@ import {
   Layers,
   ChevronDown,
   ChevronRight,
-  Network,
+  
 } from "lucide-react";
 import { getCurrentUser } from "@/lib/auth";
 import { copyText } from "@/lib/copy-text";
@@ -776,49 +777,9 @@ export default function UsersPage() {
     });
   }, [activeUsers, effectivePosition]);
 
-  // Indented hierarchy (a light visual tree above the table). Roots are active
-  // users with no upline (or an upline that isn't an active user); children are
-  // grouped under their effective reportsTo. A seen-set guards against cycles.
-  type OrgNode = { user: UserRow; children: OrgNode[]; depth: number };
-  const orgTree = useMemo(() => {
-    const activeIds = new Set(activeUsers.map((u) => u.id));
-    const childrenOf = new Map<string, UserRow[]>();
-    const roots: UserRow[] = [];
-    for (const u of activeUsers) {
-      const up = effectiveReportsTo(u);
-      if (up && activeIds.has(up) && up !== u.id) {
-        const arr = childrenOf.get(up);
-        if (arr) arr.push(u);
-        else childrenOf.set(up, [u]);
-      } else {
-        roots.push(u);
-      }
-    }
-    const byName = (a: UserRow, b: UserRow) =>
-      (a.displayName || a.email).localeCompare(b.displayName || b.email);
-    const seen = new Set<string>();
-    const build = (u: UserRow, depth: number): OrgNode => {
-      seen.add(u.id);
-      const kids = (childrenOf.get(u.id) ?? [])
-        .filter((k) => !seen.has(k.id))
-        .sort(byName)
-        .map((k) => build(k, depth + 1));
-      return { user: u, children: kids, depth };
-    };
-    return roots.sort(byName).map((r) => build(r, 0));
-  }, [activeUsers, effectiveReportsTo]);
 
   // Flatten the tree to a render list (depth-first) so the hierarchy block is a
   // simple indented list of rows.
-  const orgTreeFlat = useMemo(() => {
-    const out: OrgNode[] = [];
-    const walk = (n: OrgNode) => {
-      out.push(n);
-      for (const c of n.children) walk(c);
-    };
-    for (const n of orgTree) walk(n);
-    return out;
-  }, [orgTree]);
 
   // ----- Org Chart edit handlers -----
   const beginOrgEdit = () => {
@@ -2322,45 +2283,16 @@ export default function UsersPage() {
                   </div>
                 )}
 
-                {/* Visual hierarchy — a light indented tree by reporting line,
-                    shown above the table when at least one reporting
-                    relationship exists. The TABLE below is the source of truth
-                    for editing (mirrors Houzs's table); this is just an
-                    at-a-glance who-reports-to-whom. */}
-                {orgTreeFlat.some((n) => n.depth > 0) && (
-                  <div className="mb-5 rounded-lg border border-[#E5E7EB] bg-[#FBFAF8] p-3">
-                    <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-[#9CA3AF]">
-                      <Network className="h-3.5 w-3.5 text-[#6B5C32]" />
-                      Reporting hierarchy
-                    </div>
-                    <div className="space-y-0.5">
-                      {orgTreeFlat.map(({ user: m, depth }) => {
-                        const dept = effectiveDept(m);
-                        const pos = effectivePosition(m);
-                        return (
-                          <div
-                            key={m.id}
-                            className="flex items-center gap-2 py-0.5 text-xs"
-                            style={{ paddingLeft: `${depth * 18}px` }}
-                          >
-                            {depth > 0 && (
-                              <span className="text-[#C4BBA9]">└</span>
-                            )}
-                            <span className="font-medium text-[#111827]">
-                              {m.displayName || m.email}
-                            </span>
-                            {pos && (
-                              <span className="text-[10px] text-[#9CA3AF]">
-                                {pos}
-                              </span>
-                            )}
-                            <DeptBadge dept={dept === "Unassigned" ? "" : dept} />
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
+                {/* The board. Replaces an indented tree drawn from `users`
+                    alone — which is ten people, while the other forty-two work
+                    on the floor and live in `workers` with no account. The
+                    component reads /api/org-chart, where both tables arrive as
+                    one list, so the factory is on the same board and a
+                    reporting line can run between them (owner 2026-08-01). The
+                    TABLE below still edits department and position. */}
+                <div className="mb-5 rounded-lg border border-[#E5E7EB] bg-white p-3">
+                  <OrgChart canManage={canManageUsers} />
+                </div>
 
                 {/* Houzs-style table: Name · Department · Position · Reports to.
                     Read-only when viewing; Department / Position / Reports-to

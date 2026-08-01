@@ -123,9 +123,24 @@ async function loadPeople(db: D1Database): Promise<OrgPerson[]> {
   // Explicit edges win over the legacy users.reportsTo fallback.
   const eRes = await db
     .prepare("SELECT person_key, manager_key FROM org_reporting")
-    .all<{ person_key: string; manager_key: string | null }>();
+    .all<{
+      personKey?: string;
+      person_key?: string;
+      managerKey?: string | null;
+      manager_key?: string | null;
+    }>();
   const edges = new Map<string, string | null>();
-  for (const e of eRes.results ?? []) edges.set(e.person_key, e.manager_key ?? null);
+  // DUAL-KEY. db-pg's columnFrom camelCases every column it returns, so these
+  // rows arrive as personKey / managerKey — reading `e.person_key` gave
+  // `undefined`, the map became { undefined => null }, `edges.has(p.key)` was
+  // never true, and EVERY saved reporting line was invisible. The PUT returned
+  // 200 with the right body and the chart still showed "no manager (top)":
+  // owner 2026-08-02「完全没有反应」. See docs/PLAYBOOKS.md → fix-camelCase-read-bug.
+  for (const e of eRes.results ?? []) {
+    const pk = e.personKey ?? e.person_key;
+    if (!pk) continue;
+    edges.set(pk, e.managerKey ?? e.manager_key ?? null);
+  }
   for (const p of people) {
     if (edges.has(p.key)) p.managerKey = edges.get(p.key) ?? null;
   }

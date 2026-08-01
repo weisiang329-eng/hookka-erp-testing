@@ -67,6 +67,9 @@ type RumEvent =
 
 const queue: RumEvent[] = [];
 const FLUSH_INTERVAL_MS = 10_000;
+// Beacon POSTs must never outlive a flush cycle by much — telemetry is
+// best-effort and a stuck beacon is worse than a lost batch.
+const FLUSH_TIMEOUT_MS = 15_000;
 const MAX_BATCH = 50;
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -77,10 +80,16 @@ async function flush(): Promise<void> {
   if (queue.length === 0) return;
   const batch = queue.splice(0, MAX_BATCH);
   try {
-    await fetch("/api/fe-rum/event", {
+    // Hard timeout. This fetch is deliberately NOT routed through
+    // api-client's 30s abort budget (that patch is what reports calls, and
+    // the beacon must not be reported — see reportApiCall), so without this
+    // it had no timeout at all and could sit open indefinitely on a flaky
+    // factory network.
+    await fetch(RUM_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ events: batch }),
+      signal: AbortSignal.timeout(FLUSH_TIMEOUT_MS),
       // keepalive lets the browser finish the POST even after the
       // page unloads — without it, fire-on-visibilitychange would
       // drop the last batch on every nav.
@@ -106,6 +115,15 @@ function pushEvent(ev: RumEvent): void {
 // dropped to keep the AE stream signal-rich.
 const API_SLOW_MS = 3000;
 
+// The beacon's own path. Reporting it would feed the queue with events about
+// emptying the queue — see reportApiCall.
+const RUM_ENDPOINT = "/api/fe-rum/event";
+
+// api-client.ts aborts at 30s. Anything materially past that did not spend the
+// time on the wire — it spent it in a frozen tab (phone screen lock). 60s gives
+// generous slack for slow abort settling while still excluding sleep artifacts.
+const MAX_PLAUSIBLE_CALL_MS = 60_000;
+
 /**
  * Record one /api/* call's timing. Called by src/lib/api-client.ts after
  * each fetch resolves (or aborts/times out). Filters out fast successes
@@ -119,6 +137,31 @@ export function reportApiCall(opts: {
   duration: number; // ms
 }): void {
   const { endpoint, method, status, duration } = opts;
+
+  // 1. NEVER report the telemetry beacon's own POST.
+  //
+  // api-client.ts patches window.fetch and calls reportApiCall() for every
+  // /api/* request — including this module's own flush() to /api/fe-rum/event.
+  // That is a feedback loop: the beacon posts, the patch reports the beacon as
+  // slow/failed, that lands in the queue, the next flush posts it, and so on.
+  // On 2026-08-01 /api/fe-rum/event was the single worst "endpoint" on the
+  // health dashboard (92 hits, p95 299s) — almost entirely self-inflicted, and
+  // it crowded out the real slow endpoints it exists to surface.
+  if (endpoint === RUM_ENDPOINT) return;
+
+  // 2. Drop durations that span a tab suspension.
+  //
+  // On worker phones the tab is frozen when the screen locks. performance.now()
+  // keeps advancing in wall-clock, so a fetch that was in flight at lock time
+  // settles on wake with a "duration" of hours — 7,692,593ms (2h08m) was the
+  // observed max, despite api-client aborting at 30s. Those samples are not
+  // latency, they are sleep, and they were dominating p95/max on the dashboard.
+  //
+  // Anything beyond the client abort budget (+ generous slack) cannot be a real
+  // request, so it is dropped rather than clamped: a clamped value would still
+  // read as "a 40s request happened", which is a different lie.
+  if (duration > MAX_PLAUSIBLE_CALL_MS) return;
+
   const slow = duration >= API_SLOW_MS;
   const failed = status === 0 || status >= 400;
   if (!slow && !failed) return;

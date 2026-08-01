@@ -87,3 +87,31 @@ test("no unmapped camelCase write-columns in non-finance routes (silent-400 guar
     `Unmapped camelCase write-column(s) — would silently 400. Add to column-rename-map.json (snake col) or ALLOW (self-consistent folded table):\n  ${offenders.join("\n  ")}`,
   );
 });
+
+// ── Every camelCase column an API route SELECTs must be in the rename map ────
+//
+// The compat layer rewrites camelCase identifiers to their snake_case Postgres
+// names using column-rename-map.json. A name that is MISSING is not an error —
+// it passes straight through, Postgres folds it to lowercase ("reportsTo" →
+// "reportsto"), the column does not exist and the whole query throws. The route
+// then returns nothing and the screen renders empty with no message.
+//
+// That is exactly how /api/org-chart shipped showing "0 people on the chart"
+// while the users table below it listed ten (2026-08-01). Types, tests and the
+// build were all green — only the live page showed it.
+test("org-chart's SELECTs use only mapped camelCase columns", () => {
+  const route = readFileSync("src/api/routes/org-chart.ts", "utf8");
+  const map = JSON.parse(readFileSync("src/api/lib/column-rename-map.json", "utf8"));
+  const selects = [...route.matchAll(/SELECT\s+([\s\S]*?)\s+FROM/gi)].map((m) => m[1]);
+  assert.ok(selects.length > 0, "expected at least one SELECT");
+  const missing = [];
+  for (const cols of selects) {
+    for (const col of cols.split(",").map((c) => c.trim())) {
+      // Only mixed-case bare identifiers need a mapping.
+      if (!/^[a-z][a-zA-Z0-9]*$/.test(col)) continue;
+      if (col === col.toLowerCase()) continue;
+      if (!(col in map)) missing.push(col);
+    }
+  }
+  assert.deepEqual(missing, [], `unmapped camelCase column(s): ${missing.join(", ")}`);
+});

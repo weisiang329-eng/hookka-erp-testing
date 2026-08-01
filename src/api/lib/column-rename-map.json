@@ -699,6 +699,7 @@
   "repairedBy": "repaired_by",
   "repairedByName": "repaired_by_name",
   "reportedAt": "reported_at",
+  "reportsTo": "reports_to",
   "requestedAt": "requested_at",
   "requestedBy": "requested_by",
   "residualSen": "residual_sen",

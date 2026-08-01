@@ -49,6 +49,12 @@ type LinkedCN = {
   dispatchedAt?: string | null;
   deliveredAt?: string | null;
   driverName?: string | null;
+  // Real CN → invoice link (consignment_notes.converted_invoice_id, mig 0070),
+  // written by POST /api/consignment-notes/:id/convert-to-invoice. Both null
+  // until the CN is actually converted.
+  convertedInvoiceId?: string | null;
+  convertedInvoiceNo?: string | null;
+  convertedInvoiceStatus?: string | null;
 };
 
 // SO ID display rule (mirrors src/pages/production/index.tsx):
@@ -1453,13 +1459,40 @@ export default function SalesOrderDetailPage() {
               href: `/delivery`,
             });
           }
-          // Invoice (generated after delivery)
-          if (["INVOICED", "CLOSED"].includes(order.status)) {
+          // Invoice — REAL link only.
+          //
+          // This node used to be FABRICATED: it appeared whenever
+          // order.status was INVOICED/CLOSED and made up a document number
+          // (`INV-` + companyCOId) plus a made-up PAID/UNPAID status. That
+          // number matched no row anywhere, so the diagram could point the
+          // operator at a non-existent invoice, or show a number that
+          // disagreed with the real one.
+          //
+          // The truth is the CN → invoice link written by
+          // POST /api/consignment-notes/:id/convert-to-invoice into
+          // consignment_notes.converted_invoice_id (mig 0070), surfaced on
+          // this CO payload as linkedCNs[].convertedInvoiceId /
+          // convertedInvoiceNo / convertedInvoiceStatus. One invoice per CN
+          // (the endpoint is idempotent), so the first converted CN is the
+          // invoice for this order.
+          const invoicedCN = linkedCNs.find((cn) => !!cn.convertedInvoiceId);
+          if (invoicedCN) {
             nodes.push({
               type: "INVOICE",
               label: "Invoice",
-              docNo: `INV-${order.companyCOId.replace("SO-", "")}`,
-              status: order.status === "CLOSED" ? "PAID" : "UNPAID",
+              docNo: invoicedCN.convertedInvoiceNo || invoicedCN.convertedInvoiceId || "",
+              status: invoicedCN.convertedInvoiceStatus || undefined,
+              href: `/invoices/${invoicedCN.convertedInvoiceId}`,
+            });
+          } else if (["INVOICED", "CLOSED"].includes(order.status)) {
+            // Order says invoiced but no CN carries a converted_invoice_id —
+            // render an explicit pending placeholder rather than inventing a
+            // document number.
+            nodes.push({
+              type: "INVOICE",
+              label: "Invoice",
+              docNo: "Not linked",
+              status: "PENDING",
               href: `/invoices`,
             });
           }

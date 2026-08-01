@@ -1732,7 +1732,40 @@ app.get("/:id", async (c) => {
   // Lock status (payment recorded / status=PAID?) — surfaced to the
   // detail page so it can render a "credit note required" banner.
   const lockReason = await checkInvoiceLocked(c.var.DB, id);
-  return c.json({ success: true, data: inv, lockReason });
+  // Reverse CN link (2026-08-01). A CN can be converted into a DRAFT
+  // invoice via POST /api/consignment-notes/:id/convert-to-invoice — an
+  // official flow (owner re-confirmed 2026-08-01). That path writes the
+  // link ONE-WAY onto consignment_notes.converted_invoice_id (mig 0070):
+  // the invoice row itself keeps deliveryOrderId / doNo / salesOrderId
+  // null, so before this lookup a CN-origin invoice gave the viewer no
+  // indication where it came from. Index
+  // idx_consignment_notes_converted_invoice_id already covers this
+  // predicate, so it is a cheap single-row probe.
+  let sourceConsignmentNote: { id: string; noteNumber: string } | null = null;
+  try {
+    const cnRow = await c.var.DB.prepare(
+      "SELECT id, noteNumber FROM consignment_notes WHERE convertedInvoiceId = ?",
+    )
+      .bind(id)
+      .first<{
+        id: string;
+        noteNumber?: string | null;
+        note_number?: string | null;
+      }>();
+    if (cnRow) {
+      sourceConsignmentNote = {
+        id: cnRow.id,
+        noteNumber: cnRow.noteNumber ?? cnRow.note_number ?? "",
+      };
+    }
+  } catch (err) {
+    // Best-effort enrichment — never fail the invoice read over it.
+    console.error(
+      "[GET /api/invoices/:id] source CN lookup failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+  return c.json({ success: true, data: inv, lockReason, sourceConsignmentNote });
 });
 
 // PUT /api/invoices/:id — update (status transitions, payments, fields)

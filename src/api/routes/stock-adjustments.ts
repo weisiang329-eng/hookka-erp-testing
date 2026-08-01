@@ -37,6 +37,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -552,6 +553,20 @@ app.post("/", async (c) => {
         500,
       );
     }
+    // The module header says "No approver — adjustments take effect
+    // immediately. Audit trail is the safety net." That safety net did not
+    // exist: this endpoint rewrites raw_materials.balanceQty / wip_items.stockQty
+    // / fg_batches.remainingQty and writes cost_ledger value off the books with
+    // no audit_events row. `before` is the on-hand quantity as read for the
+    // below-zero guard, so a disputed count correction or write-off can be
+    // traced to who made it.
+    await emitAudit(c, {
+      resource: "stock-adjustments",
+      resourceId: id,
+      action: "create",
+      before: { type, itemId, itemCode, itemName, qty: currentQty },
+      after: rowToApi(created),
+    });
     return c.json({ success: true, data: rowToApi(created) }, 201);
   } catch (err) {
     return c.json(

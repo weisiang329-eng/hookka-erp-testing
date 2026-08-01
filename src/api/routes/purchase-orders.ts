@@ -921,6 +921,18 @@ app.put("/:id", async (c) => {
     }
 
     const updated = await fetchPOWithItems(c.var.DB, id);
+    // PO create was audited but the edit path was not, even though this same
+    // handler drives the status transitions that commit us to buying (SUBMITTED
+    // → CONFIRMED → RECEIVED) and can rewrite supplier, prices and line items.
+    // Snapshot both sides so a changed unit price or a re-pointed supplier is
+    // traceable to who did it.
+    await emitAudit(c, {
+      resource: "purchase-orders",
+      resourceId: id,
+      action: "update",
+      before: existing,
+      after: updated,
+    });
     return c.json({ success: true, data: updated });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1067,6 +1079,17 @@ app.delete("/:id", async (c) => {
   await c.var.DB.prepare("DELETE FROM purchase_orders WHERE id = ?")
     .bind(id)
     .run();
+
+  // The delete cascades to purchase_order_items via FK, so the whole document —
+  // supplier, prices, quantities — is destroyed in one statement with nothing
+  // left behind. This event is the only surviving copy; snapshot the full
+  // pre-state including items, not just the id.
+  await emitAudit(c, {
+    resource: "purchase-orders",
+    resourceId: id,
+    action: "delete",
+    before: existing,
+  });
   return c.json({ success: true, data: existing });
 });
 

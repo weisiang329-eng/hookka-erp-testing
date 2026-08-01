@@ -27,6 +27,7 @@ import { computeInvoicePrintExtras } from "../lib/invoice-print-extras";
 // getOrgId import is additive and stays.
 import {
   buildAuditStatement,
+  emitAudit,
   recordAuditCreatedMetric,
 } from "../lib/audit";
 import {
@@ -1689,6 +1690,16 @@ app.post("/", async (c) => {
         500,
       );
     }
+    // Invoice creation was entirely unaudited — the core revenue document
+    // appeared with no record of who raised it. `before` is null by definition
+    // for a create; `after` is the persisted row, so the original figures are
+    // recoverable even if the invoice is later edited.
+    await emitAudit(c, {
+      resource: "invoices",
+      resourceId: created?.id ?? id,
+      action: "create",
+      after: created,
+    });
     return c.json({ success: true, data: created }, 201);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -2474,6 +2485,16 @@ app.delete("/:id", async (c) => {
     );
   }
   await c.var.DB.batch(stmts);
+
+  // Deleting an invoice also reverses the customer's outstanding balance, so
+  // without this the money moved with no record of who moved it or what the
+  // document said. The row is gone — this event is the only surviving copy.
+  await emitAudit(c, {
+    resource: "invoices",
+    resourceId: id,
+    action: "delete",
+    before: existing,
+  });
   return c.json({ success: true });
 });
 

@@ -714,7 +714,7 @@ export async function createPackingListCore(
       resourceId: id,
       action: "create",
       after: { packingNo, doIds, stopCount, totalUnits, totalM3 },
-    }).catch(() => {});
+    });
 
     const created = await c.var.DB.prepare(
       `SELECT ${SELECT_COLS} FROM packing_lists WHERE id = ?`,
@@ -795,7 +795,7 @@ app.delete("/:id", async (c) => {
     resource: "packing-lists",
     resourceId: id,
     action: "delete",
-  }).catch(() => {});
+  });
   return c.json({ success: true });
 });
 

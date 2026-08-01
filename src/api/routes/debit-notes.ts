@@ -432,6 +432,15 @@ app.put("/:id", async (c) => {
     if (!updated) {
       return c.json({ success: false, error: "Debit note not found" }, 404);
     }
+    // Mirror of the credit-note gap: create was audited, the status transition
+    // that actually charges the customer and posts the GL legs was not.
+    await emitAudit(c, {
+      resource: "debit-notes",
+      resourceId: id,
+      action: "update",
+      before: rowToDebitNote(existing),
+      after: rowToDebitNote(updated),
+    });
     return c.json({ success: true, data: rowToDebitNote(updated) });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);

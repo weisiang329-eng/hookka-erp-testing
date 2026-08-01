@@ -897,7 +897,7 @@ app.post("/", async (c) => {
       resourceId: id,
       action: "create",
       after: { productCode, sizeLabel, fabricWidth, pieceLabel, totalHeight, displayName, sizeBytes: totalBytes },
-    }).catch(() => {});
+    });
 
     const created = await selectOneTemplateById(c.var.DB, id);
     return c.json(
@@ -1130,7 +1130,7 @@ app.post("/import", async (c) => {
           sizeBytes: batchBytes,
           source: "import",
         },
-      }).catch(() => {});
+      });
     }
 
     return c.json({
@@ -1260,7 +1260,7 @@ app.patch("/:id", async (c) => {
       displayName: existing.displayName,
     },
     after: { productCode, sizeLabel, fabricWidth, pieceLabel, totalHeight, material, displayName },
-  }).catch(() => {});
+  });
 
   const updated = await selectOneTemplate(c.var.DB, id, orgId);
   return c.json({ success: true, data: updated ? rowToCncTemplate(updated) : null });
@@ -1315,7 +1315,7 @@ app.delete("/:id", async (c) => {
     resource: "cnc-templates",
     resourceId: id,
     action: "delete",
-  }).catch(() => {});
+  });
 
   return c.json({ success: true });
 });

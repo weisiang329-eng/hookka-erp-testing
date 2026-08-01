@@ -219,6 +219,16 @@ app.post("/", async (c) => {
     if (!created) {
       return c.json({ success: false, error: "Failed to create user" }, 500);
     }
+    // Minting an account — including the role it starts with — was unaudited
+    // even though the subsequent role-CHANGE was logged, so an account created
+    // straight into a privileged role left no trace at all. `after` is the
+    // publicUser projection so the password hash never reaches audit_events.
+    await emitAudit(c, {
+      resource: "users",
+      resourceId: id,
+      action: "create",
+      after: publicUser(created),
+    });
     return c.json({ success: true, data: publicUser(created) }, 201);
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
@@ -405,6 +415,20 @@ app.put("/:id", async (c) => {
         before: publicUser(existing),
         after: publicUser(updated),
       });
+    } else {
+      // Everything that is NOT a role flip was deliberately skipped to "keep
+      // the audit log focused" — but this same handler also disables accounts
+      // (isActive → 0, which purges sessions and locks a person out) and
+      // rewrites email, display name and the reporting line. Those are
+      // security-relevant too, so the non-role edit now lands as a plain
+      // update rather than vanishing.
+      await emitAudit(c, {
+        resource: "users",
+        resourceId: id,
+        action: "update",
+        before: publicUser(existing),
+        after: publicUser(updated),
+      });
     }
 
     return c.json({ success: true, data: publicUser(updated) });
@@ -469,6 +493,19 @@ app.delete("/:id", async (c) => {
   const updated = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
     .bind(id)
     .first<UserRow>();
+
+  // Deleting an account revokes every permission that account held and purges
+  // its live sessions — the most destructive user action in the module, and it
+  // was the only one with no audit row. Soft delete, so `before` is a real
+  // pre-state (the role the account held when it was removed) rather than a
+  // reconstruction.
+  await emitAudit(c, {
+    resource: "users",
+    resourceId: id,
+    action: "delete",
+    before: publicUser(existing),
+    after: publicUser(updated ?? { ...existing, isActive: 0 }),
+  });
   return c.json({
     success: true,
     data: publicUser(updated ?? { ...existing, isActive: 0 }),

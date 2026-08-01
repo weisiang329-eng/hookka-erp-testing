@@ -11,7 +11,15 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const helper = readFileSync("src/api/lib/archive-union.ts", "utf8");
-const route = readFileSync("src/api/routes/production-orders.ts", "utf8");
+// 2026-08-01: the UNION sites moved into _helpers.ts when the route was split,
+// so reading only the route file went red - unnoticed, because this test was
+// never registered in `npm test`. Read BOTH halves.
+const route = [
+  "src/api/routes/production-orders.ts",
+  "src/api/routes/production-orders/_helpers.ts",
+]
+  .map((f) => readFileSync(f, "utf8"))
+  .join(String.fromCharCode(10));
 
 test("helper introspects, self-heals the archive, and is memoized", () => {
   assert.match(helper, /export async function archiveUnionSource/, "must export archiveUnionSource");
@@ -60,7 +68,7 @@ test("helper mirrors the real column type (not blind TEXT) for UNION compatibili
 });
 
 test("both production-orders UNION sites route through the helper with a legacy fallback", () => {
-  assert.match(route, /import \{ archiveUnionSource \} from "\.\.\/lib\/archive-union"/);
+  assert.match(route, /import \{[^}]*archiveUnionSource[^}]*\} from "[.\/]*lib\/archive-union"/);
   // po + jc, in each of fetchFilteredPOs and fetchPaginatedPOs → 2 calls each.
   const poCalls = route.match(/archiveUnionSource\(db, "production_orders", "production_orders_archive"\)/g) || [];
   const jcCalls = route.match(/archiveUnionSource\(db, "job_cards", "job_cards_archive"\)/g) || [];

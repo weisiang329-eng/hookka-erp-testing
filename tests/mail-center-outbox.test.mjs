@@ -79,11 +79,25 @@ test("Mail Center FE has the Auto-sent folder backed by the outbox panel", () =>
     /\/api\/mail-center\/outbox/,
     "OutboxPanel must fetch the outbox endpoint",
   );
-  // The reader renders the saved email in a SANDBOXED iframe (these are our own
-  // templates, but sandbox keeps it safe regardless).
-  assert.match(
-    PAGE,
-    /sandbox=""/,
-    "the body must render in a sandboxed iframe",
-  );
+  // The reader renders the saved email in a SANDBOXED iframe.
+  //
+  // 2026-08-01: this asserted the exact string sandbox="" (maximum lockdown).
+  // The attribute later gained allow-same-origin so the onLoad handler can read
+  // contentWindow.document.body.scrollHeight and auto-size the frame - and the
+  // test went red unnoticed, because it was never registered in `npm test`.
+  //
+  // Asserting an exact attribute string was the wrong test. What actually keeps
+  // this safe is that scripts cannot run: `allow-same-origin` is only dangerous
+  // when paired with `allow-scripts`, which would let framed content reach the
+  // parent origin. So pin THAT property instead - it is the invariant that
+  // matters and it survives future additions to the allow-list.
+  assert.match(PAGE, /sandbox="[^"]*"/, "the body must render in a sandboxed iframe");
+  const sandboxAttrs = [...PAGE.matchAll(/sandbox="([^"]*)"/g)].map((m) => m[1]);
+  assert.ok(sandboxAttrs.length > 0, "sanity: at least one sandboxed iframe");
+  for (const attr of sandboxAttrs) {
+    assert.ok(
+      !/allow-scripts/.test(attr),
+      `sandbox must never grant allow-scripts (got "${attr}") - with allow-same-origin that lets email HTML reach the parent origin`,
+    );
+  }
 });

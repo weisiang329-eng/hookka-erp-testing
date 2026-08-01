@@ -175,7 +175,7 @@ type StatutoryFlags = {
   pcbEnabled?: boolean | null;
 };
 
-function calcStatutory(
+export function calcStatutory(
   basicSalarySen: number,
   flags: StatutoryFlags = {},
   // Effective-dated statutory rates (owner 2026-06-11) — resolved as of the

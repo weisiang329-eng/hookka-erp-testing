@@ -48,6 +48,10 @@ import {
   ChevronRight,
 } from "lucide-react";
 import {
+  ReusedScanBadge,
+  CachedScanNotice,
+} from "@/components/scan-cached-hint";
+import {
   postScanQueueConsume,
   uploadScanQueueRowAsSourceDoc,
 } from "@/lib/scan-queue-client";
@@ -2337,6 +2341,12 @@ function PreviewStep({
     (q) => q.status === "queued" || q.status === "processing",
   );
   const failedQueue = queueItems.filter((q) => q.status === "failed");
+  // Cache hits — same bytes uploaded before, so scan-queue replayed the stored
+  // raw_json instead of re-reading the file. Informational only (never blocks).
+  const cachedRowIds = useMemo(
+    () => new Set(queueItems.filter((q) => q.status === "cached").map((q) => q.id)),
+    [queueItems],
+  );
   return (
     <div className="space-y-4">
       {/* Inline spin keyframe for the .ti-loader icon in ScanQueueStrip.
@@ -2383,6 +2393,11 @@ function PreviewStep({
         />
       )}
 
+      <CachedScanNotice
+        cachedCount={cachedRowIds.size}
+        totalCount={queueItems.length}
+      />
+
       {errors.length > 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-1">
           {errors.map((err, i) => (
@@ -2403,6 +2418,9 @@ function PreviewStep({
           <PICard
             key={card.id}
             card={card}
+            reused={
+              !!card.scanQueueRowId && cachedRowIds.has(card.scanQueueRowId)
+            }
             suppliers={suppliers}
             activeOrgs={activeOrgs}
             purchaseOrders={purchaseOrders}
@@ -2468,6 +2486,7 @@ function PreviewStep({
 
 function PICard({
   card,
+  reused,
   suppliers,
   activeOrgs,
   purchaseOrders,
@@ -2484,6 +2503,8 @@ function PICard({
   onSupplierChange,
 }: {
   card: PreviewCard;
+  /** This card came from a cache-hit queue row (same file scanned before). */
+  reused?: boolean;
   suppliers: Supplier[];
   activeOrgs: Organisation[];
   purchaseOrders: PurchaseOrder[];
@@ -2575,6 +2596,7 @@ function PICard({
             <span className="text-[#1F1D1B] font-medium whitespace-nowrap">
               RM {totalRM.toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </span>
+            {reused && <ReusedScanBadge />}
             {card.createdPiNo && (
               <Badge className="bg-green-100 text-green-800 border border-green-300">
                 <CheckCircle className="h-3 w-3 inline mr-0.5" /> {card.createdPiNo}
@@ -2760,6 +2782,7 @@ function PICard({
           <Badge className="bg-violet-50 text-violet-700 border border-violet-200">
             <FileText className="h-3 w-3 inline mr-0.5" /> {card.fileName}
           </Badge>
+          {reused && <ReusedScanBadge />}
           {linkedPo && (
             <Badge className="bg-blue-50 text-blue-700 border border-blue-200">
               PO {linkedPo.poNo}
@@ -4089,6 +4112,11 @@ function GRNPreviewStep({
     (q) => q.status === "queued" || q.status === "processing",
   );
   const failedQueue = queueItems.filter((q) => q.status === "failed");
+  // Cache hits — see CachedScanNotice. Informational only (never blocks).
+  const cachedRowIds = useMemo(
+    () => new Set(queueItems.filter((q) => q.status === "cached").map((q) => q.id)),
+    [queueItems],
+  );
 
   return (
     <div className="space-y-4">
@@ -4133,6 +4161,11 @@ function GRNPreviewStep({
         />
       )}
 
+      <CachedScanNotice
+        cachedCount={cachedRowIds.size}
+        totalCount={queueItems.length}
+      />
+
       {errors.length > 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-1">
           {errors.map((err, i) => (
@@ -4153,6 +4186,9 @@ function GRNPreviewStep({
           <GRNCard
             key={card.id}
             card={card}
+            reused={
+              !!card.scanQueueRowId && cachedRowIds.has(card.scanQueueRowId)
+            }
             suppliers={suppliers}
             activeOrgs={activeOrgs}
             purchaseOrders={purchaseOrders}
@@ -4202,6 +4238,7 @@ function GRNPreviewStep({
 
 function GRNCard({
   card,
+  reused,
   suppliers,
   activeOrgs,
   purchaseOrders,
@@ -4218,6 +4255,8 @@ function GRNCard({
   onSupplierChange,
 }: {
   card: GRNPreviewCard;
+  /** This card came from a cache-hit queue row (same file scanned before). */
+  reused?: boolean;
   suppliers: Supplier[];
   activeOrgs: Organisation[];
   purchaseOrders: PurchaseOrder[];
@@ -4302,6 +4341,7 @@ function GRNCard({
             <span className="text-[#1F1D1B] font-medium whitespace-nowrap">
               {totalReceived} received
             </span>
+            {reused && <ReusedScanBadge />}
             {card.createdGrnNo && (
               <Badge className="bg-green-100 text-green-800 border border-green-300">
                 <CheckCircle className="h-3 w-3 inline mr-0.5" /> {card.createdGrnNo}
@@ -4459,6 +4499,7 @@ function GRNCard({
           <Badge className="bg-violet-50 text-violet-700 border border-violet-200">
             <FileText className="h-3 w-3 inline mr-0.5" /> {card.fileName}
           </Badge>
+          {reused && <ReusedScanBadge />}
           {linkedPo && (
             <Badge className="bg-blue-50 text-blue-700 border border-blue-200">
               PO {linkedPo.poNo}

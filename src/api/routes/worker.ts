@@ -953,6 +953,33 @@ async function autoCloseForgottenPunch(
       row.id,
     )
     .run();
+
+  // BUG-2026-08-01-001 — closing the punch was never enough. Pay reads
+  // working_hour_entries, NOT attendance_records: a day with no entries is an
+  // ABSENCE and docks a full day (salary ÷ 26). Both auto-close paths used to
+  // stop at the UPDATE above, so every forgotten punch-out silently cost the
+  // worker a full day — the exact opposite of "auto-counted as a normal shift"
+  // (25 worker-days / ~RM2,100 in 2026-07 alone; ANN EMP-004 lost 9 of 9 days).
+  // fixedHours = the CONTRACTED shift, so a late/inverted punch can't shrink it
+  // and no short-hour dock follows. Never overwrites office-keyed rows (the
+  // helper's own gate). Best-effort: a hiccup here must not undo the close.
+  try {
+    const r = row as AttendanceRow & {
+      employee_id?: string;
+      department_code?: string;
+    };
+    await autofillWorkingHoursFromPunch(db, {
+      attendanceId: row.id,
+      workerId: row.employeeId ?? r.employee_id ?? "",
+      date: (row.date || "").slice(0, 10),
+      clockIn: row.clockIn ?? "",
+      clockOut: outTime,
+      homeDeptCode: row.departmentCode ?? r.department_code ?? null,
+      fixedHours: stdMin / 60,
+    });
+  } catch (e) {
+    console.warn("[auto-clockout] working-hours auto-fill skipped", row.id, e);
+  }
 }
 
 // Midnight cron entry: close EVERY worker's prior-day open punch (date < today

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, useLayoutEffect, useId } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect, useLayoutEffect, useId } from "react";
 import { createPortal } from "react-dom";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { Button } from "@/components/ui/button";
@@ -9,8 +9,9 @@ import { Badge } from "@/components/ui/badge";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { parsePOText, mapDeliveryHub, type ParsedPO, type POParseResult } from "@/lib/po-parser";
 import { Upload, FileText, CheckCircle, AlertTriangle, X, ChevronDown, ChevronRight, Loader2, Sparkles, Star, Plus, Trash2 } from "lucide-react";
+import { ReusedScanBadge, CachedScanNotice } from "@/components/scan-cached-hint";
 import { postScanQueueConsume } from "@/lib/scan-queue-client";
-import { matchByCompanyName } from "@/lib/company-name-match";
+import { resolveScanParty } from "@/lib/scan-party-resolve";
 
 // Background scan queue dispatch — shared with scan-supplier-modal. >2-file
 // drops POST to /api/scan-queue/upload + navigate to /scan-queue/<batchId>
@@ -289,6 +290,11 @@ type CreateSOResponse = {
   error?: string;
   data?: { companySOId?: string; id?: string };
 };
+
+// Customer + delivery hub resolution lives in @/lib/scan-party-resolve — see
+// that file's header for the bug it closes. Imported at the top; this modal
+// calls it from the pickers, the pre-create hub gate and the create payload so
+// all three read one value.
 
 // Persist the source scan as the SO's permanent attachment (owner 2026-07-15:
 // every SO must keep its original PO on record). The client lost its hold on the
@@ -879,8 +885,12 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     const hubless: string[] = [];
     for (const row of selectedClaude) {
       const po = row.extracted;
-      const hub = mapDeliveryHub(po.customerName, po.customerState ?? "");
-      if (!(po.deliveryHubId || hub.hubId)) hubless.push(po.customerPO || "(no PO no.)");
+      // Same resolver the preview picker and the create payload use, so this
+      // warning can never disagree with what the operator sees or with what
+      // actually lands on the SO.
+      const { hubId } = resolveScanParty(catalog?.customers, po);
+      const legacyHubId = mapDeliveryHub(po.customerName, po.customerState ?? "").hubId;
+      if (!(hubId || legacyHubId)) hubless.push(po.customerPO || "(no PO no.)");
     }
     for (const po of selectedFallback) {
       const hub = mapDeliveryHub(po.customerName, po.deliveryHub);
@@ -937,11 +947,17 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
         }
 
         // Hub resolution priority:
-        //   1. po.deliveryHubId — server-resolved match against the
-        //      customer's hubs (or operator's dropdown selection).
-        //   2. Heuristic from customer name + state — legacy fallback.
+        //   1. po.deliveryHubId — server-resolved match, or the operator's
+        //      explicit dropdown pick.
+        //   2. The hub name PRINTED ON THE PO, matched against this customer's
+        //      real hubs (resolveScanParty — the same call the preview picker
+        //      renders from, so the created SO carries exactly the hub shown).
+        //   3. mapDeliveryHub heuristic — legacy fallback, kept so nothing that
+        //      resolves today can start failing. It only ever fires when 1+2
+        //      found nothing.
         const hub = mapDeliveryHub(po.customerName, po.customerState ?? "");
-        const resolvedHubId = po.deliveryHubId || hub.hubId;
+        const resolvedHubId =
+          resolveScanParty(catalog?.customers, po).hubId || hub.hubId || null;
 
         // OCR rule: only productCode + variant numerics + fabricCode +
         // specialOrder go into the SO body. EVERYTHING ELSE (productName,
@@ -1032,23 +1048,12 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
         // customerId comes from the backend's catalog match (validateAndEnrichPO).
         // Tolerant re-resolve (BUG-2026-07-01): if the backend left it null
         // because the PO's legal name ("X Sdn Bhd") didn't string-match the
-        // catalog's short form ("X"), recover it here against the loaded
-        // catalog — by tolerant name (ignores Sdn Bhd / punctuation), then by
-        // a delivery hub printed on the PO (OUR identifier). Same logic the
-        // backend now runs, so an already-previewed PO resolves WITHOUT a
-        // re-scan. Unique-guarded — never guesses between two companies.
-        let resolvedCustomerId = po.customerId;
-        if (!resolvedCustomerId && catalog?.customers) {
-          let hit = matchByCompanyName(catalog.customers, po.customerName);
-          if (!hit && po.deliveryHub) {
-            const hubTarget = po.deliveryHub.trim().toUpperCase();
-            const hubMatches = catalog.customers.filter((c) =>
-              c.hubs.some((h) => h.shortName.toUpperCase() === hubTarget),
-            );
-            if (hubMatches.length === 1) hit = hubMatches[0];
-          }
-          if (hit) resolvedCustomerId = hit.id;
-        }
+        // catalog's short form ("X"), recover it here — by tolerant name
+        // (ignores Sdn Bhd / punctuation), then by a delivery hub printed on
+        // the PO (OUR identifier). Unique-guarded — never guesses between two
+        // companies. Same `resolveScanParty` the preview <select> renders from,
+        // so the created SO carries exactly the customer the operator saw.
+        const resolvedCustomerId = resolveScanParty(catalog?.customers, po).customerId;
         // If null, the SO create call will fail — surface a clearer error.
         if (!resolvedCustomerId) {
           errs.push(`${po.customerPO}: Customer "${po.customerName}" not in catalog. Add the customer first, then re-scan.`);
@@ -1762,6 +1767,13 @@ function PreviewStep({
   const visibleInFlight = inFlight.slice(0, 3);
   const overflowCount = Math.max(0, inFlight.length - visibleInFlight.length);
 
+  // Cache hits — same bytes uploaded before, so scan-queue replayed the stored
+  // raw_json instead of re-reading the file. Informational only (never blocks).
+  const cachedRowIds = useMemo(
+    () => new Set(queueItems.filter((q) => q.status === "cached").map((q) => q.id)),
+    [queueItems],
+  );
+
   return (
     <div className="space-y-4">
       {/* Inline keyframe for the .ti-loader spin in the queue strip below. */}
@@ -1874,6 +1886,11 @@ function PreviewStep({
         </div>
       )}
 
+      <CachedScanNotice
+        cachedCount={cachedRowIds.size}
+        totalCount={queueItems.length}
+      />
+
       {/* Warnings */}
       {result && result.errors.length > 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
@@ -1896,6 +1913,9 @@ function PreviewStep({
           <ClaudePOCard
             key={`claude-${idx}`}
             row={row}
+            reused={
+              !!row.scanQueueRowId && cachedRowIds.has(row.scanQueueRowId)
+            }
             catalog={catalog}
             selected={selectedPOs.has(idx)}
             // Per-card `expanded` field overrides the legacy one-at-a-time
@@ -1951,9 +1971,11 @@ function PreviewStep({
 }
 
 function ClaudePOCard({
-  row, catalog, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem, onAddItem, onRemoveItem, onMoveItem, onToggleGold, onRemoveCard,
+  row, reused, catalog, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem, onAddItem, onRemoveItem, onMoveItem, onToggleGold, onRemoveCard,
 }: {
   row: ClaudeScanRow;
+  /** This card came from a cache-hit queue row (same file scanned before). */
+  reused?: boolean;
   catalog: ScanCatalog | null;
   selected: boolean;
   expanded: boolean;
@@ -1972,6 +1994,14 @@ function ClaudePOCard({
   // Hooks MUST run before any early return — these are used by the
   // expanded branch but React's rules-of-hooks require unconditional ordering.
   const isTablet = useMediaQuery("(max-width: 1024px)");
+  // Customer + hub, resolved ONCE per render by the same function the create
+  // payload calls. Both pickers below read this, so the preview and the SO can
+  // never disagree. An explicit operator pick lands in po.customerId /
+  // po.deliveryHubId and wins inside the resolver.
+  const resolved = useMemo(
+    () => resolveScanParty(catalog?.customers, po),
+    [catalog, po],
+  );
 
   // Collapsed strip — h ~48px summary. Clicking the strip (not the checkbox
   // / X) expands. ≥5 cards default to first-expanded-only (see PreviewStep
@@ -2016,6 +2046,7 @@ function ClaudePOCard({
             {po.isUrgent && (
               <Badge className="bg-red-100 text-red-800 border-red-200">URGENT</Badge>
             )}
+            {reused && <ReusedScanBadge />}
           </div>
           <button
             type="button"
@@ -2069,21 +2100,11 @@ function ClaudePOCard({
                 {catalog?.customers ? (() => {
                   // Manual customer picker (parity with the supplier scan, owner
                   // 2026-07-01). Pre-selects the auto-match (exact → tolerant
-                  // name → delivery hub), mirroring the create-time resolve, so
-                  // the operator SEES the match and can override — a genuinely
-                  // new/unmatched customer is no longer a dead end.
-                  let matchId = po.customerId;
-                  if (!matchId) {
-                    let hit = matchByCompanyName(catalog.customers, po.customerName);
-                    if (!hit && po.deliveryHub) {
-                      const t = po.deliveryHub.trim().toUpperCase();
-                      const hm = catalog.customers.filter((c) =>
-                        c.hubs.some((h) => h.shortName.toUpperCase() === t),
-                      );
-                      if (hm.length === 1) hit = hm[0];
-                    }
-                    if (hit) matchId = hit.id;
-                  }
+                  // name → delivery hub) via the SAME resolveScanParty the
+                  // create payload uses, so what's shown here is literally the
+                  // value that gets persisted — a genuinely new/unmatched
+                  // customer is still an explicit dead end the operator sees.
+                  const matchId = resolved.customerId;
                   return (
                     <>
                       <select
@@ -2147,19 +2168,23 @@ function ClaudePOCard({
               <Badge className="bg-violet-50 text-violet-700 border border-violet-200">
                 <Sparkles className="h-3 w-3 inline mr-0.5" /> {row.file.name}
               </Badge>
+              {reused && <ReusedScanBadge />}
               <span>{po.items.length} items, {totalQty} qty</span>
               {po.isUrgent && (
                 <Badge className="bg-red-100 text-red-800 border-red-200">URGENT</Badge>
               )}
-              {/* Delivery Hub dropdown — bound to the matched customer's
-                  hubs from the catalog. Operator can override OCR's pick.
-                  Falls back to a free-text input only if catalog is null
-                  or customer didn't match (no hubs to choose from). */}
+              {/* Delivery Hub dropdown — bound to the matched customer's hubs.
+                  Reads `resolved` (not raw po.customerId): the customer match
+                  is tolerant of the "Sdn Bhd" legal suffix, so a PO whose
+                  letterhead prints the full legal name still gets its hub list.
+                  The selection is pre-filled from the hub name OCR read off the
+                  PO, matched to a real hub id — previously this select never
+                  rendered for those POs and the SO was created hub-less while
+                  the preview showed the hub as a plain badge. Operator can
+                  always override; the badge remains only when the customer
+                  genuinely has no hubs on file. */}
               {(() => {
-                const matchedCust = catalog?.customers.find(
-                  (c) => c.id === po.customerId,
-                );
-                const hubs = matchedCust?.hubs ?? [];
+                const hubs = resolved.hubs;
                 if (hubs.length === 0) {
                   return po.deliveryHub ? (
                     <Badge className="border border-[#D1D5DB]">
@@ -2170,7 +2195,7 @@ function ClaudePOCard({
                 return (
                   <select
                     className="text-xs px-2 py-0.5 rounded border border-[#D1D5DB] bg-white hover:border-[#9CA3AF]"
-                    value={po.deliveryHubId ?? ""}
+                    value={resolved.hubId ?? ""}
                     onChange={(e) => {
                       const id = e.target.value || null;
                       const matched = hubs.find((h) => h.id === id);

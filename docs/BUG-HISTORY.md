@@ -34,6 +34,48 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-01-001 — Forgotten punch-out closed the attendance row but wrote NO working hours → the day silently docked a FULL day's pay `payroll` `data-integrity` 🟡
+
+**Symptom:** Owner: 「Eiphoowei 为什么扣那么多钱」. Her 2026-07 estimate showed 7 absent days,
+3 of which (7/04, 7/08, 7/10) she had actually come in and punched for. Factory-wide, 29
+worker-days across 2026-05/06/07 were affected — ANN (EMP-004) lost **9 of her 9** July days
+(RM917.31). Total wrongly deducted: **RM2,336.54**.
+
+**Root cause:** Pay reads `working_hour_entries`, NOT `attendance_records`. A day with no
+entries is an ABSENCE and docks salary ÷ 26. Both forgotten-punch auto-close paths — the
+00:30 cron (`autoCloseStalePunches`) and the next-clock-in self-heal in `POST /clock` — share
+`autoCloseForgottenPunch`, which only UPDATEd `attendance_records` (clockOut, workingMinutes,
+notes) and stopped there. The `autofillWorkingHoursFromPunch` call that a REAL punch-out makes
+was never wired in, despite the self-heal's own comment claiming it ran "the SAME … Working-
+Hours autofill a manual clock-out does". So the row said "auto-counted as a normal shift"
+while the money said "absent". Exactly inverted from the stated intent, and from
+`attendance-deduct.ts`'s "a forgotten clock-out must not cost the worker a full day's pay".
+
+Compounding it: from 2026-07 the office stopped keying Working Hours by hand (July = 632
+auto-from-punch rows, **0** office-keyed; June = 755 office-keyed). The manual backstop that
+had been hiding this since May was gone.
+
+**Fix:**
+- `src/api/lib/punch-autofill.ts` — `autofillWorkingHoursFromPunch` takes `fixedHours`: the
+  CONTRACTED shift, used instead of the punch-derived figure, and relaxing the window gate so
+  a missing/INVERTED window still writes (EMP-001 7/04 punched in at 18:03, closed at 18:00 —
+  `outMin <= inMin` made the normal path bail). Rows tagged "(no punch-out — standard shift)".
+- `src/api/routes/worker.ts` — `autoCloseForgottenPunch` now calls it with
+  `fixedHours = stdMin / 60`, best-effort, after the UPDATE. One helper ⇒ both paths fixed.
+- Backfill: 43 `working_hour_entries` rows over 29 worker-days, note
+  `Backfill: no punch-out — standard shift (BUG-2026-08-01-001)` (one DELETE undoes it).
+
+**Verification:** `tests/punch-autofill-forgotten.test.mjs` (7 cases: fixedHours beats the
+window, inverted window still writes, per-worker 7.5h day, tagging, never-overwrite, and both
+normal-punch paths unchanged). Full attendance/payroll suite 142/142. Re-ran the payroll
+engine offline against prod: the 29 days no longer appear as absences.
+
+**Still open (needs an office decision, NOT auto-fixed):** 3 days where the worker punched in
+and out in the same minute (18:01–18:01) — THI THI AYE 7/01, YE YINT AUNG 7/02, KYAW ZIN OO
+7/01. Zero-length window ⇒ 0 hours ⇒ absence. Too ambiguous to credit automatically.
+
+---
+
 ## BUG-2026-07-27-002 — customer-save replace-diff WIPED delivery hubs; OCR create silently hub-less → State = raw PDF text `sales-orders` `data-integrity` `ui-frontend` 🟢
 
 **Symptom:** Owner created a Selangor hub for Houzs Century — it kept disappearing（「create

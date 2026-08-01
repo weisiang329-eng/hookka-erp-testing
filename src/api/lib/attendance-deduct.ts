@@ -136,6 +136,17 @@ export function computePunchShortfallHours(
     return { valid: false, hasClockOut, shortfallHours: 0, lateMin: 0, otMin: 0 };
   }
   const day = computeAttendanceDay(inMin, outMin, rules);
+  // A window that yields NO payable minutes at all is a broken punch, not a
+  // zero-hour day: the worker who produced it was physically here to punch.
+  // KYAW ZIN OO 2026-07-01 punched 18:01 IN / 18:02 OUT (forgot the morning
+  // punch, did both at knock-off) — technically "valid" (out > in), and the
+  // shift maths turned it into a FULL 9h shortfall, docked on top of the
+  // absence the same day already carried: RM149.81 for one attended day.
+  // Treating it as no evidence leaves the day to the absence rule / the office,
+  // which is the safe direction this module is built around.
+  if (day.regularWorkMin <= 0 && day.otMin <= 0) {
+    return { valid: false, hasClockOut: true, shortfallHours: 0, lateMin: day.lateMin, otMin: 0 };
+  }
   const shortfallHours = Math.round((day.shortfallMin / 60) * 100) / 100;
   return { valid: true, hasClockOut: true, shortfallHours, lateMin: day.lateMin, otMin: day.otMin };
 }

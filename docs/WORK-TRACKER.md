@@ -1914,7 +1914,30 @@ PRESERVE ALL behaviour: reply/forward/star/unread/archive/trash, labels, Assign 
   qty 1 consumes ONE WHOLE SHEET rather than one cut piece. Worth auditing how many filler
   lines are in that state.
 
-## 2026-08-01 (session: System Health was monitoring NOTHING — owner "如果是假的你就应该做成真的")
+## 2026-08-01 (session: System Health — MISDIAGNOSED, corrected below)
+- [x] **CORRECTION.** I reported that System Health was "monitoring nothing" and shipped a
+  `CF_ACCOUNT_ID` into `wrangler.toml [vars]`. **Both were wrong.**
+  - PRODUCTION (`erp.hookka.com`) health has been **LIVE all along**: `kpis-diag` returns
+    `CF_ACCOUNT_ID_set:true`, and the live AE probes return 200 with real data (smoke = 25,526
+    rows; spark = real hourly counts 416 / 118 / 1144 / 762 …).
+  - What I actually tested was **staging**, which is a Pages *preview* environment. Pages keeps
+    production and preview env vars SEPARATE, and only preview is missing `CF_ACCOUNT_ID`.
+    The mock banner is correct behaviour for preview, not a production defect.
+  - Worse, the value I added was the account from `wrangler whoami` on this machine
+    (`816e4573…`, hello@houzscentury.com) — a DIFFERENT Cloudflare account from the one
+    production actually uses (`27cd35…`). Even had it been needed, it was the wrong value.
+  - The deploy then failed outright: `Binding name 'CF_ACCOUNT_ID' already in use` — Pages
+    already had it, which was the clue that production was fine.
+  - Lesson for next time: `/admin/health` shows mock data on ANY preview deploy. Diagnose
+    environment-scoped config against the environment you actually mean to fix, and treat
+    "the dashboard says mock" on staging as expected, not as an incident.
+- [ ] Remaining, genuinely open: staging's preview env has no `CF_ACCOUNT_ID`, so health on
+  staging stays mocked. Decide whether that's worth fixing (it needs the PROD account id set
+  on the Pages *preview* environment) or whether health is a production-only concern.
+- [ ] Still to do (unchanged by the correction): measure /admin/health page load on prod, then
+  the module-by-module devtools sweep for slow fetches / console errors.
+
+### [SUPERSEDED — see the correction above] 2026-08-01 first pass
 - [x] **Diagnosed: the whole /admin/health dashboard was deterministic mock data.** The page
   banner said so ("No live data yet…") but the headline card still read "All systems normal ·
   P50 41ms · P95 241ms · No 5xx" — i.e. it looked green while measuring nothing. Every question

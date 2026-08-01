@@ -258,7 +258,19 @@ function CreateSalesOrderPage() {
     sofaPriceTier?: "PRICE_1" | "PRICE_2" | "PRICE_3" | null;
     bedframePriceTier?: "PRICE_1" | "PRICE_2" | "PRICE_3" | null;
   }[] }>("/api/fabric-tracking", 300, CAT_OPTS);
-  const customers: Customer[] = useMemo(() => customersResp?.data || [], [customersResp]);
+  // Only CONFIRMED customers can carry a sales order. The server already
+  // refuses a POTENTIAL one (assertCustomerBillable, lib/customer-stage.ts),
+  // but without this filter the operator could still PICK one from the
+  // dropdown, fill in the whole order, and only discover the rejection on
+  // save. The server guard is the control; this is so nobody wastes the trip.
+  // Rows with no stage predate the column and are real accounts -> CONFIRMED.
+  const customers: Customer[] = useMemo(
+    () =>
+      (customersResp?.data || []).filter(
+        (c) => (c.customerStage ?? "CONFIRMED") !== "POTENTIAL",
+      ),
+    [customersResp],
+  );
   const products: Product[] = useMemo(() => productsResp?.data || [], [productsResp]);
   const fabrics: FabricItem[] = useMemo(
     () => (fabricsTrackingForPickerResp?.data || []).map(t => ({

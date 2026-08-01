@@ -189,7 +189,7 @@ function StateBadge({ state }: { state: string }) {
 //     dialog (CustomerPriceHistoryDialog).
 //   - Pending badge surfaces when a future-dated history row exists.
 // =====================================================================
-function CustomerProductsPanel({ customerId, customerName, customer: _customer }: { customerId: string; customerName: string; customer: Customer }) {
+function CustomerProductsPanel({ customerId, customerName, customer }: { customerId: string; customerName: string; customer: Customer }) {
   const { toast } = useToast();
   const { confirm } = useConfirm();
   // Date the operator wants prices resolved to. Drives BOTH the on-screen
@@ -475,7 +475,9 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
   // Customer catalogue export — generates a photo-first lookbook PDF for this
   // customer's assigned SKUs only, by reusing the customer-quotation endpoint to
   // resolve product list then the generate-product-catalogue-pdf generator.
-  const handleExportCataloguePdf = async () => {
+  // `emailTo` turns this from a download into a send — same PDF either way, so
+  // the emailed catalogue can never drift from the exported one.
+  const handleExportCataloguePdf = async (emailTo?: string) => {
     if (rows.length === 0) return;
     setExportingCatalogue(true);
     try {
@@ -568,7 +570,33 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
 
       const doc = generateProductCataloguePdf(entries, { customerName });
       const safeCode = (customerId || customerName).replace(/[^a-zA-Z0-9_-]+/g, "_");
-      doc.save(`Product-Catalogue-${safeCode}-${today}.pdf`);
+      const filename = `Product-Catalogue-${safeCode}-${today}.pdf`;
+      if (emailTo) {
+        // Same PDF, delivered instead of downloaded. The send endpoint takes
+        // bare base64, so strip the data-URI prefix jsPDF emits.
+        const dataUri = doc.output("datauristring");
+        const sendRes = await fetch("/api/customer-crm/send-quote", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            customerId,
+            to: emailTo,
+            filename,
+            pdfBase64: dataUri.slice(dataUri.indexOf(",") + 1),
+          }),
+        });
+        const sendJson = (await sendRes.json().catch(() => ({}))) as {
+          success?: boolean;
+          error?: string;
+        };
+        if (!sendRes.ok || !sendJson.success) {
+          toast.error(sendJson.error || `Send failed (HTTP ${sendRes.status})`);
+          return;
+        }
+        toast.success(`Catalogue emailed to ${emailTo}.`);
+        return;
+      }
+      doc.save(filename);
     } catch (err) {
       console.error("[Customer Catalogue PDF]", err);
       toast.error("Failed to generate catalogue PDF.");
@@ -642,6 +670,44 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
     } finally {
       setExportingQuotation(false);
     }
+  };
+
+  // Which document the Email button sends. Kept as state (not two buttons) so
+  // the operator makes one explicit choice instead of hunting for the right
+  // look-alike control.
+  const [emailDocKind, setEmailDocKind] = useState<"QUOTATION" | "CATALOGUE">(
+    "QUOTATION",
+  );
+
+  // Shared recipient prompt + confirm for BOTH document kinds. Sending is an
+  // outward action, so the operator always sees who it is going to and what is
+  // going, and can correct the address before anything leaves.
+  const askRecipient = async (label: string): Promise<string | null> => {
+    const to = window.prompt(
+      `Email this ${label} to which address?`,
+      customer.email?.trim() || "",
+    );
+    if (to === null) return null; // cancelled
+    const recipient = to.trim();
+    if (!/.+@.+\..+/.test(recipient)) {
+      toast.error("That doesn't look like a valid email address.");
+      return null;
+    }
+    const ok = await confirm({
+      title: `Send ${label}?`,
+      message: `Email the ${label} for ${customerName} to ${recipient}?`,
+    });
+    return ok ? recipient : null;
+  };
+
+  const handleEmailDocument = async () => {
+    if (emailDocKind === "QUOTATION") {
+      await handleEmailQuotationV2();
+      return;
+    }
+    const recipient = await askRecipient("catalogue");
+    if (!recipient) return;
+    await handleExportCataloguePdf(recipient);
   };
 
   // One-click send (CRM slice 6): generate the SAME quotation PDF in the
@@ -805,25 +871,47 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
               )}
               Export Quotation PDF
             </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={rows.length === 0 || emailingQuotation}
-              onClick={handleEmailQuotationV2}
-              title="Generate the quotation PDF and email it to the customer (one click)"
-            >
-              {emailingQuotation ? (
-                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-              ) : (
-                <Mail className="h-4 w-4 mr-1" />
-              )}
-              Email Quotation
-            </Button>
+            {/* Owner 2026-08-01: one Email control, two documents. Picking WHAT to
+                send belongs next to the send button, not split across two
+                look-alike buttons the operator has to tell apart. Both paths
+                reuse the exact PDF their Export counterpart produces, so what
+                lands in the customer's inbox is what you saw on screen. */}
+            <div className="flex items-center">
+              <select
+                value={emailDocKind}
+                onChange={(e) => setEmailDocKind(e.target.value as "QUOTATION" | "CATALOGUE")}
+                disabled={rows.length === 0 || emailingQuotation || exportingCatalogue}
+                aria-label="Which document to email"
+                className="h-8 rounded-l-md border border-r-0 border-[#E2DDD8] bg-white px-2 text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/30 disabled:opacity-50"
+              >
+                <option value="QUOTATION">Quotation</option>
+                <option value="CATALOGUE">Catalogue</option>
+              </select>
+              <Button
+                variant="outline"
+                size="sm"
+                className="rounded-l-none"
+                disabled={rows.length === 0 || emailingQuotation || exportingCatalogue}
+                onClick={() => void handleEmailDocument()}
+                title={
+                  emailDocKind === "QUOTATION"
+                    ? "Generate the quotation PDF and email it to the customer"
+                    : "Generate the product catalogue PDF and email it to the customer"
+                }
+              >
+                {emailingQuotation || exportingCatalogue ? (
+                  <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                ) : (
+                  <Mail className="h-4 w-4 mr-1" />
+                )}
+                Email
+              </Button>
+            </div>
             <Button
               variant="outline"
               size="sm"
               disabled={rows.length === 0 || exportingCatalogue}
-              onClick={handleExportCataloguePdf}
+              onClick={() => void handleExportCataloguePdf()}
               title="Export a photo-first product lookbook for this customer's assigned SKUs"
             >
               {exportingCatalogue ? (
@@ -3391,10 +3479,24 @@ export default function CustomersPage() {
   useEffect(() => { setData(initialCustomers); }, [initialCustomers]);
 
   // ---------- Add ----------
+  // Owner 2026-08-01: a potential customer must be creatable from HERE too, not
+  // only via the Sales Pipeline. The stage follows the tab you are standing on
+  // — Potential creates POTENTIAL, Confirmed/All creates CONFIRMED — so the
+  // button never silently produces the other kind. A POTENTIAL account has no
+  // creditor code yet (that is what the Confirm gate is for), so the code is
+  // optional in that mode and the debtor-code format check only runs when one
+  // was actually typed.
+  const addingPotential = stageFilter === "POTENTIAL";
+
   const handleAdd = async () => {
-    const dv = parseDebtorCode(addForm.code);
-    if (!dv.ok) {
-      toast.error(dv.error);
+    if (addForm.code.trim()) {
+      const dv = parseDebtorCode(addForm.code);
+      if (!dv.ok) {
+        toast.error(dv.error);
+        return;
+      }
+    } else if (!addingPotential) {
+      toast.error("A creditor code is required for a confirmed customer.");
       return;
     }
     setAddSaving(true);
@@ -3402,7 +3504,10 @@ export default function CustomersPage() {
       const res = await fetch("/api/customers", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(addForm),
+        body: JSON.stringify({
+          ...addForm,
+          customerStage: addingPotential ? "POTENTIAL" : "CONFIRMED",
+        }),
       });
       const json = asCustomerMutationResponse(await res.json());
       if (json?.success) {
@@ -3869,13 +3974,17 @@ export default function CustomersPage() {
       {showAdd && (
         <Card className="border-[#6B5C32] border-2">
           <CardHeader className="pb-3">
-            <CardTitle className="text-base">New Customer</CardTitle>
+            <CardTitle className="text-base">
+              {addingPotential ? "New potential customer" : "New Customer"}
+            </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
               <div>
-                <label className="text-xs font-medium text-[#374151] mb-1 block">Creditor Code *</label>
-                <Input value={addForm.code} onChange={(e) => setAddForm({ ...addForm, code: e.target.value })} placeholder="e.g. 300-X" />
+                <label className="text-xs font-medium text-[#374151] mb-1 block">
+                  Creditor Code {addingPotential ? <span className="font-normal text-[#9CA3AF]">(set at Confirm)</span> : "*"}
+                </label>
+                <Input value={addForm.code} onChange={(e) => setAddForm({ ...addForm, code: e.target.value })} placeholder={addingPotential ? "Optional until confirmed" : "e.g. 300-X"} />
               </div>
               <div>
                 <label className="text-xs font-medium text-[#374151] mb-1 block">Customer Name *</label>
@@ -3904,9 +4013,9 @@ export default function CustomersPage() {
             </div>
             <div className="flex justify-end gap-2 mt-4">
               <Button variant="outline" onClick={() => setShowAdd(false)}>Cancel</Button>
-              <Button variant="primary" disabled={!addForm.code || !addForm.name || addSaving} onClick={handleAdd}>
+              <Button variant="primary" disabled={!addForm.name || (!addingPotential && !addForm.code) || addSaving} onClick={handleAdd}>
                 {addSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-                Create Customer
+                {addingPotential ? "Create potential" : "Create Customer"}
               </Button>
             </div>
           </CardContent>

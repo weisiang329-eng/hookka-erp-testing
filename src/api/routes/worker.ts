@@ -41,7 +41,7 @@ import {
   autofillWorkingHoursFromPunch,
 } from "../lib/punch-autofill";
 import { loadPayRuleVersions } from "../lib/pay-rules-store";
-import { resolvePayRulesAsOf, toAttendanceRules } from "../../lib/pay-rules";
+import { resolvePayRulesAsOf, toAttendanceRules, payrollDayRateSen, payrollHourDivisor } from "../../lib/pay-rules";
 import { computeAttendanceDay, hhmmToMinutes, otMinutesAtLeastMinimum } from "../../lib/attendance-rules";
 import {
   rowToMinimalPO,
@@ -2160,6 +2160,193 @@ app.get("/payslips", async (c) => {
   );
 
   return c.json({ success: true, data: payslipsData });
+});
+
+/**
+ * Absent dates, OT days and docked days for ONE worker-month.
+ *
+ * Same inputs the payroll engine uses, so the dates on the payslip line up with
+ * the counts on it. Kept separate from the live /payslips estimate because that
+ * one is scoped to the CURRENT month and this must work for any finalised past
+ * month the worker opens.
+ */
+async function buildWorkerDayDetail(
+  db: D1Database,
+  period: string,
+  workerId: string,
+): Promise<{
+  dayDetail: { absentDates: string[]; otDays: Array<{ date: string; hours: number }> };
+  lateDays: Array<{ date: string; hours: number }>;
+  shortHourDeductionSen: number;
+}> {
+  const [yy, mm] = period.split("-").map(Number);
+  const w = await db
+    .prepare("SELECT workingHoursPerDay, basicSalarySen, workingDaysPerMonth FROM workers WHERE id = ?")
+    .bind(workerId)
+    .first<{ workingHoursPerDay: number | null; basicSalarySen: number | null; workingDaysPerMonth: number | null }>();
+  const hoursPerDay = Number(w?.workingHoursPerDay) || 9;
+
+  const heRes = await db
+    .prepare("SELECT date, hours FROM working_hour_entries WHERE workerId = ? AND date LIKE ?")
+    .bind(workerId, `${period}-%`)
+    .all<{ date: string; hours: number }>();
+  const byDate = new Map<string, number>();
+  for (const r of heRes.results ?? []) {
+    byDate.set(r.date, (byDate.get(r.date) ?? 0) + (Number(r.hours) || 0));
+  }
+  const days = [...byDate.entries()].map(([date, hours]) => ({ date, hours }));
+
+  const phRow = await db
+    .prepare("SELECT value FROM kv_config WHERE key = ?")
+    .bind("public_holidays")
+    .first<{ value: string | null }>();
+  const publicHolidays = new Set<string>();
+  try {
+    for (const d of JSON.parse(phRow?.value ?? "[]")) {
+      if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) publicHolidays.add(d);
+    }
+  } catch { /* malformed — no holidays */ }
+
+  const payRules = await loadPayRuleVersions(db).catch(() => []);
+  const cfg = resolvePayRulesAsOf(payRules, `${period}-28`);
+  // A FINALISED month is whole — count absences through its last day, not
+  // through today's grace cutoff, or a past payslip would under-report them.
+  const lastDay = new Date(yy, mm, 0).getDate();
+  const dayDetail = computeAttendanceDayDetail({
+    worker: { workingHoursPerDay: hoursPerDay },
+    year: yy,
+    month: mm,
+    days,
+    publicHolidays,
+    absenceThroughDay: lastDay,
+  });
+
+  const dedRes = await db
+    .prepare("SELECT date, hours FROM payroll_hour_deductions WHERE workerId = ? AND date LIKE ? ORDER BY date")
+    .bind(workerId, `${period}-%`)
+    .all<{ date: string; hours: number }>();
+  const dayRate = payrollDayRateSen(
+    Number(w?.basicSalarySen) || 0,
+    {
+      workingDaysPerMonth: Number(w?.workingDaysPerMonth) || 26,
+      calendarDays: lastDay,
+      workingDaysInMonth: 26,
+    },
+    cfg,
+  );
+  const hourRate = dayRate / payrollHourDivisor(hoursPerDay, cfg);
+  const lateDays: Array<{ date: string; hours: number }> = [];
+  let shortHourDeductionSen = 0;
+  for (const d of dedRes.results ?? []) {
+    const h = Number(d.hours) || 0;
+    if (h <= 0) continue;
+    lateDays.push({ date: d.date, hours: Math.round(h * 100) / 100 });
+    shortHourDeductionSen += Math.round(h * hourRate);
+  }
+  return { dayDetail, lateDays, shortHourDeductionSen };
+}
+
+// ============================================================
+// GET /api/worker/payslip/:period — the worker's OWN payslip, as data.
+//
+// The phone renders it with the SAME generatePayslipHTML the office prints, so
+// there is one document and not a second one that drifts. Returning data rather
+// than server-rendered HTML is what keeps that true.
+//
+// Gated on APPROVED/PAID (owner 2026-08-01: 只有 approved 才能 print). Until the
+// office finalises a month its figures move as attendance arrives, and a worker
+// holding a PDF that later changed is the argument the whole screen exists to
+// prevent. Scoped to the caller — the period is the only parameter, the worker
+// comes from their session, so one worker can never fetch another's payslip.
+// ============================================================
+app.get("/payslip/:period", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  const workerId = auth.worker.id;
+  const period = c.req.param("period");
+  if (!/^\d{4}-\d{2}$/.test(period ?? "")) {
+    return c.json({ success: false, error: "Period must be YYYY-MM" }, 400);
+  }
+
+  const row = await c.var.DB.prepare(
+    "SELECT * FROM payslips WHERE employeeId = ? AND period = ?",
+  )
+    .bind(workerId, period)
+    .first<Record<string, unknown>>();
+  if (!row) {
+    return c.json(
+      { success: false, error: "This month's payslip has not been issued yet." },
+      404,
+    );
+  }
+  const status = String(row.status ?? "");
+  if (status !== "APPROVED" && status !== "PAID") {
+    return c.json(
+      { success: false, error: "This month is still being prepared. It is not final yet." },
+      409,
+    );
+  }
+
+  // Day detail — the payslip's whole job is to show WHICH days, so a document
+  // without it would answer nothing.
+  let dayDetail: { absentDates: string[]; otDays: Array<{ date: string; hours: number }> } = {
+    absentDates: [],
+    otDays: [],
+  };
+  const lateDays: Array<{ date: string; hours: number }> = [];
+  let shortHourDeductionSen = 0;
+  try {
+    const detail = await buildWorkerDayDetail(c.var.DB, period, workerId);
+    dayDetail = detail.dayDetail;
+    lateDays.push(...detail.lateDays);
+    shortHourDeductionSen = detail.shortHourDeductionSen;
+  } catch (e) {
+    console.warn("[worker/payslip] day detail skipped:", e);
+  }
+
+  const num = (k: string) => Number(row[k] ?? 0) || 0;
+  return c.json({
+    success: true,
+    data: {
+      id: String(row.id ?? ""),
+      employeeId: workerId,
+      employeeName: String(row.employeeName ?? auth.worker.name ?? ""),
+      employeeNo: String(row.employeeNo ?? auth.worker.empNo ?? ""),
+      departmentCode: String(row.departmentCode ?? ""),
+      period,
+      basicSalary: num("basicSalarySen"),
+      workingDays: num("workingDays"),
+      absentDays: num("absentDays"),
+      absenceDeductionSen: num("absenceDeductionSen"),
+      shortHourDeductionSen,
+      otWeekdayHours: num("otWeekdayHours"),
+      otSundayHours: num("otSundayHours"),
+      otPHHours: num("otPhHours"),
+      hourlyRate: num("hourlyRateSen"),
+      otWeekdayAmount: num("otWeekdayAmtSen"),
+      otSundayAmount: num("otSundayAmtSen"),
+      otPHAmount: num("otPhAmtSen"),
+      totalOT: num("totalOtSen"),
+      allowances: num("allowancesSen"),
+      grossPay: num("grossPaySen"),
+      epfEmployee: num("epfEmployeeSen"),
+      epfEmployer: num("epfEmployerSen"),
+      socsoEmployee: num("socsoEmployeeSen"),
+      socsoEmployer: num("socsoEmployerSen"),
+      eisEmployee: num("eisEmployeeSen"),
+      eisEmployer: num("eisEmployerSen"),
+      pcb: num("pcbSen"),
+      totalDeductions: num("totalDeductionsSen"),
+      netPay: num("netPaySen"),
+      bankAccount: String(row.bankAccount ?? ""),
+      paymentMethod: String(row.paymentMethod ?? "TRANSFER"),
+      bankName: String(row.bankName ?? ""),
+      status,
+      absentDates: dayDetail.absentDates,
+      otDays: dayDetail.otDays,
+      lateDays,
+    },
+  });
 });
 
 // ============================================================

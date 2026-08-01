@@ -454,9 +454,36 @@ function CurrentMonthBreakdown({
   // changed is exactly the argument this whole screen exists to prevent
   // (owner 2026-08-01: 只有 approved 才能 print).
   const finalised = c.payslipStatus === "APPROVED" || c.payslipStatus === "PAID";
-  const openPayslip = () => {
-    // Same document the office prints — one payslip, one layout.
-    window.open(`/api/worker/payslip/${encodeURIComponent(c.period)}`, "_blank");
+  const [payslipBusy, setPayslipBusy] = useState(false);
+  const openPayslip = async () => {
+    // Fetch the DATA and render with the same generatePayslipHTML the office
+    // prints — one document, two entry points. Opening the API URL directly
+    // would have downloaded JSON.
+    setPayslipBusy(true);
+    try {
+      const res = await workerFetch(`/api/worker/payslip/${encodeURIComponent(c.period)}`);
+      const body = (await res.json()) as { success?: boolean; error?: string; data?: unknown };
+      if (!res.ok || !body.success || !body.data) {
+        alert(body.error || "Could not open the payslip.");
+        return;
+      }
+      const { generatePayslipHTML } = await import("@/lib/generate-payslip-pdf");
+      const html = generatePayslipHTML(
+        body.data as Parameters<typeof generatePayslipHTML>[0],
+      );
+      const w = window.open("", "_blank");
+      if (!w) {
+        alert("Please allow pop-ups to save your payslip.");
+        return;
+      }
+      w.document.write(html);
+      w.document.close();
+      w.focus();
+    } catch {
+      alert("Could not reach the server.");
+    } finally {
+      setPayslipBusy(false);
+    }
   };
   return (
     <div className="bg-[#1F1D1B] text-white rounded-xl p-4">
@@ -470,9 +497,10 @@ function CurrentMonthBreakdown({
         <button
           type="button"
           onClick={openPayslip}
-          className="mt-3 w-full rounded-lg bg-white/10 py-2.5 text-sm font-semibold text-white active:bg-white/20"
+          disabled={payslipBusy}
+          className="mt-3 w-full rounded-lg bg-white/10 py-2.5 text-sm font-semibold text-white active:bg-white/20 disabled:opacity-50"
         >
-          Save payslip as PDF
+          {payslipBusy ? "Opening…" : "Save payslip as PDF"}
         </button>
       )}
 

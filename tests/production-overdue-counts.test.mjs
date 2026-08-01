@@ -170,16 +170,23 @@ test("snapshot sourceTables include delivery_orders + delivery_order_items", () 
 });
 
 test("cacheKey is version-bumped (vN) so stale old-semantics snapshots are bypassed", () => {
-  const h = extractOverdueHandler(read(SRC));
-  assert.ok(h, "handler missing — see previous test");
+  // 2026-08-01: the key moved out of the handler into the exported
+  // overdueCountsCacheKey() so the warm cron cannot drift from the route (the
+  // dept-sheet warmer was reverted once for exactly that). The INTENT of this
+  // test is unchanged and still load-bearing - assert it at the new location.
+  const src = read(SRC);
   assert.match(
-    h,
-    /const cacheKey = `v\d+&dept=\$\{dept \?\? ""\}&today=\$\{today\}`;/,
-    "cacheKey must carry a version token (vN) — the cached payload's meaning/shape " +
-      "has changed over time (bedframe by piece + ship-exclusion at v2; the overdue " +
-      "PO id arrays at v3), so pre-existing snapshot rows must not be served. Bump " +
-      "the version on any payload SHAPE change.",
+    src,
+    /export function overdueCountsCacheKey\([\s\S]*?return `v\d+&dept=\$\{dept \?\? ""\}&today=\$\{today\}`;/,
+    "the shared key builder must carry a version token (vN) — the cached payload's " +
+      "meaning/shape has changed over time (bedframe by piece + ship-exclusion at v2; " +
+      "the overdue PO id arrays at v3), so pre-existing snapshot rows must not be " +
+      "served. Bump the version on any payload SHAPE change.",
   );
+  // And the handler must actually use it, or the version guard is decorative.
+  const h = extractOverdueHandler(src);
+  assert.ok(h, "handler missing — see previous test");
+  assert.match(h, /const cacheKey = overdueCountsCacheKey\(dept, today\)/);
 });
 
 // ---------------------------------------------------------------------------

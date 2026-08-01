@@ -1039,9 +1039,34 @@ app.get("/", async (c) => {
     binds.push(supplierId);
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-  const grnsSql = `SELECT * FROM grns ${where} ORDER BY grnNumber DESC`;
 
-  const grnsRes = await c.var.DB.prepare(grnsSql).bind(...binds).all<GRNRow>();
+  // Opt-in pagination (mirrors purchase-orders / sales-orders). ?page&limit
+  // applies SQL LIMIT/OFFSET over the SAME where-clause + returns { total,
+  // page, limit }. Omitting both keeps the full-list behavior the list page
+  // falls back to whenever a filter/search is active — so a search always sees
+  // EVERY GRN, never just the current page. 2026-08-01.
+  const pageParam = c.req.query("page");
+  const limitParam = c.req.query("limit");
+  const paginate = pageParam !== undefined || limitParam !== undefined;
+  const page = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);
+  const limit = Math.min(500, Math.max(1, parseInt(limitParam ?? "50", 10) || 50));
+
+  let total: number | undefined;
+  if (paginate) {
+    const cnt = await c.var.DB
+      .prepare(`SELECT COUNT(*) AS n FROM grns ${where}`)
+      .bind(...binds)
+      .first<{ n: number }>();
+    total = Number(cnt?.n ?? 0);
+  }
+
+  const grnsSql = paginate
+    ? `SELECT * FROM grns ${where} ORDER BY grnNumber DESC LIMIT ? OFFSET ?`
+    : `SELECT * FROM grns ${where} ORDER BY grnNumber DESC`;
+  const grnsRes = await c.var.DB
+    .prepare(grnsSql)
+    .bind(...(paginate ? [...binds, limit, (page - 1) * limit] : binds))
+    .all<GRNRow>();
   const grnRows = grnsRes.results ?? [];
   // Scope grn_items to just the GRNs we return — the old `SELECT * FROM
   // grn_items` loaded the ENTIRE (forever-growing) items table on every list
@@ -1057,7 +1082,26 @@ app.get("/", async (c) => {
     : { results: [] as GRNItemRow[] };
   const data = grnRows.map((g) => rowToGRN(g, itemsRes.results ?? []));
   await fillGrnSupplierSku(c.var.DB, data);
-  return c.json({ success: true, data });
+  return c.json(
+    paginate
+      ? { success: true, data, total, page, limit }
+      : { success: true, data },
+  );
+});
+
+// GET /api/grn/stats — whole-dataset GRN header rows (NO line items) so the
+// list page's summary widgets (Total / Draft / Confirmed counts + arrival-state
+// tallies) stay whole-dataset even when the grid shows one paginated page.
+// rowToGRN reads status/arrival off the row, so an items-less map is correct +
+// cheap. Registered before /:id. 2026-08-01.
+app.get("/stats", async (c) => {
+  const denied = await requirePermission(c, "grn", "read");
+  if (denied) return denied;
+  const grnsRes = await c.var.DB
+    .prepare("SELECT * FROM grns ORDER BY grnNumber DESC")
+    .all<GRNRow>();
+  const rows = (grnsRes.results ?? []).map((g) => rowToGRN(g, []));
+  return c.json({ success: true, data: rows, total: rows.length });
 });
 
 // POST /api/grn — create a GRN.

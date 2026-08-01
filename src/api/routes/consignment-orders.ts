@@ -1272,11 +1272,31 @@ app.get("/:id", async (c) => {
     // operator can see whether the hub is still editable (no dispatched CN)
     // before clicking the Edit pencil. Expanded with delivery fields for the
     // Order Progress card.
+    //
+    // convertedInvoiceId + invoiceNo (2026-08-01): a CN can be converted to
+    // a DRAFT invoice via POST /api/consignment-notes/:id/convert-to-invoice
+    // (official flow, owner re-confirmed 2026-08-01). The link lives on
+    // consignment_notes.converted_invoice_id (mig 0070, FK → invoices(id),
+    // indexed). Surfaced here so the CO detail page renders the REAL invoice
+    // instead of fabricating a number from order.status. LEFT JOIN keeps
+    // unconverted CNs in the result set.
+    //
+    // NOTE on the JOIN: D1Compat rewrites every BARE identifier through
+    // column-rename-map.json, aliases included. `invoiceStatus` has no map
+    // entry, so a bare `AS invoiceStatus` would reach Postgres unquoted,
+    // fold to `invoicestatus` and come back un-camelCased. The rewriter
+    // copies double-quoted spans verbatim, so the one invented alias we
+    // need is QUOTED — `AS "invoiceStatus"` survives intact and Postgres
+    // preserves its casing. Every other column here is a plain qualified
+    // ref whose own name is already in the map.
     c.var.DB.prepare(
-      `SELECT id, noteNumber, status, dispatchedAt, deliveredAt, driverName
-         FROM consignment_notes
-        WHERE consignmentOrderId = ?
-        ORDER BY noteNumber`,
+      `SELECT cn.id, cn.noteNumber, cn.status, cn.dispatchedAt,
+              cn.deliveredAt, cn.driverName, cn.convertedInvoiceId,
+              inv.invoiceNo, inv.status AS "invoiceStatus"
+         FROM consignment_notes cn
+         LEFT JOIN invoices inv ON inv.id = cn.convertedInvoiceId
+        WHERE cn.consignmentOrderId = ?
+        ORDER BY cn.noteNumber`,
     )
       .bind(id)
       .all<{
@@ -1286,6 +1306,11 @@ app.get("/:id", async (c) => {
         dispatchedAt: string | null;
         deliveredAt: string | null;
         driverName: string | null;
+        convertedInvoiceId?: string | null;
+        converted_invoice_id?: string | null;
+        invoiceNo?: string | null;
+        invoice_no?: string | null;
+        invoiceStatus?: string | null;
       }>(),
     // Linked production orders for the Order Progress card.
     c.var.DB.prepare(
@@ -1335,6 +1360,11 @@ app.get("/:id", async (c) => {
     dispatchedAt: cn.dispatchedAt ?? null,
     deliveredAt: cn.deliveredAt ?? null,
     driverName: cn.driverName ?? null,
+    // Real CN → invoice link (mig 0070). Dual-keyed read per the repo rule.
+    // null when the CN has not been converted yet.
+    convertedInvoiceId: cn.convertedInvoiceId ?? cn.converted_invoice_id ?? null,
+    convertedInvoiceNo: cn.invoiceNo ?? cn.invoice_no ?? null,
+    convertedInvoiceStatus: cn.invoiceStatus ?? null,
   }));
   // Build completedBy map: poId → comma-deduped worker names.
   const completedByMap = new Map<string, string>();

@@ -37,6 +37,7 @@ import { issueDocNumber } from "../lib/doc-number-service";
 import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
 import { applyLifecycle, getDocState } from "../lib/document-lifecycle";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
+import { emitAudit } from "../lib/audit";
 
 const AP_CONTROL = "400-0000"; // Trade Creditors
 const FX_GAIN_ACCT = "530-0000"; // GAIN ON FOREIGN EXCHANGE (realised; debit = loss)
@@ -380,7 +381,31 @@ app.post("/", async (c) => {
       // 7. Execute the whole batch atomically (mirror purchase-invoices.ts).
       await c.var.DB.batch(statements);
 
-      // 8. Done.
+      // 8. Audit. This module — the highest-risk money path in the system,
+      // where cash leaves the bank to a supplier — had ZERO audit coverage
+      // across all seven of its mutating endpoints. `before` is null for a
+      // create; `after` is every persisted allocation row under this payNo so
+      // the original per-PI split and FX rates stay recoverable.
+      const createdRows = await c.var.DB.prepare(
+        "SELECT * FROM supplier_payments WHERE paymentNo = ? AND orgId = ?",
+      )
+        .bind(payNo, orgId)
+        .all<RawSupplierPaymentRow>();
+      await emitAudit(c, {
+        resource: "supplier-payments",
+        resourceId: payNo,
+        action: "create",
+        after: {
+          paymentNo: payNo,
+          payFrom,
+          totalBookedSen: totalBooked,
+          totalBankSen: totalBank,
+          totalFxSen: totalFx,
+          rows: createdRows.results ?? [],
+        },
+      });
+
+      // 9. Done.
       return c.json({
         success: true,
         data: { paymentNo: payNo, totalBankSen: totalBank },
@@ -535,6 +560,24 @@ app.post("/knock-off", async (c) => {
     statements.push(bumpSupplierPaymentsRev(c.var.DB));
     await c.var.DB.batch(statements);
 
+    // Knock-off reattributes real cash from an unapplied advance to a specific
+    // purchase invoice and bumps that PI's paid_amount_sen — the advance row is
+    // decremented in place, so nothing else records how much came off it or
+    // where it went.
+    await emitAudit(c, {
+      resource: "supplier-payments",
+      resourceId: advance.paymentNo,
+      action: "knock-off",
+      before: { advance, purchaseInvoice: pi },
+      after: {
+        advanceRowId,
+        remainingAdvanceSen: remainingAdvanceSen - amountSen,
+        purchaseInvoiceId: piId,
+        piNo: pi.piNo ?? pi.pi_no,
+        knockedOffSen: amountSen,
+      },
+    });
+
     return c.json({
       success: true,
       data: { remainingAdvanceSen: remainingAdvanceSen - amountSen, piNo: pi.piNo ?? pi.pi_no },
@@ -608,6 +651,23 @@ app.post("/un-knock", async (c) => {
       .prepare("SELECT pi_no, paid_amount_sen, status FROM purchase_invoices WHERE id = ?")
       .bind(piId)
       .first<{ piNo?: string; pi_no?: string; paidAmountSen?: number; paid_amount_sen?: number; status: string }>();
+
+    // Un-knock detaches cash from a purchase invoice and re-derives that PI's
+    // paid_amount_sen absolutely — the link to the invoice is nulled in place,
+    // so without `before` there is no record of which PI the money was against.
+    await emitAudit(c, {
+      resource: "supplier-payments",
+      resourceId: row.paymentNo,
+      action: "un-knock",
+      before: row,
+      after: {
+        rowId,
+        detachedFromPurchaseInvoiceId: piId,
+        restoredAdvanceSen: Number(row.amountSen) || 0,
+        piPaidSen: Number(pi?.paidAmountSen ?? pi?.paid_amount_sen) || 0,
+        piStatus: pi?.status ?? "",
+      },
+    });
     return c.json({
       success: true,
       data: {
@@ -1076,6 +1136,13 @@ app.post("/:paymentNo/void", async (c) => {
       return c.json({ success: true, data: { alreadyVoided: true } });
     }
 
+    // Pre-state for the audit snapshot — voiding reverses the GL and rolls
+    // back paid_amount_sen on every PI this voucher touched, so the allocation
+    // rows as they stood are the only basis for reconstructing the reversal.
+    const beforeRows = await c.var.DB
+      .prepare("SELECT * FROM supplier_payments WHERE paymentNo = ? AND orgId = ?")
+      .bind(paymentNo, orgId)
+      .all<RawSupplierPaymentRow>();
     const { statements } = await buildSupplierPaymentLifecycle(
       c.var.DB,
       orgId,
@@ -1084,6 +1151,13 @@ app.post("/:paymentNo/void", async (c) => {
       actorUserId,
     );
     await c.var.DB.batch(statements);
+    await emitAudit(c, {
+      resource: "supplier-payments",
+      resourceId: paymentNo,
+      action: "void",
+      before: { rows: beforeRows.results ?? [] },
+      after: { state: await getDocState(c.var.DB, orgId, "supplier_payment", paymentNo) },
+    });
     return c.json({ success: true });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1132,6 +1206,20 @@ app.post("/:paymentNo/lifecycle", async (c) => {
       (c as unknown as { get: (k: string) => string | undefined }).get(
         "userId",
       ) ?? null;
+    // void/delete roll paid_amount_sen back off every PI this voucher paid;
+    // unvoid re-applies it. Either way real AP balances move, and the header
+    // comment's claim that delete is "audit-traceable" was not actually true
+    // until this emit existed.
+    const beforeState = await getDocState(
+      c.var.DB,
+      orgId,
+      "supplier_payment",
+      paymentNo,
+    );
+    const beforeRows = await c.var.DB
+      .prepare("SELECT * FROM supplier_payments WHERE paymentNo = ? AND orgId = ?")
+      .bind(paymentNo, orgId)
+      .all<RawSupplierPaymentRow>();
     const { statements, newState } = await buildSupplierPaymentLifecycle(
       c.var.DB,
       orgId,
@@ -1140,6 +1228,13 @@ app.post("/:paymentNo/lifecycle", async (c) => {
       actorUserId,
     );
     await c.var.DB.batch(statements);
+    await emitAudit(c, {
+      resource: "supplier-payments",
+      resourceId: paymentNo,
+      action,
+      before: { state: beforeState, rows: beforeRows.results ?? [] },
+      after: { state: newState },
+    });
     return c.json({ success: true, data: { state: newState } });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1176,6 +1271,17 @@ app.post("/recompute-pi-paid", async (c) => {
     .prepare("SELECT paid_amount_sen, status FROM purchase_invoices WHERE id = ?")
     .bind(piId)
     .first<{ paid_amount_sen?: number; paidAmountSen?: number; status: string }>();
+
+  // An owner-triggered repair that overwrites a purchase invoice's
+  // paid_amount_sen and status outright. It is exactly the kind of manual
+  // correction that must be attributable, and it had no record at all.
+  await emitAudit(c, {
+    resource: "supplier-payments",
+    resourceId: piId,
+    action: "recompute-pi-paid",
+    before,
+    after,
+  });
   return c.json({
     success: true,
     data: {
@@ -1235,6 +1341,14 @@ app.post("/:paymentNo/restate", async (c) => {
         "userId",
       ) ?? null;
     const stamp = Date.now();
+    // Restate rewrites the voucher IN PLACE under the same PV number: the old
+    // allocation rows and GL legs are replaced by new ones. Only a `before`
+    // snapshot preserves what the voucher paid, to which invoices, at which
+    // FX rate, before the edit.
+    const beforeRows = await c.var.DB
+      .prepare("SELECT * FROM supplier_payments WHERE paymentNo = ? AND orgId = ?")
+      .bind(paymentNo, orgId)
+      .all<RawSupplierPaymentRow>();
     const statements = await buildSupplierPaymentRestate(
       c.var.DB,
       orgId,
@@ -1244,6 +1358,17 @@ app.post("/:paymentNo/restate", async (c) => {
       stamp,
     );
     await c.var.DB.batch(statements);
+    const afterRows = await c.var.DB
+      .prepare("SELECT * FROM supplier_payments WHERE paymentNo = ? AND orgId = ?")
+      .bind(paymentNo, orgId)
+      .all<RawSupplierPaymentRow>();
+    await emitAudit(c, {
+      resource: "supplier-payments",
+      resourceId: paymentNo,
+      action: "restate",
+      before: { rows: beforeRows.results ?? [] },
+      after: { rows: afterRows.results ?? [] },
+    });
     return c.json({ success: true, data: { paymentNo } });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

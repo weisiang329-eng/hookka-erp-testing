@@ -2293,7 +2293,7 @@ app.post("/packing-list-first", async (c) => {
               doNo: d.doNo,
               reason: "packing-list-first rollback",
             },
-          }).catch(() => {});
+          });
         } catch (e) {
           // Best effort — log loudly. A leftover DRAFT DO has no inventory
           // or cost effects and can be deleted from Pending Dispatch.

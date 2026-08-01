@@ -951,6 +951,7 @@ import bom from "./routes/bom";
 import products from "./routes/products";
 import productConfigs from "./routes/product-configs";
 import workers from "./routes/workers";
+import orgChart from "./routes/org-chart";
 import workerAuth from "./routes/worker-auth";
 import workerPortal from "./routes/worker";
 import departments from "./routes/departments";
@@ -1398,6 +1399,7 @@ app.route("/api/assistant", assistant);
 // import dispatchReport from ./routes/reports without a cycle at runtime.
 import agentConsole from "./routes/agent-console";
 app.route("/api/agents", agentConsole);
+app.route("/api/org-chart", orgChart);
 
 // Catch-all error handler (Sprint 5). Hono's default behaviour is to surface
 // a 500 with the error message — fine for dev, but in prod we want every

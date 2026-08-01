@@ -1092,6 +1092,18 @@ app.put("/:id", async (c) => {
     )
       .bind(id)
       .first<PaymentRow>();
+    // Payment create was audited but the status transition was not — and this
+    // is the handler where money actually moves back: BOUNCED reverses every
+    // allocated invoice's paidAmount, restores the customer's outstandingSen
+    // and posts a GL reversal. Snapshot both sides so the pre-bounce
+    // allocations (the basis for the rollback maths) survive.
+    await emitAudit(c, {
+      resource: "payments",
+      resourceId: id,
+      action: "update",
+      before: rowToPayment(existing),
+      after: updated ? rowToPayment(updated) : null,
+    });
     return c.json({
       success: true,
       data: updated ? rowToPayment(updated) : null,
@@ -1131,6 +1143,15 @@ app.post("/:id/lifecycle", async (c) => {
       (c as unknown as { get: (k: string) => string | undefined }).get(
         "userId",
       ) ?? null;
+    // Pre-state for the audit snapshot. void/delete reverse the GL, reopen
+    // every paid invoice and restore the customer's A/R — the row itself is
+    // kept (so it can be unvoided) but its allocations and status are what
+    // the reversal was computed from, and nothing else records them.
+    const before = await c.var.DB.prepare(
+      "SELECT * FROM payment_records WHERE id = ?",
+    )
+      .bind(id)
+      .first<PaymentRow>();
     const { statements, newState } = await buildCustomerPaymentLifecycle(
       c.var.DB,
       orgId,
@@ -1139,6 +1160,18 @@ app.post("/:id/lifecycle", async (c) => {
       actorUserId,
     );
     await c.var.DB.batch(statements);
+    const after = await c.var.DB.prepare(
+      "SELECT * FROM payment_records WHERE id = ?",
+    )
+      .bind(id)
+      .first<PaymentRow>();
+    await emitAudit(c, {
+      resource: "payments",
+      resourceId: id,
+      action,
+      before: before ? rowToPayment(before) : null,
+      after: after ? rowToPayment(after) : null,
+    });
     return c.json({ success: true, data: { state: newState } });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1183,6 +1216,15 @@ app.post("/:id/restate", async (c) => {
         "userId",
       ) ?? null;
     const stamp = Date.now();
+    // Restate rewrites a receipt IN PLACE, keeping the same receipt number —
+    // the original method, reference and allocations are overwritten and the
+    // posted GL legs are reversed and re-posted. Without a `before` snapshot
+    // there is no way to tell what the receipt originally said.
+    const before = await c.var.DB.prepare(
+      "SELECT * FROM payment_records WHERE id = ?",
+    )
+      .bind(id)
+      .first<PaymentRow>();
     const statements = await buildCustomerPaymentRestate(
       c.var.DB,
       orgId,
@@ -1192,6 +1234,18 @@ app.post("/:id/restate", async (c) => {
       stamp,
     );
     await c.var.DB.batch(statements);
+    const after = await c.var.DB.prepare(
+      "SELECT * FROM payment_records WHERE id = ?",
+    )
+      .bind(id)
+      .first<PaymentRow>();
+    await emitAudit(c, {
+      resource: "payments",
+      resourceId: id,
+      action: "restate",
+      before: before ? rowToPayment(before) : null,
+      after: after ? rowToPayment(after) : null,
+    });
     return c.json({ success: true });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

@@ -220,7 +220,16 @@ test("invoice detail page surfaces credit and debit notes", () => {
 //    of scope (that relationship is under review with the owner). Pin that
 //    this change did not quietly wire it up.
 // ---------------------------------------------------------------------------
-test("no converted_invoice_id reverse link was added to invoice detail", () => {
-  assert.doesNotMatch(INV_GET, /converted_invoice_id|convertedInvoiceId/);
-  assert.doesNotMatch(INV_GET, /consignment_notes/);
+// This began life as a SCOPE GUARD — the consignment link was under review with
+// the owner when these reverse queries were written, so the test asserted it had
+// deliberately been left alone. The owner has since ruled that
+// convert-to-invoice IS official (#197), so the guard expired: the same lookup
+// it used to forbid is now required. Inverted rather than deleted, so the two
+// features are pinned as coexisting in one payload instead of one silently
+// dropping the other on a future merge.
+test("the CN reverse link coexists with the credit/debit note lookups", () => {
+  assert.match(INV_GET, /convertedInvoiceId/);
+  assert.match(INV_GET, /consignment_notes/);
+  assert.match(INV_GET, /linkedCreditNotes/);
+  assert.match(INV_GET, /linkedDebitNotes/);
 });

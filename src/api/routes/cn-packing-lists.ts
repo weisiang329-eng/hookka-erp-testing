@@ -622,7 +622,7 @@ export async function createCnPackingListCore(
       resourceId: id,
       action: "create",
       after: { packingNo, cnIds, stopCount, totalUnits, totalM3 },
-    }).catch(() => {});
+    });
 
     const created = await c.var.DB.prepare(
       `SELECT ${SELECT_COLS} FROM cn_packing_lists WHERE id = ?`,
@@ -715,7 +715,7 @@ app.delete("/:id", async (c) => {
       resource: "cn-packing-lists",
       resourceId: id,
       action: "delete",
-    }).catch(() => {});
+    });
     return c.json({ success: true });
   } catch (e) {
     if (isMissingTable(e))

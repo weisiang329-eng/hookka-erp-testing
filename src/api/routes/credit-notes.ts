@@ -625,6 +625,17 @@ app.put("/:id", async (c) => {
     if (!updated) {
       return c.json({ success: false, error: "Credit note not found" }, 404);
     }
+    // Create was audited; the update was not — yet this handler owns the
+    // DRAFT → APPROVED/POSTED transition that fires the non-idempotent
+    // customer-credit (A/R reduction) and invoice-total cascade and posts the
+    // GL legs. Snapshot both sides so the approval is attributable.
+    await emitAudit(c, {
+      resource: "credit-notes",
+      resourceId: id,
+      action: "update",
+      before: rowToCreditNote(existing),
+      after: rowToCreditNote(updated),
+    });
     return c.json({ success: true, data: rowToCreditNote(updated) });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);

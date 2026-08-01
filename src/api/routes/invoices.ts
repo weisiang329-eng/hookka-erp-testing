@@ -27,6 +27,7 @@ import { computeInvoicePrintExtras } from "../lib/invoice-print-extras";
 // getOrgId import is additive and stays.
 import {
   buildAuditStatement,
+  emitAudit,
   recordAuditCreatedMetric,
 } from "../lib/audit";
 import {
@@ -1739,6 +1740,16 @@ app.post("/", async (c) => {
         500,
       );
     }
+    // Invoice creation was entirely unaudited — the core revenue document
+    // appeared with no record of who raised it. `before` is null by definition
+    // for a create; `after` is the persisted row, so the original figures are
+    // recoverable even if the invoice is later edited.
+    await emitAudit(c, {
+      resource: "invoices",
+      resourceId: created?.id ?? id,
+      action: "create",
+      after: created,
+    });
     return c.json({ success: true, data: created }, 201);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1812,12 +1823,46 @@ app.get("/:id", async (c) => {
   if (!inv) {
     return c.json({ success: false, error: "Invoice not found" }, 404);
   }
+  // Reverse CN link (2026-08-01). A CN can be converted into a DRAFT
+  // invoice via POST /api/consignment-notes/:id/convert-to-invoice — an
+  // official flow (owner re-confirmed 2026-08-01). That path writes the
+  // link ONE-WAY onto consignment_notes.converted_invoice_id (mig 0070):
+  // the invoice row itself keeps deliveryOrderId / doNo / salesOrderId
+  // null, so before this lookup a CN-origin invoice gave the viewer no
+  // indication where it came from. Index
+  // idx_consignment_notes_converted_invoice_id already covers this
+  // predicate, so it is a cheap single-row probe.
+  let sourceConsignmentNote: { id: string; noteNumber: string } | null = null;
+  try {
+    const cnRow = await c.var.DB.prepare(
+      "SELECT id, noteNumber FROM consignment_notes WHERE convertedInvoiceId = ?",
+    )
+      .bind(id)
+      .first<{
+        id: string;
+        noteNumber?: string | null;
+        note_number?: string | null;
+      }>();
+    if (cnRow) {
+      sourceConsignmentNote = {
+        id: cnRow.id,
+        noteNumber: cnRow.noteNumber ?? cnRow.note_number ?? "",
+      };
+    }
+  } catch (err) {
+    // Best-effort enrichment — never fail the invoice read over it.
+    console.error(
+      "[GET /api/invoices/:id] source CN lookup failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
   return c.json({
     success: true,
     data: inv,
     lockReason,
     linkedCreditNotes: (cnRes.results ?? []).map(rowToNoteLink),
     linkedDebitNotes: (dnRes.results ?? []).map(rowToNoteLink),
+    sourceConsignmentNote,
   });
 });
 
@@ -2560,6 +2605,16 @@ app.delete("/:id", async (c) => {
     );
   }
   await c.var.DB.batch(stmts);
+
+  // Deleting an invoice also reverses the customer's outstanding balance, so
+  // without this the money moved with no record of who moved it or what the
+  // document said. The row is gone — this event is the only surviving copy.
+  await emitAudit(c, {
+    resource: "invoices",
+    resourceId: id,
+    action: "delete",
+    before: existing,
+  });
   return c.json({ success: true });
 });
 

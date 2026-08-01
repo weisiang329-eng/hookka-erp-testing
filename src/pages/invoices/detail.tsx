@@ -2,7 +2,7 @@ import { useState, useMemo } from "react";
 import { useTimeout } from "@/lib/scheduler";
 import { humanizeError } from "@/lib/humanize-error";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
-import { SoDocumentRelationship } from "@/components/ui/so-document-relationship";
+import { DocumentChainMap } from "@/components/ui/document-chain-map";
 import { useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -58,7 +58,19 @@ export default function InvoiceDetailPage() {
   const { confirm } = useConfirm();
   const { id } = useParams();
   const navigate = useNavigate();
-  const { data: invResp, loading: invLoading, refresh: refreshInvoice } = useCachedJson<{ success?: boolean; data?: Invoice; lockReason?: string | null; linkedCreditNotes?: LinkedNote[]; linkedDebitNotes?: LinkedNote[] }>(id ? `/api/invoices/${id}` : null);
+  const { data: invResp, loading: invLoading, refresh: refreshInvoice } = useCachedJson<{
+    success?: boolean;
+    data?: Invoice;
+    lockReason?: string | null;
+    // Adjustments raised against this invoice — server-side reverse lookups.
+    linkedCreditNotes?: LinkedNote[];
+    linkedDebitNotes?: LinkedNote[];
+    // Reverse CN link from GET /api/invoices/:id. Non-null only for invoices
+    // produced by POST /api/consignment-notes/:id/convert-to-invoice — those
+    // rows carry no doNo / salesOrderId, so this is the only provenance the
+    // viewer gets.
+    sourceConsignmentNote?: { id: string; noteNumber: string } | null;
+  }>(id ? `/api/invoices/${id}` : null);
   const invoice: Invoice | null = useMemo(() => {
     if (!invResp) return null;
     if (invResp.success && invResp.data) return invResp.data;
@@ -401,10 +413,24 @@ export default function InvoiceDetailPage() {
   const debitedSen = linkedDebitNotes
     .filter((n) => n.status !== "DRAFT")
     .reduce((s, n) => s + (n.totalAmount || 0), 0);
+  // Provenance line for CN-origin invoices (see the type above).
+  const sourceCN = invResp?.sourceConsignmentNote ?? null;
 
   return (
     <div className="space-y-6 max-md:space-y-4">
       <LockBanner reason={lockReason} />
+      {sourceCN && (
+        <p className="text-xs text-[#6B7280]">
+          Created from consignment note{" "}
+          <button
+            type="button"
+            className="doc-number underline underline-offset-2 hover:text-[#1F1D1B]"
+            onClick={() => navigate(`/consignment/note?focus=${sourceCN.id}`)}
+          >
+            {sourceCN.noteNumber || sourceCN.id}
+          </button>
+        </p>
+      )}
       {/* Toast */}
       {toast && (
         <div className="fixed top-4 right-4 z-50 bg-[#4F7C3A] text-white px-6 py-3 rounded-lg shadow-lg flex items-center gap-2 animate-in slide-in-from-top-2">
@@ -1405,7 +1431,7 @@ export default function InvoiceDetailPage() {
       {/* Document Relationship — same chain graph as the SO page, so you can
           see how THIS invoice connects to its SO / DO / payments from here. */}
       {invoice && (invoice.salesOrderId || invoice.companySOId) && (
-        <SoDocumentRelationship
+        <DocumentChainMap
           soId={invoice.salesOrderId || invoice.companySOId}
           currentDocNo={invoice.invoiceNo}
         />

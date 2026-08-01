@@ -3832,6 +3832,18 @@ app.put("/:id", async (c) => {
     }
 
     const updated = await fetchSOWithItems(c.var.DB, id);
+    // The general edit path — items, prices, customer, dates — was the single
+    // biggest audit blind spot in the module: create, confirm, hub-change and
+    // company-reassign were all logged, but a plain PUT rewriting 1,400 lines'
+    // worth of state left nothing behind. Snapshot both sides so a disputed
+    // price or quantity can be traced to who changed it and when.
+    await emitAudit(c, {
+      resource: "sales-orders",
+      resourceId: id,
+      action: "update",
+      before: existing,
+      after: updated,
+    });
     return c.json({
       success: true,
       data: updated,
@@ -4592,6 +4604,16 @@ app.delete("/:id", async (c) => {
     }
     throw e;
   }
+
+  // Deleting a document is the single most important thing to audit — the row
+  // is gone, so the audit event is the ONLY remaining record that it existed.
+  // Snapshot the full pre-state, not just the id.
+  await emitAudit(c, {
+    resource: "sales-orders",
+    resourceId: id,
+    action: "delete",
+    before: existing,
+  });
   return c.json({ success: true });
 });
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, useLayoutEffect, useId } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect, useLayoutEffect, useId } from "react";
 import { createPortal } from "react-dom";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { parsePOText, mapDeliveryHub, type ParsedPO, type POParseResult } from "@/lib/po-parser";
 import { Upload, FileText, CheckCircle, AlertTriangle, X, ChevronDown, ChevronRight, Loader2, Sparkles, Star, Plus, Trash2 } from "lucide-react";
+import { ReusedScanBadge, CachedScanNotice } from "@/components/scan-cached-hint";
 import { postScanQueueConsume } from "@/lib/scan-queue-client";
 import { matchByCompanyName } from "@/lib/company-name-match";
 
@@ -1762,6 +1763,13 @@ function PreviewStep({
   const visibleInFlight = inFlight.slice(0, 3);
   const overflowCount = Math.max(0, inFlight.length - visibleInFlight.length);
 
+  // Cache hits — same bytes uploaded before, so scan-queue replayed the stored
+  // raw_json instead of re-reading the file. Informational only (never blocks).
+  const cachedRowIds = useMemo(
+    () => new Set(queueItems.filter((q) => q.status === "cached").map((q) => q.id)),
+    [queueItems],
+  );
+
   return (
     <div className="space-y-4">
       {/* Inline keyframe for the .ti-loader spin in the queue strip below. */}
@@ -1874,6 +1882,11 @@ function PreviewStep({
         </div>
       )}
 
+      <CachedScanNotice
+        cachedCount={cachedRowIds.size}
+        totalCount={queueItems.length}
+      />
+
       {/* Warnings */}
       {result && result.errors.length > 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
@@ -1896,6 +1909,9 @@ function PreviewStep({
           <ClaudePOCard
             key={`claude-${idx}`}
             row={row}
+            reused={
+              !!row.scanQueueRowId && cachedRowIds.has(row.scanQueueRowId)
+            }
             catalog={catalog}
             selected={selectedPOs.has(idx)}
             // Per-card `expanded` field overrides the legacy one-at-a-time
@@ -1951,9 +1967,11 @@ function PreviewStep({
 }
 
 function ClaudePOCard({
-  row, catalog, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem, onAddItem, onRemoveItem, onMoveItem, onToggleGold, onRemoveCard,
+  row, reused, catalog, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem, onAddItem, onRemoveItem, onMoveItem, onToggleGold, onRemoveCard,
 }: {
   row: ClaudeScanRow;
+  /** This card came from a cache-hit queue row (same file scanned before). */
+  reused?: boolean;
   catalog: ScanCatalog | null;
   selected: boolean;
   expanded: boolean;
@@ -2016,6 +2034,7 @@ function ClaudePOCard({
             {po.isUrgent && (
               <Badge className="bg-red-100 text-red-800 border-red-200">URGENT</Badge>
             )}
+            {reused && <ReusedScanBadge />}
           </div>
           <button
             type="button"
@@ -2147,6 +2166,7 @@ function ClaudePOCard({
               <Badge className="bg-violet-50 text-violet-700 border border-violet-200">
                 <Sparkles className="h-3 w-3 inline mr-0.5" /> {row.file.name}
               </Badge>
+              {reused && <ReusedScanBadge />}
               <span>{po.items.length} items, {totalQty} qty</span>
               {po.isUrgent && (
                 <Badge className="bg-red-100 text-red-800 border-red-200">URGENT</Badge>

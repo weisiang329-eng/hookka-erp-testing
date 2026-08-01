@@ -205,9 +205,25 @@ export default function SalesPage() {
   // Multi-Company Phase 2 — company filter. Default "" = ALL companies (today's
   // view, nothing hidden). Operator narrows to one org code (HOOKKA / OHANA …).
   const _flCompany = useUrlState<string>("company", "");
+  // Hoisted above `_filtersActive`, which now reads it — the Draft tab
+  // forces the whole-dataset fetch (see below).
+  const [tab, setTab] = useUrlState<"DRAFT" | "CONFIRMED">("tab", "CONFIRMED");
+
+  // The Draft tab counts as "needs the whole dataset". The list is server-
+  // PAGINATED but the tab badge reads a whole-table status count, and the
+  // DRAFT/CONFIRMED split is applied CLIENT-side — so if the drafts don't
+  // happen to sit on the fetched page, the tab shows "Draft (2)" over an empty
+  // grid reporting "0 of 0 records" (owner 2026-08-01: 「no draft 可是又show
+  // draft有两个」). Distinct from the sticky-filter bug fixed earlier: there the
+  // rows arrived and were filtered out; here they never arrive.
+  //
+  // Reuses the existing whole-dataset path (server-capped at 5000) rather than
+  // adding a status param — drafts are a handful by nature, and that path is
+  // already the proven one for "client filters the full set".
   const _filtersActive = !!(
     _flStatus[0] || _flCustomer[0] || _flFrom[0] || _flTo[0] ||
-    _flCat[0] || _flDDFrom[0] || _flDDTo[0] || _flCompany[0] || gridSearch.trim()
+    _flCat[0] || _flDDFrom[0] || _flDDTo[0] || _flCompany[0] || gridSearch.trim() ||
+    tab === "DRAFT"
   );
 
   const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{
@@ -308,7 +324,6 @@ export default function SalesPage() {
   const [showItemReview, setShowItemReview] = useState(false);
   // Tab + filter state lives in the URL so refresh, back/forward, and
   // shared links all land the user on exactly the view they had open.
-  const [tab, setTab] = useUrlState<"DRAFT" | "CONFIRMED">("tab", "CONFIRMED");
   const [scanPOOpen, setScanPOOpen] = useState(false);
 
   // Transfer to DO / Invoice states

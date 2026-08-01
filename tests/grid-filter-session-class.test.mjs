@@ -85,3 +85,22 @@ test("no grid ships defaultExcludedValues without a way to separate segments", (
     assert.ok(varies, `${f} seeds a sticky filter but never varies its storage key`);
   }
 });
+
+// --- the OTHER draft-tab bug: rows that never arrive -------------------------
+
+test("the Draft tab fetches the whole dataset, not one server page", () => {
+  // Distinct from the sticky-filter bug above. The list is server-PAGINATED
+  // while the tab badge reads a whole-table status count and the DRAFT split is
+  // applied client-side — so drafts that don't sit on the fetched page produce
+  // "Draft (2)" over an empty grid reporting "0 of 0 records" (no filter
+  // indicator, because nothing was filtered: nothing arrived).
+  assert.match(
+    sales,
+    /gridSearch\.trim\(\) \|\|\s*\n\s*tab === "DRAFT"/,
+    "the Draft tab must force the whole-dataset fetch",
+  );
+  // `tab` has to be declared before `_filtersActive` reads it.
+  const tabAt = sales.indexOf('const [tab, setTab] = useUrlState');
+  const filtersAt = sales.indexOf("const _filtersActive");
+  assert.ok(tabAt > 0 && tabAt < filtersAt, "tab must be hoisted above _filtersActive");
+});

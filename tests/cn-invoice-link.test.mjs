@@ -156,9 +156,13 @@ test("GET /api/invoices/:id looks the source CN up by converted_invoice_id", () 
     /sourceConsignmentNote/,
     "the reverse link must be exposed on the response",
   );
+  // Asserted by MEANING, not by the exact one-line layout the return happened
+  // to have: PR #198 landed linkedCreditNotes / linkedDebitNotes in the same
+  // object, so pinning the literal `lockReason, sourceConsignmentNote })` broke
+  // on a merge that changed nothing about this feature.
   assert.match(
     invRoute,
-    /lockReason, sourceConsignmentNote \}\)/,
+    /return c\.json\(\{[\s\S]{0,400}?sourceConsignmentNote,?[\s\S]{0,200}?\}\);/,
     "sourceConsignmentNote must be returned alongside the existing payload",
   );
 });

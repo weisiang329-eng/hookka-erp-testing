@@ -134,12 +134,26 @@ function calculateOverdueDays(deliveryDate: string, deliveredAt: string | null):
 // Component
 // ---------------------------------------------------------------------------
 
+// Delivery returns raised against this DO, returned by
+// GET /api/delivery-orders/:id (delivery_returns.deliveryOrderId reverse
+// lookup). Before this the relationship was only visible from the Delivery
+// Returns list, so the DO a return came off showed a clean delivered document.
+type LinkedReturn = {
+  id: string;
+  returnNo: string;
+  status: string;
+  returnType: string;
+  reason: string;
+  returnedAt: string | null;
+  createdAt: string | null;
+};
+
 export default function DeliveryDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { toast } = useToast();
   const otherEditors = usePresence("delivery_order", id, Boolean(id));
-  const { data: doResp, loading: doLoading } = useCachedJson<{ success?: boolean; data?: DeliveryOrder; lockReason?: string | null }>(id ? `/api/delivery-orders/${id}` : null);
+  const { data: doResp, loading: doLoading } = useCachedJson<{ success?: boolean; data?: DeliveryOrder; lockReason?: string | null; linkedReturns?: LinkedReturn[] }>(id ? `/api/delivery-orders/${id}` : null);
   const { data: lorryResp, loading: lorryLoading } = useCachedJson<{ success?: boolean; data?: LorryInfo[] }>("/api/lorries");
   const [orderOverride, setOrderOverride] = useState<DeliveryOrder | null>(null);
   const order: DeliveryOrder | null = useMemo(() => {
@@ -441,6 +455,8 @@ export default function DeliveryDetailPage() {
   // Cascade lock — surfaced from /api/delivery-orders/:id. Non-null when
   // an Invoice has been issued referencing this DO.
   const lockReason = (doResp as { lockReason?: string | null } | undefined)?.lockReason ?? null;
+  // Returns raised against this DO — server-side reverse lookup, no list fetch.
+  const linkedReturns: LinkedReturn[] = doResp?.linkedReturns ?? [];
 
   return (
     <div className="space-y-6 max-md:space-y-4">
@@ -1024,6 +1040,59 @@ export default function DeliveryDetailPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Delivery Returns raised against this DO. Rendered only when there are
+          any — a return means goods came back off this delivery (stock
+          reversed, plus either a credit note or a repair service order), which
+          this page previously never mentioned. */}
+      {linkedReturns.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2">
+              <Undo2 className="h-4 w-4 text-[#9A3A2D]" />
+              Delivery Returns ({linkedReturns.length})
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {linkedReturns.map((r) => (
+                <div
+                  key={r.id}
+                  className="flex flex-wrap items-center justify-between gap-2 border border-[#E2DDD8] rounded-md px-3 py-2"
+                >
+                  <div className="flex flex-wrap items-center gap-2 min-w-0">
+                    <button
+                      type="button"
+                      onClick={() => navigate(`/delivery-returns/${r.id}`)}
+                      className="text-sm font-medium text-[#6B5C32] hover:underline"
+                    >
+                      {r.returnNo || r.id}
+                    </button>
+                    <Badge variant="status" status={r.status}>
+                      {r.status.replace(/_/g, " ")}
+                    </Badge>
+                    {r.returnType && (
+                      <span className="text-xs text-[#6B7280]">
+                        {r.returnType.replace(/_/g, " ")}
+                      </span>
+                    )}
+                    {r.reason && (
+                      <span className="text-xs text-[#9CA3AF] truncate">{r.reason}</span>
+                    )}
+                  </div>
+                  <span className="text-xs text-[#9CA3AF]">
+                    {r.returnedAt
+                      ? formatDateTime(r.returnedAt)
+                      : r.createdAt
+                      ? formatDate(r.createdAt)
+                      : ""}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Document Relationship — the same chain graph as the SO page, so you
           can see how THIS delivery order connects to its SO / invoice / payment

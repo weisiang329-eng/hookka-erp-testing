@@ -1404,6 +1404,56 @@ function ensureDiscountColumn(db: D1Database): Promise<void> {
 // can never produce a duplicate. Idempotent (IF NOT EXISTS), once per isolate.
 // Failure is swallowed (e.g. a lingering duplicate would make CREATE fail) so a
 // wedged index build never blocks invoicing — but the dups were cleaned first.
+// Reverse-lookup indexes for the credit/debit notes raised against an invoice
+// (owner 2026-08-01). GET /:id now answers "what was credited/debited back off
+// this invoice" by querying credit_notes.invoice_id / debit_notes.invoice_id —
+// the reverse of the direction the notes themselves are stored in. 0001_init
+// declared these indexes, but migration files are NOT replayed on deploy, so
+// the only guarantee they exist in prod is this runtime self-apply. Idempotent
+// (IF NOT EXISTS) with the SAME index names, so it is a no-op wherever the
+// init migration was applied by hand. Memoised once per isolate; failure is
+// swallowed with a warn — an index that will not build must never take the
+// invoice detail page down with it.
+let _invNoteIndexMig: Promise<void> | null = null;
+function ensureInvoiceNoteIndexes(db: D1Database): Promise<void> {
+  if (!_invNoteIndexMig) {
+    _invNoteIndexMig = (async () => {
+      const stmts = [
+        `CREATE INDEX IF NOT EXISTS idx_credit_notes_invoice_id ON credit_notes (invoice_id)`,
+        `CREATE INDEX IF NOT EXISTS idx_debit_notes_invoice_id ON debit_notes (invoice_id)`,
+      ];
+      for (const sql of stmts) {
+        try {
+          await db.prepare(sql).run();
+        } catch (err) {
+          console.warn("[invoices] ensureInvoiceNoteIndexes:", sql, err);
+        }
+      }
+    })();
+  }
+  return _invNoteIndexMig;
+}
+
+// Shared row shape for both note tables — identical columns in 0001_init.
+type NoteLinkRow = {
+  id: string;
+  noteNumber: string | null;
+  date: string | null;
+  reason: string | null;
+  totalAmount: number | null;
+  status: string | null;
+};
+function rowToNoteLink(r: NoteLinkRow) {
+  return {
+    id: r.id,
+    noteNumber: r.noteNumber ?? "",
+    date: r.date ?? "",
+    reason: r.reason ?? "",
+    totalAmount: r.totalAmount ?? 0,
+    status: r.status ?? "",
+  };
+}
+
 let _invDedupeIndexMig: Promise<void> | null = null;
 function ensureInvoiceDedupeIndex(db: D1Database): Promise<void> {
   if (!_invDedupeIndexMig) {
@@ -1732,17 +1782,47 @@ app.get("/:id/print-extras", async (c) => {
 });
 
 // GET /api/invoices/:id — single
+// GET /api/invoices/:id — invoice + children + the notes raised against it.
+//
+// Reverse links (owner 2026-08-01): credit_notes.invoice_id and
+// debit_notes.invoice_id point AT the invoice, so an adjustment was only
+// discoverable from the Credit/Debit Notes lists. An invoice could have been
+// half credited back and its own page still showed the original total with no
+// hint the amount receivable had moved — the single most misleading number on
+// the page. See ensureInvoiceNoteIndexes() for the index self-apply.
 app.get("/:id", async (c) => {
   const denied = await requirePermission(c, "invoices", "read");
   if (denied) return denied;
   const id = c.req.param("id");
-  const inv = await fetchInvoiceWithChildren(c.var.DB, id);
+  // Reverse-lookup indexes — awaited (not fire-and-forget) so the very first
+  // detail read on a fresh isolate does not run the two note queries against
+  // an unindexed column. Memoised, so it costs one round trip per isolate.
+  await ensureInvoiceNoteIndexes(c.var.DB);
+  const [inv, lockReason, cnRes, dnRes] = await Promise.all([
+    fetchInvoiceWithChildren(c.var.DB, id),
+    // Lock status (payment recorded / status=PAID?) — surfaced to the
+    // detail page so it can render a "credit note required" banner.
+    checkInvoiceLocked(c.var.DB, id),
+    c.var.DB.prepare(
+      `SELECT id, noteNumber, date, reason, totalAmount, status
+         FROM credit_notes
+        WHERE invoiceId = ?
+        ORDER BY date DESC`,
+    )
+      .bind(id)
+      .all<NoteLinkRow>(),
+    c.var.DB.prepare(
+      `SELECT id, noteNumber, date, reason, totalAmount, status
+         FROM debit_notes
+        WHERE invoiceId = ?
+        ORDER BY date DESC`,
+    )
+      .bind(id)
+      .all<NoteLinkRow>(),
+  ]);
   if (!inv) {
     return c.json({ success: false, error: "Invoice not found" }, 404);
   }
-  // Lock status (payment recorded / status=PAID?) — surfaced to the
-  // detail page so it can render a "credit note required" banner.
-  const lockReason = await checkInvoiceLocked(c.var.DB, id);
   // Reverse CN link (2026-08-01). A CN can be converted into a DRAFT
   // invoice via POST /api/consignment-notes/:id/convert-to-invoice — an
   // official flow (owner re-confirmed 2026-08-01). That path writes the
@@ -1776,7 +1856,14 @@ app.get("/:id", async (c) => {
       err instanceof Error ? err.message : String(err),
     );
   }
-  return c.json({ success: true, data: inv, lockReason, sourceConsignmentNote });
+  return c.json({
+    success: true,
+    data: inv,
+    lockReason,
+    linkedCreditNotes: (cnRes.results ?? []).map(rowToNoteLink),
+    linkedDebitNotes: (dnRes.results ?? []).map(rowToNoteLink),
+    sourceConsignmentNote,
+  });
 });
 
 // PUT /api/invoices/:id — update (status transitions, payments, fields)

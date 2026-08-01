@@ -689,6 +689,17 @@ app.get("/", async (c) => {
 
 // ---------------------------------------------------------------------------
 // GET /api/purchase-invoices/:id
+//
+// Reverse links (owner 2026-08-01):
+//   • linkedPayments — supplier_payments.purchase_invoice_id points AT the PI,
+//     so cash-out was only visible from the payments list. A PI could be fully
+//     settled and its own page gave no indication a payment existed; AP had to
+//     open the supplier-payments screen to find out. idx_supplier_payments_pi
+//     already exists (0119), so this is one index seek.
+//   • linkedGRNs — the PI stores grn_id (the GRN it was raised from), which is
+//     a FORWARD key, but the PI page had no way to resolve it to a document, so
+//     it downloaded the ENTIRE /api/grn list and matched client-side.
+// Same `Promise.all` + `linkedX` shape as sales-orders.ts GET /:id.
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
@@ -698,8 +709,62 @@ app.get("/:id", async (c) => {
     .bind(id)
     .first<PurchaseInvoiceRow>();
   if (!row) return c.json({ success: false, error: "PI not found" }, 404);
-  const items = await loadItemsForPI(db, id);
   const projected = rowToPI(row);
+  const [items, linkedPayments, linkedGRNs] = await Promise.all([
+    loadItemsForPI(db, id),
+    (async () => {
+      const res = await db
+        .prepare(
+          `SELECT id, paymentNo, date, amountSen, method, reference
+             FROM supplier_payments
+            WHERE purchaseInvoiceId = ?
+            ORDER BY date`,
+        )
+        .bind(id)
+        .all<{
+          id: string;
+          paymentNo: string | null;
+          date: string | null;
+          amountSen: number | null;
+          method: string | null;
+          reference: string | null;
+        }>();
+      return (res.results ?? []).map((p) => ({
+        id: p.id,
+        paymentNo: p.paymentNo ?? "",
+        date: p.date ?? "",
+        amountSen: p.amountSen ?? 0,
+        method: p.method ?? "",
+        reference: p.reference ?? "",
+      }));
+    })(),
+    (async () => {
+      // grn_id is nullable + only set on GRN-sourced PIs. Skip the query
+      // entirely when absent rather than scanning for a NULL match.
+      if (!projected.grnId) return [];
+      const res = await db
+        .prepare(
+          `SELECT id, grnNumber, status, receiveDate, totalAmount
+             FROM grns
+            WHERE id = ?`,
+        )
+        .bind(projected.grnId)
+        .all<{
+          id: string;
+          grnNumber: string | null;
+          status: string | null;
+          receiveDate: string | null;
+          totalAmount: number | null;
+        }>();
+      return (res.results ?? []).map((g) => ({
+        id: g.id,
+        grnNumber: g.grnNumber ?? "",
+        status: g.status ?? "",
+        receiveDate: g.receiveDate ?? null,
+        totalAmount: g.totalAmount ?? 0,
+      }));
+    })(),
+  ]);
   // Legacy synthesis: if header subtotal/tax are still 0 but a TAX line
   // exists (or the line items now carry per-line tax), surface a sensible
   // breakdown on the fly — read-only, no writes.
@@ -717,7 +782,12 @@ app.get("/:id", async (c) => {
       projected.subtotalSen = projected.amountSen - synthTax;
     }
   }
-  return c.json({ success: true, data: { ...projected, items } });
+  return c.json({
+    success: true,
+    data: { ...projected, items },
+    linkedPayments,
+    linkedGRNs,
+  });
 });
 
 // ---------------------------------------------------------------------------

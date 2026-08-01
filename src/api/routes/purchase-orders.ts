@@ -646,15 +646,72 @@ app.post("/", async (c) => {
   }
 });
 
-// GET /api/purchase-orders/:id — single PO + items
+// GET /api/purchase-orders/:id — single PO + items + downstream documents
+//
+// Reverse links (owner 2026-08-01). grns.po_id and purchase_invoices.
+// purchase_order_id both point AT this PO, so the relationship was only
+// discoverable from the child. The PO detail page compensated by downloading
+// the ENTIRE /api/grn and /api/purchase-invoices lists on every render and
+// filtering client-side — two unbounded payloads to answer "what came off
+// this PO". Both columns are already indexed (idx_grns_po_id,
+// idx_purchase_invoices_purchase_order_id), so the reverse lookup here is two
+// index seeks. Same `Promise.all` + `linkedX` shape as sales-orders.ts.
 app.get("/:id", async (c) => {
   const denied = await requirePermission(c, "purchase-orders", "read");
   if (denied) return denied;
-  const po = await fetchPOWithItems(c.var.DB, c.req.param("id"));
+  const id = c.req.param("id");
+  const [po, grnRes, piRes] = await Promise.all([
+    fetchPOWithItems(c.var.DB, id),
+    c.var.DB.prepare(
+      `SELECT id, grnNumber, status, receiveDate, totalAmount
+         FROM grns
+        WHERE poId = ?
+        ORDER BY grnNumber`,
+    )
+      .bind(id)
+      .all<{
+        id: string;
+        grnNumber: string | null;
+        status: string | null;
+        receiveDate: string | null;
+        totalAmount: number | null;
+      }>(),
+    c.var.DB.prepare(
+      `SELECT id, piNo, status, invoiceDate, amountSen
+         FROM purchase_invoices
+        WHERE purchaseOrderId = ?
+        ORDER BY piNo`,
+    )
+      .bind(id)
+      .all<{
+        id: string;
+        piNo: string | null;
+        status: string | null;
+        invoiceDate: string | null;
+        amountSen: number | null;
+      }>(),
+  ]);
   if (!po) {
     return c.json({ success: false, error: "Purchase order not found" }, 404);
   }
-  return c.json({ success: true, data: po });
+  return c.json({
+    success: true,
+    data: po,
+    linkedGRNs: (grnRes.results ?? []).map((g) => ({
+      id: g.id,
+      grnNumber: g.grnNumber ?? "",
+      status: g.status ?? "",
+      receiveDate: g.receiveDate ?? null,
+      totalAmount: g.totalAmount ?? 0,
+    })),
+    linkedPIs: (piRes.results ?? []).map((p) => ({
+      id: p.id,
+      piNo: p.piNo ?? "",
+      status: p.status ?? "",
+      invoiceDate: p.invoiceDate ?? null,
+      amountSen: p.amountSen ?? 0,
+    })),
+  });
 });
 
 // PUT /api/purchase-orders/:id — update scalar fields + optionally replace items

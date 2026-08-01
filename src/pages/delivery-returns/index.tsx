@@ -9,7 +9,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DataGrid, type Column } from "@/components/ui/data-grid";
-import { useCachedJson } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import { Undo2, Plus, X, Loader2 } from "lucide-react";
 
@@ -143,6 +143,10 @@ export default function DeliveryReturnsPage() {
             setShowCreate(false);
             if (createFrom) setSearchParams({});
             refresh();
+            // The source DO's detail page now lists its returns
+            // (GET /api/delivery-orders/:id → linkedReturns), so its cached
+            // response is stale the moment a return is raised.
+            invalidateCachePrefix("/api/delivery-orders");
             navigate(`/delivery-returns/${id}`);
           }}
         />

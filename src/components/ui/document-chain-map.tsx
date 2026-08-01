@@ -190,7 +190,10 @@ function StationStrip({ poId }: { poId: string }) {
     );
   }
   return (
-    <div className="flex flex-wrap gap-1.5 px-3 pb-3">
+    // A GRID, not flex-wrap: the stations are a route of equal steps, and
+    // ragged widths made them read as unrelated chips with one stranded on its
+    // own line. Equal columns line the route up.
+    <div className="grid grid-cols-2 gap-1.5 px-3 pb-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
       {stations.map((s) => {
         const c = C[s.state];
         const who = s.who.join(", ");
@@ -202,7 +205,7 @@ function StationStrip({ poId }: { poId: string }) {
           <a
             key={s.code}
             href={`/production/${poId}`}
-            className="block min-w-[136px] rounded-md px-2.5 py-2 hover:opacity-90"
+            className="block rounded-md px-2.5 py-2 hover:opacity-90"
             style={{
               background: c.bg,
               border: `1px ${s.state === "pending" ? "dashed" : "solid"} ${c.border}`,
@@ -417,68 +420,79 @@ export function DocumentChainMap({
                   className="rounded-lg"
                   style={{ background: c.bg, border: `1px solid ${c.border}` }}
                 >
-                  <div className="flex w-full items-center gap-2 px-3 py-2 text-left">
-                    {/* Expand and open are SEPARATE targets on purpose: the row
-                        is both a disclosure and a link, and one click cannot
-                        mean both — merging them would navigate away every time
-                        the operator tried to see the stations. */}
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setOpenPOs((p) => ({ ...p, [po.id]: !(p[po.id] ?? true) }))
-                      }
-                      aria-label={open ? "Collapse stations" : "Expand stations"}
-                      className="flex-shrink-0 text-[#6B7280] hover:text-[#1F1D1B]"
-                    >
-                      {open ? (
-                        <ChevronDown className="h-3.5 w-3.5" />
-                      ) : (
-                        <ChevronRight className="h-3.5 w-3.5" />
-                      )}
-                    </button>
-                    <StateDot state={state} />
-                    <a
-                      href={`/production/${po.id}`}
-                      className="text-sm font-semibold text-[#1F1D1B] hover:underline"
-                      title={`Open production order ${po.poNo}`}
-                    >
-                      {po.poNo}
-                    </a>
-                    <span className="truncate text-xs text-[#6B7280]">
-                      {po.productName}
-                      {po.quantity ? ` × ${po.quantity}` : ""}
-                    </span>
-                    <span className="ml-auto flex flex-shrink-0 items-center gap-3 text-xs">
-                      {po.completedBy && (
-                        <span
-                          className="flex items-center gap-1 text-[#6B7280]"
-                          title="Workers who scanned this order's job cards"
-                        >
-                          <User className="h-3 w-3" />
-                          {po.completedBy}
-                        </span>
-                      )}
-                      {po.deliveryDoNo && (
-                        <span className="flex items-center gap-1 text-[#6B7280]">
-                          <Truck className="h-3 w-3" />
-                          {po.deliveryDoNo}
-                        </span>
-                      )}
-                      <span
-                        className="font-medium"
-                        style={{ color: state === "pending" ? "#9CA3AF" : "#1F1D1B" }}
+                  {/* TWO rows, not one. Owner 2026-08-02:「这个排版也是不好看
+                      啊」— a finished order carries a dozen worker names, and
+                      on one row that list (flex-shrink-0) crushed the PO number
+                      into four wrapped lines. The identity line is now
+                      unbreakable and the names sit under it, where a long list
+                      costs nothing. */}
+                  <div className="px-3 py-2 text-left">
+                    <div className="flex w-full items-center gap-2">
+                      {/* Expand and open are SEPARATE targets on purpose: the
+                          row is both a disclosure and a link, and one click
+                          cannot mean both — merging them would navigate away
+                          every time the operator tried to see the stations. */}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setOpenPOs((p) => ({ ...p, [po.id]: !(p[po.id] ?? true) }))
+                        }
+                        aria-label={open ? "Collapse stations" : "Expand stations"}
+                        className="flex-shrink-0 text-[#6B7280] hover:text-[#1F1D1B]"
                       >
-                        {/* `currentDepartment` is the raw code (`WOOD_CUT`).
-                            Owner 2026-08-02:「为什么show fab cut呢」— the code
-                            is internal, and next to the station names it reads
-                            like a different thing entirely. */}
-                        {done
-                          ? po.completedDate || "Completed"
-                          : po.currentDepartment
-                            ? `At ${prettyDept(po.currentDepartment)}`
-                            : "Not started"}
+                        {open ? (
+                          <ChevronDown className="h-3.5 w-3.5" />
+                        ) : (
+                          <ChevronRight className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                      <StateDot state={state} />
+                      <a
+                        href={`/production/${po.id}`}
+                        className="flex-shrink-0 whitespace-nowrap text-sm font-semibold text-[#1F1D1B] hover:underline"
+                        title={`Open production order ${po.poNo}`}
+                      >
+                        {po.poNo}
+                      </a>
+                      {/* The product is what gives way when space runs out —
+                          min-w-0 is what lets truncate actually engage inside a
+                          flex row. */}
+                      <span className="min-w-0 flex-1 truncate text-xs text-[#6B7280]">
+                        {po.productName}
+                        {po.quantity ? ` × ${po.quantity}` : ""}
                       </span>
-                    </span>
+                      <span className="flex flex-shrink-0 items-center gap-3 whitespace-nowrap text-xs">
+                        {po.deliveryDoNo && (
+                          <span className="flex items-center gap-1 text-[#6B7280]">
+                            <Truck className="h-3 w-3" />
+                            {po.deliveryDoNo}
+                          </span>
+                        )}
+                        <span
+                          className="font-medium"
+                          style={{ color: state === "pending" ? "#9CA3AF" : "#1F1D1B" }}
+                        >
+                          {/* `currentDepartment` is the raw code (`WOOD_CUT`).
+                              Owner 2026-08-02:「为什么show fab cut呢」— the code
+                              is internal, and next to the station names it reads
+                              like a different thing entirely. */}
+                          {done
+                            ? po.completedDate || "Completed"
+                            : po.currentDepartment
+                              ? `At ${prettyDept(po.currentDepartment)}`
+                              : "Not started"}
+                        </span>
+                      </span>
+                    </div>
+                    {po.completedBy && (
+                      <div
+                        className="mt-1 flex items-start gap-1 pl-[38px] text-[11px] text-[#6B7280]"
+                        title={po.completedBy}
+                      >
+                        <User className="mt-0.5 h-3 w-3 flex-shrink-0" />
+                        <span className="line-clamp-2">{po.completedBy}</span>
+                      </div>
+                    )}
                   </div>
                   {open && <StationStrip poId={po.id} />}
                 </div>

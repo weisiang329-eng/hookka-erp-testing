@@ -27,6 +27,7 @@ import { Input } from "@/components/ui/input";
 import { formatCurrency, formatDate, formatDateDMY, formatHours, formatRM, roundSen, distributeRoundSen, todayYmdMY } from "@/lib/utils";
 import { printReport, type PrintColumn, type PrintCard, type PrintSection } from "@/lib/print-report";
 import { MALAYSIAN_BANKS, PAYMENT_METHODS, normalizePaymentMethod, paymentDestinationLabel } from "@/lib/payment-method";
+import { EmployeeDrawer, type EmployeeDraft } from "@/components/employee-drawer";
 import { asArray } from "@/lib/safe-json";
 import {
   Users,
@@ -2604,6 +2605,61 @@ function EmployeeMasterTab({
     });
   };
 
+  // Quick view. The grid lists; the drawer maintains (owner 2026-08-02) — the
+  // row is opened on a single click, the way the Houzs sales-order list works.
+  const [drawerId, setDrawerId] = useState<string | null>(null);
+  const [drawerSaving, setDrawerSaving] = useState(false);
+  const drawerEmployee: EmployeeDraft | null = useMemo(() => {
+    const w = workers.find((x) => x.id === drawerId);
+    if (!w) return null;
+    return {
+      id: w.id,
+      empNo: w.empNo ?? "",
+      name: w.name ?? "",
+      position: w.position ?? "",
+      phone: w.phone ?? "",
+      status: w.status ?? "ACTIVE",
+      basicSalarySen: w.basicSalarySen ?? 0,
+      workingHoursPerDay: w.workingHoursPerDay ?? 9,
+      workingDaysPerMonth: w.workingDaysPerMonth ?? 26,
+      otMultiplier: w.otMultiplier ?? 1.5,
+      efficiencyAllowanceSen: w.efficiencyAllowanceSen ?? 0,
+      efficiencyThresholdPct: w.efficiencyThresholdPct ?? 0,
+      epfEnabled: w.epfEnabled !== false,
+      socsoEnabled: w.socsoEnabled !== false,
+      eisEnabled: w.eisEnabled !== false,
+      pcbEnabled: w.pcbEnabled !== false,
+      joinDate: w.joinDate ?? "",
+      nationality: w.nationality ?? "",
+      paymentMethod: normalizePaymentMethod(w.paymentMethod),
+      bankName: w.bankName ?? "",
+      bankAccount: w.bankAccount ?? "",
+    };
+  }, [workers, drawerId]);
+
+  const saveDrawer = async (draft: EmployeeDraft) => {
+    setDrawerSaving(true);
+    try {
+      const res = await fetch(`/api/workers/${draft.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(draft),
+      });
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) {
+        toast.error(body.error || `Could not save (HTTP ${res.status})`);
+        return;
+      }
+      toast.success("Employee updated.");
+      setDrawerId(null);
+      await refreshWorkers();
+    } catch {
+      toast.error("Could not reach the server.");
+    } finally {
+      setDrawerSaving(false);
+    }
+  };
+
   const handleUpdate = async () => {
     if (!editingId) return;
     // Resignation date is required when status is Resigned. Mirror the
@@ -2930,6 +2986,7 @@ function EmployeeMasterTab({
       },
       {
         key: "phone",
+        defaultHidden: true,
         label: "Phone",
         render: (_value, row) =>
           editingId === row.id ? (
@@ -2968,6 +3025,7 @@ function EmployeeMasterTab({
       },
       {
         key: "workingHoursPerDay",
+        defaultHidden: true,
         label: "Hrs/Day",
         align: "center",
         width: "80px",
@@ -2990,6 +3048,7 @@ function EmployeeMasterTab({
       },
       {
         key: "workingDaysPerMonth",
+        defaultHidden: true,
         label: "Days/Mo",
         align: "center",
         width: "80px",
@@ -3012,6 +3071,7 @@ function EmployeeMasterTab({
       },
       {
         key: "otMultiplier",
+        defaultHidden: true,
         label: "OT ×",
         align: "center",
         width: "70px",
@@ -3045,6 +3105,7 @@ function EmployeeMasterTab({
         // below. Stored in sen like basicSalarySen. Phase-1 config column; the
         // Payroll entitlement engine (Phase 2) decides pay/no-pay.
         key: "efficiencyAllowanceSen",
+        defaultHidden: true,
         label: "Eff. Allowance (RM)",
         align: "right",
         sortable: true,
@@ -3074,6 +3135,7 @@ function EmployeeMasterTab({
         // payroll period to earn the allowance above. 0–100; rejected out of
         // range at Save AND on the backend (same message). 0 shows as "—".
         key: "efficiencyThresholdPct",
+        defaultHidden: true,
         label: "Eff. Threshold %",
         align: "center",
         width: "110px",
@@ -3107,6 +3169,7 @@ function EmployeeMasterTab({
         // than greying them: a stale account left visible next to "Cash" is
         // exactly how someone gets paid twice.
         key: "paymentMethod",
+        defaultHidden: true,
         label: "Pay By",
         align: "center",
         width: "110px",
@@ -3129,6 +3192,7 @@ function EmployeeMasterTab({
       },
       {
         key: "bankName",
+        defaultHidden: true,
         label: "Bank",
         width: "150px",
         render: (_value, row) => {
@@ -3160,6 +3224,7 @@ function EmployeeMasterTab({
       },
       {
         key: "bankAccount",
+        defaultHidden: true,
         label: "Account No",
         width: "140px",
         render: (_value, row) => {
@@ -3190,6 +3255,7 @@ function EmployeeMasterTab({
         // (forward-compat) but the operator writes the same boolean to all
         // four. View mode = ticked green / dash grey; Edit mode = checkbox.
         key: "statutory",
+        defaultHidden: true,
         label: "Statutory",
         align: "center",
         width: "90px",
@@ -3248,6 +3314,7 @@ function EmployeeMasterTab({
       },
       {
         key: "joinDate",
+        defaultHidden: true,
         label: "Join Date",
         sortable: true,
         render: (_value, row) =>
@@ -3266,6 +3333,7 @@ function EmployeeMasterTab({
       },
       {
         key: "nationality",
+        defaultHidden: true,
         label: "Nationality",
         render: (_value, row) =>
           editingId === row.id ? (
@@ -3652,10 +3720,22 @@ function EmployeeMasterTab({
           keyField="id"
           gridId="employees-master"
           contextMenuItems={contextMenuItems}
+          onRowClick={(row) => setDrawerId(row.id)}
           onDoubleClick={(row) => startEdit(row)}
           emptyMessage="No employees found."
         />
       </CardContent>
+
+      <EmployeeDrawer
+        key={drawerId ?? "none"}
+        employee={drawerEmployee}
+        departmentLabel={
+          workers.find((w) => w.id === drawerId)?.departmentCode?.replace(/_/g, " ") ?? ""
+        }
+        saving={drawerSaving}
+        onClose={() => setDrawerId(null)}
+        onSave={saveDrawer}
+      />
 
       {/* Per-worker PIN modal — two phases: configure then reveal. */}
       {salaryChangePrompt && (

@@ -44,7 +44,16 @@ export default function InvoiceDetailPage() {
   const { confirm } = useConfirm();
   const { id } = useParams();
   const navigate = useNavigate();
-  const { data: invResp, loading: invLoading, refresh: refreshInvoice } = useCachedJson<{ success?: boolean; data?: Invoice; lockReason?: string | null }>(id ? `/api/invoices/${id}` : null);
+  const { data: invResp, loading: invLoading, refresh: refreshInvoice } = useCachedJson<{
+    success?: boolean;
+    data?: Invoice;
+    lockReason?: string | null;
+    // Reverse CN link from GET /api/invoices/:id. Non-null only for
+    // invoices produced by POST /api/consignment-notes/:id/convert-to-invoice
+    // — those rows carry no doNo / salesOrderId, so this is the only
+    // provenance the viewer gets.
+    sourceConsignmentNote?: { id: string; noteNumber: string } | null;
+  }>(id ? `/api/invoices/${id}` : null);
   const invoice: Invoice | null = useMemo(() => {
     if (!invResp) return null;
     if (invResp.success && invResp.data) return invResp.data;
@@ -378,10 +387,24 @@ export default function InvoiceDetailPage() {
   // Cascade lock — surfaced from /api/invoices/:id. Non-null when payment
   // is recorded against this invoice (status=PAID or paidAmountSen > 0).
   const lockReason = (invResp as { lockReason?: string | null } | undefined)?.lockReason ?? null;
+  // Provenance line for CN-origin invoices (see the type above).
+  const sourceCN = invResp?.sourceConsignmentNote ?? null;
 
   return (
     <div className="space-y-6 max-md:space-y-4">
       <LockBanner reason={lockReason} />
+      {sourceCN && (
+        <p className="text-xs text-[#6B7280]">
+          Created from consignment note{" "}
+          <button
+            type="button"
+            className="doc-number underline underline-offset-2 hover:text-[#1F1D1B]"
+            onClick={() => navigate(`/consignment/note?focus=${sourceCN.id}`)}
+          >
+            {sourceCN.noteNumber || sourceCN.id}
+          </button>
+        </p>
+      )}
       {/* Toast */}
       {toast && (
         <div className="fixed top-4 right-4 z-50 bg-[#4F7C3A] text-white px-6 py-3 rounded-lg shadow-lg flex items-center gap-2 animate-in slide-in-from-top-2">

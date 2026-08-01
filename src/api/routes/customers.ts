@@ -11,6 +11,10 @@ import type { Env } from "../worker";
 import { checkCustomerDeleteLocked, lockedResponse } from "../lib/lock-helpers";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
+import {
+  propagateCustomerName,
+  backfillCustomerNames,
+} from "../lib/party-name-propagate";
 import { parseDebtorCode } from "../../lib/debtor";
 import { resolveCompanyCode } from "../../lib/company-dimension";
 
@@ -382,6 +386,39 @@ app.get("/:id", async (c) => {
   return c.json({ success: true, data: rowToCustomer(cust, hubsRes.results ?? []) });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/customers/_backfill-snapshot-names — one-shot (owner 2026-08-01).
+//
+// Realigns every id-keyed customer_name snapshot (14 tables) to the customers
+// master, fixing renames made before propagation shipped. Idempotent — a second
+// run reports 0 rows. The 7 id-less tables (e_invoices, fg_units,
+// production_orders, qc_inspections, rack_items, rack_locations,
+// schedule_entries) have nothing to join on and are returned as
+// `notBackfillable`; the rename hook keeps them current from now on.
+// Optional body { customerId } scopes it to one customer.
+// ---------------------------------------------------------------------------
+app.post("/_backfill-snapshot-names", async (c) => {
+  const denied = await requirePermission(c, "customers", "update");
+  if (denied) return denied;
+  let customerId: string | null = null;
+  try {
+    const body = (await c.req.json()) as { customerId?: unknown };
+    if (typeof body?.customerId === "string" && body.customerId.trim()) {
+      customerId = body.customerId.trim();
+    }
+  } catch {
+    /* no body = every customer */
+  }
+  const r = await backfillCustomerNames(
+    c.var.DB as unknown as Parameters<typeof backfillCustomerNames>[0],
+    customerId,
+  );
+  console.info(
+    `[backfill-snapshot-names customers] scope=${customerId ?? "ALL"} rows=${r.totalRows}`,
+  );
+  return c.json({ success: true, data: r });
+});
+
 // PUT /api/customers/:id — update
 app.put("/:id", async (c) => {
   const denied = await requirePermission(c, "customers", "update");
@@ -578,6 +615,24 @@ app.put("/:id", async (c) => {
           )
           .run();
       }
+    }
+
+    // A rename must reach the 21 tables that snapshotted customer_name at
+    // create time — their read paths don't join customers, so without this the
+    // correction is invisible on every existing SO / DO / invoice / production
+    // order / schedule row / rack label (owner 2026-08-01). 14 are keyed by
+    // customer_id; the other 7 carry no id and are matched on the old name.
+    // Owner ruling: propagate to financial documents too.
+    if (merged.name !== existing.name) {
+      const prop = await propagateCustomerName(
+        c.var.DB as unknown as Parameters<typeof propagateCustomerName>[0],
+        id,
+        existing.name,
+        merged.name,
+      );
+      console.info(
+        `[PUT /api/customers/${id}] renamed "${prop.oldName}" → "${prop.newName}": ${prop.totalRows} row(s) across ${prop.tables.filter((t) => t.updated !== null).length} table(s)`,
+      );
     }
 
     const hubsRes = await c.var.DB.prepare(

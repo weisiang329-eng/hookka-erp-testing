@@ -93,3 +93,18 @@ test("isDuplicateSoIdError matches the index by name and by generic 23505", () =
   assert.match(helpers, /uniq_sales_orders_company_so_id\/i\.test\(msg\)/);
   assert.match(helpers, /duplicate key\|unique constraint\|23505/i);
 });
+
+test("the number sequence is ordered numerically, not as text", () => {
+  const helpers = readFileSync("src/api/routes/sales-orders/_helpers.ts", "utf8");
+  // Lexicographic order agreed with numeric order only up to 999: the 1000th
+  // order in a month sorts BELOW "…-999", so the next mint would collide with
+  // an existing number rather than move past it.
+  assert.match(helpers, /ORDER BY CAST\(NULLIF\(regexp_replace\(companySOId/);
+  assert.doesNotMatch(
+    helpers,
+    /ORDER BY companySOId DESC/,
+    "the text sort must not come back",
+  );
+  // Padding stays at 3 so existing ids are untouched.
+  assert.match(helpers, /padStart\(3, "0"\)/);
+});

@@ -331,13 +331,7 @@ app.post("/settle-period", async (c) => {
       // Nothing recorded at all → absence (salary-deduction territory). Skip.
       const hasPunch = !!(punch && punch.clockIn && punch.clockOut);
       const hasLogged = (logged ?? 0) > 0;
-      // ZERO logged hours = the payroll engine already counts this day as an
-      // ABSENCE and docks the full ÷26 day rate. An hour dock on top would
-      // charge the same day twice — and the absence is always the bigger of the
-      // two, so skipping can never under-charge. (Was: skip only when there is
-      // ALSO no punch, which let a short/broken punch stack a second deduction
-      // onto an absent day.)
-      if (!hasLogged) continue;
+      if (!hasPunch && !hasLogged) continue;
 
       // Punch shortfall (shift algorithm) — 0 unless a complete punch is short.
       // Scored against THIS worker's contracted day, not the factory-wide 9h:
@@ -356,6 +350,11 @@ app.post("/settle-period", async (c) => {
         ? computeUnderLoggedShortfallHours(logged ?? 0, expected)
         : 0;
 
+      // A day with ZERO logged hours is an ABSENCE — already charged in full by
+      // the engine — and must never also carry an hour dock. That rule is NOT
+      // enforced here: it lives in maybeApplyAutoDayDock (reason "absent-day")
+      // so the live punch path and the office re-apply endpoint are covered by
+      // the same guard. See BUG-2026-08-01-002.
       const shortfall = Math.max(punchShort, loggedShort);
       const source = punchShort >= loggedShort ? "from punch" : "from unlogged hours";
       const r = await maybeApplyAutoDayDock(c.var.DB, {

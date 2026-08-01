@@ -1205,20 +1205,15 @@ app.post("/clock", async (c) => {
   // skip, never overrides a manual dock). Best-effort: a dock hiccup must NEVER
   // fail the punch, and "no dock" is always the safe fallback.
   if (existing.clockIn) {
-    try {
-      await maybeApplyAutoPunchDock(c.var.DB, {
-        workerId: worker.id,
-        date,
-        clockIn: existing.clockIn,
-        clockOut: time,
-      });
-    } catch (e) {
-      console.warn("[worker/clock] auto short-hour dock skipped:", e);
-    }
     // Auto-fill Working Hours from the punch + today's dept scans (owner
     // 2026-06-11): default = the worker's home department; scans re-route
     // stretches of the day; category follows the dept's actual job cards.
     // Never overwrites office-keyed rows; best-effort like the dock.
+    //
+    // MUST run BEFORE the dock. The dock's "never charge an absent day twice"
+    // guard (BUG-2026-08-01-002) reads this day's logged hours — with the old
+    // order those rows didn't exist yet, so every live punch-out would look
+    // like an absent day and no short-hour dock would ever apply again.
     try {
       await autofillWorkingHoursFromPunch(c.var.DB, {
         attendanceId: existing.id,
@@ -1230,6 +1225,16 @@ app.post("/clock", async (c) => {
       });
     } catch (e) {
       console.warn("[worker/clock] working-hours auto-fill skipped:", e);
+    }
+    try {
+      await maybeApplyAutoPunchDock(c.var.DB, {
+        workerId: worker.id,
+        date,
+        clockIn: existing.clockIn,
+        clockOut: time,
+      });
+    } catch (e) {
+      console.warn("[worker/clock] auto short-hour dock skipped:", e);
     }
   }
 

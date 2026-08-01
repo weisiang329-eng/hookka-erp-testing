@@ -2002,6 +2002,50 @@ function PreviewStep({
   );
 }
 
+// Divan / Gap picker. Both used `<input list>` + `<datalist>`, which Chrome
+// FILTERS by whatever is already typed — the cell already held "8", so the
+// dropdown showed only "8" and looked like the maintenance list had one entry
+// (owner 2026-08-01: 「为什么这些不是dropdown选择了」). Leg was always a real
+// <select>; these two now match it.
+//
+// A value that OCR read but maintenance doesn't list is kept as its own option
+// rather than silently dropped — a select whose value isn't among its options
+// renders blank, which would look like the scan lost the number.
+function InchSelect({
+  value,
+  options,
+  onChange,
+  disabled,
+  title,
+}: {
+  value: number | null;
+  options: number[];
+  onChange: (v: number | null) => void;
+  disabled?: boolean;
+  title?: string;
+}) {
+  const known = options.includes(value ?? NaN);
+  return (
+    <select
+      className="w-16 px-1 py-1 text-sm border border-transparent hover:border-[#E2DDD8] rounded text-center bg-transparent disabled:opacity-40"
+      value={value ?? ""}
+      title={title}
+      disabled={disabled}
+      onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))}
+    >
+      <option value="">—</option>
+      {value != null && !known && (
+        <option value={value}>{`${value} (not in list)`}</option>
+      )}
+      {options.map((v) => (
+        <option key={v} value={v}>
+          {v}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 function ClaudePOCard({
   row, reused, catalog, customerAliases, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem, onAddItem, onRemoveItem, onMoveItem, onToggleGold, onRemoveCard,
 }: {
@@ -2179,14 +2223,42 @@ function ClaudePOCard({
                   />
                 )}
               </div>
-              <div>
-                <label className="block text-xs text-[#9CA3AF]">State</label>
-                <input
-                  className="w-full px-2 py-1 border border-[#E2DDD8] rounded"
-                  value={po.customerState ?? ""}
-                  onChange={e => onUpdate({ customerState: e.target.value || null })}
-                />
-              </div>
+              {/* State is DERIVED from the delivery hub, never typed. The
+                  create path already prefers the resolved hub's state, and the
+                  hub-vanishes invariant is that customer_state is authoritative
+                  only when it came from a hub — so a free-text box here could
+                  only ever produce a value the backend would discard, or a
+                  wrong one it would keep. Owner 2026-08-01: 「state 如果是自动
+                  出来的不可以edit的 那就不要给edit 然后为什么是free text」.
+                  Read-only; pick the hub to change it. */}
+              {(() => {
+                const hubState =
+                  resolved.hubs.find((h) => h.id === resolved.hubId)?.state ?? null;
+                return (
+                  <div>
+                    <label className="block text-xs text-[#9CA3AF]">
+                      State{" "}
+                      <span className="text-[10px] normal-case">(from hub)</span>
+                    </label>
+                    <div
+                      className="w-full px-2 py-1 border border-[#E2DDD8] rounded bg-[#F5F1EA] text-[#4B5563] uppercase truncate"
+                      title={
+                        hubState
+                          ? "Set by the delivery hub — change the hub to change this."
+                          : "No hub resolved yet. Pick a Delivery Hub and the state follows."
+                      }
+                    >
+                      {hubState ?? (
+                        <span className="text-[#9CA3AF] normal-case">
+                          {po.customerState
+                            ? `${po.customerState} — read off the PDF, pick a hub to confirm`
+                            : "— pick a hub —"}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
               <div>
                 <label className="block text-xs text-[#9CA3AF]">Delivery Date</label>
                 <input
@@ -2434,22 +2506,13 @@ function ClaudePOCard({
                           </td>
                           {!isTablet && (
                             <td className="px-1.5 py-1 text-center">
-                              <input
-                                list={`div-${row.sampleId}-${i}`}
-                                type="number"
-                                step="0.5"
-                                onFocus={(e) => e.currentTarget.select()}
-                                className="w-16 px-1.5 py-1 text-sm border border-transparent hover:border-[#E2DDD8] rounded text-center [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-                                value={item.divanHeightInches ?? ""}
-                                onChange={(e) => {
-                                  const v = e.target.value === "" ? null : Number(e.target.value);
-                                  onUpdateItem(i, { divanHeightInches: v });
-                                }}
+                              <InchSelect
+                                value={item.divanHeightInches}
+                                options={divanValues}
+                                onChange={(v) => onUpdateItem(i, { divanHeightInches: v })}
                                 disabled={item.category !== "BEDFRAME"}
+                                title="Divan height (inches) — from Maintenance"
                               />
-                              <datalist id={`div-${row.sampleId}-${i}`}>
-                                {divanValues.map((v) => <option key={v} value={v} />)}
-                              </datalist>
                             </td>
                           )}
                           {!isTablet && (
@@ -2482,22 +2545,13 @@ function ClaudePOCard({
                           )}
                           {!isTablet && (
                             <td className="px-1.5 py-1 text-center">
-                              <input
-                                list={`gap-${row.sampleId}-${i}`}
-                                type="number"
-                                step="0.5"
-                                onFocus={(e) => e.currentTarget.select()}
-                                className="w-16 px-1.5 py-1 text-sm border border-transparent hover:border-[#E2DDD8] rounded text-center [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-                                value={item.gapInches ?? ""}
-                                onChange={(e) => {
-                                  const v = e.target.value === "" ? null : Number(e.target.value);
-                                  onUpdateItem(i, { gapInches: v });
-                                }}
+                              <InchSelect
+                                value={item.gapInches}
+                                options={gapValues}
+                                onChange={(v) => onUpdateItem(i, { gapInches: v })}
                                 disabled={item.category !== "BEDFRAME"}
+                                title="Gap (inches) — from Maintenance"
                               />
-                              <datalist id={`gap-${row.sampleId}-${i}`}>
-                                {gapValues.map((v) => <option key={v} value={v} />)}
-                              </datalist>
                             </td>
                           )}
                           <td className="px-1.5 py-1">

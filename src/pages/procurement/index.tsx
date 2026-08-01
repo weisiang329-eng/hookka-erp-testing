@@ -833,11 +833,40 @@ export default function ProcurementPage() {
   const [filterOverdueOnly, setFilterOverdueOnly] = useState(false);
   const [gridSearch, setGridSearch] = useState("");
 
+  // Server-side pagination for the PO list. The grid shows one 200-row page at
+  // a time UNLESS a filter/search is active — then we drop pagination and pull
+  // the whole dataset so the client-side filter/search can see EVERY PO, never
+  // just the current page (the search-safe rule; mirrors sales/index.tsx). The
+  // summary widgets read the separate /stats payload so their counts stay
+  // whole-dataset regardless of which page the grid is on. 2026-08-01.
+  const PO_PAGE_SIZE = 200;
+  const [poPage, setPoPage] = useState(1);
+  const poFiltersActive = !!(
+    filterStatus ||
+    filterSupplier ||
+    filterCompany ||
+    filterDateFrom ||
+    filterDateTo ||
+    filterOverdueOnly ||
+    gridSearch.trim()
+  );
+
   const { data: supResp, loading: supLoading, refresh: refreshSuppliers } = useCachedJson<{ success?: boolean; data?: Supplier[] }>("/api/suppliers");
   // Purchase Company letterhead registry — print each PO under its supplier's
   // buying company (HOOKKA / OHANA / any sister co); accounting stays HOOKKA.
   const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code?: string; name?: string; regNo?: string; tin?: string; address?: string; phone?: string; email?: string }> }>("/api/organisations");
-  const { data: poResp, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: PurchaseOrder[] }>("/api/purchase-orders");
+  const { data: poResp, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: PurchaseOrder[]; total?: number; page?: number; limit?: number }>(
+    poFiltersActive
+      ? // Any filter/search active → whole dataset (no page params), so the
+        // client-side filter/search below sees every PO.
+        "/api/purchase-orders"
+      : `/api/purchase-orders?page=${poPage}&limit=${PO_PAGE_SIZE}`,
+  );
+  // Whole-dataset PO header rows (no line items) — drives the summary widgets so
+  // their counts never shrink to just the current page. Cheap: items excluded.
+  const { data: poStatsResp } = useCachedJson<{ success?: boolean; data?: PurchaseOrder[]; total?: number }>(
+    "/api/purchase-orders/stats",
+  );
   const { data: invResp, loading: invLoading, refresh: refreshInventory } = useCachedJson<{ success?: boolean; data?: { rawMaterials?: RawMaterial[] } }>("/api/inventory");
   const { data: bindingsResp, loading: bindingsLoading, refresh: refreshBindings } = useCachedJson<{ success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]>("/api/supplier-materials");
   // 2.6 — forward-looking shortage forecast based on open SOs + BOM walk.
@@ -876,6 +905,21 @@ export default function ProcurementPage() {
     () => (poResp?.success ? poResp.data ?? [] : Array.isArray(poResp) ? poResp : []),
     [poResp]
   );
+  // Whole-dataset PO header rows for the summary widgets (counts + aging), so a
+  // paginated grid page never makes the widget numbers shrink. Falls back to
+  // the (possibly paginated) list only until /stats lands.
+  const poStatsRows: PurchaseOrder[] = useMemo(
+    () => (poStatsResp?.success ? poStatsResp.data ?? [] : purchaseOrders),
+    [poStatsResp, purchaseOrders],
+  );
+  const poTotalCount = poStatsResp?.total ?? poStatsRows.length;
+  const poTotalPages = Math.max(1, Math.ceil(poTotalCount / PO_PAGE_SIZE));
+  // Clamp the page if the dataset shrank (a delete/filter left us past the last
+  // page) so we never request an empty out-of-range page.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- clamp only; guarded so it self-terminates (no render loop)
+    if (poPage > poTotalPages) setPoPage(poTotalPages);
+  }, [poPage, poTotalPages]);
   const rawMaterials: RawMaterial[] = useMemo(
     () => (invResp?.success ? invResp.data?.rawMaterials ?? [] : []),
     [invResp]
@@ -1378,19 +1422,19 @@ export default function ProcurementPage() {
   }, [filteredOrdersByUserFilters, tab]);
 
   const draftCount = useMemo(
-    () => purchaseOrders.filter(po => po.status === "DRAFT").length,
-    [purchaseOrders],
+    () => poStatsRows.filter(po => po.status === "DRAFT").length,
+    [poStatsRows],
   );
   const confirmedCount = useMemo(
-    () => purchaseOrders.filter(po => po.status !== "DRAFT").length,
-    [purchaseOrders],
+    () => poStatsRows.filter(po => po.status !== "DRAFT").length,
+    [poStatsRows],
   );
 
   // 4.2 — aging buckets across overdue POs (count of yellow / orange / red).
   // The widget surfaces an aggregate color = the worst bucket present.
   const overduePoList = useMemo(
-    () => purchaseOrders.filter(isOverdue),
-    [purchaseOrders, isOverdue],
+    () => poStatsRows.filter(isOverdue),
+    [poStatsRows, isOverdue],
   );
   const agingBuckets = useMemo(() => {
     let yellow = 0;
@@ -1444,7 +1488,7 @@ export default function ProcurementPage() {
 
   // ---- Summary stats ----
   // Note: 4.2 widget consumes overduePoList from the filter section above.
-  const pendingDelivery = purchaseOrders.filter((po) => ["SUBMITTED", "CONFIRMED"].includes(po.status)).length;
+  const pendingDelivery = poStatsRows.filter((po) => ["SUBMITTED", "CONFIRMED"].includes(po.status)).length;
   const totalOutstandingQty = purchaseOrders
     .filter((po) => !["RECEIVED", "CANCELLED"].includes(po.status))
     .reduce((sum, po) => sum + po.items.reduce((s, it) => s + Math.max(0, it.quantity - (it.receivedQty || 0)), 0), 0);
@@ -1700,7 +1744,7 @@ export default function ProcurementPage() {
               <FileText className="h-5 w-5 text-[#6B5C32]" />
             </div>
             <div className="min-w-0">
-              <p className="text-2xl font-bold text-[#1F1D1B]">{purchaseOrders.length}</p>
+              <p className="text-2xl font-bold text-[#1F1D1B]">{poTotalCount}</p>
               <p className="text-xs text-[#6B7280]">Total POs</p>
             </div>
           </CardContent>
@@ -1892,7 +1936,7 @@ export default function ProcurementPage() {
               )}
               {hasActiveFilters && (
                 <span className="text-sm text-[#6B7280]">
-                  Showing {filteredOrders.length} of {purchaseOrders.length} orders
+                  Showing {filteredOrders.length} of {poTotalCount} orders
                 </span>
               )}
             </div>
@@ -2088,6 +2132,33 @@ export default function ProcurementPage() {
             onSearchChange={setGridSearch}
             gridId="purchase-orders-list"
           />
+          {/* Server-side page controls — only in the default (unfiltered) view.
+              When a filter/search is active the whole dataset is loaded and the
+              grid shows every match, so paging would be meaningless (and is
+              hidden). */}
+          {!poFiltersActive && poTotalPages > 1 && (
+            <div className="flex items-center justify-center gap-3 py-3 border-t border-[#F0ECE9]">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={poPage <= 1 || poLoading}
+                onClick={() => setPoPage((p) => Math.max(1, p - 1))}
+              >
+                ← Prev
+              </Button>
+              <span className="text-sm text-[#6B7280]">
+                Page {poPage} / {poTotalPages}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={poPage >= poTotalPages || poLoading}
+                onClick={() => setPoPage((p) => Math.min(poTotalPages, p + 1))}
+              >
+                Next →
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
 

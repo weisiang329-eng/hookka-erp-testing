@@ -311,10 +311,41 @@ app.get("/", async (c) => {
   if (denied) return denied;
   const orgId = getOrgId(c);
   await ensurePoItemLineNo(c.var.DB);
-  const pos = await c.var.DB
-    .prepare("SELECT * FROM purchase_orders WHERE orgId = ? ORDER BY created_at DESC, id DESC")
-    .bind(orgId)
-    .all<PurchaseOrderRow>();
+
+  // Opt-in pagination (mirrors sales-orders.ts). `?page=N&limit=M` applies SQL
+  // LIMIT/OFFSET and scopes items to the page's POs; the response then carries
+  // { total, page, limit }. Omitting BOTH preserves the full-list behavior the
+  // list page falls back to whenever a filter/search is active — so a search
+  // always sees EVERY PO, never just the current page (the search-safe rule).
+  // 2026-08-01.
+  const pageParam = c.req.query("page");
+  const limitParam = c.req.query("limit");
+  const paginate = pageParam !== undefined || limitParam !== undefined;
+  const page = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);
+  const limit = Math.min(500, Math.max(1, parseInt(limitParam ?? "50", 10) || 50));
+
+  let total: number | undefined;
+  if (paginate) {
+    const cnt = await c.var.DB
+      .prepare("SELECT COUNT(*) AS n FROM purchase_orders WHERE orgId = ?")
+      .bind(orgId)
+      .first<{ n: number }>();
+    total = Number(cnt?.n ?? 0);
+  }
+
+  const pos = paginate
+    ? await c.var.DB
+        .prepare(
+          "SELECT * FROM purchase_orders WHERE orgId = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+        )
+        .bind(orgId, limit, (page - 1) * limit)
+        .all<PurchaseOrderRow>()
+    : await c.var.DB
+        .prepare(
+          "SELECT * FROM purchase_orders WHERE orgId = ? ORDER BY created_at DESC, id DESC",
+        )
+        .bind(orgId)
+        .all<PurchaseOrderRow>();
   const poRows = pos.results ?? [];
   // Scope items to the POs we return — was `WHERE orgId` with no LIMIT, loading
   // every item for the org on each render. Guard the "IN ()" case.
@@ -337,7 +368,33 @@ app.get("/", async (c) => {
     poRows.map((p) => p.supplierId),
   );
   fillBlankSupplierSku(data, bindings);
-  return c.json({ success: true, data });
+  return c.json(
+    paginate
+      ? { success: true, data, total, page, limit }
+      : { success: true, data },
+  );
+});
+
+// GET /api/purchase-orders/stats — whole-dataset PO header rows (NO line items),
+// so the list page's summary widgets (Draft / Confirmed counts, the overdue
+// aging widget) always reflect EVERY PO even when the main list is showing a
+// single paginated page. Items are the heavy, unbounded part and the widgets
+// never need them — rowToPO reads status / expectedDate / totalSen straight
+// off the PO row, so an items-less map is correct + cheap. The frontend reuses
+// its existing isOverdue / aging logic over this payload unchanged. Registered
+// BEFORE `/:id` so Hono doesn't route "stats" as an id. 2026-08-01.
+app.get("/stats", async (c) => {
+  const denied = await requirePermission(c, "purchase-orders", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const pos = await c.var.DB
+    .prepare(
+      "SELECT * FROM purchase_orders WHERE orgId = ? ORDER BY created_at DESC, id DESC",
+    )
+    .bind(orgId)
+    .all<PurchaseOrderRow>();
+  const rows = (pos.results ?? []).map((p) => rowToPO(p));
+  return c.json({ success: true, data: rows, total: rows.length });
 });
 
 // POST /api/purchase-orders — create PO + items atomically

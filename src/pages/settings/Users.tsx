@@ -81,10 +81,6 @@ function roleLabel(role: string): string {
   return ROLE_OPTIONS.find((o) => o.value === role)?.label ?? role;
 }
 
-// Department options for an @hookka.com mailbox (owner 2026-06-17). Used by the
-// create-alias modal; the same three buckets the org chart sorts first.
-const DEPT_OPTIONS = ["Support", "Finance", "HR"] as const;
-
 // ---------- Org Chart taxonomy (mirrors Houzs-Century) ---------------------
 // The Org Chart tab is a Houzs-style TABLE (Name · Department · Position ·
 // Reports to), NOT a kanban — owner kept asking for "like Houzs ERP". This
@@ -93,14 +89,30 @@ const DEPT_OPTIONS = ["Support", "Finance", "HR"] as const;
 // furniture-factory roles for HOOKKA (Production / Sales / Office / Warehouse /
 // Management) and stay free-text on the user row, so the list can be extended
 // later without a migration. ORG_DEPARTMENTS drives the Department <select>.
+// Owner 2026-08-01. Every FACTORY employee (the `workers` table) sits under
+// Production regardless of their production sub-department (Fab Cut, Framing,
+// …) — that split is a costing dimension, not a reporting line. Office accounts
+// pick from the rest.
 const ORG_DEPARTMENTS = [
   "Management",
   "Production",
+  "R&D",
+  "QA",
   "Sales",
   "Office",
-  "Warehouse",
+  "Finance",
+  "HR",
+  "Others",
 ] as const;
 type OrgDepartment = (typeof ORG_DEPARTMENTS)[number];
+
+// Department options for an @hookka.com mailbox. ONE list, shared with the org
+// chart below — the alias dialog itself says "Department … feed the org chart",
+// but the two used to be different sets ("Support / Finance / HR" here versus
+// "Management / Production / Sales / Office / Warehouse" there), so a person
+// filed under Support could not be placed on the chart at all.
+const DEPT_OPTIONS = ORG_DEPARTMENTS;
+
 
 const POSITIONS_BY_DEPARTMENT: Record<OrgDepartment, string[]> = {
   Management: ["Director", "General Manager", "Operations Manager", "Admin Manager"],
@@ -114,9 +126,13 @@ const POSITIONS_BY_DEPARTMENT: Record<OrgDepartment, string[]> = {
     "Operator",
     "Helper",
   ],
+  "R&D": ["R&D Manager", "Product Designer", "Prototype Maker", "R&D Assistant"],
+  QA: ["QA Manager", "QC Inspector", "QC Assistant"],
   Sales: ["Sales Manager", "Sales Executive", "Sales Coordinator", "Showroom Staff"],
-  Office: ["Account Manager", "Accounts Executive", "HR Executive", "Purchasing", "Admin Assistant"],
-  Warehouse: ["Warehouse Manager", "Storekeeper", "Logistics Coordinator", "Driver", "Loader"],
+  Office: ["Admin Manager", "Purchasing", "Admin Assistant", "Storekeeper", "Driver"],
+  Finance: ["Finance Manager", "Accounts Executive", "Account Assistant"],
+  HR: ["HR Manager", "HR Executive", "HR Assistant"],
+  Others: [],
 };
 
 // Positions that mark someone as a manager-ish "upline" candidate — mirrors how
@@ -318,7 +334,7 @@ export default function UsersPage() {
   // Department the mailbox is grouped under (owner 2026-06-17): HR people → HR,
   // Finance people → Finance, Operations + everyone else → Support. Posted as
   // assignedDept (the email_addresses table has an assigned_dept column).
-  const [aliasDept, setAliasDept] = useState<string>("Support");
+  const [aliasDept, setAliasDept] = useState<string>("Others");
   // Free-text job title recorded on the mailbox alongside the department
   // (owner 2026-06-17). Optional; posted as assignedPosition (the
   // email_addresses table has an assigned_position column).
@@ -1506,7 +1522,13 @@ export default function UsersPage() {
     setAliasForUser(u);
     setAliasExisting(existing);
     setAliasAddress(existing ? existing.address : suggestAlias(u));
-    setAliasDept(existing?.assignedDept || "Support");
+    // Existing aliases still carry the retired "Support" value; it is not in
+    // the list any more, so fall back rather than render a blank select.
+    setAliasDept(
+      existing?.assignedDept && (DEPT_OPTIONS as readonly string[]).includes(existing.assignedDept)
+        ? existing.assignedDept
+        : "Others",
+    );
     setAliasPosition(existing?.assignedPosition || "");
     setAliasError(null);
     // Role-change folded into Edit details: seed the role draft from the user's
@@ -3129,8 +3151,7 @@ export default function UsersPage() {
                 onChange={(e) => setAliasDept(e.target.value)}
                 className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
               >
-                <option value="Support">Support (Operations &amp; others)</option>
-                {DEPT_OPTIONS.filter((d) => d !== "Support").map((d) => (
+                {DEPT_OPTIONS.map((d) => (
                   <option key={d} value={d}>
                     {d}
                   </option>

@@ -331,7 +331,13 @@ app.post("/settle-period", async (c) => {
       // Nothing recorded at all → absence (salary-deduction territory). Skip.
       const hasPunch = !!(punch && punch.clockIn && punch.clockOut);
       const hasLogged = (logged ?? 0) > 0;
-      if (!hasPunch && !hasLogged) continue;
+      // ZERO logged hours = the payroll engine already counts this day as an
+      // ABSENCE and docks the full ÷26 day rate. An hour dock on top would
+      // charge the same day twice — and the absence is always the bigger of the
+      // two, so skipping can never under-charge. (Was: skip only when there is
+      // ALSO no punch, which let a short/broken punch stack a second deduction
+      // onto an absent day.)
+      if (!hasLogged) continue;
 
       // Punch shortfall (shift algorithm) — 0 unless a complete punch is short.
       // Scored against THIS worker's contracted day, not the factory-wide 9h:

@@ -69,6 +69,15 @@ export type Customer = {
    * SO create form falls back to HOOKKA. Never moves existing orders.
    */
   defaultCompanyCode?: string;
+  /**
+   * Owner 2026-08-01. POTENTIAL = created from the Sales Pipeline and not yet
+   * through the Confirm gate: quotable and SKU-assignable, but NOT billable
+   * (the server rejects it on sales orders). CONFIRMED = a real account.
+   * Absent on older payloads → treat as CONFIRMED.
+   */
+  customerStage?: "POTENTIAL" | "CONFIRMED";
+  /** users.id of the salesperson who owns this account ('' = unassigned). */
+  salespersonUserId?: string;
 };
 
 // --- BOM Types ---

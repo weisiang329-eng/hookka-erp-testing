@@ -36,11 +36,11 @@ test("clicking a card opens the Lead detail drawer", () => {
 test("Lead detail drawer mounts the full CRM record keyed on the LEAD id", () => {
   // Same panels a Customer has — the takeover requirement.
   assert.match(flat, /import \{ CrmPanel \} from "@\/components\/customer\/CrmPanel"/);
-  assert.match(flat, /import \{ WishlistPanel \} from "@\/components\/customer\/WishlistPanel"/);
   assert.match(flat, /import \{ KycPanel \} from "@\/components\/customer\/KycPanel"/);
   // Keyed on lead.id (the shared entity id), not a customer id.
   assert.match(flat, /<CrmPanel customerId=\{lead\.id\}/);
-  assert.match(flat, /<WishlistPanel customerId=\{lead\.id\} \/>/);
+  // Wishlist retired 2026-08-01 — the drawer keeps CRM + KYC only.
+  assert.ok(!/<WishlistPanel/.test(flat), "wishlist must be gone from the lead drawer");
   assert.match(flat, /<KycPanel customerId=\{lead\.id\} \/>/);
 });
 

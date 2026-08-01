@@ -29,6 +29,14 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
+import {
+  attachCustomerSO,
+  rowsToPOsBatch,
+  type ProductionOrderRow,
+  type JobCardRow,
+  type PiecePicRow,
+} from "./production-orders/_helpers";
+import { loadLeadTimes } from "../lib/lead-times";
 
 const app = new Hono<Env>();
 
@@ -212,6 +220,83 @@ app.get("/:id", async (c) => {
       jobCardIds: (members.results ?? []).map((m) => m.jobCardId).filter(Boolean),
     },
   });
+});
+
+// GET /api/production-folders/:id/rows — the production orders (with job cards)
+// that this folder's job cards belong to, in the SAME minimal PO+jobCards shape
+// the list endpoint returns. folder-detail used to pull the whole ~22MB PO list
+// just to filter it down to a folder's members (perf 2026-07-31); now the server
+// resolves the folder → its job-card ids → their distinct POs and returns only
+// those. Includes completed orders — a folder legitimately holds finished work.
+app.get("/:id/rows", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+  await ensureSchema(c.var.DB);
+  const db = c.var.DB;
+  const id = c.req.param("id");
+  const orgId = getOrgId(c);
+  const folder = await db
+    .prepare("SELECT id FROM production_folders WHERE id = ? AND org_id = ? LIMIT 1")
+    .bind(id, orgId)
+    .first<{ id: string }>();
+  if (!folder) return c.json({ success: false, error: "folder not found" }, 404);
+  // 1) the folder's job-card ids
+  const mem = await db
+    .prepare('SELECT job_card_id AS "jobCardId" FROM folder_job_cards WHERE folder_id = ?')
+    .bind(id)
+    .all<{ jobCardId: string }>();
+  const jcIds = (mem.results ?? []).map((m) => m.jobCardId).filter(Boolean);
+  if (jcIds.length === 0) return c.json({ success: true, data: [] });
+  // 2) the distinct production orders those job cards belong to
+  const ph = jcIds.map(() => "?").join(",");
+  const poRes = await db
+    .prepare(`SELECT DISTINCT productionOrderId FROM job_cards WHERE id IN (${ph})`)
+    .bind(...jcIds)
+    .all<{ productionOrderId: string }>();
+  const poIds = (poRes.results ?? []).map((r) => r.productionOrderId).filter(Boolean);
+  if (poIds.length === 0) return c.json({ success: true, data: [] });
+  // 3) batch-load the POs + all their job cards + pics in 3 queries (not
+  //    fetchPO-per-PO — that N+1 made a 47-JC folder take ~19s), then build the
+  //    same minimal shape via the shared rowsToPOsBatch (field-identical to the
+  //    list endpoint).
+  const poPh = poIds.map(() => "?").join(",");
+  const poRows =
+    (
+      await db
+        .prepare(`SELECT * FROM production_orders WHERE id IN (${poPh})`)
+        .bind(...poIds)
+        .all<ProductionOrderRow>()
+    ).results ?? [];
+  const jcAll =
+    (
+      await db
+        .prepare(`SELECT * FROM job_cards WHERE productionOrderId IN (${poPh})`)
+        .bind(...poIds)
+        .all<JobCardRow>()
+    ).results ?? [];
+  let picAll: PiecePicRow[] = [];
+  const jcAllIds = jcAll.map((j) => j.id).filter(Boolean);
+  if (jcAllIds.length > 0) {
+    const jcPh = jcAllIds.map(() => "?").join(",");
+    picAll =
+      (
+        await db
+          .prepare(`SELECT * FROM piece_pics WHERE jobCardId IN (${jcPh})`)
+          .bind(...jcAllIds)
+          .all<PiecePicRow>()
+      ).results ?? [];
+  }
+  const leadTimeMap = await loadLeadTimes(db).catch(() => null);
+  const out = rowsToPOsBatch(poRows, jcAll, picAll, leadTimeMap);
+  await attachCustomerSO(
+    db,
+    out as unknown as Array<{
+      salesOrderId: string;
+      consignmentOrderId: string;
+      customerSO: string;
+    }>,
+  );
+  return c.json({ success: true, data: out });
 });
 
 // PATCH /api/production-folders/:id — rename / description.

@@ -140,7 +140,7 @@ const DEPARTMENTS = [
   { id: "dept-2", code: "FAB_SEW", name: "Fabric Sewing", shortName: "Fab Sew", color: "#6366F1" },
   { id: "dept-3", code: "WOOD_CUT", name: "Wood Cutting", shortName: "Wood Cut", color: "#F59E0B" },
   { id: "dept-14", code: "FOAM_CUTTING", name: "Foam Cutting", shortName: "Foam Cut", color: "#A78BFA" },
-  { id: "dept-4", code: "FOAM", name: "Foam Bonding", shortName: "Foam", color: "#8B5CF6" },
+  { id: "dept-4", code: "FOAM", name: "Foam Bonding", shortName: "Foam Bonding", color: "#8B5CF6" },
   { id: "dept-5", code: "FRAMING", name: "Framing", shortName: "Framing", color: "#F97316" },
   { id: "dept-6", code: "WEBBING", name: "Webbing", shortName: "Webbing", color: "#10B981" },
   { id: "dept-7", code: "UPHOLSTERY", name: "Upholstery", shortName: "Upholstery", color: "#F43F5E" },

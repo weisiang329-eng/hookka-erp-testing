@@ -31,11 +31,15 @@ test("route is mounted in the worker", () => {
   assert.match(worker, /app\.route\("\/api\/customer-crm", customerCrm\)/);
 });
 
-test("CrmPanel renders contacts + timeline and is mounted on the customer view", () => {
+test("CrmPanel renders contacts + timeline and is mounted on the SALES PIPELINE drawer", () => {
   assert.match(panel, /export function CrmPanel/);
   assert.match(panel, /\/api\/customer-crm\/contacts/);
   assert.match(panel, /\/api\/customer-crm\/activities/);
   assert.match(panel, /next.?follow.?up/i, "timeline must capture a next follow-up");
-  assert.match(customers, /import \{ CrmPanel \} from "@\/components\/customer\/CrmPanel"/);
-  assert.match(customers, /<CrmPanel customerId=\{cust\.id\}/);
+  // Owner 2026-08-01: contacts + activity belong to the Sales Pipeline, not the
+  // customer account page. The panel itself is unchanged — only where it mounts.
+  assert.ok(!/<CrmPanel/.test(customers), "customers page must no longer mount CrmPanel");
+  const leads = readFileSync(new URL("../src/pages/leads/index.tsx", import.meta.url), "utf8");
+  assert.match(leads, /import \{ CrmPanel \} from "@\/components\/customer\/CrmPanel"/);
+  assert.match(leads, /<CrmPanel customerId=\{lead\.id\}/);
 });

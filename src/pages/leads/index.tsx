@@ -2,7 +2,7 @@
 // Sales Pipeline (Leads) — the pre-sale funnel board (owner 2026-07-30).
 // Columns per stage; cards move NEW → … → WON / LOST by DRAG or the stage
 // dropdown. Clicking a card opens a full Lead detail drawer that mounts the
-// same CRM panels a Customer has (Contacts, Activity timeline, Wishlist, KYC)
+// same CRM panels a Customer has (Contacts, Activity timeline, KYC)
 // keyed on the lead id — so a lead holds every detail and ANY salesperson can
 // take over. See docs/plans/2026-07-30-crm-unified-customer.md.
 // ---------------------------------------------------------------------------
@@ -10,7 +10,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Plus, Phone, Mail, Trash2, CalendarClock, X, GripVertical, Tag } from "lucide-react";
 import { formatCurrency } from "@/lib/utils";
 import { CrmPanel } from "@/components/customer/CrmPanel";
-import { WishlistPanel } from "@/components/customer/WishlistPanel";
 import { KycPanel } from "@/components/customer/KycPanel";
 import { PhoneInput } from "@/components/ui/phone-input";
 import { StateSelect } from "@/components/ui/state-select";
@@ -29,16 +28,26 @@ type Lead = {
   next_follow_up: string | null;
   lost_reason: string | null;
   won_customer_id?: string | null;
+  /** The POTENTIAL customer minted with this lead (owner 2026-08-01). */
+  customer_id?: string | null;
   created_at?: string | null;
 };
 
+// Stage LABELS are display-only; `key` is the value persisted in sales_leads.stage
+// (and the LEAD_STAGES contract in api/routes/sales-leads.ts), so renaming a label
+// never needs a data migration. Owner 2026-08-01: the funnel now speaks the same
+// language as the Customer module — a lead enters as Potential and becomes a
+// Confirmed customer, so "New/Won/Lost" became "Potential/Confirmed/Dropped".
+// This array is the single source of every stage label on the page (kanban
+// columns, the card stage picker, the drawer badge, the move menu) — change it
+// here and nowhere else.
 const STAGES = [
-  { key: "NEW", label: "New", accent: "#6B7280", soft: "#F3F4F6" },
+  { key: "NEW", label: "Potential", accent: "#6B7280", soft: "#F3F4F6" },
   { key: "CONTACTED", label: "Contacted", accent: "#2563EB", soft: "#EAF1FE" },
   { key: "QUOTED", label: "Quoted", accent: "#B45309", soft: "#FBF0E0" },
   { key: "NEGOTIATING", label: "Negotiating", accent: "#7C3AED", soft: "#F1EBFD" },
-  { key: "WON", label: "Won", accent: "#15803D", soft: "#E7F4EC" },
-  { key: "LOST", label: "Lost", accent: "#9A3A2D", soft: "#F9E7E3" },
+  { key: "WON", label: "Confirmed", accent: "#15803D", soft: "#E7F4EC" },
+  { key: "LOST", label: "Dropped", accent: "#9A3A2D", soft: "#F9E7E3" },
 ] as const;
 
 const SOURCES = ["Walk-in", "Referral", "Facebook", "WhatsApp", "Website", "Exhibition", "Other"];
@@ -145,7 +154,7 @@ export default function LeadsPage() {
     if (lead.stage === stage) return;
     let lostReason: string | null = null;
     if (stage === "LOST") {
-      lostReason = window.prompt("Reason for losing this lead? (price / lead time / style / …)") || "";
+      lostReason = window.prompt("Why is this lead being dropped? (price / lead time / style / …)") || "";
     }
     // Optimistic move so the drag feels instant; reconcile from the server after.
     setLeads((prev) => prev.map((l) => (l.id === lead.id ? { ...l, stage, lost_reason: lostReason ?? l.lost_reason } : l)));
@@ -177,14 +186,14 @@ export default function LeadsPage() {
             <div className="text-lg font-semibold text-[#1F1D1B]">{formatCurrency(openValueSen / 100)}</div>
           </div>
           <div className="text-right">
-            <div className="text-[11px] uppercase tracking-wide text-[#9CA3AF]">Won</div>
+            <div className="text-[11px] uppercase tracking-wide text-[#9CA3AF]">Confirmed</div>
             <div className="text-lg font-semibold text-[#15803D]">{formatCurrency(wonValueSen / 100)}</div>
           </div>
           <button
             onClick={() => setShowAdd(true)}
             className="h-10 px-4 rounded-lg bg-[#1F1D1B] text-white text-sm font-medium hover:bg-[#3a3633] flex items-center gap-2 shadow-sm transition-colors"
           >
-            <Plus className="w-4 h-4" /> New Lead
+            <Plus className="w-4 h-4" /> New Potential
           </button>
         </div>
       </div>
@@ -268,7 +277,7 @@ export default function LeadsPage() {
                     {l.source ? <span className="px-1.5 py-0.5 rounded bg-[#F0ECE9] text-[#6B5C32]">{l.source}</span> : null}
                     {l.next_follow_up ? <span className="flex items-center gap-1 text-[#6B5C32]"><CalendarClock className="w-3 h-3" />{l.next_follow_up}</span> : null}
                   </div>
-                  {l.lost_reason ? <div className="mt-1 text-[11px] text-[#9A3A2D] italic pl-5">Lost: {l.lost_reason}</div> : null}
+                  {l.lost_reason ? <div className="mt-1 text-[11px] text-[#9A3A2D] italic pl-5">Dropped: {l.lost_reason}</div> : null}
                   <div className="mt-2 flex items-center justify-between opacity-0 group-hover:opacity-100 transition-opacity pl-5" onClick={(e) => e.stopPropagation()}>
                     <select
                       value={l.stage}
@@ -301,7 +310,7 @@ export default function LeadsPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setShowAdd(false)}>
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-[#1F1D1B]">New Lead</h2>
+              <h2 className="text-lg font-semibold text-[#1F1D1B]">New potential customer</h2>
               <button onClick={() => setShowAdd(false)} className="text-[#9CA3AF] hover:text-[#1F1D1B]"><X className="w-5 h-5" /></button>
             </div>
             <div className="grid grid-cols-2 gap-3">
@@ -339,7 +348,7 @@ export default function LeadsPage() {
             </div>
             <div className="mt-5 flex justify-end gap-2">
               <button onClick={() => setShowAdd(false)} className="px-4 py-2 rounded-lg border border-[#E2DDD8] text-sm text-[#6B7280] hover:bg-[#F0ECE9]">Cancel</button>
-              <button disabled={saving || (!form.name.trim() && !form.company.trim()) || !emailValid(form.email)} onClick={() => void addLead()} className="px-4 py-2 rounded-lg bg-[#1F1D1B] text-white text-sm font-medium disabled:opacity-50 hover:bg-[#3a3633]">Add lead</button>
+              <button disabled={saving || (!form.name.trim() && !form.company.trim()) || !emailValid(form.email)} onClick={() => void addLead()} className="px-4 py-2 rounded-lg bg-[#1F1D1B] text-white text-sm font-medium disabled:opacity-50 hover:bg-[#3a3633]">Add potential</button>
             </div>
           </div>
         </div>
@@ -353,7 +362,7 @@ export default function LeadsPage() {
 // ---------------------------------------------------------------------------
 // Lead detail drawer — right-side panel. Top: editable lead fields + stage.
 // Below: the SAME CRM panels a Customer has, keyed on the lead id, so a lead
-// carries contacts, a follow-up timeline, a wishlist and KYC — everything a
+// carries contacts, a follow-up timeline and KYC — everything a
 // new salesperson needs to take over. On convert (slice 2) these rows are
 // re-pointed to the new customer id.
 // ---------------------------------------------------------------------------
@@ -495,8 +504,11 @@ function LeadDetailDrawer({
           </div>
 
           {/* Full CRM record — same panels a Customer has, keyed on the lead id. */}
+          {/* Wishlist retired 2026-08-01 (owner: "整个功能删掉，我们 assign SKU 就行了").
+              The activity timeline above plus the catalogue/SKU assignment below
+              cover what it was for. The customer_wishlist TABLE is deliberately
+              left in place — the feature is gone, the historical rows are not. */}
           <CrmPanel customerId={lead.id} customerName={lead.company || lead.name || "Lead"} />
-          <WishlistPanel customerId={lead.id} />
           <LeadCatalogPanel leadId={lead.id} />
           <KycPanel customerId={lead.id} />
         </div>
@@ -546,27 +558,50 @@ function ConvertLeadDialog({
     setBusy(true);
     setErr(null);
     try {
-      // 1) create the customer via the canonical endpoint.
-      const createRes = await fetch("/api/customers", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          code: f.code.trim(),
-          name: f.name.trim(),
-          ssmNo: f.ssmNo.trim(),
-          creditTerms: f.creditTerms,
-          creditLimitSen: Math.round((parseFloat(f.creditLimit) || 0) * 100),
-          contactName: f.contactName.trim(),
-          phone: f.phone.trim(),
-          email: f.email.trim(),
-        }),
-      });
-      const createJson = (await createRes.json().catch(() => ({}))) as { success?: boolean; error?: string; data?: { id: string } };
-      if (!createRes.ok || !createJson.success || !createJson.data?.id) {
-        setErr(createJson.error || `Could not create customer (HTTP ${createRes.status}).`);
-        return;
+      // 1) CONFIRM the account (owner 2026-08-01). The customer row already
+      //    exists — it was created as POTENTIAL the moment this lead was
+      //    entered, and has been carrying its SKU assignments, combos and
+      //    quotations ever since. So this promotes that SAME row rather than
+      //    minting a second one, which would strand everything assigned to it.
+      //    A lead from before this change (or whose best-effort customer create
+      //    failed) has no customer_id — those still take the create path.
+      const accountFields = {
+        code: f.code.trim(),
+        name: f.name.trim(),
+        ssmNo: f.ssmNo.trim(),
+        creditTerms: f.creditTerms,
+        creditLimitSen: Math.round((parseFloat(f.creditLimit) || 0) * 100),
+        contactName: f.contactName.trim(),
+        phone: f.phone.trim(),
+        email: f.email.trim(),
+        customerStage: "CONFIRMED" as const,
+      };
+      const existingCustomerId = String(lead.customer_id ?? "").trim();
+      let customerId = existingCustomerId;
+      if (existingCustomerId) {
+        const res = await fetch(`/api/customers/${existingCustomerId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: existingCustomerId, ...accountFields }),
+        });
+        const j = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string };
+        if (!res.ok || !j.success) {
+          setErr(j.error || `Could not confirm the customer (HTTP ${res.status}).`);
+          return;
+        }
+      } else {
+        const createRes = await fetch("/api/customers", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(accountFields),
+        });
+        const createJson = (await createRes.json().catch(() => ({}))) as { success?: boolean; error?: string; data?: { id: string } };
+        if (!createRes.ok || !createJson.success || !createJson.data?.id) {
+          setErr(createJson.error || `Could not create customer (HTTP ${createRes.status}).`);
+          return;
+        }
+        customerId = createJson.data.id;
       }
-      const customerId = createJson.data.id;
 
       // 2) attach a delivery hub (optional) via the customer PUT.
       if (f.hubShortName.trim() && f.hubCode.trim()) {
@@ -574,7 +609,8 @@ function ConvertLeadDialog({
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            ...createJson.data,
+            id: customerId,
+            ...accountFields,
             deliveryHubs: [{
               id: `hub-${customerId}-1`,
               code: f.hubCode.trim(),
@@ -597,7 +633,7 @@ function ConvertLeadDialog({
         body: JSON.stringify({ customerId }),
       });
 
-      window.alert(`Converted. New customer ${f.code.trim()} — ${f.name.trim()} created; the lead's contacts, activity, wishlist and KYC moved over.`);
+      window.alert(`Confirmed. ${f.code.trim()} — ${f.name.trim()} is now a confirmed customer and can be used on sales orders. Its SKU assignments and quotations carried over.`);
       await onDone();
     } finally {
       setBusy(false);
@@ -608,10 +644,10 @@ function ConvertLeadDialog({
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-1">
-          <h2 className="text-lg font-semibold text-[#1F1D1B]">Convert to customer</h2>
+          <h2 className="text-lg font-semibold text-[#1F1D1B]">Confirm customer</h2>
           <button onClick={onClose} className="text-[#9CA3AF] hover:text-[#1F1D1B]"><X className="w-5 h-5" /></button>
         </div>
-        <p className="text-xs text-[#6B7280] mb-4">Fill the account-opening details. The lead's contacts, activity, wishlist and KYC move over automatically.</p>
+        <p className="text-xs text-[#6B7280] mb-4">Fill the account-opening details. This confirms the account that already exists for this lead — everything assigned to it is kept.</p>
 
         <div className="space-y-4">
           <div>

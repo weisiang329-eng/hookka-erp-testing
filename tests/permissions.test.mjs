@@ -14,6 +14,7 @@
 // ---------------------------------------------------------------------------
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 // Stand-in module loader: monkey-patch the import map by stashing replacement
 // modules onto a global hook the SUT respects. Since RequirePermission is a
@@ -166,4 +167,13 @@ test("SUPER_ADMIN sentinel pattern: hasPermission returning true for any tuple l
     Navigate: () => "redirect",
   });
   assert.equal(result, "child-content");
+});
+
+test("role permissions use a 5s in-isolate memo in front of the KV read", () => {
+  const src = readFileSync(new URL("../src/api/lib/rbac.ts", import.meta.url), "utf8").replace(/\s+/g, " ");
+  // module-level memo + 5s TTL, keyed by role
+  assert.match(src, /const PERM_MEMO_TTL_MS = 5000/);
+  assert.match(src, /_permMemo = new Map<string, \{ set: Set<string>; expMs: number \}>/);
+  // checked before the KV read; returns a CLONE so callers can't mutate the cache
+  assert.match(src, /_permMemo\.get\(role\)[\s\S]*?return new Set\(memoHit\.set\)/);
 });

@@ -3,7 +3,8 @@
 // formal customer (owner 2026-07-30). The approval gate (Credit Code, Name,
 // Delivery Hub, PIC, PIC Contact, Terms, Credit Limit) is collected, the
 // customer is created via the canonical endpoint, and the lead's CRM record
-// (contacts, activity, wishlist, KYC) is MOVED onto the new customer.
+// (contacts, activity, KYC) is MOVED onto the new customer. Wishlist was
+// retired 2026-08-01; its table is still re-pointed so old rows stay coherent.
 // See docs/plans/2026-07-30-crm-unified-customer.md.
 // ---------------------------------------------------------------------------
 import test from "node:test";
@@ -64,16 +65,33 @@ test("convert dialog collects the full approval gate", () => {
   assert.match(feFlat, /<StateSelect value=\{f\.hubState\}/);
 });
 
-test("convert runs the 3-step flow: create customer → attach hub → re-point", () => {
+test("confirm runs: promote the existing account → attach hub → re-point", () => {
+  // Rewritten 2026-08-01. The dialog no longer CREATES the customer — the
+  // account was minted as POTENTIAL when the lead was entered, and has been
+  // carrying SKU assignments, combos and quotations ever since. Confirming
+  // promotes that SAME row; minting a second one would strand all of it.
   const src = readFileSync(FE, "utf8");
   const i = src.indexOf("const submit = async ()");
   assert.ok(i !== -1, "ConvertLeadDialog.submit must exist");
   const body = src.slice(i, src.indexOf("setBusy(false);", i));
-  const create = body.indexOf('fetch("/api/customers"');
-  const hub = body.indexOf("method: \"PUT\"");
+
+  const confirm = body.indexOf("customerStage: \"CONFIRMED\"");
+  const hub = body.indexOf("deliveryHubs: [{");
   const convert = body.indexOf("/convert`");
-  assert.ok(create !== -1, "step 1 POST /api/customers");
-  assert.ok(hub !== -1, "step 2 PUT hub");
+  assert.ok(confirm !== -1, "step 1 must promote the account to CONFIRMED");
+  assert.ok(hub !== -1, "step 2 attach hub");
   assert.ok(convert !== -1, "step 3 POST convert");
-  assert.ok(create < hub && hub < convert, "steps must run create → hub → convert in order");
+  assert.ok(confirm < hub && hub < convert, "steps must run confirm → hub → convert in order");
+
+  // The create path still exists, but ONLY as the fallback for a lead with no
+  // customer_id — i.e. one from before this change, or whose best-effort
+  // customer create failed. It must not be the primary path.
+  assert.ok(
+    body.includes("const existingCustomerId = String(lead.customer_id"),
+    "confirm must key off the lead's existing customer",
+  );
+  assert.ok(
+    body.indexOf("} else {") < body.indexOf('fetch("/api/customers"'),
+    "POST /api/customers must sit in the else (legacy) branch",
+  );
 });

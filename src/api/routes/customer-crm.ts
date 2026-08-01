@@ -366,83 +366,11 @@ app.put("/onboarding", async (c) => {
   return c.json({ success: true, data: { customerId } });
 });
 
-// ── Wishlist ─────────────────────────────────────────────────────────────────
-// Styles / models a customer likes — the outbound "what to pitch next" list.
-
-type WishlistRow = {
-  id: string;
-  customer_id: string;
-  product_id: string | null;
-  product_code: string | null;
-  product_name: string | null;
-  interest: string | null;
-  note: string | null;
-  created_by: string | null;
-  created_at: string | null;
-};
-
-// GET /api/customer-crm/wishlist?customerId=cust-3
-app.get("/wishlist", async (c) => {
-  const denied = await requirePermission(c, "customers", "read");
-  if (denied) return denied;
-  await ensureTables(c.var.DB);
-  const customerId = c.req.query("customerId");
-  if (!customerId) return c.json({ success: false, error: "customerId required" }, 400);
-  const res = await c.var.DB.prepare(
-    `SELECT * FROM customer_wishlist WHERE customer_id = ? AND org_id = ?
-      ORDER BY created_at DESC`,
-  )
-    .bind(customerId, getOrgId(c))
-    .all<WishlistRow>();
-  return c.json({ success: true, data: res.results ?? [] });
-});
-
-// POST /api/customer-crm/wishlist
-app.post("/wishlist", async (c) => {
-  const denied = await requirePermission(c, "customers", "update");
-  if (denied) return denied;
-  await ensureTables(c.var.DB);
-  const b = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-  const customerId = String(b.customerId ?? b.customer_id ?? "");
-  if (!customerId) return c.json({ success: false, error: "customerId required" }, 400);
-  const productName = String(b.productName ?? b.product_name ?? "").trim();
-  const productCode = String(b.productCode ?? b.product_code ?? "").trim();
-  if (!productName && !productCode) {
-    return c.json({ success: false, error: "a product/style is required" }, 400);
-  }
-  const id = genId("cw");
-  await c.var.DB.prepare(
-    `INSERT INTO customer_wishlist
-       (id, customer_id, product_id, product_code, product_name, interest, note, created_by, org_id, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(
-      id,
-      customerId,
-      (b.productId as string) ?? (b.product_id as string) ?? null,
-      productCode || null,
-      productName || null,
-      (b.interest as string) ?? null,
-      (b.note as string) ?? null,
-      actingUserId(c),
-      getOrgId(c),
-      new Date().toISOString(),
-    )
-    .run();
-  return c.json({ success: true, data: { id } });
-});
-
-// DELETE /api/customer-crm/wishlist/:id
-app.delete("/wishlist/:id", async (c) => {
-  const denied = await requirePermission(c, "customers", "delete");
-  if (denied) return denied;
-  await ensureTables(c.var.DB);
-  const id = c.req.param("id");
-  await c.var.DB.prepare("DELETE FROM customer_wishlist WHERE id = ? AND org_id = ?")
-    .bind(id, getOrgId(c))
-    .run();
-  return c.json({ success: true });
-});
+// ── Wishlist — RETIRED 2026-08-01 ─────────────────────────────────────────────
+// Owner: "整个功能删掉，我们 assign SKU 就行了". The GET/POST/DELETE /wishlist routes
+// and the WishlistPanel are gone. The `customer_wishlist` TABLE and its
+// CREATE TABLE IF NOT EXISTS above are deliberately KEPT: the feature is
+// withdrawn, the historical rows are not deleted. Nothing reads them now.
 
 // ── One-click send (quote / catalog) ─────────────────────────────────────────
 // The quotation PDF is generated in the browser (jsPDF); the client base64-

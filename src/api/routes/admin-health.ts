@@ -949,6 +949,19 @@ app.get("/github-runs", async (c) => {
       data: { configured: false, repo, runs: [] as GithubRunOut[] },
     });
   }
+  // Cache the GitHub result (best-effort, 45s) so repeated dashboard opens don't
+  // each pay the GitHub round-trip — and the 8s abort (which let a slow GitHub
+  // hang into a platform 504) drops to 2.5s. Owner perf audit 2026-07-31.
+  const ghCache = (globalThis as { caches?: { default?: Cache } }).caches?.default;
+  const ghCacheKey = new Request(`https://ghruns.cache.local/${encodeURIComponent(repo)}`);
+  if (ghCache) {
+    try {
+      const hit = await ghCache.match(ghCacheKey);
+      if (hit) return c.json((await hit.json()) as unknown as Record<string, unknown>);
+    } catch {
+      // cache read failure → fall through to a live fetch
+    }
+  }
   try {
     const url = `https://api.github.com/repos/${repo}/actions/runs?per_page=20`;
     const res = await fetch(url, {
@@ -958,7 +971,7 @@ app.get("/github-runs", async (c) => {
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "hookka-erp-health",
       },
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(2500),
     });
     if (!res.ok) {
       return c.json({
@@ -997,7 +1010,20 @@ app.get("/github-runs", async (c) => {
       url: r.html_url || "",
       at: r.run_started_at || r.created_at || r.updated_at || "",
     }));
-    return c.json({ success: true, data: { configured: true, repo, runs } });
+    const payload = { success: true, data: { configured: true, repo, runs } };
+    if (ghCache) {
+      try {
+        await ghCache.put(
+          ghCacheKey,
+          new Response(JSON.stringify(payload), {
+            headers: { "Content-Type": "application/json", "Cache-Control": "max-age=45" },
+          }),
+        );
+      } catch {
+        // caching is best-effort; a put failure must never fail the request
+      }
+    }
+    return c.json(payload);
   } catch (e) {
     return c.json({
       success: true,

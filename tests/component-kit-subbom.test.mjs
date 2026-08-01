@@ -140,6 +140,80 @@ test("explodeKits is a no-op when no line matches a kit parent", async () => {
   assert.equal(out[0].code, "FOAM-D35");
 });
 
+// ---- REGRESSION: rows come back camelCase from Supabase Postgres ------------
+// db-pg.ts installs `transform.column.from` on the postgres.js client, so every
+// SELECT returns camelCase keys (parentCode / childCode / qtyPer / wastePct) —
+// NOT the snake_case names the runtime DDL declares. component-bom.ts read only
+// snake_case, so on prod:
+//   - listKits() skipped EVERY row  → "Kit saved" toast, page still says
+//     "No component kits yet" (owner report 2026-08-01).
+//   - explodeKits() found NO kit    → the screws never reached consumption /
+//     costing at all — a silent money-path hole.
+// The stub above feeds snake_case (the DDL shape); these feed camelCase (the
+// shape the live driver actually returns). Both must work — repo rule is to
+// read rows DUAL-KEYED.
+const camelSeed = [
+  { id: "k1", orgId: "org1", parentCode: "MECH-PB", parentName: "PB", childCode: "SCR-M6", childName: "M6", qtyPer: 4, wastePct: 0 },
+  { id: "k2", orgId: "org1", parentCode: "MECH-PB", parentName: "PB", childCode: "SCR-M8", childName: "M8", qtyPer: 2, wastePct: 10 },
+];
+
+// camelCase-returning variant of the stub: same SQL, driver-transformed keys.
+function makeCamelDb(seed) {
+  const db = makeDb([]);
+  const rows = seed.map((r) => ({ ...r }));
+  return {
+    prepare(sql) {
+      const s = sql.trim().replace(/\s+/g, " ");
+      let bound = [];
+      const obj = {
+        bind(...args) { bound = args; return obj; },
+        async run() { return { success: true }; },
+        async all() {
+          if (/FROM component_bom_lines WHERE \(org_id = \? OR org_id IS NULL\)/i.test(s)) {
+            const [org] = bound;
+            return { results: rows.filter((r) => r.orgId === org || r.orgId == null) };
+          }
+          if (/FROM component_bom_lines WHERE parent_code IN/i.test(s)) {
+            const set = new Set(bound);
+            return { results: rows.filter((r) => set.has(r.parentCode)) };
+          }
+          return { results: [] };
+        },
+        async first() { return null; },
+      };
+      return obj;
+    },
+    batch: db.batch,
+  };
+}
+
+test("listKits reads camelCase rows (Supabase driver transform) — not just snake_case", async () => {
+  const { listKits } = await import("../src/api/lib/component-bom.ts");
+  const kits = await listKits(makeCamelDb(camelSeed), "org1");
+  assert.equal(kits.length, 1, "the kit must not be skipped when keys are camelCase");
+  assert.equal(kits[0].parentCode, "MECH-PB");
+  assert.equal(kits[0].parentName, "PB");
+  assert.equal(kits[0].children.length, 2);
+  const m8 = kits[0].children.find((c) => c.childCode === "SCR-M8");
+  assert.equal(m8.qtyPer, 2);
+  assert.equal(m8.wastePct, 10);
+  assert.equal(m8.childName, "M8");
+});
+
+test("explodeKits reads camelCase rows — screws still reach consumption / costing", async () => {
+  const { explodeKits } = await import("../src/api/lib/component-bom.ts");
+  const out = await explodeKits(makeCamelDb(camelSeed), [
+    { code: "MECH-PB", inventoryCode: "MECH-PB", name: "Pushback", qtyPerUnit: 3, wastePct: 0 },
+  ]);
+  assert.equal(out.length, 3, "parent line + 2 exploded screws");
+  const m6 = out.find((l) => l.code === "SCR-M6");
+  assert.equal(m6.qtyPerUnit, 12); // 3 × 4
+  assert.equal(m6.name, "M6");
+  const m8 = out.find((l) => l.code === "SCR-M8");
+  assert.equal(m8.qtyPerUnit, 6); // 3 × 2
+  assert.equal(m8.wastePct, 10);
+});
+
 // ---- Structural: wiring is present -----------------------------------------
 const read = (p) => readFileSync(resolve(process.cwd(), p), "utf8");
 const flat = (p) => read(p).replace(/\s+/g, " ");
@@ -185,4 +259,44 @@ test("Component Kits page + route + sidebar are wired", () => {
   assert.match(page, /MaterialPicker/);
   assert.match(flat("src/dashboard-routes.tsx"), /path: '\/bom\/component-kits'/);
   assert.match(flat("src/components/layout/sidebar.tsx"), /name: "Component Kits", href: "\/bom\/component-kits"/);
+});
+
+// ---- Multi-create: one component list, several parent SKUs ------------------
+// Owner ask. A mechanism usually comes in several sizes / handings that take the
+// identical screw set, so re-entering the list per SKU was the real chore.
+
+test("kit editor can bind one component list to several parent SKUs", () => {
+  const f = flat("src/pages/component-kits/index.tsx");
+  // Offered on CREATE only — editing targets one specific kit.
+  assert.match(f, /allowMultiParent=\{isNewKit\}/);
+  assert.match(f, /\{allowMultiParent && \(/);
+  assert.match(f, /Also apply to these SKUs/);
+  // De-duplicated, so picking the same SKU twice doesn't PUT it twice.
+  assert.match(f, /if \(c && !targets\.some\(\(t\) => t\.code === c\)\) targets\.push/);
+  // The button states how many kits the click will actually write.
+  assert.match(f, /targetCount > 1 \? `Save \$\{targetCount\} kits` : "Save kit"/);
+});
+
+test("multi-parent save reports partial failure instead of hiding it", () => {
+  const f = flat("src/pages/component-kits/index.tsx");
+  // Sequential writes with a per-parent catch: "3 of 4 saved, X failed" tells
+  // the operator which parents landed; one rejected Promise.all would not.
+  assert.match(f, /const failed: string\[\] = \[\];/);
+  assert.match(f, /failed\.push\(`\$\{t\.code\} \(\$\{humanizeError\(e\)\}\)`\)/);
+  assert.match(f, /\$\{saved\} of \$\{targets\.length\} saved\. Failed:/);
+  // The editor stays open on partial failure so the operator can retry.
+  assert.match(f, /\} else \{ \/\/ Keep the editor open/);
+  // Self-reference is caught UP FRONT — the backend rejects per parent, so one
+  // bad pick would otherwise half-apply a multi-parent save.
+  assert.match(f, /const selfRef = targets\.find\(/);
+  assert.match(f, /is in its own component list/);
+});
+
+test("Sales Pipeline create button speaks the stage vocabulary", () => {
+  const f = flat("src/pages/leads/index.tsx");
+  // Adding a card also mints a POTENTIAL customer, so "New Lead" no longer
+  // matched either the first column or the Customer module.
+  assert.match(f, /New Potential/);
+  assert.match(f, /New potential customer<\/h2>/);
+  assert.ok(!/> New Lead/.test(f), "the old 'New Lead' button label must be gone");
 });

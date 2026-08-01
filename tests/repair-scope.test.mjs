@@ -642,7 +642,9 @@ test("badge labels are operator-readable English", () => {
   );
   assert.equal(
     repairScopeBadgeLabel(parseRepairScope('{"preset":"CUSTOM","depts":["FOAM","PACKING"]}')),
-    "Custom: Foam + Packing",
+    // FOAM displays as "Foam Bonding" system-wide (owner relabel 2026-07-30,
+    // completed across every label map 2026-08-01).
+    "Custom: Foam Bonding + Packing",
   );
   // Component picks append a compact piece summary.
   assert.equal(

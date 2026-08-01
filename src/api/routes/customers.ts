@@ -10,6 +10,7 @@ import type { Context } from "hono";
 import type { Env } from "../worker";
 import { checkCustomerDeleteLocked, lockedResponse } from "../lib/lock-helpers";
 import { requirePermission } from "../lib/rbac";
+import { ensureCustomerStageColumns } from "../lib/customer-stage";
 import { getOrgId } from "../lib/tenant";
 import {
   propagateCustomerName,
@@ -119,6 +120,12 @@ type CustomerRow = {
   group_org_code?: string | null;
   // OEM product marking JSON ({bedframe,sofa,accessory} → NONE/TAG/LABEL).
   oem_marking?: string | null;
+  // POTENTIAL | CONFIRMED (owner 2026-08-01). Dual-keyed read — the Supabase
+  // driver returns these as customerStage / salespersonUserId.
+  customerStage?: string | null;
+  customer_stage?: string | null;
+  salespersonUserId?: string | null;
+  salesperson_user_id?: string | null;
 };
 
 // Multi-Company Phase 3 — dual-identity column on the customer side. snake_case,
@@ -207,6 +214,33 @@ function ensureCustomerOemColumn(db: D1Database): Promise<void> {
   return custOemColPromise;
 }
 
+// ---------------------------------------------------------------------------
+// customer_stage + salesperson_user_id (owner 2026-08-01).
+//
+// A customer entered from the Sales Pipeline is a POTENTIAL account: real
+// enough to assign SKUs, maintenance config and sofa combos against, and to
+// quote from — but NOT billable. It becomes CONFIRMED through the Confirm gate
+// (creditor code, terms, credit limit), which is the only place credit is set.
+//
+// Existing rows default to CONFIRMED: every live customer is a real account.
+// Migrations are inert on deploy, so this MUST be a runtime self-apply awaited
+// before the first read/write. See CLAUDE.md.
+// ---------------------------------------------------------------------------
+export const CUSTOMER_STAGES = ["POTENTIAL", "CONFIRMED"] as const;
+export type CustomerStage = (typeof CUSTOMER_STAGES)[number];
+
+// Rows come back from Supabase with the driver's snake_case → camelCase
+// transform applied (db-pg.ts), so read DUAL-KEYED. A snake-only read here
+// would silently return undefined and quietly mark every customer CONFIRMED —
+// the same class of bug that killed Component Kits on 2026-08-01.
+export function readCustomerStage(row: Record<string, unknown>): CustomerStage {
+  const raw = String(row.customerStage ?? row.customer_stage ?? "").toUpperCase();
+  return raw === "POTENTIAL" ? "POTENTIAL" : "CONFIRMED";
+}
+function readSalespersonUserId(row: Record<string, unknown>): string {
+  return String(row.salespersonUserId ?? row.salesperson_user_id ?? "" ).trim();
+}
+
 type HubRow = {
   id: string;
   customerId: string;
@@ -239,6 +273,9 @@ function rowToCustomer(row: CustomerRow, hubs: HubRow[] = []) {
     defaultCompanyCode: (row.default_company_code ?? "").trim().toUpperCase(),
     groupOrgCode: readCustomerGroupOrgCode(row),
     oemMarking: parseOemMarking(row.oem_marking),
+    // POTENTIAL = created from the Sales Pipeline, not yet billable.
+    customerStage: readCustomerStage(row as unknown as Record<string, unknown>),
+    salespersonUserId: readSalespersonUserId(row as unknown as Record<string, unknown>),
     deliveryHubs: hubs
       .filter((h) => h.customerId === row.id)
       .map((h) => ({
@@ -263,6 +300,7 @@ function genId(): string {
 app.get("/", async (c) => {
   const orgId = getOrgId(c);
   await ensureCustomerCompanyColumn(c.var.DB);
+  await ensureCustomerStageColumns(c.var.DB);
   // Optional index-backed search (global Ctrl+K palette, ?search=). Partial
   // match on name/code; fires ONLY when present, so the Customers list page
   // (no search param) returns the full list exactly as before.
@@ -299,17 +337,35 @@ app.post("/", async (c) => {
   const denied = await requirePermission(c, "customers", "create");
   if (denied) return denied;
   await ensureCustomerCompanyColumn(c.var.DB);
+  await ensureCustomerStageColumns(c.var.DB);
   try {
     const body = await c.req.json();
     const { code, name } = body;
-    if (!code || !name) {
+    // POTENTIAL accounts are born in the Sales Pipeline, where the salesperson
+    // has a company name and a contact but no creditor code yet — demanding one
+    // there would just breed junk codes. The code becomes mandatory at the
+    // Confirm gate (PUT below), which is also where credit terms/limit are set.
+    // A POTENTIAL customer is barred from every money document, so an account
+    // without a code can never reach the ledger.
+    const stage: CustomerStage =
+      String(body.customerStage ?? body.customer_stage ?? "").toUpperCase() === "POTENTIAL"
+        ? "POTENTIAL"
+        : "CONFIRMED";
+    if (!name) {
+      return c.json({ success: false, error: "name is required" }, 400);
+    }
+    if (stage === "CONFIRMED" && !code) {
       return c.json(
         { success: false, error: "code and name are required" },
         400,
       );
     }
-    const dv = await validateDebtorCode(c, body.code, null);
-    if (!dv.ok) return c.json({ success: false, error: dv.error }, 400);
+    let debtorCode = "";
+    if (code) {
+      const dv = await validateDebtorCode(c, body.code, null);
+      if (!dv.ok) return c.json({ success: false, error: dv.error }, 400);
+      debtorCode = dv.code;
+    }
     await ensureCustomerGroupColumn(c.var.DB);
     await ensureCustomerOemColumn(c.var.DB);
     const id = genId();
@@ -328,12 +384,13 @@ app.post("/", async (c) => {
     await c.var.DB.prepare(
       `INSERT INTO customers (id, code, name, ssmNo, companyAddress, creditTerms,
          creditLimitSen, outstandingSen, isActive, contactName, phone, email,
-         default_company_code, group_org_code, oem_marking)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         default_company_code, group_org_code, oem_marking,
+         customer_stage, salesperson_user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
-        dv.code,
+        debtorCode,
         body.name,
         body.ssmNo ?? "",
         body.companyAddress ?? "",
@@ -348,6 +405,8 @@ app.post("/", async (c) => {
         normalizeDefaultCompany(body.defaultCompanyCode),
         groupOrgCode,
         serialiseOemMarking(body.oemMarking),
+        stage,
+        String(body.salespersonUserId ?? body.salesperson_user_id ?? "").trim() || null,
       )
       .run();
 
@@ -424,6 +483,7 @@ app.put("/:id", async (c) => {
   const denied = await requirePermission(c, "customers", "update");
   if (denied) return denied;
   await ensureCustomerCompanyColumn(c.var.DB);
+  await ensureCustomerStageColumns(c.var.DB);
   const id = c.req.param("id");
   try {
     await ensureCustomerGroupColumn(c.var.DB);
@@ -460,9 +520,34 @@ app.put("/:id", async (c) => {
     // rollback on BOUNCED, credit-notes.ts decrement, debit-notes.ts
     // increment) all use atomic `outstandingSen = outstandingSen +/- ?`
     // SQL and never touch this PUT route.
+    // Confirm gate (owner 2026-08-01). Promoting POTENTIAL → CONFIRMED is the
+    // moment the account becomes billable, so the creditor code stops being
+    // optional right here. Demotion back to POTENTIAL is refused: the account
+    // may already carry invoices, and silently making it unusable on new
+    // documents would be a far worse surprise than a 400.
+    const prevStage = readCustomerStage(existing as unknown as Record<string, unknown>);
+    const askedStage = String(
+      body.customerStage ?? body.customer_stage ?? "",
+    ).toUpperCase();
+    const nextStage: CustomerStage =
+      askedStage === "CONFIRMED" ? "CONFIRMED" : askedStage === "POTENTIAL" ? "POTENTIAL" : prevStage;
+    if (prevStage === "CONFIRMED" && nextStage === "POTENTIAL") {
+      return c.json(
+        { success: false, error: "a confirmed customer cannot be moved back to potential" },
+        400,
+      );
+    }
+    const mergedCode =
+      body.code !== undefined ? String(body.code).trim() : existing.code;
+    if (nextStage === "CONFIRMED" && !mergedCode) {
+      return c.json(
+        { success: false, error: "a creditor code is required to confirm this customer" },
+        400,
+      );
+    }
+
     const merged = {
-      code:
-        body.code !== undefined ? String(body.code).trim() : existing.code,
+      code: mergedCode,
       name: body.name ?? existing.name,
       ssmNo: body.ssmNo ?? existing.ssmNo ?? "",
       companyAddress: body.companyAddress ?? existing.companyAddress ?? "",
@@ -497,6 +582,12 @@ app.put("/:id", async (c) => {
         body.oemMarking === undefined
           ? (existing.oem_marking ?? "{}")
           : serialiseOemMarking(body.oemMarking),
+      // Confirm gate: POTENTIAL → CONFIRMED. Only moves when the body sends it.
+      customer_stage: nextStage,
+      salesperson_user_id:
+        body.salespersonUserId === undefined && body.salesperson_user_id === undefined
+          ? (readSalespersonUserId(existing as unknown as Record<string, unknown>) || null)
+          : String(body.salespersonUserId ?? body.salesperson_user_id ?? "").trim() || null,
     };
 
     await c.var.DB.prepare(
@@ -504,7 +595,7 @@ app.put("/:id", async (c) => {
          code = ?, name = ?, ssmNo = ?, companyAddress = ?, creditTerms = ?,
          creditLimitSen = ?, outstandingSen = ?, isActive = ?,
          contactName = ?, phone = ?, email = ?, default_company_code = ?, group_org_code = ?,
-         oem_marking = ?
+         oem_marking = ?, customer_stage = ?, salesperson_user_id = ?
        WHERE id = ?`,
     )
       .bind(
@@ -522,6 +613,8 @@ app.put("/:id", async (c) => {
         merged.default_company_code,
         merged.groupOrgCode,
         merged.oem_marking,
+        merged.customer_stage,
+        merged.salesperson_user_id,
         id,
       )
       .run();

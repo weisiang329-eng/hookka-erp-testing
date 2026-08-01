@@ -36,3 +36,27 @@ test("pipeline board page: columns by stage + routed + in the sidebar", () => {
   assert.match(routes, /const Leads = lazy/, "lazy-loaded");
   assert.match(sidebar, /name: "Sales Pipeline", href: "\/leads"/, "nav entry present");
 });
+
+// ---------------------------------------------------------------------------
+// REGRESSION (owner 2026-08-01): stage LABELS were relabelled to match the
+// Customer module's vocabulary (a lead enters Potential and becomes a Confirmed
+// customer). The stored `key` must NOT move with the label — renaming a key
+// would orphan every existing sales_leads.stage row. Guard both halves.
+// ---------------------------------------------------------------------------
+test("pipeline stage labels are the owner's wording; stored keys are unchanged", () => {
+  const block = page.match(/const STAGES = \[([\s\S]*?)\] as const;/);
+  assert.ok(block, "STAGES array not found");
+  const pairs = [...block[1].matchAll(/key: "([A-Z_]+)", label: "([^"]+)"/g)]
+    .map((m) => [m[1], m[2]]);
+  assert.deepEqual(pairs, [
+    ["NEW", "Potential"],
+    ["CONTACTED", "Contacted"],
+    ["QUOTED", "Quoted"],
+    ["NEGOTIATING", "Negotiating"],
+    ["WON", "Confirmed"],
+    ["LOST", "Dropped"],
+  ]);
+  // The stale labels must not survive anywhere user-facing on this page.
+  assert.ok(!/label: "New"|label: "Won"|label: "Lost"/.test(page), "stale stage label left behind");
+  assert.ok(!/>Won</.test(page), 'the summary header still reads "Won"');
+});

@@ -224,6 +224,33 @@ dataset = "hookka_erp_metrics"
 #     JWT_SECRET                     — HMAC secret for OAuth CSRF state token
 [vars]
 ENVIRONMENT = "production"
+
+# CF_ACCOUNT_ID — the missing half of the /admin/health live-data wiring.
+#
+# Querying Analytics Engine is an HTTP call to
+#   https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/analytics_engine/sql
+# so the route needs BOTH the account id and AE_QUERY_TOKEN. The token was
+# set as a Pages secret long ago, the ERP_METRICS binding has been writing
+# data points on every request since P6.2 — but this id was never set, so
+# the fetch could not even be addressed and /api/admin/health/kpis silently
+# fell back to `_mock: true`. Net effect: the System Health dashboard has
+# been reporting "All systems normal · No 5xx" off deterministic mocks,
+# i.e. monitoring nothing, while looking green. Diagnosed 2026-08-01 via
+# GET /api/admin/health/kpis-diag (CF_ACCOUNT_ID_set:false, everything
+# else true).
+#
+# An account id is NOT a credential — it appears in every dashboard URL,
+# and this file already carries KV namespace ids, the D1 database id and
+# the Sentry DSN on the same reasoning. The actual secret (AE_QUERY_TOKEN)
+# stays in Pages secrets and is deliberately NOT here.
+#
+# Kept in wrangler.toml rather than set by hand in the Pages dashboard so
+# it is self-healing: a rebuilt project, a new environment or a fresh
+# clone gets it from the next deploy instead of silently going back to
+# mock data. `wrangler pages secret put` was tried first and is refused by
+# an OAuth login (API error 10000), which is another reason not to rely on
+# a manual step here.
+CF_ACCOUNT_ID = "816e457307d7fa0491c2a08a72ad5dcd"
 # 2026-05-27 — Custom-domain cutover to erp.hookka.com. Multi-origin
 # allowlist so BOTH the new prod domain AND the legacy pages.dev URL
 # work in parallel. Once everyone (employees, integrations, bookmarks)

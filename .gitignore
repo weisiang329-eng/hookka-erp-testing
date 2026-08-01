@@ -57,3 +57,7 @@ scripts/verify-*.ts
 
 # Obsidian vault config (docs/ opened as a vault)
 .obsidian/
+
+# Scratch space for one-off audit / backfill scripts. Never part of the app —
+# these carry DB connection strings and get swept into unrelated commits.
+tmp/

@@ -63,6 +63,22 @@ export type PayRulesConfig = {
   holidayOtMultiplier: number;
   /** Working days with no hours stay "Pending" this many working days (2). */
   absenceGraceWorkingDays: number;
+  /**
+   * LENIENCY (owner 2026-08-01: 「前期我们松一点通融点」). A worker who forgets
+   * the morning punch and taps in AND out at knock-off leaves a window the
+   * shift maths can't read as work (18:01 in / 18:02 out → zero payable
+   * minutes). They were clearly AT the factory, but the day logs no hours and
+   * so counts as a full absence.
+   *
+   * true  — credit the day as a normal shift (the worker's contracted hours),
+   *         same treatment a forgotten punch-OUT already gets.
+   * false — leave it as an absence (charged once; never also hour-docked).
+   *
+   * Effective-dated like every other rule, which is the point: run it true
+   * while the workforce is still learning the punch app, then flip it false
+   * from a chosen date without touching code or rewriting history.
+   */
+  brokenPunchCreditsFullDay: boolean;
   /** EPF employee share, percent of basic (11). */
   epfEmployeePct: number;
   /** EPF employer share, percent of basic (13). */
@@ -100,6 +116,7 @@ export const DEFAULT_PAY_RULES: PayRulesConfig = {
   sundayOtMultiplier: 2,
   holidayOtMultiplier: 3,
   absenceGraceWorkingDays: 2,
+  brokenPunchCreditsFullDay: true,
   epfEmployeePct: 11,
   epfEmployerPct: 13,
   socsoEmployeeSen: 745,
@@ -137,6 +154,9 @@ export function normalizePayRules(raw: unknown): PayRulesConfig {
     sundayOtMultiplier: num("sundayOtMultiplier"),
     holidayOtMultiplier: num("holidayOtMultiplier"),
     absenceGraceWorkingDays: num("absenceGraceWorkingDays"),
+    // Only an explicit `false` turns leniency off — an older stored version
+    // predates the knob and must keep behaving as it did (lenient).
+    brokenPunchCreditsFullDay: r.brokenPunchCreditsFullDay !== false,
     epfEmployeePct: num("epfEmployeePct"),
     epfEmployerPct: num("epfEmployerPct"),
     socsoEmployeeSen: num("socsoEmployeeSen"),

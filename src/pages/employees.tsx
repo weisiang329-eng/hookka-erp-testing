@@ -7312,10 +7312,23 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
 
   const printPayslipForEmployee = async (payslip: PayslipData) => {
     try {
-      const res = await fetch(`/api/payslips/${payslip.id}`);
-      const data = (await res.json()) as { data: PayslipData; ytd: unknown };
       const { generatePayslipHTML } = await import("@/lib/generate-payslip-pdf");
-      const html = generatePayslipHTML(data.data, data.ytd as Parameters<typeof generatePayslipHTML>[1]);
+      // An in-progress month has no STORED payslip — its rows are computed on
+      // the fly and carry a synthetic id ("projected-2026-08-<worker>"). The
+      // handler used to fetch that id regardless, get a 404, and the operator
+      // saw only "Error generating payslip" with no idea why the button existed.
+      // The row in hand already holds every figure, and the document stamps a
+      // DRAFT month "ESTIMATE — NOT FINAL", so print it directly instead.
+      const projected = String(payslip.id).startsWith("projected-");
+      let row: PayslipData = payslip;
+      let ytd: unknown = undefined;
+      if (!projected) {
+        const res = await fetch(`/api/payslips/${payslip.id}`);
+        const data = (await res.json()) as { data: PayslipData; ytd: unknown };
+        row = data.data;
+        ytd = data.ytd;
+      }
+      const html = generatePayslipHTML(row, ytd as Parameters<typeof generatePayslipHTML>[1]);
       const printWindow = window.open("", "_blank");
       if (printWindow) {
         printWindow.document.write(html);

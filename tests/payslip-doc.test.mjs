@@ -60,3 +60,18 @@ test("the fabricated bank account is gone", () => {
   // It used to print `CIMB-${empNo}XXXX` — a made-up account that looked real.
   assert.doesNotMatch(DOC, /CIMB-/);
 });
+
+test("an in-progress month prints without hitting a stored payslip", () => {
+  // Rows for a month that has not been generated carry a synthetic id
+  // ("projected-2026-08-<worker>"). The print handler used to fetch that id
+  // regardless, 404, and show only "Error generating payslip" — reproduced in
+  // the real app on 2026-08-01 before this guard existed.
+  const page = readFileSync(resolve(process.cwd(), "src/pages/employees.tsx"), "utf8");
+  const fn = page.slice(page.indexOf("const printPayslipForEmployee"));
+  const body = fn.slice(0, fn.indexOf("\n  };"));
+  assert.match(body, /startsWith\("projected-"\)/, "must detect a projected row");
+  assert.ok(
+    body.indexOf('startsWith("projected-")') < body.indexOf("await fetch("),
+    "the check must come BEFORE the fetch, or the 404 still happens",
+  );
+});

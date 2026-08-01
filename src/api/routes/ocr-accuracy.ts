@@ -196,9 +196,16 @@ app.get("/", async (c) => {
 
   // ---- Scan duration (owner 2026-08-01: 「要有平均 scan 一张 PO/PI/GR 的时间」)
   //
-  // scan_queue has carried created_at / completed_at all along; nothing ever
-  // aggregated them. Duration is enqueue → done, which is what the operator
-  // actually waits through (queue wait + the AI call), not just the API call.
+  // MEASURED, NOT ASSUMED (staging 2026-08-01): the first cut reported
+  // enqueue → done, on the reasoning that queue wait is time the operator sits
+  // through. Live numbers made it useless — Customer PO averaged 22 MINUTES and
+  // supplier docs 24 HOURS, with a p90 of 3.9 days. A queue row only advances
+  // while a worker is draining it, so that span is dominated by idle time when
+  // nobody had the modal open, not by scanning.
+  //
+  // So: started_at → completed_at, the actual processing cost, which is what
+  // 「平均 scan 一张 PO/PI/GR 的时间」 means. Rows with no started_at (legacy,
+  // or cache hits that never ran) are excluded rather than counted as zero.
   //
   // `kind` separates customer POs from supplier docs. Supplier PI-vs-GR needs
   // the sample's docType, reachable now that sample_id is stored on the row —
@@ -210,7 +217,19 @@ app.get("/", async (c) => {
   type TimingRow = { bucket: string | null; n: number; avgSec: number | null; p90Sec: number | null };
   let timingRows: TimingRow[] = [];
   try {
-    const parts: string[] = ["q.status = 'done'", "q.completed_at IS NOT NULL"];
+    // The column is created by scan-queue's lazy ensure, which only runs once a
+    // scan endpoint is hit. Depending on that ordering made this block silently
+    // return nothing on a fresh isolate (observed on staging). Ensure it here
+    // too — idempotent, and cheap next to the aggregate below.
+    await db
+      .prepare("ALTER TABLE scan_queue ADD COLUMN IF NOT EXISTS sample_id TEXT")
+      .run()
+      .catch(() => undefined);
+    const parts: string[] = [
+      "q.status = 'done'",
+      "q.completed_at IS NOT NULL",
+      "q.started_at IS NOT NULL",
+    ];
     const binds: string[] = [];
     if (from) { parts.push("substr(q.created_at::text, 1, 10) >= ?"); binds.push(from); }
     if (to) { parts.push("substr(q.created_at::text, 1, 10) <= ?"); binds.push(to); }
@@ -223,9 +242,9 @@ app.get("/", async (c) => {
                   ELSE 'Supplier doc (unclassified)'
                 END AS bucket,
                 COUNT(*)::int AS n,
-                ROUND(AVG(EXTRACT(EPOCH FROM (q.completed_at::timestamptz - q.created_at::timestamptz)))::numeric, 1)::float8 AS "avgSec",
+                ROUND(AVG(EXTRACT(EPOCH FROM (q.completed_at::timestamptz - q.started_at::timestamptz)))::numeric, 1)::float8 AS "avgSec",
                 ROUND(PERCENTILE_CONT(0.9) WITHIN GROUP (
-                  ORDER BY EXTRACT(EPOCH FROM (q.completed_at::timestamptz - q.created_at::timestamptz))
+                  ORDER BY EXTRACT(EPOCH FROM (q.completed_at::timestamptz - q.started_at::timestamptz))
                 )::numeric, 1)::float8 AS "p90Sec"
            FROM scan_queue q
            LEFT JOIN supplier_scan_samples s ON s.id = q.sample_id

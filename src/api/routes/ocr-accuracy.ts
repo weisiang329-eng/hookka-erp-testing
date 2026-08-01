@@ -135,15 +135,15 @@ app.get("/", async (c) => {
 
   // ---- Supplier docs (PO / PI / GRN) --------------------------------------
   const supWhere = dateWhere("createdAt");
-  let supRows: { supplierHint: string | null; rawJson: string | null; correctedJson: string | null }[] = [];
+  let supRows: { supplierHint: string | null; rawJson: string | null; correctedJson: string | null; docType: string | null }[] = [];
   try {
     const supRes = await db
       .prepare(
-        `SELECT supplierHint, rawJson, correctedJson
+        `SELECT supplierHint, rawJson, correctedJson, docType
            FROM supplier_scan_samples WHERE ${supWhere.sql}`,
       )
       .bind(...supWhere.binds)
-      .all<{ supplierHint: string | null; rawJson: string | null; correctedJson: string | null }>();
+      .all<{ supplierHint: string | null; rawJson: string | null; correctedJson: string | null; docType: string | null }>();
     supRows = supRes.results ?? [];
   } catch {
     // Table is created at runtime by the supplier-scan flow; absent until the
@@ -153,19 +153,102 @@ app.get("/", async (c) => {
 
   const supOverall = emptyBucket("Supplier");
   const supBySupplier = new Map<string, Bucket>();
+  // Owner 2026-08-01: 「每个种类的 accurate rate 是多少%？PI / SO / GR」. The
+  // sample row already carries the engine's docType (INVOICE / DELIVERY_NOTE /
+  // OTHER) — no new column needed. INVOICE is what becomes a Purchase Invoice,
+  // DELIVERY_NOTE what becomes a GRN, so that field IS the PI-vs-GR split.
+  const supByDocType = new Map<string, Bucket>();
+  // supplier||docType, for drilling into one supplier's PI vs GR accuracy.
+  const supBySupplierDoc = new Map<string, Bucket>();
+  const DOC_LABEL: Record<string, string> = {
+    INVOICE: "Purchase Invoice",
+    DELIVERY_NOTE: "Goods Received (DO/GRN)",
+  };
   for (const row of supRows) {
     const raw = parse(row.rawJson);
     const corr = parse(row.correctedJson);
     if (!corr) continue;
     const supplier = (row.supplierHint || "Unknown").trim() || "Unknown";
+    const dt = (row.docType || "").trim().toUpperCase();
+    const docLabel = DOC_LABEL[dt] ?? "Other / unclassified";
     const d = diffSupplierSample(raw, corr);
     addToBucket(supOverall, d);
     if (!supBySupplier.has(supplier)) supBySupplier.set(supplier, emptyBucket(supplier));
     addToBucket(supBySupplier.get(supplier)!, d);
+    if (!supByDocType.has(docLabel)) supByDocType.set(docLabel, emptyBucket(docLabel));
+    addToBucket(supByDocType.get(docLabel)!, d);
+    const sdKey = `${supplier}||${docLabel}`;
+    if (!supBySupplierDoc.has(sdKey)) supBySupplierDoc.set(sdKey, emptyBucket(docLabel));
+    addToBucket(supBySupplierDoc.get(sdKey)!, d);
   }
   const suppliers = [...supBySupplier.values()]
     .sort((a, b) => b.total - a.total)
+    .map((b) => {
+      const children = [...supBySupplierDoc.entries()]
+        .filter(([k]) => k.startsWith(`${b.key}||`))
+        .map(([, cb]) => bucketOut(cb))
+        .sort((a, x) => x.total - a.total);
+      return bucketOut(b, children);
+    });
+  const supplierDocTypes = [...supByDocType.values()]
+    .sort((a, b) => b.total - a.total)
     .map((b) => bucketOut(b));
+
+  // ---- Scan duration (owner 2026-08-01: 「要有平均 scan 一张 PO/PI/GR 的时间」)
+  //
+  // scan_queue has carried created_at / completed_at all along; nothing ever
+  // aggregated them. Duration is enqueue → done, which is what the operator
+  // actually waits through (queue wait + the AI call), not just the API call.
+  //
+  // `kind` separates customer POs from supplier docs. Supplier PI-vs-GR needs
+  // the sample's docType, reachable now that sample_id is stored on the row —
+  // rows scanned before that column exists simply fall into the untyped
+  // bucket rather than being dropped.
+  //
+  // 'cached' rows are excluded on purpose: a cache hit completes in
+  // milliseconds and would drag the average away from the real scan cost.
+  type TimingRow = { bucket: string | null; n: number; avgSec: number | null; p90Sec: number | null };
+  let timingRows: TimingRow[] = [];
+  try {
+    const parts: string[] = ["q.status = 'done'", "q.completed_at IS NOT NULL"];
+    const binds: string[] = [];
+    if (from) { parts.push("substr(q.created_at::text, 1, 10) >= ?"); binds.push(from); }
+    if (to) { parts.push("substr(q.created_at::text, 1, 10) <= ?"); binds.push(to); }
+    const res = await db
+      .prepare(
+        `SELECT CASE
+                  WHEN q.kind = 'po' THEN 'Customer PO'
+                  WHEN s.docType = 'INVOICE' THEN 'Purchase Invoice'
+                  WHEN s.docType = 'DELIVERY_NOTE' THEN 'Goods Received (DO/GRN)'
+                  ELSE 'Supplier doc (unclassified)'
+                END AS bucket,
+                COUNT(*)::int AS n,
+                ROUND(AVG(EXTRACT(EPOCH FROM (q.completed_at::timestamptz - q.created_at::timestamptz)))::numeric, 1)::float8 AS "avgSec",
+                ROUND(PERCENTILE_CONT(0.9) WITHIN GROUP (
+                  ORDER BY EXTRACT(EPOCH FROM (q.completed_at::timestamptz - q.created_at::timestamptz))
+                )::numeric, 1)::float8 AS "p90Sec"
+           FROM scan_queue q
+           LEFT JOIN supplier_scan_samples s ON s.id = q.sample_id
+          WHERE ${parts.join(" AND ")}
+          GROUP BY 1
+          ORDER BY n DESC`,
+      )
+      .bind(...binds)
+      .all<TimingRow>();
+    timingRows = res.results ?? [];
+  } catch {
+    // scan_queue / sample_id may not exist yet on a fresh environment.
+    timingRows = [];
+  }
+  const timing = {
+    buckets: timingRows.map((r) => ({
+      key: r.bucket ?? "Unknown",
+      scans: r.n,
+      avgSec: r.avgSec,
+      p90Sec: r.p90Sec,
+    })),
+    totalScans: timingRows.reduce((s, r) => s + (r.n ?? 0), 0),
+  };
 
   const grandTotal = soOverall.total + supOverall.total;
   const grandSuccess = soOverall.success + supOverall.success;
@@ -179,7 +262,8 @@ app.get("/", async (c) => {
         rate: grandTotal === 0 ? null : Math.round((grandSuccess / grandTotal) * 1000) / 10,
       },
       salesOrders: { ...bucketOut(soOverall), customers: soCustomers },
-      supplier: { ...bucketOut(supOverall), suppliers },
+      supplier: { ...bucketOut(supOverall), suppliers, docTypes: supplierDocTypes },
+      timing,
       from: from ?? null,
       to: to ?? null,
     },

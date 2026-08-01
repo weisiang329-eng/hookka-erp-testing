@@ -30,7 +30,12 @@
 export function normalizeCompanyName(s: string | null | undefined): string {
   return (s ?? "")
     .toUpperCase()
-    .replace(/\bSDN\.?\s*BHD\.?\b/g, " ")
+    // The separator between SDN and BHD is whatever the letterhead used —
+    // space, dot, hyphen, comma or nothing. Requiring whitespace left
+    // "ADD-WOOD-TRADING-SDN-BHD" normalising to "…TRADINGSDN" (BHD stripped by
+    // the next rule, SDN stranded), so the same company produced two different
+    // alias keys (party-alias.test.mjs).
+    .replace(/\bSDN[\s.,\-]*BHD\.?\b/g, " ")
     .replace(/\bBERHAD\b/g, " ")
     .replace(/\bBHD\.?\b/g, " ")
     .replace(/\bPLT\b/g, " ")

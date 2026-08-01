@@ -48,6 +48,16 @@ import {
   ChevronRight,
 } from "lucide-react";
 import {
+  ReusedScanBadge,
+  CachedScanNotice,
+} from "@/components/scan-cached-hint";
+import { bestMatch } from "@/lib/party-fuzzy-match";
+import {
+  resolveAlias,
+  usePartyAliases,
+  teachPartyAlias,
+} from "@/lib/party-alias-client";
+import {
   postScanQueueConsume,
   uploadScanQueueRowAsSourceDoc,
 } from "@/lib/scan-queue-client";
@@ -199,9 +209,19 @@ function autoLinkPoId(
 function pickSupplierFromName(
   rawName: string | null | undefined,
   suppliers: Supplier[],
+  /** Taught aliases: normalised OCR name → supplierId. Checked FIRST. */
+  aliasMap?: Record<string, string> | null,
 ): Supplier | null {
   const guess = (rawName ?? "").trim();
   if (!guess) return null;
+  // 0) A human already told us who this name is. Nothing outranks that — it's
+  //    the only signal that survives a typo in the supplier master (400-A002
+  //    was registered as "ADD WOORD…", which every string heuristic missed).
+  const taughtId = resolveAlias(aliasMap, guess);
+  if (taughtId) {
+    const taught = suppliers.find((s) => s.id === taughtId);
+    if (taught) return taught;
+  }
   const guessUpper = guess.toUpperCase();
   // 1) exact name/code
   const exact = suppliers.filter(
@@ -228,7 +248,11 @@ function pickSupplierFromName(
     );
   });
   if (containing.length === 1) return containing[0];
-  return null;
+  // 4) Nothing matched exactly — rank by edit distance and take the clear
+  //    winner. This is the only step that crosses a typo in the master data
+  //    (owner 2026-08-01: 「找到最像的都可以用啊」). bestMatch refuses a
+  //    near-tie, so a coin-flip is still left to the operator.
+  return bestMatch(suppliers, guess)?.party ?? null;
 }
 
 // Fix A (owner 2026-06-30): when a line came back with unitPrice 0 (supplier
@@ -420,6 +444,8 @@ type QueueItem = {
   error: string | null;
   cached: boolean;
   fileHash: string;
+  /** Real scan-sample row id from the engine — null on older queue rows. */
+  sampleId: string | null;
   createdAt: string;
   consumedAt: string | null;
   // Per-doc consumed indices within rawJson.docs[]. The modal hides any
@@ -952,6 +978,9 @@ function CreatePIWizard({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [step, setStep] = useState<StepState>("upload");
+  // Taught aliases (OCR name → supplierId). Loaded while the modal is open so
+  // a name a colleague taught earlier resolves without a page reload.
+  const supplierAliases = usePartyAliases("SUPPLIER", open);
   const [files, setFiles] = useState<{ id: string; file: File }[]>([]);
   const [parsing, setParsing] = useState(false);
   const [fileProgress, setFileProgress] = useState<
@@ -1154,7 +1183,7 @@ function CreatePIWizard({
       // (a different supplier matched), trust the OCR — the operator opened
       // the modal from one supplier's context but scanned a different
       // supplier's doc, the OCR is the authoritative signal.
-      const matched = pickSupplierFromName(ex.supplierName, suppliers);
+      const matched = pickSupplierFromName(ex.supplierName, suppliers, supplierAliases);
       const sId = matched?.id ?? defaultSupplierId ?? "";
       const sup = supplierById(sId);
       const orgCode = sup?.purchaseOrgCode ?? activeOrgs[0]?.code ?? "HOOKKA";
@@ -1268,7 +1297,7 @@ function CreatePIWizard({
         originalExtraction: ex,
       };
     },
-    [suppliers, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, materialByCode],
+    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, materialByCode],
   );
 
   // ─── Drag-drop + multi-file extract ────────────────────────────────────
@@ -1687,6 +1716,18 @@ function CreatePIWizard({
             createdPiNo: j.data?.piNo ?? "(created)",
             createError: null,
           });
+          // TEACH: the operator just filed a document read as
+          // `originalExtraction.supplierName` under `card.supplierId`. Whether
+          // the matcher got it right or they corrected it by hand, that pairing
+          // is now ground truth — remember it so the next scan of this
+          // letterhead resolves instantly, without waiting for the weekly
+          // distill (which learns document LAYOUT, never identity).
+          void teachPartyAlias({
+            partyType: "SUPPLIER",
+            partyId: card.supplierId,
+            rawName: card.originalExtraction.supplierName,
+            knownMap: supplierAliases,
+          });
           if (j.data?.id) createdIds.push(j.data.id);
           else if (j.data?.piNo) createdIds.push(j.data.piNo);
         } catch (err) {
@@ -1809,10 +1850,13 @@ function CreatePIWizard({
             if (consumedIdxs.has(idx)) return;
             const key = `${it.id}#${idx}`;
             if (have.has(key)) return;
-            // sampleId is null for queue-built cards — the engine writes a
-            // file-level sample on its own and the id isn't recoverable
-            // from the queue. Gold/correction confirm skipped in that case.
-            additions.push(buildCard(it.fileName, doc, null, it.id, idx));
+            // The engine's REAL sample id, now carried on the queue row.
+            // Previously hard-coded null, so the gold/correction confirm was
+            // skipped for EVERY queue-built card — `correctedJson` was never
+            // written, which is why the OCR accuracy dashboard stayed empty and
+            // the distill gold pool never filled. Still null on rows scanned
+            // before sample_id existed; confirm is skipped for those.
+            additions.push(buildCard(it.fileName, doc, it.sampleId, it.id, idx));
           });
         }
         if (additions.length === 0) return prev;
@@ -2337,6 +2381,12 @@ function PreviewStep({
     (q) => q.status === "queued" || q.status === "processing",
   );
   const failedQueue = queueItems.filter((q) => q.status === "failed");
+  // Cache hits — same bytes uploaded before, so scan-queue replayed the stored
+  // raw_json instead of re-reading the file. Informational only (never blocks).
+  const cachedRowIds = useMemo(
+    () => new Set(queueItems.filter((q) => q.status === "cached").map((q) => q.id)),
+    [queueItems],
+  );
   return (
     <div className="space-y-4">
       {/* Inline spin keyframe for the .ti-loader icon in ScanQueueStrip.
@@ -2383,6 +2433,11 @@ function PreviewStep({
         />
       )}
 
+      <CachedScanNotice
+        cachedCount={cachedRowIds.size}
+        totalCount={queueItems.length}
+      />
+
       {errors.length > 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-1">
           {errors.map((err, i) => (
@@ -2403,6 +2458,9 @@ function PreviewStep({
           <PICard
             key={card.id}
             card={card}
+            reused={
+              !!card.scanQueueRowId && cachedRowIds.has(card.scanQueueRowId)
+            }
             suppliers={suppliers}
             activeOrgs={activeOrgs}
             purchaseOrders={purchaseOrders}
@@ -2468,6 +2526,7 @@ function PreviewStep({
 
 function PICard({
   card,
+  reused,
   suppliers,
   activeOrgs,
   purchaseOrders,
@@ -2484,6 +2543,8 @@ function PICard({
   onSupplierChange,
 }: {
   card: PreviewCard;
+  /** This card came from a cache-hit queue row (same file scanned before). */
+  reused?: boolean;
   suppliers: Supplier[];
   activeOrgs: Organisation[];
   purchaseOrders: PurchaseOrder[];
@@ -2575,6 +2636,7 @@ function PICard({
             <span className="text-[#1F1D1B] font-medium whitespace-nowrap">
               RM {totalRM.toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </span>
+            {reused && <ReusedScanBadge />}
             {card.createdPiNo && (
               <Badge className="bg-green-100 text-green-800 border border-green-300">
                 <CheckCircle className="h-3 w-3 inline mr-0.5" /> {card.createdPiNo}
@@ -2760,6 +2822,7 @@ function PICard({
           <Badge className="bg-violet-50 text-violet-700 border border-violet-200">
             <FileText className="h-3 w-3 inline mr-0.5" /> {card.fileName}
           </Badge>
+          {reused && <ReusedScanBadge />}
           {linkedPo && (
             <Badge className="bg-blue-50 text-blue-700 border border-blue-200">
               PO {linkedPo.poNo}
@@ -3204,6 +3267,9 @@ function CreateGRNWizard({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [step, setStep] = useState<StepState>("upload");
+  // Taught aliases (OCR name → supplierId). Loaded while the modal is open so
+  // a name a colleague taught earlier resolves without a page reload.
+  const supplierAliases = usePartyAliases("SUPPLIER", open);
   const [files, setFiles] = useState<{ id: string; file: File }[]>([]);
   const [parsing, setParsing] = useState(false);
   const [fileProgress, setFileProgress] = useState<
@@ -3368,7 +3434,7 @@ function CreateGRNWizard({
       // Fix B (owner 2026-06-30): auto-resolve supplier from OCR'd name
       // using the shared layered matcher (exact → normalised → contains).
       // OCR signal trumps host default when they disagree.
-      const matched = pickSupplierFromName(ex.supplierName, suppliers);
+      const matched = pickSupplierFromName(ex.supplierName, suppliers, supplierAliases);
       const sId = matched?.id ?? defaultSupplierId ?? "";
       const sup = supplierById(sId);
       const orgCode = sup?.purchaseOrgCode ?? activeOrgs[0]?.code ?? "HOOKKA";
@@ -3446,7 +3512,7 @@ function CreateGRNWizard({
         originalExtraction: ex,
       };
     },
-    [suppliers, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, materialByCode],
+    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, materialByCode],
   );
 
   const handleFiles = useCallback(
@@ -3780,6 +3846,15 @@ function CreateGRNWizard({
             createdGrnNo: grnNo,
             createError: null,
           });
+          // TEACH — see the identical call in the PI wizard. Aliases are shared
+          // across document types, so a supplier taught here also resolves on
+          // the next Purchase Invoice or PO scan.
+          void teachPartyAlias({
+            partyType: "SUPPLIER",
+            partyId: card.supplierId,
+            rawName: card.originalExtraction.supplierName,
+            knownMap: supplierAliases,
+          });
           if (j.data?.id) createdIds.push(j.data.id);
           else if (grnNo !== "(created)") createdIds.push(grnNo);
         } catch (err) {
@@ -3883,7 +3958,13 @@ function CreateGRNWizard({
             if (consumedIdxs.has(idx)) return;
             const key = `${it.id}#${idx}`;
             if (have.has(key)) return;
-            additions.push(buildCard(it.fileName, doc, null, it.id, idx));
+            // The engine's REAL sample id, now carried on the queue row.
+            // Previously hard-coded null, so the gold/correction confirm was
+            // skipped for EVERY queue-built card — `correctedJson` was never
+            // written, which is why the OCR accuracy dashboard stayed empty and
+            // the distill gold pool never filled. Still null on rows scanned
+            // before sample_id existed; confirm is skipped for those.
+            additions.push(buildCard(it.fileName, doc, it.sampleId, it.id, idx));
           });
         }
         if (additions.length === 0) return prev;
@@ -4089,6 +4170,11 @@ function GRNPreviewStep({
     (q) => q.status === "queued" || q.status === "processing",
   );
   const failedQueue = queueItems.filter((q) => q.status === "failed");
+  // Cache hits — see CachedScanNotice. Informational only (never blocks).
+  const cachedRowIds = useMemo(
+    () => new Set(queueItems.filter((q) => q.status === "cached").map((q) => q.id)),
+    [queueItems],
+  );
 
   return (
     <div className="space-y-4">
@@ -4133,6 +4219,11 @@ function GRNPreviewStep({
         />
       )}
 
+      <CachedScanNotice
+        cachedCount={cachedRowIds.size}
+        totalCount={queueItems.length}
+      />
+
       {errors.length > 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-1">
           {errors.map((err, i) => (
@@ -4153,6 +4244,9 @@ function GRNPreviewStep({
           <GRNCard
             key={card.id}
             card={card}
+            reused={
+              !!card.scanQueueRowId && cachedRowIds.has(card.scanQueueRowId)
+            }
             suppliers={suppliers}
             activeOrgs={activeOrgs}
             purchaseOrders={purchaseOrders}
@@ -4202,6 +4296,7 @@ function GRNPreviewStep({
 
 function GRNCard({
   card,
+  reused,
   suppliers,
   activeOrgs,
   purchaseOrders,
@@ -4218,6 +4313,8 @@ function GRNCard({
   onSupplierChange,
 }: {
   card: GRNPreviewCard;
+  /** This card came from a cache-hit queue row (same file scanned before). */
+  reused?: boolean;
   suppliers: Supplier[];
   activeOrgs: Organisation[];
   purchaseOrders: PurchaseOrder[];
@@ -4302,6 +4399,7 @@ function GRNCard({
             <span className="text-[#1F1D1B] font-medium whitespace-nowrap">
               {totalReceived} received
             </span>
+            {reused && <ReusedScanBadge />}
             {card.createdGrnNo && (
               <Badge className="bg-green-100 text-green-800 border border-green-300">
                 <CheckCircle className="h-3 w-3 inline mr-0.5" /> {card.createdGrnNo}
@@ -4459,6 +4557,7 @@ function GRNCard({
           <Badge className="bg-violet-50 text-violet-700 border border-violet-200">
             <FileText className="h-3 w-3 inline mr-0.5" /> {card.fileName}
           </Badge>
+          {reused && <ReusedScanBadge />}
           {linkedPo && (
             <Badge className="bg-blue-50 text-blue-700 border border-blue-200">
               PO {linkedPo.poNo}

@@ -13,7 +13,7 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { formatCurrency, formatDate, cn } from "@/lib/utils";
 import { getPrimarySoCategory } from "@/lib/so-category";
 import { matchesCompanyFilter } from "@/lib/company-dimension";
-import { Plus, ShoppingCart, Download, Filter, X, Eye, Pencil, Printer, Truck, FileText, ClipboardList, RefreshCw, Package, CheckCircle, ScanLine, DollarSign, Building2 } from "lucide-react";
+import { Plus, ShoppingCart, Download, Filter, X, Eye, Pencil, Printer, Truck, FileText, ClipboardList, RefreshCw, Package, CheckCircle, ScanLine, DollarSign, Building2, Trash2 } from "lucide-react";
 // Note: generateSOPdf is dynamic-imported at the click handler so the
 // 1MB jspdf vendor chunk only ships when the user actually prints a SO.
 import { ScanPOModal } from "@/components/scan-po-modal";
@@ -793,6 +793,64 @@ export default function SalesPage() {
     { key: "status", label: "Status", type: "status", width: "100px", sortable: true },
   ], [linkedPOMap, deliveredQtyMap, isServiceOrderMode, orgNameByCode]);
 
+  // Delete one or more DRAFT sales orders. Shared by the row menu and the
+  // Draft-tab bulk bar (owner 2026-08-01 — the list previously had no delete
+  // affordance anywhere, so a mis-scanned draft could only be removed from its
+  // own detail page).
+  //
+  // DRAFT-only, matching the backend guard: a confirmed order must be CANCELLED
+  // (which keeps the record), never deleted. Failures are reported per order
+  // rather than as one blanket message, because the usual cause — a linked
+  // production order / DO / invoice — applies to specific rows.
+  const deleteDrafts = async (rows: SalesOrder[]) => {
+    const drafts = rows.filter((r) => r.status === "DRAFT");
+    if (drafts.length === 0) return;
+    const label =
+      drafts.length === 1
+        ? `Delete draft ${drafts[0].companySOId}?`
+        : `Delete ${drafts.length} draft orders?`;
+    const ok = await confirm({
+      title: label,
+      message:
+        drafts.length === 1
+          ? "The order and its line items are removed permanently. Its number becomes available again if it was the month's latest."
+          : `${drafts.map((d) => d.companySOId).join(", ")}\n\nThese orders and their line items are removed permanently.`,
+      danger: true,
+    });
+    if (!ok) return;
+
+    const failures: string[] = [];
+    let done = 0;
+    for (const row of drafts) {
+      try {
+        const res = await fetch(`/api/sales-orders/${row.id}`, {
+          method: "DELETE",
+          credentials: "include",
+        });
+        if (res.ok) {
+          done += 1;
+        } else {
+          const body = (await res.json().catch(() => ({}))) as { error?: string };
+          failures.push(`${row.companySOId}: ${body.error || `HTTP ${res.status}`}`);
+        }
+      } catch (err) {
+        failures.push(
+          `${row.companySOId}: ${err instanceof Error ? err.message : "Network error"}`,
+        );
+      }
+    }
+    invalidateCachePrefix("/api/sales-orders");
+    invalidateCachePrefix("/api/production-orders");
+    setSelectedRows([]);
+    fetchAll();
+    if (done > 0) {
+      toast.success(
+        done === 1 ? "Draft deleted." : `${done} drafts deleted.`,
+      );
+    }
+    for (const f of failures) toast.error(f);
+  };
+
   const getContextMenuItems = (row: SalesOrder): ContextMenuItem[] => [
     {
       label: "View",
@@ -879,6 +937,25 @@ export default function SalesPage() {
       icon: <RefreshCw className="h-3.5 w-3.5" />,
       action: () => fetchAll(),
     },
+    // Delete — DRAFT only, mirroring the backend guard. Owner 2026-08-01:
+    // 「我要可以delete SO draft，要不然如果不对的话我要删除都做不到，这只是draft」.
+    // The list had NO delete affordance at all (row menu or toolbar), so a
+    // mis-scanned draft could only be removed by opening its detail page.
+    ...(row.status === "DRAFT"
+      ? [
+          {
+            label: "",
+            separator: true,
+            action: () => {},
+          },
+          {
+            label: "Delete draft",
+            icon: <Trash2 className="h-3.5 w-3.5" />,
+            danger: true,
+            action: () => void deleteDrafts([row]),
+          },
+        ]
+      : []),
   ];
 
   // Revenue card — server-side "CS revenue" (Confirmed Sales) excludes
@@ -1315,6 +1392,18 @@ export default function SalesPage() {
                 }}
               >
                 <CheckCircle className="h-4 w-4" /> {bulkConverting ? "Converting..." : "Convert to Confirmed"}
+              </Button>
+              {/* Bulk delete — the counterpart to Convert. A batch scanned by
+                  mistake is discarded here instead of one detail page at a
+                  time (owner 2026-08-01). DRAFT-only, same guard as the
+                  backend. */}
+              <Button
+                variant="outline"
+                disabled={bulkConverting}
+                style={{ color: "var(--text-danger, #9A3A2D)" }}
+                onClick={() => void deleteDrafts(selectedRows)}
+              >
+                <Trash2 className="h-4 w-4" /> Delete
               </Button>
             </div>
           )}

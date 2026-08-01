@@ -24,6 +24,10 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
+import {
+  propagateSupplierName,
+  backfillSupplierNames,
+} from "../lib/party-name-propagate";
 
 const app = new Hono<Env>();
 
@@ -436,6 +440,37 @@ app.get("/:id", async (c) => {
 
 // PUT /api/suppliers/:id — update supplier scalar fields, replace materials if
 // body.materials is supplied. DELETE + re-INSERT as one batch for atomicity.
+// ---------------------------------------------------------------------------
+// POST /api/suppliers/_backfill-snapshot-names — one-shot (owner 2026-08-01).
+//
+// Renames made BEFORE propagation shipped left stale supplier_name snapshots
+// on documents (400-A002 alone: 24 PIs + 13 POs still read "ADD WOORD"). This
+// realigns every id-keyed snapshot table to the suppliers master. Idempotent —
+// `IS DISTINCT FROM` means a second run reports 0 rows.
+// Optional body { supplierId } limits it to one supplier for a dry first pass.
+// ---------------------------------------------------------------------------
+app.post("/_backfill-snapshot-names", async (c) => {
+  const denied = await requirePermission(c, "suppliers", "update");
+  if (denied) return denied;
+  let supplierId: string | null = null;
+  try {
+    const body = (await c.req.json()) as { supplierId?: unknown };
+    if (typeof body?.supplierId === "string" && body.supplierId.trim()) {
+      supplierId = body.supplierId.trim();
+    }
+  } catch {
+    /* no body = whole table */
+  }
+  const r = await backfillSupplierNames(
+    c.var.DB as unknown as Parameters<typeof backfillSupplierNames>[0],
+    supplierId,
+  );
+  console.info(
+    `[backfill-snapshot-names suppliers] scope=${supplierId ?? "ALL"} rows=${r.totalRows}`,
+  );
+  return c.json({ success: true, data: r });
+});
+
 app.put("/:id", async (c) => {
   const denied = await requirePermission(c, "suppliers", "update");
   if (denied) return denied;
@@ -620,6 +655,23 @@ app.put("/:id", async (c) => {
 
     // Phase 3 dual-identity link (best-effort, non-blocking).
     await writeSupplierGroupOrgCode(c.var.DB, id, body);
+
+    // A rename must reach the 8 tables that snapshotted supplier_name at
+    // create time — their read paths don't join suppliers, so without this the
+    // correction is invisible on every existing PO / GRN / PI / payment
+    // (owner 2026-08-01, after 400-A002's "ADD WOORD" typo stayed on 24 PIs
+    // and 13 POs). Owner ruling: propagate to financial documents too.
+    if (merged.name !== existing.name) {
+      const prop = await propagateSupplierName(
+        c.var.DB as unknown as Parameters<typeof propagateSupplierName>[0],
+        id,
+        existing.name,
+        merged.name,
+      );
+      console.info(
+        `[PUT /api/suppliers/${id}] renamed "${prop.oldName}" → "${prop.newName}": ${prop.totalRows} row(s) across ${prop.tables.filter((t) => t.updated !== null).length} table(s)`,
+      );
+    }
 
     const [updated, matsRes] = await Promise.all([
       c.var.DB.prepare("SELECT * FROM suppliers WHERE id = ?")

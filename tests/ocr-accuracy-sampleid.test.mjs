@@ -89,8 +89,14 @@ test("supplier accuracy splits PI vs GR off the sample's docType", () => {
 
 test("scan duration is aggregated per document type", () => {
   const route = readFileSync("src/api/routes/ocr-accuracy.ts", "utf8");
-  // Enqueue → done is what the operator waits through.
-  assert.match(route, /q\.completed_at::timestamptz - q\.created_at::timestamptz/);
+  // MEASURED on staging: enqueue → done gave 22-minute Customer PO averages and
+  // a 3.9-day supplier p90, because a queue row only advances while a worker is
+  // draining it. Processing time is the real scan cost.
+  assert.match(route, /q\.completed_at::timestamptz - q\.started_at::timestamptz/);
+  assert.doesNotMatch(route, /completed_at::timestamptz - q\.created_at::timestamptz/);
+  assert.match(route, /q\.started_at IS NOT NULL/, "rows that never ran must not count as zero");
+  // Must not depend on scan-queue's lazy ensure having run first.
+  assert.match(route, /ALTER TABLE scan_queue ADD COLUMN IF NOT EXISTS sample_id TEXT/);
   assert.match(route, /AVG\(EXTRACT\(EPOCH FROM/);
   assert.match(route, /PERCENTILE_CONT\(0\.9\)/, "an average alone hides the slow tail");
   // PI vs GR needs the sample join, which only works now sample_id is stored.

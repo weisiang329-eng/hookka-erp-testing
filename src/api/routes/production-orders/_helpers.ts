@@ -5117,6 +5117,101 @@ export async function warmPoListPlanningVariant(
   return { rows: result?.total ?? 0 };
 }
 
+// Today's date in Malaysia (UTC+8, no DST) — mirrors todayISO() in
+// src/pages/production/utils.ts. The dept page seeds its cold-start date
+// window from that exact function, so the warmer must agree on the day or the
+// key drifts by one at the UTC boundary.
+export function todayMytISO(): string {
+  return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+// The snapshot key for a dept sheet's cold open. Built the same way the
+// handler builds it: sorted, "&"-joined query params. Exported so the
+// regression test can compare it against the FE's URL construction.
+export function deptWarmCacheKey(dept: string, today: string): string {
+  return [
+    `fields=minimal`,
+    `dept=${encodeURIComponent(dept)}`,
+    `excludeCompleted=true`,
+    `dueFrom=${encodeURIComponent(today)}`,
+    `dueTo=${encodeURIComponent(today)}`,
+  ]
+    .sort()
+    .join("&");
+}
+
+// Warm ONE per-DEPT sheet snapshot (Fab Cut / Fab Sew / … / Packing), so the
+// first operator to open a dept sheet doesn't pay the ~5-8s cold recompute
+// (owner-reported "打开卡很久" on Fab Cut; health 2026-08-01 measured
+// /api/production-orders at P50 8s / P95 30s).
+//
+// ATTEMPT 1 (be17d4b4) SHIPPED A KEY THAT NEVER MATCHED and was reverted in
+// 071fcee7. It assumed the dept page sends no date window. It does: on a cold
+// open `useColdStartTodayFallback` seeds dueFrom=dueTo=todayISO() (MYT), so the
+// live request is
+//   fields=minimal&dept=<D>&excludeCompleted=true&dueFrom=<today>&dueTo=<today>
+// while the warmer stored `dept=<D>&excludeCompleted=true&fields=minimal`.
+// Result: a snapshot nobody ever read, plus wasted cron time per dept.
+//
+// The key here is now built by the SAME rule the handler uses — the request's
+// query string, sorted and "&"-joined (see production-orders.ts:
+// `new URL(c.req.url).searchParams.toString().split("&").sort().join("&")`) —
+// with the same today-MYT window the page seeds. deptWarmCacheKey() below is
+// the single place that shape is defined, and the test asserts it against the
+// FE's own construction so this cannot silently drift a third time.
+//
+// The rows we compute MUST also be filtered by that same window, or the
+// snapshot would hold more rows than the key promises.
+export async function warmPoListDeptVariant(
+  c: Context<Env>,
+  orgId: string,
+  dept: string,
+): Promise<{ rows: number }> {
+  const { withSnapshot } = await import("../../lib/snapshot");
+  const today = todayMytISO();
+  const snapshotCacheKey = deptWarmCacheKey(dept, today);
+  const result = await withSnapshot<{
+    success: true;
+    data: unknown[];
+    total: number;
+  }>(
+    c.var.DB,
+    {
+      tableName: "production_orders_list_snapshot",
+      sourceTables: ["production_orders", "job_cards", "sales_orders", "consignment_orders"],
+    },
+    orgId,
+    async () => {
+      const data = await fetchFilteredPOs(
+        c.var.DB,
+        orgId,
+        null, // statuses
+        true, // includeJobCards — the dept sheet inlines full jobCards
+        false, // includeArchive
+        true, // minimal
+        dept, // deptFilter
+        today, // dueFrom — MUST mirror the key's window (cold open seeds today)
+        today, // dueTo
+        null, // catFilter
+        true, // excludeCompleted — dept pages always send it
+      );
+      await attachCustomerSO(
+        c.var.DB,
+        data as Array<{
+          salesOrderId: string;
+          consignmentOrderId: string;
+          customerSO: string;
+        }>,
+      );
+      return { success: true, data, total: data.length };
+    },
+    snapshotCacheKey,
+    c,
+    undefined, // no SWR — force compute+store on the cron
+  );
+  return { rows: result?.total ?? 0 };
+}
+
 // After a worker QR scan completes job cards, the operator-facing production
 // dept sheets read from a cache-aside snapshot (production_orders_list_snapshot)
 // plus the KV list cache. The snapshot freshness probe compares MAX(updated_at)

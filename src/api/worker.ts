@@ -481,6 +481,21 @@ app.post("/api/internal/warm-lists", async (c) => {
     console.error("[warm-lists] poListDept failed:", e);
     out.poListDept = { ok: false };
   }
+  // 1c. Overdue counts — every dept page requests this on open, and health
+  // 2026-08-01 measured p50 7,990ms / p95 30,010ms on it: half of all calls
+  // paid an ~8s cold recompute and the slowest hit the client's 30s abort.
+  // Same cold-snapshot class as the dept sheet (#167), just a different
+  // endpoint the warm cron never covered.
+  try {
+    const { warmOverdueCounts } = await import("./routes/production-orders");
+    const { DEPT_ORDER } = await import("./lib/lead-times");
+    const r = await warmOverdueCounts(c, DEPT_ORDER);
+    out.overdueCounts = { ok: r.failed.length === 0, warmed: r.warmed, failed: r.failed };
+  } catch (e) {
+    console.error("[warm-lists] overdueCounts failed:", e);
+    out.overdueCounts = { ok: false };
+  }
+
   // 2. Delivery-orders list value map (keeps the DO list warm post-deploy too).
   try {
     const { loadDoValueMapCached } = await import("./lib/do-value");

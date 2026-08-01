@@ -23,6 +23,7 @@
 // its own table in the schema.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import type { Context } from "hono";
 import type { Env } from "../worker";
 import { postProductionOrderCompletion } from "../lib/fg-completion";
 import { postJobCardLabor } from "../lib/po-cost-cascade";
@@ -85,6 +86,27 @@ import type {
   ProductionOrderRow,
 } from "./production-orders/_helpers";
 
+// ---------------------------------------------------------------------------
+// overdue-counts snapshot key — ONE definition, used by the route AND the warm
+// cron. Attempt 1 at warming the dept sheets (be17d4b4) shipped a key the page
+// never requested and warmed a snapshot nobody read; it was reverted. The only
+// way that cannot recur is for both sides to call the same function.
+//
+// NOTE the timezone: this key uses UTC (new Date().toISOString()), NOT the
+// MYT-shifted day the dept SHEET key uses. Different endpoints, different
+// existing behaviour - deliberately preserved rather than "harmonised", since
+// changing it here would silently orphan every stored snapshot row.
+// ---------------------------------------------------------------------------
+export function overdueTodayUtc(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+export function overdueCountsCacheKey(
+  dept: string | null,
+  today: string,
+): string {
+  return `v3&dept=${dept ?? ""}&today=${today}`;
+}
+
 const app = new Hono<Env>();
 app.get("/overdue-counts", async (c) => {
   const orgId = getOrgId(c);
@@ -93,7 +115,7 @@ app.get("/overdue-counts", async (c) => {
     deptParam && deptParam.trim().length > 0
       ? deptParam.trim().toUpperCase()
       : null;
-  const today = new Date().toISOString().slice(0, 10);
+  const today = overdueTodayUtc();
 
   // PR 7 — cache-aside snapshot. cache_key encodes both the dept
   // filter AND today's date — overdue counts are inherently
@@ -109,7 +131,7 @@ app.get("/overdue-counts", async (c) => {
   // overdueSofaPoIds (the PO-id sets the Overview grid filters on). That is a
   // SHAPE change, so bump again — without this the new code reads the existing
   // v2 snapshot rows, which lack the id arrays, and the grid filters to 0.
-  const cacheKey = `v3&dept=${dept ?? ""}&today=${today}`;
+  const cacheKey = overdueCountsCacheKey(dept, today);
   const { withSnapshot } = await import("../lib/snapshot");
   const result = await withSnapshot(
     c.var.DB,
@@ -3439,3 +3461,42 @@ export type {
   ProductionOrderRow,
 };
 export default app;
+
+// ---------------------------------------------------------------------------
+// Warm the overdue-counts snapshot for every dept + the Overview (dept=null).
+//
+// Health 2026-08-01 measured /api/production-orders/overdue-counts at p50
+// 7,990ms and p95 30,010ms - i.e. HALF of all calls paid an ~8s cold recompute,
+// and the slowest hit the client's 30s abort outright. Every dept page requests
+// it on open, so this was a second cold-snapshot endpoint alongside the dept
+// sheet fixed in #167 - the warm cron simply never covered it.
+//
+// Warms by invoking THIS router's own handler rather than re-implementing the
+// aggregation. That is the whole point: the payload and the cache key are then
+// produced by exactly the code the page hits, so they cannot drift apart the
+// way the reverted dept-sheet warmer did.
+// ---------------------------------------------------------------------------
+export async function warmOverdueCounts(
+  c: Context<Env>,
+  depts: readonly string[],
+): Promise<{ warmed: number; failed: string[] }> {
+  const failed: string[] = [];
+  let warmed = 0;
+  // "" = the Overview variant (dept omitted), which the /production landing
+  // page requests and which is the most expensive of the set.
+  for (const dept of ["", ...depts]) {
+    const qs = dept ? `?dept=${encodeURIComponent(dept)}` : "";
+    try {
+      const res = await app.request(
+        `/overdue-counts${qs}`,
+        { method: "GET" },
+        c.env as Record<string, unknown>,
+      );
+      if (res.ok) warmed++;
+      else failed.push(`${dept || "overview"}:${res.status}`);
+    } catch (e) {
+      failed.push(`${dept || "overview"}:${e instanceof Error ? e.message : "throw"}`);
+    }
+  }
+  return { warmed, failed };
+}

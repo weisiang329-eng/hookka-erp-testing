@@ -333,7 +333,12 @@ export default function SalesPage() {
     () => ({ status: ["SHIPPED", "DELIVERED", "CLOSED", "CANCELLED"] }),
     [],
   );
-  const salesGridDefaultExcluded = filterStatus ? undefined : SHIPPED_STATUS_EXCLUDE;
+  // The hide-shipped default only makes sense in the unfiltered Confirmed
+  // funnel. On the Draft tab every row is DRAFT, so seeding a Status exclusion
+  // there can only ever narrow a list that is already exactly what was asked
+  // for — and it was half of how the tab ended up blank.
+  const salesGridDefaultExcluded =
+    filterStatus || tab === "DRAFT" ? undefined : SHIPPED_STATUS_EXCLUDE;
   const [filterCustomer, setFilterCustomer] = _flCustomer;
   const [filterDateFrom, setFilterDateFrom] = _flFrom;
   const [filterDateTo, setFilterDateTo] = _flTo;
@@ -1501,7 +1506,20 @@ export default function SalesPage() {
             // "Delivered" showed "0 of 66 · 1 filter active" because the
             // grid had persisted the funnel-default status exclusion and
             // never re-applied it against the new selection.
-            valueFilterKey={filterStatus || "all"}
+            // Every state that SEGMENTS the rows must be part of this key, or
+            // the two segments share one sticky filter set. The Draft/Confirmed
+            // tab was missing: the grid seeds its Status value-filter from the
+            // statuses PRESENT in the current data, so a set seeded on the
+            // Confirmed tab contains no "DRAFT" — switching to Draft then hid
+            // every row ("0 of 2 records · 1 filter active").
+            //
+            // This is the SECOND time round for this class: BUG 2026-05-16 was
+            // the same defect via the Status dropdown, and that fix added only
+            // `filterStatus`. `tab` is the other segmenting state.
+            // (Sibling grids are already safe by construction: Production bakes
+            // the department into gridId, Service Cases has statusFilter as its
+            // only segment.)
+            valueFilterKey={`${tab}:${filterStatus || "all"}`}
             // Hide already-shipped / delivered / closed / cancelled rows
             // ONLY in the default "All Statuses" funnel view — once the
             // operator explicitly picks a Status above, filteredOrders is

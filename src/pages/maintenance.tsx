@@ -21,6 +21,7 @@ import {
   History,
   Search,
 } from "lucide-react";
+import { ResourceDocuments } from "@/components/resource-documents";
 
 type TabId = "equipment" | "schedule" | "history";
 
@@ -156,6 +157,14 @@ export default function MaintenancePage() {
       type: fd.get("type"),
       maintenanceCycleDays: Number(fd.get("maintenanceCycleDays")) || 30,
       purchaseDate: fd.get("purchaseDate"),
+      // Asset identity + provenance — kept alongside the paperwork uploaded
+      // against this equipment (resourceType "equipment" in /api/files).
+      model: fd.get("model") ?? "",
+      serialNo: fd.get("serialNo") ?? "",
+      manufacturer: fd.get("manufacturer") ?? "",
+      supplier: fd.get("supplier") ?? "",
+      purchasePriceRM: Number(fd.get("purchasePriceRM")) || 0,
+      warrantyExpiry: fd.get("warrantyExpiry") ?? "",
       notes: fd.get("notes"),
       lastMaintenanceDate: new Date().toISOString().split("T")[0],
       nextMaintenanceDate: (() => {
@@ -229,6 +238,15 @@ export default function MaintenancePage() {
       status: String(fd.get("status") || ""),
       maintenanceCycleDays: Number(fd.get("maintenanceCycleDays")),
       notes: String(fd.get("notes") || ""),
+      // Asset identity + provenance. The backend merges field-by-field, so a
+      // dialog that doesn't send one of these leaves it untouched.
+      model: String(fd.get("model") || ""),
+      serialNo: String(fd.get("serialNo") || ""),
+      manufacturer: String(fd.get("manufacturer") || ""),
+      supplier: String(fd.get("supplier") || ""),
+      purchasePriceRM: Number(fd.get("purchasePriceRM")) || 0,
+      warrantyExpiry: String(fd.get("warrantyExpiry") || ""),
+      purchaseDate: String(fd.get("purchaseDate") || ""),
     };
     // 2026-05-27 verifiedSave migration.
     const result = await verifiedSave<Equipment>({
@@ -397,6 +415,19 @@ export default function MaintenancePage() {
                   <input name="type" list="equipment-type-options" required placeholder="Equipment Type (type or pick)" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
                   <input name="maintenanceCycleDays" type="number" onFocus={(e) => e.currentTarget.select()} defaultValue={30} placeholder="Cycle (days)" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
                   <input name="purchaseDate" type="date" required className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
+                  {/* Asset identity + provenance. Without these a machine on
+                      the floor can't be tied to the paperwork that bought it —
+                      which is what the purchase agreement / warranty upload
+                      below is for (owner 2026-08-01). */}
+                  <input name="model" placeholder="Model" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
+                  <input name="serialNo" placeholder="Serial No." className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
+                  <input name="manufacturer" placeholder="Manufacturer / Brand" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
+                  <input name="supplier" placeholder="Bought from (supplier)" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
+                  <input name="purchasePriceRM" type="number" step="0.01" min="0" onFocus={(e) => e.currentTarget.select()} placeholder="Purchase price (RM)" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
+                  <label className="flex flex-col text-xs text-[#6B7280] gap-1">
+                    Warranty expiry
+                    <input name="warrantyExpiry" type="date" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
+                  </label>
                   <input name="notes" placeholder="Notes (optional)" className="sm:col-span-2 h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
                   <div className="flex items-end">
                     <Button type="submit" variant="primary" className="w-full">Save Equipment</Button>
@@ -431,11 +462,38 @@ export default function MaintenancePage() {
                     <option value="DECOMMISSIONED">DECOMMISSIONED</option>
                   </select>
                   <input name="maintenanceCycleDays" type="number" onFocus={(e) => e.currentTarget.select()} defaultValue={editingEquipment.maintenanceCycleDays} className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
+                  <input name="model" defaultValue={editingEquipment.model ?? ""} placeholder="Model" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
+                  <input name="serialNo" defaultValue={editingEquipment.serialNo ?? ""} placeholder="Serial No." className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
+                  <input name="manufacturer" defaultValue={editingEquipment.manufacturer ?? ""} placeholder="Manufacturer / Brand" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
+                  <input name="supplier" defaultValue={editingEquipment.supplier ?? ""} placeholder="Bought from (supplier)" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
+                  <input name="purchasePriceRM" type="number" step="0.01" min="0" onFocus={(e) => e.currentTarget.select()} defaultValue={((editingEquipment.purchasePriceSen ?? 0) / 100) || ""} placeholder="Purchase price (RM)" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
+                  <label className="flex flex-col text-xs text-[#6B7280] gap-1">
+                    Warranty expiry
+                    <input name="warrantyExpiry" type="date" defaultValue={editingEquipment.warrantyExpiry ?? ""} className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
+                  </label>
+                  <label className="flex flex-col text-xs text-[#6B7280] gap-1">
+                    Purchase date
+                    <input name="purchaseDate" type="date" defaultValue={editingEquipment.purchaseDate ?? ""} className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
+                  </label>
                   <input name="notes" defaultValue={editingEquipment.notes} placeholder="Notes" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
                   <div className="flex items-end">
                     <Button type="submit" variant="primary" className="w-full">Update</Button>
                   </div>
                 </form>
+                {/* Paperwork lives with the asset, not in someone's drive —
+                    purchase agreement, warranty, manual, and photos of the
+                    machine and its nameplate. Uses the shared /api/files store
+                    keyed to this equipment id, so no new table. Only shown when
+                    editing: a brand-new record has no id to attach to until
+                    it's saved. */}
+                <div className="mt-4">
+                  <ResourceDocuments
+                    resourceType="equipment"
+                    resourceId={editingEquipment.id}
+                    title="Documents & photos"
+                    hint="Purchase agreement, warranty, manual, machine + nameplate photos."
+                  />
+                </div>
               </CardContent>
             </Card>
           )}

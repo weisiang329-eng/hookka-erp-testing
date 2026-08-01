@@ -786,6 +786,17 @@ export type Equipment = {
   maintenanceCycleDays: number;
   purchaseDate: string;
   notes: string;
+  // Asset identity + provenance (2026-08-01). Optional because rows created
+  // before these columns existed simply don't carry them; the API defaults
+  // each to "" / 0 rather than null so the forms stay uncontrolled-safe.
+  model?: string;
+  serialNo?: string;
+  manufacturer?: string;
+  /** Who it was bought from — free text, not a supplier FK. */
+  supplier?: string;
+  /** Integer sen, like every other money field in the system. */
+  purchasePriceSen?: number;
+  warrantyExpiry?: string;
 };
 
 export type MaintenanceLog = {

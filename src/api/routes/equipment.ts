@@ -26,6 +26,18 @@ type EquipmentRow = {
   maintenanceCycleDays: number;
   purchaseDate: string;
   notes: string;
+  // Asset identity + provenance (owner 2026-08-01). Runtime self-applied —
+  // migration files are inert on deploy (CLAUDE.md). snake_case in the DB,
+  // dual-keyed on read because the Supabase adapter folds either way.
+  model?: string | null;
+  serialNo?: string | null;
+  serial_no?: string | null;
+  manufacturer?: string | null;
+  supplier?: string | null;
+  purchasePriceSen?: number | null;
+  purchase_price_sen?: number | null;
+  warrantyExpiry?: string | null;
+  warranty_expiry?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -56,6 +68,14 @@ function rowToEquipment(row: EquipmentRow) {
     maintenanceCycleDays: row.maintenanceCycleDays,
     purchaseDate: row.purchaseDate,
     notes: row.notes,
+    model: row.model ?? "",
+    serialNo: row.serialNo ?? row.serial_no ?? "",
+    manufacturer: row.manufacturer ?? "",
+    supplier: row.supplier ?? "",
+    // Money is integer sen everywhere in this system (CLAUDE.md) — never a
+    // float. The form sends ringgit and converts on the way in.
+    purchasePriceSen: Number(row.purchasePriceSen ?? row.purchase_price_sen ?? 0) || 0,
+    warrantyExpiry: row.warrantyExpiry ?? row.warranty_expiry ?? "",
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -88,6 +108,7 @@ function addDays(isoDate: string, days: number): string {
 
 // GET /api/equipment
 app.get("/", async (c) => {
+  await ensureEquipmentAssetColumns(c.var.DB);
   const orgId = getOrgId(c);
   const res = await c.var.DB.prepare(
     "SELECT * FROM equipment WHERE orgId = ? ORDER BY name",
@@ -99,10 +120,48 @@ app.get("/", async (c) => {
 });
 
 // POST /api/equipment
+// The asset-identity columns were added 2026-08-01. Migration files are inert
+// on deploy (CLAUDE.md), so the columns have to be self-applied at runtime
+// before the first write that names them. Idempotent, once per isolate; a
+// failure is logged rather than thrown so the module keeps working on an engine
+// that lacks IF NOT EXISTS.
+let _equipColsMig: Promise<void> | null = null;
+function ensureEquipmentAssetColumns(db: D1Database): Promise<void> {
+  if (!_equipColsMig) {
+    _equipColsMig = (async () => {
+      for (const sql of [
+        "ALTER TABLE equipment ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE equipment ADD COLUMN IF NOT EXISTS serial_no TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE equipment ADD COLUMN IF NOT EXISTS manufacturer TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE equipment ADD COLUMN IF NOT EXISTS supplier TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE equipment ADD COLUMN IF NOT EXISTS purchase_price_sen INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE equipment ADD COLUMN IF NOT EXISTS warranty_expiry TEXT NOT NULL DEFAULT ''",
+      ]) {
+        try {
+          await db.prepare(sql).run();
+        } catch (e) {
+          console.warn(
+            "[equipment] column ensure:",
+            e instanceof Error ? e.message : e,
+          );
+        }
+      }
+    })();
+  }
+  return _equipColsMig;
+}
+
+/** Ringgit (what the form sends) → integer sen (what everything stores). */
+function toSen(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.round(n * 100) : 0;
+}
+
 app.post("/", async (c) => {
   const denied = await requirePermission(c, "equipment", "create");
   if (denied) return denied;
   try {
+    await ensureEquipmentAssetColumns(c.var.DB);
     const body = await c.req.json();
     const id = genId("eq");
     const now = new Date().toISOString();
@@ -110,8 +169,9 @@ app.post("/", async (c) => {
     await c.var.DB.prepare(
       `INSERT INTO equipment (id, code, name, department, type, status,
          lastMaintenanceDate, nextMaintenanceDate, maintenanceCycleDays,
-         purchaseDate, notes, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         purchaseDate, notes, model, serial_no, manufacturer, supplier,
+         purchase_price_sen, warranty_expiry, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -125,6 +185,12 @@ app.post("/", async (c) => {
         Number(body.maintenanceCycleDays) || 30,
         body.purchaseDate ?? today,
         body.notes ?? "",
+        body.model ?? "",
+        body.serialNo ?? "",
+        body.manufacturer ?? "",
+        body.supplier ?? "",
+        toSen(body.purchasePriceRM),
+        body.warrantyExpiry ?? "",
         now,
         now,
       )
@@ -177,6 +243,7 @@ app.put("/:id", async (c) => {
     if (!existing) {
       return c.json({ success: false, error: "Equipment not found" }, 404);
     }
+    await ensureEquipmentAssetColumns(c.var.DB);
     const body = await c.req.json();
     const now = new Date().toISOString();
 
@@ -235,7 +302,25 @@ app.put("/:id", async (c) => {
     }
 
     // ── Regular update path ──
+    // Same "only overwrite what was sent" rule as the existing fields, so a
+    // partial PUT from one dialog can't blank what another dialog owns.
+    const pick = <T,>(fresh: T | undefined, current: T): T =>
+      fresh === undefined ? current : fresh;
     const merged = {
+      model: pick(body.model, existing.model ?? ""),
+      serialNo: pick(body.serialNo, existing.serialNo ?? existing.serial_no ?? ""),
+      manufacturer: pick(body.manufacturer, existing.manufacturer ?? ""),
+      supplier: pick(body.supplier, existing.supplier ?? ""),
+      // The form sends ringgit; storage is integer sen.
+      purchasePriceSen:
+        body.purchasePriceRM !== undefined
+          ? toSen(body.purchasePriceRM)
+          : Number(existing.purchasePriceSen ?? existing.purchase_price_sen ?? 0) || 0,
+      warrantyExpiry: pick(
+        body.warrantyExpiry,
+        existing.warrantyExpiry ?? existing.warranty_expiry ?? "",
+      ),
+      purchaseDate: pick(body.purchaseDate, existing.purchaseDate ?? ""),
       code: body.code !== undefined ? body.code : existing.code,
       name: body.name !== undefined ? body.name : existing.name,
       department:
@@ -260,7 +345,8 @@ app.put("/:id", async (c) => {
       `UPDATE equipment SET
          code = ?, name = ?, department = ?, type = ?, status = ?,
          lastMaintenanceDate = ?, nextMaintenanceDate = ?, maintenanceCycleDays = ?,
-         notes = ?, updated_at = ?
+         notes = ?, model = ?, serial_no = ?, manufacturer = ?, supplier = ?,
+         purchase_price_sen = ?, warranty_expiry = ?, purchaseDate = ?, updated_at = ?
        WHERE id = ?`,
     )
       .bind(
@@ -273,6 +359,13 @@ app.put("/:id", async (c) => {
         merged.nextMaintenanceDate,
         merged.maintenanceCycleDays,
         merged.notes,
+        merged.model,
+        merged.serialNo,
+        merged.manufacturer,
+        merged.supplier,
+        merged.purchasePriceSen,
+        merged.warrantyExpiry,
+        merged.purchaseDate,
         now,
         id,
       )

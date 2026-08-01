@@ -23,7 +23,13 @@ type Resp = {
   data?: {
     overall: { total: number; success: number; rate: number | null };
     salesOrders: Bucket & { customers: Bucket[] };
-    supplier: Bucket & { suppliers: Bucket[] };
+    supplier: Bucket & { suppliers: Bucket[]; docTypes?: Bucket[] };
+    // Owner 2026-08-01: 「要有平均 scan 一张 PO/PI/GR 的时间」. Enqueue → done,
+    // i.e. what the operator actually waits through. Cache hits excluded.
+    timing?: {
+      totalScans: number;
+      buckets: { key: string; scans: number; avgSec: number | null; p90Sec: number | null }[];
+    };
   };
 };
 
@@ -35,6 +41,13 @@ function rateColor(rate: number | null): string {
 }
 function pct(rate: number | null): string {
   return rate === null ? "—" : `${rate}%`;
+}
+/** Seconds → "8.4s" / "2m 05s". Long scans read badly as raw seconds. */
+function secs(v: number | null): string {
+  if (v === null || !Number.isFinite(v)) return "—";
+  if (v < 60) return `${v.toFixed(1)}s`;
+  const m = Math.floor(v / 60);
+  return `${m}m ${String(Math.round(v - m * 60)).padStart(2, "0")}s`;
 }
 
 function Tile({ label, rate, sub }: { label: string; rate: number | null; sub: string }) {
@@ -138,6 +151,72 @@ export function OcrAccuracyCard({
                     <tbody>
                       {d.salesOrders.customers.slice(0, 12).map((cust) => (
                         <CustomerRow key={cust.key} b={cust} />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : null}
+
+            {d.supplier.docTypes && d.supplier.docTypes.length > 0 ? (
+              <div className="mb-5">
+                <div className="text-sm font-semibold text-[#6B5C32] mb-2">
+                  Supplier · by Document Type{" "}
+                  <span className="font-normal text-[11px] text-[#9A9384]">
+                    (Purchase Invoice vs Goods Received — from the doc type the AI read)
+                  </span>
+                </div>
+                <div className="overflow-x-auto rounded-lg border border-[#E7E0D4]">
+                  <table className="w-full text-[13px]">
+                    <thead>
+                      <tr className="bg-[#FAF7F2] text-[11px] uppercase tracking-wide text-[#8A8577]">
+                        <th className="px-3 py-2 text-left">Document type</th>
+                        <th className="px-2 py-2 text-right">Scans</th>
+                        <th className="px-2 py-2 text-right">Success</th>
+                        <th className="px-3 py-2 text-left">Most-changed fields</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {d.supplier.docTypes.map((t) => (
+                        <tr key={t.key} className="border-t border-[#F0ECE3]">
+                          <td className="px-3 py-2 font-medium text-[#1F1D1B]">{t.key}</td>
+                          <td className="px-2 py-2 text-right tabular-nums text-[#6B7280]">{t.total}</td>
+                          <td className="px-2 py-2 text-right tabular-nums font-semibold" style={{ color: rateColor(t.rate) }}>{pct(t.rate)}</td>
+                          <td className="px-3 py-2 text-[#8A8577] text-xs">{t.topFails.length ? t.topFails.join(" · ") : "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : null}
+
+            {d.timing && d.timing.buckets.length > 0 ? (
+              <div className="mb-5">
+                <div className="text-sm font-semibold text-[#6B5C32] mb-2">
+                  Scan time{" "}
+                  <span className="font-normal text-[11px] text-[#9A9384]">
+                    (upload → result, {d.timing.totalScans} scans; repeat uploads served from cache are excluded)
+                  </span>
+                </div>
+                <div className="overflow-x-auto rounded-lg border border-[#E7E0D4]">
+                  <table className="w-full text-[13px]">
+                    <thead>
+                      <tr className="bg-[#FAF7F2] text-[11px] uppercase tracking-wide text-[#8A8577]">
+                        <th className="px-3 py-2 text-left">Document type</th>
+                        <th className="px-2 py-2 text-right">Scans</th>
+                        <th className="px-2 py-2 text-right">Average</th>
+                        <th className="px-2 py-2 text-right">Slowest 10%</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {d.timing.buckets.map((t) => (
+                        <tr key={t.key} className="border-t border-[#F0ECE3]">
+                          <td className="px-3 py-2 font-medium text-[#1F1D1B]">{t.key}</td>
+                          <td className="px-2 py-2 text-right tabular-nums text-[#6B7280]">{t.scans}</td>
+                          <td className="px-2 py-2 text-right tabular-nums font-semibold text-[#1F1D1B]">{secs(t.avgSec)}</td>
+                          <td className="px-2 py-2 text-right tabular-nums text-[#6B7280]">{secs(t.p90Sec)}</td>
+                        </tr>
                       ))}
                     </tbody>
                   </table>

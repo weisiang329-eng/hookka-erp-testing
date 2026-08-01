@@ -444,6 +444,8 @@ type QueueItem = {
   error: string | null;
   cached: boolean;
   fileHash: string;
+  /** Real scan-sample row id from the engine — null on older queue rows. */
+  sampleId: string | null;
   createdAt: string;
   consumedAt: string | null;
   // Per-doc consumed indices within rawJson.docs[]. The modal hides any
@@ -1848,10 +1850,13 @@ function CreatePIWizard({
             if (consumedIdxs.has(idx)) return;
             const key = `${it.id}#${idx}`;
             if (have.has(key)) return;
-            // sampleId is null for queue-built cards — the engine writes a
-            // file-level sample on its own and the id isn't recoverable
-            // from the queue. Gold/correction confirm skipped in that case.
-            additions.push(buildCard(it.fileName, doc, null, it.id, idx));
+            // The engine's REAL sample id, now carried on the queue row.
+            // Previously hard-coded null, so the gold/correction confirm was
+            // skipped for EVERY queue-built card — `correctedJson` was never
+            // written, which is why the OCR accuracy dashboard stayed empty and
+            // the distill gold pool never filled. Still null on rows scanned
+            // before sample_id existed; confirm is skipped for those.
+            additions.push(buildCard(it.fileName, doc, it.sampleId, it.id, idx));
           });
         }
         if (additions.length === 0) return prev;
@@ -3953,7 +3958,13 @@ function CreateGRNWizard({
             if (consumedIdxs.has(idx)) return;
             const key = `${it.id}#${idx}`;
             if (have.has(key)) return;
-            additions.push(buildCard(it.fileName, doc, null, it.id, idx));
+            // The engine's REAL sample id, now carried on the queue row.
+            // Previously hard-coded null, so the gold/correction confirm was
+            // skipped for EVERY queue-built card — `correctedJson` was never
+            // written, which is why the OCR accuracy dashboard stayed empty and
+            // the distill gold pool never filled. Still null on rows scanned
+            // before sample_id existed; confirm is skipped for those.
+            additions.push(buildCard(it.fileName, doc, it.sampleId, it.id, idx));
           });
         }
         if (additions.length === 0) return prev;

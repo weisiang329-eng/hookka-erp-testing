@@ -71,6 +71,8 @@ type QueueItem = {
   error: string | null;
   cached: boolean;
   fileHash: string;
+  /** Real scan-sample row id from the engine — null on older queue rows. */
+  sampleId: string | null;
   createdAt: string;
   consumedAt: string | null;
   // Per-doc consumed indices within rawJson.pos[]. The modal hides
@@ -227,7 +229,7 @@ type ClaudeWarning = {
 };
 
 type ClaudeScanRow = {
-  sampleId: string;
+  sampleId: string | null;
   // Background scan-queue row this PO was hydrated from (only set when the
   // operator resumed via /api/scan-queue/pending or while polling an
   // in-flight batch). Drives the post-create `/consume` POST so the
@@ -931,11 +933,15 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
         // accuracy rate couldn't be computed. `gold` still only flags the
         // operator's explicit gold marks, so the few-shot/distill set (which
         // reads WHERE isGold = 1) is unchanged.
-        fetch(`/api/scan-po/samples/${row.sampleId}/confirm`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ correctedJson: po, gold: row.markedGold }),
-        }).catch(() => {});
+        // Skip when the queue row predates sample_id — posting a null id
+        // would 404 and, worse, look like a successful learn.
+        if (row.sampleId) {
+          fetch(`/api/scan-po/samples/${row.sampleId}/confirm`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ correctedJson: po, gold: row.markedGold }),
+          }).catch(() => {});
+        }
 
         // Render the source PDF page(s) for this PO into a PNG attachment.
         // Done lazily here (rather than at parse time) so the UI doesn't
@@ -1324,7 +1330,15 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
             if (haveKeys.has(key)) return;
             haveKeys.add(key);
             additions.push({
-              sampleId: `queue-${it.id}-${docIdx}`,
+              // The engine's REAL sample id, so the confirm POST at create
+              // time actually lands. This used to be a synthetic
+              // `queue-<rowId>-<docIdx}` string that matched no row, so the
+              // UPDATE silently affected 0 rows and `correctedJson` stayed
+              // NULL forever — which is why the OCR accuracy dashboard was
+              // permanently empty and the distill gold pool never filled.
+              // Null on rows scanned before sample_id existed; the create loop
+              // skips the confirm for those rather than posting a bad id.
+              sampleId: it.sampleId,
               scanQueueRowId: it.id,
               scanQueueDocIdx: docIdx,
               expanded: true,

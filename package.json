@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "node --import tsx/esm --test \"tests/*.test.mjs\"",
+    "test": "node --import tsx/esm --test tests/*.test.mjs",
     "build": "vite build",
     "build:strict": "npm run typecheck:app && npm run build",
     "typecheck": "tsc -b",

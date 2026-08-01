@@ -136,6 +136,17 @@ export function computePunchShortfallHours(
     return { valid: false, hasClockOut, shortfallHours: 0, lateMin: 0, otMin: 0 };
   }
   const day = computeAttendanceDay(inMin, outMin, rules);
+  // A window that yields NO payable minutes at all is a broken punch, not a
+  // zero-hour day: the worker who produced it was physically here to punch.
+  // KYAW ZIN OO 2026-07-01 punched 18:01 IN / 18:02 OUT (forgot the morning
+  // punch, did both at knock-off) — technically "valid" (out > in), and the
+  // shift maths turned it into a FULL 9h shortfall, docked on top of the
+  // absence the same day already carried: RM149.81 for one attended day.
+  // Treating it as no evidence leaves the day to the absence rule / the office,
+  // which is the safe direction this module is built around.
+  if (day.regularWorkMin <= 0 && day.otMin <= 0) {
+    return { valid: false, hasClockOut: true, shortfallHours: 0, lateMin: day.lateMin, otMin: 0 };
+  }
   const shortfallHours = Math.round((day.shortfallMin / 60) * 100) / 100;
   return { valid: true, hasClockOut: true, shortfallHours, lateMin: day.lateMin, otMin: day.otMin };
 }
@@ -168,7 +179,8 @@ export type AutoDockReason =
   | "invalid-times"
   | "no-shortfall"
   | "period-locked"
-  | "manual-exists";
+  | "manual-exists"
+  | "absent-day";
 
 export type AutoDockResult = {
   applied: boolean;
@@ -272,6 +284,36 @@ export async function maybeApplyAutoDayDock(
   // This is how historical MANUAL Keep-pay / Deduct picks survive a re-settle.
   if (existing && (existing.source ?? MANUAL_DOCK_SOURCE) === MANUAL_DOCK_SOURCE) {
     return { applied: false, reason: "manual-exists" };
+  }
+
+  // Guard: NEVER charge one day twice (BUG-2026-08-01-005, the class).
+  // The payroll engine defines an absence as "an elapsed working day with no
+  // LOGGED HOURS" and docks the full ÷26 day rate for it. So a day with zero
+  // logged hours is ALREADY fully charged — any hour dock on top is a second
+  // deduction for the same day (KYAW ZIN OO 2026-07-01: RM78.85 absence +
+  // RM70.96 hour dock = RM149.81 for one attended day).
+  //
+  // This lives in the shared core on purpose: all three auto paths funnel
+  // through here — the live punch-out, the office's re-apply-from-punch
+  // endpoint, and the monthly settle — so none of them can grow the bug back.
+  // The absence is always the LARGER charge, so refusing here can never
+  // under-charge; and an existing AUTO row is cleared, which self-heals the
+  // rows written before this landed. An owner's MANUAL dock is untouched (it
+  // already returned above) — their decision still wins.
+  const loggedRow = await db
+    .prepare(
+      "SELECT COALESCE(SUM(hours), 0) AS h FROM working_hour_entries WHERE workerId = ? AND date = ?",
+    )
+    .bind(workerId, date)
+    .first<{ h: number | string }>();
+  if (!(Number(loggedRow?.h ?? 0) > 0)) {
+    if (existing) {
+      await db
+        .prepare("DELETE FROM payroll_hour_deductions WHERE id = ?")
+        .bind(existing.id)
+        .run();
+    }
+    return { applied: false, reason: "absent-day" };
   }
 
   // Guard: never touch a finalised month (any payslip APPROVED / PAID).

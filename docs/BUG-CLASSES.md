@@ -156,6 +156,47 @@ against ledger legs first.
 
 ---
 
+## C6 — One day, charged twice
+
+**Shape.** A worker-day's pay is reduced by two INDEPENDENT mechanisms that don't know about
+each other:
+
+- **absence** — `labor-engine.ts` calls a day absent when it has **no logged hours**, and docks
+  the full contractual day (`salary ÷ workingDaysPerMonth`);
+- **hour docks** — `payroll_hour_deductions` rows, valued at the hourly rate.
+
+Nothing ever said they were mutually exclusive, so a day with zero logged hours could take BOTH.
+The absence is the bigger charge and the dock rides on top, invisibly — the payroll screen shows
+"Absent 18d" and "Late/short 9h" as separate lines and neither looks wrong on its own.
+
+The trigger is always a punch the shift maths can't read as a working day: someone who forgot the
+morning punch and does both at knock-off (18:01 in / 18:02 out) produces `regularWorkMin = 0`,
+which the dock path read as "short the whole 9h day".
+
+| # | writer | state |
+|---|---|---|
+| 1 | live punch-out (`POST /worker/clock` → `maybeApplyAutoPunchDock`) | ✅ covered by the core guard. NOTE the call order: `autofillWorkingHoursFromPunch` MUST run first, or the guard sees a day with no hours yet and skips every legitimate dock |
+| 2 | monthly settle (`POST /payroll-hour-deductions/settle-period`) | ✅ covered by the core guard |
+| 3 | office re-apply-from-punch (`POST /payroll-hour-deductions/apply-punch`) | ✅ covered by the core guard |
+| 4 | owner's MANUAL dock (`POST /payroll-hour-deductions`) | ⬜ deliberately NOT guarded — an owner docking an absent day is their decision, and the `manual-exists` guard already stops auto from touching it |
+| 5 | the shift maths itself (`computePunchShortfallHours`) | ✅ a window yielding no payable minutes at all is a BROKEN PUNCH, not a zero-hour day → `valid: false`, no evidence, no dock |
+
+**The rule.** *A day with zero logged working hours is an ABSENCE — already charged in full — and
+must never also carry an automatic hour dock.* It is enforced in ONE place,
+`maybeApplyAutoDayDock` (reason `absent-day`), because every automatic path funnels through it;
+it also DELETES any stale AUTO row it finds, so old damage self-heals on the next settle.
+
+**Enforced by** `tests/punch-degenerate-window.test.mjs`. The mock DBs in
+`tests/auto-attendance-deduct.test.mjs` and `tests/settle-period-punch.test.mjs` now return a
+day's logged hours (default 8) — if you add a dock test and it unexpectedly returns
+`absent-day`, that is the guard, not a bug.
+
+**When adding a new deduction mechanism**, ask first: can it land on a day the absence rule
+already charges? If yes, route it through `maybeApplyAutoDayDock` rather than writing
+`payroll_hour_deductions` directly.
+
+---
+
 ## What tests cannot catch — and what covers it
 
 None of C1–C4's money leaks were introduced by a code change on the day they started leaking:

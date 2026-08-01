@@ -34,6 +34,83 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-01-005 — A broken punch (in and out in the same minute) was docked a FULL day's hours ON TOP of that day's absence `payroll` `data-integrity` 🟡
+
+**Symptom:** KYAW ZIN OO (EMP-022) 2026-07-01 punched 18:01 IN / 18:02 OUT — he forgot the
+morning punch and did both at knock-off. The day was charged **twice**: absence RM78.85 (no
+logged hours) *and* a 9h short-hour dock RM70.96 = **RM149.81 for a day he was at the
+factory**. Three more days had the same shape (THI THI AYE 7/01, YE YINT AUNG 7/02,
+NYEIN CHAN AUNG 6/22).
+
+**Root cause:** two gaps that compound.
+1. `computePunchShortfallHours` treated any `out > in` window as valid evidence. An 18:01→18:02
+   window puts `effectiveIn` (after the 15-min late blocks) past the shift end, so
+   `regularWorkMin` is 0 and the shortfall came out as the whole 9h day.
+2. `POST /settle-period` skipped a day only when it had NEITHER a punch NOR logged hours. A day
+   with a punch but zero logged hours is an ABSENCE to the payroll engine (which defines absence
+   purely by logged hours) — yet the dock path still ran on it, stacking a second deduction.
+
+**Fix (the CLASS, not the instance — see BUG-CLASSES C6):**
+- `src/api/lib/attendance-deduct.ts` — (a) a window yielding no payable minutes at all is a
+  BROKEN PUNCH, not a zero-hour day → `valid: false`, no evidence, no dock. (b) the invariant
+  itself, in `maybeApplyAutoDayDock` (reason `absent-day`): **a day with zero logged hours is an
+  absence, already charged in full, and never also carries an automatic hour dock.** All three
+  auto paths funnel through that helper, so the live punch-out, the office re-apply endpoint and
+  the monthly settle are covered at once; it also DELETES stale AUTO rows, so old damage
+  self-heals. An owner's MANUAL dock is untouched.
+- `src/api/routes/worker.ts` — the clock-out handler now runs `autofillWorkingHoursFromPunch`
+  BEFORE `maybeApplyAutoPunchDock`. With the old order the new guard would see a day with no
+  hours yet and skip every legitimate dock.
+- Prod sweep: 4 double-charged AUTO docks deleted; the 4 broken-punch days credited as attended
+  standard shifts per the owner's call (「忘了打卡算他们有来」/「前期我们松一点通融点」).
+
+**Verification:** `tests/punch-degenerate-window.test.mjs` (10 cases — broken windows dock
+nothing, the invariant holds, stale rows clear, MANUAL still wins, and a REAL short day / late
+arrival / full day are all unchanged). The mock DBs in `auto-attendance-deduct.test.mjs` and
+`settle-period-punch.test.mjs` now return a day's logged hours. Suite green; re-ran the payroll
+engine offline against prod for 2026-05/06/07 — zero "punched but counted absent" anomalies,
+every row reconciles.
+
+---
+
+## BUG-2026-08-01-004 — Forgotten punch-out closed the attendance row but wrote NO working hours → the day silently docked a FULL day's pay `payroll` `data-integrity` 🟡
+
+**Symptom:** Owner: 「Eiphoowei 为什么扣那么多钱」. Her 2026-07 estimate showed 7 absent days she
+had actually come in and punched for. Factory-wide, **35 worker-days** across 2026-05/06/07 —
+EI PHOO WEI and KYAR TUN HLA 7 days each. Total wrongly deducted: **RM2,467.31**.
+
+**Root cause:** Pay reads `working_hour_entries`, NOT `attendance_records`. A day with no
+entries is an ABSENCE and docks salary ÷ 26. Both forgotten-punch auto-close paths — the
+00:30 cron (`autoCloseStalePunches`) and the next-clock-in self-heal in `POST /clock` — share
+`autoCloseForgottenPunch`, which only UPDATEd `attendance_records` (clockOut, workingMinutes,
+notes) and stopped there. The `autofillWorkingHoursFromPunch` call that a REAL punch-out makes
+was never wired in, despite the self-heal's own comment claiming it ran "the SAME … Working-
+Hours autofill a manual clock-out does". So the row said "auto-counted as a normal shift" while
+the money said "absent" — inverted from the stated intent, and from `attendance-deduct.ts`'s
+"a forgotten clock-out must not cost the worker a full day's pay".
+
+Compounding it: from 2026-07 the office stopped keying Working Hours by hand (July: 632
+auto-from-punch rows, **0** office-keyed; June: 755 office-keyed). The manual backstop that had
+been hiding this since May was gone.
+
+**Fix:**
+- `src/api/lib/punch-autofill.ts` — `autofillWorkingHoursFromPunch` takes `fixedHours`: the
+  CONTRACTED shift, used instead of the punch-derived figure, and relaxing the window gate so a
+  missing/INVERTED window still writes (EMP-001 7/04 punched in at 18:03, closed at 18:00 —
+  `outMin <= inMin` made the normal path bail). Rows tagged "(no punch-out — standard shift)".
+- `src/api/routes/worker.ts` — `autoCloseForgottenPunch` calls it with `fixedHours = stdMin / 60`,
+  best-effort, after the UPDATE. One shared helper ⇒ both auto-close paths fixed.
+- Prod backfill: 53 `working_hour_entries` rows over 35 worker-days, note
+  `Backfill: no punch-out — standard shift (BUG-2026-08-01-004)` (one DELETE undoes it).
+
+**Verification:** `tests/punch-autofill-forgotten.test.mjs` (7 cases: fixedHours beats the
+window, inverted window still writes, per-worker 7.5h day, tagging, never-overwrite, and both
+normal-punch paths unchanged). Full attendance/payroll suite green.
+
+**Related:** the same investigation surfaced BUG-2026-08-01-005.
+
+---
+
 ## BUG-2026-08-01-003 — co_status_changes table never created in prod → CO history 500'd AND CO auto-transitions silently failed `consignment-orders` `production` `data-integrity` `infrastructure` 🟢
 
 **Symptom.** QA on prod (2026-08-01): `GET /api/consignment-orders/status-changes` → **500** `relation "co_status_changes" does not exist` (its sales sibling `/api/sales-orders/status-changes` returns 200). The CO detail page's status history was blank/error — matching the owner's earlier "CO Detail 页一直显示空白历史" report that a 2026-05-21 code fix was supposed to close.

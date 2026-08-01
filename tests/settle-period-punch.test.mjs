@@ -33,7 +33,11 @@ const dock = await import(
 
 // A stateful in-memory mock that PERSISTS docks so a batch loop behaves like the
 // real DB (a second pass sees the first pass's rows).
-function mockDb({ locked = false } = {}) {
+// loggedByKey — "worker|date" → the day's working_hour_entries total. Anything
+// not listed defaults to a normal logged day, because a day with ZERO logged
+// hours is an ABSENCE (already charged in full by the payroll engine) and the
+// "never charge one day twice" guard refuses to dock it — see BUG-2026-08-01-005.
+function mockDb({ locked = false, loggedByKey = null } = {}) {
   const docks = new Map(); // "worker|date" -> { id, workerId, date, hours, source }
   const audit = { inserts: 0, deletes: 0 };
   function stmt(sql) {
@@ -52,6 +56,10 @@ function mockDb({ locked = false } = {}) {
         ) {
           const [wid, date] = bound;
           return docks.get(`${wid}|${date}`) ?? null;
+        }
+        if (sql.includes("FROM working_hour_entries")) {
+          const [wid, date] = bound;
+          return { h: loggedByKey ? (loggedByKey[`${wid}|${date}`] ?? 8) : 8 };
         }
         if (sql.includes("FROM payslips")) return { c: locked ? 1 : 0 };
         return null;

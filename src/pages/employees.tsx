@@ -7130,31 +7130,75 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
     }
   };
 
+  // Payroll CSV — the file HR actually works from, so every deduction has to be
+  // SHOWABLE, not just a number: each one carries its formula, the specific
+  // dates behind it, and a Basic Earned column so the row reconciles on its own
+  // (Basic − Absence − Short/Late − Part-month = Basic Earned; + OT + Allowances
+  // = Gross). Owner 2026-08-01: "写出来 deduction 是怎么 deduct 的" — before this
+  // the late/short dock had NO column at all, so Basic − Absence + OT + Allowance
+  // didn't add up to Gross and nobody could see why.
   const exportCSV = () => {
     if (payslipData.length === 0) return;
     const headers = [
       "Employee No", "Employee Name", "Department", "Basic Salary", "Working Days",
-      "Absent Days", "Absence Deduction",
-      "OT Weekday Hrs", "OT Sunday Hrs", "OT PH Hrs", "Hourly Rate",
+      "Absent Days", "Absence Deduction", "Absence Formula", "Absent Dates",
+      "Late/Short Hours", "Late/Short Deduction", "Late/Short Formula", "Late/Short Days",
+      "Part-month Adjustment", "Basic Earned",
+      "OT Weekday Hrs", "OT Sunday Hrs", "OT PH Hrs", "OT Days", "Hourly Rate",
       "OT Weekday Amt", "OT Sunday Amt", "OT PH Amt", "Total OT", "Allowances",
       "Gross Pay", "EPF EE (11%)", "EPF ER (13%)", "SOCSO EE", "SOCSO ER",
       "EIS EE", "EIS ER", "PCB", "Total Deductions", "Net Pay", "Bank Account", "Status",
     ];
-    const rows = payslipData.map((r) => [
-      r.employeeNo, r.employeeName, r.departmentCode, (r.basicSalary / 100).toFixed(2),
-      r.workingDays, r.absentDays ?? 0, ((r.absenceDeductionSen ?? 0) / 100).toFixed(2),
-      r.otWeekdayHours, r.otSundayHours, r.otPHHours,
-      (r.hourlyRate / 100).toFixed(2), (r.otWeekdayAmount / 100).toFixed(2),
-      (r.otSundayAmount / 100).toFixed(2), (r.otPHAmount / 100).toFixed(2),
-      (r.totalOT / 100).toFixed(2), (r.allowances / 100).toFixed(2),
-      (r.grossPay / 100).toFixed(2), (r.epfEmployee / 100).toFixed(2),
-      (r.epfEmployer / 100).toFixed(2), (r.socsoEmployee / 100).toFixed(2),
-      (r.socsoEmployer / 100).toFixed(2), (r.eisEmployee / 100).toFixed(2),
-      (r.eisEmployer / 100).toFixed(2), (r.pcb / 100).toFixed(2),
-      (r.totalDeductions / 100).toFixed(2), (r.netPay / 100).toFixed(2),
-      r.bankAccount, r.status,
-    ]);
-    const csv = [headers.join(","), ...rows.map((r) => r.join(","))].join("\n");
+    const rm2 = (sen: number) => (sen / 100).toFixed(2);
+    const rows = payslipData.map((r) => {
+      const absentDays = r.absentDays ?? 0;
+      const absenceSen = r.absenceDeductionSen ?? 0;
+      const shortSen = r.shortHourDeductionSen ?? 0;
+      const shortDays = r.lateDays ?? [];
+      const shortHours =
+        Math.round(shortDays.reduce((s, d) => s + (d.hours || 0), 0) * 100) / 100;
+      // The rate actually used for the dock — salary ÷ working days ÷ day span
+      // (hours + lunch). Deliberately NOT the "Hourly Rate" column, which is the
+      // ÷hours-only figure the payslip shows; printing the real one is the whole
+      // point of the formula column.
+      const shortRate = shortHours > 0 ? shortSen / shortHours : 0;
+      const prorationSen = prorationSenOf(r);
+      const basicEarnedSen = Math.max(
+        0,
+        r.basicSalary - absenceSen - shortSen - prorationSen,
+      );
+      return [
+        r.employeeNo, r.employeeName, r.departmentCode, rm2(r.basicSalary),
+        r.workingDays, absentDays, rm2(absenceSen),
+        absentDays > 0
+          ? `${rm2(r.basicSalary)} / ${r.workingDays} days x ${absentDays} = ${rm2(absenceSen)}`
+          : "",
+        (r.absentDates ?? []).join(" "),
+        shortHours || "", shortSen > 0 ? rm2(shortSen) : "",
+        shortHours > 0 ? `${shortHours}h x ${rm2(shortRate)}/h = ${rm2(shortSen)}` : "",
+        shortDays.map((d) => `${d.date} ${d.hours}h`).join("; "),
+        prorationSen > 1 ? rm2(prorationSen) : "",
+        rm2(basicEarnedSen),
+        r.otWeekdayHours, r.otSundayHours, r.otPHHours,
+        (r.otDays ?? []).map((d) => `${d.date} ${d.hours}h`).join("; "),
+        rm2(r.hourlyRate), rm2(r.otWeekdayAmount),
+        rm2(r.otSundayAmount), rm2(r.otPHAmount),
+        rm2(r.totalOT), rm2(r.allowances),
+        rm2(r.grossPay), rm2(r.epfEmployee),
+        rm2(r.epfEmployer), rm2(r.socsoEmployee),
+        rm2(r.socsoEmployer), rm2(r.eisEmployee),
+        rm2(r.eisEmployer), rm2(r.pcb),
+        rm2(r.totalDeductions), rm2(r.netPay),
+        r.bankAccount, r.status,
+      ];
+    });
+    // Quote anything containing a comma / quote / newline — the new detail
+    // columns join dates with "; " and would otherwise split the row.
+    const esc = (v: unknown) => {
+      const s = String(v ?? "");
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const csv = [headers.join(","), ...rows.map((r) => r.map(esc).join(","))].join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");

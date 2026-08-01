@@ -112,11 +112,26 @@ export async function autofillWorkingHoursFromPunch(
     clockIn: string;
     clockOut: string;
     homeDeptCode: string | null | undefined;
+    /**
+     * FORGOTTEN-PUNCH path (BUG-2026-08-01-004). A day closed by the
+     * auto-clockout (worker punched in, never out) pays as a NORMAL shift —
+     * standard hours, no OT, no short dock — so the caller passes that fixed
+     * figure instead of letting the punch window decide. Set, it also relaxes
+     * the window gate: those rows can carry a missing or INVERTED window (a
+     * worker who forgot the morning punch and clocked in at 18:03 is closed at
+     * 18:00), which the normal path rejects. Omit for a real punch-out.
+     */
+    fixedHours?: number | null;
   },
 ): Promise<{ created: number }> {
-  const inMin = hhmmToMinutes(args.clockIn);
-  const outMin = hhmmToMinutes(args.clockOut);
-  if (inMin == null || outMin == null || outMin <= inMin) return { created: 0 };
+  const inMinRaw = hhmmToMinutes(args.clockIn);
+  const outMinRaw = hhmmToMinutes(args.clockOut);
+  const fixedHours = Number(args.fixedHours) || 0;
+  if (
+    fixedHours <= 0 &&
+    (inMinRaw == null || outMinRaw == null || outMinRaw <= inMinRaw)
+  )
+    return { created: 0 };
 
   // Never overwrite — the office's rows (or a previous punch-out) win.
   // EXCEPTION (owner report 2026-07-04, the "AUNG KYAW SOE 1.33h day"): rows
@@ -154,14 +169,28 @@ export async function autofillWorkingHoursFromPunch(
     versions = [];
   }
   const rules = toAttendanceRules(resolvePayRulesAsOf(versions, args.date));
-  const day = computeAttendanceDay(inMin, outMin, rules);
+  // The window the dept/category SPLIT is carved from. A forgotten punch may
+  // have no usable window (inverted times); fall back to the standard shift so
+  // the scans still split the day sensibly. Pay is unaffected either way — the
+  // split only decides WHICH department rows the fixed total lands in.
+  let inMin = inMinRaw;
+  let outMin = outMinRaw;
+  if (inMin == null || outMin == null || outMin <= inMin) {
+    inMin = rules.startMin;
+    outMin = rules.endMin;
+  }
+  const dayHours =
+    fixedHours > 0
+      ? fixedHours
+      : (() => {
+          const day = computeAttendanceDay(inMin, outMin, rules);
+          return (day.regularWorkMin + day.otMin) / 60;
+        })();
   // Subtract hours an approved non-production request already claimed for
   // this day (see the gate above) so the day's TOTAL stays the punch total.
   const totalHours = Math.max(
     0,
-    Math.round(
-      ((day.regularWorkMin + day.otMin) / 60 - nonProdApprovedHours) * 100,
-    ) / 100,
+    Math.round((dayHours - nonProdApprovedHours) * 100) / 100,
   );
   if (totalHours <= 0) return { created: 0 };
 
@@ -238,6 +267,12 @@ export async function autofillWorkingHoursFromPunch(
       ];
     }
     allRows.push(...rows);
+  }
+
+  // Tag the forgotten-punch rows so the office can tell them from a real
+  // punch-out: these hours are the CONTRACTED shift, not a measured window.
+  if (fixedHours > 0) {
+    for (const r of allRows) r.notes = `${r.notes} (no punch-out — standard shift)`;
   }
 
   // Merge rows that land on the same (department × category) — e.g. a

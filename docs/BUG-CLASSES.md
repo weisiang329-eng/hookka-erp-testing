@@ -197,6 +197,43 @@ already charges? If yes, route it through `maybeApplyAutoDayDock` rather than wr
 
 ---
 
+## C7 — Two segments of one grid sharing a sticky filter
+
+**Shape.** `DataGrid` persists column value-filters under
+`datagrid-filters-<gridId>-<valueFilterKey>-<user>`, and seeds a column's
+selection from the values **present in the data it is currently showing**
+(`defaultExcludedValues` effect, `data-grid.tsx`). If two segments of the same
+page share one storage key, a set seeded while looking at segment A contains
+none of segment B's values — so switching to B hides every row while the footer
+cheerfully reports `0 of N records · 1 filter active`.
+
+It reads as data loss, not as a filter, which is why it gets re-reported.
+
+**Instances**
+
+| Date | Where | Segmenting state that was missing from the key |
+|---|---|---|
+| 2026-05-16 | Sales Orders | the Status dropdown → fix added `filterStatus` |
+| 2026-08-01 | Sales Orders **again** | the Draft/Confirmed `tab` — never covered by the first fix. Owner: 「包裹为什么by default是kosong的」 |
+
+The repeat is the point: the 2026-05-16 fix repaired the instance in front of
+the author and left the sibling state alone.
+
+**The rule.** *Every* state that segments the rows must appear in either
+`gridId` or `valueFilterKey`. Adding a new tab / dept / mode selector to a page
+that already has a grid means extending that key in the same commit.
+
+**Already-safe siblings** (checked 2026-08-01, pinned by
+`tests/grid-filter-session-class.test.mjs`):
+* Production — bakes the department into `gridId`
+  (`production-dept-<code>`), so each department has its own key.
+* Service Cases — `statusFilter` is its only segment and it *is* the key.
+
+**Also worth knowing.** A default exclusion that cannot apply to a segment
+should not be sent at all: on the Draft tab every row is already `DRAFT`, so
+seeding a Status exclusion there can only narrow a list that is exactly what was
+asked for. That was the other half of the blank tab.
+
 ## What tests cannot catch — and what covers it
 
 None of C1–C4's money leaks were introduced by a code change on the day they started leaking:

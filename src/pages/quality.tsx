@@ -26,6 +26,13 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { DataGrid, type Column } from "@/components/ui/data-grid";
 import { DeferredBlock } from "@/components/ui/deferred-block";
+import {
+  QC_WINDOW_DAYS,
+  QC_DEFAULT_WINDOW_DAYS,
+  qcWindowLabel,
+  sliceSlotGroups,
+  type QcWindowDays,
+} from "@/lib/qc-slot-window";
 import { formatDateDMY } from "@/lib/utils";
 import { getCurrentUser } from "@/lib/auth";
 import {
@@ -211,6 +218,12 @@ function PendingTab() {
   const inspections = useMemo(() => (pendingResp?.data ?? []).filter((i) => i.status !== "COMPLETED"), [pendingResp]);
   const [generating, setGenerating] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  // Owner decision 2026-08-02: default to the recent slots. The cron has been
+  // generating ~34 inspections a day since 2026-04-28 and none were ever
+  // completed, so "everything" meant scrolling four months of backlog to reach
+  // today's checklist. Nothing is deleted and the badge above still counts
+  // every open inspection — this only changes what is on screen first.
+  const [windowDays, setWindowDays] = useState<QcWindowDays>(QC_DEFAULT_WINDOW_DAYS);
 
   const onGenerate = useCallback(async () => {
     setGenerating(true);
@@ -243,6 +256,15 @@ function PendingTab() {
     return Array.from(out.entries()).sort((a, b) => b[0].localeCompare(a[0]));
   }, [inspections]);
 
+  // The window is measured against the NEWEST slot, not the wall clock: if
+  // the cron stops, "last 7 days" must still show the most recent seven days
+  // of slots rather than an empty page.
+  const newestSlotDay = grouped.length > 0 ? String(grouped[0][0]).slice(0, 10) : "";
+  const windowed = useMemo(
+    () => sliceSlotGroups(grouped, windowDays, newestSlotDay),
+    [grouped, windowDays, newestSlotDay],
+  );
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -255,13 +277,33 @@ function PendingTab() {
             {inspections.filter((i) => i.status === "IN_PROGRESS").length} in progress
           </span>
         </div>
-        <Button onClick={onGenerate} disabled={generating}>
-          <RefreshCw className={`mr-2 size-4 ${generating ? "animate-spin" : ""}`} />
-          Generate Today's Slot
-        </Button>
+        <div className="flex items-center gap-2">
+          <select
+            value={windowDays}
+            onChange={(e) => setWindowDays(Number(e.target.value) as QcWindowDays)}
+            className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm"
+            aria-label="Slot window"
+          >
+            {QC_WINDOW_DAYS.map((d) => (
+              <option key={d} value={d}>{qcWindowLabel(d)}</option>
+            ))}
+          </select>
+          <Button onClick={onGenerate} disabled={generating}>
+            <RefreshCw className={`mr-2 size-4 ${generating ? "animate-spin" : ""}`} />
+            Generate Today's Slot
+          </Button>
+        </div>
       </div>
 
-      {grouped.length === 0 ? (
+      {windowed.hiddenGroups > 0 && (
+        <div className="rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2 text-sm text-muted-foreground">
+          {windowed.hiddenRows} older inspection{windowed.hiddenRows === 1 ? "" : "s"} across{" "}
+          {windowed.hiddenGroups} slot{windowed.hiddenGroups === 1 ? "" : "s"} are outside this
+          window — switch to <strong>All slots</strong> to work through the backlog.
+        </div>
+      )}
+
+      {windowed.shown.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-muted-foreground">
             No pending inspections. Click <strong>Generate Today's Slot</strong> to create the noon / 4pm batch
@@ -269,7 +311,7 @@ function PendingTab() {
           </CardContent>
         </Card>
       ) : (
-        grouped.map(([slot, list]) => (
+        windowed.shown.map(([slot, list]) => (
           <DeferredBlock
             key={slot}
             estimatedHeight={QC_SLOT_CHROME_PX + list.length * QC_ROW_PX}

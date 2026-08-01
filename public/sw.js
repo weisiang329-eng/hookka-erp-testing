@@ -80,18 +80,27 @@ async function precacheBuildAssets(cache) {
     while ((m = re.exec(html)) !== null) urls.add(m[0]);
     const list = [...urls].slice(0, 60);
     if (list.length === 0) return;
-    await Promise.allSettled(
-      list.map((url) =>
-        Promise.race([
+    // Four at a time. This used to fire all 60 at once, which is what made
+    // every deploy look like an outage: install → skipWaiting → the new SW
+    // claims the booting page → the page's own entry chunks queue behind 60
+    // parallel downloads and arrive MINUTES late. No error, no failed request,
+    // just a splash that hangs until the precache drains and then works. The
+    // point of this precache is to be invisible; sixty parallel fetches on
+    // factory wifi are the opposite of invisible.
+    const PARALLEL = 4;
+    const queue = [...list];
+    const worker = async () => {
+      for (let url = queue.shift(); url; url = queue.shift()) {
+        await Promise.race([
           cache.add(url),
-          // Per-asset 8s timeout — a single slow chunk can't hold up
-          // the rest of the precache, and the install still succeeds.
+          // Per-asset 8s timeout — a single slow chunk can't hold up the rest.
           new Promise((_, reject) =>
             setTimeout(() => reject(new Error('precache-timeout')), 8000),
           ),
-        ]).catch(() => {}),
-      ),
-    );
+        ]).catch(() => {});
+      }
+    };
+    await Promise.all(Array.from({ length: PARALLEL }, worker));
   } catch {
     // /dashboard unreachable at install (offline / DNS hiccup) — skip
     // precache and let the on-demand cache-first rule below populate it
@@ -110,11 +119,11 @@ self.addEventListener('install', (event) => {
       .open(CACHE)
       .then(async (cache) => {
         await Promise.allSettled(SHELL.map((url) => cache.add(url)));
-        // Start the heavy precache but don't await — install resolves
-        // immediately so the new SW activates fast. Background fetches
-        // populate the cache over the next ~30s on a normal connection,
-        // longer on a slow one — either way, they're invisible.
-        precacheBuildAssets(cache);
+        // The heavy precache does NOT start here. Install runs while a page is
+        // booting, and skipWaiting hands that page to this SW immediately — so
+        // anything started here competes with the very chunks the app needs to
+        // render. The client asks for it once it has actually painted
+        // (main.tsx → postMessage 'PRECACHE_ASSETS').
       })
       .then(() => self.skipWaiting()),
   );
@@ -226,8 +235,16 @@ self.addEventListener('fetch', (event) => {
 });
 
 // Allow the page to tell a waiting SW to activate immediately.
+let precacheStarted = false;
+
 self.addEventListener('message', (event) => {
   if (event.data === 'SKIP_WAITING') self.skipWaiting();
+  // Sent by the app once it has rendered and been alive a few seconds. Only
+  // then is there spare bandwidth to warm the cache for the NEXT visit.
+  if (event.data === 'PRECACHE_ASSETS' && !precacheStarted) {
+    precacheStarted = true;
+    event.waitUntil(caches.open(CACHE).then((c) => precacheBuildAssets(c)));
+  }
 });
 
 // ============================================================

@@ -129,6 +129,19 @@ if (import.meta.env.PROD && 'serviceWorker' in navigator) {
 setTimeout(() => {
   sessionStorage.removeItem(STALE_ATTEMPTS_KEY)
   sessionStorage.removeItem(STALE_RELOAD_KEY)
+
+  // Only now ask the service worker to warm the cache for the NEXT visit.
+  // It used to start during SW install — while this very page was still
+  // fetching the chunks it needs to render — so every deploy stalled the app
+  // for minutes with no error to explain it. Ten seconds of a live app means
+  // the critical path is done and the bandwidth is spare.
+  if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+    navigator.serviceWorker.ready
+      .then((reg) => reg.active?.postMessage('PRECACHE_ASSETS'))
+      .catch(() => {
+        /* no SW (unsupported / blocked) — on-demand caching still applies */
+      })
+  }
 }, 10_000)
 
 createRoot(document.getElementById('root')!).render(

@@ -16,6 +16,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const main = readFileSync(resolve(process.cwd(), "src/main.tsx"), "utf8");
+const sw = readFileSync(resolve(process.cwd(), "public/sw.js"), "utf8");
 const boundary = readFileSync(
   resolve(process.cwd(), "src/components/ui/error-boundary.tsx"),
   "utf8",
@@ -62,4 +63,42 @@ test("the recovery budget is cleared where a SUCCESSFUL run can observe it", () 
 
 test("recovery still purges the service worker + caches before reloading", () => {
   assert.match(main, /purgeServiceWorkerAndCaches\(\)\.finally\(\(\)\s*=>\s*window\.location\.reload\(\)\)/);
+});
+
+// ── The precache must never compete with the boot (2026-08-02) ──────────────
+//
+// Every deploy looked like a multi-minute outage: the SW installed, fired 60
+// parallel asset downloads, and skipWaiting handed the still-booting page to
+// it — so the app's own entry chunks queued behind the precache and arrived
+// minutes late. No failed request, no console error, just a splash that hung
+// and then, once the precache drained, worked perfectly. Both halves are
+// pinned here because either one alone brings the stall back.
+test("the SW does not start the heavy precache during install", () => {
+  const install = sw.slice(sw.indexOf("addEventListener('install'"));
+  const body = install.slice(0, install.indexOf("addEventListener('activate'"));
+  assert.doesNotMatch(
+    body,
+    /precacheBuildAssets\(/,
+    "install must not kick off the precache — it runs while a page is booting",
+  );
+});
+
+test("the precache is client-triggered and concurrency-limited", () => {
+  assert.match(sw, /PRECACHE_ASSETS/, "no client trigger");
+  assert.match(sw, /const PARALLEL = \d+/, "no concurrency cap");
+  const cap = Number(/const PARALLEL = (\d+)/.exec(sw)[1]);
+  assert.ok(cap > 0 && cap <= 6, `concurrency ${cap} is not a cap`);
+  assert.doesNotMatch(
+    sw,
+    /Promise\.allSettled\(\s*list\.map/,
+    "the all-at-once precache is back",
+  );
+});
+
+test("the app asks for the precache only after it has been running", () => {
+  assert.match(main, /postMessage\('PRECACHE_ASSETS'\)/);
+  // It must sit inside the delayed block, not at module scope.
+  const idx = main.indexOf("PRECACHE_ASSETS");
+  const delayed = main.lastIndexOf("setTimeout(", idx);
+  assert.ok(delayed > 0 && idx - delayed < 1200, "precache trigger is not deferred");
 });

@@ -115,3 +115,32 @@ test("org-chart's SELECTs use only mapped camelCase columns", () => {
   }
   assert.deepEqual(missing, [], `unmapped camelCase column(s): ${missing.join(", ")}`);
 });
+
+// ---------------------------------------------------------------------------
+// The OTHER half of the same trap, found the same day: the WRITE landed and the
+// READ threw it away.
+//
+// `PUT /api/org-chart/reporting` returned 200 with the correct body, and the
+// chart still showed "— no manager (top) —" for all 44 people. Owner:
+// 「这个edit不到report to谁？」→「完全没有反应 你可以自己try啊」. Reproduced on
+// staging: PUT 200 {managerKey: "user:…"} → GET managerKey: null.
+//
+// db-pg's columnFrom camelCases every column it returns, so `SELECT person_key,
+// manager_key` arrives as personKey / managerKey. Reading `e.person_key` gave
+// undefined, the Map became { undefined => null }, and edges.has(p.key) was
+// never true — every saved reporting line was invisible.
+// ---------------------------------------------------------------------------
+test("org-chart reads its edge rows DUAL-KEYED", () => {
+  const route = readFileSync("src/api/routes/org-chart.ts", "utf8");
+  assert.match(
+    route,
+    /const pk = e\.personKey \?\? e\.person_key;/,
+    "snake_case-only reads come back undefined — see PLAYBOOKS fix-camelCase-read-bug",
+  );
+  assert.match(route, /e\.managerKey \?\? e\.manager_key \?\? null/);
+  assert.doesNotMatch(
+    route,
+    /edges\.set\(e\.person_key, e\.manager_key \?\? null\)/,
+    "the snake_case-only read must not return",
+  );
+});

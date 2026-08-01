@@ -1,4 +1,10 @@
-﻿// ---------------------------------------------------------------------------
+﻿// 2026-08-01: scripts/_algo_ref/schedule_rows.json has NEVER been committed
+// (no history for that path, not gitignored), so the two fixture-driven tests
+// below could not run even once. They were also absent from `npm test`, which
+// is why nobody noticed. Rather than delete coverage that becomes valuable the
+// moment the fixture lands, they now SKIP with a stated reason. The hand-built
+// fixture test in the middle needs no external file and runs normally.
+// ---------------------------------------------------------------------------
 // planning-scheduler.test.mjs — sanity guard for the pure Fab Cut scheduler
 // (src/api/lib/planning-scheduler.ts), the TypeScript port of the trusted
 // Python cutter.
@@ -18,6 +24,7 @@
 // far-future split so a regression in the floor / pull-window logic is caught.
 // ---------------------------------------------------------------------------
 import test from "node:test";
+import { existsSync } from "node:fs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -28,6 +35,11 @@ import { computeChain } from "../src/api/lib/planning-chain.ts";
 import { DEFAULT_CAPACITY_CONFIG } from "../src/api/lib/planning-capacity.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+
+// The row-array export this file was built against was never committed.
+const HAS_FIXTURE = existsSync(
+  join(HERE, "..", "scripts", "_algo_ref", "schedule_rows.json"),
+);
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -139,7 +151,7 @@ const HAS_CHINESE = /[一-鿿]/;
 
 // ── tests ────────────────────────────────────────────────────────────────────
 
-test("scheduleCutting: fixture invariants (no early cut, pool budget, each cut once)", () => {
+test("scheduleCutting: fixture invariants (no early cut, pool budget, each cut once)", { skip: HAS_FIXTURE ? false : "scripts/_algo_ref/schedule_rows.json is not in the repo" }, () => {
   const cards = loadFixtureCards();
   assert.ok(cards.length > 100, `expected a sizeable fixture, got ${cards.length}`);
 
@@ -413,7 +425,7 @@ function countCalendarItems(sheet) {
   return n;
 }
 
-test("computeChain: cross-department invariants from the fixture", () => {
+test("computeChain: cross-department invariants from the fixture", { skip: HAS_FIXTURE ? false : "scripts/_algo_ref/schedule_rows.json is not in the repo" }, () => {
   const rows = loadFixtureRows();
   const cutCards = rows.map(rowToCard);
   const chainCards = [];

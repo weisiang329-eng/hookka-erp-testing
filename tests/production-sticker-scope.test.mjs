@@ -1,26 +1,32 @@
-// ---------------------------------------------------------------------------
+﻿// ---------------------------------------------------------------------------
 // production-sticker-scope.test.mjs
 //
 // Locks the 2026-06-24 perf fix for slow Fab Sew / Foam sticker printing.
 // Symptom (Wei Siang): printing Fab Sew stickers from the Fab Cut page was very
-// slow / "load 不出来" because both loaders fetched the WHOLE org's production
+// slow / "load ä¸å‡ºæ¥" because both loaders fetched the WHOLE org's production
 // orders + job cards, then filtered client-side.
 //
 // Fix: a ?scope=<csv tokens> filter on GET /api/production-orders (matches an
 // order by id / poNo / companySOId / salesOrderId / companyCOId /
 // consignmentOrderId), the JC fetch narrowed to the returned POs, and both
 // loaders fetching only the visible orders (+ the SOFA group siblings, so no
-// sticker is dropped — "拉對、拉全"). These source-assertions pin the contract.
+// sticker is dropped â€” "æ‹‰å°ã€æ‹‰å…¨"). These source-assertions pin the contract.
 // ---------------------------------------------------------------------------
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const ROUTE = readFileSync(
-  resolve(process.cwd(), "src/api/routes/production-orders.ts"),
-  "utf8",
-);
+// 2026-08-01: scope filtering moved into _helpers.ts when the route was split. This test read only the route file, so it went red the
+// moment the code moved - and nobody noticed, because the test was never
+// registered in `npm test`. Reading BOTH halves means a future split cannot
+// orphan it again.
+const ROUTE = [
+  "src/api/routes/production-orders.ts",
+  "src/api/routes/production-orders/_helpers.ts",
+]
+  .map((f) => readFileSync(resolve(process.cwd(), f), "utf8"))
+  .join(String.fromCharCode(10));
 const PAGE = readFileSync(
   resolve(process.cwd(), "src/pages/production/index.tsx"),
   "utf8",
@@ -28,12 +34,12 @@ const PAGE = readFileSync(
 
 test("backend: GET /production-orders accepts a ?scope= token filter", () => {
   assert.match(ROUTE, /c\.req\.query\("scope"\)/, "must parse ?scope=");
-  // Match an order by ANY identifier — internal id, poNo, and the four SO/CO
-  // group ids — so the FE can mix po ids and human SO/CO numbers in one list.
+  // Match an order by ANY identifier â€” internal id, poNo, and the four SO/CO
+  // group ids â€” so the FE can mix po ids and human SO/CO numbers in one list.
   assert.match(
     ROUTE,
     /id IN \(\$\{scopePh\}\) OR poNo IN/,
-    "scope WHERE must OR-match id + poNo …",
+    "scope WHERE must OR-match id + poNo â€¦",
   );
   assert.match(
     ROUTE,
@@ -75,3 +81,4 @@ test("FE: Fab Sew + Foam sticker loaders fetch scoped, not the whole org", () =>
     "both loaders must keep a full-fetch FETCH_BASE fallback",
   );
 });
+

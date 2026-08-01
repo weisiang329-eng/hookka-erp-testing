@@ -3,7 +3,7 @@
 // DRY RUN by default; --apply deletes the AUTO rows (MANUAL docks never touched).
 import postgres from "postgres";
 const APPLY = process.argv.includes("--apply");
-const url = "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
+const url = "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 try {
   const rows = await sql`

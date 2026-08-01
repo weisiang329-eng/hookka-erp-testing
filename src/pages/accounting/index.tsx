@@ -62,6 +62,12 @@ import type {
 // to follow).
 import { asMutationResponse, useCompanyOptions, orgIdParam, type CompanyOption } from "./shared";
 import { AuditLogTab } from "./tabs/AuditLogTab";
+import { bestMatch } from "@/lib/party-fuzzy-match";
+import {
+  resolveAlias,
+  usePartyAliases,
+  teachPartyAlias,
+} from "@/lib/party-alias-client";
 
 // =============== MULTI-COMPANY (Phase 2) — company selector ===============
 //
@@ -5906,18 +5912,41 @@ function ScanPrefillButton({ label, onResult }: { label: string; onResult: (d: S
     </>
   );
 }
-// Loose company-name match for scan prefill: alnum-uppercase containment
-// either way ("TNB " vs "TENAGA NASIONAL BHD" won't match — operator picks
-// manually then; exact-ish letterheads do).
-function scanNameMatch<T extends { name: string }>(list: T[], name: string | null): T | undefined {
+// Party match for scan prefill. Same precedence as every other OCR surface
+// (owner 2026-08-01: 「我们的全部OCR都要有这样的功能」):
+//
+//   1. a taught alias   — a human already told us who this letterhead is
+//   2. loose containment — the original behaviour, kept so nothing that
+//                          resolves today starts failing
+//   3. fuzzy ranking     — crosses a typo in the party master, refuses a
+//                          near-tie (see party-fuzzy-match.ts)
+//
+// This surface used to be the LOOSEST of the four: bare substring either way,
+// `.find()` first-hit-wins, and no ambiguity guard at all — two parties whose
+// names contain one another would silently resolve to whichever sat earlier in
+// the array. Step 3 replaces that tail with a ranked, separation-checked pick.
+function scanNameMatch<T extends { id: string; name: string }>(
+  list: T[],
+  name: string | null,
+  aliasMap?: Record<string, string> | null,
+): T | undefined {
   if (!name) return undefined;
+  const taughtId = resolveAlias(aliasMap, name);
+  if (taughtId) {
+    const taught = list.find((p) => p.id === taughtId);
+    if (taught) return taught;
+  }
   const norm = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, "");
   const b = norm(name);
   if (!b) return undefined;
-  return list.find((p) => {
+  const contained = list.filter((p) => {
     const a = norm(p.name);
     return !!a && (a.includes(b) || b.includes(a));
   });
+  // Unique-guarded now: 2+ containment hits is ambiguous, so fall through to
+  // ranking rather than taking whichever happened to be first.
+  if (contained.length === 1) return contained[0];
+  return bestMatch(list, name)?.party ?? undefined;
 }
 
 function OtherPartyBillsTab({ accounts, side }: { accounts: ChartOfAccount[]; side: "DEBTOR" | "CREDITOR" }) {
@@ -5996,6 +6025,18 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
         });
     const j = asMutationResponse(await res.json());
     if (j?.success) {
+      // TEACH: if this bill came from a scan, the letterhead OCR read now maps
+      // to the party the operator actually filed it under — right first time or
+      // corrected by hand. Next scan of the same letterhead resolves directly.
+      if (scannedPartyName && form.partyId) {
+        void teachPartyAlias({
+          partyType: "OTHER_PARTY",
+          partyId: form.partyId,
+          rawName: scannedPartyName,
+          knownMap: partyAliases,
+        });
+      }
+      setScannedPartyName(null);
       setShowForm(false);
       setEditingBillNo(null);
       setForm({ partyId: "", billDate: today, referenceNo: "", description: "", taxStr: "", lines: [blankLine()], isOpening: false });
@@ -6067,6 +6108,13 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
   // 2026-07-08); the account(s) prefill from the party's LATEST bill (same
   // creditor almost always books to the same account) — still editable.
   const [extraParties, setExtraParties] = useState<OtherParty[]>([]);
+  // Taught aliases (scanned letterhead → other-party id), same memory the
+  // PI / GRN / customer-PO scanners use. Always active — this is a page, not
+  // a modal, so there is no open flag to gate on.
+  const partyAliases = usePartyAliases("OTHER_PARTY", true);
+  // The letterhead OCR read for the bill currently in the form — null when the
+  // operator keyed it by hand (nothing to learn from a manual entry).
+  const [scannedPartyName, setScannedPartyName] = useState<string | null>(null);
   const allSideParties = [...sideParties, ...extraParties.filter((p) => p.type === side)];
   // Unknown scanned party → a small NEW-PARTY dialog: name prefilled from the
   // letterhead, every other field OPTIONAL and left to the operator (owner
@@ -6099,7 +6147,8 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
   };
   const applyScan = (d: ScanFinanceResult) => {
     setEditingBillNo(null); // a scan always drafts a NEW bill, never overwrites an edit
-    const hit = scanNameMatch(allSideParties, d.partyName);
+    setScannedPartyName(d.partyName ?? null);
+    const hit = scanNameMatch(allSideParties, d.partyName, partyAliases);
     // Last-used account for this party (latest bill's first line).
     const lastAcct = hit
       ? ((bills ?? [])

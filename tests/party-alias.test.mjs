@@ -83,6 +83,17 @@ test("customer PO wizard consults the alias map and teaches after create", () =>
   assert.match(src, /teachPartyAlias\(\{\s*partyType: "CUSTOMER"/);
 });
 
+test("finance bills consult the alias map and teach after save", () => {
+  const src = readFileSync("src/pages/accounting/index.tsx", "utf8");
+  assert.match(src, /usePartyAliases\("OTHER_PARTY", true\)/);
+  assert.match(src, /scanNameMatch\(allSideParties, d\.partyName, partyAliases\)/);
+  assert.match(src, /teachPartyAlias\(\{\s*partyType: "OTHER_PARTY"/);
+  // The old first-hit-wins containment had no ambiguity guard — 2+ hits must
+  // now fall through to ranking instead of silently taking the first.
+  assert.match(src, /if \(contained\.length === 1\) return contained\[0\];/);
+  assert.match(src, /bestMatch\(list, name\)\?\.party/);
+});
+
 test("the alias check runs BEFORE the string heuristics", () => {
   // A human's answer must outrank every guess, or teaching achieves nothing.
   const sup = readFileSync("src/components/scan-supplier-modal.tsx", "utf8");

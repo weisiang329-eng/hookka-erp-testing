@@ -8,7 +8,7 @@ import { computeAttendanceDay, hhmmToMinutes } from "../src/lib/attendance-rules
 import { buildDeptBuckets, prorateHours } from "../src/lib/dept-scan-split.ts";
 
 const APPLY = process.argv.includes("--apply");
-const url = "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
+const url = "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 const NOTE = "Backfill: broken punch — counted as attended, standard shift (owner 2026-08-01)";
 const PROD = new Set(["FAB_CUT","FAB_SEW","FRAMING","UPHOLSTERY","FOAM","WEBBING","PACKING","WOOD_CUT"]);

@@ -64,6 +64,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useIncrementalList } from "@/components/ui/incremental-list";
 import { cn } from "@/lib/utils";
 import { ComposeDialog } from "./compose";
 import MailCenterDetailPage from "./detail";
@@ -320,6 +321,7 @@ function ThreadList({
   onOpen,
   onInjectTest,
   onRowAction,
+  listKey,
 }: {
   threads: MailThread[];
   loading: boolean;
@@ -332,7 +334,23 @@ function ThreadList({
   onOpen: (id: string) => void;
   onInjectTest: () => void;
   onRowAction: (action: RowAction, t: MailThread) => void;
+  /** Identifies the current list (folder + mailbox + search) — changing it
+   *  rewinds the rendered slice to the first screenful. */
+  listKey: string;
 }) {
+  // The threads endpoint caps at 300 and the list used to render every one of
+  // them: 11,543 DOM nodes and a 3,745ms main-thread freeze on open, measured
+  // on prod 2026-08-01, while its APIs answered in 350ms. Render the newest
+  // screenfuls and extend as the reader scrolls — nobody opens Mail Center to
+  // read thread #300, and the ones who scroll that far land exactly where they
+  // used to, just later.
+  const { count, hasMore, sentinelRef } = useIncrementalList({
+    total: threads.length,
+    initial: 40,
+    step: 40,
+    resetKey: listKey,
+  });
+
   if (threads.length === 0) {
     // Quiet, compact empty state — a normal list column that happens to be
     // empty, NOT a giant card. Gmail/Outlook show a small muted line here.
@@ -362,8 +380,9 @@ function ThreadList({
 
   const compact = density === "compact";
   return (
+    <>
     <ul className="divide-y divide-border">
-      {threads.map((t) =>
+      {threads.slice(0, count).map((t) =>
         compact ? (
           <CompactRow
             key={t.id}
@@ -391,6 +410,15 @@ function ThreadList({
         ),
       )}
     </ul>
+    {hasMore && (
+      <div
+        ref={sentinelRef}
+        className="px-4 py-3 text-center text-xs text-muted-foreground"
+      >
+        Loading older conversations… ({count} of {threads.length})
+      </div>
+    )}
+    </>
   );
 }
 
@@ -1753,6 +1781,7 @@ export default function MailCenterPage() {
                 onOpen={openThread}
                 onInjectTest={injectTest}
                 onRowAction={onRowAction}
+                listKey={`${folder}|${filter.kind}|${filter.kind === "mailbox" ? filter.value : ""}|${q}`}
               />
             )}
           </CardContent>

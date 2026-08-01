@@ -39,7 +39,12 @@ export type DeferredBlockProps = {
    * jump as the block mounts.
    */
   estimatedHeight: number;
-  /** Mount when the block comes within this many pixels of the viewport. */
+  /**
+   * Mount when the block comes within this many pixels of the viewport.
+   * Sized to cover a fast wheel-scroll; an instant jump (End key, dragging the
+   * scrollbar to the bottom) still outruns it, which is what the placeholder
+   * skeleton below is for.
+   */
   rootMargin?: number;
   /** Force the real content to render — printing, or an expanded-all view. */
   alwaysRender?: boolean;
@@ -48,7 +53,7 @@ export type DeferredBlockProps = {
 
 export function DeferredBlock({
   estimatedHeight,
-  rootMargin = 900,
+  rootMargin = 1200,
   alwaysRender = false,
   children,
 }: DeferredBlockProps) {
@@ -92,7 +97,23 @@ export function DeferredBlock({
 
   return (
     <div ref={ref} style={shown ? undefined : { height: `${estimatedHeight}px` }}>
-      {shown ? children : null}
+      {shown ? children : <BlockSkeleton />}
+    </div>
+  );
+}
+
+// Jumping straight to the bottom of a long report (End key, or dragging the
+// scrollbar) outruns the observer by a frame or two. Empty space in a ledger
+// reads as "there is nothing here"; this reads as "this is loading". Five
+// nodes, so it costs nothing next to the hundreds of rows it stands in for.
+function BlockSkeleton() {
+  return (
+    <div className="h-full rounded-lg border border-[#E2DDD8] bg-white overflow-hidden">
+      <div className="h-9 bg-[#F0ECE9]/60" />
+      <div className="p-3 space-y-2">
+        <div className="h-3 w-1/3 rounded bg-[#F0ECE9]" />
+        <div className="h-3 w-1/2 rounded bg-[#F0ECE9]" />
+      </div>
     </div>
   );
 }

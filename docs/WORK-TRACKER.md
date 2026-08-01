@@ -9,6 +9,33 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-01 (evening) — Render sweep beyond finance: /quality and /mail-center were worse than accounting
+
+Owner: 「finance 都解决了就去其他 module 不常开的，例如 sofa combo」. Every sidebar-reachable
+page opened and measured.
+
+- ✅ **`/quality` — the heaviest screen in the system (#201).** 167 QC slot cards holding
+  **2,839 pending inspections**, 30,303 DOM nodes, a **272,943px** page. Same card-per-group
+  shape as the GL ledger, so the same `DeferredBlock`. Verified on prod: **1,747 nodes,
+  73ms**, header still `2839 open`, API still returns all 2,839.
+- ✅ **`/mail-center` — a 3,745ms freeze (#199).** Rendered all 300 threads the API caps at
+  (81px each = 24,564px). Row windowing does not fit (variable row height, page-level
+  scroll), so this added `useIncrementalList`: newest 40, extend by 40 on scroll. Verified
+  on prod: **2,510 nodes, 769ms**, sentinel `Loading older conversations… (40 of 300)`,
+  `beforeprint` still expands to all 300.
+- 🟡 **`/maintenance/sofa-combos` — reported slow, does not reproduce.** 1,054 nodes / 92ms
+  on HOOKKA INDUSTRIES; list, expand-all, New Combo, edit and Copy-to-customer all ≤92ms;
+  API 50-71ms. **Zero RUM rows in 7 days**, so health cannot say either. Needs the owner to
+  say which company / which action.
+- ⚪ **Owner decision:** 2,839 pending QC inspections back to 2026-04-28 is a data signal,
+  not just a rendering one — the 12:00/16:00 cron keeps generating slots and nothing clears
+  them. Should the screen default to recent slots?
+- ⚪ Left open (under 1s, not urgent): `/employees` 5,425 nodes / 541ms, `/admin/health`
+  3,292 nodes / 781ms, accounting `?tab=coa` 5,121 nodes / 218ms.
+- ⚪ Backend, no DOM problem: `/api/accounting/dashboard` **2,010ms** (it replays
+  `computePnlWindow` per month for 12 months); `?tab=stock` fires `stock-summary` 990ms +
+  `cost-by-line` 745ms + `wip-detail` 594ms together.
+
 ## 2026-08-01 — Finance module lag: every tab measured on prod, the four real freezes fixed
 
 Owner: 「我发现 finance 的模块很卡」/「每个 module submodule 都应该要点进去检查」, plus

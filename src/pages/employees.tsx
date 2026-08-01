@@ -7152,6 +7152,10 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
       "EIS EE", "EIS ER", "PCB", "Total Deductions", "Net Pay", "Bank Account", "Status",
     ];
     const rm2 = (sen: number) => (sen / 100).toFixed(2);
+    // Hours arrive as a sum of per-department rows, so a 0.5h dock can carry
+    // float dust (0.019999999999999574h, 1.7763568394002505e-15h) straight into
+    // the spreadsheet. Two decimals is the precision they are recorded in.
+    const round2 = (h: number) => Math.round((Number(h) || 0) * 100) / 100;
     const rows = payslipData.map((r) => {
       const absentDays = r.absentDays ?? 0;
       const absenceSen = r.absenceDeductionSen ?? 0;
@@ -7178,11 +7182,11 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
         (r.absentDates ?? []).join(" "),
         shortHours || "", shortSen > 0 ? rm2(shortSen) : "",
         shortHours > 0 ? `${shortHours}h x ${rm2(shortRate)}/h = ${rm2(shortSen)}` : "",
-        shortDays.map((d) => `${d.date} ${d.hours}h`).join("; "),
+        shortDays.map((d) => `${d.date} ${round2(d.hours)}h`).join("; "),
         prorationSen > 1 ? rm2(prorationSen) : "",
         rm2(basicEarnedSen),
         r.otWeekdayHours, r.otSundayHours, r.otPHHours,
-        (r.otDays ?? []).map((d) => `${d.date} ${d.hours}h`).join("; "),
+        (r.otDays ?? []).map((d) => `${d.date} ${round2(d.hours)}h`).join("; "),
         rm2(r.hourlyRate), rm2(r.otWeekdayAmount),
         rm2(r.otSundayAmount), rm2(r.otPHAmount),
         rm2(r.totalOT), rm2(r.allowances),
@@ -7232,6 +7236,16 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
   };
 
   const fmtSen = (sen: number) => `RM ${(sen / 100).toFixed(2)}`;
+  // OT hours for DISPLAY. The payslip stores them in an INTEGER column, so a
+  // real 0.15h of overtime is stored as 0 and the panel printed the nonsense
+  // "0 hrs x RM 13.59 x 1.5 = RM 3.06" (owner 2026-08-01: 「OT 可是0hours？」).
+  // The amount is exact, so derive the hours back from it whenever the stored
+  // integer has rounded them away; otherwise show the stored figure as-is.
+  const otHrsLabel = (storedHrs: number, amountSen: number, rateSen: number, mult: number) => {
+    if (storedHrs > 0 || amountSen <= 0 || rateSen <= 0) return String(storedHrs);
+    const h = amountSen / (rateSen * mult);
+    return h >= 0.005 ? h.toFixed(2) : String(storedHrs);
+  };
   // Print-only money: no "RM " prefix. Ten money columns x ~22px of repeated
   // prefix is what pushed the payroll sheet off the page; the unit is stated
   // once in the report subtitle instead.
@@ -7378,7 +7392,11 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
           { item: "Standard day", rule: `Punch in to punch out, minus the ${lunchTxt} unpaid lunch`, example: `${shiftTxt} − ${lunchTxt} = ${stdH}h` },
           { item: "Late grace", rule: `Up to ${grace} minutes late is forgiven`, example: `${onTimeIn} in → counted as on time` },
           { item: "Lateness rounding", rule: `Beyond grace, lateness rounds UP in ${block}-min blocks`, example: `${lateIn} → ${block} min late` },
-          { item: "Overtime counting", rule: `Only after ${minToHhmm(cfg.shiftEndMin)}, in 15-min blocks (a block must be filled)`, example: "16-29 min → 15 min; 14 min → 0" },
+          // The 15-min-block wording predates the owner's 2026-07-04 rule
+          // ("OT 要30分鐘才算") and told workers 16 min earned 15 min of OT while
+          // the engine paid nothing under 30. The guide is handed to workers —
+          // it has to state what they are actually paid.
+          { item: "Overtime counting", rule: `Only after ${minToHhmm(cfg.shiftEndMin)}, and only once it reaches 30 minutes; then in 15-min blocks`, example: "29 min → 0; 30 min → 30 min; 45 min → 45 min" },
         ]),
         s("3. Lateness / short hours deduction", [
           { item: "Deduction", rule: `Short hours × the hour rate (${rm(hourRate)}/h)`, example: `30 min late, no OT → 0.5h × ${hourRate.toFixed(2)} = −${rm(hourRate / 2)}` },
@@ -7656,13 +7674,13 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
                                   </p>
                                   <hr className="border-[#E2DDD8]" />
                                   <p>
-                                    Weekday OT: {r.otWeekdayHours} hrs x {fmtSen(r.hourlyRate)} x 1.5 = <span className="font-semibold">{fmtSen(r.otWeekdayAmount)}</span>
+                                    Weekday OT: {otHrsLabel(r.otWeekdayHours, r.otWeekdayAmount, r.hourlyRate, 1.5)} hrs x {fmtSen(r.hourlyRate)} x 1.5 = <span className="font-semibold">{fmtSen(r.otWeekdayAmount)}</span>
                                   </p>
                                   <p>
-                                    Sunday OT: {r.otSundayHours} hrs x {fmtSen(r.hourlyRate)} x 2.0 = <span className="font-semibold">{fmtSen(r.otSundayAmount)}</span>
+                                    Sunday OT: {otHrsLabel(r.otSundayHours, r.otSundayAmount, r.hourlyRate, 2.0)} hrs x {fmtSen(r.hourlyRate)} x 2.0 = <span className="font-semibold">{fmtSen(r.otSundayAmount)}</span>
                                   </p>
                                   <p>
-                                    PH OT: {r.otPHHours} hrs x {fmtSen(r.hourlyRate)} x 3.0 = <span className="font-semibold">{fmtSen(r.otPHAmount)}</span>
+                                    PH OT: {otHrsLabel(r.otPHHours, r.otPHAmount, r.hourlyRate, 3.0)} hrs x {fmtSen(r.hourlyRate)} x 3.0 = <span className="font-semibold">{fmtSen(r.otPHAmount)}</span>
                                   </p>
                                   <hr className="border-[#E2DDD8]" />
                                   <p className="font-semibold">

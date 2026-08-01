@@ -92,6 +92,15 @@ export type PrintReportOptions = {
   subtitle?: string;
   /** Small line describing the active filter (period · category · etc.). */
   filterSummary: string;
+  /**
+   * What identifies THIS run in the saved file's name — normally the period.
+   * The browser names a print-to-PDF after the document <title>, so without it
+   * every month of every report saved as the same file ("Payroll - Hookka.pdf")
+   * and HR ended up with a folder of collisions. Defaults to the part of
+   * `filterSummary` before the first " · " (usually the period), sanitised for
+   * a filename. Pass explicitly when that is not the right label.
+   */
+  fileLabel?: string;
   /** Paper orientation. Defaults to "portrait". Use "landscape" for wide tables. */
   orientation?: "portrait" | "landscape";
   /**
@@ -227,11 +236,23 @@ export function buildReportHTML(opts: PrintReportOptions): string {
   const sectionsHtml = sections.map(renderSection).join("\n");
   const cardsHtml = cards && cards.length > 0 ? renderCards(cards) : "";
 
+  // Document title = the file name a print-to-PDF lands under. Strip the
+  // characters an OS will not take in a file name (a date range like
+  // "01/07/2026 – 31/07/2026" would otherwise become directories or colons),
+  // collapse whitespace, and cap the length so the dialog stays readable.
+  const rawLabel = (opts.fileLabel ?? opts.filterSummary.split(" · ")[0] ?? "").trim();
+  const label = rawLabel
+    .replace(/[\\/:*?"<>|]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 50);
+  const docTitle = label ? `${title} — ${label} · Hookka` : `${title} - Hookka`;
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>${escapeHtml(title)} - Hookka</title>
+  <title>${escapeHtml(docTitle)}</title>
   <style>
     @page { size: A4 ${orientation}; margin: 13mm; }
     @media print { body { margin: 0; } .card, tr { page-break-inside: avoid; } h2 { page-break-after: avoid; } }

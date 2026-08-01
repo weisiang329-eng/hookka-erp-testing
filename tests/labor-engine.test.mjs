@@ -848,3 +848,51 @@ test("Sunday work does NOT mask a weekday absence (pure 2x OT; absence still doc
   assert.equal(r.payroll.otPaySen, Math.round(8 * otBase * 2));
   assert.equal(r.cost.regularCostSen, Math.round(23 * (265000 / 24)));
 });
+
+// ── OT minimum, both paths (owner 2026-08-01: 「OT 可是0hours？」) ───────────
+//
+// Overtime derived from LOGGED HOURS had no minimum, while the punch path has
+// required 30 minutes since 2026-07-04. A day recorded as 7.52h against a 7.5h
+// standard therefore paid 1 minute of overtime: ANN's July payslip listed seven
+// OT days of "0.0h" and printed "0 hrs x RM 13.59 x 1.5 = RM 3.06".
+test("a 1-2 minute surplus over the standard day is NOT overtime", () => {
+  const r = labor.computeAttendanceDayDetail({
+    worker: { workingHoursPerDay: 7.5 },
+    year: 2026, month: 7,
+    days: [
+      { date: "2026-07-17", hours: 7.52 },  // 1 min over  → no OT
+      { date: "2026-07-20", hours: 7.53 },  // 2 min over  → no OT
+      { date: "2026-07-21", hours: 7.5 },   // exactly     → no OT
+    ],
+    publicHolidays: [], absenceThroughDay: 0,
+  });
+  assert.deepEqual(r.otDays, []);
+});
+
+test("30 minutes over IS overtime, and the hours carry no float dust", () => {
+  const r = labor.computeAttendanceDayDetail({
+    worker: { workingHoursPerDay: 7.5 },
+    year: 2026, month: 7,
+    days: [{ date: "2026-07-22", hours: 8.0 }],
+    publicHolidays: [], absenceThroughDay: 0,
+  });
+  assert.equal(r.otDays.length, 1);
+  assert.equal(r.otDays[0].hours, 0.5);
+});
+
+test("the month total applies the same minimum", () => {
+  const base = {
+    worker: { basicSalarySen: 265000, workingDaysPerMonth: 26, workingHoursPerDay: 7.5, otMultiplier: 1.5 },
+    year: 2026, month: 7, publicHolidays: [], absenceThroughDay: 0,
+  };
+  const dust = labor.computeMonthlyLabor({
+    ...base,
+    days: [{ date: "2026-07-17", hours: 7.52 }, { date: "2026-07-20", hours: 7.53 }],
+  });
+  assert.equal(dust.otWeekdayHours, 0);
+  assert.equal(dust.payroll.otPaySen, 0);
+
+  const real = labor.computeMonthlyLabor({ ...base, days: [{ date: "2026-07-22", hours: 8.5 }] });
+  assert.equal(real.otWeekdayHours, 1);
+  assert.ok(real.payroll.otPaySen > 0);
+});

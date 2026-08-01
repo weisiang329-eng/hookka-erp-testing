@@ -46,6 +46,7 @@ import {
   type PayRuleVersion,
   type PayRulesConfig,
 } from "./pay-rules";
+import { OT_MIN_MINUTES } from "./attendance-rules";
 
 /** Monday(1)..Saturday(6) are working weekdays; Sunday(0) is off. */
 const WORKING_DOW: ReadonlySet<number> = new Set([1, 2, 3, 4, 5, 6]);
@@ -205,6 +206,37 @@ export function absenceCutoffDay(
   return cutoff.getDate(); // current/cutoff month — count through the cutoff day
 }
 
+/**
+ * A day's logged hours, cleaned to the 2 dp they are actually recorded in.
+ *
+ * Hours reach the engine as a SUM of per-department rows, and those rows come
+ * out of `prorateHours`' cent arithmetic — so a 7.5h day can arrive as
+ * 7.500000000000001. Compared raw against a 7.5h standard that is "overtime",
+ * and ANN's July drill-down duly listed seven OT days of 0.0h while the payslip
+ * printed "0 hrs x RM 13.59 x 1.5 = RM 3.06" — a formula nobody can explain to
+ * the worker it is paid to (owner 2026-08-01: 「OT 可是0hours？」).
+ *
+ * Rounding to 2 dp before every threshold test kills the dust and leaves real
+ * fragments intact: 7.52h is still 0.02h of overtime. Money is unchanged for
+ * every day that was genuinely over the line.
+ */
+function loggedHours(h: number): number {
+  return Math.round((Number(h) || 0) * 100) / 100;
+}
+
+/**
+ * Hours above the standard day that actually COUNT as overtime.
+ *
+ * The punch path has required 30 minutes since 2026-07-04; this path — overtime
+ * derived from logged hours — had no minimum, so a 1-minute surplus was paid.
+ * Same rule, both paths. Sunday / public-holiday work is untouched: the whole
+ * day is premium there, it is not a "surplus over the standard day".
+ */
+function countableOtHours(surplus: number): number {
+  const h = loggedHours(surplus);
+  return h * 60 >= OT_MIN_MINUTES ? h : 0;
+}
+
 // ── Per-day attendance detail (DISPLAY ONLY — no money) ─────────────────────
 //
 // computeMonthlyLabor returns the COUNT of absent days and the TOTAL overtime
@@ -280,7 +312,8 @@ export function computeAttendanceDayDetail(
   // OT for: Sunday / public holiday → the whole day is OT (premium); ordinary
   // weekday → only the hours above the standard day.
   const otDays: Array<{ date: string; hours: number }> = [];
-  for (const [date, h] of hoursByDate) {
+  for (const [date, raw] of hoursByDate) {
+    const h = loggedHours(raw);
     if (h <= 0) continue;
     const [yy, mmN, dd] = date.split("-").map(Number);
     const dow = new Date(yy, (mmN || 1) - 1, dd || 1).getDay();
@@ -288,7 +321,7 @@ export function computeAttendanceDayDetail(
     if (dow === 0 || holidaySet.has(date)) {
       otH = h; // Sunday / public holiday → whole day at premium
     } else if (workingHoursPerDay > 0 && h > workingHoursPerDay) {
-      otH = h - workingHoursPerDay; // weekday → hours above the standard day
+      otH = countableOtHours(h - workingHoursPerDay); // weekday → hours above the standard day
     } else {
       otH = 0;
     }
@@ -573,8 +606,8 @@ export function computeMonthlyLabor(
       otSundayHours += h; // Sunday — whole day at 2× (wins over a holiday too)
     } else if (holidaySet.has(date)) {
       otHolidayHours += h; // public holiday on a weekday — whole day at 3×
-    } else if (workingHoursPerDay > 0 && h > workingHoursPerDay) {
-      otWeekdayHours += h - workingHoursPerDay; // ordinary weekday — above the standard day
+    } else if (workingHoursPerDay > 0) {
+      otWeekdayHours += countableOtHours(loggedHours(h) - workingHoursPerDay); // ordinary weekday — above the standard day
     }
   }
   const otHours = otWeekdayHours + otSundayHours + otHolidayHours;
@@ -663,8 +696,8 @@ export function computeMonthlyLabor(
       otSundayPayExact += h * base * cfg.sundayOtMultiplier;
     } else if (holidaySet.has(date)) {
       otHolidayPayExact += h * base * cfg.holidayOtMultiplier;
-    } else if (workingHoursPerDay > 0 && h > workingHoursPerDay) {
-      otWeekdayPayExact += (h - workingHoursPerDay) * base * otMultiplier;
+    } else if (workingHoursPerDay > 0) {
+      otWeekdayPayExact += countableOtHours(h - workingHoursPerDay) * base * otMultiplier;
     }
   }
 

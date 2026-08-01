@@ -36,6 +36,18 @@ export type AttendanceRules = {
   lateBlockMin: number;
 };
 
+/**
+ * Overtime does not start until this many minutes past the shift end
+ * (owner 2026-07-04: 「OT 要30分鐘才算」 — an 18:28 punch-out is 0 OT, not 15).
+ *
+ * Exported because the PUNCH is not the only path to overtime: the payroll
+ * engine also derives it from LOGGED HOURS (hours above the worker's standard
+ * day), and that path had no minimum at all — so a day recorded as 7.52h
+ * against a 7.5h standard paid 1 minute of overtime, and ANN's July payslip
+ * printed "0 hrs x RM 13.59 x 1.5 = RM 3.06". One threshold, both paths.
+ */
+export const OT_MIN_MINUTES = 30;
+
 export const HOOKKA_ATTENDANCE: AttendanceRules = {
   startMin: 8 * 60, // 480
   endMin: 18 * 60, // 1080
@@ -133,7 +145,7 @@ export function computeAttendanceDay(
     // Below the threshold the tail also stops offsetting the shortfall,
     // consistent with it not being counted as work. From 30 minutes on,
     // quarters apply as before (18:30→30, 18:45→45).
-    if (otMin < 30) otMin = 0;
+    if (otMin < OT_MIN_MINUTES) otMin = 0;
   }
 
   // Shortfall — same-day OT OFFSETS it first (owner 2026-06-11): a worker who

@@ -47,24 +47,30 @@ type ChainNode = {
   sub?: string | null;
   state: NodeState;
   href?: string | null;
+  /** Shown when the node is tapped but has nothing to open — see Node(). */
+  why?: string | null;
 };
 
+// A tick for done, a filled ring for current, an empty ring for pending. Studied
+// off the Houzs SCM map (DocumentRelationshipMapModal) — a glyph reads faster
+// than three shades of the same dot, and it survives being printed in mono.
 function StateDot({ state }: { state: NodeState }) {
   const c = C[state];
   if (state === "pending") {
     return (
       <span
-        className="inline-block h-3.5 w-3.5 rounded-full border-2"
-        style={{ borderColor: c.dot }}
+        className="inline-block h-4 w-4 rounded-full border"
+        style={{ borderColor: c.dot, background: "#fff" }}
       />
     );
   }
   return (
     <span
-      className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full"
+      className="inline-flex h-4 w-4 items-center justify-center rounded-full text-[10px] font-bold text-white"
       style={{ background: c.dot }}
+      aria-hidden
     >
-      <span className="h-1.5 w-1.5 rounded-full bg-white" />
+      {state === "current" ? "\u25C9" : "\u2713"}
     </span>
   );
 }
@@ -102,14 +108,32 @@ function Node({ node }: { node: ChainNode }) {
       )}
     </div>
   );
-  // Only a document that EXISTS gets a link. A pending node stays inert —
-  // offering a click that goes nowhere is worse than no affordance at all.
-  return node.href && node.state !== "pending" ? (
-    <a href={node.href} className="flex flex-1 hover:opacity-90" title={`Open ${node.docNo}`}>
+  // Houzs SCM's owner rule, adopted verbatim: 「每個點了都要有反應可以看到文件的」
+  // — a node the operator can see must ANSWER when tapped. A real document
+  // navigates. One that cannot open (a pending step, or a reference that is the
+  // customer's own paperwork and not ours) explains itself instead of sitting
+  // dead. Silence reads as a broken link; a sentence reads as a system that
+  // knows what it is doing.
+  if (node.href && node.state !== "pending") {
+    return (
+      <a
+        href={node.href}
+        className="flex flex-1 hover:opacity-90"
+        title={`Open ${node.docNo}`}
+      >
+        {inner}
+      </a>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className="flex flex-1 text-left"
+      title={node.why ?? undefined}
+      onClick={() => node.why && window.alert(node.why)}
+    >
       {inner}
-    </a>
-  ) : (
-    inner
+    </button>
   );
 }
 
@@ -293,6 +317,11 @@ export function DocumentChainMap({
         docNo: so.customerPOId || null,
         sub: so.customerPOId ? "From the customer" : "—",
         state: so.customerPOId ? "linked" : "pending",
+        // The customer's PO is THEIR document — we store the reference, never a
+        // file. Saying so beats a dead tap on a node that looks linked.
+        why: so.customerPOId
+          ? `${so.customerPOId} is the customer's own reference for this order. It is their document, not ours, so there is no file here to open.`
+          : "No customer PO reference was recorded on this order.",
       },
       {
         kind: "SO",
@@ -311,6 +340,9 @@ export function DocumentChainMap({
         sub: dos[0]
           ? [dos[0].status, dos[0].driverName].filter(Boolean).join(" · ")
           : "After confirmation",
+        why: dos[0]
+          ? null
+          : "No delivery order yet. One is created once this sales order is confirmed and the goods are ready to ship.",
         state: dos[0] ? (cur(dos[0].doNo) ? "current" : "linked") : "pending",
         href: dos[0] ? `/delivery/${dos[0].id}` : null,
       },
@@ -319,6 +351,9 @@ export function DocumentChainMap({
         label: "Sales Invoice",
         docNo: invs[0]?.invoiceNo ?? null,
         sub: invs[0] ? invs[0].status : "On delivery",
+        why: invs[0]
+          ? null
+          : "No invoice yet. One is raised from the delivery order once the goods have gone out.",
         state: invs[0] ? (cur(invs[0].invoiceNo) ? "current" : "linked") : "pending",
         href: invs[0] ? `/invoices/${invs[0].id}` : null,
       },
@@ -328,6 +363,9 @@ export function DocumentChainMap({
         docNo: pays[0]?.receiptNumber ?? null,
         sub: pays[0] ? pays[0].status : "On settlement",
         state: pays[0] ? "linked" : "pending",
+        why: pays[0]
+          ? null
+          : "No payment recorded yet. Payments appear here once they are allocated against this order's invoice.",
       },
     ];
     return { nodes, pos: data.linkedPOs ?? [], extraDOs: dos.slice(1) };

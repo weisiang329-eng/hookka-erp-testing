@@ -115,7 +115,7 @@ test("every pending node carries a caption explaining when it arrives", () => {
     ["INV", "On delivery"],
     ["PAY", "On settlement"],
   ]) {
-    const node = map.match(new RegExp(`kind: "${kind}",[\\s\\S]{0,600}?\\n      \\},`));
+    const node = map.match(new RegExp(`kind: "${kind}",[\\s\\S]{0,1600}?\\n      \\},`));
     assert.ok(node, `${kind} node not found — did the node list change shape?`);
     assert.match(
       node[0],
@@ -141,7 +141,7 @@ test("every pending node carries a caption explaining when it arrives", () => {
 // --- 2. the driver is on the DO node ----------------------------------------
 
 test("the delivery driver shows on the DO node itself", () => {
-  const doNode = map.match(/kind: "DO",[\s\S]{0,600}?\n      \},/);
+  const doNode = map.match(/kind: "DO",[\s\S]{0,1600}?\n      \},/);
   assert.ok(doNode, "DO node not found");
   assert.match(
     doNode[0],
@@ -211,12 +211,25 @@ test("a station that ran over its estimate is only flagged once it finished", ()
 
 // --- clickable nodes (owner: 「还可以点的 点的就会直接跳到那边去」) ----------
 
-test("an existing document node links to its page; a pending one does not", () => {
+test("a real document navigates; a node with nothing to open explains itself", () => {
   const src = readFileSync("src/components/ui/document-chain-map.tsx", "utf8");
-  // The link is gated on state — a grey node has nothing to open, and a click
-  // that goes nowhere is worse than no affordance.
-  assert.match(src, /node\.href && node\.state !== "pending" \? \(/);
+  // Houzs SCM's rule, adopted: 「每個點了都要有反應可以看到文件的」. A linked
+  // document opens. Anything else must SAY why rather than sit dead — silence
+  // reads as a broken link.
+  assert.match(src, /if \(node\.href && node\.state !== "pending"\) \{/);
   assert.match(src, /title=\{`Open \$\{node\.docNo\}`\}/);
+  // The fallback is a button carrying the explanation, NOT an anchor — a
+  // pending step still must not look like a live link.
+  assert.match(src, /onClick=\{\(\) => node\.why && window\.alert\(node\.why\)\}/);
+  // Every downstream node states the event that will create it.
+  for (const phrase of [
+    "is the customer's own reference",
+    "No delivery order yet",
+    "No invoice yet",
+    "No payment recorded yet",
+  ]) {
+    assert.ok(src.includes(phrase), `missing explanation: ${phrase}`);
+  }
 });
 
 test("the production order number navigates, the chevron only expands", () => {

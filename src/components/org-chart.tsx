@@ -265,7 +265,7 @@ export function OrgChart({ canManage }: Props) {
     if (!forest.length || autoFolded === sig) return;
     const wide = new Set<string>();
     const walk = (n: OrgNode) => {
-      if (n.children.length > 6) wide.add(n.key);
+      if (n.children.length > 14) wide.add(n.key);
       n.children.forEach(walk);
     };
     forest.forEach(walk);
@@ -351,26 +351,54 @@ export function OrgChart({ canManage }: Props) {
           <>
             {/* stem down from the parent */}
             <div className="h-5 w-px bg-[#C2BDB6]" />
-            <div className="flex items-start justify-center">
-              {kids.map((c, i) => (
-                <div key={c.key} className="relative flex flex-col items-center px-2">
-                  {/* the bus across the siblings, half-width at each end so it
-                      stops at the outermost child instead of hanging in air */}
-                  {kids.length > 1 && (
-                    <span
-                      aria-hidden
-                      className="absolute top-0 h-px bg-[#C2BDB6]"
-                      style={{
-                        left: i === 0 ? "50%" : 0,
-                        right: i === kids.length - 1 ? "50%" : 0,
-                      }}
-                    />
-                  )}
-                  <div className="h-5 w-px bg-[#C2BDB6]" />
-                  <Branch node={c} />
+            {/*
+              MANY reports do not fan out sideways. Owner 2026-08-02:「如果很多
+              下线她是怎么排的」— Houzs answer it by stopping the tree and
+              dropping into a BOX whose cards stack vertically in columns. A
+              Production Head with fourteen reports fanned horizontally is a
+              canvas several screens wide; the same fourteen stacked three-up is
+              one card tall and readable.
+
+              The classic fan is kept for a SMALL number of children, because
+              that is the shape that reads as an org chart. The switch is at
+              four, and only when those children lead nobody themselves — a
+              manager with a team of their own still deserves their own branch.
+            */}
+            {kids.length > 4 && kids.every((c) => c.children.length === 0) ? (
+              <div className="rounded-lg border border-[#E2DDD8] bg-[#FBFAF8] p-2">
+                <div
+                  className="grid gap-1.5"
+                  style={{
+                    gridTemplateColumns: `repeat(${Math.min(4, Math.ceil(kids.length / 4))}, minmax(0, 1fr))`,
+                  }}
+                >
+                  {kids.map((c) => (
+                    <TreeCard key={c.key} node={c} />
+                  ))}
                 </div>
-              ))}
-            </div>
+              </div>
+            ) : (
+              <div className="flex items-start justify-center">
+                {kids.map((c, i) => (
+                  <div key={c.key} className="relative flex flex-col items-center px-2">
+                    {/* the bus across the siblings, half-width at each end so it
+                        stops at the outermost child instead of hanging in air */}
+                    {kids.length > 1 && (
+                      <span
+                        aria-hidden
+                        className="absolute top-0 h-px bg-[#C2BDB6]"
+                        style={{
+                          left: i === 0 ? "50%" : 0,
+                          right: i === kids.length - 1 ? "50%" : 0,
+                        }}
+                      />
+                    )}
+                    <div className="h-5 w-px bg-[#C2BDB6]" />
+                    <Branch node={c} />
+                  </div>
+                ))}
+              </div>
+            )}
           </>
         )}
       </div>

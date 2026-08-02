@@ -94,10 +94,12 @@ export const SEARCH_SOURCES: SearchSource[] = [
     orgCol: "org_id", resource: "procurement", hrefPrefix: "/procurement/pi/",
   },
   {
+    // The column is grn_number (folds from grnNumber), NOT grn_no — confirmed
+    // against grn.ts and reported by /api/search's sourcesSkipped.
     kind: "grn", groupLabel: "Goods Receipts", table: "grns",
-    idCol: "id", labelCol: "grn_no",
+    idCol: "id", labelCol: "grn_number",
     subCols: ["supplier_name", "status"],
-    searchCols: ["grn_no", "supplier_name"],
+    searchCols: ["grn_number", "supplier_name"],
     orgCol: "org_id", resource: "procurement", hrefPrefix: "/procurement/grn/",
   },
   {
@@ -125,22 +127,28 @@ export const SEARCH_SOURCES: SearchSource[] = [
     kind: "service_case", groupLabel: "Service Cases", table: "service_cases",
     idCol: "id", labelCol: "case_no",
     subCols: ["customer_name", "status"],
-    searchCols: ["case_no", "customer_name", "description"],
+    searchCols: ["case_no", "customer_name"],
     orgCol: "org_id", resource: "service_cases", hrefPrefix: "/service-cases/",
   },
   {
-    kind: "employee", groupLabel: "Employees", table: "employees",
+    // The table is `workers`, not `employees` (the UI label is Employees but
+    // the storage kept the original name — see workers.ts). emp_no folds from
+    // empNo. orgCol is declared but degrades to no filter if the column is
+    // absent (buildSourceSql guards on availableCols).
+    kind: "employee", groupLabel: "Employees", table: "workers",
     idCol: "id", labelCol: "name",
-    subCols: ["employee_no", "department"],
-    searchCols: ["name", "employee_no"],
+    subCols: ["emp_no", "department_code", "position"],
+    searchCols: ["name", "emp_no"],
     orgCol: "org_id", resource: "employees", hrefPrefix: "/employees?id=",
   },
   {
-    kind: "lead", groupLabel: "Sales Pipeline", table: "leads",
+    // The table is `sales_leads` (sales-leads.ts), and its RBAC resource is
+    // `customers` — the same gate the leads route itself uses.
+    kind: "lead", groupLabel: "Sales Pipeline", table: "sales_leads",
     idCol: "id", labelCol: "name",
     subCols: ["company", "stage"],
     searchCols: ["name", "company", "phone", "email"],
-    orgCol: "org_id", resource: "leads", hrefPrefix: "/leads?id=",
+    orgCol: "org_id", resource: "customers", hrefPrefix: "/leads?id=",
   },
   {
     kind: "journal_entry", groupLabel: "Journal Entries", table: "journal_entries",

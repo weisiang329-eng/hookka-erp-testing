@@ -382,15 +382,20 @@ export function EmployeeDrawer({
                 </Field>
               </>
             )}
-            <Field label="OT multiplier">
-              <Input
-                type="number"
-                step="0.1"
-                value={draft.otMultiplier}
-                onChange={(e) => set("otMultiplier", parseFloat(e.target.value) || 0)}
-                className="mt-0.5 h-8 text-xs"
-              />
-            </Field>
+            {/* No overtime for per-day people (owner 2026-08-02, confirmed with
+                HR: 「outsource 暂时没有」). The multiplier has nothing to
+                multiply, so showing it only suggests it does something. */}
+            {draft.payMode !== "DAILY" && (
+              <Field label="OT multiplier">
+                <Input
+                  type="number"
+                  step="0.1"
+                  value={draft.otMultiplier}
+                  onChange={(e) => set("otMultiplier", parseFloat(e.target.value) || 0)}
+                  className="mt-0.5 h-8 text-xs"
+                />
+              </Field>
+            )}
             <Field label="Eff. allowance (RM)">
               <Input
                 type="number"

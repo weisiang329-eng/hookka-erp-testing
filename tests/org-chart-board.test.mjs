@@ -96,11 +96,36 @@ test("a wide branch opens FOLDED, so the root is the first thing you see", () =>
   // Production Head with fourteen direct reports — the first paint was a canvas
   // several screens across, opened mid-way, with the root off-screen.
   const src = readFileSync("src/components/org-chart.tsx", "utf8");
-  assert.match(src, /if \(n\.children\.length > 6\) wide\.add\(n\.key\)/);
+  assert.match(src, /if \(n\.children\.length > 14\) wide\.add\(n\.key\)/);
   // Once, keyed on the data — it must not re-fold every time the list refreshes
   // and undo what the operator just opened.
   assert.match(src, /const sig = `\$\{forest\.length\}:\$\{visible\.length\}`/);
   assert.match(src, /if \(!forest\.length \|\| autoFolded === sig\) return;/);
   // Folding ADDS to whatever is already collapsed rather than replacing it.
   assert.match(src, /setCollapsed\(\(prev\) => new Set\(\[\.\.\.prev, \.\.\.wide\]\)\)/);
+});
+
+test("MANY reports stack in a box — they do not fan out sideways", () => {
+  // Owner:「如果很多下线她是怎么排的」— Houzs stop the tree and drop into a box
+  // whose cards stack in columns. Fourteen reports fanned horizontally is a
+  // canvas several screens wide; the same fourteen stacked is one card tall.
+  const src = readFileSync("src/components/org-chart.tsx", "utf8");
+  assert.match(
+    src,
+    /kids\.length > 4 && kids\.every\(\(c\) => c\.children\.length === 0\)/,
+    "and only when those children lead nobody — a manager keeps their own branch",
+  );
+  assert.match(src, /gridTemplateColumns: `repeat\(\$\{Math\.min\(4, Math\.ceil\(kids\.length \/ 4\)\)\}/);
+  // The classic fan survives for a SMALL number, because that is the shape that
+  // reads as an org chart.
+  assert.match(src, /left: i === 0 \? "50%" : 0/);
+});
+
+test("the flat table under the chart is gone", () => {
+  // Owner:「下面的不需要」. It listed the ten office accounts only, and its
+  // Reports-to column read the legacy users.reportsTo rather than the
+  // org_reporting edges — so it printed "—" for people the chart draws a line
+  // for. Everything it could edit, the side drawer edits properly.
+  const page = readFileSync("src/pages/settings/Users.tsx", "utf8");
+  assert.doesNotMatch(page, /\{orgRows\.map\(/);
 });

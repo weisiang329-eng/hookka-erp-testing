@@ -1358,10 +1358,15 @@ export default function SalesPage() {
         </CardHeader>
         <CardContent>
           {tab === "DRAFT" && selectedRows.length > 0 && (
-            <div className="mb-3 flex items-center justify-between rounded-md border border-[#E8D597] bg-[#FAEFCB] px-3 py-2 text-sm">
+            // justify-between with THREE children put Convert in the middle of
+            // the bar, floating between the label and Delete (owner 2026-08-02:
+            // 「为什么会跑到中间？非常奇怪」). The two actions belong together on
+            // the right; only the label and the action group are spread apart.
+            <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-[#E8D597] bg-[#FAEFCB] px-3 py-2 text-sm">
               <span className="text-[#9C6F1E]">
                 {selectedRows.length} draft order(s) selected
               </span>
+              <div className="flex items-center gap-2">
               <Button
                 variant="primary"
                 size="sm"
@@ -1425,6 +1430,7 @@ export default function SalesPage() {
               >
                 <Trash2 className="h-4 w-4" /> Delete
               </Button>
+              </div>
             </div>
           )}
           {/* Multi-Company Phase 4 — bulk re-assign company. Shown whenever

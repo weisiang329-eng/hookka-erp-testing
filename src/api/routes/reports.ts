@@ -42,6 +42,7 @@ import {
   checkCogsIntegrity,
   summarizeCogsIssues,
 } from "../lib/cogs-integrity";
+import { checkOcrCodeMisses } from "../lib/ocr-code-misses";
 import {
   collectBriefData,
   renderBriefHtml,
@@ -554,6 +555,30 @@ app.get("/cogs-integrity.json", async (c) => {
     });
   } catch (err) {
     console.error("[reports/cogs-integrity.json] failed:", err);
+    return c.json({ success: false, error: "report generation failed" }, 500);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/reports/ocr-code-misses.json — WHY "Product code" is the biggest
+// single reason a scanned PO counts as a failure. READ-ONLY.
+//
+// The accuracy dashboard can only say "Product code (54)". That one label
+// covers four different defects with four different cures (see
+// lib/ocr-code-misses.ts), and only the raw→corrected pairs say which one we
+// actually have. Sizing that split is the whole point: a normaliser is exact
+// and cheap, prompt work is open-ended and regresses.
+// ---------------------------------------------------------------------------
+app.get("/ocr-code-misses.json", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "read");
+  if (denied) return denied;
+  try {
+    const { pairs, summary } = await checkOcrCodeMisses(
+      c.var.DB as unknown as Parameters<typeof checkOcrCodeMisses>[0],
+    );
+    return c.json({ success: true, summary, data: pairs });
+  } catch (err) {
+    console.error("[reports/ocr-code-misses.json] failed:", err);
     return c.json({ success: false, error: "report generation failed" }, 500);
   }
 });

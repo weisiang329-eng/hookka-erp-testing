@@ -129,11 +129,13 @@ test("below the last manager the tree stops and DEPARTMENT BOXES take over", () 
   // operators fanned into hairlines is a wall of string.
   const src = readFileSync("src/components/org-chart.tsx", "utf8");
   assert.match(src, /const boxesUnder = useCallback/);
+  // The switch must fire at the LAST management level, not one above it.
   assert.match(
     src,
-    /node\.children\.some\(\(c\) => c\.children\.length > 0\) &&\s*\n\s*new Set\(node\.children\.flatMap\(flatten\)\.map\(deptOf\)\)\.size > 1/,
-    "only where the subtree actually spans departments AND has managers in it",
+    /node\.children\.length > 0 && !node\.children\.some\(leadsManagers\)/,
+    "someone whose reports also have reports keeps their branch",
   );
+  assert.match(src, /const leadsManagers = useCallback/);
   assert.match(src, /bg-\[#33404E\]/, "the dark department cap");
 });
 
@@ -145,7 +147,28 @@ test("two leaders share a box — no line divides their team", () => {
   // not a fact about the factory.
   const src = readFileSync("src/components/org-chart.tsx", "utf8");
   assert.match(src, /`Led together by \$\{box\.leads\.length\}`/);
-  assert.match(src, /const leads = ppl\.filter\(isLeader\)/);
+  assert.match(src, /const leads = \[lead, \.\.\.co\]\.sort/, "co-leaders are collected into ONE box");
   // The team is grouped by POSITION inside the box, not by which leader.
   assert.match(src, /const byPos = new Map<string, OrgNode\[\]>\(\);/);
+});
+
+test("the management chain survives — Violet and the Production Head keep their branch", () => {
+  // The first cut fired as soon as a subtree merely CONTAINED a manager, so at
+  // the owner's level it swallowed Violet and the Production Head into the
+  // boxes as ordinary cards and the whole chain vanished. Owner:「整个
+  // Production 的上司不是一个叫 Lim 的吗?然后 Lim 的上司不是叫 Violet 吗?
+  // 为什么没看到这条线啊?」
+  const src = readFileSync("src/components/org-chart.tsx", "utf8");
+  assert.match(src, /n\.children\.some\(\(c\) => c\.children\.length > 0\)/);
+});
+
+test("a box is keyed by its LEADER, not by department", () => {
+  // ANN runs both Fabric Cutting and Fabric Sewing. Splitting her team into two
+  // boxes drew a division that does not exist. Owner:「让这个 operator leader
+  // 来 leading 这两个部门」.
+  const src = readFileSync("src/components/org-chart.tsx", "utf8");
+  assert.match(src, /key: leads\[0\]\?\.key \?\? fallbackKey/);
+  assert.match(src, /label: depts\.map\(deptLabel\)\.join\(" \+ "\)/, "titled with every department it covers");
+  // Co-leaders on the same departments share ONE box.
+  assert.match(src, /const co = teamLeads\.filter\(/);
 });

@@ -101,6 +101,61 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npx --yes wrangler@4.84.1 deploy
 
+      # ---------------------------------------------------------------------
+      # The worker's CRON_SECRET, taken straight from the repo secret.
+      #
+      # A freshly-deployed Worker has no secrets — they do not travel with the
+      # code — so the previous copy sat there answering
+      #   beat failed: CRON_SECRET unset or too short
+      # on every tick for two days, having never called the ERP once.
+      #
+      # Piping the repo secret in is not just convenience, it is the only way to
+      # be SURE the value matches: this is the very same secret warm-lists.yml
+      # already POSTs with successfully, so if the ERP accepts that, it accepts
+      # this. Setting it by hand means reading a write-only value out of two
+      # dashboards, or rotating all three places and hoping nothing was missed.
+      #
+      # Nobody reads the value; GitHub masks it in logs and wrangler does not
+      # echo it. Idempotent — re-running just overwrites with the same value.
+      # ---------------------------------------------------------------------
+      - name: Set CRON_SECRET on the worker
+        working-directory: agent-heartbeat-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$CRON_SECRET" ] || [ ${#CRON_SECRET} -lt 16 ]; then
+            echo "::error::CRON_SECRET repo secret is unset or under 16 chars."
+            echo "::error::The ERP rejects short secrets, so the worker would 403 on every tick."
+            exit 1
+          fi
+          printf '%s' "$CRON_SECRET" | npx --yes wrangler@4.84.1 secret put CRON_SECRET
+
+      - name: Prove the worker can now reach the ERP
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          # The worker's own fetch handler runs one beat and reports the result,
+          # which is a real end-to-end check: wrong secret -> 401 from the ERP,
+          # unset -> "CRON_SECRET unset". Needs the workers.dev route, which is
+          # not guaranteed to be enabled, so a failure here is a warning, not a
+          # build break — the schedules are already live either way.
+          sub=$(curl --silent -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
+            | grep -oE '"subdomain":"[^"]+"' | cut -d'"' -f4)
+          if [ -z "$sub" ]; then
+            echo "::warning::no workers.dev subdomain on this account — skipping the live beat check"
+            exit 0
+          fi
+          url="https://hookka-agent-heartbeat.$sub.workers.dev"
+          echo "beat check: $url"
+          code=$(curl --silent --max-time 30 -o /tmp/beat.txt -w '%{http_code}' "$url" || echo 000)
+          echo "HTTP $code"
+          head -c 300 /tmp/beat.txt; echo
+          [ "$code" = "200" ] || echo "::warning::beat did not return 200 — see the body above"
+
       - name: Show the schedules that are now live
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

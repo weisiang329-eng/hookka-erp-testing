@@ -16,6 +16,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { normalizePlate, findPlateCollisions } from "../../lib/plate-no";
 import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
@@ -42,6 +43,19 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       "ALTER TABLE three_pl_vehicles ADD COLUMN IF NOT EXISTS boxLengthFt DOUBLE PRECISION",
       "ALTER TABLE three_pl_vehicles ADD COLUMN IF NOT EXISTS boxWidthFt DOUBLE PRECISION",
       "ALTER TABLE three_pl_vehicles ADD COLUMN IF NOT EXISTS boxHeightFt DOUBLE PRECISION",
+      // 2026-08-02 — plate identity. plate_no keeps what the operator TYPED
+      // (a DO that prints "AKF8100" when the lorry says "AKF 8100" is a
+      // regression on paperwork a driver reads); plate_norm is the comparison
+      // form. snake_case, so it round-trips cleanly.
+      "ALTER TABLE three_pl_vehicles ADD COLUMN IF NOT EXISTS plate_norm TEXT",
+      // Backfill in place — idempotent, and IS DISTINCT FROM keeps a re-run
+      // from rewriting every row.
+      "UPDATE three_pl_vehicles SET plate_norm = UPPER(REGEXP_REPLACE(plate_no, '[^A-Za-z0-9]', '', 'g')) WHERE plate_norm IS DISTINCT FROM UPPER(REGEXP_REPLACE(plate_no, '[^A-Za-z0-9]', '', 'g'))",
+      // NON-unique on purpose: production already contains collisions, and a
+      // unique index would fail to build (or reject saves) before anyone has
+      // decided which duplicate wins. GET /collisions reports them; the repair
+      // is the owner's call.
+      "CREATE INDEX IF NOT EXISTS idx_three_pl_vehicles_plate_norm ON three_pl_vehicles (plate_norm)",
     ];
     for (const sql of stmts) {
       try {
@@ -137,6 +151,49 @@ function coerceStatus(v: unknown, fallback: AllowedStatus = "ACTIVE"): AllowedSt
 }
 
 // GET /api/three-pl-vehicles?providerId=...
+// ---------------------------------------------------------------------------
+// GET /api/three-pl-vehicles/collisions — the same truck entered twice.
+//
+// READ-ONLY. Mounted BEFORE "/" so Hono does not route "collisions" into a
+// param handler.
+//
+// Existing production data already contains collisions, which is why plate_norm
+// carries a plain index and not a unique one: a unique index would either fail
+// to build or start rejecting saves before anyone has decided WHICH duplicate
+// wins and what happens to the delivery history hanging off the loser. That is
+// an owner decision, and Houzs-ERP #1492 gated their repair for the same reason.
+// New duplicates are already blocked at POST, so this list can only shrink.
+// ---------------------------------------------------------------------------
+app.get("/collisions", async (c) => {
+  const denied = await requirePermission(c, "lorries", "read");
+  if (denied) return denied;
+  await ensurePendingMigrations(c.var.DB);
+  const res = await c.var.DB.prepare(
+    "SELECT id, plateNo, providerId, status FROM three_pl_vehicles",
+  )
+    .all<{
+      id: string;
+      plateNo?: string | null;
+      plateno?: string | null;
+      providerId?: string | null;
+      providerid?: string | null;
+      status?: string | null;
+    }>();
+  const rows = (res.results ?? []).map((r) => ({
+    id: r.id,
+    plateNo: r.plateNo ?? r.plateno ?? "",
+    providerId: r.providerId ?? r.providerid ?? null,
+    status: r.status ?? null,
+  }));
+  const groups = findPlateCollisions(rows);
+  return c.json({
+    success: true,
+    total: groups.length,
+    affectedVehicles: groups.reduce((n, g) => n + g.rows.length, 0),
+    data: groups,
+  });
+});
+
 app.get("/", async (c) => {
   await ensurePendingMigrations(c.var.DB);
   const orgId = getOrgId(c);
@@ -187,20 +244,40 @@ app.post("/", async (c) => {
     const dimH = validateDimension(body.boxHeightFt, "Height");
     if (!dimH.ok) return c.json({ success: false, error: dimH.error }, 400);
 
+    // One truck is one truck however it was typed. Blocking a NEW duplicate
+    // costs nothing and stops the problem growing while the EXISTING
+    // collisions await an owner decision (GET /collisions below).
+    const plateNorm = normalizePlate(plateNo);
+    const clash = await c.var.DB.prepare(
+      "SELECT id, plateNo FROM three_pl_vehicles WHERE plate_norm = ? LIMIT 1",
+    )
+      .bind(plateNorm)
+      .first<{ id: string; plateNo?: string | null; plateno?: string | null }>();
+    if (clash) {
+      return c.json(
+        {
+          success: false,
+          error: `A vehicle with plate ${clash.plateNo ?? clash.plateno ?? plateNo} already exists.`,
+        },
+        409,
+      );
+    }
+
     const id = genId();
     const now = new Date().toISOString();
     const status = coerceStatus(body.status);
     await c.var.DB.prepare(
-      `INSERT INTO three_pl_vehicles (id, providerId, plateNo, vehicleType,
+      `INSERT INTO three_pl_vehicles (id, providerId, plateNo, plate_norm, vehicleType,
          capacityM3, ratePerTripSen, ratePerExtraDropSen, status, remarks,
          boxLengthFt, boxWidthFt, boxHeightFt,
          created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
         providerId,
         plateNo,
+        plateNorm,
         typeof body.vehicleType === "string" ? body.vehicleType.trim() : "",
         Number(body.capacityM3) || 0,
         Number(body.ratePerTripSen) || 0,
@@ -314,7 +391,7 @@ app.put("/:id", async (c) => {
     const now = new Date().toISOString();
     await c.var.DB.prepare(
       `UPDATE three_pl_vehicles SET
-         plateNo = ?, vehicleType = ?, capacityM3 = ?, ratePerTripSen = ?,
+         plateNo = ?, plate_norm = ?, vehicleType = ?, capacityM3 = ?, ratePerTripSen = ?,
          ratePerExtraDropSen = ?, status = ?, remarks = ?,
          boxLengthFt = ?, boxWidthFt = ?, boxHeightFt = ?,
          updated_at = ?
@@ -322,6 +399,9 @@ app.put("/:id", async (c) => {
     )
       .bind(
         merged.plateNo,
+        // Renaming a plate must move its comparison form with it, or the row
+        // keeps matching its OLD identity forever.
+        normalizePlate(merged.plateNo),
         merged.vehicleType,
         merged.capacityM3,
         merged.ratePerTripSen,

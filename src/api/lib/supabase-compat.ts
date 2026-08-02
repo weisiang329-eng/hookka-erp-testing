@@ -208,14 +208,49 @@ const emptyMeta: D1Meta = {
 // half-applied write can never be silently re-run. This is the SAFE lever the
 // 2026-06-04 connect_timeout revert pointed to: a retry, never a tight global
 // timeout that fast-fails slow-but-working heavy lists.
+// 2026-08-02: pool EXHAUSTION added. Supavisor answers a connect attempt with
+// "remaining connection slots are reserved" / "sorry, too many clients already"
+// when every slot is taken — that is the same failure as a connect timeout
+// (refused BEFORE any SQL bytes are sent), so retrying is equally safe.
+//
+// Deliberately NOT added, though Houzs-ERP's set includes them: "connection
+// terminated", "socket hang up", "fetch failed", bare ETIMEDOUT. Those can fire
+// MID-statement, and retrying an INSERT that may already have applied is how
+// you get a silent double-write. The narrow matcher is the correct call and
+// stays narrow.
 const CONN_CREATE_RE =
-  /creating a new server connection|connect[_ ]?timeout|connection timed out/i
+  /creating a new server connection|connect[_ ]?timeout|connection timed out|remaining connection slots|too many clients|too many connections/i
 
 function isConnCreateError(e: unknown): boolean {
   const code = (e as { code?: string } | null)?.code ?? ''
   if (code === 'CONNECT_TIMEOUT') return true
+  // 53300 = too_many_connections, 53400 = configuration_limit_exceeded.
+  if (code === '53300' || code === '53400') return true
   const msg = e instanceof Error ? e.message : String(e)
   return CONN_CREATE_RE.test(msg)
+}
+
+/**
+ * Is this error the DATABASE being briefly unreachable, rather than a bug?
+ *
+ * Broader than isConnCreateError on purpose: this one only decides what STATUS
+ * CODE to answer with, never whether to re-run a statement, so a mid-statement
+ * drop belongs here even though it must never be retried.
+ *
+ * A 503 tells the caller (and any uptime monitor) "try again"; a 500 says
+ * "this request is broken". Answering 500 for a cold Hyperdrive pool is what
+ * made every such blip look like an application bug.
+ */
+export function isTransientDbError(e: unknown): boolean {
+  if (isConnCreateError(e)) return true
+  const code = (e as { code?: string } | null)?.code ?? ''
+  if (['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', '57P01', '57P03', '08006', '08003'].includes(code)) {
+    return true
+  }
+  const msg = e instanceof Error ? e.message : String(e)
+  return /connection terminated|socket hang up|connection closed|server closed the connection|terminating connection|the database system is (starting up|shutting down)|fetch failed/i.test(
+    msg,
+  )
 }
 
 async function withConnRetry<T>(fn: () => Promise<T>): Promise<T> {

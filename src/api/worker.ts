@@ -26,6 +26,7 @@
 //   5. Route handlers — imported from routes/* (Supabase-backed).
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import { isTransientDbError } from "./lib/supabase-compat";
 import { cors } from "hono/cors";
 
 export type Env = {
@@ -1428,12 +1429,39 @@ app.onError((err, c) => {
     method: c.req.method,
     url,
   });
-  // Preserve Hono's default response shape so the frontend's existing
-  // FetchJsonError handling keeps working.
+
+  const raw = err instanceof Error ? err.message : String(err);
+  // A short handle the operator can quote and we can grep for. The real
+  // message is logged in full right here — it just doesn't travel to a browser.
+  const ref = crypto.randomUUID().slice(0, 8);
+  console.error(`[onError ${ref}] ${c.req.method} ${url} -> ${raw}`);
+
+  // The DATABASE being briefly unreachable is not an application bug, and
+  // answering 500 for it is why every cold-pool blip looked like one — to the
+  // operator, to any uptime monitor, and in the error budget. 503 + Retry-After
+  // says "try again", which is the truth.
+  if (isTransientDbError(err)) {
+    return c.json(
+      {
+        success: false,
+        error: "The database is briefly unavailable. Please try again.",
+        transient: true,
+        ref,
+      },
+      503,
+      { "Retry-After": "2" },
+    );
+  }
+
+  // Response SHAPE preserved so the frontend's existing FetchJsonError handling
+  // keeps working — but the raw driver message no longer travels to the
+  // browser. pg-ping already refuses to echo these "because they can leak
+  // schema / table names"; the global handler was doing it for every route.
   return c.json(
     {
       success: false,
-      error: err instanceof Error ? err.message : String(err),
+      error: "Something went wrong on our side. Please try again.",
+      ref,
     },
     500,
   );

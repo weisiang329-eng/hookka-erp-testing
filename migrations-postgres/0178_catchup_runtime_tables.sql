@@ -185,21 +185,49 @@ CREATE INDEX IF NOT EXISTS idx_folder_job_cards_jc
 
 -- ----------------------------------------------------------------------------
 -- Supplier scan samples (src/api/lib/ocr-distill.ts)
--- camelCase identifiers are intentional — this table is written via the
--- D1Compat adapter using the column names the route code uses directly.
+--
+-- Spelled to match PRODUCTION, which is MIXED — corrected 2026-08-02.
+--
+-- The old header claimed "camelCase identifiers are intentional … written via
+-- the D1Compat adapter using the column names the route code uses directly."
+-- That was half true and therefore wrong. The adapter's translateSql rewrites
+-- an identifier only when it is a KEY in column-rename-map.json; everything
+-- else passes through unquoted and Postgres folds it to lower case. So the
+-- runtime CREATE in ocr-distill.ts produced:
+--
+--   orgId        -> org_id          (mapped)
+--   supplierId   -> supplier_id     (mapped)
+--   correctedJson-> corrected_json  (mapped)
+--   isGold       -> is_gold         (mapped)
+--   createdBy    -> created_by      (mapped)
+--   createdAt    -> created_at      (mapped)
+--   supplierHint -> supplierhint    (FOLDED — not in the map)
+--   docIdentifier-> docidentifier   (FOLDED)
+--   docType      -> doctype         (FOLDED)
+--   rawJson      -> rawjson         (FOLDED)
+--
+-- Not a live bug — CREATE TABLE IF NOT EXISTS no-ops against the table the
+-- runtime already made. But any tool that applies this FILE to a fresh database
+-- without going through the adapter (a restore, a new environment, the
+-- schema-in-sync check) built a table the application cannot read. Houzs-ERP
+-- #1480's exact lesson: the repo's declaration and production disagreed, and
+-- the disagreement only surfaced when someone deleted a member.
+--
+-- 0154 / 0156 / 0159 / 0163 already carry the same "folded-lowercase to match
+-- reality" correction; this one was missed.
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS supplier_scan_samples (
   id TEXT PRIMARY KEY,
-  orgId TEXT,
-  supplierId TEXT,
-  supplierHint TEXT,
-  docIdentifier TEXT,
-  docType TEXT,
-  correctedJson TEXT,
-  rawJson TEXT,
-  isGold INTEGER NOT NULL DEFAULT 0,
-  createdBy TEXT,
-  createdAt TEXT
+  org_id TEXT,
+  supplier_id TEXT,
+  supplierhint TEXT,
+  docidentifier TEXT,
+  doctype TEXT,
+  corrected_json TEXT,
+  rawjson TEXT,
+  is_gold INTEGER NOT NULL DEFAULT 0,
+  created_by TEXT,
+  created_at TEXT
 );
 
 -- ----------------------------------------------------------------------------

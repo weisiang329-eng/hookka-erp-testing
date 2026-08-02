@@ -52,6 +52,12 @@ export default defineConfig({
     },
   },
   build: {
+    // Pinned, not left to the default: public/_headers hard-codes the
+    // `/assets/*` rule (immutable, 1y) and functions/assets/[[path]].ts only
+    // intercepts that prefix. If Vite's default ever moved, both would silently
+    // stop applying to the real build output — cache policy and the missing-
+    // asset 404 would just quietly not happen. Houzs-ERP #1449, same reasoning.
+    assetsDir: "assets",
     // ─────────────────────────────────────────────────────────────────
     // Module-preload filter (perf, 2026-05-12 — Wei Siang report).
     //

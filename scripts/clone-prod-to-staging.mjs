@@ -24,17 +24,86 @@
 //
 // Idempotent — re-running TRUNCATEs and reloads from scratch.
 //
-// Usage: node scripts/clone-prod-to-staging.mjs
+// SAFETY (2026-08-02) — this script TRUNCATEs every shared table on its target.
+// It used to carry the prod and staging connection strings as two adjacent
+// hardcoded literals, so a copy/paste or a careless edit was a full production
+// wipe, and the credential was in git besides. Houzs-ERP's prod-wipe-by-loader
+// COE is exactly that incident.
+//
+// Now:
+//   * both URLs come from the environment — nothing to swap by accident
+//   * the TARGET host is checked against an allow-list and FAILS CLOSED. The
+//     production host is explicitly denied, so pointing this at prod cannot
+//     work even if someone exports the wrong variable
+//   * --dry-run (the DEFAULT) prints the plan and writes nothing; a real run
+//     needs --confirm plus typing the target host back
+//
+// Usage:
+//   export CLONE_SOURCE_URL=postgresql://...        # read-only source
+//   export CLONE_TARGET_URL=postgresql://...        # WILL BE TRUNCATED
+//   node scripts/clone-prod-to-staging.mjs                       # dry run
+//   node scripts/clone-prod-to-staging.mjs --confirm db.zaxy....supabase.co
 // ============================================================================
 import postgres from "postgres";
 
-const PROD_URL = "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
-const STAGING_URL = "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
+const PROD_URL = process.env.CLONE_SOURCE_URL || "";
+const STAGING_URL = process.env.CLONE_TARGET_URL || "";
+
+/** Hosts this script is ever allowed to WRITE to. Fail closed. */
+const TARGET_ALLOWLIST = ["db.zaxygxwadidiqcphibma.supabase.co"];
+/** Hosts it must NEVER write to, whatever else is configured. */
+const TARGET_DENYLIST = ["db.vpwdqtsxexpiqxzweivd.supabase.co"];
+
+function hostOf(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
+}
+
+function assertSafeTarget(url) {
+  const host = hostOf(url);
+  if (!host) {
+    throw new Error("CLONE_TARGET_URL is missing or unparseable — refusing to run.");
+  }
+  if (TARGET_DENYLIST.includes(host)) {
+    throw new Error(
+      `REFUSING: ${host} is the PRODUCTION database. This script truncates its target.`,
+    );
+  }
+  if (!TARGET_ALLOWLIST.includes(host)) {
+    throw new Error(
+      `REFUSING: ${host} is not in the target allow-list. ` +
+        `Add it deliberately if this is really where you want every table truncated.`,
+    );
+  }
+  return host;
+}
 
 const pgOpts = { ssl: "require", max: 1, idle_timeout: 5, connect_timeout: 15 };
 const BATCH_SIZE = 500;
 
 async function main() {
+  if (!PROD_URL) {
+    throw new Error("CLONE_SOURCE_URL is not set — refusing to guess.");
+  }
+  const targetHost = assertSafeTarget(STAGING_URL);
+
+  // Dry run is the DEFAULT. A real run must name the target back, so the
+  // destructive path cannot be reached by re-running a shell-history line.
+  const argv = process.argv.slice(2);
+  const confirmIdx = argv.indexOf("--confirm");
+  const confirmed = confirmIdx !== -1 && argv[confirmIdx + 1] === targetHost;
+  const dryRun = !confirmed;
+  console.log(
+    `[clone] source ${hostOf(PROD_URL)} -> target ${targetHost}` +
+      (dryRun
+        ? `\n[clone] DRY RUN — nothing will be written. To execute:\n` +
+          `[clone]   node scripts/clone-prod-to-staging.mjs --confirm ${targetHost}`
+        : `\n[clone] CONFIRMED — every shared table on ${targetHost} will be TRUNCATED.`),
+  );
+
   const prod = postgres(PROD_URL, pgOpts);
   const staging = postgres(STAGING_URL, pgOpts);
 
@@ -55,6 +124,13 @@ async function main() {
     console.log(`[clone] ${tables.length} tables in common; ${missingFromStaging.length} only-on-prod (skipped)`);
     if (missingFromStaging.length > 0) {
       console.log(`[clone]   skipped (staging missing migration): ${missingFromStaging.join(", ")}`);
+    }
+
+    if (dryRun) {
+      console.log(
+        `[clone] DRY RUN: would TRUNCATE and reload ${tables.length} tables on ${targetHost}.`,
+      );
+      return;
     }
 
     await staging`SET session_replication_role = replica`;

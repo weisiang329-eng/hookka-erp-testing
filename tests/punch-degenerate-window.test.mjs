@@ -54,10 +54,12 @@ test("a REAL short day is still docked — the guard must not swallow those", ()
 });
 
 test("a real late arrival is still docked", () => {
-  // 09:09 in (69 min late, rounds up to 75) → EI PHOO WEI 2026-07-11: 1.25h.
+  // 09:09 in = 69 minutes late, charged to the MINUTE now (HR 2026-08-02):
+  // 69/60 = 1.15h. Under the old ceil-to-15 the same arrival cost 1.25h —
+  // EI PHOO WEI 2026-07-11 was docked the rounded figure.
   const r = computePunchShortfallHours("09:09", "18:03");
   assert.equal(r.valid, true);
-  assert.equal(r.shortfallHours, 1.25);
+  assert.equal(r.shortfallHours, 1.15);
 });
 
 test("a full day is still zero", () => {

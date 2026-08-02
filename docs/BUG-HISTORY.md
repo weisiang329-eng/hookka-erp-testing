@@ -651,7 +651,38 @@ pin the list.
 > is then INVISIBLE, because both planners key off `specialOrderPriceSen = 0`. Always pass
 > `soNos` = exactly the SOs whose invoice actually moved.
 >
-> **⏭ REMAINS: 5 SOs / RM 750 — NEEDS THE OWNER, the planner REFUSED to guess.**
+> **✅ THOSE 5 ARE DONE — re-checked 2026-08-02, the note below is stale.**
+> Every one of the five now carries the surcharge on BOTH sides, at the owner's
+> `kv_config` price, so there is nothing left to decide:
+>
+> | SO | line | SO | invoice |
+> |---|---|---|---|
+> | SO-2605-234 | Divan Curve ×3 | RM 50 | RM 50 ✓ |
+> | SO-2605-185 | Divan Top Fully Cover | RM 50 | RM 50 ✓ |
+> | SO-2606-135 | Right Drawer | RM 160 | RM 160 ✓ |
+> | SO-2605-121 | Divan Curve ×2 | RM 50 | RM 50 ✓ |
+> | SO-2605-275 | Front / Left Drawer | RM 130 / 160 | same ✓ |
+>
+> **A wider sweep found something else, and it is bounded honestly.** Comparing
+> every live invoice line against its SO line:
+>
+> * Across ALL DOs: 99 disagreements — **not trustworthy**. The comparison has
+>   to match invoice line → SO line on product+fabric+size, which is exactly the
+>   guess BUG-2026-07-17-001 shows to be wrong on consolidated DOs (one invoice
+>   in the result matched two different SOs).
+> * Restricted to **single-SO DOs**, where the match cannot be ambiguous:
+>   **5 lines, RM 440 under-charged**, all pre-fix —
+>   `INV-2605-039[PAID]` SO-2604-250 ×2 (RM130+RM130),
+>   `INV-2607-078[SENT]` SO-2606-114 (RM80),
+>   `INV-2605-014[PAID]` SO-2604-095 ×2 (RM50+RM50). Nothing was over-charged.
+>
+> **This is the real argument for fixing BUG-2026-07-17-001.** The other ~94
+> lines cannot be measured at all while `invoice_items` carries no per-line SO
+> link — every audit of them is the same first-one-wins guess. Fixing that bug
+> is not only about what prints on the page; it is what makes this auditable.
+>
+> ~~**⏭ REMAINS: 5 SOs / RM 750 — NEEDS THE OWNER, the planner REFUSED to guess.**~~
+> *(superseded — kept for the record of what the planner refused and why)*
 > `GET /api/admin/backfill-invoiced-plan` → `needsManual`:
 > • **SO-2605-234, SO-2605-185, SO-2606-135** — each has TWO live SENT invoices; which one
 >   carries the surcharge is a business call, not a guess.

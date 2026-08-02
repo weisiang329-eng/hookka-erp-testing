@@ -73,8 +73,10 @@ test("there is a real top-down HIERARCHY view, drawn with connectors", () => {
   // A stem down from the parent, and a bus across the siblings that stops at
   // the outermost child instead of hanging in air.
   assert.match(src, /h-5 w-px bg-\[#C2BDB6\]/);
-  assert.match(src, /left: i === 0 \? "50%" : 0/);
-  assert.match(src, /right: i === kids\.length - 1 \? "50%" : 0/);
+  // The bus now lives on the unified cell row (branches + boxes together),
+  // which is why it is keyed on the cell index rather than a sibling index.
+  assert.match(src, /left: ci === 0 \? "50%" : 0/);
+  assert.match(src, /right: ci === all\.length - 1 \? "50%" : 0/);
 });
 
 test("a collapsed branch says how many it is hiding", () => {
@@ -105,20 +107,17 @@ test("a wide branch opens FOLDED, so the root is the first thing you see", () =>
   assert.match(src, /setCollapsed\(\(prev\) => new Set\(\[\.\.\.prev, \.\.\.wide\]\)\)/);
 });
 
-test("MANY reports stack in a box — they do not fan out sideways", () => {
+test("MANY reports stack — the department box IS the stack", () => {
   // Owner:「如果很多下线她是怎么排的」— Houzs stop the tree and drop into a box
-  // whose cards stack in columns. Fourteen reports fanned horizontally is a
-  // canvas several screens wide; the same fourteen stacked is one card tall.
+  // whose cards stack vertically. Fourteen reports fanned horizontally is a
+  // canvas several screens wide.
+  //
+  // The standalone grid this used to pin is gone, superseded rather than
+  // reverted: every non-manager child now lands in a department box, and the
+  // box already stacks its members in a column. One mechanism, not two.
   const src = readFileSync("src/components/org-chart.tsx", "utf8");
-  assert.match(
-    src,
-    /kids\.length > 4 && kids\.every\(\(c\) => c\.children\.length === 0\)/,
-    "and only when those children lead nobody — a manager keeps their own branch",
-  );
-  assert.match(src, /gridTemplateColumns: `repeat\(\$\{Math\.min\(4, Math\.ceil\(kids\.length \/ 4\)\)\}/);
-  // The classic fan survives for a SMALL number, because that is the shape that
-  // reads as an org chart.
-  assert.match(src, /left: i === 0 \? "50%" : 0/);
+  assert.match(src, /<div className="flex flex-col gap-1\.5">\s*\n\s*\{g\.members\.map/);
+  assert.doesNotMatch(src, /gridTemplateColumns/, "the separate grid is gone");
 });
 
 // --- the tree becomes department boxes (owner's Houzs reference) ------------
@@ -129,13 +128,10 @@ test("below the last manager the tree stops and DEPARTMENT BOXES take over", () 
   // operators fanned into hairlines is a wall of string.
   const src = readFileSync("src/components/org-chart.tsx", "utf8");
   assert.match(src, /const boxesUnder = useCallback/);
-  // The switch must fire at the LAST management level, not one above it.
-  assert.match(
-    src,
-    /node\.children\.length > 1 && !node\.children\.some\(leadsManagers\)/,
-    "someone whose reports also have reports keeps their branch",
-  );
+  // Branches and boxes render SIDE BY SIDE at every level — it is not either/or.
   assert.match(src, /const leadsManagers = useCallback/);
+  assert.match(src, /\.filter\(leadsManagers\)\s*\n\s*\.map\(\(c\) => \(\{ kind: "branch" as const/);
+  assert.match(src, /\.\.\.boxesUnder\(node\)\.map\(\(b\) => \(\{/);
   assert.match(src, /bg-\[#33404E\]/, "the dark department cap");
 });
 
@@ -146,7 +142,7 @@ test("two leaders share a box — no line divides their team", () => {
   // Splitting the seventeen between the two was an invention of the layout,
   // not a fact about the factory.
   const src = readFileSync("src/components/org-chart.tsx", "utf8");
-  assert.match(src, /`Led together by \$\{box\.leads\.length\}`/);
+  assert.match(src, /`Led together by \$\{cell\.box\.leads\.length\}`/);
   assert.match(src, /const leads = \[lead, \.\.\.co\]\.sort/, "co-leaders are collected into ONE box");
   // The team is grouped by POSITION inside the box, not by which leader.
   assert.match(src, /const byPos = new Map<string, OrgNode\[\]>\(\);/);
@@ -178,8 +174,19 @@ test("the connector bus has no holes — no flex gap between the boxes", () => {
   // hole exactly where the gap is. Owner 2026-08-02:「那个线好像断掉那样?」.
   // Padding gives the same spacing and keeps the line continuous.
   const src = readFileSync("src/components/org-chart.tsx", "utf8");
-  assert.match(src, /<div className="flex items-start">\s*\n\s*\{boxesUnder\(node\)/);
-  assert.match(src, /className="relative flex flex-col items-center px-1\.5"/);
+  // Scoped to the CONNECTOR row only — the Departments board's boxes use a
+  // flex gap inside themselves and are right to: no bus runs through them.
+  const cellRow = src.slice(
+    src.indexOf("EVERY level renders the same two things"),
+    src.indexOf("{cell.kind === \"branch\""),
+  );
+  assert.doesNotMatch(
+    cellRow,
+    /<div className="flex items-start gap-\d/,
+    "a flex gap on the connector row is what put the hole in the line",
+  );
+  assert.match(cellRow, /<div className="flex items-start">/);
+  assert.match(cellRow, /className="relative flex flex-col items-center px-1\.5"/);
 });
 
 test("every card carries a face, in BOTH views", () => {
@@ -192,9 +199,17 @@ test("every card carries a face, in BOTH views", () => {
   assert.match(treeCard, /node\.source === "worker"/, "worker and office are told apart by colour");
 });
 
-test("one person does not get a whole department box", () => {
-  // A dark cap wrapped around a single card reads as a heading with nothing
-  // under it. Owner, seeing Finance around one person:「有点怪的感觉」.
+test("EVERY department gets a box — one person is still a department", () => {
+  // Superseded the brief "no box for one person" rule. Owner was explicit:
+  //「部门就应该有部门的样子吧?…Finance,还有 Management、lim,然后 siti zamri,
+  // 全部都没有啊」and「应该每一个部门,只要有用到放名字的,都要变成那样子的」.
   const src = readFileSync("src/components/org-chart.tsx", "utf8");
-  assert.match(src, /node\.children\.length > 1 && !node\.children\.some\(leadsManagers\)/);
+  assert.doesNotMatch(
+    src,
+    /node\.children\.length > 1 && !node\.children\.some\(leadsManagers\)/,
+    "the headcount threshold must not return",
+  );
+  // A manager rendered as a branch must NOT also appear inside a box.
+  assert.match(src, /\(c\) => c\.children\.length > 0 && !leadsManagers\(c\)/);
+  assert.match(src, /\(c\) => c\.children\.length === 0 && !leadsManagers\(c\)/);
 });

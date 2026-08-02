@@ -455,7 +455,12 @@ export function OrgChart({ canManage }: Props) {
 
       // A child WITH reports is a team: that person (plus any co-leader on the
       // same departments) heads one box.
-      const teamLeads = node.children.filter((c) => c.children.length > 0);
+      //
+      // EXCEPT a child who leads MANAGERS — they are drawn as their own branch
+      // by the caller, and counting them here too would render them twice.
+      const teamLeads = node.children.filter(
+        (c) => c.children.length > 0 && !leadsManagers(c),
+      );
       const used = new Set<string>();
       for (const lead of teamLeads) {
         if (used.has(lead.key)) continue;
@@ -476,7 +481,9 @@ export function OrgChart({ canManage }: Props) {
 
       // Everyone reporting straight to this node with nobody under them —
       // grouped by department, because they have no leader to group by.
-      const loose = node.children.filter((c) => c.children.length === 0);
+      const loose = node.children.filter(
+        (c) => c.children.length === 0 && !leadsManagers(c),
+      );
       const byDept = new Map<string, OrgNode[]>();
       for (const p of loose) {
         const d = deptOf(p);
@@ -490,7 +497,7 @@ export function OrgChart({ canManage }: Props) {
 
       return boxes.sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
     },
-    [flatten, deptLabel, deptRank],
+    [flatten, deptLabel, deptRank, leadsManagers],
   );
 
   const Branch = ({ node }: { node: OrgNode }): React.ReactElement => {
@@ -515,66 +522,85 @@ export function OrgChart({ canManage }: Props) {
               four, and only when those children lead nobody themselves — a
               manager with a team of their own still deserves their own branch.
             */}
-            {/* Below the last MANAGER the tree stops and department boxes take
-                over — the Houzs shape. A branch is right where there are a few
-                named relationships; forty operators fanned into hairlines is a
-                wall of string. */}
-            {/* A whole dark department box around ONE card reads as a heading
-                with nothing under it — owner 2026-08-02, seeing Finance wrapped
-                around a single person:「有点怪的感觉」. A box earns its chrome at
-                two people; below that the plain branch says the same thing with
-                less furniture. */}
-            {node.children.length > 1 && !node.children.some(leadsManagers) ? (
-              // NO flex `gap` on this row. The connector bus is drawn INSIDE
-              // each child, so a gap leaves the line with a hole exactly where
-              // the gap is — owner 2026-08-02:「那个线好像断掉那样?」. Padding on
-              // the child gives the same spacing and keeps the bus continuous,
-              // which is what the person-level branch already did.
-              <div className="flex items-start">
-                {boxesUnder(node).map((box, bi) => (
-                  <div key={box.key} className="relative flex flex-col items-center px-1.5">
-                    {boxesUnder(node).length > 1 && (
-                      <span
-                        aria-hidden
-                        className="absolute top-0 h-px bg-[#C2BDB6]"
-                        style={{
-                          left: bi === 0 ? "50%" : 0,
-                          right: bi === boxesUnder(node).length - 1 ? "50%" : 0,
-                        }}
-                      />
-                    )}
-                    <div className="h-5 w-px bg-[#C2BDB6]" />
+            {/*
+              EVERY level renders the same two things side by side:
+
+                · a child who leads MANAGERS keeps a branch — that is a named
+                  relationship worth a line (owner → Violet → Production Head)
+                · everyone else falls into a DEPARTMENT BOX
+
+              It used to be either/or, which is why only Production had boxes:
+              Violet has one manager under her, so her whole row fell back to
+              bare cards and Office and QA never got a box. Finance had one
+              person and was excluded by a headcount rule. Owner 2026-08-02:
+              「部门就应该有部门的样子吧?…Houzs 里面的 Finance,还有 Management、
+              lim,然后 siti zamri,全部都没有啊」— so the headcount rule is gone
+              too. One person is still a department.
+            */}
+            <div className="flex items-start">
+              {[
+                ...node.children
+                  .filter(leadsManagers)
+                  .map((c) => ({ kind: "branch" as const, key: c.key, node: c })),
+                ...boxesUnder(node).map((b) => ({
+                  kind: "box" as const,
+                  key: b.key,
+                  box: b,
+                })),
+              ].map((cell, ci, all) => (
+                <div
+                  key={cell.key}
+                  className="relative flex flex-col items-center px-1.5"
+                >
+                  {/* No flex `gap` on this row — the bus is drawn INSIDE each
+                      cell, so a gap leaves the line with a hole exactly where
+                      the gap is (「那个线好像断掉那样?」). Padding keeps it
+                      continuous. */}
+                  {all.length > 1 && (
+                    <span
+                      aria-hidden
+                      className="absolute top-0 h-px bg-[#C2BDB6]"
+                      style={{
+                        left: ci === 0 ? "50%" : 0,
+                        right: ci === all.length - 1 ? "50%" : 0,
+                      }}
+                    />
+                  )}
+                  <div className="h-5 w-px bg-[#C2BDB6]" />
+                  {cell.kind === "branch" ? (
+                    <Branch node={cell.node} />
+                  ) : (
                     <div className="overflow-hidden rounded-lg border border-[#E2DDD8] bg-white">
                       <div className="flex items-center gap-2 bg-[#33404E] px-3 py-1.5 text-white">
                         <span
                           aria-hidden
                           className="h-3.5 w-1 rounded-full"
-                          style={{ background: ACCENTS[bi % ACCENTS.length] }}
+                          style={{ background: ACCENTS[ci % ACCENTS.length] }}
                         />
                         <span className="text-[11px] font-semibold uppercase tracking-wide">
-                          {box.label}
+                          {cell.box.label}
                         </span>
                         <span className="ml-auto flex items-center gap-1 text-[11px] opacity-75">
                           <Users className="h-3 w-3" />
-                          {box.count}
+                          {cell.box.count}
                         </span>
                       </div>
-                      {box.leads.length > 0 && (
+                      {cell.box.leads.length > 0 && (
                         <div className="border-b border-[#EFEAE5] bg-[#FBFAF8] px-2 py-2">
                           <div className="mb-1 text-[9px] font-semibold uppercase tracking-wider text-[#9CA3AF]">
-                            {box.leads.length > 1
-                              ? `Led together by ${box.leads.length}`
+                            {cell.box.leads.length > 1
+                              ? `Led together by ${cell.box.leads.length}`
                               : "Leader"}
                           </div>
                           <div className="flex gap-1.5">
-                            {box.leads.map((l) => (
+                            {cell.box.leads.map((l) => (
                               <TreeCard key={l.key} node={l} />
                             ))}
                           </div>
                         </div>
                       )}
                       <div className="space-y-2 p-2">
-                        {box.groups.map((g) => (
+                        {cell.box.groups.map((g) => (
                           <div key={g.position}>
                             <div className="mb-1 flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wider text-[#9CA3AF]">
                               {g.position}
@@ -589,44 +615,10 @@ export function OrgChart({ canManage }: Props) {
                         ))}
                       </div>
                     </div>
-                  </div>
-                ))}
-              </div>
-            ) : kids.length > 4 && kids.every((c) => c.children.length === 0) ? (
-              <div className="rounded-lg border border-[#E2DDD8] bg-[#FBFAF8] p-2">
-                <div
-                  className="grid gap-1.5"
-                  style={{
-                    gridTemplateColumns: `repeat(${Math.min(4, Math.ceil(kids.length / 4))}, minmax(0, 1fr))`,
-                  }}
-                >
-                  {kids.map((c) => (
-                    <TreeCard key={c.key} node={c} />
-                  ))}
+                  )}
                 </div>
-              </div>
-            ) : (
-              <div className="flex items-start justify-center">
-                {kids.map((c, i) => (
-                  <div key={c.key} className="relative flex flex-col items-center px-2">
-                    {/* the bus across the siblings, half-width at each end so it
-                        stops at the outermost child instead of hanging in air */}
-                    {kids.length > 1 && (
-                      <span
-                        aria-hidden
-                        className="absolute top-0 h-px bg-[#C2BDB6]"
-                        style={{
-                          left: i === 0 ? "50%" : 0,
-                          right: i === kids.length - 1 ? "50%" : 0,
-                        }}
-                      />
-                    )}
-                    <div className="h-5 w-px bg-[#C2BDB6]" />
-                    <Branch node={c} />
-                  </div>
-                ))}
-              </div>
-            )}
+              ))}
+            </div>
           </>
         )}
       </div>

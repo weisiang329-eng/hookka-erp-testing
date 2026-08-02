@@ -186,6 +186,8 @@ export function loadActiveBomRowsMemoized(db: DbLike): Promise<BomRow[]> {
 type SnapRow = {
   data: Record<string, unknown>;
   builtFrom: string;
+  /** COUNT(*) across the source tables when built; null = unknown. */
+  sourceRows: number | null;
 };
 
 async function readWorkerSnapshot(

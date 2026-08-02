@@ -32,6 +32,11 @@ import {
   getSourceSignature,
 } from "./snapshot-freshness";
 
+// Re-exported: four routes (working-hour-entries x2, department-performance,
+// job-cards) import the whole snapshot module and need the signature probe from
+// the same place they get readSnapshot / isSnapshotFresh.
+export { getSourceSignature };
+
 export type SnapshotConfig = {
   /** Snapshot table name, e.g. "invoice_stats_snapshot". */
   tableName: string;

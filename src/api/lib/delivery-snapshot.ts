@@ -161,8 +161,9 @@ export async function writeDeliveryStatsSnapshot(
   orgId: string,
   data: Record<string, unknown>,
   builtFrom: string,
+  sourceRows: number | null = null,
 ): Promise<void> {
-  return writeGeneric(db, "delivery_stats_snapshot", orgId, data, builtFrom);
+  return writeGeneric(db, "delivery_stats_snapshot", orgId, data, builtFrom, sourceRows);
 }
 
 export async function getDeliveryStatsMaxUpdatedAt(
@@ -194,8 +195,9 @@ export async function writeDeliveryPoValuesSnapshot(
   orgId: string,
   data: Record<string, unknown>,
   builtFrom: string,
+  sourceRows: number | null = null,
 ): Promise<void> {
-  return writeGeneric(db, "delivery_po_values_snapshot", orgId, data, builtFrom);
+  return writeGeneric(db, "delivery_po_values_snapshot", orgId, data, builtFrom, sourceRows);
 }
 
 export async function getDeliveryPoValuesMaxUpdatedAt(

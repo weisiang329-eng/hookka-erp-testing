@@ -77,10 +77,24 @@ jobs:
           base="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
           echo "can read Pages projects ....... $(ok "$(api "$base/pages/projects")")"
           echo "can read Workers scripts ...... $(ok "$(api "$base/workers/scripts")")"
+          # Which account(s) does this token actually reach? That settles
+          # whether the toml or the secret is the wrong one. Ids are shown
+          # truncated — enough to compare, not enough to copy around.
           echo
-          echo "If Pages=YES and Workers=NO the token is Pages-scoped: add"
-          echo "'Account -> Workers Scripts -> Edit' to it (or issue a new token"
-          echo "with that permission) and update the CLOUDFLARE_API_TOKEN secret."
+          echo "accounts this token can reach:"
+          api https://api.cloudflare.com/client/v4/accounts \
+            | grep -oE '"id":"[a-f0-9]{32}"' | grep -oE '[a-f0-9]{32}' \
+            | while read -r id; do
+                mark=""
+                [ "$id" = "$toml_acct" ] && mark="  <-- matches wrangler.toml"
+                [ "$id" = "$CLOUDFLARE_ACCOUNT_ID" ] && mark="$mark  <-- matches the secret"
+                echo "  ${id:0:8}…${id: -4}$mark"
+              done
+          echo
+          echo "Reading: if an account above matches NEITHER, the token belongs"
+          echo "somewhere else. If one matches the toml but not the secret, the"
+          echo "CLOUDFLARE_ACCOUNT_ID secret is stale. If Pages=YES/Workers=NO,"
+          echo "the token is Pages-scoped and needs Account -> Workers Scripts -> Edit."
 
       - name: wrangler deploy
         working-directory: agent-heartbeat-worker

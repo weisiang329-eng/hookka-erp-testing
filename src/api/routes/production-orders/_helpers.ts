@@ -4557,7 +4557,18 @@ export async function applyPoUpdate(
       // transformations — no RM consume.
       if (updated.departmentCode === "FAB_CUT") {
         try {
-          await consumeRawMaterialsForPO(db, existing.id);
+          const rm = await consumeRawMaterialsForPO(db, existing.id);
+          // A SHORTAGE is not an exception — the consume succeeds and returns
+          // the lines it could not satisfy, and every caller was throwing that
+          // list away. Those metres were cut but never left the roll in the
+          // books and never reached the cost ledger, so the job costs less than
+          // it did. Same discarded-shortfall shape as the FG side, which
+          // /api/reports/cogs-integrity.json now measures.
+          for (const sh of rm.shortages ?? []) {
+            movementErrors.push(
+              `Not enough ${sh.materialName} in stock — ${sh.shortageQty} short, so this job is under-costed.`,
+            );
+          }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           console.error("[consumeRawMaterialsForPO@FAB_CUT] cascade failed", {

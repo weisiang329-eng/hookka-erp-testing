@@ -78,6 +78,15 @@ export const SEARCH_SOURCES: SearchSource[] = [
     searchCols: ["invoice_no", "customer_name"],
     orgCol: "org_id", resource: "invoices", hrefPrefix: "/invoices/",
   },
+  {
+    // Preserves the note search the palette had before the unified endpoint —
+    // noteNumber folds to note_number; the CN page deep-links via ?focus=id.
+    kind: "consignment_note", groupLabel: "Consignment Notes", table: "consignment_notes",
+    idCol: "id", labelCol: "note_number",
+    subCols: ["customer_name", "branch_name", "status"],
+    searchCols: ["note_number", "customer_name", "branch_name"],
+    orgCol: "org_id", resource: "consignment", hrefPrefix: "/consignment/note?focus=",
+  },
   // ── everything below was NOT searchable before ──
   {
     kind: "purchase_order", groupLabel: "Purchase Orders", table: "purchase_orders",

@@ -43,7 +43,15 @@ import { cn } from "@/lib/utils";
 // Types
 // ---------------------------------------------------------------------------
 
-type ResultCategory = "pages" | "actions" | "sales_orders" | "customers" | "products" | "delivery_orders" | "invoices" | "consignment_notes";
+type ResultCategory =
+  | "pages" | "actions"
+  | "sales_orders" | "customers" | "products" | "delivery_orders" | "invoices"
+  | "consignment_notes"
+  // Added when the palette moved to the unified /api/search endpoint — these
+  // modules were never findable from search before.
+  | "purchase_orders" | "purchase_invoices" | "goods_receipts" | "suppliers"
+  | "production_orders" | "service_orders" | "service_cases"
+  | "employees" | "leads" | "journal_entries";
 
 type StatusTone = "green" | "amber" | "blue" | "red" | "neutral";
 
@@ -61,37 +69,6 @@ interface SearchResult {
   statusTone?: StatusTone;
 }
 
-// Human label + colour tone for a record's lifecycle status. Delivery stores
-// LOADED internally but the operator-facing word is "Dispatched"; SO uses its
-// own vocabulary — map both so the pill reads the way the rest of the app does.
-function titleCase(s: string): string {
-  return s.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
-}
-function statusMeta(
-  category: ResultCategory,
-  raw?: string,
-): { label: string; tone: StatusTone } | null {
-  if (!raw) return null;
-  const s = raw.toUpperCase();
-  const tone: StatusTone = ["DELIVERED", "PAID", "CLOSED", "COMPLETED"].includes(s)
-    ? "green"
-    : ["CANCELLED", "ON_HOLD", "VOID", "OVERDUE"].includes(s)
-      ? "red"
-      : ["LOADED", "DISPATCHED", "IN_TRANSIT", "SHIPPED", "SENT"].includes(s)
-        ? "blue"
-        : "amber";
-  const doLabels: Record<string, string> = {
-    DRAFT: "Pending Dispatch", LOADED: "Dispatched", IN_TRANSIT: "In Transit",
-    DELIVERED: "Delivered", INVOICED: "Invoiced", CANCELLED: "Cancelled",
-  };
-  const soLabels: Record<string, string> = {
-    DRAFT: "Draft", CONFIRMED: "In Production", IN_PRODUCTION: "In Production",
-    READY_TO_SHIP: "Ready to Ship", SHIPPED: "Shipped", DELIVERED: "Delivered",
-    INVOICED: "Invoiced", CLOSED: "Closed", ON_HOLD: "On Hold", CANCELLED: "Cancelled",
-  };
-  const map = category === "delivery_orders" ? doLabels : category === "sales_orders" ? soLabels : null;
-  return { label: map?.[s] ?? titleCase(raw), tone };
-}
 
 // Bold every occurrence of the search term inside a result label/description so
 // the matched part is obvious when several rows look alike.
@@ -199,6 +176,38 @@ const CATEGORY_CONFIG: Record<ResultCategory, { label: string; icon: LucideIcon 
   delivery_orders: { label: "Delivery Orders", icon: Truck },
   invoices: { label: "Invoices", icon: FileText },
   consignment_notes: { label: "Consignment Notes", icon: ClipboardList },
+  purchase_orders: { label: "Purchase Orders", icon: Package },
+  purchase_invoices: { label: "Purchase Invoices", icon: FileText },
+  goods_receipts: { label: "Goods Receipts", icon: Truck },
+  suppliers: { label: "Suppliers", icon: Factory },
+  production_orders: { label: "Production Orders", icon: Factory },
+  service_orders: { label: "Service Orders", icon: ShoppingCart },
+  service_cases: { label: "Service Cases", icon: ClipboardList },
+  employees: { label: "Employees", icon: Users },
+  leads: { label: "Sales Pipeline", icon: TrendingUp },
+  journal_entries: { label: "Journal Entries", icon: FileText },
+};
+
+// Server /api/search `kind` → the palette's category + icon. A kind the UI
+// hasn't mapped is skipped rather than crashing the whole result set, so the
+// server can add a source before the client catches up.
+const SERVER_KIND_MAP: Record<string, { category: ResultCategory; icon: LucideIcon }> = {
+  sales_order: { category: "sales_orders", icon: ShoppingCart },
+  customer: { category: "customers", icon: Users },
+  product: { category: "products", icon: Boxes },
+  delivery_order: { category: "delivery_orders", icon: Truck },
+  invoice: { category: "invoices", icon: FileText },
+  consignment_note: { category: "consignment_notes", icon: ClipboardList },
+  purchase_order: { category: "purchase_orders", icon: Package },
+  purchase_invoice: { category: "purchase_invoices", icon: FileText },
+  grn: { category: "goods_receipts", icon: Truck },
+  supplier: { category: "suppliers", icon: Factory },
+  production_order: { category: "production_orders", icon: Factory },
+  service_order: { category: "service_orders", icon: ShoppingCart },
+  service_case: { category: "service_cases", icon: ClipboardList },
+  employee: { category: "employees", icon: Users },
+  lead: { category: "leads", icon: TrendingUp },
+  journal_entry: { category: "journal_entries", icon: FileText },
 };
 
 // ---------------------------------------------------------------------------
@@ -231,59 +240,6 @@ function saveRecentSearch(result: SearchResult) {
 // API search hook
 // ---------------------------------------------------------------------------
 
-interface ApiRecord {
-  id?: string;
-  orderNumber?: string;
-  soNumber?: string;
-  doNumber?: string;
-  invoiceNumber?: string;
-  name?: string;
-  company?: string;
-  code?: string;
-  description?: string;
-  customerName?: string;
-  // Real payload field names the live-record search mapping reads (the
-  // soNumber/doNumber/invoiceNumber above never existed on the API payload).
-  companySOId?: string;
-  customerSOId?: string;
-  customerPOId?: string;
-  customerPO?: string;
-  doNo?: string;
-  invoiceNo?: string;
-  // DO rows expose these linkage fields (a DO can span several SOs): the
-  // customer's own SO / Ref, plus an `items` array whose salesOrderNo values
-  // are the SO numbers the DO actually ships (used to show + highlight the
-  // matched SO, e.g. searching "249" reveals the DO ships SO-2605-249).
-  customerSO?: string;
-  customerRef?: string;
-  reference?: string;
-  items?: { salesOrderNo?: string }[];
-  // Consignment note rows (/api/consignment-notes payload).
-  noteNumber?: string;
-  // Lifecycle status (SO/DO/invoice all carry one) — drives the result pill.
-  status?: string;
-}
-
-type UnknownObj = Record<string, unknown>;
-
-function asObj(v: unknown): UnknownObj | null {
-  return v && typeof v === "object" ? (v as UnknownObj) : null;
-}
-
-function asApiRecords(v: unknown): ApiRecord[] {
-  return Array.isArray(v) ? (v as ApiRecord[]) : [];
-}
-
-function pickRecords(v: unknown, ...keys: string[]): ApiRecord[] {
-  if (Array.isArray(v)) return asApiRecords(v);
-  const obj = asObj(v);
-  if (!obj) return [];
-  for (const key of keys) {
-    const candidate = obj[key];
-    if (Array.isArray(candidate)) return asApiRecords(candidate);
-  }
-  return [];
-}
 
 function useApiSearch(query: string) {
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -315,161 +271,51 @@ function useApiSearch(query: string) {
     // eslint-disable-next-line no-restricted-syntax -- debounce paired with AbortController; useTimeout's latest-fn capture would lose the per-effect controller
     const timer = setTimeout(async () => {
       setLoading(true);
+      // One request to /api/search replaces the six per-keystroke fetches this
+      // used to fan out. Six browser requests was six connection acquisitions,
+      // and on this stack that is the expensive part (a 9-row query has been
+      // measured at 38.9s — see /api/admin/health/db-connect). The server runs
+      // every source concurrently on ONE connection and returns pre-grouped
+      // results; it also covers ten modules the fan-out never could (POs, GRNs,
+      // PIs, suppliers, production/service orders, service cases, employees,
+      // leads, journal entries).
       const collected: SearchResult[] = [];
       let fetchFailures = 0;
-
-      const fetchers = [
-        // Sales Orders
-        fetch(`/api/sales-orders?search=${encodeURIComponent(query)}&limit=10`, { signal: controller.signal })
-          .then((r) => { if (!r.ok) { fetchFailures++; return null; } return r.json(); })
-          .then((data) => {
-            // Every list endpoint wraps records as {success, data:[...]} —
-            // the legacy keys never matched, so this category silently
-            // returned nothing (BUG-2026-06-12-002). Keep them as fallbacks.
-            const items = pickRecords(data, "data", "salesOrders", "orders");
-            items.forEach((item) => {
-              // Real field is companySOId (the SO number). soNumber/orderNumber
-              // never existed on the payload, so labels were blank before.
-              const num = item.companySOId || item.soNumber || item.orderNumber || item.id || "";
-              const meta = statusMeta("sales_orders", item.status);
+      try {
+        const res = await fetch(
+          `/api/search?q=${encodeURIComponent(query)}&limit=8`,
+          { signal: controller.signal },
+        );
+        if (!res.ok) {
+          fetchFailures++;
+        } else {
+          const json = (await res.json()) as {
+            success?: boolean;
+            data?: { groups?: { kind: string; items: { id: string; label: string; sub: string[]; href: string }[] }[] };
+          };
+          for (const g of json.data?.groups ?? []) {
+            const cfg = SERVER_KIND_MAP[g.kind];
+            if (!cfg) continue; // unknown kind (server added a source the UI hasn't mapped) — skip, don't crash
+            for (const it of g.items) {
               collected.push({
-                id: `so-${item.id}`,
-                label: num,
-                // Show every identifier the search can match (customer PO / customer
-                // SO / reference) so the linkage is visible AND the matched term is
-                // highlighted on whichever field it hit — no more "PO PO" doubling.
-                description: [
-                  item.customerName || item.company,
-                  item.customerPOId || item.customerPO,
-                  item.customerSOId,
-                  item.reference,
-                ].filter(Boolean).join(" · "),
-                href: `/sales/${item.id}`,
-                icon: ShoppingCart,
-                category: "sales_orders",
-                statusText: meta?.label,
-                statusTone: meta?.tone,
+                id: `${g.kind}-${it.id}`,
+                label: it.label,
+                description: it.sub.join(" · "),
+                href: it.href,
+                icon: cfg.icon,
+                category: cfg.category,
               });
-            });
-          })
-          .catch(() => { fetchFailures++; }),
+            }
+          }
+        }
+      } catch (err) {
+        // AbortError is the normal debounce-cancel path, not a failure.
+        if (!(err instanceof DOMException && err.name === "AbortError")) fetchFailures++;
+      }
 
-        // Customers
-        fetch(`/api/customers?search=${encodeURIComponent(query)}&limit=10`, { signal: controller.signal })
-          .then((r) => { if (!r.ok) { fetchFailures++; return null; } return r.json(); })
-          .then((data) => {
-            const items = pickRecords(data, "data", "customers");
-            items.forEach((item) => {
-              collected.push({
-                id: `cust-${item.id}`,
-                label: item.name || item.company || "",
-                description: item.code || "",
-                href: `/customers/${item.id}`,
-                icon: Users,
-                category: "customers",
-              });
-            });
-          })
-          .catch(() => { fetchFailures++; }),
-
-        // Products
-        fetch(`/api/products?search=${encodeURIComponent(query)}&limit=10`, { signal: controller.signal })
-          .then((r) => { if (!r.ok) { fetchFailures++; return null; } return r.json(); })
-          .then((data) => {
-            const items = pickRecords(data, "data", "products");
-            items.forEach((item) => {
-              collected.push({
-                id: `prod-${item.id}`,
-                label: item.name || item.code || "",
-                description: item.code || item.description || "",
-                href: `/products/${item.id}`,
-                icon: Boxes,
-                category: "products",
-              });
-            });
-          })
-          .catch(() => { fetchFailures++; }),
-
-        // Delivery Orders
-        fetch(`/api/delivery-orders?search=${encodeURIComponent(query)}&limit=10`, { signal: controller.signal })
-          .then((r) => { if (!r.ok) { fetchFailures++; return null; } return r.json(); })
-          .then((data) => {
-            const items = pickRecords(data, "data", "deliveryOrders", "orders");
-            items.forEach((item) => {
-              const num = item.doNo || item.doNumber || item.orderNumber || item.id || "";
-              const meta = statusMeta("delivery_orders", item.status);
-              // The SO numbers this DO ships — the real reason a DO matches an SO
-              // search. Joined + deduped from the items array (the list payload
-              // doesn't return a ready-made salesOrderNos string).
-              const soNos = Array.from(
-                new Set((item.items || []).map((i) => i.salesOrderNo).filter(Boolean)),
-              ).join(", ");
-              collected.push({
-                id: `do-${item.id}`,
-                label: num,
-                // A DO is only meaningful with its linkage — the SO numbers it
-                // ships plus the customer PO / Ref. Showing them also makes the
-                // matched term visible + highlighted (e.g. searching an SO number
-                // surfaces the DO that carries it, with that SO bolded).
-                description: [
-                  item.customerName || item.company,
-                  soNos,
-                  item.customerPOId,
-                  item.customerRef,
-                ].filter(Boolean).join(" · "),
-                href: `/delivery/${item.id}`,
-                icon: Truck,
-                category: "delivery_orders",
-                statusText: meta?.label,
-                statusTone: meta?.tone,
-              });
-            });
-          })
-          .catch(() => { fetchFailures++; }),
-
-        // Invoices
-        fetch(`/api/invoices?search=${encodeURIComponent(query)}&limit=10`, { signal: controller.signal })
-          .then((r) => { if (!r.ok) { fetchFailures++; return null; } return r.json(); })
-          .then((data) => {
-            const items = pickRecords(data, "data", "invoices");
-            items.forEach((item) => {
-              const num = item.invoiceNo || item.invoiceNumber || item.id || "";
-              const meta = statusMeta("invoices", item.status);
-              collected.push({
-                id: `inv-${item.id}`,
-                label: num,
-                description: item.customerName || item.company || "",
-                href: `/invoices/${item.id}`,
-                icon: FileText,
-                category: "invoices",
-                statusText: meta?.label,
-                statusTone: meta?.tone,
-              });
-            });
-          })
-          .catch(() => { fetchFailures++; }),
-
-        // Consignment Notes — payload is { success, data: [...] }, hence the
-        // explicit "data" key. The ?focus= deep link makes the CN page hop
-        // to the record's status tab and open its Detail dialog.
-        fetch(`/api/consignment-notes?search=${encodeURIComponent(query)}&limit=5`, { signal: controller.signal })
-          .then((r) => { if (!r.ok) { fetchFailures++; return null; } return r.json(); })
-          .then((data) => {
-            const items = pickRecords(data, "consignmentNotes", "data");
-            items.forEach((item) => {
-              const num = item.noteNumber || item.id || "";
-              collected.push({
-                id: `cn-${item.id}`,
-                label: num,
-                description: item.customerName || "",
-                href: `/consignment/note?focus=${item.id}`,
-                icon: ClipboardList,
-                category: "consignment_notes",
-              });
-            });
-          })
-          .catch(() => { fetchFailures++; }),
-      ];
+      // Retained only so the pre-existing scoring/commit block below compiles
+      // unchanged; the unified endpoint returns nothing to fan out.
+      const fetchers: Promise<unknown>[] = [];
 
       await Promise.allSettled(fetchers);
 
@@ -561,6 +407,16 @@ export function GlobalSearch() {
       "customers",
       "products",
       "consignment_notes",
+      "purchase_orders",
+      "goods_receipts",
+      "purchase_invoices",
+      "suppliers",
+      "production_orders",
+      "service_orders",
+      "service_cases",
+      "leads",
+      "employees",
+      "journal_entries",
     ];
 
     for (const cat of categoryOrder) {

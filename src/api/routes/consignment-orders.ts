@@ -1376,11 +1376,56 @@ app.get("/:id", async (c) => {
     ].filter((n, i, a) => n && a.indexOf(n) === i);
     if (parts.length) completedByMap.set(cb.productionOrderId, parts.join(", "));
   }
+  // Real AR receipts for whatever invoice this order's CNs converted into.
+  // The detail page used to INVENT a receipt number (`AR-<coId>` with a
+  // hardcoded "RECEIVED") the moment the order hit CLOSED — the same defect as
+  // the invoice node beside it, which was fixed to say "Not linked" rather than
+  // make one up. A node that shows a document number the operator cannot find
+  // anywhere is worse than one that admits the link is missing.
+  const invoiceIds = linkedCNs
+    .map((cn) => cn.convertedInvoiceId)
+    .filter((v): v is string => !!v);
+  let linkedPayments: Array<{
+    id: string;
+    invoiceId: string;
+    date: string | null;
+    amountSen: number;
+    method: string | null;
+    reference: string | null;
+  }> = [];
+  if (invoiceIds.length > 0) {
+    const ph = invoiceIds.map(() => "?").join(",");
+    const payRes = await c.var.DB.prepare(
+      `SELECT id, invoice_id, date, amount_sen, method, reference
+         FROM invoice_payments WHERE invoice_id IN (${ph}) ORDER BY date DESC`,
+    )
+      .bind(...invoiceIds)
+      .all<{
+        id: string;
+        invoiceId?: string;
+        invoice_id?: string;
+        date?: string | null;
+        amountSen?: number | null;
+        amount_sen?: number | null;
+        method?: string | null;
+        reference?: string | null;
+      }>();
+    linkedPayments = (payRes.results ?? []).map((p) => ({
+      id: p.id,
+      invoiceId: p.invoiceId ?? p.invoice_id ?? "",
+      date: p.date ?? null,
+      amountSen: Number(p.amountSen ?? p.amount_sen ?? 0),
+      method: p.method ?? null,
+      reference: p.reference ?? null,
+    }));
+  }
+
   return c.json({
     success: true,
     data: rowToCO(row, items.results ?? []),
     lockReason,
     linkedCNs,
+    linkedPayments,
     linkedPOs: (posRes.results ?? []).map((p) => ({
       id: p.id,
       poNo: p.poNo,

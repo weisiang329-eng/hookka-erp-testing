@@ -42,6 +42,15 @@ type LinkedPO = {
   completedBy?: string | null;
 };
 
+type LinkedPayment = {
+  id: string;
+  invoiceId: string;
+  date: string | null;
+  amountSen: number;
+  method: string | null;
+  reference: string | null;
+};
+
 type LinkedCN = {
   id: string;
   noteNumber: string;
@@ -293,6 +302,8 @@ export default function SalesOrderDetailPage() {
     priceOverrides?: PriceOverrideRecord[];
     // Linked Consignment Notes — used by the hub-edit gate + Order Progress card.
     linkedCNs?: LinkedCN[];
+    /** Real AR receipts against whatever invoice this order's CNs converted to. */
+    linkedPayments?: LinkedPayment[];
   }>(id ? `/api/consignment-orders/${id}` : null);
   const [updating, setUpdating] = useState(false);
   const [confirmSuccess, setConfirmSuccess] = useState<string | null>(null);
@@ -384,6 +395,10 @@ export default function SalesOrderDetailPage() {
   );
   const linkedCNs = useMemo(
     () => (orderResp?.success ? orderResp.linkedCNs ?? [] : []),
+    [orderResp],
+  );
+  const linkedPayments = useMemo(
+    () => (orderResp?.success ? orderResp.linkedPayments ?? [] : []),
     [orderResp],
   );
 
@@ -1496,13 +1511,30 @@ export default function SalesOrderDetailPage() {
               href: `/invoices`,
             });
           }
-          // AR Payment (when closed)
-          if (order.status === "CLOSED") {
+          // AR Payment — a REAL receipt, or an honest placeholder.
+          //
+          // This used to invent `AR-<coId>` with a hardcoded "RECEIVED" the
+          // moment the order hit CLOSED. Nobody could find that document,
+          // because it never existed: the number was derived from the order id
+          // and the status was a literal. Same defect as the invoice node
+          // above, which was already corrected to say "Not linked" rather than
+          // make one up. A map that invents documents is worse than a map with
+          // a gap in it.
+          if (linkedPayments.length > 0) {
+            const p = linkedPayments[0];
             nodes.push({
               type: "AR_PAYMENT",
               label: "AR Payment",
-              docNo: `AR-${order.companyCOId.replace("SO-", "")}`,
+              docNo: p.reference || p.date || "Received",
               status: "RECEIVED",
+              href: `/invoices/${p.invoiceId}`,
+            });
+          } else if (order.status === "CLOSED") {
+            nodes.push({
+              type: "AR_PAYMENT",
+              label: "AR Payment",
+              docNo: "Not recorded",
+              status: "PENDING",
               href: `/accounting`,
             });
           }

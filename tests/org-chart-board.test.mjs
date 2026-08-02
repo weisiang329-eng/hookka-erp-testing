@@ -132,7 +132,7 @@ test("below the last manager the tree stops and DEPARTMENT BOXES take over", () 
   // The switch must fire at the LAST management level, not one above it.
   assert.match(
     src,
-    /node\.children\.length > 0 && !node\.children\.some\(leadsManagers\)/,
+    /node\.children\.length > 1 && !node\.children\.some\(leadsManagers\)/,
     "someone whose reports also have reports keeps their branch",
   );
   assert.match(src, /const leadsManagers = useCallback/);
@@ -171,4 +171,30 @@ test("a box is keyed by its LEADER, not by department", () => {
   assert.match(src, /label: depts\.map\(deptLabel\)\.join\(" \+ "\)/, "titled with every department it covers");
   // Co-leaders on the same departments share ONE box.
   assert.match(src, /const co = teamLeads\.filter\(/);
+});
+
+test("the connector bus has no holes — no flex gap between the boxes", () => {
+  // The bus is drawn INSIDE each child, so a flex `gap` leaves the line with a
+  // hole exactly where the gap is. Owner 2026-08-02:「那个线好像断掉那样?」.
+  // Padding gives the same spacing and keeps the line continuous.
+  const src = readFileSync("src/components/org-chart.tsx", "utf8");
+  assert.match(src, /<div className="flex items-start">\s*\n\s*\{boxesUnder\(node\)/);
+  assert.match(src, /className="relative flex flex-col items-center px-1\.5"/);
+});
+
+test("every card carries a face, in BOTH views", () => {
+  // Owner:「他们的头像啊,好像没有」. The board's cards had an avatar and the
+  // tree's did not, so the same person looked like two different things
+  // depending on which view you were in.
+  const src = readFileSync("src/components/org-chart.tsx", "utf8");
+  const treeCard = src.slice(src.indexOf("const TreeCard ="), src.indexOf("const Branch ="));
+  assert.match(treeCard, /\{initials\(node\.name\)\}/);
+  assert.match(treeCard, /node\.source === "worker"/, "worker and office are told apart by colour");
+});
+
+test("one person does not get a whole department box", () => {
+  // A dark cap wrapped around a single card reads as a heading with nothing
+  // under it. Owner, seeing Finance around one person:「有点怪的感觉」.
+  const src = readFileSync("src/components/org-chart.tsx", "utf8");
+  assert.match(src, /node\.children\.length > 1 && !node\.children\.some\(leadsManagers\)/);
 });

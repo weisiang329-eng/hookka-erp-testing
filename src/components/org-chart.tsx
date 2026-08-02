@@ -280,15 +280,34 @@ export function OrgChart({ canManage }: Props) {
     return (
       <div className="relative">
         <div
-          className={`w-[168px] rounded-md border px-2 py-1.5 text-center ${
+          className={`w-[176px] rounded-md border px-2 py-1.5 ${
             node.active ? "border-[#E2DDD8] bg-white" : "border-dashed border-[#D8D2CC] bg-white opacity-60"
           }`}
         >
-          <div className="truncate text-[11px] font-semibold uppercase leading-tight text-[#1F1D1B]">
-            {node.name}
-          </div>
-          <div className="truncate text-[10px] text-[#8A8577]">
-            {node.position || node.departmentCode || "—"}
+          {/* The tree cards had no avatar while the department board's did, so
+              the same person looked like two different things depending on the
+              view. Owner 2026-08-02:「他们的头像啊,好像没有」— Houzs put a face
+              on every card, and a face is what makes a row of boxes read as
+              people. Initials until there is somewhere to store a photo. */}
+          <div className="flex items-center gap-2">
+            <span
+              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
+                node.source === "worker"
+                  ? "bg-[#F0ECE9] text-[#6B5C32]"
+                  : "bg-[#E0EDF0] text-[#3E6570]"
+              }`}
+              title={node.source === "worker" ? "Factory employee" : "Office account"}
+            >
+              {initials(node.name)}
+            </span>
+            <div className="min-w-0 flex-1 text-left">
+              <div className="truncate text-[11px] font-semibold uppercase leading-tight text-[#1F1D1B]">
+                {node.name}
+              </div>
+              <div className="truncate text-[10px] text-[#8A8577]">
+                {node.position || node.departmentCode || "—"}
+              </div>
+            </div>
           </div>
           {canManage && (
             <button
@@ -500,10 +519,20 @@ export function OrgChart({ canManage }: Props) {
                 over — the Houzs shape. A branch is right where there are a few
                 named relationships; forty operators fanned into hairlines is a
                 wall of string. */}
-            {node.children.length > 0 && !node.children.some(leadsManagers) ? (
-              <div className="flex items-start gap-3">
+            {/* A whole dark department box around ONE card reads as a heading
+                with nothing under it — owner 2026-08-02, seeing Finance wrapped
+                around a single person:「有点怪的感觉」. A box earns its chrome at
+                two people; below that the plain branch says the same thing with
+                less furniture. */}
+            {node.children.length > 1 && !node.children.some(leadsManagers) ? (
+              // NO flex `gap` on this row. The connector bus is drawn INSIDE
+              // each child, so a gap leaves the line with a hole exactly where
+              // the gap is — owner 2026-08-02:「那个线好像断掉那样?」. Padding on
+              // the child gives the same spacing and keeps the bus continuous,
+              // which is what the person-level branch already did.
+              <div className="flex items-start">
                 {boxesUnder(node).map((box, bi) => (
-                  <div key={box.key} className="relative flex flex-col items-center">
+                  <div key={box.key} className="relative flex flex-col items-center px-1.5">
                     {boxesUnder(node).length > 1 && (
                       <span
                         aria-hidden

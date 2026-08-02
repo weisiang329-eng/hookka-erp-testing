@@ -9479,6 +9479,23 @@ app.get("/dashboard", async (c) => {
   // switching the range never serves another range's numbers, and the month
   // component forces a natural rebuild when the calendar rolls over.
   const { withSnapshot } = await import("../lib/snapshot");
+  // The snapshot table must exist BEFORE withSnapshot reads it — readSnapshot
+  // is not guarded, so a missing table 500s (migrations don't auto-apply on
+  // this stack; see CLAUDE.md). Runtime-ensure it, matching the exact shape of
+  // the other accounting snapshot tables (migration 0082). All-TEXT so it
+  // round-trips cleanly through the d1-compat driver, DEFAULT '' because
+  // writeSnapshot always sets built_at/built_from explicitly.
+  await c.var.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS accounting_dashboard_snapshot (
+       org_id TEXT NOT NULL,
+       cache_key TEXT NOT NULL DEFAULT '',
+       data TEXT NOT NULL,
+       built_from TEXT NOT NULL,
+       built_at TEXT NOT NULL DEFAULT '',
+       refresh_count INTEGER NOT NULL DEFAULT 0,
+       PRIMARY KEY (org_id, cache_key)
+     )`,
+  ).run();
   const dashOrgId = getOrgId(c);
   const dashCacheKey = `${quarterly ? "q" : "m"}:${wanted}:${nowYm}:${dashOrgId}`;
   const dashPayload = await withSnapshot(

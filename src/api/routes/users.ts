@@ -134,6 +134,83 @@ function ensureUserOrgColumns(db: D1Database): Promise<void> {
 }
 
 // GET /api/users — list all users
+// ---------------------------------------------------------------------------
+// POST /api/users/backfill-org-from-aliases
+//
+// One-time repair for the split this codebase carried: the "Edit details" modal
+// wrote Department and Position to the ALIAS row (email_addresses.assigned_dept
+// / assigned_position) while the Users grid and the Org Chart read
+// users.department / users.position. The model moved to the user row on
+// 2026-06-17 and only one side followed, so the modal showed "Finance" and the
+// grid showed "—" — owner 2026-08-02:「明明我的 Department 里面是有数据的,为什么
+// 在外面呈现出来的却是空的?」. Everyone therefore landed in the org chart's
+// Unassigned column, which is why the chart had no shape at all.
+//
+// The modal now writes both. This carries the EXISTING alias values across.
+//
+// Only fills BLANKS — a department already set on the user row wins, because
+// that is the newer source of truth and an alias may be stale. Idempotent: a
+// second run reports 0.
+// ---------------------------------------------------------------------------
+app.post("/backfill-org-from-aliases", async (c) => {
+  const denied = await requireSuperAdmin(c);
+  if (denied) return denied;
+  await ensureUserOrgColumns(c.var.DB);
+  const dryRun = c.req.query("apply") !== "1";
+
+  const res = await c.var.DB.prepare(
+    `SELECT u.id            AS user_id,
+            u.department    AS user_dept,
+            u.position      AS user_position,
+            a.assigned_dept AS alias_dept,
+            a.assigned_position AS alias_position
+       FROM users u
+       JOIN email_addresses a ON a.assigned_user_id = u.id
+      WHERE (COALESCE(u.department, '') = '' AND COALESCE(a.assigned_dept, '') <> '')
+         OR (COALESCE(u.position, '')   = '' AND COALESCE(a.assigned_position, '') <> '')`,
+  )
+    .all<{
+      userId?: string;
+      user_id?: string;
+      userDept?: string | null;
+      user_dept?: string | null;
+      userPosition?: string | null;
+      user_position?: string | null;
+      aliasDept?: string | null;
+      alias_dept?: string | null;
+      aliasPosition?: string | null;
+      alias_position?: string | null;
+    }>();
+
+  const planned = (res.results ?? []).map((r) => ({
+    userId: r.userId ?? r.user_id ?? "",
+    department:
+      (r.userDept ?? r.user_dept ?? "") || (r.aliasDept ?? r.alias_dept ?? ""),
+    position:
+      (r.userPosition ?? r.user_position ?? "") ||
+      (r.aliasPosition ?? r.alias_position ?? ""),
+  })).filter((p) => p.userId);
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      wouldUpdate: planned.length,
+      data: planned,
+      hint: "POST again with ?apply=1 to write.",
+    });
+  }
+
+  for (const p of planned) {
+    await c.var.DB.prepare(
+      "UPDATE users SET department = ?, position = ? WHERE id = ?",
+    )
+      .bind(p.department, p.position, p.userId)
+      .run();
+  }
+  return c.json({ success: true, dryRun: false, updated: planned.length, data: planned });
+});
+
 app.get("/", async (c) => {
   // RBAC gate (P3.3-followup) — users:read.
   const denied = await requirePermission(c, "users", "read");

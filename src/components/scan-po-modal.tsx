@@ -389,6 +389,17 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
   const [claudeRows, setClaudeRows] = useState<ClaudeScanRow[]>([]);
   const [usedClaude, setUsedClaude] = useState(false);
   const [selectedPOs, setSelectedPOs] = useState<Set<number>>(new Set());
+  /**
+   * customerPO → the LIVE sales orders that already carry it.
+   *
+   * The durable duplicate question. `alreadyUsed` (below) only knows "a draft
+   * was made from this file once", which stays true after the draft is deleted
+   * — that staleness is exactly what hid two POs from an eleven-PO scan. Owner:
+   *「系统应该是根据拉出来的顾客名字和顾客的 PO 号码去做对比的,不需要看照片」.
+   */
+  const [existingByPO, setExistingByPO] = useState<
+    Record<string, { companySOId: string; status: string }[]>
+  >({});
   const [expandedPO, setExpandedPO] = useState<number | null>(null);
   const [, setCreating] = useState(false);
   const [createdSOs, setCreatedSOs] = useState<{ soNo: string; poNo: string; itemCount: number }[]>([]);
@@ -1453,6 +1464,46 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     });
   }, [claudeRows.length, parseResult?.purchaseOrders.length]);
 
+  // Ask the server which of the scanned customer POs are ALREADY orders. Purely
+  // informational — nothing is hidden or blocked by the answer.
+  useEffect(() => {
+    const nums = [
+      ...new Set(
+        claudeRows
+          .map((r) => (r.extracted.customerPO ?? "").trim())
+          .filter(Boolean),
+      ),
+    ];
+    if (nums.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/sales-orders/check-customer-pos", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pos: nums.map((customerPO) => ({ customerPO })) }),
+        });
+        const j = (await res.json()) as {
+          success?: boolean;
+          data?: {
+            customerPO: string;
+            existing: { companySOId: string; status: string }[];
+          }[];
+        };
+        if (cancelled || !j.success || !Array.isArray(j.data)) return;
+        const next: Record<string, { companySOId: string; status: string }[]> = {};
+        for (const d of j.data) if (d.existing.length) next[d.customerPO] = d.existing;
+        setExistingByPO(next);
+      } catch {
+        // Best-effort: a failed check must never stop the operator creating
+        // orders. Worst case they get no warning, which is the old behaviour.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [claudeRows]);
+
   if (!open) return null;
 
   return (
@@ -1513,6 +1564,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
               expandedPO={expandedPO}
               queueItems={queueItems}
               customerAliases={customerAliases}
+              existingByPO={existingByPO}
               onTogglePO={togglePO}
               onExpandPO={setExpandedPO}
               onRemoveClaudeRow={(i) => void removeClaudeRow(i)}
@@ -1718,7 +1770,7 @@ function InfoCard({ icon, title, desc }: { icon: string; title: string; desc: st
 }
 
 function PreviewStep({
-  claudeRows, setClaudeRows, usedClaude, result, selectedPOs, expandedPO, queueItems, customerAliases, onTogglePO, onExpandPO, onRemoveClaudeRow, onClearAll, onBack, onConfirm, catalog,
+  claudeRows, setClaudeRows, usedClaude, result, selectedPOs, expandedPO, queueItems, customerAliases, existingByPO, onTogglePO, onExpandPO, onRemoveClaudeRow, onClearAll, onBack, onConfirm, catalog,
 }: {
   claudeRows: ClaudeScanRow[];
   setClaudeRows: React.Dispatch<React.SetStateAction<ClaudeScanRow[]>>;
@@ -1728,6 +1780,8 @@ function PreviewStep({
   expandedPO: number | null;
   queueItems: QueueItem[];
   customerAliases: Record<string, string>;
+  /** customerPO → live sales orders already carrying it. Warning only. */
+  existingByPO: Record<string, { companySOId: string; status: string }[]>;
   onTogglePO: (i: number) => void;
   onExpandPO: (i: number | null) => void;
   onRemoveClaudeRow: (i: number) => void;
@@ -1970,6 +2024,7 @@ function PreviewStep({
               !!row.scanQueueRowId && cachedRowIds.has(row.scanQueueRowId)
             }
             alreadyUsed={row.alreadyUsed}
+            existingSOs={existingByPO[(row.extracted.customerPO ?? "").trim()]}
             catalog={catalog}
             customerAliases={customerAliases}
             selected={selectedPOs.has(idx)}
@@ -2070,13 +2125,15 @@ function InchSelect({
 }
 
 function ClaudePOCard({
-  row, reused, alreadyUsed, catalog, customerAliases, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem, onAddItem, onRemoveItem, onMoveItem, onToggleGold, onRemoveCard,
+  row, reused, alreadyUsed, existingSOs, catalog, customerAliases, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem, onAddItem, onRemoveItem, onMoveItem, onToggleGold, onRemoveCard,
 }: {
   row: ClaudeScanRow;
   /** This card came from a cache-hit queue row (same file scanned before). */
   reused?: boolean;
   /** Already turned into a draft once — shown, warned about, never hidden. */
   alreadyUsed?: boolean;
+  /** Live sales orders that already carry this customer PO number. */
+  existingSOs?: { companySOId: string; status: string }[];
   catalog: ScanCatalog | null;
   /** Taught aliases (OCR letterhead → customerId). */
   customerAliases?: Record<string, string> | null;
@@ -2150,13 +2207,26 @@ function ClaudePOCard({
               <Badge className="bg-red-100 text-red-800 border-red-200">URGENT</Badge>
             )}
             {reused && <ReusedScanBadge />}
-            {alreadyUsed && (
+            {existingSOs && existingSOs.length > 0 ? (
+              // Naming the order is the useful warning: the operator can go and
+              // look at it. "Draft made before" only says something happened.
               <span
                 className="rounded bg-[#FBF1DC] px-1.5 py-0.5 text-[10px] font-semibold text-[#7A5410]"
-                title="A draft was created from this PO before. It is shown anyway — if that draft was deleted, create it again."
+                title={`Already ordered: ${existingSOs
+                  .map((e) => `${e.companySOId} (${e.status})`)
+                  .join(", ")}. Shown anyway — create it again only if you mean to.`}
               >
-                Draft made before
+                Already {existingSOs.map((e) => e.companySOId).join(", ")}
               </span>
+            ) : (
+              alreadyUsed && (
+                <span
+                  className="rounded bg-[#FBF1DC] px-1.5 py-0.5 text-[10px] font-semibold text-[#7A5410]"
+                  title="A draft was created from this PO before, and no live order carries it now — most likely that draft was deleted. Shown so you can create it again."
+                >
+                  Draft made before
+                </span>
+              )
             )}
           </div>
           <button

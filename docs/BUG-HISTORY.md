@@ -34,6 +34,73 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-02-003 — 38 runtime migrations cached a REJECTED promise, so a failed schema change was remembered as done `infrastructure` `data-integrity` 🟢
+
+**Symptom:** none, until it matters. A column silently never applied for the life
+of a Worker isolate, and every write in that isolate then failing on a missing
+column with nothing explaining why.
+
+**Root cause:** #222 that same morning converted 26 self-apply sites to
+`runSelfApply`, which THROWS on a real failure — its own comment says "so the
+caller's memo can be cleared and the next request retries". 38 callers cleared
+nothing:
+
+```ts
+let _mig: Promise<void> | null = null;
+if (_mig) return _mig;        // a REJECTED promise is still a promise
+```
+
+Migrations are inert on deploy here, so that loop is the ONLY path a column
+takes to production. Six sites were worse — `.catch(() => undefined)` makes the
+memo *resolve*, recording the failure as success. Separately, a pending promise
+holds its creator's socket, which `db-pg.ts` forbids sharing across requests —
+the same mechanism that took Sales Orders down earlier the same day.
+
+**Fix:** boolean memo, set only after the DDL lands (the shape
+`payment-columns.ts` already used). 32 by codemod, 6 by hand. All six keep their
+existing failure behaviour — the error is still swallowed, the flag simply is
+not set, so the next request retries. Two of the six guard unique indexes that
+win a concurrent-create race, so an isolate remembering a failed `CREATE INDEX`
+as done was exactly the isolate where two documents get the same number.
+
+**Correction:** `pendingMigrations` in `sales-orders/_helpers.ts` was NOT one of
+the 38 — it goes through `memoizeSelfApply`, which clears for you. The first
+scan counted it because it looked for a literal `x = null`.
+
+**Verified:** `tests/self-apply-memo-is-boolean.test.mjs`, both halves proved by
+re-introducing the bug. The premature-flag half did not fire at first — it
+scoped "is this a DDL guard?" to the window the bug empties. Class **C9**.
+
+## BUG-2026-08-02-002 — an outsourced worker cost the factory nothing in Labor Cost and Department Labor `payroll` `data-integrity` 🟢
+
+**Symptom:** OSC-001 CHAU logged 24 days in June and 25 in July, all in FAB_SEW,
+and carried **RM0** of labour cost in both. Owner: 「这个薪水需要计算进我们的
+labour cost，还有我们的 department labour…这样我们的薪水才能算得准。」
+
+**Root cause:** four places price an hour as salary ÷ working days ÷ hours-per-
+day. An outsourced person has neither a salary (0) nor a standard day (0), so
+the formula does not fail — it returns zero. `labor-engine.ts` derived
+`costingDailyRateSen` from `basicSalarySen`; the three report passes in
+`employees.tsx` opened with `if (!w || !w.basicSalarySen) continue;`, dropping
+them before any costing ran.
+
+**Fix:** the costing day rate IS the day rate for a daily-paid worker, and the
+skip now runs after the daily branch. One shared helper
+(`dailyPaidEntryCostSen`) across all three sites, splitting a day across its
+entries pro-rata by hours so a day worked in two departments loads both and
+always sums back to exactly one day rate.
+
+**No double counting:** Department Labor already back-filled each worker as
+`gross + employer statutory − logged value`, so CHAU's logged value going 0 →
+RM2,125 drives that extra 2,125 → 0. The month total is unchanged; the cost now
+lands on FAB_SEW attributed to real hours instead of an unattributed lump. That
+back-fill only ran for a finished full month with no category filter — on any
+partial range, any filtered view, and the whole Labor Cost tab, he was absent.
+
+**Verified:** production punches (24 days → RM2,040; 25 days → RM2,125), plus
+tests pinning the cost side, the pro-rata split, a MONTHLY worker being
+byte-identical either way, and the blanket skip not returning.
+
 ## BUG-2026-08-02-001 — `flag ? 1 : 0` bound to a real Postgres BOOLEAN stores FALSE, silently, with HTTP 200 `data-integrity` `infrastructure` `payroll` 🟢
 
 **Symptom:** The owner ticked **Outsourced** on OSC-001 CHAU, set the day rate to RM 85, saved,

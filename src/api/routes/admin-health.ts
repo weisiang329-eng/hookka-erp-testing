@@ -1900,3 +1900,96 @@ app.get("/db-indexes", async (c) => {
     },
   });
 });
+
+// ---------------------------------------------------------------------------
+// GET /db-connect — is the database slow, or is GETTING to it slow?
+//
+// The index audit (/db-indexes) reports missing=0/14: every index the hot
+// queries need is present, and the largest table is 32k rows. Yet slow SQL
+// shows p95 20-33s, and one sampled call read NINE rows in 38,880ms. No query
+// plan explains that.
+//
+// db-pg.ts creates a fresh postgres.js client per request — it must, because a
+// socket opened in one Workers request cannot be used from another — and the
+// socket connects lazily. So the request's FIRST query pays connection
+// acquisition on top of its own execution, and every later query on that
+// request reuses the socket. timingMiddleware now records that first query's
+// duration as double4 of the `req` event.
+//
+// This endpoint compares it against total DB time per request. If the first
+// query dominates, the problem is upstream of SQL — Hyperdrive/Supavisor pool
+// exhaustion or queueing — and no amount of query tuning will move it.
+// ---------------------------------------------------------------------------
+app.get("/db-connect", async (c) => {
+  const { WINDOW } = rangeWindow(parseRange(c.req.query("range")));
+  const data = await withAe(c, async (accountId, token) => {
+    const sql = `
+      SELECT blob2 AS route,
+             double2 AS dbTotal,
+             double3 AS dbCount,
+             double4 AS firstMs
+      FROM hookka_erp_metrics
+      WHERE blob1 = 'req'
+        AND timestamp > NOW() - ${WINDOW}
+        AND double3 > 0
+      LIMIT 10000
+    `;
+    const resp = await runAeSql(accountId, token, sql);
+    type Bucket = { route: string; first: number[]; rest: number[]; n: number };
+    const grouped = new Map<string, Bucket>();
+    const allFirst: number[] = [];
+    const allRest: number[] = [];
+    for (const r of resp.data ?? []) {
+      const row = r as Record<string, unknown>;
+      const route = String(row.route ?? "");
+      const total = Number(row.dbTotal) || 0;
+      const count = Number(row.dbCount) || 0;
+      const first = Number(row.firstMs) || 0;
+      // Requests that ran a single query tell us nothing about the split —
+      // their first query IS all of their DB time.
+      if (count < 2) continue;
+      // Mean of the non-first queries on the same request, so the comparison
+      // is like-for-like: same request, same connection, same moment.
+      const rest = Math.max(0, (total - first) / (count - 1));
+      const b = grouped.get(route) ?? { route, first: [], rest: [], n: 0 };
+      b.first.push(first);
+      b.rest.push(rest);
+      b.n += 1;
+      grouped.set(route, b);
+      allFirst.push(first);
+      allRest.push(rest);
+    }
+    const pct = (arr: number[], p: number): number => {
+      if (arr.length === 0) return 0;
+      const s = [...arr].sort((a, b) => a - b);
+      return Math.round(s[Math.min(s.length - 1, Math.floor((p / 100) * s.length))]);
+    };
+    const routes = [...grouped.values()]
+      .filter((b) => b.n >= 5)
+      .map((b) => ({
+        route: b.route,
+        samples: b.n,
+        firstP50: pct(b.first, 50),
+        firstP95: pct(b.first, 95),
+        restP50: pct(b.rest, 50),
+        restP95: pct(b.rest, 95),
+        // How many times the first query costs what a later one does. This is
+        // the number to read: >5 means connection acquisition, not SQL.
+        ratioP50: pct(b.rest, 50) > 0 ? Math.round((pct(b.first, 50) / pct(b.rest, 50)) * 10) / 10 : null,
+      }))
+      .sort((a, b) => (b.ratioP50 ?? 0) - (a.ratioP50 ?? 0));
+    return {
+      overall: {
+        samples: allFirst.length,
+        firstP50: pct(allFirst, 50),
+        firstP95: pct(allFirst, 95),
+        firstMax: allFirst.length ? Math.max(...allFirst) : 0,
+        restP50: pct(allRest, 50),
+        restP95: pct(allRest, 95),
+        ratioP50: pct(allRest, 50) > 0 ? Math.round((pct(allFirst, 50) / pct(allRest, 50)) * 10) / 10 : null,
+      },
+      routes: routes.slice(0, 25),
+    };
+  });
+  return c.json({ success: true, data });
+});

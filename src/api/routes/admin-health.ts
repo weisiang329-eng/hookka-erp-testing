@@ -939,6 +939,22 @@ app.get("/deploys", async (c) => {
 // Failure isolation: any non-2xx / thrown error returns {configured:true,
 // error} with an empty runs[] — the dashboard must never hang or crash on a
 // GitHub hiccup. An 8s abort caps the wait.
+/**
+ * A workflow whose LATEST run failed, and how long it has been failing.
+ *
+ * The plain 20-run list cannot show this. Hookka runs Keep-DB-warm, the scan
+ * sweep, mail sync and the agent heartbeat on tight schedules, so a once-a-day
+ * job's failure is pushed out of the window within MINUTES. That is how the
+ * daily Postgres backup failed 20 times in a row — every run in its visible
+ * history — without anyone noticing that there were no backups at all.
+ */
+type FailingWorkflow = {
+  name: string;
+  consecutive: number;
+  since: string;
+  url: string;
+};
+
 type GithubRunOut = {
   id: number;
   name: string;
@@ -1020,7 +1036,65 @@ app.get("/github-runs", async (c) => {
       url: r.html_url || "",
       at: r.run_started_at || r.created_at || r.updated_at || "",
     }));
-    const payload = { success: true, data: { configured: true, repo, runs } };
+    // Second, cheap call: recent FAILURES only, so a daily job's failure cannot
+    // be crowded out by a 5-minute cron's successes. Reduced to the latest
+    // failure per workflow, with a consecutive count so "failing for weeks"
+    // reads differently from "failed once this morning".
+    let failing: FailingWorkflow[] = [];
+    try {
+      const fRes = await fetch(
+        `https://api.github.com/repos/${repo}/actions/runs?status=failure&per_page=50`,
+        {
+          headers: {
+            Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+            Accept: "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "hookka-erp-health",
+          },
+          signal: AbortSignal.timeout(2500),
+        },
+      );
+      if (fRes.ok) {
+        const fBody = (await fRes.json()) as {
+          workflow_runs?: Array<{
+            name?: string;
+            html_url?: string;
+            created_at?: string;
+            run_started_at?: string;
+          }>;
+        };
+        const byName = new Map<string, FailingWorkflow>();
+        for (const r of fBody.workflow_runs ?? []) {
+          const name = r.name || "(workflow)";
+          const at = r.run_started_at || r.created_at || "";
+          const hit = byName.get(name);
+          if (hit) {
+            hit.consecutive += 1;
+            // The list is newest-first, so each later row is an OLDER failure.
+            if (at && (!hit.since || at < hit.since)) hit.since = at;
+          } else {
+            byName.set(name, {
+              name,
+              consecutive: 1,
+              since: at,
+              url: r.html_url || "",
+            });
+          }
+        }
+        // A workflow that has since gone green must not be reported as failing.
+        const latestByName = new Map<string, string>();
+        for (const r of runs) {
+          if (!latestByName.has(r.name)) latestByName.set(r.name, r.conclusion ?? "");
+        }
+        failing = [...byName.values()]
+          .filter((w) => (latestByName.get(w.name) ?? "failure") === "failure")
+          .sort((a, b) => b.consecutive - a.consecutive);
+      }
+    } catch {
+      // Best-effort — the main run list must still render if this call fails.
+    }
+
+    const payload = { success: true, data: { configured: true, repo, runs, failing } };
     if (ghCache) {
       try {
         await ghCache.put(

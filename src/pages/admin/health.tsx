@@ -411,11 +411,25 @@ type GithubRun = {
   url: string;
   at: string;
 };
+/** A workflow whose LATEST run failed — see GET /github-runs. */
+type FailingWorkflow = {
+  name: string;
+  consecutive: number;
+  since: string;
+  url: string;
+};
+
 type GithubRunsData = {
   configured: boolean;
   repo: string;
   error?: string;
   runs: GithubRun[];
+  /**
+   * Computed server-side from a failures-only query, so a once-a-day job cannot
+   * be crowded out of the 20-run window by a 5-minute cron. This is what makes
+   * "the backup has failed 20 times in a row" visible at all.
+   */
+  failing?: FailingWorkflow[];
 };
 
 function SectionHeader({
@@ -1674,6 +1688,39 @@ export default function AdminHealthPage() {
             title="Automation — GitHub Actions"
             hint="Build, deploy, and baseline workflows. Failures show up here instead of emailing you on every run. Latest ~20 runs, refreshed every 60s."
           />
+
+          {/* A workflow that has failed MANY times running is a different
+              problem from one that failed this morning, and the 20-run list
+              cannot show it: the noisy 5-minute crons push a daily job's
+              failure out of the window within minutes. That is exactly how the
+              daily Postgres backup failed 20 times — every run in its visible
+              history — while the panel looked fine. */}
+          {(github?.failing?.length ?? 0) > 0 && (
+            <div className="mb-3 rounded-md border border-[#E8AFA4] bg-[#FBE9E5] p-3 text-[12px] text-[#7E251A]">
+              <div className="mb-1 font-semibold">
+                {github!.failing!.length} workflow
+                {github!.failing!.length === 1 ? "" : "s"} currently failing
+              </div>
+              <ul className="space-y-0.5">
+                {github!.failing!.map((w) => (
+                  <li key={w.name}>
+                    <a
+                      href={w.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-medium underline"
+                    >
+                      {w.name}
+                    </a>
+                    {" — "}
+                    {w.consecutive} consecutive failure
+                    {w.consecutive === 1 ? "" : "s"}
+                    {w.since ? `, oldest seen ${w.since.slice(0, 10)}` : ""}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           <Card>
             <CardHeader>

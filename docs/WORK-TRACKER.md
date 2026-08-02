@@ -2604,3 +2604,33 @@ Sizeable, money-path, wants its own PR + verification against the real ledger. N
 - Connection-acquisition root cause (the 38.9s) — needs the #217 numbers after a work day.
 - `/api/accounting/dashboard` 2,010ms (replays computePnlWindow 12×).
 - CoA tab 5,121 nodes / 218ms — heaviest DOM left, no freeze; window it once proven.
+
+## 2026-08-02 — Round 4: the rest, finished + two hypotheses disproven
+
+Owner: 「把还没做的全部完成掉」. Closed every open item; two of them turned out NOT to
+be problems once measured, which is the honest outcome.
+
+- ✅ **Chart of Accounts tab** (#229) — 9 sections / ~5,100 nodes deferred via
+  DeferredBlock. Last DOM item from the sweep.
+- ✅ **`/api/accounting/dashboard` cached** (#229 + fix #231) — was ~1,950ms on EVERY
+  call (replays computePnlWindow 12×, never cached). Now withSnapshot + SWR:
+  **cold 2,356ms once per data-change, warm ~103ms**, verified success=true / 12 rows.
+  First attempt shipped a fast 500 (missing snapshot table — migrations don't auto-apply);
+  fixed by runtime CREATE TABLE + migration 0210. Lesson: verify the payload, not the latency.
+- 🟢 **Connection bottleneck — DISPROVEN** (#217 instrument). 24h / 5,322 requests:
+  first-query (connection acquisition) P50 0ms, P95 24ms. NOT the bottleneck; the 38.9s was
+  a rare cold-start tail, not systemic. Changing the tuned connection config to chase it
+  would be net-negative — the instrument prevented a bad change. Left in as a standing gauge.
+- 🟢 **Ledger server-side paging — reclassified.** `GET /api/accounting/gl` is **567ms** for
+  a full-year window (3,635-row table). It is NOT a current performance problem; the client
+  windowing (#193) already made it render fast. The unbounded query is a scalability concern
+  at ~10x data, not today. The SQL-computed-effective-date rewrite stays deferred until the
+  ledger actually grows — doing a money-path rewrite now, unverifiable against real data, for
+  a 567ms endpoint would be the wrong trade.
+
+### Net state after 4 rounds
+Every sidebar/detail/production/finance route measured; every real freeze fixed; global
+search covers 16 modules end-to-end; DB is fully indexed and connection-healthy; the one
+genuinely-heavy endpoint (dashboard) is cached. No open perf item with a measured problem
+behind it remains. Deferred by evidence: ledger SQL paging (not slow yet), connection
+config (not slow at all).

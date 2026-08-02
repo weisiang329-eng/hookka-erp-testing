@@ -38,8 +38,8 @@ test("a resigned worker is never wired", () => {
 test("two leaders in one department are PEERS, not a chain", () => {
   // Upholstery really has two. Making the second report to the first would
   // invent a rank nobody stated.
-  assert.match(block, /const isHeadHere = heads\.includes\(w\.key\);/);
-  assert.match(block, /isHeadHere \|\| heads\.length === 0 \? productionHeadKey : heads\[0\]/);
+  assert.match(block, /const isHeadAnywhere = /);
+  assert.match(block, /isHeadAnywhere \|\| heads\.length === 0 \? productionHeadKey : heads\[0\]/);
 });
 
 test("a department with no leader falls through to the Production Head", () => {
@@ -69,4 +69,17 @@ test("a department can be pointed at a head it is not filed under", () => {
   // ANN is filed under Fabric Sewing but also runs Fabric Cutting.
   assert.match(block, /\?map=FAB_CUT:/);
   assert.match(block, /leadersByDept\.set\(dept\.trim\(\), \[key\]\)/);
+});
+
+test("a leader is a peer of every other leader, wherever they are FILED", () => {
+  // ZAW LIN's primary department is Upholstery but he heads Framing. Checking
+  // only his OWN department made him a report of Upholstery's head — one
+  // Operator Leader under another, a rank nobody stated.
+  const src = readFileSync("src/api/routes/org-chart.ts", "utf8");
+  const b = src.slice(
+    src.indexOf('app.post("/auto-wire-production"'),
+    src.indexOf('app.put("/reporting"'),
+  );
+  assert.match(b, /const isHeadAnywhere = \[\.\.\.leadersByDept\.values\(\)\]\.some\(\(ks\) => ks\.includes\(w\.key\)\)/);
+  assert.doesNotMatch(b, /const isHeadHere = heads\.includes\(w\.key\);/);
 });

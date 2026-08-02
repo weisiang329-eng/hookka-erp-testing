@@ -286,9 +286,13 @@ app.post("/auto-wire-production", async (c) => {
     if (w.key === productionHeadKey) continue;
     const dept = (w.departmentCode || "").trim();
     const heads = leadersByDept.get(dept) ?? [];
-    const isHeadHere = heads.includes(w.key);
-    const manager = isHeadHere || heads.length === 0 ? productionHeadKey : heads[0];
-    const why = isHeadHere
+    // A leader is a PEER of every other leader, wherever they are filed.
+    // ZAW LIN's primary department is Upholstery but he heads Framing, so
+    // checking only his OWN department made him a report of Upholstery's head
+    // — one Operator Leader under another, a rank nobody stated.
+    const isHeadAnywhere = [...leadersByDept.values()].some((ks) => ks.includes(w.key));
+    const manager = isHeadAnywhere || heads.length === 0 ? productionHeadKey : heads[0];
+    const why = isHeadAnywhere
       ? `${dept} head → Production Head`
       : heads.length === 0
         ? `${dept} has no leader → Production Head`

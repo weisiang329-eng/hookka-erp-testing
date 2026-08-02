@@ -108,13 +108,31 @@ export function overdueCountsCacheKey(
 }
 
 const app = new Hono<Env>();
-app.get("/overdue-counts", async (c) => {
+// ---------------------------------------------------------------------------
+// The overdue-counts computation, callable directly.
+//
+// The warm cron used to reach this through app.request("/overdue-counts"), so
+// that the payload and the cache key could not drift from what the page reads.
+// Sound idea, broken in practice: a synthetic sub-request gets a FRESH Hono
+// context whose c.var is empty — the DB binding is attached by middleware on
+// the parent app, not on this router — so every warm call threw and came back
+// 500. It had never warmed a single key (measured 2026-08-02: overview:500,
+// FAB_CUT:500, … all ten), which is why the endpoint still sat at p50 ~8s and
+// p95 30s (the client abort) after the warmer shipped.
+//
+// Extracting it keeps the original guarantee — ONE body, ONE cache key, used
+// by both the route and the cron — while the cron passes the real context it
+// already holds and names the department as an argument rather than faking a
+// query string onto a synthetic request.
+// ---------------------------------------------------------------------------
+export async function computeOverdueCounts(
+  c: Context<Env>,
+  /** Department, or null for the Overview variant. */
+  deptArg: string | null,
+): Promise<unknown> {
   const orgId = getOrgId(c);
-  const deptParam = c.req.query("dept");
   const dept =
-    deptParam && deptParam.trim().length > 0
-      ? deptParam.trim().toUpperCase()
-      : null;
+    deptArg && deptArg.trim().length > 0 ? deptArg.trim().toUpperCase() : null;
   const today = overdueTodayUtc();
 
   // PR 7 — cache-aside snapshot. cache_key encodes both the dept
@@ -358,7 +376,12 @@ app.get("/overdue-counts", async (c) => {
     },
     cacheKey,
   );
-  return c.json({ success: true, ...result });
+  return result;
+}
+
+app.get("/overdue-counts", async (c) => {
+  const result = await computeOverdueCounts(c, c.req.query("dept") ?? null);
+  return c.json({ success: true, ...(result as object) });
 });
 
 
@@ -3471,10 +3494,17 @@ export default app;
 // it on open, so this was a second cold-snapshot endpoint alongside the dept
 // sheet fixed in #167 - the warm cron simply never covered it.
 //
-// Warms by invoking THIS router's own handler rather than re-implementing the
-// aggregation. That is the whole point: the payload and the cache key are then
-// produced by exactly the code the page hits, so they cannot drift apart the
-// way the reverted dept-sheet warmer did.
+// Calls computeOverdueCounts directly with the cron's own context. It used to
+// go through app.request("/overdue-counts") to guarantee the payload and cache
+// key matched what the page reads — right instinct, but a synthetic sub-request
+// gets an EMPTY c.var (the DB binding comes from middleware on the parent app),
+// so every call threw and returned 500. Measured 2026-08-02, the warm cron's own
+// output: {"overdueCounts":{"ok":false,"warmed":0,"failed":["overview:500",
+// "FAB_CUT:500", … all ten]}}. It had never warmed a key since it shipped,
+// which is why this endpoint stayed at p50 ~8s / p95 30s.
+//
+// The guarantee is kept a better way: both paths now call the SAME extracted
+// function, so there is only one body and one cache key to begin with.
 // ---------------------------------------------------------------------------
 export async function warmOverdueCounts(
   c: Context<Env>,
@@ -3485,15 +3515,11 @@ export async function warmOverdueCounts(
   // "" = the Overview variant (dept omitted), which the /production landing
   // page requests and which is the most expensive of the set.
   for (const dept of ["", ...depts]) {
-    const qs = dept ? `?dept=${encodeURIComponent(dept)}` : "";
     try {
-      const res = await app.request(
-        `/overdue-counts${qs}`,
-        { method: "GET" },
-        c.env as Record<string, unknown>,
-      );
-      if (res.ok) warmed++;
-      else failed.push(`${dept || "overview"}:${res.status}`);
+      // dept is passed as an argument, not faked onto a synthetic request —
+      // the context stays the real one, bindings and all.
+      await computeOverdueCounts(c, dept || null);
+      warmed++;
     } catch (e) {
       failed.push(`${dept || "overview"}:${e instanceof Error ? e.message : "throw"}`);
     }

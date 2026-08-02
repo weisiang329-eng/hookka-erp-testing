@@ -26,8 +26,15 @@ account_id = "816e457307d7fa0491c2a08a72ad5dcd"
 # delivery run go out within ~30 min even if GitHub drops their crons entirely)
 # and drains the proposals backlog twice as often, at zero extra agent-run cost.
 # CF free tier covers ~100k requests/day; 48 ticks/day is nothing.
+#
+# The */5 tick drives list warming (POST /api/internal/warm-lists). GitHub's
+# warm-lists.yml asks for */5 too, but measured 2026-08-02 it delivered roughly
+# ONE run an hour with 2h+ gaps — every production snapshot was 8h+ stale and
+# the dept sheets were paying a cold recompute on every open (p50 ~8s, p95 30s
+# = the client abort). Cloudflare fires on time; GitHub stays as a fallback.
+# The heartbeat stays on */30 — scheduled() branches on controller.cron.
 [triggers]
-crons = ["*/30 * * * *"]
+crons = ["*/30 * * * *", "*/5 * * * *"]
 
 # ERP heartbeat endpoint. Plain [vars] (not a secret) so it travels with the
 # deploy. The matching CRON_SECRET is a real secret — set it with
@@ -35,3 +42,4 @@ crons = ["*/30 * * * *"]
 # never here.
 [vars]
 HEARTBEAT_URL = "https://erp.hookka.com/api/internal/agents/heartbeat"
+WARM_LISTS_URL = "https://erp.hookka.com/api/internal/warm-lists"

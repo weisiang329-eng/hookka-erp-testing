@@ -74,17 +74,51 @@ test("the day is UTC here - NOT the MYT day the dept sheet key uses", async () =
   );
 });
 
-test("the warmer replays the real handler instead of copying its SQL", () => {
+// ---------------------------------------------------------------------------
+// This block used to assert `await app.request("/overdue-counts…")` — i.e. it
+// pinned the MECHANISM, and the mechanism did not work. A synthetic Hono
+// sub-request gets a fresh context with an EMPTY c.var, and the DB binding is
+// attached by middleware on the PARENT app, so the handler threw every time.
+// The cron's own output on 2026-08-02:
+//
+//   "overdueCounts":{"ok":false,"warmed":0,"failed":["overview:500",
+//     "FAB_CUT:500","FAB_SEW:500","WOOD_CUT:500","FOAM_CUTTING:500","FOAM:500",
+//     "FRAMING:500","WEBBING:500","UPHOLSTERY:500","PACKING:500"]}
+//
+// Not one key had ever been warmed, which is why p50 stayed at ~8s after the
+// warmer "shipped" — and this test was green throughout. It now pins the
+// GUARANTEE (one body, one key, shared by route and cron) and forbids the
+// broken call shape.
+// ---------------------------------------------------------------------------
+test("the warmer shares the route's computation — without faking a request", () => {
   const f = flat("src/api/routes/production-orders.ts");
   assert.match(f, /export async function warmOverdueCounts\(/);
-  // Reusing app.request means payload AND key come from the code the page hits.
+  const warmer = f.slice(f.indexOf("export async function warmOverdueCounts("));
+  const body = warmer.slice(0, warmer.indexOf("return { warmed, failed }"));
+  assert.ok(
+    !body.includes("app.request("),
+    "app.request drops c.var (the DB binding) — every warm call 500s",
+  );
   assert.match(
-    f,
-    /await app\.request\( `\/overdue-counts\$\{qs\}`/,
-    "the warmer must invoke the route, not re-implement the aggregation",
+    body,
+    /computeOverdueCounts\(c, dept \|\| null\)/,
+    "the warmer must call the shared computation with the REAL context",
+  );
+  // Same function behind the route, so payload and cache key cannot drift.
+  assert.match(
+    f.slice(f.indexOf('app.get("/overdue-counts"')).slice(0, 400),
+    /computeOverdueCounts\(c,/,
+    "the route must delegate to the same function",
   );
   // Overview ("" = dept omitted) must be warmed too - it is the priciest one.
   assert.match(f, /for \(const dept of \["", \.\.\.depts\]\)/);
+});
+
+test("a warm failure is still counted and reported", () => {
+  // `ok:false` in the cron output is the only reason this was ever found.
+  const f = flat("src/api/routes/production-orders.ts");
+  const warmer = f.slice(f.indexOf("export async function warmOverdueCounts("));
+  assert.match(warmer.slice(0, 900), /failed\.push\(/);
 });
 
 test("the cron warms it, and one bad dept cannot abort the rest", () => {

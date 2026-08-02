@@ -40,6 +40,9 @@ interface Env {
   // The ERP heartbeat endpoint. Plain var (not a secret) so it travels with the
   // deploy: https://erp.hookka.com/api/internal/agents/heartbeat
   HEARTBEAT_URL: string;
+  // The ERP list-warming endpoint. Same CRON_SECRET. Plain var so it travels
+  // with the deploy: https://erp.hookka.com/api/internal/warm-lists
+  WARM_LISTS_URL: string;
 }
 
 // Minimal local shapes so this type-checks without @cloudflare/workers-types.
@@ -75,10 +78,50 @@ async function beat(env: Env): Promise<void> {
   console.log(`[hookka-agent-heartbeat] ${res.status} ${body}`.trim());
 }
 
+// ---------------------------------------------------------------------------
+// List warming — the second thing GitHub cron was failing to drive.
+//
+// .github/workflows/warm-lists.yml asks for `*/5 * * * *`. What GitHub actually
+// delivered, measured 2026-08-02: roughly ONE run per hour, with 2h+ gaps
+// (06:17 → 08:36, 12:39 → 14:13) and a 2-hour hole at the time of measurement.
+// 288 scheduled ticks a day, ~20 real ones. Every production snapshot row was
+// over eight hours old and not one was under ten minutes.
+//
+// That is the same disease this worker already exists to cure for the agent
+// heartbeat (see the header: GitHub drifted 1–3.5h there). Cloudflare Cron
+// Triggers fire on time, so the warm tick moves here too. The GitHub workflow
+// stays as a fallback — the endpoint is idempotent, so double-firing is a no-op.
+// ---------------------------------------------------------------------------
+async function warmLists(env: Env): Promise<void> {
+  if (!env.CRON_SECRET || env.CRON_SECRET.length < 16) {
+    throw new Error(
+      "[hookka-agent-heartbeat] CRON_SECRET unset or too short — run `wrangler secret put CRON_SECRET`",
+    );
+  }
+  const url = env.WARM_LISTS_URL || "https://erp.hookka.com/api/internal/warm-lists";
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-cron-secret": env.CRON_SECRET },
+    body: "{}",
+  });
+  const body = await res.text().catch(() => "");
+  if (!res.ok) {
+    throw new Error(`warm-lists POST failed: ${res.status} ${res.statusText} ${body}`.trim());
+  }
+  // Logged in full: the per-warmer ok/failed map in this body is how the
+  // overdue-counts warmer was caught returning 500 on all ten variants.
+  console.log(`[hookka-agent-heartbeat] warm-lists ${res.status} ${body}`.trim());
+}
+
 export default {
   // Cloudflare invokes this on every cron tick declared in wrangler.toml.
-  async scheduled(_c: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(beat(env));
+  // Two schedules are declared; `controller.cron` says which one fired.
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Warming runs on the 5-minute tick. The heartbeat keeps its own 30-minute
+    // cadence — it self-throttles anyway, but there is no reason to beat it 6×
+    // more often just because warming needs to be frequent.
+    ctx.waitUntil(warmLists(env));
+    if (controller.cron !== "*/5 * * * *") ctx.waitUntil(beat(env));
   },
 
   // Optional manual trigger: `curl https://<worker-url>/` (or the dashboard's

@@ -36,24 +36,36 @@ function read(p) {
   return readFileSync(p, "utf8");
 }
 
-// Isolate the overdue-counts handler so the assertions only inspect that
-// route, not the rest of the ~7k-line file. The handler runs from its
-// `app.get("/overdue-counts"` registration to the next `app.get(`/`app.post(`.
+// Isolate the overdue-counts computation so the assertions only inspect it,
+// not the rest of the ~7k-line file.
+//
+// It used to live inline in the `app.get("/overdue-counts")` handler. On
+// 2026-08-02 the body moved into `computeOverdueCounts` so the warm cron could
+// call it with a real context — the cron had been reaching it through
+// `app.request()`, which hands the handler an EMPTY c.var and therefore 500'd
+// on all ten variants, every run, since it shipped. The route is now a
+// two-line delegate, so slicing from the route registration finds nothing;
+// slice from the function instead. Every invariant below is unchanged.
 function extractOverdueHandler(src) {
-  const start = src.indexOf('app.get("/overdue-counts"');
+  const start = src.indexOf("export async function computeOverdueCounts(");
   if (start < 0) return null;
   const after = src.slice(start + 1);
-  const nextDecl = after.search(/\napp\.(get|post|put|patch|delete)\(/);
+  const nextDecl = after.search(/\n(app\.(get|post|put|patch|delete)\(|export (async )?function )/);
   return nextDecl < 0 ? src.slice(start) : src.slice(start, start + 1 + nextDecl);
 }
 
-test("overdue-counts handler exists", () => {
-  const h = extractOverdueHandler(read(SRC));
+test("the overdue-counts computation exists and the route delegates to it", () => {
+  const src = read(SRC);
+  const h = extractOverdueHandler(src);
   assert.ok(
     h,
-    'Could not find `app.get("/overdue-counts"` in production-orders.ts. ' +
+    "Could not find `computeOverdueCounts` in production-orders.ts. " +
       "If it was renamed/restructured, update this test — but the invariants below must still hold.",
   );
+  // Route and warm cron must both go through it, or the cached payload and the
+  // cache key can drift apart again.
+  const route = src.slice(src.indexOf('app.get("/overdue-counts"'));
+  assert.match(route.slice(0, 400), /computeOverdueCounts\(c,/);
 });
 
 // ---------------------------------------------------------------------------

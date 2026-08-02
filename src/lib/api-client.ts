@@ -177,5 +177,37 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     window.location.href = `/login?next=${encodeURIComponent(intended)}`;
   }
 
+  // ---- movementErrors --------------------------------------------------
+  // Some writes commit the DOCUMENT and then fail a downstream MOVEMENT: a
+  // job card saves but the raw-material consume and its cost-ledger row never
+  // happen; a PO saves but the sister company never gets its mirror order.
+  // Those cascades must not roll the document back — the cutting physically
+  // happened — but they used to be console.error only, so the operator saw a
+  // clean success and nobody ever found out. Routes now report them as
+  // `movementErrors` on an otherwise-200 body.
+  //
+  // Handled HERE rather than per call site so every future route that adopts
+  // the field is surfaced automatically. The response is cloned — reading the
+  // body here must not consume it for the caller.
+  if (isApiRequest(url) && response.ok) {
+    void (async () => {
+      try {
+        const ct = response.headers.get("content-type") ?? "";
+        if (!ct.includes("application/json")) return;
+        const body = (await response.clone().json()) as {
+          movementErrors?: unknown;
+        };
+        const errs = Array.isArray(body?.movementErrors)
+          ? body.movementErrors.filter((e): e is string => typeof e === "string")
+          : [];
+        for (const e of errs) window.dispatchEvent(
+          new CustomEvent("hookka:movement-error", { detail: e }),
+        );
+      } catch {
+        // A body that isn't readable/parsable is not a movement error.
+      }
+    })();
+  }
+
   return response;
 };

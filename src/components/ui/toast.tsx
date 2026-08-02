@@ -252,6 +252,24 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
+  // A write whose DOCUMENT saved but whose downstream MOVEMENT did not — a job
+  // card that saved while the raw-material consume and its cost-ledger row
+  // failed, a PO that saved while the sister company got no mirror order.
+  // api-client raises these off the response body so every route that adopts
+  // `movementErrors` is surfaced without touching its call site.
+  //
+  // WARNING, not error: the save itself really did succeed, and telling the
+  // operator it failed would be a different lie from the one this fixes.
+  useEffect(() => {
+    const onMovementError = (e: Event) => {
+      const detail = (e as CustomEvent<string>).detail;
+      if (typeof detail === "string" && detail) addToast("warning", detail);
+    };
+    window.addEventListener("hookka:movement-error", onMovementError);
+    return () =>
+      window.removeEventListener("hookka:movement-error", onMovementError);
+  }, [addToast]);
+
   const toast = {
     success: (message: string) => addToast("success", message),
     // Central safety net (owner directive): every error toast is run through

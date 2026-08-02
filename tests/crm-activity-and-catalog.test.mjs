@@ -87,8 +87,14 @@ test("the new columns reach prod through self-apply, not a migration file", () =
   // runSelfApply, so a real failure is logged with its statement and thrown
   // rather than swallowed and remembered as done.
   const r = route();
-  assert.match(r, /import \{ runSelfApply \} from "\.\.\/lib\/self-apply"/);
+  assert.match(r, /import \{ runSelfApply, memoizeSelfApply \} from "\.\.\/lib\/self-apply"/);
   assert.match(r, /runSelfApply\(\s*db[^,]*,\s*"customer-crm"/s);
+  // And the memo is a PROMISE that is dropped when the round fails — a boolean
+  // set after the awaits ran the whole block once per concurrent caller and had
+  // no rejection path. The sweep in self-apply-retry.test.mjs caught this file.
+  assert.match(r, /let tablesPending: Promise<void> \| null = null;/);
+  assert.match(r, /memoizeSelfApply\(/);
+  assert.doesNotMatch(r, /tablesEnsured/, "the boolean guard must not return");
 });
 
 // --- Lead catalog: model first, then multiselect -----------------------------

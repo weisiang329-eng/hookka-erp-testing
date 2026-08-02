@@ -34,9 +34,13 @@ test("hhmmToMinutes parses HH:MM and rejects garbage", () => {
   assert.equal(at(null), null);
 });
 
-test("roundOutMinute floors to the confirmed quarters (15→0 enforces >15)", () => {
+test("roundOutMinute floors to COMPLETED quarters — 15 earns 15", () => {
+  // HR via owner 2026-08-02: 「不满 15 分钟不算，要做满 15 分钟才会算 15 分钟」.
+  // The old table returned 0 for exactly 15 (a 2026-06-09 note read the rule as
+  // "must EXCEED 15"), so someone who stayed to precisely 18:15 was paid nothing.
   assert.equal(A.roundOutMinute(0), 0);
-  assert.equal(A.roundOutMinute(15), 0); // 15 → 0 (must EXCEED 15)
+  assert.equal(A.roundOutMinute(14), 0);
+  assert.equal(A.roundOutMinute(15), 15);
   assert.equal(A.roundOutMinute(16), 15);
   assert.equal(A.roundOutMinute(29), 15);
   assert.equal(A.roundOutMinute(30), 30);
@@ -63,20 +67,28 @@ test("late within the 10-min grace is forgiven (08:10 still full pay)", () => {
   assert.equal(d.shortfallMin, 0); // forgiven — no deduction
 });
 
-test("late beyond grace deducts from 08:00 (08:15 → 15 min short)", () => {
+test("15 minutes late is still WITHIN grace — nothing docked", () => {
+  // Grace is 15 (HR via owner 2026-08-02: 「允许员工迟到 15 分钟」). It was 10.
   const d = day("08:15", "18:00");
-  assert.equal(d.isLate, true);
-  assert.equal(d.lateMin, 15);
-  assert.equal(d.shortfallMin, 15);
+  assert.equal(d.isLate, false);
+  assert.equal(d.lateMin, 0);
+  assert.equal(d.shortfallMin, 0);
   assert.equal(d.otMin, 0);
 });
 
-test("11 min late = just over grace → rounds UP to a 15-min block (owner 2026-06-11)", () => {
-  // Lateness ceils to 15-min blocks: even 1 min into a block costs the block.
-  assert.equal(day("08:11", "18:00").shortfallMin, 15);
-  assert.equal(day("08:16", "18:00").shortfallMin, 30); // 16 min → next block
-  assert.equal(day("08:30", "18:00").shortfallMin, 30); // exact block boundary
-  assert.equal(day("08:31", "18:00").shortfallMin, 45);
+test("past grace, the ACTUAL minutes are docked — no block rounding", () => {
+  // 「当超过了 15 分钟，就会以分钟来计算，根据具体迟到了多少分钟来扣钱」.
+  // The grace stays a threshold, not a free allowance: 08:16 owes 16, not 1.
+  assert.equal(day("08:16", "18:00").shortfallMin, 16);
+  assert.equal(day("08:17", "18:00").shortfallMin, 17);
+  assert.equal(day("08:31", "18:00").shortfallMin, 31);
+  assert.equal(day("08:16", "18:00").lateMin, 16);
+});
+
+test("11 minutes late is inside the 15-minute grace", () => {
+  // Under the old 10-min grace + ceil-to-15 this cost a full 15 minutes.
+  assert.equal(day("08:11", "18:00").shortfallMin, 0);
+  assert.equal(day("08:11", "18:00").isLate, false);
 });
 
 test("leaving early is also a shortfall (17:30 → 30 min short), no grace", () => {
@@ -86,23 +98,26 @@ test("leaving early is also a shortfall (17:30 → 30 min short), no grace", () 
 });
 
 test("late + early are one combined shortfall, not double-counted", () => {
-  // 08:20 in (20 late) + 17:40 out (20 early) → 40 min short total.
+  // 08:20 in (20 late, past grace → charged as 20) + 17:40 out (20 early) = 40.
+  // Under the old ceil-to-15 the same day cost 50.
   const d = day("08:20", "17:40");
-  assert.equal(d.lateMin, 20); // raw lateness reported as-is
-  // Late 20 → penal 30 (ceiled block) + early 20 (exact) = 50 min short total.
-  assert.equal(d.shortfallMin, 50);
+  assert.equal(d.lateMin, 20);
+  assert.equal(d.shortfallMin, 40);
 });
 
-test("OT needs 30 min (owner 2026-07-04): 18:14/18:16/18:28/18:29 → 0, 18:30 → 30", () => {
+test("OT needs a COMPLETED 15 minutes (HR, owner 2026-08-02)", () => {
+  // 「只要做满 15 分钟，就会算 15 分钟的 OT … 做 20 分钟只算 15，做 29 分钟也
+  // 只算 15，做 30 分钟就算 30」. Between 2026-07-04 and 2026-08-02 the floor
+  // was 30, so every one of these except the last paid nothing.
   assert.equal(day("08:00", "18:14").otMin, 0);
-  assert.equal(day("08:00", "18:15").otMin, 0);
-  assert.equal(day("08:00", "18:16").otMin, 0); // was 15 pre-2026-07-04
-  assert.equal(day("08:00", "18:28").otMin, 0); // the owner's exact example
+  assert.equal(day("08:00", "18:15").otMin, 15);
+  assert.equal(day("08:00", "18:20").otMin, 15);
+  assert.equal(day("08:00", "18:29").otMin, 15);
   assert.equal(day("08:00", "18:30").otMin, 30);
 });
 
 test("OT rounding within the hour (18:30→30, 18:45→45, 18:59→45)", () => {
-  assert.equal(day("08:00", "18:29").otMin, 0); // below the 30-min OT threshold
+  assert.equal(day("08:00", "18:29").otMin, 15); // one completed quarter
   assert.equal(day("08:00", "18:30").otMin, 30);
   assert.equal(day("08:00", "18:44").otMin, 30);
   assert.equal(day("08:00", "18:45").otMin, 45); // the table's deciding case
@@ -140,21 +155,24 @@ test("OT smaller than the shortfall -> only the remainder is docked (08:30 -> 18
   const d = day("08:30", "18:35");
   assert.equal(d.otMin, 30);
   assert.equal(d.shortfallMin, 0);
-  // Sub-30-min tail no longer counts at all (owner 2026-07-04): 18:20 out is
-  // 0 OT, so the full 30-min morning gap is docked.
+  // A completed quarter DOES count now (HR, 2026-08-02): 18:20 out is 15 min
+  // of OT, which offsets 15 of the 30-minute morning gap. Under the 30-minute
+  // floor this tail was worth nothing and the whole 30 was docked.
   const e = day("08:30", "18:20");
-  assert.equal(e.otMin, 0);
-  assert.equal(e.shortfallMin, 30);
+  assert.equal(e.otMin, 15);
+  assert.equal(e.shortfallMin, 15);
 });
 
 // ── Lunch (12:00–13:00) is deducted only for the overlap with the worked
 //    window — owner 2026-06-28: arrive after 1pm and you missed the break, so
 //    it isn't docked; you just came a half day. ──────────────────────────────
 test("arrive AFTER lunch (13:58 -> 18:00) -> NO lunch deducted (owner 2026-06-28)", () => {
-  // 13:58 ceils to 14:00; lunch window is entirely before the shift, 0 overlap
-  // -> 18:00-14:00 = 4h (was 3h when the hour was always cut).
+  // Lateness is charged to the MINUTE now, so 13:58 is 13:58 — it no longer
+  // ceils to 14:00, and the day is 4h02m rather than a rounded 4h. The point of
+  // the case is unchanged: the lunch window is entirely before the shift, so
+  // zero overlap and no hour is cut.
   const d = day("13:58", "18:00");
-  assert.equal(d.regularWorkMin, 4 * 60);
+  assert.equal(d.regularWorkMin, 4 * 60 + 2);
 });
 
 test("arrive DURING lunch (12:30 -> 18:00) -> only the remaining 30 min drops", () => {
@@ -173,9 +191,11 @@ test("leave BEFORE lunch (08:00 -> 11:00) -> no lunch deducted (none taken)", ()
 // engine's logged-hours path, the worker's own My Pay screen and the office
 // attendance grid — and only the punch applied the 30-minute minimum. A worker
 // could see 0.02h of overtime on their phone for a day the payslip paid nothing.
-test("otMinutesAtLeastMinimum: below 30 minutes earns nothing", () => {
+test("otMinutesAtLeastMinimum: below ONE completed block earns nothing", () => {
   assert.equal(A.otMinutesAtLeastMinimum(1), 0);
-  assert.equal(A.otMinutesAtLeastMinimum(29), 0);
+  assert.equal(A.otMinutesAtLeastMinimum(14), 0);
+  assert.equal(A.otMinutesAtLeastMinimum(15), 15);
+  assert.equal(A.otMinutesAtLeastMinimum(29), 15);
   assert.equal(A.otMinutesAtLeastMinimum(0), 0);
   assert.equal(A.otMinutesAtLeastMinimum(-5), 0);
 });
@@ -187,9 +207,15 @@ test("otMinutesAtLeastMinimum: 30 minutes and up is paid in full", () => {
 });
 
 test("otMinutesAtLeastMinimum agrees with the punch path at the boundary", () => {
-  // 18:29 punch-out → 0 OT; 18:30 → 30 min. The two must not disagree.
-  assert.equal(A.computeAttendanceDay(8 * 60, 18 * 60 + 29).otMin, 0);
-  assert.equal(A.otMinutesAtLeastMinimum(29), 0);
-  assert.equal(A.computeAttendanceDay(8 * 60, 18 * 60 + 30).otMin, 30);
-  assert.equal(A.otMinutesAtLeastMinimum(30), 30);
+  // The punch path and the logged-hours path must never disagree — a worker
+  // seeing OT on their phone that the payslip does not pay is the bug this
+  // shared helper exists to prevent.
+  for (const [mins, want] of [[14, 0], [15, 15], [29, 15], [30, 30], [44, 30], [45, 45]]) {
+    assert.equal(
+      A.computeAttendanceDay(8 * 60, 18 * 60 + mins).otMin,
+      want,
+      `punch path at 18:${String(mins).padStart(2, "0")}`,
+    );
+    assert.equal(A.otMinutesAtLeastMinimum(mins), want, `logged-hours path at ${mins}`);
+  }
 });

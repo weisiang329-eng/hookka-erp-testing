@@ -144,7 +144,17 @@ export function computePunchShortfallHours(
   // absence the same day already carried: RM149.81 for one attended day.
   // Treating it as no evidence leaves the day to the absence rule / the office,
   // which is the safe direction this module is built around.
-  if (day.regularWorkMin <= 0 && day.otMin <= 0) {
+  //
+  // The threshold is ONE overtime block (15 min), not zero. It used to be zero
+  // and it worked only by accident: lateness ceiled to 15-minute blocks, so a
+  // 17:50 arrival landed exactly on 18:00 and produced precisely 0 payable
+  // minutes. Charging lateness to the MINUTE (HR, 2026-08-02) leaves that same
+  // punch with 10 payable minutes — the guard stopped firing and the day was
+  // docked 8.83h. Anchoring on the OT block keeps the protection from depending
+  // on a rounding side effect, and reuses a unit HR already defines rather than
+  // inventing a new one.
+  const brokenPunchMin = rules.otBlockMin ?? 15;
+  if (day.regularWorkMin < brokenPunchMin && day.otMin <= 0) {
     return { valid: false, hasClockOut: true, shortfallHours: 0, lateMin: day.lateMin, otMin: 0 };
   }
   const shortfallHours = Math.round((day.shortfallMin / 60) * 100) / 100;

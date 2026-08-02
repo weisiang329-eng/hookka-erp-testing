@@ -114,14 +114,22 @@ test("leaving an hour early 08:00–17:00 → 1.0h shortfall", () => {
   assert.equal(r.shortfallHours, 1);
 });
 
-test("late 12 min (past grace) 08:12–18:00 → ceiled to a 15-min block = 0.25h, lateMin 12", () => {
-  // Owner 2026-06-11: penal lateness rounds UP to 15-min blocks.
+test("12 min late is INSIDE the 15-minute grace — nothing docked", () => {
+  // HR via owner 2026-08-02: grace is 15, not 10. Under the old 10-min grace
+  // plus ceil-to-15 this same punch cost a quarter of an hour.
   const r = dock.computePunchShortfallHours("08:12", "18:00");
-  assert.equal(r.lateMin, 12);
-  assert.equal(r.shortfallHours, 0.25);
+  assert.equal(r.lateMin, 0);
+  assert.equal(r.shortfallHours, 0);
 });
 
-test("late within the 10-min grace 08:08–18:00 → no shortfall, no late", () => {
+test("past the grace, the ACTUAL minutes are docked — 08:24 owes 24, not 30", () => {
+  // 「以分钟来计算，根据具体迟到了多少分钟来扣钱」. Ceil-to-15 charged 30.
+  const r = dock.computePunchShortfallHours("08:24", "18:00");
+  assert.equal(r.lateMin, 24);
+  assert.equal(r.shortfallHours, 0.4); // 24/60
+});
+
+test("late within the grace 08:08–18:00 → no shortfall, no late", () => {
   const r = dock.computePunchShortfallHours("08:08", "18:00");
   assert.equal(r.lateMin, 0);
   assert.equal(r.shortfallHours, 0);
@@ -166,18 +174,18 @@ test("clean late/short day → applies an AUTO dock with the shortfall hours", a
   const res = await dock.maybeApplyAutoPunchDock(db, {
     workerId: "W1",
     date: "2026-06-03",
-    clockIn: "08:12",
+    clockIn: "08:24",
     clockOut: "18:00",
   });
   assert.equal(res.applied, true);
   assert.equal(res.reason, "applied");
-  assert.equal(res.hours, 0.25);
+  assert.equal(res.hours, 0.4); // 24 real minutes, not a ceiled 30
   assert.equal(db.__calls.inserts.length, 1);
   const ins = db.__calls.inserts[0];
   // INSERT (id, workerId, date, hours, note, source)
   assert.equal(ins.bound[1], "W1");
   assert.equal(ins.bound[2], "2026-06-03");
-  assert.equal(ins.bound[3], 0.25);
+  assert.equal(ins.bound[3], 0.4);
   assert.equal(ins.bound[5], dock.AUTO_DOCK_SOURCE);
 });
 

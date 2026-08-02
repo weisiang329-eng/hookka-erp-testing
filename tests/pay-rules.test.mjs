@@ -178,7 +178,10 @@ test("toAttendanceRules: a 15-min grace version makes 08:12 on-time", () => {
   const d = att.computeAttendanceDay(8 * 60 + 12, 18 * 60, rules);
   assert.equal(d.isLate, false);
   assert.equal(d.shortfallMin, 0);
-  // Default grace (10): 08:12 is late → ceiled to a 15-min block.
+  // The DEFAULT grace is now 15 too, so the same punch is on-time either way.
+  // A stricter stored version still bites: grace 10, charged to the minute.
   const d0 = att.computeAttendanceDay(8 * 60 + 12, 18 * 60);
-  assert.equal(d0.shortfallMin, 15);
+  assert.equal(d0.shortfallMin, 0);
+  const strict = pr.toAttendanceRules(pr.normalizePayRules({ lateGraceMin: 10, lateBlockMin: 1 }));
+  assert.equal(att.computeAttendanceDay(8 * 60 + 12, 18 * 60, strict).shortfallMin, 12);
 });

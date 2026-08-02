@@ -9469,6 +9469,38 @@ app.get("/dashboard", async (c) => {
   const wanted = Math.min(24, Math.max(2, parseInt(c.req.query("periods") ?? "12", 10) || 12));
   const nowYm = new Date().toISOString().slice(0, 7);
 
+  // Cache-aside + serve-stale-while-revalidate. This endpoint replays
+  // computePnlWindow for up to 12 months plus a per-month cost-structure pass,
+  // so it measured ~1,950ms on EVERY call (not a cold-snapshot miss — it never
+  // cached). withSnapshot serves the last computed copy instantly and refreshes
+  // in the background whenever a source table changes; the doc comment names
+  // dashboards as an acceptable SWR target because the figures self-heal on the
+  // next revalidation. cacheKey partitions by (granularity, periods, month) so
+  // switching the range never serves another range's numbers, and the month
+  // component forces a natural rebuild when the calendar rolls over.
+  const { withSnapshot } = await import("../lib/snapshot");
+  const dashOrgId = getOrgId(c);
+  const dashCacheKey = `${quarterly ? "q" : "m"}:${wanted}:${nowYm}:${dashOrgId}`;
+  const dashPayload = await withSnapshot(
+    c.var.DB,
+    {
+      tableName: "accounting_dashboard_snapshot",
+      // Every table the P&L + cost-structure replay reads. kv_config carries
+      // the opening date; a change to any of these must rebuild the snapshot.
+      sourceTables: [
+        "ledger_journal_entries",
+        "invoices",
+        "purchase_invoices",
+        "cost_ledger",
+        "grn_items",
+        "production_orders",
+        "delivery_orders",
+        "kv_config",
+      ],
+    },
+    dashOrgId,
+    async () => {
+
   // --- bucket list (oldest → newest), each with its member months ----------
   const monthsBack = quarterly ? wanted * 3 : wanted;
   const allMonths: string[] = [];
@@ -9794,10 +9826,17 @@ app.get("/dashboard", async (c) => {
   let first = 0;
   while (first < rows.length - 1 && !hasAny(rows[first])) first++;
 
-  return c.json({
-    success: true,
-    data: { granularity: quarterly ? "quarter" : "month", openingDate: openingRawDash, rows: rows.slice(first) },
-  });
+      return {
+        granularity: quarterly ? "quarter" : "month",
+        openingDate: openingRawDash,
+        rows: rows.slice(first),
+      };
+    },
+    dashCacheKey,
+    c,
+    { staleWhileRevalidate: true },
+  );
+  return c.json({ success: true, data: dashPayload });
 });
 
 // ---------------------------------------------------------------------------

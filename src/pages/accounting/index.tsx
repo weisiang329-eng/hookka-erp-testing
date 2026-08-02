@@ -2332,6 +2332,11 @@ function AgingCard({
 
 // =============== TAB 2: CHART OF ACCOUNTS ===============
 
+// Measured height of one Chart-of-Accounts tree row on prod (py-2 row).
+// Only used to size the DeferredBlock placeholder so the scrollbar holds
+// steady while an off-screen section is unmounted.
+const COA_ROW_PX = 37;
+
 function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh: () => void }) {
   const { toast } = useToast();
   const { confirm, confirmDialog } = useConfirm();
@@ -2903,9 +2908,17 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
             </div>
             {isExpanded && (
               <CardContent className="pt-0 pb-2">
-                <div className="border-t border-[#E2DDD8]">
-                  {treeTops.map((node) => renderNode(node, 0))}
-                </div>
+                {/* The CoA is 9 sections expanded by default; the whole tree
+                    is ~5,100 DOM nodes on prod (each account is a draggable
+                    row with nested handlers). No freeze — 218ms — but the
+                    off-screen sections need not build until scrolled to. Each
+                    row is ~37px; a placeholder holds the space so the page
+                    height and drag targets stay correct once mounted. */}
+                <DeferredBlock estimatedHeight={COA_ROW_PX * Math.max(1, typeAccounts.length)}>
+                  <div className="border-t border-[#E2DDD8]">
+                    {treeTops.map((node) => renderNode(node, 0))}
+                  </div>
+                </DeferredBlock>
               </CardContent>
             )}
           </Card>

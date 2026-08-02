@@ -216,7 +216,7 @@ app.get("/summary", async (c) => {
 
   // PR 7 — cache-aside snapshot. cache_key encodes the date window.
   const { getOrgId } = await import("../lib/tenant");
-  const { readSnapshot, writeSnapshot, getMaxSourceUpdatedAt, isSnapshotFresh } =
+  const { readSnapshot, writeSnapshot, getSourceSignature, isSnapshotFresh } =
     await import("../lib/snapshot");
   const orgId = getOrgId(c);
   const snapConfig = {
@@ -226,12 +226,13 @@ app.get("/summary", async (c) => {
   const cacheKey = `from=${from}&to=${to}`;
   const _snap_check = await Promise.all([
     readSnapshot(c.var.DB, snapConfig, orgId, cacheKey),
-    getMaxSourceUpdatedAt(c.var.DB, snapConfig),
+    getSourceSignature(c.var.DB, snapConfig.sourceTables),
   ]);
-  if (isSnapshotFresh(_snap_check[0], _snap_check[1]) && _snap_check[0]) {
+  if (isSnapshotFresh(_snap_check[0], _snap_check[1].maxUpdatedAt, _snap_check[1].rowCount) && _snap_check[0]) {
     return c.json({ success: true, ..._snap_check[0].data });
   }
-  const _snap_currentMax = _snap_check[1];
+  const _snap_currentMax = _snap_check[1].maxUpdatedAt;
+  const _snap_sourceRows = _snap_check[1].rowCount;
 
   // Aliases use snake_case so Postgres preserves them (unquoted identifiers
   // get folded to lowercase, breaking JS reads on camelCase aliases like
@@ -339,6 +340,7 @@ app.get("/summary", async (c) => {
       _snap_payload,
       _snap_currentMax ?? new Date().toISOString(),
       cacheKey,
+      _snap_sourceRows,
     );
   } catch (e) {
     console.warn("[job-cards-summary-snapshot] write-back failed:", e);

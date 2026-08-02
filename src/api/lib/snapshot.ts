@@ -193,6 +193,22 @@ export async function ensureSourceRowsColumn(
   }
 }
 
+/**
+ * Pull source_rows off a snapshot row, whichever casing the driver returned.
+ *
+ * Shared so the four modules that read snapshots WITHOUT going through
+ * withSnapshot (dashboard-snapshot, delivery-snapshot, invoice-snapshot,
+ * worker-perf) cannot each get the dual-key wrong in their own way. Absent or
+ * unparseable means "unknown", which isSnapshotFresh treats as stale-once.
+ */
+export function pickSourceRows(row: Record<string, unknown> | null): number | null {
+  if (!row) return null;
+  const v = row.sourceRows ?? row.source_rows;
+  if (v === null || v === undefined) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 /** For tests — drop the per-table migration cache. */
 export function _resetSourceRowsMigForTests(): void {
   _rowsColReady.clear();

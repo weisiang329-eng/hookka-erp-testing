@@ -112,7 +112,7 @@ app.get("/", async (c) => {
   // Read-then-fallthrough pattern (vs withSnapshot wrap) keeps the
   // 360-line compute below at its original indent level.
   const { getOrgId } = await import("../lib/tenant");
-  const { readSnapshot, writeSnapshot, getMaxSourceUpdatedAt, isSnapshotFresh } =
+  const { readSnapshot, writeSnapshot, getSourceSignature, isSnapshotFresh } =
     await import("../lib/snapshot");
   const orgId = getOrgId(c);
   const snapConfig = {
@@ -126,12 +126,13 @@ app.get("/", async (c) => {
   const cacheKey = `from=${fromStr}&to=${toStr}&dept=${departmentCode ?? ""}&cat=${category ?? ""}`;
   const _snap_check = await Promise.all([
     readSnapshot(c.var.DB, snapConfig, orgId, cacheKey),
-    getMaxSourceUpdatedAt(c.var.DB, snapConfig),
+    getSourceSignature(c.var.DB, snapConfig.sourceTables),
   ]);
-  if (isSnapshotFresh(_snap_check[0], _snap_check[1]) && _snap_check[0]) {
+  if (isSnapshotFresh(_snap_check[0], _snap_check[1].maxUpdatedAt, _snap_check[1].rowCount) && _snap_check[0]) {
     return c.json({ success: true, ..._snap_check[0].data });
   }
-  const _snap_currentMax = _snap_check[1];
+  const _snap_currentMax = _snap_check[1].maxUpdatedAt;
+  const _snap_sourceRows = _snap_check[1].rowCount;
 
   // ---- Per-date accumulators.
   type WorkerJobCell = {
@@ -619,6 +620,7 @@ app.get("/", async (c) => {
       _snap_payload,
       _snap_currentMax ?? new Date().toISOString(),
       cacheKey,
+      _snap_sourceRows,
     );
   } catch (e) {
     console.warn("[department-performance-snapshot] write-back failed:", e);

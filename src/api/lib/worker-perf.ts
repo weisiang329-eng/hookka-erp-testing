@@ -28,7 +28,8 @@
 //      rebuild. nightly-wipe philosophy carries from the shared snapshot layer.
 // ---------------------------------------------------------------------------
 
-import { getMaxSourceUpdatedAt } from "./snapshot-freshness";
+import { getSourceSignature } from "./snapshot-freshness";
+import { ensureSourceRowsColumn, pickSourceRows } from "./snapshot";
 import {
   computeMonthlyEfficiencyByWorker,
   type WorkerMonthlyEfficiency,
@@ -195,12 +196,11 @@ async function readWorkerSnapshot(
 ): Promise<SnapRow | null> {
   const row = await db
     .prepare(
-      `SELECT data, built_from AS "builtFrom"
-         FROM ${tableName}
-        WHERE org_id = ? AND cache_key = ?`,
+      // Star select + no schema work on the read — see lib/snapshot.ts.
+      `SELECT * FROM ${tableName} WHERE org_id = ? AND cache_key = ?`,
     )
     .bind(orgId, cacheKey)
-    .first<{ data: string; builtFrom: string }>();
+    .first<Record<string, unknown> & { data: string; builtFrom?: string; built_from?: string }>();
   if (!row) return null;
   let parsed: Record<string, unknown>;
   try {
@@ -211,7 +211,11 @@ async function readWorkerSnapshot(
   } catch {
     return null;
   }
-  return { data: parsed, builtFrom: row.builtFrom };
+  return {
+    data: parsed,
+    builtFrom: (row.builtFrom ?? row.built_from) as string,
+    sourceRows: pickSourceRows(row),
+  };
 }
 
 async function writeWorkerSnapshot(
@@ -221,10 +225,22 @@ async function writeWorkerSnapshot(
   cacheKey: string,
   data: Record<string, unknown>,
   builtFrom: string,
+  sourceRows: number | null = null,
 ): Promise<void> {
+  // Schema work on the WRITE only.
+  const withRows = await ensureSourceRowsColumn(db as never, tableName);
   await db
     .prepare(
-      `INSERT INTO ${tableName} (org_id, cache_key, data, built_from, built_at, refresh_count)
+      withRows
+        ? `INSERT INTO ${tableName} (org_id, cache_key, data, built_from, built_at, refresh_count, source_rows)
+       VALUES (?, ?, ?, ?, ?, 1, ?)
+       ON CONFLICT (org_id, cache_key) DO UPDATE
+       SET data = EXCLUDED.data,
+           built_from = EXCLUDED.built_from,
+           built_at = EXCLUDED.built_at,
+           source_rows = EXCLUDED.source_rows,
+           refresh_count = ${tableName}.refresh_count + 1`
+        : `INSERT INTO ${tableName} (org_id, cache_key, data, built_from, built_at, refresh_count)
        VALUES (?, ?, ?, ?, ?, 1)
        ON CONFLICT (org_id, cache_key) DO UPDATE
        SET data = EXCLUDED.data,
@@ -232,15 +248,26 @@ async function writeWorkerSnapshot(
            built_at = EXCLUDED.built_at,
            refresh_count = ${tableName}.refresh_count + 1`,
     )
-    .bind(orgId, cacheKey, JSON.stringify(data), builtFrom, new Date().toISOString())
+    .bind(...(withRows
+      ? [orgId, cacheKey, JSON.stringify(data), builtFrom, new Date().toISOString(), sourceRows]
+      : [orgId, cacheKey, JSON.stringify(data), builtFrom, new Date().toISOString()]))
     .run();
 }
 
 // Type-aware freshness compare — pg returns TIMESTAMP cols as Date and MAX over
 // TEXT cols as string; parse both to ms before comparing. (Same rule as
 // lib/snapshot.ts isSnapshotFresh — see that file for the incident writeup.)
-function isFresh(snap: SnapRow | null, currentMax: string | null): boolean {
+function isFresh(
+  snap: SnapRow | null,
+  currentMax: string | null,
+  /** COUNT(*) now — the only signal that perceives a DELETE. */
+  currentRows?: number | null,
+): boolean {
   if (!snap) return false;
+  if (currentRows !== undefined && currentRows !== null) {
+    if (snap.sourceRows === null) return false;   // pre-column row: rebuild once
+    if (snap.sourceRows !== currentRows) return false;
+  }
   if (!currentMax) return true;
   const builtMs = new Date(snap.builtFrom as unknown as string).getTime();
   const currentMs = new Date(currentMax as unknown as string).getTime();
@@ -269,11 +296,12 @@ export async function withWorkerSnapshot<T extends Record<string, unknown>>(
   },
   computeFresh: () => Promise<T>,
 ): Promise<T> {
-  const [snap, currentMax] = await Promise.all([
+  const [snap, sig] = await Promise.all([
     readWorkerSnapshot(db, opts.tableName, opts.orgId, opts.cacheKey),
-    getMaxSourceUpdatedAt(db, opts.sourceTables),
+    getSourceSignature(db as never, opts.sourceTables),
   ]);
-  if (isFresh(snap, currentMax) && snap) {
+  const currentMax = sig.maxUpdatedAt;
+  if (isFresh(snap, currentMax, sig.rowCount) && snap) {
     return snap.data as T;
   }
   const data = await computeFresh();
@@ -285,6 +313,7 @@ export async function withWorkerSnapshot<T extends Record<string, unknown>>(
       opts.cacheKey,
       data,
       currentMax ?? new Date().toISOString(),
+      sig.rowCount,
     );
   } catch (e) {
     console.warn(`[${opts.tableName}] write-back failed:`, e);

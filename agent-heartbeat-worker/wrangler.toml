@@ -13,9 +13,23 @@ main = "src/index.ts"
 compatibility_date = "2026-04-01"
 compatibility_flags = ["nodejs_compat"]
 
-# account_id — the Hookka Cloudflare account (same one hookka-mail-inbound and
-# the Pages app deploy to). `wrangler whoami` confirms this id.
-account_id = "816e457307d7fa0491c2a08a72ad5dcd"
+# account_id is deliberately NOT pinned here.
+#
+# It used to say 816e4573… with the comment "same one the Pages app deploys to".
+# That was wrong, and it made the worker undeployable from CI: the repo's
+# CLOUDFLARE_API_TOKEN reaches exactly ONE account — 27cd35c9…b059, the one
+# .github/workflows/deploy.yml actually ships the Pages app to — so wrangler
+# answered a bare "Authentication error [code: 10000]" (measured 2026-08-02).
+#
+# The copy that is live today at hookka-agent-heartbeat.houzs-erp.workers.dev
+# sits on some third account nobody here can see, and it has never worked: it
+# answers `beat failed: CRON_SECRET unset or too short` on every tick, so it has
+# never sent the ERP a single request. It is inert, not a second driver.
+#
+# Leaving this unset means wrangler takes CLOUDFLARE_ACCOUNT_ID from the
+# environment — the same value the Pages deploy uses — so the worker lands
+# beside the app it drives instead of somewhere a laptop happened to be logged
+# into.
 
 # ---------------------------------------------------------------------------
 # Cron Trigger — the whole point of this worker.

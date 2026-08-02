@@ -67,34 +67,32 @@ jobs:
 
           echo "token itself valid ............ $(ok "$(api https://api.cloudflare.com/client/v4/user/tokens/verify)")"
 
-          toml_acct=$(grep -oE 'account_id = "[a-f0-9]+"' agent-heartbeat-worker/wrangler.toml | grep -oE '[a-f0-9]{32}')
-          if [ "$toml_acct" = "$CLOUDFLARE_ACCOUNT_ID" ]; then
-            echo "wrangler.toml account matches . YES"
-          else
-            echo "wrangler.toml account matches . NO  <-- toml says ${toml_acct}, secret says a different account"
+          # The toml must NOT pin an account — it did, to an account this token
+          # cannot reach, and that produced a bare "Authentication error
+          # [code: 10000]" with no hint which of the two was wrong.
+          if grep -qE '^account_id' agent-heartbeat-worker/wrangler.toml; then
+            echo "::error::wrangler.toml pins an account_id again. Remove it — the"
+            echo "::error::deploy must use CLOUDFLARE_ACCOUNT_ID, the account the Pages app ships to."
+            exit 1
           fi
+          echo "wrangler.toml pins no account .. YES (correct)"
 
           base="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
           echo "can read Pages projects ....... $(ok "$(api "$base/pages/projects")")"
           echo "can read Workers scripts ...... $(ok "$(api "$base/workers/scripts")")"
-          # Which account(s) does this token actually reach? That settles
-          # whether the toml or the secret is the wrong one. Ids are shown
-          # truncated — enough to compare, not enough to copy around.
           echo
-          echo "accounts this token can reach:"
+          echo "accounts this token can reach (ids truncated):"
           api https://api.cloudflare.com/client/v4/accounts \
             | grep -oE '"id":"[a-f0-9]{32}"' | grep -oE '[a-f0-9]{32}' \
             | while read -r id; do
                 mark=""
-                [ "$id" = "$toml_acct" ] && mark="  <-- matches wrangler.toml"
-                [ "$id" = "$CLOUDFLARE_ACCOUNT_ID" ] && mark="$mark  <-- matches the secret"
+                [ "$id" = "$CLOUDFLARE_ACCOUNT_ID" ] && mark="  <-- the one we deploy to"
                 echo "  ${id:0:8}…${id: -4}$mark"
               done
           echo
-          echo "Reading: if an account above matches NEITHER, the token belongs"
-          echo "somewhere else. If one matches the toml but not the secret, the"
-          echo "CLOUDFLARE_ACCOUNT_ID secret is stale. If Pages=YES/Workers=NO,"
-          echo "the token is Pages-scoped and needs Account -> Workers Scripts -> Edit."
+          echo "If 'can read Workers scripts' is NO, the token is Pages-scoped:"
+          echo "add Account -> Workers Scripts -> Edit at"
+          echo "https://dash.cloudflare.com/profile/api-tokens"
 
       - name: wrangler deploy
         working-directory: agent-heartbeat-worker

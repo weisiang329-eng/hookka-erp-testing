@@ -238,3 +238,28 @@ test("a MONTHLY worker still earns OT on the very same days", () => {
     "a DAILY rate sitting unused on a MONTHLY worker changes nothing",
   );
 });
+
+test("DAILY is not docked for short hours or lateness", () => {
+  // CHAU carries 5 auto short-hour/late rows. Under a day-rate agreement a day
+  // logged is a day paid — and a day rate has no hour rate inside it to dock
+  // FROM. Passing a large dock must change nothing.
+  const osc = { ...STAFF, basicSalarySen: 205000, payMode: "DAILY", dailyRateSen: 8500 };
+  const withDock = E.computeMonthlyLabor({
+    worker: osc, year: 2026, month: 7,
+    days: WORKING_DAYS.slice(0, 25).map((date) => ({ date, hours: 9 })),
+    publicHolidays: [], absenceThroughDay: "2026-07-31",
+    shortHourDeductionHours: 8,
+  });
+  assert.equal(withDock.payroll.shortHourDeductionSen, 0);
+  assert.equal(withDock.payroll.basicEarnedSen, 25 * 8500, "25 days logged, 25 days paid");
+});
+
+test("a MONTHLY worker IS still docked for short hours", () => {
+  const withDock = E.computeMonthlyLabor({
+    worker: STAFF, year: 2026, month: 7,
+    days: WORKING_DAYS.slice(0, 25).map((date) => ({ date, hours: 9 })),
+    publicHolidays: [], absenceThroughDay: "2026-07-31",
+    shortHourDeductionHours: 8,
+  });
+  assert.ok(withDock.payroll.shortHourDeductionSen > 0, "the hourly dock still applies to staff");
+});

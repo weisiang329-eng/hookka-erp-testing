@@ -768,19 +768,25 @@ export function computeMonthlyLabor(
   // Owner-flagged / punch-derived unworked hours dock at (salary ÷ 26) ÷ the
   // effective-dated hour divisor — the same RM7.88/h base the OT rate uses.
   const shortHourDeductionHours = Math.max(0, input.shortHourDeductionHours || 0);
-  const shortHourDeductionSen = Math.round(shortHourDeductionHours * lateHourlyRateSen);
-  // Daily: rate x days actually worked, then the same short-hour dock. There is
-  // no absence line to subtract — a day not worked simply is not paid.
+  // No hourly docking for a per-day worker. Owner 2026-08-02: 「打卡了几天，就会
+  // 算几天的薪水」 and 「根据你的日薪…去计算」. A day rate has no hour rate inside
+  // it to dock FROM — the deduction would be priced off basicSalarySen, which
+  // they do not have. CHAU carries 5 auto short-hour/late rows (16 min late on
+  // 06-29, 0.75h short on 07-09); under a day-rate agreement those do not
+  // reduce the day. Like the OT rule, this already came to zero because the
+  // hourly rate is zero — and like the OT rule, an accident is not a rule.
+  const shortHourDeductionSen = isDailyPaid
+    ? 0
+    : Math.round(shortHourDeductionHours * lateHourlyRateSen);
+  // Daily: rate x days actually worked. There is no absence line to subtract —
+  // a day not worked simply is not paid.
   // Deliberately `daysWorked`, NOT `workedWithinWindow`. The latter is clamped
   // by the absence window (elapsed working days), which is the right basis for
   // deciding what to DOCK but the wrong one for deciding what to PAY: a day
   // that falls outside that window would be worked and then not paid for. For
   // daily pay the rule is simply "days logged, days paid".
   const basicEarnedSen = isDailyPaid
-    ? Math.max(
-        0,
-        Math.round(daysWorked * (worker.dailyRateSen ?? 0)) - shortHourDeductionSen,
-      )
+    ? Math.max(0, Math.round(daysWorked * (worker.dailyRateSen ?? 0)))
     : Math.max(
         0,
         Math.max(0, basicSalarySen - absenceDeductionSen) - shortHourDeductionSen,

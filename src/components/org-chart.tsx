@@ -13,9 +13,9 @@
 // reporting line.
 // ---------------------------------------------------------------------------
 import { useCallback, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Network, Minus, Plus, Users } from "lucide-react";
+import { ChevronDown, ChevronRight, Network, Minus, Plus, Users, Pencil } from "lucide-react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import { buildOrgTree, countSubtree, type OrgNode, type OrgPerson } from "@/lib/org-people";
+import { type OrgPerson } from "@/lib/org-people";
 
 /**
  * Fallback column order, used only until the server's department list arrives
@@ -40,6 +40,9 @@ const DEPT_ORDER_FALLBACK = [
 ];
 
 const UNASSIGNED = "Unassigned";
+
+/** One stripe colour per department box, so neighbours are told apart. */
+const ACCENTS = ["#6B5C32", "#3E6570", "#2F6E62", "#8A5A6B", "#5A6B8A", "#8A7A3E"];
 
 type DeptMeta = { code: string; name: string; sequence: number };
 
@@ -98,41 +101,67 @@ export function OrgChart({ canManage }: Props) {
   const [showInactive, setShowInactive] = useState(false);
   const [saving, setSaving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** Which card has its reporting-line picker open. */
+  const [editing, setEditing] = useState<string | null>(null);
 
   const visible = useMemo(
     () => (showInactive ? people : people.filter((p) => p.active)),
     [people, showInactive],
   );
-
-  // One tree per department. A person's manager may sit in ANOTHER department
-  // (a Fab Cut operator under the Production Manager, an office lead under the
-  // GM) — that edge is real, so the tree is built ONCE across everyone and the
-  // columns then take whichever roots fall to them. Building per-column instead
-  // would silently re-root anyone whose manager is elsewhere.
-  const columns = useMemo(() => {
-    const roots = buildOrgTree(visible);
-    const byDept = new Map<string, OrgNode[]>();
-    const push = (d: string, n: OrgNode) => {
-      const arr = byDept.get(d) ?? [];
-      arr.push(n);
-      byDept.set(d, arr);
-    };
-    for (const r of roots) push(deptOf(r), r);
+  // ─── The board ───────────────────────────────────────────────────────────
+  //
+  // Owner 2026-08-02:「你那个设计很丑,我要像这样子的 Org Chart」, with the
+  // Houzs board attached. The first version drew a left-indented list of the
+  // reporting tree, which had two problems: it looks like a directory, and the
+  // moment everyone actually reports to one person it collapses into a single
+  // 44-deep column.
+  //
+  // So the BOARD groups by DEPARTMENT, and inside each department by POSITION —
+  // exactly what Houzs do (their `HELPER` / `DRIVER` / `STOREKEEPER` strips are
+  // position labels inside one department box, not reporting lines). The
+  // reporting line is edited on the card and drawn nowhere: a box is a grouping,
+  // a line is a relationship, and mixing them is what made the old one unusable.
+  const board = useMemo(() => {
+    const byDept = new Map<string, OrgPerson[]>();
+    for (const p of visible) {
+      const d = deptOf(p);
+      const arr = byDept.get(d);
+      if (arr) arr.push(p);
+      else byDept.set(d, [p]);
+    }
+    // Leaders lead. Anything with leader/head/manager/supervisor in its title
+    // sorts to the top of its box so the person in charge is the first card.
+    const posRank = (pos: string) =>
+      /head|manager/i.test(pos) ? 0 : /leader|supervisor/i.test(pos) ? 1 : 2;
     return [...byDept.entries()]
-      .map(([dept, nodes]) => ({
-        dept,
-        label: deptLabel(dept),
-        nodes,
-        headcount: nodes.reduce((s, n) => s + countSubtree(n), 0),
-      }))
+      .map(([dept, ppl]) => {
+        const byPos = new Map<string, OrgPerson[]>();
+        for (const p of ppl) {
+          const pos = (p.position || "").trim() || "—";
+          const arr = byPos.get(pos);
+          if (arr) arr.push(p);
+          else byPos.set(pos, [p]);
+        }
+        const groups = [...byPos.entries()]
+          .map(([position, members]) => ({
+            position,
+            members: [...members].sort((a, b) => a.name.localeCompare(b.name)),
+          }))
+          .sort(
+            (a, b) =>
+              posRank(a.position) - posRank(b.position) ||
+              a.position.localeCompare(b.position),
+          );
+        return { dept, label: deptLabel(dept), count: ppl.length, groups };
+      })
       .sort(
         (a, b) => deptRank(a.dept) - deptRank(b.dept) || a.label.localeCompare(b.label),
       );
   }, [visible, deptLabel, deptRank]);
 
   const totalOnChart = useMemo(
-    () => columns.reduce((s, c) => s + c.headcount, 0),
-    [columns],
+    () => board.reduce((s, c) => s + c.count, 0),
+    [board],
   );
 
   const toggle = useCallback((key: string) => {
@@ -143,17 +172,6 @@ export function OrgChart({ canManage }: Props) {
       return next;
     });
   }, []);
-
-  const collapseAll = useCallback(() => {
-    // Only nodes that HAVE children are worth collapsing.
-    const withKids = new Set<string>();
-    const walk = (n: OrgNode) => {
-      if (n.children.length) withKids.add(n.key);
-      n.children.forEach(walk);
-    };
-    columns.forEach((c) => c.nodes.forEach(walk));
-    setCollapsed(withKids);
-  }, [columns]);
 
   const setManager = useCallback(
     async (personKey: string, managerKey: string) => {
@@ -183,98 +201,35 @@ export function OrgChart({ canManage }: Props) {
     [refresh],
   );
 
-  // Manager picker options — everyone on the chart except the person and their
-  // own descendants (choosing one of those is exactly the loop the server
-  // rejects, so it should not be offered in the first place).
-  const pickerFor = useCallback(
-    (node: OrgNode) => {
-      const banned = new Set<string>([node.key]);
-      const mark = (n: OrgNode) => {
-        banned.add(n.key);
-        n.children.forEach(mark);
-      };
-      mark(node);
-      return visible
-        .filter((p) => !banned.has(p.key))
-        .sort((a, b) => a.name.localeCompare(b.name));
-    },
+  // Who this person may report to: everyone except themselves and anyone who
+  // already reports up through them — choosing one of those is exactly the loop
+  // the server rejects, so it is not offered.
+  const descendantsOf = useMemo(() => {
+    const kids = new Map<string, string[]>();
+    for (const p of visible) {
+      if (!p.managerKey) continue;
+      const arr = kids.get(p.managerKey);
+      if (arr) arr.push(p.key);
+      else kids.set(p.managerKey, [p.key]);
+    }
+    return (key: string) => {
+      const out = new Set<string>([key]);
+      const stack = [key];
+      while (stack.length) {
+        for (const c of kids.get(stack.pop()!) ?? []) {
+          if (out.has(c)) continue;
+          out.add(c);
+          stack.push(c);
+        }
+      }
+      return out;
+    };
+  }, [visible]);
+
+  const managerName = useCallback(
+    (key: string | null) => visible.find((p) => p.key === key)?.name ?? null,
     [visible],
   );
-
-  const renderNode = (node: OrgNode, depth: number) => {
-    const isCollapsed = collapsed.has(node.key);
-    const kids = node.children.length;
-    return (
-      <div key={node.key} style={{ marginLeft: depth === 0 ? 0 : 14 }}>
-        <div
-          className={`mb-1.5 rounded-md border bg-white px-2 py-1.5 ${
-            node.active ? "border-[#E2DDD8]" : "border-dashed border-[#D8D2CC] opacity-60"
-          }`}
-        >
-          <div className="flex items-start gap-2">
-            {kids > 0 ? (
-              <button
-                type="button"
-                onClick={() => toggle(node.key)}
-                className="mt-0.5 text-[#9CA3AF] hover:text-[#6B5C32]"
-                title={isCollapsed ? `Show ${kids} report(s)` : "Hide reports"}
-              >
-                {isCollapsed ? (
-                  <ChevronRight className="h-3.5 w-3.5" />
-                ) : (
-                  <ChevronDown className="h-3.5 w-3.5" />
-                )}
-              </button>
-            ) : (
-              <span className="mt-0.5 inline-block h-3.5 w-3.5" />
-            )}
-            <span
-              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
-                node.source === "worker"
-                  ? "bg-[#F0ECE9] text-[#6B5C32]"
-                  : "bg-[#E0EDF0] text-[#3E6570]"
-              }`}
-              title={node.source === "worker" ? "Factory employee" : "Office account"}
-            >
-              {initials(node.name)}
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-xs font-semibold text-[#1F1D1B]">
-                {node.name}
-              </div>
-              <div className="truncate text-[10px] text-[#6B7280]">
-                {node.position || "—"}
-                {node.ref ? ` · ${node.ref}` : ""}
-              </div>
-              {canManage && (
-                <select
-                  value={node.managerKey ?? ""}
-                  disabled={saving === node.key}
-                  onChange={(e) => setManager(node.key, e.target.value)}
-                  className="mt-1 h-6 w-full rounded border border-[#E2DDD8] bg-[#FBFAF8] px-1 text-[10px] text-[#6B7280]"
-                  title="Who this person reports to"
-                >
-                  <option value="">— no manager (top) —</option>
-                  {pickerFor(node).map((p) => (
-                    <option key={p.key} value={p.key}>
-                      {p.name}
-                      {p.position ? ` · ${p.position}` : ""}
-                    </option>
-                  ))}
-                </select>
-              )}
-            </div>
-            {kids > 0 && isCollapsed && (
-              <span className="mt-0.5 rounded-full bg-[#F0ECE9] px-1.5 text-[10px] font-semibold text-[#6B5C32]">
-                +{countSubtree(node) - 1}
-              </span>
-            )}
-          </div>
-        </div>
-        {!isCollapsed && node.children.map((c) => renderNode(c, depth + 1))}
-      </div>
-    );
-  };
 
   if (loading && people.length === 0) {
     return <div className="p-6 text-center text-sm text-[#9CA3AF]">Loading org chart…</div>;
@@ -285,7 +240,8 @@ export function OrgChart({ canManage }: Props) {
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2 text-xs text-[#6B7280]">
           <Network className="h-4 w-4 text-[#6B5C32]" />
-          <span className="font-semibold text-[#1F1D1B]">{totalOnChart}</span> people on the chart
+          <span className="font-semibold text-[#1F1D1B]">{totalOnChart}</span> people on the
+          chart
           <span className="text-[#9CA3AF]">
             · office accounts and factory employees together
           </span>
@@ -301,33 +257,33 @@ export function OrgChart({ canManage }: Props) {
           </label>
           <button
             type="button"
-            onClick={collapseAll}
-            className="rounded border border-[#D8D2CC] px-2 py-1 text-[11px] hover:bg-[#F0ECE9]"
+            onClick={() => setCollapsed(new Set(board.map((b) => b.dept)))}
+            className="rounded border border-[#E2DDD8] px-2 py-1 text-[11px] text-[#6B7280] hover:text-[#1F1D1B]"
           >
             Collapse all
           </button>
           <button
             type="button"
             onClick={() => setCollapsed(new Set())}
-            className="rounded border border-[#D8D2CC] px-2 py-1 text-[11px] hover:bg-[#F0ECE9]"
+            className="rounded border border-[#E2DDD8] px-2 py-1 text-[11px] text-[#6B7280] hover:text-[#1F1D1B]"
           >
             Expand all
           </button>
-          <div className="flex items-center gap-1 rounded border border-[#D8D2CC] px-1">
+          <div className="flex items-center gap-1">
             <button
               type="button"
               onClick={() => setZoom((z) => Math.max(50, z - 10))}
-              className="p-1 text-[#6B7280] hover:text-[#1F1D1B]"
-              title="Zoom out"
+              className="rounded border border-[#E2DDD8] p-1 text-[#6B7280] hover:text-[#1F1D1B]"
+              aria-label="Zoom out"
             >
               <Minus className="h-3 w-3" />
             </button>
-            <span className="w-9 text-center text-[11px] tabular-nums">{zoom}%</span>
+            <span className="w-10 text-center text-[11px] text-[#6B7280]">{zoom}%</span>
             <button
               type="button"
-              onClick={() => setZoom((z) => Math.min(130, z + 10))}
-              className="p-1 text-[#6B7280] hover:text-[#1F1D1B]"
-              title="Zoom in"
+              onClick={() => setZoom((z) => Math.min(150, z + 10))}
+              className="rounded border border-[#E2DDD8] p-1 text-[#6B7280] hover:text-[#1F1D1B]"
+              aria-label="Zoom in"
             >
               <Plus className="h-3 w-3" />
             </button>
@@ -336,47 +292,166 @@ export function OrgChart({ canManage }: Props) {
       </div>
 
       {error && (
-        <div className="mb-3 rounded-md border border-[#E8C4BE] bg-[#FBEAE7] px-3 py-2 text-xs text-[#9A3A2D]">
+        <div className="mb-3 rounded-md border border-[#E8AFA4] bg-[#FBE9E5] px-3 py-2 text-[12px] text-[#7E251A]">
           {error}
         </div>
       )}
 
-      {columns.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-[#D8D2CC] p-8 text-center text-sm text-[#9CA3AF]">
-          Nobody on the chart yet.
-        </div>
-      ) : (
-        <div className="overflow-x-auto pb-2">
-          <div
-            className="flex items-start gap-3"
-            style={{
-              zoom: zoom / 100,
-              // `zoom` keeps hit-testing aligned with what is drawn; a CSS
-              // transform would offset every click by the scale factor.
-            }}
-          >
-            {columns.map((col) => (
+      {/* Boxes sit side by side and the BOARD scrolls, not the page — a
+          department with forty people must not push the next one off-screen. */}
+      <div className="overflow-x-auto pb-4">
+        <div
+          style={{ zoom: `${zoom}%` }}
+          className="flex min-w-max items-start gap-3"
+        >
+          {board.map((box, boxIdx) => {
+            const isShut = collapsed.has(box.dept);
+            const accent = ACCENTS[boxIdx % ACCENTS.length];
+            return (
               <div
-                key={col.dept}
-                className="w-[260px] shrink-0 rounded-lg border border-[#E5E7EB] bg-[#FBFAF8] p-2"
+                key={box.dept}
+                className="overflow-hidden rounded-lg border border-[#E2DDD8] bg-white"
               >
-                <div className="mb-2 flex items-center justify-between border-b border-[#E2DDD8] pb-1.5">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-[#6B5C32]">
-                    {col.label}
+                {/* Dark cap + a colour stripe per department, so two boxes side
+                    by side are told apart at a glance. Houzs's move. */}
+                <button
+                  type="button"
+                  onClick={() => toggle(box.dept)}
+                  className="flex w-full items-center gap-2 bg-[#33404E] px-3 py-2 text-left text-white"
+                >
+                  <span
+                    aria-hidden
+                    className="h-4 w-1 rounded-full"
+                    style={{ background: accent }}
+                  />
+                  {isShut ? (
+                    <ChevronRight className="h-3.5 w-3.5 opacity-80" />
+                  ) : (
+                    <ChevronDown className="h-3.5 w-3.5 opacity-80" />
+                  )}
+                  <span className="text-[11px] font-semibold uppercase tracking-wide">
+                    {box.label}
                   </span>
-                  <span className="flex items-center gap-1 text-[10px] text-[#9CA3AF]">
+                  <span className="ml-auto flex items-center gap-1 text-[11px] opacity-75">
                     <Users className="h-3 w-3" />
-                    {col.headcount}
+                    {box.count}
                   </span>
-                </div>
-                {col.nodes.map((n) => renderNode(n, 0))}
+                </button>
+
+                {!isShut && (
+                  <div className="flex items-start gap-5 p-3">
+                    {box.groups.map((g) => (
+                      <div key={g.position}>
+                        {/* Position strip — the grouping INSIDE a department,
+                            the same role Houzs's HELPER / DRIVER labels play. */}
+                        <div className="mb-1.5 flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wider text-[#9CA3AF]">
+                          {g.position}
+                          <span className="text-[#C2BDB6]">{g.members.length}</span>
+                        </div>
+                        <div className="flex flex-col gap-1.5">
+                          {g.members.map((p) => {
+                            const open = editing === p.key;
+                            return (
+                              <div
+                                key={p.key}
+                                className={`relative w-[178px] rounded-md border bg-white px-2 py-1.5 ${
+                                  p.active
+                                    ? "border-[#E2DDD8]"
+                                    : "border-dashed border-[#D8D2CC] opacity-60"
+                                }`}
+                              >
+                                <div className="flex items-start gap-2">
+                                  <span
+                                    className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
+                                      p.source === "worker"
+                                        ? "bg-[#F0ECE9] text-[#6B5C32]"
+                                        : "bg-[#E0EDF0] text-[#3E6570]"
+                                    }`}
+                                    title={
+                                      p.source === "worker"
+                                        ? "Factory employee"
+                                        : "Office account"
+                                    }
+                                  >
+                                    {initials(p.name)}
+                                  </span>
+                                  <div className="min-w-0 flex-1 pr-4">
+                                    <div className="truncate text-[11px] font-semibold uppercase leading-tight text-[#1F1D1B]">
+                                      {p.name}
+                                    </div>
+                                    <div className="truncate text-[10px] text-[#8A8577]">
+                                      {p.position || "—"}
+                                    </div>
+                                    {/* Who they report to, in words. The old
+                                        chart drew this as nesting; a name is
+                                        shorter and survives everyone reporting
+                                        to one person. */}
+                                    {p.managerKey && (
+                                      <div className="truncate text-[10px] text-[#9CA3AF]">
+                                        ↳ {managerName(p.managerKey) ?? "—"}
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {canManage && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditing(open ? null : p.key)}
+                                    className="absolute right-1 top-1 text-[#C2BDB6] hover:text-[#6B5C32]"
+                                    aria-label={`Change who ${p.name} reports to`}
+                                    title="Change who this person reports to"
+                                  >
+                                    <Pencil className="h-3 w-3" />
+                                  </button>
+                                )}
+
+                                {canManage && open && (
+                                  <select
+                                    autoFocus
+                                    value={p.managerKey ?? ""}
+                                    disabled={saving === p.key}
+                                    onChange={(e) => {
+                                      setEditing(null);
+                                      void setManager(p.key, e.target.value);
+                                    }}
+                                    onBlur={() => setEditing(null)}
+                                    className="mt-1.5 h-6 w-full rounded border border-[#E2DDD8] bg-[#FBFAF8] px-1 text-[10px] text-[#6B7280]"
+                                  >
+                                    <option value="">— no manager (top) —</option>
+                                    {(() => {
+                                      const banned = descendantsOf(p.key);
+                                      return visible
+                                        .filter((c) => !banned.has(c.key))
+                                        .sort((a, b) => a.name.localeCompare(b.name))
+                                        .map((c) => (
+                                          <option key={c.key} value={c.key}>
+                                            {c.name}
+                                            {c.position ? ` · ${c.position}` : ""}
+                                          </option>
+                                        ));
+                                    })()}
+                                  </select>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
-            ))}
-          </div>
+            );
+          })}
+
+          {board.length === 0 && (
+            <div className="py-10 text-center text-sm text-[#9CA3AF]">
+              Nobody on the chart yet.
+            </div>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }
-
-export default OrgChart;

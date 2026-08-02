@@ -161,3 +161,64 @@ export async function getMaxSourceUpdatedAt(
     .all<{ t: string | null }>();
   return latestTimestamp((res.results ?? []).map((r) => r.t));
 }
+
+// ---------------------------------------------------------------------------
+// The full freshness signature: latest timestamp AND total row count.
+//
+// MAX(updated_at) alone CANNOT SEE A DELETE. Removing a row never raises the
+// maximum — it can only lower it or leave it untouched — so `built_from >=
+// currentMax` stays true forever and the snapshot containing the deleted row is
+// served as fresh until something unrelated happens to bump a timestamp.
+//
+// Measured on production 2026-08-02, after the owner deleted two draft sales
+// orders and watched them disappear:
+//     sales_orders  DRAFT rows in the database  = 0
+//     GET /api/sales-orders                     = 1191 rows, both drafts present
+//     GET /api/sales-orders/stats  byStatus     = { DRAFT: 2 }
+//     sales_orders  MAX(updated_at)             = 2026-08-01T08:48:36Z (yesterday)
+//     snapshot      built_from                  = 2026-08-01T12:xx    (newer)
+// The delete had really happened. The probe simply could not perceive it. The
+// owner reports the same on production orders previously — it is the whole
+// class, not one endpoint.
+//
+// The count closes it: a delete changes COUNT(*), an insert changes both, an
+// update changes MAX. A delete-plus-insert in the same instant keeps the count
+// but moves MAX. Both come back in the SAME round trip the probe already made,
+// so this costs one aggregate per source table and no extra latency.
+// ---------------------------------------------------------------------------
+export type SourceSignature = {
+  maxUpdatedAt: string | null;
+  /** null when no source table could be counted — treated as "unknown". */
+  rowCount: number | null;
+};
+
+export async function getSourceSignature(
+  db: D1Database,
+  tables: readonly string[],
+): Promise<SourceSignature> {
+  if (tables.length === 0) return { maxUpdatedAt: null, rowCount: null };
+  const cols = await resolveFreshnessColumns(db, tables);
+  if (cols.size === 0) return { maxUpdatedAt: null, rowCount: null };
+
+  const parts: string[] = [];
+  for (const [table, col] of cols) {
+    parts.push(`SELECT MAX(${col})::text AS t, COUNT(*)::bigint AS n FROM ${table}`);
+  }
+  const res = await db
+    .prepare(parts.join(" UNION ALL "))
+    .all<{ t: string | null; n: number | string | null }>();
+  const rows = res.results ?? [];
+  let total = 0;
+  let counted = false;
+  for (const r of rows) {
+    const n = Number(r.n);
+    if (Number.isFinite(n)) {
+      total += n;
+      counted = true;
+    }
+  }
+  return {
+    maxUpdatedAt: latestTimestamp(rows.map((r) => r.t)),
+    rowCount: counted ? total : null,
+  };
+}

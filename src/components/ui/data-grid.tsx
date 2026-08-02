@@ -2091,6 +2091,20 @@ export function DataGrid<T extends Record<string, any>>({
     } catch { return null; }
   };
   const seeded = readFilterState();
+  // Column FILTERS are deliberately not restored — only the search text is.
+  //
+  // Restoring them is how a grid opens completely blank: the operator narrows
+  // a column, moves on, comes back later and the page shows nothing, with only
+  // a small "Clear 1 filter" link to explain it. It has now bitten twice on the
+  // same screen — Sales Orders "Delivered" showing 0 of 66, and the Draft tab
+  // showing 0 of 2 while two draft orders sat right there (owner 2026-08-02:
+  // 「我想要它 by default 是打开的，筛选的那个不要 by default」).
+  //
+  // The search box still survives a tab hop, which was the original request
+  // (Wei Siang, 2026-04-26: "I search something, switch tabs, come back, it's
+  // gone"). A visible search term explains its own empty result; an invisible
+  // column filter does not.
+  const seededFilters = null as typeof seeded;
   const [searchText, setSearchText] = useState(initialSearch ?? seeded?.searchText ?? "");
   // Deferred copy of the search value. The <input> stays bound to searchText
   // (instant caret/echo), but the heavy filter+sort AND the parent
@@ -2100,13 +2114,13 @@ export function DataGrid<T extends Record<string, any>>({
   // Same data shown, just deferred a frame. (Wei Siang 2026-06-04 input-lag fix)
   const deferredSearch = useDeferredValue(searchText);
   const [columnFilters, setColumnFilters] = useState<Record<string, string>>(
-    seeded?.columnFilters ?? {},
+    seededFilters?.columnFilters ?? {},
   );
   const [columnValueFilters, setColumnValueFilters] = useState<Record<string, Set<string>>>(
     () => {
-      if (!seeded?.columnValueFilters) return {};
+      if (!seededFilters?.columnValueFilters) return {};
       const out: Record<string, Set<string>> = {};
-      for (const [k, v] of Object.entries(seeded.columnValueFilters)) {
+      for (const [k, v] of Object.entries(seededFilters.columnValueFilters)) {
         out[k] = new Set(v);
       }
       return out;
@@ -2117,7 +2131,9 @@ export function DataGrid<T extends Record<string, any>>({
   // caller's defaultExcludedValues whenever new data arrives — so the
   // default "hide COMPLETED rows" behaviour kicks in on every fresh load.
   // Once they touch a filter, we stop overriding their choice.
-  const hasInitialFilterState = !!seeded?.columnValueFilters && Object.keys(seeded.columnValueFilters).length > 0;
+  const hasInitialFilterState =
+    !!seededFilters?.columnValueFilters &&
+    Object.keys(seededFilters.columnValueFilters).length > 0;
   const [valueFilterTouched, setValueFilterTouched] = useState<boolean>(hasInitialFilterState);
   // Mirror touched into a ref so the seed effect can short-circuit
   // synchronously even when React is mid-batch between a touch event and

@@ -97,3 +97,81 @@ test("the two employee-number series are independent", () => {
   assert.match(src, /prefix: "EMP" \| "OSC" = "EMP"/);
   assert.match(src, /\$\{prefix\}-\$\{String\(max \+ 1\)\.padStart\(3, "0"\)\}/);
 });
+
+// ---------------------------------------------------------------------------
+// The COST side. Pay was right from the first version; cost was not.
+//
+// Owner 2026-08-02: 「并且这个薪水需要计算进我们的 labour cost，还有我们的
+// department labour…你要把这部分薪水计算在内，这样我们的薪水才能算得准。」
+//
+// computeMonthlyLabor derived the production-cost day rate from basicSalarySen,
+// which is 0 for an outsourced person — so someone could work a full month in a
+// department and contribute exactly nothing to that department's cost. Nothing
+// looked broken: no error, no zero row, just a factory that appeared cheaper
+// than it was.
+// ---------------------------------------------------------------------------
+
+test("DAILY costs the day rate — production cost is NOT zero", () => {
+  const osc = { ...STAFF, basicSalarySen: 0, payMode: "DAILY", dailyRateSen: 8500 };
+  const r = run(osc, 12);
+  assert.equal(r.costingDailyRateSen, 8500, "the costing day rate IS the day rate");
+  assert.equal(
+    r.cost.regularCostSen,
+    12 * 8500,
+    "12 days logged at RM85 must cost RM1,020 — a zero here is the bug",
+  );
+  assert.ok(r.cost.totalCostSen > 0);
+});
+
+test("DAILY cost tracks days logged, and equals what is paid", () => {
+  const osc = { ...STAFF, basicSalarySen: 0, payMode: "DAILY", dailyRateSen: 8500 };
+  for (const n of [1, 5, 26]) {
+    const r = run(osc, n);
+    assert.equal(r.cost.regularCostSen, n * 8500);
+    // No OT in this fixture, so cost and pay must agree exactly — the reports
+    // and the payslip are the same number seen from two sides.
+    assert.equal(r.cost.regularCostSen, r.payroll.basicEarnedSen);
+  }
+});
+
+test("a MONTHLY worker's costing rate is untouched by the daily branch", () => {
+  const before = run(STAFF, 26);
+  const withStrayRate = run({ ...STAFF, dailyRateSen: 8500 }, 26);
+  assert.equal(withStrayRate.costingDailyRateSen, before.costingDailyRateSen);
+  assert.deepEqual(withStrayRate.cost, before.cost);
+});
+
+test("dailyPaidEntryCostSen splits one day across departments, summing to the rate", () => {
+  const osc = { payMode: "DAILY", dailyRateSen: 8500 };
+  assert.equal(E.isDailyPaidWorker(osc), true);
+  assert.equal(E.isDailyPaidWorker({ payMode: "MONTHLY", dailyRateSen: 8500 }), false);
+  // One day split 6h in one dept, 3h in another — 9h total.
+  const a = E.dailyPaidEntryCostSen(osc, 6, 9);
+  const b = E.dailyPaidEntryCostSen(osc, 3, 9);
+  assert.ok(Math.abs(a + b - 8500) < 1e-6, "the split must sum to exactly one day rate");
+  assert.ok(a > b);
+  // A single entry carries the whole day.
+  assert.equal(E.dailyPaidEntryCostSen(osc, 9, 9), 8500);
+  // A punch with no hours is not a paid day, and must not divide by zero.
+  assert.equal(E.dailyPaidEntryCostSen(osc, 0, 0), 0);
+  // Monthly people get nothing from this helper — callers keep their own maths.
+  assert.equal(E.dailyPaidEntryCostSen({ payMode: "MONTHLY", basicSalarySen: 205000 }, 9, 9), 0);
+});
+
+test("the labour reports no longer skip a worker just because salary is 0", () => {
+  // The three sites in employees.tsx (Department Labor + two in Labor Cost)
+  // each used `if (!w || !w.basicSalarySen) continue;`, which silently dropped
+  // every outsourced person from the costing. The guard must now come AFTER
+  // the daily branch, never before it.
+  const src = readFileSync("src/pages/employees.tsx", "utf8");
+  assert.equal(
+    (src.match(/if \(!w \|\| !w\.basicSalarySen\) continue;/g) ?? []).length,
+    0,
+    "the blanket skip is back — outsourced people are being dropped from labour cost again",
+  );
+  assert.equal(
+    (src.match(/if \(isDailyPaidWorker\(w\)\) \{/g) ?? []).length,
+    3,
+    "all three costing sites must handle daily-paid workers",
+  );
+});

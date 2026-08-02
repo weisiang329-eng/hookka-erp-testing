@@ -343,39 +343,51 @@ export function EmployeeDrawer({
                 )}
               </>
             )}
-            <Field label="Basic salary (RM)">
-              <Input
-                type="number"
-                value={rm(draft.basicSalarySen)}
-                onChange={(e) =>
-                  set("basicSalarySen", Math.round((parseFloat(e.target.value) || 0) * 100))
-                }
-                className="mt-0.5 h-8 text-xs"
-              />
-            </Field>
+            {/* Basic salary, hours/day and days/month are the MONTHLY model:
+                a salary, the standard day it buys, and the divisor between
+                them. None of the three means anything for someone paid per day
+                — the day rate above is the whole of their pay. Owner
+                2026-08-02: 「大家不需要去看他的 basic hours 和 days，他是根据他的
+                daywork（85 块一天）来计算的。」 Showing them invites someone to
+                "fix" the zeroes and put a phantom salary on an outsourced
+                person. */}
+            {draft.payMode !== "DAILY" && (
+              <>
+                <Field label="Basic salary (RM)">
+                  <Input
+                    type="number"
+                    value={rm(draft.basicSalarySen)}
+                    onChange={(e) =>
+                      set("basicSalarySen", Math.round((parseFloat(e.target.value) || 0) * 100))
+                    }
+                    className="mt-0.5 h-8 text-xs"
+                  />
+                </Field>
+                <Field label="Hours / day" hint="Their standard day — also the OT threshold.">
+                  <Input
+                    type="number"
+                    step="0.5"
+                    value={draft.workingHoursPerDay}
+                    onChange={(e) => set("workingHoursPerDay", parseFloat(e.target.value) || 0)}
+                    className="mt-0.5 h-8 text-xs"
+                  />
+                </Field>
+                <Field label="Days / month" hint="The divisor for the day rate.">
+                  <Input
+                    type="number"
+                    value={draft.workingDaysPerMonth}
+                    onChange={(e) => set("workingDaysPerMonth", parseInt(e.target.value) || 0)}
+                    className="mt-0.5 h-8 text-xs"
+                  />
+                </Field>
+              </>
+            )}
             <Field label="OT multiplier">
               <Input
                 type="number"
                 step="0.1"
                 value={draft.otMultiplier}
                 onChange={(e) => set("otMultiplier", parseFloat(e.target.value) || 0)}
-                className="mt-0.5 h-8 text-xs"
-              />
-            </Field>
-            <Field label="Hours / day" hint="Their standard day — also the OT threshold.">
-              <Input
-                type="number"
-                step="0.5"
-                value={draft.workingHoursPerDay}
-                onChange={(e) => set("workingHoursPerDay", parseFloat(e.target.value) || 0)}
-                className="mt-0.5 h-8 text-xs"
-              />
-            </Field>
-            <Field label="Days / month" hint="The divisor for the day rate.">
-              <Input
-                type="number"
-                value={draft.workingDaysPerMonth}
-                onChange={(e) => set("workingDaysPerMonth", parseInt(e.target.value) || 0)}
                 className="mt-0.5 h-8 text-xs"
               />
             </Field>

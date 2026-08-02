@@ -79,8 +79,12 @@ jobs:
       # Fill in every asset a previous deploy served that this build no longer
       # emits. `cp -n` never overwrites, so the new build always wins for names
       # it does emit; only genuinely-retired files are carried.
+      # workflow_dispatch included 2026-08-02. It was 'push' only, so a manual
+      # re-run built, tested and then SKIPPED the deploy — which is how a merge
+      # into `staging` that produced no push run at all left staging sitting
+      # undeployed with no way to kick it except an empty commit.
       - name: Deploy to Cloudflare Pages (main / branch push)
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}

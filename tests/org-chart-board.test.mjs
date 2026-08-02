@@ -213,3 +213,21 @@ test("EVERY department gets a box — one person is still a department", () => {
   assert.match(src, /\(c\) => c\.children\.length > 0 && !leadsManagers\(c\)/);
   assert.match(src, /\(c\) => c\.children\.length === 0 && !leadsManagers\(c\)/);
 });
+
+test("a manager wears the same cap the departments under them wear", () => {
+  // Owner 2026-08-02, pointing at the owner / Violet / the Production Head:
+  //「我觉得这三个你也是要想一下,怎么去设计才好看的」. He was right that it read
+  // wrong: the three people who run the company were the three THINNEST cards
+  // on the board while every department under them had a heading. Weight has to
+  // follow rank, not contradict it. Houzs cap their leadership row the same way.
+  const src = readFileSync("src/components/org-chart.tsx", "utf8");
+  const branch = src.slice(src.indexOf("const Branch ="), src.indexOf("if (loading &&"));
+  assert.match(branch, /const capped = node\.children\.length > 0;/);
+  assert.match(branch, /bg-\[#33404E\]/, "the same dark cap as the department boxes");
+  // The cap names their position, and counts the people under them.
+  assert.match(branch, /\{cap \|\| "Leadership"\}/);
+  assert.match(branch, /\{countSubtree\(node\) - 1\}/);
+  // Someone with nobody under them stays a plain card — a cap with no branch
+  // beneath it is the "heading with nothing under it" problem again.
+  assert.match(branch, /\) : \(\s*\n\s*<TreeCard node=\{node\} \/>\s*\n\s*\)\}/);
+});

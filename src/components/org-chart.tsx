@@ -502,9 +502,40 @@ export function OrgChart({ canManage }: Props) {
 
   const Branch = ({ node }: { node: OrgNode }): React.ReactElement => {
     const kids = collapsed.has(node.key) ? [] : node.children;
+    // A manager who carries a branch wears the SAME dark cap the department
+    // boxes below wear. Owner 2026-08-02, pointing at the owner / Violet / the
+    // Production Head:「我觉得这三个你也是要想一下,怎么去设计才好看的」— and he
+    // was right that it read wrong: the three people who run the company were
+    // the three thinnest cards on the board while every department under them
+    // had a heading. Houzs cap their leadership row the same way. Weight now
+    // follows rank instead of contradicting it.
+    const capped = node.children.length > 0;
+    const cap = (node.position || node.departmentCode || "").trim();
     return (
       <div className="flex flex-col items-center">
-        <TreeCard node={node} />
+        {capped ? (
+          <div className="overflow-hidden rounded-lg border border-[#E2DDD8] bg-white">
+            <div className="flex items-center gap-2 bg-[#33404E] px-3 py-1 text-white">
+              <span
+                aria-hidden
+                className="h-3 w-1 rounded-full"
+                style={{ background: ACCENTS[0] }}
+              />
+              <span className="text-[10px] font-semibold uppercase tracking-wide">
+                {cap || "Leadership"}
+              </span>
+              <span className="ml-auto flex items-center gap-1 text-[10px] opacity-75">
+                <Users className="h-3 w-3" />
+                {countSubtree(node) - 1}
+              </span>
+            </div>
+            <div className="p-1.5">
+              <TreeCard node={node} />
+            </div>
+          </div>
+        ) : (
+          <TreeCard node={node} />
+        )}
         {kids.length > 0 && (
           <>
             {/* stem down from the parent */}

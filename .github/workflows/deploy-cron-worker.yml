@@ -52,6 +52,36 @@ jobs:
             exit 1
           fi
 
+      # A bare "Authentication error [code: 10000]" from wrangler has two very
+      # different causes — a token without Workers scope, or a token belonging
+      # to another account than the one wrangler.toml names. This says which,
+      # so the fix is one specific click instead of a guess. Prints only
+      # pass/fail and counts; never the token.
+      - name: Diagnose the token before deploying
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          api() { curl --silent -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$1"; }
+          ok() { echo "$1" | grep -q '"success":true' && echo YES || echo NO; }
+
+          echo "token itself valid ............ $(ok "$(api https://api.cloudflare.com/client/v4/user/tokens/verify)")"
+
+          toml_acct=$(grep -oE 'account_id = "[a-f0-9]+"' agent-heartbeat-worker/wrangler.toml | grep -oE '[a-f0-9]{32}')
+          if [ "$toml_acct" = "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "wrangler.toml account matches . YES"
+          else
+            echo "wrangler.toml account matches . NO  <-- toml says ${toml_acct}, secret says a different account"
+          fi
+
+          base="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
+          echo "can read Pages projects ....... $(ok "$(api "$base/pages/projects")")"
+          echo "can read Workers scripts ...... $(ok "$(api "$base/workers/scripts")")"
+          echo
+          echo "If Pages=YES and Workers=NO the token is Pages-scoped: add"
+          echo "'Account -> Workers Scripts -> Edit' to it (or issue a new token"
+          echo "with that permission) and update the CLOUDFLARE_API_TOKEN secret."
+
       - name: wrangler deploy
         working-directory: agent-heartbeat-worker
         env:

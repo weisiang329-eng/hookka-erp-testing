@@ -1135,7 +1135,8 @@ const listSuppliers: ToolDefinition = {
     }
 
     const limit = clampLimit(args.limit, 50);
-    const sql = `SELECT id, code, name, contactName, phone, email, isActive
+    // suppliers stores it as contact_person; contact_name is the CUSTOMER one.
+    const sql = `SELECT id, code, name, contactPerson, phone, email, isActive
                  FROM suppliers
                  WHERE ${wheres.join(" AND ")}
                  ORDER BY code
@@ -1147,7 +1148,7 @@ const listSuppliers: ToolDefinition = {
         id: string;
         code: string | null;
         name: string | null;
-        contactName: string | null;
+        contactPerson: string | null;
         phone: string | null;
         email: string | null;
         isActive: number | boolean | null;
@@ -1158,7 +1159,7 @@ const listSuppliers: ToolDefinition = {
         id: r.id,
         code: r.code ?? "",
         name: r.name ?? "",
-        contactName: r.contactName ?? "",
+        contactName: r.contactPerson ?? "",
         phone: r.phone ?? "",
         email: r.email ?? "",
         isActive: Boolean(r.isActive),
@@ -2342,7 +2343,8 @@ const smart_lookup: ToolDefinition = {
         runColumnSearch(
           "workers",
           ["name", "empNo", "id"],
-          "id, empNo, name, departmentCode, role, status",
+          // `position` — workers has no `role` column.
+          "id, empNo, name, departmentCode, position, status",
           "name",
           { hasCustomerName: false },
         ),
@@ -2449,7 +2451,7 @@ const smart_lookup: ToolDefinition = {
       empNo: String(r.empNo ?? ""),
       name: String(r.name ?? ""),
       department: String(r.departmentCode ?? ""),
-      role: String(r.role ?? ""),
+      role: String(r.position ?? ""),
       status: String(r.status ?? ""),
     }));
     const products = safeRows(productRows).map((r) => ({
@@ -4221,14 +4223,14 @@ const findEmployee: ToolDefinition = {
     // (that silently binds empty through the adapter). Active workers first.
     const like = `%${q.toLowerCase()}%`;
     const matchRes = await c.var.DB.prepare(
-      `SELECT id, empNo, name, departmentCode, role, status
+      `SELECT id, empNo, name, departmentCode, position, status
        FROM workers
        WHERE orgId = ? AND (LOWER(name) LIKE ? OR LOWER(empNo) LIKE ?)
        ORDER BY (CASE WHEN UPPER(COALESCE(status,'')) = 'ACTIVE' THEN 0 ELSE 1 END), name
        LIMIT 25`,
     ).bind(orgId, like, like).all<{
       id: string; empNo: string | null; name: string | null;
-      departmentCode: string | null; role: string | null; status: string | null;
+      departmentCode: string | null; position: string | null; status: string | null;
     }>();
     const matched = matchRes.results ?? [];
 
@@ -4245,7 +4247,7 @@ const findEmployee: ToolDefinition = {
       empNo: w.empNo ?? "",
       name: w.name ?? "",
       department: w.departmentCode ?? "",
-      role: w.role ?? "",
+      role: w.position ?? "",
       status: w.status ?? "",
     }));
 
@@ -5846,13 +5848,13 @@ async function runEntityExportQuery(
   switch (entity) {
     case "sales_orders":
       sql = `SELECT companySOId AS soId, customerName, customerPOId AS customerPO,
-                    status, hub, totalSen, customerDeliveryDate, created_at AS createdAt
+                    status, hubName, totalSen, customerDeliveryDate, created_at AS createdAt
              FROM sales_orders WHERE ${whereSql}
              ORDER BY created_at DESC LIMIT ${MAX_EXPORT_ROWS}`;
       break;
     case "consignment_orders":
       sql = `SELECT companyCOId AS co_id, customerName, customerCOId AS customerPO,
-                    status, hub, totalSen, created_at AS createdAt
+                    status, hubName, totalSen, created_at AS createdAt
              FROM consignment_orders WHERE ${whereSql}
              ORDER BY created_at DESC LIMIT ${MAX_EXPORT_ROWS}`;
       break;
@@ -5863,8 +5865,11 @@ async function runEntityExportQuery(
              ORDER BY created_at DESC LIMIT ${MAX_EXPORT_ROWS}`;
       break;
     case "delivery_orders":
-      sql = `SELECT doNo, customerName, customerPOId AS customerPO, status, hub,
-                    totalSen, deliveryDate, created_at AS createdAt
+      // `hubName`, not `hub`; and delivery_orders carries no total_sen at all —
+      // a DO's value is derived, not stored (see lib/do-value). Exporting the
+      // real load figures beats 500ing on a column that never existed.
+      sql = `SELECT doNo, customerName, customerPOId AS customerPO, status, hubName,
+                    totalItems, totalM3, deliveryDate, created_at AS createdAt
              FROM delivery_orders WHERE ${whereSql}
              ORDER BY created_at DESC LIMIT ${MAX_EXPORT_ROWS}`;
       break;
@@ -5881,7 +5886,9 @@ async function runEntityExportQuery(
              ORDER BY created_at DESC LIMIT ${MAX_EXPORT_ROWS}`;
       break;
     case "customers":
-      sql = `SELECT id, code, name, contactPerson, phone, email, hub, status
+      // customers has contact_name (not contact_person), no hub of its own —
+      // the hub lives on the order — and is_active rather than a status string.
+      sql = `SELECT id, code, name, contactName, phone, email, isActive, customerStage
              FROM customers WHERE ${whereSql}
              ORDER BY name ASC LIMIT ${MAX_EXPORT_ROWS}`;
       break;
@@ -5896,7 +5903,8 @@ async function runEntityExportQuery(
              ORDER BY code ASC LIMIT ${MAX_EXPORT_ROWS}`;
       break;
     case "employees":
-      sql = `SELECT id, empNo, name, departmentCode, role, status
+      // `position` — workers has no `role` column.
+      sql = `SELECT id, empNo, name, departmentCode, position, status
              FROM workers WHERE ${whereSql}
              ORDER BY name ASC LIMIT ${MAX_EXPORT_ROWS}`;
       break;

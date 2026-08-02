@@ -258,15 +258,17 @@ app.post("/", async (c) => {
     if (type === "RM") {
       const row = await c.var.DB
         .prepare(
-          `SELECT itemCode, itemName, balanceQty FROM raw_materials WHERE id = ?`,
+          // `description` — raw_materials has no item_name. Every RM stock
+          // adjustment died here on a column that does not exist.
+          `SELECT itemCode, description, balanceQty FROM raw_materials WHERE id = ?`,
         )
         .bind(itemId)
-        .first<{ itemCode: string; itemName: string | null; balanceQty: number }>();
+        .first<{ itemCode: string; description: string | null; balanceQty: number }>();
       if (!row) {
         return c.json({ success: false, error: "Raw material not found" }, 404);
       }
       itemCode = row.itemCode;
-      itemName = row.itemName;
+      itemName = row.description;
       currentQty = row.balanceQty;
     } else if (type === "WIP") {
       const row = await c.var.DB

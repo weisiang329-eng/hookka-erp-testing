@@ -949,6 +949,7 @@ app.use("/api/*", apiRateLimit({ exempt: ["/api/health", "/api/pg-ping"] }));
 import customers from "./routes/customers";
 import bom from "./routes/bom";
 import products from "./routes/products";
+import globalSearch from "./routes/search";
 import productConfigs from "./routes/product-configs";
 import workers from "./routes/workers";
 import orgChart from "./routes/org-chart";
@@ -1137,6 +1138,8 @@ app.route("/api/mail-center", mailCenter);
 app.route("/api/datagrid-layouts", datagridLayouts);
 app.route("/api/bom", bom);
 app.route("/api/products", products);
+// Unified cross-module search behind the Ctrl+K palette (see routes/search.ts).
+app.route("/api/search", globalSearch);
 app.route("/api/product-configs", productConfigs);
 app.route("/api/workers", workers);
 app.route("/api/worker-auth", workerAuth);

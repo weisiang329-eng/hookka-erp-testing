@@ -124,7 +124,10 @@ test("it is wired into the daily report AND reachable on demand", () => {
   const compliance = readFileSync("src/api/lib/compliance-report.ts", "utf8");
   assert.match(compliance, /checkCogsIntegrity\(db\)/);
   assert.match(compliance, /cogsIssues: cogsIssues\.length/);
-  assert.match(compliance, /cogsIssues\.length,\n\s*\};/, "must count toward the total");
+  // The literal \n did not match a CRLF checkout, so this failed on Windows
+  // only and blocked every local commit while CI (LF) stayed green. \s already
+  // covers \r\n.
+  assert.match(compliance, /cogsIssues\.length,\s*\};/, "must count toward the total");
 
   // The on-demand endpoint is the point: sizing a money exposure needs live
   // data, not yesterday's cached snapshot.

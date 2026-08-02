@@ -20,6 +20,7 @@ import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
 import { sendMail } from "../lib/email";
+import { runSelfApply } from "../lib/self-apply";
 
 const app = new Hono<Env>();
 
@@ -65,13 +66,28 @@ async function ensureTables(db: D1Database): Promise<void> {
          contact_id TEXT,
          contact_name TEXT,
          next_follow_up TEXT,
+         follow_up_topic TEXT,
          outcome TEXT,
+         occurred_at TEXT,
          created_by TEXT,
          org_id TEXT,
          created_at TEXT
        )`,
     )
     .run();
+  // CREATE TABLE IF NOT EXISTS is a no-op on the production table, which was
+  // created before these two columns existed — so the ALTERs are the ONLY path
+  // they take to prod (CLAUDE.md: migrations are inert on deploy). Via
+  // runSelfApply so a real failure is logged with its statement and thrown,
+  // instead of swallowed and remembered as done.
+  await runSelfApply(db as unknown as Parameters<typeof runSelfApply>[0], "customer-crm", [
+    // WHEN it happened, as opposed to when it was typed in. A call logged the
+    // next morning was being filed under the wrong day.
+    "ALTER TABLE customer_activities ADD COLUMN IF NOT EXISTS occurred_at TEXT",
+    // WHAT to raise next time. A reminder that only carries a date tells you
+    // nothing when it fires.
+    "ALTER TABLE customer_activities ADD COLUMN IF NOT EXISTS follow_up_topic TEXT",
+  ]);
   await db
     .prepare(
       `CREATE TABLE IF NOT EXISTS customer_onboarding (
@@ -131,7 +147,9 @@ type ActivityRow = {
   contact_id: string | null;
   contact_name: string | null;
   next_follow_up: string | null;
+  follow_up_topic: string | null;
   outcome: string | null;
+  occurred_at: string | null;
   created_by: string | null;
   created_at: string | null;
 };
@@ -237,8 +255,11 @@ app.get("/activities", async (c) => {
   const customerId = c.req.query("customerId");
   if (!customerId) return c.json({ success: false, error: "customerId required" }, 400);
   const res = await c.var.DB.prepare(
+    // Newest CALL first, not newest TYPED first — logging yesterday's call this
+    // morning must not jump it above a call actually made today. COALESCE keeps
+    // every row written before occurred_at existed in its old position.
     `SELECT * FROM customer_activities WHERE customer_id = ? AND org_id = ?
-      ORDER BY created_at DESC`,
+      ORDER BY COALESCE(occurred_at, substr(created_at, 1, 10)) DESC, created_at DESC`,
   )
     .bind(customerId, getOrgId(c))
     .all<ActivityRow>();
@@ -257,8 +278,8 @@ app.post("/activities", async (c) => {
   await c.var.DB.prepare(
     `INSERT INTO customer_activities
        (id, customer_id, activity_type, summary, detail, contact_id, contact_name,
-        next_follow_up, outcome, created_by, org_id, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        next_follow_up, follow_up_topic, outcome, occurred_at, created_by, org_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       id,
@@ -269,7 +290,11 @@ app.post("/activities", async (c) => {
       (b.contactId as string) ?? (b.contact_id as string) ?? null,
       (b.contactName as string) ?? (b.contact_name as string) ?? null,
       (b.nextFollowUp as string) ?? (b.next_follow_up as string) ?? null,
+      (b.followUpTopic as string) ?? (b.follow_up_topic as string) ?? null,
       (b.outcome as string) ?? null,
+      // Falls back to today rather than to null: an activity with no date at
+      // all sorts to the bottom of the timeline forever.
+      (b.occurredAt as string) ?? (b.occurred_at as string) ?? new Date().toISOString().slice(0, 10),
       actingUserId(c),
       getOrgId(c),
       new Date().toISOString(),

@@ -14,6 +14,7 @@ import { KycPanel } from "@/components/customer/KycPanel";
 import { PhoneInput } from "@/components/ui/phone-input";
 import { StateSelect } from "@/components/ui/state-select";
 import { isValidEmail } from "@/lib/contact-format";
+import { familyOf } from "@/lib/product-family";
 
 type Lead = {
   id: string;
@@ -718,7 +719,19 @@ type ProductLite = { id: string; code: string; name: string };
 function LeadCatalogPanel({ leadId }: { leadId: string }) {
   const [items, setItems] = useState<LeadProduct[]>([]);
   const [products, setProducts] = useState<ProductLite[]>([]);
-  const [pick, setPick] = useState("");
+  // Owner 2026-08-02:「不能根据我的 catalog 去选吗？应该当我选了 catalog 之后,
+  // 直接带出这个 catalog 里面所有的 SKU」+「难道不能 multiselect 吗？如果不能
+  // multiselect 的话,就不好用了」.
+  //
+  // The old control was one free-text datalist over EVERY SKU. A single
+  // bedframe model carries fourteen of them (1003-(K), 1003(A)-(Q),
+  // 1003(A)(HF)(W)-(SS)…), so quoting a model meant typing a near-identical
+  // string fourteen times and getting one character wrong on the way. Pick the
+  // MODEL, tick its SKUs, add them together — the same family grouping the
+  // Products → Catalog page shows, via the same `familyOf`, so the two screens
+  // can never disagree about what a model is.
+  const [model, setModel] = useState("");
+  const [ticked, setTicked] = useState<Set<string>>(new Set());
   const [priceRm, setPriceRm] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -744,25 +757,68 @@ function LeadCatalogPanel({ leadId }: { leadId: string }) {
   }, [leadId]);
   /* eslint-enable react-hooks/exhaustive-deps, react-hooks/set-state-in-effect */
 
-  const add = async () => {
-    const raw = pick.trim();
-    if (!raw) return;
-    const code = raw.includes("—") ? raw.split("—")[0].trim() : raw;
-    const match = products.find((p) => p.code.toLowerCase() === code.toLowerCase());
+  /** Models, grouped exactly as Products → Catalog groups them. */
+  const models = useMemo(() => {
+    const map = new Map<string, ProductLite[]>();
+    for (const p of products) {
+      const key = familyOf(p.code) || p.code;
+      const arr = map.get(key);
+      if (arr) arr.push(p);
+      else map.set(key, [p]);
+    }
+    return [...map.entries()]
+      .map(([key, skus]) => ({
+        key,
+        // The family's own name, not the first SKU's: "1003 — HILTON BEDFRAME"
+        // reads as a model, "1003-(K) — HILTON BEDFRAME (6FT)" reads as a size.
+        name: skus[0]?.name ?? key,
+        skus: skus.slice().sort((a, b) => a.code.localeCompare(b.code)),
+      }))
+      .sort((a, b) => a.key.localeCompare(b.key));
+  }, [products]);
+
+  const modelSkus = useMemo(
+    () => models.find((m) => m.key === model)?.skus ?? [],
+    [models, model],
+  );
+  /** Already on the lead — shown ticked and locked, never added twice. */
+  const alreadyOn = useMemo(
+    () => new Set(items.map((i) => (i.product_code ?? "").toUpperCase()).filter(Boolean)),
+    [items],
+  );
+
+  const toggleSku = (id: string) =>
+    setTicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const addTicked = async () => {
+    const chosen = modelSkus.filter((p) => ticked.has(p.id));
+    if (chosen.length === 0) return;
     setSaving(true);
     try {
-      await fetch("/api/sales-leads/lead-products", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          leadId,
-          productId: match?.id ?? null,
-          productCode: match?.code ?? (raw.includes("—") ? code : null),
-          productName: match?.name ?? (raw.includes("—") ? raw.split("—")[1]?.trim() : raw),
-          priceRm: priceRm.trim() === "" ? null : priceRm,
-        }),
-      });
-      setPick("");
+      // Sequential, not Promise.all: the endpoint self-applies its DDL on first
+      // write, and firing ten concurrent creates at a cold isolate races that.
+      for (const p of chosen) {
+        await fetch("/api/sales-leads/lead-products", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            leadId,
+            productId: p.id,
+            productCode: p.code,
+            productName: p.name,
+            // One target price applies to every SKU ticked in this batch — the
+            // sizes of one model are quoted together in practice. Per-SKU edits
+            // stay possible by adding them one at a time.
+            priceRm: priceRm.trim() === "" ? null : priceRm,
+          }),
+        });
+      }
+      setTicked(new Set());
       setPriceRm("");
       await reload();
     } finally { setSaving(false); }
@@ -779,13 +835,74 @@ function LeadCatalogPanel({ leadId }: { leadId: string }) {
         <Tag className="h-4 w-4 text-[#3E6570]" /> Catalog &amp; target prices ({items.length})
       </div>
       <p className="text-[11px] text-[#9CA3AF] mb-3">What you&apos;re quoting this lead. Copied onto the customer when you convert.</p>
+      {/* Step 1 — the model. */}
+      <div className="flex flex-wrap items-center gap-2 mb-2">
+        <select
+          value={model}
+          onChange={(e) => { setModel(e.target.value); setTicked(new Set()); }}
+          className="flex-1 min-w-[200px] text-sm border border-[#E2DDD8] rounded px-2 py-1.5 bg-white focus:outline-none focus:border-[#6B5C32]"
+        >
+          <option value="">Pick a model from the catalog…</option>
+          {models.map((m) => (
+            <option key={m.key} value={m.key}>
+              {m.key} — {m.name} ({m.skus.length} SKU{m.skus.length === 1 ? "" : "s"})
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* Step 2 — tick the sizes. */}
+      {model && (
+        <div className="mb-3 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-2">
+          <div className="mb-1.5 flex items-center gap-2 text-[11px] text-[#6B7280]">
+            <span>{modelSkus.length} SKUs in this model</span>
+            <button
+              type="button"
+              onClick={() => setTicked(new Set(modelSkus.filter((p) => !alreadyOn.has(p.code.toUpperCase())).map((p) => p.id)))}
+              className="rounded border border-[#E2DDD8] bg-white px-1.5 py-0.5 hover:text-[#1F1D1B]"
+            >
+              Select all
+            </button>
+            <button
+              type="button"
+              onClick={() => setTicked(new Set())}
+              className="rounded border border-[#E2DDD8] bg-white px-1.5 py-0.5 hover:text-[#1F1D1B]"
+            >
+              Clear
+            </button>
+          </div>
+          <div className="max-h-52 overflow-y-auto">
+            {modelSkus.map((p) => {
+              const on = alreadyOn.has(p.code.toUpperCase());
+              return (
+                <label
+                  key={p.id}
+                  className={`flex items-center gap-2 rounded px-1.5 py-1 text-[12px] ${on ? "text-[#9CA3AF]" : "cursor-pointer text-[#1F1D1B] hover:bg-white"}`}
+                >
+                  <input
+                    type="checkbox"
+                    // Already on the lead: ticked and locked, so a second pass
+                    // over the same model cannot silently duplicate a line.
+                    checked={on || ticked.has(p.id)}
+                    disabled={on}
+                    onChange={() => toggleSku(p.id)}
+                  />
+                  <span className="font-mono text-[#6B5C32]">{p.code}</span>
+                  <span className="truncate">{p.name}</span>
+                  {on ? <span className="ml-auto shrink-0 text-[10px]">already added</span> : null}
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Step 3 — one target price for the batch, then add. */}
       <div className="flex flex-wrap items-center gap-2 mb-3">
-        <input list={`leadcat-${leadId}`} value={pick} onChange={(e) => setPick(e.target.value)} placeholder="Pick a SKU…" className="flex-1 min-w-[180px] text-sm border border-[#E2DDD8] rounded px-2 py-1.5 bg-white focus:outline-none focus:border-[#6B5C32]" />
-        <datalist id={`leadcat-${leadId}`}>
-          {products.slice(0, 2000).map((p) => <option key={p.id} value={`${p.code} — ${p.name}`} />)}
-        </datalist>
-        <input value={priceRm} onChange={(e) => setPriceRm(e.target.value)} type="number" placeholder="Target RM" className="w-28 text-sm border border-[#E2DDD8] rounded px-2 py-1.5 bg-white focus:outline-none focus:border-[#6B5C32]" />
-        <button onClick={() => void add()} disabled={saving || !pick.trim()} className="text-sm px-3 py-1.5 bg-[#6B5C32] text-white rounded-md hover:bg-[#5A4D2A] disabled:opacity-40">{saving ? "…" : "Add"}</button>
+        <input value={priceRm} onChange={(e) => setPriceRm(e.target.value)} type="number" placeholder="Target RM (optional)" className="w-40 text-sm border border-[#E2DDD8] rounded px-2 py-1.5 bg-white focus:outline-none focus:border-[#6B5C32]" />
+        <button onClick={() => void addTicked()} disabled={saving || ticked.size === 0} className="text-sm px-3 py-1.5 bg-[#6B5C32] text-white rounded-md hover:bg-[#5A4D2A] disabled:opacity-40">
+          {saving ? "Adding…" : `Add ${ticked.size || ""} SKU${ticked.size === 1 ? "" : "s"}`.trim()}
+        </button>
       </div>
       {items.length === 0 ? (
         <p className="text-xs text-gray-400 py-1">No SKUs yet.</p>

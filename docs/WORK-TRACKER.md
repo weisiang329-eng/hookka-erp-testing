@@ -9,6 +9,148 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-02 — ✅ System Health 大扫除（owner: 「把这些都优化解决」「不要停下来」)
+
+Owner 贴了 System Health 六张图。逐条查，**每一条都实测过才动手**。
+
+### ✅ 1. 两个正在 500 的会计端点 → 变成 12 个 SQL bug（PR 合入 main）
+
+`/api/accounting/wip-detail` + `/cleanup-report`：`column "po_number" does not exist`。
+`production_orders` 存的是 `po_no`；`poNumber → po_number` 这条映射**是真的**，
+只是属于 `grns` / `goods_in_transit` / `three_way_matches`。
+
+**所以这不是「rename map 少一条」那一类**，是「映射到别的表的栏位」——
+`sql-write-column-coverage` 全绿，tsc 也看不到（SQL 是字串），只有真的有人打开那一页
+才会 500。修完第一个还是 500 → 干脆把 `src/api` 里每一句
+`SELECT … FROM <table>` 对着**线上 schema** 扫一遍：**1,033 组 (table, column)，146 张表，
+12 个是错的**：
+
+| 写的 | 变成 | 实际 | 影响 |
+|---|---|---|---|
+| production_orders.poNumber | po_number | `po_no` | 会计两页 500（线上） |
+| raw_materials.name | name | `description` | cleanup-report 500（线上） |
+| raw_materials.itemName / unit | item_name | `description` / `base_uom` | 采购 agent |
+| workers.role ×3 | role | `position` | 助手查人 / 汇出员工 |
+| customers.contactPerson | contact_person | `contact_name` | 汇出客户 |
+| customers.hub / status | — | 根本没有这两栏 | 汇出客户 |
+| suppliers.contactName | contact_name | `contact_person` | 查供应商 |
+| sales_orders.hub ×2 | hub | `hub_name` | 月报表 / 汇出 |
+| consignment_orders.hub | hub | `hub_name` | 汇出 |
+| delivery_orders.hub / totalSen | — | `hub_name` / **DO 的金额是算出来的，没存** | 汇出 DO |
+
+大部分在**助手的汇出工具**（员工/客户/供应商/DO/SO 的 CSV 全是死的），
+还有一个在 **RM 库存调整的写入路径**。
+栏位真的不存在的地方**没有乱编**：DO 汇出改成 `totalItems` + `totalM3`（真实数字），
+客户汇出改成 `isActive` + `customerStage`。
+
+**守门**：`tests/sql-columns-exist.test.mjs` 对 `tests/db-schema.json`
+（266 表 / 3,210 个栏位名，无资料）。CI 没有资料库所以比对快照；
+migration 后跑 `node scripts/refresh-db-schema-fixture.mjs` 更新。
+**先确认这个 test 会在原本那句 poNumber 上变红**才敢信。扫描现在 0 mismatch。
+
+### ✅ 2. Warm cron 根本没在 warm（两个独立原因，都实测）
+
+Dept 页 p50 ~8s、p95 30s（= 前端 abort）。2026-08-01 加过一个 warmer 就是要治这个。
+**它从来没成功过。**
+
+**原因 A —— 每一次呼叫都 500。** 这是 cron 自己吐的：
+```
+"overdueCounts":{"ok":false,"warmed":0,"failed":["overview:500","FAB_CUT:500",
+ "FAB_SEW:500","WOOD_CUT:500","FOAM_CUTTING:500","FOAM:500","FRAMING:500",
+ "WEBBING:500","UPHOLSTERY:500","PACKING:500"]}
+```
+它用 `app.request("/overdue-counts?dept=…", {}, c.env)`。Hono 的合成 sub-request
+拿到的是**全新的 context，`c.var` 是空的** —— DB binding 是父 app 的 middleware 挂上去的。
+所以 handler 每次都 throw。`ok:false` 有老实回报，只是没人看。
+
+用 `app.request` 的动机是对的（payload 和 cache key 都来自页面实际跑的那段码，不会漂）。
+现在抽成 `computeOverdueCounts(c, dept)`，**route 和 cron 都呼叫它** —— 同样的保证，
+但 context 是真的。
+
+⚠️ **`tests/warm-overdue-counts.test.mjs` 当时断言的是 `await app.request(...)`
+—— 它钉的是「用什么手段」，而那个手段是坏的**，所以 warmer 死了多久它就绿了多久。
+已改成钉「保证」并禁止那个呼叫形状。**教训：断言结果，不要断言手段。**
+
+**原因 B —— 排程是假的。** `warm-lists.yml` 写 `*/5`。GitHub 实际给的（08-01/02 实测）：
+**大约一小时一次**，中间断 2 小时以上（06:17 → 08:36、12:39 → 14:13），
+量测当下已经断了 2 小时。**排 288 次/天，真的跑约 20 次。**
+两张 snapshot 表**没有任何一列少于 10 分钟**，最新的是 8.7 小时前。
+
+这个 repo 已经学过一次：`agent-heartbeat-worker` 就是因为 GitHub 在 heartbeat 上漂 1–3.5h 才建的。
+warm tick 搬到同一个 Cloudflare Cron Worker（`*/5` 和 heartbeat 的 `*/30` 并存，
+用 `controller.cron` 分流）。GitHub 那个留着当 fallback（端点幂等，重复触发无害）。
+
+🟡 **需要 owner 手动跑一次（我没有 wrangler 权限）**：
+```
+cd agent-heartbeat-worker && wrangler deploy
+```
+CRON_SECRET 已经在那个 worker 上了，`WARM_LISTS_URL` 写在 `[vars]`。
+没跑之前 warm 还是 GitHub 那个 ~每小时的节奏 —— 但原因 A 修好后，**有跑到的那几次是真的有效的**。
+
+### 📌 顺手量到、值得记的：**资料库不是瓶颈**
+
+之前 tracker 写过「backend 瓶颈是连线不是索引」。这次实测两边都不是：
+- 这些端点背后最重的那句（`cost_ledger` 33k 列扫描）**执行 15ms**
+  （seq scan / 2183 buffers；这个量级不需要索引）
+- 连线池 **12 / 90**，没有争用
+- `job_cards` 全表 61ms、`production_orders` 全表 39ms
+
+**那几秒全部是 cold recompute**，不是 SQL 慢。以后看到 System Health 的
+「slow SQL」不要直接去加索引。
+
+### ✅ 3. 验证（线上实测，不是推论）
+
+**Warm cron 修好后第一次真跑：**
+```
+"overdueCounts":{"ok":true,"warmed":10,"failed":[]}
+```
+资料库对照 —— 今天的 10 个 dept key **全部存在，其中 8 个是 35 秒前写的**：
+```
+v3&dept=PACKING&today=2026-08-02      31s
+v3&dept=UPHOLSTERY&today=2026-08-02   32s
+…  10/10
+```
+修之前：**今天的 per-dept key 一个都没有**，两张表没有任何一列少于 10 分钟，最新 8.7 小时。
+
+⚠️ 中间还揪出**第二个原因**，正是「把 500 换成可读错误」买到的：
+```
+"failed":["overview:orgId not resolved on request context", … ×10]
+```
+cron 用 CRON_SECRET 认证、没有 user session，`getOrgId(c)` 直接 throw。
+warm-lists 里其他 warmer 早就显式传 `DEFAULT_ORG_ID`，只有这个没传。已修。
+
+**端点前后对照：**
+
+| | 之前 | 之后 |
+|---|---|---|
+| `/api/accounting/wip-detail` | **40s 逾时** | 200 · **766ms** |
+| `/api/accounting/cleanup-report` | **500** | 200 · **259ms** |
+| `overdue-counts`（总览） | p50 7,991ms | **84ms** |
+| `overdue-counts?dept=PACKING` | 同上 | **86ms** |
+| `/api/users` | 12,901ms | **91ms** |
+| `/api/notifications` | max 30,011ms | **38ms** |
+| `/api/organisations` | p95 30,011ms | **52ms** |
+
+⚠️ **`/api/users`／`/api/notifications`／`/api/datagrid-layouts` 那几个 15s/30s
+我没有单独去修。** 它们是低次数离群值（1–3 次），跟 dept 页的 cold recompute 抢同一份
+资源，属于同一个根因的连带；现在量起来都是几十毫秒。**如果之后又出现，那就是另一个
+原因，要重查，不要以为已经修过。**
+
+### ⚪ 还没做的（下一轮）
+- `/api/production-orders?dept=…` 回应 **5.1MB**（1,745ms）。查询本身不慢
+  （`production_orders` 全表 39ms），**是 payload 大小**。工厂 wifi 上这就是好几秒。
+  同类：`/api/sales-orders` 1.96MB（brotli 后 124KB）。
+- `poListDept` 每个部门都回报 `rows: 0`。查过：今天到期的 10 张 PO 里 PACKING 那 8 张是
+  COMPLETED（`excludeCompleted` 正确排除），FOAM／WEBBING 各 1 张 PENDING。
+  **0 有可能是对的**（dept sheet 的「今天」可能按 job card 而不是 PO 的 target date）。
+  **没有证据说它坏，所以没动** —— 要动之前先确认 dept 页实际请求的是哪个 key。
+- `/api/mail-center/inbound` P95 4530ms、DB 100%、207 hits。是 Email Routing 的
+  machine-to-machine 写入端点，**不挡操作员**，所以排在后面。
+- overdue 的 `today` 用 UTC，dept sheet 用 MYT —— 每天有 8 小时两边的「今天」不同一天。
+  改动会**动到数字**（owner 红线），所以只记录不动。
+
+---
+
 ## 2026-08-02 — ✅ 假 bank account 还留在已存的 payslip 列上（owner: 「东西都完成了吗」)
 
 收工前复查抓到的**漏网**，属于「改了 code、没补资料」这一类（同一天已经被 owner 讲过一次

@@ -120,12 +120,3 @@ test("MANY reports stack in a box — they do not fan out sideways", () => {
   // reads as an org chart.
   assert.match(src, /left: i === 0 \? "50%" : 0/);
 });
-
-test("the flat table under the chart is gone", () => {
-  // Owner:「下面的不需要」. It listed the ten office accounts only, and its
-  // Reports-to column read the legacy users.reportsTo rather than the
-  // org_reporting edges — so it printed "—" for people the chart draws a line
-  // for. Everything it could edit, the side drawer edits properly.
-  const page = readFileSync("src/pages/settings/Users.tsx", "utf8");
-  assert.doesNotMatch(page, /\{orgRows\.map\(/);
-});

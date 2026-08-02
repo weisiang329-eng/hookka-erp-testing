@@ -64,6 +64,12 @@ type WorkerRow = {
   paymentMethod: string | null;
   bankName: string | null;
   bankAccount: string | null;
+  isOutsource?: boolean | number | null;
+  is_outsource?: boolean | number | null;
+  payMode?: string | null;
+  pay_mode?: string | null;
+  dailyRateSen?: number | null;
+  daily_rate_sen?: number | null;
 };
 
 type DepartmentRow = {
@@ -135,6 +141,11 @@ function rowToWorker(row: WorkerRow) {
     paymentMethod: normalizePaymentMethod(row.paymentMethod),
     bankName: row.bankName ?? "",
     bankAccount: row.bankAccount ?? "",
+    // Dual-keyed per the repo rule — the driver camelCases, but a row read
+    // through another path can arrive snake_case.
+    isOutsource: Boolean(row.isOutsource ?? row.is_outsource ?? false),
+    payMode: String(row.payMode ?? row.pay_mode ?? "MONTHLY") || "MONTHLY",
+    dailyRateSen: Number(row.dailyRateSen ?? row.daily_rate_sen ?? 0),
   };
 }
 
@@ -489,6 +500,9 @@ app.put("/:id", async (c) => {
       paymentMethod: body.paymentMethod ?? existing.paymentMethod,
       bankName: body.bankName ?? existing.bankName,
       bankAccount: body.bankAccount ?? existing.bankAccount,
+      isOutsource: body.isOutsource ?? existing.isOutsource,
+      payMode: body.payMode ?? existing.payMode,
+      dailyRateSen: body.dailyRateSen ?? existing.dailyRateSen,
       name: body.name ?? existing.name,
       empNo: body.empNo ?? existing.empNo,
       departmentId: nextDepartmentId,
@@ -538,7 +552,8 @@ app.put("/:id", async (c) => {
          epfEnabled = ?, socsoEnabled = ?, eisEnabled = ?, pcbEnabled = ?,
          joinDate = ?, icNumber = ?, passportNumber = ?, nationality = ?, resignedAt = ?,
          efficiencyAllowanceSen = ?, efficiencyThresholdPct = ?,
-         paymentMethod = ?, bankName = ?, bankAccount = ?
+         paymentMethod = ?, bankName = ?, bankAccount = ?,
+         isOutsource = ?, payMode = ?, dailyRateSen = ?
        WHERE id = ?`,
     )
       .bind(
@@ -569,6 +584,18 @@ app.put("/:id", async (c) => {
         normalizePaymentMethod(merged.paymentMethod),
         normalizePaymentMethod(merged.paymentMethod) === "CASH" ? null : (merged.bankName || null),
         normalizePaymentMethod(merged.paymentMethod) === "CASH" ? null : (merged.bankAccount || null),
+        // A REAL boolean, not `? 1 : 0`. is_outsource is one of the ten columns
+        // in this database that is an actual Postgres BOOLEAN, and postgres.js
+        // binds anything that is not a JS boolean to a bool column as FALSE —
+        // silently, no error, HTTP 200. `? 1 : 0` is the correct idiom for the
+        // INTEGER flag columns inherited from D1, and it is why ticking
+        // "Outsourced" saved as false while payMode and dailyRateSen (same
+        // statement, same request) saved fine. See
+        // tests/boolean-column-binds.test.mjs.
+        merged.isOutsource === true,
+        // Only DAILY is special; anything else means the ordinary monthly rule.
+        String(merged.payMode ?? "MONTHLY") === "DAILY" ? "DAILY" : "MONTHLY",
+        Math.max(0, Math.round(Number(merged.dailyRateSen) || 0)),
         id,
       )
       .run();

@@ -342,6 +342,138 @@ export function OrgChart({ canManage }: Props) {
     );
   };
 
+  /** Everyone at or below a node, flattened. */
+  const flatten = useCallback((n: OrgNode): OrgNode[] => {
+    const out: OrgNode[] = [n];
+    for (const c of n.children) out.push(...flatten(c));
+    return out;
+  }, []);
+
+  /**
+   * The subtree below a node, as DEPARTMENT BOXES rather than more branches.
+   *
+   * Owner 2026-08-02:「两个 leader…他们应该合在一起,两个 leader 共同带剩下的
+   * 人才对」and「为什么这里没有分部门呢?正常的 HouzsERP 里是有看到部门划分的」.
+   *
+   * Houzs's chart does not express co-management with lines either — their model
+   * is a single manager_id, same as ours. What their board does is stop drawing
+   * the tree and switch to a DEPARTMENT BOX: the leaders sit at the top of the
+   * box, the team sits under a position label, and NO line divides the team
+   * between the leaders. Belonging is expressed by being in the same box.
+   *
+   * That is the right answer here too, because a line per leader is exactly the
+   * distinction the owner does not want drawn: two Operator Leaders both cover
+   * Upholstery and Framing, and splitting the seventeen between them was an
+   * invention of the layout, not a fact about the factory.
+   */
+  /**
+   * Is this person a manager OF MANAGERS?
+   *
+   * The switch from branches to boxes has to happen at the LAST management
+   * level and not one above it. The first cut fired as soon as a subtree merely
+   * CONTAINED a manager, so at the owner's level it swallowed Violet and the
+   * Production Head into the boxes as ordinary cards and the whole management
+   * chain vanished — owner 2026-08-02:「整个 Production 的上司不是一个叫 Lim
+   * 的吗?然后 Lim 的上司不是叫 Violet 吗?为什么没看到这条线啊?」
+   *
+   * Someone whose own reports also have reports keeps their branch. Someone
+   * whose reports are the shop floor folds into a box with them.
+   */
+  const leadsManagers = useCallback(
+    (n: OrgNode) => n.children.some((c) => c.children.length > 0),
+    [],
+  );
+
+  /**
+   * The teams below a node, as boxes.
+   *
+   * Keyed by LEADER, not by department — owner:「Fabric Cutting 还有 Fabric
+   * Sewing 应该都是 under 一个部门…让这个 operator leader 来 leading 这两个部门」.
+   * ANN runs both Fabric Cutting and Fabric Sewing, so splitting her team into
+   * two boxes drew a division that does not exist. One leader, one box, titled
+   * with every department it covers.
+   *
+   * Two leaders on the same team share one box and NO line divides their people
+   * between them — that is how Houzs express co-management, and their model is
+   * a single manager_id exactly like ours.
+   */
+  const boxesUnder = useCallback(
+    (node: OrgNode) => {
+      const isLeader = (p: OrgNode) =>
+        /leader|head|manager|supervisor/i.test(p.position ?? "");
+      const boxes: {
+        key: string;
+        label: string;
+        count: number;
+        leads: OrgNode[];
+        groups: { position: string; members: OrgNode[] }[];
+      }[] = [];
+
+      const build = (leads: OrgNode[], team: OrgNode[], fallbackKey: string) => {
+        const depts = [...new Set([...leads, ...team].map(deptOf))].sort(
+          (a, b) => deptRank(a) - deptRank(b),
+        );
+        const byPos = new Map<string, OrgNode[]>();
+        for (const p of team) {
+          const pos = (p.position || "").trim() || "—";
+          const arr = byPos.get(pos);
+          if (arr) arr.push(p);
+          else byPos.set(pos, [p]);
+        }
+        boxes.push({
+          key: leads[0]?.key ?? fallbackKey,
+          label: depts.map(deptLabel).join(" + "),
+          count: leads.length + team.length,
+          leads,
+          groups: [...byPos.entries()]
+            .map(([position, members]) => ({
+              position,
+              members: [...members].sort((a, b) => a.name.localeCompare(b.name)),
+            }))
+            .sort((a, b) => a.position.localeCompare(b.position)),
+        });
+      };
+
+      // A child WITH reports is a team: that person (plus any co-leader on the
+      // same departments) heads one box.
+      const teamLeads = node.children.filter((c) => c.children.length > 0);
+      const used = new Set<string>();
+      for (const lead of teamLeads) {
+        if (used.has(lead.key)) continue;
+        const myDepts = new Set(lead.children.map(deptOf).concat(deptOf(lead)));
+        // A co-leader is another team lead covering the SAME departments.
+        const co = teamLeads.filter(
+          (o) =>
+            !used.has(o.key) &&
+            o.key !== lead.key &&
+            [...new Set(o.children.map(deptOf).concat(deptOf(o)))].some((d) =>
+              myDepts.has(d),
+            ),
+        );
+        const leads = [lead, ...co].sort((a, b) => a.name.localeCompare(b.name));
+        leads.forEach((l) => used.add(l.key));
+        build(leads, leads.flatMap((l) => l.children.flatMap(flatten)), lead.key);
+      }
+
+      // Everyone reporting straight to this node with nobody under them —
+      // grouped by department, because they have no leader to group by.
+      const loose = node.children.filter((c) => c.children.length === 0);
+      const byDept = new Map<string, OrgNode[]>();
+      for (const p of loose) {
+        const d = deptOf(p);
+        const arr = byDept.get(d);
+        if (arr) arr.push(p);
+        else byDept.set(d, [p]);
+      }
+      for (const [dept, ppl] of byDept) {
+        build(ppl.filter(isLeader), ppl.filter((p) => !isLeader(p)), dept);
+      }
+
+      return boxes.sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+    },
+    [flatten, deptLabel, deptRank],
+  );
+
   const Branch = ({ node }: { node: OrgNode }): React.ReactElement => {
     const kids = collapsed.has(node.key) ? [] : node.children;
     return (
@@ -364,7 +496,74 @@ export function OrgChart({ canManage }: Props) {
               four, and only when those children lead nobody themselves — a
               manager with a team of their own still deserves their own branch.
             */}
-            {kids.length > 4 && kids.every((c) => c.children.length === 0) ? (
+            {/* Below the last MANAGER the tree stops and department boxes take
+                over — the Houzs shape. A branch is right where there are a few
+                named relationships; forty operators fanned into hairlines is a
+                wall of string. */}
+            {node.children.length > 0 && !node.children.some(leadsManagers) ? (
+              <div className="flex items-start gap-3">
+                {boxesUnder(node).map((box, bi) => (
+                  <div key={box.key} className="relative flex flex-col items-center">
+                    {boxesUnder(node).length > 1 && (
+                      <span
+                        aria-hidden
+                        className="absolute top-0 h-px bg-[#C2BDB6]"
+                        style={{
+                          left: bi === 0 ? "50%" : 0,
+                          right: bi === boxesUnder(node).length - 1 ? "50%" : 0,
+                        }}
+                      />
+                    )}
+                    <div className="h-5 w-px bg-[#C2BDB6]" />
+                    <div className="overflow-hidden rounded-lg border border-[#E2DDD8] bg-white">
+                      <div className="flex items-center gap-2 bg-[#33404E] px-3 py-1.5 text-white">
+                        <span
+                          aria-hidden
+                          className="h-3.5 w-1 rounded-full"
+                          style={{ background: ACCENTS[bi % ACCENTS.length] }}
+                        />
+                        <span className="text-[11px] font-semibold uppercase tracking-wide">
+                          {box.label}
+                        </span>
+                        <span className="ml-auto flex items-center gap-1 text-[11px] opacity-75">
+                          <Users className="h-3 w-3" />
+                          {box.count}
+                        </span>
+                      </div>
+                      {box.leads.length > 0 && (
+                        <div className="border-b border-[#EFEAE5] bg-[#FBFAF8] px-2 py-2">
+                          <div className="mb-1 text-[9px] font-semibold uppercase tracking-wider text-[#9CA3AF]">
+                            {box.leads.length > 1
+                              ? `Led together by ${box.leads.length}`
+                              : "Leader"}
+                          </div>
+                          <div className="flex gap-1.5">
+                            {box.leads.map((l) => (
+                              <TreeCard key={l.key} node={l} />
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      <div className="space-y-2 p-2">
+                        {box.groups.map((g) => (
+                          <div key={g.position}>
+                            <div className="mb-1 flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wider text-[#9CA3AF]">
+                              {g.position}
+                              <span className="text-[#C2BDB6]">{g.members.length}</span>
+                            </div>
+                            <div className="flex flex-col gap-1.5">
+                              {g.members.map((m) => (
+                                <TreeCard key={m.key} node={m} />
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : kids.length > 4 && kids.every((c) => c.children.length === 0) ? (
               <div className="rounded-lg border border-[#E2DDD8] bg-[#FBFAF8] p-2">
                 <div
                   className="grid gap-1.5"

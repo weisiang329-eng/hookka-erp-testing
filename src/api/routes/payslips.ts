@@ -56,6 +56,8 @@ type WorkerRow = {
   basicSalarySen: number;
   workingDaysPerMonth: number;
   workingHoursPerDay: number;
+  payMode?: string | null;
+  dailyRateSen?: number | null;
   otMultiplier: number;
   // Per-worker statutory toggles (migration 0131). NULL/undefined falls
   // back to true downstream so legacy rows keep their pre-toggle behaviour.
@@ -484,7 +486,7 @@ app.get("/projected", async (c) => {
 
   // Same worker scope as POST: ACTIVE, plus RESIGNED in their final month.
   const wres = await c.var.DB.prepare(
-    "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate, efficiencyAllowanceSen, efficiencyThresholdPct, paymentMethod, bankName, bankAccount FROM workers WHERE (status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)) AND empNo NOT LIKE 'TEST%'",
+    "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate, efficiencyAllowanceSen, efficiencyThresholdPct, paymentMethod, bankName, bankAccount, payMode, dailyRateSen FROM workers WHERE (status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)) AND empNo NOT LIKE 'TEST%'",
   )
     .bind(`${period}-%`)
     .all<WorkerRow>();
@@ -608,6 +610,10 @@ app.get("/projected", async (c) => {
     const labor = computeMonthlyLabor({
       worker: {
         basicSalarySen: effectiveSalarySen,
+        // Outsourced people are paid per day worked; own staff are unaffected
+        // (payMode defaults to MONTHLY).
+        payMode: worker.payMode,
+        dailyRateSen: worker.dailyRateSen,
         workingDaysPerMonth: worker.workingDaysPerMonth,
         workingHoursPerDay: worker.workingHoursPerDay,
         otMultiplier: worker.otMultiplier,
@@ -780,7 +786,7 @@ app.post("/", async (c) => {
       // partial, month) — the existing absence math prorates the days after
       // they left. Later months exclude them because resignedAt no longer
       // matches the period. Earlier months were generated while still ACTIVE.
-      "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate, efficiencyAllowanceSen, efficiencyThresholdPct, paymentMethod, bankName, bankAccount FROM workers WHERE (status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)) AND empNo NOT LIKE 'TEST%'",
+      "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate, efficiencyAllowanceSen, efficiencyThresholdPct, paymentMethod, bankName, bankAccount, payMode, dailyRateSen FROM workers WHERE (status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)) AND empNo NOT LIKE 'TEST%'",
     )
       .bind(`${period}-%`)
       .all<WorkerRow>();
@@ -951,6 +957,10 @@ app.post("/", async (c) => {
       const labor = computeMonthlyLabor({
         worker: {
           basicSalarySen: effectiveSalarySen,
+        // Outsourced people are paid per day worked; own staff are unaffected
+        // (payMode defaults to MONTHLY).
+        payMode: worker.payMode,
+        dailyRateSen: worker.dailyRateSen,
           workingDaysPerMonth: worker.workingDaysPerMonth,
           workingHoursPerDay: worker.workingHoursPerDay,
           otMultiplier: worker.otMultiplier,

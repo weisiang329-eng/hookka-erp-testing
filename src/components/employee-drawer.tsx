@@ -58,6 +58,12 @@ export type EmployeeDraft = {
   paymentMethod: string;
   bankName: string;
   bankAccount: string;
+  /** Outsourced rather than own staff — drives the OSC-### series. */
+  isOutsource: boolean;
+  /** "MONTHLY" (default) or "DAILY". */
+  payMode: string;
+  /** Rate per day worked, sen. Only used when payMode is DAILY. */
+  dailyRateSen: number;
 };
 
 export type { DepartmentOption };
@@ -283,39 +289,105 @@ export function EmployeeDrawer({
           </Section>
 
           <Section title="Pay">
-            <Field label="Basic salary (RM)">
-              <Input
-                type="number"
-                value={rm(draft.basicSalarySen)}
-                onChange={(e) =>
-                  set("basicSalarySen", Math.round((parseFloat(e.target.value) || 0) * 100))
-                }
-                className="mt-0.5 h-8 text-xs"
-              />
+            {/* Outsourced people are paid per DAY worked, not a monthly salary
+                minus absences — someone who comes five days in a month would
+                otherwise be recorded with 21 absences against a salary they
+                were never on (owner 2026-08-02). */}
+            <Field label="Employment" full>
+              <label className="mt-1 flex items-center gap-2 text-[11px] text-[#374151]">
+                <input
+                  type="checkbox"
+                  checked={draft.isOutsource}
+                  onChange={(e) => {
+                    const on = e.target.checked;
+                    setDraft((d) =>
+                      d
+                        ? {
+                            ...d,
+                            isOutsource: on,
+                            // Turning it on defaults to per-day, which is the
+                            // point of the flag; turning it off returns to the
+                            // ordinary monthly rule.
+                            payMode: on ? "DAILY" : "MONTHLY",
+                          }
+                        : d,
+                    );
+                  }}
+                />
+                Outsourced (paid per day, numbered OSC-###)
+              </label>
             </Field>
+            {draft.isOutsource && (
+              <>
+                <Field label="Pay basis">
+                  <select
+                    value={draft.payMode || "MONTHLY"}
+                    onChange={(e) => set("payMode", e.target.value)}
+                    className="mt-0.5 h-8 w-full rounded-md border border-[#D8D2CC] bg-white px-2 text-xs"
+                  >
+                    <option value="DAILY">Per day worked</option>
+                    <option value="MONTHLY">Monthly salary</option>
+                  </select>
+                </Field>
+                {draft.payMode === "DAILY" && (
+                  <Field label="Rate per day (RM)" hint="Paid for each day they log.">
+                    <Input
+                      type="number"
+                      value={rm(draft.dailyRateSen)}
+                      onChange={(e) =>
+                        set("dailyRateSen", Math.round((parseFloat(e.target.value) || 0) * 100))
+                      }
+                      className="mt-0.5 h-8 text-xs"
+                    />
+                  </Field>
+                )}
+              </>
+            )}
+            {/* Basic salary, hours/day and days/month are the MONTHLY model:
+                a salary, the standard day it buys, and the divisor between
+                them. None of the three means anything for someone paid per day
+                — the day rate above is the whole of their pay. Owner
+                2026-08-02: 「大家不需要去看他的 basic hours 和 days，他是根据他的
+                daywork（85 块一天）来计算的。」 Showing them invites someone to
+                "fix" the zeroes and put a phantom salary on an outsourced
+                person. */}
+            {draft.payMode !== "DAILY" && (
+              <>
+                <Field label="Basic salary (RM)">
+                  <Input
+                    type="number"
+                    value={rm(draft.basicSalarySen)}
+                    onChange={(e) =>
+                      set("basicSalarySen", Math.round((parseFloat(e.target.value) || 0) * 100))
+                    }
+                    className="mt-0.5 h-8 text-xs"
+                  />
+                </Field>
+                <Field label="Hours / day" hint="Their standard day — also the OT threshold.">
+                  <Input
+                    type="number"
+                    step="0.5"
+                    value={draft.workingHoursPerDay}
+                    onChange={(e) => set("workingHoursPerDay", parseFloat(e.target.value) || 0)}
+                    className="mt-0.5 h-8 text-xs"
+                  />
+                </Field>
+                <Field label="Days / month" hint="The divisor for the day rate.">
+                  <Input
+                    type="number"
+                    value={draft.workingDaysPerMonth}
+                    onChange={(e) => set("workingDaysPerMonth", parseInt(e.target.value) || 0)}
+                    className="mt-0.5 h-8 text-xs"
+                  />
+                </Field>
+              </>
+            )}
             <Field label="OT multiplier">
               <Input
                 type="number"
                 step="0.1"
                 value={draft.otMultiplier}
                 onChange={(e) => set("otMultiplier", parseFloat(e.target.value) || 0)}
-                className="mt-0.5 h-8 text-xs"
-              />
-            </Field>
-            <Field label="Hours / day" hint="Their standard day — also the OT threshold.">
-              <Input
-                type="number"
-                step="0.5"
-                value={draft.workingHoursPerDay}
-                onChange={(e) => set("workingHoursPerDay", parseFloat(e.target.value) || 0)}
-                className="mt-0.5 h-8 text-xs"
-              />
-            </Field>
-            <Field label="Days / month" hint="The divisor for the day rate.">
-              <Input
-                type="number"
-                value={draft.workingDaysPerMonth}
-                onChange={(e) => set("workingDaysPerMonth", parseInt(e.target.value) || 0)}
                 className="mt-0.5 h-8 text-xs"
               />
             </Field>

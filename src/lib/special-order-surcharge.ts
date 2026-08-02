@@ -46,12 +46,30 @@ export type CustomSpecialInput = {
   surchargeSen?: number | null;
 };
 
-// The two cover options have a combined cap: picking BOTH costs RM 100 flat,
-// not 50 + 80 = 130. Source: pricing-options.ts:66 ("If HB & divan full cover
-// combined = RM100 total") and calcPredefinedSurcharge in sales/create.tsx.
+// COMBO DISCOUNT — corrected 2026-08-02 by the owner, twice over.
+//
+// What was here was a flat RM 100 TOTAL, applied to HB Fully Cover + Divan FULL
+// Cover. Two things were wrong with it:
+//   * the pair was wrong. The rule belongs to HB Fully Cover + Divan **TOP**
+//     Fully Cover ("If HB & divan top full cover combined = discount RM20").
+//     HB + Divan FULL Cover has no rule at all — it is 50 + 80 = 130, and had
+//     been charging 100, i.e. RM 30 under per line.
+//   * a flat TOTAL hardcodes the prices. The owner edits special-order prices in
+//     Settings, and a total of "100" silently stops meaning anything the moment
+//     either price moves. Owner:「不要放死价格」.
+//
+// So it is a DISCOUNT off the sum, not a total. Change a price in Settings and
+// the combo follows it; only the discount itself is a number, and it comes from
+// the same owner-editable config the prices do.
+//
+// Owner's ruling on history:「旧的 order 就算了 新的 order 确保要全部跟着」— no
+// backfill. Existing orders keep the price they were written with.
 export const HB_FULL_COVER = "HB Fully Cover";
+export const DIVAN_TOP_COVER = "Divan Top Fully Cover";
+/** Kept exported: other modules still name the option. */
 export const DIVAN_FULL_COVER = "Divan Full Cover";
-export const HB_DIVAN_COMBINED_SEN = 10000;
+/** Default when the config carries no override. RM 20. */
+export const HB_DIVAN_TOP_COMBO_DISCOUNT_SEN = 2000;
 
 /** Split the stored text into option tokens. The two writers disagree on the
  *  separator — the form joins with "; " while scan-po.ts:430 joins with ", " —
@@ -89,22 +107,29 @@ export function deriveSpecialOrderSurchargeSen(
   specialOrderText: string | null | undefined,
   customSpecials?: CustomSpecialInput[] | null,
   cfgSpecials?: CfgSpecial[] | null,
+  /** Owner-editable override for the combo discount; defaults to RM 20. */
+  comboDiscountSen?: number | null,
 ): number {
   const tokens = parseSpecialOrderTokens(specialOrderText);
   const hasHb = tokens.includes(HB_FULL_COVER);
-  const hasDivan = tokens.includes(DIVAN_FULL_COVER);
-  const combined = hasHb && hasDivan;
+  const hasDivanTop = tokens.includes(DIVAN_TOP_COVER);
+  const comboDiscount = hasHb && hasDivanTop;
 
   let sen = 0;
   const counted = new Set<string>();
   for (const t of tokens) {
-    if (combined && (t === HB_FULL_COVER || t === DIVAN_FULL_COVER)) continue;
-    // A repeated token is the same option named twice — charge it once.
+    // Every option is charged at ITS OWN price, always — the combo is a
+    // discount off the sum, never a replacement for it. That is what lets the
+    // owner change a price in Settings and have the combo follow.
     if (counted.has(t)) continue;
     counted.add(t);
     sen += priceOfSen(t, cfgSpecials);
   }
-  if (combined) sen += HB_DIVAN_COMBINED_SEN;
+  if (comboDiscount) {
+    sen -= comboDiscountSen ?? HB_DIVAN_TOP_COMBO_DISCOUNT_SEN;
+    // A discount must never turn into a credit, however the prices are edited.
+    if (sen < 0) sen = 0;
+  }
 
   for (const cs of customSpecials ?? []) {
     const v = Number(cs?.surchargeSen);

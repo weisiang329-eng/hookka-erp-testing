@@ -67,8 +67,19 @@ const FALLBACK_WORKING_DAYS_PER_MONTH = 26;
  * pure and unit-testable.
  */
 export type LaborWorker = {
-  /** Monthly basic salary, in sen. */
+  /** Monthly basic salary, in sen. Ignored when payMode is DAILY. */
   basicSalarySen: number;
+  /**
+   * "MONTHLY" (default) or "DAILY".
+   *
+   * MONTHLY starts from the full salary and deducts days not worked. DAILY
+   * starts from zero and pays days worked — the right model for an outsourced
+   * person who may come five days in a month, where the monthly rule would
+   * record 21 absences against a salary they were never on.
+   */
+  payMode?: string | null;
+  /** Rate per day worked, in sen. Only read when payMode is DAILY. */
+  dailyRateSen?: number | null;
   /** Nominal working days per month — the payroll divisor. Typically 26. */
   workingDaysPerMonth: number;
   /** Standard hours in a normal working day — the OT threshold. e.g. 8 or 9. */
@@ -677,7 +688,24 @@ export function computeMonthlyLabor(
   // Unified ÷26 (owner 2026-06-11): the late/short hourly rate uses the SAME
   // ÷26 base as OT (was ÷calendar÷10).
   const lateHourlyRateSen = otBaseHourlyRateSen;
-  const costingDailyRateSen = basicSalarySen / costingDivisor;
+  // Is this an outsourced / per-day person? Hoisted above the costing rate
+  // because the COST side needs it too, not just the pay side further down.
+  const isDailyPaid =
+    (worker.payMode ?? "MONTHLY") === "DAILY" && (worker.dailyRateSen ?? 0) > 0;
+  // Production cost per day worked. A monthly worker's day costs their salary
+  // spread over the month's working days; a daily worker's day costs exactly
+  // the agreed day rate — that IS their cost, and it does not depend on a
+  // monthly salary they do not have.
+  //
+  // Owner 2026-08-02: 「这个人是 outsource…他是根据他的 daywork（85 块一天）来计算
+  // 的…并且这个薪水需要计算进我们的 labour cost，还有我们的 department labour。」
+  // Without this branch basicSalarySen is 0 for them, so costingDailyRateSen is
+  // 0, so regularCostSen is 0 — the person works a full month in a department
+  // and contributes nothing to that department's cost. Every hour they log
+  // would make the factory look cheaper than it is.
+  const costingDailyRateSen = isDailyPaid
+    ? Math.max(0, worker.dailyRateSen ?? 0)
+    : basicSalarySen / costingDivisor;
 
   // Per-date OT MONEY — each date's hours are paid with the multipliers and
   // hour-divisor in force ON that date (a mid-month rule change applies from
@@ -721,15 +749,36 @@ export function computeMonthlyLabor(
   // Absence docks the ÷26 contractual day rate (RM78.85 on RM2,050) — the
   // same divisor as OT. The ÷26-vs-÷working-days difference per absent day is
   // bridged on the Labor Cost screen (the absence-leniency line).
-  const absenceDeductionSen = Math.round(absentDays * payrollDailyRateSen);
+  // DAILY pay mode (outsourced people, owner 2026-08-02). Monthly starts from a
+  // full salary and DEDUCTS the days not worked; daily starts from zero and PAYS
+  // the days worked. For someone who comes five days in a month those are not
+  // two routes to the same number — the monthly rule would record 21 absences
+  // and dock a salary they were never on. Own staff are untouched: payMode
+  // defaults to MONTHLY, and this whole branch is skipped.
+  // (isDailyPaid is defined with the rates above — the cost side needs it too.)
+  const absenceDeductionSen = isDailyPaid
+    ? 0
+    : Math.round(absentDays * payrollDailyRateSen);
   // Owner-flagged / punch-derived unworked hours dock at (salary ÷ 26) ÷ the
   // effective-dated hour divisor — the same RM7.88/h base the OT rate uses.
   const shortHourDeductionHours = Math.max(0, input.shortHourDeductionHours || 0);
   const shortHourDeductionSen = Math.round(shortHourDeductionHours * lateHourlyRateSen);
-  const basicEarnedSen = Math.max(
-    0,
-    Math.max(0, basicSalarySen - absenceDeductionSen) - shortHourDeductionSen,
-  );
+  // Daily: rate x days actually worked, then the same short-hour dock. There is
+  // no absence line to subtract — a day not worked simply is not paid.
+  // Deliberately `daysWorked`, NOT `workedWithinWindow`. The latter is clamped
+  // by the absence window (elapsed working days), which is the right basis for
+  // deciding what to DOCK but the wrong one for deciding what to PAY: a day
+  // that falls outside that window would be worked and then not paid for. For
+  // daily pay the rule is simply "days logged, days paid".
+  const basicEarnedSen = isDailyPaid
+    ? Math.max(
+        0,
+        Math.round(daysWorked * (worker.dailyRateSen ?? 0)) - shortHourDeductionSen,
+      )
+    : Math.max(
+        0,
+        Math.max(0, basicSalarySen - absenceDeductionSen) - shortHourDeductionSen,
+      );
   // Day-typed OT pay. Weekday uses the per-worker rate (base × otMultiplier) so a
   // weekday-only worker is byte-identical to before; Sunday/holiday use the fixed
   // 2×/3× on the base rate. Each bucket is rounded, then summed → otPaySen.
@@ -859,4 +908,76 @@ export function productionCostRatePerMinuteSen(
     countElapsedWorkingDays(year, month, new Date(year, month, 0).getDate(), publicHolidays),
   );
   return basicSalarySen / costingDivisor / workingHoursPerDay / 60;
+}
+
+// ---------------------------------------------------------------------------
+// Outsourced / per-day people, on the COST side.
+//
+// Owner 2026-08-02: 「所以如果它是 outsource 的话，它就应该要用 outsource 的算法，
+// 而不是去看我们正常 workers 的计算方式。」 and 「他也是跟着我们部门一样正常做的，
+// 只是看要如何计算他的薪水而已。」
+//
+// So: they log hours in departments exactly like everyone else, and every
+// report that costs those hours must include them — but priced their own way.
+// A monthly worker's hour costs salary ÷ working days ÷ hours-per-day. That
+// formula cannot be reused here: an outsourced person has no monthly salary
+// (basicSalarySen = 0) and no standard day (workingHoursPerDay = 0), so it
+// yields 0, and a 0 cost is how someone disappears from Labor Cost and
+// Department Labor while still filling a seat on the floor.
+//
+// Their unit is the DAY, not the hour. One day logged costs one day rate,
+// however many hours or departments that day was split across — which is also
+// exactly what payroll pays them, so the reports and the payslip agree.
+// ---------------------------------------------------------------------------
+
+/** True when this person is paid per day worked rather than a monthly salary. */
+export function isDailyPaidWorker(worker: {
+  payMode?: string | null;
+  dailyRateSen?: number | null;
+}): boolean {
+  return (
+    (worker.payMode ?? "MONTHLY") === "DAILY" && (worker.dailyRateSen ?? 0) > 0
+  );
+}
+
+/**
+ * What one logged DAY costs for a daily-paid worker, in sen. Zero for anyone
+ * else — callers keep their existing monthly maths for those.
+ *
+ * Deliberately independent of hours: a short day and a long day both cost the
+ * agreed rate, because that is what is actually paid. Callers that need a
+ * per-entry figure should split this across the day's entries with
+ * `dailyPaidEntryCostSen`.
+ */
+export function dailyPaidDayCostSen(worker: {
+  payMode?: string | null;
+  dailyRateSen?: number | null;
+}): number {
+  return isDailyPaidWorker(worker) ? Math.max(0, worker.dailyRateSen ?? 0) : 0;
+}
+
+/**
+ * A daily-paid worker's day rate apportioned to ONE of that day's entries, by
+ * that entry's share of the day's hours.
+ *
+ * The split matters because a person can log to more than one department in a
+ * day and each department must carry its share — the same pro-rata rule the
+ * monthly path already uses for OT. With a single entry it returns the whole
+ * day rate; summed over one day's entries it always returns exactly the day
+ * rate, so department totals still reconcile to payroll.
+ *
+ * `dayHours` of 0 (a punch with no hours) yields 0 rather than dividing by
+ * zero — an unworked day is not a paid day.
+ */
+export function dailyPaidEntryCostSen(
+  worker: { payMode?: string | null; dailyRateSen?: number | null },
+  entryHours: number,
+  dayHours: number,
+): number {
+  const dayCost = dailyPaidDayCostSen(worker);
+  if (dayCost <= 0) return 0;
+  const total = Math.max(0, dayHours);
+  if (total <= 0) return 0;
+  const share = Math.max(0, entryHours) / total;
+  return dayCost * share;
 }

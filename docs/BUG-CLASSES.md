@@ -234,6 +234,59 @@ should not be sent at all: on the Draft tab every row is already `DRAFT`, so
 seeding a Status exclusion there can only narrow a list that is exactly what was
 asked for. That was the other half of the blank tab.
 
+## C8 — The D1 integer idiom, bound to a real Postgres BOOLEAN
+
+**Shape.** `.bind(flag ? 1 : 0)` against a column whose type is `boolean`.
+`postgres.js` maps **every value that is not a JS boolean** to `FALSE`:
+
+| bound | stored |
+|---|---|
+| `true` (boolean) | `true` |
+| `false` (boolean) | `false` |
+| `1` (number) | **`false`** |
+| `0` (number) | `false` |
+| `"1"` / `"true"` (string) | **`false`** |
+
+No error. No 500. HTTP 200, success toast, and the value on screen is not the
+value in the database. That is the whole danger: every other write bug in this
+file announces itself somewhere. This one does not.
+
+**Why it keeps happening.** `flag ? 1 : 0` is **correct** for most of this
+codebase. It came from Cloudflare D1 (SQLite), where a boolean *is* the integer
+0/1, and the great majority of flag columns here really are `INTEGER`. Only
+**ten** columns in 267 tables were created as an actual `BOOLEAN`. On those ten,
+and nowhere else, the ordinary idiom silently writes false. `tsc` cannot see it
+— the SQL is a string — and no test in the suite executes a real INSERT.
+
+**Instances**
+
+| Date | Where | Effect |
+|---|---|---|
+| 2026-08-02 | `workers.is_outsource` — `merged.isOutsource ? 1 : 0` (`routes/workers.ts`) | Ticking "Outsourced" never stuck. `pay_mode` and `daily_rate_sen` in the SAME statement saved fine, so it read as a cache bug. Owner: 「我明明设置了这个人是 outsource…他又没有 save 成功」 |
+| 2026-08-02 | `sales_orders.is_service_order` — bare `0` (`lib/intercompany-mirror-create.ts`) | Latent. `0` lands on `false`, which is the intended value, so nothing was visibly wrong — but only by luck. |
+
+**The rule.** A column of type `boolean` is bound a **JS boolean**. Never
+`? 1 : 0`, never `Number(...)`, never a string.
+
+**Covered by** `tests/boolean-column-binds.test.mjs`, which maps `.bind()`
+arguments positionally onto the columns of each INSERT/UPDATE and fails on a
+non-boolean bound to any column in `tests/db-boolean-columns.json`. That fixture
+is regenerated from production by `scripts/refresh-db-schema-fixture.mjs` —
+**re-run it after any migration that adds a boolean column**, or the new column
+is unguarded.
+
+> The first version of that test counted only the `?` in `SET` and not the one
+> in `WHERE id = ?`. The counts disagreed by one, the statement was skipped, and
+> the test passed while the bug was still in the file. It was caught by putting
+> the bug back and checking the test went red. Do that; a guard nobody has seen
+> fail is not a guard.
+
+**The other nine boolean columns, checked 2026-08-02 and safe:**
+`workers.{epf,socso,eis,pcb}_enabled` (real booleans on both INSERT and UPDATE),
+`worker_pins.must_reset` (SQL literal `false`), `announcements.is_active`
+(`? true : false`), `organisations.is_default` (`=== true ? true : false`),
+`rd_team_members.active` (real boolean).
+
 ## What tests cannot catch — and what covers it
 
 None of C1–C4's money leaks were introduced by a code change on the day they started leaking:

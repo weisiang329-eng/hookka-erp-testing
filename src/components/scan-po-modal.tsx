@@ -242,6 +242,16 @@ type ClaudeScanRow = {
   // hold multiple POs; per-doc /consume marks just one off without
   // discarding the rest.
   scanQueueDocIdx: number;
+  /**
+   * This exact PO was already turned into a draft from a previous scan.
+   *
+   * It is a WARNING, never a filter. Owner 2026-08-02:「无论什么情况,它都应该
+   * 要出来,只是做提醒,而不是影响我的 flow」— and the reason that matters: a
+   * draft that was later DELETED leaves the consumed mark behind, so the PO
+   * became permanently invisible to every future scan of the same file. Two
+   * real POs (9720, 9721) vanished out of eleven and nothing said so.
+   */
+  alreadyUsed: boolean;
   // Collapsed/expanded toggle for the card body. Default rule: total rows
   // ≥5 → only the first card expanded; <5 → all expanded.
   expanded: boolean;
@@ -737,6 +747,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
             sampleId: s.sampleId,
             scanQueueRowId: null,
             scanQueueDocIdx: 0,
+            alreadyUsed: false,
             // buildAllRows below re-applies the ≥5 collapse rule across the
             // full set. Start expanded; the post-loop sweeper flips later
             // additions to collapsed when we cross the threshold.
@@ -1294,10 +1305,13 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
       }
        
       setQueueItems(r.data.items);
+      // NOTE the absence of a `!it.consumedAt` test. It used to be here, and it
+      // is why POs disappeared: consumed means "a draft was made from this
+      // once", which survives the draft being deleted. Everything the scan
+      // found is surfaced; consumed rows arrive flagged and unticked instead.
       const ready = r.data.items.filter(
         (it) =>
           (it.status === "done" || it.status === "cached") &&
-          !it.consumedAt &&
           it.rawJson != null,
       );
       if (ready.length === 0) return;
@@ -1311,12 +1325,12 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
         for (const it of ready) {
           const raw = it.rawJson as { pos?: ClaudeExtractedPO[] } | null;
           const pos = Array.isArray(raw?.pos) ? raw.pos : [];
-          // Skip per-doc-consumed indices (operator X-deleted them earlier).
+          // Per-doc consumed indices — FLAGGED, not skipped. Skipping was the
+          // bug: the mark outlives the draft it refers to.
           const consumedIdxs = new Set<number>(
             Array.isArray(it.consumedDocIdxs) ? it.consumedDocIdxs : [],
           );
           pos.forEach((poRaw, docIdx) => {
-            if (consumedIdxs.has(docIdx)) return;
             const po: ClaudeExtractedPO = {
               ...poRaw,
               pageNumbers: poRaw.pageNumbers ?? [],
@@ -1341,6 +1355,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
               sampleId: it.sampleId,
               scanQueueRowId: it.id,
               scanQueueDocIdx: docIdx,
+              alreadyUsed: consumedIdxs.has(docIdx) || !!it.consumedAt,
               expanded: true,
               extracted: po,
               original: JSON.parse(JSON.stringify(po)) as ClaudeExtractedPO,
@@ -1426,7 +1441,14 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
       const total = claudeRows.length + fbCount;
       if (total === prev.size) return prev;
       const next = new Set(prev);
-      for (let i = 0; i < total; i++) next.add(i);
+      for (let i = 0; i < total; i++) {
+        // A PO that was already turned into a draft is SHOWN but not ticked.
+        // Visible, flagged, one click from being created again — but never
+        // swept into a bulk confirm by accident. Owner 2026-08-02:「只是做提醒,
+        // 而不是影响我的 flow」.
+        if (claudeRows[i]?.alreadyUsed) continue;
+        next.add(i);
+      }
       return next;
     });
   }, [claudeRows.length, parseResult?.purchaseOrders.length]);
@@ -1947,6 +1969,7 @@ function PreviewStep({
             reused={
               !!row.scanQueueRowId && cachedRowIds.has(row.scanQueueRowId)
             }
+            alreadyUsed={row.alreadyUsed}
             catalog={catalog}
             customerAliases={customerAliases}
             selected={selectedPOs.has(idx)}
@@ -2047,11 +2070,13 @@ function InchSelect({
 }
 
 function ClaudePOCard({
-  row, reused, catalog, customerAliases, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem, onAddItem, onRemoveItem, onMoveItem, onToggleGold, onRemoveCard,
+  row, reused, alreadyUsed, catalog, customerAliases, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem, onAddItem, onRemoveItem, onMoveItem, onToggleGold, onRemoveCard,
 }: {
   row: ClaudeScanRow;
   /** This card came from a cache-hit queue row (same file scanned before). */
   reused?: boolean;
+  /** Already turned into a draft once — shown, warned about, never hidden. */
+  alreadyUsed?: boolean;
   catalog: ScanCatalog | null;
   /** Taught aliases (OCR letterhead → customerId). */
   customerAliases?: Record<string, string> | null;
@@ -2125,6 +2150,14 @@ function ClaudePOCard({
               <Badge className="bg-red-100 text-red-800 border-red-200">URGENT</Badge>
             )}
             {reused && <ReusedScanBadge />}
+            {alreadyUsed && (
+              <span
+                className="rounded bg-[#FBF1DC] px-1.5 py-0.5 text-[10px] font-semibold text-[#7A5410]"
+                title="A draft was created from this PO before. It is shown anyway — if that draft was deleted, create it again."
+              >
+                Draft made before
+              </span>
+            )}
           </div>
           <button
             type="button"

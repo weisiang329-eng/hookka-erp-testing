@@ -704,9 +704,18 @@ export default function SalesPage() {
           ).length;
           const totalPOs = linkedPOs.length;
           if (totalPOs === 0) {
+            // The order is CONFIRMED / IN PRODUCTION but has no production order
+            // behind it — nothing is being made. That is the whole message, and
+            // "2 pcs" did not carry it: the owner read it as the column showing
+            // a random number (2026-08-02「为什么 Outstanding 奇怪地显示在 one
+            // piece, two piece?」). Every other row reads "3/3", so a bare
+            // quantity here looks like a different unit, not a different state.
             return (
-              <span className="font-semibold text-[#9A3A2D]">
-                {totalQty} pcs
+              <span
+                className="font-semibold text-[#9A3A2D]"
+                title={`${totalQty} pcs ordered, but no production order exists yet`}
+              >
+                No PO yet
               </span>
             );
           }

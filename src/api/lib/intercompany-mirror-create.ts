@@ -327,7 +327,9 @@ export async function createPurchaseOrderMirror(
         "PENDING",
         notes,
         null, // customerPOImageB64
-        0, // is_service_order
+        false, // is_service_order — a real BOOLEAN column; 0 happens to land on
+               // FALSE but only because postgres.js maps every non-boolean to
+               // FALSE. See tests/boolean-column-binds.test.mjs.
         null, // caseid
         decision.sisterOrgCode,
         now,

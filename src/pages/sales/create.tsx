@@ -28,7 +28,11 @@ import {
   gapHeightOptions,
   SEAT_HEIGHT_OPTIONS,
 } from "@/lib/pricing-options";
-import { fetchVariantsConfig, getVariantsConfigSync, subscribeKvConfig, VARIANTS_CONFIG_KEY } from "@/lib/kv-config";
+
+import {
+  deriveSpecialOrderSurchargeSen,
+  HB_DIVAN_TOP_COMBO_DISCOUNT_SEN,
+} from "@/lib/special-order-surcharge";import { fetchVariantsConfig, getVariantsConfigSync, subscribeKvConfig, VARIANTS_CONFIG_KEY } from "@/lib/kv-config";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useUnsavedChanges } from "@/lib/use-unsaved-changes";
 import { useFormDraft, clearFormDraft } from "@/lib/use-form-draft";
@@ -183,31 +187,19 @@ function parseInches(h: string): number | null {
 }
 
 /**
- * Calculate total special order surcharge, applying the combined HB+Divan cover rule:
- * If both HB_FULL_COVER and DIVAN_BTM_COVER are selected, total for that pair = RM100 (10000 sen)
- * instead of RM50 + RM80 = RM130.
+ * Total special-order surcharge for the selected CODES.
+ *
+ * Delegates to the shared rule in lib/special-order-surcharge.ts. It used to
+ * carry its own copy — a flat "RM 100 for HB + Divan BTM" — which was wrong on
+ * both counts: wrong pair, and a hardcoded TOTAL that stops meaning anything the
+ * moment the owner edits a price in Settings. Two implementations of one money
+ * rule is how the two sides drift, and a price that drifts is not a display bug.
  */
 function calcSpecialOrderSurcharge(codes: string[]): number {
-  const hasHBCover = codes.includes("HB_FULL_COVER");
-  const hasDivanBtmCover = codes.includes("DIVAN_BTM_COVER");
-
-  let total = 0;
-  for (const code of codes) {
-    const opt = specialOrderOptions.find(o => o.code === code);
-    if (!opt) continue;
-
-    if (hasHBCover && hasDivanBtmCover) {
-      // Apply combined pricing: skip individual HB + BTM, add combined RM100 once
-      if (code === "HB_FULL_COVER" || code === "DIVAN_BTM_COVER") continue;
-    }
-    total += opt.surcharge;
-  }
-
-  if (hasHBCover && hasDivanBtmCover) {
-    total += 10000; // RM100 combined
-  }
-
-  return total;
+  const names = codes
+    .map((c) => specialOrderOptions.find((o) => o.code === c)?.name)
+    .filter((n): n is string => !!n);
+  return deriveSpecialOrderSurchargeSen(names.join("; "));
 }
 
 export default function CreateSalesOrderPageWrapper() {
@@ -1441,20 +1433,18 @@ function CreateSalesOrderPage() {
     if (!cfgSpecials || !Array.isArray(cfgSpecials)) {
       return calcSpecialOrderSurcharge(codes);
     }
-    let surcharge = 0;
-    const hasHBCover = codes.includes("HB_FULL_COVER");
-    const hasDivanBtmCover = codes.includes("DIVAN_BTM_COVER");
-    for (const c of codes) {
-      const opt = specialOrderOptions.find(o => o.code === c);
-      if (!opt) continue;
-      if (hasHBCover && hasDivanBtmCover && (c === "HB_FULL_COVER" || c === "DIVAN_BTM_COVER")) continue;
-      const cfgEntry = cfgSpecials.find((e: {value:string; priceSen:number} | string) =>
-        typeof e === "object" && e.value === opt.name
-      );
-      surcharge += (cfgEntry && typeof cfgEntry === "object") ? cfgEntry.priceSen : opt.surcharge;
-    }
-    if (hasHBCover && hasDivanBtmCover) surcharge += 10000;
-    return surcharge;
+    // The owner's edited prices go straight into the SHARED rule — this used to
+    // be a third copy of the combo maths, with its own hardcoded RM 100.
+    const names = codes
+      .map((c) => specialOrderOptions.find((o) => o.code === c)?.name)
+      .filter((n): n is string => !!n);
+    const cfg = (cfgSpecials as unknown[])
+      .filter(
+        (e): e is { value: string; priceSen: number } =>
+          !!e && typeof e === "object" && "value" in e && "priceSen" in e,
+      )
+      .map((e) => ({ value: e.value, priceSen: e.priceSen }));
+    return deriveSpecialOrderSurchargeSen(names.join("; "), null, cfg);
   };
 
   // Build the joined `specialOrder` text column from predefined codes and
@@ -3751,13 +3741,19 @@ function LineItemCard({
               </div>
             );
           })}
-          {/* Show combined discount note if applicable */}
-          {item.specialOrders.includes("HB_FULL_COVER") && item.specialOrders.includes("DIVAN_BTM_COVER") && (
-            <div className="flex justify-between text-[#3E6570]">
-              <span>HB + Divan Cover (combined):</span>
-              <span>RM 100.00</span>
-            </div>
-          )}
+          {/* The combo DISCOUNT, shown as a discount — the chips above already
+              carry each option at its own price, so a line saying "combined:
+              RM 100" on top of them is what made the operator add 50 + 80 and
+              get a different answer from the field. */}
+          {item.specialOrders.includes("HB_FULL_COVER") &&
+            item.specialOrders.includes("DIVAN_TOP_COVER") && (
+              <div className="flex justify-between text-[#3E6570]">
+                <span>HB + Divan Top Cover (combined discount):</span>
+                <span>
+                  − RM {(HB_DIVAN_TOP_COMBO_DISCOUNT_SEN / 100).toFixed(2)}
+                </span>
+              </div>
+            )}
           {/* Custom specials breakdown — descriptions are operator-typed
               so we show them as "Other: <desc>" lines mirroring how they
               appear in the saved specialOrder text. Zero-surcharge entries

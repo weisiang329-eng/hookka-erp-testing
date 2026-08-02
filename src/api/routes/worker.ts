@@ -1877,6 +1877,11 @@ type PayslipRow = {
   socsoEmployeeSen: number;
   eisEmployeeSen: number;
   pcbSen: number;
+  absentDays?: number | null;
+  absenceDeductionSen?: number | null;
+  otWeekdayHours?: number | null;
+  otSundayHours?: number | null;
+  otPhHours?: number | null;
 };
 
 app.get("/payslips", async (c) => {
@@ -1925,15 +1930,70 @@ app.get("/payslips", async (c) => {
     async () => {
 
   const res = await c.var.DB.prepare(
+    // absentDays / absenceDeductionSen ride along so a FINISHED month can show
+    // the same "why is it this number" breakdown the in-progress month already
+    // showed. Without them the worker could see every late minute and absent
+    // day for the current month and then, once payroll ran, only a bare Net —
+    // which is exactly the moment they most want to check it (owner 2026-08-02:
+    // 「他们的迟到、OT、请假等等，全部都可以在 MyPay 那一边呈现出来」).
     `SELECT id, employeeId, period, basicSalarySen, totalOtSen, allowancesSen,
             grossPaySen, netPaySen, epfEmployeeSen, socsoEmployeeSen,
-            eisEmployeeSen, pcbSen
+            eisEmployeeSen, pcbSen, absentDays, absenceDeductionSen,
+            otWeekdayHours, otSundayHours, otPhHours
        FROM payslips
       WHERE employeeId = ?
       ORDER BY period DESC`,
   )
     .bind(workerId)
     .all<PayslipRow>();
+
+  // Late / short-hour docks are NOT a payslips column — they live in
+  // payroll_hour_deductions and are folded into the stored gross. Read them
+  // per period and price them with the SAME rate the engine docked at (the
+  // contractual day rate over the worker's day SPAN, resolved per period), so
+  // the worker's phone and the admin payslip quote one number, not two.
+  const lateByPeriod = new Map<string, Array<{ date: string; hours: number }>>();
+  const lateSenByPeriod = new Map<string, number>();
+  try {
+    const dedRes = await c.var.DB.prepare(
+      "SELECT date, hours FROM payroll_hour_deductions WHERE workerId = ? ORDER BY date",
+    )
+      .bind(workerId)
+      .all<{ date: string; hours: number }>();
+    const wRow = await c.var.DB.prepare(
+      "SELECT basicSalarySen, workingDaysPerMonth, workingHoursPerDay FROM workers WHERE id = ?",
+    )
+      .bind(workerId)
+      .first<{ basicSalarySen: number; workingDaysPerMonth: number; workingHoursPerDay: number }>();
+    const versions = await loadPayRuleVersions(c.var.DB);
+    for (const d of dedRes.results ?? []) {
+      const h = Number(d.hours) || 0;
+      if (h <= 0 || typeof d.date !== "string") continue;
+      const per = d.date.slice(0, 7);
+      const arr = lateByPeriod.get(per) ?? [];
+      arr.push({ date: d.date, hours: Math.round(h * 100) / 100 });
+      lateByPeriod.set(per, arr);
+      if (!wRow) continue;
+      // Rules as of THAT period — a rule change today must not re-price a
+      // month the worker was already paid for.
+      const cfg = resolvePayRulesAsOf(versions, `${per}-28`);
+      const dayRate = payrollDayRateSen(
+        Number(wRow.basicSalarySen) || 0,
+        {
+          workingDaysPerMonth: Number(wRow.workingDaysPerMonth) || 26,
+          calendarDays: 30,
+          workingDaysInMonth: 26,
+        },
+        cfg,
+      );
+      const hourRate = dayRate / payrollHourDivisor(Number(wRow.workingHoursPerDay) || 0, cfg);
+      lateSenByPeriod.set(per, (lateSenByPeriod.get(per) ?? 0) + Math.round(h * hourRate));
+    }
+  } catch (e) {
+    // Best-effort: the money figures above are still correct without it, the
+    // breakdown just loses its per-day chips. Logged, never silent.
+    console.error("[worker/payslips] late-day detail unavailable:", e);
+  }
 
   const history = (res.results ?? []).map((r) => ({
     id: r.id,
@@ -1947,6 +2007,15 @@ app.get("/payslips", async (c) => {
     socsoEeSen: r.socsoEmployeeSen,
     eisEeSen: r.eisEmployeeSen,
     taxSen: r.pcbSen,
+    // The "why is it this number" half.
+    absentDays: Number(r.absentDays ?? 0),
+    absenceDeductionSen: Number(r.absenceDeductionSen ?? 0),
+    otHours:
+      (Number(r.otWeekdayHours ?? 0) || 0) +
+      (Number(r.otSundayHours ?? 0) || 0) +
+      (Number(r.otPhHours ?? 0) || 0),
+    lateDays: lateByPeriod.get(r.period) ?? [],
+    shortHourDeductionSen: lateSenByPeriod.get(r.period) ?? 0,
   }));
 
   // Live current-month estimate, computed by the shared labor engine —

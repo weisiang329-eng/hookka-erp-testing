@@ -1,0 +1,24 @@
+{
+  "announcements": [
+    "is_active"
+  ],
+  "organisations": [
+    "is_default"
+  ],
+  "rd_team_members": [
+    "active"
+  ],
+  "sales_orders": [
+    "is_service_order"
+  ],
+  "worker_pins": [
+    "must_reset"
+  ],
+  "workers": [
+    "eis_enabled",
+    "epf_enabled",
+    "is_outsource",
+    "pcb_enabled",
+    "socso_enabled"
+  ]
+}

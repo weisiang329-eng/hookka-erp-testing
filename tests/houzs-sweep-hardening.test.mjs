@@ -45,7 +45,7 @@ test("the RETRY matcher stays narrow — a mid-statement drop is never re-run", 
   // more dangerous decision: re-running an INSERT that may already have applied
   // is a silent double-write. Houzs' set includes these; ours must not.
   const compat = readFileSync("src/api/lib/supabase-compat.ts", "utf8");
-  const createRe = compat.match(/const CONN_CREATE_RE =\n\s*(\/.*\/i)/)?.[1] ?? "";
+  const createRe = compat.match(/const CONN_CREATE_RE =\s*(\/.*\/i)/)?.[1] ?? "";
   assert.ok(createRe, "CONN_CREATE_RE must still exist");
   for (const unsafe of ["connection terminated", "socket hang up", "fetch failed"]) {
     assert.ok(
@@ -109,7 +109,7 @@ test("the plate column keeps what the operator typed", () => {
     "production already contains collisions — a unique index would fail or start rejecting saves before anyone decided which duplicate wins",
   );
   // New duplicates blocked; existing ones reported, not silently merged.
-  assert.match(route, /already exists\.`,\n\s*\},\n\s*409,/);
+  assert.match(route, /already exists\.`,\s*\},\s*409,/);
   assert.match(route, /app\.get\("\/collisions"/);
   // Renaming a plate must move its comparison form with it.
   assert.match(route, /normalizePlate\(merged\.plateNo\)/);

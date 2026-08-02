@@ -104,11 +104,24 @@ app.get("/", async (c) => {
   // Permission is checked BEFORE querying, not after: a user without
   // procurement access should never cause a procurement query to run.
   const allowed: SearchSource[] = [];
+  const skipped: { kind: string; reason: string }[] = [];
   for (const s of SEARCH_SOURCES) {
-    if (!isSourceUsable(s, columns)) continue;
+    if (!isSourceUsable(s, columns)) {
+      // Name the missing piece so a schema drift is diagnosable from the
+      // response instead of a source silently vanishing from search.
+      const cols = columns.get(s.table);
+      const missing = !cols
+        ? `table ${s.table}`
+        : [s.idCol, s.labelCol, ...s.searchCols].filter((col) => !cols.has(col)).join(", ");
+      skipped.push({ kind: s.kind, reason: `missing ${missing}` });
+      continue;
+    }
     // requirePermission returns null when allowed and a 403 Response when
     // not; we only need the boolean, and the denial Response is discarded.
-    if (await requirePermission(c, s.resource, "read")) continue;
+    if (await requirePermission(c, s.resource, "read")) {
+      skipped.push({ kind: s.kind, reason: "no read permission" });
+      continue;
+    }
     allowed.push(s);
   }
 
@@ -150,6 +163,7 @@ app.get("/", async (c) => {
       // say "keep typing" rather than implying these are all the matches.
       truncated: groups.some((g) => g.items.length >= perSource),
       sourcesSearched: allowed.length,
+      sourcesSkipped: skipped,
       sourcesFailed: settled.filter((g) => "failed" in g && g.failed).map((g) => g.kind),
     },
   });

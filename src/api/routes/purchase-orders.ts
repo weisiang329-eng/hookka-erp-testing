@@ -10,6 +10,7 @@
 // mapper handles the rename.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import { runSelfApply } from "../lib/self-apply";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
@@ -1052,19 +1053,14 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       // what lets the PO→SO mirror know the seller is a sister group company.
       "ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS group_org_code TEXT NOT NULL DEFAULT ''",
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).run();
-      } catch (err) {
-        console.warn(
-          "[purchase-orders] migration: CREATE UNIQUE INDEX failed " +
-            "(usually means duplicate poNos exist — run /api/import/po-no-duplicates to investigate). " +
-            "Worker will continue without uniqueness enforcement.",
-          err instanceof Error ? err.message : String(err),
-        );
-      }
-    }
-  })();
+    await runSelfApply(db, "purchase-orders", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    pendingMigrations = null;
+    throw err;
+  });
   return pendingMigrations;
 }
 

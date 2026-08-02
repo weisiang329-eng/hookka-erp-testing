@@ -35,6 +35,7 @@
 // ---------------------------------------------------------------------------
 
 import { resolveStateCode } from "../../lib/malaysia-states";
+import { runSelfApply } from "../lib/self-apply";
 import { loadHubStateMap } from "../routes/delivery-orders";
 import { loadDoValueMap } from "./do-value";
 import { askAgentBrain } from "./agent-brain";
@@ -104,17 +105,14 @@ export function ensureDeliveryAgentTables(db: DbLike): Promise<void> {
       `CREATE INDEX IF NOT EXISTS idx_delivery_briefs_date
          ON delivery_briefs(date, taken_at DESC)`,
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).bind().run();
-      } catch (err) {
-        console.warn("[delivery-agent.migrations] DDL skipped", {
-          sql: sql.split("\n")[0],
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-  })();
+    await runSelfApply(db, "delivery-agent", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    _agentMig = null;
+    throw err;
+  });
   return _agentMig;
 }
 

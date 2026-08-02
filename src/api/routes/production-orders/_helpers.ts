@@ -5,6 +5,7 @@
 // handlers remain in production-orders.ts, which imports/re-exports from here.
 // ---------------------------------------------------------------------------
 import type { Context } from "hono";
+import { runSelfApply } from "../../lib/self-apply";
 import type { Env } from "../../worker";
 import { postProductionOrderCompletion } from "../../lib/fg-completion";
 import { archiveUnionSource } from "../../lib/archive-union";
@@ -157,19 +158,14 @@ export function ensurePendingMigrations(db: D1Database): Promise<void> {
       `CREATE INDEX IF NOT EXISTS idx_wip_cascade_log_jc
          ON wip_cascade_log (org_id, job_card_id, applied_at DESC)`,
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).run();
-      } catch (err) {
-        // Best-effort. Log so silent schema drift surfaces in wrangler tail
-        // (per the security-fix tightening landed earlier this branch).
-        console.warn("[production-orders.migrations] DDL skipped", {
-          sql: sql.split("\n")[0],
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-  })();
+    await runSelfApply(db, "production-orders", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    pendingMigrations = null;
+    throw err;
+  });
   return pendingMigrations;
 }
 

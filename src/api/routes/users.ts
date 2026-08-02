@@ -15,6 +15,7 @@
 // remain valid.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import { runSelfApply } from "../lib/self-apply";
 import type { Env } from "../worker";
 import { requirePermission, requireSuperAdmin } from "../lib/rbac";
 import { hashPassword } from "../lib/password";
@@ -121,14 +122,14 @@ function ensureUserOrgColumns(db: D1Database): Promise<void> {
       // org chart can draw a reporting line — mirrors Houzs's parentId.
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS reports_to TEXT",
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).run();
-      } catch (e) {
-        console.error("[users] org-column schema init failed:", e);
-      }
-    }
-  })();
+    await runSelfApply(db, "users", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    orgColumnsEnsured = null;
+    throw err;
+  });
   return orgColumnsEnsured;
 }
 

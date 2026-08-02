@@ -26,6 +26,7 @@
 //     ON DELETE CASCADE on folder_id so deleting a folder cleans its rows.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import { runSelfApply } from "../lib/self-apply";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
@@ -72,17 +73,14 @@ function ensureSchema(db: D1Database): Promise<void> {
       `CREATE INDEX IF NOT EXISTS idx_folder_job_cards_jc
          ON folder_job_cards (job_card_id)`,
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).run();
-      } catch (err) {
-        console.warn("[production-folders.migrations] DDL skipped", {
-          sql: sql.split("\n")[0],
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-  })();
+    await runSelfApply(db, "production-folders", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    pendingMigrations = null;
+    throw err;
+  });
   return pendingMigrations;
 }
 

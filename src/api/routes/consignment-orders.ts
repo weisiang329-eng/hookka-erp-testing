@@ -19,6 +19,7 @@
 // CO) — see PR 3.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import { runSelfApply } from "../lib/self-apply";
 import type { Env } from "../worker";
 import { createProductionOrdersForOrder } from "./_shared/production-builder";
 import {
@@ -522,14 +523,14 @@ function ensureDiscountColumn(db: D1Database): Promise<void> {
         "ALTER TABLE consignment_orders ADD COLUMN IF NOT EXISTS held_by TEXT",
         "ALTER TABLE consignment_orders ADD COLUMN IF NOT EXISTS held_at TEXT",
       ];
-      for (const sql of stmts) {
-        try {
-          await db.prepare(sql).run();
-        } catch {
-          // ignore — column may already exist or DDL transiently rejected
-        }
-      }
-    })();
+      await runSelfApply(db, "consignment-orders", stmts);
+    })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    _coDiscountColMig = null;
+    throw err;
+  });
   }
   return _coDiscountColMig;
 }

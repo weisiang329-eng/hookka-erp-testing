@@ -145,10 +145,16 @@ test("credit/debit note invoice_id indexes are runtime self-applied", () => {
   );
 });
 
-test("the note-index ensure is memoised and swallows failure with a warn", () => {
+test("the note-index ensure is memoised, and a FAILED round is retried", () => {
+  // Updated 2026-08-02. This used to assert the ensure "swallows failure with a
+  // warn" — which was describing the bug, not the requirement. Swallowing plus
+  // memoising means one transient blip leaves the index unbuilt for the life of
+  // the isolate, and nothing anywhere says why. runSelfApply logs the exact
+  // statement and memoizeSelfApply-style reset lets the next request retry.
   assert.match(INV_ROUTE, /let _invNoteIndexMig: Promise<void> \| null = null/);
   assert.match(INV_ROUTE, /if \(!_invNoteIndexMig\)/);
-  assert.match(INV_ROUTE, /console\.warn\("\[invoices\] ensureInvoiceNoteIndexes:/);
+  assert.match(INV_ROUTE, /runSelfApply\(/);
+  assert.match(INV_ROUTE, /_invNoteIndexMig = null;/);
 });
 
 test("invoice GET /:id awaits the note-index ensure before querying", () => {

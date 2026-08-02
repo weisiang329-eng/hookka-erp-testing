@@ -17,6 +17,7 @@
 // working between deploy and migration apply.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import { runSelfApply } from "../lib/self-apply";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 
@@ -200,14 +201,14 @@ function ensureOrganisationRegistry(db: D1Database): Promise<void> {
       "CREATE UNIQUE INDEX IF NOT EXISTS organisations_code_per_org_uniq ON organisations (org_id, code)",
       "ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS purchase_org_code text NOT NULL DEFAULT 'HOOKKA'",
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).bind().run();
-      } catch {
-        // best-effort; column/constraint may already be in the target state
-      }
-    }
-  })();
+    await runSelfApply(db, "organisations", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    orgRegistryPromise = null;
+    throw err;
+  });
   return orgRegistryPromise;
 }
 

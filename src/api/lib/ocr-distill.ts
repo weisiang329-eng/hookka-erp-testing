@@ -22,6 +22,8 @@
 // so it can also be invoked from tests / scripts.
 // ---------------------------------------------------------------------------
 
+import { runSelfApply } from "../lib/self-apply";
+
 const CLAUDE_MODEL = "claude-sonnet-4-6";
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 
@@ -37,14 +39,14 @@ function ensureDistillColumns(db: DistillDb): Promise<void> {
       "ALTER TABLE customers ADD COLUMN IF NOT EXISTS ocrPromptRules TEXT",
       "ALTER TABLE po_scan_samples ADD COLUMN IF NOT EXISTS isGold INTEGER NOT NULL DEFAULT 0",
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).bind().run();
-      } catch {
-        // best-effort; column may already exist or DDL transiently rejected
-      }
-    }
-  })();
+    await runSelfApply(db, "ocr-distill", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    distillColumnsPromise = null;
+    throw err;
+  });
   return distillColumnsPromise;
 }
 
@@ -388,14 +390,14 @@ function ensureSupplierDistillSchema(db: DistillDb): Promise<void> {
          createdAt TEXT
        )`,
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).bind().run();
-      } catch {
-        // best-effort — column/table may already exist or DDL transiently rejected
-      }
-    }
-  })();
+    await runSelfApply(db, "ocr-distill", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    supplierDistillSchemaPromise = null;
+    throw err;
+  });
   return supplierDistillSchemaPromise;
 }
 

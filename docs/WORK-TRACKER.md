@@ -9,6 +9,49 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-02 — ✅ 假 bank account 还留在已存的 payslip 列上（owner: 「东西都完成了吗」)
+
+收工前复查抓到的**漏网**，属于「改了 code、没补资料」这一类（同一天已经被 owner 讲过一次
+「你补掉了」）。
+
+Owner 早前的指示：**「假的acc就不要放了 放空都好过放假的」**。当时我做的是：
+- ✅ `payslips.ts` 不再自己捏造 `CIMB-${empNo}XXXX`，改读 `workers.bank_account`
+- ✅ prod `workers` 表 42 人全部清空（实测 fake=0 / blank=42）
+
+**没做的：已经生成并存起来的 payslip 列。** 那些是真正会印出来交给 HR 的东西。
+
+实测 prod（`vpwdqtsxexpiqxzweivd`）：
+
+| period | rows | fake | status |
+|---|---|---|---|
+| 2026-07 | 36 | **36** | DRAFT |
+| 2026-05 | 31 | **31** | DRAFT |
+
+**处理**：67 列 `bank_account` 清空（`UPDATE … WHERE bank_account ILIKE '%XXXX%' AND
+status = 'DRAFT'`）。**只动 DRAFT** —— approved 的是已经交出去的单据，事后改写不叫清理。
+复验：两个 period 都 fake=0 / blank=100%；live API `/api/payslips?period=2026-07`
+同样 36 列全空。payslip 现在印 `Bank details not set`，不再印一个不存在的户口。
+
+**堵回源头**：`mock-data.ts:6556` 还在捏 `CIMB-${empNo}XXXX`，而
+`scripts/generate-seed-sql.ts:1356` 会把 `payslipDetails` 灌进 `payslip_details` ——
+**再 seed 一次假户口就回来了**。改成 `""`，加 `payment-method.test.mjs` 的
+「the seed never invents a bank account」扫源码断言。**先确认拿掉修正会红**（fail 1）
+才当数。
+
+同场复查（都已确认 OK，非新工作）：
+- `(26 x 9)` 硬编码除数 —— 早前标 🟡 deferred，实际已修（`employees.tsx:7026`
+  按 worker 查真实 `workingHoursPerDay`；重写后的 payslip PDF 没有硬编码）。
+- SW precache 修正在 prod 生效（`sw.js` 有 `PARALLEL = 4` / `PRECACHE_ASSETS`，
+  install 不再预载）；缺失 asset 正确回 404 不回 shell；`/api/health` 30ms；
+  org chart 50 人（10 users + 40 workers），改过的汇报线有存住。
+- 全测试 2294 支 0 fail；`tsc -p tsconfig.app.json --noEmit` 干净。
+
+🟡 **仍未决（等 owner）**：asset carry-forward 当初是因为错误判断被拿掉的，真凶已确认是
+SW，要不要加回来（能治 stale chunk）？工人手机「Save payslip as PDF」端点+按钮都在，
+但没有工人 PIN，没在真机上按过。
+
+---
+
 ## 2026-08-02 — Houzs-ERP bug sweep: 「他们 fix 过的我们有没有类似的」
 
 Owner asked me to read Houzs-ERP's recent fixes + COEs and check Hookka for the same

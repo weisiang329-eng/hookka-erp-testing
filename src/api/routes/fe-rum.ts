@@ -40,6 +40,34 @@ import type { Env } from "../worker";
 
 const app = new Hono<Env>();
 
+// ---------------------------------------------------------------------------
+// Known-benign front-end noise, dropped at ingestion.
+//
+// These are best-effort camera-constraint rejections on /worker/scan:
+// focusMode and torch are unsupported on many lenses (iOS Safari especially),
+// and a MediaStreamTrack goes "invalid" whenever the camera is torn down while
+// a constraint call is still in flight (mode switch, tab backgrounded, scan
+// ended). scan.tsx already absorbs them functionally — every applyConstraints
+// carries .catch (fix 4d542343). But warehouse phones keep the scanner open
+// across shifts, so a device still running a pre-fix bundle keeps emitting them
+// as unhandled rejections, and no client-side change can reach a client that
+// never reloads. Dropping them here, at the sink, is the only layer that works
+// regardless of bundle age — and it keeps the error feed honest so a REAL
+// scanner regression is not buried under this steady background hiss.
+//
+// Deliberately narrow: exact substrings of documented-benign messages, so a
+// new/different camera error still surfaces.
+const BENIGN_FE_ERROR_PATTERNS = [
+  "the associated track is in an invalid state",
+  "unsupported focusmode",
+  "setphotooptions failed",
+];
+
+function isBenignFeError(msg: string): boolean {
+  const m = msg.toLowerCase();
+  return BENIGN_FE_ERROR_PATTERNS.some((p) => m.includes(p));
+}
+
 type ErrorEv = {
   kind: "error";
   route: string;
@@ -131,6 +159,9 @@ app.post("/event", async (c) => {
     try {
       if (ev.kind === "error") {
         const e = ev as ErrorEv;
+        // Drop known-benign camera noise from stale scanner clients before it
+        // reaches the feed (see BENIGN_FE_ERROR_PATTERNS).
+        if (isBenignFeError(String(e.msg ?? ""))) continue;
         ae?.writeDataPoint?.({
           indexes: ["fe_error"],
           blobs: [

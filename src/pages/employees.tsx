@@ -3,7 +3,11 @@ import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { humanizeError } from "@/lib/humanize-error";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
-import { countElapsedWorkingDays } from "@/lib/labor-engine";
+import {
+  countElapsedWorkingDays,
+  isDailyPaidWorker,
+  dailyPaidEntryCostSen,
+} from "@/lib/labor-engine";
 import { computeAttendanceDay, hhmmToMinutes, type AttendanceRules } from "@/lib/attendance-rules";
 import { getQRCodeDataURL } from "@/lib/qr-utils";
 import { appOrigin } from "@/lib/app-origin";
@@ -123,6 +127,12 @@ type Worker = {
   paymentMethod?: string | null;
   bankName?: string | null;
   bankAccount?: string | null;
+  /** Outsourced (numbered OSC-###). Paid per day worked, not a monthly salary. */
+  isOutsource?: boolean;
+  /** "MONTHLY" (default) or "DAILY". */
+  payMode?: string | null;
+  /** Rate per day worked, in sen. Only read when payMode is DAILY. */
+  dailyRateSen?: number | null;
 };
 
 // Day-typed OT for the COST side — mirrors the engine so logged labor cost
@@ -4470,7 +4480,36 @@ function DepartmentLaborTab({
     for (const [k, segs] of segsByWorkerDate.entries()) {
       const [workerId] = k.split("|");
       const w = workerById.get(workerId);
-      if (!w || !w.basicSalarySen) continue;
+      if (!w) continue;
+      // Outsourced / per-day people are costed their own way — day rate ×
+      // days logged — and must NOT fall through to the monthly maths below,
+      // which reads a basic salary they do not have. Owner 2026-08-02:
+      // 「如果它是 outsource 的话，它就应该要用 outsource 的算法，而不是去看我们
+      // 正常 workers 的计算方式。」
+      if (isDailyPaidWorker(w)) {
+        const dayHours = segs.reduce((s, e) => s + (Number(e.hours) || 0), 0);
+        for (const e of segs) {
+          const hours = Number(e.hours) || 0;
+          const cost = dailyPaidEntryCostSen(w, hours, dayHours);
+          const cat = (typeof e.category === "string" ? e.category.trim().toUpperCase() : "") as "" | "SOFA" | "BEDFRAME" | "ACCESSORY";
+          if (categoryFilter && cat !== categoryFilter && cat !== "") continue;
+          let cell = acc.get(e.departmentCode);
+          if (!cell) {
+            cell = { totalHours: 0, workerIds: new Set(), costSen: 0, catSen: { SOFA: 0, BEDFRAME: 0, ACCESSORY: 0 } };
+            acc.set(e.departmentCode, cell);
+          }
+          cell.totalHours += hours;
+          cell.workerIds.add(workerId);
+          cell.costSen += cost;
+          if (cat === "SOFA" || cat === "BEDFRAME" || cat === "ACCESSORY") {
+            cell.catSen[cat] += cost;
+          }
+          loggedByWorker.set(workerId, (loggedByWorker.get(workerId) ?? 0) + cost);
+        }
+        continue;
+      }
+      // A monthly worker with no salary on record has no rate to cost with.
+      if (!w.basicSalarySen) continue;
       // Per-worker rates — OT threshold, hours/day and days/month all come
       // from this worker's own Employee Master figures (no hard-coded 9 h).
       // Regular day rate divides by (days − public holidays); the OT base
@@ -8615,7 +8654,27 @@ function LaborCostTab({
     for (const [k, segs] of segsByWorkerDate.entries()) {
       const [workerId] = k.split("|");
       const w = workersById.get(workerId);
-      if (!w || !w.basicSalarySen) continue;
+      if (!w) continue;
+      // Outsourced / per-day people: day rate × days logged, split across the
+      // day's entries. They never reach the monthly maths below — there is no
+      // salary behind it for them. Owner 2026-08-02.
+      if (isDailyPaidWorker(w)) {
+        const dayHours = segs.reduce((s, e) => s + (Number(e.hours) || 0), 0);
+        for (const e of segs) {
+          const hours = Number(e.hours) || 0;
+          const cost = dailyPaidEntryCostSen(w, hours, dayHours);
+          const cat = (typeof e.category === "string" ? e.category.trim().toUpperCase() : "") as Category;
+          if (categoryFilter && cat !== categoryFilter && cat !== "") continue;
+          const bucketKey = `${e.departmentCode}|${cat}`;
+          const cur = buckets.get(bucketKey) ?? { hours: 0, laborCostSen: 0 };
+          cur.hours += hours;
+          cur.laborCostSen += cost;
+          buckets.set(bucketKey, cur);
+        }
+        continue;
+      }
+      // A monthly worker with no salary on record has no rate to cost with.
+      if (!w.basicSalarySen) continue;
       // Per-worker rates — OT threshold, hours/day and days/month all come
       // from this worker's own Employee Master figures (no hard-coded 9 h).
       // Salary = the month's EFFECTIVE (day-weighted) figure so the rate matches
@@ -8946,7 +9005,20 @@ function LaborCostTab({
     for (const [k, segs] of segsByWorkerDate.entries()) {
       const [workerId] = k.split("|");
       const w = workersById.get(workerId);
-      if (!w || !w.basicSalarySen) continue;
+      if (!w) continue;
+      // Outsourced / per-day: the whole day is worth the day rate, whatever
+      // the hours or how many departments it was split across. Owner 2026-08-02.
+      if (isDailyPaidWorker(w)) {
+        const dayHours = segs.reduce((s, e) => s + (Number(e.hours) || 0), 0);
+        let dayValue = 0;
+        for (const e of segs) {
+          dayValue += dailyPaidEntryCostSen(w, Number(e.hours) || 0, dayHours);
+        }
+        out.set(workerId, (out.get(workerId) ?? 0) + dayValue);
+        continue;
+      }
+      // A monthly worker with no salary on record has no rate to cost with.
+      if (!w.basicSalarySen) continue;
       const stdHours = w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
       const monthDays = w.workingDaysPerMonth > 0 ? w.workingDaysPerMonth : 26;
       const regularDays = actualWorkingDays;

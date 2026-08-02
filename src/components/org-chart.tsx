@@ -366,42 +366,110 @@ export function OrgChart({ canManage }: Props) {
    * Upholstery and Framing, and splitting the seventeen between them was an
    * invention of the layout, not a fact about the factory.
    */
+  /**
+   * Is this person a manager OF MANAGERS?
+   *
+   * The switch from branches to boxes has to happen at the LAST management
+   * level and not one above it. The first cut fired as soon as a subtree merely
+   * CONTAINED a manager, so at the owner's level it swallowed Violet and the
+   * Production Head into the boxes as ordinary cards and the whole management
+   * chain vanished — owner 2026-08-02:「整个 Production 的上司不是一个叫 Lim
+   * 的吗?然后 Lim 的上司不是叫 Violet 吗?为什么没看到这条线啊?」
+   *
+   * Someone whose own reports also have reports keeps their branch. Someone
+   * whose reports are the shop floor folds into a box with them.
+   */
+  const leadsManagers = useCallback(
+    (n: OrgNode) => n.children.some((c) => c.children.length > 0),
+    [],
+  );
+
+  /**
+   * The teams below a node, as boxes.
+   *
+   * Keyed by LEADER, not by department — owner:「Fabric Cutting 还有 Fabric
+   * Sewing 应该都是 under 一个部门…让这个 operator leader 来 leading 这两个部门」.
+   * ANN runs both Fabric Cutting and Fabric Sewing, so splitting her team into
+   * two boxes drew a division that does not exist. One leader, one box, titled
+   * with every department it covers.
+   *
+   * Two leaders on the same team share one box and NO line divides their people
+   * between them — that is how Houzs express co-management, and their model is
+   * a single manager_id exactly like ours.
+   */
   const boxesUnder = useCallback(
     (node: OrgNode) => {
-      const people = node.children.flatMap(flatten);
+      const isLeader = (p: OrgNode) =>
+        /leader|head|manager|supervisor/i.test(p.position ?? "");
+      const boxes: {
+        key: string;
+        label: string;
+        count: number;
+        leads: OrgNode[];
+        groups: { position: string; members: OrgNode[] }[];
+      }[] = [];
+
+      const build = (leads: OrgNode[], team: OrgNode[], fallbackKey: string) => {
+        const depts = [...new Set([...leads, ...team].map(deptOf))].sort(
+          (a, b) => deptRank(a) - deptRank(b),
+        );
+        const byPos = new Map<string, OrgNode[]>();
+        for (const p of team) {
+          const pos = (p.position || "").trim() || "—";
+          const arr = byPos.get(pos);
+          if (arr) arr.push(p);
+          else byPos.set(pos, [p]);
+        }
+        boxes.push({
+          key: leads[0]?.key ?? fallbackKey,
+          label: depts.map(deptLabel).join(" + "),
+          count: leads.length + team.length,
+          leads,
+          groups: [...byPos.entries()]
+            .map(([position, members]) => ({
+              position,
+              members: [...members].sort((a, b) => a.name.localeCompare(b.name)),
+            }))
+            .sort((a, b) => a.position.localeCompare(b.position)),
+        });
+      };
+
+      // A child WITH reports is a team: that person (plus any co-leader on the
+      // same departments) heads one box.
+      const teamLeads = node.children.filter((c) => c.children.length > 0);
+      const used = new Set<string>();
+      for (const lead of teamLeads) {
+        if (used.has(lead.key)) continue;
+        const myDepts = new Set(lead.children.map(deptOf).concat(deptOf(lead)));
+        // A co-leader is another team lead covering the SAME departments.
+        const co = teamLeads.filter(
+          (o) =>
+            !used.has(o.key) &&
+            o.key !== lead.key &&
+            [...new Set(o.children.map(deptOf).concat(deptOf(o)))].some((d) =>
+              myDepts.has(d),
+            ),
+        );
+        const leads = [lead, ...co].sort((a, b) => a.name.localeCompare(b.name));
+        leads.forEach((l) => used.add(l.key));
+        build(leads, leads.flatMap((l) => l.children.flatMap(flatten)), lead.key);
+      }
+
+      // Everyone reporting straight to this node with nobody under them —
+      // grouped by department, because they have no leader to group by.
+      const loose = node.children.filter((c) => c.children.length === 0);
       const byDept = new Map<string, OrgNode[]>();
-      for (const p of people) {
+      for (const p of loose) {
         const d = deptOf(p);
         const arr = byDept.get(d);
         if (arr) arr.push(p);
         else byDept.set(d, [p]);
       }
-      const isLeader = (p: OrgNode) => /leader|head|manager|supervisor/i.test(p.position ?? "");
-      return [...byDept.entries()]
-        .map(([dept, ppl]) => {
-          const leads = ppl.filter(isLeader).sort((a, b) => a.name.localeCompare(b.name));
-          const rest = ppl.filter((p) => !isLeader(p));
-          const byPos = new Map<string, OrgNode[]>();
-          for (const p of rest) {
-            const pos = (p.position || "").trim() || "—";
-            const arr = byPos.get(pos);
-            if (arr) arr.push(p);
-            else byPos.set(pos, [p]);
-          }
-          return {
-            dept,
-            label: deptLabel(dept),
-            count: ppl.length,
-            leads,
-            groups: [...byPos.entries()]
-              .map(([position, members]) => ({
-                position,
-                members: [...members].sort((a, b) => a.name.localeCompare(b.name)),
-              }))
-              .sort((a, b) => a.position.localeCompare(b.position)),
-          };
-        })
-        .sort((a, b) => deptRank(a.dept) - deptRank(b.dept) || a.label.localeCompare(b.label));
+      for (const [dept, ppl] of byDept) {
+        build(ppl.filter(isLeader), ppl.filter((p) => !isLeader(p)), dept);
+      }
+
+      return boxes.sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
     },
     [flatten, deptLabel, deptRank],
   );
@@ -432,11 +500,10 @@ export function OrgChart({ canManage }: Props) {
                 over — the Houzs shape. A branch is right where there are a few
                 named relationships; forty operators fanned into hairlines is a
                 wall of string. */}
-            {node.children.some((c) => c.children.length > 0) &&
-            new Set(node.children.flatMap(flatten).map(deptOf)).size > 1 ? (
+            {node.children.length > 0 && !node.children.some(leadsManagers) ? (
               <div className="flex items-start gap-3">
                 {boxesUnder(node).map((box, bi) => (
-                  <div key={box.dept} className="relative flex flex-col items-center">
+                  <div key={box.key} className="relative flex flex-col items-center">
                     {boxesUnder(node).length > 1 && (
                       <span
                         aria-hidden

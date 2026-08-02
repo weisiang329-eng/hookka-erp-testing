@@ -585,6 +585,7 @@ app.post("/", async (c) => {
     // affected, and external POs never reach the DB work (the pure decision in
     // intercompany-mirror.ts short-circuits). Idempotent via
     // intercompany_mirror_log — a re-save/retry never double-creates.
+    let mirrorError: string | null = null;
     try {
       const cfgRow = await c.var.DB
         .prepare("SELECT auto_create_mirror_docs FROM inter_company_config WHERE id = 1")
@@ -627,15 +628,27 @@ app.post("/", async (c) => {
         }
       }
     } catch (mirrorErr) {
-      // Never let a mirror failure break the PO create — log only.
+      // Never let a mirror failure break the PO create — the PO itself is
+      // committed and correct. But "log only" meant the counterpart company
+      // silently had no order at all while this side reported 201, so the
+      // failure is reported on the response too (additive: absent when the
+      // mirror succeeded or was not applicable, so no caller changes).
+      const msg =
+        mirrorErr instanceof Error ? mirrorErr.message : String(mirrorErr);
       console.error(
         "[intercompany-mirror] mirror creation failed for PO",
         poId,
-        mirrorErr instanceof Error ? mirrorErr.message : String(mirrorErr),
+        msg,
       );
+      mirrorError = `Intercompany mirror not created: ${msg}`;
     }
 
-    return c.json({ success: true, data: created }, 201);
+    return c.json(
+      mirrorError
+        ? { success: true, data: created, movementErrors: [mirrorError] }
+        : { success: true, data: created },
+      201,
+    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[POST /api/purchase-orders] failed:", msg, err);

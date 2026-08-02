@@ -62,6 +62,11 @@ type PayData = {
     payslipStatus?: string;
   };
   history: Array<{
+    absentDays?: number;
+    absenceDeductionSen?: number;
+    otHours?: number;
+    lateDays?: Array<{ date: string; hours: number }>;
+    shortHourDeductionSen?: number;
     id: string;
     period: string;
     basicSen?: number;
@@ -105,6 +110,16 @@ function asPayslipRow(v: unknown): PayslipRow | null {
     netSen: asNumber(v.netSen) ?? undefined,
     allowancesSen: asNumber(v.allowancesSen) ?? undefined,
     overtimeSen: asNumber(v.overtimeSen) ?? undefined,
+    absentDays: asNumber(v.absentDays) ?? 0,
+    absenceDeductionSen: asNumber(v.absenceDeductionSen) ?? 0,
+    otHours: asNumber(v.otHours) ?? 0,
+    shortHourDeductionSen: asNumber(v.shortHourDeductionSen) ?? 0,
+    lateDays: Array.isArray(v.lateDays)
+      ? v.lateDays
+          .filter(isRecord)
+          .map((d) => ({ date: String(d.date ?? ""), hours: asNumber(d.hours) ?? 0 }))
+          .filter((d) => d.date)
+      : [],
     epfEeSen: asNumber(v.epfEeSen) ?? undefined,
     socsoEeSen: asNumber(v.socsoEeSen) ?? undefined,
     eisEeSen: asNumber(v.eisEeSen) ?? undefined,
@@ -558,12 +573,39 @@ function FinalisedBreakdown({ slip, t }: { slip: PayslipRow; t: Translate }) {
       </p>
 
       <div className="mt-4 pt-4 border-t border-white/10 space-y-2 text-sm">
+        {/* The "why is it this number" half. A finished month used to show a
+            bare Net — the moment a worker most wants to check it (owner
+            2026-08-02). Same chips as the in-progress month, so the two views
+            read the same way. */}
+        {slip.absenceDeductionSen ? (
+          <Row
+            label={t("pay.absentDeduction").replace("{n}", String(slip.absentDays ?? 0))}
+            value={`− ${rm(slip.absenceDeductionSen)}`}
+            muted
+          />
+        ) : null}
+        {slip.shortHourDeductionSen ? (
+          <DetailRow
+            label={t("pay.lateShortDeduction")}
+            value={`− ${rm(slip.shortHourDeductionSen)}`}
+            chips={(slip.lateDays ?? []).map((d) => ({
+              key: d.date,
+              text: `${fmtDay(d.date)} · ${
+                Number.isInteger(d.hours) ? d.hours : d.hours.toFixed(1)
+              }h`,
+            }))}
+            tone="amber"
+          />
+        ) : null}
         <Row label={t("pay.basicEarned")} value={rm(slip.basicSen)} />
         {slip.allowancesSen ? (
           <Row label={t("pay.efficiencyAllowance")} value={rm(slip.allowancesSen)} />
         ) : null}
         {slip.overtimeSen ? (
-          <Row label={t("pay.ot")} value={rm(slip.overtimeSen)} />
+          <Row
+            label={`${t("pay.ot")}${slip.otHours ? ` · ${slip.otHours.toFixed(1)}h` : ""}`}
+            value={rm(slip.overtimeSen)}
+          />
         ) : null}
         <div className="pt-2 mt-2 border-t border-white/10">
           <Row label={t("pay.gross")} value={rm(slip.grossSen)} bold />

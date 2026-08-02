@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef, startTransition, Fragment } from "react";
+import { useState, useEffect, useMemo, useCallback, startTransition, Fragment } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { humanizeError } from "@/lib/humanize-error";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
@@ -26,8 +26,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatCurrency, formatDate, formatDateDMY, formatHours, formatRM, roundSen, distributeRoundSen, todayYmdMY } from "@/lib/utils";
 import { printReport, type PrintColumn, type PrintCard, type PrintSection } from "@/lib/print-report";
-import { MALAYSIAN_BANKS, PAYMENT_METHODS, normalizePaymentMethod, paymentDestinationLabel } from "@/lib/payment-method";
+import { normalizePaymentMethod, paymentDestinationLabel } from "@/lib/payment-method";
 import { EmployeeDrawer, type EmployeeDraft } from "@/components/employee-drawer";
+import { DepartmentMultiSelect } from "@/components/department-multi-select";
+import { POSITIONS, categoryOptions, positionHasCategory } from "@/lib/employee-options";
 import { asArray } from "@/lib/safe-json";
 import {
   Users,
@@ -2251,101 +2253,6 @@ type BulkModalState = {
   error: string | null;
 };
 
-// Self-contained Departments multi-select dropdown for the inline edit row.
-// Owns its own open/close state so DataGrid cell memoization (which keys on
-// row data only) doesn't strand the popover JSX un-mounted. Previously the
-// open boolean lived in the parent EmployeeMasterTab, which meant clicking
-// the button re-rendered the parent but NOT the memoized cell — operator
-// had to click twice to open the popover (Wei Siang 2026-05-10: "很卡，要
-// 点两下才开"). Keeping state inside this component forces the cell to
-// re-render via React's normal child-state path.
-function DepartmentMultiSelect({
-  selectedCodes,
-  allDepts,
-  onChange,
-}: {
-  selectedCodes: string[];
-  allDepts: DepartmentLite[];
-  onChange: (codes: string[], primaryDept: DepartmentLite | undefined) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement | null>(null);
-
-  // Click-outside detector. Document-level mousedown (not a backdrop div)
-  // because the edit row scrolls horizontally — an opaque shield would
-  // block reaching the Save button on narrow screens.
-  useEffect(() => {
-    if (!open) return;
-    const onDocMouseDown = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDocMouseDown);
-    return () => document.removeEventListener("mousedown", onDocMouseDown);
-  }, [open]);
-
-  const deptNamesOf = (codes: string[]) =>
-    codes
-      .map((code) => allDepts.find((d) => d.code === code)?.name ?? code)
-      .join(", ");
-
-  const summary =
-    selectedCodes.length === 0
-      ? "— Select —"
-      : selectedCodes.length <= 2
-        ? deptNamesOf(selectedCodes)
-        : `${selectedCodes.length} departments`;
-
-  return (
-    <div className="relative" ref={ref}>
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen((v) => !v);
-        }}
-        className="h-8 w-44 text-xs border border-[#E2DDD8] rounded-md bg-white px-2 pr-2 text-left flex items-center justify-between gap-1 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-        title={selectedCodes.length > 0 ? deptNamesOf(selectedCodes) : ""}
-      >
-        <span className="truncate flex-1">{summary}</span>
-        <svg className="h-3 w-3 text-[#6B7280] shrink-0" viewBox="0 0 12 12" fill="none">
-          <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </button>
-      {open && (
-        <div className="absolute z-50 top-full left-0 mt-1 w-56 bg-white border border-[#E2DDD8] rounded-md shadow-lg max-h-64 overflow-y-auto">
-          {allDepts.map((d) => {
-            const checked = selectedCodes.includes(d.code);
-            return (
-              <label
-                key={d.id}
-                className={`flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-[#FAF9F7] ${
-                  checked ? "bg-[#FAF7EE]" : ""
-                }`}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <input
-                  type="checkbox"
-                  className="h-3.5 w-3.5 accent-[#6B5C32]"
-                  checked={checked}
-                  onChange={() => {
-                    const set = new Set(selectedCodes);
-                    if (set.has(d.code)) set.delete(d.code);
-                    else set.add(d.code);
-                    const codes = Array.from(set);
-                    const primaryDept = allDepts.find((x) => x.code === codes[0]);
-                    onChange(codes, primaryDept);
-                  }}
-                />
-                <span className="text-[#374151]">{d.name}</span>
-              </label>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function EmployeeMasterTab({
   workers,
   refreshWorkers,
@@ -2363,8 +2270,6 @@ function EmployeeMasterTab({
   const { confirm, confirmDialog } = useConfirm();
   const [showAddForm, setShowAddForm] = useState(false);
   const [form, setForm] = useState<WorkerFormData>({ ...emptyForm });
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState<WorkerFormData>({ ...emptyForm });
   // After a salary edit, ask WHEN it takes effect (a raise can be back/post-dated)
   // — recorded as a worker_salary_history row rather than a silent overwrite.
   const [salaryChangePrompt, setSalaryChangePrompt] = useState<{
@@ -2570,40 +2475,6 @@ function EmployeeMasterTab({
     setSaving(false);
   };
 
-  const startEdit = (w: Worker) => {
-    setEditingId(w.id);
-    setEditForm({
-      empNo: w.empNo,
-      name: w.name,
-      departmentId: w.departmentId,
-      departmentCodes:
-        Array.isArray(w.departmentCodes) && w.departmentCodes.length > 0
-          ? w.departmentCodes
-          : w.departmentCode
-            ? [w.departmentCode]
-            : [],
-      categories: Array.isArray(w.categories) ? w.categories : [],
-      position: w.position,
-      phone: w.phone,
-      basicSalarySen: w.basicSalarySen,
-      workingHoursPerDay: w.workingHoursPerDay,
-      workingDaysPerMonth: w.workingDaysPerMonth,
-      otMultiplier: w.otMultiplier ?? 1.5,
-      epfEnabled: w.epfEnabled !== false,
-      socsoEnabled: w.socsoEnabled !== false,
-      eisEnabled: w.eisEnabled !== false,
-      pcbEnabled: w.pcbEnabled !== false,
-      joinDate: w.joinDate,
-      nationality: w.nationality,
-      status: w.status,
-      resignedAt: w.resignedAt ?? "",
-      efficiencyAllowanceSen: w.efficiencyAllowanceSen ?? 0,
-      efficiencyThresholdPct: w.efficiencyThresholdPct ?? 0,
-      paymentMethod: normalizePaymentMethod(w.paymentMethod),
-      bankName: w.bankName ?? "",
-      bankAccount: w.bankAccount ?? "",
-    });
-  };
 
   // Quick view. The grid lists; the drawer maintains (owner 2026-08-02) — the
   // row is opened on a single click, the way the Houzs sales-order list works.
@@ -2664,88 +2535,40 @@ function EmployeeMasterTab({
       toast.error("Efficiency allowance cannot be negative.");
       return;
     }
-    setDrawerSaving(true);
-    try {
-      const res = await fetch(`/api/workers/${draft.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        // departmentCode is the PRIMARY; the backend derives the rest from
-        // departmentCodes. Sending only the array would leave the primary stale.
-        body: JSON.stringify({
-          ...draft,
-          departmentCode: draft.departmentCodes[0] ?? "",
-          resignedAt: draft.status === "RESIGNED" ? draft.resignedAt : "",
-        }),
-      });
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) {
-        toast.error(body.error || `Could not save (HTTP ${res.status})`);
-        return;
-      }
-      toast.success("Employee updated.");
-      setDrawerId(null);
-      await refreshWorkers();
-    } catch {
-      toast.error("Could not reach the server.");
-    } finally {
-      setDrawerSaving(false);
-    }
-  };
-
-  const handleUpdate = async () => {
-    if (!editingId) return;
-    // Resignation date is required when status is Resigned. Mirror the
-    // backend rule on the frontend so the operator gets an instant reject
-    // instead of a delayed 400.
-    const isResigned = editForm.status === "RESIGNED";
-    if (isResigned && !/^\d{4}-\d{2}-\d{2}$/.test(editForm.resignedAt || "")) {
-      toast.error("A resignation date is required when status is Resigned.");
-      return;
-    }
-    // Efficiency bonus config — reject out-of-range with the SAME message the
-    // backend PUT returns, so the operator gets an instant identical reject
-    // instead of a delayed 400 (frontend+backend unified validation).
-    const effAllowanceSen = editForm.efficiencyAllowanceSen ?? 0;
-    const effThresholdPct = editForm.efficiencyThresholdPct ?? 0;
-    if (!Number.isFinite(effAllowanceSen) || effAllowanceSen < 0) {
-      toast.error("Efficiency allowance must be 0 or more.");
-      return;
-    }
-    if (
-      !Number.isFinite(effThresholdPct) ||
-      effThresholdPct < 0 ||
-      effThresholdPct > 100
-    ) {
-      toast.error("Efficiency threshold must be between 0 and 100.");
-      return;
-    }
-    // Backend rejects a non-empty resignedAt unless status is RESIGNED, so
-    // send "" whenever the worker is not resigned.
-    const resignedAt = isResigned ? (editForm.resignedAt || "") : "";
-    // A salary change is recorded with an EFFECTIVE DATE via a follow-up prompt,
-    // not silently overwritten — so keep the salary scalar untouched in THIS PUT
-    // and open the prompt once the rest of the row has saved.
-    const originalWorker = workers.find((w) => w.id === editingId);
-    const newSalarySen = editForm.basicSalarySen;
+    // Backend rejects a non-empty resignedAt unless status is RESIGNED.
+    const resignedAt = draft.status === "RESIGNED" ? draft.resignedAt || "" : "";
+    // A salary change is recorded with an EFFECTIVE DATE via a follow-up
+    // prompt, not silently overwritten — so this PUT keeps the OLD salary and
+    // the prompt writes the dated worker_salary_history row afterwards. A raise
+    // can be back- or post-dated, and payroll resolves it as of the period.
+    const originalWorker = workers.find((w) => w.id === draft.id);
+    const newSalarySen = draft.basicSalarySen;
     const salaryChanged =
       !!originalWorker && newSalarySen !== originalWorker.basicSalarySen;
     const keptSalarySen = salaryChanged
       ? originalWorker!.basicSalarySen
-      : editForm.basicSalarySen;
-    setSaving(true);
-    const payload =
-      editForm.position === "Operator Leader"
-        ? { ...editForm, resignedAt, basicSalarySen: keptSalarySen }
-        : { ...editForm, resignedAt, categories: [], basicSalarySen: keptSalarySen };
-    // 2026-05-27 verifiedSave migration. Worker master-data drives
-    // payroll, statutory toggles, and OT — a stale-cache silent
-    // overwrite would mis-pay workers. Read back and confirm.
+      : draft.basicSalarySen;
+    setDrawerSaving(true);
+    // departmentCode is the PRIMARY; the backend derives the rest from
+    // departmentCodes. Sending only the array would leave the primary stale.
+    // Categories belong to Operator Leaders only — cleared otherwise, so
+    // demoting a leader cannot leave a stale line filter on their record.
+    const payload = {
+      ...draft,
+      departmentCode: draft.departmentCodes[0] ?? "",
+      resignedAt,
+      basicSalarySen: keptSalarySen,
+      categories: positionHasCategory(draft.position) ? draft.categories : [],
+    };
+    // Worker master data drives payroll, statutory and OT — a stale-cache
+    // silent overwrite would mis-pay people, so the write is read back and
+    // confirmed rather than trusted (verifiedSave, 2026-05-27).
     const result = await verifiedSave<Worker>({
-      endpoint: `/api/workers/${editingId}`,
+      endpoint: `/api/workers/${draft.id}`,
       method: "PUT",
       body: payload,
       readback: async () => {
-        const r = await fetch(`/api/workers/${editingId}?_v=${Date.now()}`, {
+        const r = await fetch(`/api/workers/${draft.id}?_v=${Date.now()}`, {
           credentials: "include",
           cache: "no-store",
         });
@@ -2754,20 +2577,19 @@ function EmployeeMasterTab({
         return (j as { data?: Worker })?.data ?? (j as Worker) ?? null;
       },
       expect: {
-        empNo: editForm.empNo,
-        name: editForm.name,
-        position: editForm.position,
-        phone: editForm.phone,
-        status: editForm.status,
+        empNo: draft.empNo,
+        name: draft.name,
+        position: draft.position,
+        phone: draft.phone,
+        status: draft.status,
       },
     });
     if (result.ok) {
-      setEditingId(null);
+      setDrawerId(null);
       if (salaryChanged && originalWorker) {
-        // Other fields saved; now ask WHEN the new salary takes effect.
         setSalaryChangePrompt({
           workerId: originalWorker.id,
-          workerName: editForm.name || originalWorker.name,
+          workerName: draft.name || originalWorker.name,
           newSalarySen,
           oldSalarySen: originalWorker.basicSalarySen,
           effectiveFrom: todayYmdMY(),
@@ -2775,6 +2597,7 @@ function EmployeeMasterTab({
           error: null,
         });
       } else {
+        toast.success("Employee updated.");
         refreshWorkers();
       }
     } else if (result.reason === "mismatch") {
@@ -2789,11 +2612,9 @@ function EmployeeMasterTab({
     } else {
       toast.error(`Save failed: ${result.details}`);
     }
-    setSaving(false);
+    setDrawerSaving(false);
   };
 
-  // Record the salary change at the chosen effective date (a worker_salary_history
-  // row). The backend re-syncs the current scalar, so payroll picks it up.
   const confirmSalaryChange = async () => {
     if (!salaryChangePrompt) return;
     const { workerId, newSalarySen, effectiveFrom } = salaryChangePrompt;
@@ -2864,34 +2685,14 @@ function EmployeeMasterTab({
         label: "Emp No",
         width: "120px",
         render: (_value, row) =>
-          editingId === row.id ? (
-            <Input
-              value={editForm.empNo}
-              onChange={(e) =>
-                setEditForm((f) => ({ ...f, empNo: e.target.value }))
-              }
-              className="h-8 w-24 text-xs"
-            />
-          ) : (
-            <span className="font-medium text-[#6B5C32]">{row.empNo}</span>
-          ),
+          <span className="font-medium text-[#6B5C32]">{row.empNo}</span>,
       },
       {
         key: "name",
         label: "Name",
         sortable: true,
         render: (_value, row) =>
-          editingId === row.id ? (
-            <Input
-              value={editForm.name}
-              onChange={(e) =>
-                setEditForm((f) => ({ ...f, name: e.target.value }))
-              }
-              className="h-8 w-36 text-xs"
-            />
-          ) : (
-            <span className="font-medium text-[#1F1D1B]">{row.name}</span>
-          ),
+          <span className="font-medium text-[#1F1D1B]">{row.name}</span>,
       },
       {
         key: "departmentCode",
@@ -2911,27 +2712,6 @@ function EmployeeMasterTab({
                 (code) => allDepts.find((d) => d.code === code)?.name ?? code,
               )
               .join(", ");
-          if (editingId === row.id) {
-            // Multi-select disguised as a dropdown — looks like the Position
-            // <select> but the panel has tickable checkboxes. Wei Siang
-            // 2026-05-10: the chip wall was too tall and ugly inline.
-            // State lives inside DepartmentMultiSelect to bypass DataGrid
-            // cell memoization (parent state changes wouldn't re-render the
-            // memoized cell, so the popover never mounted on first click).
-            return (
-              <DepartmentMultiSelect
-                selectedCodes={editForm.departmentCodes}
-                allDepts={allDepts}
-                onChange={(codes, primaryDept) => {
-                  setEditForm((f) => ({
-                    ...f,
-                    departmentCodes: codes,
-                    departmentId: primaryDept?.id ?? f.departmentId,
-                  }));
-                }}
-              />
-            );
-          }
           const codes =
             Array.isArray(row.departmentCodes) && row.departmentCodes.length > 0
               ? row.departmentCodes
@@ -2957,20 +2737,7 @@ function EmployeeMasterTab({
         key: "position",
         label: "Position",
         render: (_value, row) =>
-          editingId === row.id ? (
-            <select
-              value={editForm.position}
-              onChange={(e) =>
-                setEditForm((f) => ({ ...f, position: e.target.value }))
-              }
-              className="h-8 w-36 text-xs border border-[#E2DDD8] rounded-md bg-white px-2 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-            >
-              <option value="Operator">Operator</option>
-              <option value="Operator Leader">Operator Leader</option>
-            </select>
-          ) : (
-            <span className="text-[#4B5563]">{row.position}</span>
-          ),
+          <span className="text-[#4B5563]">{row.position}</span>,
       },
       {
         key: "categories",
@@ -2981,31 +2748,6 @@ function EmployeeMasterTab({
           // 2026-05-10. "All" stores [] (no filter), the named choices store
           // a single-element array. A leader who covers both SOFA + BEDFRAME
           // picks "All".
-          if (editingId === row.id) {
-            if (editForm.position !== "Operator Leader") {
-              return <span className="text-[#9CA3AF] text-xs">—</span>;
-            }
-            const current =
-              editForm.categories.length === 0
-                ? ""
-                : editForm.categories[0];
-            return (
-              <select
-                value={current}
-                onChange={(e) =>
-                  setEditForm((f) => ({
-                    ...f,
-                    categories: e.target.value ? [e.target.value] : [],
-                  }))
-                }
-                className="h-8 w-32 text-xs border border-[#E2DDD8] rounded-md bg-white px-2 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-              >
-                <option value="">All</option>
-                <option value="SOFA">SOFA</option>
-                <option value="BEDFRAME">BEDFRAME</option>
-              </select>
-            );
-          }
           if (row.position !== "Operator Leader") {
             return <span className="text-[#9CA3AF] text-xs">—</span>;
           }
@@ -3021,17 +2763,7 @@ function EmployeeMasterTab({
         defaultHidden: true,
         label: "Phone",
         render: (_value, row) =>
-          editingId === row.id ? (
-            <Input
-              value={editForm.phone}
-              onChange={(e) =>
-                setEditForm((f) => ({ ...f, phone: e.target.value }))
-              }
-              className="h-8 w-36 text-xs"
-            />
-          ) : (
-            <span className="text-[#4B5563]">{row.phone}</span>
-          ),
+          <span className="text-[#4B5563]">{row.phone}</span>,
       },
       {
         key: "basicSalarySen",
@@ -3039,21 +2771,7 @@ function EmployeeMasterTab({
         align: "right",
         sortable: true,
         render: (_value, row) =>
-          editingId === row.id ? (
-            <Input
-              type="number" onFocus={(e) => e.currentTarget.select()}
-              value={editForm.basicSalarySen / 100}
-              onChange={(e) =>
-                setEditForm((f) => ({
-                  ...f,
-                  basicSalarySen: Math.round(parseFloat(e.target.value) * 100),
-                }))
-              }
-              className="h-8 w-24 text-xs"
-            />
-          ) : (
-            <span className="font-medium">{formatRM(row.basicSalarySen)}</span>
-          ),
+          <span className="font-medium">{formatRM(row.basicSalarySen)}</span>,
       },
       {
         key: "workingHoursPerDay",
@@ -3062,21 +2780,7 @@ function EmployeeMasterTab({
         align: "center",
         width: "80px",
         render: (_value, row) =>
-          editingId === row.id ? (
-            <Input
-              type="number" step="any" min="0" max="24" onFocus={(e) => e.currentTarget.select()}
-              value={editForm.workingHoursPerDay}
-              onChange={(e) =>
-                setEditForm((f) => ({
-                  ...f,
-                  workingHoursPerDay: parseFloat(e.target.value) || 0,
-                }))
-              }
-              className="h-8 w-16 text-xs"
-            />
-          ) : (
-            <span>{row.workingHoursPerDay}</span>
-          ),
+          <span>{row.workingHoursPerDay}</span>,
       },
       {
         key: "workingDaysPerMonth",
@@ -3085,21 +2789,7 @@ function EmployeeMasterTab({
         align: "center",
         width: "80px",
         render: (_value, row) =>
-          editingId === row.id ? (
-            <Input
-              type="number" onFocus={(e) => e.currentTarget.select()}
-              value={editForm.workingDaysPerMonth}
-              onChange={(e) =>
-                setEditForm((f) => ({
-                  ...f,
-                  workingDaysPerMonth: parseInt(e.target.value) || 0,
-                }))
-              }
-              className="h-8 w-16 text-xs"
-            />
-          ) : (
-            <span>{row.workingDaysPerMonth}</span>
-          ),
+          <span>{row.workingDaysPerMonth}</span>,
       },
       {
         key: "otMultiplier",
@@ -3109,26 +2799,9 @@ function EmployeeMasterTab({
         width: "70px",
         render: (_value, row) => {
           const mult = row.otMultiplier ?? 1.5;
-          return editingId === row.id ? (
-            <Input
-              type="number" onFocus={(e) => e.currentTarget.select()}
-              min={1}
-              step={0.1}
-              value={editForm.otMultiplier}
-              onChange={(e) =>
-                setEditForm((f) => ({
-                  ...f,
-                  otMultiplier: parseFloat(e.target.value) || 1,
-                }))
-              }
-              className="h-8 w-16 text-xs"
-              title="OT premium multiplier — 1.5 = OT pays 1.5× hourly rate; 1.0 = no premium"
-            />
-          ) : (
-            <span title="OT premium multiplier (hourly rate × this for OT hours)">
+          return <span title="OT premium multiplier (hourly rate × this for OT hours)">
               {mult.toFixed(1)}×
-            </span>
-          );
+            </span>;
         },
       },
       {
@@ -3142,25 +2815,9 @@ function EmployeeMasterTab({
         align: "right",
         sortable: true,
         render: (_value, row) =>
-          editingId === row.id ? (
-            <Input
-              type="number" onFocus={(e) => e.currentTarget.select()}
-              min={0}
-              value={(editForm.efficiencyAllowanceSen ?? 0) / 100}
-              onChange={(e) =>
-                setEditForm((f) => ({
-                  ...f,
-                  efficiencyAllowanceSen: Math.round(parseFloat(e.target.value) * 100) || 0,
-                }))
-              }
-              className="h-8 w-24 text-xs"
-              title="Flat bonus paid when this worker's efficiency over the payroll period reaches the threshold %"
-            />
-          ) : (
-            <span className="font-medium">
+          <span className="font-medium">
               {row.efficiencyAllowanceSen ? formatRM(row.efficiencyAllowanceSen) : "—"}
-            </span>
-          ),
+            </span>,
       },
       {
         // Efficiency Threshold % — the efficiency the worker must reach over the
@@ -3173,27 +2830,9 @@ function EmployeeMasterTab({
         width: "110px",
         render: (_value, row) => {
           const pct = row.efficiencyThresholdPct ?? 0;
-          return editingId === row.id ? (
-            <Input
-              type="number" onFocus={(e) => e.currentTarget.select()}
-              min={0}
-              max={100}
-              step={1}
-              value={editForm.efficiencyThresholdPct}
-              onChange={(e) =>
-                setEditForm((f) => ({
-                  ...f,
-                  efficiencyThresholdPct: parseFloat(e.target.value) || 0,
-                }))
-              }
-              className="h-8 w-16 text-xs"
-              title="Efficiency % this worker must reach over the payroll period to earn the allowance"
-            />
-          ) : (
-            <span title="Efficiency % required to earn the allowance">
+          return <span title="Efficiency % required to earn the allowance">
               {pct ? `${pct}%` : "—"}
-            </span>
-          );
+            </span>;
         },
       },
       {
@@ -3206,53 +2845,20 @@ function EmployeeMasterTab({
         align: "center",
         width: "110px",
         render: (_value, row) =>
-          editingId === row.id ? (
-            <select
-              value={editForm.paymentMethod}
-              onChange={(e) => setEditForm((f) => ({ ...f, paymentMethod: e.target.value }))}
-              className="h-8 w-[104px] rounded-md border border-[#D8D2CC] bg-white px-1.5 text-xs"
-            >
-              {PAYMENT_METHODS.map((m) => (
-                <option key={m.value} value={m.value}>{m.label}</option>
-              ))}
-            </select>
-          ) : (
-            <span className="text-xs">
+          <span className="text-xs">
               {normalizePaymentMethod(row.paymentMethod) === "CASH" ? "Cash" : "Transfer"}
-            </span>
-          ),
+            </span>,
       },
       {
         key: "bankName",
         defaultHidden: true,
         label: "Bank",
         width: "150px",
-        render: (_value, row) => {
-          const isCash = normalizePaymentMethod(
-            editingId === row.id ? editForm.paymentMethod : row.paymentMethod,
-          ) === "CASH";
-          if (editingId === row.id) {
-            return isCash ? (
-              <span className="text-xs text-[#9CA3AF]">—</span>
-            ) : (
-              <select
-                value={editForm.bankName}
-                onChange={(e) => setEditForm((f) => ({ ...f, bankName: e.target.value }))}
-                className="h-8 w-[142px] rounded-md border border-[#D8D2CC] bg-white px-1.5 text-xs"
-              >
-                <option value="">Select bank…</option>
-                {MALAYSIAN_BANKS.map((b) => (
-                  <option key={b} value={b}>{b}</option>
-                ))}
-              </select>
-            );
-          }
-          return (
-            <span className="text-xs" title="Where this worker's pay is sent">
-              {paymentDestinationLabel(row.paymentMethod, row.bankName, row.bankAccount)}
-            </span>
-          );
-        },
+        render: (_value, row) => (
+          <span className="text-xs" title="Where this worker's pay is sent">
+            {paymentDestinationLabel(row.paymentMethod, row.bankName, row.bankAccount)}
+          </span>
+        ),
       },
       {
         key: "bankAccount",
@@ -3260,22 +2866,10 @@ function EmployeeMasterTab({
         label: "Account No",
         width: "140px",
         render: (_value, row) => {
-          const isCash = normalizePaymentMethod(
-            editingId === row.id ? editForm.paymentMethod : row.paymentMethod,
-          ) === "CASH";
-          if (editingId !== row.id) {
-            return <span className="text-xs">{isCash ? "—" : row.bankAccount || "—"}</span>;
-          }
-          return isCash ? (
-            <span className="text-xs text-[#9CA3AF]">—</span>
-          ) : (
-            <Input
-              value={editForm.bankAccount}
-              onChange={(e) => setEditForm((f) => ({ ...f, bankAccount: e.target.value }))}
-              className="h-8 w-[132px] text-xs"
-              placeholder="Account number"
-            />
-          );
+          // Cash shows a dash rather than a blank: "—" reads as "not applicable",
+          // an empty cell reads as "nobody has filled this in yet".
+          const isCash = normalizePaymentMethod(row.paymentMethod) === "CASH";
+          return <span className="text-xs">{isCash ? "—" : row.bankAccount || "—"}</span>;
         },
       },
       {
@@ -3297,35 +2891,6 @@ function EmployeeMasterTab({
             row.socsoEnabled !== false &&
             row.eisEnabled !== false &&
             row.pcbEnabled !== false;
-          if (editingId === row.id) {
-            const editAllOn =
-              editForm.epfEnabled &&
-              editForm.socsoEnabled &&
-              editForm.eisEnabled &&
-              editForm.pcbEnabled;
-            return (
-              <label
-                className="flex items-center justify-center cursor-pointer"
-                title="When ticked: EPF + SOCSO + EIS + PCB will all be deducted on this worker's payslip. Unticked: no statutory deductions — Net Pay = Gross Pay."
-              >
-                <input
-                  type="checkbox"
-                  checked={editAllOn}
-                  onChange={(e) => {
-                    const v = e.target.checked;
-                    setEditForm((f) => ({
-                      ...f,
-                      epfEnabled: v,
-                      socsoEnabled: v,
-                      eisEnabled: v,
-                      pcbEnabled: v,
-                    }));
-                  }}
-                  className="h-4 w-4 cursor-pointer"
-                />
-              </label>
-            );
-          }
           return (
             <span
               className="inline-block text-base font-semibold"
@@ -3350,35 +2915,14 @@ function EmployeeMasterTab({
         label: "Join Date",
         sortable: true,
         render: (_value, row) =>
-          editingId === row.id ? (
-            <Input
-              type="date"
-              value={editForm.joinDate}
-              onChange={(e) =>
-                setEditForm((f) => ({ ...f, joinDate: e.target.value }))
-              }
-              className="h-8 w-36 text-xs"
-            />
-          ) : (
-            <span className="text-[#4B5563]">{formatDateDMY(row.joinDate)}</span>
-          ),
+          <span className="text-[#4B5563]">{formatDateDMY(row.joinDate)}</span>,
       },
       {
         key: "nationality",
         defaultHidden: true,
         label: "Nationality",
         render: (_value, row) =>
-          editingId === row.id ? (
-            <Input
-              value={editForm.nationality}
-              onChange={(e) =>
-                setEditForm((f) => ({ ...f, nationality: e.target.value }))
-              }
-              className="h-8 w-24 text-xs"
-            />
-          ) : (
-            <span className="text-[#4B5563]">{row.nationality || "-"}</span>
-          ),
+          <span className="text-[#4B5563]">{row.nationality || "-"}</span>,
       },
       {
         // 150px (was 110): the edit UI stacks a <select> AND a native date
@@ -3389,104 +2933,55 @@ function EmployeeMasterTab({
         label: "Status",
         width: "150px",
         render: (_value, row) =>
-          editingId === row.id ? (
-            <div className="flex flex-col gap-1">
-              <select
-                value={editForm.status}
-                onChange={(e) =>
-                  setEditForm((f) => ({ ...f, status: e.target.value }))
-                }
-                className="h-8 w-full min-w-0 rounded-md border border-[#E2DDD8] bg-white px-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-              >
-                <option value="ACTIVE">ACTIVE</option>
-                <option value="INACTIVE">INACTIVE</option>
-                <option value="RESIGNED">Resigned</option>
-              </select>
-              {editForm.status === "RESIGNED" && (
-                // w-full + min-w-0 lets the native date input shrink to the
-                // column instead of overflowing it; the label sits ABOVE (its
-                // own line) so it never competes for the row's width.
-                <label className="flex flex-col gap-0.5">
-                  <span className="text-[11px] text-[#6B7280]">Resigned on</span>
-                  <input
-                    type="date"
-                    value={editForm.resignedAt ?? ""}
-                    onChange={(e) =>
-                      setEditForm((f) => ({ ...f, resignedAt: e.target.value }))
-                    }
-                    className="h-8 w-full min-w-0 rounded-md border border-[#E2DDD8] bg-white px-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                  />
-                </label>
-              )}
-            </div>
-          ) : (
-            <span className="inline-flex items-center gap-1">
+          <span className="inline-flex items-center gap-1">
               <Badge variant="status" status={row.status} />
               {row.status === "RESIGNED" && row.resignedAt && (
                 <span className="text-[11px] text-[#9CA3AF]">
                   · left {formatDateDMY(row.resignedAt)}
                 </span>
               )}
-            </span>
-          ),
+            </span>,
       },
       {
         key: "_actions",
         label: "Actions",
         width: "120px",
         align: "center",
-        render: (_value, row) =>
-          editingId === row.id ? (
-            <div className="flex items-center gap-1">
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={handleUpdate}
-                disabled={saving}
-              >
-                <Save className="h-3 w-3" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setEditingId(null)}
-              >
-                <X className="h-3 w-3" />
-              </Button>
-            </div>
-          ) : (
-            <div className="flex items-center gap-1">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => startEdit(row)}
-                title="Edit employee"
-              >
-                <Pencil className="h-3 w-3" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => openPinModal(row)}
-                title="Set / Reset PIN"
-              >
-                <KeyRound className="h-3 w-3" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => handleDelete(row.id)}
-                className="text-[#9A3A2D] hover:text-[#7A2E24]"
-                title="Delete employee"
-              >
-                <Trash2 className="h-3 w-3" />
-              </Button>
-            </div>
-          ),
+        // No pencil: editing a person happens in the drawer, which is the only
+        // surface that shows every field (owner 2026-08-02: 「点开了才edit
+        // 不需要在row edit了」). PIN and Delete stay — they are actions on the
+        // record, not edits to its fields.
+        render: (_value, row) => (
+          <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                openPinModal(row);
+              }}
+              title="Set / Reset PIN"
+            >
+              <KeyRound className="h-3 w-3" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleDelete(row.id);
+              }}
+              className="text-[#9A3A2D] hover:text-[#7A2E24]"
+              title="Delete employee"
+            >
+              <Trash2 className="h-3 w-3" />
+            </Button>
+          </div>
+        ),
       },
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [editingId, editForm, saving]
+    [saving]
   );
 
   const contextMenuItems: ContextMenuItem[] = useMemo(
@@ -3502,7 +2997,7 @@ function EmployeeMasterTab({
         label: "Edit",
         icon: <Pencil className="h-4 w-4" />,
         action: (row: Worker) => {
-          startEdit(row);
+          setDrawerId(row.id);
         },
       },
       {
@@ -3582,46 +3077,26 @@ function EmployeeMasterTab({
               </div>
               <div className="col-span-2">
                 <label className="text-xs text-[#6B7280]">
-                  Departments <span className="text-[10px] text-[#9CA3AF]">(tick all that apply)</span>
+                  Departments <span className="text-[10px] text-[#9CA3AF]">(first one is their primary)</span>
                 </label>
-                <div className="mt-1 flex flex-wrap gap-1.5 p-2 border border-[#E2DDD8] rounded-md bg-white max-h-32 overflow-y-auto">
-                  {allDepts.map((d) => {
-                    const checked = form.departmentCodes.includes(d.code);
-                    return (
-                      <label
-                        key={d.id}
-                        className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded border text-[11px] cursor-pointer ${
-                          checked
-                            ? "bg-[#F0ECE9] border-[#6B5C32] text-[#1F1D1B]"
-                            : "bg-white border-[#E2DDD8] text-[#6B7280] hover:bg-[#FAF9F7]"
-                        }`}
-                      >
-                        <input
-                          type="checkbox"
-                          className="h-3 w-3"
-                          checked={checked}
-                          onChange={(e) => {
-                            setForm((f) => {
-                              const set = new Set(f.departmentCodes);
-                              if (e.target.checked) set.add(d.code);
-                              else set.delete(d.code);
-                              const codes = Array.from(set);
-                              // Primary departmentId follows the first
-                              // ticked department (so back-compat lookups
-                              // by departmentId still resolve sensibly).
-                              const primaryDept = allDepts.find((x) => x.code === codes[0]);
-                              return {
-                                ...f,
-                                departmentCodes: codes,
-                                departmentId: primaryDept?.id ?? f.departmentId,
-                              };
-                            });
-                          }}
-                        />
-                        {d.name}
-                      </label>
-                    );
-                  })}
+                <div className="mt-1">
+                  {/* The SAME picker the drawer uses — this form used to be a
+                      wall of chips, which is a third design for one field. */}
+                  <DepartmentMultiSelect
+                    selectedCodes={form.departmentCodes}
+                    allDepts={allDepts}
+                    onChange={(codes, primaryDept) =>
+                      setForm((f) => ({
+                        ...f,
+                        departmentCodes: codes,
+                        // Primary departmentId follows the first ticked
+                        // department, so back-compat lookups by departmentId
+                        // still resolve sensibly.
+                        departmentId: primaryDept?.id ?? f.departmentId,
+                      }))
+                    }
+                    className="w-full"
+                  />
                 </div>
               </div>
               <div>
@@ -3633,14 +3108,17 @@ function EmployeeMasterTab({
                   }
                   className="h-8 text-xs w-full border border-[#D1D5DB] rounded-md px-2 bg-white"
                 >
-                  <option value="Operator">Operator</option>
-                  <option value="Operator Leader">Operator Leader</option>
+                  {POSITIONS.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
                 </select>
               </div>
               {/* Category only applies to Operator Leaders — gates which
                   (dept × category) cells the Team dashboard surfaces. Hidden
                   entirely for plain Operators. — Wei Siang 2026-05-10 */}
-              {form.position === "Operator Leader" && (
+              {positionHasCategory(form.position) && (
                 <div>
                   <label className="text-xs text-[#6B7280]">Category</label>
                   <select
@@ -3654,8 +3132,11 @@ function EmployeeMasterTab({
                     className="h-8 text-xs w-full border border-[#D1D5DB] rounded-md px-2 bg-white"
                   >
                     <option value="">All</option>
-                    <option value="SOFA">SOFA</option>
-                    <option value="BEDFRAME">BEDFRAME</option>
+                    {categoryOptions(form.categories[0]).map((cat) => (
+                      <option key={cat} value={cat}>
+                        {cat}
+                      </option>
+                    ))}
                   </select>
                 </div>
               )}
@@ -3753,7 +3234,7 @@ function EmployeeMasterTab({
           gridId="employees-master"
           contextMenuItems={contextMenuItems}
           onRowClick={(row) => setDrawerId(row.id)}
-          onDoubleClick={(row) => startEdit(row)}
+          onDoubleClick={(row) => setDrawerId(row.id)}
           emptyMessage="No employees found."
         />
       </CardContent>
@@ -3761,8 +3242,7 @@ function EmployeeMasterTab({
       <EmployeeDrawer
         key={drawerId ?? "none"}
         employee={drawerEmployee}
-        departments={allDepts.map((d) => ({ code: d.code, name: d.name }))}
-        categories={CATEGORIES}
+        departments={allDepts.map((d) => ({ id: d.id, code: d.code, name: d.name }))}
         saving={drawerSaving}
         onClose={() => setDrawerId(null)}
         onSave={saveDrawer}

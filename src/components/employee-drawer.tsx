@@ -20,6 +20,15 @@ import {
   PAYMENT_METHODS,
   normalizePaymentMethod,
 } from "@/lib/payment-method";
+import {
+  POSITIONS,
+  categoryOptions,
+  positionHasCategory,
+} from "@/lib/employee-options";
+import {
+  DepartmentMultiSelect,
+  type DepartmentOption,
+} from "@/components/department-multi-select";
 
 /** Only what the drawer touches — the page owns the full Worker type. */
 export type EmployeeDraft = {
@@ -51,14 +60,12 @@ export type EmployeeDraft = {
   bankAccount: string;
 };
 
-export type DepartmentOption = { code: string; name: string };
+export type { DepartmentOption };
 
 type Props = {
   employee: EmployeeDraft | null;
   /** Departments to choose from — the SAME list the grid uses. */
   departments: DepartmentOption[];
-  /** Production lines to choose from. */
-  categories: readonly string[];
   saving?: boolean;
   onClose: () => void;
   onSave: (draft: EmployeeDraft) => void;
@@ -100,7 +107,6 @@ function Field({
 export function EmployeeDrawer({
   employee,
   departments,
-  categories,
   saving,
   onClose,
   onSave,
@@ -115,6 +121,18 @@ export function EmployeeDrawer({
   const set = <K extends keyof EmployeeDraft>(k: K, v: EmployeeDraft[K]) =>
     setDraft((d) => (d ? { ...d, [k]: v } : d));
   const isCash = normalizePaymentMethod(draft.paymentMethod) === "CASH";
+  // A record holding a position this build no longer lists keeps it as a
+  // choice, so opening the drawer on that person cannot silently retitle them
+  // on the next save.
+  const positionOptions: string[] = [...POSITIONS];
+  if (draft.position && !positionOptions.includes(draft.position)) {
+    positionOptions.unshift(draft.position);
+  }
+  if (!draft.position) positionOptions.unshift("");
+  // Shown when they ARE resigned, and also whenever a date is already on the
+  // record — otherwise flipping someone back to ACTIVE hides a stale leaving
+  // date that nobody can see or clear.
+  const showResignedAt = draft.status === "RESIGNED" || Boolean(draft.resignedAt);
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true">
@@ -158,12 +176,22 @@ export function EmployeeDrawer({
                 className="mt-0.5 h-8 text-xs"
               />
             </Field>
+            {/* Dropdown, not a text box — the grid and the Add form have always
+                been a fixed two-item select, and a free-text Position here let
+                a typo ("Operater Leader") silently drop someone out of every
+                leader-scoped view. */}
             <Field label="Position">
-              <Input
+              <select
                 value={draft.position}
                 onChange={(e) => set("position", e.target.value)}
-                className="mt-0.5 h-8 text-xs"
-              />
+                className="mt-0.5 h-8 w-full rounded-md border border-[#D8D2CC] bg-white px-2 text-xs"
+              >
+                {positionOptions.map((p) => (
+                  <option key={p} value={p}>
+                    {p || "—"}
+                  </option>
+                ))}
+              </select>
             </Field>
             <Field label="Phone">
               <Input
@@ -172,54 +200,40 @@ export function EmployeeDrawer({
                 className="mt-0.5 h-8 text-xs"
               />
             </Field>
+            {/* The SAME control the grid's edit row uses — fourteen loose
+                checkboxes here was a second design for one field (owner:
+                「department太乱了 做成dropdown」). */}
             <Field label="Departments" hint="First one ticked is their primary department." full>
-              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
-                {departments.map((d) => {
-                  const on = draft.departmentCodes.includes(d.code);
-                  return (
-                    <label key={d.code} className="flex items-center gap-1 text-[11px] text-[#374151]">
-                      <input
-                        type="checkbox"
-                        checked={on}
-                        onChange={() =>
-                          set(
-                            "departmentCodes",
-                            on
-                              ? draft.departmentCodes.filter((c) => c !== d.code)
-                              : [...draft.departmentCodes, d.code],
-                          )
-                        }
-                      />
-                      {d.name}
-                    </label>
-                  );
-                })}
+              <div className="mt-1">
+                <DepartmentMultiSelect
+                  selectedCodes={draft.departmentCodes}
+                  allDepts={departments}
+                  onChange={(codes) => set("departmentCodes", codes)}
+                  className="w-full"
+                />
               </div>
             </Field>
-            <Field label="Category" hint="Leave all unticked to cover every line." full>
-              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
-                {categories.map((cat) => {
-                  const on = draft.categories.includes(cat);
-                  return (
-                    <label key={cat} className="flex items-center gap-1 text-[11px] text-[#374151]">
-                      <input
-                        type="checkbox"
-                        checked={on}
-                        onChange={() =>
-                          set(
-                            "categories",
-                            on
-                              ? draft.categories.filter((c) => c !== cat)
-                              : [...draft.categories, cat],
-                          )
-                        }
-                      />
+            {/* Category scopes an Operator Leader's Team dashboard, so it is
+                meaningless on a plain Operator — hidden there, exactly as the
+                grid cell and the Add form do it. */}
+            {positionHasCategory(draft.position) && (
+              <Field label="Category" hint='"All" covers every line.'>
+                <select
+                  value={draft.categories[0] ?? ""}
+                  onChange={(e) =>
+                    set("categories", e.target.value ? [e.target.value] : [])
+                  }
+                  className="mt-0.5 h-8 w-full rounded-md border border-[#D8D2CC] bg-white px-2 text-xs"
+                >
+                  <option value="">All</option>
+                  {categoryOptions(draft.categories[0]).map((cat) => (
+                    <option key={cat} value={cat}>
                       {cat}
-                    </label>
-                  );
-                })}
-              </div>
-            </Field>
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
             <Field label="Status">
               <select
                 value={draft.status}
@@ -234,8 +248,15 @@ export function EmployeeDrawer({
             {/* Required when resigned — the payroll engine scopes a resigned
                 worker's final month by this date, so saving without it would
                 pay them for months they were gone. */}
-            {draft.status === "RESIGNED" && (
-              <Field label="Resigned on">
+            {showResignedAt && (
+              <Field
+                label="Resigned on"
+                hint={
+                  draft.status === "RESIGNED"
+                    ? "Required — payroll stops at this date."
+                    : "Not resigned; this date is ignored and cleared on save."
+                }
+              >
                 <Input
                   type="date"
                   value={draft.resignedAt || ""}

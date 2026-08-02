@@ -5832,10 +5832,14 @@ app.get("/wip-detail", async (c) => {
            FROM cost_ledger WHERE type IN ('RM_ISSUE','LABOR_POSTED','FG_COMPLETED')`,
       )
       .all<{ type: string; itemId: string; refType: string | null; refId: string | null; totalCostSen: number; date: string }>(),
-    c.var.DB.prepare("SELECT id, poNumber, itemCategory, status FROM production_orders").all<{ id: string; poNumber: string | null; itemCategory: string | null; status: string | null }>(),
+    // `poNo`, not `poNumber`: production_orders stores it as po_no. The
+    // rename map DOES carry poNumber → po_number, but that column lives on
+    // grns / goods_in_transit / three_way_matches — so this SELECT rewrote
+    // cleanly and then 500'd on a column production_orders never had.
+    c.var.DB.prepare("SELECT id, poNo, itemCategory, status FROM production_orders").all<{ id: string; poNo: string | null; itemCategory: string | null; status: string | null }>(),
   ]);
   const po = new Map<string, { poNumber: string; category: string; status: string }>();
-  for (const p of poRes.results ?? []) po.set(p.id, { poNumber: p.poNumber ?? p.id, category: String(p.itemCategory ?? "").toUpperCase(), status: p.status ?? "" });
+  for (const p of poRes.results ?? []) po.set(p.id, { poNumber: p.poNo ?? p.id, category: String(p.itemCategory ?? "").toUpperCase(), status: p.status ?? "" });
   type Wip = { poId: string; poNumber: string; category: string; status: string; materialSen: number; labourSen: number; completedSen: number };
   const byPo = new Map<string, Wip>();
   const ensure = (poId: string): Wip => {
@@ -5884,11 +5888,12 @@ app.get("/cleanup-report", async (c) => {
     db.prepare(
       `SELECT type, itemId, refType, refId, totalCostSen FROM cost_ledger WHERE type IN ('RM_ISSUE','LABOR_POSTED')`,
     ).all<{ type: string; itemId: string; refType: string | null; refId: string | null; totalCostSen: number }>(),
-    db.prepare("SELECT id, poNumber, itemCategory FROM production_orders").all<{ id: string; poNumber: string | null; itemCategory: string | null }>(),
+    // `poNo` — see the note on /wip-detail above.
+    db.prepare("SELECT id, poNo, itemCategory FROM production_orders").all<{ id: string; poNo: string | null; itemCategory: string | null }>(),
     db.prepare("SELECT id, itemCode, name, itemGroup FROM raw_materials").all<{ id: string; itemCode: string | null; name: string | null; itemGroup: string | null }>(),
   ]);
   const poCat = new Map<string, { poNumber: string; category: string }>();
-  for (const p of poRes.results ?? []) poCat.set(p.id, { poNumber: p.poNumber ?? p.id, category: String(p.itemCategory ?? "").toUpperCase() });
+  for (const p of poRes.results ?? []) poCat.set(p.id, { poNumber: p.poNo ?? p.id, category: String(p.itemCategory ?? "").toUpperCase() });
   // POs with cost activity but no usable category.
   const badPo = new Map<string, { poNumber: string; costSen: number }>();
   for (const l of clRes.results ?? []) {

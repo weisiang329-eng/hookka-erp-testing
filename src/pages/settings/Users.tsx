@@ -24,6 +24,7 @@ import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { OrgChart } from "@/components/org-chart";
 import { humanizeError } from "@/lib/humanize-error";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
+import { UserDetailDrawer, type DrawerUser } from "@/components/user-detail-drawer";
 import { Tabs, type TabItem } from "@/components/ui/tabs";
 import { DataGrid, type Column } from "@/components/ui/data-grid";
 import {
@@ -329,6 +330,11 @@ export default function UsersPage() {
   //     was only matched heuristically (floating assigned_user_id), the PATCH
   //     ALSO writes assigned_user_id so the link becomes the source of truth.
   // `aliasExisting` holds the alias being edited (null when creating).
+  // Employee-Master-style side panel (owner 2026-08-02:「我要做到像 employee
+  // master 这样子,在旁边去做 maintenance」). Edits the USER row, so a person
+  // with no @hookka.com mailbox can still be given a Department and a Position —
+  // the alias-gated modal below could never reach seven of the ten accounts.
+  const [drawerUser, setDrawerUser] = useState<UserRow | null>(null);
   const [aliasForUser, setAliasForUser] = useState<UserRow | null>(null);
   const [aliasExisting, setAliasExisting] = useState<MailAddress | null>(null);
   const [aliasAddress, setAliasAddress] = useState("");
@@ -1804,9 +1810,9 @@ export default function UsersPage() {
               size="sm"
               onClick={(e) => {
                 e.stopPropagation();
-                openAliasModal(u);
+                setDrawerUser(u);
               }}
-              title="Edit details (position, department, email alias, role)"
+              title="Edit details (name, department, position, reports to, role)"
             >
               <SlidersHorizontal className="h-3.5 w-3.5" />
             </Button>
@@ -3045,6 +3051,40 @@ export default function UsersPage() {
           once the domain MX points at Cloudflare Email Routing — NOT a Gmail
           login. */}
       {/* =========================================================== */}
+      {drawerUser && (
+        <UserDetailDrawer
+          user={
+            {
+              id: drawerUser.id,
+              email: drawerUser.email,
+              displayName: drawerUser.displayName ?? "",
+              role: drawerUser.role,
+              isActive: drawerUser.isActive,
+              department: drawerUser.department ?? "",
+              position: drawerUser.position ?? "",
+              reportsTo: drawerUser.reportsTo ?? "",
+            } satisfies DrawerUser
+          }
+          uplineOptions={activeUsers
+            .filter((u) => u.id !== drawerUser.id)
+            .map((u) => ({
+              id: u.id,
+              label: `${u.displayName || u.email}${u.position ? ` · ${u.position}` : ""}`,
+            }))}
+          departments={ORG_DEPARTMENTS}
+          roleOptions={ROLE_OPTIONS}
+          currentUserId={currentUser?.id ?? ""}
+          canManage={canManageUsers}
+          onClose={() => setDrawerUser(null)}
+          onSaved={() => {
+            fetchUsers();
+            // The chart groups on these, so it must not keep serving the old
+            // department for the rest of the session.
+            invalidateCachePrefix("/api/org-chart");
+          }}
+        />
+      )}
+
       {aliasForUser && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"

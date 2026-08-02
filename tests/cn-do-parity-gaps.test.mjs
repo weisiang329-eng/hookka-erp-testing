@@ -178,43 +178,48 @@ test("gap2: no-search list SQL path is unchanged (legacy query + legacy paginati
   );
 });
 
-test("gap2: palette wires the CN fetcher with the ?focus deep link, without reordering categories", () => {
-  assert.match(
-    SEARCH_SRC,
-    /\/api\/consignment-notes\?search=\$\{encodeURIComponent\(query\)\}&limit=5/,
-    "palette must fetch /api/consignment-notes with search+limit",
+test("gap2: consignment notes stay findable + ?focus deep-link after the unified-search move", () => {
+  // The palette no longer fans out a per-endpoint CN fetch — it calls
+  // /api/search once (see feat/palette-unified-search). The behaviour this
+  // test protects is unchanged: CN is a search source, it deep-links to
+  // /consignment/note?focus=<id>, and it maps to the consignment_notes group
+  // with the ClipboardList icon. The assertions moved to where those now live.
+  const CATALOGUE = readFileSync("src/api/lib/search-sources.ts", "utf8");
+
+  // The server catalogue carries the CN source with the ?focus deep link.
+  const cnSource = sliceBetween(
+    CATALOGUE,
+    'kind: "consignment_note"',
+    "},",
   );
+  assert.match(cnSource, /table: "consignment_notes"/, "CN source must query consignment_notes");
+  assert.match(cnSource, /note_number/, "CN label/search must use note_number");
   assert.match(
-    SEARCH_SRC,
-    /pickRecords\(data, "consignmentNotes", "data"\)/,
-    'CN payload is { success, data } — the "data" key must be picked',
-  );
-  assert.match(
-    SEARCH_SRC,
-    /href: `\/consignment\/note\?focus=\$\{item\.id\}`/,
+    cnSource,
+    /hrefPrefix: "\/consignment\/note\?focus="/,
     "CN results must deep-link to /consignment/note?focus=<id>",
+  );
+
+  // The palette maps the server `consignment_note` kind to the existing group.
+  assert.match(
+    SEARCH_SRC,
+    /consignment_note: \{ category: "consignment_notes", icon: ClipboardList \}/,
+    "palette must map the consignment_note kind to the consignment_notes group",
   );
   assert.match(
     SEARCH_SRC,
     /consignment_notes: \{ label: "Consignment Notes", icon: ClipboardList \}/,
     "category config must label the group Consignment Notes with the ClipboardList icon",
   );
-  // Result rows: noteNumber as label, customerName as description.
-  const cnFetcher = sliceBetween(
-    SEARCH_SRC,
-    "// Consignment Notes",
-    'category: "consignment_notes",',
-  );
-  assert.match(cnFetcher, /item\.noteNumber/, "label must read noteNumber");
-  assert.match(cnFetcher, /item\.customerName/, "description must read customerName");
-  // Existing display order must be untouched — the new category appends.
+  // The previously-covered six categories keep their original relative order;
+  // the new modules append after consignment_notes.
   const orderMatch = SEARCH_SRC.match(
     /const categoryOrder: ResultCategory\[\] = (\[[\s\S]*?\]);/,
   );
   assert.ok(orderMatch, "categoryOrder must exist");
   const order = new Function(`return ${orderMatch[1]};`)();
   assert.deepEqual(
-    order,
+    order.slice(0, 8),
     [
       "pages",
       "actions",
@@ -225,7 +230,7 @@ test("gap2: palette wires the CN fetcher with the ?focus deep link, without reor
       "products",
       "consignment_notes",
     ],
-    "existing categories keep their order; consignment_notes appends last",
+    "the original eight keep their order; new modules append after",
   );
 });
 

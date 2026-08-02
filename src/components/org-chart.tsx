@@ -12,7 +12,7 @@
 // Production — their production sub-department is a costing dimension, not a
 // reporting line.
 // ---------------------------------------------------------------------------
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Network, Minus, Plus, Users, Pencil } from "lucide-react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { buildOrgTree, countSubtree, type OrgNode, type OrgPerson } from "@/lib/org-people";
@@ -249,6 +249,30 @@ export function OrgChart({ canManage }: Props) {
   // an extra root.
   const forest = useMemo(() => buildOrgTree(visible), [visible]);
 
+  // A pure top-down chart is as wide as its widest fan-out, and this one has a
+  // Production Head with fourteen direct reports — so the first paint was a
+  // canvas several screens across, opened somewhere in the middle, with the
+  // root off-screen. Useless as a first impression of the hierarchy.
+  //
+  // So a WIDE node starts folded: you land on
+  //   owner → Violet → Production Head → three leaders + the unled
+  // which is the shape the owner described (「第一个、第二个、第三个、第四个」),
+  // and a click opens any team. Done once, keyed on the data, so it does not
+  // fight the operator every time the list refreshes.
+  const [autoFolded, setAutoFolded] = useState("");
+  useEffect(() => {
+    const sig = `${forest.length}:${visible.length}`;
+    if (!forest.length || autoFolded === sig) return;
+    const wide = new Set<string>();
+    const walk = (n: OrgNode) => {
+      if (n.children.length > 6) wide.add(n.key);
+      n.children.forEach(walk);
+    };
+    forest.forEach(walk);
+    setAutoFolded(sig);
+    if (wide.size) setCollapsed((prev) => new Set([...prev, ...wide]));
+  }, [forest, visible.length, autoFolded]);
+
   const TreeCard = ({ node }: { node: OrgNode }) => {
     const open = editing === node.key;
     const kids = node.children.length;
@@ -441,7 +465,7 @@ export function OrgChart({ canManage }: Props) {
           className="flex min-w-max items-start gap-3"
         >
           {view === "tree" && (
-            <div className="flex min-w-max items-start justify-center gap-8 px-4 pt-2">
+            <div className="mx-auto flex min-w-max items-start justify-center gap-8 px-4 pt-2">
               {forest.map((r) => (
                 <Branch key={r.key} node={r} />
               ))}

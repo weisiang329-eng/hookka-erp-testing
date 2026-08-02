@@ -90,3 +90,17 @@ test("the reporting line is editable from the tree too", () => {
   assert.match(branch, /descendantsOf\(node\.key\)/, "and it still refuses a loop");
   assert.match(branch, /void setManager\(node\.key, e\.target\.value\)/);
 });
+
+test("a wide branch opens FOLDED, so the root is the first thing you see", () => {
+  // A pure top-down chart is as wide as its widest fan-out, and this one has a
+  // Production Head with fourteen direct reports — the first paint was a canvas
+  // several screens across, opened mid-way, with the root off-screen.
+  const src = readFileSync("src/components/org-chart.tsx", "utf8");
+  assert.match(src, /if \(n\.children\.length > 6\) wide\.add\(n\.key\)/);
+  // Once, keyed on the data — it must not re-fold every time the list refreshes
+  // and undo what the operator just opened.
+  assert.match(src, /const sig = `\$\{forest\.length\}:\$\{visible\.length\}`/);
+  assert.match(src, /if \(!forest\.length \|\| autoFolded === sig\) return;/);
+  // Folding ADDS to whatever is already collapsed rather than replacing it.
+  assert.match(src, /setCollapsed\(\(prev\) => new Set\(\[\.\.\.prev, \.\.\.wide\]\)\)/);
+});

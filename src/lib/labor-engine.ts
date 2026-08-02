@@ -67,8 +67,19 @@ const FALLBACK_WORKING_DAYS_PER_MONTH = 26;
  * pure and unit-testable.
  */
 export type LaborWorker = {
-  /** Monthly basic salary, in sen. */
+  /** Monthly basic salary, in sen. Ignored when payMode is DAILY. */
   basicSalarySen: number;
+  /**
+   * "MONTHLY" (default) or "DAILY".
+   *
+   * MONTHLY starts from the full salary and deducts days not worked. DAILY
+   * starts from zero and pays days worked — the right model for an outsourced
+   * person who may come five days in a month, where the monthly rule would
+   * record 21 absences against a salary they were never on.
+   */
+  payMode?: string | null;
+  /** Rate per day worked, in sen. Only read when payMode is DAILY. */
+  dailyRateSen?: number | null;
   /** Nominal working days per month — the payroll divisor. Typically 26. */
   workingDaysPerMonth: number;
   /** Standard hours in a normal working day — the OT threshold. e.g. 8 or 9. */
@@ -721,15 +732,37 @@ export function computeMonthlyLabor(
   // Absence docks the ÷26 contractual day rate (RM78.85 on RM2,050) — the
   // same divisor as OT. The ÷26-vs-÷working-days difference per absent day is
   // bridged on the Labor Cost screen (the absence-leniency line).
-  const absenceDeductionSen = Math.round(absentDays * payrollDailyRateSen);
+  // DAILY pay mode (outsourced people, owner 2026-08-02). Monthly starts from a
+  // full salary and DEDUCTS the days not worked; daily starts from zero and PAYS
+  // the days worked. For someone who comes five days in a month those are not
+  // two routes to the same number — the monthly rule would record 21 absences
+  // and dock a salary they were never on. Own staff are untouched: payMode
+  // defaults to MONTHLY, and this whole branch is skipped.
+  const isDailyPaid =
+    (worker.payMode ?? "MONTHLY") === "DAILY" && (worker.dailyRateSen ?? 0) > 0;
+  const absenceDeductionSen = isDailyPaid
+    ? 0
+    : Math.round(absentDays * payrollDailyRateSen);
   // Owner-flagged / punch-derived unworked hours dock at (salary ÷ 26) ÷ the
   // effective-dated hour divisor — the same RM7.88/h base the OT rate uses.
   const shortHourDeductionHours = Math.max(0, input.shortHourDeductionHours || 0);
   const shortHourDeductionSen = Math.round(shortHourDeductionHours * lateHourlyRateSen);
-  const basicEarnedSen = Math.max(
-    0,
-    Math.max(0, basicSalarySen - absenceDeductionSen) - shortHourDeductionSen,
-  );
+  // Daily: rate x days actually worked, then the same short-hour dock. There is
+  // no absence line to subtract — a day not worked simply is not paid.
+  // Deliberately `daysWorked`, NOT `workedWithinWindow`. The latter is clamped
+  // by the absence window (elapsed working days), which is the right basis for
+  // deciding what to DOCK but the wrong one for deciding what to PAY: a day
+  // that falls outside that window would be worked and then not paid for. For
+  // daily pay the rule is simply "days logged, days paid".
+  const basicEarnedSen = isDailyPaid
+    ? Math.max(
+        0,
+        Math.round(daysWorked * (worker.dailyRateSen ?? 0)) - shortHourDeductionSen,
+      )
+    : Math.max(
+        0,
+        Math.max(0, basicSalarySen - absenceDeductionSen) - shortHourDeductionSen,
+      );
   // Day-typed OT pay. Weekday uses the per-worker rate (base × otMultiplier) so a
   // weekday-only worker is byte-identical to before; Sunday/holiday use the fixed
   // 2×/3× on the base rate. Each bucket is rounded, then summed → otPaySen.

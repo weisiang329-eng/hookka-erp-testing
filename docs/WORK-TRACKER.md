@@ -9,103 +9,6 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
-## 2026-08-02 — 🔵 System Health 大扫除（owner: 「把这些都优化解决」「不要停下来」)
-
-Owner 贴了 System Health 六张图。逐条查，**每一条都实测过才动手**。
-
-### ✅ 1. 两个正在 500 的会计端点 → 变成 12 个 SQL bug（PR 合入 main）
-
-`/api/accounting/wip-detail` + `/cleanup-report`：`column "po_number" does not exist`。
-`production_orders` 存的是 `po_no`；`poNumber → po_number` 这条映射**是真的**，
-只是属于 `grns` / `goods_in_transit` / `three_way_matches`。
-
-**所以这不是「rename map 少一条」那一类**，是「映射到别的表的栏位」——
-`sql-write-column-coverage` 全绿，tsc 也看不到（SQL 是字串），只有真的有人打开那一页
-才会 500。修完第一个还是 500 → 干脆把 `src/api` 里每一句
-`SELECT … FROM <table>` 对着**线上 schema** 扫一遍：**1,033 组 (table, column)，146 张表，
-12 个是错的**：
-
-| 写的 | 变成 | 实际 | 影响 |
-|---|---|---|---|
-| production_orders.poNumber | po_number | `po_no` | 会计两页 500（线上） |
-| raw_materials.name | name | `description` | cleanup-report 500（线上） |
-| raw_materials.itemName / unit | item_name | `description` / `base_uom` | 采购 agent |
-| workers.role ×3 | role | `position` | 助手查人 / 汇出员工 |
-| customers.contactPerson | contact_person | `contact_name` | 汇出客户 |
-| customers.hub / status | — | 根本没有这两栏 | 汇出客户 |
-| suppliers.contactName | contact_name | `contact_person` | 查供应商 |
-| sales_orders.hub ×2 | hub | `hub_name` | 月报表 / 汇出 |
-| consignment_orders.hub | hub | `hub_name` | 汇出 |
-| delivery_orders.hub / totalSen | — | `hub_name` / **DO 的金额是算出来的，没存** | 汇出 DO |
-
-大部分在**助手的汇出工具**（员工/客户/供应商/DO/SO 的 CSV 全是死的），
-还有一个在 **RM 库存调整的写入路径**。
-栏位真的不存在的地方**没有乱编**：DO 汇出改成 `totalItems` + `totalM3`（真实数字），
-客户汇出改成 `isActive` + `customerStage`。
-
-**守门**：`tests/sql-columns-exist.test.mjs` 对 `tests/db-schema.json`
-（266 表 / 3,210 个栏位名，无资料）。CI 没有资料库所以比对快照；
-migration 后跑 `node scripts/refresh-db-schema-fixture.mjs` 更新。
-**先确认这个 test 会在原本那句 poNumber 上变红**才敢信。扫描现在 0 mismatch。
-
-### ✅ 2. Warm cron 根本没在 warm（两个独立原因，都实测）
-
-Dept 页 p50 ~8s、p95 30s（= 前端 abort）。2026-08-01 加过一个 warmer 就是要治这个。
-**它从来没成功过。**
-
-**原因 A —— 每一次呼叫都 500。** 这是 cron 自己吐的：
-```
-"overdueCounts":{"ok":false,"warmed":0,"failed":["overview:500","FAB_CUT:500",
- "FAB_SEW:500","WOOD_CUT:500","FOAM_CUTTING:500","FOAM:500","FRAMING:500",
- "WEBBING:500","UPHOLSTERY:500","PACKING:500"]}
-```
-它用 `app.request("/overdue-counts?dept=…", {}, c.env)`。Hono 的合成 sub-request
-拿到的是**全新的 context，`c.var` 是空的** —— DB binding 是父 app 的 middleware 挂上去的。
-所以 handler 每次都 throw。`ok:false` 有老实回报，只是没人看。
-
-用 `app.request` 的动机是对的（payload 和 cache key 都来自页面实际跑的那段码，不会漂）。
-现在抽成 `computeOverdueCounts(c, dept)`，**route 和 cron 都呼叫它** —— 同样的保证，
-但 context 是真的。
-
-⚠️ **`tests/warm-overdue-counts.test.mjs` 当时断言的是 `await app.request(...)`
-—— 它钉的是「用什么手段」，而那个手段是坏的**，所以 warmer 死了多久它就绿了多久。
-已改成钉「保证」并禁止那个呼叫形状。**教训：断言结果，不要断言手段。**
-
-**原因 B —— 排程是假的。** `warm-lists.yml` 写 `*/5`。GitHub 实际给的（08-01/02 实测）：
-**大约一小时一次**，中间断 2 小时以上（06:17 → 08:36、12:39 → 14:13），
-量测当下已经断了 2 小时。**排 288 次/天，真的跑约 20 次。**
-两张 snapshot 表**没有任何一列少于 10 分钟**，最新的是 8.7 小时前。
-
-这个 repo 已经学过一次：`agent-heartbeat-worker` 就是因为 GitHub 在 heartbeat 上漂 1–3.5h 才建的。
-warm tick 搬到同一个 Cloudflare Cron Worker（`*/5` 和 heartbeat 的 `*/30` 并存，
-用 `controller.cron` 分流）。GitHub 那个留着当 fallback（端点幂等，重复触发无害）。
-
-🟡 **需要 owner 手动跑一次（我没有 wrangler 权限）**：
-```
-cd agent-heartbeat-worker && wrangler deploy
-```
-CRON_SECRET 已经在那个 worker 上了，`WARM_LISTS_URL` 写在 `[vars]`。
-没跑之前 warm 还是 GitHub 那个 ~每小时的节奏 —— 但原因 A 修好后，**有跑到的那几次是真的有效的**。
-
-### 📌 顺手量到、值得记的：**资料库不是瓶颈**
-
-之前 tracker 写过「backend 瓶颈是连线不是索引」。这次实测两边都不是：
-- 这些端点背后最重的那句（`cost_ledger` 33k 列扫描）**执行 15ms**
-  （seq scan / 2183 buffers；这个量级不需要索引）
-- 连线池 **12 / 90**，没有争用
-- `job_cards` 全表 61ms、`production_orders` 全表 39ms
-
-**那几秒全部是 cold recompute**，不是 SQL 慢。以后看到 System Health 的
-「slow SQL」不要直接去加索引。
-
-### ⚪ 还没做的（下一轮）
-- `/api/mail-center/inbound` P95 4530ms、DB 100%、207 hits
-- `/api/sales-orders` 回应 1.96MB（brotli 后 124KB）
-- overdue 的 `today` 用 UTC，dept sheet 用 MYT —— 每天有 8 小时两边的「今天」不同一天。
-  改动会**动到数字**（owner 红线），所以只记录不动。
-
----
-
 ## 2026-08-02 — ✅ 假 bank account 还留在已存的 payslip 列上（owner: 「东西都完成了吗」)
 
 收工前复查抓到的**漏网**，属于「改了 code、没补资料」这一类（同一天已经被 owner 讲过一次
@@ -207,7 +110,42 @@ confirmed by reading Hookka code, not inferred.
 - **Rotate the Supabase credential** that was committed in `clone-prod-to-staging.mjs`. It
   is out of the file now but remains in git history.
 
+### ✅ Shipped (final round)
+8. **All 26 remaining self-apply sites** (#222) — plus two CLASS tests: no hand-rolled
+   `for (const sql of stmts)` loop may exist anywhere under `src/api`, and any file calling
+   `runSelfApply` must guard its memo. One stale assertion corrected, not worked around:
+   `reverse-doc-links.test.mjs` pinned that the invoice note-index ensure "swallows failure
+   with a warn" — that was describing the bug.
+9. **A workflow failing for weeks is now visible** (#224) — `/admin/health` listed the last
+   ~20 runs, and the 5-minute crons push a daily job's failure out of that window within
+   MINUTES, which is how the backup failed 20× unnoticed. A failures-only query now reduces
+   to the latest failure per workflow with a consecutive count. Also: `workflow_dispatch`
+   now actually deploys (it was `push`-only, so a manual re-run built, tested and skipped
+   the deploy) — verified live by dispatching a staging deploy that previously would have
+   been skipped.
+
+### QA — run against staging after everything merged (staging == main)
+- 22 read endpoints across every module whose self-apply block was rewritten: **all 200**
+- write path (org-chart PUT): sets, **sticks**, clears, restores
+- COGS detector on staging data: **30 orders, 53 uncosted units, ~RM 4,520 estimated**
+- prod: `/api/health` ok, a missing asset 404s, three real hashed assets still 200+immutable
+- ⚠️ staging has no `GITHUB_TOKEN`, so the new failing-workflow banner cannot render there —
+  needs a look on prod.
+
 ### ⚪ Queued (verified real, not yet fixed)
+- **The COGS repair.** BLOCKED on the PROD number — the detector is live at
+  `GET /api/reports/cogs-integrity.json`; staging says ~RM 4,520 but prod is the one that
+  matters. Read it before writing the fix, and reconcile on EVERY FG-IN path
+  (`fg-completion.ts`), not just one. Same discarded-shortfall shape in
+  `po-cost-cascade.ts:800` for raw materials.
+- **Existing plate collisions** need an owner decision (which duplicate wins, what happens
+  to the delivery history on the loser) before a unique index can go on. 0 on staging;
+  check `GET /api/three-pl-vehicles/collisions` on prod.
+- ~~26 more self-apply sites~~ — DONE, see above.
+- **Root cause of "a push to `staging` produced no workflow run at all"** is still unknown.
+  The dispatch fix gives a way around it; it does not explain it.
+
+### (superseded)
 - **26 more self-apply sites** still carry the swallow-and-memoise loop. The canonical one
   (sales-orders) is converted and `src/api/lib/self-apply.ts` is the mechanism; the shapes
   vary too much for a blind script. Highest first: grn, invoices, purchase-orders, users.

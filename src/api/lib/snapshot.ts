@@ -58,10 +58,31 @@ export async function readSnapshot(
   orgId: string,
   cacheKey: string = "",
 ): Promise<SnapshotRow | null> {
+  // AWAITED BEFORE THE READ, not just before the write.
+  //
+  // I shipped this selecting source_rows while only ensuring the column on the
+  // write path, and every snapshot-backed endpoint 500'd on
+  // `column "source_rows" does not exist` — /api/sales-orders and its stats
+  // went down on 2026-08-02 until this line was added. Migrations are inert on
+  // deploy here: a column exists only because the runtime ALTER ran first, and
+  // the READ gets there before any write does.
+  // Belt and braces: if the ALTER itself cannot run (a permission problem, a
+  // replica), degrade to the pre-2026-08-02 read rather than take the page
+  // down. sourceRows null then means "unknown", which isSnapshotFresh treats
+  // as stale-once — safe, never wrong-and-quiet.
+  let hasRowsCol = true;
+  try {
+    await ensureSourceRowsColumn(db, config.tableName);
+  } catch (e) {
+    hasRowsCol = false;
+    console.warn(`[${config.tableName}] source_rows unavailable:`, e);
+  }
   const row = await db
     .prepare(
       `SELECT data, built_from AS "builtFrom", built_at AS "builtAt",
-              refresh_count AS "refreshCount", source_rows AS "sourceRows"
+              refresh_count AS "refreshCount"${
+                hasRowsCol ? ', source_rows AS "sourceRows"' : ""
+              }
          FROM ${config.tableName}
         WHERE org_id = ? AND cache_key = ?`,
     )

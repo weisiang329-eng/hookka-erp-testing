@@ -34,6 +34,60 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-02-001 — `flag ? 1 : 0` bound to a real Postgres BOOLEAN stores FALSE, silently, with HTTP 200 `data-integrity` `infrastructure` `payroll` 🟢
+
+**Symptom:** The owner ticked **Outsourced** on OSC-001 CHAU, set the day rate to RM 85, saved,
+got "Employee updated." — and on reopening the drawer the tick was gone. 「我明明设置了这个人
+是 outsource，然后他的 rate 是 85 块。当我 save 了之后，我点回来的时候，他又没有 save 成功。」
+It presented as a caching bug, on the back of a week of real caching bugs.
+
+**It was not a cache.** Production, straight after the save:
+
+```
+emp_no OSC-001 | pay_mode 'DAILY' | daily_rate_sen 8500 | is_outsource false
+```
+
+Two of the three columns from the *same* UPDATE, the *same* request, saved correctly. Only the
+boolean was wrong — which is what ruled out every cache, snapshot and stale-read explanation.
+
+**Root cause:** `postgres.js` binds any value that is not a JS boolean to a `boolean` column as
+`FALSE`. Verified directly against production inside a rolled-back transaction:
+
+| bound value | stored |
+|---|---|
+| `1` (number) | **false** |
+| `0` (number) | false |
+| `"1"` / `"true"` (string) | **false** |
+| `true` / `false` (boolean) | correct |
+
+No error, no 500 — the write reports success and the row is wrong. `src/api/routes/workers.ts`
+bound `merged.isOutsource ? 1 : 0`.
+
+That idiom is **correct** almost everywhere in this repo: the codebase came from Cloudflare D1
+(SQLite), where a boolean *is* the integer 0/1, and nearly every flag column here is `INTEGER`.
+Exactly **10 of 3,251 columns** are a true `BOOLEAN`. On those ten it fails silently, and `tsc`
+cannot see it because the SQL is a string.
+
+**Fix:**
+- `src/api/routes/workers.ts:595` — `merged.isOutsource === true` (a real boolean).
+- `src/api/lib/intercompany-mirror-create.ts:330` — `sales_orders.is_service_order` was bound a
+  bare `0`. Latent only: `0` lands on `false`, which was the intended value. Now `false`.
+- Data repair: `UPDATE workers SET is_outsource = true WHERE emp_no = 'OSC-001'`, read back.
+
+**Swept — the other 8 boolean columns are safe:** `workers.{epf,socso,eis,pcb}_enabled` (real
+booleans on both INSERT and UPDATE), `worker_pins.must_reset` (SQL literal), `announcements.
+is_active`, `organisations.is_default`, `rd_team_members.active`.
+
+**Not a bug, checked:** 41 of 42 workers have `epf/socso/eis/pcb_enabled = false`. That is
+deliberate — the worker INSERT defaults them false for foreign staff and binds real booleans.
+
+**Verified:** `tests/boolean-column-binds.test.mjs` maps `.bind()` arguments positionally onto
+each INSERT/UPDATE's columns and fails on a non-boolean bound to any column in
+`tests/db-boolean-columns.json` (regenerated from prod). Proved by re-introducing **both** bugs
+and confirming the test went red on both, then green after restoring — the first version of the
+test counted only the `?` in `SET` and not the one in `WHERE id = ?`, so it skipped the very
+statement it was written for and passed. Class recorded as **C8** in `docs/BUG-CLASSES.md`.
+
 ## BUG-2026-08-01-005 — A broken punch (in and out in the same minute) was docked a FULL day's hours ON TOP of that day's absence `payroll` `data-integrity` 🟡
 
 **Symptom:** KYAW ZIN OO (EMP-022) 2026-07-01 punched 18:01 IN / 18:02 OUT — he forgot the

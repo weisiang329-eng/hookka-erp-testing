@@ -584,7 +584,15 @@ app.put("/:id", async (c) => {
         normalizePaymentMethod(merged.paymentMethod),
         normalizePaymentMethod(merged.paymentMethod) === "CASH" ? null : (merged.bankName || null),
         normalizePaymentMethod(merged.paymentMethod) === "CASH" ? null : (merged.bankAccount || null),
-        merged.isOutsource ? 1 : 0,
+        // A REAL boolean, not `? 1 : 0`. is_outsource is one of the ten columns
+        // in this database that is an actual Postgres BOOLEAN, and postgres.js
+        // binds anything that is not a JS boolean to a bool column as FALSE —
+        // silently, no error, HTTP 200. `? 1 : 0` is the correct idiom for the
+        // INTEGER flag columns inherited from D1, and it is why ticking
+        // "Outsourced" saved as false while payMode and dailyRateSen (same
+        // statement, same request) saved fine. See
+        // tests/boolean-column-binds.test.mjs.
+        merged.isOutsource === true,
         // Only DAILY is special; anything else means the ordinary monthly rule.
         String(merged.payMode ?? "MONTHLY") === "DAILY" ? "DAILY" : "MONTHLY",
         Math.max(0, Math.round(Number(merged.dailyRateSen) || 0)),

@@ -25,7 +25,6 @@ import {
   wouldCycle,
   type OrgPerson,
 } from "../../lib/org-people";
-import { notifyManagerChain } from "../lib/org-notify";
 
 const app = new Hono<Env>();
 
@@ -374,39 +373,7 @@ app.put("/reporting", async (c) => {
       .bind(pk, mk, now),
   ]);
 
-  // Tell the new manager they picked someone up. This is the reporting line
-  // being USED rather than merely drawn (owner 2026-08-02: 「我只要能把
-  // reporting line 放对，这整个东西就会做出来了…包括通知 reporting line」) —
-  // and it means a brand-new person or department needs no code at all: give
-  // them a manager and the wiring is live.
-  //
-  // Best-effort and deliberately AFTER the write: the reporting line is saved
-  // whether or not the message lands, and notifyManagerChain swallows its own
-  // failures. depth 1 = the new manager only; nobody's boss gets copied on
-  // routine re-parenting.
-  let notified: string[] = [];
-  if (mk) {
-    const person = byKey.get(pk);
-    const res = await notifyManagerChain(
-      c.var.DB,
-      pk,
-      {
-        type: "org",
-        title: `${person?.name ?? "Someone"} now reports to you`,
-        message: [person?.name, person?.position, person?.ref]
-          .filter(Boolean)
-          .join(" · "),
-        severity: "info",
-        link: "/settings/users",
-      },
-      { depth: 1 },
-    );
-    notified = res.notified;
-  }
-  return c.json({
-    success: true,
-    data: { personKey: pk, managerKey: mk, notified },
-  });
+  return c.json({ success: true, data: { personKey: pk, managerKey: mk } });
 });
 
 export default app;

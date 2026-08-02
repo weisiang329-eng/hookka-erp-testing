@@ -10,20 +10,11 @@
 // userId concept yet, so the GET returns every row.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
-import type { Context } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
-import { ensureNotificationTargeting } from "../lib/org-notify";
 
 const app = new Hono<Env>();
 
-// authMiddleware stashes the resolved user id via c.set('userId'). Env.Variables
-// only types DB / dbTimer, so read it through a loose cast — same pattern as
-// routes/working-hour-entries.ts and routes/presence.ts.
-function getUserId(c: Context<Env>): string {
-  const id = (c as unknown as { get: (k: string) => unknown }).get("userId");
-  return typeof id === "string" ? id : "";
-}
 
 type NotificationRow = {
   id: string;
@@ -64,22 +55,6 @@ app.get("/", async (c) => {
     where.push("isRead = ?");
     binds.push(isRead === "true" ? 1 : 0);
   }
-  // Scope to the caller. Every existing row has user_id NULL — the column did
-  // not exist until 2026-08-02 — so broadcasts still reach everyone and nothing
-  // that is visible today disappears. What changes is that a notification
-  // ADDRESSED to somebody (the reporting-line escalations) lands only in their
-  // list, instead of every user reading every other user's mail.
-  await ensureNotificationTargeting(c.var.DB);
-  const me = getUserId(c);
-  if (me) {
-    where.push("(userId IS NULL OR userId = ?)");
-    binds.push(me);
-  } else {
-    // No resolvable session (service token, legacy caller): broadcasts only.
-    // Showing them everyone's targeted mail would be worse than showing less.
-    where.push("userId IS NULL");
-  }
-
   const sql =
     "SELECT * FROM notifications" +
     (where.length > 0 ? " WHERE " + where.join(" AND ") : "") +

@@ -129,21 +129,20 @@ function isMissingTotalHeightColumn(e: unknown): boolean {
 // once per worker instance; the route middleware below calls it before every
 // request so SELECT_COLS (which lists `material`) always has the column.
 // `material` is a single lowercase word — no rename-map entry needed.
-let materialColEnsured: Promise<void> | null = null;
-function ensureMaterialColumn(db: DbLike): Promise<void> {
-  if (materialColEnsured) return materialColEnsured;
-  materialColEnsured = (async () => {
-    try {
-      await db
-        .prepare("ALTER TABLE cnc_templates ADD COLUMN IF NOT EXISTS material TEXT")
-        .bind()
-        .run();
-    } catch {
-      // already exists / transient DDL reject — ignore (rowToCncTemplate
-      // defaults a missing value to 'fabric').
-    }
-  })();
-  return materialColEnsured;
+let materialColEnsured = false;
+async function ensureMaterialColumn(db: DbLike): Promise<void> {
+  if (materialColEnsured) return;
+
+  try {
+    await db
+      .prepare("ALTER TABLE cnc_templates ADD COLUMN IF NOT EXISTS material TEXT")
+      .bind()
+      .run();
+  } catch {
+    // already exists / transient DDL reject — ignore (rowToCncTemplate
+    // defaults a missing value to 'fabric').
+  }
+  materialColEnsured = true;
 }
 
 // Minimal D1-style prepared-statement contract this route relies on. Avoids

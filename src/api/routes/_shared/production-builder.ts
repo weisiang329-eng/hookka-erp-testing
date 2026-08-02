@@ -379,22 +379,21 @@ export type CreatedProductionOrder = {
 // folded to lowercase `repairscope` by Postgres; migration file
 // 0160_so_items_repair_scope.sql uses the folded name so a tool apply
 // no-ops; all reads are dual-key (`row.repairScope ?? row.repairscope`).
-let repairScopeColumnEnsured: Promise<void> | null = null;
-function ensureRepairScopeColumn(db: D1Database): Promise<void> {
-  if (repairScopeColumnEnsured) return repairScopeColumnEnsured;
-  repairScopeColumnEnsured = (async () => {
-    try {
-      await db
-        .prepare(
-          "ALTER TABLE production_orders ADD COLUMN IF NOT EXISTS repairScope TEXT",
-        )
-        .run();
-    } catch {
-      // ignore — column already exists or DDL transiently rejected; the
-      // INSERT below resurfaces a real schema mismatch with a clear error.
-    }
-  })();
-  return repairScopeColumnEnsured;
+let repairScopeColumnEnsured = false;
+async function ensureRepairScopeColumn(db: D1Database): Promise<void> {
+  if (repairScopeColumnEnsured) return;
+
+  try {
+    await db
+      .prepare(
+        "ALTER TABLE production_orders ADD COLUMN IF NOT EXISTS repairScope TEXT",
+      )
+      .run();
+  } catch {
+    // ignore — column already exists or DDL transiently rejected; the
+    // INSERT below resurfaces a real schema mismatch with a clear error.
+  }
+  repairScopeColumnEnsured = true;
 }
 
 export async function createProductionOrdersForOrder(

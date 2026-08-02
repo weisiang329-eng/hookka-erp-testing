@@ -45,38 +45,37 @@ const VALID_KINDS = new Set(["org-default", "print"]);
 // try/catch so a benign "already exists" never poisons the cached promise.
 // Same pattern as routes/mail-center.ts (ensureMailSchema).
 // ---------------------------------------------------------------------------
-let pendingSchema: Promise<void> | null = null;
-function ensureLayoutSchema(db: D1Database): Promise<void> {
-  if (pendingSchema) return pendingSchema;
-  pendingSchema = (async () => {
-    const stmts = [
-      // One row per (org, grid, kind). visible_cols / col_order are JSON-stringified
-      // arrays; col_widths is a JSON-stringified object (or NULL when never saved).
-      // updated_at is written via new Date().toISOString() so it MUST stay TEXT
-      // (never timestamptz) for the SupabaseAdapter to round-trip it unchanged.
-      `CREATE TABLE IF NOT EXISTS datagrid_org_layouts (
-         id TEXT PRIMARY KEY,
-         org_id TEXT NOT NULL DEFAULT 'hookka',
-         grid_id TEXT NOT NULL,
-         kind TEXT NOT NULL,
-         visible_cols TEXT,
-         col_order TEXT,
-         col_widths TEXT,
-         updated_by TEXT,
-         updated_at TEXT
-       )`,
-      `CREATE UNIQUE INDEX IF NOT EXISTS ux_datagrid_org_layouts_org_grid_kind
-         ON datagrid_org_layouts (org_id, grid_id, kind)`,
-    ];
-    for (const stmt of stmts) {
-      try {
-        await db.prepare(stmt).run();
-      } catch (e) {
-        console.error("[datagrid-layouts] schema init failed:", e);
-      }
+let pendingSchema = false;
+async function ensureLayoutSchema(db: D1Database): Promise<void> {
+  if (pendingSchema) return;
+
+  const stmts = [
+    // One row per (org, grid, kind). visible_cols / col_order are JSON-stringified
+    // arrays; col_widths is a JSON-stringified object (or NULL when never saved).
+    // updated_at is written via new Date().toISOString() so it MUST stay TEXT
+    // (never timestamptz) for the SupabaseAdapter to round-trip it unchanged.
+    `CREATE TABLE IF NOT EXISTS datagrid_org_layouts (
+       id TEXT PRIMARY KEY,
+       org_id TEXT NOT NULL DEFAULT 'hookka',
+       grid_id TEXT NOT NULL,
+       kind TEXT NOT NULL,
+       visible_cols TEXT,
+       col_order TEXT,
+       col_widths TEXT,
+       updated_by TEXT,
+       updated_at TEXT
+     )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS ux_datagrid_org_layouts_org_grid_kind
+       ON datagrid_org_layouts (org_id, grid_id, kind)`,
+  ];
+  for (const stmt of stmts) {
+    try {
+      await db.prepare(stmt).run();
+    } catch (e) {
+      console.error("[datagrid-layouts] schema init failed:", e);
     }
-  })();
-  return pendingSchema;
+  }
+  pendingSchema = true;
 }
 
 type LayoutRow = {

@@ -41,7 +41,7 @@ type DbLike = D1Database;
 
 // ───────────────────────── 1. runtime self-apply ─────────────────────────
 
-let _perfIndicesMig: Promise<void> | null = null;
+let _perfIndicesMig = false;
 /**
  * Self-apply the worker-portal perf indices (migration 0197). Memoized per
  * isolate; awaited at the top of /history + /payslips. CREATE INDEX IF NOT
@@ -54,24 +54,23 @@ let _perfIndicesMig: Promise<void> | null = null;
  * piece_pics(job_card_id) is NOT added here — idx_piece_pics_jc already covers
  * it (verified against 0001_init.sql).
  */
-export function ensureWorkerPerfIndices(db: DbLike): Promise<void> {
-  if (_perfIndicesMig) return _perfIndicesMig;
-  _perfIndicesMig = (async () => {
-    await db
-      .prepare(
-        "CREATE INDEX IF NOT EXISTS idx_job_cards_completed_date ON job_cards (completed_date)",
-      )
-      .run();
-    await db
-      .prepare(
-        "CREATE INDEX IF NOT EXISTS idx_attendance_employee_date ON attendance_records (employee_id, date)",
-      )
-      .run();
-  })();
-  return _perfIndicesMig;
+export async function ensureWorkerPerfIndices(db: DbLike): Promise<void> {
+  if (_perfIndicesMig) return;
+
+  await db
+    .prepare(
+      "CREATE INDEX IF NOT EXISTS idx_job_cards_completed_date ON job_cards (completed_date)",
+    )
+    .run();
+  await db
+    .prepare(
+      "CREATE INDEX IF NOT EXISTS idx_attendance_employee_date ON attendance_records (employee_id, date)",
+    )
+    .run();
+  _perfIndicesMig = true;
 }
 
-let _snapTablesMig: Promise<void> | null = null;
+let _snapTablesMig = false;
 /**
  * Self-apply the two worker-portal snapshot tables (migrations 0198 + 0199).
  * Memoized per isolate; awaited before the first snapshot read. Types match the
@@ -79,37 +78,36 @@ let _snapTablesMig: Promise<void> | null = null;
  * d1-compat path these map cleanly (TEXT/timestamp), same as every other
  * snapshot table.
  */
-export function ensureWorkerSnapshotTables(db: DbLike): Promise<void> {
-  if (_snapTablesMig) return _snapTablesMig;
-  _snapTablesMig = (async () => {
-    await db
-      .prepare(
-        `CREATE TABLE IF NOT EXISTS worker_payslips_snapshot (
-           org_id        TEXT NOT NULL,
-           cache_key     TEXT NOT NULL DEFAULT '',
-           data          JSONB NOT NULL,
-           built_from    TIMESTAMP NOT NULL,
-           built_at      TIMESTAMP NOT NULL DEFAULT NOW(),
-           refresh_count INTEGER NOT NULL DEFAULT 0,
-           PRIMARY KEY (org_id, cache_key)
-         )`,
-      )
-      .run();
-    await db
-      .prepare(
-        `CREATE TABLE IF NOT EXISTS worker_history_snapshot (
-           org_id        TEXT NOT NULL,
-           cache_key     TEXT NOT NULL DEFAULT '',
-           data          JSONB NOT NULL,
-           built_from    TIMESTAMP NOT NULL,
-           built_at      TIMESTAMP NOT NULL DEFAULT NOW(),
-           refresh_count INTEGER NOT NULL DEFAULT 0,
-           PRIMARY KEY (org_id, cache_key)
-         )`,
-      )
-      .run();
-  })();
-  return _snapTablesMig;
+export async function ensureWorkerSnapshotTables(db: DbLike): Promise<void> {
+  if (_snapTablesMig) return;
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS worker_payslips_snapshot (
+         org_id        TEXT NOT NULL,
+         cache_key     TEXT NOT NULL DEFAULT '',
+         data          JSONB NOT NULL,
+         built_from    TIMESTAMP NOT NULL,
+         built_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+         refresh_count INTEGER NOT NULL DEFAULT 0,
+         PRIMARY KEY (org_id, cache_key)
+       )`,
+    )
+    .run();
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS worker_history_snapshot (
+         org_id        TEXT NOT NULL,
+         cache_key     TEXT NOT NULL DEFAULT '',
+         data          JSONB NOT NULL,
+         built_from    TIMESTAMP NOT NULL,
+         built_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+         refresh_count INTEGER NOT NULL DEFAULT 0,
+         PRIMARY KEY (org_id, cache_key)
+       )`,
+    )
+    .run();
+  _snapTablesMig = true;
 }
 
 // ──────────────────── 2. short-TTL efficiency dedup memo ────────────────────

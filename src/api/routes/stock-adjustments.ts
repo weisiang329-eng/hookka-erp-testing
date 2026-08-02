@@ -85,19 +85,18 @@ const VALID_REASONS: AdjustmentReason[] = [
 // Self-applying migration — 0164. caseid is the optional service_cases.id
 // backlink for SERVICE_REPLACEMENT adjustments (the "Replacement Parts" card
 // on the case detail page). Module-level promise = one ALTER per isolate.
-let pendingColumns: Promise<void> | null = null;
-function ensureStockAdjustmentColumns(db: D1Database): Promise<void> {
-  if (pendingColumns) return pendingColumns;
-  pendingColumns = (async () => {
-    try {
-      await db
-        .prepare("ALTER TABLE stock_adjustments ADD COLUMN IF NOT EXISTS caseid TEXT")
-        .run();
-    } catch {
-      // ignore — column may already exist or DDL transiently rejected
-    }
-  })();
-  return pendingColumns;
+let pendingColumns = false;
+async function ensureStockAdjustmentColumns(db: D1Database): Promise<void> {
+  if (pendingColumns) return;
+
+  try {
+    await db
+      .prepare("ALTER TABLE stock_adjustments ADD COLUMN IF NOT EXISTS caseid TEXT")
+      .run();
+  } catch {
+    // ignore — column may already exist or DDL transiently rejected
+  }
+  pendingColumns = true;
 }
 
 function genId(): string {

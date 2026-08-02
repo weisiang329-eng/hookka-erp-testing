@@ -1638,21 +1638,20 @@ app.post("/:id/convert-to-invoice", async (c) => {
 // folded-lowercase (unquoted camelCase DDL folds to lowercase anyway —
 // BUG-2026-06-11-007), so reads are dual-key.
 // ---------------------------------------------------------------------------
-let cnNotifyEmailColumn: Promise<void> | null = null;
-function ensureCnNotifyEmailColumn(db: D1Database): Promise<void> {
-  if (cnNotifyEmailColumn) return cnNotifyEmailColumn;
-  cnNotifyEmailColumn = (async () => {
-    try {
-      await db
-        .prepare(
-          "ALTER TABLE consignment_notes ADD COLUMN IF NOT EXISTS dispatchemailat TEXT",
-        )
-        .run();
-    } catch {
-      // ignore — column may already exist or DDL transiently rejected
-    }
-  })();
-  return cnNotifyEmailColumn;
+let cnNotifyEmailColumn = false;
+async function ensureCnNotifyEmailColumn(db: D1Database): Promise<void> {
+  if (cnNotifyEmailColumn) return;
+
+  try {
+    await db
+      .prepare(
+        "ALTER TABLE consignment_notes ADD COLUMN IF NOT EXISTS dispatchemailat TEXT",
+      )
+      .run();
+  } catch {
+    // ignore — column may already exist or DDL transiently rejected
+  }
+  cnNotifyEmailColumn = true;
 }
 
 app.post("/:id/notify-customer", async (c) => {

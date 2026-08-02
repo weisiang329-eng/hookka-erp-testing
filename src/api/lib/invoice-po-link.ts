@@ -22,7 +22,7 @@
 // ---------------------------------------------------------------------------
 import type { D1Database } from "@cloudflare/workers-types";
 
-let _mig: Promise<void> | null = null;
+let _mig = false;
 
 /**
  * Runtime self-apply for `invoice_items.production_order_id`. Memoised per
@@ -30,23 +30,24 @@ let _mig: Promise<void> | null = null;
  * Best-effort: a transient DDL reject must not block invoicing (the column is
  * additive; a missing value only degrades the printout to its old guess).
  */
-export function ensureInvoicePoLinkColumn(db: D1Database): Promise<void> {
-  if (!_mig) {
-    _mig = db
+export async function ensureInvoicePoLinkColumn(db: D1Database): Promise<void> {
+  if (_mig) return;
+  try {
+    await db
       .prepare(
         "ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS production_order_id TEXT",
       )
-      .run()
-      .then(() => undefined)
-      .catch((err) => {
-        console.warn(
-          "[invoice-po-link] ensure production_order_id failed:",
-          err instanceof Error ? err.message : String(err),
-        );
-        return undefined;
-      });
+      .run();
+    // Only on success. The old code cached the promise, so a failed ALTER was
+    // remembered as done and the column was never applied again for the life
+    // of the isolate — the exact shape self-apply.ts exists to prevent.
+    _mig = true;
+  } catch (err) {
+    console.warn(
+      "[invoice-po-link] ensure production_order_id failed:",
+      err instanceof Error ? err.message : String(err),
+    );
   }
-  return _mig;
 }
 
 /**

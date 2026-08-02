@@ -258,35 +258,34 @@ type ProductRow = {
 // and nothing here touches business tables. Runtime self-apply, snake_case.
 // ---------------------------------------------------------------------------
 
-let _csMig: Promise<void> | null = null;
-export function ensureCsAgentTables(db: D1Database): Promise<void> {
-  if (_csMig) return _csMig;
-  _csMig = (async () => {
-    await db
-      .prepare(
-        `CREATE TABLE IF NOT EXISTS cs_promise_log (
-           id TEXT PRIMARY KEY,
-           asked_at TEXT NOT NULL,
-           channel TEXT,
-           so_id TEXT,
-           company_so_id TEXT,
-           product_code TEXT,
-           qty INTEGER,
-           state_code TEXT,
-           promise_date TEXT,
-           confidence TEXT NOT NULL
-         )`,
-      )
-      .bind()
-      .run();
-    await db
-      .prepare(
-        "CREATE INDEX IF NOT EXISTS idx_cs_promise_log_asked ON cs_promise_log(asked_at DESC)",
-      )
-      .bind()
-      .run();
-  })();
-  return _csMig;
+let _csMig = false;
+export async function ensureCsAgentTables(db: D1Database): Promise<void> {
+  if (_csMig) return;
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS cs_promise_log (
+         id TEXT PRIMARY KEY,
+         asked_at TEXT NOT NULL,
+         channel TEXT,
+         so_id TEXT,
+         company_so_id TEXT,
+         product_code TEXT,
+         qty INTEGER,
+         state_code TEXT,
+         promise_date TEXT,
+         confidence TEXT NOT NULL
+       )`,
+    )
+    .bind()
+    .run();
+  await db
+    .prepare(
+      "CREATE INDEX IF NOT EXISTS idx_cs_promise_log_asked ON cs_promise_log(asked_at DESC)",
+    )
+    .bind()
+    .run();
+  _csMig = true;
 }
 
 async function logPromise(

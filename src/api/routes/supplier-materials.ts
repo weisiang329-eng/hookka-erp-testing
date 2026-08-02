@@ -84,45 +84,44 @@ function genId(): string {
 // SKU binding threw on the missing column and returned 400 "Invalid request
 // body" (supplier-code edits silently did nothing). Land it on first use;
 // migration 0174 makes it permanent. Idempotent + once per worker instance.
-let bindingColumnsEnsured: Promise<void> | null = null;
-function ensureBindingColumns(db: D1Database): Promise<void> {
-  if (bindingColumnsEnsured) return bindingColumnsEnsured;
-  bindingColumnsEnsured = (async () => {
-    // Each ALTER is in its own try/catch so one failing column doesn't block
-    // the others (the column may already exist or DDL may transiently reject).
-    try {
-      await db
-        .prepare(
-          "ALTER TABLE supplier_material_bindings ADD COLUMN IF NOT EXISTS supplier_description TEXT",
-        )
-        .run();
-    } catch {
-      /* already exists / transient — ignore */
-    }
-    // Effective-dated pricing (migration 0183): the date this price takes
-    // effect. Current price = newest effectiveFrom <= today. Append-only audit
-    // trail lives in price_histories (also carrying effective_from so the
-    // Price Change Log shows the real effective date, not the system clock).
-    try {
-      await db
-        .prepare(
-          "ALTER TABLE supplier_material_bindings ADD COLUMN IF NOT EXISTS effective_from TEXT",
-        )
-        .run();
-    } catch {
-      /* already exists / transient — ignore */
-    }
-    try {
-      await db
-        .prepare(
-          "ALTER TABLE price_histories ADD COLUMN IF NOT EXISTS effective_from TEXT",
-        )
-        .run();
-    } catch {
-      /* already exists / transient — ignore */
-    }
-  })();
-  return bindingColumnsEnsured;
+let bindingColumnsEnsured = false;
+async function ensureBindingColumns(db: D1Database): Promise<void> {
+  if (bindingColumnsEnsured) return;
+
+  // Each ALTER is in its own try/catch so one failing column doesn't block
+  // the others (the column may already exist or DDL may transiently reject).
+  try {
+    await db
+      .prepare(
+        "ALTER TABLE supplier_material_bindings ADD COLUMN IF NOT EXISTS supplier_description TEXT",
+      )
+      .run();
+  } catch {
+    /* already exists / transient — ignore */
+  }
+  // Effective-dated pricing (migration 0183): the date this price takes
+  // effect. Current price = newest effectiveFrom <= today. Append-only audit
+  // trail lives in price_histories (also carrying effective_from so the
+  // Price Change Log shows the real effective date, not the system clock).
+  try {
+    await db
+      .prepare(
+        "ALTER TABLE supplier_material_bindings ADD COLUMN IF NOT EXISTS effective_from TEXT",
+      )
+      .run();
+  } catch {
+    /* already exists / transient — ignore */
+  }
+  try {
+    await db
+      .prepare(
+        "ALTER TABLE price_histories ADD COLUMN IF NOT EXISTS effective_from TEXT",
+      )
+      .run();
+  } catch {
+    /* already exists / transient — ignore */
+  }
+  bindingColumnsEnsured = true;
 }
 
 // GET /api/supplier-materials?supplierId=...&materialCode=...

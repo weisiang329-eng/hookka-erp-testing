@@ -2233,21 +2233,20 @@ export async function fetchFreshMinimalPO(
 // column reaches prod only via this ADD COLUMN IF NOT EXISTS, awaited inside
 // ensurePiecePicsForJc before any piece_pics row is created/read. Memoised so
 // the DDL runs at most once per worker isolate.
-export let piecePicsRackingColumnEnsured: Promise<void> | null = null;
-export function ensurePiecePicsRackingColumn(db: D1Database): Promise<void> {
-  if (piecePicsRackingColumnEnsured) return piecePicsRackingColumnEnsured;
-  piecePicsRackingColumnEnsured = (async () => {
-    try {
-      await db
-        .prepare(
-          "ALTER TABLE piece_pics ADD COLUMN IF NOT EXISTS racking_number TEXT",
-        )
-        .run();
-    } catch {
-      // ignore — column may already exist or DDL transiently rejected
-    }
-  })();
-  return piecePicsRackingColumnEnsured;
+export let piecePicsRackingColumnEnsured = false;
+export async function ensurePiecePicsRackingColumn(db: D1Database): Promise<void> {
+  if (piecePicsRackingColumnEnsured) return;
+
+  try {
+    await db
+      .prepare(
+        "ALTER TABLE piece_pics ADD COLUMN IF NOT EXISTS racking_number TEXT",
+      )
+      .run();
+  } catch {
+    // ignore — column may already exist or DDL transiently rejected
+  }
+  piecePicsRackingColumnEnsured = true;
 }
 
 // co_status_changes — the Consignment Order status audit log (migration 0104).
@@ -2262,42 +2261,41 @@ export function ensurePiecePicsRackingColumn(db: D1Database): Promise<void> {
 // columns matching the migration + the cascade INSERTs; org_id defaults so the
 // writers (which don't set it) still satisfy NOT NULL. FK omitted so the DDL
 // can never fail on a schema quirk — the audit log doesn't need it.
-export let coStatusChangesTableEnsured: Promise<void> | null = null;
-export function ensureCoStatusChangesTable(db: D1Database): Promise<void> {
-  if (coStatusChangesTableEnsured) return coStatusChangesTableEnsured;
-  coStatusChangesTableEnsured = (async () => {
-    try {
-      await db
-        .prepare(
-          `CREATE TABLE IF NOT EXISTS co_status_changes (
-             id           TEXT PRIMARY KEY,
-             co_id        TEXT,
-             from_status  TEXT,
-             to_status    TEXT,
-             changed_by   TEXT,
-             timestamp    TEXT NOT NULL,
-             notes        TEXT,
-             auto_actions TEXT,
-             org_id       TEXT NOT NULL DEFAULT 'hookka'
-           )`,
-        )
-        .run();
-      await db
-        .prepare(
-          "CREATE INDEX IF NOT EXISTS idx_co_status_changes_co_id ON co_status_changes(co_id)",
-        )
-        .run();
-      await db
-        .prepare(
-          "CREATE INDEX IF NOT EXISTS idx_co_status_changes_timestamp ON co_status_changes(timestamp)",
-        )
-        .run();
-    } catch {
-      // ignore — table may already exist or DDL transiently rejected; callers
-      // read-guard so a still-missing table degrades to an empty list, never 500.
-    }
-  })();
-  return coStatusChangesTableEnsured;
+export let coStatusChangesTableEnsured = false;
+export async function ensureCoStatusChangesTable(db: D1Database): Promise<void> {
+  if (coStatusChangesTableEnsured) return;
+
+  try {
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS co_status_changes (
+           id           TEXT PRIMARY KEY,
+           co_id        TEXT,
+           from_status  TEXT,
+           to_status    TEXT,
+           changed_by   TEXT,
+           timestamp    TEXT NOT NULL,
+           notes        TEXT,
+           auto_actions TEXT,
+           org_id       TEXT NOT NULL DEFAULT 'hookka'
+         )`,
+      )
+      .run();
+    await db
+      .prepare(
+        "CREATE INDEX IF NOT EXISTS idx_co_status_changes_co_id ON co_status_changes(co_id)",
+      )
+      .run();
+    await db
+      .prepare(
+        "CREATE INDEX IF NOT EXISTS idx_co_status_changes_timestamp ON co_status_changes(timestamp)",
+      )
+      .run();
+  } catch {
+    // ignore — table may already exist or DDL transiently rejected; callers
+    // read-guard so a still-missing table degrades to an empty list, never 500.
+  }
+  coStatusChangesTableEnsured = true;
 }
 
 export async function ensurePiecePicsForJc(

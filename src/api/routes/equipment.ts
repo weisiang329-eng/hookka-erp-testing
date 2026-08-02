@@ -125,30 +125,33 @@ app.get("/", async (c) => {
 // before the first write that names them. Idempotent, once per isolate; a
 // failure is logged rather than thrown so the module keeps working on an engine
 // that lacks IF NOT EXISTS.
-let _equipColsMig: Promise<void> | null = null;
-function ensureEquipmentAssetColumns(db: D1Database): Promise<void> {
-  if (!_equipColsMig) {
-    _equipColsMig = (async () => {
-      for (const sql of [
-        "ALTER TABLE equipment ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE equipment ADD COLUMN IF NOT EXISTS serial_no TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE equipment ADD COLUMN IF NOT EXISTS manufacturer TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE equipment ADD COLUMN IF NOT EXISTS supplier TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE equipment ADD COLUMN IF NOT EXISTS purchase_price_sen INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE equipment ADD COLUMN IF NOT EXISTS warranty_expiry TEXT NOT NULL DEFAULT ''",
-      ]) {
-        try {
-          await db.prepare(sql).run();
-        } catch (e) {
-          console.warn(
-            "[equipment] column ensure:",
-            e instanceof Error ? e.message : e,
-          );
-        }
-      }
-    })();
+// A BOOLEAN, not the promise — see src/api/lib/self-apply.ts. `ok` tracks
+// whether every statement landed; one failure leaves the flag unset so the
+// next request retries instead of the isolate remembering a half-applied
+// schema as done.
+let _equipColsMig = false;
+async function ensureEquipmentAssetColumns(db: D1Database): Promise<void> {
+  if (_equipColsMig) return;
+  let ok = true;
+  for (const sql of [
+    "ALTER TABLE equipment ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE equipment ADD COLUMN IF NOT EXISTS serial_no TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE equipment ADD COLUMN IF NOT EXISTS manufacturer TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE equipment ADD COLUMN IF NOT EXISTS supplier TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE equipment ADD COLUMN IF NOT EXISTS purchase_price_sen INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE equipment ADD COLUMN IF NOT EXISTS warranty_expiry TEXT NOT NULL DEFAULT ''",
+  ]) {
+    try {
+      await db.prepare(sql).run();
+    } catch (e) {
+      ok = false;
+      console.warn(
+        "[equipment] column ensure:",
+        e instanceof Error ? e.message : e,
+      );
+    }
   }
-  return _equipColsMig;
+  _equipColsMig = ok;
 }
 
 /** Ringgit (what the form sends) → integer sen (what everything stores). */

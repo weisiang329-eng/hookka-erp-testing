@@ -178,25 +178,33 @@ export async function loadDoValueMap(
 // request path. The number is BYTE-IDENTICAL to loadDoValueMap — accuracy is
 // untouched (owner: "銷售額一定要準確"); only the timing moves. Any snapshot
 // failure falls straight back to the direct computation.
-let _doValSnapMig: Promise<void> | null = null;
-function ensureDoValueSnapshot(db: D1Database): Promise<void> {
-  if (_doValSnapMig) return _doValSnapMig;
-  _doValSnapMig = db
-    .prepare(
-      `CREATE TABLE IF NOT EXISTS do_value_map_snapshot (
-         org_id        TEXT NOT NULL,
-         cache_key     TEXT NOT NULL DEFAULT '',
-         data          JSONB NOT NULL,
-         built_from    TIMESTAMP NOT NULL,
-         built_at      TIMESTAMP NOT NULL DEFAULT NOW(),
-         refresh_count INTEGER NOT NULL DEFAULT 0,
-         PRIMARY KEY (org_id, cache_key)
-       )`,
-    )
-    .run()
-    .then(() => undefined)
-    .catch(() => undefined);
-  return _doValSnapMig;
+// A BOOLEAN, not the promise. Caching the promise meant a failed DDL was
+// remembered as done for the life of the isolate — the table was never created
+// and never retried — and a pending promise holds the socket of the request
+// that made it, which db-pg.ts forbids sharing across requests. The flag is
+// set only on success, so a transient failure simply leaves the next request
+// to try again. Failure behaviour is unchanged: it is still swallowed here.
+let _doValSnapMig = false;
+async function ensureDoValueSnapshot(db: D1Database): Promise<void> {
+  if (_doValSnapMig) return;
+  try {
+    await db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS do_value_map_snapshot (
+           org_id        TEXT NOT NULL,
+           cache_key     TEXT NOT NULL DEFAULT '',
+           data          JSONB NOT NULL,
+           built_from    TIMESTAMP NOT NULL,
+           built_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+           refresh_count INTEGER NOT NULL DEFAULT 0,
+           PRIMARY KEY (org_id, cache_key)
+         )`,
+      )
+      .run();
+    _doValSnapMig = true;
+  } catch {
+    /* transient — leave the flag unset so the next request retries */
+  }
 }
 
 export async function loadDoValueMapCached(

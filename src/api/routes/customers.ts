@@ -133,21 +133,20 @@ type CustomerRow = {
 // self-apply (deploy does NOT replay migration files). Paired with
 // suppliers.group_org_code (ensured in purchase-orders.ts). See
 // src/lib/intercompany-mirror.ts.
-let custGroupColPromise: Promise<void> | null = null;
-function ensureCustomerGroupColumn(db: D1Database): Promise<void> {
-  if (custGroupColPromise) return custGroupColPromise;
-  custGroupColPromise = (async () => {
-    try {
-      await db
-        .prepare(
-          "ALTER TABLE customers ADD COLUMN IF NOT EXISTS group_org_code TEXT NOT NULL DEFAULT ''",
-        )
-        .run();
-    } catch {
-      // best-effort — column may already exist
-    }
-  })();
-  return custGroupColPromise;
+let custGroupColPromise = false;
+async function ensureCustomerGroupColumn(db: D1Database): Promise<void> {
+  if (custGroupColPromise) return;
+
+  try {
+    await db
+      .prepare(
+        "ALTER TABLE customers ADD COLUMN IF NOT EXISTS group_org_code TEXT NOT NULL DEFAULT ''",
+      )
+      .run();
+  } catch {
+    // best-effort — column may already exist
+  }
+  custGroupColPromise = true;
 }
 
 /** Read-side coalesce for the dual-identity code. '' = external customer. */
@@ -197,21 +196,20 @@ function serialiseOemMarking(raw: unknown): string {
   });
 }
 
-let custOemColPromise: Promise<void> | null = null;
-function ensureCustomerOemColumn(db: D1Database): Promise<void> {
-  if (custOemColPromise) return custOemColPromise;
-  custOemColPromise = (async () => {
-    try {
-      await db
-        .prepare(
-          "ALTER TABLE customers ADD COLUMN IF NOT EXISTS oem_marking TEXT NOT NULL DEFAULT '{}'",
-        )
-        .run();
-    } catch {
-      // best-effort — column may already exist
-    }
-  })();
-  return custOemColPromise;
+let custOemColPromise = false;
+async function ensureCustomerOemColumn(db: D1Database): Promise<void> {
+  if (custOemColPromise) return;
+
+  try {
+    await db
+      .prepare(
+        "ALTER TABLE customers ADD COLUMN IF NOT EXISTS oem_marking TEXT NOT NULL DEFAULT '{}'",
+      )
+      .run();
+  } catch {
+    // best-effort — column may already exist
+  }
+  custOemColPromise = true;
 }
 
 // ---------------------------------------------------------------------------

@@ -605,20 +605,25 @@ export async function generateCompanySOId(
 // the DB happily accepts two orders carrying the same companySOId — measured:
 // the column had only a plain index, never a unique one. Idempotent, once per
 // isolate, failure swallowed so a lingering duplicate can't block order entry.
-let _soIdUniqueMig: Promise<void> | null = null;
-export function ensureCompanySOIdUnique(db: D1Database): Promise<void> {
-  if (!_soIdUniqueMig) {
-    _soIdUniqueMig = db
+// A BOOLEAN, not the promise — see src/api/lib/self-apply.ts. Like the invoice
+// dedupe index, this one exists to win a RACE at the storage layer, so an
+// isolate that remembers a FAILED create as done is precisely the isolate where
+// two concurrent creates both get a company SO id. Flag set on success only.
+let _soIdUniqueMig = false;
+export async function ensureCompanySOIdUnique(db: D1Database): Promise<void> {
+  if (_soIdUniqueMig) return;
+  try {
+    await db
       .prepare(
         `CREATE UNIQUE INDEX IF NOT EXISTS uniq_sales_orders_company_so_id
            ON sales_orders (company_so_id)
            WHERE company_so_id IS NOT NULL`,
       )
-      .run()
-      .then(() => undefined)
-      .catch(() => undefined);
+      .run();
+    _soIdUniqueMig = true;
+  } catch {
+    /* transient — leave the flag unset so the next request retries */
   }
-  return _soIdUniqueMig;
 }
 
 /** True when an error is the unique-violation from the index above. */

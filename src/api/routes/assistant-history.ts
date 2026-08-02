@@ -33,30 +33,29 @@ function cutoffIso(): string {
   return new Date(Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
 }
 
-let _mig: Promise<void> | null = null;
-function ensureTable(db: Env["Variables"]["DB"]): Promise<void> {
-  if (_mig) return _mig;
-  _mig = (async () => {
-    await db
-      .prepare(
-        `CREATE TABLE IF NOT EXISTS assistant_conversations (
-           id TEXT PRIMARY KEY,
-           user_id TEXT NOT NULL,
-           title TEXT,
-           pinned INTEGER NOT NULL DEFAULT 0,
-           messages TEXT,
-           created_at TEXT NOT NULL,
-           updated_at TEXT NOT NULL
-         )`,
-      )
-      .run();
-    await db
-      .prepare(
-        "CREATE INDEX IF NOT EXISTS idx_assistant_convos_user ON assistant_conversations(user_id, updated_at DESC)",
-      )
-      .run();
-  })();
-  return _mig;
+let _mig = false;
+async function ensureTable(db: Env["Variables"]["DB"]): Promise<void> {
+  if (_mig) return;
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS assistant_conversations (
+         id TEXT PRIMARY KEY,
+         user_id TEXT NOT NULL,
+         title TEXT,
+         pinned INTEGER NOT NULL DEFAULT 0,
+         messages TEXT,
+         created_at TEXT NOT NULL,
+         updated_at TEXT NOT NULL
+       )`,
+    )
+    .run();
+  await db
+    .prepare(
+      "CREATE INDEX IF NOT EXISTS idx_assistant_convos_user ON assistant_conversations(user_id, updated_at DESC)",
+    )
+    .run();
+  _mig = true;
 }
 
 interface Row {

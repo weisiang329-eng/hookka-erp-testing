@@ -36,37 +36,36 @@ import {
   VALID_CATEGORIES,
 } from "../routes/working-hour-entries";
 
-let _deptScanMig: Promise<void> | null = null;
-export function ensureDeptScanEvents(db: D1Database): Promise<void> {
-  if (_deptScanMig) return _deptScanMig;
-  _deptScanMig = (async () => {
-    await db
-      .prepare(
-        `CREATE TABLE IF NOT EXISTS dept_scan_events (
-           id TEXT PRIMARY KEY,
-           workerid TEXT NOT NULL,
-           date TEXT NOT NULL,
-           departmentcode TEXT NOT NULL,
-           atmin INTEGER NOT NULL,
-           createdat TEXT
-         )`,
-      )
-      .run();
-    // v2 (owner 2026-06-11): production QRs carry the CATEGORY (Sofa /
-    // Bedframe / Accessory line) — per-person line attribution, not the
-    // department average. Nullable: dept-only scans + non-production depts.
-    await db
-      .prepare(
-        "ALTER TABLE dept_scan_events ADD COLUMN IF NOT EXISTS category TEXT",
-      )
-      .run();
-    await db
-      .prepare(
-        "CREATE INDEX IF NOT EXISTS idx_dept_scan_events_worker_date ON dept_scan_events (workerid, date)",
-      )
-      .run();
-  })();
-  return _deptScanMig;
+let _deptScanMig = false;
+export async function ensureDeptScanEvents(db: D1Database): Promise<void> {
+  if (_deptScanMig) return;
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS dept_scan_events (
+         id TEXT PRIMARY KEY,
+         workerid TEXT NOT NULL,
+         date TEXT NOT NULL,
+         departmentcode TEXT NOT NULL,
+         atmin INTEGER NOT NULL,
+         createdat TEXT
+       )`,
+    )
+    .run();
+  // v2 (owner 2026-06-11): production QRs carry the CATEGORY (Sofa /
+  // Bedframe / Accessory line) — per-person line attribution, not the
+  // department average. Nullable: dept-only scans + non-production depts.
+  await db
+    .prepare(
+      "ALTER TABLE dept_scan_events ADD COLUMN IF NOT EXISTS category TEXT",
+    )
+    .run();
+  await db
+    .prepare(
+      "CREATE INDEX IF NOT EXISTS idx_dept_scan_events_worker_date ON dept_scan_events (workerid, date)",
+    )
+    .run();
+  _deptScanMig = true;
 }
 
 /** Record one "I am now working in <dept> (on <category> line)" scan. */

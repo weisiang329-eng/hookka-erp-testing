@@ -30,30 +30,29 @@ const app = new Hono<Env>();
 
 // ---- runtime self-apply of the push_subscriptions table ----
 // One-shot per isolate; ALTER/CREATE IF NOT EXISTS so a re-run is a no-op.
-let _pushMig: Promise<void> | null = null;
-function ensurePushTable(db: D1Database): Promise<void> {
-  if (_pushMig) return _pushMig;
-  _pushMig = (async () => {
-    await db
-      .prepare(
-        `CREATE TABLE IF NOT EXISTS push_subscriptions (
-           id TEXT PRIMARY KEY,
-           worker_id TEXT NOT NULL,
-           endpoint TEXT NOT NULL UNIQUE,
-           p256dh TEXT NOT NULL,
-           auth TEXT NOT NULL,
-           created_at TEXT
-         )`,
-      )
-      .run();
-    // Helpful for targeted sends + pruning by worker.
-    await db
-      .prepare(
-        "CREATE INDEX IF NOT EXISTS idx_push_subscriptions_worker ON push_subscriptions(worker_id)",
-      )
-      .run();
-  })();
-  return _pushMig;
+let _pushMig = false;
+async function ensurePushTable(db: D1Database): Promise<void> {
+  if (_pushMig) return;
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS push_subscriptions (
+         id TEXT PRIMARY KEY,
+         worker_id TEXT NOT NULL,
+         endpoint TEXT NOT NULL UNIQUE,
+         p256dh TEXT NOT NULL,
+         auth TEXT NOT NULL,
+         created_at TEXT
+       )`,
+    )
+    .run();
+  // Helpful for targeted sends + pruning by worker.
+  await db
+    .prepare(
+      "CREATE INDEX IF NOT EXISTS idx_push_subscriptions_worker ON push_subscriptions(worker_id)",
+    )
+    .run();
+  _pushMig = true;
 }
 
 function genId(): string {

@@ -29,32 +29,31 @@ interface DbLike {
   };
 }
 
-let _mig: Promise<void> | null = null;
-export function ensureFeedbackTable(db: DbLike): Promise<void> {
-  if (_mig) return _mig;
-  _mig = (async () => {
-    await db
-      .prepare(
-        `CREATE TABLE IF NOT EXISTS agent_feedback (
-           id TEXT PRIMARY KEY,
-           created_at TEXT NOT NULL,
-           agent TEXT NOT NULL,
-           instruction TEXT NOT NULL,
-           created_by TEXT,
-           status TEXT NOT NULL DEFAULT 'ACTIVE',
-           retired_at TEXT
-         )`,
-      )
-      .bind()
-      .run();
-    await db
-      .prepare(
-        "CREATE INDEX IF NOT EXISTS idx_agent_feedback_agent ON agent_feedback(agent, status)",
-      )
-      .bind()
-      .run();
-  })();
-  return _mig;
+let _mig = false;
+export async function ensureFeedbackTable(db: DbLike): Promise<void> {
+  if (_mig) return;
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS agent_feedback (
+         id TEXT PRIMARY KEY,
+         created_at TEXT NOT NULL,
+         agent TEXT NOT NULL,
+         instruction TEXT NOT NULL,
+         created_by TEXT,
+         status TEXT NOT NULL DEFAULT 'ACTIVE',
+         retired_at TEXT
+       )`,
+    )
+    .bind()
+    .run();
+  await db
+    .prepare(
+      "CREATE INDEX IF NOT EXISTS idx_agent_feedback_agent ON agent_feedback(agent, status)",
+    )
+    .bind()
+    .run();
+  _mig = true;
 }
 
 export interface AgentFeedbackRow {

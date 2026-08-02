@@ -236,34 +236,33 @@ export interface LearningData {
 
 // ── config_proposals runtime self-apply ──────────────────────────────────────
 
-let _configMig: Promise<void> | null = null;
-export function ensureConfigProposalTable(db: DbLike): Promise<void> {
-  if (_configMig) return _configMig;
-  _configMig = (async () => {
-    await db
-      .prepare(
-        `CREATE TABLE IF NOT EXISTS config_proposals (
-           id TEXT PRIMARY KEY,
-           generated_at TEXT NOT NULL,
-           param_key TEXT NOT NULL,
-           current_value TEXT,
-           proposed_value TEXT NOT NULL,
-           reason TEXT,
-           status TEXT NOT NULL DEFAULT 'PENDING',
-           decided_at TEXT,
-           decided_by TEXT
-         )`,
-      )
-      .bind()
-      .run();
-    await db
-      .prepare(
-        "CREATE INDEX IF NOT EXISTS idx_config_proposals_status ON config_proposals(status, generated_at DESC)",
-      )
-      .bind()
-      .run();
-  })();
-  return _configMig;
+let _configMig = false;
+export async function ensureConfigProposalTable(db: DbLike): Promise<void> {
+  if (_configMig) return;
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS config_proposals (
+         id TEXT PRIMARY KEY,
+         generated_at TEXT NOT NULL,
+         param_key TEXT NOT NULL,
+         current_value TEXT,
+         proposed_value TEXT NOT NULL,
+         reason TEXT,
+         status TEXT NOT NULL DEFAULT 'PENDING',
+         decided_at TEXT,
+         decided_by TEXT
+       )`,
+    )
+    .bind()
+    .run();
+  await db
+    .prepare(
+      "CREATE INDEX IF NOT EXISTS idx_config_proposals_status ON config_proposals(status, generated_at DESC)",
+    )
+    .bind()
+    .run();
+  _configMig = true;
 }
 
 /**

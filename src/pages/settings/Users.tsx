@@ -1212,7 +1212,39 @@ export default function UsersPage() {
     setAliasError(null);
     setAliasSubmitting(true);
 
-    // Role is changed through the SAME verifiedSave (re-confirm) path the
+    /**
+   * Mirror Department / Position onto the USER row.
+   *
+   * The bug this closes (owner 2026-08-02: 「明明我的 Department 里面是有数据的,
+   * 为什么在外面呈现出来的却是空的?」): this modal wrote department and position
+   * to the ALIAS (`email_addresses.assigned_dept` / `assigned_position`) only,
+   * while the Users table AND the Org Chart read `users.department` /
+   * `users.position` — the column comment in this very file says "Department
+   * lives on the USER row now (owner 2026-06-17)". The model moved and only one
+   * side was updated, so the modal showed Finance and the grid showed "—",
+   * and every person landed in the org chart's Unassigned column.
+   *
+   * The user row is the source of truth; the alias keeps its copy because Mail
+   * Center groups mailboxes by it.
+   */
+  async function mirrorOrgFieldsToUser(
+    userId: string,
+    department: string,
+    position: string,
+  ): Promise<void> {
+    try {
+      await fetch(`/api/users/${encodeURIComponent(userId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ department, position }),
+      });
+    } catch {
+      // Best-effort: the alias write already succeeded and the operator has
+      // been told so. A failure here is picked up by the backfill endpoint.
+    }
+  }
+
+  // Role is changed through the SAME verifiedSave (re-confirm) path the
     // standalone Change-role modal used — only when it actually changed, so
     // dept/position-only saves stay normal (no re-confirm prompt).
     const roleChanged = editRole !== target.role;
@@ -1265,6 +1297,11 @@ export default function UsersPage() {
           showFlash("ok", `Details saved for ${aliasExisting.address}`);
           fetchAddresses();
         }
+        // The Users grid and the Org Chart read the USER row, not the alias.
+        // Always mirror — even when the alias patch was empty, because the user
+        // row may still be out of step with it.
+        await mirrorOrgFieldsToUser(target.id, aliasDept, aliasPosition.trim());
+        fetchUsers();
         // Apply the role change (security-critical: confirm + verifiedSave
         // read-back). Keep the modal open if it was cancelled/failed so the
         // operator sees the role error and can retry.
@@ -1315,6 +1352,8 @@ export default function UsersPage() {
       if (res.ok) {
         showFlash("ok", `Alias ${json.address ?? address} created for ${target.email}`);
         fetchAddresses();
+        await mirrorOrgFieldsToUser(target.id, aliasDept, aliasPosition.trim());
+        fetchUsers();
         // Apply the role change too (same verifiedSave re-confirm path), only
         // when it actually changed. Keep the modal open if it was
         // cancelled/failed so the role error is visible.

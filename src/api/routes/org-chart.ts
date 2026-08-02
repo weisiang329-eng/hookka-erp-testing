@@ -28,7 +28,7 @@ import {
 
 const app = new Hono<Env>();
 
-/** Factory workers all sit under one department on the chart. */
+/** Fallback for a worker with no department of their own. */
 const WORKER_DEPARTMENT = "Production";
 
 // Runtime self-apply. Migrations are inert on deploy in this repo — the table
@@ -98,13 +98,17 @@ async function loadPeople(db: D1Database): Promise<OrgPerson[]> {
   }
 
   const wRes = await db
-    .prepare("SELECT id, empNo, name, position, status FROM workers WHERE empNo NOT LIKE 'TEST%'")
+    .prepare(
+      "SELECT id, empNo, name, position, status, departmentCode FROM workers WHERE empNo NOT LIKE 'TEST%'",
+    )
     .all<{
       id: string;
       empNo: string | null;
       name: string | null;
       position: string | null;
       status: string | null;
+      departmentCode?: string | null;
+      departmentcode?: string | null;
     }>();
   for (const w of wRes.results ?? []) {
     people.push({
@@ -113,7 +117,13 @@ async function loadPeople(db: D1Database): Promise<OrgPerson[]> {
       id: String(w.id),
       name: (w.name || w.empNo || String(w.id)).trim(),
       position: (w.position ?? "").trim(),
-      departmentCode: WORKER_DEPARTMENT,
+      // Every worker used to be forced to "Production", which put all 40 of
+      // them in ONE column and left the chart with nothing to divide by —
+      // owner 2026-08-02:「Employee 那边,需要按照部门去划分」. They already
+      // carry their real department (FAB_CUT, FAB_SEW, WOOD_CUT…); the chart
+      // was just throwing it away. Dual-keyed, per the repo rule.
+      departmentCode:
+        (w.departmentCode ?? w.departmentcode ?? "").trim() || WORKER_DEPARTMENT,
       ref: (w.empNo ?? "").trim(),
       active: (w.status ?? "").toUpperCase() === "ACTIVE",
       managerKey: null,

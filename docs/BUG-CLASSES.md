@@ -287,6 +287,57 @@ is unguarded.
 (`? true : false`), `organisations.is_default` (`=== true ? true : false`),
 `rd_team_members.active` (real boolean).
 
+## C9 — A runtime migration memoised as a PROMISE
+
+**Shape.** Migrations are inert on deploy here, so a column reaches production
+only through an `ALTER TABLE … IF NOT EXISTS` awaited before the first write.
+Every one of those was memoised like this:
+
+```ts
+let _mig: Promise<void> | null = null;
+export function ensureX(db) {
+  if (_mig) return _mig;          // a REJECTED promise is still a promise
+  _mig = (async () => { … })();
+  return _mig;
+}
+```
+
+Two defects share that one shape:
+
+1. **A failed round is remembered as done.** One transient DDL blip on the first
+   write after an isolate boots leaves the column unapplied and never retried
+   for that isolate's life. Every later write fails on a missing column and
+   nothing says why. Worse where the body did `.catch(() => undefined)`: the
+   memo *resolves*, so failure is recorded as success.
+2. **A pending promise holds its creator's socket.** `db-pg.ts` forbids sharing
+   that across requests in capitals. A cache change doing exactly this took
+   Sales Orders down on 2026-08-02.
+
+**Why it keeps happening.** The shape reads as an obvious optimisation, and it
+is correct for anything idempotent that cannot fail. It is only wrong because
+this is the *load-bearing* path for schema.
+
+**Instances**
+
+| Date | What | Outcome |
+|---|---|---|
+| 2026-08-02 (am) | #222 converted 26 sites to `runSelfApply` | Half a fix. The helper throws "so the caller's memo can be cleared" — and 38 callers cleared nothing, so the retry it enables never happened. |
+| 2026-08-02 (pm) | The 38 remaining callers | 32 by codemod, 6 by hand (they swallowed errors inline). Two of the six guard *unique indexes* that win a concurrent-create race — an isolate that remembered a failed `CREATE INDEX` as done is exactly the one where two documents get the same number. |
+
+**The rule.** Memoise a **boolean**, set only after the statement lands
+(`src/api/lib/payment-columns.ts`), or use `memoizeSelfApply`, which clears the
+memo on failure for you. Never cache the promise itself.
+
+**Covered by** `tests/self-apply-memo-is-boolean.test.mjs`.
+
+> Both halves of that test were proved by putting the bug back. The
+> premature-flag half did **not** fire at first: it decided "is this a DDL
+> guard?" over the window between the declaration and the setter — the exact
+> window the bug empties — so it skipped the case it was written for. An earlier
+> draft also flagged 16 ordinary local booleans (`inQuotes`, `hasMore`) as
+> migration bugs; a test that cries wolf gets muted, and a muted test protects
+> nothing. Scope narrowly, then watch it fail.
+
 ## What tests cannot catch — and what covers it
 
 None of C1–C4's money leaks were introduced by a code change on the day they started leaking:

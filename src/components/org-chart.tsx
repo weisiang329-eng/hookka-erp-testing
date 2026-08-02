@@ -17,8 +17,17 @@ import { ChevronDown, ChevronRight, Network, Minus, Plus, Users } from "lucide-r
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { buildOrgTree, countSubtree, type OrgNode, type OrgPerson } from "@/lib/org-people";
 
-/** Column order. Anything unrecognised falls to the end, before Unassigned. */
-const DEPT_ORDER = [
+/**
+ * Fallback column order, used only until the server's department list arrives
+ * (and if that read ever fails).
+ *
+ * The server now ships the real `departments` table with the people, so a
+ * department added in Settings appears here under its own NAME in its own
+ * position — it does not need adding to this array (owner 2026-08-02:
+ * 「无论是有新添加的人或者部门…这整个东西就会做出来」). Anything still
+ * unrecognised falls to the end, before Unassigned.
+ */
+const DEPT_ORDER_FALLBACK = [
   "Management",
   "Production",
   "R&D",
@@ -32,6 +41,8 @@ const DEPT_ORDER = [
 
 const UNASSIGNED = "Unassigned";
 
+type DeptMeta = { code: string; name: string; sequence: number };
+
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return "?";
@@ -44,22 +55,43 @@ function deptOf(p: OrgPerson): string {
   return d || UNASSIGNED;
 }
 
-function deptRank(d: string): number {
-  const i = DEPT_ORDER.indexOf(d);
-  if (i >= 0) return i;
-  return d === UNASSIGNED ? DEPT_ORDER.length + 1 : DEPT_ORDER.length;
-}
-
 type Props = {
   /** Editing the reporting line needs users:update; read-only otherwise. */
   canManage: boolean;
 };
 
 export function OrgChart({ canManage }: Props) {
-  const { data, loading, refresh } = useCachedJson<{ data?: OrgPerson[] }>(
-    "/api/org-chart",
-  );
+  const { data, loading, refresh } = useCachedJson<{
+    data?: OrgPerson[];
+    departments?: DeptMeta[];
+  }>("/api/org-chart");
   const people = useMemo(() => data?.data ?? [], [data]);
+
+  // The live departments table. A department created in Settings arrives here
+  // on the next load — no code change, no entry in any list.
+  const deptMeta = useMemo(() => {
+    const m = new Map<string, DeptMeta>();
+    for (const d of data?.departments ?? []) m.set(d.code, d);
+    return m;
+  }, [data]);
+
+  const deptLabel = useCallback(
+    (code: string) => (code === UNASSIGNED ? code : deptMeta.get(code)?.name ?? code),
+    [deptMeta],
+  );
+
+  const deptRank = useCallback(
+    (code: string) => {
+      if (code === UNASSIGNED) return Number.MAX_SAFE_INTEGER;
+      const seq = deptMeta.get(code)?.sequence;
+      if (typeof seq === "number") return seq;
+      // Not in the table (an office user's free-text department, or the list
+      // failed to load) — keep the old ordering, then anything else.
+      const i = DEPT_ORDER_FALLBACK.indexOf(code);
+      return i >= 0 ? 10_000 + i : 20_000;
+    },
+    [deptMeta],
+  );
 
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [zoom, setZoom] = useState(100);
@@ -89,11 +121,14 @@ export function OrgChart({ canManage }: Props) {
     return [...byDept.entries()]
       .map(([dept, nodes]) => ({
         dept,
+        label: deptLabel(dept),
         nodes,
         headcount: nodes.reduce((s, n) => s + countSubtree(n), 0),
       }))
-      .sort((a, b) => deptRank(a.dept) - deptRank(b.dept) || a.dept.localeCompare(b.dept));
-  }, [visible]);
+      .sort(
+        (a, b) => deptRank(a.dept) - deptRank(b.dept) || a.label.localeCompare(b.label),
+      );
+  }, [visible, deptLabel, deptRank]);
 
   const totalOnChart = useMemo(
     () => columns.reduce((s, c) => s + c.headcount, 0),
@@ -327,7 +362,7 @@ export function OrgChart({ canManage }: Props) {
               >
                 <div className="mb-2 flex items-center justify-between border-b border-[#E2DDD8] pb-1.5">
                   <span className="text-[10px] font-bold uppercase tracking-wider text-[#6B5C32]">
-                    {col.dept}
+                    {col.label}
                   </span>
                   <span className="flex items-center gap-1 text-[10px] text-[#9CA3AF]">
                     <Users className="h-3 w-3" />

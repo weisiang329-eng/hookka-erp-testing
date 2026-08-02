@@ -123,3 +123,34 @@ export function buildOrgTree(people: readonly OrgPerson[]): OrgNode[] {
 export function countSubtree(node: OrgNode): number {
   return 1 + node.children.reduce((s, c) => s + countSubtree(c), 0);
 }
+
+/**
+ * Who this person answers to, nearest first: direct manager, then theirs, up
+ * to the top.
+ *
+ * This is what turns the chart from a picture into wiring. The reporting line
+ * was drawn and stored but nothing else ever read it, so "tell this person's
+ * manager" had no answer to call. Anything that needs to escalate — an
+ * unacknowledged alert, a resignation, a shortfall — asks here rather than
+ * re-walking `org_reporting` itself.
+ *
+ * `maxDepth` bounds the walk so one bad edge cannot spin. A cycle that reached
+ * the database before the write guard existed stops at the repeat rather than
+ * looping, and the person themselves is never in their own chain.
+ */
+export function managerChainOf(
+  personKey_: string,
+  managerOf: ReadonlyMap<string, string | null>,
+  maxDepth = 10,
+): string[] {
+  const chain: string[] = [];
+  const seen = new Set<string>([personKey_]);
+  let cur = managerOf.get(personKey_) ?? null;
+  while (cur && chain.length < maxDepth) {
+    if (seen.has(cur)) break; // cycle — stop, don't loop
+    seen.add(cur);
+    chain.push(cur);
+    cur = managerOf.get(cur) ?? null;
+  }
+  return chain;
+}

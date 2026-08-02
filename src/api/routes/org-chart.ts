@@ -25,6 +25,7 @@ import {
   wouldCycle,
   type OrgPerson,
 } from "../../lib/org-people";
+import { notifyManagerChain } from "../lib/org-notify";
 
 const app = new Hono<Env>();
 
@@ -174,7 +175,30 @@ app.get("/", async (c) => {
   if (denied) return denied;
   await ensureOrgReporting(c.var.DB);
   const people = await loadPeople(c.var.DB);
-  return c.json({ success: true, data: people, total: people.length });
+  // Ship the department list alongside the people so a department added in
+  // Settings shows up on the chart with its real NAME and its real order,
+  // instead of falling to the end of a hardcoded list under its raw code
+  // (owner 2026-08-02: 「无论是有新添加的人或者部门…这整个东西就会做出来」).
+  // Best-effort: the chart still renders from the codes if this read fails.
+  let departments: Array<{ code: string; name: string; sequence: number }> = [];
+  try {
+    const dRes = await c.var.DB.prepare(
+      "SELECT code, name, sequence FROM departments ORDER BY sequence, name",
+    ).all<{ code: string; name: string | null; sequence: number | null }>();
+    departments = (dRes.results ?? []).map((d, i) => ({
+      code: d.code,
+      name: (d.name ?? d.code).trim(),
+      sequence: Number(d.sequence ?? i),
+    }));
+  } catch (e) {
+    console.error("[org-chart] department list unavailable:", e);
+  }
+  return c.json({
+    success: true,
+    data: people,
+    departments,
+    total: people.length,
+  });
 });
 
 app.put("/reporting", async (c) => {
@@ -222,7 +246,40 @@ app.put("/reporting", async (c) => {
       )
       .bind(pk, mk, now),
   ]);
-  return c.json({ success: true, data: { personKey: pk, managerKey: mk } });
+
+  // Tell the new manager they picked someone up. This is the reporting line
+  // being USED rather than merely drawn (owner 2026-08-02: 「我只要能把
+  // reporting line 放对，这整个东西就会做出来了…包括通知 reporting line」) —
+  // and it means a brand-new person or department needs no code at all: give
+  // them a manager and the wiring is live.
+  //
+  // Best-effort and deliberately AFTER the write: the reporting line is saved
+  // whether or not the message lands, and notifyManagerChain swallows its own
+  // failures. depth 1 = the new manager only; nobody's boss gets copied on
+  // routine re-parenting.
+  let notified: string[] = [];
+  if (mk) {
+    const person = byKey.get(pk);
+    const res = await notifyManagerChain(
+      c.var.DB,
+      pk,
+      {
+        type: "org",
+        title: `${person?.name ?? "Someone"} now reports to you`,
+        message: [person?.name, person?.position, person?.ref]
+          .filter(Boolean)
+          .join(" · "),
+        severity: "info",
+        link: "/settings/users",
+      },
+      { depth: 1 },
+    );
+    notified = res.notified;
+  }
+  return c.json({
+    success: true,
+    data: { personKey: pk, managerKey: mk, notified },
+  });
 });
 
 export default app;

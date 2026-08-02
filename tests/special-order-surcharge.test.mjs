@@ -12,7 +12,7 @@ import {
   deriveSpecialOrderSurchargeSen,
   resolveSpecialOrderPriceSen,
   parseSpecialOrderTokens,
-  HB_DIVAN_COMBINED_SEN,
+  HB_DIVAN_TOP_COMBO_DISCOUNT_SEN,
 } from "../src/lib/special-order-surcharge.ts";
 
 test("derives the real prod case: Divan Full Cover = RM 80", () => {
@@ -35,26 +35,39 @@ test("accepts BOTH separators — the two writers disagree", () => {
   assert.equal(deriveSpecialOrderSurchargeSen("Front Drawer, No Side Panel"), 9000);
 });
 
-test("HB + Divan full cover combined is capped at RM 100, not 130", () => {
-  // The owner's rule (pricing-options.ts:66). 10 lines on prod hit this — my
-  // first sweep over-counted them as RM 130 and reported RM 8,390 instead of
-  // RM 8,060.
-  assert.equal(
-    deriveSpecialOrderSurchargeSen("HB Fully Cover, Divan Full Cover"),
-    HB_DIVAN_COMBINED_SEN,
-  );
-  assert.equal(deriveSpecialOrderSurchargeSen("HB Fully Cover, Divan Full Cover"), 10000);
+test("HB + Divan FULL cover has no rule — it is simply 50 + 80 = RM 130", () => {
+  // CORRECTED 2026-08-02. This used to assert RM 100, and that assertion was
+  // wrong twice over: the combined rule belongs to HB + Divan **TOP** Fully
+  // Cover, and it is a DISCOUNT off the sum rather than a flat total. Owner,
+  // shown a live order charging 100 for chips reading 50 and 80:「另外一个
+  // Divan Fully Cover 就别写规则了,就给它自动根据 SpecialOrder 去跑」.
+  //
+  // So this pair had been UNDER-charging RM 30 a line. Owner's ruling on the
+  // history:「旧的 order 就算了 新的 order 确保要全部跟着」— no backfill.
+  assert.equal(deriveSpecialOrderSurchargeSen("HB Fully Cover, Divan Full Cover"), 13000);
   // Order must not matter — prod has it written both ways.
-  assert.equal(deriveSpecialOrderSurchargeSen("Divan Full Cover, HB Fully Cover"), 10000);
+  assert.equal(deriveSpecialOrderSurchargeSen("Divan Full Cover, HB Fully Cover"), 13000);
 });
 
-test("combined cap still adds OTHER options on the same line", () => {
-  // "Divan Full Cover, HB Fully Cover, Front Drawer" = 100 + 130.
-  // Front Drawer was RM 120 in the static catalog until 2026-07-23, when it
-  // was realigned to the live config's RM 130.
+test("HB + Divan TOP cover takes the discount: 50 + 50 − 20 = RM 80", () => {
+  assert.equal(HB_DIVAN_TOP_COMBO_DISCOUNT_SEN, 2000);
   assert.equal(
-    deriveSpecialOrderSurchargeSen("Divan Full Cover, HB Fully Cover, Front Drawer"),
-    10000 + 13000,
+    deriveSpecialOrderSurchargeSen("HB Fully Cover, Divan Top Fully Cover"),
+    8000,
+  );
+  assert.equal(
+    deriveSpecialOrderSurchargeSen("Divan Top Fully Cover, HB Fully Cover"),
+    8000,
+  );
+});
+
+test("the discounted pair still adds OTHER options on the same line", () => {
+  // 50 + 50 − 20 + 130 (Front Drawer, realigned to the live config 2026-07-23).
+  assert.equal(
+    deriveSpecialOrderSurchargeSen(
+      "Divan Top Fully Cover, HB Fully Cover, Front Drawer",
+    ),
+    8000 + 13000,
   );
 });
 

@@ -93,14 +93,24 @@ type UserRow = {
   // a TOTP code (or recovery code) before /login issues a session.
   totpSecret?: string | null;
   totpEnrolledAt?: string | null;
+  // TRUE while the account still carries the password an ADMIN chose for it.
+  // Until the person changes it, nothing the account does can be attributed to
+  // them — the admin knows the credential too. Dual-keyed: the column is
+  // snake_case and db-pg camelCases it on read.
+  mustChangePassword?: boolean | number | null;
+  must_change_password?: boolean | number | null;
 };
 
 function publicUser(u: UserRow) {
+  const mustChange = u.mustChangePassword ?? u.must_change_password ?? false;
   return {
     id: u.id,
     email: u.email,
     role: u.role,
     displayName: u.displayName ?? "",
+    // Surfaced so the app can make the first thing an admin-created user does
+    // be choosing their own password. Nothing else depends on it.
+    mustChangePassword: mustChange === true || mustChange === 1,
   };
 }
 
@@ -600,6 +610,26 @@ app.post("/change-password", async (c) => {
   await c.var.DB.prepare("UPDATE users SET passwordHash = ? WHERE id = ?")
     .bind(newHash, userId)
     .run();
+  // Clearing the flag is the POINT of the change: from here the credential is
+  // the person's own and their actions are theirs alone.
+  //
+  // SEPARATE statement, and its failure cannot fail the password change. The
+  // column is created by ensureUserOrgColumns over in the users route, so on a
+  // cold isolate where nobody has opened User Management yet it may not exist —
+  // and a password rotation must never be blocked by a column that only
+  // controls a prompt. Worst case the person is asked to change it once more.
+  try {
+    await c.var.DB.prepare(
+      "UPDATE users SET must_change_password = FALSE WHERE id = ?",
+    )
+      .bind(userId)
+      .run();
+  } catch (err) {
+    console.warn(
+      "[auth] could not clear must_change_password:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
 
   // Security hardening — kill EVERY existing session for this user. If
   // the old password was leaked (the reason they're rotating), any token

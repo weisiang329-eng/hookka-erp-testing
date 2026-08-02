@@ -25,6 +25,7 @@ import { OrgChart } from "@/components/org-chart";
 import { humanizeError } from "@/lib/humanize-error";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { UserDetailDrawer, type DrawerUser } from "@/components/user-detail-drawer";
+import { AddUserDrawer } from "@/components/add-user-drawer";
 import { Tabs, type TabItem } from "@/components/ui/tabs";
 import { DataGrid, type Column } from "@/components/ui/data-grid";
 import {
@@ -284,6 +285,10 @@ export default function UsersPage() {
   // with no @hookka.com mailbox can still be given a Department and a Position —
   // the alias-gated modal below could never reach seven of the ten accounts.
   const [drawerUser, setDrawerUser] = useState<UserRow | null>(null);
+  // Create an account outright, with a password the owner hands over. The
+  // invite flow stays for people who have their own company mailbox and can
+  // accept for themselves.
+  const [addingUser, setAddingUser] = useState(false);
   const [aliasForUser, setAliasForUser] = useState<UserRow | null>(null);
   const [aliasExisting, setAliasExisting] = useState<MailAddress | null>(null);
   const [aliasAddress, setAliasAddress] = useState("");
@@ -1755,7 +1760,7 @@ export default function UsersPage() {
             <CardHeader>
               <div className="flex items-center gap-3">
                 <UsersIcon className="h-5 w-5 text-[#6B5C32]" />
-                <div>
+                <div className="flex-1">
                   <CardTitle>Active Users</CardTitle>
                   <CardDescription>
                     {/* Cache-first: only say "Loading…" on a genuine cold first
@@ -1767,6 +1772,16 @@ export default function UsersPage() {
                       : `${users.length} user(s) total`}
                   </CardDescription>
                 </div>
+                {canManageUsers && (
+                  <button
+                    type="button"
+                    onClick={() => setAddingUser(true)}
+                    className="ml-auto flex h-9 items-center gap-1.5 rounded-md bg-[#6B5C32] px-3 text-[13px] font-semibold text-white"
+                  >
+                    <UserPlus className="h-4 w-4" />
+                    Add user
+                  </button>
+                )}
               </div>
             </CardHeader>
             <CardContent>
@@ -2624,6 +2639,18 @@ export default function UsersPage() {
           once the domain MX points at Cloudflare Email Routing — NOT a Gmail
           login. */}
       {/* =========================================================== */}
+      {addingUser && (
+        <AddUserDrawer
+          departments={ORG_DEPARTMENTS}
+          roleOptions={ROLE_OPTIONS}
+          onClose={() => setAddingUser(false)}
+          onCreated={() => {
+            fetchUsers();
+            invalidateCachePrefix("/api/org-chart");
+          }}
+        />
+      )}
+
       {drawerUser && (
         <UserDetailDrawer
           key={drawerUser.id}

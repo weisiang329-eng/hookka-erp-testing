@@ -30,7 +30,7 @@ test("Save sends only what CHANGED", () => {
   // A department edit must never silently rewrite a role.
   assert.match(drawer, /if \(displayName !== user\.displayName\)/);
   assert.match(drawer, /if \(role !== user\.role\) body\.role = role;/);
-  assert.match(drawer, /if \(Object\.keys\(body\)\.length === 0\)/);
+  assert.match(drawer, /if \(Object\.keys\(body\)\.length === 0 && !uplineChanged\)/);
 });
 
 test("every action the owner listed is there", () => {
@@ -57,5 +57,58 @@ test("the server's wording wins on a refusal", () => {
 test("saving busts the org-chart cache", () => {
   // The chart groups on department; it must not serve the old one all session.
   const at = page.indexOf("<UserDetailDrawer");
-  assert.match(page.slice(at, at + 1400), /invalidateCachePrefix\("\/api\/org-chart"\)/);
+  assert.match(page.slice(at, at + 2500), /invalidateCachePrefix\("\/api\/org-chart"\)/);
+});
+
+// --- the reporting line reads and writes the REAL edge ----------------------
+
+test("the drawer shows the reporting line the CHART draws, not the legacy column", () => {
+  // users.reports_to is blank for everyone whose line was set through the org
+  // chart — the edges live in org_reporting, keyed (source, id) so they can
+  // cross `users` and `workers`. Seeding from the column made the drawer say
+  // "no manager (top)" for people the chart draws a line for.
+  assert.match(drawer, /useState\(currentManagerKey \?\? ""\)/);
+  assert.match(page, /currentManagerKey=\{/);
+  assert.match(page, /orgPeople\.find\(\(p\) => p\.key === `user:\$\{drawerUser\.id\}`\)\?\.managerKey/);
+});
+
+test("saving the upline writes org_reporting, not users.reports_to", () => {
+  assert.match(drawer, /"\/api\/org-chart\/reporting"/);
+  assert.match(drawer, /personKey: `user:\$\{user\.id\}`/);
+  // The server's loop message is the useful sentence.
+  assert.match(drawer, /Could not save the reporting line/);
+});
+
+test("the upline list includes the factory floor", () => {
+  // A reporting line is allowed to cross the two tables; offering office
+  // accounts only would make half the company unpickable.
+  assert.match(page, /uplineOptions=\{orgPeople/);
+  assert.doesNotMatch(page, /uplineOptions=\{activeUsers/);
+});
+
+test("switching person REMOUNTS the drawer instead of setState-ing in an effect", () => {
+  // The re-seed effect was a cascading render. A key is the fix; suppressing
+  // the rule is not.
+  assert.match(page, /<UserDetailDrawer\n\s*key=\{drawerUser\.id\}/);
+  assert.doesNotMatch(drawer, /useEffect/);
+});
+
+test("the flat table under the chart is gone, and nothing dead was left behind", () => {
+  assert.doesNotMatch(page, /\{orgRows\.map\(/);
+  // Code only — one comment still NAMES POSITIONS_BY_DEPARTMENT as the Houzs
+  // file it was mirrored from, and that reference is worth keeping.
+  const code = page
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"))
+    .join("\n");
+  for (const dead of [
+    "DeptBadge",
+    "DEPT_BADGE_CLASSES",
+    "POSITIONS_BY_DEPARTMENT",
+    "uplineCandidates",
+    "effectiveDept",
+    "deptOrderIndex",
+  ]) {
+    assert.ok(!code.includes(dead), `${dead} should have gone with the table`);
+  }
 });

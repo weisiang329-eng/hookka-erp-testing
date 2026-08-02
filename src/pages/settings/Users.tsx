@@ -106,7 +106,6 @@ const ORG_DEPARTMENTS = [
   "HR",
   "Others",
 ] as const;
-type OrgDepartment = (typeof ORG_DEPARTMENTS)[number];
 
 // Department options for an @hookka.com mailbox. ONE list, shared with the org
 // chart below — the alias dialog itself says "Department … feed the org chart",
@@ -115,56 +114,6 @@ type OrgDepartment = (typeof ORG_DEPARTMENTS)[number];
 // filed under Support could not be placed on the chart at all.
 const DEPT_OPTIONS = ORG_DEPARTMENTS;
 
-
-const POSITIONS_BY_DEPARTMENT: Record<OrgDepartment, string[]> = {
-  Management: ["Director", "General Manager", "Operations Manager", "Admin Manager"],
-  Production: [
-    "Production Manager",
-    "Supervisor",
-    "Carpenter",
-    "Upholsterer",
-    "Welder",
-    "QC Inspector",
-    "Operator",
-    "Helper",
-  ],
-  "R&D": ["R&D Manager", "Product Designer", "Prototype Maker", "R&D Assistant"],
-  QA: ["QA Manager", "QC Inspector", "QC Assistant"],
-  Sales: ["Sales Manager", "Sales Executive", "Sales Coordinator", "Showroom Staff"],
-  Office: ["Admin Manager", "Purchasing", "Admin Assistant", "Storekeeper", "Driver"],
-  Finance: ["Finance Manager", "Accounts Executive", "Account Assistant"],
-  HR: ["HR Manager", "HR Executive", "HR Assistant"],
-  Others: [],
-};
-
-// Positions that mark someone as a manager-ish "upline" candidate — mirrors how
-// Houzs filters the Upline picker to directors/managers (AdminUsersPage.tsx
-// lines 495 & 620, `["Sales Director", "Ops Manager", "Super Admin", …]`).
-// Anyone whose position contains one of these words can be a reports-to target;
-// everyone else is still selectable via the "All active users" fallback below.
-const MANAGER_POSITION_HINTS = ["Director", "Manager", "General Manager", "Supervisor"];
-
-// Department → badge colours. Same idea as Houzs's DeptBadge
-// (AdminUsersPage.tsx lines 404-409): a small coloured pill per department so
-// the table scans fast. Unknown / "Unassigned" departments fall back to grey.
-const DEPT_BADGE_CLASSES: Record<string, string> = {
-  Management: "bg-purple-100 text-purple-700",
-  Production: "bg-amber-100 text-amber-700",
-  Sales: "bg-teal-100 text-teal-700",
-  Office: "bg-sky-100 text-sky-700",
-  Warehouse: "bg-emerald-100 text-emerald-700",
-};
-
-function DeptBadge({ dept }: { dept: string }) {
-  const cls = DEPT_BADGE_CLASSES[dept] ?? "bg-gray-100 text-gray-600";
-  return (
-    <span
-      className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold ${cls}`}
-    >
-      {dept || "Unassigned"}
-    </span>
-  );
-}
 
 // ---------- Row types ------------------------------------------------------
 
@@ -381,6 +330,14 @@ export default function UsersPage() {
   const { data: invitesResp, loading: loadingInvites, refresh: refreshInvitesHook } = useCachedJson<ApiEnvelope<InviteRow[]>>("/api/users/invites");
   // Mail Center returns a bare array (no { success, data } envelope).
   const { data: addressesResp, refresh: refreshAddressesHook } = useCachedJson<MailAddress[]>("/api/mail-center/addresses");
+  // The org chart's people, ONLY so the drawer can show the real reporting line.
+  // users.reports_to is the legacy column and is blank for everyone whose line
+  // was set through the chart — the edges live in org_reporting, keyed
+  // (source, id) so they can cross `users` and `workers`.
+  const { data: orgPeopleResp, refresh: refreshOrgPeople } = useCachedJson<{
+    data?: { key: string; name: string; position: string; managerKey: string | null }[];
+  }>("/api/org-chart");
+  const orgPeople = useMemo(() => orgPeopleResp?.data ?? [], [orgPeopleResp]);
 
   const fetchUsers = useCallback(() => {
     invalidateCachePrefix("/api/users");
@@ -695,95 +652,12 @@ export default function UsersPage() {
   const aliasIsHeuristic = (u: UserRow, alias: MailAddress | undefined): boolean =>
     !!alias && alias.assignedUserId !== u.id;
 
-  // Effective department for a user, honouring any queued change in edit mode
-  // (orgDeptDraft on the user id) over the user's saved department. Empty
-  // department ⇒ "Unassigned". Driven by the USER row now, so a user needs NO
-  // @hookka.com alias to be placed (owner 2026-06-17).
-  const effectiveDept = useCallback(
-    (u: UserRow): string => {
-      if (orgDeptDraft.has(u.id)) return orgDeptDraft.get(u.id)!;
-      return u.department || "Unassigned";
-    },
-    [orgDeptDraft],
-  );
-  // Effective position for a user, honouring any queued change in edit mode
-  // over the saved position. "" ⇒ no position. Like Houzs, the position list
-  // is scoped to the (effective) department in the editor.
-  const effectivePosition = useCallback(
-    (u: UserRow): string => {
-      if (orgPosDraft.has(u.id)) return orgPosDraft.get(u.id)!;
-      return u.position || "";
-    },
-    [orgPosDraft],
-  );
-  // Effective upline (reportsTo user id) for a user, honouring any queued
-  // change in edit mode over the saved reportsTo. "" ⇒ no upline.
-  const effectiveReportsTo = useCallback(
-    (u: UserRow): string => {
-      if (orgReportsDraft.has(u.id)) return orgReportsDraft.get(u.id)!;
-      return u.reportsTo || "";
-    },
-    [orgReportsDraft],
-  );
-
   // Active users, for the "Reports to" upline picker (a person can report to
   // any other active user; the picker excludes the person themselves).
   const activeUsers = useMemo(
     () => users.filter((u) => u.isActive),
     [users],
   );
-  // userId → display label, so a row can show "Reports to <name>".
-  const userLabelById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const u of users) m.set(u.id, u.displayName || u.email);
-    return m;
-  }, [users]);
-
-  // Department display order for the table (Management first, then the rest in
-  // declared order, "Unassigned" last) so the rows read top-down like an org.
-  const deptOrderIndex = useCallback((dept: string): number => {
-    if (dept === "Unassigned" || !dept) return 999;
-    const i = (ORG_DEPARTMENTS as readonly string[]).indexOf(dept);
-    return i === -1 ? 900 : i;
-  }, []);
-
-  // Org Chart ROWS — Houzs-style flat table (Name · Department · Position ·
-  // Reports to), active users only, sorted by department → position → name.
-  // Uses the EFFECTIVE values so a queued edit re-sorts/re-badges live before
-  // Save. Mirrors AdminUsersPage.tsx's table (lines 243-300).
-  const orgRows = useMemo(() => {
-    return [...activeUsers].sort((a, b) => {
-      const da = effectiveDept(a);
-      const db = effectiveDept(b);
-      const di = deptOrderIndex(da) - deptOrderIndex(db);
-      if (di !== 0) return di;
-      if (da !== db) return da.localeCompare(db);
-      const pa = effectivePosition(a);
-      const pb = effectivePosition(b);
-      if (pa !== pb) return (pa || "~").localeCompare(pb || "~");
-      return (a.displayName || a.email).localeCompare(b.displayName || b.email);
-    });
-  }, [activeUsers, effectiveDept, effectivePosition, deptOrderIndex]);
-
-  // "Reports to" candidates — like Houzs, the picker is biased toward
-  // manager-ish positions (AdminUsersPage.tsx lines 495/620), but every active
-  // user remains selectable so the line can always be drawn. Managers first,
-  // then everyone else, each group A–Z; the person themselves is excluded by
-  // the row that renders the picker.
-  const uplineCandidates = useMemo(() => {
-    const isManager = (u: UserRow) => {
-      const pos = effectivePosition(u);
-      return MANAGER_POSITION_HINTS.some((h) => pos.includes(h));
-    };
-    return [...activeUsers].sort((a, b) => {
-      const ma = isManager(a) ? 0 : 1;
-      const mb = isManager(b) ? 0 : 1;
-      if (ma !== mb) return ma - mb;
-      return (a.displayName || a.email).localeCompare(b.displayName || b.email);
-    });
-  }, [activeUsers, effectivePosition]);
-
-
   // Flatten the tree to a render list (depth-first) so the hierarchy block is a
   // simple indented list of rows.
 
@@ -800,56 +674,6 @@ export default function UsersPage() {
     setOrgPosDraft(new Map());
     setOrgReportsDraft(new Map());
   };
-  // Queue a department change for a user (the Department <select>). Selecting
-  // the user's saved dept removes the entry so Save stays a no-op. Changing the
-  // department also clears a queued position that's no longer valid for the new
-  // department (so you can't save Production + "Sales Executive").
-  const setDeptDraft = (u: UserRow, dept: string) => {
-    const saved = u.department || "Unassigned";
-    setOrgDeptDraft((prev) => {
-      const next = new Map(prev);
-      if (dept === saved) next.delete(u.id);
-      else next.set(u.id, dept);
-      return next;
-    });
-    // If the currently-effective position isn't offered by the new department,
-    // null it out so the row doesn't keep a mismatched title.
-    const validForDept =
-      dept === "Unassigned"
-        ? []
-        : POSITIONS_BY_DEPARTMENT[dept as OrgDepartment] ?? [];
-    const curPos = effectivePosition(u);
-    if (curPos && !validForDept.includes(curPos)) {
-      setPositionDraft(u, "");
-    }
-  };
-  // Queue a position change for a user (the Position <select>). Selecting back
-  // to the saved value removes the entry so Save stays a no-op.
-  const setPositionDraft = (u: UserRow, position: string) => {
-    const saved = u.position || "";
-    setOrgPosDraft((prev) => {
-      const next = new Map(prev);
-      if (position === saved) next.delete(u.id);
-      else next.set(u.id, position);
-      return next;
-    });
-  };
-  // Queue an upline change for a user (the "Reports to" picker). Selecting back
-  // to the saved value removes the entry so Save stays a no-op.
-  const setReportsToDraft = (u: UserRow, managerId: string) => {
-    const saved = u.reportsTo || "";
-    setOrgReportsDraft((prev) => {
-      const next = new Map(prev);
-      if (managerId === saved) next.delete(u.id);
-      else next.set(u.id, managerId);
-      return next;
-    });
-  };
-  // True when a user has any queued org change (dept / position / upline).
-  const userHasOrgDraft = (u: UserRow): boolean =>
-    orgDeptDraft.has(u.id) ||
-    orgPosDraft.has(u.id) ||
-    orgReportsDraft.has(u.id);
   // Count of distinct users with a queued change (for the Save button badge).
   const orgDraftCount = useMemo(() => {
     const ids = new Set<string>([
@@ -2339,264 +2163,13 @@ export default function UsersPage() {
                   <OrgChart canManage={canManageUsers} />
                 </div>
 
-                {/* Houzs-style table: Name · Department · Position · Reports to.
-                    Read-only when viewing; Department / Position / Reports-to
-                    become selects in edit mode (mirrors AdminUsersPage.tsx
-                    lines 243-300 + its Edit modal selectors). */}
-                <div className="overflow-x-auto rounded-lg border border-[#E5E7EB]">
-                  <table className="w-full min-w-[640px] text-xs">
-                    <thead>
-                      <tr className="border-b border-[#E5E7EB] bg-[#F9FAFB] text-[10px] uppercase tracking-wide text-gray-500">
-                        <th className="px-3 py-2 text-left font-semibold">
-                          Name
-                        </th>
-                        <th className="px-3 py-2 text-left font-semibold">
-                          Department
-                        </th>
-                        <th className="px-3 py-2 text-left font-semibold">
-                          Position
-                        </th>
-                        <th className="px-3 py-2 text-left font-semibold">
-                          Reports to
-                        </th>
-                        <th className="px-3 py-2 text-right font-semibold">
-                          Actions
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {orgRows.map((m) => {
-                        const name = m.displayName || m.email;
-                        const initials = name
-                          .trim()
-                          .split(/\s+/)
-                          .slice(0, 2)
-                          .map((p) => p[0]?.toUpperCase() ?? "")
-                          .join("");
-                        const dept = effectiveDept(m);
-                        const pos = effectivePosition(m);
-                        const uplineId = effectiveReportsTo(m);
-                        const uplineName = uplineId
-                          ? (userLabelById.get(uplineId) ?? "(unknown)")
-                          : "";
-                        const moved = userHasOrgDraft(m);
-                        // Positions offered for this row = those of the row's
-                        // EFFECTIVE department (Houzs scopes the same way). If a
-                        // saved position isn't in the list (legacy / dept just
-                        // changed) keep it selectable so it isn't silently lost.
-                        const deptPositions =
-                          dept === "Unassigned"
-                            ? []
-                            : POSITIONS_BY_DEPARTMENT[dept as OrgDepartment] ??
-                              [];
-                        const positionOptions =
-                          pos && !deptPositions.includes(pos)
-                            ? [pos, ...deptPositions]
-                            : deptPositions;
-                        return (
-                          <tr
-                            key={m.id}
-                            className={
-                              "border-b border-[#F0F1F3] last:border-0 " +
-                              (moved ? "bg-[#F7F4EC]" : "hover:bg-[#FAFAF9]")
-                            }
-                          >
-                            {/* Name (+ email) — avatar like the rest of the UI */}
-                            <td className="px-3 py-2">
-                              <div className="flex items-center gap-2">
-                                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#EFEAE5] text-[10px] font-semibold text-[#6B5C32]">
-                                  {initials || "?"}
-                                </span>
-                                <div className="min-w-0">
-                                  <div className="truncate font-medium text-[#111827]">
-                                    {name}
-                                    {m.id === currentUser?.id && (
-                                      <span className="ml-1.5 rounded bg-[#6B5C32]/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-[#6B5C32]">
-                                        You
-                                      </span>
-                                    )}
-                                    {moved && (
-                                      <span className="ml-1.5 rounded bg-[#6B5C32]/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#6B5C32]">
-                                        Changed
-                                      </span>
-                                    )}
-                                  </div>
-                                  <div className="truncate text-[10px] text-[#9CA3AF]">
-                                    {m.email}
-                                  </div>
-                                </div>
-                              </div>
-                            </td>
-
-                            {/* Department — badge (view) / select (edit) */}
-                            <td className="px-3 py-2">
-                              {orgEdit ? (
-                                <select
-                                  value={dept === "Unassigned" ? "" : dept}
-                                  onChange={(e) =>
-                                    setDeptDraft(
-                                      m,
-                                      e.target.value || "Unassigned",
-                                    )
-                                  }
-                                  title="Department"
-                                  className="h-7 w-full min-w-[8rem] rounded border border-[#E2DDD8] bg-white px-1.5 text-[11px] text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
-                                >
-                                  <option value="">— Unassigned —</option>
-                                  {ORG_DEPARTMENTS.map((d) => (
-                                    <option key={d} value={d}>
-                                      {d}
-                                    </option>
-                                  ))}
-                                </select>
-                              ) : (
-                                <DeptBadge
-                                  dept={dept === "Unassigned" ? "" : dept}
-                                />
-                              )}
-                            </td>
-
-                            {/* Position — text (view) / dept-scoped select (edit) */}
-                            <td className="px-3 py-2">
-                              {orgEdit ? (
-                                <select
-                                  value={pos}
-                                  onChange={(e) =>
-                                    setPositionDraft(m, e.target.value)
-                                  }
-                                  disabled={dept === "Unassigned"}
-                                  title={
-                                    dept === "Unassigned"
-                                      ? "Pick a department first"
-                                      : "Position"
-                                  }
-                                  className="h-7 w-full min-w-[9rem] rounded border border-[#E2DDD8] bg-white px-1.5 text-[11px] text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32] disabled:cursor-not-allowed disabled:bg-[#F4F2EF] disabled:text-[#9CA3AF]"
-                                >
-                                  <option value="">
-                                    {dept === "Unassigned"
-                                      ? "—"
-                                      : "— No position —"}
-                                  </option>
-                                  {positionOptions.map((p) => (
-                                    <option key={p} value={p}>
-                                      {p}
-                                    </option>
-                                  ))}
-                                </select>
-                              ) : pos ? (
-                                <span className="text-[#374151]">{pos}</span>
-                              ) : (
-                                <span className="text-gray-400">—</span>
-                              )}
-                            </td>
-
-                            {/* Reports to — upline name (view) / picker (edit).
-                                Picker biases manager-ish positions first but
-                                lists every active user (Houzs's Upline picker). */}
-                            <td className="px-3 py-2">
-                              {orgEdit ? (
-                                <select
-                                  value={uplineId}
-                                  onChange={(e) =>
-                                    setReportsToDraft(m, e.target.value)
-                                  }
-                                  title="Who this person reports to (their upline)"
-                                  className="h-7 w-full min-w-[10rem] rounded border border-[#E2DDD8] bg-white px-1.5 text-[11px] text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
-                                >
-                                  <option value="">— None —</option>
-                                  {uplineCandidates
-                                    .filter((c) => c.id !== m.id)
-                                    .map((c) => {
-                                      const cDept = effectiveDept(c);
-                                      const cPos = effectivePosition(c);
-                                      const meta = [
-                                        cPos,
-                                        cDept === "Unassigned" ? "" : cDept,
-                                      ]
-                                        .filter(Boolean)
-                                        .join(" · ");
-                                      return (
-                                        <option key={c.id} value={c.id}>
-                                          {c.displayName || c.email}
-                                          {meta ? ` (${meta})` : ""}
-                                        </option>
-                                      );
-                                    })}
-                                </select>
-                              ) : uplineName ? (
-                                <span className="text-[#6B7280]">
-                                  {uplineName}
-                                </span>
-                              ) : (
-                                <span className="text-gray-400">—</span>
-                              )}
-                            </td>
-
-                            {/* Account actions — same three as the Users tab
-                                (Disable/Enable · Reset password · Delete). They
-                                reuse the component-level handlers and modals and
-                                are independent of the inline Edit mode, so they
-                                stay visible whether or not orgEdit is on. */}
-                            <td className="px-3 py-2 text-right whitespace-nowrap">
-                              <div className="inline-flex gap-1">
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    toggleActive(m);
-                                  }}
-                                  title={
-                                    m.id === currentUser?.id
-                                      ? "You can't disable your own account"
-                                      : m.isActive
-                                        ? "Disable"
-                                        : "Enable"
-                                  }
-                                  // Self-guard: can't disable your own account
-                                  // (mirrors the Delete button + the server-side
-                                  // lockout guard on PUT /api/users/:id).
-                                  disabled={m.isActive && m.id === currentUser?.id}
-                                >
-                                  {m.isActive ? (
-                                    <Ban className="h-3.5 w-3.5" />
-                                  ) : (
-                                    <Check className="h-3.5 w-3.5" />
-                                  )}
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setResetForUser(m);
-                                    setResetPassword("");
-                                    setResetError(null);
-                                  }}
-                                  title="Reset password"
-                                >
-                                  <KeyRound className="h-3.5 w-3.5" />
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    deleteUser(m);
-                                  }}
-                                  title="Delete"
-                                  disabled={m.id === currentUser?.id}
-                                >
-                                  <Trash2 className="h-3.5 w-3.5 text-red-600" />
-                                </Button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+                {/* The Houzs-style table that used to sit here is gone —
+                    owner 2026-08-02:「下面的不需要」. It covered the ten OFFICE
+                    accounts only, and its Reports-to column read the legacy
+                    users.reportsTo instead of the org_reporting edges, so it
+                    printed "—" for people the chart directly above it draws a
+                    line for. Everything it could edit, the side drawer edits
+                    properly, on the user row, for all fifty. */}
               </>
             )}
           </CardContent>
@@ -3053,6 +2626,7 @@ export default function UsersPage() {
       {/* =========================================================== */}
       {drawerUser && (
         <UserDetailDrawer
+          key={drawerUser.id}
           user={
             {
               id: drawerUser.id,
@@ -3065,11 +2639,17 @@ export default function UsersPage() {
               reportsTo: drawerUser.reportsTo ?? "",
             } satisfies DrawerUser
           }
-          uplineOptions={activeUsers
-            .filter((u) => u.id !== drawerUser.id)
-            .map((u) => ({
-              id: u.id,
-              label: `${u.displayName || u.email}${u.position ? ` · ${u.position}` : ""}`,
+          currentManagerKey={
+            orgPeople.find((p) => p.key === `user:${drawerUser.id}`)?.managerKey ?? null
+          }
+          // Everyone on the chart, factory floor included — a reporting line is
+          // allowed to cross the two tables, and offering office accounts only
+          // would make half the company unpickable.
+          uplineOptions={orgPeople
+            .filter((p) => p.key !== `user:${drawerUser.id}`)
+            .map((p) => ({
+              id: p.key,
+              label: `${p.name}${p.position ? ` · ${p.position}` : ""}`,
             }))}
           departments={ORG_DEPARTMENTS}
           roleOptions={ROLE_OPTIONS}
@@ -3078,6 +2658,7 @@ export default function UsersPage() {
           onClose={() => setDrawerUser(null)}
           onSaved={() => {
             fetchUsers();
+            refreshOrgPeople();
             // The chart groups on these, so it must not keep serving the old
             // department for the rest of the session.
             invalidateCachePrefix("/api/org-chart");

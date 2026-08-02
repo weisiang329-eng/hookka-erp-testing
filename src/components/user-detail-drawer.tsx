@@ -26,7 +26,7 @@
 //   * Save sends only what changed, so a department edit can never silently
 //     rewrite a role
 // ---------------------------------------------------------------------------
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { X, Trash2, Ban, CheckCircle2, Save } from "lucide-react";
 
 export type DrawerUser = {
@@ -42,6 +42,14 @@ export type DrawerUser = {
 
 type Props = {
   user: DrawerUser;
+  /**
+   * The person's REAL upline key from org_reporting ("user:<id>" / "worker:<id>"),
+   * or null. `user.reportsTo` is the legacy `users.reports_to` column and is
+   * blank for everyone whose line was set through the org chart — which is
+   * everyone — so showing it made the drawer say "no manager (top)" for people
+   * the chart draws a line for.
+   */
+  currentManagerKey?: string | null;
   /** Everyone who could be an upline — excludes the person themselves. */
   uplineOptions: { id: string; label: string }[];
   departments: readonly string[];
@@ -56,6 +64,7 @@ type Props = {
 
 export function UserDetailDrawer({
   user,
+  currentManagerKey,
   uplineOptions,
   departments,
   roleOptions,
@@ -68,23 +77,17 @@ export function UserDetailDrawer({
   const [department, setDepartment] = useState(user.department);
   const [position, setPosition] = useState(user.position);
   const [role, setRole] = useState(user.role);
-  const [reportsTo, setReportsTo] = useState(user.reportsTo);
+  // Seeded from the org_reporting edge, not the legacy column.
+  const [reportsTo, setReportsTo] = useState(currentManagerKey ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  // Re-seed when the drawer is pointed at a different person without unmounting.
-  useEffect(() => {
-    setDisplayName(user.displayName);
-    setDepartment(user.department);
-    setPosition(user.position);
-    setRole(user.role);
-    setReportsTo(user.reportsTo);
-    setError(null);
-    setOk(null);
-    setConfirmDelete(false);
-  }, [user]);
+  // No re-seed effect: the caller gives this component a `key`, so pointing the
+  // drawer at a different person REMOUNTS it and every field starts from that
+  // person's data. An effect that setState'd on a prop change was a cascading
+  // render, and the fix for that is not to suppress the rule.
 
   const isSelf = user.id === currentUserId;
 
@@ -126,12 +129,44 @@ export function UserDetailDrawer({
     if (department !== user.department) body.department = department;
     if (position !== user.position) body.position = position.trim();
     if (role !== user.role) body.role = role;
-    if (reportsTo !== user.reportsTo) body.reportsTo = reportsTo;
-    if (Object.keys(body).length === 0) {
+    const uplineChanged = reportsTo !== (currentManagerKey ?? "");
+    if (Object.keys(body).length === 0 && !uplineChanged) {
       setOk("No changes to save");
       return;
     }
-    await send(body, "Saved");
+    if (Object.keys(body).length > 0) {
+      const okSave = await send(body, "Saved");
+      if (!okSave) return;
+    }
+    if (uplineChanged) {
+      // The reporting line lives in org_reporting, keyed (source, id), because
+      // it has to be able to cross `users` and `workers`. Writing
+      // users.reports_to would put it somewhere the chart does not read.
+      setBusy(true);
+      try {
+        const res = await fetch("/api/org-chart/reporting", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ personKey: `user:${user.id}`, managerKey: reportsTo }),
+        });
+        const j = (await res.json().catch(() => ({}))) as {
+          success?: boolean;
+          error?: string;
+        };
+        if (!res.ok || j.success === false) {
+          // "That reporting line would create a loop." is the server's, and it
+          // is the useful sentence.
+          setError(j.error || `Could not save the reporting line (HTTP ${res.status})`);
+          return;
+        }
+        setOk("Saved");
+        onSaved();
+      } catch {
+        setError("Could not reach the server.");
+      } finally {
+        setBusy(false);
+      }
+    }
   }
 
   async function remove() {

@@ -125,7 +125,32 @@ export function emitCounter(
 // durations into it so the Server-Timing header can emit a `db` entry alongside
 // `app`. count is the number of DB ops (prepare-then-{all,first,run,raw} or
 // batch) — handy as the `desc` in DevTools so you can spot N+1s at a glance.
-export type DbTimer = { total: number; count: number };
+export type DbTimer = {
+  total: number;
+  count: number;
+  /**
+   * How many queries have been ISSUED (not yet finished). Used only to
+   * identify which call is the first one of the request.
+   */
+  issued: number;
+  /**
+   * Duration of the request's FIRST-ISSUED query, in ms.
+   *
+   * This is the number that separates "the query is slow" from "getting a
+   * connection is slow". A fresh postgres.js client is created per request
+   * (see db-pg.ts — it must not be cached across Workers requests) and the
+   * socket connects lazily, so the first query of a request pays connection
+   * acquisition on top of its own execution; every later query on the same
+   * request reuses that socket.
+   *
+   * The evidence that made this worth measuring: over 7 days, a
+   * `SELECT ... FROM sales_orders WHERE id IN (9 ids)` reading NINE rows took
+   * 38,880ms. No index explains that, and the tables are fully indexed
+   * (db-indexes reports missing=0/14). If firstMs >> the rest, the cost is
+   * upstream of SQL entirely.
+   */
+  firstMs: number;
+};
 
 // Hono middleware — times every request. Emits a [req] line for every call,
 // upgrades to [slow-req] over SLOW_REQUEST_MS so you can grep, and writes a
@@ -144,7 +169,7 @@ export async function timingMiddleware(c: Context, next: Next): Promise<void> {
   // Per-request DB-time aggregator. The DB-injection middleware (worker.ts)
   // grabs this with c.get("dbTimer") and threads it into instrumentD1 so
   // every .all/.first/.run/.raw/.batch credits its duration here.
-  const dbTimer: DbTimer = { total: 0, count: 0 };
+  const dbTimer: DbTimer = { total: 0, count: 0, issued: 0, firstMs: 0 };
   c.set("dbTimer", dbTimer);
 
   // P6.1 — read incoming W3C Trace Context. If the caller didn't send one,
@@ -258,7 +283,7 @@ export async function timingMiddleware(c: Context, next: Next): Promise<void> {
           method,
           errMsg,
         ],
-        doubles: [dur, dbTimer.total, dbTimer.count],
+        doubles: [dur, dbTimer.total, dbTimer.count, dbTimer.firstMs],
       });
     } catch { /* swallow */ }
     if (responseStatus >= 500) emitCounter(c, "req.5xx", { resource: path });
@@ -326,12 +351,14 @@ export function instrumentD1<T extends object>(
       }
       if (prop === "batch" && typeof orig === "function") {
         return async (statements: unknown[]) => {
+          const isFirst = timer ? ++timer.issued === 1 : false;
           const start = Date.now();
           const res = await orig.call(target, statements);
           const dur = Date.now() - start;
           if (timer) {
             timer.total += dur;
             timer.count += 1;
+            if (isFirst) timer.firstMs = dur;
           }
           if (dur >= SLOW_QUERY_MS) {
             console.warn(
@@ -363,12 +390,17 @@ function wrapStatement(
       }
       if ((prop === "all" || prop === "first" || prop === "run" || prop === "raw") && typeof orig === "function") {
         return async (...args: unknown[]) => {
+          // "First" means first ISSUED, not first to finish: a request that
+          // fires several queries with Promise.all still pays the connection
+          // cost on whichever one opened the socket.
+          const isFirst = timer ? ++timer.issued === 1 : false;
           const start = Date.now();
           const res = await orig.apply(target, args);
           const dur = Date.now() - start;
           if (timer) {
             timer.total += dur;
             timer.count += 1;
+            if (isFirst) timer.firstMs = dur;
           }
           if (dur >= SLOW_QUERY_MS) {
             const meta = (res as { meta?: { rows_read?: number; rows_written?: number } } | undefined)?.meta;

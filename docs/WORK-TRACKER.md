@@ -2558,3 +2558,49 @@ owner 看到「No scans yet」是因为卡片跟着 Command Center 的期间走�
 - docTypes 目前只有 1 笔 `Other / unclassified` —— 因为历史样本几乎都来自
   po_scan_samples（客户 PO），供应商样本的 correctedJson 直到本次修好才会开始累积。
   PI / GR 的分项要等新的扫描进来才有意义。
+
+## 2026-08-02 — Round 3: every route swept, backend + search + DB + scanner
+
+Owner: loop over every module/sub-module, wire frontend↔backend↔DB, optimise perf,
+implement global search. All shipped to `main` and verified live unless noted.
+
+### Rendering (every sidebar + detail + production + planning route measured)
+- ✅ `/sales/create` product picker — the real "sofa combo 卡" (#203). SearchableSelect
+  built all 360 products into a 240px dropdown; 1,383ms open / 1,024ms typing → 498/341ms.
+  Backs 16 screens, so every picker in the app is fixed.
+- 🟢 `/production/upholstery` — the 3,405ms reading was a sweep contention artifact;
+  re-measured clean at **166ms**. No fix needed (confirmed, not assumed).
+- 🟢 All other production/planning/procurement/inventory/service routes measured ≤550ms.
+
+### Global search (owner: 「无论多少页面都能搜到」)
+- ✅ `GET /api/search` — one request, 16 sources, concurrent on one connection
+  (#221 #223 #225). Was 6 browser fetches covering 6 things; now covers POs, GRNs, PIs,
+  suppliers, production/service orders, service cases, employees, leads, journal entries,
+  consignment notes too. Live: 15 sources, 0 skipped, ~680ms.
+- ✅ Ctrl+K palette rewired to it (#226) — all 16 groups now render in the UI.
+
+### Database
+- ✅ `/api/admin/health/db-indexes` (#209, corrected #212) — reads LIVE pg_indexes.
+  Result: **missing 0/14, 97 indexes**. Indexing is NOT the backend bottleneck.
+- ✅ `/api/admin/health/db-connect` (#217) — measures first-query vs later-query time per
+  request to isolate connection-acquisition cost. (A 9-row lookup was clocked at 38.9s.)
+
+### Scanner
+- ✅ `/worker/scan` camera noise (#227) — "Track invalid" ×14 + "Unsupported focusMode" ×6
+  in 24h. Code already guarded; these are stale-bundle warehouse clients. Dropped at the
+  fe-rum sink so the feed stays honest regardless of client bundle age.
+
+### 🟡 The one large item left: server-side ledger paging/search
+`GET /api/accounting/gl` still `SELECT`s EVERY `ledger_journal_entries` row and filters in
+JS. The client-side windowing (#193) made it render fast, but the query is still unbounded.
+**Correct approach (revised):** compute the leg's effective date IN SQL via LEFT JOINs to
+each source table (invoices/PIs/payments/…), NOT a persisted `effective_date` column — a
+stored column drifts the moment someone edits an invoice date or the opening date, and on
+the money path a wrong-but-fast date is worse than a slow one. This also removes the second
+cost: `loadDocDateResolver` currently reads 13 whole tables into the Worker per request.
+Sizeable, money-path, wants its own PR + verification against the real ledger. NOT started.
+
+### Also open (small)
+- Connection-acquisition root cause (the 38.9s) — needs the #217 numbers after a work day.
+- `/api/accounting/dashboard` 2,010ms (replays computePnlWindow 12×).
+- CoA tab 5,121 nodes / 218ms — heaviest DOM left, no freeze; window it once proven.

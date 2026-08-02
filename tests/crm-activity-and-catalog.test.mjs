@@ -147,3 +147,14 @@ test("changing model clears the ticks", () => {
   // Carrying ticks across models would add SKUs the operator never saw.
   assert.match(leads(), /setModel\(e\.target\.value\); setTicked\(new Set\(\)\)/);
 });
+
+test("a model is labelled with the MODEL's name, not one member's size", () => {
+  // The first SKU of 1003 is "HILTON BEDFRAME (6FT) (183X190CM)", so taking its
+  // name verbatim made the dropdown read "1003 — HILTON BEDFRAME (6FT)
+  // (183X190CM) (14 SKUs)" — as though the model itself were a 6FT.
+  const src = leads();
+  assert.match(src, /\.replace\(\/\(\\s\*\\\(\[\^\)\]\*\\\)\)\+\\s\*\$\/, ""\)/,
+    "trailing size parentheticals are stripped");
+  // Never leaves a blank label.
+  assert.match(src, /\.trim\(\) \|\| \(skus\[0\]\?\.name \?\? key\)/);
+});

@@ -769,9 +769,13 @@ function LeadCatalogPanel({ leadId }: { leadId: string }) {
     return [...map.entries()]
       .map(([key, skus]) => ({
         key,
-        // The family's own name, not the first SKU's: "1003 — HILTON BEDFRAME"
-        // reads as a model, "1003-(K) — HILTON BEDFRAME (6FT)" reads as a size.
-        name: skus[0]?.name ?? key,
+        // The MODEL's name, not the first SKU's. Every SKU name ends in its own
+        // size parentheticals — "HILTON BEDFRAME (6FT) (183X190CM)" — and
+        // labelling the model with one arbitrary member's size reads as though
+        // the model IS that size. Strip the trailing groups back to
+        // "HILTON BEDFRAME"; if that leaves nothing, keep the name as-is rather
+        // than show a bare code.
+        name: (skus[0]?.name ?? key).replace(/(\s*\([^)]*\))+\s*$/, "").trim() || (skus[0]?.name ?? key),
         skus: skus.slice().sort((a, b) => a.code.localeCompare(b.code)),
       }))
       .sort((a, b) => a.key.localeCompare(b.key));

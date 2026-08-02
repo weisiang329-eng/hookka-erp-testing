@@ -342,6 +342,70 @@ export function OrgChart({ canManage }: Props) {
     );
   };
 
+  /** Everyone at or below a node, flattened. */
+  const flatten = useCallback((n: OrgNode): OrgNode[] => {
+    const out: OrgNode[] = [n];
+    for (const c of n.children) out.push(...flatten(c));
+    return out;
+  }, []);
+
+  /**
+   * The subtree below a node, as DEPARTMENT BOXES rather than more branches.
+   *
+   * Owner 2026-08-02:「两个 leader…他们应该合在一起,两个 leader 共同带剩下的
+   * 人才对」and「为什么这里没有分部门呢?正常的 HouzsERP 里是有看到部门划分的」.
+   *
+   * Houzs's chart does not express co-management with lines either — their model
+   * is a single manager_id, same as ours. What their board does is stop drawing
+   * the tree and switch to a DEPARTMENT BOX: the leaders sit at the top of the
+   * box, the team sits under a position label, and NO line divides the team
+   * between the leaders. Belonging is expressed by being in the same box.
+   *
+   * That is the right answer here too, because a line per leader is exactly the
+   * distinction the owner does not want drawn: two Operator Leaders both cover
+   * Upholstery and Framing, and splitting the seventeen between them was an
+   * invention of the layout, not a fact about the factory.
+   */
+  const boxesUnder = useCallback(
+    (node: OrgNode) => {
+      const people = node.children.flatMap(flatten);
+      const byDept = new Map<string, OrgNode[]>();
+      for (const p of people) {
+        const d = deptOf(p);
+        const arr = byDept.get(d);
+        if (arr) arr.push(p);
+        else byDept.set(d, [p]);
+      }
+      const isLeader = (p: OrgNode) => /leader|head|manager|supervisor/i.test(p.position ?? "");
+      return [...byDept.entries()]
+        .map(([dept, ppl]) => {
+          const leads = ppl.filter(isLeader).sort((a, b) => a.name.localeCompare(b.name));
+          const rest = ppl.filter((p) => !isLeader(p));
+          const byPos = new Map<string, OrgNode[]>();
+          for (const p of rest) {
+            const pos = (p.position || "").trim() || "—";
+            const arr = byPos.get(pos);
+            if (arr) arr.push(p);
+            else byPos.set(pos, [p]);
+          }
+          return {
+            dept,
+            label: deptLabel(dept),
+            count: ppl.length,
+            leads,
+            groups: [...byPos.entries()]
+              .map(([position, members]) => ({
+                position,
+                members: [...members].sort((a, b) => a.name.localeCompare(b.name)),
+              }))
+              .sort((a, b) => a.position.localeCompare(b.position)),
+          };
+        })
+        .sort((a, b) => deptRank(a.dept) - deptRank(b.dept) || a.label.localeCompare(b.label));
+    },
+    [flatten, deptLabel, deptRank],
+  );
+
   const Branch = ({ node }: { node: OrgNode }): React.ReactElement => {
     const kids = collapsed.has(node.key) ? [] : node.children;
     return (
@@ -364,7 +428,75 @@ export function OrgChart({ canManage }: Props) {
               four, and only when those children lead nobody themselves — a
               manager with a team of their own still deserves their own branch.
             */}
-            {kids.length > 4 && kids.every((c) => c.children.length === 0) ? (
+            {/* Below the last MANAGER the tree stops and department boxes take
+                over — the Houzs shape. A branch is right where there are a few
+                named relationships; forty operators fanned into hairlines is a
+                wall of string. */}
+            {node.children.some((c) => c.children.length > 0) &&
+            new Set(node.children.flatMap(flatten).map(deptOf)).size > 1 ? (
+              <div className="flex items-start gap-3">
+                {boxesUnder(node).map((box, bi) => (
+                  <div key={box.dept} className="relative flex flex-col items-center">
+                    {boxesUnder(node).length > 1 && (
+                      <span
+                        aria-hidden
+                        className="absolute top-0 h-px bg-[#C2BDB6]"
+                        style={{
+                          left: bi === 0 ? "50%" : 0,
+                          right: bi === boxesUnder(node).length - 1 ? "50%" : 0,
+                        }}
+                      />
+                    )}
+                    <div className="h-5 w-px bg-[#C2BDB6]" />
+                    <div className="overflow-hidden rounded-lg border border-[#E2DDD8] bg-white">
+                      <div className="flex items-center gap-2 bg-[#33404E] px-3 py-1.5 text-white">
+                        <span
+                          aria-hidden
+                          className="h-3.5 w-1 rounded-full"
+                          style={{ background: ACCENTS[bi % ACCENTS.length] }}
+                        />
+                        <span className="text-[11px] font-semibold uppercase tracking-wide">
+                          {box.label}
+                        </span>
+                        <span className="ml-auto flex items-center gap-1 text-[11px] opacity-75">
+                          <Users className="h-3 w-3" />
+                          {box.count}
+                        </span>
+                      </div>
+                      {box.leads.length > 0 && (
+                        <div className="border-b border-[#EFEAE5] bg-[#FBFAF8] px-2 py-2">
+                          <div className="mb-1 text-[9px] font-semibold uppercase tracking-wider text-[#9CA3AF]">
+                            {box.leads.length > 1
+                              ? `Led together by ${box.leads.length}`
+                              : "Leader"}
+                          </div>
+                          <div className="flex gap-1.5">
+                            {box.leads.map((l) => (
+                              <TreeCard key={l.key} node={l} />
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      <div className="space-y-2 p-2">
+                        {box.groups.map((g) => (
+                          <div key={g.position}>
+                            <div className="mb-1 flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wider text-[#9CA3AF]">
+                              {g.position}
+                              <span className="text-[#C2BDB6]">{g.members.length}</span>
+                            </div>
+                            <div className="flex flex-col gap-1.5">
+                              {g.members.map((m) => (
+                                <TreeCard key={m.key} node={m} />
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : kids.length > 4 && kids.every((c) => c.children.length === 0) ? (
               <div className="rounded-lg border border-[#E2DDD8] bg-[#FBFAF8] p-2">
                 <div
                   className="grid gap-1.5"

@@ -1078,8 +1078,28 @@ app.post("/", async (c) => {
 
     const data = rows.map(rowToPayslip);
     return c.json({ success: true, data, total: data.length }, 201);
-  } catch {
-    return c.json({ success: false, error: "Invalid request body" }, 400);
+  } catch (e) {
+    // This bare catch wrapped the ENTIRE generation and reported every failure
+    // — DB error, computation bug, anything — as "Invalid request body". On
+    // 2026-08-02 a regenerate DELETED July's 36 drafts, the recompute then
+    // threw, and the only thing anybody saw was a 400 blaming the request. The
+    // period was left empty with no clue why. Same shape as the `catch → return
+    // []` that disguised a broken endpoint as "no data" earlier the same day.
+    const ref = crypto.randomUUID().slice(0, 8);
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[payslips.generate ${ref}] ${msg}`, e);
+    // A malformed body really is a 400; anything else is ours and is a 500.
+    const isBadBody = /JSON|Unexpected token|body/i.test(msg);
+    return c.json(
+      {
+        success: false,
+        error: isBadBody
+          ? "Invalid request body"
+          : `Payslip generation failed: ${msg}`,
+        ref,
+      },
+      isBadBody ? 400 : 500,
+    );
   }
 });
 

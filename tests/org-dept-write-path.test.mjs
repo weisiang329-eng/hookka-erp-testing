@@ -49,3 +49,22 @@ test("existing alias data is carried across, dry-run first", () => {
   assert.match(route, /COALESCE\(u\.department, ''\) = ''/);
   assert.match(route, /requireSuperAdmin\(c\)/);
 });
+
+test("a worker's REAL department reaches the chart", () => {
+  // All 40 workers were forced to "Production", so the chart had one column and
+  // nothing to divide by — owner:「Employee 那边,需要按照部门去划分」. They
+  // already carry FAB_CUT / FAB_SEW / WOOD_CUT etc.; the query was not even
+  // selecting the column.
+  const org = readFileSync("src/api/routes/org-chart.ts", "utf8");
+  assert.match(org, /SELECT id, empNo, name, position, status, departmentCode FROM workers/);
+  assert.match(
+    org,
+    /\(w\.departmentCode \?\? w\.departmentcode \?\? ""\)\.trim\(\) \|\| WORKER_DEPARTMENT/,
+    "dual-keyed, with Production only as the fallback",
+  );
+  assert.doesNotMatch(
+    org,
+    /departmentCode: WORKER_DEPARTMENT,/,
+    "the hardcoded single department must not return",
+  );
+});

@@ -3,15 +3,14 @@
 // shortfall, and overtime, per Wei Siang's spec (confirmed 2026-06-09).
 //
 //   • Shift 08:00–18:00, 1 h unpaid lunch → 9 payable work hours. Mon–Sat.
-//   • Late: a clock-in within 10 min of 08:00 is forgiven; MORE than 10 min late
+//   • Late: a clock-in within 15 min of 08:00 is forgiven; MORE than 15 min late
 //     counts from 08:00 (the grace is a threshold, not a free allowance).
 //   • Short: fewer than 9 worked hours → the shortfall is deducted at the hourly
 //     rate. Coming late and leaving early are just two ways to fall short — the
 //     shortfall is counted ONCE (never a separate late penalty on top).
-//   • Overtime: only past 18:00, and only if it EXCEEDS 15 min. The clock-out
-//     minute is floored to a quarter — 0–15→0, 16–29→15, 30–44→30, 45–59→45
-//     (confirmed rounding table; note 15→0 enforces the ">15 min" rule). OT
-//     minutes feed the existing × otMultiplier overtime pay.
+//   • Overtime: only past 18:00, floored to a COMPLETED quarter — 0–14→0,
+//     15–29→15, 30–44→30, 45–59→45. Fifteen minutes worked earns fifteen
+//     minutes (HR via owner 2026-08-02). OT minutes feed the × otMultiplier pay.
 //
 // Pure + deterministic: this only maps times → minutes, so it can be unit-tested
 // to the minute. All money / payroll wiring lives in the payroll engine.
@@ -30,15 +29,36 @@ export type AttendanceRules = {
   lunchEndMin: number;
   /** Payable work target, minutes (9 h = 540). */
   standardWorkMin: number;
-  /** Lateness forgiven up to this many minutes (10). */
+  /** Lateness forgiven up to this many minutes (15). */
   lateGraceMin: number;
-  /** Penal lateness rounds UP to blocks of this many minutes (15). */
+  /**
+   * Penal lateness rounds UP to blocks of this many minutes.
+   *
+   * 1 = charge the actual minutes, which is what HR describes (owner
+   * 2026-08-02: 「当超过了 15 分钟，就会以分钟来计算，根据具体迟到了多少分钟来
+   * 扣钱」). Kept as a rule field rather than deleted because it is
+   * effective-dated in pay_rule_versions — historical periods keep whatever
+   * they were computed under.
+   */
   lateBlockMin: number;
+  /**
+   * Overtime floors to a completed block of this many minutes (15); less than
+   * one block earns nothing. Effective-dated, NOT a constant — see OT_MIN_MINUTES.
+   */
+  otBlockMin: number;
 };
 
 /**
- * Overtime does not start until this many minutes past the shift end
- * (owner 2026-07-04: 「OT 要30分鐘才算」 — an 18:28 punch-out is 0 OT, not 15).
+ * Overtime does not start until this many minutes past the shift end.
+ *
+ * 15, per HR via the owner 2026-08-02: 「只要做满 15 分钟，就会算 15 分钟的 OT
+ * … 做 20 分钟只算 15，做 29 分钟也只算 15，做 30 分钟就算 30」. That is exactly
+ * floor-to-a-quarter with a 15-minute floor.
+ *
+ * It was 30 from 2026-07-04 to 2026-08-02, on the strength of a note reading
+ * 「OT 要30分鐘才算」 — which turned every 15–29 minute stay into unpaid time.
+ * Measured across July's 889 punches, that cost workers 135 minutes of OT over
+ * 9 days.
  *
  * Exported because the PUNCH is not the only path to overtime: the payroll
  * engine also derives it from LOGGED HOURS (hours above the worker's standard
@@ -46,7 +66,7 @@ export type AttendanceRules = {
  * against a 7.5h standard paid 1 minute of overtime, and ANN's July payslip
  * printed "0 hrs x RM 13.59 x 1.5 = RM 3.06". One threshold, both paths.
  */
-export const OT_MIN_MINUTES = 30;
+export const OT_MIN_MINUTES = 15;
 
 export const HOOKKA_ATTENDANCE: AttendanceRules = {
   startMin: 8 * 60, // 480
@@ -55,8 +75,9 @@ export const HOOKKA_ATTENDANCE: AttendanceRules = {
   lunchStartMin: 12 * 60, // 720 (12:00)
   lunchEndMin: 13 * 60, // 780 (13:00)
   standardWorkMin: 9 * 60, // 540
-  lateGraceMin: 10,
-  lateBlockMin: 15,
+  lateGraceMin: 15,
+  lateBlockMin: 1,
+  otBlockMin: 15,
 };
 
 export type AttendanceDay = {
@@ -88,11 +109,16 @@ export function hhmmToMinutes(hhmm: string | null | undefined): number | null {
  * table: 0–15→0, 16–29→15, 30–44→30, 45–59→45. The 15→0 boundary enforces the
  * spec's "OT must exceed 15 min" rule (18:00–18:15 yields 0 OT).
  */
-export function roundOutMinute(minuteOfHour: number): number {
-  if (minuteOfHour <= 15) return 0;
-  if (minuteOfHour <= 29) return 15;
-  if (minuteOfHour <= 44) return 30;
-  return 45;
+export function roundOutMinute(
+  minuteOfHour: number,
+  blockMin: number = OT_MIN_MINUTES,
+): number {
+  // Floor to a COMPLETED block. 15 EARNS 15 — HR, via the owner 2026-08-02:
+  // 「不满 15 分钟不算，要做满 15 分钟才会算 15 分钟」. The old table returned 0
+  // for exactly 15 because a 2026-06-09 note read the rule as "must EXCEED 15",
+  // so a worker who stayed to precisely 18:15 was paid nothing for it.
+  const b = Math.max(1, Math.round(blockMin) || 1);
+  return Math.floor(Math.max(0, minuteOfHour) / b) * b;
 }
 
 /**
@@ -137,15 +163,15 @@ export function computeAttendanceDay(
   // Overtime past the shift end — clock-out minute floored to a quarter.
   let otMin = 0;
   if (clockOutMin > rules.endMin) {
+    // Block size comes from the EFFECTIVE-DATED rules, not a constant, so a
+    // change today cannot rewrite what a past month was computed under.
+    const block = rules.otBlockMin ?? OT_MIN_MINUTES;
     const roundedOut =
-      Math.floor(clockOutMin / 60) * 60 + roundOutMinute(clockOutMin % 60);
+      Math.floor(clockOutMin / 60) * 60 + roundOutMinute(clockOutMin % 60, block);
     otMin = Math.max(0, roundedOut - rules.endMin);
-    // OT only counts from 30 minutes past shift end (owner correction
-    // 2026-07-04: "OT 要30分鐘才算" — an 18:28 punch-out is 0 OT, not 15).
-    // Below the threshold the tail also stops offsetting the shortfall,
-    // consistent with it not being counted as work. From 30 minutes on,
-    // quarters apply as before (18:30→30, 18:45→45).
-    if (otMin < OT_MIN_MINUTES) otMin = 0;
+    // Short of one whole block earns nothing, and the tail then also stops
+    // offsetting the shortfall — consistent with it not counting as work.
+    if (otMin < block) otMin = 0;
   }
 
   // Shortfall — same-day OT OFFSETS it first (owner 2026-06-11): a worker who
@@ -173,7 +199,13 @@ export function computeAttendanceDay(
  * and only the punch path applied the minimum. A worker could see 0.02h of
  * overtime on their phone for a day the payslip paid nothing for.
  */
-export function otMinutesAtLeastMinimum(surplusMinutes: number): number {
+export function otMinutesAtLeastMinimum(
+  surplusMinutes: number,
+  /** Block size from the effective-dated rules; defaults to today's 15. */
+  blockMin: number = OT_MIN_MINUTES,
+): number {
+  const block = Math.max(1, Math.round(blockMin) || 1);
   const m = Math.max(0, Math.round(Number(surplusMinutes) || 0));
-  return m >= OT_MIN_MINUTES ? m : 0;
+  // Same shape as the punch path: floor to a completed block, nothing below one.
+  return m >= block ? Math.floor(m / block) * block : 0;
 }

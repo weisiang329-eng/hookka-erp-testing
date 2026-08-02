@@ -19,13 +19,16 @@
 //                                  the resolver output.
 // ---------------------------------------------------------------------------
 
-import { getMaxSourceUpdatedAt } from "./snapshot-freshness";
+import { getMaxSourceUpdatedAt, getSourceSignature } from "./snapshot-freshness";
+import { ensureSourceRowsColumn, pickSourceRows } from "./snapshot";
 
 type SnapRow = {
   data: Record<string, unknown>;
   builtFrom: string;
   builtAt: string;
   refreshCount: number;
+  /** COUNT(*) across the source tables when built; null = unknown. */
+  sourceRows: number | null;
 };
 
 // Generic single-row reader. Each snapshot table has the same column
@@ -37,17 +40,20 @@ async function readGeneric(
 ): Promise<SnapRow | null> {
   const row = await db
     .prepare(
-      `SELECT data, built_from AS "builtFrom", built_at AS "builtAt",
-              refresh_count AS "refreshCount"
-         FROM ${tableName}
-        WHERE org_id = ?`,
+      // Star select, and NO schema work on this path — naming a column that may
+      // not exist yet, or running DDL per read, is what took production down on
+      // 2026-08-02. This returns source_rows when present and omits it when not.
+      `SELECT * FROM ${tableName} WHERE org_id = ?`,
     )
     .bind(orgId)
-    .first<{
+    .first<Record<string, unknown> & {
       data: string;
-      builtFrom: string;
-      builtAt: string;
-      refreshCount: number;
+      builtFrom?: string;
+      built_from?: string;
+      builtAt?: string;
+      built_at?: string;
+      refreshCount?: number;
+      refresh_count?: number;
     }>();
   if (!row) return null;
   let parsed: Record<string, unknown>;
@@ -61,9 +67,10 @@ async function readGeneric(
   }
   return {
     data: parsed,
-    builtFrom: row.builtFrom,
-    builtAt: row.builtAt,
-    refreshCount: row.refreshCount ?? 0,
+    builtFrom: (row.builtFrom ?? row.built_from) as string,
+    builtAt: (row.builtAt ?? row.built_at) as string,
+    refreshCount: Number(row.refreshCount ?? row.refresh_count ?? 0),
+    sourceRows: pickSourceRows(row),
   };
 }
 
@@ -73,12 +80,24 @@ async function writeGeneric(
   orgId: string,
   data: Record<string, unknown>,
   builtFrom: string,
+  sourceRows: number | null = null,
 ): Promise<void> {
   const dataJson = JSON.stringify(data);
   const builtAt = new Date().toISOString();
+  // Schema work on the WRITE only — see the read above.
+  const withRows = await ensureSourceRowsColumn(db, tableName);
   await db
     .prepare(
-      `INSERT INTO ${tableName} (org_id, data, built_from, built_at, refresh_count)
+      withRows
+        ? `INSERT INTO ${tableName} (org_id, data, built_from, built_at, refresh_count, source_rows)
+       VALUES (?, ?, ?, ?, 1, ?)
+       ON CONFLICT (org_id) DO UPDATE
+       SET data = EXCLUDED.data,
+           built_from = EXCLUDED.built_from,
+           built_at = EXCLUDED.built_at,
+           source_rows = EXCLUDED.source_rows,
+           refresh_count = ${tableName}.refresh_count + 1`
+        : `INSERT INTO ${tableName} (org_id, data, built_from, built_at, refresh_count)
        VALUES (?, ?, ?, ?, 1)
        ON CONFLICT (org_id) DO UPDATE
        SET data = EXCLUDED.data,
@@ -86,7 +105,9 @@ async function writeGeneric(
            built_at = EXCLUDED.built_at,
            refresh_count = ${tableName}.refresh_count + 1`,
     )
-    .bind(orgId, dataJson, builtFrom, builtAt)
+    .bind(...(withRows
+      ? [orgId, dataJson, builtFrom, builtAt, sourceRows]
+      : [orgId, dataJson, builtFrom, builtAt]))
     .run();
 }
 
@@ -101,8 +122,17 @@ async function getMaxUpdatedAtFor(
   return getMaxSourceUpdatedAt(db, tables);
 }
 
-function isFresh(snap: SnapRow | null, currentMax: string | null): boolean {
+function isFresh(
+  snap: SnapRow | null,
+  currentMax: string | null,
+  /** COUNT(*) now — the only signal that perceives a DELETE. */
+  currentRows?: number | null,
+): boolean {
   if (!snap) return false;
+  if (currentRows !== undefined && currentRows !== null) {
+    if (snap.sourceRows === null) return false;   // pre-column row: rebuild once
+    if (snap.sourceRows !== currentRows) return false;
+  }
   if (!currentMax) return true;
   // Type-aware compare — see snapshot.ts isSnapshotFresh comment for the
   // full rationale. pg driver returns TIMESTAMP cols as Date, MAX over
@@ -131,8 +161,9 @@ export async function writeDeliveryStatsSnapshot(
   orgId: string,
   data: Record<string, unknown>,
   builtFrom: string,
+  sourceRows: number | null = null,
 ): Promise<void> {
-  return writeGeneric(db, "delivery_stats_snapshot", orgId, data, builtFrom);
+  return writeGeneric(db, "delivery_stats_snapshot", orgId, data, builtFrom, sourceRows);
 }
 
 export async function getDeliveryStatsMaxUpdatedAt(
@@ -164,8 +195,9 @@ export async function writeDeliveryPoValuesSnapshot(
   orgId: string,
   data: Record<string, unknown>,
   builtFrom: string,
+  sourceRows: number | null = null,
 ): Promise<void> {
-  return writeGeneric(db, "delivery_po_values_snapshot", orgId, data, builtFrom);
+  return writeGeneric(db, "delivery_po_values_snapshot", orgId, data, builtFrom, sourceRows);
 }
 
 export async function getDeliveryPoValuesMaxUpdatedAt(
@@ -176,3 +208,18 @@ export async function getDeliveryPoValuesMaxUpdatedAt(
 
 // Re-exported for clarity at call sites.
 export { isFresh as isSnapshotFresh };
+
+// ---------------------------------------------------------------------------
+// Freshness SIGNATURE — timestamp AND row count.
+//
+// MAX(updated_at) cannot perceive a DELETE: removing rows never raises a
+// maximum, so a snapshot holding a deleted delivery order stayed "fresh"
+// indefinitely. Declared after the source-table lists so they are in scope.
+// ---------------------------------------------------------------------------
+export async function getDeliveryStatsSignature(db: D1Database) {
+  return getSourceSignature(db, STATS_SOURCE_TABLES);
+}
+
+export async function getDeliveryPoValuesSignature(db: D1Database) {
+  return getSourceSignature(db, PO_VALUES_SOURCE_TABLES);
+}

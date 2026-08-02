@@ -49,10 +49,24 @@ export type PayRulesConfig = {
   shiftEndMin: number;
   /** Unpaid lunch, minutes (60). */
   lunchMin: number;
-  /** Lateness forgiven up to this many minutes (10). */
+  /** Lateness forgiven up to this many minutes (15). */
   lateGraceMin: number;
-  /** Penal lateness rounds UP to blocks of this many minutes (15). */
+  /**
+   * Penal lateness rounds UP to blocks of this many minutes. 1 = charge the
+   * actual minutes, which is what HR describes.
+   */
   lateBlockMin: number;
+  /**
+   * Overtime is floored to a completed block of this many minutes (15), and
+   * anything short of ONE block earns nothing.
+   *
+   * Effective-dated like everything else here — it used to be a bare constant
+   * in attendance-rules.ts, so changing it silently rewrote every past month's
+   * overtime (owner 2026-08-02: 「为什么会没有版本控制呢 你应该要做啊」). It
+   * was 30 between 2026-07-04 and 2026-08-02, which paid nothing for a 15–29
+   * minute stay; HR's rule is and was 15.
+   */
+  otBlockMin: number;
   /** FALLBACK hour divisor for OT + late/short rates, used only when a worker
    *  has no daily hours set. Normally the divisor is the worker's own day
    *  span: daily working hours + lunch (9h + 1h = ÷10; 7.5h → ÷8.5). */
@@ -110,8 +124,9 @@ export const DEFAULT_PAY_RULES: PayRulesConfig = {
   shiftStartMin: 8 * 60,
   shiftEndMin: 18 * 60,
   lunchMin: 60,
-  lateGraceMin: 10,
-  lateBlockMin: 15,
+  lateGraceMin: 15,
+  lateBlockMin: 1,
+  otBlockMin: 15,
   rateHoursPerDay: 10,
   sundayOtMultiplier: 2,
   holidayOtMultiplier: 3,
@@ -150,6 +165,12 @@ export function normalizePayRules(raw: unknown): PayRulesConfig {
     lunchMin: num("lunchMin"),
     lateGraceMin: num("lateGraceMin"),
     lateBlockMin: num("lateBlockMin"),
+    // A stored version from before this field existed keeps the behaviour it
+    // was computed under: 30, the value that was live when it was written.
+    // A stored version written BEFORE this knob existed keeps the behaviour it
+    // was actually computed under — 30, the value live at the time — instead of
+    // silently inheriting today's 15 and re-pricing a closed month.
+    otBlockMin: r.otBlockMin === undefined ? 30 : num("otBlockMin"),
     rateHoursPerDay: Math.max(1, num("rateHoursPerDay")),
     sundayOtMultiplier: num("sundayOtMultiplier"),
     holidayOtMultiplier: num("holidayOtMultiplier"),
@@ -235,6 +256,7 @@ export function toAttendanceRules(cfg: PayRulesConfig): {
   standardWorkMin: number;
   lateGraceMin: number;
   lateBlockMin: number;
+  otBlockMin: number;
 } {
   // Lunch window: Hookka's break is 12:00–13:00 (owner 2026-06-28). The engine
   // deducts only the overlap of the worked window with this, so arriving after
@@ -249,6 +271,7 @@ export function toAttendanceRules(cfg: PayRulesConfig): {
     standardWorkMin: Math.max(0, cfg.shiftEndMin - cfg.shiftStartMin - cfg.lunchMin),
     lateGraceMin: cfg.lateGraceMin,
     lateBlockMin: cfg.lateBlockMin,
+    otBlockMin: cfg.otBlockMin,
   };
 }
 

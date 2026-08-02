@@ -286,13 +286,15 @@ app.get("/stats", async (c) => {
   // PR 3 (2026-05-20) — cache-aside snapshot. See lib/delivery-snapshot.ts
   // for the architecture. Mirror of the pattern in routes/dashboard-overview.ts.
   {
-    const { readDeliveryStatsSnapshot, getDeliveryStatsMaxUpdatedAt, isSnapshotFresh } =
+    const { readDeliveryStatsSnapshot, getDeliveryStatsSignature, isSnapshotFresh } =
       await import("../lib/delivery-snapshot");
-    const [snap, currentMax] = await Promise.all([
+    const [snap, sig] = await Promise.all([
       readDeliveryStatsSnapshot(c.var.DB, orgId),
-      getDeliveryStatsMaxUpdatedAt(c.var.DB),
+      // Signature = timestamp AND row count. A deleted delivery order never
+      // moves MAX(updated_at), so the timestamp alone kept it on the board.
+      getDeliveryStatsSignature(c.var.DB),
     ]);
-    if (isSnapshotFresh(snap, currentMax) && snap) {
+    if (isSnapshotFresh(snap, sig.maxUpdatedAt, sig.rowCount) && snap) {
       return c.json({ success: true, ...snap.data });
     }
   }
@@ -327,14 +329,15 @@ app.get("/stats", async (c) => {
 
   // PR 3 write-back. Errors swallowed — cache is perf, not load-bearing.
   try {
-    const { writeDeliveryStatsSnapshot, getDeliveryStatsMaxUpdatedAt } =
+    const { writeDeliveryStatsSnapshot, getDeliveryStatsSignature } =
       await import("../lib/delivery-snapshot");
-    const currentMax = await getDeliveryStatsMaxUpdatedAt(c.var.DB);
+    const sig = await getDeliveryStatsSignature(c.var.DB);
     await writeDeliveryStatsSnapshot(
       c.var.DB,
       orgId,
       payload as Record<string, unknown>,
-      currentMax ?? new Date().toISOString(),
+      sig.maxUpdatedAt ?? new Date().toISOString(),
+      sig.rowCount,
     );
   } catch (e) {
     console.warn("[delivery-stats-snapshot] write-back failed:", e);
@@ -361,13 +364,15 @@ app.get("/po-values", async (c) => {
   // watches delivery_orders + delivery_order_items + sales_orders +
   // sales_order_items — a price edit on any line correctly invalidates.
   {
-    const { readDeliveryPoValuesSnapshot, getDeliveryPoValuesMaxUpdatedAt, isSnapshotFresh } =
+    const { readDeliveryPoValuesSnapshot, getDeliveryPoValuesSignature, isSnapshotFresh } =
       await import("../lib/delivery-snapshot");
-    const [snap, currentMax] = await Promise.all([
+    const [snap, sig] = await Promise.all([
       readDeliveryPoValuesSnapshot(c.var.DB, orgId),
-      getDeliveryPoValuesMaxUpdatedAt(c.var.DB),
+      // Signature = timestamp AND row count. A deleted delivery order never
+      // moves MAX(updated_at), so the timestamp alone kept it on the board.
+      getDeliveryPoValuesSignature(c.var.DB),
     ]);
-    if (isSnapshotFresh(snap, currentMax) && snap) {
+    if (isSnapshotFresh(snap, sig.maxUpdatedAt, sig.rowCount) && snap) {
       return c.json({ success: true, ...snap.data });
     }
   }
@@ -376,14 +381,15 @@ app.get("/po-values", async (c) => {
   const payload = { values: Object.fromEntries(map) };
 
   try {
-    const { writeDeliveryPoValuesSnapshot, getDeliveryPoValuesMaxUpdatedAt } =
+    const { writeDeliveryPoValuesSnapshot, getDeliveryPoValuesSignature } =
       await import("../lib/delivery-snapshot");
-    const currentMax = await getDeliveryPoValuesMaxUpdatedAt(c.var.DB);
+    const sig = await getDeliveryPoValuesSignature(c.var.DB);
     await writeDeliveryPoValuesSnapshot(
       c.var.DB,
       orgId,
       payload as Record<string, unknown>,
-      currentMax ?? new Date().toISOString(),
+      sig.maxUpdatedAt ?? new Date().toISOString(),
+      sig.rowCount,
     );
   } catch (e) {
     console.warn("[delivery-po-values-snapshot] write-back failed:", e);

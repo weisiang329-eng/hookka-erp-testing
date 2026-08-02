@@ -33,7 +33,11 @@
 // tenants.
 // ---------------------------------------------------------------------------
 
-import { getMaxSourceUpdatedAt as probeMaxSourceUpdatedAt } from "./snapshot-freshness";
+import {
+  getMaxSourceUpdatedAt as probeMaxSourceUpdatedAt,
+  getSourceSignature,
+} from "./snapshot-freshness";
+import { ensureSourceRowsColumn, pickSourceRows } from "./snapshot";
 
 // Source tables whose MAX(updated_at) feeds the Layer 2 freshness check.
 //
@@ -85,6 +89,8 @@ export type DashboardSnapshotRow = {
   builtFrom: string; // ISO datetime
   builtAt: string;
   refreshCount: number;
+  /** COUNT(*) across the source tables when built; null = unknown. */
+  sourceRows: number | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -97,17 +103,20 @@ export async function readSnapshot(
 ): Promise<DashboardSnapshotRow | null> {
   const row = await db
     .prepare(
-      `SELECT data, built_from AS "builtFrom", built_at AS "builtAt",
-              refresh_count AS "refreshCount"
-         FROM dashboard_snapshot
-        WHERE org_id = ?`,
+      // Star select, and NO schema work on this path — naming a column that may
+      // not exist yet, or running DDL per read, is what took production down on
+      // 2026-08-02. Returns source_rows when present, omits it when not.
+      `SELECT * FROM dashboard_snapshot WHERE org_id = ?`,
     )
     .bind(orgId)
-    .first<{
+    .first<Record<string, unknown> & {
       data: string;
-      builtFrom: string;
-      builtAt: string;
-      refreshCount: number;
+      builtFrom?: string;
+      built_from?: string;
+      builtAt?: string;
+      built_at?: string;
+      refreshCount?: number;
+      refresh_count?: number;
     }>();
   if (!row) return null;
   let parsed: Record<string, unknown>;
@@ -125,9 +134,10 @@ export async function readSnapshot(
   }
   return {
     data: parsed,
-    builtFrom: row.builtFrom,
-    builtAt: row.builtAt,
-    refreshCount: row.refreshCount ?? 0,
+    builtFrom: (row.builtFrom ?? row.built_from) as string,
+    builtAt: (row.builtAt ?? row.built_at) as string,
+    refreshCount: Number(row.refreshCount ?? row.refresh_count ?? 0),
+    sourceRows: pickSourceRows(row),
   };
 }
 
@@ -177,8 +187,14 @@ export async function getMaxSourceUpdatedAt(
 export function isSnapshotFresh(
   snapshot: DashboardSnapshotRow | null,
   currentMax: string | null,
+  /** COUNT(*) now — the only signal that perceives a DELETE. */
+  currentRows?: number | null,
 ): boolean {
   if (!snapshot) return false;
+  if (currentRows !== undefined && currentRows !== null) {
+    if (snapshot.sourceRows === null) return false;   // pre-column row: rebuild once
+    if (snapshot.sourceRows !== currentRows) return false;
+  }
   if (!currentMax) return true;
   const builtMs = new Date(snapshot.builtFrom as unknown as string).getTime();
   const currentMs = new Date(currentMax as unknown as string).getTime();
@@ -197,14 +213,26 @@ export async function writeSnapshot(
   orgId: string,
   data: Record<string, unknown>,
   builtFrom: string,
+  sourceRows: number | null = null,
 ): Promise<void> {
   const dataJson = JSON.stringify(data);
   const builtAt = new Date().toISOString();
+  // Schema work on the WRITE only — see the read above.
+  const withRows = await ensureSourceRowsColumn(db, "dashboard_snapshot");
   // Postgres ON CONFLICT path. The D1 adapter rewrites ON CONFLICT to
   // SQLite's INSERT OR REPLACE / equivalent — same effective semantics.
   await db
     .prepare(
-      `INSERT INTO dashboard_snapshot (org_id, data, built_from, built_at, refresh_count)
+      withRows
+        ? `INSERT INTO dashboard_snapshot (org_id, data, built_from, built_at, refresh_count, source_rows)
+       VALUES (?, ?, ?, ?, 1, ?)
+       ON CONFLICT (org_id) DO UPDATE
+       SET data = EXCLUDED.data,
+           built_from = EXCLUDED.built_from,
+           built_at = EXCLUDED.built_at,
+           source_rows = EXCLUDED.source_rows,
+           refresh_count = dashboard_snapshot.refresh_count + 1`
+        : `INSERT INTO dashboard_snapshot (org_id, data, built_from, built_at, refresh_count)
        VALUES (?, ?, ?, ?, 1)
        ON CONFLICT (org_id) DO UPDATE
        SET data = EXCLUDED.data,
@@ -212,8 +240,15 @@ export async function writeSnapshot(
            built_at = EXCLUDED.built_at,
            refresh_count = dashboard_snapshot.refresh_count + 1`,
     )
-    .bind(orgId, dataJson, builtFrom, builtAt)
+    .bind(...(withRows
+      ? [orgId, dataJson, builtFrom, builtAt, sourceRows]
+      : [orgId, dataJson, builtFrom, builtAt]))
     .run();
+}
+
+/** Timestamp AND row count — the count is what sees a DELETE. */
+export async function getDashboardSignature(db: D1Database) {
+  return getSourceSignature(db, TRACKED_TABLES);
 }
 
 // ---------------------------------------------------------------------------

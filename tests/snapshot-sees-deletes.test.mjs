@@ -22,7 +22,7 @@
 // The fix adds COUNT(*) to the signature: a delete moves the count, an insert
 // moves both, an update moves MAX.
 // ---------------------------------------------------------------------------
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -164,3 +164,69 @@ test("the count is read back, compared, and written on every rebuild", () => {
   assert.match(SNAP, /isSnapshotFresh\(snap, currentMax, sourceRows\)/, "compare");
   assert.match(SNAP, /source_rows = EXCLUDED\.source_rows/, "write");
 });
+
+// ---------------------------------------------------------------------------
+// The other snapshot modules. snapshot.ts was fixed on 2026-08-02, but four
+// more places read a snapshot and judge freshness WITHOUT going through
+// withSnapshot — dashboard, delivery (×2), invoice — plus four routes that use
+// snapshot.ts's helpers directly and were passing only the timestamp. Every one
+// of them still could not see a DELETE.
+// ---------------------------------------------------------------------------
+const HELPERS = [
+  ["src/api/lib/dashboard-snapshot.ts", "dashboard_snapshot"],
+  ["src/api/lib/delivery-snapshot.ts", "${tableName}"],
+  ["src/api/lib/invoice-snapshot.ts", "invoice_stats_snapshot"],
+  ["src/api/lib/worker-perf.ts", "${tableName}"],
+];
+
+for (const [file, table] of HELPERS) {
+  test(`${file.split("/").pop()} — reads with a star select and no DDL`, () => {
+    const src = readFileSync(file, "utf8");
+    assert.ok(
+      src.includes(`SELECT * FROM ${table}`),
+      "must star-select so a missing source_rows column cannot break the read",
+    );
+    // The read FUNCTION must never run schema work — that is what took
+    // production down when the first attempt did it on 31 tables at once. The
+    // import at the top of the file is fine; the read body is what matters.
+    const readStart = src.search(/async function read[A-Za-z]*\(/);
+    const readEnd = src.indexOf("async function write", readStart);
+    assert.ok(readStart > 0 && readEnd > readStart, "could not isolate the read function");
+    const readBody = src.slice(readStart, readEnd);
+    assert.ok(
+      !readBody.includes("ensureSourceRowsColumn") && !readBody.includes("ALTER TABLE"),
+      "the read function must do no schema work",
+    );
+  });
+
+  test(`${file.split("/").pop()} — writes the count and compares it`, () => {
+    const src = readFileSync(file, "utf8");
+    assert.match(src, /ensureSourceRowsColumn\(db(?: as never)?, /, "write ensures the column");
+    assert.match(src, /source_rows = EXCLUDED\.source_rows/, "write stores the count");
+    assert.match(src, /sourceRows: pickSourceRows\(row\)/, "read extracts the count");
+    assert.match(src, /currentRows\?: number \| null/, "freshness accepts the count");
+    assert.match(src, /snapshot\.sourceRows !== currentRows|snap\.sourceRows !== currentRows/);
+  });
+}
+
+test("no caller judges freshness on the timestamp alone", () => {
+  // A two-argument isSnapshotFresh silently skips the delete check.
+  const bad = [];
+  for (const file of walkApi()) {
+    const src = readFileSync(file, "utf8");
+    for (const m of src.matchAll(/is(?:Snapshot)?Fresh\(([^;]*?)\)\s*&&/g)) {
+      const args = m[1].split(",").length;
+      if (args < 3) bad.push(`${file}: isSnapshotFresh called with ${args} arguments`);
+    }
+  }
+  assert.deepEqual(bad, [], `\n${bad.join("\n")}\n`);
+});
+
+function walkApi(dir = "src/api", out = []) {
+  for (const name of readdirSync(dir)) {
+    const p = `${dir}/${name}`;
+    if (statSync(p).isDirectory()) walkApi(p, out);
+    else if (name.endsWith(".ts")) out.push(p);
+  }
+  return out;
+}

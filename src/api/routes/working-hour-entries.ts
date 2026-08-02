@@ -506,12 +506,13 @@ app.get("/summary", async (c) => {
   const _cacheKeySum = `from=${from}&to=${to}`;
   const _checkSum = await Promise.all([
     _snapMod.readSnapshot(c.var.DB, _snapCfgSum, _orgIdSum, _cacheKeySum),
-    _snapMod.getMaxSourceUpdatedAt(c.var.DB, _snapCfgSum),
+    _snapMod.getSourceSignature(c.var.DB, _snapCfgSum.sourceTables),
   ]);
-  if (_snapMod.isSnapshotFresh(_checkSum[0], _checkSum[1]) && _checkSum[0]) {
+  if (_snapMod.isSnapshotFresh(_checkSum[0], _checkSum[1].maxUpdatedAt, _checkSum[1].rowCount) && _checkSum[0]) {
     return c.json({ success: true, ..._checkSum[0].data });
   }
-  const _currentMaxSum = _checkSum[1];
+  const _currentMaxSum = _checkSum[1].maxUpdatedAt;
+  const _sourceRowsSum = _checkSum[1].rowCount;
 
   // One query per (worker, dept) bucket — totals are derived in JS by
   // summing across each worker's bucket rows. distinct(date) per worker
@@ -580,6 +581,7 @@ app.get("/summary", async (c) => {
       _payloadSum,
       _currentMaxSum ?? new Date().toISOString(),
       _cacheKeySum,
+      _sourceRowsSum,
     );
   } catch (e) {
     console.warn("[whe-summary-snapshot] write-back failed:", e);
@@ -618,12 +620,13 @@ app.get("/dept-category-summary", async (c) => {
   const _cacheKeyDC = `from=${from}&to=${to}`;
   const _checkDC = await Promise.all([
     _snapModDC.readSnapshot(c.var.DB, _snapCfgDC, _orgIdDC, _cacheKeyDC),
-    _snapModDC.getMaxSourceUpdatedAt(c.var.DB, _snapCfgDC),
+    _snapModDC.getSourceSignature(c.var.DB, _snapCfgDC.sourceTables),
   ]);
-  if (_snapModDC.isSnapshotFresh(_checkDC[0], _checkDC[1]) && _checkDC[0]) {
+  if (_snapModDC.isSnapshotFresh(_checkDC[0], _checkDC[1].maxUpdatedAt, _checkDC[1].rowCount) && _checkDC[0]) {
     return c.json({ success: true, ..._checkDC[0].data });
   }
-  const _currentMaxDC = _checkDC[1];
+  const _currentMaxDC = _checkDC[1].maxUpdatedAt;
+  const _sourceRowsDC = _checkDC[1].rowCount;
 
   const res = await c.var.DB
     .prepare(
@@ -654,6 +657,7 @@ app.get("/dept-category-summary", async (c) => {
       _payloadDC,
       _currentMaxDC ?? new Date().toISOString(),
       _cacheKeyDC,
+      _sourceRowsDC,
     );
   } catch (e) {
     console.warn("[whe-dept-category-snapshot] write-back failed:", e);

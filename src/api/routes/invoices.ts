@@ -1199,13 +1199,16 @@ app.get("/stats", async (c) => {
 
   // PR 4 (2026-05-20) — cache-aside snapshot (UNFILTERED whole-dataset only).
   if (!filtered) {
-    const { readInvoiceStatsSnapshot, getInvoiceStatsMaxUpdatedAt, isSnapshotFresh } =
+    const { readInvoiceStatsSnapshot, getInvoiceStatsSignature, isSnapshotFresh } =
       await import("../lib/invoice-snapshot");
-    const [snap, currentMax] = await Promise.all([
+    const [snap, sig] = await Promise.all([
       readInvoiceStatsSnapshot(c.var.DB, orgId),
-      getInvoiceStatsMaxUpdatedAt(c.var.DB),
+      // Signature = timestamp AND row count. The timestamp alone cannot see a
+      // deleted invoice, so the stats card kept quoting one that was gone.
+      getInvoiceStatsSignature(c.var.DB),
     ]);
-    if (isSnapshotFresh(snap, currentMax) && snap) {
+    const currentMax = sig.maxUpdatedAt;
+    if (isSnapshotFresh(snap, currentMax, sig.rowCount) && snap) {
       return c.json({ success: true, ...snap.data });
     }
   }
@@ -1263,14 +1266,15 @@ app.get("/stats", async (c) => {
   // per-request and must never overwrite the canonical snapshot.
   if (!filtered) {
     try {
-      const { writeInvoiceStatsSnapshot, getInvoiceStatsMaxUpdatedAt } =
+      const { writeInvoiceStatsSnapshot, getInvoiceStatsSignature } =
         await import("../lib/invoice-snapshot");
-      const currentMax = await getInvoiceStatsMaxUpdatedAt(c.var.DB);
+      const sig = await getInvoiceStatsSignature(c.var.DB);
       await writeInvoiceStatsSnapshot(
         c.var.DB,
         orgId,
         payload as Record<string, unknown>,
-        currentMax ?? new Date().toISOString(),
+        sig.maxUpdatedAt ?? new Date().toISOString(),
+        sig.rowCount,
       );
     } catch (e) {
       console.warn("[invoice-stats-snapshot] write-back failed:", e);

@@ -201,7 +201,11 @@ test("a mixed month settles: full days dock nothing; short PUNCH or under-LOG do
   const db = mockDb();
   const rows = [
     { workerId: "W1", date: "2026-06-01", clockIn: "08:00", clockOut: "18:00", logged: 9, expected: 9 }, // full → 0
-    { workerId: "W1", date: "2026-06-02", clockIn: "08:12", clockOut: "18:00", logged: 8.75, expected: 9 }, // punch 0.25, log 0.25 → 0.25
+    // 08:24 = 24 real minutes late (0.4h). 08:12 used to sit past the old
+    // 10-min grace and ceil to 0.25h; with the 15-min grace it is on-time, so
+    // the case needs a punch that is genuinely late to still exercise the
+    // punch-vs-logged tie-break.
+    { workerId: "W1", date: "2026-06-02", clockIn: "08:24", clockOut: "18:00", logged: 8.6, expected: 9 }, // punch 0.4, log 0.4 → 0.4
     { workerId: "W1", date: "2026-06-03", clockIn: null, clockOut: null, logged: 7, expected: 9 }, // no punch, under-log 2 → 2 (logged-source)
     { workerId: "W1", date: "2026-06-04", clockIn: null, clockOut: null, logged: 0, expected: 9 }, // absence → skip
     { workerId: "W1", date: "2026-06-05", clockIn: "08:00", clockOut: "16:00", logged: 6, expected: 9 }, // punch 2.0, log 3.0 → 3 (logged wins)
@@ -209,8 +213,8 @@ test("a mixed month settles: full days dock nothing; short PUNCH or under-LOG do
   const res = await settleMonth(db, rows);
   assert.equal(res.applied, 3);            // 0.25 + 2 + 3
   assert.equal(res["no-shortfall"], 1);    // the full day
-  assert.equal(res.dockedHours, 5.25);     // 0.25 + 2 + 3
-  assert.equal(res["punch-source"], 1);    // 06-02 (0.25, tie → punch)
+  assert.equal(res.dockedHours, 5.4);      // 0.4 + 2 + 3
+  assert.equal(res["punch-source"], 1);    // 06-02 (0.4, tie → punch)
   assert.equal(res["logged-source"], 2);   // 06-03 (2) + 06-05 (3, logged 6/9 beats punch 2)
   assert.equal(db.__docks.has("W1|2026-06-04"), false); // absence never docked
   assert.equal(db.__docks.get("W1|2026-06-03").hours, 2);

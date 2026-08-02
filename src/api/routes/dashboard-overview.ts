@@ -19,7 +19,7 @@ import { computeFabricNext30ByCategory } from "../lib/fabric-usage";
 import {
   readSnapshot,
   writeSnapshot,
-  getMaxSourceUpdatedAt,
+  getDashboardSignature,
   isSnapshotFresh,
 } from "../lib/dashboard-snapshot";
 import {
@@ -125,11 +125,13 @@ app.get("/", async (c) => {
   // month filters skip the snapshot and run the compute (those reads
   // are rare — operator usually leaves it on "All").
   if (period === "all") {
-    const [snap, currentMax] = await Promise.all([
+    const [snap, sig] = await Promise.all([
       readSnapshot(c.var.DB, orgId),
-      getMaxSourceUpdatedAt(c.var.DB),
+      // Signature = timestamp AND row count. A deleted order never moves
+      // MAX(updated_at), so the tiles kept counting it.
+      getDashboardSignature(c.var.DB),
     ]);
-    if (isSnapshotFresh(snap, currentMax) && snap) {
+    if (isSnapshotFresh(snap, sig.maxUpdatedAt, sig.rowCount) && snap) {
       // Keep the daily state snapshot fresh even when the dashboard_snapshot
       // stays valid all day (so a quiet-data day still records its row).
       captureTodayState(snap.data);
@@ -2012,16 +2014,17 @@ app.get("/", async (c) => {
   // computed payload in `data` and gets it back via the c.json below.
   if (period === "all") {
     try {
-      const currentMax = await getMaxSourceUpdatedAt(c.var.DB);
-      // currentMax may be null on a brand-new install (every tracked
+      const sig = await getDashboardSignature(c.var.DB);
+      // maxUpdatedAt may be null on a brand-new install (every tracked
       // table empty). In that case use the wall-clock now as
       // built_from so the row gets a non-null timestamp.
-      const builtFrom = currentMax ?? new Date().toISOString();
+      const builtFrom = sig.maxUpdatedAt ?? new Date().toISOString();
       await writeSnapshot(
         c.var.DB,
         orgId,
         data as Record<string, unknown>,
         builtFrom,
+        sig.rowCount,
       );
     } catch (e) {
       console.warn("[dashboard-snapshot] write-back failed:", e);

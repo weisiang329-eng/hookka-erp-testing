@@ -20,7 +20,7 @@ import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
 import { sendMail } from "../lib/email";
-import { runSelfApply } from "../lib/self-apply";
+import { runSelfApply, memoizeSelfApply } from "../lib/self-apply";
 
 const app = new Hono<Env>();
 
@@ -34,9 +34,25 @@ function genId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
 }
 
-let tablesEnsured = false;
-async function ensureTables(db: D1Database): Promise<void> {
-  if (tablesEnsured) return;
+// A PROMISE memo, not a boolean. The boolean was only set after every statement
+// had run, so N concurrent first-requests each executed the whole DDL block;
+// and it had no rejection path at all. memoizeSelfApply collapses the
+// concurrent callers into one round AND drops the memo when that round fails,
+// so the next request retries instead of inheriting a permanently-broken
+// isolate (tests/self-apply-retry.test.mjs — its sweep is what caught this
+// file).
+let tablesPending: Promise<void> | null = null;
+function ensureTables(db: D1Database): Promise<void> {
+  return memoizeSelfApply(
+    () => tablesPending,
+    (p) => {
+      tablesPending = p;
+    },
+    () => createCrmTables(db),
+  );
+}
+
+async function createCrmTables(db: D1Database): Promise<void> {
   await db
     .prepare(
       `CREATE TABLE IF NOT EXISTS customer_contacts (
@@ -122,7 +138,6 @@ async function ensureTables(db: D1Database): Promise<void> {
        )`,
     )
     .run();
-  tablesEnsured = true;
 }
 
 type ContactRow = {

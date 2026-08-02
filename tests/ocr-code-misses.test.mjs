@@ -164,3 +164,68 @@ test("it is reachable on demand", () => {
   const reports = readFileSync("src/api/routes/reports.ts", "utf8");
   assert.match(reports, /app\.get\("\/ocr-code-misses\.json"/);
 });
+
+// --- the measurement that decides where the effort goes ---------------------
+
+test("a transposed pair of lines is reported as REORDERED, not as two misreads", () => {
+  // The live data's shape: "5531-2A(LHF)" → "5531-L(LHF)" 10 times AND
+  // "5531-L(LHF)" → "5531-2A(LHF)" 6 times. A symmetric pair of "misreads" is
+  // what one swap looks like through a positional diff. If the codes are right
+  // and only the ORDER is wrong, prompt work on code recognition cannot move
+  // the number — the extraction is already correct.
+  const { summary } = collectCodeMisses(
+    [
+      sample(
+        "Carres",
+        [{ productCode: "SL-13.5-E" }, { productCode: "HB1200" }],
+        [{ productCode: "HB1200" }, { productCode: "SL-13.5-E" }],
+      ),
+    ],
+    KNOWN,
+  );
+  assert.equal(summary.linesChanged, 2, "a positional diff still sees two wrong lines");
+  assert.equal(summary.docsWithChanges, 1);
+  assert.equal(summary.docsOnlyReordered, 1, "but the SET of codes was exactly right");
+});
+
+test("a genuinely wrong code is NOT counted as merely reordered", () => {
+  const { summary } = collectCodeMisses(
+    [
+      sample(
+        "Carres",
+        [{ productCode: "SL-13.5-E" }, { productCode: "HB1200" }],
+        [{ productCode: "HB1200" }, { productCode: "NLY-D30" }],
+      ),
+    ],
+    KNOWN,
+  );
+  assert.equal(summary.docsWithChanges, 1);
+  assert.equal(summary.docsOnlyReordered, 0);
+});
+
+test("a document that also GAINED a line cannot look merely reordered", () => {
+  // The multiset is compared over the same positional window the lines were
+  // compared on, so an added line cannot sneak a document into the reordered
+  // bucket by accident.
+  const { summary } = collectCodeMisses(
+    [
+      sample(
+        "Carres",
+        [{ productCode: "SL-13.5-E" }, { productCode: "HB1200" }],
+        [{ productCode: "HB1200" }, { productCode: "SL-13.5-E" }, { productCode: "NLY-D30" }],
+      ),
+    ],
+    KNOWN,
+  );
+  assert.equal(summary.docsOnlyReordered, 1, "the two compared lines were a clean swap");
+  assert.equal(summary.linesCompared, 2, "the third line had no raw counterpart to judge");
+});
+
+test("a document nobody changed is not counted at all", () => {
+  const { summary } = collectCodeMisses(
+    [sample("A", [{ productCode: "HB1200" }], [{ productCode: "HB1200" }])],
+    KNOWN,
+  );
+  assert.equal(summary.docsWithChanges, 0);
+  assert.equal(summary.docsOnlyReordered, 0);
+});

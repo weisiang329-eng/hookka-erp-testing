@@ -24,7 +24,14 @@ const src = readFileSync("src/components/org-chart.tsx", "utf8");
 test("it groups by department, then by position", () => {
   assert.match(src, /const board = useMemo/);
   assert.match(src, /const byPos = new Map<string, OrgPerson\[\]>\(\);/);
-  assert.doesNotMatch(src, /buildOrgTree/, "the indented tree list must not return");
+  // NOT "buildOrgTree must not appear" — the Hierarchy view added later uses it
+  // legitimately. What must not return is the LEFT-INDENTED list: a depth-driven
+  // marginLeft, which is what turned into one 44-deep column.
+  assert.doesNotMatch(
+    src,
+    /marginLeft: depth/,
+    "the depth-indented list must not return",
+  );
 });
 
 test("whoever is in charge is the first card in the box", () => {
@@ -51,4 +58,35 @@ test("the BOARD scrolls, not the page", () => {
   // A department with forty people must not push the next one off-screen.
   assert.match(src, /overflow-x-auto/);
   assert.match(src, /flex min-w-max items-start gap-3/);
+});
+
+// --- the textbook chart (owner's 4th reference photo) -----------------------
+
+test("there is a real top-down HIERARCHY view, drawn with connectors", () => {
+  // Owner:「目前的 UI 很漂亮了,只是要看怎么去做出来第四章照片的层级图」— the
+  // Wikipedia "Agency Department System" chart: one box per person, levels
+  // stacked, joined by lines. The board can only NAME an upline; it cannot show
+  // rank. So both views stay, and neither is a worse version of the other.
+  const src = readFileSync("src/components/org-chart.tsx", "utf8");
+  assert.match(src, /const \[view, setView\] = useState<"tree" \| "board">\("tree"\)/);
+  assert.match(src, /const forest = useMemo\(\(\) => buildOrgTree\(visible\), \[visible\]\)/);
+  // A stem down from the parent, and a bus across the siblings that stops at
+  // the outermost child instead of hanging in air.
+  assert.match(src, /h-5 w-px bg-\[#C2BDB6\]/);
+  assert.match(src, /left: i === 0 \? "50%" : 0/);
+  assert.match(src, /right: i === kids\.length - 1 \? "50%" : 0/);
+});
+
+test("a collapsed branch says how many it is hiding", () => {
+  const src = readFileSync("src/components/org-chart.tsx", "utf8");
+  assert.match(src, /shut \? `\+\$\{countSubtree\(node\) - 1\}` : "–"/);
+});
+
+test("the reporting line is editable from the tree too", () => {
+  // Otherwise the hierarchy view is read-only and you have to switch back to
+  // the board to fix anything you notice in it.
+  const src = readFileSync("src/components/org-chart.tsx", "utf8");
+  const branch = src.slice(src.indexOf("const TreeCard ="), src.indexOf("const Branch ="));
+  assert.match(branch, /descendantsOf\(node\.key\)/, "and it still refuses a loop");
+  assert.match(branch, /void setManager\(node\.key, e\.target\.value\)/);
 });

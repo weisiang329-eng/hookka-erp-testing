@@ -15,7 +15,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Network, Minus, Plus, Users, Pencil } from "lucide-react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import { type OrgPerson } from "@/lib/org-people";
+import { buildOrgTree, countSubtree, type OrgNode, type OrgPerson } from "@/lib/org-people";
 
 /**
  * Fallback column order, used only until the server's department list arrives
@@ -103,6 +103,19 @@ export function OrgChart({ canManage }: Props) {
   const [error, setError] = useState<string | null>(null);
   /** Which card has its reporting-line picker open. */
   const [editing, setEditing] = useState<string | null>(null);
+  /**
+   * Two views, because the owner asked for two different things and they are
+   * genuinely different questions.
+   *
+   *   TREE  — "who reports to whom", drawn like the textbook chart they sent:
+   *           one box per person, levels stacked, connected by hairlines.
+   *   BOARD — "who is in which department", grouped by department then position.
+   *
+   * The board cannot show rank (its cards only NAME their upline) and the tree
+   * cannot show a department at a glance. Neither is a worse version of the
+   * other, so both stay.
+   */
+  const [view, setView] = useState<"tree" | "board">("tree");
 
   const visible = useMemo(
     () => (showInactive ? people : people.filter((p) => p.active)),
@@ -231,6 +244,115 @@ export function OrgChart({ canManage }: Props) {
     [visible],
   );
 
+  // The reporting forest. Anyone whose manager is filtered out becomes a root
+  // rather than disappearing — a chart that hides people is worse than one with
+  // an extra root.
+  const forest = useMemo(() => buildOrgTree(visible), [visible]);
+
+  const TreeCard = ({ node }: { node: OrgNode }) => {
+    const open = editing === node.key;
+    const kids = node.children.length;
+    const shut = collapsed.has(node.key);
+    return (
+      <div className="relative">
+        <div
+          className={`w-[168px] rounded-md border px-2 py-1.5 text-center ${
+            node.active ? "border-[#E2DDD8] bg-white" : "border-dashed border-[#D8D2CC] bg-white opacity-60"
+          }`}
+        >
+          <div className="truncate text-[11px] font-semibold uppercase leading-tight text-[#1F1D1B]">
+            {node.name}
+          </div>
+          <div className="truncate text-[10px] text-[#8A8577]">
+            {node.position || node.departmentCode || "—"}
+          </div>
+          {canManage && (
+            <button
+              type="button"
+              onClick={() => setEditing(open ? null : node.key)}
+              className="absolute right-1 top-1 text-[#C2BDB6] hover:text-[#6B5C32]"
+              aria-label={`Change who ${node.name} reports to`}
+            >
+              <Pencil className="h-3 w-3" />
+            </button>
+          )}
+          {canManage && open && (
+            <select
+              autoFocus
+              value={node.managerKey ?? ""}
+              disabled={saving === node.key}
+              onChange={(e) => {
+                setEditing(null);
+                void setManager(node.key, e.target.value);
+              }}
+              onBlur={() => setEditing(null)}
+              className="mt-1 h-6 w-full rounded border border-[#E2DDD8] bg-[#FBFAF8] px-1 text-[10px] text-[#6B7280]"
+            >
+              <option value="">— no manager (top) —</option>
+              {(() => {
+                const banned = descendantsOf(node.key);
+                return visible
+                  .filter((c) => !banned.has(c.key))
+                  .sort((a, b) => a.name.localeCompare(b.name))
+                  .map((c) => (
+                    <option key={c.key} value={c.key}>
+                      {c.name}
+                      {c.position ? ` · ${c.position}` : ""}
+                    </option>
+                  ));
+              })()}
+            </select>
+          )}
+        </div>
+        {kids > 0 && (
+          <button
+            type="button"
+            onClick={() => toggle(node.key)}
+            aria-label={shut ? `Show ${kids} report(s)` : "Hide reports"}
+            className="absolute -bottom-2 left-1/2 z-10 -translate-x-1/2 rounded-full border border-[#E2DDD8] bg-white px-1 text-[9px] font-semibold text-[#6B5C32]"
+          >
+            {shut ? `+${countSubtree(node) - 1}` : "–"}
+          </button>
+        )}
+      </div>
+    );
+  };
+
+  const Branch = ({ node }: { node: OrgNode }): React.ReactElement => {
+    const kids = collapsed.has(node.key) ? [] : node.children;
+    return (
+      <div className="flex flex-col items-center">
+        <TreeCard node={node} />
+        {kids.length > 0 && (
+          <>
+            {/* stem down from the parent */}
+            <div className="h-5 w-px bg-[#C2BDB6]" />
+            <div className="flex items-start justify-center">
+              {kids.map((c, i) => (
+                <div key={c.key} className="relative flex flex-col items-center px-2">
+                  {/* the bus across the siblings, half-width at each end so it
+                      stops at the outermost child instead of hanging in air */}
+                  {kids.length > 1 && (
+                    <span
+                      aria-hidden
+                      className="absolute top-0 h-px bg-[#C2BDB6]"
+                      style={{
+                        left: i === 0 ? "50%" : 0,
+                        right: i === kids.length - 1 ? "50%" : 0,
+                      }}
+                    />
+                  )}
+                  <div className="h-5 w-px bg-[#C2BDB6]" />
+                  <Branch node={c} />
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
+
   if (loading && people.length === 0) {
     return <div className="p-6 text-center text-sm text-[#9CA3AF]">Loading org chart…</div>;
   }
@@ -247,6 +369,20 @@ export function OrgChart({ canManage }: Props) {
           </span>
         </div>
         <div className="flex items-center gap-2">
+          <div className="flex overflow-hidden rounded border border-[#E2DDD8]">
+            {(["tree", "board"] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => setView(v)}
+                className={`px-2 py-1 text-[11px] capitalize ${
+                  view === v ? "bg-[#6B5C32] text-white" : "text-[#6B7280] hover:text-[#1F1D1B]"
+                }`}
+              >
+                {v === "tree" ? "Hierarchy" : "Departments"}
+              </button>
+            ))}
+          </div>
           <label className="flex items-center gap-1 text-[11px] text-[#6B7280]">
             <input
               type="checkbox"
@@ -304,7 +440,17 @@ export function OrgChart({ canManage }: Props) {
           style={{ zoom: `${zoom}%` }}
           className="flex min-w-max items-start gap-3"
         >
-          {board.map((box, boxIdx) => {
+          {view === "tree" && (
+            <div className="flex min-w-max items-start justify-center gap-8 px-4 pt-2">
+              {forest.map((r) => (
+                <Branch key={r.key} node={r} />
+              ))}
+              {forest.length === 0 && (
+                <div className="py-10 text-sm text-[#9CA3AF]">Nobody on the chart yet.</div>
+              )}
+            </div>
+          )}
+          {view === "board" && board.map((box, boxIdx) => {
             const isShut = collapsed.has(box.dept);
             const accent = ACCENTS[boxIdx % ACCENTS.length];
             return (

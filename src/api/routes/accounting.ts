@@ -5890,7 +5890,9 @@ app.get("/cleanup-report", async (c) => {
     ).all<{ type: string; itemId: string; refType: string | null; refId: string | null; totalCostSen: number }>(),
     // `poNo` — see the note on /wip-detail above.
     db.prepare("SELECT id, poNo, itemCategory FROM production_orders").all<{ id: string; poNo: string | null; itemCategory: string | null }>(),
-    db.prepare("SELECT id, itemCode, name, itemGroup FROM raw_materials").all<{ id: string; itemCode: string | null; name: string | null; itemGroup: string | null }>(),
+    // `description` — raw_materials has no `name` column; the item's readable
+    // label is its description. This is what was 500ing the report.
+    db.prepare("SELECT id, itemCode, description, itemGroup FROM raw_materials").all<{ id: string; itemCode: string | null; description: string | null; itemGroup: string | null }>(),
   ]);
   const poCat = new Map<string, { poNumber: string; category: string }>();
   for (const p of poRes.results ?? []) poCat.set(p.id, { poNumber: p.poNo ?? p.id, category: String(p.itemCategory ?? "").toUpperCase() });
@@ -5913,7 +5915,7 @@ app.get("/cleanup-report", async (c) => {
   const usedGroups = new Set<string>();
   for (const r of rmRes.results ?? []) {
     const g = String(r.itemGroup ?? "").trim();
-    if (!g) rmNoGroup.push({ itemCode: r.itemCode ?? r.id, name: r.name ?? "" });
+    if (!g) rmNoGroup.push({ itemCode: r.itemCode ?? r.id, name: r.description ?? "" });
     else usedGroups.add(g);
   }
   const unmappedGroups = [...usedGroups].filter((g) => !mappedGroups.has(g)).sort();

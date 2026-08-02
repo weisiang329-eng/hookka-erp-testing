@@ -324,10 +324,17 @@ export async function explodeBomNeeds(
   return { needs: [...merged.values()], missingBom };
 }
 
+// raw_materials stores the readable label as `description` and the unit as
+// `base_uom` — there is no item_name and no unit column. The camelCase aliases
+// below are kept because callers read them; they are just filled from the real
+// columns now instead of from a SELECT that 500'd.
 type RawMaterialStockRow = {
   itemCode: string;
+  description?: string | null;
   itemName?: string | null;
   item_name?: string | null;
+  baseUom?: string | null;
+  base_uom?: string | null;
   unit?: string | null;
   balanceQty: number | null;
   balance_qty?: number | null;
@@ -423,7 +430,7 @@ export async function materialAvailability(
   const [stockRes, poRes, readiness] = await Promise.all([
     db
       .prepare(
-        "SELECT itemCode, itemName, unit, balanceQty FROM raw_materials",
+        "SELECT itemCode, description, baseUom, balanceQty FROM raw_materials",
       )
       .all<RawMaterialStockRow>(),
     db
@@ -519,8 +526,9 @@ export async function materialAvailability(
 
     materials.push({
       code: need.code,
-      name: stock?.itemName ?? stock?.item_name ?? need.name ?? need.code,
-      unit: stock?.unit ?? need.unit ?? "PCS",
+      name:
+        stock?.description ?? stock?.itemName ?? stock?.item_name ?? need.name ?? need.code,
+      unit: stock?.baseUom ?? stock?.base_uom ?? stock?.unit ?? need.unit ?? "PCS",
       requiredQty: Math.ceil(requiredQty * 100) / 100,
       onHand,
       enough: shortQty <= 0,

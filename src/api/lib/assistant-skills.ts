@@ -107,7 +107,8 @@ const monthlySalesSummary: ReportTemplate = {
       args.push(`%${customer}%`);
     }
     const rows = await c.var.DB.prepare(
-      `SELECT id, companySOId, customerName, customerPOId, status, hub,
+      // `hubName` — sales_orders has hub_id / hub_name, never a bare `hub`.
+      `SELECT id, companySOId, customerName, customerPOId, status, hubName,
               totalSen, customerDeliveryDate, created_at AS createdAt
        FROM sales_orders WHERE ${wheres.join(" AND ")}
        ORDER BY created_at ASC LIMIT ${MAX_EXPORT_ROWS}`,
@@ -119,7 +120,7 @@ const monthlySalesSummary: ReportTemplate = {
         customerName: string | null;
         customerPOId: string | null;
         status: string | null;
-        hub: string | null;
+        hubName: string | null;
         totalSen: number | null;
         customerDeliveryDate: string | null;
         createdAt: string | null;
@@ -129,7 +130,7 @@ const monthlySalesSummary: ReportTemplate = {
     // Bucket by hub. Treat null/empty as "OTHER".
     const buckets = new Map<string, typeof results>();
     for (const r of results) {
-      const hub = (r.hub ?? "").trim().toUpperCase() || "OTHER";
+      const hub = (r.hubName ?? "").trim().toUpperCase() || "OTHER";
       const list = buckets.get(hub) ?? [];
       list.push(r);
       buckets.set(hub, list);

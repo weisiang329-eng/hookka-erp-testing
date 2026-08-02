@@ -814,6 +814,42 @@ INV-2607-060 happens to be safe (same code = same price there), but two SOs pric
 same code differently would take the FIRST price → a money bug. Unverified; check before
 assuming it's benign.
 
+**Resolved 2026-08-02 — split in two, because the two halves have very different
+severity.**
+
+*The `priceByCode` money bug is NOT real.* That map is written by
+`invoice-print-extras.ts:159/218` and declared in `generate-invoice-pdf.ts:39`
+("kept for backward-safety") — and **read nowhere in the codebase**. It is dead.
+Nothing can be mispriced through it.
+
+*The printed price build-up IS affected, and the charged amount is NOT.* Two
+different lines in `generate-invoice-pdf.ts`:
+
+- `:358` `grossLineSen = it.unitPriceSen × it.quantity` — what the customer is
+  **charged** comes from `invoice_items`, untouched by any of this.
+- `:366` `priceLines(it.unitPriceSen, ex)` — what is **printed** as the build-up
+  (Base / + Divan / + Leg / + T.Height / + Special) comes from `ex`, i.e.
+  `items[id]`, whose `baseSen…unitSen` are taken from the first-one-wins matched
+  SO line for every line that was not price-edited
+  (`invoice-print-extras.ts:350-355`). `unitPriceSen` is only the fallback when
+  no match exists at all.
+
+So the exposure is a **self-contradicting document**, not an under- or
+over-charge: an invoice can print "Base RM430.00" on a line it charges RM880.00
+for. On a customer-facing document that is still serious — it is the kind of
+thing a customer's own reconciliation finds.
+
+*Scale of the risk condition in production:* **152** consolidated DOs contain a
+product code that resolves to more than one price across their source SOs,
+spreads up to **RM 450** (`1013-(K)` RM430 vs RM880; `2008(A)-(K)` three prices
+RM830–RM1,255). That counts DOs where the ambiguity EXISTS — not invoices proven
+to have printed the wrong one, which needs a per-line replay.
+
+This does not change the recommendation (option **B** — resolve refs through the
+DO's items, which hold the real per-line link), but it does change the urgency
+argument: no money has moved incorrectly, so this is a correctness-of-document
+fix, not a billing recovery.
+
 **Fix options given to owner:** (A) persist the real per-line SO/production-order link on
 `invoice_items` (treats the cause; schema + backfill); (B) resolve refs THROUGH the DO's
 items, which already hold the truth (no schema change) — **recommended**; (C) keep guessing

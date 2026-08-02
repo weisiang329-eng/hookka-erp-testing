@@ -231,3 +231,57 @@ test("a manager wears the same cap the departments under them wear", () => {
   // beneath it is the "heading with nothing under it" problem again.
   assert.match(branch, /\) : \(\s*\n\s*<TreeCard node=\{node\} \/>\s*\n\s*\)\}/);
 });
+
+test("Collapse all / Expand all are gone — they did nothing in the default view", () => {
+  // Owner 2026-08-02:「为什么会有 collapse all 还有 expand all？这个功能没有用啊」.
+  // He was right, and for a sharper reason than "unused": both buttons wrote
+  // DEPARTMENT names into `collapsed`, but the Hierarchy tree — the view the
+  // chart opens on — checks `collapsed.has(node.key)`, a person key. So in the
+  // default view they were inert, while still occupying the toolbar.
+  const src = readFileSync("src/components/org-chart.tsx", "utf8");
+  assert.doesNotMatch(src, />\s*Collapse all\s*</);
+  assert.doesNotMatch(src, />\s*Expand all\s*</);
+  assert.doesNotMatch(
+    src,
+    /setCollapsed\(new Set\(board\.map/,
+    "the department-keyed bulk collapse must not return",
+  );
+  // The per-box header toggle is the control that always worked — it stays.
+  assert.match(src, /onClick=\{\(\) => toggle\(box\.dept\)\}/);
+});
+
+test("the chart prints what you see, expanded and unzoomed", () => {
+  // Owner 2026-08-02:「它不能 print 出来吗？」. Printing CLONES the live chart
+  // node rather than re-rendering the tree as standalone HTML — a second
+  // layout engine would drift from this one the first time a card changes.
+  const src = readFileSync("src/components/org-chart.tsx", "utf8");
+  assert.match(src, /ref=\{chartRef\}/, "the printed copy comes from the real node");
+  assert.match(src, /cloneNode\(true\)/);
+
+  // Two screen conveniences that would silently LOSE people on paper:
+  // a collapsed box prints as a bare header with no hint anyone is missing…
+  assert.match(src, /setCollapsed\(new Set\(\)\);\s*\n\s*setPendingPrint\(true\)/,
+    "expand BEFORE cloning — setState is async, so the handler would clone the old DOM");
+  // …and a zoom on top of the sheet's own scale-to-fit clips the right edge.
+  assert.match(src, /el\.style\.zoom = "";/);
+
+  // The app's own stylesheets ride along, or the sheet prints unstyled.
+  assert.match(src, /link\[rel="stylesheet"\], style/);
+  // And the dialog waits for them to apply.
+  assert.match(src, /addEventListener\("load"/);
+
+  // Landscape: the tree is far wider than it is tall, and A4 portrait would
+  // break it across pages at an arbitrary column.
+  assert.match(src, /@page \{ size: A3 landscape/);
+  // A department box split across a page boundary is unreadable.
+  assert.match(src, /break-inside: avoid/);
+  // On paper there is no scrolling — the board must wrap, not clip.
+  assert.match(src, /overflow: visible !important/);
+  assert.match(src, /flex-wrap: wrap !important/);
+
+  // Controls are not content.
+  assert.match(src, /select, button\[aria-label\], \.org-no-print/);
+
+  // A blocked pop-up must say so rather than appear to do nothing.
+  assert.match(src, /blocked the print window/);
+});

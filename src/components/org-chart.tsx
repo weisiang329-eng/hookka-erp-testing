@@ -12,8 +12,17 @@
 // Production — their production sub-department is a costing dimension, not a
 // reporting line.
 // ---------------------------------------------------------------------------
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Network, Minus, Plus, Users, Pencil } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Network,
+  Minus,
+  Plus,
+  Users,
+  Pencil,
+  Printer,
+} from "lucide-react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { buildOrgTree, countSubtree, type OrgNode, type OrgPerson } from "@/lib/org-people";
 
@@ -116,6 +125,118 @@ export function OrgChart({ canManage }: Props) {
    * other, so both stay.
    */
   const [view, setView] = useState<"tree" | "board">("tree");
+
+  // ─── Print ────────────────────────────────────────────────────────────────
+  //
+  // Owner 2026-08-02: 「它不能 print 出来吗？」. A chart that cannot leave the
+  // screen is half a chart — this one gets pinned on a wall and handed to new
+  // staff.
+  //
+  // It prints WHAT YOU SEE by cloning the chart node into a blank window along
+  // with the app's own stylesheets, rather than re-rendering the tree as
+  // standalone HTML. Re-rendering means a second layout engine to keep in step
+  // with this one, and it would drift the first time a card changes here.
+  //
+  // Two things are forced in the printed copy, because they are screen
+  // conveniences that would silently lose people on paper:
+  //   * every department is EXPANDED — a collapsed box would print as a bare
+  //     header and the reader has no way to know anyone is missing;
+  //   * zoom is dropped back to 100% — the print sheet does its own
+  //     scale-to-fit, and a zoom on top of that clips the right-hand edge.
+  const chartRef = useRef<HTMLDivElement>(null);
+  /** Set when Print is pressed; the effect below prints once React has expanded. */
+  const [pendingPrint, setPendingPrint] = useState(false);
+
+  const startPrint = useCallback(() => {
+    // Expand first, print in the effect — setState is async, so cloning the DOM
+    // in this handler would capture the still-collapsed boxes.
+    setCollapsed(new Set());
+    setPendingPrint(true);
+  }, []);
+
+  useEffect(() => {
+    if (!pendingPrint) return;
+    setPendingPrint(false);
+    const node = chartRef.current;
+    if (!node) return;
+
+    const clone = node.cloneNode(true) as HTMLElement;
+    // The zoom lives as an inline style on the inner wrapper.
+    clone.querySelectorAll<HTMLElement>("[style*='zoom']").forEach((el) => {
+      el.style.zoom = "";
+    });
+    // The reporting-line pickers are controls, not content.
+    clone.querySelectorAll("select, button[aria-label], .org-no-print").forEach((el) => {
+      el.remove();
+    });
+
+    const styles = [
+      ...document.querySelectorAll('link[rel="stylesheet"], style'),
+    ]
+      .map((n) => n.outerHTML)
+      .join("\n");
+
+    const today = new Date().toLocaleDateString("en-GB", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+    });
+    const heading = view === "tree" ? "Reporting Structure" : "Departments";
+
+    const w = window.open("", "_blank", "width=1400,height=900");
+    if (!w) {
+      setError("Your browser blocked the print window — allow pop-ups for this site.");
+      return;
+    }
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8">
+<title>Hookka Org Chart — ${heading}</title>
+${styles}
+<style>
+  /* Landscape by default: the tree is far wider than it is tall, and A4
+     portrait would break it across pages at a random column. */
+  @page { size: A3 landscape; margin: 10mm; }
+  body { background: #fff; padding: 0; margin: 0; }
+  .sheet { padding: 12px 16px; }
+  .sheet-head {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    border-bottom: 2px solid #6B5C32; padding-bottom: 8px; margin-bottom: 14px;
+  }
+  .sheet-head .brand { font-size: 18px; font-weight: 800; letter-spacing: .5px; color: #1F1D1B; }
+  .sheet-head .brand small { display:block; font-size: 9px; font-weight: 500; letter-spacing: 2px; color: #9CA3AF; }
+  .sheet-head .meta { text-align: right; font-size: 11px; color: #6B7280; }
+  .sheet-head .meta strong { display:block; font-size: 13px; color:#1F1D1B; }
+  /* The screen keeps the board in a horizontal scroller. On paper there is no
+     scrolling — let it wrap onto the page instead of clipping at the edge. */
+  .sheet .overflow-x-auto { overflow: visible !important; }
+  .sheet .min-w-max { min-width: 0 !important; }
+  .sheet .flex.min-w-max { flex-wrap: wrap !important; align-items: flex-start !important; }
+  /* Never split a department box across two pages. */
+  .sheet .rounded-lg { break-inside: avoid; page-break-inside: avoid; }
+  .no-print { position: fixed; top: 10px; right: 12px; }
+  .no-print button {
+    background: #6B5C32; color: #fff; border: 0; padding: 8px 14px;
+    border-radius: 6px; cursor: pointer; font-size: 12px;
+  }
+  @media print { .no-print { display: none; } }
+</style>
+</head><body>
+<div class="no-print"><button onclick="window.print()">Print / Save as PDF</button></div>
+<div class="sheet">
+  <div class="sheet-head">
+    <div class="brand">HOOKKA<small>FURNITURE MANUFACTURING</small></div>
+    <div class="meta"><strong>Org Chart — ${heading}</strong>${today}</div>
+  </div>
+  ${clone.outerHTML}
+</div>
+</body></html>`);
+    w.document.close();
+    // Fire the dialog once the cloned stylesheets have actually applied —
+    // printing before then produces an unstyled sheet.
+    w.addEventListener("load", () => {
+      w.focus();
+      w.print();
+    });
+  }, [pendingPrint, view]);
 
   const visible = useMemo(
     () => (showInactive ? people : people.filter((p) => p.active)),
@@ -694,19 +815,19 @@ export function OrgChart({ canManage }: Props) {
             />
             Show inactive
           </label>
+          {/* Collapse all / Expand all were removed (owner 2026-08-02:
+              「这个功能没有用啊」). They were worse than useless: they wrote
+              DEPARTMENT keys into `collapsed`, which only the Departments view
+              reads, so in Hierarchy view — the default — pressing them did
+              nothing at all. Each department header is still its own toggle,
+              which is the control anyone actually reaches for. */}
           <button
             type="button"
-            onClick={() => setCollapsed(new Set(board.map((b) => b.dept)))}
-            className="rounded border border-[#E2DDD8] px-2 py-1 text-[11px] text-[#6B7280] hover:text-[#1F1D1B]"
+            onClick={startPrint}
+            className="flex items-center gap-1 rounded border border-[#E2DDD8] px-2 py-1 text-[11px] text-[#6B7280] hover:text-[#1F1D1B]"
           >
-            Collapse all
-          </button>
-          <button
-            type="button"
-            onClick={() => setCollapsed(new Set())}
-            className="rounded border border-[#E2DDD8] px-2 py-1 text-[11px] text-[#6B7280] hover:text-[#1F1D1B]"
-          >
-            Expand all
+            <Printer className="h-3 w-3" />
+            Print
           </button>
           <div className="flex items-center gap-1">
             <button
@@ -738,7 +859,7 @@ export function OrgChart({ canManage }: Props) {
 
       {/* Boxes sit side by side and the BOARD scrolls, not the page — a
           department with forty people must not push the next one off-screen. */}
-      <div className="overflow-x-auto pb-4">
+      <div ref={chartRef} className="overflow-x-auto pb-4">
         <div
           style={{ zoom: `${zoom}%` }}
           className="flex min-w-max items-start gap-3"

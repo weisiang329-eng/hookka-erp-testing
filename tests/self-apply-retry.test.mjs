@@ -132,3 +132,57 @@ test("the canonical call site uses the helper", async () => {
     "the swallow-everything loop must not return",
   );
 });
+
+// --- the sweep --------------------------------------------------------------
+
+test("EVERY self-apply site uses the helper — the class, not one instance", async () => {
+  const { readFileSync, readdirSync, statSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const walk = (d, out = []) => {
+    for (const n of readdirSync(d)) {
+      const p = join(d, n);
+      if (statSync(p).isDirectory()) walk(p, out);
+      else if (p.endsWith(".ts")) out.push(p);
+    }
+    return out;
+  };
+  const offenders = [];
+  for (const f of walk("src/api")) {
+    if (f.endsWith("self-apply.ts")) continue;
+    const src = readFileSync(f, "utf8");
+    if (/for \(const sql of stmts\)/.test(src)) offenders.push(f);
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    "a hand-rolled self-apply loop swallows errors AND memoises the failure — use runSelfApply",
+  );
+});
+
+test("every converted site drops its memo when the round fails", async () => {
+  const { readFileSync, readdirSync, statSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const walk = (d, out = []) => {
+    for (const n of readdirSync(d)) {
+      const p = join(d, n);
+      if (statSync(p).isDirectory()) walk(p, out);
+      else if (p.endsWith(".ts")) out.push(p);
+    }
+    return out;
+  };
+  const missing = [];
+  for (const f of walk("src/api")) {
+    if (f.endsWith("self-apply.ts")) continue;
+    const src = readFileSync(f, "utf8");
+    if (!src.includes("runSelfApply(")) continue;
+    // Either the explicit memoizeSelfApply wrapper, or the IIFE's .catch reset.
+    const guarded =
+      src.includes("memoizeSelfApply(") || /\)\(\)\.catch\(\(err\) => \{/.test(src);
+    if (!guarded) missing.push(f);
+  }
+  assert.deepEqual(
+    missing,
+    [],
+    "a rejected memo that is never cleared is as bad as a swallowed error",
+  );
+});

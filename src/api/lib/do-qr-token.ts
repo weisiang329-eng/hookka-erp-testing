@@ -19,6 +19,7 @@
 // ---------------------------------------------------------------------------
 
 import { canonicalizeOrigin } from "../../lib/app-origin";
+import { runSelfApply } from "../lib/self-apply";
 
 export type QrTokenTable = "delivery_orders" | "packing_lists";
 
@@ -39,14 +40,14 @@ export function ensureQrTokenColumns(db: D1Database): Promise<void> {
       "CREATE INDEX IF NOT EXISTS ix_delivery_orders_qrtoken ON delivery_orders (qrtoken)",
       "CREATE INDEX IF NOT EXISTS ix_packing_lists_qrtoken ON packing_lists (qrtoken)",
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).run();
-      } catch {
-        // ignore — column/index may already exist or DDL transiently rejected
-      }
-    }
-  })();
+    await runSelfApply(db, "do-qr-token", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    qrColumnsEnsured = null;
+    throw err;
+  });
   return qrColumnsEnsured;
 }
 

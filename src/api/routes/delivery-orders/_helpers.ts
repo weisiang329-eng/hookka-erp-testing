@@ -9,6 +9,7 @@
 // ---------------------------------------------------------------------------
 
 import type { Context } from "hono";
+import { runSelfApply } from "../../lib/self-apply";
 import type { Env } from "../../worker";
 import { consumeFGBatchesForDO } from "../../lib/do-cost-cascade";
 import { loadSoLinePriceIndex, priceForItem } from "../../lib/do-value";
@@ -2856,14 +2857,14 @@ export function ensureNotifyEmailColumns(db: D1Database): Promise<void> {
       "ALTER TABLE delivery_orders ADD COLUMN IF NOT EXISTS dispatchEmailAt TEXT",
       "ALTER TABLE delivery_orders ADD COLUMN IF NOT EXISTS deliveredEmailAt TEXT",
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).run();
-      } catch {
-        // ignore — column may already exist or DDL transiently rejected
-      }
-    }
-  })();
+    await runSelfApply(db, "delivery-orders", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    notifyEmailColumns = null;
+    throw err;
+  });
   return notifyEmailColumns;
 }
 

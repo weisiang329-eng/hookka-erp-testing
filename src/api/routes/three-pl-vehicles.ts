@@ -14,6 +14,7 @@
 // frontend's provider edit dialog and DO create dialog can scope.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import { runSelfApply } from "../lib/self-apply";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { normalizePlate, findPlateCollisions } from "../../lib/plate-no";
@@ -57,17 +58,14 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       // is the owner's call.
       "CREATE INDEX IF NOT EXISTS idx_three_pl_vehicles_plate_norm ON three_pl_vehicles (plate_norm)",
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).run();
-      } catch (err) {
-        console.warn("[three-pl-vehicles.migrations] ALTER skipped", {
-          sql,
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-  })();
+    await runSelfApply(db, "three-pl-vehicles", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    pendingMigrations = null;
+    throw err;
+  });
   return pendingMigrations;
 }
 

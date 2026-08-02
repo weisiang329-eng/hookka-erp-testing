@@ -19,6 +19,7 @@
 // everything on the fly and returns the freshly-built MRPRun.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import { runSelfApply } from "../lib/self-apply";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
@@ -296,17 +297,14 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       "CREATE INDEX IF NOT EXISTS idx_mrp_runs_org_run_date ON mrp_runs(org_id, run_date DESC)",
       "CREATE INDEX IF NOT EXISTS idx_mrp_requirements_run ON mrp_requirements(mrp_run_id)",
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).run();
-      } catch (err) {
-        console.warn("[mrp.migrations] ALTER skipped", {
-          sql,
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-  })();
+    await runSelfApply(db, "mrp", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    pendingMigrations = null;
+    throw err;
+  });
   return pendingMigrations;
 }
 

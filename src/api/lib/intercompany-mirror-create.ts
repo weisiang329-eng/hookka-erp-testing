@@ -41,6 +41,7 @@ import {
   DEFAULT_COMPANY_CODE,
 } from "../../lib/intercompany-mirror";
 import { normalizeCompanyName } from "../../lib/company-name-match";
+import { runSelfApply } from "../lib/self-apply";
 
 export type MirrorResult =
   | { created: false; reason: string; mirrorSoId?: undefined }
@@ -72,14 +73,14 @@ export function ensureMirrorLog(db: D1Database): Promise<void> {
       `CREATE UNIQUE INDEX IF NOT EXISTS intercompany_mirror_log_source_uniq
          ON intercompany_mirror_log (source_type, source_id)`,
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).run();
-      } catch {
-        // best-effort; table/index may already exist
-      }
-    }
-  })();
+    await runSelfApply(db, "intercompany-mirror-create", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    mirrorLogPromise = null;
+    throw err;
+  });
   return mirrorLogPromise;
 }
 

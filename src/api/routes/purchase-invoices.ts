@@ -12,6 +12,7 @@
 // DELETE is gated to DRAFT only — once confirmed we keep the row for audit.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import { runSelfApply } from "../lib/self-apply";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
@@ -79,14 +80,14 @@ function ensurePiMigrations(db: D1Database): Promise<void> {
       // → no column-rename-map.json entry needed.
       "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS source_document_file_id TEXT",
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).run();
-      } catch (err) {
-        console.warn("[pi] ensurePiMigrations:", sql, err);
-      }
-    }
-  })();
+    await runSelfApply(db, "purchase-invoices", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    piMigrationPromise = null;
+    throw err;
+  });
   return piMigrationPromise;
 }
 

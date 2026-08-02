@@ -13,6 +13,7 @@
 // and are remapped to camelCase in the response.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import { runSelfApply } from "../lib/self-apply";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { monthsOverdue, nextMonthDueDate } from "../../lib/terms";
@@ -6714,17 +6715,14 @@ function ensurePnlHistorical(db: D1Database): Promise<void> {
        )`,
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_pnl_hist_key ON pnl_historical (org_id, ym, line)`,
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).run();
-      } catch (err) {
-        console.warn("[accounting.pnl-historical] DDL skipped", {
-          sql: sql.split("\n")[0],
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-  })();
+    await runSelfApply(db, "accounting", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    _pendingPnlHistMigrations = null;
+    throw err;
+  });
   return _pendingPnlHistMigrations;
 }
 
@@ -6745,17 +6743,14 @@ function ensureInventoryOpening(db: D1Database): Promise<void> {
        )`,
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_opening_key ON inventory_opening (org_id, layer)`,
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).run();
-      } catch (err) {
-        console.warn("[accounting.inventory-opening] DDL skipped", {
-          sql: sql.split("\n")[0],
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-  })();
+    await runSelfApply(db, "accounting", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    _pendingInventoryOpeningMigrations = null;
+    throw err;
+  });
   return _pendingInventoryOpeningMigrations;
 }
 
@@ -6779,17 +6774,14 @@ function ensureStockTake(db: D1Database): Promise<void> {
        )`,
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_take_key ON stock_take (org_id, item_group, ym)`,
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).run();
-      } catch (err) {
-        console.warn("[accounting.stock-take] DDL skipped", {
-          sql: sql.split("\n")[0],
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-  })();
+    await runSelfApply(db, "accounting", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    _pendingStockTakeMigrations = null;
+    throw err;
+  });
   return _pendingStockTakeMigrations;
 }
 
@@ -6815,17 +6807,14 @@ function ensureStockTakeItemAlias(db: D1Database): Promise<void> {
        )`,
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_take_item_alias_key ON stock_take_item_alias (org_id, item_key)`,
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).run();
-      } catch (err) {
-        console.warn("[accounting.stock-take-item-alias] DDL skipped", {
-          sql: sql.split("\n")[0],
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-  })();
+    await runSelfApply(db, "accounting", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    _pendingStockTakeItemAliasMigrations = null;
+    throw err;
+  });
   return _pendingStockTakeItemAliasMigrations;
 }
 
@@ -6848,17 +6837,14 @@ function ensureOtherPartyBillOpening(db: D1Database): Promise<void> {
       `ALTER TABLE other_party_bills ADD COLUMN IF NOT EXISTS is_opening INTEGER NOT NULL DEFAULT 0`,
       `CREATE INDEX IF NOT EXISTS idx_other_party_bills_is_opening ON other_party_bills (is_opening) WHERE is_opening = 1`,
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).run();
-      } catch (err) {
-        console.warn("[accounting.other-party-bill-opening] DDL skipped", {
-          sql: sql.split("\n")[0],
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-  })();
+    await runSelfApply(db, "accounting", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    _pendingOtherPartyBillOpeningMigrations = null;
+    throw err;
+  });
   return _pendingOtherPartyBillOpeningMigrations;
 }
 
@@ -11900,17 +11886,14 @@ function ensureMaterialOpeningStock(db: D1Database): Promise<void> {
        )`,
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_mos_key ON material_opening_stock (org_id, rm_id)`,
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).run();
-      } catch (err) {
-        console.warn("[accounting.material-opening-stock] DDL skipped", {
-          sql: sql.split("\n")[0],
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-  })();
+    await runSelfApply(db, "accounting", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    pendingMosMigrations = null;
+    throw err;
+  });
   return pendingMosMigrations;
 }
 

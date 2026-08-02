@@ -21,6 +21,7 @@
 // arrival_state = 'ARRIVED'.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import { runSelfApply } from "../lib/self-apply";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { makeLedgerEntry } from "../../lib/costing";
@@ -83,16 +84,14 @@ function ensureGrnMigrations(db: D1Database): Promise<void> {
       "UPDATE grns SET arrival_state = 'ARRIVED' " +
         "WHERE status = 'POSTED' AND (arrival_state IS NULL OR arrival_state <> 'ARRIVED')",
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).run();
-      } catch (err) {
-        // ADD COLUMN IF NOT EXISTS is idempotent; log unexpected errors but
-        // do not abort — a missing column is better caught on first write.
-        console.warn("[grn] ensureGrnMigrations:", sql, err);
-      }
-    }
-  })();
+    await runSelfApply(db, "grn", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    grnMigrationPromise = null;
+    throw err;
+  });
   return grnMigrationPromise;
 }
 

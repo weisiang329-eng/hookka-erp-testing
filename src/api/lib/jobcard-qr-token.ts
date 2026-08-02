@@ -25,6 +25,8 @@
 //   • routes/public-rack-write.ts  GET/POST /:token…          (public resolve)
 // ---------------------------------------------------------------------------
 
+import { runSelfApply } from "../lib/self-apply";
+
 export function newJobCardQrToken(): string {
   return (crypto.randomUUID() + crypto.randomUUID()).replace(/-/g, "");
 }
@@ -41,14 +43,14 @@ export function ensureJobCardQrTokenColumn(db: D1Database): Promise<void> {
       "ALTER TABLE job_cards ADD COLUMN IF NOT EXISTS qr_token TEXT",
       "CREATE INDEX IF NOT EXISTS ix_job_cards_qr_token ON job_cards (qr_token)",
     ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).run();
-      } catch {
-        // ignore — column/index may already exist or DDL transiently rejected
-      }
-    }
-  })();
+    await runSelfApply(db, "jobcard-qr-token", stmts);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — otherwise one
+    // transient blip leaves the column unapplied for the life of this
+    // isolate. Dropping the memo lets the next request retry.
+    jobCardQrColumnEnsured = null;
+    throw err;
+  });
   return jobCardQrColumnEnsured;
 }
 

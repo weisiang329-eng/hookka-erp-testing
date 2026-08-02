@@ -50,7 +50,23 @@ export function isBenignSelfApplyError(err: unknown): boolean {
   return BENIGN.test(msg);
 }
 
-type Runner = { prepare(sql: string): { run(): Promise<unknown> } };
+// Two prepared-statement shapes exist in this codebase: the D1-compat one that
+// can `.run()` directly, and the narrower DbLike interfaces some modules declare
+// locally, which require a `.bind()` first. Accept both — the adapter treats
+// `.run()` and `.bind().run()` identically for a parameterless statement, and
+// forcing 20 call sites to converge on one shape is a bigger change than this
+// fix earns.
+type Runnable = { run(): Promise<unknown> };
+type Bindable = { bind(...args: unknown[]): Runnable };
+type Runner = {
+  prepare(sql: string): Partial<Runnable> & Partial<Bindable>;
+};
+
+function runnableFor(stmt: Partial<Runnable> & Partial<Bindable>): Runnable {
+  if (typeof stmt.run === "function") return stmt as Runnable;
+  if (typeof stmt.bind === "function") return stmt.bind();
+  throw new Error("self-apply: prepared statement can neither run() nor bind()");
+}
 
 /**
  * Run one module's self-applied DDL.
@@ -72,7 +88,7 @@ export async function runSelfApply(
   const failures: { sql: string; msg: string }[] = [];
   for (const sql of stmts) {
     try {
-      await db.prepare(sql).run();
+      await runnableFor(db.prepare(sql)).run();
     } catch (err) {
       if (isBenignSelfApplyError(err)) continue;
       const msg = err instanceof Error ? err.message : String(err);

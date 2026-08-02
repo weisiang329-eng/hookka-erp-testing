@@ -71,29 +71,48 @@ confirmed by reading Hookka code, not inferred.
    on the first write after an isolate boot left a column unapplied and never retried for
    the life of that isolate. `src/api/lib/self-apply.ts` + `tests/self-apply-retry.test.mjs`.
 
+### ✅ Shipped (continued — all on prod)
+4. **Delivered units with no cost behind them** (#218) — READ-ONLY detector.
+   `do-cost-cascade.ts` computes `shortages`; the caller consumed only `statements` and
+   dropped them, with no reconcile anywhere. Detector first, per Houzs's own COE §6.
+   `GET /api/reports/cogs-integrity.json` + folded into the daily compliance report.
+5. **"Doc posted, stock never moved"** (#219) — a FAB_CUT job card whose raw-material
+   consume threw returned a clean success (no RM_ISSUE, no cost-ledger row); a PO whose
+   intercompany mirror threw returned 201 while the sister company had no order.
+   Additive `movementErrors: string[]`, surfaced centrally in api-client so any future
+   route is covered, toasted as a WARNING (the save really did succeed).
+6. **Four hardening items** (#220):
+   · `onError` returned 500 + the RAW DRIVER MESSAGE for everything → transient now 503 +
+     Retry-After, everything else a generic message with a `ref` (full text still logged).
+     `withConnRetry` gains pool exhaustion at connect time; deliberately NOT widened to
+     mid-statement drops (retrying those is a silent double-write).
+   · lorry plates → `plate_norm` + non-unique index; new duplicates 409'd, existing ones
+     reported by `GET /api/three-pl-vehicles/collisions`. Repair is gated on an owner call.
+   · migration `0178` rewritten to production's actual MIXED spelling; `vite assetsDir` pinned.
+   · `clone-prod-to-staging.mjs` — env-only URLs, allow-list that fails closed, prod denied
+     by name, `--dry-run` default, `--confirm <host>` required.
+7. **Org chart — three defects on one endpoint** (#215, #216): rename-map miss (500), the
+   driver's camelCase result keys discarding the value (200 + silent no-op), and the edge
+   read being served from Hyperdrive's cache (value appears/disappears). Verified live on
+   staging: 6 reads over 36s all stick, loop guard fires, clear works.
+
+### 🔴 OWNER ACTION
+- **`.github/workflows/backup.yml` has failed 20/20 runs** — every run in the visible
+  history — at "Verify required secrets are set": `Missing required secrets:
+  SUPABASE_PROD_URL SUPABASE_SERVICE_ROLE_KEY`. **There are no automated DB backups.**
+  Only the repo owner can add GitHub secrets. Setup steps are in the workflow header.
+- **Rotate the Supabase credential** that was committed in `clone-prod-to-staging.mjs`. It
+  is out of the file now but remains in git history.
+
 ### ⚪ Queued (verified real, not yet fixed)
 - **26 more self-apply sites** still carry the swallow-and-memoise loop. The canonical one
-  (sales-orders) is converted; the shapes vary too much for a blind script, so the rest need
-  doing by hand. Highest first: grn, invoices, purchase-orders, users.
-- **FG COGS shortfall is computed and then dropped** — `do-cost-cascade.ts:163` returns
-  `shortages`, `delivery-orders/_helpers.ts:4282` consumes only `statements`, and there is
-  NO reconcile path anywhere. Goods ship with RM0 COGS / 100% margin, permanently. Same in
-  `po-cost-cascade.ts:800`. **Read-only detector first** to size it — that sequencing is the
-  whole lesson of Houzs's inventory-costing-oversell COE.
-- **Swallowed cascades that still return 200** — `production-orders/_helpers.ts:4557`
-  (material consumption + cost ledger silently skipped, job card reports success),
-  `purchase-orders.ts:629` (intercompany mirror). Fix is additive: `movementErrors: string[]`.
-- **`scripts/clone-prod-to-staging.mjs`** hardcodes plaintext prod AND staging connection
-  strings as adjacent literals, then TRUNCATEs every shared table on the target. No
-  allow-list, no dry-run, no dump. 🟡 **Owner: rotate that credential.**
-- **`app.onError` returns 500 + the raw driver message** for every uncaught error — no
-  transient/503 branch, and it echoes internals the pg-ping endpoint deliberately refuses to.
-  `withConnRetry` matches only connection-establishment signatures.
-  `docs/INFRA-RESILIENCE-PLAYBOOK.md:53` already lists this as "written, not deployed".
-- **`three_pl_vehicles.plate_no`** has neither canonicalization nor a unique index, and
-  `delivery_orders` denormalizes `vehicleId` — one truck's history splits across spellings.
-- **`migrations-postgres/0178`** declares `supplier_scan_samples` all-camelCase; production is
-  mixed. Harmless today (CREATE IF NOT EXISTS no-ops), wrong for a fresh DB.
+  (sales-orders) is converted and `src/api/lib/self-apply.ts` is the mechanism; the shapes
+  vary too much for a blind script. Highest first: grn, invoices, purchase-orders, users.
+- **The COGS repair itself.** The detector is live — read it before writing the fix, and
+  reconcile on EVERY FG-IN path (`fg-completion.ts`), not just one. Same discarded-shortfall
+  shape in `po-cost-cascade.ts:800` for raw materials.
+- **The existing plate collisions** need an owner decision (which duplicate wins, what
+  happens to the delivery history on the loser) before a unique index can go on.
 - **CI**: merging a PR into `staging` produced NO push run at all, and `workflow_dispatch`
   skips the deploy step, so staging sat undeployed until an empty commit was pushed.
 

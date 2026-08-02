@@ -4012,6 +4012,11 @@ export async function applyPoUpdate(
   id: string,
 ): Promise<Response> {
   const db = c.var.DB;
+  // Downstream movements that failed AFTER the job card was already committed.
+  // The document save is intentionally not rolled back — the cutting physically
+  // happened — but a silent failure here is "doc posted, stock never moved",
+  // and the operator sees a clean success. Surfaced on the response.
+  const movementErrors: string[] = [];
   const existing = await db
     .prepare("SELECT * FROM production_orders WHERE id = ?")
     .bind(id)
@@ -4558,12 +4563,19 @@ export async function applyPoUpdate(
         try {
           await consumeRawMaterialsForPO(db, existing.id);
         } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
           console.error("[consumeRawMaterialsForPO@FAB_CUT] cascade failed", {
             poId: id,
             jobCardId: updated.id,
             dept: updated.departmentCode,
-            err: err instanceof Error ? err.message : String(err),
+            err: msg,
           });
+          // The job card is already committed and MUST stay committed — the
+          // cutting physically happened. But a swallowed failure here means the
+          // meters never left the roll in the books and no RM_ISSUE reached the
+          // cost ledger, while the operator sees a clean save. Report it on the
+          // response instead of only in a log nobody reads.
+          movementErrors.push(`Raw-material consumption failed: ${msg}`);
         }
       }
     }
@@ -4746,7 +4758,15 @@ export async function applyPoUpdate(
     );
   }
 
-  return c.json({ success: true, data: fresh });
+  // Additive: absent when everything cascaded cleanly, so no existing caller
+  // changes behaviour. Present means the DOCUMENT saved but a downstream
+  // movement did not — the shape Houzs-ERP's api-fetch-hardening COE calls
+  // "doc posted, stock never moved".
+  return c.json(
+    movementErrors.length > 0
+      ? { success: true, data: fresh, movementErrors }
+      : { success: true, data: fresh },
+  );
 }
 
 // ---------------------------------------------------------------------------

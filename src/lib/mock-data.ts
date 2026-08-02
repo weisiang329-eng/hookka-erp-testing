@@ -6548,7 +6548,12 @@ function generatePayslipForWorker(
     pcb: stat.pcb,
     totalDeductions,
     netPay,
-    bankAccount: `CIMB-${worker.empNo.replace("EMP-", "")}XXXX`,
+    // Blank, never invented. This used to emit `CIMB-<empNo>XXXX`, which the
+    // seed carried into the real payslips table, and a payslip that prints a
+    // made-up account is worse than one that prints nothing (owner 2026-08-01:
+    // 「假的acc就不要放了 放空都好过放假的」). A real account arrives via the
+    // worker record; until then the document says so.
+    bankAccount: "",
     status,
   };
 }

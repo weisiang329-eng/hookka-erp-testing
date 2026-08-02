@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
+import { readFile } from "node:fs/promises";
 
 try {
   register("tsx/esm", pathToFileURL("./"));
@@ -45,8 +46,33 @@ test("a transfer shows bank and account together", () => {
 });
 
 test("a legacy single-string account still reads correctly", () => {
-  // 67 existing payslips hold "CIMB-004XXXX" in bank_account with no bank set.
+  // Older rows hold the whole thing in bank_account with no bank set. The 67
+  // seeded "CIMB-<empNo>XXXX" rows were blanked on prod 2026-08-02, but the
+  // single-string SHAPE is still what a hand-typed account looks like.
   assert.equal(pm.paymentDestinationLabel("TRANSFER", null, "CIMB-004XXXX"), "CIMB-004XXXX");
+});
+
+test("the seed never invents a bank account", async () => {
+  // It used to: `CIMB-${empNo}XXXX`, which the seed carried into the real
+  // payslips table, so 67 stored payslips would have PRINTED an account that
+  // does not exist. Blanking prod fixes the rows that are there; this stops a
+  // re-seed from putting them back (owner: 「假的acc就不要放了 放空都好过放假的」).
+  //
+  // Scanned as source text rather than imported: mock-data.ts resolves "@/lib"
+  // through the Vite alias, which the test runner has no idea about.
+  const src = await readFile(resolve(process.cwd(), "src/lib/mock-data.ts"), "utf8");
+  // Object-literal assignments only — `bankAccount: string;` in the type is a
+  // declaration, not a value, and matching it would fail on nothing real.
+  const assignments = [...src.matchAll(/^\s*bankAccount:\s*(.+?),\s*$/gm)].map((m) =>
+    m[1].trim(),
+  );
+  assert.ok(assignments.length > 0, "no bankAccount assignment found — has it moved?");
+  for (const value of assignments) {
+    assert.ok(
+      value === '""' || value === "''",
+      `seed must not invent a bank account, got bankAccount: ${value}`,
+    );
+  }
 });
 
 test("a transfer with nothing set SAYS so — never a silent blank", () => {

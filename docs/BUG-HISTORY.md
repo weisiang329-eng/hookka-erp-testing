@@ -813,7 +813,47 @@ line was matched to the wrong SO.
   (17,667.90 both legs), 15 rows kept incl. advance 1,619, PI paids unchanged,
   /ap-reconciliation residual 0.00.
 
-## BUG-2026-07-17-001 — invoice prints the WRONG customer PO on consolidated DOs (first-one-wins guess) `invoices` `delivery` `consolidated-do` `print` `data-integrity` 🔴
+## BUG-2026-07-17-001 — invoice prints the WRONG customer PO on consolidated DOs (first-one-wins guess) `invoices` `delivery` `consolidated-do` `print` `data-integrity` 🟢
+
+> **STATUS WAS WRONG — corrected 2026-08-02.** This sat at 🔴 "Awaiting owner's
+> pick" for two weeks. Option **A was actually implemented the same day it was
+> reported**: `invoice_items.production_order_id` exists, is populated on
+> **2,526 of 2,728 rows (92.6%)**, and `invoice-print-extras.ts:331` resolves the
+> refs from it FIRST — the code|fabric|size maps are now only a legacy fallback.
+> The owner was right to push back ("你确定吗？有这个问题？"); the write-up was
+> being read instead of the code.
+>
+> **Verified on the very invoice that was reported.** INV-2607-060, all 12 lines:
+> **12/12 resolve through the exact link, 0 fall back to the guess.** The three
+> colliding `1003(A)-(K)|PC151-01|6FT` lines now cite three DIFFERENT SOs
+> (SO-2607-030 / SO-2607-014 / SO-2606-270) — exactly the lines that were wrong.
+>
+> **The pricing half was checked too, and it is also fine going forward.**
+> `computeDoInvoiceLines` prices each line via `priceForItem(idx, di.productionOrderId, …)`,
+> which walks PO → its salesOrderId → the full `soId|code|size|fabric` key. Lines
+> charged something matching neither their SO line's full price nor its base,
+> `price_edited = 0`:
+>
+> | invoices created | such lines |
+> |---|---|
+> | before 2026-07-17 | 18 |
+> | **on/after 2026-07-17** | **0** |
+>
+> **Legacy set, stated with its limitation.** Those 18 pre-fix lines net to about
+> RM 1,285 OVER-charged (RM 401 under, RM 1,686 over) — but that figure compares
+> against TODAY's SO prices, and the special-order backfill re-priced the SO side
+> on 2026-07-17. Without point-in-time SO prices these cannot be cleanly
+> attributed between this bug and that backfill, so the number is an upper bound
+> on the disturbance, not a bill. Owner 2026-08-02 on the under-charged side:
+> 「已经收到钱了就算了」.
+>
+> **What is left:** the printed price BUILD-UP (`v` at `invoice-print-extras.ts:322`)
+> still resolves through the code|fabric|size maps rather than the PO link, so on
+> a legacy consolidated invoice the Base/Divan/Leg/Special breakdown can show
+> another SO's numbers even though the PO line and the charged total are right.
+> Cosmetic on new invoices (the refs and the charge are both exact); worth
+> mirroring `refByPo` with a `valByPo` when someone is next in this file.
+
 **Symptom (owner):** DO-2607-051 vs INV-2607-060 — "為什麼兩個 items details PO number
 不一樣?不對?" Correct. **4 of 12 invoice lines cite the WRONG customer PO.**
 

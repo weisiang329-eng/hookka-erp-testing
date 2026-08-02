@@ -9,6 +9,66 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-02 — 🔴 删掉的单据会从快取回来（owner 报，**根因确认、修正已回滚**）
+
+Owner：「为什么我明明 delete 掉了，却还能看到？而且我在 delete 的时候，它确实显示这个
+东西已经不在了」，并指出 Production Order 以前也这样。
+
+### 根因（实测，不是推论）
+
+```
+资料库 DRAFT 数量            = 0        ← 删除真的成功
+GET /api/sales-orders        = 两笔都还在
+stats byStatus               = { DRAFT: 2 }
+sales_orders MAX(updated_at) = 2026-08-01T08:48:36Z
+快照 built_from              = 2026-08-01T12:xx   ← 比它还新
+```
+加 cache-buster 参数无效 → **服务端**，不是浏览器、不是 CDN。
+
+快照新鲜度是 `built_from >= MAX(updated_at)`。**删除一列永远不会让 MAX 变大**，
+所以探针永远说「还新鲜」。因为最后一次编辑是前一天，它会**永远**错下去。
+
+**这是整个类别**：31 张快照表都有同一个洞。也**不是近期造成的** ——
+`git log` 显示 `snapshot.ts` / `snapshot-freshness.ts` 自 7/25 起无任何改动。
+
+**已用手动清除证实**：`DELETE FROM sales_orders_list_snapshot` +
+`sales_orders_stats_snapshot` 之后，1191 → **1189**，两笔消失，stats 归零。
+→ 确认过期资料就在快照表，不在 KV。
+
+### 🔴 修正尝试失败并回滚（9c983b4b → 5b696c29 → 669560af）
+
+做法：新鲜度签章加上 `COUNT(*)`。**代码方向是对的，但上线炸了。**
+
+`/api/sales-orders`、`/api/sales-orders/stats`、`/api/production-orders/overdue-counts`
+从部署那一刻全部 500。热修（读取前 await ALTER）**没有救回来** → 还有第二个原因。
+**服务优先，先回滚。**
+
+**最可能的原因（离线查出，尚未证实）**：我把 runtime ALTER 的 **promise 跨请求快取**：
+```ts
+const _rowsCol = new Map<string, Promise<void>>();   // ← 危险
+```
+`db-pg.ts` 档头明写 **MUST NOT be cached across requests**
+（"Cannot perform I/O on behalf of a different request"）。这个 ALTER 会在
+**31 张表的每一次读取**触发，部署瞬间大量请求同时撞上「别人还在跑的 promise」。
+Workers 这类错误是**整个请求**层级中止的，所以 `try/catch` 接不住 ——
+这解释了为什么热修无效。
+
+⚠️ **repo 里别处也有同样写法**（如 org-chart 的建表 `_mig`）。它们一直没事，
+可能只是因为不会同时在 31 张表上被触发。**要一起复查。**
+
+### ⚪ 下次怎么做（顺序不可以再颠倒）
+1. 改成快取 **`Set<string>`** 而不是 promise（纯资料，没有 I/O 身份）
+2. **先让这条路把驱动层错误原文吐出来** —— 现在只回通用讯息，这正是我查不到的原因
+3. **在 staging 实测**，包含部署瞬间的并发
+4. 通过才碰 main
+
+### 📌 教训
+- 2372 支测试全绿，**没有一支会连真的 Postgres** —— 这类错测试抓不到，
+  **只有部署后实测才会现形**。绿灯不等于可以上线。
+- 我整天在引用「migration 部署时不会跑、runtime ALTER 必须先 await」这条规则，
+  然后**自己违反了**，而且第一次修还修错方向。
+
+
 ## 2026-08-02 — ✅ System Health 大扫除（owner: 「把这些都优化解决」「不要停下来」)
 
 Owner 贴了 System Health 六张图。逐条查，**每一条都实测过才动手**。

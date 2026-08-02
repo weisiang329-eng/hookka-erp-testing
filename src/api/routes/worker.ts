@@ -851,22 +851,21 @@ type DepartmentRow = { id: string; shortName: string };
 // deploy-time migration step. Additive + nullable + IF NOT EXISTS → a re-run is a
 // no-op, and a phone that denies/can't-get location just leaves them null. SOFT:
 // location is recorded for review, never blocks the punch.
-let _attendanceGeoMig: Promise<void> | null = null;
-function ensureAttendanceGeo(db: D1Database): Promise<void> {
-  if (_attendanceGeoMig) return _attendanceGeoMig;
-  _attendanceGeoMig = (async () => {
-    const stmts = [
-      "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockInLat DOUBLE PRECISION",
-      "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockInLng DOUBLE PRECISION",
-      "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockOutLat DOUBLE PRECISION",
-      "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockOutLng DOUBLE PRECISION",
-      // Punch selfie (compressed JPEG data URL) — anti-buddy-punching evidence.
-      "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockInPhoto TEXT",
-      "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockOutPhoto TEXT",
-    ];
-    for (const s of stmts) await db.prepare(s).run();
-  })();
-  return _attendanceGeoMig;
+let _attendanceGeoMig = false;
+async function ensureAttendanceGeo(db: D1Database): Promise<void> {
+  if (_attendanceGeoMig) return;
+
+  const stmts = [
+    "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockInLat DOUBLE PRECISION",
+    "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockInLng DOUBLE PRECISION",
+    "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockOutLat DOUBLE PRECISION",
+    "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockOutLng DOUBLE PRECISION",
+    // Punch selfie (compressed JPEG data URL) — anti-buddy-punching evidence.
+    "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockInPhoto TEXT",
+    "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockOutPhoto TEXT",
+  ];
+  for (const s of stmts) await db.prepare(s).run();
+  _attendanceGeoMig = true;
 }
 // Valid WGS84 coordinate or null (a denied/garbage reading must not be stored).
 function parseCoord(v: unknown): number | null {
@@ -2639,71 +2638,70 @@ app.patch("/profile", async (c) => {
 // Runtime self-apply: the table reaches prod via this CREATE-IF-NOT-EXISTS
 // (migrations don't auto-replay on deploy). Awaited before the first read/write.
 // ============================================================
-let _nonprodReqMig: Promise<void> | null = null;
-export function ensureNonprodRequests(db: D1Database): Promise<void> {
-  if (_nonprodReqMig) return _nonprodReqMig;
-  _nonprodReqMig = (async () => {
-    await db
-      .prepare(
-        `CREATE TABLE IF NOT EXISTS worker_nonprod_requests (
-           id TEXT PRIMARY KEY,
-           worker_id TEXT NOT NULL,
-           date TEXT NOT NULL,
-           department_code TEXT NOT NULL,
-           hours DOUBLE PRECISION NOT NULL,
-           note TEXT,
-           status TEXT NOT NULL DEFAULT 'PENDING',
-           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-           decided_at TEXT,
-           decided_by TEXT,
-           entry_id TEXT
-         )`,
-      )
-      .run();
-    await db
-      .prepare(
-        "CREATE INDEX IF NOT EXISTS idx_worker_nonprod_requests_worker ON worker_nonprod_requests(worker_id, date DESC)",
-      )
-      .run();
-    await db
-      .prepare(
-        "CREATE INDEX IF NOT EXISTS idx_worker_nonprod_requests_status ON worker_nonprod_requests(status, created_at DESC)",
-      )
-      .run();
-    // Time-adjustment extension (migration 0196, owner 2026-06-26). Additive:
-    //   kind        — 'NONPROD' (existing, default) | 'ADD_PROD' (extra production time)
-    //   job_card_id — optional WIP/job ref for an ADD_PROD claim
-    // Pre-existing 0110 rows default kind='NONPROD' / job_card_id=NULL, so their
-    // behaviour is byte-identical. snake_case = no column-rename-map entry.
-    await db
-      .prepare(
-        "ALTER TABLE worker_nonprod_requests ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'NONPROD'",
-      )
-      .run();
-    await db
-      .prepare(
-        "ALTER TABLE worker_nonprod_requests ADD COLUMN IF NOT EXISTS job_card_id TEXT",
-      )
-      .run();
-    // Reject-with-reason + partial-approve (owner 2026-07-04). Additive:
-    //   reject_reason  — required note the office gives when REJECTing; shown
-    //                    back to the worker on their portal so they know why.
-    //   approved_hours — the amount actually approved (may be LESS than the
-    //                    requested `hours`, e.g. asked 1h20m, approved 1h).
-    //                    NULL for legacy / not-yet-approved rows → full `hours`.
-    // snake_case = no column-rename-map entry needed.
-    await db
-      .prepare(
-        "ALTER TABLE worker_nonprod_requests ADD COLUMN IF NOT EXISTS reject_reason TEXT",
-      )
-      .run();
-    await db
-      .prepare(
-        "ALTER TABLE worker_nonprod_requests ADD COLUMN IF NOT EXISTS approved_hours DOUBLE PRECISION",
-      )
-      .run();
-  })();
-  return _nonprodReqMig;
+let _nonprodReqMig = false;
+export async function ensureNonprodRequests(db: D1Database): Promise<void> {
+  if (_nonprodReqMig) return;
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS worker_nonprod_requests (
+         id TEXT PRIMARY KEY,
+         worker_id TEXT NOT NULL,
+         date TEXT NOT NULL,
+         department_code TEXT NOT NULL,
+         hours DOUBLE PRECISION NOT NULL,
+         note TEXT,
+         status TEXT NOT NULL DEFAULT 'PENDING',
+         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+         decided_at TEXT,
+         decided_by TEXT,
+         entry_id TEXT
+       )`,
+    )
+    .run();
+  await db
+    .prepare(
+      "CREATE INDEX IF NOT EXISTS idx_worker_nonprod_requests_worker ON worker_nonprod_requests(worker_id, date DESC)",
+    )
+    .run();
+  await db
+    .prepare(
+      "CREATE INDEX IF NOT EXISTS idx_worker_nonprod_requests_status ON worker_nonprod_requests(status, created_at DESC)",
+    )
+    .run();
+  // Time-adjustment extension (migration 0196, owner 2026-06-26). Additive:
+  //   kind        — 'NONPROD' (existing, default) | 'ADD_PROD' (extra production time)
+  //   job_card_id — optional WIP/job ref for an ADD_PROD claim
+  // Pre-existing 0110 rows default kind='NONPROD' / job_card_id=NULL, so their
+  // behaviour is byte-identical. snake_case = no column-rename-map entry.
+  await db
+    .prepare(
+      "ALTER TABLE worker_nonprod_requests ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'NONPROD'",
+    )
+    .run();
+  await db
+    .prepare(
+      "ALTER TABLE worker_nonprod_requests ADD COLUMN IF NOT EXISTS job_card_id TEXT",
+    )
+    .run();
+  // Reject-with-reason + partial-approve (owner 2026-07-04). Additive:
+  //   reject_reason  — required note the office gives when REJECTing; shown
+  //                    back to the worker on their portal so they know why.
+  //   approved_hours — the amount actually approved (may be LESS than the
+  //                    requested `hours`, e.g. asked 1h20m, approved 1h).
+  //                    NULL for legacy / not-yet-approved rows → full `hours`.
+  // snake_case = no column-rename-map entry needed.
+  await db
+    .prepare(
+      "ALTER TABLE worker_nonprod_requests ADD COLUMN IF NOT EXISTS reject_reason TEXT",
+    )
+    .run();
+  await db
+    .prepare(
+      "ALTER TABLE worker_nonprod_requests ADD COLUMN IF NOT EXISTS approved_hours DOUBLE PRECISION",
+    )
+    .run();
+  _nonprodReqMig = true;
 }
 
 type NonprodRequestRow = {

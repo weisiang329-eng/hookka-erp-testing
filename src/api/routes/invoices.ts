@@ -1383,22 +1383,24 @@ app.get("/aging", async (c) => {
 // 0179 self-apply — Postgres migration files are applied manually (deploy.yml
 // does NOT replay them), so ensure the per-line discount column exists before
 // any invoice write touches it. Idempotent ADD COLUMN IF NOT EXISTS, once/isolate.
-let _invDiscountColMig: Promise<void> | null = null;
-function ensureDiscountColumn(db: D1Database): Promise<void> {
-  if (!_invDiscountColMig) {
-    _invDiscountColMig = db
+// A BOOLEAN, not the promise — see src/api/lib/self-apply.ts. The old shape
+// cached the promise AND swallowed the error, so one transient DDL reject left
+// both columns unapplied and remembered as done for the life of the isolate.
+let _invDiscountColMig = false;
+async function ensureDiscountColumn(db: D1Database): Promise<void> {
+  if (_invDiscountColMig) return;
+  try {
+    await db
       .prepare("ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS discount_sen INTEGER NOT NULL DEFAULT 0")
-      .run()
-      .then(() =>
-        db
-          // 0209 — total-height component column (see sales-orders self-apply).
-          .prepare("ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS total_height_price_sen INTEGER NOT NULL DEFAULT 0")
-          .run()
-          .then(() => undefined),
-      )
-      .catch(() => undefined);
+      .run();
+    // 0209 — total-height component column (see sales-orders self-apply).
+    await db
+      .prepare("ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS total_height_price_sen INTEGER NOT NULL DEFAULT 0")
+      .run();
+    _invDiscountColMig = true;
+  } catch {
+    /* transient — leave the flag unset so the next request retries */
   }
-  return _invDiscountColMig;
 }
 
 // 0208 self-apply — the DB-level guarantee that one delivery order can have at
@@ -1459,20 +1461,25 @@ function rowToNoteLink(r: NoteLinkRow) {
   };
 }
 
-let _invDedupeIndexMig: Promise<void> | null = null;
-function ensureInvoiceDedupeIndex(db: D1Database): Promise<void> {
-  if (!_invDedupeIndexMig) {
-    _invDedupeIndexMig = db
+// A BOOLEAN, not the promise. This one guards a RACE (two concurrent creates
+// both passing the application check), so an isolate that quietly remembers a
+// failed CREATE INDEX as done is exactly the isolate where the duplicate slips
+// through. Flag set on success only.
+let _invDedupeIndexMig = false;
+async function ensureInvoiceDedupeIndex(db: D1Database): Promise<void> {
+  if (_invDedupeIndexMig) return;
+  try {
+    await db
       .prepare(
         `CREATE UNIQUE INDEX IF NOT EXISTS uniq_invoice_active_delivery_order
            ON invoices (delivery_order_id)
            WHERE status <> 'CANCELLED' AND delivery_order_id IS NOT NULL`,
       )
-      .run()
-      .then(() => undefined)
-      .catch(() => undefined);
+      .run();
+    _invDedupeIndexMig = true;
+  } catch {
+    /* transient — leave the flag unset so the next request retries */
   }
-  return _invDedupeIndexMig;
 }
 
 app.post("/", async (c) => {

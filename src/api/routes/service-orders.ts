@@ -412,24 +412,23 @@ app.get("/:id", async (c) => {
 // Self-applying migration (same pattern as sales-orders.ts): hubId lands on
 // service_orders at first POST per isolate, so prod keeps working before
 // migrations-postgres/0158 replays. Module-level promise = one ALTER per boot.
-let pendingServiceOrderMigrations: Promise<void> | null = null;
-function ensureServiceOrderMigrations(db: D1Database): Promise<void> {
-  if (pendingServiceOrderMigrations) return pendingServiceOrderMigrations;
-  pendingServiceOrderMigrations = (async () => {
-    try {
-      // 0158 — delivery hub inherited from the source SO/CO so service POs
-      // dispatch with a real address/state (DO-2606-030 root cause).
-      await db
-        .prepare(
-          "ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS hubId TEXT",
-        )
-        .run();
-    } catch {
-      // ignore — column may already exist or DDL transiently rejected; the
-      // INSERT below surfaces a real schema error with a clearer message.
-    }
-  })();
-  return pendingServiceOrderMigrations;
+let pendingServiceOrderMigrations = false;
+async function ensureServiceOrderMigrations(db: D1Database): Promise<void> {
+  if (pendingServiceOrderMigrations) return;
+
+  try {
+    // 0158 — delivery hub inherited from the source SO/CO so service POs
+    // dispatch with a real address/state (DO-2606-030 root cause).
+    await db
+      .prepare(
+        "ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS hubId TEXT",
+      )
+      .run();
+  } catch {
+    // ignore — column may already exist or DDL transiently rejected; the
+    // INSERT below surfaces a real schema error with a clearer message.
+  }
+  pendingServiceOrderMigrations = true;
 }
 
 app.post("/", async (c) => {

@@ -24,7 +24,7 @@ const co = readFileSync(
 );
 
 test("ensureCoStatusChangesTable creates the table idempotently, snake_case", () => {
-  assert.match(helpers, /export function ensureCoStatusChangesTable\(/);
+  assert.match(helpers, /export (?:async )?function ensureCoStatusChangesTable\(/);
   assert.match(helpers, /CREATE TABLE IF NOT EXISTS co_status_changes/);
   // physical columns the writers + reader depend on
   for (const col of ["co_id", "from_status", "to_status", "changed_by", "auto_actions"]) {

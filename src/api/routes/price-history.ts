@@ -80,21 +80,20 @@ app.get("/", async (c) => {
 // Runtime self-apply for the effective_from column (effective-dated pricing,
 // migration 0183). Mirrors ensureBindingColumns in supplier-materials.ts so
 // this route can write effective_from even if it's hit before that route.
-let effectiveFromEnsured: Promise<void> | null = null;
-function ensureEffectiveFromColumn(db: D1Database): Promise<void> {
-  if (effectiveFromEnsured) return effectiveFromEnsured;
-  effectiveFromEnsured = (async () => {
-    try {
-      await db
-        .prepare(
-          "ALTER TABLE price_histories ADD COLUMN IF NOT EXISTS effective_from TEXT",
-        )
-        .run();
-    } catch {
-      /* already exists / transient — ignore */
-    }
-  })();
-  return effectiveFromEnsured;
+let effectiveFromEnsured = false;
+async function ensureEffectiveFromColumn(db: D1Database): Promise<void> {
+  if (effectiveFromEnsured) return;
+
+  try {
+    await db
+      .prepare(
+        "ALTER TABLE price_histories ADD COLUMN IF NOT EXISTS effective_from TEXT",
+      )
+      .run();
+  } catch {
+    /* already exists / transient — ignore */
+  }
+  effectiveFromEnsured = true;
 }
 
 // POST /api/price-history — record a price change entry

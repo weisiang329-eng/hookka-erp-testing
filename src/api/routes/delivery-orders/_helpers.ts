@@ -2883,21 +2883,20 @@ export function ensureNotifyEmailColumns(db: D1Database): Promise<void> {
 // so invoices.ts (manual-invoice gate) and public-do-qr.ts (scan summary) can
 // guarantee the column exists before their own SELECTs read it.
 // ---------------------------------------------------------------------------
-export let deliveryIncompleteColumn: Promise<void> | null = null;
-export function ensureDeliveryIncompleteColumn(db: D1Database): Promise<void> {
-  if (deliveryIncompleteColumn) return deliveryIncompleteColumn;
-  deliveryIncompleteColumn = (async () => {
-    try {
-      await db
-        .prepare(
-          "ALTER TABLE delivery_orders ADD COLUMN IF NOT EXISTS delivery_incomplete INTEGER NOT NULL DEFAULT 0",
-        )
-        .run();
-    } catch {
-      // ignore — column may already exist or DDL transiently rejected
-    }
-  })();
-  return deliveryIncompleteColumn;
+export let deliveryIncompleteColumn = false;
+export async function ensureDeliveryIncompleteColumn(db: D1Database): Promise<void> {
+  if (deliveryIncompleteColumn) return;
+
+  try {
+    await db
+      .prepare(
+        "ALTER TABLE delivery_orders ADD COLUMN IF NOT EXISTS delivery_incomplete INTEGER NOT NULL DEFAULT 0",
+      )
+      .run();
+  } catch {
+    // ignore — column may already exist or DDL transiently rejected
+  }
+  deliveryIncompleteColumn = true;
 }
 
 // Uint8Array → base64 (chunked so a multi-page PDF doesn't blow the arg

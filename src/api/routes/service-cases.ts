@@ -231,64 +231,63 @@ export function synthesizeRootCauses(
 // service_cases.responsibleunit (migration 0166) piggybacks on the same
 // ensure — which business unit caused the issue, written by PUT /:id.
 // ---------------------------------------------------------------------------
-let caseLinkColumns: Promise<void> | null = null;
-function ensureCaseLinkColumns(db: D1Database): Promise<void> {
-  if (caseLinkColumns) return caseLinkColumns;
-  caseLinkColumns = (async () => {
-    try {
-      await db
-        .prepare("ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS caseid TEXT")
-        .run();
-    } catch {
-      // ignore — column may already exist or DDL transiently rejected
-    }
-    try {
-      await db
-        .prepare("ALTER TABLE service_cases ADD COLUMN IF NOT EXISTS responsibleunit TEXT")
-        .run();
-    } catch {
-      // ignore — column may already exist or DDL transiently rejected
-    }
-    try {
-      // investigatingat (migration 0168) — set the first time the case is
-      // marked IN_PROGRESS, so the Case Pipeline can date the Investigating
-      // stage (the only stage without another native timestamp).
-      await db
-        .prepare("ALTER TABLE service_cases ADD COLUMN IF NOT EXISTS investigatingat TEXT")
-        .run();
-    } catch {
-      // ignore — column may already exist or DDL transiently rejected
-    }
-    try {
-      // rootcauses (migration 0169) — JSON array of the case's root causes; a
-      // case can have several (owner 2026-06-12). The FIRST entry is mirrored
-      // into the legacy root_cause_category / root_cause_details columns so
-      // the list "Category" column + any legacy reader keep working.
-      await db
-        .prepare("ALTER TABLE service_cases ADD COLUMN IF NOT EXISTS rootcauses TEXT")
-        .run();
-    } catch {
-      // ignore — column may already exist or DDL transiently rejected
-    }
-    try {
-      // PERFORMANCE (owner 2026-08-01) — caseid was added above with no index,
-      // so loadSvOrdersForCases() below full-scanned sales_orders on EVERY
-      // case-detail load (and again, unfiltered, for the case list). On a table
-      // that grows with every order this is the most expensive read on the
-      // page, to return the handful of SV orders on one case. Runtime
-      // self-applied because Postgres migration files are not replayed on
-      // deploy; idempotent, and failure is swallowed so a rejected DDL can
-      // never take the Service Cases module down.
-      await db
-        .prepare(
-          "CREATE INDEX IF NOT EXISTS idx_sales_orders_caseid ON sales_orders (caseid)",
-        )
-        .run();
-    } catch (err) {
-      console.warn("[service-cases] idx_sales_orders_caseid:", err);
-    }
-  })();
-  return caseLinkColumns;
+let caseLinkColumns = false;
+async function ensureCaseLinkColumns(db: D1Database): Promise<void> {
+  if (caseLinkColumns) return;
+
+  try {
+    await db
+      .prepare("ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS caseid TEXT")
+      .run();
+  } catch {
+    // ignore — column may already exist or DDL transiently rejected
+  }
+  try {
+    await db
+      .prepare("ALTER TABLE service_cases ADD COLUMN IF NOT EXISTS responsibleunit TEXT")
+      .run();
+  } catch {
+    // ignore — column may already exist or DDL transiently rejected
+  }
+  try {
+    // investigatingat (migration 0168) — set the first time the case is
+    // marked IN_PROGRESS, so the Case Pipeline can date the Investigating
+    // stage (the only stage without another native timestamp).
+    await db
+      .prepare("ALTER TABLE service_cases ADD COLUMN IF NOT EXISTS investigatingat TEXT")
+      .run();
+  } catch {
+    // ignore — column may already exist or DDL transiently rejected
+  }
+  try {
+    // rootcauses (migration 0169) — JSON array of the case's root causes; a
+    // case can have several (owner 2026-06-12). The FIRST entry is mirrored
+    // into the legacy root_cause_category / root_cause_details columns so
+    // the list "Category" column + any legacy reader keep working.
+    await db
+      .prepare("ALTER TABLE service_cases ADD COLUMN IF NOT EXISTS rootcauses TEXT")
+      .run();
+  } catch {
+    // ignore — column may already exist or DDL transiently rejected
+  }
+  try {
+    // PERFORMANCE (owner 2026-08-01) — caseid was added above with no index,
+    // so loadSvOrdersForCases() below full-scanned sales_orders on EVERY
+    // case-detail load (and again, unfiltered, for the case list). On a table
+    // that grows with every order this is the most expensive read on the
+    // page, to return the handful of SV orders on one case. Runtime
+    // self-applied because Postgres migration files are not replayed on
+    // deploy; idempotent, and failure is swallowed so a rejected DDL can
+    // never take the Service Cases module down.
+    await db
+      .prepare(
+        "CREATE INDEX IF NOT EXISTS idx_sales_orders_caseid ON sales_orders (caseid)",
+      )
+      .run();
+  } catch (err) {
+    console.warn("[service-cases] idx_sales_orders_caseid:", err);
+  }
+  caseLinkColumns = true;
 }
 
 type SvOrderRow = {

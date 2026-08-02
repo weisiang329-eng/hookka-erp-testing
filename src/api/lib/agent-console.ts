@@ -42,67 +42,66 @@ export type AgentTaskId =
   | "employee-agent"
   | "service-agent";
 
-let _agentMig: Promise<void> | null = null;
-export function ensureAgentTables(db: D1Database): Promise<void> {
-  if (_agentMig) return _agentMig;
-  _agentMig = (async () => {
+let _agentMig = false;
+export async function ensureAgentTables(db: D1Database): Promise<void> {
+  if (_agentMig) return;
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS agent_runs (
+         id TEXT PRIMARY KEY,
+         agent TEXT NOT NULL,
+         started_at TEXT NOT NULL,
+         finished_at TEXT,
+         status TEXT NOT NULL DEFAULT 'running',
+         summary TEXT,
+         tokens_in INTEGER NOT NULL DEFAULT 0,
+         tokens_out INTEGER NOT NULL DEFAULT 0,
+         error TEXT
+       )`,
+    )
+    .run();
+  await db
+    .prepare(
+      "CREATE INDEX IF NOT EXISTS idx_agent_runs_agent ON agent_runs(agent, started_at DESC)",
+    )
+    .run();
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS agent_controls (
+         agent TEXT PRIMARY KEY,
+         paused INTEGER NOT NULL DEFAULT 0,
+         auto_approve INTEGER NOT NULL DEFAULT 0,
+         updated_at TEXT
+       )`,
+    )
+    .run();
+  // Phase column (owner 2026-07-16): 1 = propose · 2 = auto-tune · 3 =
+  // full-auto. Nullable add + a one-time backfill from the legacy
+  // auto_approve flag (ON = full-auto = 3). The WHERE phase IS NULL guard
+  // makes it idempotent — an explicitly-set phase is never clobbered.
+  try {
     await db
-      .prepare(
-        `CREATE TABLE IF NOT EXISTS agent_runs (
-           id TEXT PRIMARY KEY,
-           agent TEXT NOT NULL,
-           started_at TEXT NOT NULL,
-           finished_at TEXT,
-           status TEXT NOT NULL DEFAULT 'running',
-           summary TEXT,
-           tokens_in INTEGER NOT NULL DEFAULT 0,
-           tokens_out INTEGER NOT NULL DEFAULT 0,
-           error TEXT
-         )`,
-      )
+      .prepare("ALTER TABLE agent_controls ADD COLUMN IF NOT EXISTS phase INTEGER")
       .run();
     await db
       .prepare(
-        "CREATE INDEX IF NOT EXISTS idx_agent_runs_agent ON agent_runs(agent, started_at DESC)",
+        "UPDATE agent_controls SET phase = CASE WHEN auto_approve = 1 THEN 3 ELSE 1 END WHERE phase IS NULL",
       )
       .run();
-    await db
-      .prepare(
-        `CREATE TABLE IF NOT EXISTS agent_controls (
-           agent TEXT PRIMARY KEY,
-           paused INTEGER NOT NULL DEFAULT 0,
-           auto_approve INTEGER NOT NULL DEFAULT 0,
-           updated_at TEXT
-         )`,
-      )
-      .run();
-    // Phase column (owner 2026-07-16): 1 = propose · 2 = auto-tune · 3 =
-    // full-auto. Nullable add + a one-time backfill from the legacy
-    // auto_approve flag (ON = full-auto = 3). The WHERE phase IS NULL guard
-    // makes it idempotent — an explicitly-set phase is never clobbered.
-    try {
-      await db
-        .prepare("ALTER TABLE agent_controls ADD COLUMN IF NOT EXISTS phase INTEGER")
-        .run();
-      await db
-        .prepare(
-          "UPDATE agent_controls SET phase = CASE WHEN auto_approve = 1 THEN 3 ELSE 1 END WHERE phase IS NULL",
-        )
-        .run();
-    } catch (e) {
-      console.warn("[agent-controls] phase migration:", e);
-    }
-    // Seed the global kill-switch row so the console always has it to toggle.
-    await db
-      .prepare(
-        `INSERT INTO agent_controls (agent, paused, auto_approve, updated_at)
-         VALUES ('ALL', 0, 0, ?)
-         ON CONFLICT(agent) DO NOTHING`,
-      )
-      .bind(new Date().toISOString())
-      .run();
-  })();
-  return _agentMig;
+  } catch (e) {
+    console.warn("[agent-controls] phase migration:", e);
+  }
+  // Seed the global kill-switch row so the console always has it to toggle.
+  await db
+    .prepare(
+      `INSERT INTO agent_controls (agent, paused, auto_approve, updated_at)
+       VALUES ('ALL', 0, 0, ?)
+       ON CONFLICT(agent) DO NOTHING`,
+    )
+    .bind(new Date().toISOString())
+    .run();
+  _agentMig = true;
 }
 
 // ── Run logging ──────────────────────────────────────────────────────────────

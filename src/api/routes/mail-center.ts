@@ -39,168 +39,167 @@ const app = new Hono<Env>();
 // try/catch so a benign "already exists" never poisons the cached promise.
 // Same pattern as routes/three-pl-state-rates.ts.
 // ---------------------------------------------------------------------------
-let pendingSchema: Promise<void> | null = null;
-export function ensureMailSchema(db: D1Database): Promise<void> {
-  if (pendingSchema) return pendingSchema;
-  pendingSchema = (async () => {
-    const stmts = [
-      // Our outward-facing addresses / aliases (support@, sales@, lim@ ...).
-      // catch-all routing means mail to ANY of these already arrives; a row
-      // here is the in-ERP record that maps an address to a person/dept.
-      `CREATE TABLE IF NOT EXISTS email_addresses (
-         id TEXT PRIMARY KEY,
-         org_id TEXT NOT NULL DEFAULT 'hookka',
-         address TEXT NOT NULL,
-         label TEXT,
-         assigned_user_id TEXT,
-         assigned_user_name TEXT,
-         assigned_dept TEXT,
-         active INTEGER NOT NULL DEFAULT 1,
-         created_at TEXT,
-         created_by TEXT
-       )`,
-      // Lazy idempotent add — the per-statement try/catch above swallows the
-      // "duplicate column" error on isolates where this already ran, so it is
-      // safe whether or not the column exists. Records the person's job title
-      // alongside assigned_dept (owner 2026-06-17).
-      `ALTER TABLE email_addresses ADD COLUMN IF NOT EXISTS assigned_position TEXT`,
-      `CREATE UNIQUE INDEX IF NOT EXISTS ux_email_addresses_org_addr
-         ON email_addresses (org_id, address)`,
-      // Mailbox access grants (the "mailbox matrix" — owner 2026-06-17). A user
-      // always has their own assigned alias; these rows ADDITIONALLY grant
-      // access to shared mailboxes (support@/hr@/finance@) so several people
-      // can work one inbox. Managed from the User Management matrix.
-      `CREATE TABLE IF NOT EXISTS email_address_access (
-         id TEXT PRIMARY KEY,
-         org_id TEXT NOT NULL DEFAULT 'hookka',
-         address_id TEXT NOT NULL,
-         user_id TEXT NOT NULL,
-         created_at TEXT,
-         created_by TEXT
-       )`,
-      `CREATE UNIQUE INDEX IF NOT EXISTS ux_email_access_addr_user
-         ON email_address_access (org_id, address_id, user_id)`,
-      `CREATE INDEX IF NOT EXISTS ix_email_access_user
-         ON email_address_access (org_id, user_id)`,
-      // Hierarchical mail-visibility level per user (owner 2026-06-17). One row
-      // per user setting how WIDE their inbox is: 'personal' (own assigned +
-      // granted mailboxes — the default), 'department' (also every mailbox in
-      // their dept), or 'company' (every active mailbox in the org). Absent row
-      // ⇒ 'personal'. Managed by SUPER_ADMIN; folded into getMailScope below.
-      `CREATE TABLE IF NOT EXISTS mail_user_scope (
-         org_id TEXT NOT NULL DEFAULT 'hookka',
-         user_id TEXT NOT NULL,
-         level TEXT NOT NULL DEFAULT 'personal',
-         created_at TEXT,
-         PRIMARY KEY (org_id, user_id)
-       )`,
-      // One conversation with an external party, grouped by RFC threading.
-      `CREATE TABLE IF NOT EXISTS email_threads (
-         id TEXT PRIMARY KEY,
-         org_id TEXT NOT NULL DEFAULT 'hookka',
-         mailbox_address TEXT,
-         subject TEXT,
-         counterparty_email TEXT,
-         counterparty_name TEXT,
-         status TEXT NOT NULL DEFAULT 'open',
-         assigned_to_user_id TEXT,
-         assigned_to_name TEXT,
-         last_message_at TEXT,
-         last_direction TEXT,
-         last_snippet TEXT,
-         message_count INTEGER NOT NULL DEFAULT 0,
-         unread INTEGER NOT NULL DEFAULT 1,
-         created_at TEXT
-       )`,
-      // Email-client affordances that the frontend used to keep only in
-      // localStorage (star / labels / trash). Lazy idempotent adds — the
-      // per-statement try/catch swallows "duplicate column" on isolates where
-      // this already ran. trashed_at is a soft-delete timestamp; like every
-      // timestamp written here via new Date().toISOString() it MUST stay TEXT
-      // (never timestamptz) so the SupabaseAdapter round-trips it unchanged.
-      `ALTER TABLE email_threads ADD COLUMN IF NOT EXISTS starred INTEGER NOT NULL DEFAULT 0`,
-      `ALTER TABLE email_threads ADD COLUMN IF NOT EXISTS labels TEXT`,
-      `ALTER TABLE email_threads ADD COLUMN IF NOT EXISTS trashed_at TEXT`,
-      `CREATE INDEX IF NOT EXISTS ix_email_threads_org_box
-         ON email_threads (org_id, mailbox_address, last_message_at)`,
-      // Individual messages (both directions).
-      `CREATE TABLE IF NOT EXISTS email_messages (
-         id TEXT PRIMARY KEY,
-         org_id TEXT NOT NULL DEFAULT 'hookka',
-         thread_id TEXT NOT NULL,
-         direction TEXT NOT NULL,
-         message_id TEXT,
-         in_reply_to TEXT,
-         reference_ids TEXT,
-         from_address TEXT,
-         from_name TEXT,
-         to_addresses TEXT,
-         cc_addresses TEXT,
-         subject TEXT,
-         text_body TEXT,
-         html_body TEXT,
-         sent_at TEXT,
-         received_at TEXT,
-         sent_by_user_id TEXT,
-         sent_by_name TEXT,
-         provider_message_id TEXT,
-         created_at TEXT
-       )`,
-      `CREATE INDEX IF NOT EXISTS ix_email_messages_thread
-         ON email_messages (thread_id, created_at)`,
-      `CREATE INDEX IF NOT EXISTS ix_email_messages_msgid
-         ON email_messages (message_id)`,
-      // Inbound attachments (owner 2026-06-18 — "e-invoices/photos must show").
-      // One row per file on an inbound email. The bytes live in Supabase Storage
-      // (bucket hookka-files, same as file_assets) under storage_path; this row
-      // is the index the detail view reads to render a download chip + thumbnail.
-      // size_bytes is the byte count; content_id is the MIME Content-ID (for a
-      // future v2 that inlines cid: images inside the HTML body). created_at is
-      // written via new Date().toISOString() so it MUST stay TEXT (never
-      // timestamptz) for the SupabaseAdapter to round-trip it unchanged — same
-      // rule as every timestamp column above.
-      `CREATE TABLE IF NOT EXISTS email_attachments (
-         id TEXT PRIMARY KEY,
-         org_id TEXT NOT NULL DEFAULT 'hookka',
-         message_id TEXT NOT NULL,
-         filename TEXT,
-         content_type TEXT,
-         size_bytes INTEGER,
-         storage_path TEXT,
-         content_id TEXT,
-         created_at TEXT
-       )`,
-      `CREATE INDEX IF NOT EXISTS ix_email_attachments_msg
-         ON email_attachments (message_id)`,
-      // Label registry (owner 2026-06-17 — "labels with colours like Gmail").
-      // Thread labels themselves stay as a JSON name array on email_threads
-      // (above); THIS table is the canonical name→colour catalogue so the
-      // sidebar can render a coloured dot per label and offer a managed list.
-      // Joined to thread labels by lower(name); a thread label with no catalogue
-      // row just renders in the neutral brand tone. created_at is written via
-      // new Date().toISOString() so it MUST stay TEXT (never timestamptz) for
-      // the SupabaseAdapter to round-trip it unchanged — same rule as the
-      // timestamp columns above.
-      `CREATE TABLE IF NOT EXISTS email_labels (
-         id TEXT PRIMARY KEY,
-         org_id TEXT NOT NULL DEFAULT 'hookka',
-         name TEXT NOT NULL,
-         color TEXT,
-         created_at TEXT,
-         created_by TEXT
-       )`,
-      `CREATE UNIQUE INDEX IF NOT EXISTS ux_email_labels_org_name
-         ON email_labels (org_id, name)`,
-    ];
-    for (const stmt of stmts) {
-      try {
-        await db.prepare(stmt).run();
-      } catch (e) {
-        console.error("[mail-center] schema init failed:", e);
-      }
+let pendingSchema = false;
+export async function ensureMailSchema(db: D1Database): Promise<void> {
+  if (pendingSchema) return;
+
+  const stmts = [
+    // Our outward-facing addresses / aliases (support@, sales@, lim@ ...).
+    // catch-all routing means mail to ANY of these already arrives; a row
+    // here is the in-ERP record that maps an address to a person/dept.
+    `CREATE TABLE IF NOT EXISTS email_addresses (
+       id TEXT PRIMARY KEY,
+       org_id TEXT NOT NULL DEFAULT 'hookka',
+       address TEXT NOT NULL,
+       label TEXT,
+       assigned_user_id TEXT,
+       assigned_user_name TEXT,
+       assigned_dept TEXT,
+       active INTEGER NOT NULL DEFAULT 1,
+       created_at TEXT,
+       created_by TEXT
+     )`,
+    // Lazy idempotent add — the per-statement try/catch above swallows the
+    // "duplicate column" error on isolates where this already ran, so it is
+    // safe whether or not the column exists. Records the person's job title
+    // alongside assigned_dept (owner 2026-06-17).
+    `ALTER TABLE email_addresses ADD COLUMN IF NOT EXISTS assigned_position TEXT`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS ux_email_addresses_org_addr
+       ON email_addresses (org_id, address)`,
+    // Mailbox access grants (the "mailbox matrix" — owner 2026-06-17). A user
+    // always has their own assigned alias; these rows ADDITIONALLY grant
+    // access to shared mailboxes (support@/hr@/finance@) so several people
+    // can work one inbox. Managed from the User Management matrix.
+    `CREATE TABLE IF NOT EXISTS email_address_access (
+       id TEXT PRIMARY KEY,
+       org_id TEXT NOT NULL DEFAULT 'hookka',
+       address_id TEXT NOT NULL,
+       user_id TEXT NOT NULL,
+       created_at TEXT,
+       created_by TEXT
+     )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS ux_email_access_addr_user
+       ON email_address_access (org_id, address_id, user_id)`,
+    `CREATE INDEX IF NOT EXISTS ix_email_access_user
+       ON email_address_access (org_id, user_id)`,
+    // Hierarchical mail-visibility level per user (owner 2026-06-17). One row
+    // per user setting how WIDE their inbox is: 'personal' (own assigned +
+    // granted mailboxes — the default), 'department' (also every mailbox in
+    // their dept), or 'company' (every active mailbox in the org). Absent row
+    // ⇒ 'personal'. Managed by SUPER_ADMIN; folded into getMailScope below.
+    `CREATE TABLE IF NOT EXISTS mail_user_scope (
+       org_id TEXT NOT NULL DEFAULT 'hookka',
+       user_id TEXT NOT NULL,
+       level TEXT NOT NULL DEFAULT 'personal',
+       created_at TEXT,
+       PRIMARY KEY (org_id, user_id)
+     )`,
+    // One conversation with an external party, grouped by RFC threading.
+    `CREATE TABLE IF NOT EXISTS email_threads (
+       id TEXT PRIMARY KEY,
+       org_id TEXT NOT NULL DEFAULT 'hookka',
+       mailbox_address TEXT,
+       subject TEXT,
+       counterparty_email TEXT,
+       counterparty_name TEXT,
+       status TEXT NOT NULL DEFAULT 'open',
+       assigned_to_user_id TEXT,
+       assigned_to_name TEXT,
+       last_message_at TEXT,
+       last_direction TEXT,
+       last_snippet TEXT,
+       message_count INTEGER NOT NULL DEFAULT 0,
+       unread INTEGER NOT NULL DEFAULT 1,
+       created_at TEXT
+     )`,
+    // Email-client affordances that the frontend used to keep only in
+    // localStorage (star / labels / trash). Lazy idempotent adds — the
+    // per-statement try/catch swallows "duplicate column" on isolates where
+    // this already ran. trashed_at is a soft-delete timestamp; like every
+    // timestamp written here via new Date().toISOString() it MUST stay TEXT
+    // (never timestamptz) so the SupabaseAdapter round-trips it unchanged.
+    `ALTER TABLE email_threads ADD COLUMN IF NOT EXISTS starred INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE email_threads ADD COLUMN IF NOT EXISTS labels TEXT`,
+    `ALTER TABLE email_threads ADD COLUMN IF NOT EXISTS trashed_at TEXT`,
+    `CREATE INDEX IF NOT EXISTS ix_email_threads_org_box
+       ON email_threads (org_id, mailbox_address, last_message_at)`,
+    // Individual messages (both directions).
+    `CREATE TABLE IF NOT EXISTS email_messages (
+       id TEXT PRIMARY KEY,
+       org_id TEXT NOT NULL DEFAULT 'hookka',
+       thread_id TEXT NOT NULL,
+       direction TEXT NOT NULL,
+       message_id TEXT,
+       in_reply_to TEXT,
+       reference_ids TEXT,
+       from_address TEXT,
+       from_name TEXT,
+       to_addresses TEXT,
+       cc_addresses TEXT,
+       subject TEXT,
+       text_body TEXT,
+       html_body TEXT,
+       sent_at TEXT,
+       received_at TEXT,
+       sent_by_user_id TEXT,
+       sent_by_name TEXT,
+       provider_message_id TEXT,
+       created_at TEXT
+     )`,
+    `CREATE INDEX IF NOT EXISTS ix_email_messages_thread
+       ON email_messages (thread_id, created_at)`,
+    `CREATE INDEX IF NOT EXISTS ix_email_messages_msgid
+       ON email_messages (message_id)`,
+    // Inbound attachments (owner 2026-06-18 — "e-invoices/photos must show").
+    // One row per file on an inbound email. The bytes live in Supabase Storage
+    // (bucket hookka-files, same as file_assets) under storage_path; this row
+    // is the index the detail view reads to render a download chip + thumbnail.
+    // size_bytes is the byte count; content_id is the MIME Content-ID (for a
+    // future v2 that inlines cid: images inside the HTML body). created_at is
+    // written via new Date().toISOString() so it MUST stay TEXT (never
+    // timestamptz) for the SupabaseAdapter to round-trip it unchanged — same
+    // rule as every timestamp column above.
+    `CREATE TABLE IF NOT EXISTS email_attachments (
+       id TEXT PRIMARY KEY,
+       org_id TEXT NOT NULL DEFAULT 'hookka',
+       message_id TEXT NOT NULL,
+       filename TEXT,
+       content_type TEXT,
+       size_bytes INTEGER,
+       storage_path TEXT,
+       content_id TEXT,
+       created_at TEXT
+     )`,
+    `CREATE INDEX IF NOT EXISTS ix_email_attachments_msg
+       ON email_attachments (message_id)`,
+    // Label registry (owner 2026-06-17 — "labels with colours like Gmail").
+    // Thread labels themselves stay as a JSON name array on email_threads
+    // (above); THIS table is the canonical name→colour catalogue so the
+    // sidebar can render a coloured dot per label and offer a managed list.
+    // Joined to thread labels by lower(name); a thread label with no catalogue
+    // row just renders in the neutral brand tone. created_at is written via
+    // new Date().toISOString() so it MUST stay TEXT (never timestamptz) for
+    // the SupabaseAdapter to round-trip it unchanged — same rule as the
+    // timestamp columns above.
+    `CREATE TABLE IF NOT EXISTS email_labels (
+       id TEXT PRIMARY KEY,
+       org_id TEXT NOT NULL DEFAULT 'hookka',
+       name TEXT NOT NULL,
+       color TEXT,
+       created_at TEXT,
+       created_by TEXT
+     )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS ux_email_labels_org_name
+       ON email_labels (org_id, name)`,
+  ];
+  for (const stmt of stmts) {
+    try {
+      await db.prepare(stmt).run();
+    } catch (e) {
+      console.error("[mail-center] schema init failed:", e);
     }
-  })();
-  return pendingSchema;
+  }
+  pendingSchema = true;
 }
 
 // ---------------------------------------------------------------------------

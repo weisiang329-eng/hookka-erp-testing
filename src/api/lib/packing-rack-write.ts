@@ -29,23 +29,22 @@ import { packingPieceIdentity } from "./packing-piece-identity";
 // (production-orders.ts) also self-applies it; this is the safety net for the
 // public/worker rack-write path, which may not have gone through that helper.
 // Memoised so the DDL runs at most once per worker isolate.
-let piecePicsRackingColumnEnsured: Promise<void> | null = null;
+let piecePicsRackingColumnEnsured = false;
 // Exported so the /r/ rack-scan stock-in (public-rack-qr.ts) self-applies the
 // SAME per-piece rack column via this ONE memoised DDL — no second copy to drift.
-export function ensurePiecePicsRackingColumn(db: D1Database): Promise<void> {
-  if (piecePicsRackingColumnEnsured) return piecePicsRackingColumnEnsured;
-  piecePicsRackingColumnEnsured = (async () => {
-    try {
-      await db
-        .prepare(
-          "ALTER TABLE piece_pics ADD COLUMN IF NOT EXISTS racking_number TEXT",
-        )
-        .run();
-    } catch {
-      // ignore — column may already exist or DDL transiently rejected
-    }
-  })();
-  return piecePicsRackingColumnEnsured;
+export async function ensurePiecePicsRackingColumn(db: D1Database): Promise<void> {
+  if (piecePicsRackingColumnEnsured) return;
+
+  try {
+    await db
+      .prepare(
+        "ALTER TABLE piece_pics ADD COLUMN IF NOT EXISTS racking_number TEXT",
+      )
+      .run();
+  } catch {
+    // ignore — column may already exist or DDL transiently rejected
+  }
+  piecePicsRackingColumnEnsured = true;
 }
 
 export type PackingRackWriteResult =

@@ -71,7 +71,18 @@ test("companySOId is protected by a storage-level unique index", () => {
   assert.match(helpers, /ON sales_orders \(company_so_id\)/);
   // Idempotent + memoised per isolate, and a failure must not block order entry.
   assert.match(helpers, /_soIdUniqueMig/);
-  assert.match(helpers, /\.catch\(\(\) => undefined\)/);
+  // The memo is a BOOLEAN, not a promise. Caching the promise meant a failed
+  // CREATE INDEX was remembered as done for the life of the isolate — and this
+  // index is what wins the concurrent-create race, so that isolate is exactly
+  // where two orders both get the same company SO id. Asserted as intent, not
+  // as the old `.catch(() => undefined)` syntax: the failure is still
+  // swallowed (order entry must not block), the flag just isn't set.
+  assert.match(helpers, /let _soIdUniqueMig = false;/);
+  assert.match(
+    helpers,
+    /if \(_soIdUniqueMig\) return;[\s\S]{0,400}?_soIdUniqueMig = true;[\s\S]{0,120}?\} catch \{/,
+    "the flag must be set INSIDE the try, after the index actually lands",
+  );
 });
 
 test("the create path ensures the index before minting a number", () => {

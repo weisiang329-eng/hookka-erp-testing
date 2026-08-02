@@ -23,28 +23,27 @@
  * in customers.ts because sales-leads.ts also inserts a customer row and needs
  * the same guarantee before it writes customer_stage.
  */
-let custStageColPromise: Promise<void> | null = null;
-export function ensureCustomerStageColumns(db: D1Database): Promise<void> {
-  if (custStageColPromise) return custStageColPromise;
-  custStageColPromise = (async () => {
-    try {
-      await db
-        .prepare(
-          "ALTER TABLE customers ADD COLUMN IF NOT EXISTS customer_stage TEXT NOT NULL DEFAULT 'CONFIRMED'",
-        )
-        .run();
-    } catch {
-      // best-effort — column may already exist
-    }
-    try {
-      await db
-        .prepare("ALTER TABLE customers ADD COLUMN IF NOT EXISTS salesperson_user_id TEXT")
-        .run();
-    } catch {
-      // best-effort — column may already exist
-    }
-  })();
-  return custStageColPromise;
+let custStageColPromise = false;
+export async function ensureCustomerStageColumns(db: D1Database): Promise<void> {
+  if (custStageColPromise) return;
+
+  try {
+    await db
+      .prepare(
+        "ALTER TABLE customers ADD COLUMN IF NOT EXISTS customer_stage TEXT NOT NULL DEFAULT 'CONFIRMED'",
+      )
+      .run();
+  } catch {
+    // best-effort — column may already exist
+  }
+  try {
+    await db
+      .prepare("ALTER TABLE customers ADD COLUMN IF NOT EXISTS salesperson_user_id TEXT")
+      .run();
+  } catch {
+    // best-effort — column may already exist
+  }
+  custStageColPromise = true;
 }
 
 /** Stage as stored. Anything unrecognised is treated as CONFIRMED — existing

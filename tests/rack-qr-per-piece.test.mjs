@@ -140,7 +140,7 @@ test("multi-piece stock-in writes piece_pics.racking_number, not card-level", ()
 test("the per-piece rack column DDL is the ONE shared (exported) helper — no drift", () => {
   assert.match(
     writeHelper,
-    /export function ensurePiecePicsRackingColumn\(/,
+    /export (?:async )?function ensurePiecePicsRackingColumn\(/,
     "packing-rack-write.ts must export the memoised DDL so /r/ reuses it",
   );
   assert.match(

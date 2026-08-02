@@ -30,52 +30,51 @@ import { computeChainWithAssignments } from "../routes/planning-schedule";
 
 // ── Runtime self-apply (ensureNonprodRequests pattern) ───────────────────────
 
-let _proposalsMig: Promise<void> | null = null;
-export function ensureProposalTables(db: D1Database): Promise<void> {
-  if (_proposalsMig) return _proposalsMig;
-  _proposalsMig = (async () => {
-    await db
-      .prepare(
-        `CREATE TABLE IF NOT EXISTS schedule_proposals (
-           id TEXT PRIMARY KEY,
-           generated_at TEXT NOT NULL,
-           jc_id TEXT NOT NULL,
-           po_id TEXT,
-           dept TEXT,
-           so_ref TEXT,
-           lane TEXT,
-           fabric TEXT,
-           current_due TEXT,
-           proposed_due TEXT NOT NULL,
-           reason TEXT,
-           status TEXT NOT NULL DEFAULT 'PENDING',
-           decided_at TEXT,
-           decided_by TEXT
-         )`,
-      )
-      .run();
-    await db
-      .prepare(
-        "CREATE INDEX IF NOT EXISTS idx_schedule_proposals_status ON schedule_proposals(status, generated_at DESC)",
-      )
-      .run();
-    await db
-      .prepare(
-        "CREATE INDEX IF NOT EXISTS idx_schedule_proposals_jc ON schedule_proposals(jc_id, status)",
-      )
-      .run();
-    await db
-      .prepare(
-        `CREATE TABLE IF NOT EXISTS plan_snapshots (
-           id TEXT PRIMARY KEY,
-           taken_at TEXT NOT NULL,
-           date TEXT NOT NULL,
-           payload TEXT NOT NULL
-         )`,
-      )
-      .run();
-  })();
-  return _proposalsMig;
+let _proposalsMig = false;
+export async function ensureProposalTables(db: D1Database): Promise<void> {
+  if (_proposalsMig) return;
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS schedule_proposals (
+         id TEXT PRIMARY KEY,
+         generated_at TEXT NOT NULL,
+         jc_id TEXT NOT NULL,
+         po_id TEXT,
+         dept TEXT,
+         so_ref TEXT,
+         lane TEXT,
+         fabric TEXT,
+         current_due TEXT,
+         proposed_due TEXT NOT NULL,
+         reason TEXT,
+         status TEXT NOT NULL DEFAULT 'PENDING',
+         decided_at TEXT,
+         decided_by TEXT
+       )`,
+    )
+    .run();
+  await db
+    .prepare(
+      "CREATE INDEX IF NOT EXISTS idx_schedule_proposals_status ON schedule_proposals(status, generated_at DESC)",
+    )
+    .run();
+  await db
+    .prepare(
+      "CREATE INDEX IF NOT EXISTS idx_schedule_proposals_jc ON schedule_proposals(jc_id, status)",
+    )
+    .run();
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS plan_snapshots (
+         id TEXT PRIMARY KEY,
+         taken_at TEXT NOT NULL,
+         date TEXT NOT NULL,
+         payload TEXT NOT NULL
+       )`,
+    )
+    .run();
+  _proposalsMig = true;
 }
 
 // ── Proposal generation ──────────────────────────────────────────────────────

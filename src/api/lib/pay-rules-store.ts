@@ -12,24 +12,23 @@ import {
   normalizePayRules,
 } from "../../lib/pay-rules";
 
-let _mig: Promise<void> | null = null;
-export function ensurePayRuleVersions(db: D1Database): Promise<void> {
-  if (_mig) return _mig;
-  _mig = (async () => {
-    await db
-      .prepare(
-        `CREATE TABLE IF NOT EXISTS pay_rule_versions (
-           id TEXT PRIMARY KEY,
-           effectivefrom TEXT NOT NULL,
-           rulesjson TEXT NOT NULL,
-           note TEXT,
-           createdat TEXT,
-           createdby TEXT
-         )`,
-      )
-      .run();
-  })();
-  return _mig;
+let _mig = false;
+export async function ensurePayRuleVersions(db: D1Database): Promise<void> {
+  if (_mig) return;
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS pay_rule_versions (
+         id TEXT PRIMARY KEY,
+         effectivefrom TEXT NOT NULL,
+         rulesjson TEXT NOT NULL,
+         note TEXT,
+         createdat TEXT,
+         createdby TEXT
+       )`,
+    )
+    .run();
+  _mig = true;
 }
 
 type Row = {

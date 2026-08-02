@@ -116,19 +116,18 @@ app.get("/", async (c) => {
 // Distinct from the legacy `won_customer_id` (set only at conversion): reads
 // should prefer customer_id and fall back, so leads that converted before
 // 2026-08-01 still resolve. Runtime self-apply — migrations are inert on deploy.
-let leadCustomerColPromise: Promise<void> | null = null;
-function ensureLeadCustomerColumn(db: D1Database): Promise<void> {
-  if (leadCustomerColPromise) return leadCustomerColPromise;
-  leadCustomerColPromise = (async () => {
-    try {
-      await db
-        .prepare("ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS customer_id TEXT")
-        .run();
-    } catch {
-      // best-effort — column may already exist
-    }
-  })();
-  return leadCustomerColPromise;
+let leadCustomerColPromise = false;
+async function ensureLeadCustomerColumn(db: D1Database): Promise<void> {
+  if (leadCustomerColPromise) return;
+
+  try {
+    await db
+      .prepare("ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS customer_id TEXT")
+      .run();
+  } catch {
+    // best-effort — column may already exist
+  }
+  leadCustomerColPromise = true;
 }
 
 // Mints the POTENTIAL customer that backs a lead. Deliberately writes the same

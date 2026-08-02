@@ -70,7 +70,7 @@ export const divanHeightOptions: DivanHeightOption[] = [
 export const specialOrderOptions: SpecialOrderOption[] = [
   { code: "HB_FULL_COVER", name: "HB Fully Cover", surcharge: 5000, notes: "" },
   { code: "DIVAN_TOP_COVER", name: "Divan Top Fully Cover", surcharge: 5000, notes: "" },
-  { code: "DIVAN_BTM_COVER", name: "Divan Full Cover", surcharge: 8000, notes: "If HB & divan full cover combined = RM100 total" },
+  { code: "DIVAN_BTM_COVER", name: "Divan Full Cover", surcharge: 8000, notes: "If HB & divan top full cover combined = discount RM20" },
   { code: "LEFT_DRAWER", name: "Left Drawer", surcharge: 16000, notes: "" },
   { code: "RIGHT_DRAWER", name: "Right Drawer", surcharge: 16000, notes: "" },
   { code: "FRONT_DRAWER", name: "Front Drawer", surcharge: 13000, notes: "" },

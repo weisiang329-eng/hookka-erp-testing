@@ -58,6 +58,12 @@ export type EmployeeDraft = {
   paymentMethod: string;
   bankName: string;
   bankAccount: string;
+  /** Outsourced rather than own staff — drives the OSC-### series. */
+  isOutsource: boolean;
+  /** "MONTHLY" (default) or "DAILY". */
+  payMode: string;
+  /** Rate per day worked, sen. Only used when payMode is DAILY. */
+  dailyRateSen: number;
 };
 
 export type { DepartmentOption };
@@ -283,6 +289,60 @@ export function EmployeeDrawer({
           </Section>
 
           <Section title="Pay">
+            {/* Outsourced people are paid per DAY worked, not a monthly salary
+                minus absences — someone who comes five days in a month would
+                otherwise be recorded with 21 absences against a salary they
+                were never on (owner 2026-08-02). */}
+            <Field label="Employment" full>
+              <label className="mt-1 flex items-center gap-2 text-[11px] text-[#374151]">
+                <input
+                  type="checkbox"
+                  checked={draft.isOutsource}
+                  onChange={(e) => {
+                    const on = e.target.checked;
+                    setDraft((d) =>
+                      d
+                        ? {
+                            ...d,
+                            isOutsource: on,
+                            // Turning it on defaults to per-day, which is the
+                            // point of the flag; turning it off returns to the
+                            // ordinary monthly rule.
+                            payMode: on ? "DAILY" : "MONTHLY",
+                          }
+                        : d,
+                    );
+                  }}
+                />
+                Outsourced (paid per day, numbered OSC-###)
+              </label>
+            </Field>
+            {draft.isOutsource && (
+              <>
+                <Field label="Pay basis">
+                  <select
+                    value={draft.payMode || "MONTHLY"}
+                    onChange={(e) => set("payMode", e.target.value)}
+                    className="mt-0.5 h-8 w-full rounded-md border border-[#D8D2CC] bg-white px-2 text-xs"
+                  >
+                    <option value="DAILY">Per day worked</option>
+                    <option value="MONTHLY">Monthly salary</option>
+                  </select>
+                </Field>
+                {draft.payMode === "DAILY" && (
+                  <Field label="Rate per day (RM)" hint="Paid for each day they log.">
+                    <Input
+                      type="number"
+                      value={rm(draft.dailyRateSen)}
+                      onChange={(e) =>
+                        set("dailyRateSen", Math.round((parseFloat(e.target.value) || 0) * 100))
+                      }
+                      className="mt-0.5 h-8 text-xs"
+                    />
+                  </Field>
+                )}
+              </>
+            )}
             <Field label="Basic salary (RM)">
               <Input
                 type="number"

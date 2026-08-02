@@ -2174,12 +2174,21 @@ type WorkerFormData = {
 // "max of existing" means it adapts to changes — remove the last worker and it
 // drops back, add one and it climbs. Non-conforming codes are ignored so a stray
 // hand-typed value can't poison the sequence. The operator can still overtype it.
-function nextEmpNo(workers: { empNo?: string | null }[]): string {
+// Employee numbers run in two independent series. Own staff are EMP-###;
+// outsourced people are OSC-### (owner 2026-08-02: 「outsource 的 code 就会
+// 根据他的名字自动生成」). Keeping them separate means adding an outsourced
+// worker never advances the staff numbering, and the prefix alone tells payroll
+// and HR which set of rules the person is on.
+function nextEmpNo(
+  workers: { empNo?: string | null }[],
+  prefix: "EMP" | "OSC" = "EMP",
+): string {
+  const re = new RegExp(`^${prefix}-(\\d+)$`);
   const max = workers.reduce((m, w) => {
-    const match = /^EMP-(\d+)$/.exec((w.empNo ?? "").trim());
+    const match = re.exec((w.empNo ?? "").trim());
     return match ? Math.max(m, parseInt(match[1], 10)) : m;
   }, 0);
-  return `EMP-${String(max + 1).padStart(3, "0")}`;
+  return `${prefix}-${String(max + 1).padStart(3, "0")}`;
 }
 
 const emptyForm: WorkerFormData = {
@@ -2513,6 +2522,24 @@ function EmployeeMasterTab({
       paymentMethod: normalizePaymentMethod(w.paymentMethod),
       bankName: w.bankName ?? "",
       bankAccount: w.bankAccount ?? "",
+      // Dual-keyed: the driver camelCases what it returns, but a row that came
+      // through another path can still carry the snake_case name.
+      isOutsource: Boolean(
+        (w as { isOutsource?: unknown; is_outsource?: unknown }).isOutsource ??
+          (w as { is_outsource?: unknown }).is_outsource ??
+          false,
+      ),
+      payMode:
+        String(
+          (w as { payMode?: unknown; pay_mode?: unknown }).payMode ??
+            (w as { pay_mode?: unknown }).pay_mode ??
+            "MONTHLY",
+        ) || "MONTHLY",
+      dailyRateSen: Number(
+        (w as { dailyRateSen?: unknown; daily_rate_sen?: unknown }).dailyRateSen ??
+          (w as { daily_rate_sen?: unknown }).daily_rate_sen ??
+          0,
+      ),
     };
   }, [workers, drawerId]);
 

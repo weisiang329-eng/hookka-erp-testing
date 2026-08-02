@@ -155,7 +155,13 @@ and confirming the test went red on both, then green after restoring — the fir
 test counted only the `?` in `SET` and not the one in `WHERE id = ?`, so it skipped the very
 statement it was written for and passed. Class recorded as **C8** in `docs/BUG-CLASSES.md`.
 
-## BUG-2026-08-01-005 — A broken punch (in and out in the same minute) was docked a FULL day's hours ON TOP of that day's absence `payroll` `data-integrity` 🟡
+## BUG-2026-08-01-005 — A broken punch (in and out in the same minute) was docked a FULL day's hours ON TOP of that day's absence `payroll` `data-integrity` 🟢
+
+> **Closed 2026-08-02** on evidence, not on the write-up. The invariant was
+> re-checked directly against production — every AUTO hour-dock since
+> 2026-05-01 whose day has no `working_hour_entries` row, i.e. every day charged
+> as an absence AND docked again: **0 rows**.
+
 
 **Symptom:** KYAW ZIN OO (EMP-022) 2026-07-01 punched 18:01 IN / 18:02 OUT — he forgot the
 morning punch and did both at knock-off. The day was charged **twice**: absence RM78.85 (no
@@ -194,7 +200,14 @@ every row reconciles.
 
 ---
 
-## BUG-2026-08-01-004 — Forgotten punch-out closed the attendance row but wrote NO working hours → the day silently docked a FULL day's pay `payroll` `data-integrity` 🟡
+## BUG-2026-08-01-004 — Forgotten punch-out closed the attendance row but wrote NO working hours → the day silently docked a FULL day's pay `payroll` `data-integrity` 🟢
+
+> **Closed 2026-08-02** on evidence. Re-queried production for the defect's own
+> shape — an `attendance_records` row with a `clock_out` but no
+> `working_hour_entries` behind it, since 2026-05-01. **2 rows**, both TEST-001
+> and TEST-002, which the payslip query excludes outright
+> (`empNo NOT LIKE 'TEST%'`). Zero real staff affected.
+
 
 **Symptom:** Owner: 「Eiphoowei 为什么扣那么多钱」. Her 2026-07 estimate showed 7 absent days she
 had actually come in and punched for. Factory-wide, **35 worker-days** across 2026-05/06/07 —

@@ -177,6 +177,133 @@ app.get("/", async (c) => {
   return c.json({ success: true, data: people, total: people.length });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/org-chart/auto-wire-production
+//
+// Builds the FACTORY half of the tree in one go. Owner 2026-08-02: the chart
+// showed 44 separate roots because nothing infers a hierarchy — the dropdown
+// sets ONE edge at a time, and marking yourself "no manager (top)" only says
+// you have no manager; it pulls nobody under you.
+//
+// The rules, from the owner, in order:
+//   1. an Operator Leader is their department's head
+//   2. every other worker in that department reports to their department's head
+//   3. a department with no leader reports straight to the Production Head
+//   4. the leaders themselves report to the Production Head
+//
+// Deliberately scoped to WORKERS. The office reporting lines are already set by
+// hand (Violet → owner, Production Head → Violet, and so on) and this must not
+// touch them — 「就跟着 reporting line」. It never writes an edge for a `user:`
+// key, and it never overwrites an existing worker edge unless asked to.
+//
+// Category (BEDFRAME / SOFA) is NOT used to split anyone. Only the two leaders
+// carry one; all fifteen operators under them are blank, so splitting on it
+// would be guessing. Owner: 「暂时不看 category 之后才看 先根据部门区分」.
+// Houzs reach the same conclusion in their own UI copy — sub-groups are
+// "for visibility only", not a reporting line.
+//
+// DRY-RUN BY DEFAULT. It rewires the whole factory; ?apply=1 to write.
+// ---------------------------------------------------------------------------
+app.post("/auto-wire-production", async (c) => {
+  const denied = await requirePermission(c, "users", "update");
+  if (denied) return denied;
+  await ensureOrgReporting(c.var.DB);
+
+  const productionHeadKey = (c.req.query("head") ?? "").trim();
+  if (!parsePersonKey(productionHeadKey)) {
+    return c.json(
+      {
+        success: false,
+        error:
+          "head=<user:id|worker:id> is required — the Production Head everything hangs from.",
+      },
+      400,
+    );
+  }
+  const apply = c.req.query("apply") === "1";
+  const overwrite = c.req.query("overwrite") === "1";
+
+  const people = await loadPeople(c.var.DB);
+  const byKey = new Map(people.map((p) => [p.key, p]));
+  if (!byKey.has(productionHeadKey)) {
+    return c.json({ success: false, error: "Production Head not found" }, 400);
+  }
+
+  // ACTIVE workers only. A resigned operator on the chart is a person the
+  // factory no longer has, and their line would outlive them.
+  const workers = people.filter((p) => p.source === "worker" && p.active);
+
+  // One head per department: its Operator Leader. Two leaders in the same
+  // department is real here (Upholstery has two), so the SECOND one becomes a
+  // head in its own right rather than a report of the first — they are peers.
+  const leadersByDept = new Map<string, string[]>();
+  for (const w of workers) {
+    if (!/leader|head|supervisor/i.test(w.position ?? "")) continue;
+    const d = (w.departmentCode || "").trim();
+    if (!d) continue;
+    const arr = leadersByDept.get(d) ?? [];
+    arr.push(w.key);
+    leadersByDept.set(d, arr);
+  }
+
+  // Explicit department -> head overrides, for the cases the data cannot state:
+  // a leader who also covers a department they are not filed under (the owner's
+  // ANN covers Fabric Cutting as well as her own Fabric Sewing), and a
+  // department whose two leaders must be split between them.
+  //   ?map=FAB_CUT:worker-d636133a,FRAMING:worker-f8ad8074
+  for (const pair of (c.req.query("map") ?? "").split(",")) {
+    const [dept, id] = pair.split(":");
+    if (!dept || !id) continue;
+    const key = id.includes(":") ? id : personKey("worker", id);
+    if (byKey.has(key)) leadersByDept.set(dept.trim(), [key]);
+  }
+
+  const planned: Array<{ personKey: string; name: string; managerKey: string; why: string }> = [];
+  for (const w of workers) {
+    if (w.key === productionHeadKey) continue;
+    const dept = (w.departmentCode || "").trim();
+    const heads = leadersByDept.get(dept) ?? [];
+    const isHeadHere = heads.includes(w.key);
+    const manager = isHeadHere || heads.length === 0 ? productionHeadKey : heads[0];
+    const why = isHeadHere
+      ? `${dept} head → Production Head`
+      : heads.length === 0
+        ? `${dept} has no leader → Production Head`
+        : `${dept} → its leader`;
+    if (!overwrite && w.managerKey && w.managerKey !== manager) continue;
+    if (w.managerKey === manager) continue;
+    planned.push({ personKey: w.key, name: w.name, managerKey: manager, why });
+  }
+
+  if (!apply) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      wouldWire: planned.length,
+      productionHead: byKey.get(productionHeadKey)?.name ?? productionHeadKey,
+      heads: [...leadersByDept.entries()].map(([d, ks]) => ({
+        department: d,
+        heads: ks.map((k) => byKey.get(k)?.name ?? k),
+      })),
+      data: planned,
+      hint: "POST again with ?apply=1 to write. Office reporting lines are never touched.",
+    });
+  }
+
+  const now = new Date().toISOString();
+  for (const p of planned) {
+    await c.var.DB.batch([
+      c.var.DB.prepare("DELETE FROM org_reporting WHERE person_key = ?").bind(p.personKey),
+      c.var.DB
+        .prepare(
+          "INSERT INTO org_reporting (person_key, manager_key, updated_at) VALUES (?, ?, ?)",
+        )
+        .bind(p.personKey, p.managerKey, now),
+    ]);
+  }
+  return c.json({ success: true, dryRun: false, wired: planned.length, data: planned });
+});
+
 app.put("/reporting", async (c) => {
   const denied = await requirePermission(c, "users", "update");
   if (denied) return denied;

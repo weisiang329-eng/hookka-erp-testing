@@ -101,8 +101,17 @@ test("the warmer shares the route's computation — without faking a request", (
   );
   assert.match(
     body,
-    /computeOverdueCounts\(c, dept \|\| null\)/,
-    "the warmer must call the shared computation with the REAL context",
+    /computeOverdueCounts\(c, dept \|\| null, orgId\)/,
+    "the warmer must call the shared computation with the REAL context AND an explicit tenant",
+  );
+  // Second cause of the same ten 500s: the cron authenticates with CRON_SECRET
+  // and has no session, so getOrgId(c) throws "orgId not resolved on request
+  // context". Every other warmer already passes DEFAULT_ORG_ID; this one must too.
+  const workerSrc = flat("src/api/worker.ts");
+  assert.match(
+    workerSrc,
+    /warmOverdueCounts\(c, DEPT_ORDER, DEFAULT_ORG_ID\)/,
+    "the cron must pass the tenant — it has no session to resolve one from",
   );
   // Same function behind the route, so payload and cache key cannot drift.
   assert.match(
@@ -124,7 +133,7 @@ test("a warm failure is still counted and reported", () => {
 test("the cron warms it, and one bad dept cannot abort the rest", () => {
   const w = flat("src/api/worker.ts");
   assert.match(w, /const \{ warmOverdueCounts \} = await import\("\.\/routes\/production-orders"\)/);
-  assert.match(w, /warmOverdueCounts\(c, DEPT_ORDER\)/);
+  assert.match(w, /warmOverdueCounts\(c, DEPT_ORDER, DEFAULT_ORG_ID\)/);
   // Reports which variants failed rather than a bare ok:false.
   assert.match(w, /out\.overdueCounts = \{ ok: r\.failed\.length === 0, warmed: r\.warmed, failed: r\.failed \}/);
   // Wrapped so a failure here never kills the other warmers in the cron.

@@ -490,7 +490,7 @@ app.post("/api/internal/warm-lists", async (c) => {
   try {
     const { warmOverdueCounts } = await import("./routes/production-orders");
     const { DEPT_ORDER } = await import("./lib/lead-times");
-    const r = await warmOverdueCounts(c, DEPT_ORDER);
+    const r = await warmOverdueCounts(c, DEPT_ORDER, DEFAULT_ORG_ID);
     out.overdueCounts = { ok: r.failed.length === 0, warmed: r.warmed, failed: r.failed };
   } catch (e) {
     console.error("[warm-lists] overdueCounts failed:", e);

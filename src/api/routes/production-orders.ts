@@ -129,8 +129,16 @@ export async function computeOverdueCounts(
   c: Context<Env>,
   /** Department, or null for the Overview variant. */
   deptArg: string | null,
+  /**
+   * Tenant. The route resolves it from the session; the warm cron has NO
+   * session (it authenticates with CRON_SECRET), so getOrgId throws
+   * "orgId not resolved on request context" there and every warm call dies.
+   * That was the SECOND cause behind the ten 500s — the cron passes
+   * DEFAULT_ORG_ID explicitly, exactly as the other warmers already do.
+   */
+  orgIdArg?: string,
 ): Promise<unknown> {
-  const orgId = getOrgId(c);
+  const orgId = orgIdArg ?? getOrgId(c);
   const dept =
     deptArg && deptArg.trim().length > 0 ? deptArg.trim().toUpperCase() : null;
   const today = overdueTodayUtc();
@@ -3509,6 +3517,8 @@ export default app;
 export async function warmOverdueCounts(
   c: Context<Env>,
   depts: readonly string[],
+  /** The cron has no session — pass the tenant in, like every other warmer. */
+  orgId: string,
 ): Promise<{ warmed: number; failed: string[] }> {
   const failed: string[] = [];
   let warmed = 0;
@@ -3518,7 +3528,7 @@ export async function warmOverdueCounts(
     try {
       // dept is passed as an argument, not faked onto a synthetic request —
       // the context stays the real one, bindings and all.
-      await computeOverdueCounts(c, dept || null);
+      await computeOverdueCounts(c, dept || null, orgId);
       warmed++;
     } catch (e) {
       failed.push(`${dept || "overview"}:${e instanceof Error ? e.message : "throw"}`);

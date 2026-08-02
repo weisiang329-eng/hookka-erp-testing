@@ -64,6 +64,45 @@ jobs:
       # runners. Mirrors the wrangler.toml `[vars] SENTRY_DSN` for the
       # worker side.
       # ---------------------------------------------------------------------
+      # Stale-chunk root cause: a Pages deployment serves ONLY its own files.
+      # Vite fingerprints every chunk, so the moment a deploy lands, the chunk
+      # names every currently-open browser is still holding stop existing. Pages
+      # answers with the SPA fallback (index.html, text/html), the browser
+      # refuses it as a module, and the tab breaks — including a lazy route the
+      # user opens minutes later. Client-side recovery exists, but it is a net,
+      # not a fix: 2026-08-02 the owner hit a full error page on /employees with
+      # both recovery attempts spent (the second reload landed on a 504 mid-
+      # deploy). The fix is to stop deleting the old files.
+      #
+      # THIS WAS TRIED ON 2026-08-01 AND REVERTED — production stopped booting,
+      # splash rendered, React never attached, every route, clean profile too.
+      # I blamed this step because it was the only deploy-mechanism change that
+      # day. Re-examined 2026-08-02, that was very likely the wrong culprit:
+      #
+      #  * public/sw.js's background precache fired all 60 assets at once, so a
+      #    fresh SW claimed the booting page and its entry chunks queued behind
+      #    60 parallel downloads. The comment now in sw.js describes the result
+      #    as "no error, no failed request, just a splash that hangs" — the
+      #    exact symptom. That bug shipped 06-29, was live during the outage,
+      #    and was only found and fixed at 01:33 on 08-02 (1babbe69).
+      #  * Both assumptions this step rests on were measured on 08-02 and hold:
+      #    a real build emits 249 files into dist/assets and ZERO of them are
+      #    unhashed, so `cp -n` cannot serve a stale version of anything the new
+      #    build emits, and a hash collision would mean identical content.
+      #  * index.html, sw.js and _headers live in dist ROOT, not dist/assets.
+      #    This step cannot change what index.html references or how the SW
+      #    behaves.
+      #
+      # Staging first, deliberately. Merge to main only after several
+      # consecutive staging deploys with tabs held open.
+      - name: Restore previous builds' assets
+        uses: actions/cache/restore@v4
+        with:
+          path: .asset-history
+          key: asset-history-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            asset-history-${{ github.ref_name }}-
+
       - run: npm run build:strict
         env:
           VITE_SENTRY_DSN: https://0b81e5f99dab7b31f74514a5bb9f6f62@o4511302465814528.ingest.us.sentry.io/4511302481346560
@@ -71,6 +110,68 @@ jobs:
       - name: Bundle size budget
         run: node scripts/check-bundle-size.mjs
         continue-on-error: true
+
+      # Fill in every asset a previous deploy served that this build no longer
+      # emits. `cp -n` never overwrites, so the new build always wins for names
+      # it does emit; only genuinely-retired files are carried.
+      - name: Carry previous assets into this deployment
+        run: |
+          set -u
+          # A Pages deployment is capped at 20,000 files. One build is ~250, and
+          # a busy day here is 100+ deploys — the ORIGINAL version of this step
+          # had only a 14-day prune and no count cap, which on this repo's real
+          # cadence would have walked into that ceiling and started failing
+          # deploys outright. Age prune AND a hard count cap, and the cap is set
+          # so the served total stays an order of magnitude below the limit.
+          RETAIN_DAYS=7
+          MAX_CARRIED=4000
+          mkdir -p .asset-history dist/assets
+
+          # ORDER MATTERS. Record this build FIRST, prune, and only then carry
+          # survivors into the deployment. The other way round silently disables
+          # the prune: `cp` does not preserve mtime, so every carried file is
+          # re-stamped today on every deploy and nothing is ever old enough to
+          # drop. The history would grow without bound.
+          cp -R dist/assets/. .asset-history/ 2>/dev/null || true
+
+          aged=$(find .asset-history -type f -mtime +$RETAIN_DAYS | wc -l)
+          find .asset-history -type f -mtime +$RETAIN_DAYS -delete 2>/dev/null || true
+
+          # Count cap — drop the OLDEST beyond MAX_CARRIED. Newest survive,
+          # which is what an open tab is most likely to still be asking for.
+          total=$(find .asset-history -type f | wc -l)
+          capped=0
+          if [ "$total" -gt "$MAX_CARRIED" ]; then
+            capped=$((total - MAX_CARRIED))
+            find .asset-history -type f -printf '%T@ %p\n' \
+              | sort -n | head -n "$capped" | cut -d' ' -f2- \
+              | tr '\n' '\0' | xargs -0 -r rm -f
+          fi
+
+          # Hand the PREVIOUS deploy's entry chunk to the verify step below,
+          # then record this build's for the next run. Read before write — the
+          # cache save happens after this step, so the marker has to be updated
+          # here or it would never persist.
+          echo "PREV_ENTRY=$(cat .asset-history/.previous-entry 2>/dev/null || true)" >> "$GITHUB_ENV"
+          grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' dist/index.html | head -1 \
+            > .asset-history/.previous-entry || true
+
+          before=$(find dist/assets -type f | wc -l)
+          cp -Rn .asset-history/. dist/assets/ 2>/dev/null || true
+          # The marker is bookkeeping, not an asset — don't ship it.
+          rm -f dist/assets/.previous-entry
+          after=$(find dist/assets -type f | wc -l)
+
+          # No silent caps: say exactly what was dropped and why, so a deploy
+          # that quietly stopped carrying anything is visible in the log.
+          echo "this build:      $before file(s)"
+          echo "carried forward: $((after - before)) retired file(s)"
+          echo "serving:         $after file(s)  (Pages limit 20000)"
+          echo "history:         $(find .asset-history -type f | wc -l) file(s), $(du -sh .asset-history | cut -f1)"
+          echo "pruned:          $aged older than ${RETAIN_DAYS}d, $capped over the ${MAX_CARRIED}-file cap"
+          if [ "$after" -gt 15000 ]; then
+            echo "::warning::serving $after files — approaching the 20000 Pages limit; lower MAX_CARRIED"
+          fi
 
       # Deploy to Cloudflare Pages — main branch path. Preserves the
       # original behavior: pushes to `main` and `claude/**` deploy to
@@ -91,6 +192,44 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy dist --project-name=hookka-erp-testing --branch=${{ github.ref_name }}
 
+      - name: Save assets for the next deploy
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: actions/cache/save@v4
+        with:
+          path: .asset-history
+          key: asset-history-${{ github.ref_name }}-${{ github.run_id }}
+
+      # The proof, not the intention. Take the entry chunk the PREVIOUS
+      # deployment served and ask the live site for it: 200 with a JS
+      # content-type means an already-open tab survives this deploy; the SPA
+      # fallback (text/html) or a 404 means it does not, and carrying is not
+      # actually working however clean the log above looks.
+      #
+      # Non-blocking — this reports, it does not gate. A false alarm here must
+      # never be able to hold up a deploy.
+      - name: Verify the previous build's entry chunk still resolves
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        continue-on-error: true
+        run: |
+          set -u
+          case "${{ github.ref_name }}" in
+            main) BASE="https://erp.hookka.com" ;;
+            *)    BASE="https://${{ github.ref_name }}.hookka-erp-testing.pages.dev" ;;
+          esac
+          prev="${PREV_ENTRY:-}"
+          if [ -z "$prev" ]; then
+            echo "no previous entry recorded yet — first run after this change. Nothing to verify."
+            exit 0
+          fi
+          echo "previous entry chunk: $prev"
+          sleep 20
+          code=$(curl -s -o /tmp/prev.js -w '%{http_code}' "$BASE$prev" || echo 000)
+          ctype=$(curl -s -o /dev/null -w '%{content_type}' "$BASE$prev" || echo unknown)
+          echo "HTTP $code  content-type: $ctype"
+          case "$ctype" in
+            *javascript*) echo "OK — an open tab from the previous deploy still resolves its chunks." ;;
+            *) echo "::warning::$prev came back '$ctype' (HTTP $code) — carry-forward is NOT protecting open tabs." ;;
+          esac
 
       # ---------------------------------------------------------------------
       # Phase B.5 — Canary deploy on PR.

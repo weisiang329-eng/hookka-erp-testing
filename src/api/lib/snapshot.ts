@@ -27,10 +27,7 @@
 // implement; cache-aside achieves the same user-visible behaviour).
 // ---------------------------------------------------------------------------
 
-import {
-  getMaxSourceUpdatedAt as probeMaxSourceUpdatedAt,
-  getSourceSignature,
-} from "./snapshot-freshness";
+import { getMaxSourceUpdatedAt as probeMaxSourceUpdatedAt } from "./snapshot-freshness";
 
 export type SnapshotConfig = {
   /** Snapshot table name, e.g. "invoice_stats_snapshot". */
@@ -44,8 +41,6 @@ export type SnapshotRow = {
   builtFrom: string;
   builtAt: string;
   refreshCount: number;
-  /** COUNT(*) across the source tables when this row was built. */
-  sourceRows: number | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -58,31 +53,10 @@ export async function readSnapshot(
   orgId: string,
   cacheKey: string = "",
 ): Promise<SnapshotRow | null> {
-  // AWAITED BEFORE THE READ, not just before the write.
-  //
-  // I shipped this selecting source_rows while only ensuring the column on the
-  // write path, and every snapshot-backed endpoint 500'd on
-  // `column "source_rows" does not exist` — /api/sales-orders and its stats
-  // went down on 2026-08-02 until this line was added. Migrations are inert on
-  // deploy here: a column exists only because the runtime ALTER ran first, and
-  // the READ gets there before any write does.
-  // Belt and braces: if the ALTER itself cannot run (a permission problem, a
-  // replica), degrade to the pre-2026-08-02 read rather than take the page
-  // down. sourceRows null then means "unknown", which isSnapshotFresh treats
-  // as stale-once — safe, never wrong-and-quiet.
-  let hasRowsCol = true;
-  try {
-    await ensureSourceRowsColumn(db, config.tableName);
-  } catch (e) {
-    hasRowsCol = false;
-    console.warn(`[${config.tableName}] source_rows unavailable:`, e);
-  }
   const row = await db
     .prepare(
       `SELECT data, built_from AS "builtFrom", built_at AS "builtAt",
-              refresh_count AS "refreshCount"${
-                hasRowsCol ? ', source_rows AS "sourceRows"' : ""
-              }
+              refresh_count AS "refreshCount"
          FROM ${config.tableName}
         WHERE org_id = ? AND cache_key = ?`,
     )
@@ -92,7 +66,6 @@ export async function readSnapshot(
       builtFrom: string;
       builtAt: string;
       refreshCount: number;
-      sourceRows: number | string | null;
     }>();
   if (!row) return null;
   let parsed: Record<string, unknown>;
@@ -109,10 +82,6 @@ export async function readSnapshot(
     builtFrom: row.builtFrom,
     builtAt: row.builtAt,
     refreshCount: row.refreshCount ?? 0,
-    sourceRows:
-      row.sourceRows === null || row.sourceRows === undefined
-        ? null
-        : Number(row.sourceRows),
   };
 }
 
@@ -126,46 +95,21 @@ export async function writeSnapshot(
   data: Record<string, unknown>,
   builtFrom: string,
   cacheKey: string = "",
-  sourceRows: number | null = null,
 ): Promise<void> {
-  await ensureSourceRowsColumn(db, config.tableName);
   const dataJson = JSON.stringify(data);
   const builtAt = new Date().toISOString();
   await db
     .prepare(
-      `INSERT INTO ${config.tableName} (org_id, cache_key, data, built_from, built_at, refresh_count, source_rows)
-       VALUES (?, ?, ?, ?, ?, 1, ?)
+      `INSERT INTO ${config.tableName} (org_id, cache_key, data, built_from, built_at, refresh_count)
+       VALUES (?, ?, ?, ?, ?, 1)
        ON CONFLICT (org_id, cache_key) DO UPDATE
        SET data = EXCLUDED.data,
            built_from = EXCLUDED.built_from,
            built_at = EXCLUDED.built_at,
-           source_rows = EXCLUDED.source_rows,
            refresh_count = ${config.tableName}.refresh_count + 1`,
     )
-    .bind(orgId, cacheKey, dataJson, builtFrom, builtAt, sourceRows)
+    .bind(orgId, cacheKey, dataJson, builtFrom, builtAt)
     .run();
-}
-
-// Runtime self-apply, per snapshot table. Migrations are inert on deploy here,
-// so this column reaches production ONLY by running and being AWAITED before
-// the first read or write. There are 31 snapshot tables and each one learns
-// about the column the first time it is touched.
-const _rowsCol = new Map<string, Promise<void>>();
-export function ensureSourceRowsColumn(db: D1Database, tableName: string): Promise<void> {
-  const cached = _rowsCol.get(tableName);
-  if (cached) return cached;
-  const p = (async () => {
-    await db
-      .prepare(`ALTER TABLE ${tableName} ADD COLUMN IF NOT EXISTS source_rows BIGINT`)
-      .run();
-  })();
-  _rowsCol.set(tableName, p);
-  return p;
-}
-
-/** For tests — drop the per-table migration cache. */
-export function _resetSourceRowsMigForTests(): void {
-  _rowsCol.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -221,24 +165,8 @@ export async function getMaxSourceUpdatedAt(
 export function isSnapshotFresh(
   snapshot: SnapshotRow | null,
   currentMax: string | null,
-  /**
-   * COUNT(*) across the source tables right now. A DELETE never raises
-   * MAX(updated_at), so without this a snapshot holding a deleted row stays
-   * "fresh" forever — the owner deleted two draft sales orders on 2026-08-02,
-   * watched them disappear, and the list kept serving them because
-   * MAX(updated_at) had not moved since the day before. Omit (undefined) to
-   * skip the check; null means "could not be counted", also skipped.
-   */
-  currentRows?: number | null,
 ): boolean {
   if (!snapshot) return false;
-  // Row count first: it is the only signal that sees a deletion. A snapshot
-  // written before this column existed has sourceRows null — treated as stale
-  // exactly once, then it rebuilds and carries the count from then on.
-  if (currentRows !== undefined && currentRows !== null) {
-    if (snapshot.sourceRows === null) return false;
-    if (snapshot.sourceRows !== currentRows) return false;
-  }
   if (!currentMax) return true;
   // `as unknown` because the type annotations lie — the runtime values
   // may be Date objects (TIMESTAMP cols) or strings (TEXT cols).
@@ -279,7 +207,6 @@ async function computeAndStore<T extends Record<string, unknown>>(
   computeFresh: () => Promise<T>,
   cacheKey: string,
   currentMax: string | null,
-  sourceRows: number | null,
 ): Promise<T> {
   const key = flightKey(config.tableName, orgId, cacheKey);
   const existing = inFlightComputes.get(key);
@@ -294,7 +221,6 @@ async function computeAndStore<T extends Record<string, unknown>>(
         data,
         currentMax ?? new Date().toISOString(),
         cacheKey,
-        sourceRows,
       );
     } catch (e) {
       console.warn(`[${config.tableName}] write-back failed:`, e);
@@ -350,14 +276,12 @@ export async function withSnapshot<T extends Record<string, unknown>>(
     onRevalidated?: () => void | Promise<void>;
   },
 ): Promise<T> {
-  const [snap, signature] = await Promise.all([
+  const [snap, currentMax] = await Promise.all([
     readSnapshot(db, config, orgId, cacheKey),
-    getSourceSignature(db, config.sourceTables),
+    getMaxSourceUpdatedAt(db, config),
   ]);
-  const currentMax = signature.maxUpdatedAt;
-  const sourceRows = signature.rowCount;
 
-  if (isSnapshotFresh(snap, currentMax, sourceRows) && snap) {
+  if (isSnapshotFresh(snap, currentMax) && snap) {
     if (c) {
       try {
         const { emitCounter } = await import("./observability");
@@ -399,7 +323,6 @@ export async function withSnapshot<T extends Record<string, unknown>>(
           computeFresh,
           cacheKey,
           currentMax,
-          sourceRows,
         );
         waitUntil(
           refresh
@@ -423,7 +346,6 @@ export async function withSnapshot<T extends Record<string, unknown>>(
     computeFresh,
     cacheKey,
     currentMax,
-    sourceRows,
   );
 }
 

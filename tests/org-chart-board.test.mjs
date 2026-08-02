@@ -120,3 +120,32 @@ test("MANY reports stack in a box — they do not fan out sideways", () => {
   // reads as an org chart.
   assert.match(src, /left: i === 0 \? "50%" : 0/);
 });
+
+// --- the tree becomes department boxes (owner's Houzs reference) ------------
+
+test("below the last manager the tree stops and DEPARTMENT BOXES take over", () => {
+  // Owner:「为什么这里没有分部门呢?正常的 HouzsERP 里是有看到部门划分的」.
+  // A branch is right where there are a few named relationships; forty
+  // operators fanned into hairlines is a wall of string.
+  const src = readFileSync("src/components/org-chart.tsx", "utf8");
+  assert.match(src, /const boxesUnder = useCallback/);
+  assert.match(
+    src,
+    /node\.children\.some\(\(c\) => c\.children\.length > 0\) &&\s*\n\s*new Set\(node\.children\.flatMap\(flatten\)\.map\(deptOf\)\)\.size > 1/,
+    "only where the subtree actually spans departments AND has managers in it",
+  );
+  assert.match(src, /bg-\[#33404E\]/, "the dark department cap");
+});
+
+test("two leaders share a box — no line divides their team", () => {
+  // Owner:「两个 leader…他们应该合在一起,两个 leader 共同带剩下的人才对」.
+  // Houzs express co-management the same way: their model is a single
+  // manager_id too, and the BOX is what says "these people belong here".
+  // Splitting the seventeen between the two was an invention of the layout,
+  // not a fact about the factory.
+  const src = readFileSync("src/components/org-chart.tsx", "utf8");
+  assert.match(src, /`Led together by \$\{box\.leads\.length\}`/);
+  assert.match(src, /const leads = ppl\.filter\(isLeader\)/);
+  // The team is grouped by POSITION inside the box, not by which leader.
+  assert.match(src, /const byPos = new Map<string, OrgNode\[\]>\(\);/);
+});

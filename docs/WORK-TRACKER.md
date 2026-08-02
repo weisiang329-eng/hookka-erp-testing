@@ -46,9 +46,15 @@ status = 'DRAFT'`）。**只动 DRAFT** —— approved 的是已经交出去的
   org chart 50 人（10 users + 40 workers），改过的汇报线有存住。
 - 全测试 2294 支 0 fail；`tsc -p tsconfig.app.json --noEmit` 干净。
 
-🟡 **仍未决（等 owner）**：asset carry-forward 当初是因为错误判断被拿掉的，真凶已确认是
-SW，要不要加回来（能治 stale chunk）？工人手机「Save payslip as PDF」端点+按钮都在，
-但没有工人 PIN，没在真机上按过。
+🟡 **asset carry-forward — 暂缓，owner 同意（2026-08-02）。** 它治的是 stale chunk
+（Pages 只 serve 当次 deployment 的档案 → 旧分页握着的 hash chunk 消失），跟已修好的
+deploy 空窗是两回事。当初 revert 是因为我误判它弄挂了 prod，真凶其实是 SW。
+**但我到现在仍解释不了它当时为什么会坏**（`cp -n` + content hash 理论上不该出事，
+代表我有个假设是错的），所以不加回来 —— 现在有 #213 的 404 + client hard-reload
+兜着，症状是「闪一下」而非死站。要重来必须先能解释，且走 staging 多轮验，不直推 main。
+
+🟡 **工人手机「Save payslip as PDF」** —— 端点 + 按钮都在，但没有工人 PIN，
+没在真机上按过。
 
 ---
 

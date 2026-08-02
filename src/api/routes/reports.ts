@@ -39,6 +39,10 @@ import {
 } from "../lib/schedule-overdue-report";
 import { collectComplianceData } from "../lib/compliance-report";
 import {
+  checkCogsIntegrity,
+  summarizeCogsIssues,
+} from "../lib/cogs-integrity";
+import {
   collectBriefData,
   renderBriefHtml,
   renderBriefEmailText,
@@ -525,6 +529,34 @@ app.post("/brief/send", async (c) => {
 // across the order → delivery → invoice + procurement chains, plus overdue
 // orders and low-efficiency workers. JSON only (no HTML / email / cron for v1).
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// GET /api/reports/cogs-integrity.json — delivered units with no cost behind
+// them. READ-ONLY, uncached, no repair.
+//
+// Deliberately its own endpoint rather than only a line in the daily report:
+// this exists to SIZE a money exposure before anyone writes a repair, and it
+// has to be runnable on demand against live data. Houzs-ERP's
+// inventory-costing-oversell COE spends its section 6 on having written the
+// repair before knowing the shape of the damage.
+// ---------------------------------------------------------------------------
+app.get("/cogs-integrity.json", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "read");
+  if (denied) return denied;
+  try {
+    const rows = await checkCogsIntegrity(
+      c.var.DB as unknown as Parameters<typeof checkCogsIntegrity>[0],
+    );
+    return c.json({
+      success: true,
+      summary: summarizeCogsIssues(rows),
+      data: rows,
+    });
+  } catch (err) {
+    console.error("[reports/cogs-integrity.json] failed:", err);
+    return c.json({ success: false, error: "report generation failed" }, 500);
+  }
+});
 
 app.get("/compliance.json", async (c) => {
   const denied = await requirePermission(c, "sales-orders", "read");

@@ -33,6 +33,10 @@ import {
   checkPricingIntegrity,
   type PricingIssueRow,
 } from "./pricing-integrity";
+import {
+  checkCogsIntegrity,
+  type CogsIssueRow,
+} from "./cogs-integrity";
 
 // D1-compat shape (the SupabaseAdapter installed in worker.ts exposes this).
 // `first` is used to read the single kv_config row (mirrors kv-config.ts).
@@ -268,6 +272,10 @@ export interface ComplianceCounts {
   /** Money invariants (src/api/lib/pricing-integrity.ts). Three price defects
    *  ran for months unseen because nothing checked the DATA daily. */
   pricingIssues: number;
+  /** Delivered units with no cost layer behind them (cogs-integrity.ts). The
+   *  cascade already computes the shortfall and the caller drops it, so the
+   *  only place this is visible is here. */
+  cogsIssues: number;
 }
 
 export interface ComplianceGroups {
@@ -284,6 +292,7 @@ export interface ComplianceGroups {
   incompleteBoms: IncompleteBomRow[];
   rdStalled: RdStalledRow[];
   pricingIssues: PricingIssueRow[];
+  cogsIssues: CogsIssueRow[];
 }
 
 export interface ComplianceData {
@@ -1246,6 +1255,7 @@ export async function collectComplianceData(
     incompleteBoms,
     rdStalled,
     pricingIssues,
+    cogsIssues,
   ] = await Promise.all([
     checkDoPendingDispatch(db, todayYmd, graceDays.doPendingDispatch),
     checkDoNotDelivered(db, todayYmd, graceDays.doNotDelivered),
@@ -1260,6 +1270,7 @@ export async function collectComplianceData(
     checkIncompleteBoms(db),
     checkRdStalled(db, todayYmd),
     checkPricingIntegrity(db),
+    checkCogsIntegrity(db),
   ]);
 
   const counts: ComplianceCounts = {
@@ -1276,6 +1287,7 @@ export async function collectComplianceData(
     incompleteBoms: incompleteBoms.length,
     rdStalled: rdStalled.length,
     pricingIssues: pricingIssues.length,
+    cogsIssues: cogsIssues.length,
     total:
       doPendingDispatch.length +
       doNotDelivered.length +
@@ -1289,7 +1301,8 @@ export async function collectComplianceData(
       missingWipTimes.length +
       incompleteBoms.length +
       rdStalled.length +
-      pricingIssues.length,
+      pricingIssues.length +
+      cogsIssues.length,
   };
 
   return {
@@ -1310,6 +1323,7 @@ export async function collectComplianceData(
       incompleteBoms,
       rdStalled,
       pricingIssues,
+      cogsIssues,
     },
   };
 }

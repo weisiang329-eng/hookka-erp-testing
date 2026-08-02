@@ -27,7 +27,10 @@
 // implement; cache-aside achieves the same user-visible behaviour).
 // ---------------------------------------------------------------------------
 
-import { getMaxSourceUpdatedAt as probeMaxSourceUpdatedAt } from "./snapshot-freshness";
+import {
+  getMaxSourceUpdatedAt as probeMaxSourceUpdatedAt,
+  getSourceSignature,
+} from "./snapshot-freshness";
 
 export type SnapshotConfig = {
   /** Snapshot table name, e.g. "invoice_stats_snapshot". */
@@ -41,6 +44,12 @@ export type SnapshotRow = {
   builtFrom: string;
   builtAt: string;
   refreshCount: number;
+  /**
+   * COUNT(*) across the source tables when this row was built, or null when the
+   * column does not exist yet / could not be read. Null means "unknown", which
+   * isSnapshotFresh treats as stale-once rather than as a match.
+   */
+  sourceRows: number | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -53,19 +62,34 @@ export async function readSnapshot(
   orgId: string,
   cacheKey: string = "",
 ): Promise<SnapshotRow | null> {
+  // `SELECT *`, ON PURPOSE, and NO migration call on this path.
+  //
+  // v1 of this fix named source_rows explicitly and ran the runtime ALTER here.
+  // Every snapshot read then performed DDL, on 31 tables, and cached the
+  // in-flight promise across requests — which db-pg.ts warns in capitals must
+  // never happen ("Cannot perform I/O on behalf of a different request").
+  // /api/sales-orders, its stats and overdue-counts all 500'd from the moment
+  // it deployed, and because Workers aborts the whole request for that class of
+  // error, the try/catch added afterwards could not save it either.
+  //
+  // A star select needs neither. It returns source_rows when the column exists
+  // and simply omits it when it does not, so reads keep working before, during
+  // and after the column appears — and the read path does no schema work at all.
   const row = await db
     .prepare(
-      `SELECT data, built_from AS "builtFrom", built_at AS "builtAt",
-              refresh_count AS "refreshCount"
-         FROM ${config.tableName}
-        WHERE org_id = ? AND cache_key = ?`,
+      `SELECT * FROM ${config.tableName} WHERE org_id = ? AND cache_key = ?`,
     )
     .bind(orgId, cacheKey)
     .first<{
       data: string;
-      builtFrom: string;
-      builtAt: string;
-      refreshCount: number;
+      builtFrom?: string;
+      built_from?: string;
+      builtAt?: string;
+      built_at?: string;
+      refreshCount?: number;
+      refresh_count?: number;
+      sourceRows?: number | string | null;
+      source_rows?: number | string | null;
     }>();
   if (!row) return null;
   let parsed: Record<string, unknown>;
@@ -77,11 +101,16 @@ export async function readSnapshot(
   } catch {
     return null;
   }
+  // Dual-keyed: db-pg's columnFrom camelCases what it returns, but a star
+  // select through other paths can hand back the raw snake_case names. Reading
+  // only one form is the repo's most-repeated bug.
+  const rawRows = row.sourceRows ?? row.source_rows ?? null;
   return {
     data: parsed,
-    builtFrom: row.builtFrom,
-    builtAt: row.builtAt,
-    refreshCount: row.refreshCount ?? 0,
+    builtFrom: (row.builtFrom ?? row.built_from) as string,
+    builtAt: (row.builtAt ?? row.built_at) as string,
+    refreshCount: Number(row.refreshCount ?? row.refresh_count ?? 0),
+    sourceRows: rawRows === null || rawRows === undefined ? null : Number(rawRows),
   };
 }
 
@@ -95,21 +124,79 @@ export async function writeSnapshot(
   data: Record<string, unknown>,
   builtFrom: string,
   cacheKey: string = "",
+  sourceRows: number | null = null,
 ): Promise<void> {
   const dataJson = JSON.stringify(data);
   const builtAt = new Date().toISOString();
+  // Schema work happens HERE and nowhere else. A rebuild is rare (the whole
+  // point of a snapshot) whereas reads are constant, so this is the one place
+  // where a once-per-isolate ALTER costs nothing and risks little — and a
+  // failure here is already tolerated by the caller.
+  const withRows = await ensureSourceRowsColumn(db, config.tableName);
+  const cols = withRows
+    ? "(org_id, cache_key, data, built_from, built_at, refresh_count, source_rows)"
+    : "(org_id, cache_key, data, built_from, built_at, refresh_count)";
+  const vals = withRows ? "(?, ?, ?, ?, ?, 1, ?)" : "(?, ?, ?, ?, ?, 1)";
+  const setRows = withRows ? "\n           source_rows = EXCLUDED.source_rows," : "";
+  const binds: unknown[] = [orgId, cacheKey, dataJson, builtFrom, builtAt];
+  if (withRows) binds.push(sourceRows);
   await db
     .prepare(
-      `INSERT INTO ${config.tableName} (org_id, cache_key, data, built_from, built_at, refresh_count)
-       VALUES (?, ?, ?, ?, ?, 1)
+      `INSERT INTO ${config.tableName} ${cols}
+       VALUES ${vals}
        ON CONFLICT (org_id, cache_key) DO UPDATE
        SET data = EXCLUDED.data,
            built_from = EXCLUDED.built_from,
-           built_at = EXCLUDED.built_at,
+           built_at = EXCLUDED.built_at,${setRows}
            refresh_count = ${config.tableName}.refresh_count + 1`,
     )
-    .bind(orgId, cacheKey, dataJson, builtFrom, builtAt)
+    .bind(...binds)
     .run();
+}
+
+// ---------------------------------------------------------------------------
+// Add source_rows to one snapshot table. Returns whether the column can be used.
+//
+// The cache is a Set of TABLE NAMES — plain data with no I/O identity. v1
+// cached the in-flight Promise instead, which is exactly what db-pg.ts forbids
+// ("MUST NOT be cached across requests… Cannot perform I/O on behalf of a
+// different request") and is the most likely reason it took production down:
+// a second request awaiting the first request's socket. A Set cannot do that.
+//
+// Failure is NOT fatal and NOT silent. The real driver message is logged — the
+// generic 500 body is precisely what stopped me diagnosing v1 — and the caller
+// writes the old column list instead, so the snapshot keeps working exactly as
+// it did before this feature existed.
+// ---------------------------------------------------------------------------
+const _rowsColReady = new Set<string>();
+const _rowsColFailed = new Set<string>();
+export async function ensureSourceRowsColumn(
+  db: D1Database,
+  tableName: string,
+): Promise<boolean> {
+  if (_rowsColReady.has(tableName)) return true;
+  if (_rowsColFailed.has(tableName)) return false;
+  try {
+    await db
+      .prepare(`ALTER TABLE ${tableName} ADD COLUMN IF NOT EXISTS source_rows BIGINT`)
+      .run();
+    _rowsColReady.add(tableName);
+    return true;
+  } catch (e) {
+    _rowsColFailed.add(tableName);
+    console.error(
+      `[snapshot] ${tableName}: could not add source_rows — delete-detection is OFF for this table. ${
+        e instanceof Error ? e.message : String(e)
+      }`,
+    );
+    return false;
+  }
+}
+
+/** For tests — drop the per-table migration cache. */
+export function _resetSourceRowsMigForTests(): void {
+  _rowsColReady.clear();
+  _rowsColFailed.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -165,8 +252,27 @@ export async function getMaxSourceUpdatedAt(
 export function isSnapshotFresh(
   snapshot: SnapshotRow | null,
   currentMax: string | null,
+  /**
+   * COUNT(*) across the source tables right now.
+   *
+   * MAX(updated_at) CANNOT SEE A DELETE — removing rows never raises a maximum.
+   * Measured on production 2026-08-02: 0 draft sales orders in the database,
+   * two of them still being served, because the last edit was the previous day
+   * and built_from was newer than MAX. It would have stayed wrong forever.
+   *
+   * undefined = caller opted out; null = could not be counted. Both skip the
+   * check and fall back to the timestamp-only rule, never to "always stale".
+   */
+  currentRows?: number | null,
 ): boolean {
   if (!snapshot) return false;
+  // Checked FIRST: it is the only signal that perceives a deletion. A snapshot
+  // written before the column existed has sourceRows null — stale exactly once,
+  // then it rebuilds and carries the count from then on. No backfill needed.
+  if (currentRows !== undefined && currentRows !== null) {
+    if (snapshot.sourceRows === null) return false;
+    if (snapshot.sourceRows !== currentRows) return false;
+  }
   if (!currentMax) return true;
   // `as unknown` because the type annotations lie — the runtime values
   // may be Date objects (TIMESTAMP cols) or strings (TEXT cols).
@@ -207,6 +313,7 @@ async function computeAndStore<T extends Record<string, unknown>>(
   computeFresh: () => Promise<T>,
   cacheKey: string,
   currentMax: string | null,
+  sourceRows: number | null,
 ): Promise<T> {
   const key = flightKey(config.tableName, orgId, cacheKey);
   const existing = inFlightComputes.get(key);
@@ -221,6 +328,7 @@ async function computeAndStore<T extends Record<string, unknown>>(
         data,
         currentMax ?? new Date().toISOString(),
         cacheKey,
+        sourceRows,
       );
     } catch (e) {
       console.warn(`[${config.tableName}] write-back failed:`, e);
@@ -276,12 +384,14 @@ export async function withSnapshot<T extends Record<string, unknown>>(
     onRevalidated?: () => void | Promise<void>;
   },
 ): Promise<T> {
-  const [snap, currentMax] = await Promise.all([
+  const [snap, signature] = await Promise.all([
     readSnapshot(db, config, orgId, cacheKey),
-    getMaxSourceUpdatedAt(db, config),
+    getSourceSignature(db, config.sourceTables),
   ]);
+  const currentMax = signature.maxUpdatedAt;
+  const sourceRows = signature.rowCount;
 
-  if (isSnapshotFresh(snap, currentMax) && snap) {
+  if (isSnapshotFresh(snap, currentMax, sourceRows) && snap) {
     if (c) {
       try {
         const { emitCounter } = await import("./observability");
@@ -323,6 +433,7 @@ export async function withSnapshot<T extends Record<string, unknown>>(
           computeFresh,
           cacheKey,
           currentMax,
+          sourceRows,
         );
         waitUntil(
           refresh
@@ -346,6 +457,7 @@ export async function withSnapshot<T extends Record<string, unknown>>(
     computeFresh,
     cacheKey,
     currentMax,
+    sourceRows,
   );
 }
 

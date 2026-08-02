@@ -47,7 +47,12 @@ function makeDb({ snapshotRow = null, currentMax = "2030-01-01T00:00:00.000Z" } 
         },
         async first() {
           if (sql.includes('"maxUpdatedAt"')) return { maxUpdatedAt: currentMax };
-          if (sql.includes('"builtFrom"')) return snapshotRow; // readSnapshot
+          // readSnapshot is a star select as of 2026-08-02 (v1 named the new
+          // source_rows column explicitly and ran DDL on the read path, which
+          // took production down). Match either shape.
+          if (sql.includes("SELECT * FROM") || sql.includes('"builtFrom"')) {
+            return snapshotRow;
+          }
           return null;
         },
         async all() {
@@ -64,7 +69,20 @@ function makeDb({ snapshotRow = null, currentMax = "2030-01-01T00:00:00.000Z" } 
           // .all() (was a lexical SQL MAX(t)::first()) — see snapshot-freshness.ts.
           // Hand it the watermark as one per-table row.
           if (sql.includes("AS t")) {
-            return { results: [{ t: currentMax }] };
+            // The probe now also returns COUNT(*) AS n — the only signal that
+            // can perceive a DELETE. Echo the snapshot's own count so these
+            // SWR cases stay about staleness, not about row counts.
+            // `n` is OMITTED unless the fixture opts in: Number(undefined) is
+            // NaN, so getSourceSignature reports rowCount null and the count
+            // check is skipped. These cases are about staleness, not deletes —
+            // the delete behaviour has its own file.
+            return {
+              results: [
+                snapshotRow?.sourceRows === undefined
+                  ? { t: currentMax }
+                  : { t: currentMax, n: snapshotRow.sourceRows },
+              ],
+            };
           }
           return { results: [] };
         },

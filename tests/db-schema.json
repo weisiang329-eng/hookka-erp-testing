@@ -2451,6 +2451,7 @@
     "material_name",
     "notes",
     "pi_id",
+    "po_id",
     "qty",
     "supplier_sku",
     "tax_sen",

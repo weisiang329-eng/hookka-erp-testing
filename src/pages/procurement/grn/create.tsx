@@ -20,9 +20,16 @@
 //   ?poId=<id>   — pre-select a PO (PO-linked mode); locks the PO.
 //   ?scan=1      — auto-open the scan modal once a PO is selected
 //
-// Single-PO by design: the GRN backend keys each line to ONE parent PO by
-// poItemIndex (grns.poId is a single column). Converting from multiple POs
-// into one GRN is NOT supported by the schema and is left as a follow-up.
+// Single-PO IN THIS UI ONLY (2026-08-04). The backend no longer requires it:
+// each grn_items row now carries its own `po_id` + `po_item_id`, so a receipt
+// can draw down several purchase orders and the create handler persists
+// whatever the caller names. What is still missing is HERE — this page picks
+// one PO and seeds its lines, so nothing yet posts a multi-PO receipt.
+//
+// To lift it: let the operator add lines from further POs and send each line's
+// own { poId, poItemId } in `items`. The handler already prefers those over the
+// header PO, and the post/reverse cascades already recompute every purchase
+// order a receipt touched.
 // ---------------------------------------------------------------------------
 
 import React, { useState, useEffect, useRef, useMemo, Suspense } from "react";

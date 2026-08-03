@@ -1292,6 +1292,10 @@ app.post("/", async (c) => {
     let grnSupplierName: string | null = null;
     let grnItems: Array<{
       poItemIndex: number | null;
+      // The PO LINE this receipt line draws down. A receipt may span several
+      // purchase orders, so ownership lives on the line, not on grns.poId.
+      poId: string | null;
+      poItemId: string | null;
       materialCode: string;
       materialName: string;
       orderedQty: number;
@@ -1367,6 +1371,8 @@ app.post("/", async (c) => {
       grnItems = (
         items as Array<{
           poItemIndex: number;
+          poId?: string | null;
+          poItemId?: string | null;
           receivedQty: number;
           acceptedQty: number;
           rejectedQty: number;
@@ -1376,6 +1382,10 @@ app.post("/", async (c) => {
         const poItem = poItems[item.poItemIndex];
         return {
           poItemIndex: item.poItemIndex,
+          // Prefer what the caller named; fall back to the header PO line at
+          // this index so an older client still writes a resolvable row.
+          poId: (item.poId ?? "").trim() || grnPoId,
+          poItemId: (item.poItemId ?? "").trim() || poItem?.id || null,
           materialCode: poItem?.material_code || poItem?.supplierSKU || "",
           materialName: poItem?.materialName ?? "",
           orderedQty: poItem?.quantity ?? 0,
@@ -1404,7 +1414,10 @@ app.post("/", async (c) => {
           unitPriceSen?: number | null;
         }>
       ).map((item) => ({
+        // Manual receipt — no purchase order behind it, so nothing to draw down.
         poItemIndex: null,
+        poId: null,
+        poItemId: null,
         materialCode: item.materialCode ?? "",
         materialName: item.materialName ?? "",
         // orderedQty has no PO reference — mirror receivedQty so it reads sensibly
@@ -1481,13 +1494,15 @@ app.post("/", async (c) => {
       ),
       ...grnItems.map((item) =>
         c.var.DB.prepare(
-          `INSERT INTO grn_items (grnId, poItemIndex, materialCode, materialName,
+          `INSERT INTO grn_items (grnId, poItemIndex, po_id, po_item_id, materialCode, materialName,
              orderedQty, receivedQty, acceptedQty, rejectedQty,
              rejectionReason, unitPrice)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           grnId,
           item.poItemIndex,
+          item.poId ?? null,
+          item.poItemId ?? null,
           item.materialCode,
           item.materialName,
           item.orderedQty,

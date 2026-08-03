@@ -109,6 +109,29 @@ test("partial receipt still accumulates rather than overwrites", () => {
   assert.doesNotMatch(post, /SET receivedQty = \?/);
 });
 
+test("create PERSISTS the per-line PO reference, not just reads it", () => {
+  // The columns are useless if nothing writes them — the resolver would then
+  // fall back to the positional path forever and multi-PO stays unreachable.
+  assert.match(
+    SRC,
+    /INSERT INTO grn_items \(grnId, poItemIndex, po_id, po_item_id, materialCode/,
+  );
+  assert.match(SRC, /item\.poId \?\? null,\s*\n\s*item\.poItemId \?\? null,/);
+});
+
+test("a PO-linked line falls back to the header PO line when the caller omits it", () => {
+  // An older client that still posts only poItemIndex must keep producing
+  // resolvable rows rather than NULLs that silently stop drawing down.
+  assert.match(SRC, /poId: \(item\.poId \?\? ""\)\.trim\(\) \|\| grnPoId/);
+  assert.match(SRC, /poItemId: \(item\.poItemId \?\? ""\)\.trim\(\) \|\| poItem\?\.id \|\| null/);
+});
+
+test("a manual receipt records no PO line at all", () => {
+  // No purchase order behind it, so there is nothing to draw down and the
+  // columns must stay NULL rather than pointing somewhere plausible.
+  assert.match(SRC, /poItemIndex: null,\s*\n\s*poId: null,\s*\n\s*poItemId: null,/);
+});
+
 test("the schema fixture records the self-applied columns", () => {
   const schema = JSON.parse(readFileSync(resolve(process.cwd(), "tests/db-schema.json"), "utf8"));
   assert.ok(schema.grn_items.includes("po_id"));

@@ -77,21 +77,35 @@ test("EditBOMDialog defines every reorder handler", () => {
   }
 });
 
-test("EditBOMDialog wires the full reorder set into its SubWIPTree", () => {
+// 2026-08-03: EditBOMDialog's WIP tab became a TWO-PANE editor — the tree is
+// flattened on the left and ONE node is edited on the right, so it no longer
+// renders SubWIPTree at all. The reorder capability is unchanged; it now
+// reaches the detail pane through depth-agnostic adapters that dispatch on
+// path length. These pins follow the capability, not the old markup.
+
+test("EditBOMDialog routes every reorder through its depth-agnostic adapters", () => {
   const body = componentBody("EditBOMDialog");
-  assert.match(body, /onWrap=\{\(path, si\) => wrapSubWIPAtPath\(wi, path, si\)\}/);
-  assert.match(body, /onMoveUp=\{\(path, si\) => moveSubWIPAtPath\(wi, path, si, -1\)\}/);
-  assert.match(body, /onMoveDown=\{\(path, si\) => moveSubWIPAtPath\(wi, path, si, 1\)\}/);
-  assert.match(body, /onMoveProcessUp=\{\(path, pi\) => moveProcessAtPath\(wi, path, pi, -1\)\}/);
-  assert.match(body, /onMoveProcessDown=\{\(path, pi\) => moveProcessAtPath\(wi, path, pi, 1\)\}/);
+  // Each adapter must serve BOTH families — top-level and nested — or one of
+  // the two depths silently loses the affordance.
+  assert.match(body, /nMoveProcess[\s\S]*?moveWIPProcess\(wi, pi, dir\)[\s\S]*?moveProcessAtPath\(wi, path, pi, dir\)/);
+  assert.match(body, /nMove = \(wi: number, path: number\[\], dir: -1 \| 1\)/);
+  assert.match(body, /moveWIP\(wi, dir\)/);
+  assert.match(body, /moveSubWIPAtPath\(wi, path\.slice\(0, -1\), path\[path\.length - 1\], dir\)/);
+  // "+ Above" (insert a parent level) survived the rework.
+  assert.match(body, /wrapSubWIPAtPath\(wi, path\.slice\(0, -1\), path\[path\.length - 1\]\)/);
 });
 
-test("EditBOMDialog renders ↑/↓ on its L1 processes and L1 WIP header", () => {
-  const body = componentBody("EditBOMDialog");
-  assert.match(body, /moveWIPProcess\(wi, pi, -1\)/);
-  assert.match(body, /moveWIPProcess\(wi, pi, 1\)/);
-  assert.match(body, /moveWIP\(wi, -1\)/);
-  assert.match(body, /moveWIP\(wi, 1\)/);
+test("the detail pane renders ↑/↓ for both processes and the node itself", () => {
+  const body = componentBody("WipNodeDetail");
+  assert.match(body, /onMoveProcess\(wi, path, pi, -1\)/);
+  assert.match(body, /onMoveProcess\(wi, path, pi, 1\)/);
+  assert.match(body, /onMove\(wi, path, -1\)/);
+  assert.match(body, /onMove\(wi, path, 1\)/);
+  // Boundary-guarded, so the first process can't move up nor the last down.
+  assert.match(body, /disabled=\{pi === 0\}/);
+  assert.match(body, /disabled=\{pi === node\.processes\.length - 1\}/);
+  // "+ Above" only offered where a parent can exist.
+  assert.match(body, /onWrap && path\.length > 0/);
 });
 
 test("reorder swaps are pure element swaps and boundary-guarded", () => {

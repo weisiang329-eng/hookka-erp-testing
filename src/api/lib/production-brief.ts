@@ -37,6 +37,7 @@ import {
 } from "./efficiency-report";
 import { loadCapacityConfig, type CapacityConfig } from "./planning-capacity";
 import { runLearning, type LearningData } from "./agent-learning";
+import { buildLateRiskReport, type LateRiskReport } from "./planning-late-risk";
 import { askAgentBrain } from "./agent-brain";
 import { activeInstructions } from "./agent-feedback";
 
@@ -100,6 +101,13 @@ export interface BriefData {
    * fails because learning hiccuped.
    */
   learning: LearningData | null;
+  /**
+   * Orders the CURRENT plan cannot deliver on time (planning-late-risk.ts).
+   * Null when the check was skipped or errored — a failed risk check must
+   * never sink the brief. Surfaced EARLY on purpose: overtime can only be
+   * spread instead of spiked if the shortfall is known before it bites.
+   */
+  lateRisk: LateRiskReport | null;
   aiFocus: string | null;
 }
 
@@ -383,7 +391,7 @@ export async function collectBriefData(
   opts: BriefOptions = {},
 ): Promise<BriefData> {
   const cfg = await loadCapacityConfig(db);
-  const [schedule, overdue, efficiency, cnc, drift, pendingProposals, learning] =
+  const [schedule, overdue, efficiency, cnc, drift, pendingProposals, learning, lateRisk] =
     await Promise.all([
       collectScheduleData(db as never, date),
       collectOverdueData(db as never, date),
@@ -400,6 +408,12 @@ export async function collectBriefData(
             return null;
           })
         : Promise.resolve(null),
+      // Late-risk runs the chain engine — best-effort for the same reason as
+      // learning: the brief must go out even if the risk check trips.
+      buildLateRiskReport(db).catch((err) => {
+        console.warn("[brief/late-risk] failed:", err);
+        return null;
+      }),
     ]);
   const lowWorkers = efficiency.workers
     .filter((w) => w.workingMinutes > 0 && w.efficiencyPct < 60)
@@ -423,6 +437,7 @@ export async function collectBriefData(
     drift,
     proposals: { pending: pendingProposals },
     learning,
+    lateRisk,
   };
   const ownerNotes = anthropicApiKey
     ? await activeInstructions(db as never, "PRODUCTION")
@@ -532,6 +547,7 @@ ${d.proposals.pending > 0 ? `<div style="background:#EEF3EA;border:1px solid #CB
 <table ${table}><tr><th ${th}>Category</th><th ${thR}>Configured</th><th ${thR}>Actual /set</th><th ${thR}>Drift</th></tr>${driftRows}</table>
 <div style="font:11px Arial;color:#9CA3AF;margin-top:6px">⚠ = actual speed is >25% off the configured model — worth updating the CNC settings (Planning → capacity config).</div>
 ${renderLearningHtml(d, h2, th, thR, table)}
+${renderLateRiskSection(d.lateRisk)}
 <div style="border-top:1px solid #E2DDD8;margin-top:20px;padding-top:10px;font:11px Arial;color:#9CA3AF">
   Generated ${d.generatedAtIso} · Hookka Production Agent · full detail in the ERP dashboard (Agent Console: /agents).
 </div>
@@ -624,6 +640,53 @@ ${otBlocks || `<div style="font:13px Arial;color:#4F7C3A">No department is overl
 <div style="font:11px Arial;color:#9CA3AF;margin-top:6px">Rules: spread to lighter days FIRST; OT only as a fallback, max 2h/day, started early and spread flat — never a last-minute spike. If capped OT still isn't enough, the humane answer is to delay the lowest-priority orders and inform customers early.</div>`;
 }
 
+/**
+ * Section 9 — orders the plan already cannot deliver on time. This is the
+ * section that makes early overtime possible: it names the shortfall while
+ * there are still working days left to spread it over, instead of announcing
+ * it on the day the order goes overdue.
+ */
+function renderLateRiskSection(r: LateRiskReport | null): string {
+  if (!r) return "";
+  const h2 = `style="font:600 15px Arial;color:#1F1D1B;margin:18px 0 6px"`;
+  const table = `style="border-collapse:collapse;width:100%;font:12px Arial"`;
+  const th = `style="text-align:left;padding:6px 10px;background:#F0ECE9;color:#4B4642;font-weight:600"`;
+  const thR = `style="text-align:right;padding:6px 10px;background:#F0ECE9;color:#4B4642;font-weight:600"`;
+  const td = `style="padding:6px 10px;border-top:1px solid #EFEAE5"`;
+  const tdR = `style="padding:6px 10px;border-top:1px solid #EFEAE5;text-align:right"`;
+
+  if (r.late.length === 0 && r.atRisk.length === 0) {
+    return `
+<h2 ${h2}>9 · Delivery Risk — all clear</h2>
+<div style="font:13px Arial;color:#4F7C3A">Every dated order in the plan finishes on or before its deadline (${r.totalOrdersPlanned} order(s) planned${r.undated > 0 ? `, ${r.undated} with no customer date` : ""}).</div>`;
+  }
+
+  const rows = r.late
+    .slice(0, 20)
+    .map(
+      (o) => `<tr>
+<td ${td}><b>${esc(o.soId)}</b><div style="color:#6B7280;font-size:11px">${esc(o.customer)}</div></td>
+<td ${td}>${esc(o.customerDd)}</td>
+<td ${td}>${esc(o.scheduledFinish)} <span style="color:#9CA3AF">(${esc(o.finishDept)})</span></td>
+<td ${tdR}><b style="color:#9A3A2D">${o.workingDaysLate}d late</b></td>
+<td ${tdR}>${o.cards}</td>
+</tr>`,
+    )
+    .join("");
+
+  const atRiskNote =
+    r.atRisk.length > 0
+      ? `<div style="font:12px Arial;color:#B8860B;margin-top:8px">${r.atRisk.length} further order(s) finish exactly ON the deadline — no room left for any slippage.</div>`
+      : "";
+
+  return `
+<h2 ${h2}>9 · Delivery Risk — ${r.late.length} order(s) cannot make it on the current plan</h2>
+<table ${table}><tr><th ${th}>SO</th><th ${th}>Customer DD</th><th ${th}>Plan finishes</th><th ${thR}>Miss by</th><th ${thR}>Cards</th></tr>${rows}</table>
+${r.late.length > 20 ? `<div style="font:11px Arial;color:#9CA3AF;margin-top:4px">Showing the worst 20 of ${r.late.length}.</div>` : ""}
+${atRiskNote}
+<div style="font:11px Arial;color:#9CA3AF;margin-top:6px">Deadline = customer date minus ${r.shipBufferDays} working day(s) for dispatch. Act TODAY: start the ≤2h/day overtime above so it can be spread, or tell these customers early. Leaving it costs the same hours in a worse shape.</div>`;
+}
+
 export function renderBriefEmailText(d: BriefData): string {
   const lines: string[] = [];
   lines.push(`Hookka Production Morning Brief — ${d.date}`);
@@ -689,6 +752,23 @@ export function renderBriefEmailText(d: BriefData): string {
       );
     } else {
       lines.push("8) Forward OT outlook: all clear — no OT needed in the window.");
+    }
+  }
+  const R = d.lateRisk;
+  if (R) {
+    if (R.late.length === 0 && R.atRisk.length === 0) {
+      lines.push(`9) Delivery risk: all clear — ${R.totalOrdersPlanned} planned order(s) all fit.`);
+    } else {
+      const worst = R.late
+        .slice(0, 5)
+        .map((o) => `${o.soId} (${o.customer}) ${o.workingDaysLate}d late, due ${o.customerDd}`)
+        .join("; ");
+      lines.push(
+        `9) Delivery risk: ${R.late.length} order(s) CANNOT make it on the current plan` +
+          (worst ? ` — worst: ${worst}` : "") +
+          (R.atRisk.length > 0 ? `; ${R.atRisk.length} more finish exactly on the deadline` : "") +
+          ". Start the spread OT above today, or tell these customers early.",
+      );
     }
   }
   return lines.join("\n");

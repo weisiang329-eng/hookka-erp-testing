@@ -745,7 +745,13 @@ export function computeMonthlyLabor(
   // Clamp days-worked to the elapsed window so a stray future-dated log can't
   // make absences negative.
   const workedWithinWindow = Math.min(daysWorked, elapsedWorkingDays);
-  const absentDays = Math.max(0, elapsedWorkingDays - workedWithinWindow);
+  // A day an outsourced person does not come is not an ABSENCE — there is no
+  // salary for it to be absent from. Reporting 2 absent days against someone
+  // hired by the day is meaningless on a payslip and invites someone to dock
+  // it. Owner 2026-08-02: 「我们的算法就是根据你的日薪去计算。」
+  const absentDays = isDailyPaid
+    ? 0
+    : Math.max(0, elapsedWorkingDays - workedWithinWindow);
   // Absence docks the ÷26 contractual day rate (RM78.85 on RM2,050) — the
   // same divisor as OT. The ÷26-vs-÷working-days difference per absent day is
   // bridged on the Labor Cost screen (the absence-leniency line).
@@ -762,19 +768,25 @@ export function computeMonthlyLabor(
   // Owner-flagged / punch-derived unworked hours dock at (salary ÷ 26) ÷ the
   // effective-dated hour divisor — the same RM7.88/h base the OT rate uses.
   const shortHourDeductionHours = Math.max(0, input.shortHourDeductionHours || 0);
-  const shortHourDeductionSen = Math.round(shortHourDeductionHours * lateHourlyRateSen);
-  // Daily: rate x days actually worked, then the same short-hour dock. There is
-  // no absence line to subtract — a day not worked simply is not paid.
+  // No hourly docking for a per-day worker. Owner 2026-08-02: 「打卡了几天，就会
+  // 算几天的薪水」 and 「根据你的日薪…去计算」. A day rate has no hour rate inside
+  // it to dock FROM — the deduction would be priced off basicSalarySen, which
+  // they do not have. CHAU carries 5 auto short-hour/late rows (16 min late on
+  // 06-29, 0.75h short on 07-09); under a day-rate agreement those do not
+  // reduce the day. Like the OT rule, this already came to zero because the
+  // hourly rate is zero — and like the OT rule, an accident is not a rule.
+  const shortHourDeductionSen = isDailyPaid
+    ? 0
+    : Math.round(shortHourDeductionHours * lateHourlyRateSen);
+  // Daily: rate x days actually worked. There is no absence line to subtract —
+  // a day not worked simply is not paid.
   // Deliberately `daysWorked`, NOT `workedWithinWindow`. The latter is clamped
   // by the absence window (elapsed working days), which is the right basis for
   // deciding what to DOCK but the wrong one for deciding what to PAY: a day
   // that falls outside that window would be worked and then not paid for. For
   // daily pay the rule is simply "days logged, days paid".
   const basicEarnedSen = isDailyPaid
-    ? Math.max(
-        0,
-        Math.round(daysWorked * (worker.dailyRateSen ?? 0)) - shortHourDeductionSen,
-      )
+    ? Math.max(0, Math.round(daysWorked * (worker.dailyRateSen ?? 0)))
     : Math.max(
         0,
         Math.max(0, basicSalarySen - absenceDeductionSen) - shortHourDeductionSen,
@@ -782,9 +794,17 @@ export function computeMonthlyLabor(
   // Day-typed OT pay. Weekday uses the per-worker rate (base × otMultiplier) so a
   // weekday-only worker is byte-identical to before; Sunday/holiday use the fixed
   // 2×/3× on the base rate. Each bucket is rounded, then summed → otPaySen.
-  const otWeekdayPaySen = Math.round(otWeekdayPayExact);
-  const otSundayPaySen = Math.round(otSundayPayExact);
-  const otHolidayPaySen = Math.round(otHolidayPayExact);
+  //
+  // Outsourced / per-day people get NO overtime. Owner 2026-08-02, after asking
+  // HR: 「outsource 暂时没有。暂时我们的算法就是根据你的日薪…去计算。」 It is a
+  // POLICY, stated explicitly here rather than left to fall out of the
+  // arithmetic. It already came to zero by accident — every OT rate divides
+  // from basicSalarySen, which is 0 for them — but an accident is not a rule:
+  // the moment someone puts a figure in Basic salary to "fix" a zero, an
+  // outsourced person would start earning overtime nobody agreed to.
+  const otWeekdayPaySen = isDailyPaid ? 0 : Math.round(otWeekdayPayExact);
+  const otSundayPaySen = isDailyPaid ? 0 : Math.round(otSundayPayExact);
+  const otHolidayPaySen = isDailyPaid ? 0 : Math.round(otHolidayPayExact);
   const otPaySen = otWeekdayPaySen + otSundayPaySen + otHolidayPaySen;
   const grossSen = basicEarnedSen + otPaySen;
 

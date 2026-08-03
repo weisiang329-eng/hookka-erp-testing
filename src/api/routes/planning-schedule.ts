@@ -24,6 +24,9 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
 import { loadCapacityConfig, type CapacityConfig, type Lane } from "../lib/planning-capacity";
+import { buildCapacityAudit } from "../lib/planning-capacity-audit";
+import { resolveAdaptiveCapacity } from "../lib/planning-adaptive-capacity";
+import { buildLateRiskReport } from "../lib/planning-late-risk";
 import { scheduleCutting, type CutCard } from "../lib/planning-scheduler";
 import {
   computeChain,
@@ -147,12 +150,19 @@ app.get("/schedule/fabric-cutting", async (c) => {
   const config = await loadCapacityConfig(db);
   const { holidays, startDate, generatedAt } = await loadCalendarWindow(db);
 
+  // Same measured CNC budget the full-chain route uses, so this standalone
+  // Fabric Cutting sheet can never disagree with /schedule/:dept.
+  const cutBudget = await resolveAdaptiveCapacity(db)
+    .then((r) => r.byDept.FAB_CUT)
+    .catch(() => undefined);
+
   const snapshot = scheduleCutting({
     cards,
     config,
     holidays,
     startDate,
     generatedAt,
+    dailyBudgetMin: cutBudget,
   });
 
   return c.json(snapshot);
@@ -216,6 +226,7 @@ const DEPT_SLUGS: Record<string, keyof ChainOutput> = {
 const DEPT_CODE_TO_CHAIN: Record<string, ChainDept> = {
   FAB_SEW: "FAB_SEW",
   WOOD_CUT: "WOOD_CUT",
+  FOAM_CUTTING: "FOAM_CUTTING",
   FRAMING: "FRAMING",
   WEBBING: "WEBBING",
   FOAM: "FOAM",
@@ -226,6 +237,7 @@ const DEPT_CODE_TO_CHAIN: Record<string, ChainDept> = {
 interface ChainRawRow {
   jobCardId: string;
   dueDate: string | null;
+  distributedAt: string | null;
   departmentCode: string | null;
   status: string | null;
   wipLabel: string | null;
@@ -280,7 +292,32 @@ function modelOf(r: ChainRawRow): string {
   return wl ? wl.split("|")[0].trim() : "";
 }
 
-function normalizeChainCard(r: ChainRawRow, dept: ChainDept): ChainCard {
+/**
+ * Working days a due date may sit inside before the card counts as COMMITTED.
+ * Must match the guard in schedule-proposals.ts — the engine and the proposal
+ * generator have to agree on which work is frozen, or one of them plans around
+ * a day the other has already given away.
+ */
+const FREEZE_WINDOW_DAYS = 3;
+
+/**
+ * The real day a frozen card will be worked, or null when it is free to move.
+ * Frozen = already sent to the floor, or due inside the freeze window.
+ */
+function pinnedDueOf(r: ChainRawRow, today: string, freezeEnd: string): string | null {
+  const due = (r.dueDate ?? "").slice(0, 10);
+  const sent = (r.distributedAt ?? "").trim() !== "";
+  if (sent) return due || null;
+  if (due && due >= today && due <= freezeEnd) return due;
+  return null;
+}
+
+function normalizeChainCard(
+  r: ChainRawRow,
+  dept: ChainDept,
+  today: string,
+  freezeEnd: string,
+): ChainCard {
   const lane = (laneOf(r) ?? "ACCESSORY") as Lane;
   const qty = Math.max(1, r.wipQty ?? 1);
   const perUnit = r.productionTimeMinutes ?? 0;
@@ -305,6 +342,7 @@ function normalizeChainCard(r: ChainRawRow, dept: ChainDept): ChainCard {
     // when the line never appears in the cutting plan).
     cutDone: false,
     noCutStep: false,
+    pinnedDue: pinnedDueOf(r, today, freezeEnd),
   };
 }
 
@@ -326,6 +364,8 @@ interface LoadedChainInputs {
   holidays: string[];
   startDate: string;
   generatedAt: string;
+  /** Measured minutes/day per department; undefined = use the constants. */
+  dailyBudgetByDept?: Record<string, number>;
 }
 
 // ONE batched load of every WAITING production card + order + SO dates,
@@ -336,6 +376,7 @@ async function loadChainInputs(db: D1Database): Promise<LoadedChainInputs> {
   const sql = `
     SELECT jc.id             AS jobCardId,
            jc.dueDate        AS dueDate,
+           jc.distributedAt  AS distributedAt,
            jc.departmentCode AS departmentCode,
            jc.status         AS status,
            jc.wipLabel       AS wipLabel,
@@ -366,6 +407,15 @@ async function loadChainInputs(db: D1Database): Promise<LoadedChainInputs> {
      ORDER BY po.companySOId, jc.sequence`;
   const res = await db.prepare(sql).all<ChainRawRow>();
   const raw = res.results ?? [];
+
+  // Freeze window — cards due inside it (or already sent to the floor) keep
+  // their committed day and consume capacity THERE, so the engine cannot give
+  // the same near-term hours away twice.
+  const todayYmd = fmtLocalIso(new Date());
+  const freezeEndDate = new Date();
+  freezeEndDate.setHours(0, 0, 0, 0);
+  freezeEndDate.setDate(freezeEndDate.getDate() + FREEZE_WINDOW_DAYS);
+  const freezeEnd = fmtLocalIso(freezeEndDate);
 
   const cutCards: CutCard[] = [];
   const chainCards: ChainCard[] = [];
@@ -401,14 +451,33 @@ async function loadChainInputs(db: D1Database): Promise<LoadedChainInputs> {
     const chainDept = DEPT_CODE_TO_CHAIN[code];
     if (!chainDept) continue;
     if (!laneOf(r)) continue;
-    const card = normalizeChainCard(r, chainDept);
+    const card = normalizeChainCard(r, chainDept, todayYmd, freezeEnd);
     chainCards.push(card);
     meta.set(card, jcMeta);
   }
 
   const config = await loadCapacityConfig(db);
   const { holidays, startDate, generatedAt } = await loadCalendarWindow(db);
-  return { cutCards, chainCards, meta, config, holidays, startDate, generatedAt };
+  // Measured daily budgets (owner 2026-08-03). Resolved WITHOUT persist so a
+  // plain schedule read never moves the stored value — only the agent's own
+  // run commits one. A failure here degrades to the hardcoded constants rather
+  // than failing the schedule.
+  const dailyBudgetByDept = await resolveAdaptiveCapacity(db)
+    .then((r) => r.byDept)
+    .catch((e) => {
+      console.warn("[planning] adaptive capacity unavailable, using constants:", e);
+      return undefined;
+    });
+  return {
+    cutCards,
+    chainCards,
+    meta,
+    config,
+    holidays,
+    startDate,
+    generatedAt,
+    dailyBudgetByDept,
+  };
 }
 
 // Reusable: load WAITING cards, run the full chain ONCE, and return the
@@ -422,7 +491,7 @@ export async function computeDeptSchedule(
   const which = DEPT_SLUGS[slug];
   if (!which) return null;
 
-  const { cutCards, chainCards, config, holidays, startDate, generatedAt } =
+  const { cutCards, chainCards, config, holidays, startDate, generatedAt, dailyBudgetByDept } =
     await loadChainInputs(db);
 
   const out = computeChain({
@@ -432,6 +501,7 @@ export async function computeDeptSchedule(
     holidays,
     startDate,
     generatedAt,
+    dailyBudgetByDept,
   });
 
   return out[which];
@@ -470,8 +540,16 @@ export async function computeChainWithAssignments(db: D1Database): Promise<{
   startDate: string;
   assignments: EngineAssignment[];
 }> {
-  const { cutCards, chainCards, meta, config, holidays, startDate, generatedAt } =
-    await loadChainInputs(db);
+  const {
+    cutCards,
+    chainCards,
+    meta,
+    config,
+    holidays,
+    startDate,
+    generatedAt,
+    dailyBudgetByDept,
+  } = await loadChainInputs(db);
 
   const assignments: EngineAssignment[] = [];
   computeChain({
@@ -481,6 +559,7 @@ export async function computeChainWithAssignments(db: D1Database): Promise<{
     holidays,
     startDate,
     generatedAt,
+    dailyBudgetByDept,
     collect: (a) => {
       const m = meta.get(a.card);
       if (!m) return;
@@ -501,6 +580,33 @@ export async function computeChainWithAssignments(db: D1Database): Promise<{
 
   return { generatedAt, startDate, assignments };
 }
+
+// ── GET /capacity-audit ──────────────────────────────────────────────────────
+// Read-only reconciliation: the engine's per-department daily ceiling (in
+// minutes) against what the floor actually produced over the last 7 working
+// days. Writes nothing and does not run the scheduler — it exists so the
+// numbers can be checked BEFORE any capacity constant is touched.
+// `adaptive` is a PREVIEW of the measured budget the scheduler would adopt —
+// resolved without persist, so hitting this endpoint never moves the plan.
+app.get("/capacity-audit", async (c) => {
+  void getOrgId(c);
+  const [data, adaptive] = await Promise.all([
+    buildCapacityAudit(c.var.DB),
+    resolveAdaptiveCapacity(c.var.DB),
+  ]);
+  return c.json({ success: true, data: { ...data, adaptive } });
+});
+
+// ── GET /late-risk ───────────────────────────────────────────────────────────
+// Orders the CURRENT plan cannot deliver on time. Read-only, and derived from
+// the same engine the schedule pages render, so it can never disagree with the
+// plan the floor is working to. This is the input for "start OT now" — knowing
+// early is the only way overtime can be spread instead of spiked.
+app.get("/late-risk", async (c) => {
+  void getOrgId(c);
+  const data = await buildLateRiskReport(c.var.DB);
+  return c.json({ success: true, data });
+});
 
 app.get("/schedule/:dept", async (c) => {
   const slug = c.req.param("dept");

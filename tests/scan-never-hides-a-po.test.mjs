@@ -53,3 +53,24 @@ test("the flag is on every row shape, so no path can forget it", () => {
   assert.match(src, /alreadyUsed: boolean;/);
   assert.match(src, /alreadyUsed: false,/, "the sync /extract path sets it too");
 });
+
+// --- the DURABLE duplicate question ----------------------------------------
+
+test("duplicates are judged against LIVE orders, not scan history", () => {
+  // Owner:「系统应该是根据拉出来的顾客名字和顾客的 PO 号码去做对比的,不需要看
+  // 照片」. "Did I touch this file" goes stale the moment a draft is deleted;
+  // "is this order in the system" does not.
+  const route = readFileSync("src/api/routes/sales-orders.ts", "utf8");
+  assert.match(route, /app\.post\("\/check-customer-pos"/);
+  assert.match(route, /WHERE customerPOId IN/);
+  // A cancelled order is not a reason to warn — it is not an order any more.
+  assert.match(route, /UPPER\(COALESCE\(status, ''\)\) <> 'CANCELLED'/);
+  assert.match(src, /"\/api\/sales-orders\/check-customer-pos"/);
+});
+
+test("the warning NAMES the order, and the check can never block a create", () => {
+  // "Already SO-2608-019" sends the operator somewhere; "seen before" does not.
+  assert.match(src, /Already \{existingSOs\.map\(\(e\) => e\.companySOId\)\.join\(", "\)\}/);
+  // Best-effort: a failed lookup degrades to no warning, never to a blocked flow.
+  assert.match(src, /\/\/ Best-effort: a failed check must never stop the operator creating/);
+});

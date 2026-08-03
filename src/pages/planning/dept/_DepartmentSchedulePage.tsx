@@ -8,12 +8,16 @@
 //
 // The page renders (top -> bottom):
 //   header + Recalculate button + snapshot caption
-//   (a) Scheduling Process  — collapsible, closed by default
-//   (c) Scheduling Logic / Prompt — collapsible, closed by default
-//   (b) Schedule Result — the saved snapshot: a date-grouped Calendar (each
+//   Schedule Result — the saved snapshot: a date-grouped Calendar (each
 //       order/cut headed by a count summary line) + a By Day summary, open by
 //       default. Framing additionally renders its downstream-team schedules
 //       (Sofa Foam Bonding, Upholstery, Packing) as extra collapsible tables.
+//
+// The prose "Scheduling Process" and "Scheduling Logic / Prompt" panels were
+// removed 2026-08-03 (owner): they described the scheduler in hand-written
+// paragraphs that no test or type checked, so they drifted out of step with
+// planning-chain.ts / planning-scheduler.ts and became actively misleading.
+// The engine's behaviour is documented at its source instead.
 //
 // The Recalculate button is intentionally inert: live re-scheduling from
 // current orders is a later backend phase. It surfaces a toast saying so, and
@@ -33,9 +37,7 @@ import { useToast } from "@/components/ui/toast";
 import {
   ArrowLeft,
   RefreshCw,
-  ListChecks,
   CalendarDays,
-  BookOpen,
   ChevronDown,
   ChevronRight,
   Info,
@@ -53,7 +55,6 @@ export type Snapshot = {
 };
 
 // ── Curated explanatory content typing ─────────────────────────────────────
-export type Para = { heading: string; body: string; bullets?: string[] };
 
 // ── Lane label mapping (data may carry mixed-language lane names) ───────────
 // The snapshot's Lane column carries mixed-language labels whose English word
@@ -192,26 +193,6 @@ function buildCalendarGroups(sheet: Sheet | undefined): CalGroup[] {
 }
 
 // ── Reusable bits ──────────────────────────────────────────────────────────
-function SectionParagraphs({ items }: { items: Para[] }) {
-  return (
-    <div className="space-y-4">
-      {items.map((p) => (
-        <div key={p.heading}>
-          <h4 className="text-sm font-semibold text-[#1F1D1B]">{p.heading}</h4>
-          <p className="mt-1 text-sm leading-relaxed text-[#4B4642]">{p.body}</p>
-          {p.bullets && (
-            <ul className="mt-2 ml-4 list-disc space-y-1 text-sm text-[#4B4642]">
-              {p.bullets.map((b) => (
-                <li key={b}>{b}</li>
-              ))}
-            </ul>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
-
 // A grouped header line that sits above each group's item rows: the group key
 // chip (Cut B1 / SO SO-2605-131), the lane, and the count summary chips the
 // owner asked for (orders / sets / slots, or pieces / sets / mins, etc.).
@@ -646,11 +627,6 @@ export type DepartmentSchedulePageProps = {
   /** By Day sheet name + its render config. */
   byDaySheetName: string;
   byDayConfig: ByDayConfig;
-  /** Curated, plain-English explanatory content (English only). */
-  processSections: Para[];
-  logicSections: Para[];
-  /** Optional intro line shown above the logic sections. */
-  logicIntro?: string;
   /** Optional downstream sheets (Framing) rendered below the main result. */
   extraSheets?: ExtraSheet[];
   /** Optional upstream department(s) this stage depends on. Rendered as a
@@ -809,28 +785,7 @@ export default function DepartmentSchedulePage(props: DepartmentSchedulePageProp
         </div>
       )}
 
-      {/* (a) Scheduling Process — explanation at top, collapsed by default */}
-      <CollapsibleCard
-        icon={<ListChecks className="h-4 w-4 text-[#6B5C32]" />}
-        title="Scheduling Process"
-        defaultOpen={false}
-      >
-        <SectionParagraphs items={props.processSections} />
-      </CollapsibleCard>
-
-      {/* (c) Scheduling Logic / Prompt — explanation at top, collapsed by default */}
-      <CollapsibleCard
-        icon={<BookOpen className="h-4 w-4 text-[#6B5C32]" />}
-        title="Scheduling Logic / Prompt"
-        defaultOpen={false}
-      >
-        {props.logicIntro && (
-          <p className="mb-4 text-xs leading-relaxed text-[#6B7280]">{props.logicIntro}</p>
-        )}
-        <SectionParagraphs items={props.logicSections} />
-      </CollapsibleCard>
-
-      {/* (b) Schedule Result — main body, open by default */}
+      {/* Schedule Result — main body, open by default */}
       <Card className="overflow-hidden">
         <CardHeader>
           <CardTitle className="flex flex-wrap items-center justify-between gap-2 text-base text-[#1F1D1B]">

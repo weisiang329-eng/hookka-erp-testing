@@ -16,7 +16,6 @@ import { LayoutGrid } from "lucide-react";
 import snapshot from "@/data/webbing-schedule-snapshot.json";
 import DepartmentSchedulePage, {
   type Snapshot,
-  type Para,
   type CalendarConfig,
   type ByDayConfig,
 } from "./_DepartmentSchedulePage";
@@ -59,75 +58,6 @@ const BY_DAY_CONFIG: ByDayConfig = {
   wideCol: 3,
 };
 
-const PROCESS_SECTIONS: Para[] = [
-  {
-    heading: "Webbing has no separate schedule",
-    body:
-      "Webbing is not scheduled on its own. Each order's webbing is done on the " +
-      "SAME day as that order's framing — so the webbing plan is simply the " +
-      "framing plan, read from the webbing team's point of view.",
-  },
-  {
-    heading: "Runs in parallel with framing",
-    body:
-      "Webbing is done by different people at a different station and runs " +
-      "alongside framing. It does NOT eat into the framing hours — it just rides " +
-      "along on the same day. That is why webbing does not need its own daily " +
-      "capacity budget.",
-  },
-  {
-    heading: "What this page shows",
-    body:
-      "The calendar groups each framing day's orders so you can see which SOs are " +
-      "webbed that day and how many webbing pieces fall on it (pulled straight " +
-      "from the framing plan). The By Day table sums the webbing pieces per day.",
-  },
-  {
-    heading: "Sofa webbing is also same-day",
-    body:
-      "Sofa webbing (base, back cushion and armrest) is likewise done the same " +
-      "day as the sofa's framing. Sofa foam bonding then follows the next working " +
-      "day — that is the Foam Bonding department's plan.",
-  },
-  {
-    heading: "Working days only",
-    body:
-      "Because webbing follows framing exactly, it inherits the framing calendar: " +
-      "Monday to Saturday, with Sundays and public holidays skipped.",
-  },
-];
-
-const LOGIC_SECTIONS: Para[] = [
-  {
-    heading: "Same-day rider — no capacity gate",
-    body:
-      "Webbing is a same-day rider on framing. Unlike framing, foam bonding and " +
-      "upholstery, it has no daily hour budget: whatever is framed on a day is " +
-      "webbed on that day, on a separate crew running in parallel.",
-  },
-  {
-    heading: "Date inherited from framing",
-    body:
-      "A webbing card's date is exactly its framing date — there is no handoff " +
-      "wait and no separate floor. Move an order's framing day and its webbing " +
-      "moves with it.",
-  },
-  {
-    heading: "Volume pulled from the framing plan",
-    body:
-      "The per-day webbing piece count on this page comes directly from the " +
-      "framing schedule's same-day webbing column, so the two can never drift " +
-      "apart.",
-  },
-  {
-    heading: "Calendar boundaries",
-    body:
-      "Schedule starts 2026-06-02 (1 June is a holiday). Sundays and public " +
-      "holidays are skipped. The plan is read-only — nothing is written back to " +
-      "the ERP.",
-  },
-];
-
 export default function WebbingDeptPage() {
   return (
     <DepartmentSchedulePage
@@ -143,9 +73,6 @@ export default function WebbingDeptPage() {
       calendarHeading="Webbing Calendar (same day as framing)"
       byDaySheetName="By Day"
       byDayConfig={BY_DAY_CONFIG}
-      processSections={PROCESS_SECTIONS}
-      logicSections={LOGIC_SECTIONS}
-      logicIntro="The detailed rule set behind the webbing plan, kept here as a reference for the owner."
     />
   );
 }

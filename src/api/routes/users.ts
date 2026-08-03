@@ -121,6 +121,14 @@ function ensureUserOrgColumns(db: D1Database): Promise<void> {
       // reports_to holds the user id of this person's upline (manager), so the
       // org chart can draw a reporting line — mirrors Houzs's parentId.
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS reports_to TEXT",
+      // An account created by an admin carries a password the ADMIN chose, so
+      // the admin knows it. Until the person changes it, nothing that account
+      // does can be attributed to them — the admin could equally have done it.
+      // Owner 2026-08-02 wants to hand out credentials directly:「我给他们密码、
+      // 账号,他们都可以直接登录进来」— which is a normal way to run an ERP on
+      // company mailboxes, and is safe exactly as long as the first login
+      // forces a change. Defaults FALSE so nothing existing is affected.
+      "ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE",
     ];
     await runSelfApply(db, "users", stmts);
   })().catch((err) => {
@@ -242,12 +250,16 @@ app.post("/", async (c) => {
   if (su) return su;
   try {
     const body = await c.req.json();
-    const { email, password, displayName, role } = body as {
-      email?: string;
-      password?: string;
-      displayName?: string;
-      role?: string;
-    };
+    const { email, password, displayName, role, department, position, mustChangePassword } =
+      body as {
+        email?: string;
+        password?: string;
+        displayName?: string;
+        role?: string;
+        department?: string;
+        position?: string;
+        mustChangePassword?: boolean;
+      };
     if (!email || !password) {
       return c.json(
         { success: false, error: "email and password are required" },
@@ -277,9 +289,14 @@ app.post("/", async (c) => {
     const passwordHash = await hashPassword(password);
     const createdAt = new Date().toISOString();
 
+    // Department / position are set HERE rather than in a second call, so a new
+    // person lands on the org chart the moment they exist instead of sitting in
+    // Unassigned until someone remembers.
+    await ensureUserOrgColumns(c.var.DB);
     await c.var.DB.prepare(
-      `INSERT INTO users (id, email, passwordHash, role, isActive, createdAt, lastLoginAt, displayName)
-       VALUES (?, ?, ?, ?, 1, ?, NULL, ?)`,
+      `INSERT INTO users (id, email, passwordHash, role, isActive, createdAt, lastLoginAt,
+                          displayName, department, position, must_change_password)
+       VALUES (?, ?, ?, ?, 1, ?, NULL, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -288,6 +305,11 @@ app.post("/", async (c) => {
         role ?? "STAFF",
         createdAt,
         displayName ?? "",
+        (department ?? "").trim() || null,
+        (position ?? "").trim() || null,
+        // Default TRUE: an admin-chosen password is a handover credential, not
+        // the person's password. Only an explicit false opts out.
+        mustChangePassword === false ? false : true,
       )
       .run();
 

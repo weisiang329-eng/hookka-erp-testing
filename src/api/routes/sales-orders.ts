@@ -77,6 +77,7 @@ import { resolveHeightPriceSen } from "../../lib/height-surcharge";
 import { resolveTotalHeightPriceSen } from "../../lib/total-height-surcharge";
 import { loadSpecialsConfig, loadHeightsConfig } from "../lib/specials-config";
 import { validateRepairScopeInput } from "../../lib/repair-scope";
+import { buildOrderFootprint } from "../lib/order-footprint";
 
 import {
   parseCustomSpecials,
@@ -392,6 +393,89 @@ app.get("/", async (c) => {
 // onto in-stock FG stickers, then reprint.
 // (defined BEFORE /:id so the route matches first)
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// POST /api/sales-orders/check-customer-pos
+//
+// "Is this customer PO already an order in the system?" — the question the scan
+// preview should be asking.
+//
+// It used to ask a different one: "have I seen this FILE before, and did anyone
+// make a draft from it?" That answer goes stale the moment a draft is deleted,
+// and it went stale silently — two of eleven POs vanished from a scan and
+// nothing said so (owner 2026-08-02:「为什么我的 OCR PO 9721、9720 会没有出来
+// 呢?」). Owner's own diagnosis:「系统应该是根据拉出来的顾客名字和顾客的 PO 号码
+// 去做对比的,不需要看照片」.
+//
+// This asks the durable question instead. A deleted draft is simply not here,
+// so the PO comes through clean; a live order IS here, and the caller is told
+// exactly which one.
+//
+// READ-ONLY. Body: { pos: [{ customerPO, customerId?, customerName? }] }.
+// Matching is on the customer PO number, narrowed by customer when the caller
+// knows it — the same number can legitimately exist for two customers.
+// ---------------------------------------------------------------------------
+app.post("/check-customer-pos", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "read");
+  if (denied) return denied;
+  let body: { pos?: { customerPO?: unknown; customerId?: unknown }[] };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+  const asked = (Array.isArray(body.pos) ? body.pos : [])
+    .map((p) => ({
+      customerPO: typeof p?.customerPO === "string" ? p.customerPO.trim() : "",
+      customerId: typeof p?.customerId === "string" ? p.customerId.trim() : "",
+    }))
+    .filter((p) => p.customerPO);
+  if (asked.length === 0) return c.json({ success: true, data: [] });
+
+  const nums = [...new Set(asked.map((p) => p.customerPO))].slice(0, 200);
+  const ph = nums.map(() => "?").join(",");
+  const res = await c.var.DB.prepare(
+    `SELECT id, companySOId, customerPOId, customerId, customerName, status
+       FROM sales_orders
+      WHERE customerPOId IN (${ph})
+        AND UPPER(COALESCE(status, '')) <> 'CANCELLED'`,
+  )
+    .bind(...nums)
+    .all<{
+      id: string;
+      companySOId?: string | null;
+      companysoid?: string | null;
+      customerPOId?: string | null;
+      customerpoid?: string | null;
+      customerId?: string | null;
+      customerid?: string | null;
+      customerName?: string | null;
+      customername?: string | null;
+      status?: string | null;
+    }>();
+
+  const rows = (res.results ?? []).map((r) => ({
+    id: r.id,
+    companySOId: r.companySOId ?? r.companysoid ?? "",
+    customerPO: r.customerPOId ?? r.customerpoid ?? "",
+    customerId: r.customerId ?? r.customerid ?? "",
+    customerName: r.customerName ?? r.customername ?? "",
+    status: r.status ?? "",
+  }));
+
+  // One entry per ASKED po, in the order asked, so the caller can zip it back.
+  const data = asked.map((p) => {
+    const hits = rows.filter(
+      (r) =>
+        r.customerPO === p.customerPO &&
+        // Narrow by customer only when the caller supplied one AND the stored
+        // row has one — an older row with no customerId must still match.
+        (!p.customerId || !r.customerId || r.customerId === p.customerId),
+    );
+    return { customerPO: p.customerPO, existing: hits };
+  });
+  return c.json({ success: true, data });
+});
+
 app.post("/backfill-hub-by-state", async (c) => {
   const denied = await requirePermission(c, "sales-orders", "edit");
   if (denied) return denied;
@@ -2227,6 +2311,19 @@ app.post("/:id/confirm", async (c) => {
 // ---------------------------------------------------------------------------
 // GET /api/sales-orders/:id — SO + items + statusHistory + priceOverrides
 // ---------------------------------------------------------------------------
+// ── GET /:ref/footprint ─────────────────────────────────────────────────────
+// READ-ONLY: everything still attached to one sales order (POs, job cards,
+// delivery orders, invoices, promises, proposals). Exists so "this order is
+// empty, delete it" can be checked instead of assumed — deleting the head of
+// the chain orphans dispatch and accounting records that month-end depends on.
+// Writes nothing; it only reports and recommends.
+app.get("/:ref/footprint", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "read");
+  if (denied) return denied;
+  const data = await buildOrderFootprint(c.var.DB, c.req.param("ref"));
+  return c.json({ success: true, data });
+});
+
 app.get("/:id", async (c) => {
   let id = c.req.param("id");
   // Doc-chain callers (the DO / Invoice relationship graph, incl. consolidated
@@ -3808,7 +3905,11 @@ app.put("/:id", async (c) => {
           updateStmts.push(
             c.var.DB
               .prepare(
-                `UPDATE job_cards SET dueDate = ?, updated_at = ? WHERE id = ?`,
+                // SENT-LOCK (owner 2026-08-03): re-deriving due dates from a
+                // changed SO date must not touch cards already sent to the
+                // floor — those dates are committed to the departments.
+                `UPDATE job_cards SET dueDate = ?, updated_at = ?
+                  WHERE id = ? AND (distributedAt IS NULL OR distributedAt = '')`,
               )
               .bind(newDueDate, now, jc.id),
           );

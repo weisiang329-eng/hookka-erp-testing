@@ -1,0 +1,9 @@
+import postgres from "postgres";
+import fs from "node:fs";
+const sql = postgres("postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres", { ssl: "require", max: 1, idle_timeout: 10 });
+const rows = await sql`SELECT * FROM payslips WHERE period='2026-07' ORDER BY employee_no`;
+const clean = rows.map(r => { const { id, created_at, updated_at, payroll_run_id, ...rest } = r; return rest; });
+fs.writeFileSync(process.argv[2], JSON.stringify(clean, null, 1));
+const g = rows.reduce((s,r)=>s+Number(r.gross_pay_sen),0), n = rows.reduce((s,r)=>s+Number(r.net_pay_sen),0);
+console.log(`snapshot: ${rows.length} payslips  gross RM ${(g/100).toFixed(2)}  net RM ${(n/100).toFixed(2)}`);
+await sql.end();

@@ -175,3 +175,91 @@ test("the labour reports no longer skip a worker just because salary is 0", () =
     "all three costing sites must handle daily-paid workers",
   );
 });
+
+// --- No overtime for per-day people -----------------------------------------
+// Owner 2026-08-02, after checking with HR: 「outsource 暂时没有。暂时我们的算法
+// 就是根据你的日薪（不是时薪，纠正为日薪）去计算。」
+//
+// It already came to zero by accident — every OT rate divides from
+// basicSalarySen, which is 0 for them. An accident is not a rule: put a figure
+// in Basic salary to "fix" a zero and an outsourced person starts earning
+// overtime nobody agreed to. These pin the policy, not the accident.
+
+test("DAILY earns no OT even with a salary and a multiplier on the record", () => {
+  const osc = {
+    ...STAFF,                       // basicSalarySen 205000, otMultiplier 1.5
+    payMode: "DAILY",
+    dailyRateSen: 8500,
+  };
+  // Twelve 12-hour days — 3h over the 9h standard day, every day.
+  const r = E.computeMonthlyLabor({
+    worker: osc,
+    year: 2026,
+    month: 7,
+    days: WORKING_DAYS.slice(0, 12).map((date) => ({ date, hours: 12 })),
+    publicHolidays: [],
+    absenceThroughDay: "2026-07-31",
+  });
+  assert.equal(r.payroll.otPaySen, 0, "no overtime for a per-day worker");
+  assert.equal(r.payroll.basicEarnedSen, 12 * 8500);
+  assert.equal(r.payroll.grossSen, 12 * 8500, "gross is days x day rate, nothing else");
+});
+
+test("DAILY records no ABSENCE — a day not worked is simply not paid", () => {
+  const osc = { ...STAFF, basicSalarySen: 0, payMode: "DAILY", dailyRateSen: 8500 };
+  const r = run(osc, 5);
+  assert.equal(r.payroll.absentDays, 0, "21 'absences' on a day-rate payslip is meaningless");
+  assert.equal(r.payroll.absenceDeductionSen, 0);
+});
+
+test("a MONTHLY worker still earns OT on the very same days", () => {
+  // The contrast is the point: identical 12-hour days, one worker paid monthly
+  // and one paid per day. Monthly earns the overtime; per-day earns none.
+  // (Absences are NOT the contrast here — this fixture's absence window does
+  // not produce any for either, which the MONTHLY test above already says.)
+  // NOTE: run() logs 9-hour days — the standard day, which by definition
+  // produces no overtime. The comparison has to use the same 12-hour days as
+  // the DAILY test above or it proves nothing.
+  const twelveHourDays = (worker) =>
+    E.computeMonthlyLabor({
+      worker,
+      year: 2026,
+      month: 7,
+      days: WORKING_DAYS.slice(0, 12).map((date) => ({ date, hours: 12 })),
+      publicHolidays: [],
+      absenceThroughDay: "2026-07-31",
+    });
+  const before = twelveHourDays(STAFF);
+  assert.ok(before.payroll.otPaySen > 0, "the monthly rule still pays overtime");
+  const strayRate = twelveHourDays({ ...STAFF, dailyRateSen: 8500 });
+  assert.deepEqual(
+    strayRate.payroll,
+    before.payroll,
+    "a DAILY rate sitting unused on a MONTHLY worker changes nothing",
+  );
+});
+
+test("DAILY is not docked for short hours or lateness", () => {
+  // CHAU carries 5 auto short-hour/late rows. Under a day-rate agreement a day
+  // logged is a day paid — and a day rate has no hour rate inside it to dock
+  // FROM. Passing a large dock must change nothing.
+  const osc = { ...STAFF, basicSalarySen: 205000, payMode: "DAILY", dailyRateSen: 8500 };
+  const withDock = E.computeMonthlyLabor({
+    worker: osc, year: 2026, month: 7,
+    days: WORKING_DAYS.slice(0, 25).map((date) => ({ date, hours: 9 })),
+    publicHolidays: [], absenceThroughDay: "2026-07-31",
+    shortHourDeductionHours: 8,
+  });
+  assert.equal(withDock.payroll.shortHourDeductionSen, 0);
+  assert.equal(withDock.payroll.basicEarnedSen, 25 * 8500, "25 days logged, 25 days paid");
+});
+
+test("a MONTHLY worker IS still docked for short hours", () => {
+  const withDock = E.computeMonthlyLabor({
+    worker: STAFF, year: 2026, month: 7,
+    days: WORKING_DAYS.slice(0, 25).map((date) => ({ date, hours: 9 })),
+    publicHolidays: [], absenceThroughDay: "2026-07-31",
+    shortHourDeductionHours: 8,
+  });
+  assert.ok(withDock.payroll.shortHourDeductionSen > 0, "the hourly dock still applies to staff");
+});

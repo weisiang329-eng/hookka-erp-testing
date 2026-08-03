@@ -155,7 +155,13 @@ and confirming the test went red on both, then green after restoring — the fir
 test counted only the `?` in `SET` and not the one in `WHERE id = ?`, so it skipped the very
 statement it was written for and passed. Class recorded as **C8** in `docs/BUG-CLASSES.md`.
 
-## BUG-2026-08-01-005 — A broken punch (in and out in the same minute) was docked a FULL day's hours ON TOP of that day's absence `payroll` `data-integrity` 🟡
+## BUG-2026-08-01-005 — A broken punch (in and out in the same minute) was docked a FULL day's hours ON TOP of that day's absence `payroll` `data-integrity` 🟢
+
+> **Closed 2026-08-02** on evidence, not on the write-up. The invariant was
+> re-checked directly against production — every AUTO hour-dock since
+> 2026-05-01 whose day has no `working_hour_entries` row, i.e. every day charged
+> as an absence AND docked again: **0 rows**.
+
 
 **Symptom:** KYAW ZIN OO (EMP-022) 2026-07-01 punched 18:01 IN / 18:02 OUT — he forgot the
 morning punch and did both at knock-off. The day was charged **twice**: absence RM78.85 (no
@@ -194,7 +200,14 @@ every row reconciles.
 
 ---
 
-## BUG-2026-08-01-004 — Forgotten punch-out closed the attendance row but wrote NO working hours → the day silently docked a FULL day's pay `payroll` `data-integrity` 🟡
+## BUG-2026-08-01-004 — Forgotten punch-out closed the attendance row but wrote NO working hours → the day silently docked a FULL day's pay `payroll` `data-integrity` 🟢
+
+> **Closed 2026-08-02** on evidence. Re-queried production for the defect's own
+> shape — an `attendance_records` row with a `clock_out` but no
+> `working_hour_entries` behind it, since 2026-05-01. **2 rows**, both TEST-001
+> and TEST-002, which the payslip query excludes outright
+> (`empNo NOT LIKE 'TEST%'`). Zero real staff affected.
+
 
 **Symptom:** Owner: 「Eiphoowei 为什么扣那么多钱」. Her 2026-07 estimate showed 7 absent days she
 had actually come in and punched for. Factory-wide, **35 worker-days** across 2026-05/06/07 —
@@ -638,7 +651,38 @@ pin the list.
 > is then INVISIBLE, because both planners key off `specialOrderPriceSen = 0`. Always pass
 > `soNos` = exactly the SOs whose invoice actually moved.
 >
-> **⏭ REMAINS: 5 SOs / RM 750 — NEEDS THE OWNER, the planner REFUSED to guess.**
+> **✅ THOSE 5 ARE DONE — re-checked 2026-08-02, the note below is stale.**
+> Every one of the five now carries the surcharge on BOTH sides, at the owner's
+> `kv_config` price, so there is nothing left to decide:
+>
+> | SO | line | SO | invoice |
+> |---|---|---|---|
+> | SO-2605-234 | Divan Curve ×3 | RM 50 | RM 50 ✓ |
+> | SO-2605-185 | Divan Top Fully Cover | RM 50 | RM 50 ✓ |
+> | SO-2606-135 | Right Drawer | RM 160 | RM 160 ✓ |
+> | SO-2605-121 | Divan Curve ×2 | RM 50 | RM 50 ✓ |
+> | SO-2605-275 | Front / Left Drawer | RM 130 / 160 | same ✓ |
+>
+> **A wider sweep found something else, and it is bounded honestly.** Comparing
+> every live invoice line against its SO line:
+>
+> * Across ALL DOs: 99 disagreements — **not trustworthy**. The comparison has
+>   to match invoice line → SO line on product+fabric+size, which is exactly the
+>   guess BUG-2026-07-17-001 shows to be wrong on consolidated DOs (one invoice
+>   in the result matched two different SOs).
+> * Restricted to **single-SO DOs**, where the match cannot be ambiguous:
+>   **5 lines, RM 440 under-charged**, all pre-fix —
+>   `INV-2605-039[PAID]` SO-2604-250 ×2 (RM130+RM130),
+>   `INV-2607-078[SENT]` SO-2606-114 (RM80),
+>   `INV-2605-014[PAID]` SO-2604-095 ×2 (RM50+RM50). Nothing was over-charged.
+>
+> **This is the real argument for fixing BUG-2026-07-17-001.** The other ~94
+> lines cannot be measured at all while `invoice_items` carries no per-line SO
+> link — every audit of them is the same first-one-wins guess. Fixing that bug
+> is not only about what prints on the page; it is what makes this auditable.
+>
+> ~~**⏭ REMAINS: 5 SOs / RM 750 — NEEDS THE OWNER, the planner REFUSED to guess.**~~
+> *(superseded — kept for the record of what the planner refused and why)*
 > `GET /api/admin/backfill-invoiced-plan` → `needsManual`:
 > • **SO-2605-234, SO-2605-185, SO-2606-135** — each has TWO live SENT invoices; which one
 >   carries the surcharge is a business call, not a guess.
@@ -769,7 +813,47 @@ line was matched to the wrong SO.
   (17,667.90 both legs), 15 rows kept incl. advance 1,619, PI paids unchanged,
   /ap-reconciliation residual 0.00.
 
-## BUG-2026-07-17-001 — invoice prints the WRONG customer PO on consolidated DOs (first-one-wins guess) `invoices` `delivery` `consolidated-do` `print` `data-integrity` 🔴
+## BUG-2026-07-17-001 — invoice prints the WRONG customer PO on consolidated DOs (first-one-wins guess) `invoices` `delivery` `consolidated-do` `print` `data-integrity` 🟢
+
+> **STATUS WAS WRONG — corrected 2026-08-02.** This sat at 🔴 "Awaiting owner's
+> pick" for two weeks. Option **A was actually implemented the same day it was
+> reported**: `invoice_items.production_order_id` exists, is populated on
+> **2,526 of 2,728 rows (92.6%)**, and `invoice-print-extras.ts:331` resolves the
+> refs from it FIRST — the code|fabric|size maps are now only a legacy fallback.
+> The owner was right to push back ("你确定吗？有这个问题？"); the write-up was
+> being read instead of the code.
+>
+> **Verified on the very invoice that was reported.** INV-2607-060, all 12 lines:
+> **12/12 resolve through the exact link, 0 fall back to the guess.** The three
+> colliding `1003(A)-(K)|PC151-01|6FT` lines now cite three DIFFERENT SOs
+> (SO-2607-030 / SO-2607-014 / SO-2606-270) — exactly the lines that were wrong.
+>
+> **The pricing half was checked too, and it is also fine going forward.**
+> `computeDoInvoiceLines` prices each line via `priceForItem(idx, di.productionOrderId, …)`,
+> which walks PO → its salesOrderId → the full `soId|code|size|fabric` key. Lines
+> charged something matching neither their SO line's full price nor its base,
+> `price_edited = 0`:
+>
+> | invoices created | such lines |
+> |---|---|
+> | before 2026-07-17 | 18 |
+> | **on/after 2026-07-17** | **0** |
+>
+> **Legacy set, stated with its limitation.** Those 18 pre-fix lines net to about
+> RM 1,285 OVER-charged (RM 401 under, RM 1,686 over) — but that figure compares
+> against TODAY's SO prices, and the special-order backfill re-priced the SO side
+> on 2026-07-17. Without point-in-time SO prices these cannot be cleanly
+> attributed between this bug and that backfill, so the number is an upper bound
+> on the disturbance, not a bill. Owner 2026-08-02 on the under-charged side:
+> 「已经收到钱了就算了」.
+>
+> **What is left:** the printed price BUILD-UP (`v` at `invoice-print-extras.ts:322`)
+> still resolves through the code|fabric|size maps rather than the PO link, so on
+> a legacy consolidated invoice the Base/Divan/Leg/Special breakdown can show
+> another SO's numbers even though the PO line and the charged total are right.
+> Cosmetic on new invoices (the refs and the charge are both exact); worth
+> mirroring `refByPo` with a `valByPo` when someone is next in this file.
+
 **Symptom (owner):** DO-2607-051 vs INV-2607-060 — "為什麼兩個 items details PO number
 不一樣?不對?" Correct. **4 of 12 invoice lines cite the WRONG customer PO.**
 
@@ -800,6 +884,42 @@ Single-SO DOs are unaffected.
 INV-2607-060 happens to be safe (same code = same price there), but two SOs pricing the
 same code differently would take the FIRST price → a money bug. Unverified; check before
 assuming it's benign.
+
+**Resolved 2026-08-02 — split in two, because the two halves have very different
+severity.**
+
+*The `priceByCode` money bug is NOT real.* That map is written by
+`invoice-print-extras.ts:159/218` and declared in `generate-invoice-pdf.ts:39`
+("kept for backward-safety") — and **read nowhere in the codebase**. It is dead.
+Nothing can be mispriced through it.
+
+*The printed price build-up IS affected, and the charged amount is NOT.* Two
+different lines in `generate-invoice-pdf.ts`:
+
+- `:358` `grossLineSen = it.unitPriceSen × it.quantity` — what the customer is
+  **charged** comes from `invoice_items`, untouched by any of this.
+- `:366` `priceLines(it.unitPriceSen, ex)` — what is **printed** as the build-up
+  (Base / + Divan / + Leg / + T.Height / + Special) comes from `ex`, i.e.
+  `items[id]`, whose `baseSen…unitSen` are taken from the first-one-wins matched
+  SO line for every line that was not price-edited
+  (`invoice-print-extras.ts:350-355`). `unitPriceSen` is only the fallback when
+  no match exists at all.
+
+So the exposure is a **self-contradicting document**, not an under- or
+over-charge: an invoice can print "Base RM430.00" on a line it charges RM880.00
+for. On a customer-facing document that is still serious — it is the kind of
+thing a customer's own reconciliation finds.
+
+*Scale of the risk condition in production:* **152** consolidated DOs contain a
+product code that resolves to more than one price across their source SOs,
+spreads up to **RM 450** (`1013-(K)` RM430 vs RM880; `2008(A)-(K)` three prices
+RM830–RM1,255). That counts DOs where the ambiguity EXISTS — not invoices proven
+to have printed the wrong one, which needs a per-line replay.
+
+This does not change the recommendation (option **B** — resolve refs through the
+DO's items, which hold the real per-line link), but it does change the urgency
+argument: no money has moved incorrectly, so this is a correctness-of-document
+fix, not a billing recovery.
 
 **Fix options given to owner:** (A) persist the real per-line SO/production-order link on
 `invoice_items` (treats the cause; schema + backfill); (B) resolve refs THROUGH the DO's

@@ -12,8 +12,17 @@
 // Production — their production sub-department is a costing dimension, not a
 // reporting line.
 // ---------------------------------------------------------------------------
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Network, Minus, Plus, Users, Pencil } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Network,
+  Minus,
+  Plus,
+  Users,
+  Pencil,
+  Printer,
+} from "lucide-react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { buildOrgTree, countSubtree, type OrgNode, type OrgPerson } from "@/lib/org-people";
 
@@ -116,6 +125,118 @@ export function OrgChart({ canManage }: Props) {
    * other, so both stay.
    */
   const [view, setView] = useState<"tree" | "board">("tree");
+
+  // ─── Print ────────────────────────────────────────────────────────────────
+  //
+  // Owner 2026-08-02: 「它不能 print 出来吗？」. A chart that cannot leave the
+  // screen is half a chart — this one gets pinned on a wall and handed to new
+  // staff.
+  //
+  // It prints WHAT YOU SEE by cloning the chart node into a blank window along
+  // with the app's own stylesheets, rather than re-rendering the tree as
+  // standalone HTML. Re-rendering means a second layout engine to keep in step
+  // with this one, and it would drift the first time a card changes here.
+  //
+  // Two things are forced in the printed copy, because they are screen
+  // conveniences that would silently lose people on paper:
+  //   * every department is EXPANDED — a collapsed box would print as a bare
+  //     header and the reader has no way to know anyone is missing;
+  //   * zoom is dropped back to 100% — the print sheet does its own
+  //     scale-to-fit, and a zoom on top of that clips the right-hand edge.
+  const chartRef = useRef<HTMLDivElement>(null);
+  /** Set when Print is pressed; the effect below prints once React has expanded. */
+  const [pendingPrint, setPendingPrint] = useState(false);
+
+  const startPrint = useCallback(() => {
+    // Expand first, print in the effect — setState is async, so cloning the DOM
+    // in this handler would capture the still-collapsed boxes.
+    setCollapsed(new Set());
+    setPendingPrint(true);
+  }, []);
+
+  useEffect(() => {
+    if (!pendingPrint) return;
+    setPendingPrint(false);
+    const node = chartRef.current;
+    if (!node) return;
+
+    const clone = node.cloneNode(true) as HTMLElement;
+    // The zoom lives as an inline style on the inner wrapper.
+    clone.querySelectorAll<HTMLElement>("[style*='zoom']").forEach((el) => {
+      el.style.zoom = "";
+    });
+    // The reporting-line pickers are controls, not content.
+    clone.querySelectorAll("select, button[aria-label], .org-no-print").forEach((el) => {
+      el.remove();
+    });
+
+    const styles = [
+      ...document.querySelectorAll('link[rel="stylesheet"], style'),
+    ]
+      .map((n) => n.outerHTML)
+      .join("\n");
+
+    const today = new Date().toLocaleDateString("en-GB", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+    });
+    const heading = view === "tree" ? "Reporting Structure" : "Departments";
+
+    const w = window.open("", "_blank", "width=1400,height=900");
+    if (!w) {
+      setError("Your browser blocked the print window — allow pop-ups for this site.");
+      return;
+    }
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8">
+<title>Hookka Org Chart — ${heading}</title>
+${styles}
+<style>
+  /* Landscape by default: the tree is far wider than it is tall, and A4
+     portrait would break it across pages at a random column. */
+  @page { size: A3 landscape; margin: 10mm; }
+  body { background: #fff; padding: 0; margin: 0; }
+  .sheet { padding: 12px 16px; }
+  .sheet-head {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    border-bottom: 2px solid #6B5C32; padding-bottom: 8px; margin-bottom: 14px;
+  }
+  .sheet-head .brand { font-size: 18px; font-weight: 800; letter-spacing: .5px; color: #1F1D1B; }
+  .sheet-head .brand small { display:block; font-size: 9px; font-weight: 500; letter-spacing: 2px; color: #9CA3AF; }
+  .sheet-head .meta { text-align: right; font-size: 11px; color: #6B7280; }
+  .sheet-head .meta strong { display:block; font-size: 13px; color:#1F1D1B; }
+  /* The screen keeps the board in a horizontal scroller. On paper there is no
+     scrolling — let it wrap onto the page instead of clipping at the edge. */
+  .sheet .overflow-x-auto { overflow: visible !important; }
+  .sheet .min-w-max { min-width: 0 !important; }
+  .sheet .flex.min-w-max { flex-wrap: wrap !important; align-items: flex-start !important; }
+  /* Never split a department box across two pages. */
+  .sheet .rounded-lg { break-inside: avoid; page-break-inside: avoid; }
+  .no-print { position: fixed; top: 10px; right: 12px; }
+  .no-print button {
+    background: #6B5C32; color: #fff; border: 0; padding: 8px 14px;
+    border-radius: 6px; cursor: pointer; font-size: 12px;
+  }
+  @media print { .no-print { display: none; } }
+</style>
+</head><body>
+<div class="no-print"><button onclick="window.print()">Print / Save as PDF</button></div>
+<div class="sheet">
+  <div class="sheet-head">
+    <div class="brand">HOOKKA<small>FURNITURE MANUFACTURING</small></div>
+    <div class="meta"><strong>Org Chart — ${heading}</strong>${today}</div>
+  </div>
+  ${clone.outerHTML}
+</div>
+</body></html>`);
+    w.document.close();
+    // Fire the dialog once the cloned stylesheets have actually applied —
+    // printing before then produces an unstyled sheet.
+    w.addEventListener("load", () => {
+      w.focus();
+      w.print();
+    });
+  }, [pendingPrint, view]);
 
   const visible = useMemo(
     () => (showInactive ? people : people.filter((p) => p.active)),
@@ -280,15 +401,34 @@ export function OrgChart({ canManage }: Props) {
     return (
       <div className="relative">
         <div
-          className={`w-[168px] rounded-md border px-2 py-1.5 text-center ${
+          className={`w-[176px] rounded-md border px-2 py-1.5 ${
             node.active ? "border-[#E2DDD8] bg-white" : "border-dashed border-[#D8D2CC] bg-white opacity-60"
           }`}
         >
-          <div className="truncate text-[11px] font-semibold uppercase leading-tight text-[#1F1D1B]">
-            {node.name}
-          </div>
-          <div className="truncate text-[10px] text-[#8A8577]">
-            {node.position || node.departmentCode || "—"}
+          {/* The tree cards had no avatar while the department board's did, so
+              the same person looked like two different things depending on the
+              view. Owner 2026-08-02:「他们的头像啊,好像没有」— Houzs put a face
+              on every card, and a face is what makes a row of boxes read as
+              people. Initials until there is somewhere to store a photo. */}
+          <div className="flex items-center gap-2">
+            <span
+              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
+                node.source === "worker"
+                  ? "bg-[#F0ECE9] text-[#6B5C32]"
+                  : "bg-[#E0EDF0] text-[#3E6570]"
+              }`}
+              title={node.source === "worker" ? "Factory employee" : "Office account"}
+            >
+              {initials(node.name)}
+            </span>
+            <div className="min-w-0 flex-1 text-left">
+              <div className="truncate text-[11px] font-semibold uppercase leading-tight text-[#1F1D1B]">
+                {node.name}
+              </div>
+              <div className="truncate text-[10px] text-[#8A8577]">
+                {node.position || node.departmentCode || "—"}
+              </div>
+            </div>
           </div>
           {canManage && (
             <button
@@ -436,7 +576,12 @@ export function OrgChart({ canManage }: Props) {
 
       // A child WITH reports is a team: that person (plus any co-leader on the
       // same departments) heads one box.
-      const teamLeads = node.children.filter((c) => c.children.length > 0);
+      //
+      // EXCEPT a child who leads MANAGERS — they are drawn as their own branch
+      // by the caller, and counting them here too would render them twice.
+      const teamLeads = node.children.filter(
+        (c) => c.children.length > 0 && !leadsManagers(c),
+      );
       const used = new Set<string>();
       for (const lead of teamLeads) {
         if (used.has(lead.key)) continue;
@@ -457,7 +602,9 @@ export function OrgChart({ canManage }: Props) {
 
       // Everyone reporting straight to this node with nobody under them —
       // grouped by department, because they have no leader to group by.
-      const loose = node.children.filter((c) => c.children.length === 0);
+      const loose = node.children.filter(
+        (c) => c.children.length === 0 && !leadsManagers(c),
+      );
       const byDept = new Map<string, OrgNode[]>();
       for (const p of loose) {
         const d = deptOf(p);
@@ -471,14 +618,45 @@ export function OrgChart({ canManage }: Props) {
 
       return boxes.sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
     },
-    [flatten, deptLabel, deptRank],
+    [flatten, deptLabel, deptRank, leadsManagers],
   );
 
   const Branch = ({ node }: { node: OrgNode }): React.ReactElement => {
     const kids = collapsed.has(node.key) ? [] : node.children;
+    // A manager who carries a branch wears the SAME dark cap the department
+    // boxes below wear. Owner 2026-08-02, pointing at the owner / Violet / the
+    // Production Head:「我觉得这三个你也是要想一下,怎么去设计才好看的」— and he
+    // was right that it read wrong: the three people who run the company were
+    // the three thinnest cards on the board while every department under them
+    // had a heading. Houzs cap their leadership row the same way. Weight now
+    // follows rank instead of contradicting it.
+    const capped = node.children.length > 0;
+    const cap = (node.position || node.departmentCode || "").trim();
     return (
       <div className="flex flex-col items-center">
-        <TreeCard node={node} />
+        {capped ? (
+          <div className="overflow-hidden rounded-lg border border-[#E2DDD8] bg-white">
+            <div className="flex items-center gap-2 bg-[#33404E] px-3 py-1 text-white">
+              <span
+                aria-hidden
+                className="h-3 w-1 rounded-full"
+                style={{ background: ACCENTS[0] }}
+              />
+              <span className="text-[10px] font-semibold uppercase tracking-wide">
+                {cap || "Leadership"}
+              </span>
+              <span className="ml-auto flex items-center gap-1 text-[10px] opacity-75">
+                <Users className="h-3 w-3" />
+                {countSubtree(node) - 1}
+              </span>
+            </div>
+            <div className="p-1.5">
+              <TreeCard node={node} />
+            </div>
+          </div>
+        ) : (
+          <TreeCard node={node} />
+        )}
         {kids.length > 0 && (
           <>
             {/* stem down from the parent */}
@@ -496,56 +674,85 @@ export function OrgChart({ canManage }: Props) {
               four, and only when those children lead nobody themselves — a
               manager with a team of their own still deserves their own branch.
             */}
-            {/* Below the last MANAGER the tree stops and department boxes take
-                over — the Houzs shape. A branch is right where there are a few
-                named relationships; forty operators fanned into hairlines is a
-                wall of string. */}
-            {node.children.length > 0 && !node.children.some(leadsManagers) ? (
-              <div className="flex items-start gap-3">
-                {boxesUnder(node).map((box, bi) => (
-                  <div key={box.key} className="relative flex flex-col items-center">
-                    {boxesUnder(node).length > 1 && (
-                      <span
-                        aria-hidden
-                        className="absolute top-0 h-px bg-[#C2BDB6]"
-                        style={{
-                          left: bi === 0 ? "50%" : 0,
-                          right: bi === boxesUnder(node).length - 1 ? "50%" : 0,
-                        }}
-                      />
-                    )}
-                    <div className="h-5 w-px bg-[#C2BDB6]" />
+            {/*
+              EVERY level renders the same two things side by side:
+
+                · a child who leads MANAGERS keeps a branch — that is a named
+                  relationship worth a line (owner → Violet → Production Head)
+                · everyone else falls into a DEPARTMENT BOX
+
+              It used to be either/or, which is why only Production had boxes:
+              Violet has one manager under her, so her whole row fell back to
+              bare cards and Office and QA never got a box. Finance had one
+              person and was excluded by a headcount rule. Owner 2026-08-02:
+              「部门就应该有部门的样子吧?…Houzs 里面的 Finance,还有 Management、
+              lim,然后 siti zamri,全部都没有啊」— so the headcount rule is gone
+              too. One person is still a department.
+            */}
+            <div className="flex items-start">
+              {[
+                ...node.children
+                  .filter(leadsManagers)
+                  .map((c) => ({ kind: "branch" as const, key: c.key, node: c })),
+                ...boxesUnder(node).map((b) => ({
+                  kind: "box" as const,
+                  key: b.key,
+                  box: b,
+                })),
+              ].map((cell, ci, all) => (
+                <div
+                  key={cell.key}
+                  className="relative flex flex-col items-center px-1.5"
+                >
+                  {/* No flex `gap` on this row — the bus is drawn INSIDE each
+                      cell, so a gap leaves the line with a hole exactly where
+                      the gap is (「那个线好像断掉那样?」). Padding keeps it
+                      continuous. */}
+                  {all.length > 1 && (
+                    <span
+                      aria-hidden
+                      className="absolute top-0 h-px bg-[#C2BDB6]"
+                      style={{
+                        left: ci === 0 ? "50%" : 0,
+                        right: ci === all.length - 1 ? "50%" : 0,
+                      }}
+                    />
+                  )}
+                  <div className="h-5 w-px bg-[#C2BDB6]" />
+                  {cell.kind === "branch" ? (
+                    <Branch node={cell.node} />
+                  ) : (
                     <div className="overflow-hidden rounded-lg border border-[#E2DDD8] bg-white">
                       <div className="flex items-center gap-2 bg-[#33404E] px-3 py-1.5 text-white">
                         <span
                           aria-hidden
                           className="h-3.5 w-1 rounded-full"
-                          style={{ background: ACCENTS[bi % ACCENTS.length] }}
+                          style={{ background: ACCENTS[ci % ACCENTS.length] }}
                         />
                         <span className="text-[11px] font-semibold uppercase tracking-wide">
-                          {box.label}
+                          {cell.box.label}
                         </span>
                         <span className="ml-auto flex items-center gap-1 text-[11px] opacity-75">
                           <Users className="h-3 w-3" />
-                          {box.count}
+                          {cell.box.count}
                         </span>
                       </div>
-                      {box.leads.length > 0 && (
+                      {cell.box.leads.length > 0 && (
                         <div className="border-b border-[#EFEAE5] bg-[#FBFAF8] px-2 py-2">
                           <div className="mb-1 text-[9px] font-semibold uppercase tracking-wider text-[#9CA3AF]">
-                            {box.leads.length > 1
-                              ? `Led together by ${box.leads.length}`
+                            {cell.box.leads.length > 1
+                              ? `Led together by ${cell.box.leads.length}`
                               : "Leader"}
                           </div>
                           <div className="flex gap-1.5">
-                            {box.leads.map((l) => (
+                            {cell.box.leads.map((l) => (
                               <TreeCard key={l.key} node={l} />
                             ))}
                           </div>
                         </div>
                       )}
                       <div className="space-y-2 p-2">
-                        {box.groups.map((g) => (
+                        {cell.box.groups.map((g) => (
                           <div key={g.position}>
                             <div className="mb-1 flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wider text-[#9CA3AF]">
                               {g.position}
@@ -560,44 +767,10 @@ export function OrgChart({ canManage }: Props) {
                         ))}
                       </div>
                     </div>
-                  </div>
-                ))}
-              </div>
-            ) : kids.length > 4 && kids.every((c) => c.children.length === 0) ? (
-              <div className="rounded-lg border border-[#E2DDD8] bg-[#FBFAF8] p-2">
-                <div
-                  className="grid gap-1.5"
-                  style={{
-                    gridTemplateColumns: `repeat(${Math.min(4, Math.ceil(kids.length / 4))}, minmax(0, 1fr))`,
-                  }}
-                >
-                  {kids.map((c) => (
-                    <TreeCard key={c.key} node={c} />
-                  ))}
+                  )}
                 </div>
-              </div>
-            ) : (
-              <div className="flex items-start justify-center">
-                {kids.map((c, i) => (
-                  <div key={c.key} className="relative flex flex-col items-center px-2">
-                    {/* the bus across the siblings, half-width at each end so it
-                        stops at the outermost child instead of hanging in air */}
-                    {kids.length > 1 && (
-                      <span
-                        aria-hidden
-                        className="absolute top-0 h-px bg-[#C2BDB6]"
-                        style={{
-                          left: i === 0 ? "50%" : 0,
-                          right: i === kids.length - 1 ? "50%" : 0,
-                        }}
-                      />
-                    )}
-                    <div className="h-5 w-px bg-[#C2BDB6]" />
-                    <Branch node={c} />
-                  </div>
-                ))}
-              </div>
-            )}
+              ))}
+            </div>
           </>
         )}
       </div>
@@ -642,19 +815,19 @@ export function OrgChart({ canManage }: Props) {
             />
             Show inactive
           </label>
+          {/* Collapse all / Expand all were removed (owner 2026-08-02:
+              「这个功能没有用啊」). They were worse than useless: they wrote
+              DEPARTMENT keys into `collapsed`, which only the Departments view
+              reads, so in Hierarchy view — the default — pressing them did
+              nothing at all. Each department header is still its own toggle,
+              which is the control anyone actually reaches for. */}
           <button
             type="button"
-            onClick={() => setCollapsed(new Set(board.map((b) => b.dept)))}
-            className="rounded border border-[#E2DDD8] px-2 py-1 text-[11px] text-[#6B7280] hover:text-[#1F1D1B]"
+            onClick={startPrint}
+            className="flex items-center gap-1 rounded border border-[#E2DDD8] px-2 py-1 text-[11px] text-[#6B7280] hover:text-[#1F1D1B]"
           >
-            Collapse all
-          </button>
-          <button
-            type="button"
-            onClick={() => setCollapsed(new Set())}
-            className="rounded border border-[#E2DDD8] px-2 py-1 text-[11px] text-[#6B7280] hover:text-[#1F1D1B]"
-          >
-            Expand all
+            <Printer className="h-3 w-3" />
+            Print
           </button>
           <div className="flex items-center gap-1">
             <button
@@ -686,7 +859,7 @@ export function OrgChart({ canManage }: Props) {
 
       {/* Boxes sit side by side and the BOARD scrolls, not the page — a
           department with forty people must not push the next one off-screen. */}
-      <div className="overflow-x-auto pb-4">
+      <div ref={chartRef} className="overflow-x-auto pb-4">
         <div
           style={{ zoom: `${zoom}%` }}
           className="flex min-w-max items-start gap-3"

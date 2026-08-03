@@ -52,6 +52,7 @@ import {
   CachedScanNotice,
 } from "@/components/scan-cached-hint";
 import { bestMatch } from "@/lib/party-fuzzy-match";
+import { resolvePoLink, splitPoRefs } from "@/lib/po-ref-match";
 import {
   resolveAlias,
   usePartyAliases,
@@ -184,18 +185,7 @@ function autoLinkPoId(
   purchaseOrders: PurchaseOrder[],
   fallback: string | null | undefined,
 ): string | null {
-  const raw = (ex.customerPoRef ?? "").trim();
-  if (raw) {
-    const ref = raw.toUpperCase().replace(/[^A-Z0-9]/g, "");
-    if (ref) {
-      const hit = purchaseOrders.find((p) => {
-        const poNo = (p.poNo ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-        return poNo && (poNo === ref || poNo.endsWith(ref) || ref.endsWith(poNo));
-      });
-      if (hit) return hit.id;
-    }
-  }
-  return fallback ?? null;
+  return resolvePoLink(ex.customerPoRef, purchaseOrders, fallback).poId;
 }
 
 // Fix B (owner 2026-06-30): pick a Supplier off the OCR'd supplierName.
@@ -941,6 +931,13 @@ type PreviewCard = {
   // Frozen extraction snapshot — used to decide whether to write back the
   // sample as a corrected few-shot example.
   originalExtraction: SupplierExtraction;
+  /**
+   * PO references the DOCUMENT named, when it named more than one. A Purchase
+   * Invoice holds a single purchaseOrderId, so a multi-PO document cannot be
+   * linked automatically without hiding one of them — the operator is shown
+   * this instead of a quietly half-correct link.
+   */
+  multiPoRefs?: string[];
 };
 
 function makeBlankLine(): PreviewLine {
@@ -1064,6 +1061,48 @@ function CreatePIWizard({
     }
     return m;
   }, [bindings]);
+
+  // Supplier-printed DESCRIPTION → binding. The SKU path cannot help suppliers
+  // whose paperwork carries no product code at all (ADD WOOD's invoice is just
+  // No / Description / Qty / Price), and for them the description is the only
+  // identifying text on the line. Normalised the same aggressive way as SKUs so
+  // OCR spacing drift ("9MM 4' X 8'" vs "9MM 4'X8'") still lands on one row.
+  const normDesc = (s: string | null | undefined) =>
+    (s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const bindingsBySupplierDesc = useMemo(() => {
+    const m = new Map<string, SupplierMaterialBinding>();
+    for (const b of bindings) {
+      const k = normDesc(b.supplierDescription);
+      if (!k || !b.supplierId) continue;
+      // First binding wins — a later duplicate must not silently retarget an
+      // existing mapping.
+      const key = `${b.supplierId}__${k}`;
+      if (!m.has(key)) m.set(key, b);
+    }
+    return m;
+  }, [bindings]);
+
+  const resolveBindingByDescription = useCallback(
+    (supplierId: string, description: string): SupplierMaterialBinding | null => {
+      const d = normDesc(description);
+      if (!d || !supplierId) return null;
+      const exact = bindingsBySupplierDesc.get(`${supplierId}__${d}`);
+      if (exact) return exact;
+      // Suppliers pad their own descriptions inconsistently between documents
+      // ("9MM 4' X 8' PLYWOOD AB" vs "PLYWOOD 9MM 4X8 AB"), so accept a
+      // containment match — but ONLY when exactly one binding qualifies.
+      // Two candidates means we cannot tell which item this line is, and
+      // guessing would silently book stock against the wrong material.
+      const hits = bindings.filter((b) => {
+        if (b.supplierId !== supplierId) return false;
+        const bd = normDesc(b.supplierDescription);
+        if (!bd) return false;
+        return bd === d || bd.includes(d) || d.includes(bd);
+      });
+      return hits.length === 1 ? hits[0] : null;
+    },
+    [bindingsBySupplierDesc, bindings],
+  );
 
   const resolveBindingFor = useCallback(
     (supplierId: string, supplierSku: string): SupplierMaterialBinding | null => {
@@ -1213,7 +1252,14 @@ function CreatePIWizard({
         let binding = sId ? resolveBindingFor(sId, rawSku) : null;
         if (!binding && sId && !rawSku) {
           const desc = (ln.description ?? "").trim();
-          if (desc) binding = resolveBindingForMaterial(sId, desc);
+          if (desc) {
+            // 1) The supplier prints no code, so try what they DO print — the
+            //    description — against bindings that recorded it.
+            binding = resolveBindingByDescription(sId, desc);
+            // 2) Legacy path: some suppliers put our own internal code in the
+            //    description field, so treat it as a materialCode as well.
+            if (!binding) binding = resolveBindingForMaterial(sId, desc);
+          }
         }
         const rm = binding
           ? materialByCode.get(binding.materialCode.trim().toUpperCase())
@@ -1259,7 +1305,8 @@ function CreatePIWizard({
         };
       });
 
-      const purchaseOrderId = autoLinkPoId(ex, purchaseOrders, defaultPurchaseOrderId);
+      const poLink = resolvePoLink(ex.customerPoRef, purchaseOrders, defaultPurchaseOrderId);
+      const purchaseOrderId = poLink.poId;
       // Fix A (owner 2026-06-30): if a PO got auto-linked AND any line came
       // back with no price (DN-only doc), fill those lines' unitPriceRM off
       // the matching PO line. Preview shows real prices BEFORE Create.
@@ -1289,6 +1336,7 @@ function CreatePIWizard({
         // on their doc (their "Customer P.O.", "B.O. NO.", etc.). Falls
         // back to the host-supplied default if no match.
         purchaseOrderId,
+        multiPoRefs: poLink.ambiguous ? splitPoRefs((ex.customerPoRef ?? "").trim()) : undefined,
         invoiceDate: docDate,
         supplierInvoiceNo: supInvNo,
         supplierDoNo: supDoNo,
@@ -1297,7 +1345,7 @@ function CreatePIWizard({
         originalExtraction: ex,
       };
     },
-    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, materialByCode],
+    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, resolveBindingByDescription, materialByCode],
   );
 
   // ─── Drag-drop + multi-file extract ────────────────────────────────────
@@ -2814,6 +2862,16 @@ function PICard({
               }
               disabled={!!card.createdPiNo || !card.supplierId}
             />
+            {card.multiPoRefs && card.multiPoRefs.length > 1 && (
+              // Not auto-linked ON PURPOSE. The document bills several POs and
+              // a PI holds one, so linking either would look reconciled while
+              // the other PO's receipts are never drawn down.
+              <p className="mt-1 text-[11px] text-[#B8601A]">
+                This document names {card.multiPoRefs.length} POs (
+                {card.multiPoRefs.join(", ")}) — not linked automatically. Pick the
+                one this invoice should draw down, or split it.
+              </p>
+            )}
           </div>
         </div>
 
@@ -3336,6 +3394,41 @@ function CreateGRNWizard({
     return m;
   }, [bindings]);
 
+  // Same description fallback as the create-PI mode — a supplier that prints
+  // no product code must resolve identically whether the operator is making a
+  // Purchase Invoice or a Goods Receipt, or the same document would map to
+  // different materials depending on which door it came through.
+  const bindingsBySupplierDescG = useMemo(() => {
+    const m = new Map<string, SupplierMaterialBinding>();
+    for (const b of bindings) {
+      const k = normSkuG(b.supplierDescription);
+      if (!k || !b.supplierId) continue;
+      const key = `${b.supplierId}__${k}`;
+      if (!m.has(key)) m.set(key, b);
+    }
+    return m;
+  }, [bindings]);
+
+  const resolveBindingByDescription = useCallback(
+    (supplierId: string, description: string): SupplierMaterialBinding | null => {
+      const d = normSkuG(description);
+      if (!d || !supplierId) return null;
+      const exact = bindingsBySupplierDescG.get(`${supplierId}__${d}`);
+      if (exact) return exact;
+      // Containment only when EXACTLY one binding qualifies — two candidates
+      // means the line is ambiguous, and guessing would book stock against the
+      // wrong material.
+      const hits = bindings.filter((b) => {
+        if (b.supplierId !== supplierId) return false;
+        const bd = normSkuG(b.supplierDescription);
+        if (!bd) return false;
+        return bd === d || bd.includes(d) || d.includes(bd);
+      });
+      return hits.length === 1 ? hits[0] : null;
+    },
+    [bindingsBySupplierDescG, bindings],
+  );
+
   const resolveBindingFor = useCallback(
     (supplierId: string, supplierSku: string): SupplierMaterialBinding | null => {
       const sku = normSkuG(supplierSku);
@@ -3455,7 +3548,14 @@ function CreateGRNWizard({
         let binding = sId ? resolveBindingFor(sId, rawSku) : null;
         if (!binding && sId && !rawSku) {
           const desc = (ln.description ?? "").trim();
-          if (desc) binding = resolveBindingForMaterial(sId, desc);
+          if (desc) {
+            // 1) The supplier prints no code, so try what they DO print — the
+            //    description — against bindings that recorded it.
+            binding = resolveBindingByDescription(sId, desc);
+            // 2) Legacy path: some suppliers put our own internal code in the
+            //    description field, so treat it as a materialCode as well.
+            if (!binding) binding = resolveBindingForMaterial(sId, desc);
+          }
         }
         const rm = binding
           ? materialByCode.get(binding.materialCode.trim().toUpperCase())
@@ -3512,7 +3612,7 @@ function CreateGRNWizard({
         originalExtraction: ex,
       };
     },
-    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, materialByCode],
+    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, resolveBindingByDescription, materialByCode],
   );
 
   const handleFiles = useCallback(

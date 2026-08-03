@@ -940,6 +940,17 @@ export type SupplierMaterialBinding = {
   materialCode: string;
   materialName: string;
   supplierSku: string;
+  /**
+   * What the SUPPLIER prints for this item on their own paperwork, as opposed
+   * to `materialName` (what we call it).
+   *
+   * Some suppliers print no product code at all — ADD WOOD's invoices carry
+   * only `No | Description | Qty | Unit/Price | Amount`. For them the
+   * SKU-keyed binding path can never fire, so the description is the ONLY
+   * thing a scan can match on. The API has always returned this column; it
+   * was missing from this type, so the scanner could not see it.
+   */
+  supplierDescription?: string;
   unitPrice: number;
   currency: "MYR" | "RMB";
   leadTimeDays: number;

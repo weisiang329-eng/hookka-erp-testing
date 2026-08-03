@@ -3303,29 +3303,47 @@ function ScheduleProposalsTab() {
     }
   };
 
+  // The API caps each request at 500 ids (one UPDATE per proposal — an
+  // unbounded batch is what killed the Worker mid-apply on 2026-07-16). Sending
+  // the whole selection in one call therefore used to apply the first 500 and
+  // silently drop the rest, so "select all -> Approve" reported success while
+  // leaving a backlog behind. Chunk below the cap and loop until every selected
+  // proposal has actually been decided.
+  const DECIDE_CHUNK = 200;
+
   const decide = async (action: "approve" | "reject") => {
     const ids = [...selected];
     if (ids.length === 0) return;
     setBusy(true);
     try {
-      const res = await fetch(`/api/planning/proposals/${action}`, {
-        method: "POST",
-        headers: csrfHeaders(),
-        body: JSON.stringify({ ids }),
-        credentials: "include",
-      });
-      const j = (await res.json()) as {
-        success?: boolean;
-        error?: string;
-        data?: { approved?: number; rejected?: number };
-      };
-      if (!res.ok || !j?.success) throw new Error(j?.error || `HTTP ${res.status}`);
+      let done = 0;
+      for (let i = 0; i < ids.length; i += DECIDE_CHUNK) {
+        const chunk = ids.slice(i, i + DECIDE_CHUNK);
+        const res = await fetch(`/api/planning/proposals/${action}`, {
+          method: "POST",
+          headers: csrfHeaders(),
+          body: JSON.stringify({ ids: chunk }),
+          credentials: "include",
+        });
+        const j = (await res.json()) as {
+          success?: boolean;
+          error?: string;
+          data?: { approved?: number; rejected?: number; dropped?: number };
+        };
+        if (!res.ok || !j?.success) throw new Error(j?.error || `HTTP ${res.status}`);
+        // Should be impossible now that chunks sit below the cap — surface it
+        // rather than let a silent truncation creep back in.
+        if ((j.data?.dropped ?? 0) > 0) {
+          throw new Error(
+            `Server dropped ${j.data?.dropped} of ${chunk.length} — batch size is above the API cap.`,
+          );
+        }
+        done += (action === "approve" ? j.data?.approved : j.data?.rejected) ?? chunk.length;
+      }
       if (action === "approve") {
-        toast.success(
-          `Approved ${j.data?.approved ?? ids.length} — job-card due dates updated.`,
-        );
+        toast.success(`Approved ${done} of ${ids.length} — job-card due dates updated.`);
       } else {
-        toast.success(`Rejected ${j.data?.rejected ?? ids.length}.`);
+        toast.success(`Rejected ${done} of ${ids.length}.`);
       }
       load();
     } catch (err) {

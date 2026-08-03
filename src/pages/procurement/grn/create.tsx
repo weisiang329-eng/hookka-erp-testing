@@ -20,9 +20,18 @@
 //   ?poId=<id>   — pre-select a PO (PO-linked mode); locks the PO.
 //   ?scan=1      — auto-open the scan modal once a PO is selected
 //
-// Single-PO by design: the GRN backend keys each line to ONE parent PO by
-// poItemIndex (grns.poId is a single column). Converting from multiple POs
-// into one GRN is NOT supported by the schema and is left as a follow-up.
+// MULTI-PO (owner 2026-08-04: "可以多个 PO 去 Good receipt"). One delivery
+// routinely covers several purchase orders, so "Convert from PO" becomes "Add
+// another PO" once lines exist and APPENDS rather than replaces.
+//
+// Each line carries its own { poId, poItemId } and is sent that way, so every
+// purchase order is drawn down against its own line — `grns.poId` is only the
+// header/display PO (the first one added). Rows show their PO number once more
+// than one is involved, or the table is unreadable.
+//
+// Two guards: a second PO from a DIFFERENT supplier is refused (one GRN has one
+// supplier, and taking the first would misattribute the goods), and re-picking
+// a PO line already on the receipt is skipped so it cannot be double-counted.
 // ---------------------------------------------------------------------------
 
 import React, { useState, useEffect, useRef, useMemo, Suspense } from "react";
@@ -47,14 +56,28 @@ import {
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-/** PO-mode line — keyed by PO item index, fields derived from PO on submit */
+/**
+ * PO-mode line.
+ *
+ * Each line names the PO LINE it receives, because one receipt routinely
+ * covers several purchase orders (owner 2026-08-04). `poItemIndex` is kept for
+ * the older backend path — the create handler prefers poId/poItemId when both
+ * are present — but it is only meaningful WITHIN that line's own PO.
+ */
 type POItemEntry = {
+  poId: string;
+  poItemId: string;
   poItemIndex: number;
   receivedQty: number;
   acceptedQty: number;
   rejectedQty: number;
   rejectionReason: string;
 };
+
+/** Stable React key — poItemIndex alone collides across POs. */
+function entryKey(e: { poId: string; poItemId: string; poItemIndex: number }): string {
+  return `${e.poId}:${e.poItemId || e.poItemIndex}`;
+}
 
 /** Manual-mode line — all fields supplied by the operator */
 type ManualItemEntry = {
@@ -249,6 +272,8 @@ function GRNCreatePage() {
         po.items.map((item, idx) => {
           const remaining = Math.max(0, item.quantity - (item.receivedQty || 0));
           return {
+            poId: po.id,
+            poItemId: String(item.id ?? ""),
             poItemIndex: idx,
             receivedQty: remaining,
             acceptedQty: remaining,
@@ -263,19 +288,44 @@ function GRNCreatePage() {
 
   // ── Convert-from-PO handler ────────────────────────────────────────────────
   const handleConvert = (res: ConvertFromPOResult) => {
-    setSelectedPO(res.poId);
-    setConvertPoNo(res.poNo);
-    setConvertSupplierName(res.supplierName);
+    // One GRN has ONE supplier. Receiving two suppliers on a single document
+    // would misattribute the goods, so refuse rather than silently take the
+    // first supplier and mislabel the rest.
+    if (
+      poItemEntries.length > 0 &&
+      convertSupplierName &&
+      res.supplierName &&
+      res.supplierName !== convertSupplierName
+    ) {
+      toast.error(
+        `This receipt is for ${convertSupplierName}. Create a separate GRN for ${res.supplierName}.`,
+      );
+      return;
+    }
+    // The FIRST PO becomes the header PO; later ones only contribute lines.
+    if (!selectedPO) {
+      setSelectedPO(res.poId);
+      setConvertPoNo(res.poNo);
+      setConvertSupplierName(res.supplierName);
+    }
     deepLinkSeeded.current = true; // suppress the deep-link seeder
-    setPoItemEntries(
-      res.lines.map((l) => ({
-        poItemIndex: l.poItemIndex,
-        receivedQty: l.receivedQty,
-        acceptedQty: l.receivedQty,
-        rejectedQty: 0,
-        rejectionReason: "",
-      })),
-    );
+    const incoming = res.lines.map((l) => ({
+        poId: res.poId,
+        poItemId: String(
+          purchaseOrders.find((x) => x.id === res.poId)?.items?.[l.poItemIndex]?.id ?? "",
+        ),
+      poItemIndex: l.poItemIndex,
+      receivedQty: l.receivedQty,
+      acceptedQty: l.receivedQty,
+      rejectedQty: 0,
+      rejectionReason: "",
+    }));
+    // Append, skipping any PO line already on this receipt so picking the same
+    // PO twice cannot double-count it.
+    setPoItemEntries((prev) => {
+      const seen = new Set(prev.map(entryKey));
+      return [...prev, ...incoming.filter((e) => !seen.has(entryKey(e)))];
+    });
   };
 
   // ── Clear the PO link → back to manual entry ───────────────────────────────
@@ -451,8 +501,26 @@ function GRNCreatePage() {
     ? poItemEntries.some((e) => e.receivedQty > 0)
     : manualItems.some((e) => e.receivedQty > 0 && e.materialName.trim());
 
-  // PO line lookup for the converted entry table (entries carry poItemIndex).
-  const poItemByIndex = (idx: number) => po?.items[idx];
+  // PO line lookup. Entries may come from SEVERAL purchase orders, so resolve
+  // against the entry's own PO — falling back to the header PO by index for
+  // rows seeded before a poItemId was known.
+  const poById = useMemo(
+    () => new Map(purchaseOrders.map((x) => [x.id, x])),
+    [purchaseOrders],
+  );
+  const poItemForEntry = (e: POItemEntry) => {
+    const owner = poById.get(e.poId) ?? po;
+    if (!owner) return undefined;
+    return (
+      owner.items.find((it) => String(it.id ?? "") === e.poItemId) ??
+      owner.items[e.poItemIndex]
+    );
+  };
+  /** Distinct POs contributing lines — drives the header chips + summary. */
+  const linkedPoIds = useMemo(
+    () => [...new Set(poItemEntries.map((e) => e.poId).filter(Boolean))],
+    [poItemEntries],
+  );
 
   // ── Submit ────────────────────────────────────────────────────────────────
   const handleSave = async () => {
@@ -508,7 +576,20 @@ function GRNCreatePage() {
           // backend derives the status from arrival (arrived → POSTED, in
           // transit → DRAFT tracked by the arrival pipeline).
           ocrUsed,
-          items: poItemEntries.filter((ie) => ie.receivedQty > 0),
+          // Each line carries its OWN purchase order, so a receipt spanning
+          // several POs draws each one down correctly. `poId` above is only
+          // the header/display PO (the first one added).
+          items: poItemEntries
+            .filter((ie) => ie.receivedQty > 0)
+            .map((ie) => ({
+              poItemIndex: ie.poItemIndex,
+              poId: ie.poId || selectedPO,
+              poItemId: ie.poItemId || null,
+              receivedQty: ie.receivedQty,
+              acceptedQty: ie.acceptedQty,
+              rejectedQty: ie.rejectedQty,
+              rejectionReason: ie.rejectionReason,
+            })),
           ...(hasShipment ? {
             arrival_state: "NOT_ARRIVED",
             shipping_method: shipmentMethod || null,
@@ -654,7 +735,8 @@ function GRNCreatePage() {
             onClick={() => setConvertOpen(true)}
             title="Pick a Purchase Order and its lines to pre-fill this receipt"
           >
-            <FolderInput className="h-4 w-4" /> Convert from PO
+            <FolderInput className="h-4 w-4" />{" "}
+            {poItemEntries.length > 0 ? "Add another PO" : "Convert from PO"}
           </Button>
         )}
         {/* Scan & Create GRNs (multi-document wizard) — only when not deep-linked
@@ -1029,7 +1111,8 @@ function GRNCreatePage() {
                   </thead>
                   <tbody>
                     {poItemEntries.map((entry, idx) => {
-                      const poItem = poItemByIndex(entry.poItemIndex);
+                      const poItem = poItemForEntry(entry);
+                      const ownerPo = poById.get(entry.poId);
                       const alreadyReceived = poItem?.receivedQty || 0;
                       const ordered = poItem?.quantity ?? 0;
                       const cumulative = alreadyReceived + entry.receivedQty;
@@ -1037,7 +1120,7 @@ function GRNCreatePage() {
                         ordered > 0 && cumulative > ordered * 1.1;
                       return (
                         <tr
-                          key={entry.poItemIndex}
+                          key={entryKey(entry)}
                           className="border-t border-[#E2DDD8] hover:bg-[#FAF9F7]"
                         >
                           <td className="px-3 py-2">
@@ -1047,6 +1130,14 @@ function GRNCreatePage() {
                             </div>
                             <div className="text-xs text-[#9CA3AF]">
                               {poItem?.supplierSKU ?? ""}
+                              {/* Which PO this line draws down — without it a
+                                  multi-PO receipt is unreadable. Only shown
+                                  once more than one PO is involved. */}
+                              {linkedPoIds.length > 1 && ownerPo?.poNo && (
+                                <span className="ml-2 rounded bg-[#E0EDF0] px-1.5 py-0.5 text-[10px] font-medium text-[#3E6570]">
+                                  {ownerPo.poNo}
+                                </span>
+                              )}
                             </div>
                           </td>
                           <td className="px-3 py-2 text-right">

@@ -856,11 +856,15 @@ app.post("/rollback-last-batch", async (c) => {
   let skipped = 0;
   for (const entry of payload.applied) {
     if (!entry?.jcId) continue;
-    // Same guard as approve: only a still-open card is touched.
+    // Same guards as approve: only a still-open card is touched, and a card
+    // SENT to the floor since the batch was applied keeps its date — rolling
+    // back a schedule must not silently re-date work the departments are
+    // already building to (owner 2026-08-03).
     const r = (await db
       .prepare(
         `UPDATE job_cards SET dueDate = ?, updated_at = ?
-          WHERE id = ? AND status = 'WAITING'`,
+          WHERE id = ? AND status = 'WAITING'
+            AND (distributedAt IS NULL OR distributedAt = '')`,
       )
       .bind(entry.from ?? null, nowIso, entry.jcId)
       .run()) as { meta?: { changes?: number } };

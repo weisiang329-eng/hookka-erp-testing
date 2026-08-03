@@ -44,6 +44,13 @@ function ensurePiMigrations(db: D1Database): Promise<void> {
     const stmts = [
       "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS grn_id TEXT",
       "ALTER TABLE purchase_invoice_items ADD COLUMN IF NOT EXISTS grn_item_id TEXT",
+      // Which purchase order this invoice LINE bills (owner 2026-08-04 — one
+      // supplier invoice routinely covers several POs, e.g. ADD WOOD printing
+      // `P/O No : 2607-003/2607-020`). `purchase_invoices.purchaseOrderId`
+      // stays as the header/display PO. A GRN-sourced line can already derive
+      // its PO through grn_item_id → grn_items.po_id; this column carries it
+      // for lines invoiced straight off a PO with no receipt in between.
+      "ALTER TABLE purchase_invoice_items ADD COLUMN IF NOT EXISTS po_id TEXT",
       "ALTER TABLE grn_items ADD COLUMN IF NOT EXISTS invoiced_qty NUMERIC DEFAULT 0",
       // Supplier reference numbers (owner 2026-06-21): the supplier's own
       // invoice number AND their delivery-order number. snake_case → no
@@ -425,6 +432,8 @@ function normalizeItems(
     lineType: PurchaseInvoiceItemLineType;
     notes: string | null;
     grnItemId: string | null;
+    /** The PO this LINE bills — one invoice may cover several. */
+    poId: string | null;
   }> } | { ok: false; error: string } {
   if (!Array.isArray(items)) {
     return { ok: false, error: "items must be an array" };
@@ -441,6 +450,7 @@ function normalizeItems(
     lineType: PurchaseInvoiceItemLineType;
     notes: string | null;
     grnItemId: string | null;
+    poId: string | null;
   }> = [];
   for (let i = 0; i < items.length; i++) {
     const it = items[i] as PurchaseInvoiceItemInput;
@@ -486,6 +496,7 @@ function normalizeItems(
       lineType,
       notes: it.notes == null ? null : String(it.notes),
       grnItemId,
+      poId: (it as { poId?: unknown }).poId == null ? null : String((it as { poId?: unknown }).poId).trim() || null,
     });
   }
   return { ok: true, rows };
@@ -1013,53 +1024,70 @@ app.post("/", async (c) => {
     // PO source without a GRN: cap each requested qty at the PO line's
     // remaining (quantity − already-invoiced across live PIs). Match lines to
     // PO lines by materialCode (the stable per-line key on both sides).
-    const poItemsRes = await db
-      .prepare(
-        "SELECT material_code, materialName, quantity FROM purchase_order_items WHERE purchaseOrderId = ?",
-      )
-      .bind(body.purchaseOrderId)
-      .all<{ material_code?: string | null; materialCode?: string | null; materialName: string | null; quantity: number }>();
-    // Already-invoiced per material_code across this PO's live PIs.
-    const invRes = await db
-      .prepare(
-        `SELECT pii.material_code AS mc, COALESCE(SUM(pii.qty), 0) AS qty
-           FROM purchase_invoice_items pii
-           JOIN purchase_invoices pi ON pi.id = pii.pi_id
-          WHERE pi.purchaseOrderId = ? AND pi.status != 'CANCELLED'
-          GROUP BY pii.material_code`,
-      )
-      .bind(body.purchaseOrderId)
-      .all<{ mc?: string | null; material_code?: string | null; qty: number }>();
-    const invByCode = new Map<string, number>();
-    for (const row of invRes.results ?? []) {
-      const code = String(row.mc ?? row.material_code ?? "");
-      if (code) invByCode.set(code, Number(row.qty) || 0);
-    }
-    const orderedByCode = new Map<string, { name: string; qty: number }>();
-    for (const po of poItemsRes.results ?? []) {
-      const code = String(po.material_code ?? po.materialCode ?? "");
-      if (!code) continue;
-      const prev = orderedByCode.get(code);
-      orderedByCode.set(code, {
-        name: po.materialName ?? code,
-        qty: (prev?.qty ?? 0) + (Number(po.quantity) || 0),
-      });
-    }
-    const lines: ConvertLineRequest[] = [];
+    //
+    // Grouped BY PURCHASE ORDER (owner 2026-08-04): one supplier invoice
+    // routinely covers several POs. Pooling them would measure every line
+    // against the header PO's ceiling — over-invoicing one PO while wrongly
+    // rejecting a line that is perfectly in budget on its own.
+    const byPo = new Map<string, typeof normalizedItems.rows>();
     for (const r of normalizedItems.rows) {
-      const code = r.materialCode ?? "";
-      const ordered = code ? orderedByCode.get(code) : undefined;
-      if (!ordered) continue; // line not matched to a PO line → not guarded here
-      lines.push({
-        ref: ordered.name,
-        orderedQty: ordered.qty,
-        consumedQty: invByCode.get(code) ?? 0,
-        requestedQty: r.qty,
-      });
+      const poId = r.poId || String(body.purchaseOrderId);
+      const bucket = byPo.get(poId) ?? [];
+      bucket.push(r);
+      byPo.set(poId, bucket);
     }
-    const guard = checkConvertAvailability(lines);
-    if (!guard.ok) {
-      return c.json({ success: false, error: guard.error }, 409);
+
+    for (const [poId, rows] of byPo) {
+      const poItemsRes = await db
+        .prepare(
+          "SELECT material_code, materialName, quantity FROM purchase_order_items WHERE purchaseOrderId = ?",
+        )
+        .bind(poId)
+        .all<{ material_code?: string | null; materialCode?: string | null; materialName: string | null; quantity: number }>();
+      // Already-invoiced per material_code against THIS PO. Counts lines by
+      // their own po_id as well as PIs whose header points here, so a
+      // multi-PO invoice still contributes to the right ceiling.
+      const invRes = await db
+        .prepare(
+          `SELECT pii.material_code AS mc, COALESCE(SUM(pii.qty), 0) AS qty
+             FROM purchase_invoice_items pii
+             JOIN purchase_invoices pi ON pi.id = pii.pi_id
+            WHERE COALESCE(pii.po_id, pi.purchaseOrderId) = ? AND pi.status != 'CANCELLED'
+            GROUP BY pii.material_code`,
+        )
+        .bind(poId)
+        .all<{ mc?: string | null; material_code?: string | null; qty: number }>();
+      const invByCode = new Map<string, number>();
+      for (const row of invRes.results ?? []) {
+        const code = String(row.mc ?? row.material_code ?? "");
+        if (code) invByCode.set(code, Number(row.qty) || 0);
+      }
+      const orderedByCode = new Map<string, { name: string; qty: number }>();
+      for (const po of poItemsRes.results ?? []) {
+        const code = String(po.material_code ?? po.materialCode ?? "");
+        if (!code) continue;
+        const prev = orderedByCode.get(code);
+        orderedByCode.set(code, {
+          name: po.materialName ?? code,
+          qty: (prev?.qty ?? 0) + (Number(po.quantity) || 0),
+        });
+      }
+      const lines: ConvertLineRequest[] = [];
+      for (const r of rows) {
+        const code = r.materialCode ?? "";
+        const ordered = code ? orderedByCode.get(code) : undefined;
+        if (!ordered) continue; // line not matched to a PO line → not guarded here
+        lines.push({
+          ref: ordered.name,
+          orderedQty: ordered.qty,
+          consumedQty: invByCode.get(code) ?? 0,
+          requestedQty: r.qty,
+        });
+      }
+      const guard = checkConvertAvailability(lines);
+      if (!guard.ok) {
+        return c.json({ success: false, error: guard.error }, 409);
+      }
     }
   }
 
@@ -1196,8 +1224,8 @@ app.post("/", async (c) => {
             `INSERT INTO purchase_invoice_items (
                id, pi_id, material_code, material_name, supplier_sku,
                qty, unit_price_sen, line_total_sen, tax_sen, line_type, notes,
-               grn_item_id, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               grn_item_id, po_id, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             r.id,
@@ -1212,6 +1240,7 @@ app.post("/", async (c) => {
             r.lineType,
             r.notes,
             r.grnItemId,
+            r.poId ?? body.purchaseOrderId ?? null,
             now,
             null,
           ),
@@ -1739,8 +1768,8 @@ app.put("/:id", async (c) => {
             `INSERT INTO purchase_invoice_items (
                id, pi_id, material_code, material_name, supplier_sku,
                qty, unit_price_sen, line_total_sen, tax_sen, line_type, notes,
-               grn_item_id, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               grn_item_id, po_id, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             r.id,
@@ -1755,6 +1784,11 @@ app.put("/:id", async (c) => {
             r.lineType,
             r.notes,
             r.grnItemId,
+            // On update the header PO comes from the stored invoice, not the
+            // body — a PUT does not re-declare it.
+            r.poId ??
+              (existing as unknown as { purchaseOrderId?: string | null }).purchaseOrderId ??
+              null,
             now,
             null,
           ),

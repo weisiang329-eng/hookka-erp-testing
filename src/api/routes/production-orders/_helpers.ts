@@ -4182,7 +4182,31 @@ export async function applyPoUpdate(
     if (body.actualMinutes !== undefined) {
       updated.actualMinutes = body.actualMinutes;
     }
-    if (body.dueDate !== undefined) updated.dueDate = body.dueDate;
+    // SENT-LOCK (owner 2026-08-03): once "Sent" is ticked the card has been
+    // handed to the production department — "你再换的话，他们会混乱的". The
+    // automated writers all refuse to move it; the manual edit refuses too, so
+    // the rule holds no matter which door the change comes through.
+    //
+    // The deliberate escape hatch is to UNTICK Sent in the same request (or
+    // first): pulling the card back from the floor is an explicit act, and the
+    // date is free again once it is no longer out there.
+    if (body.dueDate !== undefined) {
+      const alreadySent = String(jcRow.distributedAt ?? "").trim() !== "";
+      const unsendingNow =
+        body.distributedAt !== undefined && !String(body.distributedAt ?? "").trim();
+      const changesDate = String(body.dueDate ?? "") !== String(jcRow.dueDate ?? "");
+      if (alreadySent && changesDate && !unsendingNow) {
+        return c.json(
+          {
+            success: false,
+            error:
+              'This job card has already been sent to production — its due date is locked. Untick "Sent" first if the date really must change.',
+          },
+          409,
+        );
+      }
+      updated.dueDate = body.dueDate;
+    }
     if (body.rackingNumber !== undefined) {
       updated.rackingNumber = body.rackingNumber;
     }

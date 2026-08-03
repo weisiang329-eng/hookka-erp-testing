@@ -372,7 +372,14 @@ app.post("/recalc-all", async (c) => {
       for (const [jcId, newDue] of newDueByJc) {
         updateStatements.push(
           c.var.DB
-            .prepare("UPDATE job_cards SET dueDate = ? WHERE id = ?")
+            // SENT-LOCK (owner 2026-08-03): a card already handed to the floor
+            // (distributedAt ticked) keeps its date. Recalculating lead times
+            // must never move work the departments are already building to —
+            // they would be running to a date nobody told them changed.
+            .prepare(
+              `UPDATE job_cards SET dueDate = ?
+                WHERE id = ? AND (distributedAt IS NULL OR distributedAt = '')`,
+            )
             .bind(newDue, jcId),
         );
         updatedJCs++;

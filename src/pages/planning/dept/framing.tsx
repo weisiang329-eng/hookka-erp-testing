@@ -16,7 +16,6 @@ import { Frame, Layers, Sofa, Package } from "lucide-react";
 import snapshot from "@/data/framing-schedule-snapshot.json";
 import DepartmentSchedulePage, {
   type Snapshot,
-  type Para,
   type CalendarConfig,
   type ByDayConfig,
   type ExtraSheet,
@@ -91,106 +90,6 @@ const EXTRA_SHEETS: ExtraSheet[] = [
   },
 ];
 
-const PROCESS_SECTIONS: Para[] = [
-  {
-    heading: "What goes into the schedule",
-    body:
-      "The planner only looks at framing cards that still need to be done — the " +
-      "WAITING FRAMING cards pulled live from the orders. Cards already framed, " +
-      "on-hold orders and cancelled orders are left out, so the calendar shows the " +
-      "real remaining framing work only.",
-  },
-  {
-    heading: "Framing is the end of the chain",
-    body:
-      "The chain runs Fabric Cutting → Fabric Sewing → Wood Cutting → Framing. " +
-      "Framing for an order can only start after that order's wood cut is done, so " +
-      "every earlier stage has to clear first.",
-  },
-  {
-    heading: "Webbing and headboard foam run the same day",
-    body:
-      "Each order's webbing and headboard-foam bonding happen on the SAME day as " +
-      "its framing. They are done by different people at different stations and run " +
-      "in parallel, so they do not eat into the framing hours — they just ride " +
-      "along. The calendar shows both as 'same day' columns next to each frame.",
-  },
-  {
-    heading: "A whole order is framed together",
-    body:
-      "A whole SO is framed on the same day — never split across days, so an " +
-      "order's parts stay together as it moves to upholstery.",
-  },
-  {
-    heading: "Priority by customer delivery date",
-    body:
-      "Orders are ordered by the customer delivery date first — the real promise " +
-      "to the customer — then by the earliest day they are ready (the wood-cut " +
-      "floor). The earliest promise that is ready goes first.",
-  },
-  {
-    heading: "Downstream teams",
-    body:
-      "Below the framing result, three downstream-team schedules are shown for " +
-      "context — Sofa Foam Bonding, Upholstery and Packing. They flow from the " +
-      "framing plan and let the owner see the whole back end of the line in one " +
-      "place.",
-  },
-  {
-    heading: "Working days only",
-    body:
-      "The calendar runs Monday to Saturday. Sundays and public holidays are " +
-      "skipped, so an order is never scheduled on a day the framing team isn't in.",
-  },
-];
-
-const LOGIC_SECTIONS: Para[] = [
-  {
-    heading: "Capacity gate (production hours per day, per lane)",
-    body:
-      "Framing capacity is measured in production man-hours per day, not set " +
-      "count — framing tracks the production-hour output. Bedframe and sofa are " +
-      "framed by different teams with their own hour budgets: Bedframe 22 h/day, " +
-      "Sofa 8 h/day. Each card consumes its own framing minutes from the matching " +
-      "lane's budget for that day.",
-  },
-  {
-    heading: "Wood → frame handoff (1 working day)",
-    body:
-      "An order's floor is (its wood-cut day) + 1 working day — framed the next " +
-      "working day after its wood cut. Orders with no wood-cut waiting (wood " +
-      "already done) start from day one.",
-  },
-  {
-    heading: "Same-day riders (webbing + HB foam)",
-    body:
-      "Each SO's webbing and headboard-foam bonding are scheduled on the same day " +
-      "as its framing. They run on separate people / stations and do NOT consume " +
-      "the framing hour budget — the calendar surfaces them so the floor can staff " +
-      "all three in parallel.",
-  },
-  {
-    heading: "Whole-SO grouping and priority",
-    body:
-      "A whole SO is framed on the same day, never split. Priority is earliest " +
-      "Customer DD first, then earliest ready (the wood-cut floor).",
-  },
-  {
-    heading: "Downstream schedules",
-    body:
-      "The Sofa Foam Bonding, Upholstery and Packing tables are derived from the " +
-      "framing plan and shown as read-only context, so the back end of the line " +
-      "can be planned against the same dates.",
-  },
-  {
-    heading: "Calendar boundaries",
-    body:
-      "Schedule starts 2026-06-02 (1 June is a holiday). Sundays and public " +
-      "holidays are skipped. The plan is read-only — nothing is written back to " +
-      "the ERP.",
-  },
-];
-
 export default function FramingDeptPage() {
   return (
     <DepartmentSchedulePage
@@ -205,9 +104,6 @@ export default function FramingDeptPage() {
       calendarHeading="Framing Calendar"
       byDaySheetName="By Day"
       byDayConfig={BY_DAY_CONFIG}
-      processSections={PROCESS_SECTIONS}
-      logicSections={LOGIC_SECTIONS}
-      logicIntro="The detailed rule set that drives the framing schedule, kept here as a reference for the owner."
       extraSheets={EXTRA_SHEETS}
     />
   );

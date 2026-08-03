@@ -726,53 +726,147 @@ async function cascadePOStatusAfterGRNPost(
     .prepare("SELECT poId FROM grns WHERE id = ?")
     .bind(grnId)
     .first<{ poId: string | null }>();
-  if (!grn?.poId) return;
-  const poId = grn.poId;
 
-  const grnItemsRes = await db
-    .prepare(
-      "SELECT poItemIndex, acceptedQty FROM grn_items WHERE grnId = ? ORDER BY id ASC",
-    )
-    .bind(grnId)
-    .all<{ poItemIndex: number | null; acceptedQty: number }>();
-  const grnItems = grnItemsRes.results ?? [];
-
-  await ensurePoItemLineNo(db);
-  const poItemsRes = await db
-    .prepare(
-      // Canonical order (2026-07-04): line_no = paper order for new POs,
-      // legacy id-order for backfilled rows. GRN lines key to PO lines by
-      // index, so this MUST match the order the PO endpoints serve
-      // (PO_ITEMS_ORDER) or acceptedQty routes to the WRONG PO line.
-      // NOTE the old comment claimed ids are time-ordered — they are NOT
-      // (poi-<uuid8> is random); line_no exists precisely because no column
-      // encoded the document order.
-      `SELECT id, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ? ${PO_ITEMS_ORDER}`,
-    )
-    .bind(poId)
-    .all<{ id: string; quantity: number; receivedQty: number }>();
-  const poItemsOrdered = poItemsRes.results ?? [];
+  // Targets carry their OWN PO — a receipt may span several purchase orders,
+  // so the header PO is only a fallback for legacy positional lines.
+  const targets = await resolveGrnLineTargets(db, grnId, grn?.poId ?? null);
+  if (targets.length === 0) return;
 
   const statements: D1PreparedStatement[] = [];
-  for (const gi of grnItems) {
-    const idx = gi.poItemIndex ?? -1;
-    if (idx < 0 || idx >= poItemsOrdered.length) continue;
-    const poItem = poItemsOrdered[idx];
-    const qty = Number(gi.acceptedQty) || 0;
-    if (qty <= 0) continue;
+  for (const t of targets) {
     statements.push(
       db
         .prepare(
           "UPDATE purchase_order_items SET receivedQty = receivedQty + ? WHERE id = ?",
         )
-        .bind(qty, poItem.id),
+        .bind(t.qty, t.poItemId),
     );
   }
   if (statements.length > 0) {
     await db.batch(statements);
   }
 
-  // Recompute status. Re-read items post-update so we include the bumps.
+  // Refresh EVERY purchase order this receipt touched. Recomputing only the
+  // header PO would leave a second PO sitting at CONFIRMED while its goods are
+  // already in the building.
+  for (const poId of [...new Set(targets.map((t) => t.poId))]) {
+    await recomputePoStatusFromReceipts(db, poId);
+  }
+}
+// ---------------------------------------------------------------------------
+// Per-line PO ownership (owner 2026-08-04: "正常都是 GR 会 generate from 好几张
+// PO 的").
+//
+// A GRN historically belonged to ONE purchase order: `grns.poId`, with each
+// line carrying `po_item_index` — a POSITION into that single PO's item list.
+// Two consequences:
+//
+//   1. a receipt spanning several POs could not be represented at all; and
+//   2. the position is only meaningful while the PO's line order is stable.
+//      The existing comment already warned that a changed order routes
+//      acceptedQty to the WRONG PO line.
+//
+// Each GRN line now records the PO line it actually receives (`po_id` +
+// `po_item_id`). Both the post cascade and its reversal already ACTED on a PO
+// line id — only the lookup was positional — so this replaces the lookup and
+// leaves the arithmetic untouched.
+//
+// Legacy rows have no `po_item_id`, so the positional path stays as a fallback
+// rather than requiring a backfill to be correct.
+let grnItemPoRefEnsured = false;
+async function ensureGrnItemPoRef(db: D1Database): Promise<void> {
+  if (grnItemPoRefEnsured) return;
+  try {
+    await db
+      .prepare("ALTER TABLE grn_items ADD COLUMN IF NOT EXISTS po_id TEXT")
+      .run();
+    await db
+      .prepare("ALTER TABLE grn_items ADD COLUMN IF NOT EXISTS po_item_id TEXT")
+      .run();
+    await db
+      .prepare(
+        "CREATE INDEX IF NOT EXISTS idx_grn_items_po_item ON grn_items(po_item_id)",
+      )
+      .run();
+    grnItemPoRefEnsured = true;
+  } catch (err) {
+    // Never block a receipt — the positional fallback still resolves.
+    console.warn("[grn] po-ref self-apply:", err);
+  }
+}
+
+interface GrnLinePoRef {
+  poItemIndex: number | null;
+  acceptedQty: number;
+  poId?: string | null;
+  poItemId?: string | null;
+  po_id?: string | null;
+  po_item_id?: string | null;
+}
+
+/**
+ * Resolve every GRN line to the PO line it draws down, as (poItemId, qty).
+ *
+ * Explicit `po_item_id` wins. Only lines still lacking it fall back to the
+ * positional lookup against the GRN's header PO — so a legacy receipt behaves
+ * exactly as before, and a multi-PO receipt is expressible.
+ */
+async function resolveGrnLineTargets(
+  db: D1Database,
+  grnId: string,
+  headerPoId: string | null,
+): Promise<Array<{ poId: string; poItemId: string; qty: number }>> {
+  await ensureGrnItemPoRef(db);
+  const res = await db
+    .prepare(
+      "SELECT poItemIndex, acceptedQty, po_id, po_item_id FROM grn_items WHERE grnId = ? ORDER BY id ASC",
+    )
+    .bind(grnId)
+    .all<GrnLinePoRef>();
+  const lines = res.results ?? [];
+
+  const out: Array<{ poId: string; poItemId: string; qty: number }> = [];
+  const needPositional = lines.some(
+    (l) => !((l.poItemId ?? l.po_item_id) ?? "").trim(),
+  );
+
+  let poItemsOrdered: Array<{ id: string }> = [];
+  if (needPositional && headerPoId) {
+    await ensurePoItemLineNo(db);
+    // Same SELECT shape the rest of this file uses for PO lines — one query
+    // shape in the money path is worth more than the two unused columns.
+    const poRes = await db
+      .prepare(
+        `SELECT id, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ? ${PO_ITEMS_ORDER}`,
+      )
+      .bind(headerPoId)
+      .all<{ id: string }>();
+    poItemsOrdered = poRes.results ?? [];
+  }
+
+  for (const l of lines) {
+    const qty = Number(l.acceptedQty) || 0;
+    if (qty <= 0) continue;
+    const explicitItem = ((l.poItemId ?? l.po_item_id) ?? "").trim();
+    if (explicitItem) {
+      const explicitPo = ((l.poId ?? l.po_id) ?? headerPoId ?? "").trim();
+      if (explicitPo) out.push({ poId: explicitPo, poItemId: explicitItem, qty });
+      continue;
+    }
+    const idx = l.poItemIndex ?? -1;
+    if (idx < 0 || idx >= poItemsOrdered.length || !headerPoId) continue;
+    out.push({ poId: headerPoId, poItemId: poItemsOrdered[idx].id, qty });
+  }
+  return out;
+}
+
+/**
+ * Recompute status for ONE purchase order from its current receivedQty totals.
+ * Split out because a multi-PO receipt has to refresh every PO it touched, not
+ * just the GRN's header PO — otherwise the second PO stays CONFIRMED forever
+ * while its goods are physically in the building.
+ */
+async function recomputePoStatusFromReceipts(db: D1Database, poId: string): Promise<void> {
   const afterRes = await db
     .prepare(
       "SELECT quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ?",
@@ -785,7 +879,6 @@ async function cascadePOStatusAfterGRNPost(
     (r) => (Number(r.receivedQty) || 0) >= (Number(r.quantity) || 0),
   );
   const anyPartial = after.some((r) => (Number(r.receivedQty) || 0) > 0);
-
   const nowIso = new Date().toISOString();
   if (allFull) {
     await db
@@ -795,16 +888,7 @@ async function cascadePOStatusAfterGRNPost(
       )
       .bind(nowIso.split("T")[0], nowIso, poId)
       .run();
-    // PO is now fully received — clear the goods_in_transit row keyed to
-    // this PO so the In Transit sidebar count reconciles. Stays a no-op
-    // if there is no in-transit row (e.g. local supplier that skipped the
-    // shipping leg). Mirrors the cleanup the operator would otherwise do
-    // by hand, and keeps the bulk Convert-to-GRN action in line with the
-    // workflow Wei Siang described.
-    await db
-      .prepare("DELETE FROM goods_in_transit WHERE poId = ?")
-      .bind(poId)
-      .run();
+    await db.prepare("DELETE FROM goods_in_transit WHERE poId = ?").bind(poId).run();
   } else if (anyPartial) {
     await db
       .prepare(
@@ -815,21 +899,6 @@ async function cascadePOStatusAfterGRNPost(
   }
 }
 
-// ---------------------------------------------------------------------------
-// RESTORE the parent PO's per-line availability when a posted GRN is
-// un-posted, cancelled, or deleted. The inverse of
-// cascadePOStatusAfterGRNPost: decrements purchase_order_items.receivedQty by
-// each GRN line's acceptedQty (clamped at 0 so a double-restore can't drive a
-// line negative) and recomputes the PO status:
-//   - no items received → CONFIRMED (back to the pre-receipt committed state)
-//   - some received      → PARTIAL_RECEIVED
-//   - all still full      → RECEIVED (unchanged — e.g. another GRN covered it)
-//
-// Scope note: this only restores the AVAILABILITY counter. The inventory the
-// GRN posted (rm_batches / cost_ledger / raw_materials.balanceQty) is NOT
-// reversed here — postGRNToStock stays intact (a stock reversal is a separate
-// concern). Returns the qty restored per PO line for the caller's audit/notes.
-// ---------------------------------------------------------------------------
 async function restorePOReceivedQtyForGRN(
   db: D1Database,
   grnId: string,
@@ -838,92 +907,81 @@ async function restorePOReceivedQtyForGRN(
     .prepare("SELECT poId FROM grns WHERE id = ?")
     .bind(grnId)
     .first<{ poId: string | null }>();
-  if (!grn?.poId) return { poId: null, restored: [] };
-  const poId = grn.poId;
 
-  const grnItemsRes = await db
-    .prepare(
-      "SELECT poItemIndex, acceptedQty FROM grn_items WHERE grnId = ? ORDER BY id ASC",
-    )
-    .bind(grnId)
-    .all<{ poItemIndex: number | null; acceptedQty: number }>();
-  const grnItems = grnItemsRes.results ?? [];
+  const targets = await resolveGrnLineTargets(db, grnId, grn?.poId ?? null);
+  if (targets.length === 0) return { poId: grn?.poId ?? null, restored: [] };
 
-  await ensurePoItemLineNo(db);
-  const poItemsRes = await db
-    .prepare(
-      // Same deterministic PO_ITEMS_ORDER as the post cascade — GRN lines key
-      // to PO lines by index, so scan order must match the original mapping.
-      `SELECT id, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ? ${PO_ITEMS_ORDER}`,
-    )
-    .bind(poId)
-    .all<{ id: string; quantity: number; receivedQty: number }>();
-  const poItemsOrdered = poItemsRes.results ?? [];
+  // Current receivedQty per target line, so a re-delete / double-restore can
+  // never drive a line negative.
+  const ids = [...new Set(targets.map((t) => t.poItemId))];
+  const ph = ids.map(() => "?").join(",");
+  const curRes = await db
+    .prepare(`SELECT id, receivedQty FROM purchase_order_items WHERE id IN (${ph})`)
+    .bind(...ids)
+    .all<{ id: string; receivedQty: number }>();
+  const currentById = new Map(
+    (curRes.results ?? []).map((r) => [r.id, Number(r.receivedQty) || 0]),
+  );
 
   const statements: D1PreparedStatement[] = [];
   const restored: { poItemId: string; qty: number }[] = [];
-  for (const gi of grnItems) {
-    const idx = gi.poItemIndex ?? -1;
-    if (idx < 0 || idx >= poItemsOrdered.length) continue;
-    const poItem = poItemsOrdered[idx];
-    // Clamp so a re-delete / double-restore never drives receivedQty < 0.
-    const dec = clampDecrement(
-      Number(poItem.receivedQty) || 0,
-      Number(gi.acceptedQty) || 0,
-    );
+  for (const t of targets) {
+    const dec = clampDecrement(currentById.get(t.poItemId) ?? 0, t.qty);
     if (dec <= 0) continue;
+    // Track the running figure so two lines against the SAME PO line cannot
+    // each clamp against the original value and over-restore between them.
+    currentById.set(t.poItemId, (currentById.get(t.poItemId) ?? 0) - dec);
     statements.push(
       db
         .prepare(
           "UPDATE purchase_order_items SET receivedQty = receivedQty - ? WHERE id = ?",
         )
-        .bind(dec, poItem.id),
+        .bind(dec, t.poItemId),
     );
-    restored.push({ poItemId: poItem.id, qty: dec });
+    restored.push({ poItemId: t.poItemId, qty: dec });
   }
   if (statements.length > 0) {
     await db.batch(statements);
   }
 
-  // Recompute PO status from the post-restore receivedQty totals.
-  const afterRes = await db
-    .prepare(
-      "SELECT quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ?",
-    )
-    .bind(poId)
-    .all<{ quantity: number; receivedQty: number }>();
-  const after = afterRes.results ?? [];
-  if (after.length === 0) return { poId, restored };
-  const allFull = after.every(
-    (r) => (Number(r.receivedQty) || 0) >= (Number(r.quantity) || 0),
-  );
-  const anyReceived = after.some((r) => (Number(r.receivedQty) || 0) > 0);
-
+  // Recompute EVERY purchase order this receipt had touched.
   const nowIso = new Date().toISOString();
-  if (allFull) {
+  for (const poId of [...new Set(targets.map((t) => t.poId))]) {
+    const afterRes = await db
+      .prepare(
+        "SELECT quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ?",
+      )
+      .bind(poId)
+      .all<{ quantity: number; receivedQty: number }>();
+    const after = afterRes.results ?? [];
+    if (after.length === 0) continue;
+    const allFull = after.every(
+      (r) => (Number(r.receivedQty) || 0) >= (Number(r.quantity) || 0),
+    );
     // Still fully received (another GRN covers it) — leave status RECEIVED.
-    return { poId, restored };
+    if (allFull) continue;
+    const anyReceived = after.some((r) => (Number(r.receivedQty) || 0) > 0);
+    if (anyReceived) {
+      await db
+        .prepare(
+          "UPDATE purchase_orders SET status = 'PARTIAL_RECEIVED', receivedDate = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(nowIso, poId)
+        .run();
+    } else {
+      // Nothing received anymore — back to CONFIRMED (the committed,
+      // pre-receipt state). Only move a PO that was sitting in a received
+      // status; never resurrect a CANCELLED/CLOSED/DRAFT PO.
+      await db
+        .prepare(
+          `UPDATE purchase_orders SET status = 'CONFIRMED', receivedDate = NULL, updated_at = ?
+             WHERE id = ? AND status IN ('RECEIVED','PARTIAL_RECEIVED')`,
+        )
+        .bind(nowIso, poId)
+        .run();
+    }
   }
-  if (anyReceived) {
-    await db
-      .prepare(
-        "UPDATE purchase_orders SET status = 'PARTIAL_RECEIVED', receivedDate = NULL, updated_at = ? WHERE id = ?",
-      )
-      .bind(nowIso, poId)
-      .run();
-  } else {
-    // Nothing received anymore — drop back to CONFIRMED (the committed,
-    // pre-receipt state). Only move a PO that was sitting in a received
-    // status; never resurrect a CANCELLED/CLOSED/DRAFT PO.
-    await db
-      .prepare(
-        `UPDATE purchase_orders SET status = 'CONFIRMED', receivedDate = NULL, updated_at = ?
-           WHERE id = ? AND status IN ('RECEIVED','PARTIAL_RECEIVED')`,
-      )
-      .bind(nowIso, poId)
-      .run();
-  }
-  return { poId, restored };
+  return { poId: grn?.poId ?? null, restored };
 }
 
 // ---------------------------------------------------------------------------
@@ -1234,6 +1292,10 @@ app.post("/", async (c) => {
     let grnSupplierName: string | null = null;
     let grnItems: Array<{
       poItemIndex: number | null;
+      // The PO LINE this receipt line draws down. A receipt may span several
+      // purchase orders, so ownership lives on the line, not on grns.poId.
+      poId: string | null;
+      poItemId: string | null;
       materialCode: string;
       materialName: string;
       orderedQty: number;
@@ -1309,6 +1371,8 @@ app.post("/", async (c) => {
       grnItems = (
         items as Array<{
           poItemIndex: number;
+          poId?: string | null;
+          poItemId?: string | null;
           receivedQty: number;
           acceptedQty: number;
           rejectedQty: number;
@@ -1318,6 +1382,10 @@ app.post("/", async (c) => {
         const poItem = poItems[item.poItemIndex];
         return {
           poItemIndex: item.poItemIndex,
+          // Prefer what the caller named; fall back to the header PO line at
+          // this index so an older client still writes a resolvable row.
+          poId: (item.poId ?? "").trim() || grnPoId,
+          poItemId: (item.poItemId ?? "").trim() || poItem?.id || null,
           materialCode: poItem?.material_code || poItem?.supplierSKU || "",
           materialName: poItem?.materialName ?? "",
           orderedQty: poItem?.quantity ?? 0,
@@ -1346,7 +1414,10 @@ app.post("/", async (c) => {
           unitPriceSen?: number | null;
         }>
       ).map((item) => ({
+        // Manual receipt — no purchase order behind it, so nothing to draw down.
         poItemIndex: null,
+        poId: null,
+        poItemId: null,
         materialCode: item.materialCode ?? "",
         materialName: item.materialName ?? "",
         // orderedQty has no PO reference — mirror receivedQty so it reads sensibly
@@ -1423,13 +1494,15 @@ app.post("/", async (c) => {
       ),
       ...grnItems.map((item) =>
         c.var.DB.prepare(
-          `INSERT INTO grn_items (grnId, poItemIndex, materialCode, materialName,
+          `INSERT INTO grn_items (grnId, poItemIndex, po_id, po_item_id, materialCode, materialName,
              orderedQty, receivedQty, acceptedQty, rejectedQty,
              rejectionReason, unitPrice)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           grnId,
           item.poItemIndex,
+          item.poId ?? null,
+          item.poItemId ?? null,
           item.materialCode,
           item.materialName,
           item.orderedQty,

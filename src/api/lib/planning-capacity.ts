@@ -57,6 +57,16 @@ export interface ChainConfig {
   foamCapMin: number;
   /** Sofa framing → foam handoff in working days. */
   foamHandoffDays: number;
+  /**
+   * Foam Cutting (owner 2026-08-03). A SOURCE stage like Fabric Cutting and
+   * Wood Cutting — it waits on no upstream department, because the raw foam is
+   * simply there. What it IS tied to is the day its output is needed, so it is
+   * pulled back this many WORKING days from that SO's Foam Bonding day.
+   * Owner: "把它放成 Foam Bonding 的前一天就是了" — 1, revisit later.
+   */
+  foamCutLeadDays: number;
+  /** Foam Cutting: minutes/day. Measured throughput overrides this. */
+  foamCutCapMin: number;
   /** Upholstery: minutes/day per lane (BEDFRAME 24h, SOFA 12h). */
   uphCapMin: { BEDFRAME: number; SOFA: number };
   /** Upstream → upholstery handoff in working days. */
@@ -83,6 +93,8 @@ export const DEFAULT_CHAIN_CONFIG: ChainConfig = {
   frameHandoffDays: 1,
   foamCapMin: 8 * 60,
   foamHandoffDays: 1,
+  foamCutLeadDays: 1,
+  foamCutCapMin: 8 * 60,
   uphCapMin: { BEDFRAME: 24 * 60, SOFA: 12 * 60 },
   uphHandoffDays: 1,
 };
@@ -227,6 +239,8 @@ function cloneChain(): ChainConfig {
     frameHandoffDays: c.frameHandoffDays,
     foamCapMin: c.foamCapMin,
     foamHandoffDays: c.foamHandoffDays,
+    foamCutLeadDays: c.foamCutLeadDays,
+    foamCutCapMin: c.foamCutCapMin,
     uphCapMin: { ...c.uphCapMin },
     uphHandoffDays: c.uphHandoffDays,
   };
@@ -259,6 +273,8 @@ function mergeChain(base: ChainConfig, override: unknown): void {
   if (pme !== null) base.pillowMinEach = pme;
   const fcm = posInt(o.foamCapMin);
   if (fcm !== null) base.foamCapMin = fcm;
+  const fccm = posInt(o.foamCutCapMin);
+  if (fccm !== null) base.foamCutCapMin = fccm;
 
   for (const key of [
     "sewHandoffDays",
@@ -266,6 +282,7 @@ function mergeChain(base: ChainConfig, override: unknown): void {
     "frameHandoffDays",
     "foamHandoffDays",
     "uphHandoffDays",
+    "foamCutLeadDays",
   ] as const) {
     const v = nonNegInt(o[key]);
     if (v !== null) base[key] = v;

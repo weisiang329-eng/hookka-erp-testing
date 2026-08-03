@@ -7,16 +7,18 @@
 // The grouped Calendar in _DepartmentSchedulePage needs a Lane column + a
 // per-SO group key, which these sheets don't have (they are one row per
 // working day). This scaffold renders the same page chrome — header +
-// Recalculate button + snapshot caption + collapsible Process / Logic
-// sections + a snapshot-result Card — but with a plain (header + body) table
-// as the main result, so the four new dept pages stay visually consistent
-// with the existing four while honouring their real, simpler column shapes.
+// Recalculate button + snapshot caption + a snapshot-result Card — but with a
+// plain (header + body) table as the main result, so the four new dept pages
+// stay visually consistent with the existing four while honouring their real,
+// simpler column shapes.
+//
+// The prose "Scheduling Process" / "Scheduling Logic / Prompt" panels were
+// removed 2026-08-03 (owner) — see the note in _DepartmentSchedulePage.tsx.
 //
 // All UI copy is English (project rule). Snapshot DATA renders as-is, except
 // each sheet's header row is replaced by a curated English header list
 // (headerOverride) so no mixed-language column titles leak into the UI.
 // ---------------------------------------------------------------------------
-import { useState } from "react";
 import { formatDate } from "@/lib/utils";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -25,16 +27,12 @@ import { useToast } from "@/components/ui/toast";
 import {
   ArrowLeft,
   RefreshCw,
-  ListChecks,
   CalendarDays,
-  BookOpen,
-  ChevronDown,
-  ChevronRight,
   Info,
 } from "lucide-react";
-import type { Snapshot, Para } from "./_DepartmentSchedulePage";
+import type { Snapshot } from "./_DepartmentSchedulePage";
 
-export type { Snapshot, Para };
+export type { Snapshot };
 
 // ── Plain table ────────────────────────────────────────────────────────────
 // Renders a snapshot sheet as a header + body table. The sheet's own header
@@ -100,61 +98,6 @@ function PlainTable({
   );
 }
 
-// ── Collapsible card wrapper (mirrors _DepartmentSchedulePage) ──────────────
-function CollapsibleCard({
-  icon,
-  title,
-  defaultOpen,
-  children,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}) {
-  const [open, setOpen] = useState(defaultOpen ?? true);
-  return (
-    <Card className="overflow-hidden">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between gap-2 px-6 py-4 text-left hover:bg-[#FAF8F6]"
-      >
-        <CardTitle className="flex items-center gap-2 text-base text-[#1F1D1B]">
-          {icon}
-          {title}
-        </CardTitle>
-        {open ? (
-          <ChevronDown className="h-4 w-4 text-[#6B7280]" />
-        ) : (
-          <ChevronRight className="h-4 w-4 text-[#6B7280]" />
-        )}
-      </button>
-      {open && <CardContent className="pt-0">{children}</CardContent>}
-    </Card>
-  );
-}
-
-function SectionParagraphs({ items }: { items: Para[] }) {
-  return (
-    <div className="space-y-4">
-      {items.map((p) => (
-        <div key={p.heading}>
-          <h4 className="text-sm font-semibold text-[#1F1D1B]">{p.heading}</h4>
-          <p className="mt-1 text-sm leading-relaxed text-[#4B4642]">{p.body}</p>
-          {p.bullets && (
-            <ul className="mt-2 ml-4 list-disc space-y-1 text-sm text-[#4B4642]">
-              {p.bullets.map((b) => (
-                <li key={b}>{b}</li>
-              ))}
-            </ul>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
-
 // ── Page ───────────────────────────────────────────────────────────────────
 export type PlainDeptSchedulePageProps = {
   /** Display name, e.g. "Foam Bonding". */
@@ -181,11 +124,6 @@ export type PlainDeptSchedulePageProps = {
   valueCols?: number[];
   /** A value column (rendered position) given extra min-width. */
   wideCol: number | null;
-  /** Curated, plain-English explanatory content (English only). */
-  processSections: Para[];
-  logicSections: Para[];
-  /** Optional intro line shown above the logic sections. */
-  logicIntro?: string;
   /**
    * Optional extra content rendered inside the result Card ABOVE the table —
    * used by the Webbing page to explain its "same day as framing" model.
@@ -250,28 +188,7 @@ export default function PlainDeptSchedulePage(props: PlainDeptSchedulePageProps)
         </p>
       </div>
 
-      {/* (a) Scheduling Process — collapsed by default */}
-      <CollapsibleCard
-        icon={<ListChecks className="h-4 w-4 text-[#6B5C32]" />}
-        title="Scheduling Process"
-        defaultOpen={false}
-      >
-        <SectionParagraphs items={props.processSections} />
-      </CollapsibleCard>
-
-      {/* (c) Scheduling Logic / Prompt — collapsed by default */}
-      <CollapsibleCard
-        icon={<BookOpen className="h-4 w-4 text-[#6B5C32]" />}
-        title="Scheduling Logic / Prompt"
-        defaultOpen={false}
-      >
-        {props.logicIntro && (
-          <p className="mb-4 text-xs leading-relaxed text-[#6B7280]">{props.logicIntro}</p>
-        )}
-        <SectionParagraphs items={props.logicSections} />
-      </CollapsibleCard>
-
-      {/* (b) Schedule Result — main body, open by default */}
+      {/* Schedule Result — main body, open by default */}
       <Card className="overflow-hidden">
         <CardHeader>
           <CardTitle className="flex flex-wrap items-center justify-between gap-2 text-base text-[#1F1D1B]">

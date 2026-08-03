@@ -85,6 +85,14 @@ type PILineDraft = {
   // the POST so the backend increments grn_items.invoiced_qty and runs the
   // line-level availability guard. null = manual / PO-source line.
   grnItemId?: string | null;
+  /**
+   * The purchase order this LINE bills. One supplier invoice routinely covers
+   * several POs (owner 2026-08-04) — ADD WOOD prints
+   * `P/O No : 2607-003/2607-020` — and the backend guard caps each line
+   * against its OWN purchase order, so the line has to say which one.
+   * null = manual line with no PO behind it.
+   */
+  poId?: string | null;
 };
 
 function emptyPILine(): PILineDraft {
@@ -96,6 +104,7 @@ function emptyPILine(): PILineDraft {
     unitPriceRM: 0,
     taxRM: 0,
     grnItemId: null,
+    poId: null,
   };
 }
 
@@ -227,6 +236,7 @@ function CreatePurchaseInvoicePage() {
             unitPriceRM: it.unitPriceSen / 100,
             taxRM: 0,
             grnItemId: null,
+            poId: po.id,
           }));
           setLines(prefilled.length > 0 ? prefilled : [emptyPILine()]);
         })
@@ -367,8 +377,20 @@ function CreatePurchaseInvoicePage() {
   // grnItemId. No navigation: we keep the user on the form with their picks.
   const handleConvert = (res: ConvertToPIResult) => {
     setSupplierId(res.supplierId);
-    setSourceGrnId(res.grnId);
-    setSourcePurchaseOrderId(res.purchaseOrderId);
+    // One invoice has ONE supplier — refuse a second source from a different
+    // one rather than silently keeping the first and mislabelling the rest.
+    const hasLines = lines.some((l) => l.materialName.trim() || l.qty > 0);
+    if (hasLines && supplierId && res.supplierId && res.supplierId !== supplierId) {
+      const name = suppliers.find((x) => x.id === supplierId)?.name ?? "this supplier";
+      toast.error(`This invoice is for ${name}. Create a separate PI for ${res.supplierName}.`);
+      return;
+    }
+    // A GRN source drives invoiced_qty draw-down and can only be ONE, so it
+    // never appends. Adding further PURCHASE ORDERS is the multi-PO case.
+    const append = hasLines && res.source === "po" && !sourceGrnId;
+    if (res.grnId) setSourceGrnId(res.grnId);
+    // Keep the FIRST purchase order as the header; later ones only add lines.
+    if (!append || !sourcePurchaseOrderId) setSourcePurchaseOrderId(res.purchaseOrderId);
     // Prefill Purchase company in priority order: convert payload (if it
     // carries one) → supplier default → leave current. The convert payload
     // doesn't carry the org today; fall back to the supplier.
@@ -379,24 +401,34 @@ function CreatePurchaseInvoicePage() {
       const sup = suppliers.find((s) => s.id === res.supplierId);
       if (sup?.purchaseOrgCode) setPurchaseOrgCode(sup.purchaseOrgCode);
     }
-    setRemarks(
-      res.source === "grn"
-        ? `From GRN ${res.docLabel}`
-        : `Created from PO ${res.docLabel}`,
-    );
-    setLines(
-      res.lines.length > 0
-        ? res.lines.map((l) => ({
-            materialCode: l.materialCode,
-            materialName: l.materialName,
-            supplierSku: l.supplierSku,
-            qty: l.qty,
-            unitPriceRM: l.unitPriceRM,
-            taxRM: 0,
-            grnItemId: l.grnItemId,
-          }))
-        : [emptyPILine()],
-    );
+    setRemarks((prev) => {
+      const label =
+        res.source === "grn" ? `From GRN ${res.docLabel}` : `Created from PO ${res.docLabel}`;
+      // Name every purchase order on the invoice, so the remark still matches
+      // the document once several are billed together.
+      return append && prev ? `${prev} + PO ${res.docLabel}` : label;
+    });
+    const incoming = res.lines.map((l) => ({
+      materialCode: l.materialCode,
+      materialName: l.materialName,
+      supplierSku: l.supplierSku,
+      qty: l.qty,
+      unitPriceRM: l.unitPriceRM,
+      taxRM: 0,
+      grnItemId: l.grnItemId,
+      poId: res.purchaseOrderId,
+    }));
+    setLines((prev) => {
+      if (!append) return incoming.length > 0 ? incoming : [emptyPILine()];
+      // Drop the blank starter row, and skip a (PO, material) already billed on
+      // this invoice so re-picking the same PO cannot double-count it.
+      const kept = prev.filter((l) => l.materialName.trim() || l.qty > 0);
+      const seen = new Set(kept.map((l) => `${l.poId ?? ""}:${l.materialCode}`));
+      return [
+        ...kept,
+        ...incoming.filter((l) => !seen.has(`${l.poId ?? ""}:${l.materialCode}`)),
+      ];
+    });
   };
 
   // SST fallback: when the operator doesn't fill per-line tax, they can type
@@ -492,6 +524,10 @@ function CreatePurchaseInvoicePage() {
               // Convert-chain: carry the GRN source line so the backend draws down
               // grn_items.invoiced_qty and enforces the line-level guard.
               grnItemId: l.grnItemId ?? null,
+              // Which PO this line bills — the guard checks each purchase
+              // order against its own ceiling, so pooling them would both
+              // over-invoice one and wrongly reject another.
+              poId: l.poId ?? sourcePurchaseOrderId ?? null,
             };
           });
         })(),
@@ -586,7 +622,10 @@ function CreatePurchaseInvoicePage() {
           onClick={() => setConvertOpen(true)}
           title="Pick a Goods Receipt (or Purchase Order) and its lines to pre-fill this invoice"
         >
-          <FolderInput className="h-4 w-4" /> Convert from GR or PO
+          <FolderInput className="h-4 w-4" />{" "}
+          {lines.some((l) => l.materialName.trim() || l.qty > 0)
+            ? "Add another PO"
+            : "Convert from GR or PO"}
         </Button>
         <Button
           variant="outline"

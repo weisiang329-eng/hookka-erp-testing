@@ -261,11 +261,18 @@ function makeDb() {
     if (/^SELECT \* FROM grn_items$/i.test(sql)) {
       return tables.grn_items.slice();
     }
-    // SELECT poItemIndex, acceptedQty FROM grn_items WHERE grnId = ?
-    if (/SELECT poItemIndex, acceptedQty FROM grn_items WHERE grnId = \?/i.test(sql)) {
+    // SELECT poItemIndex, acceptedQty[, po_id, po_item_id] FROM grn_items WHERE grnId = ?
+    // A GRN line may now name its OWN purchase order (a receipt can span
+    // several POs), with the positional poItemIndex kept as the legacy path.
+    if (/SELECT poItemIndex, acceptedQty.* FROM grn_items WHERE grnId = \?/i.test(sql)) {
       return tables.grn_items
         .filter((r) => String(getCol(r, "grnId")) === String(binds[0]))
-        .map((r) => ({ poItemIndex: getCol(r, "poItemIndex"), acceptedQty: getCol(r, "acceptedQty") }));
+        .map((r) => ({
+          poItemIndex: getCol(r, "poItemIndex"),
+          acceptedQty: getCol(r, "acceptedQty"),
+          po_id: getCol(r, "po_id") ?? null,
+          po_item_id: getCol(r, "po_item_id") ?? null,
+        }));
     }
     // SELECT invoiced_qty FROM grn_items WHERE id = ?
     if (/SELECT invoiced_qty FROM grn_items WHERE id = \?/i.test(sql)) {

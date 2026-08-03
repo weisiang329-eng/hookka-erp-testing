@@ -19,7 +19,6 @@ import { Layers } from "lucide-react";
 import snapshot from "@/data/foamcutting-schedule-snapshot.json";
 import DepartmentSchedulePage, {
   type Snapshot,
-  type Para,
   type CalendarConfig,
   type ByDayConfig,
 } from "./_DepartmentSchedulePage";
@@ -62,48 +61,6 @@ const BY_DAY_CONFIG: ByDayConfig = {
   wideCol: 3,
 };
 
-const PROCESS_SECTIONS: Para[] = [
-  {
-    heading: "What Foam Cutting is",
-    body:
-      "Foam Cutting is a tracking and labor stage that runs immediately before " +
-      "Foam Bonding. It lets the floor schedule and record the foam-cutting work " +
-      "on its own department. The raw material is still consumed at Fab Cut — this " +
-      "stage does not touch raw material.",
-  },
-  {
-    heading: "Runs before Foam Bonding",
-    body:
-      "In the production line order Foam Cutting sits between Wood Cut and Foam " +
-      "Bonding. Each WIP that has a Foam Bonding step now carries a Foam Cutting " +
-      "step immediately in front of it.",
-  },
-  {
-    heading: "Working days only",
-    body:
-      "The calendar runs Monday to Saturday. Sundays and public holidays are " +
-      "skipped, so an order is never scheduled on a day the team isn't in.",
-  },
-];
-
-const LOGIC_SECTIONS: Para[] = [
-  {
-    heading: "Capacity model not yet built",
-    body:
-      "A dedicated forward-capacity schedule for Foam Cutting (a capacity stage " +
-      "with owner-confirmed minutes/day and handoff days) has not been built yet. " +
-      "Until it lands, Foam Cutting job-card due dates come from the per-department " +
-      "lead-time cascade (default 1 day), not from a capacity engine.",
-  },
-  {
-    heading: "Snapshot only",
-    body:
-      "This page currently shows a saved (empty) snapshot. The live Recalculate " +
-      "button is inert until the backend schedule endpoint exists. The plan is " +
-      "read-only — nothing is written back to the ERP.",
-  },
-];
-
 export default function FoamCuttingDeptPage() {
   return (
     <DepartmentSchedulePage
@@ -119,9 +76,6 @@ export default function FoamCuttingDeptPage() {
       calendarHeading="Foam Cutting Calendar"
       byDaySheetName="By Day"
       byDayConfig={BY_DAY_CONFIG}
-      processSections={PROCESS_SECTIONS}
-      logicSections={LOGIC_SECTIONS}
-      logicIntro="Foam Cutting is a new tracking stage; its forward-capacity schedule is not built yet."
     />
   );
 }

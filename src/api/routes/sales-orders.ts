@@ -77,6 +77,7 @@ import { resolveHeightPriceSen } from "../../lib/height-surcharge";
 import { resolveTotalHeightPriceSen } from "../../lib/total-height-surcharge";
 import { loadSpecialsConfig, loadHeightsConfig } from "../lib/specials-config";
 import { validateRepairScopeInput } from "../../lib/repair-scope";
+import { buildOrderFootprint } from "../lib/order-footprint";
 
 import {
   parseCustomSpecials,
@@ -2310,6 +2311,19 @@ app.post("/:id/confirm", async (c) => {
 // ---------------------------------------------------------------------------
 // GET /api/sales-orders/:id — SO + items + statusHistory + priceOverrides
 // ---------------------------------------------------------------------------
+// ── GET /:ref/footprint ─────────────────────────────────────────────────────
+// READ-ONLY: everything still attached to one sales order (POs, job cards,
+// delivery orders, invoices, promises, proposals). Exists so "this order is
+// empty, delete it" can be checked instead of assumed — deleting the head of
+// the chain orphans dispatch and accounting records that month-end depends on.
+// Writes nothing; it only reports and recommends.
+app.get("/:ref/footprint", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "read");
+  if (denied) return denied;
+  const data = await buildOrderFootprint(c.var.DB, c.req.param("ref"));
+  return c.json({ success: true, data });
+});
+
 app.get("/:id", async (c) => {
   let id = c.req.param("id");
   // Doc-chain callers (the DO / Invoice relationship graph, incl. consolidated
@@ -3891,7 +3905,11 @@ app.put("/:id", async (c) => {
           updateStmts.push(
             c.var.DB
               .prepare(
-                `UPDATE job_cards SET dueDate = ?, updated_at = ? WHERE id = ?`,
+                // SENT-LOCK (owner 2026-08-03): re-deriving due dates from a
+                // changed SO date must not touch cards already sent to the
+                // floor — those dates are committed to the departments.
+                `UPDATE job_cards SET dueDate = ?, updated_at = ?
+                  WHERE id = ? AND (distributedAt IS NULL OR distributedAt = '')`,
               )
               .bind(newDueDate, now, jc.id),
           );

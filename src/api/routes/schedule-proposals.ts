@@ -58,16 +58,36 @@ function actorId(c: { get: (k: string) => unknown }): string | null {
 }
 
 /** Parse + clamp the {ids} body shared by approve / reject. */
-async function readIds(c: { req: { json: () => Promise<unknown> } }): Promise<string[] | null> {
+/**
+ * Per-request id ceiling. Approving runs one UPDATE per proposal, so an
+ * unbounded batch is what killed the Worker mid-apply on 2026-07-16 (the agent
+ * path answered that with APPLY_BATCH=150). The cap stays — but it is now
+ * REPORTED rather than applied behind the caller's back.
+ */
+const MAX_IDS_PER_REQUEST = 500;
+
+interface ReadIdsResult {
+  ids: string[];
+  /** How many the caller actually sent, before the cap. */
+  requested: number;
+  /** Ids dropped by the cap — the caller must re-send these. */
+  dropped: number;
+}
+
+async function readIds(c: {
+  req: { json: () => Promise<unknown> };
+}): Promise<ReadIdsResult | null> {
   let body: unknown;
   try {
     body = await c.req.json();
   } catch {
     return null;
   }
-  const ids = (body as { ids?: unknown })?.ids;
-  if (!Array.isArray(ids) || ids.length === 0) return null;
-  return ids.filter((x): x is string => typeof x === "string" && x.length > 0).slice(0, 500);
+  const raw = (body as { ids?: unknown })?.ids;
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const valid = raw.filter((x): x is string => typeof x === "string" && x.length > 0);
+  const ids = valid.slice(0, MAX_IDS_PER_REQUEST);
+  return { ids, requested: valid.length, dropped: valid.length - ids.length };
 }
 
 // ── Generate ─────────────────────────────────────────────────────────────────
@@ -139,8 +159,9 @@ app.post("/proposals/approve", async (c) => {
   const denied = await requirePermission(c, "production-orders", "update");
   if (denied) return denied;
   void getOrgId(c);
-  const ids = await readIds(c);
-  if (!ids) return c.json({ success: false, error: "ids[] required" }, 400);
+  const batch = await readIds(c);
+  if (!batch) return c.json({ success: false, error: "ids[] required" }, 400);
+  const ids = batch.ids;
 
   const db = c.var.DB;
   await ensureProposalTables(db);
@@ -209,7 +230,18 @@ app.post("/proposals/approve", async (c) => {
       .run();
   }
 
-  return c.json({ success: true, data: { approved: applied.length, skipped: ids.length - applied.length } });
+  // `dropped` is the batch cap biting. Reporting it is the point: silently
+  // truncating made "select all -> Approve" look complete while leaving a
+  // backlog behind (the queue once reached 1,715). The caller re-sends.
+  return c.json({
+    success: true,
+    data: {
+      approved: applied.length,
+      skipped: ids.length - applied.length,
+      requested: batch.requested,
+      dropped: batch.dropped,
+    },
+  });
 });
 
 // ── Reject ───────────────────────────────────────────────────────────────────
@@ -218,8 +250,9 @@ app.post("/proposals/reject", async (c) => {
   const denied = await requirePermission(c, "production-orders", "update");
   if (denied) return denied;
   void getOrgId(c);
-  const ids = await readIds(c);
-  if (!ids) return c.json({ success: false, error: "ids[] required" }, 400);
+  const batch = await readIds(c);
+  if (!batch) return c.json({ success: false, error: "ids[] required" }, 400);
+  const ids = batch.ids;
 
   const db = c.var.DB;
   await ensureProposalTables(db);
@@ -234,7 +267,10 @@ app.post("/proposals/reject", async (c) => {
     )
     .bind(nowIso, decidedBy, ...ids)
     .run();
-  return c.json({ success: true, data: { rejected: ids.length } });
+  return c.json({
+    success: true,
+    data: { rejected: ids.length, requested: batch.requested, dropped: batch.dropped },
+  });
 });
 
 export default app;

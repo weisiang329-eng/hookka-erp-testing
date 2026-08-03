@@ -14,7 +14,6 @@ import { Axe } from "lucide-react";
 import snapshot from "@/data/woodcut-schedule-snapshot.json";
 import DepartmentSchedulePage, {
   type Snapshot,
-  type Para,
   type CalendarConfig,
   type ByDayConfig,
 } from "./_DepartmentSchedulePage";
@@ -64,93 +63,6 @@ const BY_DAY_CONFIG: ByDayConfig = {
   wideCol: 3,
 };
 
-const PROCESS_SECTIONS: Para[] = [
-  {
-    heading: "What goes into the schedule",
-    body:
-      "The planner only looks at wood-cutting cards that still need to be cut — " +
-      "the WAITING WOOD_CUT cards pulled live from the orders. Cards already cut, " +
-      "on-hold orders and cancelled orders are left out, so the calendar shows the " +
-      "real remaining wood-cutting work only.",
-  },
-  {
-    heading: "Wood cutting follows sewing",
-    body:
-      "The chain runs Fabric Cutting → Fabric Sewing → Wood Cutting, each stage " +
-      "planned after the previous one finishes for that order. An order's wood cut " +
-      "can only start after its fabric SEWING is done. Wood cutting lags sewing by " +
-      "several days, so there is plenty of freedom in the plan.",
-  },
-  {
-    heading: "A whole order is cut together",
-    body:
-      "A whole SO is cut on the same day — never split across days. A sofa order " +
-      "carries its base, arms and back-cushion (and any sectional left/right " +
-      "lines), and ALL of it is cut together. This matters most for sofa, where " +
-      "splitting an order across days would scatter its parts.",
-  },
-  {
-    heading: "Same model, no size split",
-    body:
-      "All sizes of a model are cut together, and the same models are placed next " +
-      "to each other wherever the sewing-done floor allows, so the cutter changes " +
-      "its setup as little as possible.",
-  },
-  {
-    heading: "Priority by customer delivery date",
-    body:
-      "Orders are ordered by the customer delivery date first — the real promise " +
-      "to the customer — then by the earliest day they are ready (the sewing-done " +
-      "floor). The earliest promise that is ready goes first.",
-  },
-  {
-    heading: "Working days only",
-    body:
-      "The calendar runs Monday to Saturday. Sundays and public holidays are " +
-      "skipped, so an order is never scheduled on a day the cutters aren't in.",
-  },
-];
-
-const LOGIC_SECTIONS: Para[] = [
-  {
-    heading: "Capacity gate (sets per day, per lane)",
-    body:
-      "The gate is sets per day, where one set = one SO line = one finished bed or " +
-      "one sofa. Daily budgets: Bedframe 20 sets/day, Sofa 10 sets/day. Bedframe " +
-      "and sofa are cut on separate lanes with separate budgets.",
-  },
-  {
-    heading: "Sew → wood handoff (2 working days)",
-    body:
-      "An order's floor is (its fabric-sewing done day) + 2 working days — one " +
-      "clear buffer day between sewing and wood cutting. On the buffer day the " +
-      "wood team has no material for that order, so its people move to other work. " +
-      "Orders whose sewing is already done, or that have no sewing step, start from " +
-      "day one.",
-  },
-  {
-    heading: "Whole-SO and whole-model grouping",
-    body:
-      "A whole SO is one indivisible unit on the floor — every line of the order " +
-      "is cut on the same day. Within a model, all sizes are cut together, and the " +
-      "same model is kept adjacent across SOs where the floor allows.",
-  },
-  {
-    heading: "Priority order",
-    body:
-      "Earliest Customer DD first, then earliest ready (the sewing-done floor). An " +
-      "order that is urgent but not yet ready waits for its floor before it can be " +
-      "placed.",
-  },
-  {
-    heading: "Calendar boundaries",
-    body:
-      "Schedule starts 2026-06-02 (1 June is a holiday). Sundays and public " +
-      "holidays are skipped. The plan is read-only — nothing is written back to " +
-      "the ERP.",
-  },
-];
-
 export default function WoodCuttingDeptPage() {
   return (
     <DepartmentSchedulePage
@@ -165,9 +77,6 @@ export default function WoodCuttingDeptPage() {
       calendarHeading="Wood Cut Calendar"
       byDaySheetName="By Day"
       byDayConfig={BY_DAY_CONFIG}
-      processSections={PROCESS_SECTIONS}
-      logicSections={LOGIC_SECTIONS}
-      logicIntro="The detailed rule set that drives the wood-cutting schedule, kept here as a reference for the owner."
     />
   );
 }

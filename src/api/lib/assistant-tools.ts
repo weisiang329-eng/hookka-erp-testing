@@ -53,6 +53,11 @@ import {
   listAgentFeedback,
   retireAgentFeedback,
 } from "./agent-feedback";
+import {
+  loadCapacityPins,
+  resolveAdaptiveCapacity,
+  setCapacityPin,
+} from "./planning-adaptive-capacity";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -6561,6 +6566,121 @@ const teachAgentTool: ToolDefinition = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// set_capacity — the SAFE way to say a capacity number in chat.
+//
+// teach_agent stores FREE TEXT that gets injected into an LLM prompt, so it
+// must never carry scheduling arithmetic: a number the model re-reads out of a
+// sentence has no bounds, no type and no audit. The real dividing line is not
+// chat-vs-UI, it is validated-write vs unvalidated-text. This tool is the
+// validated write — same chat box, but the number lands in kv_config through
+// a bounded, audited path the deterministic engine can trust.
+//
+// It PINS rather than sets, because capacity is otherwise measured from actual
+// output and drifts ±20%/day: a plain "set" would be quietly walked back to
+// reality within a week. A pin holds until the owner clears it.
+// ---------------------------------------------------------------------------
+const setCapacityTool: ToolDefinition = {
+  schema: {
+    name: "set_capacity",
+    description:
+      "SUPER_ADMIN ONLY — PIN a department's daily production capacity in MINUTES per working day, overriding the measured figure ('裁剪一天能做 1200 分钟'). Capacity is normally derived from the last 7 working days of actual output and drifts with it, so a pin is the only way to hold a number: it wins outright until cleared. action=set needs dept + minutesPerDay; action=clear hands the department back to measurement; action=list shows every pin plus what the floor is actually producing, which is the honest way to answer 'is my number right?'. Use this for NUMBERS — teach_agent is for judgment and house rules, never arithmetic.",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["set", "clear", "list"] },
+        dept: {
+          type: "string",
+          enum: [
+            "FAB_CUT",
+            "FAB_SEW",
+            "WOOD_CUT",
+            "FOAM_CUTTING",
+            "FRAMING",
+            "FOAM",
+            "UPHOLSTERY",
+            "PACKING",
+            "WEBBING",
+          ],
+          description: "Department code (required for set / clear).",
+        },
+        minutesPerDay: {
+          type: "number",
+          description:
+            "For set: production MINUTES per working day for the whole department (e.g. 8 hours = 480). Not hours, not per-worker.",
+        },
+      },
+      required: ["action"],
+    },
+  },
+  execute: async (c, args) => {
+    const db = c.var.DB;
+    const action = String(args.action ?? "");
+    // Capacity drives every date the factory works to — owner-only, unlike the
+    // pause/run verbs staff may use.
+    if (!isSuperAdmin(c)) {
+      return { ok: false, error: "Only the owner can change production capacity." };
+    }
+
+    if (action === "list") {
+      const [pins, resolved] = await Promise.all([
+        loadCapacityPins(db),
+        resolveAdaptiveCapacity(db),
+      ]);
+      return {
+        ok: true,
+        pinned: pins,
+        departments: resolved.budgets.map((b) => ({
+          dept: b.dept,
+          effectiveMinPerDay: b.effectiveMinPerDay,
+          measuredMinPerDay: b.measuredMinPerDay,
+          source: b.reason,
+        })),
+        note: "effective = what the scheduler uses; measured = actual output over the last 7 working days. source 'pinned' means the owner is overriding measurement.",
+      };
+    }
+
+    const dept = String(args.dept ?? "").toUpperCase();
+    if (!dept) return { ok: false, error: "dept is required for set / clear." };
+
+    if (action === "clear") {
+      const r = await setCapacityPin(db, dept, null);
+      if (!r.ok) return { ok: false, error: r.error };
+      await emitAudit(c, {
+        resource: "planning",
+        resourceId: dept,
+        action: "capacity-unpin",
+        source: "admin",
+      });
+      return {
+        ok: true,
+        dept: r.dept,
+        note: `${r.dept} is back on measured capacity — it will follow actual output again from the next run.`,
+      };
+    }
+
+    if (action === "set") {
+      const minutes = Number(args.minutesPerDay);
+      const r = await setCapacityPin(db, dept, minutes);
+      if (!r.ok) return { ok: false, error: r.error };
+      await emitAudit(c, {
+        resource: "planning",
+        resourceId: dept,
+        action: "capacity-pin",
+        after: { minutesPerDay: r.minutesPerDay },
+        source: "admin",
+      });
+      return {
+        ok: true,
+        dept: r.dept,
+        minutesPerDay: r.minutesPerDay,
+        note: `${r.dept} is pinned at ${r.minutesPerDay} min/day and will no longer follow measured output. Tell the boss it stays until cleared, and mention the measured figure if it differs a lot.`,
+      };
+    }
+    return { ok: false, error: "action must be set | clear | list" };
+  },
+};
+
 // Autonomy note: batch auto-apply is intentionally NOT a direct chat verb —
 // it is governed by the per-agent gate (auto_on/auto_off above), so "apply
 // them now" = turn the gate on and the next run/heartbeat drains the queue.
@@ -6655,6 +6775,7 @@ export const TOOLS: ToolDefinition[] = [
   agentOverviewTool,
   agentControlTool,
   teachAgentTool,
+  setCapacityTool,
 ];
 
 const TOOL_BY_NAME = new Map<string, ToolDefinition>(

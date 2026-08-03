@@ -96,6 +96,24 @@ export interface SchedulerInput {
    * pre-Phase-2 call site) the run is byte-identical to the old behaviour.
    */
   collect?: (a: CutAssignment) => void;
+  /**
+   * OPTIONAL measured CNC budget in MINUTES per working day
+   * (planning-adaptive-capacity.ts, dept FAB_CUT).
+   *
+   * Supplying it switches cutting from the legacy CUT-SLOT model to minutes,
+   * which is the model the machine actually has. Two things only minutes can
+   * express:
+   *
+   *   - a batch of 1 set costs one set, not a whole slot. The slot model gave
+   *     every group a full day-slot regardless of size, so fragmented orders
+   *     burned the day's budget without filling it.
+   *   - a fabric change costs real re-rigging time (cnc.fabricChangeMin). The
+   *     slot model priced it at zero, so "group the same fabric together"
+   *     earned nothing in the schedule no matter how well it was batched.
+   *
+   * Omitted → the legacy slot behaviour, byte-identical.
+   */
+  dailyBudgetMin?: number;
 }
 
 export interface ScheduleSnapshot {
@@ -477,6 +495,91 @@ function scheduleLane(
   }
 }
 
+// ── Minutes model (CNC) ─────────────────────────────────────────────────────
+//
+// The machine cuts in minutes, not slots: a set costs its per-set time and a
+// fabric change costs re-rigging. Everything below prices a batch the way the
+// CNC actually experiences it, which is what finally makes same-fabric
+// batching pay for itself in the schedule.
+
+/** Per-set CNC minutes for a lane. */
+function setMinutesOf(cfg: CapacityConfig, lane: Lane): number {
+  if (lane === "BEDFRAME") return cfg.cnc.bedframeSetMin;
+  if (lane === "SOFA") return cfg.cnc.sofaSetMin;
+  return cfg.cnc.accessoryPieceMin;
+}
+
+/** Distinct fabrics in a group, in the order the items will be cut. */
+function groupFabrics(g: Group): string[] {
+  const seen: string[] = [];
+  for (const it of g.items) {
+    const f = it.fabric || "(none)";
+    if (seen[seen.length - 1] !== f && !seen.includes(f)) seen.push(f);
+  }
+  return seen.length ? seen : ["(none)"];
+}
+
+/**
+ * Minutes this group costs on a day whose last-cut fabric was `dayLastFabric`.
+ * Every distinct fabric in the batch pays one changeover, EXCEPT when the
+ * batch opens on the fabric already rigged — that is the saving batching is
+ * supposed to buy, and it only exists in the minutes model.
+ */
+function groupCostMin(
+  g: Group,
+  lane: Lane,
+  cfg: CapacityConfig,
+  dayLastFabric: string | null,
+): number {
+  const cut = g.sets * setMinutesOf(cfg, lane);
+  const fabrics = groupFabrics(g);
+  const changes = fabrics[0] === dayLastFabric ? fabrics.length - 1 : fabrics.length;
+  return cut + Math.max(0, changes) * cfg.cnc.fabricChangeMin;
+}
+
+interface MinuteDay {
+  used: number;
+  lastFabric: string | null;
+}
+
+/**
+ * Minute-budget scheduler. Mirrors scheduleLane's contract (floor, then the
+ * first day with room, `used` shared between lanes) but meters MINUTES.
+ *
+ * A group larger than a whole day's budget lands on the first day that is
+ * still empty rather than looping forever — the same escape hatch the chain
+ * departments use, and reachable only if setupCap is set absurdly high.
+ */
+function scheduleLaneMinutes(
+  groups: Group[],
+  cal: Calendar,
+  lane: Lane,
+  cfg: CapacityConfig,
+  budgetFn: (d: number) => number,
+  days: Map<number, MinuteDay>,
+): void {
+  for (const g of groups) {
+    let d = g.floor || cal.day1;
+    let guard = 0;
+    for (;;) {
+      guard++;
+      const day = days.get(d) ?? { used: 0, lastFabric: null };
+      const cost = groupCostMin(g, lane, cfg, day.lastFabric);
+      const budget = budgetFn(d);
+      if (day.used + cost <= budget || (day.used === 0 && cost > budget) || guard > 3650) {
+        day.used += cost;
+        day.lastFabric = groupFabrics(g)[groupFabrics(g).length - 1];
+        days.set(d, day);
+        g.days = [d];
+        g.start = d;
+        g.end = d;
+        break;
+      }
+      d = cal.stepWorkday(d);
+    }
+  }
+}
+
 // ── Output formatting helpers ───────────────────────────────────────────────
 
 const LANE_ORDER: Lane[] = ["BEDFRAME", "SOFA", "ACCESSORY"];
@@ -535,9 +638,41 @@ export function runCutting(input: SchedulerInput): CuttingRun {
   const bfCapFn = (d: number): number =>
     Math.min(cfg.laneCap.BEDFRAME, Math.max(1, poolCap(cal, cfg, d) - cfg.sofaMin));
 
+  // MINUTES model (owner 2026-08-03) — active only when the caller supplied a
+  // measured CNC budget. The sofa guarantee survives the switch: the old
+  // `sofaMin` cuts/day reserve becomes its minute equivalent, so bedframe can
+  // still never consume the whole machine.
+  const budgetMin = input.dailyBudgetMin;
+  const inMinutes = typeof budgetMin === "number" && Number.isFinite(budgetMin) && budgetMin > 0;
+  // The legacy reserve is a CUT COUNT, so converting it to minutes yields a
+  // FIXED figure that knows nothing about the measured budget. On a small
+  // machine day that fixed reserve can exceed the whole day and leave bedframe
+  // with nothing — a guarantee for sofa must never become a starvation of
+  // bedframe. Cap it at a share of the day so both lanes always have room.
+  const SOFA_RESERVE_MAX_SHARE = 0.3;
+  const sofaReserveMin = inMinutes
+    ? Math.min(
+        cfg.sofaMin * cfg.setupCap.SOFA * cfg.cnc.sofaSetMin,
+        Math.floor((budgetMin as number) * SOFA_RESERVE_MAX_SHARE),
+      )
+    : 0;
+  const minuteDays = new Map<number, MinuteDay>();
+
   const bfRows = input.cards.filter((r) => r.lane === "BEDFRAME");
   const bfGroups = buildGroups(bfRows, "BEDFRAME", cal, cfg);
-  scheduleLane(bfGroups, cal, bfCapFn, poolUsed);
+  if (inMinutes) {
+    // Bedframe may fill everything except sofa's reserved slice.
+    scheduleLaneMinutes(
+      bfGroups,
+      cal,
+      "BEDFRAME",
+      cfg,
+      () => Math.max(1, (budgetMin as number) - sofaReserveMin),
+      minuteDays,
+    );
+  } else {
+    scheduleLane(bfGroups, cal, bfCapFn, poolUsed);
+  }
   // Snapshot of bedframe-only cuts per day (sofa cap reads this).
   const bfUsed = new Map(poolUsed);
 
@@ -556,13 +691,27 @@ export function runCutting(input: SchedulerInput): CuttingRun {
     } else if (lane === "SOFA") {
       const rows = input.cards.filter((r) => r.lane === "SOFA");
       const gs = buildGroups(rows, "SOFA", cal, cfg);
-      scheduleLane(gs, cal, sofaCapFn, poolUsed); // shares pool
+      if (inMinutes) {
+        // Sofa gets the whole machine day minus whatever bedframe already took
+        // — its reserve is protected because bedframe was capped above it.
+        scheduleLaneMinutes(gs, cal, "SOFA", cfg, () => budgetMin as number, minuteDays);
+      } else {
+        scheduleLane(gs, cal, sofaCapFn, poolUsed); // shares pool
+      }
       laneGroups.SOFA = gs;
     } else {
       const rows = input.cards.filter((r) => r.lane === lane);
       const gs = buildGroups(rows, lane, cal, cfg);
-      const ownPool = new Map<number, number>();
-      scheduleLane(gs, cal, () => cfg.laneCap[lane], ownPool); // own capacity
+      if (inMinutes) {
+        // Accessory keeps its own pool in both models, so pillow work can
+        // never eat the bedframe/sofa machine day.
+        const accBudget =
+          cfg.laneCap.ACCESSORY * cfg.setupCap.ACCESSORY * cfg.cnc.accessoryPieceMin;
+        scheduleLaneMinutes(gs, cal, lane, cfg, () => accBudget, new Map<number, MinuteDay>());
+      } else {
+        const ownPool = new Map<number, number>();
+        scheduleLane(gs, cal, () => cfg.laneCap[lane], ownPool); // own capacity
+      }
       laneGroups[lane] = gs;
     }
     laneGroups[lane].forEach((g, i) => {

@@ -55,7 +55,7 @@ const OT_MAX_HOURS_PER_DAY = 2;
 /** Forward window (working days) the OT learner looks ahead. */
 const OT_WINDOW_WORKING_DAYS = 21;
 /** Rolling actual-throughput window (working days). */
-const ROLLING_WORKING_DAYS = 7;
+export const ROLLING_WORKING_DAYS = 7;
 /** Handoff drift (working days) that triggers a config proposal. */
 const HANDOFF_DRIFT_THRESHOLD = 1;
 /** Minimum (PO) samples before a handoff drift counts as "sustained". */
@@ -65,7 +65,7 @@ const HANDOFF_LOOKBACK_DAYS = 30;
 
 // ── Date helpers (SGT, YMD-string arithmetic — never toISOString on locals) ──
 
-function ymdInSgt(d: Date = new Date()): string {
+export function ymdInSgt(d: Date = new Date()): string {
   const shifted = new Date(d.getTime() + 8 * 60 * 60 * 1000);
   return shifted.toISOString().slice(0, 10);
 }
@@ -130,7 +130,7 @@ function workingDaysBetween(
 }
 
 /** The N-th working day walking BACK from (and excluding) fromYmd. */
-function workingDaysBack(
+export function workingDaysBack(
   fromYmd: string,
   n: number,
   holidays: Set<string>,
@@ -146,7 +146,7 @@ function workingDaysBack(
   return cur;
 }
 
-async function loadHolidaySet(db: DbLike): Promise<Set<string>> {
+export async function loadHolidaySet(db: DbLike): Promise<Set<string>> {
   const set = new Set<string>();
   try {
     const row = await db
@@ -706,7 +706,10 @@ interface LoadRawRow {
   customerDd?: string | null;
 }
 
-async function collectRollingCapacity(
+/** Exported for the read-only capacity audit (planning-capacity-audit.ts) so
+ *  the audit and the learning loop can never disagree on what "actual daily
+ *  throughput" means. */
+export async function collectRollingCapacity(
   db: DbLike,
   today: string,
   holidays: Set<string>,

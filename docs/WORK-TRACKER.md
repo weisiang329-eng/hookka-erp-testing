@@ -2752,3 +2752,65 @@ search covers 16 modules end-to-end; DB is fully indexed and connection-healthy;
 genuinely-heavy endpoint (dashboard) is cached. No open perf item with a measured problem
 behind it remains. Deferred by evidence: ledger SQL paging (not slow yet), connection
 config (not slow at all).
+
+---
+
+## 2026-08-03/04 — Production Agent: the scheduler rebuild
+
+Owner started from one observation: Capacity Loading showed the plan at 15-21% while the
+past 14 working days ran at 97-125%. Everything below came out of chasing that.
+
+### The diagnosis (and one correction)
+- Every per-department budget in `planning-capacity.ts` is a constant ported from the
+  2026-06-01 Python builders — i.e. from BEFORE the CNC changeover on 2026-07-11. The floor
+  got faster; the scheduler never found out. AGENTS-BLUEPRINT promised adaptive capacity
+  ("CNC 变快数字自动涨") and only the chart ever delivered it.
+- 🔴 **I got a number wrong mid-investigation and corrected it in place**: I first reported
+  Fabric Cutting's engine ceiling as ~1/7 of actual. That compared the BEDFRAME-lane-only
+  ceiling against all-lane actual. All lanes together it is 564 min/day vs 951 actual — 59%,
+  not 1/7. The bedframe lane specifically IS starved (2 cuts/day from day 8 on) — that part
+  stood. Building the read-only audit FIRST is what caught it.
+
+### Shipped
+- **Measured capacity is live.** Trimmed mean of per-day output over 15 working days
+  (owner's call — 60 was too long, "工厂有时候我添加人、减少人"). Zero-output days dropped,
+  Sundays/holidays excluded, top+bottom decile discarded. Guard rails: cold-start fallback,
+  ±20%/day drift limit, 3× first-run ceiling.
+- **All 9 departments now scheduled in minutes.** FAB_CUT rewritten from cut-SLOTS to CNC
+  minutes with fabric changeover priced in (same-fabric batching finally earns real time).
+  WOOD_CUT sets→minutes. PACKING had NO budget at all — it inherited the upholstery day, so
+  the plan could not represent a packing bottleneck. WEBBING still rides framing by design.
+- **FOAM_CUTTING was invisible to planning.** Added to the departments table weeks ago, but
+  absent from the hardcoded `DEPT_CODE_TO_CHAIN`, so `if (!chainDept) continue;` dropped every
+  card silently. Now a SOURCE stage pulled back `foamCutLeadDays` from Foam Bonding.
+- **Slack priority replaces raw customer-DD ordering.** The old key broke ties between
+  same-due-date orders on the SO reference string — i.e. alphabetically.
+- **Backward pass + late-risk report** (`planning-late-risk.ts`, brief section 9): names the
+  promises the current plan cannot meet, while there are still days to spread OT over.
+- **Planned OT in the schedule** (`placeUnitsWithOt`): pack once at normal capacity; only if
+  something misses its deadline is the shortfall spread FLAT across the horizon at ≤2h/day and
+  the department re-packed. Discarded if it rescues nothing. No day can exceed cap+2h.
+- **SENT-LOCK closed in four more places.** Lead-time recalc, SO-date re-derivation, rollback,
+  and the manual PATCH could all still re-date work already handed to the floor.
+- **Committed work is PINNED** — frozen cards now consume capacity on the day they will
+  really be worked, so the next 3 days are no longer handed out twice.
+- **Proposal approve stopped silently truncating** at 500 ids ("select all" reported success
+  while leaving a backlog; the queue once hit 1,715).
+- `set_capacity` chat tool (owner-only, bounded, audited) — the safe path for a capacity
+  NUMBER said in chat, as opposed to `teach_agent` free text.
+- Order-footprint audit before deleting any sales order.
+- BOM editor WIP tab → two-pane; deleted 907 lines of stale prose panels.
+
+### Deliberately NOT done
+- **Oversize splitting** from `planning-packer.ts` — it contradicts this engine's explicit
+  rule "a whole SO is cut the same day, never split". OT raises the day's ceiling instead.
+- **Multi-PO on PI/GRN.** The ADD WOOD invoice carries `2607-003/2607-020` in one field and
+  the matcher's `endsWith` would silently link only the LAST one. Needs a schema change on
+  both PI and GRN plus an allocation rule the owner has to define.
+- **Description-keyed supplier bindings.** That supplier's invoice has no product-code column
+  at all, so the SKU-keyed binding path can never fire — Internal Code cannot auto-resolve for
+  them until binding can key on description.
+
+### Verification
+`typecheck:app` clean · lint clean on every touched file · **2620 tests / 0 fail**
+(~100 new). NOT yet run against prod data — the numbers depend on real output.

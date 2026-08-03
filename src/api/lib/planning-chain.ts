@@ -28,6 +28,13 @@
 // ===========================================================================
 import type { CapacityConfig, ChainConfig, Lane } from "./planning-capacity";
 import {
+  deptDeadlines,
+  durationDays,
+  UNDATED_SLACK,
+  type ChainDeptId,
+  type DeadlineLane,
+} from "./planning-deadlines";
+import {
   Calendar,
   DOW,
   FAR_DAY,
@@ -51,6 +58,7 @@ import {
 export type ChainDept =
   | "FAB_SEW"
   | "WOOD_CUT"
+  | "FOAM_CUTTING"
   | "FRAMING"
   | "WEBBING"
   | "FOAM"
@@ -90,6 +98,20 @@ export interface ChainCard {
    */
   wipType: string;
   /** True when this line's fabric is already cut (no cut floor needed). */
+  /**
+   * A FROZEN card's real working day, YYYY-MM-DD, or null when the card is
+   * free to be scheduled.
+   *
+   * schedule-proposals.ts refuses to propose a new date for work already SENT
+   * to the floor (`distributedAt`) or due within 3 days — those dates are
+   * committed. The engine, however, used to re-plan those cards anyway and
+   * charge their minutes to whatever day IT picked. The work then happened on
+   * the frozen day while the engine believed that day was free, so the next
+   * three days were quietly over-committed — precisely the window where an
+   * over-commitment cannot be recovered. A pinned card consumes its capacity
+   * on the day it will really be worked.
+   */
+  pinnedDue: string | null;
   cutDone: boolean;
   /** True when this line has no fabric-cut step at all. */
   noCutStep: boolean;
@@ -129,6 +151,16 @@ export interface ChainInput {
    * (every pre-Phase-2 call site) the run is byte-identical.
    */
   collect?: (a: ChainAssignment) => void;
+  /**
+   * OPTIONAL measured daily budget per department, in MINUTES
+   * (planning-adaptive-capacity.ts). computeChain is pure, so the caller
+   * resolves this from the database and passes it in.
+   *
+   * A department present here is scheduled against what the floor has actually
+   * been producing; a department absent falls back to its hardcoded constant in
+   * `config`. Omitting the field entirely reproduces the legacy run exactly.
+   */
+  dailyBudgetByDept?: Record<string, number>;
 }
 
 export interface ChainOutput {
@@ -172,6 +204,261 @@ function cmpKey(a: (number | string)[], b: (number | string)[]): number {
     if (a[i] > b[i]) return 1;
   }
   return 0;
+}
+
+// ── Measured daily budgets ──────────────────────────────────────────────────
+//
+// A department's minute budget comes from planning-adaptive-capacity.ts when
+// the caller supplied one, and from the hardcoded constant otherwise. The
+// adaptive figure is ONE number for the whole department, but sewing, framing
+// and upholstery hold SEPARATE per-lane budgets so bedframe volume can never
+// starve sofa. Splitting the measured total in the same proportion as the
+// configured lane caps keeps that protection intact while scaling the total to
+// what the floor actually does.
+//
+// A department with no measured value, or a configured split that sums to
+// zero, falls straight back to its constant — never to zero.
+function laneBudget(
+  budgets: Record<string, number> | undefined,
+  dept: string,
+  configuredForLane: number,
+  configuredTotal: number,
+): number {
+  const measured = budgets?.[dept];
+  if (measured === undefined || !Number.isFinite(measured) || measured <= 0) {
+    return configuredForLane;
+  }
+  if (configuredTotal <= 0) return configuredForLane;
+  return Math.max(1, Math.round(measured * (configuredForLane / configuredTotal)));
+}
+
+/** Whole-department budget (no lane split), falling back to the constant. */
+function deptBudget(
+  budgets: Record<string, number> | undefined,
+  dept: string,
+  configured: number,
+): number {
+  const measured = budgets?.[dept];
+  if (measured === undefined || !Number.isFinite(measured) || measured <= 0) return configured;
+  return Math.max(1, Math.round(measured));
+}
+
+// ── Slack priority ──────────────────────────────────────────────────────────
+//
+// Departments used to queue on raw customer delivery date, which cannot tell
+// an order with six departments left from one that only needs packing when
+// both are due the same day — it broke the tie on the SO reference string.
+//
+// SLACK is the working days of room left once the backward pass says when this
+// department must be finished. Smaller is more urgent, negative means the
+// promise is already arithmetically impossible, and it is self-correcting: an
+// order that slips loses slack and climbs the queue with nobody expediting it.
+//
+// Undated work sorts behind every dated order (UNDATED_SLACK) — it has made no
+// promise, so it may never displace one.
+function slackFor(
+  cal: Calendar,
+  chain: ChainConfig,
+  dept: ChainDeptId,
+  lane: ChainLane | Lane,
+  cdd: number,
+  floor: number,
+  minutes: number,
+  dailyBudgetMin: number,
+): number {
+  if (cdd === FAR_DAY) return UNDATED_SLACK;
+  const deadline = deptDeadlines({
+    customerDd: cdd,
+    lane: (lane === "SOFA" ? "SOFA" : lane === "BEDFRAME" ? "BEDFRAME" : "ACCESSORY") as DeadlineLane,
+    chain,
+    backWorkday: (day, n) => cal.backWorkday(day, n),
+  })[dept];
+  if (deadline === null) return UNDATED_SLACK;
+  return deadline - floor - durationDays(minutes, dailyBudgetMin) + 1;
+}
+
+/**
+ * The committed day for a group of cards, or null when none is frozen.
+ *
+ * A unit whose work is already promised to a day must be PLACED there and must
+ * consume that day's capacity, rather than being re-planned somewhere the
+ * engine finds convenient. Mixed units take the EARLIEST pinned day: the unit
+ * moves together, and the frozen card is the one whose date cannot slip.
+ */
+function pinnedDayOf(cards: ChainCard[], cal: Calendar): number | null {
+  let best: number | null = null;
+  for (const c of cards) {
+    if (!c.pinnedDue) continue;
+    const d = parseYmd(c.pinnedDue);
+    if (d === null) continue;
+    const clamped = Math.max(d, cal.day1);
+    if (best === null || clamped < best) best = clamped;
+  }
+  return best;
+}
+
+/**
+ * The day a unit should occupy: THE one piece of placement logic, shared by
+ * every department instead of hand-copied into each.
+ *
+ * Two rules live here and both are easy to get subtly wrong in a copy:
+ *
+ *   • a PINNED unit owns its day outright — committed work is not re-planned,
+ *     and it charges its capacity where it will really be worked;
+ *   • an EMPTY day accepts a unit however oversized it is. Without that escape
+ *     the walk never terminates for any unit bigger than a day's budget. It is
+ *     deliberate, not an oversight: it is also why capacity is a soft ceiling
+ *     rather than a hard one.
+ *
+ * Does NOT charge the load — callers do, because sewing distributes a group's
+ * cards across days after choosing the start.
+ */
+function firstDayWithRoom(
+  cal: Calendar,
+  load: Map<number, number>,
+  cost: number,
+  cap: number,
+  floor: number,
+  pin: number | null,
+): number {
+  if (pin !== null) return pin;
+  let d = Math.max(floor, cal.day1);
+  let guard = 0;
+  while ((load.get(d) ?? 0) + cost > cap && (load.get(d) ?? 0) !== 0 && guard < 3650) {
+    d = cal.stepWorkday(d);
+    guard++;
+  }
+  return d;
+}
+
+// ── Planned overtime ────────────────────────────────────────────────────────
+//
+// Owner red line (2026-08-03): "不要突然有一天直接开 10 个小时的 OT，一个工作
+// 人员怎么能一天连续做 20 个小时呢？所以你一定要提前把 OT 分摊开."
+//
+// So overtime is never decided day-by-day as the packer walks. Each department
+// packs ONCE at normal capacity; only if something then lands past its promise
+// is a shortfall computed for the WHOLE horizon and spread FLAT across every
+// working day up to the last affected deadline, capped per day. The department
+// is then re-packed against those raised budgets. A single day can therefore
+// never be handed a spike, and the extra hours start immediately rather than
+// piling up in front of the deadline.
+//
+// Matches OT_MAX_HOURS_PER_DAY in agent-learning.ts, which the morning brief
+// already reports against — the schedule and the brief must not disagree about
+// what "humane OT" means.
+const OT_MAX_MIN_PER_DAY = 120;
+
+/** Latest day this unit may run and still keep its promise (backward pass). */
+function deadlineFor(
+  cal: Calendar,
+  chain: ChainConfig,
+  dept: ChainDeptId,
+  lane: ChainLane | Lane,
+  cdd: number,
+): number | null {
+  if (cdd === FAR_DAY) return null;
+  return deptDeadlines({
+    customerDd: cdd,
+    lane: (lane === "SOFA" ? "SOFA" : lane === "BEDFRAME" ? "BEDFRAME" : "ACCESSORY") as DeadlineLane,
+    chain,
+    backWorkday: (day, n) => cal.backWorkday(day, n),
+  })[dept];
+}
+
+/**
+ * Flat OT minutes per day needed to pull `shortfallMin` of work back inside
+ * the deadlines, spread over `spreadDays` working days and capped.
+ *
+ * Deliberately flat and horizon-wide: the point is that no day is special.
+ */
+function otPerDay(shortfallMin: number, spreadDays: number): number {
+  if (shortfallMin <= 0 || spreadDays <= 0) return 0;
+  return Math.min(OT_MAX_MIN_PER_DAY, Math.ceil(shortfallMin / spreadDays));
+}
+
+interface OtPlaceable {
+  cost: number;
+  floor: number;
+  pin: number | null;
+  deadline: number | null;
+}
+
+/**
+ * Place every unit, adding humane overtime ONLY if the normal-capacity pass
+ * would miss a promise.
+ *
+ * Units are NOT split across days — "a whole SO is cut the same day, never
+ * split" is an explicit grouping rule of this engine, so the packer's
+ * oversize-splitting is deliberately not adopted here.
+ *
+ * Returns the OT actually planned per day so the caller can surface it.
+ */
+function placeUnitsWithOt<T>(
+  units: T[],
+  cal: Calendar,
+  cap: number,
+  load: Map<number, number>,
+  read: (u: T) => OtPlaceable,
+  assign: (u: T, day: number) => void,
+): Map<number, number> {
+  const run = (budget: (day: number) => number): { late: T[]; lastDeadline: number } => {
+    load.clear();
+    const late: T[] = [];
+    let lastDeadline = cal.day1;
+    for (const u of units) {
+      const p = read(u);
+      let d = p.pin ?? Math.max(p.floor, cal.day1);
+      let guard = 0;
+      while (
+        p.pin === null &&
+        (load.get(d) ?? 0) + p.cost > budget(d) &&
+        (load.get(d) ?? 0) !== 0 &&
+        guard < 3650
+      ) {
+        d = cal.stepWorkday(d);
+        guard++;
+      }
+      assign(u, d);
+      load.set(d, (load.get(d) ?? 0) + p.cost);
+      if (p.deadline !== null && d > p.deadline) {
+        late.push(u);
+        if (p.deadline > lastDeadline) lastDeadline = p.deadline;
+      }
+    }
+    return { late, lastDeadline };
+  };
+
+  const first = run(() => cap);
+  if (first.late.length === 0) return new Map();
+
+  const shortfall = first.late.reduce((s, u) => s + read(u).cost, 0);
+  const spreadDays = Math.max(1, cal.workdayIndex(first.lastDeadline));
+  const perDay = otPerDay(shortfall, spreadDays);
+  if (perDay <= 0) return new Map();
+
+  const second = run((day) => (cal.workdayIndex(day) <= spreadDays ? cap + perDay : cap));
+  // Keep the OT plan only when it actually rescued something.
+  if (second.late.length >= first.late.length) {
+    run(() => cap);
+    return new Map();
+  }
+
+  const ot = new Map<number, number>();
+  for (const [day, used] of load) {
+    const over = used - cap;
+    if (over > 0) ot.set(day, Math.min(over, perDay));
+  }
+  return ot;
+}
+
+/** The measured value for a department, or null when there isn't a usable one. */
+function measuredMinutes(
+  budgets: Record<string, number> | undefined,
+  dept: string,
+): number | null {
+  const m = budgets?.[dept];
+  return m !== undefined && Number.isFinite(m) && m > 0 ? m : null;
 }
 
 const SIZE_SUFFIX = /-\((SS|SK|K|Q|S)\)\s*$/;
@@ -218,6 +505,7 @@ function runSewing(
   cal: Calendar,
   chain: ChainConfig,
   cutLastDay: Map<string, number>,
+  budgets?: Record<string, number>,
 ): SewResult {
   const byLane: Record<Lane, SewCard[]> = { BEDFRAME: [], SOFA: [], ACCESSORY: [] };
   for (const c of chainCards) {
@@ -254,7 +542,15 @@ function runSewing(
     SOFA: new Map(),
     ACCESSORY: new Map(),
   };
-  const capOf = (lane: Lane): number => chain.sewCapMin[lane as keyof ChainConfig["sewCapMin"]] ?? 0;
+  const sewConfiguredTotal =
+    chain.sewCapMin.BEDFRAME + chain.sewCapMin.SOFA + chain.sewCapMin.ACCESSORY;
+  const capOf = (lane: Lane): number =>
+    laneBudget(
+      budgets,
+      "FAB_SEW",
+      chain.sewCapMin[lane as keyof ChainConfig["sewCapMin"]] ?? 0,
+      sewConfiguredTotal,
+    );
 
   for (const lane of SEW_LANE_ORDER) {
     const groups = new Map<string, SewCard[]>();
@@ -275,23 +571,29 @@ function runSewing(
         end: cal.day1,
       });
     }
-    glist.sort((a, b) => cmpKey([a.cdd, a.floor, -a.mins], [b.cdd, b.floor, -b.mins]));
-
     const load = loadByLane[lane];
     const cap = capOf(lane);
+    const sl = (g: SewGroup): number =>
+      slackFor(cal, chain, "FAB_SEW", lane, g.cdd, g.floor, g.mins, cap);
+    // COMMITTED groups are placed first so they claim their day BEFORE free
+    // work competes for it — otherwise free work takes the slot and the pinned
+    // group lands on top of it, which is the double-booking this fixes.
+    // Ties then break on the bigger job first (-mins): with equal urgency the
+    // harder group should claim the day before small work fragments it.
+    const pinRank = (g: SewGroup): number =>
+      pinnedDayOf(g.cards.map((c) => c.card), cal) === null ? 1 : 0;
+    glist.sort((a, b) =>
+      cmpKey([pinRank(a), sl(a), a.cdd, -a.mins], [pinRank(b), sl(b), b.cdd, -b.mins]),
+    );
     for (const g of glist) {
-      let d = Math.max(g.floor, cal.day1);
-      for (;;) {
-        const used = load.get(d) ?? 0;
-        if (used + g.mins <= cap) break;
-        if (used === 0 && g.mins > cap) break;
-        d = cal.stepWorkday(d);
-      }
+      const pin = pinnedDayOf(g.cards.map((c) => c.card), cal);
+      const d = firstDayWithRoom(cal, load, g.mins, cap, g.floor, pin);
       g.start = d;
       let cur = d;
       let room = cap - (load.get(cur) ?? 0);
       for (const c of [...g.cards].sort((x, y) => y.sewMins - x.sewMins)) {
-        while (room < c.sewMins && (load.get(cur) ?? 0) > 0) {
+        // A committed group never spills onto a later day — its date is fixed.
+        while (pin === null && room < c.sewMins && (load.get(cur) ?? 0) > 0) {
           cur = cal.stepWorkday(cur);
           room = cap - (load.get(cur) ?? 0);
         }
@@ -333,8 +635,19 @@ function renderSewing(
   chain: ChainConfig,
   generatedAt: string,
   cutLastDay: Map<string, number>,
+  budgets?: Record<string, number>,
 ): ScheduleSnapshot {
-  const capOf = (lane: Lane): number => chain.sewCapMin[lane as keyof ChainConfig["sewCapMin"]] ?? 0;
+  // MUST match the budget runSewing packed against, or the sheet's
+  // load-vs-capacity column reports against a capacity nobody scheduled to.
+  const sewConfiguredTotal =
+    chain.sewCapMin.BEDFRAME + chain.sewCapMin.SOFA + chain.sewCapMin.ACCESSORY;
+  const capOf = (lane: Lane): number =>
+    laneBudget(
+      budgets,
+      "FAB_SEW",
+      chain.sewCapMin[lane as keyof ChainConfig["sewCapMin"]] ?? 0,
+      sewConfiguredTotal,
+    );
 
   // Upstream (Fabric Cutting) day for one sewing line, matched on its PO/Line
   // key (soPo). Display only — does not feed any scheduling math.
@@ -531,6 +844,8 @@ interface WoodUnit {
   lane: ChainLane;
   cards: ChainCard[];
   sets: number;
+  /** Work content in MINUTES — used when a measured budget is available. */
+  wmin: number;
   cdd: number;
   models: string[];
   sizes: string[];
@@ -544,6 +859,10 @@ interface WoodResult {
   loadByLane: Record<ChainLane, Map<number, number>>;
   /** (soId, lane) → wood-cut day-number. */
   woodDay: Map<string, number>;
+  /** True when this run packed by minutes rather than the legacy sets/day. */
+  inMinutes: boolean;
+  /** The budgets this run packed against — the renderer must reuse them. */
+  budgets?: Record<string, number>;
 }
 
 /** A unit's set count: count base cards if present, else distinct lines. */
@@ -559,6 +878,7 @@ function runWood(
   cal: Calendar,
   chain: ChainConfig,
   sewEnd: Map<string, number>,
+  budgets?: Record<string, number>,
 ): WoodResult {
   const byUnit = new Map<string, ChainCard[]>();
   for (const c of chainCards) {
@@ -586,6 +906,7 @@ function runWood(
       lane,
       cards,
       sets: unitSets(cards, lane),
+      wmin: cards.reduce((a, c) => a + c.mins, 0),
       cdd: cdds.length ? (parseYmd(cdds[0]) ?? FAR_DAY) : FAR_DAY,
       models,
       sizes,
@@ -601,22 +922,46 @@ function runWood(
     SOFA: new Map(),
   };
   const woodDay = new Map<string, number>();
+  // Wood cutting is the one downstream department budgeted in SETS rather than
+  // minutes. With a measured budget available it switches to minutes like every
+  // other department; without one it keeps the legacy sets/day behaviour so an
+  // un-measured install is unchanged. `woodInMinutes` also drives the By Day
+  // sheet's units, so the displayed capacity always matches what was packed.
+  const woodConfiguredSets = chain.woodCapSets.BEDFRAME + chain.woodCapSets.SOFA;
+  const woodInMinutes = measuredMinutes(budgets, "WOOD_CUT") !== null;
   for (const lane of CHAIN_LANES) {
     const us = byLane[lane];
-    us.sort((a, b) => cmpKey([a.cdd, a.floor, a.modelKey, a.so], [b.cdd, b.floor, b.modelKey, b.so]));
-    const cap = chain.woodCapSets[lane];
+    const cap = woodInMinutes
+      ? laneBudget(budgets, "WOOD_CUT", chain.woodCapSets[lane], woodConfiguredSets)
+      : chain.woodCapSets[lane];
+    // Slack needs the day budget to know how long a unit occupies, so the cap
+    // is resolved before the sort, not after it.
+    const sl = (u: WoodUnit): number =>
+      slackFor(cal, chain, "WOOD_CUT", lane, u.cdd, u.floor, u.wmin, cap);
+    const pr = (u: WoodUnit): number => (pinnedDayOf(u.cards, cal) === null ? 1 : 0);
+    us.sort((a, b) =>
+      cmpKey([pr(a), sl(a), a.cdd, a.modelKey, a.so], [pr(b), sl(b), b.cdd, b.modelKey, b.so]),
+    );
     const load = loadByLane[lane];
-    for (const u of us) {
-      let d = Math.max(u.floor, cal.day1);
-      while ((load.get(d) ?? 0) + u.sets > cap && (load.get(d) ?? 0) !== 0) {
-        d = cal.stepWorkday(d);
-      }
-      u.day = d;
-      load.set(d, (load.get(d) ?? 0) + u.sets);
-      woodDay.set(`${u.so}|${u.lane}`, d);
-    }
+    // OT applies only to a MINUTES budget — a sets/day cap has no hours to add.
+    placeUnitsWithOt(
+      us,
+      cal,
+      cap,
+      load,
+      (u) => ({
+        cost: woodInMinutes ? u.wmin : u.sets,
+        floor: u.floor,
+        pin: pinnedDayOf(u.cards, cal),
+        deadline: woodInMinutes ? deadlineFor(cal, chain, "WOOD_CUT", lane, u.cdd) : null,
+      }),
+      (u, d) => {
+        u.day = d;
+      },
+    );
+    for (const u of us) woodDay.set(`${u.so}|${u.lane}`, u.day);
   }
-  return { byLane, loadByLane, woodDay };
+  return { byLane, loadByLane, woodDay, inMinutes: woodInMinutes, budgets };
 }
 
 function renderWood(
@@ -686,7 +1031,22 @@ function renderWood(
     });
   }
 
-  const byDayHeaders: Cell[] = ["Date", "Day", "Lane", "SOs that day", "SOs", "Sets", "Cap"];
+  // Headers name the unit actually packed against, so the Load / Cap pair can
+  // never be read in the wrong unit.
+  const woodConfiguredSets = chain.woodCapSets.BEDFRAME + chain.woodCapSets.SOFA;
+  const woodDisplayCap = (lane: ChainLane): number =>
+    wood.inMinutes
+      ? laneBudget(wood.budgets, "WOOD_CUT", chain.woodCapSets[lane], woodConfiguredSets)
+      : chain.woodCapSets[lane];
+  const byDayHeaders: Cell[] = [
+    "Date",
+    "Day",
+    "Lane",
+    "SOs that day",
+    "SOs",
+    wood.inMinutes ? "Load min" : "Sets",
+    wood.inMinutes ? "Cap min" : "Cap",
+  ];
   const byDayRows: Cell[][] = [byDayHeaders];
   const perday: Record<ChainLane, Map<number, WoodUnit[]>> = { BEDFRAME: new Map(), SOFA: new Map() };
   for (const lane of CHAIN_LANES) {
@@ -709,8 +1069,10 @@ function renderWood(
         LANE_LABEL[lane],
         txt,
         us.length,
-        us.reduce((a, u) => a + u.sets, 0),
-        chain.woodCapSets[lane],
+        wood.inMinutes
+          ? us.reduce((a, u) => a + u.wmin, 0)
+          : us.reduce((a, u) => a + u.sets, 0),
+        woodDisplayCap(lane),
       ]);
     }
   }
@@ -725,8 +1087,10 @@ function renderWood(
     `  Floor = (that SO's fabric-sew done day) + ${chain.woodHandoffDays} working days (1 clear buffer day).`,
     "  Orders whose sewing is already done / has no sew step start from day 1.",
     "",
-    "[Capacity in sets/day per lane]",
-    `  Bedframe ${chain.woodCapSets.BEDFRAME} sets/day, Sofa ${chain.woodCapSets.SOFA} sets/day. Two separate lanes.`,
+    wood.inMinutes ? "[Capacity in minutes/day per lane — measured]" : "[Capacity in sets/day per lane]",
+    wood.inMinutes
+      ? `  Bedframe ${woodDisplayCap("BEDFRAME")} min/day, Sofa ${woodDisplayCap("SOFA")} min/day — derived from the last 7 working days of actual output. Two separate lanes.`
+      : `  Bedframe ${chain.woodCapSets.BEDFRAME} sets/day, Sofa ${chain.woodCapSets.SOFA} sets/day. Two separate lanes.`,
     "",
     "[Grouping]",
     "  A whole SO is cut the same day, never split (sofa carries base + arms + back cushion together).",
@@ -815,6 +1179,8 @@ interface PackUnit {
   so: string;
   lane: ChainLane;
   cards: ChainCard[];
+  /** Packing work content in MINUTES. */
+  pmin: number;
   cdd: number;
   models: string[];
   modelKey: string;
@@ -822,14 +1188,42 @@ interface PackUnit {
   uphDay: number | null;
 }
 
+/** One SO's foam-cutting work — a source stage pulled back from bonding. */
+interface FoamCutUnit {
+  so: string;
+  lane: ChainLane;
+  cards: ChainCard[];
+  fcMin: number;
+  cdd: number;
+  models: string[];
+  modelKey: string;
+  /** The day this SO's foam is needed (bonding, else framing). */
+  demandDay: number | null;
+  day: number;
+}
+
 interface FrameResult {
   units: FrameUnit[];
   loadByLane: Record<ChainLane, Map<number, number>>;
   foamUnits: FoamUnit[];
   foamLoad: Map<number, number>;
+  foamCutUnits: FoamCutUnit[];
+  foamCutLoad: Map<number, number>;
+  foamCutCap: number;
   uphUnits: UphUnit[];
   uphLoadByLane: Record<ChainLane, Map<number, number>>;
   packUnits: PackUnit[];
+  /**
+   * The minute budgets this run actually packed against — measured where a
+   * budget was supplied, the configured constant otherwise. The renderers MUST
+   * read these rather than re-deriving from `chain`, or every "load vs cap"
+   * column reports against a capacity nobody scheduled to.
+   */
+  caps: {
+    framing: Record<ChainLane, number>;
+    foam: number;
+    upholstery: Record<ChainLane, number>;
+  };
 }
 
 /** A framing unit's base-set count. */
@@ -845,12 +1239,14 @@ function runFraming(
     framing: ChainCard[];
     webbing: ChainCard[];
     foam: ChainCard[];
+    foamCutting: ChainCard[];
     upholstery: ChainCard[];
     packing: ChainCard[];
   },
   cal: Calendar,
   chain: ChainConfig,
   woodDay: Map<string, number>,
+  budgets?: Record<string, number>,
 ): FrameResult {
   // ── Framing: group into SO-units, schedule per-lane hour budget ────────────
   const webBySo = new Map<string, ChainCard[]>();
@@ -915,15 +1311,34 @@ function runFraming(
   const loadByLane: Record<ChainLane, Map<number, number>> = { BEDFRAME: new Map(), SOFA: new Map() };
   for (const lane of CHAIN_LANES) {
     const us = units.filter((u) => u.lane === lane);
-    us.sort((a, b) => cmpKey([a.cdd, a.floor, a.modelKey, a.so], [b.cdd, b.floor, b.modelKey, b.so]));
-    const cap = chain.frameCapMin[lane];
+    const cap = laneBudget(
+      budgets,
+      "FRAMING",
+      chain.frameCapMin[lane],
+      chain.frameCapMin.BEDFRAME + chain.frameCapMin.SOFA,
+    );
+    const sl = (u: FrameUnit): number =>
+      slackFor(cal, chain, "FRAMING", lane, u.cdd, u.floor, u.fmin, cap);
+    const pr = (u: FrameUnit): number => (pinnedDayOf(u.cards, cal) === null ? 1 : 0);
+    us.sort((a, b) =>
+      cmpKey([pr(a), sl(a), a.cdd, a.modelKey, a.so], [pr(b), sl(b), b.cdd, b.modelKey, b.so]),
+    );
     const load = loadByLane[lane];
-    for (const u of us) {
-      let d = Math.max(u.floor, cal.day1);
-      while ((load.get(d) ?? 0) + u.fmin > cap && (load.get(d) ?? 0) !== 0) d = cal.stepWorkday(d);
-      u.day = d;
-      load.set(d, (load.get(d) ?? 0) + u.fmin);
-    }
+    placeUnitsWithOt(
+      us,
+      cal,
+      cap,
+      load,
+      (u) => ({
+        cost: u.fmin,
+        floor: u.floor,
+        pin: pinnedDayOf(u.cards, cal),
+        deadline: deadlineFor(cal, chain, "FRAMING", lane, u.cdd),
+      }),
+      (u, d) => {
+        u.day = d;
+      },
+    );
   }
   const frameDayMap = new Map<string, number>();
   for (const u of units) frameDayMap.set(`${u.so}|${u.lane}`, u.day);
@@ -959,15 +1374,30 @@ function runFraming(
     });
   }
   const foamLoad = new Map<number, number>();
-  foamUnits.sort((a, b) => cmpKey([a.cdd, a.floor, a.modelKey, a.so], [b.cdd, b.floor, b.modelKey, b.so]));
-  for (const u of foamUnits) {
-    let d = Math.max(u.floor, cal.day1);
-    while ((foamLoad.get(d) ?? 0) + u.baMin > chain.foamCapMin && (foamLoad.get(d) ?? 0) !== 0) {
-      d = cal.stepWorkday(d);
-    }
-    u.foamDay = d;
-    foamLoad.set(d, (foamLoad.get(d) ?? 0) + u.baMin);
-  }
+  const foamCap = deptBudget(budgets, "FOAM", chain.foamCapMin);
+  const foamSlack = (u: FoamUnit): number =>
+    slackFor(cal, chain, "FOAM", "SOFA", u.cdd, u.floor, u.baMin, foamCap);
+  foamUnits.sort((a, b) =>
+    cmpKey(
+      [foamSlack(a), a.cdd, a.modelKey, a.so],
+      [foamSlack(b), b.cdd, b.modelKey, b.so],
+    ),
+  );
+  placeUnitsWithOt(
+    foamUnits,
+    cal,
+    foamCap,
+    foamLoad,
+    (u) => ({
+      cost: u.baMin,
+      floor: u.floor,
+      pin: pinnedDayOf([...u.base, ...u.arm, ...u.cush], cal),
+      deadline: deadlineFor(cal, chain, "FOAM", "SOFA", u.cdd),
+    }),
+    (u, d) => {
+      u.foamDay = d;
+    },
+  );
   const foamDayMap = new Map<string, number>();
   for (const u of foamUnits) foamDayMap.set(u.so, u.foamDay);
 
@@ -1010,15 +1440,34 @@ function runFraming(
   };
   for (const lane of CHAIN_LANES) {
     const us = uphUnits.filter((u) => u.lane === lane);
-    us.sort((a, b) => cmpKey([a.cdd, a.floor, a.modelKey, a.so], [b.cdd, b.floor, b.modelKey, b.so]));
-    const cap = chain.uphCapMin[lane];
+    const cap = laneBudget(
+      budgets,
+      "UPHOLSTERY",
+      chain.uphCapMin[lane],
+      chain.uphCapMin.BEDFRAME + chain.uphCapMin.SOFA,
+    );
+    const sl = (u: UphUnit): number =>
+      slackFor(cal, chain, "UPHOLSTERY", lane, u.cdd, u.floor, u.umin, cap);
+    const pr = (u: UphUnit): number => (pinnedDayOf(u.cards, cal) === null ? 1 : 0);
+    us.sort((a, b) =>
+      cmpKey([pr(a), sl(a), a.cdd, a.modelKey, a.so], [pr(b), sl(b), b.cdd, b.modelKey, b.so]),
+    );
     const load = uphLoadByLane[lane];
-    for (const u of us) {
-      let d = Math.max(u.floor, cal.day1);
-      while ((load.get(d) ?? 0) + u.umin > cap && (load.get(d) ?? 0) !== 0) d = cal.stepWorkday(d);
-      u.uphDay = d;
-      load.set(d, (load.get(d) ?? 0) + u.umin);
-    }
+    placeUnitsWithOt(
+      us,
+      cal,
+      cap,
+      load,
+      (u) => ({
+        cost: u.umin,
+        floor: u.floor,
+        pin: pinnedDayOf(u.cards, cal),
+        deadline: deadlineFor(cal, chain, "UPHOLSTERY", lane, u.cdd),
+      }),
+      (u, d) => {
+        u.uphDay = d;
+      },
+    );
   }
   const uphDayMap = new Map<string, number>();
   for (const u of uphUnits) uphDayMap.set(`${u.so}|${u.lane}`, u.uphDay);
@@ -1046,6 +1495,7 @@ function runFraming(
       so,
       lane,
       cards,
+      pmin: cards.reduce((a, c) => a + c.mins, 0),
       cdd: cdds.length ? (parseYmd(cdds[0]) ?? FAR_DAY) : FAR_DAY,
       models,
       modelKey: models.length ? models[0] : "",
@@ -1054,7 +1504,128 @@ function runFraming(
     });
   }
 
-  return { units, loadByLane, foamUnits, foamLoad, uphUnits, uphLoadByLane, packUnits };
+  // ── Packing capacity (owner 2026-08-03) ────────────────────────────────────
+  // Packing used to inherit the upholstery day with NO budget, which meant the
+  // plan could never show a packing bottleneck because it could not model one:
+  // any number of orders could "finish" on the same day. With a measured
+  // budget it packs forward like every other department, so an overloaded
+  // packing bench finally shows up in the schedule and in the OT outlook.
+  //
+  // No lane split — packing is one bench, not two.
+  const packCap = measuredMinutes(budgets, "PACKING");
+  if (packCap !== null) {
+    const packLoad = new Map<number, number>();
+    const packSlack = (u: PackUnit): number =>
+      slackFor(cal, chain, "PACKING", u.lane, u.cdd, u.packDay, u.pmin, packCap);
+    packUnits.sort((a, b) =>
+      cmpKey([packSlack(a), a.cdd, a.modelKey, a.so], [packSlack(b), b.cdd, b.modelKey, b.so]),
+    );
+    placeUnitsWithOt(
+      packUnits,
+      cal,
+      packCap,
+      packLoad,
+      (u) => ({
+        // Floor stays the upholstery day — packing can never precede it.
+        cost: u.pmin,
+        floor: u.uphDay ?? cal.day1,
+        pin: pinnedDayOf(u.cards, cal),
+        deadline: deadlineFor(cal, chain, "PACKING", u.lane, u.cdd),
+      }),
+      (u, d) => {
+        u.packDay = d;
+      },
+    );
+  }
+
+  const frameTotal = chain.frameCapMin.BEDFRAME + chain.frameCapMin.SOFA;
+  const uphTotal = chain.uphCapMin.BEDFRAME + chain.uphCapMin.SOFA;
+  // ── Foam Cutting (owner 2026-08-03) ───────────────────────────────────────
+  // A SOURCE stage: it waits on no upstream department (the raw foam is simply
+  // there), so its floor is day 1 like Fabric Cutting and Wood Cutting. What
+  // ties it to the chain is DEMAND — its output is needed by Foam Bonding, so
+  // each SO's cut is pulled back `foamCutLeadDays` working days from that SO's
+  // bonding day. Owner: "把它放成 Foam Bonding 的前一天就是了" (revisit later).
+  //
+  // Its cards were invisible to the whole engine until now: FOAM_CUTTING was
+  // absent from DEPT_CODE_TO_CHAIN, so loadChainInputs silently dropped every
+  // one of them and neither planned the work nor counted its hours.
+  const foamCutCap = deptBudget(budgets, "FOAM_CUTTING", chain.foamCutCapMin);
+  const foamCutByUnit = new Map<string, ChainCard[]>();
+  for (const c of input.foamCutting) {
+    if (c.lane !== "BEDFRAME" && c.lane !== "SOFA") continue;
+    const k = `${c.soId}|${c.lane}`;
+    const arr = foamCutByUnit.get(k) ?? [];
+    arr.push(c);
+    foamCutByUnit.set(k, arr);
+  }
+  const foamCutUnits: FoamCutUnit[] = [];
+  for (const [k, cards] of foamCutByUnit) {
+    const [so, laneStr] = k.split("|");
+    const lane = laneStr as ChainLane;
+    // Demand day = this SO's bonding day when it has one, else its framing day
+    // (a bedframe headboard-foam SO never reaches sofa foam bonding).
+    const demand = foamDayMap.get(so) ?? frameDayMap.get(k) ?? null;
+    const cdds = cards
+      .map((c) => c.customerDd)
+      .filter((x): x is string => !!x)
+      .sort();
+    foamCutUnits.push({
+      so,
+      lane,
+      cards,
+      fcMin: cards.reduce((a, c) => a + c.mins, 0),
+      cdd: cdds.length ? (parseYmd(cdds[0]) ?? FAR_DAY) : FAR_DAY,
+      models: [...new Set(cards.map((c) => (c.model || "").trim()).filter(Boolean))].sort(),
+      modelKey: "",
+      demandDay: demand,
+      day: cal.day1,
+    });
+  }
+  for (const u of foamCutUnits) u.modelKey = u.models.length ? u.models[0] : "";
+
+  const foamCutLoad = new Map<number, number>();
+  const fcSlack = (u: FoamCutUnit): number =>
+    slackFor(cal, chain, "FOAM_CUTTING", u.lane, u.cdd, cal.day1, u.fcMin, foamCutCap);
+  foamCutUnits.sort((a, b) =>
+    cmpKey([fcSlack(a), a.cdd, a.modelKey, a.so], [fcSlack(b), b.cdd, b.modelKey, b.so]),
+  );
+  for (const u of foamCutUnits) {
+    // Target = lead days before the day the foam is needed. Never earlier than
+    // day 1, and if the pull-back lands in the past the work simply starts now.
+    const target =
+      u.demandDay !== null ? cal.backWorkday(u.demandDay, chain.foamCutLeadDays) : cal.day1;
+    let d = Math.max(target, cal.day1);
+    while ((foamCutLoad.get(d) ?? 0) + u.fcMin > foamCutCap && (foamCutLoad.get(d) ?? 0) !== 0) {
+      d = cal.stepWorkday(d);
+    }
+    u.day = d;
+    foamCutLoad.set(d, (foamCutLoad.get(d) ?? 0) + u.fcMin);
+  }
+
+  return {
+    units,
+    loadByLane,
+    foamUnits,
+    foamLoad,
+    foamCutUnits,
+    foamCutLoad,
+    foamCutCap,
+    uphUnits,
+    uphLoadByLane,
+    packUnits,
+    caps: {
+      framing: {
+        BEDFRAME: laneBudget(budgets, "FRAMING", chain.frameCapMin.BEDFRAME, frameTotal),
+        SOFA: laneBudget(budgets, "FRAMING", chain.frameCapMin.SOFA, frameTotal),
+      },
+      foam: foamCap,
+      upholstery: {
+        BEDFRAME: laneBudget(budgets, "UPHOLSTERY", chain.uphCapMin.BEDFRAME, uphTotal),
+        SOFA: laneBudget(budgets, "UPHOLSTERY", chain.uphCapMin.SOFA, uphTotal),
+      },
+    },
+  };
 }
 
 function renderFraming(
@@ -1097,8 +1668,8 @@ function renderFraming(
       const sep = Array<Cell>(calHeaders.length).fill("");
       sep[0] = `${fmtIso(curDate)}  ${DOW[dowOf(curDate)]}   (Day ${cal.dayLabelNum(
         curDate,
-      )})   -  Bedframe ${bf}/${chain.frameCapMin.BEDFRAME / 60}h  ·  Sofa ${sf}/${
-        chain.frameCapMin.SOFA / 60
+      )})   -  Bedframe ${bf}/${fr.caps.framing.BEDFRAME / 60}h  ·  Sofa ${sf}/${
+        fr.caps.framing.SOFA / 60
       }h`;
       calRows.push(sep);
     }
@@ -1158,9 +1729,9 @@ function renderFraming(
       `${fmtIso(d)} ${DOW[dowOf(d)]}`,
       cal.dayLabelNum(d),
       round1((fr.loadByLane.BEDFRAME.get(d) ?? 0) / 60),
-      chain.frameCapMin.BEDFRAME / 60,
+      fr.caps.framing.BEDFRAME / 60,
       round1((fr.loadByLane.SOFA.get(d) ?? 0) / 60),
-      chain.frameCapMin.SOFA / 60,
+      fr.caps.framing.SOFA / 60,
       bf.length,
       sf.length,
       us.reduce((a, u) => a + u.web.length, 0),
@@ -1187,7 +1758,7 @@ function renderFraming(
       `${fmtIso(d)} ${DOW[dowOf(d)]}`,
       cal.dayLabelNum(d),
       round1((fr.foamLoad.get(d) ?? 0) / 60),
-      chain.foamCapMin / 60,
+      fr.caps.foam / 60,
       `${nb}/${na}/${nc}`,
       us.map((u) => `${u.so}(${u.models.join("+")})`).join(", "),
     ]);
@@ -1220,9 +1791,9 @@ function renderFraming(
       `${fmtIso(d)} ${DOW[dowOf(d)]}`,
       cal.dayLabelNum(d),
       round1((fr.uphLoadByLane.BEDFRAME.get(d) ?? 0) / 60),
-      chain.uphCapMin.BEDFRAME / 60,
+      fr.caps.upholstery.BEDFRAME / 60,
       round1((fr.uphLoadByLane.SOFA.get(d) ?? 0) / 60),
-      chain.uphCapMin.SOFA / 60,
+      fr.caps.upholstery.SOFA / 60,
       bf.length,
       sf.length,
       us.map((u) => `${u.so}(${u.models.join("+")})`).join(", "),
@@ -1263,17 +1834,17 @@ function renderFraming(
     `  Floor = (that SO's wood-cut day) + ${chain.frameHandoffDays} working day. Wood already done -> day 1.`,
     "",
     "[Capacity in production hours/day, per lane]",
-    `  Bedframe ${chain.frameCapMin.BEDFRAME / 60} h/day, Sofa ${chain.frameCapMin.SOFA / 60} h/day. Separate teams.`,
+    `  Bedframe ${fr.caps.framing.BEDFRAME / 60} h/day, Sofa ${fr.caps.framing.SOFA / 60} h/day. Separate teams.`,
     "",
     "[Same-day riders] Each SO's webbing + headboard-foam bonding run the SAME day as its framing,",
     `  on separate stations - they do NOT consume framing hours. Same-day total: Webbing ${totWeb} pc, HB Foam ${totHbf} pc.`,
     "",
     "[Sofa back-end] Webbing same day; foam bonding the next working day:",
-    `  - base + armrest scheduled to an ${chain.foamCapMin / 60} h/day cap, overflow pushed forward.`,
+    `  - base + armrest scheduled to an ${fr.caps.foam / 60} h/day cap, overflow pushed forward.`,
     "  - back cushion bonded the same day as its base, but does NOT consume that cap.",
     "",
     "[Upholstery] Bedframe = framing + 1 wd; Sofa = base foam bonding + 1 wd.",
-    `  Caps: Bedframe ${chain.uphCapMin.BEDFRAME / 60} h/day, Sofa ${chain.uphCapMin.SOFA / 60} h/day.`,
+    `  Caps: Bedframe ${fr.caps.upholstery.BEDFRAME / 60} h/day, Sofa ${fr.caps.upholstery.SOFA / 60} h/day.`,
     "",
     "[Packing] No capacity cap; pack day = the SO's upholstery day.",
     "",
@@ -1349,7 +1920,7 @@ function renderFoamBonding(
       const sep = Array<Cell>(calHeaders.length).fill("");
       sep[0] = `${fmtIso(curDate)}  ${DOW[dowOf(curDate)]}   (Day ${cal.dayLabelNum(
         curDate,
-      )})   -  Foam ${round1((fr.foamLoad.get(curDate) ?? 0) / 60)}/${chain.foamCapMin / 60}h`;
+      )})   -  Foam ${round1((fr.foamLoad.get(curDate) ?? 0) / 60)}/${fr.caps.foam / 60}h`;
       calRows.push(sep);
     }
     const frameDoneTxt = fmtMonDayDow(u.frameDay);
@@ -1388,7 +1959,7 @@ function renderFoamBonding(
       us.map((u) => `${u.so}(${u.models.join("+")})`).join(", "),
       us.length,
       round1((fr.foamLoad.get(d) ?? 0) / 60),
-      chain.foamCapMin / 60,
+      fr.caps.foam / 60,
     ]);
   }
 
@@ -1399,7 +1970,7 @@ function renderFoamBonding(
     "[Chain] Runs the working day after each sofa's framing (webbing rides framing the same day).",
     `  Floor = (sofa framing day) + ${chain.foamHandoffDays} working day.`,
     "",
-    `[Capacity] base + armrest capped ${chain.foamCapMin / 60} h/day; overflow pushed forward.`,
+    `[Capacity] base + armrest capped ${fr.caps.foam / 60} h/day; overflow pushed forward.`,
     "  Back cushion bonded the same day as its base, but does NOT consume the cap.",
     "",
     "[Priority] earliest Customer DD first, then earliest ready (framing floor). Whole SO together.",
@@ -1458,8 +2029,8 @@ function renderUpholstery(
       const sep = Array<Cell>(calHeaders.length).fill("");
       sep[0] = `${fmtIso(curDate)}  ${DOW[dowOf(curDate)]}   (Day ${cal.dayLabelNum(
         curDate,
-      )})   -  Bedframe ${bf}/${chain.uphCapMin.BEDFRAME / 60}h  ·  Sofa ${sf}/${
-        chain.uphCapMin.SOFA / 60
+      )})   -  Bedframe ${bf}/${fr.caps.upholstery.BEDFRAME / 60}h  ·  Sofa ${sf}/${
+        fr.caps.upholstery.SOFA / 60
       }h`;
       calRows.push(sep);
     }
@@ -1504,7 +2075,7 @@ function renderUpholstery(
         us.map((u) => `${u.so}(${u.models.join("+")})`).join(", "),
         us.length,
         round1((fr.uphLoadByLane[lane].get(d) ?? 0) / 60),
-        chain.uphCapMin[lane] / 60,
+        fr.caps.upholstery[lane] / 60,
       ]);
     }
   }
@@ -1517,7 +2088,7 @@ function renderUpholstery(
     "  Sofa upholstery = base foam bonding + 1 wd.",
     "",
     "[Capacity in production hours/day, per lane]",
-    `  Bedframe ${chain.uphCapMin.BEDFRAME / 60} h/day, Sofa ${chain.uphCapMin.SOFA / 60} h/day. Separate lanes; overflow pushed forward.`,
+    `  Bedframe ${fr.caps.upholstery.BEDFRAME / 60} h/day, Sofa ${fr.caps.upholstery.SOFA / 60} h/day. Separate lanes; overflow pushed forward.`,
     "",
     "[Priority] earliest Customer DD first, then earliest ready (upstream floor). Whole SO together.",
     "",
@@ -1780,6 +2351,8 @@ export function computeChain(input: ChainInput): ChainOutput {
     holidays: input.holidays,
     startDate: input.startDate,
     generatedAt: input.generatedAt,
+    // Measured CNC minutes flip cutting out of the legacy slot model.
+    dailyBudgetMin: input.dailyBudgetByDept?.FAB_CUT,
     // Forward the cut-head assignments to the chain-level collector.
     collect: emit
       ? (a) =>
@@ -1798,20 +2371,23 @@ export function computeChain(input: ChainInput): ChainOutput {
   const cal = cut.cal;
   const chain = input.config.chain;
 
+  const budgets = input.dailyBudgetByDept;
   const byDept = (d: ChainDept): ChainCard[] => input.chainCards.filter((c) => c.dept === d);
-  const sew = runSewing(input.chainCards, cal, chain, cut.cutLastDay);
-  const wood = runWood(input.chainCards, cal, chain, sew.sewEnd);
+  const sew = runSewing(input.chainCards, cal, chain, cut.cutLastDay, budgets);
+  const wood = runWood(input.chainCards, cal, chain, sew.sewEnd, budgets);
   const fr = runFraming(
     {
       framing: byDept("FRAMING"),
       webbing: byDept("WEBBING"),
       foam: byDept("FOAM"),
+      foamCutting: byDept("FOAM_CUTTING"),
       upholstery: byDept("UPHOLSTERY"),
       packing: byDept("PACKING"),
     },
     cal,
     chain,
     wood.woodDay,
+    budgets,
   );
 
   // ── Optional Phase-2 collector: one call per scheduled (card, day) ────────
@@ -1846,13 +2422,14 @@ export function computeChain(input: ChainInput): ChainOutput {
       // Base + armrest consume the foam cap; back cushion rides the same day.
       for (const c of [...u.base, ...u.arm, ...u.cush]) send("FOAM", c, u.foamDay);
     }
+    for (const u of fr.foamCutUnits) for (const c of u.cards) send("FOAM_CUTTING", c, u.day);
     for (const u of fr.uphUnits) for (const c of u.cards) send("UPHOLSTERY", c, u.uphDay);
     for (const u of fr.packUnits) for (const c of u.cards) send("PACKING", c, u.packDay);
   }
 
   return {
     cutting: cut.snapshot,
-    sewing: renderSewing(sew, cal, chain, input.generatedAt, cut.cutLastDay),
+    sewing: renderSewing(sew, cal, chain, input.generatedAt, cut.cutLastDay, budgets),
     woodCutting: renderWood(wood, cal, chain, input.generatedAt),
     framing: renderFraming(fr, cal, chain, input.generatedAt),
     foamBonding: renderFoamBonding(fr, cal, chain, input.generatedAt),

@@ -126,6 +126,50 @@ test("a PO-linked line falls back to the header PO line when the caller omits it
   assert.match(SRC, /poItemId: \(item\.poItemId \?\? ""\)\.trim\(\) \|\| poItem\?\.id \|\| null/);
 });
 
+// ── A second PO's lines must be read off the SECOND PO ──────────────────────
+// The first cut of multi-PO wrote the per-line `po_id` correctly but still
+// resolved the LINE ITSELF as `poItems[poItemIndex]` on the HEADER PO. So a
+// line belonging to the second order took its material, ordered qty and price
+// from whatever happened to sit at that index on the first one — and the
+// over-receipt guard compared the delivery against a quantity from a PO it was
+// not delivering. Silent, and wrong in the direction of accepting too much.
+
+test("a line's PO item is resolved on the line's OWN purchase order", () => {
+  assert.match(SRC, /const resolvePoItem = \(item: \{/);
+  assert.doesNotMatch(
+    SRC,
+    /const poItem = poItems\[item\.poItemIndex\]/,
+    "indexing the header PO's lines is exactly the bug",
+  );
+});
+
+test("the resolver prefers the line id, and only then its own PO's index", () => {
+  const fn = SRC.slice(SRC.indexOf("const resolvePoItem = (item: {"));
+  assert.match(fn, /poItemById\.get\(byId\)/, "an explicit line id is unambiguous");
+  assert.match(
+    fn,
+    /const owner = \(item\.poId \?\? ""\)\.trim\(\) \|\| poId;/,
+    "the index must be taken on the line's own PO, not the header",
+  );
+});
+
+test("the over-receipt guard checks the line's own ordered quantity", () => {
+  const guard = SRC.slice(SRC.indexOf("// Over-receipt validation"));
+  assert.match(guard.slice(0, 400), /const poItem = resolvePoItem\(item\)/);
+});
+
+test("every PO the lines name is loaded, not just the header", () => {
+  assert.match(SRC, /const extraPoIds = \[/);
+  assert.match(SRC, /SELECT \* FROM purchase_order_items WHERE purchaseOrderId IN \(/);
+});
+
+test("a PO from another supplier is refused at the API, not just in the UI", () => {
+  // One GRN has one supplier; receiving another party's order would credit the
+  // wrong supplier. The create page guards it, but the page is not the gate.
+  assert.match(SRC, /All purchase orders on one GRN must belong to the same supplier/);
+  assert.match(SRC, /Purchase order not found: \$\{missing\.join\(", "\)\}/);
+});
+
 test("a manual receipt records no PO line at all", () => {
   // No purchase order behind it, so there is nothing to draw down and the
   // columns must stay NULL rather than pointing somewhere plausible.

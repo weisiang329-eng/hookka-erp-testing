@@ -1335,12 +1335,92 @@ app.post("/", async (c) => {
 
       const poItems = poItemsRes.results ?? [];
 
+      // A receipt may span SEVERAL purchase orders, so a line's own `poId` —
+      // not the header — decides which order it draws down. Load the lines for
+      // every PO named, and resolve each line by its `poItemId` where it has
+      // one. Reading `poItems[poItemIndex]` off the HEADER PO (as this did)
+      // gives a second-PO line whatever happens to sit at that index on the
+      // first order: wrong material, wrong ordered qty, wrong price, and an
+      // over-receipt guard checking a quantity from a different PO entirely.
+      const extraPoIds = [
+        ...new Set(
+          (items as Array<{ poId?: string | null }>)
+            .map((i) => (i.poId ?? "").trim())
+            .filter((v) => v && v !== poId),
+        ),
+      ];
+      const itemsByPo = new Map<string, PurchaseOrderItemRow[]>([[poId, poItems]]);
+      const poItemById = new Map<string, PurchaseOrderItemRow>();
+      for (const r of poItems) poItemById.set(String(r.id), r);
+      if (extraPoIds.length > 0) {
+        // One GRN has one supplier — a line pointing at another supplier's
+        // order is a mis-link, and receiving it would credit the wrong party.
+        const others = await c.var.DB.prepare(
+          `SELECT id, supplierId FROM purchase_orders WHERE id IN (${extraPoIds.map(() => "?").join(",")})`,
+        )
+          .bind(...extraPoIds)
+          .all<{ id: string; supplierId: string }>();
+        const foundIds = new Set((others.results ?? []).map((r) => String(r.id)));
+        const missing = extraPoIds.filter((id) => !foundIds.has(id));
+        if (missing.length > 0) {
+          return c.json(
+            { success: false, error: `Purchase order not found: ${missing.join(", ")}` },
+            404,
+          );
+        }
+        const wrongSupplier = (others.results ?? []).filter(
+          (r) => String(r.supplierId) !== String(po.supplierId),
+        );
+        if (wrongSupplier.length > 0) {
+          return c.json(
+            {
+              success: false,
+              error: "All purchase orders on one GRN must belong to the same supplier",
+            },
+            400,
+          );
+        }
+        const extraItems = await c.var.DB.prepare(
+          `SELECT * FROM purchase_order_items WHERE purchaseOrderId IN (${extraPoIds.map(() => "?").join(",")})`,
+        )
+          .bind(...extraPoIds)
+          .all<PurchaseOrderItemRow>();
+        for (const r of extraItems.results ?? []) {
+          const owner = String(
+            (r as { purchaseOrderId?: string }).purchaseOrderId ?? "",
+          );
+          const arr = itemsByPo.get(owner) ?? [];
+          arr.push(r);
+          itemsByPo.set(owner, arr);
+          poItemById.set(String(r.id), r);
+        }
+      }
+
+      /** The PO line a receipt line draws down — by id, else by index on ITS own PO. */
+      const resolvePoItem = (item: {
+        poItemIndex?: number | null;
+        poId?: string | null;
+        poItemId?: string | null;
+      }): PurchaseOrderItemRow | undefined => {
+        const byId = (item.poItemId ?? "").trim();
+        if (byId) {
+          const hit = poItemById.get(byId);
+          if (hit) return hit;
+        }
+        const owner = (item.poId ?? "").trim() || poId;
+        const list = itemsByPo.get(owner) ?? [];
+        const idx = item.poItemIndex;
+        return typeof idx === "number" && idx >= 0 ? list[idx] : undefined;
+      };
+
       // Over-receipt validation (110% tolerance)
       for (const item of items as Array<{
         poItemIndex: number;
+        poId?: string | null;
+        poItemId?: string | null;
         receivedQty: number;
       }>) {
-        const poItem = poItems[item.poItemIndex];
+        const poItem = resolvePoItem(item);
         if (poItem) {
           const tolerance = poItem.quantity * 1.1;
           if (item.receivedQty > tolerance) {
@@ -1380,7 +1460,7 @@ app.post("/", async (c) => {
           rejectionReason: string | null;
         }>
       ).map((item) => {
-        const poItem = poItems[item.poItemIndex];
+        const poItem = resolvePoItem(item);
         return {
           poItemIndex: item.poItemIndex,
           // Prefer what the caller named; fall back to the header PO line at

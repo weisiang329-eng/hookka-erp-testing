@@ -80,6 +80,9 @@ const STAGE_COLOR: Record<string, string> = {
   "Delivery arranged": "bg-[#DCEBDC] text-[#3A6B3A]",
   Delivered: "bg-[#DCEBDC] text-[#3A6B3A]",
   Closed: "bg-[#E2DDD8] text-[#5A5550]",
+  // A cancelled case is not a stage on the chain — it is the chain stopping.
+  // Red so it cannot be mistaken for progress at a glance.
+  Cancelled: "bg-[#F5DCDC] text-[#7A2E24]",
 };
 
 // Service CASES can be opened against any source order status — a customer
@@ -330,7 +333,11 @@ export default function ServiceCasesListPage() {
         categoryCodes,
         categoriesText: categoriesLabel(categoryCodes),
         department: deptForCase(c.rootCauseDetails),
-        stageLabel: pipe.label,
+        // A cancelled case must READ as cancelled. The stage is derived from
+        // the case's service orders, so one whose SV order had already been
+        // delivered kept showing "Delivered" and the cancel was invisible
+        // outside the detail page (owner 2026-08-04).
+        stageLabel: pipe.cancelled ? "Cancelled" : pipe.label,
         stageIndex: pipe.index,
         affectedCount: c.affectedProducts?.length ?? 0,
         daysOpen:

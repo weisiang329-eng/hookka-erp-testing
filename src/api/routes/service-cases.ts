@@ -60,7 +60,10 @@ const STATUS_TRANSITIONS: Record<CaseStatus, CaseStatus[]> = {
   OPEN: ["IN_PROGRESS", "CLOSED", "CANCELLED"],
   IN_PROGRESS: ["CLOSED", "CANCELLED"],
   CLOSED: [],
-  CANCELLED: [],
+  // Undo a cancel back to the state it interrupted (owner 2026-08-04). A case
+  // is an operator record — cancelling one spawns no side effects to unwind,
+  // so the reverse is simply the status and a cleared closedAt.
+  CANCELLED: ["OPEN", "IN_PROGRESS"],
 };
 
 type ServiceCaseRow = {
@@ -245,6 +248,15 @@ async function ensureCaseLinkColumns(db: D1Database): Promise<void> {
   try {
     await db
       .prepare("ALTER TABLE service_cases ADD COLUMN IF NOT EXISTS responsibleunit TEXT")
+      .run();
+  } catch {
+    // ignore — column may already exist or DDL transiently rejected
+  }
+  try {
+    // The stage a cancel interrupted, so it can be undone exactly rather than
+    // guessed (owner 2026-08-04: "我要怎么 uncancel 回来呢？").
+    await db
+      .prepare("ALTER TABLE service_cases ADD COLUMN IF NOT EXISTS pre_cancel_status TEXT")
       .run();
   } catch {
     // ignore — column may already exist or DDL transiently rejected
@@ -461,6 +473,12 @@ function rowToApi(
     preventionStatus: row.preventionStatus ?? "PENDING",
     preventionOwner: row.preventionOwner ?? "",
     status: row.status,
+    // Stage the cancel interrupted — the detail page offers to return here.
+    // Dual-keyed: snake_case column, may come back camelCased.
+    preCancelStatus:
+      (row as { preCancelStatus?: string | null }).preCancelStatus ??
+      (row as { pre_cancel_status?: string | null }).pre_cancel_status ??
+      "",
     externalRef: row.externalRef ?? "",
     createdBy: row.createdBy ?? "",
     createdByName: row.createdByName ?? "",
@@ -916,9 +934,13 @@ app.put("/:id/status", async (c) => {
       return c.json({ success: false, error: "status invalid" }, 400);
     }
     const existing = await c.var.DB
-      .prepare("SELECT status, investigatingat FROM service_cases WHERE id = ?")
+      .prepare("SELECT status, investigatingat, pre_cancel_status FROM service_cases WHERE id = ?")
       .bind(id)
-      .first<{ status: CaseStatus; investigatingat: string | null }>();
+      .first<{
+        status: CaseStatus;
+        investigatingat: string | null;
+        pre_cancel_status?: string | null;
+      }>();
     if (!existing) {
       return c.json({ success: false, error: "Service case not found" }, 404);
     }
@@ -934,16 +956,35 @@ app.put("/:id/status", async (c) => {
     }
     const nowIso = new Date().toISOString();
     const closedAt = next === "CLOSED" || next === "CANCELLED" ? nowIso : null;
+    // Remember the state the cancel interrupted; cleared on the way back out.
+    // A second cancel must not overwrite it with 'CANCELLED'.
+    const preCancel =
+      next === "CANCELLED" && existing.status !== "CANCELLED"
+        ? existing.status
+        : next === "CANCELLED"
+          ? existing.pre_cancel_status ?? null
+          : null;
     // Stamp the Investigating timestamp the FIRST time the case is marked
     // IN_PROGRESS (COALESCE keeps any earlier value, so it records the first
     // entry only). NULL for every other transition → COALESCE keeps existing.
     const investigatingAt =
       next === "IN_PROGRESS" && !existing.investigatingat ? nowIso : null;
+    // Leaving CANCELLED must CLEAR closedAt — COALESCE would keep the cancel
+    // timestamp and the case would read as still closed everywhere that dates
+    // it. Every other transition keeps the existing value as before.
+    const leavingTerminal =
+      existing.status === "CANCELLED" && next !== "CANCELLED";
     await c.var.DB
       .prepare(
-        "UPDATE service_cases SET status = ?, closedAt = COALESCE(?, closedAt), investigatingat = COALESCE(?, investigatingat) WHERE id = ?",
+        leavingTerminal
+          ? "UPDATE service_cases SET status = ?, closedAt = NULL, investigatingat = COALESCE(?, investigatingat), pre_cancel_status = NULL WHERE id = ?"
+          : "UPDATE service_cases SET status = ?, closedAt = COALESCE(?, closedAt), investigatingat = COALESCE(?, investigatingat), pre_cancel_status = ? WHERE id = ?",
       )
-      .bind(next, closedAt, investigatingAt, id)
+      .bind(
+        ...(leavingTerminal
+          ? [next, investigatingAt, id]
+          : [next, closedAt, investigatingAt, preCancel, id]),
+      )
       .run();
     return c.json({ success: true, data: { id, status: next } });
   } catch (err) {

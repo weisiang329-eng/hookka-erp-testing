@@ -201,3 +201,70 @@ test("the mobile cancel no longer claims it is permanent", () => {
 test("the undo is audited under its own action name", () => {
   assert.match(PO_HELPERS, /next === "UNCANCEL"\s*\n\s*\? "uncancel"/);
 });
+
+// ── Service CASES — a different table, and it was missed the first time ─────
+// `service_cases` is not `service_orders`. Cancelling a CASE had the same
+// dead end, plus a display bug that made it worse: the list's Stage column and
+// the detail stepper are DERIVED from the case's service orders, so a case
+// whose SV order had already been delivered kept reporting "Delivered" after
+// the cancel. Owner 2026-08-04: "在外面也看不到这个地方已经变 cancel 了."
+
+const CASES_ROUTE = read("src/api/routes/service-cases.ts");
+const CASES_PAGE = read("src/pages/service-cases/detail.tsx");
+const CASES_LIST = read("src/pages/service-cases/index.tsx");
+const PIPELINE = read("src/lib/case-pipeline.ts");
+
+test("a cancelled case is no longer terminal", () => {
+  assert.match(CASES_ROUTE, /CANCELLED: \["OPEN", "IN_PROGRESS"\]/);
+  assert.match(CASES_PAGE, /CANCELLED: \["OPEN", "IN_PROGRESS"\]/);
+});
+
+test("the case records the state its cancel interrupted", () => {
+  assert.match(
+    CASES_ROUTE,
+    /ALTER TABLE service_cases ADD COLUMN IF NOT EXISTS pre_cancel_status TEXT/,
+  );
+  assert.match(
+    CASES_ROUTE,
+    /next === "CANCELLED" && existing\.status !== "CANCELLED"\s*\n\s*\? existing\.status/,
+  );
+});
+
+test("leaving CANCELLED clears closedAt instead of COALESCE-ing it", () => {
+  // COALESCE would keep the cancel timestamp, and every surface that dates the
+  // case would still read it as closed.
+  assert.match(CASES_ROUTE, /SET status = \?, closedAt = NULL,/);
+  assert.match(
+    CASES_ROUTE,
+    /const leavingTerminal =\s*\n\s*existing\.status === "CANCELLED" && next !== "CANCELLED";/,
+  );
+});
+
+test("the pipeline knows the case was cancelled", () => {
+  // It only ever checked CLOSED, so the derivation ran on regardless.
+  assert.match(PIPELINE, /const cancelled = input\.caseStatus === "CANCELLED";/);
+  assert.match(
+    PIPELINE,
+    /const closed = input\.caseStatus === "CLOSED" \|\| cancelled;/,
+  );
+  assert.match(PIPELINE, /return \{ index, label, doneFlags, enteredAt, cancelled \};/);
+});
+
+test("a cancelled case reads as Cancelled in the list, not Delivered", () => {
+  assert.match(CASES_LIST, /stageLabel: pipe\.cancelled \? "Cancelled" : pipe\.label/);
+  assert.match(CASES_LIST, /Cancelled: "bg-\[#F5DCDC\] text-\[#7A2E24\]"/);
+});
+
+test("the detail stepper says so rather than showing a full chain", () => {
+  assert.match(CASES_PAGE, /\{pipe\.cancelled && \(/);
+  assert.match(CASES_PAGE, /This case was cancelled\./);
+});
+
+test("the case page offers the undo, and stops calling cancel permanent", () => {
+  assert.match(CASES_PAGE, /Undo Cancel/);
+  assert.doesNotMatch(CASES_PAGE, /This is terminal — the case can't be reopened/);
+});
+
+test("the case read exposes where to go back to", () => {
+  assert.match(CASES_ROUTE, /preCancelStatus:\s*\n\s*\(row as \{ preCancelStatus\?: string \| null \}\)\.preCancelStatus/);
+});

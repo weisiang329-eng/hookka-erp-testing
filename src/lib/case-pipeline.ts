@@ -94,6 +94,13 @@ export type CasePipelineResult = {
   // The timestamp the case ENTERED its current stage. Never null for a real
   // case — falls back along the chain to createdAt.
   enteredAt: string | null;
+  // True when the case was CANCELLED. The stage is derived from the case's
+  // service orders and their delivery orders, so a cancelled case whose SV
+  // order had already been delivered kept reporting "Delivered" — the cancel
+  // was invisible everywhere except the detail-page badge (owner 2026-08-04:
+  // "在外面也看不到这个地方已经变 cancel 了"). Callers must render this
+  // instead of `label`, not alongside it.
+  cancelled: boolean;
 };
 
 // Smallest non-empty ISO string in a list (lexicographic order is
@@ -149,7 +156,10 @@ export function computeCasePipeline(input: CasePipelineInput): CasePipelineResul
     completedDates.length > 0 ||
     legacyOrders.some((o) => LEGACY_IN_PROGRESS_STATUSES.has(o.status));
   const hasOrder = input.orders.length > 0;
-  const closed = input.caseStatus === "CLOSED";
+  const cancelled = input.caseStatus === "CANCELLED";
+  // A cancelled case is CLOSED for pipeline purposes — it is not still moving
+  // through the chain, whatever its service orders went on to do.
+  const closed = input.caseStatus === "CLOSED" || cancelled;
   const investigating =
     input.caseStatus !== "OPEN" || hasOrder || repairDone || closed;
 
@@ -199,7 +209,7 @@ export function computeCasePipeline(input: CasePipelineInput): CasePipelineResul
   }
   if (enteredAt == null) enteredAt = input.createdAt || null;
 
-  return { index, label, doneFlags, enteredAt };
+  return { index, label, doneFlags, enteredAt, cancelled };
 }
 
 // Whole days a case has been open: floor((end - start) / 1 day). end =

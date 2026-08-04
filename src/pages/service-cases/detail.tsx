@@ -27,7 +27,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { getCurrentUser } from "@/lib/auth";
 import { compressImage } from "@/lib/image-compress";
 import {
-  ArrowLeft, CheckCircle2, XCircle, Plus, X, Wrench, AlertCircle, Loader2,
+  ArrowLeft, CheckCircle2, XCircle, RotateCcw, Plus, X, Wrench, AlertCircle, Loader2,
   Pencil, Check, Download,
 } from "lucide-react";
 
@@ -169,7 +169,8 @@ const STATUS_TRANSITIONS: Record<CaseStatus, CaseStatus[]> = {
   OPEN: ["IN_PROGRESS", "CLOSED", "CANCELLED"],
   IN_PROGRESS: ["CLOSED", "CANCELLED"],
   CLOSED: [],
-  CANCELLED: [],
+  // Mirrors the backend STATUS_TRANSITIONS — the PUT re-validates.
+  CANCELLED: ["OPEN", "IN_PROGRESS"],
 };
 
 // ROOT_CAUSE_LABELS now defined at the top of the file (next to the type
@@ -601,7 +602,7 @@ export default function ServiceCaseDetailPage() {
                 if (
                   await confirm({
                     title: "Cancel this case?",
-                    message: `Mark ${caseDetail.caseNo} as CANCELLED. This is terminal — the case can't be reopened.`,
+                    message: `Mark ${caseDetail.caseNo} as CANCELLED. You can undo this from this page afterwards.`,
                     confirmLabel: "Cancel Case",
                     cancelLabel: "Keep Open",
                     tone: "danger",
@@ -611,6 +612,34 @@ export default function ServiceCaseDetailPage() {
               }}
             >
               <XCircle className="h-4 w-4" /> Cancel
+            </Button>
+          )}
+          {/* Undo Cancel — a case is an operator record, so cancelling it
+              spawns nothing to unwind and the reverse is just the status plus
+              a cleared closedAt. Returns to the state the cancel interrupted;
+              cases cancelled before pre_cancel_status existed fall back to
+              OPEN. Owner 2026-08-04: "我要怎么 uncancel 回来呢？" */}
+          {caseDetail.status === "CANCELLED" && (
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={advancing}
+              onClick={async () => {
+                const target =
+                  ((caseDetail as { preCancelStatus?: string }).preCancelStatus as CaseStatus) ||
+                  "OPEN";
+                if (
+                  await confirm({
+                    title: "Undo the cancel?",
+                    message: `Restore ${caseDetail.caseNo} to ${target}. Any service orders under it are unaffected — they were never cancelled by this.`,
+                    confirmLabel: "Undo Cancel",
+                    cancelLabel: "Leave Cancelled",
+                  })
+                )
+                  advanceStatus(target);
+              }}
+            >
+              <RotateCcw className="h-4 w-4" /> Undo Cancel
             </Button>
           )}
           </>
@@ -861,6 +890,17 @@ function CasePipeline({ pipe }: { pipe: CasePipelineResult }) {
         <CardTitle className="text-sm">Case Pipeline</CardTitle>
       </CardHeader>
       <CardContent>
+        {pipe.cancelled && (
+          // The stepper is derived from the case's service orders, so a
+          // cancelled case whose SV order had already been delivered rendered
+          // as a fully-ticked chain — reading as progress when the case was
+          // stopped. Say so above the steps; what is drawn below is the state
+          // the case was in WHEN it was cancelled.
+          <div className="mb-3 rounded-md bg-[#F5DCDC] px-3 py-2 text-[12px] text-[#7A2E24]">
+            This case was cancelled. The steps below show where it had reached
+            at that point — no further progress is being tracked.
+          </div>
+        )}
         {/* Full-width stepper: each step is an equal flex-1 column, the
             connector lines stretch to fill the row left-to-right. */}
         <div className="overflow-x-auto">

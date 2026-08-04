@@ -3078,6 +3078,7 @@
     "issue_photos",
     "notes",
     "org_id",
+    "pre_cancel_status",
     "prevention_action",
     "prevention_owner",
     "prevention_status",

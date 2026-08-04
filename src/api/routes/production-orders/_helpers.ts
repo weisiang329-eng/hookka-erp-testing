@@ -120,6 +120,24 @@ export function ensurePendingMigrations(db: D1Database): Promise<void> {
       "ALTER TABLE consignment_orders ADD COLUMN IF NOT EXISTS hold_reason TEXT",
       "ALTER TABLE consignment_orders ADD COLUMN IF NOT EXISTS held_by TEXT",
       "ALTER TABLE consignment_orders ADD COLUMN IF NOT EXISTS held_at TEXT",
+      // Undo for a cancel (owner 2026-08-04: "i silap cancel" — "reverse 或者
+      // undo 这样的意思，不是吗？这样不是比较简单吗？").
+      //
+      // Cancel used to be a one-way door purely because it was LOSSY: the
+      // cascade overwrote every in-flight job card's status with 'CANCELLED'
+      // and nothing recorded what it had been, so even an admin could not put
+      // the floor back the way it was. Remembering the prior status makes the
+      // reverse exact instead of a guess — which is the whole difference
+      // between an undo and a second, different mistake.
+      //
+      // Also `pre_hold_status`: the SO detail page has always read
+      // `order.preHoldStatus` to decide where Resume goes, but nothing ever
+      // wrote it, so an IN_PRODUCTION order put on hold resumed to CONFIRMED —
+      // silently moved BACKWARDS a stage.
+      "ALTER TABLE production_orders ADD COLUMN IF NOT EXISTS pre_cancel_status TEXT",
+      "ALTER TABLE job_cards ADD COLUMN IF NOT EXISTS pre_cancel_status TEXT",
+      "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS pre_cancel_status TEXT",
+      "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS pre_hold_status TEXT",
       // BUG-2026-05-12 (FOAM 326 cleanup): WIP cascade idempotency log. Every
       // call to applyWipInventoryChange first INSERTs into this table with
       // ON CONFLICT DO NOTHING; if no row was inserted the cascade
@@ -5327,7 +5345,7 @@ export async function invalidateProductionCachesAfterScan(
 export async function applyPoStatusChange(
   c: Context<Env>,
   id: string,
-  next: "ON_HOLD" | "PENDING" | "CANCELLED",
+  next: "ON_HOLD" | "PENDING" | "CANCELLED" | "UNCANCEL",
 ): Promise<Response> {
   const db = c.var.DB;
   const existing = await db
@@ -5374,17 +5392,55 @@ export async function applyPoStatusChange(
         409,
       );
     }
+  } else if (next === "UNCANCEL") {
+    if (from !== "CANCELLED") {
+      return c.json(
+        {
+          success: false,
+          error: `Only a CANCELLED production order can be un-cancelled. This one is ${from}.`,
+        },
+        409,
+      );
+    }
   }
 
   const now = new Date().toISOString();
   const statements: D1PreparedStatement[] = [];
 
+  // Un-cancel restores whatever the PO was BEFORE the cancel. Rows cancelled
+  // before this column existed have nothing recorded, so they land on PENDING —
+  // the safe floor state, since a PENDING PO is simply waiting to be scanned.
+  const preCancel =
+    ((existing as { pre_cancel_status?: string | null; preCancelStatus?: string | null })
+      .pre_cancel_status ??
+      (existing as { preCancelStatus?: string | null }).preCancelStatus ??
+      "") || "";
+  const target = next === "UNCANCEL" ? preCancel || "PENDING" : next;
+
   statements.push(
-    db
-      .prepare(
-        `UPDATE production_orders SET status = ?, updated_at = ? WHERE id = ?`,
-      )
-      .bind(next, now, id),
+    next === "CANCELLED"
+      ? db
+          .prepare(
+            // Remember where it came from IN THE SAME WRITE, so a cancel can
+            // never land without the information needed to reverse it.
+            `UPDATE production_orders
+                SET status = ?, pre_cancel_status = ?, updated_at = ?
+              WHERE id = ?`,
+          )
+          .bind(target, from, now, id)
+      : next === "UNCANCEL"
+        ? db
+            .prepare(
+              `UPDATE production_orders
+                  SET status = ?, pre_cancel_status = NULL, updated_at = ?
+                WHERE id = ?`,
+            )
+            .bind(target, now, id)
+        : db
+            .prepare(
+              `UPDATE production_orders SET status = ?, updated_at = ? WHERE id = ?`,
+            )
+      .bind(target, now, id),
   );
 
   // CANCEL also cascades down: any non-terminal JC under this PO becomes
@@ -5395,9 +5451,15 @@ export async function applyPoStatusChange(
     statements.push(
       db
         .prepare(
-          `UPDATE job_cards SET status = 'CANCELLED', updated_at = ?
-             WHERE productionOrderId = ?
-               AND status NOT IN ('COMPLETED', 'TRANSFERRED')`,
+          // Capture each card's own prior status in the same write. Without
+          // this the cascade is lossy — WAITING, IN_PROGRESS and PAUSED all
+          // collapse to CANCELLED and the floor cannot be put back.
+          // Already-CANCELLED cards are excluded so a second cancel can never
+          // overwrite a pre_cancel_status with 'CANCELLED'.
+          `UPDATE job_cards
+              SET pre_cancel_status = status, status = 'CANCELLED', updated_at = ?
+            WHERE productionOrderId = ?
+              AND status NOT IN ('COMPLETED', 'TRANSFERRED', 'CANCELLED')`,
         )
         .bind(now, id),
     );
@@ -5408,6 +5470,38 @@ export async function applyPoStatusChange(
           `SELECT COUNT(*) AS c FROM job_cards
              WHERE productionOrderId = ?
                AND status NOT IN ('COMPLETED', 'TRANSFERRED', 'CANCELLED')`,
+        )
+        .bind(id)
+        .first<{ c: number }>();
+      jcCascadeCount = Number(r?.c ?? 0);
+    } catch {
+      /* non-fatal */
+    }
+  } else if (next === "UNCANCEL") {
+    statements.push(
+      db
+        .prepare(
+          // Restore ONLY the cards this cancel took down — `pre_cancel_status
+          // IS NOT NULL` is the marker. A card cancelled for some other reason
+          // has none and must stay cancelled; un-cancelling a PO is not a
+          // licence to revive unrelated work.
+          `UPDATE job_cards
+              SET status = COALESCE(pre_cancel_status, 'PENDING'),
+                  pre_cancel_status = NULL,
+                  updated_at = ?
+            WHERE productionOrderId = ?
+              AND status = 'CANCELLED'
+              AND pre_cancel_status IS NOT NULL`,
+        )
+        .bind(now, id),
+    );
+    try {
+      const r = await db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM job_cards
+             WHERE productionOrderId = ?
+               AND status = 'CANCELLED'
+               AND pre_cancel_status IS NOT NULL`,
         )
         .bind(id)
         .first<{ c: number }>();
@@ -5431,9 +5525,11 @@ export async function applyPoStatusChange(
           ? "hold"
           : next === "PENDING"
             ? "resume"
-            : "cancel",
+            : next === "UNCANCEL"
+              ? "uncancel"
+              : "cancel",
       before: { status: from },
-      after: { status: next, reason, jcCascadeCount },
+      after: { status: target, reason, jcCascadeCount },
     });
   } catch {
     /* audit best-effort, don't fail the action */
@@ -5442,7 +5538,7 @@ export async function applyPoStatusChange(
   return c.json({
     success: true,
     id,
-    status: next,
+    status: target,
     previousStatus: from,
     jcCascadeCount,
     reason,

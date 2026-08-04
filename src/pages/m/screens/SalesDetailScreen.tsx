@@ -79,7 +79,7 @@ export function SalesDetailScreen() {
   };
   const onCancel = async () => {
     if (busy) return;
-    if (!window.confirm(`Cancel ${str(doc ?? {}, "companySO") || "this order"}? This can't be undone.`)) return;
+    if (!window.confirm(`Cancel ${str(doc ?? {}, "companySO") || "this order"}? You can undo this from the order page.`)) return;
     setBusy(true);
     const r = await mutateJson(url, "PUT", { status: "CANCELLED" });
     setBusy(false);
@@ -87,6 +87,23 @@ export function SalesDetailScreen() {
       reload();
       flash("Order cancelled");
     } else flash(r.error || "Cancel failed");
+  };
+
+  // Undo a cancel — the order, its production orders and the job cards this
+  // cancel took down all return to their own prior statuses (owner 2026-08-04:
+  // "i silap cancel"). Falls back to IN_PRODUCTION for rows cancelled before
+  // pre_cancel_status existed.
+  const onUndoCancel = async () => {
+    if (busy) return;
+    const target = str(doc ?? {}, "preCancelStatus") || "IN_PRODUCTION";
+    if (!window.confirm(`Restore this order to ${target}? Cancelled production orders and job cards will be restored too.`)) return;
+    setBusy(true);
+    const r = await mutateJson(url, "PUT", { status: target });
+    setBusy(false);
+    if (r.ok) {
+      reload();
+      flash("Cancel undone");
+    } else flash(r.error || "Undo failed");
   };
 
   if (loading && !doc) return <Center text="Loading…" />;
@@ -394,8 +411,11 @@ export function SalesDetailScreen() {
             <Btn flex={1.3} busy={busy} onClick={onConfirm}>Confirm Order</Btn>
           </>
         ) : status === "CANCELLED" ? (
-          <div style={{ textAlign: "center", fontSize: 11.5, color: M.muted, width: "100%", padding: "12px 0" }}>
-            This order was cancelled.
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%" }}>
+            <div style={{ textAlign: "center", fontSize: 11.5, color: M.muted, padding: "4px 0" }}>
+              This order was cancelled.
+            </div>
+            <Btn busy={busy} onClick={onUndoCancel}>Undo Cancel</Btn>
           </div>
         ) : status === "CONFIRMED" ? (
           <div style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%" }}>

@@ -3469,6 +3469,20 @@ app.post("/:id/cancel", async (c) => {
   return applyPoStatusChange(c, c.req.param("id"), "CANCELLED");
 });
 
+// UNCANCEL — undo a cancel (owner 2026-08-04: "i silap cancel").
+//
+// The PO returns to whatever it was before, and every job card THIS cancel
+// took down returns to its own prior status. Cards cancelled for another
+// reason keep theirs; completed work was never touched in the first place.
+// Rows cancelled before pre_cancel_status existed land on PENDING, which just
+// means the floor re-scans them.
+app.post("/:id/uncancel", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  await ensurePendingMigrations(c.var.DB);
+  return applyPoStatusChange(c, c.req.param("id"), "UNCANCEL");
+});
+
 // Re-export the original public helper surface so external importers
 // (worker.ts, lib/consignment-note-shared.ts, tests) need no changes.
 export {

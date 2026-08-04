@@ -3369,6 +3369,7 @@ app.put("/:id", async (c) => {
            subtotalSen = ?, totalSen = ?, status = ?, overdue = ?,
            notes = ?, is_service_order = ?,
            hold_reason = ?, held_by = ?, held_at = ?,
+           pre_hold_status = ?, pre_cancel_status = ?,
            sales_org_code = ?,
            updated_at = ?
          WHERE id = ?`,
@@ -3413,6 +3414,29 @@ app.put("/:id", async (c) => {
           : clearHoldFields
             ? null
             : existing.heldAt ?? existing.held_at ?? null,
+        // Where to come BACK to.
+        //
+        // pre_hold_status: the detail page has always read `order.preHoldStatus`
+        // to decide where Resume goes, but nothing ever wrote it — so an
+        // IN_PRODUCTION order put on hold resumed to CONFIRMED, silently moving
+        // BACKWARDS a stage while the dialog cheerfully announced it.
+        //
+        // pre_cancel_status: the same idea for cancel, which is what makes the
+        // undo exact rather than a guess (owner 2026-08-04: "i silap cancel").
+        //
+        // Both are captured on the way IN and cleared on the way OUT, and a
+        // second cancel can never overwrite the stored value with 'CANCELLED'
+        // because `existing.status` is only stored when it is not the target.
+        newStatus === "ON_HOLD" && existing.status !== "ON_HOLD"
+          ? existing.status
+          : newStatus === "ON_HOLD"
+            ? existing.preHoldStatus ?? existing.pre_hold_status ?? null
+            : null,
+        newStatus === "CANCELLED" && existing.status !== "CANCELLED"
+          ? existing.status
+          : newStatus === "CANCELLED"
+            ? existing.preCancelStatus ?? existing.pre_cancel_status ?? null
+            : null,
         // Multi-Company Phase 2 — company code. Only changes when the operator
         // explicitly supplies body.salesOrgCode; otherwise the existing value
         // is preserved (a header-only edit never resets the company), and a

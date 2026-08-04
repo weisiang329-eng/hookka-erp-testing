@@ -119,6 +119,11 @@ type CustomerRow = {
   groupOrgCode?: string | null;
   group_org_code?: string | null;
   // OEM product marking JSON ({bedframe,sofa,accessory} → NONE/TAG/LABEL).
+  // Dual-keyed: the Supabase driver camelCases every column on read, so a row
+  // read back carries `oemMarking`, NOT `oem_marking` (writes still use the
+  // snake_case column name). Reading only the snake_case key returned undefined
+  // in prod → parsed to all-NONE → the marking "reverted" after every refresh.
+  oemMarking?: string | null;
   oem_marking?: string | null;
   // POTENTIAL | CONFIRMED (owner 2026-08-01). Dual-keyed read — the Supabase
   // driver returns these as customerStage / salespersonUserId.
@@ -276,7 +281,7 @@ function rowToCustomer(row: CustomerRow, hubs: HubRow[] = []) {
     // company selector. Empty string when unmapped (→ HOOKKA fallback).
     defaultCompanyCode: (row.default_company_code ?? "").trim().toUpperCase(),
     groupOrgCode: readCustomerGroupOrgCode(row),
-    oemMarking: parseOemMarking(row.oem_marking),
+    oemMarking: parseOemMarking(row.oemMarking ?? row.oem_marking),
     // POTENTIAL = created from the Sales Pipeline, not yet billable.
     customerStage: readCustomerStage(row as unknown as Record<string, unknown>),
     salespersonUserId: readSalespersonUserId(row as unknown as Record<string, unknown>),
@@ -584,7 +589,7 @@ app.put("/:id", async (c) => {
       // the existing setting is preserved.
       oem_marking:
         body.oemMarking === undefined
-          ? (existing.oem_marking ?? "{}")
+          ? (existing.oemMarking ?? existing.oem_marking ?? "{}")
           : serialiseOemMarking(body.oemMarking),
       // Confirm gate: POTENTIAL → CONFIRMED. Only moves when the body sends it.
       customer_stage: nextStage,

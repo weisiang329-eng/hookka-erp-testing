@@ -4018,7 +4018,9 @@ export default function CustomersPage() {
                 <label className="text-xs font-medium text-[#374151] mb-1 block">PIC</label>
                 <Input value={addForm.contactName} onChange={(e) => setAddForm({ ...addForm, contactName: e.target.value })} placeholder="e.g. Purchasing" />
               </div>
-              <div>
+              <div className="min-w-0 sm:col-span-2">
+                {/* Span 2 so the +60 dial select + number field aren't crushed
+                    into a quarter-width cell (number cut off). */}
                 <label className="text-xs font-medium text-[#374151] mb-1 block">PIC Contact</label>
                 <PhoneInput value={addForm.phone} onChange={(v) => setAddForm({ ...addForm, phone: v })} />
               </div>
@@ -4326,12 +4328,16 @@ export default function CustomersPage() {
                     <label className="block text-xs text-[#6B7280] mb-1">Company Address</label>
                     <Input value={editCustForm.companyAddress} onChange={(e) => setEditCustForm(f => ({ ...f, companyAddress: e.target.value }))} placeholder="Registered company address" />
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
+                  {/* PIC : Phone — Phone gets the wider share (1.4fr) and its own
+                      min-width so the +60 dial select doesn't squeeze the number
+                      field to a few visible digits ("11-6151 1…" cut off). Stacks
+                      on small screens. */}
+                  <div className="grid grid-cols-1 sm:grid-cols-[1fr_1.4fr] gap-4">
+                    <div className="min-w-0">
                       <label className="block text-xs text-[#6B7280] mb-1">PIC</label>
                       <Input value={editCustForm.contactName} onChange={(e) => setEditCustForm(f => ({ ...f, contactName: e.target.value }))} />
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <label className="block text-xs text-[#6B7280] mb-1">Phone</label>
                       <PhoneInput value={editCustForm.phone} onChange={(v) => setEditCustForm(f => ({ ...f, phone: v }))} />
                     </div>

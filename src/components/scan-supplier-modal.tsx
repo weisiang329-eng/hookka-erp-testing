@@ -1112,6 +1112,36 @@ function CreatePIWizard({
     [bindingsBySupplierDesc, bindings],
   );
 
+  /**
+   * The materials this supplier actually supplies — the only sensible search
+   * space for a scan line (owner 2026-08-04: "他应该是看到这个供应商，去供应商
+   * 里面找").
+   *
+   * Searching the whole catalogue invites exactly the wrong kind of match: two
+   * plywoods that differ only in size score almost identically, and picking
+   * between them on a fuzzy score is a guess about a real physical difference.
+   * A supplier carries a handful of items, so scoping to their bindings turns
+   * an ambiguous search into an easy one.
+   *
+   * No bindings for this supplier means no candidates, and the line is picked
+   * by hand — which is correct: we have never bought anything from them, so
+   * there is nothing to recognise.
+   */
+  const materialsForSupplier = useCallback(
+    (supplierId: string): RawMaterial[] => {
+      if (!supplierId) return [];
+      const codes = new Set(
+        bindings
+          .filter((b) => b.supplierId === supplierId)
+          .map((b) => (b.materialCode || "").trim().toUpperCase())
+          .filter(Boolean),
+      );
+      if (codes.size === 0) return [];
+      return rawMaterials.filter((rm) => codes.has(rm.itemCode.trim().toUpperCase()));
+    },
+    [bindings, rawMaterials],
+  );
+
   const resolveBindingFor = useCallback(
     (supplierId: string, supplierSku: string): SupplierMaterialBinding | null => {
       const sku = normSku(supplierSku);
@@ -1283,7 +1313,7 @@ function CreatePIWizard({
         let autoMatched = false;
         if (!binding && !rm) {
           const text = `${rawSku} ${ln.description ?? ""}`.trim();
-          const hit = matchCatalogItem(text, rawMaterials);
+          const hit = matchCatalogItem(text, materialsForSupplier(sId));
           if (hit) {
             rm = hit.item;
             autoMatched = true;
@@ -1371,7 +1401,7 @@ function CreatePIWizard({
         originalExtraction: ex,
       };
     },
-    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, resolveBindingByDescription, materialByCode, rawMaterials],
+    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, resolveBindingByDescription, materialByCode, materialsForSupplier],
   );
 
   // ─── Drag-drop + multi-file extract ────────────────────────────────────
@@ -3474,6 +3504,36 @@ function CreateGRNWizard({
     [bindingsBySupplierDescG, bindings],
   );
 
+  /**
+   * The materials this supplier actually supplies — the only sensible search
+   * space for a scan line (owner 2026-08-04: "他应该是看到这个供应商，去供应商
+   * 里面找").
+   *
+   * Searching the whole catalogue invites exactly the wrong kind of match: two
+   * plywoods that differ only in size score almost identically, and picking
+   * between them on a fuzzy score is a guess about a real physical difference.
+   * A supplier carries a handful of items, so scoping to their bindings turns
+   * an ambiguous search into an easy one.
+   *
+   * No bindings for this supplier means no candidates, and the line is picked
+   * by hand — which is correct: we have never bought anything from them, so
+   * there is nothing to recognise.
+   */
+  const materialsForSupplier = useCallback(
+    (supplierId: string): RawMaterial[] => {
+      if (!supplierId) return [];
+      const codes = new Set(
+        bindings
+          .filter((b) => b.supplierId === supplierId)
+          .map((b) => (b.materialCode || "").trim().toUpperCase())
+          .filter(Boolean),
+      );
+      if (codes.size === 0) return [];
+      return rawMaterials.filter((rm) => codes.has(rm.itemCode.trim().toUpperCase()));
+    },
+    [bindings, rawMaterials],
+  );
+
   const resolveBindingFor = useCallback(
     (supplierId: string, supplierSku: string): SupplierMaterialBinding | null => {
       const sku = normSkuG(supplierSku);
@@ -3616,7 +3676,7 @@ function CreateGRNWizard({
         let autoMatched = false;
         if (!binding && !rm) {
           const text = `${rawSku} ${ln.description ?? ""}`.trim();
-          const hit = matchCatalogItem(text, rawMaterials);
+          const hit = matchCatalogItem(text, materialsForSupplier(sId));
           if (hit) {
             rm = hit.item;
             autoMatched = true;
@@ -3675,7 +3735,7 @@ function CreateGRNWizard({
         originalExtraction: ex,
       };
     },
-    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, resolveBindingByDescription, materialByCode, rawMaterials],
+    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, resolveBindingByDescription, materialByCode, materialsForSupplier],
   );
 
   const handleFiles = useCallback(

@@ -143,10 +143,11 @@ async function ensureCustomerGroupColumn(db: D1Database): Promise<void> {
         "ALTER TABLE customers ADD COLUMN IF NOT EXISTS group_org_code TEXT NOT NULL DEFAULT ''",
       )
       .run();
+    // BUG-CLASS C9: memoise only after the DDL lands (see ensureCustomerOemColumn).
+    custGroupColPromise = true;
   } catch {
-    // best-effort — column may already exist
+    // best-effort — column may already exist. Leave the flag false to retry.
   }
-  custGroupColPromise = true;
 }
 
 /** Read-side coalesce for the dual-identity code. '' = external customer. */
@@ -206,10 +207,15 @@ async function ensureCustomerOemColumn(db: D1Database): Promise<void> {
         "ALTER TABLE customers ADD COLUMN IF NOT EXISTS oem_marking TEXT NOT NULL DEFAULT '{}'",
       )
       .run();
+    // BUG-CLASS C9: only memoise AFTER the DDL lands. Setting the flag past the
+    // catch remembers a transient ALTER failure as done — the column stays
+    // missing and every later oem_marking write in this isolate 500s (the whole
+    // customer PUT fails, so OEM + phone + name silently don't save).
+    custOemColPromise = true;
   } catch {
-    // best-effort — column may already exist
+    // best-effort — column may already exist. Leave the flag false so a failed
+    // round retries on the next call instead of poisoning the isolate.
   }
-  custOemColPromise = true;
 }
 
 // ---------------------------------------------------------------------------

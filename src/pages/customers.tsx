@@ -3831,6 +3831,30 @@ export default function CustomersPage() {
         );
       },
     },
+    {
+      // Available = credit limit − outstanding. Derived on the client from the
+      // two ledger-backed fields already on the row, so it needs no new API. A
+      // customer with no limit (e.g. CASH terms) has no meaningful headroom.
+      key: "availableSen",
+      label: "Available",
+      width: "130px",
+      sortable: true,
+      align: "right",
+      sortAccessor: (row) => row.creditLimitSen - row.outstandingSen,
+      render: (_value, row) => {
+        if (row.creditLimitSen <= 0) return <span className="text-[#9CA3AF]">—</span>;
+        const available = row.creditLimitSen - row.outstandingSen;
+        const over = available <= 0;
+        return (
+          <span
+            className={`font-medium tabular-nums ${over ? "text-[#9A3A2D]" : "text-[#4F7C3A]"}`}
+            title={over ? "Over credit limit" : "Credit headroom remaining"}
+          >
+            {formatRM(available)}
+          </span>
+        );
+      },
+    },
   ];
 
   // ---------- Context menu ----------
@@ -4096,6 +4120,13 @@ export default function CustomersPage() {
               <div className="flex items-center gap-4 mt-2 text-sm text-[#6B7280] flex-wrap">
                 <span>Credit Limit: <strong className="text-[#1F1D1B]">{formatRM(cust.creditLimitSen)}</strong></span>
                 <span>Outstanding: <strong className="text-[#1F1D1B]">{formatRM(cust.outstandingSen)}</strong></span>
+                {cust.creditLimitSen > 0 && (() => {
+                  const available = cust.creditLimitSen - cust.outstandingSen;
+                  const over = available <= 0;
+                  return (
+                    <span>Available: <strong className={over ? "text-[#9A3A2D]" : "text-[#4F7C3A]"}>{formatRM(available)}</strong>{over ? " (over limit)" : ""}</span>
+                  );
+                })()}
                 <span>Terms: <Badge>{cust.creditTerms}</Badge></span>
               </div>
             </CardHeader>

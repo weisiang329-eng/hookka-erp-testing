@@ -323,6 +323,7 @@ this is the *load-bearing* path for schema.
 |---|---|---|
 | 2026-08-02 (am) | #222 converted 26 sites to `runSelfApply` | Half a fix. The helper throws "so the caller's memo can be cleared" — and 38 callers cleared nothing, so the retry it enables never happened. |
 | 2026-08-02 (pm) | The 38 remaining callers | 32 by codemod, 6 by hand (they swallowed errors inline). Two of the six guard *unique indexes* that win a concurrent-create race — an isolate that remembered a failed `CREATE INDEX` as done is exactly the one where two documents get the same number. |
+| 2026-08-04 | `ensureCustomerOemColumn` + `ensureCustomerGroupColumn` (`customers.ts`), `ensureCustomerStageColumns` (`customer-stage.ts`) | A THIRD variant the sweep produced: promise→boolean, but the setter was placed PAST the `catch`, so the boolean is set true even when the `ALTER` threw. All three feed columns in the customer PUT `UPDATE` (`oem_marking`, `group_org_code`, `customer_stage`, `salesperson_user_id`); one poisoned isolate 500s the whole save — the reported "OEM marking / phone / name won't save". Fixed by moving each setter INSIDE its try, after `.run()` (matching the correct `ensureCustomerCompanyColumn` next door). Behavioural cover: `tests/customer-stage-self-apply-retry.test.mjs` (the generic `self-apply-memo-is-boolean` test passes this variant — an `await` does precede the setter). |
 
 **The rule.** Memoise a **boolean**, set only after the statement lands
 (`src/api/lib/payment-columns.ts`), or use `memoizeSelfApply`, which clears the

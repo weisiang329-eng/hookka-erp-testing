@@ -53,7 +53,12 @@ import {
 } from "@/components/scan-cached-hint";
 import { bestMatch } from "@/lib/party-fuzzy-match";
 import { resolvePoLink, splitPoRefs } from "@/lib/po-ref-match";
-import { allocateLinesToPos, allocatedPoIds, headerPoId } from "@/lib/po-line-allocate";
+import {
+  allocateLinesToPos,
+  allocatedPoIds,
+  headerPoId,
+  type Allocation,
+} from "@/lib/po-line-allocate";
 import {
   buildCandidateTiers,
   indexByCode,
@@ -199,6 +204,33 @@ function makeUploadId(): string {
 // back to the host-supplied default if no match. The match is fuzzy
 // (uppercase + strip non-alphanumeric, then equality OR endsWith either way)
 // because real-world refs drift: "2606-007" vs "PO-2606-007" vs "PO2606007".
+/**
+ * Re-link a card to a NEW set of purchase orders.
+ *
+ * Owner 2026-08-04: "它一定要可以 multiselect，因为可能会有好几张 PO 跟着来，
+ * 也就是好几个 PO 都要 convert 这一个."
+ *
+ * The backend has been per-line since the multi-PO work — `grn_items.po_id /
+ * po_item_id` and `purchase_invoice_items.po_id` — so the only thing missing
+ * was letting the operator name more than one order.
+ *
+ * Re-running the allocation on EVERY change is the point, not an extra. The
+ * first cut computed each line's `poId` once when the card was built and never
+ * again, so changing the Linked PO by hand re-priced the lines while leaving
+ * them drawn down against the order they were first matched to — a silent
+ * mismatch between what the invoice says and what it consumes.
+ */
+function relinkToPos(
+  lines: Array<{ materialCode: string; supplierSku: string }>,
+  poIds: string[],
+  purchaseOrders: PurchaseOrder[],
+): { pos: PurchaseOrder[]; allocations: Array<Allocation | null> } {
+  const pos = poIds
+    .map((id) => purchaseOrders.find((p) => p.id === id) ?? null)
+    .filter((p): p is PurchaseOrder => p !== null);
+  return { pos, allocations: allocateLinesToPos(lines, pos) };
+}
+
 /**
  * What to tell the operator about an automatic match.
  *
@@ -997,6 +1029,13 @@ type PreviewCard = {
    */
   namedPoIds?: string[];
   touchedPoIds?: string[];
+  /**
+   * Every PO this invoice bills. One supplier invoice routinely covers several
+   * of our orders (owner 2026-08-04: "好几个 PO 都要 convert 这一个"), and
+   * `purchase_invoice_items.po_id` records the owner per LINE — so this is the
+   * real link and `purchaseOrderId` above is just the header for display.
+   */
+  purchaseOrderIds?: string[];
 };
 
 function makeBlankLine(): PreviewLine {
@@ -1575,6 +1614,7 @@ function CreatePIWizard({
         purchaseOrgCode: orgCode,
         // Header PO — display only now that each line carries its own.
         purchaseOrderId,
+        purchaseOrderIds: namedPoIds,
         namedPoIds,
         touchedPoIds,
         multiPoRefs:
@@ -2978,6 +3018,39 @@ function PICard({
   // linkedPoOptions hoisted above the early return (rules-of-hooks).
   const linkedPo = purchaseOrders.find((p) => p.id === card.purchaseOrderId) ?? null;
 
+  // Every PO this invoice bills. `purchaseOrderId` is the header (display +
+  // back-compat); `purchaseOrderIds` is the real set. A card built before the
+  // set existed falls back to its single header PO.
+  const linkedPoIds =
+    card.purchaseOrderIds && card.purchaseOrderIds.length > 0
+      ? card.purchaseOrderIds
+      : card.purchaseOrderId
+        ? [card.purchaseOrderId]
+        : [];
+
+  /**
+   * The patch for a NEW set of linked POs.
+   *
+   * Re-allocates every line across the new set and re-prices off each line's
+   * OWN order, so the invoice can never bill one PO while drawing down
+   * another. Doing this only at card-build time was the bug: changing the
+   * Linked PO by hand re-priced but left the old allocation in place.
+   */
+  const relinkPatch = (nextIds: string[]): Partial<PreviewCard> => {
+    const { pos, allocations } = relinkToPos(card.lines, nextIds, purchaseOrders);
+    const byId = new Map(pos.map((p) => [p.id, p]));
+    const lines = card.lines.map((l, i) => {
+      const poId = allocations[i]?.poId ?? null;
+      return applyPoPriceFill([{ ...l, poId }], byId.get(poId ?? "") ?? null)[0];
+    });
+    return {
+      purchaseOrderIds: nextIds,
+      purchaseOrderId: headerPoId(allocations, nextIds),
+      touchedPoIds: allocatedPoIds(allocations),
+      lines,
+    };
+  };
+
   return (
     <Card
       className={`border-2 transition-colors ${
@@ -3103,31 +3176,66 @@ function PICard({
               Linked PO {!card.supplierId && <span className="text-[#D1D5DB]">(pick supplier first)</span>}
             </label>
             <SearchableSelect
-              value={card.purchaseOrderId ?? ""}
+              // Adds to the set — one invoice may bill several of our orders
+              // (owner 2026-08-04: "好几个 PO 都要 convert 这一个"). Stays blank
+              // so it always reads as "add another", never as the current one.
+              value=""
               onChange={(poId) => {
-                // Fix A (owner 2026-06-30): when the operator picks a
-                // Linked PO, immediately walk the lines and auto-fill any
-                // 0-priced rows off the matching PO line. Live preview
-                // shows real prices BEFORE Create.
-                const nextPoId = poId || null;
-                const linkedPoNext = nextPoId
-                  ? purchaseOrders.find((p) => p.id === nextPoId) ?? null
-                  : null;
-                const nextLines = linkedPoNext
-                  ? applyPoPriceFill(card.lines, linkedPoNext)
-                  : card.lines;
-                onPatch({ purchaseOrderId: nextPoId, lines: nextLines });
+                if (!poId || linkedPoIds.includes(poId)) return;
+                onPatch(relinkPatch([...linkedPoIds, poId]));
               }}
-              options={linkedPoOptions}
+              options={linkedPoOptions.filter(
+                (o) => !linkedPoIds.includes(o.value),
+              )}
               placeholder={
                 !card.supplierId
                   ? "Select supplier first"
                   : linkedPoOptions.length === 0
                     ? "No open POs for this supplier"
-                    : "Search PO no..."
+                    : linkedPoIds.length === 0
+                      ? "Search PO no..."
+                      : "Add another PO..."
               }
               disabled={!!card.createdPiNo || !card.supplierId}
             />
+            {linkedPoIds.length > 0 && (
+              <div className="mt-1 flex flex-wrap gap-1">
+                {linkedPoIds.map((id) => {
+                  const po = purchaseOrders.find((p) => p.id === id);
+                  const owned = card.lines.filter((l) => l.poId === id).length;
+                  return (
+                    <span
+                      key={id}
+                      className="inline-flex items-center gap-1 rounded border border-[#E2DDD8] bg-white px-1.5 py-0.5 text-[11px] text-[#6B5C32]"
+                      title={
+                        owned > 0
+                          ? `${owned} line${owned !== 1 ? "s" : ""} billed against this PO`
+                          : "No line matched to this PO yet"
+                      }
+                    >
+                      {po?.poNo ?? id}
+                      <span className={owned > 0 ? "text-[#3A6B3A]" : "text-[#B8601A]"}>
+                        {owned}
+                      </span>
+                      {!card.createdPiNo && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onPatch(
+                              relinkPatch(linkedPoIds.filter((x) => x !== id)),
+                            )
+                          }
+                          className="text-[#9CA3AF] hover:text-[#9A3A2D]"
+                          title="Unlink this PO"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      )}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
             {card.multiPoRefs && card.multiPoRefs.length > 1 && (
               // This used to refuse to link anything, because a PI held ONE
               // purchaseOrderId. `purchase_invoice_items.po_id` records it per
@@ -3622,6 +3730,8 @@ type GRNPreviewCard = {
    */
   namedPoIds?: string[];
   touchedPoIds?: string[];
+  /** Every PO this receipt draws down — see the create-PI card. */
+  purchaseOrderIds?: string[];
   receiveDate: string;
   supplierDoNo: string;
   markedGold: boolean;
@@ -4094,6 +4204,7 @@ function CreateGRNWizard({
         // Header PO — display only now that ownership is per line. Falls back
         // to the host-supplied default when the document named nothing.
         purchaseOrderId,
+        purchaseOrderIds: namedPoIds,
         namedPoIds,
         touchedPoIds,
         receiveDate: docDate,
@@ -4959,6 +5070,32 @@ function GRNCard({
   );
   const linkedPo = purchaseOrders.find((p) => p.id === card.purchaseOrderId) ?? null;
 
+  // Every PO this receipt draws down — see the create-PI card for why the
+  // header alone is not enough.
+  const linkedPoIds =
+    card.purchaseOrderIds && card.purchaseOrderIds.length > 0
+      ? card.purchaseOrderIds
+      : card.purchaseOrderId
+        ? [card.purchaseOrderId]
+        : [];
+
+  /** Re-allocate every line across a NEW set of POs. */
+  const relinkPatch = (nextIds: string[]): Partial<GRNPreviewCard> => {
+    const { allocations } = relinkToPos(card.lines, nextIds, purchaseOrders);
+    return {
+      purchaseOrderIds: nextIds,
+      purchaseOrderId: headerPoId(allocations, nextIds),
+      touchedPoIds: allocatedPoIds(allocations),
+      lines: card.lines.map((l, i) => ({
+        ...l,
+        poId: allocations[i]?.poId ?? null,
+        poItemId: allocations[i]?.poItemId ?? null,
+        poItemIndex: allocations[i]?.poItemIndex ?? null,
+      })),
+    };
+  };
+
+
   const supplierLabel =
     suppliers.find((s) => s.id === card.supplierId)?.name ??
     card.originalExtraction.supplierName ??
@@ -5148,29 +5285,71 @@ function GRNCard({
               Linked PO {!card.supplierId && <span className="text-[#D1D5DB]">(pick supplier first)</span>}
             </label>
             <SearchableSelect
-              value={card.purchaseOrderId ?? ""}
-              onChange={(poId) => onPatch({ purchaseOrderId: poId || null })}
-              options={linkedPoOptions}
+              // Adds to the set — one delivery may cover several of our orders.
+              value=""
+              onChange={(poId) => {
+                if (!poId || linkedPoIds.includes(poId)) return;
+                onPatch(relinkPatch([...linkedPoIds, poId]));
+              }}
+              options={linkedPoOptions.filter(
+                (o) => !linkedPoIds.includes(o.value),
+              )}
               placeholder={
                 !card.supplierId
                   ? "Select supplier first"
                   : linkedPoOptions.length === 0
                     ? "No open POs for this supplier"
-                    : "Search PO no..."
+                    : linkedPoIds.length === 0
+                      ? "Search PO no..."
+                      : "Add another PO..."
               }
               disabled={!!card.createdGrnNo || !card.supplierId}
             />
-            {(card.namedPoIds?.length ?? 0) > 1 && (
+            {linkedPoIds.length > 0 && (
+              <div className="mt-1 flex flex-wrap gap-1">
+                {linkedPoIds.map((id) => {
+                  const po = purchaseOrders.find((p) => p.id === id);
+                  const owned = card.lines.filter((l) => l.poId === id).length;
+                  return (
+                    <span
+                      key={id}
+                      className="inline-flex items-center gap-1 rounded border border-[#E2DDD8] bg-white px-1.5 py-0.5 text-[11px] text-[#6B5C32]"
+                      title={
+                        owned > 0
+                          ? `${owned} line${owned !== 1 ? "s" : ""} received against this PO`
+                          : "No line matched to this PO yet"
+                      }
+                    >
+                      {po?.poNo ?? id}
+                      <span className={owned > 0 ? "text-[#3A6B3A]" : "text-[#B8601A]"}>
+                        {owned}
+                      </span>
+                      {!card.createdGrnNo && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onPatch(
+                              relinkPatch(linkedPoIds.filter((x) => x !== id)),
+                            )
+                          }
+                          className="text-[#9CA3AF] hover:text-[#9A3A2D]"
+                          title="Unlink this PO"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      )}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+            {linkedPoIds.length > 1 && (
               // A supplier delivers against several of our orders on one note
               // and that is ONE receipt (owner 2026-08-04: "一定要来自首两张 PO
               // 进一张 GR 的，这东西是串联的"). `grn_items.po_id/po_item_id`
               // records ownership per line; the picker above is the header only.
               <p className="mt-1 text-[11px] text-[#6B5C32]">
-                Receives {card.namedPoIds?.length} POs (
-                {(card.namedPoIds ?? [])
-                  .map((id) => purchaseOrders.find((p) => p.id === id)?.poNo ?? id)
-                  .join(", ")}
-                ) on one GRN, each line drawing down its own.
+                {linkedPoIds.length} POs on one GRN, each line drawing down its own.
                 {(() => {
                   const unallocated = card.lines.filter(
                     (l) => l.materialCode.trim() && !l.poId,

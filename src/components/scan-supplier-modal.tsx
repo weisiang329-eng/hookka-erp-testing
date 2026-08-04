@@ -232,6 +232,38 @@ function relinkToPos(
 }
 
 /**
+ * How much of this material the linked PO still has on order.
+ *
+ * The backend rejects an over-billed line, correctly — but it did so only AFTER
+ * Create, with no way forward from where the operator was standing (owner
+ * 2026-08-04: "你都知道有这种问题了，为什么你不解决呢？"). Knowing a document
+ * will be refused and letting someone submit it anyway is not a guard, it is an
+ * ambush.
+ *
+ * Shown per line in the preview instead. Deliberately compares against the PO's
+ * ORDERED quantity only — what other invoices already consumed needs a server
+ * round trip, and the API keeps the exact check. This is the early warning, not
+ * a second authority.
+ */
+function poOrderedFor(
+  line: { materialCode: string; poId?: string | null },
+  purchaseOrders: PurchaseOrder[],
+): { poNo: string; ordered: number } | null {
+  const code = normKey(line.materialCode);
+  if (!code || !line.poId) return null;
+  const po = purchaseOrders.find((p) => p.id === line.poId);
+  if (!po || !Array.isArray(po.items)) return null;
+  let ordered = 0;
+  let found = false;
+  for (const it of po.items) {
+    if (normKey(it.materialCode ?? "") !== code) continue;
+    ordered += Number(it.quantity) || 0;
+    found = true;
+  }
+  return found ? { poNo: po.poNo, ordered } : null;
+}
+
+/**
  * What to tell the operator about an automatic match.
  *
  * The three tiers are not equally trustworthy and the row should not pretend
@@ -2726,6 +2758,18 @@ function PreviewStep({
     (c) => c.include && !c.createdPiNo && c.lines.some(isLineUnbound),
   );
   const hasBlocking = blockingCards.length > 0;
+  // Cards the API will refuse because a line bills more than its PO ordered.
+  // Surfaced next to Create so it is visible without expanding every card —
+  // the operator used to find out only after submitting.
+  const overBilledCards = cards.filter(
+    (c) =>
+      c.include &&
+      !c.createdPiNo &&
+      c.lines.some((l) => {
+        const po = poOrderedFor(l, purchaseOrders);
+        return po ? (Number(l.qty) || 0) > po.ordered : false;
+      }),
+  );
   // Queue-state split: which uploads are still being read by Claude?
   const inFlight = queueItems.filter(
     (q) => q.status === "queued" || q.status === "processing",
@@ -2835,6 +2879,14 @@ function PreviewStep({
           Back
         </Button>
         <div className="flex items-center gap-3">
+          {overBilledCards.length > 0 && (
+            <span className="text-xs text-[#9A3A2D] max-w-md text-right">
+              {overBilledCards.length} card
+              {overBilledCards.length !== 1 ? "s" : ""} exceed what the PO ordered
+              — see the red line above. Create will be refused until the quantity
+              or the PO changes.
+            </span>
+          )}
           {hasBlocking && (
             <span className="text-xs text-[#9A3A2D] max-w-md text-right">
               Pick a catalog code on {blockingCards.length} card
@@ -3473,6 +3525,23 @@ function PICard({
                     </td>
                   </tr>
                 )}
+                {(() => {
+                  const po = poOrderedFor(line, purchaseOrders);
+                  const billed = Number(line.qty) || 0;
+                  if (!po || billed <= po.ordered) return null;
+                  return (
+                    <tr className="bg-[#FFF5F0]">
+                      <td colSpan={8} className="px-3 py-1">
+                        <div className="text-[11px] text-[#9A3A2D]">
+                          Billing {billed} but {po.poNo} only ordered {po.ordered} —
+                          this will be refused on Create. Change the quantity here to
+                          what the PO covers, or amend {po.poNo} to {billed} first if
+                          the supplier really delivered the extra.
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })()}
                 {(lineUnbound || codeBoundNoSku) && (
                   <tr className="bg-[#FFF5F0]">
                     <td colSpan={8} className="px-3 py-1">
@@ -4883,6 +4952,18 @@ function GRNPreviewStep({
     (c) => c.include && !c.createdGrnNo && c.lines.some(isLineUnbound),
   );
   const hasBlocking = blockingCards.length > 0;
+  // Cards the API will refuse because a line bills more than its PO ordered.
+  // Surfaced next to Create so it is visible without expanding every card —
+  // the operator used to find out only after submitting.
+  const overBilledCards = cards.filter(
+    (c) =>
+      c.include &&
+      !c.createdGrnNo &&
+      c.lines.some((l) => {
+        const po = poOrderedFor(l, purchaseOrders);
+        return po ? (Number(l.receivedQty) || 0) > po.ordered : false;
+      }),
+  );
   const inFlight = queueItems.filter(
     (q) => q.status === "queued" || q.status === "processing",
   );
@@ -4988,6 +5069,14 @@ function GRNPreviewStep({
           Back
         </Button>
         <div className="flex items-center gap-3">
+          {overBilledCards.length > 0 && (
+            <span className="text-xs text-[#9A3A2D] max-w-md text-right">
+              {overBilledCards.length} card
+              {overBilledCards.length !== 1 ? "s" : ""} exceed what the PO ordered
+              — see the red line above. Create will be refused until the quantity
+              or the PO changes.
+            </span>
+          )}
           {hasBlocking && (
             <span className="text-xs text-[#9A3A2D]">
               {blockingCards.length} card{blockingCards.length !== 1 ? "s have" : " has"} unbound line{blockingCards.length !== 1 ? "s" : ""} — pick from catalog
@@ -5563,6 +5652,23 @@ function GRNCard({
                     </td>
                   </tr>
                 )}
+                {(() => {
+                  const po = poOrderedFor(line, purchaseOrders);
+                  const billed = Number(line.receivedQty) || 0;
+                  if (!po || billed <= po.ordered) return null;
+                  return (
+                    <tr className="bg-[#FFF5F0]">
+                      <td colSpan={8} className="px-3 py-1">
+                        <div className="text-[11px] text-[#9A3A2D]">
+                          Receiving {billed} but {po.poNo} only ordered {po.ordered} —
+                          this will be refused on Create. Change the quantity here to
+                          what the PO covers, or amend {po.poNo} to {billed} first if
+                          the supplier really delivered the extra.
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })()}
                 {(lineUnbound || codeBoundNoSku) && (
                   <tr className="bg-[#FFF5F0]">
                     <td colSpan={8} className="px-3 py-1">

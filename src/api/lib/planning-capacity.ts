@@ -67,6 +67,20 @@ export interface ChainConfig {
   foamCutLeadDays: number;
   /** Foam Cutting: minutes/day. Measured throughput overrides this. */
   foamCutCapMin: number;
+  /**
+   * Walk-in reserve (owner 2026-08-04: "有些时候他们会一直插单").
+   *
+   * The near days are packed FULL — that work is imminent and there is no
+   * point holding capacity back from it. From `reserveAfterDay` onwards a
+   * slice of each day is left unplanned so an order that walks in tomorrow
+   * has somewhere to go; without it the plan fills every future day and every
+   * insert forces a reshuffle of work already promised to the floor.
+   *
+   * Owner's numbers: full for the first 3 working days, then hold back 10-20%.
+   */
+  reserveAfterDay: number;
+  /** Percent of a day held back beyond `reserveAfterDay` (0-90). */
+  reservePct: number;
   /** Upholstery: minutes/day per lane (BEDFRAME 24h, SOFA 12h). */
   uphCapMin: { BEDFRAME: number; SOFA: number };
   /** Upstream → upholstery handoff in working days. */
@@ -95,6 +109,8 @@ export const DEFAULT_CHAIN_CONFIG: ChainConfig = {
   foamHandoffDays: 1,
   foamCutLeadDays: 1,
   foamCutCapMin: 8 * 60,
+  reserveAfterDay: 3,
+  reservePct: 15,
   uphCapMin: { BEDFRAME: 24 * 60, SOFA: 12 * 60 },
   uphHandoffDays: 1,
 };
@@ -241,6 +257,8 @@ function cloneChain(): ChainConfig {
     foamHandoffDays: c.foamHandoffDays,
     foamCutLeadDays: c.foamCutLeadDays,
     foamCutCapMin: c.foamCutCapMin,
+    reserveAfterDay: c.reserveAfterDay,
+    reservePct: c.reservePct,
     uphCapMin: { ...c.uphCapMin },
     uphHandoffDays: c.uphHandoffDays,
   };
@@ -283,6 +301,8 @@ function mergeChain(base: ChainConfig, override: unknown): void {
     "foamHandoffDays",
     "uphHandoffDays",
     "foamCutLeadDays",
+    "reserveAfterDay",
+    "reservePct",
   ] as const) {
     const v = nonNegInt(o[key]);
     if (v !== null) base[key] = v;

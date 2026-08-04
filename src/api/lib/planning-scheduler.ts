@@ -558,6 +558,15 @@ function scheduleLaneMinutes(
   budgetFn: (d: number) => number,
   days: Map<number, MinuteDay>,
 ): void {
+  // Walk-in reserve, same rule the downstream chain uses: the near days are
+  // packed full, later days keep a slice free so an insert has somewhere to go
+  // (owner 2026-08-04 — "他们会一直插单").
+  const usable = (d: number): number => {
+    const raw = budgetFn(d);
+    if (cal.workdayIndex(d) <= cfg.chain.reserveAfterDay) return raw;
+    const pct = Math.min(90, Math.max(0, cfg.chain.reservePct));
+    return Math.max(1, Math.round(raw * (1 - pct / 100)));
+  };
   for (const g of groups) {
     let d = g.floor || cal.day1;
     let guard = 0;
@@ -565,7 +574,7 @@ function scheduleLaneMinutes(
       guard++;
       const day = days.get(d) ?? { used: 0, lastFabric: null };
       const cost = groupCostMin(g, lane, cfg, day.lastFabric);
-      const budget = budgetFn(d);
+      const budget = usable(d);
       if (day.used + cost <= budget || (day.used === 0 && cost > budget) || guard > 3650) {
         day.used += cost;
         day.lastFabric = groupFabrics(g)[groupFabrics(g).length - 1];

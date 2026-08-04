@@ -298,6 +298,26 @@ function pinnedDayOf(cards: ChainCard[], cal: Calendar): number | null {
 }
 
 /**
+ * A day's usable budget after the walk-in reserve.
+ *
+ * Owner 2026-08-04: the first `reserveAfterDay` working days are packed FULL —
+ * that work is imminent and holding capacity back from it helps nobody. Beyond
+ * them a slice is left unplanned, because inserts arrive constantly ("他们会一直
+ * 插单") and a plan that fills every future day forces each one to reshuffle
+ * work already promised to the floor.
+ *
+ * The reserve is a CEILING on planning, not a reduction in capacity: the floor
+ * still has the whole day, the scheduler simply declines to spend the last
+ * slice of it this far out.
+ */
+function dayBudget(cal: Calendar, chain: ChainConfig, cap: number, day: number): number {
+  const idx = cal.workdayIndex(day);
+  if (idx <= chain.reserveAfterDay) return cap;
+  const pct = Math.min(90, Math.max(0, chain.reservePct));
+  return Math.max(1, Math.round(cap * (1 - pct / 100)));
+}
+
+/**
  * The day a unit should occupy: THE one piece of placement logic, shared by
  * every department instead of hand-copied into each.
  *
@@ -315,6 +335,7 @@ function pinnedDayOf(cards: ChainCard[], cal: Calendar): number | null {
  */
 function firstDayWithRoom(
   cal: Calendar,
+  chain: ChainConfig,
   load: Map<number, number>,
   cost: number,
   cap: number,
@@ -324,7 +345,11 @@ function firstDayWithRoom(
   if (pin !== null) return pin;
   let d = Math.max(floor, cal.day1);
   let guard = 0;
-  while ((load.get(d) ?? 0) + cost > cap && (load.get(d) ?? 0) !== 0 && guard < 3650) {
+  while (
+    (load.get(d) ?? 0) + cost > dayBudget(cal, chain, cap, d) &&
+    (load.get(d) ?? 0) !== 0 &&
+    guard < 3650
+  ) {
     d = cal.stepWorkday(d);
     guard++;
   }
@@ -397,6 +422,7 @@ interface OtPlaceable {
 function placeUnitsWithOt<T>(
   units: T[],
   cal: Calendar,
+  chain: ChainConfig,
   cap: number,
   load: Map<number, number>,
   read: (u: T) => OtPlaceable,
@@ -429,7 +455,10 @@ function placeUnitsWithOt<T>(
     return { late, lastDeadline };
   };
 
-  const first = run(() => cap);
+  // The walk-in reserve applies to the normal pass; OVERTIME deliberately
+  // ignores it — once a promise is at risk, holding a slice back for a
+  // hypothetical future order would be the wrong trade.
+  const first = run((d) => dayBudget(cal, chain, cap, d));
   if (first.late.length === 0) return new Map();
 
   const shortfall = first.late.reduce((s, u) => s + read(u).cost, 0);
@@ -437,10 +466,14 @@ function placeUnitsWithOt<T>(
   const perDay = otPerDay(shortfall, spreadDays);
   if (perDay <= 0) return new Map();
 
-  const second = run((day) => (cal.workdayIndex(day) <= spreadDays ? cap + perDay : cap));
+  const second = run((day) =>
+    cal.workdayIndex(day) <= spreadDays
+      ? dayBudget(cal, chain, cap, day) + perDay
+      : dayBudget(cal, chain, cap, day),
+  );
   // Keep the OT plan only when it actually rescued something.
   if (second.late.length >= first.late.length) {
-    run(() => cap);
+    run((d) => dayBudget(cal, chain, cap, d));
     return new Map();
   }
 
@@ -587,7 +620,7 @@ function runSewing(
     );
     for (const g of glist) {
       const pin = pinnedDayOf(g.cards.map((c) => c.card), cal);
-      const d = firstDayWithRoom(cal, load, g.mins, cap, g.floor, pin);
+      const d = firstDayWithRoom(cal, chain, load, g.mins, cap, g.floor, pin);
       g.start = d;
       let cur = d;
       let room = cap - (load.get(cur) ?? 0);
@@ -947,6 +980,7 @@ function runWood(
     placeUnitsWithOt(
       us,
       cal,
+      chain,
       cap,
       load,
       (u) => ({
@@ -1327,6 +1361,7 @@ function runFraming(
     placeUnitsWithOt(
       us,
       cal,
+      chain,
       cap,
       load,
       (u) => ({
@@ -1386,6 +1421,7 @@ function runFraming(
   placeUnitsWithOt(
     foamUnits,
     cal,
+    chain,
     foamCap,
     foamLoad,
     (u) => ({
@@ -1456,6 +1492,7 @@ function runFraming(
     placeUnitsWithOt(
       us,
       cal,
+      chain,
       cap,
       load,
       (u) => ({
@@ -1523,6 +1560,7 @@ function runFraming(
     placeUnitsWithOt(
       packUnits,
       cal,
+      chain,
       packCap,
       packLoad,
       (u) => ({

@@ -1992,12 +1992,18 @@ function CreatePIWizard({
             body: JSON.stringify(payload),
           });
           const j = (await res.json().catch(() => null)) as
-            | { success?: boolean; error?: string; data?: { piNo?: string; id?: string } }
+            | { success?: boolean; error?: string; ref?: string; data?: { piNo?: string; id?: string } }
             | null;
           if (!res.ok || !j?.success) {
+            // Surface the server's error REF. A 500 deliberately hides the
+            // real message (it can leak schema names), so without the ref the
+            // operator's only report is "something went wrong" and the failure
+            // cannot be traced in the logs at all.
             patchCard(card.id, {
               creating: false,
-              createError: j?.error || `HTTP ${res.status}`,
+              createError: j?.ref
+                ? `${j.error || `HTTP ${res.status}`} (ref ${j.ref})`
+                : j?.error || `HTTP ${res.status}`,
             });
             return;
           }
@@ -4412,12 +4418,15 @@ function CreateGRNWizard({
             body: JSON.stringify(payload),
           });
           const j = (await res.json().catch(() => null)) as
-            | { success?: boolean; error?: string; data?: { grnNumber?: string; grnNo?: string; id?: string } }
+            | { success?: boolean; error?: string; ref?: string; data?: { grnNumber?: string; grnNo?: string; id?: string } }
             | null;
           if (!res.ok || !j?.success) {
+            // Same as create-PI: without the ref a 500 is untraceable.
             patchCard(card.id, {
               creating: false,
-              createError: j?.error || `HTTP ${res.status}`,
+              createError: j?.ref
+                ? `${j.error || `HTTP ${res.status}`} (ref ${j.ref})`
+                : j?.error || `HTTP ${res.status}`,
             });
             return;
           }

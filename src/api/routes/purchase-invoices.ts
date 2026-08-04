@@ -16,6 +16,7 @@ import { runSelfApply } from "../lib/self-apply";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
+import { learnSupplierBindings } from "../lib/supplier-binding-learn";
 import { getOrgId } from "../lib/tenant";
 import {
   buildJournalEntryStatements,
@@ -1350,6 +1351,24 @@ app.post("/", async (c) => {
         now, now,
       );
     await db.batch(statements);
+  }
+
+  // Remember what this invoice just proved: supplier wording ↔ internal code.
+  // That pairing used to be discarded, so the same supplier document was
+  // re-picked by hand every month (owner 2026-08-04).
+  if (normalizedItems && normalizedItems.ok) {
+    await learnSupplierBindings(
+      db,
+      String(body.supplierId ?? ""),
+      normalizedItems.rows.map((r) => ({
+        materialCode: r.materialCode,
+        materialName: r.materialName,
+        supplierSku: r.supplierSku,
+        supplierDescription: r.materialName,
+        unitPriceSen: r.unitPriceSen,
+      })),
+      () => `smb-${crypto.randomUUID().slice(0, 8)}`,
+    ).catch(() => undefined);
   }
 
   await emitAudit(c, {

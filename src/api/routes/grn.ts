@@ -26,6 +26,7 @@ import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { makeLedgerEntry } from "../../lib/costing";
 import { emitAudit } from "../lib/audit";
+import { learnSupplierBindings } from "../lib/supplier-binding-learn";
 import { availableQty as computeAvailableQty, clampDecrement } from "../../lib/convert-chain";
 import { checkGrnLineQtyEdit, isGrnLockedByDownstreamPi, grnLockedByDownstreamPiError } from "../../lib/purchase-edit-rules";
 import { PO_ITEMS_ORDER, ensurePoItemLineNo } from "./purchase-orders";
@@ -1516,6 +1517,22 @@ app.post("/", async (c) => {
     ];
 
     await c.var.DB.batch(statements);
+
+    // Remember what this receipt just proved: supplier wording ↔ internal code.
+    // Until now that pairing was discarded, so the same supplier document was
+    // re-picked by hand every time it arrived (owner 2026-08-04).
+    await learnSupplierBindings(
+      c.var.DB,
+      grnSupplierId,
+      grnItems.map((i) => ({
+        materialCode: i.materialCode,
+        materialName: i.materialName,
+        supplierSku: (i as { supplierSku?: string | null }).supplierSku ?? null,
+        supplierDescription: i.materialName,
+        unitPriceSen: i.unitPrice,
+      })),
+      genGrnId,
+    ).catch(() => undefined);
 
     // ── Post to stock on a born-POSTED (arrived) GRN ─────────────────────────
     // When the create status is POSTED (local / arrived goods), commit the

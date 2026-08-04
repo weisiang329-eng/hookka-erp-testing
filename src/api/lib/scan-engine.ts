@@ -158,6 +158,8 @@ export type SupplierDoc = {
   supplierName?: string | null;
   docType?: string | null;
   docNo?: string | null;
+  /** The supplier's D/O reference when the document cites one as well. */
+  deliveryOrderNo?: string | null;
   docDate?: string | null;
   currency?: string | null;
   customerPoRef?: string | null;
@@ -222,6 +224,7 @@ export function sanitizeSupplierDoc(
     supplierName: str(raw.supplierName),
     docType: str(raw.docType),
     docNo: str(raw.docNo),
+    deliveryOrderNo: str(raw.deliveryOrderNo),
     docDate: str(raw.docDate),
     currency: str(raw.currency) ?? "MYR",
     customerPoRef: str(raw.customerPoRef),
@@ -270,6 +273,7 @@ PER-DOCUMENT EXTRACTION RULES
 - supplierName: the supplier's company name from the letterhead (the SENDER / seller — NOT "Hookka", who is the buyer/recipient).
 - docType: "DELIVERY_NOTE" if it is a delivery order/note (no prices, or "D/O"), "INVOICE" if it is a tax invoice (has prices + invoice no.), else "OTHER".
 - docNo: the supplier's own document number (their DO no. or invoice no.), verbatim incl. any prefix.
+- deliveryOrderNo: the supplier's DELIVERY ORDER number when the document prints one ALONGSIDE its own number — labels like "Our D/O No", "D/O No", "DO No.", "Delivery Order No". An INVOICE routinely cites the D/O it bills, and that is the only field tying the invoice to the goods received, so capture it even when it is identical to docNo. null when the document prints no D/O reference at all.
 - docDate: ISO YYYY-MM-DD. Convert DD/MM/YYYY (Malaysian convention) correctly — 03/06/2026 is 2026-06-03.
 - customerPoRef: the BUYER-side purchase order reference the supplier wrote on their doc. Look for labels like "Customer P.O.", "Cust P.O.", "P.O. No", "B.O. NO.", "Buyer Order", "Cust DO No.", "Customer Order". Return the value verbatim (e.g. "2606-007", "PO-000123", "K20061904"). null if not printed. This lets the buyer auto-link the scanned doc to an existing purchase order.
 - currency: ISO code, default "MYR" if a Malaysian RM document doesn't say otherwise.
@@ -290,7 +294,7 @@ PER-DOCUMENT EXTRACTION RULES
 NUMBERS: plain numbers, no currency symbol, no commas. Use a dot decimal. If a field is genuinely absent, use null — never guess.
 
 OUTPUT: VALID JSON ONLY, this exact shape, no preamble, no markdown, no chain-of-thought. First character '{', last character '}':
-{"docs": [{"supplierName": string|null, "docType": "DELIVERY_NOTE"|"INVOICE"|"OTHER", "docNo": string|null, "docDate": string|null, "currency": string|null, "customerPoRef": string|null, "lines": [{"supplierCode": string|null, "description": string|null, "qty": number|null, "uom": string|null, "unitPrice": number|null, "amount": number|null, "tax": number|null, "discount": number|null, "density": string|null, "thickness": string|null}], "subtotal": number|null, "tax": number|null, "total": number|null, "discount": number|null}]}`;
+{"docs": [{"supplierName": string|null, "docType": "DELIVERY_NOTE"|"INVOICE"|"OTHER", "docNo": string|null, "deliveryOrderNo": string|null, "docDate": string|null, "currency": string|null, "customerPoRef": string|null, "lines": [{"supplierCode": string|null, "description": string|null, "qty": number|null, "uom": string|null, "unitPrice": number|null, "amount": number|null, "tax": number|null, "discount": number|null, "density": string|null, "thickness": string|null}], "subtotal": number|null, "tax": number|null, "total": number|null, "discount": number|null}]}`;
 
 function formatSupplierRules(
   supplierName: string | null,

@@ -103,6 +103,12 @@ export type SupplierExtraction = {
    *  NO." field). Used to auto-link the scanned doc to an existing
    *  purchase order. */
   customerPoRef?: string | null;
+  /** The supplier's D/O reference when the document cites one as well as its
+   *  own number. An INVOICE routinely prints both ("INVOICE : 549389" and
+   *  "Our D/O No : 549389") and the D/O is what ties it to the goods received
+   *  — with only `docNo` to route, the Supplier DO field could never fill on
+   *  an invoice (owner 2026-08-04: "为什么他的 Supplier DO 也是没有出来？"). */
+  deliveryOrderNo?: string | null;
   lines?: ExtractedSupplierLine[];
   subtotal?: number | null;
   tax?: number | null;
@@ -1385,6 +1391,10 @@ function CreatePIWizard({
 
       const dt = (ex.docType ?? "").toUpperCase();
       const docNo = (ex.docNo ?? "").trim();
+      // A document can carry BOTH numbers. Route `docNo` by type as before,
+      // then let an explicitly-read D/O reference fill the DO field whatever
+      // the type — that is the only link from an invoice to its receipt.
+      const doNo = (ex.deliveryOrderNo ?? "").trim();
       let supInvNo = "";
       let supDoNo = "";
       if (docNo) {
@@ -1392,6 +1402,7 @@ function CreatePIWizard({
         else if (dt === "DELIVERY_NOTE") supDoNo = docNo;
         else supInvNo = docNo;
       }
+      if (!supDoNo && doNo) supDoNo = doNo;
 
       const docDate =
         ex.docDate && /^\d{4}-\d{2}-\d{2}$/.test(ex.docDate)
@@ -3939,7 +3950,9 @@ function CreateGRNWizard({
       const orgCode = sup?.purchaseOrgCode ?? activeOrgs[0]?.code ?? "HOOKKA";
 
       const docNo = (ex.docNo ?? "").trim();
-      const supDoNo = docNo;
+      // Prefer an explicitly-read D/O reference; fall back to the document's
+      // own number (a delivery note's docNo IS its D/O number).
+      const supDoNo = (ex.deliveryOrderNo ?? "").trim() || docNo;
 
       const docDate =
         ex.docDate && /^\d{4}-\d{2}-\d{2}$/.test(ex.docDate)

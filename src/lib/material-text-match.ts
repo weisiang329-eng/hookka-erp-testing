@@ -114,6 +114,61 @@ export function similarity(a: string, b: string): number {
  * ambiguous line is exactly the case where an automatic choice books against
  * the wrong material, and a human pick costs seconds.
  */
+/** A size-like token: `4X8`, `1220X2440`, `9MM`, `2INCH`, `28`. */
+function isDimensionToken(t: string): boolean {
+  return /^\d/.test(t);
+}
+
+/**
+ * Tokens that distinguish the candidates from each other.
+ *
+ * A word every candidate shares carries no information — every plywood row
+ * says PLYWOOD — while the size the supplier always prints is precisely what
+ * separates a 4X8 board from a 4X6 one. Weighting by rarity puts the decision
+ * where the evidence actually is, instead of letting three shared words drown
+ * out the one that matters.
+ */
+function discriminatingWeights(candidates: string[]): Map<string, number> {
+  const docFreq = new Map<string, number>();
+  for (const c of candidates) {
+    for (const t of new Set(tokenize(c))) docFreq.set(t, (docFreq.get(t) ?? 0) + 1);
+  }
+  const n = Math.max(1, candidates.length);
+  const w = new Map<string, number>();
+  for (const [t, df] of docFreq) {
+    // 1 when the token appears in a single candidate, → 0 when it is in all.
+    w.set(t, Math.log((n + 1) / (df + 0.5)) / Math.log(n + 1));
+  }
+  return w;
+}
+
+/** Weighted overlap of the supplier's tokens against one candidate. */
+function weightedScore(text: string, candidate: string, w: Map<string, number>): number {
+  const ta = tokenize(text);
+  const tb = new Set(tokenize(candidate));
+  if (ta.length === 0 || tb.size === 0) return 0;
+  let hit = 0;
+  let total = 0;
+  for (const t of new Set(ta)) {
+    const weight = (w.get(t) ?? 1) + 0.15; // floor so a shared word still counts a little
+    total += weight;
+    if (tb.has(t)) hit += weight;
+  }
+  if (total === 0) return 0;
+  let score = hit / total;
+
+  // A stated size that CONTRADICTS the candidate is evidence against, not
+  // merely absent evidence. The supplier always prints the size, so a mismatch
+  // means this is a different board.
+  const supplierDims = [...new Set(ta)].filter(isDimensionToken);
+  const candDims = [...tb].filter(isDimensionToken);
+  if (supplierDims.length > 0 && candDims.length > 0) {
+    const agreed = supplierDims.filter((d) => tb.has(d)).length;
+    if (agreed === 0) score *= 0.4;
+  }
+  return score;
+}
+
 export function matchCatalogItem<T extends CatalogItem>(
   text: string,
   catalog: T[],
@@ -123,12 +178,25 @@ export function matchCatalogItem<T extends CatalogItem>(
   const minMargin = opts.minMargin ?? MIN_MARGIN;
   if (!text.trim() || catalog.length === 0) return null;
 
+  // Weights come from THIS candidate set — what distinguishes two boards from
+  // one supplier is not what distinguishes the whole catalogue.
+  const corpus = catalog.flatMap((i) => [i.description ?? "", i.itemCode]).filter(Boolean);
+  const weights = discriminatingWeights(corpus);
+
   const scored = catalog
     .map((item) => ({
       item,
       // An item's own code is often what a supplier prints, so score against
-      // both the description and the code and keep the better reading.
-      score: Math.max(similarity(text, item.description ?? ""), similarity(text, item.itemCode)),
+      // both the description and the code and keep the better reading. Plain
+      // similarity is kept as a floor for the single-candidate case, where
+      // there is nothing to discriminate against.
+      score: Math.max(
+        weightedScore(text, item.description ?? "", weights),
+        weightedScore(text, item.itemCode, weights),
+        catalog.length === 1
+          ? Math.max(similarity(text, item.description ?? ""), similarity(text, item.itemCode))
+          : 0,
+      ),
     }))
     .filter((s) => s.score > 0)
     .sort((a, b) => b.score - a.score);

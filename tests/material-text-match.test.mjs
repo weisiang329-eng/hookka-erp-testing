@@ -83,15 +83,81 @@ test("one shared word alone can never carry a match", () => {
   );
 });
 
-test("a vague entry cannot outrank a specific one silently", () => {
-  // Both score full marks — one by containment, one by exact overlap — so the
-  // line is ambiguous and must go to a human rather than pick the vaguer row.
+test("a specific entry beats a vague one that merely fits inside the line", () => {
+  // "PLYWOOD 9MM" is contained by the line, so a containment-only reading
+  // called this a tie and refused. Weighting by what DISTINGUISHES the
+  // candidates settles it properly: 4X8 and AB belong to one row only, and
+  // they are exactly the tokens the supplier printed.
   const mixed = [
     { itemCode: "VAGUE", description: "PLYWOOD 9MM" },
     { itemCode: "EXACT", description: "PLYWOOD 9MM 4X8 AB" },
   ];
   const m = matchCatalogItem(`9MM 4' X 8' PLYWOOD AB`, mixed);
-  assert.equal(m, null, "a tie between a vague and a specific entry must be refused");
+  assert.ok(m, "the line names a size — that is enough to choose");
+  assert.equal(m.item.itemCode, "EXACT");
+  assert.ok(m.margin > 0.2, "and it should win clearly, not by a hair");
+});
+
+test("but a line with nothing distinguishing in it is still refused", () => {
+  const mixed = [
+    { itemCode: "VAGUE", description: "PLYWOOD 9MM" },
+    { itemCode: "EXACT", description: "PLYWOOD 9MM 4X8 AB" },
+  ];
+  assert.equal(
+    matchCatalogItem("PLYWOOD 9MM", mixed),
+    null,
+    "shared words alone must never pick a row",
+  );
+});
+
+// ── The size is the evidence ────────────────────────────────────────────────
+// The supplier always prints it, and it is the only thing separating these
+// rows — so it has to outweigh the words every candidate shares.
+
+const SIZES = [
+  { itemCode: "PLY-9-48-AB", description: "PLYWOOD 9MM 4X8 AB" },
+  { itemCode: "PLY-9-46-AB", description: "PLYWOOD 9MM 4X6 AB" },
+  { itemCode: "PLY-9-1224-AB", description: "PLYWOOD 9MM 1220X2440 AB" },
+];
+
+test("a stated size picks its board out of near-identical siblings", () => {
+  for (const [line, expected] of [
+    [`9MM 4' X 8' PLYWOOD AB`, "PLY-9-48-AB"],
+    [`9MM 4' X 6' PLYWOOD AB`, "PLY-9-46-AB"],
+    ["PLYWOOD 9MM 1220X2440 AB", "PLY-9-1224-AB"],
+  ]) {
+    const m = matchCatalogItem(line, SIZES);
+    assert.ok(m, `${line} should resolve — the size says which board it is`);
+    assert.equal(m.item.itemCode, expected);
+  }
+});
+
+test("shared words cannot outvote the size", () => {
+  // PLYWOOD, 9MM and AB appear on every row and carry no information; only the
+  // size does. A match must therefore be clear of the runner-up, not marginal.
+  const m = matchCatalogItem(`9MM 4' X 8' PLYWOOD AB`, SIZES);
+  assert.ok(m.margin > 0.2, `expected a decisive win, got margin ${m.margin}`);
+});
+
+test("no size stated means no basis to choose", () => {
+  assert.equal(
+    matchCatalogItem("PLYWOOD 9MM AB", SIZES),
+    null,
+    "without the discriminating token the line is genuinely ambiguous",
+  );
+});
+
+test("a contradicting size counts against, not merely as absent", () => {
+  // One candidate, wrong size. Silence would be "no evidence"; a stated size
+  // that disagrees is evidence this is a different board.
+  const only48 = [SIZES[0]];
+  const wrong = matchCatalogItem(`9MM 4' X 6' PLYWOOD AB`, only48);
+  const right = matchCatalogItem(`9MM 4' X 8' PLYWOOD AB`, only48);
+  assert.ok(right, "the matching size must still resolve");
+  assert.ok(
+    !wrong || wrong.score < right.score,
+    "a conflicting size must score strictly worse than an agreeing one",
+  );
 });
 
 test("an unrelated line matches nothing rather than the nearest thing", () => {

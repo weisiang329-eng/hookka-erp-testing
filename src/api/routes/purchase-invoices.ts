@@ -25,6 +25,7 @@ import {
 import { nextMonthDueDate } from "../../lib/terms";
 import { issueDocNumber } from "../lib/doc-number-service";
 import { checkConvertAvailability, clampDecrement, type ConvertLineRequest } from "../../lib/convert-chain";
+import { PI_STATUS_CHECK_SQL } from "../lib/ensure-partial-payment";
 import { buildPiApprovalLegs } from "../../lib/pi-posting";
 import { isPiEditable, piEditBlockedError } from "../../lib/purchase-edit-rules";
 
@@ -62,15 +63,14 @@ function ensurePiMigrations(db: D1Database): Promise<void> {
       // Inherits PO → GRN → supplier → HOOKKA on create; never null.
       "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS purchase_org_code TEXT",
       "UPDATE purchase_invoices SET purchase_org_code = 'HOOKKA' WHERE purchase_org_code IS NULL",
-      // Lifecycle simplification (owner 2026-06-29): the old CHECK constraint
-      // listed PENDING_APPROVAL / APPROVED and did NOT include the new
-      // CONFIRMED — owner hit it on the backfill UPDATE. Drop and recreate
-      // with both the new vocab AND the legacy values so the transition
-      // window is safe (idempotent — re-running is fine, the IF EXISTS / re-
-      // ADD pattern doesn't double-add).
-      "ALTER TABLE purchase_invoices DROP CONSTRAINT IF EXISTS purchase_invoices_status_chk",
-      "ALTER TABLE purchase_invoices ADD CONSTRAINT purchase_invoices_status_chk " +
-        "CHECK (status IN ('DRAFT','CONFIRMED','PAID','CANCELLED','PENDING_APPROVAL','APPROVED'))",
+      // The status CHECK. This used to keep its OWN list here — which omitted
+      // 'PARTIAL_PAID', because it predates partial supplier payments. Once one
+      // invoice reached PARTIAL_PAID the ALTER could never succeed again, and
+      // `runSelfApply` THROWS on a real failure while being awaited at the top
+      // of the create handler below: every purchase invoice create failed from
+      // that moment, with the reason stripped by the global 500 handler.
+      // Shared list now, so the two definitions cannot drift apart again.
+      ...PI_STATUS_CHECK_SQL,
       // Now collapse PENDING_APPROVAL / APPROVED rows into CONFIRMED. Safe
       // because the CHECK above accepts CONFIRMED. Idempotent.
       "UPDATE purchase_invoices SET status = 'CONFIRMED' WHERE status IN ('PENDING_APPROVAL','APPROVED')",

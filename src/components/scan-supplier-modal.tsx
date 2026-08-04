@@ -53,6 +53,7 @@ import {
 } from "@/components/scan-cached-hint";
 import { bestMatch } from "@/lib/party-fuzzy-match";
 import { resolvePoLink, splitPoRefs } from "@/lib/po-ref-match";
+import { matchCatalogItem } from "@/lib/material-text-match";
 import {
   resolveAlias,
   usePartyAliases,
@@ -885,6 +886,13 @@ type PreviewLine = {
   // truth). When ALL lines are 0 AND the OCR captured a footer tax, that
   // footer is distributed pro-rata across goods lines (existing behavior).
   taxRM: number;
+  /**
+   * True when the internal code came from matching the READ TEXT to the
+   * catalogue rather than from a saved supplier binding. Shown in the table so
+   * the operator can tell a machine guess from an established mapping — the
+   * guess is deliberately conservative, but it is still a guess.
+   */
+  autoMatched?: boolean;
 };
 
 type PreviewCard = {
@@ -1261,9 +1269,26 @@ function CreatePIWizard({
             if (!binding) binding = resolveBindingForMaterial(sId, desc);
           }
         }
-        const rm = binding
+        let rm = binding
           ? materialByCode.get(binding.materialCode.trim().toUpperCase())
           : null;
+        // 3) No binding at all — the FIRST time an item appears there is
+        //    nothing saved to match against. The OCR did read the supplier's
+        //    own wording though, so use it: match that text to the catalogue
+        //    directly instead of making the operator pick a line the scanner
+        //    could identify by itself. Deliberately conservative — an
+        //    ambiguous line returns nothing and still gets picked by hand,
+        //    because binding the WRONG material books stock against the wrong
+        //    item and surfaces far later than one extra click.
+        let autoMatched = false;
+        if (!binding && !rm) {
+          const text = `${rawSku} ${ln.description ?? ""}`.trim();
+          const hit = matchCatalogItem(text, rawMaterials);
+          if (hit) {
+            rm = hit.item;
+            autoMatched = true;
+          }
+        }
         // Use the binding's canonical supplier SKU once we resolved it, so
         // "SL.27" (OCR drift) snaps to "SL 27" (how supplier_material_bindings
         // records it). Falls back to OCR text otherwise.
@@ -1294,6 +1319,7 @@ function CreatePIWizard({
             : baseDesc;
         return {
           materialCode: rm?.itemCode ?? binding?.materialCode ?? "",
+          autoMatched,
           materialName: rm?.description ?? descOut,
           supplierSku: sku,
           description: descOut,
@@ -1345,7 +1371,7 @@ function CreatePIWizard({
         originalExtraction: ex,
       };
     },
-    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, resolveBindingByDescription, materialByCode],
+    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, resolveBindingByDescription, materialByCode, rawMaterials],
   );
 
   // ─── Drag-drop + multi-file extract ────────────────────────────────────
@@ -3072,6 +3098,19 @@ function PICard({
                     </button>
                   </td>
                 </tr>
+                {!lineUnbound && line.autoMatched && (
+                  // Read from the document rather than from a saved binding —
+                  // conservative, but still a guess, so say so instead of
+                  // letting it look like an established mapping.
+                  <tr className="bg-[#FBF4E6]">
+                    <td colSpan={8} className="px-3 py-1">
+                      <div className="text-[11px] text-[#9C6F1E]">
+                        Matched from the document text — check the code, then bind it
+                        so next time is automatic.
+                      </div>
+                    </td>
+                  </tr>
+                )}
                 {(lineUnbound || codeBoundNoSku) && (
                   <tr className="bg-[#FFF5F0]">
                     <td colSpan={8} className="px-3 py-1">
@@ -3267,6 +3306,12 @@ type GRNPreviewLine = {
   acceptedQty: number;
   rejectedQty: number;
   uom: string;
+  /**
+   * True when the internal code came from matching the READ TEXT to the
+   * catalogue rather than a saved supplier binding. Flagged in the table so a
+   * machine guess never looks like an established mapping.
+   */
+  autoMatched?: boolean;
 };
 
 type GRNPreviewCard = {
@@ -3557,9 +3602,26 @@ function CreateGRNWizard({
             if (!binding) binding = resolveBindingForMaterial(sId, desc);
           }
         }
-        const rm = binding
+        let rm = binding
           ? materialByCode.get(binding.materialCode.trim().toUpperCase())
           : null;
+        // 3) No binding at all — the FIRST time an item appears there is
+        //    nothing saved to match against. The OCR did read the supplier's
+        //    own wording though, so use it: match that text to the catalogue
+        //    directly instead of making the operator pick a line the scanner
+        //    could identify by itself. Deliberately conservative — an
+        //    ambiguous line returns nothing and still gets picked by hand,
+        //    because binding the WRONG material books stock against the wrong
+        //    item and surfaces far later than one extra click.
+        let autoMatched = false;
+        if (!binding && !rm) {
+          const text = `${rawSku} ${ln.description ?? ""}`.trim();
+          const hit = matchCatalogItem(text, rawMaterials);
+          if (hit) {
+            rm = hit.item;
+            autoMatched = true;
+          }
+        }
         const sku = binding?.supplierSku ?? rawSku;
         const qty = Number(ln.qty) || 0;
         const receivedQty = qty > 0 ? qty : 1;
@@ -3577,6 +3639,7 @@ function CreateGRNWizard({
             : baseDesc;
         return {
           materialCode: rm?.itemCode ?? binding?.materialCode ?? "",
+          autoMatched,
           materialName: rm?.description ?? descOut,
           supplierSku: sku,
           description: descOut,
@@ -3612,7 +3675,7 @@ function CreateGRNWizard({
         originalExtraction: ex,
       };
     },
-    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, resolveBindingByDescription, materialByCode],
+    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, resolveBindingByDescription, materialByCode, rawMaterials],
   );
 
   const handleFiles = useCallback(
@@ -4834,6 +4897,19 @@ function GRNCard({
                     </button>
                   </td>
                 </tr>
+                {!lineUnbound && line.autoMatched && (
+                  // Read from the document rather than from a saved binding —
+                  // conservative, but still a guess, so say so instead of
+                  // letting it look like an established mapping.
+                  <tr className="bg-[#FBF4E6]">
+                    <td colSpan={8} className="px-3 py-1">
+                      <div className="text-[11px] text-[#9C6F1E]">
+                        Matched from the document text — check the code, then bind it
+                        so next time is automatic.
+                      </div>
+                    </td>
+                  </tr>
+                )}
                 {(lineUnbound || codeBoundNoSku) && (
                   <tr className="bg-[#FFF5F0]">
                     <td colSpan={8} className="px-3 py-1">

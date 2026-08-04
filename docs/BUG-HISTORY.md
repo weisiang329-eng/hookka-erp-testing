@@ -11885,3 +11885,33 @@ write incompatible shapes:
   and #002 above only ever surfaced together).
 - For each fix, name the exact `file:line` you changed and a one-line
   verification step. If we ever roll back, this is the diff.
+
+## BUG-2026-08-04-001 — every Purchase Invoice create 500'd (two constraint lists)
+
+**Symptom.** Scan → Create PI returned "Something went wrong on our side" with no
+draft written. Reported repeatedly over an afternoon; source review could not
+find it because the cause was destroyed at runtime.
+
+**Cause.** The `purchase_invoices.status` CHECK was defined in TWO places with
+two DIFFERENT lists. `purchase-invoices.ts` re-added
+`purchase_invoices_status_chk` WITHOUT `'PARTIAL_PAID'` (it predates partial
+payments); `ensure-partial-payment.ts` added `_chk_v2` WITH it. Both drop and
+re-add on every isolate boot. Prod had **2 rows at PARTIAL_PAID**, so the first
+ALTER could never succeed again — Postgres refuses a CHECK existing rows
+violate. That ALTER runs inside `runSelfApply`, which THROWS, awaited at the top
+of the create handler: every create failed from that moment.
+
+**Why it took so long to find.** Three separate layers each erased the evidence:
+the global 500 handler strips messages (they can leak schema names); the insert
+try/catch logged the original error only for foreign-currency PIs and otherwise
+retried blindly; and the self-apply throw happened before that catch entirely.
+Fixed all three first — the real message appeared on the next attempt.
+
+**Fix.** One exported `PI_STATUS_CHECK_SQL` in `ensure-partial-payment.ts`,
+imported by both. Verified against prod: 4/4 statements apply cleanly with the
+PARTIAL_PAID rows present, and the full PI (17) and GRN (21) self-apply lists
+replay without error. Tests: `tests/pi-status-check-single-source.test.mjs`,
+`tests/pi-create-error-surfacing.test.mjs`.
+
+**Class.** A second writer with its own copy of a list that must agree. A
+corrected duplicate would drift again; the shared constant is the fix.

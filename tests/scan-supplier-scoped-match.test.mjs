@@ -193,3 +193,30 @@ test("a binding pointing at a missing material is named on the card", () => {
   assert.equal(SRC.split("brokenBindingsFor = useCallback(").length - 1, 2);
   assert.match(SRC, /not in the active catalogue/);
 });
+
+test("a binding is read BOTH ways, from whichever half the supplier printed", () => {
+  // Owner 2026-08-04: "无论是从我们内部的 SKU 去查找，还是从供应商的 SKU 去查找
+  // 都可以。找到了之后，它应该会通过我们的绑定，自动带出来另外 code 的东西."
+  //
+  // A binding is a two-way link, but each field was only read one way: the
+  // code column was tried as THEIR sku and never as ours, and the description
+  // as their wording or our code but never as their sku. A supplier printing
+  // our part number in their code column resolved nothing.
+  assert.equal(SRC.split("const resolveBindingAnyWay = useCallback(").length - 1, 2);
+  assert.equal(
+    SRC.split("resolveBindingAnyWay(sId, rawSku, (ln.description ?? \"\").trim())").length - 1,
+    2,
+    "both wizards must go through it",
+  );
+  const fn = SRC.slice(SRC.indexOf("const resolveBindingAnyWay = useCallback("));
+  const head = fn.slice(0, 1200);
+  for (const call of [
+    "resolveBindingFor(supplierId, rawSku)",
+    "resolveBindingForMaterial(supplierId, rawSku)",
+    "resolveBindingByDescription(supplierId, description)",
+    "resolveBindingForMaterial(supplierId, description)",
+    "resolveBindingFor(supplierId, description)",
+  ]) {
+    assert.ok(head.includes(call), `missing reading: ${call}`);
+  }
+});

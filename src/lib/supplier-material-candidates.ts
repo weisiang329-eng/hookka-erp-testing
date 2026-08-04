@@ -128,16 +128,27 @@ function lookup<T extends MaterialLike>(
   return dedupe(out);
 }
 
-/** Materials named on one purchase order. */
+/**
+ * Materials named on the purchase order(s) this document links to.
+ *
+ * Plural because a supplier bills or delivers against several of our orders on
+ * one document ("P/O No : 2607-003/2607-020") and that is ONE receipt — every
+ * order it names is equally part of what should have turned up.
+ */
 export function materialsOnPo<T extends MaterialLike>(
-  po: PoLike | null | undefined,
+  pos: PoLike | PoLike[] | null | undefined,
   materialByCode: Map<string, T>,
 ): T[] {
-  if (!po || !Array.isArray(po.items)) return [];
-  return lookup(
-    po.items.map((i) => (i.materialCode ?? "").trim()).filter(Boolean),
-    materialByCode,
-  );
+  const list = pos == null ? [] : Array.isArray(pos) ? pos : [pos];
+  const codes: string[] = [];
+  for (const po of list) {
+    if (!po || !Array.isArray(po.items)) continue;
+    for (const i of po.items) {
+      const c = (i.materialCode ?? "").trim();
+      if (c) codes.push(c);
+    }
+  }
+  return lookup(codes, materialByCode);
 }
 
 /**
@@ -212,8 +223,8 @@ export function supplierSkuIndex<T extends MaterialLike>(
 
 export interface TierInput<T extends MaterialLike> {
   supplierId: string;
-  /** The PO this document was linked to, when one was resolved. */
-  linkedPo?: PoLike | null;
+  /** The PO(s) this document links to — a document may name several. */
+  linkedPo?: PoLike | PoLike[] | null;
   purchaseOrders: PoLike[];
   bindings: BindingLike[];
   /** Built with `indexByCode` — a plain uppercase index will miss everything. */

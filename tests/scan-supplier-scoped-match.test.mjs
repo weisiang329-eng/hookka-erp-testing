@@ -40,7 +40,7 @@ test("both scan modes resolve through the tiered ladder", () => {
     "create-PI and create-GRN must behave identically",
   );
   assert.equal(
-    SRC.split("const tiers = tiersFor(sId, linkedPo);").length - 1,
+    SRC.split("const tiers = tiersFor(sId, linkedPos);").length - 1,
     2,
     "each mode builds its own tiers from the card's resolved PO",
   );
@@ -63,12 +63,12 @@ test("the PO is resolved before the lines, not after", () => {
   // Tier 1 is the linked PO's own lines, so the link has to exist while each
   // line is being identified. Resolving it afterwards — as both modes used to —
   // leaves the strongest evidence unused.
-  const piPoIdx = SRC.indexOf("const tiers = tiersFor(sId, linkedPo);");
+  const piPoIdx = SRC.indexOf("const tiers = tiersFor(sId, linkedPos);");
   const piLinesIdx = SRC.indexOf("const lines: PreviewLine[]");
   assert.ok(piPoIdx > 0 && piLinesIdx > piPoIdx, "create-PI resolves the PO first");
 
   const grnLinesIdx = SRC.indexOf("const lines: GRNPreviewLine[]");
-  const grnPoIdx = SRC.lastIndexOf("const tiers = tiersFor(sId, linkedPo);", grnLinesIdx);
+  const grnPoIdx = SRC.lastIndexOf("const tiers = tiersFor(sId, linkedPos);", grnLinesIdx);
   assert.ok(grnPoIdx > 0 && grnLinesIdx > grnPoIdx, "create-GRN resolves the PO first");
 });
 

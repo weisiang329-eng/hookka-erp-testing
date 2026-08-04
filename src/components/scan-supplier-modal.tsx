@@ -53,6 +53,7 @@ import {
 } from "@/components/scan-cached-hint";
 import { bestMatch } from "@/lib/party-fuzzy-match";
 import { resolvePoLink, splitPoRefs } from "@/lib/po-ref-match";
+import { allocateLinesToPos, allocatedPoIds, headerPoId } from "@/lib/po-line-allocate";
 import {
   buildCandidateTiers,
   indexByCode,
@@ -208,14 +209,6 @@ function matchTierHint(tier: CandidateTier | null | undefined): string {
     default:
       return "Matched from the document text — check the code.";
   }
-}
-
-function autoLinkPoId(
-  ex: SupplierExtraction,
-  purchaseOrders: PurchaseOrder[],
-  fallback: string | null | undefined,
-): string | null {
-  return resolvePoLink(ex.customerPoRef, purchaseOrders, fallback).poId;
 }
 
 // Fix B (owner 2026-06-30): pick a Supplier off the OCR'd supplierName.
@@ -929,6 +922,12 @@ type PreviewLine = {
    * while a catalogue hit is the scanner reading text and nothing more.
    */
   matchTier?: CandidateTier | null;
+  /**
+   * The PO this invoice line bills (`purchase_invoice_items.po_id`). An
+   * invoice may cover several of our orders, so ownership lives on the line
+   * and the header PO is display only.
+   */
+  poId?: string | null;
 };
 
 type PreviewCard = {
@@ -976,12 +975,19 @@ type PreviewCard = {
   // sample as a corrected few-shot example.
   originalExtraction: SupplierExtraction;
   /**
-   * PO references the DOCUMENT named, when it named more than one. A Purchase
-   * Invoice holds a single purchaseOrderId, so a multi-PO document cannot be
-   * linked automatically without hiding one of them — the operator is shown
-   * this instead of a quietly half-correct link.
+   * PO references the DOCUMENT named, when it named more than one. Kept for
+   * display: the operator should see that this invoice spans two orders even
+   * though every line is now allocated to its own.
    */
   multiPoRefs?: string[];
+  /**
+   * Every named PO that resolved, and every PO that ended up owning a line.
+   * They differ when a named order contributed nothing the allocator could
+   * match — worth saying, because the document claims goods from an order this
+   * invoice does not actually bill.
+   */
+  namedPoIds?: string[];
+  touchedPoIds?: string[];
 };
 
 function makeBlankLine(): PreviewLine {
@@ -1171,7 +1177,7 @@ function CreatePIWizard({
   const materialIndex = useMemo(() => indexByCode(rawMaterials), [rawMaterials]);
 
   const tiersFor = useCallback(
-    (supplierId: string, linkedPo: PurchaseOrder | null) =>
+    (supplierId: string, linkedPo: PurchaseOrder[] | PurchaseOrder | null) =>
       buildCandidateTiers({
         supplierId,
         linkedPo,
@@ -1338,15 +1344,23 @@ function CreatePIWizard({
           ? ex.docDate
           : todayISO();
 
-      // Resolve the PO link BEFORE the lines: the order we wrote is the best
-      // statement of what this delivery contains, so it has to be available as
-      // a search space while each line is being identified — not afterwards.
+      // Resolve the PO link(s) BEFORE the lines: the orders we wrote are the
+      // best statement of what this document covers, so they have to be
+      // available as a search space while each line is being identified — not
+      // afterwards. A supplier bills several of our orders on one invoice
+      // ("P/O No : 2607-003/2607-020") and `purchase_invoice_items.po_id`
+      // records which order each LINE bills, so all of them are in play.
       const poLink = resolvePoLink(ex.customerPoRef, purchaseOrders, defaultPurchaseOrderId);
-      const purchaseOrderId = poLink.poId;
-      const linkedPo = purchaseOrderId
-        ? purchaseOrders.find((p) => p.id === purchaseOrderId) ?? null
-        : null;
-      const tiers = tiersFor(sId, linkedPo);
+      const namedPoIds =
+        poLink.matchedPoIds.length > 0
+          ? poLink.matchedPoIds
+          : poLink.poId
+            ? [poLink.poId]
+            : [];
+      const linkedPos = namedPoIds
+        .map((id) => purchaseOrders.find((p) => p.id === id) ?? null)
+        .filter((p): p is PurchaseOrder => p !== null);
+      const tiers = tiersFor(sId, linkedPos);
       const skuIndex = skuIndexFor(sId);
 
       const lines: PreviewLine[] = (ex.lines ?? []).map((ln) => {
@@ -1435,13 +1449,31 @@ function CreatePIWizard({
         };
       });
 
-      // Fix A (owner 2026-06-30): if a PO got auto-linked AND any line came
-      // back with no price (DN-only doc), fill those lines' unitPriceRM off
-      // the matching PO line. Preview shows real prices BEFORE Create.
-      // (poLink / linkedPo were resolved above the line loop — the PO is also
-      // the first place a line's material is searched for.)
+      // Which PO line does each invoice line bill? `purchase_invoice_items.po_id`
+      // records it per line, so an invoice covering two of our orders is ONE
+      // document rather than an operator decision (owner 2026-08-04). A line
+      // that cannot be allocated confidently gets nothing and is picked by
+      // hand — billing the wrong order reconciles cleanly and hides the error.
+      const allocations = allocateLinesToPos(lines, linkedPos);
+      const allocatedLines = lines.map((l, i) => ({
+        ...l,
+        poId: allocations[i]?.poId ?? null,
+      }));
+      const purchaseOrderId = headerPoId(allocations, namedPoIds);
+      const touchedPoIds = allocatedPoIds(allocations);
+
+      // Fix A (owner 2026-06-30): if a PO got linked AND any line came back
+      // with no price (DN-only doc), fill those lines' unitPriceRM off the
+      // matching PO line. Preview shows real prices BEFORE Create. Priced off
+      // the line's OWN order now, so a two-PO invoice does not price the
+      // second order's goods from the first one's rates.
+      const poById = new Map(linkedPos.map((p) => [p.id, p]));
       const linesWithPriceFill =
-        lines.length > 0 ? applyPoPriceFill(lines, linkedPo) : [makeBlankLine()];
+        allocatedLines.length > 0
+          ? allocatedLines.map((l) =>
+              applyPoPriceFill([l], poById.get(l.poId ?? "") ?? null)[0],
+            )
+          : [makeBlankLine()];
 
       return {
         id: `card-${makeUploadId()}`,
@@ -1459,11 +1491,12 @@ function CreatePIWizard({
         createError: null,
         supplierId: sId,
         purchaseOrgCode: orgCode,
-        // Auto-link to an existing PO when the supplier wrote our PO ref
-        // on their doc (their "Customer P.O.", "B.O. NO.", etc.). Falls
-        // back to the host-supplied default if no match.
+        // Header PO — display only now that each line carries its own.
         purchaseOrderId,
-        multiPoRefs: poLink.ambiguous ? splitPoRefs((ex.customerPoRef ?? "").trim()) : undefined,
+        namedPoIds,
+        touchedPoIds,
+        multiPoRefs:
+          namedPoIds.length > 1 ? splitPoRefs((ex.customerPoRef ?? "").trim()) : undefined,
         invoiceDate: docDate,
         supplierInvoiceNo: supInvNo,
         supplierDoNo: supDoNo,
@@ -1840,6 +1873,11 @@ function CreatePIWizard({
               taxSen: lineTaxSen < 0 ? 0 : lineTaxSen,
               lineType: "STOCKED" as const,
               grnItemId: null,
+              // Which of our orders this line bills. The backend's per-PO
+              // over-invoicing ceiling reads this; pooling everything against
+              // the header would over-bill one order and wrongly reject a line
+              // that is within budget on its own.
+              poId: l.poId ?? null,
               // The catalogue tier is the scanner reading text with nothing to
               // corroborate it — no PO line, no history with this supplier. Now
               // that creating a document teaches a binding, a wrong guess there
@@ -2996,13 +3034,26 @@ function PICard({
               disabled={!!card.createdPiNo || !card.supplierId}
             />
             {card.multiPoRefs && card.multiPoRefs.length > 1 && (
-              // Not auto-linked ON PURPOSE. The document bills several POs and
-              // a PI holds one, so linking either would look reconciled while
-              // the other PO's receipts are never drawn down.
-              <p className="mt-1 text-[11px] text-[#B8601A]">
-                This document names {card.multiPoRefs.length} POs (
-                {card.multiPoRefs.join(", ")}) — not linked automatically. Pick the
-                one this invoice should draw down, or split it.
+              // This used to refuse to link anything, because a PI held ONE
+              // purchaseOrderId. `purchase_invoice_items.po_id` records it per
+              // LINE now, so a two-PO invoice is one document and each line
+              // bills its own order. The header PO above is display only.
+              <p className="mt-1 text-[11px] text-[#6B5C32]">
+                Names {card.multiPoRefs.length} POs ({card.multiPoRefs.join(", ")}) —
+                billed as one invoice, each line against its own PO.
+                {(() => {
+                  const unallocated = card.lines.filter(
+                    (l) => l.materialCode.trim() && !l.poId,
+                  ).length;
+                  return unallocated > 0 ? (
+                    <span className="text-[#B8601A]">
+                      {" "}
+                      {unallocated} line{unallocated !== 1 ? "s" : ""} could not be
+                      matched to a PO line — pick the PO for those, or leave them
+                      unlinked to bill them outside any order.
+                    </span>
+                  ) : null;
+                })()}
               </p>
             )}
           </div>
@@ -3422,6 +3473,15 @@ type GRNPreviewLine = {
   autoMatched?: boolean;
   /** Which search space produced it — see the create-PI line type. */
   matchTier?: CandidateTier | null;
+  /**
+   * The PO line THIS receipt line draws down. A delivery note may cover
+   * several of our orders, so ownership lives here rather than on the card:
+   * `grn_items.po_id/po_item_id` records it, and the header PO is display
+   * only. Null when no confident allocation existed — the operator picks.
+   */
+  poId?: string | null;
+  poItemId?: string | null;
+  poItemIndex?: number | null;
 };
 
 type GRNPreviewCard = {
@@ -3442,7 +3502,17 @@ type GRNPreviewCard = {
   createError: string | null;
   supplierId: string;
   purchaseOrgCode: string;
+  /** Header / display PO only — ownership lives on each line's `poId`. */
   purchaseOrderId: string | null;
+  /**
+   * Every PO this document NAMED that resolved to a known order, and every PO
+   * that ended up owning at least one line. They differ when a named order
+   * contributed nothing the allocator could match, which is worth telling the
+   * operator: the document claims goods from an order this receipt does not
+   * actually draw down.
+   */
+  namedPoIds?: string[];
+  touchedPoIds?: string[];
   receiveDate: string;
   supplierDoNo: string;
   markedGold: boolean;
@@ -3597,7 +3667,7 @@ function CreateGRNWizard({
   const materialIndex = useMemo(() => indexByCode(rawMaterials), [rawMaterials]);
 
   const tiersFor = useCallback(
-    (supplierId: string, linkedPo: PurchaseOrder | null) =>
+    (supplierId: string, linkedPo: PurchaseOrder[] | PurchaseOrder | null) =>
       buildCandidateTiers({
         supplierId,
         linkedPo,
@@ -3727,13 +3797,24 @@ function CreateGRNWizard({
           ? ex.docDate
           : todayISO();
 
-      // Resolve the PO link BEFORE the lines — the order we wrote is the first
-      // place a received line's material is looked for.
-      const purchaseOrderId = autoLinkPoId(ex, purchaseOrders, defaultPurchaseOrderId);
-      const linkedPo = purchaseOrderId
-        ? purchaseOrders.find((p) => p.id === purchaseOrderId) ?? null
-        : null;
-      const tiers = tiersFor(sId, linkedPo);
+      // Resolve the PO link(s) BEFORE the lines — the orders we wrote are the
+      // first place a received line's material is looked for.
+      //
+      // A supplier delivers against several of our orders on one note ("P/O No
+      // : 2607-003/2607-020") and that is ONE receipt, not two (owner
+      // 2026-08-04). Every order the document names is searched, and each line
+      // is allocated to its own PO line below.
+      const poLink = resolvePoLink(ex.customerPoRef, purchaseOrders, defaultPurchaseOrderId);
+      const namedPoIds =
+        poLink.matchedPoIds.length > 0
+          ? poLink.matchedPoIds
+          : poLink.poId
+            ? [poLink.poId]
+            : [];
+      const linkedPos = namedPoIds
+        .map((id) => purchaseOrders.find((p) => p.id === id) ?? null)
+        .filter((p): p is PurchaseOrder => p !== null);
+      const tiers = tiersFor(sId, linkedPos);
       const skuIndex = skuIndexFor(sId);
 
       const lines: GRNPreviewLine[] = (ex.lines ?? []).map((ln) => {
@@ -3805,6 +3886,22 @@ function CreateGRNWizard({
         };
       });
 
+      // Now that each line knows its material, decide WHICH purchase order line
+      // it draws down. This is what makes a two-PO delivery note one receipt
+      // instead of an operator decision: ownership lives on the line, so the
+      // header PO is display only. A line that cannot be allocated confidently
+      // gets nothing and is picked by hand — drawing down the wrong order
+      // reconciles cleanly and is found only when the other order is chased.
+      const allocations = allocateLinesToPos(lines, linkedPos);
+      const allocatedLines = lines.map((l, i) => ({
+        ...l,
+        poId: allocations[i]?.poId ?? null,
+        poItemId: allocations[i]?.poItemId ?? null,
+        poItemIndex: allocations[i]?.poItemIndex ?? null,
+      }));
+      const purchaseOrderId = headerPoId(allocations, namedPoIds);
+      const touchedPoIds = allocatedPoIds(allocations);
+
       return {
         id: `card-${makeUploadId()}`,
         fileName,
@@ -3819,14 +3916,15 @@ function CreateGRNWizard({
         createError: null,
         supplierId: sId,
         purchaseOrgCode: orgCode,
-        // Auto-link to an existing PO when the supplier wrote our PO ref
-        // on their doc (their "Customer P.O.", "B.O. NO.", etc.). Falls
-        // back to the host-supplied default if no match.
+        // Header PO — display only now that ownership is per line. Falls back
+        // to the host-supplied default when the document named nothing.
         purchaseOrderId,
+        namedPoIds,
+        touchedPoIds,
         receiveDate: docDate,
         supplierDoNo: supDoNo,
         markedGold: false,
-        lines: lines.length > 0 ? lines : [makeBlankGRNLine()],
+        lines: allocatedLines.length > 0 ? allocatedLines : [makeBlankGRNLine()],
         originalExtraction: ex,
       };
     },
@@ -4138,6 +4236,12 @@ function CreateGRNWizard({
               rejectedQty: Number(l.rejectedQty) || 0,
               rejectionReason: null,
               unitPriceSen: 0,
+              // Which PO line this receipt line draws down. A delivery note may
+              // cover several of our orders and that is ONE receipt, so the
+              // backend takes ownership from HERE, not from the header poId.
+              poId: l.poId ?? null,
+              poItemId: l.poItemId ?? null,
+              poItemIndex: l.poItemIndex ?? null,
               // See the create-PI note: a catalogue-tier guess may fill the
               // field but must not teach a permanent binding.
               unverifiedMatch: l.autoMatched === true && l.matchTier === "catalog",
@@ -4871,6 +4975,32 @@ function GRNCard({
               }
               disabled={!!card.createdGrnNo || !card.supplierId}
             />
+            {(card.namedPoIds?.length ?? 0) > 1 && (
+              // A supplier delivers against several of our orders on one note
+              // and that is ONE receipt (owner 2026-08-04: "一定要来自首两张 PO
+              // 进一张 GR 的，这东西是串联的"). `grn_items.po_id/po_item_id`
+              // records ownership per line; the picker above is the header only.
+              <p className="mt-1 text-[11px] text-[#6B5C32]">
+                Receives {card.namedPoIds?.length} POs (
+                {(card.namedPoIds ?? [])
+                  .map((id) => purchaseOrders.find((p) => p.id === id)?.poNo ?? id)
+                  .join(", ")}
+                ) on one GRN, each line drawing down its own.
+                {(() => {
+                  const unallocated = card.lines.filter(
+                    (l) => l.materialCode.trim() && !l.poId,
+                  ).length;
+                  return unallocated > 0 ? (
+                    <span className="text-[#B8601A]">
+                      {" "}
+                      {unallocated} line{unallocated !== 1 ? "s" : ""} could not be
+                      matched to a PO line — those receive against no order until
+                      you pick one.
+                    </span>
+                  ) : null;
+                })()}
+              </p>
+            )}
           </div>
         </div>
 

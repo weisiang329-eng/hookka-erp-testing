@@ -75,6 +75,31 @@ test("a supplier with NO bindings still resolves its lines", () => {
   assert.equal(b.item.itemCode, "PLY-18-48");
 });
 
+test("a document naming TWO orders searches both", () => {
+  // One receipt covers both — "如果它的 PO 来自两个的话，它一定要来自首两张 PO
+  // 进一张 GR 的". Searching only the header order would leave every line
+  // belonging to the second one unidentified.
+  const second = {
+    id: "po-2",
+    supplierId: "sup-addwood",
+    items: [{ materialCode: "FOAM-D24-2" }],
+  };
+  const tiers = tiersFor({ supplierId: "sup-new", linkedPo: [ADD_WOOD_PO, second] });
+  const a = resolveMaterialForLine(`9MM 4' X 8' PLYWOOD AB`, tiers);
+  const b = resolveMaterialForLine("FOAM D24 2INCH SHEET", tiers);
+  assert.equal(a.tier, "po");
+  assert.equal(a.item.itemCode, "PLY-9-48-AB");
+  assert.equal(b.tier, "po");
+  assert.equal(b.item.itemCode, "FOAM-D24-2");
+});
+
+test("materialsOnPo takes one order or several, interchangeably", () => {
+  assert.deepEqual(
+    materialsOnPo([ADD_WOOD_PO], byCode).map((m) => m.itemCode),
+    materialsOnPo(ADD_WOOD_PO, byCode).map((m) => m.itemCode),
+  );
+});
+
 test("the linked PO is what it searches first, and it says so", () => {
   const tiers = tiersFor({ linkedPo: ADD_WOOD_PO });
   const m = resolveMaterialForLine(`9MM 4' X 8' PLYWOOD AB`, tiers);

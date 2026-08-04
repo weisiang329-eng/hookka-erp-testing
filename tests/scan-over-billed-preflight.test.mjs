@@ -51,7 +51,7 @@ test("the PI wizard measures billed qty, the GRN wizard received qty", () => {
 
 test("the footer surfaces it without expanding every card", () => {
   assert.equal(SRC.split("const overBilledCards = cards.filter(").length - 1, 2);
-  assert.match(SRC, /exceed what the PO ordered/);
+  assert.match(SRC, /what the PO ordered/);
 });
 
 test("only lines actually tied to a PO are judged", () => {

@@ -1259,6 +1259,42 @@ function CreatePIWizard({
     [bindingsByMaterial],
   );
 
+  /**
+   * Resolve a scanned line to a binding from EITHER half, whichever the
+   * supplier happened to print.
+   *
+   * Owner 2026-08-04: "无论是从我们内部的 SKU 去查找，还是从供应商的 SKU 去查找
+   * 都可以。找到了之后，它应该会通过我们的绑定，自动带出来另外 code 的东西."
+   *
+   * That is the whole point of a binding — it is a two-way link — but the code
+   * only ever read it one way per field: the code column was tried as THEIR
+   * SKU and never as OURS, and the description was tried as their wording or
+   * our code but never as their SKU. So a supplier printing our part number in
+   * their code column, or their own code in the description column, resolved
+   * nothing even though the binding to answer it was sitting right there.
+   *
+   * All five readings that can identify a line, most specific first. Whichever
+   * hits, the caller gets the binding and BOTH codes fill from it.
+   */
+  const resolveBindingAnyWay = useCallback(
+    (supplierId: string, rawSku: string, description: string) => {
+      if (!supplierId) return null;
+      return (
+        // 1) the code column is their SKU — the common case
+        (rawSku ? resolveBindingFor(supplierId, rawSku) : null) ??
+        // 2) …or it is OUR material code, which some suppliers print instead
+        (rawSku ? resolveBindingForMaterial(supplierId, rawSku) : null) ??
+        // 3) the description is their own wording (suppliers with no code)
+        (description ? resolveBindingByDescription(supplierId, description) : null) ??
+        // 4) …or it is our material code sitting in the description column
+        (description ? resolveBindingForMaterial(supplierId, description) : null) ??
+        // 5) …or their SKU landed in the description column
+        (description ? resolveBindingFor(supplierId, description) : null)
+      );
+    },
+    [resolveBindingFor, resolveBindingForMaterial, resolveBindingByDescription],
+  );
+
   const materialByCode = useMemo(() => {
     const m = new Map<string, RawMaterial>();
     for (const rm of rawMaterials) {
@@ -1395,18 +1431,13 @@ function CreatePIWizard({
         // description — gated on `!rawSku` before, which meant a single junk
         // character in the code column disabled the only path some suppliers
         // have. A failed SKU lookup is exactly when the fallback is needed.
-        let binding = sId ? resolveBindingFor(sId, rawSku) : null;
-        if (!binding && sId) {
-          const desc = (ln.description ?? "").trim();
-          if (desc) {
-            // 1) The supplier prints no code, so try what they DO print — the
-            //    description — against bindings that recorded it.
-            binding = resolveBindingByDescription(sId, desc);
-            // 2) Legacy path: some suppliers put our own internal code in the
-            //    description field, so treat it as a materialCode as well.
-            if (!binding) binding = resolveBindingForMaterial(sId, desc);
-          }
-        }
+        // Either half identifies the line, and the binding supplies the other
+        // (owner 2026-08-04: "无论是从我们内部的 SKU 去查找，还是从供应商的 SKU
+        // 去查找都可以。找到了之后，它应该会通过我们的绑定，自动带出来另外
+        // code 的东西"). See resolveBindingAnyWay for the five readings.
+        const binding = sId
+          ? resolveBindingAnyWay(sId, rawSku, (ln.description ?? "").trim())
+          : null;
         let rm = binding
           ? materialByCode.get(binding.materialCode.trim().toUpperCase())
           : null;
@@ -1545,7 +1576,7 @@ function CreatePIWizard({
         originalExtraction: ex,
       };
     },
-    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, resolveBindingByDescription, materialByCode, tiersFor, skuIndexFor],
+    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingForMaterial, resolveBindingAnyWay, materialByCode, tiersFor, skuIndexFor],
   );
 
   // ─── Drag-drop + multi-file extract ────────────────────────────────────
@@ -3802,6 +3833,42 @@ function CreateGRNWizard({
     [bindingsByMaterial],
   );
 
+  /**
+   * Resolve a scanned line to a binding from EITHER half, whichever the
+   * supplier happened to print.
+   *
+   * Owner 2026-08-04: "无论是从我们内部的 SKU 去查找，还是从供应商的 SKU 去查找
+   * 都可以。找到了之后，它应该会通过我们的绑定，自动带出来另外 code 的东西."
+   *
+   * That is the whole point of a binding — it is a two-way link — but the code
+   * only ever read it one way per field: the code column was tried as THEIR
+   * SKU and never as OURS, and the description was tried as their wording or
+   * our code but never as their SKU. So a supplier printing our part number in
+   * their code column, or their own code in the description column, resolved
+   * nothing even though the binding to answer it was sitting right there.
+   *
+   * All five readings that can identify a line, most specific first. Whichever
+   * hits, the caller gets the binding and BOTH codes fill from it.
+   */
+  const resolveBindingAnyWay = useCallback(
+    (supplierId: string, rawSku: string, description: string) => {
+      if (!supplierId) return null;
+      return (
+        // 1) the code column is their SKU — the common case
+        (rawSku ? resolveBindingFor(supplierId, rawSku) : null) ??
+        // 2) …or it is OUR material code, which some suppliers print instead
+        (rawSku ? resolveBindingForMaterial(supplierId, rawSku) : null) ??
+        // 3) the description is their own wording (suppliers with no code)
+        (description ? resolveBindingByDescription(supplierId, description) : null) ??
+        // 4) …or it is our material code sitting in the description column
+        (description ? resolveBindingForMaterial(supplierId, description) : null) ??
+        // 5) …or their SKU landed in the description column
+        (description ? resolveBindingFor(supplierId, description) : null)
+      );
+    },
+    [resolveBindingFor, resolveBindingForMaterial, resolveBindingByDescription],
+  );
+
   const materialByCode = useMemo(() => {
     const m = new Map<string, RawMaterial>();
     for (const rm of rawMaterials) {
@@ -3901,18 +3968,13 @@ function CreateGRNWizard({
         // only a description-that-is-an-internal-code still binds. The
         // description path runs whenever the SKU path FAILED, not only when
         // the code column was empty.
-        let binding = sId ? resolveBindingFor(sId, rawSku) : null;
-        if (!binding && sId) {
-          const desc = (ln.description ?? "").trim();
-          if (desc) {
-            // 1) The supplier prints no code, so try what they DO print — the
-            //    description — against bindings that recorded it.
-            binding = resolveBindingByDescription(sId, desc);
-            // 2) Legacy path: some suppliers put our own internal code in the
-            //    description field, so treat it as a materialCode as well.
-            if (!binding) binding = resolveBindingForMaterial(sId, desc);
-          }
-        }
+        // Either half identifies the line, and the binding supplies the other
+        // (owner 2026-08-04: "无论是从我们内部的 SKU 去查找，还是从供应商的 SKU
+        // 去查找都可以。找到了之后，它应该会通过我们的绑定，自动带出来另外
+        // code 的东西"). See resolveBindingAnyWay for the five readings.
+        const binding = sId
+          ? resolveBindingAnyWay(sId, rawSku, (ln.description ?? "").trim())
+          : null;
         let rm = binding
           ? materialByCode.get(binding.materialCode.trim().toUpperCase())
           : null;
@@ -4022,7 +4084,7 @@ function CreateGRNWizard({
         originalExtraction: ex,
       };
     },
-    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, resolveBindingByDescription, materialByCode, tiersFor, skuIndexFor],
+    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingForMaterial, resolveBindingAnyWay, materialByCode, tiersFor, skuIndexFor],
   );
 
   const handleFiles = useCallback(

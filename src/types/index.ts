@@ -283,7 +283,10 @@ export type SalesOrder = {
   subtotalSen: number;
   totalSen: number;
   status: SOStatus;
-  /** Saved before transitioning to ON_HOLD so we can resume to the correct state. */
+  /** Saved before transitioning to ON_HOLD so we can resume to the correct
+   *  state. Declared and read by the detail page long before anything WROTE
+   *  it (fixed 2026-08-04) — until then Resume always fell back to CONFIRMED
+   *  and quietly moved an IN_PRODUCTION order backwards a stage. */
   preHoldStatus?: SOStatus;
   /** ON HOLD reason capture (0185). When an operator puts the order on hold a
    *  non-empty reason is REQUIRED; it is stored on the SO (with who put it on
@@ -292,6 +295,8 @@ export type SalesOrder = {
   holdReason?: string;
   heldBy?: string;
   heldAt?: string;
+  /** Stage the cancel interrupted — where Undo Cancel returns to. */
+  preCancelStatus?: SOStatus;
   overdue: string;
   notes: string;
   /** Make-to-stock flag — set when the SO was generated as a placeholder for

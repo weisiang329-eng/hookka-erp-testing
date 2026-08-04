@@ -16,6 +16,7 @@ import {
   ArrowLeft,
   CheckCircle2,
   XCircle,
+  RotateCcw,
   PackageOpen,
   Wrench,
   Truck,
@@ -105,7 +106,9 @@ const STATUS_TRANSITIONS_RESOLUTION: Record<Status, Status[]> = {
   READY_TO_SHIP: ["DELIVERED"],
   DELIVERED: ["CLOSED"],
   CLOSED: [],
-  CANCELLED: [],
+  // Undo a cancel back to the stage it interrupted (owner 2026-08-04). Kept in
+  // step with the backend STATUS_TRANSITIONS — the PUT re-validates.
+  CANCELLED: ["OPEN", "IN_PRODUCTION", "RESERVED", "IN_REPAIR"],
 };
 function dateLabel(iso: string): string {
   if (!iso) return "—";
@@ -294,6 +297,25 @@ export default function ServiceOrderDetailPage() {
                 onClick={() => advanceStatus("CANCELLED")}
               >
                 <XCircle className="h-4 w-4" /> Cancel
+              </Button>
+            )}
+            {/* Undo Cancel — restores the stage the cancel interrupted, the
+                resolution production orders it took down, and (for STOCK_SWAP)
+                re-consumes the stock the cancel handed back. Rows cancelled
+                before pre_cancel_status existed fall back to OPEN. */}
+            {order.status === "CANCELLED" && (
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={advancing}
+                onClick={() =>
+                  advanceStatus(
+                    ((order as { preCancelStatus?: string }).preCancelStatus as Status) ||
+                      "OPEN",
+                  )
+                }
+              >
+                <RotateCcw className="h-4 w-4" /> Undo Cancel
               </Button>
             )}
             {/* Return logging — REPAIR mode primarily, but the user can log a

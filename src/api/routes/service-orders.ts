@@ -86,7 +86,11 @@ const STATUS_TRANSITIONS: Record<Status, Status[]> = {
   READY_TO_SHIP: ["DELIVERED"],
   DELIVERED: ["CLOSED"],
   CLOSED: [],
-  CANCELLED: [],
+  // Cancel is undoable back to the stage it came from (owner 2026-08-04:
+  // "i silap cancel"). `pre_cancel_status` records that stage; the undo also
+  // restores the resolution production orders this cancel took down and
+  // re-consumes the stock a STOCK_SWAP cancel handed back.
+  CANCELLED: ["OPEN", "IN_PRODUCTION", "RESERVED", "IN_REPAIR"],
 };
 
 type SourceType = "SO" | "CO" | "EXTERNAL";
@@ -193,6 +197,12 @@ function rowToApi(
     customerName: row.customerName,
     mode: row.mode,
     status: row.status,
+    // Stage the cancel interrupted — the detail page offers to return here.
+    // Dual-keyed: the column is snake_case but may come back camelCased.
+    preCancelStatus:
+      (row as { preCancelStatus?: string | null }).preCancelStatus ??
+      (row as { pre_cancel_status?: string | null }).pre_cancel_status ??
+      "",
     createdBy: row.createdBy ?? "",
     createdByName: row.createdByName ?? "",
     createdAt: row.createdAt ?? "",
@@ -422,6 +432,13 @@ async function ensureServiceOrderMigrations(db: D1Database): Promise<void> {
     await db
       .prepare(
         "ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS hubId TEXT",
+      )
+      .run();
+    // The stage a cancel interrupted, so it can be undone exactly rather than
+    // guessed (owner 2026-08-04: "i silap cancel").
+    await db
+      .prepare(
+        "ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS pre_cancel_status TEXT",
       )
       .run();
   } catch {
@@ -862,6 +879,10 @@ app.put("/:id/status", async (c) => {
   if (denied) return denied;
   const id = c.req.param("id");
   try {
+    // This path WRITES pre_cancel_status, and migrations are inert on deploy —
+    // without this the first status change on a fresh isolate 500s on a
+    // missing column.
+    await ensureServiceOrderMigrations(c.var.DB);
     const body = (await c.req.json()) as { status?: string; notes?: string };
     const next = body.status as Status;
     if (!next || !VALID_STATUSES.includes(next)) {
@@ -894,14 +915,62 @@ app.put("/:id/status", async (c) => {
     stmts.push(
       c.var.DB.prepare(
         `UPDATE service_orders SET status = ?, closedAt = COALESCE(?, closedAt),
-           notes = COALESCE(?, notes) WHERE id = ?`,
-      ).bind(next, closedAt, (body.notes as string) ?? null, id),
+           notes = COALESCE(?, notes), pre_cancel_status = ? WHERE id = ?`,
+      ).bind(
+        next,
+        closedAt,
+        (body.notes as string) ?? null,
+        // Remember the stage the cancel interrupted, so the undo is exact
+        // rather than a guess; cleared on any transition out of CANCELLED.
+        next === "CANCELLED" && existing.status !== "CANCELLED"
+          ? existing.status
+          : next === "CANCELLED"
+            ? (existing as { pre_cancel_status?: string | null }).pre_cancel_status ?? null
+            : null,
+        id,
+      ),
     );
 
     // Cascade-cancel side effects. Only on the OPEN/IN_PRODUCTION/RESERVED →
     // CANCELLED transition; CLOSED → (anything) is a no-op here because
     // CLOSED is terminal already.
-    const cascadeSummary = { posCancelled: 0, fgRestored: 0 };
+    const cascadeSummary = { posCancelled: 0, fgRestored: 0, posRestored: 0, fgReconsumed: 0 };
+    if (existing.status === "CANCELLED" && next !== "CANCELLED") {
+      // UNDO — put back exactly what the cancel took down. A resolution PO is
+      // restored only when it still carries the pre_cancel_status this cancel
+      // wrote; one cancelled for another reason keeps its own state. STOCK_SWAP
+      // handed the reserved stock back on cancel, so the undo re-consumes it.
+      const lines = await c.var.DB
+        .prepare("SELECT * FROM service_order_lines WHERE serviceOrderId = ?")
+        .bind(id)
+        .all<ServiceOrderLineRow>();
+      for (const ln of lines.results ?? []) {
+        if (existing.mode === "REPRODUCE" && ln.resolutionProductionOrderId) {
+          stmts.push(
+            c.var.DB
+              .prepare(
+                `UPDATE production_orders
+                    SET status = COALESCE(pre_cancel_status, 'PENDING'),
+                        pre_cancel_status = NULL,
+                        updated_at = ?
+                  WHERE id = ? AND status = 'CANCELLED'`,
+              )
+              .bind(new Date().toISOString(), ln.resolutionProductionOrderId),
+          );
+          cascadeSummary.posRestored++;
+        }
+        if (existing.mode === "STOCK_SWAP" && ln.resolutionFgBatchId) {
+          stmts.push(
+            c.var.DB
+              .prepare(
+                "UPDATE fg_batches SET remainingQty = remainingQty - ? WHERE id = ? AND remainingQty >= ?",
+              )
+              .bind(ln.qty, ln.resolutionFgBatchId, ln.qty),
+          );
+          cascadeSummary.fgReconsumed++;
+        }
+      }
+    }
     if (next === "CANCELLED") {
       const lines = await c.var.DB
         .prepare("SELECT * FROM service_order_lines WHERE serviceOrderId = ?")
@@ -952,7 +1021,10 @@ app.put("/:id/status", async (c) => {
     return c.json({
       success: true,
       data: { id, status: updated?.status },
-      cascade: next === "CANCELLED" ? cascadeSummary : undefined,
+      cascade:
+        next === "CANCELLED" || existing.status === "CANCELLED"
+          ? cascadeSummary
+          : undefined,
     });
   } catch (err) {
     console.error("[PUT /api/service-orders/:id/status] failed:", err);

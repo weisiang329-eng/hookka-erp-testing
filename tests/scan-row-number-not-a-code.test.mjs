@@ -140,13 +140,20 @@ test("both wizards sanitise the code column", () => {
 
 test("the description fallback runs whenever the SKU path FAILED", () => {
   // Gated on `!rawSku` before, so one junk character in the code column
-  // disabled the only resolution path some suppliers have.
+  // disabled the only resolution path some suppliers have. The fallback chain
+  // now lives in resolveBindingAnyWay, which tries every reading in order and
+  // never short-circuits on the code column being non-empty.
   assert.equal(
     SRC.split("if (!binding && sId && !rawSku) {").length - 1,
     0,
     "an empty code column is not the only time the fallback is needed",
   );
-  assert.equal(SRC.split("if (!binding && sId) {").length - 1, 2);
+  const fn = SRC.slice(SRC.indexOf("const resolveBindingAnyWay = useCallback("), 0 + SRC.length);
+  const head = fn.slice(0, 1200);
+  assert.ok(
+    head.includes("resolveBindingByDescription(supplierId, description)"),
+    "the description reading must sit in the same unconditional chain",
+  );
 });
 
 test("suffix matching needs enough characters to identify anything", () => {

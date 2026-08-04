@@ -1316,7 +1316,31 @@ export default function SalesOrderDetailPage() {
               </Button>
             )}
 
-            {["SHIPPED", "INVOICED", "CLOSED", "CANCELLED"].includes(order.status) && (
+            {/* Undo Cancel — a cancel is reversible now that the cascade
+                records where everything came from. The order, its production
+                orders and the job cards this cancel took down all return to
+                their own prior statuses, and the reversed WIP cost is
+                re-posted. Work that was already COMPLETED was never touched.
+                Owner 2026-08-04: "i silap cancel". */}
+            {order.status === "CANCELLED" && (
+              <Button
+                variant="primary" size="sm" disabled={updating}
+                onClick={() => {
+                  const undoTarget =
+                    (order.preCancelStatus as SOStatus) || "IN_PRODUCTION";
+                  openConfirm(
+                    "Undo Cancel",
+                    `This order and the production orders / job cards cancelled with it will be restored. The order returns to ${undoTarget}. Completed work was never cancelled and is unaffected.`,
+                    "Undo Cancel",
+                    () => updateStatus(undoTarget),
+                  );
+                }}
+              >
+                <PlayCircle className="h-4 w-4" /> Undo Cancel
+              </Button>
+            )}
+
+            {["SHIPPED", "INVOICED", "CLOSED"].includes(order.status) && (
               <span className="text-sm text-[#9CA3AF]">No further status actions for this state.</span>
             )}
           </div>

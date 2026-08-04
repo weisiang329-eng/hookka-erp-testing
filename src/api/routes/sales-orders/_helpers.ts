@@ -62,6 +62,11 @@ export type SalesOrderRow = {
   held_by?: string | null;
   heldAt?: string | null;
   held_at?: string | null;
+  /** Status to return to when the hold / cancel is undone. Dual-keyed read. */
+  preHoldStatus?: string | null;
+  pre_hold_status?: string | null;
+  preCancelStatus?: string | null;
+  pre_cancel_status?: string | null;
   // Multi-Company Phase 2 — the company this SO is booked under
   // (HOOKKA / OHANA / …). snake_case DB column; db-pg toCamel folds it to
   // salesOrgCode on SELECT *, so both keys are typed for dual-key reads.
@@ -276,6 +281,12 @@ export function rowToSO(row: SalesOrderRow, items: SalesOrderItemRow[] = []) {
     holdReason: row.holdReason ?? row.hold_reason ?? "",
     heldBy: row.heldBy ?? row.held_by ?? "",
     heldAt: row.heldAt ?? row.held_at ?? "",
+    // Where a hold / cancel came FROM, so the page can offer to go back there.
+    // `preHoldStatus` was read by the detail page long before anything wrote
+    // it, which is why Resume always fell back to CONFIRMED and quietly moved
+    // an IN_PRODUCTION order backwards a stage.
+    preHoldStatus: row.preHoldStatus ?? row.pre_hold_status ?? "",
+    preCancelStatus: row.preCancelStatus ?? row.pre_cancel_status ?? "",
     // Multi-Company Phase 2 — company code (dual-keyed). Defaults to HOOKKA so
     // rows from before the column existed (or partial selects) render as Hookka.
     salesOrgCode: readCompanyCode(row.salesOrgCode, row.sales_org_code),
@@ -706,15 +717,24 @@ export async function cascadeSOStatusToPOs(
   const isResume =
     fromStatus === "ON_HOLD" &&
     (newStatus === "CONFIRMED" || newStatus === "IN_PRODUCTION");
-  if (!isHold && !isCancel && !isResume) return result;
+  // Leaving CANCELLED is an UNDO of the cancel, not an ordinary transition —
+  // it has to put back exactly what the cancel took down (owner 2026-08-04:
+  // "reverse 或者 undo 这样的意思，不是吗？").
+  const isUncancel = fromStatus === "CANCELLED" && newStatus !== "CANCELLED";
+  if (!isHold && !isCancel && !isResume && !isUncancel) return result;
 
   // Load downstream POs for this SO.
   const posRes = await db
     .prepare(
-      "SELECT id, poNo, status FROM production_orders WHERE salesOrderId = ?",
+      "SELECT id, poNo, status, pre_cancel_status FROM production_orders WHERE salesOrderId = ?",
     )
     .bind(soId)
-    .all<{ id: string; poNo: string; status: string }>();
+    .all<{
+      id: string;
+      poNo: string;
+      status: string;
+      pre_cancel_status?: string | null;
+    }>();
   const pos = posRes.results ?? [];
   if (pos.length === 0) return result;
 
@@ -742,6 +762,129 @@ export async function cascadeSOStatusToPOs(
     return result;
   }
 
+  if (isUncancel) {
+    // Only the POs THIS cancel took down — `pre_cancel_status IS NOT NULL` is
+    // the marker. A PO cancelled on its own before the SO was cancelled keeps
+    // its own state; undoing the SO cancel is not a licence to revive it.
+    const affected = pos.filter(
+      (p) =>
+        p.status === "CANCELLED" &&
+        ((p as { pre_cancel_status?: string | null }).pre_cancel_status ??
+          (p as { preCancelStatus?: string | null }).preCancelStatus ??
+          null) !== null,
+    );
+    if (affected.length === 0) {
+      result.actions.push("No production orders were cancelled by this order.");
+      return result;
+    }
+    const poIds = affected.map((p) => p.id);
+    for (const p of affected) {
+      result.statements.push(
+        db
+          .prepare(
+            `UPDATE production_orders
+                SET status = COALESCE(pre_cancel_status, 'PENDING'),
+                    pre_cancel_status = NULL,
+                    updated_at = ?
+              WHERE id = ?`,
+          )
+          .bind(now, p.id),
+      );
+    }
+    const placeholders = poIds.map(() => "?").join(", ");
+    const jcRes = await db
+      .prepare(
+        `SELECT id FROM job_cards
+           WHERE productionOrderId IN (${placeholders})
+             AND status = 'CANCELLED'
+             AND pre_cancel_status IS NOT NULL`,
+      )
+      .bind(...poIds)
+      .all<{ id: string }>();
+    const jcIds = (jcRes.results ?? []).map((r) => r.id);
+    for (const jcId of jcIds) {
+      result.statements.push(
+        db
+          .prepare(
+            `UPDATE job_cards
+                SET status = COALESCE(pre_cancel_status, 'PENDING'),
+                    pre_cancel_status = NULL
+              WHERE id = ?`,
+          )
+          .bind(jcId),
+      );
+    }
+
+    // Put the WIP cost back. The cancel wrote reversal ADJUSTMENT rows against
+    // these job cards; the undo writes the opposite AGAIN rather than deleting
+    // anything, because cost_ledger is append-only and its hash chain must
+    // stay intact. Re-reading the ORIGINAL rows (type <> 'ADJUSTMENT') and
+    // re-posting them in their own direction restores the running totals
+    // exactly, and leaves both the cancel and the undo visible in the trail.
+    if (jcIds.length > 0) {
+      const jcPlaceholders = jcIds.map(() => "?").join(",");
+      const ledgerToRestore = await db
+        .prepare(
+          `SELECT id, type, itemType, itemId, batchId, qty, direction,
+                  unitCostSen, totalCostSen, refId
+             FROM cost_ledger
+            WHERE refType = 'JOB_CARD'
+              AND type <> 'ADJUSTMENT'
+              AND refId IN (${jcPlaceholders})`,
+        )
+        .bind(...jcIds)
+        .all<{
+          id: string;
+          type: string;
+          itemType: string;
+          itemId: string;
+          batchId: string | null;
+          qty: number;
+          direction: string;
+          unitCostSen: number;
+          totalCostSen: number;
+          refId: string;
+        }>();
+      for (const entry of ledgerToRestore.results ?? []) {
+        result.statements.push(
+          db
+            .prepare(
+              `INSERT INTO cost_ledger
+                 (id, date, type, itemType, itemId, batchId, qty, direction,
+                  unitCostSen, totalCostSen, refType, refId, notes)
+               VALUES (?, ?, 'ADJUSTMENT', ?, ?, ?, ?, ?, ?, ?, 'JOB_CARD', ?, ?)`,
+            )
+            .bind(
+              `cl-unc-${crypto.randomUUID().slice(0, 12)}`,
+              now,
+              entry.itemType,
+              entry.itemId,
+              entry.batchId,
+              entry.qty,
+              entry.direction,
+              entry.unitCostSen,
+              entry.totalCostSen,
+              entry.refId,
+              `Re-post of ${entry.type} (cl=${entry.id}) — JC ${entry.refId} restored via SO cancel UNDO`,
+            ),
+        );
+      }
+      result.actions.push(
+        `${ledgerToRestore.results?.length ?? 0} cost_ledger entry/entries re-posted for restored JCs.`,
+      );
+    }
+
+    result.affectedPoCount = affected.length;
+    result.affectedJcCount = jcIds.length;
+    result.actions.push(
+      `${affected.length} production order(s) restored: ${affected.map((p) => p.poNo).join(", ")}`,
+    );
+    if (jcIds.length > 0) {
+      result.actions.push(`${jcIds.length} job card(s) restored to their prior status.`);
+    }
+    return result;
+  }
+
   if (isCancel) {
     const affected = pos.filter(
       (p) => p.status !== "COMPLETED" && p.status !== "CANCELLED",
@@ -755,9 +898,11 @@ export async function cascadeSOStatusToPOs(
       result.statements.push(
         db
           .prepare(
-            "UPDATE production_orders SET status = 'CANCELLED', updated_at = ? WHERE id = ?",
+            // Record where each PO came from in the same write, so the cancel
+            // can be undone exactly rather than approximated (owner 2026-08-04).
+            "UPDATE production_orders SET status = 'CANCELLED', pre_cancel_status = ?, updated_at = ? WHERE id = ?",
           )
-          .bind(now, p.id),
+          .bind(p.status, now, p.id),
       );
     }
     // Cascade CANCELLED to any non-terminal job_cards under those POs.
@@ -775,7 +920,12 @@ export async function cascadeSOStatusToPOs(
     for (const jcId of jcIds) {
       result.statements.push(
         db
-          .prepare("UPDATE job_cards SET status = 'CANCELLED' WHERE id = ?")
+          .prepare(
+            // Same reason as the PO above: WAITING / IN_PROGRESS / PAUSED all
+            // collapse to CANCELLED here, and without capturing which was
+            // which the floor cannot be restored.
+            "UPDATE job_cards SET pre_cancel_status = status, status = 'CANCELLED' WHERE id = ?",
+          )
           .bind(jcId),
       );
     }
@@ -905,7 +1055,18 @@ export const VALID_TRANSITIONS: Record<string, string[]> = {
   INVOICED: ["CLOSED"],
   ON_HOLD: ["CONFIRMED", "IN_PRODUCTION", "CANCELLED"],
   CLOSED: [],
-  CANCELLED: [],
+  // Cancel is undoable (owner 2026-08-04: "i silap cancel" … "reverse 或者 undo
+  // 这样的意思，不是吗？"). It was terminal only because the cascade was LOSSY —
+  // it overwrote every in-flight job card's status with nothing recorded, so
+  // there was no honest way back. `pre_cancel_status` fixes that, and the undo
+  // restores exactly what this cancel took down: POs and job cards return to
+  // their own prior statuses, and the reversed WIP cost is re-posted.
+  //
+  // The reachable set is the pre-shipping stages only. Anything from SHIPPED
+  // onwards has physical or financial evidence behind it (a delivery order, an
+  // invoice) that a status flip would contradict — an order cancelled after
+  // shipping needs a credit note, not an undo.
+  CANCELLED: ["DRAFT", "CONFIRMED", "IN_PRODUCTION", "READY_TO_SHIP"],
 };
 
 export const CS_STATUSES = new Set([

@@ -89,6 +89,46 @@ export function normKey(s: string | null | undefined): string {
 }
 
 /**
+ * A supplier-code field that is really the document's line NUMBER.
+ *
+ * Owner 2026-08-04: "其他的供应商都没问题，就这个 ADD WOOD 有问题."
+ *
+ * ADD WOOD's invoice is `No | Description | Qty | Unit/Price | Amount` — they
+ * print no product code at all, and the leading "No" column is a running 1, 2,
+ * 3. The extractor sees a short per-line value in the leftmost column and fills
+ * `supplierCode` with it, which is worse than leaving it null in three ways:
+ * the description fallback is skipped (and the description is the ONLY
+ * identifying text they print), the prefix-tolerant binding search matches any
+ * SKU ending in that digit, and the digit becomes a high-weight token that
+ * drags the text score down.
+ *
+ * The trade is deliberately one-sided. Rejecting a genuine 1–3 digit code costs
+ * a fall-through to description and text matching, which now resolve well.
+ * Accepting a row number binds the WRONG material, silently.
+ */
+export function looksLikeRowNumber(code: string | null | undefined): boolean {
+  const t = (code ?? "").trim();
+  if (!t) return false;
+  // "1", "01", "12.", "3)" — a bare short integer with optional trailing
+  // punctuation. Anything carrying a letter is a real code.
+  return /^\d{1,3}\s*[.)]?$/.test(t);
+}
+
+/** The supplier's catalogue code on a line — "" when they printed none. */
+export function supplierCodeOf(raw: string | null | undefined): string {
+  const t = (raw ?? "").trim();
+  return looksLikeRowNumber(t) ? "" : t;
+}
+
+/**
+ * Shortest supplier SKU that may be matched by SUFFIX rather than exactly.
+ *
+ * The prefix-tolerant search exists for real drift ("OST- SL 27" vs "SL.27"),
+ * but with a two-character key it matches almost anything and binds silently.
+ */
+export const MIN_SKU_SUFFIX_MATCH = 3;
+
+/**
  * Index a catalogue by code the way this module looks codes up.
  *
  * Callers must build the map with this rather than their own uppercase-trim
@@ -282,7 +322,8 @@ export function resolveMaterialForLine<T extends MaterialLike>(
   tiers: Tier<T>[],
   opts: { supplierSku?: string | null; skuIndex?: Map<string, T> } = {},
 ): Resolution<T> | null {
-  const skuKey = normKey(opts.supplierSku);
+  // A row number from the document's "No." column is not a code to look up.
+  const skuKey = normKey(supplierCodeOf(opts.supplierSku));
   if (skuKey && opts.skuIndex) {
     const hit = opts.skuIndex.get(skuKey);
     if (hit) return { item: hit, score: 1, margin: 1, tier: "supplier", via: "sku" };

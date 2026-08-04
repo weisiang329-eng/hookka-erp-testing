@@ -60,7 +60,9 @@ import {
   materialsEverBought,
   normKey,
   resolveMaterialForLine,
+  supplierCodeOf,
   supplierSkuIndex,
+  MIN_SKU_SUFFIX_MATCH,
   type CandidateTier,
 } from "@/lib/supplier-material-candidates";
 import {
@@ -1211,6 +1213,10 @@ function CreatePIWizard({
         if (b.supplierId !== supplierId) continue;
         const bSku = normSku(b.supplierSku);
         if (!bSku) continue;
+        // Both sides must be long enough to identify anything. A two-character
+        // key suffix-matches almost every binding this supplier has, and binds
+        // silently — the exact failure a stray digit in the code column caused.
+        if (sku.length < MIN_SKU_SUFFIX_MATCH || bSku.length < MIN_SKU_SUFFIX_MATCH) continue;
         if (bSku.endsWith(sku) || sku.endsWith(bSku)) return b;
       }
       return null;
@@ -1364,14 +1370,21 @@ function CreatePIWizard({
       const skuIndex = skuIndexFor(sId);
 
       const lines: PreviewLine[] = (ex.lines ?? []).map((ln) => {
-        const rawSku = (ln.supplierCode ?? "").trim();
+        // A supplier-code field holding the document's line NUMBER is not a
+        // code — ADD WOOD's invoice is `No | Description | Qty | Price` and the
+        // extractor fills supplierCode with the running 1, 2, 3. Treated as a
+        // code it skips the description path (their only identifying text),
+        // matches any binding SKU ending in that digit, and poisons the text
+        // score. See supplierCodeOf.
+        const rawSku = supplierCodeOf(ln.supplierCode);
         // Fix B (owner 2026-06-30): with supplierId now auto-picked, ALWAYS
         // try to resolve every line's binding. SKU → binding fills the
-        // internal materialCode + name. If SKU was blank but the OCR
-        // description happens to be an internal materialCode, try the
-        // reverse path so Supplier SKU also gets filled.
+        // internal materialCode + name. If the SKU path found nothing, try the
+        // description — gated on `!rawSku` before, which meant a single junk
+        // character in the code column disabled the only path some suppliers
+        // have. A failed SKU lookup is exactly when the fallback is needed.
         let binding = sId ? resolveBindingFor(sId, rawSku) : null;
-        if (!binding && sId && !rawSku) {
+        if (!binding && sId) {
           const desc = (ln.description ?? "").trim();
           if (desc) {
             // 1) The supplier prints no code, so try what they DO print — the
@@ -3698,6 +3711,10 @@ function CreateGRNWizard({
         if (b.supplierId !== supplierId) continue;
         const bSku = normSkuG(b.supplierSku);
         if (!bSku) continue;
+        // Both sides must be long enough to identify anything. A two-character
+        // key suffix-matches almost every binding this supplier has, and binds
+        // silently — the exact failure a stray digit in the code column caused.
+        if (sku.length < MIN_SKU_SUFFIX_MATCH || bSku.length < MIN_SKU_SUFFIX_MATCH) continue;
         if (bSku.endsWith(sku) || sku.endsWith(bSku)) return b;
       }
       return null;
@@ -3818,12 +3835,15 @@ function CreateGRNWizard({
       const skuIndex = skuIndexFor(sId);
 
       const lines: GRNPreviewLine[] = (ex.lines ?? []).map((ln) => {
-        const rawSku = (ln.supplierCode ?? "").trim();
+        // Line NUMBER in the code column is not a code — see the create-PI note.
+        const rawSku = supplierCodeOf(ln.supplierCode);
         // Fix B: with supplierId now auto-picked, run both directions of
         // binding resolution so a line where OCR returned only a SKU OR
-        // only a description-that-is-an-internal-code still binds.
+        // only a description-that-is-an-internal-code still binds. The
+        // description path runs whenever the SKU path FAILED, not only when
+        // the code column was empty.
         let binding = sId ? resolveBindingFor(sId, rawSku) : null;
-        if (!binding && sId && !rawSku) {
+        if (!binding && sId) {
           const desc = (ln.description ?? "").trim();
           if (desc) {
             // 1) The supplier prints no code, so try what they DO print — the

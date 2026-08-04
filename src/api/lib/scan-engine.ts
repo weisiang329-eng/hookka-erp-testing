@@ -274,7 +274,7 @@ PER-DOCUMENT EXTRACTION RULES
 - customerPoRef: the BUYER-side purchase order reference the supplier wrote on their doc. Look for labels like "Customer P.O.", "Cust P.O.", "P.O. No", "B.O. NO.", "Buyer Order", "Cust DO No.", "Customer Order". Return the value verbatim (e.g. "2606-007", "PO-000123", "K20061904"). null if not printed. This lets the buyer auto-link the scanned doc to an existing purchase order.
 - currency: ISO code, default "MYR" if a Malaysian RM document doesn't say otherwise.
 - lines[]: one object per goods line on THIS document only — do NOT pool lines across documents. Skip non-goods rows (subtotal, SST, rounding, freight-as-note, "Thank you" lines).
-    - supplierCode: the supplier's item / material code if printed (the code in their own catalogue), else null.
+    - supplierCode: the supplier's item / material code if printed (the code in their own catalogue), else null. A leading "No." / "Item" / "S/N" column that simply counts the rows 1, 2, 3 is NOT a code — return null for it. Many suppliers print no product code at all; null is the correct answer far more often than a guess, because a wrong code binds the line to the wrong material downstream.
     - description: the item description text, trimmed, single line.
     - qty: numeric quantity delivered/billed. Strip thousands separators.
     - uom: unit of measure as printed (PCS, ROLL, M, MTR, KG, SET, UNIT...). null if absent.

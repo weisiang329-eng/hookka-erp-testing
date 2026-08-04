@@ -2804,13 +2804,34 @@ past 14 working days ran at 97-125%. Everything below came out of chasing that.
 ### Deliberately NOT done
 - **Oversize splitting** from `planning-packer.ts` — it contradicts this engine's explicit
   rule "a whole SO is cut the same day, never split". OT raises the day's ceiling instead.
-- **Multi-PO on PI/GRN.** The ADD WOOD invoice carries `2607-003/2607-020` in one field and
-  the matcher's `endsWith` would silently link only the LAST one. Needs a schema change on
-  both PI and GRN plus an allocation rule the owner has to define.
-- **Description-keyed supplier bindings.** That supplier's invoice has no product-code column
-  at all, so the SKU-keyed binding path can never fire — Internal Code cannot auto-resolve for
-  them until binding can key on description.
+
+### Since closed (2026-08-04)
+- **Multi-PO on PI/GRN — done.** Per-line ownership (`grn_items.po_id/po_item_id`,
+  `purchase_invoice_items.po_id`) plus `src/lib/po-line-allocate.ts` for the allocation rule.
+  A two-PO supplier document is now filed as ONE receipt / ONE invoice with each line drawn
+  down against its own order; an ambiguous line allocates nothing rather than guessing.
+- **Description-keyed supplier bindings — done**, and then made largely unnecessary: the
+  candidate ladder (`supplier-material-candidates.ts`) resolves a line from the linked PO and
+  from PO history, neither of which needs a binding to exist first.
+
+### Bugs found while doing the above
+- **`grn.ts` read a second PO's lines off the FIRST PO.** Multi-PO receipts wrote `po_id`
+  correctly but still resolved the line as `poItems[poItemIndex]` on the header order, and
+  loaded only the header's lines. Wrong material, ordered qty and price for every second-PO
+  line, and the 110% over-receipt guard compared the delivery against a quantity from a PO it
+  was not delivering — permissive direction, no error.
+- **`three-way-match.ts` had the same defect**, plus `poTotal` = the header order's ENTIRE
+  value compared against a receipt partly belonging to another order. That variance can land
+  inside the 2% tolerance by coincidence and report FULL_MATCH.
+- **The Internal Code picker was empty for any supplier with no bindings**, so the operator
+  could not correct a scanned line without first creating the binding on another page — the
+  correction path was missing exactly when a correction was needed.
+- **A weak auto-match would have taught a permanent binding.** Now flagged `unverifiedMatch`
+  and skipped by the learner: a binding resolves silently forever, so learning a guess turns a
+  visible, correctable mistake into an invisible one.
 
 ### Verification
-`typecheck:app` clean · lint clean on every touched file · **2620 tests / 0 fail**
-(~100 new). NOT yet run against prod data — the numbers depend on real output.
+`typecheck:app` clean · lint clean on every touched file · **2794 tests / 0 fail**
+(~270 new). Planning numbers still NOT run against prod data — they depend on real output.
+The procurement work above is verified by tests only; no prod document has been scanned
+through the new ladder yet.

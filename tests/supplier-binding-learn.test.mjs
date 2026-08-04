@@ -23,7 +23,8 @@ import { learnSupplierBindings } from "../src/api/lib/supplier-binding-learn.ts"
 let seq = 0;
 const genId = () => `smb-${++seq}`;
 
-function makeDb(existingRows = []) {
+function makeDb(existingRows = [], missingMaterials = []) {
+  const missing = new Set(missingMaterials.map((m) => m.toUpperCase()));
   const inserts = [];
   const updates = [];
   const rows = [...existingRows];
@@ -39,6 +40,12 @@ function makeDb(existingRows = []) {
               return { results: [] };
             },
             async first() {
+              // The catalogue existence check — every test material is real
+              // unless the case says otherwise via `missingMaterials`.
+              if (sql.includes("FROM raw_materials")) {
+                const code = String(args[0] ?? "").toUpperCase();
+                return missing.has(code) ? null : { item_code: args[0] };
+              }
               if (!sql.includes("SELECT * FROM supplier_material_bindings")) return null;
               const [supplierId, code] = args;
               return (
@@ -257,4 +264,34 @@ test("a database failure never propagates", async () => {
   );
   assert.equal(r.created, 0);
   assert.ok(r.skipped >= 1, "the failure is counted, not thrown");
+});
+
+test("a code that names no ACTIVE material is never learned", async () => {
+  // Prod carried 7 such rows from hand entry — a truncated code, a code and
+  // description swapped, a finished-product code used as a material. A binding
+  // that points at nothing is worse than none: it vanishes from every candidate
+  // set and from the Internal Code dropdown, while the Supplier SKU dropdown
+  // still lists it, so the operator sees a code they cannot use and nothing
+  // says why. Learning must not copy one onto every future document.
+  const db = makeDb([], ["18MM 4' X 8'"]);
+  const r = await learnSupplierBindings(
+    db,
+    "sup-1",
+    [{ materialCode: "18MM 4' X 8'", supplierDescription: "18MM 4' X 8' PLYWOOD" }],
+    genId,
+  );
+  assert.equal(r.created, 0);
+  assert.equal(db.inserts.length, 0);
+  assert.ok(r.skipped >= 1);
+});
+
+test("a real material is still learned as before", async () => {
+  const db = makeDb();
+  const r = await learnSupplierBindings(
+    db,
+    "sup-1",
+    [{ materialCode: "PLY-9-48-AB", supplierDescription: "9MM 4' X 8' PLYWOOD AB" }],
+    genId,
+  );
+  assert.equal(r.created, 1);
 });

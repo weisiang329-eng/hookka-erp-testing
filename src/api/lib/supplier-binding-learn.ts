@@ -112,6 +112,27 @@ export async function learnSupplierBindings(
     const sku = (line.supplierSku ?? "").trim();
     const desc = (line.supplierDescription ?? "").trim();
     try {
+      // The code must name a material that actually exists and is active.
+      //
+      // A binding whose materialCode matches nothing is worse than no binding:
+      // it disappears from every candidate set AND from the Internal Code
+      // dropdown, while the Supplier SKU dropdown keeps listing it — so the
+      // operator sees the code in one place and cannot use it in the other,
+      // with nothing explaining why. Prod had 7 such rows from hand entry
+      // (truncated codes, code/description swapped, a product code used as a
+      // material). Without this check, learning would quietly copy each one
+      // onto every future document that carried it.
+      const known = await db
+        .prepare(
+          "SELECT item_code FROM raw_materials WHERE UPPER(REPLACE(REPLACE(item_code,' ',''),'-','')) = UPPER(REPLACE(REPLACE(?,' ',''),'-','')) AND is_active LIMIT 1",
+        )
+        .bind(code)
+        .first<{ item_code?: string }>();
+      if (!known) {
+        out.skipped++;
+        continue;
+      }
+
       const existing = await db
         .prepare(
           "SELECT * FROM supplier_material_bindings WHERE supplierId = ? AND UPPER(materialCode) = UPPER(?) LIMIT 1",

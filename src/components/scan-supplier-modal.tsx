@@ -57,6 +57,7 @@ import { allocateLinesToPos, allocatedPoIds, headerPoId } from "@/lib/po-line-al
 import {
   buildCandidateTiers,
   indexByCode,
+  danglingBindings,
   materialsEverBought,
   normKey,
   resolveMaterialForLine,
@@ -1191,6 +1192,17 @@ function CreatePIWizard({
     [purchaseOrders, bindings, materialIndex, rawMaterials],
   );
 
+  /**
+   * Bindings this supplier has whose material is not in the active catalogue.
+   * Surfaced on the card because such a binding silently disappears from every
+   * candidate set and from the Internal Code dropdown, while the Supplier SKU
+   * dropdown keeps listing it.
+   */
+  const brokenBindingsFor = useCallback(
+    (supplierId: string) => danglingBindings(supplierId, bindings, materialIndex),
+    [bindings, materialIndex],
+  );
+
   /** The supplier's own codes → our material, learned from their PO lines. */
   const skuIndexFor = useCallback(
     (supplierId: string) =>
@@ -1422,7 +1434,22 @@ function CreatePIWizard({
         // Use the binding's canonical supplier SKU once we resolved it, so
         // "SL.27" (OCR drift) snaps to "SL 27" (how supplier_material_bindings
         // records it). Falls back to OCR text otherwise.
-        const sku = binding?.supplierSku ?? rawSku;
+        // The supplier's own code for whatever we ended up resolving to.
+        //
+        // A binding found BY SKU or BY DESCRIPTION already carries it. A line
+        // resolved by TEXT does not — `binding` is null — so the column stayed
+        // blank even when a binding for that exact material existed and could
+        // have filled it. ADD WOOD prints no code on the document at all, so
+        // `rawSku` is "" too and the operator saw an empty Supplier SKU next to
+        // a correctly-resolved Internal Code (owner 2026-08-04: "明明都已经扫描
+        // 出来了 Internal Code，可是它却带不出来 Supplier Code" — and the SKU
+        // dropdown was offering "ADD-18MM 4' X 8' PLYWOOD" the whole time).
+        //
+        // So once the material is known by ANY route, ask this supplier's
+        // bindings what they call it.
+        const resolvedBinding =
+          binding ?? (sId && rm ? resolveBindingForMaterial(sId, rm.itemCode) : null);
+        const sku = resolvedBinding?.supplierSku ?? rawSku;
         const qty = Number(ln.qty) || 0;
         const unitPriceRM =
           ln.unitPrice == null || Number.isNaN(Number(ln.unitPrice))
@@ -2219,6 +2246,7 @@ function CreatePIWizard({
               activeOrgs={activeOrgs}
               purchaseOrders={purchaseOrders}
               internalCodeOptionsFor={internalCodeOptionsFor}
+              brokenBindingsFor={brokenBindingsFor}
               supplierSkuOptionsBy={supplierSkuOptionsBy}
               resolveBindingFor={resolveBindingFor}
               resolveBindingForMaterial={resolveBindingForMaterial}
@@ -2561,6 +2589,7 @@ function PreviewStep({
   activeOrgs,
   purchaseOrders,
   internalCodeOptionsFor,
+  brokenBindingsFor,
   supplierSkuOptionsBy,
   resolveBindingFor,
   resolveBindingForMaterial,
@@ -2583,6 +2612,7 @@ function PreviewStep({
   activeOrgs: Organisation[];
   purchaseOrders: PurchaseOrder[];
   internalCodeOptionsFor: (supplierId: string) => MaterialOption[];
+  brokenBindingsFor: (supplierId: string) => string[];
   supplierSkuOptionsBy: Map<string, MaterialOption[]>;
   resolveBindingFor: (supplierId: string, supplierSku: string) => SupplierMaterialBinding | null;
   resolveBindingForMaterial: (supplierId: string, materialCode: string) => SupplierMaterialBinding | null;
@@ -2697,6 +2727,7 @@ function PreviewStep({
             activeOrgs={activeOrgs}
             purchaseOrders={purchaseOrders}
             internalCodeOptions={internalCodeOptionsFor(card.supplierId)}
+            brokenBindings={brokenBindingsFor(card.supplierId)}
             supplierSkuOptions={supplierSkuOptionsBy.get(card.supplierId) ?? []}
             resolveBindingFor={resolveBindingFor}
             resolveBindingForMaterial={resolveBindingForMaterial}
@@ -2763,6 +2794,7 @@ function PICard({
   activeOrgs,
   purchaseOrders,
   internalCodeOptions,
+  brokenBindings,
   supplierSkuOptions,
   resolveBindingFor,
   resolveBindingForMaterial,
@@ -2781,6 +2813,8 @@ function PICard({
   activeOrgs: Organisation[];
   purchaseOrders: PurchaseOrder[];
   internalCodeOptions: MaterialOption[];
+  /** Bindings whose material is missing from the active catalogue. */
+  brokenBindings: string[];
   supplierSkuOptions: MaterialOption[];
   resolveBindingFor: (supplierId: string, supplierSku: string) => SupplierMaterialBinding | null;
   resolveBindingForMaterial: (supplierId: string, materialCode: string) => SupplierMaterialBinding | null;
@@ -3304,6 +3338,20 @@ function PICard({
               })}
             </tbody>
           </table>
+          {brokenBindings.length > 0 && (
+            // A binding pointing at a material that is not in the active
+            // catalogue vanishes from the auto-match AND from the Internal Code
+            // dropdown, while the Supplier SKU dropdown still lists it — so the
+            // operator sees the code in one place and cannot use it in the
+            // other, with nothing saying why. Name the broken rows.
+            <div className="px-3 py-1.5 bg-[#FFF5F0] border-t border-[#E2DDD8] text-[11px] text-[#9A3A2D]">
+              {brokenBindings.length} supplier binding
+              {brokenBindings.length !== 1 ? "s" : ""} point at a material that is
+              not in the active catalogue ({brokenBindings.join(", ")}) — those
+              lines cannot auto-resolve or be picked. Reactivate the material, or
+              fix the binding under Suppliers &gt; Materials.
+            </div>
+          )}
           <div className="px-2 py-1 bg-[#FAFAF9] border-t border-[#E2DDD8] flex justify-between items-center">
             <button
               type="button"
@@ -3692,6 +3740,17 @@ function CreateGRNWizard({
     [purchaseOrders, bindings, materialIndex, rawMaterials],
   );
 
+  /**
+   * Bindings this supplier has whose material is not in the active catalogue.
+   * Surfaced on the card because such a binding silently disappears from every
+   * candidate set and from the Internal Code dropdown, while the Supplier SKU
+   * dropdown keeps listing it.
+   */
+  const brokenBindingsFor = useCallback(
+    (supplierId: string) => danglingBindings(supplierId, bindings, materialIndex),
+    [bindings, materialIndex],
+  );
+
   /** The supplier's own codes → our material, learned from their PO lines. */
   const skuIndexFor = useCallback(
     (supplierId: string) =>
@@ -3877,7 +3936,22 @@ function CreateGRNWizard({
             matchTier = hit.tier;
           }
         }
-        const sku = binding?.supplierSku ?? rawSku;
+        // The supplier's own code for whatever we ended up resolving to.
+        //
+        // A binding found BY SKU or BY DESCRIPTION already carries it. A line
+        // resolved by TEXT does not — `binding` is null — so the column stayed
+        // blank even when a binding for that exact material existed and could
+        // have filled it. ADD WOOD prints no code on the document at all, so
+        // `rawSku` is "" too and the operator saw an empty Supplier SKU next to
+        // a correctly-resolved Internal Code (owner 2026-08-04: "明明都已经扫描
+        // 出来了 Internal Code，可是它却带不出来 Supplier Code" — and the SKU
+        // dropdown was offering "ADD-18MM 4' X 8' PLYWOOD" the whole time).
+        //
+        // So once the material is known by ANY route, ask this supplier's
+        // bindings what they call it.
+        const resolvedBinding =
+          binding ?? (sId && rm ? resolveBindingForMaterial(sId, rm.itemCode) : null);
+        const sku = resolvedBinding?.supplierSku ?? rawSku;
         const qty = Number(ln.qty) || 0;
         const receivedQty = qty > 0 ? qty : 1;
         // Foam/sponge spec — surface density + thickness on the GRN line too
@@ -4516,6 +4590,7 @@ function CreateGRNWizard({
               activeOrgs={activeOrgs}
               purchaseOrders={purchaseOrders}
               internalCodeOptionsFor={internalCodeOptionsFor}
+              brokenBindingsFor={brokenBindingsFor}
               supplierSkuOptionsBy={supplierSkuOptionsBy}
               resolveBindingFor={resolveBindingFor}
               resolveBindingForMaterial={resolveBindingForMaterial}
@@ -4567,6 +4642,7 @@ function GRNPreviewStep({
   activeOrgs,
   purchaseOrders,
   internalCodeOptionsFor,
+  brokenBindingsFor,
   supplierSkuOptionsBy,
   resolveBindingFor,
   resolveBindingForMaterial,
@@ -4589,6 +4665,7 @@ function GRNPreviewStep({
   activeOrgs: Organisation[];
   purchaseOrders: PurchaseOrder[];
   internalCodeOptionsFor: (supplierId: string) => MaterialOption[];
+  brokenBindingsFor: (supplierId: string) => string[];
   supplierSkuOptionsBy: Map<string, MaterialOption[]>;
   resolveBindingFor: (supplierId: string, supplierSku: string) => SupplierMaterialBinding | null;
   resolveBindingForMaterial: (supplierId: string, materialCode: string) => SupplierMaterialBinding | null;
@@ -4696,6 +4773,7 @@ function GRNPreviewStep({
             activeOrgs={activeOrgs}
             purchaseOrders={purchaseOrders}
             internalCodeOptions={internalCodeOptionsFor(card.supplierId)}
+            brokenBindings={brokenBindingsFor(card.supplierId)}
             supplierSkuOptions={supplierSkuOptionsBy.get(card.supplierId) ?? []}
             resolveBindingFor={resolveBindingFor}
             resolveBindingForMaterial={resolveBindingForMaterial}
@@ -4746,6 +4824,7 @@ function GRNCard({
   activeOrgs,
   purchaseOrders,
   internalCodeOptions,
+  brokenBindings,
   supplierSkuOptions,
   resolveBindingFor,
   resolveBindingForMaterial,
@@ -4764,6 +4843,8 @@ function GRNCard({
   activeOrgs: Organisation[];
   purchaseOrders: PurchaseOrder[];
   internalCodeOptions: MaterialOption[];
+  /** Bindings whose material is missing from the active catalogue. */
+  brokenBindings: string[];
   supplierSkuOptions: MaterialOption[];
   resolveBindingFor: (supplierId: string, supplierSku: string) => SupplierMaterialBinding | null;
   resolveBindingForMaterial: (supplierId: string, materialCode: string) => SupplierMaterialBinding | null;
@@ -5240,6 +5321,20 @@ function GRNCard({
               })}
             </tbody>
           </table>
+          {brokenBindings.length > 0 && (
+            // A binding pointing at a material that is not in the active
+            // catalogue vanishes from the auto-match AND from the Internal Code
+            // dropdown, while the Supplier SKU dropdown still lists it — so the
+            // operator sees the code in one place and cannot use it in the
+            // other, with nothing saying why. Name the broken rows.
+            <div className="px-3 py-1.5 bg-[#FFF5F0] border-t border-[#E2DDD8] text-[11px] text-[#9A3A2D]">
+              {brokenBindings.length} supplier binding
+              {brokenBindings.length !== 1 ? "s" : ""} point at a material that is
+              not in the active catalogue ({brokenBindings.join(", ")}) — those
+              lines cannot auto-resolve or be picked. Reactivate the material, or
+              fix the binding under Suppliers &gt; Materials.
+            </div>
+          )}
           <div className="px-2 py-1 bg-[#FAFAF9] border-t border-[#E2DDD8] flex justify-between items-center">
             <button
               type="button"

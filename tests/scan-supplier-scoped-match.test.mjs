@@ -167,3 +167,29 @@ test("a supplier carrying two sizes still refuses to guess between them", () => 
   assert.ok(sized);
   assert.equal(sized.item.itemCode, "PLY-9-48-AB");
 });
+
+test("Supplier SKU is filled from the binding even on a text match", () => {
+  // `binding?.supplierSku ?? rawSku` left the column blank whenever the line
+  // resolved by TEXT — and ADD WOOD prints no code, so rawSku was "" too. The
+  // operator saw an empty Supplier SKU next to a correct Internal Code while
+  // the SKU dropdown was offering the right value all along.
+  assert.equal(
+    SRC.split("binding ?? (sId && rm ? resolveBindingForMaterial(sId, rm.itemCode) : null)")
+      .length - 1,
+    2,
+    "create-PI and create-GRN must both back-fill",
+  );
+  assert.equal(
+    SRC.split("const sku = binding?.supplierSku ?? rawSku;").length - 1,
+    0,
+    "the binding-only read is what left the column empty",
+  );
+  assert.match(SRC, /const sku = resolvedBinding\?\.supplierSku \?\? rawSku;/);
+});
+
+test("a binding pointing at a missing material is named on the card", () => {
+  // Otherwise it is invisible: gone from the auto-match and from the Internal
+  // Code dropdown, still listed in the Supplier SKU dropdown.
+  assert.equal(SRC.split("brokenBindingsFor = useCallback(").length - 1, 2);
+  assert.match(SRC, /not in the active catalogue/);
+});

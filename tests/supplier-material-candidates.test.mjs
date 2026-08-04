@@ -21,6 +21,7 @@ import {
   materialsEverBought,
   supplierSkuIndex,
   buildCandidateTiers,
+  danglingBindings,
   resolveMaterialForLine,
   CATALOG_MIN_SCORE,
 } from "../src/lib/supplier-material-candidates.ts";
@@ -267,4 +268,47 @@ test("normKey folds every way OCR writes the same code", () => {
   assert.equal(normKey("sl 27"), "SL27");
   assert.equal(normKey("SL-27"), "SL27");
   assert.equal(normKey(null), "");
+});
+
+// ── A binding that points nowhere ───────────────────────────────────────────
+// Owner 2026-08-04, on an ADD WOOD invoice: "18mm Plywood… 我都有啊什么会 OCR
+// 不出来呢？" — the Supplier SKU dropdown was offering ADD-18MM 4' X 8' PLYWOOD
+// the whole time. That list is built from bindings alone and tolerates a
+// missing material; every candidate set here resolves the material and drops
+// what it cannot find. So a binding whose material left the active catalogue is
+// visible in one dropdown and unusable in the other, silently.
+
+test("a binding whose material is not in the catalogue is reported", () => {
+  const broken = danglingBindings(
+    "sup-addwood",
+    [
+      { supplierId: "sup-addwood", materialCode: "PLY-9-48-AB" },
+      { supplierId: "sup-addwood", materialCode: "PLY-18-GONE" },
+      { supplierId: "sup-other", materialCode: "ALSO-GONE" },
+    ],
+    byCode,
+  );
+  assert.deepEqual(broken, ["PLY-18-GONE"], "only this supplier's broken rows");
+});
+
+test("it drops silently from the candidate sets — which is the whole problem", () => {
+  const bindings = [{ supplierId: "sup-addwood", materialCode: "PLY-18-GONE" }];
+  assert.deepEqual(
+    materialsEverBought("sup-addwood", [], bindings, byCode),
+    [],
+    "nothing to match against, and nothing said about it",
+  );
+  assert.equal(danglingBindings("sup-addwood", bindings, byCode).length, 1);
+});
+
+test("a healthy supplier reports nothing", () => {
+  assert.deepEqual(
+    danglingBindings(
+      "sup-addwood",
+      [{ supplierId: "sup-addwood", materialCode: "PLY-9-48-AB" }],
+      byCode,
+    ),
+    [],
+  );
+  assert.deepEqual(danglingBindings("", [], byCode), []);
 });

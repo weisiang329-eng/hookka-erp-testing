@@ -261,6 +261,37 @@ export function supplierSkuIndex<T extends MaterialLike>(
   return out;
 }
 
+/**
+ * Bindings for this supplier whose material is not in the active catalogue.
+ *
+ * A binding names a `materialCode`; every candidate set here resolves it
+ * against the active raw materials and silently drops what it cannot find. So
+ * a binding pointing at a material that was deactivated, renamed or mistyped
+ * disappears from the auto-match AND from the Internal Code dropdown — while
+ * the Supplier SKU dropdown keeps listing it, because that list is built from
+ * the bindings alone and tolerates a missing material.
+ *
+ * The result is the worst kind of failure: the operator can SEE the supplier's
+ * code sitting in one dropdown and cannot use it in the other, with nothing
+ * saying why (owner 2026-08-04: "18mm Plywood… 我都有啊什么会 OCR 不出来呢？").
+ * Returning the broken codes lets the card say so.
+ */
+export function danglingBindings<T extends MaterialLike>(
+  supplierId: string,
+  bindings: BindingLike[],
+  materialByCode: Map<string, T>,
+): string[] {
+  if (!supplierId) return [];
+  const out: string[] = [];
+  for (const b of bindings) {
+    if (b.supplierId !== supplierId) continue;
+    const code = (b.materialCode ?? "").trim();
+    if (!code || materialByCode.has(normKey(code))) continue;
+    if (!out.includes(code)) out.push(code);
+  }
+  return out;
+}
+
 export interface TierInput<T extends MaterialLike> {
   supplierId: string;
   /** The PO(s) this document links to — a document may name several. */

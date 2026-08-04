@@ -161,6 +161,40 @@ export interface ChainInput {
    * `config`. Omitting the field entirely reproduces the legacy run exactly.
    */
   dailyBudgetByDept?: Record<string, number>;
+  /**
+   * OPTIONAL. Receives the overtime the plan ACTUALLY relies on, per
+   * department-day.
+   *
+   * The scheduler was already planning OT, but its result was discarded — a
+   * plan could depend on two hours a day that nobody was ever told about. This
+   * is the schedule's OWN figure rather than a second estimate, so what gets
+   * reported is what the floor was actually planned to work.
+   */
+  collectOt?: (d: PlannedOtDay) => void;
+}
+
+/**
+ * OT reported by the department passes of ONE computeChain run.
+ *
+ * computeChain is synchronous and single-threaded, so a module-local sink is
+ * safe and avoids threading a callback through five internal signatures. It is
+ * cleared at the top of every run.
+ */
+const otSink: PlannedOtDay[] = [];
+function reportOt(dept: string, lane: string | undefined, cal: Calendar, ot: Map<number, number>): void {
+  for (const [day, minutes] of ot) {
+    if (minutes > 0) otSink.push({ dept, lane, date: fmtIso(day), minutes: Math.round(minutes) });
+  }
+}
+
+/** One department-day the plan expects to need overtime. */
+export interface PlannedOtDay {
+  dept: string;
+  lane?: string;
+  /** Working day, YYYY-MM-DD. */
+  date: string;
+  /** Minutes beyond the normal budget. Never more than the humane per-day cap. */
+  minutes: number;
 }
 
 export interface ChainOutput {
@@ -977,7 +1011,7 @@ function runWood(
     );
     const load = loadByLane[lane];
     // OT applies only to a MINUTES budget — a sets/day cap has no hours to add.
-    placeUnitsWithOt(
+    reportOt("WOOD_CUT", lane, cal, placeUnitsWithOt(
       us,
       cal,
       chain,
@@ -992,7 +1026,7 @@ function runWood(
       (u, d) => {
         u.day = d;
       },
-    );
+    ));
     for (const u of us) woodDay.set(`${u.so}|${u.lane}`, u.day);
   }
   return { byLane, loadByLane, woodDay, inMinutes: woodInMinutes, budgets };
@@ -1358,7 +1392,7 @@ function runFraming(
       cmpKey([pr(a), sl(a), a.cdd, a.modelKey, a.so], [pr(b), sl(b), b.cdd, b.modelKey, b.so]),
     );
     const load = loadByLane[lane];
-    placeUnitsWithOt(
+    reportOt("FRAMING", lane, cal, placeUnitsWithOt(
       us,
       cal,
       chain,
@@ -1373,7 +1407,7 @@ function runFraming(
       (u, d) => {
         u.day = d;
       },
-    );
+    ));
   }
   const frameDayMap = new Map<string, number>();
   for (const u of units) frameDayMap.set(`${u.so}|${u.lane}`, u.day);
@@ -1418,7 +1452,7 @@ function runFraming(
       [foamSlack(b), b.cdd, b.modelKey, b.so],
     ),
   );
-  placeUnitsWithOt(
+  reportOt("FOAM", undefined, cal, placeUnitsWithOt(
     foamUnits,
     cal,
     chain,
@@ -1433,7 +1467,7 @@ function runFraming(
     (u, d) => {
       u.foamDay = d;
     },
-  );
+  ));
   const foamDayMap = new Map<string, number>();
   for (const u of foamUnits) foamDayMap.set(u.so, u.foamDay);
 
@@ -1489,7 +1523,7 @@ function runFraming(
       cmpKey([pr(a), sl(a), a.cdd, a.modelKey, a.so], [pr(b), sl(b), b.cdd, b.modelKey, b.so]),
     );
     const load = uphLoadByLane[lane];
-    placeUnitsWithOt(
+    reportOt("UPHOLSTERY", lane, cal, placeUnitsWithOt(
       us,
       cal,
       chain,
@@ -1504,7 +1538,7 @@ function runFraming(
       (u, d) => {
         u.uphDay = d;
       },
-    );
+    ));
   }
   const uphDayMap = new Map<string, number>();
   for (const u of uphUnits) uphDayMap.set(`${u.so}|${u.lane}`, u.uphDay);
@@ -1557,7 +1591,7 @@ function runFraming(
     packUnits.sort((a, b) =>
       cmpKey([packSlack(a), a.cdd, a.modelKey, a.so], [packSlack(b), b.cdd, b.modelKey, b.so]),
     );
-    placeUnitsWithOt(
+    reportOt("PACKING", undefined, cal, placeUnitsWithOt(
       packUnits,
       cal,
       chain,
@@ -1573,7 +1607,7 @@ function runFraming(
       (u, d) => {
         u.packDay = d;
       },
-    );
+    ));
   }
 
   const frameTotal = chain.frameCapMin.BEDFRAME + chain.frameCapMin.SOFA;
@@ -2383,6 +2417,7 @@ function renderWebbing(
 // =============================================================================
 export function computeChain(input: ChainInput): ChainOutput {
   const emit = input.collect;
+  otSink.length = 0;
   const cut = runCutting({
     cards: input.cutCards,
     config: input.config,
@@ -2463,6 +2498,10 @@ export function computeChain(input: ChainInput): ChainOutput {
     for (const u of fr.foamCutUnits) for (const c of u.cards) send("FOAM_CUTTING", c, u.day);
     for (const u of fr.uphUnits) for (const c of u.cards) send("UPHOLSTERY", c, u.uphDay);
     for (const u of fr.packUnits) for (const c of u.cards) send("PACKING", c, u.packDay);
+  }
+
+  if (input.collectOt) {
+    for (const d of otSink) input.collectOt(d);
   }
 
   return {

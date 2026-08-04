@@ -816,7 +816,23 @@ app.post("/", async (c) => {
   const db = c.var.DB;
   // Convert-chain columns must exist before the line-availability guard reads
   // grn_items.invoiced_qty and before the insert writes grn_id / grn_item_id.
-  await ensurePiMigrations(db);
+  //
+  // `runSelfApply` THROWS when an ALTER genuinely fails, and this sits before
+  // every statement — so a self-apply failure produces the same symptom as a
+  // failed insert: nothing written, and an anonymous 500 whose message the
+  // global handler strips. The insert path already reports its own cause;
+  // without this the other half of the possibility space stays invisible, and
+  // the two are indistinguishable from the outside.
+  try {
+    await ensurePiMigrations(db);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[pi] self-apply failed before create:", msg);
+    return c.json(
+      { success: false, error: `Database is missing a column and it could not be added: ${msg}` },
+      400,
+    );
+  }
   const body = await c.req.json().catch(() => ({})) as {
     purchaseOrderId?: string;
     grnId?: string;

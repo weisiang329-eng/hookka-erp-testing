@@ -62,3 +62,13 @@ test("the second batch is actually guarded", () => {
   const before = SRC.slice(Math.max(0, idx - 700), idx);
   assert.match(before, /try \{\s*\n\s*await db\.batch\(statements\);\s*\n\s*\} catch \(e2\) \{/);
 });
+
+test("a self-apply failure is reported too, not just an insert failure", () => {
+  // runSelfApply THROWS on a real ALTER failure, and ensurePiMigrations sits
+  // BEFORE every statement — so it produces the identical symptom (nothing
+  // written, anonymous 500) by a completely different route. Reporting only
+  // the insert path leaves the two indistinguishable from the outside.
+  assert.match(SRC, /try \{\s*\n\s*await ensurePiMigrations\(db\);\s*\n\s*\} catch \(err\) \{/);
+  assert.match(SRC, /Database is missing a column and it could not be added/);
+  assert.match(SRC, /self-apply failed before create/);
+});

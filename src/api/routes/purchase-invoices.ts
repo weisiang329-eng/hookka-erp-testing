@@ -1319,6 +1319,18 @@ app.post("/", async (c) => {
   try {
     await db.batch(statements);
   } catch (e) {
+    // ALWAYS record why the first attempt failed.
+    //
+    // This used to log only for a foreign PI, so a plain MYR failure was
+    // discarded entirely — then retried with a near-identical statement, and
+    // whatever the retry threw became an untraceable 500 with the real cause
+    // gone. That is exactly how a create failure became undiagnosable (owner
+    // 2026-08-04: "为什么第三张照片会有这样的问题，create 不到？"), and no
+    // amount of reading the source could recover it because the information
+    // was thrown away at runtime.
+    const firstErr = e instanceof Error ? e.message : String(e);
+    console.error(`[pi] ${id} first insert attempt failed:`, firstErr);
+
     // Pre-migration-0162 DB (currency columns absent): a plain MYR PI must
     // still save — retry with the legacy column list. A FOREIGN PI cannot
     // be stored truthfully without the columns, so that one fails loudly.
@@ -1350,7 +1362,25 @@ app.post("/", async (c) => {
         sourceDocumentFileId,
         now, now,
       );
-    await db.batch(statements);
+    // The legacy retry only ever addressed MISSING COLUMNS. If it fails too,
+    // the original error was something else entirely — bad data, a constraint,
+    // a missing row — and retrying achieved nothing. Say so, with the first
+    // error attached, instead of letting it reach the generic 500 handler that
+    // strips the message for safety.
+    try {
+      await db.batch(statements);
+    } catch (e2) {
+      const secondErr = e2 instanceof Error ? e2.message : String(e2);
+      console.error(`[pi] ${id} legacy-column retry ALSO failed:`, secondErr);
+      return c.json(
+        {
+          success: false,
+          error: `Could not save the invoice: ${firstErr}`,
+          detail: secondErr === firstErr ? undefined : secondErr,
+        },
+        400,
+      );
+    }
   }
 
   // Remember what this invoice just proved: supplier wording ↔ internal code.

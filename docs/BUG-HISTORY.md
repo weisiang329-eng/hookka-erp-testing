@@ -34,6 +34,26 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-04-005 — OEM marking reverted to None after refresh — snake_case read of a camelCased column (the Component-Kits trap again) `data-integrity` 🟢
+
+**Symptom.** Set an OEM marking (e.g. Sofa → Tag) on the Edit Customer dialog, Save (no error), reopen or refresh → back to None. The value never "stuck", but Save reported success.
+
+**Root cause — the OPERATIVE cause, correcting BUG-2026-08-04-003.** The Supabase driver (`db-pg.ts` `transform.column.from`) camelCases EVERY column on read, so a customer row read back carries `oemMarking`, not `oem_marking`. `rowToCustomer` read only `row.oem_marking` → `undefined` in prod → `parseOemMarking(undefined)` → all-NONE. The write path uses the snake_case column name, so the value WAS in the DB the whole time; only the read-back was blind. This is the same class that killed Component Kits (see hookka-erp-state memory); `customer_stage` and `group_org_code` were already dual-keyed — `oem_marking` was the one sibling left snake-only. Tests missed it because the D1 stubs feed snake_case, the shape prod never produces. The C9 self-apply fix in -003 was a real latent bug but NOT why the marking reverted.
+
+**Fix.** Dual-key the read: `oemMarking: parseOemMarking(row.oemMarking ?? row.oem_marking)`, added the `oemMarking?` field to `CustomerRow`, and dual-keyed the PUT preserve-branch. `src/api/routes/customers.ts`.
+
+**Verified.** `tsc -p tsconfig.app.json --noEmit` clean. Live prod verify (set Tag → Save → refresh persists) pending this deploy — was reproduced by the owner on prod pre-fix.
+
+## BUG-2026-08-04-004 — Phone number field cut off (too narrow) in the customer dialogs `ui-frontend` 🟢
+
+**Symptom.** In Add/Edit Customer the phone number showed truncated ("11-6151 1…"): the owner read it as the phone "format blown up, need to reopen."
+
+**Root cause.** The `+60` dial-code `<select>` (74px) shares a cramped grid cell with the number `<input>` — a 50/50 `grid-cols-2` in Edit, a `lg:grid-cols-4` quarter-cell in Add — leaving too little for the number.
+
+**Fix.** Edit: PIC/Phone row → `grid-cols-1 sm:grid-cols-[1fr_1.4fr]` (Phone gets the wider share, stacks on mobile). Add: the PIC-Contact cell spans 2 columns. `src/pages/customers.tsx`.
+
+**Verified.** `tsc` clean; visual verify pending deploy.
+
 ## BUG-2026-08-04-003 — Customer edit silently didn't save (OEM marking / phone / name) — a self-apply memo set true PAST the catch (BUG-CLASS C9) `data-integrity` `infrastructure` `ui-frontend` 🟢
 
 **Symptom.** On the Edit Customer dialog, choosing an OEM product marking (Bedframe/Sofa/Accessory → Tag/Label) and clicking Save Changes didn't persist — reopen showed None. Phone and other header edits didn't stick either, intermittently.

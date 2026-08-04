@@ -34,6 +34,16 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-04-006 — Enrolling in 2FA locked the user out; login crashed "Cannot read properties of undefined (reading 'user')" `auth` `ui-frontend` 🟢
+
+**Symptom.** A SUPER_ADMIN (nico) could not sign in — the login form showed `Cannot read properties of undefined (reading 'user')`. Password reset, disable/enable, and an Active account status made no difference (the failure is AFTER the password check).
+
+**Root cause.** The login-time TOTP verify step was never built on the frontend — nothing POSTs `{ userId, code }` to `/api/auth/totp/login-verify`, and no verify route/page exists (only `/login`, `/worker/login`, and the enrollment page `setup-2fa.tsx`). The server DID implement the hard gate: once `users.totpEnrolledAt` is set it returns `{ success: true, totpRequired: true, userId }` with **no `data`**. `login.tsx` only modelled `{success:true, data:{…}}` and `{success:false}`, so it passed the success guard and read `json.data.user` → `data` undefined → TypeError. Any user who actually completed 2FA enrollment was permanently locked out; nico was likely the first to finish the (soft-prompted) enrollment.
+
+**Fix (owner decision: turn the gate off until verify is built).** `TOTP_LOGIN_ENFORCEMENT_ENABLED = false` kill switch in `auth.ts` disables BOTH the hard gate (enrolled users now sign in with password alone — `totpEnrolledAt` is ignored, so nico is unblocked without touching the DB) AND `computeTotpPrompt` (no more soft prompt luring admins into the half-built feature). Frontend `login.tsx` now models the `totpRequired` shape and shows a clear message instead of crashing, as belt-and-suspenders for stale workers / a future re-enable. Flip the flag back to true when the login-verify flow ships.
+
+**Verified.** `tsc -p tsconfig.app.json --noEmit` clean. Live prod verify (nico signs in with password) pending deploy.
+
 ## BUG-2026-08-04-005 — OEM marking reverted to None after refresh — snake_case read of a camelCased column (the Component-Kits trap again) `data-integrity` 🟢
 
 **Symptom.** Set an OEM marking (e.g. Sofa → Tag) on the Edit Customer dialog, Save (no error), reopen or refresh → back to None. The value never "stuck", but Save reported success.

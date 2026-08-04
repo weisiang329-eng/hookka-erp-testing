@@ -18,6 +18,7 @@ import { Hono } from "hono";
 import { runSelfApply } from "../lib/self-apply";
 import type { Env } from "../worker";
 import { requirePermission, requireSuperAdmin } from "../lib/rbac";
+import { ensureOrgRoles } from "../lib/ensure-org-roles";
 import { hashPassword } from "../lib/password";
 import { inviteEmailTemplate, sendMail } from "../lib/email";
 import { enqueueEmail } from "../lib/email-outbox";
@@ -226,6 +227,10 @@ app.get("/", async (c) => {
   // Make sure the org-chart columns exist before SELECT * reads them (first
   // call on a fresh isolate adds them; later calls are a no-op).
   await ensureUserOrgColumns(c.var.DB);
+  // Every ORG department needs a role to assign people to. Seeded here because
+  // this is the page that assigns them, and migrations are inert on deploy.
+  // Additive and idempotent — never resets a role an admin has since edited.
+  await ensureOrgRoles(c.var.DB).catch(() => undefined);
   const res = await c.var.DB.prepare(
     "SELECT * FROM users ORDER BY createdAt DESC",
   ).all<UserRow>();

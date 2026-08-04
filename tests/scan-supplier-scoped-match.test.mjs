@@ -5,15 +5,21 @@
 // 去供应商里面找，不是吗？"
 //
 // Right, and it matters more than convenience. Two plywoods that differ only in
-// size score almost identically on text, so choosing between them on a fuzzy
-// score is a guess about a REAL physical difference — a 4x8 sheet is not a
-// 1220x2440 sheet just because the words look alike. A supplier carries a
-// handful of items, so scoping the search to what they actually supply turns an
-// ambiguous problem into an easy one.
+// size score almost identically, so choosing between them on a fuzzy score is a
+// guess about a REAL physical difference — a 4x8 sheet is not a 1220x2440 sheet
+// just because the words look alike. Scoping the search to what a supplier
+// actually supplies turns an ambiguous problem into an easy one.
 //
-// No bindings for a supplier means no candidates and a manual pick, which is
-// correct: nothing has ever been bought from them, so there is nothing to
-// recognise.
+// The first version of this scoped to `supplier_material_bindings`, which was
+// too narrow to be useful: a binding only exists after somebody has already
+// picked that line by hand, so the FIRST appearance of an item searched an
+// empty list and always fell through to a manual pick. Owner, same day:
+// "为什么第一次一定要手动 pick 呢？… 他一定要能自己找啊."
+//
+// So the scoping now comes from a ladder (see supplier-material-candidates):
+// the linked PO, then everything ever ordered from this supplier, then the
+// whole catalogue at a stricter bar. These tests hold the wiring; the ladder's
+// own behaviour is covered in supplier-material-candidates.test.mjs.
 // ---------------------------------------------------------------------------
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -27,24 +33,90 @@ const SRC = readFileSync(
   "utf8",
 );
 
-test("the candidate set is built from THIS supplier's bindings", () => {
-  assert.match(SRC, /const materialsForSupplier = useCallback\(/);
-  assert.match(SRC, /bindings\s*\n?\s*\.filter\(\(b\) => b\.supplierId === supplierId\)/);
+test("both scan modes resolve through the tiered ladder", () => {
+  assert.equal(
+    SRC.split("resolveMaterialForLine(text, tiers, {").length - 1,
+    2,
+    "create-PI and create-GRN must behave identically",
+  );
+  assert.equal(
+    SRC.split("const tiers = tiersFor(sId, linkedPo);").length - 1,
+    2,
+    "each mode builds its own tiers from the card's resolved PO",
+  );
 });
 
-test("a supplier with no bindings yields no candidates", () => {
-  assert.match(SRC, /if \(codes\.size === 0\) return \[\];/);
-  assert.match(SRC, /if \(!supplierId\) return \[\];/);
-});
-
-test("both scan modes search the scoped set, not the whole catalogue", () => {
-  const scoped = SRC.split("matchCatalogItem(text, materialsForSupplier(sId))").length - 1;
-  assert.equal(scoped, 2, "create-PI and create-GRN must behave identically");
+test("no path searches the whole catalogue at the scoped bar", () => {
   assert.equal(
     SRC.split("matchCatalogItem(text, rawMaterials)").length - 1,
     0,
-    "no path may still search the entire catalogue",
+    "an unscoped search at the default threshold is what made matches unsafe",
   );
+  assert.equal(
+    SRC.split("materialsForSupplier(").length - 1,
+    0,
+    "the bindings-only candidate set is gone, not merely bypassed",
+  );
+});
+
+test("the PO is resolved before the lines, not after", () => {
+  // Tier 1 is the linked PO's own lines, so the link has to exist while each
+  // line is being identified. Resolving it afterwards — as both modes used to —
+  // leaves the strongest evidence unused.
+  const piPoIdx = SRC.indexOf("const tiers = tiersFor(sId, linkedPo);");
+  const piLinesIdx = SRC.indexOf("const lines: PreviewLine[]");
+  assert.ok(piPoIdx > 0 && piLinesIdx > piPoIdx, "create-PI resolves the PO first");
+
+  const grnLinesIdx = SRC.indexOf("const lines: GRNPreviewLine[]");
+  const grnPoIdx = SRC.lastIndexOf("const tiers = tiersFor(sId, linkedPo);", grnLinesIdx);
+  assert.ok(grnPoIdx > 0 && grnLinesIdx > grnPoIdx, "create-GRN resolves the PO first");
+});
+
+test("the code index is built the way the lookups key it", () => {
+  // `materialByCode` (trim+uppercase) and the ladder's index (punctuation
+  // stripped) are NOT interchangeable — sharing the former silently produces
+  // empty candidate sets for every hyphenated code, which is most of them.
+  assert.equal(
+    SRC.split("indexByCode(rawMaterials)").length - 1,
+    2,
+    "both modes must build the ladder's own index",
+  );
+});
+
+test("the operator can always correct a line by hand", () => {
+  // The picker used to be narrowed to materials the supplier had a BINDING
+  // for, so a supplier with none got an EMPTY dropdown — no auto-match AND no
+  // way to fix it without first creating the binding on another page. Owner
+  // 2026-08-04: "他可以 manually pick，当错的时候". The coherence intent is now
+  // carried by ordering: the supplier's own materials first, the rest below.
+  assert.equal(
+    SRC.split("const internalCodeOptionsFor = useCallback(").length - 1,
+    2,
+    "both modes must offer the full catalogue, ranked",
+  );
+  assert.equal(
+    SRC.split("internalCodeOptionsBy").length - 1,
+    0,
+    "the bindings-only dropdown is gone, not merely reordered",
+  );
+  assert.match(SRC, /not supplied by this supplier before/);
+});
+
+test("a catalogue-tier guess is not allowed to teach a binding", () => {
+  // Creating a document now writes a supplier↔material binding. A binding
+  // resolves silently forever, so a weak guess that got learned would stop
+  // being flagged and become permanent. Both create paths must mark it.
+  assert.equal(
+    SRC.split(`l.autoMatched === true && l.matchTier === "catalog"`).length - 1,
+    2,
+    "create-PI and create-GRN must both flag the uncorroborated tier",
+  );
+});
+
+test("the operator is told which tier answered", () => {
+  // A PO line and a bare catalogue reading must not look alike on the row.
+  assert.match(SRC, /function matchTierHint\(/);
+  assert.match(SRC, /matchTierHint\(line\.matchTier\)/);
 });
 
 // ── Why the scoping matters, demonstrated on the matcher itself ─────────────

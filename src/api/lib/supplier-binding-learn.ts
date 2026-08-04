@@ -44,6 +44,19 @@ export interface LearnableLine {
   supplierDescription?: string | null;
   /** Unit price in SEN, used only when creating a brand-new binding. */
   unitPriceSen?: number | null;
+  /**
+   * False when the internal code came from the scanner's weakest tier — text
+   * matched against the whole catalogue, with no PO line and no history with
+   * this supplier to corroborate it.
+   *
+   * Such a line may fill the field, because the operator sees it and can
+   * correct it. It may NOT teach a binding: a binding resolves silently on
+   * every future document and is no longer flagged as a guess, so learning a
+   * wrong one converts a visible, correctable mistake into an invisible,
+   * permanent one. Defaults to true — anything a human picked, a PO line
+   * confirmed, or this supplier has delivered before is fair to learn.
+   */
+  learnable?: boolean;
 }
 
 export interface LearnResult {
@@ -82,6 +95,11 @@ export async function learnSupplierBindings(
     const desc = (l.supplierDescription ?? "").trim();
     // Teaching needs BOTH halves: what we call it, and what they call it.
     if (!code || (!sku && !desc)) {
+      out.skipped++;
+      continue;
+    }
+    // An uncorroborated match may fill a field but may not become a binding.
+    if (l.learnable === false) {
       out.skipped++;
       continue;
     }

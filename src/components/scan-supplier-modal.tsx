@@ -53,7 +53,15 @@ import {
 } from "@/components/scan-cached-hint";
 import { bestMatch } from "@/lib/party-fuzzy-match";
 import { resolvePoLink, splitPoRefs } from "@/lib/po-ref-match";
-import { matchCatalogItem } from "@/lib/material-text-match";
+import {
+  buildCandidateTiers,
+  indexByCode,
+  materialsEverBought,
+  normKey,
+  resolveMaterialForLine,
+  supplierSkuIndex,
+  type CandidateTier,
+} from "@/lib/supplier-material-candidates";
 import {
   resolveAlias,
   usePartyAliases,
@@ -181,6 +189,27 @@ function makeUploadId(): string {
 // back to the host-supplied default if no match. The match is fuzzy
 // (uppercase + strip non-alphanumeric, then equality OR endsWith either way)
 // because real-world refs drift: "2606-007" vs "PO-2606-007" vs "PO2606007".
+/**
+ * What to tell the operator about an automatic match.
+ *
+ * The three tiers are not equally trustworthy and the row should not pretend
+ * otherwise: a PO line is a statement of what we ordered, supplier history is
+ * a strong precedent, and a catalogue hit is the scanner reading text with
+ * nothing to corroborate it. The wording escalates accordingly.
+ */
+function matchTierHint(tier: CandidateTier | null | undefined): string {
+  switch (tier) {
+    case "po":
+      return "Matched to a line on the linked PO — confirm the quantity.";
+    case "supplier":
+      return "Matched from what this supplier has delivered before — check the code.";
+    case "catalog":
+      return "Matched from the document text alone — no history with this supplier yet, so check the code before creating.";
+    default:
+      return "Matched from the document text — check the code.";
+  }
+}
+
 function autoLinkPoId(
   ex: SupplierExtraction,
   purchaseOrders: PurchaseOrder[],
@@ -893,6 +922,13 @@ type PreviewLine = {
    * guess is deliberately conservative, but it is still a guess.
    */
   autoMatched?: boolean;
+  /**
+   * Which search space produced that match — the linked PO, this supplier's
+   * order history, or the whole catalogue. Shown on the row because the three
+   * do not deserve equal trust: a PO line is a statement of what we ordered,
+   * while a catalogue hit is the scanner reading text and nothing more.
+   */
+  matchTier?: CandidateTier | null;
 };
 
 type PreviewCard = {
@@ -1113,33 +1149,45 @@ function CreatePIWizard({
   );
 
   /**
-   * The materials this supplier actually supplies — the only sensible search
-   * space for a scan line (owner 2026-08-04: "他应该是看到这个供应商，去供应商
-   * 里面找").
+   * The search space for a scan line, narrowest first (owner 2026-08-04:
+   * "他一定要能自己找啊").
    *
-   * Searching the whole catalogue invites exactly the wrong kind of match: two
-   * plywoods that differ only in size score almost identically, and picking
-   * between them on a fuzzy score is a guess about a real physical difference.
-   * A supplier carries a handful of items, so scoping to their bindings turns
-   * an ambiguous search into an easy one.
+   * Scoping to the supplier was right — two plywoods differing only in size
+   * score almost identically, and choosing between them across the whole
+   * catalogue is a guess about a real physical difference. But scoping to
+   * BINDINGS made the scanner unable to help on the one document that matters
+   * most: a binding only exists once somebody has already picked that line by
+   * hand, so the first appearance of every item searched an empty list.
    *
-   * No bindings for this supplier means no candidates, and the line is picked
-   * by hand — which is correct: we have never bought anything from them, so
-   * there is nothing to recognise.
+   * `buildCandidateTiers` searches the linked PO first (we wrote that order —
+   * it says exactly what this delivery should contain), then everything ever
+   * ordered from this supplier, then the whole catalogue at a higher bar. A
+   * near-tie is still refused at every tier; the operator corrects a wrong
+   * match, but a blank line is now the exception rather than the default.
    */
-  const materialsForSupplier = useCallback(
-    (supplierId: string): RawMaterial[] => {
-      if (!supplierId) return [];
-      const codes = new Set(
-        bindings
-          .filter((b) => b.supplierId === supplierId)
-          .map((b) => (b.materialCode || "").trim().toUpperCase())
-          .filter(Boolean),
-      );
-      if (codes.size === 0) return [];
-      return rawMaterials.filter((rm) => codes.has(rm.itemCode.trim().toUpperCase()));
-    },
-    [bindings, rawMaterials],
+  // Keyed by `normKey`, NOT by trim+uppercase like `materialByCode` below:
+  // codes carry hyphens ("PLY-9-48-AB") and the candidate lookups strip them,
+  // so sharing that map would miss every row and produce empty tiers.
+  const materialIndex = useMemo(() => indexByCode(rawMaterials), [rawMaterials]);
+
+  const tiersFor = useCallback(
+    (supplierId: string, linkedPo: PurchaseOrder | null) =>
+      buildCandidateTiers({
+        supplierId,
+        linkedPo,
+        purchaseOrders,
+        bindings,
+        materialByCode: materialIndex,
+        catalog: rawMaterials,
+      }),
+    [purchaseOrders, bindings, materialIndex, rawMaterials],
+  );
+
+  /** The supplier's own codes → our material, learned from their PO lines. */
+  const skuIndexFor = useCallback(
+    (supplierId: string) =>
+      supplierSkuIndex(supplierId, purchaseOrders, bindings, materialIndex),
+    [purchaseOrders, bindings, materialIndex],
   );
 
   const resolveBindingFor = useCallback(
@@ -1219,31 +1267,41 @@ function CreatePIWizard({
     return map;
   }, [bindings, materialByCode]);
 
-  // Internal Code picker options NARROWED to materials the current supplier
-  // has bindings for. Owner ruling 2026-06-29 evening: picking from the
-  // full catalogue lets the operator choose an unbound material whose
-  // Supplier SKU then drifts away from the line above — they end up with
-  // a row whose IC and SKU point to different bindings. The narrowed list
-  // guarantees every pick keeps both columns coherent. To bind a new
-  // material, the operator adds it under Suppliers > Materials first.
-  const internalCodeOptionsBy: Map<string, MaterialOption[]> = useMemo(() => {
-    const map = new Map<string, MaterialOption[]>();
-    const seen = new Map<string, Set<string>>(); // supplierId → set of materialCode
-    for (const b of bindings) {
-      if (!b.supplierId || !b.materialCode) continue;
-      const rm = materialByCode.get(b.materialCode.trim().toUpperCase());
-      if (!rm) continue;
-      const key = rm.itemCode.trim().toUpperCase();
-      const set = seen.get(b.supplierId) ?? new Set<string>();
-      if (set.has(key)) continue;
-      set.add(key);
-      seen.set(b.supplierId, set);
-      const arr = map.get(b.supplierId) ?? [];
-      arr.push({ itemCode: rm.itemCode, description: rm.description });
-      map.set(b.supplierId, arr);
-    }
-    return map;
-  }, [bindings, materialByCode]);
+  /**
+   * Internal Code picker options: what this supplier has supplied, first —
+   * then everything else, labelled.
+   *
+   * The 2026-06-29 ruling narrowed this list to materials the supplier had a
+   * BINDING for, so that a pick could not leave the Internal Code and Supplier
+   * SKU columns pointing at different bindings. The intent was right but the
+   * mechanism was too blunt: a supplier with no bindings got an EMPTY list, so
+   * the operator could not correct a line at all without first going to
+   * Suppliers > Materials to create the binding by hand. That is the opposite
+   * of the owner's requirement (2026-08-04: "他可以 manually pick，当错的时候")
+   * — a correction path that is unavailable exactly when a correction is most
+   * likely to be needed.
+   *
+   * So the coherence intent is now carried by ORDER, not by exclusion: what
+   * this supplier has actually delivered sorts to the top, and the rest of the
+   * catalogue stays reachable below with a note saying it is unfamiliar for
+   * this supplier. Nothing is hidden; the likely answer is simply first.
+   */
+  const internalCodeOptionsFor = useCallback(
+    (supplierId: string): MaterialOption[] => {
+      const known = materialsEverBought(supplierId, purchaseOrders, bindings, materialIndex);
+      const knownKeys = new Set(known.map((m) => normKey(m.itemCode)));
+      return [
+        ...known.map((rm) => ({ itemCode: rm.itemCode, description: rm.description })),
+        ...rawMaterials
+          .filter((rm) => !knownKeys.has(normKey(rm.itemCode)))
+          .map((rm) => ({
+            itemCode: rm.itemCode,
+            description: `${rm.description} · not supplied by this supplier before`,
+          })),
+      ];
+    },
+    [purchaseOrders, bindings, materialIndex, rawMaterials],
+  );
 
   // ─── Build a card from a successful extraction ─────────────────────────
   const buildCard = useCallback(
@@ -1280,6 +1338,17 @@ function CreatePIWizard({
           ? ex.docDate
           : todayISO();
 
+      // Resolve the PO link BEFORE the lines: the order we wrote is the best
+      // statement of what this delivery contains, so it has to be available as
+      // a search space while each line is being identified — not afterwards.
+      const poLink = resolvePoLink(ex.customerPoRef, purchaseOrders, defaultPurchaseOrderId);
+      const purchaseOrderId = poLink.poId;
+      const linkedPo = purchaseOrderId
+        ? purchaseOrders.find((p) => p.id === purchaseOrderId) ?? null
+        : null;
+      const tiers = tiersFor(sId, linkedPo);
+      const skuIndex = skuIndexFor(sId);
+
       const lines: PreviewLine[] = (ex.lines ?? []).map((ln) => {
         const rawSku = (ln.supplierCode ?? "").trim();
         // Fix B (owner 2026-06-30): with supplierId now auto-picked, ALWAYS
@@ -1302,21 +1371,25 @@ function CreatePIWizard({
         let rm = binding
           ? materialByCode.get(binding.materialCode.trim().toUpperCase())
           : null;
-        // 3) No binding at all — the FIRST time an item appears there is
-        //    nothing saved to match against. The OCR did read the supplier's
-        //    own wording though, so use it: match that text to the catalogue
-        //    directly instead of making the operator pick a line the scanner
-        //    could identify by itself. Deliberately conservative — an
-        //    ambiguous line returns nothing and still gets picked by hand,
-        //    because binding the WRONG material books stock against the wrong
-        //    item and surfaces far later than one extra click.
+        // 3) No binding at all — which is the NORMAL case the first time an
+        //    item appears, not an edge case. The OCR read the supplier's own
+        //    wording and their own code; both are used here, against the
+        //    linked PO, then this supplier's order history, then the whole
+        //    catalogue at a stricter bar. A near-tie still resolves to nothing
+        //    and gets picked by hand, because binding the WRONG material books
+        //    stock against the wrong item and surfaces far later than a click.
         let autoMatched = false;
+        let matchTier: CandidateTier | null = null;
         if (!binding && !rm) {
           const text = `${rawSku} ${ln.description ?? ""}`.trim();
-          const hit = matchCatalogItem(text, materialsForSupplier(sId));
+          const hit = resolveMaterialForLine(text, tiers, {
+            supplierSku: rawSku,
+            skuIndex,
+          });
           if (hit) {
             rm = hit.item;
             autoMatched = true;
+            matchTier = hit.tier;
           }
         }
         // Use the binding's canonical supplier SKU once we resolved it, so
@@ -1350,6 +1423,7 @@ function CreatePIWizard({
         return {
           materialCode: rm?.itemCode ?? binding?.materialCode ?? "",
           autoMatched,
+          matchTier,
           materialName: rm?.description ?? descOut,
           supplierSku: sku,
           description: descOut,
@@ -1361,14 +1435,11 @@ function CreatePIWizard({
         };
       });
 
-      const poLink = resolvePoLink(ex.customerPoRef, purchaseOrders, defaultPurchaseOrderId);
-      const purchaseOrderId = poLink.poId;
       // Fix A (owner 2026-06-30): if a PO got auto-linked AND any line came
       // back with no price (DN-only doc), fill those lines' unitPriceRM off
       // the matching PO line. Preview shows real prices BEFORE Create.
-      const linkedPo = purchaseOrderId
-        ? purchaseOrders.find((p) => p.id === purchaseOrderId) ?? null
-        : null;
+      // (poLink / linkedPo were resolved above the line loop — the PO is also
+      // the first place a line's material is searched for.)
       const linesWithPriceFill =
         lines.length > 0 ? applyPoPriceFill(lines, linkedPo) : [makeBlankLine()];
 
@@ -1401,7 +1472,7 @@ function CreatePIWizard({
         originalExtraction: ex,
       };
     },
-    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, resolveBindingByDescription, materialByCode, materialsForSupplier],
+    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, resolveBindingByDescription, materialByCode, tiersFor, skuIndexFor],
   );
 
   // ─── Drag-drop + multi-file extract ────────────────────────────────────
@@ -1769,6 +1840,12 @@ function CreatePIWizard({
               taxSen: lineTaxSen < 0 ? 0 : lineTaxSen,
               lineType: "STOCKED" as const,
               grnItemId: null,
+              // The catalogue tier is the scanner reading text with nothing to
+              // corroborate it — no PO line, no history with this supplier. Now
+              // that creating a document teaches a binding, a wrong guess there
+              // would become a permanent silent mapping and stop being flagged.
+              // So it may fill the field, but it may not teach.
+              unverifiedMatch: l.autoMatched === true && l.matchTier === "catalog",
             };
           });
           const payload: Record<string, unknown> = {
@@ -2090,7 +2167,7 @@ function CreatePIWizard({
               suppliers={suppliers}
               activeOrgs={activeOrgs}
               purchaseOrders={purchaseOrders}
-              internalCodeOptionsBy={internalCodeOptionsBy}
+              internalCodeOptionsFor={internalCodeOptionsFor}
               supplierSkuOptionsBy={supplierSkuOptionsBy}
               resolveBindingFor={resolveBindingFor}
               resolveBindingForMaterial={resolveBindingForMaterial}
@@ -2432,7 +2509,7 @@ function PreviewStep({
   suppliers,
   activeOrgs,
   purchaseOrders,
-  internalCodeOptionsBy,
+  internalCodeOptionsFor,
   supplierSkuOptionsBy,
   resolveBindingFor,
   resolveBindingForMaterial,
@@ -2454,7 +2531,7 @@ function PreviewStep({
   suppliers: Supplier[];
   activeOrgs: Organisation[];
   purchaseOrders: PurchaseOrder[];
-  internalCodeOptionsBy: Map<string, MaterialOption[]>;
+  internalCodeOptionsFor: (supplierId: string) => MaterialOption[];
   supplierSkuOptionsBy: Map<string, MaterialOption[]>;
   resolveBindingFor: (supplierId: string, supplierSku: string) => SupplierMaterialBinding | null;
   resolveBindingForMaterial: (supplierId: string, materialCode: string) => SupplierMaterialBinding | null;
@@ -2568,7 +2645,7 @@ function PreviewStep({
             suppliers={suppliers}
             activeOrgs={activeOrgs}
             purchaseOrders={purchaseOrders}
-            internalCodeOptions={internalCodeOptionsBy.get(card.supplierId) ?? []}
+            internalCodeOptions={internalCodeOptionsFor(card.supplierId)}
             supplierSkuOptions={supplierSkuOptionsBy.get(card.supplierId) ?? []}
             resolveBindingFor={resolveBindingFor}
             resolveBindingForMaterial={resolveBindingForMaterial}
@@ -3131,12 +3208,13 @@ function PICard({
                 {!lineUnbound && line.autoMatched && (
                   // Read from the document rather than from a saved binding —
                   // conservative, but still a guess, so say so instead of
-                  // letting it look like an established mapping.
+                  // letting it look like an established mapping. The three
+                  // search spaces do not deserve equal trust, so name the one
+                  // that answered.
                   <tr className="bg-[#FBF4E6]">
                     <td colSpan={8} className="px-3 py-1">
                       <div className="text-[11px] text-[#9C6F1E]">
-                        Matched from the document text — check the code, then bind it
-                        so next time is automatic.
+                        {matchTierHint(line.matchTier)}
                       </div>
                     </td>
                   </tr>
@@ -3172,7 +3250,7 @@ function PICard({
               <Plus className="h-3 w-3" /> Add line
             </button>
             <span className="text-[10px] text-[#9CA3AF]">
-              Internal Code auto-resolves from supplier bindings · click (pick) to bind manually
+              Internal Code resolves from the linked PO, then this supplier's history, then the catalogue · click (pick) to override
             </span>
           </div>
         </div>
@@ -3342,6 +3420,8 @@ type GRNPreviewLine = {
    * machine guess never looks like an established mapping.
    */
   autoMatched?: boolean;
+  /** Which search space produced it — see the create-PI line type. */
+  matchTier?: CandidateTier | null;
 };
 
 type GRNPreviewCard = {
@@ -3505,33 +3585,35 @@ function CreateGRNWizard({
   );
 
   /**
-   * The materials this supplier actually supplies — the only sensible search
-   * space for a scan line (owner 2026-08-04: "他应该是看到这个供应商，去供应商
-   * 里面找").
+   * The search space for a scan line, narrowest first — identical to the
+   * create-PI path above, and deliberately so: a receipt and an invoice for
+   * the same delivery must identify the same materials.
    *
-   * Searching the whole catalogue invites exactly the wrong kind of match: two
-   * plywoods that differ only in size score almost identically, and picking
-   * between them on a fuzzy score is a guess about a real physical difference.
-   * A supplier carries a handful of items, so scoping to their bindings turns
-   * an ambiguous search into an easy one.
-   *
-   * No bindings for this supplier means no candidates, and the line is picked
-   * by hand — which is correct: we have never bought anything from them, so
-   * there is nothing to recognise.
+   * Scoping to the supplier was right. Scoping to BINDINGS was not, because a
+   * binding only exists after a manual pick, so the first appearance of an item
+   * searched an empty list — the exact case the owner objected to.
    */
-  const materialsForSupplier = useCallback(
-    (supplierId: string): RawMaterial[] => {
-      if (!supplierId) return [];
-      const codes = new Set(
-        bindings
-          .filter((b) => b.supplierId === supplierId)
-          .map((b) => (b.materialCode || "").trim().toUpperCase())
-          .filter(Boolean),
-      );
-      if (codes.size === 0) return [];
-      return rawMaterials.filter((rm) => codes.has(rm.itemCode.trim().toUpperCase()));
-    },
-    [bindings, rawMaterials],
+  // Keyed by `normKey` — see the note on the create-PI copy.
+  const materialIndex = useMemo(() => indexByCode(rawMaterials), [rawMaterials]);
+
+  const tiersFor = useCallback(
+    (supplierId: string, linkedPo: PurchaseOrder | null) =>
+      buildCandidateTiers({
+        supplierId,
+        linkedPo,
+        purchaseOrders,
+        bindings,
+        materialByCode: materialIndex,
+        catalog: rawMaterials,
+      }),
+    [purchaseOrders, bindings, materialIndex, rawMaterials],
+  );
+
+  /** The supplier's own codes → our material, learned from their PO lines. */
+  const skuIndexFor = useCallback(
+    (supplierId: string) =>
+      supplierSkuIndex(supplierId, purchaseOrders, bindings, materialIndex),
+    [purchaseOrders, bindings, materialIndex],
   );
 
   const resolveBindingFor = useCallback(
@@ -3601,25 +3683,25 @@ function CreateGRNWizard({
     return map;
   }, [bindings, materialByCode]);
 
-  // Internal Code picker narrowed to bound materials only — same rule as PI.
-  const internalCodeOptionsBy: Map<string, MaterialOption[]> = useMemo(() => {
-    const map = new Map<string, MaterialOption[]>();
-    const seen = new Map<string, Set<string>>();
-    for (const b of bindings) {
-      if (!b.supplierId || !b.materialCode) continue;
-      const rm = materialByCode.get(b.materialCode.trim().toUpperCase());
-      if (!rm) continue;
-      const key = rm.itemCode.trim().toUpperCase();
-      const set = seen.get(b.supplierId) ?? new Set<string>();
-      if (set.has(key)) continue;
-      set.add(key);
-      seen.set(b.supplierId, set);
-      const arr = map.get(b.supplierId) ?? [];
-      arr.push({ itemCode: rm.itemCode, description: rm.description });
-      map.set(b.supplierId, arr);
-    }
-    return map;
-  }, [bindings, materialByCode]);
+  // Internal Code picker — this supplier's own materials first, then the rest
+  // of the catalogue, labelled. Same rule as PI; see the note there for why
+  // the bindings-only narrowing had to go.
+  const internalCodeOptionsFor = useCallback(
+    (supplierId: string): MaterialOption[] => {
+      const known = materialsEverBought(supplierId, purchaseOrders, bindings, materialIndex);
+      const knownKeys = new Set(known.map((m) => normKey(m.itemCode)));
+      return [
+        ...known.map((rm) => ({ itemCode: rm.itemCode, description: rm.description })),
+        ...rawMaterials
+          .filter((rm) => !knownKeys.has(normKey(rm.itemCode)))
+          .map((rm) => ({
+            itemCode: rm.itemCode,
+            description: `${rm.description} · not supplied by this supplier before`,
+          })),
+      ];
+    },
+    [purchaseOrders, bindings, materialIndex, rawMaterials],
+  );
 
   const buildCard = useCallback(
     (
@@ -3645,6 +3727,15 @@ function CreateGRNWizard({
           ? ex.docDate
           : todayISO();
 
+      // Resolve the PO link BEFORE the lines — the order we wrote is the first
+      // place a received line's material is looked for.
+      const purchaseOrderId = autoLinkPoId(ex, purchaseOrders, defaultPurchaseOrderId);
+      const linkedPo = purchaseOrderId
+        ? purchaseOrders.find((p) => p.id === purchaseOrderId) ?? null
+        : null;
+      const tiers = tiersFor(sId, linkedPo);
+      const skuIndex = skuIndexFor(sId);
+
       const lines: GRNPreviewLine[] = (ex.lines ?? []).map((ln) => {
         const rawSku = (ln.supplierCode ?? "").trim();
         // Fix B: with supplierId now auto-picked, run both directions of
@@ -3665,21 +3756,24 @@ function CreateGRNWizard({
         let rm = binding
           ? materialByCode.get(binding.materialCode.trim().toUpperCase())
           : null;
-        // 3) No binding at all — the FIRST time an item appears there is
-        //    nothing saved to match against. The OCR did read the supplier's
-        //    own wording though, so use it: match that text to the catalogue
-        //    directly instead of making the operator pick a line the scanner
-        //    could identify by itself. Deliberately conservative — an
-        //    ambiguous line returns nothing and still gets picked by hand,
-        //    because binding the WRONG material books stock against the wrong
-        //    item and surfaces far later than one extra click.
+        // 3) No binding at all — the normal case the first time an item
+        //    appears. Read what the OCR gave us against the linked PO, then
+        //    this supplier's order history, then the whole catalogue at a
+        //    stricter bar. An ambiguous line still resolves to nothing and is
+        //    picked by hand, because receiving the WRONG material books stock
+        //    against the wrong item and surfaces far later than one click.
         let autoMatched = false;
+        let matchTier: CandidateTier | null = null;
         if (!binding && !rm) {
           const text = `${rawSku} ${ln.description ?? ""}`.trim();
-          const hit = matchCatalogItem(text, materialsForSupplier(sId));
+          const hit = resolveMaterialForLine(text, tiers, {
+            supplierSku: rawSku,
+            skuIndex,
+          });
           if (hit) {
             rm = hit.item;
             autoMatched = true;
+            matchTier = hit.tier;
           }
         }
         const sku = binding?.supplierSku ?? rawSku;
@@ -3700,6 +3794,7 @@ function CreateGRNWizard({
         return {
           materialCode: rm?.itemCode ?? binding?.materialCode ?? "",
           autoMatched,
+          matchTier,
           materialName: rm?.description ?? descOut,
           supplierSku: sku,
           description: descOut,
@@ -3727,7 +3822,7 @@ function CreateGRNWizard({
         // Auto-link to an existing PO when the supplier wrote our PO ref
         // on their doc (their "Customer P.O.", "B.O. NO.", etc.). Falls
         // back to the host-supplied default if no match.
-        purchaseOrderId: autoLinkPoId(ex, purchaseOrders, defaultPurchaseOrderId),
+        purchaseOrderId,
         receiveDate: docDate,
         supplierDoNo: supDoNo,
         markedGold: false,
@@ -3735,7 +3830,7 @@ function CreateGRNWizard({
         originalExtraction: ex,
       };
     },
-    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, resolveBindingByDescription, materialByCode, materialsForSupplier],
+    [suppliers, supplierAliases, defaultSupplierId, defaultPurchaseOrderId, purchaseOrders, supplierById, activeOrgs, resolveBindingFor, resolveBindingForMaterial, resolveBindingByDescription, materialByCode, tiersFor, skuIndexFor],
   );
 
   const handleFiles = useCallback(
@@ -4043,6 +4138,9 @@ function CreateGRNWizard({
               rejectedQty: Number(l.rejectedQty) || 0,
               rejectionReason: null,
               unitPriceSen: 0,
+              // See the create-PI note: a catalogue-tier guess may fill the
+              // field but must not teach a permanent binding.
+              unverifiedMatch: l.autoMatched === true && l.matchTier === "catalog",
             })),
           };
           if (card.purchaseOrderId) {
@@ -4293,7 +4391,7 @@ function CreateGRNWizard({
               suppliers={suppliers}
               activeOrgs={activeOrgs}
               purchaseOrders={purchaseOrders}
-              internalCodeOptionsBy={internalCodeOptionsBy}
+              internalCodeOptionsFor={internalCodeOptionsFor}
               supplierSkuOptionsBy={supplierSkuOptionsBy}
               resolveBindingFor={resolveBindingFor}
               resolveBindingForMaterial={resolveBindingForMaterial}
@@ -4344,7 +4442,7 @@ function GRNPreviewStep({
   suppliers,
   activeOrgs,
   purchaseOrders,
-  internalCodeOptionsBy,
+  internalCodeOptionsFor,
   supplierSkuOptionsBy,
   resolveBindingFor,
   resolveBindingForMaterial,
@@ -4366,7 +4464,7 @@ function GRNPreviewStep({
   suppliers: Supplier[];
   activeOrgs: Organisation[];
   purchaseOrders: PurchaseOrder[];
-  internalCodeOptionsBy: Map<string, MaterialOption[]>;
+  internalCodeOptionsFor: (supplierId: string) => MaterialOption[];
   supplierSkuOptionsBy: Map<string, MaterialOption[]>;
   resolveBindingFor: (supplierId: string, supplierSku: string) => SupplierMaterialBinding | null;
   resolveBindingForMaterial: (supplierId: string, materialCode: string) => SupplierMaterialBinding | null;
@@ -4473,7 +4571,7 @@ function GRNPreviewStep({
             suppliers={suppliers}
             activeOrgs={activeOrgs}
             purchaseOrders={purchaseOrders}
-            internalCodeOptions={internalCodeOptionsBy.get(card.supplierId) ?? []}
+            internalCodeOptions={internalCodeOptionsFor(card.supplierId)}
             supplierSkuOptions={supplierSkuOptionsBy.get(card.supplierId) ?? []}
             resolveBindingFor={resolveBindingFor}
             resolveBindingForMaterial={resolveBindingForMaterial}
@@ -4960,12 +5058,13 @@ function GRNCard({
                 {!lineUnbound && line.autoMatched && (
                   // Read from the document rather than from a saved binding —
                   // conservative, but still a guess, so say so instead of
-                  // letting it look like an established mapping.
+                  // letting it look like an established mapping. The three
+                  // search spaces do not deserve equal trust, so name the one
+                  // that answered.
                   <tr className="bg-[#FBF4E6]">
                     <td colSpan={8} className="px-3 py-1">
                       <div className="text-[11px] text-[#9C6F1E]">
-                        Matched from the document text — check the code, then bind it
-                        so next time is automatic.
+                        {matchTierHint(line.matchTier)}
                       </div>
                     </td>
                   </tr>
@@ -5001,7 +5100,7 @@ function GRNCard({
               <Plus className="h-3 w-3" /> Add line
             </button>
             <span className="text-[10px] text-[#9CA3AF]">
-              Internal Code auto-resolves from supplier bindings · click (pick) to bind manually
+              Internal Code resolves from the linked PO, then this supplier's history, then the catalogue · click (pick) to override
             </span>
           </div>
         </div>

@@ -182,6 +182,50 @@ test("the same material billed twice is learned once", async () => {
   assert.equal(db.inserts.length, 1);
 });
 
+test("an uncorroborated match fills the field but does not teach", async () => {
+  // The scanner's weakest tier reads text against the WHOLE catalogue, with no
+  // PO line and no history with this supplier behind it. The operator sees that
+  // line and can correct it — but a binding resolves silently on every future
+  // document and is no longer flagged as a guess, so learning a wrong one turns
+  // a visible, correctable mistake into an invisible, permanent one.
+  const db = makeDb();
+  const r = await learnSupplierBindings(
+    db,
+    "sup-1",
+    [
+      {
+        materialCode: "PLY-9-48-AB",
+        supplierDescription: "9MM 4' X 8' PLYWOOD AB",
+        learnable: false,
+      },
+    ],
+    genId,
+  );
+  assert.equal(r.created, 0);
+  assert.equal(db.inserts.length, 0);
+});
+
+test("everything else still teaches — the flag is opt-out, not opt-in", async () => {
+  // A human pick, a PO-confirmed line and a repeat from this supplier all
+  // arrive without the flag and must be learned exactly as before.
+  const db = makeDb();
+  const r = await learnSupplierBindings(
+    db,
+    "sup-1",
+    [
+      { materialCode: "A-1", supplierDescription: "THING ONE" },
+      { materialCode: "A-2", supplierDescription: "THING TWO", learnable: true },
+      { materialCode: "A-3", supplierDescription: "THING THREE", learnable: false },
+    ],
+    genId,
+  );
+  assert.equal(r.created, 2);
+  assert.deepEqual(
+    db.inserts.map((a) => a[2]),
+    ["A-1", "A-2"],
+  );
+});
+
 test("no supplier means nothing is learned", async () => {
   const db = makeDb();
   const r = await learnSupplierBindings(db, "", [{ materialCode: "X", supplierSku: "Y" }], genId);

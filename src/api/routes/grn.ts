@@ -1521,6 +1521,18 @@ app.post("/", async (c) => {
     // Remember what this receipt just proved: supplier wording ↔ internal code.
     // Until now that pairing was discarded, so the same supplier document was
     // re-picked by hand every time it arrived (owner 2026-08-04).
+    //
+    // Read off the REQUEST rather than the mapped rows: the scanner marks a
+    // line whose code came from its weakest tier — text matched against the
+    // whole catalogue, with no PO line and no history behind it. Those may fill
+    // the field but must not teach a binding, because a binding resolves
+    // silently forever and would turn a visible guess into an invisible one.
+    const unverifiedCodes = new Set(
+      (Array.isArray(items) ? items : [])
+        .filter((i) => (i as { unverifiedMatch?: boolean })?.unverifiedMatch === true)
+        .map((i) => String((i as { materialCode?: string }).materialCode ?? "").trim().toUpperCase())
+        .filter(Boolean),
+    );
     await learnSupplierBindings(
       c.var.DB,
       grnSupplierId,
@@ -1530,6 +1542,7 @@ app.post("/", async (c) => {
         supplierSku: (i as { supplierSku?: string | null }).supplierSku ?? null,
         supplierDescription: i.materialName,
         unitPriceSen: i.unitPrice,
+        learnable: !unverifiedCodes.has((i.materialCode ?? "").trim().toUpperCase()),
       })),
       genGrnId,
     ).catch(() => undefined);

@@ -1357,6 +1357,18 @@ app.post("/", async (c) => {
   // That pairing used to be discarded, so the same supplier document was
   // re-picked by hand every month (owner 2026-08-04).
   if (normalizedItems && normalizedItems.ok) {
+    // Read off the REQUEST: the scanner marks a line whose code came from its
+    // weakest tier — text matched against the whole catalogue, with no PO line
+    // and no history with this supplier behind it. Those may fill the field but
+    // must not teach a binding, because a binding resolves silently on every
+    // future document and would turn a visible guess into an invisible one.
+    const rawItems = Array.isArray(body.items) ? body.items : [];
+    const unverifiedCodes = new Set(
+      rawItems
+        .filter((i) => (i as { unverifiedMatch?: boolean })?.unverifiedMatch === true)
+        .map((i) => String((i as { materialCode?: string }).materialCode ?? "").trim().toUpperCase())
+        .filter(Boolean),
+    );
     await learnSupplierBindings(
       db,
       String(body.supplierId ?? ""),
@@ -1366,6 +1378,7 @@ app.post("/", async (c) => {
         supplierSku: r.supplierSku,
         supplierDescription: r.materialName,
         unitPriceSen: r.unitPriceSen,
+        learnable: !unverifiedCodes.has((r.materialCode ?? "").trim().toUpperCase()),
       })),
       () => `smb-${crypto.randomUUID().slice(0, 8)}`,
     ).catch(() => undefined);

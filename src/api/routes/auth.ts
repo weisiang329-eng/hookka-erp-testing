@@ -234,7 +234,7 @@ app.post("/login", async (c) => {
   // /api/auth/totp/login-verify which issues the session on success.
   // Returning userId (NOT a token) is intentional — userId alone is useless
   // without a valid TOTP/recovery code.
-  if (user.totpEnrolledAt) {
+  if (TOTP_LOGIN_ENFORCEMENT_ENABLED && user.totpEnrolledAt) {
     return c.json({
       success: true,
       totpRequired: true,
@@ -336,6 +336,15 @@ app.post("/login", async (c) => {
 // prevent the password-only login from succeeding — it only annotates the
 // response with a hint.
 // ---------------------------------------------------------------------------
+// 2026-08-04 KILL SWITCH (BUG-2026-08-04-006). The login-time TOTP verify step
+// was never built on the frontend — there is no page that POSTs
+// { userId, code } to /api/auth/totp/login-verify — so the moment a user
+// enrolls in 2FA the hard gate below returns { totpRequired } with no way to
+// enter a code, and login.tsx crashes ("Cannot read properties of undefined
+// (reading 'user')"). A SUPER_ADMIN (nico) locked himself out exactly this way.
+// Until the verify flow ships, disable BOTH the hard gate AND the soft prompt
+// that lures admins into enrolling. Flip back to true when login-verify exists.
+const TOTP_LOGIN_ENFORCEMENT_ENABLED = false;
 const TOTP_HARD_ENFORCE_CUTOFF_MS = Date.parse("2026-05-28T00:00:00.000Z");
 const TOTP_GRACE_MS = 14 * 24 * 60 * 60 * 1000;
 const TOTP_DISMISS_COOLOFF_MS = 24 * 60 * 60 * 1000;
@@ -344,6 +353,10 @@ async function computeTotpPrompt(
   c: Context<Env>,
   user: UserRow,
 ): Promise<{ severity: "soft" | "info" | "hard" } | null> {
+  // Kill switch (BUG-2026-08-04-006): no soft prompt while 2FA login is
+  // disabled — do not lure anyone into enrolling into a feature that would lock
+  // them out. Re-enable with TOTP_LOGIN_ENFORCEMENT_ENABLED once login-verify ships.
+  if (!TOTP_LOGIN_ENFORCEMENT_ENABLED) return null;
   // Only SUPER_ADMIN gets the prompt for now. Other roles can opt-in
   // manually via Settings → Security in a future enhancement.
   if (user.role !== "SUPER_ADMIN") return null;

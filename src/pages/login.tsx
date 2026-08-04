@@ -217,6 +217,11 @@ type LoginResponse =
         severity?: "soft" | "info" | "hard";
       };
     }
+  // 2FA hard-gate shape: success WITHOUT a `data` blob (the server returns just
+  // userId, expecting a login-verify step that was never built — see
+  // BUG-2026-08-04-006). Modelled so the handler must account for it instead of
+  // blindly reading json.data.user and crashing.
+  | { success: true; totpRequired: true; userId: string }
   | { success: false; error?: string };
 
 export default function LoginPage() {
@@ -304,6 +309,17 @@ export default function LoginPage() {
         setError(
           ("error" in json && json.error) ||
             "Login failed. Please check your credentials.",
+        );
+        return;
+      }
+      // 2FA hard-gate response ({ success:true, totpRequired, userId }) carries
+      // no `data`. The login-verify step isn't built (BUG-2026-08-04-006), so
+      // handle it explicitly instead of crashing on json.data.user. The server
+      // gate is currently disabled, but a stale worker / future re-enable must
+      // never white-screen the login page again.
+      if ("totpRequired" in json || !("data" in json) || !json.data?.user) {
+        setError(
+          "Two-factor sign-in isn't available yet. Ask an admin to reset your 2FA, then sign in with your password.",
         );
         return;
       }

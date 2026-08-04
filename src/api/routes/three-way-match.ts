@@ -20,9 +20,33 @@ import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
+// ── Runtime self-apply ──────────────────────────────────────────────────────
+// Migrations do NOT run on deploy in this repo, so a new column reaches prod
+// only from here. snake_case, so no column-rename-map.json entry is needed.
+//
+// `po_ids` — a receipt may span several purchase orders, so a match row that
+// names only one reads as if the other were never involved. `poId` is kept as
+// the header for every existing reader.
+// Cached as a BOOLEAN, never as the in-flight promise: a rejected promise stays
+// cached and one transient DDL blip would disable the column for the life of
+// the isolate, while a pending one shares the socket of the request that
+// created it (db-pg.ts forbids that). The statement is IF NOT EXISTS, so a
+// re-run costs nothing and a failure simply leaves the flag unset to retry.
+let _twmColumnsApplied = false;
+
+async function ensureTwmMigrations(db: D1Database): Promise<void> {
+  if (_twmColumnsApplied) return;
+  await db
+    .prepare("ALTER TABLE three_way_matches ADD COLUMN IF NOT EXISTS po_ids TEXT")
+    .run();
+  _twmColumnsApplied = true;
+}
+
 type ThreeWayMatchRow = {
   id: string;
   poId: string | null;
+  po_ids?: string | null;
+  poIds?: string | null;
   poNumber: string | null;
   grnId: string | null;
   grnNumber: string | null;
@@ -55,6 +79,12 @@ type GrnItemRow = {
   id: number;
   grnId: string;
   poItemIndex: number | null;
+  // Per-line PO ownership (see grn.ts). Read dual-keyed: the columns are
+  // snake_case, but a driver or view may hand them back camelCased.
+  po_id?: string | null;
+  poId?: string | null;
+  po_item_id?: string | null;
+  poItemId?: string | null;
   materialCode: string | null;
   materialName: string | null;
   orderedQty: number;
@@ -87,10 +117,28 @@ function parseItems(raw: string | null): MatchItem[] {
   }
 }
 
+/** Every PO the match covers. Falls back to the header for rows written before `po_ids`. */
+function parsePoIds(row: ThreeWayMatchRow): string[] {
+  const raw = row.po_ids ?? row.poIds ?? null;
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        const ids = parsed.map((v) => String(v)).filter(Boolean);
+        if (ids.length > 0) return ids;
+      }
+    } catch {
+      // Fall through to the header id below.
+    }
+  }
+  return row.poId ? [row.poId] : [];
+}
+
 function rowToMatch(row: ThreeWayMatchRow) {
   return {
     id: row.id,
     poId: row.poId ?? "",
+    poIds: parsePoIds(row),
     poNumber: row.poNumber ?? "",
     grnId: row.grnId ?? "",
     grnNumber: row.grnNumber ?? "",
@@ -465,6 +513,9 @@ app.post("/", async (c) => {
 
     if (!grnId) return c.json({ error: "grnId is required" }, 400);
 
+    // Awaited before the first write — a migration file alone is inert here.
+    await ensureTwmMigrations(c.var.DB);
+
     const grn = await c.var.DB.prepare(
       "SELECT id, grnNumber, poId, supplierId, supplierName, totalAmount FROM grns WHERE id = ?",
     )
@@ -479,38 +530,75 @@ app.post("/", async (c) => {
       }>();
     if (!grn) return c.json({ error: "GRN not found" }, 404);
 
-    if (!grn.poId) {
+    const grnItemsRes = await c.var.DB.prepare(
+      "SELECT * FROM grn_items WHERE grnId = ? ORDER BY id",
+    )
+      .bind(grn.id)
+      .all<GrnItemRow>();
+    const grnItems = grnItemsRes.results ?? [];
+
+    // A receipt may span SEVERAL purchase orders (owner 2026-08-04), so the
+    // orders to match against come from the LINES — `grns.poId` is the header
+    // for display. Matching only the header meant a second-PO line was scored
+    // against whatever sat at its index on the first order (wrong ordered qty,
+    // wrong price), and the variance compared ONE order's entire value against
+    // a receipt that was partly another order's goods. Both fail quietly: the
+    // first invents mismatches, the second can invent a FULL_MATCH.
+    const linePoIds = [
+      ...new Set(
+        grnItems
+          .map((gi) => (gi.po_id ?? gi.poId ?? "").trim())
+          .filter(Boolean),
+      ),
+    ];
+    const poIds = linePoIds.length > 0 ? linePoIds : grn.poId ? [grn.poId] : [];
+    if (poIds.length === 0) {
       return c.json({ error: "Related PO not found" }, 404);
     }
-    const po = await c.var.DB.prepare(
-      "SELECT id, poNo, totalSen FROM purchase_orders WHERE id = ?",
-    )
-      .bind(grn.poId)
-      .first<{ id: string; poNo: string; totalSen: number }>();
-    if (!po) return c.json({ error: "Related PO not found" }, 404);
 
-    const [grnItemsRes, poItemsRes] = await Promise.all([
+    const placeholders = poIds.map(() => "?").join(",");
+    const [posRes, poItemsRes] = await Promise.all([
       c.var.DB.prepare(
-        "SELECT * FROM grn_items WHERE grnId = ? ORDER BY id",
+        `SELECT id, poNo, totalSen FROM purchase_orders WHERE id IN (${placeholders})`,
       )
-        .bind(grn.id)
-        .all<GrnItemRow>(),
+        .bind(...poIds)
+        .all<{ id: string; poNo: string; totalSen: number }>(),
       c.var.DB.prepare(
-        "SELECT * FROM purchase_order_items WHERE purchaseOrderId = ? ORDER BY id",
+        `SELECT * FROM purchase_order_items WHERE purchaseOrderId IN (${placeholders}) ORDER BY id`,
       )
-        .bind(po.id)
+        .bind(...poIds)
         .all<PoItemRow>(),
     ]);
-    const grnItems = grnItemsRes.results ?? [];
+    const pos = posRes.results ?? [];
+    if (pos.length === 0) return c.json({ error: "Related PO not found" }, 404);
     const poItems = poItemsRes.results ?? [];
+
+    // Per-order line lists, so an index is read on the line's OWN purchase
+    // order, plus a direct id lookup for lines that recorded one.
+    const itemsByPo = new Map<string, PoItemRow[]>();
+    const poItemById = new Map<string, PoItemRow>();
+    for (const it of poItems) {
+      const owner = String(it.purchaseOrderId ?? "");
+      const arr = itemsByPo.get(owner) ?? [];
+      arr.push(it);
+      itemsByPo.set(owner, arr);
+      poItemById.set(String(it.id), it);
+    }
+
+    // The header PO stays whatever the GRN records, so existing single-PO
+    // matches are unchanged.
+    const headerPo = pos.find((p) => p.id === grn.poId) ?? pos[0];
 
     const TOLERANCE = 0.02;
 
     const matchItems: MatchItem[] = grnItems.map((gi) => {
+      const lineItemId = (gi.po_item_id ?? gi.poItemId ?? "").trim();
+      const ownerPoId = (gi.po_id ?? gi.poId ?? "").trim() || headerPo.id;
       const poItem =
-        gi.poItemIndex !== null && gi.poItemIndex !== undefined
-          ? poItems[gi.poItemIndex]
-          : undefined;
+        (lineItemId ? poItemById.get(lineItemId) : undefined) ??
+        (gi.poItemIndex !== null && gi.poItemIndex !== undefined
+          ? (itemsByPo.get(ownerPoId) ?? [])[gi.poItemIndex]
+          : undefined);
       const invItem = (
         invoiceItems as
           | { materialCode: string; quantity: number; unitPrice: number }[]
@@ -545,7 +633,11 @@ app.post("/", async (c) => {
       };
     });
 
-    const poTotal = po.totalSen;
+    // Every order this receipt draws down, not just the header — otherwise the
+    // variance measures one order's value against goods that partly belong to
+    // another, which can land inside tolerance by coincidence. Identical to the
+    // old behaviour when there is one PO.
+    const poTotal = pos.reduce((s, p) => s + (Number(p.totalSen) || 0), 0);
     const grnTotal = grn.totalAmount;
     const invTotal = (invoiceTotal as number | null | undefined) ?? null;
 
@@ -581,17 +673,25 @@ app.post("/", async (c) => {
     const id = genId();
     const variancePercentRounded = Math.round(variancePercent * 100) / 100;
 
+    // `poId` stays the header so every existing reader keeps working; the full
+    // set goes in `po_ids` (snake_case, self-applied) and `poNumber` lists them
+    // all, because a match row that names one of two orders reads as if the
+    // other were never involved.
+    const poNumbers = pos.map((p) => p.poNo).filter(Boolean);
+    const poNumberOut = poNumbers.length > 1 ? poNumbers.join(", ") : headerPo.poNo;
+
     await c.var.DB.prepare(
-      `INSERT INTO three_way_matches (id, poId, poNumber, grnId, grnNumber,
+      `INSERT INTO three_way_matches (id, poId, po_ids, poNumber, grnId, grnNumber,
          invoiceId, invoiceNumber, supplierId, supplierName, matchStatus,
          poTotal, grnTotal, invoiceTotal, variance, variancePercent,
          withinTolerance, items)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
-        po.id,
-        po.poNo,
+        headerPo.id,
+        JSON.stringify(pos.map((p) => p.id)),
+        poNumberOut,
         grn.id,
         grn.grnNumber,
         invoiceId ?? null,
@@ -611,8 +711,9 @@ app.post("/", async (c) => {
 
     const newMatch = {
       id,
-      poId: po.id,
-      poNumber: po.poNo,
+      poId: headerPo.id,
+      poIds: pos.map((p) => p.id),
+      poNumber: poNumberOut,
       grnId: grn.id,
       grnNumber: grn.grnNumber,
       invoiceId: invoiceId ?? null,

@@ -3409,6 +3409,7 @@
     "match_status",
     "org_id",
     "po_id",
+    "po_ids",
     "po_number",
     "po_total",
     "supplier_id",

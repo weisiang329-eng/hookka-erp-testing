@@ -72,7 +72,27 @@ export function tokenize(text: string): string[] {
   return out;
 }
 
-/** Jaccard similarity of two token sets — order-independent by design. */
+/** Shared tokens required before CONTAINMENT is allowed to carry a match. */
+export const MIN_SHARED_TOKENS = 2;
+
+/**
+ * How well the supplier's wording matches a catalogue entry.
+ *
+ * Two readings, best one wins:
+ *
+ *   • JACCARD — shared ÷ union. Right when both sides describe the item at the
+ *     same level of detail.
+ *   • CONTAINMENT — how much of the SUPPLIER's wording appears in the
+ *     catalogue entry. Necessary because our catalogue is usually the more
+ *     verbose side ("PLYWOOD SHEET AB GRADE 9MM 4FT X 8FT" against the
+ *     supplier's "9MM 4' X 8' PLYWOOD AB"), and Jaccard punishes every extra
+ *     word we happen to record. Judged on Jaccard alone that pair scores 0.33
+ *     and the operator is sent to pick a line the text plainly identifies.
+ *
+ * Containment is gated on MIN_SHARED_TOKENS, because a single shared word
+ * ("PLYWOOD") would otherwise "fully contain" a one-word line and match
+ * everything in that family.
+ */
 export function similarity(a: string, b: string): number {
   const ta = new Set(tokenize(a));
   const tb = new Set(tokenize(b));
@@ -80,7 +100,10 @@ export function similarity(a: string, b: string): number {
   let shared = 0;
   for (const t of ta) if (tb.has(t)) shared++;
   const union = ta.size + tb.size - shared;
-  return union === 0 ? 0 : shared / union;
+  const jaccard = union === 0 ? 0 : shared / union;
+  if (shared < MIN_SHARED_TOKENS) return jaccard;
+  const containment = shared / Math.min(ta.size, tb.size);
+  return Math.max(jaccard, containment);
 }
 
 /**

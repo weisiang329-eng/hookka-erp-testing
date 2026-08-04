@@ -56,6 +56,44 @@ test("the second ADD WOOD line resolves to the OTHER plywood", () => {
   assert.equal(m.item.itemCode, "PLY-18-48");
 });
 
+test("a verbose catalogue entry still matches the supplier's terse line", () => {
+  // Our catalogue is usually the WORDIER side. Judged on symmetric overlap
+  // alone this pair scores 0.33 and the operator is sent to pick a line the
+  // text plainly identifies — which was the original complaint.
+  const verbose = [{ itemCode: "PLY-9", description: "PLYWOOD SHEET AB GRADE 9MM 4FT X 8FT" }];
+  const m = matchCatalogItem(`9MM 4' X 8' PLYWOOD AB`, verbose);
+  assert.ok(m, "extra words in OUR description must not defeat the match");
+  assert.equal(m.item.itemCode, "PLY-9");
+});
+
+test("a metric catalogue size does not defeat an imperial supplier line", () => {
+  const metric = [{ itemCode: "PLY-9", description: "PLYWOOD AB 9MM 1220X2440" }];
+  const m = matchCatalogItem(`9MM 4' X 8' PLYWOOD AB`, metric);
+  assert.ok(m, "PLYWOOD + AB + 9MM is enough to identify it");
+});
+
+test("one shared word alone can never carry a match", () => {
+  // Without the shared-token floor, containment would rate a single common
+  // word as a perfect match and bind the whole family to one item.
+  const family = [{ itemCode: "X-1", description: "PLYWOOD" }];
+  assert.equal(
+    matchCatalogItem("FOAM SHEET PLYWOOD-FREE", family),
+    null,
+    "a lone common word must not be treated as identification",
+  );
+});
+
+test("a vague entry cannot outrank a specific one silently", () => {
+  // Both score full marks — one by containment, one by exact overlap — so the
+  // line is ambiguous and must go to a human rather than pick the vaguer row.
+  const mixed = [
+    { itemCode: "VAGUE", description: "PLYWOOD 9MM" },
+    { itemCode: "EXACT", description: "PLYWOOD 9MM 4X8 AB" },
+  ];
+  const m = matchCatalogItem(`9MM 4' X 8' PLYWOOD AB`, mixed);
+  assert.equal(m, null, "a tie between a vague and a specific entry must be refused");
+});
+
 test("an unrelated line matches nothing rather than the nearest thing", () => {
   assert.equal(matchCatalogItem("DELIVERY CHARGE", CATALOG), null);
   assert.equal(matchCatalogItem("", CATALOG), null);
@@ -100,14 +138,18 @@ test("the ADD WOOD line is in fact an EXACT token match", () => {
 });
 
 test("thresholds are configurable so the bar can be raised per surface", () => {
-  // A partial line: "PLYWOOD 9MM" shares 2 of 4 tokens → 0.5, enough by
-  // default but not once the bar is raised.
-  const relaxed = matchCatalogItem("PLYWOOD 9MM", CATALOG);
-  assert.ok(relaxed, "half a description still identifies it by default");
+  // Three of four tokens land, plus one the catalogue never mentions → 0.75.
+  // Enough by default; rejected once the bar goes above it.
+  const line = "PLYWOOD 9MM AB ZZTOP";
+  const relaxed = matchCatalogItem(line, CATALOG);
+  assert.ok(relaxed, "three matching tokens still identify it by default");
   assert.equal(relaxed.item.itemCode, "PLY-9-48-AB");
 
-  const strict = matchCatalogItem("PLYWOOD 9MM", CATALOG, { minScore: 0.8 });
-  assert.equal(strict, null, "a stricter bar must actually reject");
+  assert.equal(
+    matchCatalogItem(line, CATALOG, { minScore: 0.8 }),
+    null,
+    "a stricter bar must actually reject",
+  );
 });
 
 test("the winner reports how clear it was", () => {

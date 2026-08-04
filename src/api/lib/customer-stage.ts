@@ -27,23 +27,26 @@ let custStageColPromise = false;
 export async function ensureCustomerStageColumns(db: D1Database): Promise<void> {
   if (custStageColPromise) return;
 
+  // BUG-CLASS C9: both ALTERs must land before the memo is set. The previous
+  // shape set the flag past the catch, so a transient DDL blip on either column
+  // was remembered as done for the isolate's life — customer_stage /
+  // salesperson_user_id then stay missing and the customer PUT UPDATE (which
+  // references both) 500s, so NOTHING on that save sticks (OEM, phone, name).
+  // ADD COLUMN IF NOT EXISTS is idempotent, so re-running a landed column on a
+  // retry is harmless.
   try {
     await db
       .prepare(
         "ALTER TABLE customers ADD COLUMN IF NOT EXISTS customer_stage TEXT NOT NULL DEFAULT 'CONFIRMED'",
       )
       .run();
-  } catch {
-    // best-effort — column may already exist
-  }
-  try {
     await db
       .prepare("ALTER TABLE customers ADD COLUMN IF NOT EXISTS salesperson_user_id TEXT")
       .run();
+    custStageColPromise = true;
   } catch {
-    // best-effort — column may already exist
+    // best-effort — leave the flag false so a failed round retries next call.
   }
-  custStageColPromise = true;
 }
 
 /** Stage as stored. Anything unrecognised is treated as CONFIRMED — existing

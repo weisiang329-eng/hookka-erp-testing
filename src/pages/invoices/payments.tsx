@@ -179,6 +179,10 @@ export default function PaymentsPage() {
         setAllocations([]);
         invalidateCachePrefix("/api/payments");
         invalidateCachePrefix("/api/invoices");
+        // A receipt decrements the customer's A/R (accounting.ts), so the
+        // Customers list' Outstanding / Available headroom is now stale. Drop
+        // its cache so the next visit refetches the ledger-true balance.
+        invalidateCachePrefix("/api/customers");
         refreshPayments();
         refreshInvoices();
       }
@@ -207,6 +211,7 @@ export default function PaymentsPage() {
         toast.success(`Receipt ${action === "unvoid" ? "restored" : action === "delete" ? "deleted" : "voided"}`);
         invalidateCachePrefix("/api/payments");
         invalidateCachePrefix("/api/invoices");
+        invalidateCachePrefix("/api/customers"); // A/R reversed/restored → refresh Outstanding/Available
         refreshPayments();
         refreshInvoices();
         setDetail(null);
@@ -261,6 +266,7 @@ export default function PaymentsPage() {
         toast.success("Receipt updated");
         invalidateCachePrefix("/api/payments");
         invalidateCachePrefix("/api/invoices");
+        invalidateCachePrefix("/api/customers"); // A/R re-stated → refresh Outstanding/Available
         refreshPayments();
         refreshInvoices();
         cancelEdit();

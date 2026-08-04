@@ -32,8 +32,10 @@ test("contact-format: +60 default, phone split/join, email, hub codes", async ()
   assert.equal(mod.DEFAULT_DIAL_CODE, "+60");
   assert.ok(mod.COUNTRY_DIAL_CODES.some((c) => c.code === "+60"));
   assert.ok(mod.COUNTRY_DIAL_CODES.length > 5, "must offer international codes");
-  // Legacy free-text falls under +60; a +65 prefix is recognised.
-  assert.deepEqual(mod.splitPhone("011-6151 1613"), { dial: "+60", local: "011-6151 1613" });
+  // Legacy free-text falls under +60; a +65 prefix is recognised. The national
+  // trunk 0 is dropped so a MY number reads correctly under a "+60" dial code
+  // ("011…" → "11…") — see contact-format-phone.test.mjs for the full contract.
+  assert.deepEqual(mod.splitPhone("011-6151 1613"), { dial: "+60", local: "11-6151 1613" });
   assert.deepEqual(mod.splitPhone("+65 9123 4567"), { dial: "+65", local: "9123 4567" });
   assert.equal(mod.joinPhone("+60", "12-345 6789"), "+60 12-345 6789");
   assert.equal(mod.joinPhone("+60", ""), "", "blank number stays blank, not a bare dial code");

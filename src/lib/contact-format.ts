@@ -41,28 +41,61 @@ const DIAL_CODES_SORTED = [...COUNTRY_DIAL_CODES]
   .map((c) => c.code)
   .sort((a, b) => b.length - a.length);
 
+/** Clean a number destined for the LOCAL field (dial code lives separately).
+ *  Two real bugs it fixes, both of which read to the operator as the phone
+ *  "format blown up" (`+60` shown against a national-format number):
+ *    1. Leading national trunk 0 — a MY number is stored/typed "011-6151 1613"
+ *       but under a "+60" it must read "11-6151 1613" (international drops the 0).
+ *    2. A dial code that leaked INTO the local field — a paste of "+60123..." or
+ *       a re-save of an already-combined value would otherwise stack to
+ *       "+60 +60123...". Strip any leading "+<known code>" (or a bare "+").
+ *  Spaces/dashes elsewhere are preserved for readability. */
+export function normalizeLocalNumber(local: string | null | undefined): string {
+  let s = (local ?? "").trim();
+  if (s.startsWith("+")) {
+    const compact = s.replace(/\s+/g, "");
+    let stripped = false;
+    for (const code of DIAL_CODES_SORTED) {
+      if (compact.startsWith(code)) {
+        s = s.slice(s.indexOf(code) + code.length).trim();
+        stripped = true;
+        break;
+      }
+    }
+    if (!stripped) s = s.replace(/^\+\s*/, ""); // unknown code — drop the bare '+'
+  }
+  // Drop a single national trunk 0 (011… → 11…). One only, so "00…" export
+  // prefixes aren't chewed past recognition.
+  if (s.startsWith("0")) s = s.slice(1);
+  return s;
+}
+
 /** Split a stored phone string into { dial, local }. A leading "+<code>" is
  *  matched against the known list; otherwise the whole value is treated as a
- *  local number under the default dial code (legacy rows). */
+ *  local number under the default dial code (legacy rows). The local part is
+ *  normalised (see normalizeLocalNumber) so legacy trunk-0 / double-dial values
+ *  render cleanly without rewriting storage until the row is re-saved. */
 export function splitPhone(stored: string | null | undefined): { dial: string; local: string } {
   const v = (stored ?? "").trim();
   if (v.startsWith("+")) {
     const compact = v.replace(/\s+/g, "");
     for (const dial of DIAL_CODES_SORTED) {
       if (compact.startsWith(dial)) {
-        return { dial, local: v.slice(v.indexOf(dial) + dial.length).trim() };
+        return { dial, local: normalizeLocalNumber(v.slice(v.indexOf(dial) + dial.length)) };
       }
     }
-    // Unknown "+" prefix — keep it in local so the user can see/fix it.
-    return { dial: DEFAULT_DIAL_CODE, local: v };
+    // Unknown "+" prefix — keep it in local (sans the bare '+') so the user can fix it.
+    return { dial: DEFAULT_DIAL_CODE, local: normalizeLocalNumber(v) };
   }
-  return { dial: DEFAULT_DIAL_CODE, local: v };
+  return { dial: DEFAULT_DIAL_CODE, local: normalizeLocalNumber(v) };
 }
 
-/** Recombine a dial code + local number into the stored form. Empty local →
+/** Recombine a dial code + local number into the stored form. The local is
+ *  normalised first, so a dial code cannot end up stacked inside the number and
+ *  a national trunk 0 cannot ride along after the "+<code>". Empty local →
  *  empty string (so a blank phone stays blank, not a bare "+60"). */
 export function joinPhone(dial: string, local: string): string {
-  const l = (local ?? "").trim();
+  const l = normalizeLocalNumber(local);
   if (!l) return "";
   return `${dial} ${l}`;
 }

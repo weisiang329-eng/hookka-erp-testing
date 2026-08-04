@@ -34,6 +34,36 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-04-003 — Customer edit silently didn't save (OEM marking / phone / name) — a self-apply memo set true PAST the catch (BUG-CLASS C9) `data-integrity` `infrastructure` `ui-frontend` 🟢
+
+**Symptom.** On the Edit Customer dialog, choosing an OEM product marking (Bedframe/Sofa/Accessory → Tag/Label) and clicking Save Changes didn't persist — reopen showed None. Phone and other header edits didn't stick either, intermittently.
+
+**Root cause.** `ensureCustomerOemColumn` + `ensureCustomerGroupColumn` (`src/api/routes/customers.ts`) and `ensureCustomerStageColumns` (`src/api/lib/customer-stage.ts`) memoised their boolean guard AFTER the `try/catch`, so a transient DDL blip on the `ALTER TABLE … ADD COLUMN IF NOT EXISTS` (swallowed by the catch) still set the flag true. That isolate then never retried the ALTER; the columns (`oem_marking`, `group_org_code`, `customer_stage`, `salesperson_user_id`) stayed missing, and the customer PUT `UPDATE` — which references all of them — 500s, rolling the whole save back on the client. This is **BUG-CLASS C9**, third variant (see BUG-2026-08-02-003 for the promise variant).
+
+**Fix.** Moved each `flag = true` INSIDE its try, immediately after `.run()` succeeds — matching the already-correct `ensureCustomerCompanyColumn` next door. A failed round now leaves the flag false and retries. `src/api/routes/customers.ts` (ensureCustomerOemColumn, ensureCustomerGroupColumn), `src/api/lib/customer-stage.ts` (ensureCustomerStageColumns).
+
+**Verified.** `npx tsc -p tsconfig.app.json --noEmit` clean; new behavioural regression `tests/customer-stage-self-apply-retry.test.mjs` (a failed ALTER round is retried, then the memo sticks) — 2/2; the generic `self-apply-memo-is-boolean` test still green (it passes this variant by design — an await does precede the setter, which is why the targeted test exists). Live prod write→reopen verify pending deploy. **Once this lands, the sewing-sticker OEM Tag/Label display (already wired in `production/index.tsx` `oemMarkFor`) shows for real** — it was blank only because the marking never persisted.
+
+## BUG-2026-08-04-002 — Phone field "blew up": +60 shown against a national-format number, and dial codes stacked on paste `ui-frontend` 🟢
+
+**Symptom.** The PhoneInput on the customer dialog rendered a garbled number (e.g. "+60" beside "011-6151 1613"); operators had to close and reopen the dialog.
+
+**Root cause.** `splitPhone`/`joinPhone` (`src/lib/contact-format.ts`) kept the national trunk `0` under a dial code (MY numbers read "11…" under +60, not "011…"), and never stripped a dial code that leaked into the local field, so a pasted "+60123…" or a re-save stacked to "+60 +60123…".
+
+**Fix.** Added `normalizeLocalNumber` (strips a leading `+<known code>`/bare `+` and a single national trunk `0`), applied in both `splitPhone` (display, non-destructive — storage is only rewritten on the next save) and `joinPhone` (storage). `src/lib/contact-format.ts`.
+
+**Verified.** `tsc` clean; new `tests/contact-format-phone.test.mjs` (trunk-0 drop, no dial-code stacking, split→join idempotent, foreign codes, blank) — 5/5; updated `tests/contact-standardization.test.mjs` to the fixed expectation. All 137 customer/payment/contact/phone tests green.
+
+## BUG-2026-08-04-001 — Customer Outstanding didn't refresh after a payment; no Available headroom shown `ui-frontend` `data-integrity` 🟢
+
+**Symptom.** Recording a customer receipt did not update the customer's Outstanding on the Customers list, and there was no "available credit" figure at all.
+
+**Root cause.** Outstanding IS ledger-derived and decremented server-side on payment (`accounting.ts`), but the payment page (`src/pages/invoices/payments.tsx`) invalidated only `/api/payments` + `/api/invoices`, never `/api/customers` — so the cached customer list kept the pre-payment balance until TTL. Separately, no view computed `creditLimit − outstanding`.
+
+**Fix.** (1) Added `invalidateCachePrefix("/api/customers")` to all three A/R-affecting handlers (create / lifecycle void-delete-unvoid / restate) in `payments.tsx`. (2) Added an "Available" column (+ a detail-panel figure) on the Customers page, derived on the client as `creditLimitSen − outstandingSen`, red when over limit, "—" for no-limit (CASH) accounts. No new API — the two fields are already on the row. `src/pages/customers.tsx`, `src/pages/invoices/payments.tsx`.
+
+**Verified.** `tsc` clean; existing payment tests green. Visual verify of the Available column pending (needs a backend/DB session).
+
 ## BUG-2026-08-02-003 — 38 runtime migrations cached a REJECTED promise, so a failed schema change was remembered as done `infrastructure` `data-integrity` 🟢
 
 **Symptom:** none, until it matters. A column silently never applied for the life

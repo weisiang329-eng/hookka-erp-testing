@@ -403,7 +403,7 @@ test("selectBestBomByCode: among same status, latest effectiveFrom wins", () => 
   assert.equal(m.get("X1")?.wipComponents, "NEW");
 });
 
-test("DO and CN routes both import the shared helpers (shared, not duplicated)", () => {
+test("neither DO nor CN carries its own copy of the shared print-extras logic", () => {
   const doSrc = readFileSync(
     join(process.cwd(), "src", "api", "routes", "delivery-orders.ts"),
     "utf8",
@@ -412,16 +412,33 @@ test("DO and CN routes both import the shared helpers (shared, not duplicated)",
     join(process.cwd(), "src", "api", "routes", "consignment-notes.ts"),
     "utf8",
   );
-  for (const src of [doSrc, cnSrc]) {
-    assert.match(src, /from "\.\.\/lib\/print-extras-shared"/);
-    assert.match(src, /deriveComponentRacks/);
-    assert.match(src, /selectBestBomByCode/);
+
+  // This used to assert that the IMPORT NAMES appeared in each file, which is
+  // a shape, not a behaviour. When the DO route was refactored to delegate to
+  // computeDoPrintExtras, its imports went dead but the test still demanded
+  // they be written down — so 28 unused imports stayed pinned in place,
+  // failing the pre-commit lint on every change to that file. Assert what the
+  // test actually cares about instead: that neither route re-implements the
+  // shared helpers.
+  for (const [name, src] of [["delivery-orders", doSrc], ["consignment-notes", cnSrc]]) {
+    for (const fn of ["deriveComponentRacks", "selectBestBomByCode", "piecesFor"]) {
+      assert.doesNotMatch(
+        src,
+        new RegExp(`(function|const)\\s+${fn}\\s*[=(]`),
+        `${name}.ts defines its own ${fn} — it must use the shared one`,
+      );
+    }
   }
-  // CN exposes its own print-extras endpoint mirroring DO's.
+
+  // CN builds its print extras in-route, so it must be importing the shared
+  // helpers rather than doing it by hand.
+  assert.match(cnSrc, /from "\.\.\/lib\/print-extras-shared"/);
+  assert.match(cnSrc, /deriveComponentRacks/);
+  assert.match(cnSrc, /selectBestBomByCode/);
   assert.match(cnSrc, /app\.get\("\/:id\/print-extras"/);
-  // And the DO route no longer carries an inline copy of the pieces builder
-  // (it must delegate to the shared piecesFor via the positional shim).
-  assert.match(doSrc, /piecesFor as piecesForShared/);
+
+  // DO delegates instead — the same logic, reached a different way.
+  assert.match(doSrc, /computeDoPrintExtras\(/);
 });
 
 test("CN PDF reuses the DO PDF's exported formatting helpers", () => {

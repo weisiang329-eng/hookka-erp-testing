@@ -13,9 +13,7 @@
 // these as deferred but the work landed; only the comment was stale.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
-import type { Context } from "hono";
 import type { Env } from "../worker";
-import { consumeFGBatchesForDO } from "../lib/do-cost-cascade";
 import {
   // loadDoValueMap is referenced in the comments below (it's the resolver this
   // file's pricing mirrors) but every call here goes through the cached variant.
@@ -23,29 +21,18 @@ import {
   // genuinely used (lib/delivery-agent.ts).
   loadDoValueMapCached,
   loadPoValueMap,
-  loadSoLinePriceIndex,
-  priceForItem,
 } from "../lib/do-value";
 import { requirePermission } from "../lib/rbac";
 import { customerScopeSql, salesOrderScopeSql, isCustomerScoped } from "../lib/customer-scope";
 import { getOrgId } from "../lib/tenant";
 import { emitAudit } from "../lib/audit";
-import { checkDeliveryOrderLocked, lockedResponse } from "../lib/lock-helpers";
+import { checkDeliveryOrderLocked } from "../lib/lock-helpers";
 import { nextInvoiceNo, buildInvoiceLedgerLegs } from "./invoices";
 import { readGstRatePct } from "../lib/note-ledger";
 import {
   ledgerHasSource,
   buildJournalEntryStatements,
 } from "../lib/journal-hash";
-import {
-  selectBestBomByCode,
-  piecesFor as piecesForShared,
-  deriveComponentRacks,
-  buildRepairNote,
-  type PackingJcRow,
-} from "../lib/print-extras-shared";
-import { parseRepairScope, type RepairScope } from "../../lib/repair-scope";
-import { formatRacksCompact } from "../../lib/rack-format";
 import { createPackingListCore } from "./packing-lists";
 import { fetchFilteredPOs, attachCustomerSO } from "./production-orders";
 import {
@@ -56,28 +43,11 @@ import {
   groupPosByCustomerHub,
   projectCreditFailure,
 } from "../lib/pl-first-grouping";
-import { enqueueEmail } from "../lib/email-outbox";
-import {
-  dispatchNoticeTemplate,
-  invoiceNoticeTemplate,
-  resolveDispatchRecipient,
-  resolveInvoiceRecipient,
-  fmtEmailDate,
-} from "../lib/customer-notify";
-import { buildSimpleTablePdf } from "../lib/assistant-exports";
 // Server-side render of the SAME unified DO / Invoice the FE downloads and
 // e-mails. Workers-pure (pdf-lib), so the pure-backend notice path (a
 // transition with no client render) produces the identical document instead
 // of the simplified branded fallback. buildSimpleTablePdf stays the ULTIMATE
 // fallback if the unified render ever throws on Workers.
-import { buildUnifiedDocPdf } from "../lib/unified-do-invoice-pdf";
-import {
-  buildUnifiedDoData,
-  buildUnifiedInvoiceData,
-} from "../../lib/build-unified-doc-data";
-import { HOOKKA_LOGO_PNG_BASE64 } from "../lib/hookka-logo-base64";
-import { computeInvoicePrintExtras } from "../lib/invoice-print-extras";
-import { ensureInvoicePoLinkColumn } from "../lib/invoice-po-link";
 import { getOrCreateQrToken, qrScanUrl } from "../lib/do-qr-token";
 // Company office number — the driver-contact fallback on dispatch notices
 // (owner rule: no driver phone on file → give the company's number).

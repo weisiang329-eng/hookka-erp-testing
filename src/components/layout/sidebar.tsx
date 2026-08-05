@@ -533,12 +533,29 @@ export function Sidebar({
         ...items.slice(insertAt),
       ];
     }
-    // P3.6 — filter out nav items the current user can't access. Anything
-    // not in NAV_PERMISSION_REQUIREMENTS stays visible (default-allow for
-    // links the gating doesn't cover yet).
-    items = items.filter((item) => isNavItemAllowed(item.href));
+    // Drop the items this user may not see, and their sub-items with them —
+    // a parent that survives only to show a submenu of forbidden pages is
+    // still a door they cannot open.
+    items = items
+      .map((item) =>
+        item.children
+          ? { ...item, children: item.children.filter((ch) => isNavItemAllowed(ch.href)) }
+          : item,
+      )
+      .filter((item) => {
+        if (!isNavItemAllowed(item.href)) return false;
+        // A group-header item whose children were all filtered away has
+        // nothing left to open.
+        if (item.children && item.children.length === 0) return false;
+        return true;
+      });
     return { ...group, items };
-  });
+  })
+    // …then drop the SECTION itself once nothing is left in it. Without this
+    // the headings stay behind as empty labels — FORECASTING, HR & OPERATIONS,
+    // WAREHOUSE with nothing under them — which reads as a broken menu rather
+    // than an absent one (owner 2026-08-05, on exactly that screenshot).
+    .filter((group) => group.items.length > 0);
 
   const isItemActive = (href: string) => {
     // Query-string deep links (e.g. /accounting?tab=pl) — match pathname

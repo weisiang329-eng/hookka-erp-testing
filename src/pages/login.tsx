@@ -259,10 +259,10 @@ export default function LoginPage() {
     });
   }
 
-  // Already signed-in? Jump straight to the dashboard.
+  // Already signed-in? Send them to their own home, not everyone's.
   useEffect(() => {
     if (isAuthenticated()) {
-      navigate("/dashboard", { replace: true });
+      void landingPage().then((to) => navigate(to, { replace: true }));
     }
   }, [navigate]);
 
@@ -274,8 +274,34 @@ export default function LoginPage() {
     const params = new URLSearchParams(location.search);
     const next = params.get("next");
     if (next) return next;
-    // 3. default
-    return "/dashboard";
+    // 3. default — resolved from the server, see landingPage()
+    return "";
+  }
+
+  /**
+   * Where to land when nothing else said.
+   *
+   * `/dashboard` is no longer a safe default. Under the code RBAC policy it is
+   * Management + Super Admin only, so sending a salesperson there drops them on
+   * a page missing from their own menu whose every figure comes back 403 — the
+   * restriction would read as a broken login. The server already computes each
+   * role's front door alongside its permissions; ask it rather than guessing
+   * here, so the landing page cannot disagree with the menu.
+   */
+  async function landingPage(): Promise<string> {
+    const explicit = getRedirectTarget();
+    if (explicit) return explicit;
+    try {
+      const res = await fetch("/api/auth/me/permissions", {
+        credentials: "include",
+      });
+      const body = (await res.json()) as { home?: string };
+      if (body?.home) return body.home;
+    } catch {
+      /* fall through */
+    }
+    // Everyone has Settings, so this is never a dead end.
+    return "/settings";
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -380,7 +406,7 @@ export default function LoginPage() {
         // wiring it now keeps this PR focused.
       }
 
-      navigate(getRedirectTarget(), { replace: true });
+      navigate(await landingPage(), { replace: true });
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Network error. Please try again.",

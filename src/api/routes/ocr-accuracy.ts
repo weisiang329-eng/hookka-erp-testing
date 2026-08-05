@@ -132,6 +132,31 @@ app.get("/", async (c) => {
     return label;
   };
 
+  /**
+   * The stored hint is a guess; the imported document is not.
+   *
+   * `customer_hint` was captured from a filename token, which is where 'PO',
+   * 'PO2608' and '9752' came from. 'Ohana' is the same defect wearing a more
+   * convincing costume: all 14 of those rows carry customerName "Carres Sdn.
+   * Bhd." and customerCode "300-C" in what the operator actually imported, and
+   * there is no Ohana anywhere in customers or delivery hubs. Grouping them
+   * under Unidentified would have been tidier than 'Ohana' and still wrong.
+   *
+   * So the imported document is asked FIRST and the hint is the fallback. This
+   * reads existing rows correctly without touching one of them.
+   */
+  const customerFor = (hint: string | null, corrected: unknown): string => {
+    const c = (corrected ?? {}) as Record<string, unknown>;
+    for (const key of ["customerName", "customerCode"]) {
+      const v = c[key];
+      if (typeof v === "string" && v.trim()) {
+        const hit = resolveCustomerHint(customers, v.trim());
+        if (hit) return hit.name;
+      }
+    }
+    return customerLabel(hint);
+  };
+
   const soWhere = dateWhere("createdAt");
   const soRes = await db
     .prepare(
@@ -150,7 +175,7 @@ app.get("/", async (c) => {
     const raw = parse(row.rawExtracted);
     const corr = parse(row.correctedJson);
     if (!corr) continue;
-    const customer = customerLabel(row.customerHint);
+    const customer = customerFor(row.customerHint, corr);
 
     // Document-level (overall + by customer).
     const dDoc = diffSalesOrderSample(raw, corr);

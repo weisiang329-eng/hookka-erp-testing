@@ -6,7 +6,11 @@
 // joined from the delivery_hubs table (matches the in-memory Customer type).
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
-import { denyForeignCustomerWrite, canAssignSalesperson } from "../lib/customer-scope";
+import {
+  denyForeignCustomerWrite,
+  canAssignSalesperson,
+  forcedSalespersonOnCreate,
+} from "../lib/customer-scope";
 import type { Context } from "hono";
 import type { Env } from "../worker";
 import { checkCustomerDeleteLocked, lockedResponse } from "../lib/lock-helpers";
@@ -416,7 +420,11 @@ app.post("/", async (c) => {
         groupOrgCode,
         serialiseOemMarking(body.oemMarking),
         stage,
-        String(body.salespersonUserId ?? body.salesperson_user_id ?? "").trim() || null,
+        // A scoped role owns what it creates. Otherwise a salesperson raises a
+        // Potential in the pipeline and the read filter hides it the moment it
+        // is saved — they would watch their own work vanish.
+        forcedSalespersonOnCreate(c) ??
+          (String(body.salespersonUserId ?? body.salesperson_user_id ?? "").trim() || null),
       )
       .run();
 

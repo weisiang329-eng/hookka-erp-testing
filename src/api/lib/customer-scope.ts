@@ -50,30 +50,47 @@ export function isScopedPath(path: string): boolean {
 }
 
 /**
- * The customer ids this user owns, or null when they own the whole book.
+ * The customers this user must NOT see — assigned to somebody else.
  *
- * Null means "no filtering" and is returned for every unscoped role — kept
- * distinct from an EMPTY set, which means "scoped, and owns nothing yet" and
- * must hide everything. Collapsing the two would turn a brand-new salesperson
- * into an admin.
+ * Owner ruling 2026-08-04: "当他如果没有被 assign 的时候就是公开的，可是一旦被
+ * assign，就只有那个 salesperson 看得到了."
+ *
+ * So the rule is not "show me mine" — it is "hide what belongs to someone
+ * else". An UNASSIGNED customer is public and stays visible to everyone; only
+ * an assigned one narrows to its owner. The difference matters: the first
+ * reading would make every unclaimed account vanish for the whole sales team,
+ * including the ones nobody has picked up yet.
+ *
+ * Null means no filtering at all (unscoped role). `denyAll` means the lookup
+ * failed and nothing may be shown.
  */
-export async function ownedCustomerIds(
+export interface CustomerScope {
+  forbidden: Set<string>;
+  denyAll: boolean;
+}
+
+export async function foreignCustomerIds(
   c: Context<Env>,
-): Promise<Set<string> | null> {
+): Promise<CustomerScope | null> {
   const get = (c as unknown as { get: (k: string) => string | undefined }).get;
   const role = (get.call(c, "userRole") ?? "").toUpperCase();
   if (!SCOPED_ROLES.has(role)) return null;
 
   const userId = get.call(c, "userId") ?? "";
-  if (!userId) return new Set();
+  if (!userId) return { forbidden: new Set(), denyAll: true };
 
   try {
+    // Assigned to SOMEBODY, and that somebody is not me. An unassigned row is
+    // absent from this set by construction, so it stays public.
     const res = await c.var.DB.prepare(
-      "SELECT id FROM customers WHERE salesperson_user_id = ?",
+      "SELECT id FROM customers WHERE salesperson_user_id IS NOT NULL AND salesperson_user_id <> ?",
     )
       .bind(userId)
       .all<{ id: string }>();
-    return new Set((res.results ?? []).map((r) => String(r.id)));
+    return {
+      forbidden: new Set((res.results ?? []).map((r) => String(r.id))),
+      denyAll: false,
+    };
   } catch (err) {
     // A failure here must FAIL CLOSED. The alternative — treating an error as
     // "no filter" — turns a transient database blip into a data leak, which is
@@ -82,7 +99,7 @@ export async function ownedCustomerIds(
       "[customer-scope] owner lookup failed, denying all:",
       err instanceof Error ? err.message : String(err),
     );
-    return new Set();
+    return { forbidden: new Set(), denyAll: true };
   }
 }
 
@@ -107,20 +124,18 @@ function customerOf(row: unknown, isCustomerRow: boolean): string | null {
  */
 export function filterPayload(
   payload: unknown,
-  owned: Set<string>,
+  scope: CustomerScope,
   isCustomerRow: boolean,
 ): { value: unknown; denied: boolean } {
+  const blocked = (row: unknown): boolean => {
+    if (scope.denyAll) return true;
+    const cid = customerOf(row, isCustomerRow);
+    return cid !== null && scope.forbidden.has(cid);
+  };
   if (Array.isArray(payload)) {
-    return {
-      value: payload.filter((row) => {
-        const cid = customerOf(row, isCustomerRow);
-        return cid === null || owned.has(cid);
-      }),
-      denied: false,
-    };
+    return { value: payload.filter((row) => !blocked(row)), denied: false };
   }
-  const cid = customerOf(payload, isCustomerRow);
-  if (cid !== null && !owned.has(cid)) return { value: null, denied: true };
+  if (blocked(payload)) return { value: null, denied: true };
   return { value: payload, denied: false };
 }
 
@@ -138,8 +153,8 @@ export async function customerScopeMiddleware(
   const path = new URL(c.req.url).pathname;
   if (!isScopedPath(path)) return;
 
-  const owned = await ownedCustomerIds(c);
-  if (owned === null) return; // unscoped role — untouched
+  const scope = await foreignCustomerIds(c);
+  if (scope === null) return; // unscoped role — untouched
 
   const res = c.res;
   if (!res || res.status !== 200) return;
@@ -157,11 +172,11 @@ export async function customerScopeMiddleware(
   let denied = false;
 
   if (body && typeof body === "object" && "data" in (body as Record<string, unknown>)) {
-    const r = filterPayload((body as Record<string, unknown>).data, owned, isCustomerRow);
+    const r = filterPayload((body as Record<string, unknown>).data, scope, isCustomerRow);
     denied = r.denied;
     out = { ...(body as Record<string, unknown>), data: r.value };
   } else {
-    const r = filterPayload(body, owned, isCustomerRow);
+    const r = filterPayload(body, scope, isCustomerRow);
     denied = r.denied;
     out = r.value;
   }
@@ -197,9 +212,11 @@ export async function denyForeignCustomerWrite(
   c: Context<Env>,
   customerId: string,
 ): Promise<Response | null> {
-  const owned = await ownedCustomerIds(c);
-  if (owned === null) return null; // unscoped role
-  if (customerId && owned.has(String(customerId))) return null;
+  const scope = await foreignCustomerIds(c);
+  if (scope === null) return null; // unscoped role
+  // Unassigned is public — a salesperson may work an unclaimed account. Only
+  // someone else's is refused.
+  if (!scope.denyAll && !scope.forbidden.has(String(customerId))) return null;
   return c.json({ success: false, error: "Not found" }, 404);
 }
 
@@ -214,4 +231,26 @@ export function canAssignSalesperson(c: Context<Env>): boolean {
   const get = (c as unknown as { get: (k: string) => string | undefined }).get;
   const role = (get.call(c, "userRole") ?? "").toUpperCase();
   return !SCOPED_ROLES.has(role);
+}
+
+/**
+ * The salesperson a NEW customer must be bound to.
+ *
+ * A scoped role always owns what it creates — the actor's own id, whatever the
+ * body says. Without this the flow breaks in a way that looks like a bug rather
+ * than a rule: a salesperson raises a Potential in the pipeline, the record is
+ * saved with no owner, and the read filter hides it from them the instant it
+ * exists. They would be watching their own work disappear.
+ *
+ * It also closes the other direction — a scoped role cannot create an account
+ * already assigned to somebody else, which is the same reassignment
+ * `canAssignSalesperson` blocks on update.
+ *
+ * Returns null for unscoped roles, meaning "use whatever the body sent".
+ */
+export function forcedSalespersonOnCreate(c: Context<Env>): string | null {
+  const get = (c as unknown as { get: (k: string) => string | undefined }).get;
+  const role = (get.call(c, "userRole") ?? "").toUpperCase();
+  if (!SCOPED_ROLES.has(role)) return null;
+  return get.call(c, "userId") ?? null;
 }

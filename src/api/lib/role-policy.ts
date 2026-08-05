@@ -189,6 +189,7 @@ const SALES: RolePolicy = {
   "customer-hubs": OPEN, // 开 HUB
   "sofa-combos": OPEN, // 设 Sofa Combo / 加钱
   "product-pricing": OPEN, // 加钱 / quotations — Sales works in selling price
+  "agent-console": OPEN, // Sales / Quotation Agent — see AGENTS_BY_ROLE
   "promise-date": OPEN,
   "historical-sales": OPEN,
 
@@ -388,6 +389,13 @@ export const AGENTS_BY_ROLE: Record<string, string[]> = {
   QA: ["SERVICE"],
   OFFICE: ["DELIVERY", "PRODUCTION", "CS"],
   HR: ["EMPLOYEE"],
+  // Added 2026-08-05. The Sales agent's job — OCR a customer PO into a sales
+  // order draft, put engine-backed promise dates in quotes, intercept price
+  // anomalies — IS the sales desk's job, so this is reading the roster rather
+  // than inventing a responsibility.
+  SALES: ["SALES"],
+  // R&D deliberately absent: there is no R&D agent in the roster, and handing
+  // them DATA_QUALITY would be making one up. Revisit when one exists.
 };
 
 /** Agent ids this role may see. `null` means every agent (super admin / admin). */

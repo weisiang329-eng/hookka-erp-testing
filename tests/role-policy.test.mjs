@@ -286,8 +286,11 @@ test("each role's Agent Console holds only its own agents", async () => {
   // null = every agent.
   assert.equal(agentsForRole("SUPER_ADMIN"), null);
   assert.equal(agentsForRole("ADMIN"), null);
-  // A role with no assignment sees none, rather than all.
-  assert.deepEqual(agentsForRole("SALES"), []);
+  assert.deepEqual(agentsForRole("SALES"), ["SALES"]);
+  // A role with no assignment sees none, rather than all — R&D has no agent in
+  // the roster, and inventing one is how someone ends up reading a digest that
+  // was never meant for them.
+  assert.deepEqual(agentsForRole("R_AND_D"), []);
   assert.deepEqual(agentsForRole("SOMETHING_NEW"), []);
 });
 

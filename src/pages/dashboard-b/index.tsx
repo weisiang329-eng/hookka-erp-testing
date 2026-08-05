@@ -1075,7 +1075,13 @@ export default function DashboardBPage() {
     : completedMonthSofa;
   const completedHeadlineLabel = isAllTime
     ? "Completed yest."
-    : `Completed · ${period}`;
+    // Labelled with its DEFINITION. This counts a production order on the day
+    // its LAST job card closes, not when someone sets the order to COMPLETED —
+    // which is the right call (the status depends on a human remembering to
+    // click, and 59 orders on prod prove how that goes) but it makes the tile
+    // disagree with the order list by ~14%. Owner 2026-08-05: keep the number,
+    // explain it.
+    : `Completed · ${period} (all job cards done)`;
   const completedHintLabel = isAllTime ? "· view 7d" : "· view days";
   const effSub = isAllTime
     ? "production mins ÷ clocked hours · last 7 working days"

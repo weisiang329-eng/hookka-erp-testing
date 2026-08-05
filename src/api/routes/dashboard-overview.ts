@@ -629,12 +629,20 @@ app.get("/", async (c) => {
              LEFT JOIN consignment_order_items coi
                     ON coi.consignmentOrderId = po.consignmentOrderId
                    AND coi.lineNo = po.lineNo
-            WHERE po.itemCategory IN ('SOFA','BEDFRAME','ACCESSORY')
+            WHERE po.orgId = ?
+              AND po.itemCategory IN ('SOFA','BEDFRAME','ACCESSORY')
               AND per_po.unit_completed_at IS NOT NULL
             GROUP BY substr(per_po.unit_completed_at::text, 1, 7)
             ORDER BY substr(per_po.unit_completed_at::text, 1, 7)`,
         )
+        .bind(orgId)
         .all<{ ym: string | null; revenueSen: number }>(),
+      // Both production-revenue queries above are org-scoped on the PRODUCTION
+      // ORDER (`po.orgId`), which they were not until 2026-08-05. Harmless on a
+      // single-tenant prod and invisible in every figure today — which is
+      // exactly why it would have shipped as a cross-tenant revenue leak the
+      // day a second org existed. Every other list query in this file already
+      // binds orgId; these two were the outliers.
       // SO-line price index — exact per-item price resolver (same one
       // the DO/invoice path uses) for This-Month Delivered.
       loadSoLinePriceIndex(db, orgId),
@@ -1398,12 +1406,13 @@ app.get("/", async (c) => {
                     ON soi.salesOrderId = po.salesOrderId AND soi.lineNo = po.lineNo
              LEFT JOIN consignment_order_items coi
                     ON coi.consignmentOrderId = po.consignmentOrderId AND coi.lineNo = po.lineNo
-            WHERE po.itemCategory IN ('SOFA','BEDFRAME','ACCESSORY')
+            WHERE po.orgId = ?
+              AND po.itemCategory IN ('SOFA','BEDFRAME','ACCESSORY')
               AND per_po.unit_completed_at IS NOT NULL
               AND ${weekDateClause("per_po.unit_completed_at")}
             GROUP BY 1`,
         )
-        .bind(...weekDateBinds)
+        .bind(orgId, ...weekDateBinds)
         .all<{ yw: string | null; revenueSen: number }>(),
     ]);
     const soRevWeekMap = new Map<string, number>();

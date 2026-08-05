@@ -99,6 +99,11 @@ export function setAuth(data: { user: AuthUser; rememberMe?: boolean }): void {
       snapshotFor(current.id);
       wipeLiveUserKeys();
     }
+    // Unconditionally, even for the SAME user id: what a person may see can
+    // change without the person changing. sales@hookka.com went from Super
+    // Admin to Sales and kept every cached list from before the change,
+    // which is what the owner was looking at.
+    wipeApiCache();
     writeBlob(serialized, persist);
     restoreFor(data.user.id);
   } catch {
@@ -189,6 +194,39 @@ function wipeLiveUserKeys(): void {
   for (const k of userSpecificKeys()) localStorage.removeItem(k);
 }
 
+/**
+ * Drop every cached API response.
+ *
+ * `useCachedJson` keys its localStorage entries by URL alone, with no notion of
+ * who fetched them. On a shared floor terminal that means the next person to
+ * sign in is served the previous person's customer list, sales orders and
+ * invoices — from cache, before any request goes out, so no amount of
+ * server-side scoping can stop it. Owner 2026-08-05: "出来的 Sales Order 基本上
+ * 全部也没有根据那个 sales 看得到的东西."
+ *
+ * Swept on BOTH sign-out and sign-in: a tab that was closed without logging out
+ * never runs the sign-out path, and that is exactly the case worth covering.
+ *
+ * The prefix is written out rather than imported from cached-fetch, which
+ * imports this module — and it is matched WITHOUT the build id that follows it,
+ * so entries left by an earlier deploy are cleared too rather than lingering
+ * under a namespace nothing sweeps.
+ */
+const API_CACHE_PREFIX = "hookka-cache:";
+
+function wipeApiCache(): void {
+  try {
+    const toRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(API_CACHE_PREFIX)) toRemove.push(k);
+    }
+    for (const k of toRemove) localStorage.removeItem(k);
+  } catch {
+    /* private-mode quotas — best-effort */
+  }
+}
+
 export function clearAuth(): void {
   try {
     // Snapshot the current user's UI state before wiping live keys, so a
@@ -196,6 +234,7 @@ export function clearAuth(): void {
     const current = getCurrentUser();
     if (current?.id) snapshotFor(current.id);
     wipeLiveUserKeys();
+    wipeApiCache();
     // Clear the blob from BOTH stores — we don't know (or care) which one a
     // given login used; logout must leave neither behind.
     localStorage.removeItem(STORAGE_KEY);

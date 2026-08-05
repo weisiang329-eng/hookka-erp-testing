@@ -54,8 +54,9 @@ const PERMISSIONS_URL = "/api/auth/me/permissions";
  * role change reads as "the change did not work", which is exactly how it read.
  *
  * Thirty seconds keeps the request off the hot path without making a role
- * change feel broken. `clearPermissionCache()` below drops it outright at
- * login, so a fresh session is never stale at all.
+ * change feel broken. Sign-in wipes the whole `hookka-cache:` namespace
+ * (see wipeApiCache in src/lib/auth.ts), so a fresh session is never stale
+ * at all — this window only covers a role change made mid-session.
  */
 const PERMISSIONS_TTL_S = 30;
 const SUPER_ADMIN_SENTINEL = "*";
@@ -77,7 +78,20 @@ function checkSet(
 ): boolean {
   // SUPER_ADMIN sentinel: a single "*" entry means allow everything.
   if (set.has(SUPER_ADMIN_SENTINEL)) return true;
-  return set.has(`${resource}:${action}`);
+  // Match exactly how `permitted()` in src/api/lib/rbac.ts matches. The code
+  // RBAC policy grants a whole module as `invoices:*`, so an exact-tuple check
+  // answered NO to every department role while the API said yes — and every
+  // <RequirePermission> route bounced to /dashboard. Owner 2026-08-05: "为什么
+  // 我点 Invoice 的 module，它是跑出来 dashboard？"
+  //
+  // These two predicates must not drift again: tests/permission-wildcards.test.mjs
+  // asserts they agree on the same inputs.
+  return (
+    set.has(`${resource}:${action}`) ||
+    set.has(`${resource}:*`) ||
+    set.has(`*:${action}`) ||
+    set.has(`*:*`)
+  );
 }
 
 type UsePermissionsResult = {

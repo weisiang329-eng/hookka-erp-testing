@@ -181,3 +181,37 @@ export async function customerScopeMiddleware(
     headers: res.headers,
   });
 }
+
+/**
+ * Refuse a WRITE against a customer the actor does not own.
+ *
+ * The response filter hides other people's customers on the way OUT; it cannot
+ * stop a PUT on the way IN. Owner 2026-08-04: "他只是不能操作其他人的顾客" —
+ * that half is enforced here, at the write.
+ *
+ * Returns a Response to send when the write must be refused, or null to
+ * proceed. 404 rather than 403, for the same reason as the read filter: a 403
+ * confirms the id exists.
+ */
+export async function denyForeignCustomerWrite(
+  c: Context<Env>,
+  customerId: string,
+): Promise<Response | null> {
+  const owned = await ownedCustomerIds(c);
+  if (owned === null) return null; // unscoped role
+  if (customerId && owned.has(String(customerId))) return null;
+  return c.json({ success: false, error: "Not found" }, 404);
+}
+
+/**
+ * May this actor set / change a customer's salesperson?
+ *
+ * A scoped role may not — reassigning is how a salesperson would hand their
+ * account to someone else, or quietly take one. That stays with the roles that
+ * see the whole book.
+ */
+export function canAssignSalesperson(c: Context<Env>): boolean {
+  const get = (c as unknown as { get: (k: string) => string | undefined }).get;
+  const role = (get.call(c, "userRole") ?? "").toUpperCase();
+  return !SCOPED_ROLES.has(role);
+}

@@ -165,3 +165,48 @@ test("only GET responses are filtered", () => {
 test("the prefix list and the tested list agree", () => {
   assert.equal(SCOPED_PREFIXES.length, 6);
 });
+
+// ── The write side ──────────────────────────────────────────────────────────
+// The response filter hides other people's customers on the way OUT. It cannot
+// stop a PUT on the way IN — owner: "他只是不能操作其他人的顾客."
+
+test("a scoped role cannot edit a customer it does not own", () => {
+  const src = readFileSync(resolve(process.cwd(), "src/api/routes/customers.ts"), "utf8");
+  assert.match(src, /const foreign = await denyForeignCustomerWrite\(c, id\);/);
+  assert.match(src, /if \(foreign\) return foreign;/);
+});
+
+test("the write guard refuses BEFORE the row is used", () => {
+  // Checking after the update is built would still leak existence via timing
+  // or a differing error, and risks the write landing.
+  const src = readFileSync(resolve(process.cwd(), "src/api/routes/customers.ts"), "utf8");
+  const put = src.slice(src.indexOf('app.put("/:id"'));
+  const guard = put.indexOf("denyForeignCustomerWrite");
+  const update = put.indexOf("UPDATE customers SET");
+  assert.ok(guard > 0 && update > guard, "guard must precede the UPDATE");
+});
+
+test("a scoped role cannot reassign the salesperson", () => {
+  // That is how an account would be handed away — or quietly taken.
+  const src = readFileSync(resolve(process.cwd(), "src/api/routes/customers.ts"), "utf8");
+  assert.match(src, /!canAssignSalesperson\(c\) \|\|/);
+});
+
+test("an unscoped role writes exactly as before", async () => {
+  const { denyForeignCustomerWrite } = await import("../src/api/lib/customer-scope.ts");
+  for (const role of ["OFFICE", "SUPER_ADMIN", "ADMIN"]) {
+    const c = { get: (k) => (k === "userRole" ? role : "u1"), var: { DB: null }, json: () => "DENIED" };
+    assert.equal(await denyForeignCustomerWrite(c, "c9"), null, `${role} must pass`);
+  }
+});
+
+test("a scoped role writing its OWN customer passes", async () => {
+  const { denyForeignCustomerWrite } = await import("../src/api/lib/customer-scope.ts");
+  const c = {
+    get: (k) => (k === "userRole" ? "SALES" : "u1"),
+    var: { DB: { prepare: () => ({ bind: () => ({ all: async () => ({ results: [{ id: "c1" }] }) }) }) } },
+    json: () => "DENIED",
+  };
+  assert.equal(await denyForeignCustomerWrite(c, "c1"), null);
+  assert.equal(await denyForeignCustomerWrite(c, "c9"), "DENIED");
+});

@@ -20,6 +20,7 @@
 // pages — no extra round trips.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import { requirePermission } from "../lib/rbac";
 import type { Env } from "../worker";
 import { resolveCustomerPricesAsOfBatch } from "./customer-products";
 import { resolveMaintenanceConfigAsOf } from "./maintenance-config";
@@ -79,6 +80,8 @@ function parseJson<T>(raw: string | null, fallback: T): T {
 
 // GET /api/customer-quotation?customerId=<id>&asOf=YYYY-MM-DD
 app.get("/", async (c) => {
+  const denied = await requirePermission(c, "quotations", "read");
+  if (denied) return denied;
   const customerId = (c.req.query("customerId") ?? "").trim();
   if (!customerId) {
     return c.json(

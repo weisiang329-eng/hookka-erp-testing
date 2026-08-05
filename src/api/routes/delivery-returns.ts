@@ -153,7 +153,7 @@ async function loadItems(
 
 // -- GET / — list ------------------------------------------------------------
 app.get("/", async (c) => {
-  const denied = await requirePermission(c, "delivery-orders", "read");
+  const denied = await requirePermission(c, "delivery-returns", "read");
   if (denied) return denied;
   await ensureDeliveryReturnTables(c.var.DB);
   const orgId = getOrgId(c);
@@ -176,7 +176,7 @@ app.get("/", async (c) => {
 
 // -- GET /:id — detail -------------------------------------------------------
 app.get("/:id", async (c) => {
-  const denied = await requirePermission(c, "delivery-orders", "read");
+  const denied = await requirePermission(c, "delivery-returns", "read");
   if (denied) return denied;
   await ensureDeliveryReturnTables(c.var.DB);
   const id = c.req.param("id");
@@ -200,7 +200,7 @@ app.get("/:id", async (c) => {
 // "要不然我怎麼知道要選那個"). This returns the same enriched lines the create
 // path persists, from the one loader, so the picker and the record agree.
 app.get("/do-items", async (c) => {
-  const denied = await requirePermission(c, "delivery-orders", "read");
+  const denied = await requirePermission(c, "delivery-returns", "read");
   if (denied) return denied;
   const doId = String(c.req.query("doId") ?? "").trim();
   if (!doId) return c.json({ success: false, error: "doId is required" }, 400);
@@ -214,7 +214,7 @@ app.get("/do-items", async (c) => {
 });
 
 app.post("/", async (c) => {
-  const denied = await requirePermission(c, "delivery-orders", "update");
+  const denied = await requirePermission(c, "delivery-returns", "update");
   if (denied) return denied;
   await ensureDeliveryReturnTables(c.var.DB);
   const orgId = getOrgId(c);
@@ -308,7 +308,7 @@ async function buildReturnToStockStatements(
 }
 
 app.post("/:id/return-to-stock", async (c) => {
-  const denied = await requirePermission(c, "delivery-orders", "update");
+  const denied = await requirePermission(c, "delivery-returns", "update");
   if (denied) return denied;
   await ensureDeliveryReturnTables(c.var.DB);
   const id = c.req.param("id");
@@ -355,7 +355,7 @@ app.post("/:id/return-to-stock", async (c) => {
 // existing (tested) service-case and credit-note flows; this records the
 // decision + any resulting doc id + advances the DR status.
 app.post("/:id/set-outcome", async (c) => {
-  const denied = await requirePermission(c, "delivery-orders", "update");
+  const denied = await requirePermission(c, "delivery-returns", "update");
   if (denied) return denied;
   await ensureDeliveryReturnTables(c.var.DB);
   const id = c.req.param("id");
@@ -412,7 +412,7 @@ app.post("/:id/set-outcome", async (c) => {
 
 // -- POST /:id/mark-redelivered ---------------------------------------------
 app.post("/:id/mark-redelivered", async (c) => {
-  const denied = await requirePermission(c, "delivery-orders", "update");
+  const denied = await requirePermission(c, "delivery-returns", "update");
   if (denied) return denied;
   await ensureDeliveryReturnTables(c.var.DB);
   const id = c.req.param("id");
@@ -428,7 +428,7 @@ app.post("/:id/mark-redelivered", async (c) => {
 
 // -- POST /:id/cancel --------------------------------------------------------
 app.post("/:id/cancel", async (c) => {
-  const denied = await requirePermission(c, "delivery-orders", "update");
+  const denied = await requirePermission(c, "delivery-returns", "update");
   if (denied) return denied;
   await ensureDeliveryReturnTables(c.var.DB);
   const id = c.req.param("id");

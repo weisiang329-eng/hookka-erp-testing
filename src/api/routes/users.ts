@@ -19,6 +19,7 @@ import { runSelfApply } from "../lib/self-apply";
 import type { Env } from "../worker";
 import { requirePermission, requireSuperAdmin } from "../lib/rbac";
 import { ensureOrgRoles } from "../lib/ensure-org-roles";
+import { ensureDerivedPermissions } from "../lib/ensure-derived-permissions";
 import { hashPassword } from "../lib/password";
 import { inviteEmailTemplate, sendMail } from "../lib/email";
 import { enqueueEmail } from "../lib/email-outbox";
@@ -231,6 +232,10 @@ app.get("/", async (c) => {
   // this is the page that assigns them, and migrations are inert on deploy.
   // Additive and idempotent — never resets a role an admin has since edited.
   await ensureOrgRoles(c.var.DB).catch(() => undefined);
+  // Sub-modules that used to share a parent's gate now have their own resource.
+  // The grants are DERIVED from that parent, so nobody loses access on the day
+  // of the change — see ensure-derived-permissions.ts.
+  await ensureDerivedPermissions(c.var.DB).catch(() => undefined);
   const res = await c.var.DB.prepare(
     "SELECT * FROM users ORDER BY createdAt DESC",
   ).all<UserRow>();

@@ -22,6 +22,7 @@
 // productCode and an enriched `departments` array with minutesPerUnit.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import { requirePermission } from "../lib/rbac";
 import type { Env } from "../worker";
 
 const app = new Hono<Env>();
@@ -179,6 +180,8 @@ function buildCalc(
 
 // GET /api/promise-date?productId=xxx
 app.get("/", async (c) => {
+  const denied = await requirePermission(c, "promise-date", "read");
+  if (denied) return denied;
   const productId = c.req.query("productId");
   const { products, dwts, depts, queue, stock } = await loadCoreState(c.var.DB);
 

@@ -22,7 +22,7 @@
 // ---------------------------------------------------------------------------
 import { Hono, type Context } from "hono";
 import type { Env } from "../worker";
-import { requireSuperAdmin } from "../lib/rbac";
+import { requireSuperAdmin, requirePermission } from "../lib/rbac";
 import { getOrgId, DEFAULT_ORG_ID } from "../lib/tenant";
 import { sendMail } from "../lib/email";
 import { validateMailAttachments } from "../lib/mail-attachments";
@@ -918,6 +918,8 @@ function dedupeLower(addrs: string[]): string[] {
 
 // GET /api/mail-center/threads?mailbox=&status=&q=
 app.get("/threads", async (c) => {
+  const denied = await requirePermission(c, "mail-center", "read");
+  if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
   const scope = await getMailScope(c, orgId);
@@ -982,6 +984,8 @@ app.get("/threads", async (c) => {
 
 // GET /api/mail-center/threads/:id — thread + its messages (marks read).
 app.get("/threads/:id", async (c) => {
+  const denied = await requirePermission(c, "mail-center", "read");
+  if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
   const id = c.req.param("id");
@@ -1123,6 +1127,8 @@ const OUTBOX_STATUSES = ["PENDING", "RETRYING", "SENDING", "SENT", "FAILED"];
 // body comes from GET /outbox/:id. Also returns a status roll-up over the WHOLE
 // org log so the panel header can flag failures.
 app.get("/outbox", async (c) => {
+  const denied = await requirePermission(c, "mail-center", "read");
+  if (denied) return denied;
   const orgId = getOrgId(c);
   const scope = await getMailScope(c, orgId);
   const empty = { rows: [], counts: { sent: 0, failed: 0, pending: 0 }, hasMore: false };
@@ -1215,6 +1221,8 @@ app.get("/outbox", async (c) => {
 // GET /api/mail-center/outbox/:id — one auto-sent email incl. the full body
 // (HTML + text) for the reading pane. Attachment NAMES only (no base64 blobs).
 app.get("/outbox/:id", async (c) => {
+  const denied = await requirePermission(c, "mail-center", "read");
+  if (denied) return denied;
   const orgId = getOrgId(c);
   const scope = await getMailScope(c, orgId);
   if (!scope.isAdmin && scope.addresses.length === 0) {
@@ -1268,6 +1276,8 @@ app.get("/outbox/:id", async (c) => {
 // returns names only; this endpoint returns the actual bytes. Scope follows
 // the same admin/own-mailbox gate as the rest of the outbox views.
 app.get("/outbox/:id/attachments/:idx/download", async (c) => {
+  const denied = await requirePermission(c, "mail-center", "read");
+  if (denied) return denied;
   const orgId = getOrgId(c);
   const scope = await getMailScope(c, orgId);
   if (!scope.isAdmin && scope.addresses.length === 0) {
@@ -1339,6 +1349,8 @@ app.get("/outbox/:id/attachments/:idx/download", async (c) => {
 // non-admin gets exactly the rows whose lower(address) is in scope.addresses
 // (own+granted for 'personal', +dept for 'department', all for 'company').
 app.get("/addresses", async (c) => {
+  const denied = await requirePermission(c, "mail-center", "read");
+  if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
   // no-store — the User Management matrix refetches this right after creating
@@ -1415,6 +1427,8 @@ async function canManageLabels(
 // GET /api/mail-center/labels — the catalogue (name + colour), for the sidebar
 // dots and the label menu. Open to any authenticated user in the org.
 app.get("/labels", async (c) => {
+  const denied = await requirePermission(c, "mail-center", "read");
+  if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
   c.header("Cache-Control", "no-store");
@@ -1430,6 +1444,8 @@ app.get("/labels", async (c) => {
 // unique per org (case-insensitive via the lowercased unique index); a repeat
 // returns the existing row as a 200 so the picker is idempotent.
 app.post("/labels", async (c) => {
+  const denied = await requirePermission(c, "mail-center", "create");
+  if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
   if (!(await canManageLabels(c, orgId))) {
@@ -1483,6 +1499,8 @@ app.post("/labels", async (c) => {
 // rename cascades to every thread carrying the OLD name so the per-thread JSON
 // label arrays stay in sync with the catalogue.
 app.patch("/labels/:id", async (c) => {
+  const denied = await requirePermission(c, "mail-center", "update");
+  if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
   if (!(await canManageLabels(c, orgId))) {
@@ -1552,6 +1570,8 @@ app.patch("/labels/:id", async (c) => {
 // from every thread that carried it (keeps the sidebar list and thread chips
 // consistent — a deleted label shouldn't linger on threads).
 app.delete("/labels/:id", async (c) => {
+  const denied = await requirePermission(c, "mail-center", "delete");
+  if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
   if (!(await canManageLabels(c, orgId))) {
@@ -2018,6 +2038,8 @@ const DEFAULT_REPLY_FROM = "Hookka <support@hookka.com>";
 // thread is still updated correctly; cross-client threading headers are a
 // follow-up once the sender helper grows a headers option.
 app.post("/threads/:id/reply", async (c) => {
+  const denied = await requirePermission(c, "mail-center", "create");
+  if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
   const id = c.req.param("id");
@@ -2197,6 +2219,8 @@ app.post("/threads/:id/reply", async (c) => {
 // Per-user scope: a non-admin may only send FROM an @hookka.com address that
 // is assigned/granted to them (getMailScope). SUPER_ADMIN may send from any.
 app.post("/compose", async (c) => {
+  const denied = await requirePermission(c, "mail-center", "create");
+  if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
   const scope = await getMailScope(c, orgId);
@@ -2345,6 +2369,8 @@ app.post("/compose", async (c) => {
 // threads (star/label/archive/trash their own mail); SUPER_ADMIN keeps all.
 // The UPDATE is built dynamically from whichever fields the body carries.
 app.patch("/threads/:id", async (c) => {
+  const denied = await requirePermission(c, "mail-center", "update");
+  if (denied) return denied;
   await ensureMailSchema(c.var.DB);
   const orgId = getOrgId(c);
   const id = c.req.param("id");

@@ -71,7 +71,7 @@ test("routes: list / source-pi / detail / create / delete, RBAC-gated", () => {
   assert.match(f, /app\.get\("\/:id"/);
   assert.match(f, /app\.post\("\/"/);
   assert.match(f, /app\.delete\("\/:id"/);
-  assert.match(f, /requirePermission\(c, "purchase-invoices", "create"\)/);
+  assert.match(f, /requirePermission\(c, "purchase-returns", "create"\)/);
   // DELETE only while OPEN (contract kept for slices 2/3).
   assert.match(f, /only OPEN returns can be deleted/);
   // Create requires at least one line with qty > 0.
@@ -127,7 +127,7 @@ test("confirm route fires the reversal, RBAC-gated; UI has the confirm action", 
   const f = flat(ROUTES);
   assert.match(f, /app\.post\("\/:id\/confirm"/);
   assert.match(f, /applyPurchaseReturnStockOut\(c\.var\.DB, id, getOrgId\(c\)\)/);
-  assert.match(f, /app\.post\("\/:id\/confirm"[\s\S]*?requirePermission\(c, "purchase-invoices", "update"\)/);
+  assert.match(f, /app\.post\("\/:id\/confirm"[\s\S]*?requirePermission\(c, "purchase-returns", "update"\)/);
   const page = flat(PAGE);
   assert.match(page, /\/api\/purchase-returns\/\$\{r\.id\}\/confirm/);
   assert.match(page, /Confirm \(remove stock\)/);
@@ -217,7 +217,7 @@ test("issue-DN route + UI action exist, RBAC-gated", () => {
   const f = flat(ROUTES);
   assert.match(f, /app\.post\("\/:id\/issue-dn"/);
   assert.match(f, /issuePurchaseReturnDebitNote\(c\.var\.DB, id, getOrgId\(c\), userId\)/);
-  assert.match(f, /app\.post\("\/:id\/issue-dn"[\s\S]*?requirePermission\(c, "purchase-invoices", "update"\)/);
+  assert.match(f, /app\.post\("\/:id\/issue-dn"[\s\S]*?requirePermission\(c, "purchase-returns", "update"\)/);
   const page = flat(PAGE);
   assert.match(page, /\/api\/purchase-returns\/\$\{r\.id\}\/issue-dn/);
   assert.match(page, /Issue Debit Note/);

@@ -22,6 +22,10 @@ import { resolve } from "node:path";
 import { resourceForNav, hiddenNavPrefixes, homeForPermissions, NAV_RESOURCE } from "../src/api/lib/nav-permissions.ts";
 import { permissionsForRole, ALL_RESOURCES } from "../src/api/lib/role-policy.ts";
 
+const allows = (set, resource, action) =>
+  set.has(`${resource}:${action}`) || set.has(`${resource}:*`) ||
+  set.has(`*:${action}`) || set.has(`*:*`);
+
 const read = (p) => readFileSync(resolve(process.cwd(), p), "utf8");
 const SIDEBAR = read("src/components/layout/sidebar.tsx");
 const LINKS = [...new Set(
@@ -145,5 +149,23 @@ test("every mapped resource is a real one", () => {
   const known = new Set(ALL_RESOURCES);
   for (const [prefix, res] of Object.entries(NAV_RESOURCE)) {
     assert.ok(known.has(res), `${prefix} maps to "${res}", which is not a known resource`);
+  }
+});
+
+
+test("a denied route never redirects into another denied route", () => {
+  // <RequirePermission> sends a denied user to their home. If that home were
+  // itself guarded against them the browser would bounce forever — which is
+  // exactly what /dashboard as the default became once it was restricted to
+  // Management and Super Admin, and then guarded.
+  for (const role of ["SALES", "OFFICE", "QA", "HR", "R_AND_D"]) {
+    const perms = permissionsForRole(role);
+    const home = homeForPermissions(perms, role);
+    const guard = resourceForNav(home);
+    if (!guard) continue; // unguarded page — always reachable
+    assert.ok(
+      allows(perms, guard, "read"),
+      `${role} is redirected to ${home}, which guards on ${guard}:read that ${role} lacks — redirect loop`,
+    );
   }
 });

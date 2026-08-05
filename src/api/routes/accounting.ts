@@ -9698,7 +9698,11 @@ app.get("/dashboard", async (c) => {
   // --- Cash flow: THE Cash Flow report's own engine, read per month --------
   // One call per financial year touched by the window (its columns span the
   // FY), so every figure on the card is the same number the report prints.
-  const cfByMonth = new Map<string, { operating: number; investing: number; financing: number; net: number }>();
+  type CfLine = { label: string; section: string; value: number };
+  const cfByMonth = new Map<
+    string,
+    { operating: number; investing: number; financing: number; net: number; inflow: number; outflow: number; lines: CfLine[] }
+  >();
   {
     const fyKeys = new Map<string, string>(); // fy label → an anchor month
     const fyeM = await getFyeMonth(db);
@@ -9722,7 +9726,15 @@ app.get("/dashboard", async (c) => {
         const investing = rowVal(rowsCf, i, (r) => r.kind === "subtotal" && r.section === "CAPEX");
         const financing = rowVal(rowsCf, i, (r) => r.kind === "subtotal" && (r.section === "LOAN" || r.section === "DEPOSIT" || r.section === "FINANCE_COST"));
         const net = rowVal(rowsCf, i, (r) => r.kind === "total" && /Cash Surplus/i.test(r.label));
-        cfByMonth.set(col.key, { operating, investing, financing, net });
+        // Owner 2026-07-30: money IN vs money OUT, and the account-level
+        // detail behind them. The statement's `line` rows already carry the
+        // display sign (inflow +, outflow −), so the split is a sign filter.
+        const detail = rowsCf
+          .filter((r) => r.kind === "line" && (Number(r.values[i]) || 0) !== 0)
+          .map((r) => ({ label: r.label, section: r.section ?? "", value: Number(r.values[i]) || 0 }));
+        const inflow = detail.filter((l) => l.value > 0).reduce((s, l) => s + l.value, 0);
+        const outflow = detail.filter((l) => l.value < 0).reduce((s, l) => s + l.value, 0);
+        cfByMonth.set(col.key, { operating, investing, financing, net, inflow, outflow, lines: detail });
       });
     }
   }
@@ -9741,9 +9753,21 @@ app.get("/dashboard", async (c) => {
     return Math.round((salesSen * (Number(v?.bp) || 0)) / 10000);
   };
   const fcByMonth = new Map<string, PnlSlice>();
+  // Forecast per MATERIAL CATEGORY (the Forecast page keys those rows
+  // "cat:FABRIC" after folding the sofa/bedframe variants together — the same
+  // category names this dashboard's cost-structure card uses), so each
+  // material can show its target beside the actual.
+  const fcCatByMonth = new Map<string, Map<string, number>>();
   for (const [ym, m] of Object.entries(fcMonths)) {
     const slice = zero();
     slice.sales = Math.max(0, Math.round(Number(m.salesSen) || 0));
+    const cats = new Map<string, number>();
+    for (const [code, v] of Object.entries(m.pct ?? {})) {
+      if (!code.startsWith("cat:")) continue;
+      const name = code.slice(4);
+      cats.set(name, (cats.get(name) ?? 0) + fcLineAmt(m, v));
+    }
+    fcCatByMonth.set(ym, cats);
     for (const [code, v] of Object.entries(m.pct ?? {})) {
       const amt = fcLineAmt(m, v);
       const meta = code.startsWith("cat:") ? { type: "COST" } : coaDash.get(code);
@@ -9781,24 +9805,38 @@ app.get("/dashboard", async (c) => {
     const actual = sumSlices(pnlByMonth, b.months);
     const forecast = sumSlices(fcByMonth, b.months);
     const bs = bsByBucket.get(b.key) ?? null;
+    const cfLines = new Map<string, { label: string; section: string; value: number }>();
     const cf = b.months.reduce(
       (acc, ym) => {
         const m = cfByMonth.get(ym);
-        if (m) { acc.operating += m.operating; acc.investing += m.investing; acc.financing += m.financing; acc.net += m.net; }
+        if (m) {
+          acc.operating += m.operating; acc.investing += m.investing; acc.financing += m.financing;
+          acc.net += m.net; acc.inflow += m.inflow; acc.outflow += m.outflow;
+          for (const l of m.lines) {
+            const k = `${l.section}||${l.label}`;
+            const cur = cfLines.get(k) ?? { label: l.label, section: l.section, value: 0 };
+            cur.value += l.value;
+            cfLines.set(k, cur);
+          }
+        }
         return acc;
       },
-      { operating: 0, investing: 0, financing: 0, net: 0 },
+      { operating: 0, investing: 0, financing: 0, net: 0, inflow: 0, outflow: 0 },
     );
     // Cost structure for the bucket: categories summed over its months, plus
     // the bucket's own sales split (shared materials are apportioned on the
     // client with this ratio, so the same payload serves All/Bedframe/Sofa).
     const csCats = new Map<string, CsCat & { name: string }>();
+    const csForecast = new Map<string, number>();
     let bedSales = 0, sofaSales = 0;
     for (const ym of b.months) {
       for (const [k, v] of csByMonth.get(ym) ?? []) {
         const cur = csCats.get(k) ?? { name: v.name, line: v.line, spend: 0, purchase: 0, closing: 0 };
         cur.spend += v.spend; cur.purchase += v.purchase; cur.closing += v.closing;
         csCats.set(k, cur);
+      }
+      for (const [name, amt] of fcCatByMonth.get(ym) ?? []) {
+        csForecast.set(name, (csForecast.get(name) ?? 0) + amt);
       }
       const s = salesSplitByMonth.get(ym);
       if (s) { bedSales += s.bedframe; sofaSales += s.sofa; }
@@ -9811,11 +9849,18 @@ app.get("/dashboard", async (c) => {
       forecast,
       costStructure: {
         salesSplit: { bedframe: bedSales, sofa: sofaSales },
+        // Target spend per category from the Forecast P&L (blank when the
+        // owner hasn't keyed that month).
+        forecast: Object.fromEntries(csForecast),
         categories: [...csCats.values()]
           .filter((v) => v.spend !== 0 || v.purchase !== 0 || v.closing !== 0)
           .sort((x, y) => x.name.localeCompare(y.name) || x.line.localeCompare(y.line)),
       },
-      cashFlow: { ...cf, freeCashFlow: cf.operating }, // owner: treat as no fixed assets
+      cashFlow: {
+        ...cf,
+        freeCashFlow: cf.operating, // owner: treat as no fixed assets
+        lines: [...cfLines.values()].filter((l) => l.value !== 0).sort((a, b) => a.section.localeCompare(b.section) || b.value - a.value),
+      },
       balanceSheet: bs,
       ratios: {
         grossMarginPct: actual ? pct(actual.gross, actual.sales) : null,

@@ -55,8 +55,16 @@ type Row = {
   partial: boolean;
   actual: Slice | null;
   forecast: Slice | null;
-  costStructure?: { salesSplit: { bedframe: number; sofa: number }; categories: CsCat[] };
-  cashFlow: { operating: number; investing: number; financing: number; net: number; freeCashFlow: number };
+  costStructure?: {
+    salesSplit: { bedframe: number; sofa: number };
+    forecast?: Record<string, number>;
+    categories: CsCat[];
+  };
+  cashFlow: {
+    operating: number; investing: number; financing: number; net: number; freeCashFlow: number;
+    inflow?: number; outflow?: number;
+    lines?: { label: string; section: string; value: number }[];
+  };
   balanceSheet: { assets: number; liabilities: number; equity: number; currentAssets: number; currentLiabilities: number; inventory: number } | null;
   ratios: {
     grossMarginPct: number | null; netMarginPct: number | null;
@@ -185,6 +193,7 @@ export default function FinanceDashboardPage() {
   const [rows, setRows] = useState<Row[] | null>(null);
   const [plTab, setPlTab] = useState<keyof Slice>("sales");
   const [cfTab, setCfTab] = useState<"operating" | "investing" | "financing" | "freeCashFlow">("operating");
+  const [cfView, setCfView] = useState<"summary" | "detail">("summary");
   const [ratioTab, setRatioTab] = useState<
     "grossMarginPct" | "netMarginPct" | "currentRatio" | "quickRatio" | "roePct" | "roaPct"
   >("grossMarginPct");
@@ -232,9 +241,31 @@ export default function FinanceDashboardPage() {
   );
 
   const cfData = useMemo(
-    () => (rows ?? []).map((r) => ({ label: r.label + (r.partial ? " *" : ""), value: r.cashFlow?.[cfTab] ?? null, net: r.cashFlow?.net ?? null })),
+    () =>
+      (rows ?? []).map((r) => ({
+        label: r.label + (r.partial ? " *" : ""),
+        value: r.cashFlow?.[cfTab] ?? null,
+        net: r.cashFlow?.net ?? null,
+        inflow: r.cashFlow?.inflow ?? null,
+        outflow: r.cashFlow?.outflow ?? null,
+      })),
     [rows, cfTab],
   );
+  // Detail view: every account line the Cash Flow statement prints, one row
+  // per account across the periods (owner 2026-07-30: 「每个科目一行先」).
+  const cfDetailRows = useMemo(() => {
+    const keys = new Map<string, { label: string; section: string }>();
+    for (const r of rows ?? []) {
+      for (const l of r.cashFlow?.lines ?? []) keys.set(`${l.section}||${l.label}`, { label: l.label, section: l.section });
+    }
+    return [...keys.entries()]
+      .sort((a, b) => a[1].section.localeCompare(b[1].section) || a[1].label.localeCompare(b[1].label))
+      .map(([k, meta]) => ({
+        key: k,
+        ...meta,
+        values: (rows ?? []).map((r) => (r.cashFlow?.lines ?? []).find((l) => `${l.section}||${l.label}` === k)?.value ?? 0),
+      }));
+  }, [rows]);
 
   const bsData = useMemo(
     () =>
@@ -287,15 +318,30 @@ export default function FinanceDashboardPage() {
   // Chart plots the amounts; the table under it carries the amount AND its
   // share of sales side by side (owner 2026-07-29: 「把 percentage 和 RM 做在
   // 一起…% 在 spend 旁边」), so the toggle is gone.
+  // Forecast for a category in the current line view — the target is keyed
+  // whole-company, so a line view pro-rates it by that line's sales share.
+  const csForecastAmt = (r: Row, cat: string): number | null => {
+    const f = r.costStructure?.forecast?.[cat];
+    if (f === undefined) return null;
+    if (csLine === "all") return f;
+    const s = r.costStructure!.salesSplit;
+    const tot = s.bedframe + s.sofa;
+    if (tot <= 0) return null;
+    return Math.round(f * ((csLine === "bedframe" ? s.bedframe : s.sofa) / tot));
+  };
   const csData = useMemo(
     () =>
       (rows ?? []).map((r) => {
         const point: Record<string, number | string | null> = { label: r.label + (r.partial ? " *" : "") };
         const sales = csLineSales(r);
+        point.__sales__ = sales;
         for (const cat of csCats) {
           const amt = csAmount(r, cat);
           point[cat] = amt;
           point[`__pct__${cat}`] = sales > 0 ? Math.round((amt / sales) * 10000) / 100 : null;
+          const fc = csMeasure === "spend" ? csForecastAmt(r, cat) : null; // targets are spend-side
+          point[`__fc__${cat}`] = fc;
+          point[`__fcpct__${cat}`] = fc !== null && sales > 0 ? Math.round((fc / sales) * 10000) / 100 : null;
         }
         return point;
       }),
@@ -310,10 +356,13 @@ export default function FinanceDashboardPage() {
       (rows ?? []).map((r) => {
         const amt = csAmount(r, csFocusEff);
         const sales = csLineSales(r);
+        const fc = csMeasure === "spend" ? csForecastAmt(r, csFocusEff) : null;
         return {
           label: r.label + (r.partial ? " *" : ""),
           amount: amt,
           pct: sales > 0 ? Math.round((amt / sales) * 10000) / 100 : null,
+          forecast: fc,
+          forecastPct: fc !== null && sales > 0 ? Math.round((fc / sales) * 10000) / 100 : null,
         };
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -378,6 +427,20 @@ export default function FinanceDashboardPage() {
                   <tr><td className={`${td} text-left font-medium text-[#6B5C32]`}>% of revenue</td>{plData.map((d) => <td key={d.label} className={`${td} text-[#6B5C32]`}>{d.pctOfRevenue === null ? "-" : `${d.pctOfRevenue.toFixed(2)}%`}</td>)}</tr>
                   <tr><td className={`${td} text-left font-medium text-[#9A3A2D]`}>Forecast</td>{plData.map((d) => <td key={d.label} className={`${td} text-[#9A3A2D]`}>{rm(d.forecast as number)}</td>)}</tr>
                   <tr><td className={`${td} text-left font-medium text-[#9A3A2D]`}>Forecast % of revenue</td>{plData.map((d) => <td key={d.label} className={`${td} text-[#9A3A2D]`}>{d.forecastPctOfRevenue === null ? "-" : `${d.forecastPctOfRevenue.toFixed(2)}%`}</td>)}</tr>
+                  {/* Variance row (owner 2026-07-30): money gap + points gap. */}
+                  <tr className="bg-[#F7F4EF]">
+                    <td className={`${td} text-left font-semibold`}>vs Forecast</td>
+                    {plData.map((d) => {
+                      const gap = d.actual !== null && d.forecast !== null ? (d.actual as number) - (d.forecast as number) : null;
+                      const pts = d.pctOfRevenue !== null && d.forecastPctOfRevenue !== null ? d.pctOfRevenue - d.forecastPctOfRevenue : null;
+                      return (
+                        <td key={d.label} className={`${td} font-semibold ${(gap ?? 0) < 0 ? "text-[#9A3A2D]" : "text-[#27500A]"}`}>
+                          {gap === null ? "-" : `${gap > 0 ? "+" : ""}${rm(gap)}`}
+                          {pts !== null && <span className="ml-1 text-[10px]">{`${pts > 0 ? "+" : ""}${pts.toFixed(2)}pt`}</span>}
+                        </td>
+                      );
+                    })}
+                  </tr>
                   <tr><td className={`${td} text-left font-medium`}>vs last period</td>{plData.map((d) => <td key={d.label} className={`${td} ${(d.mom ?? 0) < 0 ? "text-[#9A3A2D]" : "text-[#27500A]"}`}>{d.mom === null ? "-" : `${d.mom > 0 ? "+" : ""}${d.mom.toFixed(1)}%`}</td>)}</tr>
                 </tbody>
               </table>
@@ -426,6 +489,13 @@ export default function FinanceDashboardPage() {
                   <table className="w-full">
                     <tbody>
                       {periodHead(csData.map((d) => String(d.label)))}
+                      {/* The base every percentage divides by (owner 2026-07-30). */}
+                      <tr className="border-b border-[#E2DDD8] bg-[#F6F1E7]">
+                        <td className={`${td} text-left font-semibold`}>REVENUE</td>
+                        {csData.map((d) => (
+                          <td key={String(d.label)} className={`${td} font-semibold`}>{rm(d.__sales__ as number)}</td>
+                        ))}
+                      </tr>
                       {csCats.map((cat) => (
                         <tr key={cat} className="border-b border-[#F0ECE9]">
                           <td className={`${td} text-left font-medium`}>
@@ -434,6 +504,7 @@ export default function FinanceDashboardPage() {
                           {csData.map((d) => {
                             const amt = d[cat] as number | null;
                             const p = d[`__pct__${cat}`] as number | null;
+                            const fp = d[`__fcpct__${cat}`] as number | null;
                             return (
                               <td key={String(d.label)} className={td}>
                                 {amt === null || amt === 0 ? (
@@ -442,6 +513,13 @@ export default function FinanceDashboardPage() {
                                   <>
                                     {rm(amt)}
                                     <span className="ml-1.5 text-[10px] text-[#9A3A2D]">{p === null ? "" : `${p.toFixed(2)}%`}</span>
+                                    {/* Target % from the Forecast P&L; green when
+                                        actual is at or under it, rust when over. */}
+                                    {fp !== null && (
+                                      <span className={`ml-1 text-[10px] ${p !== null && p > fp ? "text-[#9A3A2D]" : "text-[#27500A]"}`}>
+                                        (fc {fp.toFixed(2)}%)
+                                      </span>
+                                    )}
                                   </>
                                 )}
                               </td>
@@ -464,13 +542,15 @@ export default function FinanceDashboardPage() {
               onTab={(k) => setCsFocus(k)}
               data={csTrend}
               bars={[{ key: "amount", name: csMeasure === "spend" ? "Spend" : csMeasure === "purchase" ? "Purchase" : "Closing stock", color: GOLD }]}
-              line={{ key: "pct", name: "% of sales", color: RUST, axis: "right" }}
+              line={{ key: "forecast", name: "Forecast", color: RUST, dashed: true }}
               footer={
                 <table className="w-full">
                   <tbody>
                     {periodHead(csTrend.map((d) => d.label))}
                     <tr><td className={`${td} text-left font-medium`}>Amount</td>{csTrend.map((d) => <td key={d.label} className={td}>{rm(d.amount)}</td>)}</tr>
-                    <tr><td className={`${td} text-left font-medium text-[#9A3A2D]`}>% of sales</td>{csTrend.map((d) => <td key={d.label} className={`${td} text-[#9A3A2D]`}>{d.pct === null ? "-" : `${d.pct.toFixed(2)}%`}</td>)}</tr>
+                    <tr><td className={`${td} text-left font-medium text-[#6B5C32]`}>% of sales</td>{csTrend.map((d) => <td key={d.label} className={`${td} text-[#6B5C32]`}>{d.pct === null ? "-" : `${d.pct.toFixed(2)}%`}</td>)}</tr>
+                    <tr><td className={`${td} text-left font-medium text-[#9A3A2D]`}>Forecast</td>{csTrend.map((d) => <td key={d.label} className={`${td} text-[#9A3A2D]`}>{d.forecast === null ? "-" : rm(d.forecast)}</td>)}</tr>
+                    <tr><td className={`${td} text-left font-medium text-[#9A3A2D]`}>Forecast % of sales</td>{csTrend.map((d) => <td key={d.label} className={`${td} text-[#9A3A2D]`}>{d.forecastPct === null ? "-" : `${d.forecastPct.toFixed(2)}%`}</td>)}</tr>
                   </tbody>
                 </table>
               }
@@ -488,16 +568,39 @@ export default function FinanceDashboardPage() {
             active={cfTab}
             onTab={(k) => setCfTab(k as typeof cfTab)}
             data={cfData}
-            bars={[{ key: "value", name: "Amount", color: TEAL }]}
-            line={{ key: "net", name: "Net change", color: RUST }}
+            bars={[{ key: "inflow", name: "Money in", color: "#4F7C3A" }, { key: "outflow", name: "Money out", color: RUST }]}
+            line={{ key: "net", name: "Net change", color: TEAL }}
             footer={
-              <table className="w-full">
-                <tbody>
-                  {periodHead(cfData.map((d) => d.label))}
-                  <tr><td className={`${td} text-left font-medium`}>Amount</td>{cfData.map((d) => <td key={d.label} className={`${td} ${(d.value as number) < 0 ? "text-[#9A3A2D]" : ""}`}>{rm(d.value as number)}</td>)}</tr>
-                  <tr><td className={`${td} text-left font-medium`}>Net change</td>{cfData.map((d) => <td key={d.label} className={`${td} ${(d.net as number) < 0 ? "text-[#9A3A2D]" : ""}`}>{rm(d.net as number)}</td>)}</tr>
-                </tbody>
-              </table>
+              <>
+                <div className="mb-2 flex items-center gap-2">
+                  {([["summary", "Summary"], ["detail", "Detail"]] as const).map(([k, l]) => (
+                    <button key={k} onClick={() => setCfView(k)}
+                      className={`rounded-md border px-2.5 py-1 text-xs cursor-pointer ${cfView === k ? "bg-[#3E6570] text-white border-[#3E6570]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>{l}</button>
+                  ))}
+                  <span className="text-[11px] text-[#9CA3AF]">Detail lists every account that moved cash.</span>
+                </div>
+                <table className="w-full">
+                  <tbody>
+                    {periodHead(cfData.map((d) => d.label))}
+                    <tr><td className={`${td} text-left font-medium text-[#4F7C3A]`}>Money in</td>{cfData.map((d) => <td key={d.label} className={`${td} text-[#4F7C3A]`}>{rm(d.inflow as number)}</td>)}</tr>
+                    <tr><td className={`${td} text-left font-medium text-[#9A3A2D]`}>Money out</td>{cfData.map((d) => <td key={d.label} className={`${td} text-[#9A3A2D]`}>{rm(d.outflow as number)}</td>)}</tr>
+                    <tr><td className={`${td} text-left font-medium`}>{cfTab === "freeCashFlow" ? "Free cash flow" : cfTab[0].toUpperCase() + cfTab.slice(1)}</td>{cfData.map((d) => <td key={d.label} className={`${td} ${(d.value as number) < 0 ? "text-[#9A3A2D]" : ""}`}>{rm(d.value as number)}</td>)}</tr>
+                    <tr className="bg-[#F7F4EF]"><td className={`${td} text-left font-semibold`}>Net change</td>{cfData.map((d) => <td key={d.label} className={`${td} font-semibold ${(d.net as number) < 0 ? "text-[#9A3A2D]" : ""}`}>{rm(d.net as number)}</td>)}</tr>
+                    {cfView === "detail" &&
+                      cfDetailRows.map((l) => (
+                        <tr key={l.key} className="border-b border-[#F0ECE9]">
+                          <td className={`${td} text-left pl-5`}>
+                            <span className="text-[10px] text-[#9CA3AF] mr-1.5">{l.section}</span>
+                            {l.label}
+                          </td>
+                          {l.values.map((v, i) => (
+                            <td key={i} className={`${td} ${v < 0 ? "text-[#9A3A2D]" : v > 0 ? "text-[#4F7C3A]" : ""}`}>{v === 0 ? "-" : rm(v)}</td>
+                          ))}
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </>
             }
           />
 

@@ -22,6 +22,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { customerScopeSql } from "../lib/customer-scope";
 
 const app = new Hono<Env>();
 
@@ -536,6 +537,12 @@ app.get("/", async (c) => {
   if (sourceType) {
     clauses.push("sourceType = ?");
     params.push(sourceType);
+  }
+  // Owner 2026-08-05: "service case 和 Service Order，那就是看他自己的客户的."
+  const scope = await customerScopeSql(c, "customerId");
+  if (scope.clause) {
+    clauses.push(scope.clause);
+    params.push(...scope.binds);
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 

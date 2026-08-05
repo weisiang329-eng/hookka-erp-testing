@@ -14,6 +14,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { customerScopeSql } from "../lib/customer-scope";
 import { getOrgId } from "../lib/tenant";
 import { reverseFGForDeliveryReturn } from "../lib/do-cost-cascade";
 import {
@@ -157,12 +158,16 @@ app.get("/", async (c) => {
   if (denied) return denied;
   await ensureDeliveryReturnTables(c.var.DB);
   const orgId = getOrgId(c);
+  // A delivery return narrows to its customer like the delivery order it
+  // reverses (owner 2026-08-05).
+  const scope = await customerScopeSql(c, "customer_id");
+  const scopeClause = scope.clause ? ` AND ${scope.clause}` : "";
   const res = await c.var.DB
     .prepare(
       `SELECT ${HEADER_COLS} FROM delivery_returns
-        WHERE org_id = ? ORDER BY created_at DESC LIMIT 500`,
+        WHERE org_id = ?${scopeClause} ORDER BY created_at DESC LIMIT 500`,
     )
-    .bind(orgId)
+    .bind(orgId, ...scope.binds)
     .all<ReturnHeaderRow>();
   const headers = res.results ?? [];
   // Attach a lightweight item summary per row (count + first problem).

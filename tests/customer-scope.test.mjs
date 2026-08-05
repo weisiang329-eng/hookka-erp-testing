@@ -180,7 +180,20 @@ test("only GET responses are filtered", () => {
 });
 
 test("the prefix list and the tested list agree", () => {
-  assert.equal(SCOPED_PREFIXES.length, 6);
+  // Asserted by CONTENT, not by count. A bare length made adding production
+  // orders / service orders / service cases (owner 2026-08-05) look like a
+  // regression while saying nothing about which modules are actually covered.
+  assert.deepEqual([...SCOPED_PREFIXES].sort(), [
+    "/api/consignments",
+    "/api/customers",
+    "/api/delivery-orders",
+    "/api/delivery-returns",
+    "/api/invoices",
+    "/api/production-orders",
+    "/api/sales-orders",
+    "/api/service-cases",
+    "/api/service-orders",
+  ]);
 });
 
 // ── The write side ──────────────────────────────────────────────────────────

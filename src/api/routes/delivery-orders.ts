@@ -27,6 +27,7 @@ import {
   priceForItem,
 } from "../lib/do-value";
 import { requirePermission } from "../lib/rbac";
+import { customerScopeSql } from "../lib/customer-scope";
 import { getOrgId } from "../lib/tenant";
 import { emitAudit } from "../lib/audit";
 import { checkDeliveryOrderLocked, lockedResponse } from "../lib/lock-helpers";
@@ -146,15 +147,30 @@ app.get("/", async (c) => {
   const limitParam = c.req.query("limit");
   const paginate = pageParam !== undefined || limitParam !== undefined;
 
+  // Owner 2026-08-05: "如果是 DO，他会看到那一整张单的东西。所以基本上只要那张单
+  // 上有他的顾客，他就可以直接看完整张 DO."
+  //
+  // So the unit of visibility is the DOCUMENT, not the line. Narrow the ORDERS
+  // and then keep every line of the orders that survive — filtering lines would
+  // hand someone half a delivery note and a total that does not add up.
+  const doScope = await customerScopeSql(c, "customerId");
+  const doClause = doScope.clause ? ` AND ${doScope.clause}` : "";
+
   if (!paginate) {
     const [orders, items, valueMap] = await Promise.all([
       db
-        .prepare("SELECT * FROM delivery_orders WHERE orgId = ? ORDER BY created_at DESC")
-        .bind(orgId)
+        .prepare(`SELECT * FROM delivery_orders WHERE orgId = ?${doClause} ORDER BY created_at DESC`)
+        .bind(orgId, ...doScope.binds)
         .all<DeliveryOrderRow>(),
       db
-        .prepare("SELECT * FROM delivery_order_items WHERE orgId = ?")
-        .bind(orgId)
+        .prepare(
+          `SELECT * FROM delivery_order_items WHERE orgId = ?${
+            doScope.clause
+              ? ` AND deliveryOrderId IN (SELECT id FROM delivery_orders WHERE orgId = ? AND ${doScope.clause})`
+              : ""
+          }`,
+        )
+        .bind(orgId, ...(doScope.clause ? [orgId, ...doScope.binds] : []))
         .all<DeliveryOrderItemRow>(),
       loadDoValueMapCached(db, orgId, c),
     ]);
@@ -283,9 +299,14 @@ app.get("/stats", async (c) => {
 
   const orgId = getOrgId(c);
 
+  // The snapshot is keyed by org, so a scoped caller must not read it (or the
+  // tab totals would be everybody's) and must not write into it. Same reason
+  // the Sales Orders cards were showing 1,229 over an empty grid.
+  const statsScope = await customerScopeSql(c, "customerId");
+
   // PR 3 (2026-05-20) — cache-aside snapshot. See lib/delivery-snapshot.ts
   // for the architecture. Mirror of the pattern in routes/dashboard-overview.ts.
-  {
+  if (!statsScope.clause) {
     const { readDeliveryStatsSnapshot, getDeliveryStatsSignature, isSnapshotFresh } =
       await import("../lib/delivery-snapshot");
     const [snap, sig] = await Promise.all([
@@ -307,9 +328,11 @@ app.get("/stats", async (c) => {
   // row-per-DO read (exact, no item-join multiplication).
   const [statusRes, valueMap] = await Promise.all([
     c.var.DB.prepare(
-      "SELECT id, status FROM delivery_orders WHERE orgId = ?",
+      `SELECT id, status FROM delivery_orders WHERE orgId = ?${
+        statsScope.clause ? ` AND ${statsScope.clause}` : ""
+      }`,
     )
-      .bind(orgId)
+      .bind(orgId, ...statsScope.binds)
       .all<{ id: string; status: string }>(),
     // Cached (snapshot + SWR) — same exact per-DO figure as the direct
     // loadDoValueMap, just off the cold-recompute path so /stats stops
@@ -328,7 +351,9 @@ app.get("/stats", async (c) => {
   const payload = { byStatus, valueByStatus, total };
 
   // PR 3 write-back. Errors swallowed — cache is perf, not load-bearing.
-  try {
+  // NEVER from a scoped caller: the snapshot is keyed by org, so one
+  // salesperson's narrowed totals would become the whole company's.
+  if (!statsScope.clause) try {
     const { writeDeliveryStatsSnapshot, getDeliveryStatsSignature } =
       await import("../lib/delivery-snapshot");
     const sig = await getDeliveryStatsSignature(c.var.DB);
@@ -624,6 +649,12 @@ app.get("/pending-sos", async (c) => {
   const denied = await requirePermission(c, "delivery-orders", "read");
   if (denied) return denied;
   const orgId = getOrgId(c);
+  // These are SALES ORDERS awaiting a DO, so they narrow like any sales order.
+  // The row carries customerName but no customerId, which is why the response
+  // filter could not see them and a salesperson owning none of these accounts
+  // was shown all 116 (owner 2026-08-05).
+  const psScope = await customerScopeSql(c, "customerId");
+  const psClause = psScope.clause ? ` AND ${psScope.clause}` : "";
   const res = await c.var.DB.prepare(
     `SELECT id, companySO, companySOId, customerName, customerState,
             customerPO, customerPOId, customerSO, customerSOId, reference,
@@ -643,9 +674,10 @@ app.get("/pending-sos", async (c) => {
            WHERE d.status <> 'CANCELLED'
              AND po.salesOrderId IS NOT NULL AND po.salesOrderId <> ''
         )
+        ${psClause}
       ORDER BY hookkaExpectedDD ASC`,
   )
-    .bind(orgId, orgId)
+    .bind(orgId, orgId, ...psScope.binds)
     .all<Record<string, unknown>>();
   const data = (res.results ?? []).map((r) => ({
     ...r,

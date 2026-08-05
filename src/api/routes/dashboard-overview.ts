@@ -901,9 +901,16 @@ app.get("/", async (c) => {
           windowTotal += jcMinutesTotal(r.actualMinutes ?? r.estMinutes ?? 0, jc);
         }
         // Same exclusion as Active Jobs above: a job card left open on a
-        // production order whose sales order already shipped is not work in
-        // the queue, it is paperwork. Counting it added hours to the backlog
-        // and days to the queue figure that no one was ever going to work.
+        // production order whose sales order already shipped is paperwork, not
+        // queued work.
+        //
+        // Measured honestly, this is SMALL here — those 59 orders carry 2,836
+        // open minutes, 3.2% of the 1,457h backlog, moving it 9.3d → 9.0d. An
+        // earlier commit message of mine claimed it was why the backlog looked
+        // wrong; it is not. The backlog looked wrong because it was divided by
+        // a different capacity than the one printed beside it (fixed above).
+        // Kept for consistency: the two figures must not disagree about what
+        // counts as open.
         const soShipped =
           r.soStatus === "INVOICED" ||
           r.soStatus === "SHIPPED" ||
@@ -948,9 +955,20 @@ app.get("/", async (c) => {
       0,
     );
     // Unified headline (owner tally audit 2026-07-11): SOFA+BEDFRAME work on
-    // IN_PROGRESS/PENDING orders ÷ rolling-7 capacity — the SAME population
-    // the drill-down table and the Planning page use.
-    const backlogDailyCapacityMin = Math.round(capacityMin7 / 7);
+    // IN_PROGRESS/PENDING orders ÷ daily capacity — the SAME population the
+    // drill-down table and the Planning page use.
+    //
+    // Divide by the capacity figure PRINTED NEXT TO IT. This used to use the
+    // rolling-7 average while the "Daily Capacity" line beside it showed the
+    // selected month's, so the card read "9.1d · 1,433h" over "190h" — and
+    // 1,433 ÷ 190 is 7.5, not 9.1. Both halves were individually right and the
+    // pair was nonsense, with the gap moving whenever the month selector did.
+    //
+    // Falls back to rolling-7 when the selected window has no capacity yet (a
+    // month one working day old), so an early-month view still shows a number
+    // instead of dividing by zero.
+    const backlogDailyCapacityMin =
+      dailyCapacityMin > 0 ? dailyCapacityMin : Math.round(capacityMin7 / 7);
     const backlogDays =
       backlogDailyCapacityMin > 0
         ? Math.round((backlogGrandMin / backlogDailyCapacityMin) * 10) / 10

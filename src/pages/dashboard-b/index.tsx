@@ -238,6 +238,10 @@ type ComplianceResp = {
       doNotInvoiced: number;
       soNoDo: number;
       soNoInvoice: number;
+      // The two biggest categories on prod (114 + 39 of 380) and absent from
+      // this projection until 2026-08-05, which is why they never reached a chip.
+      pricingIssues: number;
+      cogsIssues: number;
       overdueOrders: number;
       poNotReceived: number;
       lowEfficiencyWorkers: number;
@@ -1181,9 +1185,22 @@ export default function DashboardBPage() {
             <div className="flex flex-wrap items-center gap-2">
               {compCounts &&
                 (
+                  // Every category behind the headline, biggest first.
+                  //
+                  // This list used to omit five of the fourteen — including the
+                  // three LARGEST (SO not invoiced 139, pricing issues 114,
+                  // COGS issues 39). With `.slice(0,4)` taking the first four in
+                  // declaration order rather than by size, the chips added up to
+                  // 35 under a headline of 380: 9% of it, and none of the parts
+                  // anyone would act on first.
                   [
                     ["Overdue", compCounts.overdueOrders],
+                    ["SO not invoiced", compCounts.soNoInvoice],
+                    ["Pricing issues", compCounts.pricingIssues],
+                    ["COGS issues", compCounts.cogsIssues],
                     ["DO not invoiced", compCounts.doNotInvoiced],
+                    ["DO pending dispatch", compCounts.doPendingDispatch],
+                    ["DO not delivered", compCounts.doNotDelivered],
                     ["SO no DO", compCounts.soNoDo],
                     ["PO not received", compCounts.poNotReceived],
                     ["Low efficiency", compCounts.lowEfficiencyWorkers],
@@ -1193,7 +1210,9 @@ export default function DashboardBPage() {
                     ["R&D stalled", compCounts.rdStalled],
                   ] as const
                 )
-                  .filter(([, n]) => n > 0)
+                  .filter(([, n]) => (n ?? 0) > 0)
+                  .slice()
+                  .sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))
                   .slice(0, 4)
                   .map(([label, n]) => (
                     <span

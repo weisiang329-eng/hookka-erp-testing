@@ -110,7 +110,6 @@ const STATUS_TONE_CLASS: Record<StatusTone, string> = {
 const PAGE_RESULTS: SearchResult[] = [
   { id: "p-dashboard", label: "Dashboard", href: "/dashboard", icon: LayoutDashboard, category: "pages" },
   { id: "p-notifications", label: "Notifications", href: "/notifications", icon: Bell, category: "pages" },
-  { id: "p-forecasting", label: "Forecasting", href: "/analytics/forecast", icon: TrendingUp, category: "pages" },
   { id: "p-sales", label: "Sales Orders", href: "/sales", icon: ShoppingCart, category: "pages" },
   { id: "p-delivery", label: "Delivery Order", href: "/delivery", icon: Truck, category: "pages" },
   { id: "p-invoices", label: "Invoices", href: "/invoices", icon: FileText, category: "pages" },

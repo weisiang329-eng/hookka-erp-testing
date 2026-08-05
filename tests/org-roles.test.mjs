@@ -1,21 +1,26 @@
 // ---------------------------------------------------------------------------
-// org-roles.test.mjs — a role for every ORG department.
+// org-roles.test.mjs — a role ROW for every org department.
 //
 // Owner 2026-08-04: "根据我们的部门都要有对应的 role，先把 role 都打开."
 //
 // The 0045 seed built roles around FUNCTIONS (sales, finance, procurement,
 // production, warehouse, worker, read-only, super-admin), but people are filed
 // by ORG DEPARTMENT — Sales, Finance, Production, HR, R&D, QA, Office,
-// Management. Four of those had no role, so everyone in them sat on ADMIN,
-// which rbac.ts short-circuits to `*:*`: HR could read every margin, QA could
-// edit invoices.
+// Management. Four had no role, so everyone in them sat on ADMIN, which
+// rbac.ts short-circuits to `*:*`: HR could read every margin.
 //
-// Watch the two different "departments": the `departments` TABLE is the 14
-// PRODUCTION stages used by job cards and scheduling. This is `users.department`
-// — the org chart. Conflating them is the easy mistake here.
+// This file's job is now ONLY to make the role exist so it can be assigned.
+// What each role may DO lives in role-policy.ts (see role-policy.test.mjs) —
+// the grants used to be seeded here too, and one thing defined in two places
+// is what took purchase-invoice creation down earlier the same day.
+//
+// Watch the two "departments": the `departments` TABLE is the 14 PRODUCTION
+// stages used by job cards and scheduling. This is `users.department`.
 // ---------------------------------------------------------------------------
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 import {
   ORG_ROLES,
@@ -44,61 +49,9 @@ test("the mapping is case- and spelling-tolerant", () => {
 });
 
 test("an unknown department maps to nothing rather than guessing", () => {
-  // Silently defaulting to a role would hand out permissions nobody chose.
+  // Silently defaulting would hand out permissions nobody chose.
   assert.equal(defaultRoleForDepartment("Legal"), null);
   assert.equal(defaultRoleForDepartment(""), null);
-});
-
-test("HR gets people data and NOT the commercials", () => {
-  const hr = ORG_ROLES.find((r) => r.name === "HR");
-  for (const res of ["workers", "attendance", "leaves", "payroll", "payslips"]) {
-    assert.ok(hr.grants[res], `HR needs ${res}`);
-  }
-  for (const res of ["cost-ledger", "accounting", "invoices", "payments", "sales-orders"]) {
-    assert.equal(hr.grants[res], undefined, `HR must not reach ${res}`);
-  }
-});
-
-test("HR can see accounts but not mint them", () => {
-  // Creating / disabling an account is requireSuperAdmin in users.ts; the grant
-  // must not imply otherwise.
-  const hr = ORG_ROLES.find((r) => r.name === "HR");
-  assert.deepEqual(hr.grants.users, ["read"]);
-});
-
-test("QA records defects without creating or deleting production work", () => {
-  const qa = ORG_ROLES.find((r) => r.name === "QA");
-  assert.deepEqual(qa.grants["job-cards"], ["read", "update"]);
-  assert.deepEqual(qa.grants["production-orders"], ["read"]);
-  assert.ok(qa.grants["qc-inspections"].includes("create"));
-  for (const res of ["invoices", "payments", "cost-ledger", "payroll"]) {
-    assert.equal(qa.grants[res], undefined, `QA must not reach ${res}`);
-  }
-});
-
-test("R&D can change a BOM — that is the point of the role", () => {
-  // Tan and Chee were READ_ONLY, so product development could not edit the
-  // things it exists to edit.
-  const rd = ORG_ROLES.find((r) => r.name === "R_AND_D");
-  for (const res of ["products", "bom", "sofa-combos", "product-configs", "fabrics"]) {
-    assert.ok(rd.grants[res].includes("update"), `R&D needs to edit ${res}`);
-  }
-});
-
-test("R&D may add a raw material but not retire one", () => {
-  // Deleting a material has stock and cost consequences owned elsewhere.
-  const rd = ORG_ROLES.find((r) => r.name === "R_AND_D");
-  assert.deepEqual(rd.grants["raw-materials"], ["read", "create", "update"]);
-});
-
-test("Office raises and receives a PO but cannot approve the spend", () => {
-  const off = ORG_ROLES.find((r) => r.name === "OFFICE");
-  assert.ok(off.grants["purchase-orders"].includes("create"));
-  assert.ok(off.grants["purchase-orders"].includes("receive"));
-  assert.ok(
-    !off.grants["purchase-orders"].includes("approve"),
-    "approving is a spend decision, not a clerical one",
-  );
 });
 
 test("there is no MANAGEMENT role — management IS super admin", () => {
@@ -112,24 +65,23 @@ test("there is no MANAGEMENT role — management IS super admin", () => {
   assert.equal(defaultRoleForDepartment("Management"), "SUPER_ADMIN");
 });
 
-test("no role grants users:role-change — that stays SUPER_ADMIN", () => {
-  // Otherwise a role could quietly promote its own holder.
-  for (const r of ORG_ROLES) {
-    assert.ok(
-      !(r.grants.users ?? []).includes("role-change"),
-      `${r.name} must not be able to change roles`,
-    );
-  }
+test("this file creates roles and grants NOTHING", () => {
+  // One source for permissions, and it is role-policy.ts.
+  const src = readFileSync(
+    resolve(process.cwd(), "src/api/lib/ensure-org-roles.ts"),
+    "utf8",
+  );
+  assert.doesNotMatch(src, /INSERT INTO role_permissions/);
+  assert.doesNotMatch(src, /^\s*grants:/m, "no grants field on the role shape");
+  assert.match(src, /INSERT INTO roles/);
 });
 
 test("seeding is additive — it never resets an edited role", async () => {
-  // The owner tunes these from the permissions UI afterwards; a re-seed that
-  // overwrote their choices would undo that work on every isolate boot.
   const sqls = [];
   const db = {
     prepare(sql) {
       sqls.push(sql);
-      const r = { run: async () => {}, all: async () => ({ results: [] }) };
+      const r = { run: async () => {} };
       return { ...r, bind: () => r };
     },
   };
@@ -144,7 +96,7 @@ test("it runs once per isolate", async () => {
   const db = {
     prepare() {
       n++;
-      const r = { run: async () => {}, all: async () => ({ results: [] }) };
+      const r = { run: async () => {} };
       return { ...r, bind: () => r };
     },
   };

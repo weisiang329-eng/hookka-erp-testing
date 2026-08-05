@@ -6,6 +6,7 @@
 // joined from the delivery_hubs table (matches the in-memory Customer type).
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import { denyForeignCustomerWrite, canAssignSalesperson } from "../lib/customer-scope";
 import type { Context } from "hono";
 import type { Env } from "../worker";
 import { checkCustomerDeleteLocked, lockedResponse } from "../lib/lock-helpers";
@@ -502,6 +503,10 @@ app.put("/:id", async (c) => {
     )
       .bind(id)
       .first<CustomerRow>();
+    // A scoped role may only edit its OWN customers. The response filter hides
+    // other people's on the way out; it cannot stop a PUT on the way in.
+    const foreign = await denyForeignCustomerWrite(c, id);
+    if (foreign) return foreign;
     if (!existing) {
       return c.json({ success: false, error: "Customer not found" }, 404);
     }
@@ -593,8 +598,12 @@ app.put("/:id", async (c) => {
           : serialiseOemMarking(body.oemMarking),
       // Confirm gate: POTENTIAL → CONFIRMED. Only moves when the body sends it.
       customer_stage: nextStage,
+      // Reassigning the salesperson is how an account would be handed away —
+      // or quietly taken. A scoped role keeps whatever is already there; only
+      // roles that see the whole book may change it.
       salesperson_user_id:
-        body.salespersonUserId === undefined && body.salesperson_user_id === undefined
+        !canAssignSalesperson(c) ||
+        (body.salespersonUserId === undefined && body.salesperson_user_id === undefined)
           ? (readSalespersonUserId(existing as unknown as Record<string, unknown>) || null)
           : String(body.salespersonUserId ?? body.salesperson_user_id ?? "").trim() || null,
     };

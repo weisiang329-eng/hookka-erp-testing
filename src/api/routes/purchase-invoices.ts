@@ -809,6 +809,32 @@ app.get("/:id", async (c) => {
 //         amountSen, remarks?, status? (default DRAFT) }
 // PO denorm fields (poRef) auto-resolved when purchaseOrderId is given.
 // ---------------------------------------------------------------------------
+/**
+ * A supplier invoice cannot be dated after the day it was keyed in.
+ *
+ * Owner 2026-08-05, on PI-2608-009: entered 1 August with invoice_date
+ * 2026-09-03 — 33 days in the future. The supplier's own numbering
+ * (SMI2608-055 — the 2608 is the month) says August, so it is a keying
+ * slip on the month digit.
+ *
+ * It matters beyond a wrong figure: the payment term runs from THIS date
+ * (that PI's due date landed on 31 October instead of 30 September), so a
+ * slip here is a month of late payment nobody notices until the supplier
+ * chases. One row in 350 today; the check costs nothing and stops the next.
+ *
+ * A small forward tolerance is allowed for timezone skew — the server is UTC
+ * and Malaysia is UTC+8, so an invoice keyed this evening MYT can legitimately
+ * carry tomorrow's date by the server's clock.
+ */
+function futureInvoiceDate(date: string | undefined | null): string | null {
+  const d = (date ?? "").trim().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return null;
+  const limit = new Date(Date.now() + 36 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+  return d > limit ? d : null;
+}
+
 app.post("/", async (c) => {
   const denied = await requirePermission(c, "purchase-invoices", "create");
   if (denied) return denied;
@@ -860,6 +886,16 @@ app.post("/", async (c) => {
   if (!body.supplierId || !body.supplierName) {
     return c.json(
       { success: false, error: "supplierId and supplierName are required" },
+      400,
+    );
+  }
+  const futureDate = futureInvoiceDate(body.invoiceDate);
+  if (futureDate) {
+    return c.json(
+      {
+        success: false,
+        error: `Invoice date ${futureDate} is in the future — check the supplier's invoice. The payment term is calculated from this date.`,
+      },
       400,
     );
   }
@@ -1659,6 +1695,19 @@ app.put("/:id", async (c) => {
     purchaseOrgCode?: string;
     items?: PurchaseInvoiceItemInput[];
   };
+
+  // Same guard as on create — an edit is exactly where a month digit gets
+  // fixed, and exactly where a new one gets introduced.
+  const futureEdit = futureInvoiceDate(body.invoiceDate);
+  if (futureEdit) {
+    return c.json(
+      {
+        success: false,
+        error: `Invoice date ${futureEdit} is in the future — check the supplier's invoice. The payment term is calculated from this date.`,
+      },
+      400,
+    );
+  }
 
   // Status transition guard.
   if (body.status && body.status !== existing.status) {

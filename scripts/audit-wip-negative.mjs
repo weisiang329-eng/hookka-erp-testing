@@ -1,9 +1,10 @@
 // Read-only audit: scan wip_items for negative or zero stock_qty.
 // Also cross-checks job_cards.wip_qty for negatives just in case.
 import postgres from "postgres";
+import { stagingUrl } from "./_db.mjs";
 
 const url =
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
+  stagingUrl();
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

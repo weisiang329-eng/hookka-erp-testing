@@ -13,6 +13,7 @@
 // Wei Siang 2026-05-09: "26" 全部无视, UI 没那个 cell 你就不该硬塞" —
 // API insertion of values that have no UI cell is a back door violation.
 import postgres from "postgres";
+import { prodUrl } from "./_db.mjs";
 
 const API_BASE = "https://hookka-erp-testing.pages.dev";
 const EMAIL = process.env.HOOKKA_EMAIL ?? "";
@@ -62,7 +63,7 @@ async function authedJson(session, method, path, body) {
 }
 
 const sql = postgres(
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",
+  prodUrl(),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

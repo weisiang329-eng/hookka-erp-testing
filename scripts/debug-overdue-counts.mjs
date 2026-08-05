@@ -1,9 +1,10 @@
 // Verify overdue-counts endpoint output. Run the same SQL the new endpoint
 // runs and compare against the broader set we'd EXPECT to be overdue.
 import postgres from "postgres";
+import { prodUrl } from "./_db.mjs";
 
 const url =
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+  prodUrl();
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

@@ -1,5 +1,6 @@
 import postgres from "postgres";
-const sql = postgres("postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres", { ssl: "require", max: 1, idle_timeout: 5 });
+import { prodUrl } from "./_db.mjs";
+const sql = postgres(prodUrl(), { ssl: "require", max: 1, idle_timeout: 5 });
 try {
   // Compare: products.cost_price_sen (BOM standard) vs avg of FG_COMPLETED ledger.
   // Sample one PO and break down its cost components from cost_ledger.

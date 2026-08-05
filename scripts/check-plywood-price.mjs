@@ -1,7 +1,8 @@
 // Look up plywood unit price from raw_materials catalog + recent PO line items.
 import postgres from "postgres";
+import { prodUrl } from "./_db.mjs";
 const sql = postgres(
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",
+  prodUrl(),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 try {

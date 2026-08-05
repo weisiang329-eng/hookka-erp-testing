@@ -1,8 +1,9 @@
 // Re-set wipQty for the 3 test SOs' merged FC JCs to set-count (1).
 import postgres from "postgres";
+import { stagingUrl } from "./_db.mjs";
 
 const sql = postgres(
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres",
+  stagingUrl(),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

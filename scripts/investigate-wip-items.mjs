@@ -1,8 +1,9 @@
 // Verify wip_items state on staging — should be 222 merged FC rows.
 import postgres from "postgres";
+import { stagingUrl } from "./_db.mjs";
 
 const url =
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
+  stagingUrl();
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

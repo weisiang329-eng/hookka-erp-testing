@@ -9,6 +9,7 @@
 // Action: DELETE the 8 wrong "5535+150" rows from earlier today + POST 8
 // correct "5531+150" rows.
 import postgres from "postgres";
+import { prodUrl } from "./_db.mjs";
 
 const API_BASE = "https://hookka-erp-testing.pages.dev";
 const EMAIL = process.env.HOOKKA_EMAIL ?? "";
@@ -51,7 +52,7 @@ async function authedJson(session, method, path, body) {
 }
 
 const sql = postgres(
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",
+  prodUrl(),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

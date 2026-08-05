@@ -1,9 +1,10 @@
 // Read-only — explain the slow /api/production-orders?fields=minimal
 // queries against prod DB to identify missing indexes.
 import postgres from "postgres";
+import { prodUrl } from "./_db.mjs";
 
 const url =
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+  prodUrl();
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

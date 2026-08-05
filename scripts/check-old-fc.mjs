@@ -1,5 +1,6 @@
 import postgres from "postgres";
-const sql = postgres("postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres", { ssl: "require", max: 1, idle_timeout: 5 });
+import { stagingUrl } from "./_db.mjs";
+const sql = postgres(stagingUrl(), { ssl: "require", max: 1, idle_timeout: 5 });
 try {
   const r = await sql`
     SELECT jc.id, jc.wip_key, jc.wip_label, jc.status, po.company_so_id, po.product_code, po.item_category, po.status AS po_status

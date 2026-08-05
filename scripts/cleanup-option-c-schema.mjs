@@ -9,9 +9,10 @@
 //   4. Decrement stock_qty for SO-2604-347's FC wip_item that didn't get
 //      consumed under the old buggy SEW cascade.
 import postgres from "postgres";
+import { stagingUrl } from "./_db.mjs";
 
 const sql = postgres(
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres",
+  stagingUrl(),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

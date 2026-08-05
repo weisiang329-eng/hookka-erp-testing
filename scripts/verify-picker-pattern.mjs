@@ -2,9 +2,10 @@
 // only ONE of those POs holds the merged FC JC; the others rely on picker
 // fallback. This is what commit 19c7aee fixes for BF/ACC.
 import postgres from "postgres";
+import { stagingUrl } from "./_db.mjs";
 
 const url =
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
+  stagingUrl();
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

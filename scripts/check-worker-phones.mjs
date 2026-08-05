@@ -1,5 +1,6 @@
 import postgres from "postgres";
-const sql = postgres("postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres", { ssl: "require", max: 1, idle_timeout: 5 });
+import { prodUrl } from "./_db.mjs";
+const sql = postgres(prodUrl(), { ssl: "require", max: 1, idle_timeout: 5 });
 try {
   const tot = await sql`SELECT COUNT(*) AS n FROM workers WHERE status = 'ACTIVE'`;
   const wPhone = await sql`SELECT COUNT(*) AS n FROM workers WHERE status = 'ACTIVE' AND phone IS NOT NULL AND phone <> ''`;

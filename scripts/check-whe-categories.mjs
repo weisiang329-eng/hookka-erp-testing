@@ -1,5 +1,6 @@
 import postgres from "postgres";
-const sql = postgres("postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres", { ssl: "require", max: 1, idle_timeout: 5 });
+import { prodUrl } from "./_db.mjs";
+const sql = postgres(prodUrl(), { ssl: "require", max: 1, idle_timeout: 5 });
 try {
   const cats = await sql`SELECT category, COUNT(*) AS n, MIN(hours) AS mn, MAX(hours) AS mx FROM working_hour_entries GROUP BY category`;
   console.log("categories in working_hour_entries:");

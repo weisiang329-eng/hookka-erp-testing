@@ -11,6 +11,7 @@
 //   node scripts/update-5531-pricing-2026-05-09.mjs           # dry-run
 //   node scripts/update-5531-pricing-2026-05-09.mjs --apply
 import postgres from "postgres";
+import { prodUrl } from "./_db.mjs";
 
 const API_BASE = "https://hookka-erp-testing.pages.dev";
 const EMAIL = process.env.HOOKKA_EMAIL ?? "";
@@ -81,7 +82,7 @@ async function authedJson(session, method, path, body) {
 }
 
 const sql = postgres(
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",
+  prodUrl(),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

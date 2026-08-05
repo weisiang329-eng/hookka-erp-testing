@@ -1,10 +1,11 @@
 // Compare wip_items rows between prod and staging to see what's missing.
 import postgres from "postgres";
+import { prodUrl, stagingUrl } from "./_db.mjs";
 
 const stagingUrl =
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
+  stagingUrl();
 const prodUrl =
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+  prodUrl();
 
 async function summarize(label, url) {
   const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });

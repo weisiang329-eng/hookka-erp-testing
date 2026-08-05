@@ -17,9 +17,10 @@
 //
 // Usage: node scripts/audit-all-config-drift-2026-05-09.mjs
 import postgres from "postgres";
+import { prodUrl } from "./_db.mjs";
 
 const url =
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+  prodUrl();
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

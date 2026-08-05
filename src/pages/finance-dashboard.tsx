@@ -14,7 +14,7 @@
 // with its report. Partial buckets (the running month / a half quarter) are
 // marked so a stub is never read as a trend.
 // ---------------------------------------------------------------------------
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   Bar,
   ComposedChart,
@@ -26,7 +26,7 @@ import {
   CartesianGrid,
 } from "recharts";
 import { Card, CardContent } from "@/components/ui/card";
-import { BarChart3 } from "lucide-react";
+import { BarChart3, ChevronDown, ChevronRight } from "lucide-react";
 
 type Slice = {
   sales: number; cogs: number; gross: number; otherIncome: number; expenses: number; net: number;
@@ -194,6 +194,13 @@ export default function FinanceDashboardPage() {
   const [plTab, setPlTab] = useState<keyof Slice>("sales");
   const [cfTab, setCfTab] = useState<"operating" | "investing" | "financing" | "freeCashFlow">("operating");
   const [cfView, setCfView] = useState<"summary" | "detail">("summary");
+  // Explicit window (owner 2026-08-05). Blank = the rolling default: last 12
+  // periods plus however far the forecast reaches.
+  const [fromYm, setFromYm] = useState("");
+  const [toYm, setToYm] = useState("");
+  // Cash-flow detail is grouped by section and opens one section at a time —
+  // the flat every-account list was unreadable (owner: 太复杂了).
+  const [cfOpenSection, setCfOpenSection] = useState<string | null>(null);
   const [ratioTab, setRatioTab] = useState<
     "grossMarginPct" | "netMarginPct" | "currentRatio" | "quickRatio" | "roePct" | "roaPct"
   >("grossMarginPct");
@@ -207,12 +214,13 @@ export default function FinanceDashboardPage() {
   // here — setting state synchronously inside an effect cascades renders.
   useEffect(() => {
     let stale = false;
-    fetch(`/api/accounting/dashboard?granularity=${granularity}&periods=${granularity === "quarter" ? 8 : 12}`)
+    const range = fromYm && toYm && fromYm <= toYm ? `&from=${fromYm}&to=${toYm}` : "";
+    fetch(`/api/accounting/dashboard?granularity=${granularity}&periods=${granularity === "quarter" ? 8 : 12}${range}`)
       .then((r) => r.json() as Promise<{ success?: boolean; data?: { rows: Row[] } }>)
       .then((j) => { if (!stale && j?.success && j.data) setRows(j.data.rows); })
       .catch(() => { if (!stale) setRows([]); });
     return () => { stale = true; };
-  }, [granularity]);
+  }, [granularity, fromYm, toYm]);
 
   const plData = useMemo(
     () =>
@@ -266,6 +274,17 @@ export default function FinanceDashboardPage() {
         values: (rows ?? []).map((r) => (r.cashFlow?.lines ?? []).find((l) => `${l.section}||${l.label}` === k)?.value ?? 0),
       }));
   }, [rows]);
+  // …grouped by section, each with its own per-period totals, so Detail opens
+  // as a handful of section rows instead of forty account rows at once.
+  const cfSections = useMemo(() => {
+    const bySec = new Map<string, typeof cfDetailRows>();
+    for (const r of cfDetailRows) bySec.set(r.section, [...(bySec.get(r.section) ?? []), r]);
+    return [...bySec.entries()].map(([name, secRows]) => ({
+      name,
+      rows: secRows,
+      totals: (rows ?? []).map((_, i) => secRows.reduce((s, r) => s + (r.values[i] ?? 0), 0)),
+    }));
+  }, [cfDetailRows, rows]);
 
   const bsData = useMemo(
     () =>
@@ -388,7 +407,19 @@ export default function FinanceDashboardPage() {
           <BarChart3 className="h-5 w-5 text-[#6B5C32]" /> Financial Dashboard
         </h2>
         <span className="text-xs text-[#9CA3AF]">* = period still running / not a full quarter</span>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <span className="text-[11px] text-[#6B7280]">Period</span>
+          <input type="month" value={fromYm} onChange={(e) => { setRows(null); setFromYm(e.target.value); }}
+            className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm" />
+          <span className="text-xs text-[#9CA3AF]">→</span>
+          <input type="month" value={toYm} onChange={(e) => { setRows(null); setToYm(e.target.value); }}
+            className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm" />
+          {(fromYm || toYm) && (
+            <button onClick={() => { setRows(null); setFromYm(""); setToYm(""); }}
+              className="rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1.5 text-xs text-[#4B5563] hover:bg-[#F0ECE9] cursor-pointer">
+              Reset
+            </button>
+          )}
           {(["month", "quarter"] as const).map((g) => (
             <button
               key={g}
@@ -423,10 +454,26 @@ export default function FinanceDashboardPage() {
               <table className="w-full">
                 <tbody>
                   {periodHead(plData.map((d) => d.label))}
-                  <tr><td className={`${td} text-left font-medium`}>Actual</td>{plData.map((d) => <td key={d.label} className={td}>{rm(d.actual as number)}</td>)}</tr>
-                  <tr><td className={`${td} text-left font-medium text-[#6B5C32]`}>% of revenue</td>{plData.map((d) => <td key={d.label} className={`${td} text-[#6B5C32]`}>{d.pctOfRevenue === null ? "-" : `${d.pctOfRevenue.toFixed(2)}%`}</td>)}</tr>
-                  <tr><td className={`${td} text-left font-medium text-[#9A3A2D]`}>Forecast</td>{plData.map((d) => <td key={d.label} className={`${td} text-[#9A3A2D]`}>{rm(d.forecast as number)}</td>)}</tr>
-                  <tr><td className={`${td} text-left font-medium text-[#9A3A2D]`}>Forecast % of revenue</td>{plData.map((d) => <td key={d.label} className={`${td} text-[#9A3A2D]`}>{d.forecastPctOfRevenue === null ? "-" : `${d.forecastPctOfRevenue.toFixed(2)}%`}</td>)}</tr>
+                  {/* Amount and its share of revenue in ONE cell (owner
+                      2026-08-05: percentage beside the amount, not its own row). */}
+                  <tr>
+                    <td className={`${td} text-left font-medium`}>Actual</td>
+                    {plData.map((d) => (
+                      <td key={d.label} className={td}>
+                        {rm(d.actual as number)}
+                        {d.pctOfRevenue !== null && <span className="ml-1.5 text-[10px] text-[#6B5C32]">{d.pctOfRevenue.toFixed(2)}%</span>}
+                      </td>
+                    ))}
+                  </tr>
+                  <tr>
+                    <td className={`${td} text-left font-medium text-[#9A3A2D]`}>Forecast</td>
+                    {plData.map((d) => (
+                      <td key={d.label} className={`${td} text-[#9A3A2D]`}>
+                        {rm(d.forecast as number)}
+                        {d.forecastPctOfRevenue !== null && <span className="ml-1.5 text-[10px]">{d.forecastPctOfRevenue.toFixed(2)}%</span>}
+                      </td>
+                    ))}
+                  </tr>
                   {/* Variance row (owner 2026-07-30): money gap + points gap. */}
                   <tr className="bg-[#F7F4EF]">
                     <td className={`${td} text-left font-semibold`}>vs Forecast</td>
@@ -587,17 +634,37 @@ export default function FinanceDashboardPage() {
                     <tr><td className={`${td} text-left font-medium`}>{cfTab === "freeCashFlow" ? "Free cash flow" : cfTab[0].toUpperCase() + cfTab.slice(1)}</td>{cfData.map((d) => <td key={d.label} className={`${td} ${(d.value as number) < 0 ? "text-[#9A3A2D]" : ""}`}>{rm(d.value as number)}</td>)}</tr>
                     <tr className="bg-[#F7F4EF]"><td className={`${td} text-left font-semibold`}>Net change</td>{cfData.map((d) => <td key={d.label} className={`${td} font-semibold ${(d.net as number) < 0 ? "text-[#9A3A2D]" : ""}`}>{rm(d.net as number)}</td>)}</tr>
                     {cfView === "detail" &&
-                      cfDetailRows.map((l) => (
-                        <tr key={l.key} className="border-b border-[#F0ECE9]">
-                          <td className={`${td} text-left pl-5`}>
-                            <span className="text-[10px] text-[#9CA3AF] mr-1.5">{l.section}</span>
-                            {l.label}
-                          </td>
-                          {l.values.map((v, i) => (
-                            <td key={i} className={`${td} ${v < 0 ? "text-[#9A3A2D]" : v > 0 ? "text-[#4F7C3A]" : ""}`}>{v === 0 ? "-" : rm(v)}</td>
-                          ))}
-                        </tr>
-                      ))}
+                      cfSections.map((sec) => {
+                        const open = cfOpenSection === sec.name;
+                        return (
+                          <Fragment key={sec.name}>
+                            <tr className="border-b border-[#F0ECE9] bg-[#F7F4EF]">
+                              <td className={`${td} text-left`}>
+                                <button
+                                  onClick={() => setCfOpenSection(open ? null : sec.name)}
+                                  className="cursor-pointer font-medium text-[#6B5C32] inline-flex items-center gap-1"
+                                >
+                                  {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                                  {sec.name.replace(/_/g, " ")}
+                                  <span className="text-[10px] font-normal text-[#9CA3AF]">({sec.rows.length})</span>
+                                </button>
+                              </td>
+                              {sec.totals.map((v, i) => (
+                                <td key={i} className={`${td} font-medium ${v < 0 ? "text-[#9A3A2D]" : v > 0 ? "text-[#4F7C3A]" : ""}`}>{v === 0 ? "-" : rm(v)}</td>
+                              ))}
+                            </tr>
+                            {open &&
+                              sec.rows.map((l) => (
+                                <tr key={l.key} className="border-b border-[#F0ECE9]">
+                                  <td className={`${td} text-left pl-8 text-[#4B5563]`}>{l.label}</td>
+                                  {l.values.map((v, i) => (
+                                    <td key={i} className={`${td} ${v < 0 ? "text-[#9A3A2D]" : v > 0 ? "text-[#4F7C3A]" : ""}`}>{v === 0 ? "-" : rm(v)}</td>
+                                  ))}
+                                </tr>
+                              ))}
+                          </Fragment>
+                        );
+                      })}
                   </tbody>
                 </table>
               </>

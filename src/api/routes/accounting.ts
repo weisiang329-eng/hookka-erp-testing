@@ -9516,8 +9516,11 @@ app.get("/dashboard", async (c) => {
   // forecast fields shipped, the stored 12-month copy kept serving the old
   // shape (its data hadn't changed, so it never revalidated) and the new rows
   // read "-" forever. Versioning the key retires every stale copy at once.
-  const DASH_PAYLOAD_V = "v3"; // v3: bank-derived in/out + forward forecast months
-  const dashCacheKey = `${DASH_PAYLOAD_V}:${quarterly ? "q" : "m"}:${wanted}:${nowYm}:${dashOrgId}`;
+  const DASH_PAYLOAD_V = "v4"; // v4: explicit from/to window
+  // The explicit window is part of the identity — otherwise two different
+  // ranges would share one cached copy.
+  const dashRangeKey = `${String(c.req.query("from") ?? "")}~${String(c.req.query("to") ?? "")}`;
+  const dashCacheKey = `${DASH_PAYLOAD_V}:${quarterly ? "q" : "m"}:${wanted}:${dashRangeKey}:${nowYm}:${dashOrgId}`;
   const dashPayload = await withSnapshot(
     c.var.DB,
     {
@@ -9565,9 +9568,26 @@ app.get("/dashboard", async (c) => {
     }
   }
 
+  // Explicit window (owner 2026-08-05: 「dashboard 可以选 period」) — ?from=
+  // &to= as YYYY-MM. When given it replaces the rolling look-back entirely
+  // (and the forward forecast months, since the range says what to show).
+  const rangeRe = /^\d{4}-\d{2}$/;
+  const fromQ = String(c.req.query("from") ?? "").trim();
+  const toQ = String(c.req.query("to") ?? "").trim();
+  const explicit = rangeRe.test(fromQ) && rangeRe.test(toQ) && fromQ <= toQ;
+
   const monthsBack = quarterly ? wanted * 3 : wanted;
   const allMonths: string[] = [];
-  {
+  if (explicit) {
+    let [y, m] = fromQ.split("-").map((n) => parseInt(n, 10));
+    for (let i = 0; i < 60; i++) { // hard cap: 5 years of columns
+      const ym = `${y}-${String(m).padStart(2, "0")}`;
+      allMonths.push(ym);
+      if (ym >= toQ) break;
+      m += 1;
+      if (m > 12) { m = 1; y += 1; }
+    }
+  } else {
     let [y, m] = nowYm.split("-").map((n) => parseInt(n, 10));
     for (let i = 0; i < monthsBack; i++) {
       allMonths.unshift(`${y}-${String(m).padStart(2, "0")}`);

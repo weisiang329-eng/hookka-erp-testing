@@ -1413,6 +1413,10 @@ export async function fetchFilteredPOs(
   // (2026-06-24 — Fab Sew / Foam print fetch only the visible orders + their
   // SO/CO group, not the whole org).
   scopeTokens: string[] | null = null,
+  // Row-level customer scope (owner 2026-08-05: a salesperson sees their own
+  // customers' production orders). Passed in rather than resolved here because
+  // this helper takes a db handle, not a request context. Null = unscoped.
+  customerScope: { clause: string; binds: string[] } | null = null,
 ): Promise<ProductionOrderOut[] | MinimalPOOut[]> {
   // Load the (category, deptCode) → days map once per request. Drives the
   // derived `expectedDueDate` field on each JC — the FE compares it
@@ -1582,12 +1586,17 @@ export async function fetchFilteredPOs(
         ...(scopeTokens as string[]), ...(scopeTokens as string[]), ...(scopeTokens as string[]),
       ]
     : [];
+  // A production order reaches its customer through its sales order, so the
+  // clause is a subquery rather than a column test. Appended LAST so its binds
+  // sit at the end of every bind list below.
+  const custWhere = customerScope?.clause ? ` AND ${customerScope.clause}` : "";
+  const custBinds = customerScope?.binds ?? [];
   const poSql = hasFilter
-    ? `SELECT * FROM ${poSource} WHERE orgId = ? AND status IN (${placeholders})${excludeCompletedWhere}${deptScopeWhere}${dueWhere}${catWhere}${scopeWhere} ORDER BY created_at DESC, id DESC`
-    : `SELECT * FROM ${poSource} WHERE orgId = ?${excludeCompletedWhere}${deptScopeWhere}${dueWhere}${catWhere}${scopeWhere} ORDER BY created_at DESC, id DESC`;
+    ? `SELECT * FROM ${poSource} WHERE orgId = ? AND status IN (${placeholders})${excludeCompletedWhere}${deptScopeWhere}${dueWhere}${catWhere}${scopeWhere}${custWhere} ORDER BY created_at DESC, id DESC`
+    : `SELECT * FROM ${poSource} WHERE orgId = ?${excludeCompletedWhere}${deptScopeWhere}${dueWhere}${catWhere}${scopeWhere}${custWhere} ORDER BY created_at DESC, id DESC`;
   const poStmt = hasFilter
-    ? db.prepare(poSql).bind(orgId, ...(statuses as string[]), ...deptScopeBinds, ...dueBindings, ...catBindings, ...scopeBinds)
-    : db.prepare(poSql).bind(orgId, ...deptScopeBinds, ...dueBindings, ...catBindings, ...scopeBinds);
+    ? db.prepare(poSql).bind(orgId, ...(statuses as string[]), ...deptScopeBinds, ...dueBindings, ...catBindings, ...scopeBinds, ...custBinds)
+    : db.prepare(poSql).bind(orgId, ...deptScopeBinds, ...dueBindings, ...catBindings, ...scopeBinds, ...custBinds);
 
   // Dept-narrowing: when caller passes ?dept=FOAM (etc.), return JCs
   // whose wipKey appears in any wipKey that contains a matching-dept JC,

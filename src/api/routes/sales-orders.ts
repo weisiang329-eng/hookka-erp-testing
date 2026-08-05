@@ -13,6 +13,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { customerScopeSql, isCustomerScoped } from "../lib/customer-scope";
 import { assertCustomerBillable } from "../lib/customer-stage";
 import { emitAudit, buildAuditStatement } from "../lib/audit";
 import { calculateUnitPrice, calculateLineTotal } from "../../lib/pricing";
@@ -225,20 +226,26 @@ app.get("/", async (c) => {
     // mirror it here via the same `salesOrderId IN (SELECT id FROM ...)`
     // subquery so the cache-aside path and the paginated path return the
     // same shape, and the items are bounded by the current org's SOs.
+    // Narrow the ORDERS and, through the same predicate, their items — an
+    // unnarrowed item subquery would ship another salesperson's line detail
+    // for orders the caller never sees.
+    const fullScope = await customerScopeSql(c, "customer_id");
+    const fullClause = fullScope.clause ? ` AND ${fullScope.clause}` : "";
+
     const computeFullList = async () => {
       const [sos, items] = await Promise.all([
         db
           .prepare(
-            `SELECT * FROM ${soSourceSql} ${orgWhere} ORDER BY created_at DESC, id DESC`,
+            `SELECT * FROM ${soSourceSql} ${orgWhere}${fullClause} ORDER BY created_at DESC, id DESC`,
           )
-          .bind(...orgParams)
+          .bind(...orgParams, ...fullScope.binds)
           .all<SalesOrderRow>(),
         db
           .prepare(
             `SELECT * FROM ${itemsSourceSql}
-              WHERE salesOrderId IN (SELECT id FROM ${soSourceSql} ${orgWhere})`,
+              WHERE salesOrderId IN (SELECT id FROM ${soSourceSql} ${orgWhere}${fullClause})`,
           )
-          .bind(...orgParams)
+          .bind(...orgParams, ...fullScope.binds)
           .all<SalesOrderItemRow>(),
       ]);
       // De-quadratic (2026-06-04): group items by salesOrderId ONCE so each
@@ -276,6 +283,11 @@ app.get("/", async (c) => {
     // over sales_orders + sales_order_items (one of the two heaviest
     // dashboard reads) and the data is relatively static. Layer 2
     // invalidates the moment either source table's freshness column moves.
+    // Same reason as /stats: the snapshot is keyed by org, so a scoped payload
+    // must never be written into it.
+    if (isCustomerScoped(c)) {
+      return c.json(await computeFullList());
+    }
     const { withSnapshot } = await import("../lib/snapshot");
     const data = await withSnapshot(
       db,
@@ -341,16 +353,23 @@ app.get("/", async (c) => {
     : "";
   const searchBinds = searchTerm ? Array(5).fill(`%${searchTerm}%`) : [];
 
+  // Narrow the PAGE and the COUNT with the same predicate. The response filter
+  // downstream would have removed the foreign rows anyway, but it cannot fix
+  // `total` — which is why the footer read "1,229 sales orders · Page 1 / 7"
+  // under an empty grid (owner 2026-08-05).
+  const listScope = await customerScopeSql(c, "customer_id");
+  const scopeClause = listScope.clause ? ` AND ${listScope.clause}` : "";
+
   const [countRes, pageRes] = await Promise.all([
     db
-      .prepare(`SELECT COUNT(*) AS n FROM ${soSourceSql} ${orgWhere}${searchClause}`)
-      .bind(...orgParams, ...searchBinds)
+      .prepare(`SELECT COUNT(*) AS n FROM ${soSourceSql} ${orgWhere}${searchClause}${scopeClause}`)
+      .bind(...orgParams, ...searchBinds, ...listScope.binds)
       .first<{ n: number }>(),
     db
       .prepare(
-        `SELECT * FROM ${soSourceSql} ${orgWhere}${searchClause} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        `SELECT * FROM ${soSourceSql} ${orgWhere}${searchClause}${scopeClause} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
       )
-      .bind(...orgParams, ...searchBinds, limit, offset)
+      .bind(...orgParams, ...searchBinds, ...listScope.binds, limit, offset)
       .all<SalesOrderRow>(),
   ]);
   const total = countRes?.n ?? 0;
@@ -651,11 +670,19 @@ app.get("/stats", async (c) => {
         ? "(is_service_order = FALSE OR is_service_order IS NULL)"
         : "";
 
+  // A salesperson's totals must come from a NARROWED aggregate — there is no
+  // row here for the response filter to drop, which is how the grid could read
+  // "No confirmed orders" while the card above it read 1,229 / RM 1.4m
+  // (owner 2026-08-05). The clause also has to be inside the GROUP BY, not
+  // applied after, or the tab badges would still count other people's orders.
+  const scope = await customerScopeSql(c, "customerId");
+  const scopedWhere = [extraWhere, scope.clause].filter(Boolean).join(" AND ");
+
   const compute = async () => {
     const { whereSql: orgWhere, params: orgParams } = withOrgScope(
       c,
       "sales_orders",
-      extraWhere,
+      scopedWhere,
     );
     const res = await c.var.DB
       .prepare(
@@ -666,7 +693,7 @@ app.get("/stats", async (c) => {
            ${orgWhere}
            GROUP BY status`,
       )
-      .bind(...orgParams)
+      .bind(...orgParams, ...scope.binds)
       .all<{ status: string; n: number; revenueSen: number }>();
     const byStatus: Record<string, number> = {};
     const revenueByStatus: Record<string, number> = {};
@@ -703,7 +730,11 @@ app.get("/stats", async (c) => {
   // other than the default (false → normal sales) bypasses the cache.
   // Otherwise a SV-filtered payload could land in the cache and the next
   // /sales fetch would serve the wrong totals.
-  if (serviceOrderFilter !== "false") {
+  // The snapshot is keyed by org alone, so a scoped result must neither be
+  // written into it nor read from it — one salesperson's totals would become
+  // everybody's. Compute fresh; there are few enough scoped users for that to
+  // be the cheap option.
+  if (serviceOrderFilter !== "false" || scope.clause) {
     return c.json({ success: true, ...(await compute()) });
   }
 

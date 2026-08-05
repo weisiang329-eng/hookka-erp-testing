@@ -30,6 +30,7 @@ import { postJobCardLabor } from "../lib/po-cost-cascade";
 import { resolveWorkerToken } from "./worker-auth";
 import { workerCoversDept } from "../../lib/worker";
 import { requirePermission } from "../lib/rbac";
+import { salesOrderScopeSql, isCustomerScoped } from "../lib/customer-scope";
 import {
   ensureJobCardQrTokenColumn,
   getOrCreateJobCardQrToken,
@@ -424,6 +425,8 @@ app.get("/", async (c) => {
   const limitParam = c.req.query("limit");
   const paginate = pageParam !== undefined || limitParam !== undefined;
   const includeArchive = c.req.query("includeArchive") === "true";
+  // Owner 2026-08-05: production orders narrow with their sales order.
+  const poCustomerScope = await salesOrderScopeSql(c, "salesOrderId");
   // Opt-in slim payload for the Production page: drops ~20 unused PO fields
   // and the whole piece_pics tree. Default stays full-response for backward
   // compat (the PO detail page + other consumers need the full shape).
@@ -496,6 +499,7 @@ app.get("/", async (c) => {
       catFilter,
       excludeCompleted,
       scopeTokens,
+      poCustomerScope,
     );
     await attachCustomerSO(
       c.var.DB,
@@ -514,6 +518,21 @@ app.get("/", async (c) => {
   // on the KV background refresh (already off the request path — wait for
   // fresh data so the stored body is current, and skip the version bump).
   const buildListPayload = async (swr: boolean) => {
+    // The snapshot is keyed by org + query string, not by user, so a scoped
+    // payload must never enter it — one salesperson's narrowed list would be
+    // served to the whole factory. Few enough scoped users to just compute.
+    if (isCustomerScoped(c)) {
+      const data = await fetchFilteredPOs(
+        c.var.DB, orgId, statuses, includeJobCards, includeArchive, minimal,
+        deptFilter, dueFrom, dueTo, catFilter, excludeCompleted, null,
+        poCustomerScope,
+      );
+      await attachCustomerSO(
+        c.var.DB,
+        data as Array<{ salesOrderId: string; consignmentOrderId: string; customerSO: string }>,
+      );
+      return { success: true as const, data: data as unknown[], total: data.length };
+    }
     const { withSnapshot } = await import("../lib/snapshot");
     const snapshotCacheKey =
       new URL(c.req.url).searchParams.toString().split("&").sort().join("&");
@@ -541,6 +560,8 @@ app.get("/", async (c) => {
           dueTo,
           catFilter,
           excludeCompleted,
+          null,
+          poCustomerScope,
         );
         await attachCustomerSO(
           c.var.DB,

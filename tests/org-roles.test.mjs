@@ -101,12 +101,15 @@ test("Office raises and receives a PO but cannot approve the spend", () => {
   );
 });
 
-test("Management approves and confirms, and reads everything", () => {
-  const mg = ORG_ROLES.find((r) => r.name === "MANAGEMENT");
-  assert.ok(mg.grants["purchase-orders"].includes("approve"));
-  assert.ok(mg.grants["sales-orders"].includes("confirm"));
-  // Read-all is granted by expansion in ensureOrgRoles, not listed per resource.
-  assert.equal(mg.grants["cost-ledger"], undefined);
+test("there is no MANAGEMENT role — management IS super admin", () => {
+  // Drafted as read-all plus two approvals; the owner rejected it: "management
+  // 不是跟 superadmin 的吗？" Management is the ownership layer, so limiting it
+  // to reading routes every action through someone else. It would also have
+  // been decorative — requireSuperAdmin in users.ts gates account management
+  // independently of the permission table, so even a wildcard MANAGEMENT could
+  // not open an account. A role nobody uses is worse than no role.
+  assert.equal(ORG_ROLES.find((r) => r.name === "MANAGEMENT"), undefined);
+  assert.equal(defaultRoleForDepartment("Management"), "SUPER_ADMIN");
 });
 
 test("no role grants users:role-change — that stays SUPER_ADMIN", () => {

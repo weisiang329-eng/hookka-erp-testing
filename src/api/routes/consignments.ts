@@ -14,6 +14,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { customerScopeSql } from "../lib/customer-scope";
 import { emitAudit } from "../lib/audit";
 import {
   type ConsignmentNoteRow,
@@ -42,6 +43,13 @@ app.get("/", async (c) => {
   if (customerId) {
     clauses.push("customerId = ?");
     params.push(customerId);
+  }
+  // Owner 2026-08-05: "consignment order 也是这样。我想 consignment note、
+  // return 等等都是."
+  const cnScope = await customerScopeSql(c, "customerId");
+  if (cnScope.clause) {
+    clauses.push(cnScope.clause);
+    params.push(...cnScope.binds);
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const [notesRes, itemsRes] = await Promise.all([

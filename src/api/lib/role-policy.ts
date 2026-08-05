@@ -96,7 +96,7 @@ export const ALL_RESOURCES = [
   // Forecasting
   "forecasts",
   // Products & master data
-  "products", "product-configs", "sofa-combos", "rd-projects",
+  "products", "product-configs", "sofa-combos", "rd-projects", "cnc-templates",
   "equipment", "maintenance-logs", "lorries", "drivers", "departments",
   "organisations",
   // People
@@ -245,6 +245,10 @@ const QA: RolePolicy = {
   "production-orders": OPEN,
   "job-cards": OPEN,
   products: OPEN,
+  // Kept explicitly: QA reached the CNC templates through `products` before it
+  // got a gate of its own, and taking it away was never the point — only Sales
+  // was to lose it (owner 2026-08-05).
+  "cnc-templates": OPEN,
   "fg-units": OPEN,
 };
 
@@ -261,6 +265,9 @@ const QA: RolePolicy = {
 const R_AND_D: RolePolicy = {
   "rd-projects": OPEN,
   products: OPEN,
+  // Same as QA — product development is exactly who the cutting templates are
+  // for. Only Sales loses them.
+  "cnc-templates": OPEN,
   "product-configs": OPEN,
   bom: OPEN,
   "bom-master-templates": OPEN,

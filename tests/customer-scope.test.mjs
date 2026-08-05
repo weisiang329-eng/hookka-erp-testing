@@ -184,6 +184,8 @@ test("the prefix list and the tested list agree", () => {
   // orders / service orders / service cases (owner 2026-08-05) look like a
   // regression while saying nothing about which modules are actually covered.
   assert.deepEqual([...SCOPED_PREFIXES].sort(), [
+    "/api/consignment-notes",
+    "/api/consignment-orders",
     "/api/consignments",
     "/api/customers",
     "/api/delivery-orders",

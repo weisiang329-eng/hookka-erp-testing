@@ -690,7 +690,7 @@ function parseTemplateName(rawBase: string): ParsedTemplateName {
 // product_code, size_label.
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
-  const denied = await requirePermission(c, "products", "read");
+  const denied = await requirePermission(c, "cnc-templates", "read");
   if (denied) return denied;
   const orgId = getOrgId(c);
   const q = (c.req.query("q") ?? "").trim();
@@ -739,7 +739,7 @@ app.get("/", async (c) => {
 // GET /:id — one template (metadata only).
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {
-  const denied = await requirePermission(c, "products", "read");
+  const denied = await requirePermission(c, "cnc-templates", "read");
   if (denied) return denied;
   const orgId = getOrgId(c);
   const id = c.req.param("id");
@@ -760,7 +760,7 @@ app.get("/:id", async (c) => {
 // when signing isn't available on this runtime.
 // ---------------------------------------------------------------------------
 app.get("/:id/file/:kind", async (c) => {
-  const denied = await requirePermission(c, "products", "read");
+  const denied = await requirePermission(c, "cnc-templates", "read");
   if (denied) return denied;
   const orgId = getOrgId(c);
   const id = c.req.param("id");
@@ -819,7 +819,7 @@ app.get("/:id/file/:kind", async (c) => {
 // cnc-templates/<productCode>/<displayName>.<ext> and its key stored.
 // ---------------------------------------------------------------------------
 app.post("/", async (c) => {
-  const denied = await requirePermission(c, "products", "create");
+  const denied = await requirePermission(c, "cnc-templates", "create");
   if (denied) return denied;
   const orgId = getOrgId(c);
 
@@ -945,7 +945,7 @@ app.post("/", async (c) => {
 // Returns { success, imported: <rows>, files: <accepted files>, rows: [...] }.
 // ---------------------------------------------------------------------------
 app.post("/import", async (c) => {
-  const denied = await requirePermission(c, "products", "create");
+  const denied = await requirePermission(c, "cnc-templates", "create");
   if (denied) return denied;
   const orgId = getOrgId(c);
 
@@ -1176,7 +1176,7 @@ app.post("/import", async (c) => {
 // ASSIGN a model — we don't let an edit blank it out).
 // ---------------------------------------------------------------------------
 app.patch("/:id", async (c) => {
-  const denied = await requirePermission(c, "products", "update");
+  const denied = await requirePermission(c, "cnc-templates", "update");
   if (denied) return denied;
   const orgId = getOrgId(c);
   const id = c.req.param("id");
@@ -1270,7 +1270,7 @@ app.patch("/:id", async (c) => {
 // missing), then the row.
 // ---------------------------------------------------------------------------
 app.delete("/:id", async (c) => {
-  const denied = await requirePermission(c, "products", "delete");
+  const denied = await requirePermission(c, "cnc-templates", "delete");
   if (denied) return denied;
   const orgId = getOrgId(c);
   const id = c.req.param("id");

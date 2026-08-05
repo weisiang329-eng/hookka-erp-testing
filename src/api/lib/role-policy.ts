@@ -103,6 +103,7 @@ export const ALL_RESOURCES = [
   // 就可以" (R&D) and "HR… 我们只需要保留着人工成本".
   "product-pricing",   // selling price, margin, surcharge amounts
   "revenue-figures",   // revenue / remain on the labour report
+  "agent-console",     // read the Agent Console (which agents, see AGENTS_BY_ROLE)
   "equipment", "maintenance-logs", "lorries", "drivers", "departments",
   "organisations",
   // People
@@ -259,6 +260,7 @@ const QA: RolePolicy = {
   // Held explicitly for the same reason as cnc-templates: QA saw prices through
   // `products` before that split off, and only R&D was to lose them.
   "product-pricing": OPEN,
+  "agent-console": OPEN,
   "fg-units": OPEN,
 };
 
@@ -312,6 +314,7 @@ const R_AND_D: RolePolicy = {
  * which belongs to QA and R&D. Flagged rather than assumed.
  */
 const HR: RolePolicy = {
+  "agent-console": OPEN, // Employee Agent — see AGENTS_BY_ROLE
   workers: OPEN,
   attendance: OPEN,
   leaves: OPEN,
@@ -358,4 +361,38 @@ export function permissionsForRole(role: string): Set<string> | null {
     for (const a of actions) out.add(`${resource}:${a}`);
   }
   return out;
+}
+
+
+// ---------------------------------------------------------------------------
+// Agent Console — who sees which agents.
+//
+// Owner 2026-08-05: "Agent Console 每一个人都会有，但他们只会看到自己相关的
+// Agent… 大家只需要看到自己专属的 Agent 就可以了."
+//
+//   • QA     → Service Agent
+//   • Office → Delivery Agent, Production Agent, Customer Service Agent
+//   • HR     → Employee Agent
+//
+// READING the console is what this opens up. The controls — run now, pause,
+// kill all, rollback, approve — stay SUPER_ADMIN, because "see your own agent"
+// is not the same request as "let everyone stop the factory's automation".
+//
+// A role absent from this map sees no agents; the link is hidden rather than
+// opening an empty console. Sales and R&D are in that position today — the
+// owner listed three roles and there are agents named SALES and DATA_QUALITY
+// going spare, so this is worth a second look, but guessing an assignment is
+// how someone ends up reading a digest that was never meant for them.
+// ---------------------------------------------------------------------------
+export const AGENTS_BY_ROLE: Record<string, string[]> = {
+  QA: ["SERVICE"],
+  OFFICE: ["DELIVERY", "PRODUCTION", "CS"],
+  HR: ["EMPLOYEE"],
+};
+
+/** Agent ids this role may see. `null` means every agent (super admin / admin). */
+export function agentsForRole(role: string): string[] | null {
+  const r = (role || "").trim().toUpperCase();
+  if (r === "SUPER_ADMIN" || r === "ADMIN") return null;
+  return AGENTS_BY_ROLE[r] ?? [];
 }

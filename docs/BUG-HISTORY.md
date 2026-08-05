@@ -11915,3 +11915,7 @@ replay without error. Tests: `tests/pi-status-check-single-source.test.mjs`,
 
 **Class.** A second writer with its own copy of a list that must agree. A
 corrected duplicate would drift again; the shared constant is the fix.
+
+## BUG-2026-08-05-001 — The SUPER ADMIN's own menu was cut down to a read-only one `auth` `rbac`
+
+🟢 Fixed. `/api/auth/me/permissions` resolved the role ONLY through `users.roleId → roles.name`, while the GATE (rbac.ts) reads the `users.role` TEXT and short-circuits SUPER_ADMIN/ADMIN. The owner's row carries role='SUPER_ADMIN' with a roleId the roles table doesn't resolve → the JOIN returned NULL → the handler's READ_ONLY fallback ran → hiddenNavPrefixes hid `/procurement/pi` and the whole HR group from him, while every one of those pages opened fine by URL (owner 2026-08-05: 「我就是 super admin 啊」). Two sources of truth for one fact. The endpoint now selects both and lets the legacy TEXT stand in (`roleName ?? legacyRole ?? READ_ONLY`), and treats ADMIN like SUPER_ADMIN as the gate does. Regression: `tests/me-permissions-role-source.test.mjs`. Lesson for the class: when a screen and its gate answer the same question, they must read the same column — a menu that disagrees with the gate looks like a missing feature, not a permission bug.

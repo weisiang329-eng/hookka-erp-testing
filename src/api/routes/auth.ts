@@ -501,27 +501,38 @@ app.get("/me/permissions", async (c) => {
   try {
     // Look up the user's role (id + name). Empty roleId -> READ_ONLY fallback,
     // mirroring rbac.ts's role resolution.
+    // BUG-2026-08-05: this resolved the role ONLY through users.roleId →
+    // roles.name, while the GATE (rbac.ts) reads the users.role TEXT and
+    // short-circuits SUPER_ADMIN / ADMIN. The owner's row carries
+    // role='SUPER_ADMIN' but a roleId the roles table doesn't resolve, so the
+    // menu asked this endpoint, got the READ_ONLY fallback, and hid
+    // /procurement/pi and the HR group from him — while every one of those
+    // pages opened fine by URL, because the gate knew he was SUPER_ADMIN.
+    // Read BOTH and let the legacy TEXT stand in, so the menu can never
+    // disagree with the gate that enforces it.
     const roleRow = await c.var.DB.prepare(
-      `SELECT u.roleId AS roleId, r.name AS "roleName"
+      `SELECT u.roleId AS roleId, u.role AS "legacyRole", r.name AS "roleName"
          FROM users u
          LEFT JOIN roles r ON r.id = u.roleId
         WHERE u.id = ?
         LIMIT 1`,
     )
       .bind(userId)
-      .first<{ roleId: string | null; roleName: string | null }>();
+      .first<{ roleId: string | null; legacyRole: string | null; roleName: string | null }>();
 
     if (!roleRow) {
       // Authenticated but no users row — shouldn't happen in practice.
       return c.json({ success: true, permissions: [] });
     }
 
-    // SUPER_ADMIN bypass — sentinel list keeps payload tiny + matches the
-    // rbac.ts SUPER_ADMIN short-circuit.
-    if (roleRow.roleName === "SUPER_ADMIN") {
+    const resolvedRole = roleRow.roleName ?? roleRow.legacyRole ?? null;
+
+    // SUPER_ADMIN / ADMIN bypass — sentinel list keeps the payload tiny and
+    // matches the rbac.ts short-circuit, which grants BOTH "*:*".
+    if (resolvedRole === "SUPER_ADMIN" || resolvedRole === "ADMIN") {
       return c.json({
         success: true,
-        role: roleRow.roleName,
+        role: resolvedRole,
         permissions: ["*"],
         navHidden: [],
         home: "/dashboard",
@@ -529,7 +540,7 @@ app.get("/me/permissions", async (c) => {
     }
 
     const roleId = roleRow.roleId ?? "role_read_only";
-    const roleName = roleRow.roleName ?? "READ_ONLY";
+    const roleName = resolvedRole ?? "READ_ONLY";
 
     // A role whose policy is written in CODE never touches the table — the same
     // short-circuit rbac.ts uses for the GATE. Reading the table here while the

@@ -605,7 +605,7 @@ app.get("/:id", async (c) => {
 // }
 // ---------------------------------------------------------------------------
 app.post("/", async (c) => {
-  const denied = await requirePermission(c, "service-orders", "create");
+  const denied = await requirePermission(c, "service-cases", "create");
   if (denied) return denied;
   try {
     const body = (await c.req.json()) as Record<string, unknown>;
@@ -748,7 +748,7 @@ app.post("/", async (c) => {
 // PUT /api/service-cases/:id — edit metadata (issue, photos, RCA, notes)
 // ---------------------------------------------------------------------------
 app.put("/:id", async (c) => {
-  const denied = await requirePermission(c, "service-orders", "update");
+  const denied = await requirePermission(c, "service-cases", "update");
   if (denied) return denied;
   const id = c.req.param("id");
   try {
@@ -922,7 +922,7 @@ app.put("/:id", async (c) => {
 // PUT /api/service-cases/:id/status
 // ---------------------------------------------------------------------------
 app.put("/:id/status", async (c) => {
-  const denied = await requirePermission(c, "service-orders", "update");
+  const denied = await requirePermission(c, "service-cases", "update");
   if (denied) return denied;
   const id = c.req.param("id");
   try {
@@ -998,7 +998,7 @@ app.put("/:id/status", async (c) => {
 // (Use PUT /:id/status with CANCELLED to soft-cancel anything past OPEN.)
 // ---------------------------------------------------------------------------
 app.delete("/:id", async (c) => {
-  const denied = await requirePermission(c, "service-orders", "delete");
+  const denied = await requirePermission(c, "service-cases", "delete");
   if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB

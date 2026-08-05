@@ -5,6 +5,7 @@
 // full fabric master list. Row columns in `fabrics` already match FabricItem.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import { requirePermission } from "../lib/rbac";
 import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
 
@@ -34,6 +35,8 @@ function rowToFabric(r: FabricRow) {
 
 // GET /api/fabrics — list all fabrics
 app.get("/", async (c) => {
+  const denied = await requirePermission(c, "fabrics", "read");
+  if (denied) return denied;
   const orgId = getOrgId(c);
   const res = await c.var.DB.prepare(
     "SELECT * FROM fabrics WHERE orgId = ? ORDER BY code",

@@ -34,7 +34,7 @@ const pick = (r: Record<string, unknown>, snake: string, camel: string): unknown
 
 // GET /api/purchase-returns — list (newest first)
 app.get("/", async (c) => {
-  const denied = await requirePermission(c, "purchase-invoices", "read");
+  const denied = await requirePermission(c, "purchase-returns", "read");
   if (denied) return denied;
   await ensurePurchaseReturnTables(c.var.DB);
   const res = await c.var.DB.prepare(
@@ -49,7 +49,7 @@ app.get("/", async (c) => {
 // GET /api/purchase-returns/source/pi/:piId — the PI header + its returnable
 // (stocked) lines, so the create form can pre-fill the picker.
 app.get("/source/pi/:piId", async (c) => {
-  const denied = await requirePermission(c, "purchase-invoices", "read");
+  const denied = await requirePermission(c, "purchase-returns", "read");
   if (denied) return denied;
   await ensurePurchaseReturnTables(c.var.DB);
   const piId = c.req.param("piId");
@@ -75,7 +75,7 @@ app.get("/source/pi/:piId", async (c) => {
 // GET /api/purchase-returns/source/grn/:grnId — a GRN header + its received
 // lines, so a return can be created straight from a goods receipt.
 app.get("/source/grn/:grnId", async (c) => {
-  const denied = await requirePermission(c, "purchase-invoices", "read");
+  const denied = await requirePermission(c, "purchase-returns", "read");
   if (denied) return denied;
   await ensurePurchaseReturnTables(c.var.DB);
   const grnId = c.req.param("grnId");
@@ -101,7 +101,7 @@ app.get("/source/grn/:grnId", async (c) => {
 
 // GET /api/purchase-returns/:id — header + items
 app.get("/:id", async (c) => {
-  const denied = await requirePermission(c, "purchase-invoices", "read");
+  const denied = await requirePermission(c, "purchase-returns", "read");
   if (denied) return denied;
   await ensurePurchaseReturnTables(c.var.DB);
   const id = c.req.param("id");
@@ -121,7 +121,7 @@ app.get("/:id", async (c) => {
 
 // POST /api/purchase-returns — create from a PI
 app.post("/", async (c) => {
-  const denied = await requirePermission(c, "purchase-invoices", "create");
+  const denied = await requirePermission(c, "purchase-returns", "create");
   if (denied) return denied;
   await ensurePurchaseReturnTables(c.var.DB);
   const b = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
@@ -196,7 +196,7 @@ app.post("/", async (c) => {
 // fires only while OPEN, flips to STOCK_OUT. The supplier Debit Note + AP is
 // slice 3. Inventory-critical → owner verifies on staging before prod.
 app.post("/:id/confirm", async (c) => {
-  const denied = await requirePermission(c, "purchase-invoices", "update");
+  const denied = await requirePermission(c, "purchase-returns", "update");
   if (denied) return denied;
   await ensurePurchaseReturnTables(c.var.DB);
   const id = c.req.param("id");
@@ -213,7 +213,7 @@ app.post("/:id/confirm", async (c) => {
 // accounts). Only from STOCK_OUT; idempotent (flips to DN_ISSUED). AP + GL →
 // owner verifies on staging before prod.
 app.post("/:id/issue-dn", async (c) => {
-  const denied = await requirePermission(c, "purchase-invoices", "update");
+  const denied = await requirePermission(c, "purchase-returns", "update");
   if (denied) return denied;
   await ensurePurchaseReturnTables(c.var.DB);
   const id = c.req.param("id");
@@ -229,7 +229,7 @@ app.post("/:id/issue-dn", async (c) => {
 // DELETE /api/purchase-returns/:id — only while still OPEN (no ledger to unwind
 // in slice 1, but the guard is here so slices 2/3 keep the same contract).
 app.delete("/:id", async (c) => {
-  const denied = await requirePermission(c, "purchase-invoices", "delete");
+  const denied = await requirePermission(c, "purchase-returns", "delete");
   if (denied) return denied;
   await ensurePurchaseReturnTables(c.var.DB);
   const id = c.req.param("id");

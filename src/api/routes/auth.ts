@@ -19,7 +19,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import { permissionsForRole } from "../lib/role-policy";
-import { hiddenNavPrefixes } from "../lib/nav-permissions";
+import { hiddenNavPrefixes, homeForPermissions } from "../lib/nav-permissions";
 import type { Context } from "hono";
 import type { Env } from "../worker";
 import { hashPassword, verifyPassword } from "../lib/password";
@@ -524,6 +524,7 @@ app.get("/me/permissions", async (c) => {
         role: roleRow.roleName,
         permissions: ["*"],
         navHidden: [],
+        home: "/dashboard",
       });
     }
 
@@ -541,6 +542,7 @@ app.get("/me/permissions", async (c) => {
         role: roleName,
         permissions: [...coded],
         navHidden: hiddenNavPrefixes(coded),
+        home: homeForPermissions(coded, roleName),
       });
     }
 
@@ -563,6 +565,7 @@ app.get("/me/permissions", async (c) => {
       // Computed here so the browser never needs to know which resource guards
       // which link (owner: "直接从 backend 就挡掉嘛").
       navHidden: hiddenNavPrefixes(new Set(permissions)),
+      home: homeForPermissions(new Set(permissions), roleName),
     });
   } catch (err) {
     console.warn(

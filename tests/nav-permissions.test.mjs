@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { resourceForNav, hiddenNavPrefixes, NAV_RESOURCE } from "../src/api/lib/nav-permissions.ts";
+import { resourceForNav, hiddenNavPrefixes, homeForPermissions, NAV_RESOURCE } from "../src/api/lib/nav-permissions.ts";
 import { permissionsForRole, ALL_RESOURCES } from "../src/api/lib/role-policy.ts";
 
 const read = (p) => readFileSync(resolve(process.cwd(), p), "utf8");
@@ -47,8 +47,32 @@ test("a query string does not change the answer", () => {
 
 test("an unmapped link stays visible", () => {
   // Hiding by omission is how a menu quietly loses a page.
-  assert.equal(resourceForNav("/dashboard"), null);
   assert.equal(resourceForNav("/something-added-tomorrow"), null);
+});
+
+test("the dashboard is management-only, and everyone still has a home", () => {
+  // Owner 2026-08-05: "Dashboard VUCA report，除了 Management、Super Admin 可以
+  // 看到，其他人都看不到." It is also the post-login landing page, so hiding it
+  // without giving each role somewhere else to land would break login for them.
+  assert.equal(resourceForNav("/dashboard"), "accounting");
+
+  for (const role of ["SALES", "OFFICE", "QA", "HR", "R_AND_D"]) {
+    const perms = permissionsForRole(role);
+    assert.ok(
+      hiddenNavPrefixes(perms).includes("/dashboard"),
+      `${role} should not see the dashboard`,
+    );
+    const home = homeForPermissions(perms, role);
+    assert.notEqual(home, "/dashboard", `${role} must not land on the dashboard`);
+    assert.ok(
+      !hiddenNavPrefixes(perms).some((h) => home === h || home.startsWith(`${h}/`)),
+      `${role} lands on ${home}, which its own menu hides`,
+    );
+  }
+
+  const admin = new Set(["*"]);
+  assert.ok(!hiddenNavPrefixes(admin).includes("/dashboard"));
+  assert.equal(homeForPermissions(admin, "SUPER_ADMIN"), "/dashboard");
 });
 
 test("almost every sidebar link is mapped", () => {

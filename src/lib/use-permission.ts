@@ -40,10 +40,24 @@ type PermissionsResponse = {
    * mapping cannot drift from the gate that enforces it.
    */
   navHidden?: string[];
+  /** Where this user should land — see homeForPermissions on the API. */
+  home?: string;
 };
 
 const PERMISSIONS_URL = "/api/auth/me/permissions";
-const PERMISSIONS_TTL_S = 300;
+/**
+ * Short on purpose.
+ *
+ * Owner 2026-08-05: "你说一定要清缓存的原因是什么？我们不是直接在 backend 那边就
+ * 直接看不到了吗？" Correct — the API refuses regardless, so a stale menu never
+ * grants access, only shows a link that 403s. But five minutes of that after a
+ * role change reads as "the change did not work", which is exactly how it read.
+ *
+ * Thirty seconds keeps the request off the hot path without making a role
+ * change feel broken. `clearPermissionCache()` below drops it outright at
+ * login, so a fresh session is never stale at all.
+ */
+const PERMISSIONS_TTL_S = 30;
 const SUPER_ADMIN_SENTINEL = "*";
 
 // Module-scoped memo so non-React callers (e.g. event handlers) can read the

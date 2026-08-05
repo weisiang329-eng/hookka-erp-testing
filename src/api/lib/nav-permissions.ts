@@ -27,6 +27,14 @@
 
 /** Path prefix → the resource that guards it. Longest prefix wins. */
 export const NAV_RESOURCE: Record<string, string> = {
+  // Owner 2026-08-05: "Dashboard、VUCA report，除了 Management、Super Admin
+  // 可以看到，其他人都看不到." Both surface company-wide revenue, margin and
+  // plant load on one screen — the numbers every department role is otherwise
+  // kept away from. Mapped to `accounting`, which only Finance-side roles and
+  // SUPER_ADMIN hold, so the command centre cannot leak past them.
+  "/dashboard": "accounting",
+  "/daily-report": "accounting",
+
   // Comms — everyone has these, but map them so a future role could not.
   "/notifications": "notifications",
   "/announcements": "announcements",
@@ -132,4 +140,63 @@ export function hiddenNavPrefixes(perms: ReadonlySet<string>): string[] {
     out.push(prefix);
   }
   return out.sort();
+}
+
+/**
+ * Where to send this user after login.
+ *
+ * `/dashboard` is the default landing page and is NOT route-guarded, so hiding
+ * it from the menu is not enough on its own: a salesperson would still land
+ * there, on a screen absent from their own navigation whose every figure comes
+ * back 403. Landing somewhere useful is part of restricting it, not a separate
+ * nicety.
+ *
+ * Ordered by how central each surface is to the person's day, and computed
+ * server-side so it cannot disagree with what the menu shows.
+ */
+const HOME_PREFERENCE = [
+  "/dashboard",
+  "/sales",
+  "/procurement",
+  "/production",
+  "/quality",
+  "/rd",
+  "/employees",
+  "/inventory",
+  "/accounting",
+  "/mail-center",
+];
+
+/**
+ * The page a role actually works in, checked before the generic order.
+ *
+ * A global preference list gets this wrong in a way that looks arbitrary: R&D
+ * can read production, so it would land on the production board rather than its
+ * own projects, and QA would open on Purchase Orders instead of QC. The role
+ * knows its own front door.
+ */
+const ROLE_HOME: Record<string, string> = {
+  SALES: "/sales",
+  OFFICE: "/procurement",
+  QA: "/quality",
+  R_AND_D: "/rd",
+  HR: "/employees",
+  FINANCE: "/accounting",
+  PROCUREMENT: "/procurement",
+  PRODUCTION: "/production",
+  WAREHOUSE: "/inventory",
+};
+
+export function homeForPermissions(
+  perms: ReadonlySet<string>,
+  role?: string,
+): string {
+  const hidden = new Set(hiddenNavPrefixes(perms));
+  const preferred = ROLE_HOME[(role ?? "").toUpperCase()];
+  if (preferred && !hidden.has(preferred)) return preferred;
+  for (const p of HOME_PREFERENCE) {
+    if (!hidden.has(p)) return p;
+  }
+  // Everyone has Settings, so there is always somewhere to land.
+  return "/settings";
 }

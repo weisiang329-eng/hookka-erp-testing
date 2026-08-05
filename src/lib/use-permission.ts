@@ -100,6 +100,8 @@ type UsePermissionsResult = {
   hasPermission: (resource: string, action: string) => boolean;
   /** Server-decided: may this menu link be shown? */
   isNavAllowed: (href: string) => boolean;
+  /** Server-decided landing page for this role. See homeForPermissions on the API. */
+  home: string;
 };
 
 /**
@@ -133,10 +135,13 @@ export function usePermissions(): UsePermissionsResult {
   }, [data]);
 
   const navHidden = data?.navHidden ?? [];
+  // Settings is granted to every role, so this fallback is never a dead end.
+  const home = data?.home ?? "/settings";
 
   return {
     permissions,
     loading: loading && !data,
+    home,
     hasPermission: (resource: string, action: string) =>
       checkSet(permissions, resource, action),
     /**

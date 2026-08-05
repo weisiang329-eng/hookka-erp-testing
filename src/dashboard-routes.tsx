@@ -216,7 +216,19 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   // Dashboard — Dashboard B is the canonical dashboard. The old
   // /dashboard-b URL redirects to /dashboard so existing links / bookmarks
   // keep working.
-  { path: '/dashboard', element: <S><DashboardB /></S> },
+  // Owner 2026-08-05: "Dashboard VUCA report，除了 Management、Super Admin 可以
+  // 看到，其他人都看不到." Hiding the menu link was never enough — /dashboard was
+  // the post-login landing page AND the redirect target for every other denied
+  // route, so it stayed one address bar away. Guarded on the same resource the
+  // nav map uses, so the menu and the route cannot disagree.
+  {
+    path: '/dashboard',
+    element: (
+      <RequirePermission resource="accounting" action="read">
+        <S><DashboardB /></S>
+      </RequirePermission>
+    ),
+  },
   { path: '/dashboard-b', element: <Navigate to="/dashboard" replace /> },
 
   // Sales

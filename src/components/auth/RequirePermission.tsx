@@ -21,7 +21,15 @@ import { usePermissions } from "@/lib/use-permission";
 type Props = {
   resource: string;
   action: string;
-  /** Where to send users without permission. Defaults to /dashboard. */
+  /**
+   * Where to send users without permission. Defaults to the role's own home,
+   * as decided by the server.
+   *
+   * It used to default to /dashboard, which stopped being safe the moment the
+   * dashboard became Management + Super Admin only: a denied route sent the
+   * user to another denied route. Now that /dashboard is itself guarded, that
+   * default would also have been a redirect loop.
+   */
   redirectTo?: string;
   /** If set, render this instead of redirecting on a miss. */
   fallback?: React.ReactNode;
@@ -31,11 +39,11 @@ type Props = {
 export default function RequirePermission({
   resource,
   action,
-  redirectTo = "/dashboard",
+  redirectTo,
   fallback,
   children,
 }: Props) {
-  const { hasPermission, loading } = usePermissions();
+  const { hasPermission, loading, home } = usePermissions();
   const location = useLocation();
 
   // First-load — no cached set yet. Render nothing rather than briefly
@@ -46,7 +54,7 @@ export default function RequirePermission({
     if (fallback !== undefined) return <>{fallback}</>;
     return (
       <Navigate
-        to={redirectTo}
+        to={redirectTo ?? home}
         replace
         state={{ from: location.pathname + location.search }}
       />

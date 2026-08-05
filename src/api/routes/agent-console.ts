@@ -24,7 +24,8 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
-import { requireSuperAdmin } from "../lib/rbac";
+import { requireSuperAdmin, requirePermission } from "../lib/rbac";
+import { agentsForRole } from "../lib/role-policy";
 import { emitAudit } from "../lib/audit";
 import {
   AGENT_FAMILIES,
@@ -162,8 +163,15 @@ function projectRun(r: RunRow) {
 }
 
 app.get("/status", async (c) => {
-  const denied = requireSuperAdmin(c);
+  // Owner 2026-08-05: "Agent Console 每一个人都会有，但他们只会看到自己相关的
+  // Agent." READING is opened up per role; every control below
+  // (run-now / pause / kill-all / rollback / approve) keeps requireSuperAdmin —
+  // "show me my agent" is not "let me stop the factory's automation".
+  const denied = await requirePermission(c, "agent-console", "read");
   if (denied) return denied;
+  const allowedAgents = agentsForRole(
+    (c as unknown as { get: (k: string) => string | undefined }).get("userRole") ?? "",
+  );
   const db = c.var.DB;
   await ensureAgentTables(db);
 
@@ -366,7 +374,23 @@ app.get("/status", async (c) => {
   // LLM spend monitor (per-agent month tokens + estimated cost + budget cap).
   const llm = await monthLlmUsage(db).catch(() => null);
 
-  return c.json({ success: true, data: { killAll, generatedAt: nowIso, agents, llm } });
+  // Narrow to this role's own agents. `null` = every agent (super admin).
+  const visibleAgents =
+    allowedAgents === null
+      ? agents
+      : agents.filter((a) => allowedAgents.includes(String((a as { id?: string }).id ?? "")));
+  return c.json({
+    success: true,
+    data: {
+      killAll,
+      generatedAt: nowIso,
+      agents: visibleAgents,
+      // The LLM spend panel is whole-system cost, not per-agent — it belongs to
+      // whoever runs the bill, not to whoever can see one agent.
+      ...(allowedAgents === null ? { llm } : {}),
+      canControl: allowedAgents === null,
+    },
+  });
 });
 
 // ── GET /review — the agents' scorecard (员工式 review, 数据自动对账) ─────────

@@ -68,6 +68,7 @@ export const NAV_RESOURCE: Record<string, string> = {
   // Sales can, read-only — got the CNC cutting templates too. A shop-floor
   // tooling screen is not part of reading a price list; it needs its own gate.
   "/cnc-templates": "cnc-templates",
+  "/agents": "agent-console",
   "/bom": "bom",
   "/maintenance/sofa-combos": "sofa-combos",
 
@@ -190,6 +191,40 @@ const ROLE_HOME: Record<string, string> = {
   PRODUCTION: "/production",
   WAREHOUSE: "/inventory",
 };
+
+/**
+ * Menu sections a role does not need to SEE, even where it keeps the permission.
+ *
+ * Owner 2026-08-05 on QA: "根本就不需要看到 Dashboard、Log、Record，然后 Sales &
+ * Customer 那整块也不需要给他们看到… 整个 Product & BOM、Inventory、整个
+ * Warehouse，他们也都不需要看到，核心权限可以保留."
+ *
+ * That last clause is the whole reason this list exists rather than a smaller
+ * permission set. QC pages read products and production orders to do their own
+ * job; revoking those would break Quality to tidy a menu. So the grant stays
+ * and the LINK goes — a deliberate, listed exception, not a silent one.
+ *
+ * Anything a role has no permission for is already hidden by
+ * hiddenNavPrefixes; this only covers the overlap.
+ */
+const NAV_HIDE_BY_ROLE: Record<string, string[]> = {
+  QA: [
+    // Overview: the dashboard and the daily log / record.
+    "/dashboard", "/daily-report",
+    // Sales & Customers, whole block.
+    "/sales", "/delivery", "/delivery-returns", "/invoices", "/consignment",
+    "/customers", "/leads",
+    // Products & BOM.
+    "/products", "/cnc-templates", "/bom", "/maintenance/sofa-combos",
+    // Warehouse / Inventory.
+    "/inventory", "/warehouse",
+    // Production stays — "Production 是还好".
+  ],
+};
+
+export function hiddenNavForRole(role: string): string[] {
+  return NAV_HIDE_BY_ROLE[(role || "").trim().toUpperCase()] ?? [];
+}
 
 export function homeForPermissions(
   perms: ReadonlySet<string>,

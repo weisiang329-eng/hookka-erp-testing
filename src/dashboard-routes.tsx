@@ -502,11 +502,14 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   // Agent Console — SUPER_ADMIN only, same defense-in-depth as /admin/health
   // (RequireRole here + requireSuperAdmin on every /api/agents route).
   {
+    // Owner 2026-08-05: everyone has the console; each role sees only its own
+    // agents (AGENTS_BY_ROLE in src/api/lib/role-policy.ts, applied by
+    // /api/agents/status). The CONTROLS behind it are still SUPER_ADMIN.
     path: '/agents',
     element: (
-      <RequireRole role="SUPER_ADMIN">
+      <RequirePermission resource="agent-console" action="read">
         <S><AgentConsole /></S>
-      </RequireRole>
+      </RequirePermission>
     ),
   },
 

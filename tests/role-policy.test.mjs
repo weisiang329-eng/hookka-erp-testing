@@ -237,3 +237,69 @@ test("the seeder no longer grants permissions — one source only", () => {
   assert.doesNotMatch(seed, /INSERT INTO role_permissions/);
   assert.match(seed, /INSERT INTO roles/);
 });
+
+// ── QA's menu, and the Agent Console ────────────────────────────────────────
+
+test("QA sees Quality, Procurement and Production — and not the rest", async () => {
+  const { hiddenNavPrefixes, hiddenNavForRole } = await import(
+    "../src/api/lib/nav-permissions.ts"
+  );
+  const perms = permissionsForRole("QA");
+  const hidden = new Set([...hiddenNavPrefixes(perms), ...hiddenNavForRole("QA")]);
+
+  // Owner 2026-08-05, listed section by section.
+  for (const href of [
+    "/dashboard", "/daily-report",
+    "/sales", "/delivery", "/delivery-returns", "/invoices", "/consignment",
+    "/customers", "/leads",
+    "/products", "/cnc-templates", "/bom", "/maintenance/sofa-combos",
+    "/inventory", "/warehouse",
+    "/accounting", "/forecast", "/employees",
+    "/settings/organisations",
+  ]) {
+    assert.ok(hidden.has(href), `QA should not see ${href}`);
+  }
+  // User Management and System Health are inserted into the SYSTEM group only
+  // for a super admin, so QA is never offered them in the first place — there
+  // is nothing for the hide list to cover.
+  const sidebar = readFileSync(resolve(process.cwd(), "src/components/layout/sidebar.tsx"), "utf8");
+  assert.match(sidebar, /group\.label === "SYSTEM" && isSuperAdmin/);
+  // "Production 是还好" — kept, along with Quality and Procurement.
+  for (const href of ["/production", "/procurement", "/quality", "/service-cases", "/settings"]) {
+    assert.ok(!hidden.has(href), `QA should still see ${href}`);
+  }
+});
+
+test("QA keeps the permissions its own pages need", () => {
+  // "核心权限可以保留" — the menu loses the link, the API does not lose access.
+  // Revoking these to tidy a menu would break the QC pages that read them.
+  for (const res of ["products", "production-orders", "job-cards"]) {
+    assert.ok(can("QA", res, "read"), `QA lost ${res}, which its own pages read`);
+  }
+});
+
+test("each role's Agent Console holds only its own agents", async () => {
+  const { agentsForRole } = await import("../src/api/lib/role-policy.ts");
+  assert.deepEqual(agentsForRole("QA"), ["SERVICE"]);
+  assert.deepEqual(agentsForRole("OFFICE"), ["DELIVERY", "PRODUCTION", "CS"]);
+  assert.deepEqual(agentsForRole("HR"), ["EMPLOYEE"]);
+  // null = every agent.
+  assert.equal(agentsForRole("SUPER_ADMIN"), null);
+  assert.equal(agentsForRole("ADMIN"), null);
+  // A role with no assignment sees none, rather than all.
+  assert.deepEqual(agentsForRole("SALES"), []);
+  assert.deepEqual(agentsForRole("SOMETHING_NEW"), []);
+});
+
+test("opening the console does not hand over its controls", async () => {
+  // "run now / pause / kill all / rollback / approve" stay SUPER_ADMIN. Seeing
+  // your own agent is not the same request as stopping the factory's automation.
+  const { readFileSync } = await import("node:fs");
+  const { resolve } = await import("node:path");
+  const src = readFileSync(resolve(process.cwd(), "src/api/routes/agent-console.ts"), "utf8");
+  const afterStatus = src.slice(src.indexOf('app.get("/status"'));
+  assert.ok(
+    (afterStatus.match(/requireSuperAdmin\(c\)/g) ?? []).length >= 3,
+    "the agent controls are no longer super-admin only",
+  );
+});

@@ -115,7 +115,12 @@ test("HR is told to hide the commercial menu", () => {
 
 test("the decision is made on the server, not in the browser", () => {
   // The mapping must not leave the API — otherwise it drifts from the gate.
-  assert.match(read("src/api/routes/auth.ts"), /navHidden: hiddenNavPrefixes\(/);
+  // Both halves of the decision — what the permissions hide, and what a role
+  // is simply not shown while keeping the permission (hiddenNavForRole) — are
+  // computed on the API and merged there.
+  const auth = read("src/api/routes/auth.ts");
+  assert.match(auth, /hiddenNavPrefixes\(/);
+  assert.match(auth, /hiddenNavForRole\(roleName\)/);
   assert.doesNotMatch(SIDEBAR, /NAV_RESOURCE|resourceForNav/, "the browser must not map hrefs");
   assert.match(SIDEBAR, /isNavAllowed\(href\)/);
 });

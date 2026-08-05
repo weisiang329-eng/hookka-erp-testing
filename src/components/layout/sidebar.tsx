@@ -308,11 +308,11 @@ const SUPER_ADMIN_HEALTH_LINK: NavItem = {
   href: "/admin/health",
   icon: Activity,
 };
-// Agent Console (Production Agent Phase 3) — SUPER_ADMIN-only mission
-// control for the agents (status lights + run-now / pause / kill-all /
-// rollback / approval gate). Gated by RequireRole in dashboard-routes.tsx
-// AND requireSuperAdmin on every /api/agents route.
-const SUPER_ADMIN_AGENTS_LINK: NavItem = {
+// Agent Console. No longer SUPER_ADMIN-only (owner 2026-08-05: "Agent Console
+// 每一个人都会有，但他们只会看到自己相关的 Agent"). Shown to any role holding
+// `agent-console`, and the server decides which agents are inside; every
+// control still checks requireSuperAdmin.
+const AGENTS_LINK: NavItem = {
   name: "Agent Console",
   href: "/agents",
   icon: Bot,
@@ -529,9 +529,17 @@ export function Sidebar({
         ...items.slice(0, insertAt),
         SUPER_ADMIN_LINK,
         SUPER_ADMIN_HEALTH_LINK,
-        SUPER_ADMIN_AGENTS_LINK,
         ...items.slice(insertAt),
       ];
+    }
+    // Agent Console is no longer an admin extra — every role that holds
+    // `agent-console` gets it, and the server decides which agents are inside.
+    // Inserted for non-admins too, then filtered by the same isNavItemAllowed
+    // pass below, so a role without the grant never sees it.
+    if (group.label === "SYSTEM") {
+      const idx = items.findIndex((i) => i.name === "Settings");
+      const at = idx === -1 ? items.length : idx;
+      items = [...items.slice(0, at), AGENTS_LINK, ...items.slice(at)];
     }
     // Drop the items this user may not see, and their sub-items with them —
     // a parent that survives only to show a submenu of forbidden pages is

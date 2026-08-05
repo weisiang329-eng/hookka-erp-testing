@@ -7658,10 +7658,23 @@ async function computeCashflowStatement(
     }
   }
 
-  return buildStatement({
+  const statement = buildStatement({
     classified, bankLegs, coa, map, rmSplit, stockGroupOverride: sgOverride,
     fyeMonth, period, editable,
   });
+  // Money IN / OUT straight off the bank legs (DR = in, CR = out). Derived
+  // here rather than by summing statement lines: the statement's line values
+  // carry a per-SECTION display sign, so a salary payment reads positive under
+  // "COST / EXPENSE OUT" — summing those gave an in/out pair that didn't add
+  // up to the cash surplus. Bank legs tie to it by construction.
+  const bankByMonth = new Map<string, { inflow: number; outflow: number }>();
+  for (const l of bankLegs) {
+    const cur = bankByMonth.get(l.ym) ?? { inflow: 0, outflow: 0 };
+    cur.inflow += Number(l.debitSen) || 0;
+    cur.outflow -= Number(l.creditSen) || 0;
+    bankByMonth.set(l.ym, cur);
+  }
+  return { ...statement, bankByMonth };
 }
 
 app.get("/cashflow-statement", async (c) => {
@@ -7669,7 +7682,7 @@ app.get("/cashflow-statement", async (c) => {
   if (denied) return denied;
   const period = c.req.query("period") || new Date().toISOString().slice(0, 7);
   const editable = c.req.query("editable") === "1";
-  const statement = await computeCashflowStatement(c.var.DB, period, editable);
+  const { bankByMonth: _bank, ...statement } = await computeCashflowStatement(c.var.DB, period, editable);
   return c.json({ success: true, data: { period, ...statement } });
 });
 
@@ -9503,7 +9516,7 @@ app.get("/dashboard", async (c) => {
   // forecast fields shipped, the stored 12-month copy kept serving the old
   // shape (its data hadn't changed, so it never revalidated) and the new rows
   // read "-" forever. Versioning the key retires every stale copy at once.
-  const DASH_PAYLOAD_V = "v2";
+  const DASH_PAYLOAD_V = "v3"; // v3: bank-derived in/out + forward forecast months
   const dashCacheKey = `${DASH_PAYLOAD_V}:${quarterly ? "q" : "m"}:${wanted}:${nowYm}:${dashOrgId}`;
   const dashPayload = await withSnapshot(
     c.var.DB,
@@ -9526,6 +9539,32 @@ app.get("/dashboard", async (c) => {
     async () => {
 
   // --- bucket list (oldest → newest), each with its member months ----------
+  // The window also reaches FORWARD to the last month the owner has keyed a
+  // forecast for — that is the whole point of the dashed target line: the
+  // stock-app read where actual bars stop and the plan carries on. Capped at
+  // 12 future months so a stray far-future entry can't stretch the axis.
+  const fcAheadRow = await db
+    .prepare("SELECT value FROM kv_config WHERE key = 'forecast_pnl'")
+    .first<{ value: string }>();
+  let lastForecastYm = "";
+  try {
+    const fm = (JSON.parse(fcAheadRow?.value ?? "{}") as { months?: Record<string, unknown> }).months ?? {};
+    for (const ym of Object.keys(fm)) if (/^\d{4}-\d{2}$/.test(ym) && ym > lastForecastYm) lastForecastYm = ym;
+  } catch {
+    /* no forecast yet */
+  }
+  const aheadMonths: string[] = [];
+  if (lastForecastYm > nowYm) {
+    let [y, m] = nowYm.split("-").map((n) => parseInt(n, 10));
+    for (let i = 0; i < 12; i++) {
+      m += 1;
+      if (m > 12) { m = 1; y += 1; }
+      const ym = `${y}-${String(m).padStart(2, "0")}`;
+      aheadMonths.push(ym);
+      if (ym >= lastForecastYm) break;
+    }
+  }
+
   const monthsBack = quarterly ? wanted * 3 : wanted;
   const allMonths: string[] = [];
   {
@@ -9535,6 +9574,7 @@ app.get("/dashboard", async (c) => {
       m -= 1;
       if (m === 0) { m = 12; y -= 1; }
     }
+    allMonths.push(...aheadMonths);
   }
   type Bucket = { key: string; label: string; months: string[]; partial: boolean };
   const buckets: Bucket[] = [];
@@ -9673,7 +9713,7 @@ app.get("/dashboard", async (c) => {
   };
   const bucketEnd = (b: Bucket) => `${b.months[b.months.length - 1]}-31`;
   const running = new Map<string, number>(); // account → dr−cr
-  const bsByBucket = new Map<string, { assets: number; liabilities: number; equity: number; currentAssets: number; currentLiabilities: number; inventory: number }>();
+  const bsByBucket = new Map<string, { assets: number; liabilities: number; equity: number; currentAssets: number; currentLiabilities: number; inventory: number } | null>();
   {
     let i = 0;
     for (const b of buckets) {
@@ -9683,6 +9723,9 @@ app.get("/dashboard", async (c) => {
         running.set(l.code, (running.get(l.code) ?? 0) + l.dr - l.cr);
         i++;
       }
+      // A future bucket has no balances — leave it null so the balance-sheet
+      // card doesn't draw phantom zero bars past today.
+      if (b.months[0] > nowYm) { bsByBucket.set(b.key, null); continue; }
       let assets = 0, liabilities = 0, equity = 0, curA = 0, curL = 0, inv = 0;
       for (const [code, net] of running) {
         const sec = sectionOf(code);
@@ -9739,9 +9782,8 @@ app.get("/dashboard", async (c) => {
         const detail = rowsCf
           .filter((r) => r.kind === "line" && (Number(r.values[i]) || 0) !== 0)
           .map((r) => ({ label: r.label, section: r.section ?? "", value: Number(r.values[i]) || 0 }));
-        const inflow = detail.filter((l) => l.value > 0).reduce((s, l) => s + l.value, 0);
-        const outflow = detail.filter((l) => l.value < 0).reduce((s, l) => s + l.value, 0);
-        cfByMonth.set(col.key, { operating, investing, financing, net, inflow, outflow, lines: detail });
+        const bank = st.bankByMonth?.get(col.key) ?? { inflow: 0, outflow: 0 };
+        cfByMonth.set(col.key, { operating, investing, financing, net, inflow: bank.inflow, outflow: bank.outflow, lines: detail });
       });
     }
   }

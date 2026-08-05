@@ -69,6 +69,8 @@ type Overview = {
     activeJobs: JobsBreakdown;
     completedYesterday: JobsBreakdown;
     completedLast7: { date: string; bedframeUnits: number; sofaSets: number }[];
+    /** Whole-window totals, deduped — NOT the per-day series added up. */
+    completedRange?: { bedframeUnits: number; sofaSets: number };
     capacityDays: { date: string; minutes: number; workers: number }[];
     // backlogDays: null = "stalled" (zero completions in the rolling window —
     // no honest way to express the queue in days).
@@ -1055,14 +1057,16 @@ export default function DashboardBPage() {
   // Completed headline: all-time shows yesterday's live pulse; a selected month
   // (current or past) shows that month's RUNNING TOTAL, summed from the per-day
   // series the backend already returns for the whole month range.
-  const completedMonthBf = (prod?.completedLast7 ?? []).reduce(
-    (s, d) => s + (d.bedframeUnits || 0),
-    0,
-  );
-  const completedMonthSofa = (prod?.completedLast7 ?? []).reduce(
-    (s, d) => s + (d.sofaSets || 0),
-    0,
-  );
+  // Take the server's whole-window total. Adding up the per-day series
+  // double-counts sofa sets, which are a DISTINCT count of sales orders — an
+  // order finishing across two days appears in both. Falls back to the sum
+  // only if an older payload has no range total.
+  const completedMonthBf =
+    prod?.completedRange?.bedframeUnits ??
+    (prod?.completedLast7 ?? []).reduce((s, d) => s + (d.bedframeUnits || 0), 0);
+  const completedMonthSofa =
+    prod?.completedRange?.sofaSets ??
+    (prod?.completedLast7 ?? []).reduce((s, d) => s + (d.sofaSets || 0), 0);
   const completedHeadBf = isAllTime
     ? (prod?.completedYesterday?.bedframeUnits ?? 0)
     : completedMonthBf;

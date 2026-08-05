@@ -39,14 +39,27 @@ type Resp = {
   };
 };
 
-function rateColor(rate: number | null): string {
+/**
+ * Below this many documents a rate is noise, not a measurement.
+ *
+ * Owner 2026-08-05: the Supplier panel read a red 0% off ONE document. One
+ * edited field on one scan is 0%, one clean scan is 100%, and neither says
+ * anything about the scanner. Shown greyed with the sample size instead, so a
+ * thin month reads as "not enough to judge" rather than "broken".
+ */
+const MIN_SAMPLE = 5;
+
+function rateColor(rate: number | null, total?: number): string {
   if (rate === null) return "#9CA3AF";
+  if (total !== undefined && total < MIN_SAMPLE) return "#9CA3AF";
   if (rate >= 97) return "#3B6D11";
   if (rate >= 85) return "#B5701A";
   return "#A32D2D";
 }
-function pct(rate: number | null): string {
-  return rate === null ? "—" : `${rate}%`;
+function pct(rate: number | null, total?: number): string {
+  if (rate === null) return "—";
+  if (total !== undefined && total < MIN_SAMPLE) return `${rate}%*`;
+  return `${rate}%`;
 }
 /** Seconds → "8.4s" / "2m 05s". Long scans read badly as raw seconds. */
 function secs(v: number | null): string {
@@ -69,11 +82,11 @@ function countWithUnit(total: number, unit: Bucket["unit"]): string {
   return `${total} ${noun}`;
 }
 
-function Tile({ label, rate, sub }: { label: string; rate: number | null; sub: string }) {
+function Tile({ label, rate, sub, total }: { label: string; rate: number | null; sub: string; total?: number }) {
   return (
     <div className="rounded-lg bg-[#F5F1EA] px-4 py-3">
       <div className="text-xs text-[#8A8577] mb-1">{label}</div>
-      <div className="text-2xl font-semibold tabular-nums" style={{ color: rateColor(rate) }}>{pct(rate)}</div>
+      <div className="text-2xl font-semibold tabular-nums" style={{ color: rateColor(rate, total) }}>{pct(rate, total)}</div>
       <div className="text-[11px] text-[#9A9384]">{sub}</div>
     </div>
   );
@@ -95,7 +108,7 @@ function CustomerRow({ b }: { b: Bucket }) {
           {b.key}
         </td>
         <td className="px-2 py-2 text-right tabular-nums text-[#6B7280]">{countWithUnit(b.total, b.unit)}</td>
-        <td className="px-2 py-2 text-right tabular-nums font-semibold" style={{ color: rateColor(b.rate) }}>{pct(b.rate)}</td>
+        <td className="px-2 py-2 text-right tabular-nums font-semibold" style={{ color: rateColor(b.rate, b.total) }}>{pct(b.rate, b.total)}</td>
         <td className="px-3 py-2 text-[#8A8577] text-xs">{b.topFails.length ? b.topFails.join(" · ") : "—"}</td>
       </tr>
       {open && hasKids
@@ -103,7 +116,7 @@ function CustomerRow({ b }: { b: Bucket }) {
             <tr key={cc.key} className="border-t border-[#F6F2EA]">
               <td className="py-1.5 pl-9 pr-3 text-[#5F5E5A]">{cc.key}</td>
               <td className="px-2 py-1.5 text-right tabular-nums text-[#9A9384]">{countWithUnit(cc.total, cc.unit)}</td>
-              <td className="px-2 py-1.5 text-right tabular-nums" style={{ color: rateColor(cc.rate) }}>{pct(cc.rate)}</td>
+              <td className="px-2 py-1.5 text-right tabular-nums" style={{ color: rateColor(cc.rate, cc.total) }}>{pct(cc.rate, cc.total)}</td>
               <td className="px-3 py-1.5 text-[#9A9384] text-xs">{cc.topFails.length ? cc.topFails.join(" · ") : "—"}</td>
             </tr>
           ))
@@ -137,7 +150,7 @@ export function OcrAccuracyCard({
             <span className="text-base font-semibold text-[#1F1D1B]">OCR Accuracy</span>
             <span className="text-xs font-normal text-[#9A9384]">· {periodLabel}</span>
           </div>
-          <span className="text-xs text-[#8A8577]">Changed after upload = Fail · automate only near ~100%</span>
+          <span className="text-xs text-[#8A8577]">Changed after upload = Fail · automate only near ~100% · * = fewer than 5 documents, not enough to judge</span>
         </div>
 
         {loading && !d ? (
@@ -149,9 +162,9 @@ export function OcrAccuracyCard({
         ) : (
           <>
             <div className="grid grid-cols-3 gap-3 mb-5">
-              <Tile label="Overall" rate={d.overall.rate} sub={`${d.overall.success} / ${d.overall.total} documents clean`} />
-              <Tile label="Sales Orders" rate={d.salesOrders.rate} sub={countWithUnit(d.salesOrders.total, d.salesOrders.unit)} />
-              <Tile label="Supplier (PO/PI/GRN)" rate={d.supplier.rate} sub={countWithUnit(d.supplier.total, d.supplier.unit)} />
+              <Tile label="Overall" rate={d.overall.rate} total={d.overall.total} sub={`${d.overall.success} / ${d.overall.total} documents clean`} />
+              <Tile label="Sales Orders" rate={d.salesOrders.rate} total={d.salesOrders.total} sub={countWithUnit(d.salesOrders.total, d.salesOrders.unit)} />
+              <Tile label="Supplier (PO/PI/GRN)" rate={d.supplier.rate} total={d.supplier.total} sub={countWithUnit(d.supplier.total, d.supplier.unit)} />
             </div>
 
             {d.salesOrders.customers.length > 0 ? (
@@ -200,7 +213,7 @@ export function OcrAccuracyCard({
                         <tr key={t.key} className="border-t border-[#F0ECE3]">
                           <td className="px-3 py-2 font-medium text-[#1F1D1B]">{t.key}</td>
                           <td className="px-2 py-2 text-right tabular-nums text-[#6B7280]">{countWithUnit(t.total, t.unit)}</td>
-                          <td className="px-2 py-2 text-right tabular-nums font-semibold" style={{ color: rateColor(t.rate) }}>{pct(t.rate)}</td>
+                          <td className="px-2 py-2 text-right tabular-nums font-semibold" style={{ color: rateColor(t.rate, t.total) }}>{pct(t.rate, t.total)}</td>
                           <td className="px-3 py-2 text-[#8A8577] text-xs">{t.topFails.length ? t.topFails.join(" · ") : "—"}</td>
                         </tr>
                       ))}

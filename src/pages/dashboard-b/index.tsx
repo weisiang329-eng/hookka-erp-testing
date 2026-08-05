@@ -89,6 +89,13 @@ type Overview = {
     itemsPendingReceipt: number;
     grnsPendingQC: number;
     topSuppliers: { name: string; spendSen: number }[];
+    /** Which month the money figures belong to; "all" for all-time. */
+    period: string;
+    /** The month before it, or "" on all-time. */
+    prevPeriod: string;
+    piSpendThisMonthSen: number;
+    piSpendPrevMonthSen: number;
+    topSuppliersByPi: { name: string; spendSen: number; invoices: number }[];
   };
   fabricCostPerMeterSen?: {
     total: number;
@@ -334,7 +341,8 @@ function toQuarterly(
   return [...q.entries()]
     .sort((a, b) => a[0].localeCompare(b[0]))
     .slice(-8)
-    .map(([label, v]) => ({ label, ...v }));
+    .map(([label, v]) => ({ label, ...v }))
+    .reverse();
 }
 
 // Customer-mix donut palette — professional financial-report scheme
@@ -2184,8 +2192,11 @@ export default function DashboardBPage() {
                 <p className="text-[11px] text-[#9CA3AF]">
                   Excl. Bedframe &amp; Sofa
                 </p>
+                {/* Zero here means "no fabric was issued to anything other
+                    than bedframe or sofa in this period", not "it cost
+                    nothing". RM 0.00 read as a broken figure. */}
                 <p className="text-xl font-bold text-[#1F1D1B] tabular-nums">
-                  {rm(fc.exclBedframeSofa)}
+                  {fc.exclBedframeSofa > 0 ? rm(fc.exclBedframeSofa) : "—"}
                 </p>
               </div>
               <p className="text-[10px] text-[#9CA3AF] max-w-[16rem]">
@@ -2201,11 +2212,16 @@ export default function DashboardBPage() {
             const trend =
               fabGran === "quarter"
                 ? toQuarterly(blk?.monthly ?? [])
-                : (blk?.monthly ?? []).map((m) => ({
-                    label: m.month,
-                    meters: m.meters,
-                    lateMeters: m.lateMeters ?? 0,
-                  }));
+                : (blk?.monthly ?? [])
+                    .map((m) => ({
+                      label: m.month,
+                      meters: m.meters,
+                      lateMeters: m.lateMeters ?? 0,
+                    }))
+                    // Newest at the top (owner 2026-08-05). The series arrives
+                    // oldest-first because that is the order a chart needs;
+                    // this list is read like a statement, not a chart.
+                    .reverse();
             const mMax = Math.max(1, ...trend.map((t) => t.meters));
             const fabRows =
               fabMode === "next"
@@ -2228,7 +2244,7 @@ export default function DashboardBPage() {
                     sub={
                       fabMode === "next"
                         ? "forecast — next 30 days · purchase price /m"
-                        : "used (history) · purchase price /m"
+                        : `used in ${period === "all" ? "all time" : period} · lifetime purchase price /m`
                     }
                     right={
                       <div className="text-right">
@@ -2271,8 +2287,19 @@ export default function DashboardBPage() {
                               live
                             </span>
                           </th>
-                          <th className="font-medium pb-1.5 text-right">
+                          {/* Weighted average across EVERY receipt ever, not
+                              the selected month — three columns on this row sit
+                              on three different clocks (Used = the month,
+                              Past 30d = a rolling window, Avg buy = lifetime)
+                              and none of them said so. Owner 2026-08-05. */}
+                          <th
+                            className="font-medium pb-1.5 text-right"
+                            title="Weighted average purchase price across all receipts to date — not scoped to the selected month."
+                          >
                             Avg buy
+                            <span className="ml-1 text-[8px] uppercase tracking-wide text-[#9CA3AF]">
+                              all time
+                            </span>
                           </th>
                           <th className="font-medium pb-1.5 text-right">
                             Min–Max
@@ -2497,8 +2524,11 @@ export default function DashboardBPage() {
 
         <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
           <CardContent className="p-5">
-            <SectionTitle title="Purchasing" sub="open POs · spend" />
-            <div className="grid grid-cols-2 gap-3 mb-3">
+            <SectionTitle
+              title="Purchasing"
+              sub="open POs · invoiced spend"
+            />
+            <div className="grid grid-cols-3 gap-3 mb-3">
               <div>
                 <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
                   Open POs
@@ -2506,30 +2536,63 @@ export default function DashboardBPage() {
                 <p className="text-lg font-bold text-[#1F1D1B]">
                   {pur?.openPOCount ?? 0}
                 </p>
+                {/* Not month-scoped, and it never said so. It used to sit
+                    beside a month-only spend figure with neither labelled —
+                    owner 2026-08-05: "你这个最新数据到底是几月份的？" */}
+                <p className="text-[10px] text-[#9CA3AF]">all open</p>
               </div>
               <div>
                 <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
-                  Spend / month
+                  PI spend
                 </p>
                 <p className="text-lg font-bold text-[#1F1D1B]">
-                  {rm(pur?.spendThisMonthSen)}
+                  {rm(pur?.piSpendThisMonthSen)}
+                </p>
+                <p className="text-[10px] text-[#9CA3AF]">
+                  {pur?.period && pur.period !== "all" ? pur.period : "all time"}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
+                  Prev month
+                </p>
+                <p className="text-lg font-bold text-[#5A5550]">
+                  {pur?.prevPeriod ? rm(pur?.piSpendPrevMonthSen) : "—"}
+                </p>
+                <p className="text-[10px] text-[#9CA3AF]">
+                  {pur?.prevPeriod || "—"}
                 </p>
               </div>
             </div>
+            {/* Ordered by what was INVOICED, not what was ordered. A purchase
+                order is a commitment; the invoice is the bill. The two diverge
+                badly month to month — August has RM 99,665 of orders against a
+                single RM 4,800 invoice — so the two figures answer different
+                questions and the card now says which one it is showing. */}
             <p className="text-[11px] font-semibold text-[#5A5550] mb-1">
-              Top suppliers
+              Top suppliers by PI amount
+              {pur?.period && pur.period !== "all" ? ` · ${pur.period}` : ""}
             </p>
-            {(pur?.topSuppliers ?? []).slice(0, 5).map((s) => (
-              <div
-                key={s.name}
-                className="flex items-center justify-between text-xs py-0.5"
-              >
-                <span className="text-[#5A5550] truncate pr-2">{s.name}</span>
-                <span className="font-semibold text-[#1F1D1B] tabular-nums">
-                  {rm(s.spendSen)}
-                </span>
-              </div>
-            ))}
+            {(pur?.topSuppliersByPi ?? []).length === 0 ? (
+              <p className="text-xs text-[#9CA3AF]">
+                No purchase invoices in this period.
+              </p>
+            ) : (
+              (pur?.topSuppliersByPi ?? []).slice(0, 5).map((s) => (
+                <div
+                  key={s.name}
+                  className="flex items-center justify-between text-xs py-0.5"
+                >
+                  <span className="text-[#5A5550] truncate pr-2">
+                    {s.name}
+                    <span className="text-[#9CA3AF]"> · {s.invoices} PI</span>
+                  </span>
+                  <span className="font-semibold text-[#1F1D1B] tabular-nums">
+                    {rm(s.spendSen)}
+                  </span>
+                </div>
+              ))
+            )}
           </CardContent>
         </Card>
       </div>

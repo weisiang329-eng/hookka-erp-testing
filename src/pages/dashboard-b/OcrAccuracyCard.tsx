@@ -15,6 +15,12 @@ type Bucket = {
   total: number;
   success: number;
   rate: number | null;
+  // What `total` counted. A customer row counts DOCUMENTS (imported POs) while
+  // its expanded category rows count LINES on those POs, so the two levels
+  // legitimately disagree — the parent 'PO' row read 59 while its children read
+  // 87 + 4 + 1 = 92 under one "Scans" header (owner 2026-08-05). Never render a
+  // total without its unit.
+  unit?: "documents" | "lines";
   topFails: string[];
   children?: Bucket[];
 };
@@ -50,6 +56,19 @@ function secs(v: number | null): string {
   return `${m}m ${String(Math.round(v - m * 60)).padStart(2, "0")}s`;
 }
 
+/**
+ * "59 docs" / "92 lines" — the unit ships with every bucket from
+ * /api/ocr-accuracy, so a parent and its children can never silently disagree
+ * about what they counted. Singular where it reads better.
+ */
+function countWithUnit(total: number, unit: Bucket["unit"]): string {
+  const noun =
+    unit === "lines"
+      ? total === 1 ? "line" : "lines"
+      : total === 1 ? "doc" : "docs";
+  return `${total} ${noun}`;
+}
+
 function Tile({ label, rate, sub }: { label: string; rate: number | null; sub: string }) {
   return (
     <div className="rounded-lg bg-[#F5F1EA] px-4 py-3">
@@ -75,7 +94,7 @@ function CustomerRow({ b }: { b: Bucket }) {
           ) : null}
           {b.key}
         </td>
-        <td className="px-2 py-2 text-right tabular-nums text-[#6B7280]">{b.total}</td>
+        <td className="px-2 py-2 text-right tabular-nums text-[#6B7280]">{countWithUnit(b.total, b.unit)}</td>
         <td className="px-2 py-2 text-right tabular-nums font-semibold" style={{ color: rateColor(b.rate) }}>{pct(b.rate)}</td>
         <td className="px-3 py-2 text-[#8A8577] text-xs">{b.topFails.length ? b.topFails.join(" · ") : "—"}</td>
       </tr>
@@ -83,7 +102,7 @@ function CustomerRow({ b }: { b: Bucket }) {
         ? b.children!.map((cc) => (
             <tr key={cc.key} className="border-t border-[#F6F2EA]">
               <td className="py-1.5 pl-9 pr-3 text-[#5F5E5A]">{cc.key}</td>
-              <td className="px-2 py-1.5 text-right tabular-nums text-[#9A9384]">{cc.total}</td>
+              <td className="px-2 py-1.5 text-right tabular-nums text-[#9A9384]">{countWithUnit(cc.total, cc.unit)}</td>
               <td className="px-2 py-1.5 text-right tabular-nums" style={{ color: rateColor(cc.rate) }}>{pct(cc.rate)}</td>
               <td className="px-3 py-1.5 text-[#9A9384] text-xs">{cc.topFails.length ? cc.topFails.join(" · ") : "—"}</td>
             </tr>
@@ -130,20 +149,20 @@ export function OcrAccuracyCard({
         ) : (
           <>
             <div className="grid grid-cols-3 gap-3 mb-5">
-              <Tile label="Overall" rate={d.overall.rate} sub={`${d.overall.success} / ${d.overall.total} clean`} />
-              <Tile label="Sales Orders" rate={d.salesOrders.rate} sub={`${d.salesOrders.total} scans`} />
-              <Tile label="Supplier (PO/PI/GRN)" rate={d.supplier.rate} sub={`${d.supplier.total} scans`} />
+              <Tile label="Overall" rate={d.overall.rate} sub={`${d.overall.success} / ${d.overall.total} documents clean`} />
+              <Tile label="Sales Orders" rate={d.salesOrders.rate} sub={countWithUnit(d.salesOrders.total, d.salesOrders.unit)} />
+              <Tile label="Supplier (PO/PI/GRN)" rate={d.supplier.rate} sub={countWithUnit(d.supplier.total, d.supplier.unit)} />
             </div>
 
             {d.salesOrders.customers.length > 0 ? (
               <div className="mb-5">
-                <div className="text-sm font-semibold text-[#6B5C32] mb-2">Sales Orders · Customer × Category <span className="font-normal text-[11px] text-[#9A9384]">(click a customer to expand categories)</span></div>
+                <div className="text-sm font-semibold text-[#6B5C32] mb-2">Sales Orders · Customer × Category <span className="font-normal text-[11px] text-[#9A9384]">(click a customer to expand categories — a customer row counts documents, a category row counts the lines on them, so the two do not add up)</span></div>
                 <div className="overflow-x-auto rounded-lg border border-[#E7E0D4]">
                   <table className="w-full text-[13px]">
                     <thead>
                       <tr className="bg-[#FAF7F2] text-[11px] uppercase tracking-wide text-[#8A8577]">
                         <th className="px-3 py-2 text-left">Customer / Category</th>
-                        <th className="px-2 py-2 text-right">Scans</th>
+                        <th className="px-2 py-2 text-right">Documents / Lines</th>
                         <th className="px-2 py-2 text-right">Success</th>
                         <th className="px-3 py-2 text-left">Most-changed fields</th>
                       </tr>
@@ -171,7 +190,7 @@ export function OcrAccuracyCard({
                     <thead>
                       <tr className="bg-[#FAF7F2] text-[11px] uppercase tracking-wide text-[#8A8577]">
                         <th className="px-3 py-2 text-left">Document type</th>
-                        <th className="px-2 py-2 text-right">Scans</th>
+                        <th className="px-2 py-2 text-right">Documents</th>
                         <th className="px-2 py-2 text-right">Success</th>
                         <th className="px-3 py-2 text-left">Most-changed fields</th>
                       </tr>
@@ -180,7 +199,7 @@ export function OcrAccuracyCard({
                       {d.supplier.docTypes.map((t) => (
                         <tr key={t.key} className="border-t border-[#F0ECE3]">
                           <td className="px-3 py-2 font-medium text-[#1F1D1B]">{t.key}</td>
-                          <td className="px-2 py-2 text-right tabular-nums text-[#6B7280]">{t.total}</td>
+                          <td className="px-2 py-2 text-right tabular-nums text-[#6B7280]">{countWithUnit(t.total, t.unit)}</td>
                           <td className="px-2 py-2 text-right tabular-nums font-semibold" style={{ color: rateColor(t.rate) }}>{pct(t.rate)}</td>
                           <td className="px-3 py-2 text-[#8A8577] text-xs">{t.topFails.length ? t.topFails.join(" · ") : "—"}</td>
                         </tr>
@@ -232,7 +251,7 @@ export function OcrAccuracyCard({
                     <thead>
                       <tr className="bg-[#FAF7F2] text-[11px] uppercase tracking-wide text-[#8A8577]">
                         <th className="px-3 py-2 text-left">Supplier</th>
-                        <th className="px-2 py-2 text-right">Scans</th>
+                        <th className="px-2 py-2 text-right">Documents</th>
                         <th className="px-2 py-2 text-right">Success</th>
                         <th className="px-3 py-2 text-left">Most-changed fields</th>
                       </tr>
@@ -241,7 +260,7 @@ export function OcrAccuracyCard({
                       {d.supplier.suppliers.slice(0, 12).map((s) => (
                         <tr key={s.key} className="border-t border-[#F0ECE3]">
                           <td className="px-3 py-2 font-medium text-[#1F1D1B]">{s.key}</td>
-                          <td className="px-2 py-2 text-right tabular-nums text-[#6B7280]">{s.total}</td>
+                          <td className="px-2 py-2 text-right tabular-nums text-[#6B7280]">{countWithUnit(s.total, s.unit)}</td>
                           <td className="px-2 py-2 text-right tabular-nums font-semibold" style={{ color: rateColor(s.rate) }}>{pct(s.rate)}</td>
                           <td className="px-3 py-2 text-[#8A8577] text-xs">{s.topFails.length ? s.topFails.join(" · ") : "—"}</td>
                         </tr>

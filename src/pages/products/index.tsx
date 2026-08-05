@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef, Fragment, type ReactNode } from "react";
+import { usePermissions } from "@/lib/use-permission";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cachedFetchJson, invalidateCachePrefix, useCachedJson } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
@@ -2020,7 +2021,30 @@ export default function ProductsPage() {
     () => sofaHeightsFromConfig(maintenanceConfig),
     [maintenanceConfig],
   );
-  const baseCols = useMemo(() => buildBaseCols(sofaHeightList), [sofaHeightList]);
+  // Owner 2026-08-05: "我们卖价不需要给他们知道，我们只需要给他们看到成本就可以."
+  // The API already withholds the figures, so these columns would render blank;
+  // dropping them keeps the grid readable instead of leaving a row of dashes,
+  // and takes the derived Margin / Labor-% columns with them (they are price
+  // minus cost, so without a price there is nothing to show).
+  const { hasPermission: hasPerm } = usePermissions();
+  const canSeePricing = hasPerm("product-pricing", "read");
+  const PRICE_COL_KEYS = useMemo(
+    () => new Set(["price2", "price1", "basePrice", "marginP2", "marginP1", "laborPctP2", "laborPctP1"]),
+    [],
+  );
+  const baseCols = useMemo(() => {
+    const built = buildBaseCols(sofaHeightList);
+    if (canSeePricing) return built;
+    const out = {} as typeof built;
+    for (const [cat, cols] of Object.entries(built)) {
+      out[cat as keyof typeof built] = cols.filter(
+        // H_COL_RE matches the dynamic sofa seat-height columns, which are
+        // seat PRICES — same rule as the static price columns.
+        (col) => !PRICE_COL_KEYS.has(col.key) && !H_COL_RE.test(col.key),
+      );
+    }
+    return out;
+  }, [sofaHeightList, canSeePricing, PRICE_COL_KEYS]);
   // Fabric list. Variant editor uses this for the Default Fabric
   // dropdown — same source as Sales Order's fabric picker so codes align.
   const [fabricList, setFabricList] = useState<{ code: string; description?: string }[]>([]);

@@ -251,6 +251,37 @@ export async function requirePermission(
  * cannot disable or delete other people's accounts — "otherwise anyone
  * could just disable my account". Returns null when allowed, else a 403.
  */
+/**
+ * Boolean form of requirePermission — "may they, yes or no".
+ *
+ * `requirePermission` answers by returning a 403 to send, which is right for a
+ * whole endpoint but wrong for a FIELD. Selling price and revenue travel inside
+ * payloads their readers are otherwise entitled to: R&D may read the product
+ * catalogue but not what it sells for, HR may read the labour report but not
+ * the revenue beside it (owner 2026-08-05). Refusing the whole response would
+ * take the page away; this lets the route drop the column instead.
+ */
+export async function hasPermission(
+  c: Context<Env>,
+  resource: string,
+  action: string,
+): Promise<boolean> {
+  const role = (
+    c as unknown as { get: (k: string) => string | undefined }
+  ).get("userRole")?.toUpperCase();
+  if (!role) return false;
+  if (role === "SUPER_ADMIN" || role === "ADMIN") return true;
+  let set: PermSet;
+  try {
+    set = await getRolePermissions(c, role);
+  } catch {
+    // Fail CLOSED for a field check. A transient failure hiding a price column
+    // is a cosmetic problem; showing one is the thing being prevented.
+    return false;
+  }
+  return permitted(set, resource, action);
+}
+
 export function requireSuperAdmin(c: Context<Env>): Response | null {
   const role = (
     c as unknown as { get: (k: string) => string | undefined }

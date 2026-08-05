@@ -133,9 +133,32 @@ test("QA writes in Quality and can return a rejected delivery", () => {
 // ── R&D ─────────────────────────────────────────────────────────────────────
 
 test("R&D can change what it exists to change", () => {
-  for (const res of ["products", "bom", "sofa-combos", "product-configs", "rd-projects"]) {
+  for (const res of ["products", "bom", "product-configs", "rd-projects"]) {
     assert.ok(can("R_AND_D", res, "update"), `R&D needs to edit ${res}`);
   }
+});
+
+test("R&D sees what a product COSTS, never what it sells for", () => {
+  // Owner 2026-08-05: "我们卖价不需要给他们知道，我们只需要给他们看到成本就可以."
+  // The catalogue, the BOM and the build stay; the price does not.
+  assert.ok(can("R_AND_D", "products", "update"), "R&D still needs the catalogue");
+  assert.ok(can("R_AND_D", "bom", "update"), "R&D still needs the BOM");
+  assert.ok(!can("R_AND_D", "product-pricing", "read"), "R&D must not see selling price");
+  // Sofa Combos is a per-customer price list — removed the same day.
+  assert.ok(!can("R_AND_D", "sofa-combos", "read"), "R&D must not see combo pricing");
+
+  // And the roles that reached prices through `products` before it split off
+  // must NOT have lost them. Only R&D was to lose anything.
+  for (const role of ["SALES", "OFFICE", "QA"]) {
+    assert.ok(can(role, "product-pricing", "read"), `${role} lost selling price`);
+  }
+});
+
+test("HR sees the labour bill, not the revenue beside it", () => {
+  // Owner 2026-08-05: "我们只需要保留着人工成本，给 HR 看到就行."
+  assert.ok(can("HR", "workers", "read"), "HR still needs the labour report");
+  assert.ok(!can("HR", "revenue-figures", "read"), "HR must not see revenue / remain");
+  assert.ok(can("OFFICE", "revenue-figures", "read"), "Office should still see it");
 });
 
 test("R&D keeps fabrics even though they sit under Warehouse", () => {

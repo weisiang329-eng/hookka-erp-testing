@@ -18,6 +18,7 @@
 //
 // Usage in a Hono route handler:
 //   import { requirePermission } from "../lib/rbac";
+import { permissionsForRole } from "./role-policy";
 //   app.post("/", async (c) => {
 //     const denied = await requirePermission(c, "sales-orders", "create");
 //     if (denied) return denied;       // 403 response, abort handler
@@ -75,6 +76,16 @@ async function loadRolePermissions(
   // text is what auth-middleware already stamps on the context from the
   // legacy users.role TEXT column, so this keeps the dashboard working
   // until ops re-applies migrations.
+  // A role whose policy is written in CODE never touches the table.
+  //
+  // Owner 2026-08-04: "我全部不要用这种正常的渠道，我要用 backend 直接写出来的."
+  // The gate below is unchanged — this only decides where the permission set
+  // comes from. It short-circuits BEFORE the query so the two can never
+  // disagree: a stale `role_permissions` row for a code-defined role is simply
+  // never read, rather than quietly widening or narrowing what the code says.
+  const coded = permissionsForRole(role);
+  if (coded) return coded;
+
   let rows: { results?: { resource: string; action: string }[] } = {};
   try {
     rows = await db

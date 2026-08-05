@@ -83,7 +83,6 @@ const navigationGroups: NavGroup[] = [
       { name: "Notifications", href: "/notifications", icon: Bell },
       { name: "Announcements", href: "/announcements", icon: Megaphone },
       { name: "Mail Center", href: "/mail-center", icon: Mail },
-      { name: "Forecasting", href: "/analytics/forecast", icon: TrendingUp },
     ],
   },
   {

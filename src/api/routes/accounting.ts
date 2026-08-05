@@ -9497,7 +9497,14 @@ app.get("/dashboard", async (c) => {
      )`,
   ).run();
   const dashOrgId = getOrgId(c);
-  const dashCacheKey = `${quarterly ? "q" : "m"}:${wanted}:${nowYm}:${dashOrgId}`;
+  // PAYLOAD VERSION — bump whenever this endpoint's response SHAPE changes.
+  // The snapshot's freshness probe watches the source TABLES, so a pure code
+  // change never invalidates it: after the cash in/out + cost-structure
+  // forecast fields shipped, the stored 12-month copy kept serving the old
+  // shape (its data hadn't changed, so it never revalidated) and the new rows
+  // read "-" forever. Versioning the key retires every stale copy at once.
+  const DASH_PAYLOAD_V = "v2";
+  const dashCacheKey = `${DASH_PAYLOAD_V}:${quarterly ? "q" : "m"}:${wanted}:${nowYm}:${dashOrgId}`;
   const dashPayload = await withSnapshot(
     c.var.DB,
     {

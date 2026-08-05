@@ -156,12 +156,12 @@ test("it never throws — one bad query cannot take a report down", async () => 
 });
 
 test("the detector writes NOTHING", () => {
-  const src = readFileSync("src/api/lib/ocr-code-misses.ts", "utf8");
+  const src = readFileSync("src/api/lib/ocr-code-misses.ts", "utf8").replace(/\r\n/g, "\n");
   assert.doesNotMatch(src, /\b(INSERT INTO|UPDATE \w+ SET|DELETE FROM|ALTER TABLE|DROP TABLE)\b/);
 });
 
 test("it is reachable on demand", () => {
-  const reports = readFileSync("src/api/routes/reports.ts", "utf8");
+  const reports = readFileSync("src/api/routes/reports.ts", "utf8").replace(/\r\n/g, "\n");
   assert.match(reports, /app\.get\("\/ocr-code-misses\.json"/);
 });
 

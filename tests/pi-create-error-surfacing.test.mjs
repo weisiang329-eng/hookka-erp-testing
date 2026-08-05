@@ -25,7 +25,7 @@ import { resolve } from "node:path";
 const SRC = readFileSync(
   resolve(process.cwd(), "src/api/routes/purchase-invoices.ts"),
   "utf8",
-);
+).replace(/\r\n/g, "\n");
 
 test("the first insert failure is always logged, not only for foreign PIs", () => {
   const block = SRC.slice(SRC.indexOf("  try {\n    await db.batch(statements);"));

@@ -25,7 +25,7 @@ import { resolve } from "node:path";
 const SRC = readFileSync(
   resolve(process.cwd(), "src/components/scan-supplier-modal.tsx"),
   "utf8",
-);
+).replace(/\r\n/g, "\n");
 
 test("both modes resolve EVERY PO the document named, not just one", () => {
   assert.equal(

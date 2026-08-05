@@ -22,7 +22,7 @@ import { resolve } from "node:path";
 const SRC = readFileSync(
   resolve(process.cwd(), "src/components/scan-supplier-modal.tsx"),
   "utf8",
-);
+).replace(/\r\n/g, "\n");
 
 test("the over-billed line is flagged in the preview", () => {
   assert.match(SRC, /function poOrderedFor\(/);

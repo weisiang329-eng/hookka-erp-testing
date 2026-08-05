@@ -24,7 +24,7 @@ import { resolve } from "node:path";
 const SRC = readFileSync(
   resolve(process.cwd(), "src/components/scan-supplier-modal.tsx"),
   "utf8",
-);
+).replace(/\r\n/g, "\n");
 
 test("the picker ADDS to a set instead of replacing one value", () => {
   assert.equal(

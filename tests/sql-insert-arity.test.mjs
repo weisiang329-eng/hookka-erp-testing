@@ -41,7 +41,7 @@ test("every INSERT supplies exactly one expression per column", () => {
     /INSERT\s+(?:OR\s+IGNORE\s+)?INTO\s+([a-z_][a-z0-9_]*)\s*\(([^()]*?)\)\s*VALUES\s*\(([^()]*?)\)/gis;
   const bad = [];
   for (const file of walk("src/api")) {
-    const src = readFileSync(file, "utf8");
+    const src = readFileSync(file, "utf8").replace(/\r\n/g, "\n");
     for (const m of src.matchAll(RE)) {
       const [, table, colBlock, valBlock] = m;
       // A column list containing ${...} is built at runtime — not comparable.
@@ -61,7 +61,7 @@ test("every INSERT supplies exactly one expression per column", () => {
 });
 
 test("the payslip INSERT specifically — the one that wiped July", () => {
-  const src = readFileSync("src/api/routes/payslips.ts", "utf8");
+  const src = readFileSync("src/api/routes/payslips.ts", "utf8").replace(/\r\n/g, "\n");
   const i = src.indexOf("INSERT OR IGNORE INTO payslips");
   assert.ok(i > 0, "the payslip INSERT moved — update this test");
   const block = src.slice(i, src.indexOf(")`,", i) + 3);

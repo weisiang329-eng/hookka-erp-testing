@@ -13,8 +13,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const page = readFileSync("src/pages/settings/Users.tsx", "utf8");
-const drawer = readFileSync("src/components/user-detail-drawer.tsx", "utf8");
+const page = readFileSync("src/pages/settings/Users.tsx", "utf8").replace(/\r\n/g, "\n");
+const drawer = readFileSync("src/components/user-detail-drawer.tsx", "utf8").replace(/\r\n/g, "\n");
 
 test("the row's edit action opens the drawer, not the alias modal", () => {
   assert.match(page, /setDrawerUser\(u\);/);

@@ -29,7 +29,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const read = (p) => readFileSync(resolve(process.cwd(), p), "utf8");
+const read = (p) => readFileSync(resolve(process.cwd(), p), "utf8").replace(/\r\n/g, "\n");
 const PO_HELPERS = read("src/api/routes/production-orders/_helpers.ts");
 const PO_ROUTES = read("src/api/routes/production-orders.ts");
 const SO_HELPERS = read("src/api/routes/sales-orders/_helpers.ts");

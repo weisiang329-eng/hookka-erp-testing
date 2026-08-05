@@ -26,6 +26,7 @@
 //   5. Route handlers — imported from routes/* (Supabase-backed).
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import { customerScopeMiddleware } from "./lib/customer-scope";
 import { isTransientDbError } from "./lib/supabase-compat";
 import { cors } from "hono/cors";
 
@@ -910,6 +911,20 @@ app.route("/api/push", push);
 // PUBLIC_PREFIXES (worker-auth, worker, fg-units) handled inside the middleware.
 // MUST be registered BEFORE any route that touches business data.
 app.use("/api/*", authMiddleware);
+
+// Row-level scope for a salesperson: their OWN customers' documents only
+// (owner 2026-08-04: "只能看到自己顾客的单据").
+//
+// Registered ONCE here and gated on the path prefix inside, rather than bolted
+// onto each of the 29 GET endpoints across customers / sales-orders /
+// delivery-orders / delivery-returns / invoices / consignments. A missed
+// endpoint would not look broken — it would render another salesperson's
+// customer list perfectly normally — so a new endpoint under any of those
+// routes must inherit the filter without anyone remembering to add it.
+//
+// AFTER authMiddleware, because it needs userId and userRole on the context.
+// Roles outside SCOPED_ROLES pass through untouched.
+app.use("/api/*", customerScopeMiddleware);
 
 // Phase C #1 quick-win — resolves the authenticated user's orgId and stashes
 // it on the Hono context. Routes consume via getOrgId(c) / withOrgScope(c, ...)

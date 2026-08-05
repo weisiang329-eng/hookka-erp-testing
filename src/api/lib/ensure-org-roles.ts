@@ -146,24 +146,20 @@ export const ORG_ROLES: OrgRole[] = [
       notifications: RO,
     },
   },
-  {
-    id: "role_management",
-    name: "MANAGEMENT",
-    description: "Oversight — read across the business, approve spend",
-    departments: ["Management"],
-    // Read-everything is granted below by expansion, not listed here; the
-    // explicit grants are the WRITE actions management actually needs.
-    grants: {
-      "purchase-orders": ["read", "approve"],
-      "sales-orders": ["read", "confirm"],
-      forecasts: RW,
-      notifications: RO,
-    },
-  },
 ];
 
-/** Roles that also receive read on EVERY resource. */
-const READ_ALL_ROLES = new Set(["role_management"]);
+/**
+ * Roles that also receive read on EVERY resource.
+ *
+ * Empty on purpose. A "MANAGEMENT" role was drafted here — read-all plus the
+ * two approvals — and the owner rejected it: management is the ownership
+ * layer, so limiting it to reading means every action routes through someone
+ * else. It would also have been decorative, since `requireSuperAdmin` in
+ * users.ts gates account management independently of the permission table, so
+ * even a wildcard MANAGEMENT could not open an account. Management maps to
+ * SUPER_ADMIN instead, and a role nobody uses is worse than no role.
+ */
+const READ_ALL_ROLES = new Set<string>();
 
 let _applied = false;
 
@@ -237,6 +233,10 @@ export function defaultRoleForDepartment(department: string): string | null {
     PROCUREMENT: "PROCUREMENT",
     WAREHOUSE: "WAREHOUSE",
     WAREHOUSING: "WAREHOUSE",
+    // Owner ruling 2026-08-04: "management 不是跟 superadmin 的吗？" — yes.
+    // Only a SUGGESTED default; nothing auto-assigns it, precisely because
+    // handing the master key to a department is not something to automate.
+    MANAGEMENT: "SUPER_ADMIN",
   };
   return legacy[d] ?? null;
 }

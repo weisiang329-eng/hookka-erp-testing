@@ -2835,3 +2835,43 @@ past 14 working days ran at 97-125%. Everything below came out of chasing that.
 (~270 new). Planning numbers still NOT run against prod data — they depend on real output.
 The procurement work above is verified by tests only; no prod document has been scanned
 through the new ladder yet.
+
+---
+
+## 2026-08-05 — finance dashboard, the super-admin menu, purchase-invoice void
+
+Owner asks this session, in order, all closed:
+1. GL page: back-to-top button + Debit/Credit totals — done.
+2. Purchase/Sales ledger had no totals — added to both party ledgers.
+3. Supplier payment edit failure + "editing an advance double-books a PV" — investigated
+   (no system duplication; the twins were void+re-entered because a payment carrying an
+   advance could not be edited), then advances made editable on the edit screen because
+   that grid is how the owner knocks off in bulk.
+4. Unused finance features listed, then Monthly Trend / Cost & Expense Classes / the whole
+   legacy Reports entry removed on his ruling.
+5. Forecast P&L built to his spec, then refined (focus-aware thousand separators, FY from
+   the server, % beside spend, shared materials apportioned by sales).
+6. **Financial Dashboard** (`/finance-dashboard`, FORECASTING group) — six cards off a new
+   `GET /api/accounting/dashboard`. Design agreed before any code, then ~8 rounds of his
+   refinements. The settled rules are in `CHECKPOINT-交接.md` under 2026-08-05; the two that
+   bite are `DASH_PAYLOAD_V` (the snapshot cache does not invalidate on a code change) and
+   inflow/outflow being derived from bank legs rather than summed statement lines.
+7. **BUG-2026-08-05-001** — the super admin's own menu was cut to a read-only one because
+   the menu endpoint and the gate read the role from different columns. See BUG-HISTORY.
+8. **Purchase-invoice Void** — `POST /api/purchase-invoices/:id/void`, gated by the new
+   `requireFinance` guard (FINANCE / SUPER_ADMIN / ADMIN), NOT by `purchase-invoices:*`:
+   several roles hold that to raise invoices, while reversing a posted entry is a finance
+   decision. Reverses the visible legs netted per account, restores `grn_items.invoiced_qty`,
+   sets CANCELLED, refuses any part-paid invoice, idempotent.
+
+### Verification
+`typecheck:app` clean · lint clean on every touched file · **2989 tests / 0 fail**
+(8 new in `tests/pi-void.test.mjs`, 5 in `tests/me-permissions-role-source.test.mjs`).
+Deploy `a4b13ee4` green; live check = void route answers 401 (registered, auth required)
+and the shipped `PurchaseInvoiceDetail` chunk carries `/void` + the SUPER_ADMIN gate.
+Dashboard figures tied out against prod data (Jun'26 COGS 293,469 = its components;
+cash 20,000 in − 151,388 out = net −131,388).
+
+### Not done, deliberately
+**PI-2605-011 was NOT voided.** The owner's last word on that invoice was 「你检查就好」;
+he then asked for the capability, not for it to be used. His call.

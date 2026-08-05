@@ -108,6 +108,16 @@ function emptyPILine(): PILineDraft {
   };
 }
 
+/**
+ * Mirrors futureInvoiceDate() in src/api/routes/purchase-invoices.ts, so the
+ * warning shown here and the refusal returned there never disagree.
+ */
+function isFutureInvoiceDate(date: string | null | undefined): boolean {
+  const d = (date ?? "").trim().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
+  return d > new Date(Date.now() + 36 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
 export default function CreatePurchaseInvoicePageWrapper() {
   return (
     <Suspense
@@ -702,6 +712,20 @@ function CreatePurchaseInvoicePage() {
                   onChange={(e) => setInvoiceDate(e.target.value)}
                   required
                 />
+                {/* Same warning the scan card carries. The server refuses a
+                    future-dated invoice — the payment term is calculated from
+                    this date, so a month slip is a month of late payment
+                    nobody sees until the supplier chases (PI-2608-009 on prod).
+                    Said here so the operator does not have to hit Create and
+                    then work out which field. The predicate mirrors
+                    futureInvoiceDate() in routes/purchase-invoices.ts, same
+                    36-hour tolerance for the UTC/MYT gap. */}
+                {isFutureInvoiceDate(invoiceDate) && (
+                  <p className="mt-1 text-xs text-[#9A3A2D]">
+                    This date is in the future — check the supplier&rsquo;s
+                    invoice. Creating will be refused until it is corrected.
+                  </p>
+                )}
               </div>
             </div>
 

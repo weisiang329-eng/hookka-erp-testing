@@ -2367,6 +2367,10 @@ app.get("/ap-control", async (c) => {
     supplierName: string;
     piNo: string;
     amountSen: number;
+    // Both spellings: the SQL asks for paid_amount_sen, the adapter hands back
+    // paidAmountSen. Declaring only the snake_case name is what let the
+    // undefined read past the typechecker (BUG-2026-08-05-002).
+    paidAmountSen?: number | null;
     paid_amount_sen?: number | null;
     status: string;
     dueDate: string | null;
@@ -2450,7 +2454,11 @@ app.get("/ap-control", async (c) => {
     if (apRowBeforeOpening({ id: pi.id, date: pi.invoiceDate, isOpening: pi.isOpening }, obDateAp, apExclCtl)) continue;
     // Net outstanding = face − paid (paid includes cash payments AND allocated
     // CN credits), so a knocked-off discount drops the subledger exactly once.
-    const amt = (Number(pi.amountSen) || 0) - (Number(pi.paid_amount_sen) || 0);
+    // Dual-key: the SQL asks for paid_amount_sen but the adapter camelCases
+    // every result column, so the snake_case read alone lands on undefined and
+    // silently counts every bill at FULL FACE (BUG-2026-08-05-002).
+    const amt =
+      (Number(pi.amountSen) || 0) - (Number(pi.paidAmountSen ?? pi.paid_amount_sen) || 0);
     if (amt <= 0) continue;
     piOutstandingSen += amt;
     let row = bySupplier.get(pi.supplierId);

@@ -2536,7 +2536,7 @@ export default function DashboardBPage() {
           <CardContent className="p-5">
             <SectionTitle
               title="Purchasing"
-              sub="open POs · invoiced spend"
+              sub="open POs · invoiced spend (by supplier invoice date)"
             />
             <div className="grid grid-cols-3 gap-3 mb-3">
               <div>
@@ -2552,6 +2552,12 @@ export default function DashboardBPage() {
                 <p className="text-[10px] text-[#9CA3AF]">all open</p>
               </div>
               <div>
+                {/* By INVOICE DATE, not by when the PI was keyed in. The two
+                    differ a lot: 13 PIs were entered in August 2026 but only
+                    one carries an August invoice date — the other 12 are July's
+                    (and one September's) bills, captured late. The list page
+                    numbers PIs by entry month, so without this line the two
+                    screens look like they disagree. Owner 2026-08-05. */}
                 <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
                   PI spend
                 </p>
@@ -2560,6 +2566,7 @@ export default function DashboardBPage() {
                 </p>
                 <p className="text-[10px] text-[#9CA3AF]">
                   {pur?.period && pur.period !== "all" ? pur.period : "all time"}
+                  <span className="block">by invoice date</span>
                 </p>
               </div>
               <div>

@@ -552,11 +552,34 @@ app.get("/", async (c) => {
           costSen: number;
         }>(),
       // Monthly fabric meters (RM_ISSUE), split Bedframe vs Sofa.
+      //
+      // These months are POSTING months, not consumption months — the ledger
+      // date is when the issue was recorded, which is not always when the
+      // fabric was cut. Owner 2026-08-05: "这个数据怎么可能是这样子的？"
+      // 2026-05 reads 6,403m against 300–800m either side, and 800 of its
+      // 1,394 issues (4,759m, 60%) belong to production orders raised in
+      // APRIL. That is April's cloth, booked late.
+      //
+      // The rows are real consumption and stay — dropping them would erase
+      // April's usage entirely.
+      //
+      // `lateMeters` reports the share whose production order predates the
+      // posting month. It is NOT a backfill detector, and an earlier version of
+      // this comment was wrong to imply it: measured across prod that share is
+      // 100% for August sofa, 83% for July, 48% for June. An order raised one
+      // month and cut the next is simply how the factory runs. It is exposed so
+      // the panel can say honestly that a bar is a POSTING month, not a
+      // production month; the May spike is a volume anomaly (1,394 issues
+      // against a ~120 baseline), which is a different question and one for the
+      // people who loaded it.
       db
         .prepare(
           `SELECT po.itemCategory AS "cat",
                   substr(cl.date::text, 1, 7) AS "ym",
-                  COALESCE(SUM(cl.qty),0) AS "meters"
+                  COALESCE(SUM(cl.qty),0) AS "meters",
+                  COALESCE(SUM(CASE
+                    WHEN substr(po.created_at::text, 1, 7) < substr(cl.date::text, 1, 7)
+                    THEN cl.qty ELSE 0 END), 0) AS "lateMeters"
              FROM cost_ledger cl
              JOIN raw_materials rm ON rm.id = cl.itemId
              JOIN production_orders po ON po.id = cl.refId
@@ -567,7 +590,7 @@ app.get("/", async (c) => {
             GROUP BY po.itemCategory, substr(cl.date::text, 1, 7)`,
         )
         .bind(orgId)
-        .all<{ cat: string; ym: string | null; meters: number }>(),
+        .all<{ cat: string; ym: string | null; meters: number; lateMeters: number }>(),
       // Invoiced per month — by invoiceDate, every invoice except
       // CANCELLED (incl. DRAFT, per Wei Siang: all current invoices are
       // still DRAFT, so excluding them would leave the line empty).
@@ -1741,6 +1764,8 @@ app.get("/", async (c) => {
         .map((r) => ({
           month: r.ym as string,
           meters: Number(r.meters) || 0,
+          /** Of those meters, how many belong to an EARLIER month's orders. */
+          lateMeters: Number(r.lateMeters) || 0,
         }))
         .sort((a, b) => a.month.localeCompare(b.month))
         .slice(-12);

@@ -32,8 +32,8 @@ export const NAV_RESOURCE: Record<string, string> = {
   // plant load on one screen — the numbers every department role is otherwise
   // kept away from. Mapped to `accounting`, which only Finance-side roles and
   // SUPER_ADMIN hold, so the command centre cannot leak past them.
-  "/dashboard": "accounting",
-  "/daily-report": "accounting",
+  "/dashboard": "dashboard",
+  "/daily-report": "dashboard",
 
   // Comms — everyone has these, but map them so a future role could not.
   "/notifications": "notifications",
@@ -182,7 +182,9 @@ const HOME_PREFERENCE = [
  */
 const ROLE_HOME: Record<string, string> = {
   SALES: "/sales",
-  OFFICE: "/procurement",
+  // Office got the Command Center on 2026-08-05, and a role that has it should
+  // land on it — that is what it is for.
+  OFFICE: "/dashboard",
   QA: "/quality",
   R_AND_D: "/rd",
   HR: "/employees",

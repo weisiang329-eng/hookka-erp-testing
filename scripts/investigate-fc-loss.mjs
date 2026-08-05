@@ -2,9 +2,10 @@
 // their FC JCs after the backfill. Run via:
 //   node scripts/investigate-fc-loss.mjs
 import postgres from "postgres";
+import { stagingUrl } from "./_db.mjs";
 
 const url =
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
+  stagingUrl();
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

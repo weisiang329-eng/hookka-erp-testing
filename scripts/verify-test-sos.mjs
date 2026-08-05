@@ -1,8 +1,9 @@
 // Verify SO-2605-001 (BF) + SO-2605-002 (SOFA) cascaded correctly per Option C.
 import postgres from "postgres";
+import { stagingUrl } from "./_db.mjs";
 
 const sql = postgres(
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres",
+  stagingUrl(),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

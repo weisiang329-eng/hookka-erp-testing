@@ -1,6 +1,7 @@
 import postgres from "postgres";
-const stagingUrl = "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
-const prodUrl = "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+import { prodUrl, stagingUrl } from "./_db.mjs";
+const stagingUrl = stagingUrl();
+const prodUrl = prodUrl();
 
 async function dump(label, url) {
   const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });

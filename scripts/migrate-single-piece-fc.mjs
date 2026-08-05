@@ -4,7 +4,8 @@
 // breaks audit checks. Rebuild wipKey/wipLabel/wipType to be uniform
 // with the rest of the merged FC universe.
 import postgres from "postgres";
-const sql = postgres("postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres", { ssl: "require", max: 1, idle_timeout: 5 });
+import { stagingUrl } from "./_db.mjs";
+const sql = postgres(stagingUrl(), { ssl: "require", max: 1, idle_timeout: 5 });
 
 function buildLabel(modelLabel, sizeLabel, totalH, divanH, fabric, isBF) {
   return [

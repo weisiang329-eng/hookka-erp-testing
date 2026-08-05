@@ -1,5 +1,6 @@
 import postgres from "postgres";
-const sql = postgres("postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres", { ssl: "require", max: 1, idle_timeout: 5 });
+import { prodUrl } from "./_db.mjs";
+const sql = postgres(prodUrl(), { ssl: "require", max: 1, idle_timeout: 5 });
 try {
   const c = await sql`SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'kv_config' ORDER BY ordinal_position`;
   for (const x of c) console.log(`  ${x.column_name} ${x.data_type}`);

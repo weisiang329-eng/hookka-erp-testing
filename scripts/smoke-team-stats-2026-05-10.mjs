@@ -5,6 +5,7 @@
 // (department_codes, categories). The Cloudflare D1-compat adapter on the
 // API side translates camelCase ↔ snake_case.
 import postgres from "postgres";
+import { prodUrl } from "./_db.mjs";
 
 const API = "https://hookka-erp-testing.pages.dev";
 const FROM = "2026-04-15";
@@ -13,7 +14,7 @@ const ADMIN_EMAIL = process.env.HOOKKA_EMAIL ?? "";
 const ADMIN_PASSWORD = process.env.HOOKKA_PASSWORD ?? "";
 
 const sql = postgres(
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres",
+  prodUrl(),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

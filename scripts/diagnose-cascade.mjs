@@ -1,5 +1,6 @@
 import postgres from "postgres";
-const sql = postgres("postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres", { ssl: "require", max: 1, idle_timeout: 5 });
+import { stagingUrl } from "./_db.mjs";
+const sql = postgres(stagingUrl(), { ssl: "require", max: 1, idle_timeout: 5 });
 try {
   // Find all test SOs (5/2-created) and dump their FC + SEW state + wip_items
   for (const soid of ["SO-2605-001", "SO-2605-002", "SO-2605-006", "SO-2605-007", "SO-2605-008"]) {

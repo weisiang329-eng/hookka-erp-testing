@@ -2,9 +2,10 @@
 // Hypothesis: two separate sales_orders rows share company_so_id=SO-2603-157
 // and each one fans out -01/-02 POs.
 import postgres from "postgres";
+import { stagingUrl } from "./_db.mjs";
 
 const url =
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
+  stagingUrl();
 
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 

@@ -1,8 +1,9 @@
 // Break the 524 candidate JCs down by status, and show how many negative
 // wip_items rows are pure-cancelled vs pure-waiting vs mixed.
 import postgres from "postgres";
+import { prodUrl } from "./_db.mjs";
 const url =
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+  prodUrl();
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 
 try {

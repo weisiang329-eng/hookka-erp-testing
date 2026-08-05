@@ -1,5 +1,6 @@
 import postgres from "postgres";
-const sql = postgres("postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres", { ssl: "require", max: 1, idle_timeout: 5 });
+import { stagingUrl } from "./_db.mjs";
+const sql = postgres(stagingUrl(), { ssl: "require", max: 1, idle_timeout: 5 });
 try {
   // For each non-FC wip_items row with stock != 0, compute the EXPECTED stock from JC state.
   // Producer = JC where wip_label = code AND status DONE

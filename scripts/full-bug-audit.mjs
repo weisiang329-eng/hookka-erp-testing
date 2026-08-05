@@ -1,5 +1,6 @@
 import postgres from "postgres";
-const sql = postgres("postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres", { ssl: "require", max: 1, idle_timeout: 5 });
+import { stagingUrl } from "./_db.mjs";
+const sql = postgres(stagingUrl(), { ssl: "require", max: 1, idle_timeout: 5 });
 try {
   // 1. Current inventory WIP (what's visible)
   console.log("=== 1. Current visible Inventory WIP rows (stock_qty != 0) ===");

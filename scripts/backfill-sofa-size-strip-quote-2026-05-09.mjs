@@ -18,9 +18,10 @@
 //   node scripts/backfill-sofa-size-strip-quote-2026-05-09.mjs           # dry-run
 //   node scripts/backfill-sofa-size-strip-quote-2026-05-09.mjs --apply   # write
 import postgres from "postgres";
+import { prodUrl } from "./_db.mjs";
 
 const url =
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+  prodUrl();
 
 const APPLY = process.argv.includes("--apply");
 

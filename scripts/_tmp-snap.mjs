@@ -1,6 +1,7 @@
 import postgres from "postgres";
+import { prodUrl } from "./_db.mjs";
 import fs from "node:fs";
-const sql = postgres("postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres", { ssl: "require", max: 1, idle_timeout: 10 });
+const sql = postgres(prodUrl(), { ssl: "require", max: 1, idle_timeout: 10 });
 const rows = await sql`SELECT * FROM payslips WHERE period='2026-07' ORDER BY employee_no`;
 const clean = rows.map(r => { const { id, created_at, updated_at, payroll_run_id, ...rest } = r; return rest; });
 fs.writeFileSync(process.argv[2], JSON.stringify(clean, null, 1));

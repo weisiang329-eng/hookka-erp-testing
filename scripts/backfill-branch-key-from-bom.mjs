@@ -19,9 +19,9 @@
 // Stops at first error per PO; logs aggregate stats at end.
 // ---------------------------------------------------------------------------
 import postgres from "postgres";
+import { prodPoolerUrl } from "./_db.mjs";
 
-const DB_URL =
-  "postgresql://postgres.vpwdqtsxexpiqxzweivd:Hookka%402026@aws-1-ap-southeast-1.pooler.supabase.com:6543/postgres";
+const DB_URL = prodPoolerUrl();
 
 const sql = postgres(DB_URL);
 

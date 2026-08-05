@@ -10,11 +10,12 @@
 // Names only, no data. Reading information_schema needs no table privileges
 // beyond connecting.
 import postgres from "postgres";
+import { prodUrl } from "./_db.mjs";
 import fs from "node:fs";
 
 const url =
   process.env.DATABASE_URL ||
-  "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+  prodUrl();
 const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });
 
 try {

@@ -1,8 +1,9 @@
 // Query BOTH Supabase DBs to figure out which one the testing site uses.
 import postgres from "postgres";
+import { prodUrl, stagingUrl } from "./_db.mjs";
 
-const dbA = "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres";
-const dbB = "postgresql://postgres:ZaXI0JigbBD6muTk@db.vpwdqtsxexpiqxzweivd.supabase.co:5432/postgres";
+const dbA = stagingUrl();
+const dbB = prodUrl();
 
 async function check(label, url) {
   const sql = postgres(url, { ssl: "require", max: 1, idle_timeout: 5 });

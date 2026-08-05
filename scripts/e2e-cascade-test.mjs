@@ -7,9 +7,10 @@
 //   5. Rollback DV SEW → DV's own row -2; FC upstream UNCHANGED (HB still DONE)
 //   6. Rollback HB SEW → HB's own row -1; FC upstream +1 (no DONE sibling)
 import postgres from "postgres";
+import { stagingUrl } from "./_db.mjs";
 
 const sql = postgres(
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres",
+  stagingUrl(),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 

@@ -1,6 +1,7 @@
 import postgres from "postgres";
+import { stagingUrl } from "./_db.mjs";
 const sql = postgres(
-  "postgresql://postgres:wfIPMyT4462iK0za@db.zaxygxwadidiqcphibma.supabase.co:5432/postgres",
+  stagingUrl(),
   { ssl: "require", max: 1, idle_timeout: 5 },
 );
 try {

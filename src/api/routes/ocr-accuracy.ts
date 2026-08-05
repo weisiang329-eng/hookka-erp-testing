@@ -17,6 +17,10 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import {
+  resolveCustomerHint,
+  UNIDENTIFIED_CUSTOMER,
+} from "../../lib/customer-hint";
+import {
   diffSalesOrderSample,
   diffSupplierSample,
   salesOrderLineDiffs,
@@ -38,21 +42,32 @@ function parse(json: string | null | undefined): unknown {
   }
 }
 
+// `total` is NOT the same unit at every level, so every bucket now says which
+// unit it counted (owner 2026-08-05: the customer row read 59 while its three
+// category rows read 87 + 4 + 1 = 92 under one "Scans" header). A customer row
+// counts DOCUMENTS (one imported PO) and a category row counts LINES (one item
+// on that PO), which is the honest breakdown — one PO carries many lines — but
+// only if the UI is told, so the unit ships with the data instead of being
+// re-guessed in the card.
+type BucketUnit = "documents" | "lines";
+
 type BucketOut = {
   key: string;
   total: number;
   success: number;
   rate: number | null;
+  unit: BucketUnit;
   topFails: string[];
   children?: BucketOut[];
 };
 
-function bucketOut(b: Bucket, children?: BucketOut[]): BucketOut {
+function bucketOut(b: Bucket, unit: BucketUnit, children?: BucketOut[]): BucketOut {
   return {
     key: b.key,
     total: b.total,
     success: b.success,
     rate: rateOf(b),
+    unit,
     topFails: topFails(b.failFields),
     ...(children && children.length ? { children } : {}),
   };
@@ -88,6 +103,35 @@ app.get("/", async (c) => {
     if (p.code) catByCode.set(String(p.code).trim().toUpperCase(), (p.category || "Other").toUpperCase());
   }
 
+  // Customer roster for hint → customer folding. Owner 2026-08-05:「为什么它会
+  // 收到像 PO2068 这样的东西？非常奇怪」— `customerHint` is free text captured at
+  // scan time (historically the first token of the FILE NAME), so prod holds
+  // 'PO' x63, 'PO2608' and '9752' next to three different spellings of two real
+  // companies. Group by the customer the hint NAMES, never by the raw string:
+  // 'Houzs Century Sdn Bhd' and 'Houzs Century' are one row, and every hint
+  // that names nobody collapses into ONE 'Unidentified' bucket instead of a row
+  // per spelling. Read-side only — no prod row is rewritten.
+  //
+  // Unscoped like the `products` read above: this dashboard has always been
+  // single-tenant, and resolveCustomerHint refuses to guess between two
+  // same-named customers anyway (they'd fall to 'Unidentified').
+  const custRes = await db
+    .prepare("SELECT id, name FROM customers")
+    .all<{ id: string; name: string | null }>();
+  const customers = (custRes.results ?? [])
+    .filter((r) => (r.name ?? "").trim())
+    .map((r) => ({ id: String(r.id), name: String(r.name) }));
+  // Same hint string appears on hundreds of rows — resolve each spelling once.
+  const hintCache = new Map<string, string>();
+  const customerLabel = (hint: string | null): string => {
+    const raw = (hint ?? "").trim();
+    const cached = hintCache.get(raw);
+    if (cached !== undefined) return cached;
+    const label = resolveCustomerHint(customers, raw)?.name ?? UNIDENTIFIED_CUSTOMER;
+    hintCache.set(raw, label);
+    return label;
+  };
+
   const soWhere = dateWhere("createdAt");
   const soRes = await db
     .prepare(
@@ -106,7 +150,7 @@ app.get("/", async (c) => {
     const raw = parse(row.rawExtracted);
     const corr = parse(row.correctedJson);
     if (!corr) continue;
-    const customer = (row.customerHint || "Unknown").trim() || "Unknown";
+    const customer = customerLabel(row.customerHint);
 
     // Document-level (overall + by customer).
     const dDoc = diffSalesOrderSample(raw, corr);
@@ -128,9 +172,9 @@ app.get("/", async (c) => {
     .map((b) => {
       const children = [...soByCustCat.entries()]
         .filter(([k]) => k.startsWith(`${b.key}||`))
-        .map(([, cb]) => bucketOut(cb))
+        .map(([, cb]) => bucketOut(cb, "lines"))
         .sort((a, x) => x.total - a.total);
-      return bucketOut(b, children);
+      return bucketOut(b, "documents", children);
     });
 
   // ---- Supplier docs (PO / PI / GRN) --------------------------------------
@@ -181,18 +225,22 @@ app.get("/", async (c) => {
     if (!supBySupplierDoc.has(sdKey)) supBySupplierDoc.set(sdKey, emptyBucket(docLabel));
     addToBucket(supBySupplierDoc.get(sdKey)!, d);
   }
+  // Both levels of the supplier table count DOCUMENTS (a supplier row and its
+  // per-docType children are the same `diffSupplierSample` call), so parent and
+  // child agree here — they carry the unit anyway so the UI never has to know
+  // which table it is rendering.
   const suppliers = [...supBySupplier.values()]
     .sort((a, b) => b.total - a.total)
     .map((b) => {
       const children = [...supBySupplierDoc.entries()]
         .filter(([k]) => k.startsWith(`${b.key}||`))
-        .map(([, cb]) => bucketOut(cb))
+        .map(([, cb]) => bucketOut(cb, "documents"))
         .sort((a, x) => x.total - a.total);
-      return bucketOut(b, children);
+      return bucketOut(b, "documents", children);
     });
   const supplierDocTypes = [...supByDocType.values()]
     .sort((a, b) => b.total - a.total)
-    .map((b) => bucketOut(b));
+    .map((b) => bucketOut(b, "documents"));
 
   // ---- Scan duration (owner 2026-08-01: 「要有平均 scan 一张 PO/PI/GR 的时间」)
   //
@@ -280,8 +328,8 @@ app.get("/", async (c) => {
         success: grandSuccess,
         rate: grandTotal === 0 ? null : Math.round((grandSuccess / grandTotal) * 1000) / 10,
       },
-      salesOrders: { ...bucketOut(soOverall), customers: soCustomers },
-      supplier: { ...bucketOut(supOverall), suppliers, docTypes: supplierDocTypes },
+      salesOrders: { ...bucketOut(soOverall, "documents"), customers: soCustomers },
+      supplier: { ...bucketOut(supOverall, "documents"), suppliers, docTypes: supplierDocTypes },
       timing,
       from: from ?? null,
       to: to ?? null,

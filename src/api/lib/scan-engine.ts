@@ -46,6 +46,8 @@
 // needed are GONE.
 // ---------------------------------------------------------------------------
 import type { Env } from "../worker";
+import { cleanCustomerHint } from "../../lib/customer-hint";
+import { matchByCompanyName } from "../../lib/company-name-match";
 
 // ---------- Anthropic config ------------------------------------------------
 // Owner ruling 2026-06-29 evening: scans were timing out on Sonnet
@@ -1056,8 +1058,11 @@ async function runPoExtract(
   // discounts repeat scans.
   let catalogText = "";
   let customerRulesText = "";
+  // Kept in scope past the prompt build so the sample row below can resolve the
+  // extracted customer name against the same roster the prompt was built from.
+  let catalog: Catalog | null = null;
   try {
-    const catalog = await loadCatalog(db as unknown as ScanDBLike, orgId);
+    catalog = await loadCatalog(db as unknown as ScanDBLike, orgId);
     catalogText = formatCatalog(catalog);
     customerRulesText = formatCustomerRules(catalog);
   } catch (e) {
@@ -1067,8 +1072,14 @@ async function runPoExtract(
     };
   }
 
-  const customerHintGuess =
-    opts.fileName.split(/[-_ .]/)[0]?.slice(0, 40) ?? null;
+  // File-name fallback only, and only when it isn't plainly a document number.
+  // Owner 2026-08-05:「为什么它会收到像 PO2068 这样的东西？非常奇怪」— operators name
+  // the file after the PO, so this token was filing PO numbers as customers
+  // ('PO', 'PO2608', '9752' on the accuracy dashboard). NULL beats a fake name;
+  // the dashboard folds NULL into 'Unidentified'.
+  const customerHintGuess = cleanCustomerHint(
+    opts.fileName.split(/[-_ .]/)[0]?.slice(0, 40),
+  );
   const cachedPrefix = `${PO_SYSTEM_PROMPT}\n\nCATALOG\n=======\n${catalogText}\n\n${customerRulesText}`;
 
   // Few-shot: operator-confirmed PO extractions — gold first, same-customer
@@ -1202,6 +1213,22 @@ async function runPoExtract(
   let sampleId: string | null = null;
   if (opts.recordSample) {
     sampleId = genPoSampleId();
+    // Prefer the customer the DOCUMENT names, folded onto the catalog record
+    // (owner 2026-08-05) — 'Houzs Century Sdn Bhd' must store the one catalog
+    // name 'Houzs Century', not a second spelling that splits the customer
+    // across two dashboard rows. This row covers the whole document, so it
+    // takes the first PO's customer; the per-PO rows written by routes/scan-po
+    // resolve each PO individually. Falls back to the letterhead text, then to
+    // the cleaned file-name guess.
+    const firstPo = (parsed?.pos?.[0] ?? null) as { customerName?: unknown } | null;
+    const readName =
+      typeof firstPo?.customerName === "string" ? firstPo.customerName : null;
+    const customerHint =
+      (readName && catalog
+        ? matchByCompanyName(catalog.customers, readName)?.name
+        : null) ??
+      cleanCustomerHint(readName) ??
+      customerHintGuess;
     try {
       await db
         .prepare(
@@ -1210,7 +1237,7 @@ async function runPoExtract(
         )
         .bind(
           sampleId,
-          customerHintGuess,
+          customerHint,
           null,
           parsed ? JSON.stringify(parsed) : JSON.stringify({ error: errorMsg, claudeText }),
           opts.createdBy ?? null,

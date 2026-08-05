@@ -330,6 +330,18 @@ app.get("/", async (c) => {
       // Active Jobs — still-in-production POs, split Bedframe (units =
       // qty) vs Sofa (sets = distinct SOs), with the customer for the
       // click-through breakdown.
+      //
+      // "Still in production" cannot be read off the production order alone.
+      // Owner 2026-08-05: "你确定有 60 套还在 pending 没做好吗？" — no. On prod
+      // 59 of the 300 non-terminal production orders belong to a sales order
+      // that is already INVOICED, SHIPPED or CLOSED: the goods left the factory
+      // and nobody went back to close the job card. Counting those inflated the
+      // figure to 125 units / 60 sets when the real in-flight work is 98 / 49,
+      // and carried the same padding into the backlog hours and the queue days.
+      //
+      // So the sales order gets a say. A production order with NO sales order
+      // (consignment or stock build) has nothing to check and stays counted —
+      // dropping it would hide real work rather than finished work.
       db
         .prepare(
           `SELECT po.itemCategory AS "cat",
@@ -337,7 +349,10 @@ app.get("/", async (c) => {
                   COALESCE(SUM(po.quantity),0) AS "units",
                   COUNT(DISTINCT po.salesOrderId) AS "sos"
              FROM production_orders po
+             LEFT JOIN sales_orders so ON so.id = po.salesOrderId
             WHERE po.orgId = ? AND po.status NOT IN ('COMPLETED','CANCELLED')
+              AND (so.status IS NULL
+                   OR so.status NOT IN ('INVOICED','SHIPPED','DELIVERED','CLOSED'))
             GROUP BY po.itemCategory, po.customerName`,
         )
         .bind(orgId)
@@ -766,9 +781,11 @@ app.get("/", async (c) => {
           `SELECT jc.departmentCode AS "dept", jc.status AS "jcStatus",
                   jc.estMinutes AS "estMinutes", jc.actualMinutes AS "actualMinutes",
                   jc.wipQty AS "wipQty", jc.completedDate AS "completedDate",
-                  po.itemCategory AS "cat", po.status AS "poStatus"
+                  po.itemCategory AS "cat", po.status AS "poStatus",
+                  so.status AS "soStatus"
              FROM job_cards jc
              JOIN production_orders po ON po.id = jc.productionOrderId
+             LEFT JOIN sales_orders so ON so.id = po.salesOrderId
             WHERE jc.orgId = ?`,
         )
         .bind(orgId)
@@ -781,6 +798,7 @@ app.get("/", async (c) => {
           completedDate: string | null;
           cat: string | null;
           poStatus: string;
+          soStatus: string | null;
         }>(),
       // NOTE: `workers` is NOT org-scoped (no org_id column — the workers
       // route never filters by org). Do not add `WHERE orgId = ?` here.
@@ -882,8 +900,18 @@ app.get("/", async (c) => {
         ) {
           windowTotal += jcMinutesTotal(r.actualMinutes ?? r.estMinutes ?? 0, jc);
         }
+        // Same exclusion as Active Jobs above: a job card left open on a
+        // production order whose sales order already shipped is not work in
+        // the queue, it is paperwork. Counting it added hours to the backlog
+        // and days to the queue figure that no one was ever going to work.
+        const soShipped =
+          r.soStatus === "INVOICED" ||
+          r.soStatus === "SHIPPED" ||
+          r.soStatus === "DELIVERED" ||
+          r.soStatus === "CLOSED";
         if (
           (r.poStatus === "IN_PROGRESS" || r.poStatus === "PENDING") &&
+          !soShipped &&
           r.jcStatus !== "COMPLETED" &&
           r.jcStatus !== "CANCELLED" &&
           r.jcStatus !== "TRANSFERRED"

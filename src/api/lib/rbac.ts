@@ -272,6 +272,32 @@ export function requireSuperAdmin(c: Context<Env>): Response | null {
 }
 
 /**
+ * Gate an action to the finance desk (owner 2026-08-05, on voiding a purchase
+ * invoice: 「权限放在 finance 和 super admin」).
+ *
+ * A resource permission is the wrong tool here: several roles hold
+ * `purchase-invoices:*` because they RAISE invoices — voiding one reverses a
+ * posted ledger entry, which is a finance decision, not a procurement one.
+ * ADMIN rides along with SUPER_ADMIN exactly as it does everywhere else in
+ * this file.
+ */
+export function requireFinance(c: Context<Env>): Response | null {
+  const role = (
+    c as unknown as { get: (k: string) => string | undefined }
+  ).get("userRole")?.toUpperCase();
+  if (!role) {
+    return c.json({ success: false, error: "Unauthorized" }, 401);
+  }
+  if (role !== "FINANCE" && role !== "SUPER_ADMIN" && role !== "ADMIN") {
+    return c.json(
+      { success: false, error: "Only Finance or a Super Admin can void a posted document.", role },
+      403,
+    );
+  }
+  return null;
+}
+
+/**
  * Invalidate the cached permission set for a role.  Call after admin edits
  * role_permissions for that role so the change is visible within seconds
  * instead of waiting out the 5-minute TTL.

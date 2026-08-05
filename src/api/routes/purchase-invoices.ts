@@ -14,7 +14,7 @@
 import { Hono } from "hono";
 import { runSelfApply } from "../lib/self-apply";
 import type { Env } from "../worker";
-import { requirePermission } from "../lib/rbac";
+import { requirePermission, requireFinance } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
 import { learnSupplierBindings } from "../lib/supplier-binding-learn";
 import { getOrgId } from "../lib/tenant";
@@ -2288,6 +2288,141 @@ app.delete("/:id", async (c) => {
     before: existing,
   });
   return c.json({ success: true });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/purchase-invoices/:id/void — cancel a POSTED purchase invoice.
+//
+// Owner 2026-08-05, on an imported GVP invoice: 「帮我做 void 的功能」. Until
+// now the only way out of CONFIRMED was PAID: DELETE is DRAFT-only and the
+// status machine has no CANCELLED edge, so a wrongly-imported invoice sat in
+// the creditor aging and on 400-0000 forever (PI-2605-011: RM 2,650 of GVP's
+// balance was exactly this).
+//
+// Voiding must undo everything raising it did, or the books drift:
+//   • REVERSE the GL — mirror the invoice's own VISIBLE legs per account, so
+//     400-0000 and the expense accounts come back to where they were. Org-
+//     agnostic and derived from what is actually posted (the same rule
+//     buildCancelReversalStatements uses for sales invoices), because an
+//     imported document's legs may carry a different orgId.
+//   • RELEASE the convert chain — give grn_items.invoiced_qty back, or the
+//     GRN can never be billed again.
+//   • Flip status to CANCELLED so every aging / recon / P&L reader drops it.
+//
+// Refused when any money has been applied: un-apply the payment first, so a
+// void can never silently strand a supplier payment against a dead invoice.
+// Idempotent — voiding twice is a no-op, not a double reversal.
+// ---------------------------------------------------------------------------
+app.post("/:id/void", async (c) => {
+  const denied = requireFinance(c);
+  if (denied) return denied;
+
+  const id = c.req.param("id");
+  const db = c.var.DB;
+  await ensurePiMigrations(db);
+
+  const pi = await db
+    .prepare("SELECT * FROM purchase_invoices WHERE id = ?")
+    .bind(id)
+    .first<PurchaseInvoiceRow>();
+  if (!pi) return c.json({ success: false, error: "Purchase invoice not found" }, 404);
+
+  const status = String(pi.status ?? "");
+  if (status === "CANCELLED") {
+    return c.json({ success: true, data: { id, status: "CANCELLED", alreadyVoid: true } });
+  }
+  if (status === "DRAFT") {
+    return c.json(
+      { success: false, error: "A draft isn't posted — delete it instead of voiding it." },
+      409,
+    );
+  }
+  const paidSen = Number(
+    (pi as unknown as { paid_amount_sen?: number; paidAmountSen?: number }).paidAmountSen ??
+      (pi as unknown as { paid_amount_sen?: number }).paid_amount_sen ??
+      0,
+  );
+  if (paidSen > 0) {
+    return c.json(
+      {
+        success: false,
+        error: `RM ${(paidSen / 100).toFixed(2)} has been paid against this invoice — void or un-apply that payment first.`,
+      },
+      409,
+    );
+  }
+
+  const statements: D1PreparedStatement[] = [];
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+
+  // 1. Mirror-reverse the visible ledger legs, netted per account.
+  const legRes = await db
+    .prepare(
+      `SELECT accountCode, debitSen, creditSen, orgId FROM ledger_journal_entries
+        WHERE sourceId = ? AND hidden = 0 AND sourceType LIKE 'purchase_invoice%'`,
+    )
+    .bind(id)
+    .all<{ accountCode: string; debitSen: number; creditSen: number; orgId: string }>();
+  const legs = legRes.results ?? [];
+  const alreadyVoided = await ledgerHasSource(db, String(legs[0]?.orgId ?? getOrgId(c)), "purchase_invoice_void", id);
+  if (legs.length > 0 && !alreadyVoided) {
+    const netByAccount = new Map<string, number>(); // +ve = net DR to reverse
+    let legOrgId = getOrgId(c);
+    for (const l of legs) {
+      legOrgId = l.orgId ?? legOrgId;
+      netByAccount.set(
+        l.accountCode,
+        (netByAccount.get(l.accountCode) ?? 0) + (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0),
+      );
+    }
+    let legNo = 1;
+    const revLegs: Parameters<typeof buildJournalEntryStatements>[2] = [];
+    for (const [accountCode, net] of netByAccount) {
+      if (net === 0) continue;
+      revLegs.push({
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "purchase_invoice_void",
+        sourceId: id,
+        legNo: legNo++,
+        accountCode,
+        debitSen: net < 0 ? -net : 0,
+        creditSen: net > 0 ? net : 0,
+        description: `Void · PI ${pi.piNo ?? id} · ${pi.supplierName ?? ""}`,
+        actorUserId,
+        orgId: legOrgId,
+      });
+    }
+    if (revLegs.length > 0) {
+      const { statements: ls } = await buildJournalEntryStatements(db, legOrgId, revLegs);
+      statements.push(...ls);
+    }
+  }
+
+  // 2. Give the GRN lines their availability back.
+  statements.push(...(await buildGrnRestoreStatements(db, id)));
+
+  // 3. Drop it out of every subledger read.
+  statements.push(
+    db
+      .prepare("UPDATE purchase_invoices SET status = 'CANCELLED', updated_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), id),
+  );
+
+  await db.batch(statements);
+
+  await emitAudit(c, {
+    resource: "purchase-invoices",
+    resourceId: id,
+    action: "void",
+    before: { status, amountSen: pi.amountSen },
+    after: { status: "CANCELLED", reversedLegs: legs.length },
+  });
+
+  return c.json({
+    success: true,
+    data: { id, piNo: pi.piNo, status: "CANCELLED", reversedLegs: legs.length },
+  });
 });
 
 export default app;

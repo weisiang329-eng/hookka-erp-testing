@@ -15,7 +15,7 @@
 // ---------------------------------------------------------------------------
 import { useMemo, useState } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, FileText, Package, Pencil, Plus, Printer, Trash2, Undo2 } from "lucide-react";
+import { ArrowLeft, Ban, FileText, Package, Pencil, Plus, Printer, Trash2, Undo2 } from "lucide-react";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,7 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { getCurrentUser } from "@/lib/auth";
 import { useNavGuard } from "@/lib/use-nav-guard";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { MaterialPicker, type MaterialOption } from "@/components/material-picker";
@@ -157,6 +158,11 @@ export default function PurchaseInvoiceDetailPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const { confirm } = useConfirm();
+  // Void is a finance-desk action (owner 2026-08-05); the server gates it too.
+  const canVoid = (() => {
+    const role = (getCurrentUser()?.role || "").toUpperCase();
+    return role === "FINANCE" || role === "SUPER_ADMIN" || role === "ADMIN";
+  })();
   const [busy, setBusy] = useState(false);
   // GET /api/purchase-invoices/:id now returns the linked documents with the PI
   // itself: linkedGRNs (the GRN this PI was raised from, resolved from the PI's
@@ -300,6 +306,37 @@ export default function PurchaseInvoiceDetailPage() {
       navigate("/procurement/pi");
     } catch {
       toast.error("Delete failed — network error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Void — the finance desk's way out of a POSTED invoice (owner 2026-08-05).
+  // The confirm spells out what it undoes, because this one moves the ledger.
+  async function voidPI() {
+    if (!pi) return;
+    const ok = await confirm({
+      title: `Void ${pi.piNo}?`,
+      message:
+        `This reverses its ledger entry, gives the goods-receipt quantity back, and drops it out of the creditor aging. ` +
+        `The invoice stays on file as CANCELLED. It cannot be voided if any payment has been applied.`,
+      danger: true,
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/purchase-invoices/${pi.id}/void`, { method: "POST" });
+      const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+      if (!res.ok || !j?.success) {
+        toast.error(j?.error || `Void failed (${res.status})`);
+        return;
+      }
+      invalidateCachePrefix("/api/purchase-invoices");
+      invalidateCachePrefix("/api/accounting");
+      toast.success(`${pi.piNo} voided`);
+      refresh();
+    } catch {
+      toast.error("Void failed — network error");
     } finally {
       setBusy(false);
     }
@@ -532,6 +569,21 @@ export default function PurchaseInvoiceDetailPage() {
             {!editing && isPiEditable(pi.status) && (
               <Button type="button" variant="outline" size="sm" onClick={startEdit} disabled={busy}>
                 <Pencil className="h-3.5 w-3.5" /> Edit
+              </Button>
+            )}
+            {/* Void — finance desk only (owner 2026-08-05). Shown once posted
+                and while nothing has been paid against it; the server gates it
+                again by role and refuses a part-paid invoice. */}
+            {!editing && pi.status !== "DRAFT" && pi.status !== "CANCELLED" && canVoid && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={voidPI}
+                disabled={busy}
+                className="text-[#9A3A2D] hover:bg-[#9A3A2D]/5"
+              >
+                <Ban className="h-3.5 w-3.5" /> Void
               </Button>
             )}
             {!editing &&

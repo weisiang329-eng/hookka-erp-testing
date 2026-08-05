@@ -27,10 +27,25 @@
 type Actions = string[];
 export type RolePolicy = Record<string, Actions>;
 
+/**
+ * MODULE-LEVEL for now, by instruction.
+ *
+ * Owner 2026-08-04: "这个 RBAC 你暂时不需要去理它是可以 view 还是 edit 还是等等
+ * 的，只需要开放那个 module 给它先。开放的意思就是它既可以 edit 也可以 view，
+ * 可以做所有的操作."
+ *
+ * So a role either HAS a module or does not, and having it means full access.
+ * The finer spec that came earlier — SALES reading Sales Orders but not editing
+ * them, consignment being read-plus-create, price being read-only — is NOT lost:
+ * it is recorded per line below as a trailing `was: read` note, so tightening
+ * later is a one-line change per resource rather than a re-interview.
+ *
+ * The one distinction kept is `users`, because it is not a display choice: a
+ * wildcard there includes `role-change`, which lets a role promote its own
+ * holder and quietly undoes every other line in this file.
+ */
+const OPEN = ["*"];
 const R = ["read"];
-const RC = ["read", "create"];
-const RCU = ["read", "create", "update"];
-const RW = ["read", "create", "update", "delete"];
 
 /**
  * Modules that are money.
@@ -127,10 +142,10 @@ function allExcept(excluded: string[]): RolePolicy {
  * Organisations, System Health or Agent Console, which stay administrative.
  */
 const EVERYONE: RolePolicy = {
-  announcements: R,
-  "mail-center": R,
-  notifications: R,
-  settings: R,
+  announcements: OPEN,
+  "mail-center": OPEN,
+  notifications: OPEN,
+  settings: OPEN,
 };
 
 /** A role's own grants on top of the shared base. */
@@ -150,40 +165,38 @@ function withBase(policy: RolePolicy): RolePolicy {
  * ("可以开单，只是不能编辑").
  */
 const SALES: RolePolicy = {
-  // (1a) documents — read only, and only their own customers' (row filter).
-  "sales-orders": R,
-  "delivery-orders": R,
-  "delivery-returns": R,
-  invoices: R,
-  // (1b) consignment — read, but may raise one.
-  consignments: RC,
-  "consignment-notes": RC,
+  // (1) the documents. Full access for now — the spec was read-only, kept here
+  // so it can be tightened without asking again.
+  "sales-orders": OPEN, // was: read
+  "delivery-orders": OPEN, // was: read
+  "delivery-returns": OPEN, // was: read
+  invoices: OPEN, // was: read
+  consignments: OPEN, // was: read + create
+  "consignment-notes": OPEN, // was: read + create
 
   // (2) the customer module is theirs end to end.
-  customers: RW,
-  "sales-pipeline": ["*"],
-  "customer-products": RW, // Assign SKU
-  quotations: ["*"], // Export Quotation
-  "customer-hubs": RW, // 开 HUB
-  "sofa-combos": RW, // 设 Sofa Combo / 加钱
-  "promise-date": RCU,
-  "historical-sales": R,
+  customers: OPEN,
+  "sales-pipeline": OPEN,
+  "customer-products": OPEN, // Assign SKU
+  quotations: OPEN, // Export Quotation
+  "customer-hubs": OPEN, // 开 HUB
+  "sofa-combos": OPEN, // 设 Sofa Combo / 加钱
+  "promise-date": OPEN,
+  "historical-sales": OPEN,
 
-  // (3) production & planning — look, don't touch.
-  "production-orders": R,
-  "job-cards": R,
-  scheduling: R,
+  // (3) production & planning.
+  "production-orders": OPEN, // was: read
+  "job-cards": OPEN, // was: read
+  scheduling: OPEN, // was: read
 
-  // (4) products — SKU master, catalogue, maintenance. Price is READ ONLY.
-  products: R,
-  "price-history": R,
+  // (4) products — SKU master, catalogue, maintenance.
+  products: OPEN, // was: read
+  "price-history": OPEN, // was: read
 
-  // (5a) Quality, so an unfamiliar case is not a dead end.
-  "qc-inspections": R,
-  "service-cases": R,
-  "service-orders": R,
-
-  // (5b) announcements / notifications come from EVERYONE below.
+  // (5) Quality, so an unfamiliar case is not a dead end.
+  "qc-inspections": OPEN, // was: read
+  "service-cases": OPEN, // was: read
+  "service-orders": OPEN, // was: read
 };
 
 /**
@@ -214,25 +227,25 @@ const OFFICE: RolePolicy = {
  * delivery is raised and returned from there.
  */
 const QA: RolePolicy = {
-  // Quality — the work itself.
-  "qc-inspections": ["*"],
-  "service-cases": RCU,
-  "service-orders": RCU,
+  // Quality.
+  "qc-inspections": OPEN,
+  "service-cases": OPEN,
+  "service-orders": OPEN,
   // Procurement — a failed inspection becomes a purchase return.
-  "purchase-orders": RCU,
-  "purchase-returns": ["*"],
-  grn: RCU,
-  "purchase-invoices": R,
-  mrp: R,
-  suppliers: RCU,
-  "supplier-materials": R,
-  "supplier-scorecards": RCU,
-  "goods-in-transit": R,
+  "purchase-orders": OPEN,
+  "purchase-returns": OPEN,
+  grn: OPEN,
+  "purchase-invoices": OPEN,
+  mrp: OPEN,
+  suppliers: OPEN,
+  "supplier-materials": OPEN,
+  "supplier-scorecards": OPEN,
+  "goods-in-transit": OPEN,
   // Enough context to know what was being made when a defect appeared.
-  "production-orders": R,
-  "job-cards": R,
-  products: R,
-  "fg-units": R,
+  "production-orders": OPEN,
+  "job-cards": OPEN,
+  products: OPEN,
+  "fg-units": OPEN,
 };
 
 /**
@@ -246,23 +259,23 @@ const QA: RolePolicy = {
  * (inventory, stock value, adjustments) stays off.
  */
 const R_AND_D: RolePolicy = {
-  "rd-projects": ["*"],
-  products: RW,
-  "product-configs": RW,
-  bom: RW,
-  "bom-master-templates": RW,
-  "sofa-combos": RW,
-  fabrics: RW, // see note above
-  // "R&D Maintenance" in the sidebar.
-  equipment: RW,
-  "maintenance-logs": RW,
+  "rd-projects": OPEN,
+  products: OPEN,
+  "product-configs": OPEN,
+  bom: OPEN,
+  "bom-master-templates": OPEN,
+  "sofa-combos": OPEN,
+  fabrics: OPEN, // sits under Warehouse in the sidebar; see note above
+  // "R&D Maintenance".
+  equipment: OPEN,
+  "maintenance-logs": OPEN,
   // Quality is explicitly allowed.
-  "qc-inspections": R,
-  "service-cases": R,
-  "service-orders": R,
+  "qc-inspections": OPEN,
+  "service-cases": OPEN,
+  "service-orders": OPEN,
   // Enough production visibility to see how a design is actually built.
-  "production-orders": R,
-  "job-cards": R,
+  "production-orders": OPEN,
+  "job-cards": OPEN,
 };
 
 /**
@@ -278,13 +291,14 @@ const R_AND_D: RolePolicy = {
  * which belongs to QA and R&D. Flagged rather than assumed.
  */
 const HR: RolePolicy = {
-  workers: ["*"],
-  attendance: ["*"],
-  leaves: ["*"],
-  payroll: ["*"],
-  payslips: ["*"],
-  departments: R,
-  // Sees who has an account; opening or disabling one is requireSuperAdmin.
+  workers: OPEN,
+  attendance: OPEN,
+  leaves: OPEN,
+  payroll: OPEN,
+  payslips: OPEN,
+  departments: OPEN,
+  // Sees who has an account; opening or disabling one is requireSuperAdmin, and
+  // `role-change` is never granted to anyone — see NEVER_WILDCARD.
   users: R,
 };
 

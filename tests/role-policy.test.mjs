@@ -45,21 +45,29 @@ test("News Center, Announcements, Notifications and Settings are for everyone", 
 
 // ── SALES ───────────────────────────────────────────────────────────────────
 
-test("SALES reads the documents but cannot edit them", () => {
-  for (const res of ["sales-orders", "delivery-orders", "delivery-returns", "invoices"]) {
-    assert.ok(can("SALES", res, "read"), `must read ${res}`);
-    for (const a of ["create", "update", "delete"]) {
-      assert.ok(!can("SALES", res, a), `must NOT ${a} ${res}`);
-    }
+test("SALES has the modules its spec named, at module level", () => {
+  // Owner 2026-08-04: "暂时不需要去理它是可以 view 还是 edit… 只需要开放那个
+  // module 给它先." So the assertion is presence, not shape. The finer spec
+  // (SO/DO/Invoice read-only, consignment read-plus-create, price read-only) is
+  // recorded as `was:` notes in role-policy.ts so it can be reinstated without
+  // another interview.
+  for (const res of [
+    "sales-orders", "delivery-orders", "delivery-returns", "invoices",
+    "consignments", "consignment-notes",
+    "customers", "sales-pipeline", "quotations", "customer-hubs",
+    "customer-products", "sofa-combos", "promise-date",
+    "production-orders", "scheduling", "products", "price-history",
+    "qc-inspections", "service-cases", "service-orders",
+  ]) {
+    assert.ok(can("SALES", res, "read"), `SALES needs ${res}`);
+    assert.ok(can("SALES", res, "update"), `${res} is open, so editable`);
   }
 });
 
-test("SALES may RAISE a consignment but not edit one", () => {
-  // The single exception in the document rules: "可以开单，只是不能编辑".
-  assert.ok(can("SALES", "consignments", "read"));
-  assert.ok(can("SALES", "consignments", "create"));
-  assert.ok(!can("SALES", "consignments", "update"));
-  assert.ok(!can("SALES", "consignments", "delete"));
+test("the finer read-only spec is preserved for later, not discarded", () => {
+  // Losing it would mean re-asking the owner every rule they already gave.
+  const src = readFileSync(resolve(process.cwd(), "src/api/lib/role-policy.ts"), "utf8");
+  assert.ok(src.split("was: read").length - 1 >= 8, "the earlier spec must stay recorded");
 });
 
 test("SALES owns the customer end to end", () => {
@@ -72,20 +80,6 @@ test("SALES owns the customer end to end", () => {
   assert.ok(can("SALES", "customer-hubs", "update"));
   assert.ok(can("SALES", "sofa-combos", "update"));
   assert.ok(can("SALES", "customer-products", "create"));
-});
-
-test("SALES sees production and planning without touching them", () => {
-  for (const res of ["production-orders", "scheduling"]) {
-    assert.ok(can("SALES", res, "read"));
-    assert.ok(!can("SALES", res, "update"), `${res} must stay read-only`);
-  }
-});
-
-test("SALES sees the price but cannot change it", () => {
-  assert.ok(can("SALES", "price-history", "read"));
-  assert.ok(!can("SALES", "price-history", "update"));
-  assert.ok(can("SALES", "products", "read"));
-  assert.ok(!can("SALES", "products", "update"));
 });
 
 test("SALES can reach Quality so an unfamiliar case is not a dead end", () => {

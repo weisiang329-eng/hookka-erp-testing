@@ -474,16 +474,6 @@ export function renderBriefHtml(d: BriefData): string {
         `<td style="padding:4px 10px;border-bottom:1px solid #eee;text-align:right">${hm(x.prodMinutes)}</td></tr>`,
     )
     .join("");
-  const fabricRows = d.cnc.topFabrics
-    .map(
-      (f) =>
-        `<tr><td style="padding:4px 10px;border-bottom:1px solid #eee">${esc(f.fabricCode)}</td>` +
-        `<td style="padding:4px 10px;border-bottom:1px solid #eee;text-align:right">${f.bedframeSets}</td>` +
-        `<td style="padding:4px 10px;border-bottom:1px solid #eee;text-align:right">${f.sofaSets}</td>` +
-        `<td style="padding:4px 10px;border-bottom:1px solid #eee;text-align:right">${f.accessoryPieces}</td>` +
-        `<td style="padding:4px 10px;border-bottom:1px solid #eee;text-align:right">${hm(f.minutes)}</td></tr>`,
-    )
-    .join("");
   const overdueRows = d.overdue.rows
     .slice(0, 8)
     .map(
@@ -502,22 +492,6 @@ export function renderBriefHtml(d: BriefData): string {
         `<td style="padding:4px 10px;border-bottom:1px solid #eee;text-align:right;color:#9A3A2D">${w.pct}%</td></tr>`,
     )
     .join("");
-  const driftRows = d.drift
-    .map((x) => {
-      const actual = x.actualMin == null ? "—" : `${x.actualMin} min`;
-      const drift =
-        x.driftPct == null
-          ? "—"
-          : `${x.driftPct > 0 ? "+" : ""}${x.driftPct}%`;
-      const color = x.flagged ? "#9A3A2D" : "#4F7C3A";
-      return (
-        `<tr><td style="padding:4px 10px;border-bottom:1px solid #eee">${x.category}</td>` +
-        `<td style="padding:4px 10px;border-bottom:1px solid #eee;text-align:right">${x.configuredMin} min</td>` +
-        `<td style="padding:4px 10px;border-bottom:1px solid #eee;text-align:right">${actual}</td>` +
-        `<td style="padding:4px 10px;border-bottom:1px solid #eee;text-align:right;color:${color};font-weight:600">${drift}${x.flagged ? " ⚠" : ""}</td></tr>`
-      );
-    })
-    .join("");
   const h2 = 'style="font:600 15px/1.3 Arial;margin:22px 0 8px;color:#1F1D1B"';
   const th = 'style="padding:5px 10px;text-align:left;background:#F0ECE9;font:600 12px Arial;color:#374151"';
   const thR = 'style="padding:5px 10px;text-align:right;background:#F0ECE9;font:600 12px Arial;color:#374151"';
@@ -532,20 +506,10 @@ ${d.aiFocus ? `<div style="background:#FBF7EC;border:1px solid #E2D9C3;border-ra
 ${d.proposals.pending > 0 ? `<div style="background:#EEF3EA;border:1px solid #CBDCC0;border-radius:8px;padding:10px 14px;font:13px/1.5 Arial;color:#33512A;margin:14px 0">排产提案：<b>${d.proposals.pending}</b> 张卡待批准排产 — Planning &gt; Schedule Proposals 里一键批准后写入交期。</div>` : ""}
 <h2 ${h2}>1 · Today's Plan — ${d.schedule.totals.jobCards} job cards · ${hm(d.schedule.totals.prodMinutes)}</h2>
 <table ${table}><tr><th ${th}>Department</th><th ${thR}>Cards</th><th ${thR}>Units</th><th ${thR}>Time</th></tr>${deptRows || `<tr><td colspan="4" style="padding:8px 10px;color:#9CA3AF">Nothing due today.</td></tr>`}</table>
-<h2 ${h2}>2 · CNC Cutting Queue — ${hm(d.cnc.totalMinutes)} (≈ ${d.cnc.referenceDays} days)</h2>
-<div style="font:12px Arial;color:#6B7280;margin-bottom:6px">
-  ${d.cnc.bedframeSets} bedframe sets × ${d.cncConfig.bedframeSetMin}m · ${d.cnc.sofaSets} sofa sets × ${d.cncConfig.sofaSetMin}m · ${d.cnc.accessoryPieces} accessories × ${d.cncConfig.accessoryPieceMin}m ·
-  ${d.cnc.fabricCount} fabrics × ${d.cncConfig.fabricChangeMin}m changeover = ${hm(d.cnc.changeoverMinutes)} lost to fabric changes.
-  Cut same-fabric batches together to keep changeovers down.
-</div>
-<table ${table}><tr><th ${th}>Fabric</th><th ${thR}>BF sets</th><th ${thR}>Sofa sets</th><th ${thR}>Acc</th><th ${thR}>Cut time</th></tr>${fabricRows || `<tr><td colspan="5" style="padding:8px 10px;color:#9CA3AF">CNC queue is empty.</td></tr>`}</table>
-<h2 ${h2}>3 · Overdue — ${d.overdue.totals.salesOrders} orders (worst ${d.overdue.totals.worstDays}d)</h2>
+<h2 ${h2}>2 · Overdue — ${d.overdue.totals.salesOrders} orders (worst ${d.overdue.totals.worstDays}d)</h2>
 <table ${table}><tr><th ${th}>SO</th><th ${th}>Customer</th><th ${th}>Items</th><th ${thR}>Late</th></tr>${overdueRows || `<tr><td colspan="4" style="padding:8px 10px;color:#4F7C3A">Nothing overdue 🎉</td></tr>`}</table>
-<h2 ${h2}>4 · Yesterday (${d.prevDate}) — ${d.efficiency.totals.efficiencyPct}% overall efficiency · ${d.efficiency.totals.presentCount} present</h2>
+<h2 ${h2}>3 · Yesterday (${d.prevDate}) — ${d.efficiency.totals.efficiencyPct}% overall efficiency · ${d.efficiency.totals.presentCount} present</h2>
 <table ${table}><tr><th ${th}>Below 60%</th><th ${th}>Department</th><th ${thR}>Efficiency</th></tr>${lowRows || `<tr><td colspan="3" style="padding:8px 10px;color:#4F7C3A">Nobody below 60% yesterday.</td></tr>`}</table>
-<h2 ${h2}>5 · CNC Speed Check — last 7 days vs configured</h2>
-<table ${table}><tr><th ${th}>Category</th><th ${thR}>Configured</th><th ${thR}>Actual /set</th><th ${thR}>Drift</th></tr>${driftRows}</table>
-<div style="font:11px Arial;color:#9CA3AF;margin-top:6px">⚠ = actual speed is >25% off the configured model — worth updating the CNC settings (Planning → capacity config).</div>
 ${renderLearningHtml(d, h2, th, thR, table)}
 ${renderLateRiskSection(d.lateRisk)}
 <div style="border-top:1px solid #E2DDD8;margin-top:20px;padding-top:10px;font:11px Arial;color:#9CA3AF">
@@ -696,7 +660,6 @@ export function renderBriefEmailText(d: BriefData): string {
   lines.push(
     "",
     `1) Today's plan: ${d.schedule.totals.jobCards} job cards, ${hm(d.schedule.totals.prodMinutes)} across ${d.schedule.totals.departments} departments.`,
-    `2) CNC queue: ${d.cnc.bedframeSets} BF sets + ${d.cnc.sofaSets} sofa sets + ${d.cnc.accessoryPieces} accessories over ${d.cnc.fabricCount} fabrics = ${hm(d.cnc.totalMinutes)} (~${d.cnc.referenceDays} days incl. ${hm(d.cnc.changeoverMinutes)} of fabric changes).`,
     `3) Overdue: ${d.overdue.totals.salesOrders} orders, worst ${d.overdue.totals.worstDays} days.`,
     `4) Yesterday (${d.prevDate}): ${d.efficiency.totals.efficiencyPct}% overall; ${d.lowWorkers.length} worker(s) below 60%.`,
   );

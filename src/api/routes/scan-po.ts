@@ -24,6 +24,7 @@ import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
 import { distillCustomerRules } from "../lib/ocr-distill";
 import { matchByCompanyName } from "../../lib/company-name-match";
+import { cleanCustomerHint } from "../../lib/customer-hint";
 import {
   runExtract,
   loadCatalog,
@@ -36,6 +37,14 @@ const MAX_PDF_BYTES = 32 * 1024 * 1024;
 
 function genId(): string {
   return `pos-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+function parseJsonOrNull(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
 }
 
 type DBLike = {
@@ -562,7 +571,14 @@ app.post("/extract", async (c) => {
   const arrayBuffer = await file.arrayBuffer();
   const orgId = getOrgId(c);
   const createdBy = (c.get("userId" as never) as string | undefined) ?? null;
-  const customerHintGuess = name.split(/[-_ .]/)[0]?.slice(0, 40) ?? null;
+  // Fallback hint only — the first token of the FILE NAME. Owner 2026-08-05:
+  // 「为什么它会收到像 PO2068 这样的东西？非常奇怪」— operators name files after the
+  // PO ("PO 2608-027.pdf", "9752.pdf"), so this token is routinely the PO
+  // NUMBER, and it was being filed as the customer. cleanCustomerHint drops
+  // anything that is plainly a document-number fragment; NULL is honest and the
+  // dashboard folds it into 'Unidentified' rather than inventing a customer
+  // called 'PO'.
+  const customerHintGuess = cleanCustomerHint(name.split(/[-_ .]/)[0]?.slice(0, 40));
 
   // Delegate prompt-building + Anthropic call + JSON parse to the shared
   // engine. recordSample:false because this route writes its OWN per-PO
@@ -635,6 +651,28 @@ app.post("/extract", async (c) => {
       }
     }
     const sampleId = genId();
+    // Snapshot the extraction BEFORE enrichment — `rawExtracted` is the OCR
+    // accuracy baseline, so it must stay exactly what Claude returned. The
+    // enrichment then runs first only so its catalog match is available for the
+    // hint below; it mutates `po`, never this string.
+    const rawExtracted = JSON.stringify(po);
+    const warnings = validateAndEnrichPO(po, catalog);
+
+    // Prefer the RESOLVED customer's catalog name over the letterhead spelling
+    // (owner 2026-08-05). validateAndEnrichPO already ran the full chain —
+    // customerCode → exact name → tolerant name (Sdn Bhd) → delivery hub — so
+    // 'Houzs Century Sdn Bhd' and 'Houzs Century' both store the ONE catalog
+    // name and stop splitting one customer across several dashboard rows.
+    // Unmatched falls back to the letterhead text, then to the file-name guess;
+    // both are cleaned, so a PO number never lands here as a "customer".
+    const resolvedCustomer = po.customerId
+      ? catalog.customers.find((x) => x.id === po.customerId)
+      : undefined;
+    const customerHint =
+      resolvedCustomer?.name ??
+      cleanCustomerHint(po.customerName) ??
+      customerHintGuess;
+
     try {
       await (c.var.DB as unknown as DBLike)
         .prepare(
@@ -643,20 +681,16 @@ app.post("/extract", async (c) => {
         )
         .bind(
           sampleId,
-          po.customerName ?? customerHintGuess,
+          customerHint,
           po.customerPO ?? null,
-          JSON.stringify(po),
+          rawExtracted,
           createdBy,
         )
         .run();
     } catch (e) {
       console.error("po_scan_samples insert failed:", (e as Error).message);
     }
-    samples.push({
-      sampleId,
-      extracted: po,
-      warnings: validateAndEnrichPO(po, catalog),
-    });
+    samples.push({ sampleId, extracted: po, warnings });
   }
 
   return c.json({
@@ -711,10 +745,45 @@ app.post("/samples/:id/confirm", async (c) => {
     /* best-effort */
   }
 
-  const result = await (c.var.DB as unknown as DBLike)
-    .prepare("UPDATE po_scan_samples SET correctedJson = ?, isGold = ? WHERE id = ?")
-    .bind(payload, goldFlag, id)
-    .run();
+  // The operator's own pick is the most authoritative customer signal we ever
+  // get: the preview modal's customer <select> writes customerId + the catalog
+  // name onto the PO before it is confirmed. Promote it to `customerHint` so
+  // the accuracy dashboard files this sample under the real customer instead of
+  // the letterhead spelling — or, worse, the file name (owner 2026-08-05:
+  // 「为什么它会收到像 PO2068 这样的东西？非常奇怪」). Only ever OVERWRITES with a
+  // resolved catalog name; a failed lookup leaves the stored hint untouched.
+  let pickedHint: string | null = null;
+  const corrected: unknown =
+    typeof body.correctedJson === "string"
+      ? parseJsonOrNull(body.correctedJson)
+      : body.correctedJson;
+  const pickedCustomerId =
+    corrected && typeof corrected === "object"
+      ? (corrected as { customerId?: unknown }).customerId
+      : null;
+  if (typeof pickedCustomerId === "string" && pickedCustomerId) {
+    try {
+      const row = await (c.var.DB as unknown as DBLike)
+        .prepare("SELECT name FROM customers WHERE id = ?")
+        .bind(pickedCustomerId)
+        .first<{ name: string | null }>();
+      pickedHint = cleanCustomerHint(row?.name);
+    } catch {
+      /* best-effort — never fail an import over the accuracy sample */
+    }
+  }
+
+  const result = pickedHint
+    ? await (c.var.DB as unknown as DBLike)
+        .prepare(
+          "UPDATE po_scan_samples SET correctedJson = ?, isGold = ?, customerHint = ? WHERE id = ?",
+        )
+        .bind(payload, goldFlag, pickedHint, id)
+        .run()
+    : await (c.var.DB as unknown as DBLike)
+        .prepare("UPDATE po_scan_samples SET correctedJson = ?, isGold = ? WHERE id = ?")
+        .bind(payload, goldFlag, id)
+        .run();
 
   if (!result.success || result.meta.changes === 0) {
     return c.json(

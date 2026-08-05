@@ -920,7 +920,7 @@ async function runAndSendReport(
     );
     html = renderBriefHtml(data);
     text = renderBriefEmailText(data);
-    subject = `[Hookka] Production Morning Brief — ${date} (${data.overdue.totals.salesOrders} overdue · CNC ~${data.cnc.referenceDays}d)`;
+    subject = `[Hookka] Production Morning Brief — ${date} (${data.overdue.totals.salesOrders} overdue)`;
   } else if (kind === "efficiency") {
     const data = await collectEfficiencyData(c.var.DB, date);
     html = renderEfficiencyHtml(data);

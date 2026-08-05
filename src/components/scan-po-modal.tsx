@@ -962,7 +962,18 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ correctedJson: po, gold: row.markedGold }),
-          }).catch(() => {});
+          })
+            .then((r) => {
+              // See scan-supplier-modal: `.catch` alone only sees a network
+              // failure, so a 403/404 resolved quietly and July recorded zero
+              // samples out of 308 imports with nothing to show for it.
+              if (!r.ok) {
+                console.warn(
+                  `[scan-po] accuracy sample not recorded (${r.status}) — the dashboard will under-count this import`,
+                );
+              }
+            })
+            .catch(() => {});
         }
 
         // Render the source PDF page(s) for this PO into a PNG attachment.

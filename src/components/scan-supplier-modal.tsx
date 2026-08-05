@@ -1941,7 +1941,21 @@ function CreatePIWizard({
                 correctedJson: serialiseCardAsExtraction(card),
                 gold: card.markedGold,
               }),
-            }).catch(() => {});
+            })
+              .then((r) => {
+                // Fire-and-forget, but not silent. `.catch` alone only sees a
+                // network failure — a 403 or 404 resolves normally, so two
+                // months of samples (119 supplier, 308 sales order in July)
+                // went unrecorded with nothing anywhere to show for it. The
+                // import itself must not be blocked by this, so it stays
+                // non-blocking; it just stops being invisible.
+                if (!r.ok) {
+                  console.warn(
+                    `[scan-supplier] accuracy sample not recorded (${r.status}) — the dashboard will under-count this import`,
+                  );
+                }
+              })
+              .catch(() => {});
           }
 
           const sup = supplierById(card.supplierId);
@@ -4544,7 +4558,21 @@ function CreateGRNWizard({
                 correctedJson: serialiseGRNCardAsExtraction(card),
                 gold: card.markedGold,
               }),
-            }).catch(() => {});
+            })
+              .then((r) => {
+                // Fire-and-forget, but not silent. `.catch` alone only sees a
+                // network failure — a 403 or 404 resolves normally, so two
+                // months of samples (119 supplier, 308 sales order in July)
+                // went unrecorded with nothing anywhere to show for it. The
+                // import itself must not be blocked by this, so it stays
+                // non-blocking; it just stops being invisible.
+                if (!r.ok) {
+                  console.warn(
+                    `[scan-supplier] accuracy sample not recorded (${r.status}) — the dashboard will under-count this import`,
+                  );
+                }
+              })
+              .catch(() => {});
           }
 
           const sup = supplierById(card.supplierId);

@@ -191,6 +191,17 @@ const num = (v: number | null | undefined) =>
   v === null || v === undefined || Number.isNaN(v) ? "" : String(v);
 
 let uploadSeq = 0;
+/**
+ * Mirrors futureInvoiceDate() in src/api/routes/purchase-invoices.ts — same
+ * 36-hour tolerance for the UTC/MYT gap, so the warning shown here and the
+ * refusal returned there never disagree.
+ */
+function isFutureInvoiceDate(date: string | null | undefined): boolean {
+  const d = (date ?? "").trim().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
+  return d > new Date(Date.now() + 36 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
 function makeUploadId(): string {
   uploadSeq += 1;
   return `sup-upload-${Date.now().toString(36)}-${uploadSeq}`;
@@ -3178,6 +3189,21 @@ function PICard({
                 onChange={(e) => onPatch({ invoiceDate: e.target.value })}
                 disabled={!!card.createdPiNo}
               />
+              {/* The date arrives from the scan, and a scan can misread a
+                  month. The server refuses a future-dated invoice — the
+                  payment term is calculated from it, so a month slip is a
+                  month of late payment nobody sees until the supplier chases.
+                  Say so HERE, while the field is still open, instead of
+                  letting Create fail and leaving the operator to work out why.
+                  Owner 2026-08-05: "如果这个日期错了，我必须还能更改，要不然我
+                  直接不能开单." The field stays editable; this is a warning,
+                  not a lock. */}
+              {isFutureInvoiceDate(card.invoiceDate) && (
+                <p className="mt-1 text-[10px] text-[#9A3A2D]">
+                  This date is in the future — check the supplier&rsquo;s
+                  invoice. Creating will be refused until it is corrected.
+                </p>
+              )}
             </div>
           </div>
           <button

@@ -50,8 +50,41 @@ const SO_LINE: [string, string][] = [
   ["specialOrder", "Special order"],
 ];
 
-export function diffSalesOrderSample(raw: unknown, corrected: unknown): DiffResult {
+/**
+ * The raw PO to compare a corrected one against.
+ *
+ * Since the multi-PO scan (2026-06-30) `rawExtracted` holds the whole DOCUMENT
+ * — `{ pos: [ … ] }` — while `correctedJson` holds the single PO the operator
+ * imported. Comparing the envelope against a PO reads `customerPO` and `items`
+ * off an object that has neither, so every field registers as edited and the
+ * scan can never be a success. That is the whole of the 0% the owner saw on
+ * 2026-08-05: 49 scans, every one of them envelope-shaped, several byte-for-byte
+ * identical to what was imported.
+ *
+ * Match by PO NUMBER, not by position. One document routinely carries two POs
+ * and the operator imports them separately, so `pos[0]` is the right PO only by
+ * luck — in the sample that prompted this, page 1 was PO/2608-027 and the
+ * imported row was PO/2608-029.
+ *
+ * A raw PO number that matches nothing falls back to the sole entry when there
+ * is only one; with several and no match there is nothing honest to compare, so
+ * the caller is handed the envelope and the scan counts as changed.
+ */
+export function rawPoFor(raw: unknown, corrected: unknown): unknown {
   const r = asRec(raw);
+  if (!Array.isArray(r.pos)) return raw; // legacy flat sample
+  const pos = asArr(r.pos);
+  if (pos.length === 0) return raw;
+  const want = norm(asRec(corrected).customerPO);
+  if (want) {
+    const hit = pos.find((p) => norm(p.customerPO) === want);
+    if (hit) return hit;
+  }
+  return pos.length === 1 ? pos[0] : raw;
+}
+
+export function diffSalesOrderSample(raw: unknown, corrected: unknown): DiffResult {
+  const r = asRec(rawPoFor(raw, corrected));
   const c = asRec(corrected);
   const fields = new Set<string>();
 
@@ -78,7 +111,7 @@ export type LineDiff = { productCode: string; changed: boolean; fields: string[]
 
 export function salesOrderLineDiffs(raw: unknown, corrected: unknown): LineDiff[] {
   const ci = asArr(asRec(corrected).items);
-  const ri = asArr(asRec(raw).items);
+  const ri = asArr(asRec(rawPoFor(raw, corrected)).items);
   return ci.map((cLine, i) => {
     const rLine = ri[i] ?? {};
     const fields: string[] = [];
@@ -119,9 +152,18 @@ function docsOf(v: unknown): AnyRec[] {
 }
 
 export function diffSupplierSample(raw: unknown, corrected: unknown): DiffResult {
-  const rd = docsOf(raw);
+  let rd = docsOf(raw);
   const cd = docsOf(corrected);
   const fields = new Set<string>();
+  // Same envelope-vs-document mismatch as the sales side: `rawJson` may hold
+  // every document on the page while `correctedJson` holds the one that was
+  // imported. Narrow to the matching docNo before counting a length difference,
+  // or a two-invoice scan reads as "Doc added/removed" on both halves.
+  if (rd.length > cd.length && cd.length === 1) {
+    const want = norm(cd[0].docNo);
+    const hit = want ? rd.find((d) => norm(d.docNo) === want) : undefined;
+    if (hit) rd = [hit];
+  }
   if (rd.length !== cd.length) fields.add("Doc added/removed");
   const dn = Math.min(rd.length, cd.length);
   for (let d = 0; d < dn; d++) {

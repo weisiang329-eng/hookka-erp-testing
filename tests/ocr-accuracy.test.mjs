@@ -13,7 +13,7 @@ try {
 const core = await import(
   pathToFileURL(resolve(process.cwd(), "src/api/lib/ocr-accuracy-core.ts")).href
 );
-const { diffSalesOrderSample, diffSupplierSample, emptyBucket, addToBucket, rateOf, topFails } = core;
+const { diffSalesOrderSample, diffSupplierSample, salesOrderLineDiffs, emptyBucket, addToBucket, rateOf, topFails } = core;
 
 test("SO: identical extraction → success, no changed fields", () => {
   const po = { customerPO: "PO-1", customerName: "Houzs", items: [{ productCode: "5543-1B", quantity: 2, fabricCode: "M2402-4", sizeCode: "28" }] };
@@ -80,4 +80,63 @@ test("aggregation: bucket rate + topFails", () => {
 
 test("rateOf null on empty bucket", () => {
   assert.equal(rateOf(emptyBucket("x")), null);
+});
+
+// ---------------------------------------------------------------------------
+// The envelope regression (owner 2026-08-05: "它的 sales order 那个 success
+// rate 那么低的吗？0%哦？").
+//
+// Since multi-PO scanning, `rawExtracted` holds the whole document —
+// `{ pos: [ … ] }` — while `correctedJson` holds the single PO that was
+// imported. Diffing an envelope against a PO reads customerPO and items off an
+// object that has neither, so every scan failed: 49 of 49, including ones that
+// were byte-for-byte identical to what the operator imported.
+// ---------------------------------------------------------------------------
+test("an untouched PO inside an envelope is a success, not a fail", () => {
+  const po = {
+    customerPO: "PO/2608-013",
+    customerName: "Carres Sdn. Bhd.",
+    items: [{ productCode: "5531-2A(LHF)", sizeCode: "L", fabricCode: "KN390-14", quantity: 1 }],
+  };
+  const d = diffSalesOrderSample({ pos: [po] }, po);
+  assert.equal(d.changed, false, `unchanged scan reported as changed: ${d.fields}`);
+});
+
+test("the envelope is matched by PO number, never by position", () => {
+  // A real sample: page 1 was PO/2608-027, the imported row was PO/2608-029.
+  // Taking pos[0] would compare two different orders and call every field edited.
+  const first = { customerPO: "PO/2608-027", customerName: "Carres", items: [{ productCode: "1013-(Q)", quantity: 1 }] };
+  const second = { customerPO: "PO/2608-029", customerName: "Carres", items: [{ productCode: "1013-(K)", quantity: 1 }] };
+  const env = { pos: [first, second] };
+  assert.equal(diffSalesOrderSample(env, second).changed, false);
+  assert.equal(diffSalesOrderSample(env, first).changed, false);
+
+  // And a genuine edit inside an envelope is still caught.
+  const edited = { ...second, items: [{ productCode: "1013-(Q)", quantity: 1 }] };
+  const d = diffSalesOrderSample(env, edited);
+  assert.equal(d.changed, true);
+  assert.deepEqual(d.fields, ["Product code"]);
+});
+
+test("line diffs read the matching PO too", () => {
+  const first = { customerPO: "PO/2608-027", items: [{ productCode: "AAA", quantity: 1 }] };
+  const second = { customerPO: "PO/2608-029", items: [{ productCode: "BBB", quantity: 2 }] };
+  const lines = salesOrderLineDiffs({ pos: [first, second] }, second);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].changed, false, `line reported changed: ${lines[0].fields}`);
+});
+
+test("a legacy flat sample still compares the old way", () => {
+  const flat = { customerPO: "PO/1", customerName: "X", items: [{ productCode: "A", quantity: 1 }] };
+  assert.equal(diffSalesOrderSample(flat, flat).changed, false);
+  assert.equal(diffSalesOrderSample(flat, { ...flat, customerPO: "PO/2" }).changed, true);
+});
+
+test("a supplier envelope narrows to the imported document", () => {
+  const a = { docNo: "K26050470", supplierName: "SUNMAT", lines: [{ supplierCode: "AM275-1", qty: 20, unitPrice: 21 }] };
+  const b = { docNo: "K26050471", supplierName: "SUNMAT", lines: [{ supplierCode: "KN390-2", qty: 5, unitPrice: 30 }] };
+  assert.equal(diffSupplierSample({ docs: [a, b] }, b).changed, false);
+  const d = diffSupplierSample({ docs: [a, b] }, { ...b, lines: [{ supplierCode: "KN390-9", qty: 5, unitPrice: 30 }] });
+  assert.equal(d.changed, true);
+  assert.deepEqual(d.fields, ["Material code"]);
 });

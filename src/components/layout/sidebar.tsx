@@ -481,29 +481,15 @@ export function Sidebar({
   // P3.6 — load the current user's permission set so we can hide nav links
   // that would otherwise lead to a redirect or 403. SUPER_ADMIN gets ["*"]
   // from the backend so hasPermission always returns true for them.
-  const { hasPermission: canDo } = usePermissions();
+  const { isNavAllowed } = usePermissions();
 
-  // Routes that are gated by RequirePermission in dashboard-routes.tsx — keep
-  // this list in sync with the wrappers there. If we don't list a route here
-  // it stays visible by default (matches the current behavior for any link).
-  const NAV_PERMISSION_REQUIREMENTS: Record<
-    string,
-    { resource: string; action: string }
-  > = {
-    "/accounting": { resource: "accounting", action: "read" },
-    "/accounting/cash-flow": { resource: "accounting", action: "read" },
-    "/invoices": { resource: "invoices", action: "read" },
-    "/invoices/credit-notes": { resource: "invoices", action: "read" },
-    "/invoices/debit-notes": { resource: "invoices", action: "read" },
-    "/invoices/payments": { resource: "invoices", action: "read" },
-    "/invoices/supplier-payments": { resource: "invoices", action: "read" },
-    "/invoices/e-invoice": { resource: "invoices", action: "read" },
-  };
-  const isNavItemAllowed = (href: string): boolean => {
-    const req = NAV_PERMISSION_REQUIREMENTS[href];
-    if (!req) return true;
-    return canDo(req.resource, req.action);
-  };
+  // Which links to hide is decided by the API and handed over as a list of
+  // path prefixes (owner 2026-08-05: "直接从 backend 就挡掉嘛"). The browser
+  // never learns which resource guards which page, so the menu cannot drift
+  // from the gate that enforces it.
+  const isNavItemAllowed = (href: string): boolean => isNavAllowed(href);
+
+
 
   // Inject badge counts into the Notifications item, and the
   // SUPER_ADMIN-only User Management link into the SYSTEM group.

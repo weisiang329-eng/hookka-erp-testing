@@ -32,6 +32,14 @@ type PermissionsResponse = {
   success?: boolean;
   role?: string;
   permissions?: string[];
+  /**
+   * Path prefixes this user may not see, computed SERVER-side.
+   *
+   * Owner 2026-08-05: "我不要用 frontend loading 等等的，直接从 backend 就挡掉嘛."
+   * The browser hides a link without knowing which resource guards it, so the
+   * mapping cannot drift from the gate that enforces it.
+   */
+  navHidden?: string[];
 };
 
 const PERMISSIONS_URL = "/api/auth/me/permissions";
@@ -62,6 +70,8 @@ type UsePermissionsResult = {
   permissions: PermissionMap;
   loading: boolean;
   hasPermission: (resource: string, action: string) => boolean;
+  /** Server-decided: may this menu link be shown? */
+  isNavAllowed: (href: string) => boolean;
 };
 
 /**
@@ -94,11 +104,30 @@ export function usePermissions(): UsePermissionsResult {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
+  const navHidden = data?.navHidden ?? [];
+
   return {
     permissions,
     loading: loading && !data,
     hasPermission: (resource: string, action: string) =>
       checkSet(permissions, resource, action),
+    /**
+     * Should this menu link be shown?
+     *
+     * The decision was made on the server; this only matches the path against
+     * the prefixes it was handed. `/delivery-returns` is NOT hidden by a
+     * `/delivery` prefix — a prefix matches the path exactly or as a path
+     * SEGMENT, never as a bare string prefix.
+     *
+     * Unknown while the set is still loading means SHOW. A menu that blinks
+     * empty on every page load reads as broken, and the API refuses anything
+     * the user should not reach anyway.
+     */
+    isNavAllowed: (href: string) => {
+      if (!navHidden.length) return true;
+      const path = (href || "").split("?")[0];
+      return !navHidden.some((p) => path === p || path.startsWith(`${p}/`));
+    },
   };
 }
 

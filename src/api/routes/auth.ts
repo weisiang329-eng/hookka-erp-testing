@@ -18,6 +18,8 @@
 // /me round-trip, but the token itself never touches localStorage.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import { permissionsForRole } from "../lib/role-policy";
+import { hiddenNavPrefixes } from "../lib/nav-permissions";
 import type { Context } from "hono";
 import type { Env } from "../worker";
 import { hashPassword, verifyPassword } from "../lib/password";
@@ -521,11 +523,26 @@ app.get("/me/permissions", async (c) => {
         success: true,
         role: roleRow.roleName,
         permissions: ["*"],
+        navHidden: [],
       });
     }
 
     const roleId = roleRow.roleId ?? "role_read_only";
     const roleName = roleRow.roleName ?? "READ_ONLY";
+
+    // A role whose policy is written in CODE never touches the table — the same
+    // short-circuit rbac.ts uses for the GATE. Reading the table here while the
+    // gate read the code would hand the browser a different answer from the one
+    // the API enforces: menus for pages that 403, or pages hidden that work.
+    const coded = permissionsForRole(roleName);
+    if (coded) {
+      return c.json({
+        success: true,
+        role: roleName,
+        permissions: [...coded],
+        navHidden: hiddenNavPrefixes(coded),
+      });
+    }
 
     const permsRes = await c.var.DB.prepare(
       `SELECT p.resource AS resource, p.action AS action
@@ -543,6 +560,9 @@ app.get("/me/permissions", async (c) => {
       success: true,
       role: roleName,
       permissions,
+      // Computed here so the browser never needs to know which resource guards
+      // which link (owner: "直接从 backend 就挡掉嘛").
+      navHidden: hiddenNavPrefixes(new Set(permissions)),
     });
   } catch (err) {
     console.warn(

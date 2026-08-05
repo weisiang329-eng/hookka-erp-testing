@@ -152,6 +152,15 @@ app.get("/", async (c) => {
     // The point-in-time state KPIs (Outstanding / Pending / Plant Load) are
     // NOT period-scoped — they always reflect "now" and are tagged live.
     const kpiAllTime = period === "all";
+    // The month before the selected one, for the Purchasing side-by-side. On
+    // all-time there is no "previous", so it points at nothing and the card
+    // renders only the total.
+    const prevPeriod = (() => {
+      if (kpiAllTime) return "";
+      const [y, m] = period.split("-").map(Number);
+      const d = new Date(Date.UTC(y, m - 2, 1));
+      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+    })();
     const yesterdayISO = (() => {
       const y = new Date(today);
       y.setDate(y.getDate() - 1);
@@ -292,6 +301,8 @@ app.get("/", async (c) => {
       poPendRes,
       grnQcRes,
       topSupRes,
+      piSpendRes,
+      topSupPiRes,
       fabTotRes,
       fabExclRes,
       soAggRes,
@@ -419,6 +430,45 @@ app.get("/", async (c) => {
         )
         .bind(orgId)
         .all<{ name: string; spendSen: number }>(),
+      // Purchase-INVOICE spend, this period and the one before it, plus the
+      // top suppliers by invoiced amount.
+      //
+      // Owner 2026-08-05: "Purchasing 这一边也可以显示这一个月的、last month 的，
+      // 然后列出来 Top 5 supplier by PI amount." A purchase ORDER is what was
+      // committed; a purchase INVOICE is what was actually billed, and the two
+      // diverge — August has RM 99,665 of orders against a single RM 4,800
+      // invoice, while July has RM 179,329 invoiced. One month alone reads as
+      // a collapse; next to its predecessor it reads as invoicing lag.
+      //
+      // `amount_sen` is the canonical total. subtotal+tax agrees with it on
+      // recent months and NOT on older ones (2026-06: 201,626 vs 93,581),
+      // because those columns were backfilled later — so the sum must not be
+      // rebuilt from them.
+      db
+        .prepare(
+          `SELECT substr(invoiceDate::text, 1, 7) AS "ym",
+                  COALESCE(SUM(amountSen),0) AS "spendSen"
+             FROM purchase_invoices
+            WHERE orgId = ? AND status != 'CANCELLED'
+              AND substr(invoiceDate::text, 1, 7) IN (?, ?)
+            GROUP BY substr(invoiceDate::text, 1, 7)`,
+        )
+        .bind(orgId, period, prevPeriod)
+        .all<{ ym: string; spendSen: number }>(),
+      db
+        .prepare(
+          `SELECT supplierName AS "name",
+                  COALESCE(SUM(amountSen),0) AS "spendSen",
+                  COUNT(*) AS "invoices"
+             FROM purchase_invoices
+            WHERE orgId = ? AND status != 'CANCELLED'
+              ${kpiAllTime ? "" : "AND substr(invoiceDate::text, 1, 7) = ?"}
+            GROUP BY supplierName
+            ORDER BY COALESCE(SUM(amountSen),0) DESC
+            LIMIT 5`,
+        )
+        .bind(...(kpiAllTime ? [orgId] : [orgId, period]))
+        .all<{ name: string; spendSen: number; invoices: number }>(),
       db
         .prepare(
           `SELECT COALESCE(SUM(cl.totalCostSen),0) AS sen, COALESCE(SUM(cl.qty),0) AS qty
@@ -960,6 +1010,14 @@ app.get("/", async (c) => {
             bedframeMin += m;
         }
       }
+      // Per-dept capacity keeps its own rolling-7 basis: it is that dept's
+      // OWN recent throughput, which is the only sensible denominator for a
+      // per-dept queue, and no plant-wide capacity figure is printed beside
+      // this table to contradict it. The HEADLINE gauge is different — it sits
+      // directly under "Daily Capacity · 190h" and must divide by that, which
+      // it now does. Flagged rather than unified: making both use the month
+      // would divide a bottleneck dept by three days of its own output and
+      // swing the bottleneck ranking on the 1st of every month.
       const dailyCapMin = Math.round(windowTotal / 7);
       const totalMin = sofaMin + bedframeMin;
       // Div-zero guard (owner audit 2026-07-11): a dept with backlog but ZERO
@@ -1780,6 +1838,12 @@ app.get("/", async (c) => {
       },
     };
 
+    // PI spend keyed by month, so the card can print this month next to last.
+    const piByMonth = new Map<string, number>();
+    for (const r of piSpendRes.results ?? []) {
+      if (r.ym) piByMonth.set(String(r.ym), Number(r.spendSen) || 0);
+    }
+
     const headByDept = (headRes.results ?? []).map((r) => ({
       dept: r.dept || "—",
       count: Number(r.n) || 0,
@@ -2063,6 +2127,18 @@ app.get("/", async (c) => {
         topSuppliers: (topSupRes.results ?? []).map((s) => ({
           name: s.name || "—",
           spendSen: Number(s.spendSen) || 0,
+        })),
+        // Which month each figure belongs to, so the card can say so. The old
+        // card printed "SPEND / MONTH" beside an all-time "OPEN POS" with
+        // neither labelled — owner 2026-08-05: "你这个最新数据到底是几月份的？"
+        period,
+        prevPeriod,
+        piSpendThisMonthSen: piByMonth.get(period) ?? 0,
+        piSpendPrevMonthSen: piByMonth.get(prevPeriod) ?? 0,
+        topSuppliersByPi: (topSupPiRes.results ?? []).map((s) => ({
+          name: s.name || "—",
+          spendSen: Number(s.spendSen) || 0,
+          invoices: Number(s.invoices) || 0,
         })),
       },
       fabricCostPerMeterSen: {

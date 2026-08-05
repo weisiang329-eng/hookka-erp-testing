@@ -63,7 +63,11 @@ export const NAV_RESOURCE: Record<string, string> = {
 
   // Products & BOM.
   "/products": "products",
-  "/cnc-templates": "products",
+  // Owner 2026-08-05: "CNC template 把它移除掉" (from the sales menu). It used to
+  // share the `products` gate, so anyone who could read the catalogue — which
+  // Sales can, read-only — got the CNC cutting templates too. A shop-floor
+  // tooling screen is not part of reading a price list; it needs its own gate.
+  "/cnc-templates": "cnc-templates",
   "/bom": "bom",
   "/maintenance/sofa-combos": "sofa-combos",
 

@@ -1924,6 +1924,9 @@ export async function fetchPaginatedPOs(
   dueFrom: string | null = null,
   dueTo: string | null = null,
   catFilter: string | null = null,
+  // Row-level customer scope — see fetchFilteredPOs. Narrows the COUNT as well
+  // as the page, so `total` cannot disagree with the rows above it.
+  customerScope: { clause: string; binds: string[] } | null = null,
 ): Promise<{ data: ProductionOrderOut[] | MinimalPOOut[]; total: number }> {
   const hasFilter = Array.isArray(statuses) && statuses.length > 0;
   const statusPlaceholders = hasFilter
@@ -2001,20 +2004,22 @@ export async function fetchPaginatedPOs(
   const dueWhere = dueClauses.length > 0 ? ` AND ${dueClauses.join(" AND ")}` : "";
   const catWhere = catFilter ? ' AND itemCategory = ?' : '';
   const catBindings: string[] = catFilter ? [catFilter] : [];
+  const pagCustWhere = customerScope?.clause ? ` AND ${customerScope.clause}` : "";
+  const pagCustBinds = customerScope?.binds ?? [];
 
   const countSql = hasFilter
-    ? `SELECT COUNT(*) AS n FROM ${poSource} WHERE orgId = ? AND status IN (${statusPlaceholders})${dueWhere}${catWhere}`
-    : `SELECT COUNT(*) AS n FROM ${poSource} WHERE orgId = ?${dueWhere}${catWhere}`;
+    ? `SELECT COUNT(*) AS n FROM ${poSource} WHERE orgId = ? AND status IN (${statusPlaceholders})${dueWhere}${catWhere}${pagCustWhere}`
+    : `SELECT COUNT(*) AS n FROM ${poSource} WHERE orgId = ?${dueWhere}${catWhere}${pagCustWhere}`;
   const pageSql = hasFilter
-    ? `SELECT * FROM ${poSource} WHERE orgId = ? AND status IN (${statusPlaceholders})${dueWhere}${catWhere} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
-    : `SELECT * FROM ${poSource} WHERE orgId = ?${dueWhere}${catWhere} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`;
+    ? `SELECT * FROM ${poSource} WHERE orgId = ? AND status IN (${statusPlaceholders})${dueWhere}${catWhere}${pagCustWhere} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+    : `SELECT * FROM ${poSource} WHERE orgId = ?${dueWhere}${catWhere}${pagCustWhere} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`;
 
   const countStmt = hasFilter
-    ? db.prepare(countSql).bind(orgId, ...(statuses as string[]), ...dueBindings, ...catBindings)
-    : db.prepare(countSql).bind(orgId, ...dueBindings, ...catBindings);
+    ? db.prepare(countSql).bind(orgId, ...(statuses as string[]), ...dueBindings, ...catBindings, ...pagCustBinds)
+    : db.prepare(countSql).bind(orgId, ...dueBindings, ...catBindings, ...pagCustBinds);
   const pageStmt = hasFilter
-    ? db.prepare(pageSql).bind(orgId, ...(statuses as string[]), ...dueBindings, ...catBindings, limit, offset)
-    : db.prepare(pageSql).bind(orgId, ...dueBindings, ...catBindings, limit, offset);
+    ? db.prepare(pageSql).bind(orgId, ...(statuses as string[]), ...dueBindings, ...catBindings, ...pagCustBinds, limit, offset)
+    : db.prepare(pageSql).bind(orgId, ...dueBindings, ...catBindings, ...pagCustBinds, limit, offset);
 
   const [countRes, pageRes] = await Promise.all([
     countStmt.first<{ n: number }>(),

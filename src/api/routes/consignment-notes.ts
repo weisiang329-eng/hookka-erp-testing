@@ -38,6 +38,7 @@ import { getOrgId } from "../lib/tenant";
 import { loadCnValueMap, loadCnCustomerRefMap } from "../lib/cn-value";
 import { emitAudit } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
+import { customerScopeSql } from "../lib/customer-scope";
 import { enqueueEmail } from "../lib/email-outbox";
 import {
   cnDispatchNoticeTemplate,
@@ -90,6 +91,13 @@ app.get("/", async (c) => {
   if (q) {
     clauses.push("(noteNumber ILIKE ? OR customerName ILIKE ? OR branchName ILIKE ?)");
     params.push(`%${q}%`, `%${q}%`, `%${q}%`);
+  }
+  // Owner 2026-08-05: "consignment order 也是这样。我想 consignment note、
+  // return 等等都是."
+  const cnScope = await customerScopeSql(c, "customerId");
+  if (cnScope.clause) {
+    clauses.push(cnScope.clause);
+    params.push(...cnScope.binds);
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 

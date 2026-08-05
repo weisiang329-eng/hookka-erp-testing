@@ -34,6 +34,7 @@ import {
 import { checkConsignmentOrderLocked, lockedResponse } from "../lib/lock-helpers";
 import { emitAudit, buildAuditStatement } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
+import { customerScopeSql } from "../lib/customer-scope";
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { getOrgId } from "../lib/tenant";
 import {
@@ -466,6 +467,13 @@ app.get("/", async (c) => {
   if (customerId) {
     clauses.push("customerId = ?");
     params.push(customerId);
+  }
+  // Owner 2026-08-05: "consignment order 也是这样。我想 consignment note、
+  // return 等等都是."
+  const cnScope = await customerScopeSql(c, "customerId");
+  if (cnScope.clause) {
+    clauses.push(cnScope.clause);
+    params.push(...cnScope.binds);
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 

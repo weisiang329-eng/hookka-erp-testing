@@ -27,7 +27,7 @@ import {
   priceForItem,
 } from "../lib/do-value";
 import { requirePermission } from "../lib/rbac";
-import { customerScopeSql } from "../lib/customer-scope";
+import { customerScopeSql, salesOrderScopeSql, isCustomerScoped } from "../lib/customer-scope";
 import { getOrgId } from "../lib/tenant";
 import { emitAudit } from "../lib/audit";
 import { checkDeliveryOrderLocked, lockedResponse } from "../lib/lock-helpers";
@@ -491,30 +491,23 @@ app.get("/ready-planning", async (c) => {
   // the delivery page would block its cold paint on an ~8s request. withSnapshot
   // serves the last good {ready,planning} instantly and refreshes in the
   // background; freshness tracks production_orders / job_cards / delivery_order_items.
+  // The Planning and Pending-Delivery tabs are built here, and this response is
+  // shaped {ready, planning} rather than {data} — so the response filter never
+  // looked at it at all. It has to narrow in SQL, and it must not touch the
+  // org-keyed snapshot while scoped (owner 2026-08-05: "他 deliveryOrder
+  // planning 跟 planning delivery 还是会看到别的顧客的").
+  const rpPoScope = await salesOrderScopeSql(c, "salesOrderId");
+  const rpSoScope = await customerScopeSql(c, "customerId");
+  const rpSoClause = rpSoScope.clause ? ` AND ${rpSoScope.clause}` : "";
   const { withSnapshot } = await import("../lib/snapshot");
-  const data = await withSnapshot(
-    db,
-    {
-      tableName: "delivery_ready_planning_snapshot",
-      sourceTables: [
-        "production_orders",
-        "job_cards",
-        "delivery_order_items",
-        "delivery_orders",
-        "sales_orders",
-        "sales_order_items",
-        "consignment_orders",
-      ],
-    },
-    orgId,
-    async () => {
+  const compute = async () => {
   const [pos, soRes, itemRes, linkedRes, poValMap] = await Promise.all([
-    fetchFilteredPOs(db, orgId, null, true, false, true),
+    fetchFilteredPOs(db, orgId, null, true, false, true, null, null, null, null, false, null, rpPoScope),
     db
       .prepare(
-        "SELECT id, companySOId, customerId, customerSO, customerSOId, customerPO, customerPOId, reference, hookkaExpectedDD FROM sales_orders WHERE orgId = ?",
+        `SELECT id, companySOId, customerId, customerSO, customerSOId, customerPO, customerPOId, reference, hookkaExpectedDD FROM sales_orders WHERE orgId = ?${rpSoClause}`,
       )
-      .bind(orgId)
+      .bind(orgId, ...rpSoScope.binds)
       .all<{
         id: string;
         companySOId?: string;
@@ -624,8 +617,29 @@ app.get("/ready-planning", async (c) => {
     soPriceByProduct,
     productM3Map,
   });
-      return { ready, planning };
+    return { ready, planning };
+  };
+
+  // A scoped caller computes fresh and never enters the shared snapshot.
+  if (isCustomerScoped(c)) {
+    return c.json({ success: true, ...(await compute()) });
+  }
+  const data = await withSnapshot(
+    db,
+    {
+      tableName: "delivery_ready_planning_snapshot",
+      sourceTables: [
+        "production_orders",
+        "job_cards",
+        "delivery_order_items",
+        "delivery_orders",
+        "sales_orders",
+        "sales_order_items",
+        "consignment_orders",
+      ],
     },
+    orgId,
+    compute,
     "",
     c,
     { staleWhileRevalidate: true },

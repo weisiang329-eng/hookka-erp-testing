@@ -53,6 +53,8 @@ export const SCOPED_PREFIXES = [
   "/api/service-cases",
   "/api/invoices",
   "/api/consignments",
+  "/api/consignment-notes",
+  "/api/consignment-orders",
 ];
 
 /** Field names a row might carry its customer under. */

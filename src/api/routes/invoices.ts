@@ -21,6 +21,7 @@ import { Hono } from "hono";
 import { runSelfApply } from "../lib/self-apply";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { customerScopeSql } from "../lib/customer-scope";
 import { computeInvoicePrintExtras } from "../lib/invoice-print-extras";
 // Rollup: S3 won the audit/journal-hash signature change (batched into the
 // invoice txn via buildAuditStatement + buildJournalEntryStatements). S4's
@@ -1085,6 +1086,14 @@ app.get("/", async (c) => {
   const orgId = getOrgId(c);
   const where: string[] = ["orgId = ?"];
   const params: unknown[] = [orgId];
+  // Owner 2026-08-05: "包括 invoice 也会看到 total amount，也不是根据我自己的."
+  // The grid was already empty; the KPI cards and `total` were not, because
+  // they are aggregates with no customer on them to filter.
+  const invScope = await customerScopeSql(c, "customerId");
+  if (invScope.clause) {
+    where.push(invScope.clause);
+    params.push(...invScope.binds);
+  }
   if (customerId) {
     where.push("customerId = ?");
     params.push(customerId);
@@ -1188,9 +1197,14 @@ app.get("/stats", async (c) => {
   const fStatus = c.req.query("status");
   const fFrom = c.req.query("from");
   const fTo = c.req.query("to");
-  const filtered = !!(fCustomer || fStatus || fFrom || fTo);
+  // A scoped caller's KPI cards must be computed from their own rows, and must
+  // never read or write the org-wide snapshot — the cards read 433 invoices and
+  // RM 944,105.37 over an empty grid (owner 2026-08-05).
+  const statScope = await customerScopeSql(c, "customerId");
+  const filtered = !!(fCustomer || fStatus || fFrom || fTo) || !!statScope.clause;
   const fWhere: string[] = ["orgId = ?"];
   const fParams: unknown[] = [orgId];
+  if (statScope.clause) { fWhere.push(statScope.clause); fParams.push(...statScope.binds); }
   if (fCustomer) { fWhere.push("customerId = ?"); fParams.push(fCustomer); }
   if (fStatus) { fWhere.push("status = ?"); fParams.push(fStatus); }
   if (fFrom) { fWhere.push("invoiceDate >= ?"); fParams.push(fFrom); }

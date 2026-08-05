@@ -96,3 +96,68 @@ test("isCustomerScoped is role-only and needs no database", () => {
   assert.equal(isCustomerScoped(ctx("sales", "u1")), true);
   assert.equal(isCustomerScoped(ctx("OFFICE", "u1")), false);
 });
+
+// ---------------------------------------------------------------------------
+// Round two, owner 2026-08-05: "他 deliveryOrder planning 跟 planning delivery
+// 还是会看到别的顧客的，包括 invoice 也会看到 total amount… consignment order
+// 也是这样。我想 consignment note、return 等等都是."
+// ---------------------------------------------------------------------------
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+const read = (p) => readFileSync(resolve(process.cwd(), p), "utf8");
+
+test("every list that shows customer rows narrows in SQL", () => {
+  // Asserted against the SOURCE because these are route handlers with their own
+  // snapshots and query builders — a unit test of the helper alone would keep
+  // passing while a route quietly stopped calling it.
+  for (const [file, needle] of [
+    ["src/api/routes/sales-orders.ts", "customerScopeSql"],
+    ["src/api/routes/delivery-orders.ts", "customerScopeSql"],
+    ["src/api/routes/delivery-returns.ts", "customerScopeSql"],
+    ["src/api/routes/service-orders.ts", "customerScopeSql"],
+    ["src/api/routes/service-cases.ts", "customerScopeSql"],
+    ["src/api/routes/invoices.ts", "customerScopeSql"],
+    ["src/api/routes/consignments.ts", "customerScopeSql"],
+    ["src/api/routes/consignment-notes.ts", "customerScopeSql"],
+    ["src/api/routes/consignment-orders.ts", "customerScopeSql"],
+    ["src/api/routes/production-orders.ts", "salesOrderScopeSql"],
+  ]) {
+    assert.ok(read(file).includes(needle), `${file} does not narrow its rows`);
+  }
+});
+
+test("the Planning and Pending-Delivery tabs narrow too", () => {
+  // /ready-planning answers {ready, planning}, not {data} — the response filter
+  // never inspected it, which is why both tabs kept showing other people's rows
+  // after the first pass.
+  const src = read("src/api/routes/delivery-orders.ts");
+  const rp = src.slice(src.indexOf('app.get("/ready-planning"'));
+  assert.match(rp, /rpPoScope/, "ready-planning does not narrow its production orders");
+  assert.match(rp, /rpSoScope/, "ready-planning does not narrow its sales orders");
+  assert.match(rp, /isCustomerScoped\(c\)/, "ready-planning would cache a scoped payload");
+});
+
+test("no org-keyed snapshot is written from a scoped request", () => {
+  // A narrowed payload in a shared cache is worse than no filter at all: it
+  // would serve one salesperson's view to the whole factory.
+  for (const [file, guard] of [
+    ["src/api/routes/sales-orders.ts", /if \(serviceOrderFilter !== "false" \|\| scope\.clause\)/],
+    ["src/api/routes/delivery-orders.ts", /if \(!statsScope\.clause\)/],
+    ["src/api/routes/invoices.ts", /\|\| !!statScope\.clause/],
+    ["src/api/routes/production-orders.ts", /if \(isCustomerScoped\(c\)\)/],
+  ]) {
+    assert.match(read(file), guard, `${file} may poison its snapshot`);
+  }
+});
+
+test("CNC templates have a gate of their own, not the catalogue's", () => {
+  // They used to share `products`, so read-only catalogue access handed out the
+  // shop-floor cutting templates with it.
+  const nav = read("src/api/lib/nav-permissions.ts");
+  assert.match(nav, /"\/cnc-templates": "cnc-templates"/);
+  const route = read("src/api/routes/cnc-templates.ts");
+  assert.equal(
+    (route.match(/requirePermission\(c, "products"/g) ?? []).length, 0,
+    "a CNC template endpoint still gates on products",
+  );
+});

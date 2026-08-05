@@ -193,6 +193,8 @@ export async function computeOverdueCounts(
   // branch is the MIN(jc.dueDate) across that dept's still-open JCs that have
   // already passed today.
   let rows: OverduePoRow[];
+  const ocScope = await salesOrderScopeSql(c, "po.salesOrderId", "po.consignmentOrderId");
+  const ocClause = ocScope.clause ? ` AND ${ocScope.clause}` : "";
   if (dept === null) {
     // Overview overdue now keys off the PO's SO "Our Expected DD"
     // (sales_orders.hookkaExpectedDD) — the date the operator reads in the
@@ -240,8 +242,8 @@ export async function computeOverdueCounts(
                 ELSE NULL
               END AS earliest_overdue
          FROM production_orders po
-        WHERE po.orgId = ?`,
-    ).bind(today, orgId);
+        WHERE po.orgId = ?${ocClause}`,
+    ).bind(today, orgId, ...ocScope.binds);
     const res = await stmt.all<OverduePoRow>();
     rows = res.results ?? [];
   } else {
@@ -273,8 +275,8 @@ export async function computeOverdueCounts(
             JOIN delivery_orders d ON d.id = di.deliveryOrderId
             WHERE di.productionOrderId = po.id
               AND d.status IN ('LOADED','IN_TRANSIT','DELIVERED','INVOICED')
-          )`,
-    ).bind(dept, today, orgId);
+          )${ocClause}`,
+    ).bind(dept, today, orgId, ...ocScope.binds);
     const res = await stmt.all<OverduePoRow>();
     rows = res.results ?? [];
   }
@@ -389,6 +391,8 @@ export async function computeOverdueCounts(
 }
 
 app.get("/overdue-counts", async (c) => {
+  // An aggregate, so nothing downstream can narrow it — the badge would keep
+  // counting other people's overdue orders.
   const result = await computeOverdueCounts(c, c.req.query("dept") ?? null);
   return c.json({ success: true, ...(result as object) });
 });
@@ -694,6 +698,7 @@ app.get("/", async (c) => {
     dueFrom,
     dueTo,
     catFilter,
+    poCustomerScope,
   );
   await attachCustomerSO(
     c.var.DB,

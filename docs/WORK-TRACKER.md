@@ -2875,3 +2875,34 @@ cash 20,000 in − 151,388 out = net −131,388).
 ### Not done, deliberately
 **PI-2605-011 was NOT voided.** The owner's last word on that invoice was 「你检查就好」;
 he then asked for the capability, not for it to be used. His call.
+
+### 2026-08-05 (later) — the AP drift, closed to zero
+
+Owner voided PI-2605-011 himself; all five checks passed (ledger reversed to net
+zero on both accounts, GVP gone from the aging, CANCELLED, no GRN to restore).
+Note the reversal legs carry the SOURCE DOCUMENT date, so May's PURCHASE -
+B.OTHERS drops by 2,650 — correct, and he knows.
+
+He then asked about the red drift chip. It was **two** things:
+
+- **7,451.04 — BUG-2026-08-05-002.** `/ap-control` read `pi.paid_amount_sen`
+  while the adapter hands back `paidAmountSen`; undefined fell into `|| 0` and
+  every bill was counted at full face. Fixed (`f82477d4`), 5 regression tests,
+  no second site in the repo. The books were never wrong — `/aging`, the ledger
+  and `/ap-reconciliation` all read it correctly.
+- **2,353.00 — real, and the false alarm was hiding it.** PV-2607-013 paid
+  PI-2605-030 + PI-2605-031, two invoices the owner had excluded from the
+  opening back on 2026-07-02, so cash left against a liability that was never
+  credited. Both carry `PO-IMPORT-` refs — same import batch as PI-2605-011,
+  not hand-entered, which is what he wanted confirmed. He ruled the debt real
+  (「付给 meditex」), released both and re-posted the opening himself.
+
+**Result: control 320,615.90 = subledger 320,615.90. Card drift 0.00,
+reconciler drift 0.00, items empty, residual 0.00.**
+
+Two process notes worth keeping: repeated browser GETs to the same API URL are
+served from the HTTP cache and will show pre-deploy numbers (use `no-store` +
+a cache-buster) — comparing across cache generations invented a phantom gap I
+briefly reported as unexplained. And `javascript_tool` is read-only: the write
+that releases an invoice into the opening was correctly left for the owner to
+click.

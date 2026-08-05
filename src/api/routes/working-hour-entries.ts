@@ -197,6 +197,14 @@ function validateEntry(input: EntryInput): { ok: true; data: { departmentCode: s
 // the "Revenue Raw Data" audit table on the Labor Cost tab.
 // ---------------------------------------------------------------------------
 app.get("/production-revenue", async (c) => {
+  // Owner 2026-08-05: "我们的 HR 也是可以把 Total Revenue 还有 Remain 这样子的
+  // Sales 的东西 remove 掉，我们只需要保留着人工成本，给 HR 看到就行."
+  //
+  // The whole endpoint IS the revenue side — labour cost comes from /summary
+  // and /dept-category-summary, which are untouched. So this is a gate, not a
+  // field strip: HR keeps the report, minus the figures that are not theirs.
+  const deniedRevenue = await requirePermission(c, "revenue-figures", "read");
+  if (deniedRevenue) return deniedRevenue;
   const from = c.req.query("from");
   const to = c.req.query("to");
   if (!from || !to) {

@@ -97,6 +97,12 @@ export const ALL_RESOURCES = [
   "forecasts",
   // Products & master data
   "products", "product-configs", "sofa-combos", "rd-projects", "cnc-templates",
+  // Two figures that travel WITH other data rather than on a page of their own,
+  // so they need a gate of their own or they ride in on whoever can read the
+  // page. Owner 2026-08-05: "我们卖价不需要给他们知道，我们只需要给他们看到成本
+  // 就可以" (R&D) and "HR… 我们只需要保留着人工成本".
+  "product-pricing",   // selling price, margin, surcharge amounts
+  "revenue-figures",   // revenue / remain on the labour report
   "equipment", "maintenance-logs", "lorries", "drivers", "departments",
   "organisations",
   // People
@@ -181,6 +187,7 @@ const SALES: RolePolicy = {
   quotations: OPEN, // Export Quotation
   "customer-hubs": OPEN, // 开 HUB
   "sofa-combos": OPEN, // 设 Sofa Combo / 加钱
+  "product-pricing": OPEN, // 加钱 / quotations — Sales works in selling price
   "promise-date": OPEN,
   "historical-sales": OPEN,
 
@@ -249,6 +256,9 @@ const QA: RolePolicy = {
   // got a gate of its own, and taking it away was never the point — only Sales
   // was to lose it (owner 2026-08-05).
   "cnc-templates": OPEN,
+  // Held explicitly for the same reason as cnc-templates: QA saw prices through
+  // `products` before that split off, and only R&D was to lose them.
+  "product-pricing": OPEN,
   "fg-units": OPEN,
 };
 
@@ -264,6 +274,8 @@ const QA: RolePolicy = {
  */
 const R_AND_D: RolePolicy = {
   "rd-projects": OPEN,
+  // products WITHOUT `product-pricing` — the catalogue, the BOM and the cost
+  // side, but not what it sells for. Owner 2026-08-05.
   products: OPEN,
   // Same as QA — product development is exactly who the cutting templates are
   // for. Only Sales loses them.
@@ -271,7 +283,9 @@ const R_AND_D: RolePolicy = {
   "product-configs": OPEN,
   bom: OPEN,
   "bom-master-templates": OPEN,
-  "sofa-combos": OPEN,
+  // Sofa Combos removed 2026-08-05 ("把 IMD 的 sofa compartment remove 掉") —
+  // it is a per-customer PRICE list, which is the same thing being withheld
+  // via product-pricing below.
   fabrics: OPEN, // sits under Warehouse in the sidebar; see note above
   // "R&D Maintenance".
   equipment: OPEN,

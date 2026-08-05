@@ -13,7 +13,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
-import { requirePermission } from "../lib/rbac";
+import { requirePermission, hasPermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -24,6 +24,21 @@ type Row = {
 };
 
 // GET /api/kv-config/:key
+/** Recursively zero any surcharge amount, leaving the option itself intact. */
+const PRICE_KEYS = new Set(["priceSen", "surchargeSen", "amountSen", "price", "surcharge"]);
+
+function blankSurcharges(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(blankSurcharges);
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      out[k] = PRICE_KEYS.has(k) && typeof val === "number" ? 0 : blankSurcharges(val);
+    }
+    return out;
+  }
+  return v;
+}
+
 app.get("/:key", async (c) => {
   const key = c.req.param("key");
   const row = await c.var.DB.prepare(
@@ -43,6 +58,15 @@ app.get("/:key", async (c) => {
     // Malformed row — treat as missing so the UI falls back to defaults
     // rather than crashing on JSON.parse.
     return c.json({ success: true, data: null });
+  }
+
+  // `variants-config` carries the option lists AND the surcharge each option
+  // adds to the selling price (Products → Maintenance). Owner 2026-08-05: R&D
+  // gets the options, not what they add to the price. Blanked to 0 rather than
+  // deleted — every form that renders these reads `priceSen` and would show
+  // NaN, and an option that silently vanished would look like missing data.
+  if (key === "variants-config" && !(await hasPermission(c, "product-pricing", "read"))) {
+    parsed = blankSurcharges(parsed);
   }
 
   return c.json({

@@ -7,9 +7,10 @@
 // (`subAssemblies`, `pieces`, `seatHeightPrices`) are parsed back to objects.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import type { Context } from "hono";
 import type { Env } from "../worker";
 import { checkProductDeleteLocked, lockedResponse } from "../lib/lock-helpers";
-import { requirePermission } from "../lib/rbac";
+import { requirePermission, hasPermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
@@ -418,6 +419,38 @@ async function fetchProductWithChildren(db: D1Database, id: string) {
 // list doesn't drift away from the source of truth when somebody edits
 // the BOM tree (qty changes, process additions). Falls back to the stored
 // snapshot for SKUs that have no ACTIVE template yet.
+/**
+ * Remove what a product SELLS for, keeping what it costs.
+ *
+ * Owner 2026-08-05: "我们的 products 的这些卖价、价钱这一些东西，全部不需要给
+ * [R&D] 知道。我们卖价不需要给他们知道，我们只需要给他们看到成本就可以."
+ *
+ * Done on the SERVER, not by hiding a column: the figures were on the wire
+ * either way, and the SKU export, the Ctrl+K palette and every other reader of
+ * this payload would have needed the same treatment separately.
+ *
+ * Cost, labour minutes, BOM and margin INPUTS other than price are untouched —
+ * withholding those would take away the half R&D is meant to have. The margin
+ * column derives from the price, so it disappears with it rather than being
+ * blanked separately.
+ */
+const SELLING_PRICE_FIELDS = [
+  "basePriceSen",      // PRICE 2
+  "price1Sen",         // PRICE 1
+  "seatHeightPrices",  // per-height surcharges
+  "seatHeightPricesRaw",
+];
+
+async function stripSellingPrice<T>(c: Context<Env>, rows: T[]): Promise<T[]> {
+  if (await hasPermission(c, "product-pricing", "read")) return rows;
+  return rows.map((row) => {
+    if (!row || typeof row !== "object") return row;
+    const out = { ...(row as Record<string, unknown>) };
+    for (const f of SELLING_PRICE_FIELDS) delete out[f];
+    return out as T;
+  });
+}
+
 app.get("/", async (c) => {
   const orgId = getOrgId(c);
   // Global Ctrl+K palette: lightweight, index-backed search returning ONLY
@@ -484,7 +517,7 @@ app.get("/", async (c) => {
       priceOverlays.get(p.id),
     ),
   );
-  return c.json({ success: true, data });
+  return c.json({ success: true, data: await stripSellingPrice(c, data) });
 });
 
 // POST /api/products — create (rejects duplicate codes)
@@ -630,7 +663,7 @@ app.get("/:id", async (c) => {
   if (!product) {
     return c.json({ success: false, error: "Product not found" }, 404);
   }
-  return c.json({ success: true, data: product });
+  return c.json({ success: true, data: (await stripSellingPrice(c, [product]))[0] });
 });
 
 // PUT /api/products/:id — update (recomputes productionTimeMinutes from dept times)
@@ -966,6 +999,10 @@ async function resolveProductPriceAsOf(
 
 // GET /api/products/:productId/price-history — full history (past + pending)
 app.get("/:productId/price-history", async (c) => {
+  // A history OF the selling price. Nothing to strip — the whole endpoint is
+  // the thing being withheld.
+  const deniedPricing = await requirePermission(c, "product-pricing", "read");
+  if (deniedPricing) return deniedPricing;
   const productId = c.req.param("productId");
   const res = await c.var.DB.prepare(
     `SELECT * FROM product_prices

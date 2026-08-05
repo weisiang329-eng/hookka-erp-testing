@@ -116,6 +116,11 @@ function isValidFabricTier(t: unknown): t is FabricTier {
 // GET /api/sofa-combos
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
+  // Combo pricing is a per-customer PRICE list and had no gate at all — anyone
+  // who could reach the page could read it. Owner 2026-08-05 removed it from
+  // R&D; that only means anything if the endpoint enforces it too.
+  const denied = await requirePermission(c, "sofa-combos", "read");
+  if (denied) return denied;
   const baseModel = c.req.query("baseModel");
   const customerId = c.req.query("customerId");
   // When set with a real customerId, the response also includes

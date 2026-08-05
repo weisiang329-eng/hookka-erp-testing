@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, startTransition, Fragment } from "react";
+import { usePermissions } from "@/lib/use-permission";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { humanizeError } from "@/lib/humanize-error";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
@@ -8383,9 +8384,17 @@ function LaborCostTab({
   // Same-period revenue, bucketed by product category. "Production Revenue"
   // is realized the day each item completes UPHOLSTERY, not at SO creation —
   // see /api/working-hour-entries/production-revenue.
+  // Owner 2026-08-05: HR sees the labour bill, not the revenue beside it.
+  // Skip the request as well as the cards — asking for something the API will
+  // refuse just fills the console with 403s on every date change.
+  const { hasPermission: hasPerm } = usePermissions();
+  const canSeeRevenue = hasPerm("revenue-figures", "read");
   const prodRevUrl = useMemo(
-    () => `/api/working-hour-entries/production-revenue?from=${from}&to=${to}`,
-    [from, to],
+    () =>
+      canSeeRevenue
+        ? `/api/working-hour-entries/production-revenue?from=${from}&to=${to}`
+        : "",
+    [from, to, canSeeRevenue],
   );
   const { data: plResp, loading: plLoading } = useCachedJson<{
     success?: boolean;
@@ -9233,8 +9242,14 @@ function LaborCostTab({
     // ── KPI dashboard cards — mirror the on-screen strip. ──
     const cards: PrintCard[] = [
       { label: "Production Labor Cost", value: formatCurrency(productionLaborCostSen) },
-      { label: "Total Revenue", value: formatCurrency(totalRevenueSen) },
-      { label: "Remain", value: formatCurrency(totalRevenueSen - productionLaborCostSen), color: "#15803D" },
+      // Same rule as the screen: the printed report must not carry what the
+      // screen withholds, or the restriction lasts until someone hits Print.
+      ...(canSeeRevenue
+        ? [
+            { label: "Total Revenue", value: formatCurrency(totalRevenueSen) },
+            { label: "Remain", value: formatCurrency(totalRevenueSen - productionLaborCostSen), color: "#15803D" },
+          ]
+        : []),
       { label: "Borrowed (Warehousing)", value: formatCurrency(warehousingLaborCostSen), color: "#9C6F1E" },
       { label: "Shortfall", value: formatCurrency(shortfallLaborCostSen), color: "#9A3A2D" },
     ];
@@ -9279,7 +9294,9 @@ function LaborCostTab({
         { header: "Category", value: (r) => { const c = (r as LaborCostRow).category; return c ? c[0] + c.slice(1).toLowerCase() : "—"; } },
         { header: "Hours", align: "right", value: (r) => `${(r as LaborCostRow).hours.toFixed(1)}h` },
         { header: "Labor Cost", align: "right", value: (r) => formatCurrency((r as LaborCostRow).laborCostSen) },
-        { header: "Category Revenue", align: "right", value: (r) => { const row = r as LaborCostRow; return row.category ? formatCurrency(row.revenueSen) : "n/a"; } },
+        ...(canSeeRevenue
+          ? [{ header: "Category Revenue", align: "right" as const, value: (r: unknown) => { const row = r as LaborCostRow; return row.category ? formatCurrency(row.revenueSen) : "n/a"; } }]
+          : []),
         {
           header: "Cost / Revenue",
           align: "right",
@@ -9329,6 +9346,7 @@ function LaborCostTab({
   }, [
     rows,
     categoryFilter,
+    canSeeRevenue,
     from,
     to,
     productionLaborCostSen,
@@ -9439,25 +9457,33 @@ function LaborCostTab({
               <p className="text-lg font-bold text-[#1F1D1B]">{formatCurrency(totalLaborCostSen)}</p>
             </CardContent>
           </Card>
-          <Card>
-            <CardContent className="p-3">
-              <p className="text-xs text-[#6B7280]">Total Revenue</p>
-              <p className="text-lg font-bold text-[#1F1D1B]">{formatCurrency(totalRevenueSen)}</p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent
-              className="p-3"
-              title="Remain = Total Revenue − Production Labor Cost. Positive = labor came in under booked revenue this period; negative = labor outpaced bookings (e.g. workshop did a lot of in-progress work whose POs haven't completed UPHOLSTERY yet, so Total Revenue hasn't recognized it)."
-            >
-              <p className="text-xs text-[#6B7280]">Remain</p>
-              <p className={`text-lg font-bold ${(totalRevenueSen - productionLaborCostSen) >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}>
-                {totalRevenueSen > 0 || productionLaborCostSen > 0
-                  ? formatCurrency(totalRevenueSen - productionLaborCostSen)
-                  : "—"}
-              </p>
-            </CardContent>
-          </Card>
+          {/* Owner 2026-08-05: HR keeps the labour bill, not the revenue beside
+              it. The API refuses /production-revenue for them either way; this
+              is so the page reads as a labour report rather than as a broken
+              one with two empty cards. */}
+          {canSeeRevenue && (
+            <>
+              <Card>
+                <CardContent className="p-3">
+                  <p className="text-xs text-[#6B7280]">Total Revenue</p>
+                  <p className="text-lg font-bold text-[#1F1D1B]">{formatCurrency(totalRevenueSen)}</p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardContent
+                  className="p-3"
+                  title="Remain = Total Revenue − Production Labor Cost. Positive = labor came in under booked revenue this period; negative = labor outpaced bookings (e.g. workshop did a lot of in-progress work whose POs haven't completed UPHOLSTERY yet, so Total Revenue hasn't recognized it)."
+                >
+                  <p className="text-xs text-[#6B7280]">Remain</p>
+                  <p className={`text-lg font-bold ${(totalRevenueSen - productionLaborCostSen) >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}>
+                    {totalRevenueSen > 0 || productionLaborCostSen > 0
+                      ? formatCurrency(totalRevenueSen - productionLaborCostSen)
+                      : "—"}
+                  </p>
+                </CardContent>
+              </Card>
+            </>
+          )}
         </div>
 
         {/* Payroll reconciliation — proves the labor breakdown tallies to the

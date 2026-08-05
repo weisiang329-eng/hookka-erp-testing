@@ -19,6 +19,12 @@
 // matches the rest of the dashboard.
 // ---------------------------------------------------------------------------
 import { useCallback, useMemo, useState } from "react";
+import {
+  ROLE_OPTIONS,
+  roleShort,
+  roleLabel,
+  suggestedRoleForDepartment,
+} from "@/lib/role-labels";
 import { appOrigin } from "@/lib/app-origin";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { OrgChart } from "@/components/org-chart";
@@ -74,15 +80,7 @@ import { copyText } from "@/lib/copy-text";
 //    src/api/lib/rbac.ts).
 //  • ADMIN       — full operational access but CANNOT manage user accounts.
 //  • READ_ONLY   — Viewer: sees everything, every mutation is blocked 403.
-const ROLE_OPTIONS: { value: string; label: string }[] = [
-  { value: "SUPER_ADMIN", label: "Super Admin (full access + manage users)" },
-  { value: "ADMIN", label: "Admin (full access, cannot manage users)" },
-  { value: "READ_ONLY", label: "Viewer (read-only)" },
-];
 
-function roleLabel(role: string): string {
-  return ROLE_OPTIONS.find((o) => o.value === role)?.label ?? role;
-}
 
 // ---------- Org Chart taxonomy (mirrors Houzs-Century) ---------------------
 // The Org Chart tab is a Houzs-style TABLE (Name · Department · Position ·
@@ -1445,11 +1443,12 @@ export default function UsersPage() {
       key: "role",
       label: "Role",
       type: "text",
-      width: "120px",
+      width: "140px",
       sortable: true,
+      // The stored value is an identifier ("R_AND_D"); people read words.
       render: (_v, u) => (
-        <span className="text-xs font-semibold uppercase tracking-wider text-[#6B5C32]">
-          {u.role}
+        <span className="text-xs font-semibold tracking-wide text-[#6B5C32]">
+          {roleShort(u.role)}
         </span>
       ),
     },
@@ -2799,6 +2798,25 @@ export default function UsersPage() {
               <label className="block text-xs font-medium text-gray-600 uppercase tracking-wide pt-2">
                 Role
               </label>
+              {/* The department suggests a role, it does not set one. Somebody
+                  in Office may legitimately hold PROCUREMENT, and Management
+                  maps to the master key — neither is safe to apply on its own. */}
+              {(() => {
+                const suggested = suggestedRoleForDepartment(aliasDept);
+                if (!suggested || suggested === editRole) return null;
+                return (
+                  <p className="text-xs text-[#6B5C32]">
+                    {aliasDept} usually gets{" "}
+                    <button
+                      type="button"
+                      onClick={() => setEditRole(suggested)}
+                      className="font-semibold underline underline-offset-2 hover:text-[#5a4d2a]"
+                    >
+                      {roleShort(suggested)}
+                    </button>
+                  </p>
+                );
+              })()}
               <select
                 value={editRole}
                 onChange={(e) => setEditRole(e.target.value)}

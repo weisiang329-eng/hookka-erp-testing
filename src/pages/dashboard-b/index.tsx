@@ -151,7 +151,7 @@ type Overview = {
         buyMinSen: number;
         buyMaxSen: number;
       }[];
-      monthly: { month: string; meters: number }[];
+      monthly: { month: string; meters: number; lateMeters?: number }[];
     };
     SOFA: {
       list: {
@@ -163,7 +163,7 @@ type Overview = {
         buyMinSen: number;
         buyMaxSen: number;
       }[];
-      monthly: { month: string; meters: number }[];
+      monthly: { month: string; meters: number; lateMeters?: number }[];
     };
   };
   monthlyRevenue?: {
@@ -315,19 +315,26 @@ const CUR_YM = new Date().toISOString().slice(0, 7);
 
 // Roll the last-12 monthly fabric series up into the last 8 quarters.
 function toQuarterly(
-  monthly: { month: string; meters: number }[],
-): { label: string; meters: number }[] {
-  const q = new Map<string, number>();
+  monthly: { month: string; meters: number; lateMeters?: number }[],
+): { label: string; meters: number; lateMeters: number }[] {
+  // The late share rolls up too: a quarter that absorbed the PREVIOUS
+  // quarter's postings deserves the same warning a month gets. Late-within-
+  // the-same-quarter is still flagged — the tag says "an earlier month", which
+  // remains true, and a quarter bar is read against other quarters anyway.
+  const q = new Map<string, { meters: number; lateMeters: number }>();
   for (const m of monthly) {
     const [y, mm] = m.month.split("-");
     const qn = Math.ceil((Number(mm) || 1) / 3);
     const key = `${y}-Q${qn}`;
-    q.set(key, (q.get(key) ?? 0) + m.meters);
+    const e = q.get(key) ?? { meters: 0, lateMeters: 0 };
+    e.meters += m.meters;
+    e.lateMeters += m.lateMeters ?? 0;
+    q.set(key, e);
   }
   return [...q.entries()]
     .sort((a, b) => a[0].localeCompare(b[0]))
     .slice(-8)
-    .map(([label, meters]) => ({ label, meters }));
+    .map(([label, v]) => ({ label, ...v }));
 }
 
 // Customer-mix donut palette — professional financial-report scheme
@@ -2197,6 +2204,7 @@ export default function DashboardBPage() {
                 : (blk?.monthly ?? []).map((m) => ({
                     label: m.month,
                     meters: m.meters,
+                    lateMeters: m.lateMeters ?? 0,
                   }));
             const mMax = Math.max(1, ...trend.map((t) => t.meters));
             const fabRows =
@@ -2313,8 +2321,8 @@ export default function DashboardBPage() {
                   <div className="mt-3 border-t border-[#F0ECE6] pt-2 space-y-1">
                     <p className="text-[11px] font-semibold text-[#5A5550] mb-1">
                       {fabGran === "quarter"
-                        ? "Quarterly meters — last 8"
-                        : "Monthly meters — last 12"}
+                        ? "Quarterly meters posted — last 8"
+                        : "Monthly meters posted — last 12"}
                     </p>
                     {trend.length === 0 ? (
                       <p className="text-xs text-[#9CA3AF]">No data.</p>
@@ -2350,7 +2358,9 @@ export default function DashboardBPage() {
                   <p className="text-[10px] text-[#9CA3AF] mt-2">
                     Fabric issued to{" "}
                     {cat === "BEDFRAME" ? "bedframe" : "sofa"} production
-                    (RM_ISSUE).
+                    (RM_ISSUE). Bars are grouped by the date the issue was
+                    POSTED — an order raised one month is routinely cut the
+                    next, so a bar is not that month&rsquo;s production.
                   </p>
                 </CardContent>
               </Card>

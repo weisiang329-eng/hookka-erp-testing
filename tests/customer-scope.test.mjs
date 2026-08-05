@@ -20,12 +20,14 @@ import { resolve } from "node:path";
 import {
   filterPayload,
   isScopedPath,
-  ownedCustomerIds,
+  foreignCustomerIds,
   SCOPED_ROLES,
   SCOPED_PREFIXES,
 } from "../src/api/lib/customer-scope.ts";
 
-const OWNED = new Set(["c1", "c2"]);
+// c9 belongs to another salesperson. c1/c2 are mine, cX is UNASSIGNED.
+const SCOPE = { forbidden: new Set(["c9"]), denyAll: false };
+const DENY_ALL = { forbidden: new Set(), denyAll: true };
 
 // ── Which paths are covered ─────────────────────────────────────────────────
 
@@ -57,21 +59,31 @@ test("unrelated routes are untouched", () => {
 
 test("another salesperson's rows are dropped from a list", () => {
   const rows = [{ id: "s1", customerId: "c1" }, { id: "s2", customerId: "c9" }];
-  const { value } = filterPayload(rows, OWNED, false);
+  const { value } = filterPayload(rows, SCOPE, false);
   assert.deepEqual(value.map((r) => r.id), ["s1"]);
 });
 
+test("an UNASSIGNED customer stays public", () => {
+  // Owner ruling: "没有被 assign 的时候就是公开的，可是一旦被 assign，就只有那个
+  // salesperson 看得到." The opposite reading — show me only mine — would make
+  // every unclaimed account vanish for the whole team, including ones nobody
+  // has picked up yet.
+  const rows = [{ id: "s1", customerId: "cX" }, { id: "s2", customerId: "c9" }];
+  const { value } = filterPayload(rows, SCOPE, false);
+  assert.deepEqual(value.map((r) => r.id), ["s1"], "unassigned must survive");
+});
+
 test("the customers list is judged on its OWN id", () => {
-  const rows = [{ id: "c1" }, { id: "c9" }];
-  const { value } = filterPayload(rows, OWNED, true);
-  assert.deepEqual(value.map((r) => r.id), ["c1"]);
+  const rows = [{ id: "c1" }, { id: "c9" }, { id: "cX" }];
+  const { value } = filterPayload(rows, SCOPE, true);
+  assert.deepEqual(value.map((r) => r.id), ["c1", "cX"], "mine + unassigned");
 });
 
 test("snake_case and camelCase customer keys are both honoured", () => {
   // A row read through a different path may come back either way; missing one
   // spelling silently lets those rows through.
   const rows = [{ id: "a", customer_id: "c9" }, { id: "b", customerId: "c9" }];
-  const { value } = filterPayload(rows, OWNED, false);
+  const { value } = filterPayload(rows, SCOPE, false);
   assert.deepEqual(value, []);
 });
 
@@ -80,29 +92,35 @@ test("a row carrying NO customer is kept", () => {
   // would break the page while looking like a permissions bug — the rule is
   // "hide other people's customers", not "hide anything unrecognised".
   const rows = [{ id: "opt1", label: "Cash" }, { id: "s1", customerId: "c1" }];
-  const { value } = filterPayload(rows, OWNED, false);
+  const { value } = filterPayload(rows, SCOPE, false);
   assert.equal(value.length, 2);
 });
 
 test("fetching one record you do not own is denied", () => {
-  const { denied } = filterPayload({ id: "s9", customerId: "c9" }, OWNED, false);
+  const { denied } = filterPayload({ id: "s9", customerId: "c9" }, SCOPE, false);
   assert.equal(denied, true);
 });
 
 test("fetching your own record is returned", () => {
-  const { value, denied } = filterPayload({ id: "s1", customerId: "c1" }, OWNED, false);
+  const { value, denied } = filterPayload({ id: "s1", customerId: "c1" }, SCOPE, false);
   assert.equal(denied, false);
   assert.equal(value.id, "s1");
 });
 
 // ── The failure directions ──────────────────────────────────────────────────
 
-test("owning nothing hides everything — it does not mean owning all", () => {
-  // A brand-new salesperson with no customers assigned must see an empty list,
-  // not the whole book. `null` (no scoping) and an EMPTY set are deliberately
-  // different values for this reason.
-  const rows = [{ id: "s1", customerId: "c1" }];
-  const { value } = filterPayload(rows, new Set(), false);
+test("a brand-new salesperson sees the unclaimed book, not an empty screen", () => {
+  // Nothing assigned to anyone → nothing forbidden → everything public. This is
+  // what makes the rule usable on day one; the earlier "show me only mine"
+  // reading gave a new joiner a blank system.
+  const rows = [{ id: "s1", customerId: "c1" }, { id: "s2", customerId: "c2" }];
+  const { value } = filterPayload(rows, { forbidden: new Set(), denyAll: false }, false);
+  assert.equal(value.length, 2);
+});
+
+test("denyAll hides everything, including unassigned", () => {
+  const rows = [{ id: "s1", customerId: "cX" }, { id: "s2" }];
+  const { value } = filterPayload(rows, DENY_ALL, false);
   assert.deepEqual(value, []);
 });
 
@@ -112,22 +130,21 @@ test("a database failure FAILS CLOSED", async () => {
     get: (k) => (k === "userRole" ? "SALES" : "u1"),
     var: { DB: { prepare() { return { bind: () => ({ all: async () => { throw new Error("boom"); } }) }; } } },
   };
-  const owned = await ownedCustomerIds(c);
-  assert.ok(owned instanceof Set);
-  assert.equal(owned.size, 0, "must deny, not allow");
+  const scope = await foreignCustomerIds(c);
+  assert.equal(scope.denyAll, true, "must deny, not allow");
 });
 
 test("a scoped user with no id is denied, not waved through", async () => {
   const c = { get: (k) => (k === "userRole" ? "SALES" : ""), var: { DB: null } };
-  const owned = await ownedCustomerIds(c);
-  assert.equal(owned.size, 0);
+  const scope = await foreignCustomerIds(c);
+  assert.equal(scope.denyAll, true);
 });
 
 test("an unscoped role is not filtered at all", async () => {
   // null, distinctly — the middleware returns early on it.
   for (const role of ["OFFICE", "FINANCE", "SUPER_ADMIN", "ADMIN", "QA"]) {
     const c = { get: (k) => (k === "userRole" ? role : "u1"), var: { DB: null } };
-    assert.equal(await ownedCustomerIds(c), null, `${role} must not be filtered`);
+    assert.equal(await foreignCustomerIds(c), null, `${role} must not be filtered`);
   }
 });
 
@@ -204,9 +221,19 @@ test("a scoped role writing its OWN customer passes", async () => {
   const { denyForeignCustomerWrite } = await import("../src/api/lib/customer-scope.ts");
   const c = {
     get: (k) => (k === "userRole" ? "SALES" : "u1"),
-    var: { DB: { prepare: () => ({ bind: () => ({ all: async () => ({ results: [{ id: "c1" }] }) }) }) } },
+    // c9 is somebody else's; c1 is mine, cX is unassigned.
+    var: { DB: { prepare: () => ({ bind: () => ({ all: async () => ({ results: [{ id: "c9" }] }) }) }) } },
     json: () => "DENIED",
   };
-  assert.equal(await denyForeignCustomerWrite(c, "c1"), null);
-  assert.equal(await denyForeignCustomerWrite(c, "c9"), "DENIED");
+  assert.equal(await denyForeignCustomerWrite(c, "c1"), null, "own customer");
+  assert.equal(await denyForeignCustomerWrite(c, "cX"), null, "unassigned is public");
+  assert.equal(await denyForeignCustomerWrite(c, "c9"), "DENIED", "someone else's");
+});
+
+test("a scoped role owns what it creates", () => {
+  // Owner: "谁去 key new potential，这个时候就会 assign 给那个人自己." Without
+  // this a salesperson raises a Potential and the filter hides it the moment it
+  // is saved — they would watch their own work vanish.
+  const src = readFileSync(resolve(process.cwd(), "src/api/routes/customers.ts"), "utf8");
+  assert.match(src, /forcedSalespersonOnCreate\(c\) \?\?/);
 });

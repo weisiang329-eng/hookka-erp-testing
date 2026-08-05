@@ -224,7 +224,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   {
     path: '/dashboard',
     element: (
-      <RequirePermission resource="accounting" action="read">
+      <RequirePermission resource="dashboard" action="read">
         <S><DashboardB /></S>
       </RequirePermission>
     ),

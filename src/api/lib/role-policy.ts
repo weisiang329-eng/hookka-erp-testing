@@ -101,6 +101,13 @@ export const ALL_RESOURCES = [
   // so they need a gate of their own or they ride in on whoever can read the
   // page. Owner 2026-08-05: "我们卖价不需要给他们知道，我们只需要给他们看到成本
   // 就可以" (R&D) and "HR… 我们只需要保留着人工成本".
+  // The Command Center and the Hookka (daily) Report. Owner 2026-08-05:
+  // "office need dashboard … and hookka report". They used to ride on
+  // `accounting`, which is why opening them to Office was impossible without
+  // opening Finance with them — the one thing Office is explicitly not to see.
+  // Not listed in FINANCE_RESOURCES, so allExcept() grants it to Office and
+  // the roles with hand-written lists (Sales, QA, HR, R&D) still do not get it.
+  "dashboard",
   "product-pricing",   // selling price, margin, surcharge amounts
   "revenue-figures",   // revenue / remain on the labour report
   "agent-console",     // read the Agent Console (which agents, see AGENTS_BY_ROLE)

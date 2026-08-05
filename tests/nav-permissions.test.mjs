@@ -58,9 +58,12 @@ test("the dashboard is management-only, and everyone still has a home", () => {
   // Owner 2026-08-05: "Dashboard VUCA report，除了 Management、Super Admin 可以
   // 看到，其他人都看不到." It is also the post-login landing page, so hiding it
   // without giving each role somewhere else to land would break login for them.
-  assert.equal(resourceForNav("/dashboard"), "accounting");
+  // The dashboard has a resource of its own since 2026-08-05, so it can be
+  // opened to Office without opening Finance with it.
+  assert.equal(resourceForNav("/dashboard"), "dashboard");
+  assert.equal(resourceForNav("/daily-report"), "dashboard");
 
-  for (const role of ["SALES", "OFFICE", "QA", "HR", "R_AND_D"]) {
+  for (const role of ["SALES", "QA", "HR", "R_AND_D"]) {
     const perms = permissionsForRole(role);
     assert.ok(
       hiddenNavPrefixes(perms).includes("/dashboard"),
@@ -73,6 +76,14 @@ test("the dashboard is management-only, and everyone still has a home", () => {
       `${role} lands on ${home}, which its own menu hides`,
     );
   }
+
+  // Office was added by the owner and keeps it; Finance stays shut to them,
+  // which is the whole reason the dashboard needed its own resource.
+  const office = permissionsForRole("OFFICE");
+  const officeHidden = hiddenNavPrefixes(office);
+  assert.ok(!officeHidden.includes("/dashboard"), "Office should see the dashboard");
+  assert.ok(!officeHidden.includes("/daily-report"), "Office should see the Hookka Report");
+  assert.ok(officeHidden.includes("/accounting"), "Office must still not see Finance");
 
   const admin = new Set(["*"]);
   assert.ok(!hiddenNavPrefixes(admin).includes("/dashboard"));

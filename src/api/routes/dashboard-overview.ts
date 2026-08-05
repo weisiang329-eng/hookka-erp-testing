@@ -317,6 +317,7 @@ app.get("/", async (c) => {
       delivDoRes,
       compYestRes,
       compLast7Res,
+      compRangeRes,
       fabRecvRes,
       fabPast30CatRes,
       backlogJcRes,
@@ -812,6 +813,40 @@ app.get("/", async (c) => {
         )
         .bind(orgId, completedRangeStart, completedRangeEnd)
         .all<{ d: string | null; bfUnits: number; sofaSets: number }>(),
+      // The SAME window, counted once. Sofa sets are a DISTINCT count of sales
+      // orders, so summing the per-day series double-counts any order whose
+      // sofas finished across two days. August happens to agree either way (9
+      // both ways), which is precisely why the bug would have sat unnoticed
+      // until a month where it did not.
+      db
+        .prepare(
+          `WITH per_po AS (
+             SELECT productionOrderId,
+                    MAX(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                                  AND completedDate IS NOT NULL
+                             THEN completedDate END) AS unit_completed_at
+               FROM job_cards
+              WHERE departmentCode = 'UPHOLSTERY'
+              GROUP BY productionOrderId
+             HAVING COUNT(*) > 0
+                AND SUM(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                                  AND completedDate IS NOT NULL
+                             THEN 1 ELSE 0 END) = COUNT(*)
+           )
+           SELECT
+                  COALESCE(SUM(CASE WHEN po.itemCategory = 'BEDFRAME'
+                                    THEN po.quantity ELSE 0 END),0) AS "bfUnits",
+                  COUNT(DISTINCT CASE WHEN po.itemCategory = 'SOFA'
+                                      THEN po.salesOrderId END) AS "sofaSets"
+             FROM per_po
+             JOIN production_orders po ON po.id = per_po.productionOrderId
+            WHERE po.orgId = ?
+              AND substr(per_po.unit_completed_at::text, 1, 10) >= ?
+              AND substr(per_po.unit_completed_at::text, 1, 10) <= ?
+`,
+        )
+        .bind(orgId, completedRangeStart, completedRangeEnd)
+        .first<{ bfUnits: number; sofaSets: number }>(),
       // Fabric PURCHASE price per SKU — from RM_RECEIPT ledger rows.
       // weighted avg = Σ cost ÷ Σ qty; plus min/max per-meter unit cost.
       db
@@ -1118,6 +1153,13 @@ app.get("/", async (c) => {
         sofa: Number(r.sofaSets) || 0,
       });
     }
+    // Range totals, counted ONCE over the whole window.
+    //
+    // The headline used to be the per-day series added up, and sofa sets are a
+    // DISTINCT count of sales orders — so a sales order whose sofas finished on
+    // two days was counted twice. It has not bitten this month (August's daily
+    // figures sum to the same 9 the range gives), which is exactly why it would
+    // have gone unnoticed until a month where it did.
     const completedLast7: {
       date: string;
       bedframeUnits: number;
@@ -1867,6 +1909,11 @@ app.get("/", async (c) => {
       activeJobs,
       completedYesterday,
       completedLast7,
+      // Headline totals for the selected window, deduped once (see the query).
+      completedRange: {
+        bedframeUnits: Number(compRangeRes?.bfUnits) || 0,
+        sofaSets: Number(compRangeRes?.sofaSets) || 0,
+      },
       capacityDays,
       backlogByDept,
       backlogGrandMin,

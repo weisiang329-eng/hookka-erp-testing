@@ -21,6 +21,17 @@
 // scorecard looks half-built rather than quietly scoring out of three.
 // ---------------------------------------------------------------------------
 
+/**
+ * Every KPI is weighted the same way.
+ *
+ * There WAS a GATE shape that capped the whole month at 60 when the customer's
+ * promised date was missed. Owner 2026-08-06: "我还是可以 assign，assign 是
+ * assign 啊，为什么你要 cap 呢？应该说我 assign 这个东西给那个人，那个人就要顾."
+ * Fair — assigning a KPI already makes it that person's to look after, and a
+ * cap punishes twice for one miss while making the other five KPIs pointless
+ * in a month where it happened. The shape is kept only so old assignment rows
+ * keep loading; nothing caps any more.
+ */
 export type KpiShape = "GATE" | "RATIO";
 
 /**
@@ -93,15 +104,19 @@ export interface KpiDef {
   roles: string[];
 }
 
-/** Below this, a missed gate caps the total score. */
+/**
+ * Retained so stored rows and the API shape stay readable, but NOT applied.
+ * See the note on KpiShape — the owner's ruling is that an assigned KPI is
+ * weighted like any other.
+ */
 export const GATE_FAIL_CAP = 60;
 
 export const KPI_CATALOG: KpiDef[] = [
   {
     key: "customer_delivery_date",
     label: "On-time delivery to the customer's promised date",
-    detail: "Zero tolerance — the promised date is the floor, not a target",
-    shape: "GATE",
+    detail: "How many orders shipped later than the date we promised",
+    shape: "RATIO",
     direction: "LOWER_IS_BETTER",
     unit: "count",
     scoring: "AUTO",
@@ -113,11 +128,11 @@ export const KPI_CATALOG: KpiDef[] = [
       "Take the date on the sales order that was promised to the customer (customer_delivery_date, filled on 99.8% of orders). Our own internal estimate is NOT used.",
       "Find the first dispatch date across every delivery order carrying that sales order's production.",
       "If the dispatch date is later than the promised date, the order counts as late.",
-      "Target is 0. Any late order fails the gate and caps the whole month's score at 60.",
+      "Target is 0 late. Attainment falls as late orders climb, and it carries whatever weight it was assigned — like every other KPI.",
     ],
     formula: "Count of sales orders dispatched after the date promised to the customer. Target 0.",
     defaultTarget: 0,
-    defaultWeight: 0,
+    defaultWeight: 30,
     available: true,
     drillPath: "/sales?filter=late-to-customer",
     roles: ["OFFICE", "SALES"],

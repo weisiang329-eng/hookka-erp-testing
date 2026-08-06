@@ -96,6 +96,16 @@ const DDL: string[] = [
      updated_by        TEXT,
      updated_at        TIMESTAMP NOT NULL DEFAULT NOW()
    )`,
+  // CREATE TABLE IF NOT EXISTS does NOT add a column to a table that already
+  // exists. kpi_user_settings shipped with payout_floor_pct, then the ladder
+  // replaced it with payout_bands — and every card 500'd, because the table on
+  // prod still had the old shape. The repo warns about exactly this
+  // (CLAUDE.md: a new column reaches prod ONLY via ALTER … ADD COLUMN IF NOT
+  // EXISTS) and I walked into it anyway. Any column added to a table above
+  // needs a line here too.
+  `ALTER TABLE kpi_user_settings ADD COLUMN IF NOT EXISTS payout_bands TEXT NOT NULL DEFAULT '[]'`,
+  `ALTER TABLE kpi_assignments ADD COLUMN IF NOT EXISTS assigned_by TEXT`,
+  `ALTER TABLE kpi_checklist_ticks ADD COLUMN IF NOT EXISTS note TEXT`,
 ];
 
 let _applied = false;

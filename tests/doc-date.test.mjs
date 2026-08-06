@@ -24,6 +24,36 @@ test("stripLegSuffix — void / bounce / reversal / settle suffixes", () => {
   assert.equal(stripLegSuffix("opening_balance_reversal"), "opening_balance");
 });
 
+// BUG-2026-08-06-001 (class C5). The unvoid endpoint shipped posting a brand
+// new sourceType that this list had never heard of, so its legs got no family,
+// fell back to postedAt, and reported in the month the button was clicked
+// rather than the month of the invoice — PI-2606-073's restored RM 1,865.80
+// landed in August's P&L instead of June's. The money tied the whole time;
+// only the period was wrong. Every correction sourceType must resolve HOME.
+test("stripLegSuffix — unvoid resolves home, and is not confused with void", () => {
+  assert.equal(stripLegSuffix("purchase_invoice_unvoid"), "purchase_invoice");
+  assert.equal(stripLegSuffix("purchase_invoice_void"), "purchase_invoice");
+  assert.equal(stripLegSuffix("invoice_unvoid"), "invoice");
+});
+
+test("every correction sourceType the API posts resolves to a dated family", () => {
+  // The legs that carry money and MUST report on their document's date.
+  for (const t of [
+    "purchase_invoice",
+    "purchase_invoice_void",
+    "purchase_invoice_unvoid",
+    "invoice_void",
+    "payment_bounce",
+    "manual_reversal",
+    "purchase_credit_note_void",
+    "supplier_payment_restate_post:1",
+    "other_party_bill",
+    "other_party_payment",
+  ]) {
+    assert.ok(familyOf(t), `${t} must resolve to a document family, not postedAt`);
+  }
+});
+
 test("stripLegSuffix — restate rev/post drop the :stamp then the suffix", () => {
   assert.equal(stripLegSuffix("invoice_restate_rev:1719216340123"), "invoice");
   assert.equal(stripLegSuffix("invoice_restate_post:1719216340123"), "invoice");

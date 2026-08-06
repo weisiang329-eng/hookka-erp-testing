@@ -49,10 +49,19 @@ export const DOC_DATE_FAMILIES: Record<string, DocFamily> = {
 //   <type>_restate_rev:<stamp>    → <type>   (':stamp' dropped first)
 //   <type>_restate_post:<stamp>   → <type>
 //   opening_balance_reversal      → opening_balance
+//   purchase_invoice_unvoid       → purchase_invoice
+//
+// `unvoid` must precede `void` in the alternation for readability, though it
+// would match either way: in "…_unvoid" the character before "void" is 'n', so
+// the `_void$` branch cannot fire. Getting this list wrong is silent — an
+// unlisted suffix yields no family, the leg falls back to postedAt, and it
+// reports in the month it was CLICKED instead of the month of its document
+// (BUG-2026-08-06-001, and BUG-2026-07-24-001 before it: class C5). Any new
+// correction sourceType has to be added here in the same commit that posts it.
 export function stripLegSuffix(sourceType: string | null | undefined): string {
   const base = String(sourceType ?? "").split(":")[0];
   return base.replace(
-    /_(restate_rev|restate_post|reversal|void|bounce|settle)$/,
+    /_(restate_rev|restate_post|reversal|unvoid|void|bounce|settle)$/,
     "",
   );
 }

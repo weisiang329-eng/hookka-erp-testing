@@ -11916,6 +11916,12 @@ replay without error. Tests: `tests/pi-status-check-single-source.test.mjs`,
 **Class.** A second writer with its own copy of a list that must agree. A
 corrected duplicate would drift again; the shared constant is the fix.
 
+## BUG-2026-08-06-001 — Unvoid legs reported in the month the button was clicked `accounting` `doc-date` `C5`
+
+🟢 Fixed, same day, found by verifying the owner's first real unvoid. `POST /:id/unvoid` posts a new sourceType, `purchase_invoice_unvoid`, and `stripLegSuffix` had never heard of it: its regex strips `_void` but `_unvoid` fails that branch (the character before `void` is `n`), so `familyOf` returned null, the legs fell back to `postedAt`, and PI-2606-073's restored RM 1,865.80 landed in **August's** P&L instead of **June's**. Both legs moved together, so 400-0000, the aging and `/ap-reconciliation` tied throughout — the money was never wrong, only the period. Fix = one word in the alternation. Because the resolver dates legs at READ time, adding it re-dates the already-posted legs on the next read; no data repair was needed. Regression: `tests/doc-date.test.mjs` — plus a test asserting every money-carrying correction sourceType the API posts resolves to a family, so the next invented type fails a test instead of a month-end.
+
+**Class C5, and I authored this instance.** The class is "a leg whose sourceType or sourceId shape the resolver does not recognise escapes document dating" — BUG-2026-07-24-001 was the `:edit-<stamp>` sourceId. The lesson that generalises: inventing a sourceType is a two-file change, and the second file is `doc-date.ts`. A sourceType that fails to resolve raises no error anywhere; it simply reports in the wrong month, which nobody notices until a period comparison.
+
 ## BUG-2026-08-05-002 — The AP control card counted every bill at full face `accounting` `camelcase-read`
 
 🟢 Fixed. `/ap-control` computed `amt = amountSen − pi.paid_amount_sen`, but the adapter camelCases every result column, so the snake_case read landed on `undefined`, `|| 0` swallowed it, and **every** invoice was counted at its full amount — the paid portion of a part-paid bill was never subtracted. The card's drift chip therefore showed exactly minus the total already paid, and could never reach zero while any invoice was part-paid, which hides a real drift behind a permanent false one. `amountSen` was unaffected because that column is already camelCase, so the sum looked plausible; the row type declared only `paid_amount_sen`, which is what let the undefined read past `tsc`.

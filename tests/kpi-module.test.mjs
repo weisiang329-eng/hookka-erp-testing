@@ -108,3 +108,44 @@ test("a person is scored on what they were assigned, not on the whole catalogue"
   assert.ok(kpisForRole("OFFICE").length >= 4);
   assert.equal(kpisForRole("NOT_A_ROLE").length, 0);
 });
+
+// ── Payout ──────────────────────────────────────────────────────────────────
+// Owner 2026-08-06: "75 分未必是拿到 75% 的钱，可能 75 分拿到的是 60%。如果是
+// 50 分的话，是不是就直接拿不到了?" Yes to both — banded, with nothing below
+// the lowest rung.
+
+test("the ladder is banded, not straight-line", async () => {
+  const { payoutSen, bandFor, DEFAULT_PAYOUT_BANDS } = await import("../src/api/lib/kpi-catalog.ts");
+  const pot = 100000; // RM 1,000
+  const pay = (score) =>
+    payoutSen(score, { mode: "MONTHLY_CASH", amountSen: pot, bands: DEFAULT_PAYOUT_BANDS }) / 100;
+
+  assert.equal(pay(75), 600, "75 pays the 60% band, not 75%");
+  assert.equal(pay(50), 0, "below the lowest rung pays nothing");
+  assert.equal(pay(100), 1000);
+  assert.equal(pay(60), 400, "the bottom rung still pays");
+  assert.equal(pay(59), 0, "one point below it does not");
+
+  // The cliff IS the mechanism — it is what makes 79 worth pushing to 80.
+  assert.equal(pay(79), 600);
+  assert.equal(pay(80), 800);
+  assert.equal(bandFor(79, DEFAULT_PAYOUT_BANDS).payPct, 60);
+  assert.equal(bandFor(80, DEFAULT_PAYOUT_BANDS).payPct, 80);
+  assert.equal(bandFor(12, DEFAULT_PAYOUT_BANDS), null);
+});
+
+test("score-only pays nothing, whatever the score", async () => {
+  const { payoutSen, DEFAULT_PAYOUT_BANDS } = await import("../src/api/lib/kpi-catalog.ts");
+  // The score still exists — it is settled at year end, outside this system.
+  assert.equal(payoutSen(100, { mode: "SCORE_ONLY", amountSen: 100000, bands: DEFAULT_PAYOUT_BANDS }), 0);
+});
+
+test("a broken payout config never silently zeroes someone's pay", async () => {
+  const { payoutSen, bandFor } = await import("../src/api/lib/kpi-catalog.ts");
+  // No bands configured falls back to the standard ladder rather than paying 0.
+  assert.equal(payoutSen(95, { mode: "MONTHLY_CASH", amountSen: 100000, bands: [] }) / 100, 1000);
+  assert.equal(bandFor(95, []).payPct, 100);
+  // No pot means no money regardless — that is a deliberate setting, not a bug.
+  assert.equal(payoutSen(95, { mode: "MONTHLY_CASH", amountSen: 0, bands: [] }), 0);
+  assert.equal(payoutSen(null, { mode: "MONTHLY_CASH", amountSen: 100000, bands: [] }), 0);
+});

@@ -89,9 +89,9 @@ const DDL: string[] = [
      user_id           TEXT PRIMARY KEY,
      payout_mode       TEXT NOT NULL DEFAULT 'SCORE_ONLY',
      payout_amount_sen INTEGER NOT NULL DEFAULT 0,
-     /* Below this score nothing is paid — a 12% month should not earn 12% of
-        the pot. 0 disables the floor. */
-     payout_floor_pct  DOUBLE PRECISION NOT NULL DEFAULT 0,
+     /* Banded ladder as JSON, high rung first. A linear scale gives nobody a
+        reason to push 74 to 76; a band means 79 → 80 jumps a whole rung. */
+     payout_bands      TEXT NOT NULL DEFAULT '[]',
      org_id            TEXT NOT NULL DEFAULT 'hookka',
      updated_by        TEXT,
      updated_at        TIMESTAMP NOT NULL DEFAULT NOW()

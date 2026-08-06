@@ -39,7 +39,14 @@ type CardData = {
   rawScore: number | null; score: number | null;
   gateFailed: boolean; gateCap: number;
   weightMeasured: number; weightUnbuilt: number;
-  payout?: { mode: "MONTHLY_CASH" | "SCORE_ONLY"; amountSen: number; floorPct: number; earnedSen: number };
+  payout?: {
+    mode: "MONTHLY_CASH" | "SCORE_ONLY";
+    amountSen: number;
+    earnedSen: number;
+    bands: Array<{ minScore: number; payPct: number }>;
+    band: { minScore: number; payPct: number } | null;
+    nextBand: { minScore: number; payPct: number } | null;
+  };
 };
 type LibItem = {
   key: string; label: string; detail: string; shape: "GATE" | "RATIO"; unit: string;
@@ -481,10 +488,36 @@ export default function KpiPage() {
                       <p className="text-3xl font-extrabold tabular-nums leading-none text-[#1F1D1B]">
                         RM {(card.payout.earnedSen / 100).toLocaleString("en-MY", { minimumFractionDigits: 2 })}
                       </p>
-                      <p className="text-[11px] text-[#9CA3AF] mt-1">
-                        of RM {(card.payout.amountSen / 100).toLocaleString("en-MY", { minimumFractionDigits: 2 })} at 100
-                        {card.payout.floorPct > 0 && <> · nothing below {card.payout.floorPct}</>}
+                      {/* Say which rung, and what the next one is worth. 75
+                          paying 60% is otherwise unexplained, and "why didn't
+                          I get 75%" is the first question. */}
+                      <p className="text-[11px] text-[#5A5550] mt-1">
+                        {card.payout.band
+                          ? `${card.payout.band.payPct}% band (${card.payout.band.minScore}+) of RM ${(card.payout.amountSen / 100).toLocaleString("en-MY", { minimumFractionDigits: 2 })}`
+                          : `Below the lowest band — nothing is paid`}
                       </p>
+                      {card.payout.nextBand && (
+                        <p className="text-[11px] text-[#B5701A] mt-0.5">
+                          {card.payout.nextBand.minScore} points pays{" "}
+                          {card.payout.nextBand.payPct}% — RM{" "}
+                          {((card.payout.amountSen * card.payout.nextBand.payPct) / 10000).toLocaleString("en-MY", { minimumFractionDigits: 2 })}
+                        </p>
+                      )}
+                      <div className="mt-2 flex gap-1 flex-wrap">
+                        {[...card.payout.bands].sort((a, b) => b.minScore - a.minScore).map((b) => (
+                          <span
+                            key={b.minScore}
+                            className="rounded border px-1.5 py-0.5 text-[10px] tabular-nums"
+                            style={
+                              card.payout?.band?.minScore === b.minScore
+                                ? { borderColor: "#6B5C32", background: "#F5EFE2", fontWeight: 700 }
+                                : { borderColor: "#E2DDD8", color: "#9CA3AF" }
+                            }
+                          >
+                            {b.minScore}+ → {b.payPct}%
+                          </span>
+                        ))}
+                      </div>
                     </div>
                   )}
                   {card.payout?.mode === "SCORE_ONLY" && (

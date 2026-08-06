@@ -912,5 +912,6 @@
   "payoutMode": "payout_mode",
   "payoutAmountSen": "payout_amount_sen",
   "payoutFloorPct": "payout_floor_pct",
-  "updatedBy": "updated_by"
+  "updatedBy": "updated_by",
+  "payoutBands": "payout_bands"
 }

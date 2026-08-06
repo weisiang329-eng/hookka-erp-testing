@@ -904,5 +904,8 @@
   "workingMinutes": "working_minutes",
   "xmlContent": "xml_content",
   "kpiKey": "kpi_key",
-  "assignedBy": "assigned_by"
+  "assignedBy": "assigned_by",
+  "itemIndex": "item_index",
+  "verifiedBy": "verified_by",
+  "verifiedAt": "verified_at"
 }

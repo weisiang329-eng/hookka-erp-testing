@@ -232,6 +232,93 @@ app.get("/users/:id", async (c) => {
   return c.json({ success: true, data });
 });
 
+// ---- Checklist ticks -------------------------------------------------------
+//
+// A person ticks their OWN items; Super Admin may tick anyone's and is the one
+// who verifies. Both go through here, and the id comes from the context for a
+// self-tick — never from the body — so "my checklist" cannot be pointed at
+// someone else's month.
+app.put("/checklist/:kpiKey", async (c) => {
+  await ensureKpiTables(c.var.DB);
+  const kpiKey = c.req.param("kpiKey");
+  const def = kpiByKey(kpiKey);
+  if (!def || def.scoring !== "CHECKLIST") {
+    return c.json({ success: false, error: `${kpiKey} is not a checklist KPI` }, 400);
+  }
+
+  let body: { userId?: string; period?: string; itemIndex?: number; done?: boolean; note?: string };
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body" }, 400);
+  }
+
+  const self = ctxGet(c, "userId");
+  const isAdmin = requireSuperAdmin(c) === null;
+  // Only a Super Admin may tick on someone else's behalf.
+  const userId = body.userId && isAdmin ? String(body.userId) : self;
+  if (!userId) return c.json({ success: false, error: "Unauthorized" }, 401);
+  if (body.userId && !isAdmin && String(body.userId) !== self) {
+    return c.json({ success: false, error: "Forbidden" }, 403);
+  }
+
+  const period = /^\d{4}-\d{2}$/.test(String(body.period ?? "")) ? String(body.period) : periodOf(c);
+  const idx = Number(body.itemIndex);
+  const total = def.checklistItems?.length ?? 0;
+  if (!Number.isInteger(idx) || idx < 0 || idx >= total) {
+    return c.json({ success: false, error: `itemIndex must be 0–${total - 1}` }, 400);
+  }
+
+  // A settled month is closed to edits — the score was agreed against it.
+  const locked = await c.var.DB.prepare(
+    `SELECT 1 AS x FROM kpi_periods
+      WHERE userId = ? AND period = ? AND lockedAt IS NOT NULL LIMIT 1`,
+  )
+    .bind(userId, period)
+    .first<{ x: number }>();
+  if (locked) {
+    return c.json({ success: false, error: `${period} is already settled` }, 400);
+  }
+
+  const done = body.done !== false;
+  await c.var.DB.prepare(
+    `INSERT INTO kpi_checklist_ticks
+       (id, userId, period, kpiKey, itemIndex, done, verifiedBy, verifiedAt, note, orgId)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (userId, period, kpiKey, itemIndex) DO UPDATE
+       SET done = EXCLUDED.done, verifiedBy = EXCLUDED.verifiedBy,
+           verifiedAt = EXCLUDED.verifiedAt, note = EXCLUDED.note, updatedAt = NOW()`,
+  )
+    .bind(
+      `kct_${userId}_${period}_${kpiKey}_${idx}`,
+      userId, period, kpiKey, idx, done,
+      isAdmin ? self : null,
+      isAdmin ? new Date().toISOString() : null,
+      body.note ?? null,
+      getOrgId(c),
+    )
+    .run();
+  return c.json({ success: true });
+});
+
+/** Which items are ticked, for rendering the boxes. */
+app.get("/checklist/:kpiKey", async (c) => {
+  await ensureKpiTables(c.var.DB);
+  const kpiKey = c.req.param("kpiKey");
+  const self = ctxGet(c, "userId");
+  const isAdmin = requireSuperAdmin(c) === null;
+  const wanted = c.req.query("userId");
+  const userId = wanted && isAdmin ? wanted : self;
+  if (!userId) return c.json({ success: false, error: "Unauthorized" }, 401);
+  const res = await c.var.DB.prepare(
+    `SELECT itemIndex, done, verifiedBy, note FROM kpi_checklist_ticks
+      WHERE userId = ? AND period = ? AND kpiKey = ?`,
+  )
+    .bind(userId, periodOf(c), kpiKey)
+    .all<{ itemIndex: number; done: boolean; verifiedBy: string | null; note: string | null }>();
+  return c.json({ success: true, data: res.results ?? [] });
+});
+
 // ---- Library: every KPI, its live value, and who holds it ------------------
 //
 // Answers the question the old screen could not: "what KPIs do we have?"

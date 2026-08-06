@@ -21,6 +21,7 @@
 import type { Context } from "hono";
 import type { Env } from "../worker";
 import { kpiByKey } from "./kpi-catalog";
+import { computeMonthlyEfficiencyByWorker } from "./efficiency-allowance";
 
 export interface MetricResult {
   actual: number | null;
@@ -94,37 +95,73 @@ export async function customerDeliveryLate(
  * Active SKUs that are fully set up.
  *
  * "Fully" means all four: a price, a cubic volume, a fabric usage, and a BOM
- * template that actually contains routing. That last clause is the one that
- * matters — the daily report's own incomplete-BOM check only asks whether a
- * template ROW exists, which is why it reads 0 every day while 45% of
- * templates have empty l1_processes.
+ * template that actually contains routing.
+ *
+ * Routing lives in `wip_components`, NOT `l1_processes`. The first version of
+ * this asked about l1_processes and reported 113 of 360 — the owner said that
+ * could not be right ("BOM 的工序基本上都有的，不是吗？") and was correct: the
+ * wip-times route, which is what actually schedules the floor, reads
+ * wip_components and resolves 273 of the same 360. l1_processes is a mostly
+ * empty legacy column, so the KPI was measuring the wrong field and calling it
+ * a data gap. Also UPPER()s the status, exactly as wip-times does.
  */
 export async function setupCompleteness(
   c: Context<Env>,
 ): Promise<MetricResult> {
+  // Counted PER FIELD as well as overall. "31% complete" tells nobody what to
+  // go and do; "247 have no BOM" is a morning's work with a visible end. The
+  // four checks each pass on ~75% of SKUs, so the intersection collapses to a
+  // third — which reads as a catastrophe until you can see it is really one
+  // missing field on most of them.
   const row = await c.var.DB.prepare(
     `SELECT COUNT(*) AS total,
+            COALESCE(SUM(CASE WHEN COALESCE(p.basePriceSen,0) + COALESCE(p.price1Sen,0) > 0
+                     THEN 1 ELSE 0 END), 0) AS has_price,
+            COALESCE(SUM(CASE WHEN COALESCE(p.unitM3,0) > 0 THEN 1 ELSE 0 END), 0) AS has_m3,
+            COALESCE(SUM(CASE WHEN COALESCE(p.fabricUsage,0) > 0 THEN 1 ELSE 0 END), 0) AS has_fabric,
+            COALESCE(SUM(CASE WHEN EXISTS (
+                                SELECT 1 FROM bom_templates b
+                                 WHERE b.productCode = p.code
+                                   AND UPPER(b.versionStatus) = 'ACTIVE'
+                                   AND COALESCE(b.wipComponents,'') NOT IN ('', '[]')
+                              ) THEN 1 ELSE 0 END), 0) AS has_bom,
             COALESCE(SUM(CASE WHEN COALESCE(p.basePriceSen,0) + COALESCE(p.price1Sen,0) > 0
                           AND COALESCE(p.unitM3,0) > 0
                           AND COALESCE(p.fabricUsage,0) > 0
                           AND EXISTS (
                                 SELECT 1 FROM bom_templates b
                                  WHERE b.productCode = p.code
-                                   AND b.versionStatus = 'ACTIVE'
-                                   AND COALESCE(b.l1Processes,'') NOT IN ('', '[]')
+                                   AND UPPER(b.versionStatus) = 'ACTIVE'
+                                   AND COALESCE(b.wipComponents,'') NOT IN ('', '[]')
                               )
                      THEN 1 ELSE 0 END), 0) AS complete
        FROM products p
       WHERE p.status = 'ACTIVE'`,
-  ).first<{ total: number; complete: number }>();
+  ).first<{
+    total: number; complete: number;
+    has_price: number; has_m3: number; has_fabric: number; has_bom: number;
+  }>();
 
   const total = Number(row?.total) || 0;
   const complete = Number(row?.complete) || 0;
   if (total === 0) return EMPTY;
+
+  const gaps: string[] = [];
+  const miss = (label: string, have: unknown) => {
+    const n = total - (Number(have) || 0);
+    if (n > 0) gaps.push(`${n} no ${label}`);
+  };
+  miss("BOM", row?.has_bom);
+  miss("price", row?.has_price);
+  miss("volume", row?.has_m3);
+  miss("fabric usage", row?.has_fabric);
+
   return {
     actual: Math.round((complete / total) * 1000) / 10,
     sampleSize: total,
-    detail: `${complete} of ${total} active SKUs fully set up`,
+    detail:
+      `${complete} of ${total} active SKUs fully set up` +
+      (gaps.length ? ` — ${gaps.join(", ")}` : ""),
   };
 }
 
@@ -443,6 +480,50 @@ export async function surveyMean(
 }
 
 /** Dispatch table — one entry per computable KPI. */
+/**
+ * Factory production efficiency for the month.
+ *
+ * Reuses computeMonthlyEfficiencyByWorker — the SAME function behind the
+ * efficiency allowance and the daily report's low-efficiency list. Writing a
+ * second query here would eventually disagree with the payslip, and an
+ * employee who can point at two different efficiency numbers has stopped
+ * believing both.
+ *
+ * Aggregated across workers rather than averaged: a worker with 4 hours and
+ * one with 180 must not weigh the same. Total earned minutes over total
+ * production hours is the factory's real figure.
+ *
+ * NOTE: this is the FLOOR's efficiency, not the assignee's own. App users
+ * carry no employee link (`users` has no employee_id), so a personal figure
+ * cannot be resolved yet. Assign this to whoever owns the floor's output.
+ */
+export async function productionEfficiency(
+  c: Context<Env>,
+  period: string,
+): Promise<MetricResult> {
+  const { start, end } = periodBounds(period);
+  const byWorker = await computeMonthlyEfficiencyByWorker(c.var.DB, start, end);
+
+  let minutes = 0;
+  let hours = 0;
+  let counted = 0;
+  for (const w of byWorker.values()) {
+    if (!(w.prodHours > 0)) continue;
+    minutes += w.prodMinutes;
+    hours += w.prodHours;
+    counted += 1;
+  }
+  if (hours <= 0) {
+    return { actual: null, sampleSize: 0, detail: "No production hours logged this month" };
+  }
+  const pct = Math.round((minutes / (hours * 60)) * 1000) / 10;
+  return {
+    actual: pct,
+    sampleSize: counted,
+    detail: `${Math.round(minutes).toLocaleString()} standard minutes earned on ${Math.round(hours).toLocaleString()} production hours, across ${counted} workers`,
+  };
+}
+
 export async function computeMetric(
   c: Context<Env>,
   key: string,
@@ -455,6 +536,8 @@ export async function computeMetric(
       return setupCompleteness(c);
     case "documents_not_stuck":
       return documentsStuck(c, period);
+    case "production_efficiency":
+      return productionEfficiency(c, period);
     default:
       return EMPTY;
   }

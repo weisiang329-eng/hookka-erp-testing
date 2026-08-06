@@ -298,3 +298,50 @@ test("the survey scores five 1–5 answers out of 100", async () => {
   assert.equal(attainment(q, 90, 96), 96);
   assert.equal(Math.round((attainment(q, 90, 96) / 100) * 20 * 10) / 10, 19.2);
 });
+
+test("production efficiency: 100% is full marks, 80% is the floor, 75% is nothing", () => {
+  // Owner 2026-08-07: "达到 80%：基本上还能拿得到 60 分 … 低于 80%（可能在 75%
+  // 之下）：直接 0 分 … 最低要求最少都要达到 80%，最好是 90% 以上，通常都是 100%."
+  const d = kpiByKey("production_efficiency");
+  assert.equal(d.curve, "EFFICIENCY_BANDS");
+  assert.equal(d.efficiencyFloorPct, 80);
+  assert.equal(d.efficiencyFloorScore, 60);
+  assert.equal(d.efficiencyZeroPct, 75);
+
+  assert.equal(attainment(d, 100, 100), 100, "the normal month scores full marks");
+  assert.equal(attainment(d, 100, 120), 100, "no bonus above standard — that means the standard is wrong");
+  assert.equal(attainment(d, 100, 90), 80, "the ideal target");
+  assert.equal(attainment(d, 100, 85), 70);
+  assert.equal(attainment(d, 100, 80), 60, "the floor");
+  assert.equal(attainment(d, 100, 78), 36, "below the floor it falls away fast");
+  assert.equal(attainment(d, 100, 76), 12);
+  assert.equal(attainment(d, 100, 75), 0);
+  assert.equal(attainment(d, 100, 50), 0);
+
+  // Monotonic: more efficiency can never score less.
+  let prev = -1;
+  for (let e = 60; e <= 105; e += 0.5) {
+    const s = attainment(d, 100, e);
+    assert.ok(s >= prev, `score fell going from just under ${e}% to ${e}%`);
+    prev = s;
+  }
+});
+
+test("pending time-adjustment requests are a daily-report exception", () => {
+  // Owner 2026-08-07: "either reject or approve 而不是 hanging 在那边."
+  const src = readFileSync(resolve(process.cwd(), "src/api/lib/compliance-report.ts"), "utf8");
+  assert.match(src, /pendingTimeAdjustments: number;/, "it must be a counted category");
+  assert.match(src, /pendingTimeAdjustments: pendingTimeAdjustments\.length/,
+    "it must be in the counts block");
+  // Parse the total expression rather than matching on position — see the note
+  // in cogs-integrity.test.mjs for why the positional form is a trap.
+  const total = src.match(/total:\s*\n([\s\S]*?);/)?.[1] ?? "";
+  assert.ok(
+    total.includes("pendingTimeAdjustments.length"),
+    "and inside the total, or the KPI's burn-down will never see it",
+  );
+  // The columns this reads are real ones — worker_nonprod_requests stores
+  // hours and worker_id, not minutes and workerName. The first draft asked for
+  // the wrong two and would have logged an error and returned an empty list.
+  assert.match(src, /SELECT id, workerId, departmentCode, hours, kind, date, createdAt/);
+});

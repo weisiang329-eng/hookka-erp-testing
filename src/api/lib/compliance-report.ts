@@ -255,6 +255,16 @@ export interface RdStalledRow {
   daysOverdue: number;
 }
 
+export interface PendingTimeAdjustmentRow {
+  id: string;
+  workerId: string;
+  departmentCode: string;
+  minutes: number;
+  kind: string;
+  requestedOn: string;
+  daysWaiting: number;
+}
+
 export interface ComplianceCounts {
   total: number;
   doPendingDispatch: number;
@@ -269,6 +279,11 @@ export interface ComplianceCounts {
   missingWipTimes: number;
   incompleteBoms: number;
   rdStalled: number;
+  /** Time-adjustment requests left PENDING. Owner 2026-08-07: "either reject
+   *  or approve 而不是 hanging 在那边" — an unanswered request is a worker's
+   *  pay sitting in limbo, and it silently distorts efficiency too, because the
+   *  minutes are neither counted nor refused. */
+  pendingTimeAdjustments: number;
   /** Money invariants (src/api/lib/pricing-integrity.ts). Three price defects
    *  ran for months unseen because nothing checked the DATA daily. */
   pricingIssues: number;
@@ -291,6 +306,7 @@ export interface ComplianceGroups {
   missingWipTimes: MissingWipTimeRow[];
   incompleteBoms: IncompleteBomRow[];
   rdStalled: RdStalledRow[];
+  pendingTimeAdjustments: PendingTimeAdjustmentRow[];
   pricingIssues: PricingIssueRow[];
   cogsIssues: CogsIssueRow[];
 }
@@ -1231,6 +1247,58 @@ async function checkRdStalled(
   }
 }
 
+// 14. Time-adjustment requests still waiting for a yes or a no.
+//
+// Owner 2026-08-07: "either reject or approve 而不是 hanging 在那边." A pending
+// request is worse than a rejected one — the worker does not know whether the
+// minutes count, and neither does the efficiency figure that pays their
+// allowance. There is no grace window: the whole point is that these are
+// answered, and an answer takes seconds.
+async function checkPendingTimeAdjustments(
+  db: DbLike,
+  todayYmd: string,
+): Promise<PendingTimeAdjustmentRow[]> {
+  try {
+    const res = await db
+      .prepare(
+        `SELECT id, workerId, departmentCode, hours, kind, date, createdAt
+           FROM worker_nonprod_requests
+          WHERE status = 'PENDING'
+          ORDER BY createdAt ASC
+          LIMIT 500`,
+      )
+      .bind()
+      .all<{
+        id: string;
+        workerId: string | null;
+        departmentCode: string | null;
+        hours: number | string | null;
+        kind: string | null;
+        date: string | null;
+        createdAt: string | null;
+      }>();
+    return (res.results ?? []).map((r) => {
+      // The request carries hours; the floor talks in minutes.
+      const minutes = Math.round((Number(r.hours) || 0) * 60);
+      // created_at is nullable on legacy rows — fall back to the work date so
+      // "waiting 0 days" never hides a request from 2026-06.
+      const raised = r.createdAt || r.date || "";
+      return {
+        id: r.id,
+        workerId: r.workerId ?? "",
+        departmentCode: r.departmentCode ?? "",
+        minutes,
+        kind: r.kind ?? "",
+        requestedOn: String(raised).slice(0, 10),
+        daysWaiting: daysBetween(raised, todayYmd),
+      };
+    });
+  } catch (err) {
+    console.error("[compliance] pendingTimeAdjustments failed:", err);
+    return [];
+  }
+}
+
 // ─── Top-level collector ───────────────────────────────────────────────────
 
 export async function collectComplianceData(
@@ -1256,6 +1324,7 @@ export async function collectComplianceData(
     rdStalled,
     pricingIssues,
     cogsIssues,
+    pendingTimeAdjustments,
   ] = await Promise.all([
     checkDoPendingDispatch(db, todayYmd, graceDays.doPendingDispatch),
     checkDoNotDelivered(db, todayYmd, graceDays.doNotDelivered),
@@ -1271,6 +1340,7 @@ export async function collectComplianceData(
     checkRdStalled(db, todayYmd),
     checkPricingIntegrity(db),
     checkCogsIntegrity(db),
+    checkPendingTimeAdjustments(db, todayYmd),
   ]);
 
   const counts: ComplianceCounts = {
@@ -1288,6 +1358,7 @@ export async function collectComplianceData(
     rdStalled: rdStalled.length,
     pricingIssues: pricingIssues.length,
     cogsIssues: cogsIssues.length,
+    pendingTimeAdjustments: pendingTimeAdjustments.length,
     total:
       doPendingDispatch.length +
       doNotDelivered.length +
@@ -1302,7 +1373,8 @@ export async function collectComplianceData(
       incompleteBoms.length +
       rdStalled.length +
       pricingIssues.length +
-      cogsIssues.length,
+      cogsIssues.length +
+      pendingTimeAdjustments.length,
   };
 
   return {
@@ -1324,6 +1396,7 @@ export async function collectComplianceData(
       rdStalled,
       pricingIssues,
       cogsIssues,
+      pendingTimeAdjustments,
     },
   };
 }

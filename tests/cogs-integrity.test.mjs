@@ -124,10 +124,12 @@ test("it is wired into the daily report AND reachable on demand", () => {
   const compliance = readFileSync("src/api/lib/compliance-report.ts", "utf8");
   assert.match(compliance, /checkCogsIntegrity\(db\)/);
   assert.match(compliance, /cogsIssues: cogsIssues\.length/);
-  // The literal \n did not match a CRLF checkout, so this failed on Windows
-  // only and blocked every local commit while CI (LF) stayed green. \s already
-  // covers \r\n.
-  assert.match(compliance, /cogsIssues\.length,\s*\};/, "must count toward the total");
+  // Read the `total:` expression itself rather than asserting cogsIssues is
+  // the LAST term in it. The positional form broke the moment another category
+  // was appended after it (pendingTimeAdjustments, 2026-08-07) — a green test
+  // that fails on an unrelated correct change is worse than no test.
+  const total = compliance.match(/total:\s*\n([\s\S]*?);/)?.[1] ?? "";
+  assert.ok(total.includes("cogsIssues.length"), "must count toward the total");
 
   // The on-demand endpoint is the point: sizing a money exposure needs live
   // data, not yesterday's cached snapshot.

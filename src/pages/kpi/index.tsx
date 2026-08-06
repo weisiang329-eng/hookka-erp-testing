@@ -27,7 +27,7 @@ type Scoring = "AUTO" | "CHECKLIST" | "SURVEY" | "MANUAL";
 type Line = {
   key: string; label: string; detail: string;
   scoring?: Scoring; formula?: string; checklistItems?: string[]; surveyQuestions?: string[];
-  ratingGuide?: string[];
+  ratingGuide?: string[]; surveyScale?: string[];
   purpose?: string; definition?: string; measurement?: string[];
   shape: "GATE" | "RATIO"; unit: "%" | "count" | "score";
   available: boolean; blockedBy?: string; drillPath?: string;
@@ -52,7 +52,7 @@ type CardData = {
 type LibItem = {
   key: string; label: string; detail: string; shape: "GATE" | "RATIO"; unit: string;
   scoring: Scoring; formula: string; checklistItems?: string[]; surveyQuestions?: string[];
-  ratingGuide?: string[];
+  ratingGuide?: string[]; surveyScale?: string[];
   purpose?: string; definition?: string; measurement?: string[];
   defaultTarget: number; defaultWeight: number; available: boolean;
   current: number | null; evidence: string;
@@ -416,6 +416,24 @@ export default function KpiPage() {
                                 <li key={q} className="text-[11.5px] text-[#3A3733] leading-relaxed">{q}</li>
                               ))}
                             </ol>
+                            {(k.surveyScale?.length ?? 0) > 0 && (
+                              <div className="mt-2">
+                                <p className="text-[11.5px] font-semibold text-[#1F1D1B] mb-1">
+                                  What each answer means
+                                </p>
+                                {/* Best first — the customer reads it that way. */}
+                                <ul className="space-y-0.5">
+                                  {k.surveyScale!.map((label, i) => ({ label, star: i + 1 }))
+                                    .reverse()
+                                    .map(({ label, star }) => (
+                                      <li key={label} className="text-[11.5px] text-[#3A3733]">
+                                        <span className="font-semibold">{star}</span> — {label}{" "}
+                                        <span className="text-[#9CA3AF]">({star * 4} pts)</span>
+                                      </li>
+                                    ))}
+                                </ul>
+                              </div>
+                            )}
                           </div>
                         )}
                         {(k.checklistItems?.length ?? 0) > 0 && (

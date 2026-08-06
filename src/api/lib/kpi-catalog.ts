@@ -86,8 +86,15 @@ export type KpiScoring = "AUTO" | "CHECKLIST" | "SURVEY" | "MANUAL";
  *   MANUAL_SCORE       — the supervisor's number IS the attainment. No maths.
  *   COMPOSITE          — the metric already blended two or more halves and
  *                        handed back a finished 0–100 score.
+ *   EFFICIENCY_BANDS   — piecewise, and steep below the floor. Owner
+ *                        2026-08-07: "达到 80%：基本上还能拿得到 60 分 … 低于
+ *                        80%（可能在 75% 之下）：直接 0 分." A straight ratio
+ *                        would pay 80 points for 80% efficiency, which reads as
+ *                        "80% is a B". It is not — it is the floor, and five
+ *                        points below it the work is not worth costing.
  *
- * The last three are all pass-throughs. They stay separate names because the
+ * SURVEY_MEAN, MANUAL_SCORE and COMPOSITE are all pass-throughs. They stay
+ * separate names because the
  * card explains itself differently for each, and because collapsing them would
  * make "why is this not divided by the target?" unanswerable.
  */
@@ -97,7 +104,8 @@ export type AttainmentCurve =
   | "PENALTY_PER_UNIT"
   | "SURVEY_MEAN"
   | "MANUAL_SCORE"
-  | "COMPOSITE";
+  | "COMPOSITE"
+  | "EFFICIENCY_BANDS";
 /** Higher actual is better, or lower is better (a count of problems). */
 export type KpiDirection = "HIGHER_IS_BETTER" | "LOWER_IS_BETTER";
 
@@ -135,6 +143,15 @@ export interface KpiDef {
   checklistItems?: string[];
   /** SURVEY only — the questions, each answered 1–5. */
   surveyQuestions?: string[];
+  /**
+   * SURVEY only — what 1 through 5 MEAN, index 0 = 1 star.
+   *
+   * Owner 2026-08-07: "最高是 Excellent，最小是 Poor，中间是 Acceptable，第四个
+   * 是？" A bare 1–5 gets answered differently by every customer — some treat 3
+   * as "fine", others as a complaint — and an average across those is not a
+   * measurement of anything. Naming each rung makes the replies comparable.
+   */
+  surveyScale?: string[];
   curve?: AttainmentCurve;
   /** PENALTY_PER_PCT only — points lost per percentage point. */
   penaltyPerPct?: number;
@@ -142,6 +159,10 @@ export interface KpiDef {
   penaltyPerUnit?: number;
   /** How many days are allowed before a document starts counting as late. */
   graceDays?: number;
+  /** EFFICIENCY_BANDS — the floor, what it scores, and where the score hits 0. */
+  efficiencyFloorPct?: number;
+  efficiencyFloorScore?: number;
+  efficiencyZeroPct?: number;
   /** MANUAL only — what earns a high score, and what earns a low one. */
   ratingGuide?: string[];
   /** Suggested target; the assignment row overrides it per person. */
@@ -216,10 +237,16 @@ export const KPI_CATALOG: KpiDef[] = [
       "Count every product with status ACTIVE.",
       "A product counts as complete only when all four are present — price > 0, unit_m3 > 0, fabric_usage > 0, and an ACTIVE BOM template whose routing list is not empty.",
       "An empty BOM template counts as INCOMPLETE. 45% of templates on file have no routing in them, and the daily report has been reading those as fine.",
-      "Score = complete ÷ active × 100.",
+      "Score = complete ÷ active × 100. Everything present is 100; the score IS the share finished, so 80 means four SKUs in five are fully set up.",
+      "The card also lists how many SKUs are missing EACH field, because 'we are at 31%' cannot be acted on and '247 have no BOM' can.",
+      "WIP times are deliberately NOT part of this. They belong to production routing, not to the product record, and the daily report already tracks them separately.",
     ],
     formula: "Active SKUs having price + m³ + fabric usage + a BOM with routing ÷ all active SKUs × 100",
-    defaultTarget: 95,
+    // 100, not 95. Owner 2026-08-07: "everything 都有就代表 100 分，然后看他完成
+    // 多少" — the score should BE the share finished. Against a target of 95 a
+    // genuine 31.4% reported as 33.1, which is a different number for no reason
+    // anyone could explain.
+    defaultTarget: 100,
     defaultWeight: 20,
     available: true,
     drillPath: "/products?filter=incomplete",
@@ -257,6 +284,38 @@ export const KPI_CATALOG: KpiDef[] = [
     roles: ["OFFICE"],
   },
   {
+    key: "production_efficiency",
+    label: "Production time efficiency",
+    detail: "Standard minutes earned against production hours worked. 100% is the norm",
+    shape: "RATIO",
+    direction: "HIGHER_IS_BETTER",
+    unit: "%",
+    scoring: "AUTO",
+    curve: "EFFICIENCY_BANDS",
+    efficiencyFloorPct: 80,
+    efficiencyFloorScore: 60,
+    efficiencyZeroPct: 75,
+    purpose:
+      "Every hour a production worker is paid for is an hour we quoted against a standard time. When the floor runs below its standard, the difference is not a number in a report — it is work we sold at one price and paid for at another.",
+    definition:
+      "The standard minutes earned by completed job cards, divided by the hours actually worked in production departments, as a percentage. 100% means the floor produced exactly what the BOM said the work should take. This is the SAME figure the efficiency allowance and the daily report already use, so a worker's payslip and this KPI can never disagree.",
+    measurement: [
+      "Earned minutes: every job card completed or transferred in the month, valued at its BOM standard time. A card with two people on it splits the credit.",
+      "Worked hours: hours logged against production departments only. Office and admin hours are not in the denominator.",
+      "Efficiency % = earned minutes ÷ (worked hours × 60) × 100.",
+      "100% or better scores the full 100 points. There is no bonus above 100 — beating the standard usually means the standard is wrong, not that the month was twice as good.",
+      "80% is the FLOOR and scores 60. Between 80% and 100% the score rises 2 points for every 1% of efficiency: 85% → 70, 90% → 80, 95% → 90.",
+      "Below the floor it falls away fast: 78% → 36, 76% → 12, and 75% or under scores 0. Work costed at 75% of its standard time is not work we can price.",
+    ],
+    formula:
+      "100% → 100 pts · 90% → 80 · 80% → 60 (the floor) · 78% → 36 · 75% or below → 0",
+    defaultTarget: 100,
+    defaultWeight: 30,
+    available: true,
+    drillPath: "/reports/operations",
+    roles: ["PRODUCTION", "QA"],
+  },
+  {
     key: "customer_satisfaction",
     label: "Customer satisfaction survey",
     detail: "Five questions, each scored 1–5 by the customer, worth 20 points each",
@@ -271,7 +330,9 @@ export const KPI_CATALOG: KpiDef[] = [
       "Three customers a month answer five questions about how the office deals with them. Each answer is 1–5 and worth up to 20 points, so five 5s is 100 and four 5s with one 4 is 96. The KPI is the average across everyone who replied.",
     measurement: [
       "Pick about three customers and send each the five-question link. They may be the same customers as last month — what matters is that somebody is asked.",
-      "Each question is answered 1–5. A 5 earns the full 20 points for that question, a 4 earns 16, a 3 earns 12, and so on.",
+      "Each question is answered 1–5, and every rung is named so two customers mean the same thing by a 3: 5 Excellent, 4 Good, 3 Acceptable, 2 Weak, 1 Poor.",
+      "A 5 earns the full 20 points for that question, a 4 earns 16, a 3 earns 12, a 2 earns 8, a 1 earns 4.",
+      "Note that 'Acceptable' is a 60, not a pass mark of 100. A customer who is simply not complaining is not a customer who is happy.",
       "One reply's score = (sum of the five answers ÷ 25) × 100.",
       "The month's figure is the average across every reply received.",
       "That figure is the attainment, multiplied by the weight assigned. At weight 20, a 96 earns 19.2 points.",
@@ -283,6 +344,16 @@ export const KPI_CATALOG: KpiDef[] = [
       "When you chase us or follow up, how quickly does someone come back to you?",
       "How accurate is the paperwork we send you — quotations, order confirmations, delivery notes and invoices?",
       "When something went wrong, how well did we own it and put it right?",
+    ],
+    // Index 0 is a 1. Deliberately NOT symmetrical in tone: 3 is "Acceptable",
+    // which is a pass and not a compliment, so a customer who is merely not
+    // complaining lands at 60 rather than at the middle of a happy scale.
+    surveyScale: [
+      "Poor — it caused me a real problem",
+      "Weak — below what I expect from you",
+      "Acceptable — it was fine, nothing more",
+      "Good — better than most suppliers I deal with",
+      "Excellent — I could not ask for better",
     ],
     defaultTarget: 90,
     defaultWeight: 20,
@@ -304,17 +375,22 @@ export const KPI_CATALOG: KpiDef[] = [
       "A score out of 100, given by your supervisor at the end of the month. This is the one KPI the system does NOT calculate, because it cannot: a month with genuinely nothing wrong and a month where nobody looked produce the same empty record. Only a supervisor can tell those apart, and usually only afterwards.",
     measurement: [
       "During the month, raise the problems you find — before they turn into a customer complaint, a delay or a loss.",
-      "At month end your supervisor scores this out of 100 and writes the reason.",
-      "Finding nothing because there genuinely was nothing is fine and does not cost you marks.",
-      "Raising nothing, and then something going wrong that was there to be found, scores low. That is the case this KPI exists for.",
-      "The score and the supervisor's note are both shown on your card, so you know why.",
+      "At month end your supervisor scores this out of 100 against the bands below, and writes the reason.",
+      "A NORMAL month is 60–69. Nothing raised and nothing went wrong is a pass, not a failure — this KPI does not reward inventing problems to report.",
+      "You go ABOVE 80 by catching something real while it was still cheap to fix. Two things earn the marks: that it was genuine, and that it was early.",
+      "You go BELOW 50 only when something went wrong that was there to be found and nobody raised it. Being unlucky is not scored; not looking is.",
+      "It is judged on what you RAISED, not on what you personally fixed. Passing a problem to the right person in time counts fully.",
+      "The score and the supervisor's note are both shown on your card, so you can see the reason and argue with it.",
     ],
     formula: "Your supervisor's score out of 100, multiplied by this KPI's weight",
     ratingGuide: [
-      "90–100 — caught something real and early, and it was killed while it was still small.",
-      "70–89 — raised problems in good time; nothing serious got past.",
-      "50–69 — quiet month, nothing raised, and nothing blew up either.",
-      "1–49 — nothing was raised, and something then went wrong that was findable.",
+      "90–100 — Caught something that would have cost us. Raised it while it was still cheap to fix, and it never reached the customer. Example: spotted that a fabric on three open orders was short before cutting started, so the orders were re-planned instead of stopping the line.",
+      "80–89 — Consistently ahead of the problems. Several real issues raised during the month, each early enough that handling them was routine rather than urgent. Nothing needed rescuing.",
+      "70–79 — Solid. Problems were raised, but mostly once they were already visible to someone else. Nothing got worse for being noticed late.",
+      "60–69 — The ordinary quiet month. Nothing significant raised, and nothing went wrong. This is the DEFAULT, not a punishment — a month with genuinely nothing to find lands here.",
+      "50–59 — Nothing raised, and afterwards something surfaced that was awkward but small: a document nobody chased, a price nobody queried. Findable, but it cost us little.",
+      "30–49 — Nothing raised, and something then went wrong that was clearly there to be found. The information was on a screen this person looks at.",
+      "1–29 — Something was noticed and not passed on, or was raised only once the customer had already complained. This band is for withholding, not for missing.",
     ],
     defaultTarget: 100,
     defaultWeight: 20,
@@ -341,7 +417,17 @@ export function kpisForRole(role: string): KpiDef[] {
  */
 export function attainment(
   def: Pick<KpiDef, "direction"> &
-    Partial<Pick<KpiDef, "curve" | "penaltyPerPct" | "penaltyPerUnit">>,
+    Partial<
+      Pick<
+        KpiDef,
+        | "curve"
+        | "penaltyPerPct"
+        | "penaltyPerUnit"
+        | "efficiencyFloorPct"
+        | "efficiencyFloorScore"
+        | "efficiencyZeroPct"
+      >
+    >,
   target: number,
   actual: number,
 ): number {
@@ -361,6 +447,22 @@ export function attainment(
   }
   // A survey mean, a supervisor's rating and a blended score are all already
   // the attainment.
+  // Piecewise: full marks at 100%, the floor scores its stated points, and it
+  // falls to nothing a few points below. Two straight lines, not a ratio.
+  if (def.curve === "EFFICIENCY_BANDS") {
+    const floor = Number(def.efficiencyFloorPct ?? 80);
+    const floorScore = Number(def.efficiencyFloorScore ?? 60);
+    const zero = Number(def.efficiencyZeroPct ?? 75);
+    if (actual >= 100) return 100;
+    if (actual >= floor) {
+      const slope = (100 - floorScore) / (100 - floor);
+      return Math.round((floorScore + (actual - floor) * slope) * 10) / 10;
+    }
+    if (actual > zero) {
+      return Math.round(((actual - zero) / (floor - zero)) * floorScore * 10) / 10;
+    }
+    return 0;
+  }
   if (
     def.curve === "SURVEY_MEAN" ||
     def.curve === "MANUAL_SCORE" ||

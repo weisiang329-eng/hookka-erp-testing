@@ -338,12 +338,18 @@ export const KPI_CATALOG: KpiDef[] = [
       "That figure is the attainment, multiplied by the weight assigned. At weight 20, a 96 earns 19.2 points.",
     ],
     formula: "Average across replies of (sum of five 1–5 answers ÷ 25) × 100",
+    // Q1 was "how quickly do you get a quotation" until 2026-08-07. The owner
+    // struck it: quoting is Sales' job, and scoring Office on somebody else's
+    // response time measures the wrong department. The replacement is
+    // deliberately OPEN — the other four are all specific, so one broad
+    // question is where a complaint the questionnaire never thought to ask
+    // about can still land.
     surveyQuestions: [
-      "When you send us an enquiry or ask for a quotation, how quickly do you get a reply?",
       "When you ask where your order is or when it will arrive, how clear and reliable is the answer?",
       "When you chase us or follow up, how quickly does someone come back to you?",
-      "How accurate is the paperwork we send you — quotations, order confirmations, delivery notes and invoices?",
+      "How accurate is the paperwork we send you — order confirmations, delivery notes and invoices?",
       "When something went wrong, how well did we own it and put it right?",
+      "Overall, how easy are we to deal with as a supplier?",
     ],
     // Index 0 is a 1. Deliberately NOT symmetrical in tone: 3 is "Acceptable",
     // which is a pass and not a compliment, so a customer who is merely not

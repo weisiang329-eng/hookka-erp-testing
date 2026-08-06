@@ -35,7 +35,7 @@ import {
   type KpiDef,
   type PayoutSettings,
 } from "../lib/kpi-catalog";
-import { computeMetric, checklistProgress } from "../lib/kpi-metrics";
+import { computeMetric, checklistProgress, surveyMean } from "../lib/kpi-metrics";
 
 const app = new Hono<Env>();
 
@@ -78,6 +78,7 @@ interface CardLine {
   /** Plain-English derivation, shown to the person being measured. */
   formula: string;
   checklistItems?: string[];
+  surveyQuestions?: string[];
   shape: KpiDef["shape"];
   unit: KpiDef["unit"];
   available: boolean;
@@ -186,12 +187,15 @@ async function buildCard(c: Context<Env>, userId: string, role: string, period: 
     const m =
       def.scoring === "CHECKLIST"
         ? await checklistProgress(c, userId, def.key, period, def.checklistItems?.length ?? 0)
-        : await computeMetric(c, def.key, period);
+        : def.scoring === "SURVEY"
+          ? await surveyMean(c, userId, def.key, period)
+          : await computeMetric(c, def.key, period);
     const att =
       m.actual === null ? null : attainment(def, Number(a.target), m.actual);
     lines.push({
       key: def.key, label: def.label, detail: def.detail,
       scoring: def.scoring, formula: def.formula, checklistItems: def.checklistItems,
+      surveyQuestions: def.surveyQuestions,
       shape: def.shape, unit: def.unit, available: true,
       drillPath: def.drillPath,
       target: Number(a.target), weight: Number(a.weight),
@@ -427,6 +431,72 @@ app.get("/checklist/:kpiKey", async (c) => {
   )
     .bind(userId, periodOf(c), kpiKey)
     .all<{ itemIndex: number; done: boolean; verifiedBy: string | null; note: string | null }>();
+  return c.json({ success: true, data: res.results ?? [] });
+});
+
+// ---- Survey replies --------------------------------------------------------
+//
+// Until the public link exists, replies are keyed in here. The maths is the
+// same either way, so the KPI does not change when the link ships — only where
+// the rows come from.
+app.post("/survey/:kpiKey", async (c) => {
+  const denied = requireSuperAdmin(c);
+  if (denied) return denied;
+  await ensureKpiTables(c.var.DB);
+  const kpiKey = c.req.param("kpiKey");
+  const def = kpiByKey(kpiKey);
+  if (!def || def.scoring !== "SURVEY") {
+    return c.json({ success: false, error: `${kpiKey} is not a survey KPI` }, 400);
+  }
+
+  let body: {
+    userId?: string; period?: string; customerId?: string; customerName?: string;
+    answers?: number[]; comment?: string;
+  };
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body" }, 400);
+  }
+  const answers = Array.isArray(body.answers) ? body.answers.map(Number) : [];
+  if (answers.length !== 5 || answers.some((a) => !Number.isInteger(a) || a < 1 || a > 5)) {
+    return c.json(
+      { success: false, error: "Five answers are required, each 1–5" },
+      400,
+    );
+  }
+  const userId = String(body.userId ?? "");
+  if (!userId) return c.json({ success: false, error: "userId is required" }, 400);
+  const period = /^\d{4}-\d{2}$/.test(String(body.period ?? "")) ? String(body.period) : periodOf(c);
+
+  await c.var.DB.prepare(
+    `INSERT INTO kpi_survey_responses
+       (id, userId, kpiKey, period, customerId, customerName, q1, q2, q3, q4, q5, comment, orgId)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      `ksr_${userId}_${kpiKey}_${period}_${(body.customerId ?? body.customerName ?? "anon").slice(0, 40)}`,
+      userId, kpiKey, period,
+      body.customerId ?? null, body.customerName ?? null,
+      answers[0], answers[1], answers[2], answers[3], answers[4],
+      body.comment ?? null, getOrgId(c),
+    )
+    .run();
+  return c.json({ success: true });
+});
+
+app.get("/survey/:kpiKey", async (c) => {
+  await ensureKpiTables(c.var.DB);
+  const self = ctxGet(c, "userId");
+  const isAdmin = requireSuperAdmin(c) === null;
+  const wanted = c.req.query("userId");
+  const userId = wanted && isAdmin ? wanted : self;
+  const res = await c.var.DB.prepare(
+    `SELECT customerName, q1, q2, q3, q4, q5, comment FROM kpi_survey_responses
+      WHERE userId = ? AND kpiKey = ? AND period = ? ORDER BY createdAt`,
+  )
+    .bind(userId, c.req.param("kpiKey"), periodOf(c))
+    .all();
   return c.json({ success: true, data: res.results ?? [] });
 });
 

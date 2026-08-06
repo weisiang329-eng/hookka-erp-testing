@@ -79,10 +79,13 @@ export async function customerDeliveryLate(
   const shipped = Number(row?.shipped) || 0;
   const late = Number(row?.late) || 0;
   if (shipped === 0) return EMPTY;
+  // Reported as a PERCENTAGE, not a count: 9 late out of 41 and 9 out of 400
+  // are different failures, and the scoring curve is per percentage point.
+  const pct = Math.round((late / shipped) * 1000) / 10;
   return {
-    actual: late,
+    actual: pct,
     sampleSize: shipped,
-    detail: `${late} late of ${shipped} shipped`,
+    detail: `${late} late of ${shipped} shipped (${pct}%)`,
   };
 }
 
@@ -262,6 +265,47 @@ export async function checklistProgress(
     actual: Math.round((done / totalItems) * 1000) / 10,
     sampleSize: totalItems,
     detail: `${done} of ${totalItems} items done`,
+  };
+}
+
+/**
+ * SURVEY — the average of the replies received this month.
+ *
+ * One reply scores (sum of its five 1–5 answers ÷ 25) × 100, so five 5s is 100
+ * and four 5s with one 4 is 96. The month's figure is the mean across replies;
+ * a month with none has no figure rather than a zero, because nobody asking is
+ * a different failure from customers answering badly, and scoring it as 0
+ * would hide which one happened.
+ */
+export async function surveyMean(
+  c: Context<Env>,
+  userId: string,
+  kpiKey: string,
+  period: string,
+): Promise<MetricResult> {
+  const res = await c.var.DB.prepare(
+    `SELECT q1, q2, q3, q4, q5 FROM kpi_survey_responses
+      WHERE userId = ? AND kpiKey = ? AND period = ?`,
+  )
+    .bind(userId, kpiKey, period)
+    .all<{ q1: number; q2: number; q3: number; q4: number; q5: number }>();
+  const rows = res.results ?? [];
+  if (rows.length === 0) {
+    return { actual: null, sampleSize: 0, detail: "No replies received yet" };
+  }
+  let total = 0;
+  for (const r of rows) {
+    const sum = [r.q1, r.q2, r.q3, r.q4, r.q5].reduce(
+      (a, v) => a + (Number(v) || 0),
+      0,
+    );
+    total += (sum / 25) * 100;
+  }
+  const mean = Math.round((total / rows.length) * 10) / 10;
+  return {
+    actual: mean,
+    sampleSize: rows.length,
+    detail: `${mean} average across ${rows.length} repl${rows.length === 1 ? "y" : "ies"}`,
   };
 }
 

@@ -104,6 +104,20 @@ const DDL: string[] = [
   // EXISTS) and I walked into it anyway. Any column added to a table above
   // needs a line here too.
   `ALTER TABLE kpi_user_settings ADD COLUMN IF NOT EXISTS payout_bands TEXT NOT NULL DEFAULT '[]'`,
+  // One row per customer reply. Five answers, each 1–5.
+  `CREATE TABLE IF NOT EXISTS kpi_survey_responses (
+     id             TEXT PRIMARY KEY,
+     user_id        TEXT NOT NULL,
+     kpi_key        TEXT NOT NULL,
+     period         TEXT NOT NULL,
+     customer_id    TEXT,
+     customer_name  TEXT,
+     q1 INTEGER NOT NULL, q2 INTEGER NOT NULL, q3 INTEGER NOT NULL,
+     q4 INTEGER NOT NULL, q5 INTEGER NOT NULL,
+     comment        TEXT,
+     org_id         TEXT NOT NULL DEFAULT 'hookka',
+     created_at     TIMESTAMP NOT NULL DEFAULT NOW()
+   )`,
   `ALTER TABLE kpi_assignments ADD COLUMN IF NOT EXISTS assigned_by TEXT`,
   `ALTER TABLE kpi_checklist_ticks ADD COLUMN IF NOT EXISTS note TEXT`,
 ];

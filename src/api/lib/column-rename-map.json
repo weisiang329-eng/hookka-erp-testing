@@ -907,5 +907,6 @@
   "assignedBy": "assigned_by",
   "itemIndex": "item_index",
   "verifiedBy": "verified_by",
-  "verifiedAt": "verified_at"
+  "verifiedAt": "verified_at",
+  "lockedAt": "locked_at"
 }

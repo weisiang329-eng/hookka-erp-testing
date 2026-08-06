@@ -164,6 +164,7 @@ const AdminHealth = lazy(() => import('./pages/admin/health'))
 // Agent Console (Production Agent Phase 3) — SUPER_ADMIN-only status +
 // one-click controls for every agent (run-now / pause / kill-all / rollback).
 const AgentConsole = lazy(() => import('./pages/agents'))
+const KpiPage = lazy(() => import('./pages/kpi'))
 
 // 2FA setup (any authenticated user — soft-prompt destination from /login).
 const Setup2FA = lazy(() => import('./pages/setup-2fa'))
@@ -505,6 +506,17 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
     // Owner 2026-08-05: everyone has the console; each role sees only its own
     // agents (AGENTS_BY_ROLE in src/api/lib/role-policy.ts, applied by
     // /api/agents/status). The CONTROLS behind it are still SUPER_ADMIN.
+    // KPI — the page itself is self-service (/api/kpi/me never takes a user
+    // id), so the gate here only decides who sees the menu entry. Every
+    // cross-user route re-checks SUPER_ADMIN on the server.
+    path: '/kpi',
+    element: (
+      <RequirePermission resource="kpi" action="read">
+        <S><KpiPage /></S>
+      </RequirePermission>
+    ),
+  },
+  {
     path: '/agents',
     element: (
       <RequirePermission resource="agent-console" action="read">

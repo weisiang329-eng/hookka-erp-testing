@@ -642,10 +642,17 @@ app.get("/projected", async (c) => {
       employmentStartDay: joinedDay,
       employmentEndDay: resignedDay,
     });
+    // Pro-rated by days actually worked — the same absentDays that produces
+    // the salary deduction two lines below, so the payslip cannot show one
+    // absence count against the salary and a different one against the bonus.
     const allowances = resolveEfficiencyAllowanceSen(
       effByWorker.get(worker.id),
       worker.efficiencyAllowanceSen,
       worker.efficiencyThresholdPct,
+      {
+        workingDays: worker.workingDaysPerMonth,
+        absentDays: labor.payroll.absentDays,
+      },
     );
     const stat = calcStatutory(effectiveSalarySen, {
       epfEnabled: worker.epfEnabled,
@@ -983,6 +990,10 @@ app.post("/", async (c) => {
         effByWorker.get(worker.id),
         worker.efficiencyAllowanceSen,
         worker.efficiencyThresholdPct,
+        {
+          workingDays: worker.workingDaysPerMonth,
+          absentDays: labor.payroll.absentDays,
+        },
       );
       // Statutory deductions computed on the month's effective monthly salary
       // (= the worker's salary, day-weighted if it changed mid-month).

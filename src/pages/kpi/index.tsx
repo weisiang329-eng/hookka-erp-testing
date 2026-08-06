@@ -1,16 +1,19 @@
 // ---------------------------------------------------------------------------
-// KPI — one person's monthly scorecard.
+// KPI — library, people, and one person's monthly card.
 //
-// Owner 2026-08-06. Two things this page is built around:
+// Owner 2026-08-06, after using the first version: "我一定要先选他的名字、点
+// assign KPI 才能看到现有的 KPI 吗？" No. That order was backwards — a target
+// is decided by looking at the current number, so the current number has to be
+// on the list before anyone is picked.
 //
-//  1. Every number opens the list behind it. A figure nobody can click is a
-//     figure nobody trusts, and the first question is always "which ones?".
-//  2. A KPI that cannot be computed yet is SHOWN, greyed, contributing
-//     nothing. Hiding it would make a half-built scorecard look complete.
+// Three tabs, and a Super Admin lands on Library:
+//   Library — every KPI, its live company value, who holds it. Tick several,
+//             assign them to several people in one go.
+//   People  — everyone's score this month against last month.
+//   My KPI  — the card the person being measured sees, read-only, with the
+//             formula spelled out and any checklist items tickable.
 //
-// Self-service by default: the page asks /api/kpi/me and never sends a user
-// id. Super Admin gets a picker, which switches to /api/kpi/users/:id — the
-// server re-checks, so the picker is a convenience, not the gate.
+// An ordinary user has only the third, so they never see the strip.
 // ---------------------------------------------------------------------------
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
@@ -19,43 +22,44 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { getCurrentUser } from "@/lib/auth";
 
+type Scoring = "AUTO" | "CHECKLIST";
+
 type Line = {
-  key: string;
-  label: string;
-  detail: string;
-  scoring?: "AUTO" | "CHECKLIST";
-  formula?: string;
-  checklistItems?: string[];
-  shape: "GATE" | "RATIO";
-  unit: "%" | "count" | "score";
-  available: boolean;
-  blockedBy?: string;
-  drillPath?: string;
-  target: number;
-  weight: number;
-  actual: number | null;
-  attainment: number | null;
-  points: number | null;
+  key: string; label: string; detail: string;
+  scoring?: Scoring; formula?: string; checklistItems?: string[];
+  shape: "GATE" | "RATIO"; unit: "%" | "count" | "score";
+  available: boolean; blockedBy?: string; drillPath?: string;
+  target: number; weight: number;
+  actual: number | null; attainment: number | null; points: number | null;
   evidence: string;
 };
-type Card = {
-  period: string;
-  locked: boolean;
-  lines: Line[];
-  rawScore: number | null;
-  score: number | null;
-  gateFailed: boolean;
-  gateCap: number;
-  weightMeasured: number;
-  weightUnbuilt: number;
+type CardData = {
+  period: string; locked: boolean; lines: Line[];
+  rawScore: number | null; score: number | null;
+  gateFailed: boolean; gateCap: number;
+  weightMeasured: number; weightUnbuilt: number;
+};
+type LibItem = {
+  key: string; label: string; detail: string; shape: "GATE" | "RATIO"; unit: string;
+  scoring: Scoring; formula: string; checklistItems?: string[];
+  defaultTarget: number; defaultWeight: number; available: boolean;
+  current: number | null; evidence: string;
+  assignedTo: Array<{ userId: string; name: string; role: string }>;
+};
+type PersonRow = {
+  userId: string; name: string; email: string; role: string;
+  kpiCount: number; score: number | null; gateFailed: boolean;
+  prevPeriod: string; prevScore: number | null; delta: number | null;
 };
 
-const fmt = (v: number | null, unit: Line["unit"]): string => {
+const fmt = (v: number | null, unit: string): string => {
   if (v === null || !Number.isFinite(v)) return "—";
   if (unit === "%") return `${v}%`;
   if (unit === "score") return v.toFixed(1);
   return String(v);
 };
+const scoreColour = (v: number | null) =>
+  v == null ? "#9CA3AF" : v >= 90 ? "#3B6D11" : v >= 70 ? "#B5701A" : "#9A3A2D";
 
 function monthsBack(n: number): string[] {
   const out: string[] = [];
@@ -67,113 +71,355 @@ function monthsBack(n: number): string[] {
   return out;
 }
 
+const BADGE: Record<string, string> = {
+  AUTO: "border-[#BFD9AE] bg-[#F2F7EE] text-[#3B6D11]",
+  CHECKLIST: "border-[#AECBD9] bg-[#EEF4F7] text-[#11566D]",
+  GATE: "border-[#E7B8B0] bg-[#FDF3F1] text-[#9A3A2D]",
+};
+const Badge = ({ kind, children }: { kind: string; children: React.ReactNode }) => (
+  <span className={`rounded border px-1.5 text-[10px] font-semibold ${BADGE[kind] ?? ""}`}>
+    {children}
+  </span>
+);
+
 export default function KpiPage() {
   const me = getCurrentUser();
   const isSuperAdmin = (me?.role ?? "").toUpperCase() === "SUPER_ADMIN";
   const [period, setPeriod] = useState(() => new Date().toISOString().slice(0, 7));
-  const [viewUserId, setViewUserId] = useState<string>("");
+  const months = useMemo(() => monthsBack(12), []);
+
+  type Tab = "library" | "people" | "mine";
+  const [tab, setTab] = useState<Tab>(isSuperAdmin ? "library" : "mine");
+  const [viewUserId, setViewUserId] = useState("");
 
   const { data: usersResp } = useCachedJson<{
     data?: Array<{ id: string; email: string; displayName?: string; role?: string }>;
   }>(isSuperAdmin ? "/api/users" : "");
 
-  // ---- Assignment panel (Super Admin) ------------------------------------
-  // Lives on this page rather than in Settings: whoever is deciding a target
-  // is looking at the card the target produces, and making them navigate away
-  // to change it is how targets stop being revisited.
-  const [assignOpen, setAssignOpen] = useState(false);
-  const [draft, setDraft] = useState<Record<string, { target: number; weight: number; on: boolean }>>({});
+  const { data: libResp, loading: libLoading } = useCachedJson<{ data?: LibItem[] }>(
+    isSuperAdmin && tab === "library" ? `/api/kpi/library?period=${period}` : "",
+  );
+  const { data: peopleResp, loading: peopleLoading } = useCachedJson<{ data?: PersonRow[] }>(
+    isSuperAdmin && tab === "people" ? `/api/kpi/people?period=${period}` : "",
+  );
+
+  const cardUrl =
+    tab === "mine"
+      ? viewUserId
+        ? `/api/kpi/users/${viewUserId}?period=${period}`
+        : `/api/kpi/me?period=${period}`
+      : "";
+  const { data: cardResp, loading: cardLoading } = useCachedJson<{ data?: CardData }>(cardUrl);
+  const card = cardResp?.data;
+
+  // ---- Library multi-select ------------------------------------------------
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [assignees, setAssignees] = useState<Record<string, { on: boolean; weight: number }>>({});
   const [saving, setSaving] = useState(false);
-  const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
 
-  const viewedUser = (usersResp?.data ?? []).find((u) => u.id === viewUserId);
-  const viewedRole = (viewedUser?.role ?? me?.role ?? "").toUpperCase();
-
-  const { data: catalogResp } = useCachedJson<{
-    data?: Array<{
-      key: string; label: string; detail: string; shape: string; unit: string;
-      defaultTarget: number; defaultWeight: number; available: boolean; blockedBy?: string;
-    }>;
-  }>(isSuperAdmin && assignOpen && viewedRole ? `/api/kpi/catalog?role=${viewedRole}` : "");
-
-  const { data: currentResp } = useCachedJson<{
-    data?: Array<{ kpiKey: string; target: number; weight: number; isActive: boolean }>;
-  }>(isSuperAdmin && assignOpen && viewUserId ? `/api/kpi/assignments/${viewUserId}` : "");
-
-  const openAssign = () => {
-    setSaveMsg(null);
-    setAssignOpen(true);
+  const lib = libResp?.data ?? [];
+  const pickedDefs = lib.filter((k) => picked.has(k.key));
+  const togglePick = (key: string) => {
+    const next = new Set(picked);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    setPicked(next);
+    setMsg(null);
   };
 
-  // Seed the form from what is already assigned, falling back to the
-  // catalogue's suggestion for anything not yet set.
-  const seeded = useMemo(() => {
-    const cat = catalogResp?.data ?? [];
-    const cur = new Map((currentResp?.data ?? []).map((r) => [r.kpiKey, r]));
-    const out: Record<string, { target: number; weight: number; on: boolean }> = {};
-    for (const k of cat) {
-      const c = cur.get(k.key);
-      out[k.key] = c
-        ? { target: Number(c.target), weight: Number(c.weight), on: c.isActive !== false }
-        : { target: k.defaultTarget, weight: k.defaultWeight, on: false };
-    }
-    return out;
-  }, [catalogResp, currentResp]);
+  const weightTotal = Object.values(assignees).reduce(
+    (s, v) => (v.on ? s + (Number(v.weight) || 0) : s),
+    0,
+  );
 
-  const form = Object.keys(draft).length ? draft : seeded;
-  const patch = (key: string, v: Partial<{ target: number; weight: number; on: boolean }>) =>
-    setDraft({ ...form, [key]: { ...form[key], ...v } });
-
-  const save = async () => {
-    if (!viewUserId) return;
+  const saveBulk = async () => {
     setSaving(true);
-    setSaveMsg(null);
+    setMsg(null);
     try {
-      const assignments = Object.entries(form).map(([kpiKey, v]) => ({
-        kpiKey, target: Number(v.target), weight: Number(v.weight), isActive: v.on,
-      }));
-      const r = await fetch(`/api/kpi/assignments/${viewUserId}`, {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ assignments }),
-      });
-      const j = (await r.json()) as { success?: boolean; error?: string };
-      if (!r.ok || !j.success) throw new Error(j.error || `Save failed (${r.status})`);
-      setSaveMsg("Saved. Reopen the month to see the card.");
-      setDraft({});
+      const people = Object.entries(assignees).filter(([, v]) => v.on);
+      if (!people.length) throw new Error("Pick at least one person");
+      for (const def of pickedDefs) {
+        const r = await fetch(`/api/kpi/kpi/${def.key}/assignees`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            assignees: people.map(([userId, v]) => ({
+              userId,
+              target: def.defaultTarget,
+              weight: def.shape === "GATE" ? 0 : Number(v.weight) || 0,
+              isActive: true,
+            })),
+          }),
+        });
+        const j = (await r.json()) as { success?: boolean; error?: string };
+        if (!r.ok || !j.success) throw new Error(j.error || `Failed on ${def.label}`);
+      }
+      setMsg(`Assigned ${pickedDefs.length} KPI(s) to ${people.length} person(s).`);
+      setPicked(new Set());
       invalidateCachePrefix("/api/kpi");
     } catch (e) {
-      setSaveMsg(e instanceof Error ? e.message : "Save failed");
+      setMsg(e instanceof Error ? e.message : "Save failed");
     } finally {
       setSaving(false);
     }
   };
 
-  const url = viewUserId
-    ? `/api/kpi/users/${viewUserId}?period=${period}`
-    : `/api/kpi/me?period=${period}`;
-  const { data, loading } = useCachedJson<{ success?: boolean; data?: Card }>(url);
-  const card = data?.data;
+  const tickItem = async (kpiKey: string, itemIndex: number, done: boolean) => {
+    await fetch(`/api/kpi/checklist/${kpiKey}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ period, itemIndex, done, userId: viewUserId || undefined }),
+    });
+    invalidateCachePrefix("/api/kpi");
+  };
 
-  const months = useMemo(() => monthsBack(12), []);
-  const scoreColour =
-    card?.score == null ? "#9CA3AF" : card.score >= 90 ? "#3B6D11" : card.score >= 70 ? "#B5701A" : "#9A3A2D";
+  const openPerson = (userId: string) => {
+    setViewUserId(userId);
+    setTab("mine");
+  };
 
   return (
-    <div className="p-4 sm:p-6 space-y-4 max-w-5xl">
+    <div className="p-4 sm:p-6 space-y-4 max-w-6xl">
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
-          <p className="text-[11px] font-semibold uppercase tracking-wider text-[#5A5550]">
-            Performance
-          </p>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">
-            {viewUserId ? "KPI" : "My KPI"}
-          </h1>
-          <p className="text-xs text-[#9CA3AF] mt-0.5">
-            Settled monthly · targets are set by Super Admin
-          </p>
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-[#5A5550]">Performance</p>
+          <h1 className="text-2xl font-bold text-[#1F1D1B]">KPI</h1>
+          <p className="text-xs text-[#9CA3AF] mt-0.5">Settled monthly · targets set by Super Admin</p>
         </div>
-        <div className="flex items-center gap-2">
+        <select
+          value={period}
+          onChange={(e) => setPeriod(e.target.value)}
+          className="h-8 rounded-md border border-[#E2DDD8] bg-white px-2 text-xs"
+        >
+          {months.map((m) => <option key={m} value={m}>{m}</option>)}
+        </select>
+      </div>
+
+      {isSuperAdmin && (
+        <div className="flex gap-1 flex-wrap">
+          {([["library", "Library"], ["people", "People"], ["mine", viewUserId ? "Card" : "My KPI"]] as const).map(
+            ([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setTab(id)}
+                className={`rounded-md border px-3.5 py-1.5 text-xs ${
+                  tab === id
+                    ? "bg-[#6B5C32] text-white border-[#6B5C32] font-semibold"
+                    : "border-[#E2DDD8] bg-[#FAF9F7]"
+                }`}
+              >
+                {label}
+              </button>
+            ),
+          )}
+        </div>
+      )}
+
+      {/* ---------------- Library ---------------- */}
+      {isSuperAdmin && tab === "library" && (
+        <div className="grid grid-cols-1 lg:grid-cols-[1.25fr_1fr] gap-3 items-start">
+          <Card className="bg-white rounded-xl overflow-hidden">
+            <div className="px-4 py-2.5 border-b border-[#E2DDD8] flex justify-between items-center gap-2 flex-wrap">
+              <div>
+                <p className="text-sm font-bold">All KPIs</p>
+                <p className="text-[11px] text-[#9CA3AF]">
+                  {lib.length} defined · tick several, then assign in one go
+                </p>
+              </div>
+            </div>
+            {libLoading && !lib.length ? (
+              <Skeleton height={200} />
+            ) : (
+              lib.map((k) => (
+                <label
+                  key={k.key}
+                  className={`flex gap-2.5 px-4 py-2.5 border-b border-[#F0ECE6] last:border-0 cursor-pointer ${
+                    picked.has(k.key) ? "bg-[#FBF8F2]" : ""
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={picked.has(k.key)}
+                    onChange={() => togglePick(k.key)}
+                    className="mt-1"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[12.5px] font-semibold flex items-center gap-1.5 flex-wrap">
+                      {k.label}
+                      {k.shape === "GATE" && <Badge kind="GATE">gate</Badge>}
+                      <Badge kind={k.scoring}>{k.scoring === "AUTO" ? "auto" : "checklist"}</Badge>
+                    </div>
+                    <div className="text-[11px] text-[#9CA3AF]">{k.detail}</div>
+                    <div className="text-[10.5px] text-[#9CA3AF] mt-0.5">{k.formula}</div>
+                    <div className="flex gap-1 mt-1 flex-wrap">
+                      {k.assignedTo.length === 0 ? (
+                        <span className="rounded-full bg-[#F2EFE9] px-2 text-[10px] text-[#9CA3AF]">nobody</span>
+                      ) : (
+                        k.assignedTo.map((a) => (
+                          <span key={a.userId} className="rounded-full bg-[#F2EFE9] px-2 text-[10px] text-[#5A5550]">
+                            {a.name}
+                          </span>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                  <div className="text-right whitespace-nowrap">
+                    <div className="text-[13.5px] font-bold tabular-nums" style={{ color: scoreColour(null) }}>
+                      {k.current === null ? "—" : fmt(k.current, k.unit)}
+                    </div>
+                    <div className="text-[10px] text-[#9CA3AF]">{k.evidence}</div>
+                  </div>
+                </label>
+              ))
+            )}
+          </Card>
+
+          <Card className="bg-white rounded-xl overflow-hidden">
+            <CardContent className="p-4">
+              <p className="text-sm font-bold">
+                {pickedDefs.length ? `Assign ${pickedDefs.length} KPI(s)` : "Pick a KPI"}
+              </p>
+              <p className="text-[11px] text-[#9CA3AF]">
+                {pickedDefs.length
+                  ? "Targets come from the catalogue — you set the weight"
+                  : "Tick one or more on the left to assign them"}
+              </p>
+              {pickedDefs.map((k) => (
+                <p key={k.key} className="text-[11px] mt-1.5">
+                  <b>{k.label}</b>{" "}
+                  <span className="text-[#9CA3AF]">
+                    target {fmt(k.defaultTarget, k.unit)} · now {k.current === null ? "—" : fmt(k.current, k.unit)}
+                  </span>
+                </p>
+              ))}
+            </CardContent>
+            {pickedDefs.length > 0 && (
+              <div className="border-t border-[#E2DDD8] bg-[#FAF9F7] px-4 py-3">
+                <div className="flex justify-between items-center mb-1.5">
+                  <span className="text-[11px] font-bold">Who carries them</span>
+                  <span
+                    className="text-[11px] font-semibold"
+                    style={{ color: Math.round(weightTotal) === 100 ? "#3B6D11" : "#B5701A" }}
+                  >
+                    Weights {Math.round(weightTotal * 10) / 10}
+                    {Math.round(weightTotal) === 100 ? " ✓" : " / 100"}
+                  </span>
+                </div>
+                {(usersResp?.data ?? []).map((u) => {
+                  const cur = assignees[u.id] ?? { on: false, weight: 20 };
+                  return (
+                    <div key={u.id} className="flex items-center gap-2 py-1 text-[11.5px]">
+                      <input
+                        type="checkbox"
+                        checked={cur.on}
+                        onChange={(e) => setAssignees({ ...assignees, [u.id]: { ...cur, on: e.target.checked } })}
+                      />
+                      <span className="flex-1 truncate">
+                        {u.displayName || u.email} <span className="text-[#9CA3AF]">· {u.role}</span>
+                      </span>
+                      <input
+                        type="number"
+                        value={cur.weight}
+                        onChange={(e) =>
+                          setAssignees({ ...assignees, [u.id]: { ...cur, weight: Number(e.target.value) } })
+                        }
+                        className="w-14 rounded border border-[#E2DDD8] px-2 py-0.5 text-right text-[11px] tabular-nums"
+                      />
+                      <span className="text-[10px] text-[#9CA3AF]">wt</span>
+                    </div>
+                  );
+                })}
+                <div className="mt-2.5 flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={saveBulk}
+                    disabled={saving}
+                    className="rounded-md bg-[#6B5C32] px-3 py-1.5 text-[11.5px] font-semibold text-white disabled:opacity-50"
+                  >
+                    {saving ? "Assigning…" : "Assign"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setPicked(new Set()); setMsg(null); }}
+                    className="rounded-md border border-[#E2DDD8] px-3 py-1.5 text-[11.5px]"
+                  >
+                    Clear
+                  </button>
+                  {msg && <span className="text-[11px] text-[#5A5550]">{msg}</span>}
+                </div>
+              </div>
+            )}
+          </Card>
+        </div>
+      )}
+
+      {/* ---------------- People ---------------- */}
+      {isSuperAdmin && tab === "people" && (
+        <Card className="bg-white rounded-xl overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-[#E2DDD8]">
+            <p className="text-sm font-bold">People</p>
+            <p className="text-[11px] text-[#9CA3AF]">click a row to open their card</p>
+          </div>
+          {peopleLoading && !peopleResp ? (
+            <Skeleton height={180} />
+          ) : (
+            <table className="w-full text-[12.5px]">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-[10px] uppercase tracking-wide text-[#9CA3AF]">
+                  <th className="text-left px-4 py-2 font-semibold">Person</th>
+                  <th className="text-right px-3 py-2 font-semibold">KPIs</th>
+                  <th className="text-left px-3 py-2 font-semibold">Attainment</th>
+                  <th className="text-right px-3 py-2 font-semibold">Last month</th>
+                  <th className="text-right px-4 py-2 font-semibold">Score</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(peopleResp?.data ?? []).map((p) => (
+                  <tr
+                    key={p.userId}
+                    onClick={() => openPerson(p.userId)}
+                    className="border-b border-[#F0ECE6] last:border-0 cursor-pointer hover:bg-[#FBF8F2]"
+                  >
+                    <td className="px-4 py-2.5">
+                      <b>{p.name}</b> <span className="text-[#9CA3AF]">· {p.role}</span>
+                      {p.gateFailed && <span className="ml-1.5 text-[10px] text-[#9A3A2D]">gate missed</span>}
+                    </td>
+                    <td className="px-3 py-2.5 text-right text-[#9CA3AF] tabular-nums">{p.kpiCount}</td>
+                    <td className="px-3 py-2.5">
+                      <div className="h-1.5 rounded bg-[#F0ECE6] overflow-hidden">
+                        <div
+                          className="h-full rounded"
+                          style={{
+                            width: `${Math.max(0, Math.min(100, p.score ?? 0))}%`,
+                            background: scoreColour(p.score),
+                          }}
+                        />
+                      </div>
+                    </td>
+                    <td className="px-3 py-2.5 text-right tabular-nums text-[#9CA3AF]">
+                      {p.prevScore == null ? "—" : p.prevScore}
+                      {p.delta != null && (
+                        <span style={{ color: p.delta >= 0 ? "#3B6D11" : "#9A3A2D" }}>
+                          {" "}{p.delta >= 0 ? "↑" : "↓"}{Math.abs(p.delta)}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-2.5 text-right font-bold tabular-nums" style={{ color: scoreColour(p.score) }}>
+                      {p.score ?? "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </Card>
+      )}
+
+      {/* ---------------- One card ---------------- */}
+      {tab === "mine" && (
+        <>
           {isSuperAdmin && (
             <select
               value={viewUserId}
@@ -182,309 +428,134 @@ export default function KpiPage() {
             >
               <option value="">My own card</option>
               {(usersResp?.data ?? []).map((u) => (
-                <option key={u.id} value={u.id}>
-                  {u.displayName || u.email} · {u.role}
-                </option>
+                <option key={u.id} value={u.id}>{u.displayName || u.email} · {u.role}</option>
               ))}
             </select>
           )}
-          {isSuperAdmin && viewUserId && (
-            <button
-              type="button"
-              onClick={openAssign}
-              className="h-8 rounded-md bg-[#6B5C32] px-3 text-xs font-semibold text-white hover:bg-[#4D4224]"
-            >
-              Assign KPIs
-            </button>
-          )}
-          <select
-            value={period}
-            onChange={(e) => setPeriod(e.target.value)}
-            className="h-8 rounded-md border border-[#E2DDD8] bg-white px-2 text-xs"
-          >
-            {months.map((m) => (
-              <option key={m} value={m}>{m}</option>
-            ))}
-          </select>
-        </div>
-      </div>
 
-      {isSuperAdmin && assignOpen && viewUserId && (
-        <Card className="bg-white rounded-xl">
-          <CardContent className="p-0">
-            <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-[#E2DDD8] flex-wrap">
-              <div>
-                <p className="text-sm font-bold">
-                  Assign KPIs — {viewedUser?.displayName || viewedUser?.email}
-                </p>
-                <p className="text-[11px] text-[#9CA3AF]">
-                  {viewedRole} · they see this read-only on their own KPI page
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                {(() => {
-                  // Weights should total 100 across the RATIO rows. Shown, not
-                  // enforced — a half-finished assignment is a normal thing to
-                  // save, and blocking it would mean juggling the last two rows
-                  // just to close the dialog.
-                  const total = Object.entries(form).reduce((sum, [key, v]) => {
-                    if (!v.on) return sum;
-                    const def = (catalogResp?.data ?? []).find((k) => k.key === key);
-                    if (!def || def.shape === "GATE") return sum;
-                    return sum + (Number(v.weight) || 0);
-                  }, 0);
-                  const ok = Math.round(total) === 100;
-                  return (
-                    <span className="text-[11px] font-semibold" style={{ color: ok ? "#3B6D11" : "#B5701A" }}>
-                      Weights {Math.round(total * 10) / 10}{ok ? " ✓" : " / 100"}
-                    </span>
-                  );
-                })()}
-                {saveMsg && <span className="text-[11px] text-[#5A5550]">{saveMsg}</span>}
-                <button
-                  type="button"
-                  onClick={() => { setAssignOpen(false); setDraft({}); }}
-                  className="h-8 rounded-md border border-[#E2DDD8] px-3 text-xs"
-                >
-                  Close
-                </button>
-                <button
-                  type="button"
-                  onClick={save}
-                  disabled={saving}
-                  className="h-8 rounded-md bg-[#6B5C32] px-3 text-xs font-semibold text-white disabled:opacity-50"
-                >
-                  {saving ? "Saving…" : "Save"}
-                </button>
-              </div>
-            </div>
-            {(catalogResp?.data ?? []).length === 0 ? (
-              <p className="p-4 text-xs text-[#5A5550]">
-                No KPIs are defined for the {viewedRole} role yet.
-              </p>
-            ) : (
-              <table className="w-full text-[12.5px]">
-                <thead>
-                  <tr className="border-b border-[#E2DDD8]">
-                    <th className="text-left px-4 py-2 text-[10.5px] uppercase tracking-wide text-[#9CA3AF] font-semibold">Assign</th>
-                    <th className="text-left px-3 py-2 text-[10.5px] uppercase tracking-wide text-[#9CA3AF] font-semibold">KPI</th>
-                    <th className="text-right px-3 py-2 text-[10.5px] uppercase tracking-wide text-[#9CA3AF] font-semibold">Target</th>
-                    <th className="text-right px-4 py-2 text-[10.5px] uppercase tracking-wide text-[#9CA3AF] font-semibold">Weight</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(catalogResp?.data ?? []).map((k) => {
-                    const row = form[k.key] ?? { target: k.defaultTarget, weight: k.defaultWeight, on: false };
-                    const isGate = k.shape === "GATE";
-                    return (
-                      <tr key={k.key} className="border-b border-[#F0ECE6] last:border-0">
-                        <td className="px-4 py-2.5">
-                          <input
-                            type="checkbox"
-                            checked={row.on}
-                            onChange={(e) => patch(k.key, { on: e.target.checked })}
-                          />
-                        </td>
-                        <td className="px-3 py-2.5">
-                          <div className="font-semibold flex items-center gap-1.5 flex-wrap">
-                            {k.label}
-                            {isGate && (
-                              <span className="rounded border border-[#E7B8B0] bg-[#FDF3F1] px-1.5 text-[10px] text-[#9A3A2D]">
-                                gate · caps the score
-                              </span>
-                            )}
-                            {!k.available && (
-                              <span className="rounded border border-[#D9C6A0] bg-[#FBF4E6] px-1.5 text-[10px] text-[#7A5C18]">
-                                needs build
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-[11px] text-[#9CA3AF]">
-                            {k.available ? k.detail : k.blockedBy}
-                          </div>
-                        </td>
-                        <td className="px-3 py-2.5 text-right">
-                          <input
-                            type="number"
-                            value={row.target}
-                            onChange={(e) => patch(k.key, { target: Number(e.target.value) })}
-                            className="w-20 rounded border border-[#E2DDD8] px-2 py-1 text-right text-xs tabular-nums"
-                          />
-                          <span className="ml-1 text-[11px] text-[#9CA3AF]">{k.unit === "count" ? "" : k.unit}</span>
-                        </td>
-                        <td className="px-4 py-2.5 text-right">
-                          {isGate ? (
-                            <span className="text-[11px] text-[#9CA3AF]">—</span>
-                          ) : (
-                            <input
-                              type="number"
-                              value={row.weight}
-                              onChange={(e) => patch(k.key, { weight: Number(e.target.value) })}
-                              className="w-16 rounded border border-[#E2DDD8] px-2 py-1 text-right text-xs tabular-nums"
-                            />
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
-      {loading && !card ? (
-        <Skeleton height={220} />
-      ) : !card || card.lines.length === 0 ? (
-        <Card className="bg-white rounded-xl">
-          <CardContent className="p-6 text-sm text-[#5A5550]">
-            No KPIs are assigned{viewUserId ? " to this person" : " to you"} yet.
-            {isSuperAdmin && viewUserId && (
-              <> Use <b>Assign KPIs</b> above.</>
-            )}
-            {isSuperAdmin && !viewUserId && (
-              <> Pick a person above, then <b>Assign KPIs</b>.</>
-            )}
-          </CardContent>
-        </Card>
-      ) : (
-        <>
-          <Card className="bg-white rounded-xl">
-            <CardContent className="p-5">
-              <div className="flex items-center gap-6 flex-wrap">
-                <div>
-                  <p className="text-xs text-[#9CA3AF] mb-1">
-                    Score · {card.period}
-                    {card.locked && (
-                      <span className="ml-2 rounded border border-[#E2DDD8] bg-[#F7F4EF] px-1.5 py-0.5 text-[10px]">
-                        settled
-                      </span>
-                    )}
-                  </p>
-                  <p className="text-4xl font-extrabold tabular-nums leading-none" style={{ color: scoreColour }}>
-                    {card.score == null ? "—" : card.score}
-                    <span className="text-lg text-[#9CA3AF] font-semibold"> / 100</span>
-                  </p>
-                </div>
-                <div className="flex-1 min-w-[220px] text-xs leading-relaxed">
-                  {card.gateFailed ? (
-                    <>
-                      <p className="font-semibold text-[#9A3A2D]">
-                        Capped at {card.gateCap} — a gate was not met.
-                      </p>
-                      <p className="text-[#9CA3AF] mt-0.5">
-                        Weighted total would have been {card.rawScore}.
-                      </p>
-                    </>
-                  ) : (
-                    <p className="text-[#5A5550]">
-                      Weighted across {card.weightMeasured} points of measurable KPIs.
-                    </p>
-                  )}
-                  {card.weightUnbuilt > 0 && (
-                    <p className="text-[#9CA3AF] mt-1">
-                      {card.weightUnbuilt} points of assigned KPIs cannot be
-                      measured yet and are excluded from the score.
-                    </p>
-                  )}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {card.lines
-            .filter((l) => l.shape === "GATE")
-            .map((g) => {
-              const failed = g.actual !== null && g.actual > g.target;
-              return (
-                <Card key={g.key} className="rounded-xl" style={{
-                  background: failed ? "#FDF3F1" : "#F2F7EE",
-                  borderColor: failed ? "#E7B8B0" : "#BFD9AE",
-                }}>
-                  <CardContent className="p-4">
-                    <div className="flex justify-between items-baseline gap-3 flex-wrap">
-                      <span className="text-sm font-bold">🚩 Gate · {g.label}</span>
-                      <span className="text-sm font-bold tabular-nums" style={{ color: failed ? "#9A3A2D" : "#3B6D11" }}>
-                        {g.actual === null ? "—" : failed ? `${g.actual} late — not met` : "met"}
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-[#5A5550] mt-1.5 leading-relaxed">
-                      Target <b>{g.target} late</b>. {g.evidence}
-                      {g.drillPath && (
-                        <Link to={g.drillPath} className="ml-2 underline decoration-dotted text-[#6B5C32]">
-                          See them →
-                        </Link>
+          {cardLoading && !card ? (
+            <Skeleton height={200} />
+          ) : !card || card.lines.length === 0 ? (
+            <Card className="bg-white rounded-xl">
+              <CardContent className="p-6 text-sm text-[#5A5550]">
+                No KPIs are assigned{viewUserId ? " to this person" : " to you"} yet.
+                {isSuperAdmin && <> Use the <b>Library</b> tab to assign some.</>}
+              </CardContent>
+            </Card>
+          ) : (
+            <>
+              <Card className="bg-white rounded-xl">
+                <CardContent className="p-5 flex items-center gap-6 flex-wrap">
+                  <div>
+                    <p className="text-xs text-[#9CA3AF] mb-1">
+                      Score · {card.period}
+                      {card.locked && (
+                        <span className="ml-2 rounded border border-[#E2DDD8] bg-[#F7F4EF] px-1.5 py-0.5 text-[10px]">settled</span>
                       )}
                     </p>
-                  </CardContent>
-                </Card>
-              );
-            })}
+                    <p className="text-4xl font-extrabold tabular-nums leading-none" style={{ color: scoreColour(card.score) }}>
+                      {card.score ?? "—"}<span className="text-lg text-[#9CA3AF] font-semibold"> / 100</span>
+                    </p>
+                  </div>
+                  <div className="flex-1 min-w-[220px] text-xs leading-relaxed">
+                    {card.gateFailed ? (
+                      <>
+                        <p className="font-semibold text-[#9A3A2D]">Capped at {card.gateCap} — a gate was not met.</p>
+                        <p className="text-[#9CA3AF] mt-0.5">Weighted total would have been {card.rawScore}.</p>
+                      </>
+                    ) : (
+                      <p className="text-[#5A5550]">Weighted across {card.weightMeasured} points.</p>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
 
-          <Card className="bg-white rounded-xl overflow-hidden">
-            <table className="w-full text-[12.5px]">
-              <thead>
-                <tr className="border-b border-[#E2DDD8]">
-                  <th className="text-left px-4 py-2 text-[10.5px] uppercase tracking-wide text-[#9CA3AF] font-semibold">KPI</th>
-                  <th className="text-right px-3 py-2 text-[10.5px] uppercase tracking-wide text-[#9CA3AF] font-semibold">Target</th>
-                  <th className="text-right px-3 py-2 text-[10.5px] uppercase tracking-wide text-[#9CA3AF] font-semibold">Actual</th>
-                  <th className="text-right px-3 py-2 text-[10.5px] uppercase tracking-wide text-[#9CA3AF] font-semibold">Attain</th>
-                  <th className="text-right px-3 py-2 text-[10.5px] uppercase tracking-wide text-[#9CA3AF] font-semibold">Weight</th>
-                  <th className="text-right px-4 py-2 text-[10.5px] uppercase tracking-wide text-[#9CA3AF] font-semibold">Points</th>
-                </tr>
-              </thead>
-              <tbody>
-                {card.lines.filter((l) => l.shape !== "GATE").map((l) => (
-                  <tr key={l.key} className="border-b border-[#F0ECE6] last:border-0" style={{ opacity: l.available ? 1 : 0.55 }}>
-                    <td className="px-4 py-2.5">
-                      <div className="font-semibold flex items-center gap-1.5 flex-wrap">
-                        {l.label}
-                        {!l.available && (
-                          <span className="rounded border border-[#D9C6A0] bg-[#FBF4E6] px-1.5 text-[10px] text-[#7A5C18]">
-                            needs build
-                          </span>
+              {card.lines.map((l) => (
+                <Card key={l.key} className="bg-white rounded-xl">
+                  <CardContent className="p-4">
+                    <div className="flex justify-between gap-3 flex-wrap">
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[13px] font-bold flex items-center gap-1.5 flex-wrap">
+                          {l.label}
+                          {l.shape === "GATE" && <Badge kind="GATE">gate · caps the score</Badge>}
+                          {l.scoring && <Badge kind={l.scoring}>{l.scoring === "AUTO" ? "auto" : "checklist"}</Badge>}
+                        </div>
+                        {l.formula && (
+                          <p className="text-[11px] text-[#5A5550] mt-1 leading-relaxed">
+                            <span className="font-semibold">How it is calculated: </span>{l.formula}
+                          </p>
+                        )}
+                        <p className="text-[11px] text-[#9CA3AF] mt-0.5">{l.evidence}</p>
+                        {l.drillPath && (
+                          <Link to={l.drillPath} className="text-[11px] underline decoration-dotted text-[#6B5C32]">
+                            See the list →
+                          </Link>
                         )}
                       </div>
-                      <div className="text-[11px] text-[#9CA3AF]">{l.evidence || l.detail}</div>
-                      {/* The derivation, in words. Owner 2026-08-06: the person
-                          being measured has to be able to see exactly how the
-                          number was reached, or the score gets argued with
-                          instead of worked on. */}
-                      {l.formula && (
-                        <div className="text-[10.5px] text-[#9CA3AF] mt-0.5 leading-snug">
-                          <span className="font-semibold">How it is calculated: </span>
-                          {l.formula}
-                        </div>
-                      )}
-                      {l.scoring === "CHECKLIST" && (l.checklistItems?.length ?? 0) > 0 && (
-                        <ul className="mt-1 space-y-0.5">
-                          {l.checklistItems!.map((it) => (
-                            <li key={it} className="text-[10.5px] text-[#5A5550] flex gap-1.5">
-                              <span className="text-[#9CA3AF]">•</span>
-                              <span>{it}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                      {l.drillPath && l.available && (
-                        <Link to={l.drillPath} className="text-[11px] underline decoration-dotted text-[#6B5C32]">
-                          See the list →
-                        </Link>
-                      )}
-                    </td>
-                    <td className="px-3 py-2.5 text-right tabular-nums">{fmt(l.target, l.unit)}</td>
-                    <td className="px-3 py-2.5 text-right tabular-nums font-semibold">{fmt(l.actual, l.unit)}</td>
-                    <td className="px-3 py-2.5 text-right tabular-nums">{l.attainment === null ? "—" : `${l.attainment}%`}</td>
-                    <td className="px-3 py-2.5 text-right tabular-nums text-[#9CA3AF]">{l.weight}</td>
-                    <td className="px-4 py-2.5 text-right tabular-nums font-semibold">{l.points === null ? "—" : l.points}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </Card>
+                      <div className="text-right whitespace-nowrap">
+                        <p className="text-lg font-bold tabular-nums">{fmt(l.actual, l.unit)}</p>
+                        <p className="text-[10.5px] text-[#9CA3AF]">
+                          target {fmt(l.target, l.unit)}
+                          {l.shape !== "GATE" && <> · wt {l.weight}</>}
+                        </p>
+                        {l.points !== null && (
+                          <p className="text-[11px] font-semibold">{l.points} pts</p>
+                        )}
+                      </div>
+                    </div>
+
+                    {l.scoring === "CHECKLIST" && (l.checklistItems?.length ?? 0) > 0 && (
+                      <ChecklistBlock
+                        kpiKey={l.key}
+                        items={l.checklistItems!}
+                        period={period}
+                        userId={viewUserId}
+                        locked={card.locked}
+                        onTick={tickItem}
+                      />
+                    )}
+                  </CardContent>
+                </Card>
+              ))}
+            </>
+          )}
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * The tickable items behind a checklist KPI.
+ *
+ * The list itself comes from the code catalogue, so the denominator cannot be
+ * changed by anyone being measured against it; only the ticks are data.
+ */
+function ChecklistBlock({
+  kpiKey, items, period, userId, locked, onTick,
+}: {
+  kpiKey: string; items: string[]; period: string; userId: string; locked: boolean;
+  onTick: (kpiKey: string, itemIndex: number, done: boolean) => Promise<void>;
+}) {
+  const url = `/api/kpi/checklist/${kpiKey}?period=${period}${userId ? `&userId=${userId}` : ""}`;
+  const { data } = useCachedJson<{ data?: Array<{ itemIndex: number; done: boolean }> }>(url);
+  const done = new Set((data?.data ?? []).filter((t) => t.done).map((t) => t.itemIndex));
+
+  return (
+    <div className="mt-3 border-t border-[#F0ECE6] pt-2.5 space-y-1">
+      {items.map((it, i) => (
+        <label key={it} className="flex items-start gap-2 text-[11.5px]">
+          <input
+            type="checkbox"
+            checked={done.has(i)}
+            disabled={locked}
+            onChange={(e) => void onTick(kpiKey, i, e.target.checked)}
+            className="mt-0.5"
+          />
+          <span className={done.has(i) ? "text-[#5A5550]" : ""}>{it}</span>
+        </label>
+      ))}
+      {locked && <p className="text-[10.5px] text-[#9CA3AF]">This month is settled — items are locked.</p>}
     </div>
   );
 }

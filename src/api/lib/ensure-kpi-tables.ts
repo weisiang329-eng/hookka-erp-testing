@@ -54,6 +54,26 @@ const DDL: string[] = [
    )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS kpi_periods_user_period_kpi
      ON kpi_periods (user_id, period, kpi_key)`,
+  // One row per (person, month, KPI, checklist item) that has been ticked.
+  // The item list itself lives in the code catalogue, so the month's total
+  // cannot drift when someone edits a list halfway through — the denominator
+  // is whatever the catalogue says today, and the ticks are just facts.
+  `CREATE TABLE IF NOT EXISTS kpi_checklist_ticks (
+     id           TEXT PRIMARY KEY,
+     user_id      TEXT NOT NULL,
+     period       TEXT NOT NULL,
+     kpi_key      TEXT NOT NULL,
+     item_index   INTEGER NOT NULL,
+     done         BOOLEAN NOT NULL DEFAULT TRUE,
+     verified_by  TEXT,
+     verified_at  TIMESTAMP,
+     note         TEXT,
+     org_id       TEXT NOT NULL DEFAULT 'hookka',
+     created_at   TIMESTAMP NOT NULL DEFAULT NOW(),
+     updated_at   TIMESTAMP NOT NULL DEFAULT NOW()
+   )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS kpi_checklist_unique
+     ON kpi_checklist_ticks (user_id, period, kpi_key, item_index)`,
 ];
 
 let _applied = false;

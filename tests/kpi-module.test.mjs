@@ -40,17 +40,43 @@ test("attainment is capped and floored", () => {
   assert.equal(attainment(up, 95, NaN), 0);
 });
 
-test("a KPI with no data yet is declared, not hidden", () => {
-  const unbuilt = KPI_CATALOG.filter((k) => !k.available);
-  assert.ok(unbuilt.length >= 2, "survey and early-detection are not measurable yet");
-  for (const k of unbuilt) {
-    assert.ok(k.blockedBy && k.blockedBy.length > 20, `${k.key} must say WHY it cannot be measured`);
+test("every KPI is measurable — there is no subjective type", () => {
+  // Owner 2026-08-06: "每一个 KPI 都必须是可以量化的，员工怎么去达成、做到什么
+  // 程度能拿多少分 … 全部都要有明确、可衡量的标准." A score assigned by
+  // impression at month end cannot be worked towards, so it is not a KPI.
+  for (const k of KPI_CATALOG) {
+    assert.ok(
+      k.scoring === "AUTO" || k.scoring === "CHECKLIST",
+      `${k.key} has scoring ${k.scoring} — only AUTO and CHECKLIST are measurable`,
+    );
+    assert.ok(k.available, `${k.key} must be computable; express it as a checklist if the data is missing`);
   }
 });
 
-test("every measurable KPI can be drilled into", () => {
-  // A number nobody can click is a number nobody trusts.
-  for (const k of KPI_CATALOG.filter((k) => k.available)) {
+test("a checklist states its items up front", () => {
+  // The employee has to know what earns the marks BEFORE the month, and the
+  // denominator lives in code so nobody can raise a score by shortening it.
+  for (const k of KPI_CATALOG.filter((k) => k.scoring === "CHECKLIST")) {
+    assert.ok(Array.isArray(k.checklistItems) && k.checklistItems.length >= 3,
+      `${k.key} needs a real list of actions`);
+    for (const item of k.checklistItems) {
+      assert.ok(item.length > 12, `${k.key}: "${item}" is too vague to tick honestly`);
+    }
+  }
+});
+
+test("every KPI explains how it is calculated", () => {
+  // Owner: "系统会提供一个完整的清单给员工，让他们清清楚楚地知道自己的 KPI
+  // 是如何计算和获取的."
+  for (const k of KPI_CATALOG) {
+    assert.ok(k.formula && k.formula.length > 25, `${k.key} has no readable formula`);
+  }
+});
+
+test("every AUTO KPI can be drilled into", () => {
+  // A number nobody can click is a number nobody trusts. A checklist is its
+  // own drill-down — the items ARE the detail.
+  for (const k of KPI_CATALOG.filter((k) => k.scoring === "AUTO")) {
     assert.ok(k.drillPath, `${k.key} has no drill-down`);
   }
 });

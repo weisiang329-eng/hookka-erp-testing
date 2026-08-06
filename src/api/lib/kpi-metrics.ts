@@ -235,6 +235,36 @@ function safeParse(s: string): unknown {
   }
 }
 
+/**
+ * CHECKLIST — items ticked ÷ items defined.
+ *
+ * The denominator comes from the CODE catalogue, not the database, so nobody
+ * can raise their own score by shortening the list. The ticks are facts about
+ * what was done; the list is the standard, and the standard lives in one place.
+ */
+export async function checklistProgress(
+  c: Context<Env>,
+  userId: string,
+  kpiKey: string,
+  period: string,
+  totalItems: number,
+): Promise<MetricResult> {
+  if (totalItems <= 0) return EMPTY;
+  const row = await c.var.DB.prepare(
+    `SELECT COUNT(*) AS n FROM kpi_checklist_ticks
+      WHERE userId = ? AND period = ? AND kpiKey = ? AND done = TRUE
+        AND itemIndex >= 0 AND itemIndex < ?`,
+  )
+    .bind(userId, period, kpiKey, totalItems)
+    .first<{ n: number }>();
+  const done = Math.min(totalItems, Number(row?.n) || 0);
+  return {
+    actual: Math.round((done / totalItems) * 1000) / 10,
+    sampleSize: totalItems,
+    detail: `${done} of ${totalItems} items done`,
+  };
+}
+
 /** Dispatch table — one entry per computable KPI. */
 export async function computeMetric(
   c: Context<Env>,

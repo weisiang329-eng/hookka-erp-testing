@@ -22,6 +22,22 @@
 // ---------------------------------------------------------------------------
 
 export type KpiShape = "GATE" | "RATIO";
+
+/**
+ * How the ACTUAL number is produced.
+ *
+ *   AUTO      — computed from data already in the system.
+ *   CHECKLIST — a fixed list of actions defined here, ticked during the month
+ *               and verified by Super Admin. actual = done ÷ total.
+ *
+ * There is deliberately no subjective "rated" type. Owner 2026-08-06: "每一个
+ * KPI 都必须是可以量化的，员工怎么去达成、做到什么程度能拿多少分 … 全部都要有
+ * 明确、可衡量的标准." A score somebody assigns by impression at month end
+ * cannot be worked towards, so it is not a KPI — it is an opinion with a
+ * number on it. Anything that felt un-measurable is expressed as a checklist
+ * of the ACTIONS instead, which is countable and knowable in advance.
+ */
+export type KpiScoring = "AUTO" | "CHECKLIST";
 /** Higher actual is better, or lower is better (a count of problems). */
 export type KpiDirection = "HIGHER_IS_BETTER" | "LOWER_IS_BETTER";
 
@@ -34,11 +50,28 @@ export interface KpiDef {
   direction: KpiDirection;
   /** "%" | "count" | "score" — drives formatting, not maths. */
   unit: "%" | "count" | "score";
+  scoring: KpiScoring;
+  /**
+   * Plain-English formula, shown to the EMPLOYEE on their own card.
+   *
+   * Owner 2026-08-06: "系统会提供一个完整的清单给员工，让他们清清楚楚地知道
+   * 自己的 KPI 是如何计算和获取的." A score whose derivation is hidden gets
+   * argued with instead of worked on.
+   */
+  formula: string;
+  /** CHECKLIST only — the actions that make up the month. */
+  checklistItems?: string[];
   /** Suggested target; the assignment row overrides it per person. */
   defaultTarget: number;
-  /** Suggested weight (RATIO only; a GATE has none — it caps). */
+  /**
+   * A STARTING POINT for the weight box, not a fixed property of the KPI.
+   *
+   * Owner 2026-08-06: "我们 assign 给一个人的时候，我们再重新 set 过他的 KPI 的
+   * 权重会比较好，不要直接特定一个 KPI 的权重是多少" — the same KPI matters
+   * differently to different jobs, so the weight belongs to the assignment.
+   */
   defaultWeight: number;
-  /** False until the capture it needs exists. */
+  /** False only while a data source genuinely does not exist. */
   available: boolean;
   /** Why it is not available, shown on the card. */
   blockedBy?: string;
@@ -59,6 +92,9 @@ export const KPI_CATALOG: KpiDef[] = [
     shape: "GATE",
     direction: "LOWER_IS_BETTER",
     unit: "count",
+    scoring: "AUTO",
+    formula:
+      "Orders whose first dispatch was after the date promised to the customer. Target is 0 — any miss caps the whole score.",
     defaultTarget: 0,
     defaultWeight: 0,
     available: true,
@@ -72,6 +108,9 @@ export const KPI_CATALOG: KpiDef[] = [
     shape: "RATIO",
     direction: "HIGHER_IS_BETTER",
     unit: "%",
+    scoring: "AUTO",
+    formula:
+      "Active SKUs having ALL of: a price, a cubic volume, a fabric usage and an ACTIVE BOM that contains routing ÷ all active SKUs × 100",
     defaultTarget: 95,
     defaultWeight: 20,
     available: true,
@@ -85,6 +124,9 @@ export const KPI_CATALOG: KpiDef[] = [
     shape: "RATIO",
     direction: "LOWER_IS_BETTER",
     unit: "count",
+    scoring: "AUTO",
+    formula:
+      "Sales orders not yet invoiced + delivery orders not yet invoiced, taken from the same Daily Report you see on the dashboard",
     defaultTarget: 40,
     defaultWeight: 20,
     available: true,
@@ -98,6 +140,9 @@ export const KPI_CATALOG: KpiDef[] = [
     shape: "RATIO",
     direction: "HIGHER_IS_BETTER",
     unit: "%",
+    scoring: "AUTO",
+    formula:
+      "(Exceptions open at the start of the month − open at the end) ÷ open at the start × 100",
     defaultTarget: 90,
     defaultWeight: 20,
     available: true,
@@ -105,31 +150,48 @@ export const KPI_CATALOG: KpiDef[] = [
     roles: ["OFFICE", "QA"],
   },
   {
+    // Measures the ACTIONS, not the customer's mood. The mood needs a survey
+    // that does not exist; the actions are countable today and are what the
+    // person actually controls. When the survey ships, an average-score KPI
+    // joins this one as AUTO rather than replacing it.
     key: "customer_satisfaction",
-    label: "Customer satisfaction",
-    detail: "3–5 customers surveyed each month, average score",
+    label: "Customer satisfaction follow-up",
+    detail: "Reaching out, collecting replies and acting on the low ones",
     shape: "RATIO",
     direction: "HIGHER_IS_BETTER",
-    unit: "score",
-    defaultTarget: 4,
+    unit: "%",
+    scoring: "CHECKLIST",
+    formula: "Items completed ÷ items in the list × 100",
+    checklistItems: [
+      "Satisfaction link sent to at least 3 customers",
+      "At least 2 replies collected",
+      "Any reply below 3/5 written up as an improvement item",
+      "Last month's improvement items followed up",
+    ],
+    defaultTarget: 100,
     defaultWeight: 20,
-    available: false,
-    blockedBy:
-      "No survey exists yet — needs a response table, a tokenised public link and a send step.",
+    available: true,
     roles: ["OFFICE"],
   },
   {
     key: "problems_caught_early",
     label: "Problems caught early",
-    detail: "Exceptions acknowledged before they reach the customer",
+    detail: "The monthly sweep that finds trouble before the customer does",
     shape: "RATIO",
     direction: "HIGHER_IS_BETTER",
     unit: "%",
-    defaultTarget: 80,
+    scoring: "CHECKLIST",
+    formula: "Items completed ÷ items in the list × 100",
+    checklistItems: [
+      "Agent error log reviewed and failures raised",
+      "Orders past their customer date reviewed and chased",
+      "Price and COGS anomalies on the daily report cleared",
+      "Purchase orders not received chased with the supplier",
+      "Stuck delivery orders pushed to invoice",
+    ],
+    defaultTarget: 100,
     defaultWeight: 20,
-    available: false,
-    blockedBy:
-      "Nothing records who saw an exception or when — needs an acknowledgement trail.",
+    available: true,
     roles: ["OFFICE", "QA"],
   },
 ];

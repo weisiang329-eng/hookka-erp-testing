@@ -151,10 +151,20 @@ async function buildCard(c: Context<Env>, userId: string, role: string, period: 
   const isLocked = lockedRows.length > 0;
 
   const assigned = await loadAssignments(c, userId);
-  const offered = kpisForRole(role);
-  // A person is measured on what they were ASSIGNED. The role catalogue is
-  // only the menu Super Admin picks from — assigning nothing must show an
-  // empty card, not silently score them on every default.
+  // A person is measured on exactly what they were ASSIGNED — driven off the
+  // assignment rows, NOT off their role's slice of the catalogue.
+  //
+  // This used to iterate kpisForRole(role), which quietly dropped any KPI
+  // assigned outside the person's own role: Super Admin picked it, the
+  // assignment row was written, and the card showed nothing. Owner 2026-08-07:
+  // "我就自己选了 assign 给别人啊" — same ruling as the GATE cap. Assigning is
+  // assigning; `roles` is a SUGGESTION for the picker, never a gate on what a
+  // person can be held to.
+  //
+  // Assigning nothing still shows an empty card rather than every default.
+  const offered = [...assigned.keys()]
+    .map((k) => kpiByKey(k))
+    .filter((d): d is KpiDef => Boolean(d));
   const lines: CardLine[] = [];
 
   for (const def of offered) {

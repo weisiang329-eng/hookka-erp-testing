@@ -23,6 +23,9 @@ type Line = {
   key: string;
   label: string;
   detail: string;
+  scoring?: "AUTO" | "CHECKLIST";
+  formula?: string;
+  checklistItems?: string[];
   shape: "GATE" | "RATIO";
   unit: "%" | "count" | "score";
   available: boolean;
@@ -219,6 +222,24 @@ export default function KpiPage() {
                 </p>
               </div>
               <div className="flex items-center gap-2">
+                {(() => {
+                  // Weights should total 100 across the RATIO rows. Shown, not
+                  // enforced — a half-finished assignment is a normal thing to
+                  // save, and blocking it would mean juggling the last two rows
+                  // just to close the dialog.
+                  const total = Object.entries(form).reduce((sum, [key, v]) => {
+                    if (!v.on) return sum;
+                    const def = (catalogResp?.data ?? []).find((k) => k.key === key);
+                    if (!def || def.shape === "GATE") return sum;
+                    return sum + (Number(v.weight) || 0);
+                  }, 0);
+                  const ok = Math.round(total) === 100;
+                  return (
+                    <span className="text-[11px] font-semibold" style={{ color: ok ? "#3B6D11" : "#B5701A" }}>
+                      Weights {Math.round(total * 10) / 10}{ok ? " ✓" : " / 100"}
+                    </span>
+                  );
+                })()}
                 {saveMsg && <span className="text-[11px] text-[#5A5550]">{saveMsg}</span>}
                 <button
                   type="button"
@@ -426,6 +447,26 @@ export default function KpiPage() {
                         )}
                       </div>
                       <div className="text-[11px] text-[#9CA3AF]">{l.evidence || l.detail}</div>
+                      {/* The derivation, in words. Owner 2026-08-06: the person
+                          being measured has to be able to see exactly how the
+                          number was reached, or the score gets argued with
+                          instead of worked on. */}
+                      {l.formula && (
+                        <div className="text-[10.5px] text-[#9CA3AF] mt-0.5 leading-snug">
+                          <span className="font-semibold">How it is calculated: </span>
+                          {l.formula}
+                        </div>
+                      )}
+                      {l.scoring === "CHECKLIST" && (l.checklistItems?.length ?? 0) > 0 && (
+                        <ul className="mt-1 space-y-0.5">
+                          {l.checklistItems!.map((it) => (
+                            <li key={it} className="text-[10.5px] text-[#5A5550] flex gap-1.5">
+                              <span className="text-[#9CA3AF]">•</span>
+                              <span>{it}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
                       {l.drillPath && l.available && (
                         <Link to={l.drillPath} className="text-[11px] underline decoration-dotted text-[#6B5C32]">
                           See the list →

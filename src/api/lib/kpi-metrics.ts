@@ -129,7 +129,14 @@ export async function setupCompleteness(
 }
 
 /**
- * How many document-days of invoicing lag the month ran up.
+ * The merged daily-report KPI: invoicing lag AND the exception burn-down.
+ *
+ * Owner 2026-08-07 merged two KPIs into one ("这两个要结合"), because the
+ * uninvoiced buckets were BOTH scored here and counted again inside the daily
+ * exception total — the same late invoice charged twice. The exception half
+ * now runs with those buckets removed.
+ *
+ * Half one, invoicing:
  *
  * Owner 2026-08-07: "dispatch 了之后三天内要看到 invoice，迟一天扣 10 分 … 5 张
  * 单 1 天就 50 分 … 就是一个 DO or SI，不是跟着一个 order，multiple order become
@@ -160,23 +167,69 @@ export async function documentsStuck(
   c: Context<Env>,
   period: string,
 ): Promise<MetricResult> {
+  const lag = await invoiceLag(c, period);
+  const burn = await exceptionsCleared(c, period, /* excludeInvoiceBuckets */ true);
+
+  const def = kpiByKey("documents_not_stuck");
+  const per = Number(def?.penaltyPerUnit ?? 10);
+
+  const halves: Array<{ score: number; detail: string }> = [];
+  if (lag.actual !== null) {
+    halves.push({
+      score: Math.max(0, Math.min(100, 100 - lag.actual * per)),
+      detail: lag.detail,
+    });
+  }
+  if (burn.actual !== null) {
+    halves.push({ score: Math.max(0, Math.min(100, burn.actual)), detail: burn.detail });
+  }
+  if (halves.length === 0) {
+    return { actual: null, sampleSize: 0, detail: "No invoicing or exception data yet" };
+  }
+
+  // Averaged over the halves that HAVE data. A half with nothing to measure is
+  // dropped, not scored zero — the snapshot table only keeps ~23 days, so an
+  // older month legitimately has no burn-down and the invoicing half should
+  // still stand on its own rather than being halved by an absence.
+  const score = halves.reduce((s, h) => s + h.score, 0) / halves.length;
+  return {
+    actual: Math.round(score * 10) / 10,
+    sampleSize: lag.sampleSize + burn.sampleSize,
+    detail: halves.map((h) => h.detail).join(" · "),
+  };
+}
+
+/**
+ * Half one: document-days of invoicing lag.
+ *
+ * Cancelled delivery orders are excluded — there is nothing to bill, so
+ * counting them would charge Office for a shipment that never happened.
+ */
+async function invoiceLag(
+  c: Context<Env>,
+  period: string,
+): Promise<MetricResult> {
   const { start, end } = periodBounds(period);
   const def = kpiByKey("documents_not_stuck");
   const grace = Number(def?.graceDays ?? 3);
   const today = new Date().toISOString().slice(0, 10);
   const asAt = today < end ? today : end;
 
+  // DISPATCH, in the owner's word — the day the goods left. `dispatchedAt` is
+  // the field the on-time-delivery KPI already scores against, so the two
+  // cannot disagree about when a shipment happened. `deliveredAt` is the
+  // fallback for older rows that only carry the arrival date.
   const res = await c.var.DB.prepare(
-    `SELECT d.id           AS "id",
-            d.deliveredAt  AS "dispatched",
-            MIN(i.invoiceDate) AS "invoiced"
+    `SELECT d.id AS "id",
+            substr(COALESCE(NULLIF(d.dispatchedAt::text, ''), d.deliveredAt::text), 1, 10) AS "dispatched",
+            substr(MIN(i.invoiceDate)::text, 1, 10) AS "invoiced"
        FROM delivery_orders d
        LEFT JOIN invoices i ON i.deliveryOrderId = d.id
-      WHERE d.deliveredAt IS NOT NULL
-        AND d.deliveredAt <> ''
-        AND substr(d.deliveredAt, 1, 10) >= ?
-        AND substr(d.deliveredAt, 1, 10) <= ?
-      GROUP BY d.id, d.deliveredAt`,
+      WHERE d.status <> 'CANCELLED'
+        AND COALESCE(NULLIF(d.dispatchedAt::text, ''), d.deliveredAt::text) IS NOT NULL
+        AND substr(COALESCE(NULLIF(d.dispatchedAt::text, ''), d.deliveredAt::text), 1, 10) >= ?
+        AND substr(COALESCE(NULLIF(d.dispatchedAt::text, ''), d.deliveredAt::text), 1, 10) <= ?
+      GROUP BY d.id, d.dispatchedAt, d.deliveredAt`,
   )
     .bind(start, end)
     .all<{ id: string; dispatched: string | null; invoiced: string | null }>();
@@ -261,6 +314,7 @@ export async function manualRating(
 export async function exceptionsCleared(
   c: Context<Env>,
   period: string,
+  excludeInvoiceBuckets = false,
 ): Promise<MetricResult> {
   const { start, end } = periodBounds(period);
   const res = await c.var.DB.prepare(
@@ -286,7 +340,14 @@ export async function exceptionsCleared(
   const totalOf = (p: unknown): number => {
     const d = typeof p === "string" ? safeParse(p) : p;
     const counts = (d as { counts?: Record<string, number> })?.counts ?? {};
-    return Number(counts.total) || 0;
+    const total = Number(counts.total) || 0;
+    if (!excludeInvoiceBuckets) return total;
+    // The uninvoiced buckets are scored by the invoicing half of the same KPI.
+    // Leaving them in here charged one late invoice twice — which is exactly
+    // why the owner merged the two KPIs on 2026-08-07.
+    const billed =
+      (Number(counts.soNoInvoice) || 0) + (Number(counts.doNotInvoiced) || 0);
+    return Math.max(0, total - billed);
   };
   const first = totalOf(rows[0].payload);
   const last = totalOf(rows[rows.length - 1].payload);
@@ -294,10 +355,11 @@ export async function exceptionsCleared(
   // Cleared share of what was open at the start. A month that ENDS with more
   // than it started scores 0 rather than a negative.
   const cleared = Math.max(0, first - last);
+  const label = excludeInvoiceBuckets ? " non-invoice exceptions" : "";
   return {
     actual: Math.round((cleared / first) * 1000) / 10,
     sampleSize: rows.length,
-    detail: `${first} open at the start, ${last} at the end (${rows.length} days recorded)`,
+    detail: `${first}${label} open at the start, ${last} at the end (${rows.length} days recorded)`,
   };
 }
 
@@ -393,8 +455,6 @@ export async function computeMetric(
       return setupCompleteness(c);
     case "documents_not_stuck":
       return documentsStuck(c, period);
-    case "exceptions_cleared":
-      return exceptionsCleared(c, period);
     default:
       return EMPTY;
   }

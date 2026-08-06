@@ -84,13 +84,20 @@ export type KpiScoring = "AUTO" | "CHECKLIST" | "SURVEY" | "MANUAL";
  *                        the owner intends — the unit is the document-day.
  *   SURVEY_MEAN        — the average of the answers, already a 0–100 figure.
  *   MANUAL_SCORE       — the supervisor's number IS the attainment. No maths.
+ *   COMPOSITE          — the metric already blended two or more halves and
+ *                        handed back a finished 0–100 score.
+ *
+ * The last three are all pass-throughs. They stay separate names because the
+ * card explains itself differently for each, and because collapsing them would
+ * make "why is this not divided by the target?" unanswerable.
  */
 export type AttainmentCurve =
   | "TARGET_RATIO"
   | "PENALTY_PER_PCT"
   | "PENALTY_PER_UNIT"
   | "SURVEY_MEAN"
-  | "MANUAL_SCORE";
+  | "MANUAL_SCORE"
+  | "COMPOSITE";
 /** Higher actual is better, or lower is better (a count of problems). */
 export type KpiDirection = "HIGHER_IS_BETTER" | "LOWER_IS_BETTER";
 
@@ -220,57 +227,34 @@ export const KPI_CATALOG: KpiDef[] = [
   },
   {
     key: "documents_not_stuck",
-    label: "Invoice raised within 3 days of dispatch",
-    detail: "Each delivery order costs 10 points for every day its invoice is late",
+    label: "Daily report worked down — invoices raised, exceptions cleared",
+    detail: "Invoice within 3 days of dispatch, and burn down the rest of the list",
     shape: "RATIO",
-    direction: "LOWER_IS_BETTER",
-    unit: "count",
+    direction: "HIGHER_IS_BETTER",
+    unit: "score",
     scoring: "AUTO",
-    curve: "PENALTY_PER_UNIT",
+    curve: "COMPOSITE",
     penaltyPerUnit: 10,
     graceDays: 3,
     purpose:
-      "Goods that shipped but were never invoiced are work already paid for by us and not yet paid for by the customer. It is cash sitting still, and every day it sits is a day we financed the customer for free.",
+      "Goods that shipped but were never invoiced are work already paid for by us and not yet paid for by the customer — cash sitting still, and every day it sits is a day we financed the customer for free. The rest of the daily report is the same job in a different column: a few hundred exceptions a month that are only worth raising if somebody works them down.",
     definition:
-      "Days late, summed across every delivery order dispatched in the month. The clock starts the day the goods leave and the invoice is due within 3 days. The unit counted is the DELIVERY ORDER (or the invoice raised against it), NOT the sales order — several sales orders routinely ship on one delivery order, and that is one document to bill, not three.",
+      "One score out of 100 from two halves, worth 50 each. Owner 2026-08-07: these were two KPIs and they are now one, because uninvoiced deliveries were ALSO one of the daily-report exception categories — the same failure was being charged twice. The exception half now excludes the invoice buckets, so nothing is double-counted.",
     measurement: [
-      "For every delivery order dispatched during the month, take the date it left.",
-      "Find the invoice raised against that delivery order. If there is none yet, count up to today instead.",
-      "Days late = days from dispatch to invoice, minus the 3 allowed. Invoiced on day 0, 1, 2 or 3 is not late.",
-      "Add up the days late across every delivery order. Five documents one day late each = 5, exactly the same as one document five days late.",
-      "Score starts at 100 and loses 10 points per day late. 10 days late in total scores nothing.",
+      "HALF ONE — invoicing, 50 points. For every delivery order dispatched during the month, measure the days from dispatch to the invoice raised against it. No invoice yet counts up to today.",
+      "3 days are allowed. Days late = the gap minus 3; invoiced on day 0–3 is not late.",
+      "Add up the days late across every delivery order. Five documents one day late each = 5, the same as one document five days late — the unit is the DELIVERY ORDER, not the sales order, because several orders routinely ship on one document and billing it late is one failure, not three.",
+      "That half starts at 100 and loses 10 points per day late; 10 days late scores nothing.",
+      "HALF TWO — the rest of the list, 50 points. Take the exception total from the first daily snapshot in the month and from the last, EXCLUDING the uninvoiced buckets already scored above. Score = cleared ÷ opening × 100.",
+      "The two halves are averaged. A half with no data to score is dropped and the other stands alone, rather than being counted as a zero.",
     ],
-    formula: "100 − (total days late × 10), where a delivery order is late from day 4 after dispatch",
-    defaultTarget: 0,
+    formula:
+      "Average of: [100 − days late × 10] and [exceptions cleared ÷ exceptions open at the start × 100, invoice buckets excluded]",
+    defaultTarget: 100,
     defaultWeight: 20,
     available: true,
     drillPath: "/daily-report",
     roles: ["OFFICE"],
-  },
-  {
-    key: "exceptions_cleared",
-    label: "Daily exception backlog cleared",
-    detail: "How much of the month's opening exception list actually got closed",
-    shape: "RATIO",
-    direction: "HIGHER_IS_BETTER",
-    unit: "%",
-    scoring: "AUTO",
-    purpose:
-      "The daily report raises a few hundred exceptions a month — wrong prices, missing invoices, unreceived purchase orders. They are only useful if somebody works them down. This measures whether the list shrinks.",
-    definition:
-      "The share of the exceptions open at the START of the month that were closed by the END of it. It is a burn-down, not a snapshot.",
-    measurement: [
-      "Take the total exception count from the first daily snapshot stored in the month.",
-      "Take the total from the last snapshot in the month.",
-      "Cleared = opening − closing. A month that ends with MORE than it started scores 0 rather than a negative.",
-      "Score = cleared ÷ opening × 100.",
-    ],
-    formula: "(Exceptions open at the start of the month − open at the end) ÷ open at the start × 100",
-    defaultTarget: 90,
-    defaultWeight: 20,
-    available: true,
-    drillPath: "/daily-report",
-    roles: ["OFFICE", "QA"],
   },
   {
     key: "customer_satisfaction",
@@ -375,8 +359,13 @@ export function attainment(
     const per = Number(def.penaltyPerUnit) || 10;
     return Math.max(0, Math.min(120, Math.round((100 - actual * per) * 10) / 10));
   }
-  // A survey mean, and a supervisor's rating, are both already the attainment.
-  if (def.curve === "SURVEY_MEAN" || def.curve === "MANUAL_SCORE") {
+  // A survey mean, a supervisor's rating and a blended score are all already
+  // the attainment.
+  if (
+    def.curve === "SURVEY_MEAN" ||
+    def.curve === "MANUAL_SCORE" ||
+    def.curve === "COMPOSITE"
+  ) {
     return Math.max(0, Math.min(120, Math.round(actual * 10) / 10));
   }
 

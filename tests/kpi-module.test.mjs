@@ -96,16 +96,49 @@ test("invoicing lag costs 10 points per document-day", () => {
   // 1天就50分." Five documents one day late is the same as one document five
   // days late — the unit is the document-day, not the document.
   const d = kpiByKey("documents_not_stuck");
-  assert.equal(d.curve, "PENALTY_PER_UNIT");
   assert.equal(d.penaltyPerUnit, 10);
   assert.equal(d.graceDays, 3, "invoiced within 3 days of dispatch is not late");
 
-  assert.equal(attainment(d, 0, 0), 100, "everything billed inside 3 days");
-  assert.equal(attainment(d, 0, 1), 90, "one document, one day late");
-  assert.equal(attainment(d, 0, 5), 50, "five documents one day late each");
-  assert.equal(attainment(d, 0, 5), attainment(d, 0, 5), "or one document five days late");
-  assert.equal(attainment(d, 0, 10), 0);
-  assert.equal(attainment(d, 0, 40), 0, "cannot go negative");
+  // The half-score the metric computes before blending.
+  const half = (days) => Math.max(0, Math.min(100, 100 - days * d.penaltyPerUnit));
+  assert.equal(half(0), 100, "everything billed inside 3 days");
+  assert.equal(half(1), 90, "one document, one day late");
+  assert.equal(half(5), 50, "five documents one day late each — or one, five days late");
+  assert.equal(half(10), 0);
+  assert.equal(half(40), 0, "cannot go negative");
+});
+
+test("the invoicing and exception KPIs are merged into one, with no double count", () => {
+  // Owner 2026-08-07: "这两个要结合" — uninvoiced deliveries were scored by the
+  // invoicing KPI AND counted again inside the daily exception total.
+  assert.equal(
+    kpiByKey("exceptions_cleared"),
+    undefined,
+    "the separate exception KPI is retired, not left alongside the merged one",
+  );
+  const d = kpiByKey("documents_not_stuck");
+  assert.equal(d.curve, "COMPOSITE", "the metric blends the halves and hands back a score");
+  assert.equal(attainment(d, 100, 73.5), 73.5, "a composite passes straight through");
+  assert.equal(attainment(d, 100, 0), 0);
+
+  // Both halves have to be described, or the employee cannot tell which half
+  // cost them the marks.
+  const text = d.measurement.join(" ");
+  assert.match(text, /HALF ONE/, "the invoicing half must be spelled out");
+  assert.match(text, /HALF TWO/, "the exception half must be spelled out");
+  assert.match(
+    text,
+    /EXCLUDING the uninvoiced buckets/,
+    "the exception half must say it drops what the invoicing half already scored",
+  );
+
+  // The retired key must not still be assignable to anyone.
+  const src = readFileSync(resolve(process.cwd(), "src/api/lib/ensure-kpi-tables.ts"), "utf8");
+  assert.match(
+    src,
+    /DELETE FROM kpi_assignments WHERE kpi_key = 'exceptions_cleared'/,
+    "existing assignments on the retired key must be migrated, not orphaned",
+  );
 });
 
 test("a checklist states its items up front", () => {

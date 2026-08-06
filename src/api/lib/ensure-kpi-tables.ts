@@ -140,6 +140,23 @@ const DDL: string[] = [
      ON kpi_manual_ratings (user_id, period, kpi_key)`,
   `ALTER TABLE kpi_assignments ADD COLUMN IF NOT EXISTS assigned_by TEXT`,
   `ALTER TABLE kpi_checklist_ticks ADD COLUMN IF NOT EXISTS note TEXT`,
+  // 2026-08-07: exceptions_cleared was merged into documents_not_stuck ("这两个
+  // 要结合"). The card loop iterates the CATALOGUE, so an assignment on a
+  // retired key would not crash — it would just vanish from the person's card
+  // while still sitting in the table, which is worse: a silent orphan nobody
+  // can see to delete.
+  //
+  // Rename it across for anyone who does not already hold the merged KPI, then
+  // drop the rest. Idempotent: after the first pass no rows match either
+  // statement. Weights are NOT summed — the merged KPI is one KPI, and the
+  // owner re-sets weights per assignment anyway.
+  `UPDATE kpi_assignments a
+      SET kpi_key = 'documents_not_stuck'
+    WHERE a.kpi_key = 'exceptions_cleared'
+      AND NOT EXISTS (
+            SELECT 1 FROM kpi_assignments b
+             WHERE b.user_id = a.user_id AND b.kpi_key = 'documents_not_stuck')`,
+  `DELETE FROM kpi_assignments WHERE kpi_key = 'exceptions_cleared'`,
 ];
 
 let _applied = false;

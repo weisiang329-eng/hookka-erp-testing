@@ -312,6 +312,11 @@ const SUPER_ADMIN_HEALTH_LINK: NavItem = {
 // 每一个人都会有，但他们只会看到自己相关的 Agent"). Shown to any role holding
 // `agent-console`, and the server decides which agents are inside; every
 // control still checks requireSuperAdmin.
+const KPI_LINK: NavItem = {
+  name: "KPI",
+  href: "/kpi",
+  icon: Target,
+};
 const AGENTS_LINK: NavItem = {
   name: "Agent Console",
   href: "/agents",
@@ -539,7 +544,7 @@ export function Sidebar({
     if (group.label === "SYSTEM") {
       const idx = items.findIndex((i) => i.name === "Settings");
       const at = idx === -1 ? items.length : idx;
-      items = [...items.slice(0, at), AGENTS_LINK, ...items.slice(at)];
+      items = [...items.slice(0, at), KPI_LINK, AGENTS_LINK, ...items.slice(at)];
     }
     // Drop the items this user may not see, and their sub-items with them —
     // a parent that survives only to show a submenu of forbidden pages is

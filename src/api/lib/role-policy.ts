@@ -108,6 +108,11 @@ export const ALL_RESOURCES = [
   // Not listed in FINANCE_RESOURCES, so allExcept() grants it to Office and
   // the roles with hand-written lists (Sales, QA, HR, R&D) still do not get it.
   "dashboard",
+  // KPI module. Deliberately granted to NOBODY by name — Super Admin reaches
+  // it through the "*" short-circuit, and the owner asked for it to land there
+  // first ("给superadmin先"). Opening it to Office is one line here, once the
+  // per-person attribution problem is solved.
+  "kpi",
   "product-pricing",   // selling price, margin, surcharge amounts
   "revenue-figures",   // revenue / remain on the labour report
   "agent-console",     // read the Agent Console (which agents, see AGENTS_BY_ROLE)
@@ -225,7 +230,12 @@ const SALES: RolePolicy = {
  * that IS held is the one the owner drew: money.
  */
 const OFFICE: RolePolicy = {
-  ...allExcept([...FINANCE_RESOURCES, ...FORECAST_RESOURCES]),
+  // "kpi" excluded on purpose. allExcept() hands Office every new resource by
+  // default, and the owner asked for the KPI module to land on Super Admin
+  // first ("给superadmin先") — the per-person figures are not trustworthy until
+  // the shared Office login is split and sales_orders carries an author.
+  // Deleting this one string is how Office gets it.
+  ...allExcept([...FINANCE_RESOURCES, ...FORECAST_RESOURCES, "kpi"]),
   // Sees the directory; opening or promoting an account stays SUPER_ADMIN.
   users: R,
 };

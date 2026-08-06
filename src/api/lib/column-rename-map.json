@@ -902,5 +902,7 @@
   "workingDaysPerMonth": "working_days_per_month",
   "workingHoursPerDay": "working_hours_per_day",
   "workingMinutes": "working_minutes",
-  "xmlContent": "xml_content"
+  "xmlContent": "xml_content",
+  "kpiKey": "kpi_key",
+  "assignedBy": "assigned_by"
 }

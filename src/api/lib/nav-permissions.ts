@@ -69,6 +69,7 @@ export const NAV_RESOURCE: Record<string, string> = {
   // tooling screen is not part of reading a price list; it needs its own gate.
   "/cnc-templates": "cnc-templates",
   "/agents": "agent-console",
+  "/kpi": "kpi",
   "/bom": "bom",
   "/maintenance/sofa-combos": "sofa-combos",
 

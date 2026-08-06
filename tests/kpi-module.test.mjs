@@ -15,14 +15,22 @@ import {
 
 const ROUTE = readFileSync(resolve(process.cwd(), "src/api/routes/kpi.ts"), "utf8");
 
-test("the customer's delivery date is a gate, not a percentage", () => {
-  // Owner: "顾客的日期绝对不可以 overdue … 这是最低原则". Scoring it as a ratio
-  // would say the opposite — that a few percent late is acceptable.
+test("nothing caps the score — every assigned KPI is simply weighted", () => {
+  // This once capped the month at 60 when the promised date was missed. Owner
+  // 2026-08-06: "我还是可以 assign，assign 是 assign 啊，为什么你要 cap 呢？应该
+  // 说我 assign 这个东西给那个人，那个人就要顾." Assigning it already makes it
+  // theirs; capping punishes twice for one miss and makes the other five KPIs
+  // pointless in a month where it happened.
   const g = kpiByKey("customer_delivery_date");
-  assert.equal(g.shape, "GATE");
-  assert.equal(g.defaultTarget, 0);
-  assert.equal(g.defaultWeight, 0, "a gate caps the score, it does not earn points");
-  assert.ok(GATE_FAIL_CAP > 0 && GATE_FAIL_CAP < 100);
+  assert.equal(g.defaultTarget, 0, "the target is still zero late");
+  assert.ok(g.defaultWeight > 0, "it earns points now, like every other KPI");
+
+  const route = readFileSync(resolve(process.cwd(), "src/api/routes/kpi.ts"), "utf8");
+  assert.doesNotMatch(route, /Math\.min\(GATE_FAIL_CAP/, "the cap must not be applied");
+  assert.match(route, /const gateFailed = false;/);
+  // Every line with points counts towards the total — none are filtered out
+  // for being a gate.
+  assert.match(route, /lines\.filter\(\(l\) => l\.points !== null\)/);
 });
 
 test("attainment is capped and floored", () => {

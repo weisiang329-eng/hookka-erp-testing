@@ -196,29 +196,23 @@ async function buildCard(c: Context<Env>, userId: string, role: string, period: 
       drillPath: def.drillPath,
       target: Number(a.target), weight: Number(a.weight),
       actual: m.actual,
-      attainment: def.shape === "GATE" ? null : att,
-      points:
-        def.shape === "GATE" || att === null
-          ? null
-          : Math.round((att / 100) * Number(a.weight) * 10) / 10,
+      attainment: att,
+      points: att === null ? null : Math.round((att / 100) * Number(a.weight) * 10) / 10,
       evidence: m.detail, sampleSize: m.sampleSize,
     });
   }
 
-  // Weighted total over the RATIO lines only, then the gate cap.
-  const ratio = lines.filter((l) => l.shape !== "GATE" && l.points !== null);
+  // Every assigned KPI is weighted, including the delivery-date one. The cap
+  // it used to apply is gone — see the note on KpiShape.
+  const ratio = lines.filter((l) => l.points !== null);
   const weightUsed = ratio.reduce((s, l) => s + l.weight, 0);
   const earned = ratio.reduce((s, l) => s + (l.points ?? 0), 0);
   // Scored out of the weight ACTUALLY measurable, so the two unbuilt KPIs do
   // not drag the score to 60% of itself and make the number meaningless.
   const raw = weightUsed > 0 ? Math.round((earned / weightUsed) * 1000) / 10 : null;
 
-  const gates = lines.filter((l) => l.shape === "GATE");
-  const gateFailed = gates.some(
-    (g) => g.actual !== null && g.actual > g.target,
-  );
-  const score =
-    raw === null ? null : gateFailed ? Math.min(GATE_FAIL_CAP, raw) : raw;
+  const score = raw;
+  const gateFailed = false;
 
   const payout = await loadPayout(c, userId);
 

@@ -124,6 +124,8 @@ export default function KpiPage() {
 
   // ---- Library multi-select ------------------------------------------------
   const [picked, setPicked] = useState<Set<string>>(new Set());
+  /** Which KPI's explanation is open. One at a time keeps the list scannable. */
+  const [expanded, setExpanded] = useState<string | null>(null);
   // Weight belongs to the KPI, not the person. Owner 2026-08-06: "当我选择了
   // 四五个东西，我怎么给那个我筛选的 KPI 设置一个权重呢?" — the first version
   // had one box per PERSON, which applied the same weight to every selected
@@ -143,8 +145,7 @@ export default function KpiPage() {
     setMsg(null);
   };
 
-  const weightOf = (k: LibItem) =>
-    k.shape === "GATE" ? 0 : (kpiWeights[k.key] ?? k.defaultWeight);
+  const weightOf = (k: LibItem) => kpiWeights[k.key] ?? k.defaultWeight;
   const weightTotal = pickedDefs.reduce((sum, k) => sum + weightOf(k), 0);
 
   const saveBulk = async () => {
@@ -313,47 +314,94 @@ export default function KpiPage() {
             {libLoading && !lib.length ? (
               <Skeleton height={200} />
             ) : (
-              lib.map((k) => (
-                <label
-                  key={k.key}
-                  className={`flex gap-2.5 px-4 py-2.5 border-b border-[#F0ECE6] last:border-0 cursor-pointer ${
-                    picked.has(k.key) ? "bg-[#FBF8F2]" : ""
-                  }`}
-                >
-                  <input
-                    type="checkbox"
-                    checked={picked.has(k.key)}
-                    onChange={() => togglePick(k.key)}
-                    className="mt-1"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="text-[12.5px] font-semibold flex items-center gap-1.5 flex-wrap">
-                      {k.label}
-                      {k.shape === "GATE" && <Badge kind="GATE">gate</Badge>}
-                      <Badge kind={k.scoring}>{k.scoring === "AUTO" ? "auto" : "checklist"}</Badge>
+              lib.map((k) => {
+                const open = expanded === k.key;
+                return (
+                  <div
+                    key={k.key}
+                    className={`border-b border-[#EFEBE4] last:border-0 ${
+                      picked.has(k.key) ? "bg-[#FBF8F2]" : ""
+                    }`}
+                  >
+                    {/* Compact row: tick, name, value. The definition used to
+                        sit here in full and turned every row into a wall of
+                        text — the list has to be scannable first, explained
+                        second. */}
+                    <div className="flex items-center gap-3 px-4 py-3">
+                      <input
+                        type="checkbox"
+                        checked={picked.has(k.key)}
+                        onChange={() => togglePick(k.key)}
+                        className="shrink-0"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-[13px] font-semibold text-[#1F1D1B]">{k.label}</span>
+                          <Badge kind={k.scoring}>{k.scoring === "AUTO" ? "auto" : "checklist"}</Badge>
+                        </div>
+                        <div className="text-[11.5px] text-[#6B6560] mt-0.5 truncate">{k.detail}</div>
+                      </div>
+                      <div className="text-right shrink-0 w-28">
+                        <div className="text-[15px] font-bold tabular-nums text-[#1F1D1B]">
+                          {k.current === null ? "—" : fmt(k.current, k.unit)}
+                        </div>
+                        <div className="text-[10.5px] text-[#9CA3AF] truncate">{k.evidence || "no data"}</div>
+                      </div>
                     </div>
-                    <div className="text-[11.5px] text-[#5A5550]">{k.detail}</div>
-                    <div className="text-[11px] text-[#3A3733] mt-1 leading-relaxed">{k.definition}</div>
-                    <div className="flex gap-1 mt-1 flex-wrap">
+
+                    <div className="flex items-center gap-2 px-4 pb-2.5 pl-11 flex-wrap">
                       {k.assignedTo.length === 0 ? (
-                        <span className="rounded-full bg-[#F2EFE9] px-2 text-[10px] text-[#9CA3AF]">nobody</span>
+                        <span className="rounded-full bg-[#F2EFE9] px-2 py-0.5 text-[10px] text-[#9CA3AF]">
+                          not assigned
+                        </span>
                       ) : (
                         k.assignedTo.map((a) => (
-                          <span key={a.userId} className="rounded-full bg-[#F2EFE9] px-2 text-[10px] text-[#5A5550]">
+                          <span key={a.userId} className="rounded-full bg-[#EDE7DA] px-2 py-0.5 text-[10px] text-[#5A5550]">
                             {a.name}
                           </span>
                         ))
                       )}
+                      <button
+                        type="button"
+                        onClick={() => setExpanded(open ? null : k.key)}
+                        className="ml-auto text-[11px] text-[#6B5C32] underline decoration-dotted"
+                      >
+                        {open ? "Hide detail" : "How it works"}
+                      </button>
                     </div>
+
+                    {open && (
+                      <div className="px-4 pb-3.5 pl-11 space-y-2 bg-[#FCFBF8] border-t border-[#F2EFE9] pt-3">
+                        <p className="text-[12px] text-[#1F1D1B] leading-relaxed">
+                          <span className="font-semibold">Why: </span>{k.purpose}
+                        </p>
+                        <p className="text-[12px] text-[#3A3733] leading-relaxed">
+                          <span className="font-semibold">What is counted: </span>{k.definition}
+                        </p>
+                        {(k.measurement?.length ?? 0) > 0 && (
+                          <ol className="ml-4 list-decimal space-y-1">
+                            {k.measurement!.map((m) => (
+                              <li key={m} className="text-[11.5px] text-[#3A3733] leading-relaxed">{m}</li>
+                            ))}
+                          </ol>
+                        )}
+                        {(k.checklistItems?.length ?? 0) > 0 && (
+                          <div>
+                            <p className="text-[11.5px] font-semibold text-[#1F1D1B] mb-1">
+                              The {k.checklistItems!.length} items
+                            </p>
+                            <ul className="ml-4 list-disc space-y-0.5">
+                              {k.checklistItems!.map((it) => (
+                                <li key={it} className="text-[11.5px] text-[#3A3733]">{it}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
-                  <div className="text-right whitespace-nowrap">
-                    <div className="text-[13.5px] font-bold tabular-nums" style={{ color: scoreColour(null) }}>
-                      {k.current === null ? "—" : fmt(k.current, k.unit)}
-                    </div>
-                    <div className="text-[10px] text-[#9CA3AF]">{k.evidence}</div>
-                  </div>
-                </label>
-              ))
+                );
+              })
             )}
           </Card>
 
@@ -378,19 +426,13 @@ export default function KpiPage() {
                       {k.current === null ? "—" : fmt(k.current, k.unit)}
                     </span>
                   </span>
-                  {k.shape === "GATE" ? (
-                    <span className="text-[10px] text-[#9A3A2D] whitespace-nowrap">caps the score</span>
-                  ) : (
-                    <>
-                      <input
-                        type="number"
-                        value={kpiWeights[k.key] ?? k.defaultWeight}
-                        onChange={(e) => setKpiWeights({ ...kpiWeights, [k.key]: Number(e.target.value) })}
-                        className="w-14 rounded border border-[#E2DDD8] px-2 py-0.5 text-right text-[11px] tabular-nums"
-                      />
-                      <span className="text-[10px] text-[#9CA3AF]">wt</span>
-                    </>
-                  )}
+                  <input
+                    type="number"
+                    value={kpiWeights[k.key] ?? k.defaultWeight}
+                    onChange={(e) => setKpiWeights({ ...kpiWeights, [k.key]: Number(e.target.value) })}
+                    className="w-14 rounded border border-[#E2DDD8] px-2 py-0.5 text-right text-[11px] tabular-nums"
+                  />
+                  <span className="text-[10px] text-[#9CA3AF]">wt</span>
                 </div>
               ))}
             </CardContent>
@@ -476,7 +518,6 @@ export default function KpiPage() {
                   >
                     <td className="px-4 py-2.5">
                       <b>{p.name}</b> <span className="text-[#9CA3AF]">· {p.role}</span>
-                      {p.gateFailed && <span className="ml-1.5 text-[10px] text-[#9A3A2D]">gate missed</span>}
                     </td>
                     <td className="px-3 py-2.5 text-right text-[#9CA3AF] tabular-nums">{p.kpiCount}</td>
                     <td className="px-3 py-2.5">
@@ -767,14 +808,7 @@ export default function KpiPage() {
                     </div>
                   )}
                   <div className="flex-1 min-w-[220px] text-xs leading-relaxed">
-                    {card.gateFailed ? (
-                      <>
-                        <p className="font-semibold text-[#9A3A2D]">Capped at {card.gateCap} — a gate was not met.</p>
-                        <p className="text-[#9CA3AF] mt-0.5">Weighted total would have been {card.rawScore}.</p>
-                      </>
-                    ) : (
-                      <p className="text-[#5A5550]">Weighted across {card.weightMeasured} points.</p>
-                    )}
+                    <p className="text-[#5A5550]">Weighted across {card.weightMeasured} points.</p>
                   </div>
                 </CardContent>
               </Card>
@@ -786,7 +820,6 @@ export default function KpiPage() {
                       <div className="flex-1 min-w-0">
                         <div className="text-[13px] font-bold flex items-center gap-1.5 flex-wrap">
                           {l.label}
-                          {l.shape === "GATE" && <Badge kind="GATE">gate · caps the score</Badge>}
                           {l.scoring && <Badge kind={l.scoring}>{l.scoring === "AUTO" ? "auto" : "checklist"}</Badge>}
                         </div>
                         {l.purpose && (

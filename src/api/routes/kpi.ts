@@ -25,10 +25,13 @@ import { ensureKpiTables } from "../lib/ensure-kpi-tables";
 import {
   KPI_CATALOG,
   GATE_FAIL_CAP,
+  DEFAULT_PAYOUT,
   attainment,
   kpiByKey,
   kpisForRole,
+  payoutSen,
   type KpiDef,
+  type PayoutSettings,
 } from "../lib/kpi-catalog";
 import { computeMetric, checklistProgress } from "../lib/kpi-metrics";
 
@@ -95,6 +98,21 @@ interface CardLine {
  * live, so the person can watch it during the month rather than finding out on
  * the 1st.
  */
+async function loadPayout(c: Context<Env>, userId: string): Promise<PayoutSettings> {
+  const row = await c.var.DB.prepare(
+    `SELECT payoutMode, payoutAmountSen, payoutFloorPct
+       FROM kpi_user_settings WHERE userId = ?`,
+  )
+    .bind(userId)
+    .first<{ payoutMode: string; payoutAmountSen: number; payoutFloorPct: number }>();
+  if (!row) return DEFAULT_PAYOUT;
+  return {
+    mode: row.payoutMode === "MONTHLY_CASH" ? "MONTHLY_CASH" : "SCORE_ONLY",
+    amountSen: Number(row.payoutAmountSen) || 0,
+    floorPct: Number(row.payoutFloorPct) || 0,
+  };
+}
+
 async function buildCard(c: Context<Env>, userId: string, role: string, period: string) {
   await ensureKpiTables(c.var.DB);
   const orgId = getOrgId(c);
@@ -191,11 +209,19 @@ async function buildCard(c: Context<Env>, userId: string, role: string, period: 
   const score =
     raw === null ? null : gateFailed ? Math.min(GATE_FAIL_CAP, raw) : raw;
 
+  const payout = await loadPayout(c, userId);
+
   return {
     period,
     userId,
     role,
     locked: isLocked,
+    payout: {
+      ...payout,
+      // What this month's score is worth. SCORE_ONLY always pays 0 here — the
+      // score still exists, it is simply settled elsewhere at year end.
+      earnedSen: payoutSen(score, payout),
+    },
     lines,
     rawScore: raw,
     score,
@@ -230,6 +256,57 @@ app.get("/users/:id", async (c) => {
   if (!u) return c.json({ success: false, error: "User not found" }, 404);
   const data = await buildCard(c, String(u.id), String(u.role).toUpperCase(), periodOf(c));
   return c.json({ success: true, data });
+});
+
+// ---- What a person's score is worth ---------------------------------------
+app.get("/payout/:id", async (c) => {
+  const denied = requireSuperAdmin(c);
+  if (denied) return denied;
+  await ensureKpiTables(c.var.DB);
+  return c.json({ success: true, data: await loadPayout(c, c.req.param("id")) });
+});
+
+app.put("/payout/:id", async (c) => {
+  const denied = requireSuperAdmin(c);
+  if (denied) return denied;
+  await ensureKpiTables(c.var.DB);
+  const userId = c.req.param("id");
+
+  let body: { mode?: string; amountSen?: number; floorPct?: number };
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body" }, 400);
+  }
+  const mode = body.mode === "MONTHLY_CASH" ? "MONTHLY_CASH" : "SCORE_ONLY";
+  const amountSen = Math.round(Number(body.amountSen) || 0);
+  const floorPct = Number(body.floorPct) || 0;
+  if (amountSen < 0) {
+    return c.json({ success: false, error: "Amount cannot be negative" }, 400);
+  }
+  if (floorPct < 0 || floorPct > 100) {
+    return c.json({ success: false, error: "Floor must be 0–100" }, 400);
+  }
+  if (mode === "MONTHLY_CASH" && amountSen === 0) {
+    return c.json(
+      { success: false, error: "A monthly cash KPI needs an amount above 0" },
+      400,
+    );
+  }
+
+  await c.var.DB.prepare(
+    `INSERT INTO kpi_user_settings
+       (userId, payoutMode, payoutAmountSen, payoutFloorPct, orgId, updatedBy, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, NOW())
+     ON CONFLICT (userId) DO UPDATE
+       SET payoutMode = EXCLUDED.payoutMode,
+           payoutAmountSen = EXCLUDED.payoutAmountSen,
+           payoutFloorPct = EXCLUDED.payoutFloorPct,
+           updatedBy = EXCLUDED.updatedBy, updatedAt = NOW()`,
+  )
+    .bind(userId, mode, amountSen, floorPct, getOrgId(c), ctxGet(c, "userId"))
+    .run();
+  return c.json({ success: true });
 });
 
 // ---- Checklist ticks -------------------------------------------------------

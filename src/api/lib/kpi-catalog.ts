@@ -59,6 +59,18 @@ export interface KpiDef {
    * argued with instead of worked on.
    */
   formula: string;
+  /**
+   * What problem this KPI exists to solve.
+   *
+   * Owner 2026-08-06: "正常 KPI 都应该包含它的定义、标题对应的实际意思、以及它
+   * 是为了解决什么问题." A title alone was ambiguous — "Customer delivery date"
+   * reads as a date field, not as a measure of lateness.
+   */
+  purpose: string;
+  /** Exactly what is counted, in the terms the shop floor uses. */
+  definition: string;
+  /** Step by step, how the number is produced. */
+  measurement: string[];
   /** CHECKLIST only — the actions that make up the month. */
   checklistItems?: string[];
   /** Suggested target; the assignment row overrides it per person. */
@@ -87,14 +99,23 @@ export const GATE_FAIL_CAP = 60;
 export const KPI_CATALOG: KpiDef[] = [
   {
     key: "customer_delivery_date",
-    label: "Customer delivery date",
-    detail: "Orders shipped on or before the date promised to the customer",
+    label: "On-time delivery to the customer's promised date",
+    detail: "Zero tolerance — the promised date is the floor, not a target",
     shape: "GATE",
     direction: "LOWER_IS_BETTER",
     unit: "count",
     scoring: "AUTO",
-    formula:
-      "Orders whose first dispatch was after the date promised to the customer. Target is 0 — any miss caps the whole score.",
+    purpose:
+      "A late delivery is the one failure the customer always notices. Everything else in the factory can slip; this cannot.",
+    definition:
+      "The number of SALES ORDERS whose FIRST dispatch left after the delivery date promised to that customer. Counted once per order, not per delivery note — a customer promised one date was let down once, however many trips it took.",
+    measurement: [
+      "Take the date on the sales order that was promised to the customer (customer_delivery_date, filled on 99.8% of orders). Our own internal estimate is NOT used.",
+      "Find the first dispatch date across every delivery order carrying that sales order's production.",
+      "If the dispatch date is later than the promised date, the order counts as late.",
+      "Target is 0. Any late order fails the gate and caps the whole month's score at 60.",
+    ],
+    formula: "Count of sales orders dispatched after the date promised to the customer. Target 0.",
     defaultTarget: 0,
     defaultWeight: 0,
     available: true,
@@ -103,14 +124,23 @@ export const KPI_CATALOG: KpiDef[] = [
   },
   {
     key: "setup_completeness",
-    label: "Setup completeness",
-    detail: "Active SKUs with a price, m³, fabric usage and a BOM that has routing",
+    label: "Product master data completeness",
+    detail: "Every active SKU carries the four things production and quoting need",
     shape: "RATIO",
     direction: "HIGHER_IS_BETTER",
     unit: "%",
     scoring: "AUTO",
-    formula:
-      "Active SKUs having ALL of: a price, a cubic volume, a fabric usage and an ACTIVE BOM that contains routing ÷ all active SKUs × 100",
+    purpose:
+      "An SKU missing its price, volume, fabric usage or routing cannot be quoted, planned or costed. The gap surfaces later as a rush, a wrong price, or a job card nobody can schedule.",
+    definition:
+      "The share of ACTIVE products that have ALL FOUR of: a selling price, a cubic volume (m³), a fabric usage figure, and an ACTIVE BOM template that actually contains routing steps.",
+    measurement: [
+      "Count every product with status ACTIVE.",
+      "A product counts as complete only when all four are present — price > 0, unit_m3 > 0, fabric_usage > 0, and an ACTIVE BOM template whose routing list is not empty.",
+      "An empty BOM template counts as INCOMPLETE. 45% of templates on file have no routing in them, and the daily report has been reading those as fine.",
+      "Score = complete ÷ active × 100.",
+    ],
+    formula: "Active SKUs having price + m³ + fabric usage + a BOM with routing ÷ all active SKUs × 100",
     defaultTarget: 95,
     defaultWeight: 20,
     available: true,
@@ -119,14 +149,22 @@ export const KPI_CATALOG: KpiDef[] = [
   },
   {
     key: "documents_not_stuck",
-    label: "Documents not stuck",
-    detail: "Sales order → delivery order → invoice, open more than 7 days",
+    label: "Orders billed, not left sitting",
+    detail: "Delivered goods that still have no invoice against them",
     shape: "RATIO",
     direction: "LOWER_IS_BETTER",
     unit: "count",
     scoring: "AUTO",
-    formula:
-      "Sales orders not yet invoiced + delivery orders not yet invoiced, taken from the same Daily Report you see on the dashboard",
+    purpose:
+      "Goods that shipped but were never invoiced are work already paid for by us and not yet paid for by the customer. It is the largest single item on the daily report and it is cash sitting still.",
+    definition:
+      "The count of sales orders and delivery orders that have moved but carry no invoice — the same two buckets the Daily Report shows on the dashboard.",
+    measurement: [
+      "Read the Daily Report's own figures rather than asking the question separately, so this KPI and the dashboard can never disagree.",
+      "Add: sales orders not yet invoiced + delivery orders not yet invoiced.",
+      "Lower is better. Reaching the target scores full marks; there is no extra credit for going below it.",
+    ],
+    formula: "Sales orders not invoiced + delivery orders not invoiced, from the Daily Report on the dashboard",
     defaultTarget: 40,
     defaultWeight: 20,
     available: true,
@@ -135,14 +173,23 @@ export const KPI_CATALOG: KpiDef[] = [
   },
   {
     key: "exceptions_cleared",
-    label: "Exceptions cleared",
-    detail: "Daily-report exceptions closed within the same week",
+    label: "Daily exception backlog cleared",
+    detail: "How much of the month's opening exception list actually got closed",
     shape: "RATIO",
     direction: "HIGHER_IS_BETTER",
     unit: "%",
     scoring: "AUTO",
-    formula:
-      "(Exceptions open at the start of the month − open at the end) ÷ open at the start × 100",
+    purpose:
+      "The daily report raises a few hundred exceptions a month — wrong prices, missing invoices, unreceived purchase orders. They are only useful if somebody works them down. This measures whether the list shrinks.",
+    definition:
+      "The share of the exceptions open at the START of the month that were closed by the END of it. It is a burn-down, not a snapshot.",
+    measurement: [
+      "Take the total exception count from the first daily snapshot stored in the month.",
+      "Take the total from the last snapshot in the month.",
+      "Cleared = opening − closing. A month that ends with MORE than it started scores 0 rather than a negative.",
+      "Score = cleared ÷ opening × 100.",
+    ],
+    formula: "(Exceptions open at the start of the month − open at the end) ÷ open at the start × 100",
     defaultTarget: 90,
     defaultWeight: 20,
     available: true,
@@ -150,23 +197,30 @@ export const KPI_CATALOG: KpiDef[] = [
     roles: ["OFFICE", "QA"],
   },
   {
-    // Measures the ACTIONS, not the customer's mood. The mood needs a survey
-    // that does not exist; the actions are countable today and are what the
-    // person actually controls. When the survey ships, an average-score KPI
-    // joins this one as AUTO rather than replacing it.
     key: "customer_satisfaction",
-    label: "Customer satisfaction follow-up",
-    detail: "Reaching out, collecting replies and acting on the low ones",
+    label: "Customer satisfaction survey — 3 customers a month",
+    detail: "Pick three, send the link, collect the scores, act on the low ones",
     shape: "RATIO",
     direction: "HIGHER_IS_BETTER",
     unit: "%",
     scoring: "CHECKLIST",
-    formula: "Items completed ÷ items in the list × 100",
+    purpose:
+      "We hear from customers only when something goes wrong, which means the quiet ones are invisible until they leave. Asking three a month, rotating through the list, turns that into a number that moves.",
+    definition:
+      "A monthly cycle: choose three customers who were NOT surveyed last month, send each a scored questionnaire, collect the replies, and turn anything below 3/5 into a written improvement item. Scored on completing the cycle, not on the customers' mood — the mood is theirs, the follow-through is ours.",
+    measurement: [
+      "Pick 3 customers who did not receive the survey last month (rotate, so the same easy accounts are not asked every time).",
+      "Send each the questionnaire link. Five questions, each scored 1–5: delivery on time · product quality · quotation accuracy · how quickly we answer · how easy we are to deal with.",
+      "Collect at least 2 replies. Below that the month's answers are too thin to read.",
+      "Any answer below 3/5 becomes a written improvement item with an owner.",
+      "Score = items completed ÷ 4 × 100. When the survey system ships, the AVERAGE SCORE joins as a separate KPI — this one keeps measuring that the cycle was run.",
+    ],
+    formula: "Steps of the monthly survey cycle completed ÷ 4 × 100",
     checklistItems: [
-      "Satisfaction link sent to at least 3 customers",
-      "At least 2 replies collected",
-      "Any reply below 3/5 written up as an improvement item",
-      "Last month's improvement items followed up",
+      "3 customers chosen, none of them surveyed last month",
+      "Survey link sent to all 3",
+      "At least 2 replies received",
+      "Every answer below 3/5 written up as an improvement item with an owner",
     ],
     defaultTarget: 100,
     defaultWeight: 20,
@@ -175,19 +229,29 @@ export const KPI_CATALOG: KpiDef[] = [
   },
   {
     key: "problems_caught_early",
-    label: "Problems caught early",
-    detail: "The monthly sweep that finds trouble before the customer does",
+    label: "Preventive sweep — find it before the customer does",
+    detail: "Five checks a month over the places trouble shows up first",
     shape: "RATIO",
     direction: "HIGHER_IS_BETTER",
     unit: "%",
     scoring: "CHECKLIST",
-    formula: "Items completed ÷ items in the list × 100",
+    purpose:
+      "Most of the work is done by agents now, so the job is watching them. The cost of a missed exception is not the exception — it is the customer finding it first.",
+    definition:
+      "Five named checks, each done at least once in the month and verified by Super Admin. Scored on the checks being done, because whether a problem existed that month is luck; whether anyone looked is not.",
+    measurement: [
+      "Each of the five checks is ticked by the person when done, and verified by Super Admin.",
+      "A tick is a claim; the verification is what makes it a score. Super Admin can untick.",
+      "Score = checks done ÷ 5 × 100.",
+      "The list is fixed in the system, so it cannot be shortened to raise a score.",
+    ],
+    formula: "Checks completed ÷ 5 × 100",
     checklistItems: [
-      "Agent error log reviewed and failures raised",
-      "Orders past their customer date reviewed and chased",
+      "Agent error log reviewed and every failed run raised",
+      "Orders already past their promised date reviewed and chased",
       "Price and COGS anomalies on the daily report cleared",
-      "Purchase orders not received chased with the supplier",
-      "Stuck delivery orders pushed to invoice",
+      "Purchase orders not yet received chased with the supplier",
+      "Delivered orders with no invoice pushed through to billing",
     ],
     defaultTarget: 100,
     defaultWeight: 20,
@@ -226,4 +290,42 @@ export function attainment(
   if (actual <= target) return Math.min(120, target === 0 ? 100 : 100);
   if (target <= 0) return 0;
   return Math.max(0, Math.round((target / actual) * 1000) / 10);
+}
+
+
+/** How a person's KPI score turns into money, if at all. */
+export type PayoutMode = "MONTHLY_CASH" | "SCORE_ONLY";
+
+export interface PayoutSettings {
+  mode: PayoutMode;
+  /** The pot at a score of 100, in sen. */
+  amountSen: number;
+  /** Below this score, nothing is paid. 0 disables the floor. */
+  floorPct: number;
+}
+
+export const DEFAULT_PAYOUT: PayoutSettings = {
+  mode: "SCORE_ONLY",
+  amountSen: 0,
+  floorPct: 0,
+};
+
+/**
+ * What the month pays.
+ *
+ * Straight-line against the score, with a floor. The floor exists because a
+ * straight line with no floor pays something for a month that was mostly
+ * missed — 12% of the pot for a 12% score reads as a reward for failing, and
+ * it is the first thing anyone argues about.
+ *
+ * SCORE_ONLY always returns 0: the score still exists, it is just not money
+ * this month (the owner settles those at year end).
+ */
+export function payoutSen(score: number | null, s: PayoutSettings): number {
+  if (s.mode !== "MONTHLY_CASH") return 0;
+  if (score === null || !Number.isFinite(score)) return 0;
+  if (s.amountSen <= 0) return 0;
+  if (s.floorPct > 0 && score < s.floorPct) return 0;
+  const capped = Math.max(0, Math.min(100, score));
+  return Math.round((s.amountSen * capped) / 100);
 }

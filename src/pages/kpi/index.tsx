@@ -27,6 +27,7 @@ type Scoring = "AUTO" | "CHECKLIST";
 type Line = {
   key: string; label: string; detail: string;
   scoring?: Scoring; formula?: string; checklistItems?: string[];
+  purpose?: string; definition?: string; measurement?: string[];
   shape: "GATE" | "RATIO"; unit: "%" | "count" | "score";
   available: boolean; blockedBy?: string; drillPath?: string;
   target: number; weight: number;
@@ -38,10 +39,12 @@ type CardData = {
   rawScore: number | null; score: number | null;
   gateFailed: boolean; gateCap: number;
   weightMeasured: number; weightUnbuilt: number;
+  payout?: { mode: "MONTHLY_CASH" | "SCORE_ONLY"; amountSen: number; floorPct: number; earnedSen: number };
 };
 type LibItem = {
   key: string; label: string; detail: string; shape: "GATE" | "RATIO"; unit: string;
   scoring: Scoring; formula: string; checklistItems?: string[];
+  purpose?: string; definition?: string; measurement?: string[];
   defaultTarget: number; defaultWeight: number; available: boolean;
   current: number | null; evidence: string;
   assignedTo: Array<{ userId: string; name: string; role: string }>;
@@ -114,7 +117,12 @@ export default function KpiPage() {
 
   // ---- Library multi-select ------------------------------------------------
   const [picked, setPicked] = useState<Set<string>>(new Set());
-  const [assignees, setAssignees] = useState<Record<string, { on: boolean; weight: number }>>({});
+  // Weight belongs to the KPI, not the person. Owner 2026-08-06: "当我选择了
+  // 四五个东西，我怎么给那个我筛选的 KPI 设置一个权重呢?" — the first version
+  // had one box per PERSON, which applied the same weight to every selected
+  // KPI. Five KPIs sharing one number is not a weighting.
+  const [kpiWeights, setKpiWeights] = useState<Record<string, number>>({});
+  const [chosenPeople, setChosenPeople] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -128,26 +136,25 @@ export default function KpiPage() {
     setMsg(null);
   };
 
-  const weightTotal = Object.values(assignees).reduce(
-    (s, v) => (v.on ? s + (Number(v.weight) || 0) : s),
-    0,
-  );
+  const weightOf = (k: LibItem) =>
+    k.shape === "GATE" ? 0 : (kpiWeights[k.key] ?? k.defaultWeight);
+  const weightTotal = pickedDefs.reduce((sum, k) => sum + weightOf(k), 0);
 
   const saveBulk = async () => {
     setSaving(true);
     setMsg(null);
     try {
-      const people = Object.entries(assignees).filter(([, v]) => v.on);
+      const people = [...chosenPeople];
       if (!people.length) throw new Error("Pick at least one person");
       for (const def of pickedDefs) {
         const r = await fetch(`/api/kpi/kpi/${def.key}/assignees`, {
           method: "PUT",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            assignees: people.map(([userId, v]) => ({
+            assignees: people.map((userId) => ({
               userId,
               target: def.defaultTarget,
-              weight: def.shape === "GATE" ? 0 : Number(v.weight) || 0,
+              weight: weightOf(def),
               isActive: true,
             })),
           }),
@@ -251,8 +258,8 @@ export default function KpiPage() {
                       {k.shape === "GATE" && <Badge kind="GATE">gate</Badge>}
                       <Badge kind={k.scoring}>{k.scoring === "AUTO" ? "auto" : "checklist"}</Badge>
                     </div>
-                    <div className="text-[11px] text-[#9CA3AF]">{k.detail}</div>
-                    <div className="text-[10.5px] text-[#9CA3AF] mt-0.5">{k.formula}</div>
+                    <div className="text-[11.5px] text-[#5A5550]">{k.detail}</div>
+                    <div className="text-[11px] text-[#3A3733] mt-1 leading-relaxed">{k.definition}</div>
                     <div className="flex gap-1 mt-1 flex-wrap">
                       {k.assignedTo.length === 0 ? (
                         <span className="rounded-full bg-[#F2EFE9] px-2 text-[10px] text-[#9CA3AF]">nobody</span>
@@ -286,13 +293,31 @@ export default function KpiPage() {
                   ? "Targets come from the catalogue — you set the weight"
                   : "Tick one or more on the left to assign them"}
               </p>
+              {/* Weight per KPI — a target belongs to the KPI, so the weight
+                  it carries does too. */}
               {pickedDefs.map((k) => (
-                <p key={k.key} className="text-[11px] mt-1.5">
-                  <b>{k.label}</b>{" "}
-                  <span className="text-[#9CA3AF]">
-                    target {fmt(k.defaultTarget, k.unit)} · now {k.current === null ? "—" : fmt(k.current, k.unit)}
+                <div key={k.key} className="flex items-center gap-2 mt-2 text-[11.5px]">
+                  <span className="flex-1 min-w-0">
+                    <b>{k.label}</b>
+                    <span className="block text-[#9CA3AF]">
+                      target {fmt(k.defaultTarget, k.unit)} · now{" "}
+                      {k.current === null ? "—" : fmt(k.current, k.unit)}
+                    </span>
                   </span>
-                </p>
+                  {k.shape === "GATE" ? (
+                    <span className="text-[10px] text-[#9A3A2D] whitespace-nowrap">caps the score</span>
+                  ) : (
+                    <>
+                      <input
+                        type="number"
+                        value={kpiWeights[k.key] ?? k.defaultWeight}
+                        onChange={(e) => setKpiWeights({ ...kpiWeights, [k.key]: Number(e.target.value) })}
+                        className="w-14 rounded border border-[#E2DDD8] px-2 py-0.5 text-right text-[11px] tabular-nums"
+                      />
+                      <span className="text-[10px] text-[#9CA3AF]">wt</span>
+                    </>
+                  )}
+                </div>
               ))}
             </CardContent>
             {pickedDefs.length > 0 && (
@@ -307,30 +332,23 @@ export default function KpiPage() {
                     {Math.round(weightTotal) === 100 ? " ✓" : " / 100"}
                   </span>
                 </div>
-                {(usersResp?.data ?? []).map((u) => {
-                  const cur = assignees[u.id] ?? { on: false, weight: 20 };
-                  return (
-                    <div key={u.id} className="flex items-center gap-2 py-1 text-[11.5px]">
-                      <input
-                        type="checkbox"
-                        checked={cur.on}
-                        onChange={(e) => setAssignees({ ...assignees, [u.id]: { ...cur, on: e.target.checked } })}
-                      />
-                      <span className="flex-1 truncate">
-                        {u.displayName || u.email} <span className="text-[#9CA3AF]">· {u.role}</span>
-                      </span>
-                      <input
-                        type="number"
-                        value={cur.weight}
-                        onChange={(e) =>
-                          setAssignees({ ...assignees, [u.id]: { ...cur, weight: Number(e.target.value) } })
-                        }
-                        className="w-14 rounded border border-[#E2DDD8] px-2 py-0.5 text-right text-[11px] tabular-nums"
-                      />
-                      <span className="text-[10px] text-[#9CA3AF]">wt</span>
-                    </div>
-                  );
-                })}
+                {(usersResp?.data ?? []).map((u) => (
+                  <label key={u.id} className="flex items-center gap-2 py-1 text-[11.5px] cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={chosenPeople.has(u.id)}
+                      onChange={() => {
+                        const next = new Set(chosenPeople);
+                        if (next.has(u.id)) next.delete(u.id);
+                        else next.add(u.id);
+                        setChosenPeople(next);
+                      }}
+                    />
+                    <span className="flex-1 truncate">
+                      {u.displayName || u.email} <span className="text-[#9CA3AF]">· {u.role}</span>
+                    </span>
+                  </label>
+                ))}
                 <div className="mt-2.5 flex items-center gap-2 flex-wrap">
                   <button
                     type="button"
@@ -457,6 +475,25 @@ export default function KpiPage() {
                       {card.score ?? "—"}<span className="text-lg text-[#9CA3AF] font-semibold"> / 100</span>
                     </p>
                   </div>
+                  {card.payout?.mode === "MONTHLY_CASH" && (
+                    <div className="border-l border-[#E2DDD8] pl-6">
+                      <p className="text-xs text-[#9CA3AF] mb-1">Earns this month</p>
+                      <p className="text-3xl font-extrabold tabular-nums leading-none text-[#1F1D1B]">
+                        RM {(card.payout.earnedSen / 100).toLocaleString("en-MY", { minimumFractionDigits: 2 })}
+                      </p>
+                      <p className="text-[11px] text-[#9CA3AF] mt-1">
+                        of RM {(card.payout.amountSen / 100).toLocaleString("en-MY", { minimumFractionDigits: 2 })} at 100
+                        {card.payout.floorPct > 0 && <> · nothing below {card.payout.floorPct}</>}
+                      </p>
+                    </div>
+                  )}
+                  {card.payout?.mode === "SCORE_ONLY" && (
+                    <div className="border-l border-[#E2DDD8] pl-6">
+                      <p className="text-xs text-[#9CA3AF] mb-1">Payout</p>
+                      <p className="text-sm font-semibold text-[#5A5550]">Score only</p>
+                      <p className="text-[11px] text-[#9CA3AF] mt-0.5">Settled at year end</p>
+                    </div>
+                  )}
                   <div className="flex-1 min-w-[220px] text-xs leading-relaxed">
                     {card.gateFailed ? (
                       <>
@@ -480,12 +517,24 @@ export default function KpiPage() {
                           {l.shape === "GATE" && <Badge kind="GATE">gate · caps the score</Badge>}
                           {l.scoring && <Badge kind={l.scoring}>{l.scoring === "AUTO" ? "auto" : "checklist"}</Badge>}
                         </div>
-                        {l.formula && (
-                          <p className="text-[11px] text-[#5A5550] mt-1 leading-relaxed">
-                            <span className="font-semibold">How it is calculated: </span>{l.formula}
+                        {l.purpose && (
+                          <p className="text-[12px] text-[#1F1D1B] mt-1.5 leading-relaxed">
+                            <span className="font-semibold">Why: </span>{l.purpose}
                           </p>
                         )}
-                        <p className="text-[11px] text-[#9CA3AF] mt-0.5">{l.evidence}</p>
+                        {l.definition && (
+                          <p className="text-[12px] text-[#3A3733] mt-1 leading-relaxed">
+                            <span className="font-semibold">What is counted: </span>{l.definition}
+                          </p>
+                        )}
+                        {(l.measurement?.length ?? 0) > 0 && (
+                          <ol className="mt-1.5 ml-4 list-decimal space-y-0.5">
+                            {l.measurement!.map((m) => (
+                              <li key={m} className="text-[11.5px] text-[#3A3733] leading-relaxed">{m}</li>
+                            ))}
+                          </ol>
+                        )}
+                        <p className="text-[12px] text-[#5A5550] mt-1.5 font-medium">{l.evidence}</p>
                         {l.drillPath && (
                           <Link to={l.drillPath} className="text-[11px] underline decoration-dotted text-[#6B5C32]">
                             See the list →

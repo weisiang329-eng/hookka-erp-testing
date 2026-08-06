@@ -74,6 +74,28 @@ const DDL: string[] = [
    )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS kpi_checklist_unique
      ON kpi_checklist_ticks (user_id, period, kpi_key, item_index)`,
+  // What the score is WORTH, per person.
+  //
+  // Owner 2026-08-06: "有一些是只有 KPI 分数、没有钱（属于年尾结算），有一些则是
+  // 直接计算钱的." So the money hangs off the PERSON, not off each KPI: several
+  // weighted KPIs collapse into one score, and the payout follows that score.
+  // Putting an amount on every KPI row would mean five pots that have to be
+  // kept adding up to one.
+  //
+  //   MONTHLY_CASH — pot × score ÷ 100, payable that month.
+  //   SCORE_ONLY   — the score is recorded and nothing is paid; settled at
+  //                  year end outside this system.
+  `CREATE TABLE IF NOT EXISTS kpi_user_settings (
+     user_id           TEXT PRIMARY KEY,
+     payout_mode       TEXT NOT NULL DEFAULT 'SCORE_ONLY',
+     payout_amount_sen INTEGER NOT NULL DEFAULT 0,
+     /* Below this score nothing is paid — a 12% month should not earn 12% of
+        the pot. 0 disables the floor. */
+     payout_floor_pct  DOUBLE PRECISION NOT NULL DEFAULT 0,
+     org_id            TEXT NOT NULL DEFAULT 'hookka',
+     updated_by        TEXT,
+     updated_at        TIMESTAMP NOT NULL DEFAULT NOW()
+   )`,
 ];
 
 let _applied = false;

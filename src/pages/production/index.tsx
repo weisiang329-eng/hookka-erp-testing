@@ -625,8 +625,19 @@ export default function ProductionPage({
   }, [customersResp]);
   const custOemRef = useRef(custOemMap);
   custOemRef.current = custOemMap;
-  const oemMarkFor = (row: { customerName?: string; itemCategory?: string }): string => {
-    const cat = (row.itemCategory || "").toUpperCase();
+  const oemMarkFor = (row: {
+    customerName?: string;
+    /** Production-sheet rows carry `itemCategory`… */
+    itemCategory?: string;
+    /** …while a sticker carries the same value as `category`. */
+    category?: string;
+  }): string => {
+    // Read BOTH. This function was written against the production-sheet row
+    // and then called only with STICKERS, which name the field `category` —
+    // so `itemCategory` was always undefined, `key` was always "", and the
+    // OEM tag never printed for anyone. Owner 2026-08-06: Houzs Century is
+    // set to TAG for sofa and SO-2608-082-01 came out with no tag on it.
+    const cat = (row.itemCategory || row.category || "").toUpperCase();
     const key = cat === "BEDFRAME" ? "bedframe" : cat === "SOFA" ? "sofa" : cat === "ACCESSORY" ? "accessory" : "";
     if (!key) return "";
     const mk = custOemRef.current.get(row.customerName || "");

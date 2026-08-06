@@ -2906,3 +2906,41 @@ a cache-buster) — comparing across cache generations invented a phantom gap I
 briefly reported as unexplained. And `javascript_tool` is read-only: the write
 that releases an invoice into the opening was correctly left for the owner to
 click.
+
+## 2026-08-06 — unvoid, and the duplicate purchase-invoice clean-up
+
+**Unvoid** (`daceaf44`). The owner voided the wrong half of a duplicate pair and
+had no way back. `POST /:id/unvoid` mirrors void: the ledger returns to BASE as
+an appended `purchase_invoice_unvoid` batch (the journal is hash-chained, so the
+void legs are never deleted), the GRN quantity is re-claimed and **refused** if
+another invoice has taken it, and the status returns to `pre_void_status`.
+
+It also closed a hole in void itself: the old "has this ever been voided?" test
+could not tell a re-void after an unvoid from a redundant press, and would have
+skipped the reversal — liability left on 400-0000 while the subledger dropped
+the invoice. Both directions now target a ledger position (0 for void, base for
+unvoid) and post the delta, so a no-op writes nothing and both are idempotent by
+construction.
+
+**BUG-2026-08-06-001** — I authored it that morning: `stripLegSuffix` strips
+`_void` but not `_unvoid`, so the restored RM 1,865.80 reported in August
+instead of June. Money tied throughout; only the period was wrong. Dates resolve
+at read time, so one word fixed it retroactively. New test: every correction
+sourceType the API posts must resolve to a document family.
+
+**Duplicate clean-up** (owner pressed every button; I scanned and reported).
+Two passes — the second added same-DO / same-day-same-amount / same-day-near-amount
+after his own void of PI-2604-013 slipped through a supplier-invoice-number-only
+scan, plus the rule that **different supplier invoice numbers means different
+documents** whatever the amount says. The new shape it caught: an opening seed
+already paid, with a system invoice for the same goods still outstanding.
+
+**Result, verified on prod:** 17 invoices cancelled, RM 21,181.40. Trial balance
+balanced (1,444,184.42), opening JV balanced (262,371.80), AP three-way tie at
+308,985.88, `/ap-reconciliation` drift **0.00**, items empty, residual 0.00. The
+opening was re-posted three times along the way (2,353.00, then 304.00 into
+701-0030, then 1,672.00 into 703-0010), each verified back to balanced.
+
+**Open, owner's call:** OCEAN SKY DO 26061056 carries two invoices — 2,058.64
+kept, 1,410.90 voided. If that DO is really 3,469.54 billed in two parts, the
+1,410.90 is a real payable and Restore brings it back.

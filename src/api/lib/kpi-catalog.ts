@@ -240,6 +240,7 @@ export const KPI_CATALOG: KpiDef[] = [
       "Score = complete ÷ active × 100. Everything present is 100; the score IS the share finished, so 80 means four SKUs in five are fully set up.",
       "The card also lists how many SKUs are missing EACH field, because 'we are at 31%' cannot be acted on and '247 have no BOM' can.",
       "WIP times are deliberately NOT part of this. They belong to production routing, not to the product record, and the daily report already tracks them separately.",
+      "Sectional COMPONENTS count. 86 active SOFA SKUs (5545-1A(LHF), 5543-CSL and the like) are pieces of a set rather than something sold on its own, and all 86 carry no price, no volume, no fabric usage and no routing — they are the whole of the gap. Owner 2026-08-07 ruled they stay in: a piece we cut, sew and ship needs its own figures whether or not a customer can buy it alone.",
     ],
     formula: "Active SKUs having price + m³ + fabric usage + a BOM with routing ÷ all active SKUs × 100",
     // 100, not 95. Owner 2026-08-07: "everything 都有就代表 100 分，然后看他完成
@@ -348,7 +349,7 @@ export const KPI_CATALOG: KpiDef[] = [
       "When you ask where your order is or when it will arrive, how clear and reliable is the answer?",
       "When you chase us or follow up, how quickly does someone come back to you?",
       "How accurate is the paperwork we send you — order confirmations, delivery notes and invoices?",
-      "When something went wrong, how well did we own it and put it right?",
+      "When something went wrong, did you hear it from us first, and did someone stay on it until it was closed?",
       "Overall, how easy are we to deal with as a supplier?",
     ],
     // Index 0 is a 1. Deliberately NOT symmetrical in tone: 3 is "Acceptable",

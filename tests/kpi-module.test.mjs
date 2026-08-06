@@ -149,3 +149,27 @@ test("a broken payout config never silently zeroes someone's pay", async () => {
   assert.equal(payoutSen(95, { mode: "MONTHLY_CASH", amountSen: 0, bands: [] }), 0);
   assert.equal(payoutSen(null, { mode: "MONTHLY_CASH", amountSen: 100000, bands: [] }), 0);
 });
+
+test("a rung can pay a share of the pot OR a flat sum", async () => {
+  // Owner 2026-08-06: "can by amount also can by %". Both are in real use — a
+  // percentage scales when the pot is reviewed, a flat sum is what people
+  // actually negotiate ("hit 80 and you get RM 800").
+  const { payoutSen, bandValueSen } = await import("../src/api/lib/kpi-catalog.ts");
+  const flat = [
+    { minScore: 90, payPct: 0, payAmountSen: 120000 },
+    { minScore: 80, payPct: 0, payAmountSen: 80000 },
+    { minScore: 70, payPct: 0, payAmountSen: 50000 },
+  ];
+  // A flat ladder needs NO pot behind it — that is the point of pinning a rung.
+  assert.equal(payoutSen(95, { mode: "MONTHLY_CASH", amountSen: 0, bands: flat }) / 100, 1200);
+  assert.equal(payoutSen(75, { mode: "MONTHLY_CASH", amountSen: 0, bands: flat }) / 100, 500);
+  assert.equal(payoutSen(65, { mode: "MONTHLY_CASH", amountSen: 0, bands: flat }), 0);
+
+  // A flat rung wins over the percentage on the same row, so one rung can be
+  // pinned without disturbing the others.
+  const mixed = [{ minScore: 80, payPct: 80, payAmountSen: 99900 }];
+  assert.equal(payoutSen(85, { mode: "MONTHLY_CASH", amountSen: 100000, bands: mixed }) / 100, 999);
+
+  assert.equal(bandValueSen({ minScore: 80, payPct: 80 }, 100000) / 100, 800);
+  assert.equal(bandValueSen({ minScore: 80, payPct: 0, payAmountSen: 75000 }, 100000) / 100, 750);
+});

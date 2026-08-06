@@ -296,10 +296,20 @@ export function attainment(
 /** How a person's KPI score turns into money, if at all. */
 export type PayoutMode = "MONTHLY_CASH" | "SCORE_ONLY";
 
-/** One rung: score at or above `minScore` pays `payPct` of the pot. */
+/**
+ * One rung of the ladder.
+ *
+ * A rung pays EITHER a percentage of the pot or a flat sum. Owner 2026-08-06:
+ * "can by amount also can by %". Both are in use in practice — a percentage
+ * scales when the pot is reviewed, a flat sum is what people actually
+ * negotiate ("hit 80 and you get RM 800"). `payAmountSen` wins when set, so a
+ * rung can be pinned without disturbing the others.
+ */
 export interface PayoutBand {
   minScore: number;
   payPct: number;
+  /** Flat sum for this rung, in sen. Overrides payPct when set. */
+  payAmountSen?: number | null;
 }
 
 /**
@@ -361,8 +371,21 @@ export function bandFor(
  */
 export function payoutSen(score: number | null, s: PayoutSettings): number {
   if (s.mode !== "MONTHLY_CASH") return 0;
-  if (s.amountSen <= 0) return 0;
   const band = bandFor(score, s.bands?.length ? s.bands : DEFAULT_PAYOUT_BANDS);
   if (!band) return 0;
+  // A flat rung stands on its own — it does not need a pot behind it, which is
+  // the point of pinning one.
+  if (band.payAmountSen != null && Number.isFinite(band.payAmountSen)) {
+    return Math.max(0, Math.round(band.payAmountSen));
+  }
+  if (s.amountSen <= 0) return 0;
   return Math.round((s.amountSen * band.payPct) / 100);
+}
+
+/** What a rung is worth, for display. */
+export function bandValueSen(band: PayoutBand, potSen: number): number {
+  if (band.payAmountSen != null && Number.isFinite(band.payAmountSen)) {
+    return Math.max(0, Math.round(band.payAmountSen));
+  }
+  return Math.round((potSen * band.payPct) / 100);
 }

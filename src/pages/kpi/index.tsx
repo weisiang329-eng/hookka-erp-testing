@@ -22,11 +22,12 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { getCurrentUser } from "@/lib/auth";
 
-type Scoring = "AUTO" | "CHECKLIST" | "SURVEY";
+type Scoring = "AUTO" | "CHECKLIST" | "SURVEY" | "MANUAL";
 
 type Line = {
   key: string; label: string; detail: string;
   scoring?: Scoring; formula?: string; checklistItems?: string[]; surveyQuestions?: string[];
+  ratingGuide?: string[];
   purpose?: string; definition?: string; measurement?: string[];
   shape: "GATE" | "RATIO"; unit: "%" | "count" | "score";
   available: boolean; blockedBy?: string; drillPath?: string;
@@ -51,6 +52,7 @@ type CardData = {
 type LibItem = {
   key: string; label: string; detail: string; shape: "GATE" | "RATIO"; unit: string;
   scoring: Scoring; formula: string; checklistItems?: string[]; surveyQuestions?: string[];
+  ratingGuide?: string[];
   purpose?: string; definition?: string; measurement?: string[];
   defaultTarget: number; defaultWeight: number; available: boolean;
   current: number | null; evidence: string;
@@ -85,7 +87,14 @@ const BADGE: Record<string, string> = {
   AUTO: "border-[#BFD9AE] bg-[#F2F7EE] text-[#3B6D11]",
   CHECKLIST: "border-[#AECBD9] bg-[#EEF4F7] text-[#11566D]",
   SURVEY: "border-[#C9B8D9] bg-[#F4F0F7] text-[#553D6D]",
+  MANUAL: "border-[#E0C79A] bg-[#FBF5EA] text-[#7A5410]",
   GATE: "border-[#E7B8B0] bg-[#FDF3F1] text-[#9A3A2D]",
+};
+const SCORING_LABEL: Record<string, string> = {
+  AUTO: "auto",
+  CHECKLIST: "checklist",
+  SURVEY: "survey",
+  MANUAL: "rated by supervisor",
 };
 const Badge = ({ kind, children }: { kind: string; children: React.ReactNode }) => (
   <span className={`rounded border px-1.5 text-[10px] font-semibold ${BADGE[kind] ?? ""}`}>
@@ -257,6 +266,17 @@ export default function KpiPage() {
     invalidateCachePrefix("/api/kpi");
   };
 
+  const saveRating = async (kpiKey: string, score: number, note: string) => {
+    const res = await fetch(`/api/kpi/rating/${kpiKey}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ period, score, note, userId: viewUserId || undefined }),
+    });
+    const j = (await res.json().catch(() => ({}))) as { error?: string };
+    if (!res.ok) throw new Error(j.error || "Could not save the rating");
+    invalidateCachePrefix("/api/kpi");
+  };
+
   const openPerson = (userId: string) => {
     setViewUserId(userId);
     setTab("mine");
@@ -338,7 +358,7 @@ export default function KpiPage() {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <span className="text-[13px] font-semibold text-[#1F1D1B]">{k.label}</span>
-                          <Badge kind={k.scoring}>{k.scoring === "AUTO" ? "auto" : k.scoring === "SURVEY" ? "survey" : "checklist"}</Badge>
+                          <Badge kind={k.scoring}>{SCORING_LABEL[k.scoring] ?? "auto"}</Badge>
                         </div>
                         <div className="text-[11.5px] text-[#6B6560] mt-0.5 truncate">{k.detail}</div>
                       </div>
@@ -406,6 +426,18 @@ export default function KpiPage() {
                             <ul className="ml-4 list-disc space-y-0.5">
                               {k.checklistItems!.map((it) => (
                                 <li key={it} className="text-[11.5px] text-[#3A3733]">{it}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {(k.ratingGuide?.length ?? 0) > 0 && (
+                          <div>
+                            <p className="text-[11.5px] font-semibold text-[#1F1D1B] mb-1">
+                              What the supervisor is scoring against
+                            </p>
+                            <ul className="ml-4 list-disc space-y-0.5">
+                              {k.ratingGuide!.map((g) => (
+                                <li key={g} className="text-[11.5px] text-[#3A3733]">{g}</li>
                               ))}
                             </ul>
                           </div>
@@ -835,7 +867,7 @@ export default function KpiPage() {
                           {l.label}
                           {l.scoring && (
                             <Badge kind={l.scoring}>
-                              {l.scoring === "AUTO" ? "auto" : l.scoring === "SURVEY" ? "survey" : "checklist"}
+                              {SCORING_LABEL[l.scoring] ?? "auto"}
                             </Badge>
                           )}
                         </div>
@@ -885,12 +917,122 @@ export default function KpiPage() {
                         onTick={tickItem}
                       />
                     )}
+
+                    {l.scoring === "MANUAL" && (
+                      <RatingBlock
+                        line={l}
+                        canRate={isSuperAdmin && !card.locked}
+                        onSave={saveRating}
+                      />
+                    )}
                   </CardContent>
                 </Card>
               ))}
             </>
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A supervisor-rated KPI: the guide everyone can read, and — for Super Admin —
+ * the box to score it in.
+ *
+ * The employee sees the guide whether or not they have been rated, because the
+ * point of writing the bands down is that the score is not a surprise at month
+ * end. When no rating exists yet the card says so; it does not show a zero.
+ */
+function RatingBlock({
+  line, canRate, onSave,
+}: {
+  line: Line;
+  canRate: boolean;
+  onSave: (kpiKey: string, score: number, note: string) => Promise<void>;
+}) {
+  const [score, setScore] = useState<string>(
+    line.actual === null ? "" : String(line.actual),
+  );
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async () => {
+    const n = Number(score);
+    if (!Number.isFinite(n) || n < 0 || n > 100) {
+      setErr("Score must be between 0 and 100");
+      return;
+    }
+    if (!note.trim()) {
+      setErr("Write the reason — the employee sees it");
+      return;
+    }
+    setBusy(true);
+    setErr("");
+    try {
+      await onSave(line.key, n, note.trim());
+      setNote("");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Could not save the rating");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-3 border-t border-[#F0ECE6] pt-2.5 space-y-2">
+      {(line.ratingGuide?.length ?? 0) > 0 && (
+        <div>
+          <p className="text-[10.5px] font-semibold uppercase tracking-wider text-[#9CA3AF]">
+            How this is scored
+          </p>
+          <ul className="mt-1 space-y-0.5">
+            {line.ratingGuide!.map((g) => (
+              <li key={g} className="text-[11.5px] text-[#5A5550]">
+                {g}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {line.actual === null && !canRate && (
+        <p className="text-[11.5px] text-[#9CA3AF]">
+          Not yet rated for this month.
+        </p>
+      )}
+
+      {canRate && (
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={0}
+              max={100}
+              value={score}
+              onChange={(e) => setScore(e.target.value)}
+              placeholder="0–100"
+              className="w-20 rounded border border-[#E5E0D8] px-2 py-1 text-[12px]"
+            />
+            <input
+              type="text"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="Reason — the employee sees this"
+              className="flex-1 min-w-0 rounded border border-[#E5E0D8] px-2 py-1 text-[12px]"
+            />
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void submit()}
+              className="rounded bg-[#1F1D1B] px-2.5 py-1 text-[11.5px] font-semibold text-white disabled:opacity-50"
+            >
+              {busy ? "Saving…" : "Save"}
+            </button>
+          </div>
+          {err && <p className="text-[11px] text-[#9A3A2D]">{err}</p>}
+        </div>
       )}
     </div>
   );

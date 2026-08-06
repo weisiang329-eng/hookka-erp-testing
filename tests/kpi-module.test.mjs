@@ -48,20 +48,64 @@ test("attainment is capped and floored", () => {
   assert.equal(attainment(up, 95, NaN), 0);
 });
 
-test("every KPI is measurable — there is no subjective type", () => {
-  // Owner 2026-08-06: "每一个 KPI 都必须是可以量化的，员工怎么去达成、做到什么
-  // 程度能拿多少分 … 全部都要有明确、可衡量的标准." A score assigned by
-  // impression at month end cannot be worked towards, so it is not a KPI.
+test("a KPI is measurable unless it provably cannot be", () => {
+  // Owner 2026-08-06: "每一个 KPI 都必须是可以量化的 … 全部都要有明确、可衡量的
+  // 标准." Owner 2026-08-07, drawing the line one step further out: "Auto：也就
+  // 是 measurable 的 … Checklist：肯定也是 measurable 的 … 而这一个就不是
+  // measurable 的，它是属于人工评分的."
+  //
+  // So MANUAL exists, but it is the exception and has to earn its place. The
+  // guard is no longer "no subjective type" — it is that a subjective type
+  // still tells the employee in advance what earns what.
   for (const k of KPI_CATALOG) {
-    // SURVEY counts as measurable: the customer answers 1–5 on a fixed set of
-    // questions, so the number comes from outside the company rather than from
-    // somebody's impression at month end.
     assert.ok(
-      ["AUTO", "CHECKLIST", "SURVEY"].includes(k.scoring),
-      `${k.key} has scoring ${k.scoring} — that is not a measurable type`,
+      ["AUTO", "CHECKLIST", "SURVEY", "MANUAL"].includes(k.scoring),
+      `${k.key} has an unknown scoring type ${k.scoring}`,
     );
-    assert.ok(k.available, `${k.key} must be computable; express it as a checklist if the data is missing`);
+    assert.ok(k.available, `${k.key} must be computable, ticked, surveyed or rated`);
   }
+
+  // Most of the catalogue must still come out of the data. If MANUAL ever
+  // becomes the easy answer, the whole thing decays into opinion with numbers
+  // on it — which is what the 2026-08-06 ruling was protecting against.
+  const manual = KPI_CATALOG.filter((k) => k.scoring === "MANUAL");
+  assert.ok(
+    manual.length * 3 <= KPI_CATALOG.length,
+    `${manual.length} of ${KPI_CATALOG.length} KPIs are hand-rated — too many to still call this measured`,
+  );
+});
+
+test("a rated KPI publishes its bands before the month starts", () => {
+  // A supervisor's score is only fair if the employee could read, in advance,
+  // what a 90 looks like and what a 40 looks like.
+  for (const k of KPI_CATALOG.filter((k) => k.scoring === "MANUAL")) {
+    assert.equal(k.curve, "MANUAL_SCORE", `${k.key} must score on the rating itself`);
+    assert.ok(
+      Array.isArray(k.ratingGuide) && k.ratingGuide.length >= 3,
+      `${k.key} needs a written guide — a bare number cannot be worked towards`,
+    );
+    assert.ok(
+      k.measurement.some((m) => /supervisor/i.test(m)),
+      `${k.key} must say plainly that a human scores it`,
+    );
+  }
+});
+
+test("invoicing lag costs 10 points per document-day", () => {
+  // Owner 2026-08-07: "dispatch 了之后三天内要看到 invoice，迟一天扣10分 … 5张单
+  // 1天就50分." Five documents one day late is the same as one document five
+  // days late — the unit is the document-day, not the document.
+  const d = kpiByKey("documents_not_stuck");
+  assert.equal(d.curve, "PENALTY_PER_UNIT");
+  assert.equal(d.penaltyPerUnit, 10);
+  assert.equal(d.graceDays, 3, "invoiced within 3 days of dispatch is not late");
+
+  assert.equal(attainment(d, 0, 0), 100, "everything billed inside 3 days");
+  assert.equal(attainment(d, 0, 1), 90, "one document, one day late");
+  assert.equal(attainment(d, 0, 5), 50, "five documents one day late each");
+  assert.equal(attainment(d, 0, 5), attainment(d, 0, 5), "or one document five days late");
+  assert.equal(attainment(d, 0, 10), 0);
+  assert.equal(attainment(d, 0, 40), 0, "cannot go negative");
 });
 
 test("a checklist states its items up front", () => {

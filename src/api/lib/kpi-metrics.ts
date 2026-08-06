@@ -20,6 +20,7 @@
 // ---------------------------------------------------------------------------
 import type { Context } from "hono";
 import type { Env } from "../worker";
+import { kpiByKey } from "./kpi-catalog";
 
 export interface MetricResult {
   actual: number | null;
@@ -128,53 +129,123 @@ export async function setupCompleteness(
 }
 
 /**
- * Documents sitting in the middle of the chain.
+ * How many document-days of invoicing lag the month ran up.
  *
- * Reads the SAME compliance snapshot the Daily Report renders, rather than
- * asking the question again in its own SQL. The first draft of this did write
- * its own query — "delivered more than 7 days ago with no invoice" — and
- * returned 0 while the Daily Report showed 139. Both were correct about
- * different things, which is exactly how a KPI loses its authority: the
- * employee sees 0 on their card and 139 on the dashboard and stops believing
- * either. One source, one number.
+ * Owner 2026-08-07: "dispatch 了之后三天内要看到 invoice，迟一天扣 10 分 … 5 张
+ * 单 1 天就 50 分 … 就是一个 DO or SI，不是跟着一个 order，multiple order become
+ * 1 DO SI 的我们."
  *
- * `soNoInvoice` + `doNotInvoiced` are the two buckets that are Office's to
- * clear; the rest of the report belongs to other roles.
+ * Three things in that sentence decide the shape of this query:
+ *
+ *  1. The clock starts at DISPATCH, not at order date, and runs to the invoice
+ *     — so this is a LAG, not a snapshot of what is currently outstanding. The
+ *     old version read the Daily Report's "not invoiced" count, which answers a
+ *     different question: it says how many are stuck right now and says nothing
+ *     about a document invoiced on day 30 last week. Under the new rule that
+ *     one cost 270 points and the snapshot would have shown it as clean.
+ *
+ *  2. The unit is the DELIVERY ORDER. Several sales orders routinely ship on
+ *     one delivery order, and that is one document to raise, so counting sales
+ *     orders would charge the same lateness three times.
+ *
+ *  3. Days accumulate across documents. Five documents one day late is 5, the
+ *     same as one document five days late — the owner's own example. So this
+ *     sums days rather than counting offending documents.
+ *
+ * A delivery order with no invoice yet accrues up to TODAY (or the period end,
+ * whichever is earlier), otherwise a document nobody ever billed would score
+ * better than one billed a day late.
  */
 export async function documentsStuck(
   c: Context<Env>,
   period: string,
 ): Promise<MetricResult> {
-  const snap = await latestSnapshotIn(c, period);
-  if (!snap) return EMPTY;
-  const counts = snap.counts;
-  const n = (Number(counts.soNoInvoice) || 0) + (Number(counts.doNotInvoiced) || 0);
+  const { start, end } = periodBounds(period);
+  const def = kpiByKey("documents_not_stuck");
+  const grace = Number(def?.graceDays ?? 3);
+  const today = new Date().toISOString().slice(0, 10);
+  const asAt = today < end ? today : end;
+
+  const res = await c.var.DB.prepare(
+    `SELECT d.id           AS "id",
+            d.deliveredAt  AS "dispatched",
+            MIN(i.invoiceDate) AS "invoiced"
+       FROM delivery_orders d
+       LEFT JOIN invoices i ON i.deliveryOrderId = d.id
+      WHERE d.deliveredAt IS NOT NULL
+        AND d.deliveredAt <> ''
+        AND substr(d.deliveredAt, 1, 10) >= ?
+        AND substr(d.deliveredAt, 1, 10) <= ?
+      GROUP BY d.id, d.deliveredAt`,
+  )
+    .bind(start, end)
+    .all<{ id: string; dispatched: string | null; invoiced: string | null }>();
+
+  const rows = res.results ?? [];
+  if (rows.length === 0) return EMPTY;
+
+  let lateDays = 0;
+  let lateDocs = 0;
+  let uninvoiced = 0;
+  for (const r of rows) {
+    const from = String(r.dispatched ?? "").slice(0, 10);
+    if (!from) continue;
+    const to = r.invoiced ? String(r.invoiced).slice(0, 10) : asAt;
+    if (!r.invoiced) uninvoiced += 1;
+    const late = Math.max(0, daysBetweenYmd(from, to) - grace);
+    if (late > 0) {
+      lateDays += late;
+      lateDocs += 1;
+    }
+  }
+
   return {
-    actual: n,
-    sampleSize: Number(counts.total) || 0,
-    detail: `${counts.soNoInvoice ?? 0} orders + ${counts.doNotInvoiced ?? 0} deliveries not invoiced (as at ${snap.day})`,
+    actual: lateDays,
+    sampleSize: rows.length,
+    detail:
+      `${lateDays} days late across ${lateDocs} of ${rows.length} delivery orders` +
+      (uninvoiced > 0 ? ` (${uninvoiced} still not invoiced, counted to ${asAt})` : ""),
   };
 }
 
-/** The last compliance snapshot stored within the period, if any. */
-async function latestSnapshotIn(
+/** Whole days from one YYYY-MM-DD to another; negative clamps to 0. */
+function daysBetweenYmd(from: string, to: string): number {
+  const a = Date.parse(`${from}T00:00:00Z`);
+  const b = Date.parse(`${to}T00:00:00Z`);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return 0;
+  return Math.max(0, Math.round((b - a) / 86400000));
+}
+
+/**
+ * A supervisor's score for the month, or null if they have not rated it yet.
+ *
+ * Deliberately returns "not yet rated" rather than 0. An unrated month is the
+ * supervisor's outstanding task, not the employee's failure, and scoring it as
+ * a zero would quietly punish the employee for their manager's inaction.
+ */
+export async function manualRating(
   c: Context<Env>,
   period: string,
-): Promise<{ day: string; counts: Record<string, number> } | null> {
-  const { start, end } = periodBounds(period);
+  userId: string,
+  kpiKey: string,
+): Promise<MetricResult> {
   const row = await c.var.DB.prepare(
-    `SELECT cache_key AS "day", data AS "payload"
-       FROM reports_compliance_snapshot
-      WHERE cache_key >= ? AND cache_key <= ?
-      ORDER BY cache_key DESC LIMIT 1`,
+    `SELECT score AS "score", note AS "note"
+       FROM kpi_manual_ratings
+      WHERE period = ? AND userId = ? AND kpiKey = ?
+      LIMIT 1`,
   )
-    .bind(start, end)
-    .first<{ day: string; payload: unknown }>();
-  if (!row) return null;
-  const d = typeof row.payload === "string" ? safeParse(row.payload) : row.payload;
+    .bind(period, userId, kpiKey)
+    .first<{ score: number | null; note: string | null }>();
+
+  if (!row || row.score === null || row.score === undefined) {
+    return { actual: null, sampleSize: 0, detail: "Not yet rated by the supervisor" };
+  }
+  const score = Number(row.score) || 0;
   return {
-    day: String(row.day),
-    counts: ((d as { counts?: Record<string, number> })?.counts ?? {}),
+    actual: score,
+    sampleSize: 1,
+    detail: row.note ? `${score}/100 — ${row.note}` : `${score}/100`,
   };
 }
 

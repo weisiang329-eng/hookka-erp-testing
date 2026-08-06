@@ -40,15 +40,28 @@ export type KpiShape = "GATE" | "RATIO";
  *   AUTO      — computed from data already in the system.
  *   CHECKLIST — a fixed list of actions defined here, ticked during the month
  *               and verified by Super Admin. actual = done ÷ total.
+ *   SURVEY    — five questions sent to the customer, answered 1–5.
+ *   MANUAL    — the supervisor types the score in at month end.
  *
- * There is deliberately no subjective "rated" type. Owner 2026-08-06: "每一个
- * KPI 都必须是可以量化的，员工怎么去达成、做到什么程度能拿多少分 … 全部都要有
- * 明确、可衡量的标准." A score somebody assigns by impression at month end
- * cannot be worked towards, so it is not a KPI — it is an opinion with a
- * number on it. Anything that felt un-measurable is expressed as a checklist
- * of the ACTIONS instead, which is countable and knowable in advance.
+ * MANUAL was removed on 2026-08-06 and put back on 2026-08-07, because the
+ * owner drew the line differently from where I had drawn it. The earlier
+ * ruling ("每一个 KPI 都必须是可以量化的") stands for everything that CAN be
+ * counted, and AUTO / CHECKLIST / SURVEY are all measurable — the owner's own
+ * split: "Auto：也就是 measurable 的 … Checklist：肯定也是 measurable 的，就是
+ * 发给顾客评估 … 而这一个就不是 measurable 的，它是属于人工评分的."
+ *
+ * The case that forced it is "spot the problem before it grows". You cannot
+ * count it, because a month with genuinely no problems and a month where the
+ * person never looked produce the same zero. Only the supervisor can tell them
+ * apart, and only afterwards: "如果他没有提出任何问题，事后却又有问题发生，那他
+ * 的这个分数就会被上级评得很低." Forcing that into a checklist measured whether
+ * the boxes got ticked, not whether anything was actually caught.
+ *
+ * A MANUAL KPI is still bounded and still shown to the employee in advance —
+ * what it is for, what earns a high score, what earns a low one. What it is
+ * not is derivable from the database, and pretending otherwise was the error.
  */
-export type KpiScoring = "AUTO" | "CHECKLIST" | "SURVEY";
+export type KpiScoring = "AUTO" | "CHECKLIST" | "SURVEY" | "MANUAL";
 
 /**
  * How an actual turns into an attainment percentage.
@@ -62,9 +75,22 @@ export type KpiScoring = "AUTO" | "CHECKLIST" | "SURVEY";
  *                        A ratio cannot express that — 1% late against a target
  *                        of 0 divides by zero, and against a target of 100%
  *                        on-time it barely moves the number.
+ *   PENALTY_PER_UNIT   — start at 100 and subtract `penaltyPerUnit` for each
+ *                        WHOLE UNIT of the actual, where the actual is already
+ *                        a count rather than a percentage. Owner 2026-08-07 on
+ *                        invoicing: "一张单迟一天就扣10分 … 5张单1天就50分."
+ *                        Five documents each one day late is the same fifty
+ *                        points as one document five days late, which is what
+ *                        the owner intends — the unit is the document-day.
  *   SURVEY_MEAN        — the average of the answers, already a 0–100 figure.
+ *   MANUAL_SCORE       — the supervisor's number IS the attainment. No maths.
  */
-export type AttainmentCurve = "TARGET_RATIO" | "PENALTY_PER_PCT" | "SURVEY_MEAN";
+export type AttainmentCurve =
+  | "TARGET_RATIO"
+  | "PENALTY_PER_PCT"
+  | "PENALTY_PER_UNIT"
+  | "SURVEY_MEAN"
+  | "MANUAL_SCORE";
 /** Higher actual is better, or lower is better (a count of problems). */
 export type KpiDirection = "HIGHER_IS_BETTER" | "LOWER_IS_BETTER";
 
@@ -105,6 +131,12 @@ export interface KpiDef {
   curve?: AttainmentCurve;
   /** PENALTY_PER_PCT only — points lost per percentage point. */
   penaltyPerPct?: number;
+  /** PENALTY_PER_UNIT only — points lost per whole unit of the actual. */
+  penaltyPerUnit?: number;
+  /** How many days are allowed before a document starts counting as late. */
+  graceDays?: number;
+  /** MANUAL only — what earns a high score, and what earns a low one. */
+  ratingGuide?: string[];
   /** Suggested target; the assignment row overrides it per person. */
   defaultTarget: number;
   /**
@@ -188,23 +220,28 @@ export const KPI_CATALOG: KpiDef[] = [
   },
   {
     key: "documents_not_stuck",
-    label: "Orders billed, not left sitting",
-    detail: "Delivered goods that still have no invoice against them",
+    label: "Invoice raised within 3 days of dispatch",
+    detail: "Each delivery order costs 10 points for every day its invoice is late",
     shape: "RATIO",
     direction: "LOWER_IS_BETTER",
     unit: "count",
     scoring: "AUTO",
+    curve: "PENALTY_PER_UNIT",
+    penaltyPerUnit: 10,
+    graceDays: 3,
     purpose:
-      "Goods that shipped but were never invoiced are work already paid for by us and not yet paid for by the customer. It is the largest single item on the daily report and it is cash sitting still.",
+      "Goods that shipped but were never invoiced are work already paid for by us and not yet paid for by the customer. It is cash sitting still, and every day it sits is a day we financed the customer for free.",
     definition:
-      "The count of sales orders and delivery orders that have moved but carry no invoice — the same two buckets the Daily Report shows on the dashboard.",
+      "Days late, summed across every delivery order dispatched in the month. The clock starts the day the goods leave and the invoice is due within 3 days. The unit counted is the DELIVERY ORDER (or the invoice raised against it), NOT the sales order — several sales orders routinely ship on one delivery order, and that is one document to bill, not three.",
     measurement: [
-      "Read the Daily Report's own figures rather than asking the question separately, so this KPI and the dashboard can never disagree.",
-      "Add: sales orders not yet invoiced + delivery orders not yet invoiced.",
-      "Lower is better. Reaching the target scores full marks; there is no extra credit for going below it.",
+      "For every delivery order dispatched during the month, take the date it left.",
+      "Find the invoice raised against that delivery order. If there is none yet, count up to today instead.",
+      "Days late = days from dispatch to invoice, minus the 3 allowed. Invoiced on day 0, 1, 2 or 3 is not late.",
+      "Add up the days late across every delivery order. Five documents one day late each = 5, exactly the same as one document five days late.",
+      "Score starts at 100 and loses 10 points per day late. 10 days late in total scores nothing.",
     ],
-    formula: "Sales orders not invoiced + delivery orders not invoiced, from the Daily Report on the dashboard",
-    defaultTarget: 40,
+    formula: "100 − (total days late × 10), where a delivery order is late from day 4 after dispatch",
+    defaultTarget: 0,
     defaultWeight: 20,
     available: true,
     drillPath: "/daily-report",
@@ -270,34 +307,35 @@ export const KPI_CATALOG: KpiDef[] = [
   },
   {
     key: "problems_caught_early",
-    label: "Preventive sweep — find it before the customer does",
-    detail: "Five checks a month over the places trouble shows up first",
+    label: "Problems raised early — before they grew",
+    detail: "Rated by your supervisor at month end. Not counted by the system",
     shape: "RATIO",
     direction: "HIGHER_IS_BETTER",
-    unit: "%",
-    scoring: "CHECKLIST",
+    unit: "score",
+    scoring: "MANUAL",
+    curve: "MANUAL_SCORE",
     purpose:
-      "Most of the work is done by agents now, so the job is watching them. The cost of a missed exception is not the exception — it is the customer finding it first.",
+      "Most of the work is done by agents now, so the job is watching them. The cost of a missed exception is not the exception — it is the customer finding it first. Catching something early and killing it while it is small is worth more than handling it well after it has grown.",
     definition:
-      "Five named checks, each done at least once in the month and verified by Super Admin. Scored on the checks being done, because whether a problem existed that month is luck; whether anyone looked is not.",
+      "A score out of 100, given by your supervisor at the end of the month. This is the one KPI the system does NOT calculate, because it cannot: a month with genuinely nothing wrong and a month where nobody looked produce the same empty record. Only a supervisor can tell those apart, and usually only afterwards.",
     measurement: [
-      "Each of the five checks is ticked by the person when done, and verified by Super Admin.",
-      "A tick is a claim; the verification is what makes it a score. Super Admin can untick.",
-      "Score = checks done ÷ 5 × 100.",
-      "The list is fixed in the system, so it cannot be shortened to raise a score.",
+      "During the month, raise the problems you find — before they turn into a customer complaint, a delay or a loss.",
+      "At month end your supervisor scores this out of 100 and writes the reason.",
+      "Finding nothing because there genuinely was nothing is fine and does not cost you marks.",
+      "Raising nothing, and then something going wrong that was there to be found, scores low. That is the case this KPI exists for.",
+      "The score and the supervisor's note are both shown on your card, so you know why.",
     ],
-    formula: "Checks completed ÷ 5 × 100",
-    checklistItems: [
-      "Agent error log reviewed and every failed run raised",
-      "Orders already past their promised date reviewed and chased",
-      "Price and COGS anomalies on the daily report cleared",
-      "Purchase orders not yet received chased with the supplier",
-      "Delivered orders with no invoice pushed through to billing",
+    formula: "Your supervisor's score out of 100, multiplied by this KPI's weight",
+    ratingGuide: [
+      "90–100 — caught something real and early, and it was killed while it was still small.",
+      "70–89 — raised problems in good time; nothing serious got past.",
+      "50–69 — quiet month, nothing raised, and nothing blew up either.",
+      "1–49 — nothing was raised, and something then went wrong that was findable.",
     ],
     defaultTarget: 100,
     defaultWeight: 20,
     available: true,
-    roles: ["OFFICE", "QA"],
+    roles: ["OFFICE", "QA", "SALES", "HR", "FINANCE", "PRODUCTION", "WAREHOUSE"],
   },
 ];
 
@@ -318,7 +356,8 @@ export function kpisForRole(role: string): KpiDef[] {
  * Floored at 0 so a bad month cannot produce negative points.
  */
 export function attainment(
-  def: Pick<KpiDef, "direction"> & Partial<Pick<KpiDef, "curve" | "penaltyPerPct">>,
+  def: Pick<KpiDef, "direction"> &
+    Partial<Pick<KpiDef, "curve" | "penaltyPerPct" | "penaltyPerUnit">>,
   target: number,
   actual: number,
 ): number {
@@ -330,8 +369,14 @@ export function attainment(
     const per = Number(def.penaltyPerPct) || 10;
     return Math.max(0, Math.min(120, Math.round((100 - actual * per) * 10) / 10));
   }
-  // A survey mean is already the attainment.
-  if (def.curve === "SURVEY_MEAN") {
+  // Same shape, but the actual is a COUNT (document-days late) rather than a
+  // percentage, so nothing is normalised by a denominator first.
+  if (def.curve === "PENALTY_PER_UNIT") {
+    const per = Number(def.penaltyPerUnit) || 10;
+    return Math.max(0, Math.min(120, Math.round((100 - actual * per) * 10) / 10));
+  }
+  // A survey mean, and a supervisor's rating, are both already the attainment.
+  if (def.curve === "SURVEY_MEAN" || def.curve === "MANUAL_SCORE") {
     return Math.max(0, Math.min(120, Math.round(actual * 10) / 10));
   }
 

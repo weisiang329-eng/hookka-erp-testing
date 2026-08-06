@@ -14,7 +14,14 @@ import { resolve } from "node:path";
 
 import { translateSql } from "../src/api/lib/supabase-compat.ts";
 
-const SRC = readFileSync(resolve(process.cwd(), "src/api/routes/kpi.ts"), "utf8");
+// Both files. The route was the only one checked, which was luck rather than
+// design: `documentsStuck` and `manualRating` live in kpi-metrics.ts and write
+// exactly the same kind of SQL, so an unmapped column there would 500 the same
+// cards through a file the guard never opened.
+const SOURCES = [
+  "src/api/routes/kpi.ts",
+  "src/api/lib/kpi-metrics.ts",
+].map((f) => [f, readFileSync(resolve(process.cwd(), f), "utf8")]);
 
 /** Every backtick SQL template in the file. */
 function sqlBlocks(src) {
@@ -22,11 +29,13 @@ function sqlBlocks(src) {
 }
 
 test("no camelCase identifier survives translation", () => {
-  const blocks = sqlBlocks(SRC);
-  assert.ok(blocks.length >= 5, `expected several SQL blocks, found ${blocks.length}`);
+  const blocks = SOURCES.flatMap(([file, src]) =>
+    sqlBlocks(src).map((b) => [file, b]),
+  );
+  assert.ok(blocks.length >= 8, `expected several SQL blocks, found ${blocks.length}`);
 
   const offenders = [];
-  for (const block of blocks) {
+  for (const [file, block] of blocks) {
     // Drop the template holes — `${...}` is JS, not SQL.
     const sql = block.replace(/\$\{[^}]*\}/g, " ");
     // Strip DOUBLE-QUOTED names before looking. `u.id AS "userId"` is an output
@@ -39,13 +48,13 @@ test("no camelCase identifier survives translation", () => {
       // Postgres folds unquoted identifiers to lowercase, so a name that is
       // already all-lowercase in the database is fine either way. What is NOT
       // fine is a camelCase name whose column is snake_case — that 400s.
-      offenders.push(id);
+      offenders.push(`${id}  (${file})`);
     }
   }
   assert.deepEqual(
     [...new Set(offenders)],
     [],
-    `untranslated camelCase in kpi.ts SQL — add to column-rename-map.json:\n  ${[...new Set(offenders)].join("\n  ")}`,
+    `untranslated camelCase in KPI SQL — add to column-rename-map.json:\n  ${[...new Set(offenders)].join("\n  ")}`,
   );
 });
 

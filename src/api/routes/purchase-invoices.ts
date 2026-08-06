@@ -59,6 +59,13 @@ function ensurePiMigrations(db: D1Database): Promise<void> {
       // column-rename-map.json entry needed.
       "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS supplier_invoice_no TEXT",
       "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS supplier_do_no TEXT",
+      // What the status was when it was voided, so unvoid restores THAT rather
+      // than guessing (owner 2026-08-05: 「我要可以 unvoid function」 — he had
+      // voided the wrong half of a duplicate pair). Rows voided before this
+      // column existed read NULL and fall back to CONFIRMED, which is what a
+      // voidable invoice always was: void refuses DRAFT and refuses any paid
+      // invoice, so PAID / PARTIAL_PAID can never be the pre-void status.
+      "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS pre_void_status TEXT",
       // 0200 — per-document purchase company override (HOOKKA / OHANA / HOUZS).
       // Inherits PO → GRN → supplier → HOOKKA on create; never null.
       "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS purchase_org_code TEXT",
@@ -577,6 +584,77 @@ async function buildGrnRestoreStatements(
 // Per GRN line: projected = (currentInvoiced − thisPI'sOldQty) + thisPI'sNewQty
 // must be ≤ acceptedQty. We subtract this PI's own old consumption because the
 // edit replaces it (it does NOT stack on top of the existing rows).
+// ---------------------------------------------------------------------------
+// The inverse of buildGrnRestoreStatements: an unvoid re-claims the quantity
+// the void handed back. It can only do that if the receipt still has the room —
+// while the invoice sat cancelled, another invoice may have billed those lines.
+// Refusing is the only safe answer: silently clamping would restore an invoice
+// whose lines no longer add up to what it charges.
+// ---------------------------------------------------------------------------
+async function buildGrnReconsumeStatements(
+  db: D1Database,
+  piId: string,
+): Promise<{ ok: true; statements: D1PreparedStatement[] } | { ok: false; error: string }> {
+  const linesRes = await db
+    .prepare(
+      "SELECT grn_item_id, qty, materialName FROM purchase_invoice_items WHERE pi_id = ?",
+    )
+    .bind(piId)
+    .all<{
+      grn_item_id?: string | null;
+      grnItemId?: string | null;
+      qty: number;
+      materialName?: string | null;
+    }>();
+
+  const wantByGrnItem = new Map<string, { qty: number; name: string }>();
+  for (const ln of linesRes.results ?? []) {
+    const giId = ln.grnItemId ?? ln.grn_item_id ?? null;
+    if (!giId) continue;
+    const q = Number(ln.qty) || 0;
+    if (q <= 0) continue;
+    const prev = wantByGrnItem.get(String(giId));
+    wantByGrnItem.set(String(giId), {
+      qty: (prev?.qty ?? 0) + q,
+      name: prev?.name ?? String(ln.materialName ?? "line"),
+    });
+  }
+  if (wantByGrnItem.size === 0) return { ok: true, statements: [] };
+
+  const statements: D1PreparedStatement[] = [];
+  for (const [giId, { qty, name }] of wantByGrnItem) {
+    const gi = await db
+      .prepare("SELECT acceptedQty, invoiced_qty FROM grn_items WHERE id = ?")
+      .bind(giId)
+      .first<{
+        acceptedQty?: number | null;
+        accepted_qty?: number | null;
+        invoiced_qty?: number | null;
+        invoicedQty?: number | null;
+      }>();
+    if (!gi) {
+      return {
+        ok: false,
+        error: `Line "${name}" points at a goods-receipt line that no longer exists — this invoice can't be restored.`,
+      };
+    }
+    const accepted = Number(gi.acceptedQty ?? gi.accepted_qty ?? 0) || 0;
+    const invoiced = Number(gi.invoicedQty ?? gi.invoiced_qty ?? 0) || 0;
+    if (invoiced + qty > accepted) {
+      return {
+        ok: false,
+        error: `Line "${name}": another invoice has billed this goods receipt since the void — only ${accepted - invoiced} of the ${qty} needed is still available (received ${accepted}, already billed ${invoiced}).`,
+      };
+    }
+    statements.push(
+      db
+        .prepare("UPDATE grn_items SET invoiced_qty = invoiced_qty + ? WHERE id = ?")
+        .bind(qty, giId),
+    );
+  }
+  return { ok: true, statements };
+}
+
 // ---------------------------------------------------------------------------
 async function checkInvoicedQtyCeilingAfterEdit(
   db: D1Database,
@@ -2340,6 +2418,80 @@ app.delete("/:id", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// The ledger state of one purchase invoice, as NET amounts per account.
+//
+// `base` = what raising the invoice posted (its own legs plus any edit legs).
+// `total` = the net of EVERY visible leg, reversals included.
+//
+// Void and unvoid are then the same operation with a different target:
+//   void   → target 0     (delta = −total)      the liability disappears
+//   unvoid → target base  (delta = base − total) the liability comes back
+//
+// Deriving the delta from what is actually posted — rather than counting how
+// many times each button was pressed — is what makes a void → unvoid → void
+// cycle safe. A press whose delta is all-zero has nothing to do and writes
+// nothing, so every one of them is idempotent for free. The earlier
+// "has it ever been voided?" test could not tell a second void from a redundant
+// one, and would have skipped the reversal on a re-void after an unvoid,
+// leaving the liability on 400-0000 while the subledger dropped the invoice.
+// ---------------------------------------------------------------------------
+const PI_REVERSAL_TYPES = ["purchase_invoice_void", "purchase_invoice_unvoid"];
+
+async function loadPiLedgerNet(
+  db: D1Database,
+  piId: string,
+): Promise<{ base: Map<string, number>; total: Map<string, number>; orgId: string | null; legs: number }> {
+  const res = await db
+    .prepare(
+      `SELECT accountCode, sourceType, debitSen, creditSen, orgId FROM ledger_journal_entries
+        WHERE sourceId = ? AND hidden = 0 AND sourceType LIKE 'purchase_invoice%'`,
+    )
+    .bind(piId)
+    .all<{ accountCode: string; sourceType: string; debitSen: number; creditSen: number; orgId: string }>();
+  const rows = res.results ?? [];
+  const base = new Map<string, number>();
+  const total = new Map<string, number>();
+  let orgId: string | null = null;
+  for (const l of rows) {
+    orgId = l.orgId ?? orgId;
+    const signed = (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0);
+    total.set(l.accountCode, (total.get(l.accountCode) ?? 0) + signed);
+    if (!PI_REVERSAL_TYPES.includes(String(l.sourceType))) {
+      base.set(l.accountCode, (base.get(l.accountCode) ?? 0) + signed);
+    }
+  }
+  return { base, total, orgId, legs: rows.length };
+}
+
+/** Legs that move the invoice's ledger position from `total` to `target`. */
+function buildPiDeltaLegs(
+  target: Map<string, number>,
+  total: Map<string, number>,
+  opts: { sourceType: string; sourceId: string; description: string; actorUserId: string | null; orgId: string },
+): Parameters<typeof buildJournalEntryStatements>[2] {
+  const accounts = new Set([...target.keys(), ...total.keys()]);
+  const legs: Parameters<typeof buildJournalEntryStatements>[2] = [];
+  let legNo = 1;
+  for (const accountCode of accounts) {
+    const delta = (target.get(accountCode) ?? 0) - (total.get(accountCode) ?? 0);
+    if (delta === 0) continue;
+    legs.push({
+      id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+      sourceType: opts.sourceType,
+      sourceId: opts.sourceId,
+      legNo: legNo++,
+      accountCode,
+      debitSen: delta > 0 ? delta : 0,
+      creditSen: delta < 0 ? -delta : 0,
+      description: opts.description,
+      actorUserId: opts.actorUserId,
+      orgId: opts.orgId,
+    });
+  }
+  return legs;
+}
+
+// ---------------------------------------------------------------------------
 // POST /api/purchase-invoices/:id/void — cancel a POSTED purchase invoice.
 //
 // Owner 2026-08-05, on an imported GVP invoice: 「帮我做 void 的功能」. Until
@@ -2405,57 +2557,30 @@ app.post("/:id/void", async (c) => {
   const actorUserId =
     (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
 
-  // 1. Mirror-reverse the visible ledger legs, netted per account.
-  const legRes = await db
-    .prepare(
-      `SELECT accountCode, debitSen, creditSen, orgId FROM ledger_journal_entries
-        WHERE sourceId = ? AND hidden = 0 AND sourceType LIKE 'purchase_invoice%'`,
-    )
-    .bind(id)
-    .all<{ accountCode: string; debitSen: number; creditSen: number; orgId: string }>();
-  const legs = legRes.results ?? [];
-  const alreadyVoided = await ledgerHasSource(db, String(legs[0]?.orgId ?? getOrgId(c)), "purchase_invoice_void", id);
-  if (legs.length > 0 && !alreadyVoided) {
-    const netByAccount = new Map<string, number>(); // +ve = net DR to reverse
-    let legOrgId = getOrgId(c);
-    for (const l of legs) {
-      legOrgId = l.orgId ?? legOrgId;
-      netByAccount.set(
-        l.accountCode,
-        (netByAccount.get(l.accountCode) ?? 0) + (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0),
-      );
-    }
-    let legNo = 1;
-    const revLegs: Parameters<typeof buildJournalEntryStatements>[2] = [];
-    for (const [accountCode, net] of netByAccount) {
-      if (net === 0) continue;
-      revLegs.push({
-        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
-        sourceType: "purchase_invoice_void",
-        sourceId: id,
-        legNo: legNo++,
-        accountCode,
-        debitSen: net < 0 ? -net : 0,
-        creditSen: net > 0 ? net : 0,
-        description: `Void · PI ${pi.piNo ?? id} · ${pi.supplierName ?? ""}`,
-        actorUserId,
-        orgId: legOrgId,
-      });
-    }
-    if (revLegs.length > 0) {
-      const { statements: ls } = await buildJournalEntryStatements(db, legOrgId, revLegs);
-      statements.push(...ls);
-    }
+  // 1. Move the invoice's ledger position to zero — target 0, delta = −total.
+  const { total, orgId: legOrgId, legs } = await loadPiLedgerNet(db, id);
+  const revLegs = buildPiDeltaLegs(new Map(), total, {
+    sourceType: "purchase_invoice_void",
+    sourceId: id,
+    description: `Void · PI ${pi.piNo ?? id} · ${pi.supplierName ?? ""}`,
+    actorUserId,
+    orgId: legOrgId ?? getOrgId(c),
+  });
+  if (revLegs.length > 0) {
+    const { statements: ls } = await buildJournalEntryStatements(db, legOrgId ?? getOrgId(c), revLegs);
+    statements.push(...ls);
   }
 
   // 2. Give the GRN lines their availability back.
   statements.push(...(await buildGrnRestoreStatements(db, id)));
 
-  // 3. Drop it out of every subledger read.
+  // 3. Drop it out of every subledger read, remembering what to restore to.
   statements.push(
     db
-      .prepare("UPDATE purchase_invoices SET status = 'CANCELLED', updated_at = ? WHERE id = ?")
-      .bind(new Date().toISOString(), id),
+      .prepare(
+        "UPDATE purchase_invoices SET status = 'CANCELLED', pre_void_status = ?, updated_at = ? WHERE id = ?",
+      )
+      .bind(status, new Date().toISOString(), id),
   );
 
   await db.batch(statements);
@@ -2465,12 +2590,106 @@ app.post("/:id/void", async (c) => {
     resourceId: id,
     action: "void",
     before: { status, amountSen: pi.amountSen },
-    after: { status: "CANCELLED", reversedLegs: legs.length },
+    after: { status: "CANCELLED", reversedLegs: legs },
   });
 
   return c.json({
     success: true,
-    data: { id, piNo: pi.piNo, status: "CANCELLED", reversedLegs: legs.length },
+    data: { id, piNo: pi.piNo, status: "CANCELLED", reversedLegs: legs },
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/purchase-invoices/:id/unvoid — bring a CANCELLED invoice back.
+//
+// Owner 2026-08-05: clearing a batch of duplicate invoices, he voided the wrong
+// half of the SUNMAT pair — the copy carrying the supplier's DO number — and
+// asked for a way back (「我要可以 unvoid function」). Without one the only
+// recovery is re-keying the invoice under a new number, which loses its
+// history and its place in the numbering.
+//
+// It is void run backwards, and every step has to reverse:
+//   • the ledger goes back to `base` (see loadPiLedgerNet) — appended as a new
+//     `purchase_invoice_unvoid` batch, never by deleting the void legs: the
+//     journal is hash-chained and append-only.
+//   • the GRN lines are re-consumed — and REFUSED if another invoice has taken
+//     that quantity in the meantime, because restoring would push
+//     invoiced_qty past what was actually received.
+//   • the status returns to what it was before the void, not a guess.
+//
+// Idempotent: unvoiding a live invoice changes nothing and says so.
+// ---------------------------------------------------------------------------
+app.post("/:id/unvoid", async (c) => {
+  const denied = requireFinance(c);
+  if (denied) return denied;
+
+  const id = c.req.param("id");
+  const db = c.var.DB;
+  await ensurePiMigrations(db);
+
+  const pi = await db
+    .prepare("SELECT * FROM purchase_invoices WHERE id = ?")
+    .bind(id)
+    .first<PurchaseInvoiceRow>();
+  if (!pi) return c.json({ success: false, error: "Purchase invoice not found" }, 404);
+
+  const status = String(pi.status ?? "");
+  if (status !== "CANCELLED") {
+    return c.json({ success: true, data: { id, piNo: pi.piNo, status, alreadyLive: true } });
+  }
+
+  // The GRN lines this invoice used to claim must still be free, or restoring
+  // it would bill more than was received.
+  const reconsume = await buildGrnReconsumeStatements(db, id);
+  if (!reconsume.ok) return c.json({ success: false, error: reconsume.error }, 409);
+
+  const statements: D1PreparedStatement[] = [];
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+
+  const { base, total, orgId: legOrgId, legs } = await loadPiLedgerNet(db, id);
+  const restoreLegs = buildPiDeltaLegs(base, total, {
+    sourceType: "purchase_invoice_unvoid",
+    sourceId: id,
+    description: `Unvoid · PI ${pi.piNo ?? id} · ${pi.supplierName ?? ""}`,
+    actorUserId,
+    orgId: legOrgId ?? getOrgId(c),
+  });
+  if (restoreLegs.length > 0) {
+    const { statements: ls } = await buildJournalEntryStatements(db, legOrgId ?? getOrgId(c), restoreLegs);
+    statements.push(...ls);
+  }
+
+  statements.push(...reconsume.statements);
+
+  const restored =
+    String(
+      (pi as unknown as { pre_void_status?: string | null; preVoidStatus?: string | null })
+        .preVoidStatus ??
+        (pi as unknown as { pre_void_status?: string | null }).pre_void_status ??
+        "",
+    ) || "CONFIRMED";
+  statements.push(
+    db
+      .prepare(
+        "UPDATE purchase_invoices SET status = ?, pre_void_status = NULL, updated_at = ? WHERE id = ?",
+      )
+      .bind(restored, new Date().toISOString(), id),
+  );
+
+  await db.batch(statements);
+
+  await emitAudit(c, {
+    resource: "purchase-invoices",
+    resourceId: id,
+    action: "unvoid",
+    before: { status: "CANCELLED", amountSen: pi.amountSen },
+    after: { status: restored, restoredLegs: restoreLegs.length, ledgerLegsSeen: legs },
+  });
+
+  return c.json({
+    success: true,
+    data: { id, piNo: pi.piNo, status: restored, restoredLegs: restoreLegs.length },
   });
 });
 

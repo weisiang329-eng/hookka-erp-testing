@@ -342,6 +342,37 @@ export default function PurchaseInvoiceDetailPage() {
     }
   }
 
+  // Unvoid — the way back. Owner 2026-08-05 voided the wrong half of a
+  // duplicate pair and had no undo; re-keying the invoice would have lost its
+  // number and its history.
+  async function unvoidPI() {
+    if (!pi) return;
+    const ok = await confirm({
+      title: `Restore ${pi.piNo}?`,
+      message:
+        `This puts its ledger entry back, re-claims the goods-receipt quantity, and returns the invoice to the creditor aging. ` +
+        `It is refused if another invoice has billed those goods-receipt lines in the meantime.`,
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/purchase-invoices/${pi.id}/unvoid`, { method: "POST" });
+      const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+      if (!res.ok || !j?.success) {
+        toast.error(j?.error || `Restore failed (${res.status})`);
+        return;
+      }
+      invalidateCachePrefix("/api/purchase-invoices");
+      invalidateCachePrefix("/api/accounting");
+      toast.success(`${pi.piNo} restored`);
+      refresh();
+    } catch {
+      toast.error("Restore failed — network error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // ---- Phase B2: edit mode (DRAFT-only) — editable header + line items ----
   const [editing, setEditing] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -584,6 +615,19 @@ export default function PurchaseInvoiceDetailPage() {
                 className="text-[#9A3A2D] hover:bg-[#9A3A2D]/5"
               >
                 <Ban className="h-3.5 w-3.5" /> Void
+              </Button>
+            )}
+            {/* Restore — the mirror of Void, same role gate. */}
+            {!editing && pi.status === "CANCELLED" && canVoid && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={unvoidPI}
+                disabled={busy}
+                className="text-[#3E6570] hover:bg-[#3E6570]/5"
+              >
+                <Undo2 className="h-3.5 w-3.5" /> Restore
               </Button>
             )}
             {!editing &&

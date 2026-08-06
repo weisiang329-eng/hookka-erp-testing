@@ -289,7 +289,11 @@ app.put("/payout/:id", async (c) => {
   await ensureKpiTables(c.var.DB);
   const userId = c.req.param("id");
 
-  let body: { mode?: string; amountSen?: number; bands?: Array<{ minScore: number; payPct: number }> };
+  let body: {
+    mode?: string;
+    amountSen?: number;
+    bands?: Array<{ minScore: number; payPct: number; payAmountSen?: number | null }>;
+  };
   try {
     body = (await c.req.json()) as typeof body;
   } catch {
@@ -302,17 +306,30 @@ app.put("/payout/:id", async (c) => {
     return c.json({ success: false, error: "Amount cannot be negative" }, 400);
   }
   for (const b of bands) {
-    const min = Number(b.minScore), pct = Number(b.payPct);
+    const min = Number(b.minScore);
     if (!Number.isFinite(min) || min < 0 || min > 100) {
       return c.json({ success: false, error: "Band score must be 0–100" }, 400);
     }
-    if (!Number.isFinite(pct) || pct < 0 || pct > 200) {
-      return c.json({ success: false, error: "Band payout must be 0–200%" }, 400);
+    // A rung pays a percentage of the pot OR a flat sum. Validate whichever it
+    // actually uses; a flat rung needs no percentage to be sensible.
+    if (b.payAmountSen != null) {
+      const amt = Number(b.payAmountSen);
+      if (!Number.isFinite(amt) || amt < 0) {
+        return c.json({ success: false, error: "Band amount cannot be negative" }, 400);
+      }
+    } else {
+      const pct = Number(b.payPct);
+      if (!Number.isFinite(pct) || pct < 0 || pct > 200) {
+        return c.json({ success: false, error: "Band payout must be 0–200%" }, 400);
+      }
     }
   }
-  if (mode === "MONTHLY_CASH" && amountSen === 0) {
+  // A pot of 0 is fine when every rung carries its own flat sum — that is the
+  // "by amount" ladder. It is only wrong when the rungs are percentages of it.
+  const anyPct = bands.some((b) => b.payAmountSen == null);
+  if (mode === "MONTHLY_CASH" && amountSen === 0 && anyPct) {
     return c.json(
-      { success: false, error: "A monthly cash KPI needs an amount above 0" },
+      { success: false, error: "Set a pot, or give every band its own amount" },
       400,
     );
   }

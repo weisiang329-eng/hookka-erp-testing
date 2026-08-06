@@ -43,9 +43,9 @@ type CardData = {
     mode: "MONTHLY_CASH" | "SCORE_ONLY";
     amountSen: number;
     earnedSen: number;
-    bands: Array<{ minScore: number; payPct: number }>;
-    band: { minScore: number; payPct: number } | null;
-    nextBand: { minScore: number; payPct: number } | null;
+    bands: Array<{ minScore: number; payPct: number; payAmountSen?: number | null }>;
+    band: { minScore: number; payPct: number; payAmountSen?: number | null } | null;
+    nextBand: { minScore: number; payPct: number; payAmountSen?: number | null } | null;
   };
 };
 type LibItem = {
@@ -176,6 +176,73 @@ export default function KpiPage() {
       setMsg(e instanceof Error ? e.message : "Save failed");
     } finally {
       setSaving(false);
+    }
+  };
+
+  // ---- Payout settings, per person ----------------------------------------
+  // Lives on the person's own card rather than in a separate screen: the pot
+  // is decided while looking at what they actually score, and the ladder is
+  // meaningless without the score beside it.
+  const [payOpen, setPayOpen] = useState(false);
+  const [payForm, setPayForm] = useState<{
+    mode: "MONTHLY_CASH" | "SCORE_ONLY";
+    amountRM: number;
+    bands: Array<{ minScore: number; payPct: number; payAmountSen?: number | null }>;
+    /** Whole-ladder toggle: rungs as a share of the pot, or as flat sums. */
+    byAmount: boolean;
+  } | null>(null);
+  const [paySaving, setPaySaving] = useState(false);
+  const [payMsg, setPayMsg] = useState<string | null>(null);
+
+  const openPayout = () => {
+    const cur = card?.payout;
+    setPayForm({
+      mode: cur?.mode ?? "SCORE_ONLY",
+      amountRM: cur ? cur.amountSen / 100 : 0,
+      bands: cur?.bands?.length
+        ? [...cur.bands].sort((a, b) => b.minScore - a.minScore)
+        : [
+            { minScore: 90, payPct: 100 },
+            { minScore: 80, payPct: 80 },
+            { minScore: 70, payPct: 60 },
+            { minScore: 60, payPct: 40 },
+          ],
+      byAmount: (cur?.bands ?? []).some((b) => b.payAmountSen != null),
+    });
+    setPayMsg(null);
+    setPayOpen(true);
+  };
+
+  const savePayout = async () => {
+    if (!payForm) return;
+    setPaySaving(true);
+    setPayMsg(null);
+    try {
+      const target = viewUserId || me?.id;
+      if (!target) throw new Error("No person selected");
+      const r = await fetch(`/api/kpi/payout/${target}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          mode: payForm.mode,
+          amountSen: Math.round(payForm.amountRM * 100),
+          // Strip the unused half so the stored ladder says which kind it is.
+          bands: payForm.bands.map((b) =>
+            payForm.byAmount
+              ? { minScore: b.minScore, payPct: 0, payAmountSen: Math.round(b.payAmountSen ?? 0) }
+              : { minScore: b.minScore, payPct: b.payPct, payAmountSen: null },
+          ),
+        }),
+      });
+      const j = (await r.json()) as { success?: boolean; error?: string };
+      if (!r.ok || !j.success) throw new Error(j.error || `Save failed (${r.status})`);
+      setPayMsg("Saved.");
+      setPayOpen(false);
+      invalidateCachePrefix("/api/kpi");
+    } catch (e) {
+      setPayMsg(e instanceof Error ? e.message : "Save failed");
+    } finally {
+      setPaySaving(false);
     }
   };
 
@@ -458,6 +525,169 @@ export default function KpiPage() {
             </select>
           )}
 
+          {isSuperAdmin && (
+            <button
+              type="button"
+              onClick={openPayout}
+              className="ml-2 h-8 rounded-md border border-[#E2DDD8] bg-white px-3 text-xs font-semibold"
+            >
+              Set bonus &amp; bands
+            </button>
+          )}
+
+          {isSuperAdmin && payOpen && payForm && (
+            <Card className="bg-white rounded-xl">
+              <CardContent className="p-4 space-y-3">
+                <div>
+                  <p className="text-sm font-bold">
+                    Bonus for {(usersResp?.data ?? []).find((u) => u.id === viewUserId)?.displayName ?? "this person"}
+                  </p>
+                  <p className="text-[11px] text-[#5A5550]">
+                    The score is weighted across their KPIs; the ladder turns that one score into money.
+                  </p>
+                </div>
+
+                <div className="flex gap-4 flex-wrap items-end">
+                  <label className="text-[12px]">
+                    <span className="block text-[11px] text-[#5A5550] mb-1">How it pays</span>
+                    <select
+                      value={payForm.mode}
+                      onChange={(e) => setPayForm({ ...payForm, mode: e.target.value as "MONTHLY_CASH" | "SCORE_ONLY" })}
+                      className="h-8 rounded-md border border-[#E2DDD8] bg-white px-2 text-xs"
+                    >
+                      <option value="SCORE_ONLY">Score only — settled at year end</option>
+                      <option value="MONTHLY_CASH">Monthly cash</option>
+                    </select>
+                  </label>
+                  {payForm.mode === "MONTHLY_CASH" && !payForm.byAmount && (
+                    <label className="text-[12px]">
+                      <span className="block text-[11px] text-[#5A5550] mb-1">Pot at the top band (RM)</span>
+                      <input
+                        type="number"
+                        value={payForm.amountRM}
+                        onChange={(e) => setPayForm({ ...payForm, amountRM: Number(e.target.value) })}
+                        className="h-8 w-32 rounded-md border border-[#E2DDD8] px-2 text-right text-xs tabular-nums"
+                      />
+                    </label>
+                  )}
+                </div>
+
+                {payForm.mode === "MONTHLY_CASH" && (
+                  <div>
+                    <div className="flex items-center gap-3 mb-1 flex-wrap">
+                      <p className="text-[11px] font-semibold text-[#1F1D1B]">Ladder</p>
+                      <label className="text-[11px] flex items-center gap-1.5">
+                        <input
+                          type="radio"
+                          checked={!payForm.byAmount}
+                          onChange={() => setPayForm({ ...payForm, byAmount: false })}
+                        />
+                        by % of the pot
+                      </label>
+                      <label className="text-[11px] flex items-center gap-1.5">
+                        <input
+                          type="radio"
+                          checked={payForm.byAmount}
+                          onChange={() => setPayForm({ ...payForm, byAmount: true })}
+                        />
+                        by fixed amount
+                      </label>
+                    </div>
+                    <p className="text-[11px] text-[#5A5550] mb-2">
+                      Below the lowest rung nothing is paid. The jump between rungs is what makes
+                      the last few points worth chasing.
+                    </p>
+                    {payForm.bands.map((b, i) => (
+                      <div key={i} className="flex items-center gap-2 py-1 text-[12px]">
+                        <input
+                          type="number"
+                          value={b.minScore}
+                          onChange={(e) => {
+                            const bands = [...payForm.bands];
+                            bands[i] = { ...b, minScore: Number(e.target.value) };
+                            setPayForm({ ...payForm, bands });
+                          }}
+                          className="w-16 rounded border border-[#E2DDD8] px-2 py-0.5 text-right tabular-nums"
+                        />
+                        <span className="text-[#5A5550]">points and above pays</span>
+                        {payForm.byAmount ? (
+                          <>
+                            <span className="text-[#5A5550]">RM</span>
+                            <input
+                              type="number"
+                              value={(b.payAmountSen ?? 0) / 100}
+                              onChange={(e) => {
+                                const bands = [...payForm.bands];
+                                bands[i] = { ...b, payAmountSen: Math.round(Number(e.target.value) * 100) };
+                                setPayForm({ ...payForm, bands });
+                              }}
+                              className="w-24 rounded border border-[#E2DDD8] px-2 py-0.5 text-right tabular-nums"
+                            />
+                          </>
+                        ) : (
+                          <>
+                            <input
+                              type="number"
+                              value={b.payPct}
+                              onChange={(e) => {
+                                const bands = [...payForm.bands];
+                                bands[i] = { ...b, payPct: Number(e.target.value) };
+                                setPayForm({ ...payForm, bands });
+                              }}
+                              className="w-16 rounded border border-[#E2DDD8] px-2 py-0.5 text-right tabular-nums"
+                            />
+                            <span className="text-[#5A5550]">%</span>
+                            <span className="text-[#9CA3AF] tabular-nums">
+                              = RM {((payForm.amountRM * b.payPct) / 100).toLocaleString("en-MY", { minimumFractionDigits: 2 })}
+                            </span>
+                          </>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setPayForm({ ...payForm, bands: payForm.bands.filter((_, j) => j !== i) })}
+                          className="text-[#9A3A2D] text-[11px]"
+                        >
+                          remove
+                        </button>
+                      </div>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPayForm({
+                          ...payForm,
+                          bands: [...payForm.bands, { minScore: 50, payPct: 20, payAmountSen: 0 }],
+                        })
+                      }
+                      className="mt-1 text-[11px] underline decoration-dotted text-[#6B5C32]"
+                    >
+                      + add a rung
+                    </button>
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={savePayout}
+                    disabled={paySaving}
+                    className="rounded-md bg-[#6B5C32] px-3 py-1.5 text-[11.5px] font-semibold text-white disabled:opacity-50"
+                  >
+                    {paySaving ? "Saving…" : "Save"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPayOpen(false)}
+                    className="rounded-md border border-[#E2DDD8] px-3 py-1.5 text-[11.5px]"
+                  >
+                    Cancel
+                  </button>
+                  {payMsg && <span className="text-[11px] text-[#5A5550]">{payMsg}</span>}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
           {cardLoading && !card ? (
             <Skeleton height={200} />
           ) : !card || card.lines.length === 0 ? (
@@ -491,16 +721,23 @@ export default function KpiPage() {
                       {/* Say which rung, and what the next one is worth. 75
                           paying 60% is otherwise unexplained, and "why didn't
                           I get 75%" is the first question. */}
+                      {/* A rung pays a share of the pot OR a flat sum, so the
+                          wording follows whichever this ladder uses. */}
                       <p className="text-[11px] text-[#5A5550] mt-1">
                         {card.payout.band
-                          ? `${card.payout.band.payPct}% band (${card.payout.band.minScore}+) of RM ${(card.payout.amountSen / 100).toLocaleString("en-MY", { minimumFractionDigits: 2 })}`
-                          : `Below the lowest band — nothing is paid`}
+                          ? card.payout.band.payAmountSen != null
+                            ? `${card.payout.band.minScore}+ band`
+                            : `${card.payout.band.payPct}% band (${card.payout.band.minScore}+) of RM ${(card.payout.amountSen / 100).toLocaleString("en-MY", { minimumFractionDigits: 2 })}`
+                          : "Below the lowest band — nothing is paid"}
                       </p>
                       {card.payout.nextBand && (
                         <p className="text-[11px] text-[#B5701A] mt-0.5">
-                          {card.payout.nextBand.minScore} points pays{" "}
-                          {card.payout.nextBand.payPct}% — RM{" "}
-                          {((card.payout.amountSen * card.payout.nextBand.payPct) / 10000).toLocaleString("en-MY", { minimumFractionDigits: 2 })}
+                          {card.payout.nextBand.minScore} points pays RM{" "}
+                          {(
+                            (card.payout.nextBand.payAmountSen != null
+                              ? card.payout.nextBand.payAmountSen
+                              : (card.payout.amountSen * card.payout.nextBand.payPct) / 100) / 100
+                          ).toLocaleString("en-MY", { minimumFractionDigits: 2 })}
                         </p>
                       )}
                       <div className="mt-2 flex gap-1 flex-wrap">
@@ -514,7 +751,9 @@ export default function KpiPage() {
                                 : { borderColor: "#E2DDD8", color: "#9CA3AF" }
                             }
                           >
-                            {b.minScore}+ → {b.payPct}%
+                            {b.minScore}+ → {b.payAmountSen != null
+                              ? `RM ${(b.payAmountSen / 100).toLocaleString("en-MY")}`
+                              : `${b.payPct}%`}
                           </span>
                         ))}
                       </div>

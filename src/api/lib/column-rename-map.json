@@ -908,5 +908,9 @@
   "itemIndex": "item_index",
   "verifiedBy": "verified_by",
   "verifiedAt": "verified_at",
-  "lockedAt": "locked_at"
+  "lockedAt": "locked_at",
+  "payoutMode": "payout_mode",
+  "payoutAmountSen": "payout_amount_sen",
+  "payoutFloorPct": "payout_floor_pct",
+  "updatedBy": "updated_by"
 }

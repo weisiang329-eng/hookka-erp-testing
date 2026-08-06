@@ -23,9 +23,19 @@ const SOURCES = [
   "src/api/lib/kpi-metrics.ts",
 ].map((f) => [f, readFileSync(resolve(process.cwd(), f), "utf8")]);
 
-/** Every backtick SQL template in the file. */
+/**
+ * Every backtick SQL template in the file, with comments stripped FIRST.
+ *
+ * A backtick inside a comment — `roles` in a prose sentence — used to open a
+ * template that swallowed the next few hundred lines of ordinary JS, and the
+ * guard then reported `kpiByKey` and `isLocked` as unmapped database columns.
+ * A comment must not be able to break a correctness check.
+ */
 function sqlBlocks(src) {
-  return [...src.matchAll(/`([^`]*(?:SELECT|INSERT|UPDATE|DELETE)[^`]*)`/gi)].map((m) => m[1]);
+  const code = src
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/(^|[^:])\/\/.*$/gm, "$1");
+  return [...code.matchAll(/`([^`]*(?:SELECT|INSERT|UPDATE|DELETE)[^`]*)`/gi)].map((m) => m[1]);
 }
 
 test("no camelCase identifier survives translation", () => {

@@ -408,6 +408,55 @@ async function loadUnappliedSupplierAdvances(
   return out;
 }
 
+// The customer mirror. A receipt whose allocations don't add up to it is
+// holding money on account (owner 2026-08-06 asked to be able to record one:
+// 「我要的就类似 advance」). The debtor control is credited in FULL when the
+// receipt posts, so unless that remainder is subtracted here the AR card
+// reports a drift for every advance — the same false alarm the supplier side
+// carried until BUG-2026-07-08-003. Voided / deleted receipts are excluded for
+// the same reason they are on the supplier side: they hold nothing.
+async function loadUnappliedCustomerAdvances(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+): Promise<Map<string, { customerName: string; sen: number; items: { receiptNumber: string; date: string; sen: number }[] }>> {
+  const out = new Map<string, { customerName: string; sen: number; items: { receiptNumber: string; date: string; sen: number }[] }>();
+  try {
+    const res = await db
+      .prepare(
+        `SELECT p.id AS id, p.customerId AS customerId, p.customerName AS customerName,
+                p.amount AS amount, p.allocations AS allocations,
+                p.receiptNumber AS receiptNumber, p.date AS date
+           FROM payment_records p
+          WHERE NOT EXISTS (
+              SELECT 1 FROM document_lifecycle dl
+               WHERE dl.source_type = 'payment'
+                 AND dl.source_id = p.id
+                 AND dl.state <> 'ACTIVE'
+            )`,
+      )
+      .all<{ id: string; customerId?: string; customerName?: string; amount?: number; allocations?: string | null; receiptNumber?: string; date?: string }>();
+    for (const r of res.results ?? []) {
+      const custId = String(r.customerId ?? "");
+      if (!custId) continue;
+      let allocated = 0;
+      try {
+        const parsed = JSON.parse(String(r.allocations ?? "[]")) as { amount?: number }[];
+        if (Array.isArray(parsed)) for (const a of parsed) allocated += Math.round(Number(a?.amount) || 0);
+      } catch { /* malformed JSON → treat as unallocated, which the card shows */ }
+      const sen = Math.round(Number(r.amount) || 0) - allocated;
+      if (sen <= 0) continue;
+      const item = { receiptNumber: String(r.receiptNumber ?? ""), date: String(r.date ?? "").slice(0, 10), sen };
+      const cur = out.get(custId);
+      if (cur) { cur.sen += sen; cur.items.push(item); }
+      else out.set(custId, { customerName: String(r.customerName ?? ""), sen, items: [item] });
+    }
+  } catch {
+    /* payment_records unavailable → no advance rows */
+  }
+  void orgId; // payment_records is not org-scoped; kept for signature symmetry
+  return out;
+}
+
 app.get("/aging", async (c) => {
   // RBAC gate (P3.3-followup) — accounting:read.
   const denied = await requirePermission(c, "accounting", "read");
@@ -573,6 +622,34 @@ app.get("/aging", async (c) => {
           addToBucket(row, moAdv, -it.sen);
           row.docs.push({
             no: `${it.paymentNo} · Advance`,
+            date: it.date,
+            mo: agingBucketIdx(moAdv),
+            amountSen: -it.sen,
+          });
+        }
+      }
+      // Unapplied customer advances → NEGATIVE rows, the mirror of the supplier
+      // block above, so the AR aging total ties the 300-0000 control exactly.
+      for (const [customerId, adv] of await loadUnappliedCustomerAdvances(c.var.DB, orgId)) {
+        let row = arMap.get(customerId);
+        if (!row) {
+          row = {
+            customerId,
+            customerName: adv.customerName || "Unknown",
+            currentSen: 0,
+            days30Sen: 0,
+            days60Sen: 0,
+            days90Sen: 0,
+            over90Sen: 0,
+            docs: [],
+          };
+          arMap.set(customerId, row);
+        }
+        for (const it of adv.items) {
+          const moAdv = monthsOverdue(it.date || null);
+          addToBucket(row, moAdv, -it.sen);
+          row.docs.push({
+            no: `${it.receiptNumber} · Advance`,
             date: it.date,
             mo: agingBucketIdx(moAdv),
             amountSen: -it.sen,
@@ -1663,6 +1740,14 @@ app.get("/ar-control", async (c) => {
     (a, b) => b.totalSen - a.totalSen,
   );
   const customerCounterSen = Number(custRes?.s) || 0;
+  // Money received but not yet knocked off an invoice. The debtor control was
+  // credited in full when the receipt posted, so the subledger only ties once
+  // the advance is netted off — mirrors netOutstandingSen on /ap-control. The
+  // per-invoice counter deliberately does NOT include it: that number answers
+  // "what do the invoices say", and an advance belongs to no invoice yet.
+  const advMapAr = await loadUnappliedCustomerAdvances(c.var.DB, getOrgId(c));
+  const unappliedAdvanceSen = [...advMapAr.values()].reduce((s, a) => s + a.sen, 0);
+  const netOutstandingSen = invoiceOutstandingSen - unappliedAdvanceSen;
   return c.json({
     success: true,
     data: {
@@ -1671,7 +1756,9 @@ app.get("/ar-control", async (c) => {
       tradeControlSen,
       invoiceOutstandingSen,
       customerCounterSen,
-      driftControlVsInvoicesSen: tradeControlSen - invoiceOutstandingSen,
+      unappliedAdvanceSen,
+      netOutstandingSen,
+      driftControlVsInvoicesSen: tradeControlSen - netOutstandingSen,
       driftCounterVsInvoicesSen: customerCounterSen - invoiceOutstandingSen,
       aging,
     },

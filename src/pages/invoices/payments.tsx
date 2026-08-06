@@ -172,8 +172,24 @@ export default function PaymentsPage() {
 
   const totalAllocated = allocations.reduce((sum, a) => sum + a.amount, 0);
 
+  // What the bank actually received. Until 2026-08-06 this WAS the allocation
+  // total, so a receipt could never hold money on account and the operator
+  // could not record a deposit at all (owner: 「我要的就类似 advance」).
+  //
+  // It tracks the allocations until the operator types in it, then it is his
+  // number — the same anchoring the supplier voucher uses for its Advance box.
+  // That keeps the old behaviour exactly for anyone who just ticks invoices.
+  const [amountStr, setAmountStr] = useState("");
+  const [amountTouched, setAmountTouched] = useState(false);
+  const receivedSen = amountTouched
+    ? Math.max(0, Math.round((parseFloat(amountStr) || 0) * 100))
+    : totalAllocated;
+  const onAccountSen = Math.max(0, receivedSen - totalAllocated);
+  const overAllocated = totalAllocated > receivedSen;
+  const canSubmit = !!selectedCustomerId && receivedSen > 0 && !overAllocated;
+
   const handleCreate = async () => {
-    if (!selectedCustomerId || totalAllocated <= 0) return;
+    if (!canSubmit) return;
     setCreating(true);
     try {
       // Sprint 3 #4 — idempotency. Payment is the highest-risk POST
@@ -183,7 +199,7 @@ export default function PaymentsPage() {
         headers: { "Idempotency-Key": crypto.randomUUID() },
         body: {
           customerId: selectedCustomerId,
-          amount: totalAllocated,
+          amount: receivedSen,
           method,
           reference,
           bankAccount,
@@ -197,6 +213,8 @@ export default function PaymentsPage() {
         setReference("");
         setPayDate(new Date().toISOString().slice(0, 10));
         setAllocations([]);
+        setAmountTouched(false);
+        setAmountStr("");
         invalidateCachePrefix("/api/payments");
         invalidateCachePrefix("/api/invoices");
         // A receipt decrements the customer's A/R (accounting.ts), so the
@@ -257,6 +275,10 @@ export default function PaymentsPage() {
     setMethod(p.method);
     setReference(p.reference ?? "");
     setPayDate((p.date || "").slice(0, 10) || new Date().toISOString().slice(0, 10));
+    // Load the receipt's OWN amount, not the allocation sum — editing an
+    // advance must not silently shrink it to whatever is knocked off so far.
+    setAmountTouched(true);
+    setAmountStr(((Number(p.amount) || 0) / 100).toFixed(2));
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -267,19 +289,21 @@ export default function PaymentsPage() {
     setAllocations([]);
     setReference("");
     setPayDate(new Date().toISOString().slice(0, 10));
+    setAmountTouched(false);
+    setAmountStr("");
   };
 
   // Save: create a new receipt, or — in edit mode — re-state the existing one in
   // place (same number; the GL is reversed + re-posted server-side).
   const handleSave = async () => {
     if (!editingId) { handleCreate(); return; }
-    if (!selectedCustomerId || totalAllocated <= 0) return;
+    if (!canSubmit) return;
     setCreating(true);
     try {
       const res = await fetch(`/api/payments/${encodeURIComponent(editingId)}/restate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ method, reference, bankAccount, date: payDate, allocations }),
+        body: JSON.stringify({ method, reference, bankAccount, date: payDate, allocations, amountSen: receivedSen }),
       });
       const j = (await res.json()) as { success?: boolean; error?: string };
       if (res.ok && j.success) {
@@ -469,7 +493,7 @@ export default function PaymentsPage() {
               {editingId && (
                 <Button variant="outline" size="sm" onClick={cancelEdit}>Cancel</Button>
               )}
-              <Button onClick={handleSave} disabled={creating || !selectedCustomerId || totalAllocated <= 0} size="sm">
+              <Button onClick={handleSave} disabled={creating || !canSubmit} size="sm">
                 {creating ? (editingId ? "Updating..." : "Recording...") : editingId ? "Update receipt" : "Record Payment"}
               </Button>
             </div>
@@ -544,13 +568,31 @@ export default function PaymentsPage() {
                   />
                 </div>
 
-                {/* Knock-off total — kept at the top beside Reference (matches
-                    the supplier-payment layout). */}
+                {/* Amount received — editable since 2026-08-06. Leave it alone
+                    and it follows the invoices you tick, exactly as before;
+                    type in it and it becomes the figure that hit the bank, with
+                    anything above the allocations held on account. */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Total (RM)</label>
-                  <div className="w-full rounded-md border border-gray-300 bg-gray-50 px-3 py-2 text-sm text-right tabular-nums font-bold text-[#4F7C3A]">
-                    {formatCurrency(totalAllocated)}
-                  </div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Amount received (RM)</label>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    className={`w-full rounded-md border px-3 py-2 text-sm text-right tabular-nums font-bold ${
+                      overAllocated ? "border-red-400 text-red-600" : "border-gray-300 text-[#4F7C3A]"
+                    }`}
+                    value={amountTouched ? amountStr : (totalAllocated / 100).toFixed(2)}
+                    onChange={(e) => { setAmountTouched(true); setAmountStr(e.target.value); }}
+                    placeholder="0.00"
+                  />
+                  {overAllocated ? (
+                    <p className="mt-1 text-xs text-red-600">
+                      Allocated {formatCurrency(totalAllocated)} — more than received.
+                    </p>
+                  ) : onAccountSen > 0 ? (
+                    <p className="mt-1 text-xs text-blue-600">
+                      {formatCurrency(totalAllocated)} knocked off · {formatCurrency(onAccountSen)} on account
+                    </p>
+                  ) : null}
                 </div>
               </div>
 

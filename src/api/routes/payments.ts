@@ -173,6 +173,11 @@ async function buildCustomerPaymentRestate(
     bankAccount?: string;
     date?: string | null;
     allocations?: Allocation[];
+    // What actually landed in the bank. Independent of the allocations since
+    // 2026-08-06: a receipt may knock off less than it is worth, and the rest
+    // sits on account as a customer advance. Older clients omit it and keep
+    // the previous behaviour (receipt total = what was allocated).
+    amountSen?: number;
   },
   actorUserId: string | null,
   stamp: number,
@@ -243,6 +248,18 @@ async function buildCustomerPaymentRestate(
     );
   }
 
+  // What the bank received. The GL and the receipt row follow THIS; the invoice
+  // bumps and the customer counter above follow the ALLOCATIONS. When the two
+  // differ, the gap is money on account — the debtor control is credited in
+  // full (so the customer's balance goes into credit, exactly as an unapplied
+  // supplier advance sits on 400-0000) while no invoice is marked paid for it.
+  const newAmount = Math.max(0, Math.round(Number(body.amountSen ?? newTotal) || 0));
+  if (newAmount < newTotal) {
+    // Allocating more than was received would credit the invoices with money
+    // that never arrived.
+    throw new Error("ALLOCATIONS_EXCEED_AMOUNT");
+  }
+
   // 4. GL: reverse the currently-visible payment legs + post the corrected
   //    legs in ONE buildJournalEntryStatements call (so rev + post chain off the
   //    same head), then collapse so only this restate_post stays visible.
@@ -276,7 +293,7 @@ async function buildCustomerPaymentRestate(
   const controlCode = ctl.ok ? ctl.controlCode : "300-0000";
   const depositAcct = body.bankAccount || bankAcct(body.method);
   const postLegs =
-    newTotal > 0
+    newAmount > 0
       ? [
           {
             id: `lje-${crypto.randomUUID().slice(0, 12)}`,
@@ -284,7 +301,7 @@ async function buildCustomerPaymentRestate(
             sourceId: id,
             legNo: 1,
             accountCode: depositAcct,
-            debitSen: newTotal,
+            debitSen: newAmount,
             creditSen: 0,
             description: `Receipt ${existing.receiptNumber} (edited)`,
             actorUserId,
@@ -297,7 +314,7 @@ async function buildCustomerPaymentRestate(
             legNo: 2,
             accountCode: controlCode,
             debitSen: 0,
-            creditSen: newTotal,
+            creditSen: newAmount,
             description: `Receipt ${existing.receiptNumber} (edited)`,
             actorUserId,
             orgId,
@@ -329,7 +346,7 @@ async function buildCustomerPaymentRestate(
         `UPDATE payment_records SET amount = ?, method = ?, reference = ?, allocations = ?, date = ? WHERE id = ?`,
       )
       .bind(
-        newTotal,
+        newAmount,
         body.method ?? existing.method,
         body.reference ?? existing.reference,
         JSON.stringify(newAllocs),
@@ -536,6 +553,21 @@ app.post("/", async (c) => {
       invoiceNumber: invoiceSnapshots.get(a.invoiceId)?.invoiceNo ?? "",
       amount: Number(a.amount) || 0,
     }));
+
+    // A receipt may knock off LESS than it is worth — the rest sits on account
+    // as a customer advance (owner 2026-08-06). It may never knock off MORE:
+    // that would credit invoices with money the bank never received.
+    const receiptSen = Math.round(Number(amount) || 0);
+    const allocSen = parsedAllocations.reduce((s, a) => s + a.amount, 0);
+    if (allocSen > receiptSen) {
+      return c.json(
+        {
+          success: false,
+          error: `Allocated ${(allocSen / 100).toFixed(2)} against a receipt of ${(receiptSen / 100).toFixed(2)} — a receipt cannot pay out more than it received.`,
+        },
+        400,
+      );
+    }
 
     // PR 0 (2026-05-20, owner-confirmed) — Reject negative and overpayment
     // at the request boundary. Both were silent-money-bug paths:
@@ -1194,6 +1226,7 @@ app.post("/:id/restate", async (c) => {
     reference?: string | null;
     bankAccount?: string;
     allocations?: Allocation[];
+    amountSen?: number;
   };
   try {
     body = await c.req.json();
@@ -1203,9 +1236,15 @@ app.post("/:id/restate", async (c) => {
   const allocs = (body.allocations ?? []).filter(
     (a) => a.invoiceId && a.amount > 0,
   );
-  if (allocs.length === 0) {
+  // Zero allocations used to be rejected outright. It is now the legitimate
+  // way to un-knock a receipt back to a pure advance — as long as the edit
+  // still says how much money is being held (owner 2026-08-06).
+  if (allocs.length === 0 && !(Number(body.amountSen) > 0)) {
     return c.json(
-      { success: false, error: "A receipt must allocate to at least one invoice" },
+      {
+        success: false,
+        error: "A receipt must either allocate to an invoice or carry an amount to hold on account",
+      },
       400,
     );
   }
@@ -1251,6 +1290,15 @@ app.post("/:id/restate", async (c) => {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg === "PAYMENT_NOT_FOUND") {
       return c.json({ success: false, error: `No payment found for ${id}` }, 404);
+    }
+    if (msg === "ALLOCATIONS_EXCEED_AMOUNT") {
+      return c.json(
+        {
+          success: false,
+          error: "The invoices allocated add up to more than the receipt — reduce them, or raise the amount received.",
+        },
+        400,
+      );
     }
     return c.json({ success: false, error: msg }, 400);
   }

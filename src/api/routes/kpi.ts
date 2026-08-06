@@ -26,6 +26,8 @@ import {
   KPI_CATALOG,
   GATE_FAIL_CAP,
   DEFAULT_PAYOUT,
+  DEFAULT_PAYOUT_BANDS,
+  bandFor,
   attainment,
   kpiByKey,
   kpisForRole,
@@ -100,16 +102,25 @@ interface CardLine {
  */
 async function loadPayout(c: Context<Env>, userId: string): Promise<PayoutSettings> {
   const row = await c.var.DB.prepare(
-    `SELECT payoutMode, payoutAmountSen, payoutFloorPct
+    `SELECT payoutMode, payoutAmountSen, payoutBands
        FROM kpi_user_settings WHERE userId = ?`,
   )
     .bind(userId)
-    .first<{ payoutMode: string; payoutAmountSen: number; payoutFloorPct: number }>();
+    .first<{ payoutMode: string; payoutAmountSen: number; payoutBands: string | null }>();
   if (!row) return DEFAULT_PAYOUT;
+  // A malformed or empty band list falls back to the standard ladder rather
+  // than paying nothing — a broken config must not silently zero someone's pay.
+  let bands = DEFAULT_PAYOUT_BANDS;
+  try {
+    const parsed = row.payoutBands ? JSON.parse(row.payoutBands) : null;
+    if (Array.isArray(parsed) && parsed.length) bands = parsed;
+  } catch {
+    /* keep the default */
+  }
   return {
     mode: row.payoutMode === "MONTHLY_CASH" ? "MONTHLY_CASH" : "SCORE_ONLY",
     amountSen: Number(row.payoutAmountSen) || 0,
-    floorPct: Number(row.payoutFloorPct) || 0,
+    bands,
   };
 }
 
@@ -221,6 +232,12 @@ async function buildCard(c: Context<Env>, userId: string, role: string, period: 
       // What this month's score is worth. SCORE_ONLY always pays 0 here — the
       // score still exists, it is simply settled elsewhere at year end.
       earnedSen: payoutSen(score, payout),
+      // The rung the score landed on, so the card can say "60% band" rather
+      // than leaving the person to work out why 75 did not pay 75%.
+      band: bandFor(score, payout.bands),
+      nextBand:
+        [...payout.bands].sort((a, b) => a.minScore - b.minScore)
+          .find((b) => score !== null && b.minScore > score) ?? null,
     },
     lines,
     rawScore: raw,
@@ -272,7 +289,7 @@ app.put("/payout/:id", async (c) => {
   await ensureKpiTables(c.var.DB);
   const userId = c.req.param("id");
 
-  let body: { mode?: string; amountSen?: number; floorPct?: number };
+  let body: { mode?: string; amountSen?: number; bands?: Array<{ minScore: number; payPct: number }> };
   try {
     body = (await c.req.json()) as typeof body;
   } catch {
@@ -280,12 +297,18 @@ app.put("/payout/:id", async (c) => {
   }
   const mode = body.mode === "MONTHLY_CASH" ? "MONTHLY_CASH" : "SCORE_ONLY";
   const amountSen = Math.round(Number(body.amountSen) || 0);
-  const floorPct = Number(body.floorPct) || 0;
+  const bands = Array.isArray(body.bands) && body.bands.length ? body.bands : DEFAULT_PAYOUT_BANDS;
   if (amountSen < 0) {
     return c.json({ success: false, error: "Amount cannot be negative" }, 400);
   }
-  if (floorPct < 0 || floorPct > 100) {
-    return c.json({ success: false, error: "Floor must be 0–100" }, 400);
+  for (const b of bands) {
+    const min = Number(b.minScore), pct = Number(b.payPct);
+    if (!Number.isFinite(min) || min < 0 || min > 100) {
+      return c.json({ success: false, error: "Band score must be 0–100" }, 400);
+    }
+    if (!Number.isFinite(pct) || pct < 0 || pct > 200) {
+      return c.json({ success: false, error: "Band payout must be 0–200%" }, 400);
+    }
   }
   if (mode === "MONTHLY_CASH" && amountSen === 0) {
     return c.json(
@@ -296,15 +319,15 @@ app.put("/payout/:id", async (c) => {
 
   await c.var.DB.prepare(
     `INSERT INTO kpi_user_settings
-       (userId, payoutMode, payoutAmountSen, payoutFloorPct, orgId, updatedBy, updatedAt)
+       (userId, payoutMode, payoutAmountSen, payoutBands, orgId, updatedBy, updatedAt)
      VALUES (?, ?, ?, ?, ?, ?, NOW())
      ON CONFLICT (userId) DO UPDATE
        SET payoutMode = EXCLUDED.payoutMode,
            payoutAmountSen = EXCLUDED.payoutAmountSen,
-           payoutFloorPct = EXCLUDED.payoutFloorPct,
+           payoutBands = EXCLUDED.payoutBands,
            updatedBy = EXCLUDED.updatedBy, updatedAt = NOW()`,
   )
-    .bind(userId, mode, amountSen, floorPct, getOrgId(c), ctxGet(c, "userId"))
+    .bind(userId, mode, amountSen, JSON.stringify(bands), getOrgId(c), ctxGet(c, "userId"))
     .run();
   return c.json({ success: true });
 });

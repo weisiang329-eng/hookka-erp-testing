@@ -296,36 +296,73 @@ export function attainment(
 /** How a person's KPI score turns into money, if at all. */
 export type PayoutMode = "MONTHLY_CASH" | "SCORE_ONLY";
 
+/** One rung: score at or above `minScore` pays `payPct` of the pot. */
+export interface PayoutBand {
+  minScore: number;
+  payPct: number;
+}
+
+/**
+ * The default ladder.
+ *
+ * Banded rather than straight-line, and deliberately so. A linear scale gives
+ * nobody a reason to push 74 to 76 — two more points is two more percent of
+ * the pot. A band means 79 → 80 jumps a whole rung, 60% to 80%, which is where
+ * the pull comes from. The cliff at each boundary is the mechanism, not a
+ * side effect.
+ *
+ * Below 60 pays nothing. Owner 2026-08-06: "如果是 50 分的话，是不是就直接拿不
+ * 到了?" — yes. A straight line would pay 30% of the pot for a 30% month, and
+ * that reads as a reward for missing.
+ *
+ * Ordered high to low; the first rung the score reaches wins.
+ */
+export const DEFAULT_PAYOUT_BANDS: PayoutBand[] = [
+  { minScore: 90, payPct: 100 },
+  { minScore: 80, payPct: 80 },
+  { minScore: 70, payPct: 60 },
+  { minScore: 60, payPct: 40 },
+];
+
 export interface PayoutSettings {
   mode: PayoutMode;
-  /** The pot at a score of 100, in sen. */
+  /** The pot at the top band, in sen. */
   amountSen: number;
-  /** Below this score, nothing is paid. 0 disables the floor. */
-  floorPct: number;
+  /** Rungs, high to low. Empty falls back to DEFAULT_PAYOUT_BANDS. */
+  bands: PayoutBand[];
 }
 
 export const DEFAULT_PAYOUT: PayoutSettings = {
   mode: "SCORE_ONLY",
   amountSen: 0,
-  floorPct: 0,
+  bands: DEFAULT_PAYOUT_BANDS,
 };
+
+/** The rung a score lands on, or null when it is below them all. */
+export function bandFor(
+  score: number | null,
+  bands: PayoutBand[] = DEFAULT_PAYOUT_BANDS,
+): PayoutBand | null {
+  if (score === null || !Number.isFinite(score)) return null;
+  // Fall back on an EMPTY list exactly as payoutSen does. A default parameter
+  // only covers `undefined`, so an explicit [] slipped through here while the
+  // money fell back — the card would have said "below the lowest band" beside
+  // a full payout. The two must answer from the same ladder.
+  const use = bands.length ? bands : DEFAULT_PAYOUT_BANDS;
+  const ordered = [...use].sort((a, b) => b.minScore - a.minScore);
+  return ordered.find((b) => score >= b.minScore) ?? null;
+}
 
 /**
  * What the month pays.
  *
- * Straight-line against the score, with a floor. The floor exists because a
- * straight line with no floor pays something for a month that was mostly
- * missed — 12% of the pot for a 12% score reads as a reward for failing, and
- * it is the first thing anyone argues about.
- *
- * SCORE_ONLY always returns 0: the score still exists, it is just not money
- * this month (the owner settles those at year end).
+ * SCORE_ONLY always returns 0 — the score still exists, it is simply not money
+ * this month; the owner settles those at year end.
  */
 export function payoutSen(score: number | null, s: PayoutSettings): number {
   if (s.mode !== "MONTHLY_CASH") return 0;
-  if (score === null || !Number.isFinite(score)) return 0;
   if (s.amountSen <= 0) return 0;
-  if (s.floorPct > 0 && score < s.floorPct) return 0;
-  const capped = Math.max(0, Math.min(100, score));
-  return Math.round((s.amountSen * capped) / 100);
+  const band = bandFor(score, s.bands?.length ? s.bands : DEFAULT_PAYOUT_BANDS);
+  if (!band) return 0;
+  return Math.round((s.amountSen * band.payPct) / 100);
 }

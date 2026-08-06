@@ -266,6 +266,7 @@ export function resolveEfficiencyAllowanceSen(
   eff: WorkerMonthlyEfficiency | undefined,
   allowanceSen: number | null | undefined,
   thresholdPct: number | null | undefined,
+  attendance?: { workingDays: number; absentDays: number },
 ): number {
   const allow = Math.round(Number(allowanceSen) || 0);
   const threshold = Number(thresholdPct) || 0;
@@ -278,7 +279,29 @@ export function resolveEfficiencyAllowanceSen(
   // Overview, so "screen shows 100.0% → bonus paid" always holds (avoids a
   // 99.96%-rounds-to-100.0%-but-no-pay surprise).
   const shown = Math.round(eff.pct * 10) / 10;
-  return shown >= threshold ? allow : 0;
+  if (shown < threshold) return 0;
+
+  // Pro-rate by days actually worked. Owner 2026-08-06: "如果一个月有 27 天的
+  // 工作天，他两天没有来，代表这两天其实是没有工作的 … 即使效率达到了也是会
+  // 扣钱的."
+  //
+  // Efficiency is a RATE — minutes produced per hour present — so a worker who
+  // came for 24 of 26 days can hit 100% while producing two days less. Paying
+  // the full bonus there pays for output that was never made. The threshold
+  // still gates: missing it earns nothing regardless of attendance.
+  //
+  // Uses the SAME absent_days that already drives the salary deduction on the
+  // payslip, so the two lines can never tell different stories about the same
+  // absence.
+  //
+  // No attendance passed ⇒ full amount, so any caller not yet updated keeps
+  // its old behaviour rather than silently paying everyone zero.
+  if (!attendance) return allow;
+  const workingDays = Math.max(0, Math.round(Number(attendance.workingDays) || 0));
+  const absentDays = Math.max(0, Math.round(Number(attendance.absentDays) || 0));
+  if (workingDays <= 0) return allow;
+  const worked = Math.max(0, workingDays - absentDays);
+  return Math.round((allow * worked) / workingDays);
 }
 
 /** period "YYYY-MM" → inclusive first + last calendar day as "YYYY-MM-DD". */

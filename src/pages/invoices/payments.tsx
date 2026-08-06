@@ -38,6 +38,26 @@ const VOUCHER_COMPANY: VoucherSpec["company"] = {
   email: COMPANY.HOOKKA.email,
 };
 
+// Money on the receipt that is not yet sitting against an invoice. The customer
+// twin of hasUnappliedAdvance in supplier-payments.tsx: there, an advance is a
+// payment LINE with no invoice; here a receipt is one row whose allocations may
+// simply not add up to it, so the leftover is the difference. Both are integer
+// sen (formatRM's input), so they subtract directly.
+//
+// Owner 2026-08-06: 「如果有还没 knock off clear 的我要像 supplier 这样整体字体
+// 显示蓝色」— a receipt with money still on account is work outstanding, and he
+// wants to spot it down the list without opening anything.
+function unallocatedSen(p: PaymentRecord): number {
+  const allocated = (p.allocations ?? []).reduce((s, a) => s + (Number(a.amount) || 0), 0);
+  return Math.max(0, (Number(p.amount) || 0) - allocated);
+}
+
+// Voided / deleted receipts are already dimmed and carry no obligation, so they
+// never turn blue however little of them was allocated.
+function hasUnallocated(p: PaymentRecord): boolean {
+  return (p.lifecycleState ?? "ACTIVE") === "ACTIVE" && unallocatedSen(p) > 0;
+}
+
 // One customer receipt → a PAYMENT RECEIPT voucher: one line per invoice the
 // receipt cleared (Invoice No · amount), total = the receipt amount. Money
 // stays integer sen, formatted with formatCurrency. The customer twin of
@@ -303,8 +323,10 @@ export default function PaymentsPage() {
       label: "Amount",
       type: "currency",
       align: "right",
+      // The row-level blue only reaches cells that don't set their own colour,
+      // so every hardcoded one here stands down while money is unallocated.
       render: (_value, row) => (
-        <span className="font-medium text-[#4F7C3A]">
+        <span className={`font-medium ${hasUnallocated(row) ? "" : "text-[#4F7C3A]"}`}>
           {formatRM(row.amount)}
         </span>
       ),
@@ -320,7 +342,9 @@ export default function PaymentsPage() {
       key: "reference",
       label: "Reference",
       render: (_value, row) => (
-        <span className="text-sm text-gray-600 font-mono">{row.reference || "-"}</span>
+        <span className={`text-sm font-mono ${hasUnallocated(row) ? "" : "text-gray-600"}`}>
+          {row.reference || "-"}
+        </span>
       ),
     },
     {
@@ -344,11 +368,14 @@ export default function PaymentsPage() {
       key: "allocations",
       label: "Allocated",
       render: (_value, row) => {
+        const left = unallocatedSen(row);
         if (row.allocations.length === 0)
-          return <span className="text-sm text-gray-400">Unallocated</span>;
+          return <span className={`text-sm ${hasUnallocated(row) ? "" : "text-gray-400"}`}>Unallocated</span>;
         return (
-          <span className="text-sm text-gray-600">
+          <span className={`text-sm ${hasUnallocated(row) ? "" : "text-gray-600"}`}>
             {row.allocations.length} invoice{row.allocations.length > 1 ? "s" : ""}
+            {/* The number of invoices alone can't show that money is left over. */}
+            {left > 0 && ` · ${formatRM(left)} left`}
           </span>
         );
       },
@@ -632,7 +659,13 @@ export default function PaymentsPage() {
             onSelectionChange={setSelectedPayments}
             contextMenuItems={contextMenuItems}
             onRowClick={(row) => setDetail(row)}
-            rowClassName={(row) => ((row.lifecycleState ?? "ACTIVE") !== "ACTIVE" ? "opacity-50" : "")}
+            rowClassName={(row) =>
+              (row.lifecycleState ?? "ACTIVE") !== "ACTIVE"
+                ? "opacity-50"
+                : hasUnallocated(row)
+                  ? "text-blue-600"
+                  : ""
+            }
           />
         </CardContent>
       </Card>
@@ -674,6 +707,13 @@ export default function PaymentsPage() {
                       </tbody>
                     </table>
                   </div>
+                )}
+                {/* Partly-allocated receipts looked fully cleared here — the
+                    table only ever showed what HAD been knocked off. */}
+                {detail.allocations.length > 0 && unallocatedSen(detail) > 0 && (
+                  <p className="mt-2 text-blue-600">
+                    {formatRM(unallocatedSen(detail))} still on account — not knocked off yet
+                  </p>
                 )}
               </div>
               <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t">

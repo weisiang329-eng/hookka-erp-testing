@@ -35,7 +35,12 @@ import {
   type KpiDef,
   type PayoutSettings,
 } from "../lib/kpi-catalog";
-import { computeMetric, checklistProgress, surveyMean } from "../lib/kpi-metrics";
+import {
+  computeMetric,
+  checklistProgress,
+  surveyMean,
+  manualRating,
+} from "../lib/kpi-metrics";
 
 const app = new Hono<Env>();
 
@@ -79,6 +84,8 @@ interface CardLine {
   formula: string;
   checklistItems?: string[];
   surveyQuestions?: string[];
+  /** MANUAL only — what earns a high mark, so the score is not a surprise. */
+  ratingGuide?: string[];
   shape: KpiDef["shape"];
   unit: KpiDef["unit"];
   available: boolean;
@@ -189,13 +196,15 @@ async function buildCard(c: Context<Env>, userId: string, role: string, period: 
         ? await checklistProgress(c, userId, def.key, period, def.checklistItems?.length ?? 0)
         : def.scoring === "SURVEY"
           ? await surveyMean(c, userId, def.key, period)
-          : await computeMetric(c, def.key, period);
+          : def.scoring === "MANUAL"
+            ? await manualRating(c, period, userId, def.key)
+            : await computeMetric(c, def.key, period);
     const att =
       m.actual === null ? null : attainment(def, Number(a.target), m.actual);
     lines.push({
       key: def.key, label: def.label, detail: def.detail,
       scoring: def.scoring, formula: def.formula, checklistItems: def.checklistItems,
-      surveyQuestions: def.surveyQuestions,
+      surveyQuestions: def.surveyQuestions, ratingGuide: def.ratingGuide,
       shape: def.shape, unit: def.unit, available: true,
       drillPath: def.drillPath,
       target: Number(a.target), weight: Number(a.weight),
@@ -480,6 +489,68 @@ app.post("/survey/:kpiKey", async (c) => {
       body.customerId ?? null, body.customerName ?? null,
       answers[0], answers[1], answers[2], answers[3], answers[4],
       body.comment ?? null, getOrgId(c),
+    )
+    .run();
+  return c.json({ success: true });
+});
+
+// ---- Supervisor rating -----------------------------------------------------
+//
+// The one KPI the system does not calculate. Super Admin only, because a score
+// somebody can set on themselves is not a score.
+//
+// The note is REQUIRED. Owner 2026-08-07: a low mark here means "你没有提出任何
+// 问题，事后却又有问题发生" — a specific accusation, and one the employee has to
+// be able to see and answer. An unexplained number would be argued with instead
+// of learned from.
+app.put("/rating/:kpiKey", async (c) => {
+  const denied = requireSuperAdmin(c);
+  if (denied) return denied;
+  await ensureKpiTables(c.var.DB);
+  const kpiKey = c.req.param("kpiKey");
+  const def = kpiByKey(kpiKey);
+  if (!def || def.scoring !== "MANUAL") {
+    return c.json({ success: false, error: `${kpiKey} is not a rated KPI` }, 400);
+  }
+
+  let body: { userId?: string; period?: string; score?: number; note?: string };
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body" }, 400);
+  }
+  const userId = String(body.userId ?? "");
+  if (!userId) return c.json({ success: false, error: "userId is required" }, 400);
+  const score = Number(body.score);
+  if (!Number.isFinite(score) || score < 0 || score > 100) {
+    return c.json({ success: false, error: "Score must be between 0 and 100" }, 400);
+  }
+  const note = String(body.note ?? "").trim();
+  if (!note) {
+    return c.json(
+      { success: false, error: "A reason is required — the employee sees it" },
+      400,
+    );
+  }
+  const period = /^\d{4}-\d{2}$/.test(String(body.period ?? ""))
+    ? String(body.period)
+    : periodOf(c);
+
+  await c.var.DB.prepare(
+    `INSERT INTO kpi_manual_ratings
+       (id, userId, period, kpiKey, score, note, ratedBy, orgId)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (userId, period, kpiKey) DO UPDATE
+       SET score = EXCLUDED.score,
+           note = EXCLUDED.note,
+           ratedBy = EXCLUDED.ratedBy,
+           ratedAt = NOW()`,
+  )
+    .bind(
+      `kmr_${userId}_${kpiKey}_${period}`,
+      userId, period, kpiKey,
+      Math.round(score * 10) / 10, note,
+      ctxGet(c, "userId"), getOrgId(c),
     )
     .run();
   return c.json({ success: true });

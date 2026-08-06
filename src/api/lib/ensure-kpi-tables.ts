@@ -118,6 +118,26 @@ const DDL: string[] = [
      org_id         TEXT NOT NULL DEFAULT 'hookka',
      created_at     TIMESTAMP NOT NULL DEFAULT NOW()
    )`,
+  // One row per (person, month, KPI) that a supervisor has scored by hand.
+  //
+  // Owner 2026-08-07 on spotting problems early: "这个维度基本上都是由上级来评分
+  // 的 … 然后这个东西就不是 measurable 的." A month with no rating stores no row,
+  // and the card reads "Not yet rated" — never 0, which would charge the
+  // employee for the supervisor not having got to it.
+  `CREATE TABLE IF NOT EXISTS kpi_manual_ratings (
+     id           TEXT PRIMARY KEY,
+     user_id      TEXT NOT NULL,
+     period       TEXT NOT NULL,
+     kpi_key      TEXT NOT NULL,
+     score        DOUBLE PRECISION,
+     note         TEXT,
+     rated_by     TEXT,
+     rated_at     TIMESTAMP NOT NULL DEFAULT NOW(),
+     org_id       TEXT NOT NULL DEFAULT 'hookka',
+     created_at   TIMESTAMP NOT NULL DEFAULT NOW()
+   )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS kpi_manual_ratings_unique
+     ON kpi_manual_ratings (user_id, period, kpi_key)`,
   `ALTER TABLE kpi_assignments ADD COLUMN IF NOT EXISTS assigned_by TEXT`,
   `ALTER TABLE kpi_checklist_ticks ADD COLUMN IF NOT EXISTS note TEXT`,
 ];

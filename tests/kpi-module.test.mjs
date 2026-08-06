@@ -53,9 +53,12 @@ test("every KPI is measurable — there is no subjective type", () => {
   // 程度能拿多少分 … 全部都要有明确、可衡量的标准." A score assigned by
   // impression at month end cannot be worked towards, so it is not a KPI.
   for (const k of KPI_CATALOG) {
+    // SURVEY counts as measurable: the customer answers 1–5 on a fixed set of
+    // questions, so the number comes from outside the company rather than from
+    // somebody's impression at month end.
     assert.ok(
-      k.scoring === "AUTO" || k.scoring === "CHECKLIST",
-      `${k.key} has scoring ${k.scoring} — only AUTO and CHECKLIST are measurable`,
+      ["AUTO", "CHECKLIST", "SURVEY"].includes(k.scoring),
+      `${k.key} has scoring ${k.scoring} — that is not a measurable type`,
     );
     assert.ok(k.available, `${k.key} must be computable; express it as a checklist if the data is missing`);
   }
@@ -180,4 +183,41 @@ test("a rung can pay a share of the pot OR a flat sum", async () => {
 
   assert.equal(bandValueSen({ minScore: 80, payPct: 80 }, 100000) / 100, 800);
   assert.equal(bandValueSen({ minScore: 80, payPct: 0, payAmountSen: 75000 }, 100000) / 100, 750);
+});
+
+
+test("late delivery is scored per percentage point, not per order", async () => {
+  // Owner 2026-08-06: "如果有 1% 的订单延迟送货，就会扣 10 分 … 如果达到 10%
+  // 延迟，最多也就扣完这 100% 的分数." A ratio against a target of 0 divides by
+  // zero; this needs its own curve.
+  const { attainment, kpiByKey } = await import("../src/api/lib/kpi-catalog.ts");
+  const d = kpiByKey("customer_delivery_date");
+  assert.equal(d.curve, "PENALTY_PER_PCT");
+  assert.equal(d.penaltyPerPct, 10);
+  assert.equal(d.unit, "%", "the actual must be a percentage — 9 of 41 and 9 of 400 are different failures");
+
+  assert.equal(attainment(d, 0, 0), 100);
+  assert.equal(attainment(d, 0, 1), 90);
+  assert.equal(attainment(d, 0, 5), 50);
+  assert.equal(attainment(d, 0, 10), 0);
+  assert.equal(attainment(d, 0, 25), 0, "worse than 10% cannot go negative");
+});
+
+test("the survey scores five 1–5 answers out of 100", async () => {
+  // Owner: "如果是四个 5 分和一个 4 分 … 总分就是 96 分."
+  const { attainment, kpiByKey } = await import("../src/api/lib/kpi-catalog.ts");
+  const q = kpiByKey("customer_satisfaction");
+  assert.equal(q.scoring, "SURVEY");
+  assert.equal(q.surveyQuestions.length, 5, "five questions, 20 points each");
+  for (const question of q.surveyQuestions) {
+    assert.ok(question.endsWith("?"), `"${question}" should be a question`);
+    assert.ok(question.length > 40, "each question has to be specific enough to answer honestly");
+  }
+
+  const score = (answers) => (answers.reduce((a, b) => a + b, 0) / 25) * 100;
+  assert.equal(score([5, 5, 5, 5, 5]), 100);
+  assert.equal(score([5, 5, 5, 5, 4]), 96);
+  // Attainment is the survey mean itself, so weight 20 on a 96 earns 19.2.
+  assert.equal(attainment(q, 90, 96), 96);
+  assert.equal(Math.round((attainment(q, 90, 96) / 100) * 20 * 10) / 10, 19.2);
 });

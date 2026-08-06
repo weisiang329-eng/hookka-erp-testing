@@ -48,7 +48,23 @@ export type KpiShape = "GATE" | "RATIO";
  * number on it. Anything that felt un-measurable is expressed as a checklist
  * of the ACTIONS instead, which is countable and knowable in advance.
  */
-export type KpiScoring = "AUTO" | "CHECKLIST";
+export type KpiScoring = "AUTO" | "CHECKLIST" | "SURVEY";
+
+/**
+ * How an actual turns into an attainment percentage.
+ *
+ *   TARGET_RATIO       — actual ÷ target (or target ÷ actual when lower is
+ *                        better). The default.
+ *   PENALTY_PER_PCT    — start at 100 and subtract `penaltyPerPct` for each
+ *                        percentage point of the actual. Owner 2026-08-06 on
+ *                        late deliveries: "如果有 1% 的订单延迟送货，就会扣 10
+ *                        分 … 如果达到 10% 延迟，最多也就扣完这 100% 的分数."
+ *                        A ratio cannot express that — 1% late against a target
+ *                        of 0 divides by zero, and against a target of 100%
+ *                        on-time it barely moves the number.
+ *   SURVEY_MEAN        — the average of the answers, already a 0–100 figure.
+ */
+export type AttainmentCurve = "TARGET_RATIO" | "PENALTY_PER_PCT" | "SURVEY_MEAN";
 /** Higher actual is better, or lower is better (a count of problems). */
 export type KpiDirection = "HIGHER_IS_BETTER" | "LOWER_IS_BETTER";
 
@@ -84,6 +100,11 @@ export interface KpiDef {
   measurement: string[];
   /** CHECKLIST only — the actions that make up the month. */
   checklistItems?: string[];
+  /** SURVEY only — the questions, each answered 1–5. */
+  surveyQuestions?: string[];
+  curve?: AttainmentCurve;
+  /** PENALTY_PER_PCT only — points lost per percentage point. */
+  penaltyPerPct?: number;
   /** Suggested target; the assignment row overrides it per person. */
   defaultTarget: number;
   /**
@@ -115,22 +136,25 @@ export const KPI_CATALOG: KpiDef[] = [
   {
     key: "customer_delivery_date",
     label: "On-time delivery to the customer's promised date",
-    detail: "How many orders shipped later than the date we promised",
+    detail: "Every 1% of orders shipped late costs 10 points",
     shape: "RATIO",
     direction: "LOWER_IS_BETTER",
-    unit: "count",
+    unit: "%",
     scoring: "AUTO",
+    curve: "PENALTY_PER_PCT",
+    penaltyPerPct: 10,
     purpose:
-      "A late delivery is the one failure the customer always notices. Everything else in the factory can slip; this cannot.",
+      "A late delivery is the one failure the customer always notices. Everything else in the factory can slip; this is the promise we made.",
     definition:
-      "The number of SALES ORDERS whose FIRST dispatch left after the delivery date promised to that customer. Counted once per order, not per delivery note — a customer promised one date was let down once, however many trips it took.",
+      "The PERCENTAGE of sales orders shipped in the month whose first dispatch left after the date promised to that customer. Counted once per order, not per delivery note — a customer promised one date was let down once, however many trips it took.",
     measurement: [
-      "Take the date on the sales order that was promised to the customer (customer_delivery_date, filled on 99.8% of orders). Our own internal estimate is NOT used.",
-      "Find the first dispatch date across every delivery order carrying that sales order's production.",
-      "If the dispatch date is later than the promised date, the order counts as late.",
-      "Target is 0 late. Attainment falls as late orders climb, and it carries whatever weight it was assigned — like every other KPI.",
+      "Take the date promised to the customer on the sales order. Our own internal estimate is never used.",
+      "Find the first dispatch date across every delivery order carrying that order's production.",
+      "Late % = orders dispatched after the promised date ÷ orders dispatched that month × 100.",
+      "Score starts at 100 and loses 10 points per 1% late: 0% → 100, 1% → 90, 5% → 50, 10% or worse → 0.",
+      "That score is then multiplied by whatever weight this KPI was assigned.",
     ],
-    formula: "Count of sales orders dispatched after the date promised to the customer. Target 0.",
+    formula: "100 − (late % × 10). 1% late costs 10 points; 10% late scores nothing.",
     defaultTarget: 0,
     defaultWeight: 30,
     available: true,
@@ -213,31 +237,33 @@ export const KPI_CATALOG: KpiDef[] = [
   },
   {
     key: "customer_satisfaction",
-    label: "Customer satisfaction survey — 3 customers a month",
-    detail: "Pick three, send the link, collect the scores, act on the low ones",
+    label: "Customer satisfaction survey",
+    detail: "Five questions, each scored 1–5 by the customer, worth 20 points each",
     shape: "RATIO",
     direction: "HIGHER_IS_BETTER",
     unit: "%",
-    scoring: "CHECKLIST",
+    scoring: "SURVEY",
+    curve: "SURVEY_MEAN",
     purpose:
-      "We hear from customers only when something goes wrong, which means the quiet ones are invisible until they leave. Asking three a month, rotating through the list, turns that into a number that moves.",
+      "We hear from customers only when something goes wrong, so the quiet ones are invisible until they leave. Asking a handful every month turns service quality into a number that moves.",
     definition:
-      "A monthly cycle: choose three customers who were NOT surveyed last month, send each a scored questionnaire, collect the replies, and turn anything below 3/5 into a written improvement item. Scored on completing the cycle, not on the customers' mood — the mood is theirs, the follow-through is ours.",
+      "Three customers a month answer five questions about how the office deals with them. Each answer is 1–5 and worth up to 20 points, so five 5s is 100 and four 5s with one 4 is 96. The KPI is the average across everyone who replied.",
     measurement: [
-      "Pick 3 customers who did not receive the survey last month (rotate, so the same easy accounts are not asked every time).",
-      "Send each the questionnaire link. Five questions, each scored 1–5: delivery on time · product quality · quotation accuracy · how quickly we answer · how easy we are to deal with.",
-      "Collect at least 2 replies. Below that the month's answers are too thin to read.",
-      "Any answer below 3/5 becomes a written improvement item with an owner.",
-      "Score = items completed ÷ 4 × 100. When the survey system ships, the AVERAGE SCORE joins as a separate KPI — this one keeps measuring that the cycle was run.",
+      "Pick about three customers and send each the five-question link. They may be the same customers as last month — what matters is that somebody is asked.",
+      "Each question is answered 1–5. A 5 earns the full 20 points for that question, a 4 earns 16, a 3 earns 12, and so on.",
+      "One reply's score = (sum of the five answers ÷ 25) × 100.",
+      "The month's figure is the average across every reply received.",
+      "That figure is the attainment, multiplied by the weight assigned. At weight 20, a 96 earns 19.2 points.",
     ],
-    formula: "Steps of the monthly survey cycle completed ÷ 4 × 100",
-    checklistItems: [
-      "3 customers chosen, none of them surveyed last month",
-      "Survey link sent to all 3",
-      "At least 2 replies received",
-      "Every answer below 3/5 written up as an improvement item with an owner",
+    formula: "Average across replies of (sum of five 1–5 answers ÷ 25) × 100",
+    surveyQuestions: [
+      "When you send us an enquiry or ask for a quotation, how quickly do you get a reply?",
+      "When you ask where your order is or when it will arrive, how clear and reliable is the answer?",
+      "When you chase us or follow up, how quickly does someone come back to you?",
+      "How accurate is the paperwork we send you — quotations, order confirmations, delivery notes and invoices?",
+      "When something went wrong, how well did we own it and put it right?",
     ],
-    defaultTarget: 100,
+    defaultTarget: 90,
     defaultWeight: 20,
     available: true,
     roles: ["OFFICE"],
@@ -292,11 +318,24 @@ export function kpisForRole(role: string): KpiDef[] {
  * Floored at 0 so a bad month cannot produce negative points.
  */
 export function attainment(
-  def: Pick<KpiDef, "direction">,
+  def: Pick<KpiDef, "direction"> & Partial<Pick<KpiDef, "curve" | "penaltyPerPct">>,
   target: number,
   actual: number,
 ): number {
-  if (!Number.isFinite(target) || !Number.isFinite(actual)) return 0;
+  if (!Number.isFinite(actual)) return 0;
+
+  // Straight penalty off a perfect start. Used where the target is zero and a
+  // ratio would divide by it.
+  if (def.curve === "PENALTY_PER_PCT") {
+    const per = Number(def.penaltyPerPct) || 10;
+    return Math.max(0, Math.min(120, Math.round((100 - actual * per) * 10) / 10));
+  }
+  // A survey mean is already the attainment.
+  if (def.curve === "SURVEY_MEAN") {
+    return Math.max(0, Math.min(120, Math.round(actual * 10) / 10));
+  }
+
+  if (!Number.isFinite(target)) return 0;
   if (def.direction === "HIGHER_IS_BETTER") {
     if (target <= 0) return actual > 0 ? 120 : 0;
     return Math.max(0, Math.min(120, Math.round((actual / target) * 1000) / 10));

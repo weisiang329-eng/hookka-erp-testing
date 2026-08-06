@@ -22,11 +22,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { getCurrentUser } from "@/lib/auth";
 
-type Scoring = "AUTO" | "CHECKLIST";
+type Scoring = "AUTO" | "CHECKLIST" | "SURVEY";
 
 type Line = {
   key: string; label: string; detail: string;
-  scoring?: Scoring; formula?: string; checklistItems?: string[];
+  scoring?: Scoring; formula?: string; checklistItems?: string[]; surveyQuestions?: string[];
   purpose?: string; definition?: string; measurement?: string[];
   shape: "GATE" | "RATIO"; unit: "%" | "count" | "score";
   available: boolean; blockedBy?: string; drillPath?: string;
@@ -50,7 +50,7 @@ type CardData = {
 };
 type LibItem = {
   key: string; label: string; detail: string; shape: "GATE" | "RATIO"; unit: string;
-  scoring: Scoring; formula: string; checklistItems?: string[];
+  scoring: Scoring; formula: string; checklistItems?: string[]; surveyQuestions?: string[];
   purpose?: string; definition?: string; measurement?: string[];
   defaultTarget: number; defaultWeight: number; available: boolean;
   current: number | null; evidence: string;
@@ -84,6 +84,7 @@ function monthsBack(n: number): string[] {
 const BADGE: Record<string, string> = {
   AUTO: "border-[#BFD9AE] bg-[#F2F7EE] text-[#3B6D11]",
   CHECKLIST: "border-[#AECBD9] bg-[#EEF4F7] text-[#11566D]",
+  SURVEY: "border-[#C9B8D9] bg-[#F4F0F7] text-[#553D6D]",
   GATE: "border-[#E7B8B0] bg-[#FDF3F1] text-[#9A3A2D]",
 };
 const Badge = ({ kind, children }: { kind: string; children: React.ReactNode }) => (
@@ -337,7 +338,7 @@ export default function KpiPage() {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <span className="text-[13px] font-semibold text-[#1F1D1B]">{k.label}</span>
-                          <Badge kind={k.scoring}>{k.scoring === "AUTO" ? "auto" : "checklist"}</Badge>
+                          <Badge kind={k.scoring}>{k.scoring === "AUTO" ? "auto" : k.scoring === "SURVEY" ? "survey" : "checklist"}</Badge>
                         </div>
                         <div className="text-[11.5px] text-[#6B6560] mt-0.5 truncate">{k.detail}</div>
                       </div>
@@ -384,6 +385,18 @@ export default function KpiPage() {
                               <li key={m} className="text-[11.5px] text-[#3A3733] leading-relaxed">{m}</li>
                             ))}
                           </ol>
+                        )}
+                        {(k.surveyQuestions?.length ?? 0) > 0 && (
+                          <div>
+                            <p className="text-[11.5px] font-semibold text-[#1F1D1B] mb-1">
+                              The {k.surveyQuestions!.length} questions — each answered 1–5, worth 20 points
+                            </p>
+                            <ol className="ml-4 list-decimal space-y-0.5">
+                              {k.surveyQuestions!.map((q) => (
+                                <li key={q} className="text-[11.5px] text-[#3A3733] leading-relaxed">{q}</li>
+                              ))}
+                            </ol>
+                          </div>
                         )}
                         {(k.checklistItems?.length ?? 0) > 0 && (
                           <div>
@@ -820,7 +833,11 @@ export default function KpiPage() {
                       <div className="flex-1 min-w-0">
                         <div className="text-[13px] font-bold flex items-center gap-1.5 flex-wrap">
                           {l.label}
-                          {l.scoring && <Badge kind={l.scoring}>{l.scoring === "AUTO" ? "auto" : "checklist"}</Badge>}
+                          {l.scoring && (
+                            <Badge kind={l.scoring}>
+                              {l.scoring === "AUTO" ? "auto" : l.scoring === "SURVEY" ? "survey" : "checklist"}
+                            </Badge>
+                          )}
                         </div>
                         {l.purpose && (
                           <p className="text-[12px] text-[#1F1D1B] mt-1.5 leading-relaxed">

@@ -274,6 +274,15 @@ function makeDb() {
           po_item_id: getCol(r, "po_item_id") ?? null,
         }));
     }
+    // SELECT acceptedQty, invoiced_qty FROM grn_items WHERE id = ?  (re-line ceiling)
+    if (/SELECT acceptedQty, invoiced_qty FROM grn_items WHERE id = \?/i.test(sql)) {
+      return tables.grn_items
+        .filter((r) => String(r.id) === String(binds[0]))
+        .map((r) => ({
+          acceptedQty: getCol(r, "acceptedQty"),
+          invoiced_qty: Number(r.invoiced_qty) || 0,
+        }));
+    }
     // SELECT invoiced_qty FROM grn_items WHERE id = ?
     if (/SELECT invoiced_qty FROM grn_items WHERE id = \?/i.test(sql)) {
       return tables.grn_items
@@ -293,7 +302,7 @@ function makeDb() {
         .filter((r) => String(getCol(r, "purchaseOrderId")) === String(binds[0]))
         .map((r) => ({ quantity: getCol(r, "quantity"), receivedQty: Number(getCol(r, "receivedQty")) || 0 }));
     }
-    // SELECT material_code, materialName, quantity FROM purchase_order_items WHERE purchaseOrderId = ?
+    // SELECT material_code, materialName, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ?
     if (/FROM purchase_order_items WHERE purchaseOrderId = \?/i.test(sql)) {
       return tables.purchase_order_items
         .filter((r) => String(getCol(r, "purchaseOrderId")) === String(binds[0]))
@@ -301,6 +310,7 @@ function makeDb() {
           material_code: getCol(r, "material_code"),
           materialName: getCol(r, "materialName"),
           quantity: getCol(r, "quantity"),
+          receivedQty: Number(getCol(r, "receivedQty")) || 0,
         }));
     }
     // SELECT id, materialName, acceptedQty, invoiced_qty FROM grn_items WHERE grnId = ?
@@ -326,8 +336,33 @@ function makeDb() {
     if (/FROM purchase_invoice_items WHERE pi_id = \?/i.test(sql)) {
       return tables.purchase_invoice_items.filter((r) => String(getCol(r, "pi_id")) === String(binds[0]));
     }
-    // PO source already-invoiced JOIN — not exercised in these tests (GRN-sourced).
-    if (/FROM purchase_invoice_items pii JOIN purchase_invoices/i.test(sql)) return [];
+    // Already-invoiced against a PO, per material code:
+    //   SELECT pii.material_code AS mc, COALESCE(SUM(pii.qty),0) AS qty
+    //     FROM purchase_invoice_items pii JOIN purchase_invoices pi ...
+    //    WHERE COALESCE(pii.po_id, pi.purchaseOrderId) = ? AND pi.status != 'CANCELLED'
+    // A GRN-sourced line counts here through its own po_id — which is exactly
+    // why the GRN-then-PO order was already blocked while PO-then-GRN was not.
+    if (/FROM purchase_invoice_items pii JOIN purchase_invoices/i.test(sql)) {
+      const wanted = String(binds[0]);
+      // The re-line path excludes the invoice being edited (AND pii.pi_id != ?)
+      // — its current lines are about to be replaced.
+      const excluded = /pii\.pi_id != \?/.test(sql) ? String(binds[1]) : null;
+      const byCode = new Map();
+      for (const it of tables.purchase_invoice_items) {
+        if (excluded && String(getCol(it, "pi_id")) === excluded) continue;
+        const pi = tables.purchase_invoices.find(
+          (p) => String(p.id) === String(getCol(it, "pi_id")),
+        );
+        if (!pi || pi.status === "CANCELLED") continue;
+        const effectivePo =
+          getCol(it, "po_id") ?? getCol(pi, "purchaseOrderId") ?? null;
+        if (effectivePo == null || String(effectivePo) !== wanted) continue;
+        const code = getCol(it, "material_code");
+        if (!code) continue;
+        byCode.set(code, (byCode.get(code) ?? 0) + (Number(getCol(it, "qty")) || 0));
+      }
+      return [...byCode].map(([mc, qty]) => ({ mc, qty }));
+    }
     // suppliers / poNo lookups not used here
     if (/FROM purchase_orders WHERE id = \?/i.test(sql)) {
       return tables.purchase_orders.filter((r) => String(r.id) === String(binds[0]));
@@ -643,6 +678,248 @@ test("PO-linked + arrival ARRIVED at create → POSTED + receivedQty cascades", 
   assert.equal(Number(poi.receivedQty), 5, "post-on-create must cascade receivedQty");
   const po = db.tables.purchase_orders.find((r) => r.id === "po-9");
   assert.equal(po.status, "RECEIVED");
+});
+
+// ---------------------------------------------------------------------------
+// BUG-2026-08-07-003 — a purchase order could be invoiced TWICE for the same
+// goods.
+//
+// A GRN-sourced invoice was validated ONLY against grn_items.invoiced_qty. It
+// never looked at the purchase order's own remaining quantity, so:
+//   1. bill 100 straight off the PO   → passes (PO ceiling: 100 remaining)
+//   2. goods arrive, GRN POSTED, accepted 100, invoiced_qty 0
+//   3. bill the same 100 off the GRN  → passed (GRN ceiling: 100 accepted)
+// = 200 of payable against a 100 PO, with no 409 anywhere.
+//
+// The REVERSE order was already caught: the PO ceiling counts a GRN-sourced
+// line through COALESCE(pii.po_id, pi.purchaseOrderId), so a GRN invoice
+// consumed the PO's remaining and the later PO-direct invoice hit the wall.
+// One-directional, which is exactly why it survived.
+// ---------------------------------------------------------------------------
+function seedPoAndReceipt(db, { ordered = 100, accepted = 100 } = {}) {
+  db.tables.suppliers.push({ id: "sup-2", code: "S2", name: "ADD WOOD", email: null });
+  db.tables.purchase_orders.push({
+    id: "po-2", poNo: "PO-2", supplierId: "sup-2", supplierName: "ADD WOOD",
+    subtotalSen: ordered * 10000, totalSen: ordered * 10000, status: "RECEIVED",
+    orderDate: "2026-08-01", expectedDate: "", receivedDate: "2026-08-02",
+    notes: "", orgId: "org-test",
+  });
+  db.tables.purchase_order_items.push({
+    id: "poi-2", purchaseOrderId: "po-2", materialCategory: "WOOD",
+    material_code: "WOOD-2", materialName: "WOOD-2 - Pine plank", supplierSKU: "",
+    quantity: ordered, unitPriceSen: 10000, totalSen: ordered * 10000,
+    receivedQty: accepted, unit: "pcs", orgId: "org-test",
+  });
+  db.tables.grns.push({
+    id: "grn-2", grnNumber: "GRN-2", poId: "po-2", poNumber: "PO-2",
+    supplierId: "sup-2", supplierName: "ADD WOOD", receiveDate: "2026-08-02",
+    receivedBy: "x", totalAmount: accepted * 10000, qcStatus: "PASSED",
+    status: "POSTED", notes: "", arrival_state: "ARRIVED",
+  });
+  db.tables.grn_items.push({
+    id: 201, grnId: "grn-2", poItemIndex: 0, po_id: "po-2", po_item_id: "poi-2",
+    materialCode: "WOOD-2", materialName: "WOOD-2 - Pine plank",
+    orderedQty: ordered, receivedQty: accepted, acceptedQty: accepted,
+    rejectedQty: 0, rejectionReason: null, unitPrice: 10000, invoiced_qty: 0,
+  });
+}
+
+const poDirectPI = (qty) => ({
+  purchaseOrderId: "po-2",
+  supplierId: "sup-2",
+  supplierName: "ADD WOOD",
+  items: [
+    {
+      materialCode: "WOOD-2",
+      materialName: "WOOD-2 - Pine plank",
+      qty,
+      unitPriceSen: 10000,
+      poId: "po-2",
+    },
+  ],
+});
+
+const grnSourcedPI = (qty, extra = {}) => ({
+  grnId: "grn-2",
+  supplierId: "sup-2",
+  supplierName: "ADD WOOD",
+  ...extra,
+  items: [
+    {
+      materialCode: "WOOD-2",
+      materialName: "WOOD-2 - Pine plank",
+      qty,
+      unitPriceSen: 10000,
+      grnItemId: 201,
+    },
+  ],
+});
+
+const post = (root, payload) =>
+  root.request("/", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+test("PO-direct 100 then GRN-sourced 100 is REJECTED — one PO, one lot of goods", async () => {
+  const db = makeDb();
+  seedPoAndReceipt(db);
+  const piRoot = mount(piApp, db);
+
+  // 1. bill all 100 straight off the purchase order
+  assert.equal((await post(piRoot, poDirectPI(100))).status, 200);
+
+  // 2. bill the SAME 100 off the receipt — the GRN line still shows 100
+  //    accepted / 0 invoiced, so only the PO ceiling can stop this.
+  const res = await post(piRoot, grnSourcedPI(100, { purchaseOrderId: "po-2" }));
+  assert.equal(res.status, 409, "a GRN-sourced invoice must also honour the PO ceiling");
+  const body = await res.json();
+  assert.equal(body.success, false);
+  // Actionable: the material, what was asked for, what is actually left.
+  assert.match(body.error, /WOOD-2/, "the error must name the material code");
+  assert.match(body.error, /requested 100/, "the error must state what was requested");
+  assert.match(body.error, /remaining 0/, "the error must state what the PO has left");
+  assert.match(body.error, /PO-2/, "the error must name the purchase order");
+
+  // Nothing was consumed by the rejected attempt.
+  const gi = db.tables.grn_items.find((r) => r.id === 201);
+  assert.equal(Number(gi.invoiced_qty) || 0, 0);
+  assert.equal(db.tables.purchase_invoices.length, 1);
+});
+
+test("the PO ceiling is found through grn_items.po_id when the body names no PO", async () => {
+  const db = makeDb();
+  seedPoAndReceipt(db);
+  const piRoot = mount(piApp, db);
+
+  assert.equal((await post(piRoot, poDirectPI(100))).status, 200);
+
+  // No purchaseOrderId, no per-line poId — the GRN's own lines resolve it.
+  const res = await post(piRoot, grnSourcedPI(100));
+  assert.equal(res.status, 409);
+  assert.match((await res.json()).error, /remaining 0/);
+});
+
+test("a legitimate split still passes: 60 off the PO, then 40 off the GRN", async () => {
+  const db = makeDb();
+  seedPoAndReceipt(db);
+  const piRoot = mount(piApp, db);
+
+  assert.equal((await post(piRoot, poDirectPI(60))).status, 200);
+
+  // 40 remain on the PO and 100 on the receipt — over-blocking this would be
+  // its own bug (the same line must not be counted twice against the PO).
+  const res = await post(piRoot, grnSourcedPI(40, { purchaseOrderId: "po-2" }));
+  assert.equal(res.status, 200, "the remaining 40 must still be invoiceable");
+
+  // 100 billed in total, and the GRN line drew down by the 40.
+  const gi = db.tables.grn_items.find((r) => r.id === 201);
+  assert.equal(Number(gi.invoiced_qty), 40);
+
+  // The 101st unit is refused.
+  const over = await post(piRoot, grnSourcedPI(1, { purchaseOrderId: "po-2" }));
+  assert.equal(over.status, 409);
+});
+
+test("two GRN-sourced invoices split 60/40 without double-counting the PO", async () => {
+  const db = makeDb();
+  seedPoAndReceipt(db);
+  const piRoot = mount(piApp, db);
+
+  assert.equal((await post(piRoot, grnSourcedPI(60, { purchaseOrderId: "po-2" }))).status, 200);
+  assert.equal((await post(piRoot, grnSourcedPI(40, { purchaseOrderId: "po-2" }))).status, 200);
+
+  const gi = db.tables.grn_items.find((r) => r.id === 201);
+  assert.equal(Number(gi.invoiced_qty), 100);
+});
+
+test("a GRN with no purchase order behind it (direct receipt) still invoices", async () => {
+  const db = makeDb();
+  db.tables.suppliers.push({ id: "sup-3", code: "S3", name: "WALK IN", email: null });
+  db.tables.grns.push({
+    id: "grn-3", grnNumber: "GRN-3", poId: null, poNumber: null,
+    supplierId: "sup-3", supplierName: "WALK IN", receiveDate: "2026-08-02",
+    receivedBy: "x", totalAmount: 50000, qcStatus: "PASSED", status: "POSTED",
+    notes: "", arrival_state: "ARRIVED",
+  });
+  db.tables.grn_items.push({
+    id: 301, grnId: "grn-3", poItemIndex: null, po_id: null, po_item_id: null,
+    materialCode: "LOOSE-1", materialName: "LOOSE-1 - Loose foam",
+    orderedQty: 0, receivedQty: 5, acceptedQty: 5, rejectedQty: 0,
+    rejectionReason: null, unitPrice: 10000, invoiced_qty: 0,
+  });
+  const piRoot = mount(piApp, db);
+
+  const res = await post(piRoot, {
+    grnId: "grn-3",
+    supplierId: "sup-3",
+    supplierName: "WALK IN",
+    items: [
+      { materialCode: "LOOSE-1", materialName: "LOOSE-1 - Loose foam", qty: 5, unitPriceSen: 10000, grnItemId: 301 },
+    ],
+  });
+  assert.equal(res.status, 200, "a receipt with no PO must stay invoiceable");
+  const gi = db.tables.grn_items.find((r) => r.id === 301);
+  assert.equal(Number(gi.invoiced_qty), 5);
+});
+
+test("re-lining an invoice cannot walk around the PO ceiling", async () => {
+  const db = makeDb();
+  seedPoAndReceipt(db);
+  const piRoot = mount(piApp, db);
+
+  // 80 already billed straight off the PO; 20 left.
+  assert.equal((await post(piRoot, poDirectPI(80))).status, 200);
+  const created = (await (await post(piRoot, grnSourcedPI(1, { purchaseOrderId: "po-2" }))).json()).data;
+
+  const relineTo = (qty) =>
+    piRoot.request(`/${created.id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        items: [
+          {
+            materialCode: "WOOD-2",
+            materialName: "WOOD-2 - Pine plank",
+            qty,
+            unitPriceSen: 10000,
+            grnItemId: 201,
+            poId: "po-2",
+          },
+        ],
+      }),
+    });
+
+  // Raise-1-then-edit-to-100 is the obvious way around a create-time guard.
+  const over = await relineTo(100);
+  assert.equal(over.status, 409);
+  assert.match((await over.json()).error, /remaining 20/);
+
+  // The edit that FITS still goes through — this invoice's own line must not
+  // be counted against it (19 more on top of its own 1 = the 20 that remain).
+  assert.equal((await relineTo(20)).status, 200);
+  const gi = db.tables.grn_items.find((r) => r.id === 201);
+  assert.equal(Number(gi.invoiced_qty), 20);
+
+  // And an edit that REDUCES is never blocked.
+  assert.equal((await relineTo(5)).status, 200);
+});
+
+test("an accepted over-receipt stays invoiceable — the ceiling follows the goods", async () => {
+  // grn.ts allows a receipt to run over the order within tolerance. Those
+  // goods are in stock and WILL be billed; capping the invoice at the ordered
+  // quantity would leave a real liability un-recordable.
+  const db = makeDb();
+  seedPoAndReceipt(db, { ordered: 100, accepted: 110 });
+  const piRoot = mount(piApp, db);
+
+  const res = await post(piRoot, grnSourcedPI(110, { purchaseOrderId: "po-2" }));
+  assert.equal(res.status, 200);
+
+  // ... but not a unit beyond what was actually received.
+  const over = await post(piRoot, grnSourcedPI(1, { purchaseOrderId: "po-2" }));
+  assert.equal(over.status, 409);
 });
 
 test("explicit body.status DRAFT forces DRAFT even for arrived goods", async () => {

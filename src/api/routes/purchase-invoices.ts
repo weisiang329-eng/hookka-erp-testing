@@ -24,7 +24,13 @@ import {
 } from "../lib/journal-hash";
 import { nextMonthDueDate } from "../../lib/terms";
 import { issueDocNumber } from "../lib/doc-number-service";
-import { checkConvertAvailability, clampDecrement, type ConvertLineRequest } from "../../lib/convert-chain";
+import {
+  checkConvertAvailability,
+  clampDecrement,
+  poCeilingError,
+  poInvoiceCeiling,
+  type ConvertLineRequest,
+} from "../../lib/convert-chain";
 import { PI_STATUS_CHECK_SQL } from "../lib/ensure-partial-payment";
 import { buildPiApprovalLegs } from "../../lib/pi-posting";
 import { isPiEditable, piEditBlockedError } from "../../lib/purchase-edit-rules";
@@ -913,6 +919,131 @@ function futureInvoiceDate(date: string | undefined | null): string | null {
   return d > limit ? d : null;
 }
 
+/**
+ * THE purchase-order invoicing ceiling — one implementation, both invoice
+ * paths (BUG-2026-08-07-003).
+ *
+ * A PI can reach a purchase order two ways: billed straight off the PO, or
+ * billed off a GRN whose lines were received against that PO. Only the first
+ * used to be capped by the order's own remaining quantity; the GRN path was
+ * capped ONLY by `grn_items.accepted − invoiced_qty`. So 100 could be billed
+ * off the PO and the same 100 billed again off the GRN — 200 of payable
+ * against a 100 PO, with no 409 anywhere. The reverse order was already
+ * caught, because already-invoiced below counts a GRN-sourced line through
+ * `COALESCE(pii.po_id, pi.purchaseOrderId)`.
+ *
+ * Called once per purchase order with the lines that bill THAT order (a
+ * supplier invoice routinely covers several — pooling them against the header
+ * PO would over-invoice one and wrongly reject a line that is in budget on its
+ * own). The requested quantity is aggregated PER MATERIAL CODE first: two
+ * lines of the same material draw down one shared ceiling, and checking them
+ * one at a time would let 60 + 60 through a remaining of 100.
+ *
+ * Nothing double-counts the invoice being created: it is not in the database
+ * yet, so the already-invoiced sum covers only OTHER live invoices.
+ */
+async function checkPoRemaining(
+  db: D1Database,
+  poId: string,
+  rows: Array<{ materialCode: string | null; qty: number }>,
+  /**
+   * A PI whose OWN lines must not count toward already-invoiced. Set by the
+   * re-line path (PUT): those lines are about to be replaced by `rows`, so
+   * counting them as well would measure the same quantity twice and block
+   * every edit — including one that REDUCES the invoice.
+   */
+  excludePiId?: string | null,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const poItemsRes = await db
+    .prepare(
+      "SELECT material_code, materialName, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ?",
+    )
+    .bind(poId)
+    .all<{
+      material_code?: string | null;
+      materialCode?: string | null;
+      materialName: string | null;
+      quantity: number;
+      receivedQty?: number | null;
+      received_qty?: number | null;
+    }>();
+  // Already-invoiced per material_code against THIS PO. Counts lines by
+  // their own po_id as well as PIs whose header points here, so a
+  // multi-PO invoice still contributes to the right ceiling.
+  const invRes = await db
+    .prepare(
+      `SELECT pii.material_code AS mc, COALESCE(SUM(pii.qty), 0) AS qty
+         FROM purchase_invoice_items pii
+         JOIN purchase_invoices pi ON pi.id = pii.pi_id
+        WHERE COALESCE(pii.po_id, pi.purchaseOrderId) = ? AND pi.status != 'CANCELLED'${
+          excludePiId ? " AND pii.pi_id != ?" : ""
+        }
+        GROUP BY pii.material_code`,
+    )
+    .bind(...(excludePiId ? [poId, excludePiId] : [poId]))
+    .all<{ mc?: string | null; material_code?: string | null; qty: number }>();
+  const invByCode = new Map<string, number>();
+  for (const row of invRes.results ?? []) {
+    const code = String(row.mc ?? row.material_code ?? "");
+    if (code) invByCode.set(code, Number(row.qty) || 0);
+  }
+  const orderedByCode = new Map<string, { name: string; qty: number }>();
+  for (const po of poItemsRes.results ?? []) {
+    const code = String(po.material_code ?? po.materialCode ?? "");
+    if (!code) continue;
+    const prev = orderedByCode.get(code);
+    orderedByCode.set(code, {
+      name: po.materialName ?? code,
+      // Ceiling = ordered, or what was actually received when the receipt ran
+      // over the order (accepted goods must stay invoiceable).
+      qty:
+        (prev?.qty ?? 0) +
+        poInvoiceCeiling(
+          Number(po.quantity) || 0,
+          Number(po.receivedQty ?? po.received_qty ?? 0) || 0,
+        ),
+    });
+  }
+  // Aggregate the REQUESTED quantity per material code before measuring.
+  const reqByCode = new Map<string, number>();
+  for (const r of rows) {
+    const code = r.materialCode ?? "";
+    if (!code) continue; // fee / tax / unmatched lines don't draw a PO line down
+    reqByCode.set(code, (reqByCode.get(code) ?? 0) + (Number(r.qty) || 0));
+  }
+  const lines: ConvertLineRequest[] = [];
+  for (const [code, requestedQty] of reqByCode) {
+    const ordered = orderedByCode.get(code);
+    if (!ordered) continue; // line not matched to a PO line → not guarded here
+    lines.push({
+      ref: code,
+      orderedQty: ordered.qty,
+      consumedQty: invByCode.get(code) ?? 0,
+      requestedQty,
+    });
+  }
+  const guard = checkConvertAvailability(lines);
+  if (guard.ok) return { ok: true };
+  // Only on a block: name the purchase order the operator has to act on.
+  const ordered = orderedByCode.get(guard.ref);
+  const po = await db
+    .prepare("SELECT poNo FROM purchase_orders WHERE id = ?")
+    .bind(poId)
+    .first<{ poNo?: string | null }>();
+  return {
+    ok: false,
+    error: poCeilingError({
+      materialCode: guard.ref,
+      materialName: ordered?.name ?? null,
+      poNo: po?.poNo ?? null,
+      requested: guard.requested,
+      remaining: guard.available,
+      ceiling: ordered?.qty ?? 0,
+      invoiced: invByCode.get(guard.ref) ?? 0,
+    }),
+  };
+}
+
 app.post("/", async (c) => {
   const denied = await requirePermission(c, "purchase-invoices", "create");
   if (denied) return denied;
@@ -1083,13 +1214,23 @@ app.post("/", async (c) => {
   // The old guard blocked ANY 2nd invoice for a PO even when quantity
   // remained — that wrongly stopped legitimate multi-shipment invoicing. Now
   // we validate PER LINE that requested qty ≤ that source line's AVAILABLE:
-  //   • GRN source (body.grnId): available = accepted_qty − invoiced_qty.
+  //   • GRN source (body.grnId): available = accepted_qty − invoiced_qty,
+  //     AND — since BUG-2026-08-07-003 — the PO ceiling below for whichever
+  //     purchase order the GRN's lines resolve to. Billing off a receipt does
+  //     not create fresh entitlement: the goods were ordered once.
   //   • PO source (body.purchaseOrderId, no grnId): available = quantity −
   //     already-invoiced (summed across this PO's live PIs).
   // Only an over-drawn line is rejected; a 2nd PI is allowed when qty remains.
   // grnId resolves the GRN → its PO so poRef/header stay populated.
   let sourceGrnId: string | null = null;
   let sourceGrnOrgCode: string | null = null;
+  // The source GRN's header purchase order — the last-resort fallback for a
+  // GRN line written before grn_items.po_id existed. Null for a direct receipt.
+  let sourceGrnPoId: string | null = null;
+  // grn_items.id → the purchase order that GRN line was received against.
+  // Populated by the GRN branch; read again by the INSERT so the po_id stored
+  // on a GRN-sourced line is the SAME order this guard measured it against.
+  const grnLinePoId = new Map<string, string>();
   if (body.grnId) {
     const grn = await db
       .prepare("SELECT id, poId, poNumber, purchase_org_code FROM grns WHERE id = ?")
@@ -1107,24 +1248,33 @@ app.post("/", async (c) => {
     sourceGrnId = grn.id;
     sourceGrnOrgCode =
       grn.purchaseOrgCode ?? grn.purchase_org_code ?? null;
+    sourceGrnPoId = grn.poId ?? null;
     if (!poRef) poRef = grn.poNumber ?? null;
 
     if (normalizedItems && normalizedItems.ok) {
       // Load this GRN's lines (accepted + already-invoiced) keyed by id.
       const giRes = await db
         .prepare(
-          "SELECT id, materialName, acceptedQty, invoiced_qty FROM grn_items WHERE grnId = ?",
+          "SELECT id, materialCode, materialName, acceptedQty, invoiced_qty, po_id FROM grn_items WHERE grnId = ?",
         )
         .bind(sourceGrnId)
         .all<{
           id: number | string;
+          materialCode?: string | null;
+          material_code?: string | null;
           materialName: string | null;
           acceptedQty: number;
           invoiced_qty?: number | null;
           invoicedQty?: number | null;
+          po_id?: string | null;
+          poId?: string | null;
         }>();
       const giById = new Map<string, (typeof giRes.results)[number]>();
-      for (const gi of giRes.results ?? []) giById.set(String(gi.id), gi);
+      for (const gi of giRes.results ?? []) {
+        giById.set(String(gi.id), gi);
+        const linePo = gi.po_id ?? gi.poId ?? null;
+        if (linePo) grnLinePoId.set(String(gi.id), String(linePo));
+      }
 
       const lines: ConvertLineRequest[] = [];
       for (const r of normalizedItems.rows) {
@@ -1150,6 +1300,40 @@ app.post("/", async (c) => {
       if (!guard.ok) {
         return c.json({ success: false, error: guard.error }, 409);
       }
+
+      // ── AND the purchase order's own ceiling (BUG-2026-08-07-003) ────────
+      // The GRN ceiling above only knows what this RECEIPT has left. It knows
+      // nothing about quantity already billed straight off the purchase
+      // order, so 100 could be invoiced off the PO and the same 100 invoiced
+      // again off the GRN — 200 of payable against a 100 PO. Resolve each
+      // line to its purchase order and measure it against the SAME ceiling
+      // the PO-source branch below uses. A GRN line with no purchase order (a
+      // direct receipt) resolves to nothing and stays invoiceable.
+      const byPo = new Map<string, Array<{ materialCode: string | null; qty: number }>>();
+      for (const r of normalizedItems.rows) {
+        const gi = r.grnItemId ? giById.get(String(r.grnItemId)) : undefined;
+        // Same resolution the INSERT uses for purchase_invoice_items.po_id, so
+        // the order this line is measured against is the order it will be
+        // recorded against — one ceiling, one counter.
+        const linePoId =
+          r.poId ??
+          body.purchaseOrderId ??
+          (r.grnItemId ? grnLinePoId.get(String(r.grnItemId)) : undefined) ??
+          sourceGrnPoId;
+        if (!linePoId) continue; // no purchase order behind this line
+        const bucket = byPo.get(String(linePoId)) ?? [];
+        bucket.push({
+          materialCode: r.materialCode ?? gi?.materialCode ?? gi?.material_code ?? null,
+          qty: r.qty,
+        });
+        byPo.set(String(linePoId), bucket);
+      }
+      for (const [poId, rows] of byPo) {
+        const poGuard = await checkPoRemaining(db, poId, rows);
+        if (!poGuard.ok) {
+          return c.json({ success: false, error: poGuard.error }, 409);
+        }
+      }
     }
   } else if (body.purchaseOrderId && normalizedItems && normalizedItems.ok) {
     // PO source without a GRN: cap each requested qty at the PO line's
@@ -1169,53 +1353,10 @@ app.post("/", async (c) => {
     }
 
     for (const [poId, rows] of byPo) {
-      const poItemsRes = await db
-        .prepare(
-          "SELECT material_code, materialName, quantity FROM purchase_order_items WHERE purchaseOrderId = ?",
-        )
-        .bind(poId)
-        .all<{ material_code?: string | null; materialCode?: string | null; materialName: string | null; quantity: number }>();
-      // Already-invoiced per material_code against THIS PO. Counts lines by
-      // their own po_id as well as PIs whose header points here, so a
-      // multi-PO invoice still contributes to the right ceiling.
-      const invRes = await db
-        .prepare(
-          `SELECT pii.material_code AS mc, COALESCE(SUM(pii.qty), 0) AS qty
-             FROM purchase_invoice_items pii
-             JOIN purchase_invoices pi ON pi.id = pii.pi_id
-            WHERE COALESCE(pii.po_id, pi.purchaseOrderId) = ? AND pi.status != 'CANCELLED'
-            GROUP BY pii.material_code`,
-        )
-        .bind(poId)
-        .all<{ mc?: string | null; material_code?: string | null; qty: number }>();
-      const invByCode = new Map<string, number>();
-      for (const row of invRes.results ?? []) {
-        const code = String(row.mc ?? row.material_code ?? "");
-        if (code) invByCode.set(code, Number(row.qty) || 0);
-      }
-      const orderedByCode = new Map<string, { name: string; qty: number }>();
-      for (const po of poItemsRes.results ?? []) {
-        const code = String(po.material_code ?? po.materialCode ?? "");
-        if (!code) continue;
-        const prev = orderedByCode.get(code);
-        orderedByCode.set(code, {
-          name: po.materialName ?? code,
-          qty: (prev?.qty ?? 0) + (Number(po.quantity) || 0),
-        });
-      }
-      const lines: ConvertLineRequest[] = [];
-      for (const r of rows) {
-        const code = r.materialCode ?? "";
-        const ordered = code ? orderedByCode.get(code) : undefined;
-        if (!ordered) continue; // line not matched to a PO line → not guarded here
-        lines.push({
-          ref: ordered.name,
-          orderedQty: ordered.qty,
-          consumedQty: invByCode.get(code) ?? 0,
-          requestedQty: r.qty,
-        });
-      }
-      const guard = checkConvertAvailability(lines);
+      // Same ceiling the GRN-sourced branch above applies — deliberately ONE
+      // implementation. Two ceilings that can disagree is how a PO came to be
+      // invoiceable twice for the same goods (BUG-2026-08-07-003).
+      const guard = await checkPoRemaining(db, poId, rows);
       if (!guard.ok) {
         return c.json({ success: false, error: guard.error }, 409);
       }
@@ -1371,7 +1512,16 @@ app.post("/", async (c) => {
             r.lineType,
             r.notes,
             r.grnItemId,
-            r.poId ?? body.purchaseOrderId ?? null,
+            // The purchase order this LINE bills. Resolved exactly as the
+            // ceiling guard above resolved it — a GRN-sourced line falls back
+            // to its GRN line's own PO — so what was measured is what gets
+            // counted next time (BUG-2026-08-07-003). Null only for a line
+            // with no purchase order behind it at all.
+            r.poId ??
+              body.purchaseOrderId ??
+              (r.grnItemId ? grnLinePoId.get(String(r.grnItemId)) : undefined) ??
+              sourceGrnPoId ??
+              null,
             now,
             null,
           ),
@@ -1855,6 +2005,29 @@ app.put("/:id", async (c) => {
     );
     if (!ceilGuard.ok) {
       return c.json({ success: false, error: ceilGuard.error }, 409);
+    }
+    // ...AND the purchase order's own ceiling (BUG-2026-08-07-003). Without
+    // this, the create-time PO guard is trivially walked around: raise the
+    // invoice for 1 unit, then re-line it to 100. Same helper, so the edit
+    // path can never drift from the create path. This PI's CURRENT lines are
+    // EXCLUDED from already-invoiced — they are the ones being replaced, and
+    // counting them too would reject even an edit that lowers the quantity.
+    const editPoId =
+      (existing as unknown as { purchaseOrderId?: string | null })
+        .purchaseOrderId ?? null;
+    const byPo = new Map<string, Array<{ materialCode: string | null; qty: number }>>();
+    for (const r of normalizedItems.rows) {
+      const linePoId = r.poId ?? editPoId;
+      if (!linePoId) continue; // no purchase order behind this line
+      const bucket = byPo.get(String(linePoId)) ?? [];
+      bucket.push({ materialCode: r.materialCode, qty: r.qty });
+      byPo.set(String(linePoId), bucket);
+    }
+    for (const [poId, rows] of byPo) {
+      const poGuard = await checkPoRemaining(db, poId, rows, id);
+      if (!poGuard.ok) {
+        return c.json({ success: false, error: poGuard.error }, 409);
+      }
     }
   }
 

@@ -52,9 +52,29 @@ test("the guard's ceiling and consumption are read for THAT PO", () => {
   // the running total describe different things.
   assert.match(
     SRC,
-    /SELECT material_code, materialName, quantity FROM purchase_order_items WHERE purchaseOrderId = \?[\s\S]{0,120}\.bind\(poId\)/,
+    /SELECT material_code, materialName, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = \?[\s\S]{0,160}\.bind\(poId\)/,
   );
   assert.match(SRC, /\.bind\(poId\)[\s\S]{0,80}material_code/);
+});
+
+test("ONE ceiling serves both invoice paths (BUG-2026-08-07-003)", () => {
+  // A GRN-sourced invoice used to be capped only by the receipt's own
+  // accepted−invoiced, so a PO could be billed straight off the order AND
+  // again off its receipt. Both paths now measure against the same helper —
+  // a second copy is how two ceilings come to disagree.
+  const calls = SRC.match(/await checkPoRemaining\(db, poId, rows/g) ?? [];
+  assert.equal(
+    calls.length,
+    3,
+    "the GRN branch, the PO branch and the re-line path must share one ceiling",
+  );
+  // The re-line path must EXCLUDE the invoice it is replacing, or an edit that
+  // even lowers the quantity is measured against its own lines and rejected.
+  assert.match(SRC, /await checkPoRemaining\(db, poId, rows, id\)/);
+  assert.match(SRC, /excludePiId \? " AND pii\.pi_id != \?" : ""/);
+  assert.match(SRC, /async function checkPoRemaining\(/);
+  // The ceiling follows the goods when a receipt legitimately ran over.
+  assert.match(SRC, /poInvoiceCeiling\(/);
 });
 
 test("already-invoiced counts a line by its OWN PO, falling back to the header", () => {
@@ -72,8 +92,14 @@ test("create and update both persist the line's PO", () => {
   const inserts = SRC.match(/grn_item_id, po_id, created_at, updated_at/g) ?? [];
   assert.equal(inserts.length, 2, "both the create and update inserts must store po_id");
   // Create takes the header from the body; update takes it from the stored
-  // invoice, because a PUT does not re-declare it.
-  assert.match(SRC, /r\.poId \?\? body\.purchaseOrderId \?\? null/);
+  // invoice, because a PUT does not re-declare it. A GRN-sourced line falls
+  // back to the PO its GRN line was received against, so the order the
+  // ceiling guard measured it against is the order it gets recorded against
+  // (BUG-2026-08-07-003).
+  assert.match(
+    SRC,
+    /r\.poId \?\?\s*\n\s*body\.purchaseOrderId \?\?\s*\n\s*\(r\.grnItemId \? grnLinePoId\.get\(String\(r\.grnItemId\)\) : undefined\) \?\?\s*\n\s*sourceGrnPoId \?\?\s*\n\s*null/,
+  );
   assert.match(SRC, /r\.poId \?\?\s*\n\s*\(existing as unknown as \{ purchaseOrderId\?: string \| null \}\)\.purchaseOrderId/);
 });
 

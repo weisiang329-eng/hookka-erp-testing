@@ -339,6 +339,38 @@ memo on failure for you. Never cache the promise itself.
 > migration bugs; a test that cries wolf gets muted, and a muted test protects
 > nothing. Scope narrowly, then watch it fail.
 
+## C10 — One quantity, two ceilings — and only one branch is checked
+
+**Shape.** A quantity can be drawn down through more than one route (invoice a PO directly, or
+invoice the receipt raised against it). Each route grew its OWN ceiling, measured against its
+OWN counter. Whichever route was written second is capped only by what IT can see, so the
+quantity is spendable once per route. It is invisible from either side: each guard fires
+correctly for the case its author had in mind, and the totals only disagree when you add them
+up. Worse, these holes are usually **one-directional** — the route whose counter the other one
+happens to read is caught, so the pair looks guarded under half the test orders you'd try.
+
+| # | quantity | routes | state |
+|---|---|---|---|
+| 1 | PO line, invoiced | PI create off a PO / PI create off a GRN | ✅ fixed 2026-08-07 (BUG-2026-08-07-003 — 100 billed off the PO then 100 more off its GRN = 200 payable on a 100 PO. GRN→PO order was already caught, because the PO ceiling reads GRN-sourced lines through `COALESCE(pii.po_id, pi.purchaseOrderId)`) |
+| 2 | PO line, invoiced | PI **re-line** (PUT items) | ✅ fixed 2026-08-07 — same hole with one more step: raise the invoice for 1, edit it to 100. Now shares the helper, with the edited PI excluded from its own already-invoiced total |
+| 3 | GRN line, invoiced (`grn_items.invoiced_qty`) | PI create / PI re-line / PI delete / PI cancel / GRN un-post | ✅ one counter, incremented and restored through the shared `convert-chain.ts` helpers |
+| 4 | PO line, received (`purchase_order_items.receivedQty`) | GRN post-on-create / GRN post-on-PUT | ✅ both go through `cascadePOStatusAfterGRNPost`; reversal through `restorePOReceivedQtyForGRN` |
+
+**The rule.** One quantity gets ONE ceiling function, called by every route that spends it —
+not one guard per route. When you add a second way to draw something down, the question is not
+"does my branch check?" but "which counter does the OTHER branch read, and would it see mine?"
+Two things make the shared helper safe to reuse: the document being written must be excluded
+from its own consumption total (or an edit that LOWERS a quantity gets rejected), and requested
+quantity must be aggregated per key before measuring (or two lines of one material each pass
+against the same remaining).
+
+**Covered by** `tests/purchasing-convert-flow.test.mjs` — the real handlers against a stateful
+mock D1, asserting both the block AND that legitimate splits, PO-less receipts and reducing
+edits still pass. The source pins in `tests/pi-multi-po.test.mjs` count the callers of the
+shared helper, so a fourth route that grows its own copy fails the test.
+
+---
+
 ## What tests cannot catch — and what covers it
 
 None of C1–C4's money leaks were introduced by a code change on the day they started leaking:

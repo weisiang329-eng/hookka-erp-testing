@@ -89,6 +89,49 @@ export function checkConvertAvailability(
 }
 
 /**
+ * The quantity a PURCHASE ORDER line may be invoiced for, in total.
+ *
+ * Normally that is what was ordered. But a receipt is allowed to run slightly
+ * OVER the order (grn.ts accepts up to the over-receipt tolerance), and goods
+ * that were accepted into stock WILL be invoiced — refusing that invoice would
+ * leave a real liability un-recordable. So the ceiling is the GREATER of
+ * ordered and actually-received.
+ *
+ * One ceiling for both invoice paths (straight off the PO, and off a GRN that
+ * resolves to the PO). Two ceilings that can disagree is what let a PO be
+ * billed twice for the same goods — BUG-2026-08-07-003.
+ */
+export function poInvoiceCeiling(orderedQty: number, receivedQty: number): number {
+  const ordered = Number(orderedQty) || 0;
+  const received = Number(receivedQty) || 0;
+  return received > ordered ? received : ordered;
+}
+
+/**
+ * Error text for a PO-ceiling block. An operator told only "over the limit"
+ * retries the same number, so this names the MATERIAL, what was REQUESTED, and
+ * what the purchase order actually has LEFT.
+ */
+export function poCeilingError(o: {
+  materialCode: string;
+  materialName?: string | null;
+  poNo?: string | null;
+  requested: number;
+  remaining: number;
+  ceiling: number;
+  invoiced: number;
+}): string {
+  // PO line names are mashed as "CODE - DESCRIPTION" — don't print the code twice.
+  const raw = (o.materialName ?? "").trim();
+  const desc = raw.startsWith(`${o.materialCode} - `)
+    ? raw.slice(o.materialCode.length + 3)
+    : raw;
+  const named = desc && desc !== o.materialCode ? ` (${desc})` : "";
+  const po = o.poNo ? `PO ${o.poNo}` : "this purchase order";
+  return `Line "${o.materialCode}"${named}: requested ${o.requested} exceeds ${po} remaining ${o.remaining} — the PO allows ${o.ceiling} and ${o.invoiced} is already invoiced. Bill at most ${o.remaining} against this PO, or amend the PO.`;
+}
+
+/**
  * Clamp a decrement so a restore can never drive a consumed counter below 0.
  * Used by the delete / cancel restore paths: decrement by min(amount, current).
  */

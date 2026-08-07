@@ -34,6 +34,7 @@ import {
 } from "../lib/lead-times";
 import { loadAndValidatePOAlignment } from "../lib/po-alignment-validator";
 import { resolveCustomerPriceAsOf } from "./customer-products";
+import { resolveSoBasePriceSen } from "../../lib/so-base-price";
 import { runSofaComboPass } from "../lib/sofa-combo-pass";
 import {
   snapItemToCatalog,
@@ -1593,13 +1594,20 @@ app.post("/", async (c) => {
         const incomingBasePrice = Number(item.basePriceSen) || 0;
         let basePriceSen = incomingBasePrice;
 
-        // Customer-specific price override: only consulted when the request
-        // didn't explicitly supply a price. A failed lookup must not break
-        // the SO create — fall through to the product-level default below.
+        // Customer-specific price is AUTHORITATIVE (owner 2026-08: "customer
+        // 专属价"). Previously it was consulted only when the request sent
+        // base=0, so any path that sent a non-zero price — a frontend branch
+        // that pre-filled the product default, the scan-PO path — silently
+        // billed the product/maintenance price instead of the customer's. Now
+        // we ALWAYS resolve it, and when a customer price exists for this
+        // (customer, product) it wins over both the incoming price and the
+        // product default. Only when NO customer price exists do we honour the
+        // incoming price (a manual entry) and then the product default.
+        // Service orders keep their own pricing (variant pricing suppressed).
         let cpSeatHeightPrices: Array<{ height: string; priceSen: number }> | null = null;
         let cpBasePrice: number | null = null;
         const productIdForLookup = (item.productId as string) || resolvedProduct?.id || "";
-        if (!isServiceOrder && incomingBasePrice === 0 && productIdForLookup && customer.id) {
+        if (!isServiceOrder && productIdForLookup && customer.id) {
           try {
             const cp = await resolveCustomerPriceAsOf(
               c.var.DB,
@@ -1612,33 +1620,40 @@ app.post("/", async (c) => {
               cpSeatHeightPrices = cp.seatHeightPrices ?? null;
             }
           } catch {
-            // Non-fatal: fall back to product-level pricing.
+            // Non-fatal: fall back to incoming / product-level pricing below.
           }
         }
 
-        if (!isServiceOrder && basePriceSen === 0 && resolvedProduct) {
+        if (!isServiceOrder && resolvedProduct) {
           const seatHeight = String(item.seatHeight ?? "");
-          if (cpSeatHeightPrices && cpSeatHeightPrices.length > 0 && seatHeight) {
-            const shp = cpSeatHeightPrices.find(
-              (p) => p.height === seatHeight || p.height === `${seatHeight}"`,
-            );
-            basePriceSen = shp?.priceSen || cpBasePrice || resolvedProduct.basePriceSen || 0;
-          } else if (resolvedProduct.seatHeightPrices && seatHeight) {
+          const matchSeat = (
+            list: Array<{ height: string; priceSen: number }> | null | undefined,
+          ): number | null =>
+            list && seatHeight
+              ? list.find((p) => p.height === seatHeight || p.height === `${seatHeight}"`)
+                  ?.priceSen ?? null
+              : null;
+          // Product-default seat-height price (parsed from the product's JSON).
+          let productSeatSen: number | null = null;
+          if (resolvedProduct.seatHeightPrices && seatHeight) {
             try {
-              const shpList = JSON.parse(resolvedProduct.seatHeightPrices) as Array<{
-                height: string;
-                priceSen: number;
-              }>;
-              const shp = shpList.find(
-                (p) => p.height === seatHeight || p.height === `${seatHeight}"`,
+              productSeatSen = matchSeat(
+                JSON.parse(resolvedProduct.seatHeightPrices) as Array<{
+                  height: string;
+                  priceSen: number;
+                }>,
               );
-              basePriceSen = shp?.priceSen || cpBasePrice || resolvedProduct.basePriceSen || 0;
             } catch {
-              basePriceSen = cpBasePrice ?? resolvedProduct.basePriceSen ?? 0;
+              productSeatSen = null;
             }
-          } else {
-            basePriceSen = cpBasePrice ?? resolvedProduct.basePriceSen ?? 0;
           }
+          basePriceSen = resolveSoBasePriceSen({
+            incomingSen: incomingBasePrice,
+            customerSeatSen: matchSeat(cpSeatHeightPrices),
+            customerBaseSen: cpBasePrice,
+            productSeatSen,
+            productBaseSen: resolvedProduct.basePriceSen ?? 0,
+          });
         }
 
         // 2026-07-22 BUG FIX (under-billing, RM 12,455 across divan + leg):

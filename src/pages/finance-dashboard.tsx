@@ -18,6 +18,7 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   Bar,
   ComposedChart,
+  LabelList,
   Line,
   ResponsiveContainer,
   Tooltip,
@@ -93,25 +94,48 @@ const TEAL = "#3E6570";
 function ChartTip(props: {
   active?: boolean;
   label?: string | number;
-  payload?: { name?: string; value?: number | string; color?: string; dataKey?: string }[];
+  payload?: {
+    name?: string;
+    value?: number | string;
+    color?: string;
+    dataKey?: string;
+    payload?: Record<string, unknown>;
+  }[];
   money?: boolean;
+  /** Show each series' share of sales beside its amount (cost-structure chart). */
+  shares?: boolean;
 }) {
   if (!props.active || !props.payload?.length) return null;
+  // The point object every series in this chart was built from — csData carries
+  // __pct__<cat> and __fcpct__<cat> alongside the amounts, so the share needs no
+  // recomputation here (owner 2026-08-06: 「帮我在 diagram 也显示 %」). An
+  // amount on a chart says how big; only the share says whether that is a lot.
+  const point = props.payload[0]?.payload ?? {};
+  const shareOf = (dataKey: string): number | null => {
+    if (!props.shares) return null;
+    const key = dataKey === "__fctotal__" ? "__fctotalpct__" : `__pct__${dataKey}`;
+    const v = point[key];
+    return typeof v === "number" ? v : null;
+  };
   return (
     <div className="rounded-lg border border-[#E2DDD8] bg-white px-3 py-2 shadow-md text-xs">
       <div className="font-semibold text-[#5A5550] mb-1">{props.label}</div>
-      {props.payload.map((p) => (
-        <div key={String(p.dataKey)} className="flex justify-between gap-4 tabular-nums">
-          <span style={{ color: p.color }}>{p.name}</span>
-          <span>
-            {typeof p.value === "number"
-              ? props.money !== false && !/%|Ratio/i.test(String(p.name))
-                ? rm2(p.value as number)
-                : `${(p.value as number).toFixed(2)}${/%/.test(String(p.name)) ? "%" : ""}`
-              : String(p.value ?? "-")}
-          </span>
-        </div>
-      ))}
+      {props.payload.map((p) => {
+        const pct = shareOf(String(p.dataKey));
+        return (
+          <div key={String(p.dataKey)} className="flex justify-between gap-4 tabular-nums">
+            <span style={{ color: p.color }}>{p.name}</span>
+            <span>
+              {typeof p.value === "number"
+                ? props.money !== false && !/%|Ratio/i.test(String(p.name))
+                  ? rm2(p.value as number)
+                  : `${(p.value as number).toFixed(2)}${/%/.test(String(p.name)) ? "%" : ""}`
+                : String(p.value ?? "-")}
+              {pct !== null && <span className="ml-1.5 text-[10px] text-[#9CA3AF]">{pct.toFixed(2)}%</span>}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -327,6 +351,12 @@ export default function FinanceDashboardPage() {
     for (const r of rows ?? []) for (const cc of r.costStructure?.categories ?? []) set.add(cc.name);
     return [...set].sort();
   }, [rows]);
+  // How many bands the chart is drawing right now — the bar label only appears
+  // at exactly one, where there is room for it.
+  const csShownCount = useMemo(
+    () => csCats.filter((c) => !csHidden.has(c)).length,
+    [csCats, csHidden],
+  );
   // A category can exist on more than one line (B.M FABRIC and S FABRIC are
   // both FABRIC) — sum every matching entry under the current line filter.
   const csAmount = (r: Row, cat: string): number => {
@@ -415,6 +445,24 @@ export default function FinanceDashboardPage() {
           if (v !== null) fcTotal = (fcTotal ?? 0) + v;
         }
         point.__fctotal__ = fcTotal;
+        // …and its share, against FORECAST revenue (BUG-2026-08-06-002's rule).
+        const fcSalesTot = csForecastSales(r);
+        point.__fctotalpct__ =
+          fcTotal !== null && fcSalesTot !== null && fcSalesTot > 0
+            ? Math.round((fcTotal / fcSalesTot) * 10000) / 100
+            : null;
+        // Share of the STACK currently drawn, for the bar label when a single
+        // material is picked. Summing the drawn bands rather than reusing one
+        // category's __pct__ keeps the label honest if several are ticked.
+        let drawn: number | null = null;
+        for (const cat of csCats) {
+          if (csHidden.has(cat)) continue;
+          const v = point[cat] as number | null;
+          if (v !== null) drawn = (drawn ?? 0) + v;
+        }
+        point.__drawn__ = drawn;
+        point.__drawnpct__ =
+          drawn !== null && sales > 0 ? Math.round((drawn / sales) * 10000) / 100 : null;
         return point;
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -647,11 +695,21 @@ export default function FinanceDashboardPage() {
                       <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false} />
                       <YAxis tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false}
                         tickFormatter={(v: number) => rm(v)} />
-                      <Tooltip content={<ChartTip />} />
+                      <Tooltip content={<ChartTip shares />} />
                       {csCats.map((cat, i) =>
                         csHidden.has(cat) ? null : (
                           <Bar key={cat} dataKey={cat} name={cat} stackId="cs" maxBarSize={44}
-                            fill={CS_COLOURS[i % CS_COLOURS.length]} />
+                            fill={CS_COLOURS[i % CS_COLOURS.length]}>
+                            {/* The share printed ON the stack, but only while a
+                                single material is drawn — a dozen labels stacked
+                                inside one bar is unreadable, and the tooltip
+                                already carries every band's share. */}
+                            {csShownCount === 1 && (
+                              <LabelList dataKey="__drawnpct__" position="top" offset={6}
+                                formatter={(v: unknown) => (typeof v === "number" ? `${v.toFixed(2)}%` : "")}
+                                style={{ fontSize: 10, fill: "#6B5C32" }} />
+                            )}
+                          </Bar>
                         ),
                       )}
                       {/* Total planned spend — the dashed line the rest of this

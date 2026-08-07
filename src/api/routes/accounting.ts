@@ -9614,7 +9614,7 @@ app.get("/dashboard", async (c) => {
   // Bump for a changed SHAPE *or* a changed default WINDOW: the stored copy is
   // keyed by the range string, and the default range's key is blank either way,
   // so a wider-or-narrower default would keep serving the old month list.
-  const DASH_PAYLOAD_V = "v5"; // v5: default window starts at the opening month
+  const DASH_PAYLOAD_V = "v6"; // v6: + labourBase (headcount / units completed)
   // The explicit window is part of the identity — otherwise two different
   // ranges would share one cached copy.
   const dashRangeKey = `${String(c.req.query("from") ?? "")}~${String(c.req.query("to") ?? "")}`;
@@ -9634,6 +9634,10 @@ app.get("/dashboard", async (c) => {
         "production_orders",
         "delivery_orders",
         "kv_config",
+        // Production Salary per head / per unit reads these two — without them
+        // hiring someone or completing a batch would leave the card stale.
+        "workers",
+        "fg_batches",
       ],
     },
     dashOrgId,
@@ -9755,6 +9759,54 @@ app.get("/dashboard", async (c) => {
   type CsCat = { line: "bedframe" | "sofa" | "shared"; spend: number; purchase: number; closing: number };
   const csByMonth = new Map<string, Map<string, CsCat & { name: string }>>();
   const salesSplitByMonth = new Map<string, { bedframe: number; sofa: number }>();
+
+  // ---- Production Salary denominators (owner 2026-08-06) ------------------
+  // He wants the wage bill read per HEAD and per UNIT, not just as a total:
+  // 91,631 says nothing until you know whether it paid 20 people or 40.
+  //
+  // Headcount is counted per month from the worker master — everyone who was
+  // on the payroll for any part of it (joined on/before the month ends, and
+  // had not resigned before it began). A leaver still costs the month they
+  // left, so a point-in-time count would divide by too few and overstate the
+  // per-head figure. All 42 production workers count, per the owner's ruling.
+  const headByMonth = new Map<string, number>();
+  const unitsByMonth = new Map<string, number>();
+  try {
+    const wRes = await db
+      .prepare(`SELECT joinDate, resignedAt FROM workers`)
+      .all<{ joinDate?: string | null; join_date?: string | null; resignedAt?: string | null; resigned_at?: string | null }>();
+    for (const ym of allMonths) {
+      const monthEnd = `${ym}-31`; // string compare — a YYYY-MM-DD never exceeds it within the month
+      let n = 0;
+      for (const w of wRes.results ?? []) {
+        const joined = String(w.joinDate ?? w.join_date ?? "").slice(0, 10);
+        const left = String(w.resignedAt ?? w.resigned_at ?? "").slice(0, 10);
+        if (joined && joined > monthEnd) continue;      // not hired yet
+        if (left && left < `${ym}-01`) continue;         // already gone
+        n += 1;
+      }
+      headByMonth.set(ym, n);
+    }
+  } catch {
+    /* workers table absent → no per-head line, the card just omits it */
+  }
+  // Units completed. NOTE: fg_batches carries the known duplicate-completion
+  // defect the owner parked on 2026-07-29 (「会有别人处理」), so this count runs
+  // HIGH and the per-unit cost it feeds runs LOW. The card labels it; it is not
+  // silently presented as clean.
+  try {
+    const fgRes = await db
+      .prepare(`SELECT completedDate, originalQty FROM fg_batches WHERE orgId = ?`)
+      .bind(getOrgId(c))
+      .all<{ completedDate?: string | null; completed_date?: string | null; originalQty?: number | null; original_qty?: number | null }>();
+    for (const b of fgRes.results ?? []) {
+      const ym = String(b.completedDate ?? b.completed_date ?? "").slice(0, 7);
+      if (!/^\d{4}-\d{2}$/.test(ym)) continue;
+      unitsByMonth.set(ym, (unitsByMonth.get(ym) ?? 0) + (Number(b.originalQty ?? b.original_qty) || 0));
+    }
+  } catch {
+    /* fg_batches absent → no per-unit line */
+  }
   const BEDFRAME_SALES = "500-0000";
   const csLineOf = (name: string): "bedframe" | "sofa" | "shared" => {
     const t = name.toUpperCase();
@@ -10019,12 +10071,26 @@ app.get("/dashboard", async (c) => {
       const s = salesSplitByMonth.get(ym);
       if (s) { bedSales += s.bedframe; sofaSales += s.sofa; }
     }
+    // Headcount over a QUARTER is the average of its months, not their sum —
+    // the same 37 people worked all three. Units are a flow and do sum.
+    let headSum = 0;
+    let headMonths = 0;
+    let units = 0;
+    for (const ym of b.months) {
+      const h = headByMonth.get(ym);
+      if (h !== undefined) { headSum += h; headMonths += 1; }
+      units += unitsByMonth.get(ym) ?? 0;
+    }
+    const headcount = headMonths > 0 ? Math.round(headSum / headMonths) : null;
     return {
       key: b.key,
       label: b.label,
       partial: b.partial || b.months.some((m) => m === nowYm),
       actual,
       forecast,
+      // Production Salary denominators. unitsCompleted is flagged in the UI:
+      // fg_batches double-counts some completions (parked defect).
+      labourBase: { headcount, unitsCompleted: units > 0 ? units : null },
       costStructure: {
         salesSplit: { bedframe: bedSales, sofa: sofaSales },
         // Target spend per category from the Forecast P&L (blank when the

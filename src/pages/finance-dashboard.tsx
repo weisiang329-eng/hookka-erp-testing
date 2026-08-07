@@ -61,6 +61,9 @@ type Row = {
     forecast?: Record<string, number>;
     categories: CsCat[];
   };
+  /** Denominators for the Production Salary card: heads on the payroll and
+      units completed in the period. unitsCompleted is known to run high. */
+  labourBase?: { headcount: number | null; unitsCompleted: number | null };
   cashFlow: {
     operating: number; investing: number; financing: number; net: number; freeCashFlow: number;
     inflow?: number; outflow?: number;
@@ -284,6 +287,37 @@ export default function FinanceDashboardPage() {
         };
       }),
     [rows, plTab],
+  );
+
+  // Production Salary card. The wage bill against its two denominators — the
+  // percentages follow the rule BUG-2026-08-06-002 set: each side divides by
+  // its OWN revenue.
+  const labourData = useMemo(
+    () =>
+      (rows ?? []).map((r) => {
+        const amount = r.actual?.labour ?? null;
+        const forecast = r.forecast?.labour ?? null;
+        const sales = r.actual?.sales ?? null;
+        const fcSales = r.forecast?.sales ?? null;
+        const headcount = r.labourBase?.headcount ?? null;
+        const units = r.labourBase?.unitsCompleted ?? null;
+        const per = (v: number | null, base: number | null) =>
+          v !== null && base !== null && base > 0 ? Math.round(v / base) : null;
+        const share = (v: number | null, base: number | null) =>
+          v !== null && base !== null && base !== 0 ? Math.round((v / base) * 10000) / 100 : null;
+        return {
+          label: r.label + (r.partial ? " *" : ""),
+          amount,
+          forecast,
+          pct: share(amount, sales),
+          forecastPct: share(forecast, fcSales),
+          headcount,
+          units,
+          perHead: per(amount, headcount),
+          perUnit: per(amount, units),
+        };
+      }),
+    [rows],
   );
 
   const cfData = useMemo(
@@ -623,6 +657,94 @@ export default function FinanceDashboardPage() {
               </table>
             }
           />
+
+          {/* ---- Production Salary: the wage bill per head and per unit ----
+              Owner 2026-08-06: 「我要把 production salary 也另外分出来一个
+              diagram」, sitting under the P&L because it is part of COGS. The
+              total alone says nothing — 91,631 reads very differently against
+              20 heads than against 40. */}
+          {labourData.some((d) => d.amount !== null) && (
+            <Card>
+              <CardContent className="p-4 space-y-3">
+                <div className="flex flex-wrap items-baseline gap-2">
+                  <h3 className="text-sm font-semibold text-[#1F1D1B] mr-2">Production Salary</h3>
+                  <span className="text-[11px] text-[#9CA3AF]">
+                    750-0010 SALARIES · 750-0020 EPF · 750-0030 SOCSO · 750-0040 EIS
+                  </span>
+                </div>
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={labourData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                      <CartesianGrid stroke="#F0ECE9" vertical={false} />
+                      <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false} />
+                      {/* Two scales: the wage bill is in tens of thousands, the
+                          unit costs in hundreds. One axis would flatten them. */}
+                      <YAxis yAxisId="amt" tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false}
+                        tickFormatter={(v: number) => rm(v)} />
+                      <YAxis yAxisId="unit" orientation="right" tick={{ fontSize: 11, fill: "#9A3A2D" }} axisLine={false} tickLine={false}
+                        tickFormatter={(v: number) => rm(v)} />
+                      <Tooltip content={<ChartTip />} />
+                      <Bar yAxisId="amt" dataKey="amount" name="Production Salary" fill={GOLD} radius={[3, 3, 0, 0]} maxBarSize={38} />
+                      <Line yAxisId="amt" type="monotone" dataKey="forecast" name="Forecast" stroke={RUST}
+                        strokeWidth={2} strokeDasharray="5 4" dot={false} connectNulls={false} />
+                      <Line yAxisId="unit" type="monotone" dataKey="perHead" name="RM / head" stroke="#3E6570"
+                        strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />
+                      <Line yAxisId="unit" type="monotone" dataKey="perUnit" name="RM / unit" stroke="#4F7C3A"
+                        strokeWidth={2} strokeDasharray="2 3" dot={{ r: 2 }} connectNulls={false} />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <tbody>
+                      {periodHead(labourData.map((d) => d.label))}
+                      <tr className="border-b border-[#F0ECE9]">
+                        <td className={`${td} text-left font-medium`}>Amount</td>
+                        {labourData.map((d) => (
+                          <td key={d.label} className={td}>
+                            {rm(d.amount)}
+                            {d.pct !== null && <span className="ml-1.5 text-[10px] text-[#6B5C32]">{d.pct.toFixed(2)}%</span>}
+                          </td>
+                        ))}
+                      </tr>
+                      <tr className="border-b border-[#F0ECE9]">
+                        <td className={`${td} text-left font-medium text-[#9A3A2D]`}>Forecast</td>
+                        {labourData.map((d) => (
+                          <td key={d.label} className={`${td} text-[#9A3A2D]`}>
+                            {rm(d.forecast)}
+                            {d.forecastPct !== null && <span className="ml-1.5 text-[10px]">{d.forecastPct.toFixed(2)}%</span>}
+                          </td>
+                        ))}
+                      </tr>
+                      <tr className="border-b border-[#F0ECE9]">
+                        <td className={`${td} text-left font-medium text-[#3E6570]`}>Headcount</td>
+                        {labourData.map((d) => <td key={d.label} className={`${td} text-[#3E6570]`}>{d.headcount ?? "-"}</td>)}
+                      </tr>
+                      <tr className="border-b border-[#F0ECE9]">
+                        <td className={`${td} text-left font-medium text-[#3E6570]`}>RM / head</td>
+                        {labourData.map((d) => <td key={d.label} className={`${td} text-[#3E6570]`}>{rm(d.perHead)}</td>)}
+                      </tr>
+                      <tr className="border-b border-[#F0ECE9]">
+                        <td className={`${td} text-left font-medium text-[#4F7C3A]`}>Units completed</td>
+                        {labourData.map((d) => <td key={d.label} className={`${td} text-[#4F7C3A]`}>{d.units ?? "-"}</td>)}
+                      </tr>
+                      <tr>
+                        <td className={`${td} text-left font-medium text-[#4F7C3A]`}>RM / unit</td>
+                        {labourData.map((d) => <td key={d.label} className={`${td} text-[#4F7C3A]`}>{rm(d.perUnit)}</td>)}
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                {/* The owner parked the duplicate-completion defect on
+                    2026-07-29; saying so here is the difference between a
+                    figure he can weigh and one that quietly misleads. */}
+                <p className="text-[11px] text-[#9A3A2D]">
+                  ⚠ RM / unit uses completed-batch quantities, which are known to double-count some
+                  completions — the unit count runs high, so this cost runs low. RM / head is unaffected.
+                </p>
+              </CardContent>
+            </Card>
+          )}
 
           {/* ---- Cost structure: composition + single-material trend ---- */}
           {csCats.length > 0 && (

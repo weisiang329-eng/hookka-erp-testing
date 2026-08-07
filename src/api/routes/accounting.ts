@@ -9170,20 +9170,39 @@ const DEFAULT_LABOUR_MAP = {
     MAINTENANCE: "780-0030", // UPKEEP OF FACTORY
     WAREHOUSING: "780-0000", // FACTORY OVERHEAD
   } as Record<string, string>,
+  // The employer's statutory contributions, posted to their OWN accounts
+  // (owner 2026-08-06: 「拆」). They used to be folded into the department's
+  // salary account as one all-in cost, which left 750-0020/0030/0040 permanently
+  // empty and made the wage bill impossible to reconcile against an EPF or
+  // SOCSO statement. The department dimension stays on the salary line, where
+  // it is what department costing needs; a statutory contribution is a
+  // company-level charge and does not carry one.
+  epf: "750-0020", // PRODUCTION - EPF
+  socso: "750-0030", // PRODUCTION - SOCSO
+  eis: "750-0040", // PRODUCTION - EIS
 };
 
-async function getLabourMap(
-  db: Env["Variables"]["DB"],
-): Promise<{ fallback: string; byDept: Record<string, string> }> {
+type LabourMap = {
+  fallback: string;
+  byDept: Record<string, string>;
+  epf: string;
+  socso: string;
+  eis: string;
+};
+
+async function getLabourMap(db: Env["Variables"]["DB"]): Promise<LabourMap> {
   try {
     const row = await db
       .prepare("SELECT value FROM kv_config WHERE key = 'labor_account_map'")
       .first<{ value: string | null }>();
     if (row?.value) {
-      const parsed = JSON.parse(row.value) as { fallback?: string; byDept?: Record<string, string> };
+      const parsed = JSON.parse(row.value) as Partial<LabourMap>;
       return {
         fallback: parsed.fallback || DEFAULT_LABOUR_MAP.fallback,
         byDept: { ...DEFAULT_LABOUR_MAP.byDept, ...(parsed.byDept ?? {}) },
+        epf: parsed.epf || DEFAULT_LABOUR_MAP.epf,
+        socso: parsed.socso || DEFAULT_LABOUR_MAP.socso,
+        eis: parsed.eis || DEFAULT_LABOUR_MAP.eis,
       };
     }
   } catch {
@@ -9247,13 +9266,17 @@ type LabourDeptAgg = {
   grossSen: number;
   employerSen: number;
   costSen: number;
+  // Kept apart so each posts to its own account (owner 2026-08-06: 「拆」).
+  epfSen: number;
+  socsoSen: number;
+  eisSen: number;
 };
 
 async function aggregateLabour(
   db: Env["Variables"]["DB"],
   month: string,
   orgId: string,
-): Promise<{ byDept: LabourDeptAgg[]; totalSen: number; map: { fallback: string; byDept: Record<string, string> } }> {
+): Promise<{ byDept: LabourDeptAgg[]; totalSen: number; map: LabourMap }> {
   const map = await getLabourMap(db);
   const res = await db
     .prepare(
@@ -9267,20 +9290,48 @@ async function aggregateLabour(
     const dept = String(p.departmentCode ?? "").trim() || "(unassigned)";
     const account = map.byDept[dept] ?? map.fallback;
     const gross = Number(p.grossPaySen) || 0;
-    const employer =
-      (Number(p.epfEmployerSen) || 0) +
-      (Number(p.socsoEmployerSen) || 0) +
-      (Number(p.eisEmployerSen) || 0);
-    const cur = agg.get(dept) ?? { departmentCode: dept, account, workers: 0, grossSen: 0, employerSen: 0, costSen: 0 };
+    const epf = Number(p.epfEmployerSen) || 0;
+    const socso = Number(p.socsoEmployerSen) || 0;
+    const eis = Number(p.eisEmployerSen) || 0;
+    const employer = epf + socso + eis;
+    const cur = agg.get(dept) ?? {
+      departmentCode: dept, account, workers: 0,
+      grossSen: 0, employerSen: 0, costSen: 0, epfSen: 0, socsoSen: 0, eisSen: 0,
+    };
     cur.workers += 1;
     cur.grossSen += gross;
     cur.employerSen += employer;
+    cur.epfSen += epf;
+    cur.socsoSen += socso;
+    cur.eisSen += eis;
     cur.costSen += gross + employer;
     agg.set(dept, cur);
   }
   const byDept = [...agg.values()].sort((a, b) => a.departmentCode.localeCompare(b.departmentCode));
   const totalSen = byDept.reduce((s, d) => s + d.costSen, 0);
   return { byDept, totalSen, map };
+}
+
+// The DEBIT side of a month's labour posting, account by account: each
+// department's GROSS pay against its mapped account, then the three statutory
+// employer contributions against theirs. One function so the preview the owner
+// approves and the batch that posts can never describe different entries.
+function labourDebitLines(
+  byDept: LabourDeptAgg[],
+  map: LabourMap,
+): { account: string; sen: number }[] {
+  const out = new Map<string, number>();
+  const add = (account: string, sen: number) => {
+    if (sen === 0) return;
+    out.set(account, (out.get(account) ?? 0) + sen);
+  };
+  for (const d of byDept) add(d.account, d.grossSen);
+  add(map.epf, byDept.reduce((s, d) => s + d.epfSen, 0));
+  add(map.socso, byDept.reduce((s, d) => s + d.socsoSen, 0));
+  add(map.eis, byDept.reduce((s, d) => s + d.eisSen, 0));
+  return [...out.entries()]
+    .map(([account, sen]) => ({ account, sen }))
+    .sort((a, b) => a.account.localeCompare(b.account));
 }
 
 app.get("/labor/preview", async (c) => {
@@ -9292,11 +9343,12 @@ app.get("/labor/preview", async (c) => {
   }
   try {
     const orgId = getOrgId(c);
-    const { byDept, totalSen } = await aggregateLabour(c.var.DB, month, orgId);
+    const { byDept, totalSen, map: labourMap } = await aggregateLabour(c.var.DB, month, orgId);
     const posted = await ledgerHasSource(c.var.DB, orgId, "labor_post", `labor-${month}`);
-    // Roll the per-dept rows up to the account level for the GL preview.
+    // Roll the per-dept rows up to the account level for the GL preview —
+    // gross to the department's account, each statutory contribution to its own.
     const byAccount = new Map<string, number>();
-    for (const d of byDept) byAccount.set(d.account, (byAccount.get(d.account) ?? 0) + d.costSen);
+    for (const l of labourDebitLines(byDept, labourMap)) byAccount.set(l.account, l.sen);
     const coaRes = await c.var.DB.prepare(
       "SELECT code, name FROM chart_of_accounts",
     ).all<{ code: string; name: string }>();
@@ -9337,18 +9389,16 @@ app.post("/labor/post", async (c) => {
     if (await ledgerHasSource(c.var.DB, orgId, "labor_post", sourceId)) {
       return c.json({ success: false, error: `Labour for ${month} is already posted (idempotent — nothing re-posted).` }, 400);
     }
-    const { byDept, totalSen } = await aggregateLabour(c.var.DB, month, orgId);
+    const { byDept, totalSen, map: labourMapPost } = await aggregateLabour(c.var.DB, month, orgId);
     if (totalSen <= 0) {
       return c.json({ success: false, error: `No payslips found for ${month} — generate payslips first.` }, 400);
     }
-    const byAccount = new Map<string, number>();
-    for (const d of byDept) byAccount.set(d.account, (byAccount.get(d.account) ?? 0) + d.costSen);
     const actorUserId =
       (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
     const legs: LedgerEntryInput[] = [];
     let legNo = 1;
-    for (const [account, sen] of byAccount) {
-      if (sen === 0) continue;
+    // Same helper the preview used, so what was approved is what is posted.
+    for (const { account, sen } of labourDebitLines(byDept, labourMapPost)) {
       legs.push({
         id: `lje-${crypto.randomUUID().slice(0, 12)}`,
         sourceType: "labor_post",
@@ -9380,9 +9430,9 @@ app.post("/labor/post", async (c) => {
       resource: "accounting",
       resourceId: sourceId,
       action: "create",
-      after: { month, totalSen, accounts: byAccount.size },
+      after: { month, totalSen, accounts: legs.length - 1},
     });
-    return c.json({ success: true, data: { month, totalSen, accounts: byAccount.size } });
+    return c.json({ success: true, data: { month, totalSen, accounts: legs.length - 1} });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }

@@ -41,6 +41,40 @@ export function periodBounds(period: string): { start: string; end: string } {
   return { start, end: `${period}-${String(last).padStart(2, "0")}` };
 }
 
+// ---------------------------------------------------------------------------
+// The delivery-date predicate, written ONCE.
+//
+// The KPI card reports a number and its "See the list →" link has to open
+// exactly the orders that number counted. Two hand-written copies of this join
+// would agree on the day they were written and quietly diverge afterwards —
+// the card would say 11 and the list would show 14, and at that point nobody
+// believes either. So the CTE, the FROM/WHERE and the "is it late" test are
+// string constants shared by the metric and by its drill-down list below.
+// ---------------------------------------------------------------------------
+
+/** First dispatch per sales order, via the only join path that resolves. */
+const FIRST_DISPATCH_CTE = `WITH first_dispatch AS (
+       SELECT po.salesOrderId AS so_id,
+              MIN(substr(d.dispatchedAt::text, 1, 10)) AS shipped_on
+         FROM delivery_orders d
+         JOIN delivery_order_items di ON di.deliveryOrderId = d.id
+         JOIN production_orders po ON po.id = di.productionOrderId
+        WHERE d.status <> 'CANCELLED'
+          AND d.dispatchedAt IS NOT NULL AND d.dispatchedAt <> ''
+          AND po.salesOrderId IS NOT NULL AND po.salesOrderId <> ''
+        GROUP BY po.salesOrderId
+     )`;
+
+/** Orders whose first dispatch fell inside the period. Binds: start, end. */
+const DISPATCHED_IN_PERIOD = `FROM first_dispatch f
+       JOIN sales_orders so ON so.id = f.so_id
+      WHERE f.shipped_on >= ? AND f.shipped_on <= ?
+        AND so.customerDeliveryDate IS NOT NULL
+        AND so.customerDeliveryDate <> ''`;
+
+/** …and left after the date promised to the customer. */
+const IS_LATE = `f.shipped_on > substr(so.customerDeliveryDate::text, 1, 10)`;
+
 /**
  * GATE — orders dispatched in the period, later than the customer's date.
  *
@@ -54,26 +88,10 @@ export async function customerDeliveryLate(
 ): Promise<MetricResult> {
   const { start, end } = periodBounds(period);
   const row = await c.var.DB.prepare(
-    `WITH first_dispatch AS (
-       SELECT po.salesOrderId AS so_id,
-              MIN(substr(d.dispatchedAt::text, 1, 10)) AS shipped_on
-         FROM delivery_orders d
-         JOIN delivery_order_items di ON di.deliveryOrderId = d.id
-         JOIN production_orders po ON po.id = di.productionOrderId
-        WHERE d.status <> 'CANCELLED'
-          AND d.dispatchedAt IS NOT NULL AND d.dispatchedAt <> ''
-          AND po.salesOrderId IS NOT NULL AND po.salesOrderId <> ''
-        GROUP BY po.salesOrderId
-     )
+    `${FIRST_DISPATCH_CTE}
      SELECT COUNT(*) AS shipped,
-            COALESCE(SUM(CASE WHEN f.shipped_on >
-                   substr(so.customerDeliveryDate::text, 1, 10)
-                 THEN 1 ELSE 0 END), 0) AS late
-       FROM first_dispatch f
-       JOIN sales_orders so ON so.id = f.so_id
-      WHERE f.shipped_on >= ? AND f.shipped_on <= ?
-        AND so.customerDeliveryDate IS NOT NULL
-        AND so.customerDeliveryDate <> ''`,
+            COALESCE(SUM(CASE WHEN ${IS_LATE} THEN 1 ELSE 0 END), 0) AS late
+       ${DISPATCHED_IN_PERIOD}`,
   )
     .bind(start, end)
     .first<{ shipped: number; late: number }>();
@@ -91,6 +109,52 @@ export async function customerDeliveryLate(
   };
 }
 
+export interface LateOrderRow {
+  id: string;
+  companySOId: string | null;
+  customerId: string | null;
+  customerName: string | null;
+  customerDeliveryDate: string | null;
+  shippedOn: string | null;
+}
+
+/**
+ * The ORDERS behind `customerDeliveryLate` — the "See the list →" drill-down.
+ *
+ * Same CTE, same period bounds, same lateness test as the metric, so the list
+ * length is the metric's `late` count by construction and not by coincidence.
+ *
+ * `scope` is the row-level customer filter (src/api/lib/customer-scope.ts). A
+ * salesperson may not see another salesperson's orders even when those orders
+ * are inside the factory-wide figure they are shown — so for a scoped role the
+ * list is legitimately SHORTER than the count. Narrowing here rather than in
+ * the browser is the point: a client-side filter over a full payload has
+ * already shipped the rows.
+ */
+export async function lateToCustomerOrders(
+  c: Context<Env>,
+  period: string,
+  scope: { clause: string; binds: string[] } = { clause: "", binds: [] },
+): Promise<LateOrderRow[]> {
+  const { start, end } = periodBounds(period);
+  const scopeClause = scope.clause ? ` AND ${scope.clause}` : "";
+  const res = await c.var.DB.prepare(
+    `${FIRST_DISPATCH_CTE}
+     SELECT so.id AS "id",
+            so.companySOId AS "companySOId",
+            so.customerId AS "customerId",
+            so.customerName AS "customerName",
+            substr(so.customerDeliveryDate::text, 1, 10) AS "customerDeliveryDate",
+            f.shipped_on AS "shippedOn"
+       ${DISPATCHED_IN_PERIOD}
+        AND ${IS_LATE}${scopeClause}
+      ORDER BY f.shipped_on DESC, so.id DESC`,
+  )
+    .bind(start, end, ...scope.binds)
+    .all<LateOrderRow>();
+  return res.results ?? [];
+}
+
 /**
  * Active SKUs that are fully set up.
  *
@@ -105,6 +169,40 @@ export async function customerDeliveryLate(
  * empty legacy column, so the KPI was measuring the wrong field and calling it
  * a data gap. Also UPPER()s the status, exactly as wip-times does.
  */
+// ---------------------------------------------------------------------------
+// The four "is this SKU set up" tests, written ONCE.
+//
+// Same reason as the delivery-date fragments above: the card reports "247 no
+// BOM" and its drill-down link has to open those 247 rows. One copy of the
+// predicate means the list cannot drift from the number. The keys here are
+// also the values the `?missing=` query param takes, so the card's per-field
+// gap and the URL that opens it are the same vocabulary.
+// ---------------------------------------------------------------------------
+export const SETUP_FIELD_SQL = {
+  price: `COALESCE(p.basePriceSen,0) + COALESCE(p.price1Sen,0) > 0`,
+  volume: `COALESCE(p.unitM3,0) > 0`,
+  fabric: `COALESCE(p.fabricUsage,0) > 0`,
+  bom: `EXISTS (
+                                SELECT 1 FROM bom_templates b
+                                 WHERE b.productCode = p.code
+                                   AND UPPER(b.versionStatus) = 'ACTIVE'
+                                   AND COALESCE(b.wipComponents,'') NOT IN ('', '[]')
+                              )`,
+} as const;
+
+/** The field a `?missing=` drill-down may narrow to. */
+export type SetupField = keyof typeof SETUP_FIELD_SQL;
+
+export const SETUP_FIELDS = Object.keys(SETUP_FIELD_SQL) as SetupField[];
+
+export function isSetupField(v: unknown): v is SetupField {
+  return typeof v === "string" && (SETUP_FIELDS as string[]).includes(v);
+}
+
+/** Only ACTIVE products are measured — a retired SKU is not a data gap. */
+const SETUP_SCOPE = `FROM products p
+      WHERE p.status = 'ACTIVE'`;
+
 export async function setupCompleteness(
   c: Context<Env>,
 ): Promise<MetricResult> {
@@ -115,28 +213,17 @@ export async function setupCompleteness(
   // missing field on most of them.
   const row = await c.var.DB.prepare(
     `SELECT COUNT(*) AS total,
-            COALESCE(SUM(CASE WHEN COALESCE(p.basePriceSen,0) + COALESCE(p.price1Sen,0) > 0
+            COALESCE(SUM(CASE WHEN ${SETUP_FIELD_SQL.price}
                      THEN 1 ELSE 0 END), 0) AS "hasPrice",
-            COALESCE(SUM(CASE WHEN COALESCE(p.unitM3,0) > 0 THEN 1 ELSE 0 END), 0) AS "hasM3",
-            COALESCE(SUM(CASE WHEN COALESCE(p.fabricUsage,0) > 0 THEN 1 ELSE 0 END), 0) AS "hasFabric",
-            COALESCE(SUM(CASE WHEN EXISTS (
-                                SELECT 1 FROM bom_templates b
-                                 WHERE b.productCode = p.code
-                                   AND UPPER(b.versionStatus) = 'ACTIVE'
-                                   AND COALESCE(b.wipComponents,'') NOT IN ('', '[]')
-                              ) THEN 1 ELSE 0 END), 0) AS "hasBom",
-            COALESCE(SUM(CASE WHEN COALESCE(p.basePriceSen,0) + COALESCE(p.price1Sen,0) > 0
-                          AND COALESCE(p.unitM3,0) > 0
-                          AND COALESCE(p.fabricUsage,0) > 0
-                          AND EXISTS (
-                                SELECT 1 FROM bom_templates b
-                                 WHERE b.productCode = p.code
-                                   AND UPPER(b.versionStatus) = 'ACTIVE'
-                                   AND COALESCE(b.wipComponents,'') NOT IN ('', '[]')
-                              )
+            COALESCE(SUM(CASE WHEN ${SETUP_FIELD_SQL.volume} THEN 1 ELSE 0 END), 0) AS "hasM3",
+            COALESCE(SUM(CASE WHEN ${SETUP_FIELD_SQL.fabric} THEN 1 ELSE 0 END), 0) AS "hasFabric",
+            COALESCE(SUM(CASE WHEN ${SETUP_FIELD_SQL.bom} THEN 1 ELSE 0 END), 0) AS "hasBom",
+            COALESCE(SUM(CASE WHEN ${SETUP_FIELD_SQL.price}
+                          AND ${SETUP_FIELD_SQL.volume}
+                          AND ${SETUP_FIELD_SQL.fabric}
+                          AND ${SETUP_FIELD_SQL.bom}
                      THEN 1 ELSE 0 END), 0) AS complete
-       FROM products p
-      WHERE p.status = 'ACTIVE'`,
+       ${SETUP_SCOPE}`,
   ).first<{
     total: number; complete: number;
     hasPrice: number; hasM3: number; hasFabric: number; hasBom: number;
@@ -169,6 +256,59 @@ export async function setupCompleteness(
       `${complete} of ${total} active SKUs fully set up` +
       (gaps.length ? ` — ${gaps.join(", ")}` : ""),
   };
+}
+
+export interface IncompleteProductRow {
+  id: string;
+  code: string;
+  /** Which of the four are absent — the same keys as SETUP_FIELD_SQL. */
+  missing: SetupField[];
+}
+
+/**
+ * The SKUs behind `setupCompleteness` — the "See the list →" drill-down.
+ *
+ * `field` narrows to ONE gap, because that is how the work is actually done:
+ * the card says "247 no BOM" and somebody spends a morning on BOMs. Passing
+ * null returns every SKU missing at least one of the four, which is the
+ * complement of the metric's `complete` count.
+ *
+ * No customer scoping — products belong to the factory, not to a customer, and
+ * `/api/products` is deliberately absent from SCOPED_PREFIXES.
+ */
+export async function incompleteSetupProducts(
+  c: Context<Env>,
+  field: SetupField | null = null,
+): Promise<IncompleteProductRow[]> {
+  const missingAny = SETUP_FIELDS.map((f) => `NOT (${SETUP_FIELD_SQL[f]})`).join(
+    " OR ",
+  );
+  const where = field
+    ? `NOT (${SETUP_FIELD_SQL[field]})`
+    : `(${missingAny})`;
+  const res = await c.var.DB.prepare(
+    `SELECT p.id AS "id",
+            p.code AS "code",
+            CASE WHEN ${SETUP_FIELD_SQL.price} THEN 0 ELSE 1 END AS "noPrice",
+            CASE WHEN ${SETUP_FIELD_SQL.volume} THEN 0 ELSE 1 END AS "noVolume",
+            CASE WHEN ${SETUP_FIELD_SQL.fabric} THEN 0 ELSE 1 END AS "noFabric",
+            CASE WHEN ${SETUP_FIELD_SQL.bom} THEN 0 ELSE 1 END AS "noBom"
+       ${SETUP_SCOPE}
+        AND (${where})
+      ORDER BY p.code`,
+  ).all<{
+    id: string; code: string;
+    noPrice: number; noVolume: number; noFabric: number; noBom: number;
+  }>();
+
+  return (res.results ?? []).map((r) => {
+    const missing: SetupField[] = [];
+    if (Number(r.noPrice)) missing.push("price");
+    if (Number(r.noVolume)) missing.push("volume");
+    if (Number(r.noFabric)) missing.push("fabric");
+    if (Number(r.noBom)) missing.push("bom");
+    return { id: String(r.id), code: String(r.code), missing };
+  });
 }
 
 /**

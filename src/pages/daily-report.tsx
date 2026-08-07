@@ -7,7 +7,7 @@
 // Plain tables / lists (NOT the DataGrid component). English only.
 // ===========================================================================
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -965,6 +965,24 @@ function shiftMonth(ymd: string, months: number): string {
 }
 
 export default function DailyReportPage() {
+  // ── KPI drill-down ────────────────────────────────────────────────────
+  // Two KPI cards link here and both were landing on the wrong thing:
+  //
+  //  • `documents_not_stuck` linked to a bare /daily-report, which opens the
+  //    tile overview — the operator then had to guess which of twelve
+  //    exception categories the invoicing half was scored on. `?section=` now
+  //    opens that category's list directly.
+  //
+  //  • `production_efficiency` linked to /reports/operations, a route that has
+  //    never existed — no `operations` tab on /reports, no /reports/:tab route,
+  //    so the link rendered a BLANK page. It now opens the Monthly Operations
+  //    edition below for the card's own month, which reads the per-worker
+  //    efficiency the metric aggregates.
+  //
+  // Read once, at mount, as the INITIAL value of the existing state: these are
+  // an entry point, not a controlled binding, so the operator's own toggling
+  // afterwards must not be fought by the URL.
+  const [searchParams] = useSearchParams();
   const { data: raw, loading, refresh } =
     useCachedJson<ComplianceResp>("/api/reports/compliance.json");
 
@@ -974,7 +992,10 @@ export default function DailyReportPage() {
   }, [raw]);
 
   // Drill-in: which one category's detail is open (null = cards-only overview).
-  const [openKey, setOpenKey] = useState<SectionKey | null>(null);
+  const [openKey, setOpenKey] = useState<SectionKey | null>(() => {
+    const s = searchParams.get("section");
+    return s && s in SECTION_IDS ? (s as SectionKey) : null;
+  });
   const detailRef = useRef<HTMLDivElement | null>(null);
 
   // Toggle a tile: open its detail, or close it if it's already the open one.
@@ -994,10 +1015,25 @@ export default function DailyReportPage() {
 
   // Daily / Weekly / Monthly edition toggle. Daily = this page's existing
   // SOP-exception newspaper; Weekly/Monthly = the operations editions.
-  const [edition, setEdition] = useState<Edition>("daily");
+  const [edition, setEdition] = useState<Edition>(() => {
+    const e = searchParams.get("edition");
+    return e === "weekly" || e === "monthly" ? e : "daily";
+  });
   // Anchor date for the Weekly/Monthly editions — lets you page back to an
   // older week/month and print it. Any day in the target period works.
-  const [anchorYmd, setAnchorYmd] = useState(ymdToday());
+  //
+  // `?period=YYYY-MM` is the KPI card's month. Any day inside it anchors the
+  // Monthly edition, so the first of the month is used. Without this the link
+  // would open the CURRENT month's operations report next to a card showing
+  // June's efficiency — the exact class of disagreement this whole change is
+  // about.
+  const [anchorYmd, setAnchorYmd] = useState(() => {
+    const p = searchParams.get("period") ?? "";
+    if (/^\d{4}-(0[1-9]|1[0-2])$/.test(p)) return `${p}-01`;
+    const d = searchParams.get("date") ?? "";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(d) && d <= ymdToday()) return d;
+    return ymdToday();
+  });
 
   if (edition !== "daily") {
     const today = ymdToday();

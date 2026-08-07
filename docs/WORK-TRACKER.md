@@ -9,6 +9,36 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-07 — ✅ KPI 卡的「See the list →」全部接回真实资料 · main（未 push）
+
+Owner：「如果是 showable 的话，就要确保这些全部数据是可以被看到的。」
+
+五个 AUTO KPI 全都有 drill-down 连结，**五个全都不对**（BUG-2026-08-07-001）：
+
+- `/sales?filter=late-to-customer` — 页面只 **写** searchParams 没读，落在没过滤的清单
+  （卡片说 11，grid 给你全部）。而且 grid 预设隐藏 SHIPPED/DELIVERED —— 迟到的单
+  每一张都是这几个状态，就算过滤对了画面也是空的。
+- `/products?filter=incomplete` — 同一类，而且页面预设停在 BEDFRAME 分页，缺口几乎
+  全是 sofa 组件。
+- `/reports/operations` — **根本没这条 route**（`/reports` 只有五个 tab，没有
+  catch-all），点下去是一片空白。
+- `/service-cases`、`/daily-report` — route 存在但完全没过滤。
+
+做法：**同一段 SQL 只写一次**（`FIRST_DISPATCH_CTE` / `IS_LATE` / `SETUP_FIELD_SQL`
+在 `kpi-metrics.ts`），metric 的 count 和 drill-down 的清单共用它，不可能各自漂走。
+新增两个只读端点（`/api/sales-orders/late-to-customer?period=`、
+`/api/products/setup-incomplete?missing=`），前者的 row-level customer scope 走 SQL，
+不是把资料送出去再前端过滤。月份用 `{period}` 带进 URL，`src/lib/kpi-drill.ts`
+统一处理。`/reports/operations` **换掉而不是假装**：改指
+`/daily-report?edition=monthly&period=`（Monthly Operations 版面，读同一个
+`computeMonthlyEfficiencyByWorker`）。
+
+`tests/kpi-drilldown.test.mjs` 拿真的 route table 对每个 drillPath —— 这条测试对
+`/reports/operations` 会红。tsc 干净、3121 tests 过。**prod 还没验**：audit 脚本用的
+唯读连线字串已经轮替掉了，本机连不上。
+
+---
+
 ## 2026-08-07 — 🔵 员工 Salary Advance（记录 → 扣薪 → HR 出钱 listing）· staging
 
 Owner：「员工他们一直在拿 advance，有没有可能在 employee 这边，我可以输入他们拿

@@ -5,8 +5,9 @@ import { cachedFetchJson, invalidateCachePrefix, useCachedJson } from "@/lib/cac
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { MoneyInput } from "@/components/ui/money-input";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { formatCurrency } from "@/lib/utils";
+import { isSetupField, SETUP_FIELD_LABEL, type SetupField } from "@/lib/kpi-drill";
 import { Plus, Trash2, Check, Calendar, History, Pencil, FileDown, Loader2, X as XIcon } from "lucide-react";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
@@ -2009,6 +2010,51 @@ export default function ProductsPage() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<string>("BEDFRAME");
   const [searchQuery, setSearchQuery] = useState<string>("");
+  // ── KPI drill-down ────────────────────────────────────────────────────
+  // `?filter=incomplete[&missing=price|volume|fabric|bom]` arrives from the
+  // `setup_completeness` card. The page never read `filter` before 2026-08-07,
+  // so the link landed on the BEDFRAME tab of the full catalogue — the card
+  // said "247 no BOM" and the grid showed every bedframe there is.
+  //
+  // The set is NOT re-derived here: "no BOM" means no ACTIVE bom_templates row
+  // with non-empty wip_components, which is a table this page does not load.
+  // The codes come from /api/products/setup-incomplete, which runs the four
+  // predicates the metric counts with (SETUP_FIELD_SQL in kpi-metrics.ts).
+  const [searchParams, setSearchParams] = useSearchParams();
+  const setupDrillActive = searchParams.get("filter") === "incomplete";
+  const missingParam = searchParams.get("missing");
+  const missingField: SetupField | null = isSetupField(missingParam)
+    ? missingParam
+    : null;
+  const { data: incompleteResp, loading: incompleteLoading } = useCachedJson<{
+    success?: boolean;
+    missing?: string;
+    data?: { id: string; code: string; missing: SetupField[] }[];
+  }>(
+    setupDrillActive
+      ? `/api/products/setup-incomplete${missingField ? `?missing=${missingField}` : ""}`
+      : null,
+  );
+  // null = still loading; the grid keeps whatever it had rather than blinking
+  // empty. An empty Set is a real answer (nothing is missing that field).
+  const incompleteCodes = useMemo<Set<string> | null>(() => {
+    if (!setupDrillActive) return null;
+    if (!incompleteResp?.success || !Array.isArray(incompleteResp.data)) {
+      return incompleteLoading ? null : new Set<string>();
+    }
+    return new Set(incompleteResp.data.map((r) => String(r.code)));
+  }, [setupDrillActive, incompleteResp, incompleteLoading]);
+  const clearSetupDrill = () => {
+    setSearchParams(
+      (prev) => {
+        const out = new URLSearchParams(prev);
+        out.delete("filter");
+        out.delete("missing");
+        return out;
+      },
+      { replace: true },
+    );
+  };
   const [loading, setLoading] = useState(true);
   // Master Maintenance config (kv_config 'variants-config'). Variant editor
   // dialog reads divan/leg/gap/specials/sofa option lists from here so any
@@ -3237,6 +3283,22 @@ export default function ProductsPage() {
   // more "why can't I find sofas while on bedframe" surprises.
   const filteredRaw = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
+    // KPI drill-down: show exactly the SKUs the card counted, ACROSS
+    // CATEGORIES. The category tab is deliberately ignored — the metric counts
+    // every ACTIVE product, and the gap is overwhelmingly sofa components, so
+    // honouring the default BEDFRAME tab would show a fraction of the number
+    // that led here. This is the same cross-category behaviour the search box
+    // already has, for the same reason.
+    if (incompleteCodes !== null) {
+      const inDrill = products.filter((p) => incompleteCodes.has(p.code));
+      if (!q) return inDrill;
+      return inDrill.filter((p) => {
+        const hay = [p.code, p.name, p.description, p.baseModel, p.category]
+          .map((v) => (v || "").toLowerCase())
+          .join(" ");
+        return hay.includes(q);
+      });
+    }
     if (!q) return products.filter((p) => p.category === categoryFilter);
     return products.filter((p) => {
       const hay = [p.code, p.name, p.description, p.baseModel, p.category]
@@ -3244,7 +3306,7 @@ export default function ProductsPage() {
         .join(" ");
       return hay.includes(q);
     });
-  }, [products, categoryFilter, searchQuery]);
+  }, [products, categoryFilter, searchQuery, incompleteCodes]);
 
   // Numeric value for an analytic column (labor / margin / labor%) for a
   // product, so the analytic columns are sortable AND filterable with the
@@ -3907,6 +3969,62 @@ export default function ProductsPage() {
         </div>
         )}
       </div>
+
+      {/* KPI drill-down banner — names the exact set on screen, and offers the
+          other three cuts so the operator can work the gap field by field
+          without going back to the KPI card. */}
+      {setupDrillActive && (
+        <div className="-mt-3 rounded-lg border border-[#D9CEB3] bg-[#F4F0E8] px-3 py-2 flex flex-wrap items-center gap-2">
+          <span className="text-xs text-[#5A5550]">
+            <span className="font-semibold">KPI drill-down:</span> active SKUs
+            missing{" "}
+            {missingField ? (
+              <span className="font-semibold">{SETUP_FIELD_LABEL[missingField]}</span>
+            ) : (
+              "at least one of price, volume, fabric usage or BOM routing"
+            )}
+            {incompleteCodes !== null && (
+              <> · {incompleteCodes.size} SKU{incompleteCodes.size === 1 ? "" : "s"}</>
+            )}
+            . Shown across every category — the metric counts them all.
+          </span>
+          <span className="text-[11px] text-[#9CA3AF]">
+            narrow:{" "}
+            {(Object.keys(SETUP_FIELD_LABEL) as SetupField[]).map((f, i) => (
+              <span key={f}>
+                {i > 0 && " · "}
+                <Link
+                  to={`/products?filter=incomplete&missing=${f}`}
+                  className={
+                    missingField === f
+                      ? "font-semibold text-[#6B5C32]"
+                      : "underline decoration-dotted text-[#6B5C32]"
+                  }
+                >
+                  {SETUP_FIELD_LABEL[f]}
+                </Link>
+              </span>
+            ))}
+            {missingField && (
+              <>
+                {" · "}
+                <Link
+                  to="/products?filter=incomplete"
+                  className="underline decoration-dotted text-[#6B5C32]"
+                >
+                  any
+                </Link>
+              </>
+            )}
+          </span>
+          <button
+            onClick={clearSetupDrill}
+            className="ml-auto px-2 py-1 rounded text-[11px] font-medium text-[#6B7280] hover:bg-white transition-colors"
+          >
+            Show all products
+          </button>
+        </div>
+      )}
 
       {/* Subtitle for SKU Master */}
       {viewMode === "skuMaster" && (

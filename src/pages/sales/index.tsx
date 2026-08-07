@@ -13,6 +13,7 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { formatCurrency, formatDate, cn } from "@/lib/utils";
 import { getPrimarySoCategory } from "@/lib/so-category";
 import { matchesCompanyFilter } from "@/lib/company-dimension";
+import { narrowToIds, validPeriod } from "@/lib/kpi-drill";
 import { Plus, ShoppingCart, Download, Filter, X, Eye, Pencil, Printer, Truck, FileText, ClipboardList, RefreshCw, Package, CheckCircle, ScanLine, DollarSign, Building2, Trash2 } from "lucide-react";
 // Note: generateSOPdf is dynamic-imported at the click handler so the
 // 1MB jspdf vendor chunk only ships when the user actually prints a SO.
@@ -205,6 +206,23 @@ export default function SalesPage() {
   // Multi-Company Phase 2 — company filter. Default "" = ALL companies (today's
   // view, nothing hidden). Operator narrows to one org code (HOOKKA / OHANA …).
   const _flCompany = useUrlState<string>("company", "");
+  // ── KPI drill-down ────────────────────────────────────────────────────
+  // `?filter=late-to-customer&period=YYYY-MM` arrives from the KPI card's
+  // "See the list →" link. Until 2026-08-07 this page took `useSearchParams`
+  // for WRITING only and never read `filter`, so the link quietly dropped the
+  // operator on the unfiltered list: the card said "11 late" and the grid
+  // showed every order on file. Owner: "如果是 showable 的话，就要确保这些全部
+  // 数据是可以被看到的."
+  //
+  // The set cannot be derived here — "late" means the FIRST dispatch across
+  // delivery_orders → delivery_order_items → production_orders came after
+  // sales_orders.customer_delivery_date, and none of that is on a list row.
+  // So the ids come from /api/sales-orders/late-to-customer, which runs the
+  // metric's own SQL (and its own row-level customer scope).
+  const [drillFilter] = useUrlState<string>("filter", "");
+  const [drillPeriodRaw] = useUrlState<string>("period", "");
+  const drillPeriod = validPeriod(drillPeriodRaw);
+  const lateDrillActive = drillFilter === "late-to-customer" && !!drillPeriod;
   // Hoisted above `_filtersActive`, which now reads it — the Draft tab
   // forces the whole-dataset fetch (see below).
   const [tab, setTab] = useUrlState<"DRAFT" | "CONFIRMED">("tab", "CONFIRMED");
@@ -220,10 +238,15 @@ export default function SalesPage() {
   // Reuses the existing whole-dataset path (server-capped at 5000) rather than
   // adding a status param — drafts are a handful by nature, and that path is
   // already the proven one for "client filters the full set".
+  //
+  // The KPI drill-down joins that list: the late orders are spread across the
+  // whole table by definition (they were dispatched in one month, but entered
+  // in any), so a 200-row page would show an arbitrary subset of the 11 and
+  // the grid would disagree with the card it was reached from.
   const _filtersActive = !!(
     _flStatus[0] || _flCustomer[0] || _flFrom[0] || _flTo[0] ||
     _flCat[0] || _flDDFrom[0] || _flDDTo[0] || _flCompany[0] || gridSearch.trim() ||
-    tab === "DRAFT"
+    tab === "DRAFT" || lateDrillActive
   );
 
   const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{
@@ -239,6 +262,28 @@ export default function SalesPage() {
       ? `/api/sales-orders?${soFilterQs}`
       : `/api/sales-orders?page=${page}&limit=${PAGE_SIZE}&${soFilterQs}`,
   );
+  // The KPI drill-down's id set. Fetched only while the drill is active, so a
+  // normal visit to /sales pays nothing for it.
+  const { data: lateResp, loading: lateLoading } = useCachedJson<{
+    success?: boolean;
+    period?: string;
+    data?: { id: string }[];
+  }>(
+    lateDrillActive
+      ? `/api/sales-orders/late-to-customer?period=${encodeURIComponent(drillPeriod)}`
+      : null,
+  );
+  // null = still loading, so `narrowToIds` leaves the grid alone instead of
+  // flashing "0 records" before the answer arrives. An empty Set is a real
+  // answer (nothing shipped late that month) and does empty the grid.
+  const lateIds = useMemo<Set<string> | null>(() => {
+    if (!lateDrillActive) return null;
+    if (!lateResp?.success || !Array.isArray(lateResp.data)) {
+      return lateLoading ? null : new Set<string>();
+    }
+    return new Set(lateResp.data.map((r) => String(r.id)));
+  }, [lateDrillActive, lateResp, lateLoading]);
+
   // Whole-dataset status bucket counts — tab badges read from this so
   // "Draft (N)" / "Confirmed (N)" reflect the full table, not just the
   // current page of rows.
@@ -352,8 +397,15 @@ export default function SalesPage() {
   // funnel. On the Draft tab every row is DRAFT, so seeding a Status exclusion
   // there can only ever narrow a list that is already exactly what was asked
   // for — and it was half of how the tab ended up blank.
+  //
+  // It is equally fatal to the late-to-customer drill-down: "late" means the
+  // order SHIPPED, late, so every single row in that set carries one of the
+  // four excluded statuses. Left on, the link would land on a filter that is
+  // right and a grid that is empty.
   const salesGridDefaultExcluded =
-    filterStatus || tab === "DRAFT" ? undefined : SHIPPED_STATUS_EXCLUDE;
+    filterStatus || tab === "DRAFT" || lateDrillActive
+      ? undefined
+      : SHIPPED_STATUS_EXCLUDE;
   const [filterCustomer, setFilterCustomer] = _flCustomer;
   const [filterDateFrom, setFilterDateFrom] = _flFrom;
   const [filterDateTo, setFilterDateTo] = _flTo;
@@ -390,7 +442,7 @@ export default function SalesPage() {
   useEffect(() => {
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterStatus, filterCustomer, filterCompany, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo, tab]);
+  }, [filterStatus, filterCustomer, filterCompany, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo, tab, lateDrillActive]);
 
   const fetchAll = () => {
     invalidateCachePrefix("/api/sales-orders");
@@ -403,7 +455,7 @@ export default function SalesPage() {
     refreshStatusChanges();
   };
 
-  const hasActiveFilters = filterStatus || filterCustomer || filterDateFrom || filterDateTo || filterCategory || filterDDFrom || filterDDTo || filterCompany;
+  const hasActiveFilters = filterStatus || filterCustomer || filterDateFrom || filterDateTo || filterCategory || filterDDFrom || filterDDTo || filterCompany || lateDrillActive;
 
   // Atomic clear — one setSearchParams call, not seven. Each useUrlState
   // setter calls navigate() under the hood; firing seven in a row races on
@@ -422,6 +474,30 @@ export default function SalesPage() {
         out.delete("ddFrom");
         out.delete("ddTo");
         out.delete("company");
+        // The KPI drill-down is a filter like any other as far as "Clear" is
+        // concerned — leaving it behind would clear the visible chips and
+        // leave the list mysteriously short.
+        out.delete("filter");
+        out.delete("period");
+        return out;
+      },
+      { replace: true },
+    );
+  };
+
+  /**
+   * Drop the KPI drill-down and go back to the full list.
+   *
+   * One batched write, not two setters: each useUrlState setter navigates, and
+   * two in a row race on react-router v7 — the second reads pre-clear state and
+   * puts the key back (same trap as `clearFilters` above).
+   */
+  const clearDrill = () => {
+    setSearchParams(
+      (prev) => {
+        const out = new URLSearchParams(prev);
+        out.delete("filter");
+        out.delete("period");
         return out;
       },
       { replace: true },
@@ -455,8 +531,14 @@ export default function SalesPage() {
   // and the cards stay individually informative. The earlier "split in
   // two" version had Outstanding = Total whenever Status=Outstanding,
   // which trained the operator to ignore the cards.
+  //
+  // The KPI drill-down is applied FIRST and to all three scopes. It is not a
+  // "focus the list" filter like Status — it defines which orders this page is
+  // about, so the bucket cards have to be counting the same 11 rows the grid
+  // shows. A drill-down whose cards still read the whole book is the same
+  // disagreement in a different place.
   const filteredOrdersForKpi = useMemo(() => {
-    return orders.filter(o => {
+    return narrowToIds(orders, lateIds).filter(o => {
       if (filterCustomer && o.customerId !== filterCustomer) return false;
       // Multi-Company Phase 2 — company filter. "" = ALL companies (default,
       // nothing hidden). Pre-column rows read as HOOKKA (server default).
@@ -483,7 +565,7 @@ export default function SalesPage() {
       }
       return true;
     });
-  }, [orders, filterCustomer, filterCompany, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo]);
+  }, [orders, lateIds, filterCustomer, filterCompany, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo]);
 
   const filteredOrdersByUserFilters = useMemo(() => {
     return filteredOrdersForKpi.filter(o => {
@@ -1165,6 +1247,28 @@ export default function SalesPage() {
           </>
         )}
       </div>
+
+      {/* KPI drill-down banner — says, in words, exactly which set is on
+          screen and which month it belongs to, so the operator can check it
+          against the card they clicked instead of trusting it. */}
+      {lateDrillActive && (
+        <Card className="border-[#B5701A] bg-[#FDF6EC]">
+          <CardContent className="p-3 flex flex-wrap items-center gap-2">
+            <Truck className="h-4 w-4 text-[#B5701A] shrink-0" />
+            <span className="text-sm text-[#5A5550]">
+              <span className="font-semibold">KPI drill-down:</span> sales orders
+              first dispatched in {drillPeriod} after the delivery date promised
+              to the customer.
+              {lateIds !== null && (
+                <> {lateIds.size} order{lateIds.size === 1 ? "" : "s"}.</>
+              )}
+            </span>
+            <Button variant="ghost" size="sm" onClick={clearDrill} className="text-[#9CA3AF] hover:text-[#374151]">
+              <X className="h-4 w-4" /> Show all orders
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Filters */}
       <Card>

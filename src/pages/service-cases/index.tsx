@@ -17,8 +17,9 @@
 // rows; Export CSV downloads whatever the grid currently shows.
 // ---------------------------------------------------------------------------
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { serviceCaseCountedIn, validPeriod } from "@/lib/kpi-drill";
 import {
   computeCasePipeline,
   caseDaysOpen,
@@ -264,11 +265,51 @@ export default function ServiceCasesListPage() {
   // flow's onFilteredDataChange={setPrintRows}.
   const [exportRows, setExportRows] = useState<CaseRow[]>([]);
 
+  // ── KPI drill-down ────────────────────────────────────────────────────
+  // `?filter=kpi-resolution&period=YYYY-MM` arrives from the
+  // `service_case_resolution` card. Before 2026-08-07 the card linked to a
+  // bare /service-cases: an average taken over a few dozen cases opened a list
+  // of every case ever raised, and there was no way to tell which rows the
+  // number came from.
+  //
+  // Unlike the Sales and Products drill-downs this one needs no endpoint —
+  // createdAt / closedAt are already on every row, so the metric's own WHERE
+  // clause is reproduced (once) in `serviceCaseCountedIn`. `cases` has already
+  // been through the API's row-level customer scope, so narrowing it here can
+  // only ever remove rows.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const kpiPeriod =
+    searchParams.get("filter") === "kpi-resolution"
+      ? validPeriod(searchParams.get("period"))
+      : "";
+  const clearKpiDrill = () => {
+    setSearchParams(
+      (prev) => {
+        const out = new URLSearchParams(prev);
+        out.delete("filter");
+        out.delete("period");
+        return out;
+      },
+      { replace: true },
+    );
+  };
+
   // Status chips pre-filter the rows fed to the grid; the grid's own
   // search / per-column filters then narrow further.
+  //
+  // The drill-down is applied FIRST and the status chip counts read from its
+  // result, so a chip can never advertise 40 cases over a grid showing 6.
+  const casesInPeriod = useMemo(
+    () =>
+      kpiPeriod ? cases.filter((c) => serviceCaseCountedIn(c, kpiPeriod)) : cases,
+    [cases, kpiPeriod],
+  );
   const filtered = useMemo(
-    () => (statusFilter === "ALL" ? cases : cases.filter((c) => c.status === statusFilter)),
-    [cases, statusFilter],
+    () =>
+      statusFilter === "ALL"
+        ? casesInPeriod
+        : casesInPeriod.filter((c) => c.status === statusFilter),
+    [casesInPeriod, statusFilter],
   );
 
   // Index DOs / POs by salesOrderId once, so each row is an O(1) lookup
@@ -570,6 +611,27 @@ export default function ServiceCasesListPage() {
         </div>
       </div>
 
+      {/* KPI drill-down banner — spells out the month and the rule, because
+          "cases still open" being in the set is the surprising half and the
+          reader has to be able to check the count against the card. */}
+      {kpiPeriod && (
+        <div className="rounded-lg border border-[#D9CEB3] bg-[#F4F0E8] px-3 py-2 flex flex-wrap items-center gap-2">
+          <span className="text-xs text-[#5A5550]">
+            <span className="font-semibold">KPI drill-down:</span> the{" "}
+            {casesInPeriod.length} case{casesInPeriod.length === 1 ? "" : "s"} the{" "}
+            {kpiPeriod} resolution average was taken over — closed that month,
+            plus every case still open that was raised on or before it ended.
+          </span>
+          <button
+            type="button"
+            onClick={clearKpiDrill}
+            className="ml-auto px-2 py-1 rounded text-[11px] font-medium text-[#6B7280] hover:bg-white transition-colors"
+          >
+            Show all cases
+          </button>
+        </div>
+      )}
+
       <div className="flex flex-wrap gap-2 text-xs">
         {(["ALL", "OPEN", "IN_PROGRESS", "CLOSED", "CANCELLED"] as const).map((s) => (
           <button
@@ -582,7 +644,10 @@ export default function ServiceCasesListPage() {
                 : "border-[#E2DDD8] hover:bg-[#FAF9F7]"
             }`}
           >
-            {s} {s !== "ALL" ? `(${cases.filter((c) => c.status === s).length})` : `(${cases.length})`}
+            {s}{" "}
+            {s !== "ALL"
+              ? `(${casesInPeriod.filter((c) => c.status === s).length})`
+              : `(${casesInPeriod.length})`}
           </button>
         ))}
       </div>

@@ -629,6 +629,8 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 | | `src/api/lib/kpi-metrics.ts` — one function per KPI's ACTUAL. `customerDeliveryLate` · `setupCompleteness` · `documentsStuck` (composite) · `productionEfficiency` · `serviceCaseResolution` · `checklistProgress` · `surveyMean` · `manualRating` | `products` / `bom_templates` / `delivery_orders` / `invoices` / `service_cases` / `reports_compliance_snapshot` | |
 | | `src/api/lib/ensure-kpi-tables.ts` — runtime self-apply. Migrations are inert; every column arrives here | | |
 | | `src/api/lib/kpi-survey-token.ts` — mint / URL / state / answer validation for the public survey link | | |
+| | `src/lib/kpi-drill.ts` — the "See the list →" contract shared by the card and every landing page: `drillHref` (stamps `{period}`), `narrowToIds`, `serviceCaseCountedIn`, `validPeriod` | | `tests/kpi-drilldown.test.mjs` |
+| | Drill-down list endpoints: `GET /api/sales-orders/late-to-customer?period=` (`sales-orders.ts`, before `/:id`, `customerScopeSql` in SQL) · `GET /api/products/setup-incomplete?missing=` (`products.ts`, before `/:id`) | | |
 
 **Read before touching this module:**
 - Four scoring types (`AUTO` / `CHECKLIST` / `SURVEY` / `MANUAL`) and six attainment
@@ -644,6 +646,17 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
   twice — that double count is the whole reason the two were merged.
 - Routing lives in `bom_templates.wip_components`, NOT `l1_processes` (near-empty
   legacy column). `setup_completeness` read the wrong one and under-reported by 160 SKUs.
+- **`drillPath` must open EXACTLY the rows the card counted, for the card's month.**
+  Owner 2026-08-07: 「如果是 showable 的话，就要确保这些全部数据是可以被看到的」.
+  All five AUTO links were decorative (BUG-2026-08-07-001) — two `?filter=` params
+  nothing read, and `/reports/operations`, a route that has never existed, rendering
+  a blank page. The predicate now lives ONCE (`FIRST_DISPATCH_CTE` / `IS_LATE` /
+  `SETUP_FIELD_SQL` in kpi-metrics.ts) and is interpolated by both the count and the
+  drill-down list, so they cannot drift. `{period}` in a drillPath is substituted by
+  `drillHref`; omit it only for a genuinely point-in-time metric. If a page cannot
+  honour the filter, DELETE the drillPath — a missing link is honest, a link to
+  unfiltered data is not. `tests/kpi-drilldown.test.mjs` checks every drillPath
+  against the real route table.
 - **Quoted camelCase SELECT aliases only.** Unquoted `AS has_bom` returns as `hasBom`
   and every lookup reads undefined. `tests/kpi-sql-identifiers.test.mjs` guards the
   camelCase-in-SQL half of this across BOTH kpi.ts and kpi-metrics.ts.

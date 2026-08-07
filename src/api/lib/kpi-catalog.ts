@@ -183,7 +183,20 @@ export interface KpiDef {
   available: boolean;
   /** Why it is not available, shown on the card. */
   blockedBy?: string;
-  /** Where clicking the row goes. */
+  /**
+   * Where "See the list →" goes — and it must land on EXACTLY the rows this
+   * KPI counted, filtered, for the month on the card.
+   *
+   * Owner 2026-08-07: "如果是 showable 的话，就要确保这些全部数据是可以被看到的."
+   * A link to the unfiltered list is not a drill-down, it is a number and a
+   * different number side by side. If a page cannot honour the filter, the
+   * right move is to DELETE this field, not to link anyway — a missing link is
+   * honest.
+   *
+   * `{period}` is substituted with the card's YYYY-MM by `drillHref`
+   * (src/lib/kpi-drill.ts). Omit the token only for a KPI that is genuinely
+   * point-in-time rather than monthly.
+   */
   drillPath?: string;
   /** Which roles this KPI is offered for. */
   roles: string[];
@@ -222,7 +235,11 @@ export const KPI_CATALOG: KpiDef[] = [
     defaultTarget: 0,
     defaultWeight: 30,
     available: true,
-    drillPath: "/sales?filter=late-to-customer",
+    // Opens the Sales list narrowed to the orders this % was computed from,
+    // for this month. The id set comes from
+    // GET /api/sales-orders/late-to-customer, which shares its SQL with
+    // `customerDeliveryLate`.
+    drillPath: "/sales?filter=late-to-customer&period={period}",
     roles: ["OFFICE", "SALES"],
   },
   {
@@ -254,6 +271,10 @@ export const KPI_CATALOG: KpiDef[] = [
     defaultTarget: 100,
     defaultWeight: 20,
     available: true,
+    // No {period}: this one is point-in-time. A SKU is missing its price NOW,
+    // not "in July" — stamping a month on the URL would promise a filter the
+    // metric itself does not apply. `?missing=` narrows to one of the four
+    // fields, matching the per-field gap the card reports.
     drillPath: "/products?filter=incomplete",
     roles: ["OFFICE"],
   },
@@ -285,7 +306,11 @@ export const KPI_CATALOG: KpiDef[] = [
     defaultTarget: 100,
     defaultWeight: 20,
     available: true,
-    drillPath: "/daily-report",
+    // Opens the Daily Report with the uninvoiced-delivery exception already
+    // expanded — the list half one is scored on — rather than the tile
+    // overview. No {period}: the Daily edition is live state by design ("what
+    // needs attention today"), so a month on the URL would be ignored.
+    drillPath: "/daily-report?section=doNotInvoiced",
     roles: ["OFFICE"],
   },
   {
@@ -317,7 +342,14 @@ export const KPI_CATALOG: KpiDef[] = [
     defaultTarget: 100,
     defaultWeight: 30,
     available: true,
-    drillPath: "/reports/operations",
+    // WAS "/reports/operations" — a route that has never existed. There is no
+    // `operations` tab on /reports and no /reports/:tab route, so the link
+    // rendered a BLANK page (2026-08-07 audit). The real home of this figure is
+    // the Daily Report's Monthly Operations edition, which reads
+    // /api/reports/operations.json for the month and lists per-worker
+    // efficiency from the SAME computeMonthlyEfficiencyByWorker this metric
+    // aggregates.
+    drillPath: "/daily-report?edition=monthly&period={period}",
     roles: ["PRODUCTION", "QA"],
   },
   {
@@ -347,7 +379,11 @@ export const KPI_CATALOG: KpiDef[] = [
     defaultTarget: 7,
     defaultWeight: 25,
     available: true,
-    drillPath: "/service-cases",
+    // Narrows the case list to the SAME set the average was taken over: cases
+    // closed inside the month, plus cases still open that were raised on or
+    // before it ended. `/service-cases` on its own showed every case ever
+    // raised, against an average computed from a few dozen.
+    drillPath: "/service-cases?filter=kpi-resolution&period={period}",
     roles: ["QA", "OFFICE"],
   },
   {

@@ -14,6 +14,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { customerScopeSql, isCustomerScoped } from "../lib/customer-scope";
+import { lateToCustomerOrders } from "../lib/kpi-metrics";
 import { assertCustomerBillable } from "../lib/customer-stage";
 import { emitAudit, buildAuditStatement } from "../lib/audit";
 import { calculateUnitPrice, calculateLineTotal } from "../../lib/pricing";
@@ -803,6 +804,40 @@ app.get("/delivery-progress", async (c) => {
     if (r.so) delivered[r.so] = Number(r.qty) || 0;
   }
   return c.json({ success: true, delivered });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/sales-orders/late-to-customer?period=YYYY-MM
+//
+// The drill-down behind the `customer_delivery_date` KPI card's "See the list
+// →" link. Returns the ids of the orders that card COUNTED — the ones whose
+// first dispatch left after the date promised to the customer, in that month.
+//
+// The query is `lateToCustomerOrders` in src/api/lib/kpi-metrics.ts, which
+// shares its CTE and its lateness test with the metric itself. That sharing is
+// the whole point: a second hand-written copy would agree today and disagree
+// in three months, and a list that disagrees with the number it was reached
+// from destroys the number's authority.
+//
+// Row-level scoping is applied IN SQL, not on the way out — a salesperson
+// never receives another salesperson's order ids. Their list is therefore
+// legitimately shorter than the factory-wide count on the card.
+//
+// Registered BEFORE /:id so Hono's trie picks the right handler.
+// ---------------------------------------------------------------------------
+app.get("/late-to-customer", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "read");
+  if (denied) return denied;
+  const period = (c.req.query("period") || "").trim();
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(period)) {
+    return c.json(
+      { success: false, error: "period must be YYYY-MM" },
+      400,
+    );
+  }
+  const scope = await customerScopeSql(c, "so.customerId");
+  const rows = await lateToCustomerOrders(c, period, scope);
+  return c.json({ success: true, period, data: rows });
 });
 
 // ---------------------------------------------------------------------------

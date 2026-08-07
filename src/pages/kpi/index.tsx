@@ -21,6 +21,12 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { getCurrentUser } from "@/lib/auth";
+import { drillHref, SETUP_FIELD_LABEL } from "@/lib/kpi-drill";
+
+/** The four per-field cuts offered under the setup_completeness drill link. */
+const SETUP_DRILL_FIELDS = (
+  Object.keys(SETUP_FIELD_LABEL) as (keyof typeof SETUP_FIELD_LABEL)[]
+).map((key) => ({ key, label: SETUP_FIELD_LABEL[key] }));
 
 type Scoring = "AUTO" | "CHECKLIST" | "SURVEY" | "MANUAL";
 
@@ -930,9 +936,36 @@ export default function KpiPage() {
                         )}
                         <p className="text-[12px] text-[#5A5550] mt-1.5 font-medium">{l.evidence}</p>
                         {l.drillPath && (
-                          <Link to={l.drillPath} className="text-[11px] underline decoration-dotted text-[#6B5C32]">
+                          // The card's month travels with the link. Without it
+                          // the target page opens "all of them, ever", which is
+                          // a different set from the one this row counted —
+                          // and the disagreement makes both numbers useless.
+                          <Link
+                            to={drillHref(l.drillPath, period)}
+                            className="text-[11px] underline decoration-dotted text-[#6B5C32]"
+                          >
                             See the list →
                           </Link>
+                        )}
+                        {l.key === "setup_completeness" && l.drillPath && (
+                          // The card reports the gap PER FIELD ("247 no BOM"),
+                          // so the drill-down offers the same four cuts. "31%
+                          // complete" cannot be acted on; "the 247 with no
+                          // routing" is a morning's work with a visible end.
+                          <span className="ml-2 text-[11px] text-[#9CA3AF]">
+                            just:{" "}
+                            {SETUP_DRILL_FIELDS.map((f, i) => (
+                              <span key={f.key}>
+                                {i > 0 && " · "}
+                                <Link
+                                  to={`${l.drillPath}&missing=${f.key}`}
+                                  className="underline decoration-dotted text-[#6B5C32]"
+                                >
+                                  {f.label}
+                                </Link>
+                              </span>
+                            ))}
+                          </span>
                         )}
                       </div>
                       <div className="text-right whitespace-nowrap">

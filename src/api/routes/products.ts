@@ -11,6 +11,11 @@ import type { Context } from "hono";
 import type { Env } from "../worker";
 import { checkProductDeleteLocked, lockedResponse } from "../lib/lock-helpers";
 import { requirePermission, hasPermission } from "../lib/rbac";
+import {
+  incompleteSetupProducts,
+  isSetupField,
+  SETUP_FIELDS,
+} from "../lib/kpi-metrics";
 import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
@@ -518,6 +523,38 @@ app.get("/", async (c) => {
     ),
   );
   return c.json({ success: true, data: await stripSellingPrice(c, data) });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/products/setup-incomplete?missing=price|volume|fabric|bom
+//
+// The drill-down behind the `setup_completeness` KPI card's "See the list →"
+// link: the ACTIVE SKUs that card counted as NOT fully set up, and which of
+// the four things each one is missing. `?missing=` narrows to one field,
+// because the card now reports the gap per field ("247 no BOM") and that is
+// the unit of work somebody actually picks up.
+//
+// The predicates come from SETUP_FIELD_SQL in src/api/lib/kpi-metrics.ts — the
+// same four strings the metric counts with, so this list cannot drift from the
+// number that led here.
+//
+// Registered BEFORE /:id so Hono's trie picks the right handler.
+// ---------------------------------------------------------------------------
+app.get("/setup-incomplete", async (c) => {
+  const denied = await requirePermission(c, "products", "read");
+  if (denied) return denied;
+  const raw = (c.req.query("missing") || "").trim();
+  // An unrecognised field is refused rather than silently widened to "all" —
+  // a typo must not quietly return a longer list than the link promised.
+  if (raw && raw !== "all" && !isSetupField(raw)) {
+    return c.json(
+      { success: false, error: `missing must be one of: all, ${SETUP_FIELDS.join(", ")}` },
+      400,
+    );
+  }
+  const field = isSetupField(raw) ? raw : null;
+  const rows = await incompleteSetupProducts(c, field);
+  return c.json({ success: true, missing: field ?? "all", data: rows });
 });
 
 // POST /api/products — create (rejects duplicate codes)

@@ -34,6 +34,20 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-07-001 — Every AUTO KPI showed "See the list →" and every link was a lie: three landed on the unfiltered list, one on a route that does not exist `ui-frontend` `kpi` 🟢
+
+**Symptom.** The KPI card renders a "See the list →" drill-down on all five AUTO KPIs. Owner: 「如果是 showable 的话，就要确保这些全部数据是可以被看到的」. None of the five opened the rows the card counted.
+
+**Root cause — four separate failures behind one link style.**
+1. `/sales?filter=late-to-customer` — `src/pages/sales/index.tsx` destructured `const [, setSearchParams] = useSearchParams()`, i.e. WRITE-only. `filter` was never read, so the link dropped the operator on the unfiltered SO list: card "11 late", grid every order on file. Worse, the grid's `SHIPPED_STATUS_EXCLUDE` default hides SHIPPED/DELIVERED/CLOSED — and every late order is one of those, so even a correct filter would have rendered empty.
+2. `/products?filter=incomplete` — same class. The Products page reads no `filter` param at all and defaults to the **BEDFRAME** tab, while the setup gap is overwhelmingly sofa components; the link showed a fraction of a number it did not explain.
+3. `/reports/operations` — **not a route**. `DASHBOARD_ROUTES` has `/reports` only, `reports.tsx` has five tabs and none is `operations`, and there is no catch-all — React Router matched nothing and rendered a BLANK page.
+4. `/service-cases` and `/daily-report` resolved, but unfiltered: an average over a few dozen cases opened every case ever raised, and the daily report opened the twelve-tile overview with no indication which category was scored.
+
+**Fix.** The predicate is now written ONCE per metric and shared. `src/api/lib/kpi-metrics.ts` exports `FIRST_DISPATCH_CTE` / `DISPATCHED_IN_PERIOD` / `IS_LATE` and `SETUP_FIELD_SQL`, interpolated by BOTH the count and the new drill-down list queries (`lateToCustomerOrders`, `incompleteSetupProducts`) — a second hand-written copy would agree today and disagree in three months. Two new read endpoints serve the id sets: `GET /api/sales-orders/late-to-customer?period=YYYY-MM` (row-level customer scope applied IN SQL via `customerScopeSql(c, "so.customerId")`, registered before `/:id`) and `GET /api/products/setup-incomplete?missing=price|volume|fabric|bom`. `src/lib/kpi-drill.ts` holds the shared client contract: `drillHref` stamps the card's month into `{period}`, `narrowToIds` applies a server-supplied set, `serviceCaseCountedIn` mirrors the service-case WHERE clause. Sales / Products / Service Cases now READ their param and narrow the rows (and their own summary cards / chips), each with a banner naming the set. `/reports/operations` was **replaced, not faked**: `production_efficiency` now opens `/daily-report?edition=monthly&period={period}`, the Monthly Operations edition, which reads the same `computeMonthlyEfficiencyByWorker`. `documents_not_stuck` gained `?section=doNotInvoiced`.
+
+**Verified.** `tsc -p tsconfig.app.json --noEmit` clean, `npm test` 3121 passing. New `tests/kpi-drilldown.test.mjs` asserts behaviour, not imports: every `drillPath` resolves against the real `DASHBOARD_ROUTES` list (this test fails on `/reports/operations`), no drill-down is a bare list link, the params actually narrow the set, and each SQL fragment is interpolated at least twice so the list cannot drift from the number. Live prod verify pending deploy — the read-only credential the audit scripts used has been rotated out of the repo.
+
 ## BUG-2026-08-04-006 — Enrolling in 2FA locked the user out; login crashed "Cannot read properties of undefined (reading 'user')" `auth` `ui-frontend` 🟢
 
 **Symptom.** A SUPER_ADMIN (nico) could not sign in — the login form showed `Cannot read properties of undefined (reading 'user')`. Password reset, disable/enable, and an Active account status made no difference (the failure is AFTER the password check).

@@ -51,9 +51,13 @@ test("the Draft tab seeds no status exclusion of its own", () => {
   // The other half of how that tab went blank: a "hide shipped" default only
   // makes sense in the Confirmed funnel. On Draft every row is DRAFT, so it
   // could only ever narrow a list that was already exactly what was asked for.
+  //
+  // The condition grew a third arm in 2026-08-07 (the late-to-customer KPI
+  // drill-down, whose every row is SHIPPED by definition), so this asserts the
+  // Draft arm is still in it rather than pinning the whole expression.
   assert.match(
     SALES,
-    /filterStatus \|\| tab === "DRAFT" \? undefined : SHIPPED_STATUS_EXCLUDE/,
+    /filterStatus \|\| tab === "DRAFT"[^]{0,60}\?\s*undefined\s*:\s*SHIPPED_STATUS_EXCLUDE/,
   );
 });
 

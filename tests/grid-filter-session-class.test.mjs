@@ -41,10 +41,12 @@ test("Sales Orders: the Draft/Confirmed tab is part of the filter session key", 
 
 test("Sales Orders: the hide-shipped default never applies on the Draft tab", () => {
   // Every Draft row is DRAFT, so a Status exclusion there can only narrow a
-  // list that is already exactly what was asked for.
+  // list that is already exactly what was asked for. (The condition gained a
+  // third arm on 2026-08-07 — the late-to-customer KPI drill-down, where every
+  // row is SHIPPED — so match the Draft arm, not the whole expression.)
   assert.match(
     sales,
-    /filterStatus \|\| tab === "DRAFT" \? undefined : SHIPPED_STATUS_EXCLUDE/,
+    /filterStatus \|\| tab === "DRAFT"[^]{0,60}\?\s*undefined\s*:\s*SHIPPED_STATUS_EXCLUDE/,
   );
 });
 

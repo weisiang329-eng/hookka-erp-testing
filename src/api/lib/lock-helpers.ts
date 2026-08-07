@@ -147,9 +147,17 @@ export async function checkProductionOrderLocked(
 }
 
 /**
- * Check whether a Delivery Order is locked because an Invoice references
+ * Check whether a Delivery Order is locked because a LIVE Invoice references
  * it. Once the invoice is issued the DO line items / quantities must not
  * change — they're already on the customer's bill.
+ *
+ * `status <> 'CANCELLED'` (2026-08-07). The lock used to count CANCELLED
+ * invoices too, which directly contradicted the void path: voiding an invoice
+ * reverses the GL + A/R and explicitly hands the DO back for re-invoicing
+ * (buildInvoiceDeathReleaseStatements), yet the dead invoice kept the DO
+ * read-only forever — so the delivery could be re-billed but never corrected
+ * first. The message even told the operator to "void the invoice", which did
+ * nothing. A cancelled invoice is not on anybody's bill; only a live one locks.
  */
 export async function checkDeliveryOrderLocked(
   db: D1Database,
@@ -157,7 +165,8 @@ export async function checkDeliveryOrderLocked(
 ): Promise<string | null> {
   const inv = await db
     .prepare(
-      `SELECT invoiceNo FROM invoices WHERE deliveryOrderId = ? LIMIT 1`,
+      `SELECT invoiceNo FROM invoices
+        WHERE deliveryOrderId = ? AND status <> 'CANCELLED' LIMIT 1`,
     )
     .bind(deliveryOrderId)
     .first<{ invoiceNo: string }>();

@@ -34,6 +34,7 @@ import {
   Mail,
   Bot,
   Undo2,
+  XCircle,
 } from "lucide-react";
 import DeliveryAgentTab from "./agent-tab";
 import type { DeliveryOrder, ProofOfDelivery, ThreePLProvider, Customer } from "@/types";
@@ -176,7 +177,16 @@ function EditableExpectedDD({
 // for "LOADED" that drifted into a separate type member, masking the
 // missing LOADED → IN_TRANSIT button. Display label "Dispatched" still
 // renders for LOADED rows via STATUS_LABEL — code stays "LOADED".
-type DOStatus = "DRAFT" | "LOADED" | "IN_TRANSIT" | "DELIVERED" | "INVOICED";
+type DOStatus =
+  | "DRAFT"
+  | "LOADED"
+  | "IN_TRANSIT"
+  | "DELIVERED"
+  | "INVOICED"
+  // CANCELLED (2026-08-07) — a DO past DRAFT used to be immortal, which also
+  // locked its production orders out of every future delivery note. It is now
+  // reachable from every live status and is terminal.
+  | "CANCELLED";
 
 type DOItem = {
   id: string;
@@ -461,6 +471,7 @@ const STATUS_LABEL: Record<DOStatus, string> = {
   IN_TRANSIT: "In Transit",
   DELIVERED: "Delivered",
   INVOICED: "Invoiced",
+  CANCELLED: "Cancelled",
 };
 
 // Delivery workflow tabs. The old "Invoice" tab was removed (2026-05-18):
@@ -473,6 +484,7 @@ const ALL_TABS = [
   { key: "pending_dispatch", label: "Pending Dispatch" },
   { key: "dispatched", label: "Dispatched" },
   { key: "delivered", label: "Delivered" },
+  { key: "cancelled", label: "Cancelled" },
   { key: "packing_list", label: "Packing List" },
 ] as const;
 
@@ -490,6 +502,10 @@ const TAB_DO_STATUSES: Record<string, DOStatus[]> = {
   // this it vanished from the Delivered tab, losing the delivery record. A
   // delivered-AND-invoiced DO is still a delivered DO, so it stays here.
   delivered: ["DELIVERED", "INVOICED"],
+  // Cancelled DOs are kept visible in their own bucket rather than vanishing:
+  // the document is the evidence of what was reversed, and the operator needs
+  // to be able to find it (and see that its POs were released) after the fact.
+  cancelled: ["CANCELLED"],
 };
 
 // PO-based tabs (show production orders, not delivery orders)
@@ -2207,6 +2223,7 @@ export default function DeliveryPage() {
       // Delivered count = DELIVERED + INVOICED so the badge matches the tab
       // list (which now keeps invoiced DOs — see TAB_DO_STATUSES).
       delivered: (byStatus.DELIVERED ?? 0) + (byStatus.INVOICED ?? 0),
+      cancelled: byStatus.CANCELLED ?? 0,
     };
   }, [doStatsRaw]);
   // Wei Siang 2026-05-16: RM value per DO-status bucket so the tab
@@ -4370,12 +4387,67 @@ export default function DeliveryPage() {
       },
       { label: "", separator: true, action: () => {} },
       {
+        // Cancel (2026-08-07). Before this, a DO past DRAFT could not be
+        // undone at all — and its production orders stayed locked out of every
+        // future delivery note, so a wrong delivery could never be re-issued
+        // correctly. The backend owns the whole reversal (fg_units, the
+        // STOCK_IN counter-movements, the FIFO FG_DELIVERED COGS and the SO
+        // step-back) and REFUSES with a readable reason when it cannot make
+        // that reversal complete — a live invoice, or an existing Delivery
+        // Return that already credited part of the goods back. Surface that
+        // reason verbatim; it names the exact next step.
+        label: "Cancel Delivery Order",
+        icon: <XCircle className="h-3.5 w-3.5" />,
+        action: async () => {
+          if (
+            !(await confirm({
+              title: `Cancel ${row.doNo}?`,
+              message:
+                "This reverses the delivery: the units go back to stock, the delivered COGS is credited back, the sales order returns to Ready to Ship, and the production orders become available for a new delivery order. The DO stays on record as Cancelled. This cannot be undone.",
+              danger: true,
+            }))
+          )
+            return;
+          const result = await verifiedSave<DeliveryOrder>({
+            endpoint: `/api/delivery-orders/${row.id}`,
+            method: "PUT",
+            body: { status: "CANCELLED" },
+            readback: async () => {
+              const r = await fetch(`/api/delivery-orders/${row.id}?_v=${Date.now()}`, {
+                credentials: "include",
+                cache: "no-store",
+              });
+              if (!r.ok) return null;
+              const j = (await r.json()) as { success?: boolean; data?: DeliveryOrder } | DeliveryOrder;
+              return (j as { data?: DeliveryOrder })?.data ?? (j as DeliveryOrder) ?? null;
+            },
+            expect: { status: "CANCELLED" },
+          });
+          if (!result.ok) {
+            if (result.reason === "mismatch") toast.error(formatMismatchError(result.diffs));
+            else if (result.reason === "http") {
+              let parsedErr = result.body;
+              try {
+                const j = JSON.parse(result.body) as { error?: string };
+                if (j.error) parsedErr = j.error;
+              } catch { /* keep raw body */ }
+              toast.error(parsedErr || `Failed to cancel (HTTP ${result.status})`);
+            } else toast.error(`Save failed: ${result.details}`);
+          } else {
+            toast.success(`${row.doNo} cancelled — its production orders are available again`);
+          }
+          fetchData();
+        },
+        disabled: row.status === "CANCELLED",
+      },
+      { label: "", separator: true, action: () => {} },
+      {
         label: "Refresh",
         icon: <RefreshCw className="h-3.5 w-3.5" />,
         action: () => fetchData(),
       },
     ],
-    [fetchData, navigate]
+    [confirm, fetchData, navigate]
   );
 
   // ---------- Tab counts ----------
@@ -4385,6 +4457,7 @@ export default function DeliveryPage() {
     pending_dispatch: pendingDispatchCount,
     dispatched: dispatchedCount,
     delivered: uniqueDOsByStatus.delivered,
+    cancelled: uniqueDOsByStatus.cancelled,
     packing_list: packingLists.length,
   };
 
@@ -4401,6 +4474,10 @@ export default function DeliveryPage() {
     pending_dispatch: valueDOsByStatus.draft,
     dispatched: valueDOsByStatus.dispatched + valueDOsByStatus.inTransit,
     delivered: valueDOsByStatus.delivered,
+    // Deliberately NO money on the Cancelled tab: those goods were handed back
+    // (stock, COGS and the SO were all reversed), so showing an RM figure
+    // there would read as revenue that still exists.
+    cancelled: null,
   };
 
   return (

@@ -266,3 +266,102 @@ export async function reverseFGForDeliveryReturn(
 
   return { skipped: false, statements, reversedCogsSen };
 }
+
+// ---------------------------------------------------------------------------
+// REVERSE (whole document) — when a DELIVERED delivery order is CANCELLED, the
+// goods never left in the eyes of the book: every FG_DELIVERED slice this DO
+// consumed must be handed back to its fg_batches layer and the COGS undone.
+//
+// Same shape as reverseFGForDeliveryReturn above, but driven by the LEDGER
+// rather than by a line list: we replay this DO's own FG_DELIVERED rows and
+// give back exactly what each one took, from exactly the batch it took it
+// from. Nothing is recomputed, so a price/BOM change since delivery cannot
+// make the reversal disagree with the original consumption — the pairing is
+// row-for-row.
+//
+// Idempotent via refType='DELIVERY_ORDER_CANCEL' + refId=<doId>: a second
+// cancel attempt (retry, concurrent click) finds its own marker and no-ops.
+//
+// IMPORTANT — this helper assumes it is reversing the WHOLE consumption. If
+// some of it was already handed back by a Delivery Return
+// (refType='DELIVERY_RETURN'), replaying the FG_DELIVERED rows in full would
+// credit those quantities TWICE. The caller must refuse the cancel in that
+// case rather than call this (see buildDoCancelReleaseStatements).
+// ---------------------------------------------------------------------------
+export async function reverseFGForDoCancel(
+  db: D1Database,
+  doId: string,
+  doNo: string,
+  reversedAtIso: string,
+): Promise<{
+  skipped: boolean;
+  statements: D1PreparedStatement[];
+  reversedCogsSen: number;
+}> {
+  const existing = await db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM cost_ledger WHERE refType = 'DELIVERY_ORDER_CANCEL' AND refId = ?",
+    )
+    .bind(doId)
+    .first<{ n: number }>();
+  if ((existing?.n ?? 0) > 0) {
+    return { skipped: true, statements: [], reversedCogsSen: 0 };
+  }
+
+  const slicesRes = await db
+    .prepare(
+      `SELECT itemId AS "itemId", batchId AS "batchId", qty AS "qty",
+              unitCostSen AS "unitCostSen"
+         FROM cost_ledger
+        WHERE refType = 'DELIVERY_ORDER' AND refId = ? AND type = 'FG_DELIVERED'
+        ORDER BY date DESC, id DESC`,
+    )
+    .bind(doId)
+    .all<{
+      itemId: string;
+      batchId: string | null;
+      qty: number;
+      unitCostSen: number;
+    }>();
+
+  const statements: D1PreparedStatement[] = [];
+  let reversedCogsSen = 0;
+  for (const s of slicesRes.results ?? []) {
+    const qty = Number(s.qty) || 0;
+    if (qty <= 0) continue;
+    const unitSen = Number(s.unitCostSen) || 0;
+    const costSen = Math.round(unitSen * qty);
+    reversedCogsSen += costSen;
+    if (s.batchId) {
+      statements.push(
+        db
+          .prepare(
+            "UPDATE fg_batches SET remainingQty = remainingQty + ? WHERE id = ?",
+          )
+          .bind(qty, s.batchId),
+      );
+    }
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO cost_ledger
+             (id, date, type, itemType, itemId, batchId, qty, direction,
+              unitCostSen, totalCostSen, refType, refId, notes)
+           VALUES (?, ?, 'ADJUSTMENT', 'FG', ?, ?, ?, 'IN', ?, ?, 'DELIVERY_ORDER_CANCEL', ?, ?)`,
+        )
+        .bind(
+          genLedgerId("fgc"),
+          reversedAtIso,
+          s.itemId,
+          s.batchId,
+          qty,
+          unitSen,
+          costSen,
+          doId,
+          `FG un-delivered — ${doNo} cancelled`,
+        ),
+    );
+  }
+
+  return { skipped: false, statements, reversedCogsSen };
+}

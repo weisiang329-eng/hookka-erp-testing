@@ -117,9 +117,8 @@ const sqlOf = (stmts) => stmts.map((s) => s.sql);
 // ── Wall 1: the status machine had no way out of INVOICED ───────────────────
 
 test("INVOICED is no longer a dead end", () => {
-  assert.deepEqual(
-    VALID_TRANSITIONS.INVOICED,
-    ["DELIVERED"],
+  assert.ok(
+    VALID_TRANSITIONS.INVOICED.includes("DELIVERED"),
     "without an outbound edge from INVOICED the DO can never return to the billable state",
   );
 });

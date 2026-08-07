@@ -11,7 +11,10 @@
 import type { Context } from "hono";
 import { runSelfApply } from "../../lib/self-apply";
 import type { Env } from "../../worker";
-import { consumeFGBatchesForDO } from "../../lib/do-cost-cascade";
+import {
+  consumeFGBatchesForDO,
+  reverseFGForDoCancel,
+} from "../../lib/do-cost-cascade";
 import { loadSoLinePriceIndex, priceForItem } from "../../lib/do-value";
 import { getOrgId } from "../../lib/tenant";
 import { emitAudit } from "../../lib/audit";
@@ -47,11 +50,24 @@ import { ensureInvoicePoLinkColumn } from "../../lib/invoice-po-link";
 
 // Status transitions allowed by the mock-data impl. Preserved here so the
 // frontend sees identical error messages.
+// CANCELLED (2026-08-07). A delivery order past DRAFT used to be IMMORTAL:
+// no status had CANCELLED as a target, nothing anywhere wrote
+// delivery_orders.status='CANCELLED', and DELETE refuses anything but DRAFT.
+// So a wrong DO shipped, and the production orders it consumed were locked
+// FOREVER by the once-only-delivery guard in validateDoComposition (which
+// skips only `d.status != 'CANCELLED'` DOs) — those goods could never go onto
+// a correct delivery note. Owner's rule: a conversion must never lock
+// permanently. CANCELLED is reachable from EVERY live status, and each one
+// carries the exact reversal of what its own progression wrote — see
+// buildDoCancelReleaseStatements below. It is terminal: a cancelled DO is
+// evidence, not a workspace; raise a fresh DO for the same POs (they are free
+// again the moment this one is cancelled).
 export const VALID_TRANSITIONS: Record<string, string[]> = {
-  DRAFT: ["LOADED"],
-  LOADED: ["DRAFT", "IN_TRANSIT", "DELIVERED"],
-  IN_TRANSIT: ["DELIVERED"],
-  DELIVERED: ["INVOICED"],
+  DRAFT: ["LOADED", "CANCELLED"],
+  LOADED: ["DRAFT", "IN_TRANSIT", "DELIVERED", "CANCELLED"],
+  IN_TRANSIT: ["DELIVERED", "CANCELLED"],
+  DELIVERED: ["INVOICED", "CANCELLED"],
+  CANCELLED: [],
   // INVOICED → DELIVERED (2026-08-07). INVOICED used to be a DEAD END: the
   // goods ship, the invoice is voided, and that DO can never be billed again
   // — the "Transfer to Invoice" button greys on status !== 'DELIVERED' and
@@ -63,7 +79,7 @@ export const VALID_TRANSITIONS: Record<string, string[]> = {
   // buildInvoiceDeathReleaseStatements below. It is NOT a delivery cascade —
   // `cascadedToDelivered` explicitly excludes it, so stepping back does not
   // re-run FIFO COGS / fg_units / the auto-invoice.
-  INVOICED: ["DELIVERED"],
+  INVOICED: ["DELIVERED", "CANCELLED"],
 };
 
 // ---------------------------------------------------------------------------
@@ -833,6 +849,271 @@ export async function buildInvoiceDeathReleaseStatements(
   }
 
   return statements;
+}
+
+// ---------------------------------------------------------------------------
+// buildDoCancelReleaseStatements — cancelling a delivery order must UNDO
+// exactly what that delivery order's own progression did, and nothing else.
+//
+// THE HOLE (2026-08-07). A DO past DRAFT could not be cancelled at all (no
+// CANCELLED target in VALID_TRANSITIONS, no writer anywhere, DELETE is
+// DRAFT-only). So a wrong DO was permanent, and its production orders stayed
+// locked forever by the once-only-delivery guard in validateDoComposition —
+// those goods could never be put on a correct delivery note. Owner's rule:
+// "这种转换不是整张单锁死的" — a conversion must be undoable and repeatable.
+//
+// Shaped after the two reversal patterns that already exist in this file:
+// `revertedToDraft` (LOADED → DRAFT: unstamp fg_units, append a STOCK_IN
+// counter-movement, step the SO back) and buildInvoiceDeathReleaseStatements
+// (release the source only when nothing else still claims it, re-assert the
+// from-status in every WHERE, write an so_status_changes audit row). This is
+// those two composed for the whole document, plus the FIFO COGS reversal the
+// DELIVERED edge needs.
+//
+// WHAT EACH FORWARD EDGE WROTE, AND HOW IT IS UNDONE
+//   DRAFT → LOADED       fg_units doId/LOADED/loadedAt   → cleared to PENDING
+//                        stock_movements STOCK_OUT       → STOCK_IN counter row
+//                                                          (history is
+//                                                          append-only, never
+//                                                          deleted — same rule
+//                                                          revertedToDraft
+//                                                          follows)
+//                        rack_items DELETE               → NOT restored; see
+//                                                          the note below
+//                        sales_orders → SHIPPED          → back to READY_TO_SHIP
+//   → DELIVERED          fg_units DELIVERED/deliveredAt  → cleared to PENDING
+//                        fg_batches draw-down + FIFO
+//                          FG_DELIVERED cost_ledger      → reverseFGForDoCancel
+//                        sales_orders → DELIVERED        → back to READY_TO_SHIP
+//                        auto invoice + GL + A/R         → refused unless the
+//                                                          invoice is already
+//                                                          dead (see below)
+//   DELIVERED → INVOICED bare status flip                → nothing to undo
+//
+// WHY IT REFUSES RATHER THAN HALF-REVERSES
+//   • A LIVE (non-CANCELLED) invoice bills the DO. Un-delivering goods that
+//     are on a customer's live bill would leave revenue, A/R and GL legs
+//     pointing at a delivery that no longer happened. Voiding the invoice is
+//     already a complete, audited reversal (invoices.ts isVoidTransition +
+//     buildInvoiceDeathReleaseStatements) — so we send the operator there
+//     instead of writing a second, weaker version of it here.
+//   • A Delivery Return exists against the DO. reverseFGForDeliveryReturn has
+//     ALREADY handed part of this DO's FG consumption back, and cancelling a
+//     return does not un-do that. Replaying every FG_DELIVERED slice on top
+//     would credit those quantities TWICE — silently inflating FG stock and
+//     under-stating COGS. Refuse; the return is the document that owns those
+//     goods now.
+//
+// RACK_ITEMS ARE DELIBERATELY NOT RESTORED. Dispatch physically empties the
+// rack, and the existing LOADED → DRAFT reversal does not put the pieces back
+// either (the operator re-scans them to a rack). Re-inserting rack_items here
+// would claim warehouse space that nobody has physically refilled — a worse
+// lie than an empty rack. The STOCK_IN movement records the round-trip.
+//
+// Returns statements for the caller's batch; never writes on its own, so the
+// release lands atomically with the status flip that caused it.
+// ---------------------------------------------------------------------------
+export type DoCancelRelease =
+  | { ok: false; status: 409; error: string }
+  | {
+      ok: true;
+      statements: D1PreparedStatement[];
+      reversedCogsSen: number;
+      releasedSoIds: string[];
+    };
+
+export async function buildDoCancelReleaseStatements(
+  db: D1Database,
+  doRow: {
+    id: string;
+    doNo: string;
+    status: string;
+    salesOrderId: string | null;
+  },
+  now: string,
+): Promise<DoCancelRelease> {
+  // --- refusal 1: a live invoice still bills this delivery -----------------
+  const liveInvoice = await db
+    .prepare(
+      "SELECT id, invoiceNo, status FROM invoices WHERE deliveryOrderId = ? AND status != 'CANCELLED' LIMIT 1",
+    )
+    .bind(doRow.id)
+    .first<{ id: string; invoiceNo: string; status: string }>();
+  if (liveInvoice) {
+    return {
+      ok: false,
+      status: 409,
+      error: `Cannot cancel ${doRow.doNo}: invoice ${liveInvoice.invoiceNo} (${liveInvoice.status}) still bills it. Void that invoice first — voiding reverses the GL and the customer's outstanding balance and hands this delivery order back — then cancel the DO.`,
+    };
+  }
+
+  // --- refusal 2: a Delivery Return already handed some of it back ---------
+  // Best-effort read: on a deployment where no return was ever raised the
+  // tables do not exist and the query throws — that means there is nothing to
+  // collide with, so the cancel proceeds. Any OTHER failure would also land
+  // here, which is why the FG reversal below is itself idempotent.
+  try {
+    const ret = await db
+      .prepare(
+        `SELECT id AS "id", status AS "status"
+           FROM delivery_returns WHERE delivery_order_id = ? LIMIT 1`,
+      )
+      .bind(doRow.id)
+      .first<{ id: string; status: string }>();
+    if (ret) {
+      return {
+        ok: false,
+        status: 409,
+        error: `Cannot cancel ${doRow.doNo}: a Delivery Return (${ret.id}, ${ret.status}) has already returned goods from it, and that return has already credited FG stock and COGS back. Cancelling now would credit the same goods twice. Handle the remaining lines through the return instead.`,
+      };
+    }
+  } catch {
+    /* delivery_return tables not present — no return can exist */
+  }
+
+  const statements: D1PreparedStatement[] = [];
+  const releasedSoIds: string[] = [];
+
+  // --- fg_units: hand every unit this DO claimed back to the warehouse -----
+  // Covers BOTH stamps in one write: the LOADED stamp (doId/status/loadedAt,
+  // written on dispatch) and the DELIVERED stamp (status/deliveredAt). Same
+  // target state the LOADED → DRAFT reversal uses, plus deliveredAt.
+  const stampedPosRes = await db
+    .prepare(`SELECT DISTINCT poId FROM fg_units WHERE doId = ?`)
+    .bind(doRow.id)
+    .all<{ poId: string }>();
+  const stampedPoIds = (stampedPosRes.results ?? [])
+    .map((r) => r.poId)
+    .filter(Boolean);
+  if (stampedPoIds.length > 0) {
+    statements.push(
+      db
+        .prepare(
+          `UPDATE fg_units
+              SET doId = NULL, status = 'PENDING', loadedAt = NULL,
+                  deliveredAt = NULL
+            WHERE doId = ?`,
+        )
+        .bind(doRow.id),
+    );
+  }
+
+  // --- stock_movements: one STOCK_IN counter-row per PO --------------------
+  // Only when the goods actually left (DRAFT never wrote a STOCK_OUT). The
+  // original STOCK_OUT rows stay — the racking ledger shows the round-trip.
+  if (doRow.status !== "DRAFT" && stampedPoIds.length > 0) {
+    for (const poId of stampedPoIds) {
+      const po = await db
+        .prepare(
+          `SELECT id, productCode, productName, quantity, rackingNumber
+             FROM production_orders WHERE id = ?`,
+        )
+        .bind(poId)
+        .first<{
+          id: string;
+          productCode: string | null;
+          productName: string | null;
+          quantity: number | null;
+          rackingNumber: string | null;
+        }>();
+      if (!po) continue;
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO stock_movements (
+               id, type, rackLocationId, rackLabel, productionOrderId,
+               productCode, productName, quantity, reason, performedBy,
+               created_at
+             ) VALUES (?, 'STOCK_IN', ?, ?, ?, ?, ?, ?, ?, 'System', ?)`,
+          )
+          .bind(
+            `mov-${crypto.randomUUID().slice(0, 8)}`,
+            null,
+            po.rackingNumber ?? "",
+            po.id,
+            po.productCode ?? "",
+            po.productName ?? "",
+            Number(po.quantity) || 0,
+            `${doRow.doNo} cancelled`,
+            now,
+          ),
+      );
+    }
+  }
+
+  // --- FIFO FG_DELIVERED COGS: give every consumed slice back -------------
+  // No-op (skipped) when this DO never reached DELIVERED, and idempotent on a
+  // retry. Refusal 2 above guarantees no return already took part of it.
+  const cogs = await reverseFGForDoCancel(db, doRow.id, doRow.doNo, now);
+  let reversedCogsSen = 0;
+  if (!cogs.skipped && cogs.statements.length > 0) {
+    statements.push(...cogs.statements);
+    reversedCogsSen = cogs.reversedCogsSen;
+  }
+
+  // --- sales orders: back to READY_TO_SHIP --------------------------------
+  // Only the two statuses THIS DO's progression can have written (SHIPPED on
+  // dispatch, DELIVERED on delivery). An SO at INVOICED/CLOSED is billed by
+  // some other document; CONFIRMED/IN_PRODUCTION/READY_TO_SHIP were never
+  // moved by us. And an SO whose goods also ride a SIBLING live DO keeps its
+  // status — that other delivery is still real.
+  const soIds = await resolveDoSalesOrderIds(db, doRow.id, doRow.salesOrderId);
+  for (const soId of soIds) {
+    const soRow = await db
+      .prepare("SELECT id, status FROM sales_orders WHERE id = ?")
+      .bind(soId)
+      .first<{ id: string; status: string }>();
+    if (!soRow) continue;
+    if (soRow.status !== "SHIPPED" && soRow.status !== "DELIVERED") continue;
+
+    const soDoIds = (await resolveSalesOrderDoIds(db, soId)).filter(
+      (x) => x !== doRow.id,
+    );
+    if (soDoIds.length > 0) {
+      const ph = soDoIds.map(() => "?").join(",");
+      const siblingLive = await db
+        .prepare(
+          `SELECT id FROM delivery_orders
+            WHERE id IN (${ph})
+              AND status IN ('LOADED','IN_TRANSIT','DELIVERED','INVOICED')
+            LIMIT 1`,
+        )
+        .bind(...soDoIds)
+        .first<{ id: string }>();
+      if (siblingLive) continue;
+    }
+
+    releasedSoIds.push(soId);
+    statements.push(
+      db
+        .prepare(
+          // Re-assert the from-status so a concurrent writer that got there
+          // first turns this into a no-op instead of a downgrade.
+          "UPDATE sales_orders SET status = 'READY_TO_SHIP', updated_at = ? WHERE id = ? AND status = ?",
+        )
+        .bind(now, soId, soRow.status),
+      db
+        .prepare(
+          `INSERT INTO so_status_changes
+             (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          genStatusChangeId(),
+          soId,
+          soRow.status,
+          "READY_TO_SHIP",
+          "System",
+          now,
+          "DO cancelled",
+          JSON.stringify([
+            `${doRow.doNo} cancelled — its production orders are free to be delivered again`,
+          ]),
+        ),
+    );
+  }
+
+  return { ok: true, statements, reversedCogsSen, releasedSoIds };
 }
 
 // DO / PO "Sales Figure" resolver moved to ../lib/do-value (single source
@@ -3759,6 +4040,20 @@ export async function applyDeliveryOrderUpdate(
           409,
         );
       }
+      // A cancel is a whole-document reversal (see the `cancelled` block
+      // below). Replacing the line items in the SAME request would make it
+      // reverse a composition that was never delivered — refuse and let the
+      // operator cancel first.
+      if (body.status === "CANCELLED" && Array.isArray(body.items)) {
+        return c.json(
+          {
+            success: false,
+            error:
+              "Cancel this delivery order on its own — a cancel reverses the lines that were actually dispatched, so it cannot also replace them.",
+          },
+          400,
+        );
+      }
       nextStatus = body.status;
       if (nextStatus === "LOADED") nextDispatchedAt = now;
       if (nextStatus === "DRAFT") nextDispatchedAt = null;
@@ -3777,6 +4072,11 @@ export async function applyDeliveryOrderUpdate(
       }
       if (nextStatus === "INVOICED") {
         nextOverdue = "INVOICED";
+      }
+      if (nextStatus === "CANCELLED") {
+        // The DO is off the board — it is neither overdue nor completed, and
+        // leaving the old value would keep it in the overdue reports.
+        nextOverdue = "CANCELLED";
       }
     }
 
@@ -4444,6 +4744,41 @@ export async function applyDeliveryOrderUpdate(
           );
         }
       }
+    }
+
+    // -------------------------------------------------------------------
+    // CANCEL (2026-08-07) — the whole-document reversal.
+    //
+    // Until now a DO past DRAFT was immortal: no CANCELLED target existed in
+    // VALID_TRANSITIONS, nothing wrote the status, and DELETE is DRAFT-only.
+    // The consequence was not just an ugly row — validateDoComposition's
+    // once-only-delivery guard skips `d.status != 'CANCELLED'` DOs, so every
+    // production order on a wrong DO was locked out of every future delivery
+    // note, permanently. Cancelling releases them by making that guard true.
+    //
+    // buildDoCancelReleaseStatements owns the whole reversal AND the two
+    // refusals (live invoice / existing delivery return). It returns
+    // statements only — they join THIS batch, so the reversal and the status
+    // flip land or roll back together. A refusal returns before anything is
+    // written, so a DO is never left half-reversed.
+    // -------------------------------------------------------------------
+    const cancelled =
+      existing.status !== "CANCELLED" && nextStatus === "CANCELLED";
+    if (cancelled) {
+      const release = await buildDoCancelReleaseStatements(
+        c.var.DB,
+        {
+          id,
+          doNo: existing.doNo,
+          status: existing.status,
+          salesOrderId: existing.salesOrderId,
+        },
+        now,
+      );
+      if (!release.ok) {
+        return c.json({ success: false, error: release.error }, release.status);
+      }
+      statements.push(...release.statements);
     }
 
     // -------------------------------------------------------------------

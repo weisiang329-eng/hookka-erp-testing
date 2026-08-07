@@ -31,7 +31,14 @@ import {
 import type { Invoice } from "@/types";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { DiscountInput } from "@/components/ui/discount-input";
-import { invoiceLineUnitSen } from "@/lib/invoice-line-price";
+// THE price rule (charge is authoritative, build-up is an explanation, an
+// explanation that doesn't reconcile is not shown, editing moves both together)
+// lives in one module shared with the backend resolver and the PDF builder.
+import {
+  invoiceLineUnitSen,
+  invoicePriceBuildUp,
+  invoicePriceEditSeed,
+} from "@/lib/invoice-line-price";
 
 const PAYMENT_METHODS = [
   { value: "BANK_TRANSFER", label: "Bank Transfer" },
@@ -107,6 +114,10 @@ export default function InvoiceDetailPage() {
     Record<string, { base: string; divan: string; leg: string; special: string; totalHeight: string }>
   >({});
   const [discountDraft, setDiscountDraft] = useState<Record<string, number>>({});
+  // Lines whose stored components could NOT be trusted, so the editor opened
+  // with the charged price as Base (see invoicePriceEditSeed). Surfaced as a
+  // note under the inputs — the operator must not read those zeros as fact.
+  const [seedUnresolved, setSeedUnresolved] = useState<Record<string, boolean>>({});
   const rm = (sen: number) => (Math.round(Number(sen) || 0) / 100).toFixed(2);
   const sen = (s: string) => Math.max(0, Math.round((Number(s) || 0) * 100));
   // Edit allowed only on DRAFT or unpaid SENT (no payment recorded).
@@ -122,24 +133,28 @@ export default function InvoiceDetailPage() {
       { base: string; divan: string; leg: string; special: string; totalHeight: string }
     > = {};
     const dd: Record<string, number> = {};
+    const unres: Record<string, boolean> = {};
     for (const it of invoice.items) {
-      const ex = lineExtras[it.id];
-      // Pre-fill from the resolved build-up (invoice's own if already
-      // edited, else the sales-order figures). Fall back to unit price
-      // as Base when nothing resolved.
-      const base = ex ? ex.baseSen : Number(it.unitPriceSen) || 0;
+      // Rule 5 (src/lib/invoice-line-price.ts): the seed ALWAYS reconciles to
+      // the charged unitPriceSen. Before this, the editor pre-filled straight
+      // from the resolved build-up — so on a line whose components didn't add
+      // up to the charge, opening the editor and pressing Save WITHOUT TYPING
+      // ANYTHING silently repriced the line (RM 305 → RM 308).
+      const seed = invoicePriceEditSeed(lineExtras[it.id], Number(it.unitPriceSen) || 0);
       d[it.id] = {
-        base: rm(base),
-        divan: rm(ex?.divanSen || 0),
-        leg: rm(ex?.legSen || 0),
-        special: rm(ex?.specialSen || 0),
-        totalHeight: rm(ex?.totalHeightSen || 0),
+        base: rm(seed.baseSen),
+        divan: rm(seed.divanSen),
+        leg: rm(seed.legSen),
+        special: rm(seed.specialSen),
+        totalHeight: rm(seed.totalHeightSen),
       };
+      if (!seed.resolved) unres[it.id] = true;
       // Per-line discount (migration 0179). Pre-fill from stored value.
       dd[it.id] = Number(it.discountSen) || 0;
     }
     setPriceDraft(d);
     setDiscountDraft(dd);
+    setSeedUnresolved(unres);
     setEditingPrices(true);
   };
 
@@ -749,6 +764,17 @@ export default function InvoiceDetailPage() {
                               totalHeightSen: sen(d.totalHeight),
                             })
                           : Number(item.unitPriceSen) || 0;
+                      // Rule 3 (src/lib/invoice-line-price.ts) — the READ view
+                      // itemises the Price column only through the shared rule,
+                      // which refuses a build-up that does not sum to the
+                      // charged unitPriceSen. The PDF always had this guard; the
+                      // screen did not, which is how it displayed
+                      // "Base 0 … = RM 305". A non-reconciling line now shows
+                      // one price: showing nothing is honest, showing a wrong
+                      // decomposition is not.
+                      const buildUp = editingPrices
+                        ? undefined
+                        : invoicePriceBuildUp(ex, Number(item.unitPriceSen) || 0);
                       // Per-line discount (migration 0179).
                       const liveDiscount = editingPrices
                         ? (discountDraft[item.id] ?? 0)
@@ -868,6 +894,13 @@ export default function InvoiceDetailPage() {
                                 <p className="text-[11px] text-[#6B5C32] font-medium pt-1">
                                   Unit {formatCurrency(liveUnit)}
                                 </p>
+                                {seedUnresolved[item.id] && (
+                                  <p className="text-[10px] text-[#9CA3AF] leading-snug max-w-[190px] ml-auto text-right">
+                                    No itemised build-up on file for this line — the
+                                    charged price is shown as Base. Retype the
+                                    components to itemise it.
+                                  </p>
+                                )}
                                 {/* Per-line Discount (migration 0179) */}
                                 <div className="flex items-center justify-end gap-1.5 pt-1 border-t border-[#E2DDD8]">
                                   <span className="text-[10px] text-[#9CA3AF] w-12 text-right">Discount</span>
@@ -884,26 +917,15 @@ export default function InvoiceDetailPage() {
                                   />
                                 </div>
                               </div>
-                            ) : ex &&
-                              (ex.divanSen || ex.legSen || ex.totalHeightSen || ex.specialSen) ? (
+                            ) : buildUp ? (
                               <div className="text-xs leading-relaxed tabular-nums">
-                                <div>Base {formatCurrency(ex.baseSen)}</div>
-                                {!!ex.divanSen && (
-                                  <div>+ Divan {formatCurrency(ex.divanSen)}</div>
-                                )}
-                                {!!ex.legSen && (
-                                  <div>+ Leg {formatCurrency(ex.legSen)}</div>
-                                )}
-                                {!!ex.totalHeightSen && (
-                                  <div>+ T.Height {formatCurrency(ex.totalHeightSen)}</div>
-                                )}
-                                {!!ex.specialSen && (
-                                  <div>
-                                    + Special {formatCurrency(ex.specialSen)}
+                                {buildUp.slice(0, -1).map((r) => (
+                                  <div key={r.label}>
+                                    {r.label} {formatCurrency(r.sen)}
                                   </div>
-                                )}
+                                ))}
                                 <div className="font-semibold text-[#1F1D1B] border-t border-[#E2DDD8] pt-0.5 mt-0.5">
-                                  = {formatCurrency(liveUnit)}
+                                  = {formatCurrency(buildUp[buildUp.length - 1].sen)}
                                 </div>
                               </div>
                             ) : (

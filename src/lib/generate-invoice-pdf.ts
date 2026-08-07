@@ -8,6 +8,7 @@ import {
   amountInWords,
   drawLetterhead,
 } from "@/lib/pdf-utils";
+import { invoicePriceBuildUp } from "@/lib/invoice-line-price";
 
 // Read-only print enrichment from GET /api/invoices/:id/print-extras.
 // All optional — the PDF still renders if not supplied.
@@ -23,7 +24,11 @@ export type InvoiceLineExtra = {
   legSen: number;
   specialSen: number;
   totalHeightSen?: number;
+  // The CHARGE (invoice_items.unitPriceSen) — see the rule in
+  // src/lib/invoice-line-price.ts. Not a re-sum of the components above.
   unitSen: number;
+  // Rule 3 verdict from the backend: do the components add up to unitSen?
+  buildUpReconciles?: boolean;
   // Per-line customer references (a consolidated invoice carries a
   // different PO / customer SO / our company SO on every line).
   customerPOId?: string | null;
@@ -152,26 +157,25 @@ function describe(
 
 // Build the stacked Price cell — every component on its own row so the
 // customer can see exactly how the price is built up and what is being
-// charged for: Base, then Divan / Leg / Special order whenever each is
-// separately priced. Falls back to the single unit price when no
-// build-up is available.
+// charged for: Base, then Divan / Leg / T.Height / Special order whenever each
+// is separately priced.
+//
+// The decision of WHETHER a build-up may be shown is not made here: it is the
+// shared rule in src/lib/invoice-line-price.ts (no surcharge, or components
+// that don't sum to the charge → render the single charged price). This
+// function only formats. It used to carry its own version, which had no
+// reconciliation guard and could fall back to `ex.unitSen` — a number that is
+// not necessarily what this invoice charges.
 function priceLines(
   unitPriceSen: number,
   ex: InvoiceLineExtra | undefined,
 ): string {
-  if (!ex) return fmtCurrency(unitPriceSen || 0);
-  const rows: string[] = [`Base ${fmtCurrency(ex.baseSen || 0)}`];
-  if (ex.divanSen) rows.push(`+ Divan ${fmtCurrency(ex.divanSen)}`);
-  if (ex.legSen) rows.push(`+ Leg ${fmtCurrency(ex.legSen)}`);
-  if (ex.totalHeightSen) rows.push(`+ T.Height ${fmtCurrency(ex.totalHeightSen)}`);
-  if (ex.specialSen) rows.push(`+ Special ${fmtCurrency(ex.specialSen)}`);
-  if (rows.length === 1) {
-    // No separately-priced add-ons — the divan / leg are built into the
-    // base (their inches still print in the Description). Show the one
-    // effective unit price.
-    return fmtCurrency(ex.unitSen || ex.baseSen || unitPriceSen || 0);
-  }
-  return rows.join("\n");
+  const rows = invoicePriceBuildUp(ex, unitPriceSen);
+  if (!rows) return fmtCurrency(unitPriceSen || 0);
+  return rows
+    .slice(0, -1)
+    .map((r) => `${r.label} ${fmtCurrency(r.sen)}`)
+    .join("\n");
 }
 
 // ---------------------------------------------------------------------------

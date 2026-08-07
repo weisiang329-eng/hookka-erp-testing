@@ -14,7 +14,14 @@
 // invoice line's OWN production_order_id — see refByPo below. The old
 // code|fabric|size maps remain only as a legacy fallback.
 // ---------------------------------------------------------------------------
+// 2026-08-07: the price half now speaks the SHARED rule. `src/lib/invoice-line-price.ts`
+// holds it in one place for the backend resolver, the invoice detail screen (read
+// AND edit) and the PDF — see the rule block at the top of that file. Two things
+// follow here: `unitSen` is the CHARGE (invoice_items.unitPriceSen), never the
+// sales order's own unit, and every line carries the reconciliation verdict so no
+// consumer has to re-derive it.
 import { readInvoiceItemPoLink } from "./invoice-po-link";
+import { invoiceBuildUpReconciles, invoiceLineUnitSen } from "../../lib/invoice-line-price";
 
 interface DbLike {
   prepare(sql: string): {
@@ -37,7 +44,20 @@ export interface InvoiceLineExtra {
   legSen: number;
   specialSen: number;
   totalHeightSen: number;
+  /**
+   * The CHARGE for this invoice line — `invoice_items.unitPriceSen`, which is
+   * authoritative (rule 1). It is NOT the sales order's own unit price and it is
+   * NOT a re-sum of the components above; if the two disagree, the components
+   * are the ones that are wrong.
+   */
   unitSen: number;
+  /**
+   * Rule 3: whether base+divan+leg+totalHeight+special === unitSen. `false` means
+   * the components above do not explain the charge and must not be displayed as a
+   * build-up. Every renderer re-checks via `invoicePriceBuildUp`; this field is so
+   * the verdict travels with the data instead of being re-derived by each caller.
+   */
+  buildUpReconciles: boolean;
   customerPOId?: string | null;
   customerSOLine?: string | null;
   customerRefLine?: string | null;
@@ -219,8 +239,13 @@ export async function computeInvoicePrintExtras(
         legSen: Number(r.legPriceSen) || 0,
         specialSen: Number(r.specialOrderPriceSen) || 0,
         totalHeightSen: Number(r.totalHeightPriceSen) || 0,
+        // Candidate value only: this is the SALES ORDER row's unit. The final
+        // per-invoice-line entry below replaces it with the invoice's own
+        // charge, which is the authoritative one (rule 1).
         unitSen: Number(r.unitPriceSen) || 0,
+        buildUpReconciles: false,
       };
+      v.buildUpReconciles = invoiceBuildUpReconciles(v, v.unitSen);
       if (code) {
         const tk = `${code}|${fab}|${size}`;
         const lk = `${code}|${fab}`;
@@ -327,7 +352,8 @@ export async function computeInvoicePrintExtras(
     .prepare(
       `SELECT id, productCode, fabricCode, sizeLabel,
               basePriceSen, divanPriceSen, legPriceSen,
-              specialOrderPriceSen, totalHeightPriceSen, priceEdited, production_order_id
+              specialOrderPriceSen, totalHeightPriceSen, unitPriceSen,
+              priceEdited, production_order_id
          FROM invoice_items WHERE invoiceId = ?`,
     )
     .bind(invoiceId)
@@ -341,6 +367,8 @@ export async function computeInvoicePrintExtras(
       legPriceSen: number | null;
       specialOrderPriceSen: number | null;
       totalHeightPriceSen: number | null;
+      // The CHARGE. Read-only here — nothing on this path may recompute it.
+      unitPriceSen: number | null;
       priceEdited: number | null;
     }>();
   for (const r of invItemsRes.results ?? []) {
@@ -382,6 +410,23 @@ export async function computeInvoicePrintExtras(
     const invSpecial = Number(r.specialOrderPriceSen) || 0;
     const invTotalHeight = Number(r.totalHeightPriceSen) || 0;
     if (v || rf || edited) {
+      // Rule 1 — the charge is invoice_items.unitPriceSen and nothing else. An
+      // edited line's own components sum to it by construction (the priceEdits
+      // handler writes unitPriceSen = invoiceLineUnitSen of what was typed); a
+      // non-edited line borrows the sales order's components, which may or may
+      // not explain this invoice's charge — hence the verdict below. The old
+      // code reported the SO's unitSen here, i.e. the backend could hand the
+      // screen a "unit price" that was not the price being charged.
+      const parts = {
+        baseSen: edited ? invBase : (v?.baseSen ?? 0),
+        divanSen: edited ? invDivan : (v?.divanSen ?? 0),
+        legSen: edited ? invLeg : (v?.legSen ?? 0),
+        specialSen: edited ? invSpecial : (v?.specialSen ?? 0),
+        totalHeightSen: edited ? invTotalHeight : (v?.totalHeightSen ?? 0),
+      };
+      const chargedSen = r.unitPriceSen == null && edited
+        ? invoiceLineUnitSen(parts)
+        : Number(r.unitPriceSen) || 0;
       items[r.id] = {
         itemCategory: v?.itemCategory ?? null,
         gapInches: v?.gapInches ?? null,
@@ -389,12 +434,9 @@ export async function computeInvoicePrintExtras(
         legHeightInches: v?.legHeightInches ?? null,
         totalHeightInches: v?.totalHeightInches ?? null,
         specialOrder: v?.specialOrder ?? null,
-        baseSen: edited ? invBase : (v?.baseSen ?? 0),
-        divanSen: edited ? invDivan : (v?.divanSen ?? 0),
-        legSen: edited ? invLeg : (v?.legSen ?? 0),
-        specialSen: edited ? invSpecial : (v?.specialSen ?? 0),
-        totalHeightSen: edited ? invTotalHeight : (v?.totalHeightSen ?? 0),
-        unitSen: edited ? invBase + invDivan + invLeg + invSpecial + invTotalHeight : (v?.unitSen ?? 0),
+        ...parts,
+        unitSen: chargedSen,
+        buildUpReconciles: invoiceBuildUpReconciles(parts, chargedSen),
         customerPOId: rf?.customerPOId ?? null,
         customerSOLine: rf?.customerSOLine ?? null,
         customerRefLine: rf?.customerRefLine ?? null,

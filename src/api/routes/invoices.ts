@@ -23,6 +23,7 @@ import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { customerScopeSql } from "../lib/customer-scope";
 import { computeInvoicePrintExtras } from "../lib/invoice-print-extras";
+import { invoiceLineUnitSen } from "../../lib/invoice-line-price";
 // Rollup: S3 won the audit/journal-hash signature change (batched into the
 // invoice txn via buildAuditStatement + buildJournalEntryStatements). S4's
 // pre-S3 emitAudit/appendJournalEntries variants are superseded. S4's
@@ -2160,7 +2161,16 @@ app.put("/:id", async (c) => {
         const ed = editById.get(r.id);
         if (ed) {
           touched++;
-          const unit = ed.base + ed.divan + ed.leg + ed.special + ed.totalHeight;
+          // Rule 5 (src/lib/invoice-line-price.ts): the charge IS the sum of the
+          // components the operator typed. Same function the editor previews
+          // with, so a component can never be counted on one side only.
+          const unit = invoiceLineUnitSen({
+            baseSen: ed.base,
+            divanSen: ed.divan,
+            legSen: ed.leg,
+            specialSen: ed.special,
+            totalHeightSen: ed.totalHeight,
+          });
           // Line total = max(0, unit × qty − discount).
           const lineTotal = Math.max(0, unit * q - ed.discount);
           newSubtotal += lineTotal;

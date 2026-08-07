@@ -3,6 +3,7 @@
 // calculations across the Sales create page and SO API handlers.
 // ---------------------------------------------------------------------------
 import { roundSen, roundUpToRinggitSen } from "./utils";
+import { invoiceLineUnitSen } from "./invoice-line-price";
 
 export interface PricingInput {
   basePriceSen: number;
@@ -18,15 +19,21 @@ export interface PricingInput {
  * `totalHeightPriceSen` is used by the frontend create page but is NOT sent
  * to the API as a separate field — it's folded into the line item before
  * submission. API handlers therefore omit it (defaults to 0).
+ *
+ * This is the ORDER side's name for the same arithmetic the invoice side calls
+ * `invoiceLineUnitSen` — the two columns families differ (`basePriceSen` vs
+ * `baseSen`), the rule does not. It delegates rather than re-summing, so the
+ * component list cannot drift between the two halves of the system; the rule
+ * itself is written down at the top of `invoice-line-price.ts`.
  */
 export function calculateUnitPrice(input: PricingInput): number {
-  return (
-    (input.basePriceSen || 0) +
-    (input.divanPriceSen || 0) +
-    (input.legPriceSen || 0) +
-    (input.totalHeightPriceSen || 0) +
-    (input.specialOrderPriceSen || 0)
-  );
+  return invoiceLineUnitSen({
+    baseSen: input.basePriceSen,
+    divanSen: input.divanPriceSen,
+    legSen: input.legPriceSen,
+    totalHeightSen: input.totalHeightPriceSen,
+    specialSen: input.specialOrderPriceSen,
+  });
 }
 
 /**

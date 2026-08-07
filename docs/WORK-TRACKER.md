@@ -9,6 +9,38 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-07 — ✅ 发票单行价格「一条规则、一个模组」· main（未 push）
+
+Owner：「一定要根据我们真正要有的规则去做啊，然后为什么 backend 和 frontend 不统一的呢？
+这些也需要解决啊」
+
+规则先写下来，再写码。规则放在 `src/lib/invoice-line-price.ts` 最上面：**收多少钱
+＝ `invoice_items.unitPriceSen`，它说了算**；Base/Divan/Leg/T.Height/Special 只是
+**解释**这个金额；解释加不起来就不给看；改价是解释和金额一起改，不可能只动一边。
+
+之前这套推导散在四个地方各写一份（backend resolver、发票明细读取画面、改价的预填、
+PDF），而**只有 PDF 那份带对帐守卫**（`build-unified-doc-data.ts:60`）。结果：
+
+- (A) 画面印得出「Base … = RM 305」但组件其实加起来是 RM 307.98；同一张 PDF 拒印。
+- (B) 按 Edit Prices → 什么都不打就 Save，RM 305 被静静改成 RM 307.98。
+
+现在四个 caller 全部走同一个模组，`invoice-print-extras` 回传的 `unitSen` 改成
+**发票自己收的钱**（以前回传的是销售单的 unit，两边本来就不是同一个数），并附
+`buildUpReconciles` 判定。`calculateUnitPrice`（订单侧同一套算术、不同栏位名）也改成
+委派，不再各加一次。没有动任何已开立单据的储存价格。
+
+`tests/invoice-price-buildup-rule.test.mjs` 测行为不测实作：加不起来的不显示、不印；
+空 Save 不改金额（含 RM 305→307.98、零元、奇数分）；打字仍然会改金额；backend／画面／
+PDF 对同一行给同一个判定同一个金额。tsc 干净、3220 tests 过。**prod 还没验**（未 push）。
+
+⚠️ 顺手扫到、**没动**：`src/pages/sales/edit.tsx:775` 和
+`src/pages/consignment/edit.tsx:462` 的 `getUnitPrice` 各自把
+base+divan+leg+special 加一遍，**完全没有 totalHeight**（两页连
+`totalHeightPriceSen` 这个栏位都没有）。这正是当初逼出 `invoiceLineUnitSen` 的同一个
+病。要另开一件事查：SO/CO 在这两页编辑存档后，T.Height 加价会不会被吃掉。
+
+---
+
 ## 2026-08-07 — ✅ KPI 卡的「See the list →」全部接回真实资料 · main（未 push）
 
 Owner：「如果是 showable 的话，就要确保这些全部数据是可以被看到的。」

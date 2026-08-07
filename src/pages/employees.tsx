@@ -30,7 +30,6 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MoneyInput } from "@/components/ui/money-input";
-import { SearchableSelect } from "@/components/ui/searchable-select";
 import { formatCurrency, formatDate, formatDateDMY, formatHours, formatRM, roundSen, distributeRoundSen, todayYmdMY } from "@/lib/utils";
 import { printReport, type PrintColumn, type PrintCard, type PrintSection } from "@/lib/print-report";
 import { normalizePaymentMethod, paymentDestinationLabel } from "@/lib/payment-method";
@@ -10443,45 +10442,90 @@ function AdvancesTab({ workers }: { workers: Worker[] }) {
   );
 
   // ---- new advance form -------------------------------------------------
-  const [formWorkerId, setFormWorkerId] = useState("");
+  //
+  // Owner 2026-08-07: "我不能 multiselect，然后直接 list 出来，然后 multiselect
+  // in 它的 amount，然后 add 到完，直接一次性处理到完？" Advances come in as a
+  // batch — payday, a queue of people, one number each — so entering them one
+  // at a time meant re-picking the date and re-opening the employee list twenty
+  // times. Tick everyone first, then fill the column of amounts.
+  //
+  // There is no separate single-entry path: picking ONE person is a batch of
+  // one, so there is no second code path that can drift out of step with this.
   const [formDate, setFormDate] = useState(todayLocalStr());
-  const [formAmountRM, setFormAmountRM] = useState<number | null>(null);
-  const [formNote, setFormNote] = useState("");
   const [saving, setSaving] = useState(false);
-  // Money is integer sen everywhere in this repo; MoneyInput hands back RM
-  // dollars, so this is the ONE conversion point.
-  const formAmountSen = formAmountRM === null ? 0 : roundSen(formAmountRM * 100);
-  const formValid =
-    !!formWorkerId && /^\d{4}-\d{2}-\d{2}$/.test(formDate) && formAmountSen > 0;
 
-  const addAdvance = async () => {
-    if (!formValid) return;
+  /** Employees ticked for this batch, in the order they were ticked. */
+  const [batchIds, setBatchIds] = useState<string[]>([]);
+  const [batchAmt, setBatchAmt] = useState<Record<string, number | null>>({});
+  const [batchNote, setBatchNote] = useState<Record<string, string>>({});
+  const [pickerQuery, setPickerQuery] = useState("");
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  const toggleBatch = (id: string) =>
+    setBatchIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const batchRows = batchIds.map((id) => {
+    const amtRM = batchAmt[id] ?? null;
+    return { id, amountSen: amtRM === null ? 0 : roundSen(amtRM * 100), note: batchNote[id] ?? "" };
+  });
+  const batchReady = batchRows.filter((r) => r.amountSen > 0);
+  const batchTotalSen = batchReady.reduce((sum, r) => sum + r.amountSen, 0);
+  const batchDateValid = /^\d{4}-\d{2}-\d{2}$/.test(formDate);
+
+  const clearBatch = () => {
+    setBatchIds([]);
+    setBatchAmt({});
+    setBatchNote({});
+    setPickerQuery("");
+  };
+
+  /**
+   * Record every ticked row that carries an amount.
+   *
+   * Posted one at a time against the SAME validated endpoint the single entry
+   * uses, rather than a second bulk path that could drift from it. That means a
+   * partial failure is possible, so the result is counted and reported by name
+   * — with money, "some of them saved" has to be said out loud, and the rows
+   * that failed stay on screen with their amounts intact so they can be retried
+   * without being re-keyed.
+   */
+  const addBatch = async () => {
+    if (!batchDateValid || batchReady.length === 0 || saving) return;
     setSaving(true);
-    try {
-      const res = await fetch("/api/employee-advances", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          workerId: formWorkerId,
-          date: formDate,
-          amountSen: formAmountSen,
-          note: formNote,
-        }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) {
-        toast.error(data?.error || `Failed to record advance (HTTP ${res.status})`);
-      } else {
-        toast.success("Advance recorded.");
-        setFormAmountRM(null);
-        setFormNote("");
-        reload();
+    const failed: string[] = [];
+    let ok = 0;
+    for (const row of batchReady) {
+      try {
+        const res = await fetch("/api/employee-advances", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            workerId: row.id,
+            date: formDate,
+            amountSen: row.amountSen,
+            note: row.note,
+          }),
+        });
+        if (res.ok) ok += 1;
+        else failed.push(workerById.get(row.id)?.name ?? row.id);
+      } catch {
+        failed.push(workerById.get(row.id)?.name ?? row.id);
       }
-    } catch {
-      toast.error("Error recording advance");
     }
+    if (ok > 0) {
+      toast.success(`${ok} advance${ok === 1 ? "" : "s"} recorded.`);
+      // Keep only what failed, so a retry needs no re-keying.
+      setBatchIds(failed.length ? batchIds.filter((id) => failed.includes(workerById.get(id)?.name ?? id)) : []);
+      if (!failed.length) clearBatch();
+    }
+    if (failed.length) {
+      toast.error(`Could not record ${failed.length}: ${failed.join(", ")}. They are still listed below.`);
+    }
+    reload();
     setSaving(false);
   };
+  // Money is integer sen everywhere in this repo; MoneyInput hands back RM
+  // dollars, so `batchRows` above is the ONE conversion point.
 
   // ---- inline edit ------------------------------------------------------
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -10692,47 +10736,144 @@ function AdvancesTab({ workers }: { workers: Worker[] }) {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          {/* Record an advance */}
+          {/* Record advances — tick everyone first, then fill the amounts. */}
           <div className="rounded-lg border border-[#E2DDD8] bg-[#FAF9F7] p-3">
-            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#6B5C32]">Record an advance</p>
-            <div className="grid grid-cols-1 gap-2 md:grid-cols-12">
-              <div className="md:col-span-4">
-                <SearchableSelect
-                  value={formWorkerId}
-                  onChange={setFormWorkerId}
-                  options={workerOptions}
-                  placeholder="Select employee"
-                />
-              </div>
-              <div className="md:col-span-2">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-[#6B5C32]">Record advances</p>
+              <div className="flex items-center gap-2">
+                <label className="text-[11px] text-[#6B7280]" htmlFor="adv-batch-date">Date handed over</label>
                 <Input
+                  id="adv-batch-date"
                   type="date"
                   value={formDate}
                   onChange={(e) => setFormDate(e.target.value)}
-                  title="The day the cash was handed over — this is what puts the advance in a pay period"
+                  className="h-9 w-[150px]"
+                  title="One date for the whole batch — this is what puts each advance in a pay period"
                 />
-              </div>
-              <div className="md:col-span-2">
-                <MoneyInput
-                  value={formAmountRM}
-                  onChange={setFormAmountRM}
-                  placeholder="Amount (RM)"
-                  className="h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 text-sm text-right tabular-nums focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                />
-              </div>
-              <div className="md:col-span-3">
-                <Input
-                  value={formNote}
-                  onChange={(e) => setFormNote(e.target.value)}
-                  placeholder="Note (optional)"
-                />
-              </div>
-              <div className="md:col-span-1">
-                <Button variant="primary" onClick={addAdvance} disabled={!formValid || saving} className="w-full">
-                  <Plus className="h-4 w-4" /> Add
-                </Button>
               </div>
             </div>
+
+            {/* Employee picker — a searchable tick list, not a one-at-a-time dropdown. */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setPickerOpen((v) => !v)}
+                className="flex h-10 w-full items-center justify-between rounded-md border border-[#E2DDD8] bg-white px-3 text-sm text-left focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              >
+                <span className={batchIds.length ? "text-[#1F1D1B]" : "text-[#9CA3AF]"}>
+                  {batchIds.length
+                    ? `${batchIds.length} employee${batchIds.length === 1 ? "" : "s"} selected`
+                    : "Select employees"}
+                </span>
+                <ChevronDown className="h-4 w-4 text-[#9CA3AF]" />
+              </button>
+
+              {pickerOpen && (
+                <div className="absolute z-20 mt-1 w-full rounded-md border border-[#E2DDD8] bg-white shadow-lg">
+                  <div className="border-b border-[#E2DDD8] p-2">
+                    <Input
+                      autoFocus
+                      value={pickerQuery}
+                      onChange={(e) => setPickerQuery(e.target.value)}
+                      placeholder="Type to search..."
+                      className="h-9"
+                    />
+                  </div>
+                  <div className="max-h-64 overflow-y-auto py-1">
+                    {workerOptions
+                      .filter((o) => o.label.toLowerCase().includes(pickerQuery.toLowerCase()))
+                      .map((o) => (
+                        <label
+                          key={o.value}
+                          className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm hover:bg-[#FAF9F7]"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={batchIds.includes(o.value)}
+                            onChange={() => toggleBatch(o.value)}
+                          />
+                          <span>{o.label}</span>
+                        </label>
+                      ))}
+                    {workerOptions.filter((o) => o.label.toLowerCase().includes(pickerQuery.toLowerCase())).length === 0 && (
+                      <p className="px-3 py-3 text-sm text-[#9CA3AF]">No employee matches that.</p>
+                    )}
+                  </div>
+                  <div className="flex items-center justify-between border-t border-[#E2DDD8] px-3 py-2">
+                    <button type="button" onClick={clearBatch} className="text-[11px] text-[#9A3A2D] hover:underline">
+                      Clear all
+                    </button>
+                    <Button variant="secondary" onClick={() => setPickerOpen(false)} className="h-7 px-3 text-[11px]">
+                      Done
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* One row per ticked employee. Amount is the only required field. */}
+            {batchIds.length > 0 && (
+              <div className="mt-3 space-y-1.5">
+                {batchIds.map((id) => {
+                  const w = workerById.get(id);
+                  return (
+                    <div key={id} className="grid grid-cols-1 items-center gap-2 md:grid-cols-12">
+                      <div className="md:col-span-4 min-w-0">
+                        <div className="truncate text-sm font-medium text-[#1F1D1B]">{w?.name ?? id}</div>
+                        <div className="text-[10px] text-[#9CA3AF]">
+                          {w?.empNo ?? "-"}{w?.departmentCode ? ` - ${w.departmentCode.replace(/_/g, " ")}` : ""}
+                        </div>
+                      </div>
+                      <div className="md:col-span-3">
+                        <MoneyInput
+                          value={batchAmt[id] ?? null}
+                          onChange={(v) => setBatchAmt((prev) => ({ ...prev, [id]: v }))}
+                          placeholder="Amount (RM)"
+                          className="h-9 w-full rounded-md border border-[#E2DDD8] bg-white px-3 text-sm text-right tabular-nums focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                        />
+                      </div>
+                      <div className="md:col-span-4">
+                        <Input
+                          value={batchNote[id] ?? ""}
+                          onChange={(e) => setBatchNote((prev) => ({ ...prev, [id]: e.target.value }))}
+                          placeholder="Note (optional)"
+                          className="h-9"
+                        />
+                      </div>
+                      <div className="md:col-span-1 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => toggleBatch(id)}
+                          title="Remove from this batch"
+                          className="rounded p-1.5 text-[#9CA3AF] hover:bg-[#F3F0EC] hover:text-[#9A3A2D]"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#E2DDD8] pt-2">
+                  <p className="text-[11px] text-[#6B7280]">
+                    {batchReady.length} of {batchIds.length} ready ·{" "}
+                    <span className="font-semibold tabular-nums text-[#1F1D1B]">{formatCurrency(batchTotalSen)}</span>
+                    {batchReady.length < batchIds.length && " · rows without an amount are skipped"}
+                  </p>
+                  <Button
+                    variant="primary"
+                    onClick={addBatch}
+                    disabled={!batchDateValid || batchReady.length === 0 || saving}
+                  >
+                    <Plus className="h-4 w-4" />
+                    {saving
+                      ? "Recording..."
+                      : `Add ${batchReady.length || ""} advance${batchReady.length === 1 ? "" : "s"}`}
+                  </Button>
+                </div>
+              </div>
+            )}
+
             <p className="mt-2 text-[11px] text-[#9CA3AF]">
               An advance is deducted from the pay period its DATE falls in. Payslips already generated for that month need a
               &ldquo;Regenerate&rdquo; on the Payroll tab before the new figure shows up in Net Pay.

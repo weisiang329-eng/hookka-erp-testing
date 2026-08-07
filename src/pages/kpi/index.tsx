@@ -132,6 +132,16 @@ export default function KpiPage() {
   const { data: cardResp, loading: cardLoading } = useCachedJson<{ data?: CardData }>(cardUrl);
   const card = cardResp?.data;
 
+  // Who the open card belongs to. `viewUserId` is set only when a Super Admin
+  // clicked through from People; on your own card it is empty and the person is
+  // you. The survey link has to be minted against THIS person, so it cannot
+  // fall back to "whoever is first in the list".
+  const cardUserId = viewUserId || String(me?.id ?? "");
+  const cardUserName =
+    (usersResp?.data ?? []).find((u) => u.id === cardUserId)?.displayName ||
+    (usersResp?.data ?? []).find((u) => u.id === cardUserId)?.email?.split("@")[0] ||
+    "this person";
+
   // ---- Library multi-select ------------------------------------------------
   const [picked, setPicked] = useState<Set<string>>(new Set());
   /** Which KPI's explanation is open. One at a time keeps the list scannable. */
@@ -953,6 +963,20 @@ export default function KpiPage() {
                         line={l}
                         canRate={isSuperAdmin && !card.locked}
                         onSave={saveRating}
+                      />
+                    )}
+
+                    {/* Owner 2026-08-07: "Customer Satisfaction Survey 这一边，
+                        我不能点开 Generate Code 吗？" It was only in the Library
+                        tab, which is the wrong place to notice you need it —
+                        you notice while looking at ONE person's card and seeing
+                        "No replies received yet". The person is already chosen
+                        here, so there is nothing to pick. */}
+                    {l.scoring === "SURVEY" && isSuperAdmin && !card.locked && (
+                      <SurveyLinkMaker
+                        kpiKey={l.key}
+                        period={period}
+                        assignedTo={[{ userId: cardUserId, name: cardUserName }]}
                       />
                     )}
                   </CardContent>

@@ -9,6 +9,58 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-08 — ✅ QC 三个 stage 三种节奏：IQC 按 GR、IPQC 一天两次、OQC 抽验对单 · main（未 push，未验 prod）
+
+Owner：「1. Raw Material 检查 … 基本上是根据进货情况按 batch 来检。只要有了 GR，可能是
+一张 PI 或者同一天进来的货，我们只需要检查一次 … 每一 batch 进来都必须抽检，把所有
+细节全部看一遍。2. WIP 检查 … 每天跟进，比如早上一次、下午一次。3. FG 检查：定期进行
+抽查，重点看他们有没有做对 order，有没有做错。」另外：「木架要看什么？海绵要看什么？
+布料要看什么？mechanism 有什么东西是需要检查的？」「你可以看一下我们大部分的供应商都是
+进的什么货物。」
+
+**JOB 1 — RM 的单位是「一张 GR」，不是「一天」。** cc06cf69 的 day gate 方向错得最要命：
+同一天两张 GR 会被压成一张 inspection，等于有一批货永远没人验；而且那个 slot 上没有任何
+指向货的连结，验的人根本不知道要去看哪一批。现在 `generateRmForGrns` 按 CONFIRMED/POSTED
+的 GRN 出单，idempotency key 是 `(source_grn_id, templateId)` 而不是 slot——所以 12:00 和
+16:00 两轮不会对同一张 GR 出两次。回溯窗 7 天（不是无限，否则第一次跑就会为几年前早就
+用掉的货生出几千张，又是 3,009 那张壁纸）。
+
+**JOB 2 — 混料 GR 的决定：一个 material family 一张 inspection，全部挂同一张 GR。**
+不做「一张综合清单」：木和布是两件不同的体力活、常常不同人不同时间做；而且整张单只有一个
+PASS/FAIL 的话，布的问题会连坐木材，等于把「到底哪里不对」这个唯一有价值的记录抹掉。
+路由走 `raw_materials.item_group`（对上 `CATEGORY_TO_ITEM_GROUPS`），不走供应商的自由文字
+——新料号只要归对 item group 就自动继承正确清单。唯一一处还要看文字的是 `B.OTHERS`
+（木条和五金杂项挤在同一组），认不出就落到 ACCESSORIES，不硬猜成木材。
+
+**JOB 3 — RM 清单补齐 + 写细。** PLYWOOD / WEBBING / PACKING / ACCESSORIES 之前**完全没有
+进货清单**，而夹板被当成实木验（分层、芯洞、层数、面级根本不在实木那张单上）。现在十个
+family 各一张，每一项都写了**抽样量**和**要抄下来的数字**（木材 10 支、海绵 3 块、五金
+每箱 5%、布每一卷）。bedframe/sofa 只拆 filler 一族：SOFA-FIL 是有密度钢印和回弹规格的
+PU，BED-FILL 是纤维片材，量的是 GSM 和回复厚度——同一张单会有四项永远填 N/A。布不拆
+（同样那五件事）；webbing 和 mechanism 拆不了（两条产线共用一个 item group），改成用
+「对留样」那一项去抓错送。
+
+**JOB 4 — FG 从「一天一张盲单」变成按量抽验 + 对单。** 0068 那张 FG 单几乎全是外观和包装，
+唯一提到 SO 的一项验的是**标签**，不是货。现在每张 FG slot 绑一台 fg_unit，并把它的
+SO 行（product code / size / fabric / qty / leg / divan / special order / 客户 hub）冻结进
+`so_spec`，清单前七项就是逐项对这张单。抽样量 = 当天产量 10%，下限 1 上限 5（每 slot 每
+品类）；同一台不会一天验两次；对不到 SO 行的成品**不吞掉**，单独报数——没单可追的成品
+本身就是要查的东西。
+
+新栏位全 snake_case + runtime self-apply（`ensureQcGenerationSchema`）：
+`qc_templates.material_family`、`qc_inspections.source_grn_id/source_grn_no/material_family/
+source_fg_unit_id/so_spec`。mig 0215 同一份 DDL + 清单内容（全部 ON CONFLICT DO NOTHING，
+重跑不会重复也不会盖掉 owner 改过的项目）。
+
+**没做、也不该假装做了**：owner 要的供应商分析（谁是主要供应商、各自要验什么）需要 prod
+资料，`HOOKKA_PROD_DB_URL` 没设、凭证已轮换出库，所以**没有连线**。只读 SQL 已经写在交付
+报告里给人手跑。清单结构预留了 per-supplier override（`pickRmTemplate` 先找
+(family, supplierId)），但 `qc_templates` 今天没有 supplier 栏位，也没有任何一列绑供应商。
+
+tsc 干净、3315 tests 全过（0 fail）。**prod 还没验**（未 push），mig 0215 也还没跑。
+
+---
+
 ## 2026-08-08 — ✅ DO 可以 cancel + 一张 DO 开多张 Invoice · main（未 push，未验 prod）
 
 Owner：「这种转换不是整张单锁死的 … 我应该可以在其中一个 Purchase Invoice 里面

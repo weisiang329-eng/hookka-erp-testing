@@ -31,6 +31,7 @@ import {
 import type { Invoice } from "@/types";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { DiscountInput } from "@/components/ui/discount-input";
+import { invoiceLineUnitSen } from "@/lib/invoice-line-price";
 
 const PAYMENT_METHODS = [
   { value: "BANK_TRANSFER", label: "Bank Transfer" },
@@ -168,7 +169,13 @@ export default function InvoiceDetailPage() {
     // Backend recomputes identically; comparing on totalAmount catches stale reads.
     const expectedTotal = invoice.items.reduce((sum, it) => {
       const e = priceEdits.find((p) => p.id === it.id);
-      const unit = (e?.baseSen ?? 0) + (e?.divanSen ?? 0) + (e?.legSen ?? 0) + (e?.specialSen ?? 0) + (e?.totalHeightSen ?? 0);
+      const unit = invoiceLineUnitSen({
+        baseSen: e?.baseSen ?? 0,
+        divanSen: e?.divanSen ?? 0,
+        legSen: e?.legSen ?? 0,
+        specialSen: e?.specialSen ?? 0,
+        totalHeightSen: e?.totalHeightSen ?? 0,
+      });
       const discount = e?.discountSen ?? 0;
       return sum + Math.max(0, unit * (Number(it.quantity) || 0) - discount);
     }, 0);
@@ -392,7 +399,13 @@ export default function InvoiceDetailPage() {
     ? invoice.items.reduce((s, it) => {
         const dd = priceDraft[it.id];
         const u = dd
-          ? sen(dd.base) + sen(dd.divan) + sen(dd.leg) + sen(dd.special)
+          ? invoiceLineUnitSen({
+              baseSen: sen(dd.base),
+              divanSen: sen(dd.divan),
+              legSen: sen(dd.leg),
+              specialSen: sen(dd.special),
+              totalHeightSen: sen(dd.totalHeight),
+            })
           : Number(it.unitPriceSen) || 0;
         const disc = discountDraft[it.id] ?? 0;
         return s + Math.max(0, u * (Number(it.quantity) || 0) - disc);
@@ -724,7 +737,13 @@ export default function InvoiceDetailPage() {
                       const qty = Number(item.quantity) || 0;
                       const liveUnit =
                         editingPrices && d
-                          ? sen(d.base) + sen(d.divan) + sen(d.leg) + sen(d.special)
+                          ? invoiceLineUnitSen({
+                              baseSen: sen(d.base),
+                              divanSen: sen(d.divan),
+                              legSen: sen(d.leg),
+                              specialSen: sen(d.special),
+                              totalHeightSen: sen(d.totalHeight),
+                            })
                           : Number(item.unitPriceSen) || 0;
                       // Per-line discount (migration 0179).
                       const liveDiscount = editingPrices
@@ -908,10 +927,13 @@ export default function InvoiceDetailPage() {
                         ? invoice.items.reduce((s, it) => {
                             const dd = priceDraft[it.id];
                             const u = dd
-                              ? sen(dd.base) +
-                                sen(dd.divan) +
-                                sen(dd.leg) +
-                                sen(dd.special)
+                              ? invoiceLineUnitSen({
+                                  baseSen: sen(dd.base),
+                                  divanSen: sen(dd.divan),
+                                  legSen: sen(dd.leg),
+                                  specialSen: sen(dd.special),
+                                  totalHeightSen: sen(dd.totalHeight),
+                                })
                               : Number(it.unitPriceSen) || 0;
                             const disc = discountDraft[it.id] ?? 0;
                             return s + Math.max(0, u * (Number(it.quantity) || 0) - disc);

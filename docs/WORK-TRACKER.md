@@ -9,6 +9,45 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-08 — ✅ DO 可以 cancel + 一张 DO 开多张 Invoice · main（未 push，未验 prod）
+
+Owner：「这种转换不是整张单锁死的 … 我应该可以在其中一个 Purchase Invoice 里面
+delete 掉，然后重新 generate 成另外一个 Invoice.」采购那边一直是对的（每行
+consumed counter，加一次就一定配一次减回去），销售这边整套都没有。
+
+**JOB 1 — DO 终于可以 cancel。** 之前 DRAFT 以后就是不死之身：`VALID_TRANSITIONS`
+根本没有 CANCELLED 这条边，全库没有一处写 `delivery_orders.status='CANCELLED'`，
+delete 又只准 DRAFT。真正的伤害不是难看：`validateDoComposition` 的一次性交货守卫
+只放过 `d.status != 'CANCELLED'` 的 DO，所以开错的那张 DO 上的 production order
+**永远**上不了下一张送货单。现在 CANCELLED 从每个活状态都能到，整套反向只写在
+`buildDoCancelReleaseStatements` 一个地方：fg_units 退回 PENDING（LOADED 和
+DELIVERED 两个戳一起）、每个 PO 补一笔 STOCK_IN（stock_movements 只增不删，跟
+LOADED→DRAFT 同一条规矩）、FIFO FG_DELIVERED 的 COGS 按 ledger 原样一笔一笔还回去
+（`reverseFGForDoCancel`）、SHIPPED/DELIVERED 的 SO 退回 READY_TO_SHIP。**反不干净就
+拒绝**：还有活 invoice 时叫你先 void；有 Delivery Return 时直接拒（它的 FG 反冲已经
+跑过，再冲一次等于同一批货入两次）。rack_items 故意不还原——货是真的离开货架了。
+顺手修：`checkDeliveryOrderLocked` 以前连 CANCELLED invoice 都算锁，等于 void 之后
+DO 能重开票却永远不能改，而错误讯息还叫人去 void。
+
+**JOB 2 — 一张 DO 可以开好几张 Invoice。** 加 `delivery_order_items.invoiced_qty`
+和 `invoice_items.delivery_order_item_id`（runtime self-apply，mig 0214），算术直接
+用采购那条 `src/lib/convert-chain.ts`。已开票状态改成**推导**（Σ invoiced_qty vs
+Σ quantity），不再看 status flag；只有开到最后一段才把 DO 翻成 INVOICED。
+`uniq_invoice_active_delivery_order` 删掉，换成 CHECK `invoiced_qty <= quantity`
+——同一个 race，但守的是真正该守的那条。void / 删 DRAFT / DRAFT 改行都会把数量还回去。
+前端 Transfer to Invoice 变成可勾行、可改数量的对话框（顺手修了一个真 bug：那个
+按钮的 POST body 从来没带 `deliveryOrderId`，一按就 400）。
+
+**向后相容的决定（最要命的一点）**：旧发票没有 line link，counter 全是 0，只看
+counter 的话全书的已开票 DO 会瞬间变成「未开票」，等于请系统去跟客户收两次钱。
+所以判定是 `remaining==0` **或**「这张 DO 上有一张没有 line link 的活发票」——后者就是
+旧的整单发票，今天的资料行为一模一样，void 掉才重新可开。**故意不 backfill**：只能靠
+product code 猜，而三条开票 fallback 里有两条根本没有 DO 行；猜少了就是默许多收一次。
+
+tsc 干净、3289 tests 全过。**prod 还没验**（未 push）。
+
+---
+
 ## 2026-08-07 — ✅ 发票单行价格「一条规则、一个模组」· main（未 push）
 
 Owner：「一定要根据我们真正要有的规则去做啊，然后为什么 backend 和 frontend 不统一的呢？

@@ -36,7 +36,7 @@ const {
 
 // ── A fake D1 that answers from plain arrays and records what would be written ─
 
-function fakeDb({ invoices = [], deliveryOrders = [], salesOrders = [], doItems = [], prodOrders = [] } = {}) {
+function fakeDb({ invoices = [], deliveryOrders = [], salesOrders = [], doItems = [], prodOrders = [], invoiceItems = [] } = {}) {
   const written = [];
   const norm = (s) => s.replace(/\s+/g, " ").trim();
   return {
@@ -44,11 +44,31 @@ function fakeDb({ invoices = [], deliveryOrders = [], salesOrders = [], doItems 
     prepare(sql) {
       const q = norm(sql);
       return {
+        // The partial-billing self-apply (ensureDoPartialInvoiceColumns) runs
+        // its DDL through .run() on a bare prepared statement.
+        async run() {
+          return { success: true };
+        },
         bind(...args) {
           const stmt = { sql: q, args };
           return {
             ...stmt,
+            async run() {
+              return { success: true };
+            },
             async first() {
+              // does this invoice carry any per-line DO link? (legacy detection)
+              if (/SELECT id FROM invoice_items WHERE invoiceId = \? AND delivery_order_item_id IS NOT NULL/.test(q)) {
+                return (
+                  invoiceItems.find(
+                    (it) => it.invoiceId === args[0] && it.deliveryOrderItemId,
+                  ) ?? null
+                );
+              }
+              if (/SELECT invoiced_qty AS "invoicedQty" FROM delivery_order_items WHERE id = \?/.test(q)) {
+                const di = doItems.find((d) => d.id === args[0]);
+                return di ? { invoicedQty: di.invoicedQty ?? 0 } : null;
+              }
               // live invoice on a DO, excluding the dying one
               if (/SELECT id FROM invoices WHERE deliveryOrderId = \? AND id != \?/.test(q)) {
                 const [doId, dying] = args;
@@ -72,6 +92,37 @@ function fakeDb({ invoices = [], deliveryOrders = [], salesOrders = [], doItems 
               throw new Error("unexpected first() query: " + q);
             },
             async all() {
+              // loadDoBillingState: the DO's lines with their consumed counters
+              if (/FROM delivery_order_items\s+WHERE deliveryOrderId = \?/.test(q)) {
+                return {
+                  results: doItems
+                    .filter((d) => d.deliveryOrderId === args[0])
+                    .map((d) => ({
+                      id: d.id ?? `${d.deliveryOrderId}-${d.productionOrderId}`,
+                      productionOrderId: d.productionOrderId ?? null,
+                      productCode: d.productCode ?? "",
+                      productName: d.productName ?? "",
+                      sizeLabel: "",
+                      fabricCode: "",
+                      quantity: d.quantity ?? 0,
+                      invoicedQty: d.invoicedQty ?? 0,
+                    })),
+                };
+              }
+              // loadDoBillingState: live invoices on the DO
+              if (/SELECT id, invoiceNo, status FROM invoices\s+WHERE deliveryOrderId = \? AND status <> 'CANCELLED'/.test(q)) {
+                return {
+                  results: invoices.filter(
+                    (i) => i.deliveryOrderId === args[0] && i.status !== "CANCELLED",
+                  ),
+                };
+              }
+              // buildInvoiceLineReleaseStatements: what this invoice consumed
+              if (/delivery_order_item_id AS "deliveryOrderItemId", quantity\s+FROM invoice_items WHERE invoiceId = \?/.test(q)) {
+                return {
+                  results: invoiceItems.filter((it) => it.invoiceId === args[0]),
+                };
+              }
               // resolveDoSalesOrderIds: DO items → production orders → SO
               if (/po\.salesOrderId AS soId/.test(q) || /SELECT DISTINCT po\.salesOrderId/.test(q)) {
                 const ids = new Set();
@@ -248,17 +299,32 @@ test("a multi-DO sales order stays INVOICED while a sibling DO's invoice lives",
 
 // ── Wall 3: the two idempotency checks disagreed about CANCELLED ────────────
 
-test("both invoice-creation paths ignore CANCELLED invoices", () => {
+test("both invoice-creation paths ask ONE shared question, and it ignores CANCELLED", () => {
+  // Originally these were two hand-written idempotency SELECTs that disagreed:
+  // auto-on-delivery counted a CANCELLED invoice as "already invoiced", so a
+  // voided DO went permanently silent on that path. 2026-08-07 they were
+  // rebased on the SAME derived read — loadDoBillingState — so they can no
+  // longer drift, and that read is `status <> 'CANCELLED'` by construction.
   assert.match(
     DO_HELPERS,
-    /SELECT id FROM invoices WHERE deliveryOrderId = \? AND status != 'CANCELLED' LIMIT 1/,
-    "auto-on-delivery used to count a CANCELLED invoice as 'already invoiced', so a voided DO " +
-      "went permanently silent on that path",
+    /const billing = await loadDoBillingState\(db, doRow\.id\)/,
+    "the auto-on-delivery cascade must gate on the derived billed state",
+  );
+  assert.match(
+    DO_HELPERS,
+    /if \(!billing\.fullyInvoiced &&/,
+    "…and skip only when there is genuinely nothing left to bill",
   );
   assert.match(
     INV,
-    /SELECT id, invoiceNo FROM invoices WHERE deliveryOrderId = \? AND status != 'CANCELLED' LIMIT 1/,
-    "the manual path already excluded CANCELLED — the two must agree",
+    /const billing = await loadDoBillingState\(c\.var\.DB, deliveryOrderId\)/,
+    "the manual POST must gate on the same read",
+  );
+  const CHAIN = read("src/api/lib/do-partial-invoice.ts");
+  assert.match(
+    CHAIN,
+    /WHERE deliveryOrderId = \? AND status <> 'CANCELLED'/,
+    "a cancelled invoice bills nobody and must never count as billed",
   );
 });
 
@@ -288,12 +354,29 @@ test("the release rides the same batch as the death, never a separate write", ()
 
 // ── The DB layer must not silently undo the release ────────────────────────
 
-test("the dedupe index covers LIVE invoices only", () => {
-  // If uniq_invoice_active_delivery_order covered cancelled rows too, the
-  // release would be useless: the DO would be DELIVERED but the re-invoice
-  // INSERT would hit a unique violation on the old cancelled row.
-  assert.match(
+test("no DB constraint silently undoes the release", () => {
+  // The original hazard: uniq_invoice_active_delivery_order. If it had covered
+  // cancelled rows too, the release would be useless — the DO would read
+  // DELIVERED but the re-invoice INSERT would hit a unique violation on the old
+  // cancelled row. It was partial, so it did not.
+  //
+  // 2026-08-07 that index is GONE (a delivery may now carry several live
+  // invoices) and the storage-layer guard is the per-line ceiling instead. The
+  // hazard it has to avoid is the same one: nothing at the DB layer may block a
+  // legitimate re-invoice after a death. A released quantity is decremented, so
+  // the ceiling has room again by construction — and the drop must actually
+  // ship, or the FIRST re-invoice fails with a duplicate key.
+  const CHAIN = read("src/api/lib/do-partial-invoice.ts");
+  assert.match(CHAIN, /DROP INDEX IF EXISTS uniq_invoice_active_delivery_order/);
+  assert.doesNotMatch(
     INV,
-    /CREATE UNIQUE INDEX IF NOT EXISTS uniq_invoice_active_delivery_order\s*\n\s*ON invoices \(delivery_order_id\)\s*\n\s*WHERE status <> 'CANCELLED' AND delivery_order_id IS NOT NULL/,
+    /CREATE UNIQUE INDEX IF NOT EXISTS uniq_invoice_active_delivery_order/,
+    "nothing may re-create the retired index after the drop",
+  );
+  assert.match(
+    CHAIN,
+    /CHECK \(invoiced_qty >= 0 AND invoiced_qty <= quantity\)/,
+    "its replacement guards the invariant that actually matters: never bill " +
+      "more than was delivered",
   );
 });

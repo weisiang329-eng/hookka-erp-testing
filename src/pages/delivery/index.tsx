@@ -188,6 +188,35 @@ type DOStatus =
   // reachable from every live status and is terminal.
   | "CANCELLED";
 
+// One delivery line as GET /api/delivery-orders/:id/billable-lines reports it:
+// what was delivered, how much of it is already on an invoice, and what is
+// left. `remainingQty` is the ceiling the picker enforces — the backend
+// enforces it again (over-drawing is a 409, never a silent clamp).
+type BillableLine = {
+  id: string;
+  productCode: string;
+  productName: string;
+  sizeLabel: string;
+  fabricCode: string;
+  quantity: number;
+  invoicedQty: number;
+  remainingQty: number;
+};
+
+type BillableLinesResponse = {
+  doNo: string;
+  status: string;
+  lines: BillableLine[];
+  totalQty: number;
+  invoicedQty: number;
+  remainingQty: number;
+  fullyInvoiced: boolean;
+  liveInvoiceCount: number;
+  legacyInvoiceNo: string | null;
+  /** Non-null ⇒ this delivery cannot be billed again; the text says why. */
+  refusal: string | null;
+};
+
 type DOItem = {
   id: string;
   productionOrderId: string;
@@ -921,6 +950,15 @@ export default function DeliveryPage() {
   const [invoiceDialog, setInvoiceDialog] = useState<DeliveryOrderRow | null>(null);
   const [podDialog, setPodDialog] = useState<DeliveryOrderRow | null>(null);
   const [invoiceLoading, setInvoiceLoading] = useState(false);
+  // Partial billing (2026-08-07). One delivery order can be billed by several
+  // invoices, so "Transfer to Invoice" is no longer a yes/no — the operator
+  // picks WHICH lines and HOW MUCH of each. This is the state behind that
+  // picker: what the backend says is still un-invoiced, and what was ticked.
+  const [invoiceLines, setInvoiceLines] = useState<BillableLine[] | null>(null);
+  const [invoiceLinesLoading, setInvoiceLinesLoading] = useState(false);
+  const [invoiceLinesError, setInvoiceLinesError] = useState<string | null>(null);
+  // doItemId -> quantity to bill on this invoice. Absent / 0 = not billed now.
+  const [invoicePick, setInvoicePick] = useState<Record<string, number>>({});
   // DO id whose customer invoice email is currently being re-sent (Feature A:
   // per-DO Resend). Drives the spinner + disables the Resend button.
   const [resendingId, setResendingId] = useState<string | null>(null);
@@ -3077,8 +3115,46 @@ export default function DeliveryPage() {
     }
   };
 
-  const handleGenerateInvoice = (doRow: DeliveryOrderRow) => {
+  const handleGenerateInvoice = async (doRow: DeliveryOrderRow) => {
     setInvoiceDialog(doRow);
+    setInvoiceLines(null);
+    setInvoicePick({});
+    setInvoiceLinesError(null);
+    setInvoiceLinesLoading(true);
+    try {
+      const r = await fetch(
+        `/api/delivery-orders/${doRow.id}/billable-lines?_v=${Date.now()}`,
+        { credentials: "include", cache: "no-store" },
+      );
+      const j = (await r.json()) as {
+        success?: boolean;
+        error?: string;
+        data?: BillableLinesResponse;
+      };
+      if (!r.ok || !j.success || !j.data) {
+        setInvoiceLinesError(j.error || `Couldn't read what is left to invoice (HTTP ${r.status}).`);
+        return;
+      }
+      // A legacy whole-document invoice owns the delivery outright — there is
+      // nothing to pick, and the backend would refuse. Say so up front.
+      if (j.data.refusal) {
+        setInvoiceLinesError(j.data.refusal);
+        setInvoiceLines(j.data.lines);
+        return;
+      }
+      setInvoiceLines(j.data.lines);
+      // Default: bill everything that is left. The common case is one whole
+      // invoice per delivery, and it should still be one click.
+      const preset: Record<string, number> = {};
+      for (const l of j.data.lines) {
+        if (l.remainingQty > 0) preset[l.id] = l.remainingQty;
+      }
+      setInvoicePick(preset);
+    } catch {
+      setInvoiceLinesError("Couldn't reach the server. Check your connection and try again.");
+    } finally {
+      setInvoiceLinesLoading(false);
+    }
   };
 
   const handleSubmitPOD = async (pod: ProofOfDelivery) => {
@@ -3135,8 +3211,23 @@ export default function DeliveryPage() {
     }
   };
 
+  // How much this invoice bills, and whether that is the LAST of the delivery.
+  // Both are needed before the request: the readback expectation differs (a
+  // partial bill must leave the DO at DELIVERED), and so does the message.
+  const invoicePickedQty = Object.values(invoicePick).reduce(
+    (n, q) => n + (Number(q) || 0),
+    0,
+  );
+  const invoiceRemainingQty = (invoiceLines ?? []).reduce(
+    (n, l) => n + l.remainingQty,
+    0,
+  );
+
   const confirmGenerateInvoice = async () => {
     if (!invoiceDialog) return;
+    const pickedQty = invoicePickedQty;
+    const billsEverythingLeft =
+      invoiceLines === null || pickedQty >= invoiceRemainingQty;
     setInvoiceLoading(true);
     // verifiedSave (2026-06-09): the old handler did `catch { /* ignore */ }`,
     // so a failed invoice creation closed the dialog with NO error — the
@@ -3145,14 +3236,27 @@ export default function DeliveryPage() {
     // read the DO back with a cache-bust and confirm; a 200 that didn't persist
     // (stale snapshot / half-write) or any failure now tells the operator
     // honestly instead of silently. Mirrors the POD / driver handlers above.
+    // The lines this invoice bills. Omitting `lines` means "everything still
+    // un-invoiced", which is what the preset already is — but we send it
+    // explicitly so what the operator SAW ticked is exactly what is charged.
+    const pickedLines = Object.entries(invoicePick)
+      .map(([deliveryOrderItemId, quantity]) => ({ deliveryOrderItemId, quantity }))
+      .filter((l) => l.quantity > 0);
+    // deliveryOrderId (2026-08-07): this body never carried it, and the
+    // backend requires it — so "Transfer to Invoice" answered 400 every time.
+    // The only reason it was not noticed is that the DELIVERED cascade
+    // auto-creates the invoice, so the button was rarely the path that had to
+    // work.
     const result = await verifiedSave<{ status?: string | null }>({
       endpoint: "/api/invoices",
       method: "POST",
       body: {
+        deliveryOrderId: invoiceDialog.id,
         salesOrderId: invoiceDialog.salesOrderId,
         doNo: invoiceDialog.doNo,
         customerId: invoiceDialog.customerId,
         customerName: invoiceDialog.customerName,
+        lines: pickedLines,
       },
       readback: async () => {
         const r = await fetch(
@@ -3165,7 +3269,10 @@ export default function DeliveryPage() {
           | { status?: string | null };
         return (j as { data?: { status?: string | null } }).data ?? (j as { status?: string | null });
       },
-      expect: { status: "INVOICED" },
+      // A PARTIAL bill deliberately leaves the DO at DELIVERED so the rest can
+      // still be invoiced — only the last slice flips it to INVOICED. Accept
+      // either; `billsEverythingLeft` below decides what we then show.
+      expect: { status: billsEverythingLeft ? "INVOICED" : ["DELIVERED", "INVOICED"] },
     });
     setInvoiceLoading(false);
     if (!result.ok) {
@@ -3193,17 +3300,24 @@ export default function DeliveryPage() {
     invalidateCachePrefix("/api/invoices");
     invalidateCachePrefix("/api/sales-orders");
     invalidateCachePrefix("/api/delivery-orders");
-    setDeliveryOrders((prev) =>
-      prev.map((d) =>
-        d.id === invoiceDialog.id && d.status === "DELIVERED"
-          ? { ...d, status: "INVOICED" as DOStatus }
-          : d
-      )
-    );
-    if (detailDO?.id === invoiceDialog.id) {
-      setDetailDO({ ...invoiceDialog, status: "INVOICED" });
+    if (billsEverythingLeft) {
+      setDeliveryOrders((prev) =>
+        prev.map((d) =>
+          d.id === invoiceDialog.id && d.status === "DELIVERED"
+            ? { ...d, status: "INVOICED" as DOStatus }
+            : d
+        )
+      );
+      if (detailDO?.id === invoiceDialog.id) {
+        setDetailDO({ ...invoiceDialog, status: "INVOICED" });
+      }
+      toast.success("Invoice generated");
+    } else {
+      const left = (invoiceLines ?? []).reduce((n, l) => n + l.remainingQty, 0) - pickedQty;
+      toast.success(
+        `Invoice generated for ${pickedQty} unit(s) — ${left} still un-invoiced on ${invoiceDialog.doNo}`,
+      );
     }
-    toast.success("Invoice generated");
     // Feature B — the DELIVERED→INVOICED flip fires the customer invoice notice
     // on the backend choke-point; if the customer has no email on file nothing
     // was emailed, so warn the operator (non-blocking).
@@ -5684,10 +5798,10 @@ export default function DeliveryPage() {
       {invoiceDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/40" onClick={() => !invoiceLoading && setInvoiceDialog(null)} />
-          <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-lg mx-4 border border-[#E2DDD8]">
+          <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 border border-[#E2DDD8] max-h-[90vh] overflow-y-auto">
             <div className="px-6 py-4 border-b border-[#E2DDD8]">
               <h2 className="text-lg font-bold text-[#1F1D1B]">Transfer to Sales Invoice</h2>
-              <p className="text-xs text-[#6B7280]">Create sales invoice from delivered DO</p>
+              <p className="text-xs text-[#6B7280]">Pick the delivered lines this invoice bills — the rest can be invoiced later</p>
             </div>
             <div className="px-6 py-5 space-y-4">
               <div className="grid grid-cols-2 gap-3 text-sm max-sm:grid-cols-1">
@@ -5716,13 +5830,133 @@ export default function DeliveryPage() {
                   <p className="font-medium">{invoiceDialog.receivedDate ? formatDate(invoiceDialog.receivedDate) : "-"}</p>
                 </div>
               </div>
+              {/* ---- Which lines, and how much of each ---------------------
+                  A delivery can be billed by several invoices, so the operator
+                  picks. Defaults to everything still un-invoiced, which keeps
+                  the ordinary one-invoice-per-delivery case a single click. */}
+              {invoiceLinesLoading && (
+                <p className="text-xs text-[#6B7280] flex items-center gap-2">
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin" /> Reading what is still un-invoiced...
+                </p>
+              )}
+              {invoiceLinesError && (
+                <div className="bg-[#FBEAEA] border border-[#E9B7B7] rounded-lg p-3">
+                  <p className="text-xs text-[#A33A3A]">{invoiceLinesError}</p>
+                </div>
+              )}
+              {!invoiceLinesLoading && !invoiceLinesError && invoiceLines && (
+                <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
+                  <div className="flex items-center justify-between px-3 py-2 bg-[#F7F5F3] border-b border-[#E2DDD8]">
+                    <p className="text-xs font-medium text-[#1F1D1B]">Lines to invoice</p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        className="text-xs text-[#6B5C32] hover:underline cursor-pointer"
+                        onClick={() => {
+                          const all: Record<string, number> = {};
+                          for (const l of invoiceLines) if (l.remainingQty > 0) all[l.id] = l.remainingQty;
+                          setInvoicePick(all);
+                        }}
+                      >
+                        Select all
+                      </button>
+                      <span className="text-[#D8D2CC]">|</span>
+                      <button
+                        type="button"
+                        className="text-xs text-[#6B5C32] hover:underline cursor-pointer"
+                        onClick={() => setInvoicePick({})}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+                  <div className="max-h-64 overflow-y-auto divide-y divide-[#F0ECE9]">
+                    {invoiceLines.map((l) => {
+                      const picked = invoicePick[l.id] ?? 0;
+                      const exhausted = l.remainingQty <= 0;
+                      return (
+                        <div
+                          key={l.id}
+                          className={`flex items-center gap-3 px-3 py-2 text-sm ${exhausted ? "opacity-50" : ""}`}
+                        >
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 cursor-pointer accent-[#6B5C32]"
+                            disabled={exhausted}
+                            checked={picked > 0}
+                            onChange={(e) =>
+                              setInvoicePick((prev) => {
+                                const next = { ...prev };
+                                if (e.target.checked) next[l.id] = l.remainingQty;
+                                else delete next[l.id];
+                                return next;
+                              })
+                            }
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p className="font-medium font-mono text-xs truncate">{l.productCode || "-"}</p>
+                            <p className="text-[11px] text-[#6B7280] truncate">
+                              {[l.productName, l.sizeLabel, l.fabricCode].filter(Boolean).join(" · ") || "-"}
+                            </p>
+                          </div>
+                          <div className="text-right text-[11px] text-[#6B7280] whitespace-nowrap">
+                            <p>Delivered {l.quantity}</p>
+                            <p>
+                              {l.invoicedQty > 0 ? `Already billed ${l.invoicedQty} · ` : ""}
+                              Left {l.remainingQty}
+                            </p>
+                          </div>
+                          <input
+                            type="number"
+                            min={0}
+                            max={l.remainingQty}
+                            step={1}
+                            disabled={exhausted}
+                            value={picked}
+                            onChange={(e) => {
+                              const raw = Math.round(Number(e.target.value) || 0);
+                              // Clamp to what is actually left — the backend
+                              // refuses an over-draw with a 409, and letting the
+                              // operator type a number that will be rejected is
+                              // just a slower way to say no.
+                              const q = Math.max(0, Math.min(l.remainingQty, raw));
+                              setInvoicePick((prev) => {
+                                const next = { ...prev };
+                                if (q > 0) next[l.id] = q;
+                                else delete next[l.id];
+                                return next;
+                              });
+                            }}
+                            className="w-16 rounded-md border border-[#E2DDD8] px-2 py-1 text-sm text-right"
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="px-3 py-2 bg-[#F7F5F3] border-t border-[#E2DDD8] text-xs text-[#6B7280]">
+                    Billing {invoicePickedQty} of {invoiceRemainingQty} un-invoiced unit(s).
+                    {invoicePickedQty > 0 && invoicePickedQty < invoiceRemainingQty
+                      ? " The rest stays on this delivery order and can be invoiced separately."
+                      : ""}
+                  </div>
+                </div>
+              )}
               <div className="bg-[#EEF3E4] border border-[#C6DBA8] rounded-lg p-3">
                 <p className="text-xs text-[#4F7C3A]">DO has been signed back and confirmed delivered. A sales invoice will be created with the delivery details.</p>
               </div>
             </div>
             <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-end gap-2">
               <Button variant="outline" onClick={() => setInvoiceDialog(null)} disabled={invoiceLoading}>Cancel</Button>
-              <Button variant="primary" onClick={confirmGenerateInvoice} disabled={invoiceLoading}>
+              <Button
+                variant="primary"
+                onClick={confirmGenerateInvoice}
+                disabled={
+                  invoiceLoading ||
+                  invoiceLinesLoading ||
+                  invoiceLinesError !== null ||
+                  invoicePickedQty <= 0
+                }
+              >
                 {invoiceLoading ? (
                   <><RefreshCw className="h-4 w-4 animate-spin" /> Creating...</>
                 ) : (

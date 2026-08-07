@@ -43,6 +43,11 @@ import {
   groupPosByCustomerHub,
   projectCreditFailure,
 } from "../lib/pl-first-grouping";
+import {
+  ensureDoPartialInvoiceColumns,
+  loadDoBillingState,
+  doBillingRefusal,
+} from "../lib/do-partial-invoice";
 // Server-side render of the SAME unified DO / Invoice the FE downloads and
 // e-mails. Workers-pure (pdf-lib), so the pure-backend notice path (a
 // transition with no client render) produces the identical document instead
@@ -2779,6 +2784,52 @@ app.get("/:id/qr-token", async (c) => {
       token,
       url: qrScanUrl(new URL(c.req.url).origin, token),
       doNo: exists.doNo,
+    },
+  });
+});
+
+// GET /api/delivery-orders/:id/billable-lines — what is still un-invoiced.
+//
+// One delivery order can now be billed by SEVERAL invoices (2026-08-07), which
+// means "Transfer to Invoice" can no longer just say "create the invoice" — the
+// operator has to be able to see, and pick, WHAT is left. This is the read
+// behind that dialog: every line with its delivered quantity, how much of it is
+// already billed, and what remains.
+//
+// Registered BEFORE /:id (Hono matches in order).
+app.get("/:id/billable-lines", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "read");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  const doRow = await c.var.DB.prepare(
+    "SELECT id, doNo, status FROM delivery_orders WHERE id = ?",
+  )
+    .bind(id)
+    .first<{ id: string; doNo: string; status: string }>();
+  if (!doRow) {
+    return c.json({ success: false, error: "Delivery order not found" }, 404);
+  }
+  // The read has to self-apply too: this is the first thing the invoice dialog
+  // touches, and on a deployment where nothing has invoiced yet the columns
+  // would not exist. Migration files are inert here (CLAUDE.md).
+  await ensureDoPartialInvoiceColumns(c.var.DB);
+  const st = await loadDoBillingState(c.var.DB, id);
+  return c.json({
+    success: true,
+    data: {
+      doNo: doRow.doNo,
+      status: doRow.status,
+      lines: st.lines,
+      totalQty: st.totalQty,
+      invoicedQty: st.invoicedQty,
+      remainingQty: st.remainingQty,
+      fullyInvoiced: st.fullyInvoiced,
+      liveInvoiceCount: st.liveInvoiceCount,
+      // Present ⇒ this delivery predates per-line billing and is owned whole by
+      // that one invoice. The dialog says so instead of offering a picker that
+      // could not be honoured.
+      legacyInvoiceNo: st.legacyInvoice?.invoiceNo ?? null,
+      refusal: doBillingRefusal(doRow.doNo, st),
     },
   });
 });

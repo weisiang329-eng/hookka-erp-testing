@@ -47,6 +47,20 @@ import { readGstRatePct } from "../lib/note-ledger";
 import { ensureInvoicePoLinkColumn, readInvoiceItemPoLink } from "../lib/invoice-po-link";
 import { matchInvoiceLinesToDoLines, type BackfillInvLine, type BackfillDoLine } from "../../lib/invoice-po-backfill";
 import { compareDoLinesByCustomerPO } from "../../lib/do-item-order";
+// The sales-side convert chain — per-line consumed counters on
+// delivery_order_items + the DO-line link on invoice_items, so one delivery
+// order can be billed by several invoices and every draw-down has its paired
+// restore. Arithmetic lives in src/lib/convert-chain.ts (shared with
+// purchasing); the DB half is src/api/lib/do-partial-invoice.ts.
+import {
+  ensureDoPartialInvoiceColumns,
+  loadDoBillingState,
+  doBillingRefusal,
+  buildDrawdownStatements,
+  buildInvoiceLineReleaseStatements,
+  buildDoStatusSyncStatement,
+} from "../lib/do-partial-invoice";
+import type { DoDraw } from "../lib/do-partial-invoice";
 
 const app = new Hono<Env>();
 
@@ -1476,33 +1490,23 @@ function rowToNoteLink(r: NoteLinkRow) {
   };
 }
 
-// A BOOLEAN, not the promise. This one guards a RACE (two concurrent creates
-// both passing the application check), so an isolate that quietly remembers a
-// failed CREATE INDEX as done is exactly the isolate where the duplicate slips
-// through. Flag set on success only.
-let _invDedupeIndexMig = false;
-async function ensureInvoiceDedupeIndex(db: D1Database): Promise<void> {
-  if (_invDedupeIndexMig) return;
-  try {
-    await db
-      .prepare(
-        `CREATE UNIQUE INDEX IF NOT EXISTS uniq_invoice_active_delivery_order
-           ON invoices (delivery_order_id)
-           WHERE status <> 'CANCELLED' AND delivery_order_id IS NOT NULL`,
-      )
-      .run();
-    _invDedupeIndexMig = true;
-  } catch {
-    /* transient — leave the flag unset so the next request retries */
-  }
-}
+// uniq_invoice_active_delivery_order is GONE (2026-08-07). It enforced "one
+// delivery order has at most ONE active invoice" at the storage layer — which
+// is precisely what one-DO-many-invoices has to undo. Its job (stopping a
+// concurrent double-create, BUG-2026-07-14-006) is now done by the CHECK
+// constraint `chk_doi_invoiced_qty` on delivery_order_items: the race worth
+// guarding is no longer "two invoices exist" but "two concurrent bills that
+// together draw more than the delivery delivered", and the CHECK makes the
+// second batch fail rather than over-bill the customer. Both the index DROP
+// and the CHECK live in ensureDoPartialInvoiceColumns
+// (src/api/lib/do-partial-invoice.ts) so they can never be applied apart.
 
 app.post("/", async (c) => {
   // RBAC gate (P3.3-followup) — invoices:create.
   const denied = await requirePermission(c, "invoices", "create");
   if (denied) return denied;
   await ensureDiscountColumn(c.var.DB);
-  await ensureInvoiceDedupeIndex(c.var.DB);
+  await ensureDoPartialInvoiceColumns(c.var.DB);
   // Sprint 3 #4 — idempotency. POSTing an invoice for the same DO twice
   // produces two distinct invoice rows today (the only guard is DO status
   // = DELIVERED, which the first request flips to INVOICED — but the
@@ -1568,24 +1572,27 @@ app.post("/", async (c) => {
         400,
       );
     }
-    // Double-invoice guard (2026-07-14). Root cause of the 64-DO / 77-extra
-    // duplicate-invoice bug: the DO-status check alone is racy (wide read→write
-    // window) and does not cover the case where a prior invoice did not flip the
-    // DO to INVOICED. The auto-invoice-on-delivery path already guards this way;
-    // the manual POST did not. Block if a NON-CANCELLED invoice already exists
-    // for this DO (a CANCELLED one is fine — legitimate re-invoice after a void).
-    const existingDoInvoice = await c.var.DB.prepare(
-      "SELECT id, invoiceNo FROM invoices WHERE deliveryOrderId = ? AND status != 'CANCELLED' LIMIT 1",
-    )
-      .bind(deliveryOrderId)
-      .first<{ id: string; invoiceNo: string }>();
-    if (existingDoInvoice) {
+    // Double-invoice guard (2026-07-14, re-based on the per-line counters
+    // 2026-08-07). Root cause of the 64-DO / 77-extra duplicate-invoice bug:
+    // the DO-status check alone is racy (wide read→write window) and does not
+    // cover the case where a prior invoice did not flip the DO to INVOICED.
+    //
+    // The question it asks is now "is there anything LEFT to bill", not "does
+    // an invoice exist" — a delivery may legitimately carry several invoices,
+    // one per part of it. loadDoBillingState answers with Σ invoiced_qty vs
+    // Σ quantity, and separately reports a LEGACY whole-document invoice (one
+    // whose lines predate the per-line link). A legacy invoice still means
+    // "fully billed", so every delivery order in today's book keeps behaving
+    // exactly as it does today and nothing becomes newly re-billable.
+    const billing = await loadDoBillingState(c.var.DB, deliveryOrderId);
+    const refusal = doBillingRefusal(doRow.doNo, billing);
+    if (refusal) {
       return c.json(
         {
           success: false,
-          error: `This delivery order is already invoiced (${existingDoInvoice.invoiceNo}). Cancel that invoice before re-invoicing.`,
-          existingInvoiceId: existingDoInvoice.id,
-          existingInvoiceNo: existingDoInvoice.invoiceNo,
+          error: refusal,
+          existingInvoiceId: billing.legacyInvoice?.id ?? null,
+          existingInvoiceNo: billing.legacyInvoice?.invoiceNo ?? null,
         },
         409,
       );
@@ -1620,11 +1627,56 @@ app.post("/", async (c) => {
       doRow.id,
       doRow.salesOrderId,
     );
-    const { invItems, computedTotal } = await computeDoInvoiceLines(
+    // WHICH lines / quantities this invoice bills. Omit `lines` and it bills
+    // everything still un-invoiced — the behaviour every existing caller (and
+    // the auto-on-delivery cascade) relies on, and identical to today on a
+    // fresh delivery. Send `lines` and the operator's own pick wins.
+    const requestedLines: DoDraw[] | null = Array.isArray(body.lines)
+      ? (body.lines as Array<Record<string, unknown>>)
+          .map((l) => ({
+            deliveryOrderItemId: String(
+              l.deliveryOrderItemId ?? l.delivery_order_item_id ?? "",
+            ),
+            quantity: Math.max(0, Math.round(Number(l.quantity) || 0)),
+          }))
+          .filter((l) => l.deliveryOrderItemId && l.quantity > 0)
+      : null;
+    if (requestedLines && requestedLines.length === 0) {
+      return c.json(
+        {
+          success: false,
+          error:
+            "Pick at least one line (and a quantity above zero) to invoice.",
+        },
+        400,
+      );
+    }
+    const { invItems, computedTotal, draws } = await computeDoInvoiceLines(
       c.var.DB,
       doRow.id,
       soIdsForInvoice,
+      requestedLines,
     );
+    if (invItems.length === 0 && computedTotal === 0) {
+      return c.json(
+        {
+          success: false,
+          error: `Nothing to invoice on ${doRow.doNo} — the lines you picked are already billed. Reload the delivery order to see what is left.`,
+        },
+        409,
+      );
+    }
+    // Over-draw guard + the draw-down statements, from the SAME seam the
+    // purchasing chain uses. computeDoInvoiceLines already clamps to the
+    // remainder, so a rejection here means the picker was stale — say so with
+    // the numbers rather than silently billing a different amount.
+    const drawn = buildDrawdownStatements(c.var.DB, billing, draws);
+    if (!drawn.ok) {
+      return c.json({ success: false, error: drawn.error }, 409);
+    }
+    const drawnQty = draws.reduce((n, d) => n + d.quantity, 0);
+    const fullyBilledAfter =
+      draws.length === 0 || billing.remainingQty - drawnQty <= 0;
     const items = invItems;
     const subtotalSen = computedTotal;
     // Phase 2 (2026-06) — SST billed to the customer: tax is computed ONCE
@@ -1688,8 +1740,9 @@ app.post("/", async (c) => {
         c.var.DB.prepare(
           `INSERT INTO invoice_items (
              id, invoiceId, productCode, productName, sizeLabel, fabricCode,
-             quantity, unitPriceSen, discountSen, totalSen
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             quantity, unitPriceSen, discountSen, totalSen,
+             production_order_id, delivery_order_item_id
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           item.id,
           id,
@@ -1702,12 +1755,18 @@ app.post("/", async (c) => {
           // Auto-created invoices (from DO) carry no discount by default.
           0,
           item.totalSen,
+          // BUG-2026-07-17-001 — the manual create path dropped this link the
+          // auto path already carried, so a hand-raised invoice went back to
+          // guessing the customer PO by product code at print time.
+          item.productionOrderId,
+          // The convert-chain link. Without it this invoice reads as a legacy
+          // whole-document bill and locks the delivery order to itself.
+          item.deliveryOrderItemId,
         ),
       ),
-      // Flip DO to INVOICED in the same batch so we roll back together.
-      c.var.DB.prepare(
-        `UPDATE delivery_orders SET status = 'INVOICED', overdue = 'INVOICED', updated_at = ? WHERE id = ?`,
-      ).bind(now, doRow.id),
+      // Draw the billed quantity down on each DO line, same batch as the
+      // invoice — build and consume are one decision.
+      ...drawn.statements,
       // Phase 2 (2026-06) — closes a long-noted gap: the auto-created
       // invoice (delivery-orders.ts) bumped customers.outstandingSen on
       // create but this manual path never did, so manually-invoiced
@@ -1718,6 +1777,19 @@ app.post("/", async (c) => {
         `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`,
       ).bind(totalSen, doRow.customerId),
     ];
+
+    // Flip the DO to INVOICED only when this invoice bills the LAST of it.
+    // The flag is no longer the source of truth (Σ invoiced_qty vs Σ quantity
+    // is), but it greys the "Transfer to Invoice" button and gates this very
+    // handler — so a half-billed delivery that flipped to INVOICED could never
+    // be finished. Same batch, so it rolls back with the invoice.
+    if (fullyBilledAfter) {
+      statements.push(
+        c.var.DB.prepare(
+          `UPDATE delivery_orders SET status = 'INVOICED', overdue = 'INVOICED', updated_at = ? WHERE id = ?`,
+        ).bind(now, doRow.id),
+      );
+    }
 
     try {
       await c.var.DB.batch(statements);
@@ -1730,6 +1802,21 @@ app.post("/", async (c) => {
       // 409 the guard returns, pointing at the invoice that won the race —
       // instead of a raw 500. Any other batch failure re-throws.
       const m = batchErr instanceof Error ? batchErr.message : String(batchErr);
+      // chk_doi_invoiced_qty is the storage-layer backstop that replaced the
+      // old uniq_invoice_active_delivery_order index: a concurrent bill that
+      // together with ours draws more than the delivery delivered fails HERE.
+      // Turn it into the same graceful 409 the guard above returns, with the
+      // now-current numbers, instead of a raw 500.
+      if (/chk_doi_invoiced_qty|check constraint/i.test(m)) {
+        const fresh = await loadDoBillingState(c.var.DB, deliveryOrderId);
+        return c.json(
+          {
+            success: false,
+            error: `Another invoice billed part of ${doRow.doNo} while this one was being raised — only ${fresh.remainingQty} unit(s) are still un-invoiced. Reload the delivery order and pick again.`,
+          },
+          409,
+        );
+      }
       if (/uniq_invoice_active_delivery_order|duplicate key|23505/i.test(m)) {
         const existing = await c.var.DB
           .prepare(
@@ -2049,12 +2136,71 @@ app.put("/:id", async (c) => {
           409,
         );
       }
+      await ensureDoPartialInvoiceColumns(c.var.DB);
+      // Removing a line from a DRAFT invoice must GIVE THE QUANTITY BACK — the
+      // same release discipline the purchasing chain has (a PI edit hands the
+      // GRN line's invoiced_qty back before the new lines re-consume). Without
+      // it, deleting a line off a draft would leave that delivery quantity
+      // consumed by an invoice that no longer charges for it, and nobody could
+      // ever bill it again.
+      //
+      // Shape: release the WHOLE old line set, then re-consume what survives.
+      // Net-delta arithmetic would be equivalent but has two failure modes this
+      // does not — a line that changed which DO line it points at, and a line
+      // dropped entirely. Release-then-reconsume is the same order the void /
+      // delete path uses, so there is one rule.
+      const oldLinksRes = await c.var.DB.prepare(
+        `SELECT id, delivery_order_item_id AS "deliveryOrderItemId",
+                production_order_id AS "productionOrderId", quantity
+           FROM invoice_items WHERE invoiceId = ?`,
+      )
+        .bind(id)
+        .all<{
+          id: string;
+          deliveryOrderItemId?: string | null;
+          delivery_order_item_id?: string | null;
+          productionOrderId?: string | null;
+          production_order_id?: string | null;
+          quantity: number;
+        }>();
+      const oldRows = oldLinksRes.results ?? [];
+      const oldLinkById = new Map(
+        oldRows.map((r) => [
+          String(r.id),
+          {
+            doItemId: r.deliveryOrderItemId ?? r.delivery_order_item_id ?? null,
+            poId: r.productionOrderId ?? r.production_order_id ?? null,
+          },
+        ]),
+      );
+      const releasedByLine = new Map<string, number>();
+      for (const r of oldRows) {
+        const k = r.deliveryOrderItemId ?? r.delivery_order_item_id ?? null;
+        if (!k) continue;
+        releasedByLine.set(
+          String(k),
+          (releasedByLine.get(String(k)) ?? 0) + (Number(r.quantity) || 0),
+        );
+      }
+      statements.push(...(await buildInvoiceLineReleaseStatements(c.var.DB, id)));
+
       statements.push(
         c.var.DB.prepare(
           "DELETE FROM invoice_items WHERE invoiceId = ?",
         ).bind(id),
       );
       let computedSubtotal = 0;
+      const reconsume: DoDraw[] = [];
+      const newRows: Array<{
+        id: string;
+        doItemId: string | null;
+        poId: string | null;
+        quantity: number;
+        unitPriceSen: number;
+        discountSen: number;
+        totalSen: number;
+        raw: Record<string, unknown>;
+      }> = [];
       for (const raw of body.items as Array<Record<string, unknown>>) {
         const quantity = Number(raw.quantity) || 0;
         const unitPriceSen = Number(raw.unitPriceSen) || 0;
@@ -2065,25 +2211,111 @@ app.put("/:id", async (c) => {
         // Line total = max(0, qty × unitPrice − discount).
         const totalSen = Math.max(0, unitPriceSen * quantity - discountSen);
         computedSubtotal += totalSen;
+        const rowId = (raw.id as string) || genInvoiceItemId();
+        const prior = oldLinkById.get(rowId);
+        // The links are carried across the replacement. A caller that echoes
+        // the rows back unchanged keeps them implicitly; one that omits them
+        // inherits from the row it is replacing. Dropping them here is what
+        // used to turn an edited invoice into a link-less legacy bill (and,
+        // before that, cost the printout its customer PO — BUG-2026-07-17-001).
+        const doItemId =
+          (raw.deliveryOrderItemId as string | undefined) ??
+          prior?.doItemId ??
+          null;
+        const poId =
+          (raw.productionOrderId as string | undefined) ?? prior?.poId ?? null;
+        if (doItemId && quantity > 0) {
+          reconsume.push({ deliveryOrderItemId: doItemId, quantity });
+        }
+        newRows.push({
+          id: rowId,
+          doItemId,
+          poId,
+          quantity,
+          unitPriceSen,
+          discountSen,
+          totalSen,
+          raw,
+        });
+      }
+
+      // Can the surviving lines still be covered? Project each DO line's
+      // consumption as (current − what THIS invoice is handing back) and check
+      // the new draw against that. A line another invoice claimed while this
+      // draft sat open is refused with the numbers, not silently trimmed.
+      if (reconsume.length > 0) {
+        const st = await loadDoBillingState(
+          c.var.DB,
+          existing.deliveryOrderId ?? "",
+        );
+        const projected = {
+          ...st,
+          lines: st.lines.map((l) => {
+            const back = releasedByLine.get(l.id) ?? 0;
+            const invoicedQty = Math.max(0, l.invoicedQty - back);
+            return {
+              ...l,
+              invoicedQty,
+              remainingQty: Math.max(0, l.quantity - invoicedQty),
+            };
+          }),
+        };
+        const redraw = buildDrawdownStatements(c.var.DB, projected, reconsume);
+        if (!redraw.ok) {
+          return c.json({ success: false, error: redraw.error }, 409);
+        }
+        statements.push(...redraw.statements);
+      }
+
+      for (const r of newRows) {
         statements.push(
           c.var.DB.prepare(
             `INSERT INTO invoice_items (
                id, invoiceId, productCode, productName, sizeLabel, fabricCode,
-               quantity, unitPriceSen, discountSen, totalSen
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               quantity, unitPriceSen, discountSen, totalSen,
+               production_order_id, delivery_order_item_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
-            (raw.id as string) || genInvoiceItemId(),
+            r.id,
             id,
-            (raw.productCode as string) ?? "",
-            (raw.productName as string) ?? "",
-            (raw.sizeLabel as string) ?? "",
-            (raw.fabricCode as string) ?? "",
-            quantity,
-            unitPriceSen,
-            discountSen,
-            totalSen,
+            (r.raw.productCode as string) ?? "",
+            (r.raw.productName as string) ?? "",
+            (r.raw.sizeLabel as string) ?? "",
+            (r.raw.fabricCode as string) ?? "",
+            r.quantity,
+            r.unitPriceSen,
+            r.discountSen,
+            r.totalSen,
+            r.poId,
+            r.doItemId,
           ),
         );
+      }
+
+      // And keep the DO's own flag in step with the counters this edit moved.
+      if (existing.deliveryOrderId) {
+        const doNow = await c.var.DB.prepare(
+          "SELECT status FROM delivery_orders WHERE id = ?",
+        )
+          .bind(existing.deliveryOrderId)
+          .first<{ status: string }>();
+        const stAfter = await loadDoBillingState(
+          c.var.DB,
+          existing.deliveryOrderId,
+        );
+        const releasedTotal = [...releasedByLine.values()].reduce((a, b) => a + b, 0);
+        const reconsumedTotal = reconsume.reduce((a, b) => a + b.quantity, 0);
+        const remainingAfter =
+          stAfter.remainingQty + releasedTotal - reconsumedTotal;
+        const sync = buildDoStatusSyncStatement(
+          c.var.DB,
+          existing.deliveryOrderId,
+          doNow?.status ?? "",
+          stAfter.legacyInvoice !== null ||
+            (stAfter.totalQty > 0 && remainingAfter <= 0),
+          now,
+        );
+        if (sync) statements.push(sync);
       }
       // Phase 2 — re-derive tax with the subtotal (same rule as creation)
       // and keep totalSen GROSS; adjust the customer's outstanding by the

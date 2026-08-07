@@ -47,6 +47,18 @@ import {
 import { HOOKKA_LOGO_PNG_BASE64 } from "../../lib/hookka-logo-base64";
 import { computeInvoicePrintExtras } from "../../lib/invoice-print-extras";
 import { ensureInvoicePoLinkColumn } from "../../lib/invoice-po-link";
+// The sales-side convert chain: per-line consumed counters + the DO-line link
+// on invoice_items, so one delivery order can be billed by several invoices and
+// every increment has its paired restore. See src/api/lib/do-partial-invoice.ts.
+import {
+  ensureDoPartialInvoiceColumns,
+  loadDoBillingState,
+  buildDrawdownStatements,
+  buildInvoiceLineReleaseStatements,
+  buildDoStatusSyncStatement,
+} from "../../lib/do-partial-invoice";
+import type { DoDraw } from "../../lib/do-partial-invoice";
+import { availableQty } from "../../../lib/convert-chain";
 
 // Status transitions allowed by the mock-data impl. Preserved here so the
 // frontend sees identical error messages.
@@ -735,6 +747,20 @@ export async function resolveSalesOrderDoIds(
 //     its delivery orders — a multi-DO SO stays INVOICED on its other DO's
 //     invoice.
 //
+// PARTIAL BILLING (2026-08-07). A dying invoice now also hands back the
+// QUANTITIES it drew: every invoice_items row carrying a delivery_order_item_id
+// decrements that DO line's invoiced_qty (clamped, so a double-restore cannot
+// drive it below 0). This runs FIRST and it runs even when a sibling invoice is
+// still live — that is the whole point of per-line counters. Voiding one of two
+// half-invoices must free ONE half, not nothing and not both.
+//
+// Which is why the "another live invoice → release nothing" shortcut now only
+// governs the STATUS steps. The DO's own status is re-derived from the counters
+// after the release (buildDoStatusSyncStatement), so a delivery that drops from
+// fully-billed back to half-billed returns to DELIVERED and can be finished —
+// while the SO step-back keeps its stricter rule, because an SO with any live
+// invoice against it is genuinely still billed.
+//
 // Returns statements for the caller's batch; never writes on its own, so the
 // release lands atomically with the void/delete that caused it.
 // ---------------------------------------------------------------------------
@@ -753,14 +779,14 @@ export async function buildInvoiceDeathReleaseStatements(
   // No source DO — nothing to release (a DO is what INVOICED was set on).
   if (!doId) return statements;
 
-  // Another live invoice still bills this delivery — it stays INVOICED.
-  const otherLive = await db
-    .prepare(
-      "SELECT id FROM invoices WHERE deliveryOrderId = ? AND id != ? AND status != 'CANCELLED' LIMIT 1",
-    )
-    .bind(doId, args.invoiceId)
-    .first<{ id: string }>();
-  if (otherLive) return statements;
+  await ensureDoPartialInvoiceColumns(db);
+
+  // (1) Give the QUANTITIES back first — unconditionally. Every increment this
+  // invoice made on delivery_order_items.invoiced_qty is paired with its
+  // decrement here, whether or not a sibling invoice survives. A legacy /
+  // fallback invoice drew nothing, so this is a no-op for it.
+  const qtyRelease = await buildInvoiceLineReleaseStatements(db, args.invoiceId);
+  statements.push(...qtyRelease);
 
   const doRow = await db
     .prepare("SELECT id, doNo, status FROM delivery_orders WHERE id = ?")
@@ -770,21 +796,65 @@ export async function buildInvoiceDeathReleaseStatements(
 
   const verb = args.reason === "void" ? "voided" : "deleted";
 
-  // Step the DO back INVOICED → DELIVERED so the grid's "Transfer to Invoice"
-  // button un-greys and POST /api/invoices accepts it again. overdue follows
-  // the same value a real →DELIVERED transition writes ("COMPLETED"), undoing
-  // the "INVOICED" stamp the create path set alongside the status.
-  if (doRow.status === "INVOICED") {
-    statements.push(
-      db
-        .prepare(
-          `UPDATE delivery_orders
-              SET status = 'DELIVERED', overdue = 'COMPLETED', updated_at = ?
-            WHERE id = ? AND status = 'INVOICED'`,
-        )
-        .bind(args.now, doId),
-    );
-  }
+  // (2) Re-derive the DO's own status from the counters AFTER this release.
+  // The flag still greys the "Transfer to Invoice" button and gates
+  // POST /api/invoices, so it has to agree with Σ invoiced_qty vs Σ quantity —
+  // otherwise a delivery that just dropped back to half-billed would sit at
+  // INVOICED with no way to bill the rest.
+  //
+  // The dying invoice is excluded from the legacy/live read by id, so this
+  // works identically for a void (row still non-CANCELLED at read time) and a
+  // DRAFT delete (row about to vanish in the same batch).
+  const billing = await loadDoBillingState(db, doId);
+  const releasedQty = qtyRelease.length
+    ? await (async () => {
+        // Recompute what this invoice is handing back so the projection does
+        // not depend on statement internals.
+        const res = await db
+          .prepare(
+            `SELECT delivery_order_item_id AS "deliveryOrderItemId", quantity
+               FROM invoice_items WHERE invoiceId = ?`,
+          )
+          .bind(args.invoiceId)
+          .all<{
+            deliveryOrderItemId?: string | null;
+            delivery_order_item_id?: string | null;
+            quantity: number;
+          }>();
+        return (res.results ?? []).reduce(
+          (n, r) =>
+            r.deliveryOrderItemId ?? r.delivery_order_item_id
+              ? n + (Number(r.quantity) || 0)
+              : n,
+          0,
+        );
+      })()
+    : 0;
+  // ANOTHER legacy whole-document bill (not the one dying) still owns this
+  // delivery outright — the release must not make it look re-billable.
+  const otherLegacy =
+    billing.legacyInvoices.find((i) => i.id !== args.invoiceId) ?? null;
+  const fullyInvoicedAfter =
+    otherLegacy !== null ||
+    (billing.totalQty > 0 && billing.remainingQty + releasedQty <= 0);
+  const statusSync = buildDoStatusSyncStatement(
+    db,
+    doId,
+    doRow.status,
+    fullyInvoicedAfter,
+    args.now,
+  );
+  if (statusSync) statements.push(statusSync);
+
+  // (3) The SO step-back keeps the stricter rule: an SO with ANY live invoice
+  // against it — through this DO or a sibling — is genuinely still billed.
+  const otherLive = await db
+    .prepare(
+      "SELECT id FROM invoices WHERE deliveryOrderId = ? AND id != ? AND status != 'CANCELLED' LIMIT 1",
+    )
+    .bind(doId, args.invoiceId)
+    .first<{ id: string }>();
+  if (otherLive) return statements;
 
   // And the sales orders the invoice bumped to INVOICED (invoices.ts DRAFT→SENT
   // cascade, and the auto path's soBillable loop). A voided invoice must not
@@ -1188,6 +1258,12 @@ export type InvItem = {
   // wrong customer PO, and three SOs' PO numbers never appeared at all.
   // The answer was never a better guess — the DO already knows. Carry the link.
   productionOrderId: string | null;
+  // The delivery_order_items row this line draws its quantity FROM — the
+  // sales-side twin of purchase_invoice_items.grn_item_id. It is what makes a
+  // delivery billable across several invoices: the draw-down increments THIS
+  // line's invoiced_qty, and a void / delete / line-drop decrements the same
+  // one. null on the two SO-level fallbacks below, which have no DO line.
+  deliveryOrderItemId: string | null;
   productCode: string;
   productName: string;
   sizeLabel: string;
@@ -1202,17 +1278,47 @@ export type InvItem = {
 // directly, then to the SOs' header totals. Shared by live invoice
 // creation AND the under-billed-invoice repair so the two can't drift —
 // "every delivered item has an amount" must mean the same thing in both.
+//
+// PARTIAL BILLING (2026-08-07). Each DO line is billed for what is still
+// UN-INVOICED (quantity − invoiced_qty), not blindly for its whole quantity,
+// and a line with nothing left drops out. That single change is what turns the
+// one-shot whole-document invoice into a repeatable draw-down without forking
+// a second line-builder: the FIRST invoice on a fresh delivery still bills
+// everything (remaining == quantity), and the second bills only the remainder.
+//
+// `select` narrows it further to the lines/quantities the operator ticked. An
+// unmatched or over-drawn selection is REFUSED by the caller through
+// buildDrawdownStatements — never silently clamped, because a clamp bills a
+// different amount than the operator approved.
+//
+// The returned `draws` are what the caller must apply to invoiced_qty in the
+// SAME batch as the invoice INSERT. Building the lines and consuming the
+// quantity are one decision; splitting them is how counters drift.
+// Alias of the convert-chain's own draw shape — one type, so a selection sent
+// by the picker, the lines this builds, and the counters it moves can never
+// disagree about what a "line + quantity" is.
+export type DoLineSelection = DoDraw;
+
 export async function computeDoInvoiceLines(
   db: D1Database,
   doId: string,
   soIds: string[],
-): Promise<{ invItems: InvItem[]; computedTotal: number }> {
+  select?: DoLineSelection[] | null,
+): Promise<{
+  invItems: InvItem[];
+  computedTotal: number;
+  draws: DoLineSelection[];
+}> {
   // BUG-2026-07-17-001 — the single choke point every invoice INSERT flows
   // through, so the runtime ALTER lives here: awaited before any caller writes
   // invoice_items.production_order_id. Deploys don't replay migration files;
   // this is the load-bearing copy. Memoised per isolate.
   await ensureInvoicePoLinkColumn(db);
-  if (soIds.length === 0) return { invItems: [], computedTotal: 0 };
+  // Same rule for the partial-billing columns — this is the choke point that
+  // reads delivery_order_items.invoiced_qty and writes
+  // invoice_items.delivery_order_item_id, so the self-apply is awaited here.
+  await ensureDoPartialInvoiceColumns(db);
+  if (soIds.length === 0) return { invItems: [], computedTotal: 0, draws: [] };
 
   // BUG-2026-05-18-004 fix. Price every delivered item with the EXACT same
   // resolver the DO "value" uses — the whole-org price index + the DO's own
@@ -1235,17 +1341,22 @@ export async function computeDoInvoiceLines(
     loadSoLinePriceIndex(db, orgId),
     db
       .prepare(
-        `SELECT productionOrderId, productCode, productName, sizeLabel, fabricCode, quantity
-           FROM delivery_order_items WHERE deliveryOrderId = ?`,
+        `SELECT id, productionOrderId, productCode, productName, sizeLabel,
+                fabricCode, quantity, invoiced_qty AS "invoicedQty"
+           FROM delivery_order_items WHERE deliveryOrderId = ?
+          ORDER BY id`,
       )
       .bind(doId)
       .all<{
+        id: string;
         productionOrderId: string | null;
         productCode: string | null;
         productName: string | null;
         sizeLabel: string | null;
         fabricCode: string | null;
         quantity: number;
+        invoicedQty?: number | null;
+        invoiced_qty?: number | null;
       }>(),
   ]);
   const doItems = doItemsRes.results ?? [];
@@ -1279,7 +1390,33 @@ export async function computeDoInvoiceLines(
       )
     : doItems;
 
-  let invItems: InvItem[] = activeDoItems.map((di) => {
+  // How much of each line this invoice is allowed to take. Default: everything
+  // still un-invoiced. With a `select`, only what was ticked — clamped to the
+  // remainder so a stale picker (someone else billed part of it while the
+  // dialog was open) can never over-draw; the caller's guard turns a real
+  // over-draw into a 409 with the numbers in it.
+  const wanted = new Map<string, number>();
+  if (select) {
+    for (const s0 of select) {
+      const q = Number(s0.quantity) || 0;
+      if (!s0.deliveryOrderItemId || q <= 0) continue;
+      wanted.set(
+        s0.deliveryOrderItemId,
+        (wanted.get(s0.deliveryOrderItemId) ?? 0) + q,
+      );
+    }
+  }
+
+  const draws: DoLineSelection[] = [];
+  let invItems: InvItem[] = [];
+  for (const di of activeDoItems) {
+    const delivered = Number(di.quantity) || 0;
+    const already = Number(di.invoicedQty ?? di.invoiced_qty ?? 0) || 0;
+    const remaining = availableQty(delivered, already);
+    const billQty = select
+      ? Math.min(wanted.get(di.id) ?? 0, remaining)
+      : remaining;
+    if (billQty <= 0) continue;
     // Identical call to loadDoValueMap → invoice total == DO value.
     const unitPriceSen = priceForItem(
       idx,
@@ -1287,22 +1424,35 @@ export async function computeDoInvoiceLines(
       doSoId,
       di.productCode,
     );
-    return {
+    invItems.push({
       id: genInvoiceItemId(),
       productionOrderId: di.productionOrderId ?? null,
+      deliveryOrderItemId: di.id,
       productCode: di.productCode ?? "",
       productName: di.productName ?? "",
       sizeLabel: di.sizeLabel ?? "",
       fabricCode: di.fabricCode ?? "",
-      quantity: di.quantity,
+      quantity: billQty,
       unitPriceSen,
-      totalSen: unitPriceSen * di.quantity,
-    };
-  });
-  let computedTotal = invItems.reduce((s, i) => s + i.totalSen, 0);
+      totalSen: unitPriceSen * billQty,
+    });
+    draws.push({ deliveryOrderItemId: di.id, quantity: billQty });
+  }
+  let computedTotal = invItems.reduce((s0, i) => s0 + i.totalSen, 0);
+
+  // The two SO-level fallbacks below bill AROUND the delivery order — they
+  // exist because a DO whose items price at zero would otherwise produce a
+  // RM 0 invoice for real delivered goods (BUG-2026-05-18-004). They have no
+  // DO line behind them, so they cannot draw anything down, which makes them
+  // unsafe the moment partial billing is in play: firing one on a SECOND
+  // invoice would bill the whole sales order again on top of what the first
+  // invoice already charged. Restrict them to what they were always for — the
+  // FIRST, whole-document bill of a delivery nothing has drawn on yet.
+  const freshWholeDo =
+    !select && activeDoItems.every((di) => (Number(di.invoicedQty ?? di.invoiced_qty ?? 0) || 0) === 0);
 
   // Fallback 1: nothing priced at all → bill the linked SO lines directly.
-  if (computedTotal === 0) {
+  if (computedTotal === 0 && freshWholeDo) {
     const soPh = soIds.map(() => "?").join(",");
     const soItemsRes = await db
       .prepare(
@@ -1328,6 +1478,10 @@ export async function computeDoInvoiceLines(
         // production-order link to carry; null is the honest value (the print
         // path falls back to the invoice-level refs for these).
         productionOrderId: null,
+        // …and no DO line either, so nothing is drawn down for these. That is
+        // exactly why `freshWholeDo` gates this branch: an invoice that
+        // consumes nothing must never be raised twice against one delivery.
+        deliveryOrderItemId: null,
         productCode: si.productCode ?? "",
         productName: si.productName ?? "",
         sizeLabel: si.sizeLabel ?? "",
@@ -1341,7 +1495,7 @@ export async function computeDoInvoiceLines(
   }
 
   // Fallback 2: still 0 → sum of every linked SO's header total.
-  if (computedTotal === 0) {
+  if (computedTotal === 0 && freshWholeDo) {
     const soPh = soIds.map(() => "?").join(",");
     const soTotal = await db
       .prepare(
@@ -1353,7 +1507,12 @@ export async function computeDoInvoiceLines(
     computedTotal = Number(soTotal?.t) || 0;
   }
 
-  return { invItems, computedTotal };
+  // A fallback invoice draws nothing down (its lines have no DO line), so the
+  // draw list is dropped with them — the caller then sees a bill with no
+  // consumption, which is what makes it a LEGACY-shaped invoice and locks the
+  // DO to that one bill. See do-partial-invoice.ts.
+  const drawsOut = invItems.some((i) => i.deliveryOrderItemId) ? draws : [];
+  return { invItems, computedTotal, draws: drawsOut };
 }
 
 export async function buildDoDeliveredSoAndInvoice(
@@ -1443,19 +1602,20 @@ export async function buildDoDeliveredSoAndInvoice(
   // AND status != 'CANCELLED' (2026-08-07): this auto-on-delivery path used to
   // count a CANCELLED invoice as "already invoiced", so once a DO's only
   // invoice was voided this path went permanently silent for it. The manual
-  // path (invoices.ts POST /) has always excluded CANCELLED, and the partial
-  // unique index uniq_invoice_active_delivery_order is itself
-  // `WHERE status <> 'CANCELLED'` — so this was the odd one out in its own
-  // codebase. A cancelled invoice must not block a re-invoice on EITHER path.
-  const existingInvoice = await db
-    .prepare(
-      "SELECT id FROM invoices WHERE deliveryOrderId = ? AND status != 'CANCELLED' LIMIT 1",
-    )
-    .bind(doRow.id)
-    .first<{ id: string }>();
+  // path (invoices.ts POST /) has always excluded CANCELLED — so this was the
+  // odd one out in its own codebase. A cancelled invoice must not block a
+  // re-invoice on EITHER path.
+  //
+  // Partial billing (2026-08-07): the gate is now the DERIVED billed state,
+  // not "does any invoice row exist". A delivery half-billed by hand must
+  // still be finishable, and a fully-billed one must stay quiet. `legacyInvoice`
+  // inside loadDoBillingState is what keeps every pre-existing whole-document
+  // invoice reading as fully-billed — see do-partial-invoice.ts.
+  await ensureDoPartialInvoiceColumns(db);
+  const billing = await loadDoBillingState(db, doRow.id);
 
-  if (!existingInvoice && soIds.length > 0 && !incomplete) {
-    const { invItems, computedTotal } = await computeDoInvoiceLines(
+  if (!billing.fullyInvoiced && soIds.length > 0 && !incomplete) {
+    const { invItems, computedTotal, draws } = await computeDoInvoiceLines(
       db,
       doRow.id,
       soIds,
@@ -1563,8 +1723,9 @@ export async function buildDoDeliveredSoAndInvoice(
           .prepare(
             `INSERT INTO invoice_items (
                id, invoiceId, productCode, productName, sizeLabel, fabricCode,
-               quantity, unitPriceSen, totalSen, production_order_id
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               quantity, unitPriceSen, totalSen, production_order_id,
+               delivery_order_item_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             item.id,
@@ -1579,6 +1740,11 @@ export async function buildDoDeliveredSoAndInvoice(
             // BUG-2026-07-17-001 — keep the DO's per-line link so the printout
             // never has to guess the customer PO by product code again.
             item.productionOrderId,
+            // The convert-chain link: which DO line this bill drew from. An
+            // invoice whose lines carry this can be partially voided and
+            // re-issued; one without it reads as a legacy whole-document bill
+            // and locks the DO to itself (do-partial-invoice.ts).
+            item.deliveryOrderItemId,
           ),
       );
     }
@@ -1623,15 +1789,40 @@ export async function buildDoDeliveredSoAndInvoice(
           .bind(now, sid),
       );
     }
-    // Flip the DO to INVOICED too — pushed last so it wins over any caller's
-    // own DELIVERED update batched ahead of dc.statements.
-    statements.push(
-      db
-        .prepare(
-          "UPDATE delivery_orders SET status = 'INVOICED', overdue = 'INVOICED', updated_at = ? WHERE id = ?",
-        )
-        .bind(now, doRow.id),
-    );
+    // Draw the billed quantity down on each DO line, in the SAME batch as the
+    // invoice. Building the lines and consuming the quantity are one decision;
+    // splitting them is how counters drift. An over-draw here is impossible by
+    // construction (computeDoInvoiceLines bills at most the remainder), but the
+    // guard is the same one the manual path uses so there is only one rule.
+    const drawn = buildDrawdownStatements(db, billing, draws);
+    if (!drawn.ok) {
+      throw new Error(
+        `[${doRow.doNo}] auto-invoice draw-down rejected: ${drawn.error}`,
+      );
+    }
+    statements.push(...drawn.statements);
+
+    // Flip the DO to INVOICED — but ONLY if this invoice bills the LAST of it.
+    // The status flag is no longer the source of truth (Σ invoiced_qty vs
+    // Σ quantity is), but it still greys the "Transfer to Invoice" button and
+    // gates POST /api/invoices, so it has to agree: a half-billed delivery that
+    // flipped to INVOICED could never be finished. Pushed last so it wins over
+    // any caller's own DELIVERED update batched ahead of dc.statements.
+    const drawnQty = draws.reduce((n, d) => n + (Number(d.quantity) || 0), 0);
+    const nowFullyBilled =
+      // A fallback-shaped invoice (no DO lines drawn) is a whole-document bill
+      // by definition — it is the legacy shape, and it owns the DO.
+      draws.length === 0 ||
+      availableQty(billing.remainingQty, drawnQty) <= 0;
+    if (nowFullyBilled) {
+      statements.push(
+        db
+          .prepare(
+            "UPDATE delivery_orders SET status = 'INVOICED', overdue = 'INVOICED', updated_at = ? WHERE id = ?",
+          )
+          .bind(now, doRow.id),
+      );
+    }
   }
 
   return {

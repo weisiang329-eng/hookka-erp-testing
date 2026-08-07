@@ -2178,3 +2178,82 @@ app.get("/db-size-code-mismatch", async (c) => {
     },
   });
 });
+
+// ---------------------------------------------------------------------------
+// POST /db-size-code-backfill — fill BLANK sales_order_item size codes from
+// the model-code suffix. Dry-run by default.
+//
+// db-size-code-mismatch found 7 SO items (1052-(Q)/(K)) with an empty sizeCode
+// but a correct sizeLabel. A blank size code drops the row out of size-based
+// KPIs (owner: "一些空的也是要进 KPI 里面的"). The code suffix IS the row's size
+// identity, so filling the blank from it is unambiguous — we only touch rows
+// where sizeCode is empty AND the suffix is a KNOWN size code (K/Q/S/SS/SK/SP).
+//
+// It deliberately does NOT touch rows where sizeCode is present-but-different
+// (the 2038(A)-(SK) K-vs-SK cases) — those are a King-vs-Super-King intent
+// question for the owner, not a blank to fill.
+//
+// Dry-run (default) lists exactly what it WOULD change. Pass {apply:true} to
+// write. Idempotent: a second apply reports 0.
+// ---------------------------------------------------------------------------
+app.post("/db-size-code-backfill", async (c) => {
+  let apply = false;
+  try {
+    const body = (await c.req.json()) as { apply?: unknown };
+    apply = body?.apply === true;
+  } catch {
+    /* no body → dry-run */
+  }
+
+  let rows: Record<string, unknown>[] = [];
+  try {
+    const res = await c.var.DB.prepare(
+      `SELECT id, productCode, sizeCode, sizeLabel, salesOrderId
+         FROM sales_order_items
+        WHERE (sizeCode IS NULL OR TRIM(sizeCode) = '')`,
+    ).all<Record<string, unknown>>();
+    rows = res.results ?? [];
+  } catch (err) {
+    return c.json({ success: false, error: err instanceof Error ? err.message : String(err) });
+  }
+
+  const planned: Array<{ id: string; productCode: string; setSizeCode: string; sizeLabel: string; salesOrderId: string }> = [];
+  for (const r of rows) {
+    const code = String(r.productCode ?? r.productcode ?? "");
+    const suffix = parseCodeSizeSuffix(code);
+    if (!suffix || !KNOWN_BEDFRAME_SIZE_CODES.has(suffix)) continue;
+    planned.push({
+      id: String(r.id ?? ""),
+      productCode: code,
+      setSizeCode: suffix,
+      sizeLabel: String(r.sizeLabel ?? r.sizelabel ?? ""),
+      salesOrderId: String(r.salesOrderId ?? r.salesorderid ?? ""),
+    });
+  }
+
+  let applied = 0;
+  if (apply) {
+    for (const p of planned) {
+      try {
+        await c.var.DB.prepare(
+          `UPDATE sales_order_items SET sizeCode = ? WHERE id = ? AND (sizeCode IS NULL OR TRIM(sizeCode) = '')`,
+        )
+          .bind(p.setSizeCode, p.id)
+          .run();
+        applied++;
+      } catch {
+        /* skip a row that races another write; the count reflects reality */
+      }
+    }
+  }
+
+  return c.json({
+    success: true,
+    data: {
+      mode: apply ? "apply" : "dry-run",
+      candidates: planned.length,
+      applied,
+      rows: planned,
+    },
+  });
+});

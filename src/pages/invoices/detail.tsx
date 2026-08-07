@@ -31,6 +31,10 @@ import {
 import type { Invoice } from "@/types";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { DiscountInput } from "@/components/ui/discount-input";
+// The SAME reconciliation rule the invoice PDF uses (BUG-2026-07-17-001):
+// a Base + surcharges build-up is shown ONLY when it adds up to the price
+// actually charged. Screen and document must never disagree.
+import { invoicePriceBreakdown } from "@/lib/build-unified-doc-data";
 
 const PAYMENT_METHODS = [
   { value: "BANK_TRANSFER", label: "Bank Transfer" },
@@ -392,7 +396,7 @@ export default function InvoiceDetailPage() {
     ? invoice.items.reduce((s, it) => {
         const dd = priceDraft[it.id];
         const u = dd
-          ? sen(dd.base) + sen(dd.divan) + sen(dd.leg) + sen(dd.special)
+          ? sen(dd.base) + sen(dd.divan) + sen(dd.leg) + sen(dd.special) + sen(dd.totalHeight)
           : Number(it.unitPriceSen) || 0;
         const disc = discountDraft[it.id] ?? 0;
         return s + Math.max(0, u * (Number(it.quantity) || 0) - disc);
@@ -722,10 +726,24 @@ export default function InvoiceDetailPage() {
                       const ex = lineExtras[item.id];
                       const d = priceDraft[item.id];
                       const qty = Number(item.quantity) || 0;
+                      // T.Height is a real component: it is an input below, it
+                      // is in the save payload, in the backend recompute and in
+                      // the PDF. Leaving it out here made the live Unit (and
+                      // the discount base derived from it) understate the price
+                      // during edit, so the figure jumped after save.
                       const liveUnit =
                         editingPrices && d
-                          ? sen(d.base) + sen(d.divan) + sen(d.leg) + sen(d.special)
+                          ? sen(d.base) +
+                            sen(d.divan) +
+                            sen(d.leg) +
+                            sen(d.special) +
+                            sen(d.totalHeight)
                           : Number(item.unitPriceSen) || 0;
+                      // Read view only: itemise the price ONLY when the stored
+                      // components reconcile to what is charged. Same rule as
+                      // the PDF — a build-up that does not add up is not shown.
+                      const priceRows =
+                        !editingPrices && ex ? invoicePriceBreakdown(ex, liveUnit) : undefined;
                       // Per-line discount (migration 0179).
                       const liveDiscount = editingPrices
                         ? (discountDraft[item.id] ?? 0)
@@ -861,24 +879,15 @@ export default function InvoiceDetailPage() {
                                   />
                                 </div>
                               </div>
-                            ) : ex &&
-                              (ex.divanSen || ex.legSen || ex.totalHeightSen || ex.specialSen) ? (
+                            ) : priceRows ? (
                               <div className="text-xs leading-relaxed tabular-nums">
-                                <div>Base {formatCurrency(ex.baseSen)}</div>
-                                {!!ex.divanSen && (
-                                  <div>+ Divan {formatCurrency(ex.divanSen)}</div>
-                                )}
-                                {!!ex.legSen && (
-                                  <div>+ Leg {formatCurrency(ex.legSen)}</div>
-                                )}
-                                {!!ex.totalHeightSen && (
-                                  <div>+ T.Height {formatCurrency(ex.totalHeightSen)}</div>
-                                )}
-                                {!!ex.specialSen && (
-                                  <div>
-                                    + Special {formatCurrency(ex.specialSen)}
-                                  </div>
-                                )}
+                                {priceRows
+                                  .filter((r) => r.label !== "=")
+                                  .map((r) => (
+                                    <div key={r.label}>
+                                      {r.label} {formatCurrency(r.sen)}
+                                    </div>
+                                  ))}
                                 <div className="font-semibold text-[#1F1D1B] border-t border-[#E2DDD8] pt-0.5 mt-0.5">
                                   = {formatCurrency(liveUnit)}
                                 </div>
@@ -911,7 +920,8 @@ export default function InvoiceDetailPage() {
                               ? sen(dd.base) +
                                 sen(dd.divan) +
                                 sen(dd.leg) +
-                                sen(dd.special)
+                                sen(dd.special) +
+                                sen(dd.totalHeight)
                               : Number(it.unitPriceSen) || 0;
                             const disc = discountDraft[it.id] ?? 0;
                             return s + Math.max(0, u * (Number(it.quantity) || 0) - disc);

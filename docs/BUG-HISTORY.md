@@ -990,6 +990,16 @@ line was matched to the wrong SO.
 > now include it (`detail.tsx:734-746` Unit · `:395` header total · `:916` Subtotal);
 > the discount base at `:870` is `liveUnit * qty` and inherits it.
 >
+> **How many lines still take the legacy path?** Not re-measured on 2026-08-07 —
+> no prod credentials in that session (`HOOKKA_PROD_DB_URL` unset), and this
+> figure must be QUERIED, not inherited from a write-up. Last measured
+> 2026-08-02: **2,526 of 2,728 `invoice_items` rows (92.6%) carry
+> `production_order_id`**, so roughly **202 rows (7.4%)** still fall back to the
+> code-keyed maps — pre-column rows the STRICT backfill matcher refused
+> (INV-2606-121 / INV-2607-024 line-count mismatches) plus the bill-the-SO-lines
+> path, which has no DO line behind it and never will. Those are exactly the rows
+> that keep the fallback necessary; re-run the count before claiming it is zero.
+>
 > **Not touched, deliberately:** rounding / the whole-ringgit question.
 > `formatCurrency`, the sofa-combo proration and `DiscountInput` are unchanged —
 > that is a policy change with an open question (where leftover sen go when a %

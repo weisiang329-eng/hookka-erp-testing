@@ -122,15 +122,53 @@ function ensureGrnMigrations(db: D1Database): Promise<void> {
 let grnCancelSchemaEnsured = false;
 async function ensureGrnCancelSchema(db: D1Database): Promise<void> {
   if (grnCancelSchemaEnsured) return;
-  for (const sql of [
+  const statements: string[] = [
     "ALTER TABLE grns ADD COLUMN IF NOT EXISTS cancelled_at TEXT",
     "ALTER TABLE grns ADD COLUMN IF NOT EXISTS cancelled_reason TEXT",
-    "ALTER TABLE grns DROP CONSTRAINT IF EXISTS grns_status_check",
-    "ALTER TABLE grns DROP CONSTRAINT IF EXISTS grns_status_chk",
-    "ALTER TABLE grns DROP CONSTRAINT IF EXISTS grns_status_chk_v2",
+  ];
+
+  // Drop whatever CHECK is actually on `grns.status`, by asking the catalogue
+  // rather than guessing its name.
+  //
+  // The first version listed three candidates (grns_status_check / _chk /
+  // _chk_v2) and hoped one matched. If prod carries a fourth name — and the
+  // name depends on how the constraint was originally created — every DROP is
+  // a no-op, the ADD is caught by the try/catch, the old CHECK survives, and
+  // the first cancel a user attempts 500s on a constraint violation. A guessed
+  // identifier is not a migration.
+  try {
+    const found = await db
+      .prepare(
+        `SELECT conname AS "conname"
+           FROM pg_constraint
+          WHERE conrelid = 'grns'::regclass
+            AND contype = 'c'
+            AND pg_get_constraintdef(oid) ILIKE '%status%'`,
+      )
+      .all<{ conname: string }>();
+    for (const r of found.results ?? []) {
+      if (r.conname) {
+        statements.push(`ALTER TABLE grns DROP CONSTRAINT IF EXISTS "${r.conname}"`);
+      }
+    }
+  } catch (err) {
+    // Not Postgres, or no permission on the catalogue. Fall back to the known
+    // names — worse than looking it up, better than not trying.
+    console.warn("[grn] could not read pg_constraint, using known names:", err);
+    statements.push(
+      "ALTER TABLE grns DROP CONSTRAINT IF EXISTS grns_status_check",
+      "ALTER TABLE grns DROP CONSTRAINT IF EXISTS grns_status_chk",
+      "ALTER TABLE grns DROP CONSTRAINT IF EXISTS grns_status_chk_v2",
+    );
+  }
+  statements.push(
     "ALTER TABLE grns ADD CONSTRAINT grns_status_chk_v2 " +
       "CHECK (status IN ('DRAFT','CONFIRMED','POSTED','CANCELLED'))",
-  ]) {
+  );
+
+  // Each statement is caught on its own: an ADD CONSTRAINT that trips over a
+  // legacy row must not take every other GRN write down with it.
+  for (const sql of statements) {
     try {
       await db.prepare(sql).run();
     } catch (err) {

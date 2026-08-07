@@ -9312,6 +9312,37 @@ async function aggregateLabour(
   return { byDept, totalSen, map };
 }
 
+// Where a month's labour posting currently STANDS in the ledger: the net of
+// every visible leg carrying its sourceId, account by account.
+//
+// "Has it been posted?" has to be answered from this, not from "does a
+// labor_post leg exist" — once a month can be unposted, the original legs are
+// still there (the journal is hash-chained and append-only, so a reversal is
+// appended, never a deletion). The existence test would then refuse to re-post
+// a month that had just been reversed. Exactly the flaw the purchase-invoice
+// void carried until 2026-08-06.
+async function labourLedgerNet(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+  sourceId: string,
+): Promise<Map<string, number>> {
+  const res = await db
+    .prepare(
+      `SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries
+        WHERE sourceId = ? AND orgId = ? AND hidden = 0 AND sourceType LIKE 'labor_post%'`,
+    )
+    .bind(sourceId, orgId)
+    .all<{ accountCode: string; debitSen: number; creditSen: number }>();
+  const net = new Map<string, number>();
+  for (const l of res.results ?? []) {
+    const signed = (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0);
+    net.set(l.accountCode, (net.get(l.accountCode) ?? 0) + signed);
+  }
+  return net;
+}
+
+const labourIsPosted = (net: Map<string, number>) => [...net.values()].some((v) => v !== 0);
+
 // The DEBIT side of a month's labour posting, account by account: each
 // department's GROSS pay against its mapped account, then the three statutory
 // employer contributions against theirs. One function so the preview the owner
@@ -9344,7 +9375,7 @@ app.get("/labor/preview", async (c) => {
   try {
     const orgId = getOrgId(c);
     const { byDept, totalSen, map: labourMap } = await aggregateLabour(c.var.DB, month, orgId);
-    const posted = await ledgerHasSource(c.var.DB, orgId, "labor_post", `labor-${month}`);
+    const posted = labourIsPosted(await labourLedgerNet(c.var.DB, orgId, `labor-${month}`));
     // Roll the per-dept rows up to the account level for the GL preview —
     // gross to the department's account, each statutory contribution to its own.
     const byAccount = new Map<string, number>();
@@ -9386,8 +9417,8 @@ app.post("/labor/post", async (c) => {
     }
     const orgId = getOrgId(c);
     const sourceId = `labor-${month}`;
-    if (await ledgerHasSource(c.var.DB, orgId, "labor_post", sourceId)) {
-      return c.json({ success: false, error: `Labour for ${month} is already posted (idempotent — nothing re-posted).` }, 400);
+    if (labourIsPosted(await labourLedgerNet(c.var.DB, orgId, sourceId))) {
+      return c.json({ success: false, error: `Labour for ${month} is already posted. Unpost it first if you need to re-post.` }, 400);
     }
     const { byDept, totalSen, map: labourMapPost } = await aggregateLabour(c.var.DB, month, orgId);
     if (totalSen <= 0) {
@@ -9433,6 +9464,68 @@ app.post("/labor/post", async (c) => {
       after: { month, totalSen, accounts: legs.length - 1},
     });
     return c.json({ success: true, data: { month, totalSen, accounts: legs.length - 1} });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /labor/unpost — reverse a month's labour posting so it can be redone.
+//
+// Owner 2026-08-06: July posted before the EPF/SOCSO/EIS split shipped, so it
+// sits in the ledger as one all-in line. Posting is idempotent and there was no
+// way back — the month was frozen in whatever shape it was first posted, and
+// the only alternative was a hand-written journal entry to undo it.
+//
+// Reverses by APPENDING the negation of the current net, never by deleting: the
+// journal is hash-chained. `labor_post_reversal` strips to `labor_post`, so the
+// reversal dates to the month it belongs to, like the posting itself. A month
+// with nothing outstanding reverses to nothing, so pressing it twice is safe.
+// ---------------------------------------------------------------------------
+app.post("/labor/unpost", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const month = String(body.month || "");
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+      return c.json({ success: false, error: "month must be YYYY-MM" }, 400);
+    }
+    const orgId = getOrgId(c);
+    const sourceId = `labor-${month}`;
+    const net = await labourLedgerNet(c.var.DB, orgId, sourceId);
+    if (!labourIsPosted(net)) {
+      return c.json({ success: true, data: { month, alreadyUnposted: true, reversedLegs: 0 } });
+    }
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+    const legs: LedgerEntryInput[] = [];
+    let legNo = 1;
+    for (const [accountCode, amt] of net) {
+      if (amt === 0) continue;
+      legs.push({
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "labor_post_reversal",
+        sourceId,
+        legNo: legNo++,
+        accountCode,
+        debitSen: amt < 0 ? -amt : 0,
+        creditSen: amt > 0 ? amt : 0,
+        description: `Labour ${month} · unposted`,
+        actorUserId,
+        orgId,
+      });
+    }
+    const { statements } = await buildJournalEntryStatements(c.var.DB, orgId, legs);
+    await c.var.DB.batch(statements);
+    await emitAudit(c, {
+      resource: "accounting",
+      resourceId: sourceId,
+      action: "delete",
+      before: { month, accounts: net.size },
+      after: { month, reversedLegs: legs.length },
+    });
+    return c.json({ success: true, data: { month, reversedLegs: legs.length } });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }

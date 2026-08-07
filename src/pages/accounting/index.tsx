@@ -8963,6 +8963,7 @@ function WipDetailCard({ month, reloadKey }: { month: string; reloadKey: number 
 
 function LaborTab({ accounts }: { accounts: ChartOfAccount[] }) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
   const [data, setData] = useState<{
     posted: boolean;
@@ -9013,6 +9014,34 @@ function LaborTab({ accounts }: { accounts: ChartOfAccount[] }) {
         toast.success(`Labour ${month} posted — ${formatCurrency(j.data.totalSen)}`);
         load();
       } else toast.error(j?.error || "Post failed");
+    } finally {
+      setPosting(false);
+    }
+  };
+
+  // Unpost — the way back from a month posted in the wrong shape (owner
+  // 2026-08-06: July went in before EPF/SOCSO/EIS were split out). Reverses in
+  // the ledger; the month then re-posts in whatever the current shape is.
+  const handleUnpost = async () => {
+    if (!(await confirm({
+      title: `Unpost labour for ${month}?`,
+      message:
+        "This reverses the posting in the general ledger (nothing is deleted — the reversal is recorded) " +
+        "and lets the month be posted again. Do it when the accounts or the split have changed since it was posted.",
+      danger: true,
+    }))) return;
+    setPosting(true);
+    try {
+      const res = await fetch("/api/accounting/labor/unpost", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ month }),
+      });
+      const j = await res.json() as { success?: boolean; data?: { reversedLegs?: number }; error?: string };
+      if (j?.success) {
+        toast.success(`Labour ${month} unposted — you can post it again now`);
+        load();
+      } else toast.error(j?.error || "Unpost failed");
     } finally {
       setPosting(false);
     }
@@ -9078,7 +9107,15 @@ function LaborTab({ accounts }: { accounts: ChartOfAccount[] }) {
             <>
               <span className="text-sm text-[#6B7280] pb-1">Total labour cost <span className="font-semibold text-[#1F1D1B] tabular-nums">{formatCurrency(data.totalSen)}</span></span>
               {data.posted ? (
-                <span className="text-xs text-[#27500A] pb-2">Already posted ✓ (DR accounts · CR {data.accrualAccount})</span>
+                <>
+                  <span className="text-xs text-[#27500A] pb-2">Already posted ✓ (DR accounts · CR {data.accrualAccount})</span>
+                  {/* Without this the month is frozen in whatever shape it was
+                      first posted — the only way back was a hand-written JE. */}
+                  <Button variant="outline" size="sm" disabled={posting} onClick={handleUnpost}
+                    className="text-[#9A3A2D] hover:bg-[#9A3A2D]/5">
+                    {posting ? "Unposting…" : "Unpost"}
+                  </Button>
+                </>
               ) : (
                 <Button variant="primary" size="sm" disabled={posting || data.totalSen <= 0} onClick={handlePost}>
                   {posting ? "Posting…" : `Post ${formatCurrency(data.totalSen)} to GL`}

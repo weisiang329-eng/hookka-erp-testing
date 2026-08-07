@@ -700,17 +700,21 @@ export default function InvoiceDetailPage() {
               </CardTitle>
             </CardHeader>
             <CardContent className="pt-0">
+              {/* min-w lets the table exceed a narrow container and scroll
+                  instead of crushing every column into an unreadable stack
+                  (owner: "整个挤在一起"). Product gets the lion's share since it
+                  carries the name + the PO/SO/REF + spec sub-lines. */}
               <div className="overflow-x-auto">
-                <table className="w-full text-sm">
+                <table className="w-full text-sm min-w-[900px]">
                   <thead>
                     <tr className="border-b-2 border-[#E2DDD8] bg-[#F0ECE9]">
-                      <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563]">
+                      <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563] w-8">
                         #
                       </th>
-                      <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563]">
+                      <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563] whitespace-nowrap">
                         SO
                       </th>
-                      <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563]">
+                      <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563] min-w-[240px]">
                         Product
                       </th>
                       <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563]">
@@ -826,7 +830,7 @@ export default function InvoiceDetailPage() {
                           <td className="py-3.5 px-4 align-top doc-number font-medium text-[#1F1D1B] whitespace-nowrap">
                             {companySO}
                           </td>
-                          <td className="py-3.5 px-4 align-top">
+                          <td className="py-3.5 px-4 align-top min-w-[240px]">
                             <p className="font-medium text-[#1F1D1B]">
                               {item.productName}
                             </p>

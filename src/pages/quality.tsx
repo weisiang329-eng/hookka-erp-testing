@@ -233,11 +233,19 @@ function PendingTab() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
       });
-      const json = (await res.json()) as { success?: boolean; error?: string; created?: number; skipped?: number; sideEffects?: { tagsCreated?: number; jobCardReset?: boolean } };
+      const json = (await res.json()) as { success?: boolean; error?: string; created?: number; skipped?: number; skippedNoActivity?: number };
       if (!res.ok || !json.success) throw new Error(json.error ?? "Generate failed");
       invalidateCachePrefix("/api/qc-pending");
       refreshPending();
-      toast.success(`Slot generated. Created ${json.created ?? 0} new pending. Skipped ${json.skipped ?? 0} (already exists).`);
+      // skippedNoActivity is the one that needs saying out loud: generation is
+      // coupled to production now, so "created 0" usually means the factory
+      // made nothing, not that the button failed.
+      const idle = json.skippedNoActivity ?? 0;
+      toast.success(
+        `Slot generated. Created ${json.created ?? 0} new pending. ` +
+        `Skipped ${json.skipped ?? 0} (already exists)` +
+        (idle > 0 ? `, ${idle} (no production/goods at that stage today).` : "."),
+      );
     } catch (err) {
       toast.error(`Failed: ${err instanceof Error ? err.message : "unknown"}`);
     } finally {

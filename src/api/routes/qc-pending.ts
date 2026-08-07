@@ -1,11 +1,17 @@
 // ---------------------------------------------------------------------------
 // QC Pending Inspections + Cron Trigger (Phase 1).
 //
-// Time-triggered QC: every day at 12:00 and 16:00 (factory's local time) we
-// generate a PENDING qc_inspections row per active qc_templates row. The
-// inspector picks each up, samples a real subject (RM batch / job card /
-// FG batch), and either fills in the per-item results (PASS/FAIL/NA) or
-// marks the slot SKIPPED ("no production at this stage today").
+// Time-triggered, PRODUCTION-COUPLED QC: every day at 12:00 and 16:00
+// (factory's local time) we generate a PENDING qc_inspections row per active
+// qc_templates row THAT HAS SOMETHING TO SAMPLE that day — a WIP department
+// with work in hand, an RM stage that actually received goods, an FG stage
+// that actually produced units. The inspector picks each up, samples a real
+// subject (RM batch / job card / FG batch), and either fills in the per-item
+// results (PASS/FAIL/NA) or marks the slot SKIPPED.
+//
+// It was NOT coupled until 2026-08-07: it was a blind schedule, 34 rows a day
+// regardless of whether anything was made, which produced a 3,009-row backlog
+// nobody could ever clear and therefore nobody read. See stageHadActivity.
 //
 // Endpoints:
 //   GET    /api/qc-pending              — list PENDING + IN_PROGRESS rows
@@ -27,6 +33,9 @@
 //                                         every FAIL item, and (for WIP stage)
 //                                         resets the linked job_card.
 //   POST   /api/qc-pending/:id/skip     — mark SKIPPED with reason.
+//   POST   /api/qc-pending/bulk-skip    — retire a backlog of old slots with a
+//                                         reason. DRY RUN unless confirm:true.
+//                                         HAS NOT BEEN RUN — see the handler.
 //   DELETE /api/qc-pending/:id          — cancel a PENDING slot (e.g., template
 //                                         was deactivated mid-day).
 // ---------------------------------------------------------------------------
@@ -115,16 +124,123 @@ function genDefectId(): string {
   return `qcd-${crypto.randomUUID().slice(0, 8)}`;
 }
 
-async function getNextInspectionNo(db: D1Database): Promise<string> {
+/**
+ * One allocator per generation run, NOT one lookup per inspection.
+ *
+ * BUG-2026-08-07: this used to be `getNextInspectionNo(db)` — a COUNT(*)
+ * called inside the per-template loop. Every INSERT of the run is deferred to
+ * a single db.batch() at the end, so the count never moved between calls and
+ * EVERY inspection generated in the same slot got the SAME inspectionNo. On
+ * prod that meant 17 rows per slot sharing one number, twice a day, for three
+ * months — an inspection number that identifies seventeen inspections
+ * identifies none of them.
+ *
+ * The base is now read ONCE, before the loop, and the counter is incremented
+ * in memory per row. It is also taken from the highest suffix actually in use
+ * rather than a row COUNT, so a deleted slot (DELETE /api/qc-pending/:id) can
+ * no longer hand its number to the next run.
+ */
+async function inspectionNoAllocator(
+  db: D1Database,
+): Promise<() => string> {
   const now = new Date();
   const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}`;
   const prefix = `QC-${yymm}-`;
   const res = await db
-    .prepare("SELECT COUNT(*) as n FROM qc_inspections WHERE inspectionNo LIKE ?")
+    .prepare("SELECT inspectionNo FROM qc_inspections WHERE inspectionNo LIKE ?")
     .bind(`${prefix}%`)
-    .first<{ n: number }>();
-  const seq = (res?.n ?? 0) + 1;
-  return `${prefix}${String(seq).padStart(3, "0")}`;
+    .all<{ inspectionNo: string | null }>();
+  let seq = 0;
+  for (const r of res.results ?? []) {
+    const tail = Number((r.inspectionNo ?? "").slice(prefix.length));
+    if (Number.isFinite(tail) && tail > seq) seq = tail;
+  }
+  return () => {
+    seq += 1;
+    return `${prefix}${String(seq).padStart(3, "0")}`;
+  };
+}
+
+// --- is there anything to inspect? ----------------------------------------
+//
+// BUG-2026-08-07: generation used to be a blind schedule — one row per active
+// template per slot, twice a day, forever, whether or not that station made
+// anything or any goods arrived. 34 rows a day against a factory that had not
+// completed a single inspection. A queue that can never be cleared is a queue
+// everyone learns to ignore, and that is exactly what happened.
+//
+// Owner 2026-08-07: everything is SAMPLING, tied to actual volume — "他应该要
+// 定期检查我们的 WIP 部门，还有我们的完成品（我们正常是抽查）… 如果是进货，也就是
+// IQC 那边，基本上他应该也都是要抽查的".
+//
+// So a slot is only created when the thing it samples EXISTS on that date:
+//   WIP — the department has work in hand (a card IN_PROGRESS or PAUSED) or
+//         finished something that day. A WAITING-only department is a queue,
+//         not production: nothing has been made yet, so there is nothing to
+//         sample. (The phone still offers WAITING cards as subjects once a
+//         slot exists — being able to inspect a card that just started is
+//         fine; generating a slot for a department that has only ever queued
+//         is not.)
+//   RM  — goods were actually received that day (a CONFIRMED / POSTED GRN).
+//         Per-material targeting ("根据不一样的 material 去抽查") is the next
+//         step and is NOT implemented here; today this is per-day.
+//   FG  — finished units were actually produced that day.
+//
+// Fail OPEN: an unknown stage, or a probe that throws, still generates. Over-
+// generating is a nuisance; silently never generating is how you end up
+// believing you have QC when you don't.
+async function stageHadActivity(
+  db: D1Database,
+  stage: Stage | null,
+  deptCode: string,
+  slotDate: string,
+): Promise<boolean> {
+  try {
+    if (stage === "WIP") {
+      const row = await db
+        .prepare(
+          `SELECT 1 AS hit FROM job_cards
+            WHERE departmentCode = ?
+              AND (status IN ('IN_PROGRESS','PAUSED') OR completedDate = ?)
+            LIMIT 1`,
+        )
+        .bind(deptCode, slotDate)
+        .first<{ hit: number }>();
+      return !!row;
+    }
+    if (stage === "RM") {
+      const row = await db
+        .prepare(
+          `SELECT 1 AS hit FROM grns
+            WHERE receiveDate LIKE ?
+              AND status IN ('CONFIRMED','POSTED')
+            LIMIT 1`,
+        )
+        .bind(`${slotDate}%`)
+        .first<{ hit: number }>();
+      return !!row;
+    }
+    if (stage === "FG") {
+      const row = await db
+        .prepare(
+          `SELECT 1 AS hit FROM fg_units
+            WHERE mfdDate LIKE ? OR packedAt LIKE ?
+            LIMIT 1`,
+        )
+        .bind(`${slotDate}%`, `${slotDate}%`)
+        .first<{ hit: number }>();
+      return !!row;
+    }
+    return true;
+  } catch (err) {
+    console.error("[qc-pending] activity probe failed — generating anyway", {
+      stage,
+      deptCode,
+      slotDate,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return true;
+  }
 }
 
 /**
@@ -224,21 +340,29 @@ async function constantTimeEqual(a: string, b: string): Promise<boolean> {
 
 // --- shared trigger logic -------------------------------------------------
 /**
- * Generate one PENDING qc_inspections row per active template, snapshotting
- * the template's items into the row. Idempotent — if a row already exists for
- * (templateId, scheduledSlotAt) we skip it. Returns count of new rows created.
+ * Generate one PENDING qc_inspections row per active template THAT HAS
+ * SOMETHING TO SAMPLE on the slot's date, snapshotting the template's items
+ * into the row. Idempotent — if a row already exists for (templateId,
+ * scheduledSlotAt) we skip it.
+ *
+ * Returns { created, skipped, skippedNoActivity }. The third number is the
+ * whole point of the coupling and is reported by /trigger and /generate-now:
+ * "nothing generated" must be legible as "nothing was made today", not as a
+ * cron that failed.
  */
 export async function generatePendingForSlot(
   db: D1Database,
   slotIso: string,
-): Promise<{ created: number; skipped: number }> {
-  const [tplRes, tplItemRes, existingRes] = await Promise.all([
+): Promise<{ created: number; skipped: number; skippedNoActivity: number }> {
+  const [tplRes, tplItemRes, existingRes, nextInspectionNo] = await Promise.all([
     db.prepare("SELECT * FROM qc_templates WHERE active = 1").all<TemplateRow>(),
     db.prepare("SELECT * FROM qc_template_items").all<TemplateItemRow>(),
     db
       .prepare("SELECT templateId FROM qc_inspections WHERE scheduledSlotAt = ?")
       .bind(slotIso)
       .all<{ templateId: string }>(),
+    // Read the number base ONCE, before the loop — see inspectionNoAllocator.
+    inspectionNoAllocator(db),
   ]);
 
   const templates = tplRes.results ?? [];
@@ -249,14 +373,29 @@ export async function generatePendingForSlot(
   const slotDate = slotIso.split("T")[0];
   let created = 0;
   let skipped = 0;
+  let skippedNoActivity = 0;
+
+  // One probe per (stage, deptCode) rather than one per template — several
+  // templates commonly share a department.
+  const activityCache = new Map<string, boolean>();
 
   for (const tpl of templates) {
     if (existingTplIds.has(tpl.id)) {
       skipped++;
       continue;
     }
+    const activityKey = `${tpl.stage}|${tpl.deptCode}`;
+    let active = activityCache.get(activityKey);
+    if (active === undefined) {
+      active = await stageHadActivity(db, tpl.stage, tpl.deptCode, slotDate);
+      activityCache.set(activityKey, active);
+    }
+    if (!active) {
+      skippedNoActivity++;
+      continue;
+    }
     const inspId = genInspId();
-    const inspNo = await getNextInspectionNo(db);
+    const inspNo = nextInspectionNo();
     const items = tplItems
       .filter((i) => i.templateId === tpl.id)
       .sort((a, b) => a.sequence - b.sequence);
@@ -312,7 +451,7 @@ export async function generatePendingForSlot(
   }
 
   if (stmts.length) await db.batch(stmts);
-  return { created, skipped };
+  return { created, skipped, skippedNoActivity };
 }
 
 // --- routes ---------------------------------------------------------------
@@ -781,6 +920,86 @@ app.post("/:id/complete", async (c) => {
     return c.json({ success: true, data: res.data, sideEffects: res.sideEffects });
   } catch (err) {
     console.error("[qc-pending/complete] error:", err);
+    return c.json({ success: false, error: err instanceof Error ? err.message : "Invalid body" }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/qc-pending/bulk-skip — retire a backlog of slots that were
+// generated by the old blind schedule and were never answerable.
+//
+// THIS HAS NOT BEEN RUN. It exists so that clearing the 3,009-row backlog is a
+// reviewed, recorded operation with a reason attached, instead of somebody
+// running UPDATE by hand against prod. Deciding to clear it is the owner's
+// call, not an agent's.
+//
+// Safety posture:
+//   • DRY RUN BY DEFAULT. Without `confirm: true` it only COUNTS what it would
+//     touch and writes nothing.
+//   • `beforeSlotIso` is REQUIRED — there is no "skip everything" call. You
+//     name a cut-off and it only touches slots older than it.
+//   • `reason` is REQUIRED (>= 10 chars) and is written onto every row, so the
+//     history says why these were retired rather than leaving 3,009 silent
+//     SKIPPEDs.
+//   • Only PENDING / IN_PROGRESS rows move. A COMPLETED or already-SKIPPED
+//     inspection is never rewritten.
+//   • Gated on qc-inspections:delete — the same permission that cancels a
+//     single slot.
+//
+// Body: { beforeSlotIso: string, reason: string, confirm?: boolean }
+// ---------------------------------------------------------------------------
+app.post("/bulk-skip", async (c) => {
+  const denied = await requirePermission(c, "qc-inspections", "delete");
+  if (denied) return denied;
+  try {
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const beforeSlotIso = String(body.beforeSlotIso ?? "").trim();
+    const reason = String(body.reason ?? "").trim();
+    const confirm = body.confirm === true;
+
+    if (!beforeSlotIso) {
+      return c.json({ success: false, error: "beforeSlotIso is required — name a cut-off" }, 400);
+    }
+    if (reason.length < 10) {
+      return c.json(
+        { success: false, error: "reason is required and must say something (>= 10 chars)" },
+        400,
+      );
+    }
+
+    const countRow = await c.var.DB
+      .prepare(
+        `SELECT COUNT(*) AS n FROM qc_inspections
+          WHERE status IN ('PENDING','IN_PROGRESS')
+            AND scheduledSlotAt < ?`,
+      )
+      .bind(beforeSlotIso)
+      .first<{ n: number }>();
+    const matched = Number(countRow?.n ?? 0);
+
+    if (!confirm) {
+      return c.json({
+        success: true,
+        dryRun: true,
+        matched,
+        message: `${matched} inspection(s) would be marked SKIPPED. Re-send with confirm: true to apply.`,
+      });
+    }
+
+    const now = new Date().toISOString();
+    await c.var.DB
+      .prepare(
+        `UPDATE qc_inspections
+            SET status = 'SKIPPED', skipReason = ?, completedAt = ?
+          WHERE status IN ('PENDING','IN_PROGRESS')
+            AND scheduledSlotAt < ?`,
+      )
+      .bind(reason, now, beforeSlotIso)
+      .run();
+
+    return c.json({ success: true, dryRun: false, matched, skipped: matched });
+  } catch (err) {
+    console.error("[qc-pending/bulk-skip] error:", err);
     return c.json({ success: false, error: err instanceof Error ? err.message : "Invalid body" }, 400);
   }
 });

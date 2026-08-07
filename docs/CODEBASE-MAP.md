@@ -856,8 +856,8 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/quality.tsx` — QC Inspections (Pending/History/Templates) (977) | `src/api/routes/qc-inspections.ts` — QC inspections CRUD (qc_inspections + qc_defects) | `qc_inspections` / `qc_defects` / `qc_templates` / `qc_template_items` / `qc_tags` | `tests/audit.test.mjs` |
-| `src/pages/warehouse.tsx` — Grid / Stock In-Out / Movement History (1368) | `src/api/routes/qc-pending.ts` — cron generates PENDING inspections from templates (12:00/16:00) | `stock_movements` / `stock_adjustments` / `fg_units` | `tests/do-scan-sort.test.mjs` |
+| `src/pages/quality.tsx` — QC Inspections (Pending/History/Templates) (1063) · `src/pages/worker/qc.tsx` — IPQC on the phone (own dept + today only) | `src/api/routes/qc-inspections.ts` — QC inspections CRUD (qc_inspections + qc_defects) · `worker.ts` GET /qc-today + POST /qc/:id/complete | `qc_inspections` / `qc_defects` / `qc_templates` / `qc_template_items` / `qc_tags` | `tests/qc-wip-completable.test.mjs` / `tests/qc-worker-portal.test.mjs` / `tests/qc-generation-coupling.test.mjs` / `tests/audit.test.mjs` |
+| `src/pages/warehouse.tsx` — Grid / Stock In-Out / Movement History (1368) | `src/api/routes/qc-pending.ts` — cron generates PENDING inspections from templates (12:00/16:00), gated on real production; owns `completeInspection` (shared desktop+phone) | `stock_movements` / `stock_adjustments` / `fg_units` | `tests/do-scan-sort.test.mjs` |
 | `src/pages/do-scan.tsx` — mobile DO sticker scanning | `src/api/routes/qc-templates.ts` — checklist templates (qc_templates + qc_template_items) | `fabric_trackings` / `audit_events` / `edit_presence` / `file_assets` | `tests/dept-scan-split.test.mjs` |
 | `src/pages/rack-scan.tsx` — rack QR stock-in; carries pieceNo/totalPieces per line (1097) | `src/api/routes/public-rack-qr.ts` — PUBLIC no-login rack stock-in + /p/ piece-sticker rack-write (auth-bypassed, idempotent); /item + stock-in are PER-PIECE (pieceNo+totalPieces → distinct rack_items row; multi-piece stamps piece_pics.racking_number not card-level) | `kv_config` / `hookka_erp_metrics` / `piece_pics` | `tests/rack-qr-per-piece.test.mjs` / `tests/scan-per-piece.test.mjs` |
 | | `src/api/lib/packing-rack-write.ts` — `applyPackingRack` (rack set/clear + `rack_items` occupancy mirror); exports `ensurePiecePicsRackingColumn` (shared mig-0192 DDL) | `rack_items` / `rack_locations` / `piece_pics` | `tests/packing-piece-identity.test.mjs` |
@@ -893,11 +893,11 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
   - Production tab (renderProductionTab) — L1065
   - System tab (renderSystemTab) — L1066
 - `src/pages/quality.tsx`
-  - QualityPage (root) — L150-187
-  - PendingTab + PendingRow — L207-341
-  - DoInspectionForm — L342-603
-  - HistoryTab — L604-672
-  - TemplatesTab + TemplateEditor — L673-977
+  - QualityPage (root) — L158-194
+  - PendingTab + PendingRow — L215-405
+  - DoInspectionForm (subject picker + checklist + submit/skip) — L406-701
+  - HistoryTab — L702-770
+  - TemplatesTab + TemplateEditor — L771-1077
 - `src/pages/rack-scan.tsx`
   - RackScanPage (single component) — L103-1097
 - `src/pages/maintenance.tsx`
@@ -908,6 +908,10 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 **Gotchas**
 - public-rack-qr.ts is auth-BYPASSED via PUBLIC_PREFIXES ('/api/public/rack-qr/'). Any new endpoint added under that prefix is exposed with no login — guard tenancy/idempotency manually. Covered by tests/security-public-endpoints.test.mjs.
+- **QC was 100% theatre until 2026-08-07.** Prod: 3,009 inspections, ALL PENDING, ZERO ever completed since the first slot on 2026-04-28. Three independent causes, all now fixed. (1) WIP was UNSUBMITTABLE: `quality.tsx` asked `/api/job-cards?status=IN_PROGRESS&departmentCode=…` but `job-cards.ts` required `picId`, hard-coded `status IN ('COMPLETED','TRANSFERRED') AND completedDate IS NOT NULL`, and never read `departmentCode` — empty dropdown, Submit permanently disabled, and the empty list rendered as the reassuring "No active job cards… Use Skip if no production today". The endpoint now serves BOTH reads (picId = finished cards, departmentCode+status = live cards) and a failed fetch renders as a red ERROR. (2) The shop floor could not REACH QC: "qc" appeared zero times in `src/pages/worker/` and `worker.ts`. Now `/worker/qc` (WIP only, own current dept only, today only, FAIL requires text), surfaced on the worker home only when a slot is actually open. (3) Generation was a BLIND SCHEDULE (`SELECT * FROM qc_templates WHERE active = 1`, 34 rows/day forever). Now gated by `stageHadActivity` — WIP needs a card IN_PROGRESS/PAUSED or completed that day, RM needs a CONFIRMED/POSTED GRN that day, FG needs a unit produced that day; probes FAIL OPEN. Also `inspectionNo` used to COLLIDE (COUNT(*) inside the loop, all INSERTs deferred to one `db.batch()`, so every row in a slot shared one number) — now one allocator per run off the max suffix.
+- **One completion core, two surfaces.** `completeInspection()` in `qc-pending.ts` owns the FAIL side-effects (qc_tags + qc_defects + JC → BLOCKED + piece_pics clear + parent-PO recompute) and is called by BOTH `POST /api/qc-pending/:id/complete` and `POST /api/worker/qc/:id/complete`. Do NOT re-implement it on a new surface: a caller that skips the piece_pics clear resurrects a QC-blocked card on the next scan (BUG-2026-06-08). A FAIL with no notes is refused there, so it is refused everywhere.
+- **The worker QC endpoints are token-guarded, not public.** `/api/worker/*` is NOT in PUBLIC_PREFIXES — `getWorker()` / X-Worker-Token is the credential. The completion additionally re-checks the inspection's department against the caller's CURRENT dept AND that the named job card is live in that same dept, because a WIP FAIL is a WRITE against whatever id you hand it.
+- **`POST /api/qc-pending/bulk-skip` exists and has NEVER BEEN RUN.** It is the reviewed way to retire the 3,009-row legacy backlog: dry-run unless `confirm:true`, `beforeSlotIso` + a >=10-char `reason` both mandatory, only touches PENDING/IN_PROGRESS. Clearing the backlog is the owner's call.
 - QC Phase 2 is DESCOPED (memory project_qc_phase2_descoped): qc_tags rows still get written on FAIL but owner does NOT want them surfaced in Inventory or as DO warnings. Don't re-surface qc_tags.
 - files.ts serves images via attachment Content-Disposition yet <img src=/api/files/:id/download> still renders — relied on by the Products Catalog modular photo grid. Don't change disposition.
 - rack stock-in is move-aware and idempotent (writes fg_units / job_cards). WIP idempotency uses wip_cascade_log claim (created at runtime, opt-in via orgId) — see arch_wip_idempotency_gap; don't double-apply.

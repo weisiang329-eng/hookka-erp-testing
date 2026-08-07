@@ -399,6 +399,29 @@ export default function FinanceDashboardPage() {
       ))}
     </tr>
   );
+  // Two columns per month (owner 2026-08-06: 「每个月分成两个 column, 一个
+  // actual + percentage, 一个 forecast amount 和 percentage」). The forecast used
+  // to ride inside the actual cell as "(fc 80.87%)", which put two different
+  // measures in one column and left the forecast AMOUNT nowhere to go.
+  const periodHeadSplit = (labels: string[]) => (
+    <>
+      <tr className="border-b border-[#E2DDD8] bg-[#F7F4EF]">
+        <td className="px-2 py-1.5 text-left text-[11px] font-bold text-[#6B5C32] tracking-wide">PERIOD</td>
+        {labels.map((l) => (
+          <td key={l} colSpan={2} className="px-2 py-1.5 text-center text-[12px] font-bold text-[#1F1D1B] whitespace-nowrap border-l border-[#E2DDD8]">{l}</td>
+        ))}
+      </tr>
+      <tr className="border-b-2 border-[#E2DDD8] bg-[#F7F4EF]">
+        <td className="px-2 py-1 text-left text-[10px] text-[#9CA3AF]"></td>
+        {labels.map((l) => (
+          <Fragment key={l}>
+            <td className="px-2 py-1 text-right text-[10px] font-semibold text-[#6B5C32] border-l border-[#E2DDD8]">Actual</td>
+            <td className="px-2 py-1 text-right text-[10px] font-semibold text-[#9A3A2D]">Forecast</td>
+          </Fragment>
+        ))}
+      </tr>
+    </>
+  );
 
   return (
     <div className="space-y-4 p-1">
@@ -535,12 +558,17 @@ export default function FinanceDashboardPage() {
                 <div className="overflow-x-auto">
                   <table className="w-full">
                     <tbody>
-                      {periodHead(csData.map((d) => String(d.label)))}
+                      {periodHeadSplit(csData.map((d) => String(d.label)))}
                       {/* The base every percentage divides by (owner 2026-07-30). */}
                       <tr className="border-b border-[#E2DDD8] bg-[#F6F1E7]">
                         <td className={`${td} text-left font-semibold`}>REVENUE</td>
-                        {csData.map((d) => (
-                          <td key={String(d.label)} className={`${td} font-semibold`}>{rm(d.__sales__ as number)}</td>
+                        {csData.map((d, i) => (
+                          <Fragment key={String(d.label)}>
+                            <td className={`${td} font-semibold border-l border-[#E2DDD8]`}>{rm(d.__sales__ as number)}</td>
+                            <td className={`${td} font-semibold text-[#9A3A2D]`}>
+                              {(rows ?? [])[i]?.forecast?.sales != null ? rm((rows ?? [])[i]!.forecast!.sales!) : "-"}
+                            </td>
+                          </Fragment>
                         ))}
                       </tr>
                       {csCats.map((cat) => (
@@ -551,25 +579,33 @@ export default function FinanceDashboardPage() {
                           {csData.map((d) => {
                             const amt = d[cat] as number | null;
                             const p = d[`__pct__${cat}`] as number | null;
+                            const fc = d[`__fc__${cat}`] as number | null;
                             const fp = d[`__fcpct__${cat}`] as number | null;
+                            // Over the target reads rust, at or under reads green
+                            // — the comparison only means something when both
+                            // sides exist.
+                            const over = p !== null && fp !== null && p > fp;
                             return (
-                              <td key={String(d.label)} className={td}>
-                                {amt === null || amt === 0 ? (
-                                  "-"
-                                ) : (
-                                  <>
-                                    {rm(amt)}
-                                    <span className="ml-1.5 text-[10px] text-[#9A3A2D]">{p === null ? "" : `${p.toFixed(2)}%`}</span>
-                                    {/* Target % from the Forecast P&L; green when
-                                        actual is at or under it, rust when over. */}
-                                    {fp !== null && (
-                                      <span className={`ml-1 text-[10px] ${p !== null && p > fp ? "text-[#9A3A2D]" : "text-[#27500A]"}`}>
-                                        (fc {fp.toFixed(2)}%)
+                              <Fragment key={String(d.label)}>
+                                <td className={`${td} border-l border-[#E2DDD8]`}>
+                                  {amt === null || amt === 0 ? "-" : (
+                                    <>
+                                      {rm(amt)}
+                                      <span className={`ml-1.5 text-[10px] ${fp === null ? "text-[#9A3A2D]" : over ? "text-[#9A3A2D]" : "text-[#27500A]"}`}>
+                                        {p === null ? "" : `${p.toFixed(2)}%`}
                                       </span>
-                                    )}
-                                  </>
-                                )}
-                              </td>
+                                    </>
+                                  )}
+                                </td>
+                                <td className={`${td} text-[#9A3A2D]`}>
+                                  {fc === null ? "-" : (
+                                    <>
+                                      {rm(fc)}
+                                      <span className="ml-1.5 text-[10px]">{fp === null ? "" : `${fp.toFixed(2)}%`}</span>
+                                    </>
+                                  )}
+                                </td>
+                              </Fragment>
                             );
                           })}
                         </tr>

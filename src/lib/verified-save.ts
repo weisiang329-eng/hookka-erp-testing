@@ -49,6 +49,44 @@
 
 import { csrfHeaders } from "./csrf";
 
+// The write already succeeded before we read back, so a failed readback is
+// treated as transient and retried a couple of times before we give up. Total
+// added wait in the worst (all-fail) case: READBACK_RETRY_MS * (1 + 2) = 900ms.
+const READBACK_ATTEMPTS = 3;
+const READBACK_RETRY_MS = 300;
+// eslint-disable-next-line no-restricted-syntax -- module-level utility, not a React component; useTimeout doesn't apply
+const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Run a readback with a few retries. The write already returned 2xx, so a
+ * throw here (a 30s-cap abort — "signal is aborted without reason" — a blip
+ * 5xx, or a read racing the commit) is transient; retry before giving up.
+ * `emptyIsRetryable` also retries a null/undefined result (single-item saves,
+ * where null means "not found yet"); bulk saves pass false because an empty
+ * array is a legitimate shape their comparison already handles.
+ *
+ * Exported for direct testing — the retry arithmetic is the load-bearing part.
+ */
+export async function readbackWithRetry<R>(
+  fn: () => Promise<R>,
+  emptyIsRetryable: (v: R) => boolean,
+): Promise<{ value: R | null; lastErr: unknown }> {
+  let value: R | null = null;
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt < READBACK_ATTEMPTS; attempt++) {
+    if (attempt > 0) await delay(READBACK_RETRY_MS * attempt);
+    try {
+      value = await fn();
+      lastErr = null;
+      if (!emptyIsRetryable(value)) break;
+    } catch (err) {
+      value = null;
+      lastErr = err;
+    }
+  }
+  return { value, lastErr };
+}
+
 type SaveResult<T> =
   | { ok: true; data: T }
   | { ok: false; reason: "http"; status: number; body: string }
@@ -111,21 +149,30 @@ export async function verifiedSave<T>(args: VerifiedSaveArgs<T>): Promise<SaveRe
   }
 
   // ── 2. Read back ────────────────────────────────────────────────────────
-  let data: T | null;
-  try {
-    data = await args.readback();
-  } catch (err) {
-    return {
-      ok: false,
-      reason: "network",
-      details: `readback failed: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
+  // The WRITE already returned 2xx above, so the row is (almost certainly)
+  // committed. A readback that throws or comes back empty here is therefore
+  // most likely transient — the global 30s fetch cap firing on a slow-
+  // connection tail (its abort message is literally "signal is aborted without
+  // reason"), a momentary 5xx, or a read that raced the commit. Treating that
+  // one blip as "save failed" rolls the UI back and tells the operator their
+  // edit was lost when it actually persisted — the owner hit exactly this
+  // editing a customer's credit limit, and it recurs on /customers and
+  // /employees in the error feed.
+  //
+  // So retry the readback (a GET — idempotent, never re-writes) a couple of
+  // times with a short backoff before giving up. Only when it STILL can't
+  // confirm do we report failure, and honestly.
+  const { value: data, lastErr } = await readbackWithRetry(
+    args.readback,
+    (v) => v == null,
+  );
   if (data == null) {
     return {
       ok: false,
       reason: "network",
-      details: "readback returned null/undefined — resource not found after save",
+      details: lastErr
+        ? `readback failed after ${READBACK_ATTEMPTS} attempts: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`
+        : "readback returned null/undefined — resource not found after save",
     };
   }
 
@@ -222,16 +269,18 @@ export async function verifiedBulkSave<TItem>(
     return { ok: false, reason: "http", status: res.status, body };
   }
 
-  let data: TItem[];
-  try {
-    data = await args.readback();
-  } catch (err) {
+  // Same transient-readback retry as the single-item path. An empty array is a
+  // legitimate readback shape here (the per-item compare reports what's
+  // missing), so only a throw triggers a retry.
+  const bulk = await readbackWithRetry(args.readback, () => false);
+  if (bulk.value == null) {
     return {
       ok: false,
       reason: "network",
-      details: `readback failed: ${err instanceof Error ? err.message : String(err)}`,
+      details: `readback failed after ${READBACK_ATTEMPTS} attempts: ${bulk.lastErr instanceof Error ? bulk.lastErr.message : String(bulk.lastErr)}`,
     };
   }
+  const data: TItem[] = bulk.value;
 
   const perItemDiffs: Array<{
     id: string;

@@ -80,6 +80,14 @@ const rm2 = (sen: number | null | undefined) =>
 
 const GOLD = "#6B5C32";
 const RUST = "#9A3A2D";
+// Stack colours for the cost-structure chart, indexed by the material's
+// position. Lifted out of the JSX so the Show chips can paint themselves the
+// same colour as the band they toggle — a chip whose swatch didn't match its
+// band would be worse than no swatch at all.
+const CS_COLOURS = [
+  "#6B5C32", "#9C6F1E", "#C9B98A", "#3E6570", "#7A9EA7", "#9A3A2D",
+  "#C58B7F", "#4F7C3A", "#8FB07A", "#6B7280", "#A9A29B", "#D8CFC4",
+];
 const TEAL = "#3E6570";
 
 function ChartTip(props: {
@@ -209,6 +217,12 @@ export default function FinanceDashboardPage() {
   const [csMeasure, setCsMeasure] = useState<"spend" | "purchase" | "closing">("spend");
   const [csLine, setCsLine] = useState<"all" | "bedframe" | "sofa">("all");
   const [csFocus, setCsFocus] = useState<string>("");
+  // Which materials the CHART draws (owner 2026-08-06: 「我想把 cost structure
+  // 的 diagram 做成我勾选我要看的」). Held as the HIDDEN set, not the shown one,
+  // so a material that appears in a later period is visible by default instead
+  // of silently missing from a stack the operator believes is complete.
+  // The table below stays complete — it is the record; the chart is the view.
+  const [csHidden, setCsHidden] = useState<Set<string>>(new Set());
 
   // The loading state is cleared by the toggle handler (a user action), not
   // here — setting state synchronously inside an effect cascades renders.
@@ -386,13 +400,17 @@ export default function FinanceDashboardPage() {
               ? Math.round((fc / fcSales) * 10000) / 100
               : null;
         }
-        // Total planned spend for the period — the dashed line over the stacked
-        // bars (owner 2026-08-06: 「cost structure 的 diagram 可以把 forecast 也
-        // 放进去？」). Null rather than 0 when nothing is keyed, so recharts
-        // breaks the line instead of dropping it to the axis on months with no
+        // Planned spend for the period — the dashed line over the stacked bars
+        // (owner 2026-08-06: 「diagram 可以把 forecast 也放进去？」). It totals
+        // only the materials currently DRAWN, so it always states the target for
+        // the stack beneath it: tick one material and the line becomes that
+        // material's target, which is what 「forecast line 只能一个？」 was
+        // asking for. Null rather than 0 when nothing is keyed, so recharts
+        // breaks the line instead of dropping it to the axis on a month with no
         // plan.
         let fcTotal: number | null = null;
         for (const cat of csCats) {
+          if (csHidden.has(cat)) continue;
           const v = point[`__fc__${cat}`] as number | null;
           if (v !== null) fcTotal = (fcTotal ?? 0) + v;
         }
@@ -400,7 +418,7 @@ export default function FinanceDashboardPage() {
         return point;
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [rows, csCats, csLine, csMeasure],
+    [rows, csCats, csLine, csMeasure, csHidden],
   );
   // The focus falls back to the first category until the operator picks one —
   // the trend read a blank key before this and drew a flat zero line.
@@ -581,6 +599,47 @@ export default function FinanceDashboardPage() {
                     same rule the Sofa / Bedframe P&amp;L uses.
                   </p>
                 )}
+                {/* Which materials the chart draws. Colours match the stack, so
+                    a chip reads as its own band. */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[11px] text-[#6B7280] mr-0.5">Show</span>
+                  {csCats.map((cat, i) => {
+                    const colour = CS_COLOURS[i % CS_COLOURS.length];
+                    const on = !csHidden.has(cat);
+                    return (
+                      <button
+                        key={cat}
+                        onClick={() =>
+                          setCsHidden((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(cat)) next.delete(cat);
+                            else next.add(cat);
+                            return next;
+                          })
+                        }
+                        className={`flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] cursor-pointer ${
+                          on ? "border-[#E2DDD8] bg-white text-[#1F1D1B]" : "border-[#E2DDD8] bg-[#F0ECE9] text-[#9CA3AF]"
+                        }`}
+                        title={on ? `Hide ${cat} from the chart` : `Show ${cat} on the chart`}
+                      >
+                        <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: on ? colour : "#D8D3CE" }} />
+                        {cat}
+                      </button>
+                    );
+                  })}
+                  {csHidden.size > 0 && (
+                    <button onClick={() => setCsHidden(new Set())}
+                      className="rounded-md border border-[#E2DDD8] px-2 py-0.5 text-[11px] text-[#3E6570] cursor-pointer hover:bg-[#F0ECE9]">
+                      Show all
+                    </button>
+                  )}
+                  {csHidden.size < csCats.length && (
+                    <button onClick={() => setCsHidden(new Set(csCats))}
+                      className="rounded-md border border-[#E2DDD8] px-2 py-0.5 text-[11px] text-[#6B7280] cursor-pointer hover:bg-[#F0ECE9]">
+                      Clear
+                    </button>
+                  )}
+                </div>
                 <div className="h-64">
                   <ResponsiveContainer width="100%" height="100%">
                     <ComposedChart data={csData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
@@ -589,10 +648,12 @@ export default function FinanceDashboardPage() {
                       <YAxis tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false}
                         tickFormatter={(v: number) => rm(v)} />
                       <Tooltip content={<ChartTip />} />
-                      {csCats.map((cat, i) => (
-                        <Bar key={cat} dataKey={cat} name={cat} stackId="cs" maxBarSize={44}
-                          fill={["#6B5C32", "#9C6F1E", "#C9B98A", "#3E6570", "#7A9EA7", "#9A3A2D", "#C58B7F", "#4F7C3A", "#8FB07A", "#6B7280", "#A9A29B", "#D8CFC4"][i % 12]} />
-                      ))}
+                      {csCats.map((cat, i) =>
+                        csHidden.has(cat) ? null : (
+                          <Bar key={cat} dataKey={cat} name={cat} stackId="cs" maxBarSize={44}
+                            fill={CS_COLOURS[i % CS_COLOURS.length]} />
+                        ),
+                      )}
                       {/* Total planned spend — the dashed line the rest of this
                           dashboard uses for a forecast, so the stack can be read
                           against its target at a glance. connectNulls stays OFF:

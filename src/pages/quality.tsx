@@ -403,15 +403,23 @@ function DoInspectionForm({
   const stage = insp.stage as Stage | null;
 
   // Subject picker data (lazily loaded based on stage)
-  const { data: rmResp } = useCachedJson<{ data?: RawMaterialOpt[] }>(
+  const { data: rmResp, error: rmError, loading: rmLoading } = useCachedJson<{ data?: RawMaterialOpt[] }>(
     stage === "RM" ? "/api/raw-materials" : null,
   );
-  const { data: jcResp } = useCachedJson<{ data?: JobCardOpt[] }>(
-    stage === "WIP" ? `/api/job-cards?status=IN_PROGRESS&departmentCode=${encodeURIComponent(insp.deptCode || insp.department || "")}` : null,
+  // A card the department has OPEN right now is what an IPQC inspector can
+  // actually sample. WAITING / IN_PROGRESS / PAUSED are the three live
+  // statuses; BLOCKED is deliberately excluded (it is already sitting on a
+  // failed inspection) and COMPLETED / TRANSFERRED are finished work.
+  const { data: jcResp, error: jcError, loading: jcLoading } = useCachedJson<{ data?: JobCardOpt[] }>(
+    stage === "WIP"
+      ? `/api/job-cards?status=IN_PROGRESS,WAITING,PAUSED&departmentCode=${encodeURIComponent(insp.deptCode || insp.department || "")}`
+      : null,
   );
-  const { data: fgResp } = useCachedJson<{ data?: FgBatchOpt[] }>(
+  const { data: fgResp, error: fgError, loading: fgLoading } = useCachedJson<{ data?: FgBatchOpt[] }>(
     stage === "FG" ? "/api/fg-units" : null,
   );
+  const subjectsError = stage === "RM" ? rmError : stage === "WIP" ? jcError : stage === "FG" ? fgError : null;
+  const subjectsLoading = stage === "RM" ? rmLoading : stage === "WIP" ? jcLoading : stage === "FG" ? fgLoading : false;
 
   // subjectType is fixed by stage (RM→RAW_MATERIAL, WIP→JOB_CARD, FG→FG_BATCH).
   // The user picks a specific subject from a stage-specific dropdown; the type
@@ -556,10 +564,27 @@ function DoInspectionForm({
               </option>
             ))}
           </select>
-          {stage === "WIP" && subjects.length === 0 && (
-            <p className="mt-1 text-xs text-muted-foreground">
-              No active job cards in this department. Use Skip if no production today.
+          {/*
+            A FAILED subject fetch used to render as the reassuring "no
+            production today" line below — a 400 from /api/job-cards looked
+            exactly like a quiet factory, which is how three months and 3,009
+            unsubmittable inspections went unnoticed (BUG-2026-08-07). An
+            error now says ERROR, in red, with the reason. If this breaks
+            again it must LOOK broken.
+          */}
+          {subjectsError ? (
+            <p className="mt-1 text-xs font-medium text-red-600">
+              Could not load the subject list: {subjectsError} — this is a fault, not an empty
+              factory. Do not Skip; report it.
             </p>
+          ) : subjectsLoading ? (
+            <p className="mt-1 text-xs text-muted-foreground">Loading subjects…</p>
+          ) : (
+            stage === "WIP" && subjects.length === 0 && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                No active job cards in this department. Use Skip if no production today.
+              </p>
+            )
           )}
         </div>
         <div>

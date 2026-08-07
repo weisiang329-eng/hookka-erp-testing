@@ -38,20 +38,41 @@ import { jcMinutesTotal } from "../../lib/job-card-minutes";
 const app = new Hono<Env>();
 
 // ---------------------------------------------------------------------------
-// GET /api/job-cards?picId=X[&from=YYYY-MM-DD][&to=YYYY-MM-DD][&status=...]
+// GET /api/job-cards?picId=X[&departmentCode=Y][&from=][&to=][&status=...]
 //
-// Returns COMPLETED + TRANSFERRED job_cards rows where the worker is PIC1 or
-// PIC2 (matched on pic1Id / pic2Id), joined to production_orders so each row
-// carries productCode + poNo without a second round-trip.
+// TWO reads share this handler, distinguished by which filter you send:
 //
-// Why this exists: Employee Performance tab used to read attendance_records
-// only — workers who do real production work (PIC on completed JCs) but
-// don't have explicit clock-in/clock-out punches looked like they did
-// nothing. This endpoint is the second data source.
+//   1. picId=X (Employee Performance) — the worker's COMPLETED + TRANSFERRED
+//      cards (PIC1 or PIC2), joined to production_orders so each row carries
+//      productCode + poNo without a second round-trip. This is the original
+//      shape and is unchanged.
+//
+//      Why it exists: Employee Performance used to read attendance_records
+//      only — workers who do real production work (PIC on completed JCs) but
+//      don't have explicit clock-in/clock-out punches looked like they did
+//      nothing. This endpoint is the second data source.
+//
+//   2. departmentCode=Y&status=IN_PROGRESS,WAITING,PAUSED (QC WIP sampling) —
+//      the cards a department has OPEN right now, so an IPQC inspector can
+//      pick the one they sampled.
+//
+// BUG-2026-08-07: (2) was the shape quality.tsx had been asking for since
+// 2026-04, and NONE of it worked — picId was mandatory (400 before anything
+// else ran), the WHERE hard-coded `status IN ('COMPLETED','TRANSFERRED') AND
+// completedDate IS NOT NULL` so IN_PROGRESS could never match even with a
+// picId, and departmentCode was never read at all. The subject dropdown was
+// therefore permanently empty and every WIP inspection was unsubmittable —
+// 1,947 of the 3,009 rows on prod. So: picId is optional (departmentCode is
+// the alternative required filter — one of the two must be present, this is
+// never an unbounded table scan), `status` genuinely selects, departmentCode
+// genuinely filters, and the `completedDate IS NOT NULL` guard applies only
+// when every requested status is terminal (an in-progress card has no
+// completedDate by definition — that clause was the whole reason the query
+// returned nothing).
 //
 // Each row's `picSlot` tells the caller which side this worker was on so
 // the FE can apply the existing "halve PIC2 contribution" convention if it
-// wants to.
+// wants to. With no picId there is no slot, so it is "".
 // ---------------------------------------------------------------------------
 type WorkerJcRow = {
   id: string;
@@ -59,6 +80,8 @@ type WorkerJcRow = {
   poNo: string | null;
   productCode: string | null;
   departmentCode: string | null;
+  departmentName: string | null;
+  sequence: number | null;
   wipCode: string | null;
   wipLabel: string | null;
   wipQty: number | null;
@@ -69,6 +92,11 @@ type WorkerJcRow = {
   pic2Id: string | null;
 };
 
+// The two statuses that mean "this card is finished". Everything else
+// (WAITING / IN_PROGRESS / PAUSED / BLOCKED) is live work with no
+// completedDate.
+const TERMINAL_JC_STATUSES = new Set(["COMPLETED", "TRANSFERRED"]);
+
 app.get("/", async (c) => {
   // job_cards is production data — gate with the same production-read
   // permission as production-orders.ts so the Employee Performance tab
@@ -77,35 +105,63 @@ app.get("/", async (c) => {
   if (denied) return denied;
 
   const picId = c.req.query("picId");
-  if (!picId) {
-    return c.json({ success: false, error: "picId required" }, 400);
+  const departmentCode = c.req.query("departmentCode");
+  if (!picId && !departmentCode) {
+    return c.json({ success: false, error: "picId or departmentCode required" }, 400);
   }
   const from = c.req.query("from") ?? null;
   const to = c.req.query("to") ?? null;
 
-  // Allowed terminal statuses. Default to both COMPLETED + TRANSFERRED — both
-  // mean "the worker finished the job", just one was handed off downstream.
+  // Default to both COMPLETED + TRANSFERRED — both mean "the worker finished
+  // the job", just one was handed off downstream. Callers that want live work
+  // pass status= explicitly.
   const statusParam = c.req.query("status");
   const statuses = statusParam
-    ? statusParam.split(",").map((s) => s.trim()).filter(Boolean)
+    ? statusParam.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean)
     : ["COMPLETED", "TRANSFERRED"];
   if (statuses.length === 0) {
     return c.json({ success: false, error: "status filter empty" }, 400);
   }
+  const terminalOnly = statuses.every((s) => TERMINAL_JC_STATUSES.has(s));
 
   const db = c.var.DB;
   const statusPlaceholders = statuses.map(() => "?").join(",");
-  const dateFilter: string[] = [];
-  const dateBinds: string[] = [];
+
+  // Built in bind order — every clause pushes its own placeholder AND its own
+  // value, so adding a filter can't silently shift the argument list.
+  const clauses: string[] = ["jc.orgId = ?"];
+  const binds: (string | number)[] = [getOrgId(c)];
+  if (picId) {
+    clauses.push("(jc.pic1Id = ? OR jc.pic2Id = ?)");
+    binds.push(picId, picId);
+  }
+  if (departmentCode) {
+    clauses.push("jc.departmentCode = ?");
+    binds.push(departmentCode);
+  }
+  clauses.push(`jc.status IN (${statusPlaceholders})`);
+  binds.push(...statuses);
+  if (terminalOnly) {
+    clauses.push("jc.completedDate IS NOT NULL");
+  }
+  // from/to bracket completedDate, so they only mean anything for finished
+  // cards. Applied whenever supplied; a live-status read simply doesn't send
+  // them.
   if (from) {
-    dateFilter.push("jc.completedDate >= ?");
-    dateBinds.push(from);
+    clauses.push("jc.completedDate >= ?");
+    binds.push(from);
   }
   if (to) {
-    dateFilter.push("jc.completedDate <= ?");
-    dateBinds.push(to);
+    clauses.push("jc.completedDate <= ?");
+    binds.push(to);
   }
-  const dateClause = dateFilter.length > 0 ? ` AND ${dateFilter.join(" AND ")}` : "";
+
+  // Finished cards read newest-first (the Performance tab's daily breakdown);
+  // live cards have no completedDate to sort on, so they follow the
+  // department's own routing order.
+  const orderBy = terminalOnly
+    ? "jc.completedDate DESC, jc.id DESC"
+    : "jc.departmentCode, jc.sequence, jc.id";
 
   const sql = `
     SELECT
@@ -114,6 +170,8 @@ app.get("/", async (c) => {
       po.poNo            AS poNo,
       po.productCode     AS productCode,
       jc.departmentCode  AS departmentCode,
+      jc.departmentName  AS departmentName,
+      jc.sequence        AS sequence,
       jc.wipCode         AS wipCode,
       jc.wipLabel        AS wipLabel,
       jc.wipQty          AS wipQty,
@@ -124,19 +182,14 @@ app.get("/", async (c) => {
       jc.pic2Id          AS pic2Id
     FROM job_cards jc
     LEFT JOIN production_orders po ON po.id = jc.productionOrderId
-    WHERE jc.orgId = ?
-      AND (jc.pic1Id = ? OR jc.pic2Id = ?)
-      AND jc.status IN (${statusPlaceholders})
-      AND jc.completedDate IS NOT NULL
-      ${dateClause}
-    ORDER BY jc.completedDate DESC, jc.id DESC
+    WHERE ${clauses.join("\n      AND ")}
+    ORDER BY ${orderBy}
     LIMIT 5000
   `;
 
-  const orgId = getOrgId(c);
   const res = await db
     .prepare(sql)
-    .bind(orgId, picId, picId, ...statuses, ...dateBinds)
+    .bind(...binds)
     .all<WorkerJcRow>();
 
   const rows = res.results ?? [];
@@ -161,6 +214,7 @@ app.get("/", async (c) => {
       poNo: r.poNo ?? "",
       productCode: r.productCode ?? "",
       departmentCode: r.departmentCode ?? "",
+      departmentName: r.departmentName ?? "",
       wipCode: r.wipCode ?? "",
       wipLabel: r.wipLabel ?? "",
       wipQty,

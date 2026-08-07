@@ -97,6 +97,34 @@ generic context packs.
 - **Money is sen (integer)** = RM × 100. Use `MoneyInput` (value is `number|null`
   in RM dollars, commits on blur) for sen-int state fields. `DiscountInput`
   (`%`-aware) computes a discount off a base amount and emits sen.
+
+- **Every COMPUTED unit price lands on a whole ringgit, rounded UP** (owner
+  2026-08-07, "我全套系统都要整除的" — the complaint was unit prices reading
+  RM 995.14 / `.98`). One primitive: **`roundUpToRinggitSen`** in
+  `src/lib/utils.ts`, next to `roundSen` / `distributeRoundSen`. Never hand-roll
+  `Math.ceil(x/100)*100` — a source-guard test fails on a second copy
+  (`tests/whole-ringgit-unit-price.test.mjs`). Scope, all deliberate:
+  **UNIT prices only** (line subtotal follows as `whole unit × qty`, so don't
+  re-round subtotals or invoice totals); **SST is EXCLUDED** (owner:
+  "SST 就不需要" — tax keeps its cents, `roundSen` is unchanged); **computed
+  values only** (a price the operator TYPED is left as typed — this is why
+  `DiscountInput`'s `%` branch rounds up but its RM branch does not).
+
+- **Sofa combos: round up, then GIVE THE EXCESS BACK.** Combo proration exists
+  to make N piece prices sum EXACTLY to a negotiated total, and rounding each
+  unit up breaks that. `distributeComboUnitPrices` (`src/api/lib/sofa-combo.ts`)
+  resolves it: round every unit up, then hand whole ringgit back — starting with
+  the line the rounding flattered most — so **the agreed combo total still
+  holds**. An agreed customer price that silently grows is worse than a `.98`.
+  Both the backend pass AND `src/pages/sales/create.tsx` call this one function.
+
+- **The round-up is FORWARD-ONLY — never retro-apply it.** Rounding up always
+  moves money in our favour, so re-rounding an already-issued document is a
+  customer dispute, not a fix. `/recompute-so-sofa-prices` and
+  `/recompute-co-sofa-prices` (`src/api/routes/import-completion/sofa-pricing.ts`)
+  reprice EXISTING orders and keep the OLD floor/round/residual maths on
+  purpose — there is a 🛑 DELIBERATE DIVERGENCE banner on the copy. Do not
+  "fix the drift" there.
 - **PO line code is mashed into the name** as "CODE - DESCRIPTION" —
   `purchase_order_items` has no dedicated code column. Recover it with
   `splitCodeName(code, name)` in `pdf-utils.ts`. GRN/PI and all sales-side docs

@@ -12,6 +12,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
 import { calculateUnitPrice, calculateLineTotal } from "@/lib/pricing";
+import { distributeComboUnitPrices } from "@/api/lib/sofa-combo";
 import {
   hasMixedSofaBedframe,
   SO_MIXED_CATEGORY_ERROR,
@@ -1815,49 +1816,27 @@ function CreateSalesOrderPage() {
       const adjustments = new Map<string, number>(); // _uid → new basePriceSen
       for (const m of comboMatches) {
         const groupLines = items.filter((l) => m.affectedLineUids.includes(l._uid));
-        const groupSum = groupLines.reduce((s, l) => s + getLineTotal(l), 0);
-        if (groupSum <= 0) continue;
-        const ratio = m.comboTotalSen / groupSum;
-        for (const l of groupLines) {
-          const lineTotal = getLineTotal(l);
-          // Re-derive an adjusted unit price for the line (after the combo
-          // discount), then back out the new basePriceSen. We keep the
-          // surcharges (divan/leg/totalHeight/special/quantity) as-is — only
-          // basePriceSen absorbs the discount, since that's the SKU value
-          // the combo is renegotiating. Round-down with a final rounding
-          // residual rebalanced into the last line so the group sum still
-          // exactly equals comboTotalSen.
-          const adjustedLineTotal = Math.floor(lineTotal * ratio);
-          const surchargesPerUnit =
-            (l.divanPriceSen || 0) +
-            (l.legPriceSen || 0) +
-            (l.totalHeightPriceSen || 0) +
-            (l.specialOrderPriceSen || 0);
-          const adjustedUnit = Math.max(0, Math.round(adjustedLineTotal / Math.max(1, l.quantity)));
-          const newBase = Math.max(0, adjustedUnit - surchargesPerUnit);
-          adjustments.set(l._uid, newBase);
-        }
-        // Rebalance rounding residual into the highest-priced line in the
-        // group so the post-discount sum matches comboTotalSen exactly.
-        const newGroupSum = groupLines.reduce((s, l) => {
-          const newBase = adjustments.get(l._uid) ?? l.basePriceSen;
-          const unit =
-            newBase +
-            (l.divanPriceSen || 0) +
-            (l.legPriceSen || 0) +
-            (l.totalHeightPriceSen || 0) +
-            (l.specialOrderPriceSen || 0);
-          return s + unit * l.quantity;
-        }, 0);
-        const residual = m.comboTotalSen - newGroupSum;
-        if (residual !== 0 && groupLines.length > 0) {
-          // Push residual into the line with the highest current basePrice.
-          const target = groupLines
-            .slice()
-            .sort((a, b) => (adjustments.get(b._uid) ?? b.basePriceSen) - (adjustments.get(a._uid) ?? a.basePriceSen))[0];
-          const cur = adjustments.get(target._uid) ?? target.basePriceSen;
-          adjustments.set(target._uid, Math.max(0, cur + Math.round(residual / Math.max(1, target.quantity))));
-        }
+        // The distribution maths is the SHARED distributeComboUnitPrices
+        // (src/api/lib/sofa-combo.ts) — the exact function the backend combo
+        // pass runs, so this page and the save can't drift. It prorates the
+        // combo total onto each line, rounds every UNIT price UP to a whole
+        // ringgit (owner 2026-08-07) and gives the round-up excess back so the
+        // agreed combo total still holds. Only basePriceSen absorbs the
+        // renegotiation; surcharges (divan/leg/totalHeight/special) ride along.
+        const newBases = distributeComboUnitPrices(
+          groupLines.map((l) => ({
+            lineTotalSen: getLineTotal(l),
+            quantity: l.quantity,
+            surchargesPerUnitSen:
+              (l.divanPriceSen || 0) +
+              (l.legPriceSen || 0) +
+              (l.totalHeightPriceSen || 0) +
+              (l.specialOrderPriceSen || 0),
+          })),
+          m.comboTotalSen,
+        );
+        if (!newBases) continue;
+        groupLines.forEach((l, i) => adjustments.set(l._uid, newBases[i]));
       }
       itemsAfterCombo = items.map((l) =>
         adjustments.has(l._uid) ? { ...l, basePriceSen: adjustments.get(l._uid)! } : l,

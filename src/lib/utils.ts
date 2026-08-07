@@ -246,6 +246,34 @@ export function roundSen(amountSen: number): number {
 }
 
 /**
+ * Round a sen amount UP to a whole ringgit (a multiple of 100 sen).
+ *
+ * Owner ruling 2026-08-07 ("我全套系统都要整除的"): every line UNIT PRICE the
+ * system COMPUTES must land on a whole ringgit, and the direction is UP
+ * ("进位"), not nearest — RM 995.14 → RM 996, RM 305.01 → RM 306. An amount
+ * that is ALREADY whole comes back unchanged (30500 → 30500); rounding up must
+ * never add a ringgit to an exact value.
+ *
+ * Scope, deliberately narrow:
+ *  - UNIT prices only. Line subtotal then follows as `whole unit × qty`, so it
+ *    is whole by construction — do NOT re-round subtotals or invoice totals.
+ *  - **SST is excluded** (owner: "SST 就不需要"). Never call this on a tax
+ *    figure; SST keeps its cents exactly as it computes them today.
+ *  - COMPUTED values only. A price the operator typed is left as typed.
+ *
+ * Fractional-sen input is settled to whole sen first (`roundSen`) so float
+ * noise like 30500.0000001 can't silently buy a whole extra ringgit.
+ *
+ * This is THE round-up primitive. Do not hand-roll `Math.ceil(x / 100) * 100`
+ * at a call site — a second copy is how these bugs get born.
+ */
+export function roundUpToRinggitSen(amountSen: number): number {
+  if (!Number.isFinite(amountSen)) return 0;
+  const whole = Math.ceil(roundSen(amountSen) / 100) * 100;
+  return whole === 0 ? 0 : whole; // normalise -0
+}
+
+/**
  * Round a list of fractional-sen `parts` to whole sen so that they sum EXACTLY
  * to `totalSen` — the largest-remainder (Hamilton) method.
  *

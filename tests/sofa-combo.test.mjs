@@ -65,9 +65,15 @@ test("2A+L combo: renegotiates bases to the combo total exactly", () => {
   assert.equal(r.matches[0].discountSen, 35000, "235000 − 200000");
   const a = r.newBaseByKey.get("a");
   const b = r.newBaseByKey.get("b");
-  // floor(125000*200000/235000)=106382 +residual 1 → 106383; floor(110000*…)=93617
-  assert.equal(a, 106383);
-  assert.equal(b, 93617);
+  // Owner pricing policy 2026-08-07 — WHOLE RINGGIT unit prices, rounded UP,
+  // with the agreed combo total still held exactly. Prorated ideals are
+  // 106,382.98 and 93,617.02 sen; rounded up they are RM 1,064 + RM 937 =
+  // RM 2,001, one ringgit over the RM 2,000 combo. The give-back goes to the
+  // line the rounding flattered most (L(RHF) gained 82.98 sen vs 17.02).
+  assert.equal(a, 106400, "2A(LHF) → RM 1,064");
+  assert.equal(b, 93600, "L(RHF) → RM 936 (carries the give-back)");
+  assert.equal(a % 100, 0, "unit price is a whole ringgit");
+  assert.equal(b % 100, 0, "unit price is a whole ringgit");
   assert.equal(a + b, 200000, "group sum equals the combo total to the sen");
 });
 

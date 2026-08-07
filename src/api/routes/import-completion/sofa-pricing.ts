@@ -923,6 +923,18 @@ app.post("/recompute-so-sofa-prices", async (c) => {
   //    each get the combo (2026-07-23, matching applySofaCombos). It is still a
   //    SEPARATE copy — keep it in sync with any change to applySofaCombos (or
   //    refactor this manual repricer to call it directly).
+  //
+  // 🛑 DELIBERATE DIVERGENCE 2026-08-07 — do NOT "sync" this one.
+  //    applySofaCombos now rounds every UNIT price UP to a whole ringgit
+  //    (owner pricing policy; see distributeComboUnitPrices in
+  //    src/api/lib/sofa-combo.ts). This endpoint REPRICES ORDERS THAT ALREADY
+  //    EXIST — /recompute-so-sofa-prices and the /recompute-co-sofa-prices twin
+  //    below — so adopting the round-up here would move money on documents that
+  //    have already been issued to customers, always in our favour. That is a
+  //    dispute, not a fix. The policy applies to what is computed FROM NOW ON;
+  //    this repricer stays on the old floor/round/residual maths on purpose.
+  //    If the owner ever asks for historical orders to be re-rounded, that is a
+  //    separate, explicitly-confirmed data migration — not a code sync.
   type ComboRule = {
     baseModel: string;
     componentSizes: unknown; // string[] | string[][]

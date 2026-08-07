@@ -1,5 +1,6 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
+import { parseDiscountEntrySen } from "@/lib/pricing";
 
 export interface DiscountInputProps {
   /** The amount (in sen) the percentage is computed off — e.g. the invoice subtotal before discount. */
@@ -16,9 +17,11 @@ export interface DiscountInputProps {
 /**
  * DiscountInput — percent-aware RM discount field.
  *
- * Entry modes (accepted on blur / Enter):
- *  - "20%"   → emits Math.round(baseAmountSen * 20 / 100)
- *  - "50.00" → emits Math.round(50 * 100) = 5000 sen
+ * Entry modes (accepted on blur / Enter) — the maths lives in the pure
+ * `parseDiscountEntrySen` (src/lib/pricing.ts) so it is unit-testable:
+ *  - "20%"   → 20% of baseAmountSen, rounded UP to a whole ringgit
+ *              (owner 2026-08-07; a computed money value must be divisible)
+ *  - "50.00" → 5000 sen, exactly as typed (a typed value is never re-rounded)
  *  - ""      → emits null
  *
  * Display (when NOT focused): resolved RM value "(valueSen/100).toFixed(2)".
@@ -46,26 +49,7 @@ const DiscountInput = React.forwardRef<HTMLInputElement, DiscountInputProps>(
     const displayValue = focused ? draft : formatted;
 
     const commit = (raw: string) => {
-      const trimmed = raw.trim();
-      if (trimmed === "") {
-        onChange(null);
-        return;
-      }
-      if (trimmed.endsWith("%")) {
-        const pct = parseFloat(trimmed.slice(0, -1));
-        if (Number.isFinite(pct)) {
-          onChange(Math.round((baseAmountSen * pct) / 100));
-        } else {
-          onChange(null);
-        }
-        return;
-      }
-      const rm = parseFloat(trimmed);
-      if (Number.isFinite(rm)) {
-        onChange(Math.round(rm * 100));
-      } else {
-        onChange(null);
-      }
+      onChange(parseDiscountEntrySen(raw, baseAmountSen));
     };
 
     return (

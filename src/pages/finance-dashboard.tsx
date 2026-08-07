@@ -515,6 +515,12 @@ export default function FinanceDashboardPage() {
         return {
           label: r.label + (r.partial ? " *" : ""),
           amount: amt,
+          // The base both percentages divide by (owner 2026-08-06: 「帮我把
+          // revenue 显示出来」). Showing it is what let him catch the forecast
+          // percentage dividing by the wrong one this morning — a share is only
+          // checkable when its denominator is on screen.
+          sales,
+          forecastSales: csForecastSales(r),
           pct: sales > 0 ? Math.round((amt / sales) * 10000) / 100 : null,
           forecast: fc,
           // Same rule as the table above: a forecast share divides by forecast
@@ -924,6 +930,15 @@ export default function FinanceDashboardPage() {
                 <table className="w-full">
                   <tbody>
                     {periodHeadSplit(csTrend.map((d) => d.label))}
+                    <tr className="border-b border-[#E2DDD8] bg-[#F6F1E7]">
+                      <td className={`${td} text-left font-semibold`}>REVENUE</td>
+                      {csTrend.map((d) => (
+                        <Fragment key={d.label}>
+                          <td className={`${td} font-semibold border-l border-[#E2DDD8]`}>{rm(d.sales)}</td>
+                          <td className={`${td} font-semibold text-[#9A3A2D]`}>{d.forecastSales === null ? "-" : rm(d.forecastSales)}</td>
+                        </Fragment>
+                      ))}
+                    </tr>
                     <tr className="border-b border-[#F0ECE9]">
                       <td className={`${td} text-left font-medium`}>Amount</td>
                       {csTrend.map((d) => (

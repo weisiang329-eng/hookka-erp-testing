@@ -9611,7 +9611,10 @@ app.get("/dashboard", async (c) => {
   // forecast fields shipped, the stored 12-month copy kept serving the old
   // shape (its data hadn't changed, so it never revalidated) and the new rows
   // read "-" forever. Versioning the key retires every stale copy at once.
-  const DASH_PAYLOAD_V = "v4"; // v4: explicit from/to window
+  // Bump for a changed SHAPE *or* a changed default WINDOW: the stored copy is
+  // keyed by the range string, and the default range's key is blank either way,
+  // so a wider-or-narrower default would keep serving the old month list.
+  const DASH_PAYLOAD_V = "v5"; // v5: default window starts at the opening month
   // The explicit window is part of the identity — otherwise two different
   // ranges would share one cached copy.
   const dashRangeKey = `${String(c.req.query("from") ?? "")}~${String(c.req.query("to") ?? "")}`;
@@ -9688,6 +9691,17 @@ app.get("/dashboard", async (c) => {
       allMonths.unshift(`${y}-${String(m).padStart(2, "0")}`);
       m -= 1;
       if (m === 0) { m = 12; y -= 1; }
+    }
+    // Never roll back past the month the books begin (owner 2026-08-06: 「这整
+    // 个的 period 可以放从 5 月 2026 开始吗」). Months before the opening date
+    // have no ledger to read — every figure lands as a zero column that pushes
+    // the real ones off the right edge. Keyed off the opening date rather than
+    // a literal so it follows if that date is ever restated. An EXPLICIT from/to
+    // is still honoured in full: asking for an earlier month is a deliberate act.
+    const openingYm = String((await getOpeningDate(db)) ?? "").slice(0, 7);
+    if (/^\d{4}-\d{2}$/.test(openingYm)) {
+      const firstKept = allMonths.findIndex((ym) => ym >= openingYm);
+      if (firstKept > 0) allMonths.splice(0, firstKept);
     }
     allMonths.push(...aheadMonths);
   }

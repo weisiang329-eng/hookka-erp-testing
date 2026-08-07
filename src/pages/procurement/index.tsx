@@ -15,6 +15,7 @@ import type { Supplier, PurchaseOrder, SupplierMaterialBinding, RawMaterial } fr
 import { useUrlState, useUrlBatch } from "@/lib/use-url-state";
 import { useSessionState } from "@/lib/use-session-state";
 import { matchesCompanyFilter } from "@/lib/company-dimension";
+import { buildPoDetailListingAoa } from "@/lib/doc-detail-listings";
 import {
   Plus, ShoppingBag, Truck, Trash2, X, Package,
   FileText, Download, Filter, AlertTriangle,
@@ -1457,35 +1458,6 @@ export default function ProcurementPage() {
           ? { bg: "bg-amber-50", border: "border-amber-200", text: "text-amber-700", subtle: "text-amber-500" }
           : { bg: "bg-[#F0ECE9]", border: "border-[#E2DDD8]", text: "text-[#1F1D1B]", subtle: "text-[#9CA3AF]" };
 
-  // ---- Export CSV ----
-  const exportCSV = () => {
-    const headers = [
-      "PO No.", "Supplier", "Order Date", "Expected Date",
-      "Items", "Total (RM)", "Status",
-    ];
-    const rows = filteredOrders.map(po => [
-      po.poNo,
-      po.supplierName,
-      po.orderDate?.split("T")[0] ?? "",
-      po.expectedDate?.split("T")[0] ?? "",
-      po.items.length.toString(),
-      (po.totalSen / 100).toFixed(2),
-      po.status,
-    ]);
-
-    const csvContent = [headers, ...rows]
-      .map(row => row.map(cell => `"${cell.replace(/"/g, '""')}"`).join(","))
-      .join("\n");
-
-    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `purchase-orders-${new Date().toISOString().split("T")[0]}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
-
   // ---- Summary stats ----
   // Note: 4.2 widget consumes overduePoList from the filter section above.
   const pendingDelivery = poStatsRows.filter((po) => ["SUBMITTED", "CONFIRMED"].includes(po.status)).length;
@@ -1977,9 +1949,6 @@ export default function ProcurementPage() {
                     : `Convert ${selectedPOs.length} to GRN`}
                 </Button>
               )}
-              <Button variant="outline" size="sm" onClick={exportCSV}>
-                <Download className="h-4 w-4" /> Export CSV
-              </Button>
             </div>
           </div>
 
@@ -2131,6 +2100,9 @@ export default function ProcurementPage() {
             emptyMessage={tab === "DRAFT" ? "No draft purchase orders." : "No purchase orders found."}
             onSearchChange={setGridSearch}
             gridId="purchase-orders-list"
+            exportName="purchase-orders"
+            exportSheetLabel="Purchase Orders"
+            detailExport={{ label: "Detail Listing", build: (rows) => buildPoDetailListingAoa(rows) }}
           />
           {/* Server-side page controls — only in the default (unfiltered) view.
               When a filter/search is active the whole dataset is loaded and the

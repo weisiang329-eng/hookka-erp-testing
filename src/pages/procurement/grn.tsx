@@ -11,6 +11,7 @@ import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency, getStatusColor, cn } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useUrlState } from "@/lib/use-url-state";
+import { buildGrnDetailListingAoa } from "@/lib/doc-detail-listings";
 import type { GoodsReceiptNote, PurchaseOrder, ArrivalState } from "@/types";
 import { Ship } from "lucide-react";
 import {
@@ -475,31 +476,6 @@ export default function GRNPage() {
     () => grnStatsRows.filter(g => g.status !== "DRAFT").length,
     [grnStatsRows],
   );
-
-  // ---- Export CSV ----
-  const exportCSV = () => {
-    const headers = ["GRN No.", "PO No.", "Supplier", "Receive Date", "Items", "Total (RM)", "QC Status", "Status"];
-    const rows = filteredGRNs.map(grn => [
-      grn.grnNumber,
-      grn.poNumber,
-      grn.supplierName,
-      grn.receiveDate?.split("T")[0] ?? "",
-      grn.items.length.toString(),
-      (grn.totalAmount / 100).toFixed(2),
-      grn.qcStatus,
-      grn.status,
-    ]);
-    const csvContent = [headers, ...rows]
-      .map(row => row.map(cell => `"${cell.replace(/"/g, '""')}"`).join(","))
-      .join("\n");
-    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `grn-list-${new Date().toISOString().split("T")[0]}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
 
   // ---- Bulk Download PDF ----
   // Render every selected GRN into one merged PDF. The list rows already carry
@@ -1109,9 +1085,6 @@ export default function GRNPage() {
                   </Button>
                 </>
               )}
-              <Button variant="outline" size="sm" onClick={exportCSV}>
-                <Download className="h-4 w-4" /> Export CSV
-              </Button>
             </div>
           </div>
 
@@ -1223,6 +1196,9 @@ export default function GRNPage() {
             maxHeight="calc(100vh - 300px)"
             emptyMessage={tab === "DRAFT" ? "No draft GRNs." : "No GRNs found."}
             onSearchChange={setGridSearch}
+            exportName="goods-receipts"
+            exportSheetLabel="Goods Receipts"
+            detailExport={{ label: "Detail Listing", build: (rows) => buildGrnDetailListingAoa(rows) }}
           />
           {/* Server-side page controls — only in the default (unfiltered) view.
               A filter/search loads the whole dataset, so paging is hidden. */}

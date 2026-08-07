@@ -111,3 +111,32 @@ test("detail listing: cancelled flag, and an item-less order still yields one ro
   assert.equal(aoa.length, 2, "header + one placeholder row");
   assert.equal(aoa[1][12], "T"); // Cancelled
 });
+
+test("detail listing: Inclusive=T, UOM by category, BALANCE=0", () => {
+  const aoa = dl.buildSoDetailListingAoa([
+    { companySOId: "SO-1", items: [
+      { itemCategory: "BEDFRAME" }, { itemCategory: "SOFA" }, { itemCategory: "ACCESSORY" },
+    ] },
+  ]);
+  assert.equal(aoa[1][7], "T"); // Inclusive?
+  assert.equal(aoa[1][19], "SET");  // bedframe → SET
+  assert.equal(aoa[2][19], "SET");  // sofa → SET
+  assert.equal(aoa[3][19], "UNIT"); // accessory → UNIT
+  assert.equal(aoa[1][32], 0); // BALANCE numeric 0
+});
+
+test("detail listing: Debtor Code + Agent come from caller lookups by customerId", () => {
+  const orders = [
+    { companySOId: "SO-1", customerId: "cust-a", items: [{ itemCategory: "BEDFRAME" }] },
+    { companySOId: "SO-2", customerId: "cust-x", items: [{ itemCategory: "SOFA" }] }, // no lookup entry
+  ];
+  const opts = {
+    debtorCodeByCustomerId: new Map([["cust-a", "300-C002"]]),
+    agentByCustomerId: new Map([["cust-a", "STANLEY"]]),
+  };
+  const aoa = dl.buildSoDetailListingAoa(orders, opts);
+  assert.equal(aoa[1][3], "300-C002"); // Debtor Code
+  assert.equal(aoa[1][5], "STANLEY");  // Agent
+  assert.equal(aoa[2][3], ""); // unknown customer → blank, never invented
+  assert.equal(aoa[2][5], "");
+});

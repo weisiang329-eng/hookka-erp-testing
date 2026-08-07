@@ -9,6 +9,9 @@ import { MoneyInput } from "@/components/ui/money-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
+import { calculateUnitPrice, formatOrderLineUnit } from "@/lib/pricing";
+import { deriveTotalHeightSurchargeSen } from "@/lib/total-height-surcharge";
+import type { CfgHeight } from "@/lib/height-surcharge";
 import {
   hasMixedSofaBedframe,
   SO_MIXED_CATEGORY_ERROR,
@@ -59,6 +62,13 @@ type LineItem = {
   divanPriceSen: number;
   legHeightInches: number | null;
   legPriceSen: number;
+  // The FIFTH price component (migration 0209, own stored column
+  // sales_order_items.total_height_price_sen). It used to be absent from this
+  // page entirely: the PUT derives it server-side when the client omits the
+  // field, so the screen showed base+divan+leg+special while the save stored
+  // that PLUS the total-height surcharge. Carried in state and posted back so
+  // what this page displays is what it saves.
+  totalHeightPriceSen: number;
   specialOrders: string[];
   specialOrder: string;
   specialOrderPriceSen: number;
@@ -78,7 +88,7 @@ const EMPTY_LINE: LineItem = {
   sizeCode: "", sizeLabel: "", fabricCode: "",
   quantity: 1, basePriceSen: 0, seatHeight: "",
   gapInches: null, divanHeightInches: null, divanPriceSen: 0,
-  legHeightInches: null, legPriceSen: 0,
+  legHeightInches: null, legPriceSen: 0, totalHeightPriceSen: 0,
   specialOrders: [], specialOrder: "", specialOrderPriceSen: 0,
   customSpecials: [], notes: "",
   discountSen: 0,
@@ -622,6 +632,11 @@ export default function EditSalesOrderPage() {
               divanPriceSen: (item.divanPriceSen as number) || 0,
               legHeightInches: item.legHeightInches as number | null,
               legPriceSen: (item.legPriceSen as number) || 0,
+              // Seeded from the line's OWN stored component (rowToItem returns
+              // it), never re-derived on load: opening an order and pressing
+              // Save without touching anything must charge exactly what it
+              // already charged.
+              totalHeightPriceSen: (item.totalHeightPriceSen as number) || 0,
               // Special-orders multi-select pre-fill. Parse the stored
               // comma/semicolon-joined string and resolve each token's
               // canonical code. Hardcoded specialOrderOptions covers the
@@ -703,7 +718,31 @@ export default function EditSalesOrderPage() {
   };
 
   const updateItem = (idx: number, updates: Partial<LineItem>) => {
-    setItems(prev => prev.map((item, i) => i === idx ? { ...item, ...updates } : item));
+    setItems(prev => prev.map((item, i) => {
+      if (i !== idx) return item;
+      const merged = { ...item, ...updates };
+      // Total height = gap + divan + leg, priced off the owner's
+      // variants-config.totalHeights. Re-derived here whenever one of those
+      // three changes — through the SAME helper the PUT uses
+      // (deriveTotalHeightSurchargeSen), so the number on screen is the number
+      // the server would have derived, and the number we now post.
+      // 0134 — Service Order mode suppresses variant pricing across the board.
+      if ("gapInches" in updates || "divanHeightInches" in updates || "legHeightInches" in updates) {
+        const cfgTotalHeights = maintenanceConfig?.totalHeights as CfgHeight[] | undefined;
+        if (isServiceOrderMode) {
+          merged.totalHeightPriceSen = 0;
+        } else if (Array.isArray(cfgTotalHeights)) {
+          merged.totalHeightPriceSen = deriveTotalHeightSurchargeSen(
+            (merged.gapInches || 0) + (merged.divanHeightInches || 0) + (merged.legHeightInches || 0),
+            cfgTotalHeights,
+          );
+        }
+        // Config not loaded (yet / at all): KEEP the line's stored surcharge
+        // rather than zeroing it. A price we cannot look up is not a price of
+        // zero, and whatever we keep is still exactly what we display and post.
+      }
+      return merged;
+    }));
   };
 
   const selectProduct = (idx: number, productId: string) => {
@@ -730,6 +769,12 @@ export default function EditSalesOrderPage() {
       divanPriceSen: isServiceOrderMode ? 0 : (isSofa ? 0 : items[idx].divanPriceSen),
       legHeightInches: isSofa ? null : items[idx].legHeightInches,
       legPriceSen: isServiceOrderMode ? 0 : (isSofa ? 0 : items[idx].legPriceSen),
+      // A sofa line has no gap/divan/leg, so it has no total height either.
+      // updateItem re-derives this anyway when the config is loaded; stating it
+      // here means a config that never loaded still can't leave a bedframe's
+      // surcharge attached to a sofa.
+      totalHeightPriceSen:
+        isServiceOrderMode || isSofa ? 0 : items[idx].totalHeightPriceSen,
     });
   };
 
@@ -772,8 +817,18 @@ export default function EditSalesOrderPage() {
     });
   };
 
+  // THE unit-price sum — the shared one, not a local copy. `calculateUnitPrice`
+  // is the order-side alias of `invoiceLineUnitSen` (src/lib/invoice-line-price.ts),
+  // and it is the same function the PUT uses to compute what it stores, so this
+  // page cannot drift a component behind the save again.
   const getUnitPrice = (item: LineItem) =>
-    item.basePriceSen + item.divanPriceSen + item.legPriceSen + item.specialOrderPriceSen;
+    calculateUnitPrice({
+      basePriceSen: item.basePriceSen,
+      divanPriceSen: item.divanPriceSen,
+      legPriceSen: item.legPriceSen,
+      totalHeightPriceSen: item.totalHeightPriceSen,
+      specialOrderPriceSen: item.specialOrderPriceSen,
+    });
 
   // Line total = (unit price × qty) − per-line discount, clamped ≥ 0.
   const getLineTotal = (item: LineItem) =>
@@ -1553,7 +1608,20 @@ export default function EditSalesOrderPage() {
                 })()}
 
                 <div className="flex items-center justify-between text-xs text-[#9CA3AF] border-t border-[#E2DDD8] pt-2">
-                  <span>Unit: {formatCurrency(getUnitPrice(item))} (Base{item.seatHeight ? ` @${item.seatHeight}` : ""} {formatCurrency(item.basePriceSen)}{item.itemCategory !== "SOFA" && item.divanPriceSen ? ` + Divan ${formatCurrency(item.divanPriceSen)}` : ""}{item.itemCategory !== "SOFA" && item.legPriceSen ? ` + Leg ${formatCurrency(item.legPriceSen)}` : ""}{item.specialOrderPriceSen ? ` + Special ${formatCurrency(item.specialOrderPriceSen)}` : ""})</span>
+                  {/* The build-up is an EXPLANATION of the unit above it, and
+                      it is only shown when it adds up to that unit — same rule
+                      as the invoice screen and the PDF, same module. */}
+                  <span>Unit: {formatOrderLineUnit(
+                    {
+                      basePriceSen: item.basePriceSen,
+                      divanPriceSen: item.divanPriceSen,
+                      legPriceSen: item.legPriceSen,
+                      totalHeightPriceSen: item.totalHeightPriceSen,
+                      specialOrderPriceSen: item.specialOrderPriceSen,
+                    },
+                    getUnitPrice(item),
+                    item.seatHeight,
+                  )}</span>
                   <span className="font-medium text-sm text-[#1F1D1B]">Total: {formatCurrency(getLineTotal(item))}</span>
                 </div>
               </div>

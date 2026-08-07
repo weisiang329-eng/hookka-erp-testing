@@ -2,8 +2,12 @@
 // Shared pricing helpers — single source of truth for unit-price & line-total
 // calculations across the Sales create page and SO API handlers.
 // ---------------------------------------------------------------------------
-import { roundSen, roundUpToRinggitSen } from "./utils";
-import { invoiceLineUnitSen } from "./invoice-line-price";
+import { formatCurrency, roundSen, roundUpToRinggitSen } from "./utils";
+import {
+  invoiceLineUnitSen,
+  invoicePriceBuildUp,
+  type InvoicePriceRow,
+} from "./invoice-line-price";
 
 export interface PricingInput {
   basePriceSen: number;
@@ -34,6 +38,65 @@ export function calculateUnitPrice(input: PricingInput): number {
     totalHeightSen: input.totalHeightPriceSen,
     specialSen: input.specialOrderPriceSen,
   });
+}
+
+/**
+ * The ORDER-side build-up rows for a line — Base + each non-zero surcharge.
+ *
+ * Same rule as the invoice side, same module (`invoicePriceBuildUp`); this is
+ * only the column-name translation (`basePriceSen` → `baseSen`, …). Returns
+ * `undefined` — meaning "show the single unit price" — when there is no
+ * surcharge to explain, or when the components do NOT sum to `chargedSen`.
+ *
+ * Rule 3, written down in `invoice-line-price.ts`: an explanation that does not
+ * add up is not an explanation. That applies to an ORDER line's inline
+ * "Unit: X (Base A + Divan B …)" exactly as it applies to the invoice screen
+ * and the PDF — those are the same sentence about the same money.
+ */
+export function orderLinePriceBuildUp(
+  input: PricingInput,
+  chargedSen: number,
+): InvoicePriceRow[] | undefined {
+  return invoicePriceBuildUp(
+    {
+      baseSen: input.basePriceSen,
+      divanSen: input.divanPriceSen,
+      legSen: input.legPriceSen,
+      totalHeightSen: input.totalHeightPriceSen,
+      specialSen: input.specialOrderPriceSen,
+    },
+    chargedSen,
+  );
+}
+
+/**
+ * The inline "Unit: …" caption on the order EDIT screens (sales + consignment).
+ *
+ * `chargedSen` is the unit price the screen will SAVE. It is passed in rather
+ * than recomputed so the caption can never quote a different number from the
+ * one the save writes — and so the reconciliation guard above is a real guard
+ * and not a tautology.
+ *
+ * Reconciles → "RM 910.00 (Base @28" RM 830.00 + T.Height RM 80.00)".
+ * Does not   → "RM 910.00", the charge alone. Showing nothing is honest;
+ *              showing a decomposition that contradicts the charge is not.
+ */
+export function formatOrderLineUnit(
+  input: PricingInput,
+  chargedSen: number,
+  seatHeight?: string | null,
+): string {
+  const charge = formatCurrency(Number(chargedSen) || 0);
+  const rows = orderLinePriceBuildUp(input, chargedSen);
+  if (!rows) return charge;
+  const parts = rows
+    // The "=" row IS the charge, already printed as the headline figure.
+    .filter((r) => r.label !== "=")
+    .map((r) => {
+      const label = r.label === "Base" && seatHeight ? `Base @${seatHeight}` : r.label;
+      return `${label} ${formatCurrency(r.sen)}`;
+    });
+  return `${charge} (${parts.join(" ")})`;
 }
 
 /**

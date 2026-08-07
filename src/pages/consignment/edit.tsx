@@ -8,7 +8,11 @@ import { MoneyInput } from "@/components/ui/money-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
-import { calculateLineTotalWithDiscount } from "@/lib/pricing";
+import {
+  calculateLineTotalWithDiscount,
+  calculateUnitPrice,
+  formatOrderLineUnit,
+} from "@/lib/pricing";
 import {
   hasMixedSofaBedframe,
   SO_MIXED_CATEGORY_ERROR,
@@ -459,8 +463,27 @@ export default function EditSalesOrderPage() {
     });
   };
 
+  // THE unit-price sum — the shared one (`calculateUnitPrice`, the order-side
+  // alias of `invoiceLineUnitSen`), not a local copy.
+  //
+  // `totalHeightPriceSen` is passed as an EXPLICIT 0, not omitted: the CO write
+  // path (`src/api/routes/consignment-orders.ts`, POST and PUT) charges
+  // base + divan + leg + special and never reads or writes
+  // `consignment_order_items.total_height_price_sen` — migration 0209 added the
+  // column on the CO table but nothing on the CO side fills it. So a CO line has
+  // no total-height component today, and this screen must show what it saves.
+  // (The CO CREATE page does compute one and post it, and the server drops it —
+  // that gap is real, but it lives in the CO write path, not here. Wiring a
+  // T.Height charge into consignment orders is a pricing decision, not a
+  // rendering one; when it is made, this is the line that changes.)
   const getUnitPrice = (item: LineItem) =>
-    item.basePriceSen + item.divanPriceSen + item.legPriceSen + item.specialOrderPriceSen;
+    calculateUnitPrice({
+      basePriceSen: item.basePriceSen,
+      divanPriceSen: item.divanPriceSen,
+      legPriceSen: item.legPriceSen,
+      totalHeightPriceSen: 0,
+      specialOrderPriceSen: item.specialOrderPriceSen,
+    });
 
   // Line total = (unit price × qty) − per-line discount, clamped ≥ 0.
   const getLineTotal = (item: LineItem) =>
@@ -1093,7 +1116,20 @@ export default function EditSalesOrderPage() {
                 })()}
 
                 <div className="flex items-center justify-between text-xs text-[#9CA3AF] border-t border-[#E2DDD8] pt-2">
-                  <span>Unit: {formatCurrency(getUnitPrice(item))} (Base{item.seatHeight ? ` @${item.seatHeight}` : ""} {formatCurrency(item.basePriceSen)}{item.itemCategory !== "SOFA" && item.divanPriceSen ? ` + Divan ${formatCurrency(item.divanPriceSen)}` : ""}{item.itemCategory !== "SOFA" && item.legPriceSen ? ` + Leg ${formatCurrency(item.legPriceSen)}` : ""}{item.specialOrderPriceSen ? ` + Special ${formatCurrency(item.specialOrderPriceSen)}` : ""})</span>
+                  {/* The build-up is an EXPLANATION of the unit above it, and
+                      it is only shown when it adds up to that unit — same rule
+                      as the invoice screen and the PDF, same module. */}
+                  <span>Unit: {formatOrderLineUnit(
+                    {
+                      basePriceSen: item.basePriceSen,
+                      divanPriceSen: item.divanPriceSen,
+                      legPriceSen: item.legPriceSen,
+                      totalHeightPriceSen: 0,
+                      specialOrderPriceSen: item.specialOrderPriceSen,
+                    },
+                    getUnitPrice(item),
+                    item.seatHeight,
+                  )}</span>
                   <span className="font-medium text-sm text-[#1F1D1B]">Total: {formatCurrency(getLineTotal(item))}</span>
                 </div>
               </div>

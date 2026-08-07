@@ -9343,6 +9343,28 @@ async function labourLedgerNet(
 
 const labourIsPosted = (net: Map<string, number>) => [...net.values()].some((v) => v !== 0);
 
+// The next free legNo for a (sourceType, sourceId). The ledger enforces
+// UNIQUE(orgId, sourceType, sourceId, legNo) — so a month that is unposted and
+// posted again cannot restart at 1, or the insert collides with the legs of the
+// first posting, which are still there (append-only journal). Found the hard
+// way: the re-post surfaced as "Invalid request body" because the handler's
+// catch-all turned a constraint violation into a parse error.
+async function nextLegNo(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+  sourceType: string,
+  sourceId: string,
+): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COALESCE(MAX(legNo), 0) AS n FROM ledger_journal_entries
+        WHERE orgId = ? AND sourceType = ? AND sourceId = ?`,
+    )
+    .bind(orgId, sourceType, sourceId)
+    .first<{ n: number }>();
+  return (Number(row?.n) || 0) + 1;
+}
+
 // The DEBIT side of a month's labour posting, account by account: each
 // department's GROSS pay against its mapped account, then the three statutory
 // employer contributions against theirs. One function so the preview the owner
@@ -9427,7 +9449,7 @@ app.post("/labor/post", async (c) => {
     const actorUserId =
       (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
     const legs: LedgerEntryInput[] = [];
-    let legNo = 1;
+    let legNo = await nextLegNo(c.var.DB, orgId, "labor_post", sourceId);
     // Same helper the preview used, so what was approved is what is posted.
     for (const { account, sen } of labourDebitLines(byDept, labourMapPost)) {
       legs.push({
@@ -9464,8 +9486,14 @@ app.post("/labor/post", async (c) => {
       after: { month, totalSen, accounts: legs.length - 1},
     });
     return c.json({ success: true, data: { month, totalSen, accounts: legs.length - 1} });
-  } catch {
-    return c.json({ success: false, error: "Invalid request body" }, 400);
+  } catch (err) {
+    // NOT "Invalid request body". That blanket message wrapped the whole
+    // handler, so a UNIQUE(orgId, sourceType, sourceId, legNo) violation on a
+    // re-post read as a malformed request and cost an hour to find. Say what
+    // actually failed (owner 2026-08-06).
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[POST /labor/post] failed:", msg);
+    return c.json({ success: false, error: `Labour posting failed: ${msg}` }, 400);
   }
 });
 
@@ -9500,7 +9528,7 @@ app.post("/labor/unpost", async (c) => {
     const actorUserId =
       (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
     const legs: LedgerEntryInput[] = [];
-    let legNo = 1;
+    let legNo = await nextLegNo(c.var.DB, orgId, "labor_post_reversal", sourceId);
     for (const [accountCode, amt] of net) {
       if (amt === 0) continue;
       legs.push({
@@ -9526,8 +9554,10 @@ app.post("/labor/unpost", async (c) => {
       after: { month, reversedLegs: legs.length },
     });
     return c.json({ success: true, data: { month, reversedLegs: legs.length } });
-  } catch {
-    return c.json({ success: false, error: "Invalid request body" }, 400);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[POST /labor/unpost] failed:", msg);
+    return c.json({ success: false, error: `Labour unpost failed: ${msg}` }, 400);
   }
 });
 

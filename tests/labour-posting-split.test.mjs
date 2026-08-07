@@ -64,3 +64,38 @@ test("a zero component posts no leg", () => {
   const fn = SRC.slice(SRC.indexOf("function labourDebitLines"));
   assert.match(fn.slice(0, 600), /if \(sen === 0\) return;/);
 });
+
+// --------------------------------------------------------------------------
+// Re-posting after an unpost. The ledger enforces
+// UNIQUE(orgId, sourceType, sourceId, legNo), and the first posting's legs are
+// still there — the journal is append-only, an unpost appends a reversal rather
+// than deleting. Restarting legNo at 1 therefore collided, and the handler's
+// blanket catch reported it as "Invalid request body".
+// --------------------------------------------------------------------------
+test("legNo continues past the existing legs instead of restarting at 1", () => {
+  assert.match(SRC, /async function nextLegNo/);
+  assert.match(SRC, /COALESCE\(MAX\(legNo\), 0\) AS n FROM ledger_journal_entries/);
+  assert.match(SRC, /let legNo = await nextLegNo\(c\.var\.DB, orgId, "labor_post", sourceId\);/);
+  assert.match(SRC, /let legNo = await nextLegNo\(c\.var\.DB, orgId, "labor_post_reversal", sourceId\);/);
+});
+
+test("the labour handlers report the REAL failure, not 'Invalid request body'", () => {
+  // Checks what is RETURNED, not the phrase — the comment above the fix names
+  // the old message deliberately, and should stay readable.
+  const post = SRC.slice(SRC.indexOf('app.post("/labor/post"'), SRC.indexOf('app.post("/labor/unpost"'));
+  assert.doesNotMatch(post, /error: "Invalid request body"/);
+  assert.match(post, /Labour posting failed: \$\{msg\}/);
+  const unpost = SRC.slice(SRC.indexOf('app.post("/labor/unpost"'));
+  assert.doesNotMatch(unpost.slice(0, 2500), /error: "Invalid request body"/);
+  assert.match(unpost, /Labour unpost failed: \$\{msg\}/);
+});
+
+test("unpost is idempotent — a month with nothing outstanding reverses nothing", () => {
+  assert.match(SRC, /if \(!labourIsPosted\(net\)\) \{/);
+  assert.match(SRC, /alreadyUnposted: true/);
+});
+
+test("'already posted' is read from the NET, so an unposted month re-posts", () => {
+  assert.match(SRC, /labourIsPosted\(await labourLedgerNet\(c\.var\.DB, orgId, sourceId\)\)/);
+  assert.match(SRC, /sourceType LIKE 'labor_post%'/);
+});

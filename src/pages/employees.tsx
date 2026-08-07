@@ -6887,15 +6887,24 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
   // employer statutory is the full cost of employing everyone; the advances
   // came out of the till earlier in the month, so they are no longer part of
   // what is left to hand over (owner 2026-08-07: "在 net pay、total pay 里面扣").
-  // Note this is "remaining outlay", not "cost of labour" — the labour COST is
-  // unchanged and the Labor Cost / Dept Labor screens are deliberately untouched.
+  // Total Pay is what the workforce COSTS, and an advance does not change that.
+  //
+  // Owner 2026-08-07: "Total Pay 还是一样的 … 因为我要给他的钱其实是一样的，只是
+  // 说我给他的钱变少了，因为他有 Advance，所以 Total Pay 减去 Advance 才是等于
+  // 我们该出的钱，也就是 Net Pay 的意思."
+  //
+  // The first version subtracted the advance here, which redefined Total Pay as
+  // "remaining outlay" and quietly broke its tie to Labor Cost and Dept Labor.
+  // The advance was already handed over — it is money paid, not money saved —
+  // so it belongs in ONE place only: Net Pay, which is what is still to be
+  // handed over. Total Pay − Advance = Net Pay, and all three screens agree
+  // again.
   const totalPayrollCost = useMemo(() => {
     return (
       totals.grossPay +
       totals.epfEmployer +
       totals.socsoEmployer +
-      totals.eisEmployer -
-      totals.advanceDeductionSen
+      totals.eisEmployer
     );
   }, [totals]);
   // An advance keyed AFTER the payslips were generated is not in the stored
@@ -7297,9 +7306,9 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
               <p className="text-xs text-[#6B7280] uppercase tracking-wide">Total Pay</p>
               <p className="text-xl font-bold text-[#6B5C32] mt-1">{formatCurrency(totalPayrollCost)}</p>
               <p className="text-[10px] text-[#9CA3AF] mt-0.5">
-                Still to pay out — Gross + all employer statutory
+                Gross + all employer statutory
                 {totals.advanceDeductionSen > 0
-                  ? `, less ${formatCurrency(totals.advanceDeductionSen)} of advances already handed out`
+                  ? ` · ${formatCurrency(totals.advanceDeductionSen)} of it already handed out as advances`
                   : ""}
               </p>
             </CardContent>
@@ -7470,7 +7479,7 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
                     <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">PCB</th>
                     <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap" title="Salary advance already handed to this worker during the month. Not a statutory deduction — it comes off AFTER them, because it is pay they have already received. Recorded on the Advances tab.">Advance</th>
                     <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap">Net Pay</th>
-                    <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap" title="What the company still hands over for this worker — Gross + employer EPF / SOCSO / EIS, less any advance already paid out during the month.">Total Pay</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap" title="Gross + employer EPF / SOCSO / EIS — what this worker costs. An advance does not reduce it; it reduces Net Pay, which is what is still handed over.">Total Pay</th>
                     <th className="h-10 px-2 text-center font-medium text-[#374151] whitespace-nowrap">Status</th>
                     <th className="h-10 px-2 text-center font-medium text-[#374151] whitespace-nowrap">Print</th>
                   </tr>
@@ -7525,7 +7534,7 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
                             company, and clamping it at zero would silently
                             write the difference off. */}
                         <td className={`h-10 px-3 text-right font-bold whitespace-nowrap ${r.netPay < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`} title={r.netPay < 0 ? "Advances taken exceed this month's pay — the balance is still owed to the company." : undefined}>{formatCurrency(r.netPay)}</td>
-                        <td className="h-10 px-3 text-right font-bold text-[#6B5C32] whitespace-nowrap" title="Gross + employer EPF / SOCSO / EIS, less any advance already handed out this month = what the company still pays for this worker">{formatCurrency(r.grossPay + r.epfEmployer + r.socsoEmployer + r.eisEmployer - (r.advanceDeductionSen ?? 0))}</td>
+                        <td className="h-10 px-3 text-right font-bold text-[#6B5C32] whitespace-nowrap" title="Gross + employer EPF / SOCSO / EIS — what this worker costs the company. An advance does NOT reduce it; it only reduces what is still handed over, which is Net Pay.">{formatCurrency(r.grossPay + r.epfEmployer + r.socsoEmployer + r.eisEmployer)}</td>
                         <td className="h-10 px-2 text-center">
                           <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${getStatusStyle(r.status)}`}>
                             {r.status}
@@ -7770,7 +7779,7 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
                     <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs">{totals.pcb > 0 ? formatCurrency(totals.pcb) : "-"}</td>
                     <td className="h-10 px-3 text-right text-[#9A3A2D]">{totals.advanceDeductionSen > 0 ? `−${formatCurrency(totals.advanceDeductionSen)}` : "-"}</td>
                     <td className="h-10 px-3 text-right font-bold">{formatCurrency(totals.netPay)}</td>
-                    <td className="h-10 px-3 text-right font-bold text-[#6B5C32]" title="What the company still hands over = Gross + employer EPF / SOCSO / EIS, less advances already paid out this month">{formatCurrency(totalPayrollCost)}</td>
+                    <td className="h-10 px-3 text-right font-bold text-[#6B5C32]" title="Gross + employer EPF / SOCSO / EIS — what the workforce costs. Advances are not deducted here; they come off Net Pay.">{formatCurrency(totalPayrollCost)}</td>
                     <td className="h-10 px-2"></td>
                     <td className="h-10 px-2"></td>
                   </tr>

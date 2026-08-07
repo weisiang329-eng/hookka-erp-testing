@@ -32,6 +32,7 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
+import { readFileSync } from "node:fs";
 import { Hono } from "hono";
 
 let loaderRegistered = false;
@@ -430,4 +431,46 @@ test("the payout listing gives one row per employee with their dates and total",
 
   const bad = await call(app, { method: "GET", path: "/payout-listing" });
   assert.equal(bad.status, 400, "a listing with no period is not a listing");
+});
+
+test("an advance reduces Net Pay and NOT Total Pay", async () => {
+  // Owner 2026-08-07, correcting the first build: "Total Pay 还是一样的 … 因为我
+  // 要给他的钱其实是一样的，只是说我给他的钱变少了，因为他有 Advance，所以
+  // Total Pay 减去 Advance 才是等于我们该出的钱，也就是 Net Pay 的意思."
+  //
+  // The advance is money ALREADY handed over — paid, not saved. Subtracting it
+  // from Total Pay redefined that column as "remaining outlay" and silently
+  // broke its tie to Labor Cost and Dept Labor, which are computed from the
+  // same gross + employer statutory and were deliberately left alone.
+  const src = readFileSync(resolve(process.cwd(), "src/pages/employees.tsx"), "utf8");
+
+  // The footer total.
+  const totalFn = src.slice(
+    src.indexOf("const totalPayrollCost = useMemo("),
+    src.indexOf("}, [totals]);", src.indexOf("const totalPayrollCost = useMemo(")),
+  );
+  assert.ok(totalFn.includes("totals.grossPay"), "Total Pay is still gross + employer statutory");
+  assert.ok(
+    !totalFn.includes("advanceDeductionSen"),
+    "Total Pay must NOT subtract advances — that is Net Pay's job",
+  );
+
+  // And the per-row cell, which is the same sum written out inline.
+  const rowCells = [...src.matchAll(/r\.grossPay \+ r\.epfEmployer \+ r\.socsoEmployer \+ r\.eisEmployer[^}]*/g)]
+    .map((m) => m[0]);
+  assert.ok(rowCells.length > 0, "the per-row Total Pay cell should still exist");
+  for (const cell of rowCells) {
+    assert.ok(
+      !/advanceDeductionSen/.test(cell),
+      `a per-row Total Pay cell subtracts the advance: ${cell.slice(0, 90)}`,
+    );
+  }
+
+  // Net Pay is where it belongs, and there is exactly one helper doing it.
+  const lib = readFileSync(resolve(process.cwd(), "src/api/lib/employee-advances.ts"), "utf8");
+  assert.match(
+    lib,
+    /grossPaySen - statutoryDeductionsSen - \(Number\(advanceSen\) \|\| 0\)/,
+    "net pay = gross − statutory − advance",
+  );
 });

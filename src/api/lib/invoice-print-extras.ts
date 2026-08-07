@@ -156,13 +156,23 @@ export async function computeInvoicePrintExtras(
   const tight = new Map<string, InvoiceLineExtra>();
   const loose = new Map<string, InvoiceLineExtra>();
   const byCode = new Map<string, InvoiceLineExtra>();
+  // SO-SCOPED price/spec maps. The global product-code maps above are
+  // first-one-wins across EVERY SO on the invoice, so a product+fabric+size
+  // that repeats across different SOs (e.g. INV JAGER BEDFRAME on SV-2607-025
+  // AND SO-2607-226) resolves to whichever SO's row was seen first — showing
+  // the wrong base/special/T.Height and dropping the special-order text
+  // (owner report). Keying by the line's OWN salesOrderId first fixes that;
+  // the global maps stay as the legacy fallback for rows with no PO link.
+  const tightBySo = new Map<string, InvoiceLineExtra>();
+  const looseBySo = new Map<string, InvoiceLineExtra>();
+  const byCodeBySo = new Map<string, InvoiceLineExtra>();
   const priceByCode: InvoicePrintExtras["priceByCode"] = {};
   if (realSoIds.size > 0) {
     const ids = Array.from(realSoIds);
     const ph = ids.map(() => "?").join(",");
     const siRes = await db
       .prepare(
-        `SELECT productCode, fabricCode, sizeLabel, itemCategory,
+        `SELECT salesOrderId, productCode, fabricCode, sizeLabel, itemCategory,
                 gapInches, divanHeightInches, legHeightInches, specialOrder,
                 basePriceSen, divanPriceSen, legPriceSen,
                 specialOrderPriceSen, totalHeightPriceSen, unitPriceSen
@@ -170,6 +180,7 @@ export async function computeInvoicePrintExtras(
       )
       .bind(...ids)
       .all<{
+        salesOrderId: string | null;
         productCode: string | null;
         fabricCode: string | null;
         sizeLabel: string | null;
@@ -186,6 +197,7 @@ export async function computeInvoicePrintExtras(
         unitPriceSen: number;
       }>();
     for (const r of siRes.results ?? []) {
+      const soId = (r.salesOrderId ?? "").trim();
       const code = (r.productCode ?? "").trim();
       const fab = (r.fabricCode ?? "").trim();
       const size = (r.sizeLabel ?? "").trim();
@@ -215,6 +227,16 @@ export async function computeInvoicePrintExtras(
         if (!tight.has(tk)) tight.set(tk, v);
         if (!loose.has(lk)) loose.set(lk, v);
         if (!byCode.has(code)) byCode.set(code, v);
+        // SO-scoped keys — first-one-wins WITHIN one SO (harmless: duplicate
+        // lines in the same SO share the same price/spec).
+        if (soId) {
+          const stk = `${soId}|${code}|${fab}|${size}`;
+          const slk = `${soId}|${code}|${fab}`;
+          const sck = `${soId}|${code}`;
+          if (!tightBySo.has(stk)) tightBySo.set(stk, v);
+          if (!looseBySo.has(slk)) looseBySo.set(slk, v);
+          if (!byCodeBySo.has(sck)) byCodeBySo.set(sck, v);
+        }
         if (!priceByCode[code])
           priceByCode[code] = {
             baseSen: v.baseSen,
@@ -245,6 +267,9 @@ export async function computeInvoicePrintExtras(
   // the DO — only the KEY was a guess. Keyed by productionOrderId there is
   // nothing to guess: one DO line, one invoice line, one answer.
   const refByPo = new Map<string, RefVal>();
+  // productionOrderId → its salesOrderId, so a price/spec lookup can be scoped
+  // to the invoice line's OWN sales order (see the SO-scoped maps above).
+  const poToSo = new Map<string, string>();
   if (inv.deliveryOrderId) {
     const dRefRes = await db
       .prepare(
@@ -280,7 +305,10 @@ export async function computeInvoicePrintExtras(
         companySO: so?.companySO || d.companySOId || d.salesOrderNo || null,
       };
       // Exact, per-line. No first-one-wins: each DO line has its own entry.
-      if (d.productionOrderId) refByPo.set(d.productionOrderId, rv);
+      if (d.productionOrderId) {
+        refByPo.set(d.productionOrderId, rv);
+        if (d.salesOrderId) poToSo.set(d.productionOrderId, d.salesOrderId);
+      }
       const code = (d.productCode ?? "").trim();
       const fab = (d.fabricCode ?? "").trim();
       const size = (d.sizeLabel ?? "").trim();
@@ -319,14 +347,28 @@ export async function computeInvoicePrintExtras(
     const code = (r.productCode ?? "").trim();
     const fab = (r.fabricCode ?? "").trim();
     const size = (r.sizeLabel ?? "").trim();
+    const poLink = readInvoiceItemPoLink(r as unknown as Record<string, unknown>);
+    // PRICE/SPEC breakdown — the unfixed half of BUG-2026-07-17-001 (the REF
+    // half below already keys by productionOrderId). Resolve to the line's OWN
+    // sales order first (via its production order), so a product+fabric+size
+    // shared across different SOs no longer grabs the wrong SO's base /
+    // special-order / T.Height. Global product-code maps stay as the fallback
+    // for legacy rows with no PO link.
+    const soId = poLink ? poToSo.get(poLink) : undefined;
     const v =
-      tight.get(`${code}|${fab}|${size}`) || loose.get(`${code}|${fab}`) || byCode.get(code);
+      (soId
+        ? tightBySo.get(`${soId}|${code}|${fab}|${size}`) ||
+          looseBySo.get(`${soId}|${code}|${fab}`) ||
+          byCodeBySo.get(`${soId}|${code}`)
+        : undefined) ||
+      tight.get(`${code}|${fab}|${size}`) ||
+      loose.get(`${code}|${fab}`) ||
+      byCode.get(code);
     // BUG-2026-07-17-001 — prefer the EXACT link the invoice now carries. The
     // code-keyed maps below stay ONLY as the fallback for legacy rows written
     // before invoice_items.production_order_id existed (and for the
     // bill-the-SO-lines fallback path, which has no DO line behind it). Once
     // those are backfilled this fallback should never fire.
-    const poLink = readInvoiceItemPoLink(r as unknown as Record<string, unknown>);
     const rf =
       (poLink ? refByPo.get(poLink) : undefined) ||
       refTight.get(`${code}|${fab}|${size}`) ||

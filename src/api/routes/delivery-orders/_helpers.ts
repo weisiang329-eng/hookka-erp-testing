@@ -52,6 +52,18 @@ export const VALID_TRANSITIONS: Record<string, string[]> = {
   LOADED: ["DRAFT", "IN_TRANSIT", "DELIVERED"],
   IN_TRANSIT: ["DELIVERED"],
   DELIVERED: ["INVOICED"],
+  // INVOICED → DELIVERED (2026-08-07). INVOICED used to be a DEAD END: the
+  // goods ship, the invoice is voided, and that DO can never be billed again
+  // — the "Transfer to Invoice" button greys on status !== 'DELIVERED' and
+  // POST /api/invoices refuses a non-DELIVERED DO, so the revenue is simply
+  // lost. (Someone had already been forced to write a manual repair endpoint,
+  // /backfill-normalize-invoiced-to-delivered — which deliberately SKIPS DOs
+  // with zero live invoices, i.e. exactly the void case it cannot help.)
+  // The edge exists so an invoice's death can hand the DO back; see
+  // buildInvoiceDeathReleaseStatements below. It is NOT a delivery cascade —
+  // `cascadedToDelivered` explicitly excludes it, so stepping back does not
+  // re-run FIFO COGS / fg_units / the auto-invoice.
+  INVOICED: ["DELIVERED"],
 };
 
 // ---------------------------------------------------------------------------
@@ -643,6 +655,186 @@ export async function resolveDoSalesOrderIds(
   return Array.from(ids);
 }
 
+// The INVERSE of resolveDoSalesOrderIds: every DO that carries an SO's goods.
+// Same two sources, walked the other way — the legacy single-SO FK on
+// delivery_orders, unioned with delivery_order_items → production_orders.
+// Needed to answer "is this SO still billed by some OTHER live invoice?"
+// before a dying invoice is allowed to step it back.
+export async function resolveSalesOrderDoIds(
+  db: D1Database,
+  soId: string,
+): Promise<string[]> {
+  const ids = new Set<string>();
+  const direct = await db
+    .prepare(`SELECT id AS "doId" FROM delivery_orders WHERE salesOrderId = ?`)
+    .bind(soId)
+    .all<{ doId: string | null }>();
+  for (const r of direct.results ?? []) {
+    if (r.doId) ids.add(r.doId);
+  }
+  const viaItems = await db
+    .prepare(
+      `SELECT DISTINCT di.deliveryOrderId AS "doId"
+         FROM delivery_order_items di
+         JOIN production_orders po ON po.id = di.productionOrderId
+        WHERE po.salesOrderId = ?
+          AND di.deliveryOrderId IS NOT NULL`,
+    )
+    .bind(soId)
+    .all<{ doId: string | null }>();
+  for (const r of viaItems.results ?? []) {
+    if (r.doId) ids.add(r.doId);
+  }
+  return Array.from(ids);
+}
+
+// ---------------------------------------------------------------------------
+// buildInvoiceDeathReleaseStatements — when an invoice DIES, its source must
+// be handed back.
+//
+// THE HOLE (2026-08-07). Creating an invoice flips the DO to INVOICED (both
+// the manual POST /api/invoices and the auto-on-delivery cascade below).
+// NOTHING ever flipped it back. The void path reversed the GL and the
+// customer's A/R but wrote nothing to delivery_orders; the DRAFT-delete path
+// reversed only customers.outstandingSen. And INVOICED had no outbound
+// transition at all. So: goods ship → invoice is voided → that delivery order
+// can NEVER be invoiced again. The money for a real, delivered shipment simply
+// falls out of the book, silently, with the DO parked in a status the UI reads
+// as "already billed".
+//
+// This is the reversal, shaped after the `revertedToDraft` SO reversal further
+// down this file (read the current status, only step back the exact status the
+// forward cascade set, write an so_status_changes audit row).
+//
+// The guards that matter:
+//   • ONLY when no OTHER live (non-CANCELLED) invoice still bills the DO. Two
+//     live invoices on one DO → voiding one releases nothing.
+//   • The dying invoice is excluded by id, so this works identically for a
+//     void (row still non-CANCELLED at read time) and a DRAFT delete (row
+//     about to vanish in the same batch).
+//   • Every UPDATE re-asserts the from-status in its WHERE, so a concurrent
+//     writer that got there first turns this into a no-op instead of a
+//     downgrade.
+//   • An SO is only stepped back if NO live invoice bills it through ANY of
+//     its delivery orders — a multi-DO SO stays INVOICED on its other DO's
+//     invoice.
+//
+// Returns statements for the caller's batch; never writes on its own, so the
+// release lands atomically with the void/delete that caused it.
+// ---------------------------------------------------------------------------
+export async function buildInvoiceDeathReleaseStatements(
+  db: D1Database,
+  args: {
+    invoiceId: string;
+    deliveryOrderId: string | null | undefined;
+    salesOrderId: string | null | undefined;
+    now: string;
+    reason: "void" | "delete";
+  },
+): Promise<D1PreparedStatement[]> {
+  const statements: D1PreparedStatement[] = [];
+  const doId = args.deliveryOrderId || "";
+  // No source DO — nothing to release (a DO is what INVOICED was set on).
+  if (!doId) return statements;
+
+  // Another live invoice still bills this delivery — it stays INVOICED.
+  const otherLive = await db
+    .prepare(
+      "SELECT id FROM invoices WHERE deliveryOrderId = ? AND id != ? AND status != 'CANCELLED' LIMIT 1",
+    )
+    .bind(doId, args.invoiceId)
+    .first<{ id: string }>();
+  if (otherLive) return statements;
+
+  const doRow = await db
+    .prepare("SELECT id, doNo, status FROM delivery_orders WHERE id = ?")
+    .bind(doId)
+    .first<{ id: string; doNo: string; status: string }>();
+  if (!doRow) return statements;
+
+  const verb = args.reason === "void" ? "voided" : "deleted";
+
+  // Step the DO back INVOICED → DELIVERED so the grid's "Transfer to Invoice"
+  // button un-greys and POST /api/invoices accepts it again. overdue follows
+  // the same value a real →DELIVERED transition writes ("COMPLETED"), undoing
+  // the "INVOICED" stamp the create path set alongside the status.
+  if (doRow.status === "INVOICED") {
+    statements.push(
+      db
+        .prepare(
+          `UPDATE delivery_orders
+              SET status = 'DELIVERED', overdue = 'COMPLETED', updated_at = ?
+            WHERE id = ? AND status = 'INVOICED'`,
+        )
+        .bind(args.now, doId),
+    );
+  }
+
+  // And the sales orders the invoice bumped to INVOICED (invoices.ts DRAFT→SENT
+  // cascade, and the auto path's soBillable loop). A voided invoice must not
+  // leave the SO stranded at INVOICED with nothing billing it.
+  const soIds = await resolveDoSalesOrderIds(db, doId, args.salesOrderId ?? null);
+  for (const soId of soIds) {
+    const soRow = await db
+      .prepare("SELECT id, status FROM sales_orders WHERE id = ?")
+      .bind(soId)
+      .first<{ id: string; status: string }>();
+    // Only undo the exact flip the invoice made. CLOSED / CANCELLED / anything
+    // pre-invoice is somebody else's state.
+    if (!soRow || soRow.status !== "INVOICED") continue;
+
+    // Still billed via a sibling DO (or linked directly)? Then it stays.
+    const directLive = await db
+      .prepare(
+        "SELECT id FROM invoices WHERE salesOrderId = ? AND id != ? AND status != 'CANCELLED' LIMIT 1",
+      )
+      .bind(soId, args.invoiceId)
+      .first<{ id: string }>();
+    if (directLive) continue;
+    const soDoIds = await resolveSalesOrderDoIds(db, soId);
+    if (soDoIds.length > 0) {
+      const placeholders = soDoIds.map(() => "?").join(",");
+      const viaDoLive = await db
+        .prepare(
+          `SELECT id FROM invoices
+            WHERE deliveryOrderId IN (${placeholders})
+              AND id != ? AND status != 'CANCELLED' LIMIT 1`,
+        )
+        .bind(...soDoIds, args.invoiceId)
+        .first<{ id: string }>();
+      if (viaDoLive) continue;
+    }
+
+    statements.push(
+      db
+        .prepare(
+          "UPDATE sales_orders SET status = 'DELIVERED', updated_at = ? WHERE id = ? AND status = 'INVOICED'",
+        )
+        .bind(args.now, soId),
+      db
+        .prepare(
+          `INSERT INTO so_status_changes
+             (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          genStatusChangeId(),
+          soId,
+          "INVOICED",
+          "DELIVERED",
+          "System",
+          args.now,
+          `Invoice ${verb}`,
+          JSON.stringify([
+            `${doRow.doNo} released for re-invoicing (invoice ${verb})`,
+          ]),
+        ),
+    );
+  }
+
+  return statements;
+}
+
 // DO / PO "Sales Figure" resolver moved to ../lib/do-value (single source
 // of truth, also used by the Sales Orders Delivered/Outstanding split).
 
@@ -966,8 +1158,18 @@ export async function buildDoDeliveredSoAndInvoice(
   }
 
   // 2. One combined invoice for the whole DO — idempotent.
+  //
+  // AND status != 'CANCELLED' (2026-08-07): this auto-on-delivery path used to
+  // count a CANCELLED invoice as "already invoiced", so once a DO's only
+  // invoice was voided this path went permanently silent for it. The manual
+  // path (invoices.ts POST /) has always excluded CANCELLED, and the partial
+  // unique index uniq_invoice_active_delivery_order is itself
+  // `WHERE status <> 'CANCELLED'` — so this was the odd one out in its own
+  // codebase. A cancelled invoice must not block a re-invoice on EITHER path.
   const existingInvoice = await db
-    .prepare("SELECT id FROM invoices WHERE deliveryOrderId = ? LIMIT 1")
+    .prepare(
+      "SELECT id FROM invoices WHERE deliveryOrderId = ? AND status != 'CANCELLED' LIMIT 1",
+    )
     .bind(doRow.id)
     .first<{ id: string }>();
 
@@ -4252,8 +4454,16 @@ export async function applyDeliveryOrderUpdate(
     //     if any invoice already references this deliveryOrderId).
     // Everything goes into the same batch so a partial failure rolls back.
     // -------------------------------------------------------------------
+    // INVOICED → DELIVERED is a RELEASE, not a delivery. The goods were
+    // already delivered once; the DO is only being handed back so it can be
+    // re-billed after its invoice died. Running the delivery cascade on that
+    // edge would re-stamp fg_units, re-emit FIFO FG_DELIVERED COGS, re-advance
+    // the SOs and auto-create a SECOND invoice for goods that shipped once.
+    // Excluded explicitly — see the INVOICED entry in VALID_TRANSITIONS.
     const cascadedToDelivered =
-      existing.status !== "DELIVERED" && nextStatus === "DELIVERED";
+      existing.status !== "DELIVERED" &&
+      existing.status !== "INVOICED" &&
+      nextStatus === "DELIVERED";
     if (cascadedToDelivered) {
       // fg_units sync: flip every unit whose doId matches.
       statements.push(

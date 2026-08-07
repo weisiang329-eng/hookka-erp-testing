@@ -34,6 +34,21 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-07-002 — Void an invoice and the delivered goods can NEVER be billed again: INVOICED was a dead-end status `delivery-orders` `invoices` `revenue` 🟢
+
+**Symptom.** Goods ship, the invoice is voided (or a DRAFT invoice is deleted), and that delivery order is permanently unbillable. The grid's "Transfer to Invoice" greys out (`src/pages/delivery/index.tsx:4348`, `disabled: row.status !== "DELIVERED"`) and the backend refuses it (`invoices.ts:1561`, DELIVERED-only). Real delivered revenue silently leaves the book, with the DO parked in a status the UI reads as "already billed". Someone had already been forced to write a manual repair endpoint for the symptom — `POST /api/delivery-orders/backfill-normalize-invoiced-to-delivered` (`delivery-orders.ts:1658`) — which deliberately SKIPS DOs with zero live invoices, i.e. exactly the void case it cannot help.
+
+**Root cause — three independent walls, each of which alone was fatal.**
+1. **The status machine had no exit.** `VALID_TRANSITIONS` (`delivery-orders/_helpers.ts:50`) had `DELIVERED → INVOICED` and nothing out of `INVOICED`. (Relatedly, no status anywhere transitions a DO to `CANCELLED`, so every `!= 'CANCELLED'` guard on `delivery_orders` is dead code.)
+2. **Invoice death wrote nothing back to the source.** Creating an invoice flips the DO to INVOICED in exactly two places (`invoices.ts:1708`, `_helpers.ts:1148`), and `invoices.ts` writes `delivery_orders` in that ONE place. The void path (`invoices.ts` PUT, `isVoidTransition`) reversed the GL and `customers.outstandingSen` but never the DO; the DRAFT-delete path reversed only `outstandingSen`. The sales order was stranded the same way (`invoices.ts:2363` / `_helpers.ts:1138` set it to INVOICED; nothing set it back).
+3. **The two idempotency checks disagreed about CANCELLED.** Auto-invoice-on-delivery (`_helpers.ts:969`) looked for ANY invoice on the DO; the manual path (`invoices.ts:1577`) excluded CANCELLED. So even with walls 1 and 2 down, the auto path would still have treated a voided invoice as "already invoiced" and stayed silent forever.
+
+**Fix.** `INVOICED: ["DELIVERED"]` added to `VALID_TRANSITIONS` (`_helpers.ts:50`) — and `cascadedToDelivered` (`_helpers.ts:~4420`) now excludes `existing.status === "INVOICED"`, because stepping back is a RELEASE, not a delivery: re-running the cascade would re-stamp `fg_units`, re-emit FIFO FG_DELIVERED COGS, re-advance the SOs and auto-create a SECOND invoice for goods that shipped once. New shared reversal `buildInvoiceDeathReleaseStatements` (`_helpers.ts:646`, shaped after the existing `revertedToDraft` SO reversal) returns statements — never writes — so the release rides the SAME batch as the void/delete and rolls back with it. It releases only when NO other live invoice bills the DO (dying invoice excluded by id, so void and delete behave identically), guards every UPDATE with its from-status, and steps a sales order back only when no live invoice bills it through ANY of its DOs (new inverse resolver `resolveSalesOrderDoIds`). Wired into both death paths in `invoices.ts` (the `isVoidTransition` branch and the DELETE handler, whose SELECT now also pulls `deliveryOrderId, salesOrderId`). Wall 3 closed at `_helpers.ts:969` with `AND status != 'CANCELLED'`.
+
+**The DB layer does not block it.** `uniq_invoice_active_delivery_order` is partial — `ON invoices (delivery_order_id) WHERE status <> 'CANCELLED' AND delivery_order_id IS NOT NULL` — in both the migration (`migrations-postgres/0208`) and the runtime self-apply (`invoices.ts:1483`). `git log -S` confirms it has only ever existed in that one form, so no non-partial ancestor can be lurking behind `CREATE UNIQUE INDEX IF NOT EXISTS` on prod. A cancelled invoice does not reserve the DO; no index change needed.
+
+**Verified.** `tsc -p tsconfig.app.json --noEmit` clean for the touched files. New `tests/invoice-death-releases-source.test.mjs` (14 tests) drives the helper against a fake D1: void releases the DO, DRAFT-delete releases it the same way, the SO is released and audited, an already-DELIVERED DO / CLOSED SO is never downgraded, a CANCELLED sibling does not count as still-billed, a multi-DO SO stays INVOICED while a sibling DO's invoice lives — and, the case that must NOT release, **two live invoices on one DO: voiding one releases nothing**. Live prod verify pending deploy. NOTE: partial / multi-invoice-per-DO is deliberately NOT in scope here (needs new columns); this change is only "death releases the source".
+
 ## BUG-2026-08-07-001 — Every AUTO KPI showed "See the list →" and every link was a lie: three landed on the unfiltered list, one on a route that does not exist `ui-frontend` `kpi` 🟢
 
 **Symptom.** The KPI card renders a "See the list →" drill-down on all five AUTO KPIs. Owner: 「如果是 showable 的话，就要确保这些全部数据是可以被看到的」. None of the five opened the rows the card counted.
@@ -921,12 +936,71 @@ line was matched to the wrong SO.
 > on the disturbance, not a bill. Owner 2026-08-02 on the under-charged side:
 > 「已经收到钱了就算了」.
 >
-> **What is left:** the printed price BUILD-UP (`v` at `invoice-print-extras.ts:322`)
+> **What is left:** ~~*(SUPERSEDED 2026-08-07 — closed, see the block below.)*~~
+> the printed price BUILD-UP (`v` at `invoice-print-extras.ts:322`)
 > still resolves through the code|fabric|size maps rather than the PO link, so on
 > a legacy consolidated invoice the Base/Divan/Leg/Special breakdown can show
 > another SO's numbers even though the PO line and the charged total are right.
 > Cosmetic on new invoices (the refs and the charge are both exact); worth
 > mirroring `refByPo` with a `valByPo` when someone is next in this file.
+>
+> ---
+>
+> **PRICE HALF NOW CLOSED — 2026-08-07. The whole bug is done.**
+>
+> Reported symptom: a line printing "Base 0" while charging "Unit RM 305", and
+> the number changing to **308** the moment the owner pressed Edit. Both numbers
+> came out of the same file. The read view showed the stored
+> `invoice_items.unitPriceSen` (305 — correct, `computeDoInvoiceLines` already
+> prices through `priceForItem(idx, di.productionOrderId, …)`), while the
+> breakdown beside it and the editor's seeded components came off the
+> **first-one-wins** code|fabric|size match (308 — a sibling SO's row). The
+> document contradicted itself; nothing was mischarged.
+>
+> **Fix — `priceByPo`, the price twin of `refByPo`** (`invoice-print-extras.ts`):
+> - the SO-item maps are now also built SO-SCOPED (`soTightH` / `soTight` /
+>   `soLoose` / `soByCode`, `:189-192` / `:249-259`), and `soIdByKey` (`:146`) resolves any
+>   alias a DO line carries (`sales_orders.id` / `companySOId` / `companySO`) to
+>   the real SO id;
+> - each DO line resolves its build-up **inside its own sales order**, keyed by
+>   the production order's OWN spec incl. divan/leg/gap (`dims`, `:70`), and is
+>   filed under its `productionOrderId` (`priceByPo`, `:297` / `:349-374`);
+> - the invoice-item loop reads `priceByPo` FIRST (`:420-424`). Tight/loose/byCode
+>   survive only for lines with no PO link (legacy rows, and the bill-the-SO-lines
+>   path, which has no DO line behind it).
+>
+> Breakdown and charged unit now come off the same SO line **by construction**,
+> so they cannot disagree — which is the actual repair, the guard below is the
+> seatbelt.
+>
+> **Reconciliation guard on screen.** `build-unified-doc-data.ts:60` already
+> refused to print a breakdown when `base+divan+leg+totalHeight+special !==
+> priceSen`; the invoice detail page had no such check, which is precisely why it
+> happily rendered "Base 0 … = RM 305". `invoices/detail.tsx` now itemises the
+> Price column **only** through the shared `invoicePriceBreakdown` — one rule for
+> the screen and the PDF. A build-up that does not add up shows a single price
+> instead. Showing nothing is honest; showing a wrong decomposition is not.
+>
+> **Also fixed in the same pass — T.Height was missing from the EDIT view's live
+> sums.** `totalHeight` is an input, is in the save payload, in the backend
+> recompute, in the read view and in the PDF — but was omitted from the per-line
+> Unit, the header total and the footer Subtotal, and therefore from the
+> `DiscountInput` base derived from Unit. A `%` discount typed while editing was
+> computed off a too-small amount and the figure jumped after save. All three sums
+> now include it (`detail.tsx:734-746` Unit · `:395` header total · `:916` Subtotal);
+> the discount base at `:870` is `liveUnit * qty` and inherits it.
+>
+> **Not touched, deliberately:** rounding / the whole-ringgit question.
+> `formatCurrency`, the sofa-combo proration and `DiscountInput` are unchanged —
+> that is a policy change with an open question (where leftover sen go when a %
+> discount or % SST does not divide evenly) and the owner has not decided.
+>
+> **Tests:** `tests/invoice-price-by-po.test.mjs` — a consolidated line resolves
+> its build-up via its OWN `production_order_id` (the two same-code/fabric/size
+> lines come out RM 305 and RM 308, not 305 twice); every resolved build-up
+> reconciles to its own unit; a line with no PO link still falls through to the
+> legacy maps; plus structural pins that the three edit-view sums and the discount
+> base carry T.Height and that the read view itemises only via the shared rule.
 
 **Symptom (owner):** DO-2607-051 vs INV-2607-060 — "為什麼兩個 items details PO number
 不一樣?不對?" Correct. **4 of 12 invoice lines cite the WRONG customer PO.**

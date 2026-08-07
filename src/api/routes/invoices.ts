@@ -2552,6 +2552,28 @@ app.put("/:id", async (c) => {
         );
       }
 
+      // Release the source (2026-08-07). The void above reverses the GL and
+      // the customer's A/R, but until now it wrote NOTHING back to
+      // delivery_orders — so the DO stayed at INVOICED forever and the
+      // delivered goods could never be billed again. Step the DO (and any SO
+      // this invoice family bumped) back to DELIVERED, but ONLY when no other
+      // live invoice still bills them. Same batch as the void, so the release
+      // and the reversal land or roll back together.
+      {
+        const { buildInvoiceDeathReleaseStatements } = await import(
+          "./delivery-orders"
+        );
+        statements.push(
+          ...(await buildInvoiceDeathReleaseStatements(c.var.DB, {
+            invoiceId: id,
+            deliveryOrderId: existing.deliveryOrderId,
+            salesOrderId: existing.salesOrderId,
+            now,
+            reason: "void",
+          })),
+        );
+      }
+
       // Hide the cancelled invoice's GL legs (original + reversal) so the void
       // doesn't show in the GL — the same effect applyLifecycle gives the
       // lifecycle-managed doc types. Pushed AFTER the reversal INSERTs, so the
@@ -2596,8 +2618,11 @@ app.delete("/:id", async (c) => {
   // bumped on create. (Auto-created DRAFT invoices from delivery-orders.ts
   // bump outstandingSen on create; manual POST invoices.ts does not. The
   // GREATEST(0, ...) guard below handles both paths safely.)
+  // deliveryOrderId / salesOrderId (2026-08-07) — deleting the invoice must
+  // also hand its source DO back for re-invoicing, so we need to know what it
+  // was billing. See buildInvoiceDeathReleaseStatements below.
   const existing = await c.var.DB.prepare(
-    "SELECT id, status, customerId, totalSen, paidAmount FROM invoices WHERE id = ?",
+    "SELECT id, status, customerId, totalSen, paidAmount, deliveryOrderId, salesOrderId FROM invoices WHERE id = ?",
   )
     .bind(id)
     .first<{
@@ -2606,6 +2631,8 @@ app.delete("/:id", async (c) => {
       customerId: string;
       totalSen: number;
       paidAmount: number;
+      deliveryOrderId: string | null;
+      salesOrderId: string | null;
     }>();
   if (!existing) {
     return c.json({ success: false, error: "Invoice not found" }, 404);
@@ -2628,6 +2655,24 @@ app.delete("/:id", async (c) => {
       c.var.DB.prepare(
         `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ?`,
       ).bind(unpaidSen, existing.customerId),
+    );
+  }
+  // Release the source, exactly as the void path does. A DRAFT invoice can
+  // only exist because the auto-on-delivery cascade created it — and that
+  // cascade flipped the DO to INVOICED. Deleting the invoice without stepping
+  // the DO back left the delivery permanently unbillable.
+  {
+    const { buildInvoiceDeathReleaseStatements } = await import(
+      "./delivery-orders"
+    );
+    stmts.push(
+      ...(await buildInvoiceDeathReleaseStatements(c.var.DB, {
+        invoiceId: id,
+        deliveryOrderId: existing.deliveryOrderId,
+        salesOrderId: existing.salesOrderId,
+        now: new Date().toISOString(),
+        reason: "delete",
+      })),
     );
   }
   await c.var.DB.batch(stmts);

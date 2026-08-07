@@ -90,6 +90,11 @@ export {
   ensureDeliveryIncompleteColumn,
   queueDoCustomerNotice,
   applyDeliveryOrderUpdate,
+  // invoices.ts calls this on void / DRAFT-delete to hand the DO (and its SOs)
+  // back for re-invoicing. Re-exported here because invoices.ts reaches this
+  // module via the existing call-time `import("./delivery-orders")` cycle-break.
+  buildInvoiceDeathReleaseStatements,
+  resolveSalesOrderDoIds,
 } from "./delivery-orders/_helpers";
 
 const app = new Hono<Env>();

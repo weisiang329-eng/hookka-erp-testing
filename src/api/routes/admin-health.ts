@@ -2067,3 +2067,114 @@ app.get("/db-connect", async (c) => {
   });
   return c.json({ success: true, data });
 });
+
+// ---------------------------------------------------------------------------
+// GET /db-size-code-mismatch — bedframe rows whose MODEL CODE size-suffix
+// disagrees with the stored size code.
+//
+// A bedframe variant code is `{baseModel}-({sizeCode})` (fg-variants.ts): so
+// `2038(A)-(SK)` is a Super-King model, and its size field must read SK too.
+// The owner found a sticker printed `2038(A)-(SK)` with Size `K` (King) — the
+// code suffix and the size field are stored separately and nothing enforces
+// they agree. This lists every such disagreement across products AND
+// sales_order_items so the wrong ones can be corrected.
+//
+// Read-only. Parses the trailing `-(XX)` group only (sofa codes like
+// `5539-1A(LHF)` have no leading `-` before the final paren, so they're
+// skipped — this is a bedframe-only convention). Compares case-insensitively.
+// ---------------------------------------------------------------------------
+
+// The trailing size-code group: "...-(SK)" -> "SK". No match for sofa codes
+// ("5539-1A(LHF)") or codes with no size suffix.
+function parseCodeSizeSuffix(code: string): string | null {
+  const m = String(code || "").match(/-\(([^)]+)\)\s*$/);
+  return m ? m[1].trim().toUpperCase() : null;
+}
+
+const KNOWN_BEDFRAME_SIZE_CODES = new Set(["K", "Q", "S", "SS", "SK", "SP"]);
+
+app.get("/db-size-code-mismatch", async (c) => {
+  const scan = async (
+    table: string,
+    idCol: string,
+    codeCol: string,
+    extraCols: string[],
+  ): Promise<{
+    total: number;
+    mismatches: Array<Record<string, unknown>>;
+    unknownSuffix: Array<Record<string, unknown>>;
+  }> => {
+    const cols = [idCol, codeCol, "sizeCode", "sizeLabel", ...extraCols].join(", ");
+    let rows: Record<string, unknown>[] = [];
+    try {
+      const res = await c.var.DB.prepare(`SELECT ${cols} FROM ${table}`).all<Record<string, unknown>>();
+      rows = res.results ?? [];
+    } catch (err) {
+      return {
+        total: -1,
+        mismatches: [{ error: err instanceof Error ? err.message : String(err) }],
+        unknownSuffix: [],
+      };
+    }
+    const mismatches: Array<Record<string, unknown>> = [];
+    const unknownSuffix: Array<Record<string, unknown>> = [];
+    let considered = 0;
+    for (const r of rows) {
+      const code = String(r[codeCol] ?? "");
+      const suffix = parseCodeSizeSuffix(code);
+      if (!suffix) continue; // no bedframe-style size suffix → not in scope
+      considered++;
+      const stored = String(r.sizeCode ?? r.sizecode ?? "").trim().toUpperCase();
+      if (!KNOWN_BEDFRAME_SIZE_CODES.has(suffix)) {
+        // suffix isn't a recognised size code — surface separately, don't
+        // assume it's a mismatch (could be a new size we don't know yet).
+        if (unknownSuffix.length < 50) {
+          unknownSuffix.push({ [idCol]: r[idCol], code, suffixFromCode: suffix, storedSizeCode: stored });
+        }
+        continue;
+      }
+      // A blank stored sizeCode is a SEPARATE problem (not "wrong", just
+      // missing) — report it as a mismatch with storedSizeCode "" so it's
+      // visible, but tag it.
+      if (stored !== suffix) {
+        if (mismatches.length < 200) {
+          mismatches.push({
+            [idCol]: r[idCol],
+            code,
+            expectedFromCode: suffix,
+            storedSizeCode: stored || "(blank)",
+            sizeLabel: r.sizeLabel ?? r.sizelabel ?? "",
+            ...Object.fromEntries(extraCols.map((k) => [k, r[k] ?? r[k.toLowerCase()] ?? null])),
+          });
+        }
+      }
+    }
+    return { total: considered, mismatches, unknownSuffix };
+  };
+
+  const [products, soItems] = await Promise.all([
+    scan("products", "id", "code", ["name", "category"]),
+    scan("sales_order_items", "id", "productCode", ["salesOrderId"]),
+  ]);
+
+  return c.json({
+    success: true,
+    data: {
+      note: "Bedframe code `{model}-({sizeCode})` vs stored sizeCode. Sofa codes are skipped.",
+      products: {
+        bedframeVariantsConsidered: products.total,
+        mismatchCount: products.mismatches.length,
+        mismatches: products.mismatches,
+        unknownSuffixCount: products.unknownSuffix.length,
+        unknownSuffix: products.unknownSuffix,
+      },
+      salesOrderItems: {
+        bedframeVariantsConsidered: soItems.total,
+        mismatchCount: soItems.mismatches.length,
+        mismatches: soItems.mismatches,
+        unknownSuffixCount: soItems.unknownSuffix.length,
+        unknownSuffix: soItems.unknownSuffix,
+      },
+    },
+  });
+});

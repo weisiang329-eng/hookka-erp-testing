@@ -1,17 +1,29 @@
 // ---------------------------------------------------------------------------
-// QC Pending Inspections + Cron Trigger (Phase 1).
+// QC Pending Inspections + Cron Trigger.
 //
-// Time-triggered, PRODUCTION-COUPLED QC: every day at 12:00 and 16:00
-// (factory's local time) we generate a PENDING qc_inspections row per active
-// qc_templates row THAT HAS SOMETHING TO SAMPLE that day — a WIP department
-// with work in hand, an RM stage that actually received goods, an FG stage
-// that actually produced units. The inspector picks each up, samples a real
-// subject (RM batch / job card / FG batch), and either fills in the per-item
-// results (PASS/FAIL/NA) or marks the slot SKIPPED.
+// Generation runs twice a day (12:00 / 16:00 factory local) but the three
+// stages are generated on THREE DIFFERENT RHYTHMS, because the owner's model
+// (2026-08-08) is three different jobs:
 //
-// It was NOT coupled until 2026-08-07: it was a blind schedule, 34 rows a day
-// regardless of whether anything was made, which produced a 3,009-row backlog
-// nobody could ever clear and therefore nobody read. See stageHadActivity.
+//   RM  — ONE INSPECTION PER GOODS RECEIPT, per material family on it.
+//         "基本上是根据进货情况按 batch 来检。只要有了 GR，可能是一张 PI 或者
+//          同一天进来的货，我们只需要检查一次 … 原材料这边一定要做到每一
+//          batch 进来都必须抽检". A GRN *is* the batch. Two receipts on one day
+//         raise two inspections; one receipt raises one however many lines it
+//         has; re-running raises none. See generateRmForGrns.
+//   WIP — TWICE DAILY, gated on the department actually working.
+//         "这个可能需要每天跟进，比如早上一次、下午一次". See stageHadActivity.
+//   FG  — PERIODIC SAMPLING of what was produced, each slot bound to a
+//         SPECIFIC finished unit and its sales order.
+//         "定期进行抽查，重点看他们有没有做对 order，有没有做错".
+//         See generateFgSamples.
+//
+// It was a blind schedule until 2026-08-07 (34 rows a day regardless of
+// whether anything was made, a 3,009-row backlog nobody could clear), then a
+// day-gated schedule until 2026-08-08. The day gate was right for WIP and
+// wrong for RM: it collapsed two receipts on one day into ONE inspection,
+// which is the exact opposite of "每一 batch 进来都必须抽检", and it named no
+// receipt so the inspector could not tell which goods to look at.
 //
 // Endpoints:
 //   GET    /api/qc-pending              — list PENDING + IN_PROGRESS rows
@@ -43,6 +55,13 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { recomputePoStatusAndProgress } from "./production-orders";
+import { ensureQcGenerationSchema } from "../lib/qc-generation-schema";
+import {
+  pickRmTemplate,
+  rmFamiliesOnReceipt,
+  type RmFamily,
+  type RmLineLike,
+} from "../lib/qc-rm-families";
 
 const app = new Hono<Env>();
 
@@ -74,6 +93,19 @@ type InspectionRow = {
   skipReason: string | null;
   completedAt: string | null;
   createdAt: string | null;
+  // Added 2026-08-08 (mig 0215 + ensureQcGenerationSchema). Read dual-keyed:
+  // the PG adapter folds snake_case → camelCase on the way out, but a row
+  // written before the self-apply landed carries neither.
+  sourceGrnId?: string | null;
+  source_grn_id?: string | null;
+  sourceGrnNo?: string | null;
+  source_grn_no?: string | null;
+  materialFamily?: string | null;
+  material_family?: string | null;
+  sourceFgUnitId?: string | null;
+  source_fg_unit_id?: string | null;
+  soSpec?: string | null;
+  so_spec?: string | null;
 };
 
 type TemplateRow = {
@@ -85,6 +117,10 @@ type TemplateRow = {
   stage: Stage;
   active: number;
   notes: string | null;
+  materialFamily?: string | null;
+  material_family?: string | null;
+  supplierId?: string | null;
+  supplier_id?: string | null;
 };
 
 type TemplateItemRow = {
@@ -181,10 +217,15 @@ async function inspectionNoAllocator(
 //         slot exists — being able to inspect a card that just started is
 //         fine; generating a slot for a department that has only ever queued
 //         is not.)
-//   RM  — goods were actually received that day (a CONFIRMED / POSTED GRN).
-//         Per-material targeting ("根据不一样的 material 去抽查") is the next
-//         step and is NOT implemented here; today this is per-day.
-//   FG  — finished units were actually produced that day.
+//
+// RM and FG NO LONGER COME THROUGH HERE (2026-08-08). A day gate was the wrong
+// unit for both of them:
+//   RM  — the unit is the RECEIPT, not the day. The day gate collapsed two
+//         GRNs into one inspection and named neither. → generateRmForGrns.
+//   FG  — the unit is the finished PIECE, and the volume decides how many to
+//         pull. One blind slot a day is not sampling. → generateFgSamples.
+// This probe is now WIP only, unchanged, because the owner's WIP rule is
+// literally a twice-daily follow-up on a department that is working.
 //
 // Fail OPEN: an unknown stage, or a probe that throws, still generates. Over-
 // generating is a nuisance; silently never generating is how you end up
@@ -205,29 +246,6 @@ async function stageHadActivity(
             LIMIT 1`,
         )
         .bind(deptCode, slotDate)
-        .first<{ hit: number }>();
-      return !!row;
-    }
-    if (stage === "RM") {
-      const row = await db
-        .prepare(
-          `SELECT 1 AS hit FROM grns
-            WHERE receiveDate LIKE ?
-              AND status IN ('CONFIRMED','POSTED')
-            LIMIT 1`,
-        )
-        .bind(`${slotDate}%`)
-        .first<{ hit: number }>();
-      return !!row;
-    }
-    if (stage === "FG") {
-      const row = await db
-        .prepare(
-          `SELECT 1 AS hit FROM fg_units
-            WHERE mfdDate LIKE ? OR packedAt LIKE ?
-            LIMIT 1`,
-        )
-        .bind(`${slotDate}%`, `${slotDate}%`)
         .first<{ hit: number }>();
       return !!row;
     }
@@ -296,6 +314,14 @@ function rowToInspection(r: InspectionRow, items: InspectionItemRow[] = []) {
     skipReason: r.skipReason ?? "",
     completedAt: r.completedAt ?? "",
     createdAt: r.createdAt ?? "",
+    // WHAT this inspection is about, decided at generation time. The subject
+    // columns above are what the inspector finally submitted; these say what
+    // they were handed. Dual-keyed — see InspectionRow.
+    sourceGrnId: r.sourceGrnId ?? r.source_grn_id ?? "",
+    sourceGrnNo: r.sourceGrnNo ?? r.source_grn_no ?? "",
+    materialFamily: r.materialFamily ?? r.material_family ?? "",
+    sourceFgUnitId: r.sourceFgUnitId ?? r.source_fg_unit_id ?? "",
+    soSpec: safeParseJson(r.soSpec ?? r.so_spec ?? "") as Record<string, unknown> | null,
     items: items
       .filter((i) => i.inspectionId === r.id)
       .sort((a, b) => a.sequence - b.sequence)
@@ -339,21 +365,523 @@ async function constantTimeEqual(a: string, b: string): Promise<boolean> {
 }
 
 // --- shared trigger logic -------------------------------------------------
+
 /**
- * Generate one PENDING qc_inspections row per active template THAT HAS
- * SOMETHING TO SAMPLE on the slot's date, snapshotting the template's items
- * into the row. Idempotent — if a row already exists for (templateId,
- * scheduledSlotAt) we skip it.
+ * How far back a generation run looks for goods receipts that have not been
+ * inspected yet.
  *
- * Returns { created, skipped, skippedNoActivity }. The third number is the
- * whole point of the coupling and is reported by /trigger and /generate-now:
- * "nothing generated" must be legible as "nothing was made today", not as a
- * cron that failed.
+ * NOT unbounded, deliberately. Prod carries years of receipts; a lookback of
+ * "all time" would raise thousands of inspections for goods that were consumed
+ * months ago on the first run after deploy — the same wallpaper backlog this
+ * module has already been rebuilt twice to get rid of. Seven days covers a GRN
+ * confirmed late (weekend arrivals, a document confirmed on the Monday) while
+ * keeping the first run honest.
+ */
+export const RM_GRN_LOOKBACK_DAYS = 7;
+
+/**
+ * FG sampling rate and per-slot ceiling.
+ *
+ * Owner 2026-08-08: "FG 检查：定期进行抽查" — a SHARE of what was produced.
+ * One blind slot a day is not a sampling plan: it says the same thing whether
+ * the factory shipped 2 units or 60. 10% with a floor of 1 (anything produced
+ * gets looked at) and a ceiling of 5 per slot per category (an inspector who
+ * is handed 12 units in one afternoon does 12 tick-box exercises, not 12
+ * inspections — and there is a second slot the same day).
+ */
+export const FG_SAMPLE_RATE = 0.1;
+export const FG_SAMPLE_MAX_PER_SLOT = 5;
+
+export function fgSampleTarget(unitsProduced: number): number {
+  if (unitsProduced <= 0) return 0;
+  return Math.min(
+    FG_SAMPLE_MAX_PER_SLOT,
+    Math.max(1, Math.ceil(unitsProduced * FG_SAMPLE_RATE)),
+  );
+}
+
+/** Everything one generated inspection needs, independent of which stage built it. */
+type PlannedInspection = {
+  tpl: TemplateRow;
+  subjectType?: SubjectType | null;
+  subjectId?: string | null;
+  subjectLabel?: string | null;
+  sourceGrnId?: string | null;
+  sourceGrnNo?: string | null;
+  materialFamily?: string | null;
+  sourceFgUnitId?: string | null;
+  soSpec?: unknown;
+};
+
+/**
+ * Turn a planned inspection into its INSERT statements (header + one row per
+ * checklist item, results NULL so the inspector just fills them in).
+ *
+ * Shared by all three stage generators so a new stage cannot quietly forget the
+ * template snapshot — the snapshot is what keeps a completed inspection
+ * readable after the template is edited.
+ */
+function buildInspectionStatements(
+  db: D1Database,
+  plan: PlannedInspection,
+  tplItems: TemplateItemRow[],
+  slotIso: string,
+  slotDate: string,
+  inspNo: string,
+): D1PreparedStatement[] {
+  const { tpl } = plan;
+  const inspId = genInspId();
+  const items = tplItems
+    .filter((i) => i.templateId === tpl.id)
+    .sort((a, b) => a.sequence - b.sequence);
+  const snapshot = JSON.stringify({
+    templateName: tpl.name,
+    items: items.map((i) => ({
+      id: i.id,
+      sequence: i.sequence,
+      itemName: i.itemName,
+      criteria: i.criteria,
+      severity: i.severity,
+      isMandatory: i.isMandatory,
+    })),
+  });
+  const now = new Date().toISOString();
+
+  const stmts: D1PreparedStatement[] = [
+    db
+      .prepare(
+        `INSERT INTO qc_inspections (
+           id, inspectionNo, templateId, templateSnapshot, stage, itemCategory,
+           department, triggerType, scheduledSlotAt, status,
+           inspectionDate, created_at,
+           subjectType, subjectId, subjectLabel,
+           source_grn_id, source_grn_no, material_family, source_fg_unit_id, so_spec
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'SCHEDULED', ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        inspId,
+        inspNo,
+        tpl.id,
+        snapshot,
+        tpl.stage,
+        tpl.itemCategory,
+        tpl.deptCode,
+        slotIso,
+        slotDate,
+        now,
+        plan.subjectType ?? null,
+        plan.subjectId ?? null,
+        plan.subjectLabel ?? null,
+        plan.sourceGrnId ?? null,
+        plan.sourceGrnNo ?? null,
+        plan.materialFamily ?? null,
+        plan.sourceFgUnitId ?? null,
+        plan.soSpec === undefined || plan.soSpec === null ? null : JSON.stringify(plan.soSpec),
+      ),
+  ];
+
+  for (const it of items) {
+    stmts.push(
+      db
+        .prepare(
+          `INSERT INTO qc_inspection_items (
+             id, inspectionId, sequence, itemName, criteria, severity, isMandatory, result
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+        )
+        .bind(genItemId(), inspId, it.sequence, it.itemName, it.criteria, it.severity, it.isMandatory),
+    );
+  }
+  return stmts;
+}
+
+// --- RM: one inspection per goods receipt ----------------------------------
+//
+// THE UNIT IS THE RECEIPT. Owner 2026-08-08: "只要有了 GR，可能是一张 PI 或者
+// 同一天进来的货，我们只需要检查一次 … 每一 batch 进来都必须抽检". A GRN is
+// exactly that unit — it is one supplier, one delivery, one document. So:
+//   • two GRNs on the same day raise TWO inspections (the day gate raised one,
+//     which is the failure this replaces);
+//   • one GRN raises ONE per material family however many LINES it has;
+//   • re-running raises none, keyed on (source_grn_id, templateId) rather than
+//     on the slot, because the receipt is not tied to a slot.
+//
+// MIXED RECEIPTS: one inspection PER MATERIAL FAMILY on the receipt, not one
+// blended checklist covering everything. A timber + fabric receipt raises two.
+// Three reasons: the checks are different physical activities (moisture meter
+// and a bench vs. a swatch in daylight) that are commonly done by different
+// people at different times; a single overall PASS/FAIL would let a fabric
+// finding condemn the timber and vice-versa, and the whole value of the record
+// is being able to say WHAT was wrong; and it keeps one inspection = one
+// template snapshot, so nothing downstream (completion, tags, the phone) has to
+// learn about multi-template inspections. Both inspections carry the same
+// source_grn_id, so "what did we do about receipt X" is still one query.
+//
+// ROUTING is off `raw_materials.item_group` (see lib/qc-rm-families.ts), never
+// off the supplier's free-text description — a new material code inherits the
+// right checklist the moment it is filed in the right group.
+type GrnHeaderRow = {
+  id: string;
+  grnNumber: string | null;
+  supplierId: string | null;
+  supplierName: string | null;
+  receiveDate: string | null;
+};
+type GrnLineRow = RmLineLike & { grnId: string };
+
+export async function generateRmForGrns(
+  db: D1Database,
+  slotIso: string,
+  slotDate: string,
+  templates: TemplateRow[],
+  tplItems: TemplateItemRow[],
+  nextInspectionNo: () => string,
+): Promise<{ stmts: D1PreparedStatement[]; created: number; skipped: number; receipts: number; noTemplate: number }> {
+  const empty = { stmts: [] as D1PreparedStatement[], created: 0, skipped: 0, receipts: 0, noTemplate: 0 };
+  const rmTemplates = templates.filter((t) => t.stage === "RM");
+  if (rmTemplates.length === 0) return empty;
+
+  const from = new Date(`${slotDate}T00:00:00.000Z`);
+  from.setUTCDate(from.getUTCDate() - RM_GRN_LOOKBACK_DAYS);
+  const fromDate = from.toISOString().slice(0, 10);
+  // receiveDate is stored either as a plain 'YYYY-MM-DD' or as a full ISO
+  // timestamp. Both compare correctly against these bounds as strings.
+  const toBound = `${slotDate}T23:59:59.999Z`;
+
+  let receipts: GrnHeaderRow[];
+  try {
+    const res = await db
+      .prepare(
+        `SELECT id, grnNumber, supplierId, supplierName, receiveDate
+           FROM grns
+          WHERE status IN ('CONFIRMED','POSTED')
+            AND receiveDate >= ?
+            AND receiveDate <= ?
+          ORDER BY receiveDate, id`,
+      )
+      .bind(fromDate, toBound)
+      .all<GrnHeaderRow>();
+    receipts = res.results ?? [];
+  } catch (err) {
+    // Unlike the WIP probe there is nothing to fail open TO — without the
+    // receipt list there is no receipt to inspect. Log loudly and let WIP/FG
+    // still generate rather than 500 the whole run.
+    console.error("[qc-pending] RM receipt scan failed — no RM slots this run", {
+      slotDate,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return empty;
+  }
+  if (receipts.length === 0) return empty;
+
+  const ids = receipts.map((r) => r.id);
+  const ph = ids.map(() => "?").join(",");
+
+  const [lineRes, doneRes] = await Promise.all([
+    db
+      .prepare(
+        `SELECT gitem.grnId AS "grnId",
+                gitem.materialCode AS "materialCode",
+                gitem.materialName AS "materialName",
+                rmat.itemGroup AS "itemGroup"
+           FROM grn_items gitem
+           LEFT JOIN raw_materials rmat ON UPPER(rmat.itemCode) = UPPER(gitem.materialCode)
+          WHERE gitem.grnId IN (${ph})`,
+      )
+      .bind(...ids)
+      .all<GrnLineRow>(),
+    db
+      .prepare(
+        `SELECT source_grn_id AS "grnId", templateId AS "templateId"
+           FROM qc_inspections
+          WHERE source_grn_id IN (${ph})`,
+      )
+      .bind(...ids)
+      .all<{ grnId: string; templateId: string }>(),
+  ]);
+
+  const linesByGrn = new Map<string, GrnLineRow[]>();
+  for (const l of lineRes.results ?? []) {
+    const list = linesByGrn.get(l.grnId);
+    if (list) list.push(l);
+    else linesByGrn.set(l.grnId, [l]);
+  }
+  // (grnId, templateId) — the idempotency key. Note it is NOT (grnId, family):
+  // if two families resolve to the same template (a receipt of two things that
+  // share a checklist) that is ONE inspection, which is the right answer.
+  const alreadyRaised = new Set(
+    (doneRes.results ?? []).map((r) => `${r.grnId}|${r.templateId}`),
+  );
+
+  const stmts: D1PreparedStatement[] = [];
+  let created = 0;
+  let skipped = 0;
+  let noTemplate = 0;
+
+  for (const grn of receipts) {
+    const lines = linesByGrn.get(grn.id) ?? [];
+    // A receipt with no lines is still goods in the building — inspect it
+    // against the general checklist rather than letting it pass unlooked-at.
+    const families: RmFamily[] = lines.length ? rmFamiliesOnReceipt(lines) : ["GENERAL"];
+    for (const family of families) {
+      const tpl = pickRmTemplate(rmTemplates, family, grn.supplierId);
+      if (!tpl) {
+        // Counted and reported, never swallowed. Handing a plywood delivery the
+        // solid-timber checklist would be worse than saying no template matched.
+        noTemplate++;
+        continue;
+      }
+      if (alreadyRaised.has(`${grn.id}|${tpl.id}`)) {
+        skipped++;
+        continue;
+      }
+      alreadyRaised.add(`${grn.id}|${tpl.id}`);
+      const grnNo = grn.grnNumber ?? grn.id;
+      stmts.push(
+        ...buildInspectionStatements(
+          db,
+          {
+            tpl,
+            // The receipt IS the subject. Before this the inspector was handed
+            // an RM slot with no link to any goods at all.
+            subjectType: "RM_BATCH",
+            subjectId: grn.id,
+            subjectLabel: `${grnNo}${grn.supplierName ? ` · ${grn.supplierName}` : ""}`,
+            sourceGrnId: grn.id,
+            sourceGrnNo: grnNo,
+            materialFamily: family,
+          },
+          tplItems,
+          slotIso,
+          slotDate,
+          nextInspectionNo(),
+        ),
+      );
+      created++;
+    }
+  }
+
+  return { stmts, created, skipped, receipts: receipts.length, noTemplate };
+}
+
+// --- FG: periodic sampling, bound to a unit and its sales order ------------
+//
+// Owner 2026-08-08: "FG 检查：定期进行抽查，重点看他们有没有做对 order，有没有
+// 做错". Two things follow, and the old model had neither.
+//
+// 1. SAMPLING IS A SHARE OF VOLUME. One slot a day said the same thing whether
+//    2 units or 60 were packed. fgSampleTarget() draws 10% (floor 1, ceiling 5
+//    per slot per product category).
+// 2. THE SLOT NAMES A UNIT. "Did they build the right order" is not answerable
+//    against a template — it is answerable against ONE piece and the sales-order
+//    line it was built from. Each generated inspection carries the fg_unit and a
+//    frozen copy of its SO line (product code, size, fabric, qty, options) in
+//    `so_spec`, so the inspector compares the thing in front of them with what
+//    was actually ordered instead of with what the label claims.
+//
+// A unit whose SO line cannot be resolved is NOT silently dropped — it is
+// counted into `unresolved` and reported, because a finished unit with no
+// traceable order is exactly the thing you want someone to look at.
+type FgUnitRow = {
+  unitId: string;
+  unitSerial: string | null;
+  soId: string | null;
+  soNo: string | null;
+  soLineNo: number | null;
+  productCode: string | null;
+  productName: string | null;
+  unitNo: number | null;
+  totalUnits: number | null;
+  customerName: string | null;
+  customerHub: string | null;
+  itemCategory: string | null;
+  soProductCode: string | null;
+  sizeCode: string | null;
+  sizeLabel: string | null;
+  fabricCode: string | null;
+  quantity: number | null;
+  specialOrder: string | null;
+  legHeightInches: number | null;
+  divanHeightInches: number | null;
+  soLineNotes: string | null;
+};
+
+export async function generateFgSamples(
+  db: D1Database,
+  slotIso: string,
+  slotDate: string,
+  templates: TemplateRow[],
+  tplItems: TemplateItemRow[],
+  existingBySlotTemplate: Map<string, number>,
+  nextInspectionNo: () => string,
+): Promise<{ stmts: D1PreparedStatement[]; created: number; skipped: number; units: number; unresolved: number }> {
+  const empty = { stmts: [] as D1PreparedStatement[], created: 0, skipped: 0, units: 0, unresolved: 0 };
+  const fgTemplates = templates.filter((t) => t.stage === "FG");
+  if (fgTemplates.length === 0) return empty;
+
+  let units: FgUnitRow[];
+  try {
+    const res = await db
+      .prepare(
+        `SELECT fgu.id AS "unitId",
+                fgu.unitSerial AS "unitSerial",
+                fgu.soId AS "soId",
+                fgu.soNo AS "soNo",
+                fgu.soLineNo AS "soLineNo",
+                fgu.productCode AS "productCode",
+                fgu.productName AS "productName",
+                fgu.unitNo AS "unitNo",
+                fgu.totalUnits AS "totalUnits",
+                fgu.customerName AS "customerName",
+                fgu.customerHub AS "customerHub",
+                soi.itemCategory AS "itemCategory",
+                soi.productCode AS "soProductCode",
+                soi.sizeCode AS "sizeCode",
+                soi.sizeLabel AS "sizeLabel",
+                soi.fabricCode AS "fabricCode",
+                soi.quantity AS "quantity",
+                soi.specialOrder AS "specialOrder",
+                soi.legHeightInches AS "legHeightInches",
+                soi.divanHeightInches AS "divanHeightInches",
+                soi.notes AS "soLineNotes"
+           FROM fg_units fgu
+           LEFT JOIN sales_order_items soi
+                  ON soi.salesOrderId = fgu.soId AND soi.lineNo = fgu.soLineNo
+          WHERE fgu.mfdDate LIKE ? OR fgu.packedAt LIKE ?
+          ORDER BY fgu.id`,
+      )
+      .bind(`${slotDate}%`, `${slotDate}%`)
+      .all<FgUnitRow>();
+    units = res.results ?? [];
+  } catch (err) {
+    console.error("[qc-pending] FG unit scan failed — no FG slots this run", {
+      slotDate,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return empty;
+  }
+  if (units.length === 0) return empty;
+
+  // Units already handed to an inspector today (either slot) are not drawn
+  // again — that, plus the per-slot target, is what makes a re-run a no-op.
+  let inspectedUnitIds = new Set<string>();
+  try {
+    const done = await db
+      .prepare(
+        `SELECT source_fg_unit_id AS "unitId"
+           FROM qc_inspections
+          WHERE source_fg_unit_id IS NOT NULL AND inspectionDate = ?`,
+      )
+      .bind(slotDate)
+      .all<{ unitId: string }>();
+    inspectedUnitIds = new Set((done.results ?? []).map((r) => r.unitId).filter(Boolean));
+  } catch (err) {
+    console.warn("[qc-pending] FG already-sampled lookup failed", err);
+  }
+
+  const stmts: D1PreparedStatement[] = [];
+  let created = 0;
+  let skipped = 0;
+  let unresolved = 0;
+
+  for (const tpl of fgTemplates) {
+    const forThisCategory = units.filter(
+      (u) => String(u.itemCategory ?? "").toUpperCase() === String(tpl.itemCategory ?? "").toUpperCase(),
+    );
+    if (forThisCategory.length === 0) continue;
+
+    const target = fgSampleTarget(forThisCategory.length);
+    const already = existingBySlotTemplate.get(`${slotIso}|${tpl.id}`) ?? 0;
+    const want = Math.max(0, target - already);
+    if (want === 0) {
+      skipped += target;
+      continue;
+    }
+
+    const pool = forThisCategory.filter((u) => !inspectedUnitIds.has(u.unitId));
+    for (const unit of pool.slice(0, want)) {
+      inspectedUnitIds.add(unit.unitId);
+      const label = [unit.unitSerial || unit.unitId, unit.soNo, unit.productCode]
+        .filter(Boolean)
+        .join(" · ");
+      stmts.push(
+        ...buildInspectionStatements(
+          db,
+          {
+            tpl,
+            subjectType: "FG_BATCH",
+            subjectId: unit.unitId,
+            subjectLabel: label,
+            sourceFgUnitId: unit.unitId,
+            // Frozen at generation time on purpose: if the SO is edited after
+            // the unit was built, the inspector must still be comparing against
+            // what production was told to make.
+            soSpec: {
+              soId: unit.soId,
+              soNo: unit.soNo,
+              soLineNo: unit.soLineNo,
+              productCode: unit.soProductCode ?? unit.productCode,
+              productName: unit.productName,
+              sizeCode: unit.sizeCode,
+              sizeLabel: unit.sizeLabel,
+              fabricCode: unit.fabricCode,
+              quantity: unit.quantity,
+              legHeightInches: unit.legHeightInches,
+              divanHeightInches: unit.divanHeightInches,
+              specialOrder: unit.specialOrder,
+              lineNotes: unit.soLineNotes,
+              customerName: unit.customerName,
+              customerHub: unit.customerHub,
+              unitNo: unit.unitNo,
+              totalUnits: unit.totalUnits,
+            },
+          },
+          tplItems,
+          slotIso,
+          slotDate,
+          nextInspectionNo(),
+        ),
+      );
+      created++;
+    }
+  }
+
+  unresolved = units.filter((u) => !u.itemCategory).length;
+  return { stmts, created, skipped, units: units.length, unresolved };
+}
+
+export type GenerateResult = {
+  created: number;
+  skipped: number;
+  skippedNoActivity: number;
+  rmCreated: number;
+  rmReceipts: number;
+  rmNoTemplate: number;
+  fgCreated: number;
+  fgUnits: number;
+  fgUnresolved: number;
+};
+
+/**
+ * Generate this slot's PENDING inspections across all three stages.
+ *
+ * WIP is per (template × slot) and gated on the department working; RM is per
+ * (receipt × material family); FG is a sampled share of the units produced.
+ * Every one of them snapshots the template's items into the row so a completed
+ * inspection stays readable after the template is edited.
+ *
+ * `created` / `skipped` / `skippedNoActivity` are TOTALS across the three
+ * stages (the UI and the cron have read those three since 2026-08-07); the
+ * per-stage numbers are additive detail. "created 0" must always be legible as
+ * a fact about the factory, not as a cron that failed — which is why
+ * rmReceipts, fgUnits and rmNoTemplate are reported too.
  */
 export async function generatePendingForSlot(
   db: D1Database,
   slotIso: string,
-): Promise<{ created: number; skipped: number; skippedNoActivity: number }> {
+): Promise<GenerateResult> {
+  // Awaited BEFORE the first write: a migration file alone is inert.
+  await ensureQcGenerationSchema(db);
+
   const [tplRes, tplItemRes, existingRes, nextInspectionNo] = await Promise.all([
     db.prepare("SELECT * FROM qc_templates WHERE active = 1").all<TemplateRow>(),
     db.prepare("SELECT * FROM qc_template_items").all<TemplateItemRow>(),
@@ -367,7 +895,11 @@ export async function generatePendingForSlot(
 
   const templates = tplRes.results ?? [];
   const tplItems = tplItemRes.results ?? [];
-  const existingTplIds = new Set((existingRes.results ?? []).map((r) => r.templateId));
+  const existingBySlotTemplate = new Map<string, number>();
+  for (const r of existingRes.results ?? []) {
+    const key = `${slotIso}|${r.templateId}`;
+    existingBySlotTemplate.set(key, (existingBySlotTemplate.get(key) ?? 0) + 1);
+  }
 
   const stmts: D1PreparedStatement[] = [];
   const slotDate = slotIso.split("T")[0];
@@ -375,12 +907,14 @@ export async function generatePendingForSlot(
   let skipped = 0;
   let skippedNoActivity = 0;
 
+  // --- WIP: one slot per template per run, gated on the department working ---
   // One probe per (stage, deptCode) rather than one per template — several
   // templates commonly share a department.
   const activityCache = new Map<string, boolean>();
 
   for (const tpl of templates) {
-    if (existingTplIds.has(tpl.id)) {
+    if (tpl.stage !== "WIP") continue;
+    if ((existingBySlotTemplate.get(`${slotIso}|${tpl.id}`) ?? 0) > 0) {
       skipped++;
       continue;
     }
@@ -394,64 +928,44 @@ export async function generatePendingForSlot(
       skippedNoActivity++;
       continue;
     }
-    const inspId = genInspId();
-    const inspNo = nextInspectionNo();
-    const items = tplItems
-      .filter((i) => i.templateId === tpl.id)
-      .sort((a, b) => a.sequence - b.sequence);
-    const snapshot = JSON.stringify({
-      templateName: tpl.name,
-      items: items.map((i) => ({
-        id: i.id,
-        sequence: i.sequence,
-        itemName: i.itemName,
-        criteria: i.criteria,
-        severity: i.severity,
-        isMandatory: i.isMandatory,
-      })),
-    });
-    const now = new Date().toISOString();
-
     stmts.push(
-      db
-        .prepare(
-          `INSERT INTO qc_inspections (
-             id, inspectionNo, templateId, templateSnapshot, stage, itemCategory,
-             department, triggerType, scheduledSlotAt, status,
-             inspectionDate, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'SCHEDULED', ?, 'PENDING', ?, ?)`,
-        )
-        .bind(
-          inspId,
-          inspNo,
-          tpl.id,
-          snapshot,
-          tpl.stage,
-          tpl.itemCategory,
-          tpl.deptCode,
-          slotIso,
-          slotDate,
-          now,
-        ),
+      ...buildInspectionStatements(db, { tpl }, tplItems, slotIso, slotDate, nextInspectionNo()),
     );
-
-    // Pre-create the per-item rows with result=null so the inspector just fills in
-    for (const it of items) {
-      stmts.push(
-        db
-          .prepare(
-            `INSERT INTO qc_inspection_items (
-               id, inspectionId, sequence, itemName, criteria, severity, isMandatory, result
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
-          )
-          .bind(genItemId(), inspId, it.sequence, it.itemName, it.criteria, it.severity, it.isMandatory),
-      );
-    }
     created++;
   }
 
+  // --- RM: per goods receipt --------------------------------------------------
+  const rm = await generateRmForGrns(db, slotIso, slotDate, templates, tplItems, nextInspectionNo);
+  stmts.push(...rm.stmts);
+  created += rm.created;
+  skipped += rm.skipped;
+
+  // --- FG: sampled share of what was produced ---------------------------------
+  const fg = await generateFgSamples(
+    db,
+    slotIso,
+    slotDate,
+    templates,
+    tplItems,
+    existingBySlotTemplate,
+    nextInspectionNo,
+  );
+  stmts.push(...fg.stmts);
+  created += fg.created;
+  skipped += fg.skipped;
+
   if (stmts.length) await db.batch(stmts);
-  return { created, skipped, skippedNoActivity };
+  return {
+    created,
+    skipped,
+    skippedNoActivity,
+    rmCreated: rm.created,
+    rmReceipts: rm.receipts,
+    rmNoTemplate: rm.noTemplate,
+    fgCreated: fg.created,
+    fgUnits: fg.units,
+    fgUnresolved: fg.unresolved,
+  };
 }
 
 // --- routes ---------------------------------------------------------------

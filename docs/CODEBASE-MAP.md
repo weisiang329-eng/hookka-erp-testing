@@ -455,7 +455,8 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 | `src/pages/worker/me.tsx` — profile | `src/api/routes/departments.ts` — dept CRUD (339) | `payroll_hour_deductions` | `tests/worker-auth-default-protect.test.mjs` |
 | `src/pages/worker/team.tsx` — team view | `src/api/routes/working-hour-entries.ts` — efficiency source (1082) | `leaves` / `worker_issues` | `tests/jc-minutes-total.test.mjs` |
 | `src/pages/worker/issue.tsx` — issue submission | `src/api/routes/payroll.ts` — run generation (308) | `public_holidays` (via kv_config['public_holidays']) | |
-| `src/pages/worker/login.tsx` — PIN login | `src/api/routes/payroll-hour-deductions.ts` — short-hour dock (195) | | |
+| `src/pages/worker/login.tsx` — PIN login | `src/api/routes/payroll-hour-deductions.ts` — short-hour dock (195) | `employee_advances` (salary advances) | `tests/employee-advances.test.mjs` |
+| | `src/api/routes/employee-advances.ts` — advance CRUD + HR payout listing; maths + runtime self-apply in `src/api/lib/employee-advances.ts` | `payslips.advance_deduction_sen` (mig 0211, runtime ALTER) | |
 | | `src/api/routes/department-performance.ts` — read-only aggregate (571) | | |
 | | `src/api/routes/leaves.ts` — leave CRUD | | |
 | | `src/api/routes/payslips.ts` — payslip read/persist (OT buckets) | | |
@@ -475,7 +476,8 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
   - TAB 4b: Department Performance (DepartmentPerformanceTab) — L5761-6044
   - DailyDrillDown helper — L6045-6189
   - RuleDraftExplainer helper (payroll) — L6196-6265
-  - TAB 5: Payroll (PayrollTab) — L6266-7462
+  - TAB 5: Payroll (PayrollTab) — L6266-7462 (+ Advance column / drift banner, 2026-08-07)
+  - TAB 5c: Salary Advances (AdvancesTab) — just above `// ========== MAIN PAGE ==========`
   - DepartmentsManager (inside Labor Cost section) — L7558-7804
   - TAB 5b: Labor Cost (LaborCostTab) — L7805-10003
   - TAB 6: Leave Management (LeaveManagementTab) — L10010-10375
@@ -490,7 +492,8 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 - Day-typed OT: OT splits into weekday(1.5×)/Sunday(2×)/holiday(3×) buckets via dayTypedOt; payslips persist these, premium routes to the dept line not Overhead. Holidays from kv_config['public_holidays']. Weekday-only must stay byte-identical.
 - Money rounding shared and load-bearing: roundSen + distributeRoundSen (largest-remainder) in `src/lib/utils.ts`. DeptLabor ties per-dept costs to the integer payroll total via distributeRoundSen (leftover sen → largest-fraction dept). All 3 screens (Payroll / Dept Labor / Labor Cost) reconcile to the sen. Don't add per-screen ad-hoc plugs.
 - Salary is effective-dated (worker_salary_history, mig 0153) — never read a single current salary; use GET /salary/effective for a date. join/resign does NO proration; unworked working days dock ÷26 as absences.
-- payroll_hour_deductions (mig 0152) and other module tables are runtime self-applied via ensurePendingMigrations, NOT replayed from migration files on deploy — a migration file alone is INERT.
+- payroll_hour_deductions (mig 0152) and other module tables are runtime self-applied via ensurePendingMigrations, NOT replayed from migration files on deploy — a migration file alone is INERT. Same for employee_advances + payslips.advance_deduction_sen (mig 0211) via `ensureAdvanceTables`.
+- Salary advances are NOT a statutory deduction and NOT an earning: netPay = gross − totalDeductions − advance, and `totalDeductionsSen` stays statutory-only (folding advances in would inflate every YTD/statutory figure). The period an advance belongs to is the month of its `advance_date`. The generated payslip snapshots the figure in `advance_deduction_sen` so editing an advance later cannot move an approved net pay — the Payroll tab shows a red drift banner instead.
 - camelCase DB columns are folded-lowercase by toCamel and can silently return undefined (clockinphoto↛clockInPhoto); at-risk cols dual-keyed r.camelCase ?? r.snake_case. New columns snake_case; a write to a camelCase col needs a `column-rename-map.json` entry.
 - employees.tsx Employee Detail tab is intentionally guard-unmounted via {activeTab === 'detail' && ...} (~L10922) — don't refactor to always-mounted.
 - UI must be 100% English — no Chinese strings/comments. EmployeesPage tab shell at L10642; add new tabs to both the tab array and the activeTab switch (~L10887).
@@ -620,10 +623,12 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/kpi/index.tsx` — three tabs: Library (the catalogue + assign) / People (everyone's score + prev-month delta) / Card (one person's month). Super Admin sees all three; everyone else only their own Card | `src/api/routes/kpi.ts` — `/me`, `/users/:id`, `/library`, `/people`, `/catalog`, `/assignments/:id`, `/kpi/:kpiKey/assignees`, `/checklist/:kpiKey`, `/survey/:kpiKey`, `/rating/:kpiKey`, `/payout/:id` | `kpi_assignments` / `kpi_periods` / `kpi_checklist_ticks` / `kpi_user_settings` / `kpi_survey_responses` / `kpi_manual_ratings` | `tests/kpi-module.test.mjs` · `tests/kpi-sql-identifiers.test.mjs` |
-| | `src/api/lib/kpi-catalog.ts` — the 7 KPIs, their scoring type, curve and published rules. THE source of truth; the UI reads questions / checklist items / rating bands from here, never a copy | | |
+| `src/pages/kpi/index.tsx` — three tabs: Library (the catalogue + assign + `SurveyLinkMaker`, the Super-Admin "generate a customer link" box) / People (everyone's score + prev-month delta) / Card (one person's month). Super Admin sees all three; everyone else only their own Card | `src/api/routes/kpi.ts` — `/me`, `/users/:id`, `/library`, `/people`, `/catalog`, `/assignments/:id`, `/kpi/:kpiKey/assignees`, `/checklist/:kpiKey`, `/survey/:kpiKey`, `/survey/:kpiKey/link` (MINT, Super Admin), `/rating/:kpiKey`, `/payout/:id` | `kpi_assignments` / `kpi_periods` / `kpi_checklist_ticks` / `kpi_user_settings` / `kpi_survey_responses` / `kpi_survey_tokens` / `kpi_manual_ratings` | `tests/kpi-module.test.mjs` · `tests/kpi-sql-identifiers.test.mjs` · `tests/kpi-survey-public.test.mjs` |
+| `src/pages/survey.tsx` — the PUBLIC customer survey page at `/s/:token`. No login, no shell, mobile-first: five questions × five NAMED rungs, one submit, thank-you | `src/api/routes/public-kpi-survey.ts` — PUBLIC no-login `GET /api/public/survey/:token` (questions + scale ONLY) and `POST` (five answers + optional comment). Single-use token, time-limited | | |
+| | `src/api/lib/kpi-catalog.ts` — the 7 KPIs, their scoring type, curve and published rules. THE source of truth; both the ERP UI and the public survey page read questions / scale / checklist items / rating bands from here, never a copy | | |
 | | `src/api/lib/kpi-metrics.ts` — one function per KPI's ACTUAL. `customerDeliveryLate` · `setupCompleteness` · `documentsStuck` (composite) · `productionEfficiency` · `serviceCaseResolution` · `checklistProgress` · `surveyMean` · `manualRating` | `products` / `bom_templates` / `delivery_orders` / `invoices` / `service_cases` / `reports_compliance_snapshot` | |
 | | `src/api/lib/ensure-kpi-tables.ts` — runtime self-apply. Migrations are inert; every column arrives here | | |
+| | `src/api/lib/kpi-survey-token.ts` — mint / URL / state / answer validation for the public survey link | | |
 
 **Read before touching this module:**
 - Four scoring types (`AUTO` / `CHECKLIST` / `SURVEY` / `MANUAL`) and six attainment
@@ -644,6 +649,14 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
   camelCase-in-SQL half of this across BOTH kpi.ts and kpi-metrics.ts.
 - A metric with no data returns `actual: null` and says so. It must never return 0 —
   a zero is a failure, an absence is not, and the score divides by measurable weight only.
+- **`/api/public/survey/` is a PUBLIC WRITE surface** (2026-08-07) — the only one in
+  this module. The token is the whole credential: 64 hex chars, minted ONLY by the
+  Super-Admin `POST /api/kpi/survey/:kpiKey/link`, single-use (claimed by an atomic
+  `UPDATE … WHERE used_at IS NULL`) and time-limited. The GET returns the catalogue's
+  questions + named scale and NOTHING else — no employee, no customer, no ids, no
+  period. Who/which KPI/which month all come off the token's OWN row, never off the
+  request body. Widening any of that means updating
+  `tests/security-public-endpoints.test.mjs` in the same commit, on purpose.
 
 ## Dashboard & Command Center
 

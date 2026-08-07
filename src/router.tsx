@@ -27,6 +27,13 @@ const RackScan = lazy(() => import('./pages/rack-scan'))
 // routes/public-rack-write.ts)
 const StickerRack = lazy(() => import('./pages/sticker-rack'))
 
+// Public customer satisfaction survey page (standalone, no auth — the
+// unguessable 64-hex token in /s/:token is the credential; the office sends a
+// customer the link and the customer rates five questions on their own phone.
+// Backend /api/public/survey serves the questions + named 1-5 scale and takes
+// exactly one reply per link. See routes/public-kpi-survey.ts)
+const CustomerSurvey = lazy(() => import('./pages/survey'))
+
 // Auth
 const Login = lazy(() => import('./pages/login'))
 const InviteAccept = lazy(() => import('./pages/InviteAccept'))
@@ -104,6 +111,12 @@ export const router = createBrowserRouter([
   // mobile-friendly — a storekeeper scans a Packing sticker's QR to open
   // /p/:token and set the rack for THAT piece; the token is the credential)
   { path: '/p/:token', element: <S><StickerRack /></S> },
+
+  // Public customer satisfaction survey (standalone, no auth, mobile-first —
+  // a customer opens /s/:token from the link the office sent, rates the five
+  // questions once, and sees a thank-you; the token is the credential and is
+  // single-use)
+  { path: '/s/:token', element: <S><CustomerSurvey /></S> },
 
   // Mobile (phone) app — additive shell at /m/*. Gated by the SAME RequireAuth
   // cookie session as the dashboard. MobileLayout renders its own nested

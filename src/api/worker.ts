@@ -1006,6 +1006,13 @@ import publicRackQr from "./routes/public-rack-qr";
 // token-resolved PACKING card, via the SAME applyPackingRack helper the worker
 // /packing-rack path uses. See routes/public-rack-write.ts.
 import publicRackWrite from "./routes/public-rack-write";
+// Public customer satisfaction survey (no login — the unguessable 64-hex
+// kpi_survey_tokens.token IS the credential, minted only by the Super-Admin
+// endpoint POST /api/kpi/survey/:kpiKey/link; auth bypass via PUBLIC_PREFIXES
+// "/api/public/survey/"). GET returns ONLY the catalogue's questions + named
+// 1–5 scale; POST writes one kpi_survey_responses row and spends the link.
+// See routes/public-kpi-survey.ts.
+import publicKpiSurvey from "./routes/public-kpi-survey";
 import cncTemplates from "./routes/cnc-templates";
 import invoices from "./routes/invoices";
 import payments from "./routes/payments";
@@ -1080,6 +1087,7 @@ import accounting, { rebuildArCounterSen, rebuildApCounterSen } from "./routes/a
 import attendance from "./routes/attendance";
 import workingHourEntries from "./routes/working-hour-entries";
 import payrollHourDeductions from "./routes/payroll-hour-deductions";
+import employeeAdvances from "./routes/employee-advances";
 import cashFlow from "./routes/cash-flow";
 import consignments from "./routes/consignments";
 import consignmentNotes from "./routes/consignment-notes";
@@ -1207,6 +1215,12 @@ app.route("/api/public/rack-qr", publicRackQr);
 // bypass via PUBLIC_PREFIXES "/api/public/rack-write/"; rate-limit override is
 // the tightened public ceiling (30/min, 300/hr) in api-rate-limit-config.ts.
 app.route("/api/public/rack-write", publicRackWrite);
+// Public customer satisfaction survey. Same mounting contract as the three
+// public scan surfaces above: the auth bypass happens in authMiddleware
+// (PUBLIC_PREFIXES "/api/public/survey/"), so the request still flows through
+// tenant + rate-limit middleware (the limiter keys by client IP when there is
+// no session), with the tightened public ceiling (30/min, 300/hr).
+app.route("/api/public/survey", publicKpiSurvey);
 app.route("/api/cnc-templates", cncTemplates);
 app.route("/api/invoices", invoices);
 app.route("/api/payments", payments);
@@ -1306,6 +1320,9 @@ app.route("/api/accounting", accounting);
 app.route("/api/attendance", attendance);
 app.route("/api/working-hour-entries", workingHourEntries);
 app.route("/api/payroll-hour-deductions", payrollHourDeductions);
+// Salary advances (cash handed to a worker mid-month). Recovered from that
+// month's net pay — see src/api/lib/employee-advances.ts.
+app.route("/api/employee-advances", employeeAdvances);
 app.route("/api/cash-flow", cashFlow);
 app.route("/api/consignments", consignments);
 app.route("/api/consignment-notes", consignmentNotes);

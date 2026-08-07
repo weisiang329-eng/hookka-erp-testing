@@ -82,6 +82,10 @@ export type PayslipDocData = PayslipDetail & {
   otDays?: Array<{ date: string; hours: number }>;
   paymentMethod?: string;
   bankName?: string;
+  /** Salary advance already handed to the worker during the period, in sen.
+   *  Recovered AFTER the statutory block — it never touches gross or EPF. */
+  advanceDeductionSen?: number;
+  advanceDays?: Array<{ date: string; amountSen: number; note?: string }>;
 };
 
 const MONTHS = [
@@ -158,6 +162,12 @@ export function generatePayslipHTML(
   const shortHours =
     Math.round(lateDays.reduce((s, d) => s + (Number(d.hours) || 0), 0) * 100) / 100;
   const otDays = payslip.otDays ?? [];
+  // Cash the worker already collected during the month. It is NOT a statutory
+  // deduction and NOT an earning adjustment, so it appears once, on its own
+  // line between Total deductions and Net pay — the same place it sits in the
+  // arithmetic.
+  const advanceSen = Number(payslip.advanceDeductionSen) || 0;
+  const advanceDays = payslip.advanceDays ?? [];
   const employerSen =
     (payslip.epfEmployer || 0) + (payslip.socsoEmployer || 0) + (payslip.eisEmployer || 0);
   const isCash = normalizePaymentMethod(payslip.paymentMethod) === "CASH";
@@ -219,6 +229,21 @@ export function generatePayslipHTML(
       <td>${L("Allowance", "pay.efficiencyAllowance")}</td>
       <td class="num">${money(payslip.allowances)}</td>
     </tr>`);
+  }
+
+  // Which days the money was collected on. A slip that says "less advances
+  // RM 300" and nothing else cannot be checked by the person holding it.
+  if (advanceSen > 0) {
+    detail.push(`<div class="why">
+      <b>Salary advance</b> &nbsp; cash already collected this month = ${money(advanceSen)}
+      <span class="rule-note">Paid to you earlier in the month, so it is not paid again here</span>
+      ${chips(
+        advanceDays.map(
+          (d) => `${dayChipLabel(d.date)} — RM ${money(Number(d.amountSen) || 0)}`,
+        ),
+        "late",
+      )}
+    </div>`);
   }
 
   const deductionDetail = detail.length
@@ -350,6 +375,11 @@ export function generatePayslipHTML(
         <tr><td>EIS (employee)</td><td class="num">${money(payslip.eisEmployee)}</td></tr>
         <tr><td>PCB (income tax)</td><td class="num">${money(payslip.pcb)}</td></tr>
         <tr class="rule"><td>Total deductions</td><td class="num">${money(payslip.totalDeductions)}</td></tr>
+        ${
+          advanceSen > 0
+            ? `<tr><td class="neg">Less &mdash; Salary advance already taken</td><td class="num neg">(${money(advanceSen)})</td></tr>`
+            : ""
+        }
       </table>
 
       <h2>Employer&rsquo;s contribution</h2>

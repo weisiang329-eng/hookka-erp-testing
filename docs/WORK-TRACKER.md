@@ -9,6 +9,32 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-07 — 🔵 员工 Salary Advance（记录 → 扣薪 → HR 出钱 listing）· staging
+
+Owner：「员工他们一直在拿 advance，有没有可能在 employee 这边，我可以输入他们拿
+advance 的金额和日期？… 一个是在 net pay、total pay 里面扣，另一个可能是可以导出
+一个我要出钱的 listing 给到我的 HR。」
+
+三件事，做完在 `staging`（feature，未 push、未合 main）：
+
+1. **记录**：新增 `employee_advances`（snake_case，runtime self-apply 在
+   `src/api/lib/employee-advances.ts`，migration 0211 只是纪录）。金额存整数 sen，
+   日期就是拿钱那天 —— **属于哪个月由日期决定**，没有另一个「套用月份」栏位。
+   `status=UNSETTLED` 时可改可删；该月薪资 APPROVED 后自动 `SETTLED` 上锁
+   （改/删回 409），退回 DRAFT 会解锁。
+2. **扣薪**：`netPay = gross − 法定 − advance`。**advance 不进 `totalDeductions`**
+   —— 那是法定合计，会污染 YTD 和每一张法定报表。生成时把当月 advance 写进
+   `payslips.advance_deduction_sen` 快照，之后再改 advance 也不会动到已核准的净薪。
+   Payroll 页新增 Advance 栏、Total Pay 改成「还要付出去的钱」（扣掉已发的 advance）。
+   已生成後又新增 advance → 页面出红色提示叫人 Regenerate，不会两个数字对不上。
+3. **Listing**：Employees 新增 **Advances** 分页 —— 录入表单 + 当月清单 +
+   「Export Payout Listing」CSV / Print Report（每位员工一列：日期、笔数、合计 + 总计）。
+
+⚠️ **待 owner 确认**：某人当月 advance 超过应领时，净薪会是**负数**（表示欠公司），
+没有自动 carry forward 到下个月。夹到 0 会把差额悄悄抹掉，所以先照实显示。
+
+---
+
 ## 2026-08-02 — ✅ 考勤规则以 HR 为准（owner 逐条确认）· ⚠️ 我删掉又重建了 7 月
 
 ### 确认后的规则（**owner 2026-08-02 逐条点头，不要再改**）
@@ -2944,7 +2970,6 @@ opening was re-posted three times along the way (2,353.00, then 304.00 into
 **Open, owner's call:** OCEAN SKY DO 26061056 carries two invoices — 2,058.64
 kept, 1,410.90 voided. If that DO is really 3,469.54 billed in two parts, the
 1,410.90 is a real payable and Restore brings it back.
-
 ---
 
 ## 2026-08-07 (session: KPI scoring rules — owner ruling by ruling)
@@ -3010,14 +3035,72 @@ merge and two additions.
 
 ### Still open
 
-- [ ] **Employee salary advance** — asked 2026-08-06, still not built at the start of
-      this session. Amount + date per employee, deducted from net/total pay, plus a
-      payout listing for HR.
-- [ ] **Public customer-survey form** — "发顾客一个类似 google form submit 选择的".
-      Only the Super-Admin-keys-it-in endpoint exists.
+- [x] **Employee salary advance** — asked 2026-08-06, built 2026-08-07 and merged.
+      Amount + date per employee, deducted from net/total pay, plus the HR payout
+      listing. THREE owner decisions still open: negative net pay is not clamped and
+      does not carry forward; "Total Pay" now means what is still to be handed over,
+      so it no longer equals Labor Cost when advances exist; settling is tied to
+      payroll APPROVAL, not generation. The worker phone shows the correct net pay
+      but not the advance line item.
+- [x] **Public customer-survey form** — see the 2026-08-07 (evening) entry below.
+      Merged to main 2026-08-07. Runtime self-apply and the read/write path still
+      need exercising against real Postgres on prod.
 - [ ] **QC KPIs not built.** 3,009 inspections scheduled since 2026-04-28, ZERO done,
       `result` empty on all of them. Owner: "因为这个还没去用". Do NOT ship a KPI
       against a queue that has never run — confirm the schedule is achievable first.
 - [ ] Per-person efficiency needs a `users` → employee link. Owner has not decided.
 - [ ] FPY and COPQ (what large factories actually run on) are NOT computable — no
       defect capture at station level. They need QC to run first.
+
+
+---
+
+## 2026-08-07 (evening) — 🔵 Public customer satisfaction survey (on `staging`, not pushed)
+
+Owner: "这些是发顾客一个类似 google form submit 选择的，直接评分." The KPI already
+worked; what was missing was **the link you send a customer**. Replies used to be
+keyed in by Super Admin, which is the same maths from the wrong hands.
+
+**Shape:** the office generates one link per customer per month; the customer opens
+it on their phone, picks one of five NAMED ratings for each of five questions, taps
+send, sees a thank-you. No login, no ERP shell, no account.
+
+- **URL** `https://erp.hookka.com/s/<64-hex token>` (origin follows the live request,
+  canonicalised — a staging-minted link stays on staging, because each site reads its
+  own DB).
+- **Table** `kpi_survey_tokens` — token / user_id / kpi_key / period / customer_id /
+  customer_name / created_by / created_at / used_at / expires_at / org_id. Runtime
+  self-apply in `ensure-kpi-tables.ts` (the migration file is a record only).
+- **Mint** `POST /api/kpi/survey/:kpiKey/link` — SUPER_ADMIN, returns `{token, url,
+  expiresAt}`. Surfaced in the Library tab as "Send a customer this survey".
+- **Public** `GET|POST /api/public/survey/:token` — auth-bypassed via PUBLIC_PREFIXES,
+  rate-limited 30/min 300/hr like the other public scan surfaces.
+
+**The three things that make it safe to leave open to the internet:**
+1. SINGLE USE. The claim is one atomic `UPDATE … WHERE used_at IS NULL`, not a read
+   then a write, so a double-tap or a replay loses the race. Otherwise one happy
+   customer could be re-submitted twenty times and the month's average is whatever
+   the office wanted it to say.
+2. It TELLS THE CALLER NOTHING. The GET returns the catalogue's five questions and
+   five named rungs and literally nothing else — no employee, no customer, no ids,
+   no period. Who / which KPI / which month all come off the token's own row, so a
+   tampered body cannot move a score onto someone else.
+3. Exactly five whole numbers, 1–5, or 400. A `6`, a `3.5`, four answers or `"five"`
+   all move the mean and nothing would look wrong afterwards.
+
+A bad submission does NOT burn the link, and a failed write hands the link back —
+the customer gets one chance and it should not be spent by our transient error.
+
+**Tests:** `tests/kpi-survey-public.test.mjs` — 16 behaviour tests driving the real
+Hono app (replay, race, expiry, out-of-range, no-leak, rollback), plus the public
+allowlist snapshot in `tests/security-public-endpoints.test.mjs`.
+
+**Not done:** no owner-facing list of "links I sent for August and which came back";
+verify on staging after deploy (read AND write path) before it goes near main.
+
+### Also, while here
+
+- 🔴 **The merge `3caef9aa` silently ate two docs.** `docs/CODEBASE-MAP.md` lost the
+  29-line KPI section added 8 minutes earlier in `68a39f9a`, and this file lost the
+  77-line 2026-08-07 KPI session added in `337857ce`. Both restored on `staging`.
+  Neither file appeared in the merge's stat, which is exactly why nobody saw it.

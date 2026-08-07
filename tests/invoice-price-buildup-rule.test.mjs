@@ -26,6 +26,7 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
+import { readFileSync } from "node:fs";
 try { register("tsx/esm", pathToFileURL("./")); } catch { /* native strip */ }
 
 const load = (p) => import(pathToFileURL(resolve(process.cwd(), p)).href);
@@ -262,4 +263,46 @@ test("backend flags the contradicted line as not reconciling", async () => {
   assert.equal((await backendLine(LINES.contradicted)).buildUpReconciles, false);
   assert.equal((await backendLine(LINES.zeroBase)).buildUpReconciles, false);
   assert.equal((await backendLine(LINES.itemised)).buildUpReconciles, true);
+});
+
+test("Save Prices writes the lines the operator changed, and no others", () => {
+  // Owner's rule, settled 2026-08-07: "Save Prices" means save MY edits, not
+  // freeze every line at whatever it currently reads. The payload used to carry
+  // all of them, so opening the editor to change one line's discount stamped
+  // priceEdited = 1 and overwrote the stored components on every other row.
+  //
+  // With the reconciling seed those rows saved back the same CHARGE, so this is
+  // no longer a repricing bug — but writing to a row nobody touched is still
+  // not something a Save button should do.
+  const src = readFileSync(resolve(process.cwd(), "src/pages/invoices/detail.tsx"), "utf8");
+
+  assert.match(
+    src,
+    /invoice\.items\.filter\(\(it\) => touched\(it\.id\)\)\.map/,
+    "the payload must be filtered to touched lines",
+  );
+
+  // The seed snapshot is what "touched" is measured against — without it the
+  // filter has no baseline and would either pass everything or nothing.
+  assert.match(src, /setPriceSeed\(/, "the editor must snapshot what it opened with");
+  assert.match(src, /setDiscountSeed\(/, "including the discounts");
+
+  // A discount change alone counts as touched — it is the case that exposed
+  // this, and the one most likely to be edited on its own.
+  const fn = src.slice(src.indexOf("const touched = (id: string)"));
+  const body = fn.slice(0, fn.indexOf("\n    };"));
+  assert.match(
+    body,
+    /discountDraft\[id\] \?\? 0\) !== \(discountSeed\[id\] \?\? 0\)/,
+    "a discount-only edit must still save that line",
+  );
+  assert.match(body, /if \(!was\) return true/, "no seed means treat it as edited, not skipped");
+
+  // The readback total must value untouched lines at their existing price, or
+  // every partial edit would fail verification.
+  assert.match(
+    src,
+    /: Number\(it\.unitPriceSen\) \|\| 0;/,
+    "untouched lines keep their stored unit price in the expected-total check",
+  );
 });

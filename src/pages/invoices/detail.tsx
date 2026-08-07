@@ -114,6 +114,11 @@ export default function InvoiceDetailPage() {
     Record<string, { base: string; divan: string; leg: string; special: string; totalHeight: string }>
   >({});
   const [discountDraft, setDiscountDraft] = useState<Record<string, number>>({});
+  // Snapshots of what the editor opened with, for the touched-only save below.
+  const [priceSeed, setPriceSeed] = useState<
+    Record<string, { base: string; divan: string; leg: string; special: string; totalHeight: string }>
+  >({});
+  const [discountSeed, setDiscountSeed] = useState<Record<string, number>>({});
   // Lines whose stored components could NOT be trusted, so the editor opened
   // with the charged price as Base (see invoicePriceEditSeed). Surfaced as a
   // note under the inputs — the operator must not read those zeros as fact.
@@ -155,20 +160,40 @@ export default function InvoiceDetailPage() {
     setPriceDraft(d);
     setDiscountDraft(dd);
     setSeedUnresolved(unres);
+    // What the editor OPENED with. Save compares against this so a line the
+    // operator never touched is not written at all — see saveEditPrices.
+    setPriceSeed(JSON.parse(JSON.stringify(d)));
+    setDiscountSeed({ ...dd });
     setEditingPrices(true);
   };
 
   const saveEditPrices = async () => {
     if (!invoice) return;
     setSavingPrices(true);
-    const priceEdits = invoice.items.map((it) => {
-      const d = priceDraft[it.id] || {
-        base: "0",
-        divan: "0",
-        leg: "0",
-        special: "0",
-        totalHeight: "0",
-      };
+    // Save what the operator CHANGED, not every line on the invoice.
+    //
+    // This used to post an edit for all of them. Combined with the reconciling
+    // seed that is no longer a repricing risk — an untouched line saves back
+    // exactly what it already charged — but it still stamped priceEdited = 1 and
+    // overwrote the stored components on rows nobody opened the editor for.
+    // Writing to a row the user never touched is not something a Save button
+    // should do, whatever the value happens to be.
+    const ZERO = { base: "0", divan: "0", leg: "0", special: "0", totalHeight: "0" };
+    const touched = (id: string): boolean => {
+      const now = priceDraft[id] || ZERO;
+      const was = priceSeed[id];
+      if (!was) return true; // opened without a seed — treat as edited
+      if ((discountDraft[id] ?? 0) !== (discountSeed[id] ?? 0)) return true;
+      return (
+        sen(now.base) !== sen(was.base) ||
+        sen(now.divan) !== sen(was.divan) ||
+        sen(now.leg) !== sen(was.leg) ||
+        sen(now.special) !== sen(was.special) ||
+        sen(now.totalHeight) !== sen(was.totalHeight)
+      );
+    };
+    const priceEdits = invoice.items.filter((it) => touched(it.id)).map((it) => {
+      const d = priceDraft[it.id] || ZERO;
       return {
         id: it.id,
         baseSen: sen(d.base),
@@ -184,14 +209,19 @@ export default function InvoiceDetailPage() {
     // Backend recomputes identically; comparing on totalAmount catches stale reads.
     const expectedTotal = invoice.items.reduce((sum, it) => {
       const e = priceEdits.find((p) => p.id === it.id);
-      const unit = invoiceLineUnitSen({
-        baseSen: e?.baseSen ?? 0,
-        divanSen: e?.divanSen ?? 0,
-        legSen: e?.legSen ?? 0,
-        specialSen: e?.specialSen ?? 0,
-        totalHeightSen: e?.totalHeightSen ?? 0,
-      });
-      const discount = e?.discountSen ?? 0;
+      // An untouched line keeps the price it already carries — it is not in the
+      // payload, so valuing it at zero here would fail the readback check on
+      // every partial edit.
+      const unit = e
+        ? invoiceLineUnitSen({
+            baseSen: e.baseSen,
+            divanSen: e.divanSen,
+            legSen: e.legSen,
+            specialSen: e.specialSen,
+            totalHeightSen: e.totalHeightSen,
+          })
+        : Number(it.unitPriceSen) || 0;
+      const discount = e ? e.discountSen : Number(it.discountSen) || 0;
       return sum + Math.max(0, unit * (Number(it.quantity) || 0) - discount);
     }, 0);
     // 2026-05-27 verifiedSave migration. Money-touching write — confirm

@@ -386,6 +386,17 @@ export default function FinanceDashboardPage() {
               ? Math.round((fc / fcSales) * 10000) / 100
               : null;
         }
+        // Total planned spend for the period — the dashed line over the stacked
+        // bars (owner 2026-08-06: 「cost structure 的 diagram 可以把 forecast 也
+        // 放进去？」). Null rather than 0 when nothing is keyed, so recharts
+        // breaks the line instead of dropping it to the axis on months with no
+        // plan.
+        let fcTotal: number | null = null;
+        for (const cat of csCats) {
+          const v = point[`__fc__${cat}`] as number | null;
+          if (v !== null) fcTotal = (fcTotal ?? 0) + v;
+        }
+        point.__fctotal__ = fcTotal;
         return point;
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -582,6 +593,13 @@ export default function FinanceDashboardPage() {
                         <Bar key={cat} dataKey={cat} name={cat} stackId="cs" maxBarSize={44}
                           fill={["#6B5C32", "#9C6F1E", "#C9B98A", "#3E6570", "#7A9EA7", "#9A3A2D", "#C58B7F", "#4F7C3A", "#8FB07A", "#6B7280", "#A9A29B", "#D8CFC4"][i % 12]} />
                       ))}
+                      {/* Total planned spend — the dashed line the rest of this
+                          dashboard uses for a forecast, so the stack can be read
+                          against its target at a glance. connectNulls stays OFF:
+                          a month with no plan should leave a gap, not a line
+                          drawn straight through it. */}
+                      <Line type="monotone" dataKey="__fctotal__" name="Forecast" stroke={RUST}
+                        strokeWidth={2} strokeDasharray="5 4" dot={false} connectNulls={false} />
                     </ComposedChart>
                   </ResponsiveContainer>
                 </div>
@@ -657,13 +675,40 @@ export default function FinanceDashboardPage() {
               bars={[{ key: "amount", name: csMeasure === "spend" ? "Spend" : csMeasure === "purchase" ? "Purchase" : "Closing stock", color: GOLD }]}
               line={{ key: "forecast", name: "Forecast", color: RUST, dashed: true }}
               footer={
+                /* Split per month like the Cost Structure table above (owner
+                   2026-08-06: 「material trend 也做成分栏」). Two rows instead
+                   of four: the plan no longer needs its own pair of rows once
+                   it has its own column, and Amount now sits directly beside
+                   the target it should be read against. */
                 <table className="w-full">
                   <tbody>
-                    {periodHead(csTrend.map((d) => d.label))}
-                    <tr><td className={`${td} text-left font-medium`}>Amount</td>{csTrend.map((d) => <td key={d.label} className={td}>{rm(d.amount)}</td>)}</tr>
-                    <tr><td className={`${td} text-left font-medium text-[#6B5C32]`}>% of sales</td>{csTrend.map((d) => <td key={d.label} className={`${td} text-[#6B5C32]`}>{d.pct === null ? "-" : `${d.pct.toFixed(2)}%`}</td>)}</tr>
-                    <tr><td className={`${td} text-left font-medium text-[#9A3A2D]`}>Forecast</td>{csTrend.map((d) => <td key={d.label} className={`${td} text-[#9A3A2D]`}>{d.forecast === null ? "-" : rm(d.forecast)}</td>)}</tr>
-                    <tr><td className={`${td} text-left font-medium text-[#9A3A2D]`}>Forecast % of sales</td>{csTrend.map((d) => <td key={d.label} className={`${td} text-[#9A3A2D]`}>{d.forecastPct === null ? "-" : `${d.forecastPct.toFixed(2)}%`}</td>)}</tr>
+                    {periodHeadSplit(csTrend.map((d) => d.label))}
+                    <tr className="border-b border-[#F0ECE9]">
+                      <td className={`${td} text-left font-medium`}>Amount</td>
+                      {csTrend.map((d) => (
+                        <Fragment key={d.label}>
+                          <td className={`${td} border-l border-[#E2DDD8]`}>{rm(d.amount)}</td>
+                          <td className={`${td} text-[#9A3A2D]`}>{d.forecast === null ? "-" : rm(d.forecast)}</td>
+                        </Fragment>
+                      ))}
+                    </tr>
+                    <tr>
+                      <td className={`${td} text-left font-medium text-[#6B5C32]`}>% of sales</td>
+                      {csTrend.map((d) => {
+                        // Over target reads rust, at or under reads green — the
+                        // same signal the Cost Structure table carries, and it
+                        // only means anything when both sides exist.
+                        const over = d.pct !== null && d.forecastPct !== null && d.pct > d.forecastPct;
+                        return (
+                          <Fragment key={d.label}>
+                            <td className={`${td} border-l border-[#E2DDD8] ${d.forecastPct === null ? "text-[#6B5C32]" : over ? "text-[#9A3A2D]" : "text-[#27500A]"}`}>
+                              {d.pct === null ? "-" : `${d.pct.toFixed(2)}%`}
+                            </td>
+                            <td className={`${td} text-[#9A3A2D]`}>{d.forecastPct === null ? "-" : `${d.forecastPct.toFixed(2)}%`}</td>
+                          </Fragment>
+                        );
+                      })}
+                    </tr>
                   </tbody>
                 </table>
               }

@@ -32,6 +32,7 @@ import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { DeliveryOrderSchema } from "@/lib/schemas/delivery-order";
 import { InvoiceSchema } from "@/lib/schemas/invoice";
+import { buildSoDetailListingAoa } from "@/lib/so-detail-listing";
 import { z } from "zod";
 
 const DOListSchema = z
@@ -657,39 +658,6 @@ export default function SalesPage() {
     }
   };
 
-  const exportCSV = () => {
-    const headers = [
-      "SO No.", "Customer", "State", "Customer PO", "Order Date", "Expected DD",
-      "Items", "Total Qty", "Total (RM)", "Status",
-    ];
-    const rows = filteredOrders.map(o => {
-      const totalQty = o.items.reduce((s, i) => s + i.quantity, 0);
-      return [
-        o.companySOId,
-        o.customerName,
-        o.customerState,
-        o.customerPOId || "",
-        o.companySODate.split("T")[0],
-        o.hookkaExpectedDD ? o.hookkaExpectedDD.split("T")[0] : "",
-        o.items.length.toString(),
-        totalQty.toString(),
-        (o.totalSen / 100).toFixed(2),
-        o.status,
-      ];
-    });
-
-    const csvContent = [headers, ...rows]
-      .map(row => row.map(cell => `"${cell.replace(/"/g, '""')}"`).join(","))
-      .join("\n");
-
-    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `sales-orders-${new Date().toISOString().split("T")[0]}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
 
   // Memoized: a fresh `columns` array every render made the DataGrid's
   // filteredData/sortedData memos (which depend on columns) recompute over the
@@ -1310,9 +1278,6 @@ export default function SalesPage() {
                   : `Download PDF (${selectedRows.length})`}
               </Button>
             )}
-            <Button variant="outline" size="sm" onClick={exportCSV}>
-              <Download className="h-4 w-4" /> Export CSV
-            </Button>
           </div>
 
           {showFilters && (
@@ -1634,6 +1599,9 @@ export default function SalesPage() {
             onSelectionChange={setSelectedRows}
             onSearchChange={setGridSearch}
             gridId="sales-orders-list"
+            exportName={isServiceOrderMode ? "service-orders" : "sales-orders"}
+            exportSheetLabel={isServiceOrderMode ? "Service Orders" : "Sales Orders"}
+            detailExport={{ label: "Detail Listing", build: (rows) => buildSoDetailListingAoa(rows) }}
             // Give each Status-dropdown selection its own filter session
             // so a sticky column-filter from a previous selection can't
             // blank the grid. BUG (Wei Siang 2026-05-16): picking

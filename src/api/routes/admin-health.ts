@@ -2257,3 +2257,76 @@ app.post("/db-size-code-backfill", async (c) => {
     },
   });
 });
+
+// ---------------------------------------------------------------------------
+// POST /db-fix-superking-2038 — correct the CELENE(A) 2038(A)-(SK) family to
+// Super King. Dry-run by default.
+//
+// Evidence (db-size-code-mismatch + live price read, 2026-08):
+//   • product 2038(A)-(SK): sizeCode "200x200", name "...(6FT)..." — but code
+//     -(SK), dims 200X200CM and base RM1170 are all Super King, and a SEPARATE
+//     2038(A)-(K) is the real King (RM710). The "(6FT)" in the name is wrong.
+//   • 4 SO items on 2038(A)-(SK): 2 tagged K/6FT (base 1420 & 1170 — Super-King
+//     money, NOT King's 710, so the SIZE tag is the error) and 2 tagged
+//     200x200 (service orders, base 0). All are Super King.
+// Owner ruling: unify to SK / SuperKing / 200X200; drop the wrong "6FT".
+// Price is untouched (already correct) — this only fixes the size identity.
+// ---------------------------------------------------------------------------
+app.post("/db-fix-superking-2038", async (c) => {
+  let apply = false;
+  try {
+    const b = (await c.req.json()) as { apply?: unknown };
+    apply = b?.apply === true;
+  } catch { /* dry-run */ }
+
+  const CODE = "2038(A)-(SK)";
+  const changes: Array<Record<string, unknown>> = [];
+
+  // Product master.
+  try {
+    const p = await c.var.DB.prepare(
+      "SELECT id, code, name, sizeCode, sizeLabel FROM products WHERE code = ?",
+    ).bind(CODE).first<Record<string, unknown>>();
+    if (p) {
+      const oldName = String(p.name ?? "");
+      const newName = oldName.replace(/\(6FT\)\s*/i, "(SUPERKING) ");
+      changes.push({
+        entity: "product", id: p.id, code: p.code,
+        from: { sizeCode: p.sizeCode ?? p.sizecode, sizeLabel: p.sizeLabel ?? p.sizelabel, name: oldName },
+        to: { sizeCode: "SK", sizeLabel: "SuperKing", name: newName },
+      });
+      if (apply) {
+        await c.var.DB.prepare(
+          "UPDATE products SET sizeCode = ?, sizeLabel = ?, name = ? WHERE id = ?",
+        ).bind("SK", "SuperKing", newName, p.id).run();
+      }
+    }
+  } catch (err) {
+    changes.push({ entity: "product", error: err instanceof Error ? err.message : String(err) });
+  }
+
+  // SO items on this product whose size isn't already SK.
+  try {
+    const res = await c.var.DB.prepare(
+      "SELECT id, salesOrderId, sizeCode, sizeLabel FROM sales_order_items WHERE productCode = ?",
+    ).bind(CODE).all<Record<string, unknown>>();
+    for (const r of res.results ?? []) {
+      const sc = String(r.sizeCode ?? r.sizecode ?? "").trim().toUpperCase();
+      if (sc === "SK") continue; // already correct
+      changes.push({
+        entity: "sales_order_item", id: r.id, salesOrderId: r.salesOrderId ?? r.salesorderid,
+        from: { sizeCode: r.sizeCode ?? r.sizecode, sizeLabel: r.sizeLabel ?? r.sizelabel },
+        to: { sizeCode: "SK", sizeLabel: "SuperKing" },
+      });
+      if (apply) {
+        await c.var.DB.prepare(
+          "UPDATE sales_order_items SET sizeCode = ?, sizeLabel = ? WHERE id = ?",
+        ).bind("SK", "SuperKing", r.id).run();
+      }
+    }
+  } catch (err) {
+    changes.push({ entity: "sales_order_item", error: err instanceof Error ? err.message : String(err) });
+  }
+
+  return c.json({ success: true, data: { mode: apply ? "apply" : "dry-run", count: changes.length, changes } });
+});

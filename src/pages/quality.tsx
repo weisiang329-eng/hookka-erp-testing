@@ -1,12 +1,17 @@
 // ---------------------------------------------------------------------------
-// QC / Quality Management — Phase 1 rebuild (2026-04-28).
+// QC / Quality Management — Phase 1 rebuild (2026-04-28), generation reworked
+// per stage 2026-08-08.
 //
-// New flow (per design discussion 2026-04-28):
-//   • Time-triggered QC. The cron at /api/qc-pending/trigger runs at 12:00 +
-//     16:00 daily (factory local time). Each run generates one PENDING
-//     inspection per active qc_templates row. Inspectors pick up each slot,
-//     sample (or skip "no production at this stage today"), record per-item
-//     PASS / FAIL / NA, and submit.
+// Flow:
+//   • Generation runs at 12:00 + 16:00 (factory local) but the three stages
+//     follow three different rhythms — see src/api/routes/qc-pending.ts:
+//       RM  one inspection per GOODS RECEIPT, per material family on it;
+//       WIP one slot per working department per run;
+//       FG  a sampled share of the units produced, each bound to ONE unit and
+//           the sales-order line it was built from.
+//     An RM or FG slot therefore arrives with its subject ALREADY NAMED; only
+//     WIP still asks the inspector to pick one. Inspectors record per-item
+//     PASS / FAIL / NA and submit, or skip with a reason.
 //   • On FAIL the system creates a 🔶 soft Issue Tag against the inspection's
 //     subject (RM / Job Card / FG). Tags are informational, not gating —
 //     production keeps running ("继续使用，加小心" — small-shop reality).
@@ -55,7 +60,30 @@ type Stage = "RM" | "WIP" | "FG";
 type ItemCategory = "SOFA" | "BEDFRAME" | "ACCESSORY" | "GENERAL";
 type Severity = "MINOR" | "MAJOR" | "CRITICAL";
 type ItemResult = "PASS" | "FAIL" | "NA";
-type SubjectType = "RAW_MATERIAL" | "JOB_CARD" | "FG_BATCH";
+type SubjectType = "RAW_MATERIAL" | "RM_BATCH" | "JOB_CARD" | "FG_BATCH";
+
+// The sales-order line a sampled finished unit is supposed to satisfy, frozen
+// into the inspection at generation time. This is what "有没有做对 order" is
+// checked against — not the label on the box, which is itself one of the
+// things being checked.
+type SoSpec = {
+  soNo?: string | null;
+  soLineNo?: number | null;
+  productCode?: string | null;
+  productName?: string | null;
+  sizeCode?: string | null;
+  sizeLabel?: string | null;
+  fabricCode?: string | null;
+  quantity?: number | null;
+  legHeightInches?: number | null;
+  divanHeightInches?: number | null;
+  specialOrder?: string | null;
+  lineNotes?: string | null;
+  customerName?: string | null;
+  customerHub?: string | null;
+  unitNo?: number | null;
+  totalUnits?: number | null;
+};
 
 type InspectionItem = {
   id: string;
@@ -91,6 +119,14 @@ type Inspection = {
   skipReason: string;
   completedAt: string;
   createdAt: string;
+  // What the slot was raised ABOUT (generation-time), as opposed to what the
+  // inspector finally submitted. RM slots name the goods receipt; FG slots name
+  // one finished unit and carry its sales-order line.
+  sourceGrnId?: string;
+  sourceGrnNo?: string;
+  materialFamily?: string;
+  sourceFgUnitId?: string;
+  soSpec?: SoSpec | null;
   items: InspectionItem[];
 };
 
@@ -103,6 +139,10 @@ type Template = {
   stage: Stage;
   active: boolean;
   notes: string;
+  // RM templates only: which incoming-material family this checklist covers.
+  // Generation routes a goods receipt to a checklist by family, so an RM
+  // template with no family is never handed to anyone.
+  materialFamily?: string;
   createdAt: string;
   updatedAt: string;
   items: {
@@ -143,6 +183,23 @@ const RESULT_COLOR: Record<ItemResult, string> = {
   FAIL: "bg-red-100 text-red-800 border-red-300",
   NA: "bg-gray-100 text-gray-700 border-gray-300",
 };
+// Mirrors RM_FAMILIES in src/api/lib/qc-rm-families.ts, which is the source of
+// truth (it is also what routes a receipt line to a checklist). Kept as a
+// literal here rather than imported so a page bundle never pulls in a server
+// module; the API validates the value anyway, so a drift shows up as a 400 and
+// not as a silently mis-routed receipt.
+const RM_FAMILY_OPTIONS = [
+  "FABRIC",
+  "PLYWOOD",
+  "TIMBER",
+  "SOFA_FOAM",
+  "BED_FILLER",
+  "WEBBING",
+  "MECHANISM",
+  "PACKING",
+  "ACCESSORIES",
+  "GENERAL",
+] as const;
 
 function fmtSlot(iso: string): string {
   if (!iso) return "—";
@@ -167,7 +224,8 @@ export default function QualityPage() {
             QA / Quality Management
           </h1>
           <p className="text-sm text-muted-foreground">
-            Time-triggered QC inspections (12:00 / 16:00 daily) · 🔶 issue tags · checklist templates
+            IQC once per goods receipt · IPQC twice daily per working department · OQC sampled
+            against the sales order · 🔶 issue tags · checklist templates
           </p>
         </div>
       </div>
@@ -233,19 +291,33 @@ function PendingTab() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
       });
-      const json = (await res.json()) as { success?: boolean; error?: string; created?: number; skipped?: number; skippedNoActivity?: number };
+      const json = (await res.json()) as {
+        success?: boolean; error?: string;
+        created?: number; skipped?: number; skippedNoActivity?: number;
+        rmCreated?: number; rmReceipts?: number; rmNoTemplate?: number;
+        fgCreated?: number; fgUnits?: number; fgUnresolved?: number;
+      };
       if (!res.ok || !json.success) throw new Error(json.error ?? "Generate failed");
       invalidateCachePrefix("/api/qc-pending");
       refreshPending();
-      // skippedNoActivity is the one that needs saying out loud: generation is
-      // coupled to production now, so "created 0" usually means the factory
-      // made nothing, not that the button failed.
+      // "created 0" must read as a fact about the factory, not as a button that
+      // failed. So the toast says what generation actually LOOKED at: how many
+      // departments were idle, how many receipts were scanned, how many units
+      // were produced.
       const idle = json.skippedNoActivity ?? 0;
-      toast.success(
-        `Slot generated. Created ${json.created ?? 0} new pending. ` +
-        `Skipped ${json.skipped ?? 0} (already exists)` +
-        (idle > 0 ? `, ${idle} (no production/goods at that stage today).` : "."),
-      );
+      const parts = [
+        `Created ${json.created ?? 0} new pending, skipped ${json.skipped ?? 0} (already raised).`,
+        idle > 0 ? `${idle} WIP department(s) had no work today.` : "",
+        `RM: ${json.rmCreated ?? 0} from ${json.rmReceipts ?? 0} goods receipt(s) in the last 7 days.`,
+        (json.rmNoTemplate ?? 0) > 0
+          ? `${json.rmNoTemplate} receipt line group(s) matched NO checklist — tell QC.`
+          : "",
+        `FG: ${json.fgCreated ?? 0} sampled from ${json.fgUnits ?? 0} unit(s) produced today.`,
+        (json.fgUnresolved ?? 0) > 0
+          ? `${json.fgUnresolved} unit(s) could not be matched to a sales-order line.`
+          : "",
+      ].filter(Boolean);
+      toast.success(parts.join(" "));
     } catch (err) {
       toast.error(`Failed: ${err instanceof Error ? err.message : "unknown"}`);
     } finally {
@@ -387,7 +459,19 @@ function PendingRow({
         <span className="w-24 text-sm">
           {insp.itemCategory ? CATEGORY_LABEL[insp.itemCategory] : "—"}
         </span>
-        <span className="flex-1 text-sm text-muted-foreground">
+        {/*
+          An RM row used to say nothing about WHICH goods it was for, because
+          the slot was raised for a DAY. It is now raised for a RECEIPT, and an
+          FG row is raised for one UNIT — say so in the list, or the inspector
+          has to open every row to find out what it is about.
+        */}
+        <span className="flex-1 truncate text-sm text-muted-foreground">
+          {insp.subjectLabel ? (
+            <>
+              <span className="font-medium text-foreground">{insp.subjectLabel}</span>
+              <span className="mx-2">·</span>
+            </>
+          ) : null}
           {insp.items.length} check items
         </span>
         <Badge
@@ -403,6 +487,51 @@ function PendingRow({
   );
 }
 
+// What the sales order actually asked for. The FG checklist's first seven items
+// are all "does the unit match this", so the answer has to be on screen next to
+// them — an inspector who has to go and look the order up will read the label
+// on the box instead, and the label is one of the things being checked.
+function SoSpecPanel({ spec }: { spec: SoSpec }) {
+  const fields: [string, string][] = [
+    ["Sales order", [spec.soNo, spec.soLineNo != null ? `line ${spec.soLineNo}` : ""].filter(Boolean).join(" · ")],
+    ["Product code", spec.productCode ?? ""],
+    ["Product", spec.productName ?? ""],
+    ["Size", [spec.sizeCode, spec.sizeLabel].filter(Boolean).join(" · ")],
+    ["Fabric code", spec.fabricCode ?? ""],
+    ["Qty ordered", spec.quantity != null ? String(spec.quantity) : ""],
+    ["Leg height", spec.legHeightInches != null ? `${spec.legHeightInches}"` : ""],
+    ["Divan height", spec.divanHeightInches != null ? `${spec.divanHeightInches}"` : ""],
+    ["Unit", spec.unitNo != null && spec.totalUnits != null ? `${spec.unitNo} of ${spec.totalUnits}` : ""],
+    ["Customer", [spec.customerName, spec.customerHub].filter(Boolean).join(" · ")],
+    ["Special order", spec.specialOrder ?? ""],
+    ["Line notes", spec.lineNotes ?? ""],
+  ];
+  const shown = fields.filter(([, v]) => v !== "");
+  if (shown.length === 0) {
+    return (
+      <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+        This unit could not be matched to a sales-order line. Do not guess what it should be —
+        record it and report it: a finished unit with no traceable order is itself the finding.
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-md border bg-background">
+      <div className="border-b bg-muted/30 px-3 py-2 text-sm font-medium">
+        What the sales order asked for
+      </div>
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-1 px-3 py-2 text-sm md:grid-cols-3">
+        {shown.map(([k, v]) => (
+          <div key={k}>
+            <dt className="text-xs text-muted-foreground">{k}</dt>
+            <dd className="font-medium">{v}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
 function DoInspectionForm({
   insp, onRefresh, onClose,
 }: { insp: Inspection; onRefresh: () => void; onClose: () => void }) {
@@ -410,9 +539,20 @@ function DoInspectionForm({
   const me = getCurrentUser();
   const stage = insp.stage as Stage | null;
 
-  // Subject picker data (lazily loaded based on stage)
+  // An RM slot names the GOODS RECEIPT it was raised for, and an FG slot names
+  // the finished unit that was drawn for sampling — both decided at generation
+  // time. When the slot already names its subject there is nothing to pick, so
+  // the dropdown (and its fetch) is replaced by the assignment itself. Picking
+  // "some raw material" out of a list of every material in the company was
+  // never a QC record of anything.
+  const assignedSubject = insp.subjectId
+    ? { id: insp.subjectId, code: insp.sourceGrnNo || "", label: insp.subjectLabel || insp.subjectId }
+    : null;
+
+  // Subject picker data (lazily loaded based on stage, and only when the slot
+  // did not already name its subject)
   const { data: rmResp, error: rmError, loading: rmLoading } = useCachedJson<{ data?: RawMaterialOpt[] }>(
-    stage === "RM" ? "/api/raw-materials" : null,
+    stage === "RM" && !assignedSubject ? "/api/raw-materials" : null,
   );
   // A card the department has OPEN right now is what an IPQC inspector can
   // actually sample. WAITING / IN_PROGRESS / PAUSED are the three live
@@ -424,19 +564,20 @@ function DoInspectionForm({
       : null,
   );
   const { data: fgResp, error: fgError, loading: fgLoading } = useCachedJson<{ data?: FgBatchOpt[] }>(
-    stage === "FG" ? "/api/fg-units" : null,
+    stage === "FG" && !assignedSubject ? "/api/fg-units" : null,
   );
   const subjectsError = stage === "RM" ? rmError : stage === "WIP" ? jcError : stage === "FG" ? fgError : null;
   const subjectsLoading = stage === "RM" ? rmLoading : stage === "WIP" ? jcLoading : stage === "FG" ? fgLoading : false;
 
-  // subjectType is fixed by stage (RM→RAW_MATERIAL, WIP→JOB_CARD, FG→FG_BATCH).
-  // The user picks a specific subject from a stage-specific dropdown; the type
-  // itself never changes during the form's lifecycle.
+  // subjectType is fixed by stage (RM→RM_BATCH for a receipt-driven slot,
+  // WIP→JOB_CARD, FG→FG_BATCH). The type never changes during the form's
+  // lifecycle; only WIP still asks the inspector to pick the subject.
   const subjectType: SubjectType | "" =
-    stage === "RM" ? "RAW_MATERIAL" : stage === "WIP" ? "JOB_CARD" : stage === "FG" ? "FG_BATCH" : "";
-  const [subjectId, setSubjectId] = useState("");
-  const [subjectLabel, setSubjectLabel] = useState("");
-  const [subjectCode, setSubjectCode] = useState("");
+    (insp.subjectType as SubjectType | null) ??
+    (stage === "RM" ? "RAW_MATERIAL" : stage === "WIP" ? "JOB_CARD" : stage === "FG" ? "FG_BATCH" : "");
+  const [subjectId, setSubjectId] = useState(assignedSubject?.id ?? "");
+  const [subjectLabel, setSubjectLabel] = useState(assignedSubject?.label ?? "");
+  const [subjectCode, setSubjectCode] = useState(assignedSubject?.code ?? "");
   const [overallNotes, setOverallNotes] = useState("");
   const [items, setItems] = useState<InspectionItem[]>(insp.items);
   const [submitting, setSubmitting] = useState(false);
@@ -561,6 +702,30 @@ function DoInspectionForm({
 
   return (
     <div className="space-y-4 border-t bg-muted/20 p-4">
+      {assignedSubject ? (
+        <div className="space-y-3">
+          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2">
+            <div className="text-xs font-medium uppercase tracking-wide text-amber-800">
+              {stage === "RM" ? "Goods receipt to inspect" : "Unit drawn for sampling"}
+            </div>
+            <div className="mt-0.5 font-mono text-sm font-semibold text-amber-900">
+              {assignedSubject.label}
+            </div>
+            {stage === "RM" && insp.materialFamily && (
+              <div className="mt-0.5 text-xs text-amber-800">
+                Material family: <strong>{insp.materialFamily.replace(/_/g, " ")}</strong> — a receipt
+                holding more than one family raises one inspection per family, all against this same
+                receipt.
+              </div>
+            )}
+          </div>
+          {stage === "FG" && insp.soSpec && <SoSpecPanel spec={insp.soSpec} />}
+          <div>
+            <label className="mb-1 block text-xs font-medium text-muted-foreground">Overall notes (optional)</label>
+            <Input value={overallNotes} onChange={(e) => setOverallNotes(e.target.value)} placeholder="Any general observation…" />
+          </div>
+        </div>
+      ) : (
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <div>
           <label className="mb-1 block text-xs font-medium text-muted-foreground">Subject (what was sampled)</label>
@@ -609,6 +774,7 @@ function DoInspectionForm({
           <Input value={overallNotes} onChange={(e) => setOverallNotes(e.target.value)} placeholder="Any general observation…" />
         </div>
       </div>
+      )}
 
       <div className="rounded-md border bg-background">
         <div className="flex items-center justify-between border-b bg-muted/30 px-3 py-2 text-sm font-medium">
@@ -845,6 +1011,7 @@ function TemplatesTab() {
                   <th className="px-3 py-2 text-left">Template</th>
                   <th className="px-3 py-2 text-left">Dept</th>
                   <th className="px-3 py-2 text-left">Category</th>
+                  <th className="px-3 py-2 text-left">Material family</th>
                   <th className="px-3 py-2 text-left">Items</th>
                   <th className="px-3 py-2 text-left">Active</th>
                   <th className="px-3 py-2"></th>
@@ -856,6 +1023,17 @@ function TemplatesTab() {
                     <td className="px-3 py-2 font-medium">{t.name}</td>
                     <td className="px-3 py-2">{t.deptName || t.deptCode}</td>
                     <td className="px-3 py-2">{CATEGORY_LABEL[t.itemCategory]}</td>
+                    <td className="px-3 py-2">
+                      {t.stage !== "RM" ? (
+                        <span className="text-muted-foreground">—</span>
+                      ) : t.materialFamily ? (
+                        t.materialFamily.replace(/_/g, " ")
+                      ) : (
+                        <span className="font-medium text-red-600" title="No receipt will ever be routed to this checklist.">
+                          none — unreachable
+                        </span>
+                      )}
+                    </td>
                     <td className="px-3 py-2">{t.items.length}</td>
                     <td className="px-3 py-2">
                       <button
@@ -908,6 +1086,7 @@ function TemplateEditor({
     deptName: template?.deptName ?? "",
     itemCategory: template?.itemCategory ?? "GENERAL",
     stage: template?.stage ?? "WIP",
+    materialFamily: template?.materialFamily ?? "",
     notes: template?.notes ?? "",
     items: template?.items ?? [],
   });
@@ -939,6 +1118,10 @@ function TemplateEditor({
     if (!form.name.trim()) { toast.error("Name is required"); return; }
     if (!form.deptCode.trim()) { toast.error("Department code is required"); return; }
     if (form.items.length === 0) { toast.error("At least one check item is required"); return; }
+    if (form.stage === "RM" && !form.materialFamily) {
+      toast.error("An incoming-material template must name the material family it covers — receipts are routed to checklists by family.");
+      return;
+    }
     if (form.items.some((i) => !i.itemName.trim())) { toast.error("Every item needs a name"); return; }
     setSaving(true);
     try {
@@ -1004,6 +1187,24 @@ function TemplateEditor({
               <option value="ACCESSORY">Accessory</option>
             </select>
           </div>
+          {form.stage === "RM" && (
+            <div>
+              <label className="mb-1 block text-xs font-medium text-muted-foreground">Material family</label>
+              <select
+                value={form.materialFamily}
+                onChange={(e) => setForm((f) => ({ ...f, materialFamily: e.target.value }))}
+                className="block w-full rounded-md border border-input bg-background p-2 text-sm"
+              >
+                <option value="">— choose a family —</option>
+                {RM_FAMILY_OPTIONS.map((f) => (
+                  <option key={f} value={f}>{f.replace(/_/g, " ")}</option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Goods receipts are routed here by the item group on their lines, not by department.
+              </p>
+            </div>
+          )}
         </div>
 
         <div>

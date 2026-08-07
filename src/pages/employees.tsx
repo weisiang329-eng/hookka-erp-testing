@@ -29,6 +29,8 @@ import { Badge } from "@/components/ui/badge";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { MoneyInput } from "@/components/ui/money-input";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { formatCurrency, formatDate, formatDateDMY, formatHours, formatRM, roundSen, distributeRoundSen, todayYmdMY } from "@/lib/utils";
 import { printReport, type PrintColumn, type PrintCard, type PrintSection } from "@/lib/print-report";
 import { normalizePaymentMethod, paymentDestinationLabel } from "@/lib/payment-method";
@@ -210,6 +212,25 @@ type PayslipData = {
   otDays?: Array<{ date: string; hours: number }>;
   shortHourDeductionSen?: number;
   lateDays?: Array<{ date: string; hours: number }>;
+  /** Salary advance already handed to the worker during the period, in sen.
+   *  ALREADY subtracted from netPay by the backend — never subtract it again
+   *  here, or the screen and the payslip disagree. Absent / 0 on a payslip
+   *  generated before the feature existed. */
+  advanceDeductionSen?: number;
+};
+
+/** One advance: cash handed to a worker mid-month, recovered from that month's
+ *  net pay. `date` is what puts it in a pay period. */
+type AdvanceRecord = {
+  id: string;
+  workerId: string;
+  date: string;
+  amountSen: number;
+  note: string;
+  enteredBy: string;
+  status: string;
+  settledPeriod: string;
+  createdAt: string;
 };
 
 type LeaveRecord = {
@@ -6725,6 +6746,29 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
     refreshPayslipsHook();
   }, [refreshPayslipsHook]);
 
+  // The period's salary advances. The MONEY always comes off the payslip row
+  // (`advanceDeductionSen`, which the backend already subtracted from net pay);
+  // this list is for the per-worker day detail and — the load-bearing part —
+  // the drift check below. A payslip generated on Monday and an advance keyed
+  // on Tuesday would otherwise disagree silently, which is exactly the class of
+  // bug this module keeps paying for.
+  const { data: advancesResp } = useCachedJson<{ data?: AdvanceRecord[] }>(
+    `/api/employee-advances?period=${period}`,
+  );
+  const periodAdvances: AdvanceRecord[] = useMemo(
+    () => advancesResp?.data ?? [],
+    [advancesResp],
+  );
+  const advanceDaysByWorker = useMemo(() => {
+    const m = new Map<string, AdvanceRecord[]>();
+    for (const a of periodAdvances) {
+      const arr = m.get(a.workerId) ?? [];
+      arr.push(a);
+      m.set(a.workerId, arr);
+    }
+    return m;
+  }, [periodAdvances]);
+
   const generatePayslips = async () => {
     setGenerating(true);
     try {
@@ -6828,20 +6872,46 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
         eisEmployer: acc.eisEmployer + r.eisEmployer,
         pcb: acc.pcb + r.pcb,
         totalDeductions: acc.totalDeductions + r.totalDeductions,
+        advanceDeductionSen: acc.advanceDeductionSen + (r.advanceDeductionSen || 0),
         netPay: acc.netPay + r.netPay,
       }),
       {
         basicSalary: 0, absenceDeductionSen: 0, shortHourDeductionSen: 0, otWeekdayHours: 0, otSundayHours: 0, otPHHours: 0,
         totalOT: 0, allowances: 0, grossPay: 0, epfEmployee: 0, epfEmployer: 0,
         socsoEmployee: 0, socsoEmployer: 0, eisEmployee: 0, eisEmployer: 0,
-        pcb: 0, totalDeductions: 0, netPay: 0,
+        pcb: 0, totalDeductions: 0, advanceDeductionSen: 0, netPay: 0,
       }
     );
   }, [payslipData]);
 
+  // What the company still has to put on the table this month. Gross +
+  // employer statutory is the full cost of employing everyone; the advances
+  // came out of the till earlier in the month, so they are no longer part of
+  // what is left to hand over (owner 2026-08-07: "在 net pay、total pay 里面扣").
+  // Note this is "remaining outlay", not "cost of labour" — the labour COST is
+  // unchanged and the Labor Cost / Dept Labor screens are deliberately untouched.
   const totalPayrollCost = useMemo(() => {
-    return totals.grossPay + totals.epfEmployer + totals.socsoEmployer + totals.eisEmployer;
+    return (
+      totals.grossPay +
+      totals.epfEmployer +
+      totals.socsoEmployer +
+      totals.eisEmployer -
+      totals.advanceDeductionSen
+    );
   }, [totals]);
+  // An advance keyed AFTER the payslips were generated is not in the stored
+  // figures. Say so loudly rather than showing two numbers that don't tie.
+  // Scoped to the workers who actually have a payslip this period, so an
+  // advance against someone with no slip (joined later, TEST account) doesn't
+  // raise a false alarm about the ones that DO reconcile.
+  const advanceDrift = useMemo(() => {
+    const payees = new Set(payslipData.map((r) => r.employeeId));
+    const recordedForPayees = periodAdvances.reduce(
+      (s, a) => (payees.has(a.workerId) ? s + (a.amountSen || 0) : s),
+      0,
+    );
+    return recordedForPayees - totals.advanceDeductionSen;
+  }, [payslipData, periodAdvances, totals.advanceDeductionSen]);
 
   // "Part-month" column — LEGACY display reconciliation. Under the UNIFIED ÷26
   // model (owner 2026-06-11) the engine never prorates: join/resign months are
@@ -6903,7 +6973,13 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
       "OT Weekday Hrs", "OT Sunday Hrs", "OT PH Hrs", "OT Days", "Hourly Rate",
       "OT Weekday Amt", "OT Sunday Amt", "OT PH Amt", "Total OT", "Allowances",
       "Gross Pay", "EPF EE (11%)", "EPF ER (13%)", "SOCSO EE", "SOCSO ER",
-      "EIS EE", "EIS ER", "PCB", "Total Deductions", "Net Pay", "Bank Account", "Status",
+      "EIS EE", "EIS ER", "PCB", "Total Deductions",
+      // Advances sit between the statutory total and Net Pay because that is
+      // where they sit in the arithmetic: Gross − Total Deductions − Advance
+      // = Net Pay. Putting them inside Total Deductions would make every
+      // statutory column in this file stop reconciling.
+      "Advance Taken", "Advance Dates",
+      "Net Pay", "Bank Account", "Status",
     ];
     const rm2 = (sen: number) => (sen / 100).toFixed(2);
     // Hours arrive as a sum of per-department rows, so a 0.5h dock can carry
@@ -6922,6 +6998,9 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
       // ÷hours-only figure the payslip shows; printing the real one is the whole
       // point of the formula column.
       const shortRate = shortHours > 0 ? shortSen / shortHours : 0;
+      // Cash already handed over — the figure the payslip was computed with,
+      // not a live re-sum, so this column always ties to Net Pay.
+      const advanceSen = r.advanceDeductionSen ?? 0;
       const prorationSen = prorationSenOf(r);
       const basicEarnedSen = Math.max(
         0,
@@ -6948,7 +7027,14 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
         rm2(r.epfEmployer), rm2(r.socsoEmployee),
         rm2(r.socsoEmployer), rm2(r.eisEmployee),
         rm2(r.eisEmployer), rm2(r.pcb),
-        rm2(r.totalDeductions), rm2(r.netPay),
+        rm2(r.totalDeductions),
+        advanceSen > 0 ? rm2(advanceSen) : "",
+        advanceSen > 0
+          ? (advanceDaysByWorker.get(r.employeeId) ?? [])
+              .map((a) => `${a.date} ${rm2(a.amountSen)}`)
+              .join("; ")
+          : "",
+        rm2(r.netPay),
         r.bankAccount, r.status,
       ];
     });
@@ -7064,11 +7150,17 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
       { header: "SOCSO", align: "right", value: (r) => { const v = (r as PayslipData).socsoEmployee; return v > 0 ? printMoney(v) : "-"; } },
       { header: "EIS", align: "right", value: (r) => { const v = (r as PayslipData).eisEmployee; return v > 0 ? printMoney(v) : "-"; } },
       { header: "PCB", align: "right", value: (r) => { const p = r as PayslipData; return p.pcb > 0 ? printMoney(p.pcb) : "-"; } },
+      // Between the statutory columns and Net Pay, because that is where it
+      // sits in the sum: Gross − statutory − Advance = Net Pay.
+      { header: "Advance", align: "right", value: (r) => { const v = (r as PayslipData).advanceDeductionSen || 0; return v > 0 ? `−${printMoney(v)}` : "-"; } },
       { header: "Net Pay", align: "right", value: (r) => ({ text: printMoney((r as PayslipData).netPay), bold: true }) },
       { header: "Status", align: "center", value: (r) => (r as PayslipData).status },
     ];
     const cards: PrintCard[] = [
-      { label: "Total Payroll Cost", value: formatCurrency(totalPayrollCost) },
+      { label: "Still To Pay Out", value: formatCurrency(totalPayrollCost) },
+      ...(totals.advanceDeductionSen > 0
+        ? [{ label: "Advances Already Paid", value: formatCurrency(totals.advanceDeductionSen) }]
+        : []),
       { label: "Total EPF (EE+ER)", value: formatCurrency(totals.epfEmployee + totals.epfEmployer) },
       { label: "Total SOCSO", value: formatCurrency(totals.socsoEmployee + totals.socsoEmployer) },
       { label: "Total EIS", value: formatCurrency(totals.eisEmployee + totals.eisEmployer) },
@@ -7188,7 +7280,8 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
         s("7. Allowance, statutory & net pay", [
           { item: "Efficiency allowance", rule: "Flat bonus when the month's cumulative efficiency reaches the worker's target, else RM0 (no proration)", example: "RM150 at 100%" },
           { item: "Statutory (per-worker toggle)", rule: `EPF ${cfg.epfEmployeePct}% employee / ${cfg.epfEmployerPct}% employer on basic · SOCSO RM${(cfg.socsoEmployeeSen / 100).toFixed(2)}/${(cfg.socsoEmployerSen / 100).toFixed(2)} · EIS RM${(cfg.eisEmployeeSen / 100).toFixed(2)}/${(cfg.eisEmployerSen / 100).toFixed(2)}`, example: "Deducted only when enabled" },
-          { item: "Net pay", rule: "Basic − absence − late/short + OT + allowance − employee statutory", example: "What the worker receives" },
+          { item: "Net pay", rule: "Basic − absence − late/short + OT + allowance − employee statutory − salary advances already taken", example: "What the worker receives" },
+          { item: "Salary advance", rule: "Cash drawn during the month is paid back out of that same month's pay. It is not an earning and not a statutory deduction, so EPF / SOCSO / EIS / PCB are unaffected", example: "Draw RM300 on the 12th → RM300 less in the pay-out" },
         ]),
       ],
     });
@@ -7204,7 +7297,12 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
             <CardContent className="p-4">
               <p className="text-xs text-[#6B7280] uppercase tracking-wide">Total Pay</p>
               <p className="text-xl font-bold text-[#6B5C32] mt-1">{formatCurrency(totalPayrollCost)}</p>
-              <p className="text-[10px] text-[#9CA3AF] mt-0.5">Company outlay — Gross + all employer statutory</p>
+              <p className="text-[10px] text-[#9CA3AF] mt-0.5">
+                Still to pay out — Gross + all employer statutory
+                {totals.advanceDeductionSen > 0
+                  ? `, less ${formatCurrency(totals.advanceDeductionSen)} of advances already handed out`
+                  : ""}
+              </p>
             </CardContent>
           </Card>
           <Card>
@@ -7321,6 +7419,13 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
           </div>
         </CardHeader>
         <CardContent>
+          {advanceDrift !== 0 && payslipData.length > 0 && !isProjected && (
+            <div className="mb-3 rounded-md border border-[#E8C9C3] bg-[#FBEFEC] px-3 py-2 text-xs text-[#9A3A2D]">
+              <span className="font-semibold">Advances changed since these payslips were generated.</span>{" "}
+              {formatCurrency(Math.abs(advanceDrift))} of advances {advanceDrift > 0 ? "is not yet" : "is no longer"} reflected in Net Pay.
+              Use &ldquo;Regenerate&rdquo; to recompute this period. (Approved payslips keep the figure they were signed off with — un-approve first.)
+            </div>
+          )}
           {isProjected && (
             <div className="mb-3 rounded-md border border-[#E2D9C3] bg-[#FBF7EC] px-3 py-2 text-xs text-[#6B5C32]">
               <span className="font-semibold">Estimate · month in progress.</span> Same engine the worker app shows — payslips aren&rsquo;t generated yet. The figures update as Working Hours are entered; click &ldquo;Generate (finalise)&rdquo; at month-end to lock them in (the numbers will match).
@@ -7364,8 +7469,9 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
                     <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">SOCSO</th>
                     <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">EIS</th>
                     <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">PCB</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap" title="Salary advance already handed to this worker during the month. Not a statutory deduction — it comes off AFTER them, because it is pay they have already received. Recorded on the Advances tab.">Advance</th>
                     <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap">Net Pay</th>
-                    <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap" title="Real company outlay for this worker — Net Pay plus every statutory contribution (employee + employer EPF / SOCSO / EIS + PCB). Equals Gross + employer EPF / SOCSO / EIS.">Total Pay</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap" title="What the company still hands over for this worker — Gross + employer EPF / SOCSO / EIS, less any advance already paid out during the month.">Total Pay</th>
                     <th className="h-10 px-2 text-center font-medium text-[#374151] whitespace-nowrap">Status</th>
                     <th className="h-10 px-2 text-center font-medium text-[#374151] whitespace-nowrap">Print</th>
                   </tr>
@@ -7410,8 +7516,17 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
                         <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs whitespace-nowrap">{formatCurrency(r.socsoEmployee)}</td>
                         <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs whitespace-nowrap">{formatCurrency(r.eisEmployee)}</td>
                         <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs whitespace-nowrap">{r.pcb > 0 ? formatCurrency(r.pcb) : "-"}</td>
-                        <td className="h-10 px-3 text-right font-bold text-[#1F1D1B] whitespace-nowrap">{formatCurrency(r.netPay)}</td>
-                        <td className="h-10 px-3 text-right font-bold text-[#6B5C32] whitespace-nowrap" title="Net Pay + all EPF / SOCSO / EIS / PCB = real company outlay for this worker">{formatCurrency(r.grossPay + r.epfEmployer + r.socsoEmployer + r.eisEmployer)}</td>
+                        <td className="h-10 px-3 text-right whitespace-nowrap text-[#9A3A2D]" title="Salary advance already collected this month — click the row to see the days.">
+                          {(r.advanceDeductionSen ?? 0) > 0
+                            ? <span>−{formatCurrency(r.advanceDeductionSen ?? 0)}{(advanceDaysByWorker.get(r.employeeId)?.length ?? 0) > 0 ? <span className="text-[10px] text-[#9CA3AF]"> ({advanceDaysByWorker.get(r.employeeId)?.length}x)</span> : null}</span>
+                            : "-"}
+                        </td>
+                        {/* Net Pay can go NEGATIVE when someone drew more than
+                            the month earns. Shown as-is, in red: they owe the
+                            company, and clamping it at zero would silently
+                            write the difference off. */}
+                        <td className={`h-10 px-3 text-right font-bold whitespace-nowrap ${r.netPay < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`} title={r.netPay < 0 ? "Advances taken exceed this month's pay — the balance is still owed to the company." : undefined}>{formatCurrency(r.netPay)}</td>
+                        <td className="h-10 px-3 text-right font-bold text-[#6B5C32] whitespace-nowrap" title="Gross + employer EPF / SOCSO / EIS, less any advance already handed out this month = what the company still pays for this worker">{formatCurrency(r.grossPay + r.epfEmployer + r.socsoEmployer + r.eisEmployer - (r.advanceDeductionSen ?? 0))}</td>
                         <td className="h-10 px-2 text-center">
                           <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${getStatusStyle(r.status)}`}>
                             {r.status}
@@ -7430,7 +7545,7 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
                       {/* Expanded Detail Row */}
                       {expandedRow === r.id && (
                         <tr className="bg-[#FDFCFB]">
-                          <td colSpan={22} className="px-6 py-4">
+                          <td colSpan={23} className="px-6 py-4">
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                               {/* OT Calculation Breakdown */}
                               <div className="space-y-2">
@@ -7539,6 +7654,25 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
                                     <span>Less: Deductions</span>
                                     <span className="font-semibold">({fmtSen(r.totalDeductions)})</span>
                                   </div>
+                                  {(r.advanceDeductionSen ?? 0) > 0 && (
+                                    <>
+                                      <div className="flex justify-between text-[#9A3A2D]">
+                                        <span>Less: Salary advance already taken</span>
+                                        <span className="font-semibold">({fmtSen(r.advanceDeductionSen ?? 0)})</span>
+                                      </div>
+                                      <div className="flex flex-wrap gap-1 pl-2">
+                                        {(advanceDaysByWorker.get(r.employeeId) ?? []).map((a) => (
+                                          <span
+                                            key={a.id}
+                                            className="rounded bg-[#F5E9E7] px-1.5 py-0.5 text-[10px] text-[#9A3A2D]"
+                                            title={a.note || undefined}
+                                          >
+                                            {a.date} · {fmtSen(a.amountSen)}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    </>
+                                  )}
                                   <hr className="border-[#E2DDD8]" />
                                   <div className="flex justify-between font-bold text-base text-[#1F1D1B]">
                                     <span>Net Pay</span>
@@ -7635,8 +7769,9 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
                     <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs">{formatCurrency(totals.socsoEmployee)}</td>
                     <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs">{formatCurrency(totals.eisEmployee)}</td>
                     <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs">{totals.pcb > 0 ? formatCurrency(totals.pcb) : "-"}</td>
+                    <td className="h-10 px-3 text-right text-[#9A3A2D]">{totals.advanceDeductionSen > 0 ? `−${formatCurrency(totals.advanceDeductionSen)}` : "-"}</td>
                     <td className="h-10 px-3 text-right font-bold">{formatCurrency(totals.netPay)}</td>
-                    <td className="h-10 px-3 text-right font-bold text-[#6B5C32]" title="Real company outlay = Net Pay + all EPF / SOCSO / EIS / PCB = Total Payroll Cost">{formatCurrency(totalPayrollCost)}</td>
+                    <td className="h-10 px-3 text-right font-bold text-[#6B5C32]" title="What the company still hands over = Gross + employer EPF / SOCSO / EIS, less advances already paid out this month">{formatCurrency(totalPayrollCost)}</td>
                     <td className="h-10 px-2"></td>
                     <td className="h-10 px-2"></td>
                   </tr>
@@ -10259,9 +10394,468 @@ function LeaveManagementTab({ workers }: { workers: Worker[] }) {
   );
 }
 
+// ========== TAB: SALARY ADVANCES ==========
+//
+// Owner 2026-08-07: "员工他们一直在拿 advance，有没有可能在 employee 这边，我可以
+// 输入他们拿 advance 的金额和日期？"
+//
+// Two jobs, and they are deliberately on ONE screen: recording the cash as it
+// goes out, and printing the sheet HR counts it against. The deduction itself
+// is not here — it happens in payroll, off the DATE of each advance (an advance
+// dated inside the month reduces that month's net pay). Keeping the money in
+// one table and the maths in one place is why the Payroll tab can warn when the
+// two have drifted apart.
+function AdvancesTab({ workers }: { workers: Worker[] }) {
+  const { toast } = useToast();
+  const { confirm, confirmDialog } = useConfirm();
+  const now = new Date();
+  const [selectedYear, setSelectedYear] = useState(now.getFullYear());
+  const [selectedMonth, setSelectedMonth] = useState(now.getMonth() + 1);
+  const period = `${selectedYear}-${String(selectedMonth).padStart(2, "0")}`;
+  const months = MONTH_NAMES;
+
+  const { data: advResp, loading, refresh } = useCachedJson<{ data?: AdvanceRecord[] }>(
+    `/api/employee-advances?period=${period}`,
+  );
+  const advances: AdvanceRecord[] = useMemo(() => advResp?.data ?? [], [advResp]);
+  const reload = useCallback(() => {
+    invalidateCachePrefix("/api/employee-advances");
+    // The payroll screens read the advance through the payslip row, so their
+    // cached copies are stale the moment an advance moves.
+    invalidateCachePrefix("/api/payslips");
+    refresh();
+  }, [refresh]);
+
+  const workerById = useMemo(() => {
+    const m = new Map<string, Worker>();
+    for (const w of workers) m.set(w.id, w);
+    return m;
+  }, [workers]);
+  // Payees only: a resigned worker can still be owed a settled advance from an
+  // earlier month, but new cash is never handed to one.
+  const workerOptions = useMemo(
+    () =>
+      workers
+        .filter((w) => w.status === "ACTIVE" && !w.empNo?.startsWith("TEST"))
+        .sort((a, b) => (a.empNo || "").localeCompare(b.empNo || ""))
+        .map((w) => ({ value: w.id, label: `${w.empNo} — ${w.name}` })),
+    [workers],
+  );
+
+  // ---- new advance form -------------------------------------------------
+  const [formWorkerId, setFormWorkerId] = useState("");
+  const [formDate, setFormDate] = useState(todayLocalStr());
+  const [formAmountRM, setFormAmountRM] = useState<number | null>(null);
+  const [formNote, setFormNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  // Money is integer sen everywhere in this repo; MoneyInput hands back RM
+  // dollars, so this is the ONE conversion point.
+  const formAmountSen = formAmountRM === null ? 0 : roundSen(formAmountRM * 100);
+  const formValid =
+    !!formWorkerId && /^\d{4}-\d{2}-\d{2}$/.test(formDate) && formAmountSen > 0;
+
+  const addAdvance = async () => {
+    if (!formValid) return;
+    setSaving(true);
+    try {
+      const res = await fetch("/api/employee-advances", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workerId: formWorkerId,
+          date: formDate,
+          amountSen: formAmountSen,
+          note: formNote,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) {
+        toast.error(data?.error || `Failed to record advance (HTTP ${res.status})`);
+      } else {
+        toast.success("Advance recorded.");
+        setFormAmountRM(null);
+        setFormNote("");
+        reload();
+      }
+    } catch {
+      toast.error("Error recording advance");
+    }
+    setSaving(false);
+  };
+
+  // ---- inline edit ------------------------------------------------------
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDate, setEditDate] = useState("");
+  const [editAmountRM, setEditAmountRM] = useState<number | null>(null);
+  const [editNote, setEditNote] = useState("");
+  const startEdit = (a: AdvanceRecord) => {
+    setEditingId(a.id);
+    setEditDate(a.date);
+    setEditAmountRM(a.amountSen / 100);
+    setEditNote(a.note);
+  };
+  const saveEdit = async () => {
+    if (!editingId) return;
+    const sen = editAmountRM === null ? 0 : roundSen(editAmountRM * 100);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(editDate) || sen <= 0) {
+      toast.error("A date (YYYY-MM-DD) and an amount above zero are required.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/employee-advances/${editingId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date: editDate, amountSen: sen, note: editNote }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) {
+        toast.error(data?.error || `Failed to update advance (HTTP ${res.status})`);
+      } else {
+        setEditingId(null);
+        reload();
+      }
+    } catch {
+      toast.error("Error updating advance");
+    }
+    setSaving(false);
+  };
+
+  const deleteAdvance = async (a: AdvanceRecord) => {
+    const w = workerById.get(a.workerId);
+    if (
+      !(await confirm({
+        title: `Delete this advance?`,
+        message: `${w?.name ?? a.workerId} · ${a.date} · ${formatCurrency(a.amountSen)}. The deduction disappears from that month's pay — regenerate the period's payslips afterwards if they were already generated.`,
+        confirmLabel: "Delete",
+        tone: "danger",
+      }))
+    ) {
+      return;
+    }
+    const res = await fetch(`/api/employee-advances/${a.id}`, { method: "DELETE" });
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    if (!res.ok) {
+      toast.error(data?.error || `Failed to delete advance (HTTP ${res.status})`);
+      return;
+    }
+    reload();
+  };
+
+  // ---- the HR payout listing -------------------------------------------
+  // One row per employee: the days they drew on, and the total to hand out.
+  // Owner: "可以导出一个我要出钱的 listing 给到我的 HR."
+  const payoutRows = useMemo(() => {
+    const by = new Map<
+      string,
+      { workerId: string; empNo: string; name: string; dept: string; items: AdvanceRecord[]; totalSen: number }
+    >();
+    for (const a of advances) {
+      const w = workerById.get(a.workerId);
+      const row =
+        by.get(a.workerId) ?? {
+          workerId: a.workerId,
+          empNo: w?.empNo ?? "",
+          name: w?.name ?? a.workerId,
+          dept: w?.departmentCode ?? "",
+          items: [],
+          totalSen: 0,
+        };
+      row.items.push(a);
+      row.totalSen += a.amountSen;
+      by.set(a.workerId, row);
+    }
+    return [...by.values()].sort((x, y) => x.empNo.localeCompare(y.empNo));
+  }, [advances, workerById]);
+  const grandTotalSen = useMemo(
+    () => payoutRows.reduce((s, r) => s + r.totalSen, 0),
+    [payoutRows],
+  );
+
+  const exportPayoutCSV = () => {
+    if (payoutRows.length === 0) return;
+    const rm2 = (sen: number) => (sen / 100).toFixed(2);
+    const headers = [
+      "Employee No", "Employee Name", "Department", "Advances", "Dates", "Notes", "Total Advance (RM)",
+    ];
+    const rows = payoutRows.map((r) => [
+      r.empNo,
+      r.name,
+      r.dept.replace(/_/g, " "),
+      r.items.length,
+      r.items.map((a) => `${a.date} ${rm2(a.amountSen)}`).join("; "),
+      r.items.map((a) => a.note).filter(Boolean).join("; "),
+      rm2(r.totalSen),
+    ]);
+    // A payout sheet without its own total is a sheet somebody has to add up by
+    // hand before they can count the cash.
+    rows.push(["", "TOTAL", "", "", "", "", rm2(grandTotalSen)]);
+    const esc = (v: unknown) => {
+      const s = String(v ?? "");
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const csv = [headers.join(","), ...rows.map((r) => r.map(esc).join(","))].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `advance-payout-${period}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handlePrint = useCallback(() => {
+    const columns: PrintColumn[] = [
+      { header: "Employee", width: "26%", value: (r) => { const p = r as (typeof payoutRows)[number]; return `${p.empNo} ${p.name}`; } },
+      { header: "Dept", width: "16%", value: (r) => (r as (typeof payoutRows)[number]).dept.replace(/_/g, " ") },
+      { header: "Advances", align: "center", value: (r) => (r as (typeof payoutRows)[number]).items.length },
+      { header: "Dates", width: "34%", value: (r) => (r as (typeof payoutRows)[number]).items.map((a) => `${a.date} (${formatCurrency(a.amountSen).replace(/^RM\s*/, "")})`).join(", ") },
+      { header: "Total (RM)", align: "right", value: (r) => ({ text: formatCurrency((r as (typeof payoutRows)[number]).totalSen).replace(/^RM\s*/, ""), bold: true }) },
+    ];
+    printReport({
+      title: "Salary Advance Payout Listing",
+      subtitle: "All amounts in RM",
+      filterSummary: `${months[selectedMonth - 1]} ${selectedYear}`,
+      cards: [
+        { label: "Employees", value: String(payoutRows.length) },
+        { label: "Total To Pay Out", value: formatCurrency(grandTotalSen) },
+      ] as PrintCard[],
+      sections: [{ columns, rows: payoutRows } as PrintSection],
+    });
+  }, [payoutRows, grandTotalSen, months, selectedMonth, selectedYear]);
+
+  return (
+    <div className="space-y-4">
+      {confirmDialog}
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-3">
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-xs text-[#6B7280] uppercase tracking-wide">Advanced This Month</p>
+            <p className="text-xl font-bold text-[#9A3A2D] mt-1">{formatCurrency(grandTotalSen)}</p>
+            <p className="text-[10px] text-[#9CA3AF] mt-0.5">Cash already handed out — deducted from this month&rsquo;s net pay</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-xs text-[#6B7280] uppercase tracking-wide">Employees</p>
+            <p className="text-xl font-bold text-[#1F1D1B] mt-1">{payoutRows.length}</p>
+            <p className="text-[10px] text-[#9CA3AF] mt-0.5">{advances.length} advance{advances.length === 1 ? "" : "s"} recorded</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-xs text-[#6B7280] uppercase tracking-wide">Settled</p>
+            <p className="text-xl font-bold text-[#3E6570] mt-1">
+              {advances.filter((a) => a.status === "SETTLED").length} / {advances.length}
+            </p>
+            <p className="text-[10px] text-[#9CA3AF] mt-0.5">Locked once this month&rsquo;s payroll is approved</p>
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <CardTitle className="flex items-center gap-2">
+              <DollarSign className="h-5 w-5 text-[#6B5C32]" /> Salary Advances - {months[selectedMonth - 1]} {selectedYear}
+            </CardTitle>
+            <div className="flex items-center gap-3">
+              <select
+                value={selectedMonth}
+                onChange={(e) => setSelectedMonth(parseInt(e.target.value))}
+                className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              >
+                {months.map((m, i) => (
+                  <option key={i} value={i + 1}>{m}</option>
+                ))}
+              </select>
+              <select
+                value={selectedYear}
+                onChange={(e) => setSelectedYear(parseInt(e.target.value))}
+                className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              >
+                {[2025, 2026, 2027].map((y) => (
+                  <option key={y} value={y}>{y}</option>
+                ))}
+              </select>
+              {payoutRows.length > 0 && (
+                <Button variant="outline" onClick={exportPayoutCSV} title="One row per employee — the sheet HR counts the cash against">
+                  <Download className="h-4 w-4" /> Export Payout Listing
+                </Button>
+              )}
+              {payoutRows.length > 0 && (
+                <Button variant="outline" size="sm" onClick={handlePrint} title="Print the payout listing">
+                  <Printer className="h-4 w-4 mr-1" /> Print Report
+                </Button>
+              )}
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Record an advance */}
+          <div className="rounded-lg border border-[#E2DDD8] bg-[#FAF9F7] p-3">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#6B5C32]">Record an advance</p>
+            <div className="grid grid-cols-1 gap-2 md:grid-cols-12">
+              <div className="md:col-span-4">
+                <SearchableSelect
+                  value={formWorkerId}
+                  onChange={setFormWorkerId}
+                  options={workerOptions}
+                  placeholder="Select employee"
+                />
+              </div>
+              <div className="md:col-span-2">
+                <Input
+                  type="date"
+                  value={formDate}
+                  onChange={(e) => setFormDate(e.target.value)}
+                  title="The day the cash was handed over — this is what puts the advance in a pay period"
+                />
+              </div>
+              <div className="md:col-span-2">
+                <MoneyInput
+                  value={formAmountRM}
+                  onChange={setFormAmountRM}
+                  placeholder="Amount (RM)"
+                  className="h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 text-sm text-right tabular-nums focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                />
+              </div>
+              <div className="md:col-span-3">
+                <Input
+                  value={formNote}
+                  onChange={(e) => setFormNote(e.target.value)}
+                  placeholder="Note (optional)"
+                />
+              </div>
+              <div className="md:col-span-1">
+                <Button variant="primary" onClick={addAdvance} disabled={!formValid || saving} className="w-full">
+                  <Plus className="h-4 w-4" /> Add
+                </Button>
+              </div>
+            </div>
+            <p className="mt-2 text-[11px] text-[#9CA3AF]">
+              An advance is deducted from the pay period its DATE falls in. Payslips already generated for that month need a
+              &ldquo;Regenerate&rdquo; on the Payroll tab before the new figure shows up in Net Pay.
+            </p>
+          </div>
+
+          {loading ? (
+            <div className="flex items-center justify-center h-32 text-[#6B7280]">Loading advances...</div>
+          ) : advances.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-32 text-[#6B7280]">
+              <p>No advances recorded for {months[selectedMonth - 1]} {selectedYear}.</p>
+            </div>
+          ) : (
+            <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
+              <table className="w-full min-w-max text-sm">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
+                    <th className="h-10 px-3 text-left font-medium text-[#374151] whitespace-nowrap">Date</th>
+                    <th className="h-10 px-3 text-left font-medium text-[#374151] min-w-[180px] whitespace-nowrap">Employee</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap">Amount</th>
+                    <th className="h-10 px-3 text-left font-medium text-[#374151] whitespace-nowrap">Note</th>
+                    <th className="h-10 px-2 text-center font-medium text-[#374151] whitespace-nowrap" title="Locked once the month's payroll is approved — the money is then a signed-off fact">Status</th>
+                    <th className="h-10 px-2 text-center font-medium text-[#374151] whitespace-nowrap">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {advances.map((a) => {
+                    const w = workerById.get(a.workerId);
+                    const settled = a.status === "SETTLED";
+                    const editing = editingId === a.id;
+                    return (
+                      <tr key={a.id} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors">
+                        <td className="h-11 px-3 whitespace-nowrap">
+                          {editing ? (
+                            <Input type="date" value={editDate} onChange={(e) => setEditDate(e.target.value)} className="h-8" />
+                          ) : (
+                            a.date
+                          )}
+                        </td>
+                        <td className="h-11 px-3 whitespace-nowrap">
+                          <div className="font-medium text-[#1F1D1B]">{w?.name ?? a.workerId}</div>
+                          <div className="text-[10px] text-[#9CA3AF]">
+                            {w?.empNo ?? "-"}{w?.departmentCode ? ` - ${w.departmentCode.replace(/_/g, " ")}` : ""}
+                          </div>
+                        </td>
+                        <td className="h-11 px-3 text-right whitespace-nowrap tabular-nums">
+                          {editing ? (
+                            <MoneyInput
+                              value={editAmountRM}
+                              onChange={setEditAmountRM}
+                              className="h-8 w-28 rounded-md border border-[#E2DDD8] bg-white px-2 text-sm text-right tabular-nums focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                            />
+                          ) : (
+                            <span className="font-semibold text-[#9A3A2D]">{formatCurrency(a.amountSen)}</span>
+                          )}
+                        </td>
+                        <td className="h-11 px-3 text-[#6B7280]">
+                          {editing ? (
+                            <Input value={editNote} onChange={(e) => setEditNote(e.target.value)} className="h-8" />
+                          ) : (
+                            a.note || "-"
+                          )}
+                        </td>
+                        <td className="h-11 px-2 text-center">
+                          <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${settled ? "bg-[#E0EDF0] text-[#3E6570]" : "bg-gray-100 text-gray-700"}`}>
+                            {settled ? "SETTLED" : "UNSETTLED"}
+                          </span>
+                        </td>
+                        <td className="h-11 px-2 text-center whitespace-nowrap">
+                          {editing ? (
+                            <>
+                              <button onClick={saveEdit} disabled={saving} className="p-1 rounded hover:bg-[#F0ECE9] text-[#4F7C3A]" title="Save">
+                                <Save className="h-4 w-4" />
+                              </button>
+                              <button onClick={() => setEditingId(null)} className="p-1 rounded hover:bg-[#F0ECE9] text-[#6B7280]" title="Cancel">
+                                <X className="h-4 w-4" />
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button
+                                onClick={() => startEdit(a)}
+                                disabled={settled}
+                                className="p-1 rounded hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#6B5C32] disabled:opacity-30 disabled:cursor-not-allowed"
+                                title={settled ? "Settled — this month's payroll is approved. Un-approve it first." : "Edit"}
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </button>
+                              <button
+                                onClick={() => deleteAdvance(a)}
+                                disabled={settled}
+                                className="p-1 rounded hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#9A3A2D] disabled:opacity-30 disabled:cursor-not-allowed"
+                                title={settled ? "Settled — this month's payroll is approved. Un-approve it first." : "Delete"}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  <tr className="bg-[#F0ECE9] font-semibold">
+                    <td className="h-10 px-3"></td>
+                    <td className="h-10 px-3 text-[#1F1D1B]">TOTAL ({payoutRows.length} employee{payoutRows.length === 1 ? "" : "s"})</td>
+                    <td className="h-10 px-3 text-right text-[#9A3A2D] tabular-nums">{formatCurrency(grandTotalSen)}</td>
+                    <td className="h-10 px-3"></td>
+                    <td className="h-10 px-2"></td>
+                    <td className="h-10 px-2"></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 // ========== MAIN PAGE ==========
 
-type TabKey = "working-hours" | "attendance" | "labor-cost" | "employee-master" | "efficiency" | "department-labor" | "detail" | "department-performance" | "payroll" | "leave";
+type TabKey = "working-hours" | "attendance" | "labor-cost" | "employee-master" | "efficiency" | "department-labor" | "detail" | "department-performance" | "payroll" | "advances" | "leave";
 
 // Labor Cost tab is wedged between Working Hours and Payroll per spec — the
 // flow goes "what hours did people work" → "what did those hours cost vs the
@@ -10306,6 +10900,13 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
     key: "payroll",
     label: "Payroll",
     icon: <DollarSign className="h-4 w-4" />,
+  },
+  // Sits right after Payroll: an advance is payroll money paid early, and the
+  // Payroll tab's Advance column is where it comes back out.
+  {
+    key: "advances",
+    label: "Advances",
+    icon: <Download className="h-4 w-4" />,
   },
   // Wei Siang 2026-05-10: Leave Management hidden until rollout.
   // {
@@ -10935,6 +11536,10 @@ export default function EmployeesPage() {
 
       {activeTab === "payroll" && (
         <PayrollTab workers={workers} />
+      )}
+
+      {activeTab === "advances" && (
+        <AdvancesTab workers={workers} />
       )}
 
       {activeTab === "leave" && (

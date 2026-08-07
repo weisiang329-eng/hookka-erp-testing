@@ -36,6 +36,16 @@ import {
 import { loadPayRuleVersions } from "../lib/pay-rules-store";
 import { normalizePaymentMethod } from "../../lib/payment-method";
 import { ensurePaymentColumns } from "../lib/payment-columns";
+// Salary advances — cash already handed to the worker this month. Subtracted
+// AFTER the statutory block, never folded into it. See the reasoning header in
+// ../lib/employee-advances.ts.
+import {
+  ensureAdvanceTables,
+  loadPeriodAdvances,
+  markAdvancesSettled,
+  netPayAfterAdvanceSen,
+  totalAdvanceSen,
+} from "../lib/employee-advances";
 
 // Data-entry grace before an unrecorded working day is treated as a confirmed
 // absence. Spec (Wei Siang, 2026-06-02): the office keys Working Hours a few
@@ -112,6 +122,12 @@ type PayslipRow = {
   pcbSen: number;
   totalDeductionsSen: number;
   netPaySen: number;
+  // Salary advance recovered in this payslip (snake_case column
+  // advance_deduction_sen, so the driver hands it back camelCased; a row
+  // generated before the feature has 0). Stored rather than re-derived so
+  // deleting an advance later can never move an approved net pay.
+  advanceDeductionSen?: number | null;
+  advance_deduction_sen?: number | null;
   bankAccount: string;
   paymentMethod: string | null;
   bankName: string | null;
@@ -155,6 +171,10 @@ function rowToPayslip(r: PayslipRow) {
     pcb: r.pcbSen,
     totalDeductions: r.totalDeductionsSen,
     netPay: r.netPaySen,
+    // Dual-keyed: camelCase from the PG driver, snake_case from any path that
+    // hands the raw column through. Absent (legacy row) reads as 0.
+    advanceDeductionSen:
+      Number(r.advanceDeductionSen ?? r.advance_deduction_sen ?? 0) || 0,
     bankAccount: r.bankAccount,
     paymentMethod: normalizePaymentMethod(r.paymentMethod),
     bankName: r.bankName ?? "",
@@ -352,6 +372,10 @@ async function buildDayDetailForPeriod(
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
   await ensurePaymentColumns(c.var.DB);
+  // Awaited before the SELECT * below — without it, a database that predates
+  // the advance feature has no advance_deduction_sen and every row would read
+  // back a silent 0 that looks like "no advance taken".
+  await ensureAdvanceTables(c.var.DB);
   // RBAC gate (P3.3-followup) — payslips:read.
   const denied = await requirePermission(c, "payslips", "read");
   if (denied) return denied;
@@ -483,6 +507,7 @@ app.get("/projected", async (c) => {
   if (!period || !/^\d{4}-\d{2}$/.test(period)) {
     return c.json({ success: false, error: "Period (YYYY-MM) is required" }, 400);
   }
+  await ensureAdvanceTables(c.var.DB);
 
   // Same worker scope as POST: ACTIVE, plus RESIGNED in their final month.
   const wres = await c.var.DB.prepare(
@@ -567,6 +592,11 @@ app.get("/projected", async (c) => {
   const today = new Date();
   const absenceThroughDay = absenceCutoffDay(pYear, pMonth, today, statutoryRules.absenceGraceWorkingDays, publicHolidays);
   const periodLastIso = `${period}-${String(new Date(pYear, pMonth, 0).getDate()).padStart(2, "0")}`;
+
+  // Cash already handed out this month, per worker. Read from the SAME helper
+  // the month-end generation uses, so the in-progress estimate and the
+  // finalised payslip can never disagree about what is still owed.
+  const advancesByWorker = await loadPeriodAdvances(c.var.DB, period);
 
   // Month-cumulative efficiency per worker (job_cards production minutes ÷
   // production-dept working hours) — drives the efficiency allowance below.
@@ -662,6 +692,9 @@ app.get("/projected", async (c) => {
     }, statutoryRules);
     const grossPay = labor.payroll.grossSen + allowances;
     const totalDeductions = stat.epfEmployee + stat.socsoEmployee + stat.eisEmployee + stat.pcb;
+    // Advances are NOT added to totalDeductions — that figure is the statutory
+    // total the payslip and every YTD reads. They come off after it.
+    const advanceSen = totalAdvanceSen(advancesByWorker.get(worker.id));
     const hourlyRate =
       worker.workingHoursPerDay > 0
         ? Math.round(labor.payrollDailyRateSen / worker.workingHoursPerDay)
@@ -699,7 +732,8 @@ app.get("/projected", async (c) => {
       eisEmployer: stat.eisEmployer,
       pcb: stat.pcb,
       totalDeductions,
-      netPay: grossPay - totalDeductions,
+      netPay: netPayAfterAdvanceSen(grossPay, totalDeductions, advanceSen),
+      advanceDeductionSen: advanceSen,
       bankAccount: worker.bankAccount ?? "",
       paymentMethod: normalizePaymentMethod(worker.paymentMethod),
       bankName: worker.bankName ?? "",
@@ -730,8 +764,11 @@ app.post("/", async (c) => {
   const denied = await requirePermission(c, "payslips", "create");
   if (denied) return denied;
   // Migrations are inert on deploy — the payment columns exist only because
-  // this runs and is AWAITED before the first write below.
+  // this runs and is AWAITED before the first write below. Same for the
+  // advance table + payslips.advance_deduction_sen: the INSERT further down
+  // binds that column, so the DDL has to have landed first.
   await ensurePaymentColumns(c.var.DB);
+  await ensureAdvanceTables(c.var.DB);
   try {
     const body = await c.req.json();
     const { period, regenerate } = body;
@@ -907,6 +944,11 @@ app.post("/", async (c) => {
     // Last calendar day of the period, as YYYY-MM-DD, for join-date comparison.
     const periodLastIso = `${period}-${String(new Date(pYear, pMonth, 0).getDate()).padStart(2, "0")}`;
 
+    // Cash handed out during the period, per worker — recovered from net pay
+    // below. Same helper as /projected so the finalised figure equals the
+    // estimate the screen was showing a moment earlier.
+    const advancesByWorker = await loadPeriodAdvances(c.var.DB, period);
+
     // Month-cumulative efficiency per worker — the basis for the efficiency
     // allowance written into each generated payslip's allowancesSen.
     const effBounds = monthBounds(period);
@@ -1007,7 +1049,14 @@ app.post("/", async (c) => {
       const grossPay = labor.payroll.grossSen + allowances;
       const totalDeductions =
         stat.epfEmployee + stat.socsoEmployee + stat.eisEmployee + stat.pcb;
-      const netPay = grossPay - totalDeductions;
+      // Salary advances taken during the period. Deliberately OUTSIDE
+      // totalDeductions (which is the statutory total the payslip, the YTD
+      // block and every statutory report read) — the advance is money already
+      // paid against this same gross, so it only reduces what is still handed
+      // over. Snapshotted onto the row so a later edit to the advance cannot
+      // move an approved net pay.
+      const advanceSen = totalAdvanceSen(advancesByWorker.get(worker.id));
+      const netPay = netPayAfterAdvanceSen(grossPay, totalDeductions, advanceSen);
       // Where the money actually goes. This used to be
       //   `CIMB-${empNo}XXXX`
       // — a placeholder MANUFACTURED from the employee number, printed on every
@@ -1042,7 +1091,8 @@ app.post("/", async (c) => {
            hourlyRateSen, otWeekdayAmtSen, otSundayAmtSen, otPhAmtSen, totalOtSen,
            allowancesSen, grossPaySen, epfEmployeeSen, epfEmployerSen,
            socsoEmployeeSen, socsoEmployerSen, eisEmployeeSen, eisEmployerSen, pcbSen,
-           totalDeductionsSen, netPaySen, bankAccount, paymentMethod, bankName, status
+           totalDeductionsSen, netPaySen, advance_deduction_sen,
+           bankAccount, paymentMethod, bankName, status
          ) VALUES (
            ?, ?, ?, ?, ?, ?,
            ?, ?, ?, ?,
@@ -1050,7 +1100,8 @@ app.post("/", async (c) => {
            ?, ?, ?, ?, ?,
            ?, ?, ?, ?,
            ?, ?, ?, ?, ?,
-           ?, ?, ?, ?, ?, 'DRAFT'
+           ?, ?, ?,
+           ?, ?, ?, 'DRAFT'
          )`,
       )
         .bind(
@@ -1083,6 +1134,7 @@ app.post("/", async (c) => {
           stat.pcb,
           totalDeductions,
           netPay,
+          advanceSen,
           bankAccount,
           paymentMethod,
           bankName,
@@ -1147,6 +1199,20 @@ app.put("/", async (c) => {
     )
       .bind(status, period)
       .run();
+    // Approving (or paying) a month makes its advances a signed-off fact —
+    // lock them. Putting it back to DRAFT hands them back to the office. This
+    // is what "editable and deletable while unsettled" actually keys on.
+    // Best-effort: a failure here must not fault the approval the operator
+    // asked for, and the next flip re-applies it (the UPDATE is idempotent).
+    try {
+      await ensureAdvanceTables(c.var.DB);
+      await markAdvancesSettled(c.var.DB, period, status !== "DRAFT");
+    } catch (e) {
+      // The catch below reports EVERYTHING as "Invalid request body" (400).
+      // Letting a DDL hiccup fall through there would tell the operator their
+      // successful approval failed. Swallow it here instead.
+      console.warn("[payslips] advance settle skipped:", e);
+    }
     return c.json({ success: true, updated: res.meta?.changes ?? 0 });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
@@ -1252,6 +1318,21 @@ app.get("/:id", async (c) => {
     absenceDeductionSen = absenceDeductionSen || 0;
   }
 
+  // Which days the worker drew an advance on. Same reason as the absence dates
+  // above: a slip that says "less advances RM 300" and nothing else is not
+  // checkable by the person holding it. Display only — the money is the stored
+  // advanceDeductionSen, never re-derived here.
+  const advanceDays: Array<{ date: string; amountSen: number; note: string }> = [];
+  try {
+    const list = (await loadPeriodAdvances(c.var.DB, payslip.period)).get(
+      payslip.employeeId,
+    );
+    for (const a of list ?? [])
+      advanceDays.push({ date: a.date, amountSen: a.amountSen, note: a.note });
+  } catch (e) {
+    console.warn("[payslips/:id] advance detail skipped:", e);
+  }
+
   return c.json({
     success: true,
     data: {
@@ -1262,6 +1343,7 @@ app.get("/:id", async (c) => {
       lateDays,
       absenceDeductionSen,
       shortHourDeductionSen,
+      advanceDays,
     },
     ytd,
     monthsIncluded: employeeSlips.length,

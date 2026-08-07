@@ -16,6 +16,7 @@ Owns the whole workforce lifecycle: the **employee master** (workers + effective
   - Working-hour entries (efficiency source) → `src/api/routes/working-hour-entries.ts` (1628)
   - Payroll run header → `src/api/routes/payroll.ts` (308); payslip generate/read → `src/api/routes/payslips.ts` (1095)
   - Short-hour docks → `src/api/routes/payroll-hour-deductions.ts` (407)
+  - Salary advances → `src/api/routes/employee-advances.ts` (CRUD + `GET /payout-listing`); the maths, the runtime self-apply and the payroll hook live in `src/api/lib/employee-advances.ts`
   - Admin attendance → `src/api/routes/attendance.ts` (379); departments → `src/api/routes/departments.ts` (373)
   - Read-only aggregate → `src/api/routes/department-performance.ts` (680); leaves → `src/api/routes/leaves.ts` (243)
 - **Engine libs**
@@ -29,6 +30,7 @@ Owns the whole workforce lifecycle: the **employee master** (workers + effective
 - `working_hour_entries` — per-worker per-day production minutes by department (efficiency numerator/denominator source).
 - `attendance_records` — admin-side attendance (punch photos, dept breakdown JSON).
 - `payroll_records` / `payroll_payslips` — generated payslip rows per period; `payroll_hour_deductions` (mig 0152) = short-hour docks.
+- `employee_advances` (mig 0211, runtime self-applied by `ensureAdvanceTables`) — one row per cash advance: `worker_id`, `advance_date` (the day the cash was handed over — THIS is what puts it in a pay period), `amount_sen`, `note`, `entered_by`, `status` UNSETTLED|SETTLED. `payslips.advance_deduction_sen` snapshots what each generated payslip recovered.
 - `departments` — department master (`isProduction` flag gates the efficiency denominator); `leaves`, `worker_issues`, `public_holidays` (via `kv_config['public_holidays']`).
 
 ## Core flows
@@ -66,6 +68,7 @@ Owns the whole workforce lifecycle: the **employee master** (workers + effective
 | `POST /auto-from-punch` / `settle-period` | `src/api/routes/payroll-hour-deductions.ts:149 / 211` | Short-hour docks |
 
 ## Gotchas
+- **A salary advance is neither an earning nor a statutory deduction.** `netPay = gross − totalDeductions − advance`, and `totalDeductionsSen` stays statutory-only — folding advances into it would inflate every YTD and statutory report. The advance is subtracted AFTER the statutory block, in both `payslips.ts POST /` and `GET /projected` (one shared helper, so the finalised slip and the estimate cannot disagree). Net pay is deliberately NOT clamped at zero: drawing more than the month earns shows a negative net pay (a debt) rather than silently writing the difference off. Approving a period settles its advances (locking edit/delete); reverting to DRAFT unlocks them.
 - **Two divisors, both in `labor-engine.ts`, never revert either.** Pay side = ÷26 (`workingDaysPerMonth`) for absence, late/short docks, OT base; hourly = ÷26 ÷ the worker's DAY SPAN (daily hours + lunch, e.g. 9h→÷10). Cost side = ÷ ACTUAL Mon–Sat working days minus holidays (`countElapsedWorkingDays:123` → `costingDailyRateSen:647`). NEVER revert to fixed-26 or ÷calendar. (Note: `src/lib/costing.ts` is a *different* rate — per-minute product costing, not the payroll divisor.)
 - **Day-typed OT must stay byte-identical for weekday-only.** OT splits weekday(1.5×)/Sunday(2×)/holiday(3×) inline in `computeMonthlyLabor` (`:556–580`); premium routes to the dept line, not Overhead. Holidays from `kv_config['public_holidays']`.
 - **Three screens reconcile to the sen.** Payroll / Dept Labor / Labor Cost tie out via `roundSen` + `distributeRoundSen` (largest-remainder, `src/lib/utils.ts`); leftover sen → largest-fraction dept. Don't add per-screen ad-hoc plugs.

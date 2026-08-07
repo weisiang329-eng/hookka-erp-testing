@@ -9,6 +9,32 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-07 — 🔵 员工 Salary Advance（记录 → 扣薪 → HR 出钱 listing）· staging
+
+Owner：「员工他们一直在拿 advance，有没有可能在 employee 这边，我可以输入他们拿
+advance 的金额和日期？… 一个是在 net pay、total pay 里面扣，另一个可能是可以导出
+一个我要出钱的 listing 给到我的 HR。」
+
+三件事，做完在 `staging`（feature，未 push、未合 main）：
+
+1. **记录**：新增 `employee_advances`（snake_case，runtime self-apply 在
+   `src/api/lib/employee-advances.ts`，migration 0211 只是纪录）。金额存整数 sen，
+   日期就是拿钱那天 —— **属于哪个月由日期决定**，没有另一个「套用月份」栏位。
+   `status=UNSETTLED` 时可改可删；该月薪资 APPROVED 后自动 `SETTLED` 上锁
+   （改/删回 409），退回 DRAFT 会解锁。
+2. **扣薪**：`netPay = gross − 法定 − advance`。**advance 不进 `totalDeductions`**
+   —— 那是法定合计，会污染 YTD 和每一张法定报表。生成时把当月 advance 写进
+   `payslips.advance_deduction_sen` 快照，之后再改 advance 也不会动到已核准的净薪。
+   Payroll 页新增 Advance 栏、Total Pay 改成「还要付出去的钱」（扣掉已发的 advance）。
+   已生成後又新增 advance → 页面出红色提示叫人 Regenerate，不会两个数字对不上。
+3. **Listing**：Employees 新增 **Advances** 分页 —— 录入表单 + 当月清单 +
+   「Export Payout Listing」CSV / Print Report（每位员工一列：日期、笔数、合计 + 总计）。
+
+⚠️ **待 owner 确认**：某人当月 advance 超过应领时，净薪会是**负数**（表示欠公司），
+没有自动 carry forward 到下个月。夹到 0 会把差额悄悄抹掉，所以先照实显示。
+
+---
+
 ## 2026-08-02 — ✅ 考勤规则以 HR 为准（owner 逐条确认）· ⚠️ 我删掉又重建了 7 月
 
 ### 确认后的规则（**owner 2026-08-02 逐条点头，不要再改**）

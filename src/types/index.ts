@@ -1577,7 +1577,9 @@ export type GoodsReceiptNote = {
   // PO then supplier on create, overridable per receipt.
   purchaseOrgCode?: string;
   qcStatus: "PENDING" | "PASSED" | "PARTIAL" | "FAILED";
-  status: "DRAFT" | "CONFIRMED" | "POSTED";
+  // CANCELLED = the receipt was reversed (stock returned, PO quantity
+  // released) via POST /api/grn/:id/cancel. Terminal and read-only.
+  status: "DRAFT" | "CONFIRMED" | "POSTED" | "CANCELLED";
   notes: string;
   // Arrival pipeline
   arrival_state: ArrivalState;

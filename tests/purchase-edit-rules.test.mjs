@@ -25,6 +25,10 @@ const {
   isPiEditable,
   piEditBlockedError,
   isGrnLineEditable,
+  isGrnLineLockedByPi,
+  isGrnFullyLockedByDownstreamPi,
+  countGrnLinesLockedByPi,
+  grnLineInvoicedQty,
   checkGrnLineQtyEdit,
   describeGrnStockDelta,
 } = await import(
@@ -74,16 +78,61 @@ test("GRN qty edit: a no-op (same qty) is allowed with delta 0", () => {
   assert.deepEqual(r, { ok: true, delta: 0 });
 });
 
-test("GRN qty edit: can reduce DOWN TO the already-invoiced qty but no lower", () => {
-  // 5 invoiced; reducing accepted to exactly 5 is fine (delta −1 from 6).
+test("GRN qty edit: an invoiced LINE is frozen in both directions", () => {
+  // The lock is per line, and a billed line does not move at all — an UP edit
+  // would leave the invoice sitting on a stale qty/price just as a DOWN edit
+  // would leave it claiming goods the receipt no longer records.
+  const down = checkGrnLineQtyEdit({ ref: "Foam", oldAcceptedQty: 6, newAcceptedQty: 5, invoicedQty: 5 });
+  assert.equal(down.ok, false);
+  assert.match(down.error, /billed on a purchase invoice/);
+  assert.match(down.error, /other lines on this receipt can still be corrected/);
+
+  const up = checkGrnLineQtyEdit({ ref: "Foam", oldAcceptedQty: 6, newAcceptedQty: 9, invoicedQty: 5 });
+  assert.equal(up.ok, false);
+  assert.match(up.error, /billed on a purchase invoice/);
+
+  // Reducing BELOW the invoiced qty keeps its own, more specific message —
+  // that is the mistake operators actually make.
+  const below = checkGrnLineQtyEdit({ ref: "Foam", oldAcceptedQty: 6, newAcceptedQty: 4, invoicedQty: 5 });
+  assert.equal(below.ok, false);
+  assert.match(below.error, /already been invoiced/);
+});
+
+test("GRN qty edit: an UN-invoiced line moves freely even when a sibling is billed", () => {
+  // Defect B: one billed line used to lock the whole document. The rule is per
+  // line, so this untouched line's own invoicedQty (0) is all that matters.
   assert.deepEqual(
-    checkGrnLineQtyEdit({ ref: "Foam", oldAcceptedQty: 6, newAcceptedQty: 5, invoicedQty: 5 }),
-    { ok: true, delta: -1 },
+    checkGrnLineQtyEdit({ ref: "Wood", oldAcceptedQty: 4, newAcceptedQty: 7, invoicedQty: 0 }),
+    { ok: true, delta: 3 },
   );
-  // reducing below 5 (the invoiced qty) is BLOCKED.
-  const r = checkGrnLineQtyEdit({ ref: "Foam", oldAcceptedQty: 6, newAcceptedQty: 4, invoicedQty: 5 });
-  assert.equal(r.ok, false);
-  assert.match(r.error, /already been invoiced/);
+});
+
+// ── per-line downstream-PI lock helpers ─────────────────────────────────────
+test("the PI lock is per LINE, not per document", () => {
+  const items = [
+    { invoicedQty: 3 }, // billed
+    { invoicedQty: 0 }, // free
+    { invoiced_qty: 0 }, // free (snake_case read)
+  ];
+  assert.equal(isGrnLineLockedByPi(items[0]), true);
+  assert.equal(isGrnLineLockedByPi(items[1]), false);
+  assert.equal(isGrnLineLockedByPi(items[2]), false);
+  assert.equal(countGrnLinesLockedByPi(items), 1);
+  // One billed line must NOT lock the receipt — that was the defect.
+  assert.equal(isGrnFullyLockedByDownstreamPi(items), false);
+});
+
+test("only an entirely-invoiced GRN is locked as a document", () => {
+  assert.equal(isGrnFullyLockedByDownstreamPi([{ invoicedQty: 2 }, { invoiced_qty: 5 }]), true);
+  // An empty receipt has nothing billed, so it is not "fully locked".
+  assert.equal(isGrnFullyLockedByDownstreamPi([]), false);
+});
+
+test("invoiced qty reads dual-keyed and defaults to 0", () => {
+  assert.equal(grnLineInvoicedQty({ invoicedQty: 4 }), 4);
+  assert.equal(grnLineInvoicedQty({ invoiced_qty: 4 }), 4);
+  assert.equal(grnLineInvoicedQty({}), 0);
+  assert.equal(grnLineInvoicedQty({ invoicedQty: null }), 0);
 });
 
 test("GRN qty edit: a negative target is rejected", () => {

@@ -28,7 +28,12 @@ import { makeLedgerEntry } from "../../lib/costing";
 import { emitAudit } from "../lib/audit";
 import { learnSupplierBindings } from "../lib/supplier-binding-learn";
 import { availableQty as computeAvailableQty, clampDecrement } from "../../lib/convert-chain";
-import { checkGrnLineQtyEdit, isGrnLockedByDownstreamPi, grnLockedByDownstreamPiError } from "../../lib/purchase-edit-rules";
+import {
+  checkGrnLineQtyEdit,
+  isGrnFullyLockedByDownstreamPi,
+  grnLockedByDownstreamPiError,
+  grnLineInvoicedQty,
+} from "../../lib/purchase-edit-rules";
 import { PO_ITEMS_ORDER, ensurePoItemLineNo } from "./purchase-orders";
 
 const app = new Hono<Env>();
@@ -97,6 +102,45 @@ function ensureGrnMigrations(db: D1Database): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Cancel-a-receipt schema (owner: a conversion must never lock permanently).
+//
+// A POSTED GRN used to be immortal — un-post 409s, delete 409s, and the UI
+// exposed no way out at all. A receipt keyed against the WRONG purchase order
+// therefore consumed that PO line's receivedQty forever. CANCELLED is the way
+// out: it reverses what posting did and hands the PO line back.
+//
+// Kept OUT of ensureGrnMigrations deliberately. That block runs through
+// runSelfApply, which THROWS on an unexpected failure so the caller's memo can
+// be cleared — right for ADD COLUMN, wrong for a CHECK constraint swap, where
+// one legacy row holding an unlisted status would make ADD CONSTRAINT throw and
+// take every GRN write down with it (exactly the PI-status incident recorded in
+// ensure-partial-payment.ts). Each statement is therefore individually
+// try/caught: worst case the constraint is simply absent, which still ACCEPTS
+// 'CANCELLED'. Same drop-then-re-add shape as PI_STATUS_CHECK_SQL, including
+// both constraint names Postgres may have generated.
+// ---------------------------------------------------------------------------
+let grnCancelSchemaEnsured = false;
+async function ensureGrnCancelSchema(db: D1Database): Promise<void> {
+  if (grnCancelSchemaEnsured) return;
+  for (const sql of [
+    "ALTER TABLE grns ADD COLUMN IF NOT EXISTS cancelled_at TEXT",
+    "ALTER TABLE grns ADD COLUMN IF NOT EXISTS cancelled_reason TEXT",
+    "ALTER TABLE grns DROP CONSTRAINT IF EXISTS grns_status_check",
+    "ALTER TABLE grns DROP CONSTRAINT IF EXISTS grns_status_chk",
+    "ALTER TABLE grns DROP CONSTRAINT IF EXISTS grns_status_chk_v2",
+    "ALTER TABLE grns ADD CONSTRAINT grns_status_chk_v2 " +
+      "CHECK (status IN ('DRAFT','CONFIRMED','POSTED','CANCELLED'))",
+  ]) {
+    try {
+      await db.prepare(sql).run();
+    } catch (err) {
+      console.warn("[grn] cancel self-apply:", sql, err);
+    }
+  }
+  grnCancelSchemaEnsured = true;
+}
+
+// ---------------------------------------------------------------------------
 // Arrival state machine
 // ---------------------------------------------------------------------------
 export const VALID_ARRIVAL_TRANSITIONS: Record<string, string[]> = {
@@ -143,6 +187,11 @@ type GRNRow = {
   // Per-document purchase company override; nullable until ensureGrnMigrations
   // backfills legacy rows to HOOKKA.
   purchase_org_code: string | null;
+  // Cancellation audit (ensureGrnCancelSchema); dual-keyed on read.
+  cancelled_at?: string | null;
+  cancelled_reason?: string | null;
+  cancelledAt?: string | null;
+  cancelledReason?: string | null;
   supplierDoNo?: string | null;
   // toCamel folds the snake_case DB columns to camelCase on read — dual-key
   // the reads below so the stored arrival/shipment/cost values are recovered.
@@ -314,7 +363,9 @@ function rowToGRN(row: GRNRow, items: GRNItemRow[] = []) {
       | "PASSED"
       | "PARTIAL"
       | "FAILED",
-    status: (row.status ?? "DRAFT") as "DRAFT" | "CONFIRMED" | "POSTED",
+    status: (row.status ?? "DRAFT") as "DRAFT" | "CONFIRMED" | "POSTED" | "CANCELLED",
+    cancelled_at: row.cancelledAt ?? row.cancelled_at ?? null,
+    cancelled_reason: row.cancelledReason ?? row.cancelled_reason ?? null,
     // Arrival pipeline
     arrival_state: deriveArrivalState(row),
     shipping_method: row.shippingMethod ?? row.shipping_method ?? null,
@@ -1730,16 +1781,34 @@ app.put("/:id", async (c) => {
         ? body.purchaseOrgCode.trim()
         : existingOrgCode || "HOOKKA";
 
-    // ── Lock POSTED (received) GRNs from un-posting ──────────────────────
-    // Owner ruling 2026-06-21 (option A): once a GRN is POSTED its stock is in
-    // (rm_batches/cost_ledger/balanceQty). It must NOT be un-posted/cancelled by
-    // a status change — that would free the PO line while the stock stays, a
-    // double-count hole. To undo a receipt, do a deliberate stock adjustment.
+    // ── A CANCELLED receipt is a historical record ───────────────────────
+    // Cancelling already reversed the stock and handed the PO line back, so
+    // nothing may be edited or resurrected through this PUT — an un-cancel
+    // would re-consume the PO line without re-posting the stock. Checked
+    // BEFORE the items branch, whose pre-commit path would otherwise happily
+    // rewrite the lines of a cancelled document.
+    if (prevStatus === "CANCELLED") {
+      return c.json(
+        {
+          success: false,
+          error: `This goods receipt is CANCELLED — its stock has been reversed and the PO quantity released. Create a new receipt instead of editing this one.`,
+        },
+        409,
+      );
+    }
+
+    // ── Un-posting is not a status flip; it is Cancel Receipt ────────────
+    // Owner ruling 2026-06-21 (option A): a bare status change must not take a
+    // GRN out of POSTED — that would free the PO line while the stock stays,
+    // a double-count hole. The escape hatch is the dedicated
+    // POST /:id/cancel below, which reverses stock and restores the PO in one
+    // guarded transaction. This 409 now points at it instead of at a manual
+    // stock adjustment.
     if (prevStatus === "POSTED" && newStatus !== "POSTED") {
       return c.json(
         {
           success: false,
-          error: "This GRN is already received into stock — it can't be un-posted. Reverse it with a stock adjustment instead.",
+          error: "This GRN is already received into stock — its status can't be changed here. Use Cancel Receipt, which reverses the posted stock and releases the PO quantity.",
         },
         409,
       );
@@ -1794,10 +1863,14 @@ app.put("/:id", async (c) => {
           .bind(id)
           .all<GRNItemRow>();
         const existingItems = existingItemsRes.results ?? [];
-        // Owner ruling 2026-06-29 (evening): once a PI has billed off any
-        // line on this GRN, the entire GRN is locked. Delete the linked PI
-        // first to unlock — see isGrnLockedByDownstreamPi.
-        if (isGrnLockedByDownstreamPi(existingItems)) {
+        // The downstream-PI lock is PER LINE (owner: "这种转换不是整张单锁死的").
+        // Billing one line of a ten-line receipt used to freeze the whole
+        // document; now only the invoiced lines are frozen — enforced inside
+        // the per-line loop by checkGrnLineQtyEdit. The only document-level
+        // refusal left is the degenerate case where EVERY line is invoiced,
+        // where there is nothing correctable at all and a single clear message
+        // beats N per-line ones.
+        if (isGrnFullyLockedByDownstreamPi(existingItems)) {
           return c.json(
             { success: false, error: grnLockedByDownstreamPiError() },
             409,
@@ -1828,7 +1901,10 @@ app.put("/:id", async (c) => {
           const incoming = rawItems[i];
           const oldAccepted = Number(ex.acceptedQty) || 0;
           const newAccepted = Number(incoming.acceptedQty);
-          const invoiced = Number(ex.invoicedQty ?? ex.invoiced_qty ?? 0) || 0;
+          // One formula for "how much of this line is already billed" — the
+          // same helper the FE and the cancel guard use, so the per-line lock
+          // can't drift between them.
+          const invoiced = grnLineInvoicedQty(ex);
           const guard = checkGrnLineQtyEdit({
             ref: ex.materialName ?? ex.materialCode ?? `Line ${i + 1}`,
             oldAcceptedQty: oldAccepted,
@@ -2149,6 +2225,229 @@ app.put("/:id/arrival", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/grn/:id/cancel — kill a receipt and give back everything it took.
+//
+// The gap this closes: a POSTED GRN was immortal. Un-post 409'd, delete 409'd,
+// and no UI exposed either — so a receipt keyed against the WRONG purchase
+// order consumed that PO line's receivedQty permanently, and local goods-in-
+// hand are BORN posted, which made that the common case. Editing every line
+// down to 0 was the only escape.
+//
+// What it reverses, and why exactly this much:
+//
+//   • purchase_order_items.receivedQty — via restorePOReceivedQtyForGRN, the
+//     SAME helper delete/un-post already use (it clamps, tracks the running
+//     figure so two lines against one PO line can't over-restore, and
+//     recomputes status for EVERY purchase order the receipt touched). No
+//     third restore path.
+//
+//   • the perpetual stock postGRNToStock wrote — one rm_batches lot and a
+//     raw_materials.balanceQty bump per line. The lot rows are the record of
+//     what actually landed (a line whose material didn't resolve never got
+//     one, and a later qty edit moved originalQty in step with balanceQty), so
+//     the reversal is driven off the LOTS, not off the lines: whatever posting
+//     put in is what comes out. Each lot's qty is subtracted from balanceQty
+//     with the same signed `balanceQty + ?` statement the post and edit paths
+//     use, and the lot row is removed.
+//
+//   • the COST side needs no ledger entry, and writing one would be a bug.
+//     The FIFO/P&L engine sources GRN receipts from
+//     `grn_items JOIN grns … WHERE g.status IN ('CONFIRMED','POSTED')`
+//     (accounting.ts loadMaterialCostData) and reads cost_ledger only for
+//     RM_ISSUE / ADJUSTMENT. Flipping the status to CANCELLED therefore
+//     removes the receipt from the replay by itself; appending an ADJUSTMENT
+//     OUT on top would reduce material cost TWICE. The original RM_RECEIPT
+//     leg stays untouched — the ledger is append-only.
+//
+// Two refusals, because a partial reversal is worse than none:
+//
+//   • a live purchase invoice still drawing on these lines (invoiced_qty > 0
+//     on a non-CANCELLED PI). Void the PI first — that path already restores
+//     invoiced_qty correctly — then cancel.
+//   • any of this receipt's lots has been CONSUMED (remainingQty <
+//     originalQty): the goods are already issued into production or returned.
+//     There is nothing safe to hand back, so we refuse and name the material
+//     rather than guessing and corrupting inventory.
+// ---------------------------------------------------------------------------
+app.post("/:id/cancel", async (c) => {
+  // Cancelling destroys a receipt — gate it with delete, not update.
+  const denied = await requirePermission(c, "grn", "delete");
+  if (denied) return denied;
+
+  await ensureGrnMigrations(c.var.DB);
+  // MUST be awaited before the status write — 'CANCELLED' has to be accepted
+  // by the status CHECK, and cancelled_at/cancelled_reason have to exist.
+  await ensureGrnCancelSchema(c.var.DB);
+
+  const id = c.req.param("id");
+  try {
+    const existing = await c.var.DB.prepare("SELECT * FROM grns WHERE id = ?")
+      .bind(id)
+      .first<GRNRow>();
+    if (!existing) {
+      return c.json({ success: false, error: "GRN not found" }, 404);
+    }
+    const prevStatus = (existing.status ?? "DRAFT").toUpperCase();
+    if (prevStatus === "CANCELLED") {
+      return c.json(
+        { success: false, error: "This goods receipt is already cancelled." },
+        409,
+      );
+    }
+
+    const body = await c.req.json().catch(() => ({}) as Record<string, unknown>);
+    const reason =
+      typeof body?.reason === "string" && body.reason.trim()
+        ? body.reason.trim()
+        : null;
+
+    // ── Refusal 1: a live purchase invoice is still drawing on these lines ──
+    const itemsRes = await c.var.DB
+      .prepare("SELECT * FROM grn_items WHERE grnId = ? ORDER BY id ASC")
+      .bind(id)
+      .all<GRNItemRow>();
+    const items = itemsRes.results ?? [];
+    const invoicedLines = items.filter((it) => grnLineInvoicedQty(it) > 0);
+    const linkedPi = await c.var.DB.prepare(
+      "SELECT piNo FROM purchase_invoices WHERE grn_id = ? AND status != 'CANCELLED' LIMIT 1",
+    )
+      .bind(id)
+      .first<{ piNo: string }>();
+    if (invoicedLines.length > 0 || linkedPi) {
+      const named = linkedPi ? ` (${linkedPi.piNo})` : "";
+      const qtys = invoicedLines
+        .map((it) => `${it.materialName || it.materialCode || "line"} × ${grnLineInvoicedQty(it)}`)
+        .join(", ");
+      return c.json(
+        {
+          success: false,
+          error:
+            `This goods receipt is still billed on a purchase invoice${named}` +
+            (qtys ? ` — ${qtys} invoiced` : "") +
+            ". Void that invoice first: voiding it returns the invoiced quantity to this receipt, and then it can be cancelled.",
+        },
+        409,
+      );
+    }
+
+    // ── Refusal 2: the posted stock has already moved on ────────────────────
+    // Every lot this receipt created, exactly as postGRNToStock wrote them.
+    const batchesRes = await c.var.DB
+      .prepare(
+        "SELECT id, rmId, originalQty, remainingQty, unitCostSen FROM rm_batches WHERE source = 'GRN' AND sourceRefId = ?",
+      )
+      .bind(id)
+      .all<{
+        id: string;
+        rmId: string;
+        originalQty: number | null;
+        remainingQty: number | null;
+        unitCostSen: number | null;
+      }>();
+    const batches = batchesRes.results ?? [];
+    const consumed = batches.filter(
+      (b) => (Number(b.remainingQty) || 0) < (Number(b.originalQty) || 0),
+    );
+    if (consumed.length > 0) {
+      // Name the materials so the operator can see WHAT was used. A partial
+      // un-receive would leave balanceQty and the FIFO lots disagreeing.
+      const rmIds = [...new Set(consumed.map((b) => b.rmId).filter(Boolean))];
+      const nameById = new Map<string, string>();
+      if (rmIds.length > 0) {
+        const ph = rmIds.map(() => "?").join(",");
+        const rmRes = await c.var.DB
+          .prepare(`SELECT id, itemCode, description FROM raw_materials WHERE id IN (${ph})`)
+          .bind(...rmIds)
+          .all<{ id: string; itemCode: string | null; description: string | null }>();
+        for (const r of rmRes.results ?? []) {
+          nameById.set(r.id, r.itemCode || r.description || r.id);
+        }
+      }
+      const detail = consumed
+        .map((b) => {
+          const used = (Number(b.originalQty) || 0) - (Number(b.remainingQty) || 0);
+          return `${nameById.get(b.rmId) ?? b.rmId} (${used} already used)`;
+        })
+        .join(", ");
+      return c.json(
+        {
+          success: false,
+          error:
+            `Stock received on this GRN has already been issued or returned — ${detail}. ` +
+            "It can't be cancelled without leaving inventory wrong. Correct it with a purchase return or a stock adjustment instead.",
+        },
+        409,
+      );
+    }
+
+    // ── Reverse the perpetual stock ─────────────────────────────────────────
+    const reversedStock: { rmId: string; qty: number }[] = [];
+    const statements: D1PreparedStatement[] = [];
+    for (const b of batches) {
+      const qty = Number(b.originalQty) || 0;
+      if (qty > 0 && b.rmId) {
+        // Signed bump — the exact statement shape postGRNToStock and
+        // buildPostedGRNStockAdjustment use, so all three agree on how on-hand
+        // moves (and the SQL translator only has to know one form).
+        statements.push(
+          c.var.DB
+            .prepare("UPDATE raw_materials SET balanceQty = balanceQty + ? WHERE id = ?")
+            .bind(-qty, b.rmId),
+        );
+        reversedStock.push({ rmId: b.rmId, qty });
+      }
+      // The lot is provably untouched (guarded above), so nothing FIFO-consumed
+      // it and no RM_ISSUE references it — remove it rather than leaving a
+      // zero-qty ghost in the FIFO queue and the inventory drill-down.
+      statements.push(
+        c.var.DB.prepare("DELETE FROM rm_batches WHERE id = ?").bind(b.id),
+      );
+    }
+    if (statements.length > 0) {
+      await c.var.DB.batch(statements);
+    }
+
+    // ── Give the PO its quantity back (shared helper, not a third path) ─────
+    // Runs while grn_items is still intact — resolveGrnLineTargets reads it.
+    let restoreSummary: { poId: string | null; restored: unknown[] } | undefined;
+    if (COMMITTED_STATUSES.has(prevStatus)) {
+      restoreSummary = await restorePOReceivedQtyForGRN(c.var.DB, id);
+    }
+
+    const nowIso = new Date().toISOString();
+    await c.var.DB
+      .prepare(
+        "UPDATE grns SET status = 'CANCELLED', cancelled_at = ?, cancelled_reason = ? WHERE id = ?",
+      )
+      .bind(nowIso, reason, id)
+      .run();
+
+    const updated = await fetchGRN(c.var.DB, id);
+    await emitAudit(c, {
+      resource: "grn",
+      resourceId: id,
+      action: "cancel",
+      before: rowToGRN(existing, items),
+      after: updated,
+    });
+
+    return c.json({
+      success: true,
+      data: updated,
+      restore: restoreSummary,
+      stockReversal: {
+        batchesRemoved: batches.length,
+        lines: reversedStock,
+      },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[POST /api/grn/:id/cancel] failed:", msg, err);
+    return c.json({ success: false, error: msg || "Internal error cancelling GRN" }, 500);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // DELETE /api/grn/:id — delete a GRN and RESTORE the parent PO's per-line
 // availability.
 //
@@ -2178,14 +2477,17 @@ app.delete("/:id", async (c) => {
       return c.json({ success: false, error: "GRN not found" }, 404);
     }
 
-    // Owner ruling 2026-06-21 (option A): a POSTED (received) GRN is locked —
-    // deleting it would free the PO line while the posted stock stays (a
-    // double-count hole). Undo a receipt with a stock adjustment, not by delete.
+    // Owner ruling 2026-06-21 (option A): a POSTED (received) GRN is not
+    // deletable — a plain delete would free the PO line while the posted stock
+    // stays, a double-count hole. Cancel Receipt (POST /:id/cancel) is the
+    // supported way out: it reverses the stock AND restores the PO, and leaves
+    // a CANCELLED row, which IS deletable afterwards (it no longer holds any
+    // stock or PO quantity, so the restore below correctly skips it).
     if ((existing.status ?? "DRAFT") === "POSTED") {
       return c.json(
         {
           success: false,
-          error: "This GRN is already received into stock — it can't be deleted. Reverse it with a stock adjustment instead.",
+          error: "This GRN is already received into stock — it can't be deleted directly. Cancel Receipt first: that reverses the posted stock and releases the PO quantity.",
         },
         409,
       );

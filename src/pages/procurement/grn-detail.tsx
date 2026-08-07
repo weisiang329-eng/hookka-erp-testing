@@ -19,7 +19,7 @@ import { useState, useMemo } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
 import {
   ArrowLeft, FileText, Package, CheckCircle2, PackageCheck, Receipt, Printer,
-  Ship, ChevronDown, ChevronUp, DollarSign,
+  Ship, ChevronDown, ChevronUp, DollarSign, Lock, Ban,
 } from "lucide-react";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { Badge } from "@/components/ui/badge";
@@ -35,7 +35,10 @@ import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import {
   isGrnLineEditable,
-  isGrnLockedByDownstreamPi,
+  isGrnLineLockedByPi,
+  isGrnFullyLockedByDownstreamPi,
+  countGrnLinesLockedByPi,
+  grnLineInvoicedQty,
   checkGrnLineQtyEdit,
   describeGrnStockDelta,
 } from "@/lib/purchase-edit-rules";
@@ -124,6 +127,9 @@ type GRNDetail = {
   currency: string | null;
   landed_cost_sen: number;
   supplier_do_no: string | null;
+  // Set when the receipt was cancelled (stock reversed, PO quantity released).
+  cancelled_at?: string | null;
+  cancelled_reason?: string | null;
 };
 
 export default function GRNDetailPage() {
@@ -375,7 +381,10 @@ export default function GRNDetailPage() {
     const deltaLines: { ref: string; delta: number }[] = [];
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
-      const newAccepted = parseFloat(qtyEdit[i]);
+      // A line a PI has billed keeps its stored qty verbatim — its input is
+      // rendered read-only, and pinning the value here means a stale edit
+      // buffer can't smuggle a change past the (identical) backend rule.
+      const newAccepted = isGrnLineLockedByPi(it) ? it.acceptedQty : parseFloat(qtyEdit[i]);
       const guard = checkGrnLineQtyEdit({
         ref: it.materialName || it.materialCode || `Line ${i + 1}`,
         oldAcceptedQty: it.acceptedQty,
@@ -417,7 +426,7 @@ export default function GRNDetailPage() {
         materialName: it.materialName,
         orderedQty: it.orderedQty,
         receivedQty: it.receivedQty,
-        acceptedQty: parseFloat(qtyEdit[i]) || 0,
+        acceptedQty: isGrnLineLockedByPi(it) ? it.acceptedQty : parseFloat(qtyEdit[i]) || 0,
         rejectedQty: it.rejectedQty,
         rejectionReason: it.rejectionReason,
         unitPrice: it.unitPrice,
@@ -451,6 +460,60 @@ export default function GRNDetailPage() {
       refresh();
     } catch {
       toast.error("Save failed — network error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Cancel the receipt — reverses the posted stock and hands the quantities
+  // back to the purchase order. The confirmation spells out BOTH sides (which
+  // PO gets what back, what leaves stock on hand) because this is the one
+  // action that moves inventory downwards without a physical goods movement.
+  async function cancelReceipt() {
+    if (!grn) return;
+    const released = items
+      .filter((it) => (it.acceptedQty ?? 0) > 0)
+      .map((it) => `${it.materialName || it.materialCode}: ${it.acceptedQty}`)
+      .join(", ");
+    const poLabel = grn.poNumber || grn.poId;
+    const lines = [
+      poLabel
+        ? `PO ${poLabel} gets this quantity back and becomes receivable again${released ? ` — ${released}.` : "."}`
+        : `This receipt has no linked purchase order${released ? ` — ${released}.` : "."}`,
+      grn.status === "POSTED"
+        ? "The stock it posted is removed from on hand, and the receipt's inventory lots are reversed."
+        : "No stock was posted, so nothing leaves inventory.",
+      "The receipt stays on file as CANCELLED and cannot be reopened.",
+    ];
+    const ok = await confirm({
+      title: `Cancel receipt ${grn.grnNumber}?`,
+      message: lines.join(" "),
+      danger: true,
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/grn/${grn.id}/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const j = (await res.json().catch(() => null)) as
+        | { success?: boolean; error?: string; stockReversal?: { batchesRemoved?: number } }
+        | null;
+      if (!res.ok || !j?.success) {
+        toast.error(j?.error || `Cancel failed (${res.status})`);
+        return;
+      }
+      toast.success(`${grn.grnNumber} cancelled — stock reversed and PO quantity released`);
+      invalidateCachePrefix("/api/grn");
+      invalidateCachePrefix("/api/purchase-orders");
+      invalidateCachePrefix("/api/raw-materials");
+      invalidateCachePrefix("/api/inventory");
+      invalidateCachePrefix("/api/stock-value");
+      refresh();
+    } catch {
+      toast.error("Cancel failed — network error");
     } finally {
       setBusy(false);
     }
@@ -585,10 +648,15 @@ export default function GRNDetailPage() {
     );
   }
 
+  const isCancelled = grn.status === "CANCELLED";
   const isPosted = grn.status === "POSTED";
   const isConfirmed = grn.status === "CONFIRMED";
   const isArrived = grn.arrival_state === "ARRIVED";
   const advanceTarget = nextArrivalState(grn.arrival_state);
+  // Per-line downstream-PI lock (owner: a conversion locks the LINE it
+  // consumed, never the whole document).
+  const lockedLineCount = countGrnLinesLockedByPi(items);
+  const fullyLockedByPi = isGrnFullyLockedByDownstreamPi(items);
 
   return (
     <div className="space-y-6">
@@ -618,21 +686,39 @@ export default function GRNDetailPage() {
             {/* Return received goods straight from this GRN (reverses stock; no
                 Debit Note since it's not invoiced). Deep-links to the Purchase
                 Returns page with this GRN preselected. */}
-            <Button type="button" variant="outline" size="sm" onClick={() => navigate(`/purchase-returns?grn=${encodeURIComponent(grn.id)}`)} disabled={busy}>
-              <PackageCheck className="h-3.5 w-3.5" /> Create Purchase Return
-            </Button>
+            {!isCancelled && (
+              <Button type="button" variant="outline" size="sm" onClick={() => navigate(`/purchase-returns?grn=${encodeURIComponent(grn.id)}`)} disabled={busy}>
+                <PackageCheck className="h-3.5 w-3.5" /> Create Purchase Return
+              </Button>
+            )}
             {/* Arrival advance button — contextual, hidden when ARRIVED */}
-            {advanceTarget && (
+            {advanceTarget && !isCancelled && (
               <Button type="button" variant="outline" size="sm" onClick={advanceArrival} disabled={busy}>
                 <Ship className="h-3.5 w-3.5" /> {advanceLabel(grn.arrival_state)}
               </Button>
             )}
-            {!isConfirmed && !isPosted && (
+            {/* Cancel Receipt — the way a POSTED receipt dies. Reverses the
+                posted stock and releases the PO quantity; refused by the
+                backend while a live PI still draws on these lines, or while
+                the received stock has already been issued. */}
+            {!isCancelled && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={cancelReceipt}
+                disabled={busy}
+                className="border-[#9A3A2D] text-[#9A3A2D] hover:bg-[#9A3A2D]/10"
+              >
+                <Ban className="h-3.5 w-3.5" /> Cancel Receipt
+              </Button>
+            )}
+            {!isConfirmed && !isPosted && !isCancelled && (
               <Button type="button" variant="outline" size="sm" onClick={() => setStatus("CONFIRMED", "Approve")} disabled={busy}>
                 <CheckCircle2 className="h-3.5 w-3.5" /> Approve
               </Button>
             )}
-            {!isPosted && (
+            {!isPosted && !isCancelled && (
               /* Post to Stock is DISABLED unless arrival_state === 'ARRIVED'.
                  The backend enforces this via a 409 gate; the UI mirrors it
                  with a disabled state + tooltip so the operator knows why. */
@@ -648,7 +734,7 @@ export default function GRNDetailPage() {
                 <PackageCheck className="h-3.5 w-3.5" /> Post to Stock
               </Button>
             )}
-            {isPosted && (
+            {isPosted && !isCancelled && (
               <Button type="button" variant="primary" size="sm" onClick={convertToInvoice} disabled={busy} className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]">
                 <Receipt className="h-3.5 w-3.5" /> Convert to Invoice
               </Button>
@@ -794,10 +880,11 @@ export default function GRNDetailPage() {
               </CardTitle>
               {/* Edit accepted quantities. For a POSTED GRN the save posts a
                   compensating stock movement; for DRAFT/CONFIRMED it just
-                  re-lines (pre-commit). Hidden when status doesn't allow OR
-                  when a downstream PI has already billed this GRN (owner
-                  ruling 2026-06-29 evening — must delete the PI first). */}
-              {qtyEdit === null && items.length > 0 && isGrnLineEditable(grn.status) && !isGrnLockedByDownstreamPi(items) && (
+                  re-lines (pre-commit). Hidden when the status doesn't allow,
+                  or when EVERY line has been billed — a partially-invoiced
+                  receipt still opens, with the billed lines locked
+                  individually (owner: "这种转换不是整张单锁死的"). */}
+              {qtyEdit === null && items.length > 0 && isGrnLineEditable(grn.status) && !fullyLockedByPi && (
                 <Button
                   type="button"
                   variant="outline"
@@ -811,11 +898,21 @@ export default function GRNDetailPage() {
             </div>
           </CardHeader>
           <CardContent>
-            {/* Locked banner: GRN has at least one line already invoiced by a
-                downstream PI. Edit unavailable until that PI is deleted. */}
-            {qtyEdit === null && items.length > 0 && isGrnLineEditable(grn.status) && isGrnLockedByDownstreamPi(items) && (
+            {/* Cancelled receipts are historical records. */}
+            {isCancelled && (
+              <div className="mb-3 rounded-md border border-[#E2C9C4] bg-[#FBF2F0] px-3 py-2 text-sm text-[#9A3A2D]">
+                This receipt was cancelled{grn.cancelled_at ? ` on ${formatDate(grn.cancelled_at)}` : ""} — its stock was
+                reversed and the quantity released back to the purchase order. It is read-only.
+              </div>
+            )}
+            {/* Per-line lock notice. The document is NOT locked: only the lines
+                a purchase invoice has already billed are frozen, and the table
+                marks each one. */}
+            {!isCancelled && items.length > 0 && isGrnLineEditable(grn.status) && lockedLineCount > 0 && (
               <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                A purchase invoice has already billed off this GRN — line edits are locked. Delete the linked PI first to unlock.
+                {fullyLockedByPi
+                  ? "Every line here has been billed on a purchase invoice, so nothing is editable. Void or edit that invoice to unlock the receipt."
+                  : `${lockedLineCount} of ${items.length} line(s) have been billed on a purchase invoice and are locked (marked below). The remaining lines can still be corrected.`}
               </div>
             )}
             {/* Amber banner when editing a POSTED GRN's accepted quantities —
@@ -844,11 +941,22 @@ export default function GRNDetailPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {items.map((it, idx) => (
+                    {items.map((it, idx) => {
+                      // This LINE's lock — a purchase invoice has billed off it,
+                      // so its quantity is frozen while its neighbours stay
+                      // editable.
+                      const lineLocked = isGrnLineLockedByPi(it);
+                      const lineInvoiced = grnLineInvoicedQty(it);
+                      return (
                       <tr key={idx} className={`border-b border-[#E2DDD8] ${idx % 2 === 1 ? "bg-[#FAF9F7]" : ""}`}>
                         <td className="h-12 px-3">
                           <div className="font-medium text-[#1F1D1B]">{it.materialName}</div>
                           <div className="text-xs text-[#6B5C32]">{it.materialCode}</div>
+                          {lineLocked ? (
+                            <div className="inline-flex items-center gap-1 text-xs text-amber-700">
+                              <Lock className="h-3 w-3" /> Locked — {lineInvoiced} invoiced
+                            </div>
+                          ) : null}
                           {it.rejectedQty > 0 && it.rejectionReason ? (
                             <div className="text-xs text-[#9A3A2D]">Rejected: {it.rejectionReason}</div>
                           ) : null}
@@ -856,12 +964,12 @@ export default function GRNDetailPage() {
                         <td className="h-12 px-3 text-right text-[#4B5563]">{it.orderedQty}</td>
                         <td className="h-12 px-3 text-right text-[#4B5563]">{it.receivedQty}</td>
                         <td className="h-12 px-3 text-right font-medium text-[#1F1D1B]">
-                          {qtyEdit === null ? (
+                          {qtyEdit === null || lineLocked ? (
                             it.acceptedQty
                           ) : (
                             <Input
                               type="number"
-                              min={it.invoicedQty ?? 0}
+                              min={0}
                               step="any"
                               className="h-8 w-24 text-right inline-block"
                               value={qtyEdit[idx] ?? ""}
@@ -880,11 +988,14 @@ export default function GRNDetailPage() {
                         <td className="h-12 px-3 text-right text-[#4B5563]">{formatCurrency(it.unitPrice)}</td>
                         <td className="h-12 px-3 text-right font-medium text-[#1F1D1B]">
                           {formatCurrency(
-                            (qtyEdit === null ? it.acceptedQty : parseFloat(qtyEdit[idx]) || 0) * it.unitPrice,
+                            (qtyEdit === null || lineLocked
+                              ? it.acceptedQty
+                              : parseFloat(qtyEdit[idx]) || 0) * it.unitPrice,
                           )}
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

@@ -313,6 +313,19 @@ function makeDb() {
         .filter((r) => String(r.id) === String(binds[0]))
         .map((r) => ({ invoiced_qty: Number(r.invoiced_qty) || 0 }));
     }
+    // restorePOReceivedQtyForGRN reads the CURRENT receivedQty per target line
+    // so a double-restore can't drive a PO line negative.
+    if (/SELECT id, receivedQty FROM purchase_order_items WHERE id IN \(/i.test(sql)) {
+      return tables.purchase_order_items
+        .filter((r) => binds.map(String).includes(String(r.id)))
+        .map((r) => ({ id: r.id, receivedQty: Number(getCol(r, "receivedQty")) || 0 }));
+    }
+    // The cancel path names the materials whose stock has already been issued.
+    if (/SELECT id, itemCode, description FROM raw_materials WHERE id IN \(/i.test(sql)) {
+      return tables.raw_materials
+        .filter((r) => binds.map(String).includes(String(r.id)))
+        .map((r) => ({ id: r.id, itemCode: getCol(r, "itemCode"), description: getCol(r, "description") }));
+    }
     if (/SELECT id, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = \?/i.test(sql)) {
       return tables.purchase_order_items
         .filter((r) => String(getCol(r, "purchaseOrderId")) === String(binds[0]))
@@ -472,12 +485,12 @@ test("GRN POSTED edit 5→3 moves stock −2; editing back 3→5 is a net no-op"
   assert.equal(Number(inEntries[0].qty), 2);
 });
 
-test("GRN POSTED edit: ANY invoiced_qty > 0 BLOCKS the whole edit (owner 2026-06-29)", async () => {
+test("GRN POSTED edit: an invoiced line is frozen (its OWN line only)", async () => {
   const db = makeDb();
   seed(db);
-  // Pretend a PI already billed 4 of the 5 accepted on this line. Under the
-  // new lock rule the entire GRN is now locked — not just the below-invoiced
-  // reduction. Any attempted edit (up, down, no-op) returns the same 409.
+  // A PI has billed 4 of the 5 accepted on the receipt's only line. That line
+  // cannot move — and since it is the only one, the document has nothing left
+  // to correct, so the refusal is the whole-document one.
   db.tables.grn_items.find((r) => r.id === 201).invoiced_qty = 4;
   const grnRoot = mount(grnApp, db);
 
@@ -485,9 +498,64 @@ test("GRN POSTED edit: ANY invoiced_qty > 0 BLOCKS the whole edit (owner 2026-06
   const res = await editGrnAccepted(grnRoot, grn, 0, 3);
   assert.equal(res.status, 409);
   const body = await res.json();
-  assert.match(body.error, /linked PI/);
+  assert.match(body.error, /purchase invoice/);
   // Stock untouched.
   assert.equal(db.tables.raw_materials.find((r) => r.id === "rm-foam-1").balanceQty, 5);
+});
+
+// ---------------------------------------------------------------------------
+// DEFECT B — one invoiced line used to lock the whole GRN. It must lock ONLY
+// itself; every other line stays correctable, with the usual compensating
+// stock movement.
+// ---------------------------------------------------------------------------
+test("GRN POSTED edit: one invoiced line does NOT lock the rest of the receipt", async () => {
+  const db = makeDb();
+  seed(db);
+  // Add a second, un-invoiced line (wood) with its own posted lot, and bill
+  // the first line (foam) on a PI.
+  db.tables.grn_items.find((r) => r.id === 201).invoiced_qty = 5;
+  db.tables.raw_materials.push({
+    id: "rm-wood-1", itemCode: "WOOD-1", item_code: "WOOD-1",
+    description: "WOOD-1 - Wood plank", item_group: "A.WOOD", balanceQty: 8,
+  });
+  db.tables.purchase_order_items.push({
+    id: "poi-2", purchaseOrderId: "po-1", materialCategory: "WOOD",
+    material_code: "WOOD-1", materialName: "WOOD-1 - Wood plank", supplierSKU: "",
+    quantity: 8, unitPriceSen: 5000, totalSen: 40000, receivedQty: 8, unit: "pcs",
+    orgId: "org-test",
+  });
+  db.tables.grn_items.push({
+    id: 202, grnId: "grn-1", poItemIndex: 1, materialCode: "WOOD-1",
+    materialName: "WOOD-1 - Wood plank", orderedQty: 8, receivedQty: 8,
+    acceptedQty: 8, rejectedQty: 0, rejectionReason: null, unitPrice: 5000,
+    invoiced_qty: 0,
+  });
+  db.tables.rm_batches.push({
+    id: "rmb-grn-grn-1-2", rmId: "rm-wood-1", source: "GRN", sourceRefId: "grn-1",
+    receivedDate: "2026-06-02", originalQty: 8, remainingQty: 8, unitCostSen: 5000,
+    created_at: "2026-06-02", notes: "GRN GRN-1 line 2",
+  });
+  const grnRoot = mount(grnApp, db);
+
+  // Correct the UN-invoiced wood line 8 → 6 while the foam line stays billed.
+  const grn = await getGrn(grnRoot, "grn-1");
+  const res = await editGrnAccepted(grnRoot, grn, 1, 6);
+  assert.equal(res.status, 200, await res.text());
+
+  // The correctable line moved, stock followed it.
+  assert.equal(db.tables.grn_items.find((r) => r.id === 202).acceptedQty, 6);
+  assert.equal(db.tables.raw_materials.find((r) => r.id === "rm-wood-1").balanceQty, 6);
+  assert.equal(db.tables.rm_batches.find((r) => r.id === "rmb-grn-grn-1-2").remainingQty, 6);
+  // The invoiced line is untouched — qty, stock and its lot all stand still.
+  assert.equal(db.tables.grn_items.find((r) => r.id === 201).acceptedQty, 5);
+  assert.equal(db.tables.raw_materials.find((r) => r.id === "rm-foam-1").balanceQty, 5);
+
+  // And the invoiced line itself still refuses to move.
+  const grn2 = await getGrn(grnRoot, "grn-1");
+  const blocked = await editGrnAccepted(grnRoot, grn2, 0, 4);
+  assert.equal(blocked.status, 409);
+  assert.match((await blocked.json()).error, /purchase invoice/);
+  assert.equal(db.tables.grn_items.find((r) => r.id === 201).acceptedQty, 5);
 });
 
 test("GRN POSTED edit: cannot add or remove lines (count must match)", async () => {
@@ -501,6 +569,126 @@ test("GRN POSTED edit: cannot add or remove lines (count must match)", async () 
   });
   assert.equal(res.status, 409);
   assert.match((await res.json()).error, /can't be added or removed/);
+});
+
+// ---------------------------------------------------------------------------
+// DEFECT A — a POSTED GRN must have a way to die that RESTORES what it took.
+// Cancel reverses the perpetual stock (balanceQty + the receipt's FIFO lots)
+// and hands purchase_order_items.receivedQty back so the PO is receivable
+// again. It refuses while a live PI draws on the lines, and refuses when the
+// received stock has already been issued (a partial un-receive would corrupt
+// inventory).
+// ---------------------------------------------------------------------------
+test("cancelling a POSTED GRN restores the PO's receivedQty and reverses stock", async () => {
+  const db = makeDb();
+  seed(db);
+  const grnRoot = mount(grnApp, db);
+
+  assert.equal(db.tables.purchase_order_items.find((r) => r.id === "poi-1").receivedQty, 10);
+  assert.equal(db.tables.raw_materials.find((r) => r.id === "rm-foam-1").balanceQty, 5);
+  assert.equal(db.tables.rm_batches.filter((r) => r.sourceRefId === "grn-1").length, 1);
+
+  const res = await grnRoot.request("/grn-1/cancel", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  assert.equal(res.status, 200, await res.text());
+
+  // Status is terminal-cancelled with an audit stamp.
+  const grnRow = db.tables.grns.find((r) => r.id === "grn-1");
+  assert.equal(grnRow.status, "CANCELLED");
+  assert.ok(grnRow.cancelled_at, "cancelled_at must be stamped");
+
+  // PO line handed back its 5, so the order is receivable again (10 − 5 = 5)
+  // and its status drops out of RECEIVED.
+  assert.equal(db.tables.purchase_order_items.find((r) => r.id === "poi-1").receivedQty, 5);
+  assert.equal(db.tables.purchase_orders.find((r) => r.id === "po-1").status, "PARTIAL_RECEIVED");
+
+  // Perpetual stock reversed: on-hand back down and the receipt's lot gone.
+  assert.equal(db.tables.raw_materials.find((r) => r.id === "rm-foam-1").balanceQty, 0);
+  assert.equal(db.tables.rm_batches.filter((r) => r.sourceRefId === "grn-1").length, 0);
+
+  // No compensating cost_ledger row: the FIFO/P&L replay sources GRN receipts
+  // from grn_items joined on status IN ('CONFIRMED','POSTED'), so CANCELLED
+  // already removes the receipt — an ADJUSTMENT OUT would reduce it twice.
+  assert.equal(
+    db.tables.cost_ledger.filter((r) => r.type === "ADJUSTMENT").length,
+    0,
+    "cancel must not double-reduce material cost with an ADJUSTMENT leg",
+  );
+
+  // Terminal: the cancelled receipt can't be edited or resurrected.
+  const reopen = await grnRoot.request("/grn-1", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ status: "POSTED" }),
+  });
+  assert.equal(reopen.status, 409);
+  assert.match((await reopen.json()).error, /CANCELLED/);
+
+  // And cancelling twice is refused rather than double-restoring.
+  const again = await grnRoot.request("/grn-1/cancel", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  assert.equal(again.status, 409);
+  assert.equal(db.tables.purchase_order_items.find((r) => r.id === "poi-1").receivedQty, 5);
+});
+
+test("cancel is REFUSED while a live purchase invoice draws on the GRN", async () => {
+  const db = makeDb();
+  seed(db);
+  db.tables.grn_items.find((r) => r.id === 201).invoiced_qty = 5;
+  db.tables.purchase_invoices.push({
+    id: "pi-9", piNo: "PI-9", purchaseOrderId: "po-1", grn_id: "grn-1",
+    supplierId: "sup-1", supplierName: "ACME", invoiceDate: "2026-06-03",
+    amountSen: 50000, status: "CONFIRMED", currency: "MYR",
+  });
+  const grnRoot = mount(grnApp, db);
+
+  const res = await grnRoot.request("/grn-1/cancel", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  assert.equal(res.status, 409);
+  const err = (await res.json()).error;
+  assert.match(err, /PI-9/);
+  assert.match(err, /Void that invoice first/);
+
+  // Nothing moved — not the PO, not stock, not the lot, not the status.
+  assert.equal(db.tables.purchase_order_items.find((r) => r.id === "poi-1").receivedQty, 10);
+  assert.equal(db.tables.raw_materials.find((r) => r.id === "rm-foam-1").balanceQty, 5);
+  assert.equal(db.tables.rm_batches.filter((r) => r.sourceRefId === "grn-1").length, 1);
+  assert.equal(db.tables.grns.find((r) => r.id === "grn-1").status, "POSTED");
+});
+
+test("cancel is REFUSED once the received stock has been issued", async () => {
+  const db = makeDb();
+  seed(db);
+  // Production drew 2 of the 5 off this receipt's lot (remaining < original).
+  // Un-receiving all 5 would drive balanceQty below what is physically there.
+  db.tables.rm_batches.find((r) => r.id === "rmb-grn-grn-1-1").remainingQty = 3;
+  db.tables.raw_materials.find((r) => r.id === "rm-foam-1").balanceQty = 3;
+  const grnRoot = mount(grnApp, db);
+
+  const res = await grnRoot.request("/grn-1/cancel", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  assert.equal(res.status, 409);
+  const err = (await res.json()).error;
+  assert.match(err, /already been issued or returned/);
+  assert.match(err, /FOAM-1/, "the refusal must name the material");
+
+  // Refuse, don't guess: everything stands exactly as it was.
+  assert.equal(db.tables.purchase_order_items.find((r) => r.id === "poi-1").receivedQty, 10);
+  assert.equal(db.tables.raw_materials.find((r) => r.id === "rm-foam-1").balanceQty, 3);
+  assert.equal(db.tables.rm_batches.filter((r) => r.sourceRefId === "grn-1").length, 1);
+  assert.equal(db.tables.grns.find((r) => r.id === "grn-1").status, "POSTED");
 });
 
 // ---------------------------------------------------------------------------

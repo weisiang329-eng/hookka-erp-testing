@@ -56,44 +56,77 @@ export function piEditBlockedError(status: string | null | undefined): string {
  *     post a COMPENSATING stock movement for the delta (this module computes
  *     the per-line delta; the route reuses postGRNToStock's helpers to apply
  *     it).
+ *   • CANCELLED — the receipt has been reversed; it is a historical record.
  */
 export function isGrnLineEditable(status: string | null | undefined): boolean {
   const s = String(status ?? "").toUpperCase();
   return s === "DRAFT" || s === "CONFIRMED" || s === "POSTED";
 }
 
+// ── The downstream-PI lock is PER LINE, not per document ───────────────────
+//
+// Owner ruling 2026-06-29 (evening) froze a GRN the moment ANY line had been
+// invoiced. The intent was right — an invoiced quantity must never be edited
+// out from under a live invoice — but the SCOPE was the whole document, so
+// billing one line of a ten-line receipt made the other nine permanently
+// uncorrectable. Owner rule: "这种转换不是整张单锁死的" — a conversion locks the
+// line it consumed, never the whole document.
+//
+// The lock is now per line: a line with invoiced_qty > 0 is frozen (no change
+// at all — even an UP edit would leave the PI sitting on a stale qty/price),
+// every other line on the same GRN stays correctable with the usual
+// compensating stock movement.
+
+type GrnLineInvoiced = { invoicedQty?: number | null; invoiced_qty?: number | null };
+
+/** The qty a purchase invoice has already billed off this GRN line. */
+export function grnLineInvoicedQty(item: GrnLineInvoiced): number {
+  return Number(item.invoicedQty ?? item.invoiced_qty) || 0;
+}
+
+/** A single GRN line is locked when a live PI has drawn any qty off it. */
+export function isGrnLineLockedByPi(item: GrnLineInvoiced): boolean {
+  return grnLineInvoicedQty(item) > 0;
+}
+
 /**
- * Owner ruling 2026-06-29 (evening): once a Purchase Invoice has consumed
- * any qty off this GRN, the GRN is FULLY LOCKED for line edits — including
- * the per-line invoiced_qty cap path. The operator must delete the
- * downstream PI first (which returns invoiced_qty to 0), then re-edit the
- * GRN, then re-create the PI. The previous "can reduce down to invoiced_qty"
- * rule is too easy to misuse — even an UP edit on an already-invoiced line
- * leaves the PI sitting on stale qty/price.
- *
- * Returns true when ANY line on this GRN has been invoiced (sum > 0).
+ * True only when EVERY line is invoiced — i.e. there is genuinely nothing left
+ * to correct on this receipt. Used by the UI to hide the edit affordance
+ * entirely; a partially-invoiced GRN still opens for edit, with the invoiced
+ * lines individually locked.
  */
-export function isGrnLockedByDownstreamPi(
-  items: { invoicedQty?: number | null; invoiced_qty?: number | null }[],
-): boolean {
-  return items.some(
-    (it) =>
-      (Number(it.invoicedQty ?? it.invoiced_qty) || 0) > 0,
-  );
+export function isGrnFullyLockedByDownstreamPi(items: GrnLineInvoiced[]): boolean {
+  return items.length > 0 && items.every(isGrnLineLockedByPi);
 }
 
+/** How many lines on this GRN are frozen by a downstream PI. */
+export function countGrnLinesLockedByPi(items: GrnLineInvoiced[]): number {
+  return items.filter(isGrnLineLockedByPi).length;
+}
+
+/** The per-line refusal. Names the line so the operator knows which one. */
+export function grnLineLockedByPiError(ref: string, invoicedQty: number): string {
+  return `Line "${ref}" has been billed on a purchase invoice (${invoicedQty} invoiced) and can't be changed. Void or edit that invoice first — the other lines on this receipt can still be corrected.`;
+}
+
+/** The whole-document refusal, only used when every line is invoiced. */
 export function grnLockedByDownstreamPiError(): string {
-  return "This GRN has been billed on a purchase invoice. Delete the linked PI first to unlock the GRN for edit.";
+  return "Every line on this GRN has been billed on a purchase invoice. Void or edit the linked PI first to unlock the receipt for edit.";
 }
 
 /**
- * A POSTED GRN line whose accepted qty is being changed. Pure check: the new
- * accepted qty must not drop BELOW what a purchase invoice has already billed
- * off this line (invoiced_qty), or the PI would silently desync (it would be
- * invoicing stock the GRN no longer says it received).
+ * A POSTED GRN line whose accepted qty is being changed. Pure check, and the
+ * ONE place the downstream-PI lock is applied per line:
+ *
+ *   • a line a PI has already billed (invoiced_qty > 0) is FROZEN — no change
+ *     in either direction, because the invoice is sitting on that qty/price;
+ *   • dropping below invoiced_qty gets its own, more specific message (it is
+ *     the mistake operators actually make);
+ *   • every other line is free to move, and a delta of 0 is always allowed so
+ *     the unchanged lines of a partially-invoiced GRN pass straight through.
  *
  * Returns the per-line delta (new − old) when allowed, or a blocking error.
- * A delta of 0 is allowed (no-op). qty may be fractional.
+ * qty may be fractional.
  */
 export type GrnLineEditResult =
   | { ok: true; delta: number }
@@ -124,6 +157,11 @@ export function checkGrnLineQtyEdit(args: {
       ok: false,
       error: `Line "${args.ref}": can't reduce accepted quantity to ${newQty} — ${invoiced} has already been invoiced. Cancel or reduce the purchase invoice first.`,
     };
+  }
+  // An invoiced line is frozen at its billed figure. Unchanged is fine (delta
+  // 0) so the rest of the receipt can still be saved around it.
+  if (invoiced > 0 && newQty !== oldQty) {
+    return { ok: false, error: grnLineLockedByPiError(args.ref, invoiced) };
   }
   return { ok: true, delta: newQty - oldQty };
 }

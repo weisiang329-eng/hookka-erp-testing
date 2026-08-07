@@ -28,6 +28,7 @@ import {
   FileText,
   ScanLine,
   FolderInput,
+  Ban,
 } from "lucide-react";
 import {
   ScanSupplierModal,
@@ -849,12 +850,66 @@ export default function GRNPage() {
       },
       { label: "", separator: true, action: () => {} },
       {
+        // The way a receipt dies. A POSTED GRN used to have no exit at all:
+        // un-post 409'd, delete 409'd, and neither this list nor the detail
+        // page offered anything — so a receipt keyed against the wrong PO
+        // consumed that PO line forever. Cancel reverses the posted stock AND
+        // releases the PO quantity; the backend refuses when a live purchase
+        // invoice still draws on the lines, or when the received stock has
+        // already been issued.
+        label: "Cancel Receipt",
+        icon: <Ban className="h-3.5 w-3.5" />,
+        action: async () => {
+          const released = (row.items ?? [])
+            .filter((it) => (it.acceptedQty ?? 0) > 0)
+            .map((it) => `${it.materialName || it.materialCode}: ${it.acceptedQty}`)
+            .join(", ");
+          const poLabel = row.poNumber || row.poId;
+          const ok = await confirm({
+            title: `Cancel receipt ${row.grnNumber}?`,
+            message:
+              (poLabel
+                ? `PO ${poLabel} gets this quantity back and becomes receivable again${released ? ` — ${released}.` : "."}`
+                : `This receipt has no linked purchase order${released ? ` — ${released}.` : "."}`) +
+              (row.status === "POSTED"
+                ? " The stock it posted is removed from on hand."
+                : " No stock was posted, so nothing leaves inventory.") +
+              " The receipt stays on file as CANCELLED and cannot be reopened.",
+            danger: true,
+          });
+          if (!ok) return;
+          try {
+            const res = await fetch(`/api/grn/${row.id}/cancel`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({}),
+            });
+            const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+            if (!res.ok || !j?.success) {
+              toast.error(j?.error || `Cancel failed (${res.status})`);
+              return;
+            }
+            toast.success(`${row.grnNumber} cancelled — stock reversed and PO quantity released`);
+            invalidateCachePrefix("/api/grn");
+            invalidateCachePrefix("/api/purchase-orders");
+            invalidateCachePrefix("/api/raw-materials");
+            invalidateCachePrefix("/api/inventory");
+            invalidateCachePrefix("/api/stock-value");
+            fetchData();
+          } catch {
+            toast.error("Cancel failed — network error");
+          }
+        },
+        disabled: row.status === "CANCELLED",
+      },
+      { label: "", separator: true, action: () => {} },
+      {
         label: "Refresh",
         icon: <RefreshCw className="h-3.5 w-3.5" />,
         action: () => fetchData(),
       },
     ];
-  }, [navigate, toast, fetchData]);
+  }, [navigate, toast, fetchData, confirm]);
 
   if (loading) {
     return (

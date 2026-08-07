@@ -471,6 +471,11 @@ function DoInspectionForm({
 
   const allMandatoryAnswered = items.every((i) => !i.isMandatory || i.result != null);
   const failingItems = items.filter((i) => i.result === "FAIL");
+  // A FAIL with no words is not a finding, it is a shrug — and it is the one
+  // thing anyone reading this back in a month actually needs. The backend
+  // enforces it too (completeInspection), so this is only here to say so
+  // before the round-trip rather than after a 400.
+  const failMissingReason = failingItems.some((i) => !i.notes.trim());
 
   const submit = useCallback(async () => {
     if (!subjectType || !subjectId) {
@@ -479,6 +484,10 @@ function DoInspectionForm({
     }
     if (!allMandatoryAnswered) {
       toast.error("Every mandatory item needs PASS / FAIL / NA.");
+      return;
+    }
+    if (failMissingReason) {
+      toast.error("Every FAIL needs one line saying what was wrong.");
       return;
     }
     setSubmitting(true);
@@ -515,7 +524,7 @@ function DoInspectionForm({
     } finally {
       setSubmitting(false);
     }
-  }, [subjectType, subjectId, subjectLabel, subjectCode, items, overallNotes, insp.id, me, allMandatoryAnswered, onRefresh, onClose, toast]);
+  }, [subjectType, subjectId, subjectLabel, subjectCode, items, overallNotes, insp.id, me, allMandatoryAnswered, failMissingReason, onRefresh, onClose, toast]);
 
   const skip = useCallback(async () => {
     if (!skipReason.trim()) {
@@ -660,7 +669,7 @@ function DoInspectionForm({
       )}
 
       <div className="flex flex-wrap items-center gap-2 border-t pt-3">
-        <Button onClick={submit} disabled={submitting || !subjectId || !allMandatoryAnswered}>
+        <Button onClick={submit} disabled={submitting || !subjectId || !allMandatoryAnswered || failMissingReason}>
           <CheckCircle2 className="mr-2 size-4" />
           Submit ({failingItems.length > 0 ? "FAIL" : "PASS"})
         </Button>

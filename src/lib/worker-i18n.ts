@@ -229,6 +229,18 @@ const dict: Dict = {
     zh: '报告问题',
     my: 'ပြဿနာတင်ပြရန်',
   },
+  'home.qualityCheck': {
+    en: 'Quality Check',
+    ms: 'Pemeriksaan Kualiti',
+    zh: '质量检查',
+    my: 'အရည်အသွေး စစ်ဆေးမှု',
+  },
+  'home.qualityCheckDue': {
+    en: 'due today',
+    ms: 'perlu hari ini',
+    zh: '今天要做',
+    my: 'ယနေ့ လုပ်ရန်',
+  },
 
   // ---- Scan ----
   'scan.title': {
@@ -477,6 +489,68 @@ const dict: Dict = {
     my: 'ပြဿနာကို ဖော်ပြပါ',
   },
   'issue.submit': { en: 'Send', ms: 'Hantar', zh: '发送', my: 'ပို့ပါ' },
+
+  // ---- QC (IPQC on the phone) ----
+  'qc.title': {
+    en: 'Quality Check',
+    ms: 'Pemeriksaan Kualiti',
+    zh: '质量检查',
+    my: 'အရည်အသွေး စစ်ဆေးမှု',
+  },
+  'qc.todayFor': {
+    en: "Today's checks for",
+    ms: 'Pemeriksaan hari ini untuk',
+    zh: '今天的检查：',
+    my: 'ယနေ့ စစ်ဆေးမှု —',
+  },
+  'qc.none': {
+    en: 'No quality check due for your department today.',
+    ms: 'Tiada pemeriksaan kualiti untuk jabatan anda hari ini.',
+    zh: '今天你的部门没有需要做的质量检查。',
+    my: 'ယနေ့ သင့်ဌာနအတွက် စစ်ဆေးမှု မရှိပါ။',
+  },
+  'qc.subject': {
+    en: 'Which job card did you check?',
+    ms: 'Kad kerja yang mana anda periksa?',
+    zh: '你检查的是哪一张工卡？',
+    my: 'ဘယ် job card ကို စစ်ခဲ့သလဲ?',
+  },
+  'qc.subjectNone': {
+    en: 'No live job card in your department to check.',
+    ms: 'Tiada kad kerja aktif di jabatan anda.',
+    zh: '你的部门现在没有可检查的工卡。',
+    my: 'သင့်ဌာနတွင် စစ်ရန် job card မရှိပါ။',
+  },
+  'qc.pass': { en: 'PASS', ms: 'LULUS', zh: '合格', my: 'အောင်' },
+  'qc.fail': { en: 'FAIL', ms: 'GAGAL', zh: '不合格', my: 'ကျ' },
+  'qc.na': { en: 'N/A', ms: 'T/B', zh: '不适用', my: 'မသက်ဆိုင်' },
+  'qc.failReason': {
+    en: 'What went wrong? (required)',
+    ms: 'Apa yang tidak kena? (wajib)',
+    zh: '哪里不合格？（必填）',
+    my: 'ဘာမှားသလဲ? (ဖြည့်ရန်လို)',
+  },
+  'qc.failReasonMissing': {
+    en: 'Every FAIL needs one line saying what was wrong.',
+    ms: 'Setiap GAGAL perlu satu baris sebab.',
+    zh: '每个不合格都要写一行原因。',
+    my: 'ကျတိုင်း အကြောင်းပြချက် တစ်ကြောင်း ရေးရပါမည်။',
+  },
+  'qc.answerAll': {
+    en: 'Answer every required item.',
+    ms: 'Jawab setiap item wajib.',
+    zh: '每个必填项都要作答。',
+    my: 'လိုအပ်သော အချက်တိုင်း ဖြေပါ။',
+  },
+  'qc.submit': { en: 'Submit check', ms: 'Hantar', zh: '提交检查', my: 'တင်သွင်းရန်' },
+  'qc.sent': {
+    en: 'Check submitted. Thank you.',
+    ms: 'Pemeriksaan dihantar. Terima kasih.',
+    zh: '检查已提交，谢谢。',
+    my: 'တင်သွင်းပြီးပါပြီ။ ကျေးဇူးတင်ပါသည်။',
+  },
+  'qc.required': { en: 'required', ms: 'wajib', zh: '必填', my: 'လိုအပ်' },
+
   'issue.sent': {
     en: 'Problem reported',
     ms: 'Masalah dilaporkan',

@@ -60,6 +60,9 @@ import {
   signedDownloadUrl,
 } from "../lib/supabase-storage";
 import { DEFAULT_ORG_ID } from "../lib/tenant";
+// One shared completion core with the desktop QC page — see the QC-on-the-
+// phone block below for why the phone must not own a second copy.
+import { completeInspection } from "./qc-pending";
 
 const app = new Hono<Env>();
 
@@ -2602,6 +2605,244 @@ app.get("/issues", async (c) => {
     .bind(workerId)
     .all<IssueRow>();
   return c.json({ success: true, data: res.results ?? [] });
+});
+
+// ============================================================
+// QC on the phone — GET /api/worker/qc-today, POST /api/worker/qc/:id/complete
+//
+// Until 2026-08-07 the shop floor could not reach QC AT ALL. "qc" appeared
+// zero times in src/pages/worker/ and in this file; QC lived only in the
+// desktop ERP sidebar, which a machinist never opens. That is a large part of
+// why 3,009 inspections sat PENDING for three months with none ever completed.
+//
+// Deliberately narrow:
+//   • WIP (IPQC) only. RM/IQC is goods-received and FG/OQC is the packed
+//     unit — both are desk jobs with their own subject lists. The phone
+//     covers the stage the worker is standing in, which is also 65% of the
+//     backlog.
+//   • The worker's CURRENT department only (same derivation as the scan
+//     boundary: latest dept-QR scan today → punch dept → home dept). A phone
+//     can never answer for another department.
+//   • Today's slots only.
+//
+// Guarding follows the rest of this file: every request resolves an
+// X-Worker-Token via getWorker() and is scoped to that worker. /api/worker/*
+// is NOT in PUBLIC_PREFIXES — the token IS the credential — so this adds no
+// unauthenticated write. On top of that the completion re-checks that the
+// inspection belongs to the caller's own department and that the job card
+// they claim to have sampled is a LIVE card in that same department: without
+// that second check a phone could hand any job-card id in the factory to a
+// FAIL and reset it.
+//
+// The submission itself calls the SAME completeInspection() the desktop page
+// calls — one copy of the FAIL side-effects (qc_tags, qc_defects, JC reset,
+// piece_pics clear, parent-PO recompute).
+// ============================================================
+type WorkerQcInspectionRow = {
+  id: string;
+  inspectionNo: string | null;
+  stage: string | null;
+  department: string | null;
+  itemCategory: string | null;
+  status: string | null;
+  scheduledSlotAt: string | null;
+  inspectionDate: string | null;
+};
+type WorkerQcItemRow = {
+  id: string;
+  inspectionId: string;
+  sequence: number;
+  itemName: string;
+  criteria: string | null;
+  severity: string;
+  isMandatory: number;
+};
+type WorkerQcSubjectRow = {
+  id: string;
+  poNo: string | null;
+  wipLabel: string | null;
+  wipCode: string | null;
+  status: string;
+};
+
+// The three job-card statuses that mean "live work you could sample now".
+// BLOCKED is excluded on purpose — it is already sitting on a failed
+// inspection. COMPLETED / TRANSFERRED are finished.
+const WORKER_QC_LIVE_JC_STATUSES = ["IN_PROGRESS", "WAITING", "PAUSED"];
+
+async function workerQcSubjects(
+  db: D1Database,
+  deptCode: string,
+): Promise<WorkerQcSubjectRow[]> {
+  const placeholders = WORKER_QC_LIVE_JC_STATUSES.map(() => "?").join(",");
+  const res = await db
+    .prepare(
+      `SELECT jc.id AS id, po.poNo AS poNo, jc.wipLabel AS wipLabel,
+              jc.wipCode AS wipCode, jc.status AS status
+         FROM job_cards jc
+         LEFT JOIN production_orders po ON po.id = jc.productionOrderId
+        WHERE jc.departmentCode = ?
+          AND jc.status IN (${placeholders})
+        ORDER BY jc.sequence, jc.id
+        LIMIT 200`,
+    )
+    .bind(deptCode, ...WORKER_QC_LIVE_JC_STATUSES)
+    .all<WorkerQcSubjectRow>();
+  return res.results ?? [];
+}
+
+app.get("/qc-today", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  const today = todayYmd();
+  const dept = await getCurrentDeptForWorker(
+    c.var.DB,
+    auth.workerId,
+    today,
+    auth.worker.departmentCode,
+  );
+  if (!dept) {
+    return c.json({
+      success: true,
+      data: { deptCode: "", date: today, inspections: [], subjects: [] },
+    });
+  }
+
+  const inspRes = await c.var.DB
+    .prepare(
+      `SELECT id, inspectionNo, stage, department, itemCategory, status,
+              scheduledSlotAt, inspectionDate
+         FROM qc_inspections
+        WHERE department = ?
+          AND stage = 'WIP'
+          AND status IN ('PENDING','IN_PROGRESS')
+          AND inspectionDate = ?
+        ORDER BY scheduledSlotAt`,
+    )
+    .bind(dept, today)
+    .all<WorkerQcInspectionRow>();
+  const inspections = inspRes.results ?? [];
+
+  let items: WorkerQcItemRow[] = [];
+  if (inspections.length > 0) {
+    const ph = inspections.map(() => "?").join(",");
+    const itemRes = await c.var.DB
+      .prepare(
+        `SELECT id, inspectionId, sequence, itemName, criteria, severity, isMandatory
+           FROM qc_inspection_items
+          WHERE inspectionId IN (${ph})
+          ORDER BY sequence`,
+      )
+      .bind(...inspections.map((i) => i.id))
+      .all<WorkerQcItemRow>();
+    items = itemRes.results ?? [];
+  }
+
+  const subjects = inspections.length > 0 ? await workerQcSubjects(c.var.DB, dept) : [];
+
+  return c.json({
+    success: true,
+    data: {
+      deptCode: dept,
+      date: today,
+      subjects: subjects.map((s) => ({
+        id: s.id,
+        label: `${s.poNo ?? "(no PO)"} · ${s.wipLabel || s.wipCode || ""}`.trim(),
+        poNo: s.poNo ?? "",
+        status: s.status,
+      })),
+      inspections: inspections.map((r) => ({
+        id: r.id,
+        inspectionNo: r.inspectionNo ?? "",
+        stage: r.stage ?? "",
+        deptCode: r.department ?? "",
+        status: r.status ?? "",
+        scheduledSlotAt: r.scheduledSlotAt ?? "",
+        items: items
+          .filter((i) => i.inspectionId === r.id)
+          .map((i) => ({
+            id: i.id,
+            sequence: i.sequence,
+            itemName: i.itemName,
+            criteria: i.criteria ?? "",
+            severity: i.severity,
+            isMandatory: i.isMandatory === 1,
+          })),
+      })),
+    },
+  });
+});
+
+app.post("/qc/:id/complete", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  const id = c.req.param("id");
+  const today = todayYmd();
+  const dept = await getCurrentDeptForWorker(
+    c.var.DB,
+    auth.workerId,
+    today,
+    auth.worker.departmentCode,
+  );
+  if (!dept) {
+    return c.json({ success: false, error: "No department for this worker today" }, 403);
+  }
+
+  const insp = await c.var.DB
+    .prepare(
+      "SELECT id, stage, department, status FROM qc_inspections WHERE id = ?",
+    )
+    .bind(id)
+    .first<{ id: string; stage: string | null; department: string | null; status: string | null }>();
+  if (!insp) return c.json({ success: false, error: "Inspection not found" }, 404);
+  // The department gate. A phone answers for the bench it is standing at and
+  // nothing else.
+  if ((insp.department ?? "").toUpperCase() !== dept) {
+    return c.json({ success: false, error: "That inspection belongs to another department" }, 403);
+  }
+  if (insp.stage !== "WIP") {
+    return c.json({ success: false, error: "Only WIP inspections can be submitted from the phone" }, 403);
+  }
+
+  const body = (await c.req.json().catch(() => ({}))) as {
+    subjectId?: string;
+    overallNotes?: string;
+    items?: Array<{ id?: string; result?: string; notes?: string }>;
+  };
+  const subjectId = String(body.subjectId ?? "").trim();
+  if (!subjectId) {
+    return c.json({ success: false, error: "Pick the job card you sampled" }, 400);
+  }
+  // The subject must be a live card in the SAME department. Without this a
+  // FAIL could be pointed at any job-card id in the factory and reset it.
+  const subjects = await workerQcSubjects(c.var.DB, dept);
+  if (!subjects.some((s) => s.id === subjectId)) {
+    return c.json(
+      { success: false, error: "That job card is not live in your department" },
+      403,
+    );
+  }
+  const subject = subjects.find((s) => s.id === subjectId);
+
+  const items = (Array.isArray(body.items) ? body.items : [])
+    .filter((it): it is { id: string; result: "PASS" | "FAIL" | "NA"; notes?: string } =>
+      typeof it?.id === "string" &&
+      (it.result === "PASS" || it.result === "FAIL" || it.result === "NA"),
+    )
+    .map((it) => ({ id: it.id, result: it.result, notes: it.notes }));
+
+  const res = await completeInspection(c.var.DB, id, {
+    subjectType: "JOB_CARD",
+    subjectId,
+    subjectCode: subject?.poNo ?? "",
+    subjectLabel: `${subject?.poNo ?? ""} · ${subject?.wipLabel || subject?.wipCode || ""}`.trim(),
+    items,
+    overallNotes: String(body.overallNotes ?? ""),
+    inspectorId: auth.workerId,
+    inspectorName: auth.worker.name,
+  });
+  if (!res.ok) return c.json({ success: false, error: res.error }, res.status);
+  return c.json({ success: true, data: res.data, sideEffects: res.sideEffects });
 });
 
 // ============================================================

@@ -468,6 +468,284 @@ app.post("/:id/skip", async (c) => {
   }
 });
 
+// --- shared completion core ------------------------------------------------
+//
+// Submitting an inspection is NOT just a status flip — it writes the per-item
+// results, the header, a qc_tag + qc_defect per FAIL, and (WIP + JOB_CARD +
+// FAIL) resets the job card, clears its piece_pics and recomputes the parent
+// PO. Two surfaces now submit inspections: the desktop ERP page and the worker
+// phone (POST /api/worker/qc/:id/complete). They MUST NOT each own a copy of
+// that side-effect list — the phone silently skipping the piece_pics clear
+// would resurrect a QC-blocked card on the next scan (BUG-2026-06-08). So the
+// whole thing lives here once and both routes call it. Each surface keeps its
+// OWN authorization: this function assumes the caller already decided they may
+// submit THIS inspection.
+export type CompleteInspectionInput = {
+  subjectType: SubjectType;
+  subjectId: string;
+  subjectLabel?: string;
+  subjectCode?: string;
+  items: Array<{
+    id: string;
+    result: "PASS" | "FAIL" | "NA";
+    notes?: string;
+    photoUrl?: string;
+  }>;
+  overallNotes?: string;
+  inspectorId?: string | null;
+  inspectorName?: string | null;
+};
+
+export type CompleteInspectionResult =
+  | {
+      ok: true;
+      data: ReturnType<typeof rowToInspection>;
+      sideEffects: { tagsCreated: number; jobCardReset: boolean };
+    }
+  | { ok: false; status: 400 | 404 | 409 | 500; error: string };
+
+export async function completeInspection(
+  db: D1Database,
+  id: string,
+  input: CompleteInspectionInput,
+): Promise<CompleteInspectionResult> {
+  const existing = await db
+    .prepare("SELECT * FROM qc_inspections WHERE id = ?")
+    .bind(id)
+    .first<InspectionRow>();
+  if (!existing) return { ok: false, status: 404, error: "Inspection not found" };
+  if (existing.status === "COMPLETED" || existing.status === "SKIPPED") {
+    return { ok: false, status: 409, error: `Already ${existing.status}` };
+  }
+
+  const subjectType = input.subjectType;
+  const subjectId = input.subjectId;
+  const subjectLabel = input.subjectLabel ?? "";
+  const subjectCode = input.subjectCode ?? "";
+  const items = Array.isArray(input.items) ? input.items : [];
+  const overallNotes = input.overallNotes ?? "";
+  const inspectorId = input.inspectorId ?? existing.inspectorId ?? null;
+  const inspectorName = input.inspectorName ?? existing.inspectorName ?? null;
+
+  if (!subjectType) return { ok: false, status: 400, error: "subjectType is required" };
+  if (!subjectId) return { ok: false, status: 400, error: "subjectId is required" };
+  if (items.length === 0) return { ok: false, status: 400, error: "items array is required" };
+
+  // Load existing per-item rows so we can map by id and detect missing
+  const itemRowsRes = await db
+    .prepare("SELECT * FROM qc_inspection_items WHERE inspectionId = ?")
+    .bind(id)
+    .all<InspectionItemRow>();
+  const itemRows = itemRowsRes.results ?? [];
+  const itemRowsById = new Map(itemRows.map((r) => [r.id, r]));
+
+  // Validate every mandatory item has a result
+  for (const ir of itemRows) {
+    if (ir.isMandatory === 1) {
+      const supplied = items.find((x) => x.id === ir.id);
+      if (!supplied || !supplied.result) {
+        return {
+          ok: false,
+          status: 400,
+          error: `Item "${ir.itemName}" is mandatory and must be PASS / FAIL / NA`,
+        };
+      }
+    }
+  }
+
+  // A FAIL with no words is not a finding, it is a shrug — and it is the ONE
+  // thing a reviewer needs weeks later ("what actually failed?"). Enforced
+  // server-side so neither surface can skip it.
+  for (const it of items) {
+    if (it.result === "FAIL" && !String(it.notes ?? "").trim()) {
+      const row = itemRowsById.get(it.id);
+      return {
+        ok: false,
+        status: 400,
+        error: `"${row?.itemName ?? it.id}" is marked FAIL — say what failed`,
+      };
+    }
+  }
+
+  const overallFail = items.some((it) => it.result === "FAIL");
+  const overallResult = overallFail ? "FAIL" : "PASS";
+  const now = new Date().toISOString();
+
+  const stmts: D1PreparedStatement[] = [];
+
+  // 1. Update each per-item row
+  for (const it of items) {
+    const row = itemRowsById.get(it.id);
+    if (!row) continue;
+    stmts.push(
+      db
+        .prepare(
+          `UPDATE qc_inspection_items SET result = ?, notes = ?, photoUrl = ? WHERE id = ?`,
+        )
+        .bind(it.result, it.notes ?? null, it.photoUrl ?? null, it.id),
+    );
+  }
+
+  // 2. Update the inspection header
+  stmts.push(
+    db
+      .prepare(
+        `UPDATE qc_inspections SET
+           status = 'COMPLETED',
+           result = ?,
+           subjectType = ?,
+           subjectId = ?,
+           subjectLabel = ?,
+           notes = ?,
+           inspectorId = ?,
+           inspectorName = ?,
+           completedAt = ?
+         WHERE id = ?`,
+      )
+      .bind(
+        overallResult,
+        subjectType,
+        subjectId,
+        subjectLabel,
+        overallNotes,
+        inspectorId,
+        inspectorName,
+        now,
+        id,
+      ),
+  );
+
+  // 3. For each FAIL item, create a qc_tag + qc_defect row.
+  // The tag is the new soft-marker model; the defect row is kept in sync
+  // so the old defect-tracker UI / reports still see fail data.
+  // (qc_tags stay WRITE-ONLY here — Phase 2 surfacing in Inventory / as DO
+  // warnings was descoped by the owner. Don't re-surface them.)
+  const failItems = items.filter((it) => it.result === "FAIL");
+  for (const it of failItems) {
+    const row = itemRowsById.get(it.id);
+    if (!row) continue;
+    const tagId = genTagId();
+    stmts.push(
+      db
+        .prepare(
+          `INSERT INTO qc_tags (
+             id, subjectType, subjectId, subjectCode, subjectLabel,
+             inspectionId, reason, severity, status, taggedBy, taggedByName, taggedAt
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)`,
+        )
+        .bind(
+          tagId,
+          subjectType,
+          subjectId,
+          subjectCode || null,
+          subjectLabel || null,
+          id,
+          `${row.itemName}${it.notes ? ` — ${it.notes}` : ""}`,
+          row.severity,
+          inspectorId,
+          inspectorName,
+          now,
+        ),
+    );
+    // Mirror into qc_defects so legacy views still see fail data.
+    stmts.push(
+      db
+        .prepare(
+          `INSERT INTO qc_defects (id, qcInspectionId, type, severity, description, actionTaken)
+           VALUES (?, ?, 'OTHER', ?, ?, 'REWORK')`,
+        )
+        .bind(genDefectId(), id, row.severity, `${row.itemName}: ${it.notes ?? "(no detail)"}`),
+    );
+  }
+
+  // 4. WIP-stage + JOB_CARD subject + FAIL → reset the Job Card.
+  let jcResetParentPoId: string | null = null;
+  if (overallFail && existing.stage === "WIP" && subjectType === "JOB_CARD") {
+    stmts.push(
+      db
+        .prepare(
+          `UPDATE job_cards SET
+             status = 'BLOCKED',
+             completedDate = NULL,
+             wipQty = 0,
+             actualMinutes = NULL,
+             productionTimeMinutes = 0
+           WHERE id = ?`,
+        )
+        .bind(subjectId),
+    );
+    // BUG-2026-06-08: clearing the JC's completion alone leaves the per-piece
+    // scan stamps (piece_pics) in place. A later scan re-derives "all pieces
+    // done" from those stamps and re-completes the card (the same vector as
+    // the production-page remove fix, BUG-2026-06-08-002), silently un-doing
+    // the QC block. Clear this JC's piece_pics so a re-scan after rework
+    // starts fresh instead of resurrecting the old completion.
+    stmts.push(
+      db
+        .prepare(
+          `UPDATE piece_pics SET
+             pic1Id = NULL, pic1Name = NULL,
+             pic2Id = NULL, pic2Name = NULL,
+             completedAt = NULL, lastScanAt = NULL, boundStickerKey = NULL
+           WHERE jobCardId = ?`,
+        )
+        .bind(subjectId),
+    );
+    // Stash the parent PO id so we can recompute its status/progress
+    // after the batch commits — flipping a JC to BLOCKED can drop the
+    // parent PO from COMPLETED (extremely rare but possible) or simply
+    // refresh the progress %. Fetched outside the batch so the read
+    // happens before the UPDATE lands.
+    try {
+      const jcRow = await db
+        .prepare(`SELECT productionOrderId FROM job_cards WHERE id = ?`)
+        .bind(subjectId)
+        .first<{ productionOrderId: string }>();
+      jcResetParentPoId = jcRow?.productionOrderId ?? null;
+    } catch (err) {
+      console.error("[qc-pending] parent PO lookup failed", {
+        jcId: subjectId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  await db.batch(stmts);
+
+  // After the batch commits, recompute the parent PO's status/progress
+  // off the fresh JC view. Defensive — a recompute miss must not void
+  // the inspection submission that already committed.
+  if (jcResetParentPoId) {
+    try {
+      await recomputePoStatusAndProgress(db, jcResetParentPoId);
+    } catch (err) {
+      console.error("[qc-pending] recomputePoStatusAndProgress failed", {
+        poId: jcResetParentPoId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Reload + return
+  const [updated, updatedItems] = await Promise.all([
+    db.prepare("SELECT * FROM qc_inspections WHERE id = ?").bind(id).first<InspectionRow>(),
+    db
+      .prepare("SELECT * FROM qc_inspection_items WHERE inspectionId = ? ORDER BY sequence")
+      .bind(id)
+      .all<InspectionItemRow>(),
+  ]);
+  if (!updated) return { ok: false, status: 500, error: "Reload failed" };
+
+  return {
+    ok: true,
+    data: rowToInspection(updated, updatedItems.results ?? []),
+    sideEffects: {
+      tagsCreated: failItems.length,
+      jobCardReset: overallFail && existing.stage === "WIP" && subjectType === "JOB_CARD",
+    },
+  };
+}
+
 // POST /api/qc-pending/:id/complete — submit results + side-effects.
 //
 // Body: {
@@ -481,240 +759,26 @@ app.post("/:id/skip", async (c) => {
 //   inspectorName?: string,
 // }
 //
-// Side-effects on FAIL:
-//   • One qc_tags row per FAIL item (status='ACTIVE')
-//   • qc_defects rows kept in sync for backwards-compat with the old view
-//   • If stage='WIP' and subjectType='JOB_CARD', reset the JC: status=BLOCKED,
-//     completedDate=null, wipQty=0, actualMinutes=null, productionTimeMinutes=0.
+// Side-effects on FAIL: see completeInspection above.
 app.post("/:id/complete", async (c) => {
   const denied = await requirePermission(c, "qc-inspections", "create");
   if (denied) return denied;
   const id = c.req.param("id");
-  const existing = await c.var.DB
-    .prepare("SELECT * FROM qc_inspections WHERE id = ?")
-    .bind(id)
-    .first<InspectionRow>();
-  if (!existing) return c.json({ success: false, error: "Inspection not found" }, 404);
-  if (existing.status === "COMPLETED" || existing.status === "SKIPPED") {
-    return c.json({ success: false, error: `Already ${existing.status}` }, 409);
-  }
 
   try {
     const body = (await c.req.json()) as Record<string, unknown>;
-    const subjectType = body.subjectType as SubjectType;
-    const subjectId = body.subjectId as string;
-    const subjectLabel = (body.subjectLabel as string) ?? "";
-    const subjectCode = (body.subjectCode as string) ?? "";
-    const items = (Array.isArray(body.items) ? body.items : []) as Array<{
-      id: string;
-      result: "PASS" | "FAIL" | "NA";
-      notes?: string;
-      photoUrl?: string;
-    }>;
-    const overallNotes = (body.overallNotes as string) ?? "";
-    const inspectorId = (body.inspectorId as string) ?? existing.inspectorId ?? null;
-    const inspectorName = (body.inspectorName as string) ?? existing.inspectorName ?? null;
-
-    if (!subjectType) return c.json({ success: false, error: "subjectType is required" }, 400);
-    if (!subjectId) return c.json({ success: false, error: "subjectId is required" }, 400);
-    if (items.length === 0) return c.json({ success: false, error: "items array is required" }, 400);
-
-    // Load existing per-item rows so we can map by id and detect missing
-    const itemRowsRes = await c.var.DB
-      .prepare("SELECT * FROM qc_inspection_items WHERE inspectionId = ?")
-      .bind(id)
-      .all<InspectionItemRow>();
-    const itemRows = itemRowsRes.results ?? [];
-    const itemRowsById = new Map(itemRows.map((r) => [r.id, r]));
-
-    // Validate every mandatory item has a result
-    for (const ir of itemRows) {
-      if (ir.isMandatory === 1) {
-        const supplied = items.find((x) => x.id === ir.id);
-        if (!supplied || !supplied.result) {
-          return c.json(
-            { success: false, error: `Item "${ir.itemName}" is mandatory and must be PASS / FAIL / NA` },
-            400,
-          );
-        }
-      }
-    }
-
-    const overallFail = items.some((it) => it.result === "FAIL");
-    const overallResult = overallFail ? "FAIL" : "PASS";
-    const now = new Date().toISOString();
-
-    const stmts: D1PreparedStatement[] = [];
-
-    // 1. Update each per-item row
-    for (const it of items) {
-      const row = itemRowsById.get(it.id);
-      if (!row) continue;
-      stmts.push(
-        c.var.DB
-          .prepare(
-            `UPDATE qc_inspection_items SET result = ?, notes = ?, photoUrl = ? WHERE id = ?`,
-          )
-          .bind(it.result, it.notes ?? null, it.photoUrl ?? null, it.id),
-      );
-    }
-
-    // 2. Update the inspection header
-    stmts.push(
-      c.var.DB
-        .prepare(
-          `UPDATE qc_inspections SET
-             status = 'COMPLETED',
-             result = ?,
-             subjectType = ?,
-             subjectId = ?,
-             subjectLabel = ?,
-             notes = ?,
-             inspectorId = ?,
-             inspectorName = ?,
-             completedAt = ?
-           WHERE id = ?`,
-        )
-        .bind(
-          overallResult,
-          subjectType,
-          subjectId,
-          subjectLabel,
-          overallNotes,
-          inspectorId,
-          inspectorName,
-          now,
-          id,
-        ),
-    );
-
-    // 3. For each FAIL item, create a qc_tag + qc_defect row.
-    // The tag is the new soft-marker model; the defect row is kept in sync
-    // so the old defect-tracker UI / reports still see fail data.
-    const failItems = items.filter((it) => it.result === "FAIL");
-    for (const it of failItems) {
-      const row = itemRowsById.get(it.id);
-      if (!row) continue;
-      const tagId = genTagId();
-      stmts.push(
-        c.var.DB
-          .prepare(
-            `INSERT INTO qc_tags (
-               id, subjectType, subjectId, subjectCode, subjectLabel,
-               inspectionId, reason, severity, status, taggedBy, taggedByName, taggedAt
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)`,
-          )
-          .bind(
-            tagId,
-            subjectType,
-            subjectId,
-            subjectCode || null,
-            subjectLabel || null,
-            id,
-            `${row.itemName}${it.notes ? ` — ${it.notes}` : ""}`,
-            row.severity,
-            inspectorId,
-            inspectorName,
-            now,
-          ),
-      );
-      // Mirror into qc_defects so legacy views still see fail data.
-      stmts.push(
-        c.var.DB
-          .prepare(
-            `INSERT INTO qc_defects (id, qcInspectionId, type, severity, description, actionTaken)
-             VALUES (?, ?, 'OTHER', ?, ?, 'REWORK')`,
-          )
-          .bind(genDefectId(), id, row.severity, `${row.itemName}: ${it.notes ?? "(no detail)"}`),
-      );
-    }
-
-    // 4. WIP-stage + JOB_CARD subject + FAIL → reset the Job Card.
-    let jcResetParentPoId: string | null = null;
-    if (overallFail && existing.stage === "WIP" && subjectType === "JOB_CARD") {
-      stmts.push(
-        c.var.DB
-          .prepare(
-            `UPDATE job_cards SET
-               status = 'BLOCKED',
-               completedDate = NULL,
-               wipQty = 0,
-               actualMinutes = NULL,
-               productionTimeMinutes = 0
-             WHERE id = ?`,
-          )
-          .bind(subjectId),
-      );
-      // BUG-2026-06-08: clearing the JC's completion alone leaves the per-piece
-      // scan stamps (piece_pics) in place. A later scan re-derives "all pieces
-      // done" from those stamps and re-completes the card (the same vector as
-      // the production-page remove fix, BUG-2026-06-08-002), silently un-doing
-      // the QC block. Clear this JC's piece_pics so a re-scan after rework
-      // starts fresh instead of resurrecting the old completion.
-      stmts.push(
-        c.var.DB
-          .prepare(
-            `UPDATE piece_pics SET
-               pic1Id = NULL, pic1Name = NULL,
-               pic2Id = NULL, pic2Name = NULL,
-               completedAt = NULL, lastScanAt = NULL, boundStickerKey = NULL
-             WHERE jobCardId = ?`,
-          )
-          .bind(subjectId),
-      );
-      // Stash the parent PO id so we can recompute its status/progress
-      // after the batch commits — flipping a JC to BLOCKED can drop the
-      // parent PO from COMPLETED (extremely rare but possible) or simply
-      // refresh the progress %. Fetched outside the batch so the read
-      // happens before the UPDATE lands.
-      try {
-        const jcRow = await c.var.DB
-          .prepare(`SELECT productionOrderId FROM job_cards WHERE id = ?`)
-          .bind(subjectId)
-          .first<{ productionOrderId: string }>();
-        jcResetParentPoId = jcRow?.productionOrderId ?? null;
-      } catch (err) {
-        console.error("[qc-pending] parent PO lookup failed", {
-          jcId: subjectId,
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-
-    await c.var.DB.batch(stmts);
-
-    // After the batch commits, recompute the parent PO's status/progress
-    // off the fresh JC view. Defensive — a recompute miss must not void
-    // the inspection submission that already committed.
-    if (jcResetParentPoId) {
-      try {
-        await recomputePoStatusAndProgress(c.var.DB, jcResetParentPoId);
-      } catch (err) {
-        console.error("[qc-pending] recomputePoStatusAndProgress failed", {
-          poId: jcResetParentPoId,
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-
-    // Reload + return
-    const [updated, updatedItems] = await Promise.all([
-      c.var.DB.prepare("SELECT * FROM qc_inspections WHERE id = ?").bind(id).first<InspectionRow>(),
-      c.var.DB
-        .prepare("SELECT * FROM qc_inspection_items WHERE inspectionId = ? ORDER BY sequence")
-        .bind(id)
-        .all<InspectionItemRow>(),
-    ]);
-    if (!updated) return c.json({ success: false, error: "Reload failed" }, 500);
-
-    return c.json({
-      success: true,
-      data: rowToInspection(updated, updatedItems.results ?? []),
-      sideEffects: {
-        tagsCreated: failItems.length,
-        jobCardReset: overallFail && existing.stage === "WIP" && subjectType === "JOB_CARD",
-      },
+    const res = await completeInspection(c.var.DB, id, {
+      subjectType: body.subjectType as SubjectType,
+      subjectId: body.subjectId as string,
+      subjectLabel: (body.subjectLabel as string) ?? "",
+      subjectCode: (body.subjectCode as string) ?? "",
+      items: (Array.isArray(body.items) ? body.items : []) as CompleteInspectionInput["items"],
+      overallNotes: (body.overallNotes as string) ?? "",
+      inspectorId: (body.inspectorId as string) ?? null,
+      inspectorName: (body.inspectorName as string) ?? null,
     });
+    if (!res.ok) return c.json({ success: false, error: res.error }, res.status);
+    return c.json({ success: true, data: res.data, sideEffects: res.sideEffects });
   } catch (err) {
     console.error("[qc-pending/complete] error:", err);
     return c.json({ success: false, error: err instanceof Error ? err.message : "Invalid body" }, 400);

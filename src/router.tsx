@@ -53,6 +53,7 @@ const WorkerLogin = lazy(() => import('./pages/worker/login'))
 const WorkerHome = lazy(() => import('./pages/worker'))
 const WorkerScan = lazy(() => import('./pages/worker/scan'))
 const WorkerIssue = lazy(() => import('./pages/worker/issue'))
+const WorkerQc = lazy(() => import('./pages/worker/qc'))
 const WorkerPay = lazy(() => import('./pages/worker/pay'))
 const WorkerMe = lazy(() => import('./pages/worker/me'))
 const WorkerTeam = lazy(() => import('./pages/worker/team'))
@@ -164,6 +165,7 @@ export const router = createBrowserRouter([
       { path: '/worker/login', element: <S><WorkerLogin /></S> },
       { path: '/worker/scan', element: <S><WorkerScan /></S> },
       { path: '/worker/issue', element: <S><WorkerIssue /></S> },
+      { path: '/worker/qc', element: <S><WorkerQc /></S> },
       { path: '/worker/pay', element: <S><WorkerPay /></S> },
       { path: '/worker/me', element: <S><WorkerMe /></S> },
       { path: '/worker/team', element: <S><WorkerTeam /></S> },

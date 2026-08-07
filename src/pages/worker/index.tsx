@@ -25,6 +25,7 @@ import {
   Megaphone,
   MapPin,
   ChevronDown,
+  ShieldCheck,
 } from "lucide-react";
 import { useT, useWorkerLang } from "@/lib/worker-i18n";
 import { workerFetch, WORKER_ME_KEY } from "@/layouts/WorkerLayout";
@@ -522,6 +523,9 @@ export default function WorkerHomePage() {
   // ---- Location permission (Feature B) ----
   const [locState, setLocState] = useState<LocationState>("unknown");
 
+  // ---- QC slots waiting for this worker's department today ----
+  const [qcDue, setQcDue] = useState(0);
+
   // ---- fetches ----
   const refreshToday = useCallback(async () => {
     try {
@@ -605,11 +609,32 @@ export default function WorkerHomePage() {
     }
   }, []);
 
+  // QC slots due for THIS worker's department today. Best-effort: a failure
+  // just leaves the count at 0 and the entry hidden — it must never strand the
+  // home page. The count is what makes the entry honest: a QC button that is
+  // usually a dead end is a button people learn to ignore, which is most of
+  // how 3,009 inspections came to sit untouched.
+  const refreshQcDue = useCallback(async () => {
+    try {
+      const res = await workerFetch("/api/worker/qc-today");
+      const raw = (await res.json()) as {
+        success?: boolean;
+        data?: { inspections?: unknown[] };
+      };
+      if (res.ok && raw.success && Array.isArray(raw.data?.inspections)) {
+        setQcDue(raw.data.inspections.length);
+      }
+    } catch {
+      /* leave qcDue as-is */
+    }
+  }, []);
+
   useEffect(() => {
     refreshToday();
     // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot mount data load; refresh* are stable useCallbacks
     refreshAnnouncements();
-  }, [refreshToday, refreshAnnouncements]);
+    void refreshQcDue();
+  }, [refreshToday, refreshAnnouncements, refreshQcDue]);
 
   // Feature B — proactively request location ONCE on app open. This prompts a
   // worker who hasn't decided yet (so their punch stamps "At factory"); a
@@ -1153,6 +1178,27 @@ export default function WorkerHomePage() {
         <span className="h-full w-full flex items-center justify-center gap-3">
           <ScanLine className="h-7 w-7" />
           {t("home.scanBig")}
+        </span>
+      </Link>
+      )}
+
+      {/* Quality check — shown ONLY when this worker's department actually has
+          a slot open today, so the entry always leads somewhere. Not behind
+          SHOW_CLOCK_AND_SCAN: reaching QC from the floor is the whole point
+          (2026-08-07 — before this, "qc" appeared nowhere in the worker
+          portal and every inspection was a desk job nobody did). */}
+      {qcDue > 0 && (
+      <Link
+        to="/worker/qc"
+        className="block w-full h-14 rounded-xl bg-white border-2 border-[#6B5C32] text-[#6B5C32] font-bold hover:bg-[#FAF7F0] transition-colors"
+      >
+        <span className="h-full w-full flex items-center justify-center gap-2">
+          <ShieldCheck className="h-5 w-5" />
+          {t("home.qualityCheck")}
+          <span className="rounded-full bg-[#6B5C32] px-2 py-0.5 text-xs font-bold text-white">
+            {qcDue}
+          </span>
+          <span className="text-xs font-medium text-[#8A8680]">{t("home.qualityCheckDue")}</span>
         </span>
       </Link>
       )}

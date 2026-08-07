@@ -21,6 +21,7 @@ import { translateSql } from "../src/api/lib/supabase-compat.ts";
 const SOURCES = [
   "src/api/routes/kpi.ts",
   "src/api/lib/kpi-metrics.ts",
+  "src/api/routes/public-kpi-survey.ts",
 ].map((f) => [f, readFileSync(resolve(process.cwd(), f), "utf8")]);
 
 /**
@@ -84,3 +85,4 @@ test("the KPI tables' own columns are all mapped", () => {
     );
   }
 });
+

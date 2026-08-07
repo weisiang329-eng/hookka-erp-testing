@@ -84,8 +84,25 @@ async function resolveToken(
 ): Promise<SurveyTokenRow | null> {
   return db
     .prepare(
-      `SELECT token, userId, kpiKey, period, customerId, customerName,
-              usedAt, expiresAt, orgId
+      // QUOTED aliases, not bare column names. Bare `expiresAt` is translated
+      // to `expires_at`, and Postgres hands the column back under THAT name —
+      // so `row.expiresAt` read undefined, `parseTs(undefined)` returned null,
+      // and surveyTokenState called every freshly-minted link EXPIRED. Verified
+      // on prod 2026-08-07: a token minted seconds earlier, expiring in 30 days,
+      // 410'd on its first open. Quoting is what makes the JS side match.
+      //
+      // It failed CLOSED, which is the only reason this was a dead feature and
+      // not an open door: with usedAt unreadable too, a spent link would also
+      // have read EXPIRED rather than LIVE.
+      `SELECT token       AS "token",
+              userId      AS "userId",
+              kpiKey      AS "kpiKey",
+              period      AS "period",
+              customerId  AS "customerId",
+              customerName AS "customerName",
+              usedAt      AS "usedAt",
+              expiresAt   AS "expiresAt",
+              orgId       AS "orgId"
          FROM kpi_survey_tokens
         WHERE token = ? LIMIT 1`,
     )

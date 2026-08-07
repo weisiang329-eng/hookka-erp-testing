@@ -55,8 +55,8 @@ export type SurveyTokenRow = {
   period: string;
   customerId: string | null;
   customerName: string | null;
-  usedAt: string | null;
-  expiresAt: string | null;
+  usedAt: string | Date | null;
+  expiresAt: string | Date | null;
   orgId: string | null;
 };
 
@@ -69,9 +69,29 @@ export type SurveyTokenState = "LIVE" | "USED" | "EXPIRED";
  * Date.parse, which on a Malaysian phone is 8 hours off. Everything we write
  * is UTC, so a string with no zone marker gets one.
  */
-export function parseTs(raw: string | null | undefined): number | null {
+export function parseTs(raw: unknown): number | null {
+  // A Date or an epoch arrives already resolved. `expires_at` is TIMESTAMPTZ —
+  // unlike the TIMESTAMP columns on the other KPI tables — and the driver hands
+  // those back as Date objects, not strings.
+  //
+  // The first version went straight to String(raw), which turned a Date into
+  // "Wed Sep 06 2026 11:09:50 GMT+0800 (…)", saw no trailing Z, appended one,
+  // and produced a string Date.parse cannot read. parseTs returned null,
+  // surveyTokenState reads a null expiry as EXPIRED, and so EVERY freshly
+  // minted link 410'd on the customer's first tap. Found on prod 2026-08-07 by
+  // opening a link minted seconds earlier; the whole unit suite passed, because
+  // the in-memory harness stores strings and never produces a Date.
+  if (raw instanceof Date) {
+    const ms = raw.getTime();
+    return Number.isFinite(ms) ? ms : null;
+  }
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+
   const s = String(raw ?? "").trim();
   if (!s) return null;
+  // Everything we write is UTC, so a string with no zone marker gets one — a
+  // bare `2026-09-06T12:00:00` would otherwise parse as LOCAL time, which on a
+  // Malaysian phone is 8 hours off.
   const iso = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(s)
     ? s
     : `${s.replace(" ", "T")}Z`;
@@ -89,8 +109,12 @@ export function surveyTokenState(
   row: SurveyTokenRow,
   now: number = Date.now(),
 ): SurveyTokenState {
-  if (row.usedAt) return "USED";
-  const expires = parseTs(row.expiresAt);
+  // Dual-keyed, as CLAUDE.md requires of every row read. The query aliases
+  // these properly now, but a single unquoted SELECT somewhere else would
+  // otherwise turn every live link into an expired one, silently.
+  const r = row as SurveyTokenRow & { used_at?: string | null; expires_at?: string | null };
+  if (r.usedAt ?? r.used_at) return "USED";
+  const expires = parseTs(r.expiresAt ?? r.expires_at);
   if (expires === null || expires <= now) return "EXPIRED";
   return "LIVE";
 }

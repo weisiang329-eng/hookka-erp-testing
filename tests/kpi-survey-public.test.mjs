@@ -489,3 +489,39 @@ test("only Super Admin can mint a link", async () => {
   assert.ok(!/newSurveyToken/.test(pub),
     "the public route must only RESOLVE tokens, never create them");
 });
+
+test("a TIMESTAMPTZ expiry arrives as a Date, and must not read as expired", async () => {
+  // The bug that made this feature dead on arrival. `kpi_survey_tokens` uses
+  // TIMESTAMPTZ where the other KPI tables use TIMESTAMP, and the driver hands
+  // those back as Date objects. parseTs stringified the Date, saw no trailing
+  // Z, appended one, and produced something Date.parse cannot read — so every
+  // live link reported EXPIRED and no customer could ever answer.
+  //
+  // The whole suite passed while this was broken: the in-memory harness stores
+  // strings and never produces a Date. That is the gap this case closes.
+  const { parseTs, surveyTokenState } = await import("../src/api/lib/kpi-survey-token.ts");
+
+  const inThirtyDays = new Date(Date.now() + 30 * 86400_000);
+  assert.equal(parseTs(inThirtyDays), inThirtyDays.getTime(), "a Date must survive intact");
+  assert.equal(parseTs(inThirtyDays.getTime()), inThirtyDays.getTime(), "and so must an epoch");
+
+  const live = { usedAt: null, expiresAt: inThirtyDays };
+  assert.equal(surveyTokenState(live), "LIVE", "a link with 30 days left is LIVE");
+
+  const gone = { usedAt: null, expiresAt: new Date(Date.now() - 86400_000) };
+  assert.equal(surveyTokenState(gone), "EXPIRED");
+  assert.equal(surveyTokenState({ usedAt: new Date(), expiresAt: inThirtyDays }), "USED");
+
+  // Strings still work — both zoned and bare-UTC.
+  assert.equal(surveyTokenState({ usedAt: null, expiresAt: inThirtyDays.toISOString() }), "LIVE");
+  assert.equal(
+    surveyTokenState({ usedAt: null, expiresAt: inThirtyDays.toISOString().replace("T", " ").replace("Z", "") }),
+    "LIVE",
+    "a bare UTC timestamp must not be read as local time",
+  );
+
+  // Unreadable still fails CLOSED — a link whose lifetime cannot be established
+  // is not one to accept a score through.
+  assert.equal(parseTs("not a date"), null);
+  assert.equal(surveyTokenState({ usedAt: null, expiresAt: "not a date" }), "EXPIRED");
+});

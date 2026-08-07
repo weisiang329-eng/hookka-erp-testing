@@ -24,15 +24,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const read = (p) => readFileSync(resolve(process.cwd(), p), "utf8").replace(/\r\n/g, "\n");
 const INV = read("src/api/routes/invoices.ts");
 const DO_HELPERS = read("src/api/routes/delivery-orders/_helpers.ts");
 
+// pathToFileURL, not a raw absolute path: on Windows the ESM loader rejects a
+// "C:\…" specifier (protocol 'c:'); it needs a file:// URL.
 const {
   VALID_TRANSITIONS,
   buildInvoiceDeathReleaseStatements,
-} = await import(resolve(process.cwd(), "src/api/routes/delivery-orders/_helpers.ts"));
+} = await import(pathToFileURL(resolve(process.cwd(), "src/api/routes/delivery-orders/_helpers.ts")).href);
 
 // ── A fake D1 that answers from plain arrays and records what would be written ─
 

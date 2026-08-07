@@ -15,11 +15,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { roundUpToRinggitSen, roundSen } from "../src/lib/utils.ts";
 import { parseDiscountEntrySen } from "../src/lib/pricing.ts";
 import { distributeComboUnitPrices } from "../src/api/lib/sofa-combo.ts";
 
-const SRC = new URL("../src/", import.meta.url).pathname;
+// fileURLToPath (NOT URL.pathname): on Windows .pathname yields "/C:/…" which
+// path.join then mangles into "C:\C:\…". This resolves correctly on all OSes.
+const SRC = fileURLToPath(new URL("../src/", import.meta.url));
 
 // ── 1. the primitive ────────────────────────────────────────────────────────
 
@@ -209,7 +212,10 @@ test("nobody hand-rolls Math.ceil(x / 100) * 100 — roundUpToRinggitSen is the 
   for (const f of walk(SRC)) {
     const src = readFileSync(f, "utf8");
     if (/Math\.ceil\s*\([^)]*\/\s*100\s*\)\s*\*\s*100/.test(src)) {
-      if (!f.endsWith("/lib/utils.ts")) offenders.push(f.slice(SRC.length));
+      // Normalize separators so the utils.ts exclusion holds on Windows too
+      // (walk() yields backslash paths there).
+      const rel = f.slice(SRC.length).replace(/\\/g, "/");
+      if (rel !== "lib/utils.ts") offenders.push(rel);
     }
   }
   assert.deepEqual(offenders, [], "use roundUpToRinggitSen from @/lib/utils");

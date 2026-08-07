@@ -10,6 +10,7 @@ import { RepairPartsBadge } from "@/components/sales/repair-scope-picker";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { cn, formatDate, formatRM } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { buildDoDetailListingAoa } from "@/lib/doc-detail-listings";
 import { useNavigate } from "react-router-dom";
 import {
   Truck,
@@ -4934,6 +4935,9 @@ export default function DeliveryPage() {
               onSearchChange={setSearch}
               alwaysSearchKeys={DO_SEARCH_KEYS}
               contextMenuItems={getContextMenuItems}
+              exportName="delivery-orders"
+              exportSheetLabel="Delivery Orders"
+              detailExport={{ label: "Detail Listing", build: (rows) => buildDoDetailListingAoa(rows) }}
             />
 
             {/* Pagination footer */}

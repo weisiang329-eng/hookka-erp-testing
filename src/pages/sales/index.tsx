@@ -299,6 +299,10 @@ export default function SalesPage() {
     outstandingItemsSen?: number;
   }>(`/api/sales-orders/stats?${soFilterQs}`);
   const { data: customersResp, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
+  // Salesperson display names for the Detail Listing export's "Agent" column.
+  // Best-effort: /api/users may be admin-gated, so an empty/403 payload just
+  // leaves Agent blank rather than failing the export.
+  const { data: usersResp } = useCachedJson<{ success?: boolean; data?: Array<{ id?: string; displayName?: string; email?: string }> }>("/api/users");
   // Multi-Company Phase 2 — company registry for the "Company" column (code →
   // name) and the company filter dropdown. Mirrors procurement/index.tsx.
   const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code?: string; name?: string; isActive?: boolean }> }>("/api/organisations");
@@ -335,6 +339,22 @@ export default function SalesPage() {
     () => (customersResp?.data ? customersResp.data : Array.isArray(customersResp) ? customersResp : []),
     [customersResp]
   );
+  // customerId → Debtor Code (customer.code) and → Agent (salesperson name),
+  // for the Detail Listing export. Built from data the page already loads, so
+  // the hot SO-list query stays a plain SELECT with no customer JOIN.
+  const detailExportLookups = useMemo(() => {
+    const users = usersResp?.data ?? [];
+    const userName = new Map<string, string>();
+    for (const u of users) if (u.id) userName.set(u.id, (u.displayName || u.email || "").trim());
+    const debtorCodeByCustomerId = new Map<string, string>();
+    const agentByCustomerId = new Map<string, string>();
+    for (const c of customers) {
+      if (c.code) debtorCodeByCustomerId.set(c.id, c.code);
+      const agent = c.salespersonUserId ? userName.get(c.salespersonUserId) : "";
+      if (agent) agentByCustomerId.set(c.id, agent);
+    }
+    return { debtorCodeByCustomerId, agentByCustomerId };
+  }, [customers, usersResp]);
   const linkedPOMap = useMemo<Record<string, LinkedPOSummary[]>>(() => {
     const map: Record<string, LinkedPOSummary[]> = {};
     if (productionOrdersResp?.success && productionOrdersResp.data) {
@@ -1601,7 +1621,7 @@ export default function SalesPage() {
             gridId="sales-orders-list"
             exportName={isServiceOrderMode ? "service-orders" : "sales-orders"}
             exportSheetLabel={isServiceOrderMode ? "Service Orders" : "Sales Orders"}
-            detailExport={{ label: "Detail Listing", build: (rows) => buildSoDetailListingAoa(rows) }}
+            detailExport={{ label: "Detail Listing", build: (rows) => buildSoDetailListingAoa(rows, detailExportLookups) }}
             // Give each Status-dropdown selection its own filter session
             // so a sticky column-filter from a previous selection can't
             // blank the grid. BUG (Wei Siang 2026-05-16): picking

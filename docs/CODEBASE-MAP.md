@@ -616,6 +616,35 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 ---
 
+## Performance / KPI
+
+| Frontend page | API route | Primary tables | Tests |
+|---|---|---|---|
+| `src/pages/kpi/index.tsx` — three tabs: Library (the catalogue + assign) / People (everyone's score + prev-month delta) / Card (one person's month). Super Admin sees all three; everyone else only their own Card | `src/api/routes/kpi.ts` — `/me`, `/users/:id`, `/library`, `/people`, `/catalog`, `/assignments/:id`, `/kpi/:kpiKey/assignees`, `/checklist/:kpiKey`, `/survey/:kpiKey`, `/rating/:kpiKey`, `/payout/:id` | `kpi_assignments` / `kpi_periods` / `kpi_checklist_ticks` / `kpi_user_settings` / `kpi_survey_responses` / `kpi_manual_ratings` | `tests/kpi-module.test.mjs` · `tests/kpi-sql-identifiers.test.mjs` |
+| | `src/api/lib/kpi-catalog.ts` — the 7 KPIs, their scoring type, curve and published rules. THE source of truth; the UI reads questions / checklist items / rating bands from here, never a copy | | |
+| | `src/api/lib/kpi-metrics.ts` — one function per KPI's ACTUAL. `customerDeliveryLate` · `setupCompleteness` · `documentsStuck` (composite) · `productionEfficiency` · `serviceCaseResolution` · `checklistProgress` · `surveyMean` · `manualRating` | `products` / `bom_templates` / `delivery_orders` / `invoices` / `service_cases` / `reports_compliance_snapshot` | |
+| | `src/api/lib/ensure-kpi-tables.ts` — runtime self-apply. Migrations are inert; every column arrives here | | |
+
+**Read before touching this module:**
+- Four scoring types (`AUTO` / `CHECKLIST` / `SURVEY` / `MANUAL`) and six attainment
+  curves (`TARGET_RATIO` / `PENALTY_PER_PCT` / `PENALTY_PER_UNIT` / `SURVEY_MEAN` /
+  `MANUAL_SCORE` / `COMPOSITE` / `EFFICIENCY_BANDS`). Each is documented at its
+  declaration in kpi-catalog.ts with the owner ruling that produced it — read the
+  ruling before changing a number, the numbers are not arbitrary.
+- **The card iterates ASSIGNMENT ROWS, not `kpisForRole(role)`.** `roles` is a
+  suggestion for the picker. Reverting that silently drops any cross-role assignment
+  from the person's card while leaving the row in the table (owner 2026-08-07).
+- `documents_not_stuck` swallowed the retired `exceptions_cleared`. Its exception half
+  MUST keep excluding `soNoInvoice` + `doNotInvoiced`, or one late invoice is charged
+  twice — that double count is the whole reason the two were merged.
+- Routing lives in `bom_templates.wip_components`, NOT `l1_processes` (near-empty
+  legacy column). `setup_completeness` read the wrong one and under-reported by 160 SKUs.
+- **Quoted camelCase SELECT aliases only.** Unquoted `AS has_bom` returns as `hasBom`
+  and every lookup reads undefined. `tests/kpi-sql-identifiers.test.mjs` guards the
+  camelCase-in-SQL half of this across BOTH kpi.ts and kpi-metrics.ts.
+- A metric with no data returns `actual: null` and says so. It must never return 0 —
+  a zero is a failure, an absence is not, and the score divides by measurable weight only.
+
 ## Dashboard & Command Center
 
 | Frontend page | API route | Primary tables | Tests |

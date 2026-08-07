@@ -334,6 +334,26 @@ export default function FinanceDashboardPage() {
     if (!s) return r.actual?.sales ?? 0;
     return csLine === "all" ? s.bedframe + s.sofa : csLine === "bedframe" ? s.bedframe : s.sofa;
   };
+  // The base a FORECAST percentage divides by is the FORECAST revenue, not the
+  // actual (owner 2026-08-06: 「他应该是我 forecast 的 percentage, 而不是出
+  // actual 的percentage」). Dividing a plan by an actual mixes two worlds: in a
+  // month only part-billed it read 45,000 / 37,098 = 121.30% for a target that
+  // is 15% of the 300,000 planned. Both sides must be a share of their OWN
+  // revenue, or comparing them says nothing.
+  //
+  // A line view pro-rates by the ACTUAL split, the same way csForecastAmt
+  // pro-rates the target itself — the plan is keyed whole-company, so that
+  // split is the only one there is, and using it on both sides keeps the
+  // percentage internally consistent.
+  const csForecastSales = (r: Row): number | null => {
+    const fs = r.forecast?.sales ?? null;
+    if (fs === null) return null;
+    if (csLine === "all") return fs;
+    const s = r.costStructure?.salesSplit;
+    const tot = s ? s.bedframe + s.sofa : 0;
+    if (!s || tot <= 0) return null;
+    return Math.round(fs * ((csLine === "bedframe" ? s.bedframe : s.sofa) / tot));
+  };
   // Chart plots the amounts; the table under it carries the amount AND its
   // share of sales side by side (owner 2026-07-29: 「把 percentage 和 RM 做在
   // 一起…% 在 spend 旁边」), so the toggle is gone.
@@ -360,7 +380,11 @@ export default function FinanceDashboardPage() {
           point[`__pct__${cat}`] = sales > 0 ? Math.round((amt / sales) * 10000) / 100 : null;
           const fc = csMeasure === "spend" ? csForecastAmt(r, cat) : null; // targets are spend-side
           point[`__fc__${cat}`] = fc;
-          point[`__fcpct__${cat}`] = fc !== null && sales > 0 ? Math.round((fc / sales) * 10000) / 100 : null;
+          const fcSales = csForecastSales(r);
+          point[`__fcpct__${cat}`] =
+            fc !== null && fcSales !== null && fcSales > 0
+              ? Math.round((fc / fcSales) * 10000) / 100
+              : null;
         }
         return point;
       }),
@@ -376,12 +400,18 @@ export default function FinanceDashboardPage() {
         const amt = csAmount(r, csFocusEff);
         const sales = csLineSales(r);
         const fc = csMeasure === "spend" ? csForecastAmt(r, csFocusEff) : null;
+        const fcSales = csForecastSales(r);
         return {
           label: r.label + (r.partial ? " *" : ""),
           amount: amt,
           pct: sales > 0 ? Math.round((amt / sales) * 10000) / 100 : null,
           forecast: fc,
-          forecastPct: fc !== null && sales > 0 ? Math.round((fc / sales) * 10000) / 100 : null,
+          // Same rule as the table above: a forecast share divides by forecast
+          // revenue. This row read the same 121.30% for the same reason.
+          forecastPct:
+            fc !== null && fcSales !== null && fcSales > 0
+              ? Math.round((fc / fcSales) * 10000) / 100
+              : null,
         };
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps

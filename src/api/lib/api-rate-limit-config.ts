@@ -76,6 +76,14 @@ const OVERRIDES: Array<{ prefix: string; limits: RateLimitConfig; reason: string
   // under the same tightened public ceiling as the other two public scan
   // surfaces. A warehouse crew scanning items into a rack stays far below this.
   { prefix: "/api/public/rack-qr", limits: { perMinute: 30, perHour: 300 }, reason: "public rack stock-in scan surface" },
+
+  // Public customer satisfaction survey (no session — limiter keys by IP). A
+  // customer opens one link and submits once; the same tightened public
+  // ceiling as the three scan surfaces. This one is a public WRITE with no
+  // human on our side of it, so the ceiling matters more here than anywhere
+  // else — the token is single-use, and this caps how fast anyone can hunt
+  // for one.
+  { prefix: "/api/public/survey", limits: { perMinute: 30, perHour: 300 }, reason: "public customer survey surface" },
 ];
 
 /**

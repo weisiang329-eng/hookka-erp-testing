@@ -118,6 +118,31 @@ const DDL: string[] = [
      org_id         TEXT NOT NULL DEFAULT 'hookka',
      created_at     TIMESTAMP NOT NULL DEFAULT NOW()
    )`,
+  // One row per SHAREABLE SURVEY LINK. The office mints one per customer per
+  // month and sends it; the customer opens it, rates, and the link is spent.
+  //
+  // The token carries who is measured / which KPI / which month, so the PUBLIC
+  // page never has to be told any of that and cannot be argued into writing a
+  // reply against somebody else. used_at is the single-use latch (claimed with
+  // an atomic UPDATE … WHERE used_at IS NULL) and expires_at keeps an August
+  // link out of December's average.
+  `CREATE TABLE IF NOT EXISTS kpi_survey_tokens (
+     token          TEXT PRIMARY KEY,
+     user_id        TEXT NOT NULL,
+     kpi_key        TEXT NOT NULL,
+     period         TEXT NOT NULL,
+     customer_id    TEXT,
+     customer_name  TEXT,
+     created_by     TEXT,
+     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     used_at        TIMESTAMPTZ,
+     expires_at     TIMESTAMPTZ NOT NULL,
+     org_id         TEXT NOT NULL DEFAULT 'hookka'
+   )`,
+  // The office's own list ("which links did I send for August, and did they
+  // come back?") reads by person + month.
+  `CREATE INDEX IF NOT EXISTS kpi_survey_tokens_user_period
+     ON kpi_survey_tokens (user_id, period)`,
   // One row per (person, month, KPI) that a supervisor has scored by hand.
   //
   // Owner 2026-08-07 on spotting problems early: "这个维度基本上都是由上级来评分

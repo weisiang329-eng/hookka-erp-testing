@@ -96,6 +96,16 @@ const EXPECTED_PREFIXES = [
   // PACKING card, via the shared applyPackingRack helper. See
   // routes/public-rack-write.ts and tests/sticker-rack-public.test.mjs.
   "/api/public/rack-write/",
+  // 2026-08-07 — public CUSTOMER SATISFACTION SURVEY. A customer (not a user —
+  // they will never have a session) opens /s/<token> on their phone and rates
+  // five questions. The gate is the unguessable 64-hex kpi_survey_tokens.token,
+  // minted ONLY by the Super-Admin POST /api/kpi/survey/:kpiKey/link. The link
+  // is SINGLE USE (atomic UPDATE … WHERE used_at IS NULL) and time-limited.
+  // GET returns only the code catalogue's questions + named 1–5 scale — no
+  // employee, no customer, no ids. POST writes exactly one
+  // kpi_survey_responses row whose person/KPI/month come off the token's own
+  // row. See routes/public-kpi-survey.ts and tests/kpi-survey-public.test.mjs.
+  "/api/public/survey/",
 ];
 
 test("public endpoint allowlist (exact paths) is locked in", () => {

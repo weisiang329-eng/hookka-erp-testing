@@ -41,6 +41,11 @@ import {
   surveyMean,
   manualRating,
 } from "../lib/kpi-metrics";
+import {
+  newSurveyToken,
+  surveyLinkUrl,
+  clampTokenDays,
+} from "../lib/kpi-survey-token";
 
 const app = new Hono<Env>();
 
@@ -502,6 +507,75 @@ app.post("/survey/:kpiKey", async (c) => {
     )
     .run();
   return c.json({ success: true });
+});
+
+// ---- Survey LINKS (the thing you actually send a customer) ------------------
+//
+// Owner 2026-08-07: "这些是发顾客一个类似 google form submit 选择的，直接评分."
+// The handler above is the office keying a reply in; this is the link that
+// removes the need to. Super Admin mints one per customer per month and sends
+// it; the customer opens /s/<token> and rates. The token carries who is being
+// measured, which KPI and which month, so the public page is told none of it.
+//
+// POST /api/kpi/survey/:kpiKey/link
+//   { userId, period?, customerName?, customerId?, days? }
+//   → { token, url, expiresAt }
+app.post("/survey/:kpiKey/link", async (c) => {
+  const denied = requireSuperAdmin(c);
+  if (denied) return denied;
+  await ensureKpiTables(c.var.DB);
+  const kpiKey = c.req.param("kpiKey");
+  const def = kpiByKey(kpiKey);
+  if (!def || def.scoring !== "SURVEY") {
+    return c.json({ success: false, error: `${kpiKey} is not a survey KPI` }, 400);
+  }
+
+  let body: {
+    userId?: string; period?: string;
+    customerId?: string; customerName?: string; days?: number;
+  };
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body" }, 400);
+  }
+  const userId = String(body.userId ?? "").trim();
+  if (!userId) return c.json({ success: false, error: "userId is required" }, 400);
+  const period = /^\d{4}-\d{2}$/.test(String(body.period ?? ""))
+    ? String(body.period)
+    : periodOf(c);
+
+  const token = newSurveyToken();
+  const expiresAt = new Date(
+    Date.now() + clampTokenDays(body.days) * 86_400_000,
+  ).toISOString();
+
+  await c.var.DB.prepare(
+    `INSERT INTO kpi_survey_tokens
+       (token, userId, kpiKey, period, customerId, customerName,
+        createdBy, expiresAt, orgId)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      token, userId, kpiKey, period,
+      (body.customerId ?? "").trim() || null,
+      (body.customerName ?? "").trim().slice(0, 200) || null,
+      ctxGet(c, "userId") || null,
+      expiresAt, getOrgId(c),
+    )
+    .run();
+
+  return c.json({
+    success: true,
+    data: {
+      token,
+      // Origin of the LIVE request, so a link generated on staging resolves
+      // against staging's own DB (see HOOKKA-GOTCHAS on print-time origins).
+      url: surveyLinkUrl(new URL(c.req.url).origin, token),
+      expiresAt,
+      period,
+    },
+  });
 });
 
 // ---- Supervisor rating -----------------------------------------------------

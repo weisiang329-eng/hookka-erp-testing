@@ -108,6 +108,18 @@ const PUBLIC_PREFIXES = [
   // applyPackingRack helper the worker /packing-rack path uses. See
   // routes/public-rack-write.ts.
   "/api/public/rack-write/",
+  // 2026-08-07 — public CUSTOMER SATISFACTION SURVEY. The office sends a
+  // customer a link; the customer opens /s/<token> on their own phone and
+  // rates five questions. There is no session and never will be — they are a
+  // customer, not a user. The gate is the unguessable 64-hex
+  // kpi_survey_tokens.token, minted ONLY by the Super-Admin endpoint
+  // POST /api/kpi/survey/:kpiKey/link. The token is SINGLE USE (claimed by an
+  // atomic UPDATE … WHERE used_at IS NULL) and time-limited. GET returns just
+  // the catalogue's five questions + the named 1–5 scale — no employee, no
+  // customer, no ids; POST writes exactly one kpi_survey_responses row whose
+  // person/KPI/month come off the token's OWN row, never off the body. See
+  // routes/public-kpi-survey.ts and tests/kpi-survey-public.test.mjs.
+  "/api/public/survey/",
 ];
 
 // Customer QR tracking lookup: only the single-unit GET is public. The list

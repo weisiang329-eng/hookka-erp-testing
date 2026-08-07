@@ -2970,3 +2970,132 @@ opening was re-posted three times along the way (2,353.00, then 304.00 into
 **Open, owner's call:** OCEAN SKY DO 26061056 carries two invoices — 2,058.64
 kept, 1,410.90 voided. If that DO is really 3,469.54 billed in two parts, the
 1,410.90 is a real payable and Restore brings it back.
+---
+
+## 2026-08-07 (session: KPI scoring rules — owner ruling by ruling)
+
+Shipped and verified live on prod. Catalogue is now **7 KPIs**, was 6, after one
+merge and two additions.
+
+- [x] **Invoicing lag** — "dispatch 了之后三天内要看到 invoice，迟一天扣10分 … 5张单
+      1天就50分". Rewrote `documentsStuck` from a snapshot of what is stuck TODAY to
+      a LAG: dispatch → invoice per DELIVERY ORDER, 3 days grace, days summed across
+      documents. New curve `PENALTY_PER_UNIT`.
+- [x] **Merged** `exceptions_cleared` INTO `documents_not_stuck` — "这两个要结合".
+      Uninvoiced deliveries were scored by the invoicing KPI and counted AGAIN inside
+      the daily exception total. The exception half now excludes those buckets. New
+      curve `COMPOSITE`; halves are 50/50 and a half with no data is dropped, not
+      zeroed. Retired-key assignments are migrated in the DDL, not orphaned.
+- [x] **MANUAL scoring restored** for `problems_caught_early` — "这个东西就不是
+      measurable 的，它是属于人工评分的". I had removed the subjective type on 08-06
+      and forced this into a checklist, which measured whether boxes got ticked, not
+      whether anything was caught. Supervisor scores 0–100 with a REQUIRED reason;
+      unrated reports "not yet rated", never 0. 7 published bands, 60–69 = normal month.
+- [x] **Pending time-adjustment requests** are now a daily-report exception —
+      "either reject or approve 而不是 hanging 在那边". 12 outstanding. Added to
+      `compliance-report.ts` itself so the KPI and the dashboard read one number.
+- [x] **Production efficiency** KPI — 100%→100, 90%→80, 80%→60 (floor), 75%→0.
+      New curve `EFFICIENCY_BANDS`. Reuses `computeMonthlyEfficiencyByWorker`, the
+      same function behind the allowance, so payslip and KPI cannot disagree.
+      **Limitation:** scores the FACTORY, not the assignee — `users` has no employee
+      link, so a personal figure cannot be resolved.
+- [x] **Service-case resolution** KPI — 7 days → 100, −12.5/day, 15 days → 0.
+      Counts open cases too, measured to today, or "never close it" would be the
+      highest-scoring strategy. Live: 10.3 days avg over 12 cases, 5 still open.
+- [x] **Survey** — Q1 (quotation speed) struck, "这个不可以": quoting is Sales'
+      work. Replaced with an open "how easy are we to deal with", moved to LAST.
+      Q4 tightened to the HANDLING, not the outcome. 1–5 rungs named
+      (Excellent / Good / Acceptable / Weak / Poor) so replies are comparable.
+- [x] **Assignment gate removed** — "我就自己选了 assign 给别人啊". The card loop
+      iterated `kpisForRole(role)`, so a KPI assigned outside the person's own role
+      was written to the table and then silently dropped from their card. It now
+      iterates the assignment rows; `roles` is a suggestion for the picker only.
+
+### Bugs I shipped and then fixed, same session
+
+- 🔴 **`setup_completeness` measured the WRONG COLUMN.** Reported 247 of 360 SKUs
+      as having no routing. Owner: "BOM 的工序基本上都有的，不是吗？" — correct.
+      Routing lives in `wip_components`; `l1_processes` is a near-empty legacy column.
+      273/360 actually have routing. My own comment claiming "45% of templates have
+      empty l1_processes" was measuring the wrong field and treating it as evidence.
+- 🔴 **Unquoted SELECT aliases come back CAMELCASED.** `AS has_bom` → `hasBom`, so
+      every per-field lookup read undefined and printed `total - 0`. The card said
+      "269 of 360 complete — 360 no BOM, 360 no price": self-contradictory on its
+      face. Quoted camelCase aliases now, as the rest of the file already did.
+      **This is the same class as the `lockedAt` incident — third instance.**
+- 🟡 Target 95 → 100 on `setup_completeness`: "everything 都有就代表 100 分". A
+      genuine 31.4% was rendering as 33.1 against a 95 target, which nobody could explain.
+
+### Owner rulings recorded (not code)
+
+- The 86 sectional SOFA components (`5545-1A(LHF)`, `5543-CSL`) stay IN scope — "算".
+  They are the ENTIRE master-data gap: no price, no volume, no fabric, no routing.
+- QC handbook written (RM 4 / WIP 11 / FG 2 templates, all 17 already in the system).
+  Published as an artifact, not committed here.
+
+### Still open
+
+- [ ] **Employee salary advance** — asked 2026-08-06, still not built at the start of
+      this session. Amount + date per employee, deducted from net/total pay, plus a
+      payout listing for HR.
+- [x] **Public customer-survey form** — see the 2026-08-07 (evening) entry below.
+      Built on `staging`, NOT pushed and NOT merged.
+- [ ] **QC KPIs not built.** 3,009 inspections scheduled since 2026-04-28, ZERO done,
+      `result` empty on all of them. Owner: "因为这个还没去用". Do NOT ship a KPI
+      against a queue that has never run — confirm the schedule is achievable first.
+- [ ] Per-person efficiency needs a `users` → employee link. Owner has not decided.
+- [ ] FPY and COPQ (what large factories actually run on) are NOT computable — no
+      defect capture at station level. They need QC to run first.
+
+
+---
+
+## 2026-08-07 (evening) — 🔵 Public customer satisfaction survey (on `staging`, not pushed)
+
+Owner: "这些是发顾客一个类似 google form submit 选择的，直接评分." The KPI already
+worked; what was missing was **the link you send a customer**. Replies used to be
+keyed in by Super Admin, which is the same maths from the wrong hands.
+
+**Shape:** the office generates one link per customer per month; the customer opens
+it on their phone, picks one of five NAMED ratings for each of five questions, taps
+send, sees a thank-you. No login, no ERP shell, no account.
+
+- **URL** `https://erp.hookka.com/s/<64-hex token>` (origin follows the live request,
+  canonicalised — a staging-minted link stays on staging, because each site reads its
+  own DB).
+- **Table** `kpi_survey_tokens` — token / user_id / kpi_key / period / customer_id /
+  customer_name / created_by / created_at / used_at / expires_at / org_id. Runtime
+  self-apply in `ensure-kpi-tables.ts` (the migration file is a record only).
+- **Mint** `POST /api/kpi/survey/:kpiKey/link` — SUPER_ADMIN, returns `{token, url,
+  expiresAt}`. Surfaced in the Library tab as "Send a customer this survey".
+- **Public** `GET|POST /api/public/survey/:token` — auth-bypassed via PUBLIC_PREFIXES,
+  rate-limited 30/min 300/hr like the other public scan surfaces.
+
+**The three things that make it safe to leave open to the internet:**
+1. SINGLE USE. The claim is one atomic `UPDATE … WHERE used_at IS NULL`, not a read
+   then a write, so a double-tap or a replay loses the race. Otherwise one happy
+   customer could be re-submitted twenty times and the month's average is whatever
+   the office wanted it to say.
+2. It TELLS THE CALLER NOTHING. The GET returns the catalogue's five questions and
+   five named rungs and literally nothing else — no employee, no customer, no ids,
+   no period. Who / which KPI / which month all come off the token's own row, so a
+   tampered body cannot move a score onto someone else.
+3. Exactly five whole numbers, 1–5, or 400. A `6`, a `3.5`, four answers or `"five"`
+   all move the mean and nothing would look wrong afterwards.
+
+A bad submission does NOT burn the link, and a failed write hands the link back —
+the customer gets one chance and it should not be spent by our transient error.
+
+**Tests:** `tests/kpi-survey-public.test.mjs` — 16 behaviour tests driving the real
+Hono app (replay, race, expiry, out-of-range, no-leak, rollback), plus the public
+allowlist snapshot in `tests/security-public-endpoints.test.mjs`.
+
+**Not done:** no owner-facing list of "links I sent for August and which came back";
+verify on staging after deploy (read AND write path) before it goes near main.
+
+### Also, while here
+
+- 🔴 **The merge `3caef9aa` silently ate two docs.** `docs/CODEBASE-MAP.md` lost the
+  29-line KPI section added 8 minutes earlier in `68a39f9a`, and this file lost the
+  77-line 2026-08-07 KPI session added in `337857ce`. Both restored on `staging`.
+  Neither file appeared in the merge's stat, which is exactly why nobody saw it.

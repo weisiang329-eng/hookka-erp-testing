@@ -619,6 +619,48 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 ---
 
+## Performance / KPI
+
+(Restored 2026-08-07 — this section was added in 68a39f9a and silently dropped by
+the merge 3caef9aa eight minutes later. If it goes missing again, that is why.)
+
+| Frontend page | API route | Primary tables | Tests |
+|---|---|---|---|
+| `src/pages/kpi/index.tsx` — three tabs: Library (the catalogue + assign + `SurveyLinkMaker`, the Super-Admin "generate a customer link" box) / People (everyone's score + prev-month delta) / Card (one person's month). Super Admin sees all three; everyone else only their own Card | `src/api/routes/kpi.ts` — `/me`, `/users/:id`, `/library`, `/people`, `/catalog`, `/assignments/:id`, `/kpi/:kpiKey/assignees`, `/checklist/:kpiKey`, `/survey/:kpiKey`, `/survey/:kpiKey/link` (MINT, Super Admin), `/rating/:kpiKey`, `/payout/:id` | `kpi_assignments` / `kpi_periods` / `kpi_checklist_ticks` / `kpi_user_settings` / `kpi_survey_responses` / `kpi_survey_tokens` / `kpi_manual_ratings` | `tests/kpi-module.test.mjs` · `tests/kpi-sql-identifiers.test.mjs` · `tests/kpi-survey-public.test.mjs` |
+| `src/pages/survey.tsx` — the PUBLIC customer survey page at `/s/:token`. No login, no shell, mobile-first: five questions × five NAMED rungs, one submit, thank-you | `src/api/routes/public-kpi-survey.ts` — PUBLIC no-login `GET /api/public/survey/:token` (questions + scale ONLY) and `POST` (five answers + optional comment). Single-use token, time-limited | | |
+| | `src/api/lib/kpi-catalog.ts` — the 7 KPIs, their scoring type, curve and published rules. THE source of truth; both the ERP UI and the public survey page read questions / scale / checklist items / rating bands from here, never a copy | | |
+| | `src/api/lib/kpi-metrics.ts` — one function per KPI's ACTUAL. `customerDeliveryLate` · `setupCompleteness` · `documentsStuck` (composite) · `productionEfficiency` · `serviceCaseResolution` · `checklistProgress` · `surveyMean` · `manualRating` | `products` / `bom_templates` / `delivery_orders` / `invoices` / `service_cases` / `reports_compliance_snapshot` | |
+| | `src/api/lib/ensure-kpi-tables.ts` — runtime self-apply. Migrations are inert; every column arrives here | | |
+| | `src/api/lib/kpi-survey-token.ts` — mint / URL / state / answer validation for the public survey link | | |
+
+**Read before touching this module:**
+- Four scoring types (`AUTO` / `CHECKLIST` / `SURVEY` / `MANUAL`) and six attainment
+  curves (`TARGET_RATIO` / `PENALTY_PER_PCT` / `PENALTY_PER_UNIT` / `SURVEY_MEAN` /
+  `MANUAL_SCORE` / `COMPOSITE` / `EFFICIENCY_BANDS`). Each is documented at its
+  declaration in kpi-catalog.ts with the owner ruling that produced it — read the
+  ruling before changing a number, the numbers are not arbitrary.
+- **The card iterates ASSIGNMENT ROWS, not `kpisForRole(role)`.** `roles` is a
+  suggestion for the picker. Reverting that silently drops any cross-role assignment
+  from the person's card while leaving the row in the table (owner 2026-08-07).
+- `documents_not_stuck` swallowed the retired `exceptions_cleared`. Its exception half
+  MUST keep excluding `soNoInvoice` + `doNotInvoiced`, or one late invoice is charged
+  twice — that double count is the whole reason the two were merged.
+- Routing lives in `bom_templates.wip_components`, NOT `l1_processes` (near-empty
+  legacy column). `setup_completeness` read the wrong one and under-reported by 160 SKUs.
+- **Quoted camelCase SELECT aliases only.** Unquoted `AS has_bom` returns as `hasBom`
+  and every lookup reads undefined. `tests/kpi-sql-identifiers.test.mjs` guards the
+  camelCase-in-SQL half of this across BOTH kpi.ts and kpi-metrics.ts.
+- A metric with no data returns `actual: null` and says so. It must never return 0 —
+  a zero is a failure, an absence is not, and the score divides by measurable weight only.
+- **`/api/public/survey/` is a PUBLIC WRITE surface** (2026-08-07) — the only one in
+  this module. The token is the whole credential: 64 hex chars, minted ONLY by the
+  Super-Admin `POST /api/kpi/survey/:kpiKey/link`, single-use (claimed by an atomic
+  `UPDATE … WHERE used_at IS NULL`) and time-limited. The GET returns the catalogue's
+  questions + named scale and NOTHING else — no employee, no customer, no ids, no
+  period. Who/which KPI/which month all come off the token's OWN row, never off the
+  request body. Widening any of that means updating
+  `tests/security-public-endpoints.test.mjs` in the same commit, on purpose.
+
 ## Dashboard & Command Center
 
 | Frontend page | API route | Primary tables | Tests |

@@ -434,6 +434,18 @@ export default function KpiPage() {
                                 </ul>
                               </div>
                             )}
+                            {/* The link that removes the need to key replies in
+                                by hand. Super Admin only — the mint endpoint is
+                                gated server-side regardless. */}
+                            {isSuperAdmin && (
+                              <div className="mt-2">
+                                <SurveyLinkMaker
+                                  kpiKey={k.key}
+                                  period={period}
+                                  assignedTo={k.assignedTo}
+                                />
+                              </div>
+                            )}
                           </div>
                         )}
                         {(k.checklistItems?.length ?? 0) > 0 && (
@@ -949,6 +961,130 @@ export default function KpiPage() {
             </>
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The link the office actually sends a customer.
+ *
+ * Owner 2026-08-07: "这些是发顾客一个类似 google form submit 选择的，直接评分."
+ * Pick who is being measured and who is being asked, generate, copy, send. The
+ * customer opens it on their phone, rates five questions and is done — no
+ * login, no ERP.
+ *
+ * One link, one reply, and it expires — so a link belongs to ONE customer for
+ * ONE month. Generate a fresh one per customer rather than forwarding the same
+ * URL around, or the first person to open it spends everyone's.
+ */
+function SurveyLinkMaker({
+  kpiKey, period, assignedTo,
+}: {
+  kpiKey: string;
+  period: string;
+  assignedTo: Array<{ userId: string; name: string }>;
+}) {
+  const [userId, setUserId] = useState<string>(assignedTo[0]?.userId ?? "");
+  const [customerName, setCustomerName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [url, setUrl] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const generate = async () => {
+    if (!userId || busy) return;
+    setBusy(true);
+    setErr(null);
+    setCopied(false);
+    try {
+      const r = await fetch(`/api/kpi/survey/${kpiKey}/link`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          userId, period, customerName: customerName.trim() || undefined,
+        }),
+      });
+      const j = (await r.json().catch(() => ({}))) as {
+        success?: boolean; data?: { url?: string }; error?: string;
+      };
+      if (!r.ok || !j.success || !j.data?.url) {
+        setErr(j.error || "Could not generate a link.");
+        return;
+      }
+      setUrl(j.data.url);
+    } catch {
+      setErr("Network error. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (assignedTo.length === 0) {
+    return (
+      <p className="text-[11.5px] text-[#9CA3AF]">
+        Assign this KPI to someone before generating a customer link.
+      </p>
+    );
+  }
+
+  return (
+    <div className="rounded-md border border-[#E2DDD8] bg-white p-2.5 space-y-2">
+      <p className="text-[11.5px] font-semibold text-[#1F1D1B]">
+        Send a customer this survey
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={userId}
+          onChange={(e) => { setUserId(e.target.value); setUrl(null); }}
+          aria-label="Who is being measured"
+          className="h-7 rounded-md border border-[#E2DDD8] bg-white px-2 text-[11.5px]"
+        >
+          {assignedTo.map((a) => (
+            <option key={a.userId} value={a.userId}>{a.name}</option>
+          ))}
+        </select>
+        <input
+          value={customerName}
+          onChange={(e) => { setCustomerName(e.target.value); setUrl(null); }}
+          placeholder="Customer name (optional)"
+          aria-label="Customer name"
+          className="h-7 min-w-[11rem] flex-1 rounded-md border border-[#E2DDD8] bg-white px-2 text-[11.5px]"
+        />
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void generate()}
+          className="h-7 rounded-md bg-[#6B5C32] px-3 text-[11.5px] font-semibold text-white disabled:opacity-50"
+        >
+          {busy ? "Generating..." : "Generate link"}
+        </button>
+      </div>
+      {err && <p className="text-[11px] text-[#9A3A2D]">{err}</p>}
+      {url && (
+        <div className="flex flex-wrap items-center gap-2">
+          <code className="min-w-0 flex-1 truncate rounded bg-[#F6F2EC] px-2 py-1 text-[11px] text-[#3A3733]">
+            {url}
+          </code>
+          <button
+            type="button"
+            onClick={() => {
+              void navigator.clipboard?.writeText(url).then(
+                () => setCopied(true),
+                () => setCopied(false),
+              );
+            }}
+            className="h-7 rounded-md border border-[#E2DDD8] px-2.5 text-[11px] font-semibold text-[#6B5C32]"
+          >
+            {copied ? "Copied" : "Copy"}
+          </button>
+        </div>
+      )}
+      {url && (
+        <p className="text-[11px] text-[#9CA3AF]">
+          One customer, one link, {period}. It can be answered once and expires
+          in 30 days — generate a new one for the next customer.
+        </p>
       )}
     </div>
   );

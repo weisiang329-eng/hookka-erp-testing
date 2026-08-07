@@ -3134,3 +3134,50 @@ verify on staging after deploy (read AND write path) before it goes near main.
   29-line KPI section added 8 minutes earlier in `68a39f9a`, and this file lost the
   77-line 2026-08-07 KPI session added in `337857ce`. Both restored on `staging`.
   Neither file appeared in the merge's stat, which is exactly why nobody saw it.
+
+## 2026-08-06 (later) — customer advances, the dashboard, and the labour posting
+
+**Customer receipts can hold money on account.** The blue-row signal shipped
+first and lit up nothing: the receipt amount was DERIVED from its allocations
+and a zero-allocation receipt was refused, so the state the colour was built for
+could not exist. The form now has an editable Amount received (leave it alone
+and it still follows the invoices you tick), allocations may never exceed it,
+and editing is the knock-off. `loadUnappliedCustomerAdvances` mirrors the
+supplier one so the AR card doesn't report every advance as drift.
+
+**Dashboard, eight rounds.** Actual/Forecast split columns · default period
+starts at the opening month · forecast dashed line on the cost-structure chart ·
+Material Trend split + REVENUE row · pick which materials the chart draws · % on
+the chart (tooltip always, bar label when one material is picked) · a
+**Production Salary** card with RM/head and RM/unit, the per-unit figure
+labelled unreliable because fg_batches double-counts completions.
+
+**Labour month-end posting** — the owner posted July and found two things:
+
+- **BUG-2026-08-06-003** (class C5, third instance today, second I authored):
+  `labor_post` was not in the doc-date resolver, so July's RM 69,847.45 landed
+  in August. The morning's regression test listed sourceTypes BY HAND and so
+  never saw it. The test now **scans the routes** for every `sourceType` written
+  and fails on any that resolves to neither a family nor a self-dated sourceId.
+- **EPF/SOCSO/EIS were folded into the salary account.** Now posted to
+  750-0020/0030/0040 (configurable), gross still to the department's account.
+  Preview and post share one helper — they had two roll-ups, which is how an
+  owner approves one entry and posts another.
+- **Unpost added**, because posting was idempotent with no way back: a month was
+  frozen in whatever shape it was first posted. "Already posted" is read from
+  the ledger NET, or an unposted month could never re-post.
+- **Re-post then collided** on `UNIQUE(orgId, sourceType, sourceId, legNo)` and
+  reported it as *"Invalid request body"* — the handler wrapped its whole body
+  in that blanket catch. legNo now continues from MAX; both handlers return the
+  real error. Same class as BUG-2026-07-24-003.
+
+### Verified on prod
+July's labour: 9 legs, **all dated 2026-07-31**, August empty, net
+750-0010 69,472.90 + EPF 344.50 + SOCSO 26.15 + EIS 3.90 = 69,847.45 against
+410-0010, balanced. Dashboard reads wage 69,847.45 / 39 heads for July.
+**3143 tests, 0 fail.**
+
+### Open
+May's production salary is unposted (no ruling yet — owner: 「5月的不需要先」).
+August is mid-month. RM/unit stays unreliable until the duplicate-completion
+defect is fixed.

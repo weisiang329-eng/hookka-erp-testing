@@ -2067,3 +2067,266 @@ app.get("/db-connect", async (c) => {
   });
   return c.json({ success: true, data });
 });
+
+// ---------------------------------------------------------------------------
+// GET /db-size-code-mismatch — bedframe rows whose MODEL CODE size-suffix
+// disagrees with the stored size code.
+//
+// A bedframe variant code is `{baseModel}-({sizeCode})` (fg-variants.ts): so
+// `2038(A)-(SK)` is a Super-King model, and its size field must read SK too.
+// The owner found a sticker printed `2038(A)-(SK)` with Size `K` (King) — the
+// code suffix and the size field are stored separately and nothing enforces
+// they agree. This lists every such disagreement across products AND
+// sales_order_items so the wrong ones can be corrected.
+//
+// Read-only. Parses the trailing `-(XX)` group only (sofa codes like
+// `5539-1A(LHF)` have no leading `-` before the final paren, so they're
+// skipped — this is a bedframe-only convention). Compares case-insensitively.
+// ---------------------------------------------------------------------------
+
+// The trailing size-code group: "...-(SK)" -> "SK". No match for sofa codes
+// ("5539-1A(LHF)") or codes with no size suffix.
+function parseCodeSizeSuffix(code: string): string | null {
+  const m = String(code || "").match(/-\(([^)]+)\)\s*$/);
+  return m ? m[1].trim().toUpperCase() : null;
+}
+
+const KNOWN_BEDFRAME_SIZE_CODES = new Set(["K", "Q", "S", "SS", "SK", "SP"]);
+
+app.get("/db-size-code-mismatch", async (c) => {
+  const scan = async (
+    table: string,
+    idCol: string,
+    codeCol: string,
+    extraCols: string[],
+  ): Promise<{
+    total: number;
+    mismatches: Array<Record<string, unknown>>;
+    unknownSuffix: Array<Record<string, unknown>>;
+  }> => {
+    const cols = [idCol, codeCol, "sizeCode", "sizeLabel", ...extraCols].join(", ");
+    let rows: Record<string, unknown>[] = [];
+    try {
+      const res = await c.var.DB.prepare(`SELECT ${cols} FROM ${table}`).all<Record<string, unknown>>();
+      rows = res.results ?? [];
+    } catch (err) {
+      return {
+        total: -1,
+        mismatches: [{ error: err instanceof Error ? err.message : String(err) }],
+        unknownSuffix: [],
+      };
+    }
+    const mismatches: Array<Record<string, unknown>> = [];
+    const unknownSuffix: Array<Record<string, unknown>> = [];
+    let considered = 0;
+    for (const r of rows) {
+      const code = String(r[codeCol] ?? "");
+      const suffix = parseCodeSizeSuffix(code);
+      if (!suffix) continue; // no bedframe-style size suffix → not in scope
+      considered++;
+      const stored = String(r.sizeCode ?? r.sizecode ?? "").trim().toUpperCase();
+      if (!KNOWN_BEDFRAME_SIZE_CODES.has(suffix)) {
+        // suffix isn't a recognised size code — surface separately, don't
+        // assume it's a mismatch (could be a new size we don't know yet).
+        if (unknownSuffix.length < 50) {
+          unknownSuffix.push({ [idCol]: r[idCol], code, suffixFromCode: suffix, storedSizeCode: stored });
+        }
+        continue;
+      }
+      // A blank stored sizeCode is a SEPARATE problem (not "wrong", just
+      // missing) — report it as a mismatch with storedSizeCode "" so it's
+      // visible, but tag it.
+      if (stored !== suffix) {
+        if (mismatches.length < 200) {
+          mismatches.push({
+            [idCol]: r[idCol],
+            code,
+            expectedFromCode: suffix,
+            storedSizeCode: stored || "(blank)",
+            sizeLabel: r.sizeLabel ?? r.sizelabel ?? "",
+            ...Object.fromEntries(extraCols.map((k) => [k, r[k] ?? r[k.toLowerCase()] ?? null])),
+          });
+        }
+      }
+    }
+    return { total: considered, mismatches, unknownSuffix };
+  };
+
+  const [products, soItems] = await Promise.all([
+    scan("products", "id", "code", ["name", "category"]),
+    scan("sales_order_items", "id", "productCode", ["salesOrderId"]),
+  ]);
+
+  return c.json({
+    success: true,
+    data: {
+      note: "Bedframe code `{model}-({sizeCode})` vs stored sizeCode. Sofa codes are skipped.",
+      products: {
+        bedframeVariantsConsidered: products.total,
+        mismatchCount: products.mismatches.length,
+        mismatches: products.mismatches,
+        unknownSuffixCount: products.unknownSuffix.length,
+        unknownSuffix: products.unknownSuffix,
+      },
+      salesOrderItems: {
+        bedframeVariantsConsidered: soItems.total,
+        mismatchCount: soItems.mismatches.length,
+        mismatches: soItems.mismatches,
+        unknownSuffixCount: soItems.unknownSuffix.length,
+        unknownSuffix: soItems.unknownSuffix,
+      },
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /db-size-code-backfill — fill BLANK sales_order_item size codes from
+// the model-code suffix. Dry-run by default.
+//
+// db-size-code-mismatch found 7 SO items (1052-(Q)/(K)) with an empty sizeCode
+// but a correct sizeLabel. A blank size code drops the row out of size-based
+// KPIs (owner: "一些空的也是要进 KPI 里面的"). The code suffix IS the row's size
+// identity, so filling the blank from it is unambiguous — we only touch rows
+// where sizeCode is empty AND the suffix is a KNOWN size code (K/Q/S/SS/SK/SP).
+//
+// It deliberately does NOT touch rows where sizeCode is present-but-different
+// (the 2038(A)-(SK) K-vs-SK cases) — those are a King-vs-Super-King intent
+// question for the owner, not a blank to fill.
+//
+// Dry-run (default) lists exactly what it WOULD change. Pass {apply:true} to
+// write. Idempotent: a second apply reports 0.
+// ---------------------------------------------------------------------------
+app.post("/db-size-code-backfill", async (c) => {
+  let apply = false;
+  try {
+    const body = (await c.req.json()) as { apply?: unknown };
+    apply = body?.apply === true;
+  } catch {
+    /* no body → dry-run */
+  }
+
+  let rows: Record<string, unknown>[] = [];
+  try {
+    const res = await c.var.DB.prepare(
+      `SELECT id, productCode, sizeCode, sizeLabel, salesOrderId
+         FROM sales_order_items
+        WHERE (sizeCode IS NULL OR TRIM(sizeCode) = '')`,
+    ).all<Record<string, unknown>>();
+    rows = res.results ?? [];
+  } catch (err) {
+    return c.json({ success: false, error: err instanceof Error ? err.message : String(err) });
+  }
+
+  const planned: Array<{ id: string; productCode: string; setSizeCode: string; sizeLabel: string; salesOrderId: string }> = [];
+  for (const r of rows) {
+    const code = String(r.productCode ?? r.productcode ?? "");
+    const suffix = parseCodeSizeSuffix(code);
+    if (!suffix || !KNOWN_BEDFRAME_SIZE_CODES.has(suffix)) continue;
+    planned.push({
+      id: String(r.id ?? ""),
+      productCode: code,
+      setSizeCode: suffix,
+      sizeLabel: String(r.sizeLabel ?? r.sizelabel ?? ""),
+      salesOrderId: String(r.salesOrderId ?? r.salesorderid ?? ""),
+    });
+  }
+
+  let applied = 0;
+  if (apply) {
+    for (const p of planned) {
+      try {
+        await c.var.DB.prepare(
+          `UPDATE sales_order_items SET sizeCode = ? WHERE id = ? AND (sizeCode IS NULL OR TRIM(sizeCode) = '')`,
+        )
+          .bind(p.setSizeCode, p.id)
+          .run();
+        applied++;
+      } catch {
+        /* skip a row that races another write; the count reflects reality */
+      }
+    }
+  }
+
+  return c.json({
+    success: true,
+    data: {
+      mode: apply ? "apply" : "dry-run",
+      candidates: planned.length,
+      applied,
+      rows: planned,
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /db-fix-superking-2038 — correct the CELENE(A) 2038(A)-(SK) family to
+// Super King. Dry-run by default.
+//
+// Evidence (db-size-code-mismatch + live price read, 2026-08):
+//   • product 2038(A)-(SK): sizeCode "200x200", name "...(6FT)..." — but code
+//     -(SK), dims 200X200CM and base RM1170 are all Super King, and a SEPARATE
+//     2038(A)-(K) is the real King (RM710). The "(6FT)" in the name is wrong.
+//   • 4 SO items on 2038(A)-(SK): 2 tagged K/6FT (base 1420 & 1170 — Super-King
+//     money, NOT King's 710, so the SIZE tag is the error) and 2 tagged
+//     200x200 (service orders, base 0). All are Super King.
+// Owner ruling: unify to SK / SuperKing / 200X200; drop the wrong "6FT".
+// Price is untouched (already correct) — this only fixes the size identity.
+// ---------------------------------------------------------------------------
+app.post("/db-fix-superking-2038", async (c) => {
+  let apply = false;
+  try {
+    const b = (await c.req.json()) as { apply?: unknown };
+    apply = b?.apply === true;
+  } catch { /* dry-run */ }
+
+  const CODE = "2038(A)-(SK)";
+  const changes: Array<Record<string, unknown>> = [];
+
+  // Product master.
+  try {
+    const p = await c.var.DB.prepare(
+      "SELECT id, code, name, sizeCode, sizeLabel FROM products WHERE code = ?",
+    ).bind(CODE).first<Record<string, unknown>>();
+    if (p) {
+      const oldName = String(p.name ?? "");
+      const newName = oldName.replace(/\(6FT\)\s*/i, "(SUPERKING) ");
+      changes.push({
+        entity: "product", id: p.id, code: p.code,
+        from: { sizeCode: p.sizeCode ?? p.sizecode, sizeLabel: p.sizeLabel ?? p.sizelabel, name: oldName },
+        to: { sizeCode: "SK", sizeLabel: "SuperKing", name: newName },
+      });
+      if (apply) {
+        await c.var.DB.prepare(
+          "UPDATE products SET sizeCode = ?, sizeLabel = ?, name = ? WHERE id = ?",
+        ).bind("SK", "SuperKing", newName, p.id).run();
+      }
+    }
+  } catch (err) {
+    changes.push({ entity: "product", error: err instanceof Error ? err.message : String(err) });
+  }
+
+  // SO items on this product whose size isn't already SK.
+  try {
+    const res = await c.var.DB.prepare(
+      "SELECT id, salesOrderId, sizeCode, sizeLabel FROM sales_order_items WHERE productCode = ?",
+    ).bind(CODE).all<Record<string, unknown>>();
+    for (const r of res.results ?? []) {
+      const sc = String(r.sizeCode ?? r.sizecode ?? "").trim().toUpperCase();
+      if (sc === "SK") continue; // already correct
+      changes.push({
+        entity: "sales_order_item", id: r.id, salesOrderId: r.salesOrderId ?? r.salesorderid,
+        from: { sizeCode: r.sizeCode ?? r.sizecode, sizeLabel: r.sizeLabel ?? r.sizelabel },
+        to: { sizeCode: "SK", sizeLabel: "SuperKing" },
+      });
+      if (apply) {
+        await c.var.DB.prepare(
+          "UPDATE sales_order_items SET sizeCode = ?, sizeLabel = ? WHERE id = ?",
+        ).bind("SK", "SuperKing", r.id).run();
+      }
+    }
+  } catch (err) {
+    changes.push({ entity: "sales_order_item", error: err instanceof Error ? err.message : String(err) });
+  }
+
+  return c.json({ success: true, data: { mode: apply ? "apply" : "dry-run", count: changes.length, changes } });
+});

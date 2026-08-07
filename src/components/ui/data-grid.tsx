@@ -21,6 +21,8 @@ import { getCurrentUser } from "@/lib/auth";
 import { fetchJson, passthrough } from "@/lib/fetch-json";
 import { useToast } from "@/components/ui/toast";
 import { Skeleton } from "@/components/ui/skeleton";
+import { buildListingAoa, exportFilename, type ExportColumn } from "@/lib/grid-export";
+import { exportReportCsv, exportReportXlsx, type Aoa } from "@/lib/export-report";
 
 // Stable identifier for namespacing per-user grid preferences in localStorage.
 // Using email (lowercased) so column visibility / order / saved views are
@@ -165,6 +167,11 @@ export type Column<T> = {
   // the column wider reveals more. Set `noClip: true` for the rare cell that
   // must wrap or render multi-line content.
   noClip?: boolean;
+  // Plain value this column contributes to a WYSIWYG export. Defaults to the
+  // filterAccessor, then the raw path value (currency sen→RM number, date→day).
+  // Set this for columns whose real value is computed in `render` and has no
+  // usable raw/filter value.
+  exportValue?: (row: T) => string | number | null;
 };
 
 export type ContextMenuItem = {
@@ -208,6 +215,14 @@ export type DataGridProps<T> = {
   // parent mirror the grid's internal filter state — e.g. to scope a
   // "Print" action or a QR-sticker row to exactly what the user sees.
   onFilteredDataChange?: (rows: T[]) => void;
+  // Enables the toolbar Export button. `exportName` is the filename base. The
+  // built-in "Listing" export is WYSIWYG — the CURRENT visible columns (in
+  // order) over the CURRENT filtered+sorted rows. `detailExport` adds a second
+  // option (e.g. an AutoCount per-line "Detail Listing"); it is handed the same
+  // filtered+sorted rows so it honours the on-screen filter too.
+  exportName?: string;
+  exportSheetLabel?: string;
+  detailExport?: { label: string; build: (rows: T[]) => Aoa };
   // Fires whenever the global search text changes. Lets the parent react
   // to "user is searching" — e.g. switch a server-paginated fetch to a
   // whole-dataset fetch so the search covers every record, not just the
@@ -1590,6 +1605,9 @@ export function DataGrid<T extends Record<string, any>>({
   autoGroup = true,
   viewStorageKey,
   onFilteredDataChange,
+  exportName,
+  exportSheetLabel,
+  detailExport,
   onSearchChange,
   initialSearch,
   alwaysSearchKeys = EMPTY_SEARCH_KEYS,
@@ -1724,6 +1742,7 @@ export function DataGrid<T extends Record<string, any>>({
   }, [persistColWidths]);
 
   const [showCustomizer, setShowCustomizer] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
 
   const toggleColumn = useCallback((key: string) => {
     setVisibleKeys(prev => {
@@ -2841,6 +2860,76 @@ export function DataGrid<T extends Record<string, any>>({
                   </button>
                 </div>
               </div>
+            )}
+          </div>
+        )}
+
+        {/* Export — WYSIWYG: the CURRENT visible columns over the CURRENT
+            filtered+sorted rows. Opt-in per page via the `exportName` prop. */}
+        {exportName && (
+          <div className="relative">
+            <button
+              className={cn(
+                "flex items-center gap-1 rounded border h-9 px-3 text-sm font-medium transition-colors",
+                showExportMenu ? "border-[#6B5C32] bg-[#6B5C32]/10 text-[#6B5C32]" : "border-[#DDD] text-[#666] hover:border-[#999]",
+              )}
+              onClick={() => setShowExportMenu((v) => !v)}
+              title="Export the current view"
+            >
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
+              </svg>
+              Export
+            </button>
+            {showExportMenu && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setShowExportMenu(false)} />
+                <div className="absolute right-0 z-50 mt-1 w-64 rounded-md border border-[#E2DDD8] bg-white py-1 shadow-lg text-sm">
+                  {(() => {
+                    const today = new Date().toISOString().slice(0, 10);
+                    const label = exportSheetLabel || exportName;
+                    const listingAoa = (): Aoa =>
+                      buildListingAoa(visibleColumns as unknown as ExportColumn<T>[], sortedData);
+                    const run = (aoa: Aoa, kind: string, ext: "xlsx" | "csv") => {
+                      setShowExportMenu(false);
+                      const fname = exportFilename(exportName, kind, ext, today);
+                      if (ext === "xlsx") void exportReportXlsx(fname, label, aoa);
+                      else exportReportCsv(fname, aoa);
+                    };
+                    const Item = ({ onClick, children }: { onClick: () => void; children: React.ReactNode }) => (
+                      <button
+                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[#333] hover:bg-[#F0ECE9]"
+                        onClick={onClick}
+                      >
+                        {children}
+                      </button>
+                    );
+                    return (
+                      <>
+                        <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#9CA3AF]">
+                          Listing · {sortedData.length} rows, {visibleColumns.length} cols
+                        </div>
+                        <Item onClick={() => run(listingAoa(), "listing", "xlsx")}>Listing → Excel</Item>
+                        <Item onClick={() => run(listingAoa(), "listing", "csv")}>Listing → CSV</Item>
+                        {detailExport && (
+                          <>
+                            <div className="my-1 border-t border-[#F0ECE9]" />
+                            <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#9CA3AF]">
+                              {detailExport.label} · per line item
+                            </div>
+                            <Item onClick={() => run(detailExport.build(sortedData), "detail", "xlsx")}>
+                              {detailExport.label} → Excel
+                            </Item>
+                            <Item onClick={() => run(detailExport.build(sortedData), "detail", "csv")}>
+                              {detailExport.label} → CSV
+                            </Item>
+                          </>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+              </>
             )}
           </div>
         )}

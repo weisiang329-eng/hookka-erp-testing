@@ -112,5 +112,12 @@ export function parseSourceIdDate(
   if (base === "year_close" && (m = sid.match(/^fyclose-(\d{4}-\d{2}-\d{2})/))) {
     return m[1];
   }
+  // Month-end labour posting: sourceId is `labor-YYYY-MM`. Without this it fell
+  // back to postedAt, so July's wage bill reported in the month the button was
+  // pressed — the owner posted July on 2026-08-07 and it landed in August,
+  // leaving July's Production Salary at zero (BUG-2026-08-06-003, class C5).
+  if (base === "labor_post" && (m = sid.match(/^labor-(\d{4})-(\d{2})$/))) {
+    return lastDayOfMonth(Number(m[1]), Number(m[2]));
+  }
   return null;
 }

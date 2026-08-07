@@ -9170,20 +9170,39 @@ const DEFAULT_LABOUR_MAP = {
     MAINTENANCE: "780-0030", // UPKEEP OF FACTORY
     WAREHOUSING: "780-0000", // FACTORY OVERHEAD
   } as Record<string, string>,
+  // The employer's statutory contributions, posted to their OWN accounts
+  // (owner 2026-08-06: 「拆」). They used to be folded into the department's
+  // salary account as one all-in cost, which left 750-0020/0030/0040 permanently
+  // empty and made the wage bill impossible to reconcile against an EPF or
+  // SOCSO statement. The department dimension stays on the salary line, where
+  // it is what department costing needs; a statutory contribution is a
+  // company-level charge and does not carry one.
+  epf: "750-0020", // PRODUCTION - EPF
+  socso: "750-0030", // PRODUCTION - SOCSO
+  eis: "750-0040", // PRODUCTION - EIS
 };
 
-async function getLabourMap(
-  db: Env["Variables"]["DB"],
-): Promise<{ fallback: string; byDept: Record<string, string> }> {
+type LabourMap = {
+  fallback: string;
+  byDept: Record<string, string>;
+  epf: string;
+  socso: string;
+  eis: string;
+};
+
+async function getLabourMap(db: Env["Variables"]["DB"]): Promise<LabourMap> {
   try {
     const row = await db
       .prepare("SELECT value FROM kv_config WHERE key = 'labor_account_map'")
       .first<{ value: string | null }>();
     if (row?.value) {
-      const parsed = JSON.parse(row.value) as { fallback?: string; byDept?: Record<string, string> };
+      const parsed = JSON.parse(row.value) as Partial<LabourMap>;
       return {
         fallback: parsed.fallback || DEFAULT_LABOUR_MAP.fallback,
         byDept: { ...DEFAULT_LABOUR_MAP.byDept, ...(parsed.byDept ?? {}) },
+        epf: parsed.epf || DEFAULT_LABOUR_MAP.epf,
+        socso: parsed.socso || DEFAULT_LABOUR_MAP.socso,
+        eis: parsed.eis || DEFAULT_LABOUR_MAP.eis,
       };
     }
   } catch {
@@ -9247,13 +9266,17 @@ type LabourDeptAgg = {
   grossSen: number;
   employerSen: number;
   costSen: number;
+  // Kept apart so each posts to its own account (owner 2026-08-06: 「拆」).
+  epfSen: number;
+  socsoSen: number;
+  eisSen: number;
 };
 
 async function aggregateLabour(
   db: Env["Variables"]["DB"],
   month: string,
   orgId: string,
-): Promise<{ byDept: LabourDeptAgg[]; totalSen: number; map: { fallback: string; byDept: Record<string, string> } }> {
+): Promise<{ byDept: LabourDeptAgg[]; totalSen: number; map: LabourMap }> {
   const map = await getLabourMap(db);
   const res = await db
     .prepare(
@@ -9267,20 +9290,101 @@ async function aggregateLabour(
     const dept = String(p.departmentCode ?? "").trim() || "(unassigned)";
     const account = map.byDept[dept] ?? map.fallback;
     const gross = Number(p.grossPaySen) || 0;
-    const employer =
-      (Number(p.epfEmployerSen) || 0) +
-      (Number(p.socsoEmployerSen) || 0) +
-      (Number(p.eisEmployerSen) || 0);
-    const cur = agg.get(dept) ?? { departmentCode: dept, account, workers: 0, grossSen: 0, employerSen: 0, costSen: 0 };
+    const epf = Number(p.epfEmployerSen) || 0;
+    const socso = Number(p.socsoEmployerSen) || 0;
+    const eis = Number(p.eisEmployerSen) || 0;
+    const employer = epf + socso + eis;
+    const cur = agg.get(dept) ?? {
+      departmentCode: dept, account, workers: 0,
+      grossSen: 0, employerSen: 0, costSen: 0, epfSen: 0, socsoSen: 0, eisSen: 0,
+    };
     cur.workers += 1;
     cur.grossSen += gross;
     cur.employerSen += employer;
+    cur.epfSen += epf;
+    cur.socsoSen += socso;
+    cur.eisSen += eis;
     cur.costSen += gross + employer;
     agg.set(dept, cur);
   }
   const byDept = [...agg.values()].sort((a, b) => a.departmentCode.localeCompare(b.departmentCode));
   const totalSen = byDept.reduce((s, d) => s + d.costSen, 0);
   return { byDept, totalSen, map };
+}
+
+// Where a month's labour posting currently STANDS in the ledger: the net of
+// every visible leg carrying its sourceId, account by account.
+//
+// "Has it been posted?" has to be answered from this, not from "does a
+// labor_post leg exist" — once a month can be unposted, the original legs are
+// still there (the journal is hash-chained and append-only, so a reversal is
+// appended, never a deletion). The existence test would then refuse to re-post
+// a month that had just been reversed. Exactly the flaw the purchase-invoice
+// void carried until 2026-08-06.
+async function labourLedgerNet(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+  sourceId: string,
+): Promise<Map<string, number>> {
+  const res = await db
+    .prepare(
+      `SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries
+        WHERE sourceId = ? AND orgId = ? AND hidden = 0 AND sourceType LIKE 'labor_post%'`,
+    )
+    .bind(sourceId, orgId)
+    .all<{ accountCode: string; debitSen: number; creditSen: number }>();
+  const net = new Map<string, number>();
+  for (const l of res.results ?? []) {
+    const signed = (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0);
+    net.set(l.accountCode, (net.get(l.accountCode) ?? 0) + signed);
+  }
+  return net;
+}
+
+const labourIsPosted = (net: Map<string, number>) => [...net.values()].some((v) => v !== 0);
+
+// The next free legNo for a (sourceType, sourceId). The ledger enforces
+// UNIQUE(orgId, sourceType, sourceId, legNo) — so a month that is unposted and
+// posted again cannot restart at 1, or the insert collides with the legs of the
+// first posting, which are still there (append-only journal). Found the hard
+// way: the re-post surfaced as "Invalid request body" because the handler's
+// catch-all turned a constraint violation into a parse error.
+async function nextLegNo(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+  sourceType: string,
+  sourceId: string,
+): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COALESCE(MAX(legNo), 0) AS n FROM ledger_journal_entries
+        WHERE orgId = ? AND sourceType = ? AND sourceId = ?`,
+    )
+    .bind(orgId, sourceType, sourceId)
+    .first<{ n: number }>();
+  return (Number(row?.n) || 0) + 1;
+}
+
+// The DEBIT side of a month's labour posting, account by account: each
+// department's GROSS pay against its mapped account, then the three statutory
+// employer contributions against theirs. One function so the preview the owner
+// approves and the batch that posts can never describe different entries.
+function labourDebitLines(
+  byDept: LabourDeptAgg[],
+  map: LabourMap,
+): { account: string; sen: number }[] {
+  const out = new Map<string, number>();
+  const add = (account: string, sen: number) => {
+    if (sen === 0) return;
+    out.set(account, (out.get(account) ?? 0) + sen);
+  };
+  for (const d of byDept) add(d.account, d.grossSen);
+  add(map.epf, byDept.reduce((s, d) => s + d.epfSen, 0));
+  add(map.socso, byDept.reduce((s, d) => s + d.socsoSen, 0));
+  add(map.eis, byDept.reduce((s, d) => s + d.eisSen, 0));
+  return [...out.entries()]
+    .map(([account, sen]) => ({ account, sen }))
+    .sort((a, b) => a.account.localeCompare(b.account));
 }
 
 app.get("/labor/preview", async (c) => {
@@ -9292,11 +9396,12 @@ app.get("/labor/preview", async (c) => {
   }
   try {
     const orgId = getOrgId(c);
-    const { byDept, totalSen } = await aggregateLabour(c.var.DB, month, orgId);
-    const posted = await ledgerHasSource(c.var.DB, orgId, "labor_post", `labor-${month}`);
-    // Roll the per-dept rows up to the account level for the GL preview.
+    const { byDept, totalSen, map: labourMap } = await aggregateLabour(c.var.DB, month, orgId);
+    const posted = labourIsPosted(await labourLedgerNet(c.var.DB, orgId, `labor-${month}`));
+    // Roll the per-dept rows up to the account level for the GL preview —
+    // gross to the department's account, each statutory contribution to its own.
     const byAccount = new Map<string, number>();
-    for (const d of byDept) byAccount.set(d.account, (byAccount.get(d.account) ?? 0) + d.costSen);
+    for (const l of labourDebitLines(byDept, labourMap)) byAccount.set(l.account, l.sen);
     const coaRes = await c.var.DB.prepare(
       "SELECT code, name FROM chart_of_accounts",
     ).all<{ code: string; name: string }>();
@@ -9334,21 +9439,19 @@ app.post("/labor/post", async (c) => {
     }
     const orgId = getOrgId(c);
     const sourceId = `labor-${month}`;
-    if (await ledgerHasSource(c.var.DB, orgId, "labor_post", sourceId)) {
-      return c.json({ success: false, error: `Labour for ${month} is already posted (idempotent — nothing re-posted).` }, 400);
+    if (labourIsPosted(await labourLedgerNet(c.var.DB, orgId, sourceId))) {
+      return c.json({ success: false, error: `Labour for ${month} is already posted. Unpost it first if you need to re-post.` }, 400);
     }
-    const { byDept, totalSen } = await aggregateLabour(c.var.DB, month, orgId);
+    const { byDept, totalSen, map: labourMapPost } = await aggregateLabour(c.var.DB, month, orgId);
     if (totalSen <= 0) {
       return c.json({ success: false, error: `No payslips found for ${month} — generate payslips first.` }, 400);
     }
-    const byAccount = new Map<string, number>();
-    for (const d of byDept) byAccount.set(d.account, (byAccount.get(d.account) ?? 0) + d.costSen);
     const actorUserId =
       (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
     const legs: LedgerEntryInput[] = [];
-    let legNo = 1;
-    for (const [account, sen] of byAccount) {
-      if (sen === 0) continue;
+    let legNo = await nextLegNo(c.var.DB, orgId, "labor_post", sourceId);
+    // Same helper the preview used, so what was approved is what is posted.
+    for (const { account, sen } of labourDebitLines(byDept, labourMapPost)) {
       legs.push({
         id: `lje-${crypto.randomUUID().slice(0, 12)}`,
         sourceType: "labor_post",
@@ -9380,11 +9483,81 @@ app.post("/labor/post", async (c) => {
       resource: "accounting",
       resourceId: sourceId,
       action: "create",
-      after: { month, totalSen, accounts: byAccount.size },
+      after: { month, totalSen, accounts: legs.length - 1},
     });
-    return c.json({ success: true, data: { month, totalSen, accounts: byAccount.size } });
-  } catch {
-    return c.json({ success: false, error: "Invalid request body" }, 400);
+    return c.json({ success: true, data: { month, totalSen, accounts: legs.length - 1} });
+  } catch (err) {
+    // NOT "Invalid request body". That blanket message wrapped the whole
+    // handler, so a UNIQUE(orgId, sourceType, sourceId, legNo) violation on a
+    // re-post read as a malformed request and cost an hour to find. Say what
+    // actually failed (owner 2026-08-06).
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[POST /labor/post] failed:", msg);
+    return c.json({ success: false, error: `Labour posting failed: ${msg}` }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /labor/unpost — reverse a month's labour posting so it can be redone.
+//
+// Owner 2026-08-06: July posted before the EPF/SOCSO/EIS split shipped, so it
+// sits in the ledger as one all-in line. Posting is idempotent and there was no
+// way back — the month was frozen in whatever shape it was first posted, and
+// the only alternative was a hand-written journal entry to undo it.
+//
+// Reverses by APPENDING the negation of the current net, never by deleting: the
+// journal is hash-chained. `labor_post_reversal` strips to `labor_post`, so the
+// reversal dates to the month it belongs to, like the posting itself. A month
+// with nothing outstanding reverses to nothing, so pressing it twice is safe.
+// ---------------------------------------------------------------------------
+app.post("/labor/unpost", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const month = String(body.month || "");
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+      return c.json({ success: false, error: "month must be YYYY-MM" }, 400);
+    }
+    const orgId = getOrgId(c);
+    const sourceId = `labor-${month}`;
+    const net = await labourLedgerNet(c.var.DB, orgId, sourceId);
+    if (!labourIsPosted(net)) {
+      return c.json({ success: true, data: { month, alreadyUnposted: true, reversedLegs: 0 } });
+    }
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+    const legs: LedgerEntryInput[] = [];
+    let legNo = await nextLegNo(c.var.DB, orgId, "labor_post_reversal", sourceId);
+    for (const [accountCode, amt] of net) {
+      if (amt === 0) continue;
+      legs.push({
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "labor_post_reversal",
+        sourceId,
+        legNo: legNo++,
+        accountCode,
+        debitSen: amt < 0 ? -amt : 0,
+        creditSen: amt > 0 ? amt : 0,
+        description: `Labour ${month} · unposted`,
+        actorUserId,
+        orgId,
+      });
+    }
+    const { statements } = await buildJournalEntryStatements(c.var.DB, orgId, legs);
+    await c.var.DB.batch(statements);
+    await emitAudit(c, {
+      resource: "accounting",
+      resourceId: sourceId,
+      action: "delete",
+      before: { month, accounts: net.size },
+      after: { month, reversedLegs: legs.length },
+    });
+    return c.json({ success: true, data: { month, reversedLegs: legs.length } });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[POST /labor/unpost] failed:", msg);
+    return c.json({ success: false, error: `Labour unpost failed: ${msg}` }, 400);
   }
 });
 
@@ -9614,7 +9787,7 @@ app.get("/dashboard", async (c) => {
   // Bump for a changed SHAPE *or* a changed default WINDOW: the stored copy is
   // keyed by the range string, and the default range's key is blank either way,
   // so a wider-or-narrower default would keep serving the old month list.
-  const DASH_PAYLOAD_V = "v5"; // v5: default window starts at the opening month
+  const DASH_PAYLOAD_V = "v6"; // v6: + labourBase (headcount / units completed)
   // The explicit window is part of the identity — otherwise two different
   // ranges would share one cached copy.
   const dashRangeKey = `${String(c.req.query("from") ?? "")}~${String(c.req.query("to") ?? "")}`;
@@ -9634,6 +9807,10 @@ app.get("/dashboard", async (c) => {
         "production_orders",
         "delivery_orders",
         "kv_config",
+        // Production Salary per head / per unit reads these two — without them
+        // hiring someone or completing a batch would leave the card stale.
+        "workers",
+        "fg_batches",
       ],
     },
     dashOrgId,
@@ -9755,6 +9932,54 @@ app.get("/dashboard", async (c) => {
   type CsCat = { line: "bedframe" | "sofa" | "shared"; spend: number; purchase: number; closing: number };
   const csByMonth = new Map<string, Map<string, CsCat & { name: string }>>();
   const salesSplitByMonth = new Map<string, { bedframe: number; sofa: number }>();
+
+  // ---- Production Salary denominators (owner 2026-08-06) ------------------
+  // He wants the wage bill read per HEAD and per UNIT, not just as a total:
+  // 91,631 says nothing until you know whether it paid 20 people or 40.
+  //
+  // Headcount is counted per month from the worker master — everyone who was
+  // on the payroll for any part of it (joined on/before the month ends, and
+  // had not resigned before it began). A leaver still costs the month they
+  // left, so a point-in-time count would divide by too few and overstate the
+  // per-head figure. All 42 production workers count, per the owner's ruling.
+  const headByMonth = new Map<string, number>();
+  const unitsByMonth = new Map<string, number>();
+  try {
+    const wRes = await db
+      .prepare(`SELECT joinDate, resignedAt FROM workers`)
+      .all<{ joinDate?: string | null; join_date?: string | null; resignedAt?: string | null; resigned_at?: string | null }>();
+    for (const ym of allMonths) {
+      const monthEnd = `${ym}-31`; // string compare — a YYYY-MM-DD never exceeds it within the month
+      let n = 0;
+      for (const w of wRes.results ?? []) {
+        const joined = String(w.joinDate ?? w.join_date ?? "").slice(0, 10);
+        const left = String(w.resignedAt ?? w.resigned_at ?? "").slice(0, 10);
+        if (joined && joined > monthEnd) continue;      // not hired yet
+        if (left && left < `${ym}-01`) continue;         // already gone
+        n += 1;
+      }
+      headByMonth.set(ym, n);
+    }
+  } catch {
+    /* workers table absent → no per-head line, the card just omits it */
+  }
+  // Units completed. NOTE: fg_batches carries the known duplicate-completion
+  // defect the owner parked on 2026-07-29 (「会有别人处理」), so this count runs
+  // HIGH and the per-unit cost it feeds runs LOW. The card labels it; it is not
+  // silently presented as clean.
+  try {
+    const fgRes = await db
+      .prepare(`SELECT completedDate, originalQty FROM fg_batches WHERE orgId = ?`)
+      .bind(getOrgId(c))
+      .all<{ completedDate?: string | null; completed_date?: string | null; originalQty?: number | null; original_qty?: number | null }>();
+    for (const b of fgRes.results ?? []) {
+      const ym = String(b.completedDate ?? b.completed_date ?? "").slice(0, 7);
+      if (!/^\d{4}-\d{2}$/.test(ym)) continue;
+      unitsByMonth.set(ym, (unitsByMonth.get(ym) ?? 0) + (Number(b.originalQty ?? b.original_qty) || 0));
+    }
+  } catch {
+    /* fg_batches absent → no per-unit line */
+  }
   const BEDFRAME_SALES = "500-0000";
   const csLineOf = (name: string): "bedframe" | "sofa" | "shared" => {
     const t = name.toUpperCase();
@@ -10019,12 +10244,26 @@ app.get("/dashboard", async (c) => {
       const s = salesSplitByMonth.get(ym);
       if (s) { bedSales += s.bedframe; sofaSales += s.sofa; }
     }
+    // Headcount over a QUARTER is the average of its months, not their sum —
+    // the same 37 people worked all three. Units are a flow and do sum.
+    let headSum = 0;
+    let headMonths = 0;
+    let units = 0;
+    for (const ym of b.months) {
+      const h = headByMonth.get(ym);
+      if (h !== undefined) { headSum += h; headMonths += 1; }
+      units += unitsByMonth.get(ym) ?? 0;
+    }
+    const headcount = headMonths > 0 ? Math.round(headSum / headMonths) : null;
     return {
       key: b.key,
       label: b.label,
       partial: b.partial || b.months.some((m) => m === nowYm),
       actual,
       forecast,
+      // Production Salary denominators. unitsCompleted is flagged in the UI:
+      // fg_batches double-counts some completions (parked defect).
+      labourBase: { headcount, unitsCompleted: units > 0 ? units : null },
       costStructure: {
         salesSplit: { bedframe: bedSales, sofa: sofaSales },
         // Target spend per category from the Forecast P&L (blank when the

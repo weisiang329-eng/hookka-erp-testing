@@ -18,6 +18,7 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   Bar,
   ComposedChart,
+  LabelList,
   Line,
   ResponsiveContainer,
   Tooltip,
@@ -60,6 +61,9 @@ type Row = {
     forecast?: Record<string, number>;
     categories: CsCat[];
   };
+  /** Denominators for the Production Salary card: heads on the payroll and
+      units completed in the period. unitsCompleted is known to run high. */
+  labourBase?: { headcount: number | null; unitsCompleted: number | null };
   cashFlow: {
     operating: number; investing: number; financing: number; net: number; freeCashFlow: number;
     inflow?: number; outflow?: number;
@@ -93,25 +97,48 @@ const TEAL = "#3E6570";
 function ChartTip(props: {
   active?: boolean;
   label?: string | number;
-  payload?: { name?: string; value?: number | string; color?: string; dataKey?: string }[];
+  payload?: {
+    name?: string;
+    value?: number | string;
+    color?: string;
+    dataKey?: string;
+    payload?: Record<string, unknown>;
+  }[];
   money?: boolean;
+  /** Show each series' share of sales beside its amount (cost-structure chart). */
+  shares?: boolean;
 }) {
   if (!props.active || !props.payload?.length) return null;
+  // The point object every series in this chart was built from — csData carries
+  // __pct__<cat> and __fcpct__<cat> alongside the amounts, so the share needs no
+  // recomputation here (owner 2026-08-06: 「帮我在 diagram 也显示 %」). An
+  // amount on a chart says how big; only the share says whether that is a lot.
+  const point = props.payload[0]?.payload ?? {};
+  const shareOf = (dataKey: string): number | null => {
+    if (!props.shares) return null;
+    const key = dataKey === "__fctotal__" ? "__fctotalpct__" : `__pct__${dataKey}`;
+    const v = point[key];
+    return typeof v === "number" ? v : null;
+  };
   return (
     <div className="rounded-lg border border-[#E2DDD8] bg-white px-3 py-2 shadow-md text-xs">
       <div className="font-semibold text-[#5A5550] mb-1">{props.label}</div>
-      {props.payload.map((p) => (
-        <div key={String(p.dataKey)} className="flex justify-between gap-4 tabular-nums">
-          <span style={{ color: p.color }}>{p.name}</span>
-          <span>
-            {typeof p.value === "number"
-              ? props.money !== false && !/%|Ratio/i.test(String(p.name))
-                ? rm2(p.value as number)
-                : `${(p.value as number).toFixed(2)}${/%/.test(String(p.name)) ? "%" : ""}`
-              : String(p.value ?? "-")}
-          </span>
-        </div>
-      ))}
+      {props.payload.map((p) => {
+        const pct = shareOf(String(p.dataKey));
+        return (
+          <div key={String(p.dataKey)} className="flex justify-between gap-4 tabular-nums">
+            <span style={{ color: p.color }}>{p.name}</span>
+            <span>
+              {typeof p.value === "number"
+                ? props.money !== false && !/%|Ratio/i.test(String(p.name))
+                  ? rm2(p.value as number)
+                  : `${(p.value as number).toFixed(2)}${/%/.test(String(p.name)) ? "%" : ""}`
+                : String(p.value ?? "-")}
+              {pct !== null && <span className="ml-1.5 text-[10px] text-[#9CA3AF]">{pct.toFixed(2)}%</span>}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -262,6 +289,37 @@ export default function FinanceDashboardPage() {
     [rows, plTab],
   );
 
+  // Production Salary card. The wage bill against its two denominators — the
+  // percentages follow the rule BUG-2026-08-06-002 set: each side divides by
+  // its OWN revenue.
+  const labourData = useMemo(
+    () =>
+      (rows ?? []).map((r) => {
+        const amount = r.actual?.labour ?? null;
+        const forecast = r.forecast?.labour ?? null;
+        const sales = r.actual?.sales ?? null;
+        const fcSales = r.forecast?.sales ?? null;
+        const headcount = r.labourBase?.headcount ?? null;
+        const units = r.labourBase?.unitsCompleted ?? null;
+        const per = (v: number | null, base: number | null) =>
+          v !== null && base !== null && base > 0 ? Math.round(v / base) : null;
+        const share = (v: number | null, base: number | null) =>
+          v !== null && base !== null && base !== 0 ? Math.round((v / base) * 10000) / 100 : null;
+        return {
+          label: r.label + (r.partial ? " *" : ""),
+          amount,
+          forecast,
+          pct: share(amount, sales),
+          forecastPct: share(forecast, fcSales),
+          headcount,
+          units,
+          perHead: per(amount, headcount),
+          perUnit: per(amount, units),
+        };
+      }),
+    [rows],
+  );
+
   const cfData = useMemo(
     () =>
       (rows ?? []).map((r) => ({
@@ -327,6 +385,12 @@ export default function FinanceDashboardPage() {
     for (const r of rows ?? []) for (const cc of r.costStructure?.categories ?? []) set.add(cc.name);
     return [...set].sort();
   }, [rows]);
+  // How many bands the chart is drawing right now — the bar label only appears
+  // at exactly one, where there is room for it.
+  const csShownCount = useMemo(
+    () => csCats.filter((c) => !csHidden.has(c)).length,
+    [csCats, csHidden],
+  );
   // A category can exist on more than one line (B.M FABRIC and S FABRIC are
   // both FABRIC) — sum every matching entry under the current line filter.
   const csAmount = (r: Row, cat: string): number => {
@@ -415,6 +479,24 @@ export default function FinanceDashboardPage() {
           if (v !== null) fcTotal = (fcTotal ?? 0) + v;
         }
         point.__fctotal__ = fcTotal;
+        // …and its share, against FORECAST revenue (BUG-2026-08-06-002's rule).
+        const fcSalesTot = csForecastSales(r);
+        point.__fctotalpct__ =
+          fcTotal !== null && fcSalesTot !== null && fcSalesTot > 0
+            ? Math.round((fcTotal / fcSalesTot) * 10000) / 100
+            : null;
+        // Share of the STACK currently drawn, for the bar label when a single
+        // material is picked. Summing the drawn bands rather than reusing one
+        // category's __pct__ keeps the label honest if several are ticked.
+        let drawn: number | null = null;
+        for (const cat of csCats) {
+          if (csHidden.has(cat)) continue;
+          const v = point[cat] as number | null;
+          if (v !== null) drawn = (drawn ?? 0) + v;
+        }
+        point.__drawn__ = drawn;
+        point.__drawnpct__ =
+          drawn !== null && sales > 0 ? Math.round((drawn / sales) * 10000) / 100 : null;
         return point;
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -433,6 +515,12 @@ export default function FinanceDashboardPage() {
         return {
           label: r.label + (r.partial ? " *" : ""),
           amount: amt,
+          // The base both percentages divide by (owner 2026-08-06: 「帮我把
+          // revenue 显示出来」). Showing it is what let him catch the forecast
+          // percentage dividing by the wrong one this morning — a share is only
+          // checkable when its denominator is on screen.
+          sales,
+          forecastSales: csForecastSales(r),
           pct: sales > 0 ? Math.round((amt / sales) * 10000) / 100 : null,
           forecast: fc,
           // Same rule as the table above: a forecast share divides by forecast
@@ -576,6 +664,94 @@ export default function FinanceDashboardPage() {
             }
           />
 
+          {/* ---- Production Salary: the wage bill per head and per unit ----
+              Owner 2026-08-06: 「我要把 production salary 也另外分出来一个
+              diagram」, sitting under the P&L because it is part of COGS. The
+              total alone says nothing — 91,631 reads very differently against
+              20 heads than against 40. */}
+          {labourData.some((d) => d.amount !== null) && (
+            <Card>
+              <CardContent className="p-4 space-y-3">
+                <div className="flex flex-wrap items-baseline gap-2">
+                  <h3 className="text-sm font-semibold text-[#1F1D1B] mr-2">Production Salary</h3>
+                  <span className="text-[11px] text-[#9CA3AF]">
+                    750-0010 SALARIES · 750-0020 EPF · 750-0030 SOCSO · 750-0040 EIS
+                  </span>
+                </div>
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={labourData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                      <CartesianGrid stroke="#F0ECE9" vertical={false} />
+                      <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false} />
+                      {/* Two scales: the wage bill is in tens of thousands, the
+                          unit costs in hundreds. One axis would flatten them. */}
+                      <YAxis yAxisId="amt" tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false}
+                        tickFormatter={(v: number) => rm(v)} />
+                      <YAxis yAxisId="unit" orientation="right" tick={{ fontSize: 11, fill: "#9A3A2D" }} axisLine={false} tickLine={false}
+                        tickFormatter={(v: number) => rm(v)} />
+                      <Tooltip content={<ChartTip />} />
+                      <Bar yAxisId="amt" dataKey="amount" name="Production Salary" fill={GOLD} radius={[3, 3, 0, 0]} maxBarSize={38} />
+                      <Line yAxisId="amt" type="monotone" dataKey="forecast" name="Forecast" stroke={RUST}
+                        strokeWidth={2} strokeDasharray="5 4" dot={false} connectNulls={false} />
+                      <Line yAxisId="unit" type="monotone" dataKey="perHead" name="RM / head" stroke="#3E6570"
+                        strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />
+                      <Line yAxisId="unit" type="monotone" dataKey="perUnit" name="RM / unit" stroke="#4F7C3A"
+                        strokeWidth={2} strokeDasharray="2 3" dot={{ r: 2 }} connectNulls={false} />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <tbody>
+                      {periodHead(labourData.map((d) => d.label))}
+                      <tr className="border-b border-[#F0ECE9]">
+                        <td className={`${td} text-left font-medium`}>Amount</td>
+                        {labourData.map((d) => (
+                          <td key={d.label} className={td}>
+                            {rm(d.amount)}
+                            {d.pct !== null && <span className="ml-1.5 text-[10px] text-[#6B5C32]">{d.pct.toFixed(2)}%</span>}
+                          </td>
+                        ))}
+                      </tr>
+                      <tr className="border-b border-[#F0ECE9]">
+                        <td className={`${td} text-left font-medium text-[#9A3A2D]`}>Forecast</td>
+                        {labourData.map((d) => (
+                          <td key={d.label} className={`${td} text-[#9A3A2D]`}>
+                            {rm(d.forecast)}
+                            {d.forecastPct !== null && <span className="ml-1.5 text-[10px]">{d.forecastPct.toFixed(2)}%</span>}
+                          </td>
+                        ))}
+                      </tr>
+                      <tr className="border-b border-[#F0ECE9]">
+                        <td className={`${td} text-left font-medium text-[#3E6570]`}>Headcount</td>
+                        {labourData.map((d) => <td key={d.label} className={`${td} text-[#3E6570]`}>{d.headcount ?? "-"}</td>)}
+                      </tr>
+                      <tr className="border-b border-[#F0ECE9]">
+                        <td className={`${td} text-left font-medium text-[#3E6570]`}>RM / head</td>
+                        {labourData.map((d) => <td key={d.label} className={`${td} text-[#3E6570]`}>{rm(d.perHead)}</td>)}
+                      </tr>
+                      <tr className="border-b border-[#F0ECE9]">
+                        <td className={`${td} text-left font-medium text-[#4F7C3A]`}>Units completed</td>
+                        {labourData.map((d) => <td key={d.label} className={`${td} text-[#4F7C3A]`}>{d.units ?? "-"}</td>)}
+                      </tr>
+                      <tr>
+                        <td className={`${td} text-left font-medium text-[#4F7C3A]`}>RM / unit</td>
+                        {labourData.map((d) => <td key={d.label} className={`${td} text-[#4F7C3A]`}>{rm(d.perUnit)}</td>)}
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                {/* The owner parked the duplicate-completion defect on
+                    2026-07-29; saying so here is the difference between a
+                    figure he can weigh and one that quietly misleads. */}
+                <p className="text-[11px] text-[#9A3A2D]">
+                  ⚠ RM / unit uses completed-batch quantities, which are known to double-count some
+                  completions — the unit count runs high, so this cost runs low. RM / head is unaffected.
+                </p>
+              </CardContent>
+            </Card>
+          )}
+
           {/* ---- Cost structure: composition + single-material trend ---- */}
           {csCats.length > 0 && (
             <Card>
@@ -647,11 +823,21 @@ export default function FinanceDashboardPage() {
                       <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false} />
                       <YAxis tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false}
                         tickFormatter={(v: number) => rm(v)} />
-                      <Tooltip content={<ChartTip />} />
+                      <Tooltip content={<ChartTip shares />} />
                       {csCats.map((cat, i) =>
                         csHidden.has(cat) ? null : (
                           <Bar key={cat} dataKey={cat} name={cat} stackId="cs" maxBarSize={44}
-                            fill={CS_COLOURS[i % CS_COLOURS.length]} />
+                            fill={CS_COLOURS[i % CS_COLOURS.length]}>
+                            {/* The share printed ON the stack, but only while a
+                                single material is drawn — a dozen labels stacked
+                                inside one bar is unreadable, and the tooltip
+                                already carries every band's share. */}
+                            {csShownCount === 1 && (
+                              <LabelList dataKey="__drawnpct__" position="top" offset={6}
+                                formatter={(v: unknown) => (typeof v === "number" ? `${v.toFixed(2)}%` : "")}
+                                style={{ fontSize: 10, fill: "#6B5C32" }} />
+                            )}
+                          </Bar>
                         ),
                       )}
                       {/* Total planned spend — the dashed line the rest of this
@@ -744,6 +930,15 @@ export default function FinanceDashboardPage() {
                 <table className="w-full">
                   <tbody>
                     {periodHeadSplit(csTrend.map((d) => d.label))}
+                    <tr className="border-b border-[#E2DDD8] bg-[#F6F1E7]">
+                      <td className={`${td} text-left font-semibold`}>REVENUE</td>
+                      {csTrend.map((d) => (
+                        <Fragment key={d.label}>
+                          <td className={`${td} font-semibold border-l border-[#E2DDD8]`}>{rm(d.sales)}</td>
+                          <td className={`${td} font-semibold text-[#9A3A2D]`}>{d.forecastSales === null ? "-" : rm(d.forecastSales)}</td>
+                        </Fragment>
+                      ))}
+                    </tr>
                     <tr className="border-b border-[#F0ECE9]">
                       <td className={`${td} text-left font-medium`}>Amount</td>
                       {csTrend.map((d) => (

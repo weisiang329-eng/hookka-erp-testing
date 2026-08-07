@@ -31,10 +31,7 @@ import {
 import type { Invoice } from "@/types";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { DiscountInput } from "@/components/ui/discount-input";
-// The SAME reconciliation rule the invoice PDF uses (BUG-2026-07-17-001):
-// a Base + surcharges build-up is shown ONLY when it adds up to the price
-// actually charged. Screen and document must never disagree.
-import { invoicePriceBreakdown } from "@/lib/build-unified-doc-data";
+import { invoiceLineUnitSen } from "@/lib/invoice-line-price";
 
 const PAYMENT_METHODS = [
   { value: "BANK_TRANSFER", label: "Bank Transfer" },
@@ -172,7 +169,13 @@ export default function InvoiceDetailPage() {
     // Backend recomputes identically; comparing on totalAmount catches stale reads.
     const expectedTotal = invoice.items.reduce((sum, it) => {
       const e = priceEdits.find((p) => p.id === it.id);
-      const unit = (e?.baseSen ?? 0) + (e?.divanSen ?? 0) + (e?.legSen ?? 0) + (e?.specialSen ?? 0) + (e?.totalHeightSen ?? 0);
+      const unit = invoiceLineUnitSen({
+        baseSen: e?.baseSen ?? 0,
+        divanSen: e?.divanSen ?? 0,
+        legSen: e?.legSen ?? 0,
+        specialSen: e?.specialSen ?? 0,
+        totalHeightSen: e?.totalHeightSen ?? 0,
+      });
       const discount = e?.discountSen ?? 0;
       return sum + Math.max(0, unit * (Number(it.quantity) || 0) - discount);
     }, 0);
@@ -396,7 +399,13 @@ export default function InvoiceDetailPage() {
     ? invoice.items.reduce((s, it) => {
         const dd = priceDraft[it.id];
         const u = dd
-          ? sen(dd.base) + sen(dd.divan) + sen(dd.leg) + sen(dd.special) + sen(dd.totalHeight)
+          ? invoiceLineUnitSen({
+              baseSen: sen(dd.base),
+              divanSen: sen(dd.divan),
+              legSen: sen(dd.leg),
+              specialSen: sen(dd.special),
+              totalHeightSen: sen(dd.totalHeight),
+            })
           : Number(it.unitPriceSen) || 0;
         const disc = discountDraft[it.id] ?? 0;
         return s + Math.max(0, u * (Number(it.quantity) || 0) - disc);
@@ -691,17 +700,21 @@ export default function InvoiceDetailPage() {
               </CardTitle>
             </CardHeader>
             <CardContent className="pt-0">
+              {/* min-w lets the table exceed a narrow container and scroll
+                  instead of crushing every column into an unreadable stack
+                  (owner: "整个挤在一起"). Product gets the lion's share since it
+                  carries the name + the PO/SO/REF + spec sub-lines. */}
               <div className="overflow-x-auto">
-                <table className="w-full text-sm">
+                <table className="w-full text-sm min-w-[900px]">
                   <thead>
                     <tr className="border-b-2 border-[#E2DDD8] bg-[#F0ECE9]">
-                      <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563]">
+                      <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563] w-8">
                         #
                       </th>
-                      <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563]">
+                      <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563] whitespace-nowrap">
                         SO
                       </th>
-                      <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563]">
+                      <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563] min-w-[240px]">
                         Product
                       </th>
                       <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563]">
@@ -726,24 +739,16 @@ export default function InvoiceDetailPage() {
                       const ex = lineExtras[item.id];
                       const d = priceDraft[item.id];
                       const qty = Number(item.quantity) || 0;
-                      // T.Height is a real component: it is an input below, it
-                      // is in the save payload, in the backend recompute and in
-                      // the PDF. Leaving it out here made the live Unit (and
-                      // the discount base derived from it) understate the price
-                      // during edit, so the figure jumped after save.
                       const liveUnit =
                         editingPrices && d
-                          ? sen(d.base) +
-                            sen(d.divan) +
-                            sen(d.leg) +
-                            sen(d.special) +
-                            sen(d.totalHeight)
+                          ? invoiceLineUnitSen({
+                              baseSen: sen(d.base),
+                              divanSen: sen(d.divan),
+                              legSen: sen(d.leg),
+                              specialSen: sen(d.special),
+                              totalHeightSen: sen(d.totalHeight),
+                            })
                           : Number(item.unitPriceSen) || 0;
-                      // Read view only: itemise the price ONLY when the stored
-                      // components reconcile to what is charged. Same rule as
-                      // the PDF — a build-up that does not add up is not shown.
-                      const priceRows =
-                        !editingPrices && ex ? invoicePriceBreakdown(ex, liveUnit) : undefined;
                       // Per-line discount (migration 0179).
                       const liveDiscount = editingPrices
                         ? (discountDraft[item.id] ?? 0)
@@ -825,7 +830,7 @@ export default function InvoiceDetailPage() {
                           <td className="py-3.5 px-4 align-top doc-number font-medium text-[#1F1D1B] whitespace-nowrap">
                             {companySO}
                           </td>
-                          <td className="py-3.5 px-4 align-top">
+                          <td className="py-3.5 px-4 align-top min-w-[240px]">
                             <p className="font-medium text-[#1F1D1B]">
                               {item.productName}
                             </p>
@@ -879,15 +884,24 @@ export default function InvoiceDetailPage() {
                                   />
                                 </div>
                               </div>
-                            ) : priceRows ? (
+                            ) : ex &&
+                              (ex.divanSen || ex.legSen || ex.totalHeightSen || ex.specialSen) ? (
                               <div className="text-xs leading-relaxed tabular-nums">
-                                {priceRows
-                                  .filter((r) => r.label !== "=")
-                                  .map((r) => (
-                                    <div key={r.label}>
-                                      {r.label} {formatCurrency(r.sen)}
-                                    </div>
-                                  ))}
+                                <div>Base {formatCurrency(ex.baseSen)}</div>
+                                {!!ex.divanSen && (
+                                  <div>+ Divan {formatCurrency(ex.divanSen)}</div>
+                                )}
+                                {!!ex.legSen && (
+                                  <div>+ Leg {formatCurrency(ex.legSen)}</div>
+                                )}
+                                {!!ex.totalHeightSen && (
+                                  <div>+ T.Height {formatCurrency(ex.totalHeightSen)}</div>
+                                )}
+                                {!!ex.specialSen && (
+                                  <div>
+                                    + Special {formatCurrency(ex.specialSen)}
+                                  </div>
+                                )}
                                 <div className="font-semibold text-[#1F1D1B] border-t border-[#E2DDD8] pt-0.5 mt-0.5">
                                   = {formatCurrency(liveUnit)}
                                 </div>
@@ -917,11 +931,13 @@ export default function InvoiceDetailPage() {
                         ? invoice.items.reduce((s, it) => {
                             const dd = priceDraft[it.id];
                             const u = dd
-                              ? sen(dd.base) +
-                                sen(dd.divan) +
-                                sen(dd.leg) +
-                                sen(dd.special) +
-                                sen(dd.totalHeight)
+                              ? invoiceLineUnitSen({
+                                  baseSen: sen(dd.base),
+                                  divanSen: sen(dd.divan),
+                                  legSen: sen(dd.leg),
+                                  specialSen: sen(dd.special),
+                                  totalHeightSen: sen(dd.totalHeight),
+                                })
                               : Number(it.unitPriceSen) || 0;
                             const disc = discountDraft[it.id] ?? 0;
                             return s + Math.max(0, u * (Number(it.quantity) || 0) - disc);

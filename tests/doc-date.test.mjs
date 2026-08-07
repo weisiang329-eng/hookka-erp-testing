@@ -7,6 +7,8 @@ import {
   stripSourceIdSuffix,
   DOC_DATE_FAMILIES,
 } from "../src/lib/doc-date.ts";
+import { readdirSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 test("stripLegSuffix — base types unchanged", () => {
   assert.equal(stripLegSuffix("invoice"), "invoice");
@@ -36,22 +38,57 @@ test("stripLegSuffix — unvoid resolves home, and is not confused with void", (
   assert.equal(stripLegSuffix("invoice_unvoid"), "invoice");
 });
 
-test("every correction sourceType the API posts resolves to a dated family", () => {
-  // The legs that carry money and MUST report on their document's date.
-  for (const t of [
-    "purchase_invoice",
-    "purchase_invoice_void",
-    "purchase_invoice_unvoid",
-    "invoice_void",
-    "payment_bounce",
-    "manual_reversal",
-    "purchase_credit_note_void",
-    "supplier_payment_restate_post:1",
-    "other_party_bill",
-    "other_party_payment",
-  ]) {
-    assert.ok(familyOf(t), `${t} must resolve to a document family, not postedAt`);
+// BUG-2026-08-06-003. The version of this test written that morning listed the
+// sourceTypes BY HAND, so it passed while `labor_post` — which the month-end
+// labour posting had been writing all along — resolved to nothing and dated
+// itself to the day the button was pressed. A hand-typed list can only catch
+// the types its author already thought of, which is never the one that bites.
+//
+// So SCAN the routes instead: every sourceType the API actually writes must
+// either resolve to a document family or encode its own date in the sourceId.
+// A new type that does neither now fails here, in the commit that adds it.
+test("every sourceType the API posts is dated by something other than postedAt", () => {
+  const routes = resolve(process.cwd(), "src/api/routes");
+  const found = new Set();
+  for (const f of readdirSync(routes)) {
+    if (!f.endsWith(".ts")) continue;
+    const src = readFileSync(resolve(routes, f), "utf8");
+    for (const m of src.matchAll(/sourceType: *"([a-z_]+)"/g)) found.add(m[1]);
   }
+  assert.ok(found.size > 10, `expected to scan real sourceTypes, found ${found.size}`);
+
+  // Deliberate postedAt users, each with a reason:
+  //   contra          — always same-day, so postedAt IS its document date
+  //   customers/suppliers — audit rows, not money legs
+  //   purchase_return — same-day goods return
+  //   opening_balance — posted WITH an explicit postedAt of the opening date,
+  //     so its postedAt already IS its document date. Verified on prod
+  //     2026-08-06: all 274 legs sit on 2026-05-22 after three same-day
+  //     re-posts. It is exempt because it sets the date, not because it
+  //     escapes the rule.
+  const EXEMPT = new Set([
+    "contra", "customers", "suppliers", "purchase_return",
+    "opening_balance", "opening_balance_reversal",
+  ]);
+  // Types whose date lives in the sourceId rather than a source table.
+  const SELF_DATED = new Set(["closing_stock", "year_close", "depreciation", "labor_post"]);
+
+  const orphans = [...found].filter(
+    (t) => !EXEMPT.has(t) && !SELF_DATED.has(stripLegSuffix(t)) && !familyOf(t),
+  );
+  assert.deepEqual(
+    orphans,
+    [],
+    `these post money but resolve to no date — they will report in the month the button was clicked: ${orphans.join(", ")}`,
+  );
+});
+
+test("labor_post dates to the month it is FOR, not the day it was posted", () => {
+  // The owner posted July's wage bill on 2026-08-07; it must land in July.
+  assert.equal(parseSourceIdDate("labor_post", "labor-2026-07"), "2026-07-31");
+  assert.equal(parseSourceIdDate("labor_post", "labor-2026-02"), "2026-02-28");
+  assert.equal(parseSourceIdDate("labor_post", "labor-2024-02"), "2024-02-29"); // leap
+  assert.equal(parseSourceIdDate("labor_post", "labor-bogus"), null);
 });
 
 test("stripLegSuffix — restate rev/post drop the :stamp then the suffix", () => {

@@ -82,6 +82,7 @@ export type KpiScoring = "AUTO" | "CHECKLIST" | "SURVEY" | "MANUAL";
  *                        Five documents each one day late is the same fifty
  *                        points as one document five days late, which is what
  *                        the owner intends — the unit is the document-day.
+ *                        `graceDays` units are free before the penalty starts.
  *   SURVEY_MEAN        — the average of the answers, already a 0–100 figure.
  *   MANUAL_SCORE       — the supervisor's number IS the attainment. No maths.
  *   COMPOSITE          — the metric already blended two or more halves and
@@ -157,7 +158,10 @@ export interface KpiDef {
   penaltyPerPct?: number;
   /** PENALTY_PER_UNIT only — points lost per whole unit of the actual. */
   penaltyPerUnit?: number;
-  /** How many days are allowed before a document starts counting as late. */
+  /**
+   * Units allowed before the penalty starts. Applies to PENALTY_PER_UNIT, and
+   * is what lets the card report the real average rather than the excess.
+   */
   graceDays?: number;
   /** EFFICIENCY_BANDS — the floor, what it scores, and where the score hits 0. */
   efficiencyFloorPct?: number;
@@ -317,6 +321,36 @@ export const KPI_CATALOG: KpiDef[] = [
     roles: ["PRODUCTION", "QA"],
   },
   {
+    key: "service_case_resolution",
+    label: "Service cases closed inside 7 days",
+    detail: "Average days from a case being raised to it being closed",
+    shape: "RATIO",
+    direction: "LOWER_IS_BETTER",
+    unit: "count",
+    scoring: "AUTO",
+    curve: "PENALTY_PER_UNIT",
+    penaltyPerUnit: 12.5,
+    graceDays: 7,
+    purpose:
+      "A customer with an open complaint is a customer deciding whether to buy from us again. The cost of a service case is not the repair — it is the waiting. Closing in a week keeps a bad experience recoverable; a month makes it the thing they tell other people about.",
+    definition:
+      "The average number of days between a service case being raised and being closed. Cases still OPEN at the end of the month are counted too, measured up to today — otherwise the fastest way to a perfect score would be to never close anything.",
+    measurement: [
+      "Take every case CLOSED during the month, plus every case still open at the end of it.",
+      "For each, days = from the date it was raised to the date it was closed. A case still open counts to today instead.",
+      "The KPI is the AVERAGE across those cases.",
+      "7 days or under scores the full 100. There is no extra credit for closing in 2 days — fast enough is fast enough.",
+      "Past 7 days it loses 12.5 points per day: 8 days → 87.5, 10 days → 62.5, 12 days → 37.5, 15 days or worse → 0.",
+      "A month with no cases at all reports 'no cases', not a zero — nothing to close is not a failure.",
+    ],
+    formula: "100 − (average days to close − 7) × 12.5. 7 days → 100, 10 days → 62.5, 15 days → 0",
+    defaultTarget: 7,
+    defaultWeight: 25,
+    available: true,
+    drillPath: "/service-cases",
+    roles: ["QA", "OFFICE"],
+  },
+  {
     key: "customer_satisfaction",
     label: "Customer satisfaction survey",
     detail: "Five questions, each scored 1–5 by the customer, worth 20 points each",
@@ -430,6 +464,7 @@ export function attainment(
         | "curve"
         | "penaltyPerPct"
         | "penaltyPerUnit"
+        | "graceDays"
         | "efficiencyFloorPct"
         | "efficiencyFloorScore"
         | "efficiencyZeroPct"
@@ -450,7 +485,11 @@ export function attainment(
   // percentage, so nothing is normalised by a denominator first.
   if (def.curve === "PENALTY_PER_UNIT") {
     const per = Number(def.penaltyPerUnit) || 10;
-    return Math.max(0, Math.min(120, Math.round((100 - actual * per) * 10) / 10));
+    // Units inside the grace window are free, so the ACTUAL can stay the real
+    // figure the card shows — "9.4 days average", not "2.4 days over".
+    const grace = Number(def.graceDays) || 0;
+    const over = Math.max(0, actual - grace);
+    return Math.max(0, Math.min(120, Math.round((100 - over * per) * 10) / 10));
   }
   // A survey mean, a supervisor's rating and a blended score are all already
   // the attainment.

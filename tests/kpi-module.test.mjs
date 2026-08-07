@@ -345,3 +345,39 @@ test("pending time-adjustment requests are a daily-report exception", () => {
   // the wrong two and would have logged an error and returned an empty list.
   assert.match(src, /SELECT id, workerId, departmentCode, hours, kind, date, createdAt/);
 });
+
+test("service cases: 7 days is full marks, 15 days is nothing", () => {
+  // Owner 2026-08-07: "平均解决天数在 7 天之内可以拿到最高分。超出 7 天后，每增加
+  // 1 天就扣 12.5 分，最多可以扣 8 天（即到第 15 天时全部分数扣完）."
+  const d = kpiByKey("service_case_resolution");
+  assert.equal(d.curve, "PENALTY_PER_UNIT");
+  assert.equal(d.penaltyPerUnit, 12.5);
+  assert.equal(d.graceDays, 7);
+
+  assert.equal(attainment(d, 7, 3), 100, "faster than 7 earns no extra credit");
+  assert.equal(attainment(d, 7, 7), 100, "7 days is still full marks");
+  assert.equal(attainment(d, 7, 8), 87.5);
+  assert.equal(attainment(d, 7, 10), 62.5);
+  assert.equal(attainment(d, 7, 12), 37.5);
+  assert.equal(attainment(d, 7, 15), 0, "the eighth day over wipes the score");
+  assert.equal(attainment(d, 7, 40), 0, "and it cannot go negative");
+
+  // The grace window must not leak into the OTHER penalty curve, which has no
+  // grace and whose actual is already the excess.
+  const inv = kpiByKey("documents_not_stuck");
+  assert.notEqual(inv.curve, "PENALTY_PER_UNIT", "invoicing is a composite now");
+});
+
+test("an unclosed service case still counts against the average", () => {
+  // The gap that makes or breaks this KPI: scoring only CLOSED cases would make
+  // "never close it" the highest-scoring strategy there is.
+  const src = readFileSync(resolve(process.cwd(), "src/api/lib/kpi-metrics.ts"), "utf8");
+  const fn = src.slice(src.indexOf("export async function serviceCaseResolution"));
+  const body = fn.slice(0, fn.indexOf("\nexport async function", 1));
+  assert.match(body, /closedAt IS NULL OR closedAt = ''/,
+    "open cases must be selected, not just closed ones");
+  assert.match(body, /r\.closed \|\| asAt/,
+    "an open case must be measured up to today");
+  assert.match(body, /No service cases this month/,
+    "a month with no cases reports that, rather than scoring 0");
+});

@@ -116,15 +116,15 @@ export async function setupCompleteness(
   const row = await c.var.DB.prepare(
     `SELECT COUNT(*) AS total,
             COALESCE(SUM(CASE WHEN COALESCE(p.basePriceSen,0) + COALESCE(p.price1Sen,0) > 0
-                     THEN 1 ELSE 0 END), 0) AS has_price,
-            COALESCE(SUM(CASE WHEN COALESCE(p.unitM3,0) > 0 THEN 1 ELSE 0 END), 0) AS has_m3,
-            COALESCE(SUM(CASE WHEN COALESCE(p.fabricUsage,0) > 0 THEN 1 ELSE 0 END), 0) AS has_fabric,
+                     THEN 1 ELSE 0 END), 0) AS "hasPrice",
+            COALESCE(SUM(CASE WHEN COALESCE(p.unitM3,0) > 0 THEN 1 ELSE 0 END), 0) AS "hasM3",
+            COALESCE(SUM(CASE WHEN COALESCE(p.fabricUsage,0) > 0 THEN 1 ELSE 0 END), 0) AS "hasFabric",
             COALESCE(SUM(CASE WHEN EXISTS (
                                 SELECT 1 FROM bom_templates b
                                  WHERE b.productCode = p.code
                                    AND UPPER(b.versionStatus) = 'ACTIVE'
                                    AND COALESCE(b.wipComponents,'') NOT IN ('', '[]')
-                              ) THEN 1 ELSE 0 END), 0) AS has_bom,
+                              ) THEN 1 ELSE 0 END), 0) AS "hasBom",
             COALESCE(SUM(CASE WHEN COALESCE(p.basePriceSen,0) + COALESCE(p.price1Sen,0) > 0
                           AND COALESCE(p.unitM3,0) > 0
                           AND COALESCE(p.fabricUsage,0) > 0
@@ -139,22 +139,28 @@ export async function setupCompleteness(
       WHERE p.status = 'ACTIVE'`,
   ).first<{
     total: number; complete: number;
-    has_price: number; has_m3: number; has_fabric: number; has_bom: number;
+    hasPrice: number; hasM3: number; hasFabric: number; hasBom: number;
   }>();
 
   const total = Number(row?.total) || 0;
   const complete = Number(row?.complete) || 0;
   if (total === 0) return EMPTY;
 
+  // Aliases are QUOTED camelCase. Unquoted `AS has_bom` came back as `hasBom`
+  // — the driver's transform.column.from turns snake_case into camelCase on the
+  // way out — so every lookup read undefined, `total - 0` was the whole total,
+  // and the card claimed all 360 SKUs were missing all four fields while also
+  // reporting 269 of them complete. Postgres preserves a quoted identifier, so
+  // quoting is what makes the JS side match.
   const gaps: string[] = [];
   const miss = (label: string, have: unknown) => {
     const n = total - (Number(have) || 0);
     if (n > 0) gaps.push(`${n} no ${label}`);
   };
-  miss("BOM", row?.has_bom);
-  miss("price", row?.has_price);
-  miss("volume", row?.has_m3);
-  miss("fabric usage", row?.has_fabric);
+  miss("BOM", row?.hasBom);
+  miss("price", row?.hasPrice);
+  miss("volume", row?.hasM3);
+  miss("fabric usage", row?.hasFabric);
 
   return {
     actual: Math.round((complete / total) * 1000) / 10,
@@ -524,6 +530,74 @@ export async function productionEfficiency(
   };
 }
 
+/**
+ * Average days a service case stays open.
+ *
+ * Owner 2026-08-07: "平均解决天数在 7 天之内可以拿到最高分。超出 7 天后，每增加
+ * 1 天就扣 12.5 分，最多可以扣 8 天（即到第 15 天时全部分数扣完）."
+ *
+ * Counts cases CLOSED in the month AND cases still open at the end of it, the
+ * open ones measured up to today. Scoring only the closed ones would make
+ * "never close it" the highest-scoring strategy available, and the two cases
+ * sitting OPEN right now would be invisible in every month forever.
+ *
+ * A month with no cases reports "no cases" rather than 0 — the KPI is about
+ * how fast complaints get closed, and no complaints is not a failure to close
+ * them quickly.
+ */
+export async function serviceCaseResolution(
+  c: Context<Env>,
+  period: string,
+): Promise<MetricResult> {
+  const { start, end } = periodBounds(period);
+  const today = new Date().toISOString().slice(0, 10);
+  const asAt = today < end ? today : end;
+
+  const res = await c.var.DB.prepare(
+    `SELECT id AS "id",
+            substr(createdAt::text, 1, 10) AS "raised",
+            substr(NULLIF(closedAt::text, '')::text, 1, 10) AS "closed",
+            status AS "status"
+       FROM service_cases
+      WHERE createdAt IS NOT NULL
+        AND (
+              (closedAt IS NOT NULL AND closedAt <> ''
+               AND substr(closedAt::text, 1, 10) >= ?
+               AND substr(closedAt::text, 1, 10) <= ?)
+           OR ((closedAt IS NULL OR closedAt = '')
+               AND substr(createdAt::text, 1, 10) <= ?)
+        )`,
+  )
+    .bind(start, end, end)
+    .all<{ id: string; raised: string | null; closed: string | null; status: string | null }>();
+
+  const rows = (res.results ?? []).filter((r) => r.raised);
+  if (rows.length === 0) {
+    return { actual: null, sampleSize: 0, detail: "No service cases this month" };
+  }
+
+  let totalDays = 0;
+  let stillOpen = 0;
+  let overSeven = 0;
+  for (const r of rows) {
+    const to = r.closed || asAt;
+    if (!r.closed) stillOpen += 1;
+    const d = daysBetweenYmd(String(r.raised), to);
+    totalDays += d;
+    if (d > 7) overSeven += 1;
+  }
+  const avg = Math.round((totalDays / rows.length) * 10) / 10;
+
+  return {
+    actual: avg,
+    sampleSize: rows.length,
+    detail:
+      `${avg} days average across ${rows.length} cases` +
+      (overSeven > 0 ? `, ${overSeven} past 7 days` : "") +
+      (stillOpen > 0 ? ` (${stillOpen} still open, counted to ${asAt})` : ""),
+  };
+}
+
 export async function computeMetric(
   c: Context<Env>,
   key: string,
@@ -538,6 +612,8 @@ export async function computeMetric(
       return documentsStuck(c, period);
     case "production_efficiency":
       return productionEfficiency(c, period);
+    case "service_case_resolution":
+      return serviceCaseResolution(c, period);
     default:
       return EMPTY;
   }

@@ -1,15 +1,22 @@
 // ---------------------------------------------------------------------------
 // QC Templates — checklist definitions (Phase 1).
 //
-// One template per (department × product_category × stage) combination.
-// Each template has N items (qc_template_items). When the cron generates a
+// WIP and FG: one template per (department × product_category × stage).
+// RM: one template per MATERIAL FAMILY (`material_family`, mig 0215) — a goods
+// receipt is routed to its checklist by the AutoCount item group on its lines,
+// NOT by department, so an RM template that names no family is never reached by
+// generation and POST refuses to create one.
+//
+// Each template has N items (qc_template_items). When generation creates a
 // PENDING qc_inspection it snapshots the items into the inspection row so
 // historical inspections survive future template edits.
 //
-// Schema: migrations-postgres/0066_qc_module_phase1.sql
+// Schema: migrations-postgres/0068_qc_module_phase1.sql (tables),
+//         migrations-postgres/0215_qc_rm_per_receipt_and_fg_order_check.sql
+//         (material_family + the family templates + the FG order checks).
 //
 // Endpoints:
-//   GET    /                — list templates (?active=1, ?stage=, ?deptCode=, ?itemCategory=)
+//   GET    /                — list templates (?active=1, ?stage=, ?deptCode=, ?itemCategory=, ?materialFamily=)
 //   GET    /:id             — one template + its items
 //   POST   /                — create template (with items)
 //   PUT    /:id             — update template (replaces items if items array provided)
@@ -18,6 +25,8 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { ensureQcGenerationSchema } from "../lib/qc-generation-schema";
+import { RM_FAMILIES } from "../lib/qc-rm-families";
 
 const app = new Hono<Env>();
 
@@ -40,6 +49,12 @@ type TemplateRow = {
   notes: string | null;
   createdAt: string;
   updatedAt: string | null;
+  // Which incoming-material family this checklist covers (mig 0215 +
+  // ensureQcGenerationSchema). RM only; NULL on WIP/FG rows. Read dual-keyed —
+  // the PG adapter folds snake_case to camelCase, but a row written before the
+  // self-apply landed carries neither.
+  materialFamily?: string | null;
+  material_family?: string | null;
 };
 
 type TemplateItemRow = {
@@ -69,6 +84,7 @@ function rowToTemplate(t: TemplateRow, items: TemplateItemRow[] = []) {
     stage: t.stage,
     active: t.active === 1,
     notes: t.notes ?? "",
+    materialFamily: t.materialFamily ?? t.material_family ?? "",
     createdAt: t.createdAt,
     updatedAt: t.updatedAt ?? "",
     items: items
@@ -110,6 +126,11 @@ app.get("/", async (c) => {
     clauses.push("itemCategory = ?");
     params.push(itemCategory);
   }
+  const materialFamily = c.req.query("materialFamily");
+  if (materialFamily) {
+    clauses.push("material_family = ?");
+    params.push(materialFamily);
+  }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 
   const [tplRes, itemRes] = await Promise.all([
@@ -144,6 +165,9 @@ app.post("/", async (c) => {
   const denied = await requirePermission(c, "qc-inspections", "create");
   if (denied) return denied;
   try {
+    // Awaited before the first write — material_family reaches prod through
+    // the runtime self-apply, not through the migration file.
+    await ensureQcGenerationSchema(c.var.DB);
     const body = await c.req.json();
     const name = String(body.name ?? "").trim();
     const deptCode = String(body.deptCode ?? "").trim();
@@ -163,6 +187,25 @@ app.post("/", async (c) => {
     if (items.length === 0) {
       return c.json({ success: false, error: "At least one check item is required" }, 400);
     }
+    // An RM template that names no family is never reached by generation —
+    // receipts route on the family, so an untagged checklist is invisible.
+    // Refuse it here rather than let someone build a checklist nobody is ever
+    // handed.
+    const materialFamily = body.materialFamily ? String(body.materialFamily).toUpperCase() : null;
+    if (materialFamily && !(RM_FAMILIES as readonly string[]).includes(materialFamily)) {
+      return c.json({ success: false, error: `materialFamily must be one of ${RM_FAMILIES.join("/")}` }, 400);
+    }
+    if (stage === "RM" && !materialFamily) {
+      return c.json(
+        {
+          success: false,
+          error:
+            "An incoming-material template must name the material family it covers " +
+            `(${RM_FAMILIES.join(" / ")}) — goods receipts are routed to checklists by family.`,
+        },
+        400,
+      );
+    }
 
     const id = genTemplateId();
     const now = new Date().toISOString();
@@ -171,10 +214,10 @@ app.post("/", async (c) => {
     stmts.push(
       c.var.DB
         .prepare(
-          `INSERT INTO qc_templates (id, name, deptCode, deptName, itemCategory, stage, active, notes, created_at, updatedAt)
-           VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+          `INSERT INTO qc_templates (id, name, deptCode, deptName, itemCategory, stage, active, notes, material_family, created_at, updatedAt)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
         )
-        .bind(id, name, deptCode, deptName, itemCategory, stage, body.notes ?? null, now, now),
+        .bind(id, name, deptCode, deptName, itemCategory, stage, body.notes ?? null, materialFamily, now, now),
     );
 
     for (let idx = 0; idx < items.length; idx++) {
@@ -225,6 +268,7 @@ app.put("/:id", async (c) => {
   if (denied) return denied;
   const id = c.req.param("id");
   try {
+    await ensureQcGenerationSchema(c.var.DB);
     const existing = await c.var.DB
       .prepare("SELECT * FROM qc_templates WHERE id = ?")
       .bind(id)
@@ -240,6 +284,12 @@ app.put("/:id", async (c) => {
       stage: body.stage ?? existing.stage,
       active: body.active === undefined ? existing.active : body.active === false ? 0 : 1,
       notes: body.notes ?? existing.notes,
+      materialFamily:
+        body.materialFamily === undefined
+          ? (existing.materialFamily ?? existing.material_family ?? null)
+          : body.materialFamily
+            ? String(body.materialFamily).toUpperCase()
+            : null,
     };
     if (merged.itemCategory && !VALID_CATEGORIES.includes(merged.itemCategory as ItemCategory)) {
       return c.json({ success: false, error: "itemCategory invalid" }, 400);
@@ -247,11 +297,14 @@ app.put("/:id", async (c) => {
     if (merged.stage && !VALID_STAGES.includes(merged.stage as Stage)) {
       return c.json({ success: false, error: "stage invalid" }, 400);
     }
+    if (merged.materialFamily && !(RM_FAMILIES as readonly string[]).includes(merged.materialFamily)) {
+      return c.json({ success: false, error: `materialFamily must be one of ${RM_FAMILIES.join("/")}` }, 400);
+    }
 
     const now = new Date().toISOString();
     await c.var.DB
       .prepare(
-        `UPDATE qc_templates SET name = ?, deptCode = ?, deptName = ?, itemCategory = ?, stage = ?, active = ?, notes = ?, updatedAt = ? WHERE id = ?`,
+        `UPDATE qc_templates SET name = ?, deptCode = ?, deptName = ?, itemCategory = ?, stage = ?, active = ?, notes = ?, material_family = ?, updatedAt = ? WHERE id = ?`,
       )
       .bind(
         merged.name,
@@ -261,6 +314,7 @@ app.put("/:id", async (c) => {
         merged.stage,
         merged.active,
         merged.notes,
+        merged.materialFamily,
         now,
         id,
       )

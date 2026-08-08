@@ -91,9 +91,10 @@ test("a CO with no lines still exports one row — the order does not vanish", (
 });
 
 test("the CO listing reads CO field names, never the SO ones", () => {
-  // consignment_orders has no customerPOId / companySOId column. The list page
-  // annotates its rows as SalesOrder, so reading SO names here would export a
-  // column of blanks that looks like missing data.
+  // consignment_orders has no customerPOId / companySOId column, so reading SO
+  // names here would export a column of blanks that looks like missing data.
+  // (The list page used to annotate its rows as SalesOrder, which is where the
+  // confusion came from — fixed 2026-08-08, see the test below.)
   const src = readFileSync("src/lib/doc-detail-listings.ts", "utf8");
   const co = src.slice(src.indexOf("CODetailOrder"), src.indexOf("DoDetailItem"));
   assert.doesNotMatch(co, /companySOId|customerPOId/);
@@ -105,6 +106,44 @@ test("the CO listing reads CO field names, never the SO ones", () => {
     { companySOId: "SO-1", customerPOId: "PO-1", items: [] },
   ]);
   assert.equal(wrong[1][0], "");
+});
+
+test("the CO list page shows no column the CO route cannot fill", () => {
+  // The grid and the CSV both carried a "Customer PO" column. There is no
+  // customer-PO column on consignment_orders and rowToCOList never emits one,
+  // so it could only ever render blank — which reads as missing data, not as a
+  // field that does not apply. The page's rows are ConsignmentOrder now, not an
+  // alias of it named SalesOrder, so the compiler can say so.
+  const page = readFileSync("src/pages/consignment/index.tsx", "utf8");
+  assert.doesNotMatch(
+    page,
+    /key: "customerPOId"/,
+    "the grid must not offer a column the route never fills",
+  );
+  assert.doesNotMatch(page, /o\.customerPOId/, "nor export one");
+  assert.doesNotMatch(
+    page,
+    /ConsignmentOrder as SalesOrder/,
+    "CO rows must not be annotated as sales orders",
+  );
+
+  // Every column key the grid renders must be a field the route actually
+  // returns. rowToCO + rowToCOList are the contract; read the keys straight
+  // out of them.
+  const route = readFileSync("src/api/routes/consignment-orders.ts", "utf8");
+  const rowToCo = route.slice(
+    route.indexOf("function rowToCO("),
+    route.indexOf("function rowToCOListItem("),
+  );
+  const emitted = new Set(
+    [...rowToCo.matchAll(/^\s{4}(\w+):/gm)].map((m) => m[1]),
+  );
+  assert.ok(emitted.has("companyCOId") && emitted.has("customerCOId"));
+
+  const columnKeys = [...page.matchAll(/\{ key: "(\w+)", label:/g)].map((m) => m[1]);
+  assert.ok(columnKeys.length > 5, "the grid's columns must be parseable");
+  const orphans = columnKeys.filter((k) => !emitted.has(k));
+  assert.deepEqual(orphans, [], "a column the route never fills is always blank");
 });
 
 // ── Coverage ───────────────────────────────────────────────────────────────

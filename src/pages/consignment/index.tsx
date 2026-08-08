@@ -13,7 +13,7 @@ import { StatusTabStrip } from "@/components/ui/status-tab-strip";
 import { tabValueSen } from "@/lib/status-tab-strip";
 import { formatCurrency, cn } from "@/lib/utils";
 import { getPrimarySoCategory } from "@/lib/so-category";
-import { buildCoDetailListingAoa, type CODetailOrder } from "@/lib/doc-detail-listings";
+import { buildCoDetailListingAoa } from "@/lib/doc-detail-listings";
 import { Plus, ShoppingCart, Download, Filter, X, Eye, Pencil, Printer, Truck, FileText, ClipboardList, RefreshCw, Package, CheckCircle, ScanLine } from "lucide-react";
 // generateCOPdf is dynamic-imported at the click handler so the 1MB jspdf
 // vendor chunk only ships when the user actually prints.
@@ -26,7 +26,7 @@ import {
   CONFIRMED_STATUSES,
   sumByStatuses,
 } from "@/lib/so-status";
-import type { ConsignmentOrder as SalesOrder } from "@/types";
+import type { ConsignmentOrder } from "@/types";
 import type { Customer, DeliveryOrder } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
@@ -111,7 +111,7 @@ export default function SalesPage() {
 
   const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{
     success?: boolean;
-    data?: SalesOrder[];
+    data?: ConsignmentOrder[];
     page?: number;
     limit?: number;
     total?: number;
@@ -141,7 +141,7 @@ export default function SalesPage() {
   // so the full 12MB payload was 99%+ waste. Trims to ~100KB.
   const { data: productionOrdersResp, refresh: refreshProductionOrders } = useCachedJson<{ success?: boolean; data?: { salesOrderId: string; poNo: string; status: string }[] }>("/api/production-orders?fields=minimal&include=");
   const { data: statusChangesResp, refresh: refreshStatusChanges } = useCachedJson<{ success?: boolean; data?: SOStatusChangeEntry[] }>("/api/consignment-orders/status-changes");
-  const orders: SalesOrder[] = useMemo(
+  const orders: ConsignmentOrder[] = useMemo(
     () => (ordersResp?.success ? ordersResp.data ?? [] : Array.isArray(ordersResp) ? ordersResp : []),
     [ordersResp]
   );
@@ -174,7 +174,7 @@ export default function SalesPage() {
   // Keep referencing the status-changes envelope so the hook stays subscribed,
   // even though we don't render from it directly (matches the previous behaviour).
   useMemo(() => statusChangesResp?.success ? statusChangesResp.data || [] : [], [statusChangesResp]);
-  const [selectedRows, setSelectedRows] = useState<SalesOrder[]>([]);
+  const [selectedRows, setSelectedRows] = useState<ConsignmentOrder[]>([]);
   const [bulkConverting, setBulkConverting] = useState(false);
   const [bulkPrinting, setBulkPrinting] = useState(false);
   // Tab + filter state lives in the URL so refresh, back/forward, and
@@ -183,8 +183,8 @@ export default function SalesPage() {
   const [scanPOOpen, setScanPOOpen] = useState(false);
 
   // Transfer to DO / Invoice states
-  const [transferDORow, setTransferDORow] = useState<SalesOrder | null>(null);
-  const [transferInvRow, setTransferInvRow] = useState<SalesOrder | null>(null);
+  const [transferDORow, setTransferDORow] = useState<ConsignmentOrder | null>(null);
+  const [transferInvRow, setTransferInvRow] = useState<ConsignmentOrder | null>(null);
   const [transferLoading, setTransferLoading] = useState(false);
   const [doDeliveryDate, setDoDeliveryDate] = useState("");
   const [doDriverName, setDoDriverName] = useState("");
@@ -370,7 +370,7 @@ export default function SalesPage() {
 
   const exportCSV = () => {
     const headers = [
-      "SO No.", "Customer", "State", "Customer PO", "Order Date", "Expected DD",
+      "SO No.", "Customer", "State", "Order Date", "Expected DD",
       "Items", "Total Qty", "Total (RM)", "Status",
     ];
     const rows = filteredOrders.map(o => {
@@ -379,7 +379,6 @@ export default function SalesPage() {
         o.companyCOId,
         o.customerName,
         o.customerState,
-        o.customerPOId || "",
         o.companyCODate.split("T")[0],
         o.hookkaExpectedDD ? o.hookkaExpectedDD.split("T")[0] : "",
         o.items.length.toString(),
@@ -402,10 +401,12 @@ export default function SalesPage() {
     URL.revokeObjectURL(url);
   };
 
-  const columns: Column<SalesOrder>[] = [
+  const columns: Column<ConsignmentOrder>[] = [
     { key: "companyCOId", label: "Company SO", type: "docno", width: "130px", sortable: true },
     { key: "customerCOId", label: "Customer SO", type: "docno", width: "120px", sortable: true },
-    { key: "customerPOId", label: "Customer PO", type: "docno", width: "120px", sortable: true },
+    // No "Customer PO" column: consignment_orders has no customer-PO column and
+    // rowToCOList never emits one, so it could only ever render blank. The
+    // customer's own reference on a CO is customerCOId, above.
     { key: "customerName", label: "Customer", type: "text", width: "100px", sortable: true },
     { key: "customerDeliveryDate", label: "Customer Delivery", type: "date", width: "110px", sortable: true },
     { key: "customerState", label: "State", type: "text", width: "50px", sortable: true },
@@ -427,7 +428,7 @@ export default function SalesPage() {
       width: "55px",
       align: "right" as const,
       sortable: true,
-      render: (_value: unknown, row: SalesOrder) => {
+      render: (_value: unknown, row: ConsignmentOrder) => {
         const totalQty = row.items.reduce((s, i) => s + i.quantity, 0);
         return <span>{totalQty}</span>;
       },
@@ -438,7 +439,7 @@ export default function SalesPage() {
       type: "text",
       width: "100px",
       sortable: true,
-      render: (_value: unknown, row: SalesOrder) => {
+      render: (_value: unknown, row: ConsignmentOrder) => {
         // Completed statuses - no outstanding
         if (["DELIVERED", "INVOICED", "CLOSED", "CANCELLED", "DRAFT"].includes(row.status)) {
           return <span className="text-[#9CA3AF]">—</span>;
@@ -476,7 +477,7 @@ export default function SalesPage() {
     { key: "status", label: "Status", type: "status", width: "100px", sortable: true },
   ];
 
-  const getContextMenuItems = (row: SalesOrder): ContextMenuItem[] => [
+  const getContextMenuItems = (row: ConsignmentOrder): ContextMenuItem[] => [
     {
       label: "View",
       icon: <Eye className="h-3.5 w-3.5" />,
@@ -881,7 +882,7 @@ export default function SalesPage() {
               </div>
             </div>
           )}
-          <DataGrid<SalesOrder>
+          <DataGrid<ConsignmentOrder>
             columns={columns}
             data={filteredOrders}
             keyField="id"
@@ -905,13 +906,11 @@ export default function SalesPage() {
             exportName="consignment-orders"
             exportSheetLabel="Consignment Orders"
             // The CO list endpoint ships each order's lines (rowToCOList), so
-            // the per-line detail listing has real data to export. The cast is
-            // the page's own type lie, not the export's: these rows are
-            // consignment orders (companyCOId / customerCOId), annotated here
-            // as SalesOrder.
+            // the per-line detail listing has real data to export. No cast:
+            // the rows are ConsignmentOrder, which is what the builder wants.
             detailExport={{
               label: "Detail Listing",
-              build: (rows) => buildCoDetailListingAoa(rows as unknown as CODetailOrder[]),
+              build: (rows) => buildCoDetailListingAoa(rows),
             }}
           />
 

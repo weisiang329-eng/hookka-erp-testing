@@ -4831,6 +4831,9 @@ export default function DeliveryPage() {
               columns={planningColumns}
               data={planningPOs}
               keyField="id"
+              // Its own id: a different row type and a different column set
+              // from the DO list, so it cannot share that layout.
+              gridId="delivery-planning-pos"
               loading={loading}
               stickyHeader
               virtualize
@@ -4894,6 +4897,7 @@ export default function DeliveryPage() {
               columns={pendingDeliveryColumns}
               data={readyPOs}
               keyField="id"
+              gridId="delivery-pending-delivery-pos"
               loading={loading}
               stickyHeader
               virtualize
@@ -4970,6 +4974,15 @@ export default function DeliveryPage() {
               columns={columns}
               data={filteredOrders}
               keyField="id"
+              // Column visibility / order / width persist under this id — one
+              // layout for the DO list, shared by its four stage tabs, because
+              // it is one list. The per-column VALUE filters must NOT be
+              // shared: a selection seeded while looking at Pending Dispatch
+              // contains none of Delivered's values, which reads as an empty
+              // grid rather than as a filter (BUG-CLASSES C7). Hence the tab in
+              // valueFilterKey and not in gridId.
+              gridId="delivery-orders-list"
+              valueFilterKey={activeTab}
               loading={loading}
               stickyHeader
               virtualize

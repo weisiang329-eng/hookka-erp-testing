@@ -18,15 +18,19 @@ import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-// The grids this task connected, with the exact id each must keep.
-const CONNECTED = {
-  "src/pages/invoices/index.tsx": "invoices-list",
-  "src/pages/consignment/index.tsx": "consignment-orders-list",
-  "src/pages/procurement/grn.tsx": "goods-receipts-list",
-  "src/pages/procurement/pi.tsx": "purchase-invoices-list",
-};
+// The grids this task connected, with the exact id each must keep. Delivery's
+// three grids joined on 2026-08-08 — it was the last list without an id.
+const CONNECTED = [
+  ["src/pages/invoices/index.tsx", "invoices-list"],
+  ["src/pages/consignment/index.tsx", "consignment-orders-list"],
+  ["src/pages/procurement/grn.tsx", "goods-receipts-list"],
+  ["src/pages/procurement/pi.tsx", "purchase-invoices-list"],
+  ["src/pages/delivery/index.tsx", "delivery-orders-list"],
+  ["src/pages/delivery/index.tsx", "delivery-planning-pos"],
+  ["src/pages/delivery/index.tsx", "delivery-pending-delivery-pos"],
+];
 
-for (const [file, id] of Object.entries(CONNECTED)) {
+for (const [file, id] of CONNECTED) {
   test(`${file} keeps gridId="${id}" — renaming it discards saved layouts`, () => {
     const src = readFileSync(file, "utf8");
     assert.match(
@@ -36,6 +40,23 @@ for (const [file, id] of Object.entries(CONNECTED)) {
     );
   });
 }
+
+test("the DO list's four stage tabs share a layout but NOT a value filter", () => {
+  // One list, four stages. Column visibility/order is keyed on gridId alone,
+  // so the operator sets their columns once. The value filters are keyed on
+  // gridId + valueFilterKey, and a selection seeded on Pending Dispatch holds
+  // none of Delivered's values — sharing that key empties the grid and reads
+  // as data loss (BUG-CLASSES C7, which has already bitten Sales Orders twice).
+  const src = readFileSync("src/pages/delivery/index.tsx", "utf8");
+  const at = src.indexOf('gridId="delivery-orders-list"');
+  assert.ok(at > 0, "the DO grid must name its id");
+  const nearby = src.slice(at, at + 400);
+  assert.match(
+    nearby,
+    /valueFilterKey=\{activeTab\}/,
+    "the stage tab must segment the value-filter key",
+  );
+});
 
 test("every gridId in the app is unique", () => {
   const seen = new Map();

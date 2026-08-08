@@ -32,6 +32,7 @@ import type {
   StockBreakdown,
   StockItemType,
   StockMovement,
+  WipLot,
 } from "@/lib/stock-breakdown";
 
 // ---------------------------------------------------------------------------
@@ -340,6 +341,78 @@ function FgLotsTable({
 }
 
 // ---------------------------------------------------------------------------
+// Lots — WIP. One row per JOB CARD: the piece of work that made this WIP item
+// on one production order.
+//
+// The cost columns are headed "Labour" and not "Value", because that is what
+// they are. Nothing in this system costs a WIP piece, and a column called Value
+// would be read as a stock valuation.
+// ---------------------------------------------------------------------------
+function WipLotsTable({
+  lots,
+  onNavigate,
+}: {
+  lots: WipLot[];
+  onNavigate: (href: string) => void;
+}) {
+  return (
+    <table className="w-full text-xs">
+      <thead className="bg-[#FAF8F5]">
+        <tr>
+          <th className={TH}>Production order</th>
+          <th className={TH}>Sales order</th>
+          <th className={TH}>Department</th>
+          <th className={THR}>Qty made</th>
+          <th className={THR}>Labour (min)</th>
+          <th className={THR}>Labour posted</th>
+          <th className={TH}>Completed</th>
+          <th className={THR}>Age</th>
+          <th className={TH}>Status</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-[#F0EDE9]">
+        {lots.length === 0 && (
+          <EmptyRow span={9} message="No job cards have produced this WIP item." />
+        )}
+        {lots.map((l) => (
+          <tr key={l.id}>
+            <td className={TD}>
+              <DocLink
+                no={l.productionOrderNo}
+                href={l.productionOrderHref}
+                onNavigate={onNavigate}
+              />
+            </td>
+            <td className={TD}>
+              <DocLink no={l.salesOrderNo} href={l.salesOrderHref} onNavigate={onNavigate} />
+            </td>
+            <td className={TD}>
+              <DocLink
+                no={l.department ?? l.jobCardNo}
+                href={l.jobCardHref}
+                onNavigate={onNavigate}
+              />
+            </td>
+            <td className={TDR}><Qty value={l.qty} /></td>
+            <td className={TDR}><Qty value={l.laborMinutes} /></td>
+            <td className={TDR}><Money value={l.laborPostedSen} /></td>
+            <td className={TD}><DateCell value={l.completedDate} /></td>
+            <td className={TDR}>
+              {l.ageDays === null ? <Dash /> : <span className="tabular-nums">{l.ageDays}d</span>}
+            </td>
+            <td className={TD}>
+              <span className="text-[11px] px-1.5 py-0.5 rounded bg-[#F0EDE9] text-[#6B7280]">
+                {l.status ?? "—"}
+              </span>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Movements — split IN / OUT, different columns on each (owner's ask)
 // ---------------------------------------------------------------------------
 function BalanceCell({ m }: { m: StockMovement }) {
@@ -565,6 +638,69 @@ function FgOutTable({
   );
 }
 
+/**
+ * WIP movements. One table for both directions — unlike RM and FG there is no
+ * pair of column sets to choose between, because every row is the same kind of
+ * event: labour booked against a job card, or a reversal of one.
+ *
+ * The Qty column is headed "Qty (min)" on purpose. These are MINUTES, and the
+ * grid above this drawer counts pieces; a bare "Qty" is what would let somebody
+ * add the two together.
+ */
+function WipMovementsTable({
+  rows,
+  onNavigate,
+}: {
+  rows: StockMovement[];
+  onNavigate: (href: string) => void;
+}) {
+  return (
+    <table className="w-full text-xs">
+      <thead className="bg-[#FAF8F5]">
+        <tr>
+          <th className={TH}>Date</th>
+          <th className={TH}>Type</th>
+          <th className={TH}>Production order</th>
+          <th className={TH}>Department</th>
+          <th className={TH}>Worker</th>
+          <th className={THR}>Qty (min)</th>
+          <th className={THR}>Cost</th>
+          <th className={THR}>Balance</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-[#F0EDE9]">
+        {rows.length === 0 && <EmptyRow span={8} message="No movements recorded." />}
+        {rows.map((m) => (
+          <tr key={m.id}>
+            <td className={TD}><DateCell value={m.date} /></td>
+            <td className={TD}>{m.type}</td>
+            <td className={TD}>
+              <DocLink
+                no={m.productionOrderNo}
+                href={m.productionOrderHref}
+                onNavigate={onNavigate}
+              />
+            </td>
+            <td className={TD}>
+              <DocLink
+                no={m.department ?? m.jobCardNo}
+                href={m.jobCardHref}
+                onNavigate={onNavigate}
+              />
+            </td>
+            <td className={`${TD} max-w-[160px] truncate`} title={m.takenByName ?? ""}>
+              <Txt value={m.takenByName} />
+            </td>
+            <td className={TDR}><Qty value={m.qty} /></td>
+            <td className={TDR}><Money value={m.totalCostSen} /></td>
+            <td className={TDR}><BalanceCell m={m} /></td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The drawer
 // ---------------------------------------------------------------------------
@@ -755,10 +891,17 @@ function StockBreakdownPanel({
                 <Notice tone="warn">{header.valuationNote}</Notice>
               )}
 
-              {/* 2 — Stock lots */}
+              {/* 2 — Stock lots.
+                  WIP gets a different heading because it has no lots: what it
+                  has is the job cards that made the item. Calling those "stock
+                  lots" would imply a FIFO layer that does not exist. */}
               <Section
-                title="Stock lots"
-                subtitle="Oldest first — consumed first on the next DO"
+                title={target.type === "WIP" ? "Job cards that made this" : "Stock lots"}
+                subtitle={
+                  target.type === "WIP"
+                    ? "Oldest first — WIP has no cost layers, so these are the work, not lots"
+                    : "Oldest first — consumed first on the next DO"
+                }
                 count={data?.lots.length}
               >
                 {target.type === "RM" && (
@@ -773,32 +916,49 @@ function StockBreakdownPanel({
                     onNavigate={go}
                   />
                 )}
+                {target.type === "WIP" && (
+                  <WipLotsTable
+                    lots={(data?.lots ?? []) as WipLot[]}
+                    onNavigate={go}
+                  />
+                )}
               </Section>
 
-              {/* 3 — Movements, newest first, split IN / OUT */}
+              {/* 3 — Movements, newest first, split IN / OUT.
+                  WIP is not split: every row is the same kind of event, so a
+                  second table headed "Stock issued" holding nothing would read
+                  as "nothing has been issued" rather than "issues are not
+                  recorded". The notice above says which. */}
               <Section
-                title="Movements in"
-                count={inRows.length}
+                title={target.type === "WIP" ? "Movements" : "Movements in"}
+                count={target.type === "WIP" ? movements.length : inRows.length}
                 subtitle="Newest first"
               >
-                <div className="flex items-center gap-1.5 px-3 pt-2 text-[11px] text-[#3F6B3F]">
-                  <ArrowDownToLine className="h-3.5 w-3.5" /> Stock received
-                </div>
+                {target.type !== "WIP" && (
+                  <div className="flex items-center gap-1.5 px-3 pt-2 text-[11px] text-[#3F6B3F]">
+                    <ArrowDownToLine className="h-3.5 w-3.5" /> Stock received
+                  </div>
+                )}
                 {target.type === "RM" && <RmInTable rows={inRows} onNavigate={go} />}
                 {target.type === "FG" && <FgInTable rows={inRows} onNavigate={go} />}
+                {target.type === "WIP" && (
+                  <WipMovementsTable rows={movements} onNavigate={go} />
+                )}
               </Section>
 
-              <Section
-                title="Movements out"
-                count={outRows.length}
-                subtitle="Newest first"
-              >
-                <div className="flex items-center gap-1.5 px-3 pt-2 text-[11px] text-[#9A3A2D]">
-                  <ArrowUpFromLine className="h-3.5 w-3.5" /> Stock issued
-                </div>
-                {target.type === "RM" && <RmOutTable rows={outRows} onNavigate={go} />}
-                {target.type === "FG" && <FgOutTable rows={outRows} onNavigate={go} />}
-              </Section>
+              {target.type !== "WIP" && (
+                <Section
+                  title="Movements out"
+                  count={outRows.length}
+                  subtitle="Newest first"
+                >
+                  <div className="flex items-center gap-1.5 px-3 pt-2 text-[11px] text-[#9A3A2D]">
+                    <ArrowUpFromLine className="h-3.5 w-3.5" /> Stock issued
+                  </div>
+                  {target.type === "RM" && <RmOutTable rows={outRows} onNavigate={go} />}
+                  {target.type === "FG" && <FgOutTable rows={outRows} onNavigate={go} />}
+                </Section>
+              )}
 
               {/* 4 — COGS */}
               <Section
@@ -818,7 +978,18 @@ function StockBreakdownPanel({
                   </thead>
                   <tbody className="divide-y divide-[#F0EDE9]">
                     {(data?.cogs ?? []).length === 0 && (
-                      <EmptyRow span={6} message="Nothing has been consumed yet." />
+                      <EmptyRow
+                        span={6}
+                        // "Nothing has been consumed yet" is true for a raw
+                        // material nobody has drawn on. For WIP it would be a
+                        // false statement about a real event: WIP IS consumed
+                        // constantly, and none of it is written down.
+                        message={
+                          target.type === "WIP"
+                            ? "WIP consumption is never written to the ledger, so there is nothing to list here. This is not a record that nothing was consumed."
+                            : "Nothing has been consumed yet."
+                        }
+                      />
                     )}
                     {(data?.cogs ?? []).map((r) => (
                       <tr key={r.id}>

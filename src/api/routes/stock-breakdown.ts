@@ -53,6 +53,7 @@ import {
   type StockBreakdown,
   type StockItemType,
   type StockMovement,
+  type WipLot,
 } from "../../lib/stock-breakdown";
 
 const app = new Hono<Env>();
@@ -190,12 +191,9 @@ app.get("/breakdown", async (c) => {
     return c.json({ success: true, data });
   }
 
-  // WIP lands in the follow-up commit; refuse loudly rather than return an
-  // empty shell that reads as "this item has no stock".
-  return c.json(
-    { success: false, error: `Stock breakdown for ${type} is not available yet` },
-    501,
-  );
+  const data = await buildWipBreakdown(c, orgId, itemId);
+  if (!data) return c.json({ success: false, error: "Not found" }, 404);
+  return c.json({ success: true, data });
 });
 
 // ---------------------------------------------------------------------------
@@ -451,12 +449,14 @@ async function buildRmBreakdown(
 //
 // Two facts about the live data shape everything below:
 //
-//   • fg_units.batchId is NULL on all 4,866 rows — the link from a piece to its
-//     cost layer has never been written (a sibling change is fixing the write
-//     side). So a piece's unit cost is looked up through its PRODUCTION ORDER
-//     instead, and where even that is absent the cost renders as an em dash.
-//     On prod that is most of the shelf, and the panel says so rather than
-//     quietly totalling only the priced third;
+//   • fg_units.batchId is NULL on all 4,866 rows on prod — the link from a
+//     piece to its cost layer. The write side + backfill landed on 2026-08-08
+//     (`src/api/lib/fg-batch-link.ts`) but the backfill has not been RUN, so
+//     the column is still empty. A piece's unit cost is therefore looked up
+//     through its PRODUCTION ORDER instead, and where even that is absent the
+//     cost renders as an em dash. On prod that is most of the shelf, and the
+//     panel says so rather than quietly totalling only the priced third. The
+//     direct layer takes over on its own once the backfill runs;
 //
 //   • the two legs of the FG ledger do not count the same thing. FG_COMPLETED
 //     books UNITS (2,938 across 1,451 rows); FG_DELIVERED books one row per
@@ -545,10 +545,11 @@ async function buildFgBreakdown(
            JOIN products p            ON p.code = u.productCode
            LEFT JOIN production_orders po ON po.id = u.poId
            LEFT JOIN delivery_orders d    ON d.id  = u.doId
-           -- Direct cost layer: currently never matches (batchId is NULL on
-           -- every row) but costs nothing and takes over the moment the write
-           -- side lands, with no change here. Joined on the primary key, so
-           -- it cannot fan out.
+           -- Direct cost layer. Matches nothing on prod today (batchId is
+           -- still NULL on every row — the backfill that fills it has landed
+           -- but not been run) and costs nothing to keep; it takes over on its
+           -- own the moment the column is populated. Joined on the primary
+           -- key, so it cannot fan out.
            LEFT JOIN fg_batches fb    ON fb.id = u.batchId
           WHERE p.id = ?
             -- STOCK lots means the stock you still have. A delivered piece is
@@ -752,6 +753,274 @@ async function buildFgBreakdown(
     lots,
     movements: stamped,
     cogs,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// WORK IN PROGRESS — the honest one.
+//
+// This panel exists to show what IS recorded and to say plainly what is not. It
+// would have been easy to give WIP the same running balance as the other two;
+// it would also have been wrong, and wrong in the way that is hardest to catch,
+// because a number that adds up looks checked.
+//
+// THREE THINGS THE LEDGER CANNOT TELL YOU ABOUT A WIP ITEM, all surfaced:
+//
+//   1. NOTHING IS RECORDED WHEN WIP IS CONSUMED. A WIP piece is booked in when
+//      a job card completes and nothing at all is written when the next
+//      department eats it or it turns into a finished good. On prod: 32,837
+//      inbound rows against 54 outbound, and all 54 of those are labour
+//      reversals from cancelled job cards, not consumption. Sum them and the
+//      figure only ever grows.
+//
+//   2. THE INBOUND ROWS ARE MINUTES, NOT PIECES. LABOR_POSTED books the job
+//      card's minutes (its qty is 23, 40, 50 — minutes), while the grid above
+//      counts pieces. Adding those two together produces a number in no unit at
+//      all.
+//
+//   3. cost_ledger's WIP rows are keyed by PRODUCTION ORDER, not by WIP item.
+//      Only the JOB_CARD-referenced rows can be narrowed to one WIP item at
+//      all, via job_cards.wipLabel, and that is what this builder uses — a
+//      naive per-production-order pull would drag in every other department's
+//      labour on the same order (one WIP code on prod touches 696 production
+//      orders and 9,176 ledger rows, of which 629 are actually its own).
+//      WIP_COMPLETED rows reference the production order and cannot be
+//      attributed to a WIP item, so they are excluded rather than smeared
+//      across every WIP code on that order.
+//
+// So: the movements are real and narrowed correctly, the balance column is
+// empty, and the panel carries the reason.
+// ---------------------------------------------------------------------------
+type WipJobCardRow = {
+  id: string;
+  departmentCode: string | null;
+  departmentName: string | null;
+  status: string | null;
+  wipQty: number | null;
+  completedDate: string | null;
+  productionOrderId: string | null;
+  poNo: string | null;
+  prodSalesOrderId: string | null;
+  prodSalesOrderNo: string | null;
+  laborMinutes: number | null;
+  laborPostedSen: number | null;
+};
+
+type WipLedgerRow = LedgerRow & {
+  jcDepartmentCode: string | null;
+  jcDepartmentName: string | null;
+  jcProductionOrderId: string | null;
+  workerName: string | null;
+};
+
+async function buildWipBreakdown(
+  c: Context<Env>,
+  orgId: string,
+  itemId: string,
+): Promise<StockBreakdown | null> {
+  const db = c.var.DB;
+
+  // The Inventory grid hands over a wip_items id; accept the code too, because
+  // the WIP code is what the operator can actually read off the screen and it
+  // is the key everything downstream joins on anyway.
+  const item = await db
+    .prepare(
+      `SELECT id, code, type, relatedProduct, stockQty, status
+         FROM wip_items
+        WHERE (id = ? OR code = ?) AND orgId = ?
+        ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END
+        LIMIT 1`,
+    )
+    .bind(itemId, itemId, orgId, itemId)
+    .first<{
+      id: string;
+      code: string;
+      type: string | null;
+      relatedProduct: string | null;
+      stockQty: number | null;
+      status: string | null;
+    }>();
+  if (!item) return null;
+
+  const [jcRes, ledgerRes] = await Promise.all([
+    // The job cards that made this WIP item, oldest first, with the labour
+    // booked on each. Aggregated in subqueries rather than joined so a job card
+    // with twelve labour postings stays ONE row.
+    db
+      .prepare(
+        `SELECT j.id, j.departmentCode, j.departmentName, j.status, j.wipQty,
+                j.completedDate, j.productionOrderId,
+                p.poNo           AS "poNo",
+                p.salesOrderId   AS "prodSalesOrderId",
+                p.salesOrderNo   AS "prodSalesOrderNo",
+                (SELECT SUM(cl.qty) FROM cost_ledger cl
+                  WHERE cl.itemType = 'WIP' AND cl.refType = 'JOB_CARD'
+                    AND cl.refId = j.id AND cl.direction = 'IN')
+                                 AS "laborMinutes",
+                (SELECT SUM(cl.totalCostSen) FROM cost_ledger cl
+                  WHERE cl.itemType = 'WIP' AND cl.refType = 'JOB_CARD'
+                    AND cl.refId = j.id AND cl.direction = 'IN')
+                                 AS "laborPostedSen"
+           FROM job_cards j
+           LEFT JOIN production_orders p ON p.id = j.productionOrderId
+          WHERE j.wipLabel = ?
+          ORDER BY j.completedDate ASC NULLS LAST, j.id ASC`,
+      )
+      .bind(item.code)
+      .all<WipJobCardRow>(),
+    // Only the rows that can honestly be attributed to THIS WIP item: those
+    // referencing one of its job cards.
+    db
+      .prepare(
+        `SELECT cl.id, cl.date, cl.type, cl.direction, cl.qty,
+                cl.unitCostSen, cl.totalCostSen, cl.batchId,
+                cl.refType, cl.refId, cl.notes, cl.workerId,
+                j.departmentCode AS "jcDepartmentCode",
+                j.departmentName AS "jcDepartmentName",
+                j.productionOrderId AS "jcProductionOrderId",
+                p.poNo           AS "prodOrderNo",
+                p.salesOrderId   AS "prodSalesOrderId",
+                p.salesOrderNo   AS "prodSalesOrderNo",
+                p.customerName   AS "prodCustomerName",
+                w.name           AS "workerName"
+           FROM cost_ledger cl
+           JOIN job_cards j ON j.id = cl.refId
+           LEFT JOIN production_orders p ON p.id = j.productionOrderId
+           LEFT JOIN workers w           ON w.id = cl.workerId
+          WHERE cl.itemType = 'WIP'
+            AND cl.refType  = 'JOB_CARD'
+            AND j.wipLabel  = ?
+          ORDER BY cl.date DESC, cl.id DESC`,
+      )
+      .bind(item.code)
+      .all<WipLedgerRow>(),
+  ]);
+
+  const jcRows = jcRes.results ?? [];
+  const ledgerRows = ledgerRes.results ?? [];
+
+  // --- lots (one per job card) --------------------------------------------
+  const lots: WipLot[] = jcRows.map((j) => ({
+    kind: "WIP_LOT" as const,
+    id: j.id,
+    productionOrderNo: j.poNo,
+    productionOrderHref: sourceDocHref("PRODUCTION_ORDER", j.productionOrderId, {
+      salesOrderId: j.prodSalesOrderId,
+    }),
+    department: j.departmentName ?? j.departmentCode,
+    // A job card has no number of its own — its id is a generated string
+    // nobody reads. The department board it sits on is what an operator can
+    // actually open, so that is the link.
+    jobCardNo: j.departmentCode ?? null,
+    jobCardHref: sourceDocHref("JOB_CARD", j.id, {
+      departmentCode: j.departmentCode,
+    }),
+    salesOrderNo: j.prodSalesOrderNo,
+    salesOrderHref: sourceDocHref("SALES_ORDER", j.prodSalesOrderId),
+    qty: num(j.wipQty),
+    status: j.status,
+    laborMinutes: j.laborMinutes === null ? null : num(j.laborMinutes),
+    laborPostedSen: j.laborPostedSen === null ? null : num(j.laborPostedSen),
+    completedDate: j.completedDate,
+    ageDays: ageDays(j.completedDate),
+  }));
+
+  // --- movements ----------------------------------------------------------
+  const movements: StockMovement[] = ledgerRows.map((r) => ({
+    id: r.id,
+    date: r.date,
+    direction: r.direction === "IN" ? "IN" : "OUT",
+    type: r.type,
+    qty: roundQty(num(r.qty)),
+    unitCostSen: num(r.unitCostSen),
+    totalCostSen: num(r.totalCostSen),
+    // Stays null: withRunningBalance refuses WIP outright, and this makes the
+    // intent legible at the point the row is built.
+    balanceAfter: null,
+    docType: "JOB_CARD",
+    docId: r.refId,
+    docNo: r.jcDepartmentCode ?? null,
+    docHref: sourceDocHref("JOB_CARD", r.refId, {
+      departmentCode: r.jcDepartmentCode,
+    }),
+    productionOrderNo: r.prodOrderNo,
+    productionOrderHref: sourceDocHref(
+      "PRODUCTION_ORDER",
+      r.jcProductionOrderId,
+      { salesOrderId: r.prodSalesOrderId },
+    ),
+    department: r.jcDepartmentName ?? r.jcDepartmentCode,
+    takenByName: r.workerName,
+    jobCardNo: r.jcDepartmentCode ?? null,
+    jobCardHref: sourceDocHref("JOB_CARD", r.refId, {
+      departmentCode: r.jcDepartmentCode,
+    }),
+    salesOrderNo: r.prodSalesOrderNo,
+    salesOrderHref: sourceDocHref("SALES_ORDER", r.prodSalesOrderId),
+    customerName: r.prodCustomerName,
+    batchId: r.batchId,
+    notes: r.notes,
+  }));
+
+  const reconciliation = reconciliationOf("WIP", movements);
+  const stamped = withRunningBalance(movements, reconciliation);
+
+  const onHandQty = num(item.stockQty);
+  const laborPostedSen = lots.reduce((s, l) => s + (l.laborPostedSen ?? 0), 0);
+  const { ageDays: oldestAgeDays, date: oldestLayerDate } = fifoAge(
+    lots.map((l) => ({ date: l.completedDate, qty: l.qty })),
+  );
+
+  return {
+    header: {
+      itemType: "WIP",
+      itemId: item.id,
+      itemCode: item.code,
+      itemName: item.relatedProduct ?? item.type ?? "",
+      uom: "pieces",
+      // The grid's own figure, from the same wip_items row the grid reads. It
+      // is NOT derived from the movements below and must not be read as if it
+      // were — see reconciliation.notice.
+      totalQty: onHandQty,
+      // Nothing reserves WIP against a customer document, so there is no split
+      // to report. Null rather than "0 / N", which would assert that somebody
+      // checked and found none committed.
+      assignedQty: null,
+      freeQty: null,
+      qtyNote:
+        `This figure comes from the WIP ledger table, not from the movements ` +
+        `below. The two are not connected and cannot be checked against each ` +
+        `other.`,
+      // WIP has no FIFO cost layer at all — nothing in this system costs a WIP
+      // piece. Reporting the labour total here as "Total value" would invent a
+      // valuation, so the stat stays empty and the labour is shown for what it
+      // is, per job card, in the table.
+      totalValueSen: null,
+      valuationNote:
+        `Work in progress carries no cost layer, so there is no stock value to ` +
+        `show. What IS recorded is labour: ` +
+        `${(laborPostedSen / 100).toFixed(2)} MYR has been posted across the ` +
+        `${lots.length} job card(s) that made this item — for every piece they ` +
+        `produced, not only the ${onHandQty} still on the floor.`,
+      oldestAgeDays,
+      oldestLayerDate,
+      reconciliation,
+      // Deliberately not compared. `closingBalance` returns null for WIP, so
+      // this reports "cannot say" rather than manufacturing a disagreement
+      // between a piece count and a pile of labour minutes.
+      ledgerVsOnHand: ledgerVsOnHand(
+        closingBalance(movements, reconciliation),
+        onHandQty,
+        0,
+      ),
+    },
+    lots,
+    // COGS is empty BY CONSTRUCTION, not because this item happens to have
+    // none: WIP consumption is never written, so there is nothing to list. The
+    // panel says that in the empty state rather than showing a blank table that
+    // reads as "nothing has been used".
+    movements: stamped,
+    cogs: [],
   };
 }
 

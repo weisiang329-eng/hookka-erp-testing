@@ -129,18 +129,33 @@ export interface FgLot {
   deliveryOrderHref: string | null;
 }
 
-/** A WIP "lot" is a production order's in-flight work — see reconciliationOf. */
+/**
+ * A WIP "lot" is a JOB CARD — the piece of work that produced this WIP item on
+ * one production order.
+ *
+ * It carries no unit cost and no value, and that is not an omission. WIP has no
+ * FIFO cost layer in this system: nothing is ever costed per WIP piece, only
+ * labour minutes are booked per job card. The two labour fields are named for
+ * what they are so they cannot be mistaken for a stock valuation — `laborPosted`
+ * is what was booked on that job card for all the pieces it made, not the value
+ * of the ones still sitting on the floor.
+ */
 export interface WipLot {
   kind: "WIP_LOT";
+  /** The job card id. */
   id: string;
   productionOrderNo: string | null;
   productionOrderHref: string | null;
   department: string | null;
   jobCardNo: string | null;
   jobCardHref: string | null;
+  salesOrderNo: string | null;
+  salesOrderHref: string | null;
+  /** Pieces this job card produced. */
   qty: number;
-  unitCostSen: number | null;
-  valueSen: number | null;
+  status: string | null;
+  laborMinutes: number | null;
+  laborPostedSen: number | null;
   completedDate: string | null;
   ageDays: number | null;
 }
@@ -362,8 +377,9 @@ function fmtQty(n: number): string {
  *
  * Two sources in priority order, and no third:
  *   • the piece's OWN cost layer, via fg_units.batchId. This is the right
- *     answer and it matches nothing today — batchId is NULL on all 4,866 rows
- *     — but it takes over automatically once the write side stamps it;
+ *     answer. The write side that fills that column landed on 2026-08-08 but
+ *     the prod backfill has not been run, so today it matches nothing; it takes
+ *     over on its own the moment the column is populated, with no change here;
  *   • the FG completion posted for the piece's production order. Same product,
  *     same PO, the figure the accounting cascade actually booked.
  *
@@ -401,9 +417,9 @@ export function valuationNote(
   if (totalCount === 0 || pricedCount >= totalCount) return null;
   return (
     `Only ${pricedCount} of ${totalCount} piece(s) on hand carry a cost, so the ` +
-    `total above values those and no others. A piece has no cost when ` +
-    `fg_units.batchId is unset (it is unset on every row today) and no FG ` +
-    `completion was posted for its production order.`
+    `total above values those and no others. A piece has no cost when it is ` +
+    `not linked to a cost lot and no finished-goods completion was posted for ` +
+    `its production order.`
   );
 }
 

@@ -1872,6 +1872,20 @@ export default function InventoryPage() {
   ];
   const wipContextMenu: ContextMenuItem[] = [
     { label: "View", action: (row: WIPItem) => { handleDoubleClickWIP(row); } },
+    {
+      label: "Stock breakdown",
+      action: (row: WIPItem) =>
+        setBreakdownTarget({
+          type: "WIP",
+          // The WIP CODE, not the row id: the grid's id is a synthetic
+          // `wip-dyn-*` / `wip-rebuild-*` key, while the code is what
+          // job_cards.wipLabel joins on and is the only handle that reaches the
+          // ledger. The endpoint accepts either.
+          itemId: row.wipCode,
+          code: row.wipCode,
+          name: row.relatedProduct,
+        }),
+    },
     { separator: true, label: "", action: () => {} },
     { label: "Refresh", action: () => { invalidateCachePrefix("/api/inventory"); window.location.reload(); } },
   ];

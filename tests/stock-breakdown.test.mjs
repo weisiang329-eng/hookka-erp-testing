@@ -233,6 +233,39 @@ test("WIP stays unreconcilable even when a handful of OUT rows exist", () => {
   }
 });
 
+test("an EMPTY WIP ledger still refuses a balance — silence is not a reconciliation", () => {
+  // The dangerous case. For every other type, no movements honestly means a
+  // balance of zero. For WIP it means the ledger has nothing to say about an
+  // item that physically exists, and "0" would be a claim, not an absence.
+  const rec = reconciliationOf("WIP", []);
+  assert.equal(rec.reconcilable, false);
+  assert.ok(rec.notice);
+  assert.equal(closingBalance([], rec), null);
+  assert.deepEqual(withRunningBalance([], rec), []);
+});
+
+test("the WIP notice explains the cause, not just the symptom", () => {
+  const { notice } = reconciliationOf("WIP", []);
+  // An operator reading this must come away knowing WHY, or they will assume
+  // the screen is broken and go looking for the number somewhere else.
+  assert.match(notice, /production order/i);
+  assert.match(notice, /only ever grow/i);
+  assert.match(notice, /physical count/i);
+});
+
+test("a WIP movement links to its department board through its job card", () => {
+  // WIP rows reference a JOB_CARD, and a job card has no page of its own — the
+  // department board it sits on is what actually opens.
+  assert.equal(
+    sourceDocHref("JOB_CARD", "jc-pord-so-2c538d2d-01-6112", {
+      departmentCode: "UPHOLSTERY",
+    }),
+    "/production/upholstery",
+  );
+  assert.equal(deptSlug("FAB_SEW"), "fab-sew");
+  assert.equal(deptSlug("WOOD_CUT"), "wood-cut");
+});
+
 test("an item with movements out but none in is refused a balance too", () => {
   const movements = [mv("2026-06-01T00:00:00Z", "OUT", 5)];
   const rec = reconciliationOf("RM", movements);
@@ -318,8 +351,9 @@ test("a negative lot (over-issued) is not treated as stock on hand", () => {
 // ── finished goods: an uncosted piece renders, it does not read as free ─────
 
 test("a piece with no cost layer and no posted completion has NO cost, not zero", () => {
-  // fg_units.batchId is NULL on all 4,866 rows on prod, and only 61 of the 262
-  // pieces on hand have an FG completion posted for their production order.
+  // fg_units.batchId is still NULL on all 4,866 rows on prod (the backfill has
+  // landed but not been run), and only 61 of the 262 pieces on hand have an FG
+  // completion posted for their production order.
   // Zero is a cost — a free sofa is a different claim from an uncosted one.
   assert.equal(fgUnitCostSen(null, null), null);
   assert.equal(fgUnitCostSen(undefined, undefined), null);
@@ -338,7 +372,7 @@ test("a partial valuation says how partial it is", () => {
   const note = valuationNote(18, 30);
   assert.ok(note);
   assert.match(note, /18 of 30/);
-  assert.match(note, /batchId is unset/);
+  assert.match(note, /not linked to a cost lot/);
   // Fully priced, or nothing on hand — nothing to apologise for.
   assert.equal(valuationNote(30, 30), null);
   assert.equal(valuationNote(0, 0), null);

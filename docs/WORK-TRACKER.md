@@ -9,7 +9,7 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
-## 2026-08-08 — 🔵 QC 三条修正（owner 追加）：RM 改「一天一验」、FG 按风险抽、WIP 写清各站要验什么
+## 2026-08-08 — ✅ QC 四条：RM 一天一验、STORED 新节奏、FG 按风险抽、WIP 写清各站 · main（未 push，未验 prod）
 
 Owner 三条，全部是**改已经 ship 的东西**，不是重做：
 
@@ -23,8 +23,53 @@ Owner 三条，全部是**改已经 ship 的东西**，不是重做：
    出现过的 product code / 客户 / 型号**。每一台被抽到的都要记下**为什么被抽**。
 3. **WIP：11 张站别清单太薄（3-5 项），要写清各部门实际验什么。** 规则跟 RM 不同：验的是
    **部门有没有照标准做**（方法 + 符合性 + 公差 + 该站惯犯缺陷），不是这批货好不好。
+4. **（追加，是缺口不是修正）STORED：每天验「当天用的料」。**「有货到他才有工作，没有货到他
+   就没有工作 … 可是有一些东西还是要 daily 检查的 … 那天用的木头有没有发霉？还有海绵，那天
+   用的海绵有没有问题？」上面三条全是「进货才验」；料放在仓库会坏——六月 12% 的木头，走完
+   一个雨季八月就发霉。
 
-进度见下方三个 commit。
+**JOB 1 — IQC 的单位从「一张 GR」改成「一天 × 供应商 × family」。** `source_grn_ids` /
+`source_grn_nos`（JSON list）记下当天全部 GR，单数栏 `source_grn_id` 保持是第一张，所以旧的
+读法、index、subject 连结全部照旧。**当天晚点再来的 GR 会挂到还开着的那张**（PENDING /
+IN_PROGRESS 才挂；已签掉的就另开一张，签过的记录不能再塞货进去）——这是真的会天天发生的
+情况。**同一天不同供应商仍然分开两张**：两批货两种风险两种处理（索赔是对供应商，不是对
+星期二），一个混合的 PASS 会盖掉「到底哪一批坏」。mig 0216 补 batch key 到旧列上。
+
+**JOB 2 — 新的第四种节奏 STORED，触发点是「出料」不是「到货」。** 读 `cost_ledger` 的
+RM_ISSUE（它直接指到 FIFO 消耗的那一列 `rm_batches`），所以没到货的日子照样跑，而且验的
+是正要做进客人沙发的那一批。inspection 上带 batch id、**在仓天数**、以及当初是哪张 GR 进
+来的。**抽样按「最老先验」**，每 family 每天上限 2 张；另外每天一张「仓库状况」单（漏水、
+离地离墙、堆高、FIFO 有没有真的照做）。刻意**不开第四个 `stage`**：`stage` 有 CHECK 约束
+＋一个贯穿 worker portal / completion core / 所有列表 filter 的 TS union，而 stored 检查在
+那些地方的行为跟 RM 完全一样——用 `rm_check_kind`（INCOMING / STORED）分。mig 0217。
+
+**JOB 3 — FG 抽样改成按风险加权，每一台都写下「为什么抽到你」。** 比例没错（10%，下限 1
+上限 5），错的是**抽法**——按 DB 回传顺序拿，等于在一堆重复生产里把检查花在做过四百次的
+款上。三个讯号，**相加不取 max**（又稀有又重手工又有投诉的那一台，正是应该排第一的）：
+(a) **service case 最强**——`service_cases`→`service_orders`→`service_order_lines.product_code`，
+**再加**从 case 的来源 SO 抓（`sourceType='SO'` → `sales_order_items`），漏了第二种写法等于
+把「没开维修单的投诉」全部丢掉；root cause 是 PRODUCTION/DESIGN/MATERIAL/PROCESS 的加重
+（TRANSPORT/CUSTOMER 也是真投诉，但不会在工位上重演）；重复次数会加但**有上限**，否则一
+个烂款会永远霸住抽样。(b) **稀有 = 180 天内该 product code 的 fg_units 数量**，分级；用数
+的，不用手维护名单（名单会过期而且没人发现）。(c) **手工 = ACTIVE `bom_versions.total_minutes`
+对上整个在用型录的中位数**，加 `special_order` 和行备注。**schema 里没有任何 tufting / 钉扣
+栏位**（全库只有一个 WIP 清单项目出现过这个词），所以钉扣款是靠标准工时 + special order
+间接抓到的——以后 BOM 真的加了 tufting 规格，直接当第四个讯号插进来。理由存进
+`sample_reason`（不是现算），有投诉的那张在画面上是红的。mig 0218。
+
+**JOB 4 — 11 张 WIP 站别清单写清楚。** 0068 留下的是 3-5 条光秃秃的短语、criteria 全 NULL
+（「Stitch consistency」「Overall finish look acceptable」）——这种单人人都学会照打勾。规则跟
+RM 不同：验的是**部门有没有照标准做**，所以补的是方法与符合性：**对着文件做不是对着记忆做**
+（这个款的裁剪 marker / cut list 在不在工位上）、**首件先量了才开批**（裁剪站）、**工序有没有
+真的做**（先上胶再打钉、角块、中梁、车缝头尾回针）、**公差写成数字**、以及该站惯犯而且**留到
+后面才发现会很贵**的缺陷（绒毛倒向在裁布站是重裁，到包装站是整台重做）。0068 那两条「意见
+题」改写成可量的，并用旧文字当 guard 免得盖到 owner 改过的。mig 0219 +
+`tests/qc-wip-templates.test.mjs`（直接 parse migration，任何一条掉了 criteria、没有要求记录、
+或写成意见题就 fail）。
+
+**没做 / 待办**：mig **0215-0219 全部还没跑**，跑之前新 template 不存在（`pickRmTemplate` 会
+退回 0068 那四张）。没有 prod 连线，`HOOKKA_PROD_DB_URL` 未设、凭证已轮换出库——供应商分析
+和「加权阈值该定多少」需要的只读 SQL 写在交付报告里给人手跑。`bulk-skip` 仍然没跑。
 
 ---
 

@@ -25,6 +25,7 @@
 // ---------------------------------------------------------------------------
 import { generateFGUnitsForPO } from "../routes/fg-units";
 import { applyPackingRack } from "./packing-rack-write";
+import { buildFgUnitBatchStampStatement } from "./fg-batch-link";
 import {
   backfillFGBatchCost,
   consumeRawMaterialsForPO,
@@ -105,14 +106,26 @@ export async function postProductionOrderCompletion(
   }
 
   // Idempotency: fg_batches row-per-PO — never duplicate.
-  const existingBatch = await db
+  // Read the WHOLE set, not LIMIT 1. 145 production orders in the book carry
+  // duplicate lots (replay artefacts), and "which lot do these pieces belong
+  // to" has no answer when there are several — see fg-batch-link.ts. The
+  // idempotency question ("is there one already?") is unchanged; the extra rows
+  // are what tells us whether the link below is knowable.
+  const existingBatchesRes = await db
     .prepare(
-      "SELECT id FROM fg_batches WHERE productionOrderId = ? LIMIT 1",
+      "SELECT id FROM fg_batches WHERE productionOrderId = ?",
     )
     .bind(poId)
-    .first<{ id: string }>();
+    .all<{ id: string }>();
+  const existingBatches = existingBatchesRes.results ?? [];
+  const existingBatch = existingBatches[0] ?? null;
 
   let fgBatchCreated = false;
+  // The lot these pieces belong to, once it is unambiguous. Left null when the
+  // order already carries several — a wrong cost link is worse than none.
+  let linkBatchId: string | null =
+    existingBatches.length === 1 ? existingBatches[0].id : null;
+  let linkProductCode: string | null = null;
   if (!existingBatch) {
     // Resolve productId — prefer PO.productId, fall back to products.code lookup.
     let productId = po.productId ?? null;
@@ -152,6 +165,52 @@ export async function postProductionOrderCompletion(
         .bind(batchId, productId, poId, completedDate, quantity, quantity, now)
         .run();
       fgBatchCreated = true;
+      linkBatchId = batchId;
+      // The lot's own product code, so the stamp can refuse a unit describing a
+      // different product. `po.productCode` is the unit's side of the same
+      // question and the two DO disagree on real rows (5543-CNR vs
+      // 5543-SQCNR), so read the lot's rather than assume they match.
+      const lotProduct = await db
+        .prepare("SELECT code FROM products WHERE id = ? LIMIT 1")
+        .bind(productId)
+        .first<{ code: string | null }>();
+      linkProductCode = lotProduct?.code ?? null;
+    }
+  }
+
+  // ---- Link every piece to its cost lot ---------------------------------
+  // `fg_units.batch_id` has existed since 0001_init and was NULL on all 4,866
+  // rows: the cost lots were unreachable from the pieces, so a unit had no
+  // cost, no value and no age. This is the write-time half — the moment both
+  // sides exist and the answer needs no inference at all. Only fills a BLANK
+  // link, so it never overwrites and is safe to replay with the rest of this
+  // cascade. Best-effort: a failed link must not roll back a completed
+  // production order, and the backfill (and the reconciliation) will show it.
+  if (linkBatchId) {
+    try {
+      if (!linkProductCode && existingBatch) {
+        const lotProduct = await db
+          .prepare(
+            `SELECT p.code AS "code" FROM fg_batches b
+               LEFT JOIN products p ON p.id = b.productId
+              WHERE b.id = ? LIMIT 1`,
+          )
+          .bind(linkBatchId)
+          .first<{ code: string | null }>();
+        linkProductCode = lotProduct?.code ?? null;
+      }
+      await buildFgUnitBatchStampStatement(
+        db,
+        poId,
+        linkBatchId,
+        linkProductCode,
+      ).run();
+    } catch (e) {
+      console.warn(
+        "[postProductionOrderCompletion] fg_units.batch_id link skipped for",
+        poId,
+        e,
+      );
     }
   }
 

@@ -24,6 +24,7 @@ import {
   SYSTEM_ACTOR,
 } from "../lib/fg-stock-events";
 import { reconcileFgStock } from "../lib/fg-ledger-reconcile";
+import { planFgBatchLinks } from "../lib/fg-batch-link";
 
 const app = new Hono<Env>();
 
@@ -960,6 +961,83 @@ app.post("/seed-stock-events", async (c) => {
     unitsWithoutEvents: rows.length,
     onHandUnitsSeeded: onHandSeeded,
     byStatus,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/fg-units/backfill-batch-link?execute=1 — link the existing pieces
+// to their cost lots.
+//
+// `fg_units.batch_id` has existed since 0001_init and is NULL on all 4,866
+// rows, so the 2,250 `fg_batches` cost lots are unreachable from the pieces
+// they cost: no unit cost, no stock value, no age. New units are linked at
+// write time by the completion cascade (fg-completion.ts); this is the one-shot
+// for everything already in the book.
+//
+// EVIDENCE-BASED, NOT A GUESS. The ladder lives in src/api/lib/fg-batch-link.ts
+// and answers only when the evidence NAMES the lot: the PO's FG_COMPLETED
+// cost_ledger rows agreeing on one, or the PO carrying exactly one lot — with
+// the lot's product required to match the unit's on BOTH rungs. Anything else
+// is left NULL and counted. A missing link reads as a blank an operator can
+// question; a wrong one reads as a number they will trust.
+//
+// DRY-RUN by default. Idempotent — only fills a blank link, so a re-run after a
+// partial failure completes it and a re-run after success reports 0.
+// ---------------------------------------------------------------------------
+app.post("/backfill-batch-link", async (c) => {
+  const denied = await requirePermission(c, "fg-units", "update");
+  if (denied) return denied;
+  const execute = c.req.query("execute") === "1";
+  const orgId = getOrgId(c);
+
+  const rows =
+    (
+      await c.var.DB.prepare(
+        `SELECT id, poId, poNo, productCode, status
+           FROM fg_units
+          WHERE orgId = ? AND (batchId IS NULL OR batchId = '')`,
+      )
+        .bind(orgId)
+        .all<{
+          id: string;
+          poId: string | null;
+          poNo: string | null;
+          productCode: string | null;
+          status: string | null;
+        }>()
+    ).results ?? [];
+
+  const plan = await planFgBatchLinks(c.var.DB, rows);
+
+  if (execute && plan.linked.length > 0) {
+    const stmts = plan.linked.map((l) =>
+      c.var.DB
+        // Re-assert the blank in the WHERE: a link established by the write-time
+        // path between the plan and the write must win over this one, which was
+        // computed from a snapshot.
+        .prepare(
+          "UPDATE fg_units SET batchId = ? WHERE id = ? AND (batchId IS NULL OR batchId = '')",
+        )
+        .bind(l.batchId, l.unitId),
+    );
+    for (let i = 0; i < stmts.length; i += 50) {
+      await c.var.DB.batch(stmts.slice(i, i + 50));
+    }
+  }
+
+  // A sample of what stays blank, so the reason can be checked against the
+  // actual rows rather than taken on trust.
+  const unresolvedSample = plan.unresolved.slice(0, 25);
+
+  return c.json({
+    success: true,
+    mode: execute ? "executed" : "dry-run",
+    scanned: rows.length,
+    wouldLink: plan.linked.length,
+    leftNull: plan.unresolved.length,
+    byTier: plan.byTier,
+    byReason: plan.byReason,
+    unresolvedSample,
   });
 });
 

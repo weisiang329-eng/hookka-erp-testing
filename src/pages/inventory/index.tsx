@@ -1851,6 +1851,21 @@ export default function InventoryPage() {
   const fgContextMenu: ContextMenuItem[] = [
     { label: "View", action: (row: FGItem) => { void handleDoubleClickFG(row); } },
     { label: "Edit", action: (row: FGItem) => { void handleDoubleClickFG(row); } },
+    {
+      label: "Stock breakdown",
+      action: (row: FGItem) =>
+        setBreakdownTarget({
+          type: "FG",
+          // The breakdown is keyed on the PRODUCT id. Off-catalog rows the FG
+          // grid synthesises from finished production orders carry an
+          // `fg-dyn-*` id that no product row matches, so they have nothing to
+          // open — better to leave the id alone and let the endpoint 404 than
+          // to guess at a neighbouring product.
+          itemId: row.id,
+          code: row.code,
+          name: row.name,
+        }),
+    },
     { label: "Delete", action: (row: FGItem) => { void handleDeleteFG(row); } },
     { separator: true, label: "", action: () => {} },
     { label: "Refresh", action: () => { invalidateCachePrefix("/api/products"); invalidateCachePrefix("/api/inventory"); window.location.reload(); } },

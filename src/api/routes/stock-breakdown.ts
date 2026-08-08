@@ -38,13 +38,17 @@ import { getOrgId } from "../lib/tenant";
 import {
   ageDays,
   closingBalance,
+  fgUnitCostSen,
   fifoAge,
   ledgerVsOnHand,
+  piecesNote,
   reconciliationOf,
   roundQty,
   sourceDocHref,
+  valuationNote,
   withRunningBalance,
   type CogsRow,
+  type FgLot,
   type RmLot,
   type StockBreakdown,
   type StockItemType,
@@ -180,7 +184,13 @@ app.get("/breakdown", async (c) => {
     return c.json({ success: true, data });
   }
 
-  // FG and WIP land in follow-up commits; refuse loudly rather than return an
+  if (type === "FG") {
+    const data = await buildFgBreakdown(c, orgId, itemId);
+    if (!data) return c.json({ success: false, error: "Not found" }, 404);
+    return c.json({ success: true, data });
+  }
+
+  // WIP lands in the follow-up commit; refuse loudly rather than return an
   // empty shell that reads as "this item has no stock".
   return c.json(
     { success: false, error: `Stock breakdown for ${type} is not available yet` },
@@ -413,7 +423,9 @@ async function buildRmBreakdown(
       // more useful than an "Assigned" figure invented from nothing.
       assignedQty: 0,
       freeQty: onHandQty,
+      qtyNote: null,
       totalValueSen,
+      valuationNote: null,
       oldestAgeDays,
       oldestLayerDate,
       reconciliation,
@@ -421,6 +433,320 @@ async function buildRmBreakdown(
         closingBalance(movements, reconciliation),
         onHandQty,
         openingSeedQty,
+      ),
+    },
+    lots,
+    movements: stamped,
+    cogs,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// FINISHED GOODS
+//
+// Same drawer, same four sections; `lots` becomes one row per PHYSICAL PIECE
+// (fg_units) instead of one row per cost layer, because that is what a finished
+// good actually is here — a serialised piece with a maker, a date and, usually,
+// a customer already waiting for it.
+//
+// Two facts about the live data shape everything below:
+//
+//   • fg_units.batchId is NULL on all 4,866 rows — the link from a piece to its
+//     cost layer has never been written (a sibling change is fixing the write
+//     side). So a piece's unit cost is looked up through its PRODUCTION ORDER
+//     instead, and where even that is absent the cost renders as an em dash.
+//     On prod that is most of the shelf, and the panel says so rather than
+//     quietly totalling only the priced third;
+//
+//   • the two legs of the FG ledger do not count the same thing. FG_COMPLETED
+//     books UNITS (2,938 across 1,451 rows); FG_DELIVERED books one row per
+//     FIFO slice, always qty 1 (2,680 rows). Their difference is therefore not
+//     a stock count, and the panel refuses to present it as one.
+// ---------------------------------------------------------------------------
+type FgUnitRow = {
+  id: string;
+  unitSerial: string | null;
+  shortCode: string | null;
+  status: string;
+  mfdDate: string | null;
+  pieceNo: number | null;
+  totalPieces: number | null;
+  pieceName: string | null;
+  unitNo: number | null;
+  batchId: string | null;
+  poId: string | null;
+  poNo: string | null;
+  soId: string | null;
+  soNo: string | null;
+  customerName: string | null;
+  doId: string | null;
+  prodSalesOrderId: string | null;
+  doNo: string | null;
+  batchUnitCostSen: number | null;
+  poUnitCostSen: number | null;
+};
+
+type FgLedgerRow = LedgerRow & {
+  doNo: string | null;
+  doSalesOrderId: string | null;
+  doCustomerName: string | null;
+};
+
+/** Statuses that mean the piece has left the building. */
+const FG_GONE = new Set(["DELIVERED", "RETURNED"]);
+
+async function buildFgBreakdown(
+  c: Context<Env>,
+  orgId: string,
+  itemId: string,
+): Promise<StockBreakdown | null> {
+  const db = c.var.DB;
+
+  const item = await db
+    .prepare(
+      `SELECT id, code, name, category FROM products WHERE id = ? AND orgId = ?`,
+    )
+    .bind(itemId, orgId)
+    .first<{ id: string; code: string; name: string | null; category: string | null }>();
+  if (!item) return null;
+
+  const [unitRes, ledgerRes, doSerialRes] = await Promise.all([
+    // One row per piece, oldest first — the same FIFO order the lots table
+    // claims at the top of the section.
+    //
+    // fg_units reaches its product by CODE, not id (there is no productId
+    // column), which is why the caller passes a product id and this join goes
+    // back through products.code.
+    db
+      .prepare(
+        `SELECT u.id, u.unitSerial, u.shortCode, u.status, u.mfdDate,
+                u.pieceNo, u.totalPieces, u.pieceName, u.unitNo, u.batchId,
+                u.poId, u.poNo, u.soId, u.soNo, u.customerName, u.doId,
+                po.salesOrderId AS "prodSalesOrderId",
+                d.doNo          AS "doNo",
+                fb.unitCostSen  AS "batchUnitCostSen",
+                -- Fallback cost: the completion the accounting cascade booked
+                -- for THIS piece's production order — same product, same PO,
+                -- the figure that was actually posted rather than an average.
+                --
+                -- A SCALAR SUBQUERY, not a join, and deliberately so: a PO can
+                -- carry several FG_COMPLETED rows (three is common on prod,
+                -- from re-postings), and joining would fan one piece out into
+                -- three lot rows and treble the shelf. Latest posting wins.
+                (SELECT pol.unitCostSen
+                   FROM cost_ledger pol
+                  WHERE pol.itemType = 'FG'
+                    AND pol.type     = 'FG_COMPLETED'
+                    AND pol.itemId   = p.id
+                    AND pol.refId    = u.poId
+                  ORDER BY pol.date DESC, pol.id DESC
+                  LIMIT 1)      AS "poUnitCostSen"
+           FROM fg_units u
+           JOIN products p            ON p.code = u.productCode
+           LEFT JOIN production_orders po ON po.id = u.poId
+           LEFT JOIN delivery_orders d    ON d.id  = u.doId
+           -- Direct cost layer: currently never matches (batchId is NULL on
+           -- every row) but costs nothing and takes over the moment the write
+           -- side lands, with no change here. Joined on the primary key, so
+           -- it cannot fan out.
+           LEFT JOIN fg_batches fb    ON fb.id = u.batchId
+          WHERE p.id = ?
+            -- STOCK lots means the stock you still have. A delivered piece is
+            -- history, and its history is already in Movements and COGS below.
+            -- Including it would also bury the shelf: 1013-(Q) has 1,044 pieces
+            -- on prod and 30 of them are on hand.
+            AND u.status NOT IN ('DELIVERED', 'RETURNED')
+          ORDER BY u.mfdDate ASC, u.unitSerial ASC, u.id ASC`,
+      )
+      .bind(itemId)
+      .all<FgUnitRow>(),
+    db
+      .prepare(
+        `SELECT cl.id, cl.date, cl.type, cl.direction, cl.qty,
+                cl.unitCostSen, cl.totalCostSen, cl.batchId,
+                cl.refType, cl.refId, cl.notes, cl.workerId,
+                po.poNo          AS "prodOrderNo",
+                po.salesOrderId  AS "prodSalesOrderId",
+                po.salesOrderNo  AS "prodSalesOrderNo",
+                po.customerName  AS "prodCustomerName",
+                d.doNo           AS "doNo",
+                d.salesOrderId   AS "doSalesOrderId",
+                d.customerName   AS "doCustomerName"
+           FROM cost_ledger cl
+           LEFT JOIN production_orders po ON po.id = cl.refId
+           LEFT JOIN delivery_orders d    ON d.id  = cl.refId
+          WHERE cl.itemType = 'FG' AND cl.itemId = ?
+          ORDER BY cl.date DESC, cl.id DESC`,
+      )
+      .bind(itemId)
+      .all<FgLedgerRow>(),
+    // Which serials left on which delivery order — the "which unit serials"
+    // column on FG OUT, and the lot identity on the COGS rows.
+    db
+      .prepare(
+        `SELECT u.doId AS "doId", u.unitSerial AS "unitSerial"
+           FROM fg_units u
+           JOIN products p ON p.code = u.productCode
+          WHERE p.id = ? AND u.doId IS NOT NULL
+          ORDER BY u.unitSerial ASC`,
+      )
+      .bind(itemId)
+      .all<{ doId: string; unitSerial: string | null }>(),
+  ]);
+
+  const unitRows = unitRes.results ?? [];
+  const ledgerRows = ledgerRes.results ?? [];
+
+  const serialsByDo = new Map<string, string[]>();
+  for (const r of doSerialRes.results ?? []) {
+    if (!r.doId || !r.unitSerial) continue;
+    const list = serialsByDo.get(r.doId) ?? [];
+    list.push(r.unitSerial);
+    serialsByDo.set(r.doId, list);
+  }
+
+  // --- lots (one per piece still owned) -----------------------------------
+  const lots: FgLot[] = unitRows.map((u) => {
+    // The query already excludes delivered pieces; this guard keeps `qty`
+    // honest if that filter is ever relaxed.
+    const gone = FG_GONE.has(u.status);
+    const unitCostSen = fgUnitCostSen(u.batchUnitCostSen, u.poUnitCostSen);
+    const attributes =
+      [
+        u.pieceName,
+        u.pieceNo && u.totalPieces ? `piece ${u.pieceNo}/${u.totalPieces}` : null,
+        u.unitNo ? `unit ${u.unitNo}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ") || null;
+    return {
+      kind: "FG_UNIT" as const,
+      id: u.id,
+      serial: u.unitSerial ?? u.id,
+      shortCode: u.shortCode,
+      attributes,
+      // A piece is one piece. Delivered pieces stay in the list (they are the
+      // history of this SKU) but count zero towards what is owned.
+      qty: gone ? 0 : 1,
+      unitCostSen,
+      valueSen: gone || unitCostSen === null ? null : unitCostSen,
+      productionOrderNo: u.poNo,
+      productionOrderHref: sourceDocHref("PRODUCTION_ORDER", u.poId, {
+        salesOrderId: u.prodSalesOrderId,
+      }),
+      mfdDate: u.mfdDate,
+      ageDays: ageDays(u.mfdDate),
+      claimedBySoNo: u.soNo,
+      claimedBySoHref: sourceDocHref("SALES_ORDER", u.soId),
+      customerName: u.customerName,
+      status: u.status,
+      deliveryOrderNo: u.doNo,
+      deliveryOrderHref: sourceDocHref("DELIVERY_ORDER", u.doId),
+    };
+  });
+
+  // --- movements ----------------------------------------------------------
+  const movements: StockMovement[] = ledgerRows.map((r) => {
+    const isIn = r.direction === "IN";
+    const docType = isIn ? ("PRODUCTION_ORDER" as const) : ("DELIVERY_ORDER" as const);
+    const salesOrderId = isIn ? r.prodSalesOrderId : r.doSalesOrderId;
+    return {
+      id: r.id,
+      date: r.date,
+      direction: isIn ? "IN" : "OUT",
+      type: r.type,
+      qty: roundQty(num(r.qty)),
+      unitCostSen: num(r.unitCostSen),
+      totalCostSen: num(r.totalCostSen),
+      balanceAfter: null, // derived below
+      docType,
+      docId: r.refId,
+      docNo: isIn ? r.prodOrderNo : r.doNo,
+      docHref: isIn
+        ? sourceDocHref("PRODUCTION_ORDER", r.refId, { salesOrderId })
+        : sourceDocHref("DELIVERY_ORDER", r.refId),
+      productionOrderNo: isIn ? r.prodOrderNo : null,
+      productionOrderHref: isIn
+        ? sourceDocHref("PRODUCTION_ORDER", r.refId, { salesOrderId })
+        : null,
+      salesOrderNo: isIn ? r.prodSalesOrderNo : null,
+      salesOrderHref: sourceDocHref("SALES_ORDER", salesOrderId),
+      customerName: isIn ? r.prodCustomerName : r.doCustomerName,
+      unitSerials: isIn ? undefined : (serialsByDo.get(r.refId ?? "") ?? []),
+      batchId: r.batchId,
+      notes: r.notes,
+    };
+  });
+
+  const reconciliation = reconciliationOf("FG", movements);
+  const stamped = withRunningBalance(movements, reconciliation);
+
+  // --- COGS ---------------------------------------------------------------
+  const cogs: CogsRow[] = stamped
+    .filter((m) => m.direction === "OUT")
+    .map((m) => {
+      const serials = serialsByDo.get(m.docId ?? "") ?? [];
+      return {
+        id: m.id,
+        consumedAt: m.date,
+        docType: m.docType,
+        docNo: m.docNo,
+        docHref: m.docHref,
+        qty: m.qty,
+        unitCostSen: m.unitCostSen,
+        totalCostSen: m.totalCostSen,
+        fromLotId: m.batchId ?? null,
+        // The ledger names the cost LAYER, not the piece — a FIFO slice is not
+        // tied to a serial. The serials that left on that delivery are listed
+        // so the trail is still followable; they are the delivery's pieces, not
+        // a claim about which one this slice paid for.
+        fromLotLabel:
+          [m.batchId, serials.length ? `${serials.length} serial(s) on this DO` : null]
+            .filter(Boolean)
+            .join(" · ") || null,
+      };
+    });
+
+  // --- header -------------------------------------------------------------
+  const onHand = lots.filter((l) => l.qty > 0);
+  const onHandPieces = onHand.length;
+  const assignedPieces = onHand.filter((l) => l.claimedBySoNo).length;
+  const ownedUnits = new Set(
+    unitRows
+      .filter((u) => !FG_GONE.has(u.status))
+      .map((u) => `${u.poId ?? ""}#${u.unitNo ?? ""}`),
+  ).size;
+
+  const pricedPieces = onHand.filter((l) => l.unitCostSen !== null).length;
+  const totalValueSen = onHand.reduce((s, l) => s + (l.valueSen ?? 0), 0);
+  const { ageDays: oldestAgeDays, date: oldestLayerDate } = fifoAge(
+    lots.map((l) => ({ date: l.mfdDate, qty: l.qty })),
+  );
+
+  return {
+    header: {
+      itemType: "FG",
+      itemId: item.id,
+      itemCode: item.code,
+      itemName: item.name ?? "",
+      uom: "pieces",
+      totalQty: onHandPieces,
+      assignedQty: assignedPieces,
+      freeQty: onHandPieces - assignedPieces,
+      qtyNote: piecesNote(onHandPieces, ownedUnits),
+      totalValueSen,
+      valuationNote: valuationNote(pricedPieces, onHandPieces),
+      oldestAgeDays,
+      oldestLayerDate,
+      reconciliation,
+      ledgerVsOnHand: ledgerVsOnHand(
+        closingBalance(movements, reconciliation),
+        onHandPieces,
+        0,
+        "The two legs of the finished-goods ledger do not count the same " +
+          "thing: a completion books whole units while a delivery books one " +
+          "row per FIFO slice, so their difference is a cost-layer figure and " +
+          "never was a piece count.",
       ),
     },
     lots,

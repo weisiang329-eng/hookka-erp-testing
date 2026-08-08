@@ -33,6 +33,9 @@ const {
   ageDays,
   fifoAge,
   roundQty,
+  fgUnitCostSen,
+  valuationNote,
+  piecesNote,
 } = await import(
   pathToFileURL(resolve(process.cwd(), "src/lib/stock-breakdown.ts")).href
 );
@@ -310,6 +313,70 @@ test("a negative lot (over-issued) is not treated as stock on hand", () => {
     now,
   );
   assert.equal(date, "2026-01-29T00:00:00Z");
+});
+
+// ── finished goods: an uncosted piece renders, it does not read as free ─────
+
+test("a piece with no cost layer and no posted completion has NO cost, not zero", () => {
+  // fg_units.batchId is NULL on all 4,866 rows on prod, and only 61 of the 262
+  // pieces on hand have an FG completion posted for their production order.
+  // Zero is a cost — a free sofa is a different claim from an uncosted one.
+  assert.equal(fgUnitCostSen(null, null), null);
+  assert.equal(fgUnitCostSen(undefined, undefined), null);
+  // A genuine zero is preserved, and must not be mistaken for "unknown".
+  assert.equal(fgUnitCostSen(0, 4836), 0);
+});
+
+test("a piece's own cost layer wins over its production order's completion", () => {
+  // Today the first argument is always null; the moment the write side stamps
+  // fg_units.batchId it takes over with no further change.
+  assert.equal(fgUnitCostSen(13073, 4836), 13073);
+  assert.equal(fgUnitCostSen(null, 4836), 4836);
+});
+
+test("a partial valuation says how partial it is", () => {
+  const note = valuationNote(18, 30);
+  assert.ok(note);
+  assert.match(note, /18 of 30/);
+  assert.match(note, /batchId is unset/);
+  // Fully priced, or nothing on hand — nothing to apologise for.
+  assert.equal(valuationNote(30, 30), null);
+  assert.equal(valuationNote(0, 0), null);
+});
+
+test("finished goods say out loud that they are counted in pieces", () => {
+  const note = piecesNote(30, 10);
+  assert.ok(note);
+  assert.match(note, /30 piece\(s\) = 10 sellable unit\(s\)/);
+  assert.equal(piecesNote(0, 0), null);
+});
+
+test("the FG ledger gap is explained by the unit-of-measure mismatch, not hidden", () => {
+  // prod-40 on prod: the ledger closes at 308 while 30 pieces sit on the shelf.
+  // The legs count different things — completions book units, deliveries book
+  // one row per FIFO slice.
+  const v = ledgerVsOnHand(
+    308,
+    30,
+    0,
+    "The two legs of the finished-goods ledger do not count the same thing.",
+  );
+  assert.equal(v.agrees, false);
+  assert.match(v.note, /do not reconcile/i);
+  assert.match(v.note, /do not count the same thing/i);
+});
+
+test("the explanation is only appended when the figures actually disagree", () => {
+  // An explanation attached to agreeing numbers would imply a problem that is
+  // not there, which is its own kind of dishonesty.
+  const v = ledgerVsOnHand(42, 42, 0, "some explanation");
+  assert.equal(v.agrees, true);
+  assert.equal(v.note, null);
+});
+
+test("a delivery order is a real, openable link", () => {
+  assert.equal(sourceDocHref("DELIVERY_ORDER", "do-79c141d3"), "/delivery/do-79c141d3");
+  assert.equal(sourceDocHref("DELIVERY_ORDER", null), null);
 });
 
 test("ageDays refuses to invent a number from a missing or broken date", () => {

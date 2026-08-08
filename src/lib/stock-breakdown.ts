@@ -173,7 +173,21 @@ export interface StockBreakdownHeader {
   /** Committed to a customer document. */
   assignedQty: number | null;
   freeQty: number | null;
+  /**
+   * A short caption under the total, for when the counting unit needs saying
+   * out loud — finished goods are counted in PIECES here (one lot row is one
+   * piece) and a bed is three of them, so "262" without "= 137 units" invites
+   * the wrong read. Null when the number speaks for itself.
+   */
+  qtyNote: string | null;
   totalValueSen: number | null;
+  /**
+   * Why the value is partial, when it is. Finished-goods pieces carry no cost
+   * until the write-side ledger stamps fg_units.batchId, so a total that
+   * silently covered only the priced third of the shelf would be a lie by
+   * omission. Null when every layer is priced.
+   */
+  valuationNote: string | null;
   /** Age of the OLDEST owned layer — the FIFO one, consumed next. */
   oldestAgeDays: number | null;
   oldestLayerDate: string | null;
@@ -288,6 +302,12 @@ export function ledgerVsOnHand(
   ledgerClosingQty: number | null,
   onHandQty: number | null,
   openingSeedQty: number,
+  /**
+   * A known, specific reason the two differ, appended to the note. Use it only
+   * where the cause is understood — a vague reassurance is worse than the bare
+   * numbers, because it implies somebody has checked.
+   */
+  explain?: string | null,
 ): LedgerVsOnHand {
   const base: Omit<LedgerVsOnHand, "agrees" | "note"> = {
     ledgerClosingQty,
@@ -324,12 +344,76 @@ export function ledgerVsOnHand(
           `the gap either`
         : "") +
       `. The two do not reconcile and neither figure has been adjusted to ` +
-      `match the other.`,
+      `match the other.` +
+      (explain ? ` ${explain}` : ""),
   };
 }
 
 function fmtQty(n: number): string {
   return String(roundQty(n));
+}
+
+// ---------------------------------------------------------------------------
+// Finished-goods honesty helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * A finished-goods piece's unit cost, or null when nobody has costed it.
+ *
+ * Two sources in priority order, and no third:
+ *   • the piece's OWN cost layer, via fg_units.batchId. This is the right
+ *     answer and it matches nothing today — batchId is NULL on all 4,866 rows
+ *     — but it takes over automatically once the write side stamps it;
+ *   • the FG completion posted for the piece's production order. Same product,
+ *     same PO, the figure the accounting cascade actually booked.
+ *
+ * When neither exists the answer is null, which renders as an em dash. It is
+ * not zero: zero is a cost, and a free sofa is a different claim from an
+ * uncosted one.
+ */
+export function fgUnitCostSen(
+  batchUnitCostSen: number | null | undefined,
+  productionOrderUnitCostSen: number | null | undefined,
+): number | null {
+  if (batchUnitCostSen !== null && batchUnitCostSen !== undefined) {
+    return batchUnitCostSen;
+  }
+  if (
+    productionOrderUnitCostSen !== null &&
+    productionOrderUnitCostSen !== undefined
+  ) {
+    return productionOrderUnitCostSen;
+  }
+  return null;
+}
+
+/**
+ * Why the total value is partial, or null when it is complete.
+ *
+ * A total that silently covered only the priced part of the shelf would be a
+ * lie by omission — it looks like the value of everything and is the value of
+ * some of it.
+ */
+export function valuationNote(
+  pricedCount: number,
+  totalCount: number,
+): string | null {
+  if (totalCount === 0 || pricedCount >= totalCount) return null;
+  return (
+    `Only ${pricedCount} of ${totalCount} piece(s) on hand carry a cost, so the ` +
+    `total above values those and no others. A piece has no cost when ` +
+    `fg_units.batchId is unset (it is unset on every row today) and no FG ` +
+    `completion was posted for its production order.`
+  );
+}
+
+/** Says out loud that finished goods are counted in pieces, not units. */
+export function piecesNote(pieces: number, units: number): string | null {
+  if (pieces === 0) return null;
+  return (
+    `${pieces} piece(s) = ${units} sellable unit(s). A bed or sofa ships as ` +
+    `several pieces and each one is a row below.`
+  );
 }
 
 // ---------------------------------------------------------------------------

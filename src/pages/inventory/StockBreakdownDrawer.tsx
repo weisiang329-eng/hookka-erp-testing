@@ -27,6 +27,7 @@ import { useNavigate } from "react-router-dom";
 import { X, Package, ArrowDownToLine, ArrowUpFromLine, AlertTriangle, Info } from "lucide-react";
 import { formatCurrency } from "@/lib/utils";
 import type {
+  FgLot,
   RmLot,
   StockBreakdown,
   StockItemType,
@@ -174,13 +175,16 @@ function Stat({
   label,
   value,
   sub,
+  title,
 }: {
   label: string;
   value: React.ReactNode;
   sub?: React.ReactNode;
+  /** Hover explanation — used where the counting unit needs saying out loud. */
+  title?: string;
 }) {
   return (
-    <div className="border border-[#E2DDD8] rounded-lg px-3 py-2 bg-white">
+    <div className="border border-[#E2DDD8] rounded-lg px-3 py-2 bg-white" title={title}>
       <p className="text-[11px] text-[#6B7280]">{label}</p>
       <p className="text-lg font-semibold text-[#1F1D1B] tabular-nums leading-tight">
         {value}
@@ -251,6 +255,82 @@ function RmLotsTable({
             <td className={TD}><DateCell value={l.receivedDate} /></td>
             <td className={TDR}>
               {l.ageDays === null ? <Dash /> : <span className="tabular-nums">{l.ageDays}d</span>}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Lots — FG. One row per PHYSICAL PIECE, not per cost layer: a finished good
+// here is a serialised piece with a maker, a date and usually a customer
+// already waiting for it.
+// ---------------------------------------------------------------------------
+function FgLotsTable({
+  lots,
+  onNavigate,
+}: {
+  lots: FgLot[];
+  onNavigate: (href: string) => void;
+}) {
+  return (
+    <table className="w-full text-xs">
+      <thead className="bg-[#FAF8F5]">
+        <tr>
+          <th className={TH}>Serial</th>
+          <th className={TH}>Attributes</th>
+          <th className={THR}>Unit cost</th>
+          <th className={TH}>Production order</th>
+          <th className={TH}>MFD</th>
+          <th className={THR}>Age</th>
+          <th className={TH}>Claimed by SO</th>
+          <th className={TH}>Customer</th>
+          <th className={TH}>Status</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-[#F0EDE9]">
+        {lots.length === 0 && (
+          <EmptyRow span={9} message="No pieces of this product are on hand." />
+        )}
+        {lots.map((l) => (
+          <tr key={l.id}>
+            <td className={TD}>
+              <span className="tabular-nums">{l.serial}</span>
+              {l.shortCode && (
+                <span className="text-[#9CA3AF] tabular-nums"> · {l.shortCode}</span>
+              )}
+            </td>
+            <td className={`${TD} max-w-[220px] truncate`} title={l.attributes ?? ""}>
+              <Txt value={l.attributes} />
+            </td>
+            <td className={TDR}><Money value={l.unitCostSen} /></td>
+            <td className={TD}>
+              <DocLink
+                no={l.productionOrderNo}
+                href={l.productionOrderHref}
+                onNavigate={onNavigate}
+              />
+            </td>
+            <td className={TD}><DateCell value={l.mfdDate} /></td>
+            <td className={TDR}>
+              {l.ageDays === null ? <Dash /> : <span className="tabular-nums">{l.ageDays}d</span>}
+            </td>
+            <td className={TD}>
+              <DocLink
+                no={l.claimedBySoNo}
+                href={l.claimedBySoHref}
+                onNavigate={onNavigate}
+              />
+            </td>
+            <td className={`${TD} max-w-[160px] truncate`} title={l.customerName ?? ""}>
+              <Txt value={l.customerName} />
+            </td>
+            <td className={TD}>
+              <span className="text-[11px] px-1.5 py-0.5 rounded bg-[#F0EDE9] text-[#6B7280]">
+                {l.status}
+              </span>
             </td>
           </tr>
         ))}
@@ -366,6 +446,117 @@ function RmOutTable({
             </td>
             <td className={TDR}><Qty value={m.qty} /></td>
             <td className={TDR}><Money value={m.totalCostSen} /></td>
+            <td className={TDR}><BalanceCell m={m} /></td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function FgInTable({
+  rows,
+  onNavigate,
+}: {
+  rows: StockMovement[];
+  onNavigate: (href: string) => void;
+}) {
+  return (
+    <table className="w-full text-xs">
+      <thead className="bg-[#F3F7F3]">
+        <tr>
+          <th className={TH}>Date</th>
+          <th className={TH}>Production order</th>
+          <th className={TH}>Sales order</th>
+          <th className={TH}>Customer</th>
+          <th className={THR}>Qty</th>
+          <th className={THR}>Unit cost</th>
+          <th className={THR}>Balance</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-[#F0EDE9]">
+        {rows.length === 0 && <EmptyRow span={7} message="No inbound movements." />}
+        {rows.map((m) => (
+          <tr key={m.id}>
+            <td className={TD}><DateCell value={m.date} /></td>
+            <td className={TD}>
+              <DocLink
+                no={m.productionOrderNo ?? m.docNo}
+                href={m.productionOrderHref ?? m.docHref}
+                onNavigate={onNavigate}
+              />
+            </td>
+            <td className={TD}>
+              <DocLink no={m.salesOrderNo} href={m.salesOrderHref} onNavigate={onNavigate} />
+            </td>
+            <td className={`${TD} max-w-[180px] truncate`} title={m.customerName ?? ""}>
+              <Txt value={m.customerName} />
+            </td>
+            <td className={TDR}><Qty value={m.qty} /></td>
+            <td className={TDR}><Money value={m.unitCostSen} /></td>
+            <td className={TDR}><BalanceCell m={m} /></td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+/**
+ * The serials that left on a delivery. Long lists are clipped to keep the row
+ * one line high; the full list stays in the title so nothing is lost.
+ */
+function Serials({ serials }: { serials: string[] | undefined }) {
+  if (!serials || serials.length === 0) return <Dash />;
+  const shown = serials.slice(0, 3).join(", ");
+  return (
+    <span className="tabular-nums" title={serials.join(", ")}>
+      {shown}
+      {serials.length > 3 && (
+        <span className="text-[#9CA3AF]"> +{serials.length - 3} more</span>
+      )}
+    </span>
+  );
+}
+
+function FgOutTable({
+  rows,
+  onNavigate,
+}: {
+  rows: StockMovement[];
+  onNavigate: (href: string) => void;
+}) {
+  return (
+    <table className="w-full text-xs">
+      <thead className="bg-[#FBF3F2]">
+        <tr>
+          <th className={TH}>Date</th>
+          <th className={TH}>DO no</th>
+          <th className={TH}>Sales order</th>
+          <th className={TH}>Customer</th>
+          <th className={THR}>Qty</th>
+          <th className={TH}>Unit serials</th>
+          <th className={THR}>Balance</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-[#F0EDE9]">
+        {rows.length === 0 && <EmptyRow span={7} message="No outbound movements." />}
+        {rows.map((m) => (
+          <tr key={m.id}>
+            <td className={TD}><DateCell value={m.date} /></td>
+            <td className={TD}>
+              <DocLink no={m.docNo} href={m.docHref} onNavigate={onNavigate} />
+            </td>
+            <td className={TD}>
+              <DocLink no={m.salesOrderNo} href={m.salesOrderHref} onNavigate={onNavigate} />
+            </td>
+            <td className={`${TD} max-w-[180px] truncate`} title={m.customerName ?? ""}>
+              <Txt value={m.customerName} />
+            </td>
+            <td className={TDR}><Qty value={m.qty} /></td>
+            <td className={`${TD} max-w-[280px] truncate`}>
+              <Serials serials={m.unitSerials} />
+            </td>
             <td className={TDR}><BalanceCell m={m} /></td>
           </tr>
         ))}
@@ -522,6 +713,7 @@ function StockBreakdownPanel({
                     header.totalQty === null ? <Dash /> : header.totalQty
                   }
                   sub={header.uom || undefined}
+                  title={header.qtyNote ?? undefined}
                 />
                 <Stat
                   label="Assigned / Free"
@@ -550,6 +742,7 @@ function StockBreakdownPanel({
                 />
               </div>
 
+              {header.qtyNote && <Notice tone="info">{header.qtyNote}</Notice>}
               {header.reconciliation.notice && (
                 <Notice tone="warn">{header.reconciliation.notice}</Notice>
               )}
@@ -557,6 +750,9 @@ function StockBreakdownPanel({
                 <Notice tone={header.ledgerVsOnHand.agrees ? "info" : "warn"}>
                   {header.ledgerVsOnHand.note}
                 </Notice>
+              )}
+              {header.valuationNote && (
+                <Notice tone="warn">{header.valuationNote}</Notice>
               )}
 
               {/* 2 — Stock lots */}
@@ -568,6 +764,12 @@ function StockBreakdownPanel({
                 {target.type === "RM" && (
                   <RmLotsTable
                     lots={(data?.lots ?? []) as RmLot[]}
+                    onNavigate={go}
+                  />
+                )}
+                {target.type === "FG" && (
+                  <FgLotsTable
+                    lots={(data?.lots ?? []) as FgLot[]}
                     onNavigate={go}
                   />
                 )}
@@ -583,6 +785,7 @@ function StockBreakdownPanel({
                   <ArrowDownToLine className="h-3.5 w-3.5" /> Stock received
                 </div>
                 {target.type === "RM" && <RmInTable rows={inRows} onNavigate={go} />}
+                {target.type === "FG" && <FgInTable rows={inRows} onNavigate={go} />}
               </Section>
 
               <Section
@@ -594,6 +797,7 @@ function StockBreakdownPanel({
                   <ArrowUpFromLine className="h-3.5 w-3.5" /> Stock issued
                 </div>
                 {target.type === "RM" && <RmOutTable rows={outRows} onNavigate={go} />}
+                {target.type === "FG" && <FgOutTable rows={outRows} onNavigate={go} />}
               </Section>
 
               {/* 4 — COGS */}

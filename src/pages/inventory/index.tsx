@@ -35,6 +35,11 @@ import {
   materialVariantCode,
   materialVariantDescription,
 } from "@/lib/material-variants";
+// Stock Breakdown — the per-item right-hand drawer (lots, movements with a
+// derived running balance, and FIFO COGS). One component for FG / WIP / RM.
+import StockBreakdownDrawer, {
+  type StockBreakdownTarget,
+} from "./StockBreakdownDrawer";
 import {
   DEFAULT_BEDFRAME_SIZES,
   DEFAULT_SOFA_COMPARTMENTS,
@@ -1832,6 +1837,12 @@ export default function InventoryPage() {
     }
   };
 
+  // Stock Breakdown drawer — one target for all three tabs. `null` closed.
+  // Opening it is a READ; nothing in the drawer writes, so it can sit alongside
+  // the edit dialogs without any interaction between them.
+  const [breakdownTarget, setBreakdownTarget] =
+    useState<StockBreakdownTarget | null>(null);
+
   // Context menus per tab. Each Edit/View action opens the same dialog the
   // double-click handler does — right-click was previously stubbed
   // (`action: () => {}`) which made the menu look unresponsive to
@@ -1852,6 +1863,16 @@ export default function InventoryPage() {
   const rmContextMenu: ContextMenuItem[] = [
     { label: "View", action: (row: RawMaterial) => { void handleDoubleClickRM(row); } },
     { label: "Edit", action: (row: RawMaterial) => { void handleDoubleClickRM(row); } },
+    {
+      label: "Stock breakdown",
+      action: (row: RawMaterial) =>
+        setBreakdownTarget({
+          type: "RM",
+          itemId: row.id,
+          code: row.itemCode,
+          name: row.description,
+        }),
+    },
     { separator: true, label: "", action: () => {} },
     { label: "Refresh", action: () => { invalidateCachePrefix("/api/raw-materials"); invalidateCachePrefix("/api/inventory"); window.location.reload(); } },
   ];
@@ -3146,9 +3167,29 @@ export default function InventoryPage() {
               <div className="pt-2 border-t border-[#E2DDD8]">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm font-medium text-[#374151]">Source Batches (FIFO)</span>
-                  <span className="text-xs text-[#6B7280]">
-                    {rmBatchesLoading ? "loading…" : `${rmBatches.length} batch(es)`}
-                  </span>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-[#6B7280]">
+                      {rmBatchesLoading ? "loading…" : `${rmBatches.length} batch(es)`}
+                    </span>
+                    {/* The full picture — lots, every movement with a derived
+                        running balance, and FIFO COGS. This mini table is the
+                        lots section only. */}
+                    <button
+                      type="button"
+                      className="text-xs text-[#6B5C32] underline underline-offset-2 hover:text-[#4A3F22]"
+                      onClick={() => {
+                        setBreakdownTarget({
+                          type: "RM",
+                          itemId: editRM.id,
+                          code: editRM.itemCode,
+                          name: editRM.description,
+                        });
+                        setEditRM(null);
+                      }}
+                    >
+                      Stock breakdown
+                    </button>
+                  </div>
                 </div>
                 {rmBatchesLoading ? (
                   <p className="text-xs text-[#9CA3AF] py-2">Looking up source batches…</p>
@@ -3381,6 +3422,13 @@ export default function InventoryPage() {
           invalidateCachePrefix("/api/raw-materials");
           invalidateCachePrefix("/api/inventory");
         }}
+      />
+
+      {/* Stock breakdown drawer — read-only, rendered last so it overlays the
+          edit dialogs rather than fighting them for the same z-index. */}
+      <StockBreakdownDrawer
+        target={breakdownTarget}
+        onClose={() => setBreakdownTarget(null)}
       />
     </div>
   );

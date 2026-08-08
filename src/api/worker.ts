@@ -1034,6 +1034,9 @@ import fabrics from "./routes/fabrics";
 import warehouse from "./routes/warehouse";
 import stockAccounts from "./routes/stock-accounts";
 import stockValue from "./routes/stock-value";
+// Stock Breakdown drawer — one read-only endpoint behind the per-item panel on
+// the Inventory list (GET /api/stock/breakdown?type=RM|WIP|FG&itemId=…).
+import stockBreakdown from "./routes/stock-breakdown";
 import goodsInTransit from "./routes/goods-in-transit";
 import suppliers from "./routes/suppliers";
 import supplierMaterials from "./routes/supplier-materials";
@@ -1245,6 +1248,10 @@ app.route("/api/fabrics", fabrics);
 app.route("/api/warehouse", warehouse);
 app.route("/api/stock-accounts", stockAccounts);
 app.route("/api/stock-value", stockValue);
+// Mounted at /api/stock (not /api/stock-*) so the one drawer endpoint has a
+// prefix of its own; /api/stock-accounts and /api/stock-value are distinct
+// prefixes and are matched before this line anyway.
+app.route("/api/stock", stockBreakdown);
 app.route("/api/goods-in-transit", goodsInTransit);
 app.route("/api/suppliers", suppliers);
 app.route("/api/supplier-materials", supplierMaterials);

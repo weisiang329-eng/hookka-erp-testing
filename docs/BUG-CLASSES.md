@@ -371,6 +371,46 @@ shared helper, so a fourth route that grows its own copy fails the test.
 
 ---
 
+## C11 — A `wip_items` add and its matching take, counted in different units
+
+**Shape.** `wip_items.stock_qty` is a running balance that only ever moves by deltas — nothing
+re-derives it, so every mismatched pair is permanent and cumulative. The cascade puts stock in
+at one point and takes it out at another, and the two are written by different people at
+different times against different mental models of what the row counts. When the add and the
+take disagree — about the quantity, about how many times they fire, or about whether they fire
+at all — the residue never comes back out, and the order it belonged to shipped months ago.
+
+It is invisible per-order: one card leaves 1 or 2 units behind, and only the whole-ledger sum
+shows it. It surfaces as a WIP board carrying stock nobody can find, or — when the take is the
+side that runs twice — as **negative** rows, which is the loudest symptom and the worst one.
+
+| # | the add | the take | state |
+|---|---|---|---|
+| 1 | every stage's `+wipQty` | only ever removed when a DOWNSTREAM card was scanned; the WIP→FG subtract took only UPHOLSTERY's own rows | ✅ fixed 2026-08-08 (`630b9e13`) — `settlePoTerminalWip` drains structurally, whatever the last stage is |
+| 2 | one add per completion | the idempotency ticket was keyed `(org, jc, from, to)`, so a redone card's take was swallowed while the revert's refund had already run | ✅ fixed 2026-08-08 (`bdfe14ac`) — the ticket names an OCCURRENCE, not a transition |
+| 3 | merged FAB_CUT `+wipQty` = the PIECES the card covers | the set-level consume took the literal `1`, believing the row counted SETS | ✅ fixed 2026-08-08 (BUG-2026-08-08-005) — the consume takes the upstream card's own `wipQty`, and the rollback refund the same |
+
+**The rule.** Before changing either side, name the UNIT the row is in, and check the other side
+agrees. `src/api/lib/wip-expected.ts` is the answer, and it is deliberately not a mirror of the
+cascade's arithmetic: it is a physical model — *a stage's output sits on a shelf iff the stage
+is finished, its downstream has not started, and the order has not left WIP; quantity carried =
+the card's OWN `wipQty`*. Any consume that does not bring the stored balance to what that model
+says is wrong, whichever side looks more natural. And every forward path needs its exact
+rollback inverse written in the same commit: a refund that hands back less than the consume took
+is how a row goes negative, which is the failure mode this class is being cleaned up to remove.
+
+**Covered by** `tests/wip-quantity-drift.test.mjs` — the real cascade against an in-memory stub
+of the three tables it writes, asserting balances (not source shape), including a
+`reconcileWip` cross-check that the ledger and the derivation agree. The stub reads each
+STATEMENT to decide what it enforces, so reintroducing a fixed instance fails the suite instead
+of quietly passing.
+
+**Still open:** none of the three fixes repairs the data they already produced. Prod carries
+~2,100 net overstated units and 162 negative rows; `GET /api/inventory/wip/reconcile` lists
+them, read-only. A one-off correction pass is owed.
+
+---
+
 ## What tests cannot catch — and what covers it
 
 None of C1–C4's money leaks were introduced by a code change on the day they started leaking:

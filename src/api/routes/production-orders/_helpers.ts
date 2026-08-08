@@ -2800,6 +2800,10 @@ export async function applyWipInventoryChange(
     // old wipKey-only filter pulled siblings from both branches).
     if (!isFabCut && !isWoodCut) {
       let refundLabel: string | null = null;
+      // Mirrors `upstreamWipQty` in the forward consume — the merged-FC
+      // refund has to hand back the same number the consume took, and both
+      // read it off the same card.
+      let refundUpstreamWipQty: number | null = null;
       if (wipKey) {
         const myBranch = jcRow.branchKey ?? "";
         const children = allJcRows
@@ -2812,6 +2816,7 @@ export async function applyWipInventoryChange(
           .sort((a, b) => b.sequence - a.sequence);
         if (children[0]?.wipLabel) {
           refundLabel = children[0].wipLabel;
+          refundUpstreamWipQty = children[0].wipQty ?? null;
         }
       }
       // Option C fallback (mirror of forward consume) — refund the merged
@@ -2847,14 +2852,15 @@ export async function applyWipInventoryChange(
         for (const cand of candidates) {
           const mergedFc = await db
             .prepare(
-              `SELECT wipLabel FROM job_cards
+              `SELECT wipLabel, wipQty FROM job_cards
                WHERE wipKey = ? AND departmentCode = 'FAB_CUT'
                LIMIT 1`,
             )
             .bind(cand)
-            .first<{ wipLabel: string }>();
+            .first<{ wipLabel: string; wipQty: number | null }>();
           if (mergedFc?.wipLabel) {
             refundLabel = mergedFc.wipLabel;
+            refundUpstreamWipQty = mergedFc.wipQty ?? null;
             break;
           }
         }
@@ -2911,9 +2917,10 @@ export async function applyWipInventoryChange(
             // Don't refund (consume stays).
             actualRefund = 0;
           } else {
-            // No other DONE sibling — this rollback leaves the group
-            // fully un-consumed. Refund 1 set (mirrors forward consume).
-            actualRefund = 1;
+            // No other DONE sibling — this rollback leaves the group fully
+            // un-consumed. Hand back exactly what the forward consume took:
+            // the merged FC card's own wipQty, read off the same card.
+            actualRefund = Math.max(1, Number(refundUpstreamWipQty ?? 1));
           }
         }
         if (actualRefund > 0) {
@@ -2958,6 +2965,13 @@ export async function applyWipInventoryChange(
     // Filter siblings by (wipKey, branchKey) so each branch's consume
     // only reaches its own true upstream.
     let upstreamLabel: string | null = null;
+    // What the UPSTREAM card put into that row. The producer-add below binds
+    // the producing card's own `wipQty`, so a set-level consume has to take
+    // that same number back out — see the merged-FC branch further down, where
+    // a hardcoded 1 left `wipQty − 1` behind on every merged card that cuts
+    // more than one piece. Always read off the same card the label came from,
+    // so the two can never describe different cards.
+    let upstreamWipQty: number | null = null;
     if (!wasActive && wipKey) {
       const myBranch = jcRow.branchKey ?? "";
       const children = allJcRows
@@ -2970,6 +2984,7 @@ export async function applyWipInventoryChange(
         .sort((a, b) => b.sequence - a.sequence);
       if (children[0]?.wipLabel) {
         upstreamLabel = children[0].wipLabel;
+        upstreamWipQty = children[0].wipQty ?? null;
       }
     }
     // Option C fallback: FAB_SEW's upstream FC is no longer per-piece on
@@ -3019,14 +3034,15 @@ export async function applyWipInventoryChange(
       for (const cand of candidates) {
         const mergedFc = await db
           .prepare(
-            `SELECT wipLabel FROM job_cards
+            `SELECT wipLabel, wipQty FROM job_cards
              WHERE wipKey = ? AND departmentCode = 'FAB_CUT'
              LIMIT 1`,
           )
           .bind(cand)
-          .first<{ wipLabel: string }>();
+          .first<{ wipLabel: string; wipQty: number | null }>();
         if (mergedFc?.wipLabel) {
           upstreamLabel = mergedFc.wipLabel;
+          upstreamWipQty = mergedFc.wipQty ?? null;
           break;
         }
       }
@@ -3037,14 +3053,15 @@ export async function applyWipInventoryChange(
       if (!upstreamLabel) {
         const anyFc = await db
           .prepare(
-            `SELECT wipLabel FROM job_cards
+            `SELECT wipLabel, wipQty FROM job_cards
              WHERE productionOrderId = ? AND departmentCode = 'FAB_CUT'
              LIMIT 1`,
           )
           .bind(jcRow.productionOrderId)
-          .first<{ wipLabel: string }>();
+          .first<{ wipLabel: string; wipQty: number | null }>();
         if (anyFc?.wipLabel) {
           upstreamLabel = anyFc.wipLabel;
+          upstreamWipQty = anyFc.wipQty ?? null;
         }
       }
       // For SOFA cross-PO: when this SEW row is on a sibling PO of a
@@ -3053,7 +3070,7 @@ export async function applyWipInventoryChange(
       if (!upstreamLabel && parentDocKey) {
         const sibFc = await db
           .prepare(
-            `SELECT jc.wipLabel FROM job_cards jc
+            `SELECT jc.wipLabel, jc.wipQty FROM job_cards jc
              JOIN production_orders po ON po.id = jc.productionOrderId
              WHERE (po.companySOId = ? OR po.companyCOId = ?)
                AND ? <> ''
@@ -3061,9 +3078,10 @@ export async function applyWipInventoryChange(
              LIMIT 1`,
           )
           .bind(parentDocKey, parentDocKey, parentDocKey)
-          .first<{ wipLabel: string }>();
+          .first<{ wipLabel: string; wipQty: number | null }>();
         if (sibFc?.wipLabel) {
           upstreamLabel = sibFc.wipLabel;
+          upstreamWipQty = sibFc.wipQty ?? null;
         }
       }
     }
@@ -3073,10 +3091,24 @@ export async function applyWipInventoryChange(
       // 2A_LHF / L_RHF / CNR sofa-piece SEWs for sofa) all want to
       // consume from the same upstream wip_items row. Per-piece consume
       // doesn't balance because per-piece wipQty has BOM multipliers
-      // (BF DV multiplier=2) so the merged FC stock_qty (= set count)
-      // can never reach 0. Use SET-LEVEL dedup: only the FIRST DONE
-      // sibling triggers the consume; subsequent siblings no-op. The
-      // FC's producer-add of +set_count then balances the row to 0.
+      // (BF DV multiplier=2). Use SET-LEVEL dedup: only the FIRST DONE
+      // sibling triggers the consume; subsequent siblings no-op — and it
+      // takes back exactly what the FC card's producer-add put in, so the
+      // row lands on 0.
+      //
+      // That last number used to be the literal 1, on the belief stated in
+      // the old comment here that a merged FC row IS a set count. It is
+      // not: the producer binds the FC card's own `wipQty`, and the
+      // aggregator gives a merged card the PIECES it covers — a divan-only
+      // bedframe PO cuts 2, a three-piece sectional cuts 3 (337 of 2,045
+      // FAB_CUT cards on prod carry more than 1). Consuming 1 against an
+      // add of N left N−1 on the shelf forever. This is also what
+      // `src/api/lib/wip-expected.ts` has always said the balance should
+      // be — "quantity carried = the card's own wipQty", dropping to zero
+      // the moment a downstream stage becomes active — so taking `wipQty`
+      // makes the cascade agree with the derivation instead of drifting
+      // from it. Falls back to 1 when the card carries no wipQty, which is
+      // exactly today's behaviour for those cards.
       const isMergedFcUpstream =
         deptUpper === "FAB_SEW" && upstreamLabel.endsWith("(FC)");
       let consumeQty = jcRow.wipQty || poRow.quantity || 1;
@@ -3130,10 +3162,11 @@ export async function applyWipInventoryChange(
           // idempotent at the merge-group level.
           consumeQty = 0;
         } else {
-          // First sibling to finish. Use 1 set unit, NOT per-piece
-          // wipQty (per-piece would over-decrement by the BOM
-          // multiplier).
-          consumeQty = 1;
+          // First sibling to finish. Take the UPSTREAM card's wipQty —
+          // what the FC producer-add put in — NOT this SEW card's
+          // per-piece wipQty, which carries the BOM multiplier and would
+          // over-decrement.
+          consumeQty = Math.max(1, Number(upstreamWipQty ?? 1));
         }
       }
       if (consumeQty > 0) {

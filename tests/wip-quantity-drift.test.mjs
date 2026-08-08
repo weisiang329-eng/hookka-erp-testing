@@ -62,17 +62,32 @@ function makeDb(jobCards = []) {
       },
       async first() {
         if (/SELECT baseModel FROM bom_templates/i.test(s)) return null;
-        if (/SELECT wipLabel FROM job_cards WHERE wipKey = \?/i.test(s)) {
-          const hit = jobCards.find(
-            (j) => j.wipKey === b[0] && j.departmentCode === "FAB_CUT",
+        // The FC lookups project only the columns the statement asks for, so
+        // a cascade that stops SELECTing wipQty really does lose the number
+        // and falls back to 1 — which is the C bug, and makes those tests
+        // fail rather than quietly still passing.
+        const project = (hit) => {
+          if (!hit) return null;
+          const row = { wipLabel: hit.wipLabel };
+          if (/\bwipQty\b/i.test(s)) row.wipQty = hit.wipQty ?? null;
+          return row;
+        };
+        if (/SELECT wipLabel(?:, wipQty)? FROM job_cards WHERE wipKey = \?/i.test(s)) {
+          return project(
+            jobCards.find(
+              (j) => j.wipKey === b[0] && j.departmentCode === "FAB_CUT",
+            ),
           );
-          return hit ? { wipLabel: hit.wipLabel } : null;
         }
-        if (/SELECT wipLabel FROM job_cards WHERE productionOrderId = \?/i.test(s)) {
-          const hit = jobCards.find(
-            (j) => j.productionOrderId === b[0] && j.departmentCode === "FAB_CUT",
+        if (
+          /SELECT wipLabel(?:, wipQty)? FROM job_cards WHERE productionOrderId = \?/i.test(s)
+        ) {
+          return project(
+            jobCards.find(
+              (j) =>
+                j.productionOrderId === b[0] && j.departmentCode === "FAB_CUT",
+            ),
           );
-          return hit ? { wipLabel: hit.wipLabel } : null;
         }
         if (/SELECT COUNT\(\*\) AS n FROM job_cards/i.test(s)) {
           const n = jobCards.filter(
@@ -351,6 +366,180 @@ test("B: complete → revert → complete on the LAST stage settles once, not tw
     afterFirstCompletion,
     "a revert + redo of the last stage must leave every balance unchanged",
   );
+});
+
+// ---------------------------------------------------------------------------
+// FIX C — a merged FAB_CUT card that cuts more than one piece.
+//
+// Option C merges the per-piece FAB_CUT cards into one card per (SO|PO,
+// baseModel, fabric), because the cutter lays the bolt down once. That merged
+// card's `wipQty` is the number of PIECES it covers — 2 for a divan-only
+// bedframe, 3 for a three-piece sectional — and the producer adds exactly that
+// to `wip_items`. The downstream consume is deduped to fire ONCE per merge
+// group, and it used to take the literal 1, on the belief that a merged FC row
+// counts sets. 337 of prod's 2,045 FAB_CUT cards carry more than 1, and each
+// left `wipQty − 1` on the shelf permanently.
+//
+// The fixture is a divan-only bedframe PO, which is the majority shape: one
+// merged FC card cutting 2 divans, one FAB_SEW card, one UPHOLSTERY.
+// ---------------------------------------------------------------------------
+const FC_PO = {
+  ...PO,
+  id: "po-fc",
+  productCode: "DIVAN-(K)",
+  fabricCode: "PC151-01",
+};
+const FC_LABEL = 'DIVAN-(K) | (6FT) | (10") | (DV 10") | PC151-01 | (FC)';
+
+function fcCards(pieces = 2, statuses = {}) {
+  return [
+    {
+      id: "fc",
+      productionOrderId: FC_PO.id,
+      departmentCode: "FAB_CUT",
+      sequence: 0,
+      status: statuses.fc ?? "WAITING",
+      // The merged card's own one-card chain, keyed exactly as the aggregator
+      // builds it for a BF/ACC per-PO merge.
+      wipKey: `${FC_PO.id}::DIVAN-(K)::PC151-01::FAB_CUT`,
+      wipCode: "FAB_CUT",
+      wipType: "BEDFRAME",
+      wipLabel: FC_LABEL,
+      wipQty: pieces,
+      branchKey: "",
+    },
+    {
+      id: "sew",
+      productionOrderId: FC_PO.id,
+      departmentCode: "FAB_SEW",
+      sequence: 1,
+      status: statuses.sew ?? "WAITING",
+      wipKey: "chain-divan",
+      wipCode: "FAB_SEW",
+      wipType: "DIVAN",
+      wipLabel: "Divan Sewn",
+      wipQty: pieces,
+      branchKey: "b1",
+    },
+    {
+      id: "uph",
+      productionOrderId: FC_PO.id,
+      departmentCode: "UPHOLSTERY",
+      sequence: 2,
+      status: statuses.uph ?? "WAITING",
+      wipKey: "chain-divan",
+      wipCode: "UPHOLSTERY",
+      wipType: "DIVAN",
+      wipLabel: "Divan",
+      wipQty: pieces,
+      branchKey: "",
+    },
+  ];
+}
+
+async function moveFc(db, list, id, to) {
+  const jc = byId(list, id);
+  const from = jc.status;
+  jc.status = to;
+  await applyWipInventoryChange(db, FC_PO, jc, to, list, from, {
+    orgId: ORG,
+    source: "TEST",
+  });
+}
+
+test("C: the sew takes back everything the merged cut put in, not one piece of it", async () => {
+  const list = fcCards(2);
+  const db = makeDb(list);
+
+  await moveFc(db, list, "fc", "COMPLETED");
+  assert.equal(db.wip.get(FC_LABEL), 2, "the cutter cut two divans' worth");
+
+  await moveFc(db, list, "sew", "COMPLETED");
+  assert.equal(
+    db.wip.get(FC_LABEL),
+    0,
+    "the cut stack has left the shelf — a leftover 1 here is the drift",
+  );
+  assert.equal(db.wip.get("Divan Sewn"), 2, "and the sew's own output is on it");
+});
+
+test("C: a three-piece sectional's cut clears completely too", async () => {
+  const list = fcCards(3);
+  const db = makeDb(list);
+  await moveFc(db, list, "fc", "COMPLETED");
+  await moveFc(db, list, "sew", "COMPLETED");
+  assert.equal(db.wip.get(FC_LABEL), 0, "3 in, 3 out — not 3 in, 1 out");
+});
+
+test("C: a single-piece merged cut still balances, exactly as before", async () => {
+  const list = fcCards(1);
+  const db = makeDb(list);
+  await moveFc(db, list, "fc", "COMPLETED");
+  await moveFc(db, list, "sew", "COMPLETED");
+  assert.equal(db.wip.get(FC_LABEL), 0, "the wipQty=1 case must not regress");
+});
+
+test("C: reverting the sew hands back exactly what it took", async () => {
+  // The refund is the consume's inverse or it is a new drift. A round trip
+  // has to land every balance back where the first completion left it —
+  // refunding 1 against a consume of 2 would leave the row at −1, which is
+  // the negative-balance failure mode.
+  const list = fcCards(2);
+  const db = makeDb(list);
+  await moveFc(db, list, "fc", "COMPLETED");
+  await moveFc(db, list, "sew", "COMPLETED");
+  const afterFirst = [...db.wip.entries()].sort();
+
+  await moveFc(db, list, "sew", "WAITING");
+  assert.equal(db.wip.get(FC_LABEL), 2, "the whole cut stack is back on the shelf");
+  assert.equal(db.wip.get("Divan Sewn"), 0);
+
+  await moveFc(db, list, "sew", "COMPLETED");
+  assert.deepEqual(
+    [...db.wip.entries()].sort(),
+    afterFirst,
+    "revert + redo must be a no-op on the ledger",
+  );
+  assert.ok(
+    [...db.wip.values()].every((q) => q >= 0),
+    "and must never drive a row negative",
+  );
+});
+
+test("C: the finished PO leaves nothing behind, and the books agree", async () => {
+  const list = fcCards(2);
+  const db = makeDb(list);
+  await moveFc(db, list, "fc", "COMPLETED");
+  await moveFc(db, list, "sew", "COMPLETED");
+  await moveFc(db, list, "uph", "COMPLETED");
+
+  for (const [code, qty] of db.wip) {
+    assert.equal(qty, 0, `${code} still carries ${qty} on a shipped order`);
+  }
+  // And the independent derivation agrees with what the cascade wrote — the
+  // whole point: `wip-expected.ts` says a card carries its OWN wipQty until a
+  // downstream stage picks it up, which is the number the consume now takes.
+  const r = reconcileWip(
+    [FC_PO],
+    list,
+    [...db.wip.entries()].map(([code, stockQty]) => ({ code, stockQty })),
+  );
+  assert.equal(r.disagreeing, 0, "the ledger and the derivation must agree");
+  assert.equal(r.netDiff, 0);
+});
+
+test("C: mid-flight, the derivation and the ledger agree on the cut stack", async () => {
+  // Cut done, nothing downstream started: both say the pieces are on the shelf.
+  const list = fcCards(2);
+  const db = makeDb(list);
+  await moveFc(db, list, "fc", "COMPLETED");
+  const r = reconcileWip(
+    [FC_PO],
+    list,
+    [...db.wip.entries()].map(([code, stockQty]) => ({ code, stockQty })),
+  );
+  assert.equal(db.wip.get(FC_LABEL), 2);
+  assert.equal(r.disagreeing, 0, "2 cut, 2 expected — not 1");
 });
 
 // ---------------------------------------------------------------------------

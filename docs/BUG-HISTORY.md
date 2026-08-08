@@ -34,6 +34,20 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-08-005 — A merged FAB_CUT card that cuts N pieces had only 1 taken back out `inventory-cascade` `production-orders` `data-integrity` 🟢
+
+**Symptom.** The third WIP drift mechanism, after `630b9e13` and `bdfe14ac`. `wip_items` rows for merged FAB_CUT labels ("… | (FC)") never reach zero: they settle on `wipQty − 1` and stay there permanently, on orders that shipped. On prod, **337 of 2,045 FAB_CUT cards carry a `wipQty` above 1**; of the 315 that are COMPLETED, 314 have had a FAB_SEW sibling finish, stranding **385 units**.
+
+**Root cause.** Option C merges the per-piece FAB_CUT cards into one card per (SO|PO, baseModel, fabric) because the cutter lays the bolt down once. The producer (`applyWipInventoryChange`, non-UPH COMPLETED branch) adds that card's own `wipQty`. The downstream consume is deduped to fire ONCE per merge group — correct — but took the literal **1**, on the belief written into the comment there that a merged FC row counts SETS. It does not: the aggregator gives the merged card the number of PIECES it covers (`aggregateFcSlots` — SOFA sums the merged POs, BF/ACC takes the min across the group), which is 2 for a divan-only bedframe PO and 3 for a three-piece sectional. Add N, take 1, keep N−1. The rollback refund had the mirror-image literal.
+
+**Why `wipQty` is the right number, not a guess.** `src/api/lib/wip-expected.ts` is the independent structural model of what the ledger should hold, and it has said from the start: *"quantity carried = the card's own `wipQty`"*, dropping to zero the moment a downstream stage becomes active. That is exactly the shape of the set-level dedup — one consume, whole quantity, on the first sibling. So the consume now takes the UPSTREAM FC card's `wipQty` (read off the same card the label came from, fallback 1), which makes the cascade agree with the derivation instead of drifting from it. The producer was never wrong; the alternative — making the merged card's `wipQty` 1 — would have told the cutter to cut one piece, and it also drives `ensurePiecePics` slots and the progress percentage.
+
+**Fix.** `production-orders/_helpers.ts`: the four upstream lookups now project `wipQty` beside `wipLabel` into `upstreamWipQty`; `consumeQty = Math.max(1, upstreamWipQty ?? 1)` (:3169) and the rollback's `actualRefund` gets the identical expression from `refundUpstreamWipQty` (:2923), so the two stay exact inverses and a revert cannot leave a negative.
+
+**Verified.** `tests/wip-quantity-drift.test.mjs` gains a FIX C block driving the real cascade over a divan-only BF fixture: 2 in / 2 out, a 3-piece sectional clears completely, the `wipQty=1` case does not regress, a sew revert + redo is a no-op with no row going negative, and the finished PO reconciles against `reconcileWip` at zero disagreement. The stub projects only the columns the statement asks for, so BOTH ways of reintroducing the bug — putting the literal 1 back, or dropping `wipQty` from the SELECT — fail those tests; proved by doing each. `npx tsc -p tsconfig.app.json --noEmit` clean, suite green (3,590). **No prod data was corrected** — this stops the accrual; the 385 stranded units need the same one-off reconciliation pass as the other two mechanisms.
+
+---
+
 ## BUG-2026-08-08-004 — `/api/consignment-orders/stats` cached its figures per org but computed them over every org `security` `money` `data-integrity` 🟢
 
 **Symptom.** None visible yet — there is one tenant on prod (16 COs, all `org_id='hookka'`). Latent, but the CO status tab strip started reading its money off this endpoint today, so the next tenant would have seen the wrong figure as ringgit rather than as a count.

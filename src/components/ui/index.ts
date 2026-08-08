@@ -27,6 +27,15 @@ export { ToastProvider, useToast } from "./toast";
 export { PageHeader, type PageHeaderProps } from "./page-header";
 export { FilterBar, type FilterBarProps, type FilterBarSearchProps } from "./filter-bar";
 export { Tabs, type TabItem, type TabsProps } from "./tabs";
+// The ONE status tab strip (count + money per state) — see the header comment
+// in ./status-tab-strip.tsx for why it is separate from `Tabs`.
+export { StatusTabStrip, type StatusTabStripProps } from "./status-tab-strip";
+export {
+  type StatusTabSpec,
+  tabValueSen,
+  sumTabValueSen,
+  tabTotals,
+} from "@/lib/status-tab-strip";
 export {
   StatusBadge,
   getAnyStatusStyle,

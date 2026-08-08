@@ -22,7 +22,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { generatePendingForSlot, fgSampleTarget } from "../src/api/routes/qc-pending.ts";
+import { generatePendingForSlot, fgSampleTarget, daysInStore } from "../src/api/routes/qc-pending.ts";
 
 const SLOT = "2026-08-07T04:00:00.000Z"; // 12:00 local (UTC+8)
 const SLOT_2 = "2026-08-07T08:00:00.000Z"; // 16:00 local, same day
@@ -37,6 +37,9 @@ function makeDb({
   rawMaterials = [],
   fgUnits = [],
   inspections = [],
+  // STORED: batches drawn for production, as cost_ledger RM_ISSUE rows join
+  // rm_batches join raw_materials.
+  issuedBatches = [],
 } = {}) {
   const state = { inspections, inspectionItems: [], ddl: [] };
   const norm = (s) => s.replace(/\s+/g, " ").trim();
@@ -152,6 +155,43 @@ function makeDb({
       return { rows: [] };
     }
 
+    // --- STORED: batches drawn for production today ---
+    if (/FROM cost_ledger cl/i.test(s)) {
+      const [from, to] = args;
+      return {
+        rows: issuedBatches
+          .filter((b) => (b.issuedAt ?? "") >= from && (b.issuedAt ?? "") <= to)
+          .map((b) => ({
+            batchId: b.batchId,
+            rmId: b.rmId ?? null,
+            receivedDate: b.receivedDate ?? null,
+            batchSource: b.batchSource ?? "GRN",
+            batchSourceRefId: b.batchSourceRefId ?? null,
+            itemCode: b.itemCode ?? null,
+            itemName: b.itemName ?? null,
+            itemGroup:
+              b.itemGroup ??
+              rawMaterials.find((rm) => rm.id === b.rmId || rm.itemCode === b.itemCode)?.itemGroup ??
+              null,
+          })),
+      };
+    }
+    if (/FROM qc_inspections WHERE rm_check_kind = 'STORED'/i.test(s)) {
+      return {
+        rows: state.inspections
+          .filter((r) => r.rmCheckKind === "STORED" && r.inspectionDate === args[0])
+          .map((r) => ({
+            batchId: r.sourceRmBatchId,
+            materialFamily: r.materialFamily,
+            templateId: r.templateId,
+          })),
+      };
+    }
+    if (/^SELECT id AS "id", grnNumber AS "grnNumber" FROM grns WHERE id IN/i.test(s)) {
+      const ids = new Set(args);
+      return { rows: grns.filter((g) => ids.has(g.id)).map((g) => ({ id: g.id, grnNumber: g.grnNumber })) };
+    }
+
     // --- FG: units produced today, joined to their SO line ---
     if (/FROM fg_units fgu/i.test(s)) {
       const pfx = args[0].replace(/%$/, "");
@@ -175,13 +215,15 @@ function makeDb({
         department, scheduledSlotAt, inspectionDate, createdAt,
         subjectType, subjectId, subjectLabel,
         sourceGrnId, sourceGrnNo, materialFamily, sourceFgUnitId, soSpec,
-        sourceGrnIds, sourceGrnNos, sourceReceiptDate, sourceSupplierId] = args;
+        sourceGrnIds, sourceGrnNos, sourceReceiptDate, sourceSupplierId,
+        rmCheckKind, sourceRmBatchId, sourceBatchAgeDays] = args;
       state.inspections.push({
         id, inspectionNo, templateId, templateSnapshot, stage, itemCategory,
         department, scheduledSlotAt, inspectionDate, createdAt,
         subjectType, subjectId, subjectLabel,
         sourceGrnId, sourceGrnNo, materialFamily, sourceFgUnitId, soSpec,
         sourceGrnIds, sourceGrnNos, sourceReceiptDate, sourceSupplierId,
+        rmCheckKind, sourceRmBatchId, sourceBatchAgeDays,
         triggerType: "SCHEDULED", status: "PENDING",
       });
       return { rows: [] };
@@ -528,6 +570,202 @@ test("a DRAFT receipt is not goods received, and an old receipt is out of the lo
     grnItems: [{ grnId: "g", materialCode: "FAB-001" }],
   });
   assert.equal((await generatePendingForSlot(recent.DB, SLOT)).rmCreated, 1);
+});
+
+// ── STORED: the material actually USED today, however old it is ─────────────
+//
+// Owner 2026-08-08: "有货到他才有工作，没有货到他就没有工作 … 可是有一些东西还是
+// 要 daily 检查的 … 那天用的木头有没有发霉？还有海绵，那天用的海绵有没有问题？"
+// Everything above it is INCOMING; this is the one that runs on a day nothing
+// is delivered, which is exactly when stored stock is the risk.
+
+const STORED_TEMPLATES = [
+  rmTpl("qct-st-timber", "TIMBER"),
+  rmTpl("qct-st-fabric", "FABRIC"),
+  rmTpl("qct-st-foam", "SOFA_FOAM"),
+  rmTpl("qct-st-general", "GENERAL"),
+  rmTpl("qct-st-warehouse", null),
+].map((t) => ({ ...t, rmCheckKind: "STORED" }));
+const STORED_TEMPLATE_ITEMS = STORED_TEMPLATES.map((t) => tplItem(t.id, 1));
+
+function issued(over) {
+  return {
+    batchId: "rmb-1",
+    rmId: "rm-1",
+    itemCode: "WD-001",
+    itemName: "Wood strip 2x2",
+    itemGroup: "B.OTHERS",
+    receivedDate: "2026-07-01",
+    batchSource: "GRN",
+    batchSourceRefId: null,
+    issuedAt: `${SLOT_DATE}T02:00:00.000Z`,
+    ...over,
+  };
+}
+
+test("material drawn today is checked even though NOTHING was delivered today", async () => {
+  // The whole point. Every other RM rhythm fires on a goods receipt; with no
+  // GRN in the window they all generate nothing, and the timber that has been
+  // in a Malaysian warehouse since July goes into a sofa unlooked-at.
+  const db = makeDb({
+    templates: [...RM_TEMPLATES, ...STORED_TEMPLATES],
+    templateItems: [...RM_TEMPLATE_ITEMS, ...STORED_TEMPLATE_ITEMS],
+    grns: [],
+    issuedBatches: [issued({})],
+  });
+
+  const res = await generatePendingForSlot(db.DB, SLOT);
+  assert.equal(res.rmCreated, 0, "no delivery — the incoming rhythm has nothing to do");
+  assert.equal(res.storedCreated, 2, "the timber batch, plus the once-a-day store condition check");
+  const batchRow = db.state.inspections.find((r) => r.templateId === "qct-st-timber");
+  assert.ok(batchRow, "the issued timber batch must get a stored check");
+  assert.equal(batchRow.rmCheckKind, "STORED");
+  assert.equal(batchRow.sourceRmBatchId, "rmb-1");
+  assert.equal(batchRow.stage, "RM", "STORED is a KIND of RM check, not a fourth stage");
+});
+
+test("a stored check NAMES the batch and how long it has been in the store", async () => {
+  // "Is the foam OK" is unanswerable. "Is batch rmb-9, received 2026-04-02,
+  // 127 days in store, OK" is a twenty-second job.
+  const db = makeDb({
+    templates: STORED_TEMPLATES,
+    templateItems: STORED_TEMPLATE_ITEMS,
+    grns: [{ id: "grn-77", grnNumber: "GRN-0077" }],
+    issuedBatches: [
+      issued({
+        batchId: "rmb-9",
+        itemCode: "FOAM-01",
+        itemName: "PU D32",
+        itemGroup: "SOFA-FIL",
+        receivedDate: "2026-04-02",
+        batchSourceRefId: "grn-77",
+      }),
+    ],
+  });
+  await generatePendingForSlot(db.DB, SLOT);
+  const row = db.state.inspections.find((r) => r.sourceRmBatchId === "rmb-9");
+  assert.ok(row);
+  assert.equal(row.templateId, "qct-st-foam");
+  assert.equal(row.subjectType, "RM_BATCH");
+  assert.equal(row.subjectId, "rmb-9");
+  assert.equal(row.sourceBatchAgeDays, 127);
+  assert.match(row.subjectLabel, /FOAM-01/);
+  assert.match(row.subjectLabel, /127d in store/);
+  assert.match(row.subjectLabel, /GRN-0077/,
+    "a storage finding has to walk back to the delivery it arrived on");
+  assert.equal(row.sourceReceiptDate, "2026-04-02");
+});
+
+test("the draw is by AGE — the oldest batches in play are the ones checked", async () => {
+  // Not random. A random draw over a rack that is mostly fresh stock spends the
+  // day's check on the batch that arrived on Tuesday.
+  const db = makeDb({
+    templates: STORED_TEMPLATES,
+    templateItems: STORED_TEMPLATE_ITEMS,
+    issuedBatches: [
+      issued({ batchId: "rmb-new", receivedDate: "2026-08-06" }),
+      issued({ batchId: "rmb-mid", receivedDate: "2026-06-01" }),
+      issued({ batchId: "rmb-old", receivedDate: "2026-02-01" }),
+      issued({ batchId: "rmb-older", receivedDate: "2026-01-01" }),
+    ],
+  });
+  const res = await generatePendingForSlot(db.DB, SLOT);
+  assert.equal(res.storedBatchesIssued, 4);
+  const drawn = db.state.inspections
+    .filter((r) => r.sourceRmBatchId)
+    .map((r) => r.sourceRmBatchId);
+  assert.deepEqual(drawn.sort(), ["rmb-old", "rmb-older"],
+    "four timber batches do not need four identical checklists — they need the two oldest");
+  assert.equal(res.storedOldestDays, 218,
+    "'created 0' must never be confusable with 'nothing old was drawn'");
+});
+
+test("the store-condition check is raised ONCE a day, not per batch", async () => {
+  const db = makeDb({
+    templates: STORED_TEMPLATES,
+    templateItems: STORED_TEMPLATE_ITEMS,
+    issuedBatches: [
+      issued({ batchId: "rmb-1", itemGroup: "B.OTHERS" }),
+      issued({ batchId: "rmb-2", itemCode: "FAB-001", itemGroup: "S.M-FABR" }),
+      issued({ batchId: "rmb-3", itemCode: "FOAM-01", itemGroup: "SOFA-FIL" }),
+    ],
+  });
+  await generatePendingForSlot(db.DB, SLOT);
+  const store = db.state.inspections.filter((r) => r.templateId === "qct-st-warehouse");
+  assert.equal(store.length, 1, "the building is checked once, not once per family");
+  assert.equal(store[0].sourceRmBatchId, null);
+
+  // …and the 16:00 slot does not raise a second one.
+  await generatePendingForSlot(db.DB, SLOT_2);
+  assert.equal(db.state.inspections.filter((r) => r.templateId === "qct-st-warehouse").length, 1);
+});
+
+test("re-running, and the second slot, raise no second check for the same batch", async () => {
+  const db = makeDb({
+    templates: STORED_TEMPLATES,
+    templateItems: STORED_TEMPLATE_ITEMS,
+    issuedBatches: [issued({ batchId: "rmb-1" })],
+  });
+  assert.equal((await generatePendingForSlot(db.DB, SLOT)).storedCreated, 2);
+  assert.equal((await generatePendingForSlot(db.DB, SLOT)).storedCreated, 0);
+  assert.equal((await generatePendingForSlot(db.DB, SLOT_2)).storedCreated, 0,
+    "the per-family cap is spent for the DAY, not for the slot");
+  assert.equal(db.state.inspections.length, 2);
+});
+
+test("each family is drawn against its own stored checklist", async () => {
+  const db = makeDb({
+    templates: STORED_TEMPLATES,
+    templateItems: STORED_TEMPLATE_ITEMS,
+    issuedBatches: [
+      issued({ batchId: "rmb-w", itemCode: "WD-001", itemName: "Wood strip", itemGroup: "B.OTHERS" }),
+      issued({ batchId: "rmb-f", itemCode: "FAB-001", itemGroup: "S.M-FABR" }),
+      issued({ batchId: "rmb-o", itemCode: "FOAM-01", itemGroup: "SOFA-FIL" }),
+      issued({ batchId: "rmb-?", itemCode: "MYSTERY", itemGroup: null }),
+    ],
+  });
+  await generatePendingForSlot(db.DB, SLOT);
+  assert.deepEqual(
+    db.state.inspections.map((r) => r.templateId).sort(),
+    ["qct-st-fabric", "qct-st-foam", "qct-st-general", "qct-st-timber", "qct-st-warehouse"],
+    "an issued batch is never silently unchecked — an unmapped one falls to the general list",
+  );
+});
+
+test("bedframe filler and sofa foam share ONE stored checklist", async () => {
+  // Incoming they are split because the measurables differ (a stamped density
+  // rating vs. GSM and loft). In store both fail the same five ways.
+  const db = makeDb({
+    templates: STORED_TEMPLATES,
+    templateItems: STORED_TEMPLATE_ITEMS,
+    issuedBatches: [
+      issued({ batchId: "rmb-a", itemCode: "SOFA-F", itemGroup: "SOFA-FIL", receivedDate: "2026-03-01" }),
+      issued({ batchId: "rmb-b", itemCode: "BED-F", itemGroup: "BED-FILL", receivedDate: "2026-03-02" }),
+    ],
+  });
+  await generatePendingForSlot(db.DB, SLOT);
+  const foam = db.state.inspections.filter((r) => r.templateId === "qct-st-foam");
+  assert.equal(foam.length, 2);
+});
+
+test("no material issued means no stored check — it is not a blind daily row", async () => {
+  const db = makeDb({
+    templates: STORED_TEMPLATES,
+    templateItems: STORED_TEMPLATE_ITEMS,
+    issuedBatches: [],
+  });
+  const res = await generatePendingForSlot(db.DB, SLOT);
+  assert.equal(res.storedCreated, 0);
+  assert.equal(db.state.inspections.length, 0,
+    "not even the store-condition check — a factory that drew nothing has nobody in the store");
+});
+
+test("daysInStore is the age rule, stated once", () => {
+  assert.equal(daysInStore("2026-08-07", "2026-08-07"), 0);
+  assert.equal(daysInStore("2026-08-01", "2026-08-07"), 6);
+  assert.equal(daysInStore("2026-04-02T09:00:00.000Z", "2026-08-07"), 127);
+  assert.equal(daysInStore(null, "2026-08-07"), 0, "an unknown arrival is not a negative age");
+  assert.equal(daysInStore("2026-08-09", "2026-08-07"), 0, "nor is a back-dated one");
 });
 
 // ── WIP: unchanged — twice daily, gated on the department working ───────────

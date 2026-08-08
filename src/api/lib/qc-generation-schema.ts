@@ -59,11 +59,22 @@ export async function ensureQcGenerationSchema(db: D1Database): Promise<void> {
     "ALTER TABLE qc_inspections ADD COLUMN IF NOT EXISTS source_grn_nos TEXT",
     "ALTER TABLE qc_inspections ADD COLUMN IF NOT EXISTS source_receipt_date TEXT",
     "ALTER TABLE qc_inspections ADD COLUMN IF NOT EXISTS source_supplier_id TEXT",
+    // 2026-08-08 (3) — the STORED rhythm. Material degrades in the rack, so the
+    // batch drawn for production today is checked whether or not anything was
+    // delivered today. Kept as a KIND of RM check rather than a fourth `stage`:
+    // `stage` carries a CHECK constraint and a TS union that reach the worker
+    // portal, the completion core and every list filter, and a stored-material
+    // check behaves exactly like an RM check in all of them.
+    "ALTER TABLE qc_templates ADD COLUMN IF NOT EXISTS rm_check_kind TEXT",
+    "ALTER TABLE qc_inspections ADD COLUMN IF NOT EXISTS rm_check_kind TEXT",
+    "ALTER TABLE qc_inspections ADD COLUMN IF NOT EXISTS source_rm_batch_id TEXT",
+    "ALTER TABLE qc_inspections ADD COLUMN IF NOT EXISTS source_batch_age_days INTEGER",
     "CREATE INDEX IF NOT EXISTS idx_qc_inspections_source_grn ON qc_inspections(source_grn_id)",
     "CREATE INDEX IF NOT EXISTS idx_qc_inspections_source_fg_unit ON qc_inspections(source_fg_unit_id)",
     // The batch-key lookup generation runs on every pass: find the OPEN
     // inspection for (day, supplier, family) so a later receipt attaches.
     "CREATE INDEX IF NOT EXISTS idx_qc_inspections_rm_batch ON qc_inspections(source_receipt_date, source_supplier_id, material_family)",
+    "CREATE INDEX IF NOT EXISTS idx_qc_inspections_stored ON qc_inspections(rm_check_kind, inspectionDate)",
   ];
   // Each statement is caught on its own: one refused ALTER must not take the
   // whole generation run down with it. Generation failing quietly is the exact

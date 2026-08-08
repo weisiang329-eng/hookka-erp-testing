@@ -129,6 +129,12 @@ type Inspection = {
   // predates day-batching), so the banner can list what is on the floor.
   sourceGrnNos?: string[];
   sourceReceiptDate?: string;
+  // Stage RM covers two jobs: INCOMING (did the supplier send good goods?) and
+  // STORED (is the batch we are about to use still good after months in a
+  // humid warehouse?). Blank on rows raised before the stored rhythm existed.
+  rmCheckKind?: string;
+  sourceRmBatchId?: string;
+  sourceBatchAgeDays?: number | null;
   materialFamily?: string;
   sourceFgUnitId?: string;
   soSpec?: SoSpec | null;
@@ -553,6 +559,9 @@ function DoInspectionForm({
   const assignedSubject = insp.subjectId
     ? { id: insp.subjectId, code: insp.sourceGrnNo || "", label: insp.subjectLabel || insp.subjectId }
     : null;
+  // An RM slot is either INCOMING (a goods receipt) or STORED (a batch drawn
+  // for production today). Same stage, different question.
+  const isStoredCheck = stage === "RM" && insp.rmCheckKind === "STORED";
 
   // Subject picker data (lazily loaded based on stage, and only when the slot
   // did not already name its subject)
@@ -711,14 +720,30 @@ function DoInspectionForm({
         <div className="space-y-3">
           <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2">
             <div className="text-xs font-medium uppercase tracking-wide text-amber-800">
-              {stage === "RM"
-                ? `Goods receipt${(insp.sourceGrnNos?.length ?? 0) > 1 ? "s" : ""} to inspect`
-                : "Unit drawn for sampling"}
+              {stage !== "RM"
+                ? "Unit drawn for sampling"
+                : isStoredCheck
+                  ? "Stored material drawn for production today"
+                  : `Goods receipt${(insp.sourceGrnNos?.length ?? 0) > 1 ? "s" : ""} to inspect`}
             </div>
             <div className="mt-0.5 font-mono text-sm font-semibold text-amber-900">
               {assignedSubject.label}
             </div>
-            {stage === "RM" && (insp.sourceGrnNos?.length ?? 0) > 1 && (
+            {isStoredCheck && (
+              <div className="mt-1 text-xs text-amber-800">
+                {insp.sourceBatchAgeDays != null ? (
+                  <>
+                    This batch has been in the store for{" "}
+                    <strong>{insp.sourceBatchAgeDays} day{insp.sourceBatchAgeDays === 1 ? "" : "s"}</strong>
+                    {insp.sourceGrnNo ? ` — it arrived on ${insp.sourceGrnNo}` : ""}. It passed on
+                    arrival; this check asks whether it is still good now.
+                  </>
+                ) : (
+                  <>A daily look at the store itself, not at one batch.</>
+                )}
+              </div>
+            )}
+            {stage === "RM" && !isStoredCheck && (insp.sourceGrnNos?.length ?? 0) > 1 && (
               <div className="mt-1 flex flex-wrap gap-1">
                 {insp.sourceGrnNos!.map((no) => (
                   <span
@@ -730,7 +755,7 @@ function DoInspectionForm({
                 ))}
               </div>
             )}
-            {stage === "RM" && insp.materialFamily && (
+            {stage === "RM" && !isStoredCheck && insp.materialFamily && (
               <div className="mt-1 text-xs text-amber-800">
                 Material family: <strong>{insp.materialFamily.replace(/_/g, " ")}</strong>
                 {insp.sourceReceiptDate ? ` · received ${insp.sourceReceiptDate}` : ""} — one

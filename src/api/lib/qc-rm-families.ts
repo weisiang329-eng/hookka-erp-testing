@@ -187,6 +187,28 @@ export const RM_FAMILY_DEFAULT_TEMPLATE_ID: Record<RmFamily, string> = {
   GENERAL: "qct-rm-general",
 };
 
+/**
+ * TWO KINDS OF RM CHECK, on the same families.
+ *
+ * Owner 2026-08-08, after the incoming work was built: "所以基本上就是有货到他
+ * 才有工作，没有货到他就没有工作 … 可是有一些东西还是要 daily 检查的 … 例如我们
+ * 讲的木头，那天用的木头有没有发霉？还有海绵，那天用的海绵有没有问题？"
+ *
+ *   INCOMING — fires on a goods receipt. "Did the supplier send us good goods?"
+ *   STORED   — fires on material being ISSUED to production. "Is the batch we
+ *              are about to build into a customer's sofa still good after
+ *              sitting in a Malaysian warehouse?"
+ *
+ * They are different questions with different items on the same material, so
+ * they are different TEMPLATES on the same family. `rm_check_kind` is what
+ * keeps them apart; it is NOT a new `stage`, deliberately — `stage` carries a
+ * CHECK constraint and a TypeScript union that reach the worker portal, the
+ * completion core and every list filter, and a stored-material check behaves
+ * exactly like an RM check in all of them.
+ */
+export const RM_CHECK_KINDS = ["INCOMING", "STORED"] as const;
+export type RmCheckKind = (typeof RM_CHECK_KINDS)[number];
+
 export type RmTemplateLike = {
   id: string;
   stage?: string | null;
@@ -195,6 +217,8 @@ export type RmTemplateLike = {
   material_family?: string | null;
   supplierId?: string | null;
   supplier_id?: string | null;
+  rmCheckKind?: string | null;
+  rm_check_kind?: string | null;
 };
 
 /**
@@ -215,12 +239,19 @@ export function pickRmTemplate<T extends RmTemplateLike>(
   templates: T[],
   family: RmFamily,
   supplierId?: string | null,
+  kind: RmCheckKind = "INCOMING",
 ): T | null {
+  // A template with no kind is an INCOMING one — every template that existed
+  // before the stored-material check did.
+  const kindOf = (t: T) =>
+    String(t.rmCheckKind ?? t.rm_check_kind ?? "INCOMING").toUpperCase();
   const rm = templates.filter(
-    (t) => (t.stage ?? "RM") === "RM" && (t.active ?? 1) === 1,
+    (t) => (t.stage ?? "RM") === "RM" && (t.active ?? 1) === 1 && kindOf(t) === kind,
   );
   const famOf = (t: T) => String(t.materialFamily ?? t.material_family ?? "").toUpperCase();
   const supOf = (t: T) => String(t.supplierId ?? t.supplier_id ?? "");
+  const defaults =
+    kind === "STORED" ? STORED_FAMILY_DEFAULT_TEMPLATE_ID : RM_FAMILY_DEFAULT_TEMPLATE_ID;
 
   if (supplierId) {
     const bound = rm.find((t) => famOf(t) === family && supOf(t) === supplierId);
@@ -229,12 +260,46 @@ export function pickRmTemplate<T extends RmTemplateLike>(
   const tagged = rm.find((t) => famOf(t) === family && !supOf(t));
   if (tagged) return tagged;
 
-  const byId = rm.find((t) => t.id === RM_FAMILY_DEFAULT_TEMPLATE_ID[family]);
+  const byId = rm.find((t) => t.id === defaults[family]);
   if (byId) return byId;
 
   const general =
     rm.find((t) => famOf(t) === "GENERAL") ??
-    rm.find((t) => t.id === RM_FAMILY_DEFAULT_TEMPLATE_ID.GENERAL) ??
+    rm.find((t) => t.id === defaults.GENERAL) ??
     null;
   return general;
 }
+
+/**
+ * The seeded STORED template id per family (migration 0217).
+ *
+ * Not one per family: what degrades in a rack is not what varies at the
+ * loading bay.
+ *   • SOFA_FOAM and BED_FILLER share one. Incoming they are split because the
+ *     MEASURABLES differ (a stamped density rating vs. GSM and loft); in store
+ *     both fail the same five ways — yellowing, compression set, musty smell,
+ *     surface mould, crumbling cut faces — so one list is five real answers
+ *     instead of two lists of three.
+ *   • ACCESSORIES shares the hardware list: rust, pitting, dried grease.
+ *   • PACKING falls to the general stored list (damp, crushing, vermin), which
+ *     is also the fallback so no issued batch is silently unchecked.
+ */
+export const STORED_FAMILY_DEFAULT_TEMPLATE_ID: Record<RmFamily, string> = {
+  FABRIC: "qct-st-fabric",
+  SOFA_FOAM: "qct-st-foam",
+  BED_FILLER: "qct-st-foam",
+  TIMBER: "qct-st-timber",
+  PLYWOOD: "qct-st-plywood",
+  WEBBING: "qct-st-webbing",
+  MECHANISM: "qct-st-hardware",
+  ACCESSORIES: "qct-st-hardware",
+  PACKING: "qct-st-general",
+  GENERAL: "qct-st-general",
+};
+
+/**
+ * The once-a-day store-condition check. Not per family and not per batch — it
+ * is about the BUILDING and about FIFO being followed, which is what removes
+ * most of the per-family causes at source.
+ */
+export const STORE_CONDITION_TEMPLATE_ID = "qct-st-warehouse";

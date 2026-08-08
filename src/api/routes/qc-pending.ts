@@ -1,9 +1,10 @@
 // ---------------------------------------------------------------------------
 // QC Pending Inspections + Cron Trigger.
 //
-// Generation runs twice a day (12:00 / 16:00 factory local) but the three
-// stages are generated on THREE DIFFERENT RHYTHMS, because the owner's model
-// (2026-08-08) is three different jobs:
+// Generation runs twice a day (12:00 / 16:00 factory local) on FOUR DIFFERENT
+// RHYTHMS, because the owner's model (2026-08-08) is four different jobs. Do
+// not "unify" them: each one fires on a different event and answers a different
+// question.
 //
 //   RM  — ONE INSPECTION PER RECEIPT DAY × SUPPLIER × MATERIAL FAMILY.
 //         "只要有了 GR，可能是一张 PI 或者同一天进来的货，我们只需要检查一次",
@@ -12,6 +13,13 @@
 //         GRNs of one family on one day raise ONE inspection carrying both
 //         receipt numbers, and a GRN confirmed later that day attaches to it
 //         while it is still open. Re-running raises none. See generateRmForGrns.
+//   STORED — DAILY, on the material actually DRAWN for production, however long
+//         it has been in the racks. "可是有一些东西还是要 daily 检查的 … 那天用的
+//         木头有没有发霉？还有海绵，那天用的海绵有没有问题？" IQC fires on a
+//         delivery; this fires on an ISSUE, so it still runs on a day nothing
+//         arrives — which is exactly when stored stock is the risk. It names the
+//         rm_batch and its days-in-store, and draws the OLDEST batches first.
+//         See generateStoredRmChecks.
 //   WIP — TWICE DAILY, gated on the department actually working.
 //         "这个可能需要每天跟进，比如早上一次、下午一次". See stageHadActivity.
 //   FG  — PERIODIC SAMPLING of what was produced, each slot bound to a
@@ -62,6 +70,9 @@ import { ensureQcGenerationSchema } from "../lib/qc-generation-schema";
 import {
   pickRmTemplate,
   rmFamiliesOnReceipt,
+  rmFamilyForLine,
+  STORE_CONDITION_TEMPLATE_ID,
+  type RmCheckKind,
   type RmFamily,
   type RmLineLike,
 } from "../lib/qc-rm-families";
@@ -111,6 +122,12 @@ type InspectionRow = {
   source_receipt_date?: string | null;
   sourceSupplierId?: string | null;
   source_supplier_id?: string | null;
+  rmCheckKind?: string | null;
+  rm_check_kind?: string | null;
+  sourceRmBatchId?: string | null;
+  source_rm_batch_id?: string | null;
+  sourceBatchAgeDays?: number | null;
+  source_batch_age_days?: number | null;
   materialFamily?: string | null;
   material_family?: string | null;
   sourceFgUnitId?: string | null;
@@ -340,6 +357,12 @@ function rowToInspection(r: InspectionRow, items: InspectionItemRow[] = []) {
       return one ? [one] : [];
     })(),
     sourceReceiptDate: r.sourceReceiptDate ?? r.source_receipt_date ?? "",
+    // INCOMING (a goods receipt) vs STORED (a batch drawn for production today).
+    // Both are stage RM; a row with neither is an INCOMING one from before the
+    // stored rhythm existed.
+    rmCheckKind: r.rmCheckKind ?? r.rm_check_kind ?? "",
+    sourceRmBatchId: r.sourceRmBatchId ?? r.source_rm_batch_id ?? "",
+    sourceBatchAgeDays: r.sourceBatchAgeDays ?? r.source_batch_age_days ?? null,
     materialFamily: r.materialFamily ?? r.material_family ?? "",
     sourceFgUnitId: r.sourceFgUnitId ?? r.source_fg_unit_id ?? "",
     soSpec: safeParseJson(r.soSpec ?? r.so_spec ?? "") as Record<string, unknown> | null,
@@ -436,6 +459,9 @@ type PlannedInspection = {
   materialFamily?: string | null;
   sourceFgUnitId?: string | null;
   soSpec?: unknown;
+  rmCheckKind?: RmCheckKind | null;
+  sourceRmBatchId?: string | null;
+  sourceBatchAgeDays?: number | null;
 };
 
 /**
@@ -481,8 +507,9 @@ function buildInspectionStatements(
            inspectionDate, created_at,
            subjectType, subjectId, subjectLabel,
            source_grn_id, source_grn_no, material_family, source_fg_unit_id, so_spec,
-           source_grn_ids, source_grn_nos, source_receipt_date, source_supplier_id
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'SCHEDULED', ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           source_grn_ids, source_grn_nos, source_receipt_date, source_supplier_id,
+           rm_check_kind, source_rm_batch_id, source_batch_age_days
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'SCHEDULED', ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         inspId,
@@ -507,6 +534,9 @@ function buildInspectionStatements(
         plan.sourceGrnNos?.length ? JSON.stringify(plan.sourceGrnNos) : null,
         plan.sourceReceiptDate ?? null,
         plan.sourceSupplierId ?? null,
+        plan.rmCheckKind ?? null,
+        plan.sourceRmBatchId ?? null,
+        plan.sourceBatchAgeDays ?? null,
       ),
   ];
 
@@ -873,6 +903,7 @@ export async function generateRmForGrns(
           sourceReceiptDate: batch.day,
           sourceSupplierId: batch.supplierId || null,
           materialFamily: batch.family,
+          rmCheckKind: "INCOMING",
         },
         tplItems,
         slotIso,
@@ -884,6 +915,287 @@ export async function generateRmForGrns(
   }
 
   return { stmts, created, attached, skipped, receipts: receipts.length, noTemplate };
+}
+
+// --- STORED: the material being USED today, however long it has been here ---
+//
+// Owner 2026-08-08, after seeing the incoming work: "所以基本上就是有货到他才有
+// 工作，没有货到他就没有工作，这个是 RM 管理和到货检查。可是有一些东西还是要
+// daily 检查的，以确保那些货物没有问题。例如我们讲的木头，那天用的木头有没有
+// 发霉？还有海绵，那天用的海绵有没有问题？"
+//
+// He is right, and it is a gap rather than a refinement: everything above is
+// INCOMING. No delivery, no inspection — while the timber that passed at 12%
+// moisture in June sits in a Malaysian warehouse through the monsoon and is
+// mouldy in August. Foam yellows and takes a compression set under its own
+// stack. Fabric mildews on the roll ends. Hardware rusts.
+//
+// THE TRIGGER IS THE ISSUE, NOT THE RACK. The check fires on material DRAWN for
+// production today (`cost_ledger` RM_ISSUE, which names the exact
+// `rm_batches` row FIFO consumed). That is what makes it work on a day with no
+// deliveries, and it puts the check on the batch that is about to be built into
+// a customer's sofa rather than on whatever the inspector happens to walk past.
+//
+// IT NAMES THE BATCH AND ITS AGE. "Is the foam OK" is unanswerable; "is batch
+// rmb-…, received 2026-04-02, 128 days in store, OK" is a twenty-second job.
+// Where the batch came from a goods receipt its GRN is carried too, so a
+// storage finding walks straight back to the delivery it arrived on.
+//
+// AGE IS THE DRAW. Every batch issued today is a candidate; the OLDEST are
+// drawn first, capped per family per day, because a batch drawn a week after
+// arrival needs a glance and one drawn after four months is the entire point.
+const STORED_ISSUE_TYPE = "RM_ISSUE";
+
+/**
+ * How many batches per material family per day get a stored-material check.
+ *
+ * Two, not all of them. A day that issues nine timber batches does not need
+ * nine identical checklists — it needs the two that have been in the racks
+ * longest. The floor is 1: anything issued of a family gets looked at.
+ */
+export const STORED_SAMPLE_PER_FAMILY = 2;
+
+type IssuedBatchRow = {
+  batchId: string;
+  rmId: string | null;
+  receivedDate: string | null;
+  batchSource: string | null;
+  batchSourceRefId: string | null;
+  itemCode: string | null;
+  itemName: string | null;
+  itemGroup: string | null;
+};
+
+/** Whole days between a batch's arrival and the day it was drawn. */
+export function daysInStore(receivedDate: string | null | undefined, onDate: string): number {
+  const from = Date.parse(`${String(receivedDate ?? "").slice(0, 10)}T00:00:00.000Z`);
+  const to = Date.parse(`${onDate}T00:00:00.000Z`);
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return 0;
+  return Math.max(0, Math.round((to - from) / 86_400_000));
+}
+
+export async function generateStoredRmChecks(
+  db: D1Database,
+  slotIso: string,
+  slotDate: string,
+  templates: TemplateRow[],
+  tplItems: TemplateItemRow[],
+  nextInspectionNo: () => string,
+): Promise<{
+  stmts: D1PreparedStatement[];
+  created: number;
+  skipped: number;
+  batchesIssued: number;
+  oldestDays: number;
+}> {
+  const empty = {
+    stmts: [] as D1PreparedStatement[],
+    created: 0,
+    skipped: 0,
+    batchesIssued: 0,
+    oldestDays: 0,
+  };
+  const rmTemplates = templates.filter((t) => t.stage === "RM");
+  if (rmTemplates.length === 0) return empty;
+
+  // cost_ledger.date is written as a full ISO stamp in some paths and a plain
+  // date in others; these bounds compare correctly against both as strings.
+  const dayFrom = slotDate;
+  const dayTo = `${slotDate}T23:59:59.999Z`;
+
+  let issued: IssuedBatchRow[];
+  try {
+    const res = await db
+      .prepare(
+        `SELECT cl.batchId AS "batchId",
+                b.rmId AS "rmId",
+                b.receivedDate AS "receivedDate",
+                b.source AS "batchSource",
+                b.sourceRefId AS "batchSourceRefId",
+                rmat.itemCode AS "itemCode",
+                rmat.itemName AS "itemName",
+                rmat.itemGroup AS "itemGroup"
+           FROM cost_ledger cl
+           INNER JOIN rm_batches b ON b.id = cl.batchId
+           INNER JOIN raw_materials rmat ON rmat.id = b.rmId
+          WHERE cl.type = '${STORED_ISSUE_TYPE}'
+            AND cl.batchId IS NOT NULL
+            AND cl.date >= ? AND cl.date <= ?
+          GROUP BY cl.batchId, b.rmId, b.receivedDate, b.source, b.sourceRefId,
+                   rmat.itemCode, rmat.itemName, rmat.itemGroup`,
+      )
+      .bind(dayFrom, dayTo)
+      .all<IssuedBatchRow>();
+    issued = res.results ?? [];
+  } catch (err) {
+    // Nothing to fail open TO: without the issue list there is no batch to
+    // name, and naming no batch is what made the old RM slot useless. Log
+    // loudly, let the other rhythms generate.
+    console.error("[qc-pending] stored-material issue scan failed — no STORED slots this run", {
+      slotDate,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return empty;
+  }
+  if (issued.length === 0) return empty;
+
+  // What has already been raised for this day — batch-level so a re-run and the
+  // second slot add nothing, family-level so the per-family cap holds across
+  // both slots rather than being spent twice.
+  const doneBatches = new Set<string>();
+  const perFamilyDone = new Map<string, number>();
+  let storeConditionDone = false;
+  try {
+    const done = await db
+      .prepare(
+        `SELECT source_rm_batch_id AS "batchId",
+                material_family AS "materialFamily",
+                templateId AS "templateId"
+           FROM qc_inspections
+          WHERE rm_check_kind = 'STORED' AND inspectionDate = ?`,
+      )
+      .bind(slotDate)
+      .all<{ batchId: string | null; materialFamily: string | null; templateId: string | null }>();
+    for (const r of done.results ?? []) {
+      if (r.templateId === STORE_CONDITION_TEMPLATE_ID) {
+        storeConditionDone = true;
+        continue;
+      }
+      if (r.batchId) doneBatches.add(r.batchId);
+      const fam = r.materialFamily ?? "";
+      perFamilyDone.set(fam, (perFamilyDone.get(fam) ?? 0) + 1);
+    }
+  } catch (err) {
+    console.warn("[qc-pending] stored-material already-checked lookup failed", err);
+  }
+
+  // The goods receipt each batch arrived on, so a storage finding walks back to
+  // the delivery. Best-effort: a batch from OPENING or an ADJUSTMENT has none.
+  const grnIds = [
+    ...new Set(
+      issued
+        .filter((b) => b.batchSource === "GRN" && b.batchSourceRefId)
+        .map((b) => b.batchSourceRefId as string),
+    ),
+  ];
+  const grnNoById = new Map<string, string>();
+  if (grnIds.length) {
+    try {
+      const gh = grnIds.map(() => "?").join(",");
+      const res = await db
+        .prepare(`SELECT id AS "id", grnNumber AS "grnNumber" FROM grns WHERE id IN (${gh})`)
+        .bind(...grnIds)
+        .all<{ id: string; grnNumber: string | null }>();
+      for (const r of res.results ?? []) if (r.grnNumber) grnNoById.set(r.id, r.grnNumber);
+    } catch (err) {
+      console.warn("[qc-pending] stored-material GRN lookup failed", err);
+    }
+  }
+
+  // OLDEST FIRST. That is the whole draw rule, and it is deliberately not
+  // random: age is the signal, and a random draw over a rack that is mostly
+  // fresh stock spends the day's check on the batch that arrived on Tuesday.
+  const candidates = issued
+    .map((b) => ({ ...b, ageDays: daysInStore(b.receivedDate, slotDate) }))
+    .sort((a, b) => b.ageDays - a.ageDays || a.batchId.localeCompare(b.batchId));
+
+  const stmts: D1PreparedStatement[] = [];
+  let created = 0;
+  let skipped = 0;
+
+  for (const batch of candidates) {
+    const family = rmFamilyForLine({
+      itemGroup: batch.itemGroup,
+      materialCode: batch.itemCode,
+      materialName: batch.itemName,
+    });
+    if (doneBatches.has(batch.batchId)) {
+      skipped++;
+      continue;
+    }
+    if ((perFamilyDone.get(family) ?? 0) >= STORED_SAMPLE_PER_FAMILY) {
+      skipped++;
+      continue;
+    }
+    const tpl = pickRmTemplate(rmTemplates, family, null, "STORED");
+    if (!tpl) {
+      skipped++;
+      continue;
+    }
+    doneBatches.add(batch.batchId);
+    perFamilyDone.set(family, (perFamilyDone.get(family) ?? 0) + 1);
+
+    const grnNo = batch.batchSourceRefId ? grnNoById.get(batch.batchSourceRefId) : undefined;
+    const label = [
+      batch.itemCode ?? batch.rmId ?? batch.batchId,
+      batch.itemName,
+      `received ${String(batch.receivedDate ?? "?").slice(0, 10)}`,
+      `${batch.ageDays}d in store`,
+      grnNo,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+
+    stmts.push(
+      ...buildInspectionStatements(
+        db,
+        {
+          tpl,
+          subjectType: "RM_BATCH",
+          subjectId: batch.batchId,
+          subjectLabel: label,
+          materialFamily: family,
+          rmCheckKind: "STORED",
+          sourceRmBatchId: batch.batchId,
+          sourceBatchAgeDays: batch.ageDays,
+          // The batch's OWN arrival date, which is what "how long has this been
+          // sitting here" is measured from.
+          sourceReceiptDate: String(batch.receivedDate ?? "").slice(0, 10) || null,
+          sourceGrnId: batch.batchSource === "GRN" ? batch.batchSourceRefId : null,
+          sourceGrnNo: grnNo ?? null,
+        },
+        tplItems,
+        slotIso,
+        slotDate,
+        nextInspectionNo(),
+      ),
+    );
+    created++;
+  }
+
+  // The store-condition check: once a day, not per family and not per batch. It
+  // is about the BUILDING and about FIFO being followed, which is what removes
+  // most of the per-family causes at source.
+  const storeTpl = rmTemplates.find((t) => t.id === STORE_CONDITION_TEMPLATE_ID);
+  if (storeTpl && !storeConditionDone) {
+    stmts.push(
+      ...buildInspectionStatements(
+        db,
+        {
+          tpl: storeTpl,
+          subjectType: "RM_BATCH",
+          subjectId: `store-${slotDate}`,
+          subjectLabel: `Raw material store — condition on ${slotDate}`,
+          rmCheckKind: "STORED",
+        },
+        tplItems,
+        slotIso,
+        slotDate,
+        nextInspectionNo(),
+      ),
+    );
+    created++;
+  } else if (storeTpl) {
+    skipped++;
+  }
+
+  return {
+    stmts,
+    created,
+    skipped,
+    batchesIssued: issued.length,
+    oldestDays: candidates[0]?.ageDays ?? 0,
+  };
 }
 
 // --- FG: periodic sampling, bound to a unit and its sales order ------------
@@ -1081,6 +1393,11 @@ export type GenerateResult = {
   rmAttached: number;
   rmReceipts: number;
   rmNoTemplate: number;
+  /** STORED — the daily check on material actually drawn for production. */
+  storedCreated: number;
+  storedBatchesIssued: number;
+  /** Age of the oldest batch drawn today, in days. "created 0" vs "nothing old". */
+  storedOldestDays: number;
   fgCreated: number;
   fgUnits: number;
   fgUnresolved: number;
@@ -1165,6 +1482,12 @@ export async function generatePendingForSlot(
   created += rm.created;
   skipped += rm.skipped;
 
+  // --- STORED: the material actually drawn for production today ---------------
+  const stored = await generateStoredRmChecks(db, slotIso, slotDate, templates, tplItems, nextInspectionNo);
+  stmts.push(...stored.stmts);
+  created += stored.created;
+  skipped += stored.skipped;
+
   // --- FG: sampled share of what was produced ---------------------------------
   const fg = await generateFgSamples(
     db,
@@ -1188,6 +1511,9 @@ export async function generatePendingForSlot(
     rmAttached: rm.attached,
     rmReceipts: rm.receipts,
     rmNoTemplate: rm.noTemplate,
+    storedCreated: stored.created,
+    storedBatchesIssued: stored.batchesIssued,
+    storedOldestDays: stored.oldestDays,
     fgCreated: fg.created,
     fgUnits: fg.units,
     fgUnresolved: fg.unresolved,

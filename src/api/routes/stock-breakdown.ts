@@ -179,20 +179,28 @@ app.get("/breakdown", async (c) => {
 
   const orgId = getOrgId(c);
 
+  // Now that a ROW CLICK opens this drawer, a miss is something an operator can
+  // hit by accident on any grid row — most often a row the FG or WIP grid
+  // derives from a production order, which has no catalogue record behind it.
+  // "Not found" would read as a fault; the panel renders this verbatim instead.
+  const NOT_FOUND =
+    "No catalogue item matches this row, so there is no stock ledger to read. " +
+    "Rows derived from production orders have no item record of their own.";
+
   if (type === "RM") {
     const data = await buildRmBreakdown(c, orgId, itemId);
-    if (!data) return c.json({ success: false, error: "Not found" }, 404);
+    if (!data) return c.json({ success: false, error: NOT_FOUND }, 404);
     return c.json({ success: true, data });
   }
 
   if (type === "FG") {
     const data = await buildFgBreakdown(c, orgId, itemId);
-    if (!data) return c.json({ success: false, error: "Not found" }, 404);
+    if (!data) return c.json({ success: false, error: NOT_FOUND }, 404);
     return c.json({ success: true, data });
   }
 
   const data = await buildWipBreakdown(c, orgId, itemId);
-  if (!data) return c.json({ success: false, error: "Not found" }, 404);
+  if (!data) return c.json({ success: false, error: NOT_FOUND }, 404);
   return c.json({ success: true, data });
 });
 

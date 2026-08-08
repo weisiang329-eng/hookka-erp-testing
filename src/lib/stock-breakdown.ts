@@ -219,6 +219,140 @@ export interface StockBreakdown {
 }
 
 // ---------------------------------------------------------------------------
+// What a grid row opens
+// ---------------------------------------------------------------------------
+
+/**
+ * The item the drawer is opened for. Built from a grid row by one of the three
+ * functions below rather than inline at the call site, so the mapping from a
+ * row to the thing that gets fetched is a testable fact and not a detail buried
+ * in a click handler.
+ */
+export interface StockBreakdownTarget {
+  type: StockItemType;
+  itemId: string;
+  /** Shown in the header while the fetch is in flight. */
+  code: string;
+  name?: string;
+}
+
+/**
+ * The breakdown is keyed on the PRODUCT id. Off-catalog rows the FG grid
+ * synthesises from finished production orders carry an `fg-dyn-*` id that no
+ * product row matches, so they have nothing to open — the id is left alone and
+ * the endpoint says so, rather than guessing at a neighbouring product.
+ */
+export function fgBreakdownTarget(row: {
+  id: string;
+  code: string;
+  name?: string | null;
+}): StockBreakdownTarget {
+  return { type: "FG", itemId: row.id, code: row.code, name: row.name ?? undefined };
+}
+
+/**
+ * The WIP CODE, not the row id: the grid's id is a synthetic `wip-dyn-*` /
+ * `wip-rebuild-*` key, while the code is what `job_cards.wipLabel` joins on and
+ * is the only handle that reaches the ledger. The endpoint accepts either.
+ */
+export function wipBreakdownTarget(row: {
+  wipCode: string;
+  relatedProduct?: string | null;
+}): StockBreakdownTarget {
+  return {
+    type: "WIP",
+    itemId: row.wipCode,
+    code: row.wipCode,
+    name: row.relatedProduct ?? undefined,
+  };
+}
+
+export function rmBreakdownTarget(row: {
+  id: string;
+  itemCode: string;
+  description?: string | null;
+}): StockBreakdownTarget {
+  return {
+    type: "RM",
+    itemId: row.id,
+    code: row.itemCode,
+    name: row.description ?? undefined,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Panel sections
+// ---------------------------------------------------------------------------
+
+/** The two collapsible sections at the foot of the panel. */
+export type BreakdownSection = "movements" | "cogs";
+
+export type BreakdownSections = Record<BreakdownSection, boolean>;
+
+/** Both open on arrival: the panel is a report, not a menu of reports. */
+export const DEFAULT_BREAKDOWN_SECTIONS: BreakdownSections = {
+  movements: true,
+  cogs: true,
+};
+
+/**
+ * Toggle one section. The sections are INDEPENDENT — no accordion — so closing
+ * Movements must leave COGS exactly as it was, and vice versa.
+ *
+ * State is which sections are open; it is never a cache of what was rendered.
+ * A section that is closed and reopened rebuilds from the same response, so
+ * collapsing one can never permanently lose the other's content — or its own.
+ */
+export function toggleBreakdownSection(
+  state: BreakdownSections,
+  clicked: BreakdownSection,
+): BreakdownSections {
+  return { ...state, [clicked]: !state[clicked] };
+}
+
+// ---------------------------------------------------------------------------
+// The honesty notices
+// ---------------------------------------------------------------------------
+
+export interface PanelNotice {
+  key: "qty" | "reconciliation" | "ledger" | "valuation";
+  tone: "warn" | "info";
+  text: string;
+}
+
+/**
+ * Every plain-English notice this header carries, in the order the panel shows
+ * them. This exists as a function so a restyle cannot quietly drop one: the
+ * panel maps over whatever comes back, and a test asserts that a header whose
+ * figures disagree still produces the notice that says so.
+ *
+ * A prettier panel that loses a warning is a worse panel.
+ */
+export function panelNotices(
+  header: Pick<
+    StockBreakdownHeader,
+    "qtyNote" | "reconciliation" | "ledgerVsOnHand" | "valuationNote"
+  >,
+): PanelNotice[] {
+  const out: PanelNotice[] = [];
+  if (header.qtyNote) out.push({ key: "qty", tone: "info", text: header.qtyNote });
+  if (header.reconciliation?.notice) {
+    out.push({ key: "reconciliation", tone: "warn", text: header.reconciliation.notice });
+  }
+  if (header.ledgerVsOnHand?.note) {
+    out.push({
+      key: "ledger",
+      tone: header.ledgerVsOnHand.agrees ? "info" : "warn",
+      text: header.ledgerVsOnHand.note,
+    });
+  }
+  if (header.valuationNote) {
+    out.push({ key: "valuation", tone: "warn", text: header.valuationNote });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Reconciliation — can this ledger produce a balance at all?
 // ---------------------------------------------------------------------------
 

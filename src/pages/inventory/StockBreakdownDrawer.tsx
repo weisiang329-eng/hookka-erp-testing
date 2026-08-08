@@ -24,16 +24,33 @@
 // ---------------------------------------------------------------------------
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { X, Package, ArrowDownToLine, ArrowUpFromLine, AlertTriangle, Info } from "lucide-react";
+import {
+  X,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  AlertTriangle,
+  Info,
+  ChevronDown,
+  ChevronRight,
+} from "lucide-react";
 import { formatCurrency } from "@/lib/utils";
+import {
+  DEFAULT_BREAKDOWN_SECTIONS,
+  panelNotices,
+  toggleBreakdownSection,
+} from "@/lib/stock-breakdown";
 import type {
+  BreakdownSection,
+  BreakdownSections,
   FgLot,
   RmLot,
   StockBreakdown,
-  StockItemType,
+  StockBreakdownTarget,
   StockMovement,
   WipLot,
 } from "@/lib/stock-breakdown";
+
+export type { StockBreakdownTarget };
 
 // ---------------------------------------------------------------------------
 // Shared cells
@@ -99,41 +116,109 @@ function DocLink({
   );
 }
 
-function Section({
-  title,
-  subtitle,
-  count,
-  children,
-}: {
-  title: string;
-  subtitle?: string;
-  count?: number;
-  children: React.ReactNode;
-}) {
+/**
+ * A section heading: brass left accent bar, one uppercase line, the count and
+ * the explanation inline. The whole hierarchy of the panel is carried by this
+ * one shape, so a heading never needs a box of its own.
+ */
+const EYEBROW =
+  "pl-2 border-l-[3px] border-[#6B5C32] text-[12px] font-extrabold uppercase " +
+  "tracking-[0.06em] text-[#4A3F22] leading-tight";
+
+function Eyebrow({ children }: { children: React.ReactNode }) {
+  return <p className={`m-0 ${EYEBROW}`}>{children}</p>;
+}
+
+/** The white bordered card every table sits in; wide tables scroll inside it. */
+function TableCard({ children }: { children: React.ReactNode }) {
   return (
-    <section className="border border-[#E2DDD8] rounded-lg bg-white">
-      <header className="px-4 py-2.5 border-b border-[#E2DDD8]">
-        <div className="flex items-baseline gap-2">
-          <h3 className="text-sm font-semibold text-[#1F1D1B]">{title}</h3>
-          {count !== undefined && (
-            <span className="text-xs text-[#6B7280] tabular-nums">({count})</span>
-          )}
-        </div>
-        {subtitle && (
-          <p className="text-[11px] uppercase tracking-wide text-[#9C6F1E] mt-0.5">
-            {subtitle}
-          </p>
-        )}
-      </header>
-      <div className="overflow-x-auto">{children}</div>
-    </section>
+    <div className="mt-2 rounded-md border border-[#E2DDD8] bg-white overflow-x-auto">
+      {children}
+    </div>
   );
 }
 
-const TH = "px-3 py-2 text-left font-medium text-[#6B7280] whitespace-nowrap";
+/** A collapsible section's heading. Same eyebrow, plus a chevron. */
+function SectionToggle({
+  open,
+  onClick,
+  children,
+}: {
+  open: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-expanded={open}
+      className="bg-transparent border-0 p-0 text-left cursor-pointer"
+    >
+      <span className={`inline-flex items-center gap-1 ${EYEBROW}`}>
+        {open ? (
+          <ChevronDown className="h-3 w-3" strokeWidth={2.5} />
+        ) : (
+          <ChevronRight className="h-3 w-3" strokeWidth={2.5} />
+        )}
+        {children}
+      </span>
+    </button>
+  );
+}
+
+const TH =
+  "px-3 py-2 text-left text-[10px] font-bold uppercase tracking-[0.14em] " +
+  "text-[#1F1D1B] whitespace-nowrap";
 const THR = `${TH} text-right`;
 const TD = "px-3 py-1.5 text-[#1F1D1B] whitespace-nowrap";
 const TDR = `${TD} text-right`;
+
+/** IN / OUT pill — the movement's direction, said once per row. */
+function DirectionPill({ direction }: { direction: "IN" | "OUT" }) {
+  return (
+    <span
+      className={`inline-flex items-center rounded-full px-2 py-px text-[10px] font-semibold uppercase tracking-[0.08em] ${
+        direction === "IN"
+          ? "bg-[#2F8A5B]/12 text-[#2F8A5B]"
+          : "bg-[#B23A3A]/10 text-[#B23A3A]"
+      }`}
+    >
+      {direction}
+    </span>
+  );
+}
+
+/** Signed quantity — a movement's sign is part of the number, not the column. */
+function SignedQty({ m }: { m: StockMovement }) {
+  if (m.qty === null || m.qty === undefined) return <Dash />;
+  const sign = m.direction === "IN" ? "+" : "−";
+  return (
+    <span
+      className={`tabular-nums ${m.direction === "IN" ? "text-[#2F8A5B]" : "text-[#B23A3A]"}`}
+    >
+      {sign}
+      {Math.abs(m.qty)}
+    </span>
+  );
+}
+
+/**
+ * Free-text notes, shown only where there is something to show. A column of em
+ * dashes is worse than no column: it reads as "nothing was noted" when the
+ * truth is that this kind of movement never carries a note.
+ */
+function hasNotes(rows: StockMovement[]): boolean {
+  return rows.some((r) => Boolean(r.notes));
+}
+
+function NotesCell({ value }: { value: string | null | undefined }) {
+  return (
+    <span className="text-[#6B7280]" title={value ?? ""}>
+      <Txt value={value} />
+    </span>
+  );
+}
 
 function EmptyRow({ span, message }: { span: number; message: string }) {
   return (
@@ -185,12 +270,14 @@ function Stat({
   title?: string;
 }) {
   return (
-    <div className="border border-[#E2DDD8] rounded-lg px-3 py-2 bg-white" title={title}>
-      <p className="text-[11px] text-[#6B7280]">{label}</p>
-      <p className="text-lg font-semibold text-[#1F1D1B] tabular-nums leading-tight">
+    <div className="border border-[#E2DDD8] rounded-lg px-4 py-3 bg-white" title={title}>
+      <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-[#6B7280]">
+        {label}
+      </p>
+      <p className="mt-1 text-[22px] font-bold text-[#1F1D1B] tabular-nums leading-tight">
         {value}
       </p>
-      {sub && <p className="text-[11px] text-[#6B7280] tabular-nums">{sub}</p>}
+      {sub && <p className="mt-0.5 text-[11px] text-[#6B7280] tabular-nums">{sub}</p>}
     </div>
   );
 }
@@ -205,17 +292,20 @@ function RmLotsTable({
   lots: RmLot[];
   onNavigate: (href: string) => void;
 }) {
+  // No warehouse column: `rm_batches` has no location and there is no
+  // warehouses table, so the column Houzs leads with would be an em dash on
+  // every row of every material. An always-empty column reads as missing data
+  // rather than as a dimension this system does not have.
+  const subtotalSen = lots.reduce((s, l) => s + (l.valueSen ?? 0), 0);
   return (
     <table className="w-full text-xs">
       <thead className="bg-[#FAF8F5]">
         <tr>
-          <th className={TH}>Warehouse</th>
           <th className={TH}>Attributes</th>
           <th className={THR}>Qty</th>
           <th className={THR}>Unit cost</th>
           <th className={THR}>Value</th>
           <th className={TH}>Source</th>
-          <th className={TH}>Purchase order</th>
           <th className={TH}>Supplier</th>
           <th className={TH}>Received</th>
           <th className={THR}>Age</th>
@@ -223,11 +313,10 @@ function RmLotsTable({
       </thead>
       <tbody className="divide-y divide-[#F0EDE9]">
         {lots.length === 0 && (
-          <EmptyRow span={10} message="No stock lots for this material." />
+          <EmptyRow span={8} message="No stock lots for this material." />
         )}
         {lots.map((l) => (
           <tr key={l.id} className={l.qty <= 0 ? "opacity-60" : undefined}>
-            <td className={TD}><Txt value={l.warehouse} /></td>
             <td className={`${TD} max-w-[220px] truncate`} title={l.attributes ?? ""}>
               <Txt value={l.attributes} />
             </td>
@@ -239,16 +328,22 @@ function RmLotsTable({
             </td>
             <td className={TDR}><Money value={l.unitCostSen} /></td>
             <td className={TDR}><Money value={l.valueSen} /></td>
-            <td className={TD}>
+            {/* SOURCE is two lines: the receipt on top, the PO it came from
+                underneath. They are one fact — where this lot came in — and
+                reading them as one cell is how the warehouse thinks of it. */}
+            <td className={`${TD} align-top`}>
               <span className="text-[#6B7280] mr-1">{l.source}</span>
               <DocLink no={l.grnNo} href={l.grnHref} onNavigate={onNavigate} />
-            </td>
-            <td className={TD}>
-              <DocLink
-                no={l.purchaseOrderNo}
-                href={l.purchaseOrderHref}
-                onNavigate={onNavigate}
-              />
+              {l.purchaseOrderNo && (
+                <span className="block mt-px text-[11px] text-[#9CA3AF]">
+                  from{" "}
+                  <DocLink
+                    no={l.purchaseOrderNo}
+                    href={l.purchaseOrderHref}
+                    onNavigate={onNavigate}
+                  />
+                </span>
+              )}
             </td>
             <td className={`${TD} max-w-[180px] truncate`} title={l.supplierName ?? ""}>
               <Txt value={l.supplierName} />
@@ -259,6 +354,15 @@ function RmLotsTable({
             </td>
           </tr>
         ))}
+        {lots.length > 0 && (
+          <tr className="bg-[#FAF8F5]">
+            <td colSpan={3} className={`${TDR} font-semibold`}>Value subtotal</td>
+            <td className={`${TDR} font-bold`}>
+              <Money value={subtotalSen} />
+            </td>
+            <td colSpan={4} />
+          </tr>
+        )}
       </tbody>
     </table>
   );
@@ -335,6 +439,19 @@ function FgLotsTable({
             </td>
           </tr>
         ))}
+        {/* A finished-goods piece IS its own layer, so the piece's unit cost is
+            its value and the subtotal of the column is the shelf's value — the
+            same figure the header shows. Pieces with no cost contribute
+            nothing, which the valuation notice above states outright. */}
+        {lots.length > 0 && (
+          <tr className="bg-[#FAF8F5]">
+            <td colSpan={2} className={`${TDR} font-semibold`}>Value subtotal</td>
+            <td className={`${TDR} font-bold`}>
+              <Money value={lots.reduce((s, l) => s + (l.valueSen ?? 0), 0)} />
+            </td>
+            <td colSpan={6} />
+          </tr>
+        )}
       </tbody>
     </table>
   );
@@ -436,25 +553,31 @@ function RmInTable({
   rows: StockMovement[];
   onNavigate: (href: string) => void;
 }) {
+  const notes = hasNotes(rows);
   return (
     <table className="w-full text-xs">
       <thead className="bg-[#F3F7F3]">
         <tr>
           <th className={TH}>Date</th>
+          <th className={TH}>Type</th>
           <th className={TH}>GR no</th>
           <th className={TH}>Supplier</th>
           <th className={TH}>PO no</th>
           <th className={THR}>Qty</th>
           <th className={THR}>Unit cost</th>
           <th className={THR}>Value</th>
-          <th className={THR}>Balance</th>
+          <th className={THR}>Running</th>
+          {notes && <th className={TH}>Notes</th>}
         </tr>
       </thead>
       <tbody className="divide-y divide-[#F0EDE9]">
-        {rows.length === 0 && <EmptyRow span={8} message="No inbound movements." />}
+        {rows.length === 0 && (
+          <EmptyRow span={notes ? 10 : 9} message="No inbound movements." />
+        )}
         {rows.map((m) => (
           <tr key={m.id}>
             <td className={TD}><DateCell value={m.date} /></td>
+            <td className={TD}><DirectionPill direction={m.direction} /></td>
             <td className={TD}>
               <DocLink no={m.docNo} href={m.docHref} onNavigate={onNavigate} />
             </td>
@@ -468,10 +591,15 @@ function RmInTable({
                 onNavigate={onNavigate}
               />
             </td>
-            <td className={TDR}><Qty value={m.qty} /></td>
+            <td className={TDR}><SignedQty m={m} /></td>
             <td className={TDR}><Money value={m.unitCostSen} /></td>
             <td className={TDR}><Money value={m.totalCostSen} /></td>
             <td className={TDR}><BalanceCell m={m} /></td>
+            {notes && (
+              <td className={`${TD} max-w-[220px] truncate`}>
+                <NotesCell value={m.notes} />
+              </td>
+            )}
           </tr>
         ))}
       </tbody>
@@ -486,25 +614,31 @@ function RmOutTable({
   rows: StockMovement[];
   onNavigate: (href: string) => void;
 }) {
+  const notes = hasNotes(rows);
   return (
     <table className="w-full text-xs">
       <thead className="bg-[#FBF3F2]">
         <tr>
           <th className={TH}>Date</th>
+          <th className={TH}>Type</th>
           <th className={TH}>Production order</th>
           <th className={TH}>Department</th>
           <th className={TH}>Taken by</th>
           <th className={TH}>Job card</th>
           <th className={THR}>Qty</th>
           <th className={THR}>Cost</th>
-          <th className={THR}>Balance</th>
+          <th className={THR}>Running</th>
+          {notes && <th className={TH}>Notes</th>}
         </tr>
       </thead>
       <tbody className="divide-y divide-[#F0EDE9]">
-        {rows.length === 0 && <EmptyRow span={8} message="No outbound movements." />}
+        {rows.length === 0 && (
+          <EmptyRow span={notes ? 10 : 9} message="No outbound movements." />
+        )}
         {rows.map((m) => (
           <tr key={m.id}>
             <td className={TD}><DateCell value={m.date} /></td>
+            <td className={TD}><DirectionPill direction={m.direction} /></td>
             <td className={TD}>
               <DocLink
                 no={m.productionOrderNo ?? m.docNo}
@@ -517,9 +651,14 @@ function RmOutTable({
             <td className={TD}>
               <DocLink no={m.jobCardNo} href={m.jobCardHref} onNavigate={onNavigate} />
             </td>
-            <td className={TDR}><Qty value={m.qty} /></td>
+            <td className={TDR}><SignedQty m={m} /></td>
             <td className={TDR}><Money value={m.totalCostSen} /></td>
             <td className={TDR}><BalanceCell m={m} /></td>
+            {notes && (
+              <td className={`${TD} max-w-[220px] truncate`}>
+                <NotesCell value={m.notes} />
+              </td>
+            )}
           </tr>
         ))}
       </tbody>
@@ -534,24 +673,30 @@ function FgInTable({
   rows: StockMovement[];
   onNavigate: (href: string) => void;
 }) {
+  const notes = hasNotes(rows);
   return (
     <table className="w-full text-xs">
       <thead className="bg-[#F3F7F3]">
         <tr>
           <th className={TH}>Date</th>
+          <th className={TH}>Type</th>
           <th className={TH}>Production order</th>
           <th className={TH}>Sales order</th>
           <th className={TH}>Customer</th>
           <th className={THR}>Qty</th>
           <th className={THR}>Unit cost</th>
-          <th className={THR}>Balance</th>
+          <th className={THR}>Running</th>
+          {notes && <th className={TH}>Notes</th>}
         </tr>
       </thead>
       <tbody className="divide-y divide-[#F0EDE9]">
-        {rows.length === 0 && <EmptyRow span={7} message="No inbound movements." />}
+        {rows.length === 0 && (
+          <EmptyRow span={notes ? 9 : 8} message="No inbound movements." />
+        )}
         {rows.map((m) => (
           <tr key={m.id}>
             <td className={TD}><DateCell value={m.date} /></td>
+            <td className={TD}><DirectionPill direction={m.direction} /></td>
             <td className={TD}>
               <DocLink
                 no={m.productionOrderNo ?? m.docNo}
@@ -565,9 +710,14 @@ function FgInTable({
             <td className={`${TD} max-w-[180px] truncate`} title={m.customerName ?? ""}>
               <Txt value={m.customerName} />
             </td>
-            <td className={TDR}><Qty value={m.qty} /></td>
+            <td className={TDR}><SignedQty m={m} /></td>
             <td className={TDR}><Money value={m.unitCostSen} /></td>
             <td className={TDR}><BalanceCell m={m} /></td>
+            {notes && (
+              <td className={`${TD} max-w-[220px] truncate`}>
+                <NotesCell value={m.notes} />
+              </td>
+            )}
           </tr>
         ))}
       </tbody>
@@ -599,24 +749,30 @@ function FgOutTable({
   rows: StockMovement[];
   onNavigate: (href: string) => void;
 }) {
+  const notes = hasNotes(rows);
   return (
     <table className="w-full text-xs">
       <thead className="bg-[#FBF3F2]">
         <tr>
           <th className={TH}>Date</th>
+          <th className={TH}>Type</th>
           <th className={TH}>DO no</th>
           <th className={TH}>Sales order</th>
           <th className={TH}>Customer</th>
           <th className={THR}>Qty</th>
           <th className={TH}>Unit serials</th>
-          <th className={THR}>Balance</th>
+          <th className={THR}>Running</th>
+          {notes && <th className={TH}>Notes</th>}
         </tr>
       </thead>
       <tbody className="divide-y divide-[#F0EDE9]">
-        {rows.length === 0 && <EmptyRow span={7} message="No outbound movements." />}
+        {rows.length === 0 && (
+          <EmptyRow span={notes ? 9 : 8} message="No outbound movements." />
+        )}
         {rows.map((m) => (
           <tr key={m.id}>
             <td className={TD}><DateCell value={m.date} /></td>
+            <td className={TD}><DirectionPill direction={m.direction} /></td>
             <td className={TD}>
               <DocLink no={m.docNo} href={m.docHref} onNavigate={onNavigate} />
             </td>
@@ -626,11 +782,16 @@ function FgOutTable({
             <td className={`${TD} max-w-[180px] truncate`} title={m.customerName ?? ""}>
               <Txt value={m.customerName} />
             </td>
-            <td className={TDR}><Qty value={m.qty} /></td>
+            <td className={TDR}><SignedQty m={m} /></td>
             <td className={`${TD} max-w-[280px] truncate`}>
               <Serials serials={m.unitSerials} />
             </td>
             <td className={TDR}><BalanceCell m={m} /></td>
+            {notes && (
+              <td className={`${TD} max-w-[220px] truncate`}>
+                <NotesCell value={m.notes} />
+              </td>
+            )}
           </tr>
         ))}
       </tbody>
@@ -654,6 +815,7 @@ function WipMovementsTable({
   rows: StockMovement[];
   onNavigate: (href: string) => void;
 }) {
+  const notes = hasNotes(rows);
   return (
     <table className="w-full text-xs">
       <thead className="bg-[#FAF8F5]">
@@ -665,15 +827,24 @@ function WipMovementsTable({
           <th className={TH}>Worker</th>
           <th className={THR}>Qty (min)</th>
           <th className={THR}>Cost</th>
-          <th className={THR}>Balance</th>
+          <th className={THR}>Running</th>
+          {notes && <th className={TH}>Notes</th>}
         </tr>
       </thead>
       <tbody className="divide-y divide-[#F0EDE9]">
-        {rows.length === 0 && <EmptyRow span={8} message="No movements recorded." />}
+        {rows.length === 0 && (
+          <EmptyRow span={notes ? 9 : 8} message="No movements recorded." />
+        )}
         {rows.map((m) => (
           <tr key={m.id}>
             <td className={TD}><DateCell value={m.date} /></td>
-            <td className={TD}>{m.type}</td>
+            {/* Direction pill AND the ledger type: WIP rows are all inbound
+                work, so the pill alone would not distinguish a labour posting
+                from its reversal. */}
+            <td className={TD}>
+              <DirectionPill direction={m.direction} />
+              <span className="ml-1.5 text-[11px] text-[#6B7280]">{m.type}</span>
+            </td>
             <td className={TD}>
               <DocLink
                 no={m.productionOrderNo}
@@ -691,9 +862,14 @@ function WipMovementsTable({
             <td className={`${TD} max-w-[160px] truncate`} title={m.takenByName ?? ""}>
               <Txt value={m.takenByName} />
             </td>
-            <td className={TDR}><Qty value={m.qty} /></td>
+            <td className={TDR}><SignedQty m={m} /></td>
             <td className={TDR}><Money value={m.totalCostSen} /></td>
             <td className={TDR}><BalanceCell m={m} /></td>
+            {notes && (
+              <td className={`${TD} max-w-[220px] truncate`}>
+                <NotesCell value={m.notes} />
+              </td>
+            )}
           </tr>
         ))}
       </tbody>
@@ -704,14 +880,6 @@ function WipMovementsTable({
 // ---------------------------------------------------------------------------
 // The drawer
 // ---------------------------------------------------------------------------
-export interface StockBreakdownTarget {
-  type: StockItemType;
-  itemId: string;
-  /** Shown in the header while the fetch is in flight. */
-  code: string;
-  name?: string;
-}
-
 /**
  * Closed is a distinct component from open, and each open item mounts fresh.
  *
@@ -748,6 +916,13 @@ function StockBreakdownPanel({
   const [data, setData] = useState<StockBreakdown | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Movements and COGS collapse INDEPENDENTLY and both start open. Closing one
+  // must leave the other exactly as the operator left it.
+  const [sections, setSections] = useState<BreakdownSections>(
+    DEFAULT_BREAKDOWN_SECTIONS,
+  );
+  const toggle = (s: BreakdownSection) =>
+    setSections((prev) => toggleBreakdownSection(prev, s));
 
   useEffect(() => {
     let cancelled = false;
@@ -807,29 +982,32 @@ function StockBreakdownPanel({
         role="dialog"
         aria-label="Stock breakdown"
       >
-        {/* Title bar */}
+        {/* Title bar — the PANEL is named first, then the item: the operator
+            already knows which row was clicked, and what they need to read is
+            what this thing is. Code as a chip beside the full description. */}
         <div className="flex items-start justify-between gap-4 px-5 py-3 border-b border-[#E2DDD8] bg-white">
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <Package className="h-4 w-4 text-[#6B5C32]" />
-              <h2 className="text-base font-semibold text-[#1F1D1B] truncate">
+            <h2 className="text-[18px] font-extrabold leading-tight tracking-tight text-[#1F1D1B]">
+              Stock Breakdown
+            </h2>
+            <p className="mt-1 text-[13px] text-[#6B7280] truncate">
+              <span className="inline-block rounded-full border border-[#E2DDD8] bg-[#F5F2ED] px-2 py-px font-mono text-[12px] text-[#1F1D1B]">
                 {header?.itemCode || target.code}
-              </h2>
+              </span>{" "}
               <span className="text-[11px] px-1.5 py-0.5 rounded bg-[#F0EDE9] text-[#6B7280]">
                 {target.type}
-              </span>
-            </div>
-            <p className="text-xs text-[#6B7280] truncate">
+              </span>{" "}
               {header?.itemName || target.name || ""}
             </p>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="p-1 rounded hover:bg-[#F0EDE9] text-[#6B7280]"
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1.5 text-xs text-[#6B7280] hover:bg-[#F0EDE9]"
             aria-label="Close"
           >
-            <X className="h-4 w-4" />
+            <X className="h-3.5 w-3.5" />
+            <span>Close</span>
           </button>
         </div>
 
@@ -841,10 +1019,13 @@ function StockBreakdownPanel({
 
           {header && (
             <>
-              {/* 1 — Header stats */}
+              {/* 1 — Header stats. No "(owned)" qualifier anywhere: Houzs
+                  needs it to separate owned stock from consignment, and this
+                  system holds no consignment stock at all. Borrowing the word
+                  would imply a distinction nothing here makes. */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <Stat
-                  label="Total qty (owned)"
+                  label="Total qty"
                   value={
                     header.totalQty === null ? <Dash /> : header.totalQty
                   }
@@ -852,7 +1033,7 @@ function StockBreakdownPanel({
                   title={header.qtyNote ?? undefined}
                 />
                 <Stat
-                  label="Assigned / Free"
+                  label="Assigned · Free"
                   value={
                     header.assignedQty === null || header.freeQty === null ? (
                       <Dash />
@@ -878,101 +1059,105 @@ function StockBreakdownPanel({
                 />
               </div>
 
-              {header.qtyNote && <Notice tone="info">{header.qtyNote}</Notice>}
-              {header.reconciliation.notice && (
-                <Notice tone="warn">{header.reconciliation.notice}</Notice>
-              )}
-              {header.ledgerVsOnHand.note && (
-                <Notice tone={header.ledgerVsOnHand.agrees ? "info" : "warn"}>
-                  {header.ledgerVsOnHand.note}
-                </Notice>
-              )}
-              {header.valuationNote && (
-                <Notice tone="warn">{header.valuationNote}</Notice>
-              )}
+              {/* Every notice this header carries, in one place. The list comes
+                  from panelNotices so a restyle cannot quietly drop one. */}
+              {panelNotices(header).map((n) => (
+                <Notice key={n.key} tone={n.tone}>{n.text}</Notice>
+              ))}
 
               {/* 2 — Stock lots.
                   WIP gets a different heading because it has no lots: what it
                   has is the job cards that made the item. Calling those "stock
                   lots" would imply a FIFO layer that does not exist. */}
-              <Section
-                title={target.type === "WIP" ? "Job cards that made this" : "Stock lots"}
-                subtitle={
-                  target.type === "WIP"
-                    ? "Oldest first — WIP has no cost layers, so these are the work, not lots"
-                    : "Oldest first — consumed first on the next DO"
-                }
-                count={data?.lots.length}
-              >
-                {target.type === "RM" && (
-                  <RmLotsTable
-                    lots={(data?.lots ?? []) as RmLot[]}
-                    onNavigate={go}
-                  />
-                )}
-                {target.type === "FG" && (
-                  <FgLotsTable
-                    lots={(data?.lots ?? []) as FgLot[]}
-                    onNavigate={go}
-                  />
-                )}
-                {target.type === "WIP" && (
-                  <WipLotsTable
-                    lots={(data?.lots ?? []) as WipLot[]}
-                    onNavigate={go}
-                  />
-                )}
-              </Section>
+              <section>
+                <Eyebrow>
+                  {target.type === "WIP"
+                    ? `Job cards that made this (${data?.lots.length ?? 0}) — oldest first, WIP has no cost layers so these are the work, not lots`
+                    : `Stock lots (${data?.lots.length ?? 0}) — oldest first, consumed first on the next DO`}
+                </Eyebrow>
+                <TableCard>
+                  {target.type === "RM" && (
+                    <RmLotsTable
+                      lots={(data?.lots ?? []) as RmLot[]}
+                      onNavigate={go}
+                    />
+                  )}
+                  {target.type === "FG" && (
+                    <FgLotsTable
+                      lots={(data?.lots ?? []) as FgLot[]}
+                      onNavigate={go}
+                    />
+                  )}
+                  {target.type === "WIP" && (
+                    <WipLotsTable
+                      lots={(data?.lots ?? []) as WipLot[]}
+                      onNavigate={go}
+                    />
+                  )}
+                </TableCard>
+              </section>
 
-              {/* 3 — Movements, newest first, split IN / OUT.
+              {/* 3 — Movements, newest first. ONE collapsible section, as in
+                  Houzs — but the IN and OUT rows keep their own column sets,
+                  because a receipt and an issue answer different questions
+                  (which GRN and supplier vs which production order, department
+                  and who took it) and the owner asked for both by name.
                   WIP is not split: every row is the same kind of event, so a
                   second table headed "Stock issued" holding nothing would read
                   as "nothing has been issued" rather than "issues are not
                   recorded". The notice above says which. */}
-              <Section
-                title={target.type === "WIP" ? "Movements" : "Movements in"}
-                count={target.type === "WIP" ? movements.length : inRows.length}
-                subtitle="Newest first"
-              >
-                {target.type !== "WIP" && (
-                  <div className="flex items-center gap-1.5 px-3 pt-2 text-[11px] text-[#3F6B3F]">
-                    <ArrowDownToLine className="h-3.5 w-3.5" /> Stock received
-                  </div>
-                )}
-                {target.type === "RM" && <RmInTable rows={inRows} onNavigate={go} />}
-                {target.type === "FG" && <FgInTable rows={inRows} onNavigate={go} />}
-                {target.type === "WIP" && (
-                  <WipMovementsTable rows={movements} onNavigate={go} />
-                )}
-              </Section>
-
-              {target.type !== "WIP" && (
-                <Section
-                  title="Movements out"
-                  count={outRows.length}
-                  subtitle="Newest first"
+              <section>
+                <SectionToggle
+                  open={sections.movements}
+                  onClick={() => toggle("movements")}
                 >
-                  <div className="flex items-center gap-1.5 px-3 pt-2 text-[11px] text-[#9A3A2D]">
-                    <ArrowUpFromLine className="h-3.5 w-3.5" /> Stock issued
-                  </div>
-                  {target.type === "RM" && <RmOutTable rows={outRows} onNavigate={go} />}
-                  {target.type === "FG" && <FgOutTable rows={outRows} onNavigate={go} />}
-                </Section>
-              )}
+                  Movements ({movements.length}) — every stock change for this item
+                </SectionToggle>
+                {sections.movements && (
+                  <>
+                    <TableCard>
+                      {target.type !== "WIP" && (
+                        <div className="flex items-center gap-1.5 px-3 pt-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-[#3F6B3F]">
+                          <ArrowDownToLine className="h-3.5 w-3.5" /> Stock received (
+                          {inRows.length})
+                        </div>
+                      )}
+                      {target.type === "RM" && <RmInTable rows={inRows} onNavigate={go} />}
+                      {target.type === "FG" && <FgInTable rows={inRows} onNavigate={go} />}
+                      {target.type === "WIP" && (
+                        <WipMovementsTable rows={movements} onNavigate={go} />
+                      )}
+                    </TableCard>
+
+                    {target.type !== "WIP" && (
+                      <TableCard>
+                        <div className="flex items-center gap-1.5 px-3 pt-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-[#9A3A2D]">
+                          <ArrowUpFromLine className="h-3.5 w-3.5" /> Stock issued (
+                          {outRows.length})
+                        </div>
+                        {target.type === "RM" && <RmOutTable rows={outRows} onNavigate={go} />}
+                        {target.type === "FG" && <FgOutTable rows={outRows} onNavigate={go} />}
+                      </TableCard>
+                    )}
+                  </>
+                )}
+              </section>
 
               {/* 4 — COGS */}
-              <Section
-                title="COGS — FIFO consumptions"
-                count={data?.cogs.length}
-              >
+              <section>
+                <SectionToggle open={sections.cogs} onClick={() => toggle("cogs")}>
+                  COGS ({data?.cogs.length ?? 0}) — FIFO consumptions for this item
+                </SectionToggle>
+                {sections.cogs && (
+                <TableCard>
                 <table className="w-full text-xs">
                   <thead className="bg-[#FAF8F5]">
                     <tr>
                       <th className={TH}>Consumed at</th>
-                      <th className={TH}>Source document</th>
+                      <th className={TH}>Source doc</th>
                       <th className={THR}>Qty</th>
                       <th className={THR}>Unit cost</th>
-                      <th className={THR}>Total</th>
+                      <th className={THR}>Total cost</th>
                       <th className={TH}>From lot</th>
                     </tr>
                   </thead>
@@ -1007,7 +1192,9 @@ function StockBreakdownPanel({
                     ))}
                   </tbody>
                 </table>
-              </Section>
+                </TableCard>
+                )}
+              </section>
             </>
           )}
         </div>

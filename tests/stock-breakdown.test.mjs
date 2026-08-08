@@ -419,3 +419,143 @@ test("ageDays refuses to invent a number from a missing or broken date", () => {
   assert.equal(ageDays("not a date"), null);
   assert.equal(ageDays("2026-08-09T00:00:00Z", new Date("2026-08-08T00:00:00Z")), 0);
 });
+
+// ---------------------------------------------------------------------------
+// The drawer's own behaviour — opening it, its sections, and the notices that
+// must survive a restyle. Added 2026-08-08 when the panel was reworked to match
+// the Houzs Stock Breakdown drawer.
+// ---------------------------------------------------------------------------
+const {
+  fgBreakdownTarget,
+  wipBreakdownTarget,
+  rmBreakdownTarget,
+  toggleBreakdownSection,
+  DEFAULT_BREAKDOWN_SECTIONS,
+  panelNotices,
+} = await import(
+  pathToFileURL(resolve(process.cwd(), "src/lib/stock-breakdown.ts")).href
+);
+
+const { readFileSync } = await import("node:fs");
+const inventoryPageSrc = readFileSync(
+  resolve(process.cwd(), "src/pages/inventory/index.tsx"),
+  "utf8",
+);
+const drawerSrc = readFileSync(
+  resolve(process.cwd(), "src/pages/inventory/StockBreakdownDrawer.tsx"),
+  "utf8",
+);
+
+test("a row click opens the drawer for THAT row's item, on every tab", () => {
+  // The gesture itself: all three grids hand their clicked row to the same
+  // deferred opener. Without this the drawer is reachable only from the kebab
+  // menu, which is what the owner asked to change.
+  assert.equal(
+    (inventoryPageSrc.match(/onRowClick=\{\(row\) => openBreakdown\(/g) ?? []).length,
+    3,
+    "FG, WIP and RM grids must each open the breakdown on a row click",
+  );
+
+  // And the row it opens for is its OWN row.
+  const fg = fgBreakdownTarget({ id: "prod-40", code: "2050(A)-(K)", name: "ROMA" });
+  assert.deepEqual(fg, {
+    type: "FG",
+    itemId: "prod-40",
+    code: "2050(A)-(K)",
+    name: "ROMA",
+  });
+  const other = fgBreakdownTarget({ id: "prod-41", code: "2051(A)-(K)" });
+  assert.notEqual(fg.itemId, other.itemId);
+
+  const rm = rmBreakdownTarget({ id: "rm-7", itemCode: "PC151-01", description: "Fabric" });
+  assert.deepEqual(rm, { type: "RM", itemId: "rm-7", code: "PC151-01", name: "Fabric" });
+});
+
+test("a WIP row opens on its CODE, not the grid's synthetic row id", () => {
+  // The grid id is a `wip-dyn-*` key it made up; only the code reaches the
+  // ledger (job_cards.wipLabel). Opening on the id would 404 every WIP row.
+  const t = wipBreakdownTarget({ wipCode: "FAB_SEW-2050", relatedProduct: "ROMA" });
+  assert.equal(t.itemId, "FAB_SEW-2050");
+  assert.equal(t.code, "FAB_SEW-2050");
+  assert.equal(t.type, "WIP");
+});
+
+test("a double-click still edits: the row click is deferred and cancellable", () => {
+  // A double-click always delivers its first click to the single-click
+  // handler. If the drawer opened immediately, editing a product would leave
+  // it open behind the dialog every time.
+  assert.match(inventoryPageSrc, /ROW_CLICK_DELAY_MS/);
+  assert.equal(
+    (inventoryPageSrc.match(/onDoubleClick=\{\(row\) => \{ cancelPendingBreakdown\(\);/g) ?? [])
+      .length,
+    3,
+    "each grid's double-click must cancel the pending breakdown open",
+  );
+});
+
+test("collapsing one section does not touch the other, and both start open", () => {
+  assert.deepEqual(DEFAULT_BREAKDOWN_SECTIONS, { movements: true, cogs: true });
+
+  const closedMovements = toggleBreakdownSection(DEFAULT_BREAKDOWN_SECTIONS, "movements");
+  assert.equal(closedMovements.movements, false);
+  assert.equal(closedMovements.cogs, true, "closing Movements must leave COGS open");
+
+  const closedBoth = toggleBreakdownSection(closedMovements, "cogs");
+  assert.deepEqual(closedBoth, { movements: false, cogs: false });
+
+  // Reopening restores it — the state says what is OPEN, it never caches what
+  // was rendered, so nothing can be permanently lost by collapsing.
+  const reopened = toggleBreakdownSection(closedBoth, "movements");
+  assert.equal(reopened.movements, true);
+  assert.equal(reopened.cogs, false);
+  assert.deepEqual(
+    toggleBreakdownSection(reopened, "movements"),
+    closedBoth,
+    "toggling twice must return to where it started",
+  );
+});
+
+test("the reconciliation notices still render when the data disagrees", () => {
+  // The restyle must not quietly drop a warning. This is the WIP case: no
+  // outbound movements, so no balance, plus a ledger that cannot be squared.
+  const rec = reconciliationOf("WIP", [{ direction: "IN" }, { direction: "IN" }]);
+  const notices = panelNotices({
+    qtyNote: "3 piece(s) = 1 sellable unit(s).",
+    reconciliation: rec,
+    ledgerVsOnHand: ledgerVsOnHand(308, 30, 0, "The two legs count different things."),
+    valuationNote: valuationNote(11, 30),
+  });
+
+  const keys = notices.map((n) => n.key);
+  assert.deepEqual(keys, ["qty", "reconciliation", "ledger", "valuation"]);
+  assert.match(notices[1].text, /Outbound movements are not recorded for WIP/);
+  assert.match(notices[2].text, /do not reconcile/i);
+  assert.match(notices[3].text, /Only 11 of 30 piece\(s\)/);
+  // A disagreement is a WARNING, not a footnote.
+  assert.equal(notices[1].tone, "warn");
+  assert.equal(notices[2].tone, "warn");
+  assert.equal(notices[3].tone, "warn");
+
+  // And the panel renders whatever comes back rather than its own list of
+  // hand-written conditionals, which is how one gets dropped in a restyle.
+  assert.match(drawerSrc, /panelNotices\(header\)\.map\(/);
+});
+
+test("a clean header produces no notices at all", () => {
+  // Notices are for real problems. A panel that always shows a warning trains
+  // people to ignore warnings.
+  const notices = panelNotices({
+    qtyNote: null,
+    reconciliation: reconciliationOf("RM", [{ direction: "IN" }, { direction: "OUT" }]),
+    ledgerVsOnHand: ledgerVsOnHand(42, 42, 0),
+    valuationNote: valuationNote(5, 5),
+  });
+  assert.deepEqual(notices, []);
+});
+
+test("no column is rendered that this system has no data for", () => {
+  // Hookka has no warehouse dimension: rm_batches has no location column and
+  // there is no warehouses table. Houzs leads its lot table with Warehouse; a
+  // column of em dashes reads as missing data rather than an absent concept.
+  assert.doesNotMatch(drawerSrc, /<th className=\{TH\}>Warehouse<\/th>/);
+});

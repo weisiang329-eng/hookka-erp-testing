@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, startTransition } from "react";
+import { useState, useMemo, useEffect, useRef, startTransition } from "react";
 import { cachedFetchJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { type FGItem, type FgDeltas, mergeFgDeltas } from "@/lib/fg-stock";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -37,9 +37,13 @@ import {
 } from "@/lib/material-variants";
 // Stock Breakdown — the per-item right-hand drawer (lots, movements with a
 // derived running balance, and FIFO COGS). One component for FG / WIP / RM.
-import StockBreakdownDrawer, {
+import StockBreakdownDrawer from "./StockBreakdownDrawer";
+import {
+  fgBreakdownTarget,
+  rmBreakdownTarget,
+  wipBreakdownTarget,
   type StockBreakdownTarget,
-} from "./StockBreakdownDrawer";
+} from "@/lib/stock-breakdown";
 import {
   DEFAULT_BEDFRAME_SIZES,
   DEFAULT_SOFA_COMPARTMENTS,
@@ -147,6 +151,21 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "WIP", label: "WIP" },
   { key: "RAW", label: "Raw Materials" },
 ];
+
+/**
+ * How long a row click waits before opening the Stock Breakdown drawer.
+ *
+ * A double-click always delivers its first click to the single-click handler,
+ * so without this window every "double-click to edit" would also open the
+ * drawer behind the dialog. Roughly the platform double-click threshold —
+ * short enough to feel immediate against a panel that then fetches.
+ */
+const ROW_CLICK_DELAY_MS = 220;
+
+/** Said on the grid itself, the way Houzs says it on its SKU list. */
+const ROW_CLICK_HINT = "Click a row for the stock breakdown · double-click to edit";
+const ROW_CLICK_HINT_WIP =
+  "Click a row for the stock breakdown · double-click for the production detail";
 
 // --- Finished Products with stock ---
 // FGItem + deriveFGStock now live in the shared @/lib/fg-stock (so the server
@@ -1843,6 +1862,46 @@ export default function InventoryPage() {
   const [breakdownTarget, setBreakdownTarget] =
     useState<StockBreakdownTarget | null>(null);
 
+  // CLICKING A ROW opens the breakdown (2026-08-08, owner: match Houzs, whose
+  // list says so on the tin — "click a row for the breakdown"). The kebab item
+  // stays for discoverability, but the row itself is the gesture.
+  //
+  // Double-click still opens the edit dialog, and a double-click necessarily
+  // fires the single-click handler first — so the open is deferred by one
+  // double-click interval and cancelled the moment the second click lands.
+  // Without that, editing a product would leave the drawer open behind the
+  // dialog every single time.
+  //
+  // A raw timer rather than `useTimeout` from src/lib/scheduler.ts: that hook
+  // is declarative and visibility-aware, which is right for polling and delayed
+  // saves and wrong here. This window must RESTART on every click — the second
+  // click of a double-click has to push the deadline out, not inherit the
+  // first's — and a 220ms window has nothing to gain from pausing on a hidden
+  // tab, which cannot be clicked. Cleared on unmount below.
+  const pendingBreakdown = useRef<number | null>(null);
+  const cancelPendingBreakdown = () => {
+    if (pendingBreakdown.current !== null) {
+      window.clearTimeout(pendingBreakdown.current);
+      pendingBreakdown.current = null;
+    }
+  };
+  const openBreakdown = (t: StockBreakdownTarget) => {
+    cancelPendingBreakdown();
+    // eslint-disable-next-line no-restricted-syntax -- see the note above: needs imperative restart per click, and visibility pausing does not apply to a 220ms click window.
+    pendingBreakdown.current = window.setTimeout(() => {
+      pendingBreakdown.current = null;
+      setBreakdownTarget(t);
+    }, ROW_CLICK_DELAY_MS);
+  };
+  useEffect(
+    () => () => {
+      if (pendingBreakdown.current !== null) {
+        window.clearTimeout(pendingBreakdown.current);
+      }
+    },
+    [],
+  );
+
   // Context menus per tab. Each Edit/View action opens the same dialog the
   // double-click handler does — right-click was previously stubbed
   // (`action: () => {}`) which made the menu look unresponsive to
@@ -1853,18 +1912,7 @@ export default function InventoryPage() {
     { label: "Edit", action: (row: FGItem) => { void handleDoubleClickFG(row); } },
     {
       label: "Stock breakdown",
-      action: (row: FGItem) =>
-        setBreakdownTarget({
-          type: "FG",
-          // The breakdown is keyed on the PRODUCT id. Off-catalog rows the FG
-          // grid synthesises from finished production orders carry an
-          // `fg-dyn-*` id that no product row matches, so they have nothing to
-          // open — better to leave the id alone and let the endpoint 404 than
-          // to guess at a neighbouring product.
-          itemId: row.id,
-          code: row.code,
-          name: row.name,
-        }),
+      action: (row: FGItem) => setBreakdownTarget(fgBreakdownTarget(row)),
     },
     { label: "Delete", action: (row: FGItem) => { void handleDeleteFG(row); } },
     { separator: true, label: "", action: () => {} },
@@ -1874,17 +1922,7 @@ export default function InventoryPage() {
     { label: "View", action: (row: WIPItem) => { handleDoubleClickWIP(row); } },
     {
       label: "Stock breakdown",
-      action: (row: WIPItem) =>
-        setBreakdownTarget({
-          type: "WIP",
-          // The WIP CODE, not the row id: the grid's id is a synthetic
-          // `wip-dyn-*` / `wip-rebuild-*` key, while the code is what
-          // job_cards.wipLabel joins on and is the only handle that reaches the
-          // ledger. The endpoint accepts either.
-          itemId: row.wipCode,
-          code: row.wipCode,
-          name: row.relatedProduct,
-        }),
+      action: (row: WIPItem) => setBreakdownTarget(wipBreakdownTarget(row)),
     },
     { separator: true, label: "", action: () => {} },
     { label: "Refresh", action: () => { invalidateCachePrefix("/api/inventory"); window.location.reload(); } },
@@ -1894,13 +1932,7 @@ export default function InventoryPage() {
     { label: "Edit", action: (row: RawMaterial) => { void handleDoubleClickRM(row); } },
     {
       label: "Stock breakdown",
-      action: (row: RawMaterial) =>
-        setBreakdownTarget({
-          type: "RM",
-          itemId: row.id,
-          code: row.itemCode,
-          name: row.description,
-        }),
+      action: (row: RawMaterial) => setBreakdownTarget(rmBreakdownTarget(row)),
     },
     { separator: true, label: "", action: () => {} },
     { label: "Refresh", action: () => { invalidateCachePrefix("/api/raw-materials"); invalidateCachePrefix("/api/inventory"); window.location.reload(); } },
@@ -2436,6 +2468,7 @@ export default function InventoryPage() {
             <CardHeader className="pb-3">
               <div className="flex items-center justify-between">
                 <CardTitle className="flex items-center gap-2"><Package className="h-5 w-5 text-[#6B5C32]" /> Finished Products ({filteredFG.length})</CardTitle>
+                <p className="text-[11px] uppercase tracking-wide text-[#9CA3AF]">{ROW_CLICK_HINT}</p>
               </div>
             </CardHeader>
             <CardContent>
@@ -2446,7 +2479,8 @@ export default function InventoryPage() {
                 gridId="inventory-fg"
                 virtualize
                 contextMenuItems={fgContextMenu}
-                onDoubleClick={handleDoubleClickFG}
+                onRowClick={(row) => openBreakdown(fgBreakdownTarget(row))}
+                onDoubleClick={(row) => { cancelPendingBreakdown(); void handleDoubleClickFG(row); }}
               />
             </CardContent>
           </Card>
@@ -2491,7 +2525,10 @@ export default function InventoryPage() {
 
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="flex items-center gap-2"><Layers className="h-5 w-5 text-[#6B5C32]" /> Work in Progress ({filteredWIP.length})</CardTitle>
+              <div className="flex items-center justify-between">
+                <CardTitle className="flex items-center gap-2"><Layers className="h-5 w-5 text-[#6B5C32]" /> Work in Progress ({filteredWIP.length})</CardTitle>
+                <p className="text-[11px] uppercase tracking-wide text-[#9CA3AF]">{ROW_CLICK_HINT_WIP}</p>
+              </div>
             </CardHeader>
             <CardContent>
               <DataGrid
@@ -2501,7 +2538,8 @@ export default function InventoryPage() {
                 gridId="inventory-wip"
                 virtualize
                 contextMenuItems={wipContextMenu}
-                onDoubleClick={handleDoubleClickWIP}
+                onRowClick={(row) => openBreakdown(wipBreakdownTarget(row))}
+                onDoubleClick={(row) => { cancelPendingBreakdown(); handleDoubleClickWIP(row); }}
               />
             </CardContent>
           </Card>
@@ -2791,7 +2829,10 @@ export default function InventoryPage() {
           {/* DataGrid */}
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="flex items-center gap-2"><Boxes className="h-5 w-5 text-[#6B5C32]" /> Raw Materials ({filteredRM.length})</CardTitle>
+              <div className="flex items-center justify-between">
+                <CardTitle className="flex items-center gap-2"><Boxes className="h-5 w-5 text-[#6B5C32]" /> Raw Materials ({filteredRM.length})</CardTitle>
+                <p className="text-[11px] uppercase tracking-wide text-[#9CA3AF]">{ROW_CLICK_HINT}</p>
+              </div>
             </CardHeader>
             <CardContent>
               <DataGrid
@@ -2801,7 +2842,8 @@ export default function InventoryPage() {
                 gridId="inventory-rm"
                 virtualize
                 contextMenuItems={rmContextMenu}
-                onDoubleClick={handleDoubleClickRM}
+                onRowClick={(row) => openBreakdown(rmBreakdownTarget(row))}
+                onDoubleClick={(row) => { cancelPendingBreakdown(); void handleDoubleClickRM(row); }}
               />
             </CardContent>
           </Card>

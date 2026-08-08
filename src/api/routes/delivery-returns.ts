@@ -18,6 +18,12 @@ import { customerScopeSql } from "../lib/customer-scope";
 import { getOrgId } from "../lib/tenant";
 import { reverseFGForDeliveryReturn } from "../lib/do-cost-cascade";
 import {
+  buildFgStockEventStatements,
+  ensureFgStockEventsSchema,
+  loadFgUnitsForEvent,
+  SYSTEM_ACTOR,
+} from "../lib/fg-stock-events";
+import {
   createDeliveryReturnRecord,
   ensureDeliveryReturnTables,
   loadDoItemsForReturn,
@@ -301,12 +307,31 @@ async function buildReturnToStockStatements(
   const unitIds = items.map((it) => it.fgUnitId).filter((x): x is string => !!x);
   if (unitIds.length) {
     const marks = unitIds.map(() => "?").join(",");
+    // FG stock ledger — an IN counter-row per returned piece, paired with the
+    // FIFO credit reverseFGForDeliveryReturn just built above. Read the FROM
+    // side first: the same id list, so the two agree by construction.
+    await ensureFgStockEventsSchema(db);
+    const returnedUnits = await loadFgUnitsForEvent(
+      db,
+      `id IN (${marks})`,
+      unitIds,
+    );
     statements.push(
       db
         .prepare(
           `UPDATE fg_units SET status='RETURNED', returnedAt=? WHERE id IN (${marks})`,
         )
         .bind(now, ...unitIds),
+      ...buildFgStockEventStatements(db, returnedUnits, {
+        toStatus: "RETURNED",
+        doc: { docType: "DELIVERY_RETURN", docId: drId, docNo: null },
+        actor: SYSTEM_ACTOR,
+        occurredAt: now,
+        note: "Delivery return — returned to stock",
+        reverses: doId
+          ? { docType: "DELIVERY_ORDER", docId: doId }
+          : null,
+      }),
     );
   }
   return { statements, reversedCogsSen };

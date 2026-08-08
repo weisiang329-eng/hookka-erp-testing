@@ -26,6 +26,12 @@ import {
   CN_VALID_TRANSITIONS,
 } from "../lib/consignment-note-shared";
 import { cascadeCNCompletionToCO, cascadeCNReversalToCO } from "./production-orders";
+import {
+  actorFromUserId,
+  buildFgStockEventStatements,
+  ensureFgStockEventsSchema,
+  loadFgUnitsForEvent,
+} from "../lib/fg-stock-events";
 import { fetchFilteredPOs } from "./production-orders";
 import {
   buildCnReadyPlanning,
@@ -1166,6 +1172,16 @@ app.post("/:id/return", async (c) => {
       // status='DELIVERED'; DO-delivered units carry doId set + cnId
       // NULL. Filtering on cnId ensures we only ever touch units that
       // THIS CN claimed.
+      // Same narrowing the UPDATE's sub-SELECT uses — ordering and LIMIT
+      // included, because WHICH units come back is exactly what the ledger has
+      // to record. (loadFgUnitsForEvent splices this after WHERE, so the tail
+      // clauses ride along.)
+      await ensureFgStockEventsSchema(c.var.DB);
+      const returnedUnits = await loadFgUnitsForEvent(
+        c.var.DB,
+        "poId = ? AND cnId = ? AND status = 'DELIVERED' ORDER BY deliveredAt DESC LIMIT ?",
+        [po.id, id, returnQty],
+      );
       statements.push(
         c.var.DB.prepare(
           `UPDATE fg_units
@@ -1177,6 +1193,20 @@ app.post("/:id/return", async (c) => {
                 LIMIT ?
             )`,
         ).bind(now, po.id, id, returnQty),
+        // IN counter-row: these goods are physically back and the STOCK_IN
+        // movement below says so.
+        ...buildFgStockEventStatements(c.var.DB, returnedUnits, {
+          toStatus: "RETURNED",
+          doc: { docType: "CONSIGNMENT_NOTE", docId: id, docNo: null },
+          actor: actorFromUserId(
+            (c as unknown as { get: (k: string) => string | undefined }).get(
+              "userId",
+            ),
+          ),
+          occurredAt: now,
+          note: "Consignment return",
+          reverses: { docType: "CONSIGNMENT_NOTE", docId: id },
+        }),
       );
 
       statements.push(
@@ -1474,6 +1504,15 @@ app.post("/:id/convert-to-invoice", async (c) => {
       hubName = hub?.shortName ?? null;
     }
 
+    // FG stock ledger — read the FROM side with the SAME predicate the flip
+    // below uses, before anything is written.
+    await ensureFgStockEventsSchema(c.var.DB);
+    const soldUnits = await loadFgUnitsForEvent(
+      c.var.DB,
+      "cnId = ? AND status = 'LOADED'",
+      [id],
+    );
+
     const statements: D1PreparedStatement[] = [
       c.var.DB.prepare(
         `INSERT INTO invoices (
@@ -1556,6 +1595,22 @@ app.post("/:id/convert-to-invoice", async (c) => {
             SET status = 'DELIVERED', deliveredAt = ?
           WHERE cnId = ? AND status = 'LOADED'`,
       ).bind(now, id),
+      // …and the ledger row for that flip. This route bypasses
+      // updateConsignmentNoteById, so it needs its own copy of BOTH the flip
+      // and its event — the flip alone was already duplicated here, and an
+      // event that only one of the two paths writes is exactly how the trail
+      // develops holes.
+      ...buildFgStockEventStatements(c.var.DB, soldUnits, {
+        toStatus: "DELIVERED",
+        doc: { docType: "CONSIGNMENT_NOTE", docId: id, docNo: cn.noteNumber },
+        actor: actorFromUserId(
+          (c as unknown as { get: (k: string) => string | undefined }).get(
+            "userId",
+          ),
+        ),
+        occurredAt: now,
+        note: `CN ${cn.noteNumber} converted to invoice`,
+      }),
       // CO-parity gap (2026-05-04): bump customers.outstandingSen by the
       // invoice total, mirroring DO's DELIVERED → invoice flow
       // (delivery-orders.ts:1857-1861). Without this, every CN-origin

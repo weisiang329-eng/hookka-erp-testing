@@ -6,6 +6,14 @@ import {
   cascadeCNCompletionToCO,
   cascadeCNReversalToCO,
 } from "../routes/production-orders";
+// The append-only FG stock ledger. This module runs sequential .run() calls
+// rather than a batch, so it uses the best-effort recorder — see the note on
+// recordFgStockEvents for why that trade is made HERE and nowhere else.
+import {
+  loadFgUnitsForEvent,
+  recordFgStockEvents,
+  SYSTEM_ACTOR,
+} from "./fg-stock-events";
 
 // ---------------------------------------------------------------------------
 // Shared row types + mappers for the consignment_notes / consignment_items
@@ -799,6 +807,15 @@ export async function updateConsignmentNoteById(
         }>();
       const poRows = poRowsRes.results ?? [];
       for (const po of poRows) {
+        // FG stock ledger — CN dispatch is the OUT, exactly as DO dispatch is.
+        // Read the FROM side with the SAME predicate the UPDATE uses so a unit
+        // already claimed by a sibling document never gets an OUT for a move it
+        // did not make.
+        const dispatchedUnits = await loadFgUnitsForEvent(
+          db,
+          "poId = ? AND (doId IS NULL OR doId = '') AND (cnId IS NULL OR cnId = '')",
+          [po.id],
+        );
         await db
           .prepare(
             `UPDATE fg_units
@@ -809,6 +826,17 @@ export async function updateConsignmentNoteById(
           )
           .bind(id, now, po.id)
           .run();
+        await recordFgStockEvents(db, dispatchedUnits, {
+          toStatus: "LOADED",
+          doc: {
+            docType: "CONSIGNMENT_NOTE",
+            docId: id,
+            docNo: existing.noteNumber,
+          },
+          actor: SYSTEM_ACTOR,
+          occurredAt: now,
+          note: `CN ${existing.noteNumber} dispatched`,
+        });
         await db
           .prepare(
             `INSERT INTO stock_movements (
@@ -874,6 +902,7 @@ export async function updateConsignmentNoteById(
     const stampedPoIds = (stampedPosRes.results ?? [])
       .map((r) => r.poId)
       .filter((s): s is string => !!s);
+    const releasedUnits = await loadFgUnitsForEvent(db, "cnId = ?", [id]);
     await db
       .prepare(
         `UPDATE fg_units
@@ -882,6 +911,20 @@ export async function updateConsignmentNoteById(
       )
       .bind(id)
       .run();
+    // Counter-row, not an edit — the original OUT stays exactly as written,
+    // mirroring the STOCK_IN counter-movement appended just below.
+    await recordFgStockEvents(db, releasedUnits, {
+      toStatus: "PENDING",
+      doc: {
+        docType: "CONSIGNMENT_NOTE",
+        docId: id,
+        docNo: existing.noteNumber,
+      },
+      actor: SYSTEM_ACTOR,
+      occurredAt: now,
+      note: `CN ${existing.noteNumber} reverted to Pending Dispatch`,
+      reverses: { docType: "CONSIGNMENT_NOTE", docId: id },
+    });
     for (const poId of stampedPoIds) {
       const po = await db
         .prepare(
@@ -956,6 +999,11 @@ export async function updateConsignmentNoteById(
   const cascadedToFullySold =
     existing.status !== "FULLY_SOLD" && nextStatus === "FULLY_SOLD";
   if (cascadedToFullySold) {
+    const soldUnits = await loadFgUnitsForEvent(
+      db,
+      "cnId = ? AND status = 'LOADED'",
+      [id],
+    );
     await db
       .prepare(
         `UPDATE fg_units
@@ -964,6 +1012,19 @@ export async function updateConsignmentNoteById(
       )
       .bind(deliveredAt ?? now, id)
       .run();
+    // Balance-neutral (the goods left at CN dispatch) but it is the edge that
+    // names the sale, so it belongs on the trail.
+    await recordFgStockEvents(db, soldUnits, {
+      toStatus: "DELIVERED",
+      doc: {
+        docType: "CONSIGNMENT_NOTE",
+        docId: id,
+        docNo: existing.noteNumber,
+      },
+      actor: SYSTEM_ACTOR,
+      occurredAt: deliveredAt ?? now,
+      note: `CN ${existing.noteNumber} fully sold`,
+    });
   }
 
   // Reverse: CN reverses from FULLY_SOLD back to IN_TRANSIT or earlier.
@@ -979,6 +1040,11 @@ export async function updateConsignmentNoteById(
     (existing.status === "FULLY_SOLD" || existing.status === "CLOSED") &&
     (nextStatus === "IN_TRANSIT" || nextStatus === "PARTIALLY_SOLD");
   if (revertedFromFullySold) {
+    const unsoldUnits = await loadFgUnitsForEvent(
+      db,
+      "cnId = ? AND status = 'DELIVERED'",
+      [id],
+    );
     await db
       .prepare(
         `UPDATE fg_units
@@ -987,6 +1053,18 @@ export async function updateConsignmentNoteById(
       )
       .bind(id)
       .run();
+    await recordFgStockEvents(db, unsoldUnits, {
+      toStatus: "LOADED",
+      doc: {
+        docType: "CONSIGNMENT_NOTE",
+        docId: id,
+        docNo: existing.noteNumber,
+      },
+      actor: SYSTEM_ACTOR,
+      occurredAt: now,
+      note: `CN ${existing.noteNumber} stepped back from Fully Sold`,
+      reverses: { docType: "CONSIGNMENT_NOTE", docId: id },
+    });
   }
 
   // -------------------------------------------------------------------

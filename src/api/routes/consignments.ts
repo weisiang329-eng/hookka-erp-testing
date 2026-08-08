@@ -17,6 +17,11 @@ import { requirePermission } from "../lib/rbac";
 import { customerScopeSql } from "../lib/customer-scope";
 import { emitAudit } from "../lib/audit";
 import {
+  loadFgUnitsForEvent,
+  recordFgStockEvents,
+  SYSTEM_ACTOR,
+} from "../lib/fg-stock-events";
+import {
   type ConsignmentNoteRow,
   type ConsignmentItemRow,
   rowToConsignmentNote,
@@ -514,6 +519,17 @@ app.delete("/:id", async (c) => {
 
   // Defensive fg_units rollback for any unit that picked up this cnId
   // (shouldn't happen at ACTIVE but guard against legacy seed state).
+  //
+  // Only the LOADED rows actually move, so only those get a ledger row — the
+  // CASE leaves every other status untouched and a no-op is not an event. The
+  // events are written BEFORE the consignment_notes DELETE below for a
+  // structural reason: fg_stock_events cascades on fg_unit_id, not on the note,
+  // so the trail of a deleted note survives on the units it touched.
+  const releasedUnits = await loadFgUnitsForEvent(
+    c.var.DB,
+    "cnId = ? AND status = 'LOADED'",
+    [id],
+  );
   await c.var.DB
     .prepare(
       `UPDATE fg_units
@@ -524,6 +540,18 @@ app.delete("/:id", async (c) => {
     )
     .bind(id)
     .run();
+  await recordFgStockEvents(c.var.DB, releasedUnits, {
+    toStatus: "PACKED",
+    doc: {
+      docType: "CONSIGNMENT_NOTE",
+      docId: id,
+      docNo: existing.noteNumber ?? null,
+    },
+    actor: SYSTEM_ACTOR,
+    occurredAt: new Date().toISOString(),
+    note: `Consignment note ${existing.noteNumber ?? id} deleted — returned to stock`,
+    reverses: { docType: "CONSIGNMENT_NOTE", docId: id },
+  });
 
   await c.var.DB.prepare("DELETE FROM consignment_notes WHERE id = ?")
     .bind(id)

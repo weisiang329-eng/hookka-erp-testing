@@ -58,6 +58,16 @@ import {
   buildDoStatusSyncStatement,
 } from "../../lib/do-partial-invoice";
 import type { DoDraw } from "../../lib/do-partial-invoice";
+// The append-only FG stock ledger: one immutable row per fg_unit state change,
+// carrying the document TYPE + ID that caused it. See src/api/lib/fg-stock-events.ts.
+import {
+  actorFromUserId,
+  buildFgStockEventStatements,
+  ensureFgStockEventsSchema,
+  loadFgUnitsForEvent,
+  SYSTEM_ACTOR,
+  type FgEventActor,
+} from "../../lib/fg-stock-events";
 import { availableQty } from "../../../lib/convert-chain";
 
 // Status transitions allowed by the mock-data impl. Preserved here so the
@@ -1056,6 +1066,13 @@ export async function buildDoCancelReleaseStatements(
     .map((r) => r.poId)
     .filter(Boolean);
   if (stampedPoIds.length > 0) {
+    // Read the FROM side with the SAME predicate the UPDATE uses, so the
+    // counter-rows describe exactly the units that move. A cancel can find them
+    // at LOADED (dispatched, never delivered) or DELIVERED — the ledger's
+    // direction is derived from each unit's own from-status, so one call
+    // handles both without the caller deciding a sign.
+    await ensureFgStockEventsSchema(db);
+    const movedUnits = await loadFgUnitsForEvent(db, "doId = ?", [doRow.id]);
     statements.push(
       db
         .prepare(
@@ -1065,6 +1082,18 @@ export async function buildDoCancelReleaseStatements(
             WHERE doId = ?`,
         )
         .bind(doRow.id),
+      // The counter-row. stock_movements gets a STOCK_IN below and cost_ledger
+      // gets an ADJUSTMENT via reverseFGForDoCancel; this is the same
+      // append-only discipline on the unit ledger — the original OUT row stays
+      // exactly as written, and the round trip is two rows, not an edit.
+      ...buildFgStockEventStatements(db, movedUnits, {
+        toStatus: "PENDING",
+        doc: { docType: "DELIVERY_ORDER", docId: doRow.id, docNo: doRow.doNo },
+        actor: SYSTEM_ACTOR,
+        occurredAt: now,
+        note: `${doRow.doNo} cancelled — returned to stock`,
+        reverses: { docType: "DELIVERY_ORDER", docId: doRow.id },
+      }),
     );
   }
 
@@ -1191,6 +1220,17 @@ export async function buildDoCancelReleaseStatements(
 
 export function genInvoiceItemId(): string {
   return `invi-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+/**
+ * Who a delivery-order transition is credited to on the FG stock ledger. The
+ * authenticated operator when there is one; System for the driver-QR and cron
+ * paths, which reach applyDeliveryOrderUpdate with no user attached. Never
+ * invents a name — "System" is a true answer, a guessed operator is not.
+ */
+function fgActorFor(c: Context<Env>): FgEventActor {
+  const userId = (c as unknown as { get: (k: string) => unknown }).get("userId");
+  return actorFromUserId(typeof userId === "string" ? userId : null);
 }
 
 // ---------------------------------------------------------------------------
@@ -4680,7 +4720,18 @@ export async function applyDeliveryOrderUpdate(
                 rackingNumber: string | null;
               }>()
           ).results ?? [];
+        // FG STOCK LEDGER — dispatch is the OUT. Read the FROM side with the
+        // EXACT predicate each UPDATE below uses (the cnId/doId-null guard
+        // included), because a unit already claimed by a sibling document is
+        // NOT moved by this dispatch and must not get an OUT row for it.
+        await ensureFgStockEventsSchema(c.var.DB);
+        const dispatchActor = fgActorFor(c);
         for (const po of poRows) {
+          const dispatchedUnits = await loadFgUnitsForEvent(
+            c.var.DB,
+            "poId = ? AND (doId IS NULL OR doId = '') AND (cnId IS NULL OR cnId = '')",
+            [po.id],
+          );
           statements.push(
             c.var.DB.prepare(
               // CN-side dispatch (consignment-note-shared.ts:807) stamps
@@ -4712,6 +4763,17 @@ export async function applyDeliveryOrderUpdate(
               `${existing.doNo} dispatched`,
               now,
             ),
+            ...buildFgStockEventStatements(c.var.DB, dispatchedUnits, {
+              toStatus: "LOADED",
+              doc: {
+                docType: "DELIVERY_ORDER",
+                docId: id,
+                docNo: existing.doNo,
+              },
+              actor: dispatchActor,
+              occurredAt: now,
+              note: `${existing.doNo} dispatched`,
+            }),
           );
         }
 
@@ -4843,12 +4905,24 @@ export async function applyDeliveryOrderUpdate(
       const stampedPoIds = (stampedPosRes.results ?? [])
         .map((r) => r.poId)
         .filter(Boolean);
+      // Un-dispatch is an IN counter-row, never an edit of the OUT — same rule
+      // the STOCK_IN counter-movement below already follows.
+      await ensureFgStockEventsSchema(c.var.DB);
+      const unstampedUnits = await loadFgUnitsForEvent(c.var.DB, "doId = ?", [id]);
       statements.push(
         c.var.DB.prepare(
           `UPDATE fg_units
               SET doId = NULL, status = 'PENDING', loadedAt = NULL
             WHERE doId = ?`,
         ).bind(id),
+        ...buildFgStockEventStatements(c.var.DB, unstampedUnits, {
+          toStatus: "PENDING",
+          doc: { docType: "DELIVERY_ORDER", docId: id, docNo: existing.doNo },
+          actor: fgActorFor(c),
+          occurredAt: now,
+          note: `${existing.doNo} reverted to DRAFT — returned to stock`,
+          reverses: { docType: "DELIVERY_ORDER", docId: id },
+        }),
       );
       for (const poId of stampedPoIds) {
         const po = await c.var.DB.prepare(
@@ -4992,10 +5066,27 @@ export async function applyDeliveryOrderUpdate(
       nextStatus === "DELIVERED";
     if (cascadedToDelivered) {
       // fg_units sync: flip every unit whose doId matches.
+      //
+      // LEDGER NOTE: for a unit dispatched normally this is LOADED → DELIVERED,
+      // which does NOT change the balance — the piece left the building at
+      // dispatch and the OUT was written there. It is still recorded, because
+      // this is the edge that names the delivery and drives the FIFO COGS, and
+      // the drawer has to be able to show it. balanceDelta decides the sign
+      // from each unit's own from-status, so a unit that somehow reaches
+      // DELIVERED without a dispatch still books its OUT here.
+      await ensureFgStockEventsSchema(c.var.DB);
+      const deliveredUnits = await loadFgUnitsForEvent(c.var.DB, "doId = ?", [id]);
       statements.push(
         c.var.DB.prepare(
           `UPDATE fg_units SET status = 'DELIVERED', deliveredAt = ? WHERE doId = ?`,
         ).bind(nextDeliveredAt ?? now, id),
+        ...buildFgStockEventStatements(c.var.DB, deliveredUnits, {
+          toStatus: "DELIVERED",
+          doc: { docType: "DELIVERY_ORDER", docId: id, docNo: existing.doNo },
+          actor: fgActorFor(c),
+          occurredAt: nextDeliveredAt ?? now,
+          note: `${existing.doNo} delivered`,
+        }),
       );
 
       // FIFO FG_DELIVERED COGS — consume fg_batches across layers and emit

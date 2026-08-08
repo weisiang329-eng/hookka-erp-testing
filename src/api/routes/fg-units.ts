@@ -15,6 +15,15 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
+import {
+  actorFromUserId,
+  buildFgStockEventStatements,
+  docForScannedUnit,
+  ensureFgStockEventsSchema,
+  isOnHandStatus,
+  SYSTEM_ACTOR,
+} from "../lib/fg-stock-events";
+import { reconcileFgStock } from "../lib/fg-ledger-reconcile";
 
 const app = new Hono<Env>();
 
@@ -472,6 +481,16 @@ export async function generateFGUnitsForPO(
   // awaiting LOAD onto a DO", which is exactly the post-PACKING-JC reality.
   // The downstream lifecycle (PACKED → LOADED → DELIVERED → RETURNED) stays
   // unchanged in the scan handlers below.
+  //
+  // STOCK LEDGER (2026-08-08). This INSERT is the moment a finished piece comes
+  // INTO stock, so it is also the ledger's IN event — the row that answers
+  // "which production order did this piece come in on, and when was it made".
+  // Awaited here, before the batch, because the migration file is inert on
+  // deploy; the event rows ride the SAME batch as the unit INSERTs so a piece
+  // can never exist without its arrival, or vice versa. `onceKey` makes the
+  // event id deterministic per unit for the same reason `genFGUnitId` is: a
+  // replayed completion cascade must not book the same box into stock twice.
+  await ensureFgStockEventsSchema(db);
   const statements = newUnits.map((unit) =>
     db
       .prepare(
@@ -504,6 +523,25 @@ export async function generateFGUnitsForPO(
       ),
   );
   if (statements.length > 0) {
+    statements.push(
+      ...buildFgStockEventStatements(
+        db,
+        newUnits.map((u) => ({
+          id: u.id,
+          status: null, // the piece did not exist before this batch
+          productCode: po.productCode ?? null,
+          batchId: null, // fg_batches is written by the caller, just after
+        })),
+        {
+          toStatus: "PACKED",
+          doc: { docType: "PRODUCTION_ORDER", docId: po.id, docNo: po.poNo },
+          actor: SYSTEM_ACTOR,
+          occurredAt: new Date().toISOString(),
+          note: `Produced on ${po.poNo}`,
+          onceKey: "po",
+        },
+      ),
+    );
     await db.batch(statements);
   }
 
@@ -566,6 +604,20 @@ app.get("/", async (c) => {
     .all<FGUnitRow>();
   const rows = (res.results ?? []).map(rowToFGUnit);
   return c.json({ success: true, data: rows, total: rows.length });
+});
+
+// GET /api/fg-units/ledger-reconciliation — read-only; the same three totals
+// scripts/check-fg-ledger.mjs compares, exposed so the check can be run without
+// a database shell. Never writes.
+//
+// Registered BEFORE /:id — Hono picks in insertion order and a literal path
+// that lands after a param route of the same method is unreachable.
+app.get("/ledger-reconciliation", async (c) => {
+  const denied = await requirePermission(c, "fg-units", "read");
+  if (denied) return denied;
+  await ensureFgStockEventsSchema(c.var.DB);
+  const result = await reconcileFgStock(c.var.DB, getOrgId(c));
+  return c.json({ success: true, data: result });
 });
 
 // GET /api/fg-units/:id — single unit
@@ -802,6 +854,115 @@ app.post("/backfill-hub", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/fg-units/seed-stock-events?execute=1 — the ledger's opening balance.
+//
+// An event ledger that starts today cannot explain the 4,866 pieces that were
+// already in the book yesterday. Without an opening balance, Σ events would
+// read 0 against a real on-hand count for months and the reconciliation would
+// be permanently red for a reason that is not a problem — which is how a check
+// gets ignored, and an ignored check is worse than none.
+//
+// So: exactly ONE row per fg_unit that has no events yet, from_status NULL →
+// its CURRENT status, doc_type OPENING_BALANCE pointing at the unit's own
+// production order (a real id). It does NOT invent history. It does not claim
+// the piece was packed on a date we do not know, and it does not manufacture
+// the dispatch/delivery rows the ledger never witnessed — it states the
+// position the ledger inherits, once, and lets every later transition be real.
+//
+// direction falls out of balanceDelta as it does everywhere else: +1 for a
+// piece that is on hand, 0 for one already delivered or in transit. So after
+// seeding, Σ events == the on-hand unit count exactly, and identity (A) of the
+// reconciliation holds from the first minute.
+//
+// occurred_at uses the best stamp the row actually carries (delivered → loaded
+// → packed → mfd), so the trail sorts sensibly; there is no invented "now" on a
+// piece that shipped in May. DRY-RUN by default; idempotent (a second run finds
+// every unit already seeded and reports 0).
+// ---------------------------------------------------------------------------
+app.post("/seed-stock-events", async (c) => {
+  const denied = await requirePermission(c, "fg-units", "update");
+  if (denied) return denied;
+  const execute = c.req.query("execute") === "1";
+  const orgId = getOrgId(c);
+  await ensureFgStockEventsSchema(c.var.DB);
+
+  const rows =
+    (
+      await c.var.DB.prepare(
+        `SELECT u.id, u.status, u.productCode, u.batchId, u.poId, u.poNo,
+                u.deliveredAt, u.loadedAt, u.packedAt, u.mfdDate
+           FROM fg_units u
+          WHERE u.orgId = ?
+            AND NOT EXISTS (
+              SELECT 1 FROM fg_stock_events e WHERE e.fg_unit_id = u.id
+            )`,
+      )
+        .bind(orgId)
+        .all<{
+          id: string;
+          status: string | null;
+          productCode: string | null;
+          batchId: string | null;
+          poId: string | null;
+          poNo: string | null;
+          deliveredAt: string | null;
+          loadedAt: string | null;
+          packedAt: string | null;
+          mfdDate: string | null;
+        }>()
+    ).results ?? [];
+
+  const byStatus: Record<string, number> = {};
+  let onHandSeeded = 0;
+  for (const r of rows) {
+    const k = r.status ?? "(null)";
+    byStatus[k] = (byStatus[k] ?? 0) + 1;
+    if (isOnHandStatus(r.status)) onHandSeeded++;
+  }
+
+  if (execute && rows.length > 0) {
+    const nowIso = new Date().toISOString();
+    const stmts = rows.flatMap((r) =>
+      buildFgStockEventStatements(
+        c.var.DB,
+        [
+          {
+            id: r.id,
+            status: null, // the ledger had no prior position on this piece
+            productCode: r.productCode,
+            batchId: r.batchId,
+          },
+        ],
+        {
+          toStatus: r.status ?? "PACKED",
+          doc: {
+            docType: "OPENING_BALANCE",
+            docId: r.poId ?? r.id,
+            docNo: r.poNo ?? null,
+          },
+          actor: SYSTEM_ACTOR,
+          occurredAt:
+            r.deliveredAt || r.loadedAt || r.packedAt || r.mfdDate || nowIso,
+          note: "Opening balance — position carried into the stock ledger",
+          onceKey: "open",
+        },
+      ),
+    );
+    for (let i = 0; i < stmts.length; i += 50) {
+      await c.var.DB.batch(stmts.slice(i, i + 50));
+    }
+  }
+
+  return c.json({
+    success: true,
+    mode: execute ? "executed" : "dry-run",
+    unitsWithoutEvents: rows.length,
+    onHandUnitsSeeded: onHandSeeded,
+    byStatus,
+  });
+});
+
 // POST /api/fg-units/scan
 // Body: { serial: string, action: "PACK"|"LOAD"|"DELIVER"|"RETURN", workerId?: string }
 type ScanAction = "PACK" | "LOAD" | "DELIVER" | "RETURN";
@@ -837,6 +998,11 @@ app.post("/scan", async (c) => {
   const now = new Date().toISOString();
   let updateSql = "";
   let binds: unknown[] = [];
+  // The status this scan is moving the unit TO — captured per branch so the one
+  // ledger write below can sit after the switch instead of being repeated (and
+  // forgotten) in four places.
+  let toStatus = "";
+  let scanActor = SYSTEM_ACTOR;
 
   switch (action) {
     case "PACK": {
@@ -866,6 +1032,8 @@ app.post("/scan", async (c) => {
       updateSql =
         "UPDATE fg_units SET status = 'PACKED', packerId = ?, packerName = ?, packedAt = ? WHERE id = ?";
       binds = [worker.id, worker.name, now, unit.id];
+      toStatus = "PACKED";
+      scanActor = { type: "WORKER", id: worker.id, name: worker.name };
       break;
     }
     case "LOAD": {
@@ -881,6 +1049,7 @@ app.post("/scan", async (c) => {
       updateSql =
         "UPDATE fg_units SET status = 'LOADED', loadedAt = ? WHERE id = ?";
       binds = [now, unit.id];
+      toStatus = "LOADED";
       break;
     }
     case "DELIVER": {
@@ -896,6 +1065,7 @@ app.post("/scan", async (c) => {
       updateSql =
         "UPDATE fg_units SET status = 'DELIVERED', deliveredAt = ? WHERE id = ?";
       binds = [now, unit.id];
+      toStatus = "DELIVERED";
       break;
     }
     case "RETURN": {
@@ -903,6 +1073,7 @@ app.post("/scan", async (c) => {
       updateSql =
         "UPDATE fg_units SET status = 'RETURNED', returnedAt = ? WHERE id = ?";
       binds = [now, unit.id];
+      toStatus = "RETURNED";
       break;
     }
     default:
@@ -912,9 +1083,51 @@ app.post("/scan", async (c) => {
       );
   }
 
-  await c.var.DB.prepare(updateSql)
-    .bind(...binds)
-    .run();
+  // Ledger + status flip in ONE batch. `unit` was read before the switch, so it
+  // still carries the FROM status; the four guards above already refused every
+  // transition that is not a real state change, so this is always one event.
+  // A PACK is credited to the WORKER who scanned; the other three carry the
+  // authenticated user, because the scan endpoint is permission-gated.
+  await ensureFgStockEventsSchema(c.var.DB);
+  const userId = (c as unknown as { get: (k: string) => unknown }).get("userId");
+  await c.var.DB.batch([
+    c.var.DB.prepare(updateSql).bind(...binds),
+    ...buildFgStockEventStatements(
+      c.var.DB,
+      [
+        {
+          id: unit.id,
+          status: unit.status,
+          productCode: unit.productCode,
+          batchId: unit.batchId,
+          poId: unit.poId,
+          poNo: unit.poNo,
+          doId: unit.doId,
+          cnId: (unit as unknown as { cnId?: string | null }).cnId ?? null,
+        },
+      ],
+      {
+        toStatus,
+        doc: docForScannedUnit(
+          {
+            id: unit.id,
+            status: unit.status,
+            poId: unit.poId,
+            poNo: unit.poNo,
+            doId: unit.doId,
+            cnId: (unit as unknown as { cnId?: string | null }).cnId ?? null,
+          },
+          action,
+        ),
+        actor:
+          scanActor.type === "WORKER"
+            ? scanActor
+            : actorFromUserId(typeof userId === "string" ? userId : null),
+        occurredAt: now,
+        note: `FG scan ${action}`,
+      },
+    ),
+  ]);
 
   const updated = await c.var.DB.prepare("SELECT * FROM fg_units WHERE id = ?")
     .bind(unit.id)

@@ -52,6 +52,11 @@ function fakeDb({
     prepare(sql) {
       const q = norm(sql);
       return {
+        // The FG stock ledger self-applies its DDL before it reads (migration
+        // files are inert on deploy in this repo). Parameterless .run().
+        async run() {
+          return { success: true };
+        },
         bind(...args) {
           return {
             sql: q,
@@ -87,6 +92,12 @@ function fakeDb({
               if (/SELECT DISTINCT poId FROM fg_units WHERE doId = \?/.test(q)) {
                 const ids = new Set(fgUnits.filter((u) => u.doId === args[0]).map((u) => u.poId));
                 return { results: [...ids].map((poId) => ({ poId })) };
+              }
+              // The FG stock ledger reads the FROM side with the SAME predicate
+              // the UPDATE uses, so the counter-rows describe exactly the units
+              // that move.
+              if (/SELECT id, status, productCode, batchId, poId, poNo, doId, cnId FROM fg_units WHERE doId = \?/.test(q)) {
+                return { results: fgUnits.filter((u) => u.doId === args[0]) };
               }
               if (/FROM cost_ledger\s+WHERE refType = 'DELIVERY_ORDER' AND refId = \? AND type = 'FG_DELIVERED'/.test(q)) {
                 return {
@@ -131,7 +142,10 @@ const delivered = (over = {}) => ({
   salesOrders: [{ id: "so-1", status: "DELIVERED" }],
   doItems: [{ deliveryOrderId: "do-1", productionOrderId: "po-1" }],
   prodOrders: [{ id: "po-1", poNo: "PO-1", salesOrderId: "so-1", productCode: "BF-A", productName: "Bedframe A", quantity: 2, rackingNumber: "R1" }],
-  fgUnits: [{ doId: "do-1", poId: "po-1" }],
+  fgUnits: [
+    { id: "fgu-po-1-1-1", doId: "do-1", poId: "po-1", status: "DELIVERED", productCode: "BF-A", batchId: "b-1" },
+    { id: "fgu-po-1-2-1", doId: "do-1", poId: "po-1", status: "DELIVERED", productCode: "BF-A", batchId: "b-1" },
+  ],
   costLedger: [
     { refType: "DELIVERY_ORDER", refId: "do-1", type: "FG_DELIVERED", itemId: "prod-a", batchId: "b-1", qty: 2, unitCostSen: 15000 },
   ],
@@ -200,6 +214,27 @@ test("a STOCK_IN counter-movement is appended, not a deletion of history", async
     sql.filter((s) => /DELETE FROM stock_movements/.test(s)).length,
     0,
     "stock_movements is immutable history — the round-trip is shown, not erased",
+  );
+});
+
+test("the FG stock ledger gets a counter-row per unit, and history is not edited", async () => {
+  // The per-piece stock ledger follows the SAME append-only rule as
+  // stock_movements above: the OUT written at dispatch stays exactly as it was
+  // and the return of the goods is a second row pointing back at it. Anything
+  // else and a cancelled delivery would erase the evidence that it happened.
+  const r = await buildDoCancelReleaseStatements(fakeDb(delivered()), cancelArgs, NOW);
+  const events = r.statements.filter((s) => /INSERT INTO fg_stock_events/.test(s.sql));
+  assert.equal(events.length, 2, "one per unit the DO claimed");
+  for (const e of events) {
+    assert.equal(e.args[2], "IN");
+    assert.equal(e.args[3], 1, "direction is derived from DELIVERED → PENDING, not hand-chosen");
+    assert.equal(e.args[4], "DELIVERED", "the from-status is READ, not assumed");
+    assert.equal(e.args[16], "do-1", "the counter-row names what it reverses");
+  }
+  assert.equal(
+    sqlOf(r.statements).filter((s) => /UPDATE fg_stock_events|DELETE FROM fg_stock_events/.test(s))
+      .length,
+    0,
   );
 });
 

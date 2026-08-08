@@ -131,6 +131,74 @@ export function buildGrnDetailListingAoa(notes: GrnDetailNote[]): Aoa {
   return [GRN_DETAIL_HEADERS as unknown as string[], ...body];
 }
 
+// ── Consignment Order ────────────────────────────────────────────────────────
+// The CO list endpoint ships each order's lines (rowToCOList), so a real
+// per-line export is possible here — unlike Sales/Purchase Invoices, whose
+// list payloads deliberately ship `items: []`.
+//
+// Header fields are the CO's OWN columns (companyCOId / companyCODate /
+// customerCOId), NOT the SO names. The consignment list page annotates its
+// rows as `SalesOrder`, which is wrong at runtime: `consignment_orders` has no
+// `customerPOId` column at all, so anything reading SO field names off a CO row
+// exports blanks. Only fields the table actually has appear below.
+export type CODetailItem = {
+  itemCategory?: string | null;
+  productCode?: string | null;
+  productName?: string | null;
+  sizeLabel?: string | null;
+  fabricCode?: string | null;
+  quantity?: number | null;
+  unitPriceSen?: number | null;
+  discountSen?: number | null;
+  lineTotalSen?: number | null;
+};
+export type CODetailOrder = {
+  companyCOId?: string | null;
+  companyCODate?: string | null;
+  customerCOId?: string | null;
+  customerName?: string | null;
+  customerState?: string | null;
+  hubName?: string | null;
+  status?: string | null;
+  totalSen?: number | null;
+  items?: CODetailItem[] | null;
+};
+
+export const CO_DETAIL_HEADERS = [
+  "CO No.", "Date", "Customer CO", "Customer", "State", "Hub", "Status", "Doc Total",
+  "Item Group", "Item Code", "Description", "Size", "Fabric",
+  "Qty", "Unit Price", "Discount", "Line Total",
+] as const;
+
+export function buildCoDetailListingAoa(orders: CODetailOrder[]): Aoa {
+  const body: (string | number)[][] = [];
+  for (const o of orders) {
+    const items = o.items && o.items.length > 0 ? o.items : [{} as CODetailItem];
+    for (const it of items) {
+      body.push([
+        o.companyCOId ?? "",
+        day(o.companyCODate),
+        o.customerCOId ?? "",
+        o.customerName ?? "",
+        o.customerState ?? "",
+        o.hubName ?? "",
+        o.status ?? "",
+        rm(o.totalSen),
+        it.itemCategory ?? "",
+        it.productCode ?? "",
+        it.productName ?? "",
+        it.sizeLabel ?? "",
+        it.fabricCode ?? "",
+        num(it.quantity),
+        rm(it.unitPriceSen),
+        rm(it.discountSen),
+        rm(it.lineTotalSen),
+      ]);
+    }
+  }
+  return [CO_DETAIL_HEADERS as unknown as string[], ...body];
+}
+
 // ── Delivery Order ───────────────────────────────────────────────────────────
 export type DoDetailItem = {
   salesOrderNo?: string | null;

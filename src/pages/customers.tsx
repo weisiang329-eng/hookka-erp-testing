@@ -4090,6 +4090,12 @@ export default function CustomersPage() {
             emptyMessage="No customers found."
             onRowClick={(row) => setExpandedCustomer(expandedCustomer === row.id ? null : row.id)}
             contextMenuItems={contextMenuItems}
+            // WYSIWYG export of the current columns over the current rows.
+            // No detail listing: a customer is not a document and has no line
+            // items. (Its delivery hubs / customer products are separate
+            // records shown in the expander, not lines of this row.)
+            exportName="customers"
+            exportSheetLabel="Customers"
           />
         </CardContent>
       </Card>

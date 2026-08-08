@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency, cn } from "@/lib/utils";
 import { getPrimarySoCategory } from "@/lib/so-category";
+import { buildCoDetailListingAoa, type CODetailOrder } from "@/lib/doc-detail-listings";
 import { Plus, ShoppingCart, Download, Filter, X, Eye, Pencil, Printer, Truck, FileText, ClipboardList, RefreshCw, Package, CheckCircle, ScanLine } from "lucide-react";
 // generateCOPdf is dynamic-imported at the click handler so the 1MB jspdf
 // vendor chunk only ships when the user actually prints.
@@ -867,6 +868,17 @@ export default function SalesPage() {
                 ? "!bg-[#FAEFCB]/60 border-l-2 border-l-amber-400"
                 : ""
             }
+            exportName="consignment-orders"
+            exportSheetLabel="Consignment Orders"
+            // The CO list endpoint ships each order's lines (rowToCOList), so
+            // the per-line detail listing has real data to export. The cast is
+            // the page's own type lie, not the export's: these rows are
+            // consignment orders (companyCOId / customerCOId), annotated here
+            // as SalesOrder.
+            detailExport={{
+              label: "Detail Listing",
+              build: (rows) => buildCoDetailListingAoa(rows as unknown as CODetailOrder[]),
+            }}
           />
 
           {/* Pagination footer */}

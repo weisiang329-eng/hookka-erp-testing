@@ -810,6 +810,14 @@ export default function InvoicesPage() {
                 initialSearch={gridSearch}
                 onSearchChange={setGridSearch}
                 alwaysSearchKeys={INVOICE_SEARCH_KEYS}
+                // WYSIWYG export of the current columns over the current rows.
+                // Listing only, deliberately: GET /api/invoices ships
+                // `items: []` on every row (the 2026-05-21 list-payload trim),
+                // so a per-line "Detail Listing" here would export a header
+                // and a page of blank line columns. It needs a per-invoice
+                // re-fetch, which is a feature, not this wiring.
+                exportName="invoices"
+                exportSheetLabel="Invoices"
               />
 
               {/* Pagination footer */}

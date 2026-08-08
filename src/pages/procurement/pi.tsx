@@ -768,6 +768,13 @@ export default function PurchaseInvoicesPage() {
                 contextMenuItems={piGridContextMenu}
                 maxHeight="calc(100vh - 300px)"
                 emptyMessage={tab === "DRAFT" ? "No draft invoices." : "No purchase invoices found."}
+                // WYSIWYG export of the current columns over the current rows.
+                // Listing only: GET /api/purchase-invoices maps rows through
+                // rowToPI, which carries no `items[]` — the same reason the
+                // row menu's "Print PI" re-fetches the invoice before printing.
+                // A per-line listing here needs that re-fetch per row.
+                exportName="purchase-invoices"
+                exportSheetLabel="Purchase Invoices"
               />
             </CardContent>
           </Card>

@@ -25,6 +25,9 @@ import workerApp from "../src/api/routes/worker.ts";
 
 const TODAY = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
 const TOKEN = "wt-good-token";
+// What the phone actually posts: a compressed JPEG data URL (see
+// @/lib/image-compress), the same shape service_cases.issue_photos uses.
+const PHOTO = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAA==";
 
 function makeDb(over = {}) {
   const state = {
@@ -217,7 +220,7 @@ test("a FAIL resets the job card and clears its piece stamps — via the SAME co
     body: {
       subjectId: "jc-1",
       items: [
-        { id: "it-1", result: "FAIL", notes: "Seam wandering 6mm at the left arm" },
+        { id: "it-1", result: "FAIL", notes: "Seam wandering 6mm at the left arm", photoUrl: PHOTO },
         { id: "it-2", result: "PASS" },
       ],
     },
@@ -242,6 +245,82 @@ test("a FAIL with no words is refused", async () => {
   assert.equal(res.status, 400);
   assert.match((await res.json()).error, /say what failed/i);
   assert.equal(db.state.inspections.find((r) => r.id === "qc-mine").status, "PENDING");
+});
+
+// ── The photo (owner 2026-08-08: "全部东西都要有照片、有记录") ────────────────
+//
+// `photoUrl` was plumbed end to end and had NO uploader on either surface, so
+// it was always null. Now the phone captures it — and the phone is the surface
+// that matters, because the inspector is standing at the bench with the defect
+// in front of them. These assert the RULE, not the widget: a FAIL without a
+// picture does not become a record, and the picture the phone sends actually
+// lands on the row.
+
+test("a FAIL with no photo is refused by the backend, not just by the screen", async () => {
+  const db = makeDb();
+  const res = await call(db, "POST", "/qc/qc-mine/complete", {
+    body: {
+      subjectId: "jc-1",
+      items: [
+        { id: "it-1", result: "FAIL", notes: "Seam wandering 6mm at the left arm" },
+        { id: "it-2", result: "PASS" },
+      ],
+    },
+  });
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /attach a photo/i);
+  // Nothing committed — not the inspection, and above all not the job-card reset.
+  assert.equal(db.state.inspections.find((r) => r.id === "qc-mine").status, "PENDING");
+  assert.equal(db.state.jobCards.find((x) => x.id === "jc-1").status, "IN_PROGRESS");
+});
+
+test("the photo the phone sends is stored on the item row", async () => {
+  const db = makeDb();
+  const res = await call(db, "POST", "/qc/qc-mine/complete", {
+    body: {
+      subjectId: "jc-1",
+      items: [
+        { id: "it-1", result: "FAIL", notes: "Seam wandering 6mm at the left arm", photoUrl: PHOTO },
+        { id: "it-2", result: "PASS" },
+      ],
+    },
+  });
+  assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+  // The worker route used to drop photoUrl on the floor while building the
+  // items array — the field reached the API and never reached the column.
+  assert.equal(db.state.items.find((i) => i.id === "it-1").photoUrl, PHOTO);
+  assert.equal((await res.json()).data.items.find((i) => i.id === "it-1").photoUrl, PHOTO);
+});
+
+test("a PASS needs no photo, and may still carry one", async () => {
+  const db = makeDb();
+  const res = await call(db, "POST", "/qc/qc-mine/complete", {
+    body: {
+      subjectId: "jc-1",
+      items: [
+        { id: "it-1", result: "PASS" },
+        { id: "it-2", result: "PASS", photoUrl: PHOTO },
+      ],
+    },
+  });
+  assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+  assert.equal(db.state.items.find((i) => i.id === "it-1").photoUrl, null);
+  assert.equal(db.state.items.find((i) => i.id === "it-2").photoUrl, PHOTO);
+});
+
+test("an attachment that is not an image is refused", async () => {
+  const db = makeDb();
+  const res = await call(db, "POST", "/qc/qc-mine/complete", {
+    body: {
+      subjectId: "jc-1",
+      items: [
+        { id: "it-1", result: "FAIL", notes: "Seam wandering", photoUrl: "data:text/html;base64,PHNjcmlwdD4=" },
+        { id: "it-2", result: "PASS" },
+      ],
+    },
+  });
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /not an image/i);
 });
 
 test("a phone cannot answer for another department", async () => {

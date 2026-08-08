@@ -2807,7 +2807,7 @@ app.post("/qc/:id/complete", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as {
     subjectId?: string;
     overallNotes?: string;
-    items?: Array<{ id?: string; result?: string; notes?: string }>;
+    items?: Array<{ id?: string; result?: string; notes?: string; photoUrl?: string }>;
   };
   const subjectId = String(body.subjectId ?? "").trim();
   if (!subjectId) {
@@ -2824,12 +2824,22 @@ app.post("/qc/:id/complete", async (c) => {
   }
   const subject = subjects.find((s) => s.id === subjectId);
 
+  // `photoUrl` MUST be carried through. It was dropped here until 2026-08-08,
+  // which meant the phone — the only surface where a camera is actually in the
+  // inspector's hand — could never attach the picture the shared core now
+  // requires on a FAIL. The core validates the payload; this is only transport.
   const items = (Array.isArray(body.items) ? body.items : [])
-    .filter((it): it is { id: string; result: "PASS" | "FAIL" | "NA"; notes?: string } =>
-      typeof it?.id === "string" &&
-      (it.result === "PASS" || it.result === "FAIL" || it.result === "NA"),
+    .filter(
+      (it): it is { id: string; result: "PASS" | "FAIL" | "NA"; notes?: string; photoUrl?: string } =>
+        typeof it?.id === "string" &&
+        (it.result === "PASS" || it.result === "FAIL" || it.result === "NA"),
     )
-    .map((it) => ({ id: it.id, result: it.result, notes: it.notes }));
+    .map((it) => ({
+      id: it.id,
+      result: it.result,
+      notes: it.notes,
+      photoUrl: typeof it.photoUrl === "string" ? it.photoUrl : undefined,
+    }));
 
   const res = await completeInspection(c.var.DB, id, {
     subjectType: "JOB_CARD",

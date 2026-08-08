@@ -8,16 +8,31 @@
 // This screen is deliberately the smallest thing that closes a slot:
 //   • only the logged-in worker's OWN current department,
 //   • only today's slots,
-//   • PASS / FAIL / N/A per item, and a FAIL must carry one line of text.
+//   • PASS / FAIL / N/A per item, and a FAIL must carry one line of text AND
+//     a photo.
+//
+// The photo is why this screen matters more than the desktop one: the
+// inspector is standing at the bench with the defect in front of them, and a
+// phone camera is the only realistic capture point in this factory. It is a
+// plain `<input type="file" accept="image/*" capture="environment">`, which
+// opens the camera directly on mobile Chrome / Safari — the same thing
+// /worker/issue has done since it shipped. The image is compressed with the
+// shared @/lib/image-compress helper and rides to the server as a JPEG data
+// URL, the same shape service_cases.issue_photos and worker_issues.photoDataUrl
+// already use. NOT /api/files — that route is behind the session cookie and
+// would 401 an X-Worker-Token request.
 //
 // Everything else (RM/IQC, FG/OQC, Skip, history, templates) stays on the
 // desktop page. The backend re-checks the department, the stage and the job
-// card — see the QC block in src/api/routes/worker.ts.
+// card — see the QC block in src/api/routes/worker.ts — and re-checks the
+// FAIL-needs-a-photo rule in completeInspection, so nothing here is the only
+// thing standing between a shrug and the record.
 // ============================================================
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { ArrowLeft, CheckCircle2, ShieldCheck } from "lucide-react";
+import { ArrowLeft, Camera, CheckCircle2, ShieldCheck } from "lucide-react";
 import { useT } from "@/lib/worker-i18n";
+import { compressImage } from "@/lib/image-compress";
 import { workerFetch } from "@/layouts/WorkerLayout";
 
 type QcItem = {
@@ -46,7 +61,9 @@ type QcToday = {
 };
 
 type Result = "PASS" | "FAIL" | "NA";
-type Answer = { result: Result | null; notes: string };
+type Answer = { result: Result | null; notes: string; photo: string | null };
+
+const EMPTY_ANSWER: Answer = { result: null, notes: "", photo: null };
 
 const SEVERITY_TONE: Record<string, string> = {
   MINOR: "bg-[#FDF6E3] text-[#8A6D1F]",
@@ -145,13 +162,30 @@ function InspectionCard({
   const setResult = (itemId: string, result: Result) =>
     setAnswers((prev) => ({
       ...prev,
-      [itemId]: { result, notes: prev[itemId]?.notes ?? "" },
+      [itemId]: { ...(prev[itemId] ?? EMPTY_ANSWER), result },
     }));
   const setNotes = (itemId: string, notes: string) =>
     setAnswers((prev) => ({
       ...prev,
-      [itemId]: { result: prev[itemId]?.result ?? null, notes },
+      [itemId]: { ...(prev[itemId] ?? EMPTY_ANSWER), notes },
     }));
+  const setPhoto = (itemId: string, photo: string | null) =>
+    setAnswers((prev) => ({
+      ...prev,
+      [itemId]: { ...(prev[itemId] ?? EMPTY_ANSWER), photo },
+    }));
+
+  // Compressed on the phone, not on the server: an uncompressed 10 MB camera
+  // JPEG over factory 4G is what makes an operator give up half way and stop
+  // photographing anything.
+  async function onPickPhoto(itemId: string, file: File | undefined) {
+    if (!file) return;
+    try {
+      setPhoto(itemId, await compressImage(file, { maxDim: 1280, quality: 0.7 }));
+    } catch {
+      setError(t("qc.photoFailed"));
+    }
+  }
 
   const answered = insp.items.filter((i) => answers[i.id]?.result);
   const allMandatoryAnswered = insp.items.every(
@@ -162,12 +196,18 @@ function InspectionCard({
   const failMissingReason = insp.items.some(
     (i) => answers[i.id]?.result === "FAIL" && !answers[i.id]?.notes.trim(),
   );
+  // …and a FAIL with no picture is an argument three days later. Same shape:
+  // local message first, server rule second.
+  const failMissingPhoto = insp.items.some(
+    (i) => answers[i.id]?.result === "FAIL" && !answers[i.id]?.photo,
+  );
 
   async function submit() {
     setError(null);
     if (!subjectId) { setError(t("qc.subject")); return; }
     if (!allMandatoryAnswered) { setError(t("qc.answerAll")); return; }
     if (failMissingReason) { setError(t("qc.failReasonMissing")); return; }
+    if (failMissingPhoto) { setError(t("qc.photoMissing")); return; }
     setSubmitting(true);
     try {
       const res = await workerFetch(`/api/worker/qc/${insp.id}/complete`, {
@@ -178,6 +218,7 @@ function InspectionCard({
             id: i.id,
             result: answers[i.id].result,
             notes: answers[i.id].notes.trim() || undefined,
+            photoUrl: answers[i.id].photo ?? undefined,
           })),
         }),
       });
@@ -269,6 +310,67 @@ function InspectionCard({
                   placeholder={t("qc.failReason")}
                   className="block w-full rounded-lg border border-[#9A3A2D] bg-white p-3 text-base"
                 />
+              )}
+
+              {/*
+                The camera. Offered as soon as the item has been answered:
+                REQUIRED on FAIL (red frame, and Submit stays disabled without
+                it), optional on PASS / N/A for the inspector who wants to show
+                what "good" looked like today. `capture="environment"` opens the
+                rear camera straight away instead of a file browser.
+              */}
+              {a?.result && (
+                <div>
+                  {a.photo ? (
+                    <div className="relative">
+                      <img
+                        src={a.photo}
+                        alt=""
+                        className={`w-full max-h-56 object-cover rounded-lg border ${
+                          a.result === "FAIL" ? "border-[#9A3A2D]" : "border-[#D8D2CC]"
+                        }`}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setPhoto(item.id, null)}
+                        className="absolute top-2 right-2 h-9 px-3 rounded-lg bg-white/90 text-xs font-semibold shadow"
+                      >
+                        {t("qc.photoRemove")}
+                      </button>
+                    </div>
+                  ) : (
+                    <p
+                      className={`text-[11px] font-semibold uppercase tracking-wide ${
+                        a.result === "FAIL" ? "text-[#9A3A2D]" : "text-[#8A8680]"
+                      }`}
+                    >
+                      {a.result === "FAIL" ? t("qc.photoRequired") : t("qc.photoOptional")}
+                    </p>
+                  )}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    className="hidden"
+                    id={`qc-photo-${item.id}`}
+                    onChange={(e) => {
+                      void onPickPhoto(item.id, e.target.files?.[0]);
+                      // Clear so retaking the SAME file still fires onChange.
+                      e.target.value = "";
+                    }}
+                  />
+                  <label
+                    htmlFor={`qc-photo-${item.id}`}
+                    className={`mt-1.5 flex h-12 w-full cursor-pointer items-center justify-center gap-2 rounded-lg border text-sm font-semibold ${
+                      a.result === "FAIL" && !a.photo
+                        ? "border-[#9A3A2D] bg-white text-[#9A3A2D]"
+                        : "border-[#D8D2CC] bg-white text-[#1F1D1B]"
+                    }`}
+                  >
+                    <Camera className="h-4 w-4" />
+                    {a.photo ? t("qc.photoRetake") : t("qc.photoTake")}
+                  </label>
+                </div>
               )}
             </div>
           );

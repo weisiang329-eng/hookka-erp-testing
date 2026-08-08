@@ -39,6 +39,7 @@ import {
   type QcWindowDays,
 } from "@/lib/qc-slot-window";
 import { formatDateDMY } from "@/lib/utils";
+import { compressImage } from "@/lib/image-compress";
 import { getCurrentUser } from "@/lib/auth";
 import {
   ShieldCheck,
@@ -46,6 +47,7 @@ import {
   CheckCircle2,
   XCircle,
   AlertTriangle,
+  Camera,
   Clock,
   Plus,
   Trash2,
@@ -672,6 +674,29 @@ function DoInspectionForm({
     },
     [],
   );
+  const onItemPhoto = useCallback(
+    (id: string, photoUrl: string) => {
+      setItems((prev) => prev.map((i) => (i.id === id ? { ...i, photoUrl } : i)));
+    },
+    [],
+  );
+  // `photoUrl` was plumbed all the way through — column, write, read, submit
+  // body — with nothing anywhere that could produce a value, so it was always
+  // null. Same capture path as the phone (@/lib/image-compress → JPEG data
+  // URL, stored in the TEXT column like service_cases.issue_photos), so both
+  // surfaces write the same thing and neither needs /api/files, which the
+  // worker token cannot reach.
+  const onPickPhoto = useCallback(
+    async (id: string, file: File | undefined) => {
+      if (!file) return;
+      try {
+        onItemPhoto(id, await compressImage(file, { maxDim: 1280, quality: 0.7 }));
+      } catch {
+        toast.error("Could not read that image. Try another file.");
+      }
+    },
+    [onItemPhoto, toast],
+  );
 
   const allMandatoryAnswered = items.every((i) => !i.isMandatory || i.result != null);
   const failingItems = items.filter((i) => i.result === "FAIL");
@@ -680,6 +705,11 @@ function DoInspectionForm({
   // enforces it too (completeInspection), so this is only here to say so
   // before the round-trip rather than after a 400.
   const failMissingReason = failingItems.some((i) => !i.notes.trim());
+  // A FAIL with no picture is the same shrug in a different form: the words
+  // are the inspector's opinion, the photo is the only part a reviewer can
+  // still check once the unit has been reworked. Required on FAIL, optional
+  // on PASS. Also enforced in completeInspection.
+  const failMissingPhoto = failingItems.some((i) => !i.photoUrl);
 
   const submit = useCallback(async () => {
     if (!subjectType || !subjectId) {
@@ -692,6 +722,10 @@ function DoInspectionForm({
     }
     if (failMissingReason) {
       toast.error("Every FAIL needs one line saying what was wrong.");
+      return;
+    }
+    if (failMissingPhoto) {
+      toast.error("Every FAIL needs a photo of what failed.");
       return;
     }
     setSubmitting(true);
@@ -728,7 +762,7 @@ function DoInspectionForm({
     } finally {
       setSubmitting(false);
     }
-  }, [subjectType, subjectId, subjectLabel, subjectCode, items, overallNotes, insp.id, me, allMandatoryAnswered, failMissingReason, onRefresh, onClose, toast]);
+  }, [subjectType, subjectId, subjectLabel, subjectCode, items, overallNotes, insp.id, me, allMandatoryAnswered, failMissingReason, failMissingPhoto, onRefresh, onClose, toast]);
 
   const skip = useCallback(async () => {
     if (!skipReason.trim()) {
@@ -914,6 +948,69 @@ function DoInspectionForm({
                   onChange={(e) => onItemNotes(item.id, e.target.value)}
                 />
               )}
+              {item.result != null && (
+                <div className="mt-2 flex items-start gap-3">
+                  {item.photoUrl ? (
+                    <div className="relative">
+                      <img
+                        src={item.photoUrl}
+                        alt=""
+                        className={`h-24 w-32 rounded border object-cover ${
+                          item.result === "FAIL" ? "border-red-400" : "border-input"
+                        }`}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => onItemPhoto(item.id, "")}
+                        className="absolute right-1 top-1 rounded bg-white/90 px-1.5 py-0.5 text-[10px] font-semibold shadow"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ) : null}
+                  <div>
+                    {/*
+                      `capture="environment"` is harmless on a desktop browser
+                      (it falls back to the file picker) and opens the camera
+                      directly on a tablet carried onto the floor, which is how
+                      this screen is actually used at the goods-in bench.
+                    */}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      capture="environment"
+                      className="hidden"
+                      id={`qc-photo-${item.id}`}
+                      onChange={(e) => {
+                        void onPickPhoto(item.id, e.target.files?.[0]);
+                        e.target.value = "";
+                      }}
+                    />
+                    <label
+                      htmlFor={`qc-photo-${item.id}`}
+                      className={`inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium ${
+                        item.result === "FAIL" && !item.photoUrl
+                          ? "border-red-400 bg-background text-red-700"
+                          : "border-input bg-background hover:bg-muted"
+                      }`}
+                    >
+                      <Camera className="size-3.5" />
+                      {item.photoUrl ? "Replace photo" : "Add photo"}
+                    </label>
+                    <p
+                      className={`mt-1 text-[11px] ${
+                        item.result === "FAIL" && !item.photoUrl
+                          ? "font-medium text-red-600"
+                          : "text-muted-foreground"
+                      }`}
+                    >
+                      {item.result === "FAIL"
+                        ? "Required — a failure with no picture is an argument three days later."
+                        : "Optional on a pass."}
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -930,7 +1027,7 @@ function DoInspectionForm({
       )}
 
       <div className="flex flex-wrap items-center gap-2 border-t pt-3">
-        <Button onClick={submit} disabled={submitting || !subjectId || !allMandatoryAnswered || failMissingReason}>
+        <Button onClick={submit} disabled={submitting || !subjectId || !allMandatoryAnswered || failMissingReason || failMissingPhoto}>
           <CheckCircle2 className="mr-2 size-4" />
           Submit ({failingItems.length > 0 ? "FAIL" : "PASS"})
         </Button>
@@ -955,6 +1052,11 @@ function DoInspectionForm({
 function HistoryTab() {
   const { data: histResp, loading } = useCachedJson<{ data?: Inspection[] }>("/api/qc-inspections");
   const inspections = histResp?.data ?? [];
+  // A photo nobody can look at afterwards is not a record. The grid is one row
+  // per inspection; the per-item answers — and the pictures attached to them —
+  // only exist behind a click, so there has to BE a click.
+  const [openId, setOpenId] = useState<string | null>(null);
+  const open = inspections.find((i) => i.id === openId) ?? null;
 
   const cols = useMemo<Column<Inspection>[]>(
     () => [
@@ -996,6 +1098,23 @@ function HistoryTab() {
           return failing > 0 ? <span className="font-semibold text-red-700">{failing}</span> : <span className="text-muted-foreground">0</span>;
         },
       },
+      {
+        key: "photos",
+        label: "Photos",
+        width: "70px",
+        align: "right",
+        render: (_v, row) => {
+          const n = row.items.filter((i) => i.photoUrl).length;
+          return n > 0 ? (
+            <span className="inline-flex items-center gap-1 font-medium">
+              <Camera className="size-3.5" />
+              {n}
+            </span>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          );
+        },
+      },
     ],
     [],
   );
@@ -1011,10 +1130,62 @@ function HistoryTab() {
           columns={cols}
           keyField="id"
           loading={loading}
+          onRowClick={(row) => setOpenId((cur) => (cur === row.id ? null : row.id))}
           emptyMessage="No inspections yet. Generate today's slot from the Pending tab."
           gridId="qc-history"
           maxHeight="60vh"
         />
+        {open && (
+          <div className="space-y-3 border-t bg-muted/20 p-4">
+            <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
+              <span className="font-mono font-semibold">{open.inspectionNo}</span>
+              <span className="text-muted-foreground">
+                {open.inspectorName || "—"}
+                {open.completedAt ? ` · ${fmtSlot(open.completedAt)}` : ""}
+              </span>
+              <button
+                type="button"
+                onClick={() => setOpenId(null)}
+                className="ml-auto text-xs text-muted-foreground underline"
+              >
+                Close
+              </button>
+            </div>
+            {open.notes && <p className="text-sm">{open.notes}</p>}
+            <div className="divide-y rounded-md border bg-background">
+              {open.items.length === 0 ? (
+                <p className="px-3 py-2 text-sm text-muted-foreground">
+                  No per-item answers were recorded on this inspection.
+                </p>
+              ) : (
+                open.items.map((it) => (
+                  <div key={it.id} className="flex items-start gap-3 px-3 py-2">
+                    <Badge className={`shrink-0 text-xs ${it.result ? RESULT_COLOR[it.result] : ""}`}>
+                      {it.result ?? "—"}
+                    </Badge>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium">
+                        {it.sequence}. {it.itemName}
+                      </div>
+                      {it.notes && <p className="text-xs text-muted-foreground">{it.notes}</p>}
+                    </div>
+                    {it.photoUrl ? (
+                      <a href={it.photoUrl} target="_blank" rel="noreferrer" className="shrink-0">
+                        <img
+                          src={it.photoUrl}
+                          alt=""
+                          className="h-16 w-20 rounded border object-cover"
+                        />
+                      </a>
+                    ) : (
+                      <span className="shrink-0 text-[11px] text-muted-foreground">no photo</span>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

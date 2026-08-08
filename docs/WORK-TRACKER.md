@@ -9,6 +9,39 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-08 — 🔵 QC 三条：FAIL 一定要有照片、时间跟人由 server 盖、把「对留样」的标准全部重写 · main（未 push，未验 prod）
+
+Owner 三条：
+
+1. **「全部东西都要有照片、有记录。要写什么东西，都要有记录。」**
+   `qc_inspection_items.photoUrl` 早就接好了（写在 `qc-pending.ts:2067`，回在 `:398`，
+   `quality.tsx:712` 也照传），**但两个画面都没有上传的地方**——栏位通了却按不到，所以永远
+   是 null。已核实：`grep -i photo src/pages/quality.tsx` 只有型别跟 submit 那两行，
+   `src/pages/worker/qc.tsx` 一次都没有出现。桌面 + 手机都补上拍照；**FAIL 一定要有照片，
+   PASS 可有可无**，而且 backend 也要挡（手机打的是同一个 endpoint）。
+   走既有的路：`compressImage()` → data URL 存 TEXT 栏，跟 `service_cases.issue_photos`、
+   `worker_issues.photoDataUrl` 同一条。**不走 `/api/files`**：那条是 cookie-gated
+   （`requirePermission(c,'files','create')`），worker portal 拿 X-Worker-Token 会 401。
+
+2. **「录入的时候，系统应该要自动生成日期、时间等等。」**
+   已核实：`inspectionDate` 在生成时就盖（`qc-pending.ts:541`，server 算的 slot date），
+   `completedAt` 在 `completeInspection` 用 server clock（`:2056`）。**破口在 inspector**：
+   桌面那条 `POST /api/qc-pending/:id/complete` 从 **request body** 拿 `inspectorId` /
+   `inspectorName`（`:2261-2262`）——client 自己填的名字不是记录。改成从 session
+   （`c.get("userId")` + `users.displayName`）拿，body 的值不再看。手机那条本来就是
+   `auth.workerId` / `auth.worker.name`，没问题。
+   **逐项的作答时间做不到**：`qc_inspection_items` 没有 `answered_at`，加它就要加栏位，
+   owner 没要求到这个份上——记在这里，不偷加。
+
+3. **「留样登记应该就不需要了，因为我们正常都不会做留样登记的。」**
+   DB 里根本没有留样 / 色卡 / golden sample 的表，所以每一条写「对留样比」的标准都是
+   **做不到的标准**——正是今天花一整天在拔的那个毛病。0215/0217/0219 一共 **17 条**
+   （incoming 布色、留样布片登记、夹板面级、床料种类、织带种类、配件对码、FG 沙发/床架
+   布色、在仓海绵发黄、在仓布色、在仓通用、沙发座陷、沙发整体外观、洗唛位置、织带种类、
+   床头拼缝、床头填充厚度）。全部改成只靠**货 + 单 + 眼睛**答得出来的：对 PO/BOM、对同
+   一批的另一卷/另一片、对架上还在的上一批，或者一句绝对描述。出 mig 0220，prod 已经
+   seed 过所以另外交 UPDATE 给 owner 自己跑。
+
 ## 2026-08-08 — ✅ QC 四条：RM 一天一验、STORED 新节奏、FG 按风险抽、WIP 写清各站 · main（未 push，未验 prod）
 
 Owner 三条，全部是**改已经 ship 的东西**，不是重做：

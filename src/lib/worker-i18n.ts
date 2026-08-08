@@ -550,6 +550,35 @@ const dict: Dict = {
     my: 'တင်သွင်းပြီးပါပြီ။ ကျေးဇူးတင်ပါသည်။',
   },
   'qc.required': { en: 'required', ms: 'wajib', zh: '必填', my: 'လိုအပ်' },
+  // Photo. Required on FAIL, optional on PASS — the backend enforces the same
+  // rule, so these strings describe it rather than create it.
+  'qc.photoTake': { en: 'Take photo', ms: 'Ambil gambar', zh: '拍照', my: 'ဓာတ်ပုံရိုက်' },
+  'qc.photoRetake': { en: 'Retake', ms: 'Ambil semula', zh: '重拍', my: 'ပြန်ရိုက်' },
+  'qc.photoRemove': { en: 'Remove photo', ms: 'Buang gambar', zh: '删除照片', my: 'ဓာတ်ပုံဖျက်' },
+  'qc.photoRequired': {
+    en: 'Photo required',
+    ms: 'Gambar wajib',
+    zh: '必须拍照',
+    my: 'ဓာတ်ပုံ လိုအပ်သည်',
+  },
+  'qc.photoOptional': {
+    en: 'Photo (optional)',
+    ms: 'Gambar (pilihan)',
+    zh: '照片（选填）',
+    my: 'ဓာတ်ပုံ (ရွေးချယ်)',
+  },
+  'qc.photoMissing': {
+    en: 'Every FAIL needs a photo of what failed.',
+    ms: 'Setiap GAGAL perlu gambar kerosakan itu.',
+    zh: '每个不合格都要拍一张照片。',
+    my: 'ကျတိုင်း ချို့ယွင်းချက်ဓာတ်ပုံ တစ်ပုံ လိုအပ်သည်။',
+  },
+  'qc.photoFailed': {
+    en: 'Could not read that photo. Try again.',
+    ms: 'Gambar tidak dapat dibaca. Cuba lagi.',
+    zh: '照片读取失败，请重试。',
+    my: 'ဓာတ်ပုံ မဖတ်နိုင်ပါ။ ထပ်ကြိုးစားပါ။',
+  },
 
   'issue.sent': {
     en: 'Problem reported',

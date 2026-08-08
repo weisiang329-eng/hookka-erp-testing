@@ -1980,6 +1980,41 @@ export type CompleteInspectionInput = {
   inspectorName?: string | null;
 };
 
+// ---------------------------------------------------------------------------
+// The photo on a check item.
+//
+// Owner 2026-08-08: "全部东西都要有照片、有记录。要写什么东西，都要有记录."
+// `qc_inspection_items.photoUrl` had been plumbed end to end since the rebuild
+// — written here, echoed by rowToInspection, forwarded by quality.tsx — and
+// there was NO uploader on either surface, so the column was always null. A
+// field that cannot be reached is not a record.
+//
+// Storage follows the path the repo already uses for a phone-captured photo:
+// a compressed JPEG data URL in a TEXT column, exactly like
+// `service_cases.issue_photos` and `worker_issues.photoDataUrl`. It is NOT
+// /api/files: that route is `requirePermission(c, "files", "create")` behind
+// the session cookie, and the worker portal authenticates with X-Worker-Token,
+// so the phone — the surface that matters here, because the inspector is
+// standing at the bench with the defect in front of them — would get a 401.
+//
+// ~2.2 MB decoded. `compressImage(file, { maxDim: 1280, quality: 0.7 })`
+// lands around 150 KB, so this is a guard against a client that skipped the
+// compressor, not a working limit.
+const MAX_PHOTO_CHARS = 3_000_000;
+
+function photoProblem(v: string): string | null {
+  // An already-hosted URL is accepted so a future move to /api/files (for the
+  // desktop, which CAN reach it) does not need this core changed again.
+  if (/^https?:\/\//i.test(v)) return null;
+  if (!/^data:image\/(png|jpe?g|webp|heic|heif);base64,[A-Za-z0-9+/=\s]+$/i.test(v)) {
+    return "the attachment is not an image";
+  }
+  if (v.length > MAX_PHOTO_CHARS) {
+    return "the photo is too large — retake it rather than uploading the original";
+  }
+  return null;
+}
+
 export type CompleteInspectionResult =
   | {
       ok: true;
@@ -2051,6 +2086,33 @@ export async function completeInspection(
     }
   }
 
+  // …and a FAIL with no PICTURE is an argument three days later. The words say
+  // what the inspector believed; the photo is the only part anyone else can
+  // still check once the unit has been reworked or shipped. Required on FAIL,
+  // optional on PASS — a passing item is the normal state, and demanding 251
+  // photographs of things that were fine is how the whole requirement gets
+  // quietly ignored. Enforced HERE, in the shared core, because the phone
+  // posts to the same completion path as the desk (see the note above
+  // completeInspection) and a UI-only rule is not a rule.
+  for (const it of items) {
+    const row = itemRowsById.get(it.id);
+    const name = row?.itemName ?? it.id;
+    const photo = String(it.photoUrl ?? "").trim();
+    if (it.result === "FAIL" && !photo) {
+      return {
+        ok: false,
+        status: 400,
+        error: `"${name}" is marked FAIL — attach a photo of what failed`,
+      };
+    }
+    if (photo) {
+      const problem = photoProblem(photo);
+      if (problem) {
+        return { ok: false, status: 400, error: `"${name}": ${problem}` };
+      }
+    }
+  }
+
   const overallFail = items.some((it) => it.result === "FAIL");
   const overallResult = overallFail ? "FAIL" : "PASS";
   const now = new Date().toISOString();
@@ -2066,7 +2128,7 @@ export async function completeInspection(
         .prepare(
           `UPDATE qc_inspection_items SET result = ?, notes = ?, photoUrl = ? WHERE id = ?`,
         )
-        .bind(it.result, it.notes ?? null, it.photoUrl ?? null, it.id),
+        .bind(it.result, it.notes ?? null, String(it.photoUrl ?? "").trim() || null, it.id),
     );
   }
 

@@ -1237,7 +1237,11 @@ app.get("/stats", async (c) => {
       getInvoiceStatsSignature(c.var.DB),
     ]);
     const currentMax = sig.maxUpdatedAt;
-    if (isSnapshotFresh(snap, currentMax, sig.rowCount) && snap) {
+    // A snapshot written before totalByStatus existed holds the old shape.
+    // Serving it would leave the list page's status tab strip silently without
+    // money until the next invoice write bumped the signature, so treat a
+    // missing key as stale — one recompute, then the new shape is cached.
+    if (isSnapshotFresh(snap, currentMax, sig.rowCount) && snap && snap.data.totalByStatus) {
       return c.json({ success: true, ...snap.data });
     }
   }
@@ -1252,10 +1256,19 @@ app.get("/stats", async (c) => {
   const [byStatusRes, sumsRes] = await Promise.all([
     c.var.DB
       .prepare(
-        `SELECT status, COUNT(*) AS n FROM invoices ${filtered ? fClause : ""} GROUP BY status`,
+        // The money per status rides on the SAME GROUP BY as the counts, so the
+        // list page's status tab strip can render "Sent 25 · RM 15,631.00"
+        // without a second endpoint whose figure could drift from the badge
+        // beside it. Quoted aliases: an unquoted `AS total_sen` returns
+        // CAMELCASED from the driver and the read would silently be undefined.
+        `SELECT status                     AS "status",
+                COUNT(*)                   AS "n",
+                COALESCE(SUM(totalSen), 0) AS "totalSen"
+           FROM invoices ${filtered ? fClause : ""}
+          GROUP BY status`,
       )
       .bind(...(filtered ? fParams : []))
-      .all<{ status: string; n: number }>(),
+      .all<{ status: string; n: number; totalSen: number }>(),
     c.var.DB
       .prepare(
         // Filtered: outstanding + collected within the filtered set. Unfiltered:
@@ -1279,13 +1292,18 @@ app.get("/stats", async (c) => {
       .first<{ outstandingSen: number; paidMTDSen: number }>(),
   ]);
   const byStatus: Record<string, number> = {};
+  // Invoiced total per status, integer sen — the same figure the grid's "Total"
+  // column shows, summed over exactly the rows each status bucket holds.
+  const totalByStatus: Record<string, number> = {};
   let total = 0;
   for (const row of byStatusRes.results ?? []) {
     byStatus[row.status] = row.n;
+    totalByStatus[row.status] = Number(row.totalSen) || 0;
     total += row.n;
   }
   const payload = {
     byStatus,
+    totalByStatus,
     total,
     outstandingSen: Number(sumsRes?.outstandingSen ?? 0),
     paidMTDSen: Number(sumsRes?.paidMTDSen ?? 0),

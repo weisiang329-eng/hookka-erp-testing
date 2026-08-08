@@ -852,13 +852,67 @@ app.post("/", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /api/consignment-orders/stats — whole-dataset status bucket counts.
-// Mirrors /api/sales-orders/stats. Used by the list-page tab badges.
+// GET /api/consignment-orders/stats — whole-dataset status bucket counts AND
+// the order value in each bucket.
+//
+// Mirrors /api/sales-orders/stats, including the two things that one learned
+// the hard way:
+//
+//   • the money comes from the SAME GROUP BY as the counts, so the list page's
+//     tab strip can show "Draft 12 · RM 34,000.00" without a second endpoint
+//     that could disagree with the badge beside it;
+//
+//   • an AGGREGATE is a number, not a row, so the customer-scope RESPONSE
+//     filter has nothing to drop here — the narrowing has to be inside the
+//     GROUP BY or a salesperson reads the whole company's consignment book off
+//     the tab strip. Same hole the owner caught on the Sales page 2026-08-05
+//     (empty grid, cards reading 1,229 orders / RM 1.4m); this route had it
+//     too, and adding money to the strip would have turned a count leak into a
+//     money leak.
+//
+// The snapshot is keyed by ORG alone, so a scoped caller must neither read from
+// nor write to it. cacheKey is "v2": a snapshot written before this change
+// holds { byStatus, total } with no money in it, and serving that shape would
+// leave the strip silently money-less until the next CO write.
+//
 // MUST be registered BEFORE /:id (Hono matches in registration order; a
 // wildcard /:id would otherwise swallow "/stats").
 // ---------------------------------------------------------------------------
 app.get("/stats", async (c) => {
   const orgId = getOrgId(c);
+  const scope = await customerScopeSql(c, "customerId");
+
+  const compute = async () => {
+    const where = scope.clause ? `WHERE ${scope.clause}` : "";
+    // Quoted aliases on purpose: an unquoted `AS revenue_sen` comes back
+    // CAMELCASED from the driver and `row.revenueSen` would silently read
+    // undefined → RM 0.00 everywhere.
+    const res = await c.var.DB
+      .prepare(
+        `SELECT status                     AS "status",
+                COUNT(*)                   AS "n",
+                COALESCE(SUM(totalSen), 0) AS "revenueSen"
+           FROM consignment_orders
+           ${where}
+           GROUP BY status`,
+      )
+      .bind(...scope.binds)
+      .all<{ status: string; n: number; revenueSen: number }>();
+    const byStatus: Record<string, number> = {};
+    const revenueByStatus: Record<string, number> = {};
+    let total = 0;
+    let totalRevenueSen = 0;
+    for (const row of res.results ?? []) {
+      byStatus[row.status] = row.n;
+      revenueByStatus[row.status] = Number(row.revenueSen) || 0;
+      total += row.n;
+      totalRevenueSen += Number(row.revenueSen) || 0;
+    }
+    return { byStatus, revenueByStatus, total, totalRevenueSen };
+  };
+
+  if (scope.clause) return c.json({ success: true, ...(await compute()) });
+
   const { withSnapshot } = await import("../lib/snapshot");
   // PR 7 — cache-aside snapshot.
   const data = await withSnapshot(
@@ -868,20 +922,8 @@ app.get("/stats", async (c) => {
       sourceTables: ["consignment_orders"],
     },
     orgId,
-    async () => {
-      const res = await c.var.DB
-        .prepare(
-          "SELECT status, COUNT(*) AS n FROM consignment_orders GROUP BY status",
-        )
-        .all<{ status: string; n: number }>();
-      const byStatus: Record<string, number> = {};
-      let total = 0;
-      for (const row of res.results ?? []) {
-        byStatus[row.status] = row.n;
-        total += row.n;
-      }
-      return { byStatus, total };
-    },
+    compute,
+    "v2",
   );
   return c.json({ success: true, ...data });
 });

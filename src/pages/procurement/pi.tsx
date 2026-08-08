@@ -757,6 +757,9 @@ export default function PurchaseInvoicesPage() {
                 data={filteredInvoices}
                 keyField="id"
                 virtualize
+                // Stable id — the column picker / drag / resize state persists
+                // under it. Renaming it silently discards saved layouts.
+                gridId="purchase-invoices-list"
                 loading={loading}
                 stickyHeader={true}
                 selectable

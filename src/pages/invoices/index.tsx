@@ -798,6 +798,9 @@ export default function InvoicesPage() {
                 loading={loading}
                 keyField="id"
                 virtualize
+                // Stable id — the column picker / drag / resize state persists
+                // under it. Renaming it silently discards saved layouts.
+                gridId="invoices-list"
                 selectable
                 onSelectionChange={(rows: Invoice[]) => setSelectedInvoices(rows)}
                 onDoubleClick={(row) => navigate(`/invoices/${row.id}`)}

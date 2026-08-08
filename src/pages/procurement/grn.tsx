@@ -1187,6 +1187,9 @@ export default function GRNPage() {
             data={filteredGRNs}
             keyField="id"
             virtualize
+            // Stable id — the column picker / drag / resize state persists
+            // under it. Renaming it silently discards saved layouts.
+            gridId="goods-receipts-list"
             loading={loading}
             stickyHeader={true}
             selectable

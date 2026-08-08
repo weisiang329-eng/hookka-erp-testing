@@ -853,6 +853,9 @@ export default function SalesPage() {
             loading={loading}
             stickyHeader={true}
             virtualize
+            // Stable id — the column picker / drag / resize state persists
+            // under it. Renaming it silently discards saved layouts.
+            gridId="consignment-orders-list"
             maxHeight="calc(100vh - 320px)"
             emptyMessage={tab === "DRAFT" ? "No draft orders." : "No confirmed orders."}
             onDoubleClick={(row) => navigate(`/consignment/${row.id}`)}

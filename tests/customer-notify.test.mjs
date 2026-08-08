@@ -659,10 +659,20 @@ test("frontend: bulk + single transition paths fire the notify flow", () => {
     1,
     "row-action Mark Dispatched must notify",
   );
+  // The detail DRAWER no longer carries its own Mark Dispatched button: its
+  // sticky action bar is the row menu, filtered by status (drawerActionBar,
+  // src/lib/document-drawer.ts). So there is exactly ONE Mark-Dispatched
+  // implementation to notify from — the row action pinned above — and the
+  // drawer reaching it is what must be pinned here.
+  assert.match(
+    pageSrc,
+    /drawerActionBar\("DELIVERY_ORDER",\s*getContextMenuItems\(detailLive\)\)/,
+    "the drawer's action bar must come from the row menu that notifies",
+  );
   assert.equal(
     count(pageSrc, /notifyCustomersAfterTransition\(\[detailDO\], "DISPATCHED"\)/g),
-    1,
-    "detail-modal Mark Dispatched must notify",
+    0,
+    "the drawer must not grow a second Mark Dispatched path",
   );
   assert.equal(
     count(pageSrc, /notifyCustomersAfterTransition\(\[podDialog\], "DELIVERED"\)/g),
@@ -1023,17 +1033,18 @@ test("frontend: Feature A Resend wiring (detail footer + row menu) + Feature B n
     pageSrc,
     /customersDataRef\.current\.find\(\(cu\) => cu\.id === row\.customerId\)\?\.email/,
   );
-  // Detail footer: Resend button for DELIVERED/INVOICED, disabled when no
-  // email (with the "No email on file" label/hint).
-  assert.match(
-    pageSrc,
-    /detailDO\.status === "DELIVERED" \|\|\s*\n\s*detailDO\.status === "INVOICED"/,
-  );
-  assert.match(pageSrc, /No email on file/);
-  assert.match(pageSrc, /resendCustomerNotice\(detailDO, "DELIVERED"\)/);
   // Row context menu: "Resend invoice email" entry, gated to delivered/invoiced.
+  // This is now the ONLY gate: the detail drawer's sticky action bar is that
+  // same menu filtered by status (drawerActionBar), so the DELIVERED/INVOICED
+  // rule is written once instead of once per surface.
   assert.match(pageSrc, /label: "Resend invoice email"/);
   assert.match(pageSrc, /resendCustomerNotice\(row, "DELIVERED"\)/);
+  assert.match(
+    pageSrc,
+    /disabled:\s*\n?\s*row\.status !== "DELIVERED" && row\.status !== "INVOICED",/,
+  );
+  // The drawer still tells the operator when there is nowhere to send it.
+  assert.match(pageSrc, /No email on file/);
 
   // Feature B — no-email warning fires at the moment of each customer-notice
   // transition (dispatch, mark delivered, generate invoice) so the operator
@@ -1047,9 +1058,11 @@ test("frontend: Feature A Resend wiring (detail footer + row menu) + Feature B n
   // both dispatch paths). At least: delivered + dispatch + invoice.
   assert.match(pageSrc, /warnIfNoCustomerEmail\(podDialog, "DELIVERED"\)/);
   assert.match(pageSrc, /warnIfNoCustomerEmail\(invoiceDialog, "DELIVERED"\)/);
+  // ONE dispatch path now — the row action, which the detail drawer's action
+  // bar reuses instead of keeping its own copy.
   assert.equal(
     count(pageSrc, /warnIfNoCustomerEmail\([^,]+, "DISPATCHED"\)/g),
-    2,
-    "both dispatch paths (row action + detail modal) must warn on no-email",
+    1,
+    "the single dispatch path must warn on no-email",
   );
 });

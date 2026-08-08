@@ -58,6 +58,14 @@ import {
 } from "@/lib/delivery-pipeline";
 import { MALAYSIA_STATES, resolveStateCode } from "@/lib/malaysia-states";
 import { aggregateRacksFromPackingCards } from "@/lib/rack-format";
+import { DocumentDetailDrawer } from "@/components/ui/document-detail-drawer";
+import {
+  drawerActionBar,
+  drawerDocLabel,
+  drawerFullPagePath,
+  drawerLineSpec,
+  isPrimaryDrawerAction,
+} from "@/lib/document-drawer";
 
 const DOMutationSchema = mutationWithData(DeliveryOrderSchema);
 const SOMutationSchema = mutationWithData(SalesOrderSchema);
@@ -3633,6 +3641,21 @@ export default function DeliveryPage() {
     };
   }, [detailDO?.id]);
 
+  // The open drawer's document, RE-READ from the list rather than frozen at the
+  // moment the row was clicked. The status badge and the sticky action bar are
+  // derived from the row's status, so after an action refetches the drawer must
+  // see the new status or it would keep offering the move it just made.
+  // Derived, not stored: an effect that copied the fresh row back into state
+  // would just be a cascading render. Left frozen while editing, where the
+  // draft — not the server — is the truth on screen.
+  const detailLive = useMemo(
+    () =>
+      detailDO && !editMode
+        ? (deliveryOrders.find((r) => r.id === detailDO.id) ?? detailDO)
+        : detailDO,
+    [detailDO, deliveryOrders, editMode],
+  );
+
   // Resolve a line's customer PO / SO / Ref, preferring the per-line
   // production-order values from /print-extras over the (often blank)
   // SO-header values carried on the row. Gated by forId so a previous
@@ -3650,6 +3673,20 @@ export default function DeliveryPage() {
       customerSO: item.customerSO || ext?.customerSO || "",
       customerRef: item.customerRef || ext?.customerRef || "",
     };
+  };
+
+  // The line's build spec as ONE readable line — fabric / DIVAN + LEG / GAP /
+  // T.Heights / special order. Composed by the SHARED formatter the printed DO,
+  // Invoice, CN and DR all use (src/lib/doc-line-format.ts via drawerLineSpec),
+  // so the drawer can never describe a line differently from its own paperwork.
+  // Height/gap/category/special come from the same /print-extras payload the
+  // PDF is built from; a line with no extras still shows its fabric + size.
+  const lineSpec = (item: DOItem): string => {
+    const ext =
+      detailExtras && detailExtras.forId === detailDO?.id
+        ? detailExtras.data
+        : undefined;
+    return drawerLineSpec(item, ext?.items?.[item.id]);
   };
 
   // Per-row "Print DO" — generates the formal DO PDF straight from the
@@ -4553,6 +4590,7 @@ export default function DeliveryPage() {
           }
           fetchData();
         },
+        danger: true,
         disabled: row.status === "CANCELLED",
       },
       { label: "", separator: true, action: () => {} },
@@ -4563,6 +4601,21 @@ export default function DeliveryPage() {
       },
     ],
     [confirm, fetchData, navigate]
+  );
+
+  // The drawer's sticky action bar: the grid's OWN row menu for THIS document,
+  // filtered to the entries its current status leaves enabled. One status
+  // table (getContextMenuItems), two surfaces.
+  const detailActionBar = useMemo(
+    () =>
+      detailLive
+        ? // getContextMenuItems only BUILDS descriptors here; the refs it closes
+          // over (customersDataRef) are read inside the action callbacks, at click
+          // time — never during this render.
+          // eslint-disable-next-line react-hooks/refs
+          drawerActionBar("DELIVERY_ORDER", getContextMenuItems(detailLive))
+        : [],
+    [detailLive, getContextMenuItems],
   );
 
   // ---------- Tab counts ----------
@@ -5972,25 +6025,29 @@ export default function DeliveryPage() {
         </div>
       )}
 
-      {/* ---------- Detail Dialog (inline, fixed inset-0 z-50) ---------- */}
+      {/* ---------- Detail drawer (right slide-over) ----------
+           Same body as before; the CHROME is now the shared
+           DocumentDetailDrawer, so the doc no / type / status badge / "Open
+           full page" / close bar and the pinned action bar are identical for
+           every document type that adopts it. Opening it does not navigate,
+           so the list underneath keeps its rows, filters and scroll. */}
       {detailDO && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          {/* Backdrop */}
-          <div
-            className="absolute inset-0 bg-black/40"
-            onClick={() => { if (!editMode) { setDetailDO(null); } }}
-          />
-          {/* Panel */}
-          <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-5xl mx-4 max-h-[90vh] overflow-y-auto border border-[#E2DDD8]">
-            {/* Header */}
-            <div className="sticky top-0 bg-white border-b border-[#E2DDD8] px-6 py-4 flex items-center justify-between rounded-t-xl z-10">
-              <div>
-                <h2 className="text-lg font-bold text-[#1F1D1B]">{detailDO.doNo}</h2>
-                <p className="text-xs text-[#6B7280]">
-                  {editMode ? "Edit Delivery Order" : "Delivery Order Detail"}
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
+        <DocumentDetailDrawer
+          docNo={detailDO.doNo}
+          docType={editMode ? "Edit Delivery Order" : drawerDocLabel("DELIVERY_ORDER")}
+          status={
+            <Badge variant="status" status={(detailLive ?? detailDO).status}>
+              {STATUS_LABEL[(detailLive ?? detailDO).status]}
+            </Badge>
+          }
+          // Not offered mid-edit: navigating away would drop the draft.
+          fullPageHref={
+            editMode ? undefined : drawerFullPagePath("DELIVERY_ORDER", detailDO.id)
+          }
+          onClose={() => { if (editMode) cancelEditMode(); else setDetailDO(null); }}
+          onScrimClick={() => { if (!editMode) { setDetailDO(null); } }}
+          headerActions={
+            <>
                 {!editMode && detailDO.status === "DRAFT" && (
                   <>
                     <button
@@ -6046,26 +6103,74 @@ export default function DeliveryPage() {
                     </button>
                   </>
                 )}
-                <button
-                  onClick={() => { if (editMode) cancelEditMode(); else setDetailDO(null); }}
-                  className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#1F1D1B] transition-colors"
-                >
-                  <X className="h-5 w-5" />
-                </button>
-              </div>
-            </div>
-
-            {/* Body */}
-            <div className="px-6 py-5 space-y-5 max-md:px-4 max-sm:px-3">
-              {/* Status */}
-              <div className="flex items-center gap-3">
-                <Badge variant="status" status={detailDO.status}>
-                  {STATUS_LABEL[detailDO.status]}
-                </Badge>
-                {editMode && (
-                  <span className="text-xs text-[#9C6F1E] bg-[#FAEFCB] px-2 py-0.5 rounded-full font-medium">Editing</span>
+            </>
+          }
+          footer={
+            editMode ? (
+              <>
+                <Button variant="outline" onClick={cancelEditMode} disabled={editSaving}>Cancel</Button>
+                <Button variant="primary" onClick={saveEditDO} disabled={editSaving || editItems.length === 0}>
+                  {editSaving ? (
+                    <><RefreshCw className="h-4 w-4 animate-spin" /> Saving...</>
+                  ) : (
+                    <><Save className="h-4 w-4" /> Save Changes</>
+                  )}
+                </Button>
+              </>
+            ) : (
+              <>
+                {detailDO.status === "DRAFT" && (
+                  <Button variant="outline" onClick={() => enterEditMode(detailDO)}>
+                    <Pencil className="h-4 w-4" /> Edit
+                  </Button>
                 )}
-              </div>
+                {/* The lifecycle buttons are the grid's OWN row-menu entries,
+                    filtered to the ones this status leaves enabled. The status
+                    rules live in getContextMenuItems and nowhere else, so the
+                    bar and the menu can never disagree about what a DO in this
+                    state is allowed to do. */}
+                {detailActionBar.map((item) => {
+                  // The one presentational special case: the resend action is
+                  // status-legal but pointless with no address on file, so it
+                  // says so rather than sending nowhere.
+                  const isResend = item.label === "Resend invoice email";
+                  const noEmail = isResend && !detailEmail;
+                  return (
+                    <Button
+                      key={item.label}
+                      variant={
+                        item.danger
+                          ? "destructive"
+                          : isPrimaryDrawerAction("DELIVERY_ORDER", item.label)
+                            ? "primary"
+                            : "outline"
+                      }
+                      disabled={noEmail || (isResend && resendingId === detailDO.id)}
+                      title={
+                        noEmail
+                          ? "No email on file — add the PIC Email on the customer"
+                          : undefined
+                      }
+                      onClick={() => item.action(detailLive ?? detailDO)}
+                    >
+                      {item.icon}
+                      {noEmail ? "No email on file" : item.label}
+                    </Button>
+                  );
+                })}
+                <Button variant="outline" onClick={() => setDetailDO(null)}>
+                  Close
+                </Button>
+              </>
+            )
+          }
+        >
+          <div className="px-6 py-5 space-y-5 max-md:px-4 max-sm:px-3">
+              {editMode && (
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-[#9C6F1E] bg-[#FAEFCB] px-2 py-0.5 rounded-full font-medium">Editing</span>
+                </div>
+              )}
 
               {/* Info Grid — View or Edit */}
               {editMode ? (
@@ -6520,10 +6625,14 @@ export default function DeliveryPage() {
                         <th className="text-left px-2.5 py-1.5 font-medium text-xs whitespace-nowrap">Customer SO</th>
                         <th className="text-left px-2.5 py-1.5 font-medium text-xs whitespace-nowrap">Customer Ref</th>
                         <th className="text-left px-2.5 py-1.5 font-medium text-xs whitespace-nowrap">Product Code</th>
-                        <th className="text-left px-2.5 py-1.5 font-medium text-xs whitespace-nowrap">Variant</th>
                         <th className="text-left px-2.5 py-1.5 font-medium text-xs whitespace-nowrap">Product Name</th>
-                        <th className="text-left px-2.5 py-1.5 font-medium text-xs">Size</th>
-                        <th className="text-left px-2.5 py-1.5 font-medium text-xs">Fabric</th>
+                        {/* ONE spec line — fabric / DIVAN + LEG / GAP /
+                            T.Heights / special order — replacing the separate
+                            Size + Fabric columns and the old "Variant" column,
+                            which sliced the product code at the first dash and
+                            was not the variant at all. Built by the shared
+                            formatter the printed DO uses (see lineSpec). */}
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs">Spec</th>
                         <th className="text-right px-2.5 py-1.5 font-medium text-xs">Qty</th>
                         <th className="text-right px-2.5 py-1.5 font-medium text-xs">M³</th>
                         <th className="text-left px-2.5 py-1.5 font-medium text-xs">Rack</th>
@@ -6556,15 +6665,13 @@ export default function DeliveryPage() {
                           <td className="px-2.5 py-1 text-xs text-[#1F1D1B] whitespace-nowrap">{refs.customerSO || "—"}</td>
                           <td className="px-2.5 py-1 text-xs text-[#6B7280] whitespace-nowrap">{refs.customerRef || "—"}</td>
                           <td className="px-2.5 py-1 text-xs text-[#6B5C32] whitespace-nowrap">{item.productCode}</td>
-                          <td className="px-2.5 py-1 text-xs text-[#6B7280] whitespace-nowrap">{(() => { const c = item.productCode || ""; const i = c.indexOf("-"); return i >= 0 ? c.slice(i + 1) : "—"; })()}</td>
                           <td className="px-2.5 py-1 whitespace-nowrap">
                             <span className="inline-flex flex-col items-start gap-0.5">
                               <span>{item.productName}</span>
                               <RepairPartsBadge repairScope={item.repairScope} productCode={item.productCode} />
                             </span>
                           </td>
-                          <td className="px-2.5 py-1 text-[#6B7280] whitespace-nowrap">{item.sizeLabel}</td>
-                          <td className="px-2.5 py-1 text-[#6B7280] whitespace-nowrap">{item.fabricCode}</td>
+                          <td className="px-2.5 py-1 text-xs text-[#6B7280]">{lineSpec(item) || "—"}</td>
                           <td className="px-2.5 py-1 text-right tabular-nums">{item.quantity}</td>
                           <td className="px-2.5 py-1 text-right tabular-nums">{(item.itemM3 * item.quantity).toFixed(2)}</td>
                           <td className="px-2.5 py-1 text-xs text-[#6B7280]">{item.rackingNumber || "—"}</td>
@@ -6678,132 +6785,7 @@ export default function DeliveryPage() {
                 </div>
               )}
             </div>
-
-            {/* Footer Actions */}
-            <div className="sticky bottom-0 bg-white border-t border-[#E2DDD8] px-6 py-4 flex items-center justify-end gap-2 rounded-b-xl">
-              {editMode ? (
-                <>
-                  <Button variant="outline" onClick={cancelEditMode} disabled={editSaving}>Cancel</Button>
-                  <Button variant="primary" onClick={saveEditDO} disabled={editSaving || editItems.length === 0}>
-                    {editSaving ? (
-                      <><RefreshCw className="h-4 w-4 animate-spin" /> Saving...</>
-                    ) : (
-                      <><Save className="h-4 w-4" /> Save Changes</>
-                    )}
-                  </Button>
-                </>
-              ) : (
-                <>
-                  {detailDO.status === "DRAFT" && (
-                    <>
-                      <Button
-                        variant="outline"
-                        onClick={() => enterEditMode(detailDO)}
-                      >
-                        <Pencil className="h-4 w-4" /> Edit
-                      </Button>
-                      <Button
-                        variant="primary"
-                        onClick={async () => {
-                          // 2026-05-27 verifiedSave migration.
-                          const result = await verifiedSave<DeliveryOrder>({
-                            endpoint: `/api/delivery-orders/${detailDO.id}`,
-                            method: "PUT",
-                            body: { status: "LOADED" },
-                            readback: async () => {
-                              const r = await fetch(`/api/delivery-orders/${detailDO.id}?_v=${Date.now()}`, {
-                                credentials: "include",
-                                cache: "no-store",
-                              });
-                              if (!r.ok) return null;
-                              const j = (await r.json()) as { success?: boolean; data?: DeliveryOrder } | DeliveryOrder;
-                              return (j as { data?: DeliveryOrder })?.data ?? (j as DeliveryOrder) ?? null;
-                            },
-                            expect: { status: "LOADED" },
-                          });
-                          if (result.ok) {
-                            // Dispatch notice (fire-and-forget) with the
-                            // branded DO PDF attached.
-                            notifyCustomersAfterTransition([detailDO], "DISPATCHED");
-                            // Feature B — warn (non-blocking) when no email.
-                            warnIfNoCustomerEmail(detailDO, "DISPATCHED");
-                            setDetailDO({ ...detailDO, status: "LOADED", dispatchDate: new Date().toISOString() });
-                            fetchData();
-                          } else if (result.reason === "mismatch") {
-                            toast.error(formatMismatchError(result.diffs));
-                          } else if (result.reason === "http") {
-                            let parsedErr = result.body;
-                            try {
-                              const j = JSON.parse(result.body) as { error?: string };
-                              if (j.error) parsedErr = j.error;
-                            } catch { /* keep raw body */ }
-                            toast.error(parsedErr || `Failed to mark dispatched (HTTP ${result.status})`);
-                          } else {
-                            toast.error(`Save failed: ${result.details}`);
-                          }
-                        }}
-                      >
-                        <Send className="h-4 w-4" /> Mark Dispatched
-                      </Button>
-                    </>
-                  )}
-                  {(detailDO.status === "LOADED" || detailDO.status === "IN_TRANSIT") && (
-                    <Button
-                      variant="primary"
-                      onClick={() => setPodDialog(detailDO)}
-                    >
-                      <CheckCircle2 className="h-4 w-4" /> Mark Delivered (DO Signed)
-                    </Button>
-                  )}
-                  {detailDO.status === "DELIVERED" && (
-                    <Button
-                      variant="primary"
-                      onClick={() => handleGenerateInvoice(detailDO)}
-                    >
-                      <ReceiptText className="h-4 w-4" /> Transfer to Invoice
-                    </Button>
-                  )}
-                  {/* Feature A — per-DO Resend invoice email. Shown once the DO
-                      is delivered/invoiced (the states the invoice notice
-                      fires for). Disabled when the customer has no email on
-                      file (with a "no email on file" hint), since there is
-                      nowhere to send it. */}
-                  {(detailDO.status === "DELIVERED" ||
-                    detailDO.status === "INVOICED") && (
-                    <Button
-                      variant="outline"
-                      disabled={!detailEmail || resendingId === detailDO.id}
-                      title={
-                        detailEmail
-                          ? `Re-send the invoice email to ${detailEmail}`
-                          : "No email on file — add the PIC Email on the customer"
-                      }
-                      onClick={() =>
-                        resendCustomerNotice(detailDO, "DELIVERED")
-                      }
-                    >
-                      {resendingId === detailDO.id ? (
-                        <>
-                          <RefreshCw className="h-4 w-4 animate-spin" /> Sending...
-                        </>
-                      ) : (
-                        <>
-                          <Mail className="h-4 w-4" />{" "}
-                          {detailEmail
-                            ? "Resend invoice email"
-                            : "No email on file"}
-                        </>
-                      )}
-                    </Button>
-                  )}
-                  <Button variant="outline" onClick={() => setDetailDO(null)}>
-                    Close
-                  </Button>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
+        </DocumentDetailDrawer>
       )}
 
       {/* POD Capture Dialog */}

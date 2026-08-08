@@ -16,7 +16,9 @@ deliver write `stock_movements` and read `fg_units`, and fire idempotent custome
 - Pages
   - `/delivery` → `src/pages/delivery/index.tsx:826` (`DeliveryPage`) — DO workbench **and** the whole
     3PL provider UI, behind a `pageTab` toggle (`orders` | `3pl` | `agent`, URL `?section=`).
-  - `/delivery/:id` → `src/pages/delivery/detail.tsx` (single DO detail)
+  - `/delivery/:id` → `src/pages/delivery/detail.tsx` (single DO detail; the drawer's "Open full page")
+  - DO detail **drawer** (right slide-over, opened from a row) → chrome `src/components/ui/document-detail-drawer.tsx`,
+    model `src/lib/document-drawer.ts`, body inline in `delivery/index.tsx` (was a centred modal until 2026-08-08)
   - Delivery Agent tab → `src/pages/delivery/agent-tab.tsx:128` (`DeliveryAgentTab`; rendered inline when `pageTab==="agent"`)
   - `/consignment/note` → `src/pages/consignment/note.tsx:454` (`ConsignmentNotePage`; CN workbench, DO-parity)
   - CO list/create/edit/detail/return → `src/pages/consignment/{index,create,edit,detail,return}.tsx`
@@ -67,6 +69,11 @@ deliver write `stock_movements` and read `fg_units`, and fire idempotent custome
 | `runBulkDoTransition` | `src/pages/delivery/index.tsx:2936` | FE bulk status move (all guards/cascades) |
 | `resendCustomerNotice` / `warnIfNoCustomerEmail` | `delivery/index.tsx:2825 / :2807` | Feature A per-DO resend / Feature B no-email warning |
 | `columns` (DataGrid) | `src/pages/delivery/index.tsx:3885` | DO grid column defs |
+| `getContextMenuItems` | `src/pages/delivery/index.tsx:4365` | THE DO status table — row menu **and** the drawer's action bar |
+| `detailLive` / `detailActionBar` | `src/pages/delivery/index.tsx:~3645 / ~4605` | Drawer's document re-read from the list; its bar filtered from the row menu |
+| `lineSpec` | `src/pages/delivery/index.tsx:~3660` | One-line build spec per DO line, via the shared `buildSpec` |
+| `drawerActionBar` / `drawerLineSpec` / `DRAWER_DOC_CONFIG` | `src/lib/document-drawer.ts` | Drawer model: full-page route, action-bar filter, spec-line delegation |
+| `DocumentDetailDrawer` | `src/components/ui/document-detail-drawer.tsx` | Shared slide-over chrome (chrome only, no domain knowledge) |
 | 3PL Providers block | `src/pages/delivery/index.tsx:6509` | `pageTab==="3pl"` list + Create/Edit dialog |
 | `DeliveryAgentTab` | `src/pages/delivery/agent-tab.tsx:128` | Brief strip + proposal approve/reject |
 | `ConsignmentNotePage` | `src/pages/consignment/note.tsx:454` | CN workbench (DO-parity mirror) |
@@ -93,6 +100,15 @@ deliver write `stock_movements` and read `fg_units`, and fire idempotent custome
   `runBulkDoTransition` is shared FE — don't fork them.
 - **Owner rulings.** CNs NEVER carry invoices; 3PL stays DO-side only. CN value is **derived** from the Consignment
   Order value, not stored.
+- **ONE status table for the DO, not one per surface (2026-08-08).** The detail drawer's sticky action bar is
+  `getContextMenuItems(row)` filtered by `drawerActionBar` — it does NOT re-derive what a status allows. The drawer
+  used to keep its own `status === "DRAFT"` / `"LOADED"` ladder in the footer, which is how it ended up with a second
+  Mark-Dispatched implementation. Add a move to the row menu and it appears on the bar (add the label to
+  `DRAWER_DOC_CONFIG.DELIVERY_ORDER.actionBarLabels`); never add a button beside the bar.
+- **The drawer's spec line is the PRINTED line.** `lineSpec` → `drawerLineSpec` → `buildSpec`
+  (`src/lib/doc-line-format.ts`), the same formatter the DO / Invoice / CN / DR PDFs use. There are already three
+  `describe()` copies in the PDF generators; do not make the screen a fourth. The heights / gap / category /
+  special-order inputs come from `/print-extras`, i.e. the payload the PDF is built from.
 - **Status machine is a guard, not labels.** Moves must satisfy `VALID_TRANSITIONS` (`delivery-orders.ts:88`). The
   `dispatched` tab deliberately includes IN_TRANSIT (row stays visible after loading); DB status for "dispatched" is `LOADED`. Don't bypass the guard.
 - **Notify idempotency lives in folded-lowercase cols.** `dispatchemailat` / `deliveredemailat` — db-pg `toCamel` does NOT

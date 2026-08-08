@@ -9,6 +9,23 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-08 — 🔵 DO 详情抽屉（照 Houzs 那种右侧 slide-over）· main（未 push，未验 prod）
+
+Owner：要 Houzs ERP frontend 那种「点一行、右边滑出来、不同单据看到的东西不一样」的详情抽屉。
+
+- **不是新写一个**：`/delivery` 原本那个置中大 modal（含 edit mode / dispatch / POD / transfer）
+  外壳换成 `src/components/ui/document-detail-drawer.tsx`（只有 chrome：单号 / 类型 / 状态 badge /
+  Open full page → `/delivery/:id` / ✕ / 底部固定 action bar）。body 原封不动搬进去。
+- **底部按钮不再自己判状态**：`drawerActionBar("DELIVERY_ORDER", getContextMenuItems(detailLive))`
+  —— row menu 是唯一那张状态表。抽屉里原本那份 DRAFT/LOADED 阶梯（含第二个 Mark Dispatched）删掉。
+- **Variant 併成一行**：用共用的 `buildSpec`（`src/lib/doc-line-format.ts`，PDF 也是它），
+  取代原本 Size / Fabric 两栏 + 那个把 productCode 切一刀当 variant 的假栏位。
+- 第二种单据（SO / Invoice）＝ 一个 body + `DRAWER_DOC_CONFIG` 一笔设定，不是 fork。本轮只出 DO。
+- `tests/document-drawer.test.mjs`（18 项）；`tests/customer-notify.test.mjs` 两条旧的 source pin
+  改成钉新的不变量。tsc / npm test 全绿。**没在跑起来的 app 上看过**（本机 dev server 要登入，没登）。
+
+---
+
 ## 2026-08-08 — 🔵 WIP 数量修两条 + 一支对帐 · main（未 push，未验 prod）
 
 Owner：「成本基本上我们都算不对的，这些成本没关系，不需要去看，**先看数量，查到完，解压正确**。」

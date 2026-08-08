@@ -112,9 +112,11 @@ function makeDb(over = {}) {
       return { rows: [], changes: row ? 1 : 0 };
     }
     if (/^UPDATE qc_inspections SET status = 'COMPLETED'/i.test(s)) {
-      const [result, subjectType, subjectId, subjectLabel, notes, inspectorId, inspectorName, completedAt, id] = args;
+      // The trailing `inspectionDate = COALESCE(inspectionDate, ?)` binds a
+      // server-computed date BEFORE the id — see completeInspection.
+      const [result, subjectType, subjectId, subjectLabel, notes, inspectorId, inspectorName, completedAt, dateFallback, id] = args;
       const row = state.inspections.find((r) => r.id === id);
-      if (row) Object.assign(row, { status: "COMPLETED", result, subjectType, subjectId, subjectLabel, notes, inspectorId, inspectorName, completedAt });
+      if (row) Object.assign(row, { status: "COMPLETED", result, subjectType, subjectId, subjectLabel, notes, inspectorId, inspectorName, completedAt, inspectionDate: row.inspectionDate ?? dateFallback });
       return { rows: [], changes: row ? 1 : 0 };
     }
     if (/^INSERT INTO qc_tags/i.test(s)) { state.tags.push(args); return { rows: [], changes: 1 }; }
@@ -209,9 +211,18 @@ test("a worker completes their own department's WIP slot from the phone", async 
   assert.equal(j.data.result, "PASS");
   const row = db.state.inspections.find((r) => r.id === "qc-mine");
   assert.equal(row.status, "COMPLETED");
-  // Attributed to the worker who actually stood there, by name.
+  // Attributed to the worker who actually stood there, by name — resolved from
+  // the X-Worker-Token, never from the posted body.
   assert.equal(row.inspectorId, "emp-9");
   assert.equal(row.inspectorName, "Ah Meng");
+  // …and stamped with the SERVER's clock. A phone with a wrong date, or one
+  // that simply posts a time, must not decide when the factory inspected
+  // something. The body above carries no time at all and there is nowhere to
+  // put one.
+  const completed = Date.parse(row.completedAt);
+  assert.ok(Number.isFinite(completed) && Math.abs(Date.now() - completed) < 60_000,
+    "completedAt must be the server clock at submission time");
+  assert.equal(row.inspectionDate, TODAY);
 });
 
 test("a FAIL resets the job card and clears its piece stamps — via the SAME core as the desktop", async () => {

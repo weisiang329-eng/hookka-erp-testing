@@ -40,7 +40,6 @@ import {
 } from "@/lib/qc-slot-window";
 import { formatDateDMY } from "@/lib/utils";
 import { compressImage } from "@/lib/image-compress";
-import { getCurrentUser } from "@/lib/auth";
 import {
   ShieldCheck,
   ClipboardCheck,
@@ -590,7 +589,6 @@ function DoInspectionForm({
   insp, onRefresh, onClose,
 }: { insp: Inspection; onRefresh: () => void; onClose: () => void }) {
   const { toast } = useToast();
-  const me = getCurrentUser();
   const stage = insp.stage as Stage | null;
 
   // An RM slot names the GOODS RECEIPT it was raised for, and an FG slot names
@@ -738,8 +736,12 @@ function DoInspectionForm({
           subjectId,
           subjectLabel,
           subjectCode,
-          inspectorId: me?.id,
-          inspectorName: me?.displayName ?? me?.email ?? "QC",
+          // The inspector is NOT sent. The server stamps it from the session
+          // (qc-pending.ts sessionInspector) along with completedAt from its
+          // own clock — a name and a time the client picks are a claim, not a
+          // record. This used to post `me.displayName ?? me.email ?? "QC"`,
+          // and that literal "QC" is exactly the problem: a quality record
+          // signed by nobody.
           overallNotes,
           items: items
             .filter((i) => i.result != null)
@@ -762,7 +764,7 @@ function DoInspectionForm({
     } finally {
       setSubmitting(false);
     }
-  }, [subjectType, subjectId, subjectLabel, subjectCode, items, overallNotes, insp.id, me, allMandatoryAnswered, failMissingReason, failMissingPhoto, onRefresh, onClose, toast]);
+  }, [subjectType, subjectId, subjectLabel, subjectCode, items, overallNotes, insp.id, allMandatoryAnswered, failMissingReason, failMissingPhoto, onRefresh, onClose, toast]);
 
   const skip = useCallback(async () => {
     if (!skipReason.trim()) {

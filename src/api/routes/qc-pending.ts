@@ -63,6 +63,7 @@
 //                                         was deactivated mid-day).
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import type { Context } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { recomputePoStatusAndProgress } from "./production-orders";
@@ -1898,6 +1899,46 @@ app.post("/generate-now", async (c) => {
   }
 });
 
+/**
+ * WHO is inspecting — resolved from the SESSION, never from the request body.
+ *
+ * Owner 2026-08-08: "当我录入的时候，系统应该要自动生成日期、时间等等". The date
+ * and the time were already the server's (`inspectionDate` is stamped at
+ * generation from the slot the server computed; `completedAt` is the server
+ * clock inside completeInspection). The INSPECTOR was not: both the desktop
+ * start and complete routes read `inspectorId` / `inspectorName` straight out
+ * of the posted JSON, which means the name on a quality record was whatever
+ * the client typed. That is a claim, not a record — and it is the field a
+ * dispute turns on.
+ *
+ * The phone has always done this correctly (auth.workerId / auth.worker.name
+ * off the X-Worker-Token); this brings the desk in line.
+ *
+ * `userId` is stamped by auth-middleware and read through the get() escape
+ * hatch, the same way rbac.ts and audit.ts read it — worker.ts's typed
+ * Variables map does not enumerate the auth-injected keys. requirePermission()
+ * has already refused an unauthenticated caller before this is reached.
+ */
+async function sessionInspector(
+  c: Context<Env>,
+): Promise<{ id: string | null; name: string | null }> {
+  const get = (c as unknown as { get: (k: string) => string | undefined }).get;
+  const userId = get.call(c, "userId") ?? null;
+  if (!userId) return { id: null, name: null };
+  try {
+    const row = await c.var.DB
+      .prepare("SELECT displayName, email FROM users WHERE id = ? LIMIT 1")
+      .bind(userId)
+      .first<{ displayName: string | null; email: string | null }>();
+    // Falling back to the id rather than to null: an inspection attributed to
+    // a user id is still traceable, an inspection attributed to nothing is not.
+    return { id: userId, name: row?.displayName || row?.email || userId };
+  } catch (err) {
+    console.warn("[qc-pending] inspector name lookup failed", err);
+    return { id: userId, name: userId };
+  }
+}
+
 // POST /api/qc-pending/:id/start — flip PENDING → IN_PROGRESS, attach inspector.
 app.post("/:id/start", async (c) => {
   const denied = await requirePermission(c, "qc-inspections", "create");
@@ -1912,12 +1953,11 @@ app.post("/:id/start", async (c) => {
     return c.json({ success: false, error: `Inspection is ${existing.status}, cannot start` }, 409);
   }
   try {
-    const body = await c.req.json().catch(() => ({}));
-    const inspectorId = (body as Record<string, unknown>).inspectorId as string | undefined;
-    const inspectorName = (body as Record<string, unknown>).inspectorName as string | undefined;
+    // The body is no longer read for identity — see sessionInspector.
+    const me = await sessionInspector(c);
     await c.var.DB
       .prepare("UPDATE qc_inspections SET status = 'IN_PROGRESS', inspectorId = ?, inspectorName = ? WHERE id = ?")
-      .bind(inspectorId ?? existing.inspectorId ?? null, inspectorName ?? existing.inspectorName ?? null, id)
+      .bind(me.id ?? existing.inspectorId ?? null, me.name ?? existing.inspectorName ?? null, id)
       .run();
     return c.json({ success: true, data: { id, status: "IN_PROGRESS" } });
   } catch (err) {
@@ -1976,6 +2016,12 @@ export type CompleteInspectionInput = {
     photoUrl?: string;
   }>;
   overallNotes?: string;
+  // WHO. Both callers resolve these SERVER-SIDE — the desk from the session
+  // (`sessionInspector`), the phone from the X-Worker-Token (`auth.workerId` /
+  // `auth.worker.name`). Do NOT wire a new surface to pass a client-supplied
+  // name through here: a signature the client chooses is not a record, and
+  // this is the field a dispute turns on. WHEN is not in this type at all,
+  // deliberately — the time is the server's clock, below.
   inspectorId?: string | null;
   inspectorName?: string | null;
 };
@@ -2115,7 +2161,17 @@ export async function completeInspection(
 
   const overallFail = items.some((it) => it.result === "FAIL");
   const overallResult = overallFail ? "FAIL" : "PASS";
+  // THE CLOCK IS THE SERVER'S. Never a value out of the request: a phone with
+  // a wrong date, or a client that simply sends one, would otherwise decide
+  // when the factory inspected something.
   const now = new Date().toISOString();
+  // The calendar day this inspection belongs to. Normally already stamped at
+  // generation from the server-computed slot; COALESCE'd rather than
+  // overwritten so a slot raised for Monday that is answered on Tuesday keeps
+  // saying Monday — `completedAt` is what says when it was actually answered.
+  // The fallback only fires on a row that somehow carries no date at all,
+  // which would otherwise complete with a blank date column.
+  const todayIso = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
   const stmts: D1PreparedStatement[] = [];
 
@@ -2145,7 +2201,8 @@ export async function completeInspection(
            notes = ?,
            inspectorId = ?,
            inspectorName = ?,
-           completedAt = ?
+           completedAt = ?,
+           inspectionDate = COALESCE(inspectionDate, ?)
          WHERE id = ?`,
       )
       .bind(
@@ -2157,6 +2214,7 @@ export async function completeInspection(
         inspectorId,
         inspectorName,
         now,
+        todayIso,
         id,
       ),
   );
@@ -2301,9 +2359,13 @@ export async function completeInspection(
 //   subjectCode?: string,
 //   items: [{ id: string, result: 'PASS'|'FAIL'|'NA', notes?: string, photoUrl?: string }],
 //   overallNotes?: string,
-//   inspectorId?: string,
-//   inspectorName?: string,
 // }
+//
+// `inspectorId` / `inspectorName` are NOT read from the body — they come from
+// the session (sessionInspector). A timestamp or a signature the client can
+// choose is not a record. `completedAt` is the server clock and
+// `inspectionDate` is the server-computed slot date, both set in
+// completeInspection.
 //
 // Side-effects on FAIL: see completeInspection above.
 app.post("/:id/complete", async (c) => {
@@ -2313,6 +2375,7 @@ app.post("/:id/complete", async (c) => {
 
   try {
     const body = (await c.req.json()) as Record<string, unknown>;
+    const me = await sessionInspector(c);
     const res = await completeInspection(c.var.DB, id, {
       subjectType: body.subjectType as SubjectType,
       subjectId: body.subjectId as string,
@@ -2320,8 +2383,8 @@ app.post("/:id/complete", async (c) => {
       subjectCode: (body.subjectCode as string) ?? "",
       items: (Array.isArray(body.items) ? body.items : []) as CompleteInspectionInput["items"],
       overallNotes: (body.overallNotes as string) ?? "",
-      inspectorId: (body.inspectorId as string) ?? null,
-      inspectorName: (body.inspectorName as string) ?? null,
+      inspectorId: me.id,
+      inspectorName: me.name,
     });
     if (!res.ok) return c.json({ success: false, error: res.error }, res.status);
     return c.json({ success: true, data: res.data, sideEffects: res.sideEffects });

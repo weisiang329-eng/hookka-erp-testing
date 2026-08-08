@@ -36,7 +36,7 @@ import { emitAudit, buildAuditStatement } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
 import { customerScopeSql } from "../lib/customer-scope";
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
-import { getOrgId } from "../lib/tenant";
+import { getOrgId, withOrgScope } from "../lib/tenant";
 import {
   invalidateHubChangeSnapshots,
   invalidateOrderCascadeSnapshots,
@@ -875,6 +875,12 @@ app.post("/", async (c) => {
 // holds { byStatus, total } with no money in it, and serving that shape would
 // leave the strip silently money-less until the next CO write.
 //
+// …and because the CACHE is per-org, the QUERY must be too: it was not, so the
+// figures cached under org A were computed over every org's consignment orders.
+// Latent while there is one tenant, but the tab strip now puts money on this
+// endpoint, so a wrong number would read as ringgit. withOrgScope, exactly as
+// /api/sales-orders/stats does it.
+//
 // MUST be registered BEFORE /:id (Hono matches in registration order; a
 // wildcard /:id would otherwise swallow "/stats").
 // ---------------------------------------------------------------------------
@@ -883,7 +889,11 @@ app.get("/stats", async (c) => {
   const scope = await customerScopeSql(c, "customerId");
 
   const compute = async () => {
-    const where = scope.clause ? `WHERE ${scope.clause}` : "";
+    const { whereSql, params } = withOrgScope(
+      c,
+      "consignment_orders",
+      scope.clause,
+    );
     // Quoted aliases on purpose: an unquoted `AS revenue_sen` comes back
     // CAMELCASED from the driver and `row.revenueSen` would silently read
     // undefined → RM 0.00 everywhere.
@@ -893,10 +903,10 @@ app.get("/stats", async (c) => {
                 COUNT(*)                   AS "n",
                 COALESCE(SUM(totalSen), 0) AS "revenueSen"
            FROM consignment_orders
-           ${where}
+           ${whereSql}
            GROUP BY status`,
       )
-      .bind(...scope.binds)
+      .bind(...params, ...scope.binds)
       .all<{ status: string; n: number; revenueSen: number }>();
     const byStatus: Record<string, number> = {};
     const revenueByStatus: Record<string, number> = {};

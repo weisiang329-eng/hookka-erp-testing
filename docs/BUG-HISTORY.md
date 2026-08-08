@@ -34,6 +34,20 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-08-004 — `/api/consignment-orders/stats` cached its figures per org but computed them over every org `security` `money` `data-integrity` 🟢
+
+**Symptom.** None visible yet — there is one tenant on prod (16 COs, all `org_id='hookka'`). Latent, but the CO status tab strip started reading its money off this endpoint today, so the next tenant would have seen the wrong figure as ringgit rather than as a count.
+
+**Root cause.** The handler snapshots into `consignment_orders_stats_snapshot` keyed by ORG, but its `GROUP BY status` carried only the customer-scope clause — no org predicate at all. A cache keyed one way over a query scoped another way is the whole bug: org A's cache entry holds the sum of every org's consignment orders.
+
+**Fix.** `withOrgScope(c, "consignment_orders", scope.clause)` around the aggregate (`src/api/routes/consignment-orders.ts:891`), binding the orgId ahead of the scope binds — the same shape `/api/sales-orders/stats` already uses. `scope.clause` may be empty; `withOrgScope` handles that and still emits `WHERE orgId = ?`.
+
+**Verified.** `tests/status-tab-strip.test.mjs` drives the real handler against a two-tenant book: each org's `/stats` returns its own counts AND its own money, and neither sees the other's RM 99,000.00. The mock now reads the binds positionally, so a query that drops the org predicate stops filtering and the assertions fail. Suite green, `npx tsc -p tsconfig.app.json --noEmit` clean.
+
+**Deliberately left.** `GET /api/consignment-orders` (the list, `consignment-orders.ts:481`) is customer-scoped but likewise not org-scoped, as are the by-id reads. Same class, bigger blast radius, and not what this task was scoped to — worth its own pass.
+
+---
+
 ## BUG-2026-08-08-003 — `GET /api/notifications` returned every row of every org and every user `security` `data-integrity` 🟢
 
 **Symptom.** The notifications feed was a single unfiltered `SELECT * FROM notifications`. Anyone signed in saw everyone's notifications — and the new top-bar bell (2026-08-08) surfaces that feed on every page, far more prominently than the `/notifications` page ever did. `PUT /api/notifications` had the same hole on the write side: any id could be marked read by anybody.

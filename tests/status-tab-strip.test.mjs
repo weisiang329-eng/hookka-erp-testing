@@ -209,10 +209,16 @@ function makeCoDb({ cos = [], foreignCustomers = [] } = {}) {
           return { results: foreignCustomers };
         }
         if (/FROM consignment_orders/i.test(s) && /GROUP BY status/i.test(s)) {
-          // Apply the scope clause the way Postgres would.
+          // Apply the WHERE the way Postgres would, reading the binds
+          // positionally in the order the predicates appear in the SQL.
           let rows = cos;
+          let i = 0;
+          if (/WHERE orgId = \?/i.test(s)) {
+            const org = String(bound[i++]);
+            rows = rows.filter((r) => String(r.orgId ?? "hookka") === org);
+          }
           if (/customerId NOT IN/i.test(s)) {
-            const forbidden = new Set(bound.map(String));
+            const forbidden = new Set(bound.slice(i).map(String));
             rows = rows.filter(
               (r) => r.customerId == null || !forbidden.has(String(r.customerId)),
             );
@@ -237,11 +243,11 @@ function makeCoDb({ cos = [], foreignCustomers = [] } = {}) {
   return { db: { prepare, batch: async () => [] }, seen };
 }
 
-function mountCo(db, { role, userId = "user-sales" }) {
+function mountCo(db, { role, userId = "user-sales", orgId = "hookka" }) {
   const parent = new Hono();
   parent.use("*", async (c, next) => {
     c.set("DB", db);
-    c.set("orgId", "hookka");
+    c.set("orgId", orgId);
     c.set("userRole", role);
     c.set("userId", userId);
     await next();
@@ -301,6 +307,38 @@ test("CO /stats: a scoped caller never reads or writes the org-wide snapshot", a
     !seen.some((q) => /consignment_orders_stats_snapshot/i.test(q.sql)),
     "the scoped path must not touch the snapshot table",
   );
+});
+
+// The snapshot this endpoint caches into is keyed by ORG. A query that is not
+// also keyed by org therefore caches one tenant's figures under another's — and
+// with money now on the CO tab strip, a wrong number reads as ringgit.
+const TWO_ORG_BOOK = [
+  { id: "CO-1", orgId: "hookka", status: "DRAFT", customerId: null, totalSen: 120000 },
+  { id: "CO-2", orgId: "hookka", status: "CONFIRMED", customerId: null, totalSen: 300000 },
+  { id: "CO-9", orgId: "acme", status: "CONFIRMED", customerId: null, totalSen: 9900000 },
+];
+
+test("CO /stats: the counts and money cover the caller's org only", async () => {
+  const { db } = makeCoDb({ cos: TWO_ORG_BOOK });
+  const res = await mountCo(db, { role: "OFFICE", orgId: "hookka" }).request("/stats");
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.byStatus.CONFIRMED, 1, "the other tenant's CO is not ours to count");
+  assert.equal(
+    body.revenueByStatus.CONFIRMED,
+    300000,
+    "and RM 99,000.00 of somebody else's consignment must not be in our total",
+  );
+  assert.equal(body.total, 2);
+  assert.equal(body.totalRevenueSen, 420000);
+});
+
+test("CO /stats: the second tenant reads its own book, not the first's", async () => {
+  const { db } = makeCoDb({ cos: TWO_ORG_BOOK });
+  const res = await mountCo(db, { role: "OFFICE", orgId: "acme" }).request("/stats");
+  const body = await res.json();
+  assert.equal(body.total, 1);
+  assert.equal(body.totalRevenueSen, 9900000);
 });
 
 test("CO /stats: money and counts come from ONE query, so they cannot disagree", async () => {

@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
+import { BulkActionBar } from "@/components/ui/bulk-action-bar";
 import { formatCurrency, cn } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useUrlState } from "@/lib/use-url-state";
@@ -139,6 +140,13 @@ export default function PurchaseInvoicesPage() {
   const [tab, setTab] = useUrlState<"DRAFT" | "CONFIRMED">("tab", "CONFIRMED");
   const [selectedRows, setSelectedRows] = useState<PurchaseInvoice[]>([]);
   const [bulkConverting, setBulkConverting] = useState(false);
+  // Bumped to clear the DataGrid's OWN selection (its checkboxes), which
+  // emptying selectedRows alone does not touch.
+  const [clearSelectionToken, setClearSelectionToken] = useState(0);
+  const selectedDraftCount = useMemo(
+    () => selectedRows.filter((r) => r.status === "DRAFT").length,
+    [selectedRows],
+  );
 
   // Filters
   const [filterStatus, setFilterStatus] = useState("");
@@ -413,6 +421,40 @@ export default function PurchaseInvoicesPage() {
     },
   ], [orgNameByCode]);
 
+  // One printable PI. List rows are lean (rowToPI ships no items[]), so the
+  // full invoice is fetched before printing. Shared by the row menu's
+  // "Print PI" and the bulk print below, so a single print and a bulk print
+  // can never render the document differently (letterhead, supplier block).
+  // Returns null on any failure; the caller decides how loudly to complain.
+  const loadPiForPrint = useCallback(
+    async (id: string) => {
+      const [{ letterheadForPurchaseOrg }] = await Promise.all([
+        import("@/lib/generate-purchase-order-pdf"),
+      ]);
+      const res = await fetch(`/api/purchase-invoices/${id}`);
+      const j = (await res.json().catch(() => null)) as
+        | { success?: boolean; data?: Record<string, unknown> }
+        | null;
+      if (!res.ok || !j?.success || !j.data) return null;
+      const supId = (j.data as { supplierId?: string }).supplierId;
+      const sup = suppliers.find((s) => s.id === supId);
+      return {
+        pi: {
+          ...(j.data as Record<string, unknown>),
+          supplierAddress: sup?.address,
+          supplierContact: sup?.contactPerson,
+          supplierPhone: sup?.phone,
+          supplierEmail: sup?.email,
+        },
+        letterhead: letterheadForPurchaseOrg(
+          sup?.purchaseOrgCode || "HOOKKA",
+          orgsResp?.organisations,
+        ),
+      };
+    },
+    [suppliers, orgsResp],
+  );
+
   const piGridContextMenu = useCallback((row: PurchaseInvoice): ContextMenuItem[] => {
     return [
       {
@@ -423,33 +465,19 @@ export default function PurchaseInvoicesPage() {
       {
         label: "Print PI",
         icon: <Printer className="h-3.5 w-3.5" />,
-        // List rows are lean (no items[]), so fetch the full PI before printing.
         action: async () => {
           try {
-            const res = await fetch(`/api/purchase-invoices/${row.id}`);
-            const j = (await res.json().catch(() => null)) as
-              | { success?: boolean; data?: Record<string, unknown> }
-              | null;
-            if (!res.ok || !j?.success || !j.data) {
+            const loaded = await loadPiForPrint(row.id);
+            if (!loaded) {
               toast.error("Could not load the invoice to print.");
               return;
             }
-            const [{ generatePurchaseInvoicePdf }, { letterheadForPurchaseOrg }] = await Promise.all([
-              import("@/lib/generate-purchase-invoice-pdf"),
-              import("@/lib/generate-purchase-order-pdf"),
-            ]);
-            const supId = (j.data as { supplierId?: string }).supplierId;
-            const sup = suppliers.find((s) => s.id === supId);
-            const lh = letterheadForPurchaseOrg(sup?.purchaseOrgCode || "HOOKKA", orgsResp?.organisations);
+            const { generatePurchaseInvoicePdf } = await import(
+              "@/lib/generate-purchase-invoice-pdf"
+            );
             generatePurchaseInvoicePdf(
-              {
-                ...(j.data as unknown as Parameters<typeof generatePurchaseInvoicePdf>[0]),
-                supplierAddress: sup?.address,
-                supplierContact: sup?.contactPerson,
-                supplierPhone: sup?.phone,
-                supplierEmail: sup?.email,
-              },
-              lh,
+              loaded.pi as unknown as Parameters<typeof generatePurchaseInvoicePdf>[0],
+              loaded.letterhead,
             );
           } catch {
             toast.error("Could not generate the PDF.");
@@ -494,7 +522,55 @@ export default function PurchaseInvoicesPage() {
         action: () => fetchData(),
       },
     ];
-  }, [navigate, toast, fetchData, updateStatus, suppliers, orgsResp]);
+  }, [navigate, toast, fetchData, updateStatus, loadPiForPrint]);
+
+  // ---- Bulk print ----
+  // The one bulk action this page was missing: the row menu could already
+  // print ONE invoice and generateCombinedPurchaseInvoicePdf ("PI list → bulk
+  // Download PDF") was written for exactly this and never called. Same loader
+  // as the single print, so the merged file is the single documents in order.
+  // A row that fails to load is reported by number rather than silently
+  // dropped — a short PDF that says nothing is the worst outcome here.
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
+  const printSelected = useCallback(async () => {
+    if (selectedRows.length === 0 || downloadingPdf) return;
+    setDownloadingPdf(true);
+    try {
+      const { generateCombinedPurchaseInvoicePdf } = await import(
+        "@/lib/generate-purchase-invoice-pdf"
+      );
+      type CombinedArg = Parameters<typeof generateCombinedPurchaseInvoicePdf>[0][number];
+      const ok: CombinedArg[] = [];
+      const failed: string[] = [];
+      const loaded = await Promise.all(
+        selectedRows.map(async (row) => {
+          try {
+            return { row, one: await loadPiForPrint(row.id) };
+          } catch {
+            return { row, one: null };
+          }
+        }),
+      );
+      for (const { row, one } of loaded) {
+        if (one) ok.push({ pi: one.pi as unknown as CombinedArg["pi"], letterhead: one.letterhead });
+        else failed.push(row.piNo);
+      }
+      if (ok.length === 0) {
+        toast.error("Could not load any of the selected invoices to print.");
+        return;
+      }
+      await generateCombinedPurchaseInvoicePdf(ok, `PurchaseInvoices-${ok.length}.pdf`);
+      if (failed.length > 0) {
+        toast.error(
+          `Printed ${ok.length}; ${failed.length} could not be loaded (${failed.slice(0, 3).join(", ")}).`,
+        );
+      }
+    } catch {
+      toast.error("Could not generate the PDF.");
+    } finally {
+      setDownloadingPdf(false);
+    }
+  }, [selectedRows, downloadingPdf, loadPiForPrint, toast]);
 
   // Shell renders immediately — grid shows skeleton rows (loading prop) until
   // data lands. Mirrors the Sales Invoice list (no full-page loading gate).
@@ -734,24 +810,6 @@ export default function PurchaseInvoicesPage() {
               </div>
             </CardHeader>
             <CardContent>
-              {tab === "DRAFT" && selectedRows.length > 0 && (
-                <div className="mb-3 flex items-center justify-between rounded-md border border-[#E8D597] bg-[#FAEFCB] px-3 py-2 text-sm">
-                  <span className="text-[#9C6F1E]">
-                    {selectedRows.filter(r => r.status === "DRAFT").length} draft invoice(s) selected
-                  </span>
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    disabled={bulkConverting}
-                    onClick={bulkConvertDrafts}
-                  >
-                    <CheckCircle2 className="h-4 w-4" />{" "}
-                    {bulkConverting
-                      ? "Converting..."
-                      : `Convert ${selectedRows.filter(r => r.status === "DRAFT").length} drafts`}
-                  </Button>
-                </div>
-              )}
               <DataGrid<PurchaseInvoice>
                 columns={piGridColumns}
                 data={filteredInvoices}
@@ -775,11 +833,54 @@ export default function PurchaseInvoicesPage() {
                 // A per-line listing here needs that re-fetch per row.
                 exportName="purchase-invoices"
                 exportSheetLabel="Purchase Invoices"
+                clearSelectionToken={clearSelectionToken}
               />
             </CardContent>
           </Card>
         </>
       )}
+
+      {/* Bulk actions — the shared BulkActionBar, replacing the page's own
+          inline amber strip. It offers ONLY what this page can already do to
+          one row: print (the row menu's "Print PI") and confirm a draft (the
+          row menu's "Confirm"). Confirm appears only when the selection
+          actually contains drafts, so it is never a button that would 409. */}
+      <BulkActionBar
+        selectedCount={selectedRows.length}
+        onClear={() => {
+          setSelectedRows([]);
+          // Also untick the boxes — clearing only the page's mirror leaves the
+          // grid's own selection intact and the checkboxes visibly still on.
+          setClearSelectionToken((t) => t + 1);
+        }}
+        noun="invoice"
+        actions={
+          <>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-white hover:bg-white/10"
+              disabled={downloadingPdf}
+              onClick={printSelected}
+            >
+              <Printer className="h-4 w-4" />
+              {downloadingPdf ? "Preparing…" : `Print (${selectedRows.length})`}
+            </Button>
+            {selectedDraftCount > 0 && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-white hover:bg-white/10"
+                disabled={bulkConverting}
+                onClick={bulkConvertDrafts}
+              >
+                <CheckCircle2 className="h-4 w-4" />
+                {bulkConverting ? "Converting…" : `Confirm ${selectedDraftCount} draft${selectedDraftCount === 1 ? "" : "s"}`}
+              </Button>
+            )}
+          </>
+        }
+      />
 
       {/* From PO / GRN picker — navigates to PI create with pre-fill param */}
       <FromSourceModal

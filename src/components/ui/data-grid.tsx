@@ -192,6 +192,12 @@ export type DataGridProps<T> = {
   contextMenuItems?: ContextMenuItem[] | ((row: T) => ContextMenuItem[]);
   onSelectionChange?: (selectedRows: T[]) => void;
   selectable?: boolean;
+  // Row selection lives INSIDE the grid (`selectedKeys`), so a page that
+  // empties its own mirror of the selection leaves every checkbox still
+  // ticked — a "Clear" button that visibly clears nothing. Bump this number
+  // to clear the grid's own selection; any change to it wipes selectedKeys.
+  // Undefined (the default) never clears, so existing grids are untouched.
+  clearSelectionToken?: number;
   rowClassName?: (row: T) => string;
   emptyMessage?: string;
   loading?: boolean;
@@ -1593,6 +1599,7 @@ export function DataGrid<T extends Record<string, any>>({
   contextMenuItems,
   onSelectionChange,
   selectable = false,
+  clearSelectionToken,
   rowClassName,
   emptyMessage = "No data found.",
   loading = false,
@@ -2261,6 +2268,18 @@ export function DataGrid<T extends Record<string, any>>({
   // ── Selection ──
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const lastClickedIndex = useRef<number | null>(null);
+
+  // Parent-driven clear (see `clearSelectionToken`). Skips the first render so
+  // mounting with a token doesn't fight a selection restored by anything else;
+  // only a CHANGE to the token clears. Empty-set guard keeps it from
+  // re-rendering when there is nothing selected.
+  const lastClearToken = useRef<number | undefined>(clearSelectionToken);
+  useEffect(() => {
+    if (clearSelectionToken === lastClearToken.current) return;
+    lastClearToken.current = clearSelectionToken;
+    setSelectedKeys((prev) => (prev.size === 0 ? prev : new Set()));
+    lastClickedIndex.current = null;
+  }, [clearSelectionToken]);
 
   // ── Context menu ──
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; row: T } | null>(null);

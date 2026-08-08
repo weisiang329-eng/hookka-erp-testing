@@ -41,7 +41,7 @@ Read-mostly stock visibility across the three stages of manufacturing: **Finishe
 3. **WIP derivation** — `GET /api/inventory/wip` `inventory-wip.ts:158` projects non-zero `wip_items` rows, walking dept sequence. FE also derives its own view via `deriveWIPFromPO` (`index.tsx:300`) + `mergeSofaWIPSets` (`:523`, one synthetic row per SO+fabric for sofas).
 4. **Shortage forecast** — `GET /api/inventory/shortage-forecast` `inventory.ts:225` walks CONFIRMED/IN_PRODUCTION SOs, sums per-RM BOM consumption via `collectBomMaterials` (`:205`), subtracts `balanceQty`, adds incoming-PO qty (≤ today+14d), returns `shortBy > 0`.
 5. **Stock adjustment** — `POST /api/stock-adjustments` `stock-adjustments.ts:209` validates type (RM/WIP/FG) + reason, then writes `stock_adjustments` (`:392`) AND `stock_movements` (`:421`) in one batch; carries `unitCostSen`/`caseId`.
-6. **Drill-downs** — `GET /fg-source/:productCode` `inventory.ts:467` (which POs' UPH JCs produced this FG); `GET /rm-source/:rmId` `inventory.ts:536` (which `rm_batches`/GRNs stock this RM).
+6. **Drill-downs** — `GET /rm-source/:rmId` (which `rm_batches`/GRNs stock this RM). The FG equivalent `/fg-source/:productCode` was **deleted 2026-08-08**: the Stock Breakdown panel's Movements-in lists the same production orders off the cost ledger, which is the copy that reconciles.
 
 ## Key functions / sections (locate-to-function)
 | Symbol / section | file:line | Role |
@@ -58,7 +58,7 @@ Read-mostly stock visibility across the three stages of manufacturing: **Finishe
 | `GET /fg-stock` | `inventory.ts:613` | Server snapshot; runtime-creates snapshot table |
 | `GET /shortage-forecast` | `inventory.ts:225` | SO-driven RM shortfall projection |
 | `collectBomMaterials` | `inventory.ts:205` | Recursive BOM material roll-up |
-| `GET /fg-source/:productCode` · `/rm-source/:rmId` | `inventory.ts:467 · 536` | FG→PO / RM→batch drill-downs |
+| `GET /rm-source/:rmId` | `inventory.ts` | RM→batch drill-down (the FG twin was deleted 2026-08-08) |
 | `GET /` (WIP view) | `src/api/routes/inventory-wip.ts:158` | Derived WIP grid rows |
 | RM CRUD | `raw-materials.ts:147/162/217/318/465` | list/get/POST/PUT/DELETE |
 | `_unlock` / `_relock-duplicate-codes` | `raw-materials.ts:668 / 699` | One-shot dup-code index toggle |
@@ -80,7 +80,7 @@ Read-mostly stock visibility across the three stages of manufacturing: **Finishe
 - **`fg-stock` snapshot table is runtime-created** — migration files are inert on deploy, so the `CREATE TABLE IF NOT EXISTS` at `inventory.ts:624` is awaited before `withSnapshot`.
 - **`index.tsx` has a LOCAL `Product` type** differing from `@/types` Product — watch category typing under strict tsc.
 - **camelCase columns need a `column-rename-map.json` entry** or they 400; prefer snake_case for new inventory columns.
-- **ONE row click = ONE panel (owner 2026-08-08).** The Stock Breakdown drawer now also carries a finished good's own catalogue details, read-only, with an **Edit product** button that opens the existing dialog and reopens the drawer afterwards. The dialog's duplicate "Source Production Orders" table is deleted (the panel's inbound movements are the same production orders, from the cost ledger instead of `/api/inventory/fg-source` — which now has no frontend consumer). The kebab lost "Stock breakdown" on all three tabs and "View" on FG/RM (it called the same handler as "Edit"); Edit / Delete / Refresh stay, and WIP keeps "View" because its dialog shows the GRID's own derivation, not the panel's server-side job cards.
+- **ONE row click = ONE panel (owner 2026-08-08).** The Stock Breakdown drawer now also carries a finished good's own catalogue details, read-only, with an **Edit product** button that opens the existing dialog and reopens the drawer afterwards. The dialog's duplicate "Source Production Orders" table is deleted (the panel's inbound movements are the same production orders, from the cost ledger instead of `/api/inventory/fg-source` — which lost its last consumer and has since been deleted). The kebab lost "Stock breakdown" on all three tabs and "View" on FG/RM (it called the same handler as "Edit"); Edit / Delete / Refresh stay, and WIP keeps "View" because its dialog shows the GRID's own derivation, not the panel's server-side job cards.
 - **The three item types are NOT the same panel.** RM merges its FIFO lots with its inbound movements into one "Receipts & stock lots" table (`mergeRmReceipts`, pure + tested — nothing is dropped from either side) and keeps a deliberately empty Movements out; FG has NO lots section and NO COGS, just Movements in / Movements out plus a collapsed "Pieces on hand" per-serial list; WIP is unchanged. Full column lists and the reasoning are in [[CODEBASE-MAP]] under Inventory.
 
 ## Common tasks (mini-playbook)

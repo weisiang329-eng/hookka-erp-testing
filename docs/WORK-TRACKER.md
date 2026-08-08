@@ -3486,7 +3486,7 @@ drawer's *Movements in* were the same production orders, fetched two ways.
    inputs would have meant a second save path to keep in step with the one that
    already works.
 3. Drop *Source Production Orders* from the dialog. **Done.** The dialog is now
-   only the edit form. `/api/inventory/fg-source` has no frontend consumer left.
+   only the edit form. `/api/inventory/fg-source` lost its last consumer here and was deleted.
 4. Rationalise the ⋮ menu. **Done** — removed "Stock breakdown" (all three tabs)
    and "View" (FG, RM: it called the same handler as "Edit"). Kept Edit, Delete,
    Refresh, and WIP's View.
@@ -3505,5 +3505,6 @@ drawer's *Movements in* were the same production orders, fetched two ways.
 - The per-serial FG list is kept as a **collapsed** "Pieces on hand" section, not
   deleted: it is the only per-serial view and where Age (FIFO) and
   Available · Reserved come from. Owner to say whether it goes entirely.
-- `GET /api/inventory/fg-source` (`src/api/routes/inventory.ts`) is now unused by
-  the UI. Left in place — that file was outside this task's scope.
+- `GET /api/inventory/fg-source` (`src/api/routes/inventory.ts`) was left in place
+  when its last caller went; **deleted 2026-08-08** once nothing in the repo
+  fetched it.

@@ -627,7 +627,6 @@ _Second router on the /api/planning base (worker.ts:1271)._
 | GET /api/inventory | inventory.ts:148 | Inventory overview |
 | GET /api/inventory/shortage-forecast | inventory.ts:225 | Material shortage forecast |
 | POST /api/inventory/raw-materials | inventory.ts:395 | Adjust RM inventory |
-| GET /api/inventory/fg-source/:productCode | inventory.ts:467 | FG stock source trace |
 | GET /api/inventory/rm-source/:rmId | inventory.ts:536 | RM stock source trace |
 | GET /api/inventory/fg-stock | inventory.ts:613 | FG stock levels |
 

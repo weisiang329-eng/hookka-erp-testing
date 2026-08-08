@@ -852,6 +852,16 @@ test("the duplicate Source Production Orders table is gone from the dialog", () 
   );
 });
 
+test("the second list's endpoint went with it — no unreachable route left behind", () => {
+  // /api/inventory/fg-source existed only to feed that table. A route nobody
+  // calls is a second answer to "which POs produced this SKU" that no screen
+  // ever checks against the ledger, so it can drift for free.
+  const route = readFileSync("src/api/routes/inventory.ts", "utf8");
+  assert.doesNotMatch(route, /fg-source/, "the endpoint must be gone, not merely unused");
+  // Its RM twin has a live caller and stays.
+  assert.match(route, /app\.get\("\/rm-source\/:rmId"/);
+});
+
 test("the kebab no longer offers a second door to the panel", () => {
   // A row click opens it; "Stock breakdown" as a menu item was a second way in
   // to the thing being opened. "View" went with it on the tabs where it called

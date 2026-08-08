@@ -411,6 +411,53 @@ them, read-only. A one-off correction pass is owed.
 
 ---
 
+## C12 — Narrowed by CUSTOMER, not by TENANT
+
+**Shape.** A read carries a row-level rule — `customerScopeSql`, an RBAC check, a status
+filter — and the reviewer, seeing a `WHERE` clause that is visibly *about who may see this*,
+reads the query as scoped. It is not. Those rules narrow WITHIN one tenant; the tenant boundary
+itself is `withOrgScope`, and it is a separate predicate. A query with one and not the other
+looks more finished than a query with neither, which is exactly why it survives review.
+
+**Why it keeps happening.** Three compounding reasons:
+
+1. **There is one org on prod.** Every instance is latent, so nothing fails, no page looks
+   wrong, and no bug report is ever filed. These are found only by reading.
+2. **`customerScopeSql` is deliberately a choke point** (one middleware, all 29 endpoints) and
+   `withOrgScope` deliberately is not (per-query, because each query knows its own table). So
+   the one that scales is the one that does NOT draw the boundary.
+3. **The fixes are one-line**, which makes "fix the instance in front of me" feel complete.
+
+**The rule.** `withOrgScope` is not an alternative to the customer scope — the orgId binds
+FIRST, the row rule follows, both apply. And when the endpoint is CACHED, the query's scope must
+match the cache's key: a snapshot keyed per-org over a query computed org-wide is the same
+defect wearing a different hat, and needs a `cacheKey` bump so pre-fix rows cannot still be
+served.
+
+| # | endpoint | state |
+|---|---|---|
+| 1 | `GET/PUT /api/notifications` | ✅ fixed 2026-08-08 (BUG-2026-08-08-003) — no scope of any kind, read side and write side |
+| 2 | `GET /api/consignment-orders/stats` | ✅ fixed 2026-08-08 (`39fd7a99`) — customer-scoped, org-unscoped, cached per org |
+| 3 | `GET /api/consignment-orders` + every by-id read on that router | ✅ fixed 2026-08-09 (BUG-2026-08-09-001) |
+| 4 | `GET /api/consignment-notes` + `/stats` + `/linked-po-ids` + `/:id/print-extras` | ✅ fixed 2026-08-09 (BUG-2026-08-09-001) — `/stats` was #2's untouched twin |
+| 5 | `GET/PUT/DELETE /api/consignments` (legacy surface, SAME tables) | ✅ fixed 2026-08-09 (BUG-2026-08-09-001) — found only by sweeping the module, not the two files named in the report |
+| 6 | `GET /api/sales-orders/:id` | ⬜ open — the LIST is org-scoped, the by-id read next to it is not. Same shape as #3, different module; not in scope for the consignment pass. Sweep sales the way consignment was swept. |
+| 7 | write-side `orgId` stamping | ⬜ open — `INSERT INTO consignment_orders` (and its siblings) do NOT stamp orgId; the column takes its SQL `DEFAULT 'hookka'` (see `lib/tenant.ts`, "§1 finish step"). Read scoping is therefore only half the boundary: a second tenant's writes would land labelled `hookka`. **Do this before onboarding a second org**, or the reads above will correctly hide rows from the tenant that created them. |
+
+**Covered by** `tests/consignment-tenant-scope.test.mjs` — the real handlers against a
+two-tenant book, asserting a caller in org A cannot reach org B through a list OR a by-id read,
+that the customer scope still narrows on top, and that the CN `/stats` cacheKey moved. The mock
+reads binds POSITIONALLY, so deleting an org predicate stops the filtering and the assertions
+fail rather than passing over a query that no longer narrows.
+
+**Finding the next one.** Grep is the wrong tool (it times out here, and a missing predicate has
+no text to match). Enumerate instead: for a router, list every `FROM <tenant_table>` with the
+handler it sits in, and require each ENTRY-POINT read to carry `orgId`. Downstream reads keyed
+off an already-gated id are transitively safe and should say so in a comment, so the next
+reader does not "fix" them again.
+
+---
+
 ## What tests cannot catch — and what covers it
 
 None of C1–C4's money leaks were introduced by a code change on the day they started leaking:

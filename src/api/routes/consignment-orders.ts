@@ -294,6 +294,14 @@ async function nextCompanyCOId(db: D1Database, now: Date): Promise<string> {
   // numbering audit. Sequence is per (year, month) so January resets to
   // 001. Picks max-existing-suffix+1 (NOT count) so deletions don't
   // recycle numbers and clash with old refs.
+  //
+  // DELIBERATELY NOT org-scoped (2026-08-09 tenant sweep). Every other read of
+  // consignment_orders on this router now carries an orgId predicate; this one
+  // must not. The sequence exists to make a CO number unique, and narrowing it
+  // per org would hand two tenants the same CO-2608-017 — a numbering collision
+  // is a worse outcome than a tenant learning how many COs exist this month,
+  // and this query returns no customer, money, or content. Revisit only
+  // alongside a per-org number series.
   const yy = String(now.getFullYear()).slice(-2);
   const mm = String(now.getMonth() + 1).padStart(2, "0");
   const prefix = `CO-${yy}${mm}-`;
@@ -454,6 +462,19 @@ async function cascadeCOStatusToPOs(
 
 // ---------------------------------------------------------------------------
 // GET /api/consignment-orders — list
+//
+// TWO independent narrowings, and they are not substitutes for each other:
+//
+//   • CUSTOMER scope (owner 2026-08-05) hides another salesperson's customers
+//     from a SALES role — a rule INSIDE one tenant;
+//   • ORG scope is the tenant boundary itself. It was missing here, so the list
+//     shipped every tenant's consignment orders to every tenant. /stats had the
+//     identical hole (fixed 39fd7a99); this one is worse, because /stats leaked
+//     counts and totals while the list leaks the documents.
+//
+// withOrgScope puts the orgId FIRST in the WHERE and therefore first in the
+// binds, ahead of the query filters and the customer-scope binds — the shape
+// /api/sales-orders uses.
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
   const status = c.req.query("status");
@@ -475,15 +496,22 @@ app.get("/", async (c) => {
     clauses.push(cnScope.clause);
     params.push(...cnScope.binds);
   }
-  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const { whereSql: where, params: orgParams } = withOrgScope(
+    c,
+    "consignment_orders",
+    clauses.join(" AND "),
+  );
 
   const orderRes = await c.var.DB
     .prepare(`SELECT * FROM consignment_orders ${where} ORDER BY created_at DESC`)
-    .bind(...params)
+    .bind(...orgParams, ...params)
     .all<ConsignmentOrderRow>();
   const orderRows = orderRes.results ?? [];
   // Scope items to the COs we return — was a whole-table `SELECT * FROM
   // consignment_order_items` on every list render. Guard the "IN ()" case.
+  // The org boundary rides along transitively: coIds now comes from an
+  // org-scoped SELECT, so no foreign order's lines can be named here. Same
+  // reasoning /api/sales-orders documents for its `salesOrderId IN (...)` fetch.
   const coIds = orderRows.map((r) => r.id);
   const itemRes = coIds.length
     ? await c.var.DB
@@ -828,6 +856,12 @@ app.post("/", async (c) => {
 
     await c.var.DB.batch(stmts);
 
+    // Re-read of the row this handler just wrote, by the id it minted — no org
+    // predicate, on purpose. The INSERT above does NOT stamp orgId; the column
+    // takes its SQL DEFAULT 'hookka' (see the write-side note in lib/tenant.ts).
+    // Adding `AND orgId = ?` here would 500 the create for any tenant that is
+    // not 'hookka'. Closing that properly means stamping orgId on the INSERT —
+    // tracked as the write-side half, not smuggled into a read-scope pass.
     const created = await c.var.DB.prepare(
       "SELECT * FROM consignment_orders WHERE id = ?",
     )
@@ -951,16 +985,30 @@ app.get("/stats", async (c) => {
 // Reads the same shape as /api/sales-orders/status-changes returns —
 // newest-first, capped at 500 rows so a single huge org doesn't
 // blow the response.
+//
+// ORG SCOPE (2026-08-09): this is the CO list's history and it leaked the same
+// way the list did — every tenant's status transitions, and the 500-row cap
+// meant another tenant's traffic could crowd out the caller's own audit trail.
+// `co_status_changes` carries its own org_id, and `orgId` IS in
+// column-rename-map.json (unlike `coId` below), so withOrgScope's literal
+// `WHERE orgId = ?` folds to the physical column correctly.
+//
+// Migrations are inert on deploy, so co_status_changes may not exist yet on
+// this DB — ensure it (idempotent) or the SELECT 500s with
+// relation "co_status_changes" does not exist (prod 2026-08-01). Columns are
+// spelled snake_case: `coId` is NOT in column-rename-map.json, so the compat
+// layer would pass it through verbatim and Postgres would fold it to `coid`
+// ≠ the physical `co_id` — a second, latent 500 the missing table masked.
+// The result columns come back camelCase via the adapter's output transform,
+// so the mapping below (r.coId, r.fromStatus, …) is unchanged.
+//
+// Keep the handler BODY tight: tests/co-status-changes-table.test.mjs pins the
+// try/catch degradation inside a 1600-char window measured from `app.get(`, so
+// prose belongs up here in the doc block, not between the statements. That is
+// why the two paragraphs above were lifted out of the body when the org scope
+// went in.
 // ---------------------------------------------------------------------------
 app.get("/status-changes", async (c) => {
-  // Migrations are inert on deploy, so co_status_changes may not exist yet on
-  // this DB — ensure it (idempotent) or the SELECT 500s with
-  // relation "co_status_changes" does not exist (prod 2026-08-01). Columns are
-  // spelled snake_case: `coId` is NOT in column-rename-map.json, so the compat
-  // layer would pass it through verbatim and Postgres would fold it to `coid`
-  // ≠ the physical `co_id` — a second, latent 500 the missing table masked.
-  // The result columns come back camelCase via the adapter's output transform,
-  // so the mapping below (r.coId, r.fromStatus, …) is unchanged.
   await ensureCoStatusChangesTable(c.var.DB);
   let rows: Array<{
     id: string;
@@ -972,14 +1020,21 @@ app.get("/status-changes", async (c) => {
     notes: string | null;
     autoActions: string | null;
   }> = [];
+  // Org scope — see the note above this handler.
+  const { whereSql: orgWhere, params: orgParams } = withOrgScope(
+    c,
+    "co_status_changes",
+  );
   try {
     const res = await c.var.DB
       .prepare(
         `SELECT id, co_id, from_status, to_status, changed_by, timestamp, notes, auto_actions
            FROM co_status_changes
+           ${orgWhere}
           ORDER BY timestamp DESC, id DESC
           LIMIT 500`,
       )
+      .bind(...orgParams)
       .all<{
         id: string;
         coId: string;
@@ -1029,9 +1084,13 @@ app.get("/status-changes", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/:id/edit-eligibility", async (c) => {
   const id = c.req.param("id");
+  // Org gate, same as every other by-id read on this router: a foreign order's
+  // id must read as "not found", not as an editability verdict. A 404 rather
+  // than a 403 for the reason customer-scope already documents — a 403 confirms
+  // the id exists, which is itself a disclosure.
   const co = await c.var.DB
-    .prepare("SELECT id, status FROM consignment_orders WHERE id = ?")
-    .bind(id)
+    .prepare("SELECT id, status FROM consignment_orders WHERE id = ? AND orgId = ?")
+    .bind(id, getOrgId(c))
     .first<{ id: string; status: string }>();
   if (!co) {
     return c.json({ success: false, error: "Consignment order not found" }, 404);
@@ -1184,8 +1243,8 @@ app.post("/:id/override-edit-lock", async (c) => {
   }
 
   const co = await c.var.DB
-    .prepare("SELECT id, status FROM consignment_orders WHERE id = ?")
-    .bind(id)
+    .prepare("SELECT id, status FROM consignment_orders WHERE id = ? AND orgId = ?")
+    .bind(id, getOrgId(c))
     .first<{ id: string; status: string }>();
   if (!co) {
     return c.json(
@@ -1320,9 +1379,16 @@ app.post("/:id/override-edit-lock", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
+  // The ORG gate is on the header read, and everything else in this Promise.all
+  // is keyed off the same id — so a foreign id fails the header read, the
+  // handler 404s below, and the sibling reads' results are never rendered. The
+  // list next door hid these documents; this endpoint hands one over by id, so
+  // both had to be closed together or the fix would just move the door.
   const [row, items, cnsRes, posRes, completedByRes] = await Promise.all([
-    c.var.DB.prepare("SELECT * FROM consignment_orders WHERE id = ?")
-      .bind(id)
+    c.var.DB.prepare(
+      "SELECT * FROM consignment_orders WHERE id = ? AND orgId = ?",
+    )
+      .bind(id, getOrgId(c))
       .first<ConsignmentOrderRow>(),
     c.var.DB.prepare(
       "SELECT * FROM consignment_order_items WHERE consignmentOrderId = ?",
@@ -1515,8 +1581,10 @@ app.post("/:id/confirm", async (c) => {
   const id = c.req.param("id");
 
   const [orderRow, itemsRes] = await Promise.all([
-    c.var.DB.prepare("SELECT * FROM consignment_orders WHERE id = ?")
-      .bind(id)
+    c.var.DB.prepare(
+      "SELECT * FROM consignment_orders WHERE id = ? AND orgId = ?",
+    )
+      .bind(id, getOrgId(c))
       .first<ConsignmentOrderRow>(),
     c.var.DB.prepare(
       "SELECT * FROM consignment_order_items WHERE consignmentOrderId = ? ORDER BY lineNo",
@@ -1630,10 +1698,13 @@ app.put("/:id", async (c) => {
   await ensureDiscountColumn(c.var.DB);
   const id = c.req.param("id");
   try {
+    // This read is also the WRITE gate: everything below updates by the same
+    // id, so scoping the fetch is what stops a caller in one org rewriting
+    // another org's consignment order. Not merely a read fix.
     const existing = await c.var.DB.prepare(
-      "SELECT * FROM consignment_orders WHERE id = ?",
+      "SELECT * FROM consignment_orders WHERE id = ? AND orgId = ?",
     )
-      .bind(id)
+      .bind(id, getOrgId(c))
       .first<ConsignmentOrderRow>();
     if (!existing) {
       return c.json(
@@ -2236,9 +2307,9 @@ app.post("/:id/cancel", async (c) => {
   const id = c.req.param("id");
 
   const existing = await c.var.DB.prepare(
-    "SELECT * FROM consignment_orders WHERE id = ?",
+    "SELECT * FROM consignment_orders WHERE id = ? AND orgId = ?",
   )
-    .bind(id)
+    .bind(id, getOrgId(c))
     .first<ConsignmentOrderRow>();
   if (!existing) {
     return c.json(
@@ -2389,12 +2460,15 @@ app.patch("/:id/hub", async (c) => {
     // 1. Resolve the CO by either UUID PK or companyCOId.
     const co = await c.var.DB
       .prepare(
+        // The org predicate wraps the id/code alternation rather than sitting
+        // beside it — `A = ? OR B ILIKE ? AND orgId = ?` would bind the tenant
+        // check to the code branch only and leave the UUID branch wide open.
         `SELECT * FROM consignment_orders
-          WHERE id = ?
-             OR companyCOId ILIKE ?
+          WHERE orgId = ?
+            AND (id = ? OR companyCOId ILIKE ?)
           LIMIT 1`,
       )
-      .bind(idParam, idParam)
+      .bind(getOrgId(c), idParam, idParam)
       .first<ConsignmentOrderRow>();
     if (!co) {
       return c.json(
@@ -2709,10 +2783,13 @@ app.delete("/:id", async (c) => {
   const denied = await requirePermission(c, "consignments", "delete");
   if (denied) return denied;
   const id = c.req.param("id");
+  // Gate the DELETE: the status read below is the only lookup this handler
+  // does, so without an org predicate a foreign id would fall through to the
+  // unconditional `DELETE ... WHERE id = ?` at the bottom.
   const existing = await c.var.DB.prepare(
-    "SELECT status FROM consignment_orders WHERE id = ?",
+    "SELECT status FROM consignment_orders WHERE id = ? AND orgId = ?",
   )
-    .bind(id)
+    .bind(id, getOrgId(c))
     .first<{ status: string }>();
   if (!existing) {
     return c.json(

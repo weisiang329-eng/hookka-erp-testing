@@ -40,7 +40,7 @@ import {
 } from "../../lib/delivery-pipeline";
 import { aggregateRacksFromPackingCards } from "../../lib/rack-format";
 import { nextInvoiceNo } from "./invoices";
-import { getOrgId } from "../lib/tenant";
+import { getOrgId, withOrgScope } from "../lib/tenant";
 import { loadCnValueMap, loadCnCustomerRefMap } from "../lib/cn-value";
 import { emitAudit } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
@@ -105,7 +105,20 @@ app.get("/", async (c) => {
     clauses.push(cnScope.clause);
     params.push(...cnScope.binds);
   }
-  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  // ORG scope — the tenant boundary, additional to the customer scope above and
+  // no substitute for it. This list had the same hole its CO sibling did: it
+  // narrowed by customer for a SALES role and by nothing at all across tenants,
+  // so every org's consignment notes were one request away. Note the COUNT and
+  // the page below share `where`/`params`, so the total can't disagree with the
+  // rows it counts.
+  // whereSql always leads with `WHERE orgId = ?`, so the orgId leads the binds
+  // too — ahead of the query filters and the customer-scope binds.
+  const { whereSql: where, params: orgParams } = withOrgScope(
+    c,
+    "consignment_notes",
+    clauses.join(" AND "),
+  );
+  const binds: unknown[] = [...orgParams, ...params];
 
   // Pagination defaults: no params → return everything (legacy callers).
   let page = pageParam ? Math.max(1, parseInt(pageParam, 10) || 1) : null;
@@ -119,12 +132,12 @@ app.get("/", async (c) => {
 
   const totalRes = await c.var.DB
     .prepare(`SELECT COUNT(*) AS n FROM consignment_notes ${where}`)
-    .bind(...params)
+    .bind(...binds)
     .first<{ n: number }>();
   const total = Number(totalRes?.n ?? 0);
 
   let listSql = `SELECT * FROM consignment_notes ${where} ORDER BY noteNumber DESC`;
-  const listParams: string[] = [...params];
+  const listParams: unknown[] = [...binds];
   if (page !== null && limit !== null) {
     const offset = (page - 1) * limit;
     listSql += ` LIMIT ${limit} OFFSET ${offset}`;
@@ -181,15 +194,22 @@ app.get("/", async (c) => {
 // a capped CN fetch under-excluded once CN volume passed one page (the CN twin
 // of the DO BUG-2026-06-27). One cheap DISTINCT.
 app.get("/linked-po-ids", async (c) => {
+  // Org-scoped on the ITEMS side, matching the identical DISTINCT inside
+  // /ready-planning below (`WHERE ci.orgId = ?`) — it already had the predicate
+  // this copy was missing. Unscoped, it named every tenant's production orders
+  // AND, worse, over-excluded: another org's PO id landing in this set would
+  // silently drop a legitimately-ready PO out of the caller's own "ready" list.
   const res = await c.var.DB
     .prepare(
       `SELECT DISTINCT ci.productionOrderId AS poId
          FROM consignment_items ci
          JOIN consignment_notes cn ON cn.id = ci.consignmentNoteId
-        WHERE ci.productionOrderId IS NOT NULL
+        WHERE ci.orgId = ?
+          AND ci.productionOrderId IS NOT NULL
           AND ci.productionOrderId <> ''
           AND cn.status <> 'CANCELLED'`,
     )
+    .bind(getOrgId(c))
     .all<{ poId?: string | null }>();
   const poIds = (res.results ?? [])
     .map((r) => r.poId)
@@ -461,10 +481,20 @@ app.get("/stats", async (c) => {
     },
     orgId,
     async () => {
+      // The CN twin of the CO /stats bug fixed in 39fd7a99, and it survived
+      // that pass because the author was looking at the other file: this
+      // snapshot is keyed by ORG while BOTH its queries counted every org's
+      // consignment notes. A cache keyed one way over a query scoped another
+      // way is the whole defect.
+      const { whereSql: aggWhere, params: aggParams } = withOrgScope(
+        c,
+        "consignment_notes",
+      );
       const aggRes = await c.var.DB
         .prepare(
-          "SELECT status, COUNT(*) AS n FROM consignment_notes GROUP BY status",
+          `SELECT status, COUNT(*) AS n FROM consignment_notes ${aggWhere} GROUP BY status`,
         )
+        .bind(...aggParams)
         .all<{ status: string; n: number }>();
       const byStatus: Record<string, number> = {};
       for (const row of aggRes.results ?? []) {
@@ -474,12 +504,16 @@ app.get("/stats", async (c) => {
       const startOfMonth = new Date(
         Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
       ).toISOString();
+      // Second query, same treatment — deliveredMTD is a separate SELECT and
+      // would have stayed org-wide if only the GROUP BY above were narrowed.
+      const { whereSql: mtdWhere, params: mtdParams } = withOrgScope(
+        c,
+        "consignment_notes",
+        "status = 'FULLY_SOLD' AND deliveredAt >= ?",
+      );
       const mtdRes = await c.var.DB
-        .prepare(
-          `SELECT COUNT(*) AS n FROM consignment_notes
-             WHERE status = 'FULLY_SOLD' AND deliveredAt >= ?`,
-        )
-        .bind(startOfMonth)
+        .prepare(`SELECT COUNT(*) AS n FROM consignment_notes ${mtdWhere}`)
+        .bind(...mtdParams, startOfMonth)
         .first<{ n: number }>();
       const deliveredMTD = Number(mtdRes?.n) || 0;
       return {
@@ -493,6 +527,12 @@ app.get("/stats", async (c) => {
         },
       };
     },
+    // cacheKey "v2" — a snapshot written BEFORE the org predicate above holds
+    // figures counted over every tenant, and it is still fresh by
+    // sourceTables/timestamp, so it would keep being served until the next CN
+    // write. Bumping the key retires those rows outright instead of trusting
+    // invalidation to notice a change in what the numbers MEAN.
+    "v2",
   );
   return c.json({ success: true, ...data });
 });
@@ -525,10 +565,14 @@ app.get("/:id/print-extras", async (c) => {
   const denied = await requirePermission(c, "consignment-notes", "read");
   if (denied) return denied;
   const id = c.req.param("id");
+  // Org gate on the header read — the line/config reads below all hang off
+  // this id, and the handler 404s before any of them is rendered. This one
+  // matters more than it looks: print-extras is what the PDF renders, so an
+  // unscoped by-id read here is another tenant's document in printable form.
   const cnRow = await c.var.DB.prepare(
-    "SELECT id, consignmentOrderId FROM consignment_notes WHERE id = ?",
+    "SELECT id, consignmentOrderId FROM consignment_notes WHERE id = ? AND orgId = ?",
   )
-    .bind(id)
+    .bind(id, getOrgId(c))
     .first<{ id: string; consignmentOrderId: string | null }>();
   if (!cnRow) {
     return c.json({ success: false, error: "Consignment note not found" }, 404);
@@ -1042,10 +1086,13 @@ app.post("/:id/return", async (c) => {
       );
     }
 
-    // Read source CN + items.
+    // Read source CN + items. Org-gated — this read is what decides the return
+    // proceeds, and a return moves stock (fg_units + stock_movements).
     const [cn, itemsRes] = await Promise.all([
-      c.var.DB.prepare("SELECT * FROM consignment_notes WHERE id = ?")
-        .bind(id)
+      c.var.DB.prepare(
+        "SELECT * FROM consignment_notes WHERE id = ? AND orgId = ?",
+      )
+        .bind(id, getOrgId(c))
         .first<ConsignmentNoteRow>(),
       c.var.DB.prepare(
         "SELECT * FROM consignment_items WHERE consignmentNoteId = ?",
@@ -1378,10 +1425,14 @@ app.post("/:id/convert-to-invoice", async (c) => {
       notes?: string;
     };
 
-    // Read source CN + items.
+    // Read source CN + items. Org-gated — convert-to-invoice mints a real
+    // invoice from this CN, so an unscoped read here would let one tenant
+    // raise a document off another tenant's consignment note.
     const [cn, itemsRes] = await Promise.all([
-      c.var.DB.prepare("SELECT * FROM consignment_notes WHERE id = ?")
-        .bind(id)
+      c.var.DB.prepare(
+        "SELECT * FROM consignment_notes WHERE id = ? AND orgId = ?",
+      )
+        .bind(id, getOrgId(c))
         .first<ConsignmentNoteRow>(),
       c.var.DB.prepare(
         "SELECT * FROM consignment_items WHERE consignmentNoteId = ?",
@@ -1743,10 +1794,11 @@ app.post("/:id/notify-customer", async (c) => {
 
     // SELECT * so the runtime-added stamp column comes back too (it lives
     // folded-lowercase; never use an explicit camelCase projection for it).
+    // Org-gated: this handler EMAILS the customer the contents of this CN.
     const cn = await c.var.DB.prepare(
-      "SELECT * FROM consignment_notes WHERE id = ?",
+      "SELECT * FROM consignment_notes WHERE id = ? AND orgId = ?",
     )
-      .bind(id)
+      .bind(id, getOrgId(c))
       .first<
         ConsignmentNoteRow & {
           dispatchEmailAt?: string | null;
@@ -2012,7 +2064,12 @@ app.patch("/", async (c) => {
       .prepare("SELECT status FROM consignment_notes WHERE id = ?")
       .bind(body.id)
       .first<{ status: string | null }>();
-    const res = await updateConsignmentNoteById(c.var.DB, body.id, body);
+    const res = await updateConsignmentNoteById(
+      c.var.DB,
+      body.id,
+      body,
+      getOrgId(c),
+    );
     if (!res.ok) {
       const mapped = mapUpdateCNError(res);
       return c.json(mapped.body, mapped.status);
@@ -2059,7 +2116,7 @@ app.put("/:id", async (c) => {
       .prepare("SELECT status FROM consignment_notes WHERE id = ?")
       .bind(id)
       .first<{ status: string | null }>();
-    const res = await updateConsignmentNoteById(c.var.DB, id, body);
+    const res = await updateConsignmentNoteById(c.var.DB, id, body, getOrgId(c));
     if (!res.ok) {
       const mapped = mapUpdateCNError(res);
       return c.json(mapped.body, mapped.status);

@@ -34,6 +34,28 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-09-001 — The whole consignment surface was customer-scoped but not org-scoped `security` `data-integrity` `auth-rbac` 🟢
+
+**Symptom.** None visible, and none possible today: prod has exactly ONE org. Every consignment row — 16 consignment orders, 11 consignment notes, 31 CO lines — is `org_id='hookka'`, as are all 17 users and all 1,323 sales orders. So this is a **latent hole, not a live leak**, and it should be described that way: nothing has escaped, and nothing can until a second tenant is seeded. What makes it worth doing now rather than then is that the hole is in the READ path, so it opens the moment a second org exists, before anyone thinks to audit it.
+
+**Root cause.** `customerScopeSql` narrows rows WITHIN a tenant (a salesperson sees only their own customers); `withOrgScope` is the tenant boundary. The consignment routers had the first and not the second, which reads as scoped on review — a `WHERE` clause visibly about who may see the row. `39fd7a99` fixed the `/stats` aggregate an hour earlier and explicitly left the list open. The list is worse: /stats leaked counts and totals, the list hands over the documents.
+
+The sweep found the gap was not two endpoints but **three routers**, including one nobody had named: `/api/consignments` is a live legacy surface over the SAME `consignment_notes` / `consignment_items` tables, with no tenant scope anywhere and a whole-table `SELECT * FROM consignment_items` carrying no predicate of any kind. Fixing only the two files in the report would have left the leak fully reachable.
+
+**Fix.** `withOrgScope` on every list and aggregate; `AND orgId = ?` on every entry-point by-id read, which for the mutating handlers is also the write gate (`src/api/routes/consignment-orders.ts` list `:499`, `/status-changes` `:1024`, `/:id/edit-eligibility` `:1092`, `/:id/override-edit-lock` `:1246`, `GET /:id` `:1389`, `/:id/confirm` `:1585`, `PUT /:id` `:1705`, `/:id/cancel` `:2310`, `/:id/hub` `:2467`, `DELETE /:id` `:2790`; `src/api/routes/consignment-notes.ts` list `:116`, `/linked-po-ids` `:207`, `/stats` `:489`+`:509`, `/:id/print-extras` `:573`, `/:id/return` `:1093`, `/:id/convert-to-invoice` `:1433`, `/:id/notify-customer` `:1799`, PATCH `:2067` / PUT `:2119` via the helper; `src/api/routes/consignments.ts` list `:67`+`:76`, `GET /:id` `:332`, `PUT /:id` `:362`+`:444`, `DELETE /:id` `:513`; `src/api/lib/consignment-note-shared.ts:544` takes an `orgId` argument so the shared CN update gates on it).
+
+The `/:id/hub` resolver needed care rather than a copy-paste: it matches `id = ? OR companyCOId ILIKE ?`, and appending `AND orgId = ?` would have bound the tenant check to the code branch alone and left the UUID branch wide open. The org predicate wraps the alternation instead.
+
+CN `/stats` had `/stats`'s exact bug and had been missed by that pass — cached per org, computed over every org — so its `cacheKey` moved to `"v2"`: a pre-fix snapshot is still FRESH by timestamp and would keep being served, because what changed is the MEANING of the numbers, not the source tables.
+
+**Deliberately left, both recorded in `BUG-CLASSES.md` C12 rather than half-done here.** (1) `nextCompanyCOId` stays org-WIDE on purpose — it exists to make a CO number unique, and narrowing it would hand two tenants the same `CO-2608-017`; a numbering collision is worse than knowing how many COs exist, and the query returns no customer, money or content. (2) **The write side does not stamp `orgId` at all** — `INSERT INTO consignment_orders` relies on the column's SQL `DEFAULT 'hookka'`, so a second tenant's writes would land labelled `hookka` and these very predicates would then hide their own rows from them. Scoping the post-create re-read would have turned that into a 500 on create, so it is annotated in place, not patched. **This must be done before a second org is onboarded.** (3) `GET /api/sales-orders/:id` has the identical shape — org-scoped list, unscoped by-id read — and is left for a sales-side sweep rather than a drive-by.
+
+**Verified.** `tests/consignment-tenant-scope.test.mjs` (14 tests) drives the real handlers against a two-tenant book: org A cannot reach org B's rows through any of the three lists OR through a by-id read (404, not 403 — a 403 confirms the id exists), a scoped salesperson still sees only their own customers AND only within their org, and the CN `/stats` cacheKey moved. Mutation-checked: removing the org predicate from the list, from the by-id read, or dropping the cacheKey each fails the suite — the mock reads binds positionally, so a query that stops narrowing stops filtering. Full suite 3,604 pass / 0 fail, `npx tsc -p tsconfig.app.json --noEmit` clean. Org counts read live off prod (read-only).
+
+One test needed a real accommodation rather than a loosened pin: `tests/co-status-changes-table.test.mjs` asserts the `/status-changes` try/catch degradation sits within 1,600 characters of `app.get(`. The added predicate pushed it out, so the handler's explanatory comments moved up into the doc block instead — the pin still holds against the shorter body, and a note in the file says why prose belongs above that handler.
+
+---
+
 ## BUG-2026-08-08-005 — A merged FAB_CUT card that cuts N pieces had only 1 taken back out `inventory-cascade` `production-orders` `data-integrity` 🟢
 
 **Symptom.** The third WIP drift mechanism, after `630b9e13` and `bdfe14ac`. `wip_items` rows for merged FAB_CUT labels ("… | (FC)") never reach zero: they settle on `wipQty − 1` and stay there permanently, on orders that shipped. On prod, **337 of 2,045 FAB_CUT cards carry a `wipQty` above 1**; of the 315 that are COMPLETED, 314 have had a FAB_SEW sibling finish, stranding **385 units**.

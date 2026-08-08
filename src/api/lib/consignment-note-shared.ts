@@ -524,14 +524,27 @@ export async function validatePOMutex(
   return { ok: true };
 }
 
+/**
+ * `orgId` is the tenant gate. It is optional only because this helper takes a
+ * raw D1Database rather than a Hono context and cannot resolve the org itself;
+ * every ROUTE caller must pass `getOrgId(c)`. When supplied, an id belonging to
+ * another org resolves to `not_found` — which is where the CN write path is
+ * enforced, since this `existing` read is the only lookup the update does and
+ * every statement below keys off it.
+ */
 export async function updateConsignmentNoteById(
   db: D1Database,
   id: string,
   body: Record<string, unknown>,
+  orgId?: string | null,
 ): Promise<UpdateCNResult> {
   const existing = await db
-    .prepare("SELECT * FROM consignment_notes WHERE id = ?")
-    .bind(id)
+    .prepare(
+      orgId
+        ? "SELECT * FROM consignment_notes WHERE id = ? AND orgId = ?"
+        : "SELECT * FROM consignment_notes WHERE id = ?",
+    )
+    .bind(...(orgId ? [id, orgId] : [id]))
     .first<ConsignmentNoteRow>();
   if (!existing) return { ok: false, reason: "not_found" };
 

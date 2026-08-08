@@ -15,6 +15,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { customerScopeSql } from "../lib/customer-scope";
+import { getOrgId, withOrgScope } from "../lib/tenant";
 import { emitAudit } from "../lib/audit";
 import {
   loadFgUnitsForEvent,
@@ -56,12 +57,25 @@ app.get("/", async (c) => {
     clauses.push(cnScope.clause);
     params.push(...cnScope.binds);
   }
-  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  // ORG scope (2026-08-09 tenant sweep). This legacy surface reads the SAME
+  // consignment_notes / consignment_items tables as /api/consignment-notes and
+  // had the identical hole — customer-scoped, tenant-unscoped — so closing only
+  // the two routers that were reported would have left the whole leak reachable
+  // through a third live path. The items read was worse still: an unfiltered
+  // whole-table `SELECT * FROM consignment_items`, every tenant's lines with no
+  // predicate of any kind. It is now narrowed by the same orgId.
+  const { whereSql: where, params: orgParams } = withOrgScope(
+    c,
+    "consignment_notes",
+    clauses.join(" AND "),
+  );
   const [notesRes, itemsRes] = await Promise.all([
     c.var.DB.prepare(`SELECT * FROM consignment_notes ${where}`)
-      .bind(...params)
+      .bind(...orgParams, ...params)
       .all<ConsignmentNoteRow>(),
-    c.var.DB.prepare("SELECT * FROM consignment_items").all<ConsignmentItemRow>(),
+    c.var.DB.prepare("SELECT * FROM consignment_items WHERE orgId = ?")
+      .bind(getOrgId(c))
+      .all<ConsignmentItemRow>(),
   ]);
   const data = (notesRes.results ?? []).map((r) =>
     rowToConsignmentNote(r, itemsRes.results ?? []),
@@ -314,8 +328,10 @@ app.post("/", async (c) => {
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
   const [row, items] = await Promise.all([
-    c.var.DB.prepare("SELECT * FROM consignment_notes WHERE id = ?")
-      .bind(id)
+    c.var.DB.prepare(
+      "SELECT * FROM consignment_notes WHERE id = ? AND orgId = ?",
+    )
+      .bind(id, getOrgId(c))
       .first<ConsignmentNoteRow>(),
     c.var.DB.prepare(
       "SELECT * FROM consignment_items WHERE consignmentNoteId = ?",
@@ -343,9 +359,9 @@ app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
-      "SELECT * FROM consignment_notes WHERE id = ?",
+      "SELECT * FROM consignment_notes WHERE id = ? AND orgId = ?",
     )
-      .bind(id)
+      .bind(id, getOrgId(c))
       .first<ConsignmentNoteRow>();
     if (!existing) {
       return c.json({ success: false, error: "Consignment not found" }, 404);
@@ -425,7 +441,7 @@ app.put("/:id", async (c) => {
         .run();
     }
 
-    const res = await updateConsignmentNoteById(c.var.DB, id, body);
+    const res = await updateConsignmentNoteById(c.var.DB, id, body, getOrgId(c));
     if (!res.ok) {
       // Mirror consignment-notes.ts error mapping (gaps 5 + latent gap 3,
       // 2026-04-29). The helper now returns typed errors for invalid
@@ -494,9 +510,9 @@ app.delete("/:id", async (c) => {
   if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
-    "SELECT * FROM consignment_notes WHERE id = ?",
+    "SELECT * FROM consignment_notes WHERE id = ? AND orgId = ?",
   )
-    .bind(id)
+    .bind(id, getOrgId(c))
     .first<ConsignmentNoteRow>();
   if (!existing) {
     return c.json({ success: false, error: "Consignment not found" }, 404);

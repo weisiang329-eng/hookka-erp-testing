@@ -216,7 +216,13 @@ export type DataGridProps<T> = {
   // default. Pass `autoGroup={false}` to keep the grid FLAT on open — the
   // "Group" toggle button still shows so the operator can group on demand.
   autoGroup?: boolean;
-  viewStorageKey?: string; // when provided, enables saved views feature; used as localStorage prefix
+  // Enables Saved Views (named filter/sort/grouping snapshots) and prefixes
+  // their localStorage key. DEFAULTS TO `gridId` — the feature was fully built
+  // (save / apply / delete / reset, persisted per user) but no page ever passed
+  // this prop, so the whole thing was unreachable. Defaulting it means any grid
+  // that already declares a gridId gets Views under that same stable key.
+  // Pass it explicitly only to deviate; pass "" to opt a grid out.
+  viewStorageKey?: string;
   // Fires whenever the currently filtered + sorted rows change. Lets the
   // parent mirror the grid's internal filter state — e.g. to scope a
   // "Print" action or a QR-sticker row to exactly what the user sees.
@@ -1610,7 +1616,9 @@ export function DataGrid<T extends Record<string, any>>({
   printPresetLabel,
   groupBy,
   autoGroup = true,
-  viewStorageKey,
+  // Defaults to gridId (destructured above) so Saved Views is reachable on
+  // every grid that persists a layout, without touching 28 call sites.
+  viewStorageKey = gridId,
   onFilteredDataChange,
   exportName,
   exportSheetLabel,

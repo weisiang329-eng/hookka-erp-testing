@@ -420,6 +420,64 @@ for (const variant of ["segmented", "underline"]) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// 5. The Delivery Order list — the page the pattern was copied FROM — now
+//    renders the shared strip too, and spells money the one way.
+//
+// Source-level for the same reason as 3c: the fault is textual. `formatRM`
+// puts a plain space between "RM" and the digits; `formatCurrency` (Intl,
+// en-MY) uses a NO-BREAK space. Two spellings of one amount on one page look
+// identical on screen and differ the moment anything compares, exports or
+// copies them — which is precisely what a list page does.
+// ---------------------------------------------------------------------------
+
+test("the DO list renders the SHARED strip, not a seventh hand-written copy", () => {
+  const src = readFileSync(
+    resolve(process.cwd(), "src/pages/delivery/index.tsx"),
+    "utf8",
+  );
+  assert.match(src, /<StatusTabStrip\b/, "the DO page must mount the shared strip");
+  assert.match(
+    src,
+    /from "@\/components\/ui\/status-tab-strip"/,
+    "…imported from the one component, not redefined locally",
+  );
+  // The hand-written strip's tell-tale: its own <nav aria-label="Tabs"> of
+  // status buttons with an inline count pill.
+  assert.doesNotMatch(
+    src,
+    /<nav[^>]*aria-label="Tabs"/,
+    "the hand-written status nav must be gone, not merely unused",
+  );
+});
+
+test("one money spelling on the DO page — formatCurrency, like every other list", () => {
+  const src = readFileSync(
+    resolve(process.cwd(), "src/pages/delivery/index.tsx"),
+    "utf8",
+  );
+  assert.doesNotMatch(
+    src,
+    /\bformatRM\b/,
+    "formatRM's plain space is a second spelling of the same amount",
+  );
+  assert.match(src, /\bformatCurrency\(/, "money still renders, via the shared formatter");
+});
+
+test("the DO page's bucket money goes through the honesty rule", () => {
+  // Planning / Pending Delivery sum PO rows that may all be unpriced. Summed
+  // raw, an empty bucket renders a confident RM 0.00; run through tabValueSen
+  // it renders its count alone, like every other list.
+  const src = readFileSync(
+    resolve(process.cwd(), "src/pages/delivery/index.tsx"),
+    "utf8",
+  );
+  assert.match(src, /from "@\/lib\/status-tab-strip"/);
+  // And the rule itself, exercised: an empty Planning bucket must not be RM 0.00.
+  assert.equal(tabValueSen([].reduce((s, p) => s + (p.valueSen || 0), 0)), null);
+  assert.equal(tabValueSen(9380650), 9380650);
+});
+
 test("loading hides the money rather than showing a placeholder zero", () => {
   const html = render({ tabs: VALUED_TABS, loading: true });
   assert.ok(!html.includes("RM"), "no half-computed figure while loading");

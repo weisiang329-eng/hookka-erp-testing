@@ -8,7 +8,9 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { RepairPartsBadge } from "@/components/sales/repair-scope-picker";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
-import { cn, formatDate, formatRM } from "@/lib/utils";
+import { StatusTabStrip } from "@/components/ui/status-tab-strip";
+import { tabValueSen, type StatusTabSpec } from "@/lib/status-tab-strip";
+import { cn, formatCurrency, formatDate } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { buildDoDetailListingAoa } from "@/lib/doc-detail-listings";
 import { useNavigate } from "react-router-dom";
@@ -3835,7 +3837,7 @@ export default function DeliveryPage() {
         sortable: true,
         render: (_v, row) => (
           <span className="font-medium text-[#1F1D1B] tabular-nums">
-            {formatRM(row.valueSen ?? 0)}
+            {formatCurrency(row.valueSen ?? 0)}
           </span>
         ),
       },
@@ -3966,7 +3968,7 @@ export default function DeliveryPage() {
         sortable: true,
         render: (_v, row) => (
           <span className="font-medium text-[#1F1D1B] tabular-nums">
-            {formatRM(row.valueSen ?? 0)}
+            {formatCurrency(row.valueSen ?? 0)}
           </span>
         ),
       },
@@ -4267,7 +4269,7 @@ export default function DeliveryPage() {
         sortable: true,
         render: (_value, row) => (
           <span className="font-medium text-[#1F1D1B] tabular-nums">
-            {formatRM(row.valueSen ?? 0)}
+            {formatCurrency(row.valueSen ?? 0)}
           </span>
         ),
       },
@@ -4636,17 +4638,32 @@ export default function DeliveryPage() {
   // comparable across the whole flow). DO tabs read the whole-dataset
   // /stats aggregate. "Dispatched" shows LOADED + IN_TRANSIT because the
   // tab lists both (TAB_DO_STATUSES.dispatched), so its money must too.
-  const tabValueSen: Record<string, number | null> = {
-    planning: planningPOs.reduce((s, p) => s + (p.valueSen || 0), 0),
-    pending_delivery: readyPOs.reduce((s, p) => s + (p.valueSen || 0), 0),
-    pending_dispatch: valueDOsByStatus.draft,
-    dispatched: valueDOsByStatus.dispatched + valueDOsByStatus.inTransit,
-    delivered: valueDOsByStatus.delivered,
+  // Every figure goes through the shared `tabValueSen` honesty rule, so a
+  // bucket that sums to nothing renders its count alone instead of a confident
+  // RM 0.00 — the same rule the other six lists follow.
+  const tabMoneySen: Record<string, number | null> = {
+    planning: tabValueSen(planningPOs.reduce((s, p) => s + (p.valueSen || 0), 0)),
+    pending_delivery: tabValueSen(readyPOs.reduce((s, p) => s + (p.valueSen || 0), 0)),
+    pending_dispatch: tabValueSen(valueDOsByStatus.draft),
+    dispatched: tabValueSen(
+      valueDOsByStatus.dispatched + valueDOsByStatus.inTransit,
+    ),
+    delivered: tabValueSen(valueDOsByStatus.delivered),
     // Deliberately NO money on the Cancelled tab: those goods were handed back
     // (stock, COGS and the SO were all reversed), so showing an RM figure
     // there would read as revenue that still exists.
     cancelled: null,
+    // Packing List is a different document altogether — it carries its own
+    // revenue/cost columns in the tab body, not a bucket total.
+    packing_list: null,
   };
+
+  const statusTabs: StatusTabSpec[] = ALL_TABS.map((t) => ({
+    key: t.key,
+    label: t.label,
+    count: tabCounts[t.key] ?? 0,
+    valueSen: tabMoneySen[t.key] ?? null,
+  }));
 
   return (
     <div className="space-y-6 max-md:space-y-4">
@@ -4751,54 +4768,29 @@ export default function DeliveryPage() {
 
 
 
-      {/* Tabs — 6-stage delivery workflow */}
-      <div className="border-b border-[#E2DDD8]">
-        <nav className="flex gap-4 overflow-x-auto" aria-label="Tabs">
-          {ALL_TABS.map((tab) => (
-            <button
-              key={tab.key}
-              onClick={() => {
-                // Mark the tab switch as a non-urgent transition so this huge
-                // page's re-render is interruptible — rapid tab-flicking stays
-                // responsive instead of queueing full re-renders (owner
-                // 2026-07-16: "快速切换 tab 很卡顿"). Pure scheduling; no logic
-                // change. The real cure is decomposing this 7k-line page.
-                React.startTransition(() => {
-                  setActiveTab(tab.key);
-                  setSelectedIds(new Set());
-                  setSelectedReadyPOs(new Set());
-                });
-              }}
-              className={`flex flex-col items-start gap-0.5 pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
-                activeTab === tab.key
-                  ? "border-[#6B5C32] text-[#6B5C32]"
-                  : "border-transparent text-[#6B7280] hover:text-[#1F1D1B]"
-              }`}
-            >
-              <span className="flex items-center gap-2">
-                {tab.label}
-                <span
-                  className={`rounded-full px-2 py-0.5 text-xs font-medium ${
-                    activeTab === tab.key
-                      ? "bg-[#6B5C32] text-white"
-                      : "bg-[#F0ECE9] text-[#6B7280]"
-                  }`}
-                >
-                  {tabCounts[tab.key] ?? 0}
-                </span>
-              </span>
-              {/* Wei Siang 2026-05-16: RM value of the bucket. DO-based
-                  tabs only; Planning / Pending Delivery show nothing
-                  (PO-based, price not loaded here yet). */}
-              {tabValueSen[tab.key] != null && (
-                <span className="text-[10px] font-normal text-[#9CA3AF] tabular-nums">
-                  {formatRM(tabValueSen[tab.key] as number)}
-                </span>
-              )}
-            </button>
-          ))}
-        </nav>
-      </div>
+      {/* Tabs — 6-stage delivery workflow. This strip is the one every other
+          document list copied; since 2026-08-08 it IS that shared component
+          (src/components/ui/status-tab-strip.tsx), so the page it came from
+          can no longer drift away from the pages that followed it. */}
+      <StatusTabStrip
+        variant="underline"
+        value={activeTab}
+        onChange={(key) => {
+          // Mark the tab switch as a non-urgent transition so this huge
+          // page's re-render is interruptible — rapid tab-flicking stays
+          // responsive instead of queueing full re-renders (owner
+          // 2026-07-16: "快速切换 tab 很卡顿"). Pure scheduling; no logic
+          // change. The real cure is decomposing this 7k-line page.
+          React.startTransition(() => {
+            setActiveTab(key);
+            setSelectedIds(new Set());
+            setSelectedReadyPOs(new Set());
+          });
+        }}
+        moneyLabel="Sales value"
+        ariaLabel="Delivery stage"
+        tabs={statusTabs}
+      />
 
       {/* ============================================================== */}
       {/* Tab Content                                                     */}
@@ -5097,10 +5089,10 @@ export default function DeliveryPage() {
                           {pl.totalM3.toFixed(2)}
                         </td>
                         <td className="py-2.5 px-3 text-right tabular-nums whitespace-nowrap">
-                          {formatRM(pl.revenueSen ?? 0)}
+                          {formatCurrency(pl.revenueSen ?? 0)}
                         </td>
                         <td className="py-2.5 px-3 text-right tabular-nums whitespace-nowrap">
-                          {pl.costSen == null ? "—" : formatRM(pl.costSen)}
+                          {pl.costSen == null ? "—" : formatCurrency(pl.costSen)}
                         </td>
                         <td className="py-2.5 px-3 text-center">
                           {(() => {

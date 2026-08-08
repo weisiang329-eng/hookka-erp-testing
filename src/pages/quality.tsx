@@ -85,6 +85,15 @@ type SoSpec = {
   totalUnits?: number | null;
 };
 
+// Why this finished unit was drawn out of everything packed today, frozen at
+// draw time. The draw is weighted toward prior service cases, rarely-built
+// product codes and hand-heavy models — see src/api/lib/qc-fg-risk.ts.
+type SampleReason = {
+  score?: number;
+  summary?: string;
+  reasons?: { code: string; label: string; weight: number }[];
+};
+
 type InspectionItem = {
   id: string;
   sequence: number;
@@ -138,6 +147,7 @@ type Inspection = {
   materialFamily?: string;
   sourceFgUnitId?: string;
   soSpec?: SoSpec | null;
+  sampleReason?: SampleReason | null;
   items: InspectionItem[];
 };
 
@@ -498,6 +508,37 @@ function PendingRow({
   );
 }
 
+// WHY this unit was drawn out of everything packed today. The draw is weighted
+// toward prior complaints, rarely-built product codes and hand-heavy models
+// (src/api/lib/qc-fg-risk.ts), and the reasons are frozen onto the inspection at
+// draw time. Without them on screen every sampled unit looks routine, which is
+// precisely what the weighting exists to prevent.
+function SampleReasonPanel({ reason }: { reason: SampleReason }) {
+  const reasons = reason.reasons ?? [];
+  if (reasons.length === 0) return null;
+  const complaint = reasons.some((r) => r.code?.startsWith("SERVICE_CASE"));
+  return (
+    <div
+      className={`rounded-md border px-3 py-2 ${
+        complaint ? "border-red-300 bg-red-50" : "border-sky-200 bg-sky-50"
+      }`}
+    >
+      <div
+        className={`text-xs font-medium uppercase tracking-wide ${
+          complaint ? "text-red-800" : "text-sky-800"
+        }`}
+      >
+        Why this unit was drawn
+      </div>
+      <ul className={`mt-1 space-y-0.5 text-sm ${complaint ? "text-red-900" : "text-sky-900"}`}>
+        {reasons.map((r, i) => (
+          <li key={`${r.code}-${i}`}>• {r.label}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 // What the sales order actually asked for. The FG checklist's first seven items
 // are all "does the unit match this", so the answer has to be on screen next to
 // them — an inspector who has to go and look the order up will read the label
@@ -764,6 +805,7 @@ function DoInspectionForm({
               </div>
             )}
           </div>
+          {stage === "FG" && insp.sampleReason && <SampleReasonPanel reason={insp.sampleReason} />}
           {stage === "FG" && insp.soSpec && <SoSpecPanel spec={insp.soSpec} />}
           <div>
             <label className="mb-1 block text-xs font-medium text-muted-foreground">Overall notes (optional)</label>

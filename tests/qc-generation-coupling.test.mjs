@@ -40,6 +40,10 @@ function makeDb({
   // STORED: batches drawn for production, as cost_ledger RM_ISSUE rows join
   // rm_batches join raw_materials.
   issuedBatches = [],
+  // FG risk weighting inputs.
+  productHistory = [],   // [{ productCode, n }] units built in the rarity window
+  bomVersions = [],      // [{ productCode, totalMinutes }] ACTIVE versions
+  serviceCases = [],     // [{ productCode, customerId, rootCauseCategory, viaSourceOrder }]
 } = {}) {
   const state = { inspections, inspectionItems: [], ddl: [] };
   const norm = (s) => s.replace(/\s+/g, " ").trim();
@@ -202,6 +206,36 @@ function makeDb({
           .sort((a, b) => String(a.unitId).localeCompare(String(b.unitId))),
       };
     }
+    // --- FG risk weighting: rarity, workmanship, prior complaints ---
+    if (/^SELECT productCode AS "productCode", COUNT\(\*\) AS "n" FROM fg_units/i.test(s)) {
+      const codes = new Set(args.slice(0, args.length - 1));
+      return { rows: productHistory.filter((p) => codes.has(p.productCode)) };
+    }
+    if (/FROM bom_versions/i.test(s)) {
+      return { rows: bomVersions.map((b) => ({ ...b })) };
+    }
+    if (/FROM service_cases sc LEFT JOIN service_orders/i.test(s)) {
+      return {
+        rows: serviceCases
+          .filter((c) => !c.viaSourceOrder)
+          .map((c) => ({
+            productCode: c.productCode ?? null,
+            customerId: c.customerId ?? null,
+            rootCauseCategory: c.rootCauseCategory ?? null,
+          })),
+      };
+    }
+    if (/FROM service_cases sc INNER JOIN sales_order_items/i.test(s)) {
+      return {
+        rows: serviceCases
+          .filter((c) => c.viaSourceOrder)
+          .map((c) => ({
+            productCode: c.productCode ?? null,
+            customerId: c.customerId ?? null,
+            rootCauseCategory: c.rootCauseCategory ?? null,
+          })),
+      };
+    }
     if (/FROM qc_inspections WHERE source_fg_unit_id IS NOT NULL/i.test(s)) {
       return {
         rows: state.inspections
@@ -216,14 +250,14 @@ function makeDb({
         subjectType, subjectId, subjectLabel,
         sourceGrnId, sourceGrnNo, materialFamily, sourceFgUnitId, soSpec,
         sourceGrnIds, sourceGrnNos, sourceReceiptDate, sourceSupplierId,
-        rmCheckKind, sourceRmBatchId, sourceBatchAgeDays] = args;
+        rmCheckKind, sourceRmBatchId, sourceBatchAgeDays, sampleReason] = args;
       state.inspections.push({
         id, inspectionNo, templateId, templateSnapshot, stage, itemCategory,
         department, scheduledSlotAt, inspectionDate, createdAt,
         subjectType, subjectId, subjectLabel,
         sourceGrnId, sourceGrnNo, materialFamily, sourceFgUnitId, soSpec,
         sourceGrnIds, sourceGrnNos, sourceReceiptDate, sourceSupplierId,
-        rmCheckKind, sourceRmBatchId, sourceBatchAgeDays,
+        rmCheckKind, sourceRmBatchId, sourceBatchAgeDays, sampleReason,
         triggerType: "SCHEDULED", status: "PENDING",
       });
       return { rows: [] };
@@ -884,6 +918,7 @@ function fgUnit(n, over = {}) {
     legHeightInches: 4,
     divanHeightInches: null,
     soLineNotes: null,
+    customerId: `cust-${n}`,
     ...over,
   };
 }
@@ -965,6 +1000,165 @@ test("sofa and bedframe are sampled against their own template", async () => {
   assert.deepEqual(
     db.state.inspections.map((r) => r.templateId).sort(),
     ["qct-fg-bf", "qct-fg-sofa"],
+  );
+});
+
+// ── FG: the draw is weighted by RISK, and every unit says why ───────────────
+//
+// Owner 2026-08-08: "那些特别少出现的一些 order … 一些款式，看手工等等 … 尤其是
+// 我们 service case 里面有的东西". The share was already right; the DRAW was
+// whatever order the database returned, which on a day of repeat production
+// spends the inspection on the model built four hundred times.
+
+test("a unit whose product code has a prior SERVICE CASE is drawn ahead of the rest", async () => {
+  // The strongest signal, and the loop the owner is actually asking for: the
+  // complaint that came back last month decides what gets looked at before the
+  // next one goes out of the door.
+  const db = makeDb({
+    templates: FG_TEMPLATES,
+    templateItems: FG_TEMPLATE_ITEMS,
+    // Twelve units → the target is 2. P-7 is buried in the middle of the pool,
+    // so an unweighted draw would take fgu-001 and fgu-002 and never see it.
+    fgUnits: Array.from({ length: 12 }, (_, i) => fgUnit(i + 1)),
+    serviceCases: [{ productCode: "P-7", customerId: "someone-else", rootCauseCategory: "PRODUCTION" }],
+  });
+
+  const res = await generatePendingForSlot(db.DB, SLOT);
+  assert.equal(res.fgCreated, 2);
+  const drawn = db.state.inspections.map((r) => JSON.parse(r.soSpec).productCode);
+  assert.ok(drawn.includes("P-7"),
+    `the complained-about product must be in the draw — got ${drawn.join(", ")}`);
+  assert.equal(res.fgPriorComplaintDraws, 1);
+
+  const row = db.state.inspections.find((r) => JSON.parse(r.soSpec).productCode === "P-7");
+  const reason = JSON.parse(row.sampleReason);
+  assert.ok(reason.reasons.some((x) => x.code === "SERVICE_CASE_PRODUCT"));
+  assert.ok(reason.reasons.some((x) => x.code === "SERVICE_CASE_OUR_FAULT"),
+    "a root cause of PRODUCTION means it repeats at the bench, and must weigh more");
+});
+
+test("a case logged against the SOURCE ORDER counts too, not only ones with a repair order", async () => {
+  // Missing this shape silently loses exactly the complaints nobody followed up
+  // with a repair — which are not the ones you want to stop looking at.
+  const db = makeDb({
+    templates: FG_TEMPLATES,
+    templateItems: FG_TEMPLATE_ITEMS,
+    fgUnits: Array.from({ length: 12 }, (_, i) => fgUnit(i + 1)),
+    serviceCases: [{ productCode: "P-9", viaSourceOrder: true, rootCauseCategory: null }],
+  });
+  await generatePendingForSlot(db.DB, SLOT);
+  const drawn = db.state.inspections.map((r) => JSON.parse(r.soSpec).productCode);
+  assert.ok(drawn.includes("P-9"), `got ${drawn.join(", ")}`);
+});
+
+test("a customer who has complained before pulls their unit into the draw", async () => {
+  const db = makeDb({
+    templates: FG_TEMPLATES,
+    templateItems: FG_TEMPLATE_ITEMS,
+    fgUnits: Array.from({ length: 12 }, (_, i) => fgUnit(i + 1)),
+    serviceCases: [{ productCode: null, customerId: "cust-8" }],
+  });
+  await generatePendingForSlot(db.DB, SLOT);
+  const row = db.state.inspections.find((r) => r.sourceFgUnitId === "fgu-008");
+  assert.ok(row, "the repeat complainant's unit should be drawn");
+  const reason = JSON.parse(row.sampleReason);
+  assert.ok(reason.reasons.some((x) => x.code === "SERVICE_CASE_CUSTOMER"));
+});
+
+test("a RARELY BUILT product code outranks the routine ones", async () => {
+  // Rarity is COUNTED off fg_units, not read from a hand-kept list — a list
+  // stops being true and nobody notices.
+  const db = makeDb({
+    templates: FG_TEMPLATES,
+    templateItems: FG_TEMPLATE_ITEMS,
+    fgUnits: Array.from({ length: 12 }, (_, i) => fgUnit(i + 1)),
+    productHistory: [
+      ...Array.from({ length: 12 }, (_, i) => ({ productCode: `P-${i + 1}`, n: 400 })),
+      { productCode: "P-11", n: 2 },
+    ].filter((p, i, all) => all.findIndex((q) => q.productCode === p.productCode) === i || p.n === 2),
+  });
+  await generatePendingForSlot(db.DB, SLOT);
+  const drawn = db.state.inspections.map((r) => JSON.parse(r.soSpec).productCode);
+  assert.ok(drawn.includes("P-11"), `got ${drawn.join(", ")}`);
+  const row = db.state.inspections.find((r) => JSON.parse(r.soSpec).productCode === "P-11");
+  assert.ok(JSON.parse(row.sampleReason).reasons.some((x) => x.code === "RARE_PRODUCT"));
+});
+
+test("a hand-heavy model and a one-off special order both pull a unit into the draw", async () => {
+  const db = makeDb({
+    templates: FG_TEMPLATES,
+    templateItems: FG_TEMPLATE_ITEMS,
+    fgUnits: [
+      ...Array.from({ length: 10 }, (_, i) => fgUnit(i + 1)),
+      fgUnit(11, { specialOrder: "Customer wants the chaise on the LEFT and no piping" }),
+      fgUnit(12, { productCode: "P-12", soProductCode: "P-12" }),
+    ],
+    // P-12 takes three times the catalogue median; everything else is routine.
+    bomVersions: [
+      ...Array.from({ length: 11 }, (_, i) => ({ productCode: `P-${i + 1}`, totalMinutes: 100 })),
+      { productCode: "P-12", totalMinutes: 300 },
+    ],
+  });
+  await generatePendingForSlot(db.DB, SLOT);
+  const codes = db.state.inspections.map((r) => JSON.parse(r.soSpec).productCode);
+  assert.ok(codes.includes("P-12"), `the hand-heavy model must be drawn — got ${codes.join(", ")}`);
+
+  const heavy = db.state.inspections.find((r) => JSON.parse(r.soSpec).productCode === "P-12");
+  assert.ok(JSON.parse(heavy.sampleReason).reasons.some((x) => x.code === "LABOUR_HEAVY"));
+});
+
+test("EVERY drawn unit carries a reason the inspector can read", async () => {
+  // Including a routine one: a sampled unit with no reason on it is a unit the
+  // inspector treats as routine, which is what the weighting exists to stop.
+  const db = makeDb({
+    templates: FG_TEMPLATES,
+    templateItems: FG_TEMPLATE_ITEMS,
+    fgUnits: Array.from({ length: 12 }, (_, i) => fgUnit(i + 1)),
+    serviceCases: [{ productCode: "P-4", rootCauseCategory: "TRANSPORT" }],
+  });
+  await generatePendingForSlot(db.DB, SLOT);
+  for (const row of db.state.inspections) {
+    const reason = JSON.parse(row.sampleReason);
+    assert.equal(typeof reason.score, "number");
+    assert.equal(typeof reason.summary, "string");
+    assert.ok(reason.summary.length > 0, "the summary is what is shown at the top of the checklist");
+    assert.ok(Array.isArray(reason.reasons));
+  }
+  const complained = db.state.inspections.find((r) => JSON.parse(r.soSpec).productCode === "P-4");
+  assert.ok(complained);
+  const reasons = JSON.parse(complained.sampleReason).reasons;
+  assert.ok(reasons.some((x) => x.code === "SERVICE_CASE_PRODUCT"));
+  assert.ok(!reasons.some((x) => x.code === "SERVICE_CASE_OUR_FAULT"),
+    "a complaint blamed on TRANSPORT is real, but it does not repeat at the bench");
+});
+
+test("the weighting degrades to the old draw when every signal is missing", async () => {
+  // No BOM, no history, no service cases. The correct failure direction is
+  // sampling something, never sampling nothing.
+  const db = makeDb({
+    templates: FG_TEMPLATES,
+    templateItems: FG_TEMPLATE_ITEMS,
+    fgUnits: Array.from({ length: 12 }, (_, i) => fgUnit(i + 1)),
+  });
+  const res = await generatePendingForSlot(db.DB, SLOT);
+  assert.equal(res.fgCreated, 2);
+  assert.equal(res.fgPriorComplaintDraws, 0);
+});
+
+test("a re-run re-derives the SAME ranking — the cron firing twice must not swap the unit", async () => {
+  const fixture = {
+    templates: FG_TEMPLATES,
+    templateItems: FG_TEMPLATE_ITEMS,
+    fgUnits: Array.from({ length: 12 }, (_, i) => fgUnit(i + 1)),
+    serviceCases: [{ productCode: "P-6" }],
+  };
+  const a = makeDb(fixture);
+  const b = makeDb({ ...fixture, inspections: [] });
+  await generatePendingForSlot(a.DB, SLOT);
+  await generatePendingForSlot(b.DB, SLOT);
+  assert.deepEqual(
+    a.state.inspections.map((r) => r.sourceFgUnitId),
+    b.state.inspections.map((r) => r.sourceFgUnitId),
   );
 });
 

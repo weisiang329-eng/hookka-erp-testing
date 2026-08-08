@@ -69,6 +69,10 @@ export async function ensureQcGenerationSchema(db: D1Database): Promise<void> {
     "ALTER TABLE qc_inspections ADD COLUMN IF NOT EXISTS rm_check_kind TEXT",
     "ALTER TABLE qc_inspections ADD COLUMN IF NOT EXISTS source_rm_batch_id TEXT",
     "ALTER TABLE qc_inspections ADD COLUMN IF NOT EXISTS source_batch_age_days INTEGER",
+    // 2026-08-08 (4) — WHY this finished unit was drawn for OQC, frozen at
+    // draw time. A sampled unit with no reason on it is a unit the inspector
+    // treats as routine, which is the whole thing the weighting exists to stop.
+    "ALTER TABLE qc_inspections ADD COLUMN IF NOT EXISTS sample_reason TEXT",
     "CREATE INDEX IF NOT EXISTS idx_qc_inspections_source_grn ON qc_inspections(source_grn_id)",
     "CREATE INDEX IF NOT EXISTS idx_qc_inspections_source_fg_unit ON qc_inspections(source_fg_unit_id)",
     // The batch-key lookup generation runs on every pass: find the OPEN

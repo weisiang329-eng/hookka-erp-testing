@@ -1,0 +1,43 @@
+-- ============================================================================
+-- Migration 0218 — OQC draws by RISK, and every drawn unit says why.
+--
+-- OWNER 2026-08-08, on seeing the first version of FG sampling:
+--
+--   "那些特别少出现的一些 order … 一些款式，看手工等等 … 尤其是我们 service
+--    case 里面有的东西"
+--
+-- 0215 got the SHARE right (10%, floor 1, ceiling 5) and the DRAW wrong: units
+-- came back in whatever order the database returned them, so a day of mostly
+-- repeat production spent the inspection on the model the factory has built
+-- four hundred times. The weighting lives in code (src/api/lib/qc-fg-risk.ts,
+-- unit-tested); the only thing this file adds is somewhere to record the
+-- answer.
+--
+-- WHAT THE THREE SIGNALS ARE READ OFF — all existing data, nothing hand-kept:
+--   1. PRIOR COMPLAINT (strongest, and the one he singled out): service_cases
+--      → service_orders → service_order_lines.product_code, plus the case's
+--      source sales order for cases logged without a repair order; and
+--      service_cases.customer_id for the customer-level signal. A case whose
+--      root_cause_category is PRODUCTION / DESIGN / MATERIAL / PROCESS weighs
+--      more than one blamed on transport or the customer, because only ours
+--      repeats at the bench.
+--   2. RARITY: COUNT of fg_units on that product code over the last 180 days.
+--      Counted, never a "special models" list — a list stops being true and
+--      nobody notices.
+--   3. WORKMANSHIP: bom_versions.total_minutes for the ACTIVE version against
+--      the MEDIAN of the active catalogue, plus sales_order_items.special_order
+--      and the line notes. There is no tufting / button field anywhere in this
+--      schema, so those models are reached through standard minutes and the
+--      special-order flag rather than directly.
+--
+-- NOTE: this file is INERT until `npm run db:migrate:supabase` is run.
+-- `ensureQcGenerationSchema()` self-applies the same column at runtime.
+-- ============================================================================
+
+-- WHY this unit and not the one next to it, frozen at draw time as JSON:
+--   { score, summary, reasons: [{ code, label, weight }] }
+-- A sampled unit with no reason on it is a unit the inspector treats as
+-- routine, which is exactly what the weighting exists to prevent — so the
+-- reasons are stored on the row rather than recomputed, and stay true even
+-- after the service case is closed or the product becomes a bestseller.
+ALTER TABLE qc_inspections ADD COLUMN IF NOT EXISTS sample_reason TEXT;

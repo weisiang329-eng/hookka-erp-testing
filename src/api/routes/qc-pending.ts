@@ -68,6 +68,14 @@ import { requirePermission } from "../lib/rbac";
 import { recomputePoStatusAndProgress } from "./production-orders";
 import { ensureQcGenerationSchema } from "../lib/qc-generation-schema";
 import {
+  drawReasonSummary,
+  scoreFgUnit,
+  FG_RARITY_WINDOW_DAYS,
+  FG_SERVICE_CASE_WINDOW_DAYS,
+  OUR_FAULT_ROOT_CAUSES,
+  type FgRiskScore,
+} from "../lib/qc-fg-risk";
+import {
   pickRmTemplate,
   rmFamiliesOnReceipt,
   rmFamilyForLine,
@@ -128,6 +136,8 @@ type InspectionRow = {
   source_rm_batch_id?: string | null;
   sourceBatchAgeDays?: number | null;
   source_batch_age_days?: number | null;
+  sampleReason?: string | null;
+  sample_reason?: string | null;
   materialFamily?: string | null;
   material_family?: string | null;
   sourceFgUnitId?: string | null;
@@ -366,6 +376,13 @@ function rowToInspection(r: InspectionRow, items: InspectionItemRow[] = []) {
     materialFamily: r.materialFamily ?? r.material_family ?? "",
     sourceFgUnitId: r.sourceFgUnitId ?? r.source_fg_unit_id ?? "",
     soSpec: safeParseJson(r.soSpec ?? r.so_spec ?? "") as Record<string, unknown> | null,
+    // WHY this unit was drawn. Null on a WIP/RM slot and on FG rows drawn
+    // before the weighting existed — the screen falls back to saying nothing
+    // rather than to saying "routine".
+    sampleReason: safeParseJson(r.sampleReason ?? r.sample_reason ?? "") as Record<
+      string,
+      unknown
+    > | null,
     items: items
       .filter((i) => i.inspectionId === r.id)
       .sort((a, b) => a.sequence - b.sequence)
@@ -462,6 +479,7 @@ type PlannedInspection = {
   rmCheckKind?: RmCheckKind | null;
   sourceRmBatchId?: string | null;
   sourceBatchAgeDays?: number | null;
+  sampleReason?: unknown;
 };
 
 /**
@@ -508,8 +526,8 @@ function buildInspectionStatements(
            subjectType, subjectId, subjectLabel,
            source_grn_id, source_grn_no, material_family, source_fg_unit_id, so_spec,
            source_grn_ids, source_grn_nos, source_receipt_date, source_supplier_id,
-           rm_check_kind, source_rm_batch_id, source_batch_age_days
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'SCHEDULED', ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           rm_check_kind, source_rm_batch_id, source_batch_age_days, sample_reason
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'SCHEDULED', ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         inspId,
@@ -537,6 +555,9 @@ function buildInspectionStatements(
         plan.rmCheckKind ?? null,
         plan.sourceRmBatchId ?? null,
         plan.sourceBatchAgeDays ?? null,
+        plan.sampleReason === undefined || plan.sampleReason === null
+          ? null
+          : JSON.stringify(plan.sampleReason),
       ),
   ];
 
@@ -1213,6 +1234,18 @@ export async function generateStoredRmChecks(
 //    `so_spec`, so the inspector compares the thing in front of them with what
 //    was actually ordered instead of with what the label claims.
 //
+// And, added the same day when the owner saw the first version:
+//
+// 3. WHICH unit is drawn is WEIGHTED BY RISK, not arbitrary. "那些特别少出现的
+//    一些 order … 一些款式，看手工等等 … 尤其是我们 service case 里面有的东西".
+//    The share was right; the draw was whatever order the database returned, so
+//    a day of mostly repeat production spent the inspection on the model the
+//    factory has built four hundred times. `scoreFgUnit` (lib/qc-fg-risk.ts)
+//    ranks the pool on prior service cases (strongest), on how rarely the
+//    product code is actually built, and on how much hand work its BOM says it
+//    takes; the top of the ranking is drawn and every drawn unit carries the
+//    REASONS onto the inspection in `sample_reason`.
+//
 // A unit whose SO line cannot be resolved is NOT silently dropped — it is
 // counted into `unresolved` and reported, because a finished unit with no
 // traceable order is exactly the thing you want someone to look at.
@@ -1238,7 +1271,181 @@ type FgUnitRow = {
   legHeightInches: number | null;
   divanHeightInches: number | null;
   soLineNotes: string | null;
+  /** Off the sales-order header — the customer-level service-case signal. */
+  customerId: string | null;
 };
+
+/** One row of the prior-complaint lookup, however the case was recorded. */
+type ServiceCaseHitRow = {
+  productCode: string | null;
+  customerId: string | null;
+  rootCauseCategory: string | null;
+};
+
+/** ISO day, N days before `slotDate`. */
+function daysBefore(slotDate: string, days: number): string {
+  const d = new Date(`${slotDate}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+
+function upperKey(s: string | null | undefined): string {
+  return String(s ?? "").trim().toUpperCase();
+}
+
+/**
+ * Everything the risk weighting needs, gathered in one place so that a failure
+ * in any one lookup degrades that SIGNAL rather than the draw.
+ *
+ * Every query is bounded (a window, or the set of product codes actually in
+ * play today) and every one is caught on its own. A factory with no service
+ * cases, no BOM minutes and no history scores every unit 0, and the draw falls
+ * back to the arbitrary one it used to be — which is the correct failure
+ * direction: sampling something beats sampling nothing.
+ */
+async function loadFgRiskContext(
+  db: D1Database,
+  slotDate: string,
+  productCodes: string[],
+  customerIds: string[],
+): Promise<{
+  unitsByProduct: Map<string, number>;
+  minutesByProduct: Map<string, number>;
+  medianMinutes: number;
+  caseHitsByProduct: Map<string, number>;
+  ourFaultByProduct: Map<string, number>;
+  caseHitsByCustomer: Map<string, number>;
+}> {
+  const unitsByProduct = new Map<string, number>();
+  const minutesByProduct = new Map<string, number>();
+  const caseHitsByProduct = new Map<string, number>();
+  const ourFaultByProduct = new Map<string, number>();
+  const caseHitsByCustomer = new Map<string, number>();
+  let medianMinutes = 0;
+
+  // --- rarity: how often do we actually build this? Counted, never a list.
+  if (productCodes.length) {
+    try {
+      const ph = productCodes.map(() => "?").join(",");
+      const since = daysBefore(slotDate, FG_RARITY_WINDOW_DAYS);
+      const res = await db
+        .prepare(
+          `SELECT productCode AS "productCode", COUNT(*) AS "n"
+             FROM fg_units
+            WHERE productCode IN (${ph})
+              AND COALESCE(mfdDate, packedAt) >= ?
+            GROUP BY productCode`,
+        )
+        .bind(...productCodes, since)
+        .all<{ productCode: string | null; n: number }>();
+      for (const r of res.results ?? []) {
+        unitsByProduct.set(upperKey(r.productCode), Number(r.n) || 0);
+      }
+    } catch (err) {
+      console.warn("[qc-pending] FG rarity lookup failed — rarity will not weight this draw", err);
+    }
+  }
+
+  // --- workmanship: the factory's own statement of how much hand work a model
+  // takes. The whole active catalogue, because the yardstick is the MEDIAN and
+  // a median over just today's units says nobody is heavy.
+  try {
+    const res = await db
+      .prepare(
+        `SELECT productCode AS "productCode", MAX(totalMinutes) AS "totalMinutes"
+           FROM bom_versions
+          WHERE status = 'ACTIVE' AND totalMinutes > 0 AND productCode IS NOT NULL
+          GROUP BY productCode`,
+      )
+      .all<{ productCode: string | null; totalMinutes: number }>();
+    const all: number[] = [];
+    for (const r of res.results ?? []) {
+      const m = Number(r.totalMinutes) || 0;
+      if (m <= 0) continue;
+      minutesByProduct.set(upperKey(r.productCode), m);
+      all.push(m);
+    }
+    if (all.length) {
+      all.sort((a, b) => a - b);
+      medianMinutes = all[Math.floor(all.length / 2)];
+    }
+  } catch (err) {
+    console.warn("[qc-pending] FG BOM-minutes lookup failed — workmanship will not weight this draw", err);
+  }
+
+  // --- prior complaint: the strongest signal. Two shapes, because a case can
+  // be recorded with a repair order (which names the defective product line) or
+  // logged against a sales order with no repair order at all. Missing either
+  // one silently loses exactly the complaints nobody followed up.
+  const caseSince = daysBefore(slotDate, FG_SERVICE_CASE_WINDOW_DAYS);
+  const noteHit = (row: ServiceCaseHitRow) => {
+    const pc = upperKey(row.productCode);
+    if (pc) {
+      caseHitsByProduct.set(pc, (caseHitsByProduct.get(pc) ?? 0) + 1);
+      if (OUR_FAULT_ROOT_CAUSES.has(upperKey(row.rootCauseCategory))) {
+        ourFaultByProduct.set(pc, (ourFaultByProduct.get(pc) ?? 0) + 1);
+      }
+    }
+    const cid = String(row.customerId ?? "").trim();
+    if (cid) caseHitsByCustomer.set(cid, (caseHitsByCustomer.get(cid) ?? 0) + 1);
+  };
+
+  try {
+    const res = await db
+      .prepare(
+        `SELECT sol.productCode AS "productCode",
+                sc.customerId AS "customerId",
+                sc.rootCauseCategory AS "rootCauseCategory"
+           FROM service_cases sc
+           LEFT JOIN service_orders so ON so.caseId = sc.id
+           LEFT JOIN service_order_lines sol ON sol.serviceOrderId = so.id
+          WHERE sc.status <> 'CANCELLED' AND sc.createdAt >= ?`,
+      )
+      .bind(caseSince)
+      .all<ServiceCaseHitRow>();
+    for (const r of res.results ?? []) noteHit(r);
+  } catch (err) {
+    console.warn("[qc-pending] FG service-case lookup (repair lines) failed", err);
+  }
+
+  try {
+    const res = await db
+      .prepare(
+        `SELECT soi.productCode AS "productCode",
+                sc.customerId AS "customerId",
+                sc.rootCauseCategory AS "rootCauseCategory"
+           FROM service_cases sc
+           INNER JOIN sales_order_items soi ON soi.salesOrderId = sc.sourceId
+          WHERE sc.sourceType = 'SO'
+            AND sc.status <> 'CANCELLED'
+            AND sc.createdAt >= ?`,
+      )
+      .bind(caseSince)
+      .all<ServiceCaseHitRow>();
+    // Customer hits are already counted by the query above for any case that
+    // has a repair order, so only the PRODUCT side is folded in here.
+    for (const r of res.results ?? []) {
+      const pc = upperKey(r.productCode);
+      if (!pc) continue;
+      caseHitsByProduct.set(pc, (caseHitsByProduct.get(pc) ?? 0) + 1);
+      if (OUR_FAULT_ROOT_CAUSES.has(upperKey(r.rootCauseCategory))) {
+        ourFaultByProduct.set(pc, (ourFaultByProduct.get(pc) ?? 0) + 1);
+      }
+    }
+  } catch (err) {
+    console.warn("[qc-pending] FG service-case lookup (source orders) failed", err);
+  }
+
+  void customerIds; // bounded by the case window rather than by the id list.
+  return {
+    unitsByProduct,
+    minutesByProduct,
+    medianMinutes,
+    caseHitsByProduct,
+    ourFaultByProduct,
+    caseHitsByCustomer,
+  };
+}
 
 export async function generateFgSamples(
   db: D1Database,
@@ -1248,8 +1455,22 @@ export async function generateFgSamples(
   tplItems: TemplateItemRow[],
   existingBySlotTemplate: Map<string, number>,
   nextInspectionNo: () => string,
-): Promise<{ stmts: D1PreparedStatement[]; created: number; skipped: number; units: number; unresolved: number }> {
-  const empty = { stmts: [] as D1PreparedStatement[], created: 0, skipped: 0, units: 0, unresolved: 0 };
+): Promise<{
+  stmts: D1PreparedStatement[];
+  created: number;
+  skipped: number;
+  units: number;
+  unresolved: number;
+  priorComplaintDraws: number;
+}> {
+  const empty = {
+    stmts: [] as D1PreparedStatement[],
+    created: 0,
+    skipped: 0,
+    units: 0,
+    unresolved: 0,
+    priorComplaintDraws: 0,
+  };
   const fgTemplates = templates.filter((t) => t.stage === "FG");
   if (fgTemplates.length === 0) return empty;
 
@@ -1277,10 +1498,12 @@ export async function generateFgSamples(
                 soi.specialOrder AS "specialOrder",
                 soi.legHeightInches AS "legHeightInches",
                 soi.divanHeightInches AS "divanHeightInches",
-                soi.notes AS "soLineNotes"
+                soi.notes AS "soLineNotes",
+                so.customerId AS "customerId"
            FROM fg_units fgu
            LEFT JOIN sales_order_items soi
                   ON soi.salesOrderId = fgu.soId AND soi.lineNo = fgu.soLineNo
+           LEFT JOIN sales_orders so ON so.id = fgu.soId
           WHERE fgu.mfdDate LIKE ? OR fgu.packedAt LIKE ?
           ORDER BY fgu.id`,
       )
@@ -1313,10 +1536,35 @@ export async function generateFgSamples(
     console.warn("[qc-pending] FG already-sampled lookup failed", err);
   }
 
+  // Risk context for the whole day's pool, gathered once. Bounded queries, each
+  // caught on its own, so a missing signal weakens the ranking rather than
+  // stopping the draw.
+  const risk = await loadFgRiskContext(
+    db,
+    slotDate,
+    [...new Set(units.map((u) => u.soProductCode ?? u.productCode).filter((c): c is string => !!c))],
+    [...new Set(units.map((u) => u.customerId).filter((c): c is string => !!c))],
+  );
+
+  const scoreOf = (u: FgUnitRow): FgRiskScore => {
+    const pc = upperKey(u.soProductCode ?? u.productCode);
+    return scoreFgUnit({
+      unitsOfProductCode: risk.unitsByProduct.get(pc) ?? null,
+      bomTotalMinutes: risk.minutesByProduct.get(pc) ?? null,
+      medianBomMinutes: risk.medianMinutes || null,
+      specialOrder: u.specialOrder,
+      lineNotes: u.soLineNotes,
+      serviceCaseProductHits: risk.caseHitsByProduct.get(pc) ?? 0,
+      serviceCaseProductOurFaultHits: risk.ourFaultByProduct.get(pc) ?? 0,
+      serviceCaseCustomerHits: u.customerId ? (risk.caseHitsByCustomer.get(u.customerId) ?? 0) : 0,
+    });
+  };
+
   const stmts: D1PreparedStatement[] = [];
   let created = 0;
   let skipped = 0;
   let unresolved = 0;
+  let priorComplaintDraws = 0;
 
   for (const tpl of fgTemplates) {
     const forThisCategory = units.filter(
@@ -1332,9 +1580,17 @@ export async function generateFgSamples(
       continue;
     }
 
-    const pool = forThisCategory.filter((u) => !inspectedUnitIds.has(u.unitId));
-    for (const unit of pool.slice(0, want)) {
+    // HIGHEST RISK FIRST. The tie-break is the unit id rather than anything
+    // random, so re-running a slot re-derives the same ranking — an inspector
+    // must not be handed a different unit because the cron fired twice.
+    const pool = forThisCategory
+      .filter((u) => !inspectedUnitIds.has(u.unitId))
+      .map((u) => ({ unit: u, risk: scoreOf(u) }))
+      .sort((a, b) => b.risk.score - a.risk.score || a.unit.unitId.localeCompare(b.unit.unitId));
+
+    for (const { unit, risk: unitRisk } of pool.slice(0, want)) {
       inspectedUnitIds.add(unit.unitId);
+      if (unitRisk.reasons.some((r) => r.code.startsWith("SERVICE_CASE"))) priorComplaintDraws++;
       const label = [unit.unitSerial || unit.unitId, unit.soNo, unit.productCode]
         .filter(Boolean)
         .join(" · ");
@@ -1369,6 +1625,16 @@ export async function generateFgSamples(
               unitNo: unit.unitNo,
               totalUnits: unit.totalUnits,
             },
+            // WHY this unit and not the one next to it. Frozen at draw time,
+            // because "you have this sofa because its product code is on two
+            // open complaints" and "you have it because we build one a year"
+            // are different jobs, and an inspector not told which is doing
+            // neither.
+            sampleReason: {
+              score: unitRisk.score,
+              summary: drawReasonSummary(unitRisk),
+              reasons: unitRisk.reasons,
+            },
           },
           tplItems,
           slotIso,
@@ -1381,7 +1647,17 @@ export async function generateFgSamples(
   }
 
   unresolved = units.filter((u) => !u.itemCategory).length;
-  return { stmts, created, skipped, units: units.length, unresolved };
+  return {
+    stmts,
+    created,
+    skipped,
+    units: units.length,
+    unresolved,
+    // How many of the units drawn today were drawn BECAUSE of a prior
+    // complaint. This is the number that says whether the loop is closing;
+    // "fgCreated 3" alone cannot.
+    priorComplaintDraws,
+  };
 }
 
 export type GenerateResult = {
@@ -1401,6 +1677,8 @@ export type GenerateResult = {
   fgCreated: number;
   fgUnits: number;
   fgUnresolved: number;
+  /** Of the units drawn, how many were drawn because of a PRIOR COMPLAINT. */
+  fgPriorComplaintDraws: number;
 };
 
 /**
@@ -1517,6 +1795,7 @@ export async function generatePendingForSlot(
     fgCreated: fg.created,
     fgUnits: fg.units,
     fgUnresolved: fg.unresolved,
+    fgPriorComplaintDraws: fg.priorComplaintDraws,
   };
 }
 

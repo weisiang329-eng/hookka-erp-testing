@@ -15,13 +15,25 @@
 //   qc_templates.material_family     which incoming-material family an RM
 //                                    checklist covers; goods receipts are
 //                                    routed to a checklist by family.
-//   qc_inspections.source_grn_id     the goods receipt an IQC inspection was
-//   qc_inspections.source_grn_no     raised for — also the idempotency key, so
-//                                    the 16:00 run cannot re-raise the 12:00
-//                                    receipt.
-//   qc_inspections.material_family   which family of that receipt this
-//                                    inspection covers (a mixed receipt raises
-//                                    one per family).
+//   qc_inspections.source_grn_id     the FIRST goods receipt an IQC inspection
+//   qc_inspections.source_grn_no     was raised for. Kept singular and kept
+//                                    primary so every existing read, index and
+//                                    subject link still resolves.
+//   qc_inspections.source_grn_ids    EVERY receipt the inspection covers, as a
+//   qc_inspections.source_grn_nos    JSON array (owner 2026-08-08: "同一天的话，
+//                                    通常是验一次就够了" — one inspection per
+//                                    receipt DAY, so it commonly covers more
+//                                    than one GRN and the inspector has to be
+//                                    told which goods are in front of them).
+//   qc_inspections.source_receipt_date  the receipt DAY, and
+//   qc_inspections.source_supplier_id   the supplier — together with
+//                                    material_family these are the batch key.
+//                                    A GRN arriving later the same day looks
+//                                    the open inspection up on them and
+//                                    ATTACHES instead of raising a second one.
+//   qc_inspections.material_family   which family of that day's goods this
+//                                    inspection covers (mixed goods raise one
+//                                    per family).
 //   qc_inspections.source_fg_unit_id the finished unit drawn for OQC sampling.
 //   qc_inspections.so_spec           the sales-order line that unit was built
 //                                    from, frozen at generation time.
@@ -42,8 +54,16 @@ export async function ensureQcGenerationSchema(db: D1Database): Promise<void> {
     "ALTER TABLE qc_inspections ADD COLUMN IF NOT EXISTS material_family TEXT",
     "ALTER TABLE qc_inspections ADD COLUMN IF NOT EXISTS source_fg_unit_id TEXT",
     "ALTER TABLE qc_inspections ADD COLUMN IF NOT EXISTS so_spec TEXT",
+    // 2026-08-08 (2) — one IQC inspection per receipt DAY, covering several GRNs.
+    "ALTER TABLE qc_inspections ADD COLUMN IF NOT EXISTS source_grn_ids TEXT",
+    "ALTER TABLE qc_inspections ADD COLUMN IF NOT EXISTS source_grn_nos TEXT",
+    "ALTER TABLE qc_inspections ADD COLUMN IF NOT EXISTS source_receipt_date TEXT",
+    "ALTER TABLE qc_inspections ADD COLUMN IF NOT EXISTS source_supplier_id TEXT",
     "CREATE INDEX IF NOT EXISTS idx_qc_inspections_source_grn ON qc_inspections(source_grn_id)",
     "CREATE INDEX IF NOT EXISTS idx_qc_inspections_source_fg_unit ON qc_inspections(source_fg_unit_id)",
+    // The batch-key lookup generation runs on every pass: find the OPEN
+    // inspection for (day, supplier, family) so a later receipt attaches.
+    "CREATE INDEX IF NOT EXISTS idx_qc_inspections_rm_batch ON qc_inspections(source_receipt_date, source_supplier_id, material_family)",
   ];
   // Each statement is caught on its own: one refused ALTER must not take the
   // whole generation run down with it. Generation failing quietly is the exact

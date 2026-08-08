@@ -124,6 +124,11 @@ type Inspection = {
   // one finished unit and carry its sales-order line.
   sourceGrnId?: string;
   sourceGrnNo?: string;
+  // An RM slot covers a whole DAY of one supplier's goods, so it commonly names
+  // more than one receipt. Always populated (the singular number when the row
+  // predates day-batching), so the banner can list what is on the floor.
+  sourceGrnNos?: string[];
+  sourceReceiptDate?: string;
   materialFamily?: string;
   sourceFgUnitId?: string;
   soSpec?: SoSpec | null;
@@ -706,16 +711,31 @@ function DoInspectionForm({
         <div className="space-y-3">
           <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2">
             <div className="text-xs font-medium uppercase tracking-wide text-amber-800">
-              {stage === "RM" ? "Goods receipt to inspect" : "Unit drawn for sampling"}
+              {stage === "RM"
+                ? `Goods receipt${(insp.sourceGrnNos?.length ?? 0) > 1 ? "s" : ""} to inspect`
+                : "Unit drawn for sampling"}
             </div>
             <div className="mt-0.5 font-mono text-sm font-semibold text-amber-900">
               {assignedSubject.label}
             </div>
+            {stage === "RM" && (insp.sourceGrnNos?.length ?? 0) > 1 && (
+              <div className="mt-1 flex flex-wrap gap-1">
+                {insp.sourceGrnNos!.map((no) => (
+                  <span
+                    key={no}
+                    className="rounded border border-amber-300 bg-white px-1.5 py-0.5 font-mono text-[11px] text-amber-900"
+                  >
+                    {no}
+                  </span>
+                ))}
+              </div>
+            )}
             {stage === "RM" && insp.materialFamily && (
-              <div className="mt-0.5 text-xs text-amber-800">
-                Material family: <strong>{insp.materialFamily.replace(/_/g, " ")}</strong> — a receipt
-                holding more than one family raises one inspection per family, all against this same
-                receipt.
+              <div className="mt-1 text-xs text-amber-800">
+                Material family: <strong>{insp.materialFamily.replace(/_/g, " ")}</strong>
+                {insp.sourceReceiptDate ? ` · received ${insp.sourceReceiptDate}` : ""} — one
+                inspection covers everything of this family that arrived from this supplier that
+                day. Goods of another family, or from another supplier, are a separate inspection.
               </div>
             )}
           </div>

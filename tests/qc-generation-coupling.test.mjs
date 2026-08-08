@@ -117,12 +117,39 @@ function makeDb({
       };
     }
     if (/FROM qc_inspections WHERE source_grn_id IN/i.test(s)) {
-      const ids = new Set(args);
+      // Same shape as the route: the trailing two binds are the day window.
+      const to = args[args.length - 1];
+      const from = args[args.length - 2];
+      const ids = new Set(args.slice(0, args.length - 2));
       return {
         rows: state.inspections
-          .filter((r) => r.sourceGrnId && ids.has(r.sourceGrnId))
-          .map((r) => ({ grnId: r.sourceGrnId, templateId: r.templateId })),
+          .filter(
+            (r) =>
+              (r.sourceGrnId && ids.has(r.sourceGrnId)) ||
+              (r.sourceReceiptDate && r.sourceReceiptDate >= from && r.sourceReceiptDate <= to),
+          )
+          .map((r) => ({
+            id: r.id,
+            templateId: r.templateId,
+            status: r.status,
+            sourceGrnId: r.sourceGrnId,
+            sourceGrnIds: r.sourceGrnIds,
+            sourceReceiptDate: r.sourceReceiptDate,
+            sourceSupplierId: r.sourceSupplierId,
+          })),
       };
+    }
+    if (/^UPDATE qc_inspections SET source_grn_ids = \?/i.test(s)) {
+      const [grnIds, grnNos, subjectLabel, receiptDate, supplierId, id] = args;
+      const row = state.inspections.find((r) => r.id === id);
+      if (row) {
+        row.sourceGrnIds = grnIds;
+        row.sourceGrnNos = grnNos;
+        row.subjectLabel = subjectLabel;
+        row.sourceReceiptDate = receiptDate;
+        row.sourceSupplierId = supplierId;
+      }
+      return { rows: [] };
     }
 
     // --- FG: units produced today, joined to their SO line ---
@@ -147,12 +174,14 @@ function makeDb({
       const [id, inspectionNo, templateId, templateSnapshot, stage, itemCategory,
         department, scheduledSlotAt, inspectionDate, createdAt,
         subjectType, subjectId, subjectLabel,
-        sourceGrnId, sourceGrnNo, materialFamily, sourceFgUnitId, soSpec] = args;
+        sourceGrnId, sourceGrnNo, materialFamily, sourceFgUnitId, soSpec,
+        sourceGrnIds, sourceGrnNos, sourceReceiptDate, sourceSupplierId] = args;
       state.inspections.push({
         id, inspectionNo, templateId, templateSnapshot, stage, itemCategory,
         department, scheduledSlotAt, inspectionDate, createdAt,
         subjectType, subjectId, subjectLabel,
         sourceGrnId, sourceGrnNo, materialFamily, sourceFgUnitId, soSpec,
+        sourceGrnIds, sourceGrnNos, sourceReceiptDate, sourceSupplierId,
         triggerType: "SCHEDULED", status: "PENDING",
       });
       return { rows: [] };
@@ -214,33 +243,155 @@ const RAW_MATERIALS = [
   { itemCode: "PLY-001", itemGroup: "PLYWOOD" },
 ];
 
-// ── RM: the unit is the RECEIPT ─────────────────────────────────────────────
+// ── RM: the unit is the receipt DAY × supplier × family ─────────────────────
 
-test("two goods receipts on the SAME DAY raise two RM inspections", async () => {
-  // This is the behaviour the day gate got wrong. Under the old rule these two
-  // receipts shared one "RM had activity today" slot, so one of them was never
-  // inspected at all — the opposite of 每一 batch 进来都必须抽检.
+test("two goods receipts of the same goods on one day raise ONE inspection carrying both", async () => {
+  // Owner 2026-08-08: "同一天的话，通常是验一次就够了". The inspector walks to
+  // the same pallet once. Two documents is not two inspections' worth of work —
+  // but both receipt numbers have to be ON the inspection, or they cannot tell
+  // what is in front of them.
   const db = makeDb({
     templates: RM_TEMPLATES,
     templateItems: RM_TEMPLATE_ITEMS,
     rawMaterials: RAW_MATERIALS,
     grns: [
-      { id: "grn-1", grnNumber: "GRN-0001", supplierId: "sup-a", supplierName: "Add Wood", receiveDate: SLOT_DATE, status: "POSTED" },
+      { id: "grn-1", grnNumber: "GRN-0001", supplierId: "sup-b", supplierName: "Fabric Co", receiveDate: SLOT_DATE, status: "POSTED" },
       { id: "grn-2", grnNumber: "GRN-0002", supplierId: "sup-b", supplierName: "Fabric Co", receiveDate: SLOT_DATE, status: "CONFIRMED" },
     ],
     grnItems: [
-      { grnId: "grn-1", materialCode: "WD-001", materialName: "Wood strip 2x2" },
-      { grnId: "grn-2", materialCode: "FAB-001", materialName: "Sofa fabric grey" },
+      { grnId: "grn-1", materialCode: "FAB-001", materialName: "Sofa fabric grey" },
+      { grnId: "grn-2", materialCode: "FAB-002", materialName: "Bed fabric beige" },
     ],
   });
 
   const res = await generatePendingForSlot(db.DB, SLOT);
-  assert.equal(res.rmCreated, 2, "one receipt, one inspection — two receipts must be two");
+  assert.equal(res.rmCreated, 1, "one day, one supplier, one family — one inspection");
   assert.equal(res.rmReceipts, 2);
+  assert.equal(db.state.inspections.length, 1);
+  const row = db.state.inspections[0];
+  assert.deepEqual(JSON.parse(row.sourceGrnNos), ["GRN-0001", "GRN-0002"],
+    "both receipts must be recorded on the inspection");
+  assert.deepEqual(JSON.parse(row.sourceGrnIds), ["grn-1", "grn-2"]);
+  assert.equal(row.sourceGrnId, "grn-1", "the singular column stays the first receipt");
+  assert.match(row.subjectLabel, /GRN-0001/);
+  assert.match(row.subjectLabel, /GRN-0002/);
+  assert.equal(row.sourceReceiptDate, SLOT_DATE);
+});
+
+test("the same family from TWO SUPPLIERS on one day is two inspections", async () => {
+  // Two suppliers is two batches with two independent risks and two different
+  // corrective actions — a claim goes back to a supplier, not to a Tuesday. One
+  // blended PASS would hide which delivery was the bad one.
+  const db = makeDb({
+    templates: RM_TEMPLATES,
+    templateItems: RM_TEMPLATE_ITEMS,
+    rawMaterials: RAW_MATERIALS,
+    grns: [
+      { id: "grn-1", grnNumber: "GRN-0001", supplierId: "sup-a", supplierName: "Fabric Co", receiveDate: SLOT_DATE, status: "POSTED" },
+      { id: "grn-2", grnNumber: "GRN-0002", supplierId: "sup-b", supplierName: "Textile Bhd", receiveDate: SLOT_DATE, status: "POSTED" },
+    ],
+    grnItems: [
+      { grnId: "grn-1", materialCode: "FAB-001" },
+      { grnId: "grn-2", materialCode: "FAB-001" },
+    ],
+  });
+
+  const res = await generatePendingForSlot(db.DB, SLOT);
+  assert.equal(res.rmCreated, 2);
   assert.deepEqual(
     db.state.inspections.map((r) => r.sourceGrnNo).sort(),
     ["GRN-0001", "GRN-0002"],
   );
+  assert.deepEqual(
+    db.state.inspections.map((r) => r.sourceSupplierId).sort(),
+    ["sup-a", "sup-b"],
+  );
+});
+
+test("receipts on DIFFERENT days stay different inspections", async () => {
+  const db = makeDb({
+    templates: RM_TEMPLATES,
+    templateItems: RM_TEMPLATE_ITEMS,
+    rawMaterials: RAW_MATERIALS,
+    grns: [
+      { id: "grn-1", grnNumber: "GRN-0001", supplierId: "sup-b", supplierName: "Fabric Co", receiveDate: "2026-08-05", status: "POSTED" },
+      { id: "grn-2", grnNumber: "GRN-0002", supplierId: "sup-b", supplierName: "Fabric Co", receiveDate: SLOT_DATE, status: "POSTED" },
+    ],
+    grnItems: [
+      { grnId: "grn-1", materialCode: "FAB-001" },
+      { grnId: "grn-2", materialCode: "FAB-001" },
+    ],
+  });
+  const res = await generatePendingForSlot(db.DB, SLOT);
+  assert.equal(res.rmCreated, 2, "a batch is a day — two days is two batches");
+  assert.deepEqual(
+    db.state.inspections.map((r) => r.sourceReceiptDate).sort(),
+    ["2026-08-05", SLOT_DATE],
+  );
+});
+
+test("a receipt confirmed LATER the same day ATTACHES to the open inspection", async () => {
+  // The case that will actually happen: generation runs at 12:00, a second
+  // delivery lands, generation runs again at 16:00. It must not raise a second
+  // inspection for goods that already have one open — it must add the receipt
+  // to the one the inspector is holding.
+  const fixture = {
+    templates: RM_TEMPLATES,
+    templateItems: RM_TEMPLATE_ITEMS,
+    rawMaterials: RAW_MATERIALS,
+    grns: [
+      { id: "grn-1", grnNumber: "GRN-0001", supplierId: "sup-b", supplierName: "Fabric Co", receiveDate: SLOT_DATE, status: "POSTED" },
+    ],
+    grnItems: [{ grnId: "grn-1", materialCode: "FAB-001" }],
+  };
+  const db = makeDb(fixture);
+
+  assert.equal((await generatePendingForSlot(db.DB, SLOT)).rmCreated, 1);
+  const inspId = db.state.inspections[0].id;
+
+  // The afternoon delivery arrives.
+  fixture.grns.push({ id: "grn-2", grnNumber: "GRN-0002", supplierId: "sup-b", supplierName: "Fabric Co", receiveDate: SLOT_DATE, status: "CONFIRMED" });
+  fixture.grnItems.push({ grnId: "grn-2", materialCode: "FAB-002" });
+
+  const second = await generatePendingForSlot(db.DB, SLOT_2);
+  assert.equal(second.rmCreated, 0, "no second inspection for the same day + supplier + family");
+  assert.equal(second.rmAttached, 1, "the late receipt attaches to the open one");
+  assert.equal(db.state.inspections.length, 1);
+
+  const row = db.state.inspections[0];
+  assert.equal(row.id, inspId, "it must be the SAME inspection, not a replacement");
+  assert.deepEqual(JSON.parse(row.sourceGrnNos), ["GRN-0001", "GRN-0002"]);
+  assert.match(row.subjectLabel, /GRN-0002/, "the inspector has to be told the new goods arrived");
+
+  // And a third run with nothing new changes nothing.
+  const third = await generatePendingForSlot(db.DB, SLOT_2);
+  assert.equal(third.rmCreated, 0);
+  assert.equal(third.rmAttached, 0);
+});
+
+test("a late receipt does NOT attach to an inspection somebody has already signed", async () => {
+  // You cannot add goods to a completed record. Once the inspection is answered
+  // the afternoon delivery is genuinely uninspected and needs its own row.
+  const fixture = {
+    templates: RM_TEMPLATES,
+    templateItems: RM_TEMPLATE_ITEMS,
+    rawMaterials: RAW_MATERIALS,
+    grns: [
+      { id: "grn-1", grnNumber: "GRN-0001", supplierId: "sup-b", supplierName: "Fabric Co", receiveDate: SLOT_DATE, status: "POSTED" },
+    ],
+    grnItems: [{ grnId: "grn-1", materialCode: "FAB-001" }],
+  };
+  const db = makeDb(fixture);
+  await generatePendingForSlot(db.DB, SLOT);
+  db.state.inspections[0].status = "COMPLETED";
+
+  fixture.grns.push({ id: "grn-2", grnNumber: "GRN-0002", supplierId: "sup-b", supplierName: "Fabric Co", receiveDate: SLOT_DATE, status: "POSTED" });
+  fixture.grnItems.push({ grnId: "grn-2", materialCode: "FAB-001" });
+
+  const res = await generatePendingForSlot(db.DB, SLOT_2);
+  assert.equal(res.rmAttached, 0);
+  assert.equal(res.rmCreated, 1, "goods that arrived after sign-off are uninspected goods");
+  assert.equal(db.state.inspections.length, 2);
 });
 
 test("one goods receipt raises ONE inspection however many lines it has", async () => {
@@ -266,7 +417,7 @@ test("one goods receipt raises ONE inspection however many lines it has", async 
   assert.equal(db.state.inspections[0].templateId, "qct-rm-fabric");
 });
 
-test("a MIXED receipt raises one inspection per material family, all naming the same receipt", async () => {
+test("a MIXED receipt raises one inspection per material family, all naming that receipt", async () => {
   const db = makeDb({
     templates: RM_TEMPLATES,
     templateItems: RM_TEMPLATE_ITEMS,
@@ -313,7 +464,7 @@ test("re-running generation raises no second inspection for the same receipt", a
   assert.equal(db.state.inspections.length, 1);
 });
 
-test("an RM inspection carries the receipt as its subject", async () => {
+test("an RM inspection carries the day's receipts as its subject", async () => {
   const db = makeDb({
     templates: RM_TEMPLATES,
     templateItems: RM_TEMPLATE_ITEMS,

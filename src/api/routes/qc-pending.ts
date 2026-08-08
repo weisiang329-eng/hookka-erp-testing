@@ -5,12 +5,13 @@
 // stages are generated on THREE DIFFERENT RHYTHMS, because the owner's model
 // (2026-08-08) is three different jobs:
 //
-//   RM  — ONE INSPECTION PER GOODS RECEIPT, per material family on it.
-//         "基本上是根据进货情况按 batch 来检。只要有了 GR，可能是一张 PI 或者
-//          同一天进来的货，我们只需要检查一次 … 原材料这边一定要做到每一
-//          batch 进来都必须抽检". A GRN *is* the batch. Two receipts on one day
-//         raise two inspections; one receipt raises one however many lines it
-//         has; re-running raises none. See generateRmForGrns.
+//   RM  — ONE INSPECTION PER RECEIPT DAY × SUPPLIER × MATERIAL FAMILY.
+//         "只要有了 GR，可能是一张 PI 或者同一天进来的货，我们只需要检查一次",
+//         corrected on the same day to "同一天的话，通常是验一次就够了". The
+//         batch is the DAY's goods from ONE supplier, not the document: two
+//         GRNs of one family on one day raise ONE inspection carrying both
+//         receipt numbers, and a GRN confirmed later that day attaches to it
+//         while it is still open. Re-running raises none. See generateRmForGrns.
 //   WIP — TWICE DAILY, gated on the department actually working.
 //         "这个可能需要每天跟进，比如早上一次、下午一次". See stageHadActivity.
 //   FG  — PERIODIC SAMPLING of what was produced, each slot bound to a
@@ -20,10 +21,12 @@
 //
 // It was a blind schedule until 2026-08-07 (34 rows a day regardless of
 // whether anything was made, a 3,009-row backlog nobody could clear), then a
-// day-gated schedule until 2026-08-08. The day gate was right for WIP and
-// wrong for RM: it collapsed two receipts on one day into ONE inspection,
-// which is the exact opposite of "每一 batch 进来都必须抽检", and it named no
-// receipt so the inspector could not tell which goods to look at.
+// day-gated schedule, then briefly one inspection per GRN. The day gate's real
+// fault was never the day — it was that it named NO receipt, so the inspector
+// could not tell which goods to look at, and that it collapsed two suppliers'
+// deliveries into one PASS. Both are fixed without going back to one row per
+// document: the batch is (day × supplier × family) and the row names every
+// receipt in it.
 //
 // Endpoints:
 //   GET    /api/qc-pending              — list PENDING + IN_PROGRESS rows
@@ -100,6 +103,14 @@ type InspectionRow = {
   source_grn_id?: string | null;
   sourceGrnNo?: string | null;
   source_grn_no?: string | null;
+  sourceGrnIds?: string | null;
+  source_grn_ids?: string | null;
+  sourceGrnNos?: string | null;
+  source_grn_nos?: string | null;
+  sourceReceiptDate?: string | null;
+  source_receipt_date?: string | null;
+  sourceSupplierId?: string | null;
+  source_supplier_id?: string | null;
   materialFamily?: string | null;
   material_family?: string | null;
   sourceFgUnitId?: string | null;
@@ -319,6 +330,16 @@ function rowToInspection(r: InspectionRow, items: InspectionItemRow[] = []) {
     // they were handed. Dual-keyed — see InspectionRow.
     sourceGrnId: r.sourceGrnId ?? r.source_grn_id ?? "",
     sourceGrnNo: r.sourceGrnNo ?? r.source_grn_no ?? "",
+    // EVERY receipt the day's batch covers. Falls back to the singular column so
+    // a row written before the day-batching change still renders as one receipt
+    // rather than as none.
+    sourceGrnNos: (() => {
+      const list = safeParseJson(r.sourceGrnNos ?? r.source_grn_nos ?? "");
+      if (Array.isArray(list) && list.length) return list.filter((x) => typeof x === "string");
+      const one = r.sourceGrnNo ?? r.source_grn_no ?? "";
+      return one ? [one] : [];
+    })(),
+    sourceReceiptDate: r.sourceReceiptDate ?? r.source_receipt_date ?? "",
     materialFamily: r.materialFamily ?? r.material_family ?? "",
     sourceFgUnitId: r.sourceFgUnitId ?? r.source_fg_unit_id ?? "",
     soSpec: safeParseJson(r.soSpec ?? r.so_spec ?? "") as Record<string, unknown> | null,
@@ -408,6 +429,10 @@ type PlannedInspection = {
   subjectLabel?: string | null;
   sourceGrnId?: string | null;
   sourceGrnNo?: string | null;
+  sourceGrnIds?: string[] | null;
+  sourceGrnNos?: string[] | null;
+  sourceReceiptDate?: string | null;
+  sourceSupplierId?: string | null;
   materialFamily?: string | null;
   sourceFgUnitId?: string | null;
   soSpec?: unknown;
@@ -455,8 +480,9 @@ function buildInspectionStatements(
            department, triggerType, scheduledSlotAt, status,
            inspectionDate, created_at,
            subjectType, subjectId, subjectLabel,
-           source_grn_id, source_grn_no, material_family, source_fg_unit_id, so_spec
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'SCHEDULED', ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           source_grn_id, source_grn_no, material_family, source_fg_unit_id, so_spec,
+           source_grn_ids, source_grn_nos, source_receipt_date, source_supplier_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'SCHEDULED', ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         inspId,
@@ -477,6 +503,10 @@ function buildInspectionStatements(
         plan.materialFamily ?? null,
         plan.sourceFgUnitId ?? null,
         plan.soSpec === undefined || plan.soSpec === null ? null : JSON.stringify(plan.soSpec),
+        plan.sourceGrnIds?.length ? JSON.stringify(plan.sourceGrnIds) : null,
+        plan.sourceGrnNos?.length ? JSON.stringify(plan.sourceGrnNos) : null,
+        plan.sourceReceiptDate ?? null,
+        plan.sourceSupplierId ?? null,
       ),
   ];
 
@@ -494,27 +524,46 @@ function buildInspectionStatements(
   return stmts;
 }
 
-// --- RM: one inspection per goods receipt ----------------------------------
+// --- RM: one inspection per receipt DAY, per supplier, per material family --
 //
-// THE UNIT IS THE RECEIPT. Owner 2026-08-08: "只要有了 GR，可能是一张 PI 或者
-// 同一天进来的货，我们只需要检查一次 … 每一 batch 进来都必须抽检". A GRN is
-// exactly that unit — it is one supplier, one delivery, one document. So:
-//   • two GRNs on the same day raise TWO inspections (the day gate raised one,
-//     which is the failure this replaces);
-//   • one GRN raises ONE per material family however many LINES it has;
-//   • re-running raises none, keyed on (source_grn_id, templateId) rather than
-//     on the slot, because the receipt is not tied to a slot.
+// THE UNIT IS THE DAY'S BATCH FROM ONE SUPPLIER. Owner 2026-08-08, correcting
+// the per-GRN rule shipped earlier the same day: "同一天的话，通常是验一次就够
+// 了" (and originally "可能是一张 PI 或者同一天进来的货，我们只需要检查一次").
+// Two GRNs of the same goods on one day is the goods arriving on two documents,
+// not two inspections' worth of work — the inspector walks to the same pallet
+// once. So:
+//   • two GRNs of one family from one supplier on one day raise ONE inspection,
+//     and BOTH receipts are recorded on it (source_grn_ids / source_grn_nos) so
+//     the inspector knows what is actually in front of them;
+//   • a GRN confirmed LATER the same day ATTACHES to that inspection while it
+//     is still PENDING / IN_PROGRESS — the common case, since receipts trickle
+//     in across the day and generation runs at 12:00 and again at 16:00. If the
+//     inspection is already COMPLETED or SKIPPED the late receipt raises a NEW
+//     one: you cannot add goods to a record somebody has already signed;
+//   • re-running raises nothing, keyed on (grnId, templateId) covered — which
+//     is read out of source_grn_ids, not just the singular column.
 //
-// MIXED RECEIPTS: one inspection PER MATERIAL FAMILY on the receipt, not one
-// blended checklist covering everything. A timber + fabric receipt raises two.
-// Three reasons: the checks are different physical activities (moisture meter
-// and a bench vs. a swatch in daylight) that are commonly done by different
-// people at different times; a single overall PASS/FAIL would let a fabric
-// finding condemn the timber and vice-versa, and the whole value of the record
-// is being able to say WHAT was wrong; and it keeps one inspection = one
+// TWO SUPPLIERS ON ONE DAY ARE TWO INSPECTIONS. Two suppliers is two batches
+// with two independent risks and two different corrective actions (a claim goes
+// back to one supplier, not to "Tuesday"), and one blended PASS would hide
+// which delivery was the bad one — the same argument that already splits the
+// families, applied to the other axis of the batch.
+//
+// MIXED GOODS: one inspection PER MATERIAL FAMILY, not one blended checklist. A
+// timber + fabric day raises two. The checks are different physical activities
+// (moisture meter and a bench vs. a swatch in daylight) commonly done by
+// different people at different times; a single overall PASS/FAIL would let a
+// fabric finding condemn the timber and vice-versa, and the whole value of the
+// record is being able to say WHAT was wrong; and it keeps one inspection = one
 // template snapshot, so nothing downstream (completion, tags, the phone) has to
-// learn about multi-template inspections. Both inspections carry the same
-// source_grn_id, so "what did we do about receipt X" is still one query.
+// learn about multi-template inspections.
+//
+// `source_grn_id` stays SINGULAR and stays the first receipt of the batch, so
+// every existing read, index and subject link keeps resolving; the full list
+// lives alongside it. That was the choice over "point at the day + family and
+// let the UI re-derive the receipts": the inspection is a record, and a record
+// that has to re-run a query to say what it was about stops being true the
+// moment a GRN is cancelled or back-dated.
 //
 // ROUTING is off `raw_materials.item_group` (see lib/qc-rm-families.ts), never
 // off the supplier's free-text description — a new material code inherits the
@@ -528,6 +577,58 @@ type GrnHeaderRow = {
 };
 type GrnLineRow = RmLineLike & { grnId: string };
 
+/** An existing RM inspection, as far as batching cares. */
+type RmExistingRow = {
+  id: string;
+  templateId: string | null;
+  status: string | null;
+  sourceGrnId: string | null;
+  sourceGrnIds: string | null;
+  sourceReceiptDate: string | null;
+  sourceSupplierId: string | null;
+};
+
+/** One (day × supplier × template) batch being assembled this run. */
+type RmBatch = {
+  key: string;
+  day: string;
+  supplierId: string;
+  supplierName: string | null;
+  family: RmFamily;
+  tpl: TemplateRow;
+  grns: GrnHeaderRow[];
+};
+
+/** The receipt DAY, whether receiveDate is 'YYYY-MM-DD' or a full ISO stamp. */
+function receiptDay(receiveDate: string | null | undefined, fallback: string): string {
+  const d = String(receiveDate ?? "").slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : fallback;
+}
+
+/**
+ * What the inspector is told to go and look at.
+ *
+ * Every receipt number is named while the list is short, because "GRN-0007 and
+ * GRN-0011" is an instruction and "2 receipts" is a riddle. Past three it is
+ * truncated with a count and the full list is still on the row.
+ */
+function rmSubjectLabel(grnNos: string[], supplierName: string | null): string {
+  const shown = grnNos.length <= 3 ? grnNos.join(", ") : `${grnNos.slice(0, 3).join(", ")} +${grnNos.length - 3} more`;
+  const count = grnNos.length > 1 ? ` (${grnNos.length} receipts)` : "";
+  return `${shown}${count}${supplierName ? ` · ${supplierName}` : ""}`;
+}
+
+function parseIdList(json: string | null | undefined): string[] {
+  if (!json) return [];
+  const parsed = safeParseJson(json);
+  return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+}
+
+/** PENDING / IN_PROGRESS is "still open" — anything else has been signed off. */
+function isOpenInspection(status: string | null): boolean {
+  return status === "PENDING" || status === "IN_PROGRESS";
+}
+
 export async function generateRmForGrns(
   db: D1Database,
   slotIso: string,
@@ -535,8 +636,22 @@ export async function generateRmForGrns(
   templates: TemplateRow[],
   tplItems: TemplateItemRow[],
   nextInspectionNo: () => string,
-): Promise<{ stmts: D1PreparedStatement[]; created: number; skipped: number; receipts: number; noTemplate: number }> {
-  const empty = { stmts: [] as D1PreparedStatement[], created: 0, skipped: 0, receipts: 0, noTemplate: 0 };
+): Promise<{
+  stmts: D1PreparedStatement[];
+  created: number;
+  attached: number;
+  skipped: number;
+  receipts: number;
+  noTemplate: number;
+}> {
+  const empty = {
+    stmts: [] as D1PreparedStatement[],
+    created: 0,
+    attached: 0,
+    skipped: 0,
+    receipts: 0,
+    noTemplate: 0,
+  };
   const rmTemplates = templates.filter((t) => t.stage === "RM");
   if (rmTemplates.length === 0) return empty;
 
@@ -589,14 +704,26 @@ export async function generateRmForGrns(
       )
       .bind(...ids)
       .all<GrnLineRow>(),
+    // Every RM inspection that could belong to one of this window's batches:
+    // by receipt DAY (the batch key), OR by a receipt id it already names (which
+    // catches rows written before source_receipt_date existed, so the per-GRN
+    // era cannot be re-raised as a day batch).
     db
       .prepare(
-        `SELECT source_grn_id AS "grnId", templateId AS "templateId"
+        `SELECT id AS "id",
+                templateId AS "templateId",
+                status AS "status",
+                source_grn_id AS "sourceGrnId",
+                source_grn_ids AS "sourceGrnIds",
+                source_receipt_date AS "sourceReceiptDate",
+                source_supplier_id AS "sourceSupplierId"
            FROM qc_inspections
-          WHERE source_grn_id IN (${ph})`,
+          WHERE source_grn_id IN (${ph})
+             OR (source_receipt_date IS NOT NULL
+                 AND source_receipt_date >= ? AND source_receipt_date <= ?)`,
       )
-      .bind(...ids)
-      .all<{ grnId: string; templateId: string }>(),
+      .bind(...ids, fromDate, slotDate)
+      .all<RmExistingRow>(),
   ]);
 
   const linesByGrn = new Map<string, GrnLineRow[]>();
@@ -605,23 +732,48 @@ export async function generateRmForGrns(
     if (list) list.push(l);
     else linesByGrn.set(l.grnId, [l]);
   }
-  // (grnId, templateId) — the idempotency key. Note it is NOT (grnId, family):
-  // if two families resolve to the same template (a receipt of two things that
-  // share a checklist) that is ONE inspection, which is the right answer.
-  const alreadyRaised = new Set(
-    (doneRes.results ?? []).map((r) => `${r.grnId}|${r.templateId}`),
-  );
+  const receiptById = new Map(receipts.map((r) => [r.id, r]));
+
+  // (grnId, templateId) — the idempotency key, unchanged in meaning but now
+  // read out of the LIST as well as the singular column, because a receipt that
+  // attached to an existing inspection only ever appears in the list.
+  const alreadyRaised = new Set<string>();
+  // (day, supplier, template) → the OPEN inspection a late receipt attaches to.
+  const openByBatch = new Map<string, RmExistingRow>();
+  const attachedTo = new Map<string, { ids: string[]; nos: string[]; supplierName: string | null }>();
+
+  for (const row of doneRes.results ?? []) {
+    const covered = parseIdList(row.sourceGrnIds);
+    if (row.sourceGrnId) covered.push(row.sourceGrnId);
+    for (const gid of covered) alreadyRaised.add(`${gid}|${row.templateId}`);
+    if (!isOpenInspection(row.status)) continue;
+    // A row written before these columns existed carries neither day nor
+    // supplier — derive them from the receipt it names, so the first row of the
+    // per-GRN era still absorbs the rest of its own day.
+    const seed = row.sourceGrnId ? receiptById.get(row.sourceGrnId) : undefined;
+    const day = row.sourceReceiptDate ?? (seed ? receiptDay(seed.receiveDate, slotDate) : null);
+    const supplierId = row.sourceSupplierId ?? seed?.supplierId ?? "";
+    if (!day) continue;
+    const key = `${day}|${supplierId}|${row.templateId}`;
+    if (!openByBatch.has(key)) openByBatch.set(key, row);
+  }
 
   const stmts: D1PreparedStatement[] = [];
   let created = 0;
+  let attached = 0;
   let skipped = 0;
   let noTemplate = 0;
 
+  // --- pass 1: group every uninspected receipt into its (day × supplier ×
+  // template) batch. Nothing is written until the whole window is grouped —
+  // that is what turns two receipts into one inspection instead of two.
+  const batches = new Map<string, RmBatch>();
   for (const grn of receipts) {
     const lines = linesByGrn.get(grn.id) ?? [];
     // A receipt with no lines is still goods in the building — inspect it
     // against the general checklist rather than letting it pass unlooked-at.
     const families: RmFamily[] = lines.length ? rmFamiliesOnReceipt(lines) : ["GENERAL"];
+    const day = receiptDay(grn.receiveDate, slotDate);
     for (const family of families) {
       const tpl = pickRmTemplate(rmTemplates, family, grn.supplierId);
       if (!tpl) {
@@ -635,32 +787,103 @@ export async function generateRmForGrns(
         continue;
       }
       alreadyRaised.add(`${grn.id}|${tpl.id}`);
-      const grnNo = grn.grnNumber ?? grn.id;
-      stmts.push(
-        ...buildInspectionStatements(
-          db,
-          {
-            tpl,
-            // The receipt IS the subject. Before this the inspector was handed
-            // an RM slot with no link to any goods at all.
-            subjectType: "RM_BATCH",
-            subjectId: grn.id,
-            subjectLabel: `${grnNo}${grn.supplierName ? ` · ${grn.supplierName}` : ""}`,
-            sourceGrnId: grn.id,
-            sourceGrnNo: grnNo,
-            materialFamily: family,
-          },
-          tplItems,
-          slotIso,
-          slotDate,
-          nextInspectionNo(),
-        ),
-      );
-      created++;
+      const key = `${day}|${grn.supplierId ?? ""}|${tpl.id}`;
+      const batch = batches.get(key);
+      if (batch) batch.grns.push(grn);
+      else {
+        batches.set(key, {
+          key,
+          day,
+          supplierId: grn.supplierId ?? "",
+          supplierName: grn.supplierName,
+          family,
+          tpl,
+          grns: [grn],
+        });
+      }
     }
   }
 
-  return { stmts, created, skipped, receipts: receipts.length, noTemplate };
+  // --- pass 2: attach to the open inspection for this batch, or raise one.
+  for (const batch of batches.values()) {
+    const grnIds = batch.grns.map((g) => g.id);
+    const grnNos = batch.grns.map((g) => g.grnNumber ?? g.id);
+    const open = openByBatch.get(batch.key);
+
+    if (open) {
+      // The case that will actually happen: a second delivery lands after the
+      // inspection was raised and before anyone has answered it. Fold it in.
+      const prev = attachedTo.get(open.id) ?? {
+        ids: (() => {
+          const l = parseIdList(open.sourceGrnIds);
+          return l.length ? l : open.sourceGrnId ? [open.sourceGrnId] : [];
+        })(),
+        nos: [] as string[],
+        supplierName: batch.supplierName,
+      };
+      // Numbers for receipts already on the row are re-derived where we can see
+      // them; a receipt outside the lookback keeps its id as its label.
+      if (prev.nos.length === 0) {
+        prev.nos = prev.ids.map((id) => receiptById.get(id)?.grnNumber ?? id);
+      }
+      const mergedIds = [...prev.ids];
+      const mergedNos = [...prev.nos];
+      for (let i = 0; i < grnIds.length; i++) {
+        if (mergedIds.includes(grnIds[i])) continue;
+        mergedIds.push(grnIds[i]);
+        mergedNos.push(grnNos[i]);
+      }
+      attachedTo.set(open.id, { ids: mergedIds, nos: mergedNos, supplierName: prev.supplierName });
+      stmts.push(
+        db
+          .prepare(
+            `UPDATE qc_inspections
+                SET source_grn_ids = ?, source_grn_nos = ?, subjectLabel = ?,
+                    source_receipt_date = ?, source_supplier_id = ?
+              WHERE id = ?`,
+          )
+          .bind(
+            JSON.stringify(mergedIds),
+            JSON.stringify(mergedNos),
+            rmSubjectLabel(mergedNos, prev.supplierName),
+            batch.day,
+            batch.supplierId || null,
+            open.id,
+          ),
+      );
+      attached += batch.grns.length;
+      continue;
+    }
+
+    stmts.push(
+      ...buildInspectionStatements(
+        db,
+        {
+          tpl: batch.tpl,
+          // The day's goods ARE the subject. Before 2026-08-08 the inspector was
+          // handed an RM slot with no link to any goods at all; the singular
+          // column stays the first receipt so every existing link resolves.
+          subjectType: "RM_BATCH",
+          subjectId: grnIds[0],
+          subjectLabel: rmSubjectLabel(grnNos, batch.supplierName),
+          sourceGrnId: grnIds[0],
+          sourceGrnNo: grnNos[0],
+          sourceGrnIds: grnIds,
+          sourceGrnNos: grnNos,
+          sourceReceiptDate: batch.day,
+          sourceSupplierId: batch.supplierId || null,
+          materialFamily: batch.family,
+        },
+        tplItems,
+        slotIso,
+        slotDate,
+        nextInspectionNo(),
+      ),
+    );
+    created++;
+  }
+
+  return { stmts, created, attached, skipped, receipts: receipts.length, noTemplate };
 }
 
 // --- FG: periodic sampling, bound to a unit and its sales order ------------
@@ -854,6 +1077,8 @@ export type GenerateResult = {
   skipped: number;
   skippedNoActivity: number;
   rmCreated: number;
+  /** Receipts folded into an inspection that was already open for that day. */
+  rmAttached: number;
   rmReceipts: number;
   rmNoTemplate: number;
   fgCreated: number;
@@ -934,7 +1159,7 @@ export async function generatePendingForSlot(
     created++;
   }
 
-  // --- RM: per goods receipt --------------------------------------------------
+  // --- RM: per receipt DAY × supplier × material family ------------------------
   const rm = await generateRmForGrns(db, slotIso, slotDate, templates, tplItems, nextInspectionNo);
   stmts.push(...rm.stmts);
   created += rm.created;
@@ -960,6 +1185,7 @@ export async function generatePendingForSlot(
     skipped,
     skippedNoActivity,
     rmCreated: rm.created,
+    rmAttached: rm.attached,
     rmReceipts: rm.receipts,
     rmNoTemplate: rm.noTemplate,
     fgCreated: fg.created,

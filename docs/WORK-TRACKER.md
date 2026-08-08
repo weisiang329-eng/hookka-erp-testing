@@ -9,6 +9,29 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-08 — 🔵 六张单据清单的 status tab 都带上「几张 · 多少钱」· main（未 push，未验 prod）
+
+Owner：要 Houzs 有的那套。DO 清单早就证明可行（Planning 126 · RM 93,806.50 …），其他清单只有
+count 或什么都没有。
+
+- **先抽成一个共用件再铺**（owner 今天讲过不只一次「为什么 backend 和 frontend 不统一的呢」）：
+  算钱的规则在 `src/lib/status-tab-strip.ts`（纯函式、可测），画面在
+  `src/components/ui/status-tab-strip.tsx`（segmented / underline 两种外壳，同一套行为）。
+- 铺到：Sales Orders（Order value）· Purchase Orders（Ordered value）· GRN（Received value at
+  cost）· Purchase Invoices（Supplier-invoiced amount）· Invoices（Invoiced total，顺手把
+  Status 下拉换成 tab strip）· Consignment Orders（Order value）。
+- **不敢算的就不写 RM**：整桶加起来是 0 就只出 count，不出「RM 0.00」。GRN Draft 常常是这样
+  （进货先入帐、供应商价钱还没 key）。
+- **后端两处**：`/api/consignment-orders/stats` 补 `revenueByStatus` **并补上
+  customerScopeSql**（原本没有 → 业务看得到全公司的 CO 数字，跟 2026-08-05 那条同一类洞，
+  加钱只会让洞更大）；`/api/invoices/stats` 补 `totalByStatus`（旧 snapshot 少这个 key 视为过期）。
+- `tests/status-tab-strip.test.mjs`（25 项，含 SSR render + 用真的 handler 验 scoped 总额）。
+  tsc / npm test 全绿（stock-breakdown 那条红的是别的 agent 在改的档，不是这轮）。
+  **DO 那页没动**（这轮被别的 agent 占着），所以它还是自己那份手写的 strip —— 之后要收进来。
+  **没在跑起来的 app 上看过。**
+
+---
+
 ## 2026-08-08 — 🔵 DO 详情抽屉（照 Houzs 那种右侧 slide-over）· main（未 push，未验 prod）
 
 Owner：要 Houzs ERP frontend 那种「点一行、右边滑出来、不同单据看到的东西不一样」的详情抽屉。

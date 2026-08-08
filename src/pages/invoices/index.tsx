@@ -4,6 +4,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
+import { StatusTabStrip } from "@/components/ui/status-tab-strip";
+import { tabValueSen } from "@/lib/status-tab-strip";
 import { formatCurrency } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
@@ -74,6 +76,18 @@ export default function InvoicesPage() {
     if (filterDateTo) qs.set("to", filterDateTo);
     return qs.toString();
   })();
+  // Same filter WITHOUT the status — the status tab strip needs every bucket's
+  // count and money under the customer/date filter the operator has set. Asking
+  // the status-filtered aggregate would collapse the strip to the one status
+  // already selected (every other tab would read 0), which is exactly the
+  // "cards disagree with the list" class this page has been bitten by before.
+  const filterQsNoStatus = (() => {
+    const qs = new URLSearchParams();
+    if (filterCustomer) qs.set("customerId", filterCustomer);
+    if (filterDateFrom) qs.set("from", filterDateFrom);
+    if (filterDateTo) qs.set("to", filterDateTo);
+    return qs.toString();
+  })();
 
   const { data: invResp, loading, refresh: refreshInvoices } = useCachedJson<{
     success?: boolean;
@@ -96,16 +110,67 @@ export default function InvoicesPage() {
   const { data: invStatsResp, refresh: refreshInvStats } = useCachedJson<{
     success?: boolean;
     byStatus?: Record<string, number>;
+    totalByStatus?: Record<string, number>;
     total?: number;
     outstandingSen?: number;
     paidMTDSen?: number;
   }>(filterQs ? `/api/invoices/stats?${filterQs}` : "/api/invoices/stats");
+  // The status tab strip's own source: the same aggregate minus the status
+  // filter. When no status is selected this is byte-identical to the URL above
+  // and useCachedJson serves it from the same cache entry — no extra request.
+  // /api/invoices/stats narrows its GROUP BY with customerScopeSql
+  // (invoices.ts:1218), so a salesperson's counts AND totals here cover only
+  // their own customers' invoices.
+  const { data: statusStripResp } = useCachedJson<{
+    success?: boolean;
+    byStatus?: Record<string, number>;
+    totalByStatus?: Record<string, number>;
+    total?: number;
+  }>(filterQsNoStatus ? `/api/invoices/stats?${filterQsNoStatus}` : "/api/invoices/stats");
   const invoices: Invoice[] = useMemo(
     () => (invResp?.success ? invResp.data ?? [] : Array.isArray(invResp) ? invResp : []),
     [invResp]
   );
   const totalInvoicesServer = invResp?.total ?? invoices.length;
   const totalPages = Math.max(1, Math.ceil(totalInvoicesServer / PAGE_SIZE));
+
+  // ---- Status tab strip (count + money per state) ------------------------
+  // This strip IS the status filter — there is no separate Status dropdown, so
+  // there is only one place the page's status can be set and only one set of
+  // numbers describing it.
+  //
+  // Money = INVOICED TOTAL: each invoice's own totalSen (the grid's "Total"
+  // column), summed over exactly the invoices that tab lists. Not the
+  // outstanding balance — that is a different question and already has its own
+  // card above ("Outstanding"); putting a balance under a tab labelled "Paid"
+  // would read as RM 0.00 for the fully-collected book.
+  const statusTabs = useMemo(() => {
+    const stripByStatus = statusStripResp?.byStatus ?? {};
+    const stripTotalByStatus = statusStripResp?.totalByStatus ?? {};
+    const spec: { key: string; label: string }[] = [
+      { key: "DRAFT", label: "Draft" },
+      { key: "SENT", label: "Sent" },
+      { key: "PARTIAL_PAID", label: "Partial Paid" },
+      { key: "PAID", label: "Paid" },
+      { key: "OVERDUE", label: "Overdue" },
+      { key: "CANCELLED", label: "Cancelled" },
+    ];
+    // "All" is the sum of everything the aggregate returned, including any
+    // legacy status not in the list above — its count and its money come from
+    // the same payload, so they cannot describe different invoices.
+    const allCount = statusStripResp?.total ?? 0;
+    const allValue = Object.values(stripTotalByStatus).reduce((s, v) => s + (Number(v) || 0), 0);
+    return [
+      { key: "", label: "All", count: allCount, valueSen: tabValueSen(allValue) },
+      ...spec.map((s) => ({
+        key: s.key,
+        label: s.label,
+        count: stripByStatus[s.key] ?? 0,
+        valueSen: tabValueSen(stripTotalByStatus[s.key] ?? null),
+      })),
+    ];
+  }, [statusStripResp]);
+
   const [showCreateModal, setShowCreateModal] = useState(false);
   const { data: doResp, refresh: refreshDOs } = useCachedJson<{ success?: boolean; data?: { id: string; doNo: string; customerName: string; status: string }[] }>(showCreateModal ? "/api/delivery-orders" : null);
   const deliveryOrders = useMemo(() => {
@@ -657,28 +722,22 @@ export default function InvoicesPage() {
 
       {activeTab === "list" && (
         <>
+          {/* Status tab strip — each state with how many invoices are in it and
+              what they are worth. Replaces the old Status dropdown: one control,
+              one set of numbers. */}
+          <StatusTabStrip
+            variant="underline"
+            value={filterStatus}
+            onChange={setFilterStatus}
+            moneyLabel="Invoiced total"
+            ariaLabel="Invoice status"
+            tabs={statusTabs}
+          />
+
           {/* Filters */}
           <Card>
             <CardContent className="p-4">
               <div className="flex flex-wrap items-end gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-[#6B7280] mb-1">
-                    Status
-                  </label>
-                  <select
-                    className="border border-[#E2DDD8] rounded-md px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30"
-                    value={filterStatus}
-                    onChange={(e) => setFilterStatus(e.target.value)}
-                  >
-                    <option value="">All Statuses</option>
-                    <option value="DRAFT">Draft</option>
-                    <option value="SENT">Sent</option>
-                    <option value="PARTIAL_PAID">Partial Paid</option>
-                    <option value="PAID">Paid</option>
-                    <option value="OVERDUE">Overdue</option>
-                    <option value="CANCELLED">Cancelled</option>
-                  </select>
-                </div>
                 <div>
                   <label className="block text-xs font-medium text-[#6B7280] mb-1">
                     Customer

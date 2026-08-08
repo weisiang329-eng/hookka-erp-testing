@@ -34,6 +34,24 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-08-001 — The last production stage cleared only its own WIP rows, so a stage the floor skipped kept its stock forever `inventory-cascade` `production-orders` 🟢
+
+**Symptom.** 2,206 production orders on prod have finished their last stage — the goods shipped months ago — and `wip_items` still carries rows for their upstream departments. FAB_CUT alone held 1,608 units.
+
+**Root cause.** Two hardcodes in `applyWipInventoryChange`. (1) The WIP→FG subtract (Plan B, BUG-2026-04-30-003) took only the UPHOLSTERY cards' OWN `wipLabel` rows down, and the branch-terminal consume above it reaches exactly one card per BOM branch — anything further upstream that nobody collected kept its `+wipQty` forever. 53 POs / 107 job cards are in that state. (2) Both the gate and the subtract keyed on the literal string `UPHOLSTERY`, so the **108 POs whose BOM ends somewhere else** (FAB_SEW, FOAM) never had a WIP→FG boundary at all — their rows could not be cleared by any code path. A department added to the BOM tomorrow would have joined them silently.
+
+**Fix.** One structural model, `src/api/lib/wip-expected.ts`, with exactly two consumers so they cannot drift apart: the cascade's settle and the read-only reconciliation. "Last stage", "upstream" and "downstream" are read off the job cards' own `(wipKey, branchKey, sequence)` shape — chains are grouped by `wipKey`, the last stage of a chain is its highest-sequence card, and a single-card chain is a FEEDER (the Option-C merged FAB_CUT) rather than a terminal. Verified against prod: this picks exactly today's UPHOLSTERY set on 2,272 of the 2,281 POs that have one. `settlePoTerminalWip` (`_helpers.ts:2382`) is now the whole WIP→FG boundary: the last stage's own rows come off (the original Plan B subtract) AND every upstream row this PO left standing (`poOrphanedUpstream`). It runs from the UPHOLSTERY branch and from the plain producer branch, so a chain that ends anywhere settles.
+
+**It cannot double-decrement.** `poOrphanedUpstream` treats a card whose chain-terminal is done as already collected and excludes it — precisely the set the branch-terminal consume targets. It only ever subtracts work the floor actually reported FINISHED, so it cannot manufacture a negative on its own. And `unsettlePoTerminalWip` is its exact inverse for the rollback branch, reading the PO as it stood BEFORE the revert, so a complete → revert → complete round trip settles once. While fixing that mirror we also found the rollback refunding EVERY upstream sibling in the `wipKey` while the forward consume only ever takes the branch terminal (BUG-2026-04-27-014) — a revert inflated rows that were never decremented. The refund now walks the identical `byBranch` map.
+
+**Also shipped: `GET /api/inventory/wip/reconcile`** — read-only, safe to run any time. Recomputes every `wip_items` balance from the job cards and lists the disagreements (`diff = stored − expected`), with totals that always cover the whole ledger so a truncated page cannot read as a clean bill of health. Prod today: 1,293 of 5,286 codes disagree, net **+2,133**; of the 1,440 non-zero rows **1,286 are wrong** by net **+2,145** (2,462 overstated, 317 understated), and 162 rows are negative.
+
+**Scope note.** Draining the orphans is 88 rows / 104 units on today's finished POs — real, but small. The bulk of the 2,462 overstated units is BUG-2026-08-08-002 (the swallowed re-completion), which this reconciliation is what finally measured. `scripts/reset-wip-quantities.mjs` is prepared for the backlog, dry-run by default and **NOT RUN**.
+
+**Verified.** `tests/wip-quantity-drift.test.mjs`: completing the last stage clears the upstream rows for that PO; the drain never touches a stage the floor never reported; a PO still in progress keeps its WIP on the board; the reconciliation reports a stale row, a negative row and a code shared by two POs, and stays silent when the books agree. Disabling the drain makes them fail — proved. `npx tsc -p tsconfig.app.json --noEmit` clean, suite green (3451). No prod data touched.
+
+---
+
 ## BUG-2026-08-07-007 — The SO edit screen priced a line from FOUR components while the save stored FIVE `sales-orders` `money` `ui-frontend` 🟢
 
 **Symptom.** Same disease as BUG-2026-08-07-006 ("Jager 是 305，edit 的时候就会变成 308"), one document earlier and in the opposite direction: an operator opens an existing sales order, the line reads `Unit: RM 830.00 (Base RM 830.00)`, presses Save — and the stored order is worth RM 910.00. The gap is exactly the line's total-height surcharge. No warning, no reprice prompt; the screen simply never mentioned the component.

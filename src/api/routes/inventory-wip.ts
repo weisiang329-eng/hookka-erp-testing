@@ -35,6 +35,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { laborRateForDate } from "../../lib/costing";
 import { requirePermission } from "../lib/rbac";
+import { reconcileWip, type WipJobCardLike } from "../lib/wip-expected";
 
 const app = new Hono<Env>();
 
@@ -660,6 +661,101 @@ app.get("/", async (c) => {
   rows.sort((a, b) => a.wipCode.localeCompare(b.wipCode));
 
   return c.json({ success: true, data: rows });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/inventory/wip/reconcile — READ-ONLY. Writes nothing, ever.
+//
+// `wip_items.stock_qty` is a running balance that only ever gets nudged: every
+// decrement the cascade missed is permanent, and nothing has ever re-derived
+// the number to say so. This endpoint is that derivation. It recomputes what
+// each row SHOULD be from the job cards alone (src/api/lib/wip-expected.ts —
+// the same module the cascade's settle uses, so the fix and the audit can
+// never drift apart) and lists every code where the stored balance disagrees.
+//
+// `diff = stored − expected`. Positive means the ledger is carrying stock the
+// floor never reported finishing; negative means the ledger has been decremented
+// for work that was never produced (the physically impossible rows).
+//
+// Query params:
+//   ?limit=N      cap the returned rows (default 500, 0 = all). Totals always
+//                 cover EVERY row, never just the returned page.
+//   ?nonZeroOnly  only rows whose STORED balance is non-zero — what the WIP
+//                 board actually shows today.
+// ---------------------------------------------------------------------------
+app.get("/reconcile", async (c) => {
+  const denied = await requirePermission(c, "inventory", "read");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const url = new URL(c.req.url);
+  const limitRaw = Number(url.searchParams.get("limit") ?? "500");
+  const limit = Number.isFinite(limitRaw) && limitRaw >= 0 ? limitRaw : 500;
+  const nonZeroOnly = url.searchParams.get("nonZeroOnly") !== null;
+
+  // Every PO and every job card — the derivation is a whole-ledger statement,
+  // and a code shared across POs (a third of the balance is) can only be judged
+  // by summing all of them. Quoted camelCase aliases: an unquoted `AS wipLabel`
+  // comes back folded to lowercase.
+  const [posRes, jcsRes, storedRes] = await Promise.all([
+    db
+      .prepare(
+        `SELECT id, quantity, itemCategory AS "itemCategory",
+                specialOrder AS "specialOrder"
+           FROM production_orders`,
+      )
+      .all<{
+        id: string;
+        quantity: number | null;
+        itemCategory: string | null;
+        specialOrder: string | null;
+      }>(),
+    db
+      .prepare(
+        `SELECT id, productionOrderId AS "productionOrderId",
+                departmentCode AS "departmentCode", sequence, status,
+                wipKey AS "wipKey", wipLabel AS "wipLabel", wipQty AS "wipQty",
+                branchKey AS "branchKey", wipType AS "wipType"
+           FROM job_cards`,
+      )
+      .all<WipJobCardLike>(),
+    db
+      .prepare(`SELECT code, stockQty AS "stockQty" FROM wip_items`)
+      .all<{ code: string; stockQty: number }>(),
+  ]);
+
+  const result = reconcileWip(
+    posRes.results ?? [],
+    jcsRes.results ?? [],
+    (storedRes.results ?? []).map((r) => ({
+      code: r.code,
+      stockQty: Number(r.stockQty ?? 0),
+    })),
+  );
+
+  const shown = nonZeroOnly
+    ? result.rows.filter((r) => r.storedQty !== 0)
+    : result.rows;
+
+  return c.json({
+    success: true,
+    // Totals describe the WHOLE ledger regardless of limit / filter, so a
+    // truncated page can never be mistaken for a clean bill of health.
+    summary: {
+      codesChecked: result.checked,
+      agreeing: result.agreeing,
+      disagreeing: result.disagreeing,
+      netDiff: result.netDiff,
+      overstatedUnits: result.overstatedUnits,
+      understatedUnits: result.understatedUnits,
+      negativeStoredRows: result.negativeStoredRows,
+      nonZeroStoredDisagreeing: result.rows.filter((r) => r.storedQty !== 0)
+        .length,
+    },
+    returned: limit > 0 ? Math.min(shown.length, limit) : shown.length,
+    truncated: limit > 0 && shown.length > limit,
+    rows: limit > 0 ? shown.slice(0, limit) : shown,
+  });
 });
 
 export default app;

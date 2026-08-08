@@ -59,9 +59,6 @@ import {
 // that fix that we don't touch (per memory feedback_protect_completed_work).
 // Either way, completion math must ignore wipType=DIVAN so the HB pack alone
 // can flip the PO to COMPLETED → SO/CO to READY_TO_SHIP.
-import { isHeadboardOnlySpecial } from "../fg-units";
-
-
 // ---------------------------------------------------------------------------
 // HB-only completion filter — single helper used by every "are all JCs done?"
 // gate so the rule stays in one place. Returns the JC list with DIVAN entries
@@ -75,20 +72,19 @@ import { isHeadboardOnlySpecial } from "../fg-units";
 // DIVAN job_cards before commit 9086352 must keep those rows untouched.
 // The cleanup endpoint /api/import/cleanup-headboard-only-divans (added in
 // 9086352) is the explicit opt-in path for clearing them.
+//
+// The definition now lives in src/api/lib/wip-expected.ts next to the rest of
+// the WIP structure helpers, so the cascade and the reconciliation share ONE
+// copy. Re-exported here because every existing caller imports it from this
+// module.
 // ---------------------------------------------------------------------------
-export function filterJcsForCompletionGate<
-  J extends { wipType?: string | null },
->(
-  po: { itemCategory?: string | null; specialOrder?: string | null } | null
-    | undefined,
-  jcs: J[],
-): J[] {
-  if (!po) return jcs;
-  const isBf = (po.itemCategory ?? "").toUpperCase() === "BEDFRAME";
-  if (!isBf) return jcs;
-  if (!isHeadboardOnlySpecial(po.specialOrder ?? null)) return jcs;
-  return jcs.filter((j) => (j.wipType ?? "").toUpperCase() !== "DIVAN");
-}
+export { filterJcsForCompletionGate } from "../../lib/wip-expected";
+import {
+  filterJcsForCompletionGate,
+  isWipTerminalDone,
+  poOrphanedUpstream,
+  wipTerminalCards,
+} from "../../lib/wip-expected";
 
 // Self-applying migrations for the production-orders / job-cards space.
 // Mirrors the pattern in src/api/routes/sales-orders.ts:1492 — each ALTER
@@ -2384,6 +2380,98 @@ export async function nextSOHNumber(db: D1Database): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
+// FIX A — the last stage clears the PO's upstream rows, not just its own.
+//
+// Until now the WIP→FG subtract (Plan B, BUG-2026-04-30-003) took only the
+// UPHOLSTERY cards' OWN `wipLabel` rows down, and the branch-terminal consume
+// above it reached exactly one card per BOM branch. Anything further upstream
+// that nobody ever collected — the floor skipping a stage, or a chain that
+// simply has no card between the producer and the last stage — kept its
+// +wipQty in `wip_items` forever, on goods that shipped months ago.
+//
+// `settlePoTerminalWip` is the whole WIP→FG boundary in one place:
+//   • the last stage is STRUCTURAL (`wipTerminalCards`) — read off the job
+//     cards' own (wipKey, sequence) shape, never a department name, so a
+//     department added to the BOM tomorrow settles like every other stage
+//     instead of quietly accruing;
+//   • the last stage's own rows come off (the original Plan B subtract);
+//   • every upstream row this PO left standing comes off too
+//     (`poOrphanedUpstream`).
+//
+// It CANNOT double-decrement what the branch-terminal consume just took:
+// `poOrphanedUpstream` treats a card whose chain-terminal is done as already
+// collected and excludes it, which is precisely the set that consume targets.
+// And it only ever subtracts work the floor actually REPORTED FINISHED, so it
+// can never manufacture a negative row on its own.
+// ---------------------------------------------------------------------------
+export async function settlePoTerminalWip(
+  db: D1Database,
+  poRow: ProductionOrderRow,
+  allJcRows: JobCardRow[],
+): Promise<void> {
+  if (!isWipTerminalDone(poRow, allJcRows)) return;
+  for (const terminal of wipTerminalCards(poRow, allJcRows)) {
+    if (!terminal.wipLabel) continue;
+    const subQty = terminal.wipQty || poRow.quantity || 1;
+    await db
+      .prepare("UPDATE wip_items SET stockQty = stockQty - ? WHERE code = ?")
+      .bind(subQty, terminal.wipLabel)
+      .run();
+  }
+  for (const orphan of poOrphanedUpstream(poRow, allJcRows)) {
+    if (!orphan.label) continue;
+    await db
+      .prepare("UPDATE wip_items SET stockQty = stockQty - ? WHERE code = ?")
+      .bind(orphan.qty, orphan.label)
+      .run();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The exact inverse, for the rollback branch. A last stage stepped back out of
+// COMPLETED means the goods are WIP again, so everything the settle took has
+// to go back — otherwise a complete → revert → complete round trip subtracts
+// the same upstream twice and drives the row negative.
+//
+// The card statuses are read as they were BEFORE the revert (the reverting card
+// forced back to `prevStatus`), because that is the state the settle ran
+// against; reading the post-revert state would refund rows the settle never
+// touched.
+// ---------------------------------------------------------------------------
+export async function unsettlePoTerminalWip(
+  db: D1Database,
+  poRow: ProductionOrderRow,
+  jcRow: JobCardRow,
+  allJcRows: JobCardRow[],
+  prevStatus: string | null,
+): Promise<void> {
+  const asBefore = allJcRows.map((j) =>
+    j.id === jcRow.id ? { ...j, status: prevStatus ?? j.status } : j,
+  );
+  // Only the revert that actually BREAKS the terminal-done state undoes the
+  // settle. Reverting some upstream card on an already-finished PO must not
+  // hand back rows the settle correctly took months ago.
+  if (!wipTerminalCards(poRow, asBefore).some((t) => t.id === jcRow.id)) return;
+  if (!isWipTerminalDone(poRow, asBefore)) return;
+  if (isWipTerminalDone(poRow, allJcRows)) return;
+  for (const terminal of wipTerminalCards(poRow, asBefore)) {
+    if (!terminal.wipLabel) continue;
+    const addQty = terminal.wipQty || poRow.quantity || 1;
+    await db
+      .prepare("UPDATE wip_items SET stockQty = stockQty + ? WHERE code = ?")
+      .bind(addQty, terminal.wipLabel)
+      .run();
+  }
+  for (const orphan of poOrphanedUpstream(poRow, asBefore)) {
+    if (!orphan.label) continue;
+    await db
+      .prepare("UPDATE wip_items SET stockQty = stockQty + ? WHERE code = ?")
+      .bind(orphan.qty, orphan.label)
+      .run();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // WIP inventory — mirror of the in-memory applyWipInventoryChange().
 // Writes directly to wip_items (code-keyed).
 //
@@ -2553,46 +2641,24 @@ export async function applyWipInventoryChange(
     newStatus === "COMPLETED" || newStatus === "TRANSFERRED";
   if (wasDone && !isDone) {
     const refundQty = wipQty;
+    // BUG-2026-04-30-003 reverse symmetry: if the PO's last stage was fully
+    // done (so `settlePoTerminalWip` had fired in the forward COMPLETED
+    // branch), reverting a card of that last stage means the goods are WIP
+    // again. `unsettlePoTerminalWip` re-reads the PO as it stood BEFORE this
+    // revert (this card forced back to prevStatus) and adds back exactly what
+    // the settle took — the last stage's own rows AND the upstream rows it
+    // drained. Without the second half, a complete → revert → complete round
+    // trip drains the same upstream twice and drives the row negative. It
+    // runs for EVERY department because the last stage is structural, not
+    // necessarily UPHOLSTERY, and it no-ops unless this very revert is what
+    // breaks the terminal-done state.
+    await unsettlePoTerminalWip(db, poRow, jcRow, allJcRows, prevStatus);
     if (isUpholstery) {
-      // BUG-2026-04-30-003 reverse symmetry: if PO was previously
-      // all-UPH-done (Plan B subtract had fired in the forward COMPLETED
-      // branch), reverting one UPH JC means the goods are back as WIP.
-      // Add back +wipQty for every UPH JC in this PO. Net effect:
-      //   - reverting JC's own wipLabel: +wipQty (here) - wipQty (subtract
-      //     below) = 0   ← correct, this UPH is no longer producing
-      //   - other UPH JCs (still COMPLETED): +wipQty (here) only, no
-      //     subtract applies → restored as WIP since PO is no longer
-      //     fully UPH-complete.
-      // wasAllUphDone is true iff every UPH JC in this PO is currently
-      // COMPLETED/TRANSFERRED EXCEPT the reverting one — and we know the
-      // reverting one was previously COMPLETED (wasDone=true).
-      // HB-only PO: drop DIVAN UPH JCs from the predicate so the rollback
-      // mirror stays in step with the forward gate above.
-      const poUphJcsAll = allJcRows.filter(
-        (j) =>
-          j.productionOrderId === poRow.id &&
-          (j.departmentCode || "").toUpperCase() === "UPHOLSTERY",
-      );
-      const poUphJcs = filterJcsForCompletionGate(poRow, poUphJcsAll);
-      const wasAllUphDone =
-        poUphJcs.length > 0 &&
-        poUphJcs.every((j) =>
-          j.id === jcRow.id
-            ? true // wasDone=true, this JC was COMPLETED before
-            : j.status === "COMPLETED" || j.status === "TRANSFERRED",
-        );
-      if (wasAllUphDone) {
-        for (const uphJc of poUphJcs) {
-          if (!uphJc.wipLabel) continue;
-          const addQty = uphJc.wipQty || poRow.quantity || 1;
-          await db
-            .prepare(
-              "UPDATE wip_items SET stockQty = stockQty + ? WHERE code = ?",
-            )
-            .bind(addQty, uphJc.wipLabel)
-            .run();
-        }
-      }
+      // Net effect on the reverting UPH card's own label: +wipQty (added back
+      // by the unsettle) − wipQty (the subtract just below) = 0 — correct,
+      // this UPH is no longer producing. Sibling UPH cards that are still
+      // COMPLETED keep the +wipQty: the PO is no longer finished, so their
+      // output is WIP again.
 
       // Subtract UPH's own row.
       // BUG-2026-04-27-013: no MAX(0) clamp — symmetric with the forward
@@ -2604,18 +2670,28 @@ export async function applyWipInventoryChange(
         )
         .bind(refundQty, wipLabel)
         .run();
-      // Refund every upstream sibling the forward UPH-COMPLETED path
-      // consumed from.
+      // Refund the upstream the forward UPH-COMPLETED path consumed from.
+      //
+      // This used to refund EVERY upstream sibling in the wipKey, while the
+      // forward consume (BUG-2026-04-27-014) only ever takes the BRANCH
+      // TERMINAL of each branch — the deepest card below UPH within each
+      // branchKey. Every revert therefore handed back stock to cards that were
+      // never decremented, on top of `settlePoTerminalWip`'s own mirror. The
+      // refund now walks the identical `byBranch` map the forward path builds,
+      // so the two are exact inverses and a revert cannot inflate a row.
       if (wipKey) {
-        const upstreamLabels = new Set<string>();
+        const byBranch = new Map<string, JobCardRow>();
         for (const j of allJcRows) {
-          if (
-            j.wipKey === wipKey &&
-            j.sequence < jcRow.sequence &&
-            j.wipLabel
-          ) {
-            upstreamLabels.add(j.wipLabel);
-          }
+          if (j.wipKey !== wipKey) continue;
+          if (j.sequence >= jcRow.sequence) continue;
+          if (!j.wipLabel) continue;
+          const bk = j.branchKey ?? "";
+          const cur = byBranch.get(bk);
+          if (!cur || j.sequence > cur.sequence) byBranch.set(bk, j);
+        }
+        const upstreamLabels = new Set<string>();
+        for (const [, terminal] of byBranch) {
+          if (terminal.wipLabel) upstreamLabels.add(terminal.wipLabel);
         }
         for (const label of upstreamLabels) {
           await db
@@ -3138,29 +3214,12 @@ export async function applyWipInventoryChange(
       // legacy stranded DIVAN rows don't keep the WIP→FG transition from
       // firing. The DIVAN wip_items rows themselves stay where they are
       // (we don't subtract them since their UPH JCs never completed).
-      const poUphJcsAll = allJcRows.filter(
-        (j) =>
-          j.productionOrderId === poRow.id &&
-          (j.departmentCode || "").toUpperCase() === "UPHOLSTERY",
-      );
-      const poUphJcs = filterJcsForCompletionGate(poRow, poUphJcsAll);
-      const allUphDone =
-        poUphJcs.length > 0 &&
-        poUphJcs.every(
-          (j) => j.status === "COMPLETED" || j.status === "TRANSFERRED",
-        );
-      if (allUphDone) {
-        for (const uphJc of poUphJcs) {
-          if (!uphJc.wipLabel) continue;
-          const subQty = uphJc.wipQty || poRow.quantity || 1;
-          await db
-            .prepare(
-              "UPDATE wip_items SET stockQty = stockQty - ? WHERE code = ?",
-            )
-            .bind(subQty, uphJc.wipLabel)
-            .run();
-        }
-      }
+      //
+      // The gate is now STRUCTURAL (wipTerminalCards): "every card of the PO's
+      // last stage is done", where the last stage is read off the job cards'
+      // own (wipKey, sequence) shape. On every PO that ends at UPHOLSTERY this
+      // is the same set as before.
+      await settlePoTerminalWip(db, poRow, allJcRows);
       return;
     }
 
@@ -3187,6 +3246,12 @@ export async function applyWipInventoryChange(
         wipQty,
       )
       .run();
+    // A PO whose BOM does NOT end at UPHOLSTERY (108 of them on prod today —
+    // chains that finish at FAB_SEW or FOAM) used to reach this line and stop:
+    // the WIP→FG subtract and the upstream drain both hung off a hardcoded
+    // UPHOLSTERY check, so those orders shipped and their rows stayed forever.
+    // The settle is structural, so the last stage drains whatever it is.
+    await settlePoTerminalWip(db, poRow, allJcRows);
     return;
   }
 

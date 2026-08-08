@@ -9,6 +9,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
+import { StatusTabStrip } from "@/components/ui/status-tab-strip";
+import { tabValueSen } from "@/lib/status-tab-strip";
 import { formatCurrency, cn } from "@/lib/utils";
 import { getPrimarySoCategory } from "@/lib/so-category";
 import { buildCoDetailListingAoa, type CODetailOrder } from "@/lib/doc-detail-listings";
@@ -128,7 +130,9 @@ export default function SalesPage() {
   const { data: statsResp, refresh: refreshStats } = useCachedJson<{
     success?: boolean;
     byStatus?: Record<string, number>;
+    revenueByStatus?: Record<string, number>;
     total?: number;
+    totalRevenueSen?: number;
   }>("/api/consignment-orders/stats");
   const { data: customersResp, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
   // ?fields=minimal&include= → server drops ~20 unused PO fields, the
@@ -149,6 +153,10 @@ export default function SalesPage() {
   // `kpiSource` useMemo below the filteredOrders memo for the toggle.
   const statsByStatus = statsResp?.byStatus ?? {};
   const statsTotalRaw = statsResp?.total ?? totalOrdersServer;
+  // Same aggregate, money side — SUM(totalSen) GROUP BY status, narrowed by the
+  // caller's customer scope exactly like the counts above it.
+  const statsRevenueByStatus = statsResp?.revenueByStatus ?? {};
+  const statsTotalRevenueSen = statsResp?.totalRevenueSen ?? 0;
   const customers: Customer[] = useMemo(
     () => (customersResp?.data ? customersResp.data : Array.isArray(customersResp) ? customersResp : []),
     [customersResp]
@@ -309,20 +317,48 @@ export default function SalesPage() {
   // KPI source — non-status filtered set so the bucket cards stay
   // informative even when Status is set (otherwise Status=Outstanding
   // forces Outstanding=Total and Pending=Completed=0).
+  //
+  // Money travels with the counts, from the same source — under a filter both
+  // come from the filtered rows, unfiltered both come from /stats, whose
+  // aggregate is narrowed by customerScopeSql (consignment-orders.ts /stats) so
+  // a salesperson's total covers only their own customers' orders.
   const kpiSource = useMemo(() => {
     if (hasActiveFilters) {
       const byStatus: Record<string, number> = {};
+      const revenueByStatus: Record<string, number> = {};
       for (const o of filteredOrdersForKpi) {
         byStatus[o.status] = (byStatus[o.status] ?? 0) + 1;
+        revenueByStatus[o.status] = (revenueByStatus[o.status] ?? 0) + (o.totalSen || 0);
       }
-      return { total: filteredOrdersForKpi.length, byStatus };
+      return {
+        total: filteredOrdersForKpi.length,
+        byStatus,
+        revenueByStatus,
+        totalRevenueSen: filteredOrdersForKpi.reduce((s, o) => s + (o.totalSen || 0), 0),
+      };
     }
-    return { total: statsTotalRaw, byStatus: statsByStatus };
-  }, [hasActiveFilters, filteredOrdersForKpi, statsTotalRaw, statsByStatus]);
+    return {
+      total: statsTotalRaw,
+      byStatus: statsByStatus,
+      revenueByStatus: statsRevenueByStatus,
+      totalRevenueSen: statsTotalRevenueSen,
+    };
+  }, [
+    hasActiveFilters, filteredOrdersForKpi, statsTotalRaw, statsByStatus,
+    statsRevenueByStatus, statsTotalRevenueSen,
+  ]);
 
   const statsTotal = kpiSource.total;
   const draftCount = kpiSource.byStatus.DRAFT ?? 0;
   const confirmedCount = Math.max(0, statsTotal - draftCount);
+  // Tab money — consignment order value (each CO's own totalSen, the grid's
+  // "Total" column). "Confirmed" is the complement of Draft, so its value is
+  // the complement of Draft's, keeping the figure over exactly the rows the
+  // tab lists.
+  const draftValueSen = tabValueSen(kpiSource.revenueByStatus?.DRAFT ?? null);
+  const confirmedValueSen = tabValueSen(
+    (kpiSource.totalRevenueSen ?? 0) - (kpiSource.revenueByStatus?.DRAFT ?? 0),
+  );
   // Status buckets from src/lib/so-status.ts — shared with Sales so the
   // two pages agree. Pre-2026-05-26 audit, CO's Outstanding bucket
   // included SHIPPED (Sales' didn't), and CO had READY_TO_SHIP in BOTH
@@ -733,30 +769,28 @@ export default function SalesPage() {
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
             <CardTitle className="flex items-center gap-2"><ShoppingCart className="h-5 w-5 text-[#6B5C32]" /> Consignment Orders</CardTitle>
-            <div className="inline-flex rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-0.5">
-              <button
-                onClick={() => { setTab("DRAFT"); setSelectedRows([]); }}
-                className={cn(
-                  "px-4 py-1.5 text-sm rounded transition-colors",
-                  tab === "DRAFT"
-                    ? "bg-[#FAEFCB] text-[#9C6F1E] font-medium shadow-sm"
-                    : "text-[#6B7280] hover:text-[#1F1D1B]"
-                )}
-              >
-                Draft ({draftCount})
-              </button>
-              <button
-                onClick={() => { setTab("CONFIRMED"); setSelectedRows([]); }}
-                className={cn(
-                  "px-4 py-1.5 text-sm rounded transition-colors",
-                  tab === "CONFIRMED"
-                    ? "bg-[#E0EDF0] text-[#3E6570] font-medium shadow-sm"
-                    : "text-[#6B7280] hover:text-[#1F1D1B]"
-                )}
-              >
-                Confirmed ({confirmedCount})
-              </button>
-            </div>
+            <StatusTabStrip
+              value={tab}
+              onChange={(k) => { setTab(k as "DRAFT" | "CONFIRMED"); setSelectedRows([]); }}
+              moneyLabel="Order value"
+              ariaLabel="Consignment order status"
+              tabs={[
+                {
+                  key: "DRAFT",
+                  label: "Draft",
+                  count: draftCount,
+                  valueSen: draftValueSen,
+                  activeClass: "bg-[#FAEFCB] text-[#9C6F1E] font-medium shadow-sm",
+                },
+                {
+                  key: "CONFIRMED",
+                  label: "Confirmed",
+                  count: confirmedCount,
+                  valueSen: confirmedValueSen,
+                  activeClass: "bg-[#E0EDF0] text-[#3E6570] font-medium shadow-sm",
+                },
+              ]}
+            />
           </div>
         </CardHeader>
         <CardContent>

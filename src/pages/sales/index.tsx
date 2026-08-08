@@ -10,6 +10,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
+import { StatusTabStrip } from "@/components/ui/status-tab-strip";
+import { tabValueSen } from "@/lib/status-tab-strip";
 import { formatCurrency, formatDate, cn } from "@/lib/utils";
 import { getPrimarySoCategory } from "@/lib/so-category";
 import { matchesCompanyFilter } from "@/lib/company-dimension";
@@ -335,6 +337,10 @@ export default function SalesPage() {
   // "Confirmed" is anything that isn't DRAFT.
   const statsByStatus = statsResp?.byStatus ?? {};
   const statsTotalRaw = statsResp?.total ?? totalOrdersServer;
+  // Same aggregate, money side — SUM(totalSen) GROUP BY status, narrowed by the
+  // caller's customer scope exactly like the counts above it.
+  const statsRevenueByStatus = statsResp?.revenueByStatus ?? {};
+  const statsTotalRevenueSen = statsResp?.totalRevenueSen ?? 0;
   const customers: Customer[] = useMemo(
     () => (customersResp?.data ? customersResp.data : Array.isArray(customersResp) ? customersResp : []),
     [customersResp]
@@ -626,23 +632,54 @@ export default function SalesPage() {
   // moment any filter is set — see `_filtersActive` ternary on the
   // ordersResp fetch — so `filteredOrdersForKpi` is a complete server-side
   // dataset under filter, NOT just the current page.
+  //
+  // The money moves with the counts, from the SAME source, for the same reason:
+  // a tab badge counting the filtered set beside an RM figure summing the whole
+  // book is the disagreement this page has already been bitten by twice. Under
+  // a filter both come from `filteredOrdersForKpi`; unfiltered both come from
+  // /stats, whose aggregate is narrowed by customerScopeSql (sales-orders.ts
+  // :680) so a salesperson's total covers only their own customers' orders.
   const kpiSource = useMemo(() => {
     if (hasActiveFilters) {
       const byStatus: Record<string, number> = {};
+      const revenueByStatus: Record<string, number> = {};
       for (const o of filteredOrdersForKpi) {
         byStatus[o.status] = (byStatus[o.status] ?? 0) + 1;
+        revenueByStatus[o.status] = (revenueByStatus[o.status] ?? 0) + (o.totalSen || 0);
       }
       return {
         total: filteredOrdersForKpi.length,
         byStatus,
+        revenueByStatus,
+        totalRevenueSen: filteredOrdersForKpi.reduce((s, o) => s + (o.totalSen || 0), 0),
       };
     }
-    return { total: statsTotalRaw, byStatus: statsByStatus };
-  }, [hasActiveFilters, filteredOrdersForKpi, statsTotalRaw, statsByStatus]);
+    return {
+      total: statsTotalRaw,
+      byStatus: statsByStatus,
+      revenueByStatus: statsRevenueByStatus,
+      totalRevenueSen: statsTotalRevenueSen,
+    };
+  }, [
+    hasActiveFilters,
+    filteredOrdersForKpi,
+    statsTotalRaw,
+    statsByStatus,
+    statsRevenueByStatus,
+    statsTotalRevenueSen,
+  ]);
 
   const statsTotal = kpiSource.total;
   const draftCount = kpiSource.byStatus.DRAFT ?? 0;
   const confirmedCount = Math.max(0, statsTotal - draftCount);
+  // Tab money — order value (each SO's own totalSen, the grid's "Total" column).
+  // "Confirmed" is the complement of Draft here, so its value is the complement
+  // of Draft's too; that keeps the RM figure over exactly the rows the tab lists
+  // (cancelled orders included, because the tab lists them).
+  const draftValueSen = tabValueSen(kpiSource.revenueByStatus?.DRAFT ?? null);
+  const confirmedValueSen = tabValueSen(
+    (kpiSource.totalRevenueSen ?? 0) - (kpiSource.revenueByStatus?.DRAFT ?? 0),
+  );
   // Bucket math from src/lib/so-status.ts. Buckets are now mutually
   // exclusive: every status maps to AT MOST one of Outstanding / Pending
   // Delivery / Completed. Pre-fix Sales double-counted READY_TO_SHIP in
@@ -1427,30 +1464,28 @@ export default function SalesPage() {
                   <ClipboardList className="h-4 w-4" /> Review items
                 </Button>
               )}
-              <div className="inline-flex rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-0.5">
-                <button
-                  onClick={() => { setTab("DRAFT"); setSelectedRows([]); }}
-                  className={cn(
-                    "px-4 py-1.5 text-sm rounded transition-colors",
-                    tab === "DRAFT"
-                      ? "bg-[#FAEFCB] text-[#9C6F1E] font-medium shadow-sm"
-                      : "text-[#6B7280] hover:text-[#1F1D1B]"
-                  )}
-                >
-                  Draft ({draftCount})
-                </button>
-                <button
-                  onClick={() => { setTab("CONFIRMED"); setSelectedRows([]); }}
-                  className={cn(
-                    "px-4 py-1.5 text-sm rounded transition-colors",
-                    tab === "CONFIRMED"
-                      ? "bg-[#E0EDF0] text-[#3E6570] font-medium shadow-sm"
-                      : "text-[#6B7280] hover:text-[#1F1D1B]"
-                  )}
-                >
-                  Confirmed ({confirmedCount})
-                </button>
-              </div>
+              <StatusTabStrip
+                value={tab}
+                onChange={(k) => { setTab(k as "DRAFT" | "CONFIRMED"); setSelectedRows([]); }}
+                moneyLabel="Order value"
+                ariaLabel="Sales order status"
+                tabs={[
+                  {
+                    key: "DRAFT",
+                    label: "Draft",
+                    count: draftCount,
+                    valueSen: draftValueSen,
+                    activeClass: "bg-[#FAEFCB] text-[#9C6F1E] font-medium shadow-sm",
+                  },
+                  {
+                    key: "CONFIRMED",
+                    label: "Confirmed",
+                    count: confirmedCount,
+                    valueSen: confirmedValueSen,
+                    activeClass: "bg-[#E0EDF0] text-[#3E6570] font-medium shadow-sm",
+                  },
+                ]}
+              />
             </div>
           </div>
         </CardHeader>

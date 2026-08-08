@@ -1,11 +1,24 @@
 // ---------------------------------------------------------------------------
 // StockBreakdownDrawer — everything about ONE inventory item, in one panel.
 //
-// Opened from any row of the Inventory list. ONE component serves all three
-// stock types; only the Stock Lots table changes shape between them (a FIFO
-// batch for raw material, a physical piece for finished goods, a production
-// order's in-flight work for WIP). The header, movements and COGS sections are
-// identical, because the endpoint returns one shape for all three.
+// Opened by CLICKING a row of the Inventory list. ONE component serves all
+// three stock types off one endpoint shape, but they are NOT the same panel,
+// because the three ledgers do not record the same things (owner, 2026-08-08):
+//
+//   RM  — receipts and their FIFO lots are ONE table. Every inbound movement
+//         IS the creation of a lot, so the two lists that used to sit here
+//         showed the same GRN receipts twice. Movements out stays, and stays
+//         empty: there is no material-requisition step yet.
+//   FG  — two tables, movements in and movements out, and no COGS: a finished
+//         good's cost of sale is its dispatch, which is already the second
+//         table. The per-piece list is kept, collapsed, at the foot.
+//   WIP — one movements table and no split, because every row is the same kind
+//         of event and a second empty table would read as "nothing was issued"
+//         rather than "issues are not recorded".
+//
+// For a catalogued finished good the panel also carries the product's own
+// details — the fields that used to live in a separate centred dialog, folded
+// in read-only with an Edit button that opens that dialog.
 //
 // Two things this panel refuses to do:
 //
@@ -43,6 +56,7 @@ import type {
   BreakdownSection,
   BreakdownSections,
   FgLot,
+  ProductDetails,
   RmLot,
   StockBreakdown,
   StockBreakdownTarget,
@@ -283,9 +297,21 @@ function Stat({
 }
 
 // ---------------------------------------------------------------------------
-// Lots — RM
+// Receipts — RM. ONE table where there were two.
+//
+// "Stock lots" and the inbound half of "Movements" listed the same GRN receipts
+// with the same dates, quantities, costs and GR numbers, fetched down two
+// different paths (owner 2026-08-08: "你的 movement in 还有你的 stock lots 应该
+// 要 merge 在一起"). For raw material every inbound movement IS the creation of
+// a lot, so the second list could only ever disagree with the first.
+//
+// Rows a merge must not lose, and does not: an opening-balance layer that has
+// no ledger row (its Running cell is an em dash — nothing entered the ledger,
+// so no balance can be stated), and a ledger receipt whose FIFO layer is gone
+// (its Remaining cell is an em dash, because an absent layer is unknown, not
+// empty). The header notice explains the resulting gap between the two.
 // ---------------------------------------------------------------------------
-function RmLotsTable({
+function RmReceiptsTable({
   lots,
   onNavigate,
 }: {
@@ -296,71 +322,103 @@ function RmLotsTable({
   // warehouses table, so the column Houzs leads with would be an em dash on
   // every row of every material. An always-empty column reads as missing data
   // rather than as a dimension this system does not have.
+  //
+  // Attributes is the same judgement made per material rather than once: most
+  // lots carry nothing but the source stamp, and a column of em dashes reads as
+  // "nothing was noted" when the truth is that this material never notes
+  // anything.
+  const showAttributes = lots.some((l) => Boolean(l.attributes));
+  const cols = showAttributes ? 10 : 9;
   const subtotalSen = lots.reduce((s, l) => s + (l.valueSen ?? 0), 0);
   return (
     <table className="w-full text-xs">
-      <thead className="bg-[#FAF8F5]">
+      <thead className="bg-[#F3F7F3]">
         <tr>
-          <th className={TH}>Attributes</th>
-          <th className={THR}>Qty</th>
+          <th className={TH}>Received</th>
+          <th className={TH}>GR no</th>
+          <th className={TH}>Supplier</th>
+          <th className={TH}>PO no</th>
+          <th className={THR}>Qty (rem / recd)</th>
           <th className={THR}>Unit cost</th>
           <th className={THR}>Value</th>
-          <th className={TH}>Source</th>
-          <th className={TH}>Supplier</th>
-          <th className={TH}>Received</th>
+          <th className={THR}>Running</th>
           <th className={THR}>Age</th>
+          {showAttributes && <th className={TH}>Attributes</th>}
         </tr>
       </thead>
       <tbody className="divide-y divide-[#F0EDE9]">
         {lots.length === 0 && (
-          <EmptyRow span={8} message="No stock lots for this material." />
+          <EmptyRow span={cols} message="No receipts for this material." />
         )}
         {lots.map((l) => (
-          <tr key={l.id} className={l.qty <= 0 ? "opacity-60" : undefined}>
-            <td className={`${TD} max-w-[220px] truncate`} title={l.attributes ?? ""}>
-              <Txt value={l.attributes} />
-            </td>
-            <td className={TDR}>
-              <span className={l.qty < 0 ? "text-[#9A3A2D] font-semibold tabular-nums" : "tabular-nums"}>
-                {l.qty}
-              </span>
-              <span className="text-[#9CA3AF] tabular-nums"> / {l.originalQty}</span>
-            </td>
-            <td className={TDR}><Money value={l.unitCostSen} /></td>
-            <td className={TDR}><Money value={l.valueSen} /></td>
-            {/* SOURCE is two lines: the receipt on top, the PO it came from
-                underneath. They are one fact — where this lot came in — and
-                reading them as one cell is how the warehouse thinks of it. */}
+          <tr key={l.id} className={(l.qty ?? 0) <= 0 ? "opacity-60" : undefined}>
+            <td className={TD}><DateCell value={l.receivedDate} /></td>
+            {/* The receipt and the order it came from, one under the other:
+                they are one fact — where this material came in. */}
             <td className={`${TD} align-top`}>
               <span className="text-[#6B7280] mr-1">{l.source}</span>
               <DocLink no={l.grnNo} href={l.grnHref} onNavigate={onNavigate} />
-              {l.purchaseOrderNo && (
-                <span className="block mt-px text-[11px] text-[#9CA3AF]">
-                  from{" "}
-                  <DocLink
-                    no={l.purchaseOrderNo}
-                    href={l.purchaseOrderHref}
-                    onNavigate={onNavigate}
-                  />
-                </span>
-              )}
             </td>
             <td className={`${TD} max-w-[180px] truncate`} title={l.supplierName ?? ""}>
               <Txt value={l.supplierName} />
             </td>
-            <td className={TD}><DateCell value={l.receivedDate} /></td>
+            <td className={TD}>
+              <DocLink
+                no={l.purchaseOrderNo}
+                href={l.purchaseOrderHref}
+                onNavigate={onNavigate}
+              />
+            </td>
+            <td className={TDR}>
+              {l.qty === null ? (
+                <span
+                  className="text-[#B9B2A9]"
+                  title="This receipt has no FIFO layer left in rm_batches, so how much of it remains is not recorded."
+                >
+                  &mdash;
+                </span>
+              ) : (
+                <span
+                  className={
+                    l.qty < 0 ? "text-[#9A3A2D] font-semibold tabular-nums" : "tabular-nums"
+                  }
+                >
+                  {l.qty}
+                </span>
+              )}
+              <span className="text-[#9CA3AF] tabular-nums"> / {l.originalQty}</span>
+            </td>
+            <td className={TDR}><Money value={l.unitCostSen} /></td>
+            <td className={TDR}><Money value={l.valueSen} /></td>
+            <td className={TDR}>
+              {l.balanceAfter === null ? (
+                <span
+                  className="text-[#B9B2A9]"
+                  title="This receipt has no movement row in the cost ledger — see the notice at the top of this panel."
+                >
+                  &mdash;
+                </span>
+              ) : (
+                <span className="tabular-nums font-medium">{l.balanceAfter}</span>
+              )}
+            </td>
             <td className={TDR}>
               {l.ageDays === null ? <Dash /> : <span className="tabular-nums">{l.ageDays}d</span>}
             </td>
+            {showAttributes && (
+              <td className={`${TD} max-w-[220px] truncate`} title={l.attributes ?? ""}>
+                <Txt value={l.attributes} />
+              </td>
+            )}
           </tr>
         ))}
         {lots.length > 0 && (
           <tr className="bg-[#FAF8F5]">
-            <td colSpan={3} className={`${TDR} font-semibold`}>Value subtotal</td>
+            <td colSpan={6} className={`${TDR} font-semibold`}>Value subtotal</td>
             <td className={`${TDR} font-bold`}>
               <Money value={subtotalSen} />
             </td>
-            <td colSpan={4} />
+            <td colSpan={showAttributes ? 3 : 2} />
           </tr>
         )}
       </tbody>
@@ -546,67 +604,6 @@ function BalanceCell({ m }: { m: StockMovement }) {
   return <span className="tabular-nums font-medium">{m.balanceAfter}</span>;
 }
 
-function RmInTable({
-  rows,
-  onNavigate,
-}: {
-  rows: StockMovement[];
-  onNavigate: (href: string) => void;
-}) {
-  const notes = hasNotes(rows);
-  return (
-    <table className="w-full text-xs">
-      <thead className="bg-[#F3F7F3]">
-        <tr>
-          <th className={TH}>Date</th>
-          <th className={TH}>Type</th>
-          <th className={TH}>GR no</th>
-          <th className={TH}>Supplier</th>
-          <th className={TH}>PO no</th>
-          <th className={THR}>Qty</th>
-          <th className={THR}>Unit cost</th>
-          <th className={THR}>Value</th>
-          <th className={THR}>Running</th>
-          {notes && <th className={TH}>Notes</th>}
-        </tr>
-      </thead>
-      <tbody className="divide-y divide-[#F0EDE9]">
-        {rows.length === 0 && (
-          <EmptyRow span={notes ? 10 : 9} message="No inbound movements." />
-        )}
-        {rows.map((m) => (
-          <tr key={m.id}>
-            <td className={TD}><DateCell value={m.date} /></td>
-            <td className={TD}><DirectionPill direction={m.direction} /></td>
-            <td className={TD}>
-              <DocLink no={m.docNo} href={m.docHref} onNavigate={onNavigate} />
-            </td>
-            <td className={`${TD} max-w-[180px] truncate`} title={m.supplierName ?? ""}>
-              <Txt value={m.supplierName} />
-            </td>
-            <td className={TD}>
-              <DocLink
-                no={m.purchaseOrderNo}
-                href={m.purchaseOrderHref}
-                onNavigate={onNavigate}
-              />
-            </td>
-            <td className={TDR}><SignedQty m={m} /></td>
-            <td className={TDR}><Money value={m.unitCostSen} /></td>
-            <td className={TDR}><Money value={m.totalCostSen} /></td>
-            <td className={TDR}><BalanceCell m={m} /></td>
-            {notes && (
-              <td className={`${TD} max-w-[220px] truncate`}>
-                <NotesCell value={m.notes} />
-              </td>
-            )}
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
-}
-
 function RmOutTable({
   rows,
   onNavigate,
@@ -666,6 +663,16 @@ function RmOutTable({
   );
 }
 
+/**
+ * Finished goods IN — deliberately sparse (owner 2026-08-08). A completion
+ * answers four questions and no more: when, on which production order, which
+ * department finished it and who did the work.
+ *
+ * "Completed by" is `fg_units.upholsteredByName`, the person recorded on the
+ * goods themselves — not the packer, who handles a piece that is already a
+ * finished good. The department is read off that production order's UPHOLSTERY
+ * job card, the same rule that decides the row is stock at all.
+ */
 function FgInTable({
   rows,
   onNavigate,
@@ -673,30 +680,24 @@ function FgInTable({
   rows: StockMovement[];
   onNavigate: (href: string) => void;
 }) {
-  const notes = hasNotes(rows);
   return (
     <table className="w-full text-xs">
       <thead className="bg-[#F3F7F3]">
         <tr>
           <th className={TH}>Date</th>
-          <th className={TH}>Type</th>
           <th className={TH}>Production order</th>
-          <th className={TH}>Sales order</th>
-          <th className={TH}>Customer</th>
+          <th className={TH}>Completed by dept</th>
+          <th className={TH}>Completed by</th>
           <th className={THR}>Qty</th>
           <th className={THR}>Unit cost</th>
-          <th className={THR}>Running</th>
-          {notes && <th className={TH}>Notes</th>}
+          <th className={THR}>Balance</th>
         </tr>
       </thead>
       <tbody className="divide-y divide-[#F0EDE9]">
-        {rows.length === 0 && (
-          <EmptyRow span={notes ? 9 : 8} message="No inbound movements." />
-        )}
+        {rows.length === 0 && <EmptyRow span={7} message="No inbound movements." />}
         {rows.map((m) => (
           <tr key={m.id}>
             <td className={TD}><DateCell value={m.date} /></td>
-            <td className={TD}><DirectionPill direction={m.direction} /></td>
             <td className={TD}>
               <DocLink
                 no={m.productionOrderNo ?? m.docNo}
@@ -704,20 +705,13 @@ function FgInTable({
                 onNavigate={onNavigate}
               />
             </td>
-            <td className={TD}>
-              <DocLink no={m.salesOrderNo} href={m.salesOrderHref} onNavigate={onNavigate} />
-            </td>
-            <td className={`${TD} max-w-[180px] truncate`} title={m.customerName ?? ""}>
-              <Txt value={m.customerName} />
+            <td className={TD}><Txt value={m.department} /></td>
+            <td className={`${TD} max-w-[220px] truncate`} title={m.takenByName ?? ""}>
+              <Txt value={m.takenByName} />
             </td>
             <td className={TDR}><SignedQty m={m} /></td>
             <td className={TDR}><Money value={m.unitCostSen} /></td>
             <td className={TDR}><BalanceCell m={m} /></td>
-            {notes && (
-              <td className={`${TD} max-w-[220px] truncate`}>
-                <NotesCell value={m.notes} />
-              </td>
-            )}
           </tr>
         ))}
       </tbody>
@@ -726,22 +720,12 @@ function FgInTable({
 }
 
 /**
- * The serials that left on a delivery. Long lists are clipped to keep the row
- * one line high; the full list stays in the title so nothing is lost.
+ * Finished goods OUT — the dispatch. No running balance column: the two legs of
+ * this ledger do not count the same thing (a completion books whole units, a
+ * delivery books one row per FIFO slice), which the header notice states, and a
+ * balance beside the dispatch would invite exactly the subtraction that notice
+ * warns against.
  */
-function Serials({ serials }: { serials: string[] | undefined }) {
-  if (!serials || serials.length === 0) return <Dash />;
-  const shown = serials.slice(0, 3).join(", ");
-  return (
-    <span className="tabular-nums" title={serials.join(", ")}>
-      {shown}
-      {serials.length > 3 && (
-        <span className="text-[#9CA3AF]"> +{serials.length - 3} more</span>
-      )}
-    </span>
-  );
-}
-
 function FgOutTable({
   rows,
   onNavigate,
@@ -749,30 +733,23 @@ function FgOutTable({
   rows: StockMovement[];
   onNavigate: (href: string) => void;
 }) {
-  const notes = hasNotes(rows);
   return (
     <table className="w-full text-xs">
       <thead className="bg-[#FBF3F2]">
         <tr>
-          <th className={TH}>Date</th>
-          <th className={TH}>Type</th>
+          <th className={TH}>Dispatched</th>
           <th className={TH}>DO no</th>
           <th className={TH}>Sales order</th>
           <th className={TH}>Customer</th>
           <th className={THR}>Qty</th>
-          <th className={TH}>Unit serials</th>
-          <th className={THR}>Running</th>
-          {notes && <th className={TH}>Notes</th>}
+          <th className={THR}>Unit cost</th>
         </tr>
       </thead>
       <tbody className="divide-y divide-[#F0EDE9]">
-        {rows.length === 0 && (
-          <EmptyRow span={notes ? 9 : 8} message="No outbound movements." />
-        )}
+        {rows.length === 0 && <EmptyRow span={6} message="No outbound movements." />}
         {rows.map((m) => (
           <tr key={m.id}>
             <td className={TD}><DateCell value={m.date} /></td>
-            <td className={TD}><DirectionPill direction={m.direction} /></td>
             <td className={TD}>
               <DocLink no={m.docNo} href={m.docHref} onNavigate={onNavigate} />
             </td>
@@ -783,15 +760,7 @@ function FgOutTable({
               <Txt value={m.customerName} />
             </td>
             <td className={TDR}><SignedQty m={m} /></td>
-            <td className={`${TD} max-w-[280px] truncate`}>
-              <Serials serials={m.unitSerials} />
-            </td>
-            <td className={TDR}><BalanceCell m={m} /></td>
-            {notes && (
-              <td className={`${TD} max-w-[220px] truncate`}>
-                <NotesCell value={m.notes} />
-              </td>
-            )}
+            <td className={TDR}><Money value={m.unitCostSen} /></td>
           </tr>
         ))}
       </tbody>
@@ -878,6 +847,71 @@ function WipMovementsTable({
 }
 
 // ---------------------------------------------------------------------------
+// The product's own details
+//
+// This is the centred "edit product" dialog's field list, folded in as a
+// read-only section (owner 2026-08-08: one row click, one panel). Read-only is
+// the default because most opens are not edits — the panel is where you go to
+// understand a SKU. Editing did not go away: the button opens the same dialog
+// that has always saved it, which is a smaller and more honest change than
+// growing a second edit surface that would have to be kept in step with it.
+// ---------------------------------------------------------------------------
+function ProductDetailsSection({
+  details,
+  onEdit,
+}: {
+  details: ProductDetails;
+  onEdit?: () => void;
+}) {
+  return (
+    <section>
+      <div className="flex items-center justify-between gap-3">
+        <Eyebrow>Product details — the catalogue record for this SKU</Eyebrow>
+        {onEdit && (
+          <button
+            type="button"
+            onClick={onEdit}
+            className="inline-flex shrink-0 items-center rounded-md border border-[#E2DDD8] bg-white px-2.5 py-1 text-xs font-semibold text-[#6B5C32] hover:bg-[#F0EDE9]"
+          >
+            Edit product
+          </button>
+        )}
+      </div>
+      <div className="mt-2 rounded-md border border-[#E2DDD8] bg-white px-4 py-3">
+        <dl className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-3">
+          {details.fields.map((f) => (
+            <div key={f.label} className="min-w-0">
+              <dt className="text-[10px] font-bold uppercase tracking-[0.12em] text-[#6B7280]">
+                {f.label}
+              </dt>
+              <dd
+                className="mt-0.5 text-[13px] text-[#1F1D1B] truncate"
+                title={f.kind === "text" ? (f.value ?? "") : undefined}
+              >
+                {f.kind === "money" ? (
+                  <Money value={f.valueSen} />
+                ) : (
+                  <Txt value={f.value} />
+                )}
+              </dd>
+            </div>
+          ))}
+        </dl>
+        {details.advanced.length > 0 && (
+          // Said out loud because the field grid above is NOT the whole record.
+          // An operator who edits from here has to know that what they cannot
+          // see is carried through untouched rather than blanked.
+          <p className="mt-3 border-t border-[#F0EDE9] pt-2 text-[11px] text-[#6B7280]">
+            This product also carries advanced configuration that is preserved on
+            save: {details.advanced.join(" · ")}
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // The drawer
 // ---------------------------------------------------------------------------
 /**
@@ -890,9 +924,18 @@ function WipMovementsTable({
  */
 export default function StockBreakdownDrawer({
   target,
+  details,
+  onEdit,
   onClose,
 }: {
   target: StockBreakdownTarget | null;
+  /**
+   * The catalogue record behind the row, for finished goods. Supplied by the
+   * page from the SAME product object the edit dialog fills its form from, so
+   * the two cannot disagree — that is the point of not re-fetching it here.
+   */
+  details?: ProductDetails | null;
+  onEdit?: () => void;
   onClose: () => void;
 }) {
   if (!target) return null;
@@ -900,6 +943,8 @@ export default function StockBreakdownDrawer({
     <StockBreakdownPanel
       key={`${target.type}:${target.itemId}`}
       target={target}
+      details={details ?? null}
+      onEdit={onEdit}
       onClose={onClose}
     />
   );
@@ -907,9 +952,13 @@ export default function StockBreakdownDrawer({
 
 function StockBreakdownPanel({
   target,
+  details,
+  onEdit,
   onClose,
 }: {
   target: StockBreakdownTarget;
+  details: ProductDetails | null;
+  onEdit?: () => void;
   onClose: () => void;
 }) {
   const navigate = useNavigate();
@@ -1032,13 +1081,18 @@ function StockBreakdownPanel({
                   sub={header.uom || undefined}
                   title={header.qtyNote ?? undefined}
                 />
+                {/* The Finished Products grid above this drawer already calls
+                    these two numbers "Available · Reserved". One thing must not
+                    have two names on two screens, so the panel follows the
+                    grid — free stock first, then what a customer document has
+                    already claimed. */}
                 <Stat
-                  label="Assigned · Free"
+                  label="Available · Reserved"
                   value={
                     header.assignedQty === null || header.freeQty === null ? (
                       <Dash />
                     ) : (
-                      `${header.assignedQty} / ${header.freeQty}`
+                      `${header.freeQty} / ${header.assignedQty}`
                     )
                   }
                 />
@@ -1065,43 +1119,49 @@ function StockBreakdownPanel({
                 <Notice key={n.key} tone={n.tone}>{n.text}</Notice>
               ))}
 
-              {/* 2 — Stock lots.
-                  WIP gets a different heading because it has no lots: what it
-                  has is the job cards that made the item. Calling those "stock
-                  lots" would imply a FIFO layer that does not exist. */}
-              <section>
-                <Eyebrow>
-                  {target.type === "WIP"
-                    ? `Job cards that made this (${data?.lots.length ?? 0}) — oldest first, WIP has no cost layers so these are the work, not lots`
-                    : `Stock lots (${data?.lots.length ?? 0}) — oldest first, consumed first on the next DO`}
-                </Eyebrow>
-                <TableCard>
-                  {target.type === "RM" && (
-                    <RmLotsTable
-                      lots={(data?.lots ?? []) as RmLot[]}
-                      onNavigate={go}
-                    />
-                  )}
-                  {target.type === "FG" && (
-                    <FgLotsTable
-                      lots={(data?.lots ?? []) as FgLot[]}
-                      onNavigate={go}
-                    />
-                  )}
-                  {target.type === "WIP" && (
-                    <WipLotsTable
-                      lots={(data?.lots ?? []) as WipLot[]}
-                      onNavigate={go}
-                    />
-                  )}
-                </TableCard>
-              </section>
+              {/* 2 — The product's own details, for a catalogued FG row. */}
+              {details && <ProductDetailsSection details={details} onEdit={onEdit} />}
 
-              {/* 3 — Movements, newest first. ONE collapsible section, as in
-                  Houzs — but the IN and OUT rows keep their own column sets,
-                  because a receipt and an issue answer different questions
-                  (which GRN and supplier vs which production order, department
-                  and who took it) and the owner asked for both by name.
+              {/* 3 — Receipts / job cards.
+                  RM: the FIFO layers AND the inbound movements that created
+                  them, merged into one table — see RmReceiptsTable.
+                  WIP: no lots at all; what it has is the job cards that made
+                  the item, and calling those "stock lots" would imply a FIFO
+                  layer that does not exist.
+                  FG: nothing here. A finished good has no cost layers worth
+                  listing as stock — it has completions and dispatches, which
+                  are the two tables below. The per-piece list moved to a
+                  collapsed section at the foot of the panel. */}
+              {target.type !== "FG" && (
+                <section>
+                  <Eyebrow>
+                    {target.type === "WIP"
+                      ? `Job cards that made this (${data?.lots.length ?? 0}) — oldest first, WIP has no cost layers so these are the work, not lots`
+                      : `Receipts & stock lots (${data?.lots.length ?? 0}) — oldest first, consumed first on the next issue`}
+                  </Eyebrow>
+                  <TableCard>
+                    {target.type === "RM" && (
+                      <RmReceiptsTable
+                        lots={(data?.lots ?? []) as RmLot[]}
+                        onNavigate={go}
+                      />
+                    )}
+                    {target.type === "WIP" && (
+                      <WipLotsTable
+                        lots={(data?.lots ?? []) as WipLot[]}
+                        onNavigate={go}
+                      />
+                    )}
+                  </TableCard>
+                </section>
+              )}
+
+              {/* 4 — Movements, newest first.
+                  RM shows only the OUTBOUND half: its receipts are the merged
+                  table above, and repeating them here is exactly the duplicate
+                  that was removed.
+                  FG shows both, with the sparse column sets the owner asked for
+                  by name.
                   WIP is not split: every row is the same kind of event, so a
                   second table headed "Stock issued" holding nothing would read
                   as "nothing has been issued" rather than "issues are not
@@ -1111,50 +1171,71 @@ function StockBreakdownPanel({
                   open={sections.movements}
                   onClick={() => toggle("movements")}
                 >
-                  Movements ({movements.length}) — every stock change for this item
+                  {target.type === "RM"
+                    ? `Movements out (${outRows.length}) — material leaving stock`
+                    : `Movements (${movements.length}) — every stock change for this item`}
                 </SectionToggle>
                 {sections.movements && (
                   <>
-                    <TableCard>
-                      {target.type !== "WIP" && (
-                        <div className="flex items-center gap-1.5 px-3 pt-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-[#3F6B3F]">
-                          <ArrowDownToLine className="h-3.5 w-3.5" /> Stock received (
-                          {inRows.length})
-                        </div>
-                      )}
-                      {target.type === "RM" && <RmInTable rows={inRows} onNavigate={go} />}
-                      {target.type === "FG" && <FgInTable rows={inRows} onNavigate={go} />}
-                      {target.type === "WIP" && (
-                        <WipMovementsTable rows={movements} onNavigate={go} />
-                      )}
-                    </TableCard>
+                    {target.type !== "RM" && (
+                      <TableCard>
+                        {target.type !== "WIP" && (
+                          <div className="flex items-center gap-1.5 px-3 pt-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-[#3F6B3F]">
+                            <ArrowDownToLine className="h-3.5 w-3.5" /> Movements in (
+                            {inRows.length})
+                          </div>
+                        )}
+                        {target.type === "FG" && <FgInTable rows={inRows} onNavigate={go} />}
+                        {target.type === "WIP" && (
+                          <WipMovementsTable rows={movements} onNavigate={go} />
+                        )}
+                      </TableCard>
+                    )}
 
                     {target.type !== "WIP" && (
-                      <TableCard>
-                        <div className="flex items-center gap-1.5 px-3 pt-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-[#9A3A2D]">
-                          <ArrowUpFromLine className="h-3.5 w-3.5" /> Stock issued (
-                          {outRows.length})
-                        </div>
-                        {target.type === "RM" && <RmOutTable rows={outRows} onNavigate={go} />}
-                        {target.type === "FG" && <FgOutTable rows={outRows} onNavigate={go} />}
-                      </TableCard>
+                      <>
+                        <TableCard>
+                          <div className="flex items-center gap-1.5 px-3 pt-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-[#9A3A2D]">
+                            <ArrowUpFromLine className="h-3.5 w-3.5" /> Movements out (
+                            {outRows.length})
+                          </div>
+                          {target.type === "RM" && <RmOutTable rows={outRows} onNavigate={go} />}
+                          {target.type === "FG" && <FgOutTable rows={outRows} onNavigate={go} />}
+                        </TableCard>
+                        {/* Empty here is CORRECT, not missing data, and saying
+                            so is the difference between a gap somebody chases
+                            and a step nobody has built yet. */}
+                        {target.type === "RM" && outRows.length === 0 && (
+                          <p className="mt-1 text-[11px] leading-relaxed text-[#6B7280]">
+                            There is no material-requisition step in the system
+                            yet, so nothing is written here. Today a raw material
+                            leaves stock at the moment a job consumes it, and
+                            those consumptions are listed under COGS below.
+                          </p>
+                        )}
+                      </>
                     )}
                   </>
                 )}
               </section>
 
-              {/* 4 — COGS */}
+              {/* 5 — COGS. Not shown for finished goods: every row would be one
+                  of the dispatches above, said twice. */}
+              {target.type !== "FG" && (
               <section>
                 <SectionToggle open={sections.cogs} onClick={() => toggle("cogs")}>
-                  COGS ({data?.cogs.length ?? 0}) — FIFO consumptions for this item
+                  COGS ({data?.cogs.length ?? 0}) — what was consumed, by whom, and on what
                 </SectionToggle>
                 {sections.cogs && (
+                <>
                 <TableCard>
                 <table className="w-full text-xs">
                   <thead className="bg-[#FAF8F5]">
                     <tr>
                       <th className={TH}>Consumed at</th>
-                      <th className={TH}>Source doc</th>
+                      <th className={TH}>Production order</th>
+                      <th className={TH}>Department</th>
+                      <th className={TH}>Consumed by</th>
                       <th className={THR}>Qty</th>
                       <th className={THR}>Unit cost</th>
                       <th className={THR}>Total cost</th>
@@ -1164,7 +1245,7 @@ function StockBreakdownPanel({
                   <tbody className="divide-y divide-[#F0EDE9]">
                     {(data?.cogs ?? []).length === 0 && (
                       <EmptyRow
-                        span={6}
+                        span={8}
                         // "Nothing has been consumed yet" is true for a raw
                         // material nobody has drawn on. For WIP it would be a
                         // false statement about a real event: WIP IS consumed
@@ -1182,6 +1263,10 @@ function StockBreakdownPanel({
                         <td className={TD}>
                           <DocLink no={r.docNo} href={r.docHref} onNavigate={go} />
                         </td>
+                        <td className={TD}><Txt value={r.department} /></td>
+                        <td className={`${TD} max-w-[180px] truncate`} title={r.consumedByName ?? ""}>
+                          <Txt value={r.consumedByName} />
+                        </td>
                         <td className={TDR}><Qty value={r.qty} /></td>
                         <td className={TDR}><Money value={r.unitCostSen} /></td>
                         <td className={TDR}><Money value={r.totalCostSen} /></td>
@@ -1193,8 +1278,47 @@ function StockBreakdownPanel({
                   </tbody>
                 </table>
                 </TableCard>
+                {/* Why two of those columns are empty. The consumption is
+                    booked against the production order by the BOM cascade, and
+                    that insert names neither a department nor a person — so the
+                    columns are here for the day the requisition step records
+                    them, and until then they say nothing rather than guess. */}
+                {target.type === "RM" && (data?.cogs ?? []).length > 0 && (
+                  <p className="mt-1 text-[11px] leading-relaxed text-[#6B7280]">
+                    A consumption is written when the job that uses the material
+                    completes, booked against its production order. The ledger
+                    row records no department and no worker, so those two columns
+                    are empty on every row here — not because nobody used it.
+                  </p>
+                )}
+                </>
                 )}
               </section>
+              )}
+
+              {/* 6 — Pieces on hand. The finished-goods panel is the two
+                  movement tables above; this is the only place the individual
+                  serials, their claiming sales order and their status can be
+                  seen, and it is also where the Age and Available · Reserved
+                  figures at the top come from. Folded away rather than deleted,
+                  and closed by default so it does not reassert itself as the
+                  section the owner asked to remove. */}
+              {target.type === "FG" && (
+                <section>
+                  <SectionToggle open={sections.pieces} onClick={() => toggle("pieces")}>
+                    Pieces on hand ({data?.lots.length ?? 0}) — the individual
+                    serials behind the figures above
+                  </SectionToggle>
+                  {sections.pieces && (
+                    <TableCard>
+                      <FgLotsTable
+                        lots={(data?.lots ?? []) as FgLot[]}
+                        onNavigate={go}
+                      />
+                    </TableCard>
+                  )}
+                </section>
+              )}
             </>
           )}
         </div>

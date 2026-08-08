@@ -432,6 +432,8 @@ const {
   toggleBreakdownSection,
   DEFAULT_BREAKDOWN_SECTIONS,
   panelNotices,
+  mergeRmReceipts,
+  fgProductDetails,
 } = await import(
   pathToFileURL(resolve(process.cwd(), "src/lib/stock-breakdown.ts")).href
 );
@@ -443,6 +445,10 @@ const inventoryPageSrc = readFileSync(
 );
 const drawerSrc = readFileSync(
   resolve(process.cwd(), "src/pages/inventory/StockBreakdownDrawer.tsx"),
+  "utf8",
+);
+const routeSrc = readFileSync(
+  resolve(process.cwd(), "src/api/routes/stock-breakdown.ts"),
   "utf8",
 );
 
@@ -494,20 +500,32 @@ test("a double-click still edits: the row click is deferred and cancellable", ()
 });
 
 test("collapsing one section does not touch the other, and both start open", () => {
-  assert.deepEqual(DEFAULT_BREAKDOWN_SECTIONS, { movements: true, cogs: true });
+  // `pieces` — the finished-goods per-serial list — starts CLOSED: the owner
+  // asked for that section to go, and it is kept one click away rather than
+  // deleted or reasserted.
+  assert.deepEqual(DEFAULT_BREAKDOWN_SECTIONS, {
+    movements: true,
+    cogs: true,
+    pieces: false,
+  });
 
   const closedMovements = toggleBreakdownSection(DEFAULT_BREAKDOWN_SECTIONS, "movements");
   assert.equal(closedMovements.movements, false);
   assert.equal(closedMovements.cogs, true, "closing Movements must leave COGS open");
 
   const closedBoth = toggleBreakdownSection(closedMovements, "cogs");
-  assert.deepEqual(closedBoth, { movements: false, cogs: false });
+  assert.deepEqual(closedBoth, { movements: false, cogs: false, pieces: false });
+
+  // A third section changes nothing about the other two.
+  const withPieces = toggleBreakdownSection(closedBoth, "pieces");
+  assert.deepEqual(withPieces, { movements: false, cogs: false, pieces: true });
 
   // Reopening restores it — the state says what is OPEN, it never caches what
   // was rendered, so nothing can be permanently lost by collapsing.
   const reopened = toggleBreakdownSection(closedBoth, "movements");
   assert.equal(reopened.movements, true);
   assert.equal(reopened.cogs, false);
+  assert.equal(reopened.pieces, false);
   assert.deepEqual(
     toggleBreakdownSection(reopened, "movements"),
     closedBoth,
@@ -558,4 +576,292 @@ test("no column is rendered that this system has no data for", () => {
   // there is no warehouses table. Houzs leads its lot table with Warehouse; a
   // column of em dashes reads as missing data rather than an absent concept.
   assert.doesNotMatch(drawerSrc, /<th className=\{TH\}>Warehouse<\/th>/);
+});
+
+// ---------------------------------------------------------------------------
+// RM: the lots and the inbound movements are ONE list (2026-08-08)
+//
+// They were two sections showing the same GRN receipts — same dates, same
+// quantities, same costs — fetched down two different paths. The merge exists
+// so there is one list; these tests exist so the merge cannot quietly lose a
+// row from either side, which is the only way a merge can be worse than the
+// duplication it replaces.
+// ---------------------------------------------------------------------------
+function lot(id, date, over = {}) {
+  return {
+    kind: "RM_LOT",
+    id,
+    warehouse: null,
+    attributes: null,
+    qty: 10,
+    originalQty: 10,
+    consumedQty: 0,
+    unitCostSen: 500,
+    valueSen: 5000,
+    source: "GRN",
+    grnNo: "GRN-1",
+    grnHref: null,
+    purchaseOrderNo: null,
+    purchaseOrderHref: null,
+    supplierName: null,
+    receivedDate: date,
+    ageDays: null,
+    hasLot: true,
+    movementId: null,
+    balanceAfter: null,
+    ...over,
+  };
+}
+
+test("a lot and the movement that created it become ONE row, carrying the balance", () => {
+  const lots = [lot("rmb-grn-a-1", "2026-01-02")];
+  const movements = withRunningBalance(
+    [mv("2026-01-02", "IN", 10, { batchId: "rmb-grn-a-1" })],
+    reconciliationOf("RM", [{ direction: "IN" }]),
+  );
+
+  const merged = mergeRmReceipts(lots, movements);
+  assert.equal(merged.length, 1, "one receipt is one row, not two");
+  assert.equal(merged[0].hasLot, true);
+  assert.equal(merged[0].qty, 10, "the FIFO layer's remaining quantity survives");
+  assert.equal(merged[0].balanceAfter, 10, "and so does the derived running balance");
+  assert.equal(merged[0].movementId, movements[0].id);
+});
+
+test("an opening lot with no ledger row survives the merge, with no balance", () => {
+  // 278 of 279 materials on prod: the opening stock was seeded straight into
+  // rm_batches at cut-over and never entered the cost ledger. Dropping those
+  // rows would delete most of the shelf; inventing a balance for them would be
+  // worse.
+  const lots = [lot("rmb-opening-1", "2025-12-01", { source: "OPENING", qty: 1778, originalQty: 1778 })];
+  const merged = mergeRmReceipts(lots, []);
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].qty, 1778, "quantities are untouched");
+  assert.equal(merged[0].balanceAfter, null, "no ledger row means no balance to state");
+  assert.equal(merged[0].movementId, null);
+});
+
+test("a ledger receipt whose FIFO layer is gone survives too, with no remaining qty", () => {
+  const movements = withRunningBalance(
+    [mv("2026-02-01", "IN", 12, { batchId: "rmb-vanished" })],
+    reconciliationOf("RM", [{ direction: "IN" }]),
+  );
+  const merged = mergeRmReceipts([], movements);
+
+  assert.equal(merged.length, 1, "a receipt is never dropped because its lot is not there");
+  assert.equal(merged[0].hasLot, false);
+  assert.equal(merged[0].originalQty, 12, "what came in is known");
+  assert.equal(
+    merged[0].qty,
+    null,
+    "what is LEFT of an absent layer is unknown — null, never zero, which would claim it was consumed",
+  );
+  assert.equal(
+    merged[0].valueSen,
+    null,
+    "and it contributes nothing to the value subtotal rather than the price it was bought at",
+  );
+  assert.equal(merged[0].balanceAfter, 12);
+});
+
+test("the merge loses nothing from either side and reads oldest first", () => {
+  const lots = [
+    lot("rmb-grn-b-1", "2026-03-05"),
+    lot("rmb-opening-1", "2025-11-01", { source: "OPENING" }),
+    lot("rmb-grn-a-1", "2026-01-02"),
+  ];
+  const movements = withRunningBalance(
+    [
+      mv("2026-01-02", "IN", 10, { batchId: "rmb-grn-a-1" }),
+      mv("2026-03-05", "IN", 10, { batchId: "rmb-grn-b-1" }),
+      mv("2026-04-01", "IN", 4, { batchId: "rmb-gone" }),
+      mv("2026-04-02", "OUT", 3, { batchId: "rmb-grn-a-1" }),
+    ],
+    reconciliationOf("RM", [{ direction: "IN" }, { direction: "OUT" }]),
+  );
+
+  const merged = mergeRmReceipts(lots, movements);
+  // 3 lots + 1 inbound movement with no lot. The OUTBOUND row is not a receipt
+  // and belongs to Movements out, so it is not here.
+  assert.equal(merged.length, 4);
+  assert.deepEqual(
+    merged.map((r) => r.receivedDate),
+    ["2025-11-01", "2026-01-02", "2026-03-05", "2026-04-01"],
+    "oldest first — the order the next issue will consume them in",
+  );
+  assert.equal(merged.filter((r) => r.hasLot).length, 3);
+  assert.equal(merged.filter((r) => !r.hasLot).length, 1);
+});
+
+test("one movement cannot claim two lots, and a second claim keeps its own row", () => {
+  // Two ledger rows against one batch id: the first (oldest) is the receipt
+  // that made the lot; the second is still a real ledger row and gets a row of
+  // its own rather than overwriting the first or disappearing.
+  const lots = [lot("rmb-grn-a-1", "2026-01-02")];
+  const movements = withRunningBalance(
+    [
+      mv("2026-01-02", "IN", 10, { batchId: "rmb-grn-a-1" }),
+      mv("2026-01-09", "IN", 2, { batchId: "rmb-grn-a-1" }),
+    ],
+    reconciliationOf("RM", [{ direction: "IN" }, { direction: "IN" }]),
+  );
+
+  const merged = mergeRmReceipts(lots, movements);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].hasLot, true);
+  assert.equal(merged[1].hasLot, false);
+  assert.equal(merged[1].originalQty, 2);
+});
+
+test("the merged RM table is what the panel renders, and the duplicate is gone", () => {
+  // One section, and no second inbound table to drift away from it.
+  assert.match(drawerSrc, /function RmReceiptsTable\(/);
+  assert.doesNotMatch(drawerSrc, /function RmInTable\(/);
+  assert.match(drawerSrc, /Receipts & stock lots/);
+  // Movements out stays, empty and explained — it is the step that does not
+  // exist yet, not a step that failed to record anything.
+  assert.match(drawerSrc, /No outbound movements\./);
+  assert.match(drawerSrc, /no material-requisition step in the system/i);
+});
+
+// ---------------------------------------------------------------------------
+// COGS says who used it, and on what
+// ---------------------------------------------------------------------------
+
+test("COGS carries the department and the person, and shows an em dash when the ledger has neither", () => {
+  // The columns exist for the day a requisition step records them. Rendering
+  // them empty is the honest state; omitting them would hide that the ledger
+  // does not know.
+  assert.match(drawerSrc, /<th className=\{TH\}>Department<\/th>/);
+  assert.match(drawerSrc, /<th className=\{TH\}>Consumed by<\/th>/);
+  assert.match(drawerSrc, /<Txt value=\{r\.department\} \/>/);
+  assert.match(drawerSrc, /value=\{r\.consumedByName\}/);
+  // Txt is the one place an absent value renders, and it renders an em dash.
+  assert.match(drawerSrc, /function Txt\(\{ value \}/);
+
+  // And the route reads the worker off the ledger rather than guessing at one.
+  assert.match(routeSrc, /LEFT JOIN workers w\s+ON w\.id\s+= cl\.workerId/);
+  assert.match(routeSrc, /consumedByName: src\?\.workerName \?\? null/);
+});
+
+// ---------------------------------------------------------------------------
+// FG: two movement tables, no lots section, no COGS (2026-08-08)
+// ---------------------------------------------------------------------------
+
+test("the finished-goods panel is two movement tables with the columns asked for", () => {
+  assert.match(drawerSrc, /<th className=\{TH\}>Completed by dept<\/th>/);
+  assert.match(drawerSrc, /<th className=\{TH\}>Completed by<\/th>/);
+  assert.match(drawerSrc, /<th className=\{TH\}>Dispatched<\/th>/);
+  // The per-piece list is kept and folded away, not deleted: it is the only
+  // per-serial view and the source of the Age and Available · Reserved figures.
+  assert.match(drawerSrc, /Pieces on hand \(/);
+  assert.match(drawerSrc, /sections\.pieces/);
+});
+
+test("'who completed it' is the upholsterer, not the packer", () => {
+  // A piece is a finished good the moment it is upholstered; packing happens
+  // to something that is already stock. Answering with the packer would answer
+  // a different question from the one the column asks.
+  assert.match(routeSrc, /u\.upholsteredByName AS "workerName"/);
+  assert.doesNotMatch(routeSrc, /u\.packerName/, "the packer is not read at all");
+  // And the department is the one that makes a piece finished goods — the same
+  // rule deriveFGStock uses, not a hardcoded label on the row.
+  assert.match(routeSrc, /j\.departmentCode = 'UPHOLSTERY'/);
+});
+
+test("the panel and the grid call the same two numbers by the same name", () => {
+  assert.match(drawerSrc, /label="Available · Reserved"/);
+  assert.doesNotMatch(drawerSrc, /Assigned · Free/);
+  assert.match(inventoryPageSrc, /Available · Reserved/);
+});
+
+// ---------------------------------------------------------------------------
+// The product's details live in the panel, and editing still works
+// ---------------------------------------------------------------------------
+
+test("a catalogued product folds its own details into the panel", () => {
+  const details = fgProductDetails({
+    id: "prod-40",
+    category: "BEDFRAME",
+    baseModel: "2050(A)",
+    sizeCode: "K",
+    sizeLabel: "6FT",
+    description: "",
+    basePriceSen: 250000,
+    price1Sen: null,
+    unitM3: 0.69,
+    fabricUsage: 6,
+    skuCode: "5530-1NA",
+    fabricColor: null,
+    subAssemblies: [{ code: "X" }],
+  });
+
+  const byLabel = Object.fromEntries(details.fields.map((f) => [f.label, f]));
+  assert.equal(byLabel["Category"].value, "BEDFRAME");
+  assert.equal(byLabel["Size label"].value, "6FT");
+  // Money is integer sen and stays integer sen — the panel formats it.
+  assert.deepEqual(byLabel["Base price"], {
+    label: "Base price",
+    kind: "money",
+    valueSen: 250000,
+  });
+  // An absent price is NULL, not 0: zero is a price, and a free bedframe is a
+  // different claim from an unpriced one.
+  assert.equal(byLabel["Price 1"].valueSen, null);
+  assert.equal(byLabel["Description"].value, null, "an empty string is an absent value");
+  assert.equal(byLabel["Fabric colour"].value, null);
+
+  // What the panel does NOT show is named rather than silently dropped.
+  assert.deepEqual(details.advanced, ["Sub-assemblies"]);
+
+  // Code and name are the panel's title bar; repeating them would be noise.
+  assert.equal(byLabel["Code"], undefined);
+  assert.equal(byLabel["Name"], undefined);
+});
+
+test("an off-catalogue FG row gets no details section rather than a shell of zeros", () => {
+  // The FG grid synthesises `fg-dyn-*` rows from finished production orders
+  // whose product was never catalogued. Their prices are placeholders nobody
+  // entered; rendering them as a product record would present them as facts.
+  assert.equal(fgProductDetails({ id: "fg-dyn-2050(A)-(K)", basePriceSen: 0 }), null);
+  assert.equal(fgProductDetails(null), null);
+});
+
+test("editing a product is still reachable, and from inside the panel", () => {
+  // Losing the ability to edit a product would be far worse than a busy panel.
+  // The drawer offers it; the page hands it the dialog that has always saved.
+  assert.match(drawerSrc, /Edit product/);
+  assert.match(inventoryPageSrc, /onEdit=\{/);
+  assert.match(inventoryPageSrc, /setReopenBreakdownAfterEdit\(breakdownTarget\)/);
+  assert.match(inventoryPageSrc, /Save Product/, "the dialog still saves");
+  // And the kebab keeps a direct Edit on the two tabs that can write.
+  assert.match(inventoryPageSrc, /\{ label: "Edit", action: \(row: FGItem\)/);
+  assert.match(inventoryPageSrc, /\{ label: "Edit", action: \(row: RawMaterial\)/);
+});
+
+test("the duplicate Source Production Orders table is gone from the dialog", () => {
+  // It listed the production orders that produced this SKU — the same ones the
+  // panel's inbound movements list, from a different query. Two lists of one
+  // fact eventually disagree.
+  assert.doesNotMatch(inventoryPageSrc, /Source Production Orders/);
+  assert.doesNotMatch(
+    inventoryPageSrc,
+    /fetch\(\s*`\/api\/inventory\/fg-source/,
+    "and nothing fetches the second list any more",
+  );
+});
+
+test("the kebab no longer offers a second door to the panel", () => {
+  // A row click opens it; "Stock breakdown" as a menu item was a second way in
+  // to the thing being opened. "View" went with it on the tabs where it called
+  // the same handler as "Edit" — one action wearing two labels.
+  assert.doesNotMatch(inventoryPageSrc, /label: "Stock breakdown"/);
+  assert.doesNotMatch(inventoryPageSrc, /\{ label: "View", action: \(row: FGItem\)/);
+  assert.doesNotMatch(inventoryPageSrc, /\{ label: "View", action: \(row: RawMaterial\)/);
+  // WIP keeps View: its dialog shows the grid's own derivation, which is not
+  // what the panel's server-side job cards show.
+  assert.match(inventoryPageSrc, /\{ label: "View", action: \(row: WIPItem\)/);
+  // Delete has no equivalent inside a read-only panel, so it stays.
+  assert.match(inventoryPageSrc, /\{ label: "Delete", action: \(row: FGItem\)/);
 });

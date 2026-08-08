@@ -3466,3 +3466,44 @@ July's labour: 9 legs, **all dated 2026-07-31**, August empty, net
 May's production salary is unposted (no ruling yet — owner: 「5月的不需要先」).
 August is mid-month. RM/unit stays unreliable until the duplicate-completion
 defect is fixed.
+
+---
+
+## 2026-08-08 — Inventory: the row opens ONE panel
+
+Owner, three screenshots side by side: the Stock Breakdown drawer, the row's ⋮
+menu, and the product edit dialog. 「它们两个已经粘在一起了，不是吗？那我点一下，
+它就可以打开第一张照片这样子。」 The dialog's *Source Production Orders* and the
+drawer's *Movements in* were the same production orders, fetched two ways.
+
+### Asks
+1. Fold the product's own details into the drawer, read-only. **Done** —
+   `fgProductDetails` renders the identity/spec fields from the SAME product
+   object the dialog fills its form from (not a second fetch), with the
+   advanced-configuration note. Off-catalogue `fg-dyn-*` rows get none.
+2. Keep editing reachable. **Done, via the existing dialog** — an *Edit product*
+   button in the panel opens it and the panel reopens after Save/Cancel. In-place
+   inputs would have meant a second save path to keep in step with the one that
+   already works.
+3. Drop *Source Production Orders* from the dialog. **Done.** The dialog is now
+   only the edit form. `/api/inventory/fg-source` has no frontend consumer left.
+4. Rationalise the ⋮ menu. **Done** — removed "Stock breakdown" (all three tabs)
+   and "View" (FG, RM: it called the same handler as "Edit"). Kept Edit, Delete,
+   Refresh, and WIP's View.
+5. RM: merge *Stock lots* and *Movements in*. **Done** — `mergeRmReceipts`, pure
+   and tested; nothing is dropped from either side (an opening lot with no ledger
+   row keeps its quantities and gets no balance; a receipt whose layer is gone
+   gets `qty: null`, never 0). Movements out kept and legitimately empty.
+6. RM COGS: department + consumed-by. **Done, both empty and explained** — the
+   `RM_ISSUE` insert (`consumeRawMaterialsForPO`, fired at FAB_CUT job-card
+   completion) names neither. Columns exist for the day the requisition step does.
+7. FG: two movement tables, no lots, no COGS; "Available · Reserved". **Done.**
+   "Completed by" = `fg_units.upholsteredByName` (not the packer); department off
+   the PO's UPHOLSTERY job card, the same rule `deriveFGStock` uses.
+
+### Open
+- The per-serial FG list is kept as a **collapsed** "Pieces on hand" section, not
+  deleted: it is the only per-serial view and where Age (FIFO) and
+  Available · Reserved come from. Owner to say whether it goes entirely.
+- `GET /api/inventory/fg-source` (`src/api/routes/inventory.ts`) is now unused by
+  the UI. Left in place — that file was outside this task's scope.

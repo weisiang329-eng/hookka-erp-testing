@@ -47,6 +47,8 @@ Read-mostly stock visibility across the three stages of manufacturing: **Finishe
 | Symbol / section | file:line | Role |
 |---|---|---|
 | `InventoryPage` | `src/pages/inventory/index.tsx:1009` | 3-tab grid host; `activeTab` at `:1012` |
+| `StockBreakdownDrawer` | `src/pages/inventory/StockBreakdownDrawer.tsx` | The per-item panel — opened by a ROW CLICK on any tab |
+| `mergeRmReceipts` / `fgProductDetails` | `src/lib/stock-breakdown.ts` | RM lots+inbound-movements merge; the FG product-details field list |
 | `deriveWIPFromPO` | `src/pages/inventory/index.tsx:300` | Client WIP derivation across dept stages |
 | `mergeSofaWIPSets` | `src/pages/inventory/index.tsx:523` | Collapse sofa WIPs to one row per (SO, fabric) |
 | `fgColumns` / `wipColumns` / `rmColumns` | `index.tsx:634 / 741 / 951` | Per-tab column defs |
@@ -78,6 +80,8 @@ Read-mostly stock visibility across the three stages of manufacturing: **Finishe
 - **`fg-stock` snapshot table is runtime-created** — migration files are inert on deploy, so the `CREATE TABLE IF NOT EXISTS` at `inventory.ts:624` is awaited before `withSnapshot`.
 - **`index.tsx` has a LOCAL `Product` type** differing from `@/types` Product — watch category typing under strict tsc.
 - **camelCase columns need a `column-rename-map.json` entry** or they 400; prefer snake_case for new inventory columns.
+- **ONE row click = ONE panel (owner 2026-08-08).** The Stock Breakdown drawer now also carries a finished good's own catalogue details, read-only, with an **Edit product** button that opens the existing dialog and reopens the drawer afterwards. The dialog's duplicate "Source Production Orders" table is deleted (the panel's inbound movements are the same production orders, from the cost ledger instead of `/api/inventory/fg-source` — which now has no frontend consumer). The kebab lost "Stock breakdown" on all three tabs and "View" on FG/RM (it called the same handler as "Edit"); Edit / Delete / Refresh stay, and WIP keeps "View" because its dialog shows the GRID's own derivation, not the panel's server-side job cards.
+- **The three item types are NOT the same panel.** RM merges its FIFO lots with its inbound movements into one "Receipts & stock lots" table (`mergeRmReceipts`, pure + tested — nothing is dropped from either side) and keeps a deliberately empty Movements out; FG has NO lots section and NO COGS, just Movements in / Movements out plus a collapsed "Pieces on hand" per-serial list; WIP is unchanged. Full column lists and the reasoning are in [[CODEBASE-MAP]] under Inventory.
 
 ## Common tasks (mini-playbook)
 - **Add an RM field** → snake_case column (+ rename-map if camelCase); persist in `raw-materials.ts` POST (`:217`)/PUT (`:318`); surface in `rowToApi` (`:99`) and `rmColumns` (`index.tsx:951`).

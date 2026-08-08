@@ -40,6 +40,7 @@ import {
 import StockBreakdownDrawer from "./StockBreakdownDrawer";
 import {
   fgBreakdownTarget,
+  fgProductDetails,
   rmBreakdownTarget,
   wipBreakdownTarget,
   type StockBreakdownTarget,
@@ -1718,22 +1719,12 @@ export default function InventoryPage() {
   const [editFG, setEditFG] = useState<FGItem | null>(null);
   const [editFGForm, setEditFGForm] = useState<CreateFGForm>(EMPTY_FG_FORM);
   const [editFGSaving, setEditFGSaving] = useState(false);
-  // FG source-PO drilldown — populated when the dialog opens (2026-04-27).
-  // Lists every production_order that produced this FG, qty + mfdDate per
-  // PO. Mirrors the WIP detail dialog's "Job Cards" section.
-  type FGSource = {
-    poId: string;
-    poNo: string;
-    soNo: string;
-    customerName: string;
-    qty: number;
-    mfdDate: string;
-    statusCounts: Record<string, number>;
-  };
-  const [fgSources, setFgSources] = useState<FGSource[]>([]);
-  const [fgSourcesLoading, setFgSourcesLoading] = useState(false);
-
-  const handleDoubleClickFG = async (row: FGItem) => {
+  // The FG source-PO drilldown that used to live here (2026-04-27) is GONE
+  // (2026-08-08). It fetched /api/inventory/fg-source/:productCode to list the
+  // production orders that produced this SKU — the same production orders the
+  // Stock Breakdown panel's inbound movements list from the cost ledger. One
+  // fact, two queries, and only one of them reconciles.
+  const handleDoubleClickFG = (row: FGItem) => {
     setEditFG(row);
     // Pre-populate every editable field. Mirrors the Create form so the
     // operator sees exactly the same surface for both flows.
@@ -1755,20 +1746,6 @@ export default function InventoryPage() {
       skuCode: row.skuCode || "",
       fabricColor: row.fabricColor || "",
     });
-    // Fire the source-PO lookup in the background so the dialog opens
-    // instantly and the table fills in when ready.
-    setFgSources([]);
-    setFgSourcesLoading(true);
-    try {
-      const res = await fetch(`/api/inventory/fg-source/${encodeURIComponent(row.code)}`);
-      const j = (await res.json().catch(() => null)) as
-        | { success?: boolean; sources?: FGSource[] }
-        | null;
-      setFgSources(j?.sources ?? []);
-    } catch {
-      setFgSources([]);
-    }
-    setFgSourcesLoading(false);
   };
   const [wipDetail, setWipDetail] = useState<WIPItem | null>(null);
   const handleDoubleClickWIP = (row: WIPItem) => { setWipDetail(row); };
@@ -1862,6 +1839,32 @@ export default function InventoryPage() {
   const [breakdownTarget, setBreakdownTarget] =
     useState<StockBreakdownTarget | null>(null);
 
+  // The catalogue row the panel's Product details section renders — the SAME
+  // object the edit dialog fills its form from, deliberately not a second
+  // fetch. Two reads of one product would be the very drift this merge exists
+  // to remove, and after a save the optimistic `setProducts` below refreshes
+  // both at once. Null for WIP/RM and for the off-catalogue `fg-dyn-*` rows the
+  // FG grid synthesises from production orders.
+  const breakdownProduct =
+    breakdownTarget?.type === "FG"
+      ? (fgItems.find((r) => r.id === breakdownTarget.itemId) ?? null)
+      : null;
+
+  // Editing happens in the dialog, not in the drawer: the dialog already owns
+  // the whole save path (field-by-field body building, the advanced-config
+  // passthrough, the optimistic row update), and growing a second edit surface
+  // in the panel would mean two of them to keep in step. So the drawer hands
+  // over and takes the panel back afterwards — remembered here.
+  const [reopenBreakdownAfterEdit, setReopenBreakdownAfterEdit] =
+    useState<StockBreakdownTarget | null>(null);
+  const closeEditFG = () => {
+    setEditFG(null);
+    if (reopenBreakdownAfterEdit) {
+      setBreakdownTarget(reopenBreakdownAfterEdit);
+      setReopenBreakdownAfterEdit(null);
+    }
+  };
+
   // CLICKING A ROW opens the breakdown (2026-08-08, owner: match Houzs, whose
   // list says so on the tin — "click a row for the breakdown"). The kebab item
   // stays for discoverability, but the row itself is the gesture.
@@ -1902,38 +1905,35 @@ export default function InventoryPage() {
     [],
   );
 
-  // Context menus per tab. Each Edit/View action opens the same dialog the
-  // double-click handler does — right-click was previously stubbed
-  // (`action: () => {}`) which made the menu look unresponsive to
-  // operators. Refresh hard-reloads after invalidating the relevant cache
-  // prefix so the next render fetches fresh data.
+  // Context menus per tab, rationalised 2026-08-08 now that a row CLICK opens
+  // the panel and the panel carries the product's details and its Edit button.
+  //
+  // GONE from all three: "Stock breakdown" (the row click is the gesture, and
+  // the item was a second door to the panel you are already opening) and "View"
+  // on the FG and RM tabs, which called the very same handler as "Edit" — one
+  // action wearing two labels, and the softer label was the lie.
+  //
+  // KEPT, and each for a reason the panel does not cover: Edit, because it is
+  // the only write path to a product or a material and burying the sole write
+  // action one level deeper than it was is not a rationalisation; Delete,
+  // because nothing in a read-only panel deletes a SKU; Refresh, because it
+  // busts the client cache, which no amount of reading does. WIP keeps "View" —
+  // its dialog shows the FE-derived rows the GRID counted, which is a different
+  // derivation from the panel's server-side job cards, and losing it would
+  // remove the only way to compare the two when they disagree.
   const fgContextMenu: ContextMenuItem[] = [
-    { label: "View", action: (row: FGItem) => { void handleDoubleClickFG(row); } },
-    { label: "Edit", action: (row: FGItem) => { void handleDoubleClickFG(row); } },
-    {
-      label: "Stock breakdown",
-      action: (row: FGItem) => setBreakdownTarget(fgBreakdownTarget(row)),
-    },
+    { label: "Edit", action: (row: FGItem) => { handleDoubleClickFG(row); } },
     { label: "Delete", action: (row: FGItem) => { void handleDeleteFG(row); } },
     { separator: true, label: "", action: () => {} },
     { label: "Refresh", action: () => { invalidateCachePrefix("/api/products"); invalidateCachePrefix("/api/inventory"); window.location.reload(); } },
   ];
   const wipContextMenu: ContextMenuItem[] = [
     { label: "View", action: (row: WIPItem) => { handleDoubleClickWIP(row); } },
-    {
-      label: "Stock breakdown",
-      action: (row: WIPItem) => setBreakdownTarget(wipBreakdownTarget(row)),
-    },
     { separator: true, label: "", action: () => {} },
     { label: "Refresh", action: () => { invalidateCachePrefix("/api/inventory"); window.location.reload(); } },
   ];
   const rmContextMenu: ContextMenuItem[] = [
-    { label: "View", action: (row: RawMaterial) => { void handleDoubleClickRM(row); } },
     { label: "Edit", action: (row: RawMaterial) => { void handleDoubleClickRM(row); } },
-    {
-      label: "Stock breakdown",
-      action: (row: RawMaterial) => setBreakdownTarget(rmBreakdownTarget(row)),
-    },
     { separator: true, label: "", action: () => {} },
     { label: "Refresh", action: () => { invalidateCachePrefix("/api/raw-materials"); invalidateCachePrefix("/api/inventory"); window.location.reload(); } },
   ];
@@ -2480,7 +2480,7 @@ export default function InventoryPage() {
                 virtualize
                 contextMenuItems={fgContextMenu}
                 onRowClick={(row) => openBreakdown(fgBreakdownTarget(row))}
-                onDoubleClick={(row) => { cancelPendingBreakdown(); void handleDoubleClickFG(row); }}
+                onDoubleClick={(row) => { cancelPendingBreakdown(); handleDoubleClickFG(row); }}
               />
             </CardContent>
           </Card>
@@ -2858,7 +2858,7 @@ export default function InventoryPage() {
                 <h2 className="text-lg font-bold text-[#111827]">{editFG.code}</h2>
                 <p className="text-xs text-gray-500">{editFG.name}</p>
               </div>
-              <button onClick={() => setEditFG(null)} className="p-1 hover:bg-gray-100 rounded">
+              <button onClick={closeEditFG} className="p-1 hover:bg-gray-100 rounded">
                 <X className="w-5 h-5 text-gray-400" />
               </button>
             </div>
@@ -2958,54 +2958,17 @@ export default function InventoryPage() {
                 </div>
               )}
 
-              {/* Source POs — which production orders produced this FG.
-                  Mirrors the WIP detail dialog's PO breakdown. Backend
-                  endpoint /api/inventory/fg-source/:productCode walks
-                  fg_units grouped by poId. */}
-              <div className="pt-2 border-t border-[#E2DDD8]">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm font-medium text-[#374151]">Source Production Orders</span>
-                  <span className="text-xs text-[#6B7280]">
-                    {fgSourcesLoading ? "loading…" : `${fgSources.length} PO(s)`}
-                  </span>
-                </div>
-                {fgSourcesLoading ? (
-                  <p className="text-xs text-[#9CA3AF] py-2">Looking up source POs…</p>
-                ) : fgSources.length === 0 ? (
-                  <p className="text-xs text-[#9CA3AF] py-2">No fg_units rows for this product yet.</p>
-                ) : (
-                  <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-[#E2DDD8]">
-                        <th className="text-left py-2 text-xs text-[#6B7280] font-medium">PO No</th>
-                        <th className="text-left py-2 text-xs text-[#6B7280] font-medium">SO No</th>
-                        <th className="text-left py-2 text-xs text-[#6B7280] font-medium">Customer</th>
-                        <th className="text-right py-2 text-xs text-[#6B7280] font-medium">Qty</th>
-                        <th className="text-right py-2 text-xs text-[#6B7280] font-medium">MFD Date</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {fgSources.map((s) => (
-                        <tr key={s.poId} className="border-b border-[#F0ECE9]">
-                          <td className="py-2 doc-number font-medium">{s.poNo || "—"}</td>
-                          <td className="py-2 doc-number text-xs text-[#6B7280]">{s.soNo || "—"}</td>
-                          <td className="py-2 text-xs text-[#374151]">{s.customerName || "—"}</td>
-                          <td className="py-2 text-right">{s.qty}</td>
-                          <td className="py-2 text-right text-xs text-[#6B7280]">
-                            {s.mfdDate?.split("T")[0] || "—"}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  </div>
-                )}
-              </div>
+              {/* The source-PO table that sat here is GONE (2026-08-08).
+                  It listed the production orders that produced this SKU, which
+                  is exactly what the Stock Breakdown panel's inbound movements
+                  list — the same facts down two different queries
+                  (/api/inventory/fg-source vs the cost ledger). Two lists of one
+                  thing eventually disagree, and the ledger is the one that can
+                  be reconciled. This dialog is now only the edit form. */}
             </div>
 
             <div className="px-6 py-4 border-t border-[#E2DDD8] flex justify-end gap-2">
-              <Button variant="outline" size="sm" onClick={() => setEditFG(null)} disabled={editFGSaving}>Cancel</Button>
+              <Button variant="outline" size="sm" onClick={closeEditFG} disabled={editFGSaving}>Cancel</Button>
               <Button
                 variant="primary"
                 size="sm"
@@ -3053,7 +3016,10 @@ export default function InventoryPage() {
                     invalidateCachePrefix("/api/products");
                     invalidateCachePrefix("/api/inventory");
                     toast.success(`Saved: ${editFGForm.code}`);
-                    setEditFG(null);
+                    // Back to the panel it was opened from, now showing the
+                    // values just saved — the details section reads the same
+                    // product object the optimistic update above replaced.
+                    closeEditFG();
                   } catch (err) {
                     toast.error(err instanceof Error ? err.message : "Failed to update product");
                   } finally {
@@ -3495,10 +3461,26 @@ export default function InventoryPage() {
         }}
       />
 
-      {/* Stock breakdown drawer — read-only, rendered last so it overlays the
+      {/* Stock breakdown drawer — ONE panel per row: the stock ledger and, for
+          a catalogued finished good, the product's own details with an Edit
+          button that opens the dialog below. Rendered last so it overlays the
           edit dialogs rather than fighting them for the same z-index. */}
       <StockBreakdownDrawer
         target={breakdownTarget}
+        details={fgProductDetails(breakdownProduct)}
+        onEdit={
+          breakdownProduct
+            ? () => {
+                const row = breakdownProduct;
+                // The dialog is a separate overlay, so the drawer steps aside
+                // and comes back when the edit finishes — otherwise the two
+                // stack and the operator edits underneath a panel.
+                setReopenBreakdownAfterEdit(breakdownTarget);
+                setBreakdownTarget(null);
+                handleDoubleClickFG(row);
+              }
+            : undefined
+        }
         onClose={() => setBreakdownTarget(null)}
       />
     </div>

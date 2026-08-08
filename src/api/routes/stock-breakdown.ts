@@ -41,6 +41,7 @@ import {
   fgUnitCostSen,
   fifoAge,
   ledgerVsOnHand,
+  mergeRmReceipts,
   piecesNote,
   reconciliationOf,
   roundQty,
@@ -68,6 +69,7 @@ const ITEM_TYPES: StockItemType[] = ["RM", "WIP", "FG"];
 // ---------------------------------------------------------------------------
 type LedgerRow = {
   id: string;
+  workerName?: string | null;
   date: string;
   type: string;
   direction: string;
@@ -272,10 +274,17 @@ async function buildRmBreakdown(
                 g.grnNumber      AS "grnNo",
                 g.poId           AS "grnPoId",
                 g.poNumber       AS "grnPoNo",
-                g.supplierName   AS "grnSupplierName"
+                g.supplierName   AS "grnSupplierName",
+                w.name           AS "workerName"
            FROM cost_ledger cl
            LEFT JOIN production_orders po ON po.id = cl.refId
            LEFT JOIN grns g               ON g.id  = cl.refId
+           -- Who used it. cl.workerId is NULL on every raw-material row on
+           -- prod (2,967 of them) because consumeRawMaterialsForPO does not
+           -- write the column at all — see the COGS note below. Joined anyway:
+           -- the column has to exist for the day the issue step records a
+           -- person, and a missing name must read as missing.
+           LEFT JOIN workers w            ON w.id  = cl.workerId
           WHERE cl.itemType = 'RM' AND cl.itemId = ?
           ORDER BY cl.date DESC, cl.id DESC`,
       )
@@ -285,6 +294,9 @@ async function buildRmBreakdown(
 
   const lotRows = lotRes.results ?? [];
   const ledgerRows = ledgerRes.results ?? [];
+  // Kept so the COGS rows can reach back to the ledger fields the movement
+  // model does not carry (the worker behind an issue).
+  const ledgerById = new Map(ledgerRows.map((r) => [r.id, r]));
 
   // --- lots ---------------------------------------------------------------
   const lots: RmLot[] = lotRows.map((b) => {
@@ -311,6 +323,12 @@ async function buildRmBreakdown(
       supplierName: b.grnSupplierName ?? null,
       receivedDate: b.receivedDate,
       ageDays: ageDays(b.receivedDate),
+      // Filled in by mergeRmReceipts once the ledger has been stamped with its
+      // running balance. Declared here so the shape of a lot is complete at the
+      // point it is built rather than half-built and patched later.
+      hasLot: true,
+      movementId: null,
+      balanceAfter: null,
     };
   });
   const lotById = new Map(lots.map((l) => [l.id, l]));
@@ -379,13 +397,38 @@ async function buildRmBreakdown(
   const reconciliation = reconciliationOf("RM", movements);
   const stamped = withRunningBalance(movements, reconciliation);
 
+  // --- receipts: the lots and their inbound movements, on ONE row ----------
+  // They were two sections listing the same GRN receipts down two different
+  // paths, and two lists of one fact only ever agree by luck. The merge is a
+  // pure function so the "nothing is dropped either way" property is testable.
+  const receipts = mergeRmReceipts(lots, stamped);
+
   // --- COGS ---------------------------------------------------------------
   // Every outbound movement is a FIFO consumption of a named lot; batchId says
   // which one, so the operator can see exactly which receipt paid for the job.
+  //
+  // WHAT WRITES ONE OF THESE ROWS, since the panel now claims to say who used
+  // the material and on what: `consumeRawMaterialsForPO`
+  // (src/api/lib/po-cost-cascade.ts), fired when the FAB_CUT job card of a
+  // production order completes (moved there from PO completion on 2026-05-07 —
+  // the metres leave the roll when the cutting happens), and again as a
+  // fallback at finished-goods completion. It resolves the BOM, FIFO-consumes
+  // `rm_batches`, and inserts one RM_ISSUE row per slice with
+  // refType='PRODUCTION_ORDER'.
+  //
+  // So: the production order is recorded, and the DEPARTMENT and the PERSON are
+  // not. The insert names neither — `workerId` is not in its column list, and
+  // no department is carried at all, because the row is booked against the
+  // order rather than the card that triggered it. Both columns are therefore
+  // null here, which the panel renders as an em dash and explains. Deriving
+  // "FAB_CUT" from the trigger would be a rule dressed up as a record: the
+  // finished-goods fallback path fires from somewhere else entirely, and the
+  // row itself does not know which one wrote it.
   const cogs: CogsRow[] = stamped
     .filter((m) => m.direction === "OUT")
     .map((m) => {
       const lot = m.batchId ? lotById.get(m.batchId) : undefined;
+      const src = ledgerById.get(m.id);
       return {
         id: m.id,
         consumedAt: m.date,
@@ -400,19 +443,23 @@ async function buildRmBreakdown(
           ? [lot.grnNo, lot.receivedDate?.slice(0, 10)].filter(Boolean).join(" · ") ||
             lot.id
           : (m.batchId ?? null),
+        department: null,
+        consumedByName: src?.workerName ?? null,
       };
     });
 
   // --- header -------------------------------------------------------------
-  const onHandQty = roundQty(lots.reduce((s, l) => s + l.qty, 0));
-  const totalValueSen = lots.reduce((s, l) => s + l.valueSen, 0);
+  const onHandQty = roundQty(lots.reduce((s, l) => s + (l.qty ?? 0), 0));
+  const totalValueSen = lots.reduce((s, l) => s + (l.valueSen ?? 0), 0);
   const openingSeedQty = roundQty(
     lotRows
       .filter((b) => b.source === "OPENING")
       .reduce((s, b) => s + num(b.originalQty), 0),
   );
   const { ageDays: oldestAgeDays, date: oldestLayerDate } = fifoAge(
-    lots.map((l) => ({ date: l.receivedDate, qty: l.qty })),
+    // Off the LOTS, not the merged list: a receipt with no surviving FIFO layer
+    // holds no stock, so it is not what the next issue will consume.
+    lots.map((l) => ({ date: l.receivedDate, qty: l.qty ?? 0 })),
   );
 
   return {
@@ -441,7 +488,9 @@ async function buildRmBreakdown(
         openingSeedQty,
       ),
     },
-    lots,
+    // The merged receipts ride in `lots` — for raw material a lot and its
+    // inbound movement are the same event, so there is one list, not two.
+    lots: receipts,
     movements: stamped,
     cogs,
   };
@@ -518,7 +567,7 @@ async function buildFgBreakdown(
     .first<{ id: string; code: string; name: string | null; category: string | null }>();
   if (!item) return null;
 
-  const [unitRes, ledgerRes, doSerialRes] = await Promise.all([
+  const [unitRes, ledgerRes, doSerialRes, deptRes, makerRes] = await Promise.all([
     // One row per piece, oldest first — the same FIFO order the lots table
     // claims at the top of the section.
     //
@@ -601,10 +650,64 @@ async function buildFgBreakdown(
       )
       .bind(itemId)
       .all<{ doId: string; unitSerial: string | null }>(),
+    // WHICH DEPARTMENT COMPLETED IT. The ledger row for a finished-goods
+    // completion is booked against the production order and names no
+    // department, so it is read off the job card that makes a piece a finished
+    // good — the UPHOLSTERY one. That is not a guess about this data: it is the
+    // SAME rule `deriveFGStock` (@/lib/fg-stock) uses to decide that a
+    // production order counts as stock at all, which is why the grid behind
+    // this drawer shows the row in the first place. A production order with no
+    // upholstery card (imports, backfills) yields nothing and renders as an em
+    // dash rather than borrowing another department's name.
+    db
+      .prepare(
+        `SELECT DISTINCT j.productionOrderId AS "poId",
+                j.departmentName             AS "deptName",
+                j.departmentCode             AS "deptCode"
+           FROM job_cards j
+          WHERE j.departmentCode = 'UPHOLSTERY'
+            AND j.productionOrderId IN (
+                  SELECT u.poId FROM fg_units u
+                    JOIN products p ON p.code = u.productCode
+                   WHERE p.id = ? AND u.poId IS NOT NULL)`,
+      )
+      .bind(itemId)
+      .all<{ poId: string; deptName: string | null; deptCode: string | null }>(),
+    // WHO COMPLETED IT. `fg_units.upholsteredByName` — the person recorded on
+    // the goods themselves at the moment they became finished goods.
+    // DELIBERATELY NOT `packerName`: packing is a later, separate step, and a
+    // piece was already a finished good before anybody packed it. Naming the
+    // packer here would answer a different question from the one the column
+    // asks.
+    db
+      .prepare(
+        `SELECT DISTINCT u.poId AS "poId", u.upholsteredByName AS "workerName"
+           FROM fg_units u
+           JOIN products p ON p.code = u.productCode
+          WHERE p.id = ?
+            AND u.poId IS NOT NULL
+            AND u.upholsteredByName IS NOT NULL
+          ORDER BY u.upholsteredByName ASC`,
+      )
+      .bind(itemId)
+      .all<{ poId: string; workerName: string | null }>(),
   ]);
 
   const unitRows = unitRes.results ?? [];
   const ledgerRows = ledgerRes.results ?? [];
+
+  const deptByPo = new Map<string, string>();
+  for (const r of deptRes.results ?? []) {
+    const name = r.deptName ?? r.deptCode;
+    if (r.poId && name) deptByPo.set(r.poId, name);
+  }
+  const makersByPo = new Map<string, string[]>();
+  for (const r of makerRes.results ?? []) {
+    if (!r.poId || !r.workerName) continue;
+    const list = makersByPo.get(r.poId) ?? [];
+    if (!list.includes(r.workerName)) list.push(r.workerName);
+    makersByPo.set(r.poId, list);
+  }
 
   const serialsByDo = new Map<string, string[]>();
   for (const r of doSerialRes.results ?? []) {
@@ -678,6 +781,16 @@ async function buildFgBreakdown(
       productionOrderHref: isIn
         ? sourceDocHref("PRODUCTION_ORDER", r.refId, { salesOrderId })
         : null,
+      // Who finished it and where — inbound only. A delivery is not completed
+      // by a department, so leaving these on an outbound row would invite the
+      // reading that the upholsterer shipped it.
+      department: isIn ? (deptByPo.get(r.refId ?? "") ?? null) : null,
+      // Several people can upholster the pieces of one production order; all of
+      // them are named. One name standing for four would be a quieter lie than
+      // an em dash.
+      takenByName: isIn
+        ? ((makersByPo.get(r.refId ?? "") ?? []).join(", ") || null)
+        : null,
       salesOrderNo: isIn ? r.prodSalesOrderNo : null,
       salesOrderHref: sourceDocHref("SALES_ORDER", salesOrderId),
       customerName: isIn ? r.prodCustomerName : r.doCustomerName,
@@ -691,6 +804,11 @@ async function buildFgBreakdown(
   const stamped = withRunningBalance(movements, reconciliation);
 
   // --- COGS ---------------------------------------------------------------
+  // NOT RENDERED for finished goods since 2026-08-08 (owner: "它不会有 COGS"),
+  // and rightly so — every row here is one of the outbound movements above,
+  // re-presented. It is still computed and returned because it is a true
+  // description of the ledger and costs no extra query; the panel decides what
+  // to show, not this file. If it is ever wanted back it is one section.
   const cogs: CogsRow[] = stamped
     .filter((m) => m.direction === "OUT")
     .map((m) => {

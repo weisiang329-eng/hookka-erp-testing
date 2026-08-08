@@ -82,7 +82,23 @@ export interface StockMovement {
   notes?: string | null;
 }
 
-/** A raw-material FIFO lot — one `rm_batches` row. */
+/**
+ * A raw-material RECEIPT — one `rm_batches` FIFO layer AND the inbound ledger
+ * movement that created it, on one row.
+ *
+ * They used to be two sections of the panel, "Stock lots" and the inbound half
+ * of "Movements", and on live data they listed the same receipts twice: same
+ * dates, same quantities, same unit costs, same GR numbers. For raw material
+ * there is no third possibility — every inbound movement IS the creation of a
+ * lot — so two lists fetched down two different paths could only ever agree by
+ * luck, and this codebase has spent enough time on lists that stopped agreeing.
+ *
+ * They are not quite one-to-one, and that is exactly why the merge is
+ * `mergeRmReceipts` rather than a join in SQL: the opening-balance layers were
+ * seeded straight into `rm_batches` at cut-over with no ledger row at all, so a
+ * lot can exist without a movement. Those rows keep their quantities and get no
+ * running balance, and `header.ledgerVsOnHand` explains the resulting gap.
+ */
 export interface RmLot {
   kind: "RM_LOT";
   id: string;
@@ -90,11 +106,18 @@ export interface RmLot {
   warehouse: string | null;
   /** Free-text descriptors carried on the lot (grade, colour, width…). */
   attributes: string | null;
-  qty: number;
+  /**
+   * Quantity still on hand in this layer. NULL — not zero — when the row is a
+   * ledger receipt with no surviving FIFO lot: nobody knows what is left of a
+   * layer that is not there, and zero would claim it had been consumed.
+   */
+  qty: number | null;
+  /** Quantity received. From the lot when there is one, else the movement. */
   originalQty: number;
-  consumedQty: number;
+  consumedQty: number | null;
   unitCostSen: number;
-  valueSen: number;
+  /** Value of what is LEFT in this layer. Null when there is no layer. */
+  valueSen: number | null;
   source: string;
   grnNo: string | null;
   grnHref: string | null;
@@ -103,6 +126,102 @@ export interface RmLot {
   supplierName: string | null;
   receivedDate: string | null;
   ageDays: number | null;
+
+  // --- the movement half of the merged row --------------------------------
+  /** False when no `rm_batches` layer backs this row (ledger receipt only). */
+  hasLot: boolean;
+  /** The inbound `cost_ledger` row that created it, when there is one. */
+  movementId: string | null;
+  /**
+   * DERIVED running balance as at that receipt, carried over from the movement
+   * ledger. Null when this receipt has no movement row — an opening seed never
+   * entered the ledger, so no balance can be stated for it.
+   */
+  balanceAfter: number | null;
+}
+
+/**
+ * Fold the inbound movement ledger into the FIFO lots, oldest first.
+ *
+ * NOTHING IS DROPPED, in either direction, and that is the whole contract:
+ *
+ *   • a lot with no inbound movement stays (the opening-balance layers, seeded
+ *     at cut-over with no ledger row — 278 of 279 materials on prod). It keeps
+ *     its quantities and gets no running balance;
+ *   • an inbound movement with no lot stays too, as a receipt whose FIFO layer
+ *     is gone. Its remaining quantity is NULL, not zero: a layer that is not
+ *     there cannot be said to be empty.
+ *
+ * Matched on `batchId`, which is what the GRN post-to-stock cascade writes on
+ * the ledger row and the lot alike. A lot matches at most one movement; the
+ * first (oldest) claim wins, so a second row referencing the same batch is kept
+ * as its own receipt rather than silently overwriting the first.
+ */
+export function mergeRmReceipts(
+  lots: RmLot[],
+  movements: StockMovement[],
+): RmLot[] {
+  const inbound = [...movements]
+    .filter((m) => m.direction === "IN")
+    .sort(compareOldestFirst);
+
+  const claimed = new Set<string>();
+  const byBatch = new Map<string, StockMovement>();
+  for (const m of inbound) {
+    if (!m.batchId || byBatch.has(m.batchId)) continue;
+    byBatch.set(m.batchId, m);
+  }
+
+  const merged: RmLot[] = lots.map((lot) => {
+    const m = byBatch.get(lot.id);
+    if (m) claimed.add(m.id);
+    return {
+      ...lot,
+      hasLot: true,
+      movementId: m?.id ?? null,
+      balanceAfter: m?.balanceAfter ?? null,
+      // The lot's own received date is the physical fact; the ledger date is
+      // the same event as booked. Prefer the lot, fall back to the ledger.
+      receivedDate: lot.receivedDate ?? m?.date ?? null,
+    };
+  });
+
+  for (const m of inbound) {
+    if (claimed.has(m.id)) continue;
+    merged.push({
+      kind: "RM_LOT",
+      id: m.id,
+      warehouse: null,
+      attributes: m.notes ?? null,
+      qty: null,
+      originalQty: m.qty,
+      consumedQty: null,
+      unitCostSen: m.unitCostSen,
+      // Not the movement's total cost: that is what the receipt was WORTH, and
+      // this column is what is left on the shelf. With no layer behind it,
+      // nothing can be said — and a value subtotal that quietly counted a
+      // vanished layer would overstate the stock.
+      valueSen: null,
+      source: m.type,
+      grnNo: m.docNo,
+      grnHref: m.docHref,
+      purchaseOrderNo: m.purchaseOrderNo ?? null,
+      purchaseOrderHref: m.purchaseOrderHref ?? null,
+      supplierName: m.supplierName ?? null,
+      receivedDate: m.date,
+      ageDays: ageDays(m.date),
+      hasLot: false,
+      movementId: m.id,
+      balanceAfter: m.balanceAfter,
+    });
+  }
+
+  return merged.sort((a, b) => {
+    const ad = a.receivedDate ?? "";
+    const bd = b.receivedDate ?? "";
+    if (ad !== bd) return ad < bd ? -1 : 1;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
 }
 
 /** A finished-good piece — one `fg_units` row. */
@@ -162,7 +281,20 @@ export interface WipLot {
 
 export type StockLot = RmLot | FgLot | WipLot;
 
-/** One FIFO consumption — which layer paid for an outbound movement. */
+/**
+ * One FIFO consumption — which layer paid for an outbound movement, who used
+ * it, and on what.
+ *
+ * `department` and `consumedByName` exist because today a raw material is
+ * ISSUED and CONSUMED by the same event: there is no material-requisition step
+ * in the system yet, so one BOM completion both takes the material off the
+ * shelf and books it against the job. When those two split into separate events
+ * this row will still be the one that answers "who used it and where", so the
+ * columns belong here now and not only on the outbound movement.
+ *
+ * Both are nullable and render as an em dash. That is not a placeholder for
+ * later — it is the current state of the ledger, said out loud.
+ */
 export interface CogsRow {
   id: string;
   consumedAt: string;
@@ -175,6 +307,10 @@ export interface CogsRow {
   /** The rm_batches lot (RM) or fg_units serial (FG) it came out of. */
   fromLotId: string | null;
   fromLotLabel: string | null;
+  /** The department that used it, when the ledger records one. */
+  department?: string | null;
+  /** The employee, from `cost_ledger.workerId`. */
+  consumedByName?: string | null;
 }
 
 export interface StockBreakdownHeader {
@@ -284,15 +420,27 @@ export function rmBreakdownTarget(row: {
 // Panel sections
 // ---------------------------------------------------------------------------
 
-/** The two collapsible sections at the foot of the panel. */
-export type BreakdownSection = "movements" | "cogs";
+/** The collapsible sections of the panel. */
+export type BreakdownSection = "movements" | "cogs" | "pieces";
 
 export type BreakdownSections = Record<BreakdownSection, boolean>;
 
-/** Both open on arrival: the panel is a report, not a menu of reports. */
+/**
+ * Movements and COGS are open on arrival: the panel is a report, not a menu of
+ * reports.
+ *
+ * `pieces` — the per-serial list of finished goods on hand — starts CLOSED. The
+ * owner asked for the finished-goods panel to be two movement tables and no
+ * stock-lots section (2026-08-08); the per-piece list is the only place the
+ * serials, their claiming sales order and their status can be seen at all, so
+ * it is kept and folded away rather than deleted. Closed by default is the
+ * compromise: it is not part of the panel he described, and the information is
+ * still one click away instead of gone.
+ */
 export const DEFAULT_BREAKDOWN_SECTIONS: BreakdownSections = {
   movements: true,
   cogs: true,
+  pieces: false,
 };
 
 /**
@@ -673,6 +821,111 @@ export function sourceDocHref(
 /** FAB_CUT → fab-cut. Matches the literal /production/<dept> routes. */
 export function deptSlug(code: string): string {
   return code.trim().toLowerCase().replace(/_/g, "-");
+}
+
+// ---------------------------------------------------------------------------
+// The product's own details, folded into the panel
+//
+// Until 2026-08-08 a finished-goods row had TWO surfaces: this drawer, and a
+// centred dialog carrying the catalogue fields plus its own "Source Production
+// Orders" table — which listed the same production orders the drawer's inbound
+// movements already list, fetched down a different path. Owner: "它们两个已经
+// 粘在一起了" — one click, one panel. The dialog's fields moved here, read-only;
+// the duplicated table was deleted rather than merged, because the movement
+// ledger is the one that can be reconciled.
+//
+// The values are FORMATTED here rather than in the panel so the same rule
+// decides what an empty field looks like everywhere, and so a test can assert
+// it without rendering anything.
+// ---------------------------------------------------------------------------
+
+export type ProductDetailField =
+  | { label: string; kind: "text"; value: string | null }
+  /** Integer sen. The panel prints it with formatCurrency; null is an em dash. */
+  | { label: string; kind: "money"; valueSen: number | null };
+
+export interface ProductDetails {
+  fields: ProductDetailField[];
+  /**
+   * Configuration the record carries that this panel does not show and the
+   * edit form does not touch — it is preserved on save. Naming it is the
+   * difference between "this is the whole product" and "this is the part of
+   * the product you can see here".
+   */
+  advanced: string[];
+}
+
+/** The row shape this needs; a `Product` satisfies it structurally. */
+export interface ProductDetailSource {
+  id: string;
+  category?: string | null;
+  baseModel?: string | null;
+  sizeCode?: string | null;
+  sizeLabel?: string | null;
+  description?: string | null;
+  basePriceSen?: number | null;
+  price1Sen?: number | null;
+  unitM3?: number | null;
+  fabricUsage?: number | null;
+  skuCode?: string | null;
+  fabricColor?: string | null;
+  seatHeightPrices?: unknown;
+  subAssemblies?: unknown;
+  pieces?: unknown;
+}
+
+/**
+ * The catalogue record behind a finished-goods row, or null when there is none.
+ *
+ * The FG grid synthesises rows for finished production orders whose product was
+ * never catalogued (`fg-dyn-*`, `makeDynShell` in `@/lib/fg-stock`). Those
+ * shells carry zeroed prices and blank spec fields that were never anybody's
+ * data. Rendering them as a product record would present placeholder zeros as
+ * facts, so they get no details section at all — the same reason the breakdown
+ * endpoint answers "no catalogue item matches this row" for them.
+ *
+ * Code and name are deliberately absent: the panel's title bar already carries
+ * both, and a field grid that repeats the heading is noise.
+ */
+export function fgProductDetails(
+  row: ProductDetailSource | null | undefined,
+): ProductDetails | null {
+  if (!row || row.id.startsWith("fg-dyn-")) return null;
+
+  const txt = (label: string, v: string | null | undefined): ProductDetailField => ({
+    label,
+    kind: "text",
+    value: v === undefined || v === null || v === "" ? null : String(v),
+  });
+  const money = (label: string, v: number | null | undefined): ProductDetailField => ({
+    label,
+    kind: "money",
+    valueSen: v === undefined || v === null ? null : v,
+  });
+  const num = (label: string, v: number | null | undefined): ProductDetailField =>
+    txt(label, v === undefined || v === null ? null : String(v));
+
+  const advanced: string[] = [];
+  if (row.seatHeightPrices) advanced.push("Seat-height price ladder (sofa tier JSON)");
+  if (row.subAssemblies) advanced.push("Sub-assemblies");
+  if (row.pieces) advanced.push("Pieces breakdown");
+
+  return {
+    fields: [
+      txt("Category", row.category),
+      txt("Base model", row.baseModel),
+      txt("Size code", row.sizeCode),
+      txt("Size label", row.sizeLabel),
+      money("Base price", row.basePriceSen),
+      money("Price 1", row.price1Sen),
+      num("Unit M3", row.unitM3),
+      num("Fabric usage (m)", row.fabricUsage),
+      txt("SKU code", row.skuCode),
+      txt("Fabric colour", row.fabricColor),
+      txt("Description", row.description),
+    ],
+    advanced,
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -69,13 +69,22 @@ type RawMaterialOpt = {
   // 200-row flat dropdown the user had to scroll through.
   itemGroup?: string;
 };
+// Mirrors what GET /api/inventory/wip ACTUALLY returns (inventory-wip.ts:641).
+//
+// This used to declare `code` / `type` / `stockQty`, and the route has never
+// sent any of the three — it sends `wipCode` / `wipType` / `totalQty`. Only
+// `id` and `completedBy` ever lined up. So every option in the picker rendered
+// as the literal "()" and, worse, the submitted quantity was `undefined`:
+// anyone who HAD used this screen would have posted a broken adjustment. That
+// is why `stock_adjustments` has zero rows in production — the feature was
+// unusable from the day it shipped.
 type WipOpt = {
   id: string;
-  code: string;
-  type: string;
-  stockQty: number;
-  // Latest dept the WIP completed at (e.g. FAB_CUT). Used as the WIP
-  // category filter on the Adjustments page.
+  wipCode: string;
+  wipType: string;
+  totalQty: number;
+  relatedProduct?: string;
+  /** Latest dept the WIP completed at (e.g. FAB_CUT) — the category filter. */
   completedBy?: string;
 };
 type FgBatchOpt = {
@@ -128,7 +137,9 @@ const REASON_OPTIONS: { value: AdjustmentReason; label: string }[] = [
 // expected an fg_batches id (→ 404), and fg_batches isn't the FG system-of-record
 // anyway (on-hand is derived from production + DO / fg_units). The control was
 // dead/misleading. A real FG write-off needs its own grain — out of scope here.
-const TYPE_OPTIONS: AdjustmentType[] = ["RM", "WIP"];
+// The backend has accepted all three since it shipped (stock-adjustments.ts:75
+// `VALID_TYPES = ["RM","WIP","FG"]`); the picker just never offered FG.
+const TYPE_OPTIONS: AdjustmentType[] = ["RM", "WIP", "FG"];
 
 function newDraftRow(): DraftRow {
   return {
@@ -271,7 +282,9 @@ export default function StockAdjustmentsPage() {
     }
     if (row.type === "WIP") {
       const w = wipList.find((x) => x.id === row.itemId);
-      return w ? { code: w.code, name: w.type, qty: w.stockQty, uom: "pc" } : null;
+      return w
+        ? { code: w.wipCode, name: w.wipType, qty: w.totalQty, uom: "pc" }
+        : null;
     }
     const f = fgList.find((x) => x.id === row.itemId);
     return f
@@ -471,7 +484,7 @@ export default function StockAdjustmentsPage() {
                             <option key={g} value={g}>{g}</option>
                           ))}
                         {row.type === "WIP" &&
-                          Array.from(new Set(wipList.map((w) => w.completedBy ?? w.type).filter((g): g is string => !!g))).sort().map((g) => (
+                          Array.from(new Set(wipList.map((w) => w.completedBy ?? w.wipType).filter((g): g is string => !!g))).sort().map((g) => (
                             <option key={g} value={g}>{g}</option>
                           ))}
                         {row.type === "FG" &&
@@ -498,10 +511,12 @@ export default function StockAdjustmentsPage() {
                             ))}
                         {row.type === "WIP" &&
                           wipList
-                            .filter((w) => !row.category || (w.completedBy ?? w.type) === row.category)
+                            .filter((w) => !row.category || (w.completedBy ?? w.wipType) === row.category)
                             .map((w) => (
                               <option key={w.id} value={w.id}>
-                                {w.code} ({w.type})
+                                {w.wipCode}
+                                {w.relatedProduct ? ` · ${w.relatedProduct}` : ""}
+                                {` · on hand ${w.totalQty}`}
                               </option>
                             ))}
                         {row.type === "FG" &&

@@ -50,9 +50,13 @@
 //                N/A answers, which is how a checklist stops being read.
 //   WEBBING    — ONE template. WEBBING and S_WEBBING both map to the single
 //                'WEBBING' item group, so the data cannot route them apart;
-//                the template carries a "matches the retained sample for THIS
-//                product line" item instead, which is the check that actually
-//                catches a swap.
+//                the template carries a "type matches the PO — elastic and
+//                non-elastic told apart" item instead, which is the check that
+//                actually catches a swap. It used to say "matches the retained
+//                sample for THIS product line" and that was unanswerable —
+//                this factory files no retained samples (owner 2026-08-08),
+//                so the PO line plus a 200mm pull test is the standard. See
+//                migrations-postgres/0220.
 //   MECHANISM  — ONE template, same reason (both map to 'EQUIPMEN').
 //
 // PER-SUPPLIER OVERRIDES (not implemented — designed for)

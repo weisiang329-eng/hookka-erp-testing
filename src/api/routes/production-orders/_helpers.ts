@@ -160,14 +160,29 @@ export function ensurePendingMigrations(db: D1Database): Promise<void> {
       // ALTER ... USING is idempotent: re-running when already TEXT is a no-op.
       `ALTER TABLE wip_cascade_log
          ALTER COLUMN org_id TYPE TEXT USING org_id::text`,
+      // FIX B (2026-08-08): the ticket is an OCCURRENCE, not a transition.
+      // `attempt` counts how many times this exact (from → to) has already
+      // been applied to this card, so a card that was completed, reverted and
+      // completed again claims a NEW ticket instead of colliding with its own
+      // first one. Existing rows default to 0 and are already unique on
+      // (org, jc, from, to), so the new indexes build over live data with no
+      // backfill. `seq` gives the log a total order — "what was the last thing
+      // we did to this card?" is the whole replay test, and two rows written
+      // inside one transaction share `applied_at`.
+      "ALTER TABLE wip_cascade_log ADD COLUMN IF NOT EXISTS attempt INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE wip_cascade_log ADD COLUMN IF NOT EXISTS seq BIGSERIAL",
+      // The old keys are what swallowed the second completion — they must GO,
+      // not merely be joined by the new ones, or the collision survives.
+      "DROP INDEX IF EXISTS uniq_wip_cascade_log_transition",
+      "DROP INDEX IF EXISTS uniq_wip_cascade_log_initial",
       // NULL from_status is treated distinct by Postgres uniqueness, so the
       // index is partial — one for the common (from, to) pair, one for the
       // initial-emission case.
-      `CREATE UNIQUE INDEX IF NOT EXISTS uniq_wip_cascade_log_transition
-         ON wip_cascade_log (org_id, job_card_id, from_status, to_status)
+      `CREATE UNIQUE INDEX IF NOT EXISTS uniq_wip_cascade_log_occurrence
+         ON wip_cascade_log (org_id, job_card_id, from_status, to_status, attempt)
          WHERE from_status IS NOT NULL`,
-      `CREATE UNIQUE INDEX IF NOT EXISTS uniq_wip_cascade_log_initial
-         ON wip_cascade_log (org_id, job_card_id, to_status)
+      `CREATE UNIQUE INDEX IF NOT EXISTS uniq_wip_cascade_log_occurrence_initial
+         ON wip_cascade_log (org_id, job_card_id, to_status, attempt)
          WHERE from_status IS NULL`,
       `CREATE INDEX IF NOT EXISTS idx_wip_cascade_log_jc
          ON wip_cascade_log (org_id, job_card_id, applied_at DESC)`,
@@ -2511,10 +2526,42 @@ export async function applyWipInventoryChange(
   // (jcId, fromStatus, toStatus) replayed from a backfill script, a retry
   // handler, or a cross-session re-fire. Every prior WIP inflation traced
   // back to one of those replay paths. Idempotency claim ticket: try to
-  // INSERT a row into wip_cascade_log under a UNIQUE (orgId, jcId, from,
-  // to) index. If we win the race (changes > 0) the cascade proceeds; if
-  // somebody already claimed this exact transition, we short-circuit and
-  // skip the side effects. Atomic, concurrent-safe, zero race window.
+  // INSERT a row into wip_cascade_log. If we win the race (changes > 0) the
+  // cascade proceeds; if somebody already claimed this event we short-circuit
+  // and skip the side effects. Atomic, concurrent-safe, zero race window.
+  //
+  // FIX B (2026-08-08) — the ticket names an OCCURRENCE, not a transition.
+  //
+  // The key used to be (org, jc, from, to). A card completed, reverted to
+  // WAITING and completed again therefore collided with its own first ticket:
+  // the second WAITING→COMPLETED found `changes = 0` and returned early — but
+  // the revert's refund had already run. That swallowed re-completion is the
+  // single biggest source of the drift: the upstream row keeps the refund it
+  // was given (too HIGH) and the stage's own row never gets its producer-add
+  // back (too LOW, which is where the negative rows come from). 792 job cards
+  // on prod have been reverted and redone.
+  //
+  // The key is now (org, jc, from, to, attempt) and a replay is recognised by
+  // what it IS rather than assumed: an incoming (from → to) is a REPLAY only
+  // when the card's MOST RECENT logged transition is that very same
+  // (from → to) — i.e. nothing has happened to the card since we last applied
+  // it. Anything else is a genuine new occurrence and gets the next `attempt`.
+  //
+  // Why this cannot double-apply:
+  //   • For the same event to be admitted twice, the card's last logged
+  //     transition would have to differ from (from → to) at the second call.
+  //     That can only happen if some OTHER transition was logged in between —
+  //     which means the card genuinely moved and came back, making the second
+  //     call a real second occurrence.
+  //   • Concurrency: `attempt` is computed INSIDE the INSERT … SELECT, so two
+  //     racing calls for one event compute the same value and the unique index
+  //     on (org, jc, from, to, attempt) admits exactly one; if they serialise
+  //     instead, the loser's predicate sees the winner's row as the card's
+  //     latest transition and inserts nothing. Either way: one row, one apply.
+  //   • The failure the predicate CAN have is the opposite one — after a gap
+  //     in the log it may call a genuine event a replay and skip it. That
+  //     under-applies, which leaves a row too high; it can never create the
+  //     negative rows this change exists to stop.
   //
   // Callers that pass options.orgId opt into the guard. Callers without
   // orgId (legacy code paths we haven't audited yet, plus the unit tests)
@@ -2522,10 +2569,29 @@ export async function applyWipInventoryChange(
   // we can flip this to require orgId.
   if (options.orgId) {
     try {
+      // Migrations do NOT auto-apply on deploy — `attempt` / `seq` reach prod
+      // only through this runtime self-apply, and it has to be awaited BEFORE
+      // the first statement that names them or the claim throws and the guard
+      // silently degrades to "no guard" on every request of a cold isolate.
+      // Memoized per isolate, so this is one no-op await per request.
+      await ensurePendingMigrations(db);
       const claimResult = await db
         .prepare(
-          `INSERT INTO wip_cascade_log (org_id, job_card_id, from_status, to_status, source)
-           VALUES (?, ?, ?, ?, ?)
+          `INSERT INTO wip_cascade_log (org_id, job_card_id, from_status, to_status, source, attempt)
+           SELECT ?, ?, ?, ?, ?,
+                  (SELECT COUNT(*) FROM wip_cascade_log prior
+                    WHERE prior.org_id = ?
+                      AND prior.job_card_id = ?
+                      AND prior.from_status IS NOT DISTINCT FROM ?
+                      AND prior.to_status = ?)
+            WHERE (
+                    SELECT latest.to_status || '>' || COALESCE(latest.from_status, '~')
+                      FROM wip_cascade_log latest
+                     WHERE latest.org_id = ?
+                       AND latest.job_card_id = ?
+                     ORDER BY latest.applied_at DESC, latest.seq DESC
+                     LIMIT 1
+                  ) IS DISTINCT FROM (? || '>' || COALESCE(?, '~'))
            ON CONFLICT DO NOTHING`,
         )
         .bind(
@@ -2534,12 +2600,21 @@ export async function applyWipInventoryChange(
           prevStatus,
           newStatus,
           options.source || "PATCH",
+          options.orgId,
+          jcRow.id,
+          prevStatus,
+          newStatus,
+          options.orgId,
+          jcRow.id,
+          newStatus,
+          prevStatus,
         )
         .run();
       const changes = (claimResult as unknown as { meta?: { changes?: number } }).meta?.changes ?? 0;
       if (changes === 0) {
-        // Already claimed by an earlier call for this exact transition.
-        // Side effects already applied — skip to keep wip_items balanced.
+        // This exact event was the last thing we applied to this card (or a
+        // concurrent caller just claimed it). Side effects already applied —
+        // skip to keep wip_items balanced.
         return;
       }
     } catch (err) {

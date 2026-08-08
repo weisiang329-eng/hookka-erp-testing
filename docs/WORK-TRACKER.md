@@ -9,6 +9,31 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-08 — 🔵 WIP 数量修两条 + 一支对帐 · main（未 push，未验 prod）
+
+Owner：「成本基本上我们都算不对的，这些成本没关系，不需要去看，**先看数量，查到完，解压正确**。」
+成本本轮完全不碰。
+
+1. **最后一站没把上游清掉**（BUG-2026-08-08-001）。Plan B 只减 UPHOLSTERY 自己那几行，
+   branch-terminal consume 每条 branch 只碰一张卡；被跳过的站台永远留着 `+wipQty`。
+   而且 gate 写死 `UPHOLSTERY` 字串 → **108 张 BOM 不是收在 UPH 的 PO 根本没有 WIP→FG 边界**。
+   已改成结构判定（`src/api/lib/wip-expected.ts`，从 wipKey/branchKey/sequence 读），
+   对 2,281 张有 UPH 的 PO 里 2,272 张跟旧集合一模一样。
+2. **complete → revert → complete 第二次被自己的 ticket 吃掉**（BUG-2026-08-08-002）。
+   key 从 (org, jc, from, to) 改成 (…, attempt)，replay 改成「上一笔就是这笔」才算 replay。
+   prod 有 **792 张卡** 走过这条路，追到的那个 (FC) code 有 148 张 PO 共用、存 124、应为 2。
+3. **`GET /api/inventory/wip/reconcile`** — 唯读，随时可跑，把每一行该是多少重算出来。
+   prod 现况：5,286 行里 1,293 行对不上，净 +2,133；**1,440 行非零里 1,286 行错，净 +2,145**
+   （多算 2,462、少算 317），162 行是负的。全库应有的 WIP ≈ 337 units，帐上写 2,470。
+
+**待 owner 决定**：`scripts/reset-wip-quantities.mjs` 已写好，**预设 dry-run，没有跑过**。
+要清那 162 行负数跟积欠的差额得跑它（`--apply --i-have-read-the-report`），这是要复核的动作。
+
+**还没解掉**：跳站台时 branch-terminal consume 仍会把没做过的站台减成负数
+（BUG-2026-04-27-013 刻意留的「可见信号」，owner 2026-04-27 拍板过），这次没动。
+
+---
+
 ## 2026-08-08 — 🔵 QC 三条：FAIL 一定要有照片、时间跟人由 server 盖、把「对留样」的标准全部重写 · main（未 push，未验 prod）
 
 Owner 三条：

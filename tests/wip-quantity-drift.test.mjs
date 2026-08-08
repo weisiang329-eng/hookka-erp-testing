@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// wip-quantity-drift.test.mjs — the mechanisms that made `wip_items`
+// wip-quantity-drift.test.mjs — the two mechanisms that made `wip_items`
 // quantities wrong, and the read-only audit that proves they are fixed.
 //
 // Owner, 2026-08-08: "成本基本上我们都算不对的，这些成本没关系，不需要去看，
@@ -9,6 +9,12 @@
 //     decremented the previous stage only when a DOWNSTREAM card was scanned,
 //     and the WIP→FG subtract took only the UPHOLSTERY cards' OWN rows. A stage
 //     the floor skipped kept its +wipQty forever, on goods that shipped.
+//
+// B — a reverted-and-redone card was swallowed. The idempotency ticket was
+//     keyed (org, jc, from, to), so complete → revert → complete collided with
+//     its own first ticket: the second completion returned before applying
+//     anything, while the revert's refund had already run. Upstream too HIGH,
+//     the stage's own row too LOW — which is where the negative rows come from.
 //
 // These are BEHAVIOUR tests: they run the real cascade against an in-memory
 // stub of the three tables it writes and assert the resulting balances, so a
@@ -251,6 +257,99 @@ test("A: a PO still in progress keeps its WIP on the board", async () => {
     db.wip.get("Divan (WD)"),
     1,
     "wood cut output stays visible until someone picks it up",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// FIX B
+// ---------------------------------------------------------------------------
+test("B: a reverted-and-redone job card applies its decrement exactly once", async () => {
+  const list = cards();
+  const db = makeDb(list);
+
+  await move(db, list, "wd", "COMPLETED");
+  assert.equal(db.wip.get("Divan (WD)"), 1);
+
+  // Complete FRAMING, revert it, complete it again — the exact sequence that
+  // 792 job cards on prod went through.
+  await move(db, list, "fr", "COMPLETED");
+  assert.equal(db.wip.get("Divan (WD)"), 0, "framing consumed the wood cut");
+  assert.equal(db.wip.get("Divan Frame"), 1);
+
+  await move(db, list, "fr", "WAITING");
+  assert.equal(db.wip.get("Divan (WD)"), 1, "the revert refunded the wood cut");
+  assert.equal(db.wip.get("Divan Frame"), 0, "and took framing's own output back");
+
+  await move(db, list, "fr", "COMPLETED");
+  assert.equal(
+    db.wip.get("Divan (WD)"),
+    0,
+    "the SECOND completion must consume the upstream again — this is the bug",
+  );
+  assert.equal(
+    db.wip.get("Divan Frame"),
+    1,
+    "and must re-add its own output; leaving it at 0 is where the negatives came from",
+  );
+});
+
+test("B: the same event applied twice changes nothing", async () => {
+  const list = cards();
+  const db = makeDb(list);
+  await move(db, list, "wd", "COMPLETED");
+
+  const jc = byId(list, "fr");
+  jc.status = "COMPLETED";
+  // Two callers replay the identical WAITING → COMPLETED (a retry, a backfill
+  // re-firing, two operators racing the same card).
+  await applyWipInventoryChange(db, PO, jc, "COMPLETED", list, "WAITING", {
+    orgId: ORG,
+    source: "TEST",
+  });
+  const after = new Map(db.wip);
+  await applyWipInventoryChange(db, PO, jc, "COMPLETED", list, "WAITING", {
+    orgId: ORG,
+    source: "REPLAY",
+  });
+  assert.deepEqual(
+    [...db.wip.entries()].sort(),
+    [...after.entries()].sort(),
+    "a replay of the last-applied transition must be a no-op",
+  );
+  assert.equal(db.wip.get("Divan (WD)"), 0, "consumed once, not twice");
+  assert.equal(db.wip.get("Divan Frame"), 1, "added once, not twice");
+});
+
+test("B: complete → revert → complete on the LAST stage settles once, not twice", async () => {
+  const list = cards();
+  const db = makeDb(list);
+  await move(db, list, "wd", "COMPLETED");
+  await move(db, list, "fr", "COMPLETED");
+
+  await move(db, list, "uph", "COMPLETED");
+  assert.equal(db.wip.get("Divan Frame"), 0, "settle drained the orphaned framing");
+  const afterFirstCompletion = [...db.wip.entries()].sort();
+
+  await move(db, list, "uph", "WAITING");
+  assert.equal(
+    db.wip.get("Divan Frame"),
+    1,
+    "reverting the last stage puts the goods back into WIP",
+  );
+
+  await move(db, list, "uph", "COMPLETED");
+  assert.equal(
+    db.wip.get("Divan Frame"),
+    0,
+    "the re-completion drains it once more — never twice, which would go negative",
+  );
+  // The invariant that matters: a revert/redo round trip is a no-op on the
+  // ledger. Every balance lands exactly where the first completion left it —
+  // the settle applied once, the refund gave back exactly what it took.
+  assert.deepEqual(
+    [...db.wip.entries()].sort(),
+    afterFirstCompletion,
+    "a revert + redo of the last stage must leave every balance unchanged",
   );
 });
 

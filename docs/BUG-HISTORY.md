@@ -34,6 +34,20 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-08-002 — A job card completed, reverted and completed again applied its decrement ONCE: the redo was swallowed by its own idempotency ticket `inventory-cascade` `production-orders` `data-integrity` 🟢
+
+**Symptom.** `wip_items` on prod: 5,286 rows, 1,440 with a non-zero balance, 2,470 units — and **162 rows NEGATIVE (−273 units)**, which is physically impossible. Recomputed from the job cards, 1,286 of the 1,440 non-zero rows are wrong, net **+2,145 units**: the ledger claims 2,470 units of work-in-progress where the floor's own cards justify 337.
+
+**Root cause.** `applyWipInventoryChange` (`production-orders/_helpers.ts:2523`) claims each cascade under a ticket in `wip_cascade_log`, keyed `UNIQUE (org_id, job_card_id, from_status, to_status)`. That key names a TRANSITION, and a transition repeats: complete → revert to WAITING → complete again. The second `WAITING→COMPLETED` collided with the card's own first ticket, `changes = 0`, and the function returned before touching anything — but the revert's refund had already run. Upstream keeps the refund it was given (too HIGH); the stage's own row never gets its producer-add back (too LOW, and below zero once it had been consumed). **792 job cards on prod have been reverted and redone.** The one code we traced end-to-end (`1013-(Q) … | (FC)`, shared by 148 POs) carries 124 units where 2 are justified: 146 completions added, and ~122 of the matching consumes were swallowed exactly this way.
+
+**Fix.** The ticket now names an OCCURRENCE: key `(org_id, job_card_id, from_status, to_status, attempt)`, and a replay is recognised on evidence instead of assumed — the cascade skips only when the card's MOST RECENT logged transition is that very same (from → to), i.e. nothing has happened to the card since we last applied it. `attempt` is computed INSIDE the `INSERT … SELECT`, so two racing callers for one event compute the same value and the unique index admits exactly one; if they serialise, the loser's predicate sees the winner's row as the latest transition and inserts nothing. Either way: one row, one apply. `seq BIGSERIAL` gives the log a total order, because "what was the last thing we did to this card?" is the whole test and two rows written in one transaction share `applied_at`. The old unique indexes are DROPped, not merely joined, or the collision survives. Migration `0222` for the record; what reaches prod is the runtime self-apply (`_helpers.ts:141`), now awaited at the top of the claim so a cold isolate cannot degrade to "no guard".
+
+**Why it cannot double-apply.** For one event to be admitted twice, the card's last logged transition would have to differ from (from → to) at the second call — which can only happen if another transition was logged in between, meaning the card genuinely moved and came back, making the second call a real second occurrence. The failure this predicate CAN have is the opposite one: after a gap in the log it may call a genuine event a replay and skip it, which under-applies — leaving a row too high, never creating a negative.
+
+**Verified.** `tests/wip-quantity-drift.test.mjs` drives the real cascade against an in-memory stub of the three tables it writes: a complete → revert → complete round trip consumes upstream exactly once and re-adds its own output; the same event replayed twice changes nothing; a revert + redo of the LAST stage leaves every balance where the first completion left it. The stub reads the statement to decide which key it enforces, so putting the old ticket back makes those tests FAIL — proved by doing exactly that. `npx tsc -p tsconfig.app.json --noEmit` clean, suite green (3451). No prod data touched.
+
+---
+
 ## BUG-2026-08-08-001 — The last production stage cleared only its own WIP rows, so a stage the floor skipped kept its stock forever `inventory-cascade` `production-orders` 🟢
 
 **Symptom.** 2,206 production orders on prod have finished their last stage — the goods shipped months ago — and `wip_items` still carries rows for their upstream departments. FAB_CUT alone held 1,608 units.

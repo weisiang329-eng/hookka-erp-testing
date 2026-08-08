@@ -9,6 +9,8 @@ import { Input } from "@/components/ui/input";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { BulkActionBar } from "@/components/ui/bulk-action-bar";
+import { StatusTabStrip } from "@/components/ui/status-tab-strip";
+import { tabTotals } from "@/lib/status-tab-strip";
 import { formatCurrency, cn } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useUrlState } from "@/lib/use-url-state";
@@ -247,16 +249,29 @@ export default function PurchaseInvoicesPage() {
     });
   }, [filteredByUserFilters, tab]);
 
-  // Tab badge counts — whole-list, not the current filter, so the operator
-  // always sees the real Draft backlog.
-  const draftCount = useMemo(
-    () => invoices.filter(pi => pi.status === "DRAFT").length,
-    [invoices],
+  // ---- Status tab strip (count + money per state) ------------------------
+  // Under a filter the strip describes the FILTERED set — same rows the grid
+  // renders — so the badge and the RM figure can never point at different PIs.
+  // With no filter it is the whole list (this page fetches every PI, no
+  // pagination), which is what the Draft backlog badge has always meant.
+  const piTabSource = useMemo(
+    () => (hasActiveFilters ? filteredByUserFilters : invoices),
+    [hasActiveFilters, filteredByUserFilters, invoices],
   );
-  const tabConfirmedCount = useMemo(
-    () => invoices.filter(pi => pi.status !== "DRAFT").length,
-    [invoices],
+  // Money = the amount the SUPPLIER has billed (amountSen — the grid's "Amount"
+  // column), i.e. how much payable is sitting in that state. Not the PO's
+  // ordered value and not the GRN's received value: a PI is the supplier's own
+  // claim and is the figure Finance pays against.
+  const draftTab = useMemo(
+    () => tabTotals(piTabSource.filter(pi => pi.status === "DRAFT"), pi => pi.amountSen),
+    [piTabSource],
   );
+  const confirmedTab = useMemo(
+    () => tabTotals(piTabSource.filter(pi => pi.status !== "DRAFT"), pi => pi.amountSen),
+    [piTabSource],
+  );
+  const draftCount = draftTab.count;
+  const tabConfirmedCount = confirmedTab.count;
 
   // Bulk DRAFT → CONFIRMED — parallel PUTs, then cache invalidation. Per the
   // BE lifecycle map only DRAFT rows are valid sources for this transition.
@@ -779,30 +794,28 @@ export default function PurchaseInvoicesPage() {
                 </CardTitle>
                 <div className="flex flex-wrap items-center gap-2">
                   {/* Draft / Confirmed toggle — mirrors SO list shell. */}
-                  <div className="inline-flex rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-0.5">
-                    <button
-                      onClick={() => { setTab("DRAFT"); setSelectedRows([]); }}
-                      className={cn(
-                        "px-4 py-1.5 text-sm rounded transition-colors",
-                        tab === "DRAFT"
-                          ? "bg-[#FAEFCB] text-[#9C6F1E] font-medium shadow-sm"
-                          : "text-[#6B7280] hover:text-[#1F1D1B]"
-                      )}
-                    >
-                      Draft ({draftCount})
-                    </button>
-                    <button
-                      onClick={() => { setTab("CONFIRMED"); setSelectedRows([]); }}
-                      className={cn(
-                        "px-4 py-1.5 text-sm rounded transition-colors",
-                        tab === "CONFIRMED"
-                          ? "bg-[#E0EDF0] text-[#3E6570] font-medium shadow-sm"
-                          : "text-[#6B7280] hover:text-[#1F1D1B]"
-                      )}
-                    >
-                      Confirmed ({tabConfirmedCount})
-                    </button>
-                  </div>
+                  <StatusTabStrip
+                    value={tab}
+                    onChange={(k) => { setTab(k as "DRAFT" | "CONFIRMED"); setSelectedRows([]); }}
+                    moneyLabel="Supplier-invoiced amount"
+                    ariaLabel="Purchase invoice status"
+                    tabs={[
+                      {
+                        key: "DRAFT",
+                        label: "Draft",
+                        count: draftCount,
+                        valueSen: draftTab.valueSen,
+                        activeClass: "bg-[#FAEFCB] text-[#9C6F1E] font-medium shadow-sm",
+                      },
+                      {
+                        key: "CONFIRMED",
+                        label: "Confirmed",
+                        count: tabConfirmedCount,
+                        valueSen: confirmedTab.valueSen,
+                        activeClass: "bg-[#E0EDF0] text-[#3E6570] font-medium shadow-sm",
+                      },
+                    ]}
+                  />
                   <Button variant="outline" size="sm" onClick={exportCSV}>
                     <Download className="h-4 w-4" /> Export CSV
                   </Button>

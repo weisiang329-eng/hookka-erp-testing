@@ -9,6 +9,8 @@ import { MoneyInput } from "@/components/ui/money-input";
 import { PageSkeleton } from "@/components/ui/skeleton";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
+import { StatusTabStrip } from "@/components/ui/status-tab-strip";
+import { tabTotals } from "@/lib/status-tab-strip";
 import { formatCurrency, cn } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { Supplier, PurchaseOrder, SupplierMaterialBinding, RawMaterial } from "@/types";
@@ -1422,14 +1424,37 @@ export default function ProcurementPage() {
     });
   }, [filteredOrdersByUserFilters, tab]);
 
-  const draftCount = useMemo(
-    () => poStatsRows.filter(po => po.status === "DRAFT").length,
-    [poStatsRows],
+  // ---- Status tab strip (count + money per state) ------------------------
+  // The rows the two tabs are computed over. Under a filter that is the
+  // filtered set, so the badge and the RM figure describe the same POs the grid
+  // is showing; with no filter it is the whole-dataset /stats payload, so
+  // neither shrinks to the current 200-row page. `gridSearch` is deliberately
+  // not in the toggle — the DataGrid applies it internally and the arrays here
+  // never see it, so switching source on it would make the strip lie.
+  const poTabSource = useMemo(
+    () =>
+      (filterStatus || filterSupplier || filterCompany || filterDateFrom || filterDateTo || filterOverdueOnly)
+        ? filteredOrdersByUserFilters
+        : poStatsRows,
+    [
+      filterStatus, filterSupplier, filterCompany, filterDateFrom, filterDateTo,
+      filterOverdueOnly, filteredOrdersByUserFilters, poStatsRows,
+    ],
   );
-  const confirmedCount = useMemo(
-    () => poStatsRows.filter(po => po.status !== "DRAFT").length,
-    [poStatsRows],
+  // Money = the PO's ORDERED value (its own totalSen, the grid's "Total"
+  // column) — what the company has committed to spend in that state. A PO with
+  // no priced lines contributes nothing rather than zero, so a Draft backlog
+  // that has not been priced yet shows its count alone.
+  const draftTab = useMemo(
+    () => tabTotals(poTabSource.filter(po => po.status === "DRAFT"), po => po.totalSen),
+    [poTabSource],
   );
+  const confirmedTab = useMemo(
+    () => tabTotals(poTabSource.filter(po => po.status !== "DRAFT"), po => po.totalSen),
+    [poTabSource],
+  );
+  const draftCount = draftTab.count;
+  const confirmedCount = confirmedTab.count;
 
   // 4.2 — aging buckets across overdue POs (count of yellow / orange / red).
   // The widget surfaces an aggregate color = the worst bucket present.
@@ -2040,30 +2065,28 @@ export default function ProcurementPage() {
             {/* Draft / Confirmed toggle — mirrors SO list shell.
                 POs are all Confirmed (no DRAFT workflow); the Draft tab shows
                 the real count so if any slip through they're visible. */}
-            <div className="inline-flex rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-0.5">
-              <button
-                onClick={() => { setTab("DRAFT"); setSelectedPOs([]); }}
-                className={cn(
-                  "px-4 py-1.5 text-sm rounded transition-colors",
-                  tab === "DRAFT"
-                    ? "bg-[#FAEFCB] text-[#9C6F1E] font-medium shadow-sm"
-                    : "text-[#6B7280] hover:text-[#1F1D1B]"
-                )}
-              >
-                Draft ({draftCount})
-              </button>
-              <button
-                onClick={() => { setTab("CONFIRMED"); setSelectedPOs([]); }}
-                className={cn(
-                  "px-4 py-1.5 text-sm rounded transition-colors",
-                  tab === "CONFIRMED"
-                    ? "bg-[#E0EDF0] text-[#3E6570] font-medium shadow-sm"
-                    : "text-[#6B7280] hover:text-[#1F1D1B]"
-                )}
-              >
-                Confirmed ({confirmedCount})
-              </button>
-            </div>
+            <StatusTabStrip
+              value={tab}
+              onChange={(k) => { setTab(k as "DRAFT" | "CONFIRMED"); setSelectedPOs([]); }}
+              moneyLabel="Ordered value"
+              ariaLabel="Purchase order status"
+              tabs={[
+                {
+                  key: "DRAFT",
+                  label: "Draft",
+                  count: draftCount,
+                  valueSen: draftTab.valueSen,
+                  activeClass: "bg-[#FAEFCB] text-[#9C6F1E] font-medium shadow-sm",
+                },
+                {
+                  key: "CONFIRMED",
+                  label: "Confirmed",
+                  count: confirmedCount,
+                  valueSen: confirmedTab.valueSen,
+                  activeClass: "bg-[#E0EDF0] text-[#3E6570] font-medium shadow-sm",
+                },
+              ]}
+            />
           </div>
         </CardHeader>
         <CardContent>

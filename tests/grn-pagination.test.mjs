@@ -42,10 +42,26 @@ test("frontend widens to whole dataset on any filter/search (search-safe)", () =
 
 test("summary widgets read the whole-dataset /stats payload, not the page", () => {
   assert.match(page, /\/api\/grn\/stats/);
-  for (const w of ["draftCount", "tabConfirmedCount"]) {
+  // The tab strip's counts (and, since the status-tab-strip rollout, its money)
+  // come from `grnTabSource`: the whole-dataset /stats rows when NOTHING is
+  // filtered — which is what this test has always been guarding — and the
+  // filtered rows when something is, so the badge and the RM figure beside it
+  // describe the same GRNs the grid shows.
+  const srcIdx = page.indexOf("const grnTabSource");
+  assert.ok(srcIdx >= 0, "grnTabSource must exist");
+  const srcBody = page.slice(srcIdx, srcIdx + 260);
+  assert.ok(
+    srcBody.includes("grnStatsRows"),
+    "the unfiltered tab source must be the whole-dataset /stats rows",
+  );
+  assert.ok(
+    srcBody.includes("filteredGRNsByUserFilters"),
+    "under a filter the tab source must be the filtered rows",
+  );
+  for (const w of ["draftTab", "confirmedTab"]) {
     const idx = page.indexOf(`const ${w}`);
     assert.ok(idx >= 0, `${w} must exist`);
-    assert.ok(page.slice(idx, idx + 160).includes("grnStatsRows"), `${w} must read grnStatsRows`);
+    assert.ok(page.slice(idx, idx + 200).includes("grnTabSource"), `${w} must read grnTabSource`);
   }
   // arrival-state tallies + Total also come from the whole dataset
   assert.match(page, /grnStatsRows\.filter\(g => g\.arrival_state === state\)/);

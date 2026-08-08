@@ -58,16 +58,40 @@ test("frontend drops pagination whenever a filter/search is active (search-safe)
 
 test("summary widgets read the whole-dataset /stats payload, not the page", () => {
   assert.match(page, /\/api\/purchase-orders\/stats/);
-  // the counts derive from poStatsRows, never the paginated purchaseOrders
-  for (const w of ["draftCount", "confirmedCount", "overduePoList"]) {
+  // The tab strip's counts (and, since the status-tab-strip rollout, its money)
+  // come from `poTabSource`: poStatsRows — the whole dataset, never the
+  // paginated `purchaseOrders` — when nothing is filtered, and the filtered
+  // rows when something is, so the badge and the RM figure beside it describe
+  // the same POs the grid shows.
+  const srcIdx = page.indexOf("const poTabSource");
+  assert.ok(srcIdx >= 0, "poTabSource must exist");
+  const srcBody = page.slice(srcIdx, srcIdx + 420);
+  assert.ok(
+    srcBody.includes("poStatsRows"),
+    "the unfiltered tab source must be poStatsRows (whole dataset)",
+  );
+  assert.ok(
+    srcBody.includes("filteredOrdersByUserFilters"),
+    "under a filter the tab source must be the filtered rows",
+  );
+  assert.ok(
+    !srcBody.includes("purchaseOrders"),
+    "the tab source must never be the paginated page of rows",
+  );
+  for (const w of ["draftTab", "confirmedTab"]) {
     const idx = page.indexOf(`const ${w}`);
     assert.ok(idx >= 0, `${w} must exist`);
-    const body = page.slice(idx, idx + 160);
     assert.ok(
-      body.includes("poStatsRows"),
-      `${w} must compute over poStatsRows (whole dataset), not the page`,
+      page.slice(idx, idx + 200).includes("poTabSource"),
+      `${w} must compute over poTabSource`,
     );
   }
+  const overdueIdx = page.indexOf("const overduePoList");
+  assert.ok(overdueIdx >= 0, "overduePoList must exist");
+  assert.ok(
+    page.slice(overdueIdx, overdueIdx + 160).includes("poStatsRows"),
+    "overduePoList must compute over poStatsRows (whole dataset), not the page",
+  );
 });
 
 test("page controls are hidden while filtering (whole set already shown)", () => {

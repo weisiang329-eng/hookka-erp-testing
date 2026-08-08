@@ -8,7 +8,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
-import { formatCurrency, getStatusColor, cn } from "@/lib/utils";
+import { StatusTabStrip } from "@/components/ui/status-tab-strip";
+import { tabTotals } from "@/lib/status-tab-strip";
+import { formatCurrency, getStatusColor } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useUrlState } from "@/lib/use-url-state";
 import { buildGrnDetailListingAoa } from "@/lib/doc-detail-listings";
@@ -467,15 +469,31 @@ export default function GRNPage() {
     });
   }, [filteredGRNsByUserFilters, tab]);
 
-  // Tab badge counts come from the whole list, not the current filter.
-  const draftCount = useMemo(
-    () => grnStatsRows.filter(g => g.status === "DRAFT").length,
-    [grnStatsRows],
+  // ---- Status tab strip (count + money per state) ------------------------
+  // Under a filter the strip counts and values the FILTERED set, so the badge
+  // and the RM figure describe the same GRNs the grid shows; with no filter it
+  // reads the whole-dataset /stats rows so neither shrinks to the current page.
+  const grnTabSource = useMemo(
+    () => (hasActiveFilters ? filteredGRNsByUserFilters : grnStatsRows),
+    [hasActiveFilters, filteredGRNsByUserFilters, grnStatsRows],
   );
-  const tabConfirmedCount = useMemo(
-    () => grnStatsRows.filter(g => g.status !== "DRAFT").length,
-    [grnStatsRows],
+  // Money = RECEIVED VALUE AT COST: each GRN's totalAmount, which the backend
+  // computes as accepted qty × the line's unit price in sen (grn.ts:1603) — the
+  // same figure the grid's "Total" column shows. A GRN booked in before the
+  // supplier's prices are keyed in has unpriced lines and therefore a zero
+  // total; `tabTotals` turns a bucket that sums to nothing into "count only"
+  // rather than a confident RM 0.00, which is the common case for the Draft
+  // backlog on this list.
+  const draftTab = useMemo(
+    () => tabTotals(grnTabSource.filter(g => g.status === "DRAFT"), g => g.totalAmount),
+    [grnTabSource],
   );
+  const confirmedTab = useMemo(
+    () => tabTotals(grnTabSource.filter(g => g.status !== "DRAFT"), g => g.totalAmount),
+    [grnTabSource],
+  );
+  const draftCount = draftTab.count;
+  const tabConfirmedCount = confirmedTab.count;
 
   // ---- Bulk Download PDF ----
   // Render every selected GRN into one merged PDF. The list rows already carry
@@ -1137,30 +1155,28 @@ export default function GRNPage() {
               Goods Receipt Notes
             </CardTitle>
             {/* Draft / Confirmed toggle — mirrors SO list shell. */}
-            <div className="inline-flex rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-0.5">
-              <button
-                onClick={() => { setTab("DRAFT"); setSelectedGrns([]); }}
-                className={cn(
-                  "px-4 py-1.5 text-sm rounded transition-colors",
-                  tab === "DRAFT"
-                    ? "bg-[#FAEFCB] text-[#9C6F1E] font-medium shadow-sm"
-                    : "text-[#6B7280] hover:text-[#1F1D1B]"
-                )}
-              >
-                Draft ({draftCount})
-              </button>
-              <button
-                onClick={() => { setTab("CONFIRMED"); setSelectedGrns([]); }}
-                className={cn(
-                  "px-4 py-1.5 text-sm rounded transition-colors",
-                  tab === "CONFIRMED"
-                    ? "bg-[#E0EDF0] text-[#3E6570] font-medium shadow-sm"
-                    : "text-[#6B7280] hover:text-[#1F1D1B]"
-                )}
-              >
-                Confirmed ({tabConfirmedCount})
-              </button>
-            </div>
+            <StatusTabStrip
+              value={tab}
+              onChange={(k) => { setTab(k as "DRAFT" | "CONFIRMED"); setSelectedGrns([]); }}
+              moneyLabel="Received value at cost"
+              ariaLabel="Goods receipt status"
+              tabs={[
+                {
+                  key: "DRAFT",
+                  label: "Draft",
+                  count: draftCount,
+                  valueSen: draftTab.valueSen,
+                  activeClass: "bg-[#FAEFCB] text-[#9C6F1E] font-medium shadow-sm",
+                },
+                {
+                  key: "CONFIRMED",
+                  label: "Confirmed",
+                  count: tabConfirmedCount,
+                  valueSen: confirmedTab.valueSen,
+                  activeClass: "bg-[#E0EDF0] text-[#3E6570] font-medium shadow-sm",
+                },
+              ]}
+            />
           </div>
         </CardHeader>
         <CardContent>

@@ -34,6 +34,18 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-08-003 — `GET /api/notifications` returned every row of every org and every user `security` `data-integrity` 🟢
+
+**Symptom.** The notifications feed was a single unfiltered `SELECT * FROM notifications`. Anyone signed in saw everyone's notifications — and the new top-bar bell (2026-08-08) surfaces that feed on every page, far more prominently than the `/notifications` page ever did. `PUT /api/notifications` had the same hole on the write side: any id could be marked read by anybody.
+
+**Root cause.** The route's own header comment said it: "the current UI has no userId concept yet, so the GET returns every row". Both `org_id` (NOT NULL, default `hookka`) and `user_id` (nullable) have existed on the prod table for some time; the route never caught up.
+
+**Fix.** One visibility rule, defined once and used by both handlers (`src/api/routes/notifications.ts:31` `userScope`): a row is visible iff it is in the caller's org (`withOrgScope`) AND either `userId IS NULL` (broadcast to that org) or `userId` = the authenticated user. Broadcast is expressed by the NULL — tightening to a bare `userId = ?` would have emptied the bell, since all 18 rows on prod today are broadcasts. A request with no resolved user can only ever see broadcasts; a request with no resolved org fails closed via `getOrgId`, as it does everywhere else.
+
+**Verified.** `tests/notifications-scope.test.mjs` executes the route's REAL SQL against node:sqlite through a D1-shaped shim that camelCases result keys the same way `db-pg.ts`'s `transform.column.from` does: two users of one org each see the broadcast plus only their own row, a second tenant sees neither, `?type=` still narrows on top of the scope, a PUT naming four ids marks only the two the caller can see, and a request with no org returns no rows. Prod read-only check: `notifications` is 18 rows, all `org_id='hookka'`, all `user_id` NULL — so no operator loses a notification. `npx tsc -p tsconfig.app.json --noEmit` clean, suite green.
+
+---
+
 ## BUG-2026-08-08-002 — A job card completed, reverted and completed again applied its decrement ONCE: the redo was swallowed by its own idempotency ticket `inventory-cascade` `production-orders` `data-integrity` 🟢
 
 **Symptom.** `wip_items` on prod: 5,286 rows, 1,440 with a non-zero balance, 2,470 units — and **162 rows NEGATIVE (−273 units)**, which is physically impossible. Recomputed from the job cards, 1,286 of the 1,440 non-zero rows are wrong, net **+2,145 units**: the ledger claims 2,470 units of work-in-progress where the floor's own cards justify 337.

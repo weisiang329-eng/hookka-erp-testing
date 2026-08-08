@@ -5,15 +5,38 @@
 // JSON array (not wrapped in {success,data}) so the existing UI code that
 // iterates the response doesn't break.
 //
-// Notifications with userId = NULL are broadcast (visible to every user);
-// rows with a userId are scoped to that user only. The current UI has no
-// userId concept yet, so the GET returns every row.
+// Visibility rule (the ONE definition — both handlers use it):
+//   a row is visible to a request iff it is in the caller's org AND it is
+//   either a BROADCAST (userId IS NULL — meant for everyone in that org) or
+//   addressed to the caller (userId = the authenticated user).
+// Broadcast is expressed by the NULL, not by leaving the route open; before
+// 2026-08-08 the GET returned every row of every org and every user, which
+// the new top-bar bell put in front of everyone.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { withOrgScope } from "../lib/tenant";
 
 const app = new Hono<Env>();
+
+function currentUserId(c: { get: (k: string) => unknown }): string | null {
+  const v = (c as unknown as { get: (k: string) => string | undefined }).get(
+    "userId",
+  );
+  return typeof v === "string" && v.length > 0 ? (v as string) : null;
+}
+
+/**
+ * The per-user half of the visibility rule, as a SQL fragment + its binds.
+ * With no resolved user the caller can only ever see broadcasts — never
+ * somebody else's addressed row.
+ */
+function userScope(userId: string | null): { sql: string; binds: string[] } {
+  return userId
+    ? { sql: "(userId IS NULL OR userId = ?)", binds: [userId] }
+    : { sql: "userId IS NULL", binds: [] };
+}
 
 
 type NotificationRow = {
@@ -49,8 +72,11 @@ app.get("/", async (c) => {
   const type = c.req.query("type");
   const isRead = c.req.query("isRead");
 
-  const where: string[] = [];
-  const binds: (string | number)[] = [];
+  // Order matters: the predicates below are joined in this order, so the
+  // binds must be pushed in the same order (after withOrgScope's orgId).
+  const user = userScope(currentUserId(c));
+  const where: string[] = [user.sql];
+  const binds: (string | number)[] = [...user.binds];
   if (type) {
     where.push("type = ?");
     binds.push(type);
@@ -59,12 +85,14 @@ app.get("/", async (c) => {
     where.push("isRead = ?");
     binds.push(isRead === "true" ? 1 : 0);
   }
-  const sql =
-    "SELECT * FROM notifications" +
-    (where.length > 0 ? " WHERE " + where.join(" AND ") : "") +
-    " ORDER BY created_at DESC";
+  const { whereSql, params } = withOrgScope(
+    c,
+    "notifications",
+    where.join(" AND "),
+  );
+  const sql = `SELECT * FROM notifications ${whereSql} ORDER BY created_at DESC`;
   const res = await c.var.DB.prepare(sql)
-    .bind(...binds)
+    .bind(...params, ...binds)
     .all<NotificationRow>();
   return c.json((res.results ?? []).map(rowToNotification));
 });
@@ -85,12 +113,19 @@ app.put("/", async (c) => {
   }
   if (ids.length === 0) return c.json({ updated: 0 });
 
-  // D1 needs the IN-list expanded.
+  // D1 needs the IN-list expanded. Same visibility rule as the GET — an id
+  // you cannot see is an id you cannot mark read.
   const placeholders = ids.map(() => "?").join(", ");
+  const user = userScope(currentUserId(c));
+  const { whereSql, params } = withOrgScope(
+    c,
+    "notifications",
+    `id IN (${placeholders}) AND ${user.sql}`,
+  );
   const res = await c.var.DB.prepare(
-    `UPDATE notifications SET isRead = 1 WHERE id IN (${placeholders})`,
+    `UPDATE notifications SET isRead = 1 ${whereSql}`,
   )
-    .bind(...(ids as string[]))
+    .bind(...params, ...(ids as string[]), ...user.binds)
     .run();
 
   const updated = res.meta?.changes ?? 0;

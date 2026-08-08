@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { Bell, ChevronDown, LogOut, User, Building2 } from "lucide-react";
+import { ChevronDown, LogOut, User, Building2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { GlobalSearch } from "./global-search";
+import { NotificationBell } from "./notification-bell";
 import { WorkspaceTabs } from "./workspace-tabs";
 import { clearAuth, getCurrentUser } from "@/lib/auth";
 
@@ -94,11 +95,8 @@ export function Topbar({ user }: TopbarProps) {
         )}
       </div>
 
-      {/* Notifications */}
-      <button className="relative rounded-md p-2 text-[#6B7280] hover:bg-[#F0ECE9] transition-colors">
-        <Bell className="h-5 w-5" />
-        <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-[#EC4899]" />
-      </button>
+      {/* Notifications — real feed + real unread count (see notification-bell.tsx) */}
+      <NotificationBell />
 
       {/* User menu */}
       <div className="relative">

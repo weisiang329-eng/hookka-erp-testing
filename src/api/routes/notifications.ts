@@ -22,7 +22,11 @@ type NotificationRow = {
   title: string;
   message: string | null;
   severity: string;
-  isRead: number;
+  // Stored as an integer in the SQLite schema, but a Postgres column typed
+  // BOOLEAN comes back as `true`/`false`. Read both — a strict `=== 1` here
+  // reports EVERY row unread on a boolean column, which is what keeps the
+  // top-bar bell permanently lit while meaning nothing.
+  isRead: number | boolean | string | null;
   link: string | null;
   createdAt: string;
 };
@@ -34,7 +38,7 @@ function rowToNotification(r: NotificationRow) {
     title: r.title,
     message: r.message ?? "",
     severity: r.severity,
-    isRead: r.isRead === 1,
+    isRead: r.isRead === 1 || r.isRead === true || r.isRead === "1" || r.isRead === "t",
     link: r.link ?? undefined,
     createdAt: r.createdAt,
   };

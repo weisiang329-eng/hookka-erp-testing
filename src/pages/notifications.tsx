@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { useNavigate } from "react-router-dom";
+import { markNotificationsRead, parseNotificationList } from "@/lib/notifications-feed";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -121,25 +122,17 @@ export default function NotificationsPage() {
   const { data: notifResp, loading } = useCachedJson<unknown>("/api/notifications");
 
   const notifications: Notification[] = useMemo(() => {
-    const raw = notifResp;
-    if (raw === null || raw === undefined) return [];
-    const list = Array.isArray(raw)
-      ? (raw as Notification[])
-      : Array.isArray((raw as { data?: unknown })?.data)
-        ? ((raw as { data: Notification[] }).data)
-        : [];
+    const list = parseNotificationList(notifResp);
     if (locallyRead.size === 0) return list;
     return list.map((n) => (locallyRead.has(n.id) ? { ...n, isRead: true } : n));
   }, [notifResp, locallyRead]);
 
   // --- Mark as read ---
 
+  // Goes through the shared feed helper so the top-bar bell's unread dot
+  // clears at the same moment this page does — the two surfaces read one feed.
   async function markAsRead(ids: string[]) {
-    await fetch("/api/notifications", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ids }),
-    });
+    await markNotificationsRead(ids);
     setLocallyRead((prev) => {
       const next = new Set(prev);
       for (const id of ids) next.add(id);

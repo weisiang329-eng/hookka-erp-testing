@@ -3557,3 +3557,39 @@ drawer's *Movements in* were the same production orders, fetched two ways.
 - `GET /api/inventory/fg-source` (`src/api/routes/inventory.ts`) was left in place
   when its last caller went; **deleted 2026-08-08** once nothing in the repo
   fetched it.
+
+## 2026-08-06 (evening) — Carress debtor opening, posted
+
+The first customer opening actually done. Owner supplied Carress's own creditor
+aging as at 22/05/2026 and our old system's debtor aging for the same date;
+**both say 32,414.00**, so the figure was agreed before a single row was written.
+
+Reconciled to the cent first. Our old-system invoice listing gross was 53,773.00
+— it is not the receivable: −11,359.00 already credited across six invoices
+(the CN cases) and −10,000.00 receipt OR000081 on 18/05 bring it to 32,414.00.
+Per-document the two sides differ (three of our invoices Carress does not
+recognise; two of their document numbers were mis-keyed — proved from the actual
+invoice PDFs, I-2604-005 is our I-2604-053 and I-2604-028 is our I-2604-054) but
+the totals agree, so the opening was built **to their list**, which is what future
+knock-offs will quote.
+
+**Built, on the owner's explicit instruction, each step verified:**
+- 22 opening invoices for the old-system balance = 32,414.00
+- the six ERP invoices Carress recognises (8,828.00) flagged as opening via the
+  new `ar-include` — they were dated before 22/05 and therefore invisible, so
+  flagging them adds them without double counting
+- opening re-posted: 29 lines, 303,613.80, balanced
+- the AR credit split by PRODUCT, per the owner: 500-0000 BEDFRAME 14,023.00 /
+  500-0020 SOFA 27,219.00, derived from each invoice's own item mix
+
+### Verified on prod
+Trial balance 1,558,974.02 DR = CR. AP drift 0.00, `/ap-reconciliation` items
+empty, residual 0.00. Carress opening AR exactly 41,242.00.
+**AR drift −60,000 → −39,418** — the Carress share is absorbed; what remains is
+Houzs and The Conts, whose openings the owner parked for later.
+
+### Also today
+`opening-balance/ar-include` (the AR twin of ap-exclude, missing since
+2026-07-09) and a guard on the opening list's `remove`, which DELETES the
+invoice row — right for a seed, catastrophic for a real invoice merely flagged
+as opening.

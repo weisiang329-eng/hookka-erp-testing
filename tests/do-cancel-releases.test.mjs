@@ -26,14 +26,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const read = (p) => readFileSync(resolve(process.cwd(), p), "utf8").replace(/\r\n/g, "\n");
 const DO_HELPERS = read("src/api/routes/delivery-orders/_helpers.ts");
 const LOCKS = read("src/api/lib/lock-helpers.ts");
 
-const { VALID_TRANSITIONS, buildDoCancelReleaseStatements } = await import(
-  resolve(process.cwd(), "src/api/routes/delivery-orders/_helpers.ts")
-);
+const { VALID_TRANSITIONS, buildDoCancelReleaseStatements } = await import(pathToFileURL(resolve(process.cwd(), "src/api/routes/delivery-orders/_helpers.ts")).href);
 
 // ── A fake D1 answering from plain arrays ──────────────────────────────────
 

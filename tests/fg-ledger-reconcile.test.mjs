@@ -16,10 +16,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
-const { diffFgReconciliation } = await import(
-  resolve(process.cwd(), "src/api/lib/fg-ledger-reconcile.ts")
-);
+const { diffFgReconciliation } = await import(pathToFileURL(resolve(process.cwd(), "src/api/lib/fg-ledger-reconcile.ts")).href);
 
 const m = (obj) => new Map(Object.entries(obj));
 
@@ -175,9 +174,7 @@ test("the opening-balance seed makes Σ events equal the on-hand count exactly",
   // direction is onHand(to) − onHand(from), an on-hand piece contributes +1 and
   // a piece already delivered or in transit contributes 0 — no history is
   // invented and identity (A) holds from the first minute.
-  const { balanceDelta } = await import(
-    resolve(process.cwd(), "src/api/lib/fg-stock-events.ts")
-  );
+  const { balanceDelta } = await import(pathToFileURL(resolve(process.cwd(), "src/api/lib/fg-stock-events.ts")).href);
   const prodToday = [
     ...Array(231).fill("PACKED"),
     ...Array(31).fill("LOADED"),

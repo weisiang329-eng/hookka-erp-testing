@@ -21,11 +21,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const read = (p) => readFileSync(resolve(process.cwd(), p), "utf8").replace(/\r\n/g, "\n");
 
 const { pickBatchForUnit, planFgBatchLinks, buildFgUnitBatchStampStatement } =
-  await import(resolve(process.cwd(), "src/api/lib/fg-batch-link.ts"));
+  await import(pathToFileURL(resolve(process.cwd(), "src/api/lib/fg-batch-link.ts")).href);
 
 const unit = (over = {}) => ({
   id: "fgu-po-1-1-1",

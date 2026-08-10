@@ -28,6 +28,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const read = (p) => readFileSync(resolve(process.cwd(), p), "utf8").replace(/\r\n/g, "\n");
 
@@ -37,11 +38,9 @@ const {
   buildDrawdownStatements,
   buildInvoiceLineReleaseStatements,
   buildDoStatusSyncStatement,
-} = await import(resolve(process.cwd(), "src/api/lib/do-partial-invoice.ts"));
+} = await import(pathToFileURL(resolve(process.cwd(), "src/api/lib/do-partial-invoice.ts")).href);
 
-const { computeDoInvoiceLines } = await import(
-  resolve(process.cwd(), "src/api/routes/delivery-orders/_helpers.ts")
-);
+const { computeDoInvoiceLines } = await import(pathToFileURL(resolve(process.cwd(), "src/api/routes/delivery-orders/_helpers.ts")).href);
 
 // ── A tiny in-memory book ──────────────────────────────────────────────────
 //

@@ -23,6 +23,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const read = (p) => readFileSync(resolve(process.cwd(), p), "utf8").replace(/\r\n/g, "\n");
 
@@ -32,7 +33,7 @@ const {
   eventTypeFor,
   isOnHandStatus,
   docForScannedUnit,
-} = await import(resolve(process.cwd(), "src/api/lib/fg-stock-events.ts"));
+} = await import(pathToFileURL(resolve(process.cwd(), "src/api/lib/fg-stock-events.ts")).href);
 
 // ── a fake D1 that just records what it was asked to do ────────────────────
 
@@ -147,9 +148,7 @@ test("a transition that changes nothing is not an event", () => {
 // ── 2. producing a piece writes exactly one IN ─────────────────────────────
 
 test("producing a piece writes exactly one IN event naming its production order", async () => {
-  const { generateFGUnitsForPO } = await import(
-    resolve(process.cwd(), "src/api/routes/fg-units.ts")
-  );
+  const { generateFGUnitsForPO } = await import(pathToFileURL(resolve(process.cwd(), "src/api/routes/fg-units.ts")).href);
 
   const po = {
     id: "pord-so-abc-01",
@@ -276,9 +275,7 @@ test("a dispatch OUT is NOT idempotency-swallowed — a piece can ship twice", (
 // ── 4. cancelling writes a counter-row and leaves the original ─────────────
 
 test("cancelling a delivery order writes a counter-row and never touches the original", async () => {
-  const { buildDoCancelReleaseStatements } = await import(
-    resolve(process.cwd(), "src/api/routes/delivery-orders/_helpers.ts")
-  );
+  const { buildDoCancelReleaseStatements } = await import(pathToFileURL(resolve(process.cwd(), "src/api/routes/delivery-orders/_helpers.ts")).href);
 
   const fgUnits = [
     { id: "u1", poId: "po-1", doId: "do-77", status: "DELIVERED", productCode: "1013-(Q)", batchId: "FGB-1" },

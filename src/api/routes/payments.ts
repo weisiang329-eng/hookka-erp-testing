@@ -57,6 +57,26 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
   BOUNCED: [],
 };
 
+// The aging snapshot probes kv_config, NOT payment_records — so a payment
+// mutation that only rewrites payment_records (and bumps invoice paidAmount
+// without touching updated_at) leaves the snapshot serving the old numbers
+// until some unrelated write lands. The supplier side learned this on
+// 2026-07-09 (BUG-2026-07-09-002, voiding an advance) and got
+// bumpSupplierPaymentsRev; the customer side had the SAME hole — the owner
+// re-allocated two receipts on 2026-08-06 and the Carress aging kept reading
+// 140,473.32 when every live figure said 126,055.32. Same class, same cure.
+function bumpPaymentRecordsRev(db: Env["Variables"]["DB"]): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO kv_config (key, value, updated_at)
+       VALUES ('payment_records_rev', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         updated_at = excluded.updated_at`,
+    )
+    .bind(JSON.stringify(Date.now()), new Date().toISOString());
+}
+
 // buildCustomerPaymentLifecycle — void/delete/unvoid core (mirrors the supplier
 // one). applyLifecycle reverses the GL legs + sets hidden + records the
 // document_lifecycle state; on leaving/returning to ACTIVE we also roll the
@@ -947,6 +967,7 @@ app.post("/", async (c) => {
       );
     }
 
+    statements.push(bumpPaymentRecordsRev(c.var.DB));
     await c.var.DB.batch(statements);
 
     const created = await c.var.DB.prepare(
@@ -1189,6 +1210,7 @@ app.put("/:id", async (c) => {
       }
     }
 
+    statements.push(bumpPaymentRecordsRev(c.var.DB));
     await c.var.DB.batch(statements);
 
     const updated = await c.var.DB.prepare(
@@ -1263,6 +1285,7 @@ app.post("/:id/lifecycle", async (c) => {
       action,
       actorUserId,
     );
+    statements.push(bumpPaymentRecordsRev(c.var.DB));
     await c.var.DB.batch(statements);
     const after = await c.var.DB.prepare(
       "SELECT * FROM payment_records WHERE id = ?",
@@ -1344,6 +1367,7 @@ app.post("/:id/restate", async (c) => {
       actorUserId,
       stamp,
     );
+    statements.push(bumpPaymentRecordsRev(c.var.DB));
     await c.var.DB.batch(statements);
     const after = await c.var.DB.prepare(
       "SELECT * FROM payment_records WHERE id = ?",

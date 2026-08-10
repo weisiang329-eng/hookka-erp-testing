@@ -12199,6 +12199,12 @@ replay without error. Tests: `tests/pi-status-check-single-source.test.mjs`,
 **Class.** A second writer with its own copy of a list that must agree. A
 corrected duplicate would drift again; the shared constant is the fix.
 
+## BUG-2026-08-06-004 — Editing a customer receipt never rebuilt the aging snapshot `accounting` `snapshot-staleness`
+
+🟢 Fixed. The `/aging` snapshot rebuilds when a PROBED source table changes; it probes `kv_config`, not `payment_records`. A customer-payment restate rewrites `payment_records` and bumps invoice `paidAmount` without touching `updated_at` — no probed write, so the snapshot kept serving the old set. Found live: the owner re-allocated two Carress receipts (moving 14,418.00 off out-of-book invoices) and the aging kept reading **140,473.32** while `/ar-control`, the per-invoice recomputation and the counter all said **126,055.32**; a no-op `ar-include` re-flag (which bumps kv) refreshed it to exactly 126,055.32, proving staleness rather than a data fault. Fix = `bumpPaymentRecordsRev` (the customer twin of `bumpSupplierPaymentsRev`) pushed into **all four** mutation batches — create, status transition, lifecycle, restate. Regression: `tests/payment-aging-bump.test.mjs` counts bump-before-batch PAIRS, so a new mutation path cannot ship without it.
+
+**Second instance of the class.** BUG-2026-07-09-002 was the identical hole on the supplier side (voiding an advance left phantom aging rows); its fix stopped at supplier payments. The class rule: any mutation whose ONLY writes are unprobed tables must bump a probed one in the same batch — and when fixing one side of a mirrored module pair, check the mirror.
+
 ## BUG-2026-08-06-003 — July's wage bill posted into August `accounting` `doc-date` `C5`
 
 🟢 Fixed. The month-end Labour posting writes `sourceType: "labor_post"`, `sourceId: "labor-YYYY-MM"` — the month is right there in the id, like `closing_stock` and `year_close` — but `parseSourceIdDate` had no branch for it and `DOC_DATE_FAMILIES` has no `labor_post`, so the legs fell back to `postedAt`. The owner posted **July** on 2026-08-07 and RM 69,847.45 landed in **August**: July's Production Salary read zero on the card built for it that same hour. Fix = one branch returning the month end. Dates resolve at read time, so it re-dates itself; no data repair.

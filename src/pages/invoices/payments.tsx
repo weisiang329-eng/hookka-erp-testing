@@ -621,6 +621,12 @@ export default function PaymentsPage() {
                       <table className="w-full text-sm">
                         <thead className="bg-gray-50">
                           <tr>
+                            {/* Date first — the list is sorted by it, and it is
+                                how the operator decides which invoice to knock
+                                off (owner 2026-08-06: 「不然我不知道要 knock off
+                                哪几张」). The supplier form has carried this
+                                column all along. */}
+                            <th className="text-left px-3 py-2 font-medium text-gray-600">Date</th>
                             <th className="text-left px-3 py-2 font-medium text-gray-600">Invoice #</th>
                             <th className="text-right px-3 py-2 font-medium text-gray-600">Invoice Amount</th>
                             <th className="text-right px-3 py-2 font-medium text-gray-600">Previously Paid</th>
@@ -636,6 +642,7 @@ export default function PaymentsPage() {
                             const isFull = !!alloc && alloc.amount === outstanding;
                             return (
                               <tr key={inv.id} className="border-t hover:bg-gray-50">
+                                <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{formatDateDMY(inv.invoiceDate)}</td>
                                 <td className="px-3 py-2 font-mono">{inv.invoiceNo}</td>
                                 <td className="px-3 py-2 text-right">{formatCurrency(inv.totalSen)}</td>
                                 <td className="px-3 py-2 text-right text-gray-500">{formatCurrency(inv.paidAmount)}</td>

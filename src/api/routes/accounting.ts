@@ -11673,6 +11673,34 @@ app.get("/opening-balance", async (c) => {
   } catch {
     /* excludes table unavailable — list stays empty */
   }
+  // The AR mirror, and it runs the OTHER WAY (owner 2026-08-06). A pre-opening
+  // PURCHASE invoice counts as opening by default and is excluded by exception;
+  // a pre-opening SALES invoice does NOT, and is opted in one at a time.
+  //
+  // The asymmetry is deliberate: flipping the AR default would sweep every
+  // customer's pre-opening invoices into the books at once — Houzs alone has
+  // over a hundred — when the owner is reconciling them one customer at a time
+  // against that customer's own statement.
+  let preExistingAr: unknown[] = [];
+  try {
+    if (openingDate) {
+      const pr = await db
+        .prepare(
+          `SELECT id, invoiceNo, customerId, customerName, invoiceDate,
+                  totalSen, paidAmount, status
+             FROM invoices
+            WHERE COALESCE(isOpening, 0) = 0
+              AND status NOT IN ('DRAFT','CANCELLED')
+              AND invoiceDate < ?
+            ORDER BY customerName, invoiceDate, invoiceNo`,
+        )
+        .bind(openingDate)
+        .all();
+      preExistingAr = pr.results ?? [];
+    }
+  } catch {
+    /* invoices table shape unexpected — list stays empty */
+  }
   const sums = await openingControlSums(db);
   const pnlPriorCum = await getPnlOpeningPriorCum(db);
   return c.json({
@@ -11685,6 +11713,7 @@ app.get("/opening-balance", async (c) => {
       arInvoices,
       apInvoices,
       preExistingAp,
+      preExistingAr,
       pnlPriorCum,
       arByControl: Object.fromEntries(sums.arByControl),
       arTotalSen: sums.arTotalSen,
@@ -11747,6 +11776,81 @@ app.post("/opening-balance/ap-exclude", async (c) => {
     after: { openingExcluded: excluded, piNo: pi.piNo },
   });
   return c.json({ success: true, data: { piId, excluded } });
+});
+
+// ---------------------------------------------------------------------------
+// POST /opening-balance/ar-include — count a pre-opening SALES invoice as
+// opening, or stop counting it.
+//
+// Owner 2026-08-06, reconciling Carress against their own creditor aging: six
+// ERP invoices dated before 22/05 are exactly the RM 8,828 that customer
+// admits owing, so they belong in the opening — but there was no way to say so.
+// The AP side has had `ap-exclude` since 2026-07-02; this is the AR twin that
+// was noted as missing on 2026-07-09 and never built.
+//
+// Unlike AP it writes the invoice ROW (isOpening), because that flag is what
+// `rowBeforeOpening` reads to let a pre-opening invoice through the floor, and
+// what the opening AR total sums. Nothing else on the invoice is touched — not
+// the amount, not the status, not its payments.
+//
+// The opening JV must be RE-POSTED afterwards: openingControlSums derives
+// 300-0000 from the flagged set, so until then the posted entry and the covered
+// set disagree — the same dance the AP side does.
+// ---------------------------------------------------------------------------
+app.post("/opening-balance/ar-include", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  const body = (await c.req.json().catch(() => ({}))) as { invoiceId?: string; isOpening?: boolean };
+  const invoiceId = String(body.invoiceId ?? "").trim();
+  if (!invoiceId) {
+    return c.json({ success: false, error: "invoiceId is required" }, 400);
+  }
+  const db = c.var.DB;
+  const inv = await db
+    .prepare("SELECT id, invoiceNo, invoiceDate, status, totalSen FROM invoices WHERE id = ?")
+    .bind(invoiceId)
+    .first<{ id: string; invoiceNo: string; invoiceDate: string; status: string; totalSen: number }>();
+  if (!inv) return c.json({ success: false, error: "Invoice not found" }, 404);
+  if (inv.status === "DRAFT" || inv.status === "CANCELLED") {
+    return c.json(
+      { success: false, error: `${inv.invoiceNo} is ${inv.status} — only a live invoice can be part of the opening.` },
+      409,
+    );
+  }
+  const openingDate = await getOpeningDate(db);
+  const isOpening = body.isOpening !== false;
+  // An invoice dated ON or AFTER the opening is already in the books on its own
+  // date; flagging it would double it against the opening entry.
+  if (isOpening && openingDate && String(inv.invoiceDate ?? "").slice(0, 10) >= openingDate) {
+    return c.json(
+      {
+        success: false,
+        error: `${inv.invoiceNo} is dated ${inv.invoiceDate}, on or after the opening date ${openingDate} — it is already in the ledger and must not also be opening.`,
+      },
+      409,
+    );
+  }
+  await db
+    .prepare("UPDATE invoices SET isOpening = ?, updated_at = ? WHERE id = ?")
+    .bind(isOpening ? 1 : 0, new Date().toISOString(), invoiceId)
+    .run();
+  // The aging snapshot probes kv_config; bump it so the change shows without
+  // waiting for an unrelated write (the lesson of BUG-2026-07-09-002).
+  await db
+    .prepare(
+      `INSERT INTO kv_config (key, value, updated_at)
+         VALUES ('opening_ar_include_rev', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    )
+    .bind(JSON.stringify(Date.now()), new Date().toISOString())
+    .run();
+  await emitAudit(c, {
+    resource: "accounting",
+    resourceId: invoiceId,
+    action: "update",
+    after: { openingIncluded: isOpening, invoiceNo: inv.invoiceNo, totalSen: inv.totalSen },
+  });
+  return c.json({ success: true, data: { invoiceId, invoiceNo: inv.invoiceNo, isOpening } });
 });
 
 // PUT /opening-balance/pnl-prior-cum — store the prior-month-end TB P&L
@@ -11894,6 +11998,21 @@ app.delete("/opening-balance/ar/:id", async (c) => {
     .first<{ id: string; customerId: string; totalSen: number; paidAmount: number; isOpening: number | null }>();
   if (!row || (row.isOpening ?? 0) !== 1) {
     return c.json({ success: false, error: "Opening invoice not found" }, 404);
+  }
+  // This endpoint DELETES the invoice row. That is right for a seed created by
+  // /opening-balance/ar (id `inv-ob-…`) — it exists only to carry an opening
+  // balance. It is NOT right for a REAL invoice that was merely FLAGGED as
+  // opening via /ar-include (2026-08-06): deleting it would destroy a live
+  // document, its line items and its history to undo a bookkeeping flag.
+  // Un-flagging is the correct undo, and it is one call away.
+  if (!String(row.id).startsWith("inv-ob-")) {
+    return c.json(
+      {
+        success: false,
+        error: "This is a real invoice counted as opening, not an opening seed — un-tick it with 'remove from opening' instead of deleting it.",
+      },
+      409,
+    );
   }
   if ((Number(row.paidAmount) || 0) !== 0) {
     return c.json(

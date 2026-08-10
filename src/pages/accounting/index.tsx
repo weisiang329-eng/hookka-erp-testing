@@ -9865,6 +9865,7 @@ type ObState = {
   // PIs entered before the opening date — counted as opening by default
   // (rows untouched); `excluded` marks the wrong/phantom exceptions.
   preExistingAp?: { id: string; piNo: string; supplierName: string; invoiceDate: string | null; amountSen: number; status: string; excluded: number }[];
+  preExistingAr?: { id: string; invoiceNo: string; customerName: string; invoiceDate: string | null; totalSen: number; paidAmount: number; status: string }[];
   arByControl: Record<string, number>;
   arTotalSen: number;
   apTotalSen: number;
@@ -10139,6 +10140,24 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
     } else toast.error(j?.error || "Failed to update opening inclusion");
   };
 
+  // The AR twin, and it runs the OTHER WAY: a pre-opening SALES invoice is NOT
+  // opening until the owner says so, one at a time, as he reconciles a customer
+  // against that customer's own statement (owner 2026-08-06 on Carress).
+  const [preArOpen, setPreArOpen] = useState(false);
+  const [arCustFilter, setArCustFilter] = useState("");
+  const toggleArInclude = async (invoiceId: string, isOpening: boolean) => {
+    const res = await fetch("/api/accounting/opening-balance/ar-include", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ invoiceId, isOpening }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (res.ok && j?.success) {
+      toast.success(isOpening ? "Counted as opening — re-post the opening entry" : "Removed from opening");
+      load(false);
+    } else toast.error(j?.error || "Failed to update opening inclusion");
+  };
+
   const inputCls =
     "w-full rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm text-right tabular-nums focus:outline-none focus:ring-1 focus:ring-[#6B5C32]";
 
@@ -10234,7 +10253,15 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
                     <td className="px-2 py-1.5 text-right tabular-nums">{formatCurrency(r.totalSen)}</td>
                     <td className="px-2 py-1.5 text-right tabular-nums text-xs text-[#6B7280]">{r.paidAmount ? formatCurrency(r.paidAmount) : "-"}</td>
                     <td className="px-2 py-1.5 text-right">
-                      <button onClick={() => handleDelete("ar", r.id)} className="text-[#9A3A2D] hover:text-[#791F1F] text-xs underline decoration-dotted cursor-pointer">remove</button>
+                      {/* A seed created here can be deleted; a REAL invoice that
+                          was merely flagged as opening must only be un-flagged —
+                          deleting it would destroy a live document to undo a
+                          bookkeeping decision. */}
+                      {r.id.startsWith("inv-ob-") ? (
+                        <button onClick={() => handleDelete("ar", r.id)} className="text-[#9A3A2D] hover:text-[#791F1F] text-xs underline decoration-dotted cursor-pointer">remove</button>
+                      ) : (
+                        <button onClick={() => toggleArInclude(r.id, false)} className="text-[#9A3A2D] hover:text-[#791F1F] text-xs underline decoration-dotted cursor-pointer">remove from opening</button>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -10361,6 +10388,109 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
           </CardContent>
         </Card>
       )}
+
+      {/* Pre-opening SALES invoices — opt IN one at a time. The list runs to
+          hundreds across all customers, and the owner reconciles one customer
+          at a time against that customer's own statement, so it opens filtered
+          and collapsed rather than dumping everything. */}
+      {(data?.preExistingAr?.length ?? 0) > 0 && (() => {
+        const rows = data?.preExistingAr ?? [];
+        const shown = arCustFilter ? rows.filter((r) => r.customerName === arCustFilter) : rows;
+        const customers = [...new Set(rows.map((r) => r.customerName))].sort();
+        return (
+          <Card>
+            <CardContent className="p-4 space-y-3">
+              <button
+                type="button"
+                onClick={() => setPreArOpen((v) => !v)}
+                className="flex w-full items-center justify-between gap-3 flex-wrap text-left cursor-pointer"
+              >
+                <h3 className="text-sm font-semibold text-[#1F1D1B] flex items-center gap-1">
+                  {preArOpen ? <ChevronDownIcon className="h-4 w-4 shrink-0 text-[#6B5C32]" /> : <ChevronRight className="h-4 w-4 shrink-0 text-[#6B5C32]" />}
+                  Already-entered customer invoices (before opening date){" "}
+                  <span className="font-normal text-[#6B7280]">
+                    — NOT counted as opening unless you say so ({rows.length} invoices)
+                  </span>
+                </h3>
+                <span className="text-sm text-[#6B7280]">
+                  Face value{" "}
+                  <span className="font-medium text-[#1F1D1B] tabular-nums">
+                    {formatCurrency(rows.reduce((s, r) => s + (Number(r.totalSen) || 0), 0))}
+                  </span>
+                </span>
+              </button>
+              {preArOpen && (
+                <>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-[#6B7280]">Customer</span>
+                    <select
+                      value={arCustFilter}
+                      onChange={(e) => setArCustFilter(e.target.value)}
+                      className="rounded-md border border-[#E2DDD8] px-2 py-1 text-sm"
+                    >
+                      <option value="">— all ({rows.length}) —</option>
+                      {customers.map((c2) => (
+                        <option key={c2} value={c2}>
+                          {c2} ({rows.filter((r) => r.customerName === c2).length})
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-xs text-[#6B7280]">
+                      Showing {shown.length} ·{" "}
+                      <span className="tabular-nums font-medium text-[#1F1D1B]">
+                        {formatCurrency(shown.reduce((s, r) => s + (Number(r.totalSen) || 0), 0))}
+                      </span>
+                    </span>
+                  </div>
+                  {/* The opening counts an invoice at FACE value — what was owed
+                      on the opening date. Payments that arrived after it reduce
+                      the balance on their own dates, so "paid" here is history,
+                      not a reason to leave the invoice out. */}
+                  <p className="text-[11px] text-[#9CA3AF]">
+                    An invoice counts at its face value; later payments reduce it on their own dates.
+                    Re-post the opening entry after changing this list.
+                  </p>
+                  <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                    <table className="w-full text-sm">
+                      <thead className="sticky top-0 bg-white">
+                        <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                          <th className="px-2 py-1.5 text-left">Customer</th>
+                          <th className="px-2 py-1.5 text-left">Invoice No</th>
+                          <th className="px-2 py-1.5 text-left">Date</th>
+                          <th className="px-2 py-1.5 text-right">Face value</th>
+                          <th className="px-2 py-1.5 text-right">Paid since</th>
+                          <th className="px-2 py-1.5" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {shown.map((r) => (
+                          <tr key={r.id} className="border-b border-[#F0ECE9]">
+                            <td className="px-2 py-1.5">{r.customerName}</td>
+                            <td className="px-2 py-1.5 tabular-nums text-xs">{r.invoiceNo}</td>
+                            <td className="px-2 py-1.5 text-xs text-[#6B7280]">{r.invoiceDate ?? ""}</td>
+                            <td className="px-2 py-1.5 text-right tabular-nums">{formatCurrency(r.totalSen)}</td>
+                            <td className="px-2 py-1.5 text-right tabular-nums text-xs text-[#6B7280]">
+                              {Number(r.paidAmount) ? formatCurrency(r.paidAmount) : "-"}
+                            </td>
+                            <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                              <button
+                                onClick={() => toggleArInclude(r.id, true)}
+                                className="text-xs text-[#3E6570] hover:underline cursor-pointer"
+                              >
+                                count as opening
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </CardContent>
+          </Card>
+        );
+      })()}
 
       {/* GL grid — all postable accounts (BS + P&L, mid-year opening); controls are derived read-only rows */}
       <Card>

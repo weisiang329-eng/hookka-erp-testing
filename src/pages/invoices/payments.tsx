@@ -146,15 +146,25 @@ export default function PaymentsPage() {
       .catch(() => {});
   }, []);
 
-  // Outstanding invoices for the selected customer
-  const customerInvoices = invoices.filter(
-    (inv) =>
-      inv.customerId === selectedCustomerId &&
-      inv.status !== "CANCELLED" &&
-      // Open invoices, plus any the receipt-being-edited paid (so they can be
-      // re-allocated even though they're currently marked PAID).
-      (inv.status !== "PAID" || editBaseline[inv.id] !== undefined)
-  );
+  // Outstanding invoices for the selected customer, OLDEST FIRST — newest at
+  // the bottom (owner 2026-08-06: 「跟着循序往下，最新的在最下面」). A receipt
+  // is applied to the oldest debt first, so the list should read in the order
+  // the operator works down it; the API's order is by invoice number, which for
+  // back-entered documents is not chronological at all.
+  const customerInvoices = invoices
+    .filter(
+      (inv) =>
+        inv.customerId === selectedCustomerId &&
+        inv.status !== "CANCELLED" &&
+        // Open invoices, plus any the receipt-being-edited paid (so they can be
+        // re-allocated even though they're currently marked PAID).
+        (inv.status !== "PAID" || editBaseline[inv.id] !== undefined)
+    )
+    .sort(
+      (a, b) =>
+        String(a.invoiceDate ?? "").localeCompare(String(b.invoiceDate ?? "")) ||
+        String(a.invoiceNo ?? "").localeCompare(String(b.invoiceNo ?? ""))
+    );
 
   const handleCustomerChange = (custId: string) => {
     setSelectedCustomerId(custId);

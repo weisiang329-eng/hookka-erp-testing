@@ -214,7 +214,17 @@ export default function SupplierPaymentsPage() {
             ? { ...pi, paidAmountSen: Math.max(0, pi.paidAmountSen - (back.get(pi.id) ?? 0)) }
             : pi,
         );
-        const open = adj.filter((pi) => pi.amountSen - pi.paidAmountSen > 0);
+        // Oldest first, newest at the bottom — the order a payment is worked
+        // down (owner 2026-08-06, on the customer side; the same action here).
+        // The API returns them by number, which for back-entered documents is
+        // not chronological.
+        const open = adj
+          .filter((pi) => pi.amountSen - pi.paidAmountSen > 0)
+          .sort(
+            (a, b) =>
+              String(a.invoiceDate ?? "").localeCompare(String(b.invoiceDate ?? "")) ||
+              String(a.piNo ?? "").localeCompare(String(b.piNo ?? "")),
+          );
         setOpenPIs(open);
         // Edit flow: seed each PI's MYR amount from the payment being edited.
         // Foreign PIs need their rate re-entered (the line only carries booked MYR).

@@ -11342,7 +11342,9 @@ app.delete("/bank-reco/line/:id", async (c) => {
 // ---------------------------------------------------------------------------
 const OPENING_DATE_KV_KEY = "opening_date";
 
-async function getOpeningDate(
+// Exported 2026-08-06 for the invoice list's `preOpening` flag — the payment
+// knock-off grid must know which invoices sit outside the books.
+export async function getOpeningDate(
   db: Env["Variables"]["DB"],
 ): Promise<string | null> {
   try {

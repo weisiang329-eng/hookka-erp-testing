@@ -38,6 +38,7 @@ import {
   ledgerHasSource,
   type LedgerEntryInput,
 } from "../lib/journal-hash";
+import { getOpeningDate } from "./accounting";
 import { getOrgId } from "../lib/tenant";
 import { checkInvoiceLocked, lockedResponse } from "../lib/lock-helpers";
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
@@ -1158,7 +1159,19 @@ app.get("/", async (c) => {
       .bind(...params)
       .all<InvoiceRow>();
 
-    const data = (invs.results ?? []).map((inv) => rowToInvoiceList(inv));
+    // preOpening = dated before the opening date AND not flagged as opening —
+    // i.e. an invoice the books do not carry. The payment knock-off grid hides
+    // these (owner 2026-08-06: money knocked onto one vanishes from the aging;
+    // the GVP 950, the Houzs 25,000 and the Carress 14,418 were all applied
+    // through a list that offered them like any other invoice).
+    const obDate = await getOpeningDate(db);
+    const data = (invs.results ?? []).map((inv) => ({
+      ...rowToInvoiceList(inv),
+      preOpening:
+        !!obDate &&
+        String(inv.invoiceDate ?? "").slice(0, 10) < obDate &&
+        !Number((inv as unknown as { isOpening?: number | null }).isOpening ?? 0),
+    }));
     return c.json({ success: true, data, total: data.length });
   }
 

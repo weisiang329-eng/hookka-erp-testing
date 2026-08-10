@@ -160,13 +160,27 @@ export default function PaymentsPage() {
         inv.status !== "CANCELLED" &&
         // Open invoices, plus any the receipt-being-edited paid (so they can be
         // re-allocated even though they're currently marked PAID).
-        (inv.status !== "PAID" || editBaseline[inv.id] !== undefined)
+        (inv.status !== "PAID" || editBaseline[inv.id] !== undefined) &&
+        // NOT the pre-opening invoices the books don't carry (owner
+        // 2026-08-06: 「这里是不是有很多旧的不录入的 invoice?」). Money knocked
+        // onto one vanishes from the aging — the GVP 950, the Houzs 25,000 and
+        // the Carress 14,418 all went through this list. Still shown while a
+        // receipt being EDITED points at one, so the mistake can be undone.
+        (!inv.preOpening || editBaseline[inv.id] !== undefined)
     )
     .sort(
       (a, b) =>
         String(a.invoiceDate ?? "").localeCompare(String(b.invoiceDate ?? "")) ||
         String(a.invoiceNo ?? "").localeCompare(String(b.invoiceNo ?? ""))
     );
+  // Said out loud, or the shorter list reads as missing data.
+  const hiddenPreOpening = invoices.filter(
+    (inv) =>
+      inv.customerId === selectedCustomerId &&
+      inv.status !== "CANCELLED" &&
+      inv.preOpening &&
+      editBaseline[inv.id] === undefined
+  ).length;
 
   const handleCustomerChange = (custId: string) => {
     setSelectedCustomerId(custId);
@@ -677,6 +691,12 @@ export default function PaymentsPage() {
                         </tbody>
                       </table>
                     </div>
+                  )}
+                  {hiddenPreOpening > 0 && (
+                    <p className="mt-2 text-xs text-[#9CA3AF]">
+                      {hiddenPreOpening} pre-opening invoice{hiddenPreOpening > 1 ? "s" : ""} not counted in the books
+                      {" "}are hidden — the aging doesn't carry them, so a payment knocked onto one disappears from it.
+                    </p>
                   )}
                 </div>
               )}

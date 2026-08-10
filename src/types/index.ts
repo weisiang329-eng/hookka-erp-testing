@@ -498,6 +498,9 @@ export type Invoice = {
   paidAmount: number;
   paymentDate: string | null;
   paymentMethod: string;
+  /** Dated before the opening date and NOT flagged as opening — the books do
+      not carry it, so money knocked onto it vanishes from the aging. */
+  preOpening?: boolean;
   payments: InvoicePayment[];
   notes: string;
   createdAt: string;

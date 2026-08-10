@@ -2836,12 +2836,21 @@ app.put("/:id", async (c) => {
 
       // Hide the cancelled invoice's GL legs (original + reversal) so the void
       // doesn't show in the GL — the same effect applyLifecycle gives the
-      // lifecycle-managed doc types. Pushed AFTER the reversal INSERTs, so the
-      // batch sets hidden=1 on both the original `invoice` and `invoice_void` legs.
+      // lifecycle-managed doc types. Pushed AFTER the reversal INSERTs.
+      //
+      // The WHOLE family, not IN ('invoice','invoice_void'): an EDITED
+      // invoice's live legs are `invoice_restate_post:<stamp>`, which the
+      // exact-match list left visible while hiding the just-written reversal —
+      // the cancelled invoice kept its full DR on 300-0000 (BUG-2026-08-06-005;
+      // the two Carress error invoices sat live at 12,802.76 after their void).
+      // Same class as BUG-2026-07-08-002: a void must cover every leg the
+      // document family ever posted. Org-agnostic like the reversal itself —
+      // sourceId is globally unique, and an orgId bind is exactly how
+      // BUG-2026-07-23-002 skipped five Carress cancels.
       statements.push(
         c.var.DB.prepare(
-          "UPDATE ledger_journal_entries SET hidden = 1 WHERE sourceType IN ('invoice','invoice_void') AND sourceId = ? AND orgId = ?",
-        ).bind(id, getOrgId(c)),
+          "UPDATE ledger_journal_entries SET hidden = 1 WHERE sourceType LIKE 'invoice%' AND sourceId = ?",
+        ).bind(id),
       );
     }
 

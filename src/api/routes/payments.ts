@@ -49,7 +49,7 @@ type PaymentRow = {
   allocations: string | null;
 };
 
-type Allocation = { invoiceId: string; invoiceNumber: string; amount: number };
+type Allocation = { invoiceId: string; invoiceNumber: string; amount: number; invoiceDate?: string };
 
 const VALID_TRANSITIONS: Record<string, string[]> = {
   RECEIVED: ["CLEARED", "BOUNCED"],
@@ -402,7 +402,7 @@ function rowToPayment(row: PaymentRow) {
   };
 }
 
-// Fill in any allocation whose invoiceNumber is blank, from the invoice itself.
+// Fill in each allocation's invoice NUMBER and DATE from the invoice itself.
 //
 // Owner 2026-08-06: 「分配记录我要看到」. Every allocation an EDIT had written
 // carried an empty number — the create path resolves it, the restate path took
@@ -411,30 +411,47 @@ function rowToPayment(row: PaymentRow) {
 // reconciling it against the customer's statement meant matching by amount.
 //
 // Resolving on READ repairs the receipts already stored, not just the next one.
+// The DATE comes from here too (owner 2026-08-06: 「这边也显示日期」) — an
+// allocation stores only an id and an amount, and the date is what makes a
+// receipt readable against a statement, which lists documents by date.
 async function fillAllocationNumbers<T extends { allocations: Allocation[] }>(
   db: Env["Variables"]["DB"],
   rows: T[],
 ): Promise<T[]> {
-  const missing = [
+  const wanted = [
     ...new Set(
-      rows.flatMap((r) => r.allocations.filter((a) => a.invoiceId && !a.invoiceNumber).map((a) => a.invoiceId)),
+      rows.flatMap((r) =>
+        r.allocations.filter((a) => a.invoiceId && (!a.invoiceNumber || !a.invoiceDate)).map((a) => a.invoiceId),
+      ),
     ),
   ];
-  if (missing.length === 0) return rows;
-  const byId = new Map<string, string>();
+  if (wanted.length === 0) return rows;
+  const byId = new Map<string, { no: string; date: string }>();
   // Chunked: a receipt can carry dozens of lines and SQLite caps bound params.
-  for (let i = 0; i < missing.length; i += 100) {
-    const slice = missing.slice(i, i + 100);
+  for (let i = 0; i < wanted.length; i += 100) {
+    const slice = wanted.slice(i, i + 100);
     const res = await db
-      .prepare(`SELECT id, invoiceNo FROM invoices WHERE id IN (${slice.map(() => "?").join(",")})`)
+      .prepare(
+        `SELECT id, invoiceNo, invoiceDate FROM invoices WHERE id IN (${slice.map(() => "?").join(",")})`,
+      )
       .bind(...slice)
-      .all<{ id: string; invoiceNo: string }>();
-    for (const r of res.results ?? []) byId.set(r.id, r.invoiceNo);
+      .all<{ id: string; invoiceNo: string; invoiceDate: string | null }>();
+    for (const r of res.results ?? []) {
+      byId.set(r.id, { no: r.invoiceNo, date: String(r.invoiceDate ?? "").slice(0, 10) });
+    }
   }
   for (const r of rows) {
     for (const a of r.allocations) {
-      if (!a.invoiceNumber) a.invoiceNumber = byId.get(a.invoiceId) ?? "";
+      const hit = byId.get(a.invoiceId);
+      if (!a.invoiceNumber) a.invoiceNumber = hit?.no ?? "";
+      if (!a.invoiceDate) a.invoiceDate = hit?.date ?? "";
     }
+    // Oldest first, matching the knock-off list the operator worked down.
+    r.allocations.sort(
+      (a, b) =>
+        String(a.invoiceDate ?? "").localeCompare(String(b.invoiceDate ?? "")) ||
+        String(a.invoiceNumber ?? "").localeCompare(String(b.invoiceNumber ?? "")),
+    );
   }
   return rows;
 }

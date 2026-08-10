@@ -33,7 +33,8 @@ test("the restate resolves the invoice number itself, not from the client", () =
 
 test("reads fill in a blank number, repairing receipts already stored", () => {
   assert.match(API, /async function fillAllocationNumbers/);
-  assert.match(API, /r\.allocations\.filter\(\(a\) => a\.invoiceId && !a\.invoiceNumber\)/);
+  // Either field missing pulls the invoice — a stored allocation has neither.
+  assert.match(API, /a\.invoiceId && \(!a\.invoiceNumber \|\| !a\.invoiceDate\)/);
 });
 
 test("both the list and the single-payment read go through it", () => {
@@ -53,4 +54,27 @@ test("a number that STILL cannot resolve is shown, not left blank", () => {
 
 test("the create path still resolves it too", () => {
   assert.match(API, /invoiceNumber: invoiceSnapshots\.get\(a\.invoiceId\)\?\.invoiceNo \?\? ""/);
+});
+
+// Owner 2026-08-06: 「这边也显示日期, invoice number, 然后 amount」. An
+// allocation stores only an id and an amount; the date is what makes a receipt
+// checkable against a customer statement, which is ordered by date.
+test("the allocation carries the invoice DATE as well", () => {
+  assert.match(API, /type Allocation = \{[^}]*invoiceDate\?: string/);
+  assert.match(API, /SELECT id, invoiceNo, invoiceDate FROM invoices WHERE id IN/);
+  assert.match(API, /if \(!a\.invoiceDate\) a\.invoiceDate = hit\?\.date \?\? "";/);
+});
+
+test("the lines come back oldest first, like the list they were picked from", () => {
+  const fn = API.slice(API.indexOf("async function fillAllocationNumbers"));
+  assert.match(fn.slice(0, 2200), /r\.allocations\.sort\(/);
+});
+
+test("the detail panel and the printed receipt both show the date", () => {
+  assert.match(UI, /<th className="text-left px-3 py-1\.5 font-medium text-gray-600">Date<\/th>/);
+  assert.match(UI, /a\.invoiceDate \? formatDateDMY\(a\.invoiceDate\) : "-"/);
+  // …and the voucher, whose column list must stay the same width as its rows.
+  assert.match(UI, /cells: \[a\.invoiceDate \? formatDateDMY\(a\.invoiceDate\) : "", a\.invoiceNumber, formatCurrency\(a\.amount\)\]/);
+  assert.match(UI, /columns: \[\{ label: "Date" \}, \{ label: "Invoice" \}, \{ label: "Amount", align: "right" \}\]/);
+  assert.match(UI, /totalCells: \["", "Total", formatCurrency\(p\.amount\)\]/);
 });

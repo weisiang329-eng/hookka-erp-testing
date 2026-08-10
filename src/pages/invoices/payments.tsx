@@ -64,8 +64,10 @@ function hasUnallocated(p: PaymentRecord): boolean {
 // buildSupplierPaymentVoucher in supplier-payments.tsx.
 function buildCustomerPaymentVoucher(p: PaymentRecord): VoucherSpec {
   const active = (p.lifecycleState ?? "ACTIVE") === "ACTIVE";
+  // Date first on the printed receipt too — the customer matches it against
+  // their own statement, which is ordered by date.
   const lines: VoucherLine[] = p.allocations.map((a) => ({
-    cells: [a.invoiceNumber, formatCurrency(a.amount)],
+    cells: [a.invoiceDate ? formatDateDMY(a.invoiceDate) : "", a.invoiceNumber, formatCurrency(a.amount)],
   }));
   return {
     title: active ? "PAYMENT RECEIPT" : "PAYMENT RECEIPT — VOID",
@@ -74,9 +76,9 @@ function buildCustomerPaymentVoucher(p: PaymentRecord): VoucherSpec {
     date: formatDateDMY(p.date),
     partyLabel: "Received From",
     partyName: p.customerName ?? "",
-    columns: [{ label: "Invoice" }, { label: "Amount", align: "right" }],
+    columns: [{ label: "Date" }, { label: "Invoice" }, { label: "Amount", align: "right" }],
     lines,
-    totalCells: ["Total", formatCurrency(p.amount)],
+    totalCells: ["", "Total", formatCurrency(p.amount)],
     amountWords: amountInWords(p.amount),
     // The customer receipt carries no bank/deposit account in PaymentRecord, so
     // there is no "Deposited to" footer; surface the payment reference instead.
@@ -748,10 +750,15 @@ export default function PaymentsPage() {
                 ) : (
                   <div className="border rounded-md overflow-hidden">
                     <table className="w-full text-sm">
-                      <thead className="bg-gray-50"><tr><th className="text-left px-3 py-1.5 font-medium text-gray-600">Invoice #</th><th className="text-right px-3 py-1.5 font-medium text-gray-600">Amount (RM)</th></tr></thead>
+                      {/* Date first — a customer's statement lists documents by
+                          date, so that is the column you match on. */}
+                      <thead className="bg-gray-50"><tr><th className="text-left px-3 py-1.5 font-medium text-gray-600">Date</th><th className="text-left px-3 py-1.5 font-medium text-gray-600">Invoice #</th><th className="text-right px-3 py-1.5 font-medium text-gray-600">Amount (RM)</th></tr></thead>
                       <tbody>
                         {detail.allocations.map((a) => (
                           <tr key={a.invoiceId} className="border-t">
+                            <td className="px-3 py-1.5 text-gray-600 whitespace-nowrap">
+                              {a.invoiceDate ? formatDateDMY(a.invoiceDate) : "-"}
+                            </td>
                             {/* The server resolves a blank number from the
                                 invoice; if one still arrives empty the row is
                                 pointing at an invoice that no longer exists,

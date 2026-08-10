@@ -1694,7 +1694,7 @@ export type PaymentRecord = {
   amount: number;
   method: "BANK_TRANSFER" | "CHEQUE" | "CASH" | "CREDIT_CARD";
   reference: string;
-  allocations: { invoiceId: string; invoiceNumber: string; amount: number }[];
+  allocations: { invoiceId: string; invoiceNumber: string; amount: number; invoiceDate?: string }[];
   status: "RECEIVED" | "CLEARED" | "BOUNCED";
   // Document lifecycle (void/delete). Absent or "ACTIVE" = live receipt.
   lifecycleState?: string;

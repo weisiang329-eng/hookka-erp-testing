@@ -21,8 +21,26 @@
 // ---------------------------------------------------------------------------
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
 import { Hono } from "hono";
+
+// `node:sqlite` is Node 22+. Local dev runs 22; the deploy workflow pins 20
+// (.github/workflows/deploy.yml), so a bare import here fails the BUILD rather
+// than the test — which is how this file blocked every deploy the day it
+// landed. Skip cleanly on an older runtime instead: a suite that cannot run is
+// not the same as a suite that failed, and CI must be able to tell them apart.
+//
+// This does mean the tenant-scope guard does not run on CI today. Raising
+// deploy.yml to 22 would fix that properly, but it is a change with a much
+// wider blast radius than this test, so it is recorded rather than done here.
+let DatabaseSync = null;
+try {
+  ({ DatabaseSync } = await import("node:sqlite"));
+} catch {
+  /* older Node — every case below skips */
+}
+const needsSqlite = DatabaseSync
+  ? {}
+  : { skip: "node:sqlite requires Node 22+ (this runtime is older)" };
 
 const { default: notifications } = await import(
   "../src/api/routes/notifications.ts"
@@ -130,28 +148,28 @@ async function idsFor(who, query = "") {
   return body.map((n) => n.id).sort();
 }
 
-test("a user sees org broadcasts plus their OWN rows — nobody else's", async () => {
+test("a user sees org broadcasts plus their OWN rows — nobody else's", needsSqlite, async () => {
   assert.deepEqual(await idsFor({ orgId: "hookka", userId: "alice" }), [
     "b1",
     "u-alice",
   ]);
 });
 
-test("the other user of the same org sees the broadcast and only THEIR row", async () => {
+test("the other user of the same org sees the broadcast and only THEIR row", needsSqlite, async () => {
   assert.deepEqual(await idsFor({ orgId: "hookka", userId: "bob" }), [
     "b1",
     "u-bob",
   ]);
 });
 
-test("a second tenant never sees the first tenant's rows", async () => {
+test("a second tenant never sees the first tenant's rows", needsSqlite, async () => {
   assert.deepEqual(await idsFor({ orgId: "acme", userId: "alice" }), [
     "other-org",
     "other-org-user",
   ]);
 });
 
-test("the ?type= filter still narrows, on top of the scope", async () => {
+test("the ?type= filter still narrows, on top of the scope", needsSqlite, async () => {
   const { shim } = makeDb([
     ...ROWS,
     { id: "u-alice-stock", orgId: "hookka", userId: "alice", type: "STOCK" },
@@ -167,7 +185,7 @@ test("the ?type= filter still narrows, on top of the scope", async () => {
   );
 });
 
-test("marking read cannot touch another user's or another org's row", async () => {
+test("marking read cannot touch another user's or another org's row", needsSqlite, async () => {
   const { db, shim } = makeDb(ROWS);
   const res = await mount(shim, { orgId: "hookka", userId: "alice" }).request(
     "/api/notifications",
@@ -185,7 +203,7 @@ test("marking read cannot touch another user's or another org's row", async () =
   assert.deepEqual(readIds, ["b1", "u-alice"]);
 });
 
-test("an unresolved org fails closed rather than returning everything", async () => {
+test("an unresolved org fails closed rather than returning everything", needsSqlite, async () => {
   const { shim } = makeDb(ROWS);
   const app = new Hono();
   app.use("*", async (c, next) => {

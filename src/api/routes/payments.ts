@@ -191,6 +191,20 @@ async function buildCustomerPaymentRestate(
   const newAllocs = (body.allocations ?? []).filter(
     (a) => a.invoiceId && a.amount > 0,
   );
+  // Resolve each allocation's invoice NUMBER here rather than trusting the
+  // client to send it — the form sends {invoiceId, amount} only, so every
+  // edited receipt stored its lines against a blank number and the detail
+  // panel listed amounts against nothing (owner 2026-08-06: 「分配记录我要看
+  //到」). The create path already resolves it the same way.
+  if (newAllocs.length > 0) {
+    const ids = [...new Set(newAllocs.map((a) => a.invoiceId))];
+    const res = await db
+      .prepare(`SELECT id, invoiceNo FROM invoices WHERE id IN (${ids.map(() => "?").join(",")})`)
+      .bind(...ids)
+      .all<{ id: string; invoiceNo: string }>();
+    const byId = new Map((res.results ?? []).map((r) => [r.id, r.invoiceNo] as const));
+    for (const a of newAllocs) a.invoiceNumber = a.invoiceNumber || byId.get(a.invoiceId) || "";
+  }
   const statements: D1PreparedStatement[] = [];
 
   // 1. Roll the OLD allocations off their invoices.
@@ -388,6 +402,43 @@ function rowToPayment(row: PaymentRow) {
   };
 }
 
+// Fill in any allocation whose invoiceNumber is blank, from the invoice itself.
+//
+// Owner 2026-08-06: 「分配记录我要看到」. Every allocation an EDIT had written
+// carried an empty number — the create path resolves it, the restate path took
+// whatever the client sent, and the client sends only {invoiceId, amount}. So a
+// receipt that had ever been edited listed amounts against nothing, and
+// reconciling it against the customer's statement meant matching by amount.
+//
+// Resolving on READ repairs the receipts already stored, not just the next one.
+async function fillAllocationNumbers<T extends { allocations: Allocation[] }>(
+  db: Env["Variables"]["DB"],
+  rows: T[],
+): Promise<T[]> {
+  const missing = [
+    ...new Set(
+      rows.flatMap((r) => r.allocations.filter((a) => a.invoiceId && !a.invoiceNumber).map((a) => a.invoiceId)),
+    ),
+  ];
+  if (missing.length === 0) return rows;
+  const byId = new Map<string, string>();
+  // Chunked: a receipt can carry dozens of lines and SQLite caps bound params.
+  for (let i = 0; i < missing.length; i += 100) {
+    const slice = missing.slice(i, i + 100);
+    const res = await db
+      .prepare(`SELECT id, invoiceNo FROM invoices WHERE id IN (${slice.map(() => "?").join(",")})`)
+      .bind(...slice)
+      .all<{ id: string; invoiceNo: string }>();
+    for (const r of res.results ?? []) byId.set(r.id, r.invoiceNo);
+  }
+  for (const r of rows) {
+    for (const a of r.allocations) {
+      if (!a.invoiceNumber) a.invoiceNumber = byId.get(a.invoiceId) ?? "";
+    }
+  }
+  return rows;
+}
+
 function genPaymentId(): string {
   return `pay-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -444,10 +495,13 @@ app.get("/", async (c) => {
       .all<{ sourceId: string; state: string }>();
     for (const r of lcRes.results ?? []) lcMap.set(r.sourceId, r.state);
   }
-  const data = rows.map((r) => ({
-    ...rowToPayment(r),
-    lifecycleState: lcMap.get(r.id) ?? "ACTIVE",
-  }));
+  const data = await fillAllocationNumbers(
+    c.var.DB,
+    rows.map((r) => ({
+      ...rowToPayment(r),
+      lifecycleState: lcMap.get(r.id) ?? "ACTIVE",
+    })),
+  );
   return c.json({ success: true, data, total: data.length });
 });
 
@@ -923,7 +977,8 @@ app.get("/:id", async (c) => {
   if (!row) {
     return c.json({ success: false, error: "Payment not found" }, 404);
   }
-  return c.json({ success: true, data: rowToPayment(row) });
+  const [one] = await fillAllocationNumbers(c.var.DB, [rowToPayment(row)]);
+  return c.json({ success: true, data: one });
 });
 
 // PUT /api/payments/:id — status transitions (RECEIVED → CLEARED / BOUNCED).

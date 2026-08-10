@@ -742,7 +742,13 @@ export default function PaymentsPage() {
                       <tbody>
                         {detail.allocations.map((a) => (
                           <tr key={a.invoiceId} className="border-t">
-                            <td className="px-3 py-1.5 font-mono">{a.invoiceNumber}</td>
+                            {/* The server resolves a blank number from the
+                                invoice; if one still arrives empty the row is
+                                pointing at an invoice that no longer exists,
+                                which is worth seeing rather than an empty cell. */}
+                            <td className="px-3 py-1.5 font-mono">
+                              {a.invoiceNumber || <span className="text-[#9A3A2D] not-italic">(invoice missing)</span>}
+                            </td>
                             <td className="px-3 py-1.5 text-right tabular-nums">{formatRM(a.amount)}</td>
                           </tr>
                         ))}

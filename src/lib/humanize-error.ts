@@ -140,3 +140,30 @@ export function humanizeError(err: unknown, fallback?: string): string {
   // 5. Last resort.
   return GENERIC;
 }
+
+/**
+ * SERVER-SIDE twin of rule 1 above: decide what a route's catch-all is allowed
+ * to put in `{ success: false, error }`.
+ *
+ * A route that returns `err.message` raw ships whatever Postgres said straight
+ * to the operator's toast — that is how a shop-floor user came to be shown
+ * `production_orders_product_id_fkey` (2026-08-10). Worse, `humanizeError` on
+ * the client then correctly classifies it as technical and replaces it with
+ * "Something went wrong. Please try again.", which tells the user nothing AND
+ * hides the real cause: the toast is generic precisely because the message was
+ * unusable. So the fix has to be at the source.
+ *
+ * Deliberately message-preserving: a route that threw a hand-written sentence
+ * ("Order already confirmed") keeps it. Only text that `looksTechnical`
+ * rejects is swapped for the caller's plain fallback. The real error is still
+ * logged server-side — nothing is lost, only what the human reads changes.
+ */
+export function operatorSafeError(err: unknown, fallback: string): string {
+  const raw =
+    err instanceof Error
+      ? err.message
+      : typeof err === "string"
+        ? err
+        : "";
+  return raw && !looksTechnical(raw) ? raw.trim() : fallback;
+}

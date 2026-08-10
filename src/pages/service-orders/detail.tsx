@@ -903,8 +903,14 @@ function SetModePanel({
 
         {mode === "STOCK_SWAP" && (
           <div className="rounded border border-[#E2DDD8] bg-white p-2">
+            {/* This list comes from /api/inventory, whose `finishedProducts`
+                is the PRODUCTS table — it never held fg_batches, and its
+                stockQty is hardcoded 0, so "(0 on hand)" was always a lie.
+                The server picks the actual batch (oldest on hand for the
+                chosen product) and says so by name if there is none. */}
             <div className="text-xs text-[#6B7280] mb-1">
-              Pick an FG batch to reserve for each affected item
+              Pick the product to swap from for each affected item — the oldest
+              batch on hand is reserved.
             </div>
             <table className="w-full text-xs">
               <tbody>
@@ -920,12 +926,12 @@ function SetModePanel({
                         onChange={(e) => setLineFgBatch(l.id, e.target.value)}
                         className="w-full rounded border border-[#E2DDD8] bg-white px-1.5 py-1 text-[11px]"
                       >
-                        <option value="">Select FG…</option>
+                        <option value="">Select product…</option>
                         {fgList
                           .filter((f) => f.id === l.productId || !l.productId)
                           .map((f) => (
                             <option key={f.id} value={f.id}>
-                              {f.code} ({f.stockQty ?? 0} on hand)
+                              {f.name ? `${f.code} — ${f.name}` : f.code}
                             </option>
                           ))}
                       </select>

@@ -22,6 +22,15 @@ import { Button } from "@/components/ui/button";
 import { ObjectPageHeader } from "@/components/ui/object-page-header";
 import { DocumentChainMap } from "@/components/ui/document-chain-map";
 import { Input } from "@/components/ui/input";
+import { SearchableSelect } from "@/components/ui/searchable-select";
+import { humanizeError } from "@/lib/humanize-error";
+import {
+  SERVICE_MODES,
+  SERVICE_MODE_SPECS,
+  modeSpec,
+  validateSpawnLines,
+  type CatalogueProduct,
+} from "@/lib/service-order-modes";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { getCurrentUser } from "@/lib/auth";
@@ -2970,6 +2979,13 @@ function ActionLogPanel({
 
 // ===========================================================================
 // SpawnServiceOrderModal — small form to spawn an order under this case.
+//
+// The Affected Items rules are NOT written here. They come from
+// `@/lib/service-order-modes`, the same module POST /api/service-orders
+// validates with, so the screen cannot promise something the server refuses.
+// It used to: the CODE column said "optional" while Reproduce's production
+// order needed a real product, and the mismatch surfaced as a raw Postgres FK
+// constraint name in a red toast (2026-08-10).
 // ===========================================================================
 type FgPickerOpt = { id: string; code: string; name: string; stockQty?: number };
 
@@ -3015,22 +3031,51 @@ function SpawnServiceOrderModal({
   );
 
   const [linePicks, setLinePicks] = useState<
-    Record<string, { qty: string; issue: string; fgBatchId: string }>
+    Record<string, { qty: string; issue: string }>
   >({});
+  // A free line is EITHER a catalogue pick (productId set by the picker) or a
+  // typed description (freeText). Both are kept on the row so flipping the
+  // mode never wipes what the operator already entered — they just get told
+  // which one this mode can accept.
   const [freeLines, setFreeLines] = useState<
-    Array<{ id: string; productCode: string; productName: string; qty: string; issue: string }>
+    Array<{
+      id: string;
+      productId: string;
+      productCode: string;
+      productName: string;
+      freeText: boolean;
+      qty: string;
+      issue: string;
+    }>
   >([]);
   const [submitting, setSubmitting] = useState(false);
+
+  // The catalogue the picker offers AND the rule-check runs against — one
+  // list, so "the picker showed it" and "the server accepted it" cannot
+  // disagree.
+  const catalogue: CatalogueProduct[] = useMemo(
+    () => fgList.map((p) => ({ id: p.id, code: p.code, name: p.name })),
+    [fgList],
+  );
+  const productOptions = useMemo(
+    () =>
+      catalogue.map((p) => ({
+        value: p.id,
+        label: p.name ? `${p.code} — ${p.name}` : p.code,
+      })),
+    [catalogue],
+  );
+  const spec = modeSpec(mode);
 
   function togglePickLine(itemId: string, on: boolean) {
     setLinePicks((prev) => {
       const copy = { ...prev };
-      if (on) copy[itemId] = copy[itemId] ?? { qty: "1", issue: "", fgBatchId: "" };
+      if (on) copy[itemId] = copy[itemId] ?? { qty: "1", issue: "" };
       else delete copy[itemId];
       return copy;
     });
   }
-  function patchPick(itemId: string, p: Partial<{ qty: string; issue: string; fgBatchId: string }>) {
+  function patchPick(itemId: string, p: Partial<{ qty: string; issue: string }>) {
     setLinePicks((prev) => ({ ...prev, [itemId]: { ...prev[itemId], ...p } }));
   }
   function addFreeLine() {
@@ -3038,28 +3083,86 @@ function SpawnServiceOrderModal({
       ...prev,
       {
         id: `fl-${Math.random().toString(36).slice(2, 8)}`,
-        productCode: "", productName: "", qty: "1", issue: "",
+        productId: "", productCode: "", productName: "",
+        freeText: false, qty: "1", issue: "",
       },
     ]);
   }
-  function patchFreeLine(id: string, p: Partial<{ productCode: string; productName: string; qty: string; issue: string }>) {
+  function patchFreeLine(
+    id: string,
+    p: Partial<{
+      productId: string; productCode: string; productName: string;
+      freeText: boolean; qty: string; issue: string;
+    }>,
+  ) {
     setFreeLines((prev) => prev.map((l) => (l.id === id ? { ...l, ...p } : l)));
+  }
+  function pickFreeLineProduct(id: string, productId: string) {
+    const hit = catalogue.find((p) => p.id === productId);
+    patchFreeLine(id, {
+      productId,
+      productCode: hit?.code ?? "",
+      productName: hit?.name ?? "",
+      freeText: false,
+    });
   }
   function removeFreeLine(id: string) {
     setFreeLines((prev) => prev.filter((l) => l.id !== id));
   }
 
   const pickedIds = Object.keys(linePicks);
+
+  // Build the exact payload lines once, so the pre-flight check and the POST
+  // can never look at different data.
+  const payloadLines = useMemo(() => {
+    if (sourceType === "EXTERNAL") {
+      return freeLines.map((l) => ({
+        rowKey: l.id,
+        sourceLineId: null,
+        productId: l.freeText ? null : l.productId || null,
+        productCode: l.productCode || null,
+        productName: l.productName || null,
+        qty: Number(l.qty) || 1,
+        issueSummary: l.issue || null,
+      }));
+    }
+    return pickedIds.map((id) => {
+      const pick = linePicks[id];
+      const item = sourceItems.find((x) => x.id === id);
+      return {
+        rowKey: id,
+        sourceLineId: id,
+        productId: item?.productId ?? null,
+        productCode: item?.productCode ?? null,
+        productName: item?.productName ?? null,
+        qty: Number(pick.qty) || 1,
+        issueSummary: pick.issue || null,
+      };
+    });
+  }, [sourceType, freeLines, pickedIds, linePicks, sourceItems]);
+
+  // THE shared rule. Same function the route calls — if this passes and the
+  // catalogue hasn't moved underneath us, the POST cannot fail on the product.
+  const validation = useMemo(
+    () => validateSpawnLines(mode, payloadLines, catalogue),
+    [mode, payloadLines, catalogue],
+  );
+  // Nothing is wrong until a mode says what "right" is — don't paint the rows
+  // red before the operator has chosen one.
+  const shownProblems = mode ? validation.problems : [];
+  const problemByRow = useMemo(() => {
+    const m: Record<string, string> = {};
+    if (!mode) return m;
+    for (const p of validation.problems) {
+      const row = payloadLines[p.lineNo - 1];
+      if (row) m[row.rowKey] = p.message;
+    }
+    return m;
+  }, [mode, validation, payloadLines]);
+
+  const qtyOk = payloadLines.every((l) => l.qty > 0);
   const linesOk =
-    sourceType === "EXTERNAL"
-      ? freeLines.length > 0 && freeLines.every((l) => l.productName.trim() && Number(l.qty) > 0)
-      : pickedIds.length > 0 &&
-        pickedIds.every((id) => {
-          const pick = linePicks[id];
-          if (Number(pick.qty) <= 0) return false;
-          if (mode === "STOCK_SWAP" && !pick.fgBatchId) return false;
-          return true;
-        });
+    payloadLines.length > 0 && qtyOk && validation.problems.length === 0;
   // Mode must be picked at spawn time — the "Decide later" option was
   // dropped from the picker because it doesn't make sense once you've
   // chosen to spawn an order.
@@ -3069,31 +3172,7 @@ function SpawnServiceOrderModal({
     if (!canSubmit) return;
     setSubmitting(true);
     try {
-      let lines: Array<Record<string, unknown>> = [];
-      if (sourceType === "EXTERNAL") {
-        lines = freeLines.map((l) => ({
-          sourceLineId: null,
-          productId: null,
-          productCode: l.productCode || null,
-          productName: l.productName,
-          qty: Number(l.qty) || 1,
-          issueSummary: l.issue || null,
-        }));
-      } else {
-        lines = pickedIds.map((id) => {
-          const pick = linePicks[id];
-          const item = sourceItems.find((x) => x.id === id);
-          return {
-            sourceLineId: id,
-            productId: item?.productId,
-            productCode: item?.productCode,
-            productName: item?.productName,
-            qty: Number(pick.qty) || 1,
-            issueSummary: pick.issue || null,
-            ...(mode === "STOCK_SWAP" ? { resolutionFgBatchId: pick.fgBatchId } : {}),
-          };
-        });
-      }
+      const lines = payloadLines.map(({ rowKey: _rowKey, ...l }) => l);
       const res = await fetch("/api/service-orders", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3106,10 +3185,22 @@ function SpawnServiceOrderModal({
         }),
       });
       const data = (await res.json()) as { success?: boolean; error?: string; data?: { id: string } };
-      if (!res.ok || !data?.success) throw new Error(data?.error || `HTTP ${res.status}`);
+      if (!res.ok || !data?.success) {
+        // Carry the status so a 401/409 gets its own plain line; the backend
+        // message is already operator-safe, so humanizeError keeps it.
+        throw Object.assign(
+          new Error(data?.error || ""),
+          { status: res.status },
+        );
+      }
       onSpawned(data.data!.id);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed");
+      toast.error(
+        humanizeError(
+          e,
+          "Couldn't spawn the service order. Check the affected items — nothing was created.",
+        ),
+      );
     } finally {
       setSubmitting(false);
     }
@@ -3138,28 +3229,40 @@ function SpawnServiceOrderModal({
           <div>
             <label className="block text-xs text-[#6B7280] mb-1">Resolution Mode</label>
             <div className="grid grid-cols-3 gap-2 max-md:grid-cols-1">
-              {(
-                [
-                  { v: "REPRODUCE", t: "Reproduce", d: "Open new PO; ship when ready" },
-                  { v: "STOCK_SWAP", t: "Stock Swap", d: "Pull from FG, ship now" },
-                  { v: "REPAIR", t: "Repair", d: "Customer returns; we fix" },
-                ] as const
-              ).map((m) => (
-                <button
-                  key={m.v}
-                  type="button"
-                  onClick={() => setMode(m.v)}
-                  className={`text-left rounded border p-3 text-xs ${
-                    mode === m.v
-                      ? "border-[#6B5C32] bg-[#F4EFE3]"
-                      : "border-[#E2DDD8] hover:bg-[#FAF9F7]"
-                  }`}
-                >
-                  <div className="font-medium text-[#1F1D1B]">{m.t}</div>
-                  <div className="text-[10px] text-[#6B7280]">{m.d}</div>
-                </button>
-              ))}
+              {SERVICE_MODES.map((v) => {
+                const m = SERVICE_MODE_SPECS[v];
+                return (
+                  <button
+                    key={v}
+                    type="button"
+                    onClick={() => setMode(v)}
+                    className={`text-left rounded border p-3 text-xs ${
+                      mode === v
+                        ? "border-[#6B5C32] bg-[#F4EFE3]"
+                        : "border-[#E2DDD8] hover:bg-[#FAF9F7]"
+                    }`}
+                  >
+                    <div className="font-medium text-[#1F1D1B]">{m.label}</div>
+                    <div className="text-[10px] text-[#6B7280]">{m.blurb}</div>
+                    <div className="mt-1 text-[10px] text-[#8A7B52]">
+                      {m.requiresCatalogueProduct
+                        ? "Needs a catalogue product"
+                        : "A typed description is enough"}
+                    </div>
+                  </button>
+                );
+              })}
             </div>
+            {/* The rule the operator is about to be held to, printed BEFORE
+                they fill the rows in — same sentence the server quotes back. */}
+            {spec && (
+              <p className="mt-2 text-[11px] text-[#6B7280]">{spec.productRule}</p>
+            )}
+            {!mode && (
+              <p className="mt-2 text-[11px] text-[#9CA3AF]">
+                Pick a mode first — it decides what each affected item has to be.
+              </p>
+            )}
           </div>
 
           {/* Lines */}
@@ -3178,21 +3281,72 @@ function SpawnServiceOrderModal({
                   <table className="w-full text-xs">
                     <thead className="bg-[#FAF9F7]">
                       <tr className="text-left text-[10px] uppercase text-[#6B7280]">
-                        <th className="p-2 w-[140px]">Code</th>
-                        <th className="p-2">Product Name</th>
+                        <th className="p-2">Product</th>
                         <th className="p-2 w-[80px]">Qty</th>
-                        <th className="p-2">Issue</th>
+                        <th className="p-2 w-[30%]">Issue</th>
                         <th className="p-2 w-[40px]"></th>
                       </tr>
                     </thead>
                     <tbody>
-                      {freeLines.map((l) => (
-                        <tr key={l.id} className="border-t border-[#F0ECE9]">
+                      {freeLines.map((l) => {
+                        const problem = problemByRow[l.id];
+                        return (
+                        <tr key={l.id} className="border-t border-[#F0ECE9] align-top">
                           <td className="p-2">
-                            <Input value={l.productCode} onChange={(e) => patchFreeLine(l.id, { productCode: e.target.value })} placeholder="optional" className="h-7 text-xs px-2" />
-                          </td>
-                          <td className="p-2">
-                            <Input value={l.productName} onChange={(e) => patchFreeLine(l.id, { productName: e.target.value })} placeholder="e.g. Brown leather sofa" className="h-7 text-xs px-2" />
+                            {/* PICK, don't retype. The reported bug was one
+                                hyphen: the operator typed `1041 (Q)` for the
+                                catalogue's `1041-(Q)`. */}
+                            <SearchableSelect
+                              value={l.freeText ? "" : l.productId}
+                              onChange={(v) => pickFreeLineProduct(l.id, v)}
+                              options={productOptions}
+                              placeholder="Search product code or name…"
+                              allowClear
+                              className="h-7 w-full text-xs px-2"
+                              emptyMessage="No matching product"
+                            />
+                            {l.freeText ? (
+                              <div className="mt-1">
+                                <Input
+                                  value={l.productName}
+                                  onChange={(e) => patchFreeLine(l.id, { productName: e.target.value })}
+                                  placeholder="e.g. Brown leather sofa (customer's own)"
+                                  className="h-7 text-xs px-2"
+                                />
+                                <button
+                                  type="button"
+                                  className="mt-1 text-[10px] text-[#6B5C32] underline"
+                                  onClick={() => patchFreeLine(l.id, { freeText: false })}
+                                >
+                                  Pick from catalogue instead
+                                </button>
+                              </div>
+                            ) : (
+                              // The escape hatch stays, but it now says which
+                              // modes can actually use it instead of calling
+                              // the field "optional" and failing later.
+                              <button
+                                type="button"
+                                className="mt-1 text-[10px] text-[#6B5C32] underline disabled:text-[#C4BFB9] disabled:no-underline"
+                                disabled={spec?.requiresCatalogueProduct === true}
+                                title={
+                                  spec?.requiresCatalogueProduct
+                                    ? `${spec.label} cannot use a typed description — switch to Repair for an item that is not in the catalogue.`
+                                    : undefined
+                                }
+                                onClick={() =>
+                                  patchFreeLine(l.id, { freeText: true, productId: "", productCode: "" })
+                                }
+                              >
+                                Not in the catalogue
+                                {spec?.requiresCatalogueProduct
+                                  ? ` (Repair only)`
+                                  : ""}
+                              </button>
+                            )}
+                            {problem && (
+                              <p className="mt-1 text-[10px] text-[#9A3A2D]">{problem}</p>
+                            )}
                           </td>
                           <td className="p-2">
                             <Input type="number" onFocus={(e) => e.currentTarget.select()} min="1" value={l.qty} onChange={(e) => patchFreeLine(l.id, { qty: e.target.value })} className="h-7 text-xs px-2" />
@@ -3206,7 +3360,8 @@ function SpawnServiceOrderModal({
                             </button>
                           </td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -3229,15 +3384,15 @@ function SpawnServiceOrderModal({
                         <th className="p-2 w-[60px] text-right">Orig</th>
                         <th className="p-2 w-[80px]">Defect Qty</th>
                         <th className="p-2">Issue</th>
-                        {mode === "STOCK_SWAP" && <th className="p-2 w-[200px]">FG Batch</th>}
                       </tr>
                     </thead>
                     <tbody>
                       {sourceItems.map((it) => {
                         const picked = !!linePicks[it.id];
                         const pick = linePicks[it.id];
+                        const problem = problemByRow[it.id];
                         return (
-                          <tr key={it.id} className="border-t border-[#F0ECE9]">
+                          <tr key={it.id} className="border-t border-[#F0ECE9] align-top">
                             <td className="p-2">
                               <input
                                 type="checkbox"
@@ -3248,6 +3403,9 @@ function SpawnServiceOrderModal({
                             <td className="p-2">
                               <div className="text-xs">{it.productCode}</div>
                               <div className="text-[10px] text-[#6B7280]">{it.productName}</div>
+                              {problem && (
+                                <p className="mt-1 text-[10px] text-[#9A3A2D]">{problem}</p>
+                              )}
                             </td>
                             <td className="p-2 text-right">{it.quantity}</td>
                             <td className="p-2">
@@ -3280,25 +3438,6 @@ function SpawnServiceOrderModal({
                                 className="h-7 text-xs px-2"
                               />
                             </td>
-                            {mode === "STOCK_SWAP" && (
-                              <td className="p-2">
-                                <select
-                                  value={pick?.fgBatchId ?? ""}
-                                  onChange={(e) => patchPick(it.id, { fgBatchId: e.target.value })}
-                                  disabled={!picked}
-                                  className="w-full rounded border border-[#E2DDD8] bg-white px-1.5 py-1 text-[11px]"
-                                >
-                                  <option value="">Select FG…</option>
-                                  {fgList
-                                    .filter((f) => f.id === it.productId || !it.productId)
-                                    .map((f) => (
-                                      <option key={f.id} value={f.id}>
-                                        {f.code} ({f.stockQty ?? 0} on hand)
-                                      </option>
-                                    ))}
-                                </select>
-                              </td>
-                            )}
                           </tr>
                         );
                       })}
@@ -3309,14 +3448,28 @@ function SpawnServiceOrderModal({
             </div>
           )}
 
-          {mode === "STOCK_SWAP" && pickedIds.length > 0 && (
+          {mode === "STOCK_SWAP" && payloadLines.length > 0 && (
             <div className="flex items-start gap-2 text-xs text-[#6B5232] bg-[#F4ECE0] border border-[#E8D8B2] rounded p-2">
               <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
               <p>
-                Stock Swap will decrement the picked FG batch's remaining qty immediately.
-                The customer keeps the defective unit; record the return separately when it
-                arrives.
+                Stock Swap takes each item out of finished-goods stock immediately —
+                the oldest batch on hand for that product. If there is none on hand
+                you'll be told which line, and nothing will be created. The customer
+                keeps the defective unit; record the return separately when it arrives.
               </p>
+            </div>
+          )}
+
+          {/* The refusal, in full, before they press the button — the toast is
+              the fallback, not the first the operator hears of it. */}
+          {shownProblems.length > 0 && (
+            <div className="flex items-start gap-2 text-xs text-[#9A3A2D] bg-[#FBF0EE] border border-[#E8C4BD] rounded p-2">
+              <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                {shownProblems.map((p) => (
+                  <p key={p.lineNo}>{p.message}</p>
+                ))}
+              </div>
             </div>
           )}
         </div>

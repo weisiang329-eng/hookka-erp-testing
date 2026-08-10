@@ -9,6 +9,55 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-10 — 🔵 Spawn Service Order：Reproduce 空 code 直接爆 FK · main（未 push，未验 prod）
+
+现场：Service Case → Spawn Service Order，Resolution Mode = Reproduce，一行 Affected Item，
+CODE 留空（画面自己写 "optional"），PRODUCT NAME 打 `1041 (Q)`，QTY 1。红 toast
+「Something went wrong. Please try again.」`POST /api/service-orders` 400，body 是
+`… violates foreign key constraint "production_orders_product_id_fkey"`。目录里那支货是
+`1041-(Q)`（prod-53，VICTORIA BEDFRAME (5FT)）—— 差一个连字号。
+
+Asks（全部要做完）：
+1. Reproduce 要真货，画面却说 code optional → UI 和 server 必须一致。
+2. 使用者看到 Postgres constraint 名 / 无用的 generic toast → 讯息要指名是哪一行、要怎么办；
+   修整条错误路径，不是只修这一句。
+3. Affected Items 要能「挑」产品，重用现有 picker（不要再写一个）；自由文字若要保留，
+   必须讲清楚哪些 mode 可以没有目录产品。
+4. 另外两个 mode（Stock Swap / Repair）各自真正需要什么，dialog 就只问那些；
+   不要把 Reproduce 的规矩套到不需要的 mode。
+5. 写之前先验：失败的那次有没有留下半张单 / 孤儿列（prod 只读查）。
+
+### 先验的（写 code 之前，prod 只读）
+- **不是原子性问题**。`SupabaseAdapter.batch` 是 `sql.begin(...)`，FK 一炸整笔 rollback。prod 实查：
+  7 张 service order、0 张没有 line、0 条孤儿 line、0 张孤儿 production_order、
+  0 张 REPAIR PO 是空/NULL product、0 张 case 卡在 IN_PROGRESS 却没有单。
+  `nextServiceOrderNo` 是 `COUNT(*)`，连单号都没烧掉。**没有需要清的孤儿列。**
+- `production_orders.product_id` = nullable TEXT + `production_orders_product_id_fkey → products(id)`。
+  route 绑的是 `productId ?? ""` —— **空字串不是 NULL**，所以 FK 照查照挡。
+- `1041-(Q)` = `prod-53`。375 支货全部折成 `[A-Z0-9]` 之后**零碰撞**，所以 `1041 (Q)` 折出来
+  只对得到一支，可以直接收。
+- **prod 那 7 张单全部是 REPAIR** —— REPRODUCE / STOCK_SWAP 一次都没成功过。
+- 第四个洞（自己挖到的）：全部 FG Batch 下拉都是 `/api/inventory` 喂的，那是 **products** 表，
+  `stockQty` 还写死 0。送出去的 `resolutionFgBatchId` 一直是 `prod-*`，route 拿去查 `fg_batches`
+  必 404 →**STOCK_SWAP 本来就不可能成功**。
+
+### 做了什么
+1. 规则抽成 `src/lib/service-order-modes.ts`（纯的），**画面和 route 叫同一个函式**，不可能再各讲各的。
+   规则由「这个 mode 会写什么」推出来：REPRODUCE 开 PO（product_id FK）、STOCK_SWAP 扣 fg_batch
+   （batch 属于某支货）→ 两者都要目录产品；REPAIR 什么都不写 → **故意**允许自由文字。
+2. 讯息一律指名行号 + 讲怎么办 + 结尾「Nothing was created」，而且过 `looksTechnical === false`
+   （不然会被 humanizeError 换成那句没用的 generic）。七个 catch-all 全走 `operatorSafeError`。
+3. Affected Items 改成用现成的 `SearchableSelect` 挑货；「Not in the catalogue」逃生口留着，
+   但明写只有 Repair 能用。错误在**按钮按下去之前**就贴在那一行旁边。
+4. `PUT /:id/mode` 的 REPRODUCE 分支同一个洞，一起补（只补 spawn 会留后门）。
+   STOCK_SWAP 改成从产品 FIFO 挑 batch，顺手把三个坏掉的 picker 一次修好。
+
+### 还没做
+- `src/pages/service-orders/index.tsx` 的 `CreateServiceOrderModal`（~900 行）是**死码**：
+  `setCreateOpen(true)` 从来没被叫过、没人 import，而且它 POST 不带 `caseId`（0074 之后必需）。
+  记在 BUG-CLASSES C13 #4，没有顺手改，也**别**照原样接回去。
+- **没在跑起来的 app 上看过，也没上 prod。** merge 到 main，没 push。
+
 ## 2026-08-08 — 🔵 六张单据清单的 status tab 都带上「几张 · 多少钱」· main（未 push，未验 prod）
 
 Owner：要 Houzs 有的那套。DO 清单早就证明可行（Planning 126 · RM 93,806.50 …），其他清单只有

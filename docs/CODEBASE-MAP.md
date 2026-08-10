@@ -758,9 +758,10 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
 | `src/pages/service-cases/index.tsx` — Service Cases list (1522) | `src/api/routes/service-cases.ts` — service_cases CRUD + status + photos + stock top-ups (959) | `service_cases` / `service_orders` / `service_order_lines` / `service_order_returns` | `tests/case-pipeline.test.mjs` |
-| `src/pages/service-cases/detail.tsx` — Service Case command center (3275) | `src/api/routes/service-orders.ts` — SV-order returns/repair lifecycle + mode/scope (1569) | `sales_orders` (caseid links SV→case; isServiceOrder mode flag) / `sales_order_items` | `tests/repair-scope.test.mjs` |
+| `src/pages/service-cases/detail.tsx` — Service Case command center (3493) | `src/api/routes/service-orders.ts` — SV-order returns/repair lifecycle + mode/scope (1859) | `sales_orders` (caseid links SV→case; isServiceOrder mode flag) / `sales_order_items` | `tests/repair-scope.test.mjs` |
 | `src/pages/service-orders/index.tsx` — SV-order list + CreateServiceOrderModal (1224) | `src/api/routes/sales-orders.ts` — co-owns the SO MODE (isServiceOrder) for the re-export pages | `production_orders` (repairscope) / `job_cards` / `fg_batches` | `tests/service-cases-rootcauses.test.mjs` |
-| `src/pages/service-orders/detail.tsx` — SV-order detail (returns, repair scope) (933) | | `stock_adjustments` / `stock_movements` / `cost_ledger` | `tests/service-hub-chain.test.mjs` |
+| `src/pages/service-orders/detail.tsx` — SV-order detail (returns, repair scope) (961) | | `stock_adjustments` / `stock_movements` / `cost_ledger` | `tests/service-hub-chain.test.mjs` |
+| `src/lib/service-order-modes.ts` — **per-mode line requirements + tolerant catalogue lookup; shared by the Spawn dialog AND the route** (300) | | `products` / `fg_batches` | `tests/service-order-spawn-product.test.mjs` |
 | `src/pages/service-order/index.tsx` — thin re-export of @/pages/sales in SV mode (18) | | `consignment_orders` / `products` | |
 | `src/pages/service-order/create.tsx` / `detail.tsx` / `edit.tsx` — re-exports of @/pages/sales/* in SV mode | | | |
 
@@ -775,8 +776,8 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
   - AffectedProductsPanel — attach 0..N product SKUs to the case — L1949-2255
   - StockTopUpPanel — stock-only part top-ups recorded against the case — L2256-2611
   - PhotosPanel — view/add/remove case photos after creation — L2612-2756
-  - ActionLogPanel — service-agent action log over case lifetime — L2757-2905
-  - SpawnServiceOrderModal — spawn an SV order under this case — L2906-3275
+  - ActionLogPanel — service-agent action log over case lifetime — L2837-2985
+  - SpawnServiceOrderModal — spawn an SV order under this case — L2986-3493
 
 **Gotchas**
 - TWO parallel directories with confusingly similar names: src/pages/service-order/* (SINGULAR) = thin re-exports of the Sales pages running in Service-Order mode via useSOMode() (src/lib/so-mode.ts); src/pages/service-orders/* (PLURAL) = a real, separate repair/returns module with its own list+detail. Don't confuse them.
@@ -784,10 +785,14 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 - sales_orders.caseid (mig 0165) links SV orders onto a case; Replacement Parts on a case = stock_adjustments with reason SERVICE_REPLACEMENT + stock_adjustments.caseid (mig 0164) — NO production order created. Don't route replacement parts through production.
 - Repair scope lives on production_orders.repairscope (FULL=null=byte-identical legacy path); component-level picks stored on affectedProducts[].components and resolved via shared deriveTopLevelWipKey — ONE wipKey formula, never re-implement. Stale picks throw at confirm.
 - Owner ruling: Service orders price RM 0 by default (auto-pricing fully skipped, BUG-016) — don't reintroduce auto-pricing on SV orders. Locked SO headers (production COMPLETED + DO delivered) cannot be zeroed.
+- **What each resolution mode needs from an affected item is `src/lib/service-order-modes.ts`, and BOTH the Spawn dialog and the route call it** (BUG-2026-08-10-001, class C13). Derived from what the mode WRITES, not from taste: REPRODUCE inserts a `production_orders` row (`product_id` is a FK to `products`) and STOCK_SWAP decrements an `fg_batch` (which belongs to one product) → both REQUIRE a catalogue product; REPAIR writes neither → free text is allowed **on purpose**, because a case can be about a unit that was never in our catalogue. Don't re-encode the rule in a screen. `normaliseProductKey` folds to `[A-Z0-9]`, so `1041 (Q)` resolves to `1041-(Q)` — verified zero collisions across all 375 prod codes; a fold that hits several rows is reported ambiguous, never guessed. **Never bind `productId ?? ""` into an id column** — an empty string is not NULL, so a nullable FK still runs its check and rejects.
+- Route catch-alls go through `operatorSafeError` (`src/lib/humanize-error.ts`) — a hand-written sentence survives, anything `looksTechnical` is swapped for a plain fallback. Returning `err.message` raw is how a shop-floor user got shown `production_orders_product_id_fkey`; the client's `humanizeError` then correctly buries it under "Something went wrong", which is worse. Refuse BEFORE composing statements so the message can name the line.
+- `/api/inventory` `finishedProducts` is the **products** table with `stockQty` hardcoded 0 — it is NOT an fg_batches list. Every "FG Batch" picker in this module was feeding `prod-*` ids into a `fg_batches` lookup. The route now derives the batch FIFO from the resolved product (`resolveSwapBatch`) and tolerates a product-id hint; don't "fix" a picker by pointing it back at `/api/inventory` and calling the ids batches.
+- `CreateServiceOrderModal` in `src/pages/service-orders/index.tsx` is **dead** — `setCreateOpen(true)` is never called, nothing imports it, and it POSTs without `caseId` (required since 0074). Delete it or rebuild it on the shared module; do not re-enable it as-is.
 - service_order_returns scrap path (POST /:id/returns/:rid/scrap) writes stock_movements/cost_ledger — integrity-sensitive, mind idempotency.
 - UI must stay 100% English; window.confirm replaced by useConfirm; manual-save surfaces here use verifiedSave + unsaved-nav guard (RootCausePanel is the reference impl).
 
-**Start here:** For a typical Service Case task open `src/pages/service-cases/detail.tsx` (the 3275-line command center) paired with `src/api/routes/service-cases.ts`; for repair/return ORDER behavior open the PLURAL `src/pages/service-orders/detail.tsx` + `src/api/routes/service-orders.ts` — and remember the SINGULAR `src/pages/service-order/*` is just a re-export of the Sales pages in SV mode (edit sales-orders.ts / src/pages/sales/* instead).
+**Start here:** For a typical Service Case task open `src/pages/service-cases/detail.tsx` (the 3493-line command center) paired with `src/api/routes/service-cases.ts`; for repair/return ORDER behavior open the PLURAL `src/pages/service-orders/detail.tsx` + `src/api/routes/service-orders.ts` — and remember the SINGULAR `src/pages/service-order/*` is just a re-export of the Sales pages in SV mode (edit sales-orders.ts / src/pages/sales/* instead).
 
 ---
 

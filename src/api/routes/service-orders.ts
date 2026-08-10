@@ -34,8 +34,106 @@ import { requirePermission } from "../lib/rbac";
 import { customerScopeSql } from "../lib/customer-scope";
 import { invalidateProductionListCaches } from "../lib/po-list-cache";
 import { getOrgId } from "../lib/tenant";
+import { operatorSafeError } from "../../lib/humanize-error";
+import {
+  SERVICE_MODE_SPECS,
+  modeSpec,
+  spawnProblemsMessage,
+  validateSpawnLines,
+  type CatalogueProduct,
+  type SpawnLineInput,
+  type ValidatedLine,
+} from "../../lib/service-order-modes";
 
 const app = new Hono<Env>();
+
+// The affected-item rules (which mode needs a real `products` row, and the
+// tolerant `1041 (Q)` → `1041-(Q)` lookup) live in src/lib/service-order-modes
+// so the Spawn dialog refuses on exactly the same rule this route refuses on.
+// Before 2026-08-10 each side had its own idea and they contradicted: the
+// dialog called the code "optional", this route bound `productId ?? ""` into
+// `production_orders.product_id` (a FK to `products`), and Postgres rejected
+// the whole insert with a constraint name the operator was then shown.
+async function loadCatalogue(db: D1Database): Promise<CatalogueProduct[]> {
+  const res = await db
+    .prepare("SELECT id, code, name FROM products")
+    .all<{ id: string; code: string | null; name: string | null }>();
+  return (res.results ?? []).map((p) => ({
+    id: p.id,
+    code: p.code ?? "",
+    name: p.name ?? "",
+  }));
+}
+
+/**
+ * Find the finished-goods batch a STOCK_SWAP line will draw from.
+ *
+ * The caller may pass an explicit batch id, but every picker in the app has
+ * been feeding this field a PRODUCT id: they are all populated from
+ * `/api/inventory`, whose `finishedProducts` is the `products` table, not
+ * `fg_batches` (ids look like `prod-53` vs `FGB-260505-03-e9e0b7`). So a hint
+ * that is not a batch is ignored rather than 404'd, and we select FIFO from
+ * the resolved product's own batches — which is what the operator meant and
+ * the only thing that can actually succeed.
+ */
+async function resolveSwapBatch(
+  db: D1Database,
+  productId: string,
+  qty: number,
+  hint: string | null,
+): Promise<
+  | { ok: true; batchId: string }
+  | { ok: false; reason: "wrong-product" | "none" | "short"; onHand: number }
+> {
+  if (hint) {
+    const explicit = await db
+      .prepare("SELECT id, productId, remainingQty FROM fg_batches WHERE id = ?")
+      .bind(hint)
+      .first<{ id: string; productId: string; remainingQty: number }>();
+    if (explicit) {
+      if (explicit.productId !== productId)
+        return { ok: false, reason: "wrong-product", onHand: 0 };
+      if (explicit.remainingQty < qty)
+        return { ok: false, reason: "short", onHand: explicit.remainingQty };
+      return { ok: true, batchId: explicit.id };
+    }
+    // Not a batch id — fall through to FIFO on the product.
+  }
+
+  const batch = await db
+    .prepare(
+      `SELECT id, remainingQty FROM fg_batches
+        WHERE productId = ? AND remainingQty >= ?
+        ORDER BY completedDate ASC, id ASC LIMIT 1`,
+    )
+    .bind(productId, qty)
+    .first<{ id: string; remainingQty: number }>();
+  if (batch) return { ok: true, batchId: batch.id };
+
+  const total = await db
+    .prepare(
+      "SELECT COALESCE(SUM(remainingQty), 0) AS onHand FROM fg_batches WHERE productId = ?",
+    )
+    .bind(productId)
+    .first<{ onHand: number }>();
+  const onHand = Number(total?.onHand ?? 0);
+  return { ok: false, reason: onHand > 0 ? "short" : "none", onHand };
+}
+
+function swapProblem(
+  line: ValidatedLine,
+  qty: number,
+  r: { reason: "wrong-product" | "none" | "short"; onHand: number },
+): string {
+  const label = line.productCode
+    ? `Line ${line.lineNo} (${line.productCode})`
+    : `Line ${line.lineNo}`;
+  if (r.reason === "wrong-product")
+    return `${label}: the finished-goods batch picked for this line belongs to a different product. Pick the item again. Nothing was created.`;
+  if (r.reason === "none")
+    return `${label}: there is no finished-goods stock for this product, so there is nothing to swap. Use Reproduce to build a replacement, or Repair if the customer sends the unit back. Nothing was created.`;
+  return `${label}: ${r.onHand} in finished-goods stock but no single batch holds the ${qty} needed. Swap fewer, or use Reproduce for the rest. Nothing was created.`;
+}
 
 // SHIPPED-equivalent statuses on the source order. Server-side guard for
 // "we don't open service orders for stuff that hasn't gone out yet".
@@ -569,10 +667,32 @@ app.post("/", async (c) => {
     const rawLines = Array.isArray(body.lines) ? body.lines : [];
     if (rawLines.length === 0) {
       return c.json(
-        { success: false, error: "At least one line is required" },
+        {
+          success: false,
+          error: "Add at least one affected item before spawning the order.",
+        },
         400,
       );
     }
+
+    // ---- resolve the affected items against the catalogue FIRST ----
+    // Everything this refuses, it refuses with nothing written and nothing
+    // even attempted. The old code discovered a bad product only when the
+    // INSERT reached Postgres, so the operator's error was a FK constraint
+    // name instead of "which line, and what to do".
+    const catalogue = await loadCatalogue(c.var.DB);
+    const validation = validateSpawnLines(
+      mode,
+      rawLines as SpawnLineInput[],
+      catalogue,
+    );
+    if (validation.problems.length > 0) {
+      return c.json(
+        { success: false, error: spawnProblemsMessage(validation.problems) },
+        400,
+      );
+    }
+    const resolvedLines = validation.lines;
 
     // ---- compose ----
     const now = new Date();
@@ -590,18 +710,35 @@ app.post("/", async (c) => {
     const lineRows: ServiceOrderLineRow[] = [];
     const sideEffectStmts: D1PreparedStatement[] = [];
 
-    for (let idx = 0; idx < rawLines.length; idx++) {
-      const ln = rawLines[idx] as Record<string, unknown>;
+    for (let idx = 0; idx < resolvedLines.length; idx++) {
+      const ln = resolvedLines[idx];
+      const raw = rawLines[idx] as Record<string, unknown>;
       const lineId = genLineId();
-      const qty = Math.max(1, Number(ln.qty) || 1);
-      const productId = (ln.productId as string) ?? null;
-      const productCode = (ln.productCode as string) ?? null;
-      const productName = (ln.productName as string) ?? null;
+      const qty = ln.qty;
+      // NEVER `?? ""`. An empty string is not NULL, so Postgres runs the
+      // production_orders.product_id FK check against it and rejects the whole
+      // transaction. For the modes that write a product-bound row this is
+      // already guaranteed non-null by validateSpawnLines above; for REPAIR it
+      // stays null, which the column allows.
+      const productId = ln.productId;
+      const productCode = ln.productCode;
+      const productName = ln.productName;
 
       let resolutionPoId: string | null = null;
       let resolutionFgBatchId: string | null = null;
 
       if (mode === "REPRODUCE") {
+        if (!productId) {
+          // Unreachable via validateSpawnLines — kept as a hard stop so no
+          // future caller can walk a product-less line into the FK again.
+          return c.json(
+            {
+              success: false,
+              error: `Line ${ln.lineNo}: pick the item from the Product list — ${SERVICE_MODE_SPECS.REPRODUCE.productRule} Nothing was created.`,
+            },
+            400,
+          );
+        }
         // ---- spawn a production_orders row for this line ----
         const poId = `pord-svc-${crypto.randomUUID().slice(0, 8)}`;
         const poNo = `${serviceOrderNo}-${String(idx + 1).padStart(2, "0")}`;
@@ -623,7 +760,7 @@ app.post("/", async (c) => {
               idx + 1,
               source.customerName,
               source.customerState ?? "",
-              productId ?? "",
+              productId,
               productCode ?? "",
               productName ?? "",
               qty,
@@ -634,39 +771,30 @@ app.post("/", async (c) => {
         );
         resolutionPoId = poId;
       } else if (mode === "STOCK_SWAP") {
-        // ---- validate FG batch + decrement qty ----
-        const fgBatchId = (ln.resolutionFgBatchId as string) ?? "";
-        if (!fgBatchId) {
+        if (!productId) {
           return c.json(
             {
               success: false,
-              error: `Line ${idx + 1}: STOCK_SWAP requires resolutionFgBatchId`,
+              error: `Line ${ln.lineNo}: pick the item from the Product list — ${SERVICE_MODE_SPECS.STOCK_SWAP.productRule} Nothing was created.`,
             },
             400,
           );
         }
-        const batch = await c.var.DB
-          .prepare(
-            "SELECT id, productId, remainingQty FROM fg_batches WHERE id = ?",
-          )
-          .bind(fgBatchId)
-          .first<{ id: string; productId: string; remainingQty: number }>();
-        if (!batch) {
+        // ---- pick the FG batch to draw from + decrement it ----
+        // The batch is derived from the PRODUCT (FIFO) rather than demanded
+        // from the client: every FG picker in the app is populated from
+        // /api/inventory, which returns `products`, not `fg_batches`, so the
+        // id the client sends has never been a batch id.
+        const swap = await resolveSwapBatch(
+          c.var.DB,
+          productId,
+          qty,
+          ln.resolutionFgBatchId,
+        );
+        if (!swap.ok) {
           return c.json(
-            {
-              success: false,
-              error: `Line ${idx + 1}: FG batch ${fgBatchId} not found`,
-            },
-            404,
-          );
-        }
-        if (batch.remainingQty < qty) {
-          return c.json(
-            {
-              success: false,
-              error: `Line ${idx + 1}: FG batch only has ${batch.remainingQty} on hand (requested ${qty})`,
-            },
-            409,
+            { success: false, error: swapProblem(ln, qty, swap) },
+            swap.reason === "wrong-product" ? 400 : 409,
           );
         }
         sideEffectStmts.push(
@@ -674,21 +802,22 @@ app.post("/", async (c) => {
             .prepare(
               "UPDATE fg_batches SET remainingQty = remainingQty - ? WHERE id = ?",
             )
-            .bind(qty, fgBatchId),
+            .bind(qty, swap.batchId),
         );
-        resolutionFgBatchId = fgBatchId;
+        resolutionFgBatchId = swap.batchId;
       }
-      // REPAIR has no per-line side effects.
+      // REPAIR has no per-line side effects — and no product requirement: the
+      // unit may be something that was never in our catalogue.
 
       lineRows.push({
         id: lineId,
         serviceOrderId: id,
-        sourceLineId: (ln.sourceLineId as string) ?? null,
+        sourceLineId: (raw.sourceLineId as string) ?? null,
         productId,
         productCode,
         productName,
         qty,
-        issueSummary: (ln.issueSummary as string) ?? null,
+        issueSummary: (raw.issueSummary as string) ?? null,
         resolutionProductionOrderId: resolutionPoId,
         resolutionFgBatchId,
       });
@@ -793,7 +922,12 @@ app.post("/", async (c) => {
     );
   } catch (err) {
     console.error("[POST /api/service-orders] failed:", err);
-    const message = err instanceof Error ? err.message : "Invalid request body";
+    // Never echo a driver/Postgres string to the operator — that is how a
+    // shop-floor user was shown a raw FK constraint name (2026-08-10).
+    const message = operatorSafeError(
+      err,
+      "Couldn't spawn the service order. Check the affected items and try again — nothing was created.",
+    );
     return c.json({ success: false, error: message }, 400);
   }
 });
@@ -858,7 +992,12 @@ app.put("/:id", async (c) => {
     });
   } catch (err) {
     console.error("[PUT /api/service-orders/:id] failed:", err);
-    const message = err instanceof Error ? err.message : "Invalid request body";
+    // Never echo a driver/Postgres string to the operator — that is how a
+    // shop-floor user was shown a raw FK constraint name (2026-08-10).
+    const message = operatorSafeError(
+      err,
+      "Couldn't save the service order. Nothing was changed.",
+    );
     return c.json({ success: false, error: message }, 400);
   }
 });
@@ -1035,7 +1174,12 @@ app.put("/:id/status", async (c) => {
     });
   } catch (err) {
     console.error("[PUT /api/service-orders/:id/status] failed:", err);
-    const message = err instanceof Error ? err.message : "Invalid request body";
+    // Never echo a driver/Postgres string to the operator — that is how a
+    // shop-floor user was shown a raw FK constraint name (2026-08-10).
+    const message = operatorSafeError(
+      err,
+      "Couldn't move the service order to that status. Nothing was changed.",
+    );
     return c.json({ success: false, error: message }, 400);
   }
 });
@@ -1132,6 +1276,35 @@ app.put("/:id/mode", async (c) => {
       .all<ServiceOrderLineRow>();
     const existingLines = linesRes.results ?? [];
 
+    // Same rule as POST — a mode picked LATER still has to be able to write
+    // what that mode writes. Before 2026-08-10 this branch bound
+    // `ln.productId ?? ""` into the same product_id FK as the spawn path, so
+    // "decide later → Reproduce" failed identically. Fixing only the spawn
+    // path would have left the second door open.
+    const modeCatalogue =
+      modeSpec(next)?.requiresCatalogueProduct === true
+        ? await loadCatalogue(c.var.DB)
+        : [];
+    const modeValidation = validateSpawnLines(
+      next,
+      existingLines.map((ln) => ({
+        productId: ln.productId,
+        productCode: ln.productCode,
+        productName: ln.productName,
+        qty: ln.qty,
+      })),
+      modeCatalogue,
+    );
+    if (modeValidation.problems.length > 0) {
+      return c.json(
+        {
+          success: false,
+          error: `${modeValidation.problems.map((p) => p.message).join(" ")} The mode was not changed — fix the affected items on this order first.`,
+        },
+        400,
+      );
+    }
+
     const stmts: D1PreparedStatement[] = [];
     const nowIso = new Date().toISOString();
     let nextStatus: Status = "OPEN";
@@ -1140,6 +1313,7 @@ app.put("/:id/mode", async (c) => {
       nextStatus = "IN_PRODUCTION";
       for (let idx = 0; idx < existingLines.length; idx++) {
         const ln = existingLines[idx];
+        const resolved = modeValidation.lines[idx];
         const poId = `pord-svc-${crypto.randomUUID().slice(0, 8)}`;
         const poNo = `${existing.serviceOrderNo}-${String(idx + 1).padStart(2, "0")}`;
         stmts.push(
@@ -1160,9 +1334,9 @@ app.put("/:id/mode", async (c) => {
               idx + 1,
               sourceCustomerName,
               sourceCustomerState ?? "",
-              ln.productId ?? "",
-              ln.productCode ?? "",
-              ln.productName ?? "",
+              resolved.productId,
+              resolved.productCode ?? "",
+              resolved.productName ?? "",
               ln.qty,
               nowIso.split("T")[0],
               nowIso,
@@ -1172,47 +1346,45 @@ app.put("/:id/mode", async (c) => {
         stmts.push(
           c.var.DB
             .prepare(
-              "UPDATE service_order_lines SET resolutionProductionOrderId = ? WHERE id = ?",
+              "UPDATE service_order_lines SET resolutionProductionOrderId = ?, productId = ?, productCode = ?, productName = ? WHERE id = ?",
             )
-            .bind(poId, ln.id),
+            .bind(
+              poId,
+              resolved.productId,
+              resolved.productCode,
+              resolved.productName,
+              ln.id,
+            ),
         );
       }
     } else if (next === "STOCK_SWAP") {
       nextStatus = "RESERVED";
       const lineFgBatches = (body.lineFgBatches as Record<string, string>) ?? {};
-      // Validate every existing line has a chosen FG batch.
-      for (const ln of existingLines) {
-        const fgBatchId = lineFgBatches[ln.id];
-        if (!fgBatchId) {
+      for (let idx = 0; idx < existingLines.length; idx++) {
+        const ln = existingLines[idx];
+        const resolved = modeValidation.lines[idx];
+        if (!resolved.productId) {
           return c.json(
             {
               success: false,
-              error: `STOCK_SWAP requires lineFgBatches[${ln.id}] (pick an FG batch for each affected item).`,
+              error: `Line ${resolved.lineNo}: pick the item from the Product list — ${SERVICE_MODE_SPECS.STOCK_SWAP.productRule} The mode was not changed.`,
             },
             400,
           );
         }
-        const batch = await c.var.DB
-          .prepare(
-            "SELECT id, remainingQty FROM fg_batches WHERE id = ?",
-          )
-          .bind(fgBatchId)
-          .first<{ id: string; remainingQty: number }>();
-        if (!batch) {
+        const swap = await resolveSwapBatch(
+          c.var.DB,
+          resolved.productId,
+          ln.qty,
+          lineFgBatches[ln.id] ?? null,
+        );
+        if (!swap.ok) {
           return c.json(
-            { success: false, error: `FG batch ${fgBatchId} not found` },
-            404,
+            { success: false, error: swapProblem(resolved, ln.qty, swap) },
+            swap.reason === "wrong-product" ? 400 : 409,
           );
         }
-        if (batch.remainingQty < ln.qty) {
-          return c.json(
-            {
-              success: false,
-              error: `FG batch ${fgBatchId} only has ${batch.remainingQty} on hand (need ${ln.qty}).`,
-            },
-            409,
-          );
-        }
+        const fgBatchId = swap.batchId;
         stmts.push(
           c.var.DB
             .prepare(
@@ -1223,9 +1395,15 @@ app.put("/:id/mode", async (c) => {
         stmts.push(
           c.var.DB
             .prepare(
-              "UPDATE service_order_lines SET resolutionFgBatchId = ? WHERE id = ?",
+              "UPDATE service_order_lines SET resolutionFgBatchId = ?, productId = ?, productCode = ?, productName = ? WHERE id = ?",
             )
-            .bind(fgBatchId, ln.id),
+            .bind(
+              fgBatchId,
+              resolved.productId,
+              resolved.productCode,
+              resolved.productName,
+              ln.id,
+            ),
         );
       }
     }
@@ -1263,7 +1441,12 @@ app.put("/:id/mode", async (c) => {
     });
   } catch (err) {
     console.error("[PUT /api/service-orders/:id/mode] failed:", err);
-    const message = err instanceof Error ? err.message : "Invalid request body";
+    // Never echo a driver/Postgres string to the operator — that is how a
+    // shop-floor user was shown a raw FK constraint name (2026-08-10).
+    const message = operatorSafeError(
+      err,
+      "Couldn't set the resolution mode. Nothing was changed.",
+    );
     return c.json({ success: false, error: message }, 400);
   }
 });
@@ -1343,7 +1526,12 @@ app.post("/:id/returns", async (c) => {
     return c.json({ success: true, data: created }, 201);
   } catch (err) {
     console.error("[POST /api/service-orders/:id/returns] failed:", err);
-    const message = err instanceof Error ? err.message : "Invalid request body";
+    // Never echo a driver/Postgres string to the operator — that is how a
+    // shop-floor user was shown a raw FK constraint name (2026-08-10).
+    const message = operatorSafeError(
+      err,
+      "Couldn't record the returned unit. Nothing was created.",
+    );
     return c.json({ success: false, error: message }, 400);
   }
 });
@@ -1443,7 +1631,12 @@ app.put("/:id/returns/:rid", async (c) => {
     return c.json({ success: true, data: updated });
   } catch (err) {
     console.error("[PUT /api/service-orders/:id/returns/:rid] failed:", err);
-    const message = err instanceof Error ? err.message : "Invalid request body";
+    // Never echo a driver/Postgres string to the operator — that is how a
+    // shop-floor user was shown a raw FK constraint name (2026-08-10).
+    const message = operatorSafeError(
+      err,
+      "Couldn't update the returned unit. Nothing was changed.",
+    );
     return c.json({ success: false, error: message }, 400);
   }
 });
@@ -1618,7 +1811,12 @@ app.post("/:id/returns/:rid/scrap", async (c) => {
     });
   } catch (err) {
     console.error("[POST /api/service-orders/:id/returns/:rid/scrap] failed:", err);
-    const message = err instanceof Error ? err.message : "Invalid request body";
+    // Never echo a driver/Postgres string to the operator — that is how a
+    // shop-floor user was shown a raw FK constraint name (2026-08-10).
+    const message = operatorSafeError(
+      err,
+      "Couldn't scrap the returned unit. Nothing was changed.",
+    );
     return c.json({ success: false, error: message }, 400);
   }
 });

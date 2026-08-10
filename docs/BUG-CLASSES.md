@@ -458,6 +458,49 @@ reader does not "fix" them again.
 
 ---
 
+## C13 — The screen calls a field optional; the write path requires it
+
+**Shape.** A form labels a field "optional" (or simply doesn't mark it required), the operator
+leaves it blank, and a table two hops downstream has a NOT NULL or a FOREIGN KEY on the column
+it feeds. The refusal therefore arrives from **Postgres**, at INSERT time, phrased as a
+constraint name. Two separate defects fall out of one root: the user was told the field didn't
+matter by the very screen that then failed, **and** the failure text is unusable — and because
+`humanizeError` correctly classifies a constraint string as technical, what actually reaches the
+toast is *"Something went wrong. Please try again."*, which is worse than the raw string,
+because retrying fails identically forever.
+
+**Why it keeps happening.** The requirement is not written down anywhere both sides can read.
+The screen encodes one belief about what a mode/branch needs, the route encodes another, and
+nothing forces them to agree — so they drift the moment either side is edited. `?? ""` makes it
+land as a *constraint* error rather than a *null* error, which reads like a data problem instead
+of a validation gap: **an empty string is not NULL**, so a nullable FK column still runs its
+check against `""` and rejects it.
+
+**The rule.** Derive the requirement from **what the branch WRITES**, put it in one pure module,
+and have the screen and the route both call it. Refuse BEFORE composing any statement, so the
+refusal can name the row the operator can see and say what to do. Never coerce a missing foreign
+key to `""` — pass `null` if the column truly allows it, or refuse.
+
+| # | surface | state |
+|---|---|---|
+| 1 | Spawn Service Order — CODE "optional", REPRODUCE's `production_orders.product_id` FK | ✅ fixed 2026-08-10 — rules moved to `src/lib/service-order-modes.ts`, called by dialog AND route |
+| 2 | `PUT /api/service-orders/:id/mode` → REPRODUCE — the same FK, reached by "decide later" | ✅ fixed 2026-08-10 in the same pass; fixing only #1 would have left this door open |
+| 3 | STOCK_SWAP "FG Batch" pickers fed from `/api/inventory` (which returns **products**, not `fg_batches`) — the id sent as `resolutionFgBatchId` was always a `prod-*` id, so the mode could never succeed | ✅ fixed 2026-08-10 — the route derives the batch FIFO from the product and tolerates a product-id hint; the spawn dialog's column is gone, the mode-change dropdown relabelled (it also printed a hardcoded "(0 on hand)") |
+| 4 | `CreateServiceOrderModal` in `src/pages/service-orders/index.tsx` — 900 lines that POST **without** `caseId`, which the route has required since 0074 | ⬜ open, but **unreachable**: `setCreateOpen(true)` is never called and nothing imports it. Delete it or wire it to the shared module; do not let it be re-enabled as-is |
+| 5 | the rest of the app | ⬜ unswept. The shape to look for is a form control whose label says *optional* feeding a column with a FK/NOT NULL, or a route binding `x ?? ""` into an id column |
+
+**Covered by** `tests/service-order-spawn-product.test.mjs` — the real handlers against an
+in-memory book whose `production_orders` insert **re-implements the FK** (an unknown id,
+including `""`, throws exactly what prod threw) and whose `batch()` is atomic like
+`SupabaseAdapter.batch`. So a regression that reintroduces `?? ""` fails the test the same way
+it failed the operator, and every refusal is asserted to pass `looksTechnical === false`.
+
+**Finding the next one.** Start from the SCHEMA, not the screen: list the FK / NOT NULL columns
+a route writes, then find the control that feeds each one and read its label. A field the user
+can leave blank must map to a column that accepts blank — or the screen must say so.
+
+---
+
 ## What tests cannot catch — and what covers it
 
 None of C1–C4's money leaks were introduced by a code change on the day they started leaking:

@@ -1199,7 +1199,16 @@ app.get("/", async (c) => {
   // invoice's nested `items` / `payments` arrays (see rowToInvoiceList). The
   // per-page invoice_items + invoice_payments fetches are dropped; the slim
   // mapper ships `items: []` / `payments: []`.
-  const data = invRows.map((inv) => rowToInvoiceList(inv));
+  // Same preOpening flag as the unpaginated branch — a caller must not see a
+  // different shape depending on whether it paginates.
+  const obDatePg = await getOpeningDate(db);
+  const data = invRows.map((inv) => ({
+    ...rowToInvoiceList(inv),
+    preOpening:
+      !!obDatePg &&
+      String(inv.invoiceDate ?? "").slice(0, 10) < obDatePg &&
+      !Number((inv as unknown as { isOpening?: number | null }).isOpening ?? 0),
+  }));
   return c.json({ success: true, data, page, limit, total });
 });
 

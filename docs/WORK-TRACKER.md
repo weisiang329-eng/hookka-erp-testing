@@ -9,6 +9,25 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-11 — ⚪ 两个新功能 ask（设计讨论中，未动工）
+
+Owner 原话两件事（多部分讯息，先全记下）：
+1. **人工薪水要包括 non-production 的**；然后 **dashboard 和 forecast 需要分类不同部门占比多少**。
+2. **Supplier payment 有一个付款方式 CASH AT BANK - HOUZS CENTURY，其实是用 Houzs Century
+   的 trade finance，是要还回给 Houzs Century 的**。要在 **creditor aging 分类出来**等等。
+   「具体再套路怎样做」—— 先谈设计再动手。
+
+进展（同日）：**两份设计已谈定并落文档**（项目夹 `财务模块-工资部门占比-设计.md`、
+`财务模块-HouzsCentury-TradeFinance-设计.md`），待 owner 过目后出实施计划。
+Owner 当日拍板：非生产工资**先不做**（只做分部门 dashboard/forecast）；不开新图——
+**现有 Production Salary 卡升级成 Cost Structure 式**（部门堆叠柱 + Show chips + tooltip
+占比；RM/head、RM/unit 等原有内容保留）〔owner 纠正过一次理解，以此为准〕；
+forecast 工资按部门 key、750-x 派生；
+TF 还款走 **Supplier Payment**（供应商 HOUZS CENTURY SDN BHD sup-c51b4c45）；310-0020
+**原地改 LIABILITY** 改名 TRADE FINANCE - HOUZS CENTURY（台账零改动）；账龄按**到期日**。
+实测底数：payslips 仅 8 生产部门（7 月 RM 69,847）；310-0020 净贷余 94,822.92 =
+4 笔代付（07-07~07-24），零还款；440-0010 闲置；tenor 默认 90 天待确认。
+
 ## 2026-08-10 — 🔵 Spawn Service Order：Reproduce 空 code 直接爆 FK · main（未 push，未验 prod）
 
 现场：Service Case → Spawn Service Order，Resolution Mode = Reproduce，一行 Affected Item，

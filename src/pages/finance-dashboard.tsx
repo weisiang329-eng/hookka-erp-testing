@@ -64,8 +64,9 @@ type Row = {
   /** Denominators for the Production Salary card: heads on the payroll and
       units completed in the period. unitsCompleted is known to run high. */
   labourBase?: { headcount: number | null; unitsCompleted: number | null };
-  /** Wage bill per department (payslips-sourced) for the stacked salary card. */
-  salaryByDept?: { dept: string; costSen: number }[];
+  /** Wage bill per department (payslips-sourced) for the stacked salary card,
+      with each department's forecast (dept: rows) beside it. */
+  salaryByDept?: { dept: string; costSen: number; forecastSen?: number }[];
   cashFlow: {
     operating: number; investing: number; financing: number; net: number; freeCashFlow: number;
     inflow?: number; outflow?: number;
@@ -337,12 +338,21 @@ export default function FinanceDashboardPage() {
       (rows ?? []).map((r, i) => {
         const base = labourData[i];
         const sales = r.actual?.sales ?? null;
+        const fcSales = r.forecast?.sales ?? null;
         const rec: Record<string, number | string | null> = { ...base };
+        rec.__sales__ = sales;
         let drawn = 0;
         for (const d of r.salaryByDept ?? []) {
-          rec[d.dept] = d.costSen;
-          if (sales && sales !== 0) rec[`__pct__${d.dept}`] = Math.round((d.costSen / sales) * 10000) / 100;
-          if (!salHidden.has(d.dept)) drawn += d.costSen;
+          if (d.costSen !== 0) {
+            rec[d.dept] = d.costSen;
+            if (sales && sales !== 0) rec[`__pct__${d.dept}`] = Math.round((d.costSen / sales) * 10000) / 100;
+            if (!salHidden.has(d.dept)) drawn += d.costSen;
+          }
+          const fc = d.forecastSen ?? 0;
+          if (fc !== 0) {
+            rec[`__fc__${d.dept}`] = fc;
+            if (fcSales && fcSales !== 0) rec[`__fcpct__${d.dept}`] = Math.round((fc / fcSales) * 10000) / 100;
+          }
         }
         if (base?.forecastPct !== null && base?.forecastPct !== undefined) rec.__pct__forecast = base.forecastPct;
         // The share printed on top of the stack while a single band is drawn.
@@ -799,40 +809,93 @@ export default function FinanceDashboardPage() {
                 <div className="overflow-x-auto">
                   <table className="w-full">
                     <tbody>
-                      {periodHead(labourData.map((d) => d.label))}
-                      <tr className="border-b border-[#F0ECE9]">
-                        <td className={`${td} text-left font-medium`}>Amount</td>
-                        {labourData.map((d) => (
-                          <td key={d.label} className={td}>
-                            {rm(d.amount)}
-                            {d.pct !== null && <span className="ml-1.5 text-[10px] text-[#6B5C32]">{d.pct.toFixed(2)}%</span>}
-                          </td>
+                      {/* Same split layout as the Cost Structure table (owner
+                          2026-08-11): every period = actual RM+% | forecast
+                          RM+%, one row per department. */}
+                      {periodHeadSplit(salData.map((d) => String(d.label)))}
+                      <tr className="border-b border-[#E2DDD8] bg-[#F6F1E7]">
+                        <td className={`${td} text-left font-semibold`}>REVENUE</td>
+                        {salData.map((d, i) => (
+                          <Fragment key={String(d.label)}>
+                            <td className={`${td} font-semibold border-l border-[#E2DDD8]`}>{rm(d.__sales__ as number | null)}</td>
+                            <td className={`${td} font-semibold text-[#9A3A2D]`}>
+                              {(rows ?? [])[i]?.forecast?.sales != null ? rm((rows ?? [])[i]!.forecast!.sales!) : "-"}
+                            </td>
+                          </Fragment>
                         ))}
                       </tr>
-                      <tr className="border-b border-[#F0ECE9]">
-                        <td className={`${td} text-left font-medium text-[#9A3A2D]`}>Forecast</td>
+                      {salDepts.map((dept) => (
+                        <tr key={dept} className="border-b border-[#F0ECE9]">
+                          <td className={`${td} text-left font-medium`}>{dept}</td>
+                          {salData.map((d) => {
+                            const amt = (d[dept] as number | null) ?? null;
+                            const p = (d[`__pct__${dept}`] as number | null) ?? null;
+                            const fc = (d[`__fc__${dept}`] as number | null) ?? null;
+                            const fp = (d[`__fcpct__${dept}`] as number | null) ?? null;
+                            const over = p !== null && fp !== null && p > fp;
+                            return (
+                              <Fragment key={String(d.label)}>
+                                <td className={`${td} border-l border-[#E2DDD8]`}>
+                                  {amt === null || amt === 0 ? "-" : (
+                                    <>
+                                      {rm(amt)}
+                                      <span className={`ml-1.5 text-[10px] ${fp === null ? "text-[#6B5C32]" : over ? "text-[#9A3A2D]" : "text-[#27500A]"}`}>
+                                        {p === null ? "" : `${p.toFixed(2)}%`}
+                                      </span>
+                                    </>
+                                  )}
+                                </td>
+                                <td className={`${td} text-[#9A3A2D]`}>
+                                  {fc === null ? "-" : (
+                                    <>
+                                      {rm(fc)}
+                                      <span className="ml-1.5 text-[10px]">{fp === null ? "" : `${fp.toFixed(2)}%`}</span>
+                                    </>
+                                  )}
+                                </td>
+                              </Fragment>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                      <tr className="border-b border-[#E2DDD8] bg-[#F7F4EF] font-semibold">
+                        <td className={`${td} text-left`}>TOTAL</td>
                         {labourData.map((d) => (
-                          <td key={d.label} className={`${td} text-[#9A3A2D]`}>
-                            {rm(d.forecast)}
-                            {d.forecastPct !== null && <span className="ml-1.5 text-[10px]">{d.forecastPct.toFixed(2)}%</span>}
-                          </td>
+                          <Fragment key={d.label}>
+                            <td className={`${td} border-l border-[#E2DDD8]`}>
+                              {rm(d.amount)}
+                              {d.pct !== null && <span className="ml-1.5 text-[10px] text-[#6B5C32]">{d.pct.toFixed(2)}%</span>}
+                            </td>
+                            <td className={`${td} text-[#9A3A2D]`}>
+                              {rm(d.forecast)}
+                              {d.forecastPct !== null && <span className="ml-1.5 text-[10px]">{d.forecastPct.toFixed(2)}%</span>}
+                            </td>
+                          </Fragment>
                         ))}
                       </tr>
                       <tr className="border-b border-[#F0ECE9]">
                         <td className={`${td} text-left font-medium text-[#3E6570]`}>Headcount</td>
-                        {labourData.map((d) => <td key={d.label} className={`${td} text-[#3E6570]`}>{d.headcount ?? "-"}</td>)}
+                        {labourData.map((d) => (
+                          <td key={d.label} colSpan={2} className={`${td} text-[#3E6570] border-l border-[#E2DDD8]`}>{d.headcount ?? "-"}</td>
+                        ))}
                       </tr>
                       <tr className="border-b border-[#F0ECE9]">
                         <td className={`${td} text-left font-medium text-[#3E6570]`}>RM / head</td>
-                        {labourData.map((d) => <td key={d.label} className={`${td} text-[#3E6570]`}>{rm(d.perHead)}</td>)}
+                        {labourData.map((d) => (
+                          <td key={d.label} colSpan={2} className={`${td} text-[#3E6570] border-l border-[#E2DDD8]`}>{rm(d.perHead)}</td>
+                        ))}
                       </tr>
                       <tr className="border-b border-[#F0ECE9]">
                         <td className={`${td} text-left font-medium text-[#4F7C3A]`}>Units completed</td>
-                        {labourData.map((d) => <td key={d.label} className={`${td} text-[#4F7C3A]`}>{d.units ?? "-"}</td>)}
+                        {labourData.map((d) => (
+                          <td key={d.label} colSpan={2} className={`${td} text-[#4F7C3A] border-l border-[#E2DDD8]`}>{d.units ?? "-"}</td>
+                        ))}
                       </tr>
                       <tr>
                         <td className={`${td} text-left font-medium text-[#4F7C3A]`}>RM / unit</td>
-                        {labourData.map((d) => <td key={d.label} className={`${td} text-[#4F7C3A]`}>{rm(d.perUnit)}</td>)}
+                        {labourData.map((d) => (
+                          <td key={d.label} colSpan={2} className={`${td} text-[#4F7C3A] border-l border-[#E2DDD8]`}>{rm(d.perUnit)}</td>
+                        ))}
                       </tr>
                     </tbody>
                   </table>

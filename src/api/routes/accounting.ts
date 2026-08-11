@@ -10071,7 +10071,7 @@ app.get("/dashboard", async (c) => {
   // Bump for a changed SHAPE *or* a changed default WINDOW: the stored copy is
   // keyed by the range string, and the default range's key is blank either way,
   // so a wider-or-narrower default would keep serving the old month list.
-  const DASH_PAYLOAD_V = "v7"; // v7: + salaryByDept (per-department wage bill); v6: + labourBase
+  const DASH_PAYLOAD_V = "v8"; // v8: salaryByDept entries carry forecastSen; v7: + salaryByDept; v6: + labourBase
   // The explicit window is part of the identity — otherwise two different
   // ranges would share one cached copy.
   const dashRangeKey = `${String(c.req.query("from") ?? "")}~${String(c.req.query("to") ?? "")}`;
@@ -10464,6 +10464,9 @@ app.get("/dashboard", async (c) => {
   // category names this dashboard's cost-structure card uses), so each
   // material can show its target beside the actual.
   const fcCatByMonth = new Map<string, Map<string, number>>();
+  // Forecast per DEPARTMENT (`dept:` rows) — the Production Salary card's
+  // table shows each department's target beside its actual (owner 2026-08-11).
+  const fcDeptByMonth = new Map<string, Map<string, number>>();
   for (const [ym, m] of Object.entries(fcMonths)) {
     const slice = zero();
     slice.sales = Math.max(0, Math.round(Number(m.salesSen) || 0));
@@ -10484,6 +10487,10 @@ app.get("/dashboard", async (c) => {
         const deptAmt = fcLineAmt(m, v);
         slice.labour += deptAmt;
         slice.cogs += deptAmt;
+        const deptName = code.slice(5);
+        const dm = fcDeptByMonth.get(ym) ?? new Map<string, number>();
+        dm.set(deptName, (dm.get(deptName) ?? 0) + deptAmt);
+        fcDeptByMonth.set(ym, dm);
         continue;
       }
       if (kind === "labourAccount" && deptForecast) continue;
@@ -10570,10 +10577,13 @@ app.get("/dashboard", async (c) => {
       units += unitsByMonth.get(ym) ?? 0;
     }
     const headcount = headMonths > 0 ? Math.round(headSum / headMonths) : null;
-    // Wage bill per department over the bucket's months (payslips-sourced).
+    // Wage bill per department over the bucket's months (payslips-sourced),
+    // with each department's forecast (dept: rows) beside it.
     const salDept = new Map<string, number>();
+    const salDeptFc = new Map<string, number>();
     for (const ym of b.months) {
       for (const d of salByMonth.get(ym) ?? []) salDept.set(d.dept, (salDept.get(d.dept) ?? 0) + d.costSen);
+      for (const [dept, sen] of fcDeptByMonth.get(ym) ?? []) salDeptFc.set(dept, (salDeptFc.get(dept) ?? 0) + sen);
     }
     return {
       key: b.key,
@@ -10584,9 +10594,9 @@ app.get("/dashboard", async (c) => {
       // Production Salary denominators. unitsCompleted is flagged in the UI:
       // fg_batches double-counts some completions (parked defect).
       labourBase: { headcount, unitsCompleted: units > 0 ? units : null },
-      salaryByDept: [...salDept.entries()]
-        .map(([dept, costSen]) => ({ dept, costSen }))
-        .filter((d) => d.costSen !== 0)
+      salaryByDept: [...new Set([...salDept.keys(), ...salDeptFc.keys()])]
+        .map((dept) => ({ dept, costSen: salDept.get(dept) ?? 0, forecastSen: salDeptFc.get(dept) ?? 0 }))
+        .filter((d) => d.costSen !== 0 || d.forecastSen !== 0)
         .sort((a, b2) => a.dept.localeCompare(b2.dept)),
       costStructure: {
         salesSplit: { bedframe: bedSales, sofa: sofaSales },

@@ -37,6 +37,7 @@ import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
 import { ensureFinanceOrgColumns } from "../lib/ensure-finance-org";
 import { apRowBeforeOpening, legBeforeOpening, rowBeforeOpening } from "../../lib/opening-floor";
 import { applyOpeningSlice, windowCoversMonth } from "../../lib/opening-slice";
+import { groupPayslipsByMonthDept, forecastEntryKind, monthHasDeptForecast } from "../../lib/salary-dept";
 import { buildDeliveredAsOf, fgClosingSen } from "../../lib/fg-closing";
 import { costAsOfByPo } from "../../lib/cost-attribution";
 import { STOCK_TAKE_ITEM_ALIAS_SEED_2026_05 } from "../lib/stock-take-item-alias-seed-2026-05";
@@ -9424,6 +9425,27 @@ app.get("/labor/preview", async (c) => {
   }
 });
 
+// The Forecast page seeds its per-department salary rows from the departments
+// that have ever appeared on a payslip (owner 2026-08-11). Non-production
+// departments will simply show up here once they exist — nothing to change.
+app.get("/labor/departments", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  try {
+    const res = await c.var.DB.prepare(
+      `SELECT DISTINCT departmentCode FROM payslips WHERE orgId = ? AND status != 'CANCELLED'`,
+    )
+      .bind(getOrgId(c))
+      .all<{ departmentCode: string | null; department_code: string | null }>();
+    const departments = [...new Set(
+      (res.results ?? []).map((r) => String(r.departmentCode ?? r.department_code ?? "").trim()).filter(Boolean),
+    )].sort();
+    return c.json({ success: true, data: { departments } });
+  } catch {
+    return c.json({ success: true, data: { departments: [] } });
+  }
+});
+
 app.post("/labor/post", async (c) => {
   const denied = await requirePermission(c, "accounting", "create");
   if (denied) return denied;
@@ -9787,7 +9809,7 @@ app.get("/dashboard", async (c) => {
   // Bump for a changed SHAPE *or* a changed default WINDOW: the stored copy is
   // keyed by the range string, and the default range's key is blank either way,
   // so a wider-or-narrower default would keep serving the old month list.
-  const DASH_PAYLOAD_V = "v6"; // v6: + labourBase (headcount / units completed)
+  const DASH_PAYLOAD_V = "v7"; // v7: + salaryByDept (per-department wage bill); v6: + labourBase
   // The explicit window is part of the identity — otherwise two different
   // ranges would share one cached copy.
   const dashRangeKey = `${String(c.req.query("from") ?? "")}~${String(c.req.query("to") ?? "")}`;
@@ -9811,6 +9833,9 @@ app.get("/dashboard", async (c) => {
         // hiring someone or completing a batch would leave the card stale.
         "workers",
         "fg_batches",
+        // salaryByDept reads payslips — without it a payroll edit leaves the
+        // department stacks stale.
+        "payslips",
       ],
     },
     dashOrgId,
@@ -9979,6 +10004,22 @@ app.get("/dashboard", async (c) => {
     }
   } catch {
     /* fg_batches absent → no per-unit line */
+  }
+  // ---- Salary by department (owner 2026-08-11) ----------------------------
+  // The dept dimension lives only in payslips; one query for the whole window,
+  // grouped by the shared pure rule so Σdepts always equals the Labour tab.
+  let salByMonth = new Map<string, { dept: string; costSen: number }[]>();
+  try {
+    const psRes = await db
+      .prepare(
+        `SELECT period, departmentCode, grossPaySen, epfEmployerSen, socsoEmployerSen, eisEmployerSen
+           FROM payslips WHERE orgId = ? AND status != 'CANCELLED'`,
+      )
+      .bind(orgIdDash)
+      .all<Record<string, unknown>>();
+    salByMonth = groupPayslipsByMonthDept((psRes.results ?? []) as never[]);
+  } catch {
+    /* payslips table absent → card simply shows no dept split */
   }
   const BEDFRAME_SALES = "500-0000";
   const csLineOf = (name: string): "bedframe" | "sofa" | "shared" => {
@@ -10171,7 +10212,19 @@ app.get("/dashboard", async (c) => {
       cats.set(name, (cats.get(name) ?? 0) + fcLineAmt(m, v));
     }
     fcCatByMonth.set(ym, cats);
+    // Owner 2026-08-11: salaries forecast PER DEPARTMENT (`dept:` pseudo-rows).
+    // A month with any dept row owns its labour there — its 750-x account
+    // entries are superseded leftovers (shared rule with the Forecast page).
+    const deptForecast = monthHasDeptForecast(m.pct);
     for (const [code, v] of Object.entries(m.pct ?? {})) {
+      const kind = forecastEntryKind(code);
+      if (kind === "dept") {
+        const deptAmt = fcLineAmt(m, v);
+        slice.labour += deptAmt;
+        slice.cogs += deptAmt;
+        continue;
+      }
+      if (kind === "labourAccount" && deptForecast) continue;
       const amt = fcLineAmt(m, v);
       const meta = code.startsWith("cat:") ? { type: "COST" } : coaDash.get(code);
       if (!meta) { slice.materials += amt; slice.cogs += amt; continue; }
@@ -10255,6 +10308,11 @@ app.get("/dashboard", async (c) => {
       units += unitsByMonth.get(ym) ?? 0;
     }
     const headcount = headMonths > 0 ? Math.round(headSum / headMonths) : null;
+    // Wage bill per department over the bucket's months (payslips-sourced).
+    const salDept = new Map<string, number>();
+    for (const ym of b.months) {
+      for (const d of salByMonth.get(ym) ?? []) salDept.set(d.dept, (salDept.get(d.dept) ?? 0) + d.costSen);
+    }
     return {
       key: b.key,
       label: b.label,
@@ -10264,6 +10322,10 @@ app.get("/dashboard", async (c) => {
       // Production Salary denominators. unitsCompleted is flagged in the UI:
       // fg_batches double-counts some completions (parked defect).
       labourBase: { headcount, unitsCompleted: units > 0 ? units : null },
+      salaryByDept: [...salDept.entries()]
+        .map(([dept, costSen]) => ({ dept, costSen }))
+        .filter((d) => d.costSen !== 0)
+        .sort((a, b2) => a.dept.localeCompare(b2.dept)),
       costStructure: {
         salesSplit: { bedframe: bedSales, sofa: sofaSales },
         // Target spend per category from the Forecast P&L (blank when the

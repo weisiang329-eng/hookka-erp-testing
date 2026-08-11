@@ -9,7 +9,21 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
-## 2026-08-11 — ⚪ 两个新功能 ask（设计讨论中，未动工）
+## 2026-08-11 — 🔵 两个新功能：工资部门占比 ✅ 已上线验证；Houzs TF 已推送待 owner Setup
+
+**功能 1 ✅ 上线并验证**（commits 97d50070/573d34bf/6a351e66/d0e3d605）：Production Salary
+卡部门堆叠 + Show chips（CS 同款交互）；forecast 部门行（`dept:` 伪行）、750-x 派生、
+共享 supersede 规则（`src/lib/salary-dept.ts`）；dashboard 载荷 v7 + `salaryByDept`、
+sourceTables 补 payslips；`GET /labor/departments`。**Prod 实测：7 月 Σ8 部门 =
+69,847.45 = Labour tab 分毫一致**；`/labor/departments` 回 8 生产部门。
+**功能 2 已推送**（commits a4adc953/ca755f97/00381df3）：310-0020 原地改 LIABILITY 走
+`POST /trade-finance/setup`（owner 按 Save 才发生）；draw 子账台账派生自愈
+（`loadTfDraws`，金额零存储）；还款 = Supplier Payment 选 lender（method
+TF_REPAYMENT、DR TF/CR 银行、逐笔 clamp）；void 双向闸；aging `tf` 区块按到期日分桶、
+恒等式上屏。**待 owner**：① Creditor Aging → Trade Finance → Set up（310-0020 /
+HOUZS CENTURY SDN BHD / 真实 tenor）② 4 笔 draw 逐笔核到期日 ③ 验 BS/TB/Cash Book。
+tenor 默认 90 天（owner 未答，逐笔可改）。回归测试 tests/salary-dept、trade-finance、
+tf-repayment 全绿；全量套件每 commit 过。
 
 Owner 原话两件事（多部分讯息，先全记下）：
 1. **人工薪水要包括 non-production 的**；然后 **dashboard 和 forecast 需要分类不同部门占比多少**。

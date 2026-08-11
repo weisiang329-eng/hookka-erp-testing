@@ -64,6 +64,8 @@ type Row = {
   /** Denominators for the Production Salary card: heads on the payroll and
       units completed in the period. unitsCompleted is known to run high. */
   labourBase?: { headcount: number | null; unitsCompleted: number | null };
+  /** Wage bill per department (payslips-sourced) for the stacked salary card. */
+  salaryByDept?: { dept: string; costSen: number }[];
   cashFlow: {
     operating: number; investing: number; financing: number; net: number; freeCashFlow: number;
     inflow?: number; outflow?: number;
@@ -318,6 +320,36 @@ export default function FinanceDashboardPage() {
         };
       }),
     [rows],
+  );
+  // Department stacks for the Production Salary card (owner 2026-08-11:
+  // 「弄到像 cost structure 这样」). Chips = the union of departments in the
+  // window; every point carries __pct__<dept> so ChartTip shares prints
+  // RM + % of sales per band, exactly like the cost-structure chart.
+  const salDepts = useMemo(() => {
+    const s = new Set<string>();
+    for (const r of rows ?? []) for (const d of r.salaryByDept ?? []) s.add(d.dept);
+    return [...s].sort();
+  }, [rows]);
+  const [salHidden, setSalHidden] = useState<Set<string>>(new Set());
+  const salShownCount = salDepts.filter((d) => !salHidden.has(d)).length;
+  const salData = useMemo(
+    () =>
+      (rows ?? []).map((r, i) => {
+        const base = labourData[i];
+        const sales = r.actual?.sales ?? null;
+        const rec: Record<string, number | string | null> = { ...base };
+        let drawn = 0;
+        for (const d of r.salaryByDept ?? []) {
+          rec[d.dept] = d.costSen;
+          if (sales && sales !== 0) rec[`__pct__${d.dept}`] = Math.round((d.costSen / sales) * 10000) / 100;
+          if (!salHidden.has(d.dept)) drawn += d.costSen;
+        }
+        if (base?.forecastPct !== null && base?.forecastPct !== undefined) rec.__pct__forecast = base.forecastPct;
+        // The share printed on top of the stack while a single band is drawn.
+        rec.__drawnpct__ = sales && sales !== 0 ? Math.round((drawn / sales) * 10000) / 100 : null;
+        return rec;
+      }),
+    [rows, labourData, salHidden],
   );
 
   const cfData = useMemo(
@@ -677,10 +709,54 @@ export default function FinanceDashboardPage() {
                   <span className="text-[11px] text-[#9CA3AF]">
                     750-0010 SALARIES · 750-0020 EPF · 750-0030 SOCSO · 750-0040 EIS
                   </span>
+                  <span className="ml-1 text-[11px] text-[#9CA3AF]">RM + % of sales</span>
                 </div>
+                {/* Which departments the stack draws (owner 2026-08-11: 「像
+                    cost structure 这样选择」). Colours match the bands. */}
+                {salDepts.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] text-[#6B7280] mr-0.5">Show</span>
+                    {salDepts.map((dept, i) => {
+                      const colour = CS_COLOURS[i % CS_COLOURS.length];
+                      const on = !salHidden.has(dept);
+                      return (
+                        <button
+                          key={dept}
+                          onClick={() =>
+                            setSalHidden((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(dept)) next.delete(dept);
+                              else next.add(dept);
+                              return next;
+                            })
+                          }
+                          className={`flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] cursor-pointer ${
+                            on ? "border-[#E2DDD8] bg-white text-[#1F1D1B]" : "border-[#E2DDD8] bg-[#F0ECE9] text-[#9CA3AF]"
+                          }`}
+                          title={on ? `Hide ${dept} from the chart` : `Show ${dept} on the chart`}
+                        >
+                          <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: on ? colour : "#D8D3CE" }} />
+                          {dept}
+                        </button>
+                      );
+                    })}
+                    {salHidden.size > 0 && (
+                      <button onClick={() => setSalHidden(new Set())}
+                        className="rounded-md border border-[#E2DDD8] px-2 py-0.5 text-[11px] text-[#3E6570] cursor-pointer hover:bg-[#F0ECE9]">
+                        Show all
+                      </button>
+                    )}
+                    {salHidden.size < salDepts.length && (
+                      <button onClick={() => setSalHidden(new Set(salDepts))}
+                        className="rounded-md border border-[#E2DDD8] px-2 py-0.5 text-[11px] text-[#6B7280] cursor-pointer hover:bg-[#F0ECE9]">
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                )}
                 <div className="h-64">
                   <ResponsiveContainer width="100%" height="100%">
-                    <ComposedChart data={labourData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                    <ComposedChart data={salData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                       <CartesianGrid stroke="#F0ECE9" vertical={false} />
                       <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false} />
                       {/* Two scales: the wage bill is in tens of thousands, the
@@ -689,8 +765,28 @@ export default function FinanceDashboardPage() {
                         tickFormatter={(v: number) => rm(v)} />
                       <YAxis yAxisId="unit" orientation="right" tick={{ fontSize: 11, fill: "#9A3A2D" }} axisLine={false} tickLine={false}
                         tickFormatter={(v: number) => rm(v)} />
-                      <Tooltip content={<ChartTip />} />
-                      <Bar yAxisId="amt" dataKey="amount" name="Production Salary" fill={GOLD} radius={[3, 3, 0, 0]} maxBarSize={38} />
+                      <Tooltip content={<ChartTip shares />} />
+                      {salDepts.length === 0 ? (
+                        // No dept data yet (pre-payroll months / fresh org) —
+                        // the original single-total bar keeps the card alive.
+                        <Bar yAxisId="amt" dataKey="amount" name="Production Salary" fill={GOLD} radius={[3, 3, 0, 0]} maxBarSize={38} />
+                      ) : (
+                        salDepts.map((dept, i) =>
+                          salHidden.has(dept) ? null : (
+                            <Bar key={dept} yAxisId="amt" dataKey={dept} name={dept} stackId="sal" maxBarSize={38}
+                              fill={CS_COLOURS[i % CS_COLOURS.length]}>
+                              {/* The share printed ON the stack, but only while a
+                                  single department is drawn — the tooltip already
+                                  carries every band's share. */}
+                              {salShownCount === 1 && (
+                                <LabelList dataKey="__drawnpct__" position="top" offset={6}
+                                  formatter={(v: unknown) => (typeof v === "number" ? `${v.toFixed(2)}%` : "")}
+                                  style={{ fontSize: 10, fill: "#6B5C32" }} />
+                              )}
+                            </Bar>
+                          ),
+                        )
+                      )}
                       <Line yAxisId="amt" type="monotone" dataKey="forecast" name="Forecast" stroke={RUST}
                         strokeWidth={2} strokeDasharray="5 4" dot={false} connectNulls={false} />
                       <Line yAxisId="unit" type="monotone" dataKey="perHead" name="RM / head" stroke="#3E6570"

@@ -3593,3 +3593,42 @@ Houzs and The Conts, whose openings the owner parked for later.
 2026-07-09) and a guard on the opening list's `remove`, which DELETES the
 invoice row — right for a seed, catastrophic for a real invoice merely flagged
 as opening.
+
+## 2026-08-06 (night) — Carress closed end to end; the payments module hardened
+
+**Carress is the first customer opening finished completely.** 41,242.00 posted
+(22 invoices built to THEIR list + 6 ERP invoices flagged via the new
+ar-include), the opening credit split by product (BEDFRAME 14,023 / SOFA
+27,219), 31/05 verified at 33,706.50 — Carress's own figure — and all 66,000 of
+receipts re-allocated oldest-first onto in-book invoices, per-document parity
+with their statement. Two mis-issued 30/05 invoices (12,802.76) un-knocked and
+voided on the owner's ruling. Ten small invoices (3,911) deliberately left
+unknocked pending CN/DN.
+
+**AR drift: −60,000 → −25,000, and every sen of what remains is named** — the
+Houzs 25,000 receipt sitting on 14 out-of-book Houzs invoices, which the Houzs
+opening will absorb.
+
+**Four fixes shipped along the way, each found because the owner pressed the
+buttons and the numbers on screen didn't move the way the maths said:**
+- BUG-2026-08-06-004 — editing a customer receipt never rebuilt the aging
+  snapshot (supplier side fixed in July; the mirror was missed).
+- BUG-2026-08-06-005 — voiding an EDITED invoice left its restate legs live;
+  two cancelled invoices kept 12,802.76 on 300-0000 and partially CANCELLED OUT
+  the Houzs drift, displaying −12,197.24. Hide is now family-wide and
+  org-agnostic; data repaired via backfill-cancel-reversals (dry-run first:
+  84 scanned, exactly 2 needed).
+- The knock-off grid offered 18 out-of-book invoices beside real ones — the
+  exact path the GVP 950, Houzs 25,000 and Carress 14,418 mistakes took. The
+  list now carries a `preOpening` flag and the grid hides them (edit-mode
+  exception so old mistakes stay undoable).
+- Allocations now carry invoice number AND date (resolved on read — repairs
+  stored receipts), shown in the detail panel, the printed voucher, and both
+  knock-off grids, all sorted oldest-first.
+
+**3657 tests, 0 fail.** Trial balance balanced; AP 0.00; counter drift 0.00;
+unapplied advances 0.00.
+
+**Next:** Houzs and The Conts openings (the Carress playbook, written into the
+checkpoint); the 18 Carress ghosts await a void ruling; the 10 CN/DN invoices;
+SUNMAT K26050470; May labour unposted.

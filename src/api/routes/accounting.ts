@@ -9913,6 +9913,88 @@ app.get("/trade-finance", async (c) => {
   }
 });
 
+// Interest on a draw (owner 2026-08-11 「要包括 interest」): the owner keys
+// the bank's charged interest per draw (manual now; OCR-prefill later). The
+// figure is stored NOWHERE — it is posted as `tf_interest` legs under the
+// DRAW's sourceId (DR 900-I001 INTEREST ON TRADE FINANCE / CR the TF
+// account), so the draw's ledger-derived amount, outstanding, repayment
+// clamps and the identity line all include it by construction. The endpoint
+// takes the draw's TOTAL interest and delta-posts the difference — send the
+// same figure twice and nothing happens; lower it and the excess reverses.
+// sourceType `tf_interest` is deliberately NOT in DOC_DATE_FAMILIES: its
+// legs date to the day they are keyed (postedAt fallback), which is when the
+// charge becomes known.
+const TF_INTEREST_ACCT = { code: "900-I001", name: "INTEREST ON TRADE FINANCE" };
+
+app.put("/trade-finance/draw-interest", async (c) => {
+  const denied = requireFinance(c);
+  if (denied) return denied;
+  try {
+    const body = (await c.req.json().catch(() => ({}))) as { drawSourceId?: string; interestSen?: number; date?: string };
+    const drawSourceId = String(body.drawSourceId ?? "").trim();
+    const targetSen = Math.round(Number(body.interestSen) || 0);
+    // Charge date (bank statement day) — becomes part of the sourceId so the
+    // leg self-dates (doc-date). Defaults to today for hand-keyed figures.
+    const chargeDate = /^\d{4}-\d{2}-\d{2}$/.test(String(body.date ?? ""))
+      ? String(body.date)
+      : new Date().toISOString().slice(0, 10);
+    if (!drawSourceId || targetSen < 0) {
+      return c.json({ success: false, error: "drawSourceId and a non-negative interestSen are required" }, 400);
+    }
+    await ensureTfTables(c.var.DB);
+    const drawRow = await c.var.DB.prepare(
+      "SELECT draw_source_id, account_code FROM trade_finance_draws WHERE draw_source_id = ?",
+    ).bind(drawSourceId).first<Record<string, unknown>>();
+    if (!drawRow) return c.json({ success: false, error: "Draw not found — open the aging block once to backfill it" }, 404);
+    const accountCode = String(drawRow.accountCode ?? drawRow.account_code ?? "");
+    const source = (await getTfSources(c.var.DB)).find((s) => s.accountCode === accountCode);
+    if (!source) return c.json({ success: false, error: "This draw's account is not a configured trade-finance source" }, 400);
+    const { draws } = await loadTfDraws(c.var.DB, source);
+    const draw = draws.find((d) => d.drawSourceId === drawSourceId);
+    if (!draw) return c.json({ success: false, error: "Draw is not open (voided or fully derived away)" }, 404);
+    const deltaSen = targetSen - draw.interestSen;
+    if (deltaSen === 0) return c.json({ success: true, data: { drawSourceId, interestSen: targetSen, unchanged: true } });
+    if (draw.amountSen + deltaSen < draw.repaidSen) {
+      return c.json({ success: false, error: "Lowering interest below what is already repaid would overdraw the draw — void the repayment first" }, 400);
+    }
+    // Make sure the dedicated expense account exists (created once, quietly).
+    await c.var.DB.prepare(
+      `INSERT INTO chart_of_accounts (code, name, type, parentCode, balanceSen, isActive, cashFlowCategory, specialAccountType, pnlCategory, isPostable)
+       VALUES (?, ?, 'EXPENSE', NULL, 0, 1, NULL, NULL, NULL, 1)
+       ON CONFLICT (code) DO NOTHING`,
+    ).bind(TF_INTEREST_ACCT.code, TF_INTEREST_ACCT.name).run();
+    const orgId = getOrgId(c);
+    const actorUserId = (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+    // sourceId carries the charge date (self-dated leg, see doc-date.ts);
+    // deriveDraws strips the `tfint-<date>-` prefix to fold it into the draw.
+    const interestSourceId = `tfint-${chargeDate}-${drawSourceId}`;
+    const legNoBase = await nextLegNo(c.var.DB, orgId, "tf_interest", interestSourceId);
+    const abs = Math.abs(deltaSen);
+    const legs: LedgerEntryInput[] = deltaSen > 0
+      ? [
+          { id: `lje-${crypto.randomUUID().slice(0, 12)}`, sourceType: "tf_interest", sourceId: interestSourceId, legNo: legNoBase, accountCode: TF_INTEREST_ACCT.code, debitSen: abs, creditSen: 0, description: `TF interest · ${drawSourceId}`, actorUserId, orgId },
+          { id: `lje-${crypto.randomUUID().slice(0, 12)}`, sourceType: "tf_interest", sourceId: interestSourceId, legNo: legNoBase + 1, accountCode: accountCode, debitSen: 0, creditSen: abs, description: `TF interest · ${drawSourceId}`, actorUserId, orgId },
+        ]
+      : [
+          { id: `lje-${crypto.randomUUID().slice(0, 12)}`, sourceType: "tf_interest", sourceId: interestSourceId, legNo: legNoBase, accountCode: accountCode, debitSen: abs, creditSen: 0, description: `TF interest adjust · ${drawSourceId}`, actorUserId, orgId },
+          { id: `lje-${crypto.randomUUID().slice(0, 12)}`, sourceType: "tf_interest", sourceId: interestSourceId, legNo: legNoBase + 1, accountCode: TF_INTEREST_ACCT.code, debitSen: 0, creditSen: abs, description: `TF interest adjust · ${drawSourceId}`, actorUserId, orgId },
+        ];
+    const { statements } = await buildJournalEntryStatements(c.var.DB, orgId, legs);
+    await c.var.DB.batch(statements);
+    await emitAudit(c, {
+      resource: "trade-finance",
+      resourceId: drawSourceId,
+      action: "draw-interest",
+      before: { interestSen: draw.interestSen },
+      after: { interestSen: targetSen, deltaSen, expenseAccount: TF_INTEREST_ACCT.code },
+    });
+    return c.json({ success: true, data: { drawSourceId, interestSen: targetSen } });
+  } catch (err) {
+    console.error("[PUT /trade-finance/draw-interest] failed:", err instanceof Error ? err.message : err);
+    return c.json({ success: false, error: "Interest update failed" }, 400);
+  }
+});
+
 app.put("/trade-finance/draw-due", async (c) => {
   const denied = requireFinance(c);
   if (denied) return denied;

@@ -20,6 +20,7 @@ type TfDrawRow = {
   drawDate: string;
   dueDate: string;
   amountSen: number;
+  interestSen: number;
   repaidSen: number;
   outstandingSen: number;
   paidSupplier: string;
@@ -72,6 +73,22 @@ export function TradeFinanceBlock() {
     else toast.error(j?.error || "Couldn't save the due date");
   };
 
+  // Keys the draw's TOTAL interest (the bank's figure); the server delta-posts
+  // DR INTEREST ON TRADE FINANCE / CR the TF account under this draw, so
+  // outstanding + the identity include it. Same figure twice = no-op.
+  const saveInterest = async (drawSourceId: string, rmStr: string) => {
+    const rmv = parseFloat(rmStr);
+    if (!Number.isFinite(rmv) || rmv < 0) return;
+    const res = await fetch("/api/accounting/trade-finance/draw-interest", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ drawSourceId, interestSen: Math.round(rmv * 100) }),
+    }).catch(() => null);
+    const j = (await res?.json().catch(() => null)) as { success?: boolean; error?: string; data?: { unchanged?: boolean } } | null;
+    if (j?.success) { if (!j.data?.unchanged) { toast.success("Interest posted"); } load(); }
+    else toast.error(j?.error || "Couldn't save the interest");
+  };
+
   if (sources === null) return null; // loading — the aging tab renders fine without it
   return (
     <div className="space-y-4">
@@ -119,14 +136,15 @@ export function TradeFinanceBlock() {
                     <th className="py-2 px-3 text-left font-medium">Paid supplier</th>
                     <th className="py-2 px-3 text-left font-medium">Draw date</th>
                     <th className="py-2 px-3 text-left font-medium">Due date</th>
-                    <th className="py-2 px-3 text-right font-medium">Amount</th>
+                    <th className="py-2 px-3 text-right font-medium">Principal</th>
+                    <th className="py-2 px-3 text-right font-medium">Interest</th>
                     <th className="py-2 px-3 text-right font-medium">Repaid</th>
                     <th className="py-2 px-3 text-right font-medium">Outstanding</th>
                   </tr>
                 </thead>
                 <tbody>
                   {s.draws.length === 0 && (
-                    <tr><td colSpan={7} className="py-4 px-3 text-center text-[#9CA3AF]">No open draws.</td></tr>
+                    <tr><td colSpan={8} className="py-4 px-3 text-center text-[#9CA3AF]">No open draws.</td></tr>
                   )}
                   {s.draws.map((d) => (
                     <tr key={d.drawSourceId} className="border-b border-[#F0ECE9]">
@@ -142,11 +160,37 @@ export function TradeFinanceBlock() {
                           className="rounded border border-[#E2DDD8] px-1.5 py-0.5 text-[12px] bg-white"
                         />
                       </td>
-                      <td className="py-1.5 px-3 text-right tabular-nums">{rm(d.amountSen)}</td>
+                      <td className="py-1.5 px-3 text-right tabular-nums">{rm(d.amountSen - d.interestSen)}</td>
+                      <td className="py-1.5 px-3 text-right">
+                        {/* The bank's charged interest — keyed here (OCR prefill
+                            later); posts to 900-I001 and joins the balance. */}
+                        <input
+                          key={`${d.drawSourceId}:${d.interestSen}`}
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          defaultValue={d.interestSen ? (d.interestSen / 100).toFixed(2) : ""}
+                          placeholder="0.00"
+                          onBlur={(e) => {
+                            const cur = d.interestSen ? (d.interestSen / 100).toFixed(2) : "";
+                            if (e.target.value !== cur && e.target.value !== "") void saveInterest(d.drawSourceId, e.target.value);
+                          }}
+                          className="w-24 rounded border border-[#E2DDD8] px-1.5 py-0.5 text-[12px] text-right tabular-nums bg-white"
+                        />
+                      </td>
                       <td className="py-1.5 px-3 text-right tabular-nums">{d.repaidSen ? rm(d.repaidSen) : "-"}</td>
                       <td className="py-1.5 px-3 text-right tabular-nums font-semibold">{rm(d.outstandingSen)}</td>
                     </tr>
                   ))}
+                  {s.draws.length > 0 && (
+                    <tr className="border-t-2 border-[#E2DDD8] bg-[#F6F1E7] font-semibold">
+                      <td className="py-2 px-3" colSpan={4}>TOTAL</td>
+                      <td className="py-2 px-3 text-right tabular-nums">{rm(s.draws.reduce((t, d) => t + d.amountSen - d.interestSen, 0))}</td>
+                      <td className="py-2 px-3 text-right tabular-nums">{rm(s.draws.reduce((t, d) => t + d.interestSen, 0))}</td>
+                      <td className="py-2 px-3 text-right tabular-nums">{rm(s.draws.reduce((t, d) => t + d.repaidSen, 0))}</td>
+                      <td className="py-2 px-3 text-right tabular-nums">{rm(s.draws.reduce((t, d) => t + d.outstandingSen, 0))}</td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>

@@ -65,6 +65,27 @@ test("buckets by days past DUE date", () => {
   assert.equal(t.total, 800);
 });
 
+test("tf_interest legs join the draw's amount and surface as interestSen", () => {
+  const r = m.deriveDraws(
+    [
+      { sourceType: "supplier_payment", sourceId: "HPV-1", debitSen: 0, creditSen: 100000 },
+      // interest legs carry their charge date in the sourceId (self-dated);
+      // the tfint-<date>- prefix strips back to the draw they belong to.
+      { sourceType: "tf_interest", sourceId: "tfint-2026-08-11-HPV-1", debitSen: 0, creditSen: 2500 },
+      // a downward interest adjustment (delta-post reversal), different day
+      { sourceType: "tf_interest", sourceId: "tfint-2026-08-12-HPV-1", debitSen: 500, creditSen: 0 },
+    ],
+    [{ drawSourceId: "HPV-1", drawDate: "2026-07-07", dueDate: "2026-10-05" }],
+    [], new Set(),
+  );
+  assert.equal(r.draws.length, 1);
+  assert.equal(r.draws[0].amountSen, 102000);   // principal 100000 + net interest 2000
+  assert.equal(r.draws[0].interestSen, 2000);
+  assert.equal(r.draws[0].outstandingSen, 102000);
+  assert.equal(r.accountNetSen, 102000);
+  assert.equal(r.unallocatedSen, 0);            // identity still closes
+});
+
 test("clampRepayAlloc refuses overpay and non-positive", () => {
   assert.equal(m.clampRepayAlloc(1000, 1000).ok, true);
   assert.equal(m.clampRepayAlloc(1000, 1001).ok, false);

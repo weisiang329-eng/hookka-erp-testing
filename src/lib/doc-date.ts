@@ -119,5 +119,12 @@ export function parseSourceIdDate(
   if (base === "labor_post" && (m = sid.match(/^labor-(\d{4})-(\d{2})$/))) {
     return lastDayOfMonth(Number(m[1]), Number(m[2]));
   }
+  // Trade-finance interest: sourceId is `tfint-YYYY-MM-DD-<draw payment no>`
+  // — the CHARGE date (bank statement day), keyed explicitly when posted, so
+  // interest expense reports in the month it was incurred, not the month the
+  // owner got around to keying it.
+  if (base === "tf_interest" && (m = sid.match(/^tfint-(\d{4}-\d{2}-\d{2})-/))) {
+    return m[1];
+  }
   return null;
 }

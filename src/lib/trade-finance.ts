@@ -16,7 +16,11 @@ export type TfDraw = {
   drawSourceId: string;
   drawDate: string;
   dueDate: string;
+  /** Ledger family net for this draw INCLUDING interest legs. */
   amountSen: number;
+  /** The interest portion of amountSen (net of `tf_interest%` legs), shown
+      as its own column; principal = amountSen − interestSen. */
+  interestSen: number;
   repaidSen: number;
   outstandingSen: number;
 };
@@ -37,11 +41,20 @@ export function deriveDraws(
   const repaidBy = new Map<string, number>();
   for (const a of allocs) repaidBy.set(a.drawSourceId, (repaidBy.get(a.drawSourceId) ?? 0) + (Number(a.amountSen) || 0));
   const netBy = new Map<string, number>();
+  // Interest charged on a draw posts `tf_interest` legs whose sourceId is
+  // `tfint-YYYY-MM-DD-<draw payment no>` (the date part makes the leg
+  // self-dated for doc-date). Fold each into ITS DRAW's family net, so
+  // outstanding, repayment clamps and the identity include interest
+  // automatically; tracked separately only for display.
+  const interestBy = new Map<string, number>();
   let accountNetSen = 0;
   for (const l of legs) {
     const net = (Number(l.creditSen) || 0) - (Number(l.debitSen) || 0);
     accountNetSen += net;
-    netBy.set(l.sourceId, (netBy.get(l.sourceId) ?? 0) + net);
+    const isInterest = String(l.sourceType ?? "").split(":")[0].startsWith("tf_interest");
+    const key = isInterest ? l.sourceId.replace(/^tfint-\d{4}-\d{2}-\d{2}-/, "") : l.sourceId;
+    netBy.set(key, (netBy.get(key) ?? 0) + net);
+    if (isInterest) interestBy.set(key, (interestBy.get(key) ?? 0) + net);
   }
   const draws: TfDraw[] = [];
   for (const [sourceId, net] of netBy) {
@@ -53,6 +66,7 @@ export function deriveDraws(
       drawDate: meta?.drawDate ?? "",
       dueDate: meta?.dueDate ?? "",
       amountSen: net,
+      interestSen: interestBy.get(sourceId) ?? 0,
       repaidSen,
       outstandingSen: net - repaidSen,
     });

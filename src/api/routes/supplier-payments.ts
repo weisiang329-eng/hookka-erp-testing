@@ -861,6 +861,17 @@ async function buildSupplierPaymentLifecycle(
       .bind(paymentNo)
       .first<{ s: number | null }>();
     if ((Number(allocSum?.s) || 0) > 0) throw new Error("TF_DRAW_HAS_REPAYMENTS");
+    // Interest legs live under their own `tfint-<date>-<paymentNo>` sourceId —
+    // voiding the draw would strand them as a ghost balance. Zero the interest
+    // first (its delta-post reverses cleanly), then void.
+    const intNet = await db
+      .prepare(
+        `SELECT COALESCE(SUM(creditSen - debitSen),0) AS s FROM ledger_journal_entries
+          WHERE hidden = 0 AND sourceType LIKE 'tf_interest%' AND sourceId LIKE 'tfint-____-__-__-' || ?`,
+      )
+      .bind(paymentNo)
+      .first<{ s: number | null }>();
+    if ((Number(intNet?.s) || 0) !== 0) throw new Error("TF_DRAW_HAS_INTEREST");
   }
   const isTfRepayment = !!(await db
     .prepare(`SELECT 1 AS x FROM supplier_payments WHERE payment_no = ? AND method = 'TF_REPAYMENT' LIMIT 1`)
@@ -1342,6 +1353,12 @@ app.post("/:paymentNo/void", async (c) => {
         400,
       );
     }
+    if (msg === "TF_DRAW_HAS_INTEREST") {
+      return c.json(
+        { success: false, error: "This draw has interest posted — set its interest to 0 in the aging block first, then void." },
+        400,
+      );
+    }
     console.error("[POST /api/supplier-payments/:paymentNo/void] failed:", msg, err);
     return c.json(
       { success: false, error: msg || "Internal error voiding supplier payment" },
@@ -1428,6 +1445,12 @@ app.post("/:paymentNo/lifecycle", async (c) => {
     if (msg === "TF_REPAYMENT_NO_UNVOID") {
       return c.json(
         { success: false, error: "A voided trade-finance repayment cannot be restored — record it again." },
+        400,
+      );
+    }
+    if (msg === "TF_DRAW_HAS_INTEREST") {
+      return c.json(
+        { success: false, error: "This draw has interest posted — set its interest to 0 in the aging block first, then void." },
         400,
       );
     }

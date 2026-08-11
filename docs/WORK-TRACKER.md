@@ -3594,7 +3594,14 @@ Houzs and The Conts, whose openings the owner parked for later.
 invoice row — right for a seed, catastrophic for a real invoice merely flagged
 as opening.
 
-## 2026-08-06 (night) — Carress closed end to end; the payments module hardened
+## 2026-08-10/11 — Carress closed end to end; the payments module hardened
+
+> Dating correction (owner, 2026-08-11): this work happened 10–11 Aug — the
+> reconciliation PDFs are stamped 10/08. Earlier entries labelled 08-06 cover
+> work genuinely done then (ledger legs prove the void/unvoid batch), except
+> the labour posting, which the ledger dates to 08-07. BUG-2026-08-06-004/005
+> were actually FOUND on 08-11; their IDs stay as minted since commits cite
+> them.
 
 **Carress is the first customer opening finished completely.** 41,242.00 posted
 (22 invoices built to THEIR list + 6 ERP invoices flagged via the new

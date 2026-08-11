@@ -64,6 +64,7 @@ import type {
 // to follow).
 import { asMutationResponse, useCompanyOptions, orgIdParam, type CompanyOption } from "./shared";
 import { AuditLogTab } from "./tabs/AuditLogTab";
+import { TradeFinanceBlock } from "./tabs/TradeFinanceBlock";
 import { bestMatch } from "@/lib/party-fuzzy-match";
 import {
   resolveAlias,
@@ -4522,6 +4523,9 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
         <CompanySelect value={company} onChange={pickCompany} options={companyOptions} />
       </div>
       <APControlPanel company={company} />
+      {/* Trade finance (owner 2026-08-11): its own section — owed to a LENDER
+          for bills it paid on our behalf, never mixed into trade creditors. */}
+      <TradeFinanceBlock />
       <div className="flex justify-between items-center">
         <div>
           <h2 className="text-lg font-semibold text-[#1F1D1B]">Accounts Payable</h2>

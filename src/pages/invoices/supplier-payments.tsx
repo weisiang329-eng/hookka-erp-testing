@@ -89,6 +89,25 @@ type PaymentGroup = {
 const isUnappliedAdvanceLine = (l: PaymentLine) => !l.purchaseInvoiceId && l.amountSen > 0;
 const hasUnappliedAdvance = (p: PaymentGroup) => p.lines.some(isUnappliedAdvanceLine);
 
+// Trade finance (owner 2026-08-11): payload of GET /api/accounting/trade-finance.
+type TfDrawRow = {
+  drawSourceId: string;
+  drawDate: string;
+  dueDate: string;
+  amountSen: number;
+  repaidSen: number;
+  outstandingSen: number;
+  paidSupplier: string;
+};
+type TfSourceRow = {
+  accountCode: string;
+  lenderSupplierId: string;
+  lenderName: string;
+  tenorDays: number;
+  accountName: string;
+  draws: TfDrawRow[];
+};
+
 // COMPANY.HOOKKA → the VoucherSpec.company shape (single source of truth);
 // mirrors VOUCHER_COMPANY in accounting/index.tsx.
 const VOUCHER_COMPANY: VoucherSpec["company"] = {
@@ -146,8 +165,11 @@ export default function SupplierPaymentsPage() {
     return raw.filter((s) => s.isActive !== false);
   }, [supResp]);
 
-  // Header form state
-  const [selectedSupplierId, setSelectedSupplierId] = useState("");
+  // Header form state. Lazily seeded from ?supplier=<id> (the trade-finance
+  // aging block's Repay deep-link) — no setState-in-effect needed.
+  const [selectedSupplierId, setSelectedSupplierId] = useState(
+    () => new URLSearchParams(window.location.search).get("supplier") ?? "",
+  );
   const today = new Date().toISOString().slice(0, 10);
   const [date, setDate] = useState(today);
   const [reference, setReference] = useState("");
@@ -159,6 +181,9 @@ export default function SupplierPaymentsPage() {
   // + filter as payments.tsx's bankAccount picker).
   const [payFrom, setPayFrom] = useState("");
   const [bankOptions, setBankOptions] = useState<{ code: string; name: string }[]>([]);
+  // Trade-finance config + per-draw repayment rows (owner 2026-08-11).
+  const [tfSources, setTfSources] = useState<TfSourceRow[]>([]);
+  const [tfRows, setTfRows] = useState<Record<string, { amountStr: string; full: boolean }>>({});
 
   useEffect(() => {
     fetch("/api/accounting/coa")
@@ -243,8 +268,51 @@ export default function SupplierPaymentsPage() {
   const handleSupplierChange = (supplierId: string) => {
     setSelectedSupplierId(supplierId);
     setRows({});
+    setTfRows({});
     loadOpenPIs(supplierId);
   };
+
+  // ---- Trade finance (owner 2026-08-11) ----
+  // Selecting the LENDER supplier flips the form into repayment mode: the
+  // grid lists open DRAWS instead of purchase invoices and the GL will be
+  // DR TF-liability / CR bank. TF source accounts are appended to Pay From
+  // in normal mode (paying FROM one records a draw); a repayment must come
+  // from a real bank, so in lender mode they are excluded.
+  const refreshTf = () => {
+    fetch("/api/accounting/trade-finance", { cache: "no-store" })
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { sources?: TfSourceRow[] } }>)
+      .then((j) => { if (j?.success) setTfSources(j.data?.sources ?? []); })
+      .catch(() => {});
+  };
+  useEffect(() => {
+    refreshTf();
+    // Deep-linked supplier (state was lazily seeded from the URL above) —
+    // fetch its open PIs the same way handleSupplierChange would have.
+    // Justified disable: loadOpenPIs flips its loading flag synchronously
+    // before the fetch; this mount-only effect IS the external-system sync.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (selectedSupplierId) loadOpenPIs(selectedSupplierId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const tfCfg = tfSources.find((s) => s.lenderSupplierId === selectedSupplierId) ?? null;
+  const lenderIds = useMemo(() => new Set(tfSources.map((s) => s.lenderSupplierId)), [tfSources]);
+  const tfOpenDraws = useMemo(() => (tfCfg?.draws ?? []).filter((d) => d.outstandingSen > 0), [tfCfg]);
+  const tfRowSen = (d: TfDrawRow): number => {
+    const row = tfRows[d.drawSourceId];
+    if (!row) return 0;
+    if (row.full) return d.outstandingSen;
+    const rmv = parseFloat(row.amountStr);
+    return Number.isFinite(rmv) && rmv > 0 ? Math.round(rmv * 100) : 0;
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const tfTotalSen = useMemo(() => tfOpenDraws.reduce((s, d) => s + tfRowSen(d), 0), [tfOpenDraws, tfRows]);
+  const payFromOptions = useMemo(() => {
+    if (tfCfg) return bankOptions.filter((o) => !tfSources.some((s) => s.accountCode === o.code));
+    const extras = tfSources
+      .filter((s) => !bankOptions.some((o) => o.code === s.accountCode))
+      .map((s) => ({ code: s.accountCode, name: `${s.accountName || s.lenderName} · trade finance` }));
+    return [...bankOptions, ...extras];
+  }, [bankOptions, tfSources, tfCfg]);
 
   const getRow = (id: string): RowState => rows[id] ?? emptyRow();
   const setRow = (id: string, patch: Partial<RowState>) => {
@@ -296,10 +364,10 @@ export default function SupplierPaymentsPage() {
   const advanceSen = Math.max(0, Math.round((parseFloat(advanceStr) || 0) * 100));
 
   const totalBankSen = useMemo(
-    () => openPIs.reduce((sum, pi) => sum + rowBankSen(pi), 0) + advanceSen,
+    () => (tfCfg ? tfTotalSen : openPIs.reduce((sum, pi) => sum + rowBankSen(pi), 0) + advanceSen),
     // rowBankSen reads rows; recompute whenever rows / PI set / advance changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [openPIs, rows, advanceSen]
+    [openPIs, rows, advanceSen, tfCfg, tfTotalSen]
   );
 
   // Toggle a foreign row's "Full": fills the remaining foreign amount
@@ -337,6 +405,44 @@ export default function SupplierPaymentsPage() {
 
   const handlePost = async () => {
     if (!selectedSupplierId || !payFrom) return;
+
+    // Trade-finance REPAYMENT (owner 2026-08-11): the selected supplier is the
+    // lender — allocations reference draws, not PIs. No advance, no FX.
+    if (tfCfg) {
+      const tfAllocations = tfOpenDraws
+        .map((d) => {
+          const paySen = tfRowSen(d);
+          return paySen > 0 ? { drawSourceId: d.drawSourceId, paySen } : null;
+        })
+        .filter((a): a is NonNullable<typeof a> => a !== null);
+      if (tfAllocations.length === 0) {
+        toast.error("Enter an amount against at least one draw");
+        return;
+      }
+      setPosting(true);
+      try {
+        const res = await fetch("/api/supplier-payments", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+          body: JSON.stringify({ supplierId: selectedSupplierId, payFrom, date, reference: reference || undefined, tfAllocations }),
+        });
+        const j = (await res.json()) as { success?: boolean; error?: string; data?: { paymentNo?: string } };
+        if (res.ok && j.success) {
+          toast.success(j.data?.paymentNo ? `Repayment ${j.data.paymentNo} recorded` : "Repayment recorded");
+          resetForm();
+          setTfRows({});
+          refreshTf();
+          invalidateCachePrefix("/api/supplier-payments");
+          refreshHistory();
+        } else {
+          toast.error(j.error || "Failed to record the repayment");
+        }
+      } catch {
+        toast.error("Failed to record the repayment");
+      }
+      setPosting(false);
+      return;
+    }
 
     // Build allocations from rows with a positive amount entered.
     const allocations = openPIs
@@ -672,8 +778,8 @@ export default function SupplierPaymentsPage() {
                 value={payFrom}
                 onChange={(e) => setPayFrom(e.target.value)}
               >
-                {bankOptions.length === 0 && <option value="">— bank/cash —</option>}
-                {bankOptions.map((a) => (
+                {payFromOptions.length === 0 && <option value="">— bank/cash —</option>}
+                {payFromOptions.map((a) => (
                   <option key={a.code} value={a.code}>{a.code} {a.name}</option>
                 ))}
               </select>
@@ -707,7 +813,16 @@ export default function SupplierPaymentsPage() {
               This voucher carries an unapplied advance of <strong>RM {(editAdvanceKeptSen / 100).toFixed(2)}</strong> — typing amounts into the invoices below uses it up (the Advance field shrinks by itself, voucher total stays put). Edit the Advance field yourself only to change what actually left the bank.
             </p>
           )}
-          {/* Supplier advance / prepayment — editable in create AND edit. */}
+          {tfCfg && (
+            <p className="text-xs text-[#6B5C32] bg-[#F6F1E7] rounded-md px-3 py-2">
+              Repaying <strong>{tfCfg.lenderName}</strong> — this pays down the trade-finance draws below
+              (DR {tfCfg.accountCode} / CR the bank you picked). Advance and FX do not apply here.
+            </p>
+          )}
+          {/* Supplier advance / prepayment — editable in create AND edit.
+              Hidden for a trade-finance lender: a repayment is always
+              allocated to draws, never held on account. */}
+          {!tfCfg && (
           <div>
             <label className="block text-sm font-medium text-[#6B7280] mb-1">
               Advance / Prepayment (RM)
@@ -727,9 +842,79 @@ export default function SupplierPaymentsPage() {
                 : <>Pay a supplier <strong>before any invoice</strong> — posts to Trade Creditors (400-0000) as a prepayment you can knock off invoices later. Leave blank for a normal payment.</>}
             </p>
           </div>
+          )}
+
+          {/* Trade-finance draw allocation table (lender mode). Same working
+              order as the PI grid: oldest due first, Full fills the balance. */}
+          {selectedSupplierId && tfCfg && (
+            <div>
+              <label className="block text-sm font-medium text-[#6B7280] mb-2">Open Trade-Finance Draws</label>
+              {tfOpenDraws.length === 0 ? (
+                <p className="text-sm text-gray-400 italic">No open draws for {tfCfg.lenderName}</p>
+              ) : (
+                <div className="border rounded-md overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="text-left px-3 py-2 font-medium text-gray-600">Draw</th>
+                        <th className="text-left px-3 py-2 font-medium text-gray-600">Paid supplier</th>
+                        <th className="text-left px-3 py-2 font-medium text-gray-600">Draw date</th>
+                        <th className="text-left px-3 py-2 font-medium text-gray-600">Due date</th>
+                        <th className="text-right px-3 py-2 font-medium text-gray-600">Outstanding</th>
+                        <th className="text-left px-3 py-2 font-medium text-gray-600">Repay</th>
+                        <th className="text-center px-3 py-2 font-medium text-gray-600">Full</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {tfOpenDraws.map((d) => {
+                        const row = tfRows[d.drawSourceId] ?? { amountStr: "", full: false };
+                        return (
+                          <tr key={d.drawSourceId} className="border-t hover:bg-gray-50 align-top">
+                            <td className="px-3 py-2 font-mono">{d.drawSourceId}</td>
+                            <td className="px-3 py-2 text-gray-600">{d.paidSupplier || "—"}</td>
+                            <td className="px-3 py-2 text-gray-600">{formatDateDMY(d.drawDate)}</td>
+                            <td className="px-3 py-2 text-gray-600">{formatDateDMY(d.dueDate)}</td>
+                            <td className="px-3 py-2 text-right font-medium">{formatCurrency(d.outstandingSen)}</td>
+                            <td className="px-3 py-2">
+                              <input
+                                type="number"
+                                step="0.01"
+                                min="0"
+                                className="w-28 border border-[#E2DDD8] rounded-md px-2 py-1 text-sm text-right tabular-nums"
+                                value={row.full ? (d.outstandingSen / 100).toFixed(2) : row.amountStr}
+                                disabled={row.full}
+                                onChange={(e) =>
+                                  setTfRows((prev) => ({ ...prev, [d.drawSourceId]: { amountStr: e.target.value, full: false } }))
+                                }
+                                placeholder="0.00"
+                              />
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              <input
+                                type="checkbox"
+                                checked={row.full}
+                                onChange={() =>
+                                  setTfRows((prev) => ({
+                                    ...prev,
+                                    [d.drawSourceId]: row.full
+                                      ? { amountStr: "", full: false }
+                                      : { amountStr: (d.outstandingSen / 100).toFixed(2), full: true },
+                                  }))
+                                }
+                              />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Open-PI allocation table */}
-          {selectedSupplierId && (
+          {selectedSupplierId && !tfCfg && (
             <div>
               <label className="block text-sm font-medium text-[#6B7280] mb-2">Open Purchase Invoices</label>
               {loadingPIs ? (
@@ -924,7 +1109,10 @@ export default function SupplierPaymentsPage() {
                         >
                           <Printer className="h-3 w-3" />print
                         </button>
-                        {(p.lifecycleState ?? "ACTIVE") === "ACTIVE" && (
+                        {(p.lifecycleState ?? "ACTIVE") === "ACTIVE" && !lenderIds.has(p.supplierId) && (
+                          // A trade-finance repayment has no in-place edit (its
+                          // draw allocations live outside the rows) — void it
+                          // and record it again. Backend enforces the same.
                           <button onClick={() => editPayment(p)} className="text-xs text-[#3E6570] hover:underline mr-2">Edit</button>
                         )}
                         <span className="mr-2"><LifecycleBadge state={p.lifecycleState} /></span>

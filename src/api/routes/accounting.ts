@@ -15,7 +15,7 @@
 import { Hono } from "hono";
 import { runSelfApply } from "../lib/self-apply";
 import type { Env } from "../worker";
-import { requirePermission } from "../lib/rbac";
+import { requirePermission, requireFinance } from "../lib/rbac";
 import { monthsOverdue, nextMonthDueDate } from "../../lib/terms";
 import { getOrgId, companyFilter } from "../lib/tenant";
 import {
@@ -38,6 +38,9 @@ import { ensureFinanceOrgColumns } from "../lib/ensure-finance-org";
 import { apRowBeforeOpening, legBeforeOpening, rowBeforeOpening } from "../../lib/opening-floor";
 import { applyOpeningSlice, windowCoversMonth } from "../../lib/opening-slice";
 import { groupPayslipsByMonthDept, forecastEntryKind, monthHasDeptForecast } from "../../lib/salary-dept";
+import { ensureTfTables, getTfSources, saveTfSources, loadTfDraws } from "../lib/trade-finance";
+import type { TfSource } from "../lib/trade-finance";
+import { tfTotals } from "../../lib/trade-finance";
 import { buildDeliveredAsOf, fgClosingSen } from "../../lib/fg-closing";
 import { costAsOfByPo } from "../../lib/cost-attribution";
 import { STOCK_TAKE_ITEM_ALIAS_SEED_2026_05 } from "../lib/stock-take-item-alias-seed-2026-05";
@@ -384,6 +387,7 @@ async function loadUnappliedSupplierAdvances(
                 sp.amount_sen AS amount_sen, sp.payment_no AS payment_no, sp.date AS date
            FROM supplier_payments sp
           WHERE sp.org_id = ? AND sp.purchase_invoice_id IS NULL AND sp.amount_sen > 0
+            AND COALESCE(sp.method,'') <> 'TF_REPAYMENT'
             AND NOT EXISTS (
               SELECT 1 FROM document_lifecycle dl
                WHERE dl.source_type = 'supplier_payment'
@@ -489,7 +493,12 @@ app.get("/aging", async (c) => {
       // floor) is saved — not just when invoices/PIs change.
       // supplier_payments included so knocking off an advance rebuilds the
       // snapshot (advances appear as negative rows below).
-      sourceTables: ["invoices", "purchase_invoices", "supplier_payments", "kv_config", "opening_ap_excludes"],
+      sourceTables: [
+        "invoices", "purchase_invoices", "supplier_payments", "kv_config", "opening_ap_excludes",
+        // Trade-finance section: a repayment allocation or a due-date edit
+        // must rebuild the snapshot (kv_config above covers the Setup save).
+        "trade_finance_draws", "trade_finance_repay_allocs",
+      ],
     },
     orgId,
     async () => {
@@ -662,6 +671,46 @@ app.get("/aging", async (c) => {
       for (const row of arMap.values()) row.docs.sort((a, b) => a.mo - b.mo || b.date.localeCompare(a.date));
       for (const row of apMap.values()) row.docs.sort((a, b) => a.mo - b.mo || b.date.localeCompare(a.date));
 
+      // Trade-finance section (owner 2026-08-11) — a SEPARATE block, never
+      // mixed into the trade-creditor rows above: its subtotal ties the TF
+      // account's ledger net, not 400-0000. Buckets run on the DUE date.
+      const tfSection = [];
+      try {
+        const tfSrcs = await getTfSources(c.var.DB);
+        const todayIsoTf = new Date().toISOString().slice(0, 10);
+        for (const s of tfSrcs) {
+          const acctRow = await c.var.DB.prepare("SELECT name FROM chart_of_accounts WHERE code = ?")
+            .bind(s.accountCode).first<{ name: string }>();
+          const derived = await loadTfDraws(c.var.DB, s);
+          const tfDraws = [];
+          for (const d of derived.draws) {
+            let paidSupplier = "";
+            try {
+              const rs = await c.var.DB.prepare(
+                "SELECT DISTINCT supplierName FROM supplier_payments WHERE paymentNo = ?",
+              ).bind(d.drawSourceId).all<{ supplierName: string | null; supplier_name: string | null }>();
+              paidSupplier = [...new Set(
+                (rs.results ?? []).map((r) => String(r.supplierName ?? r.supplier_name ?? "").trim()).filter(Boolean),
+              )].join(", ");
+            } catch { /* leave blank */ }
+            tfDraws.push({ ...d, paidSupplier });
+          }
+          tfSection.push({
+            lender: s.lenderName,
+            lenderSupplierId: s.lenderSupplierId,
+            accountCode: s.accountCode,
+            accountName: acctRow?.name ?? "",
+            tenorDays: s.tenorDays,
+            accountNetSen: derived.accountNetSen,
+            unallocatedSen: derived.unallocatedSen,
+            totals: tfTotals(derived.draws, todayIsoTf),
+            draws: tfDraws,
+          });
+        }
+      } catch {
+        /* TF unconfigured / tables absent → empty section */
+      }
+
       return {
         data: {
           ar: [...arMap.values()].sort((a, b) =>
@@ -670,6 +719,7 @@ app.get("/aging", async (c) => {
           ap: [...apMap.values()].sort((a, b) =>
             a.supplierName.localeCompare(b.supplierName),
           ),
+          tf: tfSection,
         },
       };
     },
@@ -9764,6 +9814,136 @@ app.put("/bs/section-map", async (c) => {
 //   • Forecast       → kv forecast_pnl, evaluated with the same
 //     percent-or-amount rule the Forecast page uses.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// TRADE FINANCE (owner 2026-08-11) — money a lender (Houzs Century) pays our
+// suppliers on our behalf. The TF account is a LIABILITY; each drawing payment
+// is a DRAW with an editable due date; repayment happens through the normal
+// Supplier Payment screen (see supplier-payments.ts). Derivation is shared:
+// api/lib/trade-finance.ts loadTfDraws — amounts always ledger family nets.
+// ---------------------------------------------------------------------------
+
+// One-time (idempotent) setup, pressed by the owner: flags the account as a
+// TF source AND reclasses it in place — LIABILITY, new name, out of the bank
+// (SBK) lists. Zero ledger rows; history reads correctly at every date.
+app.post("/trade-finance/setup", async (c) => {
+  const denied = requireFinance(c);
+  if (denied) return denied;
+  try {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      accountCode?: string; lenderSupplierId?: string; tenorDays?: number; accountName?: string;
+    };
+    const accountCode = String(body.accountCode ?? "").trim();
+    const lenderSupplierId = String(body.lenderSupplierId ?? "").trim();
+    const accountName = String(body.accountName ?? "").trim();
+    const tenorDays = Math.round(Number(body.tenorDays) || 0);
+    if (!accountCode || !lenderSupplierId || !accountName) {
+      return c.json({ success: false, error: "accountCode, lenderSupplierId and accountName are required" }, 400);
+    }
+    if (tenorDays < 1 || tenorDays > 365) {
+      return c.json({ success: false, error: "tenorDays must be between 1 and 365" }, 400);
+    }
+    const acct = await c.var.DB.prepare(
+      "SELECT code, name, type, specialAccountType FROM chart_of_accounts WHERE code = ?",
+    ).bind(accountCode).first<{ code: string; name: string; type: string; specialAccountType: string | null }>();
+    if (!acct) return c.json({ success: false, error: `Account ${accountCode} not found` }, 404);
+    const sup = await c.var.DB.prepare("SELECT id, name FROM suppliers WHERE id = ?")
+      .bind(lenderSupplierId).first<{ id: string; name: string }>();
+    if (!sup) return c.json({ success: false, error: "Lender supplier not found" }, 404);
+    await ensureTfTables(c.var.DB);
+    await c.var.DB.prepare(
+      "UPDATE chart_of_accounts SET type = 'LIABILITY', specialAccountType = NULL, name = ? WHERE code = ?",
+    ).bind(accountName, accountCode).run();
+    const sources = await getTfSources(c.var.DB);
+    const next: TfSource[] = [
+      ...sources.filter((s) => s.accountCode !== accountCode),
+      { accountCode, lenderSupplierId, lenderName: sup.name, tenorDays },
+    ];
+    await saveTfSources(c.var.DB, next);
+    await emitAudit(c, {
+      resource: "trade-finance",
+      resourceId: accountCode,
+      action: "setup",
+      before: { account: acct },
+      after: { account: { code: accountCode, name: accountName, type: "LIABILITY", specialAccountType: null }, source: next.find((s) => s.accountCode === accountCode) },
+    });
+    return c.json({ success: true, data: { sources: next } });
+  } catch (err) {
+    console.error("[POST /trade-finance/setup] failed:", err instanceof Error ? err.message : err);
+    return c.json({ success: false, error: "Setup failed" }, 400);
+  }
+});
+
+app.get("/trade-finance", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  try {
+    const sources = await getTfSources(c.var.DB);
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const out = [];
+    for (const s of sources) {
+      const acct = await c.var.DB.prepare("SELECT name FROM chart_of_accounts WHERE code = ?")
+        .bind(s.accountCode).first<{ name: string }>();
+      const derived = await loadTfDraws(c.var.DB, s);
+      const draws = [];
+      for (const d of derived.draws) {
+        // Which supplier(s) the lender paid for us on this draw — the payment's
+        // own rows say so; a repayment or FT stray simply has none.
+        let paidSupplier = "";
+        try {
+          const rs = await c.var.DB.prepare(
+            "SELECT DISTINCT supplierName FROM supplier_payments WHERE paymentNo = ?",
+          ).bind(d.drawSourceId).all<{ supplierName: string | null; supplier_name: string | null }>();
+          paidSupplier = [...new Set((rs.results ?? []).map((r) => String(r.supplierName ?? r.supplier_name ?? "").trim()).filter(Boolean))].join(", ");
+        } catch { /* leave blank */ }
+        draws.push({ ...d, paidSupplier });
+      }
+      out.push({
+        ...s,
+        accountName: acct?.name ?? "",
+        accountNetSen: derived.accountNetSen,
+        unallocatedSen: derived.unallocatedSen,
+        totals: tfTotals(derived.draws, todayIso),
+        draws,
+      });
+    }
+    return c.json({ success: true, data: { sources: out } });
+  } catch (err) {
+    console.error("[GET /trade-finance] failed:", err instanceof Error ? err.message : err);
+    return c.json({ success: false, error: "Trade-finance read failed" }, 400);
+  }
+});
+
+app.put("/trade-finance/draw-due", async (c) => {
+  const denied = requireFinance(c);
+  if (denied) return denied;
+  try {
+    const body = (await c.req.json().catch(() => ({}))) as { drawSourceId?: string; dueDate?: string };
+    const drawSourceId = String(body.drawSourceId ?? "").trim();
+    const dueDate = String(body.dueDate ?? "").trim();
+    if (!drawSourceId || !/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) {
+      return c.json({ success: false, error: "drawSourceId and dueDate (YYYY-MM-DD) are required" }, 400);
+    }
+    await ensureTfTables(c.var.DB);
+    const before = await c.var.DB.prepare(
+      "SELECT draw_source_id, due_date FROM trade_finance_draws WHERE draw_source_id = ?",
+    ).bind(drawSourceId).first<Record<string, unknown>>();
+    if (!before) return c.json({ success: false, error: "Draw not found — open the aging block once to backfill it" }, 404);
+    await c.var.DB.prepare("UPDATE trade_finance_draws SET due_date = ? WHERE draw_source_id = ?")
+      .bind(dueDate, drawSourceId).run();
+    await emitAudit(c, {
+      resource: "trade-finance",
+      resourceId: drawSourceId,
+      action: "draw-due-edit",
+      before: { dueDate: String(before.dueDate ?? before.due_date ?? "") },
+      after: { dueDate },
+    });
+    return c.json({ success: true, data: { drawSourceId, dueDate } });
+  } catch (err) {
+    console.error("[PUT /trade-finance/draw-due] failed:", err instanceof Error ? err.message : err);
+    return c.json({ success: false, error: "Due-date update failed" }, 400);
+  }
+});
+
 app.get("/dashboard", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;

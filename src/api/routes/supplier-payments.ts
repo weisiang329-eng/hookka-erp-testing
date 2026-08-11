@@ -36,6 +36,8 @@ import { looksTechnical } from "../../lib/humanize-error";
 import { issueDocNumber } from "../lib/doc-number-service";
 import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
 import { applyLifecycle, getDocState } from "../lib/document-lifecycle";
+import { ensureTfTables, getTfSources, loadTfDraws } from "../lib/trade-finance";
+import { clampRepayAlloc, addDays } from "../../lib/trade-finance";
 import type { DocState, LifecycleAction } from "../../lib/lifecycle-machine";
 import { emitAudit } from "../lib/audit";
 
@@ -148,6 +150,11 @@ app.post("/", async (c) => {
       // shows as a prepaid (negative) balance on the creditor ledger. The owner
       // knocks it off against invoices MANUALLY later — never auto-applied.
       const advanceSen = Math.max(0, Math.round(Number(body.advanceSen) || 0));
+      // Trade-finance repayment allocations (owner 2026-08-11) — honoured only
+      // when the selected supplier IS a configured TF lender (branch below).
+      const tfAllocations: { drawSourceId?: string; paySen?: number }[] = Array.isArray(body.tfAllocations)
+        ? body.tfAllocations
+        : [];
 
       if (!supplierId || !payFrom || !date) {
         return c.json(
@@ -155,7 +162,7 @@ app.post("/", async (c) => {
           400,
         );
       }
-      if (allocations.length === 0 && advanceSen <= 0) {
+      if (allocations.length === 0 && advanceSen <= 0 && tfAllocations.length === 0) {
         return c.json(
           { success: false, error: "at least one allocation or an advance amount is required" },
           400,
@@ -168,7 +175,10 @@ app.post("/", async (c) => {
       // prod that never ran migration 7 / still has the original 0057 CHECK.
       await ensurePartialPaymentColumns(c.var.DB);
 
-      // 1. Validate payFrom is a postable SBK/SCH bank/cash account.
+      // 1. Validate payFrom is a postable SBK/SCH bank/cash account — or a
+      //    configured trade-finance source (paying from it IS a draw).
+      const tfSources = await getTfSources(c.var.DB);
+      const isTfSource = tfSources.some((s) => s.accountCode === payFrom);
       const acct = await c.var.DB.prepare(
         "SELECT specialAccountType FROM chart_of_accounts WHERE code = ?",
       )
@@ -176,15 +186,120 @@ app.post("/", async (c) => {
         .first<{ specialAccountType: string | null }>();
       if (
         !acct ||
-        (acct.specialAccountType !== "SBK" && acct.specialAccountType !== "SCH")
+        (acct.specialAccountType !== "SBK" && acct.specialAccountType !== "SCH" && !isTfSource)
       ) {
         return c.json(
           {
             success: false,
-            error: "payFrom must be a bank (SBK) or cash (SCH) account",
+            error: "payFrom must be a bank (SBK), cash (SCH), or trade-finance account",
           },
           400,
         );
+      }
+
+      // 1b. Trade-finance REPAYMENT (owner 2026-08-11): the selected supplier
+      // IS the lender → this payment pays DOWN the TF liability, allocated to
+      // specific draws. GL: DR TF account / CR the chosen bank. The payment
+      // stays an ordinary supplier_payment for lifecycle/voucher purposes;
+      // method 'TF_REPAYMENT' keeps it out of the advance machinery.
+      const lenderCfg = tfSources.find((s) => s.lenderSupplierId === supplierId);
+      if (lenderCfg) {
+        await ensureTfTables(c.var.DB);
+        if (isTfSource) {
+          return c.json(
+            { success: false, error: "A trade-finance repayment cannot be paid FROM the trade-finance account" },
+            400,
+          );
+        }
+        if (tfAllocations.length === 0) {
+          return c.json({ success: false, error: "Pick at least one draw to repay" }, 400);
+        }
+        const { draws } = await loadTfDraws(c.var.DB, lenderCfg);
+        const byId = new Map(draws.map((d) => [d.drawSourceId, d] as const));
+        let totalTf = 0;
+        const cleanAllocs: { drawSourceId: string; paySen: number }[] = [];
+        for (const a of tfAllocations) {
+          const drawSourceId = String(a.drawSourceId ?? "").trim();
+          const paySen = Math.round(Number(a.paySen) || 0);
+          if (!drawSourceId || paySen === 0) continue;
+          const d = byId.get(drawSourceId);
+          if (!d) return c.json({ success: false, error: `Unknown draw ${drawSourceId}` }, 400);
+          const chk = clampRepayAlloc(d.outstandingSen, paySen);
+          if (!chk.ok) return c.json({ success: false, error: `${drawSourceId}: ${chk.error}` }, 400);
+          cleanAllocs.push({ drawSourceId, paySen });
+          totalTf += paySen;
+        }
+        if (totalTf <= 0) return c.json({ success: false, error: "Pick at least one draw to repay" }, 400);
+        const tfPayNo = await issueDocNumber(c.var.DB, {
+          bankAccountCode: payFrom,
+          direction: "out",
+          dateIso: date,
+        });
+        const tfStatements: D1PreparedStatement[] = [];
+        tfStatements.push(
+          c.var.DB.prepare(
+            `INSERT INTO supplier_payments (
+               id, paymentNo, supplierId, supplierName, purchaseInvoiceId,
+               date, amountSen, bookedSen, foreignSen, payFxRate,
+               method, reference, notes, orgId
+             ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, NULL, NULL, 'TF_REPAYMENT', ?, ?, ?)`,
+          ).bind(
+            `sp-${crypto.randomUUID().slice(0, 8)}`,
+            tfPayNo,
+            supplierId,
+            lenderCfg.lenderName,
+            date,
+            totalTf,
+            totalTf,
+            reference ?? "",
+            `Trade finance repayment ${tfPayNo}`,
+            orgId,
+          ),
+        );
+        for (const a of cleanAllocs) {
+          tfStatements.push(
+            c.var.DB.prepare(
+              `INSERT INTO trade_finance_repay_allocs (id, repay_payment_no, draw_source_id, amount_sen, org_id)
+               VALUES (?, ?, ?, ?, ?)`,
+            ).bind(`tfa-${crypto.randomUUID().slice(0, 8)}`, tfPayNo, a.drawSourceId, a.paySen, orgId),
+          );
+        }
+        const { statements: tfLegs } = await buildJournalEntryStatements(c.var.DB, orgId, [
+          {
+            id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+            sourceType: "supplier_payment",
+            sourceId: tfPayNo,
+            legNo: 1,
+            accountCode: lenderCfg.accountCode,
+            debitSen: totalTf,
+            creditSen: 0,
+            description: `TF repayment ${tfPayNo} — ${lenderCfg.lenderName}`,
+            actorUserId,
+            orgId,
+          },
+          {
+            id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+            sourceType: "supplier_payment",
+            sourceId: tfPayNo,
+            legNo: 2,
+            accountCode: payFrom,
+            debitSen: 0,
+            creditSen: totalTf,
+            description: `TF repayment ${tfPayNo}`,
+            actorUserId,
+            orgId,
+          },
+        ]);
+        tfStatements.push(...tfLegs);
+        tfStatements.push(bumpSupplierPaymentsRev(c.var.DB));
+        await c.var.DB.batch(tfStatements);
+        await emitAudit(c, {
+          resource: "supplier-payments",
+          resourceId: tfPayNo,
+          action: "create",
+          after: { paymentNo: tfPayNo, payFrom, tfRepayment: true, totalSen: totalTf, allocations: cleanAllocs },
+        });
+        return c.json({ success: true, data: { paymentNo: tfPayNo, totalBankSen: totalTf } });
       }
 
       // 2. Issue the payment voucher number (one number for the whole batch).
@@ -380,6 +495,21 @@ app.post("/", async (c) => {
 
       // 7. Execute the whole batch atomically (mirror purchase-invoices.ts).
       await c.var.DB.batch(statements);
+
+      // 7b. Paying from a trade-finance source account IS a draw (owner
+      // 2026-08-11) — record its due-date meta. Amounts stay ledger-derived;
+      // the aging block's self-heal would recreate this row anyway, so a miss
+      // here can never lose money — only a default due date.
+      if (isTfSource) {
+        const src = tfSources.find((s) => s.accountCode === payFrom);
+        if (src) {
+          await ensureTfTables(c.var.DB);
+          await c.var.DB.prepare(
+            `INSERT INTO trade_finance_draws (draw_source_id, account_code, draw_date, due_date, org_id)
+             VALUES (?, ?, ?, ?, ?) ON CONFLICT (draw_source_id) DO NOTHING`,
+          ).bind(payNo, payFrom, date, addDays(date, src.tenorDays), orgId).run();
+        }
+      }
 
       // 8. Audit. This module — the highest-risk money path in the system,
       // where cash leaves the bank to a supplier — had ZERO audit coverage
@@ -718,6 +848,26 @@ async function buildSupplierPaymentLifecycle(
     ).results ?? [];
   if (rows.length === 0) throw new Error("PAYMENT_NOT_FOUND");
 
+  // Trade-finance guards (owner 2026-08-11):
+  //  - a DRAW with repayments allocated cannot leave ACTIVE (the repayments
+  //    would point at a dead draw) — void the repayment first;
+  //  - a voided REPAYMENT cannot be restored (its allocations were released
+  //    at void; re-applying them blind could overpay a since-repaid draw) —
+  //    record it again instead.
+  await ensureTfTables(db);
+  if (action === "void" || action === "delete") {
+    const allocSum = await db
+      .prepare(`SELECT COALESCE(SUM(amount_sen),0) AS s FROM trade_finance_repay_allocs WHERE draw_source_id = ?`)
+      .bind(paymentNo)
+      .first<{ s: number | null }>();
+    if ((Number(allocSum?.s) || 0) > 0) throw new Error("TF_DRAW_HAS_REPAYMENTS");
+  }
+  const isTfRepayment = !!(await db
+    .prepare(`SELECT 1 AS x FROM supplier_payments WHERE payment_no = ? AND method = 'TF_REPAYMENT' LIMIT 1`)
+    .bind(paymentNo)
+    .first());
+  if (isTfRepayment && action === "unvoid") throw new Error("TF_REPAYMENT_NO_UNVOID");
+
   const lc = await applyLifecycle(db, {
     orgId,
     baseSourceTypes: ["supplier_payment"],
@@ -742,6 +892,13 @@ async function buildSupplierPaymentLifecycle(
         )
         .bind(paymentNo, orgId),
     );
+    // Voiding a TF repayment releases its draw allocations in the same batch —
+    // the draws' outstanding balances spring back with the GL.
+    if (isTfRepayment) {
+      statements.push(
+        db.prepare(`DELETE FROM trade_finance_repay_allocs WHERE repay_payment_no = ?`).bind(paymentNo),
+      );
+    }
   }
   if (reactivated) {
     // BUG-2026-07-24-002 (class C5): an EDITED payment's live legs are its
@@ -838,6 +995,18 @@ async function buildSupplierPaymentRestate(
   // Restate rolls PI paid amounts to PARTIAL_PAID/APPROVED → ensure the schema
   // (migration-7 columns + relaxed status CHECK) before those writes.
   await ensurePartialPaymentColumns(db);
+  // A trade-finance repayment cannot be edited in place (v1, owner-approved
+  // design 2026-08-11): its draw allocations live outside the payment rows and
+  // a restate would rebuild past them — void it and record it again.
+  const tfRepayRow = await db
+    .prepare(`SELECT 1 AS x FROM supplier_payments WHERE payment_no = ? AND method = 'TF_REPAYMENT' LIMIT 1`)
+    .bind(paymentNo)
+    .first();
+  if (tfRepayRow) {
+    throw new Error(
+      `Payment ${paymentNo} is a trade-finance repayment — void it and record it again instead of editing.`,
+    );
+  }
   // Lifecycle guard: restating a VOID/DELETED payment would post live GL legs
   // while every subledger reader excludes the payment's rows (document_lifecycle
   // filter, incl. the truth guard below) — instant control-vs-subledger drift.
@@ -1167,6 +1336,12 @@ app.post("/:paymentNo/void", async (c) => {
         404,
       );
     }
+    if (msg === "TF_DRAW_HAS_REPAYMENTS") {
+      return c.json(
+        { success: false, error: "This payment is a trade-finance draw with repayments allocated to it — void the repayment first." },
+        400,
+      );
+    }
     console.error("[POST /api/supplier-payments/:paymentNo/void] failed:", msg, err);
     return c.json(
       { success: false, error: msg || "Internal error voiding supplier payment" },
@@ -1242,6 +1417,18 @@ app.post("/:paymentNo/lifecycle", async (c) => {
       return c.json(
         { success: false, error: `No supplier payment found for ${paymentNo}` },
         404,
+      );
+    }
+    if (msg === "TF_DRAW_HAS_REPAYMENTS") {
+      return c.json(
+        { success: false, error: "This payment is a trade-finance draw with repayments allocated to it — void the repayment first." },
+        400,
+      );
+    }
+    if (msg === "TF_REPAYMENT_NO_UNVOID") {
+      return c.json(
+        { success: false, error: "A voided trade-finance repayment cannot be restored — record it again." },
+        400,
       );
     }
     return c.json({ success: false, error: msg }, 400);

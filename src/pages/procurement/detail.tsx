@@ -594,6 +594,19 @@ export default function PurchaseOrderDetailPage() {
   const receivePct = totalOrdered > 0 ? Math.round((totalReceived / totalOrdered) * 100) : 0;
   const canPrintGRN = ["PARTIAL_RECEIVED", "RECEIVED"].includes(po.status);
 
+  // Editable until goods land. Owner ruling 2026-08-07: a CONFIRMED (or
+  // SUBMITTED) PO that has received nothing yet is still editable — the PUT
+  // route already permits supplier/line edits until a POSTED/CONFIRMED GRN
+  // exists (purchase-orders.ts), so this gate just mirrors that server lock
+  // instead of the old DRAFT-only rule. Once anything is received (posted GRN
+  // or receivedQty > 0) or the PO is terminal, it locks.
+  const isEditable =
+    !isCancelled &&
+    po.status !== "RECEIVED" &&
+    po.status !== "CLOSED" &&
+    !hasPostedGrn &&
+    totalReceived === 0;
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -604,7 +617,7 @@ export default function PurchaseOrderDetailPage() {
         badges={<Badge variant="status" status={po.status} />}
         actions={
           <>
-            {isDraft && !editing && (
+            {isEditable && !editing && (
               <Button variant="outline" onClick={startEdit}>
                 <Pencil className="h-4 w-4" /> Edit
               </Button>
@@ -730,10 +743,10 @@ export default function PurchaseOrderDetailPage() {
         </CardContent>
       </Card>
 
-      {/* Edit-mode form (DRAFT only). Replaces the read-only details/items
-          cards while editing — the operator sees the same shape they get
-          from the Create modal so there's no UI drift. */}
-      {editing && isDraft && (
+      {/* Edit-mode form (editable until goods land — see isEditable). Replaces
+          the read-only details/items cards while editing — the operator sees
+          the same shape they get from the Create modal so there's no UI drift. */}
+      {editing && isEditable && (
         <Card>
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">

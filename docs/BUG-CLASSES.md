@@ -1,8 +1,10 @@
 # Recurring bug classes — the index that makes P5 executable
 
-> **Last verified: 2026-08-13** — every one of the 27 source/test paths this file cites
-> exists (checked mechanically against the tree), and `npm test` is green
-> (3,768 tests / 0 fail). No corrections needed.
+> **Last verified: 2026-08-13** — every one of the source/test paths this file cites
+> exists (checked mechanically against the tree), and `npm test` is green.
+> **C1 was re-opened and extended the same day** (BUG-2026-08-13-040): the class had a
+> second axis nobody had counted — the DOCUMENT TYPE — and the consignment-order write
+> path plus the sofa-combo recompute shared by both order types were still carrying it.
 
 `PLAYBOOKS.md` **P5** says: *"Fix all instances of the same class, not just the flagged one."*
 
@@ -50,10 +52,31 @@ owner's list.
 | 4 | `legPriceSen` | 2026-07-22 | RM 2,560 | `resolveHeightPriceSen` |
 | 5 | `basePriceSen` | n/a — correct by design | — | customer price → product price (`resolveLineBasePriceSen`) |
 
-**Enforced by** `tests/price-component-class.test.mjs` — fails if any component returns to
-`Number(item.X) || 0`, or if a resolver is missing from either the POST or the PUT loop.
+**The class has a SECOND axis: the document type.** Rows 1–4 were all fixed in
+`sales-orders.ts`, and this test read only that file — so `consignment-orders.ts`, a
+structural clone writing the same columns for the same customers through the same
+screens, kept `Number(it.X) || 0` on three of them and left the fourth out of its INSERT
+column list entirely. A CO therefore saved for LESS than the operator approved on screen,
+for as long as COs have existed.
 
-**Adding a 6th component?** Add it to `COMPONENTS` in that test first. It will fail until wired.
+| # | site | fixed | what it was |
+|---|---|---|---|
+| a | `sales-orders.ts` POST + PUT | 2026-07-14 … 07-23 | rows 1–4 above |
+| b | `consignment-orders.ts` POST + PUT | ✅ 2026-08-13 (BUG-2026-08-13-040) | three components on trust; `totalHeightPriceSen` computed and then **omitted from the INSERT**, so the value was parsed and thrown away |
+| c | `sofa-combo-pass.ts` — the recompute **shared by both** | ✅ 2026-08-13 | rewrote a renegotiated line's unit price from FOUR components (losing total height) and its line total from a bare `unit × qty` (refunding the operator's discount to us). One function, both document types |
+| d | invoice / DO / CN write paths | ⬜ unswept | they copy components from an order line rather than resolving them; check before adding a component-computing path there |
+
+**Enforced by** `tests/price-component-class.test.mjs` — it iterates DOCUMENT × COMPONENT
+and fails if any component returns to `Number(x.X) || 0`, if a resolver is missing from
+either the POST or the PUT loop, **if an item INSERT's column list omits a component**
+(the shape that made row b invisible), or if the shared combo recompute drops a component
+or the discount. Behaviour is proved separately by
+`tests/consignment-total-height-surcharge.test.mjs` (real handlers, stored value asserted
+equal to the screen's arithmetic to the sen) and
+`tests/sofa-combo-pass-components.test.mjs`.
+
+**Adding a 6th component?** Add it to `COMPONENTS` in that test first. **Adding a document
+type that stores a priced line?** Add it to `DOCUMENTS`. Either fails until wired.
 
 ---
 

@@ -63,6 +63,15 @@ import {
   findInvalidSofaQty,
   formatSofaQtyError,
 } from "../../lib/so-category";
+// BUG-CLASS C1 — the priced components must be RESOLVED, never taken on trust.
+// The CO write path used to do `Number(it.divanPriceSen) || 0` for three of
+// them and drop the fourth entirely; these are the exact resolvers the SO write
+// path has used since 2026-07-23. See docs/BUG-CLASSES.md C1.
+import { resolveHeightPriceSen } from "../../lib/height-surcharge";
+import { resolveSpecialOrderPriceSen } from "../../lib/special-order-surcharge";
+import { resolveTotalHeightPriceSen } from "../../lib/total-height-surcharge";
+import { loadHeightsConfig, loadSpecialsConfig } from "../lib/specials-config";
+import { calculateUnitPrice, calculateLineTotalWithDiscount } from "../../lib/pricing";
 
 const app = new Hono<Env>();
 
@@ -91,7 +100,14 @@ const CO_VALID_TRANSITIONS: Record<string, string[]> = {
   // IN_PRODUCTION is the UPH-rollback target.
   READY_TO_SHIP: ["ON_HOLD", "IN_PRODUCTION"],
   DELIVERED: ["CLOSED"],
-  ON_HOLD: ["CONFIRMED", "IN_PRODUCTION", "CANCELLED"],
+  // READY_TO_SHIP added 2026-08-13 with the `pre_hold_status` fix
+  // (BUG-2026-08-13-041). A CO can be held FROM READY_TO_SHIP — the row above
+  // says so — and Resume now returns it to where it was held rather than
+  // guessing CONFIRMED. Without this entry that restoration would be refused as
+  // an illegal transition, i.e. an order held at READY_TO_SHIP could not be
+  // resumed at all. Coming back to a stage this order already reached is a
+  // restoration, not a forward jump.
+  ON_HOLD: ["CONFIRMED", "IN_PRODUCTION", "READY_TO_SHIP", "CANCELLED"],
   CLOSED: [],
   CANCELLED: [],
 };
@@ -132,6 +148,18 @@ export type ConsignmentOrderRow = {
   held_by?: string | null;
   heldAt?: string | null;
   held_at?: string | null;
+  /**
+   * Status to return to when the hold is undone. Dual-keyed read.
+   *
+   * `consignment/detail.tsx:1093` has always read `order.preHoldStatus` to
+   * decide where "Resume Order" goes, and nothing on the CO side ever wrote it
+   * — so `|| "CONFIRMED"` won every time and a CO held from IN_PRODUCTION (or
+   * READY_TO_SHIP) silently walked BACKWARDS a stage or two, while the
+   * confirmation dialog cheerfully announced where it was going. The SO side
+   * closed the identical gap on 2026-08-04; this is that fix, mirrored.
+   */
+  preHoldStatus?: string | null;
+  pre_hold_status?: string | null;
   createdAt: string | null;
   updatedAt: string | null;
 };
@@ -156,6 +184,19 @@ export type ConsignmentOrderItemRow = {
   legPriceSen: number;
   specialOrder: string | null;
   specialOrderPriceSen: number;
+  // The FIFTH price component (migration 0209 created
+  // `consignment_order_items.total_height_price_sen`; it is present in prod).
+  // The CO create screen has always computed, displayed and POSTed a
+  // total-height surcharge, and this route used to compute
+  // `unitPrice = base + divan + leg + special` and omit the column from its
+  // INSERT — so the saved CO total was LOWER than the figure the operator
+  // approved on screen, and the CO PDF's T.Height column was always 0.
+  // BUG-CLASS C1, instance 6 (BUG-2026-08-13-040).
+  // Dual-keyed: rows come off `SELECT *` through the pg shim (which camelCases
+  // `total_height_price_sen`), but a single-spelling read is a silent blank —
+  // and a silent blank on THIS field is the bug being fixed.
+  totalHeightPriceSen: number;
+  total_height_price_sen?: number | null;
   basePriceSen: number;
   unitPriceSen: number;
   // Per-line discount (migration 0179). snake_case DB column `discount_sen`
@@ -164,6 +205,13 @@ export type ConsignmentOrderItemRow = {
   lineTotalSen: number;
   notes: string | null;
 };
+
+/** Dual-keyed read of the fifth price component. Rows written before the
+ *  column was filled read back NULL, which is 0 sen of surcharge — not a
+ *  missing figure — because those lines really did carry no total height. */
+function totalHeightSenOf(it: ConsignmentOrderItemRow): number {
+  return Number(it.totalHeightPriceSen ?? it.total_height_price_sen ?? 0) || 0;
+}
 
 function rowToCO(row: ConsignmentOrderRow, items: ConsignmentOrderItemRow[]) {
   return {
@@ -193,6 +241,11 @@ function rowToCO(row: ConsignmentOrderRow, items: ConsignmentOrderItemRow[]) {
     holdReason: row.holdReason ?? row.hold_reason ?? "",
     heldBy: row.heldBy ?? row.held_by ?? "",
     heldAt: row.heldAt ?? row.held_at ?? "",
+    // Where the hold came FROM, so Resume goes back there instead of guessing
+    // CONFIRMED. Empty string on an order that was never held — the detail
+    // page's `|| "CONFIRMED"` is then a correct fallback rather than the whole
+    // behaviour.
+    preHoldStatus: row.preHoldStatus ?? row.pre_hold_status ?? "",
     createdAt: row.createdAt ?? "",
     updatedAt: row.updatedAt ?? "",
     items: items
@@ -234,6 +287,10 @@ function rowToCOListItem(it: ConsignmentOrderItemRow) {
     legPriceSen: it.legPriceSen,
     specialOrder: it.specialOrder ?? "",
     specialOrderPriceSen: it.specialOrderPriceSen,
+    // Read by the CO PDF's T.Height column (unified-doc-download.ts:231) and by
+    // the list page's Print / Bulk-Print actions, which render off THIS row and
+    // never re-fetch — so the slim projection has to carry it too.
+    totalHeightPriceSen: totalHeightSenOf(it),
     basePriceSen: it.basePriceSen,
     unitPriceSen: it.unitPriceSen,
     // Per-line discount (migration 0179). Default 0 for rows predating the column.
@@ -273,6 +330,10 @@ function rowToItem(it: ConsignmentOrderItemRow) {
     legPriceSen: it.legPriceSen,
     specialOrder: it.specialOrder ?? "",
     specialOrderPriceSen: it.specialOrderPriceSen,
+    // The fifth component — emitted so the edit screen can seed it from the
+    // line's OWN stored value instead of re-deriving it on load, and so the
+    // CO PDF prints the T.Height it was charged.
+    totalHeightPriceSen: totalHeightSenOf(it),
     basePriceSen: it.basePriceSen,
     unitPriceSen: it.unitPriceSen,
     // Per-line discount (migration 0179). Default 0 for rows predating the column.
@@ -365,9 +426,13 @@ async function cascadeCOStatusToPOs(
   // / CANCELLED JCs never touched.
   const isHold = newStatus === "ON_HOLD";
   const isCancel = newStatus === "CANCELLED";
-  const isResume =
-    fromStatus === "ON_HOLD" &&
-    (newStatus === "CONFIRMED" || newStatus === "IN_PRODUCTION");
+  // A resume is defined by what it LEAVES, not by where it lands. This used to
+  // enumerate CONFIRMED / IN_PRODUCTION, so when `pre_hold_status` made
+  // READY_TO_SHIP a reachable resume target (BUG-2026-08-13-041) the CO would
+  // come off hold while its child POs and job cards stayed ON_HOLD — the exact
+  // shop-floor symptom this cascade was written for, one status later.
+  // CANCELLED is handled by its own branch above.
+  const isResume = fromStatus === "ON_HOLD" && !isHold && !isCancel;
   if (!isHold && !isCancel && !isResume) return result;
 
   const posRes = await db
@@ -558,6 +623,20 @@ function ensureDiscountColumn(db: D1Database): Promise<void> {
         "ALTER TABLE consignment_orders ADD COLUMN IF NOT EXISTS hold_reason TEXT",
         "ALTER TABLE consignment_orders ADD COLUMN IF NOT EXISTS held_by TEXT",
         "ALTER TABLE consignment_orders ADD COLUMN IF NOT EXISTS held_at TEXT",
+        // 0209 — the fifth price component. The column is already present in
+        // prod (self-applied by the SO helper, which this route never awaits),
+        // so this ALTER is a no-op there. It is here because THIS is the
+        // handler that writes it, and "a migration file alone is inert" cuts
+        // both ways: a column you write must be ensured on the path that
+        // writes it, not on a neighbour's path that happens to run first.
+        "ALTER TABLE consignment_order_items ADD COLUMN IF NOT EXISTS total_height_price_sen INTEGER NOT NULL DEFAULT 0",
+        // Where a hold came FROM (BUG-2026-08-13-041). NEW column — the CO PUT
+        // below is the only writer of ON_HOLD on this table, and it names this
+        // column in its UPDATE, so the ALTER must land before that statement
+        // runs or the whole save 500s. It does: this is awaited at the top of
+        // both the POST and the PUT. Migration files are inert on deploy here;
+        // this line is the thing that actually creates the column in prod.
+        "ALTER TABLE consignment_orders ADD COLUMN IF NOT EXISTS pre_hold_status TEXT",
       ];
       await runSelfApply(db, "consignment-orders", stmts);
     })().catch((err) => {
@@ -708,13 +787,46 @@ app.post("/", async (c) => {
     const coPostAsOf =
       (typeof body.companyCODate === "string" && body.companyCODate) ||
       new Date().toISOString().slice(0, 10);
+    // BUG-CLASS C1 — the owner's own price lists, so a component the client
+    // omits is DERIVED here rather than stored as 0. Same two loaders the SO
+    // POST uses; both degrade to null without throwing.
+    const cfgSpecialsForPricing = await loadSpecialsConfig(c.var.DB);
+    const cfgHeightsForPricing = await loadHeightsConfig(c.var.DB);
     const itemRows: ConsignmentOrderItemRow[] = await Promise.all(
       rawItems.map(
       async (it: Record<string, unknown>, idx: number) => {
         const qty = Number(it.quantity) || 1;
-        const divanPrice = Number(it.divanPriceSen) || 0;
-        const legPrice = Number(it.legPriceSen) || 0;
-        const specialPrice = Number(it.specialOrderPriceSen) || 0;
+        // TRUST MODEL (identical to the SO write path): a client-supplied
+        // number is trusted verbatim — including a deliberate 0 — and a field
+        // the client OMITTED is derived from the owner's config. COs have no
+        // Service-Order mode, so the isServiceOrder short-circuit is never set.
+        const divanPrice = resolveHeightPriceSen(
+          it.divanPriceSen as number | string | null | undefined,
+          it.divanHeightInches as number | string | null | undefined,
+          cfgHeightsForPricing.divanHeights,
+        );
+        const legPrice = resolveHeightPriceSen(
+          it.legPriceSen as number | string | null | undefined,
+          it.legHeightInches as number | string | null | undefined,
+          cfgHeightsForPricing.legHeights,
+        );
+        const specialPrice = resolveSpecialOrderPriceSen(
+          it as {
+            specialOrderPriceSen?: number | string | null;
+            specialOrder?: string | null;
+          },
+          cfgSpecialsForPricing,
+        );
+        // The component this route dropped on the floor. The CO create screen
+        // computes it (calcTotalHeightSurcharge), shows it as "+RM x" and posts
+        // it; every unit price stored here was short by exactly this much.
+        const totalHeightPrice = resolveTotalHeightPriceSen(
+          it.totalHeightPriceSen as number | string | null | undefined,
+          it.gapInches as number | string | null | undefined,
+          it.divanHeightInches as number | string | null | undefined,
+          it.legHeightInches as number | string | null | undefined,
+          cfgHeightsForPricing.totalHeights,
+        );
         const snapped = snapItemToCatalog(
           {
             productCode: it.productCode,
@@ -741,7 +853,15 @@ app.post("/", async (c) => {
                 fallbackSen: 0,
               })
             : incomingBase;
-        const unitPrice = basePrice + divanPrice + legPrice + specialPrice;
+        // THE sum — the shared one, naming all five components. It was a local
+        // four-term addition, which is how the fifth went missing.
+        const unitPrice = calculateUnitPrice({
+          basePriceSen: basePrice,
+          divanPriceSen: divanPrice,
+          legPriceSen: legPrice,
+          totalHeightPriceSen: totalHeightPrice,
+          specialOrderPriceSen: specialPrice,
+        });
         // Per-line discount (migration 0179). Clamped ≥ 0.
         const discountSen = Math.max(0, Math.round(Number(it.discountSen) || 0));
         return {
@@ -766,10 +886,11 @@ app.post("/", async (c) => {
           legPriceSen: legPrice,
           specialOrder: (it.specialOrder as string) ?? null,
           specialOrderPriceSen: specialPrice,
+          totalHeightPriceSen: totalHeightPrice,
           basePriceSen: basePrice,
           unitPriceSen: unitPrice,
           discountSen,
-          lineTotalSen: Math.max(0, unitPrice * qty - discountSen),
+          lineTotalSen: calculateLineTotalWithDiscount(unitPrice, qty, discountSen),
           notes: (it.notes as string) ?? null,
         };
       },
@@ -823,8 +944,8 @@ app.post("/", async (c) => {
              productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
              fabricCode, quantity, gapInches, divanHeightInches, divanPriceSen,
              legHeightInches, legPriceSen, specialOrder, specialOrderPriceSen,
-             basePriceSen, unitPriceSen, discountSen, lineTotalSen, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             totalHeightPriceSen, basePriceSen, unitPriceSen, discountSen, lineTotalSen, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           it.id,
           it.consignmentOrderId,
@@ -845,6 +966,7 @@ app.post("/", async (c) => {
           it.legPriceSen,
           it.specialOrder,
           it.specialOrderPriceSen,
+          it.totalHeightPriceSen,
           it.basePriceSen,
           it.unitPriceSen,
           it.discountSen,
@@ -2054,12 +2176,37 @@ app.put("/:id", async (c) => {
         "";
       const coPutAsOf = new Date().toISOString().slice(0, 10);
       const rawPutItems = body.items as Array<Record<string, unknown>>;
+      // BUG-CLASS C1 — see the POST. A fix applied only to create leaves every
+      // EDIT of an already-correct order re-storing the short price.
+      const cfgSpecialsForPricing = await loadSpecialsConfig(c.var.DB);
+      const cfgHeightsForPricing = await loadHeightsConfig(c.var.DB);
       const newRows = await Promise.all(
         rawPutItems.map(async (it, idx) => {
           const qty = Number(it.quantity) || 1;
-          const divanPrice = Number(it.divanPriceSen) || 0;
-          const legPrice = Number(it.legPriceSen) || 0;
-          const specialPrice = Number(it.specialOrderPriceSen) || 0;
+          const divanPrice = resolveHeightPriceSen(
+            it.divanPriceSen as number | string | null | undefined,
+            it.divanHeightInches as number | string | null | undefined,
+            cfgHeightsForPricing.divanHeights,
+          );
+          const legPrice = resolveHeightPriceSen(
+            it.legPriceSen as number | string | null | undefined,
+            it.legHeightInches as number | string | null | undefined,
+            cfgHeightsForPricing.legHeights,
+          );
+          const specialPrice = resolveSpecialOrderPriceSen(
+            it as {
+              specialOrderPriceSen?: number | string | null;
+              specialOrder?: string | null;
+            },
+            cfgSpecialsForPricing,
+          );
+          const totalHeightPrice = resolveTotalHeightPriceSen(
+            it.totalHeightPriceSen as number | string | null | undefined,
+            it.gapInches as number | string | null | undefined,
+            it.divanHeightInches as number | string | null | undefined,
+            it.legHeightInches as number | string | null | undefined,
+            cfgHeightsForPricing.totalHeights,
+          );
           const snapped = snapItemToCatalog(
             {
               productCode: it.productCode,
@@ -2087,7 +2234,13 @@ app.put("/:id", async (c) => {
                   fallbackSen: isSofa ? 0 : incomingBase,
                 })
               : incomingBase;
-          const unitPrice = basePrice + divanPrice + legPrice + specialPrice;
+          const unitPrice = calculateUnitPrice({
+            basePriceSen: basePrice,
+            divanPriceSen: divanPrice,
+            legPriceSen: legPrice,
+            totalHeightPriceSen: totalHeightPrice,
+            specialOrderPriceSen: specialPrice,
+          });
           // Per-line discount (migration 0179). Clamped ≥ 0.
           const discountSen = Math.max(0, Math.round(Number(it.discountSen) || 0));
           return {
@@ -2112,10 +2265,11 @@ app.put("/:id", async (c) => {
             legPriceSen: legPrice,
             specialOrder: (it.specialOrder as string) ?? null,
             specialOrderPriceSen: specialPrice,
+            totalHeightPriceSen: totalHeightPrice,
             basePriceSen: basePrice,
             unitPriceSen: unitPrice,
             discountSen,
-            lineTotalSen: Math.max(0, unitPrice * qty - discountSen),
+            lineTotalSen: calculateLineTotalWithDiscount(unitPrice, qty, discountSen),
             notes: (it.notes as string) ?? null,
           };
         }),
@@ -2131,8 +2285,8 @@ app.put("/:id", async (c) => {
                productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
                fabricCode, quantity, gapInches, divanHeightInches, divanPriceSen,
                legHeightInches, legPriceSen, specialOrder, specialOrderPriceSen,
-               basePriceSen, unitPriceSen, discountSen, lineTotalSen, notes)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               totalHeightPriceSen, basePriceSen, unitPriceSen, discountSen, lineTotalSen, notes)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             r.id,
             r.consignmentOrderId,
@@ -2153,6 +2307,7 @@ app.put("/:id", async (c) => {
             r.legPriceSen,
             r.specialOrder,
             r.specialOrderPriceSen,
+            r.totalHeightPriceSen,
             r.basePriceSen,
             r.unitPriceSen,
             r.discountSen,
@@ -2171,7 +2326,8 @@ app.put("/:id", async (c) => {
            customerCO = ?, customerCOId = ?, customerCODate = ?, reference = ?,
            hubId = ?, hubName = ?, companyCODate = ?, customerDeliveryDate = ?,
            hookkaExpectedDD = ?, subtotalSen = ?, totalSen = ?, status = ?,
-           notes = ?, hold_reason = ?, held_by = ?, held_at = ?, updated_at = ?
+           notes = ?, hold_reason = ?, held_by = ?, held_at = ?,
+           pre_hold_status = ?, updated_at = ?
          WHERE id = ?`,
       ).bind(
         merged.customerCO,
@@ -2205,6 +2361,17 @@ app.put("/:id", async (c) => {
           : merged.status !== existing.status
             ? null
             : existing.heldAt ?? existing.held_at ?? null,
+        // Where to come BACK to (BUG-2026-08-13-041) — the CO mirror of the SO
+        // rule at sales-orders.ts:3815. Captured on the way IN, preserved while
+        // the order stays held (a header-only edit must not erase it), and
+        // cleared on the way OUT. A second hold-to-hold write can never
+        // overwrite the stored value with 'ON_HOLD' itself, because
+        // `existing.status` is only stored when it is not already the target.
+        merged.status === "ON_HOLD" && existing.status !== "ON_HOLD"
+          ? existing.status
+          : merged.status === "ON_HOLD"
+            ? existing.preHoldStatus ?? existing.pre_hold_status ?? null
+            : null,
         now,
         id,
       ),
@@ -2220,9 +2387,13 @@ app.put("/:id", async (c) => {
       merged.status !== existing.status &&
       (merged.status === "CANCELLED" ||
         merged.status === "ON_HOLD" ||
-        (existing.status === "ON_HOLD" &&
-          (merged.status === "CONFIRMED" ||
-            merged.status === "IN_PRODUCTION")))
+        // Any resume, not an enumerated pair. This listed CONFIRMED and
+        // IN_PRODUCTION only, so once `pre_hold_status` made READY_TO_SHIP a
+        // reachable resume target the shop floor would have been left holding
+        // held job cards on an order that was no longer on hold. The condition
+        // that matters is "we are LEAVING a hold" — name that, not the
+        // destinations, so a future status cannot re-open the same gap.
+        existing.status === "ON_HOLD")
     ) {
       const cascade = await cascadeCOStatusToPOs(
         c.var.DB,

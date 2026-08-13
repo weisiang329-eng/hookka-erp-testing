@@ -18,7 +18,10 @@ import {
   type ComboRuleInput,
   type SofaTier,
 } from "./sofa-combo";
-import { calculateUnitPrice, calculateLineTotal } from "../../lib/pricing";
+import {
+  calculateUnitPrice,
+  calculateLineTotalWithDiscount,
+} from "../../lib/pricing";
 import { resolveCustomerPriceAsOf } from "../routes/customer-products";
 
 export type ComboPassItem = {
@@ -33,6 +36,21 @@ export type ComboPassItem = {
   basePriceSen: number;
   divanPriceSen: number;
   legPriceSen: number;
+  // BUG-CLASS C1 (2026-08-13). Both callers — the SO and the CO write paths —
+  // carry a FIFTH price component, and this pass used to recompute the unit
+  // price from only four of them. Every line whose base the combo renegotiated
+  // therefore had its total-height surcharge silently deleted from the stored
+  // unit price. Optional because the type predates the column; `?? 0` at every
+  // use, never a re-derivation (a component we were not given is not a price
+  // of zero to invent — it is simply absent from this line).
+  totalHeightPriceSen?: number;
+  // Same shape, other direction: the recompute below used to overwrite
+  // lineTotalSen with a bare unit × qty, dropping the per-line discount the
+  // caller had already subtracted — so a renegotiated sofa line stored MORE
+  // than the operator approved. The frontend's own combo preview
+  // (sales/create.tsx) feeds `getLineTotal`, i.e. discount included, so this
+  // is also what makes the screen and the save agree.
+  discountSen?: number;
   specialOrderPriceSen: number;
   unitPriceSen: number;
   lineTotalSen: number;
@@ -207,7 +225,11 @@ export async function runSofaComboPass(
         basePriceSen: it.basePriceSen,
         divanPriceSen: it.divanPriceSen,
         legPriceSen: it.legPriceSen,
-        totalHeightPriceSen: 0,
+        // Was a hardcoded 0. It feeds `surchargesPerUnitSen` in
+        // distributeComboUnitPrices, so a zero here hands the surcharge's worth
+        // of the agreed combo total to the BASE price — the set still totals
+        // right, but each line's build-up stops adding up.
+        totalHeightPriceSen: it.totalHeightPriceSen ?? 0,
         specialOrderPriceSen: it.specialOrderPriceSen,
         quantity: it.quantity,
       };
@@ -218,13 +240,21 @@ export async function runSofaComboPass(
       const nb = result.newBaseByKey.get(it.id);
       if (typeof nb !== "number") continue;
       it.basePriceSen = nb;
+      // EVERY component, and the discount. This one statement is the whole of
+      // BUG-CLASS C1 in miniature: the sum has to name all five parts, and the
+      // line total has to keep the subtraction its caller already made.
       it.unitPriceSen = calculateUnitPrice({
         basePriceSen: nb,
         divanPriceSen: it.divanPriceSen,
         legPriceSen: it.legPriceSen,
+        totalHeightPriceSen: it.totalHeightPriceSen ?? 0,
         specialOrderPriceSen: it.specialOrderPriceSen,
       });
-      it.lineTotalSen = calculateLineTotal(it.unitPriceSen, it.quantity);
+      it.lineTotalSen = calculateLineTotalWithDiscount(
+        it.unitPriceSen,
+        it.quantity,
+        it.discountSen ?? 0,
+      );
     }
   } catch (e) {
     console.warn("[sofa-combo-pass] skipped:", e);

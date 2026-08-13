@@ -103,6 +103,194 @@ survived. Proved by deleting the check (77 bytes) and watching it go red.
 stayed green. That looked like "the guard doesn't work" but was actually "the mutation
 didn't apply". Always assert the mutation changed the file before believing a red-or-green
 result — a mutation test that doesn't mutate is a false all-clear.
+## BUG-2026-08-13-042 — every CO save with a Customer PO filled in reported "Save did NOT take effect" — on a save that had worked `consignment` `ui-frontend` `data-integrity` 🟢
+
+**Symptom.** Edit a consignment order with anything in **Customer PO No.**, press Save,
+and the toast reads *"Save did NOT take effect — customerPOId: tried PO-…, system has
+(empty). Please try again."* The page refuses to navigate. Every other field on that same
+save had persisted perfectly. Retrying fails identically, for ever.
+
+This is the worst failure mode a save guard has: `verifiedSave` exists precisely so the
+operator can trust a green tick (owner 2026-05-25: *"if I save successfully, it should
+only tell me successful when it actually saved"*). A guard that cries wolf on a healthy
+write is worse than no guard — the next real mismatch is the one nobody believes. Same
+family as BUG-2026-08-13's `reason: "unverified"`, which told the owner an edit was lost
+that had actually persisted.
+
+**Root cause.** `consignment/edit.tsx:557` listed `customerPOId` in the `expect` map.
+`rowToCO` has never emitted that key, because `consignment_orders` has no customer-PO
+column — the field was a leftover from the page's fork off `sales/edit.tsx`, filed in
+`src/types/index.ts` under a block literally commented *"SO-compat shims … CO has no
+customer-PO concept; values are always empty/undefined"*. So the readback returned
+`undefined`, `equalLoose` normalised that to `null`, compared it against `"PO-…"`, and
+recorded a diff. The write was never the problem; the **question** was unanswerable.
+
+The `expect` map is written in JS shorthand (`customerId, customerPOId, …`), so each key
+is just an identifier — nothing connects it to the response shape it is compared against,
+and `tsc` has no opinion.
+
+**Fix — the comparison, not the write.** `customerPOId` is out of the `expect` map, and
+out of the request body it was decorating (the route never read it).
+
+An input the save discards is *why* anyone typed into it, so the three dead surfaces went
+with it: the "Customer PO No." box on the CO edit page, the "Customer Reference" box on
+the CO **create** page — the other door, silently eating the value at create time with no
+error at all — and the CO detail page's "Customer PO" row, which asserted `-` about every
+consignment order ever raised. Each site keeps a comment saying what it would take to
+bring the field back (a column, a write path, a `rowToCO` emit — not just a box).
+`src/types/index.ts` documents the shim block accordingly. **No column was added and no
+write path changed**; the CO's real customer references, "Customer CO No." and
+"Reference", are untouched and both persist.
+
+**Verified.** `tests/verified-save-expect-contract.test.mjs` pins the general invariant —
+*every key in an `expect` map must be a key the endpoint actually returns* — two ways:
+the CO map is checked against the keys the **real by-id handler** puts on the wire, and
+the sales-order twin's map against `rowToSO`'s own emitted keys, so the sibling page
+cannot drift the way this one did. Three of its four assertions fail against the pre-fix
+pages. Gates clean.
+
+**NOT verified:** not deployed, no prod session. Nothing here changes stored data, so
+there is nothing to check in the database; the observable is a UI one — edit a CO, save,
+and confirm it navigates with no error toast.
+
+---
+
+## BUG-2026-08-13-041 — resuming an ON_HOLD Consignment Order walked it BACKWARDS to CONFIRMED `consignment` `status-cascade` 🟢
+
+**Symptom.** Put a CO on hold at IN_PRODUCTION, click **Resume Order**, and it comes
+back as **CONFIRMED** — a stage lost, with the confirmation dialog cheerfully announcing
+"the order will return to CONFIRMED status" as though that were the answer. Held from
+READY_TO_SHIP it lost two. Nothing errors, and the operator has to notice the status
+themselves.
+
+**Root cause.** `consignment/detail.tsx:1093` decides the target with
+`(order.preHoldStatus as SOStatus) || "CONFIRMED"`, and nothing on the CO side ever
+emitted or stored `preHoldStatus`: no column, no write, and `rowToCO` did not carry it.
+So the fallback was not a fallback, it was the entire behaviour. The Sales Order side
+had the identical defect and closed it on 2026-08-04 — the comment on
+`SalesOrder.preHoldStatus` in `src/types/index.ts` records that it "quietly moved an
+IN_PRODUCTION order backwards a stage" until then. On the CO the field was even filed
+under a block of "SO-compat shims … always empty/undefined", which is the tell.
+
+**Two things the mirror exposed, both of which had to be fixed with it:**
+
+1. `VALID_TRANSITIONS.ON_HOLD` — on **both** order types — listed CONFIRMED,
+   IN_PRODUCTION and CANCELLED. But both tables allow a hold FROM READY_TO_SHIP. So
+   storing the true origin without widening the table would have turned a silent
+   downgrade into a hard refusal: an order held at READY_TO_SHIP could not be taken off
+   hold at all. This was already live on the SO side since 08-04. Returning to a stage
+   the order already reached is a restoration, not a forward jump.
+2. Both cascades defined a resume by its DESTINATION
+   (`fromStatus === "ON_HOLD" && (newStatus === "CONFIRMED" || … "IN_PRODUCTION")`), so
+   a CO/SO resumed to READY_TO_SHIP would have come off hold with its production orders
+   and job cards still ON_HOLD — the exact shop-floor symptom the cascade exists to
+   prevent (「my CO 设 ON_HOLD 但工人继续在做」), one status later. A resume is now
+   defined by what it LEAVES, matching the `isUncancel` shape beside it, so no future
+   status can re-open the same gap.
+
+**Fix.** `src/api/routes/consignment-orders.ts` — `pre_hold_status` added to the row
+type (dual-keyed), emitted by `rowToCO`, captured/preserved/cleared in the PUT's header
+UPDATE on exactly the SO rule (`sales-orders.ts:3815`), and created by an
+`ALTER TABLE … ADD COLUMN IF NOT EXISTS` inside `ensureDiscountColumn`, which is awaited
+at the top of both the POST and the PUT — the PUT being the only writer of ON_HOLD on
+this table. `migrations-postgres/0224_…sql` is the record; the runtime ALTER is the
+mechanism. Transition tables and cascade conditions corrected on both order types;
+`src/types/index.ts` moves `preHoldStatus` out of the SO-compat block.
+
+**Verified.** `tests/consignment-pre-hold-status.test.mjs` — eight assertions against the
+REAL PUT handler: capture on hold, emit on read, PRESERVE across a header-only edit
+(an edit is not a resume), clear on resume, never store `ON_HOLD` as its own origin,
+resume to READY_TO_SHIP succeeds, and the floor is released on every resume target. All
+eight fail against the pre-fix tree. Gates clean.
+
+**NOT verified:** not deployed, no prod session. The new column reaches prod on the
+first CO create or edit after deploy; confirm with
+`SELECT column_name FROM information_schema.columns WHERE table_name='consignment_orders' AND column_name='pre_hold_status'`
+before trusting a Resume. COs **already** on hold have no stored origin and will still
+resume to CONFIRMED — that history is unrecoverable and is not backfilled.
+
+---
+
+## BUG-2026-08-13-040 — a Consignment Order saved for LESS than the operator approved: the server dropped the total-height surcharge `money` `consignment` `data-integrity` 🟢
+
+**Symptom.** Silent, and in the customer's favour. The CO create screen prices a
+bedframe line as Base + Divan + Leg + **T.Height** + Special, shows the surcharge
+inline as `+RM 80.00`, folds it into the unit price the operator reads and approves,
+and POSTs it. What was stored was Base + Divan + Leg + Special. So the saved CO — the
+number on the CO PDF, on the list, in every downstream figure — was **lower** than the
+quotation the operator had just agreed, and the PDF's "T.Height" column printed
+`RM 0.00` on every line ever raised.
+
+**Root cause.** BUG-CLASS **C1**, sixth instance, and the first one found by looking at
+a *second document type* instead of a second column. `consignment-orders.ts` computed
+`const unitPrice = basePrice + divanPrice + legPrice + specialPrice` in BOTH its POST
+and its PUT item loops, and its `INSERT INTO consignment_order_items (…)` column list
+did not name `totalHeightPriceSen` at all — so the posted value was parsed, ignored and
+thrown away. The column **exists in production**
+(`consignment_order_items.total_height_price_sen`, confirmed in `tests/db-schema.json`;
+self-applied by the SO helper, which this route never awaits) and was uniformly 0.
+
+The same file also took the other three components on trust —
+`Number(it.divanPriceSen) || 0` ×3 — the exact shape the SO route was repaired of on
+2026-07-17 and 2026-07-22. Every one of those fixes was applied to `sales-orders.ts`
+alone, and `tests/price-component-class.test.mjs` read only that file, so the clone
+beside it was never counted.
+
+A THIRD site, shared by both document types, had the same defect one level down:
+`runSofaComboPass` (`src/api/lib/sofa-combo-pass.ts`) recomputes a renegotiated sofa
+line's unit price from four components (dropping total height) and its line total from
+a bare `unit × qty` — discarding the per-line discount the caller had already
+subtracted, i.e. storing **more** than the screen quoted. The frontend's own combo
+preview passes `getLineTotal(l)` (discount included) and lists `totalHeightPriceSen`
+among the per-unit surcharges, so the two had drifted apart.
+
+**Fix.**
+- `src/api/routes/consignment-orders.ts` — all four components now go through the same
+  resolvers the SO route uses (`resolveHeightPriceSen` ×2, `resolveSpecialOrderPriceSen`,
+  `resolveTotalHeightPriceSen`) in BOTH loops; the unit price is the shared
+  `calculateUnitPrice` naming all five parts; the line total is
+  `calculateLineTotalWithDiscount`; `totalHeightPriceSen` is in both INSERT column
+  lists; `rowToItem` / `rowToCOListItem` emit it dual-keyed; the write path's own
+  `ALTER TABLE … ADD COLUMN IF NOT EXISTS` covers it.
+  **Trust model unchanged from the SO side:** a client-supplied number is trusted
+  verbatim, *including a deliberate 0*; only an OMITTED field is derived from the
+  owner's `variants-config`; a total height that is not in the owner's list prices at 0
+  and is never guessed.
+- `src/api/lib/sofa-combo-pass.ts` — the recompute names all five components and keeps
+  the discount.
+- `src/pages/consignment/edit.tsx` — carries `totalHeightPriceSen` in line state,
+  seeded from the line's own stored value, re-derived on a gap/divan/leg change through
+  the SAME helper the PUT uses, and displayed. Its stale comment claiming the CO write
+  path "never reads or writes" the column is replaced.
+- `src/lib/pricing.ts` — the header comment saying `totalHeightPriceSen` "is NOT sent to
+  the API" described the pre-0209 world and is exactly the belief that kept the CO route
+  summing four components. Corrected.
+
+**Verified.** `tests/consignment-total-height-surcharge.test.mjs` runs the REAL POST and
+PUT handlers against an in-memory book and asserts the values actually bound into the
+INSERT equal, to the sen, what the screen's own `calculateUnitPrice` /
+`calculateLineTotalWithDiscount` produce for the same line. On the fixture
+(base 83,000 · divan 5,500 · leg 2,000 · T.Height 26" 8,000 · qty 2 · discount 3,000):
+
+| | unit | line total | order total |
+|---|---|---|---|
+| screen | 98,500 | 194,000 | 194,000 |
+| stored BEFORE | 90,500 | 178,000 | 178,000 |
+| stored AFTER | 98,500 | 194,000 | 194,000 |
+
+RM 160.00 under-charged on one two-unit line. `tests/sofa-combo-pass-components.test.mjs`
+covers the shared recompute; `tests/price-component-class.test.mjs` now counts
+DOCUMENT TYPE × COMPONENT and additionally asserts each item INSERT names every
+component. **Every one of these guards was proved by putting the bug back and watching
+it go red** — separately for the POST sum, the PUT sum, the dropped INSERT column, and
+both halves of the combo recompute; against the pre-fix tree the class test fails 7/15.
+
+**NOT verified:** no prod session was available. The blast radius on live data is
+unmeasured — run the `row 34` probe in `docs/AUDIT-LAYER-CONSISTENCY.md` §7 to count the
+eligible lines. Per the standing rule, existing orders are **not** repriced
+(「旧的 order 就算了」); this is fix-forward.
+
+---
 
 ## BUG-2026-08-13-034 — every downloaded Credit Note and Debit Note printed RM 0.00, because a stale shared type certified the wrong keys `money` `ui-frontend` `data-integrity` 🟢
 

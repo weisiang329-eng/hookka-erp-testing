@@ -18,7 +18,11 @@
 // ---------------------------------------------------------------------------
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import {
+  useCachedJson,
+  cachedFetchJson,
+  invalidateCachePrefix,
+} from "@/lib/cached-fetch";
 import { serviceCaseCountedIn, validPeriod } from "@/lib/kpi-drill";
 import {
   computeCasePipeline,
@@ -249,14 +253,82 @@ export default function ServiceCasesListPage() {
   );
   const cases = useMemo(() => resp?.data ?? [], [resp]);
 
-  // Two bulk lists (cached, one fetch each — already used across the app)
-  // feed the Case Pipeline derivation for EVERY row; never fetched per-row.
-  // The Stage / Status Days columns need delivery + production dates matched
-  // by salesOrderId against each case's SV order ids.
+  // Delivery + production dates feed the Case Pipeline derivation for EVERY
+  // row (the Stage / Status Days columns), matched by salesOrderId against
+  // each case's SV order ids — never fetched per-row. Delivery orders come off
+  // the one shared cached list already used across the app; production orders
+  // are SCOPED (see below) because the unscoped list is an order of magnitude
+  // heavier.
   const { data: doResp } = useCachedJson<{ data?: DeliveryOrderApi[] }>("/api/delivery-orders");
-  const { data: poResp } = useCachedJson<{ data?: ProductionOrderApi[] }>(
-    "/api/production-orders?fields=minimal&include=jobCards",
-  );
+
+  // Production orders are fetched SCOPED to the cases' SV order ids — never
+  // bare. `?fields=minimal&include=jobCards` with no scope is the whole org
+  // (~2,539 POs WITH every job card): on a cold server snapshot that read
+  // took 30,721 ms and was then killed by api-client's 30 s global abort, so
+  // the page's Stage / Status Days columns hung forever (same read the Master
+  // Tracker was retired from — see /tracker-summary in
+  // src/api/routes/production-orders.ts).
+  //
+  // The pipeline only ever matches POs by salesOrderId against the case's SV
+  // orders (`posBySo` below, and computeCasePipeline filters again by
+  // svOrderIds), so every other PO in the org was fetched and thrown away.
+  // `scope=<csv>` matches salesOrderId at SQL level (fetchFilteredPOs) —
+  // exactly the rows we keep.
+  //
+  // `include=jobCards` STAYS: computeCasePipeline reads
+  // `po.jobCards[].completedDate` for the "Repair in progress" / "Repair done"
+  // stages and for their enteredAt timestamps. Dropping it would silently
+  // stall every case at "Service Order".
+  //
+  // Chunked because this page scopes to EVERY case's SV orders, not one
+  // case's: the id list is unbounded, and a single query string would grow
+  // past sane URL limits. 100 ids ≈ 3.7 KB of URL; the chunks run in parallel
+  // and each is cached on its own key (cachedFetchJson is the non-hook SWR
+  // entry point, so a fixed number of hooks still covers a variable number of
+  // requests).
+  const poScopeUrls = useMemo(() => {
+    const ids = new Set<string>();
+    for (const c of cases) {
+      for (const o of c.orders) {
+        if (o.isSv && o.id) ids.add(o.id);
+      }
+    }
+    // Sorted so the chunk URLs (hence their cache keys) are stable across
+    // renders and re-orderings of the case list.
+    const sorted = Array.from(ids).sort();
+    const CHUNK = 100;
+    const urls: string[] = [];
+    for (let i = 0; i < sorted.length; i += CHUNK) {
+      urls.push(
+        "/api/production-orders?fields=minimal&include=jobCards&scope=" +
+          sorted
+            .slice(i, i + CHUNK)
+            .map(encodeURIComponent)
+            .join(","),
+      );
+    }
+    return urls;
+  }, [cases]);
+  const [scopedPos, setScopedPos] = useState<ProductionOrderApi[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    // No SV orders anywhere → Promise.all([]) settles on a microtask and
+    // clears the list. Deliberately NOT an early `setScopedPos([])` — a
+    // synchronous setState in an effect body cascades renders (and the lint
+    // rule rejects it).
+    void Promise.all(
+      poScopeUrls.map((url) =>
+        cachedFetchJson<{ data?: ProductionOrderApi[] }>(url),
+      ),
+    ).then((results) => {
+      if (cancelled) return;
+      setScopedPos(results.flatMap((r) => r?.data ?? []));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [poScopeUrls]);
+
   const [createOpen, setCreateOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<CaseStatus | "ALL">("ALL");
   // Rows currently visible in the grid (post search / column filters /
@@ -327,7 +399,7 @@ export default function ServiceCasesListPage() {
   }, [doResp]);
   const posBySo = useMemo(() => {
     const m = new Map<string, ProductionOrderApi[]>();
-    for (const p of poResp?.data ?? []) {
+    for (const p of scopedPos) {
       const so = p.salesOrderId;
       if (!so) continue;
       const arr = m.get(so);
@@ -335,7 +407,7 @@ export default function ServiceCasesListPage() {
       else m.set(so, [p]);
     }
     return m;
-  }, [poResp]);
+  }, [scopedPos]);
 
   // One clock captured once at mount (a state initializer is allowed to call
   // Date.now — calling it during render is not). Every row's Days Open /

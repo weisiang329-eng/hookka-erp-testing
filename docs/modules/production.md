@@ -9,7 +9,7 @@ Owns the shop floor: a **dept-tabbed WIP board** (one production_order per confi
 - Pages
   - `/production` → `src/pages/production/index.tsx:548` (`ProductionPage` — dept-tabbed WIP board; `activeTab` ∈ ALL/UPHOLSTERY/PACKING/FOAM/FAB_CUT/FAB_SEW)
   - `/production/folders` + `/folder-detail` → `src/pages/production/folders.tsx:39`
-  - `/production/tracker` → `src/pages/production/tracker.tsx:118` (`MasterTrackerPage`)
+  - `/production/tracker` → redirect to `/planning?tab=tracker` (`src/dashboard-routes.tsx`). The Master Tracker lives as a TAB of the Planning page; the standalone `production/tracker.tsx` was deleted 2026-08-13 — unreachable since the route became a redirect, imported nowhere. **`PlanningPage` does not read `?tab=` yet** (`activeTab` is local state), so this redirect and the Production page's own "Master Tracker" button both land on Capacity Overview.
   - `/production/scan` → `src/pages/production/scan.tsx:85` (shop-floor dept scan) · `/production/fg-scan` → `src/pages/production/fg-scan.tsx:104`
   - `/production/wip-times` → `src/pages/production/wip-times.tsx:148` (per-dept minute rates)
   - `/bom` → `src/pages/bom.tsx:6773` (`BOMManagementPage`) · `/cnc-templates` → `src/pages/cnc-templates.tsx:252`

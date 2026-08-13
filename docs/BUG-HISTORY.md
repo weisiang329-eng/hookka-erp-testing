@@ -52,6 +52,39 @@ Entries themselves stay newest-first.
 **Verified.** Replayed both pipelines against live prod rows: **957 POs and 13,418 attached job cards, output byte-identical** (`JSON.stringify` equal), join **6,865 ms → 8 ms**, fetch **30.77 MB → 10.76 MB**, ~**7.3 s** of server work removed. The `/delivery` variant benefits more — join **18,132 ms → 33 ms** — with its row count unchanged. The exact new SQL was run through the real `translateSql` compat layer and executed on prod: correct snake_case rewriting inside the nested sub-select, 13,418 rows, matching expectation; the `includeArchive` UNION form parses in both the existing and the new position. `tests/production-orders-jobcard-grouping.test.mjs` (6 tests) pins order-equivalence including the equal-`sequence` stable-sort tie, empty-bucket and orphan-card cases, non-mutation of the shared array, and the SQL shape. Full suite 3,690 pass / 0 fail; `npx tsc -p tsconfig.app.json --noEmit` exit 0. **Not yet observed on a running prod deploy** — Actions is billing-blocked, so the end-to-end cold-call timing is a projection from the measured server-side saving, not a measurement.
 
 **Prod DB note (corrects the entry below).** The local `.dev.vars` `DATABASE_URL` is indeed dead (`28P01`), but a **working** read-only DSN for live prod exists in the repo's own scripts (`db.vpwdqtsxexpiqxzweivd.supabase.co`, used by ~65 `scripts/*.mjs`) — that is how the live figures above were read. The second DSN in `scripts/` (`db.zaxygxwadidiqcphibma…`) is a **stale copy**, last written 2026-08-10. Both are hardcoded credentials sitting in tracked files and belong on the rotation list.
+## BUG-2026-08-13-004 — Department Efficiency let unmeasured job cards divide their own estimate by itself, burying the 4,289 real recordings at ~100% `ui-frontend` `production-orders` `data-integrity` 🟢
+
+**Symptom.** Reports › Production › **Department Efficiency** parked every department near **100%** whatever the date range, and the **Export CSV** button shipped that as a KPI. The dead Master Tracker page (`src/pages/production/tracker.tsx`, deleted in the same branch) carried the same expression in an "Actual Hours / Efficiency %" table.
+
+**Root cause — an unpaired ratio, not a missing data source.** The table summed each completed job card's `actualMinutes || estMinutes` into `totalMin`, summed `estMinutes` into `completedMin`, and rendered `completedMin ÷ totalMin`. For any card with no recorded duration the fallback fired, so that card put **its own estimate on both sides** — the estimate divided by itself — and since most cards record nothing, that ballast dominated the ratio and flattened it. The cards that DID carry a real measurement were averaged into invisibility.
+
+**The recordings are real and partial.** Prod 2026-08-13: **4,340 of 36,796 job cards carry a non-null `actualMinutes`, 4,289 of them non-zero.** ⚠️ An earlier read of this bug — from a 5-order sample that happened to be all-NULL — concluded the factory records no durations at all and that the honest fix was to blank the figure everywhere. That premise was **WRONG**, and acting on it would have hidden 4,289 genuine recordings. It is recorded here because the same 5-order sample is quoted in the `/tracker-summary` comment in `src/api/routes/production-orders.ts` (already on `main`), which should be corrected. `productionTimeMinutes` genuinely is not a second source — it equals `estMinutes` on every row.
+
+The column beside it was headed "Avg Time (mins)" while also being built off the fallback, so an estimate was presented as elapsed time.
+
+**Fix.** `src/pages/reports.tsx` credits a card to the ratio **only when it recorded a duration**, and then credits it to **both** sides (`measuredStdMin += jc.estMinutes`, `measuredActualMin += actual`, inside one `actual > 0` guard). A department with no recorded card reads `"—"` instead of a manufactured 100%. A new **Measured Cards** column (`recorded / completed`, table + CSV) states how thin the sample is, so 12-of-400 cannot be read as a departmental KPI. The neighbouring column is now "Avg Std Time (mins)", and the caption below the table adapts to whether anything was measured. The second instance went away with the deletion of the unreachable tracker page.
+
+**Related, NOT fixed here (another agent owns the files).** `slimJobCardsToPlanningLite` (`src/api/routes/production-orders/_helpers.ts`) omits `actualMinutes` from the `jobCards-lite` projection, so `/planning` — the sole `jobCards-lite` consumer — never receives a single one of the 4,340 recordings and all ~10 `jc.actualMinutes` reads there fall through to `estMinutes`, which also makes the `useActual` flag at `src/pages/planning/index.tsx:947` a silent no-op. The fix is to ADD the field to the projection (never to blank the display). Left to a follow-up because PR #275 is editing both files.
+
+**Deliberately NOT touched.** `src/api/routes/department-performance.ts` and the employee / department / payslip efficiency built on it, plus Planning › Efficiency Overview and `src/api/lib/efficiency-report.ts`: their denominator is genuine clocked time from `working_hour_entries` (prod shows 80% overall, 64% on one day, 48% for one worker). The assistant tools (`get_department_efficiency`, `aggregateWorkerEfficiency`) already return `null` when no actual minutes exist — they never had the fallback.
+
+**Still fabricated, NOT fixed here (separate concern).** `src/pages/reports.tsx` Employees tab renders a **Worker Efficiency** table whose Hours Worked / Items Completed / Efficiency % are derived from a hash of the worker id (`seed(w.id)`), plus hardcoded "Attendance Rate 94.5%" / "Avg Hours/Day 8.7" summary cards. Invented data of a different kind — a real replacement already exists in `/api/reports/efficiency.json` (`efficiency-report.ts`, clocked-time based), so wiring it up is a feature, not a cleanup.
+
+**Verified.** `tests/no-fabricated-efficiency.test.mjs` (3 tests) refuses either fallback spelling, pins that the numerator and denominator are accumulated **together** inside the `actual > 0` guard, pins the `"—"` degradation and both new headers, asserts the deleted tracker page stays deleted, **and** pins `department-performance.ts` to `productionMinutes ÷ workingMinutes` so the fully-measured metric cannot be swept up in a future cleanup. Full suite green; `npx tsc -p tsconfig.app.json --noEmit` clean. **Not yet observed on prod** — this branch is not deployed, and no live before/after percentage was captured.
+
+---
+
+## BUG-2026-08-13-003 — Service Cases hung: an unscoped production-order fetch blew past the 30 s global abort `ui-frontend` `service-repair` `performance` 🟢
+
+**Symptom.** The Service Cases list's **Stage** and **Status Days** columns, and the Service Case detail page's pipeline stepper + Download-PDF button, sat empty with no error on a cold server snapshot.
+
+**Root cause.** Both pages fetched `/api/production-orders?fields=minimal&include=jobCards` with **no scope** — the whole org, ~2,539 production orders WITH every job card. Measured cold on prod that read takes **30,721 ms** and is then killed by `api-client`'s 30 s global abort (`API_TIMEOUT_MS`), so the request never resolves and the derived columns never appear. Same read the Master Tracker was retired from (see `GET /api/production-orders/tracker-summary`).
+
+**Fix.** Everything either page reads off that response is already filtered to `salesOrderId ∈ the case's SV order ids` (`posBySo` / `casePos`, and `computeCasePipeline` filters again), so the request now appends `&scope=<csv>` — `fetchFilteredPOs` matches those tokens against `salesOrderId` in SQL. `detail.tsx` builds one URL; `index.tsx` scopes across every case, so it chunks 100 ids per URL and fetches the chunks in parallel through `cachedFetchJson`.
+
+**`include=jobCards` deliberately KEPT.** Nothing on either page mentions job cards by name, but `computeCasePipeline` (`src/lib/case-pipeline.ts`) reads `po.jobCards[].completedDate` for the "Repair in progress" / "Repair done" stages and their `enteredAt` timestamps. Dropping the include would have silently stalled every case at "Service Order" — the same trap that made the dashboard's `poReadyForDelivery` look include-free.
+
+**Verified.** `npx tsc -p tsconfig.app.json --noEmit` clean, full suite green, eslint clean. **Not yet observed on prod** — this branch is not deployed.
 
 ---
 
@@ -68,7 +101,6 @@ Entries themselves stay newest-first.
 **Verified.** Full suite 3,684 pass / 0 fail; `npx tsc -p tsconfig.app.json --noEmit` clean. **NOT yet verified on prod, and no live before/after ringgit figure was captured** — the local `.dev.vars` DATABASE_URL is rotated (`28P01 password authentication failed`), so this worktree had no way to read the live number. Equivalence rests on the shared-code argument plus the equivalence test above; the deploying session must compare the tile against the Delivery page's Pending Delivery tab total before calling it done.
 
 **Still open (same class, not fixed here).** The mobile home screen (`src/pages/m/screens/Home.tsx`, url in `src/pages/m/config/modules.ts:1308`) still derives its Pending Delivery in the browser from the same ~2,539-PO fetch and can hang the same way.
-
 ---
 
 ## BUG-2026-08-10-001 — "Spawn Service Order" said the CODE was optional, then failed on a product FK the operator never saw `ui-frontend` `service-repair` `production-orders` `data-integrity` 🟢

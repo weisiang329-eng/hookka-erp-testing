@@ -118,7 +118,19 @@ const PAGE_RESULTS: SearchResult[] = [
   { id: "p-consignment-return", label: "Consignment Return", href: "/consignment/return", icon: Ship, category: "pages" },
   { id: "p-customers", label: "Customers", href: "/customers", icon: Users, category: "pages" },
   { id: "p-production", label: "Production", href: "/production", icon: Factory, category: "pages" },
-  { id: "p-tracker", label: "Master Tracker", href: "/production/tracker", icon: BarChart3, category: "pages" },
+  // The Master Tracker is a TAB of the Planning page. This entry used to point
+  // at /production/tracker, which has been a bare redirect since the tracker
+  // moved — so the operator searched for a page and got bounced somewhere that
+  // never names it. The label now says where it lives.
+  //
+  // The href carries ?tab=tracker to match the Production page's own "Master
+  // Tracker" button (production/index.tsx: navigate("/planning?tab=tracker")).
+  // NOTE: PlanningPage's `activeTab` is local state and does NOT read the query
+  // string, so both links currently land on Capacity Overview with the tracker
+  // one tab away. Making ?tab= load-bearing is a 10-line change in
+  // src/pages/planning/index.tsx, deliberately left out of this branch to keep
+  // clear of PR #275, which is editing that file.
+  { id: "p-tracker", label: "Master Tracker (Planning)", href: "/planning?tab=tracker", icon: BarChart3, category: "pages" },
   { id: "p-planning", label: "Planning", href: "/planning", icon: Calendar, category: "pages" },
   { id: "p-mrp", label: "MRP", href: "/planning/mrp", icon: Layers, category: "pages" },
   { id: "p-rd", label: "R&D", href: "/rd", icon: Lightbulb, category: "pages" },

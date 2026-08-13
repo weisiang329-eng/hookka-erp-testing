@@ -207,7 +207,10 @@ test("no user-facing dept label map still spells FOAM as bare \"Foam\"", () => {
   const files = [
     "src/pages/bom.tsx",
     "src/pages/production/utils.ts",
-    "src/pages/production/tracker.tsx",
+    // src/pages/production/tracker.tsx was deleted 2026-08-13 (unreachable —
+    // its route has been a redirect to the Planning Master Tracker tab, and
+    // nothing imported it). Its dept label map went with it.
+    "src/pages/planning/index.tsx",
     "src/pages/service-cases/detail.tsx",
     "src/pages/m/config/forms.ts",
     "src/pages/m/screens/ProductionScreen.tsx",

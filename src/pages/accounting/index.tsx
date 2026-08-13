@@ -7093,7 +7093,7 @@ function PartyLedgerTab({ side }: { side: "DEBTOR" | "CREDITOR" }) {
           <Button variant="outline" size="sm" onClick={printLedger} disabled={!data || data.parties.length === 0}>Print</Button>
         </div>
       </div>
-      <p className="text-xs text-[#6B7280]">每个{side === "DEBTOR" ? "客户" : "供应商"}各一段:Balance b/f → 交易 → 累计余额 → Balance c/f。空白起止日 = 全部。</p>
+      <p className="text-xs text-[#6B7280]">One section per {side === "DEBTOR" ? "customer" : "supplier"}: Balance b/f → transactions → running balance → Balance c/f. Leave the dates blank for all activity.</p>
       {loading ? (
         <div className="py-12 text-center text-[#6B7280] text-sm">Loading…</div>
       ) : !data || data.parties.length === 0 ? (

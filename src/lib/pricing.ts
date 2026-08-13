@@ -20,9 +20,14 @@ export interface PricingInput {
 /**
  * Sum all price components into a single unit price (in sen).
  *
- * `totalHeightPriceSen` is used by the frontend create page but is NOT sent
- * to the API as a separate field — it's folded into the line item before
- * submission. API handlers therefore omit it (defaults to 0).
+ * `totalHeightPriceSen` IS sent to the API and IS stored, on both order types:
+ * `sales_order_items.total_height_price_sen` since 0209 and
+ * `consignment_order_items.total_height_price_sen` since 2026-08-13. The old
+ * text here ("not sent to the API… handlers therefore omit it") described the
+ * pre-0209 world and outlived it by months; it is exactly the belief that kept
+ * the CO write path summing four components instead of five. It stays optional
+ * only because a caller may genuinely have no such component — never because a
+ * write path may skip it.
  *
  * This is the ORDER side's name for the same arithmetic the invoice side calls
  * `invoiceLineUnitSen` — the two columns families differ (`basePriceSen` vs

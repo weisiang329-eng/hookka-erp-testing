@@ -1087,7 +1087,10 @@ function HistoryTab() {
           if (row.status === "SKIPPED") return <Badge>SKIPPED</Badge>;
           if (v === "PASS") return <Badge className="bg-green-100 text-green-800">PASS</Badge>;
           if (v === "FAIL") return <Badge className="bg-red-100 text-red-800">FAIL</Badge>;
-          return <Badge>{v ?? "—"}</Badge>;
+          // A row with no recorded verdict must read as "no verdict", not as
+          // a pass. `?? "—"` alone missed it: the API now sends "" (it used
+          // to send the literal "PASS"), and "" is not nullish.
+          return <Badge>{String(v ?? "") || "—"}</Badge>;
         },
       },
       {

@@ -168,8 +168,23 @@ const SITES = [
     buckets: ['const defsByInspectionId = new Map<', 'const itemsByInspectionId = new Map<'],
     mapperCall: 'defsByInspectionId.get(r.id) ?? [], itemsByInspectionId.get(r.id) ?? [],',
     mustNotContain: ['rowToInspection(r, defRes.results ?? [], itemRes.results ?? [])'],
-    // 500 inspections (the LIMIT) x 2,151 items = 1,075,500 comparisons — the
-    // largest in the class, though bounded on both sides by that LIMIT.
+    // 500 inspections (the LIMIT) x 2,151 items = 1,075,500 comparisons,
+    // bounded on both sides by that LIMIT. This used to be annotated "the
+    // largest in the class" — it is not: the qc-pending twin below is ~75x
+    // bigger and UNBOUNDED, and it was missed because nobody looked past the
+    // file the report named. That is this class's whole failure mode.
+  },
+  {
+    name: 'qc-pending GET / — checklist items per pending inspection',
+    file: 'src/api/routes/qc-pending.ts',
+    buckets: ['const itemsByInspection = new Map<'],
+    mapperCall: 'rowToInspection(r, itemsByInspection.get(r.id) ?? []),',
+    mustNotContain: ['inspections.map((r) => rowToInspection(r, itemsResults))'],
+    // 2,839 PENDING/IN_PROGRESS rows (measured on prod 2026-08-01, recorded in
+    // quality.tsx's slot-card geometry note) x ~28,000 checklist items
+    // = ~80M comparisons. NO LIMIT on the parent query, and quality.tsx calls
+    // the endpoint with no query string at all, so nothing narrows it — the
+    // cost grows quadratically with the QC backlog.
   },
   {
     name: 'purchase-orders GET / — items per PO',

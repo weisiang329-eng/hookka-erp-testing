@@ -21,8 +21,6 @@ import {
   Bell,
   Wallet,
   Calculator,
-  Globe,
-  ClipboardCheck,
   CreditCard,
   Ship,
   ClipboardList,
@@ -151,9 +149,12 @@ const PAGE_RESULTS: SearchResult[] = [
   { id: "p-e-invoice", label: "e-Invoice", href: "/invoices/e-invoice", icon: FileText, category: "pages" },
   { id: "p-reports", label: "Reports", href: "/reports", icon: BarChart3, category: "pages" },
   { id: "p-employees", label: "Employees", href: "/employees", icon: Users, category: "pages" },
-  { id: "p-approvals", label: "Approvals", href: "/approvals", icon: ClipboardCheck, category: "pages" },
-  { id: "p-documents", label: "Documents", href: "/documents", icon: FileText, category: "pages" },
-  { id: "p-portal", label: "Customer Portal", href: "/portal", icon: Globe, category: "pages" },
+  // Removed in chore/dead-code-sweep: "Approvals" (/approvals), "Documents"
+  // (/documents) and "Customer Portal" (/portal). None of the three exists —
+  // no entry in DASHBOARD_ROUTES, no directory under src/pages/, no sidebar
+  // link. Searching for them dropped the operator on the dashboard shell with
+  // nothing matched. README.md already recorded that the /portal module "does
+  // not exist"; the palette was still advertising it.
   { id: "p-organisations", label: "Organisations", href: "/settings/organisations", icon: Settings, category: "pages" },
   { id: "p-settings", label: "Settings", href: "/settings", icon: Settings, category: "pages" },
 ];

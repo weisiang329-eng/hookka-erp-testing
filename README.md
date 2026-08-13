@@ -57,10 +57,11 @@ npm run dev:worker
 npm run dev
 ```
 
-> ⚠️ `npm run dev` alone does **not** give you a working API. `vite.config.ts`
-> still proxies `/api` to `http://localhost:3001`, which is a leftover from a
-> Node API server that no longer exists (there is no `npm run api` script). Use
-> `npm run dev:worker`, which runs `wrangler pages dev` in front of Vite.
+> ⚠️ `npm run dev` alone does **not** give you a working API — it serves the UI
+> only. Use `npm run dev:worker`, which runs `wrangler pages dev` in front of
+> Vite. (`vite.config.ts` used to proxy `/api` to `http://localhost:3001`, a
+> leftover from a Node API server that no longer exists; that proxy was removed
+> in chore/dead-code-sweep.)
 
 Other commands (this is the complete script list — anything else you read in an
 older doc is gone):
@@ -132,7 +133,8 @@ src/
     layout/         Sidebar, topbar, page shell
     ui/             38 shared UI primitives (DataGrid, PageHeader, FilterBar,
                     StatusBadge, MoneyInput, StatusTabStrip, …)
-  hooks/            useFormValidation, useMediaQuery
+  hooks/            useMediaQuery (the only one; useFormValidation was deleted
+                    in chore/dead-code-sweep — no importer)
   layouts/          DashboardLayout + WorkerLayout (route-level shells)
   lib/              client-side domain logic, PDF generators, formatters
   pages/            One directory per module (see table above)

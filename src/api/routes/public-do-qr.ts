@@ -85,7 +85,13 @@ type PublicDoRow = {
   status: string;
   totalItems: number | null;
   orgId: string | null;
-  delivery_incomplete: number | null;
+  // Both spellings. The shim returns `deliveryIncomplete` — this column is
+  // absent from column-rename-map.json, so db-pg.ts's `columnFrom` falls
+  // through to `postgres.toCamel`. Declaring only one spelling is what let the
+  // typechecker certify five wrong reads of this column instead of catching
+  // them (see BUG-CLASSES.md, the camelCase read trap).
+  deliveryIncomplete?: number | null;
+  delivery_incomplete?: number | null;
 };
 
 // One returnable line the driver can tick on "Delivered with Issue".
@@ -170,7 +176,7 @@ async function summarizeDos(
       itemCount: slot?.count || Number(r.totalItems) || 0,
       productNames: slot?.names ?? [],
       items: slot?.items ?? [],
-      incomplete: !!Number(r.delivery_incomplete),
+      incomplete: !!Number(r.deliveryIncomplete ?? r.delivery_incomplete),
     };
   });
 }

@@ -18,9 +18,12 @@
 // WHY ROUTE OFF ITEM GROUPS, NOT MATERIAL NAMES
 // ---------------------------------------------
 // `raw_materials.item_group` is the AutoCount accounting group already carried
-// by every material master row, and `src/lib/material-lookup.ts`
-// CATEGORY_TO_ITEM_GROUPS is the existing map from the BOM's StockCategory
-// (`src/types/index.ts` StockCategory) onto those groups. Routing off the group
+// by every material master row, and the BOM's StockCategory
+// (`src/types/index.ts`) names the same taxonomy from the other side. Until
+// chore/dead-code-sweep the forward map lived in `src/lib/material-lookup.ts`
+// as CATEGORY_TO_ITEM_GROUPS; that module read the in-memory `mock-data.ts`
+// fixtures, had no importer, and was deleted, so `ITEM_GROUP_TO_FAMILY` below
+// is now the ONLY copy of this mapping in the repo. Routing off the group
 // means a NEW material code inherits the right checks the moment it is filed in
 // the right group — no keyword list to maintain, no free-text matching on
 // supplier descriptions that are written differently every month.
@@ -86,8 +89,10 @@ export type RmFamily = (typeof RM_FAMILIES)[number];
 /**
  * AutoCount item group → QC material family.
  *
- * Mirrors CATEGORY_TO_ITEM_GROUPS in `src/lib/material-lookup.ts` read in the
- * other direction. Keys are compared upper-cased and trimmed.
+ * This is the SOLE copy of the group mapping. It used to mirror
+ * CATEGORY_TO_ITEM_GROUPS in `src/lib/material-lookup.ts` read in the other
+ * direction; that file was deleted (no importer, mock-data-backed). Keys are
+ * compared upper-cased and trimmed.
  */
 export const ITEM_GROUP_TO_FAMILY: Record<string, RmFamily> = {
   "B.M-FABR": "FABRIC", // bedframe fabric

@@ -2743,7 +2743,11 @@ app.post("/:id/resolve-incomplete", async (c) => {
         404,
       );
     }
-    if (Number(existing.delivery_incomplete) !== 1) {
+    // Dual-keyed — same trap as the two sibling readers. Undefined here made
+    // this guard reject EVERY resolve attempt with "not marked as
+    // delivered-with-issues", so the recovery path was unusable too: the flag
+    // could not be set effectively, and could not have been cleared either.
+    if (Number(existing.deliveryIncomplete ?? existing.delivery_incomplete) !== 1) {
       return c.json(
         {
           success: false,

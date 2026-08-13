@@ -676,7 +676,6 @@ export default function SalesOrderDetailPage() {
     if (!order) return;
     const cloneData = {
       customerId: order.customerId,
-      customerPOId: "",
       customerCOId: "",
       reference: `Clone of ${order.companyCOId}`,
       companyCODate: new Date().toISOString().split("T")[0],
@@ -1222,7 +1221,11 @@ export default function SalesOrderDetailPage() {
                     : "Editable until goods leave the warehouse."}
                 </p>
               </div>
-              <div><p className="text-xs text-[#9CA3AF]">Customer PO</p><p className="font-medium doc-number">{order.customerPOId || "-"}</p></div>
+              {/* "Customer PO" printed here, and it was ALWAYS "-":
+                  `consignment_orders` has no customer-PO column and `rowToCO`
+                  never emitted one, so this row asserted "this CO has no
+                  customer PO" about every consignment order ever raised. The
+                  inputs that fed it are gone too (BUG-2026-08-13-042). */}
               <div><p className="text-xs text-[#9CA3AF]">Customer SO</p><p className="font-medium doc-number">{order.customerCOId || "-"}</p></div>
               <div><p className="text-xs text-[#9CA3AF]">Reference</p><p className="font-medium">{order.reference || "-"}</p></div>
               <div><p className="text-xs text-[#9CA3AF]">Company CO Date</p><p className="font-medium">{formatDate(order.companyCODate)}</p></div>

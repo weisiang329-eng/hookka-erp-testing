@@ -34,6 +34,44 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-072 — the "delivered with issues" billing hold had never fired, in five places at once `money` `delivery-orders` `invoices` `data-integrity` 🟢
+
+**Symptom.** A delivery marked DELIVERED WITH ISSUES is supposed to block invoicing until
+an operator resolves the paperwork. It never did. The flag also never reached the UI, and
+the recovery endpoint rejected every attempt to clear it.
+
+**Mechanism.** `delivery_incomplete` is absent from `column-rename-map.json`, so
+`db-pg.ts`'s `columnFrom` falls through to `postgres.toCamel` and the row arrives as
+`deliveryIncomplete`. Every reader used the snake_case spelling, so each got `undefined`:
+
+| read | result |
+| --- | --- |
+| `Number(undefined) === 1` | false → the invoice hold never engaged |
+| `Number(undefined) !== 1` | true → resolve-incomplete rejected everything |
+| `!!Number(undefined)` | false → the flag never reached the UI |
+
+**Why it survived.** Two comments actively defended the wrong spelling — one called it a
+"folded-lowercase runtime column", another said snake_case was chosen "so the
+unquoted-identifier fold can't split read/write keys". Folding applies to unquoted
+MIXED-CASE identifiers; this name has an underscore and is never folded. And the row type
+declared only one spelling, so the typechecker CERTIFIED all five wrong reads instead of
+catching them — the same mechanism as BUG-2026-08-13-034 (RM 0.00 credit notes).
+
+**Blast radius: none.** Verified on prod 2026-08-13 — the delivery-orders list carries the
+key `deliveryIncomplete` (the shim's behaviour, live) and **zero** delivery orders are
+flagged. So no invoice ever slipped a hold. That also made the fix safe: turning the guard
+on blocks nothing that currently succeeds. The agent that found it declined to fix it for
+exactly that risk; measuring the row count resolved it.
+
+**Fix.** All five sites dual-keyed (`row.deliveryIncomplete ?? row.delivery_incomplete`),
+both spellings declared on both row types.
+
+**Guard.** `tests/delivery-incomplete-dual-key.test.mjs`. Worth keeping: the first version
+of the guard used `(?!s*??)` and flagged the very fix it protects — in `A ?? B` the
+`B` half has no `??` after it. It failed against known-good code, which is the harmless
+direction; inverted, it would have gone green against a broken one. Rewritten to blank out
+correct pairs first, then look for leftovers.
+
 ## BUG-2026-08-13-071 — `/consignment/return` invented the CR number, the status and the date, printed them beside real money, and exported the lot to CSV `ui-frontend` `data-integrity` `fabrication` 🟢
 
 **Symptom.** The Consignment Returns grid listed rows that looked entirely ordinary:
@@ -135,6 +173,325 @@ survived. Proved by deleting the check (77 bytes) and watching it go red.
 stayed green. That looked like "the guard doesn't work" but was actually "the mutation
 didn't apply". Always assert the mutation changed the file before believing a red-or-green
 result — a mutation test that doesn't mutate is a false all-clear.
+## BUG-2026-08-13-042 — every CO save with a Customer PO filled in reported "Save did NOT take effect" — on a save that had worked `consignment` `ui-frontend` `data-integrity` 🟢
+
+**Symptom.** Edit a consignment order with anything in **Customer PO No.**, press Save,
+and the toast reads *"Save did NOT take effect — customerPOId: tried PO-…, system has
+(empty). Please try again."* The page refuses to navigate. Every other field on that same
+save had persisted perfectly. Retrying fails identically, for ever.
+
+This is the worst failure mode a save guard has: `verifiedSave` exists precisely so the
+operator can trust a green tick (owner 2026-05-25: *"if I save successfully, it should
+only tell me successful when it actually saved"*). A guard that cries wolf on a healthy
+write is worse than no guard — the next real mismatch is the one nobody believes. Same
+family as BUG-2026-08-13's `reason: "unverified"`, which told the owner an edit was lost
+that had actually persisted.
+
+**Root cause.** `consignment/edit.tsx:557` listed `customerPOId` in the `expect` map.
+`rowToCO` has never emitted that key, because `consignment_orders` has no customer-PO
+column — the field was a leftover from the page's fork off `sales/edit.tsx`, filed in
+`src/types/index.ts` under a block literally commented *"SO-compat shims … CO has no
+customer-PO concept; values are always empty/undefined"*. So the readback returned
+`undefined`, `equalLoose` normalised that to `null`, compared it against `"PO-…"`, and
+recorded a diff. The write was never the problem; the **question** was unanswerable.
+
+The `expect` map is written in JS shorthand (`customerId, customerPOId, …`), so each key
+is just an identifier — nothing connects it to the response shape it is compared against,
+and `tsc` has no opinion.
+
+**Fix — the comparison, not the write.** `customerPOId` is out of the `expect` map, and
+out of the request body it was decorating (the route never read it).
+
+An input the save discards is *why* anyone typed into it, so the three dead surfaces went
+with it: the "Customer PO No." box on the CO edit page, the "Customer Reference" box on
+the CO **create** page — the other door, silently eating the value at create time with no
+error at all — and the CO detail page's "Customer PO" row, which asserted `-` about every
+consignment order ever raised. Each site keeps a comment saying what it would take to
+bring the field back (a column, a write path, a `rowToCO` emit — not just a box).
+`src/types/index.ts` documents the shim block accordingly. **No column was added and no
+write path changed**; the CO's real customer references, "Customer CO No." and
+"Reference", are untouched and both persist.
+
+**Verified.** `tests/verified-save-expect-contract.test.mjs` pins the general invariant —
+*every key in an `expect` map must be a key the endpoint actually returns* — two ways:
+the CO map is checked against the keys the **real by-id handler** puts on the wire, and
+the sales-order twin's map against `rowToSO`'s own emitted keys, so the sibling page
+cannot drift the way this one did. Three of its four assertions fail against the pre-fix
+pages. Gates clean.
+
+**NOT verified:** not deployed, no prod session. Nothing here changes stored data, so
+there is nothing to check in the database; the observable is a UI one — edit a CO, save,
+and confirm it navigates with no error toast.
+
+---
+
+## BUG-2026-08-13-041 — resuming an ON_HOLD Consignment Order walked it BACKWARDS to CONFIRMED `consignment` `status-cascade` 🟢
+
+**Symptom.** Put a CO on hold at IN_PRODUCTION, click **Resume Order**, and it comes
+back as **CONFIRMED** — a stage lost, with the confirmation dialog cheerfully announcing
+"the order will return to CONFIRMED status" as though that were the answer. Held from
+READY_TO_SHIP it lost two. Nothing errors, and the operator has to notice the status
+themselves.
+
+**Root cause.** `consignment/detail.tsx:1093` decides the target with
+`(order.preHoldStatus as SOStatus) || "CONFIRMED"`, and nothing on the CO side ever
+emitted or stored `preHoldStatus`: no column, no write, and `rowToCO` did not carry it.
+So the fallback was not a fallback, it was the entire behaviour. The Sales Order side
+had the identical defect and closed it on 2026-08-04 — the comment on
+`SalesOrder.preHoldStatus` in `src/types/index.ts` records that it "quietly moved an
+IN_PRODUCTION order backwards a stage" until then. On the CO the field was even filed
+under a block of "SO-compat shims … always empty/undefined", which is the tell.
+
+**Two things the mirror exposed, both of which had to be fixed with it:**
+
+1. `VALID_TRANSITIONS.ON_HOLD` — on **both** order types — listed CONFIRMED,
+   IN_PRODUCTION and CANCELLED. But both tables allow a hold FROM READY_TO_SHIP. So
+   storing the true origin without widening the table would have turned a silent
+   downgrade into a hard refusal: an order held at READY_TO_SHIP could not be taken off
+   hold at all. This was already live on the SO side since 08-04. Returning to a stage
+   the order already reached is a restoration, not a forward jump.
+2. Both cascades defined a resume by its DESTINATION
+   (`fromStatus === "ON_HOLD" && (newStatus === "CONFIRMED" || … "IN_PRODUCTION")`), so
+   a CO/SO resumed to READY_TO_SHIP would have come off hold with its production orders
+   and job cards still ON_HOLD — the exact shop-floor symptom the cascade exists to
+   prevent (「my CO 设 ON_HOLD 但工人继续在做」), one status later. A resume is now
+   defined by what it LEAVES, matching the `isUncancel` shape beside it, so no future
+   status can re-open the same gap.
+
+**Fix.** `src/api/routes/consignment-orders.ts` — `pre_hold_status` added to the row
+type (dual-keyed), emitted by `rowToCO`, captured/preserved/cleared in the PUT's header
+UPDATE on exactly the SO rule (`sales-orders.ts:3815`), and created by an
+`ALTER TABLE … ADD COLUMN IF NOT EXISTS` inside `ensureDiscountColumn`, which is awaited
+at the top of both the POST and the PUT — the PUT being the only writer of ON_HOLD on
+this table. `migrations-postgres/0224_…sql` is the record; the runtime ALTER is the
+mechanism. Transition tables and cascade conditions corrected on both order types;
+`src/types/index.ts` moves `preHoldStatus` out of the SO-compat block.
+
+**Verified.** `tests/consignment-pre-hold-status.test.mjs` — eight assertions against the
+REAL PUT handler: capture on hold, emit on read, PRESERVE across a header-only edit
+(an edit is not a resume), clear on resume, never store `ON_HOLD` as its own origin,
+resume to READY_TO_SHIP succeeds, and the floor is released on every resume target. All
+eight fail against the pre-fix tree. Gates clean.
+
+**NOT verified:** not deployed, no prod session. The new column reaches prod on the
+first CO create or edit after deploy; confirm with
+`SELECT column_name FROM information_schema.columns WHERE table_name='consignment_orders' AND column_name='pre_hold_status'`
+before trusting a Resume. COs **already** on hold have no stored origin and will still
+resume to CONFIRMED — that history is unrecoverable and is not backfilled.
+
+---
+
+## BUG-2026-08-13-040 — a Consignment Order saved for LESS than the operator approved: the server dropped the total-height surcharge `money` `consignment` `data-integrity` 🟢
+
+**Symptom.** Silent, and in the customer's favour. The CO create screen prices a
+bedframe line as Base + Divan + Leg + **T.Height** + Special, shows the surcharge
+inline as `+RM 80.00`, folds it into the unit price the operator reads and approves,
+and POSTs it. What was stored was Base + Divan + Leg + Special. So the saved CO — the
+number on the CO PDF, on the list, in every downstream figure — was **lower** than the
+quotation the operator had just agreed, and the PDF's "T.Height" column printed
+`RM 0.00` on every line ever raised.
+
+**Root cause.** BUG-CLASS **C1**, sixth instance, and the first one found by looking at
+a *second document type* instead of a second column. `consignment-orders.ts` computed
+`const unitPrice = basePrice + divanPrice + legPrice + specialPrice` in BOTH its POST
+and its PUT item loops, and its `INSERT INTO consignment_order_items (…)` column list
+did not name `totalHeightPriceSen` at all — so the posted value was parsed, ignored and
+thrown away. The column **exists in production**
+(`consignment_order_items.total_height_price_sen`, confirmed in `tests/db-schema.json`;
+self-applied by the SO helper, which this route never awaits) and was uniformly 0.
+
+The same file also took the other three components on trust —
+`Number(it.divanPriceSen) || 0` ×3 — the exact shape the SO route was repaired of on
+2026-07-17 and 2026-07-22. Every one of those fixes was applied to `sales-orders.ts`
+alone, and `tests/price-component-class.test.mjs` read only that file, so the clone
+beside it was never counted.
+
+A THIRD site, shared by both document types, had the same defect one level down:
+`runSofaComboPass` (`src/api/lib/sofa-combo-pass.ts`) recomputes a renegotiated sofa
+line's unit price from four components (dropping total height) and its line total from
+a bare `unit × qty` — discarding the per-line discount the caller had already
+subtracted, i.e. storing **more** than the screen quoted. The frontend's own combo
+preview passes `getLineTotal(l)` (discount included) and lists `totalHeightPriceSen`
+among the per-unit surcharges, so the two had drifted apart.
+
+**Fix.**
+- `src/api/routes/consignment-orders.ts` — all four components now go through the same
+  resolvers the SO route uses (`resolveHeightPriceSen` ×2, `resolveSpecialOrderPriceSen`,
+  `resolveTotalHeightPriceSen`) in BOTH loops; the unit price is the shared
+  `calculateUnitPrice` naming all five parts; the line total is
+  `calculateLineTotalWithDiscount`; `totalHeightPriceSen` is in both INSERT column
+  lists; `rowToItem` / `rowToCOListItem` emit it dual-keyed; the write path's own
+  `ALTER TABLE … ADD COLUMN IF NOT EXISTS` covers it.
+  **Trust model unchanged from the SO side:** a client-supplied number is trusted
+  verbatim, *including a deliberate 0*; only an OMITTED field is derived from the
+  owner's `variants-config`; a total height that is not in the owner's list prices at 0
+  and is never guessed.
+- `src/api/lib/sofa-combo-pass.ts` — the recompute names all five components and keeps
+  the discount.
+- `src/pages/consignment/edit.tsx` — carries `totalHeightPriceSen` in line state,
+  seeded from the line's own stored value, re-derived on a gap/divan/leg change through
+  the SAME helper the PUT uses, and displayed. Its stale comment claiming the CO write
+  path "never reads or writes" the column is replaced.
+- `src/lib/pricing.ts` — the header comment saying `totalHeightPriceSen` "is NOT sent to
+  the API" described the pre-0209 world and is exactly the belief that kept the CO route
+  summing four components. Corrected.
+
+**Verified.** `tests/consignment-total-height-surcharge.test.mjs` runs the REAL POST and
+PUT handlers against an in-memory book and asserts the values actually bound into the
+INSERT equal, to the sen, what the screen's own `calculateUnitPrice` /
+`calculateLineTotalWithDiscount` produce for the same line. On the fixture
+(base 83,000 · divan 5,500 · leg 2,000 · T.Height 26" 8,000 · qty 2 · discount 3,000):
+
+| | unit | line total | order total |
+|---|---|---|---|
+| screen | 98,500 | 194,000 | 194,000 |
+| stored BEFORE | 90,500 | 178,000 | 178,000 |
+| stored AFTER | 98,500 | 194,000 | 194,000 |
+
+RM 160.00 under-charged on one two-unit line. `tests/sofa-combo-pass-components.test.mjs`
+covers the shared recompute; `tests/price-component-class.test.mjs` now counts
+DOCUMENT TYPE × COMPONENT and additionally asserts each item INSERT names every
+component. **Every one of these guards was proved by putting the bug back and watching
+it go red** — separately for the POST sum, the PUT sum, the dropped INSERT column, and
+both halves of the combo recompute; against the pre-fix tree the class test fails 7/15.
+
+**NOT verified:** no prod session was available. The blast radius on live data is
+unmeasured — run the `row 34` probe in `docs/AUDIT-LAYER-CONSISTENCY.md` §7 to count the
+eligible lines. Per the standing rule, existing orders are **not** repriced
+(「旧的 order 就算了」); this is fix-forward.
+## BUG-2026-08-13-064 — R&D's whole page stated "All active projects are on track and within budget. ✓" over a dead request `rnd` `ui-frontend` `C15` 🟢
+
+**Symptom.** `/rd` reads `/api/rd-projects` once and every tab derives from it. When that
+read failed — 30 s abort, 5xx, `_stub` — the page rendered as if the answer were "no
+projects": the Summary tab printed the green tick **"All active projects are on track and
+within budget. ✓"** and **"No milestones are past their target date. ✓"**, the Pipeline
+showed six empty stages, Drafts said "No drafts yet", and the Reports tab offered a CSV
+export of nothing. Four KPI tiles read 0 / 0 / 0 / 0%.
+
+**Root cause.** `src/pages/rd/index.tsx:1329` destructured only `{ data, loading, refresh }`
+from `useCachedJson`, discarding the `failure` the hook has exposed since
+BUG-2026-08-13-016. `allProjects` fell back to `[]` and the render gate at `:1502` was
+`loading ? spinner : content` — so a dead request and an empty database produced
+byte-identical output. This is **C15 row 3** (the list half), in its worst form: not a
+neutral "No data", but a positive green assertion that everything is fine.
+
+**Fix.** `src/pages/rd/index.tsx` — take `failure` from the hook, compute
+`loadFailed = !rdResp && isUnknownOutcome(rdFailure)`, and render `<RecordLoadError>` in
+place of the tab body. `isUnknownOutcome` keeps a genuine 404 out of the branch, and the
+`!rdResp` term preserves the 2026-06-04 blank-page guard — a page still holding cached
+rows keeps showing them.
+
+**Verified.** `npx tsc -p tsconfig.app.json --noEmit` exit 0; `npx eslint` 0 errors;
+`npm test` 3,851 pass / 0 fail. Not observed on prod — no prod session this session.
+
+---
+
+## BUG-2026-08-13-063 — a QC inspection nobody performed displayed as a green **PASS** `quality` `data-integrity` `C15` 🟢
+
+**Symptom.** On `/quality` › History, an inspection row whose `result` column is NULL
+rendered a **green PASS badge**, and one whose `department` is NULL rendered
+**"UPHOLSTERY"**. Neither is distinguishable from a real passed UPHOLSTERY inspection.
+
+**Root cause.** `src/api/routes/qc-inspections.ts:79,82` — `department: row.department ??
+"UPHOLSTERY"` and `result: row.result ?? "PASS"`. The history query deliberately returns
+legacy rows (the route's own comment: "null on legacy rows"), so the substitution is
+reachable. The page's honest fallback at `src/pages/quality.tsx:1090`
+(`<Badge>{v ?? "—"}</Badge>`) was unreachable, because the API had already replaced the
+null with a plausible verdict before it ever left the server. Class **C15**: *"`0` is a
+claim, not a blank"* — here a **verdict** is a claim, not a blank, and it is the kind an
+auditor reads.
+
+**Fix.** `qc-inspections.ts` now emits `""` for both, matching the honest `?? ""` its
+neighbours already use for `inspectorId` / `inspectorName`. `quality.tsx:1090` becomes
+`String(v ?? "") || "—"` — `?? "—"` alone would not have caught `""`, which is not nullish.
+
+**Verified.** Gates green as above. **Impact unsized without prod** — the one-line probe is
+`SELECT COUNT(*) FROM qc_inspections WHERE result IS NULL;` (and the same for
+`department`). If both are 0 the change is a no-op; it cannot make anything worse either way.
+
+---
+
+## BUG-2026-08-13-062 — `GET /api/qc-pending` re-scanned every checklist item once per inspection: ~80M comparisons a page load `quality` `performance` `C14` 🟢
+
+**Symptom.** No error, ever — just the QC page getting slower as the backlog grew. The
+repo's own measurement (`src/pages/quality.tsx:452-456`, taken on prod 2026-08-01) puts the
+backlog at **167 slot cards holding 2,839 rows**, "the heaviest screen in the system".
+
+**Root cause.** `src/api/routes/qc-pending.ts:1848` handed the **flat** array of every
+returned inspection's checklist items to `rowToInspection`, whose first act (`:387`) is
+`items.filter(i => i.inspectionId === r.id)`. Textbook **C14**: the child fetch had already
+been improved once to `WHERE inspectionId IN (...)`, which removes the wire cost and leaves
+the join cost, and the commit reads as done. Parent = 2,839 rows with **no LIMIT** on the
+query; `src/pages/quality.tsx:296` calls the endpoint with **no query string**, so neither
+`slot`, `stage` nor `deptCode` narrows it. At ~10 items per checklist that is
+2,839 × ~28,000 ≈ **80M comparisons**, growing quadratically with the backlog.
+
+The sibling `qc-inspections.ts` was fixed on 2026-08-13 and annotated "the largest in the
+class". It was not — this twin is ~75× larger and unbounded, and was missed because the
+audit named one file. That is precisely the failure mode `BUG-CLASSES.md` exists to stop.
+
+**Fix.** Bucket the items into a `Map<inspectionId, rows[]>` once at the handler and pass
+each mapper its own bucket. `rowToInspection` **keeps** its internal `.filter()`: over a
+pre-scoped bucket it is a passthrough, which makes the change byte-identical by
+construction, and because `.filter()` copies before the following `.sort()`, the shared
+bucket can never be reordered under another row. The single-record caller at `:2345` is
+untouched.
+
+**Verified.** Gates green. `tests/list-endpoint-child-grouping.test.mjs` gains the site
+guard, **proved by reintroducing the bug and watching it go red** (`✖ ... the mapper is no
+longer called with a bucket`), then green again (12/12) on restore. The stale "largest in
+the class" annotation on the qc-inspections row was corrected in the same commit.
+
+---
+
+## BUG-2026-08-13-061 — `POST /api/customers` never stamped `orgId`, but `GET /api/customers` filters on it `customers` `multi-tenant` `C12` 🟢
+
+**Symptom.** Latent — invisible today, because `hookka` is the only seeded org and it is
+also the column DEFAULT. For any second tenant: creating a customer would 201, push the
+optimistic row onto the grid, and then the record would vanish on the next refresh,
+permanently invisible to the list that created it.
+
+**Root cause.** `src/api/routes/customers.ts:322-327` reads
+`SELECT * FROM customers WHERE orgId = ?` off `getOrgId(c)`; the INSERT at `:399-403`
+omitted `orgId` entirely and let the migration-0049 SQL DEFAULT `'hookka'` fill it. This is
+**C12 row 7** (write-side orgId stamping) — and the same file already knew the hazard: the
+`delivery_hubs` upsert 300 lines below stamps `custOrgId` with a comment saying "instead of
+relying on the column DEFAULT". The customers INSERT next to it never got the same treatment.
+
+**Fix.** Stamp `getOrgId(c)` explicitly. `DEFAULT_ORG_ID` (`src/api/lib/tenant.ts:31`) and
+the column DEFAULT are **both `'hookka'`**, so the written value is byte-identical on prod
+today and correct the moment a second org exists.
+
+**Verified.** Gates green. Byte-identity argued from the two constants, not measured — no
+prod session.
+
+---
+
+## BUG-2026-08-13-060 — every journal entry's `createdAt` was `undefined`, and the shared type swore it was a `string` `accounting` `data-integrity` 🟢
+
+**Symptom.** Dormant, and that is the point: `/api/accounting/journals` has emitted
+`createdAt: undefined` on every entry for as long as the Postgres adapter has been in
+place. Nothing renders it yet, so nothing broke — but `JournalEntry.createdAt`
+(`src/types/index.ts:719`) is declared a **non-optional `string`**, so the first component
+to trust it gets `undefined` with tsc's blessing.
+
+**Root cause.** `src/api/routes/accounting.ts:188` read `e.created_at`. `db-pg.ts` installs
+`transform: { column: { from: columnFrom } }` on **both** connection branches, and
+`columnFrom("created_at")` returns **`"createdAt"`** (rename-map entry
+`createdAt -> created_at`). Executed, not inferred. The row type at `:116` declared
+`created_at: string`, which is why the compiler was silent. The sibling `is_opening` in the
+same file is read correctly as `.isOpening` fifty lines away.
+
+Same class as the `payment_no` read already documented at `supplier-payments.ts:60-62`
+("a bare `row.payment_no` read was ALWAYS undefined"). That fix repaired one file.
+
+**Fix.** `createdAt: e.createdAt ?? e.created_at`, and the row type widened to make both
+spellings optional so the dual-key read is honest about which one arrives.
+
+**Verified.** `columnFrom` executed directly against the real rename map for
+`created_at`, `delivery_incomplete`, `company_so_id` and six others. Gates green.
+
+---
 
 ## BUG-2026-08-13-034 — every downloaded Credit Note and Debit Note printed RM 0.00, because a stale shared type certified the wrong keys `money` `ui-frontend` `data-integrity` 🟢
 

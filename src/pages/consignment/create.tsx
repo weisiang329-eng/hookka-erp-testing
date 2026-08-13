@@ -238,7 +238,6 @@ function CreateConsignmentOrderPage() {
 
   const [customerId, setCustomerId] = useState("");
   const [deliveryHubId, setDeliveryHubId] = useState("");
-  const [customerPOId, setCustomerPOId] = useState("");
   const [customerCOId, setCustomerCOId] = useState("");
   const [reference, setReference] = useState("");
   const [companyCODate, setCompanyCODate] = useState(new Date().toISOString().split("T")[0]);
@@ -253,7 +252,7 @@ function CreateConsignmentOrderPage() {
   // navigates away to the detail page) unmounts this component and the
   // useActiveTabDirty hook's cleanup automatically clears the flag.
   const isDirty = !saving && (
-    !!customerId || !!customerPOId || !!customerCOId || !!reference ||
+    !!customerId || !!customerCOId || !!reference ||
     !!customerDeliveryDate || !!hookkaExpectedDD || !!notes ||
     items.some((it) => !!it.productId)
   );
@@ -269,7 +268,6 @@ function CreateConsignmentOrderPage() {
   type DraftShape = {
     customerId: string;
     deliveryHubId: string;
-    customerPOId: string;
     customerCOId: string;
     reference: string;
     companyCODate: string;
@@ -281,7 +279,6 @@ function CreateConsignmentOrderPage() {
   const draftCurrent: DraftShape = useMemo(() => ({
     customerId,
     deliveryHubId,
-    customerPOId,
     customerCOId,
     reference,
     companyCODate,
@@ -290,7 +287,7 @@ function CreateConsignmentOrderPage() {
     notes,
     items,
   }), [
-    customerId, deliveryHubId, customerPOId, customerCOId, reference,
+    customerId, deliveryHubId, customerCOId, reference,
     companyCODate, customerDeliveryDate, hookkaExpectedDD, notes, items,
   ]);
   const restoredDraft = useFormDraft<DraftShape>(draftKey, draftCurrent);
@@ -301,13 +298,12 @@ function CreateConsignmentOrderPage() {
   const draftBannerVisible =
     !!restoredDraft &&
     !draftBannerDismissed &&
-    !customerId && !customerPOId && !customerCOId && !reference &&
+    !customerId && !customerCOId && !reference &&
     !notes && items.every((it) => !it.productId);
   const restoreDraft = () => {
     if (!restoredDraft) return;
     setCustomerId(restoredDraft.customerId);
     setDeliveryHubId(restoredDraft.deliveryHubId);
-    setCustomerPOId(restoredDraft.customerPOId);
     setCustomerCOId(restoredDraft.customerCOId);
     setReference(restoredDraft.reference);
     setCompanyCODate(restoredDraft.companyCODate);
@@ -396,7 +392,6 @@ function CreateConsignmentOrderPage() {
           const data = JSON.parse(raw);
           setIsClone(true);
           setCustomerId(data.customerId || "");
-          setCustomerPOId(data.customerPOId || "");
           setCustomerCOId(data.customerCOId || "");
           setReference(data.reference || "");
           setCompanyCODate(data.companyCODate || new Date().toISOString().split("T")[0]);
@@ -821,7 +816,7 @@ function CreateConsignmentOrderPage() {
         method: "POST",
         headers: { "Content-Type": "application/json", "Idempotency-Key": idemKey },
         body: JSON.stringify({
-          customerId, customerPOId, customerCOId, reference,
+          customerId, customerCOId, reference,
           companyCODate, customerDeliveryDate, hookkaExpectedDD, notes,
           items: itemsForServer,
           status,
@@ -1039,10 +1034,15 @@ function CreateConsignmentOrderPage() {
                   />
                 )}
               </div>
-              <div>
-                <label className="block text-sm font-medium text-[#374151] mb-1.5">Customer Reference</label>
-                <Input value={customerPOId} onChange={(e) => setCustomerPOId(e.target.value)} placeholder="e.g. PO-HKL-2604-012" />
-              </div>
+              {/* A "Customer Reference" box bound to `customerPOId` used to sit
+                  here, and it was the other door onto BUG-2026-08-13-042:
+                  `consignment_orders` has no customer-PO column, the CO POST
+                  never read the field, so anything typed here was gone the
+                  moment the order was created — and the edit screen then
+                  reported "Save did NOT take effect" for the same reason. The
+                  two real customer references, "Customer CO No." and
+                  "Reference", are below and both persist. Do not re-add this
+                  input without a column and a write path behind it. */}
               <div>
                 <label className="block text-sm font-medium text-[#374151] mb-1.5">Customer CO No.</label>
                 <Input value={customerCOId} onChange={(e) => setCustomerCOId(e.target.value)} placeholder="e.g. CO-12345" />

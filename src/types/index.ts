@@ -1148,8 +1148,17 @@ export type ConsignmentOrder = {
   createdAt: string;
   updatedAt: string;
   items: ConsignmentOrderItem[];
+  /** Status to return to when the hold is undone. REAL on the CO since
+   *  2026-08-13 (BUG-2026-08-13-041) — `consignment_orders.pre_hold_status`,
+   *  written by the CO PUT and emitted by `rowToCO`. It used to sit in the
+   *  SO-compat block below, always undefined, which is exactly why Resume fell
+   *  through to CONFIRMED and moved a held IN_PRODUCTION order backwards. */
+  preHoldStatus?: string;
   // SO-compat shims — CO pages were forked from SO pages and reference these.
-  // CO has no customer-PO concept; values are always empty/undefined.
+  // `consignment_orders` has no column for ANY of them, so they are always
+  // undefined on the wire. A screen that lets an operator TYPE into one is
+  // collecting data the save will discard: see the note on the CO edit page's
+  // Customer PO field (BUG-2026-08-13-042).
   customerPO?: string;
   customerPOId?: string;
   customerPODate?: string;
@@ -1160,7 +1169,6 @@ export type ConsignmentOrder = {
   companySOId?: string;
   companySODate?: string;
   hookkaDeliveryOrder?: string;
-  preHoldStatus?: string;
 };
 
 // --- Goods In Transit ---

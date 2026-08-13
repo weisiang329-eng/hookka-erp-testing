@@ -6,6 +6,10 @@
 > Corrected 2026-08-13: this doc still described a dev-only Node API server
 > (`src/api/index.ts`, `src/api/routes-mock/`, `npm run api`), a `PortalLayout`, a
 > `/api/test/*` B-flow surface, and an unwired login page — **none of those exist**.
+> Re-verified 2026-08-13 (chore/dead-code-sweep) against the `src/` import graph: the
+> `job-card-persistence.ts`, `material-lookup.ts`, `validation.ts`, `scheduling.ts` and
+> `swr-fetcher.ts` rows all described files with no importer (and three of them described
+> them wrongly — see the entries below); those files are deleted and the rows corrected.
 > Those sections are deleted rather than paraphrased. Counts were also stale
 > (~70 routes → 139 mounts; 80+ migrations → 244).
 
@@ -168,9 +172,15 @@ There is **no Redux and no Zustand**. Most screens still use plain `fetch` +
 sit here is no longer true — three caching layers exist and new code should use
 them:
 
-- `swr` (a real dependency) with the shared fetcher in `src/lib/swr-fetcher.ts`.
+- ~~`swr` with the shared fetcher in `src/lib/swr-fetcher.ts`~~ — **the fetcher
+  was deleted in chore/dead-code-sweep.** It was the only importer of the `swr`
+  package and nothing imported it, so this "layer" had zero adopters and was a
+  third competing fetch pattern on paper only. `swr` is still listed in
+  `package.json` dependencies and is now unused — removing it is a separate
+  change (lockfile + bundle).
 - `src/lib/cached-fetch.ts` — stale-while-revalidate + `AbortController` +
-  in-flight dedup.
+  in-flight dedup. **This is the one that is actually used** (~88 pages, via
+  `useCachedJson`).
 - `src/lib/api-client.ts` — patches `window.fetch` globally to attach
   `X-CSRF-Token` to every mutating `/api/*` call. **No call site needs to add
   CSRF headers**; an audit that reports "N fetches missing the CSRF token" is
@@ -183,9 +193,12 @@ Windowing/virtualisation primitives for large grids: `src/lib/virtual-window.ts`
 A few pieces of ambient state:
 
 - **Toasts** — `ToastProvider` + `useToast()` in `src/components/ui/toast.tsx`.
-- **Persisted job-card state** — `src/api/lib/job-card-persistence.ts` stashes
-  shop-floor form state in `localStorage` so workers don't lose in-progress
-  entries on a tab reload.
+- ~~Persisted job-card state~~ — `src/api/lib/job-card-persistence.ts` was
+  **deleted** in chore/dead-code-sweep. It had no importer, and the description
+  here was wrong twice over: it was not `localStorage` (it wrote
+  `.data/job-card-overrides.json` via `node:fs`) and it overlaid the in-memory
+  `src/lib/mock-data.ts` arrays, which stopped being the data source when the
+  app moved to Supabase Postgres. Job-card state is durable in the DB now.
 
 ### Styling
 
@@ -276,9 +289,12 @@ Uniform envelope:
 { "success": false, "error": "Customer not found" }
 ```
 
-Validation is opt-in via `src/lib/validation.ts` Zod schemas (broader Zod
-coverage on POST/PATCH bodies is a P2 follow-up — today money handlers
-have first-priority).
+Validation is opt-in and per-route. The reusable Zod schemas live in
+`src/lib/schemas/`; broader Zod coverage on POST/PATCH bodies is a P2
+follow-up (today money handlers have first priority). This paragraph used to
+point at `src/lib/validation.ts` and call it Zod — it was neither Zod nor
+reachable (hand-rolled `required` / `minValue` validators, zero importers) and
+was deleted in chore/dead-code-sweep.
 
 ### Data model
 
@@ -314,11 +330,8 @@ The non-UI heart of the app. A selected tour:
 | `utils.ts`                   | `cn()`, `formatCurrency()`, `formatDate()`, `getStatusColor` |
 | `pricing.ts`                 | Unit + line total calculation, seat-height price picker     |
 | `costing.ts`                 | FIFO consume + month-floating labor rate (sen integer)      |
-| `scheduling.ts`              | Capacity-aware production scheduling                        |
 | `scheduler.ts`               | `useInterval` / `useTimeout` with `pauseOnHidden`           |
 | `cached-fetch.ts`            | SWR + AbortController + in-flight dedup over `useState` cache |
-| `validation.ts`              | Shared Zod schemas (SO create body, DO create body, …)      |
-| `material-lookup.ts`         | SKU ↔ product match / fuzzy lookup                          |
 | `po-parser.ts`               | Parse supplier-PO emails / PDFs → structured items          |
 | `auth.ts`                    | `getCurrentUser`, `isAuthenticated`, login response handling |
 | `csrf.ts`                    | Read `hookka_csrf` cookie + attach `X-CSRF-Token` header    |
@@ -343,7 +356,6 @@ The non-UI heart of the app. A selected tour:
 | `email-outbox.ts`             | `enqueueEmail` + `processOutbox` (retry-with-backoff)      |
 | `supabase-compat.ts`          | D1-shaped facade over `postgres.js`; batch = transaction   |
 | `monitoring.ts`               | Optional toucan-js error capture in worker                 |
-| `job-card-persistence.ts`     | Shop-floor localStorage overlay (server-only deps)         |
 
 ### Currency and dates
 

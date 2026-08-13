@@ -113,7 +113,11 @@ type JournalEntryRow = {
   description: string;
   status: "DRAFT" | "POSTED" | "REVERSED";
   createdBy: string;
-  created_at: string;
+  // Postgres hands this back as `createdAt` (see rowToJournal). `created_at`
+  // is kept only as the SQLite-mirror / defensive spelling — both optional so
+  // the dual-key read is honest about which one actually arrives.
+  createdAt?: string;
+  created_at?: string;
 };
 
 type JournalLineRow = {
@@ -185,7 +189,13 @@ function rowToJournal(e: JournalEntryRow, lines: JournalLineRow[]) {
     description: e.description,
     status: e.status,
     createdBy: e.createdBy,
-    createdAt: e.created_at,
+    // Dual-keyed. `created_at` alone was ALWAYS undefined: db-pg.ts installs
+    // `transform.column.from = columnFrom`, and columnFrom("created_at") is
+    // "createdAt" (rename-map entry `createdAt -> created_at`). The shared
+    // `JournalEntry` type declares createdAt as a non-optional string, so
+    // nothing warned. Same defect, same fix, as the `payment_no` read
+    // documented at supplier-payments.ts:60.
+    createdAt: e.createdAt ?? e.created_at,
     lines: lines
       .filter((l) => l.journalEntryId === e.id)
       .sort((a, b) => a.lineOrder - b.lineOrder)

@@ -1,6 +1,7 @@
 # Procurement — Module Guide
 
 > **Last verified: 2026-08-13** against `src/api/routes/{purchase-orders,grn,purchase-invoices,three-way-match,supplier-payments}.ts`, `src/lib/{convert-chain,purchase-edit-rules,pi-posting}.ts`, `src/pages/procurement/*`, and `tests/`.
+> Re-verified 2026-08-13 (chore/dead-code-sweep): `/procurement/in-transit` is a `<Navigate>` redirect and `src/pages/procurement/in-transit.tsx` had no importer — the page is deleted, the redirect and the `goods-in-transit` API kept.
 > Corrected 2026-08-13: `grn.ts` is 2,592 lines (was 1988), `purchase-invoices.ts` 2,869 (was 2110), `purchase-orders.ts` 1,177 (was 1016). Handler anchors had drifted 100–450 lines — GRN create is :1300 (was 1094), GRN edit :1789 (was 1459), GRN arrival :2174 (was 1807), PI create :1047 (was 729), PI edit :1900 (was 1458). All five named tests exist.
 
 > Self-navigating docs (L2). Repo-wide map: [[CODEBASE-MAP]]. Never grep the whole repo — use the file:line below.

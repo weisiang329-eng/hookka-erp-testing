@@ -1,6 +1,7 @@
 # Context Pack: Frontend
 
-> **Last verified: 2026-08-13** — all 31 cited paths exist; shared primitives confirmed in `src/components/ui/` (`page-header`, `object-page-header`, `data-grid`, `money-input`, `discount-input`, `searchable-select`). Broken link to the old root-level HOOKKA-GOTCHAS path repaired.
+> **Last verified: 2026-08-13** — all cited paths exist; shared primitives confirmed in `src/components/ui/` (`page-header`, `object-page-header`, `data-grid`, `money-input`, `discount-input`, `searchable-select`). Broken link to the old root-level HOOKKA-GOTCHAS path repaired.
+> Re-verified 2026-08-13 (chore/dead-code-sweep): the Procurement list named two pages that no longer exist (`pricing.tsx`, deleted earlier; `in-transit.tsx`, deleted in that sweep — both routes are now `<Navigate>` redirects). Corrected below.
 
 Use this pack for React pages, routing, UI components, forms, tables, and browser-side API calls.
 

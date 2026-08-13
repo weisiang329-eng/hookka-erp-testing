@@ -6,6 +6,10 @@
 > Corrected 2026-08-13: this doc still described a dev-only Node API server
 > (`src/api/index.ts`, `src/api/routes-mock/`, `npm run api`), a `PortalLayout`, a
 > `/api/test/*` B-flow surface, and an unwired login page — **none of those exist**.
+> Re-verified 2026-08-13 (chore/dead-code-sweep) against the `src/` import graph: the
+> `job-card-persistence.ts`, `material-lookup.ts`, `validation.ts`, `scheduling.ts` and
+> `swr-fetcher.ts` rows all described files with no importer (and three of them described
+> them wrongly — see the entries below); those files are deleted and the rows corrected.
 > Those sections are deleted rather than paraphrased. Counts were also stale
 > (~70 routes → 139 mounts; 80+ migrations → 244).
 

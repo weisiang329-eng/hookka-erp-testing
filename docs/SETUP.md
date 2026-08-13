@@ -2,6 +2,7 @@
 
 > **Last verified: 2026-08-13** against `package.json` (scripts block), `vite.config.ts:215-224`, `src/api/worker.ts`, `wrangler.toml`, and `ls src/api/`.
 > Corrected 2026-08-13: the whole "run the API with `npm run api` / `src/api/index.ts`" workflow was fiction — neither the script nor the file exists; the API is a Cloudflare Pages Function (`functions/api/[[route]].ts` → `src/api/worker.ts`) and is run locally with `npm run dev:worker`.
+> Re-verified 2026-08-13 (chore/dead-code-sweep): the `/api` → `localhost:3001` proxy this doc flagged as vestigial has now been REMOVED from `vite.config.ts`, so the line reference is gone with it. `npm run dev` behaviour is unchanged (the proxy never reached anything).
 
 Everything you need to go from a fresh machine to a running dev environment.
 

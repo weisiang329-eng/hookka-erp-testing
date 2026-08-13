@@ -21,6 +21,13 @@
 > Every anchor above the real length pointed **past end-of-file**; the rest landed on
 > unrelated code. If a function you expect is not in the handler file, look in its sibling
 > `_helpers.ts` before concluding it was deleted.
+>
+> **Re-verified 2026-08-13 (chore/dead-code-sweep)** against a full import graph over
+> `src/` + `tests/` + `scripts/` rooted at `src/main.tsx` and `src/api/worker.ts`. Three
+> rows in this map named files that no path could reach and are struck through below:
+> `src/pages/procurement/in-transit.tsx`, `src/pages/planning/dept/_PlainDeptSchedulePage.tsx`,
+> and `src/lib/material-lookup.ts` (cited in the RM-routing gotcha). All other cited paths
+> still exist.
 
 **This is THE code map — read it before touching any module; there is no other.** Look up the
 module here and go straight to the listed files and line ranges. `Grep`/`Glob` over the whole

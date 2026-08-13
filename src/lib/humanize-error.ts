@@ -88,7 +88,7 @@ function extract(err: unknown): { status?: number; candidate: string } {
           : "";
   }
   // Recover a status the error object didn't carry but its text reveals — e.g.
-  // a raw `throw new Error("HTTP 500 ...")` (swr-fetcher) or "503 from /api/x",
+  // a raw `throw new Error("HTTP 500 ...")` or "503 from /api/x",
   // or the browser's own network-failure message ("Failed to fetch").
   if (status === undefined && candidate) {
     const m = candidate.match(/\bHTTP\s*(\d{3})\b|\b(\d{3})\s+from\s+\//i);

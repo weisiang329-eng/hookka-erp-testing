@@ -122,8 +122,11 @@ const navigationGroups: NavGroup[] = [
       ]},
       { name: "Planning", href: "/planning", icon: Calendar },
       // "Scanner" (/production/scan) removed from the menu 2026-06-21 (owner) —
-      // the route + page stay live because printed job-card sticker QRs land there
-      // (generate-sticker-pdf.ts). Workers also scan via /worker/scan (a superset).
+      // the route + page stay live because printed job-card sticker QRs land there.
+      // Those stickers are rendered by src/pages/production/index.tsx off
+      // `generateStickerData` (src/lib/qr-utils.ts); this comment used to credit
+      // `generate-sticker-pdf.ts`, a second generator with no importer, deleted
+      // in chore/dead-code-sweep. Workers also scan via /worker/scan (a superset).
       // Archive of printed paper schedules — operator multi-selects rows on
       // a dept page → "Save to Folder" to find them back later.
       { name: "Folders", href: "/production/folders", icon: FolderOpen },

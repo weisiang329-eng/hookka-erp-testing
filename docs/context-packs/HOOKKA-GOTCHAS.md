@@ -1,5 +1,16 @@
 # Hookka — Hard-Won Gotchas
 
+> **Last verified: 2026-08-13** against every file it cites — all 17 exist and carry the
+> named symbols: `roundUpToRinggitSen` (`src/lib/utils.ts:270`), `distributeComboUnitPrices`
+> (`src/api/lib/sofa-combo.ts`), `bedframeSizeDefault` (`src/api/routes/fg-units.ts:235`),
+> `canonicalizeOrigin`/`appOrigin` (`src/lib/app-origin.ts:28,42`),
+> `src/api/lib/packing-rack-write.ts`, `src/api/lib/packing-piece-identity.ts`,
+> `src/api/routes/import-completion/sofa-pricing.ts`, `src/lib/api-client.ts` (global
+> `window.fetch` patch). No corrections needed.
+>
+> **Canonical path is `docs/context-packs/HOOKKA-GOTCHAS.md`.** Several docs used to link
+> the old root-level HOOKKA-GOTCHAS path, which does not exist; those links were repaired 2026-08-13.
+
 Read this BEFORE touching schema, money, SQL, or shipping. These are the
 non-obvious traps that have repeatedly cost real time and, in one case, nearly
 shipped a broken prod. They are Hookka-specific and intentionally NOT in the
@@ -85,8 +96,11 @@ generic context packs.
 
 - **build:strict before every push** = `npx tsc -p tsconfig.app.json --noEmit`.
   The base `tsconfig.json` is LOOSER and misses errors the deploy gate fails on.
-  Ignore exactly **3 known sandbox module errors**: jsbarcode
-  (`production/index.tsx`) and @zxing/library (`rack-scan.tsx`, `worker/scan.tsx`).
+  **Measured 2026-08-13 on a clean `npm install`: exit 0, ZERO errors.** This entry used to
+  say "ignore exactly 3 known sandbox module errors" (jsbarcode in `production/index.tsx`,
+  @zxing/library in `rack-scan.tsx` / `worker/scan.tsx`). That carve-out did not reproduce.
+  A standing "ignore these N errors" instruction is how a real error gets waved through —
+  if you see any, treat them as yours until proven otherwise.
 - **Verify live on prod after every deploy — read AND write path.** Deploy exit 0
   ≠ feature works (stale chunks, silent schema-apply failures, cache bite).
 - Rapid back-to-back deploys make open tabs throw "Something went wrong" (stale

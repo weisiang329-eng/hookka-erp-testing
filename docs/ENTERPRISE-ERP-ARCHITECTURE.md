@@ -1,5 +1,9 @@
 # Enterprise ERP Architecture Blueprint (SAP/Oracle-style)
 
+> **Last verified: 2026-08-13** against `package.json`, `functions/api/[[route]].ts`, `src/api/worker.ts`, `src/api/queues/`, `src/api/lib/observability.ts` and `src/api/routes/search.ts`.
+> **UNVERIFIED ASSERTION** (as of 2026-08-13): this is a **target-state blueprint, not a description of the system**. None of §1's reference stack is present in this codebase — there is no Redis, no Kafka/NATS/SQS, no OpenSearch/Meilisearch, no BFF layer, no micro-frontends, and no read replica. What actually runs: a single Cloudflare Pages SPA (Vite/React 19) whose API is one Hono app mounted as a Pages Function (`functions/api/[[route]].ts` → `src/api/worker.ts`, 136 route files), talking to Supabase Postgres through Hyperdrive; the only async lane is `src/api/queues/po-emission-consumer.ts`. Treat every §1, §5 and §6 bullet as owner intent, not fact, and never cite this doc as evidence that a component exists.
+> Corrected 2026-08-13: the §7 KPI list asks to track "cache hit ratio (BFF + Redis)" — neither exists, so that row is unmeasurable today.
+
 ## Goal
 
 Build a large-scale ERP architecture that supports:

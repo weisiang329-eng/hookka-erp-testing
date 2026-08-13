@@ -1,3 +1,9 @@
+> **ARCHIVED — HISTORY ONLY. Last had current content 2026-06-15; archived 2026-07-23.**
+> This describes work that is finished or a system that has since changed. Its file
+> paths, line numbers, counts and open items are as of the date above and were NOT
+> re-verified. **Do not use it to decide what the code does today** — read the code, or
+> `docs/CODEBASE-MAP.md`. Banner added 2026-08-13; see `docs/archive/README.md`.
+
 # Print / document overflow audit ("被挤出去")
 
 Owner-reported 2026-06-15: important info (esp. the **QR code** on WIP stickers)

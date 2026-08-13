@@ -1,8 +1,10 @@
+> **ARCHIVED / SUPERSEDED — stopped being true 2026-07-27** (its own window closed; it had already gone stale on 2026-04-27 when D1 was retired in commit `7059259`, which invalidates deliverable 7.3 "restore D1 from backup to staging"). Three of the five docs it links no longer exist at those paths (`docs/archive/PROGRAM-EXECUTION.md`, `docs/archive/REPO-REVIEW-2026-04-24.md`, `docs/archive/UPGRADE-FINAL-READOUT.md` are all under `docs/archive/`), the `.ci-baseline/` ratchet it specs was never created, and its ESLint target ("currently 92 + 15") does not match the measured `npx eslint .` result of 20 errors / 97 warnings on 2026-08-13. Kept for history only; do not treat as current.
+
 # 90-Day Enterprise Upgrade — Execution Plan
 
 > **Window**: 2026-04-28 → 2026-07-27 (13 weeks)
 > **Last updated**: 2026-04-25
-> **Cadence**: this doc updates **weekly**, not one-shot. Replaces the lighter [PROGRAM-EXECUTION.md](PROGRAM-EXECUTION.md) for the upgrade window. The blueprint it executes against is [ENTERPRISE-ERP-ARCHITECTURE.md](ENTERPRISE-ERP-ARCHITECTURE.md).
+> **Cadence**: this doc updates **weekly**, not one-shot. Replaces the lighter [PROGRAM-EXECUTION.md](PROGRAM-EXECUTION.md) for the upgrade window. The blueprint it executes against is [ENTERPRISE-ERP-ARCHITECTURE.md](../ENTERPRISE-ERP-ARCHITECTURE.md).
 > **Status board**: live state lives in [UPGRADE-CONTROL-BOARD.md](UPGRADE-CONTROL-BOARD.md).
 
 ## Goal
@@ -29,7 +31,7 @@ Move hookka-erp-testing from "works in production, but ad-hoc" to enterprise-gra
 
 ## Phase 1 — CI Gate Foundation (W1, 2026-04-28 → 2026-05-04)
 
-**Why**: today CI runs `npm test` (1 smoke file, 9 assertions) and `npm run build` only. `npm run typecheck:app` and `npm run lint:app` exist but are not enforced. The repo currently has ~190 TS errors and 92 ESLint errors that nothing prevents from growing. ([REPO-REVIEW-2026-04-24.md](REPO-REVIEW-2026-04-24.md), [KNOWN-ISSUES.md](KNOWN-ISSUES.md))
+**Why**: today CI runs `npm test` (1 smoke file, 9 assertions) and `npm run build` only. `npm run typecheck:app` and `npm run lint:app` exist but are not enforced. The repo currently has ~190 TS errors and 92 ESLint errors that nothing prevents from growing. ([REPO-REVIEW-2026-04-24.md](REPO-REVIEW-2026-04-24.md), [KNOWN-ISSUES.md](../KNOWN-ISSUES.md))
 
 **Deliverables**
 
@@ -39,7 +41,7 @@ Move hookka-erp-testing from "works in production, but ad-hoc" to enterprise-gra
 | 1.2 | Add `typecheck` job to `.github/workflows/deploy.yml` (parallel with build). Hard-fail on **error count > baseline**. | PR with new TS error fails CI | Claude |
 | 1.3 | Add `lint` job. Same ratchet. | PR with new ESLint error fails CI | Claude |
 | 1.4 | Husky + lint-staged pre-commit: typecheck + lint on staged `.ts`/`.tsx` only. | `git commit` on bad file fails locally | Claude |
-| 1.5 | Reconcile [REPO-REVIEW](REPO-REVIEW-2026-04-24.md) #2: either restore `build = tsc -b && vite build`, or update [SETUP.md](SETUP.md) + [README.md](../README.md) to say `build:strict` is the gate. | Doc + script agree | Claude |
+| 1.5 | Reconcile [REPO-REVIEW](REPO-REVIEW-2026-04-24.md) #2: either restore `build = tsc -b && vite build`, or update [SETUP.md](../SETUP.md) + [README.md](../../README.md) to say `build:strict` is the gate. | Doc + script agree | Claude |
 
 **Risk**: ratchet logic in CI is finicky; if baseline drift is too noisy, fall back to allowlist of "known bad files" pinned to commit hash. Mitigation: ship 1.1/1.2 with `continue-on-error: true` for first 24h, then flip.
 
@@ -131,7 +133,7 @@ Move hookka-erp-testing from "works in production, but ad-hoc" to enterprise-gra
 
 ## Phase 6 — Observability + KPI Dashboard (W11, 2026-07-07 → 2026-07-13)
 
-**Why**: [ENTERPRISE-ERP-ARCHITECTURE](ENTERPRISE-ERP-ARCHITECTURE.md) §7 lists weekly KPIs (p75/p95 route, p95 API latency, JS long tasks, cache hit ratio). Today `Server-Timing` headers exist but nothing aggregates. No browser-side tracing.
+**Why**: [ENTERPRISE-ERP-ARCHITECTURE](../ENTERPRISE-ERP-ARCHITECTURE.md) §7 lists weekly KPIs (p75/p95 route, p95 API latency, JS long tasks, cache hit ratio). Today `Server-Timing` headers exist but nothing aggregates. No browser-side tracing.
 
 **Deliverables**
 

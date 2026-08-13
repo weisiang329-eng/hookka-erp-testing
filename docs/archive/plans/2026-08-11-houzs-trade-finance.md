@@ -1,3 +1,5 @@
+> **ARCHIVED / SUPERSEDED — stopped being true 2026-08-11.** Every task shipped that day even though its checkboxes are still unticked: Task 1 `src/lib/trade-finance.ts` (added `a4adc953`) + `tests/trade-finance.test.mjs`; Task 2 `src/api/lib/trade-finance.ts` + `migrations-postgres/0223_trade_finance.sql` (the latest migration in the repo); Tasks 3/5 the routes and `loadTfDraws` imported at `src/api/routes/accounting.ts:41-43`; Task 4 the repayment branch — 6 `TF_REPAYMENT` occurrences in `src/api/routes/supplier-payments.ts`, pinned by `tests/tf-repayment.test.mjs`; Task 6 `src/pages/accounting/tabs/TradeFinanceBlock.tsx`. Do NOT re-run this as a build plan — the unticked `- [ ]` boxes are a tracking artifact, not open work. Kept for history only; do not treat as current.
+
 # Houzs Century Trade Finance Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

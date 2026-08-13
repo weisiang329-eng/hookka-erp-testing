@@ -1,8 +1,10 @@
 # Context Pack: Backend
 
+> **Last verified: 2026-08-13** against `src/api/worker.ts`, `src/api/routes/README.md`, `src/api/lib/auth-middleware.ts`, `src/api/lib/supabase-compat.ts`, `src/api/lib/db-pg.ts` — all exist; the `c.var.DB` data path is as described. Broken link to the old root-level HOOKKA-GOTCHAS path repaired. For the full endpoint list use the generated [`API.md`](../API.md).
+
 Use this pack for Hono routes, middleware, API contracts, server-side business logic, queues, and integrations.
 
-> Before any DB write or new column: read `docs/HOOKKA-GOTCHAS.md` (migration self-apply + snake_case rename-map — both silently break prod writes if skipped). For how deep to review a given change, see `docs/DEV-OPERATING-FRAMEWORK.md`.
+> Before any DB write or new column: read `docs/context-packs/HOOKKA-GOTCHAS.md` (migration self-apply + snake_case rename-map — both silently break prod writes if skipped). For how deep to review a given change, see `docs/DEV-OPERATING-FRAMEWORK.md`.
 
 ## Read first
 

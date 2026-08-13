@@ -1,5 +1,11 @@
 # Sub-agent commit hygiene
 
+> **Last verified: 2026-08-13** against `docs/archive/UPGRADE-CONTROL-BOARD.md`,
+> `docs/archive/PROGRAM-90D-EXECUTION.md`, `src/lib/cached-fetch.ts`.
+> No corrections needed — every file this doc cites exists, and its rules are git
+> discipline rather than claims about the codebase. The three 2026-04-25 commit SHAs cited
+> as the failure case were not re-checked (this audit is forbidden from running git).
+
 This repo is routinely worked on by multiple Claude sub-agents in parallel — TS cleanup, governance docs, RBAC migrations, slow-query fixes — sharing one working tree. Without explicit hygiene, agents using `git add -A` accidentally sweep up siblings' pending edits, mislabeling work and making history confusing.
 
 Three commits on 2026-04-25 (`9dc583f`, `1fcd468`, `745801a`) demonstrated the failure mode: each was labeled `fix(ts): migrate X to fetchJson` but actually carried governance docs, CI gate config, cached-fetch dedup, and production-orders chunking — all from a different agent.
@@ -34,7 +40,7 @@ If your staged diff is `src/pages/products/*` only, the message is about product
 
 ### 4. Reference the control board
 
-Where applicable, cite the task ID from `docs/UPGRADE-CONTROL-BOARD.md` (e.g. `Closes P3.1`) so the audit trail back to the 90-day plan is visible.
+Where applicable, cite the task ID from `docs/archive/UPGRADE-CONTROL-BOARD.md` (e.g. `Closes P3.1`) so the audit trail back to the 90-day plan is visible.
 
 ### 5. Push frequency
 
@@ -57,4 +63,4 @@ Before every commit:
 
 ## Why this matters
 
-This repo's git log is the audit trail for a 90-day enterprise upgrade ([PROGRAM-90D-EXECUTION.md](PROGRAM-90D-EXECUTION.md)). When a future engineer asks "when did we add the AbortController to useCachedJson?", `git log src/lib/cached-fetch.ts` should answer cleanly. Sweep-style commits make that lookup return a TS-migration commit that mentions nothing about the actual fix.
+This repo's git log is the audit trail for a 90-day enterprise upgrade ([PROGRAM-90D-EXECUTION.md](archive/PROGRAM-90D-EXECUTION.md)). When a future engineer asks "when did we add the AbortController to useCachedJson?", `git log src/lib/cached-fetch.ts` should answer cleanly. Sweep-style commits make that lookup return a TS-migration commit that mentions nothing about the actual fix.

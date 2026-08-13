@@ -1,5 +1,8 @@
 # R&D / New-Model Development — Module Guide
 
+> **Last verified: 2026-08-13** against `src/api/routes/rd-projects.ts`, `src/api/routes/rd-team-members.ts`, `src/pages/rd/{index,detail,maintenance}.tsx`, `src/pages/rd/health.ts`, and `src/api/worker.ts`.
+> Corrected 2026-08-13: only the mount lines were wrong — the R&D routes mount at `worker.ts:1379-1380`, not 1265-1266. Every other anchor in this guide (both route files, all three pages, `health.ts`, the 2,261-line count) verified **exact**. The "no automated tests cover R&D" claim is confirmed — no `tests/rd-*.test.mjs` exists.
+
 > Self-navigating docs (L2). Repo-wide map: [[CODEBASE-MAP]]. Never grep the whole repo — use the file:line below.
 
 ## What it does
@@ -11,7 +14,7 @@ Tracks new-model development as **R&D Projects** moving through a staged pipelin
   - `/rd/:id` → `src/pages/rd/detail.tsx:222` (`RDProjectDetailPage` — single-project dashboard, 3143 lines)
   - `/rd/maintenance` → `src/pages/rd/maintenance.tsx:93` (`RDMaintenancePage` — R&D Team Members CRUD grid)
   - Health-scoring helper (non-page) → `src/pages/rd/health.ts:63` (`getProjectHealth`)
-- API routes (mounted in `src/api/worker.ts:1265-1266`)
+- API routes (mounted in `src/api/worker.ts:1379-1380`)
   - Full R&D lifecycle → `src/api/routes/rd-projects.ts` (2261 lines): CRUD + status transitions + pricing + material issuance + labour hours
   - R&D Team Members CRUD (feeds labour cost) → `src/api/routes/rd-team-members.ts` (305 lines)
 

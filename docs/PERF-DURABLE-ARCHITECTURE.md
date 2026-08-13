@@ -1,5 +1,29 @@
 # Durable read-performance architecture — decision + plan (2026-07-13)
 
+> **Last verified: 2026-08-13** against `src/api/lib/keyset.ts`, `src/api/lib/snapshot.ts`,
+> `src/api/lib/snapshot-freshness.ts`, `src/api/routes/delivery-orders.ts`,
+> `src/api/routes/consignment-notes.ts`, `src/lib/delivery-pipeline.ts`,
+> `src/pages/delivery/index.tsx`, `package.json`.
+>
+> Corrected 2026-08-13: **the rollout below is one-third done and Pillar 2 was never
+> started** — the plan read as if all of it were in flight. Actual state:
+>
+> | Item | State (code-verified 2026-08-13) |
+> |---|---|
+> | Delivery deep-fix spec (bottom section) | ✅ **SHIPPED.** `GET /api/delivery-orders/ready-planning` (`delivery-orders.ts:635`) + shared `buildReadyPlanning()` (`src/lib/delivery-pipeline.ts:374`); FE reads it (`src/pages/delivery/index.tsx:1217`); CN twin at `consignment-notes.ts:235`; Command-Center `/pending-value` at `delivery-orders.ts:666`. |
+> | P0 `keysetList()` helper | 🟡 partial. `src/api/lib/keyset.ts` exists with `tests/keyset.test.mjs`, but the export is not named `keysetList` and **exactly one route imports it** (`src/api/routes/production-orders.ts`). |
+> | P0 `sqlAggregateByStatus()` | ❌ **does not exist** anywhere in `src/`. |
+> | P0/Pillar 2 TanStack Query + `useInfiniteList` | ❌ **never adopted.** `package.json` has `@tanstack/react-table` and `@tanstack/react-virtual` but **no `@tanstack/react-query`**; `useInfiniteList` does not exist; `useCachedJson` is still imported by ~100 files. |
+> | P1 Delivery list → keyset + SQL stats | ❌ not done — `/delivery-orders` list is still page/limit + snapshot. |
+> | P2–P6 (Purchasing, Consignment, remaining lists, retire `useCachedJson`, cost-ledger) | ❌ not started. |
+>
+> So snapshots did **not** retire: `src/api/lib/snapshot.ts` + `snapshot-freshness.ts` +
+> `kv-cache.ts` + `po-list-cache.ts` + `dashboard-snapshot.ts` remain the live
+> read-performance mechanism, which is the opposite of this document's stated
+> decision. Treat everything below the Delivery spec as an **unexecuted proposal**,
+> not as architecture in place. The data-visibility invariants and the 11-point
+> prevention checklist are still the standing rules and were not affected.
+
 **Owner decision (2026-07-13):** stop the snapshot/cache-warming treadmill; adopt a durable
 architecture so lists/dashboards stay fast as data grows for 1–2+ years. Both pillars approved.
 Approach: build shared tooling first, pilot on **Delivery**, byte-identical verify, then roll out.

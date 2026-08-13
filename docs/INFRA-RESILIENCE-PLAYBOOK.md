@@ -1,5 +1,9 @@
 # Infra Resilience & Performance Playbook
 
+> **Last verified: 2026-08-13** against `src/api/lib/supabase-compat.ts:256` (`withConnRetry`, wired into every query path at :285-312), `src/api/routes/auth.ts:174-193` (graceful 503 on login), `.github/workflows/keep-warm.yml` (`*/5 * * * *` → `GET /api/pg-ping`), `wrangler.toml` (`[vars] SENTRY_DSN` set), and `src/api/worker.ts:1082,1474`.
+> Corrected 2026-08-13: the status columns were four levers behind. `withConnRetry` and the graceful-503 login are **shipped, not "written, not deployed"**; the keep-warm heartbeat is **live** as a GitHub Action; and the Sentry DSN **is set**, worker-side and client-side.
+> **UNVERIFIED ASSERTION** (as of 2026-08-13): everything in the Supabase dashboard — pool size 50, compute tier, PITR, the platform-incident block — cannot be checked from this repo. Treat those rows as the owner's last-known state, not fact.
+
 > **Purpose.** A reusable, copy-to-any-project playbook for keeping a
 > **Cloudflare Workers + Supabase Postgres** app (like Hookka ERP) **fast and
 > reliable — especially on weak networks**. Written so a sister project can copy
@@ -49,15 +53,15 @@ Status legend: ✅ live · ⚠️ written, not deployed · ⏳ blocked/waiting �
 ### Tier 1 — Fault tolerance (our code — the resilience layer)
 | Lever | IT term | What it buys | How | Status |
 |---|---|---|---|---|
-| Retry a failed DB **connection** once | **Retry / fault tolerance / resilience** | A transient "couldn't create a connection" becomes a successful (slightly slower) request instead of a hard 500. Safe because it only retries *connection-establishment* errors (nothing was executed yet → no double-writes) | `src/api/lib/supabase-compat.ts` → `withConnRetry` wraps every query/`batch` | ⚠️ **written, not deployed** |
-| Graceful login fallback | **Graceful degradation** | If the DB is truly down, login shows "busy, try again" (HTTP 503) instead of a raw 500 white screen | `src/api/routes/auth.ts` login → try/catch → 503 | ⚠️ **written, not deployed** |
-| Don't logout on a transient failure | **Fault tolerance** | A laggy request no longer force-bounces the user to `/login`. Backend returns 503 (retriable), frontend retries before clearing the session | backend: return 503 not 401 when the DB errors during session verify (`auth-middleware.ts`); frontend: retry once before `clearAuth()` (`api-client.ts:168`) | ⬜ not started |
-| Keep-warm heartbeat | **Warm-up / keep-alive** | The DB connection never goes cold, so the *first* user after a quiet spell doesn't pay the 20–30 s cold-start | A scheduled ping (every ~1–5 min) to `GET /api/pg-ping` (already exists). Cloudflare Pages **can't** cron — use a GitHub Action or a free external pinger (UptimeRobot) | ⬜ **not started** |
+| Retry a failed DB **connection** once | **Retry / fault tolerance / resilience** | A transient "couldn't create a connection" becomes a successful (slightly slower) request instead of a hard 500. Safe because it only retries *connection-establishment* errors (nothing was executed yet → no double-writes) | `src/api/lib/supabase-compat.ts:256` → `withConnRetry`, wrapping every query path at :285-312 | ✅ **shipped** (committed and on `main`) |
+| Graceful login fallback | **Graceful degradation** | If the DB is truly down, login shows "busy, try again" (HTTP 503) instead of a raw 500 white screen | `src/api/routes/auth.ts:174-193` — try/catch → 503 with the "login can't reach the DB" comment | ✅ **shipped** |
+| Don't logout on a transient failure | **Fault tolerance** | A laggy request no longer force-bounces the user to `/login`. Backend returns 503 (retriable), frontend retries before clearing the session | backend: return 503 not 401 when the DB errors during session verify (`auth-middleware.ts`); frontend: retry once before `clearAuth()` (`api-client.ts`) | ⬜ not started (re-checked 2026-08-13) |
+| Keep-warm heartbeat | **Warm-up / keep-alive** | The DB connection never goes cold, so the *first* user after a quiet spell doesn't pay the 20–30 s cold-start | `.github/workflows/keep-warm.yml` — `cron: '*/5 * * * *'`, curls the public `GET /api/pg-ping`, 3 attempts, best-effort | ✅ **live** (GitHub Action, since 2026-06-30) |
 
 ### Tier 2 — Knowing before it breaks (observability)
 | Lever | IT term | What it buys | How | Status |
 |---|---|---|---|---|
-| Error tracking | **Observability / error tracking** | You get alerted the moment errors spike — before workers complain | Sentry — the hook already exists (`SENTRY_DSN` in `worker.ts`); just set the secret | ⬜ DSN not set |
+| Error tracking | **Observability / error tracking** | You get alerted the moment errors spike — before workers complain | Sentry. Worker DSN is in `wrangler.toml [vars] SENTRY_DSN` and consumed by `src/api/worker.ts:1474` → `reportWorkerError`; the browser DSN is injected as `VITE_SENTRY_DSN` by `.github/workflows/deploy.yml` | ✅ **DSN set, both sides** |
 | Uptime + alerts | **Monitoring / alerting** | A text/email if the site or DB goes down. The pinger doubles as keep-warm | UptimeRobot (free) on `/api/health` + `/api/pg-ping`; Supabase dashboard alerts | ⬜ not started |
 | Health dashboard | **Observability** | One screen for CPU / memory / connections / error rate | Supabase → Reports → Database; app's own `/admin/health` | ✅ exists (Supabase) |
 
@@ -73,21 +77,32 @@ Status legend: ✅ live · ⚠️ written, not deployed · ⏳ blocked/waiting �
 
 ---
 
-## 3. Honest status for THIS project (Hookka ERP, 2026-06-30)
+## 3. Honest status for THIS project (Hookka ERP)
 
-- ✅ **Live now:** OCR multi-page fix (timeout + 3-strike retry + self-heal);
+### As re-measured from source, 2026-08-13
+
+- ✅ **Live and verified in code:** DB connection-retry (`withConnRetry`);
+  graceful-503 login; keep-warm heartbeat every 5 min via
+  `.github/workflows/keep-warm.yml`; Sentry DSN set worker-side and
+  client-side.
+- ⬜ **Still not started:** don't-logout-on-transient (the
+  `auth-middleware.ts` 503-instead-of-401 + `api-client.ts` retry pair);
+  UptimeRobot / external alerting.
+- ❓ **Not checkable from this repo** (dashboard-only — ask the owner):
+  pool size 50, compute tier, auto-pause, PITR, read replica.
+
+### Original 2026-06-30 snapshot (kept for provenance — superseded above)
+
+- ✅ **Live then:** OCR multi-page fix (timeout + 3-strike retry + self-heal);
   pool size 50 (set in Supabase).
 - ⚠️ **Written but NOT deployed:** the DB connection-retry + graceful-503 login
-  (`supabase-compat.ts`, `auth.ts`) — sitting uncommitted in the working tree.
+  — sitting uncommitted in the working tree. *(Both have since shipped.)*
 - ⏳ **Blocked:** compute → Small (Supabase platform incident on project
   resizing; retry once their status page clears). Verify it lands on the **prod**
   project `vpwdqtsxexpiqxzweivd` ("weisiang329-eng's Project"), not a sibling.
+  *(Outcome unknown from source.)*
 - ⬜ **Not started:** keep-warm heartbeat; don't-logout-on-transient; Sentry DSN;
-  uptime alerting; PITR.
-
-**So: fault tolerance and warm-up are NOT fully done yet.** The capacity levers
-(pool 50 + Small) are partly there; the code resilience layer is written but not
-shipped; warm-up and monitoring are still to do.
+  uptime alerting; PITR. *(Keep-warm and Sentry have since landed.)*
 
 ---
 
@@ -129,4 +144,6 @@ To give another Cloudflare Workers + Supabase app the same resilience:
 ---
 
 *Living doc — update the status columns as each lever ships. Origin:
-weak-wifi / login-500 investigation, 2026-06-30 (see `docs/HANDOFF-ERP-PERFORMANCE.md`).*
+weak-wifi / login-500 investigation, 2026-06-30. (The cited
+`docs/archive/HANDOFF-ERP-PERFORMANCE.md` does not exist as of 2026-08-13 — dead
+link, do not go looking for it.)*

@@ -1,374 +1,228 @@
-# API
+# API — generated reference
 
-Reference for the Hono API that backs the frontend. Every route file lives in
-`src/api/routes/` and is mounted by `src/api/index.ts`. All routes share the
-same envelope, error format, and data-source (in-memory `mock-data.ts`).
+> **GENERATED FILE — do not hand-edit.** Regenerate with `node scripts/gen-api-docs.mjs`.
+> **Last generated: 2026-08-13** from `src/api/worker.ts` + `src/api/routes/*.ts`.
 
----
+The backend is a single [Hono](https://hono.dev) app in `src/api/worker.ts`, served
+as a Cloudflare Pages Function via `functions/api/[[route]].ts`. There is no
+`src/api/index.ts` and no standalone Node API server.
 
-## Server
+- **Data source** — Supabase Postgres, reached through a Cloudflare Hyperdrive
+  binding. Routes call `c.var.DB`, a `SupabaseAdapter` that presents the
+  SQLite-flavoured `prepare/bind/all` interface over Postgres
+  (`src/api/lib/db-pg.ts`, `src/api/lib/supabase-compat.ts`). The D1 binding was
+  retired 2026-04-27 — see `docs/archive/d1-retirement-plan.md`.
+- **Auth** — `app.use("/api/*", authMiddleware)` gates the API
+  (`src/api/lib/auth-middleware.ts`). A mount escapes the gate two ways: it is
+  mounted *before* that line (Hono applies middleware in registration order), or
+  the middleware allow-lists it in `PUBLIC_PATHS` / `PUBLIC_PREFIXES`. The Auth
+  column below reports which. Downstream of auth: `customerScopeMiddleware`,
+  `tenantMiddleware`, `apiRateLimit`. Route-level permissions come from
+  `src/api/lib/rbac.ts` / `role-policy.ts` and are **not** shown here — a mount
+  marked "gated" still enforces its own permission checks.
+- **Public surface at generation time** — PUBLIC_PATHS: `/api/auth/login`, `/api/auth/logout`, `/api/auth/accept-invite`, `/api/auth/forgot-password`, `/api/auth/reset-password`, `/api/auth/totp/login-verify`, `/api/health`, `/api/fe-rum/event`, `/api/sheets-sync/apps-script-webhook`.
+  PUBLIC_PREFIXES: `/api/worker-auth/`, `/api/worker/`, `/api/auth/invite/`, `/api/auth/oauth/`, `/api/internal/reports/`, `/api/internal/delivery-agent/`, `/api/internal/agents/`, `/api/public/do-qr/`, `/api/public/rack-qr/`, `/api/public/rack-write/`, `/api/public/survey/`.
+  Plus these individual paths, opened by regex allow-lists in `isPublicPath()`
+  (each handler re-checks a worker token / dept restriction itself):
+  `/api/fg-units/:id`, `/api/production-orders/:id/scan-complete-dept`, `/api/production-orders/:id/scan-complete-shared`, `/api/production-orders/:id/scan-complete`.
+- **CSRF** — the browser side is automatic: `src/lib/api-client.ts` patches
+  `window.fetch` to attach `X-CSRF-Token` to every mutating `/api/*` call.
+- **Health** — `GET /api/health` is registered directly on the app (not via a
+  route module) and is exempt from the rate limiter.
 
-**Entry point** — `src/api/index.ts`
-**Runtime** — `@hono/node-server` via `tsx` (`npm run api`)
-**Port** — `API_PORT` env, defaults to **3001**
-**CORS origins** — `http://localhost:5173`, `http://localhost:3000`
-**Health check** — `GET /health` → `{ status: "ok", timestamp: … }`
+**Counts at generation time:** 139 mounts, 136 route files in
+`src/api/routes/`, 935 top-level handler registrations discovered.
 
----
+## Scope and limits of this file
 
-## Response envelope
+This reference is derived by static scan. It lists **where each router is mounted
+and which paths it registers at the top level**. It deliberately does *not*
+document request/response bodies: there is no single schema layer covering every
+route, so any body shape written here would be a guess. For the contract of a
+specific endpoint, open the handler — the file:line is one `Read` away from the
+table below.
 
-Every route responds with one of two shapes:
-
-```jsonc
-// success
-{
-  "success": true,
-  "data": <payload>,       // object or array
-  "total"?: <number>       // present on list endpoints
-}
-
-// failure
-{
-  "success": false,
-  "error": "<human-readable reason>"
-}
-```
-
-HTTP status codes follow REST convention:
-
-- `200` — successful read / update
-- `201` — successful create
-- `400` — bad input (missing required field, invalid body)
-- `404` — resource not found
-- `500` — unhandled server error (shouldn't happen under mock data)
-
----
-
-## Resource conventions
-
-Most resources expose the same six verbs:
-
-```
-GET    /api/<resource>/           # list
-GET    /api/<resource>/:id        # read
-POST   /api/<resource>/           # create
-PUT    /api/<resource>/:id        # full update
-PATCH  /api/<resource>/:id        # partial update
-DELETE /api/<resource>/:id        # delete (soft where it matters)
-```
-
-Not every resource implements every verb — consult the specific route file.
-Where a resource is derived (e.g. `/api/mrp`, `/api/cash-flow`) it is
-read-mostly and often only exposes GET.
+Handlers registered inside helper functions, or on sub-routers mounted with a
+computed prefix, will not appear. Where a mount shows no paths, read the file.
 
 ---
 
-## Endpoint inventory
+## Mount table
 
-Mounted in `src/api/index.ts`. All paths are prefixed with `/api/`.
+The small number after each path is the **line in that route file where the handler is
+registered**, so you can Read straight at the offset. It is regenerated with the file,
+which is the whole point — the hand-maintained predecessor of this table
+(`docs/SYMBOLS.md`, deleted 2026-08-13) had drifted to 25% accuracy, with 94 of its 891
+offsets pointing past the end of their own file.
 
-### Core sales → delivery → invoicing
-
-| Route              | Resource              | File                          |
-| ------------------ | --------------------- | ----------------------------- |
-| `sales-orders`     | SalesOrder            | `routes/sales-orders.ts`      |
-| `production-orders`| ProductionOrder       | `routes/production-orders.ts` |
-| `delivery-orders`  | DeliveryOrder         | `routes/delivery-orders.ts`   |
-| `invoices`         | Invoice               | `routes/invoices.ts`          |
-| `payments`         | Payment               | `routes/payments.ts`          |
-| `credit-notes`     | CreditNote            | `routes/credit-notes.ts`      |
-| `debit-notes`      | DebitNote             | `routes/debit-notes.ts`       |
-| `e-invoices`       | EInvoice (MY LHDN)    | `routes/e-invoices.ts`        |
-
-### Customers, workers, org
-
-| Route          | Resource         | File                       |
-| -------------- | ---------------- | -------------------------- |
-| `customers`    | Customer         | `routes/customers.ts`      |
-| `customer-hubs`| CustomerHub      | `routes/customer-hubs.ts`  |
-| `drivers`      | Driver           | `routes/drivers.ts`        |
-| `lorries`      | Lorry            | `routes/lorries.ts`        |
-| `workers`      | Worker           | `routes/workers.ts`        |
-| `attendance`   | AttendanceRecord | `routes/attendance.ts`     |
-| `leaves`       | LeaveRequest     | `routes/leaves.ts`         |
-| `payroll`      | Payroll          | `routes/payroll.ts`        |
-| `payslips`     | Payslip          | `routes/payslips.ts`       |
-| `organisations`| Organisation     | `routes/organisations.ts`  |
-| `departments`  | Department       | `routes/departments.ts`    |
-
-### Product catalogue + BOM
-
-| Route              | Resource                | File                          |
-| ------------------ | ----------------------- | ----------------------------- |
-| `products`         | Product                 | `routes/products.ts`          |
-| `product-configs`  | ProductConfig (variant) | `routes/product-configs.ts`   |
-| `bom`              | BOMVersion              | `routes/bom.ts`               |
-
-### Procurement
-
-| Route                | Resource                 | File                            |
-| -------------------- | ------------------------ | ------------------------------- |
-| `purchase-orders`    | PurchaseOrder            | `routes/purchase-orders.ts`     |
-| `grn`                | GRN                      | `routes/grn.ts`                 |
-| `suppliers`          | Supplier                 | `routes/suppliers.ts`           |
-| `supplier-materials` | SupplierMaterial         | `routes/supplier-materials.ts`  |
-| `supplier-scorecards`| SupplierScorecard        | `routes/supplier-scorecards.ts` |
-| `three-way-match`    | ThreeWayMatchRecord      | `routes/three-way-match.ts`     |
-| `goods-in-transit`   | GoodsInTransit           | `routes/goods-in-transit.ts`    |
-| `price-history`      | PriceHistoryEntry        | `routes/price-history.ts`       |
-
-### Inventory
-
-| Route              | Resource         | File                          |
-| ------------------ | ---------------- | ----------------------------- |
-| `inventory`        | StockItem / WIP  | `routes/inventory.ts`         |
-| `fabrics`          | FabricRoll       | `routes/fabrics.ts`           |
-| `fabric-tracking`  | FabricIssueLog   | `routes/fabric-tracking.ts`   |
-| `stock-value`      | StockValueRow    | `routes/stock-value.ts`       |
-| `stock-accounts`   | StockAccount     | `routes/stock-accounts.ts`    |
-| `warehouse`        | RackLocation     | `routes/warehouse.ts`         |
-| `fg-units`         | FGUnit           | `routes/fg-units.ts`          |
-
-### Planning / QC / R&D
-
-| Route                   | Resource              | File                              |
-| ----------------------- | --------------------- | --------------------------------- |
-| `scheduling`            | ScheduleEntry         | `routes/scheduling.ts`            |
-| `mrp`                   | MRPRow                | `routes/mrp.ts`                   |
-| `promise-date`          | PromiseDateRow        | `routes/promise-date.ts`          |
-| `production/leadtimes`  | ProductionLeadtime    | `routes/production-leadtimes.ts`  |
-| `forecasts`             | DemandForecast        | `routes/forecasts.ts`             |
-| `historical-sales`      | HistoricalSale        | `routes/historical-sales.ts`      |
-| `qc-inspections`        | QCInspection          | `routes/qc-inspections.ts`        |
-| `rd-projects`           | RDProject             | `routes/rd-projects.ts`           |
-
-### Accounting / ops
-
-| Route              | Resource               | File                          |
-| ------------------ | ---------------------- | ----------------------------- |
-| `accounting`       | ChartOfAccount + P&L   | `routes/accounting.ts`        |
-| `cash-flow`        | CashFlowEntry          | `routes/cash-flow.ts`         |
-| `consignments`     | Consignment            | `routes/consignments.ts`      |
-| `consignment-notes`| ConsignmentNote        | `routes/consignment-notes.ts` |
-| `equipment`        | Equipment              | `routes/equipment.ts`         |
-| `maintenance-logs` | MaintenanceLog         | `routes/maintenance-logs.ts`  |
-| `notifications`    | Notification           | `routes/notifications.ts`     |
-| `approvals`        | ApprovalRequest        | `routes/approvals.ts`         |
-| `portal`           | Portal façade          | `routes/portal.ts`             |
-| `dev`              | Dev utilities (seed)   | `routes/dev.ts`               |
-
-### Test-flow (B-flow) — parallel endpoints
-
-| Route                       | File                              |
-| --------------------------- | --------------------------------- |
-| `test/production-orders`    | `routes/production-orders-test.ts`|
-| `test/fg-units`             | `routes/fg-units-test.ts`         |
-| `test/delivery-orders`      | `routes/delivery-orders-test.ts`  |
-
-These mirror the A-flow endpoints but implement the sticker-identity flow
-(see `docs/B-FLOW.md`). They share no in-memory state with the A endpoints
-so the test flow cannot corrupt real data.
-
----
-
-## Request/response examples
-
-### Create a sales order
-
-```http
-POST /api/sales-orders
-Content-Type: application/json
-
-{
-  "customerId": "cust_001",
-  "items": [
-    {
-      "productCode": "BF-HERMIT-4BD",
-      "seatHeight": "12\"",
-      "fabricCode": "B.M-FABR-001",
-      "quantity": 2
-    }
-  ]
-}
-```
-
-Response:
-
-```json
-{
-  "success": true,
-  "data": {
-    "id": "so_1234567890",
-    "soNo": "SO-2026-0142",
-    "customerId": "cust_001",
-    "status": "DRAFT",
-    "items": [
-      {
-        "id": "soi_1234567891",
-        "productCode": "BF-HERMIT-4BD",
-        "basePriceSen": 249900,
-        "unitPriceSen": 249900,
-        "totalSen": 499800,
-        "quantity": 2,
-        "seatHeight": "12\"",
-        "fabricCode": "B.M-FABR-001"
-      }
-    ],
-    "subtotalSen": 499800,
-    "totalSen": 499800,
-    "createdAt": "2026-04-20T03:14:15.926Z"
-  }
-}
-```
-
-### List invoices
-
-```http
-GET /api/invoices
-```
-
-```json
-{
-  "success": true,
-  "data": [ /* Invoice[] */ ],
-  "total": 87
-}
-```
-
-### Read by ID (not found)
-
-```http
-GET /api/customers/cust_does_not_exist
-```
-
-```json
-{ "success": false, "error": "Customer not found" }
-```
-
-Status: `404`.
-
-### Create invoice from delivery order
-
-Business rule: only `DELIVERED` DOs can be invoiced.
-
-```http
-POST /api/invoices
-Content-Type: application/json
-
-{ "deliveryOrderId": "do_1234" }
-```
-
-If the DO is not in `DELIVERED` status:
-
-```json
-{
-  "success": false,
-  "error": "Cannot create invoice: Delivery Order is \"IN_TRANSIT\". Only DELIVERED delivery orders can be invoiced."
-}
-```
+| Mount prefix | Route file | Paths registered (with :line) | Auth |
+|---|---|---|---|
+| `/api/push` | `src/api/routes/push.ts` | `GET /vapid-public-key` <sub>:105</sub><br>`POST /subscribe` <sub>:118</sub><br>`POST /unsubscribe` <sub>:178</sub><br>`POST /clock-reminder` <sub>:208</sub> | **public** (mounted before the gate) |
+| `/api/customers` | `src/api/routes/customers.ts` | `GET /` <sub>:314</sub><br>`POST /` <sub>:350</sub><br>`GET /:id` <sub>:449</sub><br>`POST /_backfill-snapshot-names` <sub>:477</sub><br>`PUT /:id` <sub>:500</sub><br>`DELETE /:id` <sub>:775</sub> | gated |
+| `/api/mail-center` | `src/api/routes/mail-center.ts` | `GET /threads` <sub>:920</sub><br>`GET /threads/:id` <sub>:986</sub><br>`GET /outbox` <sub>:1129</sub><br>`GET /outbox/:id` <sub>:1223</sub><br>`GET /outbox/:id/attachments/:idx/download` <sub>:1278</sub><br>`GET /addresses` <sub>:1351</sub><br>`GET /labels` <sub>:1429</sub><br>`POST /labels` <sub>:1446</sub><br>`PATCH /labels/:id` <sub>:1501</sub><br>`DELETE /labels/:id` <sub>:1572</sub><br>`POST /test-inject` <sub>:1639</sub><br>`POST /addresses` <sub>:1680</sub><br>`PATCH /addresses/:id` <sub>:1758</sub><br>`GET /access` <sub>:1833</sub><br>`POST /access` <sub>:1859</sub><br>`DELETE /access` <sub>:1897</sub><br>`GET /scope-levels` <sub>:1929</sub><br>`PUT /scope-level` <sub>:1958</sub><br>`POST /threads/:id/reply` <sub>:2040</sub><br>`POST /compose` <sub>:2221</sub><br>`PATCH /threads/:id` <sub>:2371</sub> | gated |
+| `/api/datagrid-layouts` | `src/api/routes/datagrid-layouts.ts` | `GET /` <sub>:127</sub><br>`PUT /` <sub>:162</sub><br>`DELETE /` <sub>:251</sub> | gated |
+| `/api/bom` | `src/api/routes/bom.ts` | `GET /` <sub>:130</sub><br>`POST /` <sub>:144</sub><br>`GET /templates` <sub>:231</sub><br>`POST /templates` <sub>:302</sub><br>`PUT /templates` <sub>:377</sub><br>`PUT /templates/:id` <sub>:484</sub><br>`POST /templates/bulk-process-edit` <sub>:631</sub><br>`POST /resync-job-card-times` <sub>:823</sub><br>`POST /audit-contamination` <sub>:1197</sub><br>`GET /:id` <sub>:1336</sub><br>`PUT /:id` <sub>:1348</sub> | gated |
+| `/api/products` | `src/api/routes/products.ts` | `GET /` <sub>:459</sub><br>`GET /setup-incomplete` <sub>:566</sub><br>`POST /` <sub>:584</sub><br>`GET /:id` <sub>:721</sub><br>`PUT /:id` <sub>:730</sub><br>`DELETE /:id` <sub>:938</sub><br>`GET /:productId/price-history` <sub>:1061</sub><br>`POST /:productId/prices` <sub>:1087</sub><br>`DELETE /price-row/:priceRowId` <sub>:1223</sub> | gated |
+| `/api/search` | `src/api/routes/search.ts` | `GET /` <sub>:95</sub> | gated |
+| `/api/product-configs` | `src/api/routes/product-configs.ts` | `GET /` <sub>:75</sub> | gated |
+| `/api/workers` | `src/api/routes/workers.ts` | `GET /` <sub>:159</sub><br>`POST /` <sub>:184</sub><br>`GET /:id` <sub>:345</sub><br>`PUT /:id` <sub>:360</sub><br>`DELETE /:id` <sub>:695</sub><br>`POST /:id/set-pin` <sub>:810</sub><br>`POST /bulk-generate-pins` <sub>:886</sub><br>`GET /:id/salary-history` <sub>:997</sub><br>`POST /:id/salary-history` <sub>:1018</sub><br>`GET /salary/effective` <sub>:1059</sub><br>`DELETE /:id/salary-history/:rowId` <sub>:1114</sub> | gated |
+| `/api/worker-auth` | `src/api/routes/worker-auth.ts` | `POST /login` <sub>:124</sub><br>`POST /reset-pin` <sub>:241</sub><br>`POST /logout` <sub>:297</sub><br>`GET /me` <sub>:312</sub> | **public** (PUBLIC_PREFIXES) |
+| `/api/announcements` | `src/api/routes/announcements.ts` | `GET /` <sub>:459</sub><br>`GET /:id/acks` <sub>:479</sub><br>`POST /` <sub>:550</sub><br>`PATCH /:id` <sub>:667</sub><br>`POST /:id/remind` <sub>:820</sub><br>`DELETE /:id` <sub>:887</sub> | gated |
+| `/api/worker/announcements` | `src/api/routes/announcements.ts` | `GET /` <sub>:1001</sub><br>`POST /:id/ack` <sub>:1097</sub> | **public** (PUBLIC_PREFIXES) |
+| `/api/worker` | `src/api/routes/worker.ts` | `GET /ann-files/:id/download` <sub>:307</sub><br>`GET /today` <sub>:362</sub><br>`GET /wip-times` <sub>:532</sub><br>`GET /current-dept` <sub>:582</sub><br>`GET /scan-lookup` <sub>:608</sub><br>`GET /racks` <sub>:799</sub><br>`POST /packing-rack` <sub>:824</sub><br>`POST /clock` <sub>:1025</sub><br>`POST /dept-scan` <sub>:1288</sub><br>`GET /history` <sub>:1354</sub><br>`GET /payslips` <sub>:1889</sub><br>`GET /payslip/:period` <sub>:2333</sub><br>`GET /leaves` <sub>:2439</sub><br>`POST /leaves` <sub>:2501</sub><br>`POST /issues` <sub>:2564</sub><br>`GET /issues` <sub>:2598</sub><br>`GET /qc-today` <sub>:2694</sub><br>`POST /qc/:id/complete` <sub>:2776</sub><br>`PATCH /profile` <sub>:2862</sub><br>`GET /nonprod-departments` <sub>:3018</sub><br>`GET /production-departments` <sub>:3047</sub><br>`GET /nonprod-requests` <sub>:3071</sub><br>`POST /nonprod-requests` <sub>:3098</sub><br>`GET /team-stats` <sub>:3214</sub><br>`GET /department-performance` <sub>:3520</sub><br>`POST /rack-bulk-stock-in` <sub>:4030</sub> | **public** (PUBLIC_PREFIXES) |
+| `/api/departments` | `src/api/routes/departments.ts` | `GET /` <sub>:157</sub><br>`POST /` <sub>:172</sub><br>`PUT /:id` <sub>:277</sub><br>`DELETE /:id` <sub>:396</sub> | gated |
+| `/api/customer-hubs` | `src/api/routes/customer-hubs.ts` | `GET /` <sub>:58</sub> | gated |
+| `/api/customer-products` | `src/api/routes/customer-products.ts` | `GET /` <sub>:113</sub><br>`GET /by-product/:productId` <sub>:273</sub><br>`POST /` <sub>:316</sub><br>`GET /:customerProductId/price-history` <sub>:412</sub><br>`POST /:customerProductId/prices` <sub>:434</sub><br>`DELETE /price-row/:priceRowId` <sub>:590</sub><br>`PUT /:id` <sub>:614</sub><br>`DELETE /:id` <sub>:714</sub><br>`POST /bulk-assign` <sub>:743</sub><br>`POST /copy-from-master` <sub>:833</sub><br>`GET /price-for/:productId/:customerId` <sub>:1224</sub> | gated |
+| `/api/customer-maintenance` | `src/api/routes/customer-maintenance.ts` | `POST /:customerId/copy-from-master` <sub>:30</sub> | gated |
+| `/api/customer-quotation` | `src/api/routes/customer-quotation.ts` | `GET /` <sub>:82</sub> | gated |
+| `/api/customer-crm` | `src/api/routes/customer-crm.ts` | `GET /contacts` <sub>:175</sub><br>`POST /contacts` <sub>:191</sub><br>`PUT /contacts/:id` <sub>:224</sub><br>`DELETE /contacts/:id` <sub>:252</sub><br>`GET /activities` <sub>:266</sub><br>`POST /activities` <sub>:285</sub><br>`DELETE /activities/:id` <sub>:322</sub><br>`GET /follow-ups` <sub>:336</sub><br>`GET /onboarding` <sub>:359</sub><br>`PUT /onboarding` <sub>:374</sub><br>`POST /send-quote` <sub>:425</sub> | gated |
+| `/api/sales-leads` | `src/api/routes/sales-leads.ts` | `GET /` <sub>:102</sub><br>`POST /` <sub>:155</sub><br>`PUT /:id` <sub>:228</sub><br>`PUT /:id/stage` <sub>:258</sub><br>`POST /:id/convert` <sub>:295</sub><br>`DELETE /:id` <sub>:359</sub><br>`GET /lead-products` <sub>:374</sub><br>`POST /lead-products` <sub>:389</sub><br>`DELETE /lead-products/:id` <sub>:427</sub> | gated |
+| `/api/sofa-combos` | `src/api/routes/sofa-combos.ts` | `GET /` <sub>:118</sub><br>`POST /` <sub>:213</sub><br>`POST /copy-from-master` <sub>:362</sub><br>`PUT /:id` <sub>:498</sub><br>`DELETE /:id` <sub>:635</sub> | gated |
+| `/api/organisations` | `src/api/routes/organisations.ts` | `GET /` <sub>:216</sub><br>`POST /` <sub>:242</sub><br>`PATCH /:id` <sub>:328</sub><br>`DELETE /:id` <sub>:429</sub><br>`PUT /` <sub>:454</sub> | gated |
+| `/api/sales-orders` | `src/api/routes/sales-orders.ts` | `GET /` <sub>:165</sub><br>`POST /check-customer-pos` <sub>:664</sub><br>`POST /backfill-hub-by-state` <sub>:726</sub><br>`GET /status-changes` <sub>:847</sub><br>`GET /stats` <sub>:879</sub><br>`GET /delivery-progress` <sub>:1008</sub><br>`GET /late-to-customer` <sub>:1055</sub><br>`GET /repair-components` <sub>:1090</sub><br>`GET /:id/edit-eligibility` <sub>:1175</sub><br>`POST /:id/override-edit-lock` <sub>:1289</sub><br>`POST /` <sub>:1503</sub><br>`POST /:id/confirm` <sub>:2284</sub><br>`GET /:ref/footprint` <sub>:2627</sub><br>`GET /:id` <sub>:2634</sub><br>`PUT /:id` <sub>:2886</sub><br>`PATCH /:id/hub` <sub>:4324</sub><br>`DELETE /:id` <sub>:4988</sub><br>`POST /copy-for-service-order` <sub>:5094</sub><br>`POST /batch-company` <sub>:5476</sub> | gated |
+| `/api/purchase-orders` | `src/api/routes/purchase-orders.ts` | `GET /` <sub>:309</sub><br>`GET /stats` <sub>:402</sub><br>`POST /` <sub>:417</sub><br>`GET /:id` <sub>:688</sub><br>`PUT /:id` <sub>:747</sub><br>`POST /:id/email` <sub>:1091</sub><br>`DELETE /:id` <sub>:1152</sub> | gated |
+| `/api/purchase-invoices` | `src/api/routes/purchase-invoices.ts` | `GET /` <sub>:752</sub><br>`GET /:id` <sub>:801</sub><br>`POST /` <sub>:1047</sub><br>`POST /repair-gl-visibility` <sub>:1835</sub><br>`POST /backfill-gl-postings` <sub>:1881</sub><br>`PUT /:id` <sub>:1900</sub><br>`DELETE /:id` <sub>:2553</sub><br>`POST /:id/void` <sub>:2690</sub><br>`POST /:id/unvoid` <sub>:2795</sub> | gated |
+| `/api/credit-notes` | `src/api/routes/credit-notes.ts` | `GET /` <sub>:189</sub><br>`POST /` <sub>:204</sub><br>`GET /:id` <sub>:448</sub><br>`PUT /:id` <sub>:471</sub> | gated |
+| `/api/debit-notes` | `src/api/routes/debit-notes.ts` | `GET /` <sub>:122</sub><br>`POST /` <sub>:137</sub><br>`GET /:id` <sub>:282</sub><br>`PUT /:id` <sub>:302</sub> | gated |
+| `/api/e-invoices` | `src/api/routes/e-invoices.ts` | `GET /` <sub>:119</sub><br>`POST /` <sub>:134</sub><br>`GET /:id` <sub>:235</sub><br>`PUT /:id` <sub>:257</sub> | gated |
+| `/api/three-way-match` | `src/api/routes/three-way-match.ts` | `GET /` <sub>:165</sub><br>`GET /by-po/:poId` <sub>:269</sub><br>`POST /` <sub>:505</sub> | gated |
+| `/api/delivery-orders` | `src/api/routes/delivery-orders.ts` | `GET /` <sub>:121</sub><br>`GET /stats` <sub>:277</sub><br>`GET /po-values` <sub>:363</sub><br>`GET /linked-po-ids` <sub>:415</sub><br>`GET /ready-planning` <sub>:635</sub><br>`GET /pending-value` <sub>:667</sub><br>`GET /pending-sos` <sub>:692</sub><br>`POST /backfill-customer-po` <sub>:751</sub><br>`POST /backfill-customer-so` <sub>:849</sub><br>`POST /backfill-delivered-cascade` <sub>:995</sub><br>`POST /backfill-fix-underbilled-invoices` <sub>:1122</sub><br>`POST /backfill-void-reissue-underbilled` <sub>:1354</sub><br>`POST /backfill-normalize-invoiced-to-delivered` <sub>:1718</sub><br>`POST /backfill-dedupe-delivered` <sub>:1822</sub><br>`POST /` <sub>:1939</sub><br>`POST /packing-list-first` <sub>:1986</sub><br>`GET /:id/print-extras` <sub>:2481</sub><br>`POST /:id/notify-customer` <sub>:2492</sub><br>`POST /:id/resend-notice` <sub>:2536</sub><br>`POST /:id/resolve-incomplete` <sub>:2654</sub><br>`GET /:id/qr-token` <sub>:2812</sub><br>`GET /:id/billable-lines` <sub>:2850</sub><br>`GET /:id` <sub>:2896</sub><br>`PUT /:id` <sub>:2949</sub><br>`DELETE /:id` <sub>:2968</sub> | gated |
+| `/api/delivery-returns` | `src/api/routes/delivery-returns.ts` | `GET /` <sub>:162</sub><br>`GET /:id` <sub>:189</sub><br>`GET /do-items` <sub>:213</sub><br>`POST /` <sub>:227</sub><br>`POST /:id/return-to-stock` <sub>:340</sub><br>`POST /:id/set-outcome` <sub>:387</sub><br>`POST /:id/mark-redelivered` <sub>:444</sub><br>`POST /:id/cancel` <sub>:460</sub> | gated |
+| `/api/purchase-returns` | `src/api/routes/purchase-returns.ts` | `GET /` <sub>:36</sub><br>`GET /source/pi/:piId` <sub>:51</sub><br>`GET /source/grn/:grnId` <sub>:77</sub><br>`GET /:id` <sub>:103</sub><br>`POST /` <sub>:123</sub><br>`POST /:id/confirm` <sub>:198</sub><br>`POST /:id/issue-dn` <sub>:215</sub><br>`DELETE /:id` <sub>:231</sub> | gated |
+| `/api/component-boms` | `src/api/routes/component-boms.ts` | `GET /` <sub>:30</sub><br>`GET /:parentCode` <sub>:38</sub><br>`PUT /:parentCode` <sub>:51</sub><br>`DELETE /:parentCode` <sub>:75</sub> | gated |
+| `/api/packing-lists` | `src/api/routes/packing-lists.ts` | `GET /` <sub>:408</sub><br>`GET /:id/qr-token` <sub>:454</sub><br>`GET /:id` <sub>:495</sub><br>`POST /` <sub>:753</sub><br>`DELETE /:id` <sub>:780</sub> | gated |
+| `/api/public/do-qr` | `src/api/routes/public-do-qr.ts` | `GET /:token/edit` <sub>:610</sub><br>`GET /:token` <sub>:659</sub><br>`POST /:token/advance` <sub>:707</sub> | **public** (PUBLIC_PREFIXES) |
+| `/api/public/rack-qr` | `src/api/routes/public-rack-qr.ts` | `GET /:rackId` <sub>:526</sub><br>`GET /:rackId/item` <sub>:600</sub><br>`POST /:rackId/stock-in` <sub>:776</sub> | **public** (PUBLIC_PREFIXES) |
+| `/api/public/rack-write` | `src/api/routes/public-rack-write.ts` | `GET /:token` <sub>:179</sub><br>`POST /:token/rack` <sub>:228</sub> | **public** (PUBLIC_PREFIXES) |
+| `/api/public/survey` | `src/api/routes/public-kpi-survey.ts` | `GET /:token` <sub>:134</sub><br>`POST /:token` <sub>:166</sub> | **public** (PUBLIC_PREFIXES) |
+| `/api/cnc-templates` | `src/api/routes/cnc-templates.ts` | `GET /` <sub>:692</sub><br>`GET /:id` <sub>:741</sub><br>`GET /:id/file/:kind` <sub>:762</sub><br>`POST /` <sub>:821</sub><br>`POST /import` <sub>:947</sub><br>`PATCH /:id` <sub>:1178</sub><br>`DELETE /:id` <sub>:1272</sub> | gated |
+| `/api/invoices` | `src/api/routes/invoices.ts` | `POST /backfill-po-links` <sub>:733</sub><br>`POST /backfill-cancel-reversals` <sub>:859</sub><br>`POST /backfill-customer-fields` <sub>:867</sub><br>`POST /backfill-date-from-delivery` <sub>:1010</sub><br>`GET /` <sub>:1089</sub><br>`GET /stats` <sub>:1222</sub><br>`GET /aging` <sub>:1374</sub><br>`POST /` <sub>:1544</sub><br>`GET /:id/print-extras` <sub>:1927</sub><br>`GET /:id` <sub>:1947</sub><br>`PUT /:id` <sub>:2024</sub><br>`DELETE /:id` <sub>:2903</sub> | gated |
+| `/api/payments` | `src/api/routes/payments.ts` | `GET /` <sub>:493</sub><br>`POST /` <sub>:547</sub><br>`GET /:id` <sub>:1007</sub><br>`PUT /:id` <sub>:1024</sub><br>`POST /:id/lifecycle` <sub>:1250</sub><br>`POST /:id/restate` <sub>:1315</sub> | gated |
+| `/api/supplier-payments` | `src/api/routes/supplier-payments.ts` | `GET /` <sub>:52</sub><br>`POST /` <sub>:124</sub><br>`POST /knock-off` <sub>:572</sub><br>`POST /un-knock` <sub>:733</sub><br>`POST /:paymentNo/void` <sub>:1302</sub><br>`POST /:paymentNo/lifecycle` <sub>:1376</sub><br>`POST /recompute-pi-paid` <sub>:1467</sub><br>`POST /:paymentNo/restate` <sub>:1506</sub><br>`GET /debug/last-restate-error` <sub>:1622</sub> | gated |
+| `/api/production-orders` | `src/api/routes/production-orders.ts` | `GET /overdue-counts` <sub>:393</sub><br>`GET /tracker-summary` <sub>:440</sub><br>`GET /report-summary` <sub>:546</sub><br>`GET /` <sub>:726</sub><br>`GET /historical-wips` <sub>:1054</sub><br>`GET /historical-fgs` <sub>:1126</sub><br>`POST /stock` <sub>:1187</sub><br>`POST /resync-po-numbers` <sub>:1520</sub><br>`POST /packing-rack-tokens` <sub>:1642</sub><br>`POST /:id/scan-complete` <sub>:1862</sub><br>`POST /:id/scan-complete-dept` <sub>:2460</sub><br>`POST /:id/scan-complete-shared` <sub>:2787</sub><br>`GET /board` <sub>:3301</sub><br>`GET /scan-lookup` <sub>:3395</sub><br>`GET /:id` <sub>:3432</sub><br>`POST /bulk-patch` <sub>:3526</sub><br>`PUT /:id` <sub>:3762</sub><br>`PATCH /:id` <sub>:3772</sub><br>`POST /:id/hold` <sub>:3802</sub><br>`POST /:id/resume` <sub>:3809</sub><br>`POST /:id/cancel` <sub>:3816</sub><br>`POST /:id/uncancel` <sub>:3830</sub> | gated (some paths public) |
+| `/api/production-folders` | `src/api/routes/production-folders.ts` | `GET /` <sub>:100</sub><br>`POST /` <sub>:125</sub><br>`GET /:id` <sub>:182</sub><br>`GET /:id/rows` <sub>:229</sub><br>`PATCH /:id` <sub>:301</sub><br>`DELETE /:id` <sub>:352</sub><br>`POST /:id/add-jcs` <sub>:372</sub><br>`POST /:id/remove-jcs` <sub>:420</sub> | gated |
+| `/api/inventory/wip` | `src/api/routes/inventory-wip.ts` | `GET /` <sub>:159</sub><br>`GET /reconcile` <sub>:686</sub> | gated |
+| `/api/inventory` | `src/api/routes/inventory.ts` | `GET /` <sub>:148</sub><br>`GET /shortage-forecast` <sub>:225</sub><br>`POST /raw-materials` <sub>:395</sub><br>`GET /rm-source/:rmId` <sub>:460</sub><br>`GET /fg-stock` <sub>:537</sub> | gated |
+| `/api/raw-materials` | `src/api/routes/raw-materials.ts` | `GET /` <sub>:180</sub><br>`GET /:id` <sub>:195</sub><br>`GET /:id/used-in` <sub>:213</sub><br>`POST /` <sub>:250</sub><br>`PUT /:id` <sub>:355</sub><br>`DELETE /:id` <sub>:515</sub><br>`POST /bulk-import` <sub>:574</sub><br>`POST /_unlock-duplicate-codes` <sub>:718</sub><br>`POST /_relock-duplicate-codes` <sub>:749</sub> | gated |
+| `/api/rm-batches` | `src/api/routes/rm-batches.ts` | `GET /` <sub>:60</sub><br>`GET /:id` <sub>:79</sub> | gated |
+| `/api/grn` | `src/api/routes/grn.ts` | `GET /` <sub>:1172</sub><br>`GET /stats` <sub>:1259</sub><br>`POST /` <sub>:1300</sub><br>`GET /:id` <sub>:1773</sub><br>`PUT /:id` <sub>:1789</sub><br>`PUT /:id/arrival` <sub>:2174</sub><br>`POST /:id/cancel` <sub>:2325</sub><br>`DELETE /:id` <sub>:2518</sub> | gated |
+| `/api/cost-ledger` | `src/api/routes/cost-ledger.ts` | `GET /` <sub>:120</sub><br>`GET /rm-batches` <sub>:163</sub><br>`GET /fg-batches` <sub>:188</sub><br>`GET /summary` <sub>:224</sub> | gated |
+| `/api/fg-units` | `src/api/routes/fg-units.ts` | `GET /` <sub>:563</sub><br>`GET /ledger-reconciliation` <sub>:616</sub><br>`GET /:id` <sub>:632</sub><br>`POST /backfill-dedupe-fg-units` <sub>:670</sub><br>`POST /generate/:poId` <sub>:769</sub><br>`POST /backfill-hub` <sub>:796</sub><br>`POST /seed-stock-events` <sub>:884</sub><br>`POST /backfill-batch-link` <sub>:987</sub><br>`POST /scan` <sub>:1047</sub> | gated (some paths public) |
+| `/api/fabric-tracking` | `src/api/routes/fabric-tracking.ts` | `GET /` <sub>:133</sub><br>`POST /` <sub>:278</sub><br>`DELETE /:id` <sub>:358</sub><br>`PUT /:id` <sub>:382</sub> | gated |
+| `/api/fabrics` | `src/api/routes/fabrics.ts` | `GET /` <sub>:37</sub><br>`POST /` <sub>:67</sub><br>`PUT /:id` <sub>:68</sub><br>`DELETE /:id` <sub>:69</sub> | gated |
+| `/api/warehouse` | `src/api/routes/warehouse.ts` | `GET /` <sub>:248</sub><br>`POST /` <sub>:298</sub><br>`POST /racks` <sub>:396</sub><br>`GET /movements` <sub>:456</sub><br>`POST /movements` <sub>:497</sub><br>`GET /:id/details` <sub>:565</sub><br>`GET /:id` <sub>:611</sub><br>`PUT /:id` <sub>:628</sub><br>`DELETE /:id` <sub>:697</sub> | gated |
+| `/api/stock-accounts` | `src/api/routes/stock-accounts.ts` | `GET /` <sub>:29</sub> | gated |
+| `/api/stock-value` | `src/api/routes/stock-value.ts` | `GET /` <sub>:58</sub><br>`POST /` <sub>:72</sub><br>`GET /:id` <sub>:170</sub><br>`PUT /:id` <sub>:185</sub> | gated |
+| `/api/stock` | `src/api/routes/stock-breakdown.ts` | `GET /breakdown` <sub>:168</sub> | gated |
+| `/api/goods-in-transit` | `src/api/routes/goods-in-transit.ts` | `GET /` <sub>:92</sub><br>`POST /` <sub>:117</sub><br>`GET /:id` <sub>:240</sub><br>`PUT /:id` <sub>:255</sub><br>`DELETE /:id` <sub>:364</sub> | gated |
+| `/api/suppliers` | `src/api/routes/suppliers.ts` | `GET /` <sub>:266</sub><br>`POST /` <sub>:292</sub><br>`GET /:id` <sub>:422</sub><br>`POST /_backfill-snapshot-names` <sub>:452</sub><br>`PUT /:id` <sub>:474</sub><br>`DELETE /:id` <sub>:704</sub> | gated |
+| `/api/supplier-materials` | `src/api/routes/supplier-materials.ts` | `GET /` <sub>:133</sub><br>`POST /` <sub>:165</sub><br>`GET /:id` <sub>:283</sub><br>`PUT /:id` <sub>:295</sub><br>`DELETE /:id` <sub>:429</sub> | gated |
+| `/api/supplier-scorecards` | `src/api/routes/supplier-scorecards.ts` | `GET /` <sub>:47</sub><br>`GET /summary` <sub>:94</sub><br>`GET /:supplierId` <sub>:182</sub> | gated |
+| `/api/price-history` | `src/api/routes/price-history.ts` | `GET /` <sub>:56</sub><br>`POST /` <sub>:100</sub> | gated |
+| `/api/auth/oauth` | `src/api/routes/auth-oauth.ts` | `GET /google/start` <sub>:52</sub><br>`GET /google/callback` <sub>:97</sub> | **public** (PUBLIC_PREFIXES) |
+| `/api/auth/totp` | `src/api/routes/auth-totp.ts` | `POST /enroll` <sub>:77</sub><br>`POST /verify` <sub>:134</sub><br>`POST /login-verify` <sub>:183</sub><br>`POST /setup-start` <sub>:330</sub><br>`POST /setup-confirm` <sub>:406</sub><br>`POST /dismiss-prompt` <sub>:477</sub><br>`POST /disable` <sub>:499</sub> | gated (some paths public) |
+| `/api/auth` | `src/api/routes/auth.ts` | `POST /login` <sub>:148</sub><br>`POST /logout` <sub>:424</sub><br>`GET /me` <sub>:457</sub><br>`GET /me/permissions` <sub>:487</sub><br>`POST /change-password` <sub>:613</sub><br>`POST /forgot-password` <sub>:745</sub><br>`POST /reset-password` <sub>:901</sub><br>`GET /invite/:token` <sub>:1062</sub><br>`POST /accept-invite` <sub>:1107</sub> | gated (some paths public) |
+| `/api/users` | `src/api/routes/users.ts` | `POST /backfill-org-from-aliases` <sub>:165</sub><br>`GET /` <sub>:224</sub><br>`POST /` <sub>:253</sub><br>`PUT /:id` <sub>:350</sub><br>`DELETE /:id` <sub>:551</sub><br>`POST /:id/reset-password` <sub>:627</sub><br>`POST /invite` <sub>:772</sub><br>`GET /invites` <sub>:917</sub><br>`POST /invites/:token/resend` <sub>:938</sub><br>`DELETE /invites/:token` <sub>:993</sub><br>`GET /:id` <sub>:1023</sub> | gated |
+| `/api/presence` | `src/api/routes/presence.ts` | `POST /` <sub>:56</sub><br>`GET /` <sub>:106</sub><br>`DELETE /` <sub>:131</sub> | gated |
+| `/api/bom-master-templates` | `src/api/routes/bom-master-templates.ts` | `GET /` <sub>:80</sub><br>`GET /:id` <sub>:89</sub><br>`PUT /:id` <sub>:101</sub><br>`DELETE /:id` <sub>:179</sub><br>`PUT /` <sub>:190</sub> | gated |
+| `/api/kv-config` | `src/api/routes/kv-config.ts` | `GET /:key` <sub>:42</sub><br>`PUT /:key` <sub>:80</sub> | gated |
+| `/api/maintenance-config` | `src/api/routes/maintenance-config.ts` | `GET /resolved` <sub>:120</sub><br>`GET /history` <sub>:141</sub><br>`POST /changes` <sub>:174</sub><br>`DELETE /changes/:id` <sub>:227</sub> | gated |
+| `/api/admin/health` | `src/api/routes/admin-health.ts` | `GET /kpis-diag` <sub>:379</sub><br>`GET /kpis` <sub>:454</sub><br>`GET /by-endpoint` <sub>:537</sub><br>`GET /errors-by-endpoint` <sub>:620</sub><br>`GET /errors-hourly` <sub>:689</sub><br>`GET /status-breakdown` <sub>:742</sub><br>`GET /error-messages` <sub>:773</sub><br>`GET /daily-trend` <sub>:826</sub><br>`GET /deploys` <sub>:903</sub><br>`GET /github-runs` <sub>:969</sub><br>`GET /slow-sql` <sub>:1142</sub><br>`GET /long-tasks` <sub>:1215</sub><br>`GET /audit-feed` <sub>:1261</sub><br>`GET /security-events` <sub>:1384</sub><br>`GET /fe-errors` <sub>:1575</sub><br>`GET /fe-perf` <sub>:1622</sub><br>`GET /fe-api` <sub>:1690</sub><br>`GET /fe-stuck` <sub>:1778</sub><br>`GET /db-indexes` <sub>:1902</sub><br>`GET /db-connect` <sub>:1997</sub><br>`GET /db-size-code-mismatch` <sub>:2096</sub><br>`POST /db-size-code-backfill` <sub>:2199</sub><br>`POST /db-fix-superking-2038` <sub>:2275</sub> | gated |
+| `/api/admin` | `src/api/routes/admin.ts` | `POST /archive/run` <sub>:153</sub><br>`POST /rebuild-all-pos` <sub>:561</sub><br>`POST /rebuild-pos/:soId` <sub>:677</sub><br>`POST /ensure-perf-indexes` <sub>:823</sub><br>`POST /dedupe-invoices` <sub>:859</sub><br>`POST /backfill-so-prices` <sub>:994</sub><br>`POST /backfill-invoice-prices` <sub>:1103</sub><br>`GET /backfill-special-order-surcharge` <sub>:1322</sub><br>`POST /backfill-invoice-po-link` <sub>:1499</sub><br>`GET /backfill-invoiced-plan` <sub>:1825</sub><br>`POST /backfill-special-order-surcharge` <sub>:1877</sub> | gated |
+| `/api/fe-rum` | `src/api/routes/fe-rum.ts` | `POST /event` <sub>:126</sub> | gated (some paths public) |
+| `/api/job-cards` | `src/api/routes/job-cards.ts` | `GET /` <sub>:100</sub><br>`GET /summary` <sub>:261</sub><br>`GET /:id/events` <sub>:430</sub><br>`GET /duedate-original-backup` <sub>:536</sub><br>`GET /completion-pic-original-backup` <sub>:688</sub> | gated |
+| `/api/audit-events` | `src/api/routes/audit-events.ts` | `GET /` <sub>:47</sub> | gated |
+| `/api/dashboard/overview` | `src/api/routes/dashboard-overview.ts` | `GET /` <sub>:49</sub> | gated |
+| `/api/kpi` | `src/api/routes/kpi.ts` | `GET /me` <sub>:277</sub><br>`GET /users/:id` <sub>:286</sub><br>`GET /payout/:id` <sub>:301</sub><br>`PUT /payout/:id` <sub>:308</sub><br>`PUT /checklist/:kpiKey` <sub>:380</sub><br>`GET /checklist/:kpiKey` <sub>:444</sub><br>`POST /survey/:kpiKey` <sub>:466</sub><br>`POST /survey/:kpiKey/link` <sub>:523</sub><br>`PUT /rating/:kpiKey` <sub>:590</sub><br>`GET /survey/:kpiKey` <sub>:643</sub><br>`GET /library` <sub>:664</sub><br>`GET /people` <sub>:710</sub><br>`GET /catalog` <sub>:759</sub><br>`GET /assignments/:id` <sub>:771</sub><br>`PUT /assignments/:id` <sub>:784</sub><br>`PUT /kpi/:kpiKey/assignees` <sub>:847</sub> | gated |
+| `/api/mdm` | `src/api/routes/mdm.ts` | `GET /review-queue` <sub>:89</sub><br>`POST /review-queue/:id/dismiss` <sub>:198</sub><br>`POST /review-queue/:id/merge` <sub>:212</sub><br>`POST /detection/run` <sub>:232</sub> | gated |
+| `/api/files` | `src/api/routes/files.ts` | `POST /` <sub>:219</sub><br>`GET /` <sub>:376</sub><br>`PATCH /:id/cover` <sub>:407</sub><br>`GET /:id` <sub>:431</sub><br>`GET /:id/download` <sub>:446</sub><br>`GET /:id/stream` <sub>:485</sub><br>`DELETE /:id` <sub>:526</sub> | gated |
+| `/api/sheets-sync` | `src/api/routes/sheets-sync.ts` | `POST /apps-script-webhook` <sub>:57</sub><br>`POST /backfill` <sub>:308</sub> | gated (some paths public) |
+| `/api/accounting` | `src/api/routes/accounting.ts` | `GET /aging` <sub>:465</sub><br>`POST /aging` <sub>:731</sub><br>`GET /coa` <sub>:819</sub><br>`POST /coa` <sub>:829</sub><br>`PUT /coa` <sub>:909</sub><br>`POST /coa/rename` <sub>:1042</sub><br>`GET /journals` <sub>:1154</sub><br>`POST /journals` <sub>:1184</sub><br>`GET /journals/:id` <sub>:1268</sub><br>`PUT /journals/:id` <sub>:1291</sub><br>`POST /journals/:id/lifecycle` <sub>:1585</sub><br>`DELETE /journals/:id` <sub>:1639</sub><br>`GET /ar-control` <sub>:1672</sub><br>`GET /customer-statement` <sub>:1819</sub><br>`GET /purchase-credit-notes` <sub>:2016</sub><br>`POST /purchase-credit-notes` <sub>:2029</sub><br>`PUT /purchase-credit-notes/:id` <sub>:2149</sub><br>`POST /purchase-credit-notes/:id/void` <sub>:2354</sub><br>`GET /ap-control` <sub>:2470</sub><br>`GET /ap-reconciliation` <sub>:2704</sub><br>`GET /ar-reconciliation` <sub>:2879</sub><br>`POST /ar-control/rebuild-counter` <sub>:3112</sub><br>`POST /ap-control/rebuild-counter` <sub>:3135</sub><br>`GET /supplier-statement` <sub>:3156</sub><br>`GET /debtor-ledger` <sub>:3274</sub><br>`GET /creditor-ledger` <sub>:3319</sub><br>`GET /other-parties` <sub>:3437</sub><br>`POST /other-parties` <sub>:3458</sub><br>`PUT /other-parties/:id` <sub>:3517</sub><br>`DELETE /other-parties/:id` <sub>:3597</sub><br>`POST /other-party-bills` <sub>:3621</sub><br>`PUT /other-party-bills/:billNo` <sub>:3759</sub><br>`POST /other-party-bills/backfill-gl` <sub>:3987</sub><br>`GET /other-party-bills` <sub>:3995</sub><br>`DELETE /other-party-bills/:billNo` <sub>:4057</sub><br>`POST /other-party-bills/:billNo/lifecycle` <sub>:4111</sub><br>`POST /other-party-payments` <sub>:4145</sub><br>`GET /other-party-payments` <sub>:4245</sub><br>`GET /audit-log` <sub>:4282</sub><br>`GET /other-party-aging` <sub>:4389</sub><br>`POST /other-party-payments/:paymentNo/void` <sub>:4624</sub><br>`POST /other-party-payments/:paymentNo/lifecycle` <sub>:4645</sub><br>`POST /other-party-payments/:paymentNo/restate` <sub>:4667</sub><br>`GET /stock-map/effective` <sub>:4721</sub><br>`GET /trial-balance` <sub>:4792</sub><br>`GET /gl` <sub>:4860</sub><br>`GET /year-close/preview` <sub>:5206</sub><br>`POST /year-close` <sub>:5235</sub><br>`POST /stock/close-post` <sub>:5699</sub><br>`GET /stock-summary` <sub>:5819</sub><br>`GET /cost-by-line` <sub>:5954</sub><br>`GET /wip-detail` <sub>:5970</sub><br>`GET /cleanup-report` <sub>:6029</sub><br>`GET /cost-structure` <sub>:7370</sub><br>`GET /cost-expense-classes` <sub>:7449</sub><br>`GET /pl-trend` <sub>:7544</sub><br>`GET /pl-statement` <sub>:7578</sub><br>`GET /pl-monthly` <sub>:7645</sub><br>`GET /cashflow-statement` <sub>:7826</sub><br>`GET /pl` <sub>:7840</sub><br>`GET /payment-vouchers` <sub>:8264</sub><br>`POST /payment-vouchers` <sub>:8293</sub><br>`POST /payment-vouchers/:id/settle` <sub>:8416</sub><br>`POST /payment-vouchers/:id/lifecycle` <sub>:8492</sub><br>`POST /payment-vouchers/:id/restate` <sub>:8532</sub><br>`GET /official-receipts` <sub>:8591</sub><br>`POST /official-receipts` <sub>:8620</sub><br>`POST /official-receipts/:id/lifecycle` <sub>:8713</sub><br>`POST /fund-transfers` <sub>:8748</sub><br>`GET /fund-transfers` <sub>:8853</sub><br>`POST /fund-transfers/:no/lifecycle` <sub>:8957</sub><br>`GET /contra/candidates` <sub>:8994</sub><br>`POST /contra` <sub>:9030</sub><br>`GET /labor/preview` <sub>:9441</sub><br>`GET /labor/departments` <sub>:9481</sub><br>`POST /labor/post` <sub>:9499</sub><br>`POST /labor/unpost` <sub>:9585</sub><br>`GET /labor/map` <sub>:9636</sub><br>`PUT /labor/map` <sub>:9643</sub><br>`GET /cashflow/map` <sub>:9668</sub><br>`PUT /cashflow/map` <sub>:9676</sub><br>`GET /doc-number-prefixes` <sub>:9717</sub><br>`PUT /doc-number-prefixes` <sub>:9724</sub><br>`GET /pnl/section-map` <sub>:9747</sub><br>`PUT /pnl/section-map` <sub>:9754</sub><br>`GET /bs/section-map` <sub>:9773</sub><br>`PUT /bs/section-map` <sub>:9780</sub><br>`POST /trade-finance/setup` <sub>:9828</sub><br>`GET /trade-finance` <sub>:9876</sub><br>`PUT /trade-finance/draw-interest` <sub>:9929</sub><br>`PUT /trade-finance/draw-due` <sub>:9998</sub><br>`GET /dashboard` <sub>:10029</sub><br>`GET /forecast` <sub>:10663</sub><br>`PUT /forecast` <sub>:10678</sub><br>`GET /landed-cost/preview` <sub>:10793</sub><br>`POST /landed-cost` <sub>:10827</sub><br>`GET /gl-report` <sub>:10910</sub><br>`GET /fixed-assets` <sub>:11094</sub><br>`POST /fixed-assets` <sub>:11105</sub><br>`PUT /fixed-assets/:id` <sub>:11156</sub><br>`DELETE /fixed-assets/:id` <sub>:11191</sub><br>`GET /fixed-assets/depreciation-preview` <sub>:11211</sub><br>`POST /fixed-assets/depreciation-run` <sub>:11256</sub><br>`GET /bank-reco` <sub>:11376</sub><br>`POST /bank-reco/import` <sub>:11454</sub><br>`POST /bank-reco/match` <sub>:11494</sub><br>`POST /bank-reco/unmatch` <sub>:11542</sub><br>`POST /bank-reco/automatch` <sub>:11560</sub><br>`DELETE /bank-reco/line/:id` <sub>:11641</sub><br>`GET /opening-balance` <sub>:11928</sub><br>`POST /opening-balance/ap-exclude` <sub>:12066</sub><br>`POST /opening-balance/ar-include` <sub>:12136</sub><br>`PUT /opening-balance/pnl-prior-cum` <sub>:12197</sub><br>`PUT /opening-date` <sub>:12244</sub><br>`POST /opening-balance/ar` <sub>:12273</sub><br>`DELETE /opening-balance/ar/:id` <sub>:12326</sub><br>`POST /opening-balance/ap` <sub>:12369</sub><br>`DELETE /opening-balance/ap/:id` <sub>:12421</sub><br>`POST /opening-balance/post` <sub>:12452</sub><br>`GET /stock-take` <sub>:12617</sub><br>`PUT /rm-valuation-mode` <sub>:12647</sub><br>`GET /stock-take-item-aliases` <sub>:12679</sub><br>`PUT /stock-take` <sub>:12707</sub><br>`POST /stock-take-item-alias-seed` <sub>:12784</sub><br>`GET /material-opening-stock` <sub>:12891</sub><br>`PUT /material-opening-stock` <sub>:12940</sub> | gated |
+| `/api/attendance` | `src/api/routes/attendance.ts` | `GET /` <sub>:122</sub><br>`DELETE /:id` <sub>:155</sub><br>`GET /:id/photo` <sub>:177</sub><br>`POST /` <sub>:223</sub> | gated |
+| `/api/working-hour-entries` | `src/api/routes/working-hour-entries.ts` | `GET /production-revenue` <sub>:199</sub><br>`GET /summary` <sub>:499</sub><br>`GET /dept-category-summary` <sub>:613</sub><br>`GET /daily-breakdown` <sub>:703</sub><br>`GET /` <sub>:874</sub><br>`POST /` <sub>:910</sub><br>`POST /bulk` <sub>:975</sub><br>`PUT /:id` <sub>:1045</sub><br>`DELETE /:id` <sub>:1091</sub><br>`GET /nonprod-requests` <sub>:1164</sub><br>`POST /nonprod-requests/:id/approve` <sub>:1202</sub><br>`POST /nonprod-requests/:id/reject` <sub>:1450</sub><br>`POST /nonprod-requests/:id/remove` <sub>:1516</sub> | gated |
+| `/api/payroll-hour-deductions` | `src/api/routes/payroll-hour-deductions.ts` | `GET /` <sub>:64</sub><br>`POST /` <sub>:85</sub><br>`POST /auto-from-punch` <sub>:149</sub><br>`POST /settle-period` <sub>:211</sub><br>`DELETE /:id` <sub>:402</sub> | gated |
+| `/api/employee-advances` | `src/api/routes/employee-advances.ts` | `GET /` <sub>:67</sub><br>`GET /payout-listing` <sub>:105</sub><br>`POST /` <sub>:176</sub><br>`PUT /:id` <sub>:244</sub><br>`DELETE /:id` <sub>:305</sub> | gated |
+| `/api/cash-flow` | `src/api/routes/cash-flow.ts` | `GET /` <sub>:153</sub><br>`POST /` <sub>:251</sub> | gated |
+| `/api/consignments` | `src/api/routes/consignments.ts` | `GET /` <sub>:40</sub><br>`POST /` <sub>:100</sub><br>`GET /:id` <sub>:328</sub><br>`PUT /:id` <sub>:356</sub><br>`DELETE /:id` <sub>:508</sub> | gated |
+| `/api/consignment-notes` | `src/api/routes/consignment-notes.ts` | `GET /` <sub>:74</sub><br>`GET /linked-po-ids` <sub>:196</sub><br>`GET /ready-planning` <sub>:235</sub><br>`GET /stats` <sub>:472</sub><br>`GET /:id/print-extras` <sub>:564</sub><br>`POST /` <sub>:798</sub><br>`POST /:id/return` <sub>:1073</sub><br>`POST /:id/convert-to-invoice` <sub>:1419</sub><br>`POST /:id/notify-customer` <sub>:1771</sub><br>`PATCH /` <sub>:2053</sub><br>`PUT /:id` <sub>:2109</sub> | gated |
+| `/api/cn-packing-lists` | `src/api/routes/cn-packing-lists.ts` | `GET /` <sub>:382</sub><br>`GET /:id` <sub>:426</sub><br>`POST /` <sub>:663</sub><br>`DELETE /:id` <sub>:696</sub> | gated |
+| `/api/consignment-orders` | `src/api/routes/consignment-orders.ts` | `GET /` <sub>:479</sub><br>`POST /` <sub>:574</sub><br>`GET /stats` <sub>:921</sub><br>`GET /status-changes` <sub>:1011</sub><br>`GET /:id/edit-eligibility` <sub>:1085</sub><br>`POST /:id/override-edit-lock` <sub>:1209</sub><br>`GET /:id` <sub>:1380</sub><br>`POST /:id/confirm` <sub>:1578</sub><br>`PUT /:id` <sub>:1695</sub><br>`POST /:id/cancel` <sub>:2304</sub><br>`PATCH /:id/hub` <sub>:2447</sub><br>`DELETE /:id` <sub>:2782</sub> | gated |
+| `/api/stock-adjustments` | `src/api/routes/stock-adjustments.ts` | `GET /` <sub>:152</sub><br>`POST /` <sub>:209</sub> | gated |
+| `/api/drivers` | `src/api/routes/drivers.ts` | `GET /` <sub>:72</sub><br>`POST /` <sub>:143</sub><br>`GET /:id` <sub>:199</sub><br>`PUT /:id` <sub>:211</sub><br>`DELETE /:id` <sub>:300</sub> | gated |
+| `/api/three-pl-vehicles` | `src/api/routes/three-pl-vehicles.ts` | `GET /collisions` <sub>:165</sub><br>`GET /` <sub>:195</sub><br>`POST /` <sub>:211</sub><br>`GET /:id` <sub>:305</sub><br>`PUT /:id` <sub>:320</sub><br>`DELETE /:id` <sub>:428</sub> | gated |
+| `/api/three-pl-drivers` | `src/api/routes/three-pl-drivers.ts` | `GET /` <sub>:57</sub><br>`POST /` <sub>:72</sub><br>`GET /:id` <sub>:128</sub><br>`PUT /:id` <sub>:142</sub><br>`DELETE /:id` <sub>:199</sub> | gated |
+| `/api/three-pl-state-rates` | `src/api/routes/three-pl-state-rates.ts` | `GET /` <sub>:171</sub><br>`PUT /bulk` <sub>:189</sub> | gated |
+| `/api/equipment` | `src/api/routes/equipment.ts` | `GET /` <sub>:110</sub><br>`POST /` <sub>:163</sub><br>`GET /:id` <sub>:213</sub><br>`PUT /:id` <sub>:236</sub><br>`DELETE /:id` <sub>:388</sub> | gated |
+| `/api/forecasts` | `src/api/routes/forecasts.ts` | `GET /` <sub>:47</sub><br>`POST /` <sub>:72</sub> | gated |
+| `/api/ocr-accuracy` | `src/api/routes/ocr-accuracy.ts` | `GET /` <sub>:76</sub> | gated |
+| `/api/historical-sales` | `src/api/routes/historical-sales.ts` | `GET /` <sub>:49</sub> | gated |
+| `/api/leaves` | `src/api/routes/leaves.ts` | `GET /` <sub>:53</sub><br>`POST /` <sub>:76</sub><br>`PUT /` <sub>:137</sub><br>`PUT /:id` <sub>:175</sub><br>`DELETE /:id` <sub>:229</sub> | gated |
+| `/api/lorries` | `src/api/routes/lorries.ts` | `GET /` <sub>:47</sub><br>`POST /` <sub>:59</sub><br>`PUT /` <sub>:103</sub><br>`GET /:id` <sub>:159</sub><br>`PUT /:id` <sub>:171</sub><br>`DELETE /:id` <sub>:229</sub> | gated |
+| `/api/maintenance-logs` | `src/api/routes/maintenance-logs.ts` | `GET /` <sub>:49</sub><br>`POST /` <sub>:64</sub><br>`GET /:id` <sub>:115</sub><br>`DELETE /:id` <sub>:132</sub> | gated |
+| `/api/mrp` | `src/api/routes/mrp.ts` | `GET /` <sub>:397</sub><br>`GET /runs` <sub>:458</sub><br>`GET /runs/:id` <sub>:479</sub><br>`POST /` <sub>:536</sub> | gated |
+| `/api/notifications` | `src/api/routes/notifications.ts` | `GET /` <sub>:71</sub><br>`PUT /` <sub>:101</sub> | gated |
+| `/api/payroll` | `src/api/routes/payroll.ts` | `GET /` <sub>:119</sub><br>`POST /` <sub>:137</sub><br>`PUT /` <sub>:248</sub> | gated |
+| `/api/pay-rules` | `src/api/routes/pay-rules.ts` | `GET /` <sub>:48</sub><br>`POST /` <sub>:64</sub><br>`DELETE /:id` <sub>:107</sub> | gated |
+| `/api/payslips` | `src/api/routes/payslips.ts` | `GET /` <sub>:373</sub><br>`GET /projected` <sub>:503</sub><br>`POST /` <sub>:762</sub><br>`PUT /` <sub>:1182</sub><br>`GET /:id` <sub>:1225</sub> | gated |
+| `/api/production-leadtimes` | `src/api/routes/production-leadtimes.ts` | `GET /` <sub>:193</sub><br>`PUT /settings` <sub>:202</sub><br>`PUT /` <sub>:230</sub><br>`POST /recalc-all` <sub>:310</sub><br>`GET /history` <sub>:411</sub><br>`POST /schedule` <sub>:526</sub><br>`DELETE /history/:id` <sub>:602</sub> | gated |
+| `/api/production/leadtimes` | `src/api/routes/production-leadtimes.ts` | `GET /` <sub>:193</sub><br>`PUT /settings` <sub>:202</sub><br>`PUT /` <sub>:230</sub><br>`POST /recalc-all` <sub>:310</sub><br>`GET /history` <sub>:411</sub><br>`POST /schedule` <sub>:526</sub><br>`DELETE /history/:id` <sub>:602</sub> | gated |
+| `/api/production/sync-jobcards-from-bom` | `src/api/routes/jobcard-sync.ts` | `POST /` <sub>:208</sub> | gated |
+| `/api/promise-date` | `src/api/routes/promise-date.ts` | `GET /` <sub>:182</sub> | gated |
+| `/api/cs-agent` | `src/api/routes/cs-agent.ts` | `GET /promise` <sub>:31</sub><br>`GET /procurement/readiness` <sub>:76</sub> | gated |
+| `/api/qc-templates` | `src/api/routes/qc-templates.ts` | `GET /` <sub>:105</sub><br>`GET /:id` <sub>:149</sub><br>`POST /` <sub>:164</sub><br>`PUT /:id` <sub>:266</sub><br>`DELETE /:id` <sub>:365</sub> | gated |
+| `/api/qc-pending` | `src/api/routes/qc-pending.ts` | `GET /` <sub>:1806</sub><br>`POST /trigger` <sub>:1853</sub><br>`POST /generate-now` <sub>:1885</sub><br>`POST /:id/start` <sub>:1943</sub><br>`POST /:id/skip` <sub>:1969</sub><br>`POST /:id/complete` <sub>:2371</sub><br>`POST /bulk-skip` <sub>:2421</sub><br>`DELETE /:id` <sub>:2478</sub> | gated |
+| `/api/qc-inspections` | `src/api/routes/qc-inspections.ts` | `GET /` <sub>:157</sub><br>`POST /` <sub>:255</sub><br>`GET /:id` <sub>:336</sub><br>`PUT /:id` <sub>:359</sub><br>`DELETE /:id` <sub>:445</sub> | gated |
+| `/api/rd-projects` | `src/api/routes/rd-projects.ts` | `GET /` <sub>:356</sub><br>`POST /` <sub>:383</sub><br>`GET /:id` <sub>:518</sub><br>`PUT /:id` <sub>:543</sub><br>`POST /:id/start` <sub>:796</sub><br>`POST /:id/hold` <sub>:862</sub><br>`POST /:id/resume` <sub>:915</sub><br>`POST /:id/complete` <sub>:976</sub><br>`POST /:id/move-to-draft` <sub>:1038</sub><br>`POST /:id/reopen` <sub>:1098</sub><br>`POST /:id/issue-material` <sub>:1157</sub><br>`GET /:id/issuances` <sub>:1373</sub><br>`POST /:id/issuances` <sub>:1403</sub><br>`POST /:id/issuances/batch` <sub>:1555</sub><br>`DELETE /:id/issuances/:issuanceId` <sub>:1807</sub><br>`POST /:id/labour-log` <sub>:1896</sub><br>`GET /:id/labour-hours` <sub>:2013</sub><br>`POST /:id/labour-hours` <sub>:2048</sub><br>`DELETE /:id/labour-hours/:logId` <sub>:2147</sub><br>`PATCH /:id/labour-cost` <sub>:2172</sub><br>`DELETE /:id` <sub>:2237</sub> | gated |
+| `/api/rd-team-members` | `src/api/routes/rd-team-members.ts` | `GET /` <sub>:61</sub><br>`POST /` <sub>:77</sub><br>`PUT /:id` <sub>:180</sub><br>`DELETE /:id` <sub>:275</sub> | gated |
+| `/api/scheduling` | `src/api/routes/scheduling.ts` | `GET /` <sub>:186</sub><br>`POST /` <sub>:195</sub><br>`GET /capacity` <sub>:275</sub> | gated |
+| `/api/planning` | `src/api/routes/planning-schedule.ts` | `GET /schedule/fabric-cutting` <sub>:107</sub><br>`GET /capacity-audit` <sub>:591</sub><br>`GET /late-risk` <sub>:605</sub><br>`GET /schedule/:dept` <sub>:611</sub> | gated |
+| `/api/planning` | `src/api/routes/schedule-proposals.ts` | `POST /proposals/generate` <sub>:95</sub><br>`GET /proposals` <sub>:121</sub><br>`POST /proposals/approve` <sub>:158</sub><br>`POST /proposals/reject` <sub>:249</sub> | gated |
+| `/api/delivery-agent` | `src/api/routes/delivery-agent.ts` | `GET /brief.json` <sub>:144</sub><br>`POST /proposals/generate` <sub>:165</sub><br>`GET /proposals` <sub>:186</sub><br>`POST /proposals/approve` <sub>:260</sub><br>`POST /proposals/reject` <sub>:273</sub><br>`POST /run` <sub>:457</sub><br>`GET /truck-capacity-analysis` <sub>:556</sub> | gated |
+| `/api/internal/delivery-agent` | `src/api/routes/delivery-agent.ts` | `POST /run-trigger` <sub>:512</sub> | **public** (PUBLIC_PREFIXES) |
+| `/api/internal/agents` | `src/api/routes/agent-heartbeat.ts` | `POST /run-generate` <sub>:54</sub><br>`POST /heartbeat` <sub>:79</sub> | **public** (PUBLIC_PREFIXES) |
+| `/api/scan-po` | `src/api/routes/scan-po.ts` | `GET /catalog` <sub>:486</sub><br>`POST /extract` <sub>:525</sub><br>`POST /samples/:id/confirm` <sub>:712</sub><br>`GET /samples/by-po/:poIdentifier` <sub>:847</sub><br>`PATCH /samples/by-po/:poIdentifier` <sub>:904</sub><br>`GET /customer-rules/:customerId` <sub>:946</sub><br>`PUT /customer-rules/:customerId` <sub>:977</sub><br>`POST /customer-rules/:customerId/distill` <sub>:1033</sub> | gated |
+| `/api/scan-supplier` | `src/api/routes/scan-supplier.ts` | `POST /extract` <sub>:36</sub><br>`POST /samples/:id/confirm` <sub>:127</sub> | gated |
+| `/api/party-aliases` | `src/api/routes/party-aliases.ts` | `GET /` <sub>:50</sub><br>`GET /list` <sub>:69</sub><br>`POST /` <sub>:93</sub><br>`DELETE /` <sub>:134</sub> | gated |
+| `/api/scan-finance` | `src/api/routes/scan-finance.ts` | `POST /extract` <sub>:54</sub> | gated |
+| `/api/scan-queue` | `src/api/routes/scan-queue.ts` | `POST /upload` <sub>:698</sub><br>`GET /batch/:batchId` <sub>:876</sub><br>`GET /pending` <sub>:956</sub><br>`GET /:id` <sub>:1081</sub><br>`GET /:id/bytes` <sub>:1141</sub><br>`POST /:id/retry` <sub>:1201</sub><br>`POST /:id/consume` <sub>:1273</sub> | gated |
+| `/api/import` | `src/api/routes/import-completion.ts` | _(none found by static scan — read the file)_ | gated |
+| `/api/service-cases` | `src/api/routes/service-cases.ts` | `GET /` <sub>:522</sub><br>`GET /:id` <sub>:567</sub><br>`POST /` <sub>:614</sub><br>`PUT /:id` <sub>:757</sub><br>`PUT /:id/status` <sub>:931</sub><br>`DELETE /:id` <sub>:1007</sub> | gated |
+| `/api/service-orders` | `src/api/routes/service-orders.ts` | `GET /` <sub>:426</sub><br>`GET /:id` <sub>:470</sub><br>`POST /` <sub>:556</sub><br>`PUT /:id` <sub>:943</sub><br>`PUT /:id/status` <sub>:1023</sub><br>`PUT /:id/mode` <sub>:1214</sub><br>`POST /:id/returns` <sub>:1468</sub><br>`PUT /:id/returns/:rid` <sub>:1558</sub><br>`POST /:id/returns/:rid/scrap` <sub>:1669</sub><br>`DELETE /:id` <sub>:1832</sub> | gated |
+| `/api/department-performance` | `src/api/routes/department-performance.ts` | `GET /` <sub>:197</sub> | gated |
+| `/api/wip-times` | `src/api/routes/wip-times.ts` | `GET /` <sub>:113</sub><br>`PUT /` <sub>:216</sub><br>`POST /bulk-import` <sub>:376</sub> | gated |
+| `/api/reports` | `src/api/routes/reports.ts` | `GET /efficiency` <sub>:285</sub><br>`GET /efficiency.json` <sub>:319</sub><br>`GET /operations.json` <sub>:345</sub><br>`POST /efficiency/send` <sub>:374</sub><br>`GET /schedule` <sub>:384</sub><br>`GET /schedule.json` <sub>:403</sub><br>`GET /overdue` <sub>:420</sub><br>`GET /overdue.json` <sub>:439</sub><br>`GET /brief` <sub>:489</sub><br>`GET /brief.json` <sub>:523</sub><br>`POST /brief/send` <sub>:537</sub><br>`GET /cogs-integrity.json` <sub>:559</sub><br>`GET /ocr-code-misses.json` <sub>:587</sub><br>`GET /compliance.json` <sub>:601</sub><br>`POST /schedule/send` <sub>:918</sub><br>`POST /overdue/send` <sub>:923</sub> | gated |
+| `/api/internal/reports` | `src/api/routes/reports.ts` | `POST /efficiency-trigger` <sub>:879</sub><br>`POST /schedule-trigger` <sub>:885</sub><br>`POST /overdue-trigger` <sub>:891</sub><br>`POST /brief-trigger` <sub>:897</sub> | **public** (PUBLIC_PREFIXES) |
+| `/api/assistant/conversations` | `src/api/routes/assistant-history.ts` | `GET /` <sub>:87</sub><br>`GET /:id` <sub>:112</sub><br>`PUT /:id` <sub>:140</sub><br>`PATCH /:id` <sub>:204</sub><br>`DELETE /:id` <sub>:234</sub> | gated |
+| `/api/assistant` | `src/api/routes/assistant.ts` | `POST /chat` <sub>:501</sub> | gated |
+| `/api/agents` | `src/api/routes/agent-console.ts` | `GET /status` <sub>:165</sub><br>`GET /review` <sub>:410</sub><br>`POST /run-now` <sub>:562</sub><br>`POST /pause` <sub>:703</sub><br>`POST /kill-all` <sub>:730</sub><br>`POST /gate` <sub>:757</sub><br>`POST /phase` <sub>:787</sub><br>`POST /rollback-last-batch` <sub>:839</sub><br>`GET /config-proposals` <sub>:953</sub><br>`POST /config-proposals/decide` <sub>:983</sub> | gated |
+| `/api/org-chart` | `src/api/routes/org-chart.ts` | `GET /` <sub>:172</sub><br>`POST /auto-wire-production` <sub>:230</sub><br>`PUT /reporting` <sub>:334</sub> | gated |
 
 ---
 
-## Domain-specific business rules
+## Route files present but not mounted in `worker.ts`
 
-These are enforced at the route layer, not at the type layer.
+These are imported elsewhere, mounted conditionally, or dead. 1 file(s):
 
-- **SO confirm** — `status: DRAFT → CONFIRMED` auto-generates production
-  orders (`production-order-builder.ts` explodes each SO item into one PO
-  per department).
-- **Invoice create** — requires DO in `DELIVERED`; derives line items from
-  the DO (not the SO) so partial deliveries invoice correctly.
-- **Payment allocate** — a single payment can settle multiple invoices;
-  over-allocation returns 400.
-- **GRN receive** — partial receipts allowed; 3-way match updates
-  automatically when GRN quantity matches PO and supplier invoice.
-- **Three-way match** — FULL_MATCH / PARTIAL_MATCH / MISMATCH; Mismatch
-  blocks payment approval.
-- **MRP netting** — shortfall = demand − on-hand − open PO qty (with
-  lead-time alignment).
-- **Cash flow classification** — Operating / Investing / Financing per
-  journal line, aggregated per month.
+- `src/api/routes/_fabric-cascade.ts`
 
 ---
 
-## Error handling
+## Conventions that are actually enforced
 
-- Validation errors → `400` with a human-readable `error` string. No
-  shared error schema (yet); error messages are intended for UI display.
-- Route handlers wrap `await c.req.json()` in try/catch for invalid JSON.
-- 404s are explicit; "search returned no results" is a successful empty
-  list (`data: []`, `total: 0`).
+- **Money is integer sen** (RM × 100). Never floats. See `roundSen` in
+  `src/lib/utils.ts` and `src/components/ui/money-input.tsx`.
+- **New DB columns are snake_case.** A camelCase column named in route SQL needs
+  an entry in `src/api/lib/column-rename-map.json` or the request 400s. Read rows
+  dual-keyed: `r.camelCase ?? r.snake_case`.
+- **Migrations do not auto-apply on deploy.** A new column reaches production only
+  via runtime self-apply (`ALTER TABLE … ADD COLUMN IF NOT EXISTS`, awaited before
+  the first write). See `src/api/lib/self-apply.ts`.
+- **Validation** is per-route. Shared Zod schemas live in `src/lib/validation.ts`
+  and `src/lib/schemas/`; many routes still do ad-hoc checks.
 
----
+## Regenerating
 
-## Adding a new resource
-
-1. Create `src/api/routes/<resource>.ts`:
-
-   ```ts
-   import { Hono } from 'hono';
-   import { <collection>, generateId } from '../../lib/mock-data';
-
-   const app = new Hono();
-
-   app.get('/', (c) => c.json({ success: true, data: <collection> }));
-   app.get('/:id', (c) => {
-     const item = <collection>.find((x) => x.id === c.req.param('id'));
-     return item
-       ? c.json({ success: true, data: item })
-       : c.json({ success: false, error: 'Not found' }, 404);
-   });
-   app.post('/', async (c) => {
-     const body = await c.req.json();
-     const item = { id: generateId(), ...body };
-     <collection>.push(item);
-     return c.json({ success: true, data: item }, 201);
-   });
-
-   export default app;
-   ```
-
-2. Import + mount in `src/api/index.ts`:
-
-   ```ts
-   import resource from './routes/resource';
-   app.route('/api/resource', resource);
-   ```
-
-3. Add the entity shape to `src/lib/mock-data.ts` + a seed array.
-
-4. Restart `npm run api`.
-
----
-
-## Validation
-
-Shared Zod schemas in `src/lib/validation.ts`. Not every route uses them
-yet — many routes do ad-hoc checks. When tightening a route, prefer:
-
-```ts
-import { salesOrderCreateSchema } from '../../lib/validation';
-
-app.post('/', async (c) => {
-  const body = await c.req.json();
-  const parsed = salesOrderCreateSchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ success: false, error: parsed.error.issues[0].message }, 400);
-  }
-  // ... use parsed.data
-});
+```bash
+node scripts/gen-api-docs.mjs          # rewrite docs/API.md
+node scripts/gen-api-docs.mjs --check  # non-zero exit if API.md is out of date
 ```
-
----
-
-## Auth
-
-None today. Every route trusts the caller. When auth is wired:
-
-1. Add Hono middleware that verifies the session / token and populates
-   `c.var.user`.
-2. Apply it globally in `src/api/index.ts` before `app.route(...)` calls,
-   except for `/health` and the portal-login route.
-3. On the frontend, swap the bare `fetch` calls for a thin wrapper that
-   attaches the `Authorization` header.

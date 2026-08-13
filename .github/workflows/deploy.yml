@@ -54,7 +54,7 @@ jobs:
       # Strict build: runs `typecheck:app && vite build`. The typecheck gate
       # is BLOCKING — any TS error fails the deploy. Paired with `strict: true`
       # in tsconfig.app.json (TS.E), this is the graduated form of P1.6 in
-      # docs/UPGRADE-CONTROL-BOARD.md: no `continue-on-error`, no opt-out.
+      # docs/archive/UPGRADE-CONTROL-BOARD.md: no `continue-on-error`, no opt-out.
       #
       # VITE_SENTRY_DSN is injected at build time so the bundled JS knows
       # where to report client-side errors. The DSN is public-safe per

@@ -1,12 +1,22 @@
 # 🔑 Database Password Rotation — Runbook
 
+> **Last verified: 2026-08-13** against `wrangler.toml` (`HYPERDRIVE` + `HYPERDRIVE_STAGING` bindings), `.github/workflows/` (`secrets.PROD_DATABASE_URL`, `secrets.STAGING_DATABASE_URL`, `secrets.SUPABASE_DATABASE_URL`, `secrets.DATABASE_URL`, `secrets.SUPABASE_PROD_URL` are all referenced), and a re-scan of `scripts/` for embedded DSN literals.
+> Corrected 2026-08-13: the working-tree count is **3 files, not 109**. The rest were converted to `process.env.DATABASE_URL`. This changes nothing about the need to rotate — the passwords are still in git history.
+> **UNVERIFIED ASSERTION** (as of 2026-08-13): rotation status. Not checkable from source; **assume NOT DONE until the owner confirms in the Supabase dashboard.**
+> Overlaps `docs/SECURITY-ROTATION-TODO.md` (same open item, filed a week earlier, thinner procedure). This file is the better runbook of the two — recommend keeping this one and folding that one in.
+
 **Status: ACTION REQUIRED (owner).** Filed 2026-07-30.
 
 ## Why
 The two Supabase database passwords (STAGING project `zaxygxwadidiqcphibma`,
-PROD project `vpwdqtsxexpiqxzweivd`) are hard-coded in **109 tracked
-`scripts/*.mjs` files** and therefore live in **git history on both `main` and
+PROD project `vpwdqtsxexpiqxzweivd`) were hard-coded in ~109 tracked
+`scripts/*.mjs` files and therefore live in **git history on both `main` and
 `staging`**. Anyone with repo access (or a clone) has both passwords.
+
+As of 2026-08-13 only **3** files still carry a literal —
+`scripts/_db.mjs`, `scripts/check-fg-ledger.mjs`,
+`scripts/reset-wip-quantities.mjs`. That cleanup does **not** reduce the
+exposure by one bit: history is unchanged. Rotation is still the only fix.
 
 Deleting the files does **not** un-leak them — the history still has them. **The
 passwords must be rotated.** Rotation makes every leaked copy useless.

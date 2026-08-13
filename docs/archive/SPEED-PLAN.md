@@ -1,3 +1,10 @@
+> **ARCHIVED / SUPERSEDED — stopped being true 2026-07-14.** A one-off worktree plan for
+> branch `feat/perf-speed` off staging `16b31d23`. Its measurements are from that commit and
+> its levers have since been implemented, changed or refuted. Current perf state lives in
+> `docs/PERF-BACKLOG.md` and `docs/PERF-DURABLE-ARCHITECTURE.md`; the method for NOT producing
+> a false perf finding is in `docs/context-packs/HOOKKA-GOTCHAS.md` § "Diagnosing performance".
+> Kept for history only. Verified 2026-08-13.
+
 # Perf / Lag — dedicated worktree (branch: feat/perf-speed, off staging)
 
 Base = staging (16b31d23) so it already has the freshness fixes. Goal: make pages

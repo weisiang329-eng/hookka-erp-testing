@@ -1,3 +1,5 @@
+> **ARCHIVED / SUPERSEDED — stopped being true 2026-08-01.** All four slices shipped: slice 1 (drag-drop board + lead detail mounting the CRM panels) at `src/pages/leads/index.tsx` — 3 drag handlers, `CrmPanel`/`KycPanel`/`PhoneInput` imported at L12-14; slice 2 (convert) at `leads/index.tsx:392-456` plus `sales_leads.won_customer_id` in `src/api/routes/sales-leads.ts:48,266`, pinned by `tests/lead-convert.test.mjs`; slice 3 (provisional assignment) as the lead catalog at `sales-leads.ts:369`, pinned by `tests/lead-catalog.test.mjs`; slice 4 (system-wide standardization) as `src/components/ui/phone-input.tsx` + `state-select.tsx`. Note the wishlist panel this plan relies on was later retired by the owner (2026-08-01). Kept for history only; do not treat as current.
+
 # CRM redesign — unified Lead ↔ Customer (owner 2026-07-30)
 
 ## The ask (owner, in his words)

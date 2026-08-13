@@ -1,5 +1,17 @@
 # Design System
 
+> **Last verified: 2026-08-13** against `src/lib/design-tokens.ts`, `src/index.css`,
+> `src/components/ui/index.ts`, `src/components/ui/status-badge.tsx`,
+> `src/components/ui/badge.tsx`, `src/components/ui/button.tsx`,
+> `src/components/ui/card.tsx`, `src/lib/utils.ts`.
+> Corrected 2026-08-13: `<Badge>` had four variants documented but only ships two;
+> `<DateRangePicker>` does not exist anywhere in `src/`; `<Card>` has no `variant` prop;
+> `StatusBadge` has 14 `kind` values, not 13, and does **not** compile-error on an unknown
+> enum *value*; the page background hex was wrong. Everything else in this file — the nine
+> token sections, `SemanticStyle`, all seven semantic hexes, both threshold objects, the
+> three class helpers, and every named `*_COLOR` map and `get*Style` resolver — was checked
+> name-by-name against `design-tokens.ts` and is accurate.
+
 HOOKKA ERP uses a token-first design system. Every colour decision and every
 shared chrome pattern (page headers, filter bars, tabs, status chips) lives
 in one place so the brand feel is consistent across ~60 screens.
@@ -15,9 +27,14 @@ warm brown-gold (think "land of gold and moss" rather than
 "dashboard-startup neon"). Semantic colours preserve their universal
 meaning (green = success, red = danger, amber = warning, blue/teal = info)
 but shades are muted so they sit comfortably next to the brand gold instead
-of shouting over it. Pages breathe on a cream page background
-(`#FAF8F4`) with white card surfaces; borders are a soft beige
-(`#E6E0D9`).
+of shouting over it. Card surfaces are white; borders are a soft beige
+(`BRAND.border` = `#E6E0D9` on white, `BRAND.borderAlt` = `#E2DDD8` on cream).
+
+**Page background — read this carefully, two values are in play.**
+`BRAND.bgCream` in `design-tokens.ts` is `#FAF8F4`, but the actual `<body>` background
+set in `src/index.css` is `--color-stone-white: #F0ECE9`. `#FAF8F4` is the cream used by
+cream-surfaced pages and by the `/m` phone shell (`--m-paper` in
+`src/pages/m/theme-vars.css`), not by the desktop body.
 
 ---
 
@@ -130,9 +147,12 @@ import { StatusBadge } from "@/components/ui";
 
 Props:
 
-- **`kind`** — one of the 13 known enum kinds. Adding a new backend enum
-  value triggers a TS error because each enum is a `Record<EnumUnion,
-  SemanticStyle>` — you can't forget a case.
+- **`kind`** — one of 14 values: the 13 enum kinds listed above plus `"unknown"`
+  (`StatusBadgeKind` in `status-badge.tsx:44`). **Correction (2026-08-13):** adding a new
+  member to an enum *union type* does trigger a TS error, because each map is a
+  `Record<EnumUnion, SemanticStyle>`. But `value` is typed `string`, and `lookupStyle`
+  falls back to `resolveUnknownStatus(...)` — so passing a status the map has never heard
+  of renders a NEUTRAL chip silently, with no compile error and no runtime throw.
 - **`value`** — the raw enum string from the API.
 - **`label`** — optional override (default: `value.replace(/_/g, " ")`).
 - **`size`** — `"sm"` (11px, default for table cells) or `"md"`.
@@ -193,9 +213,13 @@ affordance.
   }}
 >
   <select value={status} onChange={…}>…</select>
-  <DateRangePicker … />
+  <input type="date" value={from} onChange={…} />
 </FilterBar>
 ```
+
+> Corrected 2026-08-13: this example used to show a `<DateRangePicker …/>`. **No such
+> component exists** — `DateRangePicker` appears nowhere under `src/`. Date filters are
+> built from native `<input type="date">` controls passed as `FilterBar` children.
 
 **Props**
 
@@ -244,13 +268,17 @@ type SalesTab = "all" | "pending" | "done";
 From `src/components/ui/` (import via the barrel
 `import { X } from "@/components/ui"`):
 
-- **`Badge`** — legacy styled chip with string variants (`"status"`,
-  `"success"`, `"warning"`, `"outline"`). Still used by migrated pages;
-  `variant="status"` calls through to `getStatusColor()`.
+- **`Badge`** — legacy styled chip. **Corrected 2026-08-13:** it has exactly two variants,
+  `"default"` and `"status"` (`badge.tsx:5`) — the `"success"` / `"warning"` / `"outline"`
+  variants this doc used to list have never existed on this component. `variant="status"`
+  also requires the separate `status` prop; it calls through to `getStatusColor()` in
+  `src/lib/utils.ts:87`.
 - **`Button`** — CVA variants (`default`, `ghost`, `outline`, `destructive`,
   `link`) + sizes (`default`, `sm`, `lg`, `icon`).
 - **`Card`, `CardHeader`, `CardTitle`, `CardDescription`, `CardContent`** —
-  brand-coloured surface + heading.
+  brand-coloured surface + heading. **Corrected 2026-08-13: `Card` has no `variant` prop.**
+  Padding is responsive, not a variant: `p-6 max-md:p-4` baked into `CardHeader` /
+  `CardContent`.
 - **`Input`** — Tailwind-styled native input with the brand focus ring.
 - **`FormField`** — label + hint + error wrapper for React-Hook-Form.
 - **`DataGrid`** — TanStack-Table-backed grid with sticky header, sortable
@@ -265,7 +293,16 @@ From `src/components/ui/` (import via the barrel
   lineage. Used in audit views.
 - **`ErrorBoundary` / `ErrorFallback`** — route-level error guard
   registered in `router.tsx`.
-- **`ToastProvider` / `useToast`** — app-level toast host + hook.
+- **`ToastProvider` / `useToast`** — app-level toast host + hook. There is no bare `toast`
+  object export; feedback goes through `useToast()`.
+
+Also exported from the barrel but missing from the list above (added 2026-08-13):
+`StatusTabStrip`, `SearchableSelect`, `BatchImportDialog`, and the `Skeleton*` family
+(`SkeletonText`, `SkeletonCard`, `SkeletonTable`, `SkeletonDetailPage`,
+`SkeletonDashboard`). Several `src/components/ui/*.tsx` files — `money-input`,
+`object-page-header`, `confirm-dialog`, `filter-chips`, `record-pager`, `virtual-rows`,
+`virtual-groups` and others — are **not** in the barrel and must be imported by path; see
+`docs/UI-CONVENTIONS.md`.
 
 ---
 
@@ -388,4 +425,7 @@ Page-level spacing convention:
 7. Any colour on a numeric cell → `textOnly(getXxxSemantic(value))`.
 8. Any colour on a section tile → `tileClasses(XXX)`.
 9. No bare Tailwind shades anywhere for semantic indication.
-10. Lint + type-check (`npm run lint && npx tsc --noEmit`).
+10. Lint + type-check. **Use the strict app config, not the base one:**
+    `npm run lint && npx tsc -p tsconfig.app.json --noEmit` (= `npm run build:strict`).
+    The bare `npx tsc --noEmit` this doc used to prescribe runs the looser base
+    `tsconfig.json` and misses errors the deploy gate fails on — see `CLAUDE.md`.

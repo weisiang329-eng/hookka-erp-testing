@@ -1,5 +1,20 @@
 # GitHub Workflow Governance
 
+> **Last verified: 2026-08-13** against `.github/` (contains exactly
+> `PULL_REQUEST_TEMPLATE.md` + `workflows/`) and all 24 files in `.github/workflows/`.
+> No corrections needed. `PULL_REQUEST_TEMPLATE.md`, `deploy.yml` and `sync-staging.yml`
+> all exist as named, there is no `ISSUE_TEMPLATE/` (correct — this doc says it is optional
+> and not needed), and `docs/BUG-HISTORY.md` is still the live bug log.
+>
+> For completeness, the 24 workflows present on 2026-08-13 are: agent-heartbeat,
+> analyze-staging, auto-clockout, backup, daily-reports, delivery-agent,
+> deploy-cron-worker, deploy, distill-ocr-rules, ios-build, keep-warm, mail-sync,
+> nightly-counter-rebuild, nightly-pi-gl-backfill, process-email-outbox,
+> push-clock-reminder, qc-cron, rebuild-dashboard-snapshot, refresh-bundle-baseline,
+> replay-audit-dlq, scan-queue-sweep, sync-staging, trim-staging, warm-lists.
+> Note `ios-build.yml` (Capacitor iOS, `workflow_dispatch` only, unsigned archive) predates
+> this doc's "canary deploys on pull requests" framing and is not covered by it.
+
 Purpose: keep GitHub-side project files organized as Hookka ERP moves toward a larger ERP operating model. This document explains what belongs in `.github/`, how to choose direct production vs canary vs staging, and how to reduce bugs from process drift.
 
 ## Current baseline

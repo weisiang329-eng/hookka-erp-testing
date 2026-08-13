@@ -1,5 +1,33 @@
 # MFRS — Gap Analysis for Hookka ERP Accounting
 
+> **Last verified: 2026-08-13** against `src/api/routes/accounting.ts`,
+> `src/api/lib/journal-hash.ts`, `src/api/lib/trade-finance.ts`,
+> `src/api/routes/invoices.ts`, `src/api/routes/supplier-payments.ts`,
+> `migrations-postgres/` (244 files), plus a targeted re-grep of `src/api/`.
+>
+> **Every 🔴 gap is still open on 2026-08-13.** Re-grepped across `src/api/routes/`
+> and `src/api/lib/`: `NRV` / `write-down` / `obsolescence` → 0 hits;
+> `doubtful` / `impair` → 0 hits; `deferred tax` → 0 hits; `warranty` → 1 hit, in
+> `equipment.ts` (equipment warranty dates, not a MFRS 137 provision);
+> `changes in equity` → 0 hits. No migration in `migrations-postgres/` adds a
+> provision, allowance, tax or SOCE table. So the assessment stands as written.
+>
+> Corrected 2026-08-13: one thing has changed since 2026-07-18 —
+> **trade finance shipped 2026-08-11** (`migrations-postgres/0223_trade_finance.sql`,
+> `src/api/lib/trade-finance.ts`, `src/lib/trade-finance.ts`): per-draw due dates and
+> repayment allocations, with draw amounts always derived from the live ledger family
+> net rather than stored. It is not covered by any row above and touches the same
+> posting layer; assess it before quoting this file as complete.
+>
+> Line-number citations in the "Detail + code evidence" sections were **not**
+> re-verified one by one — `accounting.ts` has moved substantially since 2026-07-18.
+> Treat them as pointers to a symbol, not to a line.
+>
+> > **UNVERIFIED ASSERTION** (as of 2026-08-13): everything framed as what MFRS
+> > *requires*, which provisions are *material*, the suggested build order, and the
+> > recommendation to scope P1 with the accountant are policy and professional
+> > judgement, not checkable from source. Treat as owner intent, not fact.
+
 **Date:** 2026-07-18 · **Status:** assessment only — NO accounting code or data changed.
 **Purpose:** owner asked to run the accounting to MFRS (Malaysian Financial Reporting Standards,
 the IFRS-aligned standards issued by the MASB), and to see the gaps first.

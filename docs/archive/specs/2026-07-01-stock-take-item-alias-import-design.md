@@ -1,3 +1,5 @@
+> **ARCHIVED / SUPERSEDED — stopped being true once the alias import shipped (on/after 2026-07-01).** Live in code: `migrations-postgres/0203_stock_take_item_alias.sql`, 6 `stock_take_item_alias` references in `src/api/routes/accounting.ts`, the ~230-row seed at `src/api/lib/stock-take-item-alias-seed-2026-05.ts`, and `tests/stock-take-import.test.mjs`. Kept for history only; do not treat as current.
+
 # Auto-Categorize Raw Stock-Take Import — Design
 
 **Date:** 2026-07-01

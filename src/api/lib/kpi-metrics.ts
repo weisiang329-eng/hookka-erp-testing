@@ -16,7 +16,7 @@
 //
 // The customer's date is `sales_orders.customer_delivery_date` (99.8% filled).
 // `hookka_expected_dd` is OUR internal estimate and must never be scored
-// against — see docs/PRODUCTION-PLANNING-LOGIC.md.
+// against — see docs/archive/PRODUCTION-PLANNING-LOGIC.md.
 // ---------------------------------------------------------------------------
 import type { Context } from "hono";
 import type { Env } from "../worker";

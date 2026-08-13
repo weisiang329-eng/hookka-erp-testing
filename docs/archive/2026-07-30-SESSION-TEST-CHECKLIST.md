@@ -1,3 +1,5 @@
+> **ARCHIVED / SUPERSEDED — stopped being true 2026-08-01.** A one-off dated session checklist whose open items have all resolved: its item C (CRM wishlist) was RETIRED by owner decision on 2026-08-01 — `src/components/customer/WishlistPanel.tsx` no longer exists and `src/api/routes/customer-crm.ts:410` records "整个功能删掉，我们 assign SKU 就行了"; its "Purchase Return slices 2/3" pending item shipped 2026-07-31 (`src/api/lib/purchase-return-create.ts` carries the Slice-2 inventory reversal at L200 and the Slice-3 supplier Debit Note at L309); its "CRM slice 3" pending item shipped as the lead-catalog provisional assignments at `src/api/routes/sales-leads.ts:369`. Kept for history only; do not treat as current.
+
 # 2026-07-30 Session — What was built, and how to test it all at once
 
 Everything below was built this session. Test on **staging** after the deploy runs.

@@ -1,5 +1,25 @@
 # Hookka ERP — AI Agent 总蓝图（Master Blueprint）
 
+> **Last verified: 2026-08-13** against `src/api/lib/cs-agent.ts`,
+> `src/api/lib/procurement-agent.ts`, `src/api/lib/delivery-agent.ts`,
+> `src/api/lib/agent-scheduler.ts`, `src/api/lib/agent-brain.ts`,
+> `src/api/lib/assistant-tools.ts`, `src/api/lib/schedule-proposals.ts`,
+> `src/api/routes/cs-agent.ts`, `src/api/routes/delivery-agent.ts`,
+> `src/api/routes/planning-schedule.ts`, `.github/workflows/agent-heartbeat.yml`,
+> `.github/workflows/delivery-agent.yml`, `docs/archive/plans/2026-07-28-delivery-agent-auto-open-do.md`.
+>
+> **Every code artefact this document names exists**, including `promiseDelivery`,
+> `procurementReadiness`, `materialAvailability`, `transitDriftLearning`,
+> `computeChainWithAssignments`, `autoCreateDosForApprovedLoadPlans`, and both
+> `/api/cs-agent/*` endpoints. No corrections needed to the "shipped surfaces" sections.
+>
+> **UNVERIFIED ASSERTION** (as of 2026-08-13): sections 2–10, the 执行顺序 ordering, the
+> Agent JD 章程, the 成本口径 figures, and every ✅/🔄/⚪ status marker are **owner intent and
+> roadmap, not checkable facts**. Nothing here tells you whether an agent is enabled in
+> prod, whether a gate is open or closed, or whether staging was ever accepted — that state
+> lives in the database (`kv_config`, `agent_runs`) and in `docs/WORK-TRACKER.md`, not in
+> this file. Treat as owner intent, not fact.
+
 Owner + Fable 5 定稿于 2026-07-12。这是全公司 Agent 化的执行大纲：以后按此清单
 一个一个做。原则：**LLM 当大脑（判断/归因/决策/说人话），确定性引擎当手脚
 （算数/执行），审批当保险丝** —— 纯 LLM 会瞎编，纯逻辑不进化，混合才是企业级。
@@ -166,7 +186,7 @@ PL-first+hub 完整性已上线、Dispatch/Delivered 客户通知邮件已上线
     起,agent 自批准后会自动开 DO**——但**只开"干净单"**(单客户+已解析 hub;模糊/无 hub 退回
     人工提案),走 office 同一条 `createDeliveryOrderForPOs`(含 `validateDoComposition`),
     **只开到 DO 为止**,不碰发票/派车/POD。gate 默认关。见
-    `autoCreateDosForApprovedLoadPlans` + `docs/plans/2026-07-28-delivery-agent-auto-open-do.md`。
+    `autoCreateDosForApprovedLoadPlans` + `docs/archive/plans/2026-07-28-delivery-agent-auto-open-do.md`。
 - **KPI**：漏开票数→0；准时交付率；每单运费 vs 报价差；退货处理时长。
 
 ## Customer Service Agent（总调度）· JD

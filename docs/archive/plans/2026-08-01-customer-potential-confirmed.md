@@ -1,3 +1,5 @@
+> **ARCHIVED / SUPERSEDED — stopped being true 2026-08-01** (the doc itself declares "IMPLEMENTED (PR #154)"). Verified against code 2026-08-13: `src/api/lib/customer-stage.ts` self-applies `customer_stage TEXT NOT NULL DEFAULT 'CONFIRMED'` (L40) and `salesperson_user_id` (L44), reads dual-keyed at L57, and exports the money-path guard `assertCustomerBillable` at L73; `WishlistPanel`/`CrmPanel` mounts are gone from `src/pages/customers.tsx` (`src/components/customer/` holds only `CrmPanel.tsx` + `KycPanel.tsx`); pinned by `tests/customer-stage.test.mjs` and `tests/customer-stage-self-apply-retry.test.mjs`. Its §7 also names `customer-salesperson.test.mjs`, which was never created. Kept for history only; do not treat as current.
+
 # Plan — Customer: Potential vs Confirmed, and the Sales Pipeline split
 
 **Owner ask:** 2026-08-01 (WhatsApp, 5 screenshots)

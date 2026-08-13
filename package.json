@@ -23,7 +23,7 @@
     "db:reset:supabase": "node scripts/apply-postgres-migrations.mjs --reset",
     "_LEGACY_db:migrate:local": "echo 'LEGACY: D1 retired 2026-04-27. Live runtime is Supabase Postgres via Hyperdrive. Use db:migrate:supabase. Original cmd: wrangler d1 migrations apply hookka-erp-db --local'",
     "_LEGACY_db:migrate:remote": "echo 'LEGACY: D1 retired 2026-04-27. Live runtime is Supabase Postgres. db:migrate:remote applied SQLite migrations to a D1 instance with zero live traffic. Use db:migrate:supabase to apply to Supabase. Original cmd: wrangler d1 migrations apply hookka-erp-db --remote'",
-    "_LEGACY_db:create": "echo 'LEGACY: D1 retired. To create a new Supabase project, see docs/CLOUDFLARE_MIGRATION.md and migrations-postgres/README.md.'",
+    "_LEGACY_db:create": "echo 'LEGACY: D1 retired. To create a new Supabase project, see docs/archive/CLOUDFLARE_MIGRATION.md and migrations-postgres/README.md.'",
     "_LEGACY_db:seed:local": "echo 'LEGACY: D1 retired. Local Postgres seeding is via apply-postgres-migrations.mjs --reset (which also seeds via migrations-postgres/*.sql).'",
     "_LEGACY_db:studio": "echo 'LEGACY: D1 retired. Inspect Supabase via the Supabase dashboard or psql with DATABASE_URL from .dev.vars.'",
     "prepare": "husky"

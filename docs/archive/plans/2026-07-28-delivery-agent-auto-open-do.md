@@ -1,3 +1,5 @@
+> **ARCHIVED / SUPERSEDED — stopped being true 2026-07-28.** Shipped the same day in commit `ad6db99d` (PR #114) "feat(delivery-agent): phase-3 auto-opens DOs (owner red-line move)": the phase-3 gate + AGENT_AUTO LOAD_PLAN read live at `src/api/routes/delivery-agent.ts:307-311`, and `tests/delivery-agent-auto-do.test.mjs` pins all seven guardrails (gate, no-hub skip, shared office path, DO-only, runaway cap). Kept for history only; do not treat as current.
+
 # Plan — Delivery Agent auto-opens DOs at Phase 3 (moving a blueprint red line)
 
 **Owner decision (2026-07-28):** "B" — move the Delivery Agent red line so that, at

@@ -1,5 +1,7 @@
 # Context Pack: Security, Auth, and RBAC
 
+> **Last verified: 2026-08-13** against `src/api/lib/auth-middleware.ts` (`PUBLIC_PATHS`/`PUBLIC_PREFIXES` + 4 regex-opened paths), `rbac.ts`, `tenant.ts`, `routes/auth.ts`, `auth-oauth.ts`, `auth-totp.ts`, `users.ts` (`requireSuperAdmin`, 9 call sites), `worker-auth.ts`, `worker.ts`, and the named tests (`security-permission-matrix`, `security-public-endpoints`, `security-route-coverage`, `permissions`, `tenant-isolation`). All present.
+
 Use this pack for login/session handling, CSRF, OAuth, TOTP, worker portal access, permissions, tenancy, and audit trails.
 
 > Security / auth / RBAC / tenancy is **always deep review** — never fast-lane it (`docs/DEV-OPERATING-FRAMEWORK.md`). Note the SUPER_ADMIN tier gate (`requireSuperAdmin`) on user-account mutations in `users.ts`.

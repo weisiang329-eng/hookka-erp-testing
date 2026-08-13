@@ -3930,7 +3930,7 @@ now appear in Pending Delivery on prod.
 **Trigger:** owner asked us to read the sibling 2990s (Houzs) ERP's full bug
 history and check whether Hookka has the same problems. We distilled ~30 of
 their incidents into 18 bug *classes* and audited Hookka against each (full
-write-up: `docs/cross-audit-2990s-2026-06.md`). Headline: Hookka was already
+write-up: `docs/archive/cross-audit-2990s-2026-06.md`). Headline: Hookka was already
 defended against their worst classes (cancel/reopen double-apply, reversal
 cost/batch drop, allocation-keying, service-line miscategorisation, the
 FormData upload break, `SELECT *` view drift, under-gated routes). The real
@@ -8161,7 +8161,7 @@ Commit `a54a7e9`.
 (verified — grep `/api/import/*` returned nothing in `src/pages` or
 `src/components`). The 19 sibling backfill admin endpoints in the same
 file remain untouched per the PR 0 allowlist; logged for follow-up in
-`docs/AUDIT-BACKLOG-2026-05-20.md`.
+`docs/archive/AUDIT-BACKLOG-2026-05-20.md`.
 
 ---
 

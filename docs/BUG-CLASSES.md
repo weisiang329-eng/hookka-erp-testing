@@ -1,5 +1,9 @@
 # Recurring bug classes — the index that makes P5 executable
 
+> **Last verified: 2026-08-13** — every one of the 27 source/test paths this file cites
+> exists (checked mechanically against the tree), and `npm test` is green
+> (3,768 tests / 0 fail). No corrections needed.
+
 `PLAYBOOKS.md` **P5** says: *"Fix all instances of the same class, not just the flagged one."*
 
 That instruction is unusable without a list of the instances. `BUG-HISTORY.md` is ordered by

@@ -1,3 +1,5 @@
+> **ARCHIVED / SUPERSEDED — stopped being true when Stage 1 landed (on/after 2026-06-30).** The design's load-bearing rule is live in code: `src/api/routes/accounting.ts` carries the `grn_item_id IS NULL` PI-only receipt filter, so PI-only lines enter the FIFO closing exactly as specced and converted PIs are skipped. Kept for history only; do not treat as current — read the code, not this doc, before changing the material window.
+
 # PI-Driven Stock-In for P&L Closing — Design
 
 **Date:** 2026-06-30

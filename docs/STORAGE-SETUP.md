@@ -1,5 +1,8 @@
 # Supabase Storage — Admin Runbook
 
+> **Last verified: 2026-08-13** against `src/api/lib/supabase-storage.ts` (`SupabaseStorageNotConfiguredError`, `DEFAULT_BUCKET = "hookka-files"`, `signedDownloadUrl` default TTL 300s), `src/api/routes/files.ts:223,358-359` (503 gating), `migrations-postgres/0055_file_assets.sql`, and `wrangler.toml`.
+> Corrected 2026-08-13: `wrangler secret put` → `wrangler pages secret put` (this is a Pages project); the migration command now points at the npm script; smoke-test URLs updated to the live domain.
+
 **Status:** Originally landed 2026-04-25 as `R2-SETUP.md` against
 Cloudflare R2; rewritten 2026-04-29 by the storage-supabase-migration to
 target Supabase Storage. The route layer (`src/api/routes/files.ts`) is
@@ -60,7 +63,8 @@ The Postgres mirror migration is `migrations-postgres/0055_file_assets.sql`.
 Run:
 
 ```bash
-node scripts/apply-postgres-migrations.mjs
+npm run db:migrate:supabase:dry   # preview pending files
+npm run db:migrate:supabase       # apply (incremental, tracked, re-runnable)
 ```
 
 The DB column is named `r2_key` (camelCase `r2Key` in the adapter
@@ -73,14 +77,15 @@ data-migrating change out of scope for the storage swap.
 ## Step 3 — Set the runtime credentials
 
 ```bash
-# Public-ish project slug (the segment before .supabase.co):
-# Edit wrangler.toml [vars] and set SUPABASE_PROJECT_REF, OR set as a
-# secret per-environment if you prefer:
-wrangler secret put SUPABASE_PROJECT_REF
-
 # Service-role key (NEVER paste this into chat or commit it):
-wrangler secret put SUPABASE_SERVICE_KEY
+wrangler pages secret put SUPABASE_SERVICE_KEY
 ```
+
+`SUPABASE_PROJECT_REF` is **already set on the Cloudflare Pages dashboard**
+for prod. Do NOT also add it to `wrangler.toml [vars]` — Cloudflare rejects
+the deploy with `Binding name 'SUPABASE_PROJECT_REF' already in use` (this
+caused the 2026-05-30 deploy failure; the line is deliberately left
+commented in `wrangler.toml`).
 
 For local dev, copy `.dev.vars.example` to `.dev.vars` and fill in both
 values. The matching keys in code are `env.SUPABASE_PROJECT_REF` and
@@ -97,7 +102,7 @@ the next deploy).
 TOKEN="<an admin bearer token>"
 
 # Upload an invoice PDF
-curl -X POST https://hookka-erp-testing.pages.dev/api/files \
+curl -X POST https://erp.hookka.com/api/files \
   -H "Authorization: Bearer $TOKEN" \
   -F "file=@./test.pdf" \
   -F "resourceType=invoice" \
@@ -108,11 +113,11 @@ curl -X POST https://hookka-erp-testing.pages.dev/api/files \
 #  just an opaque storage object key now.)
 
 # Download it (follows the 302 to a presigned URL)
-curl -L https://hookka-erp-testing.pages.dev/api/files/fa-XXX/download \
+curl -L https://erp.hookka.com/api/files/fa-XXX/download \
   -H "Authorization: Bearer $TOKEN" -o downloaded.pdf
 
 # Delete it
-curl -X DELETE https://hookka-erp-testing.pages.dev/api/files/fa-XXX \
+curl -X DELETE https://erp.hookka.com/api/files/fa-XXX \
   -H "Authorization: Bearer $TOKEN"
 ```
 

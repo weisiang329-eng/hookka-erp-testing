@@ -1,5 +1,16 @@
 # UI Data Grid, Filter, Numeric Input, and Document Layout Standards
 
+> **Last verified: 2026-08-13** against `src/components/ui/data-grid.tsx`,
+> `src/components/ui/filter-bar.tsx`, `src/lib/pdf-utils.ts`, `src/lib/utils.ts`,
+> `tests/money.test.mjs`, `tests/data-grid-fill.test.mjs`.
+> No corrections needed. Every named API was checked and exists: the `DataGrid` column
+> `type` union is exactly `"text" | "date" | "currency" | "number" | "docno" | "status"`
+> (`data-grid.tsx:137`), and `gridId`, `keyField`, `emptyMessage`, `alwaysSearchKeys`,
+> `groupBy`, `onSelectionChange`, `filterAccessor`, `sortAccessor` all exist as documented;
+> `formatCurrency` / `formatNumber` / `formatRM` / `roundSen` are all exported from
+> `src/lib/utils.ts`; `drawLetterhead` / `drawSectionLabel` / `drawDocFooter` / `tableTheme`
+> are all exported from `src/lib/pdf-utils.ts`; both cited test files exist.
+
 Purpose: provide one standard for list grids, columns, filters, sorting, numeric input, and business document layouts across Hookka ERP. Use this when adding or changing tables, filters, quotations, sales orders, delivery orders, invoices, PDFs, and printable forms.
 
 ## Current findings

@@ -1,8 +1,10 @@
 # Context Pack: Architecture
 
+> **Last verified: 2026-08-13** against `src/main.tsx`, `src/router.tsx`, `src/dashboard-routes.tsx`, `functions/api/[[route]].ts`, `src/api/worker.ts` — all 8 "read first" files exist and the runtime facts hold (139 `app.route` mounts; Hyperdrive→Supabase; D1-shaped adapter). Broken link to the old root-level HOOKKA-GOTCHAS path repaired.
+
 Use this pack for broad system understanding, architecture review, deployment questions, or cross-module refactors.
 
-> Deploys run from `main` to Cloudflare Pages but do NOT replay Postgres migration files — new columns self-apply at runtime (see `docs/HOOKKA-GOTCHAS.md`). Cross-module/refactor work is deep review (`docs/DEV-OPERATING-FRAMEWORK.md`).
+> Deploys run from `main` to Cloudflare Pages but do NOT replay Postgres migration files — new columns self-apply at runtime (see `docs/context-packs/HOOKKA-GOTCHAS.md`). Cross-module/refactor work is deep review (`docs/DEV-OPERATING-FRAMEWORK.md`).
 
 ## Read first
 

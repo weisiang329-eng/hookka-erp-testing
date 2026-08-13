@@ -1,5 +1,36 @@
 # System Health — coverage map, open issues, and the weekly review
 
+> **Last verified: 2026-08-13** against `src/api/routes/admin-health.ts`,
+> `src/api/routes/fe-rum.ts`, `src/lib/fe-rum.ts`, `src/pages/employees.tsx`,
+> `src/components/ui/searchable-select.tsx`, `docs/PERF-BACKLOG.md` (2026-08-13 prod
+> measurements).
+>
+> Corrected 2026-08-13 — four things:
+>
+> 1. **The weekly review in §4 has not been run since 2026-08-01.** The review log has
+>    exactly two rows, both from that day. The cadence this document exists to enforce
+>    lapsed for eleven days; the "QA OUTSTANDING" items on H1 and H3 were never
+>    confirmed. Do not read the H-table as a current state of prod.
+> 2. **§6's `/employees` row ("open — under 1s, not urgent") is superseded.** On
+>    2026-08-13 `/employees` measured **46,137 DOM nodes with scroll frozen >45 s** and
+>    was fixed by windowing the Working Hours grid (PR #281 → 2,214 nodes, 0 ms
+>    blocking). The 5,425-node reading here was taken on a different tab of that page.
+> 3. **§5's `/fe-perf` gap is partly closed.** `src/api/routes/fe-rum.ts:29` now
+>    accepts `longtask | lcp | fcp | nav | ttfb`, so page-load series exist at the
+>    ingest layer. Whether `/admin/health` renders them was not re-checked.
+> 4. **§7's closing conclusion has a successor.** "What is left is connection
+>    acquisition… that is the next backend investigation" was followed up on
+>    2026-08-13 and the measured answer is sharper: the API tier **serializes
+>    concurrent requests** (1 call 41 ms; 6 parallel 39→194 ms; 12 parallel
+>    1,511→1,902 ms, over h3, so not the browser connection limit). The live queue is
+>    `docs/PERF-BACKLOG.md`; read it before re-opening anything in §7.
+>
+> Still true and worth keeping: the coverage table in §1, the four monitoring gaps in
+> §2 (nobody is paged; cron unmonitored; staging health is mock; no email/WhatsApp
+> failure counter), the index audit result (0 of 14 missing across 97 indexes), the
+> `/worker/scan` camera-teardown errors, and the hidden-window measurement caveat in
+> §6 — that caveat is the single most reusable paragraph in this file.
+
 Owner ask 2026-08-01: make health REAL (done — see wrangler.toml CF_ACCOUNT_ID
 notes), audit coverage, fix what past data says is still broken, then review on
 a cadence. This doc is the standing checklist for that cadence.

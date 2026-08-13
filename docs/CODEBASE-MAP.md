@@ -1,11 +1,33 @@
 # Hookka ERP — Codebase Map (the single authoritative map)
 
+> **Last verified: 2026-08-13** — all 436 file paths cited in this map were checked
+> mechanically against the tree; 434 exist.
+> Corrected 2026-08-13: `src/pages/procurement/pricing.tsx` was deleted in commit
+> `b3b42b6c` (Supplier Pricing merged into `procurement/maintenance.tsx`; the old route
+> is now a redirect) — both the table row and the "PENDING merge" gotcha said otherwise.
+> The one remaining dead link, `docs/context-packs/NAVIGATION-MAP.md`, is a deliberate
+> historical reference to this file's former name.
+>
+> **Also corrected 2026-08-13: 46 stale file line-counts** (drift up to +189%), re-derived
+> with `wc -l`. Two of them were not drift but a **file split nothing in the docs mentioned**,
+> and it is the single biggest source of wrong line anchors in this repo's docs:
+>
+> | Handler file | Was documented as | Actually | Its helpers now live in |
+> |---|---|---|---|
+> | `src/api/routes/delivery-orders.ts` | 6,189 lines | **3,010** | `src/api/routes/delivery-orders/_helpers.ts` (5,254) |
+> | `src/api/routes/production-orders.ts` | 7,606 lines | **3,903** | `src/api/routes/production-orders/_helpers.ts` (5,799) |
+> | `src/api/routes/sales-orders.ts` | 5,318 lines | **5,626** | `src/api/routes/sales-orders/_helpers.ts` (1,452) |
+>
+> Every anchor above the real length pointed **past end-of-file**; the rest landed on
+> unrelated code. If a function you expect is not in the handler file, look in its sibling
+> `_helpers.ts` before concluding it was deleted.
+
 **This is THE code map — read it before touching any module; there is no other.** Look up the
 module here and go straight to the listed files and line ranges. `Grep`/`Glob` over the whole
 repo **time out** (large tree + many worktrees), so use the file:line entries below with
-`Read offset/limit` instead of searching. Formerly `docs/context-packs/NAVIGATION-MAP.md`.
-Retired duplicates now pointing here: `docs/code-map.md`; the code-location role of
-`docs/MODULES.md` (MODULES stays as the higher-level *product* reference).
+`Read offset/limit` instead of searching. Formerly `docs/CODEBASE-MAP.md`.
+Retired duplicates now pointing here: `docs/CODEBASE-MAP.md`; the code-location role of
+`docs/archive/MODULES.md` (MODULES stays as the higher-level *product* reference).
 
 ## 📖 Per-module deep guides — open these FIRST
 
@@ -35,14 +57,14 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/sales/index.tsx` — SO list (1705), dual-mode SO vs service-order | `src/api/routes/sales-orders.ts` — 5318 lines; SO CRUD + status cascades + snapshot | `sales_orders` / `sales_order_items` / `so_status_changes` | `tests/sofa-combo.test.mjs` |
-| `src/pages/sales/create.tsx` — Create SO (3710); OCR/scan-PO lands here | `src/api/routes/consignment-orders.ts` — CO CRUD + co_status_changes (2415) | `consignment_orders` / `consignment_order_items` / `co_status_changes` | `tests/so-category.test.mjs` |
-| `src/pages/sales/detail.tsx` — SO detail (1637); linked POs/JCs/DOs/invoices | `src/api/routes/consignment-notes.ts` — CN (DO-equiv) dispatch/delivered (1775) | `consignment_notes` / `consignment_items` | |
+| `src/pages/sales/index.tsx` — SO list (2181), dual-mode SO vs service-order | `src/api/routes/sales-orders.ts` — 5318 lines; SO CRUD + status cascades + snapshot | `sales_orders` / `sales_order_items` / `so_status_changes` | `tests/sofa-combo.test.mjs` |
+| `src/pages/sales/create.tsx` — Create SO (3710); OCR/scan-PO lands here | `src/api/routes/consignment-orders.ts` — CO CRUD + co_status_changes (2815) | `consignment_orders` / `consignment_order_items` / `co_status_changes` | `tests/so-category.test.mjs` |
+| `src/pages/sales/detail.tsx` — SO detail (1637); linked POs/JCs/DOs/invoices | `src/api/routes/consignment-notes.ts` — CN (DO-equiv) dispatch/delivered (2152) | `consignment_notes` / `consignment_items` | |
 | `src/pages/sales/edit.tsx` — Edit SO (1634); re-runs sofa-combo on save; unit price + build-up via `@/lib/pricing` | `src/api/routes/consignments.ts` — legacy/shared reads (536) | `sofa_combo_rules` / `customer_products` / `price_overrides` | |
 | `src/pages/consignment/index.tsx` — CO list (1197) | `src/api/routes/sofa-combos.ts` — sofa_combo_rules CRUD (650) | `cost_ledger` / `production_orders` / `job_cards` / `fg_units` | |
 | `src/pages/consignment/create.tsx` — Create CO (1782) | `src/api/routes/historical-sales.ts` — read-only history (128) | `delivery_orders` / `delivery_order_items` / `invoices` / `invoice_items` | |
 | `src/pages/consignment/edit.tsx` — Edit CO (1142); unit price + build-up via `@/lib/pricing` | | `sales_orders_archive` / `sales_order_items_archive` / `sales_orders_list_snapshot` | |
-| `src/pages/consignment/detail.tsx` — CO detail (1335); DO-parity P2 | | | |
+| `src/pages/consignment/detail.tsx` — CO detail (1568); DO-parity P2 | | | |
 | `src/pages/consignment/note.tsx` — CN workspace (5219); 3 tabs | | | |
 | `src/pages/consignment/return.tsx` — Consignment Return (819) | | | |
 | `src/pages/maintenance/sofa-combos.tsx` — Sofa Combo grid (1852) | | | |
@@ -98,20 +120,20 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/procurement/index.tsx` — PO list + POFormDialog (1870) | `src/api/routes/purchase-orders.ts` — PO CRUD + status lifecycle | `purchase_orders` / `purchase_order_items` | `tests/grn-arrival-state.test.mjs` |
+| `src/pages/procurement/index.tsx` — PO list + POFormDialog (2175) | `src/api/routes/purchase-orders.ts` — PO CRUD + status lifecycle | `purchase_orders` / `purchase_order_items` | `tests/grn-arrival-state.test.mjs` |
 | `src/pages/procurement/detail.tsx` — PO detail + ThreeWayMatchPanel (1497) | `src/api/routes/grn.ts` — GRN CRUD + arrival + Post-to-Stock cascade | `grns` / `grn_items` | `tests/ocr-distill-supplier.test.mjs` |
 | `src/pages/procurement/create.tsx` — full-page PO create | `src/api/routes/goods-in-transit.ts` — GIT CRUD | `goods_in_transit` | `tests/supplier-payment-alloc.test.mjs` |
-| `src/pages/procurement/grn.tsx` — GRN list (964) | `src/api/routes/purchase-invoices.ts` — PI CRUD + lifecycle | `purchase_invoices` / `purchase_invoice_items` | `tests/three-pl-state-rates.test.mjs` |
-| `src/pages/procurement/grn/create.tsx` — GRN create (1174) | `src/api/routes/three-way-match.ts` — PO↔GRN↔PI variance | `suppliers` | |
-| `src/pages/procurement/grn-detail.tsx` — GRN detail + Post-to-Stock (913) | `src/api/routes/suppliers.ts` — supplier CRUD | `supplier_materials` / `supplier_material_bindings` | |
+| `src/pages/procurement/grn.tsx` — GRN list (1252) | `src/api/routes/purchase-invoices.ts` — PI CRUD + lifecycle | `purchase_invoices` / `purchase_invoice_items` | `tests/three-pl-state-rates.test.mjs` |
+| `src/pages/procurement/grn/create.tsx` — GRN create (1490) | `src/api/routes/three-way-match.ts` — PO↔GRN↔PI variance | `suppliers` | |
+| `src/pages/procurement/grn-detail.tsx` — GRN detail + Post-to-Stock (1332) | `src/api/routes/suppliers.ts` — supplier CRUD | `supplier_materials` / `supplier_material_bindings` | |
 | `src/pages/procurement/in-transit.tsx` — GIT list (869) | `src/api/routes/supplier-materials.ts` — bindings (autofill source) | `supplier_payments` | |
-| `src/pages/procurement/pi.tsx` — PI list (498) | `src/api/routes/supplier-payments.ts` — payments + void + lifecycle | `price_histories` | |
-| `src/pages/procurement/pi/create.tsx` — PI create (739) | `src/api/routes/price-history.ts` — effective-date pricing | `credit_notes` / `debit_notes` | |
+| `src/pages/procurement/pi.tsx` — PI list (906) | `src/api/routes/supplier-payments.ts` — payments + void + lifecycle | `price_histories` | |
+| `src/pages/procurement/pi/create.tsx` — PI create (1144) | `src/api/routes/price-history.ts` — effective-date pricing | `credit_notes` / `debit_notes` | |
 | `src/pages/procurement/PurchaseInvoiceDetail.tsx` — PI detail (editable DRAFT+APPROVED) | `src/api/routes/credit-notes.ts` / `debit-notes.ts` | `raw_materials` | |
-| `src/pages/procurement/pricing.tsx` — Supplier Pricing compare/history (769) | `src/api/routes/supplier-scorecards.ts` — read-only metrics | | |
-| `src/pages/procurement/maintenance.tsx` — bindings mgmt (575) | `src/api/routes/scan-supplier.ts` — OCR extract (catalog-snap back-door) | | |
+| ~~`src/pages/procurement/pricing.tsx`~~ — **DELETED** (commit `b3b42b6c`); Supplier Pricing compare/history merged into `procurement/maintenance.tsx` ComparisonTab. `/procurement/pricing` is now a `<Navigate>` redirect to `/procurement/maintenance` (`src/dashboard-routes.tsx:385`) | `src/api/routes/supplier-scorecards.ts` — read-only metrics | | |
+| `src/pages/procurement/maintenance.tsx` — bindings mgmt (1336) | `src/api/routes/scan-supplier.ts` — OCR extract (catalog-snap back-door) | | |
 | `src/pages/procurement/sku-form-dialog.tsx` (410) / `supplier-form-dialog.tsx` (199) | | | |
-| `src/pages/suppliers/detail.tsx` — supplier profile/scorecard/history (708) | | | |
+| `src/pages/suppliers/detail.tsx` — supplier profile/scorecard/history (1082) | | | |
 
 **Big-file section index**
 - `src/pages/procurement/index.tsx`
@@ -160,7 +182,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 - **A PI create failure used to erase its own cause.** The insert batch's catch existed for a pre-0162 DB (missing currency columns) and retried with a legacy column list — but it swallowed the original error for every non-foreign invoice (`console.error` fired only for `isForeign`) and the retry's rejection reached the global 500 handler, which strips messages. The one fact needed to diagnose was destroyed at runtime. Now the first failure is ALWAYS logged before the `isForeign` branch, and the retry has its own catch returning 400 with the original cause. A fallback for a KNOWN condition must not become a catch-all that erases unknown ones. Tests: `tests/pi-create-error-surfacing.test.mjs`.
 - **A `supplierCode` holding the document's line NUMBER is not a code** (`supplierCodeOf` / `looksLikeRowNumber`). ADD WOOD's invoice is `No | Description | Qty | Unit/Price | Amount` — no product code anywhere, and the leading column counts 1, 2, 3. The extractor filled `supplierCode` with it, and that ONE junk character broke three things at once, which is why only this supplier misbehaved: the description fallback was gated on `!rawSku` so it never ran (and the description is their only identifying text — no amount of manual picking could ever make their invoice auto-resolve), the prefix-tolerant binding search matched any SKU ending in that digit, and the digit joined the matching text where a rare token carries high IDF weight and drags the score under the bar. Fixed at both ends: the extractor prompt says a counter column is not a code, and the client refuses to read one regardless. Also `MIN_SKU_SUFFIX_MATCH` — suffix matching needs ≥3 chars on both sides, since a two-character key suffix-matches nearly every binding a supplier has. Tests: `tests/scan-row-number-not-a-code.test.mjs`.
 - Supplier bindings resolve by `supplierSku` FIRST, then by `supplierDescription` — and the description path runs whenever the SKU path FAILED, not only when the code column was empty. The description path exists because some suppliers print no product code at all (ADD WOOD's invoice is `No | Description | Qty | Unit/Price | Amount`), so the SKU path can never fire and Internal Code could never auto-resolve for them. `supplierDescription` was always in the table and the API, but was missing from the `SupplierMaterialBinding` FE type, so the scanner could not see it. Description containment matches ONLY when exactly one binding qualifies — two candidates means the line is ambiguous and guessing would book stock against the wrong material. Both scan modes (create-PI and create-GRN) must resolve identically, or the same document maps differently depending on which door it came through.
-- PENDING task to merge Supplier Pricing (pricing.tsx) into the Supplier module — don't duplicate the comparison surface (a duplicate modal was shipped+reverted before).
+- ~~PENDING task to merge Supplier Pricing (pricing.tsx) into the Supplier module~~ — **DONE.** Consolidated by `8c12bfb6`, the dead page deleted by `b3b42b6c`; the comparison surface now lives in `procurement/maintenance.tsx` (ComparisonTab) and `/procurement/pricing` redirects there. Still don't duplicate it (a duplicate modal was shipped+reverted before).
 - Convert-chain availability (PO→GRN→PI, mig 0182): per-line CONSUMED tracking. PO line available = `quantity − receivedQty`; GRN line available = `accepted_qty − invoiced_qty` (both exposed as `availableQty` on item reads, dual-keyed). PI POST takes `body.grnId` + per-line `grnItemId`; a LINE-LEVEL 409 guard (`src/lib/convert-chain.ts` `checkConvertAvailability`) replaced the old PO-level double-bill 409 — a 2nd PI is allowed when qty remains, only the over-drawn line is rejected. Increment `grn_items.invoiced_qty` on PI create (same batch as the line insert); RESTORE on PI delete / PI items-replace / PI→CANCELLED, and on GRN un-post/cancel/delete (`restorePOReceivedQtyForGRN` decrements `purchase_order_items.receivedQty`, recomputes PO status). Stock posting (`postGRNToStock`) is NOT reversed by any restore — availability only. GRN DELETE is blocked while a non-CANCELLED PI references it (`purchase_invoices.grn_id`). **A GRN-sourced PI is capped by the receipt AND by the purchase order (BUG-2026-08-07-003, BUG-CLASS C10): `checkPoRemaining` (`purchase-invoices.ts:945`) is the ONE PO ceiling, called by the PO branch, the GRN branch and the PUT re-line (the last with the edited PI excluded from its own already-invoiced sum). Before this, a GRN-sourced invoice saw only `accepted − invoiced_qty`, so 100 could be billed off the PO and 100 more off its GRN. The ceiling is `poInvoiceCeiling` = max(ordered, receivedQty) so an accepted over-receipt stays invoiceable; requested qty is aggregated per material code; a GRN line with no PO (direct receipt) is not PO-capped. A GRN-sourced line's `purchase_invoice_items.po_id` is resolved the same way the guard resolves it — `line.poId → body.purchaseOrderId → grn_items.po_id → grns.poId`.** Tests: `tests/convert-chain.test.mjs` + `tests/purchasing-convert-flow.test.mjs`.
 - Convert UX (2026-06): GRN create = manual default + "Convert from PO" line-pick (`convert-from-po-modal.tsx`); PI create = "Convert from Goods Receipt" line-pick with GRN+PO tabs (`convert-to-pi-modal.tsx`). Pickers show per-line `availableQty`, checkbox + qty (≤ available), skip fully-consumed lines. PI GRN-source lines carry `grnItemId` → POST sends `body.grnId` + per-line `grnItemId`. Both pickers are SINGLE-source (one PO→one GRN; one GRN/PO→one PI) because the GRN backend keys lines to ONE parent PO by `poItemIndex` (grns.poId single column). Multi-source consolidation into one doc is a FOLLOW-UP (needs schema work). The GRN "From PO | Manual" mode toggle was removed; `?poId=` deep-link still locks PO mode.
 
@@ -176,14 +198,14 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/delivery/index.tsx` — DO workbench + 3PL mgmt (6879) | `src/api/routes/delivery-orders.ts` — DO end-to-end (6189) | `delivery_orders` / `delivery_order_items` | `tests/delivery-pipeline.test.mjs` |
+| `src/pages/delivery/index.tsx` — DO workbench + 3PL mgmt (6879) | `src/api/routes/delivery-orders.ts` — DO end-to-end (3010) | `delivery_orders` / `delivery_order_items` | `tests/delivery-pipeline.test.mjs` |
 | `src/pages/delivery/detail.tsx` — single DO detail | `src/api/routes/packing-lists.ts` — delivery-side truck runs | `packing_lists` | `tests/do-qr-public.test.mjs` |
 | `src/components/ui/document-detail-drawer.tsx` — the SHARED right slide-over chrome (doc no / type / status badge / "Open full page" / close + a pinned action bar); model in `src/lib/document-drawer.ts` | `GET /api/delivery-orders/:id/print-extras` feeds the spec line | — | `tests/document-drawer.test.mjs` |
 | `src/components/ui/status-tab-strip.tsx` — the SHARED status tab strip (per state: count + money); rules in `src/lib/status-tab-strip.ts` (`tabTotals`/`tabValueSen`; a bucket summing to nothing shows its count, never RM 0.00). Used by SO / PO / GRN / PI / Invoices / CO **and DO** lists — `delivery/index.tsx` is the pattern it came from and was folded in on 2026-08-08, so there are no hand-written copies left. Money renders through `formatCurrency` everywhere (`formatRM`'s plain space was the DO page's second spelling of the same amount). | money either from the list rows already fetched, or from that list's `/stats` aggregate (which must carry `customerScopeSql`) | — | `tests/status-tab-strip.test.mjs` |
 | `src/pages/delivery/agent-tab.tsx` — Delivery Agent tab (brief strip + proposal approve/reject) | `src/api/routes/delivery-agent.ts` — brief.json / proposals / run / cron trigger; lib `src/api/lib/delivery-agent.ts` (runtime self-apply) | `delivery_proposals` / `delivery_briefs` (snake_case) | |
 | `src/pages/consignment/note.tsx` — CN workbench, DO-parity (5219) | `src/api/routes/consignment-notes.ts` — CN lifecycle | `consignment_notes` / `cn_packing_lists` | `tests/do-scan-sort.test.mjs` |
 | `src/pages/consignment/index.tsx` — CO list | `src/api/routes/cn-packing-lists.ts` — CN packing lists | `consignment_orders` | `tests/pl-first-autosplit.test.mjs` |
-| `src/pages/consignment/create.tsx` — create CO (1782) | `src/api/routes/consignment-orders.ts` — CO CRUD (2415) | `drivers` | `tests/three-pl-state-rates.test.mjs` |
+| `src/pages/consignment/create.tsx` — create CO (1782) | `src/api/routes/consignment-orders.ts` — CO CRUD (2815) | `drivers` | `tests/three-pl-state-rates.test.mjs` |
 | `src/pages/consignment/edit.tsx` — edit CO | `src/api/routes/consignments.ts` — legacy/aggregate (536) | `three_pl_vehicles` / `three_pl_drivers` / `three_pl_state_rates` | `tests/cn-do-parity-gaps.test.mjs` |
 | `src/pages/consignment/detail.tsx` — CO/Note detail | `src/api/routes/drivers.ts` — in-house drivers | `sales_orders` / `fg_units` / `stock_movements` | `tests/cn-packing-list.test.mjs` |
 | `src/pages/consignment/return.tsx` — return flow | `src/api/routes/three-pl-drivers.ts` / `three-pl-vehicles.ts` / `three-pl-state-rates.ts` | | `tests/cn-packing-list-record.test.mjs`, `tests/cn-value.test.mjs` |
@@ -235,7 +257,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/accounting/index.tsx` — mega-page, ~25 tabs (10627) | `src/api/routes/accounting.ts` — the accounting engine (11525) | `chart_of_accounts` / `account_aliases` | `tests/cashflow-engine.test.mjs` |
+| `src/pages/accounting/index.tsx` — mega-page, ~25 tabs (10627) | `src/api/routes/accounting.ts` — the accounting engine (13054) | `chart_of_accounts` / `account_aliases` | `tests/cashflow-engine.test.mjs` |
 | `src/pages/accounting/cash-flow.tsx` — standalone cash-flow | `src/api/routes/invoices.ts` — sales invoices (~2310) | `journal_entries` / `journal_lines` / `ledger_journal_entries` | `tests/other-party-payment.test.mjs` |
 | `src/pages/invoices/index.tsx` — sales invoice list | `src/api/routes/payments.ts` — customer receipts | `document_lifecycle` | `tests/supplier-payment-alloc.test.mjs` |
 | `src/pages/invoices/detail.tsx` — invoice editor (per-line discount) | `src/api/routes/supplier-payments.ts` — pay PIs (money-critical) | `invoices` / `invoice_items` / `invoice_payments` / `payment_records` | |
@@ -392,15 +414,15 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/inventory/index.tsx` — 3-tab FG/WIP/RM grids (3446) | `src/api/routes/inventory.ts` — aggregate read + drill-downs (583) | `raw_materials` / `rm_batches` | `tests/production-wip-producer-output.test.mjs` |
-| `src/pages/inventory/adjustments.tsx` — stock adjustments (769) | `src/api/routes/inventory-wip.ts` — WIP derived view (665) | `fg_units` / `fg_batches` | `tests/cascade-fc-aggregator.test.mjs` |
-| `src/pages/inventory/fabrics.tsx` — fabric tracking (707) | `src/api/routes/raw-materials.ts` — RM CRUD + dup-code toggle (685) | `fabric_trackings` / `fabrics` | `tests/hub-cascade-completeness.test.mjs` |
+| `src/pages/inventory/index.tsx` — 3-tab FG/WIP/RM grids (3994) | `src/api/routes/inventory.ts` — aggregate read + drill-downs (661) | `raw_materials` / `rm_batches` | `tests/production-wip-producer-output.test.mjs` |
+| `src/pages/inventory/adjustments.tsx` — stock adjustments (769) | `src/api/routes/inventory-wip.ts` — WIP derived view (761) | `fg_units` / `fg_batches` | `tests/cascade-fc-aggregator.test.mjs` |
+| `src/pages/inventory/fabrics.tsx` — fabric tracking (707) | `src/api/routes/raw-materials.ts` — RM CRUD + dup-code toggle (776) | `fabric_trackings` / `fabrics` | `tests/hub-cascade-completeness.test.mjs` |
 | `src/pages/inventory/stock-value.tsx` — valuation snapshots (1037) | `src/api/routes/rm-batches.ts` — read-only (95) | `stock_adjustments` / `stock_movements` | |
-| | `src/api/routes/fg-units.ts` — FG lifecycle + backfills (906) | `stock_accounts` / `monthly_stock_values` | |
+| | `src/api/routes/fg-units.ts` — FG lifecycle + backfills (1216) | `stock_accounts` / `monthly_stock_values` | |
 | | `src/api/routes/fabrics.ts` — DEPRECATED (writes 410) (68) | `rack_locations` / `rack_items` | |
 | | `src/api/routes/fabric-tracking.ts` — active fabric CRUD (443) | `wip_items` / `cost_ledger` | |
 | | `src/api/routes/_fabric-cascade.ts` — internal helper, not mounted (216) | `production_orders` / `job_cards` / `grns` / `delivery_hubs` | |
-| | `src/api/routes/warehouse.ts` — racks + movements (684) | `fg_stock_events` (append-only FG ledger, mig 0221) | `tests/fg-stock-events.test.mjs` |
+| | `src/api/routes/warehouse.ts` — racks + movements (801) | `fg_stock_events` (append-only FG ledger, mig 0221) | `tests/fg-stock-events.test.mjs` |
 | | `src/api/lib/fg-stock-events.ts` — the FG stock ledger (emit + on-hand set + `balanceDelta`) | | `tests/fg-ledger-reconcile.test.mjs` |
 | | `src/api/lib/fg-ledger-reconcile.ts` — events vs units vs cost lots; `scripts/check-fg-ledger.mjs` | | |
 | | `src/api/routes/stock-adjustments.ts` — adjustment create/list (567) | | |
@@ -448,7 +470,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/products/index.tsx` — 3-way view (SKU Master/Catalog/Maintenance) (4545) | `src/api/routes/products.ts` — core CRUD, nested bomComponents (1088) | `products` / `bom_components` / `dept_working_times` | `tests/bom-explosion.test.mjs` |
+| `src/pages/products/index.tsx` — 3-way view (SKU Master/Catalog/Maintenance) (5307) | `src/api/routes/products.ts` — core CRUD, nested bomComponents (1245) | `products` / `bom_components` / `dept_working_times` | `tests/bom-explosion.test.mjs` |
 | `src/pages/products/catalog.tsx` — model-based photo grid | `src/api/routes/customer-products.ts` — per-customer SKU + overrides (1122) | `product_prices` / `product_dept_configs` | |
 | `src/pages/products/bom.tsx` — Master BOM Templates editor | `src/api/routes/bom.ts` — /api/bom=versions, /templates=bom_templates (1438) | `customer_products` / `customer_product_prices` | |
 | `src/pages/products/documents.tsx` — Production Docs per-variant | `src/api/routes/bom-master-templates.ts` — master CRUD | `bom_versions` / `bom_templates` / `bom_master_templates` | |
@@ -494,15 +516,15 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
 | `src/pages/employees.tsx` — 9-tab admin shell (11,746) | `src/api/routes/workers.ts` — employee master + salary effective-dating (1047) | `workers` / `worker_salary_history` | `tests/labor-engine.test.mjs` · `tests/virtual-group-window.test.mjs` |
-| `src/pages/worker/index.tsx` — worker mobile home | `src/api/routes/worker.ts` — self-service mobile backend (2878) | `departments` / `attendance_records` | `tests/attendance-rules.test.mjs` |
-| `src/pages/worker/scan.tsx` — clock/dept-scan/packing (2816) | `src/api/routes/worker-auth.ts` — PIN auth | `working_hour_entries` | `tests/auto-attendance-deduct.test.mjs` |
+| `src/pages/worker/index.tsx` — worker mobile home | `src/api/routes/worker.ts` — self-service mobile backend (4130) | `departments` / `attendance_records` | `tests/attendance-rules.test.mjs` |
+| `src/pages/worker/scan.tsx` — clock/dept-scan/packing (3203) | `src/api/routes/worker-auth.ts` — PIN auth | `working_hour_entries` | `tests/auto-attendance-deduct.test.mjs` |
 | `src/pages/worker/pay.tsx` — payslip view | `src/api/routes/attendance.ts` — admin attendance (374) | `payroll_runs` / `payroll_*` (generated) / `payroll_payslips` | `tests/worker-auth.test.mjs` |
-| `src/pages/worker/me.tsx` — profile | `src/api/routes/departments.ts` — dept CRUD (339) | `payroll_hour_deductions` | `tests/worker-auth-default-protect.test.mjs` |
-| `src/pages/worker/team.tsx` — team view | `src/api/routes/working-hour-entries.ts` — efficiency source (1082) | `leaves` / `worker_issues` | `tests/jc-minutes-total.test.mjs` |
+| `src/pages/worker/me.tsx` — profile | `src/api/routes/departments.ts` — dept CRUD (431) | `payroll_hour_deductions` | `tests/worker-auth-default-protect.test.mjs` |
+| `src/pages/worker/team.tsx` — team view | `src/api/routes/working-hour-entries.ts` — efficiency source (1640) | `leaves` / `worker_issues` | `tests/jc-minutes-total.test.mjs` |
 | `src/pages/worker/issue.tsx` — issue submission | `src/api/routes/payroll.ts` — run generation (308) | `public_holidays` (via kv_config['public_holidays']) | |
-| `src/pages/worker/login.tsx` — PIN login | `src/api/routes/payroll-hour-deductions.ts` — short-hour dock (195) | `employee_advances` (salary advances) | `tests/employee-advances.test.mjs` |
+| `src/pages/worker/login.tsx` — PIN login | `src/api/routes/payroll-hour-deductions.ts` — short-hour dock (418) | `employee_advances` (salary advances) | `tests/employee-advances.test.mjs` |
 | | `src/api/routes/employee-advances.ts` — advance CRUD + HR payout listing; maths + runtime self-apply in `src/api/lib/employee-advances.ts` | `payslips.advance_deduction_sen` (mig 0211, runtime ALTER) | |
-| | `src/api/routes/department-performance.ts` — read-only aggregate (571) | | |
+| | `src/api/routes/department-performance.ts` — read-only aggregate (807) | | |
 | | `src/api/routes/leaves.ts` — leave CRUD | | |
 | | `src/api/routes/payslips.ts` — payslip read/persist (OT buckets) | | |
 | `src/pages/announcements.tsx` — office compose + per-card **read-receipt panel** (`ReadReceiptPanel`: lazy GET `/:id/acks`, acked/pending lists, **Remind** → POST `/:id/remind`) | `src/api/routes/announcements.ts` — admin + worker sub-apps; auto-translate on POST/PATCH via `src/api/lib/translate-announcement.ts` (Claude, ANTHROPIC_API_KEY). **Read-receipts:** worker POST `/:id/ack` (idempotent upsert), worker GET returns `ackedIds` (SERVER-driven popup gate), admin GET `/:id/acks` (acked-vs-ACTIVE-roster split), admin POST `/:id/remind` (stamps `reminded_at` → re-pop) | `announcements` (snake_case; `translations` JSONB + `reminded_at`, runtime ALTER) · `announcement_acks` (PK `announcement_id,worker_id`; runtime CREATE TABLE) | `tests/announcement-translate.test.mjs` · `tests/announcement-acks.test.mjs` |
@@ -550,17 +572,17 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/customers.tsx` — customer hub, nested pricing/maintenance/combos (3846) | `src/api/routes/customers.ts` — customer CRUD (418) | `customers` / `customer_products` / `customer_product_prices` | `tests/customer-notify.test.mjs` |
-| `src/pages/settings/Users.tsx` — Users/Org/Mailbox tabs, SUPER_ADMIN-gated (3263) | `src/api/routes/customer-products.ts` — per-customer pricing + bulk (1122) | `customer_hubs` / `delivery_hubs` | `tests/hub-cascade-completeness.test.mjs` |
+| `src/pages/customers.tsx` — customer hub, nested pricing/maintenance/combos (4473) | `src/api/routes/customers.ts` — customer CRUD (795) | `customers` / `customer_products` / `customer_product_prices` | `tests/customer-notify.test.mjs` |
+| `src/pages/settings/Users.tsx` — Users/Org/Mailbox tabs, SUPER_ADMIN-gated (2922) | `src/api/routes/customer-products.ts` — per-customer pricing + bulk (1122) | `customer_hubs` / `delivery_hubs` | `tests/hub-cascade-completeness.test.mjs` |
 | `src/pages/settings/index.tsx` — settings shell | `src/api/routes/customer-maintenance.ts` — snapshot mirror (185) | `maintenance_config_history` / `sofa_combo_rules` | `tests/service-hub-chain.test.mjs` |
 | `src/pages/settings/organisations.tsx` — sister-company config | `src/api/routes/customer-hubs.ts` — per-customer hubs (75) | `product_prices` / `products` | `tests/sofa-combo.test.mjs` |
 | `src/pages/maintenance.tsx` — master variant config editor | `src/api/routes/customer-quotation.ts` — quotation pricing (259) | `users` / `user_invites` / `user_sessions` / `password_reset_tokens` | `tests/worker-auth.test.mjs` |
-| `src/pages/maintenance/sofa-combos.tsx` — master combo grid | `src/api/routes/users.ts` — accounts, requireSuperAdmin gate (890) | `role_permissions` / `kv_config` | `tests/worker-auth-default-protect.test.mjs` |
+| `src/pages/maintenance/sofa-combos.tsx` — master combo grid | `src/api/routes/users.ts` — accounts, requireSuperAdmin gate (1037) | `role_permissions` / `kv_config` | `tests/worker-auth-default-protect.test.mjs` |
 | `src/pages/maintenance/SofaComboHistoryDialog.tsx` — combo history | `src/api/routes/auth.ts` — login/session/reset (1096) | `email_threads` / `email_messages` / `email_addresses` | |
-| `src/pages/mail-center/index.tsx` — Mail Center shell (2274) | `src/api/routes/auth-oauth.ts` (239) / `auth-totp.ts` (549) | `email_attachments` / `email_labels` / `email_address_access` | |
+| `src/pages/mail-center/index.tsx` — Mail Center shell (3389) | `src/api/routes/auth-oauth.ts` (239) / `auth-totp.ts` (549) | `email_attachments` / `email_labels` / `email_address_access` | |
 | `src/pages/mail-center/detail.tsx` — thread detail | `src/api/routes/worker-auth.ts` — factory-worker auth (349) | `mail_user_scope` / `audit_events` | |
-| `src/pages/mail-center/compose.tsx` — compose | `src/api/routes/mail-center.ts` — email engine (2109) | | |
-| | `src/api/routes/files.ts` — generic upload/download (506) | | |
+| `src/pages/mail-center/compose.tsx` — compose | `src/api/routes/mail-center.ts` — email engine (2476) | | |
+| | `src/api/routes/files.ts` — generic upload/download (571) | | |
 | | `src/api/routes/kv-config.ts` — KV config store (93) | | |
 
 **Big-file section index**
@@ -613,7 +635,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 | `src/pages/planning/mrp.tsx` — MRP view (reads/posts /api/mrp) | `src/api/routes/production-leadtimes.ts` — lead-time config + history (GET /, PUT /settings, PUT /, POST /recalc-all, GET /history, POST /schedule, DELETE /history/:id) | `job_cards` (read: per-PO dept sequence, wipKey, earliest pending due date) | `tests/scheduler.test.mjs` |
 | `src/pages/planning/LeadTimeHistoryDialog.tsx` — lead-time history + scheduled changes | `src/api/routes/mrp.ts` — MRP runs (GET /, GET /runs, GET /runs/:id) | `production_lead_times` (legacy) / `production_lead_times_history` | `tests/scheduling.test.mjs` |
 | `src/pages/planning/dept/_DepartmentSchedulePage.tsx` — shared generic dept-schedule renderer (calendar, by-day lanes, grouped cards) | `src/api/routes/scheduling.ts` — GET /, POST /, GET /capacity | `hookka_dd_buffer_history` (due-date buffer history) | |
-| `src/pages/planning/dept/_PlainDeptSchedulePage.tsx` — plain-table dept variant | `src/api/routes/production-orders.ts` — 7606 lines; Planning READS only (Production-owned) | `mrp_runs` / `mrp_requirements` | |
+| `src/pages/planning/dept/_PlainDeptSchedulePage.tsx` — plain-table dept variant | `src/api/routes/production-orders.ts` — 3903 lines; Planning READS only (Production-owned) | `mrp_runs` / `mrp_requirements` | |
 | `src/pages/planning/dept/fabric-cutting.tsx` / `fabric-sewing.tsx` / `wood-cutting.tsx` — dept config shells | `src/api/routes/production-folders.ts` — folder grouping (peripheral) | `kv_config` (public_holidays / schedule settings) | |
 | `src/pages/planning/dept/foam-bonding.tsx` / `framing.tsx` / `webbing.tsx` / `upholstery.tsx` / `packing.tsx` — dept config shells | `src/api/routes/schedule-proposals.ts` — Phase-2 due-date proposals (POST /proposals/generate — pause-gated + agent-run-logged, GET /proposals, POST /proposals/approve|reject) over `src/api/lib/schedule-proposals.ts` | `schedule_proposals` / `plan_snapshots` (runtime self-apply) + `job_cards.dueDate` (approve writes) | |
 | `src/pages/agents/index.tsx` — Agent Console (SUPER_ADMIN, /agents): status lights, Run now / Pause / Kill all / Rollback last batch / Auto-approve gate, parameter-proposal approvals | `src/api/routes/agent-console.ts` — /api/agents (requireSuperAdmin): GET /status, POST /run-now|/pause|/kill-all|/gate|/rollback-last-batch, GET /config-proposals + POST /config-proposals/decide; libs `src/api/lib/agent-console.ts` (agent_runs/agent_controls + recordAgentRun/isAgentPaused) and `src/api/lib/agent-learning.ts` (P3 learning loop: plan-vs-actual adherence, flexible-handoff drift → config proposals, humane forward-OT ≤2h/day) | `agent_runs` / `agent_controls` / `config_proposals` (runtime self-apply) + `kv_config['planning_capacity']` (config-proposal approve writes chain handoffs) + `audit_events` (one row per console action) | |
@@ -721,7 +743,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/dashboard-b/index.tsx` — the entire Command Center (2576); KPI rail + month switcher + all widgets | `src/api/routes/dashboard-overview.ts` — single GET / (2009), 60s KV-cached, owns ALL dashboard data | `sales_orders` / `sales_order_items` | `tests/snapshot-freshness.test.mjs` |
+| `src/pages/dashboard-b/index.tsx` — the entire Command Center (2576); KPI rail + month switcher + all widgets | `src/api/routes/dashboard-overview.ts` — single GET / (2249), 60s KV-cached, owns ALL dashboard data | `sales_orders` / `sales_order_items` | `tests/snapshot-freshness.test.mjs` |
 | ↳ PENDING DELIVERY tile only — **and the `/m` Home card of the same name** (`src/pages/m/screens/Home.tsx`), which folds the identical dispatch chain on top | `src/api/routes/delivery-orders.ts` — `GET /pending-value` (Σ ready-row `valueSen`, server-side). Neither surface may go back to `/ready-planning`: that returns the whole row set to be re-summed in the browser (BUG-2026-08-13-011) | `production_orders` / `job_cards` / `delivery_order_items` | `tests/pending-delivery-value.test.mjs` |
 | ↳ `/m` Home **"Orders due this week"** card only (`src/pages/m/screens/Home.tsx`) — URL is the shared `ORDERS_DUE_URL` in `src/pages/m/lib/preload.ts`, imported by both so preload + screen can never warm different cache keys | `src/api/routes/sales-orders.ts` — `GET /?fields=orders-due&top=N` → `soListToOrdersDue` in `sales-orders/_helpers.ts`. Never go back to the BARE `/api/sales-orders` here: that ships 1,342 rows to render 6 (BUG-2026-08-13-013). The sort MUST stay a stable `localeCompare` over rows pre-ordered `created_at DESC, id DESC` — a SQL `ORDER BY` breaks ties under the DB's collation instead | `sales_orders` (+ `sales_orders_list_snapshot`, `cache_key = orders-due:<top>`) | `tests/sales-orders-orders-due.test.mjs` |
 | ↓ `/m` Home **Stock alerts** card (`src/pages/m/screens/Home.tsx`) — URL is the shared `STOCK_ALERTS_URL` in `src/pages/m/lib/preload.ts`, imported by both for the same reason as `ORDERS_DUE_URL` above | `src/api/routes/inventory.ts` — `GET /?buckets=rawMaterials`. Never go back to the BARE `/api/inventory`: that is 1.16 MB / three buckets to read one (BUG-2026-08-13-021) | `raw_materials` | `tests/inventory-buckets-projection.test.mjs` |
@@ -774,7 +796,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 | `src/pages/service-cases/detail.tsx` — Service Case command center (3493) | `src/api/routes/service-orders.ts` — SV-order returns/repair lifecycle + mode/scope (1859) | `sales_orders` (caseid links SV→case; isServiceOrder mode flag) / `sales_order_items` | `tests/repair-scope.test.mjs` |
 | `src/pages/service-orders/index.tsx` — SV-order list + CreateServiceOrderModal (1224) | `src/api/routes/sales-orders.ts` — co-owns the SO MODE (isServiceOrder) for the re-export pages | `production_orders` (repairscope) / `job_cards` / `fg_batches` | `tests/service-cases-rootcauses.test.mjs` |
 | `src/pages/service-orders/detail.tsx` — SV-order detail (returns, repair scope) (961) | | `stock_adjustments` / `stock_movements` / `cost_ledger` | `tests/service-hub-chain.test.mjs` |
-| `src/lib/service-order-modes.ts` — **per-mode line requirements + tolerant catalogue lookup; shared by the Spawn dialog AND the route** (300) | | `products` / `fg_batches` | `tests/service-order-spawn-product.test.mjs` |
+| `src/lib/service-order-modes.ts` — **per-mode line requirements + tolerant catalogue lookup; shared by the Spawn dialog AND the route** (380) | | `products` / `fg_batches` | `tests/service-order-spawn-product.test.mjs` |
 | `src/pages/service-order/index.tsx` — thin re-export of @/pages/sales in SV mode (18) | | `consignment_orders` / `products` | |
 | `src/pages/service-order/create.tsx` / `detail.tsx` / `edit.tsx` — re-exports of @/pages/sales/* in SV mode | | | |
 
@@ -816,8 +838,8 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/reports.tsx` — tabbed hub (Sales/Production/Inventory/Financial/Employee) (1704) | `src/api/routes/reports.ts` — /api/reports/* efficiency/schedule/overdue (GET+JSON+send) + compliance.json (545) | `sales_orders` / `sales_order_items` / `invoices` | `tests/efficiency-allowance.test.mjs` · `tests/no-fabricated-efficiency.test.mjs` · `tests/no-fabricated-worker-metrics.test.mjs` · `tests/no-fabricated-financials.test.mjs` · `tests/reports-failed-fetch-is-not-empty.test.mjs` · `tests/production-report-summary.test.mjs` · `tests/cached-fetch-result.test.mjs` |
-| `src/pages/daily-report.tsx` — newspaper-style compliance exceptions (1815) | `src/api/routes/dashboard-overview.ts` — single GET / consolidated dashboard payload (2009) | `purchase_orders` / `purchase_order_items` / `purchase_invoices` / `grns` | |
+| `src/pages/reports.tsx` — tabbed hub (Sales/Production/Inventory/Financial/Employee) (1936) | `src/api/routes/reports.ts` — /api/reports/* efficiency/schedule/overdue (GET+JSON+send) + compliance.json (1016) | `sales_orders` / `sales_order_items` / `invoices` | `tests/efficiency-allowance.test.mjs` · `tests/no-fabricated-efficiency.test.mjs` · `tests/no-fabricated-worker-metrics.test.mjs` · `tests/no-fabricated-financials.test.mjs` · `tests/reports-failed-fetch-is-not-empty.test.mjs` · `tests/production-report-summary.test.mjs` · `tests/cached-fetch-result.test.mjs` |
+| `src/pages/daily-report.tsx` — newspaper-style compliance exceptions (1815) | `src/api/routes/dashboard-overview.ts` — single GET / consolidated dashboard payload (2249) | `purchase_orders` / `purchase_order_items` / `purchase_invoices` / `grns` | |
 | `src/pages/analytics/forecast.tsx` — demand forecast vs historical sales | `src/api/routes/forecasts.ts` — demand-forecast data (131) | `production_orders` / `job_cards` / `delivery_orders` / `delivery_order_items` | |
 | `src/pages/dashboard-b/index.tsx` — experimental Dashboard B / reporting view | | `products` / `workers` / `attendance_records` / `working_hour_entries` / `piece_pics` | |
 | `src/pages/dashboard-b/charts.tsx` — lazy recharts/d3 chart chunk | | `departments` / `bom_templates` / `rd_projects` / `cost_ledger` / `per_po` / `kv_config` / `users` | |
@@ -915,13 +937,13 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
 | `src/pages/quality.tsx` — QC Inspections (Pending/History/Templates) (1063) · `src/pages/worker/qc.tsx` — IPQC on the phone (own dept + today only) | `src/api/routes/qc-inspections.ts` — QC inspections CRUD (qc_inspections + qc_defects) · `worker.ts` GET /qc-today + POST /qc/:id/complete | `qc_inspections` / `qc_defects` / `qc_templates` / `qc_template_items` / `qc_tags` | `tests/qc-wip-completable.test.mjs` / `tests/qc-worker-portal.test.mjs` / `tests/qc-generation-coupling.test.mjs` / `tests/qc-no-retained-sample.test.mjs` / `tests/audit.test.mjs` |
-| `src/pages/warehouse.tsx` — Grid / Stock In-Out / Movement History (1368) | `src/api/routes/qc-pending.ts` — generation runs 12:00/16:00 on FOUR rhythms: IQC per receipt DAY×supplier×family (`generateRmForGrns`), STORED per batch ISSUED that day (`generateStoredRmChecks`), WIP per working dept (`stageHadActivity`), FG a RISK-WEIGHTED sample (`generateFgSamples` + `lib/qc-fg-risk.ts`); owns `completeInspection` (shared desktop+phone) + `ensureQcGenerationSchema` | `stock_movements` / `stock_adjustments` / `fg_units` / `grns` / `grn_items` / `cost_ledger` / `rm_batches` / `service_cases` / `bom_versions` | `tests/do-scan-sort.test.mjs` / `tests/qc-rm-families.test.mjs` / `tests/qc-fg-risk.test.mjs` / `tests/qc-wip-templates.test.mjs` |
+| `src/pages/warehouse.tsx` — Grid / Stock In-Out / Movement History (1559) | `src/api/routes/qc-pending.ts` — generation runs 12:00/16:00 on FOUR rhythms: IQC per receipt DAY×supplier×family (`generateRmForGrns`), STORED per batch ISSUED that day (`generateStoredRmChecks`), WIP per working dept (`stageHadActivity`), FG a RISK-WEIGHTED sample (`generateFgSamples` + `lib/qc-fg-risk.ts`); owns `completeInspection` (shared desktop+phone) + `ensureQcGenerationSchema` | `stock_movements` / `stock_adjustments` / `fg_units` / `grns` / `grn_items` / `cost_ledger` / `rm_batches` / `service_cases` / `bom_versions` | `tests/do-scan-sort.test.mjs` / `tests/qc-rm-families.test.mjs` / `tests/qc-fg-risk.test.mjs` / `tests/qc-wip-templates.test.mjs` |
 | `src/pages/do-scan.tsx` — mobile DO sticker scanning | `src/api/routes/qc-templates.ts` — checklist templates (qc_templates + qc_template_items); RM templates carry `material_family` and POST refuses an RM template without one · `src/api/lib/qc-rm-families.ts` — item-group → material-family routing + `pickRmTemplate(templates, family, supplierId, kind)` where kind is INCOMING|STORED · `src/api/lib/qc-fg-risk.ts` — `scoreFgUnit` risk weighting for the OQC draw | `fabric_trackings` / `audit_events` / `edit_presence` / `file_assets` | `tests/dept-scan-split.test.mjs` |
-| `src/pages/rack-scan.tsx` — rack QR stock-in; carries pieceNo/totalPieces per line (1097) | `src/api/routes/public-rack-qr.ts` — PUBLIC no-login rack stock-in + /p/ piece-sticker rack-write (auth-bypassed, idempotent); /item + stock-in are PER-PIECE (pieceNo+totalPieces → distinct rack_items row; multi-piece stamps piece_pics.racking_number not card-level) | `kv_config` / `hookka_erp_metrics` / `piece_pics` | `tests/rack-qr-per-piece.test.mjs` / `tests/scan-per-piece.test.mjs` |
+| `src/pages/rack-scan.tsx` — rack QR stock-in; carries pieceNo/totalPieces per line (1249) | `src/api/routes/public-rack-qr.ts` — PUBLIC no-login rack stock-in + /p/ piece-sticker rack-write (auth-bypassed, idempotent); /item + stock-in are PER-PIECE (pieceNo+totalPieces → distinct rack_items row; multi-piece stamps piece_pics.racking_number not card-level) | `kv_config` / `hookka_erp_metrics` / `piece_pics` | `tests/rack-qr-per-piece.test.mjs` / `tests/scan-per-piece.test.mjs` |
 | | `src/api/lib/packing-rack-write.ts` — `applyPackingRack` (rack set/clear + `rack_items` occupancy mirror); exports `ensurePiecePicsRackingColumn` (shared mig-0192 DDL) | `rack_items` / `rack_locations` / `piece_pics` | `tests/packing-piece-identity.test.mjs` |
 | | `src/api/lib/packing-piece-identity.ts` — `packingPieceIdentity` (shared /p/ + /r/ + office piece identity; appends "· pc N of M" to notes when pieceNo set + totalPieces>1) | | |
-| `src/pages/notifications.tsx` — in-app notifications | `src/api/routes/admin.ts` — archive/restore (writes *_archive tables) (705) | `sales_orders_archive` / `job_cards_archive` / `production_orders_archive` / `sales_order_items_archive` | `tests/security-public-endpoints.test.mjs` |
-| `src/pages/maintenance.tsx` — Equipment List / Schedule / History | `src/api/routes/admin-health.ts` — platform health/metrics aggregation (1569) | | `tests/security-permission-matrix.test.mjs` |
+| `src/pages/notifications.tsx` — in-app notifications | `src/api/routes/admin.ts` — archive/restore (writes *_archive tables) (2040) | `sales_orders_archive` / `job_cards_archive` / `production_orders_archive` / `sales_order_items_archive` | `tests/security-public-endpoints.test.mjs` |
+| `src/pages/maintenance.tsx` — Equipment List / Schedule / History | `src/api/routes/admin-health.ts` — platform health/metrics aggregation (2332) | | `tests/security-permission-matrix.test.mjs` |
 | `src/pages/track/index.tsx` — public order/fabric tracking timeline | `src/api/routes/audit-events.ts` — audit log read/write | | `tests/tenant-isolation.test.mjs` |
 | `src/pages/admin/health.tsx` — admin health dashboard (1791) | `src/api/routes/presence.ts` — edit-presence (edit_presence) | | |
 | `src/pages/settings/index.tsx` — Company/Numbering/Production/System tabs (1069) | `src/api/routes/fe-rum.ts` — frontend RUM perf ingest | | |

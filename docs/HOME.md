@@ -1,5 +1,9 @@
 # Hookka ERP — Docs Home
 
+> **Last verified: 2026-08-13** — links updated for the doc-vs-code reconciliation.
+> **Check the `Last verified:` line under any doc's title before trusting it.**
+> No line, or an old date, means UNVERIFIED — read the code first.
+
 Open `docs/` as an Obsidian vault and start here. `[[wikilinks]]` resolve by note name across
 any folder.
 
@@ -13,10 +17,12 @@ any folder.
 ## Product & domain reference
 - [[MODULES]] — module-by-module product reference (what each does)
 - Domain packs (`context-packs/`): [[architecture]] · [[backend]] · [[frontend]] · [[database]] · [[core-flow]] · [[security]]
-- [[API]] · [[DESIGN-SYSTEM]] · [[UI-CONVENTIONS]] · [[BUG-HISTORY]] · [[KNOWN-ISSUES]]
+- [[API]] (generated — `node scripts/gen-api-docs.mjs`) · [[DESIGN-SYSTEM]] · [[UI-CONVENTIONS]] · [[BUG-HISTORY]] · [[KNOWN-ISSUES]]
 
 ## Active programs
-- [[PROGRAM-90D-EXECUTION]] · [[UPGRADE-CONTROL-BOARD]] · [[ISO-9001-BUILD-PLAN]] · [[WORK-TRACKER]]
+- [[ISO-9001-BUILD-PLAN]] · [[WORK-TRACKER]]
+  (`PROGRAM-90D-EXECUTION` and `UPGRADE-CONTROL-BOARD` were archived 2026-08-13 — the
+  90-day programme ended in July and neither had been updated since April.)
 
 ## History
 - `archive/` holds retired one-off docs (audits, handoffs, dated readouts). Kept for git history,

@@ -1,3 +1,18 @@
+> **ARCHIVED / SUPERSEDED — stopped being true 2026-07-28.** The tab model this
+> document reasons about no longer exists. On 2026-07-28 the workspace tab strip was
+> replaced by a port of the Houzs ERP store (`src/lib/workspaceTabs.ts` +
+> `src/components/layout/workspace-tabs.tsx`): sessionStorage-backed, per-window,
+> **no cap, no LRU eviction, and no pinning at all** — `togglePinned` appears nowhere
+> in `src/` (grep-verified 2026-08-13), so recommendations #1 and #2 are written
+> against an API that does not exist. `TabbedOutlet` still exists but now does
+> **keep-alive rendering of every open tab** (`src/dashboard-routes.tsx:4`), which
+> removes the "loses everything on mount" premise behind #6. Recommendation #4
+> (URL-synced list filters) **shipped** as `src/lib/use-url-state.ts` +
+> `src/lib/use-session-state.ts`, live on `/sales`, `/production`, `/procurement`,
+> `/procurement/grn`, `/procurement/pi`, `/delivery`, `/consignment`, `/reports`.
+> Kept for history only (the competitor research in the first half is still readable
+> background); do not treat as current.
+
 # Page UX recommendations — multi-tab and beyond
 
 How leading ERPs handle the multi-tab + state-preservation problems Hookka now hits at long-shift volume, with a ranked recommendation table at the end.

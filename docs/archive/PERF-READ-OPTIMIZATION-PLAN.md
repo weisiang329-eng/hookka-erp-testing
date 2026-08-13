@@ -1,3 +1,24 @@
+> **ARCHIVED / SUPERSEDED — stopped being true 2026-07-14.** Its two biggest steps
+> shipped and its diagnosis has been replaced. Verified against code 2026-08-13:
+>
+> - **Step 1 SHIPPED.** `/api/delivery-orders/stats` calls `loadDoValueMapCached`
+>   (`src/api/routes/delivery-orders.ts:322`) — the baseline table above still marks
+>   it "⏳ uses uncached `loadDoValueMap`", which is now false.
+> - **Step 4 SHIPPED.** `GET /api/delivery-orders/ready-planning`
+>   (`delivery-orders.ts:635`) computes ready/planning server-side through the shared
+>   `buildReadyPlanning()` in `src/lib/delivery-pipeline.ts`; the delivery page reads
+>   it (`src/pages/delivery/index.tsx:1217`) instead of pulling the 20 MB PO fetch. A
+>   consignment twin exists (`consignment-notes.ts:235`) and a Command-Center variant
+>   (`/pending-value`, `delivery-orders.ts:666`).
+> - **The root cause is no longer "compute over the whole org on every read."** The
+>   2026-08-13 prod measurement (docs/PERF-BACKLOG.md) shows the API tier *serializes*
+>   concurrent requests — 1 call 41 ms, 12 parallel 1,511–1,902 ms — so the lever is
+>   request fan-out and payload, not per-endpoint recompute.
+> - The successor plan is **docs/PERF-DURABLE-ARCHITECTURE.md** (2026-07-13, itself
+>   only partly executed) and the live queue is **docs/PERF-BACKLOG.md**.
+>
+> Kept for history only; do not treat its baselines or step list as current.
+
 # Read-path performance optimization — execution plan (2026-07-13)
 
 Owner ask: make the slow pages fast **without changing any data** — input, output,

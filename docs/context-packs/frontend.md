@@ -1,8 +1,10 @@
 # Context Pack: Frontend
 
+> **Last verified: 2026-08-13** — all 31 cited paths exist; shared primitives confirmed in `src/components/ui/` (`page-header`, `object-page-header`, `data-grid`, `money-input`, `discount-input`, `searchable-select`). Broken link to the old root-level HOOKKA-GOTCHAS path repaired.
+
 Use this pack for React pages, routing, UI components, forms, tables, and browser-side API calls.
 
-> Reuse the shared primitives — don't hand-roll: `PageHeader`/`ObjectPageHeader`, `DataGrid`, `useConfirm`, `MoneyInput`, `DiscountInput`, `SearchableSelect` (UI/PDF/grid standards in `docs/UI-CONVENTIONS.md`). If a new DB column reads back `undefined` on the frontend, suspect the camelCase fold — the API row is `toCamel`'d, so read `r.camelCase ?? r.snake_case` (see `docs/HOOKKA-GOTCHAS.md`).
+> Reuse the shared primitives — don't hand-roll: `PageHeader`/`ObjectPageHeader`, `DataGrid`, `useConfirm`, `MoneyInput`, `DiscountInput`, `SearchableSelect` (UI/PDF/grid standards in `docs/UI-CONVENTIONS.md`). If a new DB column reads back `undefined` on the frontend, suspect the camelCase fold — the API row is `toCamel`'d, so read `r.camelCase ?? r.snake_case` (see `docs/context-packs/HOOKKA-GOTCHAS.md`).
 
 ## Read first
 

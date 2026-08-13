@@ -1,6 +1,30 @@
-# Modules
+> **ARCHIVED / SUPERSEDED — stopped being true around 2026-04/05.** Superseded by
+> [`CODEBASE-MAP.md`](../CODEBASE-MAP.md) (the authoritative map) and `docs/modules/*.md`
+> (the 15 per-module guides). Kept for history only; do not treat as current.
+>
+> Verified against `src/dashboard-routes.tsx`, `src/router.tsx`, `src/pages/`, `src/lib/`
+> on 2026-08-13. What is wrong with this file:
+> - **Whole modules that do not exist.** `/portal`, `/portal/orders`, `/portal/deliveries`,
+>   `/portal/account`, `src/pages/portal/` and `PortalLayout` are **not in the codebase**
+>   (`src/layouts/` contains only `DashboardLayout.tsx` and `WorkerLayout.tsx`). Likewise
+>   `/documents`, `/approvals`, `/settings/variants`, and `src/pages/dashboard/`.
+> - **`/production/:id` was deleted 2026-04-26** by owner request — see the comment at
+>   `src/dashboard-routes.tsx:285`. This file still documents it as the PO detail screen.
+> - **"Auth — UI stub only. No real auth flow today." is flatly false.** Auth is wired at
+>   `src/api/worker.ts:913` (`authMiddleware`), guarded in the SPA by
+>   `src/components/RequireAuth.tsx`, and the repo ships login, invite-accept,
+>   forgot/reset-password, TOTP 2FA setup, and worker PIN login.
+> - **`lib/job-card-persistence.ts` does not exist.**
+> - **The premise is dead.** This file maps screens to "what entity in `mock-data.ts` it
+>   touches"; the app has run on Supabase Postgres via Hyperdrive since D1 was retired
+>   2026-04-27 (commit 7059259).
+> - **It documents ~20 of ~50 modules.** Missing entirely: agents, leads, kpi, mail-center,
+>   service-cases, service-orders, service-order, delivery-returns, purchase-returns,
+>   finance-dashboard, daily-report, announcements, cnc-templates, component-kits,
+>   suppliers, admin/health, dashboard-b, the `/worker/*` portal, the `/m` phone app, and
+>   the public QR routes `/d/:token` `/r/:rackId` `/p/:token` `/s/:token`.
 
-> **For code locations (file:line) use [`CODEBASE-MAP.md`](CODEBASE-MAP.md) — the authoritative map.** This file stays as the higher-level *product* reference.
+# Modules
 
 Per-module reference — what each screen does, what API it talks to, and what
 entity in `mock-data.ts` it touches. Modules are listed in the order they
@@ -74,7 +98,7 @@ for stage sign-off, FG sticker printing.
 
 Parallel copy with an experimental sticker-identity flow (batch-level
 identity instead of SO-item identity). Shares no API endpoints with the main
-flow — see `docs/B-FLOW.md`.
+flow — see `docs/API.md`.
 
 ---
 
@@ -96,7 +120,7 @@ DELIVERED → INVOICED → CANCELLED
 
 ### Delivery-test (`/delivery-test`)
 
-Parallel copy using Master-QR + sign-all flow. See `docs/B-FLOW.md`.
+Parallel copy using Master-QR + sign-all flow. See `docs/API.md`.
 
 ---
 

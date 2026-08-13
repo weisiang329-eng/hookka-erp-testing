@@ -1,8 +1,19 @@
+> **ARCHIVED / SUPERSEDED — this is a closed design-session requirements log, not current
+> state.** It records the prompts given to a design tool and what changed inside the
+> `.dc.html` prototypes. The current phone/fold design is the `.dc.html` sources; the
+> current *app* is `src/pages/m/`. Kept for history only; do not treat as current.
+>
+> Corrected 2026-08-13: the source paths below said `source/…`. **There is no
+> `docs/design/source/` directory.** The `.dc.html` files sit directly in `docs/design/`,
+> and the two standalone deliverables are in `docs/design/standalone/`. A ✅ in this file
+> describes the prototype, never the shipped React app.
+
 # Hookka ERP — 移动版 + Fold 版 · 需求与更改记录
 
 > 本文件记录你（客户）给出的每一条 prompt（= 需求），以及对应做了什么改动。
-> 交付物：`Hookka ERP Mobile (Phone).html`、`Hookka ERP Fold.html`（单文件、离线可用）
-> 源码：`source/Hookka ERP Mobile.dc.html`、`source/Hookka ERP Fold.dc.html` + `support.js` + `hookka-logo.png`
+> 交付物：`standalone/Hookka ERP Mobile (Phone).html`、`standalone/Hookka ERP Fold.html`（单文件、离线可用）
+> 源码：`docs/design/Hookka ERP Mobile.dc.html`、`docs/design/Hookka ERP Fold.dc.html` + `support.js` + `hookka-logo.png`
+> （路径 2026-08-13 更正：原写作 `source/…`，该目录不存在）
 
 ---
 

@@ -1,5 +1,23 @@
 # Performance & Correctness Backlog
 
+> **Last verified: 2026-08-13** against `vite.config.ts`, `src/pages/m/screens/Home.tsx`,
+> `src/pages/reports.tsx`, `src/components/layout/sidebar.tsx`, `src/lib/scheduler.ts`,
+> `src/lib/cached-fetch.ts`, `src/components/ui/data-grid.tsx`,
+> `src/api/routes/delivery-orders.ts`.
+>
+> Corrected 2026-08-13: **the "sidebar notifications poll — not reproduced, do NOT
+> chase" note below is wrong, and the refutation is what is wrong, not the finding.**
+> The code polls: `src/components/layout/sidebar.tsx:455-483` calls a raw
+> `fetch("/api/notifications")` on mount and then from `useInterval(fn, 60_000)`.
+> `useInterval` (`src/lib/scheduler.ts:56`) defaults `pauseOnHidden: true` and
+> `runImmediately: false` — so on a **visible** tab it fires at +60 s, +120 s, … The
+> disproof was an idle observation of **50 s**, which is shorter than the interval and
+> therefore cannot see the first tick. `/api/notifications` still has no LIMIT
+> (`src/api/routes/notifications.ts:93`) and the caller passes no `?isRead=`. Re-probe
+> with an idle window of ≥3 minutes before dismissing it again. (This is exactly the
+> failure this file warns about — measure the call the app makes, over a window long
+> enough for it to happen.)
+
 Owner-facing queue for the 2026-08-13 slowdown investigation. Ordered by **how
 much it hurts a real person**, not by how interesting it is.
 
@@ -133,10 +151,14 @@ a naive swap silently stops matching status, state, company, current-dept and th
 three date columns. Any fix needs a before/after result-set comparison, not just
 a timing.
 
-Not reproduced, do NOT chase: an audit reported the sidebar re-polling the whole
+~~Not reproduced, do NOT chase: an audit reported the sidebar re-polling the whole
 notifications feed every 60 s app-wide. Measured on `/sales`, idle 50 s:
 **zero notification requests**. Whatever the code path implies, it is not firing
-in normal use.
+in normal use.~~
+**RETRACTED 2026-08-13 — the disproof was invalid, the finding stands.** A 50-second
+idle window cannot observe a 60-second interval that does not run immediately.
+`sidebar.tsx:455-483` = raw `fetch("/api/notifications")` + `useInterval(…, 60_000)`;
+`scheduler.ts:56` fires at +60 s on a visible tab. Re-probe idle for ≥3 minutes.
 
 ## P8 — Aborts surface as user-facing errors  🟡
 

@@ -1,5 +1,14 @@
 # LLM Context Strategy
 
+> **Last verified: 2026-08-13** against `docs/context-packs/` (architecture, frontend,
+> backend, database, core-flow, security — all 6 named packs exist, plus
+> `HOOKKA-GOTCHAS.md`), `README.md`, `docs/ARCHITECTURE.md`, `docs/API.md`,
+> `migrations-postgres/`, `src/api/worker.ts`.
+> Corrected 2026-08-13: this file recommended `docs/archive/MODULES.md` as reference material —
+> **MODULES.md is now archived/superseded and actively wrong** (it documents a `/portal`
+> module and a `PortalLayout` that do not exist, and says auth is a UI stub when it is
+> fully wired). Use `docs/CODEBASE-MAP.md` and `docs/modules/*.md` instead.
+
 Purpose: reduce token usage when asking Claude/Codex/other assistants to work on Hookka ERP. Do not load the full repository by default. Start every new assistant session with one small context pack, then add only the module files needed for the task.
 
 ## Recommended session bootstrap
@@ -62,7 +71,9 @@ This structure lowers token usage for normal feature work because the assistant 
 - `docs/DOCS-INDEX.md`: human-facing documentation index.
 - `docs/LLM-CONTEXT-STRATEGY.md`: token-saving workflow for AI sessions.
 - `docs/context-packs/*.md`: small AI entry files grouped by task type.
-- Larger existing docs such as `docs/ARCHITECTURE.md`, `docs/MODULES.md`, and `docs/API.md`: reference material loaded only when needed.
+- `docs/CODEBASE-MAP.md` + `docs/modules/*.md`: the authoritative code map and the 15 per-module guides.
+- Larger existing docs such as `docs/ARCHITECTURE.md` and `docs/API.md`: reference material loaded only when needed.
+- **Do not load `docs/archive/MODULES.md`** — archived 2026-08-13 as superseded and wrong; see the banner at the top of that file.
 
 ## How to maintain context packs
 

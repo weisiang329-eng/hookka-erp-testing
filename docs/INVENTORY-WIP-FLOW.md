@@ -1,5 +1,40 @@
 # Inventory WIP Flow — `wip_items` Lifecycle
 
+> **Last verified: 2026-08-13** against `src/api/routes/production-orders/_helpers.ts`,
+> `src/api/routes/inventory-wip.ts`, `src/api/routes/inventory.ts`,
+> `src/api/routes/fg-units.ts`, `src/api/lib/wip-expected.ts`,
+> `src/api/lib/fg-batch-link.ts`, `src/api/lib/fg-stock-events.ts`,
+> `src/api/routes/import-completion/completion-cascades.ts`, `migrations-postgres/`.
+>
+> Corrected 2026-08-13: **every file path and line number below is dead.** The
+> invariants and the cascade's branch structure still describe the real system, but
+> the addresses do not. Read this translation before following any citation:
+>
+> | This doc cites | Where the code actually lives (2026-08-13) |
+> |---|---|
+> | `src/api/routes-d1/*` | **The whole `routes-d1` directory is gone** — D1 was retired 2026-04-27. `src/api/` now contains only `cron/ lib/ queues/ routes/ worker.ts`. |
+> | `routes-d1/production-orders.ts:844-1309` (`applyWipInventoryChange`) | `src/api/routes/production-orders/_helpers.ts:2574` — every line number in §1a, §3, §4 and §5 is off by ~1,700 lines. Use symbol search, not the numbers. |
+> | `routes-d1/delivery-orders.ts:1109-1271` | `src/api/routes/delivery-orders/_helpers.ts` |
+> | `routes-d1/admin.ts:719-767` | `src/api/routes/admin.ts` |
+> | `routes-d1/inventory-wip.ts` / `inventory.ts` | `src/api/routes/inventory-wip.ts` / `src/api/routes/inventory.ts` |
+> | `migrations/0001_init.sql:740-748` (schema) | `migrations-postgres/` (244 files, latest `0223_trade_finance.sql`); Postgres columns are snake_case (`stock_qty`, `dept_status`) read dual-keyed. |
+> | §2b `deriveFGStock` at `src/pages/inventory/index.tsx:259-326` | Moved to the shared pure lib `src/lib/fg-stock.ts` and is now run **server-side too** — `src/api/routes/inventory.ts:23`, `:516` uses the same function so the two agree by construction. It is no longer "a frontend roll-up". |
+>
+> Also missing from this document — added after it was written, and load-bearing:
+> - **Plan B / last-stage drain (BUG-2026-04-30-003, three days after this doc).**
+>   When a PO's LAST stage completes, the cascade now drains the upstream rows that PO
+>   left standing (`_helpers.ts:2465-2477`). §4's exit-condition table does not list it.
+> - **`src/api/lib/wip-expected.ts`** — a structural re-derivation of what
+>   `wip_items.stock_qty` *should* be from job-card history, with a read-only
+>   `GET /api/inventory/wip/reconcile` that lists every stored row disagreeing with it.
+>   §8's "nothing ever re-derives it" premise no longer holds.
+> - **FG batch/cost linkage** (`fg-batch-link.ts`, `fg-completion.ts`,
+>   `fg-ledger-reconcile.ts`, `fg-stock-events.ts`) and `migrations-postgres/0222_wip_cascade_log_occurrence.sql`.
+>
+> The invariants in the header block (code = wipLabel, stockQty is truth, no `MAX(0)`
+> clamp on the COMPLETED path, PACKING takes no part in the cascade) were re-checked
+> in `_helpers.ts` on 2026-08-13 and are still true.
+
 Single source-of-truth for the `wip_items` ledger: when a row appears, when
 it changes, when it disappears, and what the read paths do with it.
 

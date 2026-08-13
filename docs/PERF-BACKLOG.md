@@ -41,79 +41,41 @@ suddenly did not: `git log -S "720 SOs"` shows the dashboard projection was writ
 
 ---
 
-## P1 — Pending Delivery KPI tile never renders  🔴 user-visible breakage
+## P1–P5 — ALL SHIPPED 2026-08-13 (see the table at the bottom)
 
-`/dashboard` (src/pages/dashboard-b/index.tsx). Reproduced: SALES, INVOICES and
-OUTSTANDING all render; **PENDING DELIVERY has no value at all** — it spins forever.
+Pending Delivery tile, /planning cold start, Service Cases hang, the dead Master
+Tracker, and the fabricated Department Efficiency are done, deployed and verified
+on prod. Their detail now lives in docs/BUG-HISTORY.md (BUG-2026-08-13-001..-008)
+— the ledger is the source of truth for what was wrong and how it was proven.
 
-Not "wrong data" — *absent* data. The gate is
-`pendingL = poL || doL || poValL || soItemsL` (~line 775), and `poL` is a bare
-`/api/production-orders?fields=minimal&include=jobCards` (~line 713) over all
-~2,539 orders **with** their job cards. It can exceed the 30 s abort in
-`src/lib/api-client.ts`; when it aborts the loading flag never clears.
+## P10 — Financial P&L is fabricated  🔴 data integrity  (agent in flight)
+Reports › Financial: **COGS = `revenue × 0.65`**, and Salaries / Utilities / Rent /
+Others are hardcoded **RM 50,000 / 8,000 / 15,000 / 5,000** — rendered exactly like
+sourced account balances. Gross profit, net profit and every margin inherit the
+invention.
 
-**Fix:** compute it server-side and return one number.
-**Do NOT translate the rule into SQL.** Reuse `poReadyForDelivery()` from
-`src/lib/delivery-pipeline.ts` inside the Worker (`src/api` already imports from
-`../../lib/`). It encodes sofa upholstery cards, ACCESSORY products with no
-UPHOLSTERY step (BUG-2026-06-20-001), ON_HOLD, CANCELLED, consignment, and
-DO-linked exclusion. Re-deriving that in SQL will quietly change a ringgit figure.
+Third fabricated-metric bug of the day (after Worker Efficiency from a hash of the
+worker id, and Department Efficiency dividing an estimate by itself). Prod holds
+only **2 journal entries / 50 journal lines**, so most lines probably CANNOT be
+honestly sourced yet — a mostly-"—" P&L that states why beats an invented one.
+Needs an owner decision on which accounts roll into which bucket; do NOT invent
+that mapping to make the page look complete.
 
-Trap already hit once: `jobCards` appears in dashboard-b **only in the URL**, so it
-looks unused — but `poReadyForDelivery` reads `po.jobCards` internally. Dropping the
-include would have produced a fast, wrong number.
+## P11 — Mobile home repeats the Pending-Delivery hang  🟠  (agent in flight)
+`src/pages/m/screens/Home.tsx` still derives Pending Delivery in the browser from
+the whole-org production-order fetch — the exact read that made the desktop tile
+spin forever. Desktop's fix is deployed: `GET /api/delivery-orders/pending-value`,
+measured **589 ms**, reconciling exactly with the Delivery page.
+Matters MORE on mobile, not less — the factory floor uses phones on worse networks.
 
-Money path: baseline the current sen figure first, assert the new one is identical.
-
-## P2 — /planning cold start ~9.6 s  🔴 daily pain
-
-`GET /api/production-orders?fields=minimal&include=jobCards-lite&excludeCompleted=true`
-→ 1st call **9,587 ms / 4.3 MB**, 2nd 554 ms. Same with and without cache-busting,
-so it is real, not a probe artifact.
-
-Owner's decision: **option A — reduce the work, do not remove features.** /planning
-is a genuine 4,060-line scheduling tool (PIC assignment, capacity, lead times); it
-is not to be reduced to a dashboard.
-
-**Trap:** the route's `dueFrom`/`dueTo` filter on the PO's `targetEndDate`.
-**Never set a lower bound** — overdue orders have a targetEndDate in the past and a
-lower bound hides exactly the work that most needs scheduling. Upper bound only;
-rows with NULL targetEndDate are already preserved by the route.
-Derive the horizon from the page's own constants (`LOADING_CHART_PAST_DAYS = 14`,
-`LOADING_CHART_FUTURE_DAYS = 21`, **working** days Mon–Sat) plus margin.
-
-## P3 — Service Cases fires the same unscoped 30 s call  🟠 cliff risk
-
-`src/pages/service-cases/index.tsx` (~258) and `detail.tsx` (~283) call
-`?fields=minimal&include=jobCards` bare. Same cliff as P1.
-`src/pages/production/index.tsx` (~4494) shows the safe pattern: same base URL plus
-`&scope=<ids>` so only on-screen rows are fetched.
-
-## P4 — Dead code advertised to users  🟡
-
-`src/pages/production/tracker.tsx` is unreachable: `src/dashboard-routes.tsx:258`
-routes `/production/tracker` to `<Navigate to="/planning" replace />`, and nothing
-imports the file. Yet `src/components/layout/global-search.tsx:121` still offers a
-"Master Tracker" result that just bounces to /planning. Delete the page, fix or
-repoint the search entry.
-
-## P5 — A fabricated efficiency figure is on screen  🟡 trust issue
-
-**Verified on prod:** `job_cards.actualMinutes` is NULL on *every* finished job card
-(5 COMPLETED orders, 14–26 finished cards each), and `productionTimeMinutes` is not
-a substitute — it equals `estMinutes` exactly on every row (standard time, not a
-measurement). The factory records no work duration at all; only `completedDate`.
-
-So any UI doing `actualMinutes || estMinutes` divides the estimate by itself and
-prints **exactly 100% forever**. Show "-"/"No data" instead of inventing a KPI.
-
-**Do NOT touch `department-performance` / employee / payslip efficiency — it is
-REAL.** Its denominator is genuine clocked time from `working_hour_entries`, and it
-varies on prod (80% overall, 64% on one day, 48% for one worker). Only remove
-figures whose denominator is an estimate standing in for a measurement.
-
-Open business question (not a code fix): whether to start capturing real start/stop
-time on the floor. Until then, efficiency-from-job-cards cannot exist.
+## P12 — A 1 MB PDF chunk is a static edge of ~30 page chunks  🟠  (agent in flight)
+`__vitePreload` got parked inside the `pdf` manual chunk, so **any chunk containing
+any `await import(...)` statically pulls 1,036 KB of PDF vendor code** — measured on
+`/employees` (`pdf-D5mT946N.js`, 1,013 KB, loaded on mount). Not that page's fault;
+~30 chunks share the edge (dashboard-b, customers, delivery, accounting…).
+`modulePreload.resolveDependencies` cannot help — it strips preload hints, not
+import edges. The fix is in `manualChunks` (`vite.config.ts`); it changes how EVERY
+page loads, so prove PDF generation still works before shipping.
 
 ## P6 — Fat payloads  🟡
 
@@ -214,10 +176,28 @@ explicitly or it 404s "Project not found". Run the CI gates locally first.
 | `?fields=delivery-refs` narrow read | cold 929 ms, fingerprint identical | #271 |
 | HTML morning brief cached per date | **10,887 ms → 105 ms**, content unchanged | #272 |
 | `tracker-summary` aggregate | 845 ms; 2,539 orders reconciled exactly | #273 |
+| Pending Delivery tile computed server-side | **never rendered → 7 ms**; ties to the Delivery page to the sen | #274 |
+| `/planning` de-quadratic (35 M comparisons → grouped) | **9,587 ms → 2,412 ms**, 957 rows byte-identical | #275 |
+| Service Cases scoped + dead Tracker deleted + Dept Efficiency paired | **30 s abort → 671 ms / 15 KB**; fake 100% → honest "—" | #276 |
+| Quadratic-join class sweep (30 sites audited, 4 fixed) | largest survivor 20.8 ms; sha-256 identical | #278 |
+| Reports Production summary + Employee metrics de-fabricated | **30,012 ms abort → 1,064 ms**; hash-derived KPIs → real | #279 |
+| `/employees` Working Hours windowed | **46,137 → 2,214 nodes; scroll froze >45 s → 0 ms blocking** | #281 |
+| Comment corrections (twice) + verification discipline written up | see below | #277, #280, #282 |
 
-### Two corrections worth keeping
+### Corrections worth keeping — the investigation is the dangerous part
+Eight confidently-stated findings that session were false. Full analysis now lives
+in `docs/context-packs/HOOKKA-GOTCHAS.md` ("how the WRONG answer gets produced").
+The headlines:
 - **"The Production Tracker page cannot load" was wrong twice over.** The 30 s figure
   came from a cache-busted probe (overstated), and the page turned out to be dead
-  code. The *live* callers of that URL are dashboard-b and Service Cases.
+  code. The *live* callers of that URL were dashboard-b and Service Cases.
 - **"reports/brief is a cron nobody waits on" was wrong.** People open it in a tab to
   read and print. It was the worst user-facing wait in the app until #272.
+- **`actualMinutes` took three passes.** 5 NULL rows → "never recorded"; a non-null
+  count → "does record"; finally all 4,289 values are byte-identical copies of
+  `estMinutes` and mean nothing. Count a column to call it empty; check its
+  DISTRIBUTION to call it useful.
+- **The "credential in ~113 tracked scripts" alarm was false** — a placeholder in a
+  help string. Repeated to the owner before anyone opened the file. The git-history
+  credentials (P9) are real and still need rotating; don't let the false alarm bury
+  the true one.

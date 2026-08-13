@@ -263,8 +263,29 @@ app.post("/", async (c) => {
 });
 
 // GET /api/scheduling/capacity
+//
+// `HOURS_PER_DAY = 9` used to be a hardcoded literal, and every department's
+// capacity was `workerCount × 9 × 60 × 0.85` — while `workingHoursPerDay`, the
+// real per-department column, was SELECTed one screen down and thrown away.
+// It now comes from the department row. BUG-2026-08-13-014.
+//
+// EFFICIENCY is a PLANNING ASSUMPTION, not a measurement: nothing observes
+// that a department realises 85% of its clocked hours. It is kept because a
+// capacity figure has to assume something, but it is (a) named as an
+// assumption, (b) published in the response as `assumedEfficiency` so any
+// consumer can show it beside the number, and (c) the derived `utilization`
+// and its CRITICAL / WARNING / MODERATE / NORMAL level inherit that
+// assumption. A measured alternative already exists per worker
+// (`/api/department-performance`: production minutes ÷ clocked minutes) — if
+// the owner wants this RAG driven by measurement rather than assumption, that
+// is the source, and it is a separate change.
+//
+// NOTE: nothing consumes this endpoint today — `src/pages/planning/index.tsx`
+// records that Capacity Overview and Capacity Loading both compute
+// client-side. It is fixed rather than left as a trap for the next consumer;
+// whether to delete it is in the PR's owner-decision list.
 const EFFICIENCY = 0.85;
-const HOURS_PER_DAY = 9;
+const DEFAULT_HOURS_PER_DAY = 9;
 
 function addDays(d: Date, n: number): Date {
   const r = new Date(d);
@@ -303,8 +324,9 @@ app.get("/capacity", async (c) => {
       (w) => w.departmentCode === dept.code && w.status === "ACTIVE",
     );
     const workerCount = deptWorkers.length;
+    const hoursPerDay = dept.workingHoursPerDay || DEFAULT_HOURS_PER_DAY;
     const dailyCapacityMinutes = Math.round(
-      workerCount * HOURS_PER_DAY * 60 * EFFICIENCY,
+      workerCount * hoursPerDay * 60 * EFFICIENCY,
     );
 
     const dailyLoading = days.map((dateStr) => {
@@ -357,12 +379,21 @@ app.get("/capacity", async (c) => {
       deptName: dept.name,
       color: dept.color,
       workerCount,
+      hoursPerDay,
       dailyCapacityMinutes,
       dailyLoading,
     };
   });
 
-  return c.json({ success: true, data: capacityByDept, days });
+  // `assumedEfficiency` travels WITH the numbers it produced. A utilization
+  // percentage whose denominator carries an unstated assumption is exactly the
+  // shape this sweep exists to remove.
+  return c.json({
+    success: true,
+    data: capacityByDept,
+    days,
+    assumedEfficiency: EFFICIENCY,
+  });
 });
 
 export default app;

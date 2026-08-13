@@ -660,6 +660,93 @@ looked for the identifier `isUnknownOutcome` and passed happily while the guard
 had been short-circuited out of the branch. It now requires the CALL to gate
 the `<RecordLoadError>` render.
 
+## C15 — A figure that reads as measured, and is not
+
+**Shape.** A number reaches the screen from somewhere that is not a measurement: a
+literal typed into the source, a hash of a primary key, `Math.random()`, a fixed
+ratio of a different number, a constant `0` standing in for "not computed", or a
+ratio whose numerator and denominator come from the same place. It renders in the
+same typeface, under the same caption, beside figures that *are* real. Nothing
+about it looks wrong.
+
+**Why it keeps happening — and why it is the worst class in this file.**
+
+1. **It never fails.** Every other class here announces itself somewhere: a 500, a
+   blank tab, a stuck card, a negative row. This one is silent by construction —
+   a plausible number is exactly what it produces.
+2. **`tsc` cannot see it and no runtime assertion can catch it.** `84.2` is a
+   valid number. `revenue * 0.65` is valid arithmetic. Only a **source guard**
+   catches these, which is why every fix in this class ships one.
+3. **The placeholder outlives its author's intent.** Most of these were scaffolding
+   written to make a screen render before its data source existed. The source
+   never arrived; the scaffolding shipped; the comment saying "mock" stayed right
+   next to the number for months.
+4. **The damage is decision-shaped.** The owner reads these and acts. A wrong
+   number he trusts is worse than a page that fails to load — the failing page
+   costs him a refresh, the wrong number costs him the decision.
+
+**The rule.** *Where a real source exists, use it. Where none exists, render "—"
+and say why. Never a plausible-looking number.* Three corollaries that each cost
+a fix here:
+
+* **`0` is a claim, not a blank.** "Zero on hand" and "on-hand not computed" are
+  different statements. Never `?? 0` a missing measurement.
+* **A total inherits the weakest input.** If one line is "—", the sum is "—" — a
+  total must not launder a missing figure into a complete-looking one.
+* **Publish the provenance beside the figure.** "Measured Cards", "Accounts
+  Posted", "Valuation Basis", `assumedEfficiency` — a percentage off 12 of 400
+  cards must not read like a departmental KPI, and a denominator carrying an
+  unstated assumption is this bug wearing a hat.
+
+**Do not over-correct.** The mirror-image mistake is deleting a *measured* metric
+while cleaning up a fabricated one. Each guard below also pins the real thing in
+place: `/api/department-performance` must keep dividing by clocked time,
+`/api/inventory/fg-stock` must keep existing, `payslips.ts` must keep calling
+`computeMonthlyLabor`.
+
+| # | figure | where | what it actually was | fixed |
+|---|---|---|---|---|
+| 1 | Department Efficiency | `/reports` › Production | `(actual \|\| est) / est` — an estimate divided by itself, so ~100% forever | ✅ 2026-08-13 (-004) |
+| 2 | "No data available" over a dead 30 s request | `/reports` › Production | a failed read rendered as an empty result | ✅ 2026-08-13 (-005) |
+| 3 | Hours Worked / Items Completed / Efficiency | `/reports` › Employee | `seed(w.id)` — a hash of the worker's primary key; plus typed-in 94.5 / 8.7 / 12.5 | ✅ 2026-08-13 (-006) |
+| 4 | COGS + all four operating expenses | `/reports` › Financial | `revenue × 0.65`; Salaries/Utilities/Rent/Others as constants | ✅ 2026-08-13 (-009) |
+| 5 | "Accounts Payable Aging" | `/reports` › Financial | aged *unreceived POs* by expected delivery date — not AP at all | ✅ 2026-08-13 (-010) |
+| 6 | finished-goods `stockQty` | `/api/inventory` → 5 screens | literal `0` for all 380 products, printed as an on-hand quantity; ×`basePriceSen` for a mobile "Amount" | ✅ 2026-08-13 (-014) |
+| 7 | "Stock Valuation by Category" | `/reports` › Inventory | `Σ costPriceSen` — **no quantity**; exported to CSV | ✅ 2026-08-13 (-014) |
+| 8 | "Avg Sell Price" column | `/reports` › Inventory | rendered `p.sizeLabel` | ✅ 2026-08-13 (-014) |
+| 9 | "Forecast Accuracy 84.2%" | `/analytics/forecast` | a literal on a branch always taken (`actualQty` has no writer) | ✅ 2026-08-13 (-014) |
+| 10 | "Capacity 220/mo", a frozen 6-month window, "May Forecast" | `/analytics/forecast` | literals presented as configuration | ✅ 2026-08-13 (-014) |
+| 11 | "Overall Accuracy 100%" | `/analytics/forecast` › Accuracy | `100 − 0` off an empty set | ✅ 2026-08-13 (-014) |
+| 12 | per-product "Material Status" | `/api/promise-date` | ONE whole-table `raw_materials` reading stamped on every product | ✅ 2026-08-13 (-014) |
+| 13 | OT hours → gross + net pay | `POST /api/payroll` | three `Math.random()` calls, INSERTed into `payroll_records` | ✅ 2026-08-13 (-014) — endpoint refuses |
+| 14 | LHDN submission ID + clearance UUID | `PUT /api/e-invoices/:id` | random strings, status flipped to VALID, no LHDN client in the repo | ✅ 2026-08-13 (-014) — endpoint refuses |
+| 15 | department capacity + utilization RAG | `/api/scheduling/capacity` | `9 h` literal while `workingHoursPerDay` was SELECTed and discarded; `0.85` unstated | ✅ 2026-08-13 (-014) |
+| 16 | forecast `confidence` | `POST /api/forecasts` | defaulted to the literal `50`, rendered as a colour-coded badge | ✅ 2026-08-13 (-014) |
+| 17 | `/admin/health` KPIs · agent-console FX + LLM prices | `/admin/health`, `/agents` | seeded-random / frozen constants — **but tagged `_mock`/`est*` and captioned as estimates** | ⬜ deliberate — honest labels; the FX rate gating a real spend limit is an owner decision |
+
+**Enforced by** four files, all structural (`readFileSync` source assertions),
+because nothing else can catch a number that is merely wrong-but-plausible:
+`tests/no-fabricated-efficiency.test.mjs` (rows 1–2),
+`tests/no-fabricated-worker-metrics.test.mjs` (row 3),
+`tests/no-fabricated-financials.test.mjs` (rows 4–5),
+`tests/no-fabricated-inventory-and-forecast.test.mjs` (rows 6–16).
+
+> Every assertion in the 2026-08-13 files was proved by **reintroducing the bug
+> and watching the guard go red**. Do that for any row you add: four of these
+> guards passed on their first draft while the bug was still in the file, because
+> the pattern was anchored to the wrong text.
+
+**Finding the next one.** Grep is a starting point, never a verdict — follow the
+call chain before concluding. Look for: `Math.random`, `seed(`, a literal
+money/percent reaching JSX, a metric defined as a fixed multiple of another, a
+comment containing *mock / TODO / placeholder / stub / for now / estimate* within
+a few lines of a returned value, a guard whose "no data" branch returns a number
+instead of `null`, and a column whose input **has no writer**. That last one is
+the trap: a column can be fully populated and still meaningless —
+`job_cards.actualMinutes` is non-null on 4,289 rows and every one is a
+byte-identical copy of that card's `estMinutes`. **Check the distribution, not
+the NULL rate.**
+
 ---
 
 ## What tests cannot catch — and what covers it

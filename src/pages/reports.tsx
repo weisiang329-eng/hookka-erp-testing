@@ -20,6 +20,11 @@ import {
 
 // ── Types mirroring API response shapes ──────────────────────────────
 
+// What a cell shows when nothing sourced it. Deliberately not "0.00", not
+// "N/A", and never a plausible number: the reader must be able to tell an
+// absent figure from a measured zero at a glance.
+const NO_FIGURE = "—";
+
 type SalesOrderItem = {
   productCode: string;
   productName: string;
@@ -136,6 +141,9 @@ type Product = {
   name: string;
   category: string;
   costPriceSen: number;
+  // The catalog's base SELLING price. Listed under its own name — it is not an
+  // "average sell price" and must not be captioned as one (BUG-2026-08-13-014).
+  basePriceSen?: number;
   baseModel: string;
   sizeCode: string;
   sizeLabel: string;
@@ -919,24 +927,55 @@ function ProductionReportTab() {
 // Tab 3: Inventory Reports
 // =====================================================================
 
+// GET /api/inventory/fg-stock — the ONLY real finished-goods on-hand source in
+// the app. It runs `deriveFGStock` (src/lib/fg-stock.ts) server-side over
+// production orders / job cards / DO + CN state, snapshot-cached, and was
+// verified byte-identical to the Inventory page's own client-side derivation.
+// It ships DELTAS: only rows that actually carry stock.
+//   • counts = catalog products, merge by product id
+//   • dyn    = finished POs whose product is no longer in the active catalog
+// A product absent from `counts` genuinely has 0 on hand — that is the
+// endpoint's contract, and is why 0 here is a measurement and not a guess.
+type FgStockCount = { id: string; stockQty: number; reservedQty: number };
+type FgStockDyn = FgStockCount & { code: string; name: string; category: string };
+type FgStock = { counts: FgStockCount[]; dyn: FgStockDyn[] };
+
 function InventoryReportTab() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [products, setProducts] = useState<Product[] | null>(null);
+  // Null = the quantity source did not load. Deliberately NOT an empty object:
+  // "no stock data" and "every product has zero on hand" are different claims
+  // and this table must never print the second when it means the first.
+  const [fgStock, setFgStock] = useState<FgStock | null>(null);
+  const [fgStockError, setFgStockError] = useState<string | null>(null);
 
   const generate = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const res = await cachedFetchJsonResult<{ data?: Product[] }>(
-      "/api/products",
-    );
-    if (!res.ok) {
+    setFgStockError(null);
+    const [prodRes, fgRes] = await Promise.all([
+      cachedFetchJsonResult<{ data?: Product[] }>("/api/products"),
+      cachedFetchJsonResult<{ data?: FgStock }>("/api/inventory/fg-stock"),
+    ]);
+    if (!prodRes.ok) {
       setProducts(null);
-      setError(res.error);
+      setError(prodRes.error);
       setLoading(false);
       return;
     }
-    setProducts(res.data?.data || []);
+    setProducts(prodRes.data?.data || []);
+    // A failed stock read fails the QUANTITY column, not the whole report —
+    // but it is said out loud rather than degraded to zeroes.
+    if (fgRes.ok && fgRes.data?.data) {
+      setFgStock({
+        counts: fgRes.data.data.counts ?? [],
+        dyn: fgRes.data.data.dyn ?? [],
+      });
+    } else {
+      setFgStock(null);
+      setFgStockError(fgRes.ok ? "no data returned" : fgRes.error);
+    }
     setLoading(false);
   }, []);
 
@@ -954,40 +993,146 @@ function InventoryReportTab() {
   }
 
   const totalProducts = products.length;
-  // Use costPriceSen and avg price to estimate stock value
-  const categoryMap: Record<
-    string,
-    { count: number; totalValue: number }
-  > = {};
+
+  // ── Stock valuation ────────────────────────────────────────────────────
+  //
+  // This used to be, in full:
+  //
+  //     categoryMap[p.category].totalValue += p.costPriceSen;
+  //
+  // — a sum of PRICE TAGS with no quantity anywhere in it, published under
+  // the title "Stock Valuation by Category" and exported as
+  // stock-valuation.csv. It could not agree with /inventory/stock-value and it
+  // could not agree with itself: adding one SKU to the catalog "increased the
+  // stock value" by that SKU's unit cost even with none on hand.
+  // (BUG-2026-08-13-014, same family as -004 / -006 / -009.)
+  //
+  // Value = Σ (on-hand units × that product's cost price), and a category
+  // publishes a value ONLY for the products that carry both. Units on hand
+  // whose product has no cost price on file are counted and reported
+  // separately — they are real stock with no basis to value it, and folding
+  // them in at zero would understate the total while looking complete.
+  const stockById = new Map<string, number>();
+  for (const c of fgStock?.counts ?? []) stockById.set(c.id, c.stockQty);
+
+  type CatAgg = {
+    products: number;
+    onHandUnits: number;
+    costedUnits: number;
+    uncostedUnits: number;
+    costedProducts: number;
+    valueSen: number;
+  };
+  const categoryMap: Record<string, CatAgg> = {};
+  const bucket = (cat: string): CatAgg =>
+    (categoryMap[cat] ??= {
+      products: 0,
+      onHandUnits: 0,
+      costedUnits: 0,
+      uncostedUnits: 0,
+      costedProducts: 0,
+      valueSen: 0,
+    });
+
   products.forEach((p) => {
-    if (!categoryMap[p.category])
-      categoryMap[p.category] = { count: 0, totalValue: 0 };
-    categoryMap[p.category].count += 1;
-    // Estimate value as costPriceSen (each product is now a single SKU)
-    categoryMap[p.category].totalValue += p.costPriceSen;
+    const agg = bucket(p.category);
+    agg.products += 1;
+    const qty = stockById.get(p.id) ?? 0;
+    agg.onHandUnits += qty;
+    if (qty > 0) {
+      if (p.costPriceSen > 0) {
+        agg.costedUnits += qty;
+        agg.costedProducts += 1;
+        agg.valueSen += qty * p.costPriceSen;
+      } else {
+        agg.uncostedUnits += qty;
+      }
+    }
   });
+  // Off-catalog finished goods: real units, no catalog row and so no cost.
+  for (const d of fgStock?.dyn ?? []) {
+    const agg = bucket(d.category || "UNCATEGORISED");
+    agg.onHandUnits += d.stockQty;
+    agg.uncostedUnits += d.stockQty;
+  }
 
-  const catRows = Object.entries(categoryMap)
-    .sort(([, a], [, b]) => b.totalValue - a.totalValue)
-    .map(([cat, v]) => [cat, v.count, formatCurrency(v.totalValue)]);
+  const haveStock = fgStock !== null;
+  const qtyCell = (n: number) => (haveStock ? String(n) : NO_FIGURE);
+  // A value is publishable only when at least one on-hand unit in the
+  // category has a cost price behind it. Zero costed units is not RM 0.00.
+  const valueCell = (v: CatAgg) =>
+    haveStock && v.costedProducts > 0 ? formatCurrency(roundSen(v.valueSen)) : NO_FIGURE;
+  const basisCell = (v: CatAgg) => {
+    if (!haveStock) return "stock unavailable";
+    if (v.onHandUnits === 0) return "none on hand";
+    if (v.costedProducts === 0) return `0 / ${v.onHandUnits} units costed`;
+    return `${v.costedUnits} / ${v.onHandUnits} units costed`;
+  };
 
-  // Product detail table
-  const detailRows = products.map((p) => {
-    return [
-      p.code,
-      p.name,
-      p.category,
-      p.sizeCode,
-      formatCurrency(p.costPriceSen),
-      p.sizeLabel,
-    ];
-  });
+  const catEntries = Object.entries(categoryMap).sort(
+    ([a, x], [b, y]) => y.valueSen - x.valueSen || a.localeCompare(b),
+  );
+  const catHeaders = [
+    "Category",
+    "Products",
+    "On Hand (units)",
+    "Valuation Basis",
+    "Stock Value (at cost)",
+  ];
+  const catRows = catEntries.map(([cat, v]) => [
+    cat,
+    v.products,
+    qtyCell(v.onHandUnits),
+    basisCell(v),
+    valueCell(v),
+  ]);
+
+  // ── Product listing ────────────────────────────────────────────────────
+  //
+  // The header row read ["…", "Cost Price", "Avg Sell Price"] while the cells
+  // were [..., formatCurrency(p.costPriceSen), p.sizeLabel] — index 5 rendered
+  // the SIZE LABEL under a column captioned Avg Sell Price, on screen and in
+  // the CSV. There is no average-sell-price figure on `products` to put there:
+  // the row carries `basePriceSen`, `price1Sen` and `seatHeightPrices`, and
+  // which of those (if any) is "the" sell price is an owner decision, so the
+  // column is named for the field it actually shows. `costPriceSen` of 0 means
+  // "no cost on file" — on prod that is all 380 products — and prints "—",
+  // because RM 0.00 is a claim that the product costs nothing.
+  const money = (sen: number | undefined) =>
+    sen && sen > 0 ? formatCurrency(roundSen(sen)) : NO_FIGURE;
+  const detailHeaders = [
+    "Code",
+    "Name",
+    "Category",
+    "Size Code",
+    "Size Label",
+    "Cost Price",
+    "Base Price",
+    "On Hand",
+  ];
+  const detailRows = products.map((p) => [
+    p.code,
+    p.name,
+    p.category,
+    p.sizeCode,
+    p.sizeLabel,
+    money(p.costPriceSen),
+    money(p.basePriceSen),
+    qtyCell(stockById.get(p.id) ?? 0),
+  ]);
 
   return (
     <div className="space-y-6">
       <Button variant="primary" onClick={generate}>
         <FileSpreadsheet className="h-4 w-4" /> Refresh
       </Button>
+
+      {fgStockError && (
+        <div className="rounded-md border border-[#E8D597] bg-[#FAEFCB] px-3 py-2 text-xs text-[#7A5712]">
+          On-hand quantities are unavailable ({fgStockError}), so every quantity
+          and stock value below reads “—”. They are not zero — they are unknown.
+        </div>
+      )}
 
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-2">
         <SummaryCard label="Total Products" value={totalProducts} />
@@ -1000,14 +1145,16 @@ function InventoryReportTab() {
 
       <Card>
         <CardHeader className="pb-2 flex flex-row items-center justify-between">
-          <CardTitle className="text-base">Stock Valuation by Category</CardTitle>
+          <CardTitle className="text-base">
+            Finished-Goods Stock Valuation by Category
+          </CardTitle>
           <Button
             variant="outline"
             size="sm"
             onClick={() =>
               downloadCSV(
                 "stock-valuation.csv",
-                ["Category", "Item Count", "Total Value"],
+                catHeaders,
                 catRows.map((r) => r.map(String))
               )
             }
@@ -1017,10 +1164,18 @@ function InventoryReportTab() {
         </CardHeader>
         <CardContent>
           <ReportTable
-            headers={["Category", "Item Count", "Total Value"]}
+            headers={catHeaders}
             rows={catRows}
-            align={["left", "right", "right"]}
+            align={["left", "right", "right", "left", "right"]}
           />
+          <p className="mt-2 text-xs text-[#6B7280]">
+            Units on hand come from{" "}
+            <span className="font-mono">/api/inventory/fg-stock</span> (the same
+            derivation the Inventory page shows). Value is on-hand units × the
+            product’s cost price, counting only products that have a cost price
+            on file — the “Valuation Basis” column says how much of the stock
+            that covers. Work-in-progress and raw materials are not included.
+          </p>
         </CardContent>
       </Card>
 
@@ -1033,7 +1188,7 @@ function InventoryReportTab() {
             onClick={() =>
               downloadCSV(
                 "product-listing.csv",
-                ["Code", "Name", "Category", "Sizes", "Cost Price", "Avg Sell Price"],
+                detailHeaders,
                 detailRows.map((r) => r.map(String))
               )
             }
@@ -1043,9 +1198,18 @@ function InventoryReportTab() {
         </CardHeader>
         <CardContent>
           <ReportTable
-            headers={["Code", "Name", "Category", "Sizes", "Cost Price", "Avg Sell Price"]}
+            headers={detailHeaders}
             rows={detailRows}
-            align={["left", "left", "left", "right", "right", "right"]}
+            align={[
+              "left",
+              "left",
+              "left",
+              "left",
+              "left",
+              "right",
+              "right",
+              "right",
+            ]}
           />
         </CardContent>
       </Card>
@@ -1081,11 +1245,6 @@ type LedgerPl = {
     netProfit: number;
   };
 };
-
-// What a cell shows when nothing sourced it. Deliberately not "0.00", not
-// "N/A", and never a plausible number: the reader must be able to tell an
-// absent figure from a measured zero at a glance.
-const NO_FIGURE = "—";
 
 function FinancialReportTab() {
   const [loading, setLoading] = useState(false);

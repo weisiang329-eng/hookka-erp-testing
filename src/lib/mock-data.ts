@@ -4448,6 +4448,20 @@ export function generateEInvoiceXml(invoiceNo: string, issueDate: string, custom
 </Invoice>`;
 }
 
+// ⚠ THESE CARRY FABRICATED LHDN CLEARANCES. BUG-2026-08-13-014.
+//
+// 15 seed rows, 12 of them with a hardcoded `LHDN-SUB-…` submissionId and a
+// 15-character `uuid`, 6 of them `status: "VALID"` with a `validatedAt`.
+// scripts/generate-seed-sql.ts emits e_invoices into scripts/seed.sql, so if
+// that seed was ever applied to a real book these render on
+// /invoices/e-invoice as cleared tax documents carrying reference numbers no
+// government issued. There is no LHDN / MyInvois client in this repo and the
+// submit action now refuses rather than minting more of them.
+//
+// They are LEFT AS DATA, not edited: this array is the demo/dev fixture and
+// rewriting it does not clean any book it has already been applied to. The
+// question "does prod have e_invoices rows marked VALID?" is an owner check —
+// see the PR. If the answer is yes, they are not submissions.
 export const eInvoices: EInvoice[] = [
   {
     id: "einv-1",

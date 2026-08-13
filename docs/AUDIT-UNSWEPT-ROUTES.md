@@ -17,6 +17,17 @@ four mobile screens. This audit covers **everything else in
 
 ---
 
+> **2026-08-13 update.** Items **2** and **3** are closed by BUG-2026-08-13-014,
+> which swept the whole app for the same class rather than these two sites. That
+> sweep also found five fabrications this audit did not cover — `/api/inventory`
+> returning `stockQty: 0` for all 380 finished products (printed as an on-hand
+> quantity on five screens), `POST /api/payroll` generating overtime with
+> `Math.random()` and writing it into `payroll_records`, `PUT /api/e-invoices`
+> minting a random LHDN submission ID + UUID and marking the row VALID,
+> `/api/promise-date` stamping one whole-org material reading onto every product,
+> and `/api/scheduling/capacity` discarding the real `workingHoursPerDay`.
+> Everything else in this document stands.
+
 ## Ranked suspects
 
 Ranked by **pain × how many people actually hit it**, not by how large the
@@ -25,8 +36,8 @@ number is. Each row is one probe away from confirmation.
 | # | Route / surface | Shape | Who pays |
 |---|---|---|---|
 | 1 | app-wide (sidebar) | whole notifications feed re-fetched **every 60 s**, unbounded, raw fetch | every user, every page, always |
-| 2 | `/reports` › Inventory | "Stock Valuation" has no quantity in it; "Avg Sell Price" column renders a size label | whoever runs it — and it exports to CSV |
-| 3 | `/analytics/forecast` | `84.2%` is a literal; chart frozen at 2026-05; **page is unreachable** | nobody today — that is the finding |
+| 2 | `/reports` › Inventory | ✅ **FIXED** 2026-08-13 (BUG-2026-08-13-014) — valuation now = on-hand units (`/api/inventory/fg-stock`) × cost price, with a Valuation Basis column; the mislabelled column is renamed | — |
+| 3 | `/analytics/forecast` | ✅ **FIXED** 2026-08-13 (BUG-2026-08-13-014) — every unsourced figure now reads "—" with its reason; the 220/mo capacity line and the frozen window are gone. **The page is still unreachable — deleting it remains an open owner decision.** | — |
 | 4 | global search | 9 offered links render a blank page or the wrong record | every user (Ctrl-K is everywhere) |
 | 5 | `/inventory/adjustments` | ~2.3 s whole-org WIP walk on mount + 1.16 MB duplicate; FG on-hand always 0; cost prefilled from the SELL price | few (see note — the table is empty in prod) |
 | 6 | 5 call sites | 1.16 MB `/api/inventory` pulled for **one** of its three buckets | scattered |

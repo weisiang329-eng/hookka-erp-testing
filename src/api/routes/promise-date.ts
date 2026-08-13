@@ -8,12 +8,25 @@
 //                                job cards on production_orders that use the
 //                                product, divided by the daily department
 //                                capacity (workingHoursPerDay × 60 min).
-//   * material availability    — simple heuristic: if every raw_material row
-//                                has balanceQty > 0 we report IN_STOCK; if
-//                                some are zero we report PARTIAL; empty RM
-//                                table ⇒ NEED_ORDER. Good enough for the
-//                                planning dashboard; full MRP-driven check
-//                                lives under /api/mrp.
+//   * material availability    — ⚠ NOT PER PRODUCT. It is ONE whole-table
+//                                reading of raw_materials (all RM in stock →
+//                                IN_STOCK; some at zero → PARTIAL; none →
+//                                NEED_ORDER), computed once and stamped onto
+//                                every product in the response. No BOM is
+//                                consulted, so it carries zero per-product
+//                                information — and because any single
+//                                zero-balance RM row anywhere flips it, in
+//                                practice it is permanently "PARTIAL"
+//                                (prod: 162 of 439 RM rows sit at zero).
+//                                It is therefore returned under the name
+//                                `orgMaterialAvailability`, with the
+//                                per-product `materialAvailability` set to
+//                                null, so a consumer cannot render an
+//                                org-wide constant in a per-product column.
+//                                The real per-product answer is the BOM-driven
+//                                check under /api/mrp (and
+//                                /api/inventory/shortage-forecast).
+//                                BUG-2026-08-13-014.
 //   * estimated completion days = queueDays + productionDays
 //                                where productionDays = totalMinutes-per-unit
 //                                / (totalWorkingHoursPerDay × 60).
@@ -56,10 +69,20 @@ type StockRow = {
   zeroCount: number;
 };
 
+type MaterialAvailability = "IN_STOCK" | "PARTIAL" | "NEED_ORDER";
+
 type PromiseDateCalc = {
   productId: string;
   currentQueueDays: number;
-  materialAvailability: "IN_STOCK" | "PARTIAL" | "NEED_ORDER";
+  /**
+   * ALWAYS null. There is no per-product material check on this route — see
+   * the file header. The org-wide reading is `orgMaterialAvailability`, under
+   * a deliberately DIFFERENT name so a consumer has to opt in before rendering
+   * an org-wide constant in a per-product column. BUG-2026-08-13-014.
+   */
+  materialAvailability: null;
+  /** Whole-org raw-material stock reading. Identical on every row. */
+  orgMaterialAvailability: MaterialAvailability;
   estimatedCompletionDays: number;
   promiseDate: string; // YYYY-MM-DD
 };
@@ -123,7 +146,7 @@ async function loadCoreState(db: D1Database) {
   };
 }
 
-function materialAvailability(stock: StockRow): PromiseDateCalc["materialAvailability"] {
+function materialAvailability(stock: StockRow): MaterialAvailability {
   if (!stock.total || stock.total === 0) return "NEED_ORDER";
   if (stock.zeroCount === 0) return "IN_STOCK";
   if (stock.zeroCount >= stock.total) return "NEED_ORDER";
@@ -141,7 +164,7 @@ function buildCalc(
   dwtByProduct: Map<string, DeptWorkingTimeRow[]>,
   deptByCode: Map<string, DepartmentRow>,
   queueByProduct: Map<string, number>,
-  stockStatus: PromiseDateCalc["materialAvailability"],
+  stockStatus: MaterialAvailability,
 ): EnrichedCalc {
   const rows = dwtByProduct.get(product.id) ?? [];
 
@@ -165,7 +188,8 @@ function buildCalc(
   return {
     productId: product.id,
     currentQueueDays: Math.ceil(queueDays),
-    materialAvailability: stockStatus,
+    materialAvailability: null,
+    orgMaterialAvailability: stockStatus,
     estimatedCompletionDays,
     promiseDate: isoDateInDays(estimatedCompletionDays),
     productName: product.name,

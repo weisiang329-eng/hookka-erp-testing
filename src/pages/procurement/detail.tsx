@@ -27,6 +27,7 @@ import {
 import { Link } from "react-router-dom";
 import { useParams, useNavigate } from "react-router-dom";
 import { ObjectPageHeader } from "@/components/ui/object-page-header";
+import { parseMoneyInput } from "@/lib/parse-money";
 
 // Status timeline steps
 const STATUS_STEPS = [
@@ -982,8 +983,9 @@ export default function PurchaseOrderDetailPage() {
                             onFocus={(e) => e.currentTarget.select()}
                             value={line.unitPriceSen === 0 ? "" : (line.unitPriceSen / 100).toFixed(2)}
                             onChange={(e) => {
-                              const rm = parseFloat(e.target.value);
-                              const sen = Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : 0;
+                              // BUG-2026-08-13-095 - one money parser. `type="number"`, so the browser blocked the comma and this was never the live bug; converted so one parser owns money, and so an unreadable value can no longer be written as NaN.
+                              const rm = parseMoneyInput(e.target.value);
+                              const sen = rm !== null && rm >= 0 ? Math.round(rm * 100) : 0;
                               updateLine(idx, { unitPriceSen: sen });
                             }}
                           />

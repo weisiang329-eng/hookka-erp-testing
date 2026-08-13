@@ -27,8 +27,14 @@ import { Button } from "./button";
 import { Card, CardHeader, CardTitle, CardContent } from "./card";
 import { cn } from "@/lib/utils";
 import { humanizeError } from "@/lib/humanize-error";
+import { parseMoneyInput } from "@/lib/parse-money";
 
-export type ImportColumnType = "string" | "number" | "boolean";
+// "money" columns go through the ONE money parser (src/lib/parse-money.ts) so
+// a spreadsheet cell reading "12,000" imports as twelve thousand rather than as
+// twelve. Plain "number" columns keep `Number()` on purpose: they carry
+// quantities, metres and days, where money syntax (a leading RM, accounting
+// parentheses) would be wrong to accept.
+export type ImportColumnType = "string" | "number" | "money" | "boolean";
 
 export type ImportColumn = {
   /** Field name in the row object passed to onImport. */
@@ -259,6 +265,22 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
               continue;
             }
             values[col.key] = match;
+            continue;
+          }
+
+          if (col.type === "money") {
+            // BUG-2026-08-13-095 - this branch used to hand-roll `.replace(/,/g,
+            // "")`, one of six copies of the money parser in the repo. It now
+            // delegates. An unreadable cell still lands in `errors`, which
+            // categorises the row as "error" and blocks the import - the value
+            // is NEVER silently defaulted into the ledger.
+            const rm = parseMoneyInput(str);
+            if (rm === null) {
+              errors.push(`${col.label} must be an amount (got "${str}")`);
+              values[col.key] = 0;
+            } else {
+              values[col.key] = rm;
+            }
             continue;
           }
 

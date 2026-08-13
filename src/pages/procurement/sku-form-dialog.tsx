@@ -8,6 +8,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { X } from "lucide-react";
+import { moneyFieldToSen } from "@/lib/money-field";
 
 export type SupplierSKU = {
   id: string;
@@ -180,8 +181,11 @@ export function SKUFormDialog({
       setFormError("Select a supplier before saving.");
       return;
     }
-    const price = Math.round(parseFloat(unitPrice) * 100);
-    if (!Number.isFinite(price) || price < 0) {
+    // BUG-2026-08-13-095 - one parser. `type="number"` shields this one from
+    // the comma, and the refusal below already existed; converted so the guard
+    // does not depend on the input type staying numeric.
+    const price = moneyFieldToSen(unitPrice);
+    if (price === null || price < 0) {
       setFormError("Enter a valid unit price before saving.");
       return;
     }

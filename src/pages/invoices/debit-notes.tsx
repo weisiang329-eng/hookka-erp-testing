@@ -20,6 +20,7 @@ import { COMPANY } from "@/lib/constants";
 import { amountInWords } from "@/lib/amount-in-words";
 import { printVouchers, type VoucherSpec, type VoucherLine } from "@/lib/print-voucher";
 import { BatchActionsBar } from "@/components/accounting/batch-actions-bar";
+import { parseMoneyInput } from "@/lib/parse-money";
 
 const DNMutationSchema = mutationWithData(DebitNoteSchema);
 
@@ -462,8 +463,11 @@ export default function DebitNotesPage() {
                         placeholder="Unit Price (RM)"
                         value={item.unitPriceSen ? (item.unitPriceSen / 100).toFixed(2) : ""}
                         onChange={(e) => {
-                          const rm = parseFloat(e.target.value);
-                          const sen = Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : 0;
+                          // `type="number"` - the browser refuses a comma before
+                          // this runs, so this was never the truncation bug.
+                          // Converted so the guard survives an input-type change.
+                          const rm = parseMoneyInput(e.target.value);
+                          const sen = rm !== null && rm >= 0 ? Math.round(rm * 100) : 0;
                           updateItem(idx, "unitPriceSen", sen);
                         }}
                       />

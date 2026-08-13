@@ -13,6 +13,7 @@ import { ReusedScanBadge, CachedScanNotice } from "@/components/scan-cached-hint
 import { postScanQueueConsume } from "@/lib/scan-queue-client";
 import { resolveScanParty } from "@/lib/scan-party-resolve";
 import { usePartyAliases, teachPartyAlias } from "@/lib/party-alias-client";
+import { moneyFieldToSen } from "@/lib/money-field";
 
 // Background scan queue dispatch — shared with scan-supplier-modal. >2-file
 // drops POST to /api/scan-queue/upload + navigate to /scan-queue/<batchId>
@@ -2719,7 +2720,9 @@ function ClaudePOCard({
                                       const next = [...(item.customSpecials ?? [])];
                                       next[csIdx] = {
                                         ...next[csIdx],
-                                        surchargeSen: Math.round(parseFloat(e.target.value || "0") * 100),
+                                        // BUG-2026-08-13-095 - one money parser; keeps the
+                                        // previous surcharge rather than writing NaN.
+                                        surchargeSen: moneyFieldToSen(e.target.value) ?? cs.surchargeSen,
                                       };
                                       onUpdateItem(i, { customSpecials: next });
                                     }}

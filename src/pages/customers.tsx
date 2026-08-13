@@ -73,6 +73,7 @@ import {
   SofaComboHistoryDialog,
   type SofaComboHistoryRule,
 } from "./maintenance/SofaComboHistoryDialog";
+import { moneyFieldToSen } from "@/lib/money-field";
 
 type CustomerMutationResponse =
   | { success: true; data: Customer }
@@ -1201,8 +1202,13 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
                                           value={seatInput}
                                           onChange={(e) => setSeatInput(e.target.value)}
                                           onBlur={() => {
-                                            const val = Math.round(parseFloat(seatInput || "0") * 100);
+                                            // BUG-2026-08-13-095 - one money parser. `type="number"`
+                                            // shields this from the comma, but the old expression
+                                            // wrote **NaN** into the price on anything it could not
+                                            // read; an unreadable entry now abandons the edit.
+                                            const val = moneyFieldToSen(seatInput);
                                             setEditingSeatKey(null);
+                                            if (val === null) return;
                                             const matches = (s: SeatHeightEntry) =>
                                               norm(s.height) === hNum && custEntryTier(s.tier) === sofaTier;
                                             let arr: SeatHeightEntry[] = row.seatHeightPrices || [];
@@ -1257,8 +1263,9 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
                                       value={baseInput}
                                       onChange={(e) => setBaseInput(e.target.value)}
                                       onBlur={() => {
-                                        const val = Math.round(parseFloat(baseInput || "0") * 100);
+                                        const val = moneyFieldToSen(baseInput);
                                         setEditingBaseId(null);
+                                        if (val === null) return;
                                         setRows((prev) => prev.map((r) => r.id === row.id ? { ...r, basePriceSen: val } : r));
                                         recordDirty(row.id, { basePriceSen: val });
                                       }}
@@ -1309,8 +1316,9 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
                                       value={baseInput}
                                       onChange={(e) => setBaseInput(e.target.value)}
                                       onBlur={() => {
-                                        const val = Math.round(parseFloat(baseInput || "0") * 100);
+                                        const val = moneyFieldToSen(baseInput);
                                         setEditingBaseId(null);
+                                        if (val === null) return;
                                         setRows((prev) => prev.map((r) => r.id === row.id ? { ...r, basePriceSen: val } : r));
                                         recordDirty(row.id, { basePriceSen: val });
                                       }}
@@ -1349,8 +1357,11 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
                                       onBlur={() => {
                                         const val = price1Input.trim() === ""
                                           ? null
-                                          : Math.round(parseFloat(price1Input) * 100);
+                                          : moneyFieldToSen(price1Input);
                                         setEditingPrice1Id(null);
+                                        // A blank box legitimately CLEARS price1 (null);
+                                        // an unreadable one must not be read as "clear".
+                                        if (val === null && price1Input.trim() !== "") return;
                                         setRows((prev) => prev.map((r) => r.id === row.id ? { ...r, price1Sen: val } : r));
                                         recordDirty(row.id, { price1Sen: val });
                                       }}
@@ -2098,7 +2109,7 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
                           type="number" onFocus={(e) => e.currentTarget.select()}
                           step="0.01"
                           value={newPriceSen / 100}
-                          onChange={(e) => setNewPriceSen(Math.round(parseFloat(e.target.value || "0") * 100))}
+                          onChange={(e) => setNewPriceSen(moneyFieldToSen(e.target.value) ?? newPriceSen)}
                           className="w-24 text-right text-sm border border-[#E2DDD8] rounded-md px-3 py-1.5 bg-[#FAF9F7] focus:outline-none focus:border-[#6B5C32] focus:bg-white"
                           placeholder="0.00"
                         />
@@ -2173,7 +2184,7 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
                                   type="number" onFocus={(e) => e.currentTarget.select()}
                                   step="0.01"
                                   value={entry.priceSen / 100}
-                                  onChange={(e) => updatePrice(idx, Math.round(parseFloat(e.target.value || "0") * 100))}
+                                  onChange={(e) => updatePrice(idx, moneyFieldToSen(e.target.value) ?? entry.priceSen)}
                                   className="w-20 text-right text-sm border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32]"
                                 />
                               ) : (

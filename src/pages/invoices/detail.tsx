@@ -40,6 +40,8 @@ import {
   invoicePriceBuildUp,
   invoicePriceEditSeed,
 } from "@/lib/invoice-line-price";
+import { useToast } from "@/components/ui/toast";
+import { moneyFieldToSen, firstMoneyFieldError } from "@/lib/money-field";
 
 const PAYMENT_METHODS = [
   { value: "BANK_TRANSFER", label: "Bank Transfer" },
@@ -64,6 +66,9 @@ type LinkedNote = {
 };
 
 export default function InvoiceDetailPage() {
+  // This page has its own green success banner in local `toast` state; the
+  // shared hook is aliased so a REFUSAL renders as an error, not as success.
+  const { toast: appToast } = useToast();
   const { confirm } = useConfirm();
   const { id } = useParams();
   const navigate = useNavigate();
@@ -344,8 +349,13 @@ export default function InvoiceDetailPage() {
 
   const recordPayment = async () => {
     if (!invoice) return;
-    const amountSen = Math.round(parseFloat(paymentAmount) * 100);
-    if (isNaN(amountSen) || amountSen <= 0) return;
+    // BUG-2026-08-13-095 - `type="number"`, so never the truncation bug here;
+    // converted for one-parser consistency, and the silent `return` on an
+    // unreadable amount now explains itself.
+    const err = firstMoneyFieldError([{ label: "Payment amount (RM)", value: paymentAmount }]);
+    if (err) { appToast.error(err); return; }
+    const amountSen = moneyFieldToSen(paymentAmount) as number;
+    if (amountSen <= 0) return;
 
     setUpdating(true);
     const totalPaid = invoice.paidAmount + amountSen;
@@ -1447,7 +1457,9 @@ export default function InvoiceDetailPage() {
                 disabled={
                   updating ||
                   !paymentAmount ||
-                  parseFloat(paymentAmount) <= 0
+                  // Same parser as `recordPayment`, so the button and the handler
+                  // can never disagree about what the box says.
+                  !((moneyFieldToSen(paymentAmount) ?? 0) > 0)
                 }
               >
                 {updating ? "Processing..." : "Record Payment"}

@@ -21,6 +21,7 @@ import { COMPANY } from "@/lib/constants";
 import { amountInWords } from "@/lib/amount-in-words";
 import { printVouchers, type VoucherSpec, type VoucherLine } from "@/lib/print-voucher";
 import { BatchActionsBar } from "@/components/accounting/batch-actions-bar";
+import { parseMoneyInput } from "@/lib/parse-money";
 
 const CNMutationSchema = mutationWithData(CreditNoteSchema);
 
@@ -547,8 +548,11 @@ export default function CreditNotesPage() {
                         value={item.priceStr ?? (item.unitPriceSen ? (item.unitPriceSen / 100).toFixed(2) : "")}
                         onChange={(e) => {
                           const txt = e.target.value;
-                          const rm = parseFloat(txt);
-                          const sen = Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : 0;
+                          // `type="number"` - the browser refuses a comma before
+                          // this runs, so this was never the truncation bug.
+                          // Converted so the guard survives an input-type change.
+                          const rm = parseMoneyInput(txt);
+                          const sen = rm !== null && rm >= 0 ? Math.round(rm * 100) : 0;
                           setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, priceStr: txt, unitPriceSen: sen } : it)));
                         }}
                       />

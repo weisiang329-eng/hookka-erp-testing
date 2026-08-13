@@ -14,6 +14,9 @@ import { printVouchers, type VoucherSpec, type VoucherLine } from "@/lib/print-v
 import { useRowSelection } from "@/lib/use-row-selection";
 import { BatchActionsBar } from "@/components/accounting/batch-actions-bar";
 import { CreditCard, Printer } from "lucide-react";
+// One money parser. NOTE: `rateStr` on this page is an FX RATE, not money, and
+// deliberately keeps `parseFloat` - see the comment at `rowBankSenWith`.
+import { moneyFieldToRinggit, moneyFieldToSen, firstMoneyFieldError, isUnreadableMoney } from "@/lib/money-field";
 
 // ───────────────────────────────────────────────────────────────────────────
 // Supplier Payment — the AP twin of the customer Payment page
@@ -301,8 +304,8 @@ export default function SupplierPaymentsPage() {
     const row = tfRows[d.drawSourceId];
     if (!row) return 0;
     if (row.full) return d.outstandingSen;
-    const rmv = parseFloat(row.amountStr);
-    return Number.isFinite(rmv) && rmv > 0 ? Math.round(rmv * 100) : 0;
+    const rmv = moneyFieldToRinggit(row.amountStr);
+    return rmv !== null && rmv > 0 ? Math.round(rmv * 100) : 0;
   };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const tfTotalSen = useMemo(() => tfOpenDraws.reduce((s, d) => s + tfRowSen(d), 0), [tfOpenDraws, tfRows]);
@@ -337,10 +340,18 @@ export default function SupplierPaymentsPage() {
   // Bank-MYR contributed by a single row (MYR rows: the RM typed; foreign rows:
   // foreign × rate). Returns sen.
   const rowBankSenWith = (pi: OpenPI, row: RowState): number => {
+    // BUG-2026-08-13-095 - amountStr / foreignStr are `type="text"` money
+    // fields, so a supplier payment typed "12,500" paid RM 12.00 and left the
+    // invoice looking almost entirely unpaid. `rateStr` stays on `parseFloat`
+    // on purpose: an FX rate is not money, has no thousands separator, and
+    // giving it money syntax (a leading RM, accounting parentheses) would be
+    // wrong. `handlePost` refuses on any unreadable MONEY field, so the 0
+    // fallbacks below are only reached by a field the operator is being told
+    // to fix.
     if (isMyr(pi.currency)) {
       if (row.full) return outstandingOf(pi);
-      const rm = parseFloat(row.amountStr);
-      return Number.isFinite(rm) && rm > 0 ? Math.round(rm * 100) : 0;
+      const rm = moneyFieldToRinggit(row.amountStr);
+      return rm !== null && rm > 0 ? Math.round(rm * 100) : 0;
     }
     // Foreign
     if (row.full) {
@@ -350,9 +361,9 @@ export default function SupplierPaymentsPage() {
       if (Number.isFinite(rate) && rate > 0) return Math.round((foreignSen / 100) * rate * 100);
       return outstandingOf(pi);
     }
-    const foreign = parseFloat(row.foreignStr);
+    const foreign = moneyFieldToRinggit(row.foreignStr);
     const rate = parseFloat(row.rateStr);
-    if (!(Number.isFinite(foreign) && foreign > 0)) return 0;
+    if (!(foreign !== null && foreign > 0)) return 0;
     if (!(Number.isFinite(rate) && rate > 0)) return 0;
     return Math.round(foreign * rate * 100);
   };
@@ -361,7 +372,7 @@ export default function SupplierPaymentsPage() {
   // Advance is editable in BOTH modes (owner 2026-07-24: Edit is his bulk
   // knock-off workbench — the invoice grid shows everything at once, typing
   // amounts uses the advance up; before this he had to void + re-record).
-  const advanceSen = Math.max(0, Math.round((parseFloat(advanceStr) || 0) * 100));
+  const advanceSen = Math.max(0, moneyFieldToSen(advanceStr) ?? 0);
 
   const totalBankSen = useMemo(
     () => (tfCfg ? tfTotalSen : openPIs.reduce((sum, pi) => sum + rowBankSen(pi), 0) + advanceSen),
@@ -403,7 +414,26 @@ export default function SupplierPaymentsPage() {
     setDate(today);
   };
 
+  // Every MONEY field on the voucher (not the FX rates), labelled so a refusal
+  // names the row. Checked before anything is posted.
+  const voucherMoneyError = () =>
+    firstMoneyFieldError([
+      { label: "Advance (RM)", value: advanceStr },
+      ...tfOpenDraws
+        .filter((d) => !tfRows[d.drawSourceId]?.full)
+        .map((d) => ({ label: `Draw ${d.drawSourceId} amount`, value: tfRows[d.drawSourceId]?.amountStr ?? "" })),
+      ...openPIs
+        .filter((pi) => !getRow(pi.id).full)
+        .map((pi) =>
+          isMyr(pi.currency)
+            ? { label: `${pi.piNo} amount`, value: getRow(pi.id).amountStr }
+            : { label: `${pi.piNo} foreign amount`, value: getRow(pi.id).foreignStr },
+        ),
+    ]);
+
   const handlePost = async () => {
+    const moneyErr = voucherMoneyError();
+    if (moneyErr) { toast.error(moneyErr); return; }
     if (!selectedSupplierId || !payFrom) return;
 
     // Trade-finance REPAYMENT (owner 2026-08-11): the selected supplier is the
@@ -453,8 +483,8 @@ export default function SupplierPaymentsPage() {
           if (row.full) {
             payMyrSen = outstandingOf(pi);
           } else {
-            const rm = parseFloat(row.amountStr);
-            payMyrSen = Number.isFinite(rm) && rm > 0 ? Math.round(rm * 100) : 0;
+            const rm = moneyFieldToRinggit(row.amountStr);
+            payMyrSen = rm !== null && rm > 0 ? Math.round(rm * 100) : 0;
           }
           if (payMyrSen <= 0) return null;
           return { piId: pi.id, payMyrSen, full: row.full };
@@ -466,8 +496,8 @@ export default function SupplierPaymentsPage() {
         if (row.full) {
           foreignSen = pi.fxRate ? Math.round(outstandingOf(pi) / pi.fxRate) : 0;
         } else {
-          const foreign = parseFloat(row.foreignStr);
-          foreignSen = Number.isFinite(foreign) && foreign > 0 ? Math.round(foreign * 100) : 0;
+          const foreign = moneyFieldToRinggit(row.foreignStr);
+          foreignSen = foreign !== null && foreign > 0 ? Math.round(foreign * 100) : 0;
         }
         if (foreignSen <= 0) return null;
         return { piId: pi.id, foreignSen, payRate, full: row.full };
@@ -628,7 +658,11 @@ export default function SupplierPaymentsPage() {
 
   const submitKnockOff = async () => {
     if (!koForAdvanceId || !koPiId) return;
-    const amountSen = Math.round((parseFloat(koAmountStr) || 0) * 100);
+    // BUG-2026-08-13-095 - knocking an advance off an invoice: "1,000" applied
+    // RM 1.00 and left the advance looking almost untouched.
+    const koErr = firstMoneyFieldError([{ label: "Amount to apply (RM)", value: koAmountStr }]);
+    if (koErr) { toast.error(koErr); return; }
+    const amountSen = moneyFieldToSen(koAmountStr) as number;
     if (amountSen <= 0) { toast.error("Enter an amount to apply"); return; }
     setKoSubmitting(true);
     try {
@@ -943,7 +977,7 @@ export default function SupplierPaymentsPage() {
                         const outstanding = outstandingOf(pi);
                         const ccy = pi.currency || "MYR";
                         const myr = isMyr(pi.currency);
-                        const foreign = parseFloat(row.foreignStr);
+                        const foreign = moneyFieldToRinggit(row.foreignStr) ?? NaN;
                         const rate = parseFloat(row.rateStr);
                         const previewRm =
                           Number.isFinite(foreign) && foreign > 0 && Number.isFinite(rate) && rate > 0
@@ -967,7 +1001,7 @@ export default function SupplierPaymentsPage() {
                                     inputMode="decimal"
                                     onFocus={(e) => e.currentTarget.select()}
                                     disabled={row.full}
-                                    className="w-28 border border-[#E2DDD8] rounded px-2 py-1 text-sm text-right tabular-nums disabled:bg-gray-100"
+                                    className={`w-28 border rounded px-2 py-1 text-sm text-right tabular-nums disabled:bg-gray-100 ${isUnreadableMoney(row.amountStr) ? "border-[#9A3A2D] text-[#9A3A2D]" : "border-[#E2DDD8]"}`}
                                     value={row.amountStr}
                                     onChange={(e) => setRow(pi.id, { amountStr: e.target.value })}
                                     placeholder="0.00"
@@ -982,7 +1016,7 @@ export default function SupplierPaymentsPage() {
                                       inputMode="decimal"
                                       onFocus={(e) => e.currentTarget.select()}
                                       disabled={row.full}
-                                      className="w-24 border border-[#E2DDD8] rounded px-2 py-1 text-sm text-right tabular-nums disabled:bg-gray-100"
+                                      className={`w-24 border rounded px-2 py-1 text-sm text-right tabular-nums disabled:bg-gray-100 ${isUnreadableMoney(row.foreignStr) ? "border-[#9A3A2D] text-[#9A3A2D]" : "border-[#E2DDD8]"}`}
                                       value={row.foreignStr}
                                       onChange={(e) => setRow(pi.id, { foreignStr: e.target.value })}
                                       placeholder="0.00"

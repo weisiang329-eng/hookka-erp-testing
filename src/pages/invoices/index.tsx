@@ -24,6 +24,8 @@ import type { Invoice } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { InvoiceSchema } from "@/lib/schemas/invoice";
+import { useToast } from "@/components/ui/toast";
+import { moneyFieldToSen, firstMoneyFieldError } from "@/lib/money-field";
 
 const InvoiceMutationSchema = mutationWithData(InvoiceSchema);
 
@@ -52,6 +54,7 @@ const INVOICE_SEARCH_KEYS = [
 ];
 
 export default function InvoicesPage() {
+  const { toast } = useToast();
   const navigate = useNavigate();
 
   // Pagination — server-side. Filter changes reset to page 1 (see effect below).
@@ -508,8 +511,14 @@ export default function InvoicesPage() {
   };
 
   const recordPayment = async (inv: Invoice) => {
-    const amountSen = Math.round(parseFloat(paymentAmount) * 100);
-    if (isNaN(amountSen) || amountSen <= 0) return;
+    // BUG-2026-08-13-095 - this box IS `type="number"`, so the browser blocked
+    // the comma and no wrong figure was ever posted from here; the old code
+    // just `return`ed in silence, which reads as a dead button. One parser now,
+    // and the refusal says why.
+    const err = firstMoneyFieldError([{ label: "Payment amount (RM)", value: paymentAmount }]);
+    if (err) { toast.error(err); return; }
+    const amountSen = moneyFieldToSen(paymentAmount) as number;
+    if (amountSen <= 0) return;
 
     setPaymentSubmitting(true);
     const totalPaid = inv.paidAmount + amountSen;
@@ -1110,7 +1119,9 @@ export default function InvoicesPage() {
                       disabled={
                         paymentSubmitting ||
                         !paymentAmount ||
-                        parseFloat(paymentAmount) <= 0
+                        // Same parser as `recordPayment`, so the button and the handler
+                        // can never disagree about what the box says.
+                        !((moneyFieldToSen(paymentAmount) ?? 0) > 0)
                       }
                     >
                       {paymentSubmitting ? "Processing..." : "Record Payment"}

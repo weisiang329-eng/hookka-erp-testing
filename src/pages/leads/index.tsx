@@ -15,6 +15,8 @@ import { PhoneInput } from "@/components/ui/phone-input";
 import { StateSelect } from "@/components/ui/state-select";
 import { isValidEmail } from "@/lib/contact-format";
 import { familyOf } from "@/lib/product-family";
+import { useToast } from "@/components/ui/toast";
+import { moneyFieldToSen, firstMoneyFieldError } from "@/lib/money-field";
 
 type Lead = {
   id: string;
@@ -87,6 +89,7 @@ async function getFollowUps(): Promise<FollowUp[]> {
 }
 
 export default function LeadsPage() {
+  const { toast } = useToast();
   const [leads, setLeads] = useState<Lead[]>([]);
   const [followUps, setFollowUps] = useState<FollowUp[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -127,6 +130,11 @@ export default function LeadsPage() {
   const addLead = async () => {
     if (!form.name.trim() && !form.company.trim()) return;
     if (!emailValid(form.email)) return;
+    // BUG-2026-08-13-095 - "Est. value (RM)" on the ADD form is a plain text
+    // input (no `type="number"`), so a lead worth "50,000" was banked at
+    // RM 50.00 and every pipeline figure built on it was wrong.
+    const err = firstMoneyFieldError([{ label: "Est. value (RM)", value: form.estValue }]);
+    if (err) { toast.error(err); return; }
     setSaving(true);
     try {
       await fetch("/api/sales-leads", {
@@ -140,7 +148,7 @@ export default function LeadsPage() {
           source: form.source,
           nextFollowUp: form.nextFollowUp,
           notes: form.notes,
-          estValueSen: Math.round((parseFloat(form.estValue) || 0) * 100),
+          estValueSen: moneyFieldToSen(form.estValue) as number,
         }),
       });
       setForm({ ...EMPTY });
@@ -378,6 +386,7 @@ function LeadDetailDrawer({
   onSaved: () => Promise<void> | void;
   onMoveStage: (stage: string) => void;
 }) {
+  const { toast } = useToast();
   const [draft, setDraft] = useState({
     name: lead.name ?? "",
     company: lead.company ?? "",
@@ -395,6 +404,10 @@ function LeadDetailDrawer({
 
   const saveFields = async () => {
     if (!emailValid(draft.email)) return;
+    // The EDIT form's box is `type="number"`, so the browser blocks the comma
+    // here - same parser anyway, and the refusal is explicit either way.
+    const err = firstMoneyFieldError([{ label: "Est. value (RM)", value: draft.estValue }]);
+    if (err) { toast.error(err); return; }
     setSaving(true);
     try {
       await fetch(`/api/sales-leads/${lead.id}`, {
@@ -408,7 +421,7 @@ function LeadDetailDrawer({
           source: draft.source,
           nextFollowUp: draft.nextFollowUp,
           notes: draft.notes,
-          estValueSen: Math.round((parseFloat(draft.estValue) || 0) * 100),
+          estValueSen: moneyFieldToSen(draft.estValue) as number,
         }),
       });
       await onSaved();
@@ -535,6 +548,7 @@ function ConvertLeadDialog({
   onClose: () => void;
   onDone: () => Promise<void> | void;
 }) {
+  const { toast } = useToast();
   const [f, setF] = useState({
     code: "",
     name: lead.company || lead.name || "",
@@ -556,6 +570,8 @@ function ConvertLeadDialog({
 
   const submit = async () => {
     if (!canSubmit) return;
+    const moneyErr = firstMoneyFieldError([{ label: "Credit limit (RM)", value: f.creditLimit }]);
+    if (moneyErr) { toast.error(moneyErr); return; }
     setBusy(true);
     setErr(null);
     try {
@@ -571,7 +587,7 @@ function ConvertLeadDialog({
         name: f.name.trim(),
         ssmNo: f.ssmNo.trim(),
         creditTerms: f.creditTerms,
-        creditLimitSen: Math.round((parseFloat(f.creditLimit) || 0) * 100),
+        creditLimitSen: moneyFieldToSen(f.creditLimit) as number,
         contactName: f.contactName.trim(),
         phone: f.phone.trim(),
         email: f.email.trim(),

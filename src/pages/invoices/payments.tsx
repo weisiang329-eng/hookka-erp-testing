@@ -19,6 +19,8 @@ import { COMPANY } from "@/lib/constants";
 import { amountInWords } from "@/lib/amount-in-words";
 import { printVouchers, type VoucherSpec, type VoucherLine } from "@/lib/print-voucher";
 import { BatchActionsBar } from "@/components/accounting/batch-actions-bar";
+import { moneyFieldToSen, isUnreadableMoney } from "@/lib/money-field";
+import { parseMoneyInput } from "@/lib/parse-money";
 
 const PaymentMutationSchema = mutationWithData(PaymentSchema);
 
@@ -207,12 +209,16 @@ export default function PaymentsPage() {
   // That keeps the old behaviour exactly for anyone who just ticks invoices.
   const [amountStr, setAmountStr] = useState("");
   const [amountTouched, setAmountTouched] = useState(false);
+  // BUG-2026-08-13-095 - the Received box is `type="text"`, so a receipt typed
+  // "12,000" was recorded as RM 12.00 against the customer. `canSubmit` below
+  // now refuses while the box is unreadable, so this 0 is never posted.
+  const receivedUnreadable = amountTouched && isUnreadableMoney(amountStr);
   const receivedSen = amountTouched
-    ? Math.max(0, Math.round((parseFloat(amountStr) || 0) * 100))
+    ? Math.max(0, moneyFieldToSen(amountStr) ?? 0)
     : totalAllocated;
   const onAccountSen = Math.max(0, receivedSen - totalAllocated);
   const overAllocated = totalAllocated > receivedSen;
-  const canSubmit = !!selectedCustomerId && receivedSen > 0 && !overAllocated;
+  const canSubmit = !!selectedCustomerId && receivedSen > 0 && !overAllocated && !receivedUnreadable;
 
   const handleCreate = async () => {
     if (!canSubmit) return;
@@ -671,8 +677,11 @@ export default function PaymentsPage() {
                                     value={alloc && alloc.amount ? (alloc.amount / 100).toFixed(2) : ""}
                                     placeholder="0.00"
                                     onChange={(e) => {
-                                      const rm = parseFloat(e.target.value);
-                                      const sen = Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : 0;
+                                      // `type="number"`, so the browser blocks a
+                                      // comma before this runs - converted for
+                                      // one-parser consistency, not a live bug.
+                                      const rm = parseMoneyInput(e.target.value);
+                                      const sen = rm !== null && rm >= 0 ? Math.round(rm * 100) : 0;
                                       setAllocAmount(inv.id, sen);
                                     }}
                                   />

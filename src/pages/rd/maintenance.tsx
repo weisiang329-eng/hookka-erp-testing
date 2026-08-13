@@ -14,6 +14,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { formatCurrency } from "@/lib/utils";
 import { Plus, Pencil, Archive, RotateCcw, X, Users, Clock, Wallet } from "lucide-react";
 import type { RDTeamMember } from "@/types";
+import { moneyFieldToRinggit, firstMoneyFieldError } from "@/lib/money-field";
 
 type EmploymentType = "FULL_TIME" | "PART_TIME";
 
@@ -131,16 +132,23 @@ export default function RDMaintenancePage() {
     }
     let hourlyRateSen: number | null = null;
     let monthlyFixedCostSen: number | null = null;
+    // BUG-2026-08-13-095 - a monthly cost typed "3,500" became RM 3.00 and
+    // every R&D labour costing built on it was wrong by three orders of
+    // magnitude. One parser; unreadable refuses by name.
     if (editing.employmentType === "FULL_TIME") {
-      const rm = parseFloat(editing.hourlyRateRM);
-      if (!Number.isFinite(rm) || rm < 0) {
+      const err = firstMoneyFieldError([{ label: "Hourly Rate (RM)", value: editing.hourlyRateRM }]);
+      if (err) { toast.error(err); return; }
+      const rm = moneyFieldToRinggit(editing.hourlyRateRM) as number;
+      if (rm < 0) {
         toast.error("Hourly Rate must be a non-negative number");
         return;
       }
       hourlyRateSen = Math.round(rm * 100);
     } else {
-      const rm = parseFloat(editing.monthlyFixedCostRM);
-      if (!Number.isFinite(rm) || rm < 0) {
+      const err = firstMoneyFieldError([{ label: "Monthly Fixed Cost (RM)", value: editing.monthlyFixedCostRM }]);
+      if (err) { toast.error(err); return; }
+      const rm = moneyFieldToRinggit(editing.monthlyFixedCostRM) as number;
+      if (rm < 0) {
         toast.error("Monthly Fixed Cost must be a non-negative number");
         return;
       }

@@ -17,6 +17,10 @@ import { useToast } from "@/components/ui/toast";
 import { TrendingUp, Plus, X, Save, Eye, EyeOff, ChevronDown, ChevronRight } from "lucide-react";
 import { pnlBucketFor } from "@/lib/pnl-bucket";
 import { monthHasDeptForecast, forecastEntryKind } from "@/lib/salary-dept";
+// One money parser. NOTE `strToBp` below is a PERCENTAGE and deliberately
+// keeps `parseFloat` - it is not money and is not in this fix's scope.
+import { parseMoneyInput } from "@/lib/parse-money";
+import { moneyFieldToSen, firstMoneyFieldError } from "@/lib/money-field";
 
 type CoaAcct = { code: string; name: string; type: string; isPostable?: boolean };
 // Per line-month the owner keys ONE of the two (owner 2026-07-29): a % of
@@ -45,8 +49,8 @@ const fmtRM = (sen: number) =>
 // state survives the parent's re-renders.
 const group = (s: string): string => {
   if (s === "") return "";
-  const n = parseFloat(s);
-  return Number.isFinite(n)
+  const n = parseMoneyInput(s);
+  return n !== null
     ? n.toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
     : s;
 };
@@ -214,11 +218,16 @@ export default function ForecastPage() {
   // ---- Per-month computed figures ----
   const calc = (ym: string) => {
     const m = months[ym];
-    const salesSen = Math.max(0, Math.round((parseFloat(m?.salesStr ?? "") || 0) * 100));
+    // BUG-2026-08-13-095 - `AmountInput` strips commas on the way in, but that
+    // only covered ONE grouping style: "12 000" or "12.000,50" still reached
+    // `parseFloat` and came back as 12. The shared parser reads every form and
+    // returns null for the rest; `save` refuses on null, so the `?? 0` here is
+    // only ever reached by a cell the operator is already being told to fix.
+    const salesSen = Math.max(0, moneyFieldToSen(m?.salesStr ?? "") ?? 0);
     // Amount-keyed cells win; %-keyed cells derive from sales.
     const amt = (code: string) => {
       const e = m?.pct[code];
-      if (e?.a !== undefined && e.a !== "") return Math.round((parseFloat(e.a) || 0) * 100);
+      if (e?.a !== undefined && e.a !== "") return moneyFieldToSen(e.a) ?? 0;
       return Math.round((salesSen * strToBp(e?.p ?? "")) / 10000);
     };
     const sum = (rows: CoaAcct[]) => rows.reduce((s, r) => s + amt(r.code), 0);
@@ -267,7 +276,19 @@ export default function ForecastPage() {
       return next;
     });
 
+  // Every money cell on the sheet, labelled by month + account, so a refusal
+  // can point at the one that cannot be read.
+  const forecastMoneyError = firstMoneyFieldError(
+    Object.entries(months).flatMap(([ym, m]) => [
+      { label: `${ym} sales`, value: m.salesStr },
+      ...Object.entries(m.pct)
+        .filter(([, e]) => e.a !== undefined && e.a !== "")
+        .map(([code, e]) => ({ label: `${ym} ${code} amount`, value: e.a as string })),
+    ]),
+  );
+
   const save = async () => {
+    if (forecastMoneyError) { toast.error(forecastMoneyError); return; }
     setSaving(true);
     try {
       const payload: Record<string, { salesSen: number; pct: Record<string, { bp?: number; amtSen?: number }> }> = {};
@@ -275,14 +296,14 @@ export default function ForecastPage() {
         const pct: Record<string, { bp?: number; amtSen?: number }> = {};
         for (const [code, e] of Object.entries(m.pct)) {
           if (e.a !== undefined && e.a !== "") {
-            const sen = Math.round((parseFloat(e.a) || 0) * 100);
+            const sen = moneyFieldToSen(e.a) as number;
             if (sen !== 0) pct[code] = { amtSen: sen };
           } else if (e.p !== undefined && e.p !== "") {
             const bp = strToBp(e.p);
             if (bp !== 0) pct[code] = { bp };
           }
         }
-        payload[ym] = { salesSen: Math.max(0, Math.round((parseFloat(m.salesStr) || 0) * 100)), pct };
+        payload[ym] = { salesSen: Math.max(0, moneyFieldToSen(m.salesStr) as number), pct };
       }
       const res = await fetch("/api/accounting/forecast", {
         method: "PUT",
@@ -309,7 +330,7 @@ export default function ForecastPage() {
     const pctKeyed = e.p !== undefined && e.p !== "";
     const derivedPct =
       amtKeyed && c.salesSen > 0
-        ? ((Math.round((parseFloat(e.a as string) || 0) * 100) / c.salesSen) * 100).toFixed(2)
+        ? (((moneyFieldToSen(e.a as string) ?? 0) / c.salesSen) * 100).toFixed(2)
         : "";
     const derivedAmt = pctKeyed ? (c.amt(code) / 100).toFixed(2) : "";
     return (

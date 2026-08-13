@@ -32,6 +32,7 @@ import type { RDProject, RDProjectStage, RDProjectType } from "@/types";
 import { fetchJson, FetchJsonError } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { RdProjectSchema } from "@/lib/schemas/rd-project";
+import { moneyFieldToRinggit, firstMoneyFieldError } from "@/lib/money-field";
 import {
   getProjectHealth,
   getMilestoneHealth,
@@ -1023,7 +1024,17 @@ function CreateProjectDialog({
       if (form.serviceId.trim()) body.serviceId = form.serviceId.trim();
       if (form.description.trim()) body.description = form.description.trim();
       if (form.targetLaunchDate) body.targetLaunchDate = form.targetLaunchDate;
-      if (form.totalBudgetRM) body.totalBudget = Math.round(parseFloat(form.totalBudgetRM) * 100);
+      // BUG-2026-08-13-095 - one parser. A budget typed "1,200,000" used to be
+      // created as RM 1.00; a source price that failed to parse was silently
+      // dropped from the body altogether, so the field just came back blank.
+      const rdCreateMoneyError = firstMoneyFieldError([
+        { label: "Total budget (RM)", value: form.totalBudgetRM },
+        ...(form.projectType === "CLONE"
+          ? [{ label: "Source price (RM)", value: form.sourcePriceRM }]
+          : []),
+      ]);
+      if (rdCreateMoneyError) { toast.error(rdCreateMoneyError); return; }
+      if (form.totalBudgetRM) body.totalBudget = Math.round((moneyFieldToRinggit(form.totalBudgetRM) as number) * 100);
       if (form.teamMembers.trim()) {
         body.assignedTeam = form.teamMembers
           .split(",")
@@ -1037,13 +1048,10 @@ function CreateProjectDialog({
         if (form.sourceBrand.trim()) body.sourceBrand = form.sourceBrand.trim();
         if (form.sourcePurchaseRef.trim()) body.sourcePurchaseRef = form.sourcePurchaseRef.trim();
         if (form.sourcePriceRM.trim()) {
-          // Stored in sen for consistency with totalBudget + every other
-          // money column. parseFloat handles "1,200.50" minus the comma —
-          // we strip thousands separators so the user can type either form.
-          const rm = parseFloat(form.sourcePriceRM.replace(/,/g, ""));
-          if (Number.isFinite(rm) && rm >= 0) {
-            body.sourcePriceSen = Math.round(rm * 100);
-          }
+          // Stored in sen for consistency with totalBudget + every other money
+          // column. Grouping separators are handled by the shared parser.
+          const rm = moneyFieldToRinggit(form.sourcePriceRM) as number;
+          if (rm >= 0) body.sourcePriceSen = Math.round(rm * 100);
         }
         if (form.sourceNotes.trim()) body.sourceNotes = form.sourceNotes.trim();
       }

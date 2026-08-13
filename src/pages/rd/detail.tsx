@@ -45,6 +45,9 @@ import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { PhotoCropDialog } from "@/components/ui/PhotoCropDialog";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { getMilestoneHealth, MILESTONE_CHIP } from "./health";
+// One money parser, not six -- this file used to hand-roll `.replace(/,/g,"")`
+// plus parseFloat in four places. See src/lib/parse-money.ts.
+import { moneyFieldToRinggit, firstMoneyFieldError } from "@/lib/money-field";
 
 const RDMutationSchema = mutationWithData(RdProjectSchema);
 
@@ -609,6 +612,19 @@ export default function RDProjectDetailPage() {
 
   const handleEditSave = async () => {
     if (!project) return;
+    // BUG-2026-08-13-095 - these three fields hand-rolled their own comma
+    // stripper and then, when `parseFloat` still failed, wrote **null** - which
+    // the server reads as "clear the cap". So a fat-fingered target price
+    // silently DELETED the target instead of refusing. One parser now, and an
+    // unreadable value stops the save.
+    const rdMoneyError = firstMoneyFieldError([
+      { label: "Target selling price (RM)", value: editForm.targetSellingPriceRM },
+      { label: "Target material cost (RM)", value: editForm.targetMaterialCostRM },
+      ...(editForm.projectType === "CLONE"
+        ? [{ label: "Source price (RM)", value: editForm.sourcePriceRM }]
+        : []),
+    ]);
+    if (rdMoneyError) { toast.error(rdMoneyError); return; }
     setEditSaving(true);
     try {
       const payload: Record<string, unknown> = {
@@ -621,16 +637,14 @@ export default function RDProjectDetailPage() {
         // Pricing targets — empty string → null (clears the cap on server).
         // Otherwise RM → sen with the same convention as totalBudget.
         targetSellingPriceSen: (() => {
-          const t = editForm.targetSellingPriceRM.trim().replace(/,/g, "");
-          if (!t) return null;
-          const rm = parseFloat(t);
-          return Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : null;
+          if (!editForm.targetSellingPriceRM.trim()) return null;
+          const rm = moneyFieldToRinggit(editForm.targetSellingPriceRM) as number;
+          return rm >= 0 ? Math.round(rm * 100) : null;
         })(),
         targetMaterialCostSen: (() => {
-          const t = editForm.targetMaterialCostRM.trim().replace(/,/g, "");
-          if (!t) return null;
-          const rm = parseFloat(t);
-          return Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : null;
+          if (!editForm.targetMaterialCostRM.trim()) return null;
+          const rm = moneyFieldToRinggit(editForm.targetMaterialCostRM) as number;
+          return rm >= 0 ? Math.round(rm * 100) : null;
         })(),
         assignedTeam: editForm.assignedTeamStr.split(",").map((s) => s.trim()).filter(Boolean),
         status: editForm.status,
@@ -643,11 +657,9 @@ export default function RDProjectDetailPage() {
         payload.sourceProductName = editForm.sourceProductName.trim() || null;
         payload.sourceBrand = editForm.sourceBrand.trim() || null;
         payload.sourcePurchaseRef = editForm.sourcePurchaseRef.trim() || null;
-        const priceTrimmed = editForm.sourcePriceRM.trim().replace(/,/g, "");
-        if (priceTrimmed) {
-          const rm = parseFloat(priceTrimmed);
-          payload.sourcePriceSen =
-            Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : null;
+        if (editForm.sourcePriceRM.trim()) {
+          const rm = moneyFieldToRinggit(editForm.sourcePriceRM) as number;
+          payload.sourcePriceSen = rm >= 0 ? Math.round(rm * 100) : null;
         } else {
           payload.sourcePriceSen = null;
         }
@@ -1067,8 +1079,11 @@ export default function RDProjectDetailPage() {
   };
 
   const handleSaveManualCost = async () => {
-    const rm = parseFloat(manualCostRM);
-    if (!Number.isFinite(rm) || rm < 0) {
+    // BUG-2026-08-13-095 - a labour-cost override typed "1,500" became RM 1.00.
+    const err = firstMoneyFieldError([{ label: "Labour cost (RM)", value: manualCostRM }]);
+    if (err) { toast.warning(err); return; }
+    const rm = moneyFieldToRinggit(manualCostRM) as number;
+    if (rm < 0) {
       toast.warning("Labour cost must be a non-negative number");
       return;
     }

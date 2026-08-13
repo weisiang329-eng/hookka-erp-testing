@@ -33,6 +33,7 @@ import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { formatCurrency, formatRM } from "@/lib/utils";
 import type { Supplier, SupplierMaterialBinding, RawMaterial } from "@/types";
 import { ArrowLeft, Plus, Save, Trash2 } from "lucide-react";
+import { parseMoneyInput } from "@/lib/parse-money";
 
 // Same shape used by the modal in procurement/index.tsx — kept identical
 // so the POST payload matches what the existing /api/purchase-orders
@@ -1017,8 +1018,9 @@ function CreatePurchaseOrderPage() {
                               min={0}
                               value={item.unitPriceSen === 0 ? "" : (item.unitPriceSen / 100).toFixed(2)}
                               onChange={(e) => {
-                                const rm = parseFloat(e.target.value);
-                                const sen = Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : 0;
+                                // BUG-2026-08-13-095 - one money parser. `type="number"`, so the browser blocked the comma and this was never the live bug; converted so one parser owns money, and so an unreadable value can no longer be written as NaN.
+                                const rm = parseMoneyInput(e.target.value);
+                                const sen = rm !== null && rm >= 0 ? Math.round(rm * 100) : 0;
                                 updateItemPrice(idx, sen);
                               }}
                             />

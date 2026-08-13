@@ -4,6 +4,8 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate, cn } from "@/lib/utils";
+import { useToast } from "@/components/ui/toast";
+import { moneyFieldToSen, firstMoneyFieldError } from "@/lib/money-field";
 
 type BankAccount = {
   id: string;
@@ -602,6 +604,7 @@ function BankAccountsTab({
   data: CashFlowData;
   onRefresh: () => void;
 }) {
+  const { toast } = useToast();
   const [showForm, setShowForm] = useState(false);
   const [formAccount, setFormAccount] = useState(data.bankAccounts[0]?.id || "");
   const [formDate, setFormDate] = useState(new Date().toISOString().split("T")[0]);
@@ -616,8 +619,15 @@ function BankAccountsTab({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formDesc || !formAmount) return;
+    // BUG-2026-08-13-095 — this input IS `type="number"`, so the browser blocks
+    // a comma before the parser sees it; unlike the accounting page's 119
+    // text inputs this was never a live defect. Converted anyway: the guard
+    // then survives the input being retyped as `type="text"`, which is what
+    // every other money field on this page already is.
+    const cfMoneyError = firstMoneyFieldError([{ label: "Amount (MYR)", value: formAmount }]);
+    if (cfMoneyError) { toast.error(cfMoneyError); return; }
+    const amountSen = moneyFieldToSen(formAmount) as number;
     setSubmitting(true);
-    const amountSen = Math.round(parseFloat(formAmount) * 100);
     try {
       await fetch("/api/cash-flow", {
         method: "POST",

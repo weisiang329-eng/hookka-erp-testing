@@ -1,6 +1,6 @@
 ﻿import * as React from "react";
 import { Fragment, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { humanizeError } from "@/lib/humanize-error";
 import { useToast } from "@/components/ui/toast";
@@ -15,7 +15,7 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { MoneyInput } from "@/components/ui/money-input";
 import { useVirtualRows } from "@/components/ui/virtual-rows";
 import { DeferredBlock } from "@/components/ui/deferred-block";
-import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
+import { formatCurrency, formatDateDMY, formatRM, roundSen, todayYmdMY } from "@/lib/utils";
 import { exportReportCsv, exportReportXlsx, exportReportPdf, type Aoa, type PdfExportOpts } from "@/lib/export-report";
 import { buildAgingExportAoa, agingRowKind } from "@/lib/aging-export";
 import { isCleanImportShape, detectRawShape, parseRawStockTakeRows, impliedYmFromFilename, type ParsedRawItem } from "@/lib/stock-take-import";
@@ -556,7 +556,7 @@ export default function AccountingPage() {
       ) : (
         <>
           {tab === "overview" && (
-            <OverviewTab accounts={accounts} journals={journals} arData={arData} apData={apData} />
+            <OverviewTab journals={journals} arData={arData} apData={apData} />
           )}
           {tab === "pl" && <PLStatementTab />}
           {tab === "audit" && <AuditLogTab />}
@@ -617,6 +617,29 @@ export default function AccountingPage() {
     </div>
   );
 }
+
+// A figure with no posted account behind it is UNKNOWN, not zero — it renders
+// as this dash, and any total derived from it inherits the dash.
+const NO_FIGURE = "—";
+
+// The ledger-truth P&L slice the Overview KPI cards read (GET /accounting/pl).
+// Same shape `src/pages/reports.tsx` consumes for the same three figures.
+type OverviewPlEntry = {
+  accountCode: string;
+  accountName: string;
+  category: "REVENUE" | "COGS" | "OPERATING_EXPENSE";
+  amount: number;
+};
+type OverviewPl = {
+  entries: OverviewPlEntry[];
+  totals: {
+    revenue: number;
+    cogs: number;
+    grossProfit: number;
+    operatingExpenses: number;
+    netProfit: number;
+  };
+};
 
 // =============== TAB 1: OVERVIEW ===============
 
@@ -2121,23 +2144,59 @@ function OpeningStockTab() {
 }
 
 function OverviewTab({
-  accounts,
   journals,
   arData,
   apData,
 }: {
-  accounts: ChartOfAccount[];
   journals: JournalEntry[];
   arData: ARAgingEntry[];
   apData: APAgingEntry[];
 }) {
-  const revenue = accounts
-    .filter((a) => a.type === "REVENUE" && a.parentCode)
-    .reduce((s, a) => s + a.balance, 0);
-  const expenses = accounts
-    .filter((a) => a.type === "EXPENSE" && a.parentCode)
-    .reduce((s, a) => s + a.balance, 0);
-  const netProfit = revenue - expenses;
+  // BUG-2026-08-13-091 — these three cards used to be:
+  //   revenue  = Σ chart_of_accounts.balanceSen where type=REVENUE && parentCode
+  //   expenses = Σ  …                      where type=EXPENSE && parentCode
+  //   netProfit = revenue − expenses
+  // Three separate untruths in six lines:
+  //   (a) `balance` is `chart_of_accounts.balanceSen`, and the ONLY writers of
+  //       that column in the whole API are the manual-JV paths — accounting.ts
+  //       PUT /journals/:id (POSTED at :1378, REVERSED at :1447) and
+  //       POST /journals/:id/lifecycle (:1640). Every real posting — sales
+  //       invoices, purchase invoices, receipts, supplier payments, DOs,
+  //       credit/debit notes, trade finance — writes `ledger_journal_entries`
+  //       and never touches balanceSen. So the cards reported the net of hand-
+  //       keyed journals and called it the company's revenue.
+  //   (b) "(MTD)" was fabricated: nothing in this component filtered by date.
+  //       balanceSen is a running since-inception balance.
+  //   (c) EXPENSE was summed but the COST type was not, though the ledger
+  //       treats them alike (accounting.ts:1370-1375) — so Net Profit was
+  //       overstated by the entire cost-of-sales block.
+  // The fix is the one already blessed for these exact three figures on
+  // /reports (BUG-2026-08-13-009): read GET /accounting/pl, which nets the
+  // posted ledger per account and classifies by the account's own COA type,
+  // and publish "—" — never RM 0.00 — for a category no account has posted to.
+  const ym = todayYmdMY().slice(0, 7);
+  const { data: plResp } = useCachedJson<{ success?: boolean; data?: OverviewPl }>(
+    `/api/accounting/pl?period=${ym}`,
+  );
+  const pl = plResp?.success ? plResp.data : undefined;
+  const plEntries = pl?.entries ?? [];
+  const nAccts = (cat: OverviewPlEntry["category"]) =>
+    plEntries.filter((e) => e.category === cat).length;
+  const revenueAccts = nAccts("REVENUE");
+  const cogsAccts = nAccts("COGS");
+  const opexAccts = nAccts("OPERATING_EXPENSE");
+  // A figure is published only when an account behind it carries a posting;
+  // a derived line is only as sourced as the weakest line it derives from.
+  const sourced = (n: number, v: number | undefined) =>
+    n > 0 && v !== undefined ? formatCurrency(roundSen(v)) : NO_FIGURE;
+  const derived = (deps: number[], v: number | undefined) =>
+    deps.every((n) => n > 0) && v !== undefined ? formatCurrency(roundSen(v)) : NO_FIGURE;
+  // Cost & Expenses is COGS + OpEx so that the three cards tie by the server's
+  // own arithmetic (netProfit = revenue − cogs − opex); summing only one of
+  // them would leave Revenue − Expenses ≠ Net Profit on screen.
+  const costExpenseSen =
+    pl?.totals ? pl.totals.cogs + pl.totals.operatingExpenses : undefined;
+  const netProfitSen = pl?.totals?.netProfit;
   const totalAR = arData.reduce(
     (s, a) => s + a.currentSen + a.days30Sen + a.days60Sen + a.days90Sen + a.over90Sen,
     0
@@ -2201,11 +2260,13 @@ function OverviewTab({
     },
   ];
 
+  // BUG-2026-08-13-090: this menu was four `action: () => {}` no-ops — View,
+  // Edit, a separator and Refresh — on the Recent Journal Entries grid. "Edit"
+  // in particular advertised an action on a POSTED journal that does not exist.
+  // The grid now carries no context menu; the Journal Entries tab has the real
+  // one. Print is kept because it works from data already on screen.
   const overviewContextMenu: ContextMenuItem[] = [
-    { label: "View", action: () => {} },
-    { label: "Edit", action: () => {} },
-    { separator: true, label: "", action: () => {} },
-    { label: "Refresh", action: () => {} },
+    { label: "Print voucher", action: (r) => printVoucher(buildJvVoucher(r)) },
   ];
 
   return (
@@ -2215,8 +2276,8 @@ function OverviewTab({
         <Card>
           <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-xs text-[#6B7280]">Revenue (MTD)</p>
-              <p className="text-xl font-bold text-[#4F7C3A]">{formatCurrency(revenue)}</p>
+              <p className="text-xs text-[#6B7280]">Revenue ({ym})</p>
+              <p className="text-xl font-bold text-[#4F7C3A]">{sourced(revenueAccts, pl?.totals?.revenue)}</p>
             </div>
             <ArrowUpRight className="h-5 w-5 text-[#4F7C3A]" />
           </CardContent>
@@ -2224,8 +2285,8 @@ function OverviewTab({
         <Card>
           <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-xs text-[#6B7280]">Expenses (MTD)</p>
-              <p className="text-xl font-bold text-[#9A3A2D]">{formatCurrency(expenses)}</p>
+              <p className="text-xs text-[#6B7280]">Cost &amp; Expenses ({ym})</p>
+              <p className="text-xl font-bold text-[#9A3A2D]">{derived([cogsAccts, opexAccts], costExpenseSen)}</p>
             </div>
             <ArrowDownRight className="h-5 w-5 text-[#9A3A2D]" />
           </CardContent>
@@ -2233,9 +2294,9 @@ function OverviewTab({
         <Card>
           <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-xs text-[#6B7280]">Net Profit</p>
-              <p className={`text-xl font-bold ${netProfit >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}>
-                {formatCurrency(netProfit)}
+              <p className="text-xs text-[#6B7280]">Net Profit ({ym})</p>
+              <p className={`text-xl font-bold ${(netProfitSen ?? 0) >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}>
+                {derived([revenueAccts, cogsAccts, opexAccts], netProfitSen)}
               </p>
             </div>
             <DollarSign className="h-5 w-5 text-[#6B5C32]" />
@@ -3100,8 +3161,11 @@ function JournalsTab({
   ];
 
   const contextMenuItems = (row: JournalEntry): ContextMenuItem[] => {
+    // BUG-2026-08-13-090: a "View" item whose action was `() => {}` used to sit
+    // at the top of this menu. A control that does nothing is the same lie as a
+    // fabricated figure — dropped rather than pointed at a page that does not
+    // exist (there is no per-journal detail route).
     const items: ContextMenuItem[] = [
-      { label: "View", action: () => {} },
       { label: "Print voucher", action: (r) => printVoucher(buildJvVoucher(r)) },
     ];
     if (row.status === "DRAFT") {
@@ -3211,9 +3275,20 @@ function JournalEntryForm({
   // accounts (300-0000, 100-0000, …) from the journal picker entirely.
   const leafAccounts = accounts.filter((a) => a.isPostable !== false);
 
-  const totalDebit = lines.reduce((s, l) => s + l.debitSen, 0);
-  const totalCredit = lines.reduce((s, l) => s + l.creditSen, 0);
+  // BUG-2026-08-13-094 (journal instance). The footer totals and the green
+  // "balanced" colour used to reduce over EVERY row, while the POST body is
+  // built from `validLines` — rows that carry an account. So DR 1,000 on an
+  // account-less row against CR 1,000 on a real one rendered a GREEN, balanced
+  // RM 1,000.00 / RM 1,000.00 footer and an enabled Save, and the server then
+  // refused with "Debits (0) must equal Credits (100000)". The screen asserted
+  // balanced about rows the payload does not contain. Both figures and the
+  // guard now read the SAME rows the save will send.
+  const jeLineWillPost = (l: JournalLineRow) => !!l.accountCode && (l.debitSen > 0 || l.creditSen > 0);
+  const postableJeLines = lines.filter(jeLineWillPost);
+  const totalDebit = postableJeLines.reduce((s, l) => s + l.debitSen, 0);
+  const totalCredit = postableJeLines.reduce((s, l) => s + l.creditSen, 0);
   const isBalanced = totalDebit === totalCredit && totalDebit > 0;
+  const droppedJeLines = lines.filter((l) => !jeLineWillPost(l) && (l.debitSen > 0 || l.creditSen > 0)).length;
 
   const updateLine = (idx: number, field: string, value: string | number) => {
     const updated = [...lines];
@@ -3249,7 +3324,7 @@ function JournalEntryForm({
       setError("Debits must equal credits and be non-zero");
       return;
     }
-    const validLines = lines.filter((l) => l.accountCode && (l.debitSen > 0 || l.creditSen > 0));
+    const validLines = postableJeLines;
     if (validLines.length < 2) {
       setError("At least 2 lines with amounts are required");
       return;
@@ -3397,6 +3472,11 @@ function JournalEntryForm({
                     {!isBalanced && totalDebit > 0 && (
                       <span className="text-xs text-[#9A3A2D]">
                         Difference: {formatCurrency(Math.abs(totalDebit - totalCredit))}
+                      </span>
+                    )}
+                    {droppedJeLines > 0 && (
+                      <span className="block text-[11px] text-[#9A3A2D]">
+                        {droppedJeLines} line{droppedJeLines === 1 ? "" : "s"} with an amount but no account — not counted above, and will not be saved.
                       </span>
                     )}
                   </td>
@@ -3645,11 +3725,7 @@ ${rows}
   );
 }
 
-function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () => void }) {
-  const [paymentForm, setPaymentForm] = useState<string | null>(null);
-  const [paymentAmount, setPaymentAmount] = useState("");
-  const [paymentDate, setPaymentDate] = useState(new Date().toISOString().split("T")[0]);
-  const [paymentRef, setPaymentRef] = useState("");
+function ARTab({ arData }: { arData: ARAgingEntry[]; onRefresh: () => void }) {
   // Expandable detail (owner 2026-07-08): click a row to show every open
   // document in its aging column — the old system's "Aging - Detail" layout.
   const [openAging, setOpenAging] = useState<Set<string>>(new Set());
@@ -3677,22 +3753,16 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
   }, [company]);
   const rows = company ? (scopedAr ?? []) : arData;
 
-  const handlePayment = async (customerId: string) => {
-    const amountSen = Math.round(Number(paymentAmount) * 100);
-    if (amountSen <= 0) return;
-
-    await fetch("/api/accounting/aging", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "ar", id: customerId, amountSen, date: paymentDate, reference: paymentRef }),
-    });
-
-    setPaymentForm(null);
-    setPaymentAmount("");
-    setPaymentRef("");
-    onRefresh();
-  };
-
+  // BUG-2026-08-13-090: there used to be a "Record Payment" button + form here
+  // that POSTed to /api/accounting/aging. That endpoint UPDATEs the `ar_aging`
+  // table, which this very screen does NOT read: GET /aging computes the aging
+  // live from `invoices` (see accounting.ts — "Replaces the dead manual
+  // ar_aging/ap_aging snapshot tables"). So the write landed nowhere anyone
+  // reads, created no payment_records / invoice_payments row and no GL leg, and
+  // the response was never checked (`await fetch(...)` with no `res.ok` test) —
+  // so even the 404 the dead table returns closed the form as if it had saved.
+  // A control that cannot record a payment must not be offered; customer
+  // receipts are recorded on /invoices/payments, which posts for real.
   const totalOutstanding = rows.reduce(
     (s, a) => s + a.currentSen + a.days30Sen + a.days60Sen + a.days90Sen + a.over90Sen,
     0
@@ -3708,6 +3778,7 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
         <div>
           <h2 className="text-lg font-semibold text-[#1F1D1B]">Accounts Receivable</h2>
           <p className="text-sm text-[#6B7280]">Total Outstanding: <span className="font-semibold text-[#9C6F1E]">{formatCurrency(totalOutstanding)}</span></p>
+          <p className="text-xs text-[#9CA3AF]">Read-only. Record a customer receipt on <Link to="/invoices/payments" className="underline decoration-dotted text-[#6B5C32]">Customer Payments</Link>.</p>
         </div>
         <ExportButtons
           build={() => buildAgingExportAoa("Customer", rows.map((a) => ({
@@ -3733,7 +3804,6 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
                   <th className="py-3 px-4 text-right text-[#6B7280] font-medium">3 mth</th>
                   <th className="py-3 px-4 text-right text-[#6B7280] font-medium">3+ mth</th>
                   <th className="py-3 px-4 text-right text-[#6B7280] font-medium">Total</th>
-                  <th className="py-3 px-4 text-center text-[#6B7280] font-medium">Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -3755,17 +3825,6 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
                       <td className={`py-3 px-4 text-right ${ar.days90Sen < 0 ? "text-[#9A3A2D]" : ar.days90Sen > 0 ? "text-[#B8601A] font-medium" : ""}`}>{ar.days90Sen !== 0 ? formatCurrency(ar.days90Sen) : "-"}</td>
                       <td className={`py-3 px-4 text-right ${ar.over90Sen !== 0 ? "text-[#9A3A2D] font-medium" : ""}`}>{ar.over90Sen !== 0 ? formatCurrency(ar.over90Sen) : "-"}</td>
                       <td className="py-3 px-4 text-right font-semibold text-[#1F1D1B]">{formatCurrency(total)}</td>
-                      <td className="py-3 px-4 text-center">
-                        {total > 0 && (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setPaymentForm(paymentForm === ar.customerId ? null : ar.customerId)}
-                          >
-                            <CreditCard className="h-3.5 w-3.5" /> Record Payment
-                          </Button>
-                        )}
-                      </td>
                     </tr>
                     {open && (ar.docs ?? []).map((d, i) => (
                       <tr key={`d-${i}`} className="border-b border-[#F7F4F1] bg-[#FAF8F6] text-xs">
@@ -3776,12 +3835,11 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
                           </td>
                         ))}
                         <td className={`py-1.5 px-4 text-right tabular-nums font-medium ${d.amountSen < 0 ? "text-[#9A3A2D]" : "text-[#4B5563]"}`}>{formatCurrency(d.amountSen)}</td>
-                        <td></td>
                       </tr>
                     ))}
                     {open && !(ar.docs ?? []).length && (
                       <tr className="border-b border-[#F7F4F1] bg-[#FAF8F6] text-xs">
-                        <td colSpan={8} className="py-1.5 px-4 pl-10 text-[#9CA3AF] italic">No document detail (refresh after the next aging rebuild)</td>
+                        <td colSpan={7} className="py-1.5 px-4 pl-10 text-[#9CA3AF] italic">No document detail (refresh after the next aging rebuild)</td>
                       </tr>
                     )}
                     </Fragment>
@@ -3797,61 +3855,10 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
                   <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.days90Sen, 0))}</td>
                   <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.over90Sen, 0))}</td>
                   <td className="py-3 px-4 text-right">{formatCurrency(totalOutstanding)}</td>
-                  <td></td>
                 </tr>
               </tfoot>
             </table>
           </div>
-
-          {/* Payment Form */}
-          {paymentForm && (
-            <div className="border-t border-[#E2DDD8] p-4 bg-[#F0ECE9]/30">
-              <h4 className="text-sm font-medium text-[#1F1D1B] mb-3">
-                Record Payment - {rows.find((a) => a.customerId === paymentForm)?.customerName}
-              </h4>
-              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
-                <div>
-                  <label className="text-xs font-medium text-[#6B7280] mb-1 block">Amount (RM)</label>
-                  <input
-                    type="number" onFocus={(e) => e.currentTarget.select()}
-                    min="0"
-                    step="0.01"
-                    placeholder="0.00"
-                    value={paymentAmount}
-                    onChange={(e) => setPaymentAmount(e.target.value)}
-                    className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-[#6B7280] mb-1 block">Date</label>
-                  <input
-                    type="date"
-                    value={paymentDate}
-                    onChange={(e) => setPaymentDate(e.target.value)}
-                    className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-[#6B7280] mb-1 block">Reference</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Bank Ref No."
-                    value={paymentRef}
-                    onChange={(e) => setPaymentRef(e.target.value)}
-                    className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                  />
-                </div>
-                <div className="flex gap-2">
-                  <Button variant="primary" size="sm" onClick={() => handlePayment(paymentForm)}>
-                    Submit
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={() => setPaymentForm(null)}>
-                    Cancel
-                  </Button>
-                </div>
-              </div>
-            </div>
-          )}
         </CardContent>
       </Card>
     </div>
@@ -4473,11 +4480,7 @@ function SupplierDiscountTab() {
   );
 }
 
-function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () => void }) {
-  const [paymentForm, setPaymentForm] = useState<string | null>(null);
-  const [paymentAmount, setPaymentAmount] = useState("");
-  const [paymentDate, setPaymentDate] = useState(new Date().toISOString().split("T")[0]);
-  const [paymentRef, setPaymentRef] = useState("");
+function APTab({ apData }: { apData: APAgingEntry[]; onRefresh: () => void }) {
   // Expandable detail (owner 2026-07-08): click a row to show every open
   // document in its aging column; un-knocked advances show as negative docs.
   const [openAging, setOpenAging] = useState<Set<string>>(new Set());
@@ -4501,22 +4504,13 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
   }, [company]);
   const rows = company ? (scopedAp ?? []) : apData;
 
-  const handlePayment = async (supplierId: string) => {
-    const amountSen = Math.round(Number(paymentAmount) * 100);
-    if (amountSen <= 0) return;
-
-    await fetch("/api/accounting/aging", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "ap", id: supplierId, amountSen, date: paymentDate, reference: paymentRef }),
-    });
-
-    setPaymentForm(null);
-    setPaymentAmount("");
-    setPaymentRef("");
-    onRefresh();
-  };
-
+  // BUG-2026-08-13-090, creditor twin of the debtor case in ARTab above. The
+  // removed "Record Payment" form POSTed /api/accounting/aging, which UPDATEs
+  // `ap_aging` — a table GET /aging does not read (it computes the creditor
+  // aging live from `purchase_invoices` + un-knocked advances). No
+  // supplier_payments row, no GL leg, no PI paid_amount_sen change, and the
+  // unchecked `await fetch(...)` swallowed the dead table's 404. Supplier
+  // payments are made on /invoices/supplier-payments, which posts for real.
   const totalOutstanding = rows.reduce(
     (s, a) => s + a.currentSen + a.days30Sen + a.days60Sen + a.days90Sen + a.over90Sen,
     0
@@ -4535,6 +4529,7 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
         <div>
           <h2 className="text-lg font-semibold text-[#1F1D1B]">Accounts Payable</h2>
           <p className="text-sm text-[#6B7280]">Total Outstanding: <span className="font-semibold text-[#3E6570]">{formatCurrency(totalOutstanding)}</span></p>
+          <p className="text-xs text-[#9CA3AF]">Read-only. Pay a supplier bill on <Link to="/invoices/supplier-payments" className="underline decoration-dotted text-[#6B5C32]">Supplier Payments</Link>.</p>
         </div>
         <ExportButtons
           build={() => buildAgingExportAoa("Supplier", rows.map((a) => ({
@@ -4560,7 +4555,6 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
                   <th className="py-3 px-4 text-right text-[#6B7280] font-medium">3 mth</th>
                   <th className="py-3 px-4 text-right text-[#6B7280] font-medium">3+ mth</th>
                   <th className="py-3 px-4 text-right text-[#6B7280] font-medium">Total</th>
-                  <th className="py-3 px-4 text-center text-[#6B7280] font-medium">Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -4582,17 +4576,6 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
                       <td className={`py-3 px-4 text-right ${ap.days90Sen < 0 ? "text-[#9A3A2D]" : ap.days90Sen > 0 ? "text-[#B8601A] font-medium" : ""}`}>{ap.days90Sen !== 0 ? formatCurrency(ap.days90Sen) : "-"}</td>
                       <td className={`py-3 px-4 text-right ${ap.over90Sen !== 0 ? "text-[#9A3A2D] font-medium" : ""}`}>{ap.over90Sen !== 0 ? formatCurrency(ap.over90Sen) : "-"}</td>
                       <td className="py-3 px-4 text-right font-semibold text-[#1F1D1B]">{formatCurrency(total)}</td>
-                      <td className="py-3 px-4 text-center">
-                        {total > 0 && (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setPaymentForm(paymentForm === ap.supplierId ? null : ap.supplierId)}
-                          >
-                            <CreditCard className="h-3.5 w-3.5" /> Record Payment
-                          </Button>
-                        )}
-                      </td>
                     </tr>
                     {open && (ap.docs ?? []).map((d, i) => (
                       <tr key={`d-${i}`} className="border-b border-[#F7F4F1] bg-[#FAF8F6] text-xs">
@@ -4603,12 +4586,11 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
                           </td>
                         ))}
                         <td className={`py-1.5 px-4 text-right tabular-nums font-medium ${d.amountSen < 0 ? "text-[#9A3A2D]" : "text-[#4B5563]"}`}>{formatCurrency(d.amountSen)}</td>
-                        <td></td>
                       </tr>
                     ))}
                     {open && !(ap.docs ?? []).length && (
                       <tr className="border-b border-[#F7F4F1] bg-[#FAF8F6] text-xs">
-                        <td colSpan={8} className="py-1.5 px-4 pl-10 text-[#9CA3AF] italic">No document detail (refresh after the next aging rebuild)</td>
+                        <td colSpan={7} className="py-1.5 px-4 pl-10 text-[#9CA3AF] italic">No document detail (refresh after the next aging rebuild)</td>
                       </tr>
                     )}
                     </Fragment>
@@ -4624,61 +4606,10 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
                   <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.days90Sen, 0))}</td>
                   <td className="py-3 px-4 text-right">{formatCurrency(rows.reduce((s, a) => s + a.over90Sen, 0))}</td>
                   <td className="py-3 px-4 text-right">{formatCurrency(totalOutstanding)}</td>
-                  <td></td>
                 </tr>
               </tfoot>
             </table>
           </div>
-
-          {/* Payment Form */}
-          {paymentForm && (
-            <div className="border-t border-[#E2DDD8] p-4 bg-[#F0ECE9]/30">
-              <h4 className="text-sm font-medium text-[#1F1D1B] mb-3">
-                Record Payment - {rows.find((a) => a.supplierId === paymentForm)?.supplierName}
-              </h4>
-              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
-                <div>
-                  <label className="text-xs font-medium text-[#6B7280] mb-1 block">Amount (RM)</label>
-                  <input
-                    type="number" onFocus={(e) => e.currentTarget.select()}
-                    min="0"
-                    step="0.01"
-                    placeholder="0.00"
-                    value={paymentAmount}
-                    onChange={(e) => setPaymentAmount(e.target.value)}
-                    className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-[#6B7280] mb-1 block">Date</label>
-                  <input
-                    type="date"
-                    value={paymentDate}
-                    onChange={(e) => setPaymentDate(e.target.value)}
-                    className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-[#6B7280] mb-1 block">Reference</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Cheque No."
-                    value={paymentRef}
-                    onChange={(e) => setPaymentRef(e.target.value)}
-                    className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                  />
-                </div>
-                <div className="flex gap-2">
-                  <Button variant="primary" size="sm" onClick={() => handlePayment(paymentForm)}>
-                    Submit
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={() => setPaymentForm(null)}>
-                    Cancel
-                  </Button>
-                </div>
-              </div>
-            </div>
-          )}
         </CardContent>
       </Card>
     </div>
@@ -6063,13 +5994,27 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
   const addLine = () => setForm((f) => ({ ...f, lines: [...f.lines, blankLine()] }));
   const removeLine = (idx: number) => setForm((f) => ({ ...f, lines: f.lines.length > 1 ? f.lines.filter((_, i) => i !== idx) : f.lines }));
 
-  const subtotalSen = form.lines.reduce((s, l) => s + toSen(l.amountStr), 0);
+  // BUG-2026-08-13-094 — ONE predicate decides both what the operator is shown
+  // and what is sent. The subtotal used to reduce over EVERY line while the
+  // payload filtered to lines that carry a counter account, so a line with an
+  // amount and no account was added to the on-screen "Total" and then silently
+  // dropped from the bill (the server recomputes the header from the items it
+  // receives). Typing 300 on an accounted line and 200 on an un-accounted one
+  // showed Total RM 500.00 and posted a RM 300.00 bill, with no warning. Most
+  // likely on the scan path, where applyScan prefills N lines sharing one
+  // (often empty) account. Same shape as BUG-2026-07-17-001: the fix is that
+  // the figure and the payload cannot be computed by different expressions.
+  const billLineWillPost = (l: BillLineDraft) => !!l.counterAccount && toSen(l.amountStr) > 0;
+  const postableBillLines = form.lines.filter(billLineWillPost);
+  const subtotalSen = postableBillLines.reduce((s, l) => s + toSen(l.amountStr), 0);
   const totalSen = subtotalSen + toSen(form.taxStr);
+  // A line the operator has filled in but that will NOT post — surfaced next
+  // to the total rather than quietly discarded.
+  const droppedBillLines = form.lines.filter((l) => !billLineWillPost(l) && toSen(l.amountStr) > 0).length;
 
   const submit = async () => {
     if (!editingBillNo && !form.partyId) { toast.error("Select a party"); return; }
-    const items = form.lines
-      .filter((l) => l.counterAccount && toSen(l.amountStr) > 0)
+    const items = postableBillLines
       .map((l) => ({ counterAccount: l.counterAccount, amountSen: toSen(l.amountStr), description: l.description }));
     if (items.length === 0) { toast.error("Add at least one line with account + amount"); return; }
     const payload = { partyId: form.partyId, billDate: form.billDate, referenceNo: form.referenceNo, description: form.description, taxSen: toSen(form.taxStr), items, isOpening: form.isOpening };
@@ -6409,6 +6354,11 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
             <div className="text-right">
               <p className="text-xs text-[#6B7280]">Total</p>
               <p className="text-lg font-bold text-[#3E6570] tabular-nums">{formatCurrency(totalSen)}</p>
+              {droppedBillLines > 0 && (
+                <p className="text-[11px] text-[#9A3A2D]">
+                  {droppedBillLines} line{droppedBillLines === 1 ? "" : "s"} with an amount but no account — not counted, and will not be saved.
+                </p>
+              )}
             </div>
           </div>
           <div className="flex gap-2">
@@ -7796,7 +7746,19 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
     const v = parseFloat(s);
     return Number.isFinite(v) ? Math.round(v * 100) : 0;
   };
-  const totalSen = lines.reduce((s, l) => s + toSen(l.amount), 0);
+  // BUG-2026-08-13-094 (payment-voucher instance — see the bill form above and
+  // the receipt form below for the other two). The header Total reduced over
+  // EVERY line while the POST body filtered to lines carrying an account, and
+  // the backend recomputes the voucher header from the lines it receives
+  // (validateDocLines). Three lines — Rent 500 w/ account, Utilities 300 w/
+  // account, 200 with the picker left blank — showed "Total RM 1,000.00",
+  // enabled Post, toasted "Payment posted", and wrote a RM 800.00 voucher.
+  // One predicate now feeds both the figure and the payload.
+  const pvLineWillPost = (l: { accountCode: string; amount: string }) =>
+    !!l.accountCode && toSen(l.amount) > 0;
+  const postableLines = lines.filter(pvLineWillPost);
+  const totalSen = postableLines.reduce((s, l) => s + toSen(l.amount), 0);
+  const droppedLines = lines.filter((l) => !pvLineWillPost(l) && toSen(l.amount) > 0).length;
 
   const statusOf = (r: PvRow) => r.status === "VOID" ? "VOID" : (r.accrued === 1 && !r.settledAt ? "UNPAID" : "PAID");
   const visibleRows = (rows ?? []).filter((r) => {
@@ -7821,8 +7783,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
       payFrom: form.accrued ? undefined : (form.payFrom || defaultBankCode(bankCash)),
       accrualAccount: form.accrued ? form.accrualAccount : undefined,
       productLine: form.productLine || undefined,
-      lines: lines
-        .filter((l) => l.accountCode && toSen(l.amount) > 0)
+      lines: postableLines
         .map((l) => ({ accountCode: l.accountCode, description: l.description, amountSen: toSen(l.amount) })),
     };
     if (body.lines.length === 0) {
@@ -8035,6 +7996,9 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                   <span className="text-[11px] text-[#B4B2A9]">press <span className="font-medium text-[#6B7280]">Insert</span> to add a line below</span>
                 </div>
                 <span className="text-sm text-[#6B7280]">Total <span className="text-lg font-semibold text-[#1F1D1B] tabular-nums">{formatCurrency(totalSen)}</span></span>
+                {droppedLines > 0 && (
+                  <span className="text-[11px] text-[#9A3A2D]">{droppedLines} line{droppedLines === 1 ? "" : "s"} with an amount but no account — not counted, and will not be posted.</span>
+                )}
               </div>
             </div>
 
@@ -8253,7 +8217,14 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
     const v = parseFloat(s);
     return Number.isFinite(v) ? Math.round(v * 100) : 0;
   };
-  const totalSen = lines.reduce((s, l) => s + toSen(l.amount), 0);
+  // BUG-2026-08-13-094 (official-receipt instance — byte-identical logic to the
+  // payment-voucher form above). One predicate for the displayed Total and the
+  // posted lines, so "Total RM 1,000.00 · Post receipt" can never write RM 800.
+  const orLineWillPost = (l: { accountCode: string; amount: string }) =>
+    !!l.accountCode && toSen(l.amount) > 0;
+  const postableLines = lines.filter(orLineWillPost);
+  const totalSen = postableLines.reduce((s, l) => s + toSen(l.amount), 0);
+  const droppedLines = lines.filter((l) => !orLineWillPost(l) && toSen(l.amount) > 0).length;
 
   const handleSave = async () => {
     const body = {
@@ -8261,8 +8232,7 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
       receivedFrom: form.receivedFrom,
       description: form.description,
       payTo: form.payTo || defaultBankCode(bankCash),
-      lines: lines
-        .filter((l) => l.accountCode && toSen(l.amount) > 0)
+      lines: postableLines
         .map((l) => ({ accountCode: l.accountCode, description: l.description, amountSen: toSen(l.amount) })),
     };
     if (body.lines.length === 0) {
@@ -8383,6 +8353,9 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                   <span className="text-[11px] text-[#B4B2A9]">press <span className="font-medium text-[#6B7280]">Insert</span> to add a line below</span>
                 </div>
                 <span className="text-sm text-[#6B7280]">Total <span className="text-lg font-semibold text-[#1F1D1B] tabular-nums">{formatCurrency(totalSen)}</span></span>
+                {droppedLines > 0 && (
+                  <span className="text-[11px] text-[#9A3A2D]">{droppedLines} line{droppedLines === 1 ? "" : "s"} with an amount but no account — not counted, and will not be posted.</span>
+                )}
               </div>
             </div>
 
@@ -8712,10 +8685,24 @@ function FundTransferTab({ accounts }: { accounts: ChartOfAccount[] }) {
 // =============== TAB: STOCK SUMMARY (Phase 4.2) ===============
 //
 // Per material-group, for the chosen month: opening + purchases −
-// consumption = closing (a real cross-check — closing is recomputed from
-// the cost ledger, not opening±deltas). WIP and FG roll up too. This is
-// the read layer the Phase-5 Cost Structure report and the closing-stock
-// posting build on.
+// consumption = closing. WIP and FG roll up too. This is the read layer the
+// Phase-5 Cost Structure report and the closing-stock posting build on.
+//
+// BUG-2026-08-13-093 — this comment used to call that identity "a real
+// cross-check — closing is recomputed from the cost ledger, not
+// opening±deltas", and the table rendered a green ✓ / red ! column off the
+// endpoint's `balanced` flag. It is the other way round, and the check could
+// never fail:
+//   accounting.ts:5860  balanced = opening + purchases − consumption === closing
+//   materialWindow      consumedSen = openingSen + purchaseSen − closingSen
+// (`stockSummaryRange` maps `consumptionSen: g.consumedSen` straight from
+// `materialWindow`, so both really are the same number.) Substituting gives
+// `closing === closing` — true for every row, for every month, forever.
+// CONSUMPTION is the balancing plug; closing is the measured side. So the ✓
+// column asserted a verification nobody had performed, on a stock valuation.
+// The column and its "if a row shows !" footnote are gone. Re-deriving
+// consumption from an independent source (cost_ledger RM_ISSUE) would make a
+// real check possible, but choosing that basis is an owner/finance decision.
 
 function StockSummaryTab() {
   const { toast } = useToast();
@@ -8759,7 +8746,6 @@ function StockSummaryTab() {
     return () => { stale = true; };
   }, [month, reloadKey]);
 
-  const anyUnbalanced = (data?.rows ?? []).some((r) => !r.balanced);
 
   const handlePost = async () => {
     if (!(await confirm({ title: "Post closing stock?", message: `Post closing stock for ${month}? This takes the period's stock onto the balance-sheet stock accounts (DR 330-x · CR closing-stock) and brings down opening; re-posting/next month re-bases automatically.`, danger: false }))) return;
@@ -8814,7 +8800,6 @@ function StockSummaryTab() {
                   <th className="px-3 py-2 text-right">Purchases</th>
                   <th className="px-3 py-2 text-right">Consumption</th>
                   <th className="px-3 py-2 text-right">Closing</th>
-                  <th className="px-3 py-2 text-center">✓</th>
                 </tr>
               </thead>
               <tbody>
@@ -8825,7 +8810,6 @@ function StockSummaryTab() {
                     <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(r.purchasesSen)}</td>
                     <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(r.consumptionSen)}</td>
                     <td className="px-3 py-1.5 text-right tabular-nums font-medium">{formatCurrency(r.closingSen)}</td>
-                    <td className="px-3 py-1.5 text-center">{r.balanced ? <span className="text-[#27500A]">✓</span> : <span className="text-[#9A3A2D]" title="opening+purchases−consumption ≠ closing">!</span>}</td>
                   </tr>
                 ))}
                 <tr className="border-b border-[#F0ECE9] text-[#6B7280]">
@@ -8833,14 +8817,12 @@ function StockSummaryTab() {
                   <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(data.wip.openingSen)}</td>
                   <td className="px-3 py-1.5 text-right" colSpan={2} />
                   <td className="px-3 py-1.5 text-right tabular-nums font-medium">{formatCurrency(data.wip.closingSen)}</td>
-                  <td className="px-3 py-1.5" />
                 </tr>
                 <tr className="border-b border-[#F0ECE9] text-[#6B7280]">
                   <td className="px-3 py-1.5">330-9000 FINISHED GOODS</td>
                   <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(data.fg.openingSen)}</td>
                   <td className="px-3 py-1.5 text-right" colSpan={2} />
                   <td className="px-3 py-1.5 text-right tabular-nums font-medium">{formatCurrency(data.fg.closingSen)}</td>
-                  <td className="px-3 py-1.5" />
                 </tr>
                 <tr className="bg-[#F0ECE9]/60 font-semibold">
                   <td className="px-3 py-2">RAW MATERIAL TOTAL</td>
@@ -8848,16 +8830,12 @@ function StockSummaryTab() {
                   <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(data.totals.purchasesSen)}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(data.totals.consumptionSen)}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(data.totals.closingSen)}</td>
-                  <td className="px-3 py-2" />
                 </tr>
               </tbody>
             </table>
           )}
         </CardContent>
       </Card>
-      {anyUnbalanced && (
-        <p className="text-[11px] text-[#9A3A2D]">Some groups show "!" — opening + purchases − consumption ≠ closing. This usually means an ADJUSTMENT or non-receipt/issue movement in the period; check the cost ledger.</p>
-      )}
 
       {/* Phase 4.5 — consumption + labour split by product line, following
           the RM_ISSUE / LABOR_POSTED → production-order category. */}
@@ -11049,7 +11027,6 @@ function CashFlowTab() {
   };
   const months: string[] = [];
   { const now = new Date(); for (let i = 0; i < 18; i++) { const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1)); months.push(d.toISOString().slice(0, 7)); } }
-  const yrNow = new Date().getUTCFullYear(); const years = [yrNow, yrNow - 1];
 
   const visibleRows = rows.filter((r) =>
     r.depth <= (level >= 3 ? 9 : level) && (!r.groupId || r.kind === "group" || !collapsed.has(r.groupId)),
@@ -11083,9 +11060,20 @@ function CashFlowTab() {
               className={`rounded-md border px-3 py-1.5 text-sm cursor-pointer ${level === L ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>L{L}</button>
           ))}
           <select value={period} onChange={(e) => setPeriod(e.target.value)} className="rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
+            {/* BUG-2026-08-13-092 — the Quarter ("2026-Q1") and Full-year
+                ("2026") options used to sit here. `fyMonths` (cashflow-engine)
+                parses the period as `YYYY-MM`, so those values produced 13
+                columns all keyed "2026-NaN" and labelled "undefined'26": no
+                real month matched a column and `inFy` was false for every leg,
+                so EVERY income and expense line — and Cash Surplus — rendered
+                "-", while `balBefore("2026-NaN")` string-compared TRUE against
+                every real month and printed a large, real Bank b/f and c/f
+                identically in all 14 columns. A statement reading "no income,
+                no expenses, bank RM X" is the most dangerous shape there is.
+                Whether cash flow should support quarter / full-year windows is
+                an owner decision; the fix here is to stop offering a period
+                the engine cannot compute. */}
             <optgroup label="Monthly">{months.map((m) => <option key={m} value={m}>{m}</option>)}</optgroup>
-            <optgroup label="Quarter">{years.flatMap((yr) => [1, 2, 3, 4].map((q) => <option key={`${yr}-Q${q}`} value={`${yr}-Q${q}`}>Q{q} {yr}</option>))}</optgroup>
-            <optgroup label="Full year">{years.map((yr) => <option key={`${yr}`} value={`${yr}`}>Full Year {yr}</option>)}</optgroup>
           </select>
           <ExportButtons build={buildExport} filenameBase={`CashFlow-${period}`} title="Statement of Cash Flow" subtitle={`Period: ${period}`} />
         </div>

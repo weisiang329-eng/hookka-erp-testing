@@ -192,6 +192,220 @@ was always right — only the printed statement was wrong.
 **Guard.** `tests/accounting-subledger-parity.test.mjs` asserts the closing balance, not
 the presence of a clause; the mock applies the exclusion **only when the SQL asks for
 it**, so deleting the predicate makes the balance move and the test go red.
+## BUG-2026-08-13-090 — "Record Payment" on Debtor/Creditor Aging wrote to a dead table, and swallowed the failure `accounting` `money` `ui-frontend` `data-integrity` 🟢
+
+**Symptom.** On Accounting › Debtor Aging (and its Creditor twin), each row with a balance
+carried a **Record Payment** button. Clicking it, entering RM 5,000, a date and a bank
+reference, and pressing Submit closed the form cleanly, cleared the fields and refreshed the
+grid — with no error and no success message. The customer's Total, the aging buckets and
+Total Outstanding were **byte-identical afterwards**. No `payment_records` row, no
+`invoice_payments` row, no GL leg, no change to the invoice's `paidAmount`.
+
+**Root cause.** Two independent faults, either of which alone would have made it inert.
+
+1. The form POSTed `/api/accounting/aging`. That handler
+   (`src/api/routes/accounting.ts:741`) UPDATEs `ar_aging` / `ap_aging`:
+   `const table = type === "ar" ? "ar_aging" : "ap_aging";` (`:759`). **`GET /aging` does
+   not read those tables.** It computes the aging live from `invoices` /
+   `purchase_invoices`, and says so in capitals — *"the prod-correct source — the old
+   ar_aging / ap_aging snapshot tables are dead"* (`:490`), repeated at `:377` and in
+   `src/api/lib/ensure-finance-org.ts:22` (*"dead snapshot tables today"*). Nothing anywhere
+   in `src/api` reads them. The write landed in a table no screen consults.
+2. The client never inspected the response: a bare `await fetch(...)` with no `res.ok` and
+   no body check, followed unconditionally by `setPaymentForm(null)` and `onRefresh()`. Since
+   those tables are unmaintained, the near-certain real response is the handler's own **404
+   "Customer not found in AR"** — which closed the form as though it had saved.
+
+`date` and `reference` were not read by the handler at all.
+
+**Why it survived.** The AR and AP tabs are the two screens where a payment *feels* like it
+belongs, and the control did call a real, existing endpoint that returns HTTP 200 for the one
+case where a row happens to exist. The page's own refresh then re-read the live aging — so
+the operator saw fresh, correct-looking numbers immediately after "recording" a payment.
+
+**Fix.** `src/pages/accounting/index.tsx` — removed the button, the form and both
+`handlePayment` functions from `ARTab` and `APTab`, and dropped the now-empty Action column
+(header, cells, footer cell, and the doc-detail `colSpan` 8→7). Each tab now says it is
+read-only and links to the screen that posts for real: `/invoices/payments` (customer
+receipts) and `/invoices/supplier-payments`. Both instances were fixed together — the AP twin
+was a byte-identical copy, and fixing one would have left the other.
+
+Swept the same class on the same page: four `action: () => {}` context-menu items on the
+Overview journal grid (View / Edit / separator / Refresh — "Edit" advertising an action on a
+POSTED journal that does not exist) and a fifth "View" no-op on the Journal Entries grid.
+Replaced with the one item that works from data already on screen (Print voucher).
+
+**Verified.** `tests/accounting-ui-truthfulness.test.mjs` — a mutating call to
+`/api/accounting/aging`, either Record Payment body, the affordance itself, or any
+`action: () => {}` menu item fails the suite. Both halves proved RED by reintroducing the
+bug. **Not deployed** — the main session owns the deploy and the live verification.
+
+**Owner decision owed.** Whether the aging screens should offer a payment shortcut at all
+(and if so, which invoice it knocks off) is a design call, not a defect fix.
+
+---
+
+## BUG-2026-08-13-091 — Accounting › Overview reported hand-keyed journals as the company's revenue `accounting` `money` `ui-frontend` 🟢
+
+**Symptom.** The default Accounting tab's three headline cards — **Revenue (MTD)**,
+**Expenses (MTD)**, **Net Profit** — printed confident RM figures that agreed with nothing
+else in the system. On a book where revenue arrives through sales invoices they read
+RM 0.00 while the P&L tab showed the real revenue.
+
+**Root cause.** Three untruths in six lines:
+
+```ts
+const revenue  = accounts.filter(a => a.type === "REVENUE" && a.parentCode).reduce((s,a) => s + a.balance, 0);
+const expenses = accounts.filter(a => a.type === "EXPENSE" && a.parentCode).reduce((s,a) => s + a.balance, 0);
+const netProfit = revenue - expenses;
+```
+
+1. **Wrong source.** `a.balance` is `rowToCoa`'s `chart_of_accounts.balanceSen`. The only
+   writers of that column anywhere in `src/api` are the manual-journal paths —
+   `accounting.ts` PUT `/journals/:id` (`:1378` POSTED, `:1447` REVERSED) and POST
+   `/journals/:id/lifecycle` (`:1640`). Sales invoices, purchase invoices, receipts, supplier
+   payments, delivery orders, credit/debit notes and trade finance all post to
+   `ledger_journal_entries` and never touch it. The cards reported the net of hand-keyed
+   journals.
+2. **Fabricated caption.** "(MTD)" — nothing in the component filtered by date. `balanceSen`
+   is a running since-inception balance.
+3. **A whole account type dropped.** `ChartOfAccount.type` includes `COST`, and the posting
+   code treats COST like EXPENSE (`accounting.ts:1370-1375`). Only `"EXPENSE"` was summed, so
+   **Net Profit was overstated by the entire cost-of-sales block.**
+
+**Fix.** Same treatment already blessed for these exact three figures on `/reports`
+(BUG-2026-08-13-009): read `GET /api/accounting/pl?period=<current YYYY-MM>`, which nets the
+posted ledger per account and classifies by the account's own COA type. A category with no
+posted account renders **—**, never RM 0.00, and a derived line inherits the dash from its
+weakest input (`sourced` / `derived`). "Cost & Expenses" is COGS + OpEx so the three cards tie
+by the server's own arithmetic (`netProfit = revenue − cogs − opex`); summing only one of them
+would have left Revenue − Expenses ≠ Net Profit on screen. Captions now name the actual month.
+`OverviewTab` no longer takes the chart of accounts as a prop.
+
+**Verified.** `tests/accounting-ui-truthfulness.test.mjs` pins both halves — the
+`balanceSen` reduce cannot return, and each card must render through the provenance guard.
+Proved RED both ways. **Not deployed.**
+
+**Owner decision owed.** The label "Cost & Expenses" for COGS + OpEx, and whether the cards
+should show the current month or FY-to-date.
+
+---
+
+## BUG-2026-08-13-092 — Cash Flow: pick a Quarter and get a statement with no income, no expenses, and a real bank balance `accounting` `money` `ui-frontend` 🟢
+
+**Symptom.** Accounting › Cash Flow offered Monthly, **Quarter** and **Full year** periods.
+Selecting "Q1 2026" or "Full Year 2026" rendered a statement whose 13 month columns were all
+headed **`undefined'26`**; every Revenue Collection, Raw Materials, Direct Labour and General
+Expense line, and **Cash Surplus / (Deficit)**, showed `-`. **Bank balance b/f** and **Bank
+balance c/f** showed a large, real ringgit figure — the same number in all 14 columns. The
+Excel/PDF export carried the same. The owner reads "Bank c/f RM X" on a statement that says
+the company earned and spent nothing.
+
+**Root cause.** `fyMonths(period, fyeMonth)` (`src/lib/cashflow-engine.ts`) parses the period
+as `YYYY-MM`: `const [py, pm] = period.split("-").map(n => parseInt(n, 10))`. For `"2026-Q1"`
+`pm` is `NaN`, so every one of the 13 column keys became `"2026-NaN"` (and `monthLabel`
+rendered `names[NaN]` → `undefined'26`). Two consequences, measured by running the real
+function:
+
+* `colIndex.get("2026-05")` is `undefined` and `inFy("2026-05")` is false — because
+  `"2026-05" >= "2026-NaN"` is a **string** comparison and `'0' < 'N'`. No leg reached any
+  column, so every line and the surplus row summed to zero.
+* `balBefore("2026-NaN")` sums every leg with `bl.ym < "2026-NaN"` — which is **every real
+  2026 month and everything earlier**. So b/f was a large true number, and
+  `cfVals = bfVals + 0` repeated it.
+
+The sibling P&L Statement selector looks identical but is **correct** and untouched: `/pl` and
+`/pl-statement` route the period through `ymInPeriod` / `periodStartYm` / `periodEndYm`
+(`accounting.ts:5382-5416`), which do understand `2026-Q1` and `2026`. Only the cash-flow
+path goes through `fyMonths`.
+
+**Fix.** Removed the Quarter and Full-year optgroups from the Cash Flow selector (its only
+producer), and gave `fyMonths` an explicit `YYYY-MM` guard that **throws** rather than
+emitting NaN column keys — a 500 the caller can see beats a plausible statement that is not
+one. Checked the only other caller (`accounting.ts:10437`, the finance dashboard) passes
+month keys from `allMonths`, so it is unaffected.
+
+**Verified.** `tests/accounting-ui-truthfulness.test.mjs` — a source guard scoped to
+`CashFlowTab` (the P&L selector is explicitly asserted to keep its options), plus a
+behavioural half that runs the real `fyMonths` and asserts it refuses `2026-Q1`, `2026`,
+`2026-13`, `2026-00` and `""` while still returning real months for `2026-08`. Both proved
+RED. **Not deployed.**
+
+**Owner decision owed.** Whether Cash Flow should support quarter / full-year windows at all
+(the engine would need FY-window expansion, not a parse fix).
+
+---
+
+## BUG-2026-08-13-093 — the Stock Summary "✓" column was a check that could never fail `accounting` `inventory-display` `data-integrity` 🟢
+
+**Symptom.** Accounting › Stock Summary showed a green **✓** in the last column of every
+material-group row, with `title="opening+purchases−consumption ≠ closing"`, and a red footnote
+telling the owner what to do if a row ever showed **!**. It never could. On a stock valuation,
+the owner was being shown a measured-looking verification that verified nothing.
+
+**Root cause.** The endpoint computes
+`balanced: r.openingSen + r.purchasesSen - r.consumptionSen === r.closingSen`
+(`accounting.ts:5860`), while consumption **is defined as** the plug:
+`const consumedSen = openingSen + purchaseSen - closingSen` (`materialWindow`), which
+`stockSummaryRange` maps straight through as `consumptionSen: g.consumedSen` (`:5637`).
+Substituting gives `closing === closing` — true for every row, every month, forever. The
+tab's own header comment had the derivation backwards, claiming closing was the recomputed
+side.
+
+**Fix.** Removed the ✓/! column (header, cell, the three empty trailing cells on the WIP / FG
+/ TOTAL rows), the unreachable `anyUnbalanced` footnote and its computation, and corrected the
+header comment to say which side is the plug. The Trial Balance's own `balanced` badge is a
+**real** cross-check (server-computed ΣDR vs ΣCR over independent columns) and is explicitly
+pinned in place by the test.
+
+**Verified.** `tests/accounting-ui-truthfulness.test.mjs` fails if `r.balanced` renders again
+or if the Trial Balance badge disappears. Proved RED. **Not deployed.**
+
+**Owner decision owed.** A real check is possible by re-deriving consumption independently
+(cost_ledger `RM_ISSUE`), but choosing that basis is a finance decision — and note the
+**Consumption column itself is a balancing figure, not measured issues**.
+
+---
+
+## BUG-2026-08-13-094 — four money forms totalled lines the save then dropped `accounting` `money` `ui-frontend` 🟢
+
+**Symptom.** On the New Payment (expense voucher) form, entering Rent RM 500 with an account,
+Utilities RM 300 with an account, and RM 200 with the account picker left blank showed
+**Total RM 1,000.00**, enabled *Post payment*, and toasted **"Payment posted"**. The voucher
+that exists afterwards — in the list, on the printed voucher and in the GL — is **RM 800.00**
+with two lines. Nothing told the operator RM 200 vanished.
+
+**Root cause — one shape, four sites.** The figure the operator reads reduced over **every**
+line, while the request body filtered to lines carrying an account, and the backend recomputes
+each document header from the lines it actually receives (`validateDocLines` /
+`computeBillTotals`). So the screen and the saved document were computed by two different
+expressions over two different row sets — the class that caused BUG-2026-07-17-001, whose fix
+was to route every figure through one shared helper.
+
+| # | form | displayed figure | payload |
+|---|---|---|---|
+| 1 | Payment Voucher | `lines.reduce(…)` | `lines.filter(l => l.accountCode && …)` |
+| 2 | Official Receipt | same, byte-identical component | same |
+| 3 | Other-Party Bill | `form.lines.reduce(…)` → Total | `.filter(l => l.counterAccount && …)` |
+| 4 | Journal Entry | `totalDebit`/`totalCredit` over all rows drove the **green "balanced" footer and the enabled Save** | `validLines` |
+
+Site 4 is the loudest: DR 1,000 on an account-less row against CR 1,000 on a real one rendered
+a green, balanced RM 1,000.00 / RM 1,000.00 footer with Save enabled — and the server then
+refused with *"Debits (0) must equal Credits (100000)"*. Site 3 is the most likely to fire in
+practice: the OCR scan path prefills N lines all sharing one (often empty) account.
+
+**Fix.** Each form now declares **one** predicate — `pvLineWillPost` / `orLineWillPost` /
+`billLineWillPost` / `jeLineWillPost` — and derives **both** the displayed figure and the
+payload from it, so they cannot drift. A line the operator has filled in that will not post is
+now counted and disclosed next to the total ("N lines with an amount but no account — not
+counted, and will not be saved") rather than silently discarded.
+
+**Verified.** `tests/accounting-ui-truthfulness.test.mjs` pins the predicate **and** every
+figure/payload derived from it, per site, and fails if any total goes back to reducing over
+the whole array or if a dropped-line disclosure is removed. Three of the four sites proved RED
+individually. **Not deployed.**
+
+---
 
 ## BUG-2026-08-13-072 — the "delivered with issues" billing hold had never fired, in five places at once `money` `delivery-orders` `invoices` `data-integrity` 🟢
 

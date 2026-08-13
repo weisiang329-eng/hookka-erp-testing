@@ -65,6 +65,58 @@ survived. Proved by deleting the check (77 bytes) and watching it go red.
 stayed green. That looked like "the guard doesn't work" but was actually "the mutation
 didn't apply". Always assert the mutation changed the file before believing a red-or-green
 result — a mutation test that doesn't mutate is a false all-clear.
+## BUG-2026-08-13-042 — every CO save with a Customer PO filled in reported "Save did NOT take effect" — on a save that had worked `consignment` `ui-frontend` `data-integrity` 🟢
+
+**Symptom.** Edit a consignment order with anything in **Customer PO No.**, press Save,
+and the toast reads *"Save did NOT take effect — customerPOId: tried PO-…, system has
+(empty). Please try again."* The page refuses to navigate. Every other field on that same
+save had persisted perfectly. Retrying fails identically, for ever.
+
+This is the worst failure mode a save guard has: `verifiedSave` exists precisely so the
+operator can trust a green tick (owner 2026-05-25: *"if I save successfully, it should
+only tell me successful when it actually saved"*). A guard that cries wolf on a healthy
+write is worse than no guard — the next real mismatch is the one nobody believes. Same
+family as BUG-2026-08-13's `reason: "unverified"`, which told the owner an edit was lost
+that had actually persisted.
+
+**Root cause.** `consignment/edit.tsx:557` listed `customerPOId` in the `expect` map.
+`rowToCO` has never emitted that key, because `consignment_orders` has no customer-PO
+column — the field was a leftover from the page's fork off `sales/edit.tsx`, filed in
+`src/types/index.ts` under a block literally commented *"SO-compat shims … CO has no
+customer-PO concept; values are always empty/undefined"*. So the readback returned
+`undefined`, `equalLoose` normalised that to `null`, compared it against `"PO-…"`, and
+recorded a diff. The write was never the problem; the **question** was unanswerable.
+
+The `expect` map is written in JS shorthand (`customerId, customerPOId, …`), so each key
+is just an identifier — nothing connects it to the response shape it is compared against,
+and `tsc` has no opinion.
+
+**Fix — the comparison, not the write.** `customerPOId` is out of the `expect` map, and
+out of the request body it was decorating (the route never read it).
+
+An input the save discards is *why* anyone typed into it, so the three dead surfaces went
+with it: the "Customer PO No." box on the CO edit page, the "Customer Reference" box on
+the CO **create** page — the other door, silently eating the value at create time with no
+error at all — and the CO detail page's "Customer PO" row, which asserted `-` about every
+consignment order ever raised. Each site keeps a comment saying what it would take to
+bring the field back (a column, a write path, a `rowToCO` emit — not just a box).
+`src/types/index.ts` documents the shim block accordingly. **No column was added and no
+write path changed**; the CO's real customer references, "Customer CO No." and
+"Reference", are untouched and both persist.
+
+**Verified.** `tests/verified-save-expect-contract.test.mjs` pins the general invariant —
+*every key in an `expect` map must be a key the endpoint actually returns* — two ways:
+the CO map is checked against the keys the **real by-id handler** puts on the wire, and
+the sales-order twin's map against `rowToSO`'s own emitted keys, so the sibling page
+cannot drift the way this one did. Three of its four assertions fail against the pre-fix
+pages. Gates clean.
+
+**NOT verified:** not deployed, no prod session. Nothing here changes stored data, so
+there is nothing to check in the database; the observable is a UI one — edit a CO, save,
+and confirm it navigates with no error toast.
+
+---
+
 ## BUG-2026-08-13-041 — resuming an ON_HOLD Consignment Order walked it BACKWARDS to CONFIRMED `consignment` `status-cascade` 🟢
 
 **Symptom.** Put a CO on hold at IN_PRODUCTION, click **Resume Order**, and it comes

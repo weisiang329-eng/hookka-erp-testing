@@ -193,7 +193,6 @@ export default function EditSalesOrderPage() {
   const [order, setOrder] = useState<SalesOrder | null>(null);
 
   const [customerId, setCustomerId] = useState("");
-  const [customerPOId, setCustomerPOId] = useState("");
   const [customerCOId, setCustomerCOId] = useState("");
   const [reference, setReference] = useState("");
   const [companyCODate, setCompanyCODate] = useState("");
@@ -212,7 +211,7 @@ export default function EditSalesOrderPage() {
   // resets the flag (the page unmounts and useActiveTabDirty cleans up).
   const formSig = useMemo(
     () => JSON.stringify({
-      customerId, customerPOId, customerCOId, reference,
+      customerId, customerCOId, reference,
       companyCODate, customerDeliveryDate, hookkaExpectedDD, notes,
       items: items.map((it) => ({
         productId: it.productId, fabricCode: it.fabricCode, quantity: it.quantity,
@@ -223,7 +222,7 @@ export default function EditSalesOrderPage() {
       })),
     }),
     [
-      customerId, customerPOId, customerCOId, reference,
+      customerId, customerCOId, reference,
       companyCODate, customerDeliveryDate, hookkaExpectedDD, notes, items,
     ],
   );
@@ -339,7 +338,6 @@ export default function EditSalesOrderPage() {
           const so: SalesOrder = d.data as SalesOrder;
           setOrder(so);
           setCustomerId(so.customerId);
-          setCustomerPOId(so.customerPOId || "");
           setCustomerCOId(so.customerCOId || "");
           setReference(so.reference || "");
           setCompanyCODate(so.companyCODate ? so.companyCODate.split("T")[0] : "");
@@ -569,7 +567,7 @@ export default function EditSalesOrderPage() {
       });
       // 2026-05-27 verifiedSave migration (mirrors sales/edit.tsx).
       const requestBody = {
-        customerId, customerPOId, customerCOId, reference,
+        customerId, customerCOId, reference,
         companyCODate, customerDeliveryDate, hookkaExpectedDD, notes,
         items: itemsForServer,
         ...(overrideTokenFromState ? { overrideToken: overrideTokenFromState } : {}),
@@ -587,8 +585,22 @@ export default function EditSalesOrderPage() {
           const j = (await r.json()) as { success?: boolean; data?: SalesOrder } | SalesOrder;
           return (j as { data?: SalesOrder })?.data ?? (j as SalesOrder) ?? null;
         },
+        // BUG-2026-08-13-042. Every key here MUST be one the endpoint actually
+        // emits, or the guard reports a failure that never happened.
+        // `customerPOId` was in this map and `rowToCO` has never carried it —
+        // `consignment_orders` has no customer-PO column at all — so the
+        // readback answered `undefined`, `equalLoose` compared "PO-…" against
+        // nothing, and EVERY save with a Customer PO typed in reported
+        // "Save did NOT take effect" and refused to navigate, while all the
+        // other fields had persisted perfectly.
+        //
+        // The rule this encodes: verifiedSave compares what the SERVER
+        // promises to return. A field the contract does not carry is not a
+        // failed write — it is a question the readback cannot answer, and
+        // asking it turns the one guard the operator is meant to trust into a
+        // permanent liar. Pinned by tests/verified-save-expect-contract.test.mjs.
         expect: {
-          customerId, customerPOId, customerCOId, reference,
+          customerId, customerCOId, reference,
           companyCODate, customerDeliveryDate, hookkaExpectedDD, notes,
         },
       });
@@ -715,10 +727,15 @@ export default function EditSalesOrderPage() {
                   placeholder="Select customer..."
                 />
               </div>
-              <div>
-                <label className="block text-sm font-medium text-[#374151] mb-1.5">Customer PO No.</label>
-                <Input value={customerPOId} onChange={(e) => setCustomerPOId(e.target.value)} placeholder="e.g. PO-HKL-2604-012" />
-              </div>
+              {/* "Customer PO No." used to sit here. It was a leftover from the
+                  fork off sales/edit.tsx: `consignment_orders` has no
+                  customer-PO column, the CO route never read the field, and
+                  `rowToCO` never returned it — so whatever was typed vanished
+                  on save and the box was blank again on reload. Its only
+                  observable effect was the false "Save did NOT take effect"
+                  (BUG-2026-08-13-042). The CO's own customer reference is the
+                  field below. Do not re-add this input without a column and a
+                  write path behind it. */}
               <div>
                 <label className="block text-sm font-medium text-[#374151] mb-1.5">Customer SO No.</label>
                 <Input value={customerCOId} onChange={(e) => setCustomerCOId(e.target.value)} placeholder="e.g. SO-12345" />

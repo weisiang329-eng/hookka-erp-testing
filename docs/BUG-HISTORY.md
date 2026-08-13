@@ -34,6 +34,121 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-026 — the /m Customer detail downloaded 1,342 sales orders (2.16 MB) to show one customer's last 20, behind a comment that had been false for a month `performance` `ui-frontend` `sales-orders` 🟢
+
+**Symptom.** Opening ONE customer on a phone (`/m/customers/:id`). `src/pages/m/config/modules.ts` `customerDetail.extraFetches` fetched the **bare `/api/sales-orders`** — the whole-org list, every SO field plus every 24-field line item — and the bare `/api/invoices`, then client-filtered to that customer and rendered at most **20 rows of five fields**.
+
+**Root cause — a comment that stopped being true and nobody re-read.** The block was justified by *"`/api/sales-orders` list is in localStorage cache (preloaded) so this is fast"*. Wrong twice over:
+
+1. the `/m` preload was slimmed on **2026-07-14** to the Home's own first-paint endpoints (`src/pages/m/lib/preload.ts`) and has not warmed `/api/sales-orders` since;
+2. it would not have mattered anyway — **`useCachedJson` ALWAYS re-fetches on mount** (`src/lib/cached-fetch.ts:478`, `void ttlSec;`). The cache serves the first paint; it never suppresses the request.
+
+This is the third time on this codebase that a **code comment described intent rather than behaviour** and sent a reader the wrong way (see `HOOKKA-GOTCHAS.md` §"how the WRONG answer gets produced", rule 3).
+
+**Fix.** New narrow projection **`GET /api/sales-orders?fields=customer-mini`** (`src/api/routes/sales-orders.ts`, beside `?fields=orders-due` / `delivery-refs` / `price-index`; same shape — a narrow `SELECT` of the eight columns the panel reads, sharing the existing `sales_orders_list_snapshot` TABLE under `cache_key` `"customer-mini"`, so **no new table** and migrations stay inert on deploy). Archive / service-order / customer-scoped variants compute directly and are never written into the org-wide snapshot row.
+
+**It deliberately does NOT filter by customer, and that is the whole subtlety.** The panel matches `customerId === cid || customerName === cname` — an **OR**. A server-side `?customerId=` read would silently drop the rows matched by NAME only and change the **`Recent Orders · N`** heading. That is exactly the trap recorded as audit finding **D6** for `/api/invoices?customerId=`. Same rows in, same rows out, same order (`created_at DESC, id DESC`, which the panel's positional `.slice(0, 20)` depends on); what goes away is ~95% of every row and every line item.
+
+**Left alone, on purpose.**
+- **`/api/invoices` on the same panel.** Its list rows are already header-only (`rowToInvoiceList` ships `items: []` / `payments: []`) over ~355 rows, so there is far less to win — and `?customerId=` carries the same OR-on-name divergence on a **money-facing** surface. Needs its own before/after key-set comparison.
+- **`/api/purchase-orders` on the supplier detail** (`modules.ts` `supplierDetail.extraFetches`). 165 POs / 158,763 bytes measured on prod (BUG-2026-08-13-008). The route has **no supplier filter and no `?fields=` projection** (`purchase-orders.ts:322-323` accepts only `page`/`limit`), so unlike the SO panel there is nothing to switch to — it needs a new backend read. **Its false "preloaded so this is fast" comment IS corrected in place** so the next reader is not misled again.
+
+**Verified.** `tests/so-customer-mini-projection.test.mjs` (9 tests) replays the panel's real selection logic — with `read`/`str`/`num` transcribed verbatim from `src/pages/m/config/helpers.ts` and **locked against that file** — over a fixture that contains a name-only match, a foreign customer, and more than 20 matching rows. It asserts the rendered rows are `deepEqual` before/after, that the name-only row survives (and that a `customerId`-only filter would have changed the heading, so the assertion has teeth), that a reordered projection FAILS, and that the route emits all eight keys with the list's `ORDER BY`.
+
+**Numbers.** The 2.16 MB / 1,342 rows figure is **measured on prod** (BUG-2026-08-13-013, same list). The post-change size is **NOT measured** — this branch is not deployed and the prod API is behind login. The row count is unchanged by construction; only the per-row field count drops.
+
+---
+## BUG-2026-08-13-025 — the /m WIP list has always been empty: it reads `data.wip`, a key the endpoint has never emitted `inventory-display` `ui-frontend` 🔴
+
+**Symptom.** `/m` → Inventory → **WIP** renders nothing, on every load, for everyone.
+
+**Root cause.** `src/pages/m/config/modules.ts` `wipSource` does `select: selectNested("data", "wip")`. `GET /api/inventory` emits `{ finishedProducts, wipItems, rawMaterials }` (`src/api/routes/inventory.ts:170`). `selectNested` walks the path and returns `[]` when any hop is missing (`src/pages/m/config/helpers.ts:174-183`), so the list is `[]` by construction. Same class as BUG-2026-08-13-024 below — a read key that never matched a write key, failing silently as "empty" rather than as an error.
+
+**NOT fixed here, deliberately.** Re-pointing the selector at `wipItems` would ADD rows (a visible behaviour change, not an output-identical projection) **and it would not actually work**: `wipSource.toVM` reads `name`/`productName` and `qty`/`quantity`, none of which `rowToWipItem` emits — it has `relatedProduct` and `stockQty`. Every row would render "—" with qty 0. That is the Phase-3 wiring the file's own `TODO` describes, not a typo fix. Recorded here so the next reader does not "fix the key" and ship a list of dashes.
+
+**What DID change.** The screen now requests `?buckets=wipItems` instead of all three buckets (BUG-2026-08-13-021), so it stops downloading 1.16 MB to render an empty list. Output is identical: `[]` before, `[]` after.
+
+---
+## BUG-2026-08-13-024 — the supplier SKU picker read `finishedGoods`; the endpoint emits `finishedProducts`, so finished goods never appeared `ui-frontend` `data-migration` 🟢
+
+**Symptom.** `/suppliers/:id` → **Add/Edit SKU mapping**. The Internal Code / Internal Description search boxes advertise *"Search by code or description (**FG / WIP / RM**)"* (`src/pages/procurement/sku-form-dialog.tsx:252`). Only RM has ever been searchable.
+
+**Root cause.** `src/pages/suppliers/detail.tsx:214` spread `invResp.data.finishedGoods`. `GET /api/inventory` has no such key — its finished-goods bucket is **`finishedProducts`** (`src/api/routes/inventory.ts:170`); `finishedGoods` appears nowhere in `src/api`. So the spread was `undefined`, `|| []` swallowed it, and the picker silently contained no finished goods. Textbook camelCase/rename read-side class (see the `data-migration` index entry): a mismatched key does not throw, it just makes a list look empty.
+
+**Fix — the dead key is REMOVED, not renamed.** Removing it is **output-identical**: it deletes a spread that contributed zero rows. Renaming it to `finishedProducts` was rejected for two independent reasons:
+
+1. it would ADD 365 rows to a picker — a visible behaviour change, and whether a **finished good may back a supplier-material binding** is an owner question, not a typo;
+2. **it would not work anyway.** The picker needs `{itemCode, description, baseUOM, itemGroup}`; `rowToProduct` (`inventory.ts:84`) emits none of them — products carry `code` / `name`. The rows would render blank, and `selectInventoryItem` would commit `undefined` into `internalRMCode` / `materialName`.
+
+**Adjacent, NOT fixed:** the same shape applies to `wipItems`, which IS still requested and still spread. `rowToWipItem` also has no `itemCode`/`description`/`baseUOM`/`itemGroup`, so every WIP row in that dropdown is blank and can never match a non-empty search. It is kept because the no-search branch renders `inventoryItems.slice(0, 50)` and whether any WIP row is reachable there depends on how many raw materials exist — live data this branch cannot measure. **Dropping it would have been a row-set change resting on an assumption**; keeping it costs a few KB and keeps the list provably identical. The blank-WIP-row problem needs an owner decision alongside the FG one.
+
+**Verified.** `tests/inventory-buckets-projection.test.mjs` asserts the endpoint never emits a `finishedGoods` key and that asking for one lands on the safe fallback rather than an empty picker.
+
+---
+## BUG-2026-08-13-023 — the Service Case detail pulled the whole customer master to resolve one foreign key `performance` `ui-frontend` 🟢
+
+**Symptom.** Opening any service case fetched the bare **`/api/customers`** — every customer and every delivery hub — and used it for exactly one thing: `custResp.data.find(c => c.id === caseDetail.customerId)` (`src/pages/service-cases/detail.tsx:236`), to render a name, a code, a phone and the default delivery hub on the printed report.
+
+**Root cause.** Audit finding **D5**. `GET /api/customers/:id` already exists, is the scoped read for exactly this, and is already used this way **two pages over** — `sales/detail.tsx:467` and `consignment/detail.tsx:424`. This page simply never adopted it. It also added a request to a tier that **serializes concurrent calls** (PERF-BACKLOG: 12 parallel = 1511–1902 ms), on a page whose mount burst is already one of the widest in the app.
+
+**Fix.** Straight swap to `/api/customers/${encodeURIComponent(caseDetail.customerId)}`, gated on the id being present so the hook stays unconditional.
+
+**Output identity.** Both handlers build the row with the SAME `rowToCustomer` (`src/api/routes/customers.ts:271`) over the same `customers` row and the same `delivery_hubs` rows. Two deliberate differences:
+- the list is org-scoped (`WHERE orgId = ?`), `/:id` is keyed on the id alone. For a customer of this org the row is identical; for a foreign one the old `.find()` returned nothing. That is a **widening** — it cannot blank a field that used to render — and it is the behaviour the two pages above already have.
+- `/:id` 404s when the customer is gone, so the page now guards on `success === false` to keep `customerRecord` null in exactly the case `.find()` returned `undefined`.
+
+**Verified.** `tests/customer-detail-scoped-read.test.mjs` (4 tests) runs BOTH real handlers against one fixture and asserts the `/:id` body is `deepEqual` **and** `JSON.stringify`-equal to the row `.find()` produced — including the delivery-hub array's contents and ORDER, which the page's `hubs.find(h => h.isDefault) ?? hubs[0]` depends on — plus the no-hubs case and the 404 case.
+
+---
+## BUG-2026-08-13-022 — the Service Case stepper downloaded 1.07 MB of delivery orders to read five fields off a handful `performance` `delivery-orders` `ui-frontend` 🟢
+
+**Symptom.** `src/pages/service-cases/detail.tsx:260` fetched **bare `/api/delivery-orders`** — the whole org, ~393 DOs with every line item, **1.07 MB** (PERF-BACKLOG P6) — so the eight-step Case Pipeline stepper (and the Download-PDF handler that shares it) could read `{salesOrderId, status, createdAt, dispatchedAt, deliveredAt}` off at most a handful of rows.
+
+**Root cause.** Audit finding **D1**, and specifically a **miss**: the sibling production-order fetch **three lines below it** was scoped with `&scope=` in BUG-2026-08-13-003, with the reasoning written out. This one was left whole-org in the same edit.
+
+**Fix.** New narrow projection **`GET /api/delivery-orders?fields=case-pipeline&scope=<soIds>`** (`src/api/routes/delivery-orders.ts`). A single indexed `SELECT` of six columns filtered by `salesOrderId IN (…)`, with the same `customerScopeSql` clause the list path applies. **Deliberately NOT snapshot-cached** — it is a handful of rows off an equality filter, and a snapshot keyed per scope-set would invalidate on every `delivery_orders` write for no benefit. A bare `?fields=case-pipeline` with no `scope=` returns an **empty list**, so a future caller that forgets the scope cannot quietly restore the whole-org pull.
+
+**Output identity — by construction, and checked by call chain rather than grep.** `doResp` appears at exactly three lines in the page: the hook, the `dos:` argument, and the useMemo dep. Its only consumer is `computeCasePipeline` (`src/lib/case-pipeline.ts`), whose FIRST act (line 131) is `input.dos.filter(d => !!d.salesOrderId && svIds.has(d.salesOrderId))` — precisely what `scope=` now does in SQL.
+- **NULLs match the old behaviour exactly.** `rowToOrder` emitted `salesOrderId: row.salesOrderId ?? ""` and `!!""` is false; SQL `IN` never matches NULL. Multi-SO DOs carry a NULL `salesOrderId` (the POST leaves it unset — see `resolveDoSalesOrderIds`) and were **already invisible** to this stepper. Unchanged, deliberately: including them would move the pipeline's dates.
+- The other four values are straight passthroughs in `rowToOrder` — `status` / `dispatchedAt` / `deliveredAt` raw (null preserved) and `createdAt: row.createdAt ?? ""` — reproduced verbatim.
+- **Row order is irrelevant**: the helper folds these rows only through `earliest()` / `latest()` (`case-pipeline.ts:186-190`). An `ORDER BY` is kept anyway so the payload is stable.
+
+**Verified.** `tests/service-case-do-scope-equivalence.test.mjs` (7 tests) runs the REAL `computeCasePipeline` over a whole-org fixture and over the server-scoped subset and asserts the pipelines are `deepEqual` — with the fixture deliberately containing foreign DOs whose `deliveredAt` is LATER than the case's, so a leak would move `deliveredEnteredAt` and fail. It also pins order-independence, the blank-`salesOrderId` case, and — as source-level locks — that the page no longer requests the bare URL, that an unscoped projection returns `[]`, and that the customer-scope clause is applied.
+
+---
+## BUG-2026-08-13-021 — fourteen pages downloaded a 1.16 MB three-bucket inventory payload; not one read more than one bucket `performance` `inventory-display` `ui-frontend` 🟢
+
+**Symptom.** `GET /api/inventory` returns `products` (365 rows, 21 fields) + `wip_items` + `raw_materials` (279 rows) as three unfiltered `SELECT *`s — **1.16 MB** (PERF-BACKLOG P6). Fourteen call sites fetched it whole. Every one of them read **exactly one** bucket and discarded the other two. On `/m` it was **91%** of what remained of the Home payload after BUG-2026-08-13-011/-013.
+
+Worse, on two of them the payload was fetched for something the operator was not even looking at:
+- **`procurement/detail.tsx`** fired it **unconditionally on mount**, but every consumer of `rawMaterials` is edit-only — `filteredRMs` renders inside `{editing && isEditable && …}`. A PO detail page being **READ** downloaded, parsed and never looked at 1.16 MB.
+- **`suppliers/detail.tsx`** fired it on mount for a picker that only exists inside `{showSKUForm && <SKUFormDialog …>}`.
+
+**Fix — two independent changes, in this order.**
+
+1. **Shape.** `?buckets=<csv>` on `GET /api/inventory` (`src/api/routes/inventory.ts`). Only the named buckets are SELECTed and only those keys are emitted. **Omitting the param returns all three exactly as before**, so any call site not yet converted is untouched. An unrecognised value degrades to **all three, never to an empty page** — on a read path, serving more than asked is recoverable, and serving nothing looks exactly like "there is no stock" (BUG-2026-08-13-005's failure shape).
+2. **Timing.** The two edit/modal-only call sites are now gated: `procurement/detail.tsx` on `editing`, `suppliers/detail.tsx` on `showSKUForm`. (Gating on `editing` alone is safe — the Edit button that sets it only renders when `isEditable`.) The visible cost is that the RM picker's list arrives a fetch after the click rather than before it; in practice invisible, because that picker only renders results once the operator types.
+
+**Call sites converted** (bucket in brackets): `procurement/detail` [RM, gated] · `procurement/create` [RM] · `procurement/grn/create` [RM] · `procurement/PurchaseInvoiceDetail` [RM] · `suppliers/detail` [RM+WIP, gated] · `rd/detail` [RM] · `bom.tsx` [RM] · `component-kits/index` [RM, raw fetch] · `service-orders/detail` [FG] · `service-orders/index` [FG] · `service-cases/detail` ×2 [FG] · `inventory/adjustments` [FG] · `m/screens/Home` [RM] · `m/screens/WarehouseScreen` [FG] · `m/config/modules` FG + Stock Value [FG] and WIP [WIP]. **`inventory/index.tsx`'s fallback path is left whole** — it is the one caller that legitimately reads two buckets, and it only runs when the dedicated endpoints fail.
+
+**Cache invalidation still works.** Nine files call `invalidateCachePrefix("/api/inventory")`. That matches on `startsWith` (`src/lib/cached-fetch.ts:202`), and `/api/inventory?buckets=…` starts with `/api/inventory`, so every variant is still cleared on a save.
+
+**The /m preload had to move in lockstep.** `src/pages/m/lib/preload.ts` warms by URL string; left alone it would have downloaded the 1.16 MB payload *and* Home would then have fetched the narrow one. The URL is now a single exported constant (`STOCK_ALERTS_URL`) that both files import — the same guard `ORDERS_DUE_URL` got in BUG-2026-08-13-013.
+
+**Verified.** `tests/inventory-buckets-projection.test.mjs` (7 tests) runs the REAL route against a stub DB and asserts each projected bucket is `deepEqual` **and** `JSON.stringify`-equal to the same bucket unprojected — covering row count, row order and every field of every row, the three ways a narrowed read silently changes what a page renders. It also asserts the unrequested `SELECT`s **do not run** (otherwise the change is theatre) and that an unknown bucket falls back to all three.
+
+**Numbers.** The 1.16 MB figure is **measured on prod** (PERF-BACKLOG P6), as is the 319,231 bytes / 365 rows for `/api/products` used to argue the product bucket is the bulk (BUG-2026-08-13-008). **The `wip_items` row count is unknown and was not measured**, so the saving per call site is stated structurally — two of three buckets removed, the largest of them always — not as a percentage. Nothing here was observed on prod: this branch is not deployed and the prod API is behind login.
+
+---
+## BUG-2026-08-13-020 — `/api/inventory` had no way to ask for less than everything `performance` `infrastructure` 🟢
+
+**Symptom.** The backend half of BUG-2026-08-13-021, recorded separately because it is the reusable piece: `GET /api/inventory` had exactly one shape — three unfiltered `SELECT *`s, always — so no caller could ask for less, however little it needed.
+
+**Fix.** `?buckets=<csv>` (`finishedProducts` | `wipItems` | `rawMaterials`), documented in the route header. Each emitted bucket comes from the SAME query (same columns, same `ORDER BY`) through the SAME row mapper, so the response is a strict **subset** of today's, never a different one. No new table, no migration, no snapshot — the buckets are plain indexed reads and the cost is proportional to what was asked for.
+
+**Why a param and not a new endpoint.** `/api/raw-materials` already serves the RM bucket alone, but its `rowToApi` is a **wider** per-row shape than `inventory.ts`'s `rowToRawMaterial` (it adds `unit`, `status`, `notes`, timestamps, `uomCount`, `itemType`, `stockControl`, `mainSupplierCode`, sheet dims). Switching call sites to it would have been a **shape change requiring its own before/after measurement per page**, not a projection — audit finding D12 flagged exactly this. `?buckets=` keeps every row byte-identical, which is what made the fourteen conversions provable.
+
+---
 ## BUG-2026-08-13-013 — the phone downloaded 1,342 sales orders to render six cards `performance` `ui-frontend` `sales-orders` 🟢
 
 **Symptom.** The `/m` Home's **"Orders due this week"** card. `src/pages/m/screens/Home.tsx:343` fetched **bare `/api/sales-orders`** — the whole-org list, every SO with every line item — and then kept **six rows of seven fields**:

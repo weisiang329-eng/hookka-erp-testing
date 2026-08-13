@@ -77,11 +77,32 @@ any `await import(...)` statically pulls 1,036 KB of PDF vendor code** — measu
 import edges. The fix is in `manualChunks` (`vite.config.ts`); it changes how EVERY
 page loads, so prove PDF generation still works before shipping.
 
-## P6 — Fat payloads  🟡
+## P6 — Fat payloads  🟡 (two of three now have a narrow read)
 
 `/api/delivery-orders` 1.07 MB · `/api/inventory` 1.16 MB ·
 `/api/production-orders/historical-wips` **8.39 MB** (only on opening the
 "Create Stock PO" dialog, so not on a page-load path).
+
+**2026-08-13 — the whole-org-fetch-shape pass (BUG-2026-08-13-020..-026).** The
+endpoints are unchanged by default; what changed is that callers can now ask for
+what they read:
+
+| endpoint | narrow read added | callers moved |
+| --- | --- | --- |
+| `/api/inventory` | `?buckets=finishedProducts\|wipItems\|rawMaterials` | **all 14** — none read more than one bucket. Plus `procurement/detail` and `suppliers/detail` now GATE the fetch behind the edit toggle / the modal, so a page being READ fetches nothing. |
+| `/api/delivery-orders` | `?fields=case-pipeline&scope=<soIds>` | `service-cases/detail` (the fetch BUG-2026-08-13-003 missed) |
+| `/api/sales-orders` | `?fields=customer-mini` | the `/m` Customer detail's Recent-Orders panel (2.16 MB → 8 keys/row) |
+| `/api/customers` | *(none needed — `/:id` already existed)* | `service-cases/detail` |
+
+**Still fat, and why not touched:** `historical-wips` (8.39 MB) is dialog-gated, so
+it is not on a page-load path. `/api/invoices` and `/api/purchase-orders` are still
+pulled whole by the `/m` customer and supplier panels — the first has a
+`?customerId=` that filters on a **different key** than the panel does (the D6 trap,
+on a money surface), the second has no filter and no projection at all.
+
+**Every "after" number in that pass is COMPUTED or structural, never measured** —
+the branch is not deployed and the prod API is behind login. The "before" figures
+are the prod measurements already in this file.
 
 ## P7 — Duplicate calls per navigation  🟡
 

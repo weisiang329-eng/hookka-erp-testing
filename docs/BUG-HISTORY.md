@@ -65,6 +65,62 @@ survived. Proved by deleting the check (77 bytes) and watching it go red.
 stayed green. That looked like "the guard doesn't work" but was actually "the mutation
 didn't apply". Always assert the mutation changed the file before believing a red-or-green
 result — a mutation test that doesn't mutate is a false all-clear.
+## BUG-2026-08-13-041 — resuming an ON_HOLD Consignment Order walked it BACKWARDS to CONFIRMED `consignment` `status-cascade` 🟢
+
+**Symptom.** Put a CO on hold at IN_PRODUCTION, click **Resume Order**, and it comes
+back as **CONFIRMED** — a stage lost, with the confirmation dialog cheerfully announcing
+"the order will return to CONFIRMED status" as though that were the answer. Held from
+READY_TO_SHIP it lost two. Nothing errors, and the operator has to notice the status
+themselves.
+
+**Root cause.** `consignment/detail.tsx:1093` decides the target with
+`(order.preHoldStatus as SOStatus) || "CONFIRMED"`, and nothing on the CO side ever
+emitted or stored `preHoldStatus`: no column, no write, and `rowToCO` did not carry it.
+So the fallback was not a fallback, it was the entire behaviour. The Sales Order side
+had the identical defect and closed it on 2026-08-04 — the comment on
+`SalesOrder.preHoldStatus` in `src/types/index.ts` records that it "quietly moved an
+IN_PRODUCTION order backwards a stage" until then. On the CO the field was even filed
+under a block of "SO-compat shims … always empty/undefined", which is the tell.
+
+**Two things the mirror exposed, both of which had to be fixed with it:**
+
+1. `VALID_TRANSITIONS.ON_HOLD` — on **both** order types — listed CONFIRMED,
+   IN_PRODUCTION and CANCELLED. But both tables allow a hold FROM READY_TO_SHIP. So
+   storing the true origin without widening the table would have turned a silent
+   downgrade into a hard refusal: an order held at READY_TO_SHIP could not be taken off
+   hold at all. This was already live on the SO side since 08-04. Returning to a stage
+   the order already reached is a restoration, not a forward jump.
+2. Both cascades defined a resume by its DESTINATION
+   (`fromStatus === "ON_HOLD" && (newStatus === "CONFIRMED" || … "IN_PRODUCTION")`), so
+   a CO/SO resumed to READY_TO_SHIP would have come off hold with its production orders
+   and job cards still ON_HOLD — the exact shop-floor symptom the cascade exists to
+   prevent (「my CO 设 ON_HOLD 但工人继续在做」), one status later. A resume is now
+   defined by what it LEAVES, matching the `isUncancel` shape beside it, so no future
+   status can re-open the same gap.
+
+**Fix.** `src/api/routes/consignment-orders.ts` — `pre_hold_status` added to the row
+type (dual-keyed), emitted by `rowToCO`, captured/preserved/cleared in the PUT's header
+UPDATE on exactly the SO rule (`sales-orders.ts:3815`), and created by an
+`ALTER TABLE … ADD COLUMN IF NOT EXISTS` inside `ensureDiscountColumn`, which is awaited
+at the top of both the POST and the PUT — the PUT being the only writer of ON_HOLD on
+this table. `migrations-postgres/0224_…sql` is the record; the runtime ALTER is the
+mechanism. Transition tables and cascade conditions corrected on both order types;
+`src/types/index.ts` moves `preHoldStatus` out of the SO-compat block.
+
+**Verified.** `tests/consignment-pre-hold-status.test.mjs` — eight assertions against the
+REAL PUT handler: capture on hold, emit on read, PRESERVE across a header-only edit
+(an edit is not a resume), clear on resume, never store `ON_HOLD` as its own origin,
+resume to READY_TO_SHIP succeeds, and the floor is released on every resume target. All
+eight fail against the pre-fix tree. Gates clean.
+
+**NOT verified:** not deployed, no prod session. The new column reaches prod on the
+first CO create or edit after deploy; confirm with
+`SELECT column_name FROM information_schema.columns WHERE table_name='consignment_orders' AND column_name='pre_hold_status'`
+before trusting a Resume. COs **already** on hold have no stored origin and will still
+resume to CONFIRMED — that history is unrecoverable and is not backfilled.
+
+---
+
 ## BUG-2026-08-13-040 — a Consignment Order saved for LESS than the operator approved: the server dropped the total-height surcharge `money` `consignment` `data-integrity` 🟢
 
 **Symptom.** Silent, and in the customer's favour. The CO create screen prices a

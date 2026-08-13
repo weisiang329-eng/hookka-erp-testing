@@ -113,9 +113,14 @@ test("but an order that already shipped cannot be undone into thin air", () => {
   // SHIPPED onwards has a delivery order or an invoice behind it; a status
   // flip would contradict physical and financial evidence. That needs a
   // credit note, not an undo.
-  const table = SO_HELPERS.slice(
-    SO_HELPERS.indexOf("export const VALID_TRANSITIONS"),
-  ).slice(0, 1600);
+  // Scoped to the table's own braces, not a character budget. This used to
+  // slice a fixed 1,600 chars, so adding an explanatory comment INSIDE the
+  // table (2026-08-13, the READY_TO_SHIP resume row) pushed `CANCELLED:` out of
+  // the window and the guard failed on a change it has no opinion about. A test
+  // that a comment can break is measuring the wrong thing.
+  const from = SO_HELPERS.indexOf("export const VALID_TRANSITIONS");
+  assert.notEqual(from, -1, "VALID_TRANSITIONS must exist to be checked");
+  const table = SO_HELPERS.slice(from, SO_HELPERS.indexOf("\n};", from));
   const line = table.split("\n").find((l) => l.trim().startsWith("CANCELLED:"));
   assert.ok(line, "the CANCELLED row must be findable in the table");
   for (const forbidden of ["SHIPPED", "DELIVERED", "INVOICED", "CLOSED"]) {

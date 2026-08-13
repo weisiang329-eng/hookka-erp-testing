@@ -1,0 +1,15 @@
+-- 0224 — consignment_orders.pre_hold_status
+--
+-- Where a hold came FROM, so "Resume Order" returns the CO to the stage it was
+-- interrupted at instead of guessing CONFIRMED. `consignment/detail.tsx` has
+-- read `order.preHoldStatus` since the hold feature shipped; nothing wrote it,
+-- so a CO held from IN_PRODUCTION (or READY_TO_SHIP) silently walked BACKWARDS
+-- a stage on resume. The sales-order twin of this column was added on
+-- 2026-08-04 via the runtime self-apply. BUG-2026-08-13-041.
+--
+-- NOTE: this file is a RECORD, not the mechanism. Deploys do not replay
+-- migrations-postgres/*.sql. The statement that actually creates this column in
+-- production is the identical ALTER inside `ensureDiscountColumn`
+-- (src/api/routes/consignment-orders.ts), awaited at the top of the POST and
+-- the PUT — the PUT being the only writer of ON_HOLD on this table.
+ALTER TABLE consignment_orders ADD COLUMN IF NOT EXISTS pre_hold_status TEXT;

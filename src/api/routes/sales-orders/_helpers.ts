@@ -787,9 +787,12 @@ export async function cascadeSOStatusToPOs(
   // Only cascade on these transitions — all others no-op.
   const isHold = newStatus === "ON_HOLD";
   const isCancel = newStatus === "CANCELLED";
-  const isResume =
-    fromStatus === "ON_HOLD" &&
-    (newStatus === "CONFIRMED" || newStatus === "IN_PRODUCTION");
+  // A resume is defined by what it LEAVES, not by where it lands — the same
+  // shape as `isUncancel` below. Enumerating the destinations meant that adding
+  // READY_TO_SHIP to VALID_TRANSITIONS.ON_HOLD (2026-08-13, so an order held at
+  // READY_TO_SHIP can be resumed at all) would have taken the SO off hold while
+  // its POs and job cards stayed ON_HOLD. CANCELLED keeps its own branch.
+  const isResume = fromStatus === "ON_HOLD" && !isHold && !isCancel;
   // Leaving CANCELLED is an UNDO of the cancel, not an ordinary transition —
   // it has to put back exactly what the cancel took down (owner 2026-08-04:
   // "reverse 或者 undo 这样的意思，不是吗？").
@@ -1126,7 +1129,14 @@ export const VALID_TRANSITIONS: Record<string, string[]> = {
   SHIPPED: ["DELIVERED"],
   DELIVERED: ["INVOICED"],
   INVOICED: ["CLOSED"],
-  ON_HOLD: ["CONFIRMED", "IN_PRODUCTION", "CANCELLED"],
+  // READY_TO_SHIP added 2026-08-13 (BUG-2026-08-13-041). The 08-04 fix started
+  // WRITING `pre_hold_status`, and the detail page resumes to whatever it holds
+  // — but this table still refused the one status the fix newly made reachable.
+  // An SO held from READY_TO_SHIP (the row above permits it) therefore stored
+  // that as its resume target and then had the resume rejected outright: the
+  // order could not be taken off hold at all. Returning to a stage this order
+  // already reached is a restoration, not a forward jump.
+  ON_HOLD: ["CONFIRMED", "IN_PRODUCTION", "READY_TO_SHIP", "CANCELLED"],
   CLOSED: [],
   // Cancel is undoable (owner 2026-08-04: "i silap cancel" … "reverse 或者 undo
   // 这样的意思，不是吗？"). It was terminal only because the cascade was LOSSY —

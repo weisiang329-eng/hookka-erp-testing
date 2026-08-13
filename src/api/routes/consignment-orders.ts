@@ -100,7 +100,14 @@ const CO_VALID_TRANSITIONS: Record<string, string[]> = {
   // IN_PRODUCTION is the UPH-rollback target.
   READY_TO_SHIP: ["ON_HOLD", "IN_PRODUCTION"],
   DELIVERED: ["CLOSED"],
-  ON_HOLD: ["CONFIRMED", "IN_PRODUCTION", "CANCELLED"],
+  // READY_TO_SHIP added 2026-08-13 with the `pre_hold_status` fix
+  // (BUG-2026-08-13-041). A CO can be held FROM READY_TO_SHIP — the row above
+  // says so — and Resume now returns it to where it was held rather than
+  // guessing CONFIRMED. Without this entry that restoration would be refused as
+  // an illegal transition, i.e. an order held at READY_TO_SHIP could not be
+  // resumed at all. Coming back to a stage this order already reached is a
+  // restoration, not a forward jump.
+  ON_HOLD: ["CONFIRMED", "IN_PRODUCTION", "READY_TO_SHIP", "CANCELLED"],
   CLOSED: [],
   CANCELLED: [],
 };
@@ -141,6 +148,18 @@ export type ConsignmentOrderRow = {
   held_by?: string | null;
   heldAt?: string | null;
   held_at?: string | null;
+  /**
+   * Status to return to when the hold is undone. Dual-keyed read.
+   *
+   * `consignment/detail.tsx:1093` has always read `order.preHoldStatus` to
+   * decide where "Resume Order" goes, and nothing on the CO side ever wrote it
+   * — so `|| "CONFIRMED"` won every time and a CO held from IN_PRODUCTION (or
+   * READY_TO_SHIP) silently walked BACKWARDS a stage or two, while the
+   * confirmation dialog cheerfully announced where it was going. The SO side
+   * closed the identical gap on 2026-08-04; this is that fix, mirrored.
+   */
+  preHoldStatus?: string | null;
+  pre_hold_status?: string | null;
   createdAt: string | null;
   updatedAt: string | null;
 };
@@ -222,6 +241,11 @@ function rowToCO(row: ConsignmentOrderRow, items: ConsignmentOrderItemRow[]) {
     holdReason: row.holdReason ?? row.hold_reason ?? "",
     heldBy: row.heldBy ?? row.held_by ?? "",
     heldAt: row.heldAt ?? row.held_at ?? "",
+    // Where the hold came FROM, so Resume goes back there instead of guessing
+    // CONFIRMED. Empty string on an order that was never held — the detail
+    // page's `|| "CONFIRMED"` is then a correct fallback rather than the whole
+    // behaviour.
+    preHoldStatus: row.preHoldStatus ?? row.pre_hold_status ?? "",
     createdAt: row.createdAt ?? "",
     updatedAt: row.updatedAt ?? "",
     items: items
@@ -402,9 +426,13 @@ async function cascadeCOStatusToPOs(
   // / CANCELLED JCs never touched.
   const isHold = newStatus === "ON_HOLD";
   const isCancel = newStatus === "CANCELLED";
-  const isResume =
-    fromStatus === "ON_HOLD" &&
-    (newStatus === "CONFIRMED" || newStatus === "IN_PRODUCTION");
+  // A resume is defined by what it LEAVES, not by where it lands. This used to
+  // enumerate CONFIRMED / IN_PRODUCTION, so when `pre_hold_status` made
+  // READY_TO_SHIP a reachable resume target (BUG-2026-08-13-041) the CO would
+  // come off hold while its child POs and job cards stayed ON_HOLD — the exact
+  // shop-floor symptom this cascade was written for, one status later.
+  // CANCELLED is handled by its own branch above.
+  const isResume = fromStatus === "ON_HOLD" && !isHold && !isCancel;
   if (!isHold && !isCancel && !isResume) return result;
 
   const posRes = await db
@@ -602,6 +630,13 @@ function ensureDiscountColumn(db: D1Database): Promise<void> {
         // both ways: a column you write must be ensured on the path that
         // writes it, not on a neighbour's path that happens to run first.
         "ALTER TABLE consignment_order_items ADD COLUMN IF NOT EXISTS total_height_price_sen INTEGER NOT NULL DEFAULT 0",
+        // Where a hold came FROM (BUG-2026-08-13-041). NEW column — the CO PUT
+        // below is the only writer of ON_HOLD on this table, and it names this
+        // column in its UPDATE, so the ALTER must land before that statement
+        // runs or the whole save 500s. It does: this is awaited at the top of
+        // both the POST and the PUT. Migration files are inert on deploy here;
+        // this line is the thing that actually creates the column in prod.
+        "ALTER TABLE consignment_orders ADD COLUMN IF NOT EXISTS pre_hold_status TEXT",
       ];
       await runSelfApply(db, "consignment-orders", stmts);
     })().catch((err) => {
@@ -2291,7 +2326,8 @@ app.put("/:id", async (c) => {
            customerCO = ?, customerCOId = ?, customerCODate = ?, reference = ?,
            hubId = ?, hubName = ?, companyCODate = ?, customerDeliveryDate = ?,
            hookkaExpectedDD = ?, subtotalSen = ?, totalSen = ?, status = ?,
-           notes = ?, hold_reason = ?, held_by = ?, held_at = ?, updated_at = ?
+           notes = ?, hold_reason = ?, held_by = ?, held_at = ?,
+           pre_hold_status = ?, updated_at = ?
          WHERE id = ?`,
       ).bind(
         merged.customerCO,
@@ -2325,6 +2361,17 @@ app.put("/:id", async (c) => {
           : merged.status !== existing.status
             ? null
             : existing.heldAt ?? existing.held_at ?? null,
+        // Where to come BACK to (BUG-2026-08-13-041) — the CO mirror of the SO
+        // rule at sales-orders.ts:3815. Captured on the way IN, preserved while
+        // the order stays held (a header-only edit must not erase it), and
+        // cleared on the way OUT. A second hold-to-hold write can never
+        // overwrite the stored value with 'ON_HOLD' itself, because
+        // `existing.status` is only stored when it is not already the target.
+        merged.status === "ON_HOLD" && existing.status !== "ON_HOLD"
+          ? existing.status
+          : merged.status === "ON_HOLD"
+            ? existing.preHoldStatus ?? existing.pre_hold_status ?? null
+            : null,
         now,
         id,
       ),
@@ -2340,9 +2387,13 @@ app.put("/:id", async (c) => {
       merged.status !== existing.status &&
       (merged.status === "CANCELLED" ||
         merged.status === "ON_HOLD" ||
-        (existing.status === "ON_HOLD" &&
-          (merged.status === "CONFIRMED" ||
-            merged.status === "IN_PRODUCTION")))
+        // Any resume, not an enumerated pair. This listed CONFIRMED and
+        // IN_PRODUCTION only, so once `pre_hold_status` made READY_TO_SHIP a
+        // reachable resume target the shop floor would have been left holding
+        // held job cards on an order that was no longer on hold. The condition
+        // that matters is "we are LEAVING a hold" — name that, not the
+        // destinations, so a future status cannot re-open the same gap.
+        existing.status === "ON_HOLD")
     ) {
       const cascade = await cascadeCOStatusToPOs(
         c.var.DB,

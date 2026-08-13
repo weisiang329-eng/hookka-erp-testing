@@ -49,10 +49,14 @@ again.** Treat every entry here as a loaded gun that is still on the table.
    `consumeRawMaterialsForPO` — `src/api/lib/po-cost-cascade.ts:671`). Any authenticated user of
    any role can fire it. It is *safe on re-run* (see below), but the missing gate is real: line
    1844 goes straight to `const dryRun = …` with no `denied` check above it.
-2. **Most endpoints default to LIVE WRITE.** The dominant idiom is
+2. **Most endpoints default to LIVE WRITE — 49 of the 65.** The dominant idiom is
    `c.req.query("dryRun") === "true"`, which means **a bare POST with no query string and no body
-   writes to production.** Only 6 of 65 use the safe `!== "false"` / `!== false` form, and
-   **6 have no dry-run code path at all**. The four different dryRun spellings in this family
+   writes to production.** The exact split: **39** derive `dryRun` with a `=== true` form (live
+   unless you opt out), **10 more have no dry-run code path at all** (`procurement-backfills.ts`
+   :110, :180, :330; `so-co-do-backfills.ts` :335, :404, :444, :745, :830, :953;
+   `sofa-pricing.ts` :1690), **12 are safe-by-default** (8 use the `!== false` form, 4 are
+   audit-first behind `{"apply":true,"confirm":…}`), and **4 are read-only**. The four different
+   dryRun spellings in this family
    (`=== "true"`, `!== "false"`, `body.dryRun === true`, `body.dryRun !== false`) mean muscle
    memory from one endpoint produces a live write on the next.
 3. **Two endpoints are NOT idempotent and corrupt data on a second run** — see the table below.

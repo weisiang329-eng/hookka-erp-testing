@@ -8,59 +8,84 @@
 // and every tab import from "./shared" (or "../shared").
 // ---------------------------------------------------------------------------
 
-import { useEffect, useState } from "react";
-
 export type MutationResponse =
   | { success: true; error?: string }
   | { success: false; error?: string };
 
 // ---------------------------------------------------------------------------
-// Multi-company (Phase 2) — company selector data source.
+// Multi-company — the Accounting company selector, and why it offers only the
+// group option (BUG-2026-08-13-051).
 //
 // The finance report endpoints (/pl, /aging, /ar-control, /ap-control,
-// /trial-balance) accept an OPTIONAL ?orgId=<code> that scopes the report to
-// one sister company. NO param = today's consolidated (all-company) numbers,
-// byte-identical to before Phase 2.
+// /ar-reconciliation, /ap-reconciliation, /trial-balance) accept an OPTIONAL
+// `?orgId=` which `companyFilter` (src/api/lib/tenant.ts:204-214) binds
+// straight into `org_id = ?` / `orgId = ?` on ledger_journal_entries,
+// invoices, purchase_invoices, customers and suppliers.
 //
-// The filter value the backend expects is the org CODE lower-cased (e.g.
-// "hookka", "ohana") — NOT the org row id ("org-hookka"). companyFilter()
-// matches ledger_journal_entries.orgId / invoices.orgId, which is the
-// lower-cased code. So we map each organisation to
-// { value: code.toLowerCase(), label: name }.
+// `org_id` is the TENANT column — one value per LOGIN account, defaulting to
+// `'hookka'` (tenant.ts:31, migration 0049's column DEFAULT, and the write
+// side never stamps anything else: see BUG-CLASSES C12 row 7).
 //
-// The empty-string value "" is the DEFAULT "All companies (group)" option —
-// callers append `&orgId=<value>` ONLY when value is non-empty, keeping the
-// default fetch URL unchanged.
+// The COMPANY a document is booked under is a different, DISPLAY dimension —
+// `sales_orders.sales_org_code` / `purchase_orders.purchase_org_code`
+// (src/lib/company-dimension.ts:1-20). This hook used to feed the selector
+// `organisations.code.toLowerCase()` — HOOKKA / OHANA / HOUZS / HKMFG — into
+// that tenant filter. Those are not the same dimension and never line up:
+// migration 0142_organisations_registry.sql:92,100 seeds BOTH the HOOKKA and
+// the OHANA organisation rows with `org_id = 'hookka'`.
+//
+// So the control had no correct state at all:
+//   • picking OHANA / HOUZS / HKMFG filtered `org_id = 'ohana'` (etc.), which
+//     matches nothing — P&L, Balance Sheet, AR, AP and the Trial Balance all
+//     rendered EMPTY, with no error and no explanation;
+//   • picking HOOKKA filtered `org_id = 'hookka'`, which matches EVERY row —
+//     so it printed the whole group's money under one company's name;
+//   • the Balance Sheet's "by company" card (GroupByCompanyCard) fetches
+//     /pl per code and prints Net Profit + Total Equity per company, so it
+//     showed RM 0.00 for all four. BUG-CLASS C15: a fabricated-looking figure
+//     the owner would read and act on.
+//
+// There is NO mapping to substitute, and one must not be invented — a wrong
+// org filter shows one company another company's money. A per-company P&L /
+// Balance Sheet / TB would have to be derived from a company column on
+// `ledger_journal_entries` and `invoices`, and NEITHER TABLE HAS ONE (checked
+// against the production schema snapshot tests/db-schema.json: both carry
+// `org_id` only; `sales_org_code` exists on `sales_orders` alone, and
+// `purchase_org_code` on purchase_orders / purchase_invoices / suppliers).
+// Adding that dimension, and backfilling it from each document's source, is
+// the real feature — it is not a filter bug.
+//
+// Until then the only figure this page can state truthfully is the
+// consolidated one, so that is the only option offered. `CompanySelect`
+// hides itself for a single-option list and `GroupByCompanyCard` already
+// returns null when no real company remains, so nothing renders a per-company
+// number that does not exist.
+//
+// WHEN A SECOND TENANT IS SEEDED: this comes back keyed on the tenant
+// dimension it actually filters — `organisations.org_id`, which
+// GET /api/organisations does not currently emit (SELECT_COLS_NEW,
+// src/api/routes/organisations.ts:152-155) — not on `code`.
+//
+// The empty-string value "" is the "All companies (group)" option; callers
+// append `&orgId=<value>` ONLY when the value is non-empty, so the fetch URLs
+// are byte-identical to the unfiltered reads that were always correct.
 // ---------------------------------------------------------------------------
 export type CompanyOption = { value: string; label: string };
 
-type OrganisationsResp = {
-  organisations?: { code?: string; name?: string; isActive?: boolean }[];
-};
+// Module-level constant so the returned array has a STABLE identity: several
+// callers pass it straight into a child whose effect deps include it, and a
+// fresh array per render would re-fire those effects every paint.
+const GROUP_ONLY_OPTIONS: CompanyOption[] = [
+  { value: "", label: "All companies (group)" },
+];
 
 /**
- * Fetch the active sister companies for the company selector. Always returns
- * the "All companies (group)" option first (value ""), then one entry per
- * active organisation. On any error it degrades to just the group option, so
- * the report still renders exactly as today (consolidated).
+ * Options for the Accounting company selector. Only the consolidated group
+ * option today — see the block comment above for why a per-company option
+ * cannot be produced truthfully from the current schema.
  */
 export function useCompanyOptions(): CompanyOption[] {
-  const [orgs, setOrgs] = useState<CompanyOption[]>([]);
-  useEffect(() => {
-    let stale = false;
-    fetch("/api/organisations")
-      .then((r) => r.json() as Promise<OrganisationsResp>)
-      .then((j) => {
-        if (stale) return;
-        const opts = (j?.organisations ?? [])
-          .filter((o) => o.isActive !== false && typeof o.code === "string" && o.code)
-          .map((o) => ({ value: (o.code as string).toLowerCase(), label: o.name || (o.code as string) }));
-        setOrgs(opts);
-      })
-      .catch(() => {});
-    return () => { stale = true; };
-  }, []);
-  return [{ value: "", label: "All companies (group)" }, ...orgs];
+  return GROUP_ONLY_OPTIONS;
 }
 
 /** Build the `&orgId=…` query suffix for a selected company (empty when group). */

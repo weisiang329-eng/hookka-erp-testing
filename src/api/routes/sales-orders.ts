@@ -276,6 +276,79 @@ app.get("/", async (c) => {
     // holds the unfiltered "normal SOs only" list — if a SV-filtered
     // payload landed in it, the next /sales fetch would serve service
     // orders.
+    // ── ?fields=price-index — its OWN narrow read ──────────────────────────
+    //
+    // Measured on prod 2026-08-13: this took 10,963ms on a cold /dashboard —
+    // the single worst call in the app, and it sits on the page everyone opens
+    // first. It was projecting the FULL list (SELECT * over ~1,300 SOs AND all
+    // their items, every 24-field row) down to {productCode, unitPriceSen} and
+    // discarding ~99% of what it just built. On a snapshot MISS the entry page
+    // paid for that entire rebuild; and because the snapshot invalidates the
+    // moment either source table moves, an ordinary working day (someone
+    // saving an order) means a miss on nearly every dashboard load.
+    //
+    // Build it from a narrow query instead: SO ids + only the three item
+    // columns the projection actually reads. Output is IDENTICAL — rowToItem
+    // passes both fields straight through (`productCode: r.productCode ?? ""`,
+    // `unitPriceSen: r.unitPriceSen`) and rowToSO sorts items by lineNo, which
+    // is reproduced below. Every SO is still present, including ones with no
+    // items (they keep an empty array), matching the old .map over the list.
+    //
+    // Shares the existing snapshot TABLE under a distinct cache_key, so it
+    // needs no new table (migrations are inert on deploy) and never collides
+    // with the full-list payload.
+    if (c.req.query("fields") === "price-index" && !includeArchive && serviceOrderFilter === "false" && !isCustomerScoped(c)) {
+      const computePriceIndex = async () => {
+        const [sos, items] = await Promise.all([
+          db
+            .prepare(
+              `SELECT id FROM ${soSourceSql} ${orgWhere}${fullClause} ORDER BY created_at DESC, id DESC`,
+            )
+            .bind(...orgParams, ...fullScope.binds)
+            .all<{ id: string }>(),
+          db
+            .prepare(
+              `SELECT salesOrderId, productCode, unitPriceSen, lineNo FROM ${itemsSourceSql}
+                WHERE salesOrderId IN (SELECT id FROM ${soSourceSql} ${orgWhere}${fullClause})`,
+            )
+            .bind(...orgParams, ...fullScope.binds)
+            .all<{ salesOrderId?: string; sales_order_id?: string; productCode?: string; product_code?: string; unitPriceSen?: number; unit_price_sen?: number; lineNo?: number; line_no?: number }>(),
+        ]);
+        const bySO = new Map<string, Array<{ productCode: string; unitPriceSen: number | undefined; lineNo: number }>>();
+        for (const r of items.results ?? []) {
+          // Dual-keyed: the pg shim camelCases columns, but never assume it.
+          const soId = String(r.salesOrderId ?? r.sales_order_id ?? "");
+          if (!soId) continue;
+          const row = {
+            productCode: String(r.productCode ?? r.product_code ?? ""),
+            unitPriceSen: (r.unitPriceSen ?? r.unit_price_sen) as number | undefined,
+            lineNo: Number(r.lineNo ?? r.line_no ?? 0),
+          };
+          const arr = bySO.get(soId);
+          if (arr) arr.push(row);
+          else bySO.set(soId, [row]);
+        }
+        const data = (sos.results ?? []).map((s) => ({
+          id: s.id,
+          items: (bySO.get(s.id) ?? [])
+            .sort((a, b) => a.lineNo - b.lineNo)
+            .map((it) => ({ productCode: it.productCode, unitPriceSen: it.unitPriceSen })),
+        }));
+        return { success: true as const, data, total: data.length };
+      };
+      const { withSnapshot } = await import("../lib/snapshot");
+      return c.json(
+        await withSnapshot(
+          db,
+          { tableName: "sales_orders_list_snapshot", sourceTables: ["sales_orders", "sales_order_items"] },
+          getOrgId(c),
+          computePriceIndex,
+          "price-index",
+          c,
+        ),
+      );
+    }
+
     if (includeArchive || serviceOrderFilter !== "false") {
       return c.json(await computeFullList());
     }

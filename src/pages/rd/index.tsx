@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
-import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix, isUnknownOutcome } from "@/lib/cached-fetch";
+import { RecordLoadError } from "@/components/ui/record-load-error";
 import { Link, useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -1326,8 +1327,11 @@ export default function RDPage() {
     }
   }, [categoryFilter]);
 
-  const { data: rdResp, loading, refresh: refreshRdHook } = useCachedJson<{ data?: RDProject[] }>("/api/rd-projects");
+  const { data: rdResp, loading, failure: rdFailure, refresh: refreshRdHook } = useCachedJson<{ data?: RDProject[] }>("/api/rd-projects");
   const allProjects: RDProject[] = useMemo(() => rdResp?.data ?? [], [rdResp]);
+  // Only blank the page when there is genuinely NOTHING to show — a page still
+  // holding cached rows keeps showing them (the 2026-06-04 blank-page guard).
+  const loadFailed = !rdResp && isUnknownOutcome(rdFailure);
   // Apply the page-level category filter once at the top — every
   // downstream list (drafts / active / completed / KPIs) reads from
   // here so the filter is consistent across tabs without repeating
@@ -1503,6 +1507,20 @@ export default function RDPage() {
         <div className="flex items-center justify-center h-64">
           <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#6B5C32]" />
         </div>
+      ) : loadFailed ? (
+        // C15 — a dead /api/rd-projects used to land here as an EMPTY list,
+        // and every tab below then stated that emptiness as a fact about the
+        // business: the Summary tab printed "All active projects are on track
+        // and within budget. ✓", the Pipeline showed six empty stages, the
+        // Reports tab offered a CSV export of nothing. A green tick over a
+        // request that never answered is the worst version of this bug, so
+        // the whole tab body is replaced by the honest card. `isUnknownOutcome`
+        // keeps a real HTTP 404 out of here.
+        <RecordLoadError
+          subject="R&D project list"
+          failure={rdFailure!}
+          onRetry={fetchProjects}
+        />
       ) : (
         <>
           {activeTab === "summary" && <SummaryView projects={activeProjects} />}

@@ -56,3 +56,14 @@ jobs:
 
       - name: API.md is generated, not hand-written
         run: node scripts/gen-api-docs.mjs --check
+
+      # The map is the one doc whose ERRORS are worse than its gaps. Nobody
+      # reads 511k lines — ~6,000 A4 pages, 6-12 months to hold in your head —
+      # so the map IS the mental model a new engineer starts from. A missing
+      # entry makes them go look; a stale `file.ts:566` makes them confident and
+      # wrong. Measured 2026-08-13 before this gate existed: 4 refs pointed at
+      # code that had moved 18-149 lines, one named a test file
+      # (`tests/scheduling.test.mjs`) that has never existed in this repo, and
+      # 57% of recent src commits never touched the map at all.
+      - name: CODEBASE-MAP points where it says it does
+        run: node scripts/check-codebase-map.mjs

@@ -66,7 +66,12 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
           sudo apt-get update
           sudo apt-get install -y postgresql-client-17
-          pg_dump --version
+          # Installing the package is NOT enough: Ubuntu's pg_wrapper keeps
+          # /usr/bin/pg_dump pointing at the OLDEST installed major, so the 16
+          # client still won and the dump still aborted. Put 17's real binaries
+          # first on PATH for every later step.
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+          /usr/lib/postgresql/17/bin/pg_dump --version
 
       - name: Verify required secrets are set
         env:

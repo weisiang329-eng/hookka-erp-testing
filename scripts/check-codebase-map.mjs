@@ -174,12 +174,24 @@ lines.forEach((line, li) => {
     const defRe = new RegExp(
       `(?:function|const|let|class|export|async)\\s+.*\\b${sym}\\b|\\b${sym}\\s*[:=]\\s*(?:async\\s*)?\\(`,
     );
-    const realIdx = content.findIndex((l) => defRe.test(l));
+    let realIdx = content.findIndex((l) => defRe.test(l));
+    let kind = "defined";
+    if (realIdx < 0) {
+      // Not every anchor is a callable. `balanced: a === b` inside an object
+      // literal is a real, findable symbol that the definition regex cannot
+      // match — and reporting "not in that file at all" for it is a LIE that
+      // sends the reader hunting for a deletion that never happened. Fall back
+      // to a plain occurrence before making that claim.
+      realIdx = content.findIndex((l) => new RegExp(`\\b${sym}\\b`).test(l));
+      kind = "occurs";
+    }
     const real = realIdx >= 0 ? realIdx + 1 : null;
 
     problems.anchors.push(
       `${MAP}:${li + 1}  →  ${p}:${want} claims \`${sym}\`` +
-        (real ? `, but it is defined at :${real} (drift ${Math.abs(real - want)})` : `, which is not in that file at all`),
+        (real
+          ? `, but it ${kind} at :${real} (drift ${Math.abs(real - want)})`
+          : `, and that symbol does not appear anywhere in the file`),
     );
     if (real) fixes.push({ mapLine: li, from: `${path}:${want}`, to: `${path}:${real}` });
   }

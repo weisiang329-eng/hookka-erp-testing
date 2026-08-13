@@ -1,6 +1,8 @@
 # Recurring bug classes — the index that makes P5 executable
 
-> **Last verified: 2026-08-13** — every one of the source/test paths this file cites
+> **Last verified: 2026-08-14** — classes C17 (a file the search tool refuses to read) and C18
+> (a per-party document and its all-party twin, only one maintained) added from the accounting
+> audit. Every one of the source/test paths this file cites
 > exists (checked mechanically against the tree), and `npm test` is green
 > (3,868 tests / 0 fail).
 >

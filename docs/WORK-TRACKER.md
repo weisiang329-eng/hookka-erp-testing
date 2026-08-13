@@ -1,6 +1,7 @@
 # Hookka ERP — Work Tracker
 
-> **Last verified: 2026-08-13** against the merged PRs on `main` (#266-#300) plus the open PRs #304 (branch `fix/stock-grn-org-filter`) and the accounting-audit branch `fix/accounting-audit`, whose entry is the newest below. This file is a live queue — restamp it whenever you add or close an item.
+> **Last verified: 2026-08-14** — PRs #304/#310/#312/#313/#314/#315/#316/#317 all MERGED and
+> deployed; zero PRs open, one worktree. Previously verified against the merged PRs on `main` (#266-#300) plus the open PRs #304 (branch `fix/stock-grn-org-filter`) and the accounting-audit branch `fix/accounting-audit`, whose entry is the newest below. This file is a live queue — restamp it whenever you add or close an item.
 
 Durable, cross-session list of assigned / in-progress / shipped work so nothing is
 forgotten. **Newest first. Update on every state change** (assigned → in progress →

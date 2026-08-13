@@ -176,6 +176,16 @@ export type CfStatement = { columns: CfColumn[]; rows: CfRow[] };
 // Months of the current FY from period back to FY start (inclusive),
 // newest first, e.g. fye=8, period=2026-03 → [2026-03,...,2025-09,2025-08].
 export function fyMonths(period: string, fyeMonth: number): string[] {
+  // BUG-2026-08-13-092. `period` MUST be `YYYY-MM`. Anything else (the
+  // Cash Flow tab used to offer "2026-Q1" and "2026") made `pm` NaN, so every
+  // column key became "2026-NaN": no leg matched a column, `inFy` was false for
+  // every real month, and the statement rendered all-zero income and expense
+  // lines — while `balBefore` string-compared "2026-05" < "2026-NaN" as TRUE
+  // and printed a large, real bank balance beside them. Refuse loudly instead:
+  // a 500 the caller can see beats a plausible statement that is not one.
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(period)) {
+    throw new Error(`fyMonths: period must be YYYY-MM, got "${period}"`);
+  }
   const [py, pm] = period.split("-").map((n) => parseInt(n, 10));
   const startMonth = (fyeMonth % 12) + 1; // month after FYE
   const out: string[] = [];

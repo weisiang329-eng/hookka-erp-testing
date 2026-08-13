@@ -31,6 +31,16 @@
 > document and its all-party twin, only one of them maintained**. **C12 row 11 closes** —
 > the comment claiming `journal_entries` has no `orgId` column was false and is gone.
 > Suite at that point: 3,857 tests / 0 fail.
+> **Also 2026-08-13, branch `fix/accounting-ui-audit`:** the FIRST audit of
+> `src/pages/accounting/index.tsx` (11k lines, ~25 tabs, never opened before) added
+> **C15 rows 25–27** and a **fifth corollary** — an ACTION and a VERIFICATION are figures
+> too. Five defects, guarded by `tests/accounting-ui-truthfulness.test.mjs`
+> (BUG-2026-08-13-090…094); every assertion proved RED by reintroducing the bug, and one
+> of them passed on the first draft because `[^)]*` could not cross the `)` in a reducer's
+> own parameter list. Note also that the naive `/\/\*[\s\S]*?\*\//g` comment-stripper
+> the older guard files use **silently ate ~200 lines** of that page — an `accept` attribute
+> ending in a star-slash-star wildcard reads as a block-comment opener. Anchor block
+> comments to the start of a line.
 >
 > **Also 2026-08-13, branch `fix/stock-grn-org-filter`:** added **C16 — a field the
 > projection drops and a consumer still reads** (the class behind BUG-2026-08-13-050,
@@ -800,6 +810,9 @@ place: `/api/department-performance` must keep dividing by clocked time,
 | 22 | credit-utilisation bar | `/customers` grid | `limit > 0 ? outstanding/limit : 0` → a COD customer owing RM 50,000 shows a **green 0%** bar; the Available column beside it returns `—` correctly | ⬜ open |
 | 23 | CR No. · return status · return date | `/consignment/return` | `buildMockCRs()`: a module-level counter as a document number, `Math.random()` thresholds as a PENDING→INSPECTED→ACCEPTED→RESTOCKED status, `now −` 1-10 random days as the return date — **beside real customers and real RM, and exported to CSV** | ✅ 2026-08-13 (-071) |
 | 24 | Balance Sheet › "by company" Net Profit + Total Equity | `/accounting` › BS (`GroupByCompanyCard`) | RM 0.00 for all four companies — the per-company `/pl?orgId=<code>` filtered the TENANT column with a DISPLAY code and matched nothing, and the `catch` returned 0 as well. Printed beside a consolidated statement showing the real money | ✅ 2026-08-13 (-051) — the card renders nothing because no truthful per-company option exists; see C16 |
+| 25 | "Revenue (MTD)" · "Expenses (MTD)" · "Net Profit" | `/accounting` › Overview | `Σ chart_of_accounts.balanceSen`, a column ONLY the manual-JV paths write — so hand-keyed journals were reported as the company's revenue; "(MTD)" with no date filter anywhere in the component; and the whole `COST` type dropped from the expense side | ✅ 2026-08-13 (-091) — now `GET /accounting/pl`, dash for an unposted category |
+| 26 | every material group's green "✓" | `/accounting` › Stock Summary | `balanced = opening + purchases − consumption === closing` where consumption IS `opening + purchase − closing` → `closing === closing`, true forever. A verification nobody performed, printed on a stock valuation | ✅ 2026-08-13 (-093) |
+| 27 | the whole Cash Flow statement on a Quarter / Full-year period | `/accounting` › Cash Flow | `fyMonths` parses `YYYY-MM`, so `"2026-Q1"` keyed all 13 columns `"2026-NaN"`: every income and expense line rendered `-` while `balBefore` string-compared TRUE against every real month and printed a large, REAL Bank b/f + c/f | ✅ 2026-08-13 (-092) |
 
 **Enforced by** five files, all structural (`readFileSync` source assertions),
 because nothing else can catch a number that is merely wrong-but-plausible:
@@ -807,7 +820,9 @@ because nothing else can catch a number that is merely wrong-but-plausible:
 `tests/no-fabricated-worker-metrics.test.mjs` (row 3),
 `tests/no-fabricated-financials.test.mjs` (rows 4–5),
 `tests/no-fabricated-inventory-and-forecast.test.mjs` (rows 6–16),
-`tests/no-fabricated-consignment-returns.test.mjs` (row 23).
+`tests/no-fabricated-consignment-returns.test.mjs` (row 23),
+`tests/accounting-ui-truthfulness.test.mjs` (rows 25–27, plus the two
+non-figure defects the same accounting-page audit found — see below).
 Rows 17–22 are open or deliberate and carry no guard yet.
 
 **A fourth corollary, from row 23.** *Real money on an invented status is more
@@ -817,6 +832,21 @@ date and the identifier were invented. The correct figures are what made the
 fabricated column beside them credible — nobody questions a status sitting next
 to money that reconciles. So when a row mixes sources, the *honest* half is not
 mitigation, it is camouflage: audit every column of a row, not the row.
+
+**A fifth corollary, from rows 25–27 (the accounting-page audit).** *An ACTION and a
+VERIFICATION are figures too.* The same page carried a "Record Payment" button that POSTed to
+a live endpoint which UPDATEs a table nothing reads (`ar_aging`/`ap_aging`, called "dead" in
+three places in the API), never checked `res.ok`, and closed the form as if it had saved
+(BUG-2026-08-13-090); and a green ✓ column whose predicate was algebraically `closing ===
+closing` (BUG-2026-08-13-093). Neither is a number, and both told the owner something untrue
+with the same confidence a fabricated figure does. When auditing a screen, ask of every
+control *"what would prove this did what it says?"* and of every tick *"what input makes this
+go red?"* — if the answer is "nothing", it belongs in this class.
+
+**Finding these two shapes.** For an action: follow the endpoint to the TABLE it writes, then
+grep for a reader of that table — a write nobody reads is inert however healthy the HTTP
+status. For a tick: substitute the definition of each term into the predicate and see whether
+it collapses.
 
 > Every assertion in the 2026-08-13 files was proved by **reintroducing the bug
 > and watching the guard go red**. Do that for any row you add: four of these

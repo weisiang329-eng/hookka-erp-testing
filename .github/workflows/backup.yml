@@ -13,7 +13,7 @@ name: Daily Postgres Backup -> Supabase Storage
 # egress/month — enough headroom for the daily dumps).
 #
 # Required GitHub repo secrets (all must be set before the schedule fires):
-#   SUPABASE_PROD_URL          — full pooler connection string for pg_dump
+#   PROD_DATABASE_URL          — full pooler connection string for pg_dump
 #                                (postgres://...). Get it from Supabase
 #                                dashboard -> Project Settings -> Database ->
 #                                "Connection pooling" mode, transaction
@@ -22,7 +22,7 @@ name: Daily Postgres Backup -> Supabase Storage
 #                                Supabase project URL (NOT a secret on its
 #                                own, but kept in secrets so prod / preview
 #                                projects can swap independently).
-#   SUPABASE_SERVICE_ROLE_KEY  — service_role key from Supabase dashboard ->
+#   SUPABASE_SERVICE_KEY       — service_role key from Supabase dashboard ->
 #                                Project Settings -> API. NEVER paste this
 #                                in code or chat; treat it like a root password.
 #
@@ -57,14 +57,14 @@ jobs:
 
       - name: Verify required secrets are set
         env:
-          DATABASE_URL: ${{ secrets.SUPABASE_PROD_URL }}
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
           SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
           missing=()
-          [ -z "$DATABASE_URL" ] && missing+=("SUPABASE_PROD_URL")
+          [ -z "$DATABASE_URL" ] && missing+=("PROD_DATABASE_URL")
           [ -z "$SUPABASE_PROJECT_REF" ] && missing+=("SUPABASE_PROJECT_REF")
-          [ -z "$SUPABASE_SERVICE_ROLE_KEY" ] && missing+=("SUPABASE_SERVICE_ROLE_KEY")
+          [ -z "$SUPABASE_SERVICE_ROLE_KEY" ] && missing+=("SUPABASE_SERVICE_KEY")
           if [ ${#missing[@]} -gt 0 ]; then
             echo "::error::Missing required secrets: ${missing[*]}"
             echo "See .github/workflows/backup.yml header for setup instructions."
@@ -73,7 +73,7 @@ jobs:
 
       - name: pg_dump -> .dump (custom format, compressed)
         env:
-          DATABASE_URL: ${{ secrets.SUPABASE_PROD_URL }}
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
         run: |
           STAMP=$(date -u +%Y-%m-%d)
           # -Fc: custom format (parallel-restore-able via pg_restore --jobs)
@@ -89,7 +89,7 @@ jobs:
       - name: Upload to Supabase Storage
         env:
           SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
           # Supabase Storage v1 object endpoint — POSTs the bytes directly
           # with the service_role bearer token. x-upsert: true so a re-run
@@ -113,7 +113,7 @@ jobs:
       - name: Verify upload (size > 1KB)
         env:
           SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
           # Sentinel sanity check: a successful pg_dump on the current
           # dataset is at minimum a few MB. If we uploaded a near-empty

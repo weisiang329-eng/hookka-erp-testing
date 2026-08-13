@@ -104,29 +104,53 @@ jobs:
           echo "BACKUP_FILE=backup-$STAMP.dump" >> $GITHUB_ENV
           echo "BACKUP_STAMP=$STAMP" >> $GITHUB_ENV
 
-      - name: Upload to Supabase Storage
+      # The dump is ~400 MB and the single-object endpoint rejected it with
+      # 413 EntityTooLarge ("The object exceeded the maximum allowed size") —
+      # that is the PROJECT's Storage file-size limit, not a curl problem.
+      # Splitting keeps this working on any Supabase plan without needing a
+      # dashboard change, and each part is small enough to retry cheaply.
+      #
+      # RESTORE: download every backup-<date>.dump.part-* for the date, then
+      #   cat backup-<date>.dump.part-* > backup-<date>.dump
+      #   pg_restore --no-owner --no-acl -d "<target>" backup-<date>.dump
+      # `cat` in shell glob order is correct: split's -a 3 suffixes sort
+      # lexicographically (aaa, aab, …) in the same order they were written.
+      - name: Upload to Supabase Storage (split into parts)
         env:
           SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
-          # Supabase Storage v1 object endpoint — POSTs the bytes directly
-          # with the service_role bearer token. x-upsert: true so a re-run
-          # on the same UTC date overwrites instead of 409'ing.
-          UPLOAD_URL="https://${SUPABASE_PROJECT_REF}.supabase.co/storage/v1/object/hookka-files/backups/supabase/${BACKUP_FILE}"
-          # Capture status separately from the body so we can fail loudly
-          # on a 4xx/5xx without aws-cli's quirks.
-          HTTP_STATUS=$(curl -sS -o /tmp/upload-resp.txt -w "%{http_code}" \
-            -X POST "$UPLOAD_URL" \
+          set -euo pipefail
+          PART_SIZE=40M
+          split -b "$PART_SIZE" -a 3 -d "$BACKUP_FILE" "${BACKUP_FILE}.part-"
+          PARTS=$(ls "${BACKUP_FILE}.part-"* | sort)
+          COUNT=$(echo "$PARTS" | wc -l)
+          echo "Split into $COUNT part(s) of $PART_SIZE"
+          BASE="https://${SUPABASE_PROJECT_REF}.supabase.co/storage/v1/object/hookka-files/backups/supabase"
+          for P in $PARTS; do
+            # x-upsert so a same-day re-run overwrites instead of 409'ing.
+            HTTP_STATUS=$(curl -sS -o /tmp/upload-resp.txt -w "%{http_code}" \
+              -X POST "${BASE}/${P}" \
+              -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+              -H "Content-Type: application/octet-stream" \
+              -H "x-upsert: true" \
+              --data-binary "@${P}")
+            if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ]; then
+              echo "::error::Upload of $P failed with status $HTTP_STATUS"
+              cat /tmp/upload-resp.txt
+              exit 1
+            fi
+            echo "uploaded $P ($(stat -c%s "$P") bytes)"
+          done
+          # A manifest so a restorer knows how many parts to expect without
+          # trusting a directory listing to be complete.
+          printf '%s\n' $PARTS > "${BACKUP_FILE}.manifest"
+          curl -sS -X POST "${BASE}/${BACKUP_FILE}.manifest" \
             -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
-            -H "Content-Type: application/octet-stream" \
+            -H "Content-Type: text/plain" \
             -H "x-upsert: true" \
-            --data-binary "@${BACKUP_FILE}")
-          echo "Upload HTTP status: $HTTP_STATUS"
-          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ]; then
-            echo "::error::Upload failed with status $HTTP_STATUS"
-            cat /tmp/upload-resp.txt
-            exit 1
-          fi
+            --data-binary "@${BACKUP_FILE}.manifest" > /dev/null
+          echo "BACKUP_FIRST_PART=$(echo "$PARTS" | head -1)" >> $GITHUB_ENV
 
       - name: Verify upload (size > 1KB)
         env:
@@ -138,7 +162,12 @@ jobs:
           # file the dump silently truncated and the backup is useless.
           # We HEAD the object via the Supabase Storage info endpoint and
           # parse the size out of the metadata.
-          INFO_URL="https://${SUPABASE_PROJECT_REF}.supabase.co/storage/v1/object/info/hookka-files/backups/supabase/${BACKUP_FILE}"
+          #
+          # The upload is now SPLIT into parts, so verify the FIRST part —
+          # ${BACKUP_FILE} itself is never uploaded and asking for it would
+          # 404 (or worse, pass against a stale object from before the split
+          # and certify a backup that no longer exists).
+          INFO_URL="https://${SUPABASE_PROJECT_REF}.supabase.co/storage/v1/object/info/hookka-files/backups/supabase/${BACKUP_FIRST_PART}"
           RESP=$(curl -sS -X GET "$INFO_URL" \
             -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY")
           echo "Object info response:"

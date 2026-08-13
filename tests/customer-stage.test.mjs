@@ -182,7 +182,13 @@ test("salesperson is stored as users.id and rendered as a name", () => {
 test("creating a lead also mints its POTENTIAL customer — best-effort", () => {
   const f = flat("src/api/routes/sales-leads.ts");
   assert.match(f, /ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS customer_id TEXT/);
-  assert.match(f, /'POTENTIAL'\)`/, "the minted customer must be born POTENTIAL");
+  // Asserts the STAGE, not the shape of the rest of the statement. This used to
+  // be /'POTENTIAL'\)`/ — pinned to POTENTIAL being the LAST value in the
+  // INSERT — so adding the orgId column that stopped leads minting cross-org
+  // customers (2026-08-13) failed a test whose stated intent it never touched.
+  // An assertion tied to a neighbouring column's position tests the author's
+  // formatting, not the behaviour it names.
+  assert.match(f, /'POTENTIAL'/, "the minted customer must be born POTENTIAL");
   // No creditor code at this point — that is the Confirm gate's job.
   assert.match(f, /INSERT INTO customers \(id, code, name,[\s\S]*?VALUES \(\?, '',/);
   assert.match(f, /UPDATE sales_leads SET customer_id = \?/);

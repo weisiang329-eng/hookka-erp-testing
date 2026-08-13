@@ -279,8 +279,21 @@ export default function ServiceCaseDetailPage() {
       jobCards?: Array<{ completedDate?: string | null }>;
     }>;
   }>(
+    // SCOPED to this case's SV orders. The bare
+    // `?fields=minimal&include=jobCards` is the whole org (~2,539 POs with
+    // every job card) — 30,721 ms on a cold snapshot, past api-client's 30 s
+    // global abort, so the stepper and the PDF button hung. Everything read
+    // off this response (the pipeline, repairScopes, customerRefs) filters to
+    // salesOrderId ∈ svOrderIds anyway, and `scope=<csv>` applies exactly that
+    // filter in SQL. A case has a handful of SV orders, so no chunking is
+    // needed here (unlike the list page, which scopes across every case).
+    //
+    // `include=jobCards` STAYS — computeCasePipeline reads
+    // `po.jobCards[].completedDate` for the "Repair in progress" / "Repair
+    // done" stages; without it every case would stall at "Service Order".
     svOrderIds.length > 0
-      ? "/api/production-orders?fields=minimal&include=jobCards"
+      ? "/api/production-orders?fields=minimal&include=jobCards&scope=" +
+        svOrderIds.map(encodeURIComponent).join(",")
       : null,
   );
 

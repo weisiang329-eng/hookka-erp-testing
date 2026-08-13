@@ -1494,7 +1494,9 @@ export default function ProductionPage({
   const [batchDueDateOpen, setBatchDueDateOpen] = useState(false);
   const [batchPicOpen, setBatchPicOpen] = useState(false);
   const [batchFolderOpen, setBatchFolderOpen] = useState(false);
-  type FolderOption = { id: string; name: string; jc_count: number };
+  // Dual-keyed: the LIST endpoint camelCases the `jc_count` SQL alias to
+  // `jcCount`, the POST response hand-builds `jc_count`. (BUG-2026-08-13-032)
+  type FolderOption = { id: string; name: string; jcCount?: number; jc_count?: number };
   const [folderList, setFolderList] = useState<FolderOption[]>([]);
   // Wei Siang 2026-05-13: bumping this counter forces the DataGrid to
   // remount with a fresh `key`, which causes it to re-read its

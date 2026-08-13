@@ -47,8 +47,8 @@ function buildCreditNoteVoucher(cn: CreditNote): VoucherSpec {
     cells: [
       item.description ?? "",
       String(item.quantity ?? ""),
-      formatCurrency(item.unitPrice),
-      formatCurrency(item.total),
+      formatCurrency(item.unitPriceSen ?? item.unitPrice ?? 0),
+      formatCurrency(item.totalSen ?? item.total ?? 0),
     ],
   }));
   const remarks = [cn.reason, cn.reasonDetail].filter(Boolean).join(" — ") || undefined;
@@ -418,8 +418,8 @@ export default function CreditNotesPage() {
                   (Number(cn.totalAmount ?? 0) / 100).toFixed(2),
                   item.description ?? "",
                   String(item.quantity ?? ""),
-                  (Number(item.unitPrice ?? 0) / 100).toFixed(2),
-                  (Number(item.total ?? 0) / 100).toFixed(2),
+                  (Number(item.unitPriceSen ?? item.unitPrice ?? 0) / 100).toFixed(2),
+                  (Number(item.totalSen ?? item.total ?? 0) / 100).toFixed(2),
                 ]),
               ),
             ]}

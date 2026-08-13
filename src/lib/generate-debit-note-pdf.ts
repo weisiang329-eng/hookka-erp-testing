@@ -20,7 +20,7 @@ export function generateDebitNotePdf(data: any) {
   // --- Header (shared letterhead — single source of truth across all docs) ---
   let y = drawLetterhead(doc, {
     docTitle: "DEBIT NOTE",
-    docNo: data.dnNo ?? "-",
+    docNo: data.dnNo ?? data.noteNumber ?? "-",
     docDate: fmtDate(data.date),
     company: "HOOKKA",
   });
@@ -64,9 +64,9 @@ export function generateDebitNotePdf(data: any) {
   let yR = y + 5;
   doc.setFontSize(8);
   const dnFields: [string, string][] = [
-    ["DN No", data.dnNo ?? "-"],
+    ["DN No", data.dnNo ?? data.noteNumber ?? "-"],
     ["Date", fmtDate(data.date)],
-    ["Invoice Ref", data.invoiceRef ?? "-"],
+    ["Invoice Ref", data.invoiceRef ?? data.invoiceNumber ?? "-"],
     ["Invoice Date", data.invoiceDate ? fmtDate(data.invoiceDate) : "-"],
   ];
   for (const [label, value] of dnFields) {
@@ -96,19 +96,27 @@ export function generateDebitNotePdf(data: any) {
   }
 
   // --- Items Table ---
+  // The API (routes/debit-notes.ts `parseItems`) emits
+  // `quantity` / `unitPriceSen` / `totalSen`; the older wire shape this
+  // generator was written against used `qty` / `amountSen`. The page hands the
+  // raw API row straight in (debit-notes.tsx:239), so read both spellings —
+  // before this, Qty and Amount printed 0 on every downloaded debit note.
+  // (BUG-2026-08-13-034)
   type DebitNoteItem = {
     description?: string;
     qty?: number;
+    quantity?: number;
     unitPriceSen?: number;
     amountSen?: number;
+    totalSen?: number;
   };
   const items: DebitNoteItem[] = data.items ?? [];
   const tableBody = items.map((item, idx) => [
     String(idx + 1),
     item.description ?? "",
-    String(item.qty ?? 0),
+    String(item.qty ?? item.quantity ?? 0),
     fmtCurrency(item.unitPriceSen ?? 0),
-    fmtCurrency(item.amountSen ?? 0),
+    fmtCurrency(item.amountSen ?? item.totalSen ?? 0),
   ]);
 
   autoTable(doc, {
@@ -157,14 +165,14 @@ export function generateDebitNotePdf(data: any) {
   doc.setFont("helvetica", "bold");
   doc.setTextColor(31, 29, 27);
   doc.text("TOTAL DEBIT:", totalsX, y);
-  doc.text(fmtCurrency(data.totalSen ?? 0), pageW - margin, y, { align: "right" });
+  doc.text(fmtCurrency(data.totalSen ?? data.totalAmount ?? 0), pageW - margin, y, { align: "right" });
   y += 6;
 
   // Amount in words
   doc.setFontSize(8);
   doc.setFont("helvetica", "italic");
   doc.setTextColor(80, 80, 80);
-  doc.text(`Amount in words: ${amountInWords(data.totalSen ?? 0)}`, margin, y, { maxWidth: pageW - margin * 2 });
+  doc.text(`Amount in words: ${amountInWords(data.totalSen ?? data.totalAmount ?? 0)}`, margin, y, { maxWidth: pageW - margin * 2 });
   y += 12;
 
   // --- Signature Lines ---
@@ -200,5 +208,5 @@ export function generateDebitNotePdf(data: any) {
   doc.text(`${COMPANY_NAME}  |  This is a computer-generated document.`, margin, footerY);
   doc.text(`Generated: ${fmtDate(new Date().toISOString())}`, pageW - margin, footerY, { align: "right" });
 
-  doc.save(`${data.dnNo ?? "DebitNote"}.pdf`);
+  doc.save(`${data.dnNo ?? data.noteNumber ?? "DebitNote"}.pdf`);
 }

@@ -46,8 +46,8 @@ function buildDebitNoteVoucher(dn: DebitNote): VoucherSpec {
     cells: [
       item.description ?? "",
       String(item.quantity ?? ""),
-      formatCurrency(item.unitPrice),
-      formatCurrency(item.total),
+      formatCurrency(item.unitPriceSen ?? item.unitPrice ?? 0),
+      formatCurrency(item.totalSen ?? item.total ?? 0),
     ],
   }));
   const remarks = [dn.reason, dn.reasonDetail].filter(Boolean).join(" — ") || undefined;
@@ -339,8 +339,8 @@ export default function DebitNotesPage() {
                   (Number(dn.totalAmount ?? 0) / 100).toFixed(2),
                   item.description ?? "",
                   String(item.quantity ?? ""),
-                  (Number(item.unitPrice ?? 0) / 100).toFixed(2),
-                  (Number(item.total ?? 0) / 100).toFixed(2),
+                  (Number(item.unitPriceSen ?? item.unitPrice ?? 0) / 100).toFixed(2),
+                  (Number(item.totalSen ?? item.total ?? 0) / 100).toFixed(2),
                 ]),
               ),
             ]}

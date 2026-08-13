@@ -19,8 +19,11 @@ type LorryRow = {
   driverName: string;
   driverContact: string;
   status: string;
-  createdAt: string;
-  updatedAt: string;
+  // The production table has no created_at / updated_at (0001_init's shape —
+  // see the POST handler), so these are always undefined on the wire. Typed
+  // optional so the shape stops asserting a value that never arrives.
+  createdAt?: string | null;
+  updatedAt?: string | null;
 };
 
 function rowToLorry(row: LorryRow) {
@@ -32,8 +35,8 @@ function rowToLorry(row: LorryRow) {
     driverName: row.driverName,
     driverContact: row.driverContact,
     status: row.status,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
+    createdAt: row.createdAt ?? null,
+    updatedAt: row.updatedAt ?? null,
   };
 }
 
@@ -66,15 +69,21 @@ app.post("/", async (c) => {
       return c.json({ success: false, error: "name is required" }, 400);
     }
     const id = genId();
-    const now = new Date().toISOString();
     const status =
       typeof body.status === "string" &&
       (ALLOWED_STATUS as readonly string[]).includes(body.status)
         ? body.status
         : "AVAILABLE";
     await c.var.DB.prepare(
-      `INSERT INTO lorries (id, name, plateNumber, capacity, driverName, driverContact, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      // NOTE: `lorries` in production is 0001_init's table — id, name,
+      // plate_number, capacity, driver_name, driver_contact, status (+ org_id
+      // from 0087). 0014_drivers_lorries.sql, which declares created_at /
+      // updated_at, is a `CREATE TABLE IF NOT EXISTS` and was therefore a
+      // no-op against the already-existing table, and no runtime self-apply
+      // adds them. Naming them here made every write throw inside the catch
+      // below and answer 400 "Invalid request body". (BUG-2026-08-13-030)
+      `INSERT INTO lorries (id, name, plateNumber, capacity, driverName, driverContact, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -84,8 +93,6 @@ app.post("/", async (c) => {
         typeof body.driverName === "string" ? body.driverName : "",
         typeof body.driverContact === "string" ? body.driverContact : "",
         status,
-        now,
-        now,
       )
       .run();
     const created = await c.var.DB.prepare(
@@ -132,15 +139,14 @@ app.put("/", async (c) => {
           ? String(body.driverContact || "")
           : existing.driverContact,
     };
-    const now = new Date().toISOString();
+    // No updated_at column on this table — see the POST handler's note.
     await c.var.DB.prepare(
-      `UPDATE lorries SET status = ?, driverName = ?, driverContact = ?, updated_at = ? WHERE id = ?`,
+      `UPDATE lorries SET status = ?, driverName = ?, driverContact = ? WHERE id = ?`,
     )
       .bind(
         merged.status,
         merged.driverName,
         merged.driverContact,
-        now,
         id,
       )
       .run();
@@ -197,10 +203,10 @@ app.put("/:id", async (c) => {
           ? body.status
           : existing.status,
     };
-    const now = new Date().toISOString();
+    // No updated_at column on this table — see the POST handler's note.
     await c.var.DB.prepare(
       `UPDATE lorries SET name = ?, plateNumber = ?, capacity = ?,
-         driverName = ?, driverContact = ?, status = ?, updated_at = ?
+         driverName = ?, driverContact = ?, status = ?
        WHERE id = ?`,
     )
       .bind(
@@ -210,7 +216,6 @@ app.put("/:id", async (c) => {
         merged.driverName,
         merged.driverContact,
         merged.status,
-        now,
         id,
       )
       .run();

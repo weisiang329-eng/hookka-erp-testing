@@ -305,23 +305,26 @@ export default function SalesPage() {
   // Best-effort: /api/users may be admin-gated, so an empty/403 payload just
   // leaves Agent blank rather than failing the export.
   //
-  // DEFERRED off the critical load path (2026-08-13). This page already fires
-  // ~12 calls on mount and the API tier serializes them (~40ms each), so the
-  // LAST call lands ~1.2s in. Measured on prod: /api/users was the single
-  // slowest call on /sales at 1232ms — for 1KB that is only needed when the
-  // operator actually exports. Fetching it after the page is interactive keeps
-  // it out of that queue; the export lookup just resolves a moment later.
+  // DEFERRED off the critical load path (2026-08-13). This page fires ~12 calls
+  // on mount and the API tier serializes them, so whatever lands last pays for
+  // the whole queue. Measured on prod: /api/users was the SLOWEST call on
+  // /sales at 1232ms — for 1KB only needed when the operator actually exports.
+  //
+  // Gate on the ORDERS RESPONSE ARRIVING, not on requestIdleCallback. The first
+  // attempt used rIC and did NOT work (re-measured on prod: /api/users still
+  // started at 485ms, inside the mount burst, still 1327ms). rIC measures
+  // MAIN-THREAD idleness, but nothing here is CPU-bound — the main thread goes
+  // idle within a few hundred ms while the requests are still queued on the
+  // network, so rIC fires straight back into the burst it was meant to avoid.
+  // `ordersResp` becoming truthy is a real network signal: the page's own
+  // critical fetch has returned, so the burst has drained.
   const [wantUsers, setWantUsers] = useState(false);
   useEffect(() => {
-    const w = window as unknown as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number };
-    if (w.requestIdleCallback) {
-      const h = w.requestIdleCallback(() => setWantUsers(true), { timeout: 4000 });
-      return () => (window as unknown as { cancelIdleCallback?: (h: number) => void }).cancelIdleCallback?.(h);
-    }
-    // eslint-disable-next-line no-restricted-syntax -- one-shot idle fallback, not a React scheduler concern
-    const t = setTimeout(() => setWantUsers(true), 2500);
+    if (!ordersResp || wantUsers) return;
+    // eslint-disable-next-line no-restricted-syntax -- one-shot post-load defer, not a React scheduler concern
+    const t = setTimeout(() => setWantUsers(true), 1200);
     return () => clearTimeout(t);
-  }, []);
+  }, [ordersResp, wantUsers]);
   const { data: usersResp } = useCachedJson<{ success?: boolean; data?: Array<{ id?: string; displayName?: string; email?: string }> }>(wantUsers ? "/api/users" : "");
   // Multi-Company Phase 2 — company registry for the "Company" column (code →
   // name) and the company filter dropdown. Mirrors procurement/index.tsx.

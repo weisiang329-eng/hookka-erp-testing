@@ -78,3 +78,32 @@ test("succeeds on the very first try without delay when the readback is healthy"
   assert.ok(Date.now() - t0 < 250, "no backoff delay on first-try success");
   assert.deepEqual(r.value, { id: "x" });
 });
+
+// ── An EXHAUSTED abort must not be reported as a failed save ───────────────
+// The write already returned 2xx. If every readback attempt is then cancelled
+// (route change, or the global 30s cap), we know nothing about the row — and
+// it almost certainly saved. Reporting "failed" made the UI revert the
+// owner's credit-limit edit and tell them it was lost, when it had persisted.
+test("isAbortError recognises the cancel shapes, and only those", () => {
+  assert.equal(vs.isAbortError(new DOMException("signal is aborted without reason", "AbortError")), true);
+  assert.equal(vs.isAbortError(new Error("signal is aborted without reason")), true);
+  assert.equal(vs.isAbortError(new Error("The operation was aborted")), true);
+  // Real failures must NOT be laundered into "saved, unverified".
+  assert.equal(vs.isAbortError(new Error("500 Internal Server Error")), false);
+  assert.equal(vs.isAbortError(new Error("NetworkError when attempting to fetch")), false);
+  assert.equal(vs.isAbortError(null), false);
+  assert.equal(vs.isAbortError(undefined), false);
+});
+
+test("readback that is aborted on EVERY attempt surfaces the abort as lastErr", async () => {
+  let n = 0;
+  const r = await vs.readbackWithRetry(async () => {
+    n++;
+    throw new DOMException("signal is aborted without reason", "AbortError");
+  }, (v) => v == null);
+  assert.equal(r.value, null, "never confirmed");
+  assert.ok(n > 1, "should have retried before giving up");
+  // This is the branch verifiedSave keys on to return reason:"unverified"
+  // instead of reason:"network" — so the caller keeps the edit on screen.
+  assert.equal(vs.isAbortError(r.lastErr), true);
+});

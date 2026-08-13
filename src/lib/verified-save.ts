@@ -87,10 +87,27 @@ export async function readbackWithRetry<R>(
   return { value, lastErr };
 }
 
+/** True for a fetch cancelled by AbortController — the global 30s cap, or a
+ *  route change unmounting the component mid-flight. Its message is literally
+ *  "signal is aborted without reason", which must never reach an operator. */
+export function isAbortError(err: unknown): boolean {
+  if (!err) return false;
+  if (typeof err === "object" && (err as { name?: unknown }).name === "AbortError") return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /\baborted\b/i.test(msg);
+}
+
 type SaveResult<T> =
   | { ok: true; data: T }
   | { ok: false; reason: "http"; status: number; body: string }
   | { ok: false; reason: "network"; details: string }
+  // The WRITE succeeded (2xx) but the readback was CANCELLED, so we could not
+  // confirm it. Distinct from "network" because the row is almost certainly
+  // saved: callers must NOT roll the UI back and must NOT say "failed".
+  // The owner hit exactly this editing a customer's credit limit — the edit
+  // persisted, yet the UI reverted and showed "Failed to save customer:
+  // readback failed: signal is aborted without reason".
+  | { ok: false; reason: "unverified"; details: string }
   | {
       ok: false;
       reason: "mismatch";
@@ -167,6 +184,18 @@ export async function verifiedSave<T>(args: VerifiedSaveArgs<T>): Promise<SaveRe
     (v) => v == null,
   );
   if (data == null) {
+    // The write already returned 2xx. A CANCELLED readback (30s cap, or the
+    // operator navigating away mid-save) therefore says nothing about whether
+    // the row saved — and it almost certainly did. Report it as unverified so
+    // the caller keeps the operator's edit on screen instead of reverting it
+    // and calling a successful save a failure.
+    if (isAbortError(lastErr)) {
+      return {
+        ok: false,
+        reason: "unverified",
+        details: "Saved, but the confirmation read was interrupted. Refresh to double-check.",
+      };
+    }
     return {
       ok: false,
       reason: "network",

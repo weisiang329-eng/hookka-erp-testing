@@ -734,6 +734,34 @@ export function rowToMinimalJobCard(
 // same PO+jobCards shape the Production page consumes — the /worker/scan page's
 // Order/JobCard types are a view of this output. Reusing it (rather than
 // re-assembling) keeps the scan card from silently missing a field.
+// Group job-card rows by their productionOrderId ONCE, so a caller mapping N
+// POs over M job cards costs O(N+M) instead of O(N×M).
+//
+// Why this exists (perf 2026-08-13): rowToMinimalPO's per-PO
+// `jobCards.filter(j => j.productionOrderId === row.id)` is a full scan of the
+// job-card array for EVERY PO. On the /planning payload that is 957 POs ×
+// 36,796 job cards ≈ 35M comparisons — measured at 6,473 ms of the 9,587 ms
+// cold call on prod data. Pre-grouping the same rows costs 13 ms and yields
+// byte-identical output: insertion order within a group matches the source
+// array order, and the caller applies the same `sequence` sort afterwards
+// (Array#sort is stable), so the emitted job-card order is unchanged.
+//
+// The map is OPTIONAL on rowToMinimalPO — callers that don't pass one keep the
+// legacy filter path exactly, so single-PO callers (worker scan lookup) are
+// untouched.
+export function groupJobCardsByPoId(
+  rows: JobCardRow[],
+): Map<string, JobCardRow[]> {
+  const byPo = new Map<string, JobCardRow[]>();
+  for (const j of rows) {
+    const key = j.productionOrderId;
+    const bucket = byPo.get(key);
+    if (bucket) bucket.push(j);
+    else byPo.set(key, [j]);
+  }
+  return byPo;
+}
+
 export function rowToMinimalPO(
   row: ProductionOrderRow,
   jobCards: JobCardRow[] = [],
@@ -750,6 +778,11 @@ export function rowToMinimalPO(
   // passes this (so the phone can pre-check "already done" on a per-piece
   // sticker); every other caller omits it and the payload is unchanged.
   picsByJcId: Map<string, PiecePicRow[]> | null = null,
+  // Pre-grouped job cards (see groupJobCardsByPoId). When supplied, this PO's
+  // cards are read straight out of the map instead of re-scanning the whole
+  // `jobCards` array. Output is identical either way; omitting it keeps the
+  // legacy O(N×M) filter for callers that pass a small/single-PO array.
+  jcByPoId: Map<string, JobCardRow[]> | null = null,
 ): MinimalPOOut {
   const parentTargetEndDate = row.targetEndDate ?? null;
   const parentItemCategory = row.itemCategory ?? null;
@@ -794,8 +827,13 @@ export function rowToMinimalPO(
   );
   const siblings =
     groupKey && siblingsByGroupKey ? (siblingsByGroupKey.get(groupKey) ?? null) : null;
-  const myJCs = jobCards
-    .filter((j) => j.productionOrderId === row.id)
+  const myJCs = (
+    jcByPoId
+      ? // slice() before sorting: the map's buckets alias the caller's rows
+        // array, and sorting in place would reorder it under other callers.
+        (jcByPoId.get(row.id) ?? []).slice()
+      : jobCards.filter((j) => j.productionOrderId === row.id)
+  )
     .sort((a, b) => a.sequence - b.sequence)
     .map((j) => {
       const jc = rowToMinimalJobCard(
@@ -1602,12 +1640,33 @@ export async function fetchFilteredPOs(
   // sit at the end of every bind list below.
   const custWhere = customerScope?.clause ? ` AND ${customerScope.clause}` : "";
   const custBinds = customerScope?.binds ?? [];
-  const poSql = hasFilter
-    ? `SELECT * FROM ${poSource} WHERE orgId = ? AND status IN (${placeholders})${excludeCompletedWhere}${deptScopeWhere}${dueWhere}${catWhere}${scopeWhere}${custWhere} ORDER BY created_at DESC, id DESC`
-    : `SELECT * FROM ${poSource} WHERE orgId = ?${excludeCompletedWhere}${deptScopeWhere}${dueWhere}${catWhere}${scopeWhere}${custWhere} ORDER BY created_at DESC, id DESC`;
-  const poStmt = hasFilter
-    ? db.prepare(poSql).bind(orgId, ...(statuses as string[]), ...deptScopeBinds, ...dueBindings, ...catBindings, ...scopeBinds, ...custBinds)
-    : db.prepare(poSql).bind(orgId, ...deptScopeBinds, ...dueBindings, ...catBindings, ...scopeBinds, ...custBinds);
+  // The PO row-selection predicate, factored out so the job-card fetch can
+  // reuse it verbatim as a sub-select (see jcNarrowWhere below). Keeping ONE
+  // definition is what guarantees the two stay in lockstep — a JC fetch scoped
+  // to a DIFFERENT PO set than the PO fetch would silently drop job cards.
+  const poWhereSql = hasFilter
+    ? `orgId = ? AND status IN (${placeholders})${excludeCompletedWhere}${deptScopeWhere}${dueWhere}${catWhere}${scopeWhere}${custWhere}`
+    : `orgId = ?${excludeCompletedWhere}${deptScopeWhere}${dueWhere}${catWhere}${scopeWhere}${custWhere}`;
+  const poWhereBinds: unknown[] = hasFilter
+    ? [orgId, ...(statuses as string[]), ...deptScopeBinds, ...dueBindings, ...catBindings, ...scopeBinds, ...custBinds]
+    : [orgId, ...deptScopeBinds, ...dueBindings, ...catBindings, ...scopeBinds, ...custBinds];
+  const poSql = `SELECT * FROM ${poSource} WHERE ${poWhereSql} ORDER BY created_at DESC, id DESC`;
+  const poStmt = db.prepare(poSql).bind(...poWhereBinds);
+  // Scope the full-org job-card fetch to the POs this request actually returns.
+  //
+  // Perf 2026-08-13: the no-dept / no-status minimal path (the /planning and
+  // /delivery payloads) fetched EVERY job card in the org and then threw away
+  // the ones whose PO wasn't in the result set. On prod that is 36,796 rows /
+  // 30.8 MB pulled over Hyperdrive to keep 13,418 rows / 10.8 MB — measured
+  // 874 ms → 203 ms once narrowed. Expressed as a sub-select rather than an
+  // id list so it stays ONE statement and can still run in parallel with the
+  // PO fetch (an IN-list would have to wait for the PO ids first).
+  //
+  // Rows dropped here are exactly the rows rowToMinimalPO already discarded —
+  // a job card whose productionOrderId matches no returned PO can never be
+  // attached to one — so the response is unchanged, not merely similar.
+  const jcNarrowWhere = ` WHERE orgId = ? AND productionOrderId IN (SELECT id FROM ${poSource} WHERE ${poWhereSql})`;
+  const jcNarrowBinds: unknown[] = [orgId, ...poWhereBinds];
 
   // Dept-narrowing: when caller passes ?dept=FOAM (etc.), return JCs
   // whose wipKey appears in any wipKey that contains a matching-dept JC,
@@ -1794,8 +1853,9 @@ export async function fetchFilteredPOs(
         orgId,
         jcRows.map((j) => j.id),
       );
+      const jcByPoId = groupJobCardsByPoId(jcRows);
       return (pos.results ?? []).map((p) =>
-        rowToMinimalPO(p, jcRows, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode, deptFilter),
+        rowToMinimalPO(p, jcRows, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode, deptFilter, null, jcByPoId),
       );
     }
     if (hasFilter || hasScope) {
@@ -1820,14 +1880,17 @@ export async function fetchFilteredPOs(
         orgId,
         jcs.map((j) => j.id),
       );
+      const jcByPoId = groupJobCardsByPoId(jcs);
       return poRows.map((p) =>
-        rowToMinimalPO(p, jcs, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode, deptFilter),
+        rowToMinimalPO(p, jcs, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode, deptFilter, null, jcByPoId),
       );
     }
-    // No status filter, no dept filter: legacy full-fetch backward-compat path.
+    // No status filter, no dept filter — the /planning and /delivery payloads.
+    // JC fetch is scoped to this request's PO set (jcNarrowWhere) instead of
+    // the whole org; see that constant for the measured numbers.
     const jcStmt = db
-      .prepare(`SELECT * FROM ${jcSource} WHERE orgId = ?`)
-      .bind(orgId);
+      .prepare(`SELECT * FROM ${jcSource}${jcNarrowWhere}`)
+      .bind(...jcNarrowBinds);
     const [pos, jcs] = await Promise.all([
       poStmt.all<ProductionOrderRow>(),
       jcStmt.all<JobCardRow>(),
@@ -1838,8 +1901,9 @@ export async function fetchFilteredPOs(
       orgId,
       jcRows.map((j) => j.id),
     );
+    const jcByPoId = groupJobCardsByPoId(jcRows);
     return (pos.results ?? []).map((p) =>
-      rowToMinimalPO(p, jcRows, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode, deptFilter),
+      rowToMinimalPO(p, jcRows, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode, deptFilter, null, jcByPoId),
     );
   }
 
@@ -2148,9 +2212,10 @@ export async function fetchPaginatedPOs(
 
   // Minimal path: skip piece_pics entirely.
   if (minimal) {
+    const jcByPoId = groupJobCardsByPoId(jcs);
     return {
       data: posRows.map((p) =>
-        rowToMinimalPO(p, jcs, new Map(), leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode, deptFilter),
+        rowToMinimalPO(p, jcs, new Map(), leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode, deptFilter, null, jcByPoId),
       ),
       total,
     };

@@ -194,7 +194,7 @@ all-clears here twice this week.
 
 ---
 
-## BUG-2026-08-13-095 — 98.5% of invoice lines carry no delivery-order link, so every SO↔invoice audit has been reading 1.5% of the data and reporting "clean" `money` `invoices` `auditability` `data-integrity` 🔴
+## BUG-2026-08-13-096 — 98.5% of invoice lines carry no delivery-order link, so every SO↔invoice audit has been reading 1.5% of the data and reporting "clean" `money` `invoices` `auditability` `data-integrity` 🔴
 
 > **STATUS: IDENTIFIED, NOT FIXED. Scope is unknown and unknowable with the current
 > schema — that is the finding.** No data was changed. Raised to the owner 2026-08-13.

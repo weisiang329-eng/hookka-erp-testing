@@ -1595,7 +1595,11 @@ app.post("/", async (c) => {
         hubId: string | null;
         hubName: string | null;
         status: string;
-        delivery_incomplete: number | null;
+        // BOTH spellings declared, or the typechecker certifies the wrong read
+        // instead of catching it — the exact way BUG-2026-08-13-034 shipped
+        // RM 0.00 credit notes. The shim returns `deliveryIncomplete`.
+        deliveryIncomplete?: number | null;
+        delivery_incomplete?: number | null;
       }>();
     if (!doRow) {
       return c.json(
@@ -1641,7 +1645,17 @@ app.post("/", async (c) => {
     // incomplete, so billing is withheld until an operator resolves it
     // (POST /api/delivery-orders/:id/resolve-incomplete, which itself creates
     // the invoice). Mirrors the same block in the PUT "Convert to Invoice".
-    if (Number(doRow.delivery_incomplete) === 1) {
+    // Dual-keyed. The pg shim camelCases every column on the way back
+    // (db-pg.ts `columnFrom` → `postgres.toCamel` for anything absent from
+    // column-rename-map.json — and `delivery_incomplete` is absent), so the row
+    // carries `deliveryIncomplete`. Reading only the snake_case spelling
+    // returned undefined, `Number(undefined) === 1` is false, and this hold has
+    // therefore NEVER fired since it was written (2026-06-14).
+    //
+    // Safe to switch on: verified on prod 2026-08-13 that zero delivery orders
+    // are flagged, so turning the guard on blocks nothing that currently
+    // succeeds. See BUG-CLASSES.md — this is the camelCase read trap.
+    if (Number(doRow.deliveryIncomplete ?? doRow.delivery_incomplete) === 1) {
       return c.json(
         {
           success: false,

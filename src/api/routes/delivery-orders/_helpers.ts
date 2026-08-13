@@ -224,9 +224,20 @@ export type DeliveryOrderRow = {
   // Runtime-added flag (ensureDeliveryIncompleteColumn). 1 = the goods were
   // physically delivered but the paperwork was incomplete (e.g. damaged
   // items returning to the office), so the auto-invoice is WITHHELD until an
-  // operator resolves it. Lowercase snake_case so the unquoted-identifier
-  // fold can't split read/write keys. Absent (undefined) on rows read before
-  // the ALTER lands → treated as 0.
+  // operator resolves it. Absent (undefined) on rows read before the ALTER
+  // lands → treated as 0.
+  //
+  // BOTH spellings are declared, and every reader must use `?? `. The comment
+  // here used to justify snake_case with "so the unquoted-identifier fold can't
+  // split read/write keys" — true for a folded identifier, but this column has
+  // an UNDERSCORE, so it is never folded. What actually happens: it is absent
+  // from column-rename-map.json, so db-pg.ts's `columnFrom` falls through to
+  // `postgres.toCamel` and the row comes back as `deliveryIncomplete`.
+  //
+  // Declaring only one spelling is what let the typechecker CERTIFY five wrong
+  // reads instead of catching them — the same mechanism that shipped RM 0.00
+  // credit notes (BUG-2026-08-13-034).
+  deliveryIncomplete?: number | null;
   delivery_incomplete?: number | null;
 };
 
@@ -562,8 +573,17 @@ export function rowToOrder(
     signedByWorkerName: row.signedByWorkerName ?? undefined,
     // Delivered-with-issues flag — drives the "invoice on hold" banner on the
     // DO detail page and blocks the Convert-to-Invoice / manual-invoice paths
-    // until an operator resolves it. Folded-lowercase runtime column.
-    deliveryIncomplete: !!Number(row.delivery_incomplete),
+    // until an operator resolves it.
+    //
+    // Dual-keyed. The comment here used to call this a "folded-lowercase
+    // runtime column", which is wrong: `delivery_incomplete` has an underscore,
+    // so it is NOT folded — it is absent from column-rename-map.json, which
+    // means db-pg.ts's `columnFrom` falls through to `postgres.toCamel` and the
+    // row arrives as `deliveryIncomplete`. Reading only the snake_case spelling
+    // made this projection emit `false` for every DO, so the flag never reached
+    // the UI at all. A stale comment asserting the wrong mechanism is what kept
+    // three separate readers of this column broken.
+    deliveryIncomplete: !!Number(row.deliveryIncomplete ?? row.delivery_incomplete),
   };
   if (pod) base.proofOfDelivery = pod;
   return base;
@@ -4235,7 +4255,7 @@ export async function applyDeliveryOrderUpdate(
     // the office equivalent). Only meaningful on a →DELIVERED transition.
     const wantIncomplete =
       body.deliveryIncomplete === true || body.deliveryIncomplete === 1;
-    const wasIncomplete = Number(existing.delivery_incomplete) === 1;
+    const wasIncomplete = Number(existing.deliveryIncomplete ?? existing.delivery_incomplete) === 1;
 
     // --- status transition validation (same rules as mock-data) ---
     let nextStatus: string = existing.status;

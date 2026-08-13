@@ -13,7 +13,7 @@ Owns production **planning, scheduling, MRP and lead times** — the read-mostly
   - `/planning` → `src/pages/planning/index.tsx:444` (`PlanningPage` — one 4,060-line file, 5 tab-gated render blocks)
   - MRP view → `src/pages/planning/mrp.tsx` (reads/posts `/api/mrp`)
   - Lead-time history + scheduled changes → `src/pages/planning/LeadTimeHistoryDialog.tsx`
-  - Per-dept daily schedule (shared renderer) → `src/pages/planning/dept/_DepartmentSchedulePage.tsx` (+ `_PlainDeptSchedulePage.tsx` plain-table variant)
+  - Per-dept daily schedule (shared renderer) → `src/pages/planning/dept/_DepartmentSchedulePage.tsx` — the ONLY renderer; all nine dept pages import it. (`_PlainDeptSchedulePage.tsx`, a plain-table variant this line used to list, had no importer and was deleted in chore/dead-code-sweep.)
   - Dept config shells (one per dept, no logic) → `src/pages/planning/dept/{fabric-cutting,fabric-sewing,wood-cutting,foam-bonding,foam-cutting,framing,webbing,upholstery,packing}.tsx`
   - Agent Console (SUPER_ADMIN) → `src/pages/agents/index.tsx`
 - API routes (mounts in `src/api/worker.ts`)

@@ -1,7 +1,12 @@
 import { useState, useEffect, useMemo } from "react";
 import { Link } from "react-router-dom";
 import { useParams } from "react-router-dom";
-import { cachedFetchJson } from "@/lib/cached-fetch";
+import {
+  cachedFetchJsonResult,
+  isUnknownOutcome,
+  type CachedFetchFailure,
+} from "@/lib/cached-fetch";
+import { RecordLoadError } from "@/components/ui/record-load-error";
 import type { MaterialScaling } from "@/api/lib/material-scaling";
 
 // ---------- Types ----------
@@ -460,14 +465,31 @@ export default function BOMPage() {
   const [allVersions, setAllVersions] = useState<BOMTemplate[]>([]);
   const [template, setTemplate] = useState<BOMTemplate | null>(null);
   const [loading, setLoading] = useState(true);
+  // `cachedFetchJson` returns null on ANY failure — a 30 s abort read
+  // identically to "the product list came back and your product isn't in it",
+  // and this page printed "Product not found" over dead requests
+  // (BUG-2026-08-13-016). `cachedFetchJsonResult` says which happened.
+  const [failure, setFailure] = useState<CachedFetchFailure | null>(null);
+  const [reloadTick, setReloadTick] = useState(0);
 
   useEffect(() => {
     async function load() {
       try {
-        const [pData, tData] = await Promise.all([
-          cachedFetchJson<{ success?: boolean; data?: Product[] }>("/api/products"),
-          cachedFetchJson<{ success?: boolean; data?: BOMTemplate[] }>("/api/bom/templates"),
+        const [pRes, tRes] = await Promise.all([
+          cachedFetchJsonResult<{ success?: boolean; data?: Product[] }>("/api/products"),
+          cachedFetchJsonResult<{ success?: boolean; data?: BOMTemplate[] }>("/api/bom/templates"),
         ]);
+        // Either read failing means this page cannot state anything: without
+        // the product list it cannot say the product is absent, and without
+        // the templates it cannot say the product has no BOM.
+        const failed = !pRes.ok ? pRes : !tRes.ok ? tRes : null;
+        setFailure(
+          failed
+            ? { kind: failed.kind, status: failed.status, message: failed.error }
+            : null,
+        );
+        const pData = pRes.data;
+        const tData = tRes.data;
 
         let foundProduct: Product | null = null;
         if (pData?.success) {
@@ -505,13 +527,20 @@ export default function BOMPage() {
           );
         }
       } catch {
-        // silent — empty-state UI will render
+        // cachedFetchJsonResult does not throw for network outcomes, so this
+        // is a client-side bug in the mapping above. Still say so rather than
+        // rendering an empty state that reads like an answer.
+        setFailure({
+          kind: "network",
+          status: 0,
+          message: "This BOM couldn't be read. Please try again.",
+        });
       } finally {
         setLoading(false);
       }
     }
     load();
-  }, [id]);
+  }, [id, reloadTick]);
 
   // Find the active version for the non-active banner
   const activeVersion = useMemo(
@@ -541,6 +570,23 @@ export default function BOMPage() {
       <div className="flex items-center justify-center h-64 text-gray-500">
         Loading BOM data...
       </div>
+    );
+  }
+
+  // A read that never landed is not a product that does not exist
+  // (BUG-2026-08-13-016).
+  if (!product && failure && isUnknownOutcome(failure)) {
+    return (
+      <RecordLoadError
+        subject="BOM"
+        failure={failure}
+        onRetry={() => {
+          setLoading(true);
+          setReloadTick((t) => t + 1);
+        }}
+        backTo="/products"
+        backLabel="Back to Products"
+      />
     );
   }
 

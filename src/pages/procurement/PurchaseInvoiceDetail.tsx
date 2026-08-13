@@ -25,7 +25,8 @@ import { PurchaseLineageBar } from "@/components/ui/purchase-lineage-bar";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
-import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix, isUnknownOutcome } from "@/lib/cached-fetch";
+import { RecordLoadError } from "@/components/ui/record-load-error";
 import { getCurrentUser } from "@/lib/auth";
 import { useNavGuard } from "@/lib/use-nav-guard";
 import { formatCurrency, formatDate } from "@/lib/utils";
@@ -169,7 +170,7 @@ export default function PurchaseInvoiceDetailPage() {
   // own grn_id) and linkedPayments (supplier_payments.purchaseInvoiceId — the
   // cash-out that settles it, previously invisible from this page entirely).
   // The whole-/api/grn-list download this page used to do is gone.
-  const { data: resp, loading, error: fetchError, refresh } = useCachedJson<{
+  const { data: resp, loading, error: fetchError, failure, refresh } = useCachedJson<{
     success?: boolean;
     data?: PurchaseInvoiceDetail;
     error?: string;
@@ -530,6 +531,20 @@ export default function PurchaseInvoiceDetailPage() {
       <div className="flex items-center justify-center h-64">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#6B5C32]" />
       </div>
+    );
+  }
+
+  // Unknown outcome (timeout / network / 5xx) — not an absent purchase
+  // invoice. BUG-2026-08-13-016.
+  if (!pi && failure && isUnknownOutcome(failure)) {
+    return (
+      <RecordLoadError
+        subject="purchase invoice"
+        failure={failure}
+        onRetry={refresh}
+        backTo="/procurement/pi"
+        backLabel="Back to Purchase Invoices"
+      />
     );
   }
 

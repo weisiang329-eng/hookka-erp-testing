@@ -26,7 +26,8 @@ import { DocumentChainMap } from "@/components/ui/document-chain-map";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { LockBanner } from "@/components/ui/lock-banner";
 import { ObjectPageHeader } from "@/components/ui/object-page-header";
-import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCache, invalidateCachePrefix, isUnknownOutcome } from "@/lib/cached-fetch";
+import { RecordLoadError } from "@/components/ui/record-load-error";
 import { getCurrentUser } from "@/lib/auth";
 import type { SalesOrder, SOStatus, Customer } from "@/types";
 
@@ -344,7 +345,7 @@ export default function SalesOrderDetailPage() {
   // differ.
   const mode = useSOMode();
   const basePath = soBasePath(mode);
-  const { data: orderResp, loading, refresh: refreshOrder } = useCachedJson<{
+  const { data: orderResp, loading, failure, refresh: refreshOrder } = useCachedJson<{
     success?: boolean;
     data?: SalesOrder;
     lockReason?: string | null;
@@ -856,6 +857,20 @@ export default function SalesOrderDetailPage() {
   };
 
   if (loading) return <div className="flex items-center justify-center h-64 text-[#6B7280]">Loading...</div>;
+  // A read that FAILED is not a record that is absent. Only an HTTP 404
+  // licenses "not found" below — a 30 s timeout, a dropped connection or a
+  // 5xx leaves existence unknown, and saying otherwise sends an operator off
+  // to re-key an order that is sitting in the database (BUG-2026-08-13-016).
+  if (!order && failure && isUnknownOutcome(failure))
+    return (
+      <RecordLoadError
+        subject={mode === "service-order" ? "service order" : "sales order"}
+        failure={failure}
+        onRetry={refreshOrder}
+        backTo={basePath}
+        backLabel="Back to list"
+      />
+    );
   if (!order) return <div className="flex flex-col items-center justify-center h-64 gap-4"><div className="text-[#6B7280]">Order not found</div><Button variant="outline" onClick={() => navigate(basePath)}>Back</Button></div>;
 
   const totalQty = order.items.reduce((s, i) => s + i.quantity, 0);

@@ -31,7 +31,8 @@ import { ObjectPageHeader } from "@/components/ui/object-page-header";
 import { PurchaseLineageBar } from "@/components/ui/purchase-lineage-bar";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
-import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix, isUnknownOutcome } from "@/lib/cached-fetch";
+import { RecordLoadError } from "@/components/ui/record-load-error";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import {
   isGrnLineEditable,
@@ -165,7 +166,7 @@ export default function GRNDetailPage() {
   // accepted-qty values per line (parallel to items) = editing.
   const [qtyEdit, setQtyEdit] = useState<string[] | null>(null);
 
-  const { data: resp, loading, error: fetchError, refresh } = useCachedJson<{
+  const { data: resp, loading, error: fetchError, failure, refresh } = useCachedJson<{
     success?: boolean;
     data?: GRNDetail;
     error?: string;
@@ -630,6 +631,20 @@ export default function GRNDetailPage() {
       <div className="flex items-center justify-center h-64">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#6B5C32]" />
       </div>
+    );
+  }
+
+  // Unknown outcome (timeout / network / 5xx) — not an absent GRN.
+  // BUG-2026-08-13-016.
+  if (!grn && failure && isUnknownOutcome(failure)) {
+    return (
+      <RecordLoadError
+        subject="GRN"
+        failure={failure}
+        onRetry={refresh}
+        backTo="/procurement/grn"
+        backLabel="Back to GRNs"
+      />
     );
   }
 

@@ -11,6 +11,7 @@ That instruction is unusable without a list of the instances. `BUG-HISTORY.md` i
 | write path skips the dept-sheet cache wipe | 3 | only the one file someone was looking at |
 | fallback to the customer's DEFAULT hub | 3 | only the one document that printed wrong |
 | a child array scanned once per parent row (C14) | 3 | only the one list endpoint that was slow that week — the third miss was the hottest path in the app |
+| a dead request rendered as an answer (C15) | 2 so far | the reports pass (2026-08-13) fixed 5 tabs and left the same conflation on 19 detail/edit screens, because the shared primitive was swallowing the abort |
 
 The 2026-07-17 fix header literally reads *"This is the same bug class as the 2026-07-14
 totalHeightPriceSen fix"* — the author saw the class, and still fixed one column. The sibling
@@ -587,6 +588,77 @@ a per-row `.map()`/loop, or a single-record path? (b) how many parents and
 children does the real prod payload have? (c) is the parent set **bounded** (a
 `LIMIT`, a work queue that drains) or unbounded? An unbounded list is worth
 fixing at any size; a bounded one is worth fixing only for what it costs today.
+
+---
+
+## C15 — A request that DIED, rendered as an answer
+
+**Shape.** A read fails, the failure is not distinguishable from success-with-
+nothing, and the screen states the empty case as fact. Three surfaces, one
+shape:
+
+| surface | the false sentence |
+|---|---|
+| a report over a date range | *"No data available"* |
+| a record detail page | *"Order not found"* / *"Invoice not found"* |
+| a list page | *"No draft orders."* |
+
+Each is a **statement about the business**, and each has a recovery an operator
+will actually perform — re-key the order, re-raise the invoice, tell the
+customer nothing shipped.
+
+**Why it keeps happening.** The failure is *silent by construction*. Before
+this fix `useCachedJson` caught the 30 s `AbortError` and `return`ed with no
+error set, while `.finally` cleared `loading` — so a dead request produced
+`data = null, loading = false, error = null`, which is the exact state a
+successful empty response produces. There is no stack trace, no toast and no
+red anything; the page looks like it worked. And `cachedFetchJson` (the
+non-hook variant) still returns `null` for a timeout, a 500 and a `_stub` body
+alike, so `json?.data || []` writes emptiness into state.
+
+**The rule.** *Only an observed HTTP 404 licenses the words "not found", and
+only a 2xx body licenses "no data".* Everything else — abort, network, 5xx, a
+`_stub` envelope — leaves the answer UNKNOWN, and the screen must say it could
+not load, why, and offer a retry. Never launder a real absence into a network
+message either: a genuine 404 must still read as absence.
+
+Mechanically: `classifyFetchFailure` (`src/lib/cached-fetch.ts`) is the single
+decision, `isUnknownOutcome(failure)` is the single guard, and
+`useCachedJson().failure` / `cachedFetchJsonResult().kind` are the only two ways
+to obtain it. `cachedFetchJson` cannot express the distinction — a page in this
+class must not use it.
+
+**Instances**
+
+| # | surface | state |
+|---|---|---|
+| 1 | **reports** (5 tabs) — *"No data available"* over `/api/production-orders` killed at 30,012 ms | ✅ 2026-08-13 (BUG-2026-08-13-005) — `cachedFetchJsonResult` + `<ReportError>` |
+| 2 | **detail pages / edit forms / one embedded panel / the public QR page** — 11 printed a false absence, 4 hung on `Loading…`, 1 asserted an empty child set | ✅ 2026-08-13 (BUG-2026-08-13-016) — `useCachedJson().failure` + `isUnknownOutcome` + `<RecordLoadError>`; 19 files changed, 6 more repaired by the primitive alone |
+| 3 | **list pages** — ~25 grids whose empty caption (*"No draft orders."*, `DataGrid`'s default *"No data found."*) renders over a failed fetch | ⬜ **open, enumerated.** Each page owns its own caption and its own fetch shape, so this is a separate PR with its own before/after — not a blind sweep. Start from the files that import `useCachedJson` and pass an `emptyMessage`, and give `DataGrid` a `loadFailure` prop rather than editing 25 captions by hand |
+| 4 | **`cachedFetchJson` callers outside this class** | ⬜ unswept. The function returns `null` on every failure; any caller that renders that null as a factual empty state is row 1/2/3 wearing a different hat. `products/bom.tsx` and `products/documents.tsx` were two, found by this pass |
+
+Rows 3 and 4 are why this section exists rather than a note in the bug entry.
+Row 2's pass fixed **19 files across 11 modules**; every one would have been
+missed by an author who fixed only `sales/detail.tsx`, which is the file the
+audit named.
+
+**Cancellation is not a failure.** An unmount or a URL change aborts in-flight
+reads on purpose, and making that noisy is a new bug. The separation is
+structural: `releaseInflight` aborts only when the refcount hits 0, i.e. after
+every subscriber has set its own `cancelled` flag and returned — so an
+`AbortError` that reaches a *non-cancelled* consumer is the 30 s timeout.
+
+**Enforced by** `tests/record-load-failure-class.test.mjs` — it pins the
+primitive (the swallowed-abort line must stay gone; the `cancelled` guard must
+stay FIRST), enumerates every consumer with the guard it uses, and **fails when
+a new file reads through the cache layer and prints "…not found" without being
+in the map**. Behaviour is proved separately in
+`tests/cached-fetch-result.test.mjs`, which runs the real fetch wrapper for all
+three outcomes. Every guard was proved by reintroducing the bug and watching it
+go red — including one that did NOT fire at first: the consumer check only
+looked for the identifier `isUnknownOutcome` and passed happily while the guard
+had been short-circuited out of the branch. It now requires the CALL to gate
+the `<RecordLoadError>` render.
 
 ---
 

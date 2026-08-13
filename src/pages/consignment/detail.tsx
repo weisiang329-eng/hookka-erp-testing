@@ -23,7 +23,8 @@ import { HubEditModal } from "@/components/orders/HubEditModal";
 import DocumentFlowDiagram, { type DocNode } from "@/components/ui/document-flow-diagram";
 import { LockBanner } from "@/components/ui/lock-banner";
 import { ObjectPageHeader } from "@/components/ui/object-page-header";
-import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCache, invalidateCachePrefix, isUnknownOutcome } from "@/lib/cached-fetch";
+import { RecordLoadError } from "@/components/ui/record-load-error";
 import { getCurrentUser } from "@/lib/auth";
 import type { Customer } from "@/types";
 import type { ConsignmentOrder as SalesOrder, COStatus as SOStatus } from "@/types";
@@ -293,7 +294,7 @@ export default function SalesOrderDetailPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const { confirm } = useConfirm();
-  const { data: orderResp, loading, refresh: refreshOrder } = useCachedJson<{
+  const { data: orderResp, loading, failure, refresh: refreshOrder } = useCachedJson<{
     success?: boolean;
     data?: SalesOrder;
     lockReason?: string | null;
@@ -707,6 +708,18 @@ export default function SalesOrderDetailPage() {
   };
 
   if (loading) return <div className="flex items-center justify-center h-64 text-[#6B7280]">Loading...</div>;
+  // Failed-to-load ≠ absent. Only an HTTP 404 reaches the "not found" line
+  // below (BUG-2026-08-13-016).
+  if (!order && failure && isUnknownOutcome(failure))
+    return (
+      <RecordLoadError
+        subject="consignment order"
+        failure={failure}
+        onRetry={refreshOrder}
+        backTo="/consignment"
+        backLabel="Back to Consignment"
+      />
+    );
   if (!order) return <div className="flex flex-col items-center justify-center h-64 gap-4"><div className="text-[#6B7280]">Order not found</div><Button variant="outline" onClick={() => navigate("/consignment")}>Back</Button></div>;
 
   const totalQty = order.items.reduce((s, i) => s + i.quantity, 0);

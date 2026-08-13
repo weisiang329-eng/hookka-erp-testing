@@ -30,7 +30,7 @@ export function LineItemDetailScreen({ config }: { config: ModuleConfig }) {
   const { id = "", itemId = "" } = useParams();
   const detail = config.detail;
   const url = id && detail ? detail.url(id) : null;
-  const { data, loading } = useCachedJson<unknown>(url);
+  const { data, loading, failure } = useCachedJson<unknown>(url);
 
   const doc = useMemo(
     () => (data && detail ? detail.selectDoc(data, id) : null),
@@ -104,6 +104,13 @@ export function LineItemDetailScreen({ config }: { config: ModuleConfig }) {
       <div style={{ padding: "6px 18px 0", display: "grid", gap: 13 }}>
         {loading && !doc ? (
           <Msg text="Loading…" />
+        ) : !doc && failure ? (
+          // The parent document never arrived, so nothing is known about this
+          // line. "Line item not found." would be a claim we never checked
+          // (BUG-2026-08-13-016).
+          <Msg
+            text={`Couldn’t load this line — ${failure.message} Pull to refresh or use the desktop app.`}
+          />
         ) : !item ? (
           <Msg text="Line item not found." />
         ) : (

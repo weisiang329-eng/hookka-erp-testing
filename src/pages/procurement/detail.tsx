@@ -9,7 +9,8 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { formatCurrency, formatDate, formatDateTime } from "@/lib/utils";
 // PDF generators dynamic-imported at click handlers so the 1MB jspdf
 // vendor chunk only ships when the user actually downloads.
-import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix, isUnknownOutcome } from "@/lib/cached-fetch";
+import { RecordLoadError } from "@/components/ui/record-load-error";
 import { PurchaseLineageBar } from "@/components/ui/purchase-lineage-bar";
 import type {
   PurchaseOrder,
@@ -118,7 +119,7 @@ export default function PurchaseOrderDetailPage() {
   // This page used to download the ENTIRE /api/grn and /api/purchase-invoices
   // lists and filter them client-side just to answer "what came off this PO";
   // both fetches are gone.
-  const { data: resp, loading, error: fetchError, refresh: fetchPO } = useCachedJson<{
+  const { data: resp, loading, error: fetchError, failure, refresh: fetchPO } = useCachedJson<{
     success?: boolean;
     data?: PurchaseOrder;
     error?: string;
@@ -523,6 +524,22 @@ export default function PurchaseOrderDetailPage() {
       <div className="flex items-center justify-center h-64">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#6B5C32]" />
       </div>
+    );
+  }
+
+  // A read that never landed says nothing about whether the PO exists. It used
+  // to fall through to "Purchase order not found." because the 30 s abort was
+  // swallowed and `fetchError` stayed null (BUG-2026-08-13-016). Now it gets
+  // its own card, with the reason and a Retry.
+  if (!po && failure && isUnknownOutcome(failure)) {
+    return (
+      <RecordLoadError
+        subject="purchase order"
+        failure={failure}
+        onRetry={fetchPO}
+        backTo="/procurement"
+        backLabel="Back to Procurement"
+      />
     );
   }
 

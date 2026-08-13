@@ -9,7 +9,8 @@ import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/utils";
-import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCache, invalidateCachePrefix, isUnknownOutcome } from "@/lib/cached-fetch";
+import { RecordLoadError } from "@/components/ui/record-load-error";
 import { LockBanner } from "@/components/ui/lock-banner";
 import { ObjectPageHeader } from "@/components/ui/object-page-header";
 import {
@@ -66,7 +67,7 @@ export default function InvoiceDetailPage() {
   const { confirm } = useConfirm();
   const { id } = useParams();
   const navigate = useNavigate();
-  const { data: invResp, loading: invLoading, refresh: refreshInvoice } = useCachedJson<{
+  const { data: invResp, loading: invLoading, failure: invFailure, refresh: refreshInvoice } = useCachedJson<{
     success?: boolean;
     data?: Invoice;
     lockReason?: string | null;
@@ -424,6 +425,21 @@ export default function InvoiceDetailPage() {
       <div className="flex items-center justify-center h-64 text-[#6B7280]">
         Loading...
       </div>
+    );
+  }
+
+  // "Invoice not found" is a claim about the books. Make it only when the
+  // server actually answered 404 — a timeout / network drop leaves the
+  // invoice's existence unknown (BUG-2026-08-13-016).
+  if (!invoice && invFailure && isUnknownOutcome(invFailure)) {
+    return (
+      <RecordLoadError
+        subject="invoice"
+        failure={invFailure}
+        onRetry={refreshInvoice}
+        backTo="/invoices"
+        backLabel="Back to Invoices"
+      />
     );
   }
 

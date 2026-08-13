@@ -34,6 +34,118 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-016 — a request killed at 30 s was reported to the operator as "Order not found" `ui-frontend` `data-integrity` `sales-orders` `performance` 🟢
+
+**Symptom.** Open a sales order on a slow link. Thirty seconds later the page
+says **"Order not found"** — the same words, the same layout, the same absence
+of any hint that anything went wrong, as an order that has genuinely been
+deleted. Also **"Invoice not found"**, **"Delivery order not found"**,
+**"GRN not found."**, **"Purchase invoice not found."**, **"Supplier not
+found."**, **"Project not found."**, **"Product not found"**, **"Delivery
+return not found."**; on Service Cases, Repair Orders and both order EDIT
+forms, a **"Loading…" that never ends**; and on the public QR page a delivery
+crew is headlined **"Unit not found"** for a unit sitting in the warehouse.
+
+That is not a cosmetic wording problem. "Not found" is a **statement about the
+business**, and operators act on it — the recovery for a document that does not
+exist is to key it in again, which is how one order becomes two.
+
+**Root cause.** `src/lib/api-client.ts:43` aborts every `/api/*` request at
+`API_TIMEOUT_MS = 30_000` and re-throws the original `AbortError`.
+`src/lib/cached-fetch.ts`'s hook caught it and decided:
+
+```ts
+.catch((err) => {
+  if (cancelled) return;
+  if (isAbortError(err)) return;   // ← no setError, and .finally clears loading
+  setError(humanizeError(err));
+})
+```
+
+so a timed-out consumer was left holding `data = null, loading = false,
+error = null` — **byte-for-byte the state a successful "there is nothing here"
+produces**. Every page then reached its `if (!record) return <NotFound/>`
+branch, or, on the pages that read neither `loading` nor `error`, its
+`Loading…` branch, for ever.
+
+The comment called the abort *"the expected outcome of releaseInflight() racing
+a slow request"*. That is true of a CANCELLATION and false of a TIMEOUT, and
+the two were never separated — the same trap as the two comments finding D2/D6
+of `AUDIT-DETAIL-PAGES.md` caught: the comment described the intent, the code
+did something else.
+
+**The distinction was available by construction.** `releaseInflight` aborts a
+shared request only when its refcount reaches 0 — i.e. every subscriber has
+already unmounted and set its own `cancelled` flag, and those all `return`
+before the abort branch. So **an `AbortError` that reaches a non-cancelled
+consumer is the 30 s timeout, not a cancellation.**
+
+**Fix.**
+1. `joinInflight` now throws a typed `HttpError` carrying the numeric status
+   (message byte-identical, so `humanizeError` and every existing caller are
+   unaffected). Only the status separates *the server answered 404* from
+   *we never got an answer*.
+2. `classifyFetchFailure(err)` returns `{kind, status, message}` with
+   `kind ∈ notFound | timeout | network | server | degraded`, and
+   `isUnknownOutcome(f)` is `f.kind !== "notFound"` — **the only failure that
+   licenses the words "not found" is an observed 404.**
+3. `useCachedJson` returns a new `failure` field and no longer swallows the
+   abort. **Cancellation stays silent** — the `cancelled` guard is still the
+   first line of the catch, because making an unmount noisy would be a new bug.
+4. `cachedFetchJsonResult` carries `kind` + `status` too (its report-flavoured
+   `error` wording is unchanged, so `reports.tsx` is untouched).
+5. `<RecordLoadError>` (`src/components/ui/record-load-error.tsx`) — the
+   detail-page sibling of `reports.tsx`'s `ReportError`: what failed, why, a
+   Retry, and the sentence *"this is not a statement that the {subject} does
+   not exist"*.
+
+**Wording now shown, per outcome.** *(a)* server answered, record absent →
+the page's existing "…not found" line, unchanged. *(b)* 30 s timeout / network
+/ 5xx → *"This sales order couldn't be loaded"* + *"The server didn't respond
+within 30 seconds, so the request was stopped. Please try again."* + Retry.
+*(c)* still in flight → "Loading…", which now actually ends.
+
+**Deliberately NOT done.** The 30 s cap is untouched and no retry was added to
+any write — this is about honest reporting, not masking. A page still holding
+cached data keeps showing it (the 2026-06-04 blank-page guard); the card
+appears only when there is nothing to render.
+
+**Consumers changed:** `sales/detail` · `sales/edit` · `consignment/detail` ·
+`consignment/edit` · `delivery/detail` · `delivery-returns/detail` ·
+`invoices/detail` · `procurement/detail` · `procurement/grn-detail` ·
+`procurement/PurchaseInvoiceDetail` · `suppliers/detail` · `rd/detail` ·
+`products/bom` · `products/documents` · `service-cases/detail` ·
+`service-orders/detail` · `track/index` · `m/screens/LineItemDetailScreen` ·
+`components/ui/document-chain-map`.
+
+**Swept and already correct** (they gated their "not found" on the hook's
+`error`, which the primitive fix now sets on a timeout — so they were repaired
+by the primitive, and are tracked, not exempted):
+`m/screens/SalesDetailScreen` · `m/screens/ProductionDetailScreen` ·
+`m/screens/DocumentDetailScreen` · `m/screens/MailCenterScreen` ·
+`mail-center/detail` · `mail-center/index`.
+
+**Verified.** `tests/cached-fetch-result.test.mjs` drives the real fetch
+wrapper and pins the three outcomes apart — loaded-and-empty is a SUCCESS, a
+30 s abort is `timeout` with `status 0`, a 404 is `notFound` with `status 404`,
+and an explicit assertion that the last two never collapse into each other.
+`tests/record-load-failure-class.test.mjs` enumerates the class (C15) and fails
+if a new page prints "…not found" over a cached read without a guard. Both
+suites were proved by **reintroducing the bug**: restoring
+`if (isAbortError(err)) return;`, relabelling a timeout as `notFound`, dropping
+the `HttpError` status, short-circuiting one consumer's guard, and adding a new
+unguarded page — each went red, then was reverted. **Not verified on prod: the
+main session deploys.**
+
+**Still open — the LIST half of the same class is NOT fixed here.** ~25 list
+pages render an empty grid with a caption like *"No draft orders."* over a
+failed fetch. That is the identical conflation one level up, and it is
+enumerated as C15 row 2 in `BUG-CLASSES.md` rather than patched blind: each
+page owns its own empty caption, and it needs its own PR with its own
+before/after.
+
+---
+
 ## BUG-2026-08-13-013 — the phone downloaded 1,342 sales orders to render six cards `performance` `ui-frontend` `sales-orders` 🟢
 
 **Symptom.** The `/m` Home's **"Orders due this week"** card. `src/pages/m/screens/Home.tsx:343` fetched **bare `/api/sales-orders`** — the whole-org list, every SO with every line item — and then kept **six rows of seven fields**:

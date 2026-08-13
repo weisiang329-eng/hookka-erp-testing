@@ -99,7 +99,7 @@ export default function TrackPage() {
   const serial = params.get("s") || "";
 
   const trackUrl = serial.trim() ? `/api/fg-units?serial=${encodeURIComponent(serial.trim())}` : null;
-  const { data: d, loading: fetchLoading, error: fetchError } = useCachedJson<{ success?: boolean; data?: FGUnit[] }>(trackUrl);
+  const { data: d, loading: fetchLoading, failure: fetchFailure, refresh } = useCachedJson<{ success?: boolean; data?: FGUnit[] }>(trackUrl);
   const loading = trackUrl ? fetchLoading : false;
 
   // Pure derive — no useEffect+setState. unit / error fall out of inputs.
@@ -111,15 +111,29 @@ export default function TrackPage() {
     return null;
   }, [d]);
 
-  const error: string | null = useMemo(() => {
-    if (!serial.trim()) return "No serial number provided.";
+  // Three OUTCOMES, three messages — and the heading follows the outcome, not
+  // the other way round. The QR page used to headline "Unit not found" over a
+  // request that had simply timed out, telling a delivery crew a unit had been
+  // removed from the system when nobody had looked (BUG-2026-08-13-016).
+  const lookup: { heading: string; detail: string } | null = useMemo(() => {
+    if (!serial.trim())
+      return { heading: "No serial to look up", detail: "No serial number provided." };
+    // The lookup ANSWERED and returned no rows — a genuine absence.
     if (d) {
       if (d.success && Array.isArray(d.data) && d.data.length > 0) return null;
-      return "Unit not found. Check the QR code or serial number.";
+      return {
+        heading: "Unit not found",
+        detail: "Unit not found. Check the QR code or serial number.",
+      };
     }
-    if (fetchError) return "Network error. Please try again.";
+    // No answer. The unit may well exist — say only what is true.
+    if (fetchFailure)
+      return {
+        heading: "Couldn't look this up",
+        detail: `${fetchFailure.message} This does not mean the unit is missing — we couldn't reach the system to check.`,
+      };
     return null;
-  }, [serial, d, fetchError]);
+  }, [serial, d, fetchFailure]);
 
   const status = unit?.status;
   const statusInfo = status ? STATUS_COLORS[status] : null;
@@ -157,15 +171,24 @@ export default function TrackPage() {
           </div>
         )}
 
-        {!loading && error && (
+        {!loading && lookup && (
           <div className="rounded-xl bg-white p-6 shadow-sm border border-[#E8B2A1]">
             <div className="flex items-start gap-3">
               <AlertTriangle className="h-6 w-6 text-[#9A3A2D] shrink-0 mt-0.5" />
               <div>
-                <p className="font-semibold text-[#9A3A2D]">Unit not found</p>
-                <p className="text-sm text-[#9A3A2D] mt-1">{error}</p>
+                <p className="font-semibold text-[#9A3A2D]">{lookup.heading}</p>
+                <p className="text-sm text-[#9A3A2D] mt-1">{lookup.detail}</p>
                 {serial && (
                   <p className="text-xs text-gray-500 mt-2 font-mono break-all">Serial: {serial}</p>
+                )}
+                {fetchFailure && (
+                  <button
+                    type="button"
+                    onClick={refresh}
+                    className="mt-3 inline-flex items-center gap-2 rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-xs font-medium text-[#1F1D1B] hover:bg-[#F0ECE9]"
+                  >
+                    Try again
+                  </button>
                 )}
               </div>
             </div>

@@ -29,7 +29,8 @@ import {
   specialOrderOptions,
 } from "@/lib/pricing-options";
 import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
-import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCache, invalidateCachePrefix, isUnknownOutcome } from "@/lib/cached-fetch";
+import { RecordLoadError } from "@/components/ui/record-load-error";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { LockBanner } from "@/components/ui/lock-banner";
 import { usePresence } from "@/lib/use-presence";
@@ -308,7 +309,7 @@ export default function EditSalesOrderPage() {
   };
 
   // Load existing order
-  const { data: orderResp } = useCachedJson<{ success?: boolean; data?: SalesOrder; lockReason?: string | null }>(id ? `/api/consignment-orders/${id}` : null);
+  const { data: orderResp, failure: orderFailure, refresh: refreshOrder } = useCachedJson<{ success?: boolean; data?: SalesOrder; lockReason?: string | null }>(id ? `/api/consignment-orders/${id}` : null);
   // Seed the form ONCE per order — re-seeding on a background refetch would
   // wipe in-progress edits (the 2990s "mid-edit draft wipe" class). Marked
   // seeded only on success so an error→success sequence still hydrates.
@@ -579,6 +580,21 @@ export default function EditSalesOrderPage() {
       toast.error(e instanceof Error ? e.message : "Network error — changes not saved");
     }
   };
+
+  // Same shape as sales/edit.tsx: `loading` is the SEEDING flag and is cleared
+  // only inside the effect that fires when `orderResp` lands, so a failed read
+  // stuck this page on "Loading..." for ever. Failure is checked first
+  // (BUG-2026-08-13-016).
+  if (!order && orderFailure && isUnknownOutcome(orderFailure))
+    return (
+      <RecordLoadError
+        subject="consignment order"
+        failure={orderFailure}
+        onRetry={refreshOrder}
+        backTo="/consignment"
+        backLabel="Back to Consignment"
+      />
+    );
 
   if (loading) return <div className="flex items-center justify-center h-64 text-[#6B7280]">Loading...</div>;
 

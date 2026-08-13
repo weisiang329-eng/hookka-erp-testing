@@ -5,6 +5,16 @@
 > **C1 was re-opened and extended the same day** (BUG-2026-08-13-040): the class had a
 > second axis nobody had counted — the DOCUMENT TYPE — and the consignment-order write
 > path plus the sofa-combo recompute shared by both order types were still carrying it.
+> **Last verified: 2026-08-13** — every one of the 27 source/test paths this file cites
+> exists (checked mechanically against the tree), and `npm test` is green
+> (3,854 tests / 0 fail).
+>
+> **Updated 2026-08-13 by the thin-module sweep** (accounting · customers ·
+> quality-warehouse · rnd — see [`AUDIT-THIN-MODULES.md`](AUDIT-THIN-MODULES.md)):
+> C14 gains row 11 (`qc-pending`, ~80M comparisons — the sibling row 5 missed the day
+> before), C12 gains rows 8–11, and C15 gains rows 18–22. One correction to an existing
+> claim: the C14 test's annotation calling `qc-inspections.ts` *"the largest in the class"*
+> was **wrong** and has been fixed in place.
 
 `PLAYBOOKS.md` **P5** says: *"Fix all instances of the same class, not just the flagged one."*
 
@@ -471,6 +481,10 @@ served.
 | 4 | `GET /api/consignment-notes` + `/stats` + `/linked-po-ids` + `/:id/print-extras` | ✅ fixed 2026-08-09 (BUG-2026-08-09-001) — `/stats` was #2's untouched twin |
 | 5 | `GET/PUT/DELETE /api/consignments` (legacy surface, SAME tables) | ✅ fixed 2026-08-09 (BUG-2026-08-09-001) — found only by sweeping the module, not the two files named in the report |
 | 6 | `GET /api/sales-orders/:id` | ⬜ open — the LIST is org-scoped, the by-id read next to it is not. Same shape as #3, different module; not in scope for the consignment pass. Sweep sales the way consignment was swept. |
+| 8 | `POST /api/customers` | ✅ 2026-08-13 (-061) — the LIST reads `WHERE orgId = ?` while the INSERT let the column DEFAULT fill it; now stamps `getOrgId(c)`. Byte-identical today (`DEFAULT_ORG_ID` and the column DEFAULT are both `'hookka'`) |
+| 9 | `customer-scope.ts:117-121` | ⬜ open — the choke point that narrows **every** scoped GET under 11 prefixes is unbounded (no LIMIT) and org-blind, and it filters rows **by name**, so a same-named customer in a second tenant would vanish from this tenant's lists |
+| 10 | R&D — `rd_projects` reads + all five R&D INSERTs | ⬜ open — `GET /` and `GET /:id` carry no orgId predicate though `rd_projects.org_id` exists; `rd_prototypes`, `rd_material_issuances`, `rd_labour_hours` and `rd_team_members` bind the **literal `'hookka'`**, which mislabels a second tenant's rows rather than merely defaulting them |
+| 11 | `journal_entries` / `journal_lines` | ⬜ open — `accounting.ts:1157-1162` justifies not filtering with "journal_entries has no orgId column (it predates multi-tenancy)". **`tests/db-schema.json` shows both tables have `org_id`.** The premise is false; the INSERTs omit it too |
 | 7 | write-side `orgId` stamping | ⬜ open — `INSERT INTO consignment_orders` (and its siblings) do NOT stamp orgId; the column takes its SQL `DEFAULT 'hookka'` (see `lib/tenant.ts`, "§1 finish step"). Read scoping is therefore only half the boundary: a second tenant's writes would land labelled `hookka`. **Do this before onboarding a second org**, or the reads above will correctly hide rows from the tenant that created them. |
 
 **Covered by** `tests/consignment-tenant-scope.test.mjs` — the real handlers against a
@@ -575,10 +589,18 @@ an explicit `.slice()` before sorting, because it drops the filter.
 | 7 | `purchase-orders.ts` items | ✅ 2026-08-13 | 165 × 369 = 60,885 — 1.3 ms |
 | 8 | `grn.ts` items | ✅ 2026-08-13 | 37 × 45 = 1,665 — 0.1 ms |
 | 9 | `accounting.ts:190` + `cash-flow.ts:185` journal lines | ⬜ **open, deliberate** | 2 entries × 50 lines = 100 |
+| 11 | `qc-pending.ts:1848` checklist items per pending inspection | ✅ 2026-08-13 (thin-module sweep) | **2,839 PENDING/IN_PROGRESS × ~28,000 items ≈ 80M — NO LIMIT, and the page calls the endpoint with no query string** |
 | 10 | `qc-templates.ts:91` · `qc-pending.ts:388` · `service-cases.ts:494,506` · `service-orders.ts:311,325` · `rd-projects.ts:166` · `consignment-note-shared.ts:132` | ⬜ measured-and-cheap | ≤ 7,781 cmp each, 2026-08-13 |
 
 Row 4 is why this class exists: rows 1 and 2 fixed the same shape twice and
 neither author looked for row 4, which was on the hottest path in the app.
+
+**Row 11 is the same lesson, one day later.** Row 5 (`qc-inspections.ts`) was fixed on
+2026-08-13 and annotated in the class test as *"the largest in the class"*. It was not: its
+twin in `qc-pending.ts` — same mapper name, same child table, same shape — is **~75×
+larger and unbounded**, and it was missed because the audit named one file and the author
+fixed that file. The annotation has been corrected. When you fix a row here, grep the
+sibling routes for the same **mapper**, not the same filename.
 
 **Row 9 is the one to watch.** Both fetch the ENTIRE `journal_lines` table with
 no scoping and put no `LIMIT` on the entries — the exact pair of defects #275
@@ -750,6 +772,11 @@ place: `/api/department-performance` must keep dividing by clocked time,
 | 15 | department capacity + utilization RAG | `/api/scheduling/capacity` | `9 h` literal while `workingHoursPerDay` was SELECTed and discarded; `0.85` unstated | ✅ 2026-08-13 (-014) |
 | 16 | forecast `confidence` | `POST /api/forecasts` | defaulted to the literal `50`, rendered as a colour-coded badge | ✅ 2026-08-13 (-014) |
 | 17 | `/admin/health` KPIs · agent-console FX + LLM prices | `/admin/health`, `/agents` | seeded-random / frozen constants — **but tagged `_mock`/`est*` and captioned as estimates** | ⬜ deliberate — honest labels; the FX rate gating a real spend limit is an owner decision |
+| 18 | QC `result` / `department` | `/quality` › History | `row.result ?? "PASS"`, `row.department ?? "UPHOLSTERY"` — an inspection nobody performed rendered as a **green PASS** | ✅ 2026-08-13 (-063) |
+| 19 | R&D material unit cost | `/rd/:id` budget card, chips, KPIs, CSV | `estimateFIFOCost` — six hardcoded per-itemGroup constants (and a `2000` catch-all) **persisted** into `rd_material_issuances` and summed into `actualCost`; the arg `_itemCode` is unused, so it does not even vary by material | ⬜ open — owner decision (refuse vs `null`+`—`); probe in `AUDIT-THIN-MODULES.md` R1 |
+| 20 | Cash Flow "AP Outflow" / "Expected Outflows (12w)" | `/accounting/cash-flow` | built from **unreceived `purchase_orders` bucketed by expected DELIVERY date** — the surviving twin of row 5, which was fixed on `/reports` the same day | ⬜ open — the replacement basis is a finance decision |
+| 21 | Fabrics `soh` / `priceTier` | `/customers` › Fabrics | `m?.soh ?? 0` printed as an on-hand quantity; `?? "PRICE_1"` printed as a tier; and a genuine `PRICE_3` renders as **Price 2** | ⬜ open |
+| 22 | credit-utilisation bar | `/customers` grid | `limit > 0 ? outstanding/limit : 0` → a COD customer owing RM 50,000 shows a **green 0%** bar; the Available column beside it returns `—` correctly | ⬜ open |
 
 **Enforced by** four files, all structural (`readFileSync` source assertions),
 because nothing else can catch a number that is merely wrong-but-plausible:

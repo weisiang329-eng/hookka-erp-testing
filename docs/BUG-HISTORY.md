@@ -289,6 +289,137 @@ both halves of the combo recompute; against the pre-fix tree the class test fail
 unmeasured — run the `row 34` probe in `docs/AUDIT-LAYER-CONSISTENCY.md` §7 to count the
 eligible lines. Per the standing rule, existing orders are **not** repriced
 (「旧的 order 就算了」); this is fix-forward.
+## BUG-2026-08-13-064 — R&D's whole page stated "All active projects are on track and within budget. ✓" over a dead request `rnd` `ui-frontend` `C15` 🟢
+
+**Symptom.** `/rd` reads `/api/rd-projects` once and every tab derives from it. When that
+read failed — 30 s abort, 5xx, `_stub` — the page rendered as if the answer were "no
+projects": the Summary tab printed the green tick **"All active projects are on track and
+within budget. ✓"** and **"No milestones are past their target date. ✓"**, the Pipeline
+showed six empty stages, Drafts said "No drafts yet", and the Reports tab offered a CSV
+export of nothing. Four KPI tiles read 0 / 0 / 0 / 0%.
+
+**Root cause.** `src/pages/rd/index.tsx:1329` destructured only `{ data, loading, refresh }`
+from `useCachedJson`, discarding the `failure` the hook has exposed since
+BUG-2026-08-13-016. `allProjects` fell back to `[]` and the render gate at `:1502` was
+`loading ? spinner : content` — so a dead request and an empty database produced
+byte-identical output. This is **C15 row 3** (the list half), in its worst form: not a
+neutral "No data", but a positive green assertion that everything is fine.
+
+**Fix.** `src/pages/rd/index.tsx` — take `failure` from the hook, compute
+`loadFailed = !rdResp && isUnknownOutcome(rdFailure)`, and render `<RecordLoadError>` in
+place of the tab body. `isUnknownOutcome` keeps a genuine 404 out of the branch, and the
+`!rdResp` term preserves the 2026-06-04 blank-page guard — a page still holding cached
+rows keeps showing them.
+
+**Verified.** `npx tsc -p tsconfig.app.json --noEmit` exit 0; `npx eslint` 0 errors;
+`npm test` 3,851 pass / 0 fail. Not observed on prod — no prod session this session.
+
+---
+
+## BUG-2026-08-13-063 — a QC inspection nobody performed displayed as a green **PASS** `quality` `data-integrity` `C15` 🟢
+
+**Symptom.** On `/quality` › History, an inspection row whose `result` column is NULL
+rendered a **green PASS badge**, and one whose `department` is NULL rendered
+**"UPHOLSTERY"**. Neither is distinguishable from a real passed UPHOLSTERY inspection.
+
+**Root cause.** `src/api/routes/qc-inspections.ts:79,82` — `department: row.department ??
+"UPHOLSTERY"` and `result: row.result ?? "PASS"`. The history query deliberately returns
+legacy rows (the route's own comment: "null on legacy rows"), so the substitution is
+reachable. The page's honest fallback at `src/pages/quality.tsx:1090`
+(`<Badge>{v ?? "—"}</Badge>`) was unreachable, because the API had already replaced the
+null with a plausible verdict before it ever left the server. Class **C15**: *"`0` is a
+claim, not a blank"* — here a **verdict** is a claim, not a blank, and it is the kind an
+auditor reads.
+
+**Fix.** `qc-inspections.ts` now emits `""` for both, matching the honest `?? ""` its
+neighbours already use for `inspectorId` / `inspectorName`. `quality.tsx:1090` becomes
+`String(v ?? "") || "—"` — `?? "—"` alone would not have caught `""`, which is not nullish.
+
+**Verified.** Gates green as above. **Impact unsized without prod** — the one-line probe is
+`SELECT COUNT(*) FROM qc_inspections WHERE result IS NULL;` (and the same for
+`department`). If both are 0 the change is a no-op; it cannot make anything worse either way.
+
+---
+
+## BUG-2026-08-13-062 — `GET /api/qc-pending` re-scanned every checklist item once per inspection: ~80M comparisons a page load `quality` `performance` `C14` 🟢
+
+**Symptom.** No error, ever — just the QC page getting slower as the backlog grew. The
+repo's own measurement (`src/pages/quality.tsx:452-456`, taken on prod 2026-08-01) puts the
+backlog at **167 slot cards holding 2,839 rows**, "the heaviest screen in the system".
+
+**Root cause.** `src/api/routes/qc-pending.ts:1848` handed the **flat** array of every
+returned inspection's checklist items to `rowToInspection`, whose first act (`:387`) is
+`items.filter(i => i.inspectionId === r.id)`. Textbook **C14**: the child fetch had already
+been improved once to `WHERE inspectionId IN (...)`, which removes the wire cost and leaves
+the join cost, and the commit reads as done. Parent = 2,839 rows with **no LIMIT** on the
+query; `src/pages/quality.tsx:296` calls the endpoint with **no query string**, so neither
+`slot`, `stage` nor `deptCode` narrows it. At ~10 items per checklist that is
+2,839 × ~28,000 ≈ **80M comparisons**, growing quadratically with the backlog.
+
+The sibling `qc-inspections.ts` was fixed on 2026-08-13 and annotated "the largest in the
+class". It was not — this twin is ~75× larger and unbounded, and was missed because the
+audit named one file. That is precisely the failure mode `BUG-CLASSES.md` exists to stop.
+
+**Fix.** Bucket the items into a `Map<inspectionId, rows[]>` once at the handler and pass
+each mapper its own bucket. `rowToInspection` **keeps** its internal `.filter()`: over a
+pre-scoped bucket it is a passthrough, which makes the change byte-identical by
+construction, and because `.filter()` copies before the following `.sort()`, the shared
+bucket can never be reordered under another row. The single-record caller at `:2345` is
+untouched.
+
+**Verified.** Gates green. `tests/list-endpoint-child-grouping.test.mjs` gains the site
+guard, **proved by reintroducing the bug and watching it go red** (`✖ ... the mapper is no
+longer called with a bucket`), then green again (12/12) on restore. The stale "largest in
+the class" annotation on the qc-inspections row was corrected in the same commit.
+
+---
+
+## BUG-2026-08-13-061 — `POST /api/customers` never stamped `orgId`, but `GET /api/customers` filters on it `customers` `multi-tenant` `C12` 🟢
+
+**Symptom.** Latent — invisible today, because `hookka` is the only seeded org and it is
+also the column DEFAULT. For any second tenant: creating a customer would 201, push the
+optimistic row onto the grid, and then the record would vanish on the next refresh,
+permanently invisible to the list that created it.
+
+**Root cause.** `src/api/routes/customers.ts:322-327` reads
+`SELECT * FROM customers WHERE orgId = ?` off `getOrgId(c)`; the INSERT at `:399-403`
+omitted `orgId` entirely and let the migration-0049 SQL DEFAULT `'hookka'` fill it. This is
+**C12 row 7** (write-side orgId stamping) — and the same file already knew the hazard: the
+`delivery_hubs` upsert 300 lines below stamps `custOrgId` with a comment saying "instead of
+relying on the column DEFAULT". The customers INSERT next to it never got the same treatment.
+
+**Fix.** Stamp `getOrgId(c)` explicitly. `DEFAULT_ORG_ID` (`src/api/lib/tenant.ts:31`) and
+the column DEFAULT are **both `'hookka'`**, so the written value is byte-identical on prod
+today and correct the moment a second org exists.
+
+**Verified.** Gates green. Byte-identity argued from the two constants, not measured — no
+prod session.
+
+---
+
+## BUG-2026-08-13-060 — every journal entry's `createdAt` was `undefined`, and the shared type swore it was a `string` `accounting` `data-integrity` 🟢
+
+**Symptom.** Dormant, and that is the point: `/api/accounting/journals` has emitted
+`createdAt: undefined` on every entry for as long as the Postgres adapter has been in
+place. Nothing renders it yet, so nothing broke — but `JournalEntry.createdAt`
+(`src/types/index.ts:719`) is declared a **non-optional `string`**, so the first component
+to trust it gets `undefined` with tsc's blessing.
+
+**Root cause.** `src/api/routes/accounting.ts:188` read `e.created_at`. `db-pg.ts` installs
+`transform: { column: { from: columnFrom } }` on **both** connection branches, and
+`columnFrom("created_at")` returns **`"createdAt"`** (rename-map entry
+`createdAt -> created_at`). Executed, not inferred. The row type at `:116` declared
+`created_at: string`, which is why the compiler was silent. The sibling `is_opening` in the
+same file is read correctly as `.isOpening` fifty lines away.
+
+Same class as the `payment_no` read already documented at `supplier-payments.ts:60-62`
+("a bare `row.payment_no` read was ALWAYS undefined"). That fix repaired one file.
+
+**Fix.** `createdAt: e.createdAt ?? e.created_at`, and the row type widened to make both
+spellings optional so the dual-key read is honest about which one arrives.
+
+**Verified.** `columnFrom` executed directly against the real rename map for
+`created_at`, `delivery_incomplete`, `company_so_id` and six others. Gates green.
 
 ---
 

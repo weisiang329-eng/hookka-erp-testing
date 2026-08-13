@@ -31,16 +31,41 @@ test("delivery Pending Delivery sources exclusion from the complete /linked-po-i
   );
 });
 
-test("Command Center derives Pending Delivery from the complete /linked-po-ids set", () => {
+test("Command Center derives Pending Delivery from the complete linked-PO set", () => {
+  // 2026-08-13: the tile stopped assembling this in the browser (the ~2,500-PO
+  // fetch it needed was blowing the 30s abort and hanging the tile forever) and
+  // now reads one server-computed number. The BUG-2026-06-27 invariant is
+  // unchanged, it just moved: whatever produces the figure must still exclude
+  // POs using the COMPLETE "already on a DO" set, never a page-capped DO list.
   const src = read("src/pages/dashboard-b/index.tsx");
   assert.match(
     src,
-    /\/api\/delivery-orders\/linked-po-ids/,
-    "dashboard-b must fetch the complete linked-po-ids set",
+    /\/api\/delivery-orders\/pending-value/,
+    "dashboard-b must read the server-computed Pending Delivery value",
   );
   assert.ok(
     !/buildLinkedPOIds\s*\(/.test(stripComments(src)),
     "dashboard-b must NOT rebuild the exclusion set from the capped 200-DO page",
+  );
+  assert.ok(
+    !/delivery-orders\?page=\d+&limit=/.test(src),
+    "dashboard-b must NOT read a page-capped DO list for any KPI",
+  );
+  // Server side: /pending-value sums the rows loadDeliveryReadyPlanning built,
+  // and that assembly derives its exclusion set from the same uncapped DISTINCT
+  // delivery_order_items query the /linked-po-ids endpoint serves.
+  const api = read("src/api/routes/delivery-orders.ts");
+  const pv = api.slice(api.indexOf('app.get("/pending-value"'));
+  assert.match(
+    pv.slice(0, pv.indexOf("\n});") + 4),
+    /loadDeliveryReadyPlanning\(c\)/,
+    "/pending-value must reuse the shared ready/planning assembly",
+  );
+  const rp = api.slice(api.indexOf("async function loadDeliveryReadyPlanning"));
+  assert.match(
+    rp,
+    /SELECT DISTINCT doi\.productionOrderId/,
+    "the assembly must build linkedPOIds from the complete DO-item set",
   );
 });
 

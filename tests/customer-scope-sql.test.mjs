@@ -131,7 +131,16 @@ test("the Planning and Pending-Delivery tabs narrow too", () => {
   // never inspected it, which is why both tabs kept showing other people's rows
   // after the first pass.
   const src = read("src/api/routes/delivery-orders.ts");
-  const rp = src.slice(src.indexOf('app.get("/ready-planning"'));
+  // The assembly moved into loadDeliveryReadyPlanning() (2026-08-13) so
+  // /pending-value could reuse it — /ready-planning is now a thin wrapper, so
+  // slice from the SHARED function, which is where the narrowing has to live.
+  const rp = src.slice(src.indexOf("async function loadDeliveryReadyPlanning"));
+  const rpHandler = src.slice(src.indexOf('app.get("/ready-planning"'));
+  assert.match(
+    rpHandler.slice(0, rpHandler.indexOf("\n});") + 4),
+    /loadDeliveryReadyPlanning\(c\)/,
+    "ready-planning no longer routes through the narrowing assembly",
+  );
   assert.match(rp, /rpPoScope/, "ready-planning does not narrow its production orders");
   assert.match(rp, /rpSoScope/, "ready-planning does not narrow its sales orders");
   assert.match(rp, /isCustomerScoped\(c\)/, "ready-planning would cache a scoped payload");

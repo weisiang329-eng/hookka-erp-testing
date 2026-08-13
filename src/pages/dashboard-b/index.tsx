@@ -15,10 +15,6 @@ import { formatCurrency } from "@/lib/utils";
 import { Skeleton, SkeletonDashboard } from "@/components/ui/skeleton";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { OcrAccuracyCard } from "./OcrAccuracyCard";
-import {
-  poReadyForDelivery,
-  type PipelinePO,
-} from "@/lib/delivery-pipeline";
 // recharts (~357 KB) is loaded lazily so the KPI numbers paint first; the
 // chart code streams in behind a placeholder. See ./charts.tsx.
 const RevenueChart = lazy(() =>
@@ -198,28 +194,13 @@ type Overview = {
     asOf: string | null; // snap_date (snapshot) or month-end (reconstructed)
   };
 };
-type PODeliveryShape = PipelinePO & {
-  salesOrderId?: string;
-  productCode?: string;
-  quantity?: number;
-};
-type POResp = { success?: boolean; data?: PODeliveryShape[] };
-type DOResp = {
+// Σ valueSen of every PO that is made-but-not-yet-on-a-DO, computed server-side
+// by GET /api/delivery-orders/pending-value off the SAME buildReadyPlanning rows
+// the Delivery page's Pending-Delivery tab lists. Integer sen.
+type PendingValueResp = {
   success?: boolean;
-  data?: {
-    id: string;
-    status: string;
-    // Goods value the list endpoint attaches per DO (loadDoValueMap — the
-    // same resolver behind the Delivery page tab totals, so card figures
-    // built from it always tie to that screen).
-    valueSen?: number;
-    items?: { productionOrderId?: string | null }[];
-  }[];
-};
-type POValuesResp = { success?: boolean; values?: Record<string, number> };
-type SOItemsResp = {
-  success?: boolean;
-  data?: { id: string; items?: { productCode?: string; unitPriceSen?: number }[] }[];
+  pendingDeliveryValueSen?: number;
+  readyCount?: number;
 };
 type JcSummaryResp = {
   data?: { workerId: string; productionMinutes: number; jcCount: number }[];
@@ -709,39 +690,26 @@ export default function DashboardBPage() {
   const { data: ovRaw, loading: ovL } = useCachedJson<Overview>(
     `/api/dashboard/overview?period=${period}`,
   );
-  const { data: poRaw, loading: poL } = useCachedJson<POResp>(
-    "/api/production-orders?fields=minimal&include=jobCards",
-  );
-  // Kept only as a loading gate for the Pending Delivery tile (doL). The DO
-  // page payload is no longer READ for any KPI: Pending Delivery now uses the
-  // whole-dataset linked-PO set (linkedRaw) and the dispatch-chain KPIs use
-  // the whole-dataset /stats valueByStatus (doStatsRaw) — both below — so the
-  // capped 200-row page is never summed.
-  const { loading: doL } = useCachedJson<DOResp>(
-    "/api/delivery-orders?page=1&limit=200",
-  );
-  // Authoritative whole-dataset "already on a DO/CN" PO-id set. Replaces
-  // buildLinkedPOIds(dos), which was derived from the capped 200-row page and
-  // went wrong once total DOs exceed 200 (Pending Delivery then counted POs
-  // that were actually already shipped on a DO beyond row 200).
-  const { data: linkedRaw } = useCachedJson<{ poIds?: string[] }>(
-    "/api/delivery-orders/linked-po-ids",
-  );
+  // Pending Delivery money — ONE small server-computed number.
+  //
+  // This tile used to assemble the figure in the browser from four whole-org
+  // fetches: /api/production-orders?fields=minimal&include=jobCards (~2,500 POs
+  // with every job card — megabytes), /po-values, /linked-po-ids and
+  // /api/sales-orders?fields=price-index. Measured on prod 2026-08-13 the PO
+  // fetch alone could exceed the 30s global abort in src/lib/api-client.ts; on
+  // abort the loading flag never cleared and the tile spun FOREVER while every
+  // other KPI painted. The server now runs the identical readiness predicate
+  // (poReadyForDelivery, via buildReadyPlanning — the same rows the Delivery
+  // page's Pending-Delivery tab lists) and returns just the sen total, so the
+  // browser downloads a few dozen bytes instead of megabytes.
+  const { data: pendingRaw, loading: pendingL } =
+    useCachedJson<PendingValueResp>("/api/delivery-orders/pending-value");
   // Whole-dataset per-status value sums (valueByStatus) — the SAME aggregate
   // the Delivery list page reads. The dispatch-chain KPIs (pending-dispatch /
   // in-transit) sum from this so they reflect ALL DOs, not the 200-row page.
   const { data: doStatsRaw } = useCachedJson<{
     valueByStatus?: Record<string, number>;
   }>("/api/delivery-orders/stats");
-  const { data: poValRaw, loading: poValL } = useCachedJson<POValuesResp>(
-    "/api/delivery-orders/po-values",
-  );
-  // Slim price-index variant — returns only {id, items:[{productCode,
-  // unitPriceSen}]} instead of the full 720-SO payload. The price map built
-  // below is byte-identical (same SOs, same items); only the wire payload
-  // shrinks, so the Pending-Delivery tile + KPI value are unchanged.
-  const { data: soItemsRaw, loading: soItemsL } =
-    useCachedJson<SOItemsResp>("/api/sales-orders?fields=price-index");
   // Worker-Efficiency window follows the selected month: a specific month →
   // [1st .. month end] (capped at today for the current month); All-time →
   // the rolling last 7 working days (unchanged).
@@ -771,42 +739,13 @@ export default function DashboardBPage() {
   //                  Customer, Top Sellers, Fabric, Dept Backlog,
   //                  Purchasing). Snapshot-backed — resolves quickly.
   //   • soL        → Order Pipeline + the "Outstanding" KPI tile.
-  //   • pendingL   → the "Pending Delivery" KPI tile (4 heavy live fetches).
+  //   • pendingL   → the "Pending Delivery" KPI tile (ONE small live fetch).
   //   • effL       → Worker Efficiency (3 live fetches).
   const overviewLoading = ovL;
-  const pendingL = poL || doL || poValL || soItemsL;
   const effL = jcSumL || wheSumL || workersL;
 
-  // Pending Delivery — identical computation to /dashboard.
-  const pendingDeliveryValueSen = useMemo(() => {
-    const pos = poRaw?.success ? poRaw.data ?? [] : [];
-    // Whole-dataset linked-PO set (authoritative). Guard the loading flash:
-    // until linkedRaw lands, treat the set as empty would WRONGLY count every
-    // PO as still-pending, so bail to 0 until the set is defined.
-    if (!linkedRaw) return 0;
-    const linkedPOIds = new Set(linkedRaw.poIds ?? []);
-    const poValMap = new Map<string, number>();
-    for (const [k, v] of Object.entries(poValRaw?.values ?? {}))
-      poValMap.set(k, Number(v) || 0);
-    const soPriceByProduct = new Map<string, Map<string, number>>();
-    const sos = soItemsRaw?.success ? soItemsRaw.data ?? [] : [];
-    for (const s of sos) {
-      const m = new Map<string, number>();
-      for (const it of s.items ?? [])
-        if (it.productCode) m.set(it.productCode, Number(it.unitPriceSen) || 0);
-      soPriceByProduct.set(s.id, m);
-    }
-    let total = 0;
-    for (const po of pos) {
-      if (!poReadyForDelivery(po, linkedPOIds)) continue;
-      total +=
-        poValMap.get(po.id) ??
-        (soPriceByProduct.get(po.salesOrderId || "")?.get(
-          po.productCode || "",
-        ) ?? 0) * (po.quantity || 0);
-    }
-    return total;
-  }, [poRaw, linkedRaw, poValRaw, soItemsRaw]);
+  // Pending Delivery — server-computed (see the fetch above). Integer sen.
+  const pendingDeliveryValueSen = pendingRaw?.pendingDeliveryValueSen ?? 0;
 
   // Dispatch-chain fold (owner 2026-06-11: "Pending Dispatch 放入 Pending
   // Delivery,Dispatch 放进 Delivered"): value of DOs created but not yet

@@ -24,6 +24,14 @@
 > a row that mixes real and invented columns is *more* dangerous, not less.
 > Suite at that point: 3,866 tests / 0 fail.
 >
+> **Also 2026-08-13, branch `fix/accounting-audit`** (the first read-through of
+> `src/api/routes/accounting.ts` since the NUL byte that had made it invisible to `grep`
+> was removed): adds **C17 — a file the search tool refuses to read** (five more source
+> files still carried a raw NUL, two of them on the money path) and **C18 — a per-party
+> document and its all-party twin, only one of them maintained**. **C12 row 11 closes** —
+> the comment claiming `journal_entries` has no `orgId` column was false and is gone.
+> Suite at that point: 3,857 tests / 0 fail.
+>
 > **Also 2026-08-13, branch `fix/stock-grn-org-filter`:** added **C16 — a field the
 > projection drops and a consumer still reads** (the class behind BUG-2026-08-13-050,
 > with the four open siblings enumerated), and **C15 row 24** (the Balance Sheet's
@@ -497,7 +505,7 @@ served.
 | 8 | `POST /api/customers` | ✅ 2026-08-13 (-061) — the LIST reads `WHERE orgId = ?` while the INSERT let the column DEFAULT fill it; now stamps `getOrgId(c)`. Byte-identical today (`DEFAULT_ORG_ID` and the column DEFAULT are both `'hookka'`) |
 | 9 | `customer-scope.ts:117-121` | ⬜ open — the choke point that narrows **every** scoped GET under 11 prefixes is unbounded (no LIMIT) and org-blind, and it filters rows **by name**, so a same-named customer in a second tenant would vanish from this tenant's lists |
 | 10 | R&D — `rd_projects` reads + all five R&D INSERTs | ⬜ open — `GET /` and `GET /:id` carry no orgId predicate though `rd_projects.org_id` exists; `rd_prototypes`, `rd_material_issuances`, `rd_labour_hours` and `rd_team_members` bind the **literal `'hookka'`**, which mislabels a second tenant's rows rather than merely defaulting them |
-| 11 | `journal_entries` / `journal_lines` | ⬜ open — `accounting.ts:1157-1162` justifies not filtering with "journal_entries has no orgId column (it predates multi-tenancy)". **`tests/db-schema.json` shows both tables have `org_id`.** The premise is false; the INSERTs omit it too |
+| 11 | `journal_entries` / `journal_lines` | ✅ 2026-08-13 (BUG-2026-08-13-083) — the justification *"journal_entries has no orgId column (it predates multi-tenancy)"* was false: `0087_org_id_full_rollout.sql:105-106` adds `org_id TEXT NOT NULL DEFAULT 'hookka'` to both, `0206` re-applies it, `ensureFinanceOrgColumns` self-applies it at runtime, and `tests/db-schema.json` (from prod) lists it. Reads scoped **and** INSERTs stamped in the same change, per the rule below. Guard: `tests/accounting-subledger-parity.test.mjs` |
 | 7 | write-side `orgId` stamping | ⬜ open — `INSERT INTO consignment_orders` (and its siblings) do NOT stamp orgId; the column takes its SQL `DEFAULT 'hookka'` (see `lib/tenant.ts`, "§1 finish step"). Read scoping is therefore only half the boundary: a second tenant's writes would land labelled `hookka`. **Do this before onboarding a second org**, or the reads above will correctly hide rows from the tenant that created them. |
 
 **Covered by** `tests/consignment-tenant-scope.test.mjs` — the real handlers against a
@@ -869,6 +877,78 @@ key set against every `x.` read on the response object in that file. Follow the 
 chain: a field can be read inside a shared helper the page merely passes the row to
 (`delivery-pipeline.ts` reads `po.rackingNumber` off a payload assembled two modules
 away), and a grep of the page alone will miss it.
+
+---
+
+## C17 — a file the search tool refuses to read
+
+**Shape.** A source file contains a raw **NUL byte** — almost always someone typing
+`U+0000` straight into a template literal as a composite map-key separator instead of
+writing the escape `\u0000`. GNU `grep` then classifies the file as **binary**: it
+answers `Binary file matches` and prints **nothing**. Every grep-driven audit skips
+the file in total silence and reports it clean.
+
+**Why it is the nastiest entry in this file.** Every other class here is a bug in the
+PRODUCT. This one is a bug in the INVESTIGATION — it does not make anything wrong, it
+makes wrongness invisible, and it does so on exactly the files a search would otherwise
+have found something in. `accounting.ts` (13,064 lines, the money module) carried one
+and had never been read by any grep-based pass.
+
+**It is tool-dependent, which is why it survives.** `rg`, `git grep`, `git diff` and the
+Read tool are all unaffected. Whether the largest unreviewed surface in the repo is
+visible depends on which binary you happened to reach for.
+
+| # | file | fixed | what the byte was |
+|---|---|---|---|
+| 1 | `src/api/routes/accounting.ts` | ✅ 2026-08-13 (`a9d413f6`) | unresolved-line map key |
+| 2 | `src/lib/ap-recon.ts` | ✅ 2026-08-13 (-084) | `` `${sourceType}<NUL>${sourceId}` `` — the AP-drift engine |
+| 3 | `src/lib/pnl-historical.ts` | ✅ 2026-08-13 (-084) | `` `${code}<NUL>${name}` `` |
+| 4 | `src/api/lib/keyset.ts` | ✅ 2026-08-13 (-084) | `const SEP` ×3 (two of them inside a comment) |
+| 5 | `src/api/lib/ocr-code-misses.ts` | ✅ 2026-08-13 (-084) | two composite keys |
+| 6 | `docs/WORK-TRACKER.md` | ✅ 2026-08-13 (-084) | a **stray** byte in prose — and this is the file every session is told to read first |
+
+Row 1 is why this class exists: that fix repaired the one file its author was reading and
+nobody counted the rest, which is the pattern this whole document was written for.
+
+**The rule.** *Never a raw NUL in a tracked file.* Write `\u0000` — identical at
+runtime — `\u0000` denotes exactly the character `String.fromCharCode(0)` produces — and visible to every tool. Apply the
+replacement at BYTE level: a utf8 round-trip plus a lint pass rewrites line endings and
+turns a one-line change into an unreviewable whole-file diff.
+
+**Expect a whole-file diff anyway, once.** While the NUL is there git stores the blob as
+binary and keeps CRLF verbatim; without it the file is text and normalises to LF. That
+EOL churn is genuine and one-time — `git diff --ignore-cr-at-eol` shows the real change.
+
+**Enforced by** the NUL walk in `tests/accounting-subledger-parity.test.mjs`
+(`src/ docs/ tests/ scripts/ functions/`, all text extensions). Proved red by putting a
+byte back into `ap-recon.ts`.
+
+---
+
+## C18 — a per-party document and its all-party twin, only one of them maintained
+
+**Shape.** The same subsidiary ledger is served by TWO endpoints: one **per party** (the
+statement you print and send) and one **over all parties** (the report the accountant
+reads). They are written months apart from the same line model, so each carries its own
+copy of the source queries — and a filter added to one is not added to the other. The
+divergence is invisible from either screen alone; you have to open both, for the same
+party, and compare.
+
+**Why it survives review.** The two files read as one feature. The all-party version's
+own header even says *"Same line model as the per-party statement, looped over all
+parties in a single pass"* — which is true of the maths and false of the queries.
+
+| # | pair | the filter one had and the other did not | state |
+|---|---|---|---|
+| 1 | `/customer-statement` vs `/debtor-ledger` | lifecycle VOID/DELETED receipts | ✅ 2026-08-13 (-080) |
+| 2 | `/supplier-statement` vs `/creditor-ledger` | lifecycle VOID/DELETED payments | ✅ 2026-08-13 (-080) |
+| 3 | `/ap-control` vs `rebuildApCounterSen` | the PI status set each one sums over (`CONFIRMED/APPROVED/PARTIAL_PAID` vs *everything but DRAFT/CANCELLED*) — legitimate, but it is what turned BUG-2026-08-13-081 into a permanent drift on one card and not the other | ✅ by fixing the writer, not the readers |
+| 4 | `/ar-control` vs `/ap-control` · `/ar-reconciliation` vs `/ap-reconciliation` | — | ✅ checked 2026-08-13, no divergence found |
+| 5 | `/payment-vouchers` vs `/official-receipts` | OR has no `/restate` endpoint, PV does | ⬜ owner decision, not a defect |
+
+**The rule.** When you add a predicate to one subsidiary-ledger surface, open its twin in
+the same commit and diff the query — not the file. And when the two must agree on a
+FIGURE, pin the figure in a test for **both**, not the clause in one.
 
 ---
 

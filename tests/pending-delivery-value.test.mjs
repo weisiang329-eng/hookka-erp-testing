@@ -271,3 +271,25 @@ test("source guard: the dashboard tile no longer pulls the whole PO dataset", ()
   assert.equal(src.includes('"/api/sales-orders?fields=price-index"'), false);
   assert.match(src, /"\/api\/delivery-orders\/pending-value"/);
 });
+
+test("source guard: the MOBILE Home reads the same one number, not the ready LIST", () => {
+  const src = readFileSync(
+    resolve(process.cwd(), "src/pages/m/screens/Home.tsx"),
+    "utf8",
+  );
+  // BUG-2026-08-13-011. The phone had already stopped deriving the figure from
+  // /api/production-orders, but it still downloaded the whole
+  // {ready[], planning[]} row set from /ready-planning purely to reduce
+  // Sum(ready[].valueSen) — the factory floor is on phones and worse links, so
+  // it carries MORE of the 30s-abort risk than the desktop did, not less.
+  assert.equal(src.includes('"/api/delivery-orders/ready-planning"'), false);
+  assert.match(src, /"\/api\/delivery-orders\/pending-value"/);
+  // The number must still MEAN the same thing: server ready-sum PLUS the
+  // dispatch chain, exactly as the desktop KTile folds it.
+  assert.match(src, /pendingDeliveryValueSen/);
+  assert.match(src, /v\.DRAFT \?\? 0/);
+  assert.match(src, /v\.LOADED \?\? 0/);
+  assert.match(src, /v\.IN_TRANSIT \?\? 0/);
+  // And no client-side re-summation of a row list may creep back.
+  assert.equal(/ready\s*\?\?\s*\[\]/.test(src), false);
+});

@@ -198,20 +198,55 @@ export default function SupplierDetailPage() {
     }));
   }, [suppliersResp]);
 
-  // Inventory items — for the dialog's RM autocomplete.
+  // SKU dialog open/close — declared here because it GATES the inventory fetch
+  // below. (The rest of the dialog's state stays in the block further down.)
+  const [showSKUForm, setShowSKUForm] = useState(false);
+
+  // Inventory items — for the SKU dialog's internal-material autocomplete.
+  //
+  // perf 2026-08-13 (BUG-2026-08-13-021, audit finding D9): this was the bare
+  // "/api/inventory" — 1.16 MB, all three buckets — on mount, for a picker that
+  // only exists inside `{showSKUForm && <SKUFormDialog …>}`. Now it is gated on
+  // the dialog and asks for only the buckets it consumes.
+  //
+  // BUG-2026-08-13-024 — the dead `finishedGoods` key is GONE from this read.
+  // The endpoint has never emitted `finishedGoods`; its finished-goods bucket is
+  // called `finishedProducts` (inventory.ts:170). So `invResp.data.finishedGoods`
+  // has always been `undefined`, `|| []` swallowed it, and no finished good has
+  // ever appeared in this picker despite the field's placeholder promising
+  // "(FG / WIP / RM)". Removing the key is therefore OUTPUT-IDENTICAL — it
+  // deletes a spread that contributed zero rows.
+  //
+  // It is NOT fixed by renaming it to `finishedProducts`, and that is deliberate
+  // (two independent reasons):
+  //   1. It would ADD 365 rows to a picker — a visible behaviour change, and
+  //      whether a finished good may back a supplier-material binding is an
+  //      owner question, not a typo.
+  //   2. It would not work anyway. This picker needs {itemCode, description,
+  //      baseUOM, itemGroup}; `rowToProduct` (inventory.ts:84) emits none of
+  //      those — products carry `code` / `name`. The rows would render blank and
+  //      `selectInventoryItem` would commit `undefined` into the form.
+  // The same is true of `wipItems` (`rowToWipItem` also has no itemCode), which
+  // is why they are no longer requested either — see the identity note below.
   const { data: invResp } = useCachedJson<{
     success?: boolean;
     data?: {
       rawMaterials?: SkuFormInventoryItem[];
-      finishedGoods?: SkuFormInventoryItem[];
       wipItems?: SkuFormInventoryItem[];
     };
-  }>("/api/inventory");
+  }>(showSKUForm ? "/api/inventory?buckets=rawMaterials,wipItems" : null);
+  // `wipItems` is still REQUESTED and still spread, unchanged. Every WIP row it
+  // contributes is blank in this picker (no itemCode/description/baseUOM/
+  // itemGroup on the wire) and can never match a non-empty search, but the
+  // no-search branch renders `inventoryItems.slice(0, 50)` — so whether any WIP
+  // row is reachable depends on how many raw materials exist, which is live data
+  // this branch cannot measure. Dropping the bucket would have been a row-set
+  // change resting on an assumption; keeping it costs a few KB and keeps the
+  // list provably identical. The blank-WIP-row problem is logged separately.
   const inventoryItems: SkuFormInventoryItem[] = useMemo(() => {
     if (!invResp?.success || !invResp.data) return [];
     return [
       ...(invResp.data.rawMaterials || []),
-      ...(invResp.data.finishedGoods || []),
       ...(invResp.data.wipItems || []),
     ].map((item) => ({
       id: item.id,
@@ -327,8 +362,8 @@ export default function SupplierDetailPage() {
     });
   }, [filteredPoLines, poSort]);
 
-  // SKU dialog state
-  const [showSKUForm, setShowSKUForm] = useState(false);
+  // SKU dialog state (`showSKUForm` itself is declared above, where it gates
+  // the inventory fetch)
   const [editingSKU, setEditingSKU] = useState<SupplierSKU | null>(null);
 
   // Supplier edit dialog state

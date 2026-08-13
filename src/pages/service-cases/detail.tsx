@@ -215,8 +215,28 @@ export default function ServiceCaseDetailPage() {
   // Customer lookup — surface the actual name + phone from the customer
   // master, so the header doesn't only show the customer code (operators
   // complained the bare code wasn't useful at-a-glance, 2026-04-29).
+  //
+  // perf 2026-08-13 (BUG-2026-08-13-023, audit finding D5): this was the BARE
+  // "/api/customers" — the whole customer master — pulled to resolve ONE
+  // foreign key with `.find(c => c.id === caseDetail.customerId)`.
+  // GET /api/customers/:id already exists, is the scoped read for exactly this,
+  // and is already used this way two pages over (sales/detail.tsx:467,
+  // consignment/detail.tsx:424).
+  //
+  // Output identity: both handlers build the row with the SAME `rowToCustomer`
+  // (customers.ts:271) over the same `SELECT * FROM customers` row and the same
+  // delivery_hubs rows, so every field below is byte-identical. The two
+  // differences, both deliberate:
+  //   • the list is org-scoped (`WHERE orgId = ?`), /:id is keyed on the id
+  //     alone. For a customer of this org the row is the same; for a foreign one
+  //     the old `.find` returned null. That is a WIDENING, not a narrowing — it
+  //     cannot blank a field that used to render — and it is the behaviour the
+  //     two pages above already have.
+  //   • /:id 404s when the customer is gone, so we guard on `success` to keep
+  //     `customerRecord` null in exactly the case `.find` returned null.
   const { data: custResp } = useCachedJson<{
-    data?: Array<{
+    success?: boolean;
+    data?: {
       id: string;
       code?: string;
       name: string;
@@ -230,14 +250,16 @@ export default function ServiceCaseDetailPage() {
         address?: string;
         isDefault?: boolean;
       }>;
-    }>;
-  }>("/api/customers");
+    };
+  }>(
+    caseDetail?.customerId
+      ? `/api/customers/${encodeURIComponent(caseDetail.customerId)}`
+      : null,
+  );
   const customerRecord = useMemo(() => {
-    if (!caseDetail || !custResp?.data) return null;
-    return (
-      custResp.data.find((c) => c.id === caseDetail.customerId) ?? null
-    );
-  }, [caseDetail, custResp]);
+    if (custResp?.success === false) return null;
+    return custResp?.data ?? null;
+  }, [custResp]);
 
   // Default delivery hub (or the first one) — used for the "Delivery To"
   // line on the printed report.
@@ -266,7 +288,29 @@ export default function ServiceCaseDetailPage() {
       dispatchedAt?: string | null;
       deliveredAt?: string | null;
     }>;
-  }>(svOrderIds.length > 0 ? "/api/delivery-orders" : null);
+  }>(
+    // SCOPED to this case's SV orders — the same treatment the production-order
+    // fetch below got in BUG-2026-08-13-003, which this line was missed by
+    // (audit finding D1). The bare "/api/delivery-orders" is the whole org:
+    // 1.07 MB / ~393 DOs with every line item (PERF-BACKLOG P6), downloaded so
+    // a five-step stepper could read five fields off at most a handful of rows.
+    //
+    // `?fields=case-pipeline&scope=<csv>` returns exactly the six fields typed
+    // above, for exactly the DOs whose salesOrderId is in the scope — which is
+    // the filter computeCasePipeline runs first anyway (case-pipeline.ts:131).
+    // The route comment records why the projection is value-identical; the
+    // short version is that all six are straight passthroughs in rowToOrder and
+    // the helper folds the rows order-independently (earliest/latest).
+    //
+    // `doResp` has no other consumer on this page — it is read only by the
+    // computeCasePipeline call below, which the Download-PDF handler shares.
+    // A case has a handful of SV orders, so no chunking is needed (unlike the
+    // list page, which scopes across every case).
+    svOrderIds.length > 0
+      ? "/api/delivery-orders?fields=case-pipeline&scope=" +
+        svOrderIds.map(encodeURIComponent).join(",")
+      : null,
+  );
   const { data: poResp } = useCachedJson<{
     data?: Array<{
       id: string;
@@ -2401,7 +2445,11 @@ function StockTopUpPanel({
   }>(type === "WIP" ? "/api/inventory/wip" : null);
   const { data: invResp } = useCachedJson<{
     data?: { finishedProducts?: Array<{ id: string; code: string; name: string; stockQty?: number; basePriceSen?: number }> };
-  }>(type === "FG" ? "/api/inventory" : null);
+    // perf 2026-08-13 (BUG-2026-08-13-021): `?buckets=finishedProducts` — the
+    // FG branch reads that bucket only, and the sibling RM / WIP branches
+    // already have their own endpoints, so the other two buckets were pure
+    // duplicate weight.
+  }>(type === "FG" ? "/api/inventory?buckets=finishedProducts" : null);
 
   const itemOptions: ReplacementItemOpt[] = useMemo(() => {
     if (type === "RM") {
@@ -3025,9 +3073,12 @@ function SpawnServiceOrderModal({
   const [mode, setMode] = useState<Mode | null>(null);
   // For SO/CO source, fetch source order items so the operator can pick.
   // For EXTERNAL we collect free-text rows. Either way the result is `lines`.
+  // perf 2026-08-13 (BUG-2026-08-13-021): `?buckets=finishedProducts`. This
+  // modal is already correctly gated (`{spawnOpen && <SpawnServiceOrderModal…>}`)
+  // so it costs nothing until opened — only its SHAPE was wrong.
   const { data: invResp } = useCachedJson<{
     data?: { finishedProducts?: FgPickerOpt[] };
-  }>("/api/inventory");
+  }>("/api/inventory?buckets=finishedProducts");
   const fgList = useMemo(() => invResp?.data?.finishedProducts ?? [], [invResp]);
 
   type SourceItem = { id: string; productId: string; productCode: string; productName: string; quantity: number };

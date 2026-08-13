@@ -138,6 +138,79 @@ app.get("/", async (c) => {
   const doScope = await customerScopeSql(c, "customerId");
   const doClause = doScope.clause ? ` AND ${doScope.clause}` : "";
 
+  // ── ?fields=case-pipeline&scope=<soIds> — its OWN narrow read ────────────
+  //
+  // perf 2026-08-13 (BUG-2026-08-13-022). The Service Case detail page fetched
+  // this endpoint BARE — 1.07 MB / ~393 DOs (PERF-BACKLOG P6) — so a five-step
+  // stepper could read at most a handful of rows. Its sibling production-order
+  // fetch three lines below it was scoped in BUG-2026-08-13-003; this one was
+  // missed (audit finding D1).
+  //
+  // computeCasePipeline (src/lib/case-pipeline.ts) is the ONLY consumer of that
+  // response on the page — verified by call chain, not by grep: `doResp` appears
+  // at exactly three lines in service-cases/detail.tsx (the hook, the `dos:`
+  // argument, and the useMemo dep). The helper reads five fields
+  // ({salesOrderId, status, createdAt, dispatchedAt, deliveredAt}, plus `id` for
+  // React keys) and its FIRST act (case-pipeline.ts:131) is
+  // `input.dos.filter(d => !!d.salesOrderId && svIds.has(d.salesOrderId))` —
+  // exactly the filter `scope=` applies in SQL.
+  //
+  // Output identity, by construction:
+  //   • rowToOrderList emits `salesOrderId: row.salesOrderId ?? ""`, so a NULL
+  //     became "" and was dropped by the `!!d.salesOrderId` guard. `IN (...)`
+  //     drops NULL the same way, and no caller can pass "" (empty ids are
+  //     filtered out below). Multi-SO DOs carry a NULL salesOrderId (the POST
+  //     leaves it unset — see resolveDoSalesOrderIds) and were ALREADY invisible
+  //     to this stepper; that is unchanged, deliberately, because changing it
+  //     would move the pipeline's dates.
+  //   • the four remaining values are straight passthroughs in rowToOrder:
+  //     `status`, `dispatchedAt`, `deliveredAt` raw (null preserved) and
+  //     `createdAt: row.createdAt ?? ""` — reproduced verbatim below.
+  //   • ROW ORDER is irrelevant here and does not need reproducing: the helper
+  //     folds these rows only through `earliest()` / `latest()` over the whole
+  //     set (case-pipeline.ts:186-190). The ORDER BY is kept anyway so the
+  //     payload is stable between calls.
+  //   • the customer-scope clause is applied identically, so a customer-scoped
+  //     user sees the same subset it saw after the client-side filter.
+  //
+  // Deliberately NOT snapshot-cached: this is a handful of rows off an indexed
+  // equality filter, and a snapshot keyed per scope-set would be a new cache
+  // that invalidates on every delivery_orders write for no benefit.
+  if (c.req.query("fields") === "case-pipeline") {
+    const scopeIds = (c.req.query("scope") ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    // No scope → no rows. This projection exists only for the scoped read; a
+    // bare `?fields=case-pipeline` must never silently become the whole-org
+    // pull this replaces.
+    if (scopeIds.length === 0) {
+      return c.json({ success: true, data: [], total: 0 });
+    }
+    const holes = scopeIds.map(() => "?").join(", ");
+    const res = await db
+      .prepare(
+        `SELECT id, salesOrderId, status, created_at, dispatchedAt, deliveredAt
+           FROM delivery_orders
+          WHERE orgId = ? AND salesOrderId IN (${holes})${doClause}
+          ORDER BY created_at DESC`,
+      )
+      .bind(orgId, ...scopeIds, ...doScope.binds)
+      .all<Record<string, unknown>>();
+    // Dual-keyed reads: the pg shim camelCases columns, but never assume it.
+    const g = (r: Record<string, unknown>, camel: string, snake: string) =>
+      r[camel] ?? r[snake];
+    const data = (res.results ?? []).map((r) => ({
+      id: String(g(r, "id", "id") ?? ""),
+      salesOrderId: String(g(r, "salesOrderId", "sales_order_id") ?? ""),
+      status: g(r, "status", "status") as string,
+      createdAt: String(g(r, "createdAt", "created_at") ?? ""),
+      dispatchedAt: (g(r, "dispatchedAt", "dispatched_at") ?? null) as string | null,
+      deliveredAt: (g(r, "deliveredAt", "delivered_at") ?? null) as string | null,
+    }));
+    return c.json({ success: true, data, total: data.length });
+  }
+
   if (!paginate) {
     const [orders, items, valueMap] = await Promise.all([
       db

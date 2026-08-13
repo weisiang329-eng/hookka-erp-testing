@@ -13,6 +13,7 @@
 // these as deferred but the work landed; only the comment was stale.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import type { Context } from "hono";
 import type { Env } from "../worker";
 import {
   // loadDoValueMap is referenced in the comments below (it's the resolver this
@@ -38,6 +39,7 @@ import { fetchFilteredPOs, attachCustomerSO } from "./production-orders";
 import {
   buildReadyPlanning,
   type ReadyPlanningPO,
+  type ReadyPORow,
 } from "../../lib/delivery-pipeline";
 import {
   groupPosByCustomerHub,
@@ -442,10 +444,15 @@ app.get("/linked-po-ids", async (c) => {
 // extracted verbatim from the page's mapPO) → the rows are byte-identical by
 // construction (same code, same data). The page now fetches this small result
 // instead of the 1.2MB payload. Registered BEFORE /:id (Hono static-first).
+//
+// 2026-08-13: the body below moved into loadDeliveryReadyPlanning() so the
+// Command Center's Pending-Delivery figure (/pending-value, further down) can
+// reuse the SAME assembly + the SAME snapshot instead of re-deriving the money
+// from a second set of inputs. One compute, one cache, one number.
 // ---------------------------------------------------------------------------
-app.get("/ready-planning", async (c) => {
-  const denied = await requirePermission(c, "delivery-orders", "read");
-  if (denied) return denied;
+async function loadDeliveryReadyPlanning(
+  c: Context<Env>,
+): Promise<{ ready: ReadyPORow[]; planning: ReadyPORow[] }> {
   const orgId = getOrgId(c);
   const db = c.var.DB;
 
@@ -601,9 +608,7 @@ app.get("/ready-planning", async (c) => {
   };
 
   // A scoped caller computes fresh and never enters the shared snapshot.
-  if (isCustomerScoped(c)) {
-    return c.json({ success: true, ...(await compute()) });
-  }
+  if (isCustomerScoped(c)) return compute();
   const data = await withSnapshot(
     db,
     {
@@ -624,7 +629,52 @@ app.get("/ready-planning", async (c) => {
     c,
     { staleWhileRevalidate: true },
   );
-  return c.json({ success: true, ...data });
+  return data;
+}
+
+app.get("/ready-planning", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "read");
+  if (denied) return denied;
+  return c.json({ success: true, ...(await loadDeliveryReadyPlanning(c)) });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/delivery-orders/pending-value — the Command Center's PENDING
+// DELIVERY money, computed server-side.
+//
+// The /dashboard tile used to derive this in the browser from FOUR whole-org
+// fetches: /api/production-orders?fields=minimal&include=jobCards (~2,500 POs
+// WITH every job card — megabytes), /po-values, /linked-po-ids and
+// /api/sales-orders?fields=price-index. On prod that PO fetch regularly blew
+// past the 30s global abort in src/lib/api-client.ts; the abort left the tile's
+// loading flag stuck ON, so PENDING DELIVERY rendered a spinner FOREVER while
+// every other KPI painted (measured on prod 2026-08-13).
+//
+// The sum is the same money the Delivery page's "Pending Delivery" tab shows,
+// so it is derived from the SAME rows: loadDeliveryReadyPlanning() → the shared
+// buildReadyPlanning() → poReadyForDelivery(). Nothing is re-expressed in SQL —
+// translating that predicate would risk drifting on sofa upholstery cards,
+// ACCESSORY POs with no UPHOLSTERY step (BUG-2026-06-20-001), ON_HOLD,
+// CANCELLED, consignment POs and POs already on a DO. Each row's valueSen is
+// the identical `poValMap.get(po.id) ?? soLinePrice × qty` expression the tile
+// summed client-side (delivery-pipeline.ts mapPO), so the ringgit figure is
+// unchanged by construction — tests/pending-delivery-value.test.mjs asserts the
+// two summations agree row-for-row.
+//
+// Money is integer sen throughout: valueSen is an int and a sum of ints stays
+// exact — no float ever enters. Registered BEFORE /:id (Hono static-first).
+// ---------------------------------------------------------------------------
+app.get("/pending-value", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "read");
+  if (denied) return denied;
+  const { ready } = await loadDeliveryReadyPlanning(c);
+  let pendingDeliveryValueSen = 0;
+  for (const r of ready) pendingDeliveryValueSen += r.valueSen || 0;
+  return c.json({
+    success: true,
+    pendingDeliveryValueSen,
+    readyCount: ready.length,
+  });
 });
 
 // ---------------------------------------------------------------------------

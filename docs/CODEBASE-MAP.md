@@ -714,7 +714,8 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/dashboard-b/index.tsx` — the entire Command Center (2469); KPI rail + month switcher + all widgets | `src/api/routes/dashboard-overview.ts` — single GET / (2009), 60s KV-cached, owns ALL dashboard data | `sales_orders` / `sales_order_items` | `tests/snapshot-freshness.test.mjs` |
+| `src/pages/dashboard-b/index.tsx` — the entire Command Center (2576); KPI rail + month switcher + all widgets | `src/api/routes/dashboard-overview.ts` — single GET / (2009), 60s KV-cached, owns ALL dashboard data | `sales_orders` / `sales_order_items` | `tests/snapshot-freshness.test.mjs` |
+| ↳ PENDING DELIVERY tile only | `src/api/routes/delivery-orders.ts` — `GET /pending-value` (Σ ready-row `valueSen`, server-side) | `production_orders` / `job_cards` / `delivery_order_items` | `tests/pending-delivery-value.test.mjs` |
 | `src/pages/dashboard-b/charts.tsx` — lazy recharts wrappers (RevenueChart, CustomerPieChart) (240) | `src/api/lib/dashboard-snapshot.ts` — daily snapshot for cumulative revenue | `invoices` / `delivery_orders` / `delivery_order_items` / `consignment_order_items` | `tests/snapshot-freshness-latestts.test.mjs` |
 | `src/dashboard-routes.tsx` — maps /dashboard → dashboard-b; redirects legacy /dashboard-b → /dashboard | `src/api/lib/dashboard-state-snapshot.ts` — daily point-in-time state snapshot (upsert on org_id+snap_date) | `production_orders` / `job_cards` / `cost_ledger` | |
 | | | `purchase_orders` / `purchase_order_items` / `grns` | |

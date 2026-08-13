@@ -4,7 +4,7 @@ import { cachedFetchJsonResult } from "@/lib/cached-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { formatCurrency } from "@/lib/utils";
+import { formatCurrency, roundSen } from "@/lib/utils";
 import {
   AlertTriangle,
   BarChart3,
@@ -1057,23 +1057,57 @@ function InventoryReportTab() {
 // Tab 4: Financial Reports
 // =====================================================================
 
+// GET /api/accounting/pl — the POSTED general ledger, netted per account and
+// classified by that account's own `type` in `chart_of_accounts`
+// (REVENUE / COST → COGS / EXPENSE → operating). The endpoint drops any account
+// whose net for the window is zero, so the number of entries in a category is
+// exactly the number of accounts that CARRY a posting. That count is this tab's
+// provenance: it is printed beside every figure, and a category with zero
+// accounts publishes "—" instead of RM 0.00. See BUG-2026-08-13-009.
+type LedgerPlEntry = {
+  accountCode: string;
+  accountName: string;
+  category: "REVENUE" | "COGS" | "OPERATING_EXPENSE";
+  amount: number;
+};
+
+type LedgerPl = {
+  entries: LedgerPlEntry[];
+  totals: {
+    revenue: number;
+    cogs: number;
+    grossProfit: number;
+    operatingExpenses: number;
+    netProfit: number;
+  };
+};
+
+// What a cell shows when nothing sourced it. Deliberately not "0.00", not
+// "N/A", and never a plausible number: the reader must be able to tell an
+// absent figure from a measured zero at a glance.
+const NO_FIGURE = "—";
+
 function FinancialReportTab() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<{
     invoices: Invoice[];
     purchaseOrders: PurchaseOrder[];
+    ledger: LedgerPl | null;
+    ledgerError: string | null;
   } | null>(null);
 
   const generate = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const [invRes, poRes] = await Promise.all([
+    const [invRes, poRes, plRes] = await Promise.all([
       cachedFetchJsonResult<{ data?: Invoice[] }>("/api/invoices"),
       cachedFetchJsonResult<{ data?: PurchaseOrder[] }>("/api/purchase-orders"),
+      cachedFetchJsonResult<{ data?: LedgerPl }>("/api/accounting/pl"),
     ]);
-    // A P&L whose revenue side loaded and whose payable side did not is not
-    // "partially available" — it is wrong, and it is money. Fail the tab.
+    // The two operational sources drive the receivables and the invoiced-sales
+    // card; half of that is wrong rather than partial, so either failing fails
+    // the tab (BUG-2026-08-13-005).
     const failure = firstError(invRes, poRes);
     if (failure || !invRes.ok || !poRes.ok) {
       setData(null);
@@ -1081,9 +1115,20 @@ function FinancialReportTab() {
       setLoading(false);
       return;
     }
+    // The ledger is treated differently ON PURPOSE. If it does not load — a
+    // timeout, or a user without `accounting:read` — the P&L is not broken, it
+    // is UNSOURCED, and the page must say that with dashes rather than blank
+    // the receivables that did load.
+    const ledger = plRes.ok ? plRes.data?.data ?? null : null;
     setData({
       invoices: invRes.data?.data || [],
       purchaseOrders: poRes.data?.data || [],
+      ledger,
+      ledgerError: plRes.ok
+        ? ledger
+          ? null
+          : "The server sent an unexpected reply."
+        : plRes.error,
     });
     setLoading(false);
   }, []);
@@ -1101,46 +1146,133 @@ function FinancialReportTab() {
     );
   }
 
-  const { invoices, purchaseOrders } = data;
+  const { invoices, purchaseOrders, ledger, ledgerError } = data;
 
-  // P&L
-  const revenue = invoices.reduce((s, i) => s + i.totalSen, 0);
-  const cogs = Math.round(revenue * 0.65);
-  const grossProfit = revenue - cogs;
-  const salaries = 5000000; // RM 50,000
-  const utilities = 800000; // RM 8,000
-  const rent = 1500000; // RM 15,000
-  const others = 500000; // RM 5,000
-  const totalExpenses = salaries + utilities + rent + others;
-  const netProfit = grossProfit - totalExpenses;
+  // ── Invoiced sales — operational, and labelled as such ──────────────
+  //
+  // This is what the sales module billed, NOT what the ledger recognised as
+  // revenue; the two can legitimately disagree and are never mixed into one
+  // subtotal on this page. Drafts and cancellations are excluded, matching how
+  // `costByLineWindow` / `/api/accounting/pl` cut operational revenue
+  // (`status NOT IN ('DRAFT','CANCELLED')`). The old code summed EVERY invoice
+  // row including both.
+  const billable = invoices.filter(
+    (i) => i.status !== "DRAFT" && i.status !== "CANCELLED",
+  );
+  const invoicedSen = roundSen(
+    billable.reduce((s, i) => s + (Number(i.totalSen) || 0), 0),
+  );
+  const collectedSen = roundSen(
+    billable.reduce((s, i) => s + (Number(i.paidAmount) || 0), 0),
+  );
+
+  // ── P&L — every line off the posted ledger, or a dash ───────────────
+  //
+  // What this replaced (BUG-2026-08-13-009): COGS was `revenue × 0.65` and the
+  // four expense lines were the literals 5000000 / 800000 / 1500000 / 500000
+  // sen. Gross profit, net profit and both margins were arithmetic on those, so
+  // the entire lower half of the statement was invented and rendered in the
+  // same typeface as the revenue line.
+  //
+  // Nothing here maps an account to a bucket. Revenue / COGS / operating
+  // expense come from the account's own `type`, and each expense line is
+  // printed under its own account code and name — so no "Rent" or "Utilities"
+  // grouping is asserted that the owner has not himself defined.
+  const glEntries = ledger?.entries ?? [];
+  const inCategory = (cat: LedgerPlEntry["category"]) =>
+    glEntries.filter((e) => e.category === cat);
+  const revenueAccts = inCategory("REVENUE").length;
+  const cogsAccts = inCategory("COGS").length;
+  const opexEntries = inCategory("OPERATING_EXPENSE")
+    .slice()
+    .sort((a, b) => b.amount - a.amount);
+  const opexAccts = opexEntries.length;
+  const totals = ledger?.totals;
+
+  // A figure is published only when at least one account behind it carries a
+  // posting. Zero posted cost accounts does not mean the factory spent
+  // nothing — it means nobody has booked it — so the cell reads "—".
+  const sourced = (n: number, v: number | undefined): string =>
+    n > 0 && v !== undefined ? formatCurrency(roundSen(v)) : NO_FIGURE;
+  // Costs print in accounting brackets. A cost account that nets to a CREDIT
+  // (a reversal, a rebate) is shown plain rather than as a bracketed negative,
+  // which reads as a double negation.
+  const costCell = (v: number): string => {
+    const sen = roundSen(v);
+    return sen < 0 ? formatCurrency(sen) : `(${formatCurrency(sen)})`;
+  };
+  const sourcedCost = (n: number, v: number | undefined): string =>
+    n > 0 && v !== undefined ? costCell(v) : NO_FIGURE;
+  // A derived line is only as sourced as the weakest line it derives from.
+  const derived = (deps: number[], v: number | undefined): string =>
+    deps.every((n) => n > 0) && v !== undefined
+      ? formatCurrency(roundSen(v))
+      : NO_FIGURE;
+  const provenance = (n: number): string =>
+    ledger === null
+      ? "ledger unavailable"
+      : n === 0
+      ? "no account posted"
+      : `${n} account${n === 1 ? "" : "s"} posted`;
 
   const plRows: [string, string, string][] = [
-    ["Revenue", "", formatCurrency(revenue)],
-    ["Cost of Goods Sold (est. 65%)", "", `(${formatCurrency(cogs)})`],
-    ["Gross Profit", "", formatCurrency(grossProfit)],
+    ["Revenue", provenance(revenueAccts), sourced(revenueAccts, totals?.revenue)],
+    [
+      "Cost of Goods Sold",
+      provenance(cogsAccts),
+      sourcedCost(cogsAccts, totals?.cogs),
+    ],
+    [
+      "Gross Profit",
+      "",
+      derived([revenueAccts, cogsAccts], totals?.grossProfit),
+    ],
     ["", "", ""],
-    ["Operating Expenses", "", ""],
-    ["  Salaries & Wages", "", `(${formatCurrency(salaries)})`],
-    ["  Utilities", "", `(${formatCurrency(utilities)})`],
-    ["  Rent", "", `(${formatCurrency(rent)})`],
-    ["  Others", "", `(${formatCurrency(others)})`],
+    ["Operating Expenses", provenance(opexAccts), ""],
+    ...(opexAccts > 0
+      ? opexEntries.map(
+          (e): [string, string, string] => [
+            `  ${e.accountCode} · ${e.accountName}`,
+            "",
+            costCell(e.amount),
+          ],
+        )
+      : ([
+          [
+            "  No expense account carries a posting",
+            "",
+            NO_FIGURE,
+          ],
+        ] as [string, string, string][])),
     [
       "Total Operating Expenses",
       "",
-      `(${formatCurrency(totalExpenses)})`,
+      sourcedCost(opexAccts, totals?.operatingExpenses),
     ],
     ["", "", ""],
-    ["Net Profit / (Loss)", "", formatCurrency(netProfit)],
+    [
+      "Net Profit / (Loss)",
+      "",
+      derived([revenueAccts, cogsAccts, opexAccts], totals?.netProfit),
+    ],
   ];
 
-  // AR Aging
+  // ── AR Aging ────────────────────────────────────────────────────────
+  //
+  // DRAFT invoices are excluded: an unissued invoice is not a receivable. The
+  // last bucket is labelled "61+" because that is what the arithmetic below
+  // actually collects — everything past 60 days, not everything past 90.
   const today = new Date();
-  const arBuckets = { current: 0, d30: 0, d60: 0, d90: 0 };
+  const arBuckets = { current: 0, d1to30: 0, d31to60: 0, over60: 0 };
   invoices
-    .filter((i) => i.status !== "PAID" && i.status !== "CANCELLED")
+    .filter(
+      (i) =>
+        i.status !== "PAID" && i.status !== "CANCELLED" && i.status !== "DRAFT",
+    )
     .forEach((inv) => {
       const dueDate = new Date(inv.dueDate);
-      const outstanding = inv.totalSen - inv.paidAmount;
+      const outstanding =
+        (Number(inv.totalSen) || 0) - (Number(inv.paidAmount) || 0);
       const daysOverdue = Math.max(
         0,
         Math.ceil(
@@ -1148,26 +1280,38 @@ function FinancialReportTab() {
         )
       );
       if (daysOverdue <= 0) arBuckets.current += outstanding;
-      else if (daysOverdue <= 30) arBuckets.d30 += outstanding;
-      else if (daysOverdue <= 60) arBuckets.d60 += outstanding;
-      else arBuckets.d90 += outstanding;
+      else if (daysOverdue <= 30) arBuckets.d1to30 += outstanding;
+      else if (daysOverdue <= 60) arBuckets.d31to60 += outstanding;
+      else arBuckets.over60 += outstanding;
     });
 
   const arRows = [
-    ["Current (not yet due)", formatCurrency(arBuckets.current)],
-    ["1-30 Days Overdue", formatCurrency(arBuckets.d30)],
-    ["31-60 Days Overdue", formatCurrency(arBuckets.d60)],
-    ["90+ Days Overdue", formatCurrency(arBuckets.d90)],
+    ["Current (not yet due)", formatCurrency(roundSen(arBuckets.current))],
+    ["1-30 Days Overdue", formatCurrency(roundSen(arBuckets.d1to30))],
+    ["31-60 Days Overdue", formatCurrency(roundSen(arBuckets.d31to60))],
+    ["61+ Days Overdue", formatCurrency(roundSen(arBuckets.over60))],
     [
-      "Total AR",
+      "Total Outstanding",
       formatCurrency(
-        arBuckets.current + arBuckets.d30 + arBuckets.d60 + arBuckets.d90
+        roundSen(
+          arBuckets.current +
+            arBuckets.d1to30 +
+            arBuckets.d31to60 +
+            arBuckets.over60
+        )
       ),
     ],
   ];
 
-  // AP Aging from purchase orders
-  const apBuckets = { current: 0, d30: 0, d60: 0, d90: 0 };
+  // ── Open purchase orders by expected date ───────────────────────────
+  //
+  // This card used to be headed "Accounts Payable Aging", which it has never
+  // been: it buckets orders that are NOT yet received by their expected
+  // DELIVERY date, and it excludes every received order — i.e. it excludes
+  // exactly the population that can be owed. It is a delivery-commitment view
+  // and is now labelled as one. Real AP lives in Accounting › AP Aging
+  // (`/api/accounting/aging?kind=ap`), which ages supplier invoices by due date.
+  const poBuckets = { current: 0, d1to30: 0, d31to60: 0, over60: 0 };
   purchaseOrders
     .filter(
       (po) =>
@@ -1176,27 +1320,33 @@ function FinancialReportTab() {
     )
     .forEach((po) => {
       const expected = new Date(po.expectedDate);
-      const daysOverdue = Math.max(
+      const total = Number(po.totalSen) || 0;
+      const daysLate = Math.max(
         0,
         Math.ceil(
           (today.getTime() - expected.getTime()) / (1000 * 60 * 60 * 24)
         )
       );
-      if (daysOverdue <= 0) apBuckets.current += po.totalSen;
-      else if (daysOverdue <= 30) apBuckets.d30 += po.totalSen;
-      else if (daysOverdue <= 60) apBuckets.d60 += po.totalSen;
-      else apBuckets.d90 += po.totalSen;
+      if (daysLate <= 0) poBuckets.current += total;
+      else if (daysLate <= 30) poBuckets.d1to30 += total;
+      else if (daysLate <= 60) poBuckets.d31to60 += total;
+      else poBuckets.over60 += total;
     });
 
-  const apRows = [
-    ["Current", formatCurrency(apBuckets.current)],
-    ["1-30 Days Overdue", formatCurrency(apBuckets.d30)],
-    ["31-60 Days Overdue", formatCurrency(apBuckets.d60)],
-    ["90+ Days Overdue", formatCurrency(apBuckets.d90)],
+  const poRows = [
+    ["Not yet due", formatCurrency(roundSen(poBuckets.current))],
+    ["1-30 Days Late", formatCurrency(roundSen(poBuckets.d1to30))],
+    ["31-60 Days Late", formatCurrency(roundSen(poBuckets.d31to60))],
+    ["61+ Days Late", formatCurrency(roundSen(poBuckets.over60))],
     [
-      "Total AP",
+      "Total Open PO Value",
       formatCurrency(
-        apBuckets.current + apBuckets.d30 + apBuckets.d60 + apBuckets.d90
+        roundSen(
+          poBuckets.current +
+            poBuckets.d1to30 +
+            poBuckets.d31to60 +
+            poBuckets.over60
+        )
       ),
     ],
   ];
@@ -1207,11 +1357,11 @@ function FinancialReportTab() {
         <FileSpreadsheet className="h-4 w-4" /> Refresh
       </Button>
 
-      {/* P&L Statement */}
+      {/* P&L Statement — posted ledger only */}
       <Card>
         <CardHeader className="pb-2 flex flex-row items-center justify-between">
           <CardTitle className="text-base">
-            Profit & Loss Statement (Simplified)
+            Profit &amp; Loss — from the posted general ledger (all periods)
           </CardTitle>
           <Button
             variant="outline"
@@ -1219,7 +1369,7 @@ function FinancialReportTab() {
             onClick={() =>
               downloadCSV(
                 "profit-and-loss.csv",
-                ["Item", "", "Amount"],
+                ["Item", "Accounts Posted", "Amount"],
                 plRows.map((r) => r.map(String))
               )
             }
@@ -1228,6 +1378,14 @@ function FinancialReportTab() {
           </Button>
         </CardHeader>
         <CardContent>
+          {ledgerError && (
+            <div className="mb-3 rounded-md border border-[#C2410C]/30 bg-[#FFF7ED] px-3 py-2 text-sm text-[#4B5563]">
+              <span className="font-semibold text-[#1F1D1B]">
+                The ledger could not be read, so every figure below is “—”.
+              </span>{" "}
+              {ledgerError} Nothing is estimated in its place.
+            </div>
+          )}
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <tbody>
@@ -1261,6 +1419,9 @@ function FinancialReportTab() {
                       >
                         {row[0]}
                       </td>
+                      <td className="px-4 py-2 text-right text-xs text-[#6B7280] whitespace-nowrap">
+                        {row[1]}
+                      </td>
                       <td
                         className={`px-4 py-2 text-right ${
                           isHeader
@@ -1276,10 +1437,67 @@ function FinancialReportTab() {
               </tbody>
             </table>
           </div>
+          <div className="mt-3 space-y-2 text-xs text-[#6B7280]">
+            <p>
+              Every figure comes from <code>/api/accounting/pl</code> — the
+              posted general ledger, netted per account and classified by that
+              account&apos;s own type in the chart of accounts. The
+              &ldquo;accounts posted&rdquo; column is the number of accounts
+              actually carrying an entry behind that subtotal.
+            </p>
+            <p>
+              A line reads &ldquo;—&rdquo; when no account behind it has been
+              posted. That is not RM&nbsp;0.00: it means the ledger has no
+              answer yet, and a total built on it (gross profit, net profit)
+              reads &ldquo;—&rdquo; too rather than inheriting the gap silently.
+            </p>
+            <p>
+              Until 2026-08-13 this statement showed Cost of Goods Sold as
+              revenue&nbsp;×&nbsp;0.65 and Salaries&nbsp;RM&nbsp;50,000,
+              Utilities&nbsp;RM&nbsp;8,000, Rent&nbsp;RM&nbsp;15,000 and
+              Others&nbsp;RM&nbsp;5,000 as fixed constants written into the
+              page. None of it was data. Expense lines are now listed under
+              their own account code and name — the page does not decide which
+              accounts are &ldquo;rent&rdquo; or &ldquo;utilities&rdquo;.
+            </p>
+            <p>
+              The full manufacturing statement — opening/closing stock, raw
+              material, direct labour, factory overhead and WIP movement, by
+              period and by product line — is Accounting ›
+              Profit&nbsp;&amp;&nbsp;Loss.
+            </p>
+          </div>
         </CardContent>
       </Card>
 
-      {/* AR Aging */}
+      {/* Invoiced sales — operational, deliberately separate from the ledger */}
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">
+            Invoiced Sales &amp; Collections (from invoices, not the ledger)
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <ReportTable
+            headers={["Metric", "Value"]}
+            rows={[
+              ["Invoices issued (excl. draft & cancelled)", billable.length],
+              ["Total invoiced", formatCurrency(invoicedSen)],
+              ["Collected to date", formatCurrency(collectedSen)],
+              ["Outstanding", formatCurrency(invoicedSen - collectedSen)],
+            ]}
+            align={["left", "right"]}
+          />
+          <p className="mt-2 text-xs text-[#6B7280]">
+            Sourced from <code>/api/invoices</code>. This is what the sales
+            module billed, which is not the same thing as the revenue the ledger
+            has recognised — the two are shown apart on purpose and are never
+            added into one subtotal.
+          </p>
+        </CardContent>
+      </Card>
+
+      {/* Receivables + open purchase commitments */}
       <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
         <Card>
           <CardHeader className="pb-2">
@@ -1293,19 +1511,33 @@ function FinancialReportTab() {
               rows={arRows}
               align={["left", "right"]}
             />
+            <p className="mt-2 text-xs text-[#6B7280]">
+              Unpaid, uncancelled, non-draft invoices aged by due date;
+              outstanding = invoice total − amount paid.
+            </p>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-base">Accounts Payable Aging</CardTitle>
+            <CardTitle className="text-base">
+              Open Purchase Orders by Expected Date
+            </CardTitle>
           </CardHeader>
           <CardContent>
             <ReportTable
-              headers={["Aging Bucket", "Amount"]}
-              rows={apRows}
+              headers={["Expected Delivery", "Order Value"]}
+              rows={poRows}
               align={["left", "right"]}
             />
+            <p className="mt-2 text-xs text-[#6B7280]">
+              This is <strong>not</strong> accounts payable. It ages purchase
+              orders that have <em>not</em> been received, by expected delivery
+              date — so it excludes exactly the orders that can be owed for. It
+              was captioned as an A/P aging report until 2026-08-13. Real
+              payables live in Accounting › AP Aging, which ages supplier
+              invoices by due date.
+            </p>
           </CardContent>
         </Card>
       </div>

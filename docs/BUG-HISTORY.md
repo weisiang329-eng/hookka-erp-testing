@@ -34,6 +34,77 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-009 — Reports › Financial presented an invented P&L as accounts: COGS was `revenue × 0.65` and every operating expense was a constant `ui-frontend` `money` `data-integrity` 🟢
+
+**Symptom.** `/reports` → **Financial** → **Generate Financial Report** rendered a card headed *"Profit & Loss Statement (Simplified)"* with Revenue, Cost of Goods Sold, Gross Profit, four operating-expense lines and Net Profit / (Loss), all formatted as currency in the same typeface as the AR aging beside it. Only the Revenue line touched data, and even that was wrong.
+
+**Root cause.** `src/pages/reports.tsx`, `FinancialReportTab`:
+
+```ts
+const revenue = invoices.reduce((s, i) => s + i.totalSen, 0);
+const cogs = Math.round(revenue * 0.65);
+const grossProfit = revenue - cogs;
+const salaries  = 5000000;  // RM 50,000
+const utilities = 800000;   // RM 8,000
+const rent      = 1500000;  // RM 15,000
+const others    = 500000;   // RM 5,000
+const netProfit = grossProfit - (salaries + utilities + rent + others);
+```
+
+Three separate defects stacked:
+
+1. **COGS was an assumed 35% margin.** Not an estimate labelled as one — the row was captioned "Cost of Goods Sold (est. 65%)", which reads as *65% of cost is accounted for*, not *this figure is the answer you came to find, multiplied by a guess and handed back*. It is unfalsifiable by construction: gross margin is always exactly 35.0%, whatever the factory did.
+2. **Four expense lines were literals.** RM 50,000 / 8,000 / 15,000 / 5,000, typed into the page. They never moved, which is precisely what made them look like a stable business rather than a placeholder — the same property that made `seed(w.id)` convincing in BUG-2026-08-13-006.
+3. **Everything downstream inherited it.** Gross Profit, Total Operating Expenses and Net Profit / (Loss) were arithmetic on 1 and 2, and the CSV export shipped all of it to a spreadsheet where the provenance is gone entirely.
+
+The revenue line was also wrong on its own terms: it summed **every** invoice row, DRAFT and CANCELLED included, and called the total Revenue.
+
+**This ERP already has a real P&L, and the report was not using it.** `src/api/routes/accounting.ts` carries a full manufacturing statement (`computePnlWindow` / `GET /pl-statement`) — FIFO material, direct labour, factory overhead, WIP/FG movement, owner-editable bucket mapping via `src/lib/pnl-bucket.ts` — plus a lighter GL-only cut, `GET /api/accounting/pl`, which nets the posted ledger per account and classifies by the account's own `type` in `chart_of_accounts`.
+
+**Fix — every line names its source, and an unsourced line is a dash.**
+
+| Line | Was | Now |
+|---|---|---|
+| Revenue | Σ of every invoice, drafts and cancellations included | `GET /api/accounting/pl` → `totals.revenue`, the net of posted REVENUE accounts |
+| Cost of Goods Sold | `revenue × 0.65` | the same call's `totals.cogs`, the net of posted COST accounts |
+| Gross Profit | derived from the guess | `totals.grossProfit`, published only when revenue **and** COGS each have a posted account |
+| Salaries / Utilities / Rent / Others | `5000000` / `800000` / `1500000` / `500000` sen | **gone.** One row per EXPENSE account that carries a posting, under its own account **code and name** |
+| Total Operating Expenses | sum of the four constants | `totals.operatingExpenses` |
+| Net Profit / (Loss) | arithmetic on the above | `totals.netProfit`, published only when all three sections have a posted account |
+| — (new) Invoiced Sales & Collections | — | a separate card from `/api/invoices`, excluding DRAFT and CANCELLED, labelled *"from invoices, not the ledger"* |
+
+**The dash rule, and why zero is not an answer.** `/api/accounting/pl` drops any account whose net for the window is zero, so the number of entries it returns per category is exactly *how many accounts carry a posting*. That count is printed beside every subtotal — the same move as the **Measured Cards** column added in BUG-2026-08-13-004, for the same reason: a total resting on one account must not read like a set of books. **When a category has zero posted accounts the cell reads "—", never RM 0.00.** A furniture factory's cost of goods sold is not zero; it is unbooked, and those are different claims. Totals propagate the gap rather than launder it: `derived([revenueAccts, cogsAccts], …)` for gross profit, `derived([revenueAccts, cogsAccts, opexAccts], …)` for net profit.
+
+**No chart-of-accounts mapping was invented.** Revenue / COGS / operating expense come from each account's own `type`; every expense row is printed under its own code and name. The page does not decide which accounts are "Rent" or "Utilities" — that grouping does not exist in `pnl-bucket.ts` (which distinguishes only `OPEX_SALARIES`, `900-S0*`, from `OPERATING_EXPENSE`) and inventing one to make the statement look complete would have re-created this bug with better manners. **Open owner decision, recorded here so it can be asked once:** whether the operating-expense section should be grouped into named buckets (Salaries · Rent · Utilities · Other) and, if so, which account codes roll into each. Until he answers, accounts are listed individually.
+
+**"The GL is barely populated" is about a DIFFERENT table — check which one before quoting it.** The figure in circulation on 2026-08-13, *2 journal entries and 50 journal lines*, is `journal_entries` / `journal_lines` — the **manual journal-voucher** surface (`rowToJournal`, `accounting.ts:190`; it is also C14 row 9 in `docs/BUG-CLASSES.md`, which is left open precisely because it is that small). The table this fix reads is **`ledger_journal_entries`**, the immutable posting ledger, and it is written by `invoices.ts`, `payments.ts`, `purchase-invoices.ts`, `supplier-payments.ts`, `delivery-orders.ts`, `note-ledger.ts`, `trade-finance.ts`, `purchase-return-create.ts` and `document-lifecycle.ts` — i.e. by ordinary trading, not by anyone opening the Journals screen. **How full it actually is was NOT measured here** (see the credentials note below), so this entry claims nothing about it in either direction; the point is only that the two counts are not interchangeable and the dash rule above is correct whichever way it falls.
+
+**A ledger that did not load is not an empty ledger.** The `/api/accounting/pl` call is deliberately NOT part of the tab's `firstError` gate: the invoices and purchase-orders fetches still fail the whole tab (BUG-2026-08-13-005's rule — half a report reads as fact), but a ledger read that times out, or a user without `accounting:read`, produces dashes plus a stated reason on screen, rather than blanking the receivables that did load or rendering zeroes.
+
+**Cost of the new call, established by reading it, not by timing it.** `GET /api/accounting/pl` fetches `chart_of_accounts`, all of `ledger_journal_entries`, `invoices`, `invoice_items`, `products`, and `cost_ledger` + `raw_materials` twice (once per `liveInventory` cutoff), then filters **in JS**. Passing a `period` therefore changes nothing about the query cost — this tab calls it with no period (all-time, matching the tab's existing all-time scope) and does the same database work the Accounting Dashboard's periodised call already does on every load. If it is nonetheless slower than the 30 s `API_TIMEOUT_MS`, the tab degrades to dashes with the timeout message; it cannot degrade to a number. **This reasoning was not confirmed with a stopwatch — time it on deploy.**
+
+**Verified — and read this before quoting any figure from it.** `npx tsc -p tsconfig.app.json --noEmit` clean (zero errors, including the three jsbarcode/@zxing ones), `npm run build` clean, `npx eslint` clean on both changed files, full suite **3,744 pass / 0 fail**. New `tests/no-fabricated-financials.test.mjs` (7 cases) asserts: no money figure is a literal-coefficient multiple of another (`revenue * 0.65` and every respelling, plus a general `money × 0.NN` scan); none of the four sen constants survives; the P&L is fetched from `/api/accounting/pl` and counts accounts per category; the "—" and dash-propagation helpers keep their exact shape; invoiced sales excludes DRAFT/CANCELLED and says it is not the ledger; the aging labels match what they collect; and money passes through `roundSen`. The test strips comments from the slice it reads, so this entry can quote the bug without tripping its own guard. **NOT observed running.** The branch is not deployed (Actions is billing-blocked), prod is behind a login gate, and the two local credential paths are dead — the pooler DSN in `.dev.vars` answers *password authentication failed*, and both Supabase REST keys answer `42501 permission denied`. **No figure in this entry was read off prod; the shape of the fix was established by reading `accounting.ts`, not by querying it.** Whether the live GL is populated enough for these lines to show numbers rather than dashes is UNKNOWN and must be checked on deploy.
+
+---
+
+## BUG-2026-08-13-010 — Reports › Financial's "Accounts Payable Aging" excluded every order that could be owed for, and 61-90 day debt was filed under "90+" `ui-frontend` `money` `data-integrity` 🟢
+
+**Symptom.** Two aging cards on the same tab captioned themselves as things they were not.
+
+**Root cause 1 — the AP card is not AP.** It filtered `po.status !== "RECEIVED" && po.status !== "CANCELLED"` and bucketed `po.totalSen` by **`expectedDate`**, the expected *delivery* date. So it aged orders that had **not** been received, by when they were supposed to arrive — and excluded, by construction, exactly the population that can be owed for (a received, unpaid order). The number it printed as "Total AP" was open purchase commitment; a reader planning cash against it would have been reading the wrong side of the transaction. Real payables live in `GET /api/accounting/aging?kind=ap` / Accounting › AP Aging, which ages supplier invoices by due date; the report never called it.
+
+**Root cause 2 — the last AR bucket is mislabelled.** The chain is `<= 0` / `<= 30` / `<= 60` / else, and the else branch was captioned **"90+ Days Overdue"**. Everything from 61 days onward landed there, so 61-90 day debt was presented as three-months-plus. Same shape as the department-efficiency mislabel in BUG-2026-08-13-004: the arithmetic was right and the caption was a claim the arithmetic did not support.
+
+**Root cause 3 — draft invoices counted as receivable.** AR excluded `PAID` and `CANCELLED` but not `DRAFT`. An invoice that has not been issued is not money anyone owes.
+
+**Fix.** The purchase-order card is now headed **"Open Purchase Orders by Expected Date"** with columns *Expected Delivery* / *Order Value*, rows "Not yet due / 1-30 / 31-60 / 61+ Days Late", a "Total Open PO Value", and a note stating in as many words that it is **not** accounts payable and pointing at Accounting › AP Aging. The AR card's final bucket is **"61+ Days Overdue"**, DRAFT is excluded, and its total is captioned "Total Outstanding" rather than "Total AR". Outstanding is computed with `Number(...) || 0` on both sides so a null `paidAmount` cannot turn a receivable into `NaN`.
+
+**Verified.** Covered by `tests/no-fabricated-financials.test.mjs` ("aging buckets are labelled as what they actually collect"): the string `"90+ Days Overdue"` and the caption *Accounts Payable Aging* must both be absent, `"61+ Days Overdue"` and the new heading present, and the DRAFT exclusion in place. Gates as for -009. **Not observed on prod** — same reason.
+
+**Not fixed here.** The tab still has **no period selector**: the P&L is all-periods and the aging cards are as-of-now, which is defensible for a snapshot but means the statement cannot be compared month to month — Accounting › Profit & Loss is the surface that does that. And `/api/accounting/pl` returns a `manufacturing` block (live opening/closing stock from the cost ledger, cost of production) and a `balanceSheet` array that this tab does not render; both are real and could carry the report further once the owner has ruled on the expense grouping above.
+
+---
+
 ## BUG-2026-08-13-006 — Reports › Employee showed per-worker performance computed from a hash of the worker's id `ui-frontend` `data-integrity` `audit-logging` 🟢
 
 **Symptom.** The **Worker Efficiency** table on `/reports` → **Employee** listed every active worker with Hours Worked, Items Completed and Efficiency %. None of it was data. Beside it sat summary cards reading **"Attendance Rate 94.5%"** and **"Avg Hours/Day 8.7"**, and an Attendance Overview row **"Average OT Hours / Worker 12.5"**. The owner has been reading this.

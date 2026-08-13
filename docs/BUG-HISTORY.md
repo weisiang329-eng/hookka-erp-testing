@@ -493,6 +493,234 @@ spellings optional so the dual-key read is honest about which one arrives.
 
 ---
 
+---
+
+## BUG-2026-08-13-052 — every PO-sourced GRN line stores `material_code = ""`, and filling it cannot be done alone `procurement` `inventory-cascade` `data-migration` 🔴
+
+**Status: diagnosed, deliberately NOT fixed.** Recorded in full so the next reader does
+not spend the same hours re-deriving it, and does not ship the one-line "fix" that breaks
+a live reconciliation screen.
+
+**Symptom.** Every GRN created from a purchase order stores a blank Material Code on
+every line. `grn-detail.tsx:969` renders an empty code under each material name, and the
+GRN PDF prints nothing for it (`grn-detail.tsx:615` passes `itemCode: it.materialCode`).
+The Supplier SKU column beside it is blank too, for a consequence of the same blank:
+`fillGrnSupplierSku` (`grn.ts:347-380`) recovers the SKU by looking the line's
+`materialCode` up in `supplier_material_bindings`, and an empty code matches nothing.
+
+**Root cause — two dead keys on one expression.** `grn.ts:1574`:
+
+```ts
+materialCode: poItem?.material_code || poItem?.supplierSKU || "",
+```
+
+`poItem` comes from a raw `SELECT * FROM purchase_order_items` (`grn.ts:1431`, `:1488`).
+The pg shim renames every column on the way out: `columnFrom` (`db-pg.ts:57`) is
+`snakeToCamel[col] ?? postgres.toCamel(col)`, and `snakeToCamel` is the inverse of
+`column-rename-map.json`. The physical columns are `material_code` and `supplier_sku`
+(confirmed in the prod snapshot `tests/db-schema.json`), so the driver delivers
+**`materialCode`** and **`supplierSku`**. Note `supplier_sku` has TWO map entries —
+`"supplierSKU"` (line 815) and `"supplierSku"` (line 816) — and `Object.fromEntries`
+keeps the LAST, so the acronym spelling loses. Both operands of that `||` chain are
+therefore `undefined` on every row, and the expression is a constant `""`.
+
+`PurchaseOrderItemRow` in `grn.ts:279-291` declares exactly those two dead spellings, so
+`tsc` certifies the wrong read — the same mechanism as BUG-2026-08-13-034. The
+dual-keyed version next door in `purchase-orders.ts:97-98` (`r.materialCode ?? r.material_code`)
+is what this should have been.
+
+**Why the obvious fix is not applied here.** The value IS knowable at write time —
+`purchase_order_items.material_code` is written from the PO create screen's `it.rmCode`
+(`procurement/create.tsx:417`, `:507`), i.e. our internal raw-material `itemCode`. But
+filling the column changes two downstream readers, and one of them posts stock:
+
+1. **`resolveRmForGRNItem` (`grn.ts:473-517`) — the stock-posting path.** Step 2 is
+   `SELECT … FROM supplier_material_bindings WHERE supplierSku = ?` bound with the GRN
+   line's `materialCode`. Today the `if (materialCode)` guard is never entered because
+   the value is `""`. Filled with an internal code, that lookup starts running against a
+   **supplier-SKU** column — a key mismatch that will normally miss, but resolves to a
+   *different* raw material for any binding whose `supplier_sku` happens to equal one of
+   our internal codes. `postGRNToStock` then writes `rm_batches`, `cost_ledger` and
+   `raw_materials.balanceQty` against whatever it resolved. That is a stock write whose
+   target would change.
+2. **`deriveMatCode` (`three-way-match.ts:260-267`) — a live reconciliation screen.**
+   The PO side calls it as `deriveMatCode(it.materialName, it.supplierSKU)`, and
+   `it.supplierSKU` is the SAME dead key (this is the audit's row 20), so PO lines bucket
+   on the `" - "` split of `materialName`. The GRN side calls
+   `deriveMatCode(gl.materialName, gl.materialCode)` and today falls through to the
+   identical split — **the two sides agree only because both are broken the same way.**
+   The PO create screen sends `materialName: it.rmDescription`, a bare description with
+   no `"CODE - "` prefix, so the split yields the description. Fill the GRN side and it
+   starts bucketing on the real code while the PO side still buckets on the description:
+   every line would appear as PO-only plus GRN-only, and the three-way-match panel on
+   `procurement/detail.tsx:1398` would read as a totally unmatched PO.
+
+**What it would take.** One change that fixes the write path AND aligns both sides of
+`deriveMatCode` onto the same dimension AND decides what
+`resolveRmForGRNItem` step 2 should key on — the column is read as an internal code by
+`fillGrnSupplierSku` and as a supplier SKU by the resolver, and those cannot both be
+right. That is an owner-facing decision on a stock + reconciliation surface, not a
+dual-key repair.
+
+**Existing rows are NOT touched, and must not be.** Backfilling `grn_items.material_code`
+re-runs nothing by itself, but any GRN re-post after a backfill would resolve to a
+different raw material and post a second, different `rm_batches` / `cost_ledger` pair.
+What history carries today: every PO-sourced line `""` (`grn.ts:1574`); every manual
+line whatever the client sent (`grn.ts:1606`, in practice `""` because the create form
+has no code field); every DRAFT re-lined row echoes what was already stored
+(`grn.ts:2034`). So the column is effectively empty across the table.
+
+**Probe for the main session** (bounds the blast radius of consequence 1 before anyone
+decides):
+
+```sql
+-- how much of the table is blank today
+SELECT count(*) FILTER (WHERE COALESCE(material_code,'') = '') AS blank, count(*) AS total
+  FROM grn_items;
+-- how many bindings would make the resolver's step 2 fire on an internal code
+SELECT count(*) FROM supplier_material_bindings b
+ WHERE b.supplier_sku IN (SELECT item_code FROM raw_materials);
+-- and whether PO lines even carry the code we would copy
+SELECT count(*) FILTER (WHERE COALESCE(material_code,'') <> '') AS coded, count(*) AS total
+  FROM purchase_order_items;
+```
+
+---
+
+## BUG-2026-08-13-051 — the Accounting company selector filtered the TENANT column with a company DISPLAY code, so OHANA rendered empty everywhere and HOOKKA showed the whole group `money` `ui-frontend` `data-integrity` 🟢
+
+**Symptom.** Picking a company on any Accounting report produced a screen that was
+confidently wrong. **OHANA / HOUZS / HKMFG** rendered the P&L, Balance Sheet, AR, AP,
+both reconciliations and the Trial Balance **completely empty** — no error, no
+explanation, just a company with no books. **HOOKKA** rendered the *entire group's*
+money under one company's name. And the Balance Sheet's per-company card
+(`GroupByCompanyCard`, `accounting/index.tsx:10664`) fetches `/pl` once per code and
+prints Net Profit + Total Equity for each: it showed **RM 0.00 for all four**, beside a
+consolidated statement showing the real figures.
+
+**Root cause.** `accounting/shared.ts` mapped each organisation to
+`{ value: code.toLowerCase() }` and callers appended it as `?orgId=`.
+`companyFilter` (`src/api/lib/tenant.ts:204-214`) binds that value straight into
+`org_id = ?` / `orgId = ?` on `ledger_journal_entries`, `invoices`, `purchase_invoices`,
+`customers` and `suppliers` — six call sites in `accounting.ts` (`:474`, `:1677`,
+`:2479`, `:2709`, `:2883`, `:4798`).
+
+`org_id` is the **tenant** column: one value per login account, defaulting to `'hookka'`
+(`tenant.ts:31`), and the write side never stamps anything else (BUG-CLASSES **C12**
+row 7). The company a document is booked under is a **display** dimension —
+`sales_orders.sales_org_code` / `purchase_orders.purchase_org_code`
+(`src/lib/company-dimension.ts:1-20`). The two can never coincide, and the registry says
+so outright: `0142_organisations_registry.sql:92,100` seeds **both** the HOOKKA and the
+OHANA organisation rows with `org_id = 'hookka'`.
+
+So the control had no correct state. It either matched nothing or matched everything.
+
+**Fix (`c7509221`).** No mapping was invented, because none exists to find. A per-company
+P&L / Balance Sheet / Trial Balance has to come from a company column on
+`ledger_journal_entries` and `invoices`, and **neither table has one** — checked against
+the production schema snapshot `tests/db-schema.json`, where both carry `org_id` only.
+Adding that dimension and backfilling it from each document's source is the real feature.
+
+`useCompanyOptions()` therefore offers only the consolidated group option — the one
+figure the page can state truthfully — and `CompanySelect` renders `null` for a
+single-option list rather than leaving a dead control that implies a breakdown exists.
+`GroupByCompanyCard` already returns `null` when no real company remains, so the RM 0.00
+row set disappears with it. Every fetch URL is byte-identical to today's unfiltered read
+(`orgIdParam("")` is `""`), which is the read that was always correct, and all four
+`company` states are in-memory defaulting to `""`, so no stale code can survive.
+
+When a second tenant is seeded this comes back keyed on the dimension it actually
+filters — `organisations.org_id`, which `GET /api/organisations` does not currently emit
+(`SELECT_COLS_NEW`, `organisations.ts:152-155`) — not on `code`.
+
+**Verified.** `tests/accounting-company-filter-dimension.test.mjs` pins the four
+structural facts that make this the only honest answer (companyFilter's column, the
+migration's shared `org_id`, the absent company column on both report tables, and the
+selector's own behaviour). All three behavioural guards were proved by reintroducing the
+bug and watching them go red. `npx tsc -p tsconfig.app.json --noEmit` exit 0, `npm test`
+3,864 pass / 0 fail, `npx eslint` 0 errors. **Not deployed** — no live observation.
+
+**Related, NOT fixed:** those six endpoints read `ledger_journal_entries` with no
+`getOrgId` predicate at all. That is BUG-CLASS **C12** and a separate change.
+
+---
+
+## BUG-2026-08-13-050 — an already-racked production order stayed in the Stock-In dropdown, so one delivery could be stocked in twice `inventory-cascade` `production-orders` `data-integrity` 🟢
+
+**Symptom.** The Warehouse page's Stock-In dropdown listed every COMPLETED production
+order, including ones already assigned to a rack. Choosing one again wrote a **second**
+`rack_items` row (`POST /api/warehouse`) and a **second** `STOCK_IN` row in
+`stock_movements` (`POST /api/warehouse/movements`) for stock that had only moved once —
+inventory movements that never happened. Nothing errors; the operator gets a success
+toast both times.
+
+**Root cause.** `src/pages/warehouse.tsx:609-611` builds the list as
+
+```ts
+productionOrders.filter(po => po.status === "COMPLETED" && !po.stockedIn)
+```
+
+off `/api/production-orders?fields=minimal&include=` (`warehouse.tsx:241`), and
+`rowToMinimalPO` did not emit `stockedIn`. `undefined` makes `!po.stockedIn` true for
+every completed order, so the guard was a no-op.
+
+It is a **regression**, not a missing feature. The page read the bare
+`/api/production-orders` — the full `rowToPO` shape, which has emitted `stockedIn` since
+the start (`_helpers.ts:978`) — until **b7d00c78 (2026-05-23)**, "perf(api): slim
+/api/production-orders consumers". That commit's stated method was *"a grep of what each
+file actually reads from the response"*, and for Warehouse it checked `.jobCards` and
+nothing else.
+
+**Fix (`62ef2472`).** `stockedIn: Boolean(row.stockedIn)` restored to `rowToMinimalPO`,
+and `stockedIn: boolean` added to `MinimalPOOut`.
+`production_orders.stocked_in` is INTEGER, not one of the ten real BOOLEAN columns in
+`tests/db-boolean-columns.json` (BUG-CLASS **C8**), so the `Boolean()` cast is what makes
+the two projections agree.
+
+**Why this is NOT the `actualMinutes` trap.** The sibling `jobCards-lite` projection also
+drops a field a consumer reads, and it must stay dropped: all 4,289 non-zero prod
+`actual_minutes` values are byte-identical copies of that card's own `est_minutes`
+(BUG-2026-08-13-005), so restoring it resurrects a 100%-by-construction efficiency
+figure. `stockedIn` is the opposite — a real flag with two distinct writers (the
+warehouse PUT at `_helpers.ts:4919-4946`, and `cascadeUpholsteryToSO` / `…ToCO`, which
+set it at `_helpers.ts:3594`/`:3695` when the upholstery set completes and clear it at
+`:3768`/`:3816` on revert) and a ledger-write consequence. Both writers predate
+2026-04-28, so restoring the key restores exactly the behaviour the page shipped with —
+it does not impose a new filter.
+
+**Verified.** `tests/minimal-po-stocked-in.test.mjs` proves output identity — the full
+key set of the projection, plus value-for-value agreement with `rowToPO` on every shared
+key, plus the 0/1/null/undefined cast — and was proved to go RED with the field removed
+again. `npx tsc -p tsconfig.app.json --noEmit` exit 0, `npm test` 3,864 pass / 0 fail,
+`npx eslint` 0 errors. **Not deployed** — no live observation.
+
+**Deploy note.** `?fields=minimal&include=` is served through
+`production_orders_list_snapshot` and a KV body, and neither cache key carries a schema
+or build version. A snapshot built before this deploy will keep serving the old shape
+until a production write calls `invalidateProductionListCaches` or the TTL lapses. After
+deploying, wipe it explicitly rather than assuming: any PO/JC write does it, or
+`DELETE FROM production_orders_list_snapshot WHERE org_id = 'hookka'` plus a
+`pos:version:hookka` bump.
+
+**Same class, found in the sweep of the minimal projection's other consumers, NOT fixed
+here** (all display-only; none writes anything):
+
+| read | site | effect |
+|---|---|---|
+| `order.notes` | `planning/index.tsx:2825` | Master Tracker "Notes" column permanently `-` |
+| `order.rackingNumber` | `planning/index.tsx:2866` | Master Tracker "Rack" column permanently `-` |
+| `po.rackingNumber` | `src/lib/delivery-pipeline.ts:486` (`buildCnReadyPlanning`, run server-side off `fetchFilteredPOs(..., minimal=true)` at `consignment-notes.ts:271`) | CN ready/planning rows carry `rackingNumber: ""` |
+| `o.rackingNumber` | `production/index.tsx:2629` | only the optimistic-rollback value for the rack dropdown; the *displayed* rack comes from the job card (`:3431`), which the minimal projection does carry |
+| `o.createdAt` | `production/index.tsx:2862` | `?axis=created_at` is a silent no-op — already logged as the layer audit's row 32 |
+
+They are left alone on purpose. `notes` is free text on ~2,500 rows of the app's hottest
+payload, and `rackingNumber` at PO level is the value the DO side deliberately *rejects*
+as lossy in favour of per-piece aggregation (`delivery/index.tsx:1556-1562`) — filling
+the CN side with it would be choosing a different rack source for one of two sibling
+screens, which is a decision, not a repair.
+
+---
+
 ## BUG-2026-08-13-034 — every downloaded Credit Note and Debit Note printed RM 0.00, because a stale shared type certified the wrong keys `money` `ui-frontend` `data-integrity` 🟢
 
 **Symptom.** A customer-facing document, wrong in the loudest possible way, and nobody

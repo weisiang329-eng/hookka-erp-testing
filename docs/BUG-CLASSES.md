@@ -1,13 +1,16 @@
 # Recurring bug classes — the index that makes P5 executable
 
 > **Last verified: 2026-08-13** — every one of the source/test paths this file cites
-> exists (checked mechanically against the tree), and `npm test` is green.
+> exists (checked mechanically against the tree), and `npm test` is green
+> (3,868 tests / 0 fail).
+>
+> *(Two separate branches each appended a stamp paragraph here on 2026-08-13, leaving the
+> header with two "Last verified" lines and a superseded test count. Collapsed into this
+> one stamp; no claim was dropped.)*
+>
 > **C1 was re-opened and extended the same day** (BUG-2026-08-13-040): the class had a
 > second axis nobody had counted — the DOCUMENT TYPE — and the consignment-order write
 > path plus the sofa-combo recompute shared by both order types were still carrying it.
-> **Last verified: 2026-08-13** — every one of the 27 source/test paths this file cites
-> exists (checked mechanically against the tree), and `npm test` is green
-> (3,854 tests / 0 fail).
 >
 > **Updated 2026-08-13 by the thin-module sweep** (accounting · customers ·
 > quality-warehouse · rnd — see [`AUDIT-THIN-MODULES.md`](AUDIT-THIN-MODULES.md)):
@@ -20,6 +23,11 @@
 > (`/consignment/return`), a fifth enforcing test file, and a fourth corollary —
 > a row that mixes real and invented columns is *more* dangerous, not less.
 > Suite at that point: 3,866 tests / 0 fail.
+>
+> **Also 2026-08-13, branch `fix/stock-grn-org-filter`:** added **C16 — a field the
+> projection drops and a consumer still reads** (the class behind BUG-2026-08-13-050,
+> with the four open siblings enumerated), and **C15 row 24** (the Balance Sheet's
+> per-company card printing RM 0.00 for all four companies, BUG-2026-08-13-051).
 
 `PLAYBOOKS.md` **P5** says: *"Fix all instances of the same class, not just the flagged one."*
 
@@ -783,6 +791,7 @@ place: `/api/department-performance` must keep dividing by clocked time,
 | 21 | Fabrics `soh` / `priceTier` | `/customers` › Fabrics | `m?.soh ?? 0` printed as an on-hand quantity; `?? "PRICE_1"` printed as a tier; and a genuine `PRICE_3` renders as **Price 2** | ⬜ open |
 | 22 | credit-utilisation bar | `/customers` grid | `limit > 0 ? outstanding/limit : 0` → a COD customer owing RM 50,000 shows a **green 0%** bar; the Available column beside it returns `—` correctly | ⬜ open |
 | 23 | CR No. · return status · return date | `/consignment/return` | `buildMockCRs()`: a module-level counter as a document number, `Math.random()` thresholds as a PENDING→INSPECTED→ACCEPTED→RESTOCKED status, `now −` 1-10 random days as the return date — **beside real customers and real RM, and exported to CSV** | ✅ 2026-08-13 (-071) |
+| 24 | Balance Sheet › "by company" Net Profit + Total Equity | `/accounting` › BS (`GroupByCompanyCard`) | RM 0.00 for all four companies — the per-company `/pl?orgId=<code>` filtered the TENANT column with a DISPLAY code and matched nothing, and the `catch` returned 0 as well. Printed beside a consolidated statement showing the real money | ✅ 2026-08-13 (-051) — the card renders nothing because no truthful per-company option exists; see C16 |
 
 **Enforced by** five files, all structural (`readFileSync` source assertions),
 because nothing else can catch a number that is merely wrong-but-plausible:
@@ -816,6 +825,50 @@ the trap: a column can be fully populated and still meaningless —
 `job_cards.actualMinutes` is non-null on 4,289 rows and every one is a
 byte-identical copy of that card's `estMinutes`. **Check the distribution, not
 the NULL rate.**
+
+---
+
+## C16 — a field the projection drops and a consumer still reads
+
+**Shape.** A slim `?fields=` / `include=` projection is introduced for payload size, its
+author greps each consumer for the one field they had in mind, and every OTHER field the
+page reads off that response silently becomes `undefined`. Nothing throws: a missing key
+renders `-`, or `RM 0.00`, or — the dangerous case — flips a guard, because `!undefined`
+is `true`.
+
+**Why it keeps happening.** The projection is a plain object literal and the consumer's
+read is `po.someField` against a hand-written inline type, so `tsc` cannot see the gap
+(`DataGrid`'s `Column<T>.key` is `string`, not `keyof T`, for the same reason). And the
+slimming commit reads as careful precisely *because* it audited something — b7d00c78's
+message says *"based on a grep of what each file actually reads"*; it grepped for
+`.jobCards`.
+
+**The rule.** When you narrow a projection, enumerate the consumer's reads, not the field
+you are removing. And pin the projection's **whole key set** in a test, so the next
+narrowing has to state what it is dropping.
+
+**Instances**
+
+| # | field | projection | consumer | state |
+|---|---|---|---|---|
+| 1 | `stockedIn` | `rowToMinimalPO` | `warehouse.tsx:610` Stock-In dropdown | ✅ 2026-08-13 (-050) — **the reason this class exists**: `!po.stockedIn` was always true, so one delivery could be racked twice and write a second `STOCK_IN` |
+| 2 | `actualMinutes` | `slimJobCardsToPlanningLite` | `planning/index.tsx` ×8 | ⬜ **deliberately left dropped** — restoring it resurrects a 100%-by-construction efficiency figure (C15 row 1 / BUG-2026-08-13-005). The fix owed here is removing the `useActual` branch, not the field |
+| 3 | `notes`, `rackingNumber` | `rowToMinimalPO` | `planning/index.tsx:2825`, `:2866` | ⬜ open, display-only — two Master Tracker columns permanently `-`. `notes` is free text on the hottest payload; `rackingNumber` at PO level is the value the DO side deliberately rejects as lossy (`delivery/index.tsx:1556-1562`), so filling the CN twin is a decision |
+| 4 | `rackingNumber` | `rowToMinimalPO` → `buildCnReadyPlanning` | `src/lib/delivery-pipeline.ts:486` | ⬜ open, display-only — CN ready/planning rows carry `""` |
+| 5 | `createdAt` | `rowToMinimalPO` | `production/index.tsx:2862` | ⬜ open — `?axis=created_at` is a silent no-op; URL-only since the dropdown was removed 2026-05-07 |
+| 6 | `finishedGoods` / `finishedProducts` | `/api/inventory` | `suppliers/detail.tsx:214` | ✅ 2026-08-13 (-024) — and note the fix was to DELETE the read, not rename it; the two payload halves are different entities |
+
+**Enforced by** the key-set assertion in `tests/minimal-po-stocked-in.test.mjs`, which
+pins every field `rowToMinimalPO` emits and asserts value-for-value agreement with
+`rowToPO` on all shared keys. Dropping any field from the minimal PO projection now fails
+CI with the list. **Other projections have no such guard yet** — add one in the same
+commit as any new `?fields=` variant.
+
+**Finding the next one.** For each `?fields=`/`include=` caller, diff the projection's
+key set against every `x.` read on the response object in that file. Follow the call
+chain: a field can be read inside a shared helper the page merely passes the row to
+(`delivery-pipeline.ts` reads `po.rackingNumber` off a payload assembled two modules
+away), and a grep of the page alone will miss it.
 
 ---
 

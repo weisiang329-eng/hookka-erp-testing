@@ -34,6 +34,165 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-084 — five more source files still carried a raw NUL byte, so `grep` had never read them either `infrastructure` `data-integrity` 🟢
+
+**Symptom.** None visible to a user. The damage is to every audit anyone runs: GNU
+`grep` classifies a file containing a NUL as binary, answers `Binary file matches`
+and prints **nothing**. A grep-driven sweep therefore skips the file in silence and
+reports it clean.
+
+**What was found.** `a9d413f6` fixed exactly one instance — `accounting.ts` — because
+that was the file its author was reading. A byte-level scan of the whole tree found
+**five more**, two of them on the money path:
+
+| file | what the byte is |
+|---|---|
+| `src/lib/ap-recon.ts` | composite map key `` `${sourceType}<NUL>${sourceId}` `` — the AP-drift decomposition engine |
+| `src/lib/pnl-historical.ts` | composite key `` `${code}<NUL>${name}` `` — the P&L historical window |
+| `src/api/lib/keyset.ts` | `const SEP = "<NUL>"` (×3, two in a comment) — every keyset cursor |
+| `src/api/lib/ocr-code-misses.ts` | two composite keys |
+| `docs/WORK-TRACKER.md` | one **stray** byte in prose (line 120) — the file every session is told to read first |
+
+**Fix.** Each raw byte replaced with its escape sequence `\u0000`, applied at BYTE
+level so nothing else in the file was touched. Identical at runtime. The stray one in
+the markdown was deleted.
+
+**Guard.** `tests/accounting-subledger-parity.test.mjs` walks `src/ docs/ tests/
+scripts/ functions/` and fails on any NUL, naming the files. Proved red by putting a
+byte back into `ap-recon.ts` and watching it fire.
+
+**Lesson (new class C17).** This is the first bug class whose damage is to the
+INVESTIGATION rather than to the product. `rg` and `git grep` are unaffected, which is
+why it went unnoticed for so long — whether you can see the file depends on which tool
+you happened to reach for.
+
+## BUG-2026-08-13-083 — manual journals had no tenant boundary, argued away by a comment whose premise is false `auth-rbac` `data-integrity` `accounting` 🟢
+
+**Symptom.** Latent (one org on prod). `GET /api/accounting/journals`,
+`GET/PUT /journals/:id`, `/journals/:id/lifecycle` and `DELETE /journals/:id` carried
+**no** `org_id` predicate, and `POST /journals` stamped none — the manual-journal
+surface was the one accounting document type with no tenant boundary at all. The list's
+child fetch was a bare `SELECT * FROM journal_lines`: every tenant's lines, every call.
+
+**Root cause — a comment, believed.** `accounting.ts` said, in place, *"journal_entries
+has no orgId column (it predates multi-tenancy), so we bind the active orgId into the
+JOIN condition rather than referencing a table column"*. The premise is **false**:
+`tests/db-schema.json` (regenerated from prod) lists `org_id` on **both**
+`journal_entries` and `journal_lines`, added by
+`migrations-postgres/0087_org_id_full_rollout.sql:105-106` as
+`TEXT NOT NULL DEFAULT 'hookka'`, re-applied by `0206_finance_org_id.sql` and by the
+runtime `ensureFinanceOrgColumns`. This is `BUG-CLASSES.md` **C12 row 11**, which had
+already spotted the contradiction and was waiting for someone to act on it.
+
+**Blast radius today: zero, and byte-identical.** One tenant; every row carries the
+column default; `DEFAULT_ORG_ID` is `'hookka'`. The predicate changes no figure now and
+is load-bearing the day a second tenant is seeded.
+
+**Fix.** Both halves in one change, per C12's rule — read scoping without write stamping
+is only half a boundary (a second tenant's journals would land labelled `hookka` and
+then be hidden from the tenant that created them). Entry-point reads carry
+`AND orgId = ?`; `journal_lines` reads keyed off an already-gated id are left unscoped
+**with a comment saying why**, so the next reader does not "fix" them again.
+
+**Guard.** `tests/accounting-subledger-parity.test.mjs` — a two-tenant book; a caller in
+one org cannot see the other's journal through the list, through the lines, or through a
+by-id read, and a create stamps the caller's org.
+
+## BUG-2026-08-13-082 — the AP subledger relieved the creditor by the CASH that left the bank, not by what came off the control `money` `accounting` 🟢
+
+**Symptom.** For a supplier paid in a **foreign currency** at a rate other than the
+purchase invoice's, Accounting › Supplier Statement and the Creditor Ledger print a
+payment line for the wrong amount, and their closing balance does not tie
+`400-0000` — permanently, by the FX difference. MYR payments are unaffected.
+
+**Mechanism.** `supplier_payments` stores two amounts, and they are different things:
+`amountSen` = `r.bankSen`, the cash out; `bookedSen` = `r.bookedSen`, the AP relief.
+`supplier-payments.ts` posts **DR 400-0000 Σ bookedSen · CR bank Σ bankSen · ±530-0000
+Σ FX** and bumps `paid_amount_sen` by `bookedSen`. Both subledger reports read
+`amountSen`. So the report moved by the bank leg while the control moved by the AP leg;
+the gap is exactly the FX gain/loss, which belongs on 530-0000 and is not an AP movement.
+
+**Fix.** `COALESCE(bookedSen, amountSen) AS amountSen` on both queries. `COALESCE`
+rather than a bare swap because pre-fix `CONTRA` rows never stored a `bookedSen`
+(BUG-2026-08-13-081) — without it, fixing this one would have made those rows vanish
+from the ledger entirely.
+
+**Measured?** No. The code path is proven from the source; **how many prod rows have
+`bookedSen <> amountSen` was not measured** — this branch has no DB access. If none
+exist, the change is byte-identical.
+
+## BUG-2026-08-13-081 — a contra marked the bill PAID and nothing else: `paid_amount_sen` untouched, `bookedSen` unwritten, the supplier still "owed" `money` `accounting` `data-integrity` 🟢
+
+**Symptom.** After settling payables against a customer's receivable
+(`POST /api/accounting/contra`), Accounting › AP shows the supplier counter and
+`driftCounterVsPiSen` **too high by the full contra'd amount**, and pressing
+**Recalculate** does not clear it — the rebuild recreates the same drift every time.
+
+**Root cause — an omission measured against its own siblings.** The handler wrote
+`UPDATE purchase_invoices SET status = 'PAID'` and stopped. Three things every
+comparable path does, it did not:
+
+| what | who else does it | contra |
+|---|---|---|
+| move `paid_amount_sen` with the status flip | `supplier-payments.ts:392,680,976,1176`, `purchase-invoices.ts:2329` | ✗ |
+| store `bookedSen` on the `supplier_payments` row | **all seven** other `INSERT INTO supplier_payments` in the repo | ✗ |
+| relieve the party's outstanding counter | the AR half of this very handler, five lines above | ✗ (customer yes, supplier no) |
+
+`rebuildApCounterSen` sums `amountSen − paidAmountSen` over every PI that is not
+DRAFT/CANCELLED — including PAID ones, which is correct because a normally-paid PI nets
+to zero. A contra'd PI has `paid_amount_sen = 0`, so it nets to its **full face** and the
+counter never comes down. `/ap-control` itself is right (it filters to
+CONFIRMED/APPROVED/PARTIAL_PAID), which is why the subledger card looks fine while the
+counter card beside it does not — and why the drift reads as a mystery rather than as a
+contra.
+
+The missing `bookedSen` also makes the row claim **zero** AP relief on
+`/ap-reconciliation` and in `/audit-log`'s `SUM(bookedSen)`.
+
+**Fix.** `paid_amount_sen = amount_sen` in the same statement as the status flip;
+`bookedSen` added to the INSERT (bound to the amount actually relieved); a per-supplier
+`UPDATE suppliers SET outstandingSen = GREATEST(0, outstandingSen - ?)` mirroring the
+customer side.
+
+**Not fixed — for the owner.** A contra leaves no trace on `/debtor-ledger`,
+`/customer-statement` or `/supplier-statement` beyond the PI/invoice rows, because it
+writes no `payment_records` row. Which document type should represent a contra on a
+printed statement is a finance decision, not a defect to be guessed at.
+
+**Guard.** `tests/accounting-subledger-parity.test.mjs`, three assertions, each proved
+red by removing the fix.
+
+## BUG-2026-08-13-080 — the statement you PRINT counted voided receipts; the ledger next to it never did `money` `accounting` 🟢
+
+**Symptom.** Accounting › Customer Statement for a customer whose receipt was voided
+still shows the `RECEIPT` line and a closing balance **understated by the voided
+amount** — the document sent to the customer says they owe less than they do. The
+supplier side is the mirror: `/supplier-statement` shows a `PAYMENT` debit for a voided
+or deleted supplier payment, so what we owe reads too low. Open the Debtor/Creditor
+Ledger for the same party and the two disagree.
+
+**Root cause.** `/customer-statement` and `/debtor-ledger` build the *identical* line
+model (INVOICE / RECEIPT / BOUNCED / CREDIT_NOTE / DEBIT_NOTE) — the ledger's own header
+says so: *"Same line model as the per-party statement, looped over all parties in a
+single pass."* The **only** difference was the payments query. The ledgers exclude
+lifecycle VOID/DELETED documents; the statements did not, on either side.
+
+| endpoint | excluded voided payments |
+|---|---|
+| `/debtor-ledger` | ✅ `id NOT IN (… sourceType='payment' AND state IN ('VOID','DELETED'))` |
+| `/creditor-ledger` | ✅ `paymentNo NOT IN (… sourceType='supplier_payment' …)` |
+| `/customer-statement` | ❌ |
+| `/supplier-statement` | ❌ |
+
+A voided payment has already had its GL legs hidden and reversed, so the control account
+was always right — only the printed statement was wrong.
+
+**Fix.** The same exclusion, copied verbatim from each endpoint's own twin.
+
+**Guard.** `tests/accounting-subledger-parity.test.mjs` asserts the closing balance, not
+the presence of a clause; the mock applies the exclusion **only when the SQL asks for
+it**, so deleting the predicate makes the balance move and the test go red.
+
 ## BUG-2026-08-13-072 — the "delivered with issues" billing hold had never fired, in five places at once `money` `delivery-orders` `invoices` `data-integrity` 🟢
 
 **Symptom.** A delivery marked DELIVERED WITH ISSUES is supposed to block invoicing until

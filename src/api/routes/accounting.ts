@@ -1165,11 +1165,17 @@ app.get("/journals", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
   // T5d: annotate each JV with its lifecycle state and hide DELETED ones.
-  // journal_entries has no orgId column (it predates multi-tenancy), so we
-  // bind the active orgId into the JOIN condition rather than referencing a
-  // table column — the original query was not orgId-filtered and we keep it
-  // that way (consistent with PV/OR). VOID/REVERSED JVs still show (with
-  // state); only DELETED is excluded.
+  // VOID/REVERSED JVs still show (with state); only DELETED is excluded.
+  //
+  // BUG-2026-08-13-083: this used to carry the comment "journal_entries has no
+  // orgId column (it predates multi-tenancy)". That premise was FALSE — both
+  // journal_entries and journal_lines have carried `org_id TEXT NOT NULL
+  // DEFAULT 'hookka'` since migration 0087, re-applied by 0206 and by the
+  // runtime `ensureFinanceOrgColumns`. The orgId was bound into the JOIN
+  // condition only, so the manual-journal surface was the one accounting
+  // document type with NO tenant boundary at all (C12). Byte-identical today
+  // (one org, and every row carries the column default); load-bearing the day a
+  // second tenant is seeded.
   const orgId = getOrgId(c);
   const [entries, lines] = await Promise.all([
     c.var.DB.prepare(
@@ -1179,10 +1185,11 @@ app.get("/journals", async (c) => {
            ON dl.orgId = ?
           AND dl.sourceType = 'manual'
           AND dl.sourceId = journal_entries.id
-        WHERE (dl.state IS NULL OR dl.state <> 'DELETED')
+        WHERE journal_entries.orgId = ?
+          AND (dl.state IS NULL OR dl.state <> 'DELETED')
         ORDER BY date DESC, entryNo DESC`,
-    ).bind(orgId).all<JournalEntryRow & { lifecycleState: string | null }>(),
-    c.var.DB.prepare("SELECT * FROM journal_lines").all<JournalLineRow>(),
+    ).bind(orgId, orgId).all<JournalEntryRow & { lifecycleState: string | null }>(),
+    c.var.DB.prepare("SELECT * FROM journal_lines WHERE orgId = ?").bind(orgId).all<JournalLineRow>(),
   ]);
   const data = (entries.results ?? []).map((e) => ({
     ...rowToJournal(e, lines.results ?? []),
@@ -1224,12 +1231,17 @@ app.post("/journals", async (c) => {
     const id = genId("je");
     const entryNo = await nextJeNo(c.var.DB);
     const createdBy = body.createdBy || "admin";
+    const orgId = getOrgId(c);
 
+    // orgId is STAMPED, not left to the column DEFAULT (BUG-2026-08-13-083) —
+    // read scoping without write stamping is only half a boundary: a second
+    // tenant's journals would land labelled 'hookka' and then be hidden from
+    // the tenant that created them.
     await c.var.DB.prepare(
-      `INSERT INTO journal_entries (id, entryNo, date, description, status, createdBy)
-       VALUES (?, ?, ?, ?, 'DRAFT', ?)`,
+      `INSERT INTO journal_entries (id, entryNo, date, description, status, createdBy, orgId)
+       VALUES (?, ?, ?, ?, 'DRAFT', ?, ?)`,
     )
-      .bind(id, entryNo, date, description, createdBy)
+      .bind(id, entryNo, date, description, createdBy, orgId)
       .run();
 
     const inserts = lines.map(
@@ -1242,8 +1254,8 @@ app.post("/journals", async (c) => {
       }, idx: number) =>
         c.var.DB.prepare(
           `INSERT INTO journal_lines
-             (journalEntryId, lineOrder, accountCode, accountName, debitSen, creditSen, description)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+             (journalEntryId, lineOrder, accountCode, accountName, debitSen, creditSen, description, orgId)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           id,
           idx,
@@ -1252,6 +1264,7 @@ app.post("/journals", async (c) => {
           l.debitSen ?? 0,
           l.creditSen ?? 0,
           l.description ?? "",
+          orgId,
         ),
     );
     await c.var.DB.batch(inserts);
@@ -1279,10 +1292,13 @@ app.get("/journals/:id", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
   const id = c.req.param("id");
+  // Entry-point read → carries the tenant predicate (BUG-2026-08-13-083). The
+  // journal_lines read below is keyed off an id this query has already gated,
+  // so it is transitively safe and deliberately left unscoped.
   const entry = await c.var.DB.prepare(
-    "SELECT * FROM journal_entries WHERE id = ?",
+    "SELECT * FROM journal_entries WHERE id = ? AND orgId = ?",
   )
-    .bind(id)
+    .bind(id, getOrgId(c))
     .first<JournalEntryRow>();
   if (!entry) {
     return c.json({ success: false, error: "Journal entry not found" }, 404);
@@ -1303,10 +1319,12 @@ app.put("/journals/:id", async (c) => {
   if (denied) return denied;
   try {
     const id = c.req.param("id");
+    // Entry-point read → tenant-scoped (BUG-2026-08-13-083). Every journal_lines
+    // read/write below is keyed off this already-gated id.
     const entry = await c.var.DB.prepare(
-      "SELECT * FROM journal_entries WHERE id = ?",
+      "SELECT * FROM journal_entries WHERE id = ? AND orgId = ?",
     )
-      .bind(id)
+      .bind(id, getOrgId(c))
       .first<JournalEntryRow>();
     if (!entry) {
       return c.json({ success: false, error: "Journal entry not found" }, 404);
@@ -1552,8 +1570,8 @@ app.put("/journals/:id", async (c) => {
           }, idx: number) =>
             c.var.DB.prepare(
               `INSERT INTO journal_lines
-                 (journalEntryId, lineOrder, accountCode, accountName, debitSen, creditSen, description)
-               VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                 (journalEntryId, lineOrder, accountCode, accountName, debitSen, creditSen, description, orgId)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
             ).bind(
               id,
               idx,
@@ -1562,6 +1580,7 @@ app.put("/journals/:id", async (c) => {
               l.debitSen ?? 0,
               l.creditSen ?? 0,
               l.description ?? "",
+              getOrgId(c),
             ),
         );
         if (inserts.length) await c.var.DB.batch(inserts);
@@ -1601,7 +1620,8 @@ app.post("/journals/:id/lifecycle", async (c) => {
   try { action = ((await c.req.json()) as { action: string }).action as typeof action; } catch { return c.json({ success: false, error: "Invalid body" }, 400); }
   if (!["void", "delete", "unvoid"].includes(action)) return c.json({ success: false, error: "action must be void|delete|unvoid" }, 400);
 
-  const entry = await c.var.DB.prepare("SELECT id, entryNo, status FROM journal_entries WHERE id = ?").bind(id).first<{ id: string; entryNo: string; status: string }>();
+  // Entry-point read → tenant-scoped (BUG-2026-08-13-083).
+  const entry = await c.var.DB.prepare("SELECT id, entryNo, status FROM journal_entries WHERE id = ? AND orgId = ?").bind(id, orgId).first<{ id: string; entryNo: string; status: string }>();
   if (!entry) return c.json({ success: false, error: "Journal entry not found" }, 404);
   // A DRAFT JV has no ledger posting — there is nothing to void/delete/unvoid.
   if (entry.status === "DRAFT") {
@@ -1650,10 +1670,12 @@ app.delete("/journals/:id", async (c) => {
   const denied = await requirePermission(c, "accounting", "delete");
   if (denied) return denied;
   const id = c.req.param("id");
+  // Entry-point read → tenant-scoped (BUG-2026-08-13-083); the DELETE below is
+  // keyed off the id this read has already gated.
   const entry = await c.var.DB.prepare(
-    "SELECT * FROM journal_entries WHERE id = ?",
+    "SELECT * FROM journal_entries WHERE id = ? AND orgId = ?",
   )
-    .bind(id)
+    .bind(id, getOrgId(c))
     .first<JournalEntryRow>();
   if (!entry) {
     return c.json({ success: false, error: "Journal entry not found" }, 404);
@@ -1848,8 +1870,13 @@ app.get("/customer-statement", async (c) => {
       .bind(customerId)
       .all<{ invoiceNo: string; invoiceDate: string; totalSen: number; status: string; isOpening: number | null }>(),
     c.var.DB.prepare(
+      // VOID/DELETED receipts are excluded, exactly as /debtor-ledger does it
+      // (BUG-2026-08-13-080). The two build the SAME line model — this query was
+      // the only difference, so a voided receipt credited the printed statement
+      // while the all-party ledger next to it did not.
       `SELECT receiptNumber, date, amount, status, method FROM payment_records
-        WHERE customerId = ?`,
+        WHERE customerId = ?
+          AND id NOT IN (SELECT sourceId FROM document_lifecycle WHERE sourceType = 'payment' AND state IN ('VOID','DELETED'))`,
     )
       .bind(customerId)
       .all<{ receiptNumber: string; date: string; amount: number; status: string; method: string }>(),
@@ -3189,7 +3216,19 @@ app.get("/supplier-statement", async (c) => {
       // Exclude #6 supplier-discount markers (method='CREDIT_NOTE', amountSen=0,
       // no GL leg) — they'd render as 0.00 PAYMENT noise rows; the CN itself
       // already appears via the purchase_credit_notes query below.
-      `SELECT paymentNo, date, amountSen FROM supplier_payments WHERE supplierId = ? AND COALESCE(method,'') <> 'CREDIT_NOTE'`,
+      //
+      // VOID/DELETED payments are excluded too, exactly as /creditor-ledger does
+      // it (BUG-2026-08-13-080) — the two build the SAME line model and this was
+      // the only difference.
+      //
+      // The AP relief is bookedSen, NOT amountSen (BUG-2026-08-13-082):
+      // amountSen is the CASH that left the bank, bookedSen is what came off
+      // 400-0000. They differ on a foreign-currency payment settled at a rate
+      // other than the PI's — the difference is FX gain/loss (530-0000) and is
+      // not an AP movement. COALESCE keeps pre-fix rows that never stored one.
+      `SELECT paymentNo, date, COALESCE(bookedSen, amountSen) AS amountSen FROM supplier_payments
+        WHERE supplierId = ? AND COALESCE(method,'') <> 'CREDIT_NOTE'
+          AND paymentNo NOT IN (SELECT sourceId FROM document_lifecycle WHERE sourceType = 'supplier_payment' AND state IN ('VOID','DELETED'))`,
     )
       .bind(supplierId)
       .all<{ paymentNo: string; date: string; amountSen: number }>(),
@@ -3334,7 +3373,10 @@ app.get("/creditor-ledger", async (c) => {
   const [supRes, piRes, payRes, pcnRes] = await Promise.all([
     c.var.DB.prepare("SELECT id, name, code FROM suppliers").all<{ id: string; name: string; code: string | null }>(),
     c.var.DB.prepare(`SELECT id, supplierId, piNo, invoiceDate, amountSen, isOpening FROM purchase_invoices WHERE status IN ('CONFIRMED','APPROVED','PARTIAL_PAID','PAID')`).all<{ id: string; supplierId: string; piNo: string; invoiceDate: string; amountSen: number; isOpening: number | null }>(),
-    c.var.DB.prepare(`SELECT supplierId, paymentNo, date, amountSen FROM supplier_payments WHERE COALESCE(method,'') <> 'CREDIT_NOTE' AND paymentNo NOT IN (SELECT sourceId FROM document_lifecycle WHERE sourceType = 'supplier_payment' AND state IN ('VOID','DELETED'))`).all<{ supplierId: string; paymentNo: string; date: string; amountSen: number }>(),
+    // AP relief is bookedSen, not amountSen (BUG-2026-08-13-082) — see the note
+    // on /supplier-statement's twin query. COALESCE covers rows written before
+    // the column was populated on every path.
+    c.var.DB.prepare(`SELECT supplierId, paymentNo, date, COALESCE(bookedSen, amountSen) AS amountSen FROM supplier_payments WHERE COALESCE(method,'') <> 'CREDIT_NOTE' AND paymentNo NOT IN (SELECT sourceId FROM document_lifecycle WHERE sourceType = 'supplier_payment' AND state IN ('VOID','DELETED'))`).all<{ supplierId: string; paymentNo: string; date: string; amountSen: number }>(),
     c.var.DB.prepare(`SELECT supplierId, noteNumber, date, totalAmount FROM purchase_credit_notes WHERE status = 'POSTED'`).all<{ supplierId: string; noteNumber: string; date: string; totalAmount: number }>(),
   ]);
   const byParty = new Map<string, LedgerLine[]>();
@@ -9115,17 +9157,35 @@ app.post("/contra", async (c) => {
         .bind(totalSen, customerId),
     );
     const today = now.slice(0, 10);
+    // Per-supplier relief, so the creditor counter drops by exactly what this
+    // contra settled for that supplier (BUG-2026-08-13-081).
+    const reliefBySupplier = new Map<string, number>();
     for (const p of pis) {
+      const piSen = Number(p.amountSen) || 0;
+      reliefBySupplier.set(p.supplierId, (reliefBySupplier.get(p.supplierId) ?? 0) + piSen);
+      // paid_amount_sen MUST move with the status flip (BUG-2026-08-13-081).
+      // Every other writer of a PAID purchase invoice does both — this one set
+      // status alone, so rebuildApCounterSen (which reads amount − paid over
+      // every non-DRAFT/CANCELLED PI) kept counting the contra'd bill at FULL
+      // FACE, and the AP tab's counter-vs-subledger drift never cleared.
       statements.push(
-        db.prepare("UPDATE purchase_invoices SET status = 'PAID', updated_at = ? WHERE id = ?").bind(now, p.id),
+        db
+          .prepare(
+            "UPDATE purchase_invoices SET paid_amount_sen = amount_sen, status = 'PAID', updated_at = ? WHERE id = ?",
+          )
+          .bind(now, p.id),
       );
       statements.push(
         db
           .prepare(
+            // bookedSen is the AP relief and EVERY other supplier_payments
+            // INSERT in the repo stores it; this one omitted it, so the row
+            // claimed zero relief on /ap-reconciliation and in the audit log's
+            // SUM(bookedSen) (BUG-2026-08-13-081).
             `INSERT INTO supplier_payments (
                id, paymentNo, supplierId, supplierName, purchaseInvoiceId,
-               date, amountSen, method, reference, notes, orgId
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CONTRA', ?, ?, ?)`,
+               date, amountSen, bookedSen, method, reference, notes, orgId
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CONTRA', ?, ?, ?)`,
           )
           .bind(
             `sp-${crypto.randomUUID().slice(0, 8)}`,
@@ -9134,11 +9194,21 @@ app.post("/contra", async (c) => {
             p.supplierName ?? "",
             p.id,
             today,
-            Number(p.amountSen) || 0,
+            piSen,
+            piSen,
             p.piNo,
             `Contra vs ${cust.name}`,
             getOrgId(c),
           ),
+      );
+    }
+    // The AR side already decrements customers.outstandingSen above; the AP side
+    // never had its mirror, so the supplier stayed "owed" after the contra.
+    for (const [supplierId, sen] of reliefBySupplier) {
+      statements.push(
+        db
+          .prepare("UPDATE suppliers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ?")
+          .bind(sen, supplierId),
       );
     }
     const orgId = getOrgId(c);

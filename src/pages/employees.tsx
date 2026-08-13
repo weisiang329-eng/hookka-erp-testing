@@ -64,6 +64,9 @@ import {
   KeyRound,
   Copy,
 } from "lucide-react";
+// One money parser. NOTE: hours/day and the OT multiplier below are NOT money
+// and deliberately keep `parseFloat`.
+import { moneyFieldToSen } from "@/lib/money-field";
 
 // --------------- TYPES ---------------
 
@@ -3265,9 +3268,10 @@ function EmployeeMasterTab({
                   onChange={(e) =>
                     setForm((f) => ({
                       ...f,
-                      basicSalarySen: Math.round(
-                        parseFloat(e.target.value) * 100
-                      ),
+                      // BUG-2026-08-13-095 - one money parser. This used to
+                      // write NaN into the salary on an unreadable value.
+                      basicSalarySen:
+                        moneyFieldToSen(e.target.value) ?? f.basicSalarySen,
                     }))
                   }
                   className="h-8 text-xs"

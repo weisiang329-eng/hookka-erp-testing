@@ -13,6 +13,14 @@
 > rows re-read against the file — the page is now a read-only list of recorded
 > returns (783 lines), not a "return flow"; returns are recorded from
 > `consignment/note.tsx` via `POST /api/consignment-notes/:id/return`.
+> **Restamped 2026-08-14 on branch `fix/money-input-parsing` (BUG-2026-08-13-095):** the two
+> DUPLICATE `src/pages/accounting/index.tsx` rows — which disagreed with each other AND with the
+> file (10627 / 11140 lines vs the real 11230) — collapsed into one accurate row, and the
+> money-ENTRY rule added to the Accounting and Procurement gotchas. **The big-file section index
+> for that page is NOT re-derived here**: it was already carrying its own warning that "line
+> numbers predate the file's growth — anchor by function name", and this change adds ~90 lines
+> spread through it, so anchor by function name, not by the ranges below. Nothing else in this
+> file was re-checked on that branch.
 > **Restamped 2026-08-13 on branch `fix/stock-grn-org-filter`:** the Accounting
 > multi-company bullet (its description of the company selector was the bug —
 > BUG-2026-08-13-051) and a new bullet on `MinimalPOOut`'s now-pinned key set
@@ -187,7 +195,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 - PO detail returns 412 with `requiresGrn` when a transition needs a GRN first (detail.tsx handles res.status===412 && data.requiresGrn) — receiving must go through GRN, not a direct PO status flip.
 - Supplier line autofill reads `supplier_material_bindings`; per-line supplier+price come from bindings, NOT a separate catalog. PI standalone intentionally excludes catalog autofill.
 - Supplier pricing is EFFECTIVE-DATED (2026-06-21, mig 0183): `supplier_material_bindings.effective_from` = the date the current price takes effect (replaces the old Valid From/Valid To window; SKU dialog now shows a single "Effective From", defaulting to today). The binding stays one-row-per-supplier+material (autofill consumers unchanged); a unit-price change UPDATEs the row's price+effective_from AND APPENDS an audit row to `price_histories` (which now also carries `effective_from`) — the trail is append-only, never overwritten. POST seeds an opening history row (oldPrice 0 = "first price"). `effective_from` is already in `column-rename-map.json`; legacy rows fall back to `price_valid_from`. The suppliers/detail.tsx "Price History" tab Price Change Log reads `/api/price-history` (Effective Date / Material / Old / New / Change% with ▲▼ / Changed By / Status; old = the previous effective row's price). Supplier Quotation PDF (`generate-supplier-quotation-pdf.ts`) now reuses the shared `drawLetterhead`/`drawSectionLabel`/`tableTheme`/`drawDocFooter` (mirrors customer quotation) with an "Effective From" column instead of "Valid To". Tests: `tests/supplier-effective-pricing.test.mjs`.
-- Money stored in sen integers (amountSen, unit_cost_sen); use MoneyInput / roundSen, never float RM.
+- Money stored in sen integers (amountSen, unit_cost_sen); use MoneyInput / roundSen, never float RM. Money **entered as text** is parsed only by `src/lib/money-field.ts` → `src/lib/parse-money.ts`; `parseFloat` on a money string truncates at the thousands separator (BUG-2026-08-13-095). FX RATES and QUANTITIES on these pages deliberately keep `parseFloat` — they are not money; `tests/money-input-parsing.test.mjs` holds the allow-list.
 - Migrations INERT unless self-applied at runtime via `ensurePendingMigrations` (ALTER ADD COLUMN IF NOT EXISTS) — a new procurement column reaches prod only that way.
 - camelCase write columns (receivedDate, receivedQty) need a `column-rename-map.json` entry or the route silently 400s; prefer snake_case. db-pg toCamel recovers true snake_case but not folded-lowercase camelCase.
 - ThreeWayMatchPanel (detail.tsx 1331+) joins PO↔GRN↔PI and is also a standalone route (three-way-match.ts); variance is derived, don't persist a second copy.
@@ -279,8 +287,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/accounting/index.tsx` — mega-page, ~25 tabs (10627) | `src/api/routes/accounting.ts` — the accounting engine (13134) | `chart_of_accounts` / `account_aliases` | `tests/cashflow-engine.test.mjs` · `tests/accounting-subledger-parity.test.mjs` |
-| `src/pages/accounting/index.tsx` — mega-page, ~25 tabs (11140) | `src/api/routes/accounting.ts` — the accounting engine (13054) | `chart_of_accounts` / `account_aliases` | `tests/cashflow-engine.test.mjs` · `tests/accounting-ui-truthfulness.test.mjs` |
+| `src/pages/accounting/index.tsx` — mega-page, ~25 tabs (11230) | `src/api/routes/accounting.ts` — the accounting engine (13054) | `chart_of_accounts` / `account_aliases` | `tests/cashflow-engine.test.mjs` · `tests/accounting-subledger-parity.test.mjs` · `tests/accounting-ui-truthfulness.test.mjs` · `tests/money-input-parsing.test.mjs` |
 | `src/pages/accounting/cash-flow.tsx` — standalone cash-flow | `src/api/routes/invoices.ts` — sales invoices (~2310) | `journal_entries` / `journal_lines` / `ledger_journal_entries` | `tests/other-party-payment.test.mjs` |
 | `src/pages/invoices/index.tsx` — sales invoice list | `src/api/routes/payments.ts` — customer receipts | `document_lifecycle` | `tests/supplier-payment-alloc.test.mjs` |
 | `src/pages/invoices/detail.tsx` — invoice editor (per-line discount) | `src/api/routes/supplier-payments.ts` — pay PIs (money-critical) | `invoices` / `invoice_items` / `invoice_payments` / `payment_records` | |
@@ -321,6 +328,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 **Gotchas**
 - `document_lifecycle` JOIN is load-bearing: list endpoints (PV, journals, etc.) must return lifecycleState or the FE shows wrong actions — voided docs showed void/delete instead of unvoid/delete (commit 8221d726, F3 hotfix). When adding a list query, JOIN document_lifecycle and surface lifecycleState.
 - Money stored as integer sen (amountSen / discount_sen). Never floats; rounding through shared roundSen / distributeRoundSen in `src/lib/utils.ts`.
+- **Money ENTRY has one parser: `parseMoneyInput` / `parseMoneyToSen` (`src/lib/parse-money.ts`), reached through `src/lib/money-field.ts` (`moneyFieldToSen` / `moneyFieldToRinggit` / `isUnreadableMoney` / `firstMoneyFieldError`).** This page has **119 money inputs and not one is `type="number"`** — they are all `type="text" inputMode="decimal"`, so a comma reaches the parser, and `parseFloat("12,000")` is `12` (BUG-2026-08-13-095: a fixed asset created at RM 12.00). The contract: a **blank** box is `0`, an **unreadable** box is `null` and the caller **REFUSES** — `moneyFieldToSen(x) ?? 0` in a payload is the same bug booking RM 0.00. Each form here has a single `…MoneyError` gate that toasts, returns, disables the post button, and makes the running Total render `"—"` rather than a figure computed with a 0 substituted in (the BUG-2026-08-13-094 rule: the displayed figure and the payload cannot come from different expressions). Guard: `tests/money-input-parsing.test.mjs` — it fails on any `parseFloat` returning to this file, on a missing refusal, and on an unbudgeted `?? 0`.
 - invoices uses camelCase DB columns; new write columns should be snake_case (e.g. discount_sen mig 0179) and need a `column-rename-map.json` entry or they 400 'Invalid request body'. CI-guarded by `tests/sql-write-column-coverage.test.mjs`.
 - Migrations INERT unless runtime-wired: new column reaches prod only via `ensurePendingMigrations` self-apply inside the route before the INSERT — see invoices.ts:980 ALTER for discount_sen.
 - cost_ledger is append-only: cost-ledger.ts and stock-value reads are derived; actual cost rows written side-effectually by GRN/production_orders/delivery_orders. Don't write cost_ledger from accounting routes.

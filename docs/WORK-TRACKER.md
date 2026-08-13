@@ -1,6 +1,7 @@
 # Hookka ERP — Work Tracker
 
 > **Last verified: 2026-08-14** — branch `fix/security-posture` added below (open, not merged). Previously: PRs #304/#310/#312/#313/#314/#315/#316/#317 all MERGED and
+> **Last verified: 2026-08-14** — restamped on branch `fix/money-input-parsing` (its entry is the newest below, not yet deployed). PRs #304/#310/#312/#313/#314/#315/#316/#317 all MERGED and
 > deployed; zero PRs open, one worktree. Previously verified against the merged PRs on `main` (#266-#300) plus the open PRs #304 (branch `fix/stock-grn-org-filter`) and the accounting-audit branch `fix/accounting-audit`, whose entry is the newest below. This file is a live queue — restamp it whenever you add or close an item.
 
 Durable, cross-session list of assigned / in-progress / shipped work so nothing is
@@ -42,6 +43,37 @@ other routers, out of scope, still open and still inert on a single-tenant prod.
 must send `pendingToken` back to `/login-verify`; `LoginResponse` in `src/pages/login.tsx`
 carries the field and a pointer, but the screen itself still does not exist
 (BUG-2026-08-04-006).
+## 2026-08-14 — 🔵 Apply the strict money parser everywhere it is a money field (branch `fix/money-input-parsing`, **NOT deployed**)
+
+`src/lib/parse-money.ts` landed in `3c52fd56` and was used by nothing. This branch
+applies it. **BUG-2026-08-13-095**, new class **C19**.
+
+The measured trigger: `src/pages/accounting/index.tsx` has **119 money inputs and not
+one is `type="number"`**, so a comma reaches the parser and `parseFloat("12,000")` is
+`12` — a fixed asset entered as 12,000 was created at **RM 12.00** and depreciates off
+that figure. Six further hand-rolled money parsers existed across the front end; the
+worst wrote `null` on failure, which the R&D route reads as *"clear the target price"*.
+
+**Done**
+- 24 files converted (the accounting page's ten named sites, cash-flow, trade finance,
+  R&D ×3, forecast, invoices ×6, procurement ×4, purchase-returns, leads, inventory ×2,
+  customers, products, employees ×2, scan-po-modal, batch-import-dialog, money-input).
+- `src/lib/money-field.ts` — a thin adapter over the one parser holding the single
+  convention: **blank → 0, unreadable → `null`, and the caller REFUSES**. Every
+  converted submit path names the field, quotes the value, and returns before composing
+  a payload; running Totals render `"—"` rather than a figure with a 0 substituted in.
+- `tests/money-input-parsing.test.mjs` (45 assertions). Nine mutations run to prove it
+  goes red; **one assertion was blind on the first draft** and was fixed.
+- Quantities, percentages, hours, FX rates, dimensions and CSS pixels deliberately LEFT
+  on `parseFloat` — the test holds the allow-list by identifier so a money field cannot
+  quietly join them.
+
+**Gates:** `tsc -p tsconfig.app.json --noEmit` exit 0 · `npm test` green ·
+`check-docs-freshness` OK · `check-codebase-map` OK.
+
+**Not done:** no deploy, no prod verification — the main session owns that. Two ⬜ rows
+left open in C19: the server-side money reads, and `invoices/detail.tsx`'s price editor
+(`Number()`-based, `type="number"`, latent).
 
 ---
 

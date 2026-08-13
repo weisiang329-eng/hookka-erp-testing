@@ -24,6 +24,7 @@ import {
   X,
 } from "lucide-react";
 import type { MonthlyStockValue, StockAccount } from "@/types";
+import { moneyFieldToSen } from "@/lib/money-field";
 
 // =============== TYPES ===============
 
@@ -239,12 +240,16 @@ function EntryTab({
       if (trimmed === "") {
         value = null;
       } else {
-        const parsed = parseFloat(trimmed);
-        if (isNaN(parsed)) {
-          toast.error(`"${sv.accountDescription}": enter a valid number.`);
+        // BUG-2026-08-13-095 - one parser. The input is `type="number"` so a
+        // comma never reached `parseFloat` here, but a physical stock count of
+        // "1,250,000" pasted from a spreadsheet into a text field would have
+        // been valued at RM 1.00. The refusal below already existed and is kept.
+        const parsed = moneyFieldToSen(trimmed);
+        if (parsed === null) {
+          toast.error(`"${sv.accountDescription}": enter a valid amount.`);
           return;
         }
-        value = Math.round(parsed * 100);
+        value = parsed;
       }
       if (value !== sv.physicalCountValue) changes.push({ sv, value });
     }

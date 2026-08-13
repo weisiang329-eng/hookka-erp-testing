@@ -16,6 +16,10 @@ import { MoneyInput } from "@/components/ui/money-input";
 import { useVirtualRows } from "@/components/ui/virtual-rows";
 import { DeferredBlock } from "@/components/ui/deferred-block";
 import { formatCurrency, formatDateDMY, formatRM, roundSen, todayYmdMY } from "@/lib/utils";
+// Every money field on this page is `type="text" inputMode="decimal"` — the
+// browser lets a comma through, and `parseFloat("12,000")` is 12. One parser,
+// and a null the caller must refuse. See src/lib/parse-money.ts.
+import { moneyFieldToSen, firstMoneyFieldError, isUnreadableMoney } from "@/lib/money-field";
 import { exportReportCsv, exportReportXlsx, exportReportPdf, type Aoa, type PdfExportOpts } from "@/lib/export-report";
 import { buildAgingExportAoa, agingRowKind } from "@/lib/aging-export";
 import { isCleanImportShape, detectRawShape, parseRawStockTakeRows, impliedYmFromFilename, type ParsedRawItem } from "@/lib/stock-take-import";
@@ -865,13 +869,15 @@ function LandedCostCard() {
     grnId: string; grnNumber: string; eligible: boolean;
     batches: { id: string; itemCode: string | null; name: string | null; originalQty: number; remainingQty: number; unitCostSen: number; valueSen: number; allocSen: number; newUnitCostSen: number }[];
   } | null>(null);
-  const toSen = (s: string) => {
-    const v = parseFloat(s);
-    return Number.isFinite(v) ? Math.round(v * 100) : 0;
-  };
-  const amountSen = toSen(amount);
+  // BUG-2026-08-13-095 — this input is `type="text"`, so "12,000" reaches the
+  // parser intact. `parseFloat` read that as 12 and spread RM 12.00 of freight
+  // over the batch costs without a word. `moneyFieldToSen` returns null instead
+  // of a guess; the handlers below refuse rather than post it.
+  const amountSen = moneyFieldToSen(amount);
+  const amountUnreadable = amountSen === null;
 
   const handlePreview = async () => {
+    if (amountSen === null) { toast.error(firstMoneyFieldError([{ label: "Charges (RM)", value: amount }])!); return; }
     setPreview(null);
     const p = new URLSearchParams({ grn: grn.trim() });
     if (amountSen > 0) p.set("amountSen", String(amountSen));
@@ -882,6 +888,7 @@ function LandedCostCard() {
   };
 
   const handleAllocate = async () => {
+    if (amountSen === null) { toast.error(firstMoneyFieldError([{ label: "Charges (RM)", value: amount }])!); return; }
     setBusy(true);
     try {
       const res = await fetch("/api/accounting/landed-cost", {
@@ -914,14 +921,15 @@ function LandedCostCard() {
           </div>
           <div>
             <label className="text-xs font-medium text-[#6B7280] mb-1 block">Charges (RM)</label>
-            <input type="text" value={amount} onChange={(e) => { setAmount(e.target.value); setPreview(null); }} className={`${inCls} w-28 text-right tabular-nums`} />
+            <input type="text" value={amount} onChange={(e) => { setAmount(e.target.value); setPreview(null); }} className={`${inCls} w-28 text-right tabular-nums ${amountUnreadable ? "border-[#9A3A2D]" : ""}`} />
+            {amountUnreadable && <p className="text-[11px] text-[#9A3A2D] mt-1">Not a valid amount</p>}
           </div>
           <div>
             <label className="text-xs font-medium text-[#6B7280] mb-1 block">Ref (forwarder PI no, optional)</label>
             <input type="text" value={ref} onChange={(e) => setRef(e.target.value)} className={`${inCls} w-40`} />
           </div>
-          <Button variant="outline" size="sm" disabled={!grn.trim() || amountSen <= 0} onClick={handlePreview}>Preview</Button>
-          {preview && preview.eligible && (
+          <Button variant="outline" size="sm" disabled={!grn.trim() || !(amountSen !== null && amountSen > 0)} onClick={handlePreview}>Preview</Button>
+          {preview && preview.eligible && amountSen !== null && (
             <Button variant="primary" size="sm" disabled={busy} onClick={handleAllocate}>
               {busy ? "Allocating…" : `Allocate ${formatCurrency(amountSen)}`}
             </Button>
@@ -1635,9 +1643,19 @@ function StockTakeTab() {
       toast.error(`${rawNeedsMapping.length} imported item${rawNeedsMapping.length === 1 ? "" : "s"} still need${rawNeedsMapping.length === 1 ? "s" : ""} a group below before you can Save.`);
       return;
     }
+    // BUG-2026-08-13-095 — a closing-stock value typed "1,234,567" used to be
+    // saved as RM 1.00. Refuse the whole save and name the group, rather than
+    // valuing the stock at a number nobody typed.
+    const badGroup = allRowGroups
+      .filter((g) => valueFor(g).trim() !== "")
+      .find((g) => isUnreadableMoney(valueFor(g)));
+    if (badGroup !== undefined) {
+      toast.error(firstMoneyFieldError([{ label: badGroup, value: valueFor(badGroup) }])!);
+      return;
+    }
     const rows = allRowGroups
       .filter((g) => valueFor(g).trim() !== "")
-      .map((g) => ({ itemGroup: g, valueSen: Math.round((parseFloat(valueFor(g)) || 0) * 100) }));
+      .map((g) => ({ itemGroup: g, valueSen: moneyFieldToSen(valueFor(g)) as number }));
     // Every resolution from the last raw import (fetched-known + newly picked)
     // round-trips back so next month's import of the SAME items is automatic.
     // Re-upserting an already-known pair is a harmless no-op (idempotent).
@@ -5987,7 +6005,13 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
   useEffect(load, [side]);
 
   const sideParties = parties.filter((p) => p.type === side && p.isActive);
-  const toSen = (s: string) => Math.round((parseFloat(s) || 0) * 100);
+  // BUG-2026-08-13-095 — every amount here is `type="text" inputMode="decimal"`,
+  // so "1,200" arrives whole and `parseFloat` booked it as RM 1.00. `toSen` now
+  // delegates to the one money parser; a value it cannot read is never posted
+  // (`submit` refuses) and never stated as a figure (the Total shows "—"), so
+  // the `?? 0` below can only ever be reached by a field the operator is still
+  // being told to fix.
+  const toSen = (s: string) => moneyFieldToSen(s) ?? 0;
 
   const updateLine = (idx: number, field: keyof BillLineDraft, value: string) =>
     setForm((f) => ({ ...f, lines: f.lines.map((l, i) => (i === idx ? { ...l, [field]: value } : l)) }));
@@ -6011,8 +6035,15 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
   // A line the operator has filled in but that will NOT post — surfaced next
   // to the total rather than quietly discarded.
   const droppedBillLines = form.lines.filter((l) => !billLineWillPost(l) && toSen(l.amountStr) > 0).length;
+  // The one gate: any unreadable amount makes the Total unstatable and the
+  // Save button inert, so a truncated figure cannot reach the ledger.
+  const billMoneyError = firstMoneyFieldError([
+    ...form.lines.map((l, i) => ({ label: `Line ${i + 1} amount`, value: l.amountStr })),
+    { label: "Tax / SST", value: form.taxStr },
+  ]);
 
   const submit = async () => {
+    if (billMoneyError) { toast.error(billMoneyError); return; }
     if (!editingBillNo && !form.partyId) { toast.error("Select a party"); return; }
     const items = postableBillLines
       .map((l) => ({ counterAccount: l.counterAccount, amountSen: toSen(l.amountStr), description: l.description }));
@@ -6353,8 +6384,9 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
             </div>
             <div className="text-right">
               <p className="text-xs text-[#6B7280]">Total</p>
-              <p className="text-lg font-bold text-[#3E6570] tabular-nums">{formatCurrency(totalSen)}</p>
-              {droppedBillLines > 0 && (
+              <p className="text-lg font-bold text-[#3E6570] tabular-nums">{billMoneyError ? "—" : formatCurrency(totalSen)}</p>
+              {billMoneyError && <p className="text-[11px] text-[#9A3A2D]">{billMoneyError}</p>}
+              {!billMoneyError && droppedBillLines > 0 && (
                 <p className="text-[11px] text-[#9A3A2D]">
                   {droppedBillLines} line{droppedBillLines === 1 ? "" : "s"} with an amount but no account — not counted, and will not be saved.
                 </p>
@@ -6362,7 +6394,7 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
             </div>
           </div>
           <div className="flex gap-2">
-            <Button variant="primary" size="sm" onClick={submit}>{editingBillNo ? "Save Changes (re-post)" : "Save & Post"}</Button>
+            <Button variant="primary" size="sm" disabled={!!billMoneyError} onClick={submit}>{editingBillNo ? "Save Changes (re-post)" : "Save & Post"}</Button>
             <Button variant="outline" size="sm" onClick={() => { setShowForm(false); setEditingBillNo(null); }}>Cancel</Button>
           </div>
         </CardContent></Card>
@@ -6544,14 +6576,23 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
       .catch(() => {});
   };
 
-  const toSen = (s: string) => Math.round((parseFloat(s) || 0) * 100);
+  // BUG-2026-08-13-095 — a settlement typed "1,500" was allocated as RM 1.00
+  // against the bill and the payment posted for that. One parser; unreadable is
+  // refused at save and never stated as a Total.
+  const toSen = (s: string) => moneyFieldToSen(s) ?? 0;
   const getRow = (id: string) => rows[id] ?? { amountStr: "", full: false };
   const setRow = (id: string, patch: Partial<{ amountStr: string; full: boolean }>) =>
     setRows((r) => ({ ...r, [id]: { ...getRow(id), ...patch } }));
   const allocSen = (b: OpenBill) => { const row = getRow(b.id); return row.full ? b.outstandingSen : toSen(row.amountStr); };
   const totalSen = openBills.reduce((s, b) => s + allocSen(b), 0);
+  const allocMoneyError = firstMoneyFieldError(
+    openBills
+      .filter((b) => !getRow(b.id).full)
+      .map((b) => ({ label: `${b.billNo} amount`, value: getRow(b.id).amountStr })),
+  );
 
   const handleSave = async () => {
+    if (allocMoneyError) { toast.error(allocMoneyError); return; }
     if (!partyId) { toast.error("Select a party"); return; }
     if (!bankAccount) { toast.error("Select a bank/cash account"); return; }
     const allocations = openBills
@@ -6624,7 +6665,7 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
         <h3 className="text-sm font-semibold text-[#3E6570]">{editingNo ? `Edit ${verb.toLowerCase()}` : side === "CREDITOR" ? "Payments" : "Receipts"}</h3>
         <div className="flex items-center gap-2">
           {editingNo && <Button variant="outline" size="sm" onClick={cancelEdit}>Cancel</Button>}
-          <Button variant="primary" size="sm" disabled={posting || !partyId || !bankAccount || totalSen <= 0} onClick={handleSave}>
+          <Button variant="primary" size="sm" disabled={posting || !partyId || !bankAccount || totalSen <= 0 || !!allocMoneyError} onClick={handleSave}>
             {editingNo ? `Update ${verb.toLowerCase()}` : `Post ${verb.toLowerCase()}`}
           </Button>
         </div>
@@ -6659,8 +6700,9 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
 
         {partyId && openBills.length > 0 && (
           <div className="flex items-center justify-end gap-3 rounded-md border border-[#E2DDD8] bg-[#FAF8F5] px-3 py-2">
+            {allocMoneyError && <span className="text-[11px] text-[#9A3A2D] mr-auto">{allocMoneyError}</span>}
             <span className="text-xs font-medium text-[#6B7280]">Total (RM)</span>
-            <span className="text-lg font-bold text-[#3E6570] tabular-nums">{formatCurrency(totalSen)}</span>
+            <span className="text-lg font-bold text-[#3E6570] tabular-nums">{allocMoneyError ? "—" : formatCurrency(totalSen)}</span>
           </div>
         )}
 
@@ -6684,7 +6726,7 @@ function OtherPartyPaymentsManager({ parties, accounts, side }: { parties: Other
                       <input type="text" inputMode="decimal" disabled={row.full}
                         value={row.full ? (b.outstandingSen / 100).toFixed(2) : row.amountStr}
                         onChange={(e) => setRow(b.id, { amountStr: e.target.value })}
-                        className="w-28 rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm text-right tabular-nums disabled:bg-[#F0ECE9]" />
+                        className={`w-28 rounded-md border px-2 py-1.5 text-sm text-right tabular-nums disabled:bg-[#F0ECE9] ${!row.full && isUnreadableMoney(row.amountStr) ? "border-[#9A3A2D]" : "border-[#E2DDD8]"}`} />
                     </td>
                     <td className="py-1 text-center">
                       <input type="checkbox" checked={row.full} onChange={(e) => setRow(b.id, { full: e.target.checked })} />
@@ -7742,10 +7784,10 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
   }, []);
   useEffect(() => { load(); }, [load]);
 
-  const toSen = (s: string) => {
-    const v = parseFloat(s);
-    return Number.isFinite(v) ? Math.round(v * 100) : 0;
-  };
+  // BUG-2026-08-13-095 — the amount cell is `type="text"`; `parseFloat("1,200")`
+  // is 1, so a voucher line typed 1,200 posted RM 1.00 against the expense
+  // account. One parser now, and an amount it cannot read stops the post.
+  const toSen = (s: string) => moneyFieldToSen(s) ?? 0;
   // BUG-2026-08-13-094 (payment-voucher instance — see the bill form above and
   // the receipt form below for the other two). The header Total reduced over
   // EVERY line while the POST body filtered to lines carrying an account, and
@@ -7759,6 +7801,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
   const postableLines = lines.filter(pvLineWillPost);
   const totalSen = postableLines.reduce((s, l) => s + toSen(l.amount), 0);
   const droppedLines = lines.filter((l) => !pvLineWillPost(l) && toSen(l.amount) > 0).length;
+  const pvMoneyError = firstMoneyFieldError(lines.map((l, i) => ({ label: `Line ${i + 1} amount`, value: l.amount })));
 
   const statusOf = (r: PvRow) => r.status === "VOID" ? "VOID" : (r.accrued === 1 && !r.settledAt ? "UNPAID" : "PAID");
   const visibleRows = (rows ?? []).filter((r) => {
@@ -7775,6 +7818,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
   const [editingId, setEditingId] = useState<string | null>(null);
 
   const handleSave = async () => {
+    if (pvMoneyError) { toast.error(pvMoneyError); return; }
     const body = {
       date: form.date,
       payee: form.payee,
@@ -7983,7 +8027,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                       <AccountPicker accounts={lineAccounts} value={l.accountCode} onChange={(code) => setLines(lines.map((x, j) => (j === i ? { ...x, accountCode: code } : x)))} placeholder="Account…" />
                     </div>
                     <input type="text" placeholder="Line description" value={l.description} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, description: e.target.value } : x)))} className="border-0 bg-transparent px-2.5 py-1.5 text-sm w-full focus:outline-none" />
-                    <input type="text" placeholder="0.00" value={l.amount} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, amount: e.target.value } : x)))} className="border-0 bg-transparent px-2.5 py-1.5 text-sm w-full text-right tabular-nums focus:outline-none" />
+                    <input type="text" placeholder="0.00" value={l.amount} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, amount: e.target.value } : x)))} className={`border-0 bg-transparent px-2.5 py-1.5 text-sm w-full text-right tabular-nums focus:outline-none ${isUnreadableMoney(l.amount) ? "text-[#9A3A2D] underline decoration-wavy" : ""}`} />
                     <button onClick={() => setLines(lines.length > 1 ? lines.filter((_, j) => j !== i) : lines)} title="Remove line" className="text-[#B4B2A9] hover:text-[#9A3A2D] text-sm">✕</button>
                   </div>
                 ))}
@@ -7995,7 +8039,8 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                   </Button>
                   <span className="text-[11px] text-[#B4B2A9]">press <span className="font-medium text-[#6B7280]">Insert</span> to add a line below</span>
                 </div>
-                <span className="text-sm text-[#6B7280]">Total <span className="text-lg font-semibold text-[#1F1D1B] tabular-nums">{formatCurrency(totalSen)}</span></span>
+                <span className="text-sm text-[#6B7280]">Total <span className="text-lg font-semibold text-[#1F1D1B] tabular-nums">{pvMoneyError ? "—" : formatCurrency(totalSen)}</span></span>
+                {pvMoneyError && <span className="text-[11px] text-[#9A3A2D]">{pvMoneyError}</span>}
                 {droppedLines > 0 && (
                   <span className="text-[11px] text-[#9A3A2D]">{droppedLines} line{droppedLines === 1 ? "" : "s"} with an amount but no account — not counted, and will not be posted.</span>
                 )}
@@ -8003,7 +8048,7 @@ function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
             </div>
 
             <div className="flex gap-2 pt-3 border-t border-[#F0ECE9]">
-              <Button variant="primary" size="sm" disabled={saving || totalSen <= 0 || (form.accrued ? !form.accrualAccount : !(form.payFrom || defaultBankCode(bankCash)))} onClick={handleSave}>
+              <Button variant="primary" size="sm" disabled={saving || totalSen <= 0 || !!pvMoneyError || (form.accrued ? !form.accrualAccount : !(form.payFrom || defaultBankCode(bankCash)))} onClick={handleSave}>
                 {saving ? (editingId ? "Updating…" : "Posting…") : editingId ? "Update payment" : form.accrued ? "Post (accrued)" : "Post payment"}
               </Button>
               <Button variant="outline" size="sm" onClick={() => { setShowForm(false); setEditingId(null); }}>Cancel</Button>
@@ -8213,10 +8258,10 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
   }, []);
   useEffect(() => { load(); }, [load]);
 
-  const toSen = (s: string) => {
-    const v = parseFloat(s);
-    return Number.isFinite(v) ? Math.round(v * 100) : 0;
-  };
+  // BUG-2026-08-13-095 — byte-identical trap to the payment voucher above: a
+  // receipt line typed "1,200" was banked as RM 1.00. One parser; an amount it
+  // cannot read stops the post.
+  const toSen = (s: string) => moneyFieldToSen(s) ?? 0;
   // BUG-2026-08-13-094 (official-receipt instance — byte-identical logic to the
   // payment-voucher form above). One predicate for the displayed Total and the
   // posted lines, so "Total RM 1,000.00 · Post receipt" can never write RM 800.
@@ -8225,8 +8270,10 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
   const postableLines = lines.filter(orLineWillPost);
   const totalSen = postableLines.reduce((s, l) => s + toSen(l.amount), 0);
   const droppedLines = lines.filter((l) => !orLineWillPost(l) && toSen(l.amount) > 0).length;
+  const orMoneyError = firstMoneyFieldError(lines.map((l, i) => ({ label: `Line ${i + 1} amount`, value: l.amount })));
 
   const handleSave = async () => {
+    if (orMoneyError) { toast.error(orMoneyError); return; }
     const body = {
       date: form.date,
       receivedFrom: form.receivedFrom,
@@ -8340,7 +8387,7 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                       <AccountPicker accounts={lineAccounts} value={l.accountCode} onChange={(code) => setLines(lines.map((x, j) => (j === i ? { ...x, accountCode: code } : x)))} placeholder="Account…" />
                     </div>
                     <input type="text" placeholder="Line description" value={l.description} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, description: e.target.value } : x)))} className="border-0 bg-transparent px-2.5 py-1.5 text-sm w-full focus:outline-none" />
-                    <input type="text" placeholder="0.00" value={l.amount} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, amount: e.target.value } : x)))} className="border-0 bg-transparent px-2.5 py-1.5 text-sm w-full text-right tabular-nums focus:outline-none" />
+                    <input type="text" placeholder="0.00" value={l.amount} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, amount: e.target.value } : x)))} className={`border-0 bg-transparent px-2.5 py-1.5 text-sm w-full text-right tabular-nums focus:outline-none ${isUnreadableMoney(l.amount) ? "text-[#9A3A2D] underline decoration-wavy" : ""}`} />
                     <button onClick={() => setLines(lines.length > 1 ? lines.filter((_, j) => j !== i) : lines)} title="Remove line" className="text-[#B4B2A9] hover:text-[#9A3A2D] text-sm">✕</button>
                   </div>
                 ))}
@@ -8352,7 +8399,8 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                   </Button>
                   <span className="text-[11px] text-[#B4B2A9]">press <span className="font-medium text-[#6B7280]">Insert</span> to add a line below</span>
                 </div>
-                <span className="text-sm text-[#6B7280]">Total <span className="text-lg font-semibold text-[#1F1D1B] tabular-nums">{formatCurrency(totalSen)}</span></span>
+                <span className="text-sm text-[#6B7280]">Total <span className="text-lg font-semibold text-[#1F1D1B] tabular-nums">{orMoneyError ? "—" : formatCurrency(totalSen)}</span></span>
+                {orMoneyError && <span className="text-[11px] text-[#9A3A2D]">{orMoneyError}</span>}
                 {droppedLines > 0 && (
                   <span className="text-[11px] text-[#9A3A2D]">{droppedLines} line{droppedLines === 1 ? "" : "s"} with an amount but no account — not counted, and will not be posted.</span>
                 )}
@@ -8360,7 +8408,7 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
             </div>
 
             <div className="flex gap-2 pt-3 border-t border-[#F0ECE9]">
-              <Button variant="primary" size="sm" disabled={saving || totalSen <= 0 || !(form.payTo || defaultBankCode(bankCash))} onClick={handleSave}>
+              <Button variant="primary" size="sm" disabled={saving || totalSen <= 0 || !!orMoneyError || !(form.payTo || defaultBankCode(bankCash))} onClick={handleSave}>
                 {saving ? "Posting…" : "Post receipt"}
               </Button>
               <Button variant="outline" size="sm" onClick={() => setShowForm(false)}>Cancel</Button>
@@ -8494,8 +8542,13 @@ function FundTransferTab({ accounts }: { accounts: ChartOfAccount[] }) {
   useEffect(() => { load(); }, [load]);
 
   const handleSubmit = async () => {
-    const amount = parseFloat(amountStr);
-    if (!from || !to || from === to || !(amount > 0)) {
+    // BUG-2026-08-13-095 — `amountStr` comes from a `type="text"` input, so a
+    // transfer typed "50,000" reached `parseFloat` whole and moved RM 50.00
+    // between the two bank accounts. Unreadable now refuses instead of guessing.
+    const ftMoneyError = firstMoneyFieldError([{ label: "Amount (RM)", value: amountStr }]);
+    if (ftMoneyError) { toast.error(ftMoneyError); return; }
+    const amountSen = moneyFieldToSen(amountStr) as number;
+    if (!from || !to || from === to || !(amountSen > 0)) {
       toast.error(!from || !to ? "Select both From and To accounts" : from === to ? "From and To must be different accounts" : "Enter a positive amount");
       return;
     }
@@ -8507,7 +8560,7 @@ function FundTransferTab({ accounts }: { accounts: ChartOfAccount[] }) {
         body: JSON.stringify({
           fromAccount: from,
           toAccount: to,
-          amountSen: Math.round(amount * 100),
+          amountSen,
           date,
           reference,
         }),
@@ -9247,12 +9300,20 @@ function FixedAssetsTab({ accounts }: { accounts: ChartOfAccount[] }) {
   }, []);
   useEffect(() => { load(); }, [load]);
 
-  const toSen = (s: string) => {
-    const v = parseFloat(s);
-    return Number.isFinite(v) ? Math.round(v * 100) : 0;
-  };
+  // BUG-2026-08-13-095 — THE reported instance. Cost / residual / opening
+  // accumulated are `type="text"` inputs; an asset entered as "12,000" was
+  // created at RM 12.00 by `parseFloat` and has depreciated off that figure ever
+  // since. Nothing downstream can detect it, because RM 12.00 is a perfectly
+  // valid cost. The parser now returns null and `handleAdd` refuses.
+  const toSen = (s: string) => moneyFieldToSen(s) ?? 0;
+  const faMoneyError = firstMoneyFieldError([
+    { label: "Cost (RM)", value: form.cost },
+    { label: "Residual (RM)", value: form.residual },
+    { label: "Opening accumulated depreciation (RM)", value: form.openingAccum },
+  ]);
 
   const handleAdd = async () => {
+    if (faMoneyError) { toast.error(faMoneyError); return; }
     setSaving(true);
     try {
       const res = await fetch("/api/accounting/fixed-assets", {
@@ -9358,11 +9419,11 @@ function FixedAssetsTab({ accounts }: { accounts: ChartOfAccount[] }) {
               </div>
               <div>
                 <label className="text-xs font-medium text-[#6B7280] mb-1 block">Cost (RM)</label>
-                <input type="text" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} className={`${selCls} w-28 text-right tabular-nums`} />
+                <input type="text" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} className={`${selCls} w-28 text-right tabular-nums ${isUnreadableMoney(form.cost) ? "border-[#9A3A2D]" : ""}`} />
               </div>
               <div>
                 <label className="text-xs font-medium text-[#6B7280] mb-1 block">Residual (RM)</label>
-                <input type="text" placeholder="0" value={form.residual} onChange={(e) => setForm({ ...form, residual: e.target.value })} className={`${selCls} w-24 text-right tabular-nums`} />
+                <input type="text" placeholder="0" value={form.residual} onChange={(e) => setForm({ ...form, residual: e.target.value })} className={`${selCls} w-24 text-right tabular-nums ${isUnreadableMoney(form.residual) ? "border-[#9A3A2D]" : ""}`} />
               </div>
               <div>
                 <label className="text-xs font-medium text-[#6B7280] mb-1 block">Life (months)</label>
@@ -9370,7 +9431,7 @@ function FixedAssetsTab({ accounts }: { accounts: ChartOfAccount[] }) {
               </div>
               <div>
                 <label className="text-xs font-medium text-[#6B7280] mb-1 block">Accum. depn b/f (RM)</label>
-                <input type="text" placeholder="0" value={form.openingAccum} onChange={(e) => setForm({ ...form, openingAccum: e.target.value })} className={`${selCls} w-28 text-right tabular-nums`} title="Depreciation already taken before the opening date" />
+                <input type="text" placeholder="0" value={form.openingAccum} onChange={(e) => setForm({ ...form, openingAccum: e.target.value })} className={`${selCls} w-28 text-right tabular-nums ${isUnreadableMoney(form.openingAccum) ? "border-[#9A3A2D]" : ""}`} title="Depreciation already taken before the opening date" />
               </div>
             </div>
             <div className="flex flex-wrap items-end gap-3">
@@ -9386,7 +9447,8 @@ function FixedAssetsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                 <label className="text-xs font-medium text-[#6B7280] mb-1 block">Depreciation expense account</label>
                 <AccountPicker accounts={expAccounts} value={form.expenseAccount} onChange={(code) => setForm({ ...form, expenseAccount: code })} placeholder="780-0080 / 780-0090 / 900-D001…" />
               </div>
-              <Button variant="primary" size="sm" disabled={saving} onClick={handleAdd}>{saving ? "Saving…" : "Save asset"}</Button>
+              <Button variant="primary" size="sm" disabled={saving || !!faMoneyError} onClick={handleAdd}>{saving ? "Saving…" : "Save asset"}</Button>
+              {faMoneyError && <span className="text-[11px] text-[#9A3A2D] self-center">{faMoneyError}</span>}
               <Button variant="outline" size="sm" onClick={() => setShowForm(false)}>Cancel</Button>
             </div>
           </CardContent>
@@ -9558,19 +9620,25 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
     const mm = map.fmt === "DD/MM/YYYY" ? b : a;
     return `${y}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
   };
-  const parseAmt = (s: string): number => {
-    let v = s.replace(/[RM,\s]/gi, "").trim();
-    let neg = false;
-    if (/^\(.*\)$/.test(v)) { neg = true; v = v.slice(1, -1); }
-    const n = parseFloat(v);
-    if (!Number.isFinite(n)) return 0;
-    return Math.round(n * 100) * (neg ? -1 : 1);
-  };
+  // BUG-2026-08-13-095 — this importer carried the FIFTH hand-rolled money
+  // parser in the repo (`replace(/[RM,\s]/gi, "")` then `parseFloat`). It now
+  // delegates to the one parser, with two deliberate carry-overs:
+  //  • a trailing DR/CR marker is stripped explicitly. The old regex ate the "R"
+  //    by accident and `parseFloat` stopped at the "C", so statements written
+  //    "1,200.00 CR" DID import; removing that silently would drop those rows.
+  //  • an unreadable cell still yields 0 and the row is still skipped — but the
+  //    skip is now COUNTED and shown to the operator instead of being invisible.
+  const parseAmt = (s: string): number =>
+    moneyFieldToSen(s.trim().replace(/\s*(?:DR|CR)\s*$/i, "")) ?? 0;
+  const isUnreadableAmtCell = (s: string): boolean =>
+    isUnreadableMoney(s.trim().replace(/\s*(?:DR|CR)\s*$/i, ""));
 
-  const parsedRows = (() => {
-    if (!csv.trim()) return [];
+  const { rows: parsedRows, unreadable: unreadableAmtRows } = (() => {
+    const empty = { rows: [] as { date: string; description: string; amountSen: number }[], unreadable: 0 };
+    if (!csv.trim()) return empty;
     const rawLines = csv.trim().split(/\r?\n/);
     const rows: { date: string; description: string; amountSen: number }[] = [];
+    let unreadable = 0;
     const di = parseInt(map.date, 10) - 1;
     const ci = parseInt(map.desc, 10) - 1;
     const oi = parseInt(map.out, 10) - 1;
@@ -9581,8 +9649,10 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
       if (!date) continue;
       let amountSen = 0;
       if (oi === ii) {
+        if (isUnreadableAmtCell(cells[ii] ?? "")) unreadable++;
         amountSen = parseAmt(cells[ii] ?? "");
       } else {
+        if (isUnreadableAmtCell(cells[oi] ?? "") || isUnreadableAmtCell(cells[ii] ?? "")) unreadable++;
         const outAmt = Math.abs(parseAmt(cells[oi] ?? ""));
         const inAmt = Math.abs(parseAmt(cells[ii] ?? ""));
         amountSen = inAmt - outAmt;
@@ -9590,7 +9660,7 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
       if (amountSen === 0) continue;
       rows.push({ date, description: (cells[ci] ?? "").trim(), amountSen });
     }
-    return rows;
+    return { rows, unreadable };
   })();
 
   const handleImport = async () => {
@@ -9742,7 +9812,14 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
                 <input type="checkbox" checked={map.header} onChange={(e) => setMap({ ...map, header: e.target.checked })} className="h-4 w-4 accent-[#6B5C32]" />
                 First row is a header
               </label>
-              <span className="text-sm text-[#6B7280] pb-2">{parsedRows.length} rows parsed · net {formatCurrency(parsedRows.reduce((s, r) => s + r.amountSen, 0))}</span>
+              <span className="text-sm text-[#6B7280] pb-2">
+                {parsedRows.length} rows parsed · net {formatCurrency(parsedRows.reduce((s, r) => s + r.amountSen, 0))}
+                {unreadableAmtRows > 0 && (
+                  <span className="block text-[11px] text-[#9A3A2D]">
+                    {unreadableAmtRows} dated row{unreadableAmtRows === 1 ? "" : "s"} had an amount this parser could not read and {unreadableAmtRows === 1 ? "was" : "were"} skipped — check the column mapping before importing.
+                  </span>
+                )}
+              </span>
               <Button variant="primary" size="sm" disabled={busy || parsedRows.length === 0} onClick={handleImport}>Import {parsedRows.length} lines</Button>
             </div>
           </CardContent>
@@ -9927,10 +10004,11 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const toSen = (s: string): number => {
-    const v = parseFloat(s);
-    return Number.isFinite(v) ? Math.round(v * 100) : 0;
-  };
+  // BUG-2026-08-13-095 — the opening trial balance. Every Dr/Cr cell is
+  // `type="text"`, so an opening bank balance typed "1,250,000" was posted as
+  // RM 1.00 and every report since would have been built on it. One parser; a
+  // cell it cannot read blocks the post and is named.
+  const toSen = (s: string): number => moneyFieldToSen(s) ?? 0;
 
   // Mid-year opening: ALL postable accounts (balance sheet AND P&L) — the
   // opening date sits inside the financial year, so the old books' YTD
@@ -9944,6 +10022,12 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
     )
     .sort((a, b) => a.code.localeCompare(b.code));
 
+  const openingMoneyError = firstMoneyFieldError(
+    glAccounts.flatMap((a) => [
+      { label: `${a.code} debit`, value: amounts[a.code]?.dr ?? "" },
+      { label: `${a.code} credit`, value: amounts[a.code]?.cr ?? "" },
+    ]),
+  );
   const userDr = glAccounts.reduce((s, a) => s + toSen(amounts[a.code]?.dr ?? ""), 0);
   const userCr = glAccounts.reduce((s, a) => s + toSen(amounts[a.code]?.cr ?? ""), 0);
 
@@ -10026,6 +10110,7 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
   };
 
   const handlePost = async () => {
+    if (openingMoneyError) { toast.error(openingMoneyError); return; }
     if (!openingDate) {
       toast.error("Set the opening date first");
       return;
@@ -10056,6 +10141,8 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
   };
 
   const handleAddAr = async () => {
+    const arErr = firstMoneyFieldError([{ label: "Amount (RM)", value: arForm.amount }]);
+    if (arErr) { toast.error(arErr); return; }
     const amountSen = toSen(arForm.amount);
     if (!arForm.customerId || !arForm.invoiceNo.trim() || !arForm.invoiceDate || amountSen <= 0) {
       toast.error("Customer, invoice no, date and a positive amount are required");
@@ -10079,6 +10166,8 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
   };
 
   const handleAddAp = async () => {
+    const apErr = firstMoneyFieldError([{ label: "Amount (RM)", value: apForm.amount }]);
+    if (apErr) { toast.error(apErr); return; }
     const amountSen = toSen(apForm.amount);
     if (!apForm.supplierId || !apForm.piNo.trim() || !apForm.invoiceDate || amountSen <= 0) {
       toast.error("Supplier, PI no, date and a positive amount are required");
@@ -10187,9 +10276,10 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
               {diff === 0 ? "Balanced ✓" : `Difference ${formatCurrency(Math.abs(diff))} ${diff > 0 ? "DR" : "CR"}`}
             </span>
           </div>
-          <Button variant="primary" size="sm" disabled={posting || diff !== 0 || !openingDate} onClick={handlePost}>
+          <Button variant="primary" size="sm" disabled={posting || diff !== 0 || !openingDate || !!openingMoneyError} onClick={handlePost}>
             {posting ? "Posting…" : data?.posted ? "Re-post opening balance" : "Post opening balance"}
           </Button>
+          {openingMoneyError && <span className="text-xs text-[#9A3A2D]">{openingMoneyError}</span>}
           {data?.posted && (
             <span className="text-xs text-[#6B7280]">
               Already posted{data.openingDate ? ` as at ${data.openingDate}` : ""} — re-posting reverses the
@@ -10520,7 +10610,7 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
                       value={amounts[it.code]?.dr ?? ""}
                       onChange={(e) => setAmounts({ ...amounts, [it.code]: { dr: e.target.value, cr: "" } })}
                       placeholder=""
-                      className={inputCls}
+                      className={`${inputCls} ${isUnreadableMoney(amounts[it.code]?.dr ?? "") ? "border-[#9A3A2D] text-[#9A3A2D]" : ""}`}
                     />
                   </td>
                   <td className="px-3 py-1">
@@ -10529,7 +10619,7 @@ function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]
                       value={amounts[it.code]?.cr ?? ""}
                       onChange={(e) => setAmounts({ ...amounts, [it.code]: { dr: "", cr: e.target.value } })}
                       placeholder=""
-                      className={inputCls}
+                      className={`${inputCls} ${isUnreadableMoney(amounts[it.code]?.cr ?? "") ? "border-[#9A3A2D] text-[#9A3A2D]" : ""}`}
                     />
                   </td>
                 </tr>

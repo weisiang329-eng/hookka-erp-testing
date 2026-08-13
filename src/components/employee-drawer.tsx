@@ -29,6 +29,9 @@ import {
   DepartmentMultiSelect,
   type DepartmentOption,
 } from "@/components/department-multi-select";
+// One money parser. NOTE: hours/day, OT multiplier and efficiency threshold %
+// below are NOT money and deliberately keep `parseFloat`.
+import { moneyFieldToSen } from "@/lib/money-field";
 
 /** Only what the drawer touches — the page owns the full Worker type. */
 export type EmployeeDraft = {
@@ -335,7 +338,7 @@ export function EmployeeDrawer({
                       type="number"
                       value={rm(draft.dailyRateSen)}
                       onChange={(e) =>
-                        set("dailyRateSen", Math.round((parseFloat(e.target.value) || 0) * 100))
+                        set("dailyRateSen", moneyFieldToSen(e.target.value) ?? draft.dailyRateSen)
                       }
                       className="mt-0.5 h-8 text-xs"
                     />
@@ -358,7 +361,7 @@ export function EmployeeDrawer({
                     type="number"
                     value={rm(draft.basicSalarySen)}
                     onChange={(e) =>
-                      set("basicSalarySen", Math.round((parseFloat(e.target.value) || 0) * 100))
+                      set("basicSalarySen", moneyFieldToSen(e.target.value) ?? draft.basicSalarySen)
                     }
                     className="mt-0.5 h-8 text-xs"
                   />
@@ -403,7 +406,7 @@ export function EmployeeDrawer({
                 onChange={(e) =>
                   set(
                     "efficiencyAllowanceSen",
-                    Math.round((parseFloat(e.target.value) || 0) * 100),
+                    moneyFieldToSen(e.target.value) ?? draft.efficiencyAllowanceSen,
                   )
                 }
                 className="mt-0.5 h-8 text-xs"

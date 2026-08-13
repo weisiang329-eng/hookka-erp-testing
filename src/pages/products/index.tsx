@@ -70,6 +70,9 @@ import {
   type BedframeSize,
 } from "@/lib/fg-variants";
 import { optionPacksSeparately } from "@/lib/leg-packing";
+// One money parser. NOTE: Unit M3 and Fabric Usage on this page are NOT money
+// (cubic metres / metres) and deliberately keep `parseFloat`.
+import { moneyFieldToSen } from "@/lib/money-field";
 
 // ---------- Types matching mock-data ----------
 // Sofa fabric price tier — values mirror fabric_tracking.priceTier verbatim
@@ -4650,8 +4653,12 @@ export default function ProductsPage() {
                                   value={priceInput}
                                   onChange={(e) => setPriceInput(e.target.value)}
                                   onBlur={() => {
-                                    const val = Math.round(parseFloat(priceInput || "0") * 100);
+                                    // BUG-2026-08-13-095 - one money parser; an
+                                    // unreadable entry abandons the edit instead of
+                                    // writing NaN into the product's base price.
+                                    const val = moneyFieldToSen(priceInput);
                                     setEditingPrice(null);
+                                    if (val === null) return;
                                     // Local-only update — bulk Save batches every dirty
                                     // cell into one product_prices row at the picked
                                     // effective date.
@@ -4692,8 +4699,9 @@ export default function ProductsPage() {
                                   value={price1Input}
                                   onChange={(e) => setPrice1Input(e.target.value)}
                                   onBlur={() => {
-                                    const val = Math.round(parseFloat(price1Input || "0") * 100);
+                                    const val = moneyFieldToSen(price1Input);
                                     setEditingPrice1(null);
+                                    if (val === null) return;
                                     setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, price1Sen: val } : pr));
                                     recordDirty(p.id, { price1Sen: val });
                                   }}
@@ -4787,8 +4795,9 @@ export default function ProductsPage() {
                                       value={seatPriceInputs[h] ?? ""}
                                       onChange={(e) => setSeatPriceInputs((prev) => ({ ...prev, [h]: e.target.value }))}
                                       onBlur={() => {
-                                        const val = Math.round(parseFloat(seatPriceInputs[h] || "0") * 100);
+                                        const val = moneyFieldToSen(seatPriceInputs[h] ?? "");
                                         setEditingSeatPrices(null);
+                                        if (val === null) return;
                                         const hN = h.replace('"', '');
                                         let arr = p.seatHeightPrices || [];
                                         // Match by BOTH height and current tier so editing

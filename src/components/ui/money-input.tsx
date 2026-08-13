@@ -1,5 +1,6 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
+import { parseMoneyInput } from "@/lib/parse-money";
 
 export interface MoneyInputProps {
   /** The RM value in dollars (e.g. 25.5 for RM 25.50). Pass null/0 for empty. */
@@ -25,7 +26,8 @@ export interface MoneyInputProps {
  *
  * This is ONLY a UX layer — it does not own or transform the money math. The parent keeps its
  * exact state shape; MoneyInput's onChange hands back the same dollar-number shape a raw
- * `<input type="number">`'s `parseFloat(e.target.value)` would produce.
+ * `<input type="number">` would produce. Parsing goes through `parseMoneyInput`, the repo's
+ * single money parser (see the note on `commit` for why, given the input is `type="number"`).
  */
 const MoneyInput = React.forwardRef<HTMLInputElement, MoneyInputProps>(
   ({ value, onChange, disabled, placeholder, className, id, selectOnFocus = true }, ref) => {
@@ -38,18 +40,22 @@ const MoneyInput = React.forwardRef<HTMLInputElement, MoneyInputProps>(
     // While focused, show the user's raw draft. While blurred, show the formatted value.
     const displayValue = focused ? draft : formatted;
 
+    // BUG-2026-08-13-095 (defence in depth — NOT a live bug).
+    // This input renders `type="number"`, so the browser refuses a comma before
+    // the value ever reaches here: `parseFloat` could not have truncated
+    // "12,000" through THIS component, and no wrong figure was ever committed
+    // by it. The reason to convert anyway is that the parser and the input type
+    // are two separate lines that nothing binds together — the moment someone
+    // reuses this with a text input (which is what all 119 money fields on the
+    // accounting page are), the old `parseFloat` becomes the accounting page's
+    // bug. Committing `null` on unreadable input is unchanged behaviour.
     const commit = (raw: string) => {
       const trimmed = raw.trim();
       if (trimmed === "") {
         onChange(null);
         return;
       }
-      const parsed = parseFloat(trimmed);
-      if (Number.isFinite(parsed)) {
-        onChange(parsed);
-      } else {
-        onChange(null);
-      }
+      onChange(parseMoneyInput(trimmed));
     };
 
     return (

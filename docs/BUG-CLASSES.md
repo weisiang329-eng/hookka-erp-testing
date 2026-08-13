@@ -7,6 +7,15 @@
 > router; the `send-quote` recipient allow-list). Suite at that point: 3,908 tests / 0 fail.
 >
 > **Previously verified 2026-08-14** — classes C17 (a file the search tool refuses to read) and C18
+> **Last verified: 2026-08-14** — class **C19 (a typed money string read by `parseFloat`,
+> which stops at the thousands separator)** added on branch `fix/money-input-parsing`
+> (BUG-2026-08-13-095): 119 money inputs on the accounting page, not one `type="number"`,
+> and a fixed asset typed `12,000` created at RM 12.00. Enforced by
+> `tests/money-input-parsing.test.mjs`; every assertion proved RED by reintroducing the
+> bug, and one of them was BLIND on the first draft — the "the guard must `return`" check
+> searched a fixed 400-character window and passed with the `return` deleted.
+>
+> Classes C17 (a file the search tool refuses to read) and C18
 > (a per-party document and its all-party twin, only one maintained) added from the accounting
 > audit. Every one of the source/test paths this file cites
 > exists (checked mechanically against the tree), and `npm test` is green
@@ -1007,6 +1016,74 @@ parties in a single pass"* — which is true of the maths and false of the queri
 **The rule.** When you add a predicate to one subsidiary-ledger surface, open its twin in
 the same commit and diff the query — not the file. And when the two must agree on a
 FIGURE, pin the figure in a test for **both**, not the clause in one.
+
+---
+
+## C19 — a typed money string read by a parser that stops at the first character it dislikes
+
+**Shape.** A money field is `type="text"` (or a plain `<input>` with no type at all),
+its value goes to `parseFloat`, and `parseFloat` returns the digits BEFORE the
+separator with no error and no `NaN`. `parseFloat("12,000") === 12`. The document
+saves, the toast says success, and the figure on the ledger is three orders of
+magnitude out.
+
+**Why it keeps happening — and why it is worse than it looks.**
+
+1. **The browser was doing the protecting, and nobody wrote that down.** On a
+   `type="number"` input the comma never reaches the parser, so the identical line of
+   code is harmless there and fatal here. Nothing in the source connects the two —
+   the input type is in the JSX, the parser is in a handler fifty lines away.
+   Measured 2026-08-13: `src/pages/accounting/index.tsx` has **119 money inputs and
+   NOT ONE is `type="number"`**.
+2. **The wrong value is PLAUSIBLE.** Every other money defect in this file announces
+   itself somewhere — a 500, a mismatch, a negative row. RM 12.00 is a valid asset
+   cost. It reconciles, it depreciates, it reports. Only the person who typed it
+   knows.
+3. **Fixing it invites the same bug in a new shape.** The strict parser returns
+   `null`, and the shortest way to make that compile is `?? 0` — which books RM 0.00
+   just as silently. The fix is not a better parser; it is a REFUSAL.
+4. **Everyone who noticed fixed their own copy.** Seven separate money parsers had
+   grown across the front end, each handling a different subset (one stripped commas
+   but not spaces, one stripped commas in `onChange` only, one stripped `RM` too, one
+   wrote `null` on failure — which its route read as *"clear the field"*).
+
+**The rule.** *One parser: `parseMoneyInput` / `parseMoneyToSen` (`src/lib/parse-money.ts`),
+reached through `src/lib/money-field.ts`. A blank box is `0`. An unreadable box is
+`null`, and the caller REFUSES — names the field, quotes the value, returns before
+composing a payload, and does not STATE a total it had to substitute a 0 into.*
+`type="number"` does not exempt a site: converting it costs nothing and stops the
+component being reused with a text input, which is how this class spreads.
+
+| # | surface | state |
+|---|---|---|
+| 1 | `accounting/index.tsx` — Fixed Assets (the reported instance), Landed Cost, Fund Transfer, Opening Balance, Stock Take, other-party bills, payment allocation, payment vouchers, official receipts, bank-CSV import | ✅ 2026-08-13 (-095) |
+| 2 | the six hand-rolled `.replace(/,/g, "")` parsers — `rd/detail.tsx`, `rd/index.tsx`, `forecast.tsx`, the bank-CSV `parseAmt`, `batch-import-dialog.tsx`, `assistant-tools.ts` | ✅ 2026-08-13 (-095) except `assistant-tools.ts`, which parses a string IT formatted for a sort key — no operator input, left alone |
+| 3 | `type="number"` money sites across invoices / procurement / customers / products / inventory / employees | ✅ 2026-08-13 (-095) — defence in depth, never live; they DID write `NaN` into a price on unreadable input, which the conversion also removes |
+| 4 | `components/ui/money-input.tsx` | ✅ 2026-08-13 (-095) — **never a live bug** (`type="number"`); converted so the guard survives the input type changing |
+| 5 | the SERVER side | ⬜ unswept. This pass is front-end only. A route that does `Number(body.amountSen)` on a client-supplied money string is C1's territory, not this one, but the same "plausible wrong number, no error" property applies |
+| 6 | `invoices/detail.tsx` price editor (`sen = Math.max(0, Math.round((Number(s) || 0) * 100))`) | ⬜ open, not a `parseFloat` site. `Number("12,000")` is `NaN` → `0`, so it fails to ZERO rather than to 12; the input is `type="number"` and its drafts are machine-serialised, so it is latent. Convert when that editor is next touched |
+
+**Enforced by** `tests/money-input-parsing.test.mjs` — a per-file pin that no
+executable `parseFloat` returns to the 17 fully-converted files; an ALLOW-LIST naming
+the exact non-money identifiers still permitted to reach `parseFloat` in the 5 mixed
+files (so a money field cannot quietly join them); a refusal check per submit path
+that brace-matches the guard's own block; the `"—"` abstention check; and a BUDGETED
+count of every surviving `?? 0` on a money parse, so shape 3 above has to be argued
+for rather than merely typed. Behaviour is proved separately in
+`tests/parse-money.test.mjs`.
+
+> Nine mutations were run against that file to prove it fails when the bug is back.
+> One did **not**: the "the guard must `return`" assertion searched a fixed
+> 400-character window and passed with the `return` deleted, because a handler has
+> other `return`s within 400 characters. It now brace-matches the guard's own block.
+> Same lesson as C8 and C9 — a guard nobody has watched fail is not a guard.
+
+**Finding the next one.** Do not grep for `parseFloat` and start converting: most hits
+are quantities, percentages, hours, dimensions and CSS pixels, and converting those is
+a behaviour change nobody asked for. Grep for the INPUT instead — a money-labelled
+field whose element is not `type="number"` — then follow its state to whatever parses
+it. And ask the question that actually decides it: *if this box gets a comma, what
+number reaches the database?*
 
 ---
 

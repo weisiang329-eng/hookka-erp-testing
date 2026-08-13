@@ -13,6 +13,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
+import { moneyFieldToRinggit, firstMoneyFieldError } from "@/lib/money-field";
 import { Landmark, Settings2 } from "lucide-react";
 
 type TfDrawRow = {
@@ -77,8 +78,14 @@ export function TradeFinanceBlock() {
   // DR INTEREST ON TRADE FINANCE / CR the TF account under this draw, so
   // outstanding + the identity include it. Same figure twice = no-op.
   const saveInterest = async (drawSourceId: string, rmStr: string) => {
-    const rmv = parseFloat(rmStr);
-    if (!Number.isFinite(rmv) || rmv < 0) return;
+    // BUG-2026-08-13-095 — the interest cell is a free-text input, so the
+    // bank's "1,250.00" reached `parseFloat` whole and posted RM 1.00 of
+    // interest against the draw. Silence was the danger: the old guard simply
+    // `return`ed, so an unreadable figure looked like a saved one.
+    const tfMoneyError = firstMoneyFieldError([{ label: "Interest (RM)", value: rmStr }]);
+    if (tfMoneyError) { toast.error(tfMoneyError); return; }
+    const rmv = moneyFieldToRinggit(rmStr) as number;
+    if (rmv < 0) { toast.error("Interest cannot be negative"); return; }
     const res = await fetch("/api/accounting/trade-finance/draw-interest", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },

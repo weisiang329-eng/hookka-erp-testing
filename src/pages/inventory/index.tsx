@@ -56,6 +56,9 @@ import {
   sofaVariantDescription,
   type BedframeSize,
 } from "@/lib/fg-variants";
+// One money parser. NOTE: Unit M3 and Fabric Usage on this page are NOT money
+// and deliberately keep `parseFloat`.
+import { moneyFieldToSen } from "@/lib/money-field";
 
 // -- FIFO cost column helpers ----------------------------------------------
 // These USED to read from the module-scope `rmBatches`/`fgBatches` mock
@@ -1957,8 +1960,9 @@ export default function InventoryPage() {
     { key: "baseModel", label: "Base Model", example: "2050(A)", help: "Optional family name grouping" },
     { key: "sizeCode", label: "Size Code", example: "K", help: "K / Q / S / SS / SK / SP" },
     { key: "sizeLabel", label: "Size Label", example: "6FT" },
-    { key: "basePriceSen", label: "Base Price (RM)", type: "number", example: 2500, help: "In ringgit, converted to sen internally" },
-    { key: "costPriceSen", label: "Cost Price (RM)", type: "number", example: 1500 },
+    { key: "basePriceSen", label: "Base Price (RM)", type: "money", example: 2500, help: "In ringgit, converted to sen internally" },
+    { key: "costPriceSen", label: "Cost Price (RM)", type: "money", example: 1500 },
+    // Metres of fabric, not money - stays a plain number column on purpose.
     { key: "fabricUsage", label: "Fabric Usage (m)", type: "number", example: 8 },
   ];
 
@@ -2331,7 +2335,7 @@ export default function InventoryPage() {
                     <input
                       type="number" onFocus={(e) => e.currentTarget.select()} step="0.01" min={0}
                       value={fgForm.basePriceSen !== undefined ? (fgForm.basePriceSen / 100).toFixed(2) : ""}
-                      onChange={e => setFgForm(f => ({ ...f, basePriceSen: e.target.value === "" ? undefined : Math.round(parseFloat(e.target.value || "0") * 100) }))}
+                      onChange={e => setFgForm(f => ({ ...f, basePriceSen: e.target.value === "" ? undefined : moneyFieldToSen(e.target.value) ?? f.basePriceSen }))}
                       className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
                       placeholder="0.00"
                     />
@@ -2341,7 +2345,7 @@ export default function InventoryPage() {
                     <input
                       type="number" onFocus={(e) => e.currentTarget.select()} step="0.01" min={0}
                       value={fgForm.price1Sen !== undefined && fgForm.price1Sen !== null ? (fgForm.price1Sen / 100).toFixed(2) : ""}
-                      onChange={e => setFgForm(f => ({ ...f, price1Sen: e.target.value === "" ? undefined : Math.round(parseFloat(e.target.value || "0") * 100) }))}
+                      onChange={e => setFgForm(f => ({ ...f, price1Sen: e.target.value === "" ? undefined : moneyFieldToSen(e.target.value) ?? f.price1Sen }))}
                       className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
                       placeholder="Optional (bedframe tier 1)"
                     />
@@ -2905,7 +2909,7 @@ export default function InventoryPage() {
                   <input
                     type="number" onFocus={(e) => e.currentTarget.select()} step="0.01" min={0}
                     value={editFGForm.basePriceSen !== undefined ? (editFGForm.basePriceSen / 100).toFixed(2) : ""}
-                    onChange={e => setEditFGForm(f => ({ ...f, basePriceSen: e.target.value === "" ? undefined : Math.round(parseFloat(e.target.value || "0") * 100) }))}
+                    onChange={e => setEditFGForm(f => ({ ...f, basePriceSen: e.target.value === "" ? undefined : moneyFieldToSen(e.target.value) ?? f.basePriceSen }))}
                     className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
                     placeholder="0.00"
                   />
@@ -2915,7 +2919,7 @@ export default function InventoryPage() {
                   <input
                     type="number" onFocus={(e) => e.currentTarget.select()} step="0.01" min={0}
                     value={editFGForm.price1Sen !== undefined && editFGForm.price1Sen !== null ? (editFGForm.price1Sen / 100).toFixed(2) : ""}
-                    onChange={e => setEditFGForm(f => ({ ...f, price1Sen: e.target.value === "" ? undefined : Math.round(parseFloat(e.target.value || "0") * 100) }))}
+                    onChange={e => setEditFGForm(f => ({ ...f, price1Sen: e.target.value === "" ? undefined : moneyFieldToSen(e.target.value) ?? f.price1Sen }))}
                     className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
                     placeholder="Optional (bedframe tier 1)"
                   />

@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------------
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Plus, X, Undo2, Trash2 } from "lucide-react";
+import { moneyFieldToSen, firstMoneyFieldError } from "@/lib/money-field";
 
 type PurchaseReturn = {
   id: string;
@@ -224,6 +225,14 @@ function NewPurchaseReturnDialog({ initialPiId, initialGrnId, onClose, onDone }:
 
   const submit = async () => {
     const picked = lines.filter((l) => l.on && (parseFloat(l.retQty) || 0) > 0);
+    // BUG-2026-08-13-095 - the Return-cost cell is a PLAIN `<input>` (no
+    // `type="number"`), so "1,250" reached `parseFloat` whole and the return
+    // was credited at RM 1.00 per unit. `retQty` above is a QUANTITY and keeps
+    // `parseFloat` on purpose - it is not money and not in this fix's scope.
+    const costErr = firstMoneyFieldError(
+      picked.map((l) => ({ label: `${l.materialName} return cost (RM)`, value: l.retCostRM })),
+    );
+    if (costErr) { setErr(costErr); return; }
     if (!grnMode && !piId) { setErr("Pick a Purchase Invoice."); return; }
     if (picked.length === 0) { setErr("Tick at least one line with a quantity."); return; }
     setBusy(true);
@@ -244,7 +253,7 @@ function NewPurchaseReturnDialog({ initialPiId, initialGrnId, onClose, onDone }:
             supplierSku: l.supplierSku,
             grnItemId: l.grnItemId,
             quantity: parseFloat(l.retQty) || 0,
-            unitCostSen: Math.round((parseFloat(l.retCostRM) || 0) * 100),
+            unitCostSen: moneyFieldToSen(l.retCostRM) as number,
             problem: l.problem,
           })),
         }),

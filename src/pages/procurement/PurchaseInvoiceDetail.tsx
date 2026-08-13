@@ -35,6 +35,9 @@ import { MoneyInput } from "@/components/ui/money-input";
 import { DiscountInput } from "@/components/ui/discount-input";
 import { isPiEditable } from "@/lib/purchase-edit-rules";
 import type { RawMaterial } from "@/types";
+// One money parser. NOTE: `l.qty` on this page is a QUANTITY and deliberately
+// keeps `parseFloat` - it is not money and is not in this fix's scope.
+import { moneyFieldToRinggit } from "@/lib/money-field";
 
 const VALID_LINE_TYPES: LineType[] = ["STOCKED", "FEE", "TAX", "REBATE", "DISCOUNT", "OTHER"];
 
@@ -439,15 +442,15 @@ export default function PurchaseInvoiceDetailPage() {
     (s, l) =>
       l.lineType === "TAX"
         ? s
-        : s + Math.round((parseFloat(l.unitPriceRm) || 0) * 100) * (parseFloat(l.qty) || 0),
+        : s + Math.round((moneyFieldToRinggit(l.unitPriceRm) ?? 0) * 100) * (parseFloat(l.qty) || 0),
     0,
   );
   const draftTaxSen = dLines.reduce(
     (s, l) =>
       s +
-      Math.round((parseFloat(l.taxRm) || 0) * 100) +
+      Math.round((moneyFieldToRinggit(l.taxRm) ?? 0) * 100) +
       (l.lineType === "TAX"
-        ? Math.round((parseFloat(l.unitPriceRm) || 0) * 100) * (parseFloat(l.qty) || 0)
+        ? Math.round((moneyFieldToRinggit(l.unitPriceRm) ?? 0) * 100) * (parseFloat(l.qty) || 0)
         : 0),
     0,
   );
@@ -458,7 +461,7 @@ export default function PurchaseInvoiceDetailPage() {
     (s, l) =>
       l.lineType === "DISCOUNT"
         ? s
-        : s + Math.round((parseFloat(l.unitPriceRm) || 0) * 100) * (parseFloat(l.qty) || 0),
+        : s + Math.round((moneyFieldToRinggit(l.unitPriceRm) ?? 0) * 100) * (parseFloat(l.qty) || 0),
     0,
   );
 
@@ -494,10 +497,10 @@ export default function PurchaseInvoiceDetailPage() {
         materialName: l.materialName.trim(),
         supplierSku: l.supplierSku.trim() || null,
         qty: parseFloat(l.qty) || 0,
-        unitPriceSen: Math.round((parseFloat(l.unitPriceRm) || 0) * 100),
+        unitPriceSen: Math.round((moneyFieldToRinggit(l.unitPriceRm) ?? 0) * 100),
         // Per-line SST (owner 2026-06-30). 0 for non-taxable lines; backend
         // rolls them into header tax_sen on save.
-        taxSen: Math.max(0, Math.round((parseFloat(l.taxRm) || 0) * 100)),
+        taxSen: Math.max(0, Math.round((moneyFieldToRinggit(l.taxRm) ?? 0) * 100)),
         lineType: l.lineType,
         // Preserve the GRN-source link so the backend keeps invoiced_qty in sync.
         grnItemId: l.grnItemId,
@@ -1010,14 +1013,14 @@ export default function PurchaseInvoiceDetailPage() {
                           {l.lineType === "DISCOUNT" ? (
                             <DiscountInput
                               baseAmountSen={discountBaseAmountSen}
-                              valueSen={Math.round((parseFloat(l.unitPriceRm) || 0) * 100) || null}
+                              valueSen={Math.round((moneyFieldToRinggit(l.unitPriceRm) ?? 0) * 100) || null}
                               onChange={(sen) =>
                                 patchLine(i, { unitPriceRm: sen === null ? "0" : (sen / 100).toFixed(2) })
                               }
                             />
                           ) : (
                             <MoneyInput
-                              value={parseFloat(l.unitPriceRm) || null}
+                              value={moneyFieldToRinggit(l.unitPriceRm) || null}
                               onChange={(rm) =>
                                 patchLine(i, { unitPriceRm: rm === null ? "0" : String(rm) })
                               }
@@ -1032,7 +1035,7 @@ export default function PurchaseInvoiceDetailPage() {
                             <span className="text-xs text-[#9CA3AF] italic">n/a</span>
                           ) : (
                             <MoneyInput
-                              value={parseFloat(l.taxRm) || null}
+                              value={moneyFieldToRinggit(l.taxRm) || null}
                               onChange={(rm) =>
                                 patchLine(i, { taxRm: rm === null ? "0" : String(rm) })
                               }

@@ -266,6 +266,130 @@ presented as measured), C17 (a check that cannot observe what it claims to check
 
 ---
 
+## BUG-2026-08-13-095 — a money field typed with a thousands separator was booked as the digits before the comma `accounting` `data-integrity` `ui-frontend` 🟢
+
+**Symptom.** A fixed asset entered as `12,000` was created at **RM 12.00**, and has
+depreciated off that figure ever since. Nothing anywhere reports a problem: RM 12.00
+is a perfectly valid cost, the asset register shows it, the monthly depreciation
+journal posts against it, and every downstream report is internally consistent. The
+only way to notice is to remember what was typed.
+
+**Root cause.** `parseFloat` stops at the first character it does not understand and
+returns what it has so far, with no error and no `NaN`:
+
+| typed | `parseFloat` | meant |
+|---|---|---|
+| `12,000` | `12` | twelve thousand |
+| `1,200` | `1` | one thousand two hundred |
+| `12 000` | `12` | twelve thousand |
+| `12.000,50` | `12` | twelve thousand and fifty cents (EU grouping) |
+
+That is only a bug if a comma can reach the parser. **It can, nearly everywhere.**
+Measured on `src/pages/accounting/index.tsx` 2026-08-13: **119 money inputs and NOT
+ONE is `type="number"`** — every one is `type="text" inputMode="decimal"`, which
+accepts a comma happily. The browser was doing all the protecting, and on this page
+it was not there.
+
+Six more copies of the money parser had grown around the same problem, each solving
+a slightly different part of it: `src/pages/rd/detail.tsx` and `rd/index.tsx` stripped
+commas by hand (`.replace(/,/g, "")`) and then wrote **`null`** when `parseFloat`
+still failed — which the R&D route reads as *"clear the target price"*, so a
+mistyped figure silently DELETED the target; `src/pages/forecast.tsx` stripped commas
+in its input's `onChange` (so commas were safe, and spaces were not); the accounting
+bank-CSV importer had its own `replace(/[RM,\s]/gi, "")`; `batch-import-dialog.tsx`
+had a seventh. One value, seven parsers, seven different answers to "what is
+unreadable input".
+
+**Fix.** `src/lib/parse-money.ts` (`parseMoneyInput` / `parseMoneyToSen`, landed
+separately in `3c52fd56`) is now the only money parser. `src/lib/money-field.ts` is a
+thin screen-side adapter over it that spells out the one convention every money form
+already had, so no call site can re-derive it slightly differently:
+
+> a **blank** field means "nothing entered" → `0`; anything the parser **cannot read**
+> → `null`, and the caller **REFUSES**.
+
+**Refusing is the whole point, and it is where this fix could have gone wrong.**
+Writing `parseMoneyToSen(x) ?? 0` at a call site is the same bug in a new shape — it
+books RM 0.00 instead of RM 12.00, just as silently. So every converted submit path
+gained an explicit gate that names the field and the value and **returns** before
+composing a payload, and — following BUG-2026-08-13-094's rule that the figure on
+screen and the figure in the payload cannot come from different expressions — the
+forms that show a running Total render **"—"** while any amount is unreadable rather
+than a total computed with a 0 substituted in.
+
+**Converted (24 files).** Accounting page (all ten sites: Fixed Assets, Landed Cost,
+Fund Transfer, Opening Balance, Stock Take, other-party bills, other-party payment
+allocation, payment vouchers, official receipts, bank-statement CSV import) ·
+`accounting/cash-flow.tsx` · `accounting/tabs/TradeFinanceBlock.tsx` (draw interest —
+a real live one: the old guard just `return`ed, so an unreadable figure looked saved) ·
+`rd/detail.tsx` · `rd/index.tsx` · `rd/maintenance.tsx` · `forecast.tsx` ·
+`invoices/{payments,supplier-payments,credit-notes,debit-notes,index,detail}.tsx` ·
+`purchase-returns/index.tsx` (return unit cost — a plain `<input>`, live) ·
+`leads/index.tsx` (Est. value on the ADD form is a plain `<input>`, live) ·
+`inventory/{index,stock-value}.tsx` · `customers.tsx` · `products/index.tsx` ·
+`procurement/{create,detail,sku-form-dialog,PurchaseInvoiceDetail}.tsx` ·
+`components/scan-po-modal.tsx` · `components/employee-drawer.tsx` · `employees.tsx` ·
+`components/ui/batch-import-dialog.tsx` (gained a `money` column type; plain `number`
+columns keep `Number()` because they carry quantities and metres) ·
+`components/ui/money-input.tsx`.
+
+**`money-input.tsx` was NOT a live bug and this entry must not be read as saying it
+was.** It renders `type="number"`, so the browser refused the comma before
+`parseFloat` ever saw it, and no wrong figure was ever committed through that
+component. It was converted anyway because the parser and the input type are two
+unrelated lines that nothing binds together: reuse it with a text input — which is
+what all 119 accounting fields are — and it becomes the accounting page's bug. Same
+for the `type="number"` sites in `invoices/`, `procurement/`, `customers.tsx`,
+`products/index.tsx` and `inventory/index.tsx`; those conversions do fix a smaller
+real defect, though, since `Math.round(parseFloat(x) * 100)` wrote **`NaN`** into a
+price on anything it could not read, and the new code abandons the edit instead.
+
+**Deliberately NOT converted** (each says so in place): FX rates
+(`supplier-payments.tsx` `rateStr`, `procurement/pi.tsx`, `grn-detail.tsx` — not
+money, no thousands separator, and money syntax like a leading `RM` or accounting
+parentheses would be wrong to accept); quantities (`PurchaseInvoiceDetail` `qty`,
+`purchase-returns` `retQty`, `bom.tsx`); percentages (`forecast.tsx` `strToBp`,
+`employee-drawer` efficiency threshold); hours and multipliers (`employees.tsx`,
+`employee-drawer.tsx`, `rd/detail.tsx` labour hours); dimensions (`unitM3`,
+`fabricUsage`, gap/divan/leg inches on sales + consignment edit); BOM version sort
+(`products/bom.tsx`); and CSS pixel widths (`data-grid.tsx`).
+
+**Verified.** `npx tsc -p tsconfig.app.json --noEmit` exit 0.
+`node scripts/check-docs-freshness.mjs` and `node scripts/check-codebase-map.mjs` OK.
+`npm test` green. New guard: `tests/money-input-parsing.test.mjs` (45 assertions —
+behaviour of the adapter, a per-file "no `parseFloat` in executable code" pin for the
+17 fully-converted files, an allow-list naming the exact non-money identifiers still
+permitted to reach `parseFloat` in the 5 mixed files, a refusal check per submit path,
+the "—" abstention check, and a budgeted count of every surviving `?? 0` on a money
+parse so a new one has to be argued for).
+
+**Every assertion was proved RED by putting the bug back** (harness applies the
+mutation to the raw bytes, asserts the byte length changed, runs the test, restores,
+re-verifies green — patterns expanded to both `\n` and `\r\n`, because a mutation that
+silently fails to apply is a false all-clear this repo has hit three times):
+
+| mutation | result |
+|---|---|
+| adapter goes back to `parseFloat` | RED |
+| blank stops meaning zero | RED |
+| the error stops naming the field | RED |
+| `parseFloat` returns to the accounting page | RED |
+| a money field joins the non-money allow-list | RED |
+| the Fixed Asset guard is deleted | RED |
+| the guard warns but does not `return` | **STILL GREEN → guard fixed → RED** |
+| the bill Total states a figure over an unreadable line | RED |
+| a new unlisted `?? 0` on a money parse | RED |
+
+The seventh is the one worth keeping. The first draft of that assertion searched a
+fixed 400-character window after the gate and passed happily with the `return`
+deleted — a handler has other `return`s within 400 characters. It now brace-matches
+the guard's OWN block, which is exactly the span the regression empties. A guard
+nobody has watched fail is not a guard.
+
+**Not verified on prod.** This branch is not deployed; the main session owns the
+deploy and the live read/write check.
+
+---
 ## BUG-2026-08-13-084 — five more source files still carried a raw NUL byte, so `grep` had never read them either `infrastructure` `data-integrity` 🟢
 
 **Symptom.** None visible to a user. The damage is to every audit anyone runs: GNU

@@ -255,7 +255,13 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/production', element: <S><ProductionOverview /></S> },
   { path: '/production/scan', element: <S><ProductionScan /></S> },
   { path: '/production/fg-scan', element: <S><FGScan /></S> },
-  { path: '/production/tracker', element: <Navigate to="/planning" replace /> },
+  // The Master Tracker page was retired into Planning's Master Tracker TAB;
+  // the standalone src/pages/production/tracker.tsx is deleted. The redirect
+  // STAYS — /production/tracker was a real page for months, so bookmarks and
+  // printed links still point at it. ?tab=tracker matches the Production
+  // page's own Master Tracker button; PlanningPage doesn't read it yet (see
+  // the note in global-search.tsx), so today it lands on Capacity Overview.
+  { path: '/production/tracker', element: <Navigate to="/planning?tab=tracker" replace /> },
   // Legacy per-dept route — superseded by /production/<dept> (the shared
   // ProductionPage). Redirect so old links/bookmarks land on the live page
   // instead of the orphaned department.tsx (2026-06-10).

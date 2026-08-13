@@ -48,7 +48,7 @@ Tracker, and the fabricated Department Efficiency are done, deployed and verifie
 on prod. Their detail now lives in docs/BUG-HISTORY.md (BUG-2026-08-13-001..-008)
 — the ledger is the source of truth for what was wrong and how it was proven.
 
-## P10 — Financial P&L is fabricated  🔴 data integrity  (agent in flight)
+## P10 — Financial P&L was fabricated  ✅ SHIPPED (BUG-2026-08-13-009/-010)
 Reports › Financial: **COGS = `revenue × 0.65`**, and Salaries / Utilities / Rent /
 Others are hardcoded **RM 50,000 / 8,000 / 15,000 / 5,000** — rendered exactly like
 sourced account balances. Gross profit, net profit and every margin inherit the
@@ -61,14 +61,14 @@ honestly sourced yet — a mostly-"—" P&L that states why beats an invented on
 Needs an owner decision on which accounts roll into which bucket; do NOT invent
 that mapping to make the page look complete.
 
-## P11 — Mobile home repeats the Pending-Delivery hang  🟠  (agent in flight)
+## P11 — Mobile home Pending-Delivery + orders-due  ✅ SHIPPED (BUG-2026-08-13-011/-013)
 `src/pages/m/screens/Home.tsx` still derives Pending Delivery in the browser from
 the whole-org production-order fetch — the exact read that made the desktop tile
 spin forever. Desktop's fix is deployed: `GET /api/delivery-orders/pending-value`,
 measured **589 ms**, reconciling exactly with the Delivery page.
 Matters MORE on mobile, not less — the factory floor uses phones on worse networks.
 
-## P12 — A 1 MB PDF chunk is a static edge of ~30 page chunks  🟠  (agent in flight)
+## P12 — 1 MB PDF chunk static edge  ✅ SHIPPED (BUG-2026-08-13-012) — 53 importers → 14
 `__vitePreload` got parked inside the `pdf` manual chunk, so **any chunk containing
 any `await import(...)` statically pulls 1,036 KB of PDF vendor code** — measured on
 `/employees` (`pdf-D5mT946N.js`, 1,013 KB, loaded on mount). Not that page's fault;
@@ -87,6 +87,35 @@ page loads, so prove PDF generation still works before shipping.
 
 Across 7 module hops: `customers` ×8, `datagrid-layouts` ×8, `organisations` ×6,
 `notifications` ×2–4. Wasted slots in a queue that is the bottleneck.
+
+Root cause now known (audit, PR #288): **`useCachedJson` ALWAYS re-fetches on
+mount** (`cached-fetch.ts:478`, `void ttlSec`). "The cache is warm from the list
+page" is false for the network — the whole burst fires again on every navigation
+into a record. That is the lever for P7, not per-page deduplication.
+
+## Grid search loads the whole table  🟠  (measured 2026-08-13)
+
+When a filter/search goes active, several grids drop pagination and fetch the
+entire dataset to filter in the browser. Deliberate (so the grid can show every
+match), but the cost scales with the table:
+
+| page | measured | server `search=`? |
+| --- | --- | --- |
+| `/sales` | **2,215 KB decoded**, 4,480 ms on the first keystroke | **YES** — pg_trgm, `?search=` returns 164 matches in **172 ms** and already includes `total` |
+| `/procurement` | 0.16 MB / 113 ms (only 165 POs) | no |
+| `/procurement/grn` | not measured | no |
+| `/production` | **fires nothing** — the page starts empty by design ("Pick a filter or Load all") | no |
+
+`/sales` is the only one that currently hurts. **The trap before swapping in the
+server search:** the client matches **17 visible columns**, the server matches 5 —
+a naive swap silently stops matching status, state, company, current-dept and the
+three date columns. Any fix needs a before/after result-set comparison, not just
+a timing.
+
+Not reproduced, do NOT chase: an audit reported the sidebar re-polling the whole
+notifications feed every 60 s app-wide. Measured on `/sales`, idle 50 s:
+**zero notification requests**. Whatever the code path implies, it is not firing
+in normal use.
 
 ## P8 — Aborts surface as user-facing errors  🟡
 

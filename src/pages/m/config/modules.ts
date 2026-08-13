@@ -1852,7 +1852,10 @@ export const warehouseConfig: ModuleConfig = {
 //   • Adjustments     → /api/stock-adjustments
 // ---------------------------------------------------------------------------
 const finishedGoodsSource: DataSource = {
-  url: "/api/inventory",
+  // perf 2026-08-13 (BUG-2026-08-13-021): `?buckets=finishedProducts` — the
+  // selector below reads that bucket and nothing else, so the RM + WIP buckets
+  // no longer ride along in a 1.16 MB payload on a phone.
+  url: "/api/inventory?buckets=finishedProducts",
   select: selectNested("data", "finishedProducts"),
   toVM: (r): RowVM => ({
     id: str(r, "id", "code"),
@@ -1876,7 +1879,22 @@ const wipSource: DataSource = {
   // WIP rows are surfaced by the inventory meta endpoint when available; if the
   // key is absent the list is empty (desktop computes WIP from production
   // orders). TODO: wire the production-orders WIP derivation here in Phase 3.
-  url: "/api/inventory",
+  //
+  // perf 2026-08-13 (BUG-2026-08-13-021): `?buckets=wipItems` — this screen was
+  // downloading all three buckets (1.16 MB) to render a list that is EMPTY.
+  //
+  // BUG-2026-08-13-025 — and it IS empty, always: the selector reads
+  // `data.wip`, a key the endpoint has never emitted (its WIP bucket is called
+  // `wipItems` — inventory.ts:170), so `selectNested` returns [] on every load.
+  // The projection is therefore output-identical: [] before, [] after.
+  //
+  // Re-pointing the selector at `wipItems` is deliberately NOT done here. It
+  // would ADD rows (a visible change), and it would not actually work: `toVM`
+  // reads `name`/`productName` and `qty`/`quantity`, none of which `rowToWipItem`
+  // emits (it has `relatedProduct` and `stockQty`), so every row would render
+  // "—" with qty 0. That is the Phase-3 wiring the TODO above describes, not a
+  // typo fix.
+  url: "/api/inventory?buckets=wipItems",
   select: selectNested("data", "wip"),
   toVM: (r): RowVM => ({
     id: str(r, "id", "code", "poNo"),
@@ -2042,7 +2060,9 @@ const fabricsSource: DataSource = {
 };
 
 const stockValueSource: DataSource = {
-  url: "/api/inventory",
+  // perf 2026-08-13 (BUG-2026-08-13-021): same one-bucket projection as
+  // finishedGoodsSource above — this screen reuses the identical selector.
+  url: "/api/inventory?buckets=finishedProducts",
   select: selectNested("data", "finishedProducts"),
   toVM: (r): RowVM => ({
     id: str(r, "id", "code"),
@@ -2984,10 +3004,30 @@ const customerDetail: DetailConfig = {
   ],
   // Recent Orders (View History) — sub-fetch SOs for THIS customer to show
   // recent history below the hubs. CHANGELOG: "导出: Quotation PDF /
-  // Catalogue PDF / View History". /api/sales-orders list is in localStorage
-  // cache (preloaded) so this is fast.
+  // Catalogue PDF / View History".
+  //
+  // perf 2026-08-13 (BUG-2026-08-13-026). The old comment here said the SO list
+  // "is in localStorage cache (preloaded) so this is fast". It was wrong twice
+  // over: the /m preload was slimmed to the Home's own endpoints on 2026-07-14
+  // and has not warmed /api/sales-orders since, and `useCachedJson` ALWAYS
+  // re-fetches on mount anyway (cached-fetch.ts:478, `void ttlSec`) — the cache
+  // only ever served the first paint. So opening one customer on a phone
+  // downloaded 2.16 MB / 1,342 SOs with every line item to render ≤20 rows of
+  // five fields.
+  //
+  // `?fields=customer-mini` returns the SAME rows in the SAME order, projected
+  // to exactly the eight keys the sub-list below reads. It deliberately does
+  // NOT filter by customer: the filter is `customerId === cid || customerName
+  // === cname`, and a server-side customerId filter would drop the name-only
+  // matches and change the "Recent Orders · N" count (audit finding D6).
+  //
+  // `/api/invoices` is LEFT WHOLE, deliberately. Its list rows are already
+  // header-only (`rowToInvoiceList` ships `items: []` / `payments: []`) over
+  // ~355 rows, so there is far less to win; and `?customerId=` — which does
+  // exist — carries the same OR-on-name divergence, on a money-facing surface.
+  // Worth its own change with its own key-set comparison, not a drive-by.
   extraFetches: {
-    a: { key: "soList", url: () => "/api/sales-orders" },
+    a: { key: "soList", url: () => "/api/sales-orders?fields=customer-mini" },
     b: { key: "invList", url: () => "/api/invoices" },
   },
   // Delivery Hubs + Recent Orders + Invoices. The design source's "Delivery
@@ -3161,7 +3201,21 @@ const supplierDetail: DetailConfig = {
     fld("Address", (d) => str(d, "address"), true),
   ],
   // Last Purchase Orders + Scorecard (v17/CHANGELOG D.2 supplier detail).
-  // The PO list is preloaded so this is fast; scorecard fetched per-supplier.
+  //
+  // 2026-08-13: "The PO list is preloaded so this is fast" is FALSE and has been
+  // since 2026-07-14, when the /m preload was slimmed to the Home's own
+  // endpoints (see src/pages/m/lib/preload.ts) — /api/purchase-orders is not in
+  // it. `useCachedJson` also always re-fetches on mount (cached-fetch.ts:478),
+  // so a warm cache never suppressed the request either. This IS a whole-org
+  // pull: 165 POs / 158,763 bytes measured on prod (BUG-2026-08-13-008), read to
+  // show one supplier's last few orders.
+  //
+  // Left as-is deliberately (BUG-2026-08-13-026): /api/purchase-orders has NO
+  // supplier filter and no `?fields=` projection today
+  // (purchase-orders.ts:322-323 accepts only page/limit), so unlike the SO panel
+  // above there is nothing to switch to — it needs a new backend read of its
+  // own, and at 158 KB it ranks below the 2.16 MB one. Recorded rather than
+  // half-done.
   extraFetches: {
     a: { key: "poList", url: () => "/api/purchase-orders" },
     b: { key: "scorecard", url: (id) => `/api/supplier-scorecards/${encodeURIComponent(id)}` },

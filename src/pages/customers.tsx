@@ -3588,6 +3588,15 @@ export default function CustomersPage() {
       },
     });
     if (!result.ok) {
+      // The write returned 2xx but the confirmation read was cancelled (route
+      // change / 30s cap). The edit almost certainly persisted, so KEEP it on
+      // screen — reverting here is what made the owner's credit-limit change
+      // vanish behind "Failed to save customer: signal is aborted without
+      // reason" when it had in fact saved.
+      if (result.reason === "unverified") {
+        toast.info(result.details);
+        return true;
+      }
       setData(previousData);
       if (result.reason === "mismatch") {
         toast.error(formatMismatchError(result.diffs));

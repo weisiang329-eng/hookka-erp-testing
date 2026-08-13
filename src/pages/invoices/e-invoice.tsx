@@ -48,6 +48,7 @@ export default function EInvoicePage() {
   const [selectedInvoiceIds, setSelectedInvoiceIds] = useState<Set<string>>(new Set());
   const [generating, setGenerating] = useState(false);
   const [submitting, setSubmitting] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState<string | null>(null);
   const [cancelConfirmId, setCancelConfirmId] = useState<string | null>(null);
   const [selectedXmlId, setSelectedXmlId] = useState<string | null>(null);
@@ -128,13 +129,34 @@ export default function EInvoicePage() {
     setActiveTab("dashboard");
   };
 
+  // Submitting to LHDN is NOT implemented — the route now refuses (501) rather
+  // than minting a random submission ID + UUID and flipping the row to VALID,
+  // which is what it did until BUG-2026-08-13-014. The refusal is surfaced
+  // here: this function used to throw the response away entirely, so a failure
+  // would have looked like a button that simply did nothing.
   const submitToLHDN = async (eInvoiceId: string) => {
     setSubmitting(eInvoiceId);
-    await fetch(`/api/e-invoices/${eInvoiceId}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "submit" }),
-    });
+    setSubmitError(null);
+    try {
+      const res = await fetch(`/api/e-invoices/${eInvoiceId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "submit" }),
+      });
+      const json = (await res.json().catch(() => null)) as
+        | { success?: boolean; error?: string }
+        | null;
+      if (!res.ok || !json?.success) {
+        setSubmitError(
+          json?.error ??
+            `Submission failed (HTTP ${res.status}). Nothing was sent to LHDN.`,
+        );
+      }
+    } catch {
+      setSubmitError(
+        "Submission failed: the request could not be sent. Nothing was sent to LHDN.",
+      );
+    }
     await fetchData();
     setSubmitting(null);
   };
@@ -229,7 +251,8 @@ export default function EInvoicePage() {
         <div>
           <h1 className="text-xl font-bold text-[#1F1D1B]">e-Invoice</h1>
           <p className="text-xs text-[#6B7280]">
-            LHDN MyInvois - Malaysian e-Invoice management and submission
+            LHDN MyInvois - Malaysian e-Invoice XML generation. Transmission to
+            LHDN is not connected.
           </p>
         </div>
         <Button variant="outline" onClick={fetchData} className="gap-2">
@@ -237,6 +260,24 @@ export default function EInvoicePage() {
           Refresh
         </Button>
       </div>
+
+      {/* Standing notice. Until BUG-2026-08-13-014 the Submit button minted a
+          random `LHDN-SUB-…` id and a random 15-char UUID, marked the row
+          VALID and showed a green badge — with no LHDN client in the codebase
+          at all. Any VALID row created before this fix carries an identifier
+          LHDN never issued. */}
+      <div className="rounded-md border border-[#E8D597] bg-[#FAEFCB] px-3 py-2 text-xs text-[#7A5712]">
+        <span className="font-semibold">Not connected to LHDN.</span> This page
+        builds and stores the e-Invoice UBL XML. It does not transmit anything —
+        submit through MyInvois. Any row already marked <em>VALID</em> with a
+        submission ID or UUID was stamped locally, not cleared by LHDN.
+      </div>
+
+      {submitError && (
+        <div className="rounded-md border border-[#E8B2A1] bg-[#F9E1DA] px-3 py-2 text-xs text-[#9A3A2D]">
+          {submitError}
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="flex gap-1 border-b border-[#E2DDD8] overflow-x-auto">

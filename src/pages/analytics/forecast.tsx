@@ -8,6 +8,39 @@ import type { ForecastEntry, HistoricalSales, PromiseDateCalc } from "@/types";
 
 type Tab = "dashboard" | "detail" | "accuracy" | "promise";
 
+// What a figure reads when nothing sourced it. Same convention as
+// src/pages/reports.tsx — never "0", never a plausible number.
+const NO_FIGURE = "—";
+
+// `historical_sales` has one row per product PER MONTH PER CUSTOMER
+// (src/api/routes/historical-sales.ts groups by period, productCode,
+// customerId). Every derivation on this page treated one row as one month:
+// `sales.slice(-3)` was described as "the last 3 months" but on a product sold
+// to three customers in one month it is that ONE month, three times. Fold to
+// one row per period first, then all the month arithmetic below means what its
+// captions say. BUG-2026-08-13-014.
+function byPeriod(rows: HistoricalSales[]): { period: string; quantity: number; revenue: number }[] {
+  const m = new Map<string, { period: string; quantity: number; revenue: number }>();
+  for (const s of rows) {
+    const cur = m.get(s.period);
+    if (cur) {
+      cur.quantity += s.quantity;
+      cur.revenue += s.revenue;
+    } else {
+      m.set(s.period, { period: s.period, quantity: s.quantity, revenue: s.revenue });
+    }
+  }
+  return Array.from(m.values()).sort((a, b) => a.period.localeCompare(b.period));
+}
+
+/** "YYYY-MM" for `offset` months from the current month. */
+function periodFromNow(offset: number): string {
+  const d = new Date();
+  d.setDate(1);
+  d.setMonth(d.getMonth() + offset);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
 type PromiseDateEnriched = PromiseDateCalc & {
   productName: string;
   productCode: string;
@@ -80,6 +113,23 @@ export default function ForecastPage() {
         </p>
       </div>
 
+      {/* Provenance. `forecast_entries` has NO writer that anything in this app
+          calls: POST /api/forecasts exists but no screen posts to it, there is
+          no PUT at all, and the seed array (src/lib/mock-data.ts) is empty. So
+          `forecasts` is expected to be empty and every forecast figure below is
+          absent rather than measured. Saying so once, at the top, is the point
+          — the previous version filled the same space with 84.2%, a 220/month
+          capacity line and a frozen 2026-05 window. BUG-2026-08-13-014. */}
+      {forecasts.length === 0 && (
+        <div className="rounded-md border border-[#E8D597] bg-[#FAEFCB] px-3 py-2 text-xs text-[#7A5712]">
+          <span className="font-semibold">No forecasts are recorded.</span>{" "}
+          Nothing in the app writes <span className="font-mono">forecast_entries</span>,
+          so the forecast columns and the accuracy KPI read “—”. The Historical
+          and Promise-Date tabs are computed from real invoices and job cards
+          and are unaffected.
+        </div>
+      )}
+
       {/* Tab bar */}
       <div className="flex gap-1 border-b border-[#E2DDD8]">
         {tabs.map((t) => (
@@ -136,26 +186,39 @@ function DashboardTab({
   historicalSales: HistoricalSales[];
   productList: { id: string; code: string; name: string }[];
 }) {
-  // Forecast accuracy: compare forecast with historical where both exist
-  const accuracyData = useMemo(() => {
+  // Forecast accuracy: compare each forecast against the actual later recorded
+  // against it.
+  //
+  // The `withActual.length === 0` branch used to return a literal accuracy of
+  // 84.2, with a trailing comment that called it a mock, and that branch is
+  // taken EVERY time:
+  // `forecast_entries.actualQty` has no writer anywhere. POST /api/forecasts
+  // inserts it as a literal NULL (src/api/routes/forecasts.ts) and there is no
+  // PUT/PATCH on that table, so no row can ever carry one. Nothing in the app
+  // even POSTs a forecast — this page is read-only. So "84.2%" was printed as
+  // a 3xl KPI captioned "Based on historical comparison", forever, and the
+  // `last3` count computed to justify that caption was discarded unused.
+  // BUG-2026-08-13-014. `null` = unmeasurable; the card says which input is
+  // missing.
+  const accuracyData = useMemo((): { accuracy: number | null; count: number } => {
     const withActual = forecasts.filter((f) => f.actualQty !== null);
     if (withActual.length === 0) {
-      // Use last 3 months historical as pseudo-accuracy check
-      const last3 = historicalSales.filter((s) => s.period >= "2026-02");
-      return { accuracy: 84.2, count: last3.length }; // Mock accuracy
+      return { accuracy: null, count: 0 };
     }
     const totalMape = withActual.reduce((sum, f) => {
       const actual = f.actualQty ?? 1;
       return sum + Math.abs(f.forecastQty - actual) / actual;
     }, 0);
     return { accuracy: Math.round((1 - totalMape / withActual.length) * 1000) / 10, count: withActual.length };
-  }, [forecasts, historicalSales]);
+  }, [forecasts]);
 
-  // Top growing product (compare last 3 months vs prior 3 months)
+  // Top growing product — last 3 MONTHS vs the prior 3 MONTHS. `byPeriod`
+  // folds the per-customer rows first; without it `slice(-3)` could take three
+  // customers out of a single month and call the result a quarter.
   const growthData = useMemo(() => {
     const results: { id: string; name: string; growth: number }[] = [];
     productList.forEach((p) => {
-      const sales = historicalSales.filter((s) => s.productId === p.id).sort((a, b) => a.period.localeCompare(b.period));
+      const sales = byPeriod(historicalSales.filter((s) => s.productId === p.id));
       if (sales.length >= 6) {
         const recent3 = sales.slice(-3).reduce((s, v) => s + v.quantity, 0);
         const prior3 = sales.slice(-6, -3).reduce((s, v) => s + v.quantity, 0);
@@ -169,34 +232,53 @@ function DashboardTab({
   const topGrowing = growthData[0];
   const atRiskProducts = growthData.filter((g) => g.growth < -5);
 
-  // 6-month forecast totals by month for bar chart
+  // The next 6 months, rolling. This was a frozen literal array
+  // `["2026-05" … "2026-10"]` under the title "6-Month Forecast vs Capacity" —
+  // by today (2026-08) three of the six bars were already in the past.
+  //
+  // The capacity series is GONE. It was a `capacity` field set to the literal
+  // 220, annotated as a units-per-month plant capacity, with a legend saying
+  // so: a constant from no configuration, no table and no calculation, drawn as a
+  // reference line the forecast was judged against. A real per-department
+  // capacity does exist (`departments.workingHoursPerDay`, which
+  // /api/promise-date divides by) but converting it to units/month needs a
+  // per-product routing assumption that nobody has made. Publishing no line is
+  // correct; publishing 220 was not. BUG-2026-08-13-014.
   const forecastMonths = useMemo(() => {
-    const months = ["2026-05", "2026-06", "2026-07", "2026-08", "2026-09", "2026-10"];
-    return months.map((m) => {
-      const total = forecasts.filter((f) => f.period === m).reduce((s, f) => s + f.forecastQty, 0);
-      return { period: m, total, capacity: 220 }; // 220 units/month capacity
-    });
+    return Array.from({ length: 6 }, (_, i) => periodFromNow(i)).map((m) => ({
+      period: m,
+      total: forecasts.filter((f) => f.period === m).reduce((s, f) => s + f.forecastQty, 0),
+    }));
   }, [forecasts]);
 
-  const maxBarVal = Math.max(...forecastMonths.map((m) => Math.max(m.total, m.capacity)), 1);
+  const maxBarVal = Math.max(...forecastMonths.map((m) => m.total), 1);
+
+  // The "next forecast" column was pinned to the literal period "2026-05"
+  // under a header that read "May Forecast". It follows the calendar now.
+  const nextPeriod = periodFromNow(1);
 
   // Products table with trend
   const productTrends = useMemo(() => {
     return productList.map((p) => {
-      const sales = historicalSales.filter((s) => s.productId === p.id).sort((a, b) => a.period.localeCompare(b.period));
+      const sales = byPeriod(historicalSales.filter((s) => s.productId === p.id));
       const last3Avg = sales.length >= 3 ? sales.slice(-3).reduce((s, v) => s + v.quantity, 0) / 3 : 0;
       const prior3Avg = sales.length >= 6 ? sales.slice(-6, -3).reduce((s, v) => s + v.quantity, 0) / 3 : 0;
-      const nextForecast = forecasts.find((f) => f.productId === p.id && f.period === "2026-05");
+      const nextForecast = forecasts.find((f) => f.productId === p.id && f.period === nextPeriod);
       const trend = prior3Avg > 0 ? ((last3Avg - prior3Avg) / prior3Avg) * 100 : 0;
       return {
         ...p,
-        last3Avg: Math.round(last3Avg),
-        nextForecast: nextForecast?.forecastQty ?? 0,
-        confidence: nextForecast?.confidence ?? 0,
-        trend,
+        // `null` where there is nothing to average / nothing forecast, so the
+        // cell reads "—". `nextForecast?.forecastQty ?? 0` and
+        // `?.confidence ?? 0` printed a hard 0 and a red "0%" confidence badge
+        // for every product, which reads as a measured collapse in demand
+        // rather than as an absent forecast.
+        last3Avg: sales.length >= 3 ? Math.round(last3Avg) : null,
+        nextForecast: nextForecast ? nextForecast.forecastQty : null,
+        confidence: nextForecast ? nextForecast.confidence : null,
+        trend: sales.length >= 6 ? trend : null,
       };
     });
-  }, [productList, historicalSales, forecasts]);
+  }, [productList, historicalSales, forecasts, nextPeriod]);
 
   return (
     <div className="space-y-6">
@@ -207,8 +289,14 @@ function DashboardTab({
             <CardTitle className="text-sm font-medium text-gray-500">Forecast Accuracy</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-bold text-[#1F1D1B]">{accuracyData.accuracy}%</div>
-            <p className="text-xs text-gray-500 mt-1">Based on historical comparison</p>
+            <div className="text-3xl font-bold text-[#1F1D1B]">
+              {accuracyData.accuracy === null ? NO_FIGURE : `${accuracyData.accuracy}%`}
+            </div>
+            <p className="text-xs text-gray-500 mt-1">
+              {accuracyData.accuracy === null
+                ? "No forecast has an actual recorded against it, so accuracy cannot be measured."
+                : `From ${accuracyData.count} forecast${accuracyData.count === 1 ? "" : "s"} with a recorded actual`}
+            </p>
           </CardContent>
         </Card>
 
@@ -217,12 +305,25 @@ function DashboardTab({
             <CardTitle className="text-sm font-medium text-gray-500">Top Growing Product</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-lg font-bold text-[#1F1D1B]">{topGrowing?.name ?? "-"}</div>
+            <div className="text-lg font-bold text-[#1F1D1B]">{topGrowing?.name ?? NO_FIGURE}</div>
             <p className="text-xs mt-1">
               {topGrowing ? (
-                <span className="text-[#4F7C3A] font-medium">+{topGrowing.growth.toFixed(1)}% growth</span>
+                // The "+" used to be hardcoded into the string, so the leader
+                // of a shrinking catalogue rendered as "+-12.3% growth".
+                <span
+                  className={
+                    topGrowing.growth >= 0
+                      ? "text-[#4F7C3A] font-medium"
+                      : "text-[#9A3A2D] font-medium"
+                  }
+                >
+                  {topGrowing.growth >= 0 ? "+" : ""}
+                  {topGrowing.growth.toFixed(1)}% growth
+                </span>
               ) : (
-                "-"
+                <span className="text-gray-500">
+                  Needs 6 months of sales history for at least one product
+                </span>
               )}
             </p>
           </CardContent>
@@ -239,27 +340,21 @@ function DashboardTab({
         </Card>
       </div>
 
-      {/* Bar chart: 6-month forecast vs capacity */}
+      {/* Bar chart: next 6 months of forecast. No capacity series — see the
+          comment on forecastMonths. */}
       <Card>
         <CardHeader>
-          <CardTitle>6-Month Forecast vs Capacity</CardTitle>
+          <CardTitle>6-Month Forecast</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="flex items-end gap-3 h-48">
             {forecastMonths.map((m) => (
               <div key={m.period} className="flex-1 flex flex-col items-center gap-1">
                 <div className="relative w-full flex gap-1 items-end justify-center" style={{ height: "160px" }}>
-                  {/* Forecast bar */}
                   <div
                     className="w-5 bg-[#6B5C32] rounded-t transition-all"
                     style={{ height: `${(m.total / maxBarVal) * 160}px` }}
                     title={`Forecast: ${m.total}`}
-                  />
-                  {/* Capacity bar */}
-                  <div
-                    className="w-5 bg-[#E2DDD8] rounded-t transition-all"
-                    style={{ height: `${(m.capacity / maxBarVal) * 160}px` }}
-                    title={`Capacity: ${m.capacity}`}
                   />
                 </div>
                 <span className="text-[10px] text-gray-500">{m.period.slice(5)}</span>
@@ -271,8 +366,9 @@ function DashboardTab({
             <span className="flex items-center gap-1">
               <span className="w-3 h-3 rounded bg-[#6B5C32]" /> Forecast
             </span>
-            <span className="flex items-center gap-1">
-              <span className="w-3 h-3 rounded bg-[#E2DDD8]" /> Capacity (220/mo)
+            <span>
+              No production-capacity line: there is no per-month unit capacity
+              recorded anywhere to draw one from.
             </span>
           </div>
         </CardContent>
@@ -291,7 +387,9 @@ function DashboardTab({
                   <th className="text-left py-2 px-3 font-medium text-gray-500">Product</th>
                   <th className="text-left py-2 px-3 font-medium text-gray-500">Code</th>
                   <th className="text-right py-2 px-3 font-medium text-gray-500">3M Avg</th>
-                  <th className="text-right py-2 px-3 font-medium text-gray-500">May Forecast</th>
+                  <th className="text-right py-2 px-3 font-medium text-gray-500">
+                    {nextPeriod} Forecast
+                  </th>
                   <th className="text-right py-2 px-3 font-medium text-gray-500">Confidence</th>
                   <th className="text-right py-2 px-3 font-medium text-gray-500">Trend</th>
                 </tr>
@@ -301,17 +399,29 @@ function DashboardTab({
                   <tr key={p.id} className="border-b border-[#E2DDD8] hover:bg-[#F0ECE9]/50">
                     <td className="py-2 px-3 font-medium">{p.name}</td>
                     <td className="py-2 px-3 text-gray-500">{p.code}</td>
-                    <td className="py-2 px-3 text-right">{formatNumber(p.last3Avg)}</td>
-                    <td className="py-2 px-3 text-right font-medium">{formatNumber(p.nextForecast)}</td>
                     <td className="py-2 px-3 text-right">
-                      <Badge className={p.confidence >= 75 ? "bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8]" : p.confidence >= 60 ? "bg-[#FAEFCB] text-[#9C6F1E] border-[#E8D597]" : "bg-[#F9E1DA] text-[#9A3A2D] border-[#E8B2A1]"}>
-                        {p.confidence}%
-                      </Badge>
+                      {p.last3Avg === null ? NO_FIGURE : formatNumber(p.last3Avg)}
+                    </td>
+                    <td className="py-2 px-3 text-right font-medium">
+                      {p.nextForecast === null ? NO_FIGURE : formatNumber(p.nextForecast)}
                     </td>
                     <td className="py-2 px-3 text-right">
-                      <span className={p.trend >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}>
-                        {p.trend >= 0 ? "\u2191" : "\u2193"} {Math.abs(p.trend).toFixed(1)}%
-                      </span>
+                      {p.confidence === null ? (
+                        <span className="text-gray-400">{NO_FIGURE}</span>
+                      ) : (
+                        <Badge className={p.confidence >= 75 ? "bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8]" : p.confidence >= 60 ? "bg-[#FAEFCB] text-[#9C6F1E] border-[#E8D597]" : "bg-[#F9E1DA] text-[#9A3A2D] border-[#E8B2A1]"}>
+                          {p.confidence}%
+                        </Badge>
+                      )}
+                    </td>
+                    <td className="py-2 px-3 text-right">
+                      {p.trend === null ? (
+                        <span className="text-gray-400">{NO_FIGURE}</span>
+                      ) : (
+                        <span className={p.trend >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}>
+                          {p.trend >= 0 ? "\u2191" : "\u2193"} {Math.abs(p.trend).toFixed(1)}%
+                        </span>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -342,11 +452,11 @@ function DetailTab({
   selectedMethod: "SMA_3" | "SMA_6" | "WMA";
   setSelectedMethod: (m: "SMA_3" | "SMA_6" | "WMA") => void;
 }) {
+  // One row per MONTH (see byPeriod) — the moving averages below index rows as
+  // if they were consecutive months, and historical_sales rows are per
+  // customer.
   const sales = useMemo(
-    () =>
-      historicalSales
-        .filter((s) => s.productId === selectedProductId)
-        .sort((a, b) => a.period.localeCompare(b.period)),
+    () => byPeriod(historicalSales.filter((s) => s.productId === selectedProductId)),
     [historicalSales, selectedProductId]
   );
 
@@ -549,10 +659,22 @@ function AccuracyTab({
   forecasts: ForecastEntry[];
   historicalSales: HistoricalSales[];
 }) {
-  // Build comparison data: use historical months where we can simulate "what if forecast existed"
-  // Since forecasts are future, we simulate accuracy using SMA-3 on historical data
+  // This tab is a BACK-TEST, not a record of what the business forecast.
+  //
+  // No forecast ever existed for these periods (`_forecasts` is unused, and
+  // nothing writes forecast_entries). Each "forecast" is the SMA-3 of the three
+  // months before it, computed here, now, from the very actuals it is then
+  // scored against. That is a legitimate way to test a method — it is not
+  // "Forecast vs Actual", which is what the card, the KPI and the column
+  // headers used to call it. The captions now say back-test, so the number
+  // means what it says. BUG-2026-08-13-014.
   const comparisonData = useMemo(() => {
     const productIds = [...new Set(historicalSales.map((s) => s.productId))];
+    const nameById = new Map<string, { name: string; code: string }>();
+    for (const s of historicalSales) {
+      if (!nameById.has(s.productId))
+        nameById.set(s.productId, { name: s.productName, code: s.productCode });
+    }
     const rows: {
       period: string;
       productName: string;
@@ -564,27 +686,30 @@ function AccuracyTab({
     }[] = [];
 
     productIds.forEach((pid) => {
-      const sales = historicalSales
-        .filter((s) => s.productId === pid)
-        .sort((a, b) => a.period.localeCompare(b.period));
+      // Per MONTH, not per customer-month — otherwise the "prior 3 months"
+      // window can be three customers inside one month.
+      const sales = byPeriod(historicalSales.filter((s) => s.productId === pid));
+      const meta = nameById.get(pid) ?? { name: "", code: "" };
 
-      // For months 4-12, use SMA-3 of prior 3 months as "forecast", actual as actual
       for (let i = 3; i < sales.length; i++) {
         const forecastQty = Math.round(
           (sales[i - 1].quantity + sales[i - 2].quantity + sales[i - 3].quantity) / 3
         );
         const actualQty = sales[i].quantity;
         const variance = forecastQty - actualQty;
-        const mape = actualQty > 0 ? (Math.abs(variance) / actualQty) * 100 : 0;
+        // A month with zero actual has no percentage error — it is excluded
+        // from the average rather than scored as a perfect 0% miss, which is
+        // what `actualQty > 0 ? … : 0` did.
+        const mape = actualQty > 0 ? Math.round((Math.abs(variance) / actualQty) * 1000) / 10 : null;
 
         rows.push({
           period: sales[i].period,
-          productName: sales[i].productName,
-          productCode: sales[i].productCode,
+          productName: meta.name,
+          productCode: meta.code,
           forecastQty,
           actualQty,
           variance,
-          mape: Math.round(mape * 10) / 10,
+          mape: mape ?? Number.NaN,
         });
       }
     });
@@ -592,13 +717,19 @@ function AccuracyTab({
     return rows.sort((a, b) => b.period.localeCompare(a.period) || a.productName.localeCompare(b.productName));
   }, [historicalSales]);
 
-  const overallMape = useMemo(() => {
-    if (comparisonData.length === 0) return 0;
-    const total = comparisonData.reduce((s, r) => s + r.mape, 0);
-    return Math.round((total / comparisonData.length) * 10) / 10;
+  // `null` when there is nothing to average. It used to return 0, and the card
+  // below then printed `100 - 0 = 100%` — a perfect score off an empty set,
+  // which is exactly what an empty forecast_entries table produces.
+  const overallMape = useMemo((): number | null => {
+    const scored = comparisonData.filter((r) => Number.isFinite(r.mape));
+    if (scored.length === 0) return null;
+    const total = scored.reduce((s, r) => s + r.mape, 0);
+    return Math.round((total / scored.length) * 10) / 10;
   }, [comparisonData]);
 
-  const overallAccuracy = Math.round((100 - overallMape) * 10) / 10;
+  const overallAccuracy =
+    overallMape === null ? null : Math.round((100 - overallMape) * 10) / 10;
+  const scoredCount = comparisonData.filter((r) => Number.isFinite(r.mape)).length;
 
   function getMapeColor(mape: number): string {
     if (mape < 10) return "bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8]";
@@ -612,11 +743,19 @@ function AccuracyTab({
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-gray-500">Overall Accuracy (SMA-3)</CardTitle>
+            <CardTitle className="text-sm font-medium text-gray-500">
+              SMA-3 Back-test Accuracy
+            </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-bold text-[#1F1D1B]">{overallAccuracy}%</div>
-            <p className="text-xs text-gray-500 mt-1">100% - Avg MAPE</p>
+            <div className="text-3xl font-bold text-[#1F1D1B]">
+              {overallAccuracy === null ? NO_FIGURE : `${overallAccuracy}%`}
+            </div>
+            <p className="text-xs text-gray-500 mt-1">
+              {overallAccuracy === null
+                ? "No month has both a prior 3-month window and a non-zero actual."
+                : "100% − average MAPE, over months replayed from history"}
+            </p>
           </CardContent>
         </Card>
         <Card>
@@ -624,7 +763,9 @@ function AccuracyTab({
             <CardTitle className="text-sm font-medium text-gray-500">Average MAPE</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-bold text-[#1F1D1B]">{overallMape}%</div>
+            <div className="text-3xl font-bold text-[#1F1D1B]">
+              {overallMape === null ? NO_FIGURE : `${overallMape}%`}
+            </div>
             <p className="text-xs text-gray-500 mt-1">Mean Absolute Percentage Error</p>
           </CardContent>
         </Card>
@@ -633,8 +774,10 @@ function AccuracyTab({
             <CardTitle className="text-sm font-medium text-gray-500">Data Points</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-bold text-[#1F1D1B]">{comparisonData.length}</div>
-            <p className="text-xs text-gray-500 mt-1">Forecast vs actual comparisons</p>
+            <div className="text-3xl font-bold text-[#1F1D1B]">{scoredCount}</div>
+            <p className="text-xs text-gray-500 mt-1">
+              Months replayed against their own prior 3 months
+            </p>
           </CardContent>
         </Card>
       </div>
@@ -642,7 +785,12 @@ function AccuracyTab({
       {/* Comparison table */}
       <Card>
         <CardHeader>
-          <CardTitle>Forecast vs Actual Comparison</CardTitle>
+          <CardTitle>SMA-3 Back-test vs Actual</CardTitle>
+          <p className="text-xs text-gray-500 mt-1">
+            The “SMA-3” column is not a forecast the business made — no forecast
+            exists for these months. It is the average of the three months
+            before each row, computed now from this same history.
+          </p>
         </CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
@@ -651,7 +799,7 @@ function AccuracyTab({
                 <tr className="border-b border-[#E2DDD8]">
                   <th className="text-left py-2 px-3 font-medium text-gray-500">Period</th>
                   <th className="text-left py-2 px-3 font-medium text-gray-500">Product</th>
-                  <th className="text-right py-2 px-3 font-medium text-gray-500">Forecast Qty</th>
+                  <th className="text-right py-2 px-3 font-medium text-gray-500">SMA-3 (back-test)</th>
                   <th className="text-right py-2 px-3 font-medium text-gray-500">Actual Qty</th>
                   <th className="text-right py-2 px-3 font-medium text-gray-500">Variance</th>
                   <th className="text-right py-2 px-3 font-medium text-gray-500">MAPE %</th>
@@ -673,9 +821,15 @@ function AccuracyTab({
                       </span>
                     </td>
                     <td className="py-2 px-3 text-right">
-                      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium border ${getMapeColor(r.mape)}`}>
-                        {r.mape}%
-                      </span>
+                      {Number.isFinite(r.mape) ? (
+                        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium border ${getMapeColor(r.mape)}`}>
+                          {r.mape}%
+                        </span>
+                      ) : (
+                        <span className="text-gray-400" title="Actual was zero — no percentage error is defined">
+                          {NO_FIGURE}
+                        </span>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -738,18 +892,30 @@ function PromiseDateTab({
               </CardContent>
             </Card>
 
+            {/* This card used to be captioned "Material Status" beside the
+                selected product, but /api/promise-date computes ONE reading of
+                the whole raw_materials table and stamps it on every product —
+                no BOM is consulted. It is the same value for every row, so it
+                is now labelled as the org-wide figure it is. The per-product
+                answer would come from the BOM-driven /api/mrp check.
+                BUG-2026-08-13-014. */}
             <Card>
               <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-gray-500">Material Status</CardTitle>
+                <CardTitle className="text-sm font-medium text-gray-500">
+                  Raw Materials (all products)
+                </CardTitle>
               </CardHeader>
               <CardContent>
                 <span
                   className={`inline-flex items-center rounded-full px-3 py-1 text-sm font-medium border ${
-                    availabilityColor[selected.materialAvailability] ?? ""
+                    availabilityColor[selected.orgMaterialAvailability] ?? ""
                   }`}
                 >
-                  {selected.materialAvailability.replace(/_/g, " ")}
+                  {selected.orgMaterialAvailability.replace(/_/g, " ")}
                 </span>
+                <p className="text-xs text-gray-500 mt-1">
+                  Whole-warehouse reading — not specific to this product
+                </p>
               </CardContent>
             </Card>
 
@@ -814,7 +980,6 @@ function PromiseDateTab({
                     <tr className="border-b border-[#E2DDD8]">
                       <th className="text-left py-2 px-3 font-medium text-gray-500">Product</th>
                       <th className="text-right py-2 px-3 font-medium text-gray-500">Queue (days)</th>
-                      <th className="text-left py-2 px-3 font-medium text-gray-500">Materials</th>
                       <th className="text-right py-2 px-3 font-medium text-gray-500">Est. Days</th>
                       <th className="text-left py-2 px-3 font-medium text-gray-500">Promise Date</th>
                     </tr>
@@ -833,15 +998,9 @@ function PromiseDateTab({
                           <span className="text-gray-400 ml-1 text-xs">({p.productCode})</span>
                         </td>
                         <td className="py-2 px-3 text-right">{p.currentQueueDays}</td>
-                        <td className="py-2 px-3">
-                          <span
-                            className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium border ${
-                              availabilityColor[p.materialAvailability] ?? ""
-                            }`}
-                          >
-                            {p.materialAvailability.replace(/_/g, " ")}
-                          </span>
-                        </td>
+                        {/* The "Materials" column is gone: every row carried
+                            the identical whole-org reading, so as a per-product
+                            column it was pure noise. BUG-2026-08-13-014. */}
                         <td className="py-2 px-3 text-right font-medium">{p.estimatedCompletionDays}</td>
                         <td className="py-2 px-3 font-medium text-[#6B5C32]">{p.promiseDate}</td>
                       </tr>

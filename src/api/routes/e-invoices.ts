@@ -270,55 +270,49 @@ app.put("/:id", async (c) => {
     }
 
     const body = await c.req.json();
-    const now = new Date().toISOString();
 
+    // -----------------------------------------------------------------------
+    // action:"submit" — DISABLED. It MINTED an LHDN identity that LHDN had
+    // never issued. BUG-2026-08-13-014.
+    //
+    // What it used to do:
+    //
+    //   submissionId = `LHDN-SUB-${yyyymmdd}-${Math.floor(Math.random()*999)}`
+    //   uuid         = 15 random chars from [A-Z0-9]
+    //   UPDATE e_invoices SET status='VALID', submittedAt=now, validatedAt=now,
+    //                        submissionId=?, uuid=?
+    //   // comment on that line: "Mock auto-validation: SUBMITTED → VALID"
+    //
+    // There is NO LHDN / MyInvois client anywhere in this repo (checked across
+    // src/: the only other mentions of "LHDN" are a page heading, a comment,
+    // and a mail-sender regex). Nothing was ever transmitted. The row then
+    // rendered on /invoices/e-invoice as a green **VALID** badge carrying a
+    // fabricated clearance UUID — a number the owner could hand to an auditor
+    // — and the audit journal recorded it under a comment calling it "the LHDN
+    // transmission moment ... for tax-audit traceability".
+    //
+    // This is the one figure in this sweep that is not merely wrong: it is a
+    // government-issued identifier that no government issued. It cannot be
+    // sourced, so it must not be produced. Wiring the real MyInvois API
+    // (credentials, TIN validation, digital signature, the 72-hour rejection
+    // window) is a project, not a fix — it is the top owner decision in the PR.
+    //
+    // GET, POST (build the UBL XML) and action:"cancel" are untouched: they
+    // manipulate our own records and claim nothing about LHDN.
+    // -----------------------------------------------------------------------
     if (body.action === "submit") {
-      if (existing.status !== "PENDING" && existing.status !== "INVALID") {
-        return c.json(
-          {
-            success: false,
-            error: "Only PENDING or INVALID e-invoices can be submitted",
-          },
-          400,
-        );
-      }
-
-      const submissionId = `LHDN-SUB-${now.slice(0, 10).replace(/-/g, "")}-${String(
-        Math.floor(Math.random() * 999),
-      ).padStart(3, "0")}`;
-      const uuid = Array.from({ length: 15 }, () =>
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[
-          Math.floor(Math.random() * 36)
-        ],
-      ).join("");
-
-      // Mock auto-validation: SUBMITTED → VALID immediately
-      await c.var.DB.prepare(
-        `UPDATE e_invoices SET status = ?, submittedAt = ?, validatedAt = ?,
-           submissionId = ?, uuid = ?, errorMessage = NULL WHERE id = ?`,
-      )
-        .bind("VALID", now, now, submissionId, uuid, id)
-        .run();
-
-      const updated = await c.var.DB.prepare(
-        "SELECT * FROM e_invoices WHERE id = ?",
-      )
-        .bind(id)
-        .first<EInvoiceRow>();
-      if (!updated) {
-        return c.json({ success: false, error: "e-Invoice not found" }, 404);
-      }
-      // Audit emit (P3.4) — e-invoice submit. This is the LHDN
-      // transmission moment; capture before/after so the journal records
-      // submissionId / uuid / status flip for tax-audit traceability.
-      await emitAudit(c, {
-        resource: "e-invoices",
-        resourceId: id,
-        action: "submit",
-        before: rowToEInvoice(existing),
-        after: rowToEInvoice(updated),
-      });
-      return c.json({ success: true, data: rowToEInvoice(updated) });
+      return c.json(
+        {
+          success: false,
+          error:
+            "Submission to LHDN is not implemented. This action used to mint a " +
+            "random submission ID and UUID and mark the e-invoice VALID without " +
+            "contacting LHDN, so the clearance shown was not real. The e-invoice " +
+            "XML is generated and stored; transmission must be done through " +
+            "MyInvois until a real integration is built.",
+        },
+        501,
+      );
     }
 
     if (body.action === "cancel") {
@@ -345,6 +339,17 @@ app.put("/:id", async (c) => {
       if (!updated) {
         return c.json({ success: false, error: "e-Invoice not found" }, 404);
       }
+      // Audit emit (P3.4). The `submit` branch carried the only emit on this
+      // router and it has been removed with the fabricated LHDN submission —
+      // cancel is a real state change on a tax document and keeps its journal
+      // entry, so this router does not silently lose audit coverage.
+      await emitAudit(c, {
+        resource: "e-invoices",
+        resourceId: id,
+        action: "cancel",
+        before: rowToEInvoice(existing),
+        after: rowToEInvoice(updated),
+      });
       return c.json({ success: true, data: rowToEInvoice(updated) });
     }
 

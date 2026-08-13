@@ -5,7 +5,8 @@
 // is derived from the `workers` table at run-time.
 //
 //   GET  /api/payroll?period=2026-04  → list payroll records for a period
-//   POST /api/payroll                  → generate run for all ACTIVE workers
+//   POST /api/payroll                  → DISABLED (501) — it fabricated OT;
+//                                       use POST /api/payslips instead
 //   PUT  /api/payroll                  → bulk update status for a period
 //
 // Response shape matches legacy mock: camelCase *Sen fields, no timestamps.
@@ -16,15 +17,6 @@ import { requirePermission } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
-
-type WorkerRow = {
-  id: string;
-  empNo: string;
-  name: string;
-  status: string;
-  basicSalarySen: number;
-  workingDaysPerMonth: number;
-};
 
 type PayrollRow = {
   id: string;
@@ -80,39 +72,6 @@ function rowToPayroll(r: PayrollRow) {
   };
 }
 
-// PAY-YYMM-NNN sequential, bucketed by payroll period. Bug fix 2026-04-28:
-// previous PAY-NNNNN format was a global counter without month context.
-// Now derives YYMM from the `period` (YYYY-MM) so all rows for a given
-// run share the same prefix and number monotonically inside it. Falls
-// back to the current month if the period is malformed.
-async function nextPayrollId(
-  db: D1Database,
-  period: string,
-): Promise<string> {
-  let yymm: string;
-  const m = /^(\d{4})-(\d{2})$/.exec(period ?? "");
-  if (m) {
-    yymm = `${m[1].slice(2)}${m[2]}`;
-  } else {
-    const now = new Date();
-    yymm = `${String(now.getFullYear()).slice(2)}${String(
-      now.getMonth() + 1,
-    ).padStart(2, "0")}`;
-  }
-  const prefix = `PAY-${yymm}-`;
-  const res = await db
-    .prepare(
-      "SELECT id FROM payroll_records WHERE id LIKE ? ORDER BY id DESC LIMIT 1",
-    )
-    .bind(`${prefix}%`)
-    .first<{ id: string }>();
-  if (!res) return `${prefix}001`;
-  const tail = res.id.replace(prefix, "");
-  const seq = parseInt(tail, 10);
-  if (!Number.isFinite(seq)) return `${prefix}001`;
-  return `${prefix}${String(seq + 1).padStart(3, "0")}`;
-}
-
 // ---------------------------------------------------------------------------
 // GET /api/payroll?period=YYYY-MM
 // ---------------------------------------------------------------------------
@@ -132,114 +91,52 @@ app.get("/", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /api/payroll — generate a run for all ACTIVE workers
+// POST /api/payroll — DISABLED. It fabricated overtime. BUG-2026-08-13-014.
+//
+// Every run did this, per ACTIVE worker:
+//
+//     const hourlyRateSen  = worker.basicSalarySen / (26 * 9);
+//     const otHoursWeekday = Math.floor(Math.random() * 16) + 2;
+//     const otHoursSunday  = Math.random() > 0.5 ? Math.floor(Math.random() * 8) : 0;
+//     const otHoursHoliday = Math.random() > 0.8 ? Math.floor(Math.random() * 8) : 0;
+//
+// Those three dice rolls were multiplied by 1.5x / 2.0x / 3.0x the hourly rate,
+// added to basic pay, and INSERTed into `payroll_records` as `otHours*`,
+// `otAmountSen`, `grossSalarySen` and `netPaySen`. No attendance table was read
+// at any point. The hourly rate itself hardcoded a 26-day x 9-hour month while
+// `workingDaysPerMonth` sat unused in the very same SELECT, and SOCSO (745),
+// EIS (390) and PCB (0) were flat constants regardless of salary band.
+//
+// Nothing in src/pages calls `/api/payroll` — but the route is mounted
+// (worker.ts) and the assistant's `get_payroll` tool READS `payroll_records`
+// (src/api/lib/assistant-tools.ts), so one call would have fed random net pay
+// back to the owner as an answer to "what did this worker earn".
+//
+// The REAL payroll engine is **POST /api/payslips**: `computeMonthlyLabor`
+// (src/lib/labor-engine.ts) over `working_hour_entries` and effective-dated pay
+// rules, with day-typed weekday / Sunday / public-holiday OT and per-worker
+// statutory toggles. This route is a legacy duplicate of it.
+//
+// Refusing is the fix, not deriving OT here: a second payroll engine beside the
+// real one is how two net-pay figures come to disagree. GET and PUT are left
+// alone so any pre-existing rows stay readable (and auditable) — see the PR for
+// the owner question about deleting them.
 // ---------------------------------------------------------------------------
 app.post("/", async (c) => {
   // RBAC gate (P3.3-followup) — payroll:create (run payroll).
   const denied = await requirePermission(c, "payroll", "create");
   if (denied) return denied;
-  try {
-    const body = await c.req.json();
-    const { period } = body;
-    if (!period) {
-      return c.json(
-        { success: false, error: "Period is required (e.g. 2026-04)" },
-        400,
-      );
-    }
-
-    const existing = await c.var.DB.prepare(
-      "SELECT COUNT(*) AS c FROM payroll_records WHERE period = ?",
-    )
-      .bind(period)
-      .first<{ c: number }>();
-    if ((existing?.c ?? 0) > 0) {
-      return c.json(
-        {
-          success: false,
-          error: "Payroll already generated for this period. Delete first to regenerate.",
-        },
-        400,
-      );
-    }
-
-    const wres = await c.var.DB.prepare(
-      "SELECT id, empNo, name, status, basicSalarySen, workingDaysPerMonth FROM workers WHERE status = 'ACTIVE'",
-    ).all<WorkerRow>();
-    const activeWorkers = wres.results ?? [];
-
-    const rows: PayrollRow[] = [];
-    for (const worker of activeWorkers) {
-      const hourlyRateSen = worker.basicSalarySen / (26 * 9);
-
-      const otHoursWeekday = Math.floor(Math.random() * 16) + 2;
-      const otHoursSunday = Math.random() > 0.5 ? Math.floor(Math.random() * 8) : 0;
-      const otHoursHoliday = Math.random() > 0.8 ? Math.floor(Math.random() * 8) : 0;
-
-      const otWeekdayAmountSen = Math.round(hourlyRateSen * otHoursWeekday * 1.5);
-      const otSundayAmountSen = Math.round(hourlyRateSen * otHoursSunday * 2.0);
-      const otHolidayAmountSen = Math.round(hourlyRateSen * otHoursHoliday * 3.0);
-      const otAmountSen = otWeekdayAmountSen + otSundayAmountSen + otHolidayAmountSen;
-
-      const grossSalarySen = worker.basicSalarySen + otAmountSen;
-
-      const epfEmployeeSen = Math.round(worker.basicSalarySen * 0.11);
-      const epfEmployerSen = Math.round(worker.basicSalarySen * 0.13);
-      const socsoEmployeeSen = 745;
-      const socsoEmployerSen = 2615;
-      const eisEmployeeSen = 390;
-      const eisEmployerSen = 390;
-      const pcbSen = 0;
-
-      const totalDeductionsSen = epfEmployeeSen + socsoEmployeeSen + eisEmployeeSen + pcbSen;
-      const netPaySen = grossSalarySen - totalDeductionsSen;
-
-      const id = await nextPayrollId(c.var.DB, period);
-      await c.var.DB.prepare(
-        `INSERT OR IGNORE INTO payroll_records (
-           id, workerId, workerName, period, basicSalarySen, workingDays,
-           otHoursWeekday, otHoursSunday, otHoursHoliday, otAmountSen, grossSalarySen,
-           epfEmployeeSen, epfEmployerSen, socsoEmployeeSen, socsoEmployerSen,
-           eisEmployeeSen, eisEmployerSen, pcbSen, totalDeductionsSen, netPaySen, status
-         ) VALUES (?, ?, ?, ?, ?, ?,  ?, ?, ?, ?, ?,  ?, ?, ?, ?,  ?, ?, ?, ?, ?, 'DRAFT')`,
-      )
-        .bind(
-          id,
-          worker.id,
-          worker.name,
-          period,
-          worker.basicSalarySen,
-          worker.workingDaysPerMonth,
-          otHoursWeekday,
-          otHoursSunday,
-          otHoursHoliday,
-          otAmountSen,
-          grossSalarySen,
-          epfEmployeeSen,
-          epfEmployerSen,
-          socsoEmployeeSen,
-          socsoEmployerSen,
-          eisEmployeeSen,
-          eisEmployerSen,
-          pcbSen,
-          totalDeductionsSen,
-          netPaySen,
-        )
-        .run();
-
-      const inserted = await c.var.DB.prepare(
-        "SELECT * FROM payroll_records WHERE id = ?",
-      )
-        .bind(id)
-        .first<PayrollRow>();
-      if (inserted) rows.push(inserted);
-    }
-
-    const data = rows.map(rowToPayroll);
-    return c.json({ success: true, data, total: data.length }, 201);
-  } catch {
-    return c.json({ success: false, error: "Invalid request body" }, 400);
-  }
+  return c.json(
+    {
+      success: false,
+      error:
+        "Payroll generation is disabled on this endpoint: it invented overtime " +
+        "hours with a random number generator instead of reading attendance. " +
+        "Generate payroll from the Payroll page (POST /api/payslips), which " +
+        "computes day-typed OT from working_hour_entries.",
+    },
+    501,
+  );
 });
 
 // ---------------------------------------------------------------------------

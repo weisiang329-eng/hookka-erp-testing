@@ -8,12 +8,13 @@
 //     data: { finishedProducts, wipItems, rawMaterials }
 //   }
 //
-// `finishedProducts` are products with `stockQty` defaulted to 0 — the real
-// on-hand quantity is derived client-side from fg_units state (see
-// `deriveFGStock` in src/pages/inventory/index.tsx). `wipItems` come from
-// the wip_items table and `rawMaterials` from raw_materials. The raw
-// material POST endpoint validates uniqueness of itemCode the same way as
-// the in-memory route.
+// `finishedProducts` are catalog products with `stockQty: null` — this
+// endpoint does NOT compute finished-goods stock. The real on-hand quantity
+// comes from `deriveFGStock` (src/lib/fg-stock.ts), served by
+// **GET /api/inventory/fg-stock**. `wipItems` come from the wip_items table
+// (their `stockQty` IS a real running balance) and `rawMaterials` from
+// raw_materials (`balanceQty` is real). The raw material POST endpoint
+// validates uniqueness of itemCode the same way as the in-memory route.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
@@ -154,13 +155,25 @@ app.get("/", async (c) => {
     ).all<RawMaterialRow>(),
   ]);
 
-  // stockQty is always 0 from the API — the real FG inventory is derived
-  // client-side from fg_units by `deriveFGStock` in
-  // src/pages/inventory/index.tsx. Keeping the field on the response
-  // preserves the wire-shape that the frontend expects.
+  // `stockQty` is NOT COMPUTED HERE — it is `null`, deliberately.
+  //
+  // It used to be the literal `0`, which is a different claim: `0` asserts
+  // "this product has nothing on hand", and five screens printed that
+  // assertion as a measured on-hand quantity (the FG pickers on
+  // /service-orders and /service-cases, the current-balance cell on
+  // /inventory/adjustments, and both mobile Inventory tabs, where it was also
+  // multiplied by a price to publish an "Amount" of RM 0.00 for every SKU).
+  // Prod carries 380 finished products and every one of them read 0.
+  //
+  // The REAL finished-goods on-hand figure is derived from fg_units / PO
+  // state by `deriveFGStock` (src/lib/fg-stock.ts) and is served, snapshot
+  // cached, by **GET /api/inventory/fg-stock** — use that endpoint if you
+  // need a quantity. `null` here means "not computed by this endpoint", and
+  // every consumer must render it as "—" rather than coercing it with `?? 0`.
+  // See BUG-2026-08-13-014.
   const finishedProducts = (productsRes.results ?? []).map((p) => ({
     ...rowToProduct(p),
-    stockQty: 0,
+    stockQty: null as number | null,
   }));
   const wipItems = (wipRes.results ?? []).map(rowToWipItem);
   const rawMaterials = (rmRes.results ?? []).map(rowToRawMaterial);

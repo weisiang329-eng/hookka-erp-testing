@@ -1851,6 +1851,22 @@ export const warehouseConfig: ModuleConfig = {
 //                       by value. TODO: dedicated stock-value endpoint.
 //   • Adjustments     → /api/stock-adjustments
 // ---------------------------------------------------------------------------
+// NO QUANTITY AND NO VALUE ON THIS TAB — deliberately. BUG-2026-08-13-014.
+//
+// `/api/inventory`'s `finishedProducts` is the PRODUCTS catalog; it does not
+// compute finished-goods stock and now ships `stockQty: null` (it used to ship
+// the literal 0). These two sources read `num(r, "stockQty")`, which coerced
+// that to 0, so on prod's 380 products the phone displayed:
+//   • "Qty 0" against every SKU, and
+//   • "Amount RM 0.00", because the Amount was basePriceSen × 0 — and
+//     `basePriceSen` is the SELLING price, so even with a real quantity this
+//     would have been a retail-valued "stock value", not a stock value.
+// The real on-hand figure is GET /api/inventory/fg-stock (deriveFGStock, the
+// same derivation the desktop Inventory page renders). Wiring it here needs a
+// second URL per DataSource, which this config layer does not have — so the
+// figures read "—" until that is built. See the PR's owner-decision list.
+const FG_QTY_UNAVAILABLE = "—";
+
 const finishedGoodsSource: DataSource = {
   url: "/api/inventory",
   select: selectNested("data", "finishedProducts"),
@@ -1859,36 +1875,38 @@ const finishedGoodsSource: DataSource = {
     code: str(r, "code") || "—",
     title: str(r, "name") || "—",
     subLine: str(r, "category") || undefined,
-    meta1: { label: "Qty", value: num(r, "stockQty") },
-    meta2: { label: "Amount", value: money(num(r, "basePriceSen", "price1Sen") * num(r, "stockQty")) },
+    meta1: { label: "On hand", value: FG_QTY_UNAVAILABLE },
   }),
   columns: [
     textCol("code", "Reference", (r) => str(r, "code")),
     textCol("name", "Customer", (r) => str(r, "name")),
     enumCol("category", "State", (r) => str(r, "category"), ["BEDFRAME", "SOFA", "ACCESSORY"]),
-    numCol("qty", "Qty", (r) => num(r, "stockQty")),
   ],
   defaultSort: { key: "name", dir: "asc" },
   subTabs: [{ key: "fg", label: "Finished Goods", match: () => true }],
 };
 
 const wipSource: DataSource = {
-  // WIP rows are surfaced by the inventory meta endpoint when available; if the
-  // key is absent the list is empty (desktop computes WIP from production
-  // orders). TODO: wire the production-orders WIP derivation here in Phase 3.
+  // `/api/inventory` returns { finishedProducts, wipItems, rawMaterials }.
+  // This read `selectNested("data", "wip")` — a key that endpoint has never
+  // sent — so the WIP tab has always drawn its empty state over a payload that
+  // was carrying the rows all along. Unlike finished goods, `wip_items.stockQty`
+  // IS a real running balance (the ledger the WIP board and C11 are about), and
+  // `relatedProduct` is the product it belongs to. BUG-2026-08-13-014.
   url: "/api/inventory",
-  select: selectNested("data", "wip"),
+  select: selectNested("data", "wipItems"),
   toVM: (r): RowVM => ({
-    id: str(r, "id", "code", "poNo"),
-    code: str(r, "code", "poNo") || "—",
-    title: str(r, "name", "productName") || "—",
-    subLine: str(r, "type", "wipType") || undefined,
-    meta1: { label: "Qty", value: num(r, "qty", "quantity") },
+    id: str(r, "id", "code"),
+    code: str(r, "code") || "—",
+    title: str(r, "relatedProduct") || str(r, "type") || "—",
+    subLine: str(r, "type") || undefined,
+    meta1: { label: "Qty", value: num(r, "stockQty") },
   }),
   columns: [
-    textCol("code", "Reference", (r) => str(r, "code", "poNo")),
-    textCol("name", "Customer", (r) => str(r, "name", "productName")),
-    numCol("qty", "Qty", (r) => num(r, "qty", "quantity")),
+    textCol("code", "Reference", (r) => str(r, "code")),
+    textCol("name", "Customer", (r) => str(r, "relatedProduct")),
+    textCol("type", "State", (r) => str(r, "type")),
+    numCol("qty", "Qty", (r) => num(r, "stockQty")),
   ],
   defaultSort: { key: "code", dir: "asc" },
   subTabs: [{ key: "wip", label: "WIP", match: () => true }],
@@ -2041,6 +2059,10 @@ const fabricsSource: DataSource = {
   subTabs: [{ key: "fabrics", label: "Fabrics", match: () => true }],
 };
 
+// Same story as finishedGoodsSource — and one step worse, because this tab is
+// named for the figure it cannot compute. Qty and Amount both read "—" until a
+// quantity source is wired; `defaultSort` moves off the removed `amount`
+// column to the product code. BUG-2026-08-13-014.
 const stockValueSource: DataSource = {
   url: "/api/inventory",
   select: selectNested("data", "finishedProducts"),
@@ -2049,16 +2071,14 @@ const stockValueSource: DataSource = {
     code: str(r, "code") || "—",
     title: str(r, "name") || "—",
     subLine: str(r, "category") || undefined,
-    meta1: { label: "Qty", value: num(r, "stockQty") },
-    meta2: { label: "Amount", value: money(num(r, "basePriceSen", "price1Sen") * num(r, "stockQty")) },
+    meta1: { label: "On hand", value: FG_QTY_UNAVAILABLE },
+    meta2: { label: "Value", value: FG_QTY_UNAVAILABLE },
   }),
   columns: [
     textCol("code", "Reference", (r) => str(r, "code")),
     textCol("name", "Customer", (r) => str(r, "name")),
-    numCol("qty", "Qty", (r) => num(r, "stockQty")),
-    numCol("amount", "Amount", (r) => num(r, "basePriceSen", "price1Sen") * num(r, "stockQty")),
   ],
-  defaultSort: { key: "amount", dir: "desc" },
+  defaultSort: { key: "code", dir: "asc" },
   subTabs: [{ key: "stock_value", label: "Stock Value", match: () => true }],
 };
 

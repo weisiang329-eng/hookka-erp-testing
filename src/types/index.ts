@@ -1219,7 +1219,17 @@ export type HistoricalSales = {
 export type PromiseDateCalc = {
   productId: string;
   currentQueueDays: number;
-  materialAvailability: "IN_STOCK" | "PARTIAL" | "NEED_ORDER";
+  /**
+   * ALWAYS null — GET /api/promise-date has no per-product material check.
+   * See the header of src/api/routes/promise-date.ts. The org-wide reading is
+   * `orgMaterialAvailability` below. BUG-2026-08-13-014.
+   */
+  materialAvailability: null;
+  /**
+   * One reading of the WHOLE raw_materials table, identical on every product
+   * in the response. Only render it labelled as an org-wide figure.
+   */
+  orgMaterialAvailability: "IN_STOCK" | "PARTIAL" | "NEED_ORDER";
   estimatedCompletionDays: number;
   promiseDate: string;
 };

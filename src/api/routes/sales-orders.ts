@@ -89,6 +89,8 @@ import {
   rowToSO,
   rowToSOList,
   soListToDeliveryRefs,
+  soListToOrdersDue,
+  ORDERS_DUE_DEFAULT_TOP,
   findIncompleteBomProducts,
   rowToStatusChange,
   rowToPriceOverride,
@@ -114,12 +116,13 @@ import type {
   SOStatusChangeRow,
   PriceOverrideRow,
   SOListRefLike,
+  SOListDueLike,
   SOCascadeResult,
 } from "./sales-orders/_helpers";
 
 // Re-export the helpers that external modules / tests import from this route
 // module, so importers of ".../sales-orders" keep working with no changes.
-export { createProductionOrdersForSO, soListToDeliveryRefs };
+export { createProductionOrdersForSO, soListToDeliveryRefs, soListToOrdersDue };
 export type { SalesOrderRow, SalesOrderItemRow };
 
 const app = new Hono<Env>();
@@ -303,6 +306,80 @@ app.get("/", async (c) => {
     // shared snapshot table under its own cache_key. Every scalar it returns is
     // a straight passthrough in rowToSO (`row.X ?? ""`), and its items are
     // sorted by lineNo — both reproduced below, so output is unchanged.
+    // ── ?fields=orders-due[&top=N] — its OWN narrow read ───────────────────
+    //
+    // The /m Home "Orders due this week" card used the BARE list. Measured on
+    // prod 2026-08-13: 2.16 MB decoded / 1,342 rows / 278-477 ms warm and
+    // 4,108 ms on the cold first load of /m — to render SIX rows of SEVEN
+    // fields. The wire cost is modest (gzip); what this removes is the decode
+    // + JSON.parse + retain on a factory phone's main thread.
+    //
+    // Same treatment as price-index / delivery-refs: a narrow SELECT of only
+    // the seven columns the card reads, then the SAME filter/sort/slice the
+    // screen ran in the browser (soListToOrdersDue — see its comment for why
+    // the ordering stays a stable JS sort over rows pre-ordered by
+    // created_at DESC, id DESC rather than a SQL ORDER BY).
+    //
+    // The WHERE below is a pure optimisation — it removes only rows
+    // soListToOrdersDue would have dropped anyway, and the projection still
+    // applies its own filter, so the two can never disagree.
+    //
+    // Shares the existing snapshot TABLE under cache_key "orders-due:<top>"
+    // (no new table — migrations are inert on deploy). Archive / service-order
+    // / customer-scoped variants compute directly and are NEVER written into
+    // the org-wide snapshot row, same rule as every other branch here.
+    if (c.req.query("fields") === "orders-due") {
+      const topRaw = parseInt(c.req.query("top") ?? "", 10);
+      const top = Math.min(
+        50,
+        Math.max(1, Number.isFinite(topRaw) ? topRaw : ORDERS_DUE_DEFAULT_TOP),
+      );
+      const computeOrdersDue = async () => {
+        const sos = await db
+          .prepare(
+            `SELECT id, company_so, company_so_id, customer_name, status,
+                    hookka_expected_dd, total_sen
+               FROM ${soSourceSql} ${orgWhere}${fullClause}
+                AND hookka_expected_dd IS NOT NULL
+                AND hookka_expected_dd <> ''
+                AND (status IS NULL OR status NOT IN ('DELIVERED','INVOICED','CLOSED','CANCELLED'))
+              ORDER BY created_at DESC, id DESC`,
+          )
+          .bind(...orgParams, ...fullScope.binds)
+          .all<Record<string, unknown>>();
+        // Dual-keyed reads: the pg shim camelCases columns, but never assume it.
+        const g = (r: Record<string, unknown>, camel: string, snake: string) =>
+          r[camel] ?? r[snake];
+        const rows: SOListDueLike[] = (sos.results ?? []).map((r) => ({
+          id: String(g(r, "id", "id") ?? ""),
+          companySO: g(r, "companySO", "company_so") as string | undefined,
+          companySOId: g(r, "companySOId", "company_so_id") as string | undefined,
+          customerName: g(r, "customerName", "customer_name") as string | undefined,
+          status: g(r, "status", "status") as string | undefined,
+          hookkaExpectedDD: g(r, "hookkaExpectedDD", "hookka_expected_dd") as
+            | string
+            | undefined,
+          totalSen: g(r, "totalSen", "total_sen") as number | undefined,
+        }));
+        const data = soListToOrdersDue(rows, top);
+        return { success: true as const, data, total: data.length };
+      };
+      if (includeArchive || serviceOrderFilter !== "false" || isCustomerScoped(c)) {
+        return c.json(await computeOrdersDue());
+      }
+      const { withSnapshot } = await import("../lib/snapshot");
+      return c.json(
+        await withSnapshot(
+          db,
+          { tableName: "sales_orders_list_snapshot", sourceTables: ["sales_orders", "sales_order_items"] },
+          getOrgId(c),
+          computeOrdersDue,
+          `orders-due:${top}`,
+          c,
+        ),
+      );
+    }
+
     if (c.req.query("fields") === "delivery-refs" && !includeArchive && serviceOrderFilter === "false" && !isCustomerScoped(c)) {
       const computeDeliveryRefs = async () => {
         const [sos, items] = await Promise.all([

@@ -366,7 +366,15 @@ export function ApplyBatchPicDialog({ open, count, workers, allWorkers, onCancel
 // ===========================================================================
 // Save-to-Folder dialog — pick existing folder OR create new with name input.
 // ===========================================================================
-type FolderOption = { id: string; name: string; jc_count: number };
+// `jc_count` is a SQL alias, so the pg shim camelCases it to `jcCount` on the
+// LIST endpoint while the POST response hand-builds the snake_case spelling.
+// Read dual-keyed. (BUG-2026-08-13-032)
+type FolderOption = {
+  id: string;
+  name: string;
+  jcCount?: number;
+  jc_count?: number;
+};
 type SaveToFolderDialogProps = {
   open: boolean;
   count: number;
@@ -421,7 +429,7 @@ export function SaveToFolderDialog({ open, count, existing, onCancel, onSave }: 
             <option value="">— select folder —</option>
             {existing.map((f) => (
               <option key={f.id} value={f.id}>
-                {f.name} ({f.jc_count})
+                {f.name} ({Number(f.jcCount ?? f.jc_count ?? 0)})
               </option>
             ))}
           </select>

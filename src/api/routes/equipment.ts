@@ -257,9 +257,11 @@ app.put("/:id", async (c) => {
       const logDate = lm.date || today;
       const logId = genId("ml");
       await c.var.DB.prepare(
+        // No created_at on the production maintenance_logs table — see the
+        // note in routes/maintenance-logs.ts. (BUG-2026-08-13-031)
         `INSERT INTO maintenance_logs (id, equipmentId, equipmentName, type,
-           description, performedBy, date, costSen, downtimeHours, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           description, performedBy, date, costSen, downtimeHours)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
         .bind(
           logId,
@@ -271,7 +273,6 @@ app.put("/:id", async (c) => {
           logDate,
           Number(lm.costSen) || 0,
           Number(lm.downtimeHours) || 0,
-          now,
         )
         .run();
 

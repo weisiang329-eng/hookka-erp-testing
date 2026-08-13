@@ -684,7 +684,13 @@ export default function GRNPage() {
     { key: "supplierName", label: "Supplier", type: "text", sortable: true },
     // Supplier's own DO number (their delivery-order ref). First-class
     // column per owner ruling 2026-06-29 evening — AP team matches on it.
-    { key: "supplierDoNo", label: "Supplier DO No.", type: "text", width: "140px", sortable: true },
+    // NOTE the key spelling: `rowToGRN` (src/api/routes/grn.ts:423) emits this
+    // one as snake_case `supplier_do_no`, like the rest of the arrival/landed-
+    // cost family next to it — grn-detail.tsx:783 reads that same spelling.
+    // `supplierDoNo` matched nothing, so the column and its sort/filter were
+    // silently blank. DataGrid keys are plain strings, so tsc cannot see this.
+    // (BUG-2026-08-13-033)
+    { key: "supplier_do_no", label: "Supplier DO No.", type: "text", width: "140px", sortable: true },
     {
       key: "purchaseOrgCode",
       label: "Purchase co",

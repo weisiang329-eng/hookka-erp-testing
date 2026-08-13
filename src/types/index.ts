@@ -1676,7 +1676,22 @@ export type CreditNote = {
   date: string;
   reason: "RETURN" | "PRICE_ADJUSTMENT" | "DAMAGE" | "OVERCHARGE" | "OTHER";
   reasonDetail: string;
-  items: { description: string; quantity: number; unitPrice: number; total: number }[];
+  // Money keys are `unitPriceSen` / `totalSen` — routes/credit-notes.ts and
+  // routes/debit-notes.ts `parseItems` PROMOTE the legacy `unitPrice`/`total`
+  // to those names on read (name-only; the values were always sen). This type
+  // still described the pre-rename shape, which is why tsc stayed silent while
+  // the CN/DN voucher printed RM NaN and the CSV wrote 0.00.
+  // (BUG-2026-08-13-034)
+  items: {
+    description: string;
+    quantity: number;
+    unitPriceSen: number;
+    totalSen: number;
+    /** @deprecated legacy wire spelling — promoted to unitPriceSen on read. */
+    unitPrice?: number;
+    /** @deprecated legacy wire spelling — promoted to totalSen on read. */
+    total?: number;
+  }[];
   totalAmount: number;
   status: "DRAFT" | "APPROVED" | "POSTED";
   approvedBy: string | null;
@@ -1692,7 +1707,22 @@ export type DebitNote = {
   date: string;
   reason: "UNDERCHARGE" | "ADDITIONAL_CHARGE" | "PRICE_ADJUSTMENT" | "OTHER";
   reasonDetail: string;
-  items: { description: string; quantity: number; unitPrice: number; total: number }[];
+  // Money keys are `unitPriceSen` / `totalSen` — routes/credit-notes.ts and
+  // routes/debit-notes.ts `parseItems` PROMOTE the legacy `unitPrice`/`total`
+  // to those names on read (name-only; the values were always sen). This type
+  // still described the pre-rename shape, which is why tsc stayed silent while
+  // the CN/DN voucher printed RM NaN and the CSV wrote 0.00.
+  // (BUG-2026-08-13-034)
+  items: {
+    description: string;
+    quantity: number;
+    unitPriceSen: number;
+    totalSen: number;
+    /** @deprecated legacy wire spelling — promoted to unitPriceSen on read. */
+    unitPrice?: number;
+    /** @deprecated legacy wire spelling — promoted to totalSen on read. */
+    total?: number;
+  }[];
   totalAmount: number;
   status: "DRAFT" | "APPROVED" | "POSTED";
   approvedBy: string | null;

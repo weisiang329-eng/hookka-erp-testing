@@ -23,7 +23,9 @@ type MaintenanceLogRow = {
   date: string;
   costSen: number;
   downtimeHours: number;
-  createdAt: string;
+  // The production table has no created_at (0001_init's shape — see the POST
+  // handler), so this never arrives. Typed optional rather than asserted.
+  createdAt?: string | null;
 };
 
 function rowToLog(row: MaintenanceLogRow) {
@@ -37,7 +39,7 @@ function rowToLog(row: MaintenanceLogRow) {
     date: row.date,
     costSen: row.costSen,
     downtimeHours: row.downtimeHours,
-    createdAt: row.createdAt,
+    createdAt: row.createdAt ?? null,
   };
 }
 
@@ -81,11 +83,16 @@ app.post("/", async (c) => {
       return c.json({ success: false, error: "Equipment not found" }, 400);
     }
     const id = genId();
-    const now = new Date().toISOString();
     await c.var.DB.prepare(
+      // NOTE: `maintenance_logs` in production is 0001_init's table — no
+      // created_at. 0015_equipment_maintenance.sql, which declares one, is a
+      // `CREATE TABLE IF NOT EXISTS` and was a no-op against the existing
+      // table, and no runtime self-apply adds it. Naming it here made the
+      // INSERT throw into the catch below and answer 400 "Invalid request
+      // body". (BUG-2026-08-13-031)
       `INSERT INTO maintenance_logs (id, equipmentId, equipmentName, type,
-         description, performedBy, date, costSen, downtimeHours, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         description, performedBy, date, costSen, downtimeHours)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -97,7 +104,6 @@ app.post("/", async (c) => {
         body.date,
         Number(body.costSen) || 0,
         Number(body.downtimeHours) || 0,
-        now,
       )
       .run();
     const created = await c.var.DB.prepare(

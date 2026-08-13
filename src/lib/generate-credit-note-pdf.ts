@@ -26,7 +26,7 @@ export function generateCreditNotePdf(
   // --- Header (shared letterhead — single source of truth across all docs) ---
   let y = drawLetterhead(doc, {
     docTitle: "CREDIT NOTE",
-    docNo: data.cnNo ?? "-",
+    docNo: data.cnNo ?? data.noteNumber ?? "-",
     docDate: fmtDate(data.date),
     company: "HOOKKA",
   });
@@ -70,9 +70,9 @@ export function generateCreditNotePdf(
   let yR = y + 5;
   doc.setFontSize(8);
   const cnFields: [string, string][] = [
-    ["CN No", data.cnNo ?? "-"],
+    ["CN No", data.cnNo ?? data.noteNumber ?? "-"],
     ["Date", fmtDate(data.date)],
-    ["Invoice Ref", data.invoiceRef ?? "-"],
+    ["Invoice Ref", data.invoiceRef ?? data.invoiceNumber ?? "-"],
     ["Invoice Date", data.invoiceDate ? fmtDate(data.invoiceDate) : "-"],
   ];
   for (const [label, value] of cnFields) {
@@ -102,19 +102,27 @@ export function generateCreditNotePdf(
   }
 
   // --- Items Table ---
+  // The API (routes/credit-notes.ts `parseItems`) emits
+  // `quantity` / `unitPriceSen` / `totalSen`; the older wire shape this
+  // generator was written against used `qty` / `amountSen`. The page hands the
+  // raw API row straight in (credit-notes.tsx:318), so read both spellings —
+  // before this, Qty and Amount printed 0 on every downloaded credit note.
+  // (BUG-2026-08-13-034)
   type CreditNoteItem = {
     description?: string;
     qty?: number;
+    quantity?: number;
     unitPriceSen?: number;
     amountSen?: number;
+    totalSen?: number;
   };
   const items: CreditNoteItem[] = data.items ?? [];
   const tableBody = items.map((item, idx) => [
     String(idx + 1),
     item.description ?? "",
-    String(item.qty ?? 0),
+    String(item.qty ?? item.quantity ?? 0),
     fmtCurrency(item.unitPriceSen ?? 0),
-    fmtCurrency(item.amountSen ?? 0),
+    fmtCurrency(item.amountSen ?? item.totalSen ?? 0),
   ]);
 
   autoTable(doc, {
@@ -163,14 +171,14 @@ export function generateCreditNotePdf(
   doc.setFont("helvetica", "bold");
   doc.setTextColor(31, 29, 27);
   doc.text("TOTAL CREDIT:", totalsX, y);
-  doc.text(fmtCurrency(data.totalSen ?? 0), pageW - margin, y, { align: "right" });
+  doc.text(fmtCurrency(data.totalSen ?? data.totalAmount ?? 0), pageW - margin, y, { align: "right" });
   y += 6;
 
   // Amount in words
   doc.setFontSize(8);
   doc.setFont("helvetica", "italic");
   doc.setTextColor(80, 80, 80);
-  doc.text(`Amount in words: ${amountInWords(data.totalSen ?? 0)}`, margin, y, { maxWidth: pageW - margin * 2 });
+  doc.text(`Amount in words: ${amountInWords(data.totalSen ?? data.totalAmount ?? 0)}`, margin, y, { maxWidth: pageW - margin * 2 });
   y += 12;
 
   // --- Signature Lines ---
@@ -207,7 +215,7 @@ export function generateCreditNotePdf(
   doc.text(`Generated: ${fmtDate(new Date().toISOString())}`, pageW - margin, footerY, { align: "right" });
 
   if (opts?.returnDoc) return doc;
-  doc.save(`${data.cnNo ?? "CreditNote"}.pdf`);
+  doc.save(`${data.cnNo ?? data.noteNumber ?? "CreditNote"}.pdf`);
 }
 
 // Merge several credit notes into ONE downloadable PDF (Credit Notes list →

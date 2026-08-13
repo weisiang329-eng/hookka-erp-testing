@@ -34,6 +34,154 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-034 — every downloaded Credit Note and Debit Note printed RM 0.00, because a stale shared type certified the wrong keys `money` `ui-frontend` `data-integrity` 🟢
+
+**Symptom.** A customer-facing document, wrong in the loudest possible way, and nobody
+reported it. The downloaded **Credit Note / Debit Note PDF** showed doc-no `-`, Invoice
+Ref `-`, Qty **0** and Amount **RM 0.00** on every line, **TOTAL CREDIT RM 0.00**,
+"Amount in words: zero", and always saved as `CreditNote.pdf`. The on-screen voucher
+printed `RMNaN` in Unit Price and Amount; the CSV export wrote `0.00`.
+
+**Root cause.** `routes/credit-notes.ts:65-81` (`parseItems`) deliberately promotes the
+legacy item keys — its own comment says *"the rename is name-only"* — so the wire shape
+is `{quantity, unitPriceSen, totalSen}` under a header carrying `noteNumber`,
+`invoiceNumber` and `totalAmount`. The PDF generator was written against the older shape
+and still read `data.cnNo`, `data.invoiceRef`, `item.qty`, `item.amountSen`,
+`data.totalSen`. The page hands it the **raw API row** (`credit-notes.tsx:318`
+`generateCreditNotePdf(row)`), so every one of those reads is `undefined` and the `?? 0`
+fallbacks turn silence into a confident zero.
+
+**Why tsc was no help — the part worth remembering.** The generator's parameter is
+`data: any`. The voucher and CSV paths *are* typed, against `src/types/index.ts:1669`
+and `:1685`, which still declared `items: {…unitPrice: number; total: number}[]` — the
+pre-rename API. So the type system did not merely fail to catch the wrong key, it
+**certified** it. `formatCurrency` is `sen / 100`, and
+`Intl.NumberFormat('en-MY',{currency:'MYR'}).format(NaN)` returns the string `"RMNaN"`,
+which is what shipped.
+
+**Fix.** `src/types/index.ts` — items are `unitPriceSen` / `totalSen`, with the legacy
+spellings kept as `@deprecated` optionals so no other consumer breaks. The four typed
+read sites (`credit-notes.tsx:50-51` voucher, `:421-422` CSV, and the debit-note twins)
+read `…Sen ?? legacy ?? 0`. `src/lib/generate-credit-note-pdf.ts` and
+`generate-debit-note-pdf.ts` read both spellings at all eight sites, including the
+`doc.save()` filename.
+
+**Verified.** `npx tsc -p tsconfig.app.json --noEmit` clean, `npm test` green,
+`npx eslint` 0 errors. **Not yet observed on prod** — deploying is not part of this
+audit; download one credit note after it ships and confirm real Qty and Amount.
+
+---
+
+## BUG-2026-08-13-033 — the GRN list's "Supplier DO No." column was blank because the grid key was camelCase and the route emits snake_case `procurement` `ui-frontend` 🟢
+
+**Symptom.** "Supplier DO No." — a first-class column added on owner ruling 2026-06-29
+because the AP team matches on it — was empty for every row on `/procurement/grn`, and
+its sort and filter did nothing. The same number displayed correctly on GRN **detail**.
+
+**Root cause.** `rowToGRN` (`src/api/routes/grn.ts:423`) emits
+`supplier_do_no: row.supplierDoNo ?? row.supplier_do_no ?? null` — snake_case, matching
+the arrival / landed-cost family beside it. The grid asked for `supplierDoNo`
+(`grn.tsx:687`). `DataGrid` resolves a cell with
+`path.split(".").reduce((acc, part) => acc?.[part], obj)` (`data-grid.tsx:327`) and
+`Column<T>.key` is a plain `string`, so a key matching nothing renders empty rather than
+failing. `grn-detail.tsx:783` reads `grn.supplier_do_no`, which is why detail worked and
+the list did not.
+
+**Fix.** `src/pages/procurement/grn.tsx:687` → key `"supplier_do_no"`. Rows reach the
+grid straight from the API response (`grn.tsx:406`), unmapped, so nothing else changes.
+
+**Verified.** Gates green. Wire check for prod:
+`curl -s "$HOST/api/grn?limit=1" | jq '.data[0]|keys'` — `supplier_do_no` present,
+`supplierDoNo` absent.
+
+---
+
+## BUG-2026-08-13-032 — Production Folders showed "` job cards`" because a SQL alias is exactly what the shim camelCases `production-orders` `ui-frontend` `data-migration` 🟢
+
+**Symptom.** The folder card on `/production/folders` read "` job cards`" with no
+number, and the Save-to-Folder picker read `Name ()`. Immediately after *creating* a
+folder it looked correct, which is what made it read as a refresh problem.
+
+**Root cause.** `GET /api/production-folders` returns its rows **unmapped**
+(`production-folders.ts:121`), and `columnFrom` (`src/api/lib/db-pg.ts:57`) is
+`snakeToCamel[col] ?? postgres.toCamel(col)` — the rename map holds *migration* columns,
+so a **SQL alias** falls through to `toCamel` and `jc_count` arrives as `jcCount`. The
+frontend read `folder.jc_count`. `POST` (`:177`) hand-builds `jc_count: jcIds.length` as
+a literal, which is why the count appeared once and then vanished.
+
+A comment at `folders.tsx:26-28` asserted the opposite — that `jc_count` "stays
+snake_case because it comes from a SQL alias" — and that comment is the whole bug. The
+repo already documents the correct behaviour at `job-cards.ts:296`
+(*"`jc_count -> jcCount`"*), from a 2026-04-28 fix of this identical shape.
+
+**Fix.** Dual-keyed reads (`jcCount ?? jc_count`) in `production/folders.tsx`,
+`production/components/BatchActionToolbar.tsx:424` and `production/index.tsx`, and the
+misleading comment replaced with the mechanism.
+
+**Verified.** Gates green. Wire check:
+`curl -s "$HOST/api/production-folders" | jq '.data[0]|keys'`.
+
+---
+
+## BUG-2026-08-13-031 — "Log maintenance" answered 400 "Invalid request body" forever, because the INSERT named a column production has never had `infrastructure` `data-integrity` 🟢
+
+**Symptom.** `/maintenance` → Log maintenance always failed. `maintenance.tsx:218`
+renders `humanizeError(...)`, which correctly classifies the raw text as technical, so
+the operator saw *"Couldn't log maintenance. Please try again."* — and retrying failed
+identically forever.
+
+**Root cause.** Both writers — `PUT /api/equipment/:id` with a `logMaintenance` body
+(`equipment.ts:260`) and `POST /api/maintenance-logs` (`maintenance-logs.ts:86`) —
+INSERT `maintenance_logs.created_at`. Production's `maintenance_logs` is
+`0001_init.sql:1306`'s table, which has no such column;
+`0015_equipment_maintenance.sql:31`, which declares one, is a
+`CREATE TABLE IF NOT EXISTS` and was a **no-op** against the table that already existed.
+No runtime self-apply adds it — `ensureEquipmentAssetColumns` (`equipment.ts:133`)
+touches `equipment` only. Confirmed against the production schema snapshot
+`tests/db-schema.json`. The failing INSERT throws inside each handler's `try` and the
+`catch` answers `400 "Invalid request body"` — the exact signature `HOOKKA-GOTCHAS.md`
+warns about ("a 400 on a well-formed body is usually a DB write throwing inside a
+try/catch").
+
+**Fix.** Drop `created_at` from both INSERTs; type `MaintenanceLogRow.createdAt` as
+`?: string | null` instead of asserting a value that never arrives. Safe against either
+table shape, because `0015`'s declaration carries a `DEFAULT`.
+
+**Not verified, and stated as such.** The fix is *necessary*; I cannot prove from code
+that it is *sufficient*. `0001_init`'s `maintenance_logs` also carries
+`FOREIGN KEY (equipment_id) REFERENCES equipment_list(id)` — a **different table** from
+the `equipment` this route reads and writes. If that FK is live and `equipment_list` is
+not populated, the INSERT will still fail. Probe:
+`SELECT conname, confrelid::regclass FROM pg_constraint WHERE conrelid='maintenance_logs'::regclass AND contype='f';`
+
+---
+
+## BUG-2026-08-13-030 — every write to `/api/lorries` answered 400 "Invalid request body", because `CREATE TABLE IF NOT EXISTS` silently did nothing `infrastructure` `data-integrity` 🟢
+
+**Symptom.** None user-visible — `POST` / `PUT /api/lorries` has no frontend caller
+today (`delivery/detail.tsx:157` only reads the list). Found by reading, not by an
+incident, which is precisely why it is logged: the endpoint was ready to fail the first
+time anyone wired a screen to it.
+
+**Root cause.** All three write paths named `created_at` / `updated_at` (`lorries.ts`
+POST, `PUT /`, `PUT /:id`). Production's `lorries` is `0001_init.sql:343`'s table —
+`id, name, plate_number, capacity, driver_name, driver_contact, status`, plus `org_id`
+from 0087 — and has neither. `0014_drivers_lorries.sql:30`, which declares both with
+defaults, is a `CREATE TABLE IF NOT EXISTS` and was a no-op against the existing table.
+Nothing self-applies them. Same failure mode as -031: the write throws, the `catch`
+returns `400 "Invalid request body"`.
+
+**Fix.** Drop the two columns from all three statements; type
+`LorryRow.createdAt/updatedAt` as `?: string | null` and map them to `null`, so the
+response stops claiming a timestamp it never had.
+
+**Class note.** -030 and -031 are one class: **a table created by `0001_init` and later
+"extended" by a `CREATE TABLE IF NOT EXISTS` in a newer migration, which is a no-op.**
+The columns exist in the migration folder and in the TypeScript row types, and not in
+the database. `tests/sql-columns-exist.test.mjs` cannot see them because it parses only
+flat `SELECT` lists — extending it to `INSERT INTO t (…)` and `UPDATE t SET …` catches
+this class mechanically, and is the top follow-up in
+`docs/AUDIT-LAYER-CONSISTENCY.md` §9.
 ## BUG-2026-08-13-026 — the /m Customer detail downloaded 1,342 sales orders (2.16 MB) to show one customer's last 20, behind a comment that had been false for a month `performance` `ui-frontend` `sales-orders` 🟢
 
 **Symptom.** Opening ONE customer on a phone (`/m/customers/:id`). `src/pages/m/config/modules.ts` `customerDetail.extraFetches` fetched the **bare `/api/sales-orders`** — the whole-org list, every SO field plus every 24-field line item — and the bare `/api/invoices`, then client-filtered to that customer and rendered at most **20 rows of five fields**.

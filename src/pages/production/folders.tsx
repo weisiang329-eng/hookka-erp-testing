@@ -23,9 +23,15 @@ function csrfHeaders(): Record<string, string> {
   return h;
 }
 
-// SupabaseAdapter auto-camelCases column names — listing endpoint returns
-// camelCase keys (createdAt etc.) but jc_count stays snake_case because it
-// comes from a SQL alias on a COUNT(*) subquery, not a renamed column.
+// SupabaseAdapter auto-camelCases column names. The old comment here claimed
+// `jc_count` stayed snake_case "because it comes from a SQL alias" — the
+// opposite is true: `columnFrom` (src/api/lib/db-pg.ts:57) falls back to
+// `postgres.toCamel` for exactly the names NOT in the rename map, i.e. SQL
+// aliases, so the LIST endpoint sends `jcCount`. (job-cards.ts:296 documents
+// the same `jc_count -> jcCount` conversion as a 2026-04-28 bug fix.) Only
+// POST hand-builds a snake_case literal (production-folders.ts:177), which is
+// why the count looked right immediately after creating a folder and went
+// blank on the next load. Read dual-keyed. (BUG-2026-08-13-032)
 type Folder = {
   id: string;
   name: string;
@@ -33,8 +39,17 @@ type Folder = {
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
-  jc_count: number;
+  jcCount?: number;
+  jc_count?: number;
 };
+
+/** The folder's job-card count, whichever spelling the payload used. */
+function folderJcCount(f: {
+  jcCount?: number;
+  jc_count?: number;
+}): number {
+  return Number(f.jcCount ?? f.jc_count ?? 0);
+}
 
 export default function ProductionFoldersPage() {
   const navigate = useNavigate();
@@ -64,7 +79,7 @@ export default function ProductionFoldersPage() {
   }, []);
 
   const handleDelete = async (folder: Folder) => {
-    if (!(await confirm({ title: "Delete folder", message: `Delete folder "${folder.name}"?\n\nThis only removes the folder. The ${folder.jc_count} job card${folder.jc_count === 1 ? "" : "s"} inside stay untouched.`, danger: true }))) return;
+    if (!(await confirm({ title: "Delete folder", message: `Delete folder "${folder.name}"?\n\nThis only removes the folder. The ${folderJcCount(folder)} job card${folderJcCount(folder) === 1 ? "" : "s"} inside stay untouched.`, danger: true }))) return;
     try {
       const res = await fetch(`/api/production-folders/${encodeURIComponent(folder.id)}`, {
         method: "DELETE",
@@ -207,7 +222,7 @@ export default function ProductionFoldersPage() {
                   </button>
                 )}
                 <div className="text-[11px] text-[#8A7F73] mt-0.5">
-                  {folder.jc_count} job card{folder.jc_count === 1 ? "" : "s"} · Created {fmtDate(folder.createdAt)}
+                  {folderJcCount(folder)} job card{folderJcCount(folder) === 1 ? "" : "s"} · Created {fmtDate(folder.createdAt)}
                   {folder.createdBy ? ` · by ${folder.createdBy}` : ""}
                 </div>
               </div>

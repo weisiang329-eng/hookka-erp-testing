@@ -3,6 +3,10 @@
 > **Last verified: 2026-08-13** — every one of the 27 source/test paths this file cites
 > exists (checked mechanically against the tree), and `npm test` is green
 > (3,768 tests / 0 fail). No corrections needed.
+> Updated 2026-08-13 (BUG-2026-08-13-071): C15 gains row 18
+> (`/consignment/return`), a fifth enforcing test file, and a fourth corollary —
+> a row that mixes real and invented columns is *more* dangerous, not less.
+> Suite re-run at that point: 3,866 tests / 0 fail.
 
 `PLAYBOOKS.md` **P5** says: *"Fix all instances of the same class, not just the flagged one."*
 
@@ -727,13 +731,23 @@ place: `/api/department-performance` must keep dividing by clocked time,
 | 15 | department capacity + utilization RAG | `/api/scheduling/capacity` | `9 h` literal while `workingHoursPerDay` was SELECTed and discarded; `0.85` unstated | ✅ 2026-08-13 (-014) |
 | 16 | forecast `confidence` | `POST /api/forecasts` | defaulted to the literal `50`, rendered as a colour-coded badge | ✅ 2026-08-13 (-014) |
 | 17 | `/admin/health` KPIs · agent-console FX + LLM prices | `/admin/health`, `/agents` | seeded-random / frozen constants — **but tagged `_mock`/`est*` and captioned as estimates** | ⬜ deliberate — honest labels; the FX rate gating a real spend limit is an owner decision |
+| 18 | CR No. · return status · return date | `/consignment/return` | `buildMockCRs()`: a module-level counter as a document number, `Math.random()` thresholds as a PENDING→INSPECTED→ACCEPTED→RESTOCKED status, `now −` 1-10 random days as the return date — **beside real customers and real RM, and exported to CSV** | ✅ 2026-08-13 (-071) |
 
-**Enforced by** four files, all structural (`readFileSync` source assertions),
+**Enforced by** five files, all structural (`readFileSync` source assertions),
 because nothing else can catch a number that is merely wrong-but-plausible:
 `tests/no-fabricated-efficiency.test.mjs` (rows 1–2),
 `tests/no-fabricated-worker-metrics.test.mjs` (row 3),
 `tests/no-fabricated-financials.test.mjs` (rows 4–5),
-`tests/no-fabricated-inventory-and-forecast.test.mjs` (rows 6–16).
+`tests/no-fabricated-inventory-and-forecast.test.mjs` (rows 6–16),
+`tests/no-fabricated-consignment-returns.test.mjs` (row 18).
+
+**A fourth corollary, from row 18.** *Real money on an invented status is more
+dangerous than fully fake data.* The `/consignment/return` grid carried the real
+customer, the real branch and (where priced) the real RM; only the status, the
+date and the identifier were invented. The correct figures are what made the
+fabricated column beside them credible — nobody questions a status sitting next
+to money that reconciles. So when a row mixes sources, the *honest* half is not
+mitigation, it is camouflage: audit every column of a row, not the row.
 
 > Every assertion in the 2026-08-13 files was proved by **reintroducing the bug
 > and watching the guard go red**. Do that for any row you add: four of these

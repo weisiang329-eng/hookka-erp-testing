@@ -2,6 +2,10 @@
 
 > **Last verified: 2026-08-13** — all 436 file paths cited in this map were checked
 > mechanically against the tree; 434 exist.
+> Re-checked 2026-08-13 (BUG-2026-08-13-071): both `src/pages/consignment/return.tsx`
+> rows re-read against the file — the page is now a read-only list of recorded
+> returns (783 lines), not a "return flow"; returns are recorded from
+> `consignment/note.tsx` via `POST /api/consignment-notes/:id/return`.
 > Corrected 2026-08-13: `src/pages/procurement/pricing.tsx` was deleted in commit
 > `b3b42b6c` (Supplier Pricing merged into `procurement/maintenance.tsx`; the old route
 > is now a redirect) — both the table row and the "PENDING merge" gotcha said otherwise.
@@ -66,7 +70,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 | `src/pages/consignment/edit.tsx` — Edit CO (1142); unit price + build-up via `@/lib/pricing` | | `sales_orders_archive` / `sales_order_items_archive` / `sales_orders_list_snapshot` | |
 | `src/pages/consignment/detail.tsx` — CO detail (1568); DO-parity P2 | | | |
 | `src/pages/consignment/note.tsx` — CN workspace (5219); 3 tabs | | | |
-| `src/pages/consignment/return.tsx` — Consignment Return (819) | | | |
+| `src/pages/consignment/return.tsx` — Consignment Return, READ-ONLY (783); rows = CN lines with `status='RETURNED'` (BUG-2026-08-13-071 de-fabrication) | | | `tests/no-fabricated-consignment-returns.test.mjs` |
 | `src/pages/maintenance/sofa-combos.tsx` — Sofa Combo grid (1852) | | | |
 | `src/pages/maintenance/SofaComboHistoryDialog.tsx` — history dialog (438) | | | |
 
@@ -208,7 +212,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 | `src/pages/consignment/create.tsx` — create CO (1782) | `src/api/routes/consignment-orders.ts` — CO CRUD (2815) | `drivers` | `tests/three-pl-state-rates.test.mjs` |
 | `src/pages/consignment/edit.tsx` — edit CO | `src/api/routes/consignments.ts` — legacy/aggregate (536) | `three_pl_vehicles` / `three_pl_drivers` / `three_pl_state_rates` | `tests/cn-do-parity-gaps.test.mjs` |
 | `src/pages/consignment/detail.tsx` — CO/Note detail | `src/api/routes/drivers.ts` — in-house drivers | `sales_orders` / `fg_units` / `stock_movements` | `tests/cn-packing-list.test.mjs` |
-| `src/pages/consignment/return.tsx` — return flow | `src/api/routes/three-pl-drivers.ts` / `three-pl-vehicles.ts` / `three-pl-state-rates.ts` | | `tests/cn-packing-list-record.test.mjs`, `tests/cn-value.test.mjs` |
+| `src/pages/consignment/return.tsx` — recorded-returns LIST only; the return itself is recorded from `note.tsx` → `POST /api/consignment-notes/:id/return` | `src/api/routes/three-pl-drivers.ts` / `three-pl-vehicles.ts` / `three-pl-state-rates.ts` | `consignment_items.status='RETURNED'` + `returnedDate` (the only return record) | `tests/cn-packing-list-record.test.mjs`, `tests/cn-value.test.mjs`, `tests/no-fabricated-consignment-returns.test.mjs` |
 
 **Big-file section index**
 - `src/pages/delivery/index.tsx`

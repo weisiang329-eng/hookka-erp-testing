@@ -34,6 +34,76 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-071 — `/consignment/return` invented the CR number, the status and the date, printed them beside real money, and exported the lot to CSV `ui-frontend` `data-integrity` `fabrication` 🟢
+
+**Symptom.** The Consignment Returns grid listed rows that looked entirely ordinary:
+a document number (`CR-00001`, `CR-00002`…), a real customer, a real branch, an RM
+return value, a return date, and a status of Pending / Inspected / Accepted /
+Restocked, summarised by four KPI cards and a four-stage pipeline. **Export CSV**
+wrote the same rows to a file. Nothing rendered as blank, nothing errored.
+
+**Root cause.** `src/pages/consignment/return.tsx` built every row in a function
+named `buildMockCRs()` that mixed real fields with invented ones:
+
+| field | source |
+|---|---|
+| customer · branch · line count | real — off the fetched note |
+| `crNo` | `` `CR-${String(++_crCounter).padStart(5,"0")}` `` — a **module-level counter**, reset to 0 on every mount, so the same return carried a different number after a refresh |
+| `status` | `Math.random()` thresholds. PENDING/INSPECTED/ACCEPTED/RESTOCKED appear in **no migration, no route and no type** — the vocabulary was invented in this file |
+| `returnDate` | `now − Math.floor(Math.random()*10+1)` days for fully-returned notes; `now` for the rest |
+| `returnValueSen` | Σ(qty × `consignment_items.unitPrice`) — real arithmetic over a column that is **routinely 0**, so it published RM 0.00 as a measured value |
+
+**Why it survived.** *Real money on an invented status is more dangerous than fully
+fake data.* The correct customer and the correct RM made the fabricated column
+beside them credible; a reader checks the figure that can be checked and carries the
+trust across the row. Three on-screen buttons — Mark Inspected / Accept Return /
+Restock Items — advanced the invented status in **local state only**; no endpoint
+accepts those transitions, so an operator could believe they had processed a return
+that the database never heard about, and a refresh reshuffled every row anyway.
+
+**What the database actually records.** `POST /api/consignment-notes/:id/return`
+(`routes/consignment-notes.ts:1073`) is the only writer, and it does everything in
+one batch: the line flips to `status='RETURNED'` with `returnedDate`, the units go
+`DELIVERED → RETURNED` in `fg_units`, and a `stock_movements` STOCK_IN with
+`reason='CONSIGNMENT_RETURN'` is written. **There is no inspection, acceptance or
+restock stage** — the goods are back in stock the moment the return is recorded. So
+the pipeline was not "unimplemented", it was a workflow this business does not have.
+
+**Fix.** The page is now a read-only list derived from the records that exist:
+`noteNumber` in place of the invented CR number; `consignment_notes.status` verbatim
+in place of the invented CR status; the latest real `consignment_items.returnedDate`,
+or "—". Two limits are **stated on the page** instead of being papered over:
+(1) a *partial* return only shrinks the line quantity — it stamps no status and no
+date — so partially-returned notes cannot appear; (2) CN line prices are commonly 0
+because the real price lives on the parent consignment ORDER line
+(`api/lib/cn-value.ts`) and `/api/consignments` carries no per-line price, so a note
+with no priced line shows "—" rather than RM 0.00, and a **Value Basis** column
+publishes how many lines are behind each figure. The status pipeline, the CR-status
+tabs and the three local-only action buttons are gone; the detail dialog's fake
+4-step timeline is replaced by the actual returned lines. The CSV exports the same
+cells, empty where the screen shows "—", and now escapes its cells (an unescaped
+comma in a customer name used to shift every later column by one).
+
+**Backend gap left open (deliberately, not silently).** A per-line return value
+would need `/api/consignments` to publish each item's CO-resolved price — the
+machinery already exists (`loadCoLinePriceIndex` + `priceForCnItem`), it is simply
+not applied on this route. Until it is, the page shows only what it can prove.
+
+**Guard.** `tests/no-fabricated-consignment-returns.test.mjs`, 9 tests, structural,
+**comments stripped before matching** so the file's own header may quote the bug
+verbatim. Bans `Math.random()`, the counter-as-document-id shape, `now`-minus-offset
+dates, the invented status vocabulary and the local-mutation actions; requires the
+"—" paths, the Value Basis provenance and an empty (never zero) CSV cell; and pins
+the *real* return endpoint in place so the cleanup cannot delete it.
+
+**Proved by 22 mutations** — each bug put back one at a time, the change verified on
+disk, the suite run, then restored. All 22 went red. Two did **not** on the first
+attempt, both for the same reason as BUG-2026-08-13-070: the assertion matched a
+*prefix*. `/loadFailed/` matched a renamed `loadFailedRemoved`, and
+`/noteStatus:\s*n\.status/` matched `noteStatus: n.status === "RETURNED" ? …`. Both
+guards were tightened until the mutation fired. A guard that passes against the
+mutated file is not a guard.
+
 ## BUG-2026-08-13-070 — the audit trail had no permission check and no org filter, and its own header claimed otherwise `security` `access-control` `multi-tenant` 🟢
 
 **Symptom.** `GET /api/audit-events?resource=X&resourceId=Y` returned the before/after

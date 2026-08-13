@@ -226,6 +226,17 @@ test("no page prints '…not found' over a cached read without being in the map"
   const known = new Set(CONSUMERS.map(([f]) => f));
   const strays = [];
   for (const rel of walk("src")) {
+    // Server code is out of scope, and cannot be otherwise: useCachedJson /
+    // cachedFetchJson are BROWSER primitives (src/lib/cached-fetch.ts reads
+    // window.localStorage), so no route handler can call one. A route's
+    // `{ success: false, error: "Order not found" }` IS a genuine 404 — it is
+    // the honest answer this whole class exists to restore, not an instance of
+    // the bug. Without this skip the scan matches any route file that merely
+    // NAMES the hook in a comment, which is a false positive of exactly the
+    // kind HOOKKA-GOTCHAS §1 warns about (a grep for a symbol is not a call
+    // site). Frontend coverage is unchanged — every real consumer is under
+    // src/pages or src/components.
+    if (rel.startsWith("src/api/")) continue;
     const src = read(rel);
     if (!/useCachedJson|cachedFetchJson/.test(src)) continue;
     if (!/not found/i.test(src)) continue;

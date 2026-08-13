@@ -145,15 +145,72 @@ function genRmId(): string {
   return `rm-${crypto.randomUUID().slice(0, 8)}`;
 }
 
-// GET /api/inventory — all three buckets
+// ---------------------------------------------------------------------------
+// GET /api/inventory[?buckets=<csv>] — the three inventory buckets.
+//
+// perf 2026-08-13 (BUG-2026-08-13-020): this endpoint is 1.16 MB (PERF-BACKLOG
+// P6) and was fetched WHOLE by twenty call sites, nineteen of which read exactly
+// ONE of its three buckets (the twentieth, inventory/index.tsx's fallback, reads
+// two and is deliberately left unprojected). `finishedProducts` alone is the bulk — 365
+// product rows, 21 fields each (for scale, /api/products measured 319,231 bytes
+// at the same 365 rows in BUG-2026-08-13-008) — so a page that only wanted the
+// 279 raw materials still decoded and retained the whole catalogue. On /m it was
+// 91% of the remaining Home payload.
+//
+// `?buckets=` names the buckets the caller actually reads (comma-separated, any
+// of finishedProducts / wipItems / rawMaterials). Only those SELECTs run and
+// only those keys are emitted. Each emitted bucket is produced by the SAME query
+// (same columns, same ORDER BY) through the SAME row mapper as before, so a
+// caller that asks for the bucket it already read gets a byte-identical array —
+// the response is a strict subset of today's, never a different one.
+//
+// OMITTING the param returns all three exactly as before, so every call site not
+// yet converted is untouched. An unrecognised value degrades to all three rather
+// than to an empty page: on a read path, serving more than asked is recoverable
+// and serving nothing looks exactly like "there is no stock" (the failure shape
+// BUG-2026-08-13-005 is about).
+//
+// Cache note: `invalidateCachePrefix("/api/inventory")` still clears every
+// variant — cached-fetch.ts:202 matches on startsWith, and "/api/inventory?
+// buckets=rawMaterials" starts with "/api/inventory".
+// ---------------------------------------------------------------------------
+const INVENTORY_BUCKETS = ["finishedProducts", "wipItems", "rawMaterials"] as const;
+type InventoryBucket = (typeof INVENTORY_BUCKETS)[number];
+
+function parseBuckets(raw: string | undefined): Set<InventoryBucket> {
+  const asked = (raw ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s): s is InventoryBucket =>
+      (INVENTORY_BUCKETS as readonly string[]).includes(s),
+    );
+  return asked.length > 0 ? new Set(asked) : new Set(INVENTORY_BUCKETS);
+}
+
 app.get("/", async (c) => {
+  const buckets = parseBuckets(c.req.query("buckets"));
+
   const [productsRes, wipRes, rmRes] = await Promise.all([
-    c.var.DB.prepare("SELECT * FROM products ORDER BY code").all<ProductRow>(),
-    c.var.DB.prepare("SELECT * FROM wip_items ORDER BY id").all<WipItemRow>(),
-    c.var.DB.prepare(
-      "SELECT * FROM raw_materials ORDER BY itemCode",
-    ).all<RawMaterialRow>(),
+    buckets.has("finishedProducts")
+      ? c.var.DB.prepare("SELECT * FROM products ORDER BY code").all<ProductRow>()
+      : null,
+    buckets.has("wipItems")
+      ? c.var.DB.prepare("SELECT * FROM wip_items ORDER BY id").all<WipItemRow>()
+      : null,
+    buckets.has("rawMaterials")
+      ? c.var.DB.prepare(
+          "SELECT * FROM raw_materials ORDER BY itemCode",
+        ).all<RawMaterialRow>()
+      : null,
   ]);
+
+  const data: {
+    finishedProducts?: Array<
+      ReturnType<typeof rowToProduct> & { stockQty: number | null }
+    >;
+    wipItems?: ReturnType<typeof rowToWipItem>[];
+    rawMaterials?: ReturnType<typeof rowToRawMaterial>[];
+  } = {};
 
   // `stockQty` is NOT COMPUTED HERE — it is `null`, deliberately.
   //
@@ -171,17 +228,16 @@ app.get("/", async (c) => {
   // need a quantity. `null` here means "not computed by this endpoint", and
   // every consumer must render it as "—" rather than coercing it with `?? 0`.
   // See BUG-2026-08-13-014.
-  const finishedProducts = (productsRes.results ?? []).map((p) => ({
-    ...rowToProduct(p),
-    stockQty: null as number | null,
-  }));
-  const wipItems = (wipRes.results ?? []).map(rowToWipItem);
-  const rawMaterials = (rmRes.results ?? []).map(rowToRawMaterial);
+  if (productsRes) {
+    data.finishedProducts = (productsRes.results ?? []).map((p) => ({
+      ...rowToProduct(p),
+      stockQty: null as number | null,
+    }));
+  }
+  if (wipRes) data.wipItems = (wipRes.results ?? []).map(rowToWipItem);
+  if (rmRes) data.rawMaterials = (rmRes.results ?? []).map(rowToRawMaterial);
 
-  return c.json({
-    success: true,
-    data: { finishedProducts, wipItems, rawMaterials },
-  });
+  return c.json({ success: true, data });
 });
 
 // ---------------------------------------------------------------------------

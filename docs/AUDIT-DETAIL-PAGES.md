@@ -92,7 +92,49 @@ Written down with the reason so the next agent skips them.
 
 ---
 
-## Nothing was changed
+## STATUS — D1, D4, D5, D9 and D12 are SHIPPED (branch `perf/whole-org-fetch-shape`)
+
+Added 2026-08-13, after this document was written. See `docs/BUG-HISTORY.md`
+BUG-2026-08-13-020..-026 for the full write-up of each.
+
+| finding | what shipped |
+| --- | --- |
+| **D1** | `GET /api/delivery-orders?fields=case-pipeline&scope=<soIds>` + the page switched to it. BUG-2026-08-13-022. |
+| **D4 + D9 + D12** | `GET /api/inventory?buckets=<csv>` + **19 of the 20** request-issuing call sites converted (`inventory/index.tsx`'s fallback is the one left — it legitimately reads two buckets), and the two edit/modal-only ones (`procurement/detail`, `suppliers/detail`) now GATE the fetch. BUG-2026-08-13-020/-021. |
+| **D5** | swapped to `/api/customers/:id`. BUG-2026-08-13-023. |
+| **D9's dead key** | `finishedGoods` REMOVED (not renamed — see below). BUG-2026-08-13-024. |
+| **the /m customer panel** (noted under BUG-2026-08-13-013, not numbered here) | `GET /api/sales-orders?fields=customer-mini`. BUG-2026-08-13-026. |
+
+Each carries a test that proves the rendered output is unchanged rather than
+asserting it: `tests/inventory-buckets-projection.test.mjs`,
+`tests/service-case-do-scope-equivalence.test.mjs`,
+`tests/customer-detail-scoped-read.test.mjs`,
+`tests/so-customer-mini-projection.test.mjs`.
+
+**D9's `finishedGoods` was NOT fixed by renaming, and this document's warning was
+right for a reason it did not state.** Renaming would add rows *and* would not work:
+the picker needs `{itemCode, description, baseUOM, itemGroup}` and `rowToProduct`
+emits none of them. The same is true of `wipItems`, which is why that bucket is still
+requested and still spread — dropping it would have been a row-set change resting on
+an unmeasurable assumption about how many raw materials exist.
+
+**Found independently while doing the work — and fixed by someone else first:** the
+`/m` WIP list read `data.wip`, a key the endpoint never emitted, so it had always
+been empty. This branch logged it as not-fixable-in-isolation (re-pointing the
+selector alone would render a list of dashes, because `toVM` read `name`/`qty` and
+`rowToWipItem` emits `relatedProduct`/`stockQty`). **#292 / BUG-2026-08-13-014
+landed first and fixed all three together**, so the rows now render real values;
+BUG-2026-08-13-025 is marked superseded rather than left in the ledger as a false
+open item.
+
+**Still open from this audit:** D2, D6, D7, D8, D10, D11, D13, and the
+`/api/purchase-orders` halves of D9 and the /m supplier panel (that route has no
+supplier filter and no `?fields=` projection, so there is nothing to switch to).
+**D3 is no longer open** — #291 shipped the `RecordLoadError` class fix.
+
+---
+
+## Nothing was changed *(as written 2026-08-13; superseded above)*
 
 This branch contains this document and nothing else. Per the brief, a fix needed to be
 unambiguous, small and provably output-identical — and none of the above is:

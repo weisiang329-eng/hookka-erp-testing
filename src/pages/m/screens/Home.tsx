@@ -69,7 +69,7 @@ import {
 import type { RawMaterial } from "@/types";
 import { MobileCard, StatusPill, FormSheet, Sheet } from "../components";
 import { GlobalSearchSheet } from "../components/GlobalSearchSheet";
-import { ORDERS_DUE_URL } from "../lib/preload";
+import { ORDERS_DUE_URL, STOCK_ALERTS_URL } from "../lib/preload";
 import { M, M_ACCENT, M_DELTA } from "../theme";
 import { type FormSpec } from "../config/form-types";
 import {
@@ -366,7 +366,12 @@ export default function MobileHome() {
   // construction. `overdue` stays client-side because it compares against the
   // PHONE's local today, not the server's. ----
   const { data: soList } = useCachedJson<OrdersDueResp>(ORDERS_DUE_URL);
-  const { data: inventory } = useCachedJson<InventoryResp>("/api/inventory");
+  // Stock alerts. perf 2026-08-13 (BUG-2026-08-13-021): the URL is now
+  // STOCK_ALERTS_URL ("/api/inventory?buckets=rawMaterials") and is defined ONCE
+  // in ../lib/preload.ts, because the preload warms it by URL string — see the
+  // constant there for why the bucket projection is byte-identical for the
+  // `rawMaterials` array this screen reads (line ~794).
+  const { data: inventory } = useCachedJson<InventoryResp>(STOCK_ALERTS_URL);
 
   // ---- Pending Delivery — SAME two fetches + the same fold as the dashboard's
   // consolidated "Pending Delivery" KTile (src/pages/dashboard-b/index.tsx).

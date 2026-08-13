@@ -39,6 +39,22 @@ export const ORDERS_DUE_TOP = 6;
  */
 export const ORDERS_DUE_URL = `/api/sales-orders?fields=orders-due&top=${ORDERS_DUE_TOP}`;
 
+/**
+ * The Home's Stock-alerts URL — exported for the SAME reason as ORDERS_DUE_URL
+ * above: the cache is keyed by the exact URL string, so preloading a different
+ * one than Home.tsx requests is a silent double fetch.
+ *
+ * perf 2026-08-13 (BUG-2026-08-13-021): this was the bare "/api/inventory" —
+ * all three buckets, 1.16 MB, of which the Home reads ONLY `rawMaterials` (the
+ * "at/below reorder" chips). After BUG-2026-08-13-011/-013 removed the
+ * whole-org delivery + sales-order pulls, this single call was 91% of what was
+ * left of the /m Home payload. `?buckets=rawMaterials` ships the identical RM
+ * array (same SELECT, same ORDER BY, same rowToRawMaterial) and drops the
+ * 365-row product catalogue and the WIP bucket, neither of which the Home
+ * touches.
+ */
+export const STOCK_ALERTS_URL = "/api/inventory?buckets=rawMaterials";
+
 function buildEndpoints(): string[] {
   // Current "YYYY-MM" — the Home's default Command Center period.
   const ym = new Date().toISOString().slice(0, 7);
@@ -54,7 +70,7 @@ function buildEndpoints(): string[] {
     // "+ Daily Report chips" half of that old comment was already stale: the
     // chips read /api/reports/compliance.json (owner tally audit 2026-07-11).
     ORDERS_DUE_URL,
-    "/api/inventory", // Stock alerts
+    STOCK_ALERTS_URL, // Stock alerts (raw materials only — see the constant)
   ];
 }
 

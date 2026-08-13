@@ -380,6 +380,84 @@ app.get("/", async (c) => {
       );
     }
 
+    // ── ?fields=customer-mini — its OWN narrow read ────────────────────────
+    //
+    // perf 2026-08-13 (BUG-2026-08-13-026). The /m Customer detail screen's
+    // "Recent Orders" panel (src/pages/m/config/modules.ts, customerDetail
+    // extraFetches) pulled the BARE list — 2.16 MB decoded / 1,342 rows with
+    // every SO field AND every 24-field line item — to render at most twenty
+    // rows of five fields on a phone. Its comment claimed "/api/sales-orders
+    // list is in localStorage cache (preloaded) so this is fast"; that has been
+    // false since 2026-07-14, when the /m preload was slimmed to the Home's own
+    // endpoints, and it was never true for the NETWORK anyway — `useCachedJson`
+    // always re-fetches on mount (cached-fetch.ts:478, `void ttlSec`).
+    //
+    // This projection deliberately does NOT filter by customer, even though the
+    // panel is about one customer. The panel matches
+    // `customerId === cid || customerName === cname` — an OR — so a server-side
+    // `customerId` filter would silently drop the name-only matches and change
+    // the "Recent Orders · N" count. That is exactly the trap audit finding D6
+    // documents for /api/invoices?customerId=. Rows in, rows out: the SAME
+    // 1,342 rows in the SAME order, each carrying only the eight keys the panel
+    // reads. What goes away is the ~95% of each row nothing looks at, and every
+    // line item.
+    //
+    // Every key below is a straight passthrough in rowToSO (_helpers.ts:243):
+    // `customerId` and `customerName` raw, the rest `row.X ?? ""`, and
+    // `totalSen`/`status` raw. Row order reproduces the full list's
+    // `ORDER BY created_at DESC, id DESC` exactly, because the panel slices the
+    // first 20 after filtering and a different order would show different
+    // orders.
+    //
+    // Shares the existing snapshot TABLE under cache_key "customer-mini" (no new
+    // table — migrations are inert on deploy), same rule as every other branch
+    // here: archive / service-order / customer-scoped variants compute directly
+    // and are never written into the org-wide snapshot row.
+    if (c.req.query("fields") === "customer-mini") {
+      const computeCustomerMini = async () => {
+        const sos = await db
+          .prepare(
+            `SELECT id, company_so, company_so_id, company_so_date, status,
+                    total_sen, customer_id, customer_name
+               FROM ${soSourceSql} ${orgWhere}${fullClause}
+              ORDER BY created_at DESC, id DESC`,
+          )
+          .bind(...orgParams, ...fullScope.binds)
+          .all<Record<string, unknown>>();
+        // Dual-keyed reads: the pg shim camelCases columns, but never assume it.
+        const g = (r: Record<string, unknown>, camel: string, snake: string) =>
+          r[camel] ?? r[snake];
+        const str = (r: Record<string, unknown>, camel: string, snake: string) =>
+          String(g(r, camel, snake) ?? "");
+        const data = (sos.results ?? []).map((s) => ({
+          id: str(s, "id", "id"),
+          companySO: str(s, "companySO", "company_so"),
+          companySOId: str(s, "companySOId", "company_so_id"),
+          companySODate: str(s, "companySODate", "company_so_date"),
+          // raw in rowToSO — no `?? ""` — so keep them raw here too
+          status: g(s, "status", "status") as string,
+          totalSen: g(s, "totalSen", "total_sen") as number,
+          customerId: g(s, "customerId", "customer_id") as string,
+          customerName: g(s, "customerName", "customer_name") as string,
+        }));
+        return { success: true as const, data, total: data.length };
+      };
+      if (includeArchive || serviceOrderFilter !== "false" || isCustomerScoped(c)) {
+        return c.json(await computeCustomerMini());
+      }
+      const { withSnapshot } = await import("../lib/snapshot");
+      return c.json(
+        await withSnapshot(
+          db,
+          { tableName: "sales_orders_list_snapshot", sourceTables: ["sales_orders", "sales_order_items"] },
+          getOrgId(c),
+          computeCustomerMini,
+          "customer-mini",
+          c,
+        ),
+      );
+    }
+
     if (c.req.query("fields") === "delivery-refs" && !includeArchive && serviceOrderFilter === "false" && !isCustomerScoped(c)) {
       const computeDeliveryRefs = async () => {
         const [sos, items] = await Promise.all([

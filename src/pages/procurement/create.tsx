@@ -75,7 +75,10 @@ function CreatePurchaseOrderPage() {
   // useCachedJson dedupes (the operator typically arrives here from
   // /procurement which already warmed the cache).
   const { data: supResp } = useCachedJson<{ success?: boolean; data?: Supplier[] }>("/api/suppliers");
-  const { data: invResp } = useCachedJson<{ success?: boolean; data?: { rawMaterials?: RawMaterial[] } }>("/api/inventory");
+  // perf 2026-08-13 (BUG-2026-08-13-021, audit finding D12): `?buckets=` — only
+  // `rawMaterials` is read here (the line picker), so the 365-row product
+  // catalogue and the WIP bucket no longer ride along.
+  const { data: invResp } = useCachedJson<{ success?: boolean; data?: { rawMaterials?: RawMaterial[] } }>("/api/inventory?buckets=rawMaterials");
   const { data: bindingsResp } = useCachedJson<{ success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]>("/api/supplier-materials");
   // Purchase Company registry — feeds the per-PO buying-company dropdown.
   // Same endpoint pi.tsx / index.tsx use, so the cache is warmed.

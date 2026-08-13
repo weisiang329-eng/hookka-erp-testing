@@ -139,7 +139,31 @@ export default function PurchaseOrderDetailPage() {
   // company's own letterhead (HOOKKA / OHANA / any sister co) while accounting
   // stays HOOKKA. Lightweight JSON; no jspdf pulled into the page bundle.
   const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code?: string; name?: string; regNo?: string; tin?: string; address?: string; phone?: string; email?: string }> }>("/api/organisations");
-  const { data: invResp } = useCachedJson<{ success?: boolean; data?: { rawMaterials?: RawMaterial[] } }>("/api/inventory");
+  // Declared up here (rather than in the Edit-mode state block below) because
+  // it GATES the raw-materials fetch on the next line — see that comment.
+  const [editing, setEditing] = useState(false);
+  //
+  // perf 2026-08-13 (BUG-2026-08-13-021, audit finding D4): this was the bare
+  // "/api/inventory" — 1.16 MB, all three buckets — fired UNCONDITIONALLY on a
+  // page that is usually only being READ. Two things were wrong with it:
+  //   • only `rawMaterials` is ever read off it (the useMemo below), so the 365
+  //     -row product catalogue and the WIP bucket were decoded and thrown away;
+  //   • every consumer of `rawMaterials` is edit-only — `filteredRMs` renders
+  //     inside `{editing && isEditable && …}`, and `addLineFromRM` only runs
+  //     from that picker — so on a read-only visit the whole payload was
+  //     downloaded, parsed and never looked at.
+  // `?buckets=rawMaterials` fixes the first; gating on `editing` fixes the
+  // second. The bucket is byte-identical (same SELECT, same ORDER BY, same
+  // rowToRawMaterial — see the route comment).
+  //
+  // Gating on `editing` alone is sufficient AND safe: the Edit button that sets
+  // it only renders when `isEditable` (line ~620), so `editing === true` already
+  // implies an editable PO. The cost is that the RM picker's list now arrives a
+  // fetch after the click instead of before it — invisible in practice, because
+  // the picker only renders results once the operator types (`rmSearch.trim()`).
+  const { data: invResp } = useCachedJson<{ success?: boolean; data?: { rawMaterials?: RawMaterial[] } }>(
+    editing ? "/api/inventory?buckets=rawMaterials" : null,
+  );
   const { data: bindingsResp } = useCachedJson<{ success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]>("/api/supplier-materials");
 
   // Document lineage for this PO: the GRNs received against it + the PIs raised
@@ -176,8 +200,8 @@ export default function PurchaseOrderDetailPage() {
     [relatedGrns],
   );
 
-  // ------- Edit mode state -------
-  const [editing, setEditing] = useState(false);
+  // ------- Edit mode state ------- (`editing` itself is declared above, where
+  // it gates the raw-materials fetch)
   const [editExpectedDate, setEditExpectedDate] = useState("");
   const [editNotes, setEditNotes] = useState("");
   const [editLines, setEditLines] = useState<EditLine[]>([]);

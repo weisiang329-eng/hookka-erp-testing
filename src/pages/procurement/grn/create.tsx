@@ -149,10 +149,15 @@ function GRNCreatePage() {
 
   // Raw materials + supplier↔material bindings — fed to the scan-create wizard
   // (mode="create-grn") so its strict-pick MaterialPickers + binding lookups work.
+  // perf 2026-08-13 (BUG-2026-08-13-021, audit finding D8): `?buckets=` — only
+  // `rawMaterials` is read here (allRawMaterials, for the scan wizard's
+  // MaterialPicker). The whole-org /api/purchase-orders pull on this same form
+  // is a SEPARATE problem and is deliberately NOT touched here — see D8: the
+  // locked (`?poId=`) and unlocked paths would need separating first.
   const { data: invResp } = useCachedJson<{
     success?: boolean;
     data?: { rawMaterials?: RawMaterial[] };
-  }>("/api/inventory");
+  }>("/api/inventory?buckets=rawMaterials");
   const { data: bindingsResp } = useCachedJson<
     { success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]
   >("/api/supplier-materials");

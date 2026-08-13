@@ -358,7 +358,11 @@ export default function RDProjectDetailPage() {
   const labourHoursUrl = id ? `/api/rd-projects/${id}/labour-hours` : null;
   const { data: projectResp, loading, failure: projectFailure, refresh: refreshProjectHook } = useCachedJson<{ data?: RDProject }>(rdUrl);
   const { data: issuancesResp, refresh: refreshIssuancesHook } = useCachedJson<{ data?: RdMaterialIssuance[] }>(issuancesUrl);
-  const { data: inventoryResp, refresh: refreshInventoryHook } = useCachedJson<{ data?: { rawMaterials?: RawMaterial[] } }>("/api/inventory");
+  // perf 2026-08-13 (BUG-2026-08-13-021, audit finding D12): `?buckets=` — only
+  // `rawMaterials` is read here, so the 365-row product catalogue and the WIP
+  // bucket no longer ride along. `fetchRawMaterials` below still invalidates by
+  // the "/api/inventory" PREFIX, which matches this URL (cached-fetch.ts:202).
+  const { data: inventoryResp, refresh: refreshInventoryHook } = useCachedJson<{ data?: { rawMaterials?: RawMaterial[] } }>("/api/inventory?buckets=rawMaterials");
   const { data: labourHoursResp, refresh: refreshLabourHoursHook } = useCachedJson<{ data?: RDLabourHourEntry[] }>(labourHoursUrl);
   const { data: teamMembersResp, refresh: refreshTeamMembersHook } = useCachedJson<{ data?: RDTeamMember[] }>("/api/rd-team-members?active=true");
 

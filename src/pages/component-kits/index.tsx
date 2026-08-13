@@ -63,7 +63,10 @@ export default function ComponentKitsPage() {
     try {
       const [kRes, iRes] = await Promise.all([
         fetch("/api/component-boms").then((r) => r.json()) as Promise<{ success?: boolean; error?: string; data?: Kit[] }>,
-        fetch("/api/inventory").then((r) => r.json()) as Promise<{ data?: { rawMaterials?: RawMaterial[] } }>,
+        // perf 2026-08-13 (BUG-2026-08-13-021): `?buckets=rawMaterials` — this
+        // raw fetch (no cache) read only the RM bucket out of a 1.16 MB
+        // three-bucket payload, on every reload() of this page.
+        fetch("/api/inventory?buckets=rawMaterials").then((r) => r.json()) as Promise<{ data?: { rawMaterials?: RawMaterial[] } }>,
       ]);
       // A failed list read used to fall through here silently, leaving the page
       // on its "No component kits yet" empty state — indistinguishable from a

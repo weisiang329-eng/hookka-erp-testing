@@ -6158,7 +6158,10 @@ export default function BOMManagementPage() {
         const [pData, tData, invData, kitData] = await Promise.all([
           cachedFetchJson<{ success?: boolean; data?: unknown }>("/api/products"),
           cachedFetchJson<{ success?: boolean; data?: unknown }>("/api/bom/templates"),
-          cachedFetchJson<{ success?: boolean; data?: { rawMaterials?: unknown[] } }>("/api/inventory"),
+          // perf 2026-08-13 (BUG-2026-08-13-021): `?buckets=rawMaterials` — only
+          // the RM bucket is read out of this response; /api/products is already
+          // fetched separately on the line above.
+          cachedFetchJson<{ success?: boolean; data?: { rawMaterials?: unknown[] } }>("/api/inventory?buckets=rawMaterials"),
           cachedFetchJson<{ success?: boolean; data?: { parentCode?: string }[] }>("/api/component-boms"),
         ]);
 

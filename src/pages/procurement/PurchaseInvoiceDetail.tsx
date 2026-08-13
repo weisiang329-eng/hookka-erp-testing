@@ -185,12 +185,17 @@ export default function PurchaseInvoiceDetailPage() {
   const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code?: string; name?: string; regNo?: string; tin?: string; address?: string; phone?: string; email?: string }> }>("/api/organisations");
 
   // Raw-materials catalog — powers the line-editor's Material Code picker so
-  // an editing operator picks from the catalog instead of free-typing. Same
-  // /api/inventory cache the PO pages warm. Off-catalog text stays allowed.
+  // an editing operator picks from the catalog instead of free-typing.
+  // Off-catalog text stays allowed.
+  // perf 2026-08-13 (BUG-2026-08-13-021, audit finding D12): `?buckets=` — only
+  // `rawMaterials` is read here. (The "same /api/inventory cache the PO pages
+  // warm" half of the old comment was already wishful: `useCachedJson` ALWAYS
+  // re-fetches on mount — cached-fetch.ts:478 `void ttlSec` — so the warm cache
+  // only ever served the first paint, never suppressed the request.)
   const { data: invResp } = useCachedJson<{
     success?: boolean;
     data?: { rawMaterials?: RawMaterial[] };
-  }>("/api/inventory");
+  }>("/api/inventory?buckets=rawMaterials");
   const materialOptions: MaterialOption[] = useMemo(
     () =>
       (invResp?.success ? invResp.data?.rawMaterials ?? [] : [])

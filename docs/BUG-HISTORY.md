@@ -34,6 +34,38 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-070 — the audit trail had no permission check and no org filter, and its own header claimed otherwise `security` `access-control` `multi-tenant` 🟢
+
+**Symptom.** `GET /api/audit-events?resource=X&resourceId=Y` returned the before/after
+snapshots of any record — including `users` rows — to **any authenticated session**, from
+**any of the four companies** (HOOKKA / OHANA / HOUZS / HKMFG). No error, no log line; it
+simply answered.
+
+**Why nobody noticed.** The file's own header describes a piggyback rule: *"Permission:
+piggyback on the resource's read permission — if you can read the resource, you can read
+its audit trail."* **That rule was never implemented.** Anyone reading the file — human or
+agent — saw a documented permission model and moved on. Same class as `README.md` asserting
+"Every API route trusts the caller" while auth had existed since April: **a comment
+describing intent gets read as a description of behaviour.**
+
+Separately, `audit_events.org_id` existed from the start and was never in the `WHERE` clause.
+
+**Fix.** Implement the rule the header already claimed — `requirePermission(c, resource,
+"read")` before the query — and scope to `getOrgId(c)`. Gating on the caller-supplied
+`resource` is safe because the same value narrows the query: you are checked against the
+resource whose rows you receive, so naming one you may read cannot hand you another's.
+NULL `org_id` rows (written before the column was populated) stay visible — an audit log
+that silently omits events is a worse failure than a slightly over-broad one.
+
+**Guard.** `tests/audit-events-access-control.test.mjs`, 4 tests, **comments stripped before
+matching** so prose mentioning `requirePermission` cannot satisfy them — precisely how this
+survived. Proved by deleting the check (77 bytes) and watching it go red.
+
+**Worth keeping:** the FIRST mutation attempt silently failed to match, and all four tests
+stayed green. That looked like "the guard doesn't work" but was actually "the mutation
+didn't apply". Always assert the mutation changed the file before believing a red-or-green
+result — a mutation test that doesn't mutate is a false all-clear.
+
 ## BUG-2026-08-13-034 — every downloaded Credit Note and Debit Note printed RM 0.00, because a stale shared type certified the wrong keys `money` `ui-frontend` `data-integrity` 🟢
 
 **Symptom.** A customer-facing document, wrong in the loudest possible way, and nobody

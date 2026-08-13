@@ -19,6 +19,8 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -54,19 +56,36 @@ app.get("/", async (c) => {
     );
   }
 
+  // The header above has always DESCRIBED this piggyback rule — "if you can
+  // read the resource, you can read its audit trail" — but no code implemented
+  // it. Until now every authenticated session could read the before/after
+  // snapshots of any record, including user rows, across every company.
+  //
+  // Gating on the CALLER-SUPPLIED `resource` is safe precisely because the same
+  // value narrows the query below: you are checked against the resource whose
+  // rows you get back, so naming one you may read cannot hand you another's.
+  const denied = await requirePermission(c, resource, "read");
+  if (denied) return denied;
+
   const limitParam = parseInt(c.req.query("limit") ?? "200", 10);
   const limit = Math.min(500, Math.max(1, Number.isFinite(limitParam) ? limitParam : 200));
 
+  // audit_events.org_id exists and was never filtered on, so the trail crossed
+  // tenants — prod runs four companies (HOOKKA / OHANA / HOUZS / HKMFG). NULL
+  // is admitted for rows written before the column was populated; excluding
+  // them would silently hide real history.
+  const orgId = getOrgId(c);
   const res = await c.var.DB
     .prepare(
       `SELECT id, actorUserId, actorUserName, actorRole, resource, resourceId,
               action, beforeJson, afterJson, source, ipAddress, userAgent, ts
          FROM audit_events
         WHERE resource = ? AND resourceId = ?
+          AND (orgId = ? OR orgId IS NULL)
         ORDER BY ts DESC
         LIMIT ?`,
     )
-    .bind(resource, resourceId, limit)
+    .bind(resource, resourceId, orgId, limit)
     .all<AuditRow>();
 
   // Pass JSON columns through as already-parsed objects so the SPA

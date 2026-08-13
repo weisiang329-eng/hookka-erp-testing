@@ -409,23 +409,33 @@ app.get("/overdue-counts", async (c) => {
 //   ?fields=minimal&include=jobCards-lite&...   -> 13,315ms / 4.27 MB
 // Counting in SQL returns the same numbers in one small payload.
 //
-// DELIBERATELY OMITS actual-hours and efficiency — but NOT for the reason the
-// first version of this comment gave. That version claimed "the factory does not
-// record actual work duration at all", generalised from a 5-order sample that
-// happened to be all-NULL. A full column count disproves it:
-// **4,340 of 36,796 job cards carry a non-null actualMinutes; 4,289 non-zero.**
-// Never assert a column is empty from a handful of rows.
+// DELIBERATELY OMITS actual-hours and efficiency. This comment has now been
+// wrong TWICE, so here is the whole chain — the conclusion is stable, the
+// reasoning took three passes to get right:
 //
-// What IS true: `productionTimeMinutes` is not a substitute (it equals
-// estMinutes exactly on every row — standard time, not measured), and any UI
-// computing `(actualMinutes || estMinutes)` divides the estimate by itself and
-// prints exactly 100% forever. That is why the retired tracker.tsx showed 100%
-// for every department.
+//   v1 "actualMinutes is NULL on every job card"  — WRONG. Generalised from a
+//      5-order sample that happened to be all-NULL.
+//   v2 "4,340 of 36,796 are non-null, so the factory DOES measure"  — the count
+//      is right, the inference is WRONG.
+//   v3 (this one) every one of the 4,289 non-zero values is BYTE-IDENTICAL to
+//      that same card's estMinutes, with zero exceptions, all on orders started
+//      2026-04/05. It is a COPY of the standard time, not a measurement.
 //
-// So this endpoint stays counts-and-dates because an efficiency number belongs
-// where its denominator is honest — /api/department-performance, which divides
-// by real clocked time from working_hour_entries — not because the measurements
-// are missing. See docs/BUG-HISTORY.md BUG-2026-08-13-004.
+// So there is still no trustworthy measured duration anywhere in job_cards —
+// but the reason is "the column was populated by copying the estimate", not
+// "the column is empty". Counting a column is not the same as checking whether
+// its values mean anything: check the DISTRIBUTION, not just the NULL rate.
+//
+// Consequences that follow: `productionTimeMinutes` is likewise not a
+// substitute (it also equals estMinutes on every row), and any UI computing
+// `(actualMinutes || estMinutes)` divides the estimate by itself and prints
+// exactly 100% forever — which is what the retired tracker.tsx did.
+//
+// This endpoint therefore stays counts-and-dates. An efficiency figure belongs
+// only where its denominator is independently measured — /api/department-
+// performance divides by real clocked time from working_hour_entries, and its
+// output genuinely varies (80% overall, 64% one day, 48% one worker).
+// See docs/BUG-HISTORY.md BUG-2026-08-13-004 / -005.
 // ---------------------------------------------------------------------------
 app.get("/tracker-summary", async (c) => {
   const denied = await requirePermission(c, "production-orders", "read");

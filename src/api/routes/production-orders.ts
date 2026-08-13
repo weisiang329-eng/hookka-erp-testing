@@ -398,6 +398,110 @@ app.get("/overdue-counts", async (c) => {
 });
 
 
+// ---------------------------------------------------------------------------
+// GET /api/production-orders/tracker-summary
+//
+// The Master Tracker and Planning pages are dashboards (owner, 2026-08-13:
+// "基本上都是 Dashboard 的作用来的"). They were each pulling EVERY production
+// order with EVERY job card just to count things in the browser:
+//   ?fields=minimal&include=jobCards            -> 30,721ms then ABORTED (the
+//     page never loaded — api-client's 30s cap killed it)
+//   ?fields=minimal&include=jobCards-lite&...   -> 13,315ms / 4.27 MB
+// Counting in SQL returns the same numbers in one small payload.
+//
+// DELIBERATELY OMITS actual-hours and efficiency. Verified on prod across 5
+// COMPLETED orders (14-26 finished job cards each): job_cards.actualMinutes is
+// NULL on every finished card, and productionTimeMinutes is not a substitute —
+// it equals estMinutes exactly on every row (it is the standard time, not the
+// measured one). tracker.tsx computed efficiency as
+// `(actualMinutes || estMinutes)`, so it compared the estimate against itself
+// and rendered exactly 100% for every department, always. Publishing that as a
+// KPI is worse than not publishing it, so the real metrics below are counts and
+// dates only. Capturing true durations needs floor-side start/stop capture —
+// a process change, not a query.
+// ---------------------------------------------------------------------------
+app.get("/tracker-summary", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const db = c.var.DB;
+  const today = new Date().toISOString().slice(0, 10);
+  // Throughput window: 14 days back, inclusive of today.
+  const since = new Date(Date.now() - 13 * 86400000).toISOString().slice(0, 10);
+
+  const [statusRows, overdueRow, deptRows, throughputRows] = await Promise.all([
+    db
+      .prepare(
+        `SELECT status, COUNT(*) AS n FROM production_orders
+          WHERE orgId = ? GROUP BY status`,
+      )
+      .bind(orgId)
+      .all<Record<string, unknown>>(),
+    db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM production_orders
+          WHERE orgId = ?
+            AND status NOT IN ('COMPLETED','TRANSFERRED','CANCELLED')
+            AND targetEndDate IS NOT NULL AND targetEndDate <> ''
+            AND targetEndDate < ?`,
+      )
+      .bind(orgId, today)
+      .first<Record<string, unknown>>(),
+    db
+      .prepare(
+        `SELECT jc.departmentCode AS dept,
+                SUM(CASE WHEN jc.status IN ('IN_PROGRESS','PAUSED') THEN 1 ELSE 0 END) AS active,
+                SUM(CASE WHEN jc.status IN ('COMPLETED','TRANSFERRED') THEN 1 ELSE 0 END) AS completed,
+                SUM(CASE WHEN jc.status NOT IN ('IN_PROGRESS','PAUSED','COMPLETED','TRANSFERRED') THEN 1 ELSE 0 END) AS pending,
+                COUNT(*) AS total
+           FROM job_cards jc
+           JOIN production_orders po ON po.id = jc.productionOrderId
+          WHERE po.orgId = ?
+          GROUP BY jc.departmentCode`,
+      )
+      .bind(orgId)
+      .all<Record<string, unknown>>(),
+    db
+      .prepare(
+        `SELECT jc.completedDate AS d, COUNT(*) AS n
+           FROM job_cards jc
+           JOIN production_orders po ON po.id = jc.productionOrderId
+          WHERE po.orgId = ?
+            AND jc.completedDate IS NOT NULL AND jc.completedDate <> ''
+            AND jc.completedDate >= ?
+          GROUP BY jc.completedDate
+          ORDER BY d`,
+      )
+      .bind(orgId, since)
+      .all<Record<string, unknown>>(),
+  ]);
+
+  // Dual-keyed reads — the pg shim camelCases columns, but never assume it.
+  const num = (r: Record<string, unknown> | null, k: string) => Number(r?.[k] ?? 0) || 0;
+  const statusCounts: Record<string, number> = {};
+  for (const r of statusRows.results ?? []) {
+    const s = String(r.status ?? "");
+    if (s) statusCounts[s] = num(r, "n");
+  }
+  return c.json({
+    success: true,
+    statusCounts,
+    totalOrders: Object.values(statusCounts).reduce((a, b) => a + b, 0),
+    overdue: num(overdueRow, "n"),
+    byDepartment: (deptRows.results ?? []).map((r) => ({
+      departmentCode: String(r.dept ?? r.departmentCode ?? ""),
+      active: num(r, "active"),
+      completed: num(r, "completed"),
+      pending: num(r, "pending"),
+      total: num(r, "total"),
+    })),
+    throughput: (throughputRows.results ?? []).map((r) => ({
+      date: String(r.d ?? r.completedDate ?? ""),
+      completed: num(r, "n"),
+    })),
+  });
+});
+
 app.get("/", async (c) => {
   const statusParam = c.req.query("status");
   const statuses = statusParam

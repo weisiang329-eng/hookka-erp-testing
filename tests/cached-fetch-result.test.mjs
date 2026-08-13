@@ -21,7 +21,8 @@ import assert from "node:assert/strict";
 // network outcome, not about caching.
 globalThis.__BUILD_ID__ = "test-build";
 
-const { cachedFetchJsonResult } = await import("../src/lib/cached-fetch.ts");
+const { cachedFetchJsonResult, classifyFetchFailure, isUnknownOutcome, HttpError } =
+  await import("../src/lib/cached-fetch.ts");
 
 function withFetch(impl, fn) {
   const original = globalThis.fetch;
@@ -131,4 +132,164 @@ test("a technical backend string is translated before it reaches an operator", a
       );
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// BUG-2026-08-13-016 — the THREE outcomes, pinned apart.
+//
+// The failure this suite was originally written for collapsed "the request
+// died" into "there is no data". Its sibling on the detail pages collapsed
+// something worse: a killed request into "this record does not exist", which
+// is a statement about the business that operators act on (they re-key orders
+// that already exist).
+//
+// Three outcomes, three answers, and they must never merge:
+//   (a) the server answered and the payload is empty  → SUCCESS, empty
+//   (b) the request was aborted / never landed        → FAILURE, existence UNKNOWN
+//   (c) the server answered 404                       → FAILURE, existence OBSERVED
+// ---------------------------------------------------------------------------
+
+test("(a) loaded-and-empty is a success and claims nothing about failure", async () => {
+  await withFetch(
+    async () => okResponse({ success: true, data: [] }),
+    async () => {
+      const r = await cachedFetchJsonResult("/api/genuinely-empty");
+      assert.equal(r.ok, true);
+      assert.equal(r.kind, undefined, "a success carries no failure kind");
+    },
+  );
+});
+
+test("(b) a 30 s abort is a TIMEOUT — existence stays unknown", async () => {
+  await withFetch(
+    async () => {
+      throw new DOMException("signal is aborted without reason", "AbortError");
+    },
+    async () => {
+      const r = await cachedFetchJsonResult("/api/killed-at-30s");
+      assert.equal(r.ok, false);
+      assert.equal(r.kind, "timeout");
+      assert.equal(r.status, 0, "there was no response, so there is no status");
+      assert.equal(
+        isUnknownOutcome({ kind: r.kind, status: r.status, message: r.error }),
+        true,
+        "a timeout must never license the words 'not found'",
+      );
+    },
+  );
+});
+
+test("(c) a real 404 is reported as ABSENT, and is NOT laundered into a network message", async () => {
+  await withFetch(
+    async () => ({ ok: false, status: 404, json: async () => ({}) }),
+    async () => {
+      const r = await cachedFetchJsonResult("/api/gone");
+      assert.equal(r.ok, false);
+      assert.equal(r.kind, "notFound", "404 is the ONE observed absence");
+      assert.equal(r.status, 404);
+      assert.equal(
+        isUnknownOutcome({ kind: r.kind, status: r.status, message: r.error }),
+        false,
+        "a 404 IS an observation — the page may still say 'not found'",
+      );
+      assert.match(
+        r.error,
+        /couldn.t be found|removed/i,
+        `a 404 must read as absence, got: ${r.error}`,
+      );
+      assert.ok(
+        !/HTTP\s*\d{3}|\/api\//.test(r.error),
+        `still operator-safe, got: ${r.error}`,
+      );
+    },
+  );
+});
+
+test("(b) and (c) are DIFFERENT — the same page must be able to tell them apart", async () => {
+  let timedOut;
+  let absent;
+  await withFetch(
+    async () => {
+      throw new DOMException("Aborted", "AbortError");
+    },
+    async () => {
+      timedOut = await cachedFetchJsonResult("/api/x-timeout");
+    },
+  );
+  await withFetch(
+    async () => ({ ok: false, status: 404, json: async () => ({}) }),
+    async () => {
+      absent = await cachedFetchJsonResult("/api/x-absent");
+    },
+  );
+  assert.notEqual(
+    timedOut.kind,
+    absent.kind,
+    "if these ever collapse, the detail pages go back to lying",
+  );
+  assert.notEqual(timedOut.error, absent.error);
+});
+
+test("a 5xx is a server failure, distinct from both absence and timeout", async () => {
+  await withFetch(
+    async () => ({ ok: false, status: 503, json: async () => ({}) }),
+    async () => {
+      // 503 is retried twice before it throws; that is existing behaviour.
+      const r = await cachedFetchJsonResult("/api/down");
+      assert.equal(r.ok, false);
+      assert.equal(r.kind, "server");
+      assert.equal(r.status, 503);
+      assert.equal(
+        isUnknownOutcome({ kind: r.kind, status: r.status, message: r.error }),
+        true,
+      );
+    },
+  );
+});
+
+test("a browser network failure classifies as network, never as absence", async () => {
+  await withFetch(
+    async () => {
+      throw new TypeError("Failed to fetch");
+    },
+    async () => {
+      const r = await cachedFetchJsonResult("/api/offline");
+      assert.equal(r.ok, false);
+      assert.equal(r.kind, "network");
+      assert.notEqual(r.kind, "notFound");
+    },
+  );
+});
+
+// --- the classifier itself (the decision every consumer now rests on) -------
+
+test("classifyFetchFailure: only a 404 is an observed absence", () => {
+  const cases = [
+    [new HttpError(404, "/api/a"), "notFound", false],
+    [new HttpError(500, "/api/a"), "server", true],
+    [new HttpError(403, "/api/a"), "server", true],
+    [new DOMException("Aborted", "AbortError"), "timeout", true],
+    [new TypeError("Failed to fetch"), "network", true],
+  ];
+  for (const [err, kind, unknown] of cases) {
+    const f = classifyFetchFailure(err);
+    assert.equal(f.kind, kind, `${err} should classify as ${kind}`);
+    assert.equal(isUnknownOutcome(f), unknown);
+    assert.ok(f.message && f.message.length > 0, "every failure carries a reason");
+    assert.ok(
+      !/HTTP\s*\d{3}|\/api\/|abort/i.test(f.message),
+      `operator-safe wording required, got: ${f.message}`,
+    );
+  }
+});
+
+test("classifyFetchFailure: a timeout says how long and what to do", () => {
+  const f = classifyFetchFailure(new DOMException("Aborted", "AbortError"));
+  assert.match(f.message, /30 seconds/);
+  assert.match(f.message, /try again/i);
+});
+
+test("isUnknownOutcome(null) is false — no failure is not an unknown outcome", () => {
+  assert.equal(isUnknownOutcome(null), false);
+  assert.equal(isUnknownOutcome(undefined), false);
 });

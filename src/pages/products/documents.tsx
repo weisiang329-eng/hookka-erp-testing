@@ -32,7 +32,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
-import { cachedFetchJson } from "@/lib/cached-fetch";
+import {
+  cachedFetchJsonResult,
+  isUnknownOutcome,
+  type CachedFetchFailure,
+} from "@/lib/cached-fetch";
+import { RecordLoadError } from "@/components/ui/record-load-error";
 import { uploadFileAsset } from "@/lib/upload-file";
 import type { Product } from "@/types";
 
@@ -91,6 +96,11 @@ export default function ProductDocumentsPage() {
   const [loading, setLoading] = useState(true);
   const [files, setFiles] = useState<FileAsset[]>([]);
   const [exporting, setExporting] = useState(false);
+  // `cachedFetchJson` returned null on ANY failure, so a 30 s abort rendered
+  // exactly like "the catalogue came back and this product isn't in it"
+  // (BUG-2026-08-13-016).
+  const [failure, setFailure] = useState<CachedFetchFailure | null>(null);
+  const [reloadTick, setReloadTick] = useState(0);
 
   // ONE call for all of this product's docs; group by category suffix.
   const reloadFiles = useCallback(async (productId: string) => {
@@ -111,8 +121,14 @@ export default function ProductDocumentsPage() {
     let cancelled = false;
     (async () => {
       try {
-        const pData = await cachedFetchJson<{ success?: boolean; data?: Product[] }>("/api/products");
+        const pRes = await cachedFetchJsonResult<{ success?: boolean; data?: Product[] }>("/api/products");
         if (cancelled) return;
+        setFailure(
+          pRes.ok
+            ? null
+            : { kind: pRes.kind, status: pRes.status, message: pRes.error },
+        );
+        const pData = pRes.data;
         const found =
           (pData?.success && Array.isArray(pData.data)
             ? pData.data.find((p) => p.id === id) || pData.data.find((p) => p.code === id)
@@ -124,7 +140,7 @@ export default function ProductDocumentsPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [id, reloadFiles]);
+  }, [id, reloadFiles, reloadTick]);
 
   const bySlot = useMemo(() => {
     const map: Record<string, FileAsset[]> = {};
@@ -143,6 +159,22 @@ export default function ProductDocumentsPage() {
       <div className="flex items-center justify-center h-64">
         <Loader2 className="h-8 w-8 animate-spin text-[#6B5C32]" />
       </div>
+    );
+  }
+
+  // A read that never landed is not a product that does not exist.
+  if (!product && failure && isUnknownOutcome(failure)) {
+    return (
+      <RecordLoadError
+        subject="product"
+        failure={failure}
+        onRetry={() => {
+          setLoading(true);
+          setReloadTick((t) => t + 1);
+        }}
+        backTo="/products"
+        backLabel="Back to Products"
+      />
     );
   }
 

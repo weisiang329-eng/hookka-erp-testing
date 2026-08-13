@@ -175,13 +175,28 @@ function StationStrip({ poId }: { poId: string }) {
   // Fetched only when the production order is expanded — a SO can carry several
   // POs of 6-8 cards each, and pulling every one up front would cost more than
   // it shows.
-  const { data } = useCachedJson<{ success?: boolean; data?: { jobCards?: JobCard[] } }>(
+  const { data, loading, failure } = useCachedJson<{ success?: boolean; data?: { jobCards?: JobCard[] } }>(
     `/api/production-orders/${poId}`,
   );
   const stations = useMemo(
     () => groupJobCardsByDept(data?.data?.jobCards ?? []),
     [data],
   );
+  // "No job cards yet" is a statement about the shop floor. Make it only when
+  // the read actually landed — a timeout used to render it identically
+  // (BUG-2026-08-13-016).
+  if (stations.length === 0 && !data && failure) {
+    return (
+      <div className="px-3 py-2 text-xs text-[#9A3A2D]">
+        Couldn&apos;t load this production order&apos;s job cards — {failure.message}
+      </div>
+    );
+  }
+  if (stations.length === 0 && !data && loading) {
+    return (
+      <div className="px-3 py-2 text-xs text-[#9CA3AF]">Loading job cards…</div>
+    );
+  }
   if (stations.length === 0) {
     return (
       <div className="px-3 py-2 text-xs text-[#9CA3AF]">

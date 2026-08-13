@@ -325,7 +325,15 @@ function joinInflight<T>(url: string): Promise<T> {
         // list with the parsed error body. A transient 500/503 (DB
         // connection contention under load) must never blank a page that
         // was already showing data.
-        throw new Error(`HTTP ${r.status} for ${url}`);
+        //
+        // Thrown as an HttpError (not a bare Error) so the STATUS survives
+        // as a number. Only the status separates "the server answered and
+        // said this record is not there" (404) from "we never got an
+        // answer" — and a page that cannot tell them apart prints
+        // "not found" over a dead request (BUG-2026-08-13-016). The message
+        // is byte-identical to the old one so humanizeError and every
+        // existing caller behave exactly as before.
+        throw new HttpError(r.status, url);
       }
       const j = (await r.json()) as T;
       // Catch-all stub guard (2026-04-26): the backend's /api/* fallback in
@@ -372,6 +380,96 @@ function isAbortError(err: unknown): boolean {
   return name === "AbortError";
 }
 
+// ---------------------------------------------------------------------------
+// A failed read is not an empty one — and only ONE failure means the record
+// is actually absent.
+//
+// `api-client.ts` aborts every `/api/*` request at `API_TIMEOUT_MS` (30 s).
+// The abort used to be swallowed here with no error set, so a consumer was
+// left holding `data = null, loading = false, error = null` — a state
+// indistinguishable from "the server answered, and there is nothing here".
+// Eight detail pages printed "Order not found." / "Invoice not found." over
+// requests that had simply been killed, and four sat on an eternal "Loading…"
+// (BUG-2026-08-13-016, audit finding D3).
+//
+// The distinction is available by construction:
+//   • HTTP 404 — the server ANSWERED. The record is genuinely absent.
+//   • abort / network / 5xx / degraded body — we have NO answer. The record
+//     may well exist. Never assert otherwise.
+//
+// `kind: "notFound"` is the ONLY value that licenses the words "not found".
+// ---------------------------------------------------------------------------
+
+/** A non-2xx response, carrying its status as a number rather than as prose. */
+export class HttpError extends Error {
+  readonly status: number;
+  constructor(status: number, url: string) {
+    super(`HTTP ${status} for ${url}`);
+    this.name = "HttpError";
+    this.status = status;
+  }
+}
+
+export type FetchFailureKind =
+  /** HTTP 404 — the server answered and said this record is not there. */
+  | "notFound"
+  /** The 30 s cap in api-client.ts stopped the request. Outcome unknown. */
+  | "timeout"
+  /** Never got a usable answer (offline, DNS, reset, unparsable body). */
+  | "network"
+  /** The server answered, but could not fulfil the request (5xx / other 4xx). */
+  | "server"
+  /** HTTP 200 carrying the unmounted-route `_stub` envelope or `success:false`. */
+  | "degraded";
+
+export type CachedFetchFailure = {
+  kind: FetchFailureKind;
+  /** HTTP status when there was a response; 0 when there was none. */
+  status: number;
+  /** Operator-safe sentence, already through `humanizeError`. */
+  message: string;
+};
+
+/**
+ * Turn anything thrown by `joinInflight` into a classified failure.
+ *
+ * NOTE on aborts: an AbortError only reaches a caller that did NOT cancel
+ * itself. `releaseInflight` aborts a shared request only when its refcount
+ * hits 0 — i.e. every subscriber has already unmounted and set its own
+ * `cancelled` flag, and those return before this is ever called. So an abort
+ * observed here is the 30 s timeout, not a cancellation.
+ */
+export function classifyFetchFailure(err: unknown): CachedFetchFailure {
+  if (isAbortError(err)) {
+    return {
+      kind: "timeout",
+      status: 0,
+      message:
+        "The server didn't respond within 30 seconds, so the request was stopped. Please try again.",
+    };
+  }
+  const status = err instanceof HttpError ? err.status : 0;
+  if (status === 404) {
+    return { kind: "notFound", status, message: humanizeError(err) };
+  }
+  return {
+    kind: status > 0 ? "server" : "network",
+    status,
+    message: humanizeError(err),
+  };
+}
+
+/**
+ * `true` when the read failed in a way that leaves the record's existence
+ * UNKNOWN. Guard every "…not found" branch with this: the only failure that
+ * proves absence is `kind: "notFound"`.
+ */
+export function isUnknownOutcome(
+  failure: CachedFetchFailure | null | undefined,
+): boolean {
+  return failure != null && failure.kind !== "notFound";
+}
+
 // A 200-OK response can still be semantically degraded: the worker's
 // catch-all returns `{success:true,data:[],_stub:true}` for an unmounted
 // route, and handled backend errors return `{success:false,error}`.
@@ -391,6 +489,16 @@ type UseCachedJsonResult<T> = {
   data: T | null;
   loading: boolean;
   error: string | null;
+  /**
+   * Set when the LAST attempt failed. `failure.kind` is what separates a
+   * record the server said is absent (`"notFound"`) from a record we simply
+   * could not reach — see `isUnknownOutcome`. `error` is `failure.message`
+   * (kept as a plain string for existing callers).
+   *
+   * `null` while loading, on success, and after a silent cancellation
+   * (unmount / URL change) — cancelling is not a failure.
+   */
+  failure: CachedFetchFailure | null;
   refresh: () => void;
 };
 
@@ -436,6 +544,7 @@ export function useCachedJson<T = unknown>(
     return readCache<T>(url) === null;
   });
   const [error, setError] = useState<string | null>(null);
+  const [failure, setFailure] = useState<CachedFetchFailure | null>(null);
   const [tick, setTick] = useState(0);
   const lastUrl = useRef<string | null>(null);
 
@@ -446,6 +555,7 @@ export function useCachedJson<T = unknown>(
       setData(null);
       setLoading(false);
       setError(null);
+      setFailure(null);
       lastUrl.current = null;
       return;
     }
@@ -459,6 +569,7 @@ export function useCachedJson<T = unknown>(
       setData(cached?.data ?? null);
       setLoading(cached === null);
       setError(null);
+      setFailure(null);
     }
 
     // Stale-while-revalidate: ALWAYS fire a network refetch on mount /
@@ -499,8 +610,13 @@ export function useCachedJson<T = unknown>(
         if (isDegradedResponse(raw)) {
           const prior = readCache<T>(joinedUrl);
           if (prior && !isDegradedResponse(prior.data)) {
+            const stale = "Showing your most recent saved data while we refresh.";
             setData(prior.data);
-            setError("Showing your most recent saved data while we refresh.");
+            setError(stale);
+            // Degraded, not absent. Stated so a consumer that renders a
+            // "not found" branch can never reach it off the back of a
+            // route that simply isn't mounted.
+            setFailure({ kind: "degraded", status: 200, message: stale });
             return;
           }
         }
@@ -511,13 +627,20 @@ export function useCachedJson<T = unknown>(
         writeCache<T>(joinedUrl, raw);
         setData(raw);
         setError(null);
+        setFailure(null);
       })
       .catch((err) => {
+        // A consumer that cancelled itself (unmount / URL change) stays
+        // SILENT — that is not an error, and making it noisy would be a new
+        // bug. Everything that gets past this line is a real failure the
+        // consumer is still mounted to see, INCLUDING the 30 s abort from
+        // api-client.ts, which used to `return` here with no error set and
+        // left the page claiming the record did not exist
+        // (BUG-2026-08-13-016).
         if (cancelled) return;
-        // AbortError is the expected outcome of releaseInflight() racing
-        // a slow request; not a user-visible failure.
-        if (isAbortError(err)) return;
-        setError(humanizeError(err));
+        const f = classifyFetchFailure(err);
+        setFailure(f);
+        setError(f.message);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -562,7 +685,7 @@ export function useCachedJson<T = unknown>(
     };
   }, [url, revalidateOnFocus]);
 
-  return { data, loading, error, refresh };
+  return { data, loading, error, failure, refresh };
 }
 
 /**
@@ -613,7 +736,18 @@ export async function cachedFetchJson<T = unknown>(
 // ---------------------------------------------------------------------------
 export type CachedFetchResult<T> =
   | { ok: true; data: T }
-  | { ok: false; error: string; data: T | null };
+  | {
+      ok: false;
+      error: string;
+      /**
+       * Why it failed. `"notFound"` is the ONLY value that means the record
+       * is genuinely absent — see `isUnknownOutcome`. `error` stays the
+       * report-flavoured sentence this function has always returned.
+       */
+      kind: FetchFailureKind;
+      status: number;
+      data: T | null;
+    };
 
 export async function cachedFetchJsonResult<T = unknown>(
   url: string,
@@ -628,6 +762,8 @@ export async function cachedFetchJsonResult<T = unknown>(
       const o = raw as { error?: unknown };
       return {
         ok: false,
+        kind: "degraded",
+        status: 200,
         // Route the backend string through the same display translator every
         // toast uses, so a constraint name or a column name can never reach an
         // operator (humanize-error.ts, owner directive 2026-06-08).
@@ -640,16 +776,21 @@ export async function cachedFetchJsonResult<T = unknown>(
     writeCache<T>(url, raw);
     return { ok: true, data: raw };
   } catch (err) {
+    const f = classifyFetchFailure(err);
     return {
       ok: false,
+      kind: f.kind,
+      status: f.status,
       // The 30 s global abort in api-client.ts surfaces as an AbortError whose
       // message ("Aborted" / "signal is aborted without reason") reads clean
       // enough that humanizeError would hand it straight to the operator. Name
       // it for what it is instead — this is the exact failure that used to be
-      // rendered as "No data available".
-      error: isAbortError(err)
-        ? "This report took too long to load. Narrow the date range and try again."
-        : humanizeError(err, "Couldn't load this report. Please try again."),
+      // rendered as "No data available". Report-flavoured on purpose: this
+      // function's callers are report tabs over a date range.
+      error:
+        f.kind === "timeout"
+          ? "This report took too long to load. Narrow the date range and try again."
+          : humanizeError(err, "Couldn't load this report. Please try again."),
       data: cached?.data ?? null,
     };
   }

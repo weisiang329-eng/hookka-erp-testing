@@ -22,6 +22,8 @@ export {
   SkeletonDashboard,
 } from "./skeleton";
 export { ToastProvider, useToast } from "./toast";
+// A record that could not be LOADED is not a record that does not EXIST.
+export { RecordLoadError, type RecordLoadErrorProps } from "./record-load-error";
 
 // New shared components (Phase 3)
 export { PageHeader, type PageHeaderProps } from "./page-header";

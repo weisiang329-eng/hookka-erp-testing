@@ -7,20 +7,29 @@
 //   2026-07-14  totalHeightPriceSen   recompute dropped a client-sent field
 //   2026-07-17  specialOrderPriceSen  BUG-2026-07-17-002, RM 8,060 / 66 SOs
 //   2026-07-22  divanPriceSen + legPriceSen                 RM 12,455
+//   2026-08-13  ALL FOUR, on the CONSIGNMENT order          BUG-2026-08-13-040
 //
 // Every time, the author noticed the class — the 07-17 file header literally
 // says "This is the same bug class as the 2026-07-14 totalHeightPriceSen fix"
 // — and still repaired only their own column, because the sibling components
 // sat on adjacent lines and nothing forced anyone to count them.
 //
-// So this test counts them. `unit_price = base + divan + leg + special` is the
-// contract (src/lib/pricing.ts); each priced component must reach the stored
-// price through a RESOLVER that can derive it when the client omits the field,
-// not through `Number(item.X) || 0`, which silently stores 0 for every client
-// that does not compute prices — i.e. both scan-PO paths.
+// The 2026-08-13 pass is the same lesson one level up: every one of those four
+// fixes was applied to `sales-orders.ts` alone, and this test read only that
+// file — so `consignment-orders.ts`, a structural clone writing the same
+// columns for the same customers, kept `Number(it.X) || 0` on three components
+// and omitted the fourth from its INSERT entirely. The axis this test counts is
+// therefore DOCUMENT TYPE × COMPONENT, not component alone.
 //
-// Adding a fifth component means adding it to COMPONENTS here, and this test
-// fails until it is wired the same way.
+// So this test counts them. `unit_price = base + divan + leg + totalHeight +
+// special` is the contract (src/lib/pricing.ts); each priced component must
+// reach the stored price through a RESOLVER that can derive it when the client
+// omits the field, not through `Number(item.X) || 0`, which silently stores 0
+// for every client that does not compute prices — i.e. both scan-PO paths.
+//
+// Adding a component means adding it to COMPONENTS here; adding a document type
+// that stores a priced line means adding it to DOCUMENTS. Either fails until it
+// is wired the same way.
 // ---------------------------------------------------------------------------
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -31,7 +40,13 @@ import {
   specialOrderOptions,
 } from "../src/lib/pricing-options.ts";
 
-const SO = readFileSync(resolve(process.cwd(), "src/api/routes/sales-orders.ts"), "utf8");
+const read = (p) => readFileSync(resolve(process.cwd(), p), "utf8");
+
+/** Every route that stores a priced order line. Both write the SAME columns. */
+const DOCUMENTS = [
+  { name: "sales order", path: "src/api/routes/sales-orders.ts" },
+  { name: "consignment order", path: "src/api/routes/consignment-orders.ts" },
+];
 
 const COMPONENTS = [
   {
@@ -49,33 +64,105 @@ const COMPONENTS = [
     resolver: "resolveSpecialOrderPriceSen",
     note: "BUG-2026-07-17-002, RM 8,060 across 66 SOs",
   },
+  {
+    field: "totalHeightPriceSen",
+    resolver: "resolveTotalHeightPriceSen",
+    note:
+      "0 of 125 eligible SO lines charged (RM 10,240) before 2026-07-23; on the CO " +
+      "side the component was dropped from the INSERT altogether, so the saved total " +
+      "was LOWER than the total the operator approved on screen (BUG-2026-08-13-040)",
+  },
 ];
 
-for (const { field, resolver, note } of COMPONENTS) {
-  test(`${field} is resolved server-side, not taken on trust`, () => {
-    const naive = new RegExp(`const\\s+${field}\\s*=\\s*Number\\(item\\.${field}\\)\\s*\\|\\|\\s*0`);
-    assert.doesNotMatch(
-      SO,
-      naive,
-      `\`Number(item.${field}) || 0\` stores whatever the client posted, and the scan-PO ` +
-        `clients post nothing — ${note}. Route it through ${resolver}() instead, which ` +
-        `trusts a supplied number (including a deliberate 0) and derives ONLY when the ` +
-        `field was omitted.`,
-    );
-    assert.match(SO, new RegExp(`${resolver}\\(`), `${field} must go through ${resolver}()`);
+for (const { name, path } of DOCUMENTS) {
+  const SRC = read(path);
+
+  for (const { field, resolver, note } of COMPONENTS) {
+    test(`${name}: ${field} is resolved server-side, not taken on trust`, () => {
+      // Anchored to a `const x = Number(y.field) || 0` DECLARATION — the shape
+      // that feeds the stored unit price. Projections that merely echo a posted
+      // value into a throwaway BOM-check row are not this bug and must not be
+      // flagged, or the test cries wolf and gets muted.
+      const naive = new RegExp(
+        `const\\s+\\w+\\s*=\\s*Number\\(\\w+\\.${field}\\)\\s*\\|\\|\\s*0`,
+      );
+      assert.doesNotMatch(
+        SRC,
+        naive,
+        `${path}: \`Number(x.${field}) || 0\` stores whatever the client posted, and the ` +
+          `scan-PO clients post nothing — ${note}. Route it through ${resolver}() instead, ` +
+          `which trusts a supplied number (including a deliberate 0) and derives ONLY when ` +
+          `the field was omitted.`,
+      );
+      assert.match(
+        SRC,
+        new RegExp(`${resolver}\\(`),
+        `${path}: ${field} must go through ${resolver}()`,
+      );
+    });
+  }
+
+  test(`${name}: both write paths — POST and PUT — resolve every component`, () => {
+    // A fix applied only to create leaves editing a scanned order re-storing 0.
+    for (const { field, resolver } of COMPONENTS) {
+      const uses = SRC.match(new RegExp(`${resolver}\\(`, "g")) ?? [];
+      assert.ok(
+        uses.length >= 2,
+        `${path}: ${resolver} (for ${field}) appears ${uses.length}x — it must be called ` +
+          `from BOTH the POST and the PUT item loops.`,
+      );
+    }
+  });
+
+  test(`${name}: the stored line names every component in its INSERT`, () => {
+    // The CO route summed four components correctly and then left the fifth out
+    // of the column list, so the value was computed and thrown away. A resolver
+    // that nothing persists is not a fix.
+    const inserts =
+      SRC.match(/INSERT INTO \w*order_items \([^)]+\)/gi) ?? [];
+    assert.ok(inserts.length >= 2, `${path}: expected a POST and a PUT item INSERT`);
+    for (const ins of inserts) {
+      for (const { field } of COMPONENTS) {
+        assert.match(
+          ins.replace(/\s+/g, " "),
+          new RegExp(`\\b${field}\\b`),
+          `${path}: an item INSERT omits ${field}. The component is computed and then ` +
+            `discarded, which is exactly how the CO total came out lower than the ` +
+            `quotation the operator approved.`,
+        );
+      }
+    }
   });
 }
 
-test("both write paths — POST and PUT — resolve every component", () => {
-  // A fix applied only to create leaves editing a scanned order re-storing 0.
-  for (const { field, resolver } of COMPONENTS) {
-    const uses = SO.match(new RegExp(`${resolver}\\(`, "g")) ?? [];
-    assert.ok(
-      uses.length >= 2,
-      `${resolver} (for ${field}) appears ${uses.length}x — it must be called from BOTH the ` +
-        `POST and the PUT item loops.`,
+test("the SHARED sofa-combo recompute drops nothing either", () => {
+  // runSofaComboPass rewrites basePriceSen for a renegotiated set and then
+  // recomputes that line's unit price and total — for BOTH document types. It
+  // named four components and used a discount-free line total, so a combo line
+  // silently lost its total-height surcharge and had its discount refunded to
+  // us. One recompute, both documents: the third site of the same class.
+  const SRC = read("src/api/lib/sofa-combo-pass.ts");
+  const recompute = SRC.slice(SRC.indexOf("newBaseByKey.get(it.id)"));
+  for (const part of [
+    "basePriceSen",
+    "divanPriceSen",
+    "legPriceSen",
+    "totalHeightPriceSen",
+    "specialOrderPriceSen",
+  ]) {
+    assert.match(
+      recompute,
+      new RegExp(part),
+      `sofa-combo-pass must include ${part} when it recomputes the unit price of a ` +
+        `renegotiated line.`,
     );
   }
+  assert.match(
+    recompute,
+    /calculateLineTotalWithDiscount\(/,
+    "the recomputed line total must keep the per-line discount its caller already " +
+      "subtracted — `calculateLineTotal(unit, qty)` hands it back to us.",
+  );
 });
 
 test("the unit price is the sum of its components, nothing dropped", () => {

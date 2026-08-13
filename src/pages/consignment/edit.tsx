@@ -28,6 +28,10 @@ import {
   legHeightOptions,
   specialOrderOptions,
 } from "@/lib/pricing-options";
+// The fifth price component. Same helper the CO PUT uses to derive it, so the
+// number on screen is the number the server would store.
+import { deriveTotalHeightSurchargeSen } from "@/lib/total-height-surcharge";
+import type { CfgHeight } from "@/lib/height-surcharge";
 import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
 import { useCachedJson, invalidateCache, invalidateCachePrefix, isUnknownOutcome } from "@/lib/cached-fetch";
 import { RecordLoadError } from "@/components/ui/record-load-error";
@@ -58,6 +62,12 @@ type LineItem = {
   divanPriceSen: number;
   legHeightInches: number | null;
   legPriceSen: number;
+  // The FIFTH price component (consignment_order_items.total_height_price_sen).
+  // Absent from this page until 2026-08-13: the CO write path now derives it
+  // when the client omits the field, so a screen that did not carry it would
+  // display base+divan+leg+special while the save stored that PLUS the
+  // total-height surcharge — the same drift, pointing the other way.
+  totalHeightPriceSen: number;
   specialOrders: string[];
   specialOrder: string;
   specialOrderPriceSen: number;
@@ -71,7 +81,7 @@ const EMPTY_LINE: LineItem = {
   sizeCode: "", sizeLabel: "", fabricCode: "",
   quantity: 1, basePriceSen: 0, seatHeight: "",
   gapInches: null, divanHeightInches: null, divanPriceSen: 0,
-  legHeightInches: null, legPriceSen: 0,
+  legHeightInches: null, legPriceSen: 0, totalHeightPriceSen: 0,
   specialOrders: [], specialOrder: "", specialOrderPriceSen: 0, notes: "",
   discountSen: 0,
 };
@@ -374,6 +384,10 @@ export default function EditSalesOrderPage() {
               divanPriceSen: (item.divanPriceSen as number) || 0,
               legHeightInches: item.legHeightInches as number | null,
               legPriceSen: (item.legPriceSen as number) || 0,
+              // Seeded from the line's OWN stored component, never re-derived
+              // on load: opening an order and pressing Save without touching
+              // anything must charge exactly what it already charged.
+              totalHeightPriceSen: (item.totalHeightPriceSen as number) || 0,
               specialOrders: (() => {
                 const raw = (item.specialOrder as string) || "";
                 const tokens = raw.split(/[;,]+/).map((s) => s.trim()).filter(Boolean);
@@ -402,7 +416,27 @@ export default function EditSalesOrderPage() {
   };
 
   const updateItem = (idx: number, updates: Partial<LineItem>) => {
-    setItems(prev => prev.map((item, i) => i === idx ? { ...item, ...updates } : item));
+    setItems(prev => prev.map((item, i) => {
+      if (i !== idx) return item;
+      const merged = { ...item, ...updates };
+      // Total height = gap + divan + leg, priced off the owner's
+      // variants-config.totalHeights. Re-derived whenever one of those three
+      // changes, through the SAME helper the PUT uses
+      // (deriveTotalHeightSurchargeSen) — mirrors sales/edit.tsx.
+      if ("gapInches" in updates || "divanHeightInches" in updates || "legHeightInches" in updates) {
+        const cfgTotalHeights = maintenanceConfig?.totalHeights as CfgHeight[] | undefined;
+        if (Array.isArray(cfgTotalHeights)) {
+          merged.totalHeightPriceSen = deriveTotalHeightSurchargeSen(
+            (merged.gapInches || 0) + (merged.divanHeightInches || 0) + (merged.legHeightInches || 0),
+            cfgTotalHeights,
+          );
+        }
+        // Config not loaded (yet / at all): KEEP the line's stored surcharge
+        // rather than zeroing it. A price we cannot look up is not a price of
+        // zero, and whatever we keep is still exactly what we display and post.
+      }
+      return merged;
+    }));
   };
 
   const selectProduct = (idx: number, productId: string) => {
@@ -424,6 +458,8 @@ export default function EditSalesOrderPage() {
       divanPriceSen: isSofa ? 0 : items[idx].divanPriceSen,
       legHeightInches: isSofa ? null : items[idx].legHeightInches,
       legPriceSen: isSofa ? 0 : items[idx].legPriceSen,
+      // A sofa line has no gap/divan/leg, so it has no total height either.
+      totalHeightPriceSen: isSofa ? 0 : items[idx].totalHeightPriceSen,
     });
   };
 
@@ -465,24 +501,21 @@ export default function EditSalesOrderPage() {
   };
 
   // THE unit-price sum — the shared one (`calculateUnitPrice`, the order-side
-  // alias of `invoiceLineUnitSen`), not a local copy.
+  // alias of `invoiceLineUnitSen`), not a local copy. All five components.
   //
-  // `totalHeightPriceSen` is passed as an EXPLICIT 0, not omitted: the CO write
-  // path (`src/api/routes/consignment-orders.ts`, POST and PUT) charges
-  // base + divan + leg + special and never reads or writes
-  // `consignment_order_items.total_height_price_sen` — migration 0209 added the
-  // column on the CO table but nothing on the CO side fills it. So a CO line has
-  // no total-height component today, and this screen must show what it saves.
-  // (The CO CREATE page does compute one and post it, and the server drops it —
-  // that gap is real, but it lives in the CO write path, not here. Wiring a
-  // T.Height charge into consignment orders is a pricing decision, not a
-  // rendering one; when it is made, this is the line that changes.)
+  // 2026-08-13 (BUG-2026-08-13-040): this passed an EXPLICIT 0 for
+  // `totalHeightPriceSen`, and the comment here recorded — correctly — that the
+  // CO write path dropped the component. The write path was the thing that was
+  // wrong: the CO CREATE screen computed a T.Height surcharge, showed it, posted
+  // it, and the server stored a unit price without it, so the saved CO total was
+  // LOWER than the operator approved. Now the route resolves and stores it, so
+  // this screen carries it too.
   const getUnitPrice = (item: LineItem) =>
     calculateUnitPrice({
       basePriceSen: item.basePriceSen,
       divanPriceSen: item.divanPriceSen,
       legPriceSen: item.legPriceSen,
-      totalHeightPriceSen: 0,
+      totalHeightPriceSen: item.totalHeightPriceSen,
       specialOrderPriceSen: item.specialOrderPriceSen,
     });
 
@@ -1140,7 +1173,7 @@ export default function EditSalesOrderPage() {
                       basePriceSen: item.basePriceSen,
                       divanPriceSen: item.divanPriceSen,
                       legPriceSen: item.legPriceSen,
-                      totalHeightPriceSen: 0,
+                      totalHeightPriceSen: item.totalHeightPriceSen,
                       specialOrderPriceSen: item.specialOrderPriceSen,
                     },
                     getUnitPrice(item),

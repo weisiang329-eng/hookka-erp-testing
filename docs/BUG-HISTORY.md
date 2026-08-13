@@ -65,6 +65,86 @@ survived. Proved by deleting the check (77 bytes) and watching it go red.
 stayed green. That looked like "the guard doesn't work" but was actually "the mutation
 didn't apply". Always assert the mutation changed the file before believing a red-or-green
 result — a mutation test that doesn't mutate is a false all-clear.
+## BUG-2026-08-13-040 — a Consignment Order saved for LESS than the operator approved: the server dropped the total-height surcharge `money` `consignment` `data-integrity` 🟢
+
+**Symptom.** Silent, and in the customer's favour. The CO create screen prices a
+bedframe line as Base + Divan + Leg + **T.Height** + Special, shows the surcharge
+inline as `+RM 80.00`, folds it into the unit price the operator reads and approves,
+and POSTs it. What was stored was Base + Divan + Leg + Special. So the saved CO — the
+number on the CO PDF, on the list, in every downstream figure — was **lower** than the
+quotation the operator had just agreed, and the PDF's "T.Height" column printed
+`RM 0.00` on every line ever raised.
+
+**Root cause.** BUG-CLASS **C1**, sixth instance, and the first one found by looking at
+a *second document type* instead of a second column. `consignment-orders.ts` computed
+`const unitPrice = basePrice + divanPrice + legPrice + specialPrice` in BOTH its POST
+and its PUT item loops, and its `INSERT INTO consignment_order_items (…)` column list
+did not name `totalHeightPriceSen` at all — so the posted value was parsed, ignored and
+thrown away. The column **exists in production**
+(`consignment_order_items.total_height_price_sen`, confirmed in `tests/db-schema.json`;
+self-applied by the SO helper, which this route never awaits) and was uniformly 0.
+
+The same file also took the other three components on trust —
+`Number(it.divanPriceSen) || 0` ×3 — the exact shape the SO route was repaired of on
+2026-07-17 and 2026-07-22. Every one of those fixes was applied to `sales-orders.ts`
+alone, and `tests/price-component-class.test.mjs` read only that file, so the clone
+beside it was never counted.
+
+A THIRD site, shared by both document types, had the same defect one level down:
+`runSofaComboPass` (`src/api/lib/sofa-combo-pass.ts`) recomputes a renegotiated sofa
+line's unit price from four components (dropping total height) and its line total from
+a bare `unit × qty` — discarding the per-line discount the caller had already
+subtracted, i.e. storing **more** than the screen quoted. The frontend's own combo
+preview passes `getLineTotal(l)` (discount included) and lists `totalHeightPriceSen`
+among the per-unit surcharges, so the two had drifted apart.
+
+**Fix.**
+- `src/api/routes/consignment-orders.ts` — all four components now go through the same
+  resolvers the SO route uses (`resolveHeightPriceSen` ×2, `resolveSpecialOrderPriceSen`,
+  `resolveTotalHeightPriceSen`) in BOTH loops; the unit price is the shared
+  `calculateUnitPrice` naming all five parts; the line total is
+  `calculateLineTotalWithDiscount`; `totalHeightPriceSen` is in both INSERT column
+  lists; `rowToItem` / `rowToCOListItem` emit it dual-keyed; the write path's own
+  `ALTER TABLE … ADD COLUMN IF NOT EXISTS` covers it.
+  **Trust model unchanged from the SO side:** a client-supplied number is trusted
+  verbatim, *including a deliberate 0*; only an OMITTED field is derived from the
+  owner's `variants-config`; a total height that is not in the owner's list prices at 0
+  and is never guessed.
+- `src/api/lib/sofa-combo-pass.ts` — the recompute names all five components and keeps
+  the discount.
+- `src/pages/consignment/edit.tsx` — carries `totalHeightPriceSen` in line state,
+  seeded from the line's own stored value, re-derived on a gap/divan/leg change through
+  the SAME helper the PUT uses, and displayed. Its stale comment claiming the CO write
+  path "never reads or writes" the column is replaced.
+- `src/lib/pricing.ts` — the header comment saying `totalHeightPriceSen` "is NOT sent to
+  the API" described the pre-0209 world and is exactly the belief that kept the CO route
+  summing four components. Corrected.
+
+**Verified.** `tests/consignment-total-height-surcharge.test.mjs` runs the REAL POST and
+PUT handlers against an in-memory book and asserts the values actually bound into the
+INSERT equal, to the sen, what the screen's own `calculateUnitPrice` /
+`calculateLineTotalWithDiscount` produce for the same line. On the fixture
+(base 83,000 · divan 5,500 · leg 2,000 · T.Height 26" 8,000 · qty 2 · discount 3,000):
+
+| | unit | line total | order total |
+|---|---|---|---|
+| screen | 98,500 | 194,000 | 194,000 |
+| stored BEFORE | 90,500 | 178,000 | 178,000 |
+| stored AFTER | 98,500 | 194,000 | 194,000 |
+
+RM 160.00 under-charged on one two-unit line. `tests/sofa-combo-pass-components.test.mjs`
+covers the shared recompute; `tests/price-component-class.test.mjs` now counts
+DOCUMENT TYPE × COMPONENT and additionally asserts each item INSERT names every
+component. **Every one of these guards was proved by putting the bug back and watching
+it go red** — separately for the POST sum, the PUT sum, the dropped INSERT column, and
+both halves of the combo recompute; against the pre-fix tree the class test fails 7/15.
+
+**NOT verified:** no prod session was available. The blast radius on live data is
+unmeasured — run the `row 34` probe in `docs/AUDIT-LAYER-CONSISTENCY.md` §7 to count the
+eligible lines. Per the standing rule, existing orders are **not** repriced
+(「旧的 order 就算了」); this is fix-forward.
+
+---
 
 ## BUG-2026-08-13-034 — every downloaded Credit Note and Debit Note printed RM 0.00, because a stale shared type certified the wrong keys `money` `ui-frontend` `data-integrity` 🟢
 

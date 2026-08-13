@@ -812,30 +812,32 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/reports.tsx` — tabbed hub (Sales/Production/Inventory/Financial/Employee) (1704) | `src/api/routes/reports.ts` — /api/reports/* efficiency/schedule/overdue (GET+JSON+send) + compliance.json (545) | `sales_orders` / `sales_order_items` / `invoices` | `tests/efficiency-allowance.test.mjs` · `tests/no-fabricated-efficiency.test.mjs` · `tests/no-fabricated-worker-metrics.test.mjs` · `tests/reports-failed-fetch-is-not-empty.test.mjs` · `tests/production-report-summary.test.mjs` · `tests/cached-fetch-result.test.mjs` |
+| `src/pages/reports.tsx` — tabbed hub (Sales/Production/Inventory/Financial/Employee) (1704) | `src/api/routes/reports.ts` — /api/reports/* efficiency/schedule/overdue (GET+JSON+send) + compliance.json (545) | `sales_orders` / `sales_order_items` / `invoices` | `tests/efficiency-allowance.test.mjs` · `tests/no-fabricated-efficiency.test.mjs` · `tests/no-fabricated-worker-metrics.test.mjs` · `tests/no-fabricated-financials.test.mjs` · `tests/reports-failed-fetch-is-not-empty.test.mjs` · `tests/production-report-summary.test.mjs` · `tests/cached-fetch-result.test.mjs` |
 | `src/pages/daily-report.tsx` — newspaper-style compliance exceptions (1815) | `src/api/routes/dashboard-overview.ts` — single GET / consolidated dashboard payload (2009) | `purchase_orders` / `purchase_order_items` / `purchase_invoices` / `grns` | |
 | `src/pages/analytics/forecast.tsx` — demand forecast vs historical sales | `src/api/routes/forecasts.ts` — demand-forecast data (131) | `production_orders` / `job_cards` / `delivery_orders` / `delivery_order_items` | |
 | `src/pages/dashboard-b/index.tsx` — experimental Dashboard B / reporting view | | `products` / `workers` / `attendance_records` / `working_hour_entries` / `piece_pics` | |
 | `src/pages/dashboard-b/charts.tsx` — lazy recharts/d3 chart chunk | | `departments` / `bom_templates` / `rd_projects` / `cost_ledger` / `per_po` / `kv_config` / `users` | |
 
 **Big-file section index**
-- `src/pages/reports.tsx` (1704 lines, refreshed 2026-08-13)
+- `src/pages/reports.tsx` (1929 lines, refreshed 2026-08-13)
   - Types mirroring API response shapes — L21-163
   - Date helpers — L164-199
   - Fetch-result helper (`firstError`) — L200-213
   - CSV helper — L214-239
   - Shared Components (Spinner / **ReportError** / DateRangeSelector / SummaryCard / ReportTable) — L240-403
-  - Tab definitions — L404-427
-  - SalesReportTab — L428-662
-  - ProductionReportTab — L663-921
-  - InventoryReportTab — L922-1059
-  - FinancialReportTab — L1060-1319
-  - EmployeeReportTab — L1320-1622
-  - ReportsPage (default export, tab router + ?tab= URL sync) — L1623-1704
+  - Tab definitions — L404-423
+  - SalesReportTab — L428-658
+  - ProductionReportTab — L663-917
+  - InventoryReportTab — L922-1055
+  - FinancialReportTab (+ `LedgerPl` types) — L1060-1540
+  - EmployeeReportTab — L1545-1843
+  - ReportsPage (default export, tab router + ?tab= URL sync) — L1844-1929
 
 **Gotchas**
 - No page file exceeds the ~2000-line threshold (reports.tsx 1704, daily-report.tsx 1815), so bigFileSections is only provided for reports.tsx as the highest-value map; daily-report.tsx is large but a single page. The 2009-line file is src/api/routes/dashboard-overview.ts, a ROUTE not a page.
 - reports.tsx tabs do NOT call /api/reports/* — Sales / Inventory / Financial fetch the source module's own list API (sales-orders, invoices, products, purchase-orders) and summarise client-side. Only daily-report.tsx consumes /api/reports/compliance.json. Don't expect the Reports hub and the reports.ts route to share data shapes.
+- **Financial tab: the P&L comes from the LEDGER, and an unsourced line is "—" (2026-08-13, BUG-2026-08-13-009).** `GET /api/accounting/pl` nets the posted `ledger_journal_entries` per account and classifies by that account's own `type` in `chart_of_accounts`; accounts netting to zero are omitted, so the entry count per category IS the provenance and is printed beside each subtotal. **A category with no posted account renders "—", never RM 0.00**, and gross/net profit propagate the dash instead of laundering it. Until this date COGS was `revenue × 0.65` and Salaries/Utilities/Rent/Others were the literals `5000000`/`800000`/`1500000`/`500000` sen. **Do not add a Rent/Utilities grouping** — no such bucket exists in `src/lib/pnl-bucket.ts` (only `OPEX_SALARIES` = `900-S0*` vs `OPERATING_EXPENSE`), and choosing which accounts roll into which is an owner decision. Expense lines are listed under their own code + name. Guarded by `tests/no-fabricated-financials.test.mjs`.
+- **The Financial tab's purchase-order card is NOT accounts payable (BUG-2026-08-13-010).** It ages orders that have *not* been received, by `expectedDate` — the opposite population from a payable. It was headed "Accounts Payable Aging" until 2026-08-13. Real AP: `GET /api/accounting/aging?kind=ap` / Accounting › AP Aging.
 - **Production tab = ONE server aggregate, never a list read (2026-08-13, BUG-2026-08-13-005).** `GET /api/production-orders/report-summary?from=&to=` returns status counts, the average completion days, the per-department paired efficiency subtotals and the overdue list, all in SQL. It used to fetch bare `/api/production-orders` (2,539 orders × every job card) and add it up in the browser: **30,012 ms, killed by api-client's 30 s `API_TIMEOUT_MS`**, after which the page printed "No data available" over the dead request. `from`/`to` are REQUIRED and 400 if malformed — the endpoint must not be able to become an unbounded scan again. Registered before `/:id`.
 - **A failed fetch must never render as an empty result (page-wide rule).** Use `cachedFetchJsonResult` (`src/lib/cached-fetch.ts`) — `cachedFetchJson` returns `null` for a timeout, an abort, a 500 and a `_stub` body alike, so `json?.data || []` silently states "nothing happened in this range". All five tabs branch on `ok`, keep data `null` on failure and render `<ReportError>` (message + Retry + an explicit denial of the "no activity" reading). Tabs with two sources fail as a whole. Pinned by `tests/reports-failed-fetch-is-not-empty.test.mjs`.
 - **Employee tab: every figure names a source; there is no placeholder left (2026-08-13, BUG-2026-08-13-006).** Worker Efficiency / Clocked Hours / Job Cards Completed come from `GET /api/department-performance?view=summary&from=&to=`; the attendance cards come from `GET /api/attendance?from=&to=`. They used to come from `seed(w.id)` — a hash of the worker's primary key — beside hardcoded "Attendance Rate 94.5%" / "Avg Hours/Day 8.7" / "12.5 OT hours". **Attendance Rate is now "—" on purpose**: `attendance_records` gets a row only when somebody punches (2,780 of 2,780 rows in 2026 are `PRESENT`, zero `ABSENT`), so a rate is 100% by construction; absence lives in `labor-engine.ts`. A worker with no clocked time reads "—", never 0%. Tests: `tests/no-fabricated-worker-metrics.test.mjs`.

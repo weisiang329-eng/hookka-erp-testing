@@ -23,7 +23,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ObjectPageHeader } from "@/components/ui/object-page-header";
 import { DataGrid, type Column } from "@/components/ui/data-grid";
-import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix, isUnknownOutcome } from "@/lib/cached-fetch";
+import { RecordLoadError } from "@/components/ui/record-load-error";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { humanizeError } from "@/lib/humanize-error";
 import { formatCurrency, formatDate, formatRM } from "@/lib/utils";
@@ -157,7 +158,7 @@ export default function SupplierDetailPage() {
   const { id } = useParams();
   const { confirm } = useConfirm();
 
-  const { data: supResp, loading: supLoading } = useCachedJson<{
+  const { data: supResp, loading: supLoading, failure: supFailure, refresh: refreshSupplier } = useCachedJson<{
     success?: boolean;
     data?: Supplier;
     error?: string;
@@ -565,6 +566,19 @@ export default function SupplierDetailPage() {
       <div className="flex items-center justify-center h-64">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#6B5C32]" />
       </div>
+    );
+  }
+
+  // A read that never landed is not an absent supplier (BUG-2026-08-13-016).
+  if (!supplier && supFailure && isUnknownOutcome(supFailure)) {
+    return (
+      <RecordLoadError
+        subject="supplier"
+        failure={supFailure}
+        onRetry={refreshSupplier}
+        backTo="/procurement/maintenance"
+        backLabel="Back to suppliers"
+      />
     );
   }
 

@@ -4,7 +4,8 @@
 // ---------------------------------------------------------------------------
 import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix, isUnknownOutcome } from "@/lib/cached-fetch";
+import { RecordLoadError } from "@/components/ui/record-load-error";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ObjectPageHeader } from "@/components/ui/object-page-header";
@@ -132,7 +133,7 @@ export default function ServiceOrderDetailPage() {
   const { confirm } = useConfirm();
   const user = getCurrentUser();
 
-  const { data: resp, refresh } = useCachedJson<{ data?: ServiceOrderDetail }>(
+  const { data: resp, loading, failure, refresh } = useCachedJson<{ data?: ServiceOrderDetail }>(
     `/api/service-orders/${id}`,
   );
   // Pulled here so the per-row Scrap action can show a dropdown of FG batches
@@ -157,6 +158,21 @@ export default function ServiceOrderDetailPage() {
     [order],
   );
 
+  // Was an eternal "Loading…" on any failure — the 30 s abort left the hook
+  // with no data and no error, and this branch reads only `order`
+  // (BUG-2026-08-13-016).
+  if (!order && failure && isUnknownOutcome(failure)) {
+    return (
+      <RecordLoadError
+        subject="repair order"
+        failure={failure}
+        onRetry={refresh}
+        backTo="/service-orders"
+        backLabel="Repair Orders"
+      />
+    );
+  }
+
   if (!order) {
     return (
       <div className="space-y-4">
@@ -166,7 +182,9 @@ export default function ServiceOrderDetailPage() {
         >
           <ArrowLeft className="h-3.5 w-3.5" /> Repair Orders
         </Link>
-        <p className="text-sm text-[#9CA3AF]">Loading…</p>
+        <p className="text-sm text-[#9CA3AF]">
+          {loading ? "Loading…" : "This repair order could not be found."}
+        </p>
       </div>
     );
   }

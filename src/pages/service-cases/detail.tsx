@@ -8,7 +8,8 @@
 // ---------------------------------------------------------------------------
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix, isUnknownOutcome } from "@/lib/cached-fetch";
+import { RecordLoadError } from "@/components/ui/record-load-error";
 import { useNavGuard } from "@/lib/use-nav-guard";
 import { todayYmdMY } from "@/lib/utils";
 import {
@@ -207,7 +208,7 @@ export default function ServiceCaseDetailPage() {
   const navigate = useNavigate();
   const user = getCurrentUser();
 
-  const { data: resp, refresh } = useCachedJson<{ data?: ServiceCaseDetail }>(
+  const { data: resp, loading, failure, refresh } = useCachedJson<{ data?: ServiceCaseDetail }>(
     `/api/service-cases/${id}`,
   );
   const caseDetail = resp?.data;
@@ -424,6 +425,22 @@ export default function ServiceCaseDetailPage() {
     [caseDetail],
   );
 
+  // This page used to render "Loading…" whenever `caseDetail` was falsy — for
+  // ever, because the 30 s abort resolved the hook with no data and no error.
+  // The three outcomes are now separate: still loading, could not be loaded,
+  // and genuinely absent (BUG-2026-08-13-016).
+  if (!caseDetail && failure && isUnknownOutcome(failure)) {
+    return (
+      <RecordLoadError
+        subject="service case"
+        failure={failure}
+        onRetry={refresh}
+        backTo="/service-cases"
+        backLabel="Service Cases"
+      />
+    );
+  }
+
   if (!caseDetail) {
     return (
       <div className="space-y-4">
@@ -433,7 +450,9 @@ export default function ServiceCaseDetailPage() {
         >
           <ArrowLeft className="h-3.5 w-3.5" /> Service Cases
         </Link>
-        <p className="text-sm text-[#9CA3AF]">Loading…</p>
+        <p className="text-sm text-[#9CA3AF]">
+          {loading ? "Loading…" : "This service case could not be found."}
+        </p>
       </div>
     );
   }

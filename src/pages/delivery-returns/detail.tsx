@@ -9,7 +9,8 @@ import { useParams, useNavigate, Link } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { useCachedJson } from "@/lib/cached-fetch";
+import { useCachedJson, isUnknownOutcome } from "@/lib/cached-fetch";
+import { RecordLoadError } from "@/components/ui/record-load-error";
 import { useToast } from "@/components/ui/toast";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Loader2, ArrowLeft, Printer } from "lucide-react";
@@ -71,7 +72,7 @@ export default function DeliveryReturnDetail() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const { confirm } = useConfirm();
-  const { data: raw, loading, refresh } = useCachedJson<Resp>(
+  const { data: raw, loading, failure, refresh } = useCachedJson<Resp>(
     `/api/delivery-returns/${id}`,
   );
   const dr = raw?.data ?? null;
@@ -107,6 +108,19 @@ export default function DeliveryReturnDetail() {
       </div>
     );
   }
+  // A read that never landed is not an absent return (BUG-2026-08-13-016).
+  if (!dr && failure && isUnknownOutcome(failure)) {
+    return (
+      <RecordLoadError
+        subject="delivery return"
+        failure={failure}
+        onRetry={refresh}
+        backTo="/delivery-returns"
+        backLabel="Back to Delivery Returns"
+      />
+    );
+  }
+
   if (!dr) {
     return (
       <div className="space-y-4">

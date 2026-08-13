@@ -6,7 +6,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { RepairPartsBadge } from "@/components/sales/repair-scope-picker";
 import { formatDate, formatDateTime } from "@/lib/utils";
-import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCache, invalidateCachePrefix, isUnknownOutcome } from "@/lib/cached-fetch";
+import { RecordLoadError } from "@/components/ui/record-load-error";
 import { LockBanner } from "@/components/ui/lock-banner";
 import { DocumentChainMap } from "@/components/ui/document-chain-map";
 import { ObjectPageHeader } from "@/components/ui/object-page-header";
@@ -153,7 +154,7 @@ export default function DeliveryDetailPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const otherEditors = usePresence("delivery_order", id, Boolean(id));
-  const { data: doResp, loading: doLoading } = useCachedJson<{ success?: boolean; data?: DeliveryOrder; lockReason?: string | null; linkedReturns?: LinkedReturn[] }>(id ? `/api/delivery-orders/${id}` : null);
+  const { data: doResp, loading: doLoading, failure: doFailure, refresh: refreshDo } = useCachedJson<{ success?: boolean; data?: DeliveryOrder; lockReason?: string | null; linkedReturns?: LinkedReturn[] }>(id ? `/api/delivery-orders/${id}` : null);
   const { data: lorryResp, loading: lorryLoading } = useCachedJson<{ success?: boolean; data?: LorryInfo[] }>("/api/lorries");
   const [orderOverride, setOrderOverride] = useState<DeliveryOrder | null>(null);
   const order: DeliveryOrder | null = useMemo(() => {
@@ -435,6 +436,21 @@ export default function DeliveryDetailPage() {
       <div className="flex items-center justify-center h-64">
         <div className="text-[#6B7280]">Loading delivery order...</div>
       </div>
+    );
+  }
+
+  // The DO fetch failed in a way that leaves existence unknown (30 s timeout,
+  // dropped connection, 5xx). Saying "not found" here would be a claim we
+  // never observed — BUG-2026-08-13-016.
+  if (!order && doFailure && isUnknownOutcome(doFailure)) {
+    return (
+      <RecordLoadError
+        subject="delivery order"
+        failure={doFailure}
+        onRetry={refreshDo}
+        backTo="/delivery"
+        backLabel="Back to Deliveries"
+      />
     );
   }
 

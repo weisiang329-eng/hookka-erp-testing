@@ -27,7 +27,8 @@ import {
   specialOrderOptions,
 } from "@/lib/pricing-options";
 import { fetchVariantsConfig, getVariantsConfigSync, subscribeKvConfig, VARIANTS_CONFIG_KEY } from "@/lib/kv-config";
-import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCache, invalidateCachePrefix, isUnknownOutcome } from "@/lib/cached-fetch";
+import { RecordLoadError } from "@/components/ui/record-load-error";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { LockBanner } from "@/components/ui/lock-banner";
 import { RepairScopePicker, RepairScopeBadge } from "@/components/sales/repair-scope-picker";
@@ -552,7 +553,7 @@ export default function EditSalesOrderPage() {
   // need to refetch the (much heavier) production-orders payload.
   // lockReason comes back on /:id and surfaces the cascade-lock reason
   // (e.g. "PO X is COMPLETED") so the page can disable Save + show banner.
-  const { data: orderResp } = useCachedJson<{ success?: boolean; data?: SalesOrder; lockReason?: string | null }>(id ? `/api/sales-orders/${id}` : null);
+  const { data: orderResp, failure: orderFailure, refresh: refreshOrder } = useCachedJson<{ success?: boolean; data?: SalesOrder; lockReason?: string | null }>(id ? `/api/sales-orders/${id}` : null);
   const { data: eligibilityResp } = useCachedJson<EditEligibility>(id ? `/api/sales-orders/${id}/edit-eligibility` : null);
   // Seed the form ONCE per order. Re-seeding on a later background refetch
   // (cross-tab cache invalidation, the SWR mount refetch, polling) would
@@ -945,6 +946,22 @@ export default function EditSalesOrderPage() {
       toast.error(e instanceof Error ? e.message : "Network error — changes not saved");
     }
   };
+
+  // `loading` here is the SEEDING flag, and it is only cleared inside the
+  // effect that runs when `orderResp` arrives. So a failed read used to leave
+  // this page on "Loading..." for ever, with no way back. Check the failure
+  // FIRST — before `loading` — because on this page loading never clears
+  // (BUG-2026-08-13-016).
+  if (!order && orderFailure && isUnknownOutcome(orderFailure))
+    return (
+      <RecordLoadError
+        subject={mode === "service-order" ? "service order" : "sales order"}
+        failure={orderFailure}
+        onRetry={refreshOrder}
+        backTo={basePath}
+        backLabel="Back to list"
+      />
+    );
 
   if (loading) return <div className="flex items-center justify-center h-64 text-[#6B7280]">Loading...</div>;
 

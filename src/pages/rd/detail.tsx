@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix, isUnknownOutcome } from "@/lib/cached-fetch";
+import { RecordLoadError } from "@/components/ui/record-load-error";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -355,7 +356,7 @@ export default function RDProjectDetailPage() {
   // mutation. See migration 0095 for the JSON→table backfill.
   const issuancesUrl = id ? `/api/rd-projects/${id}/issuances` : null;
   const labourHoursUrl = id ? `/api/rd-projects/${id}/labour-hours` : null;
-  const { data: projectResp, loading, refresh: refreshProjectHook } = useCachedJson<{ data?: RDProject }>(rdUrl);
+  const { data: projectResp, loading, failure: projectFailure, refresh: refreshProjectHook } = useCachedJson<{ data?: RDProject }>(rdUrl);
   const { data: issuancesResp, refresh: refreshIssuancesHook } = useCachedJson<{ data?: RdMaterialIssuance[] }>(issuancesUrl);
   // perf 2026-08-13 (BUG-2026-08-13-021, audit finding D12): `?buckets=` — only
   // `rawMaterials` is read here, so the 365-row product catalogue and the WIP
@@ -1382,6 +1383,19 @@ export default function RDProjectDetailPage() {
       <div className="flex items-center justify-center h-64">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#6B5C32]" />
       </div>
+    );
+  }
+
+  // A read that never landed is not an absent project (BUG-2026-08-13-016).
+  if (!project && projectFailure && isUnknownOutcome(projectFailure)) {
+    return (
+      <RecordLoadError
+        subject="R&D project"
+        failure={projectFailure}
+        onRetry={fetchProject}
+        backTo="/rd"
+        backLabel="Back to R&D"
+      />
     );
   }
 

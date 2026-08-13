@@ -608,10 +608,46 @@ function ProductionReportTab() {
         }, 0) / completedOrders.length
       : 0;
 
-  // Department efficiency
+  // Department efficiency.
+  //
+  // An efficiency ratio's denominator must be a MEASUREMENT, and both sides of
+  // the ratio must cover the SAME cards. This table broke both rules: it summed
+  // each completed card's actual minutes OR-ed with its estimate into one
+  // total, summed the estimates into the other, and divided. On any card with
+  // no recorded duration — the majority — the fallback fired and that card
+  // contributed its own estimate to both sides, i.e. the estimate divided by
+  // itself, pinning the department at ~100%.
+  //
+  // The recordings are real and partial. On prod 2026-08-13: 4,340 of 36,796
+  // job cards carry a non-null `actualMinutes`, 4,289 of them non-zero. So
+  // there IS something to report — it must simply be reported over the cards
+  // that have it, never smeared across the ones that don't.
+  //
+  // Fix: a card is credited to the ratio ONLY when it carries a real duration,
+  // and then it contributes to BOTH sides (its estimate to the numerator, its
+  // measurement to the denominator). Departments with no recorded card read
+  // "—" rather than a manufactured 100%, and the Measured column says how many
+  // of the completed cards the percentage actually rests on, so nobody reads a
+  // 12-card sample as a departmental KPI.
+  //
+  // `productionTimeMinutes` is deliberately NOT used as a stand-in: it equals
+  // `estMinutes` on every row, so it is the standard time wearing another name.
+  //
+  // The genuine, fully-measured efficiency figure lives elsewhere and is NOT
+  // affected: /api/department-performance (and the employee / department /
+  // payslip surfaces on it) divides production minutes by CLOCKED time from
+  // `working_hour_entries`.
   const deptStats: Record<
     string,
-    { name: string; orders: number; totalMin: number; completedMin: number }
+    {
+      name: string;
+      orders: number;
+      stdMin: number;
+      // The paired subtotals — only cards that actually recorded a duration.
+      measuredCards: number;
+      measuredStdMin: number;
+      measuredActualMin: number;
+    }
   > = {};
   data.forEach((po) =>
     po.jobCards.forEach((jc) => {
@@ -619,27 +655,47 @@ function ProductionReportTab() {
         deptStats[jc.departmentCode] = {
           name: jc.departmentName,
           orders: 0,
-          totalMin: 0,
-          completedMin: 0,
+          stdMin: 0,
+          measuredCards: 0,
+          measuredStdMin: 0,
+          measuredActualMin: 0,
         };
       if (jc.status === "COMPLETED") {
-        deptStats[jc.departmentCode].orders += 1;
-        deptStats[jc.departmentCode].totalMin += jc.actualMinutes || jc.estMinutes;
-        deptStats[jc.departmentCode].completedMin += jc.estMinutes;
+        const d = deptStats[jc.departmentCode];
+        d.orders += 1;
+        d.stdMin += jc.estMinutes ?? 0;
+        // Deliberately NO `?? jc.estMinutes` fallback here — that is what
+        // silently turned an unmeasured card into a 100% one.
+        const actual = jc.actualMinutes ?? 0;
+        if (actual > 0) {
+          d.measuredCards += 1;
+          d.measuredStdMin += jc.estMinutes ?? 0;
+          d.measuredActualMin += actual;
+        }
       }
     })
   );
   const deptRows = Object.values(deptStats)
     .sort((a, b) => b.orders - a.orders)
     .map((d) => {
-      const avgTime =
-        d.orders > 0 ? Math.round(d.totalMin / d.orders) : 0;
+      // Standard (spec) minutes per completed card — an estimate, and now
+      // labelled as one — the old header omitted "Std", so it read as time
+      // actually taken.
+      const avgStdTime = d.orders > 0 ? Math.round(d.stdMin / d.orders) : 0;
+      const measured =
+        d.measuredCards > 0 ? `${d.measuredCards} / ${d.orders}` : "—";
       const efficiency =
-        d.totalMin > 0
-          ? ((d.completedMin / d.totalMin) * 100).toFixed(1) + "%"
-          : "-";
-      return [d.name, d.orders, avgTime, efficiency];
+        d.measuredActualMin > 0
+          ? ((d.measuredStdMin / d.measuredActualMin) * 100).toFixed(1) + "%"
+          : "—";
+      return [d.name, d.orders, avgStdTime, measured, efficiency];
     });
+  // Drives the explanatory caption under the table — shown only while not one
+  // completed card in range carries a duration, so the note disappears by
+  // itself as soon as the report has something real to stand on.
+  const anyActualMinutesRecorded = Object.values(deptStats).some(
+    (d) => d.measuredCards > 0,
+  );
 
   // Overdue orders
   const today = new Date();
@@ -688,7 +744,7 @@ function ProductionReportTab() {
             onClick={() =>
               downloadCSV(
                 "department-efficiency.csv",
-                ["Department", "Orders Processed", "Avg Time (mins)", "Efficiency %"],
+                ["Department", "Orders Processed", "Avg Std Time (mins)", "Measured Cards", "Efficiency %"],
                 deptRows.map((r) => r.map(String))
               )
             }
@@ -698,10 +754,32 @@ function ProductionReportTab() {
         </CardHeader>
         <CardContent>
           <ReportTable
-            headers={["Department", "Orders Processed", "Avg Time (mins)", "Efficiency %"]}
+            headers={["Department", "Orders Processed", "Avg Std Time (mins)", "Measured Cards", "Efficiency %"]}
             rows={deptRows}
-            align={["left", "right", "right", "right"]}
+            align={["left", "right", "right", "right", "right"]}
           />
+          <p className="mt-2 text-xs text-[#6B7280]">
+            {anyActualMinutesRecorded ? (
+              <>
+                Efficiency is standard minutes ÷ recorded minutes, over the
+                completed job cards that actually recorded a duration —
+                “Measured Cards” says how many that is. Most cards record none,
+                so treat a small sample as an indication, not a departmental
+                KPI. For a fully measured figure use Employees › Department
+                Performance, which divides production minutes by clocked
+                working hours.
+              </>
+            ) : (
+              <>
+                Efficiency reads “—” because no completed job card in this date
+                range recorded how long it actually took. It is never filled in
+                from the standard time — that would just show 100% for every
+                department. For a measured figure use Employees › Department
+                Performance, which divides production minutes by clocked
+                working hours.
+              </>
+            )}
+          </p>
         </CardContent>
       </Card>
 

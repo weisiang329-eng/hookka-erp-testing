@@ -1,11 +1,12 @@
 import { useState, useCallback, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
-import { cachedFetchJson } from "@/lib/cached-fetch";
+import { cachedFetchJsonResult } from "@/lib/cached-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
 import {
+  AlertTriangle,
   BarChart3,
   Factory,
   ShoppingCart,
@@ -14,6 +15,7 @@ import {
   Download,
   Loader2,
   FileSpreadsheet,
+  RefreshCw,
 } from "lucide-react";
 
 // ── Types mirroring API response shapes ──────────────────────────────
@@ -57,25 +59,75 @@ type Invoice = {
   items: InvoiceItem[];
 };
 
-type JobCard = {
+// GET /api/production-orders/report-summary — the whole Production tab, added
+// up in SQL. The browser used to download every PO with every job card to
+// compute this; see BUG-2026-08-13-005.
+type ProductionDeptRow = {
   departmentCode: string;
   departmentName: string;
-  status: string;
-  estMinutes: number;
-  actualMinutes: number | null;
+  completedCards: number;
+  stdMinutes: number;
+  measuredCards: number;
+  measuredStdMinutes: number;
+  measuredActualMinutes: number;
+  // Measured cards whose recorded minutes actually DIFFER from the standard
+  // minutes. On prod 2026-08-13 this is 0 of 4,289 — the column is populated
+  // with a copy of the estimate, so any ratio off it is 100.0% by construction.
+  measuredDistinctCards: number;
 };
 
-type ProductionOrder = {
-  id: string;
+type ProductionOverdueRow = {
   poNo: string;
-  productCode: string;
   productName: string;
-  status: string;
   currentDepartment: string;
   targetEndDate: string;
-  completedDate: string | null;
-  startDate: string;
-  jobCards: JobCard[];
+  daysOverdue: number;
+};
+
+type ProductionSummary = {
+  range: { from: string; to: string };
+  totals: {
+    totalOrders: number;
+    completed: number;
+    inProgress: number;
+    avgCompletionDays: number | null;
+    completedWithDates: number;
+  };
+  departments: ProductionDeptRow[];
+  overdue: ProductionOverdueRow[];
+};
+
+// GET /api/department-performance?view=summary — clocked working minutes vs
+// production minutes, per worker, over a date range. The ONLY trustworthy
+// efficiency source in the app: its denominator is `working_hour_entries`,
+// i.e. time people actually clocked, not an estimate.
+type WorkerPerfRow = {
+  workerId: string;
+  workerName: string;
+  workingMinutes: number;
+  productionMinutes: number;
+  efficiencyPct: number;
+  // Distinct job cards this worker was credited on across the range.
+  jobCards: number;
+};
+
+type DeptPerformanceSummary = {
+  range: { from: string; to: string };
+  totals: {
+    workingMinutes: number;
+    productionMinutes: number;
+    efficiencyPct: number;
+    workerCount: number;
+  };
+  workers: WorkerPerfRow[];
+};
+
+type AttendanceRecord = {
+  employeeId: string;
+  date: string;
+  status: string;
+  workingMinutes: number;
+  overtimeMinutes: number;
 };
 
 type Product = {
@@ -145,6 +197,20 @@ function writePersistedDateRange(key: string, from: string, to: string): void {
   }
 }
 
+// ── Fetch-result helper ──────────────────────────────────────────────
+
+// The first failure among several parallel fetches, or null if all succeeded.
+// A tab that needs two sources must fail on EITHER — half a report still reads
+// as fact (see BUG-2026-08-13-005).
+function firstError(
+  ...results: { ok: boolean; error?: string }[]
+): string | null {
+  for (const r of results) {
+    if (!r.ok) return r.error ?? "Couldn't load this report. Please try again.";
+  }
+  return null;
+}
+
 // ── CSV helper ───────────────────────────────────────────────────────
 
 function downloadCSV(
@@ -179,6 +245,48 @@ function Spinner() {
       <Loader2 className="h-8 w-8 animate-spin text-[#6B5C32]" />
       <span className="ml-3 text-[#6B7280]">Generating report...</span>
     </div>
+  );
+}
+
+// ── Failed fetch ≠ empty result ──────────────────────────────────────
+//
+// Every tab on this page used to do `catch { setData([]) }`, and
+// `cachedFetchJson` returns `null` on failure anyway — so a request that timed
+// out, 500'd or hit the 30 s global abort landed in state as an empty array and
+// rendered through `ReportTable`'s "No data available" caption. That caption is
+// a STATEMENT ABOUT THE BUSINESS ("nothing happened in this range"), and it was
+// being printed over dead requests: BUG-2026-08-13-005, where the Production
+// report claimed no department activity for a window in which prod had 370 and
+// 367 job cards completed on two consecutive days.
+//
+// The rule this component exists to enforce: a report that could not load says
+// so, and offers a retry. It never renders a number, a row, or an emptiness.
+function ReportError({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry: () => void;
+}) {
+  return (
+    <Card className="border-[#C2410C]/30 bg-[#FFF7ED]">
+      <CardContent className="p-5 flex items-start gap-3">
+        <AlertTriangle className="h-5 w-5 text-[#C2410C] shrink-0 mt-0.5" />
+        <div className="space-y-2">
+          <p className="text-sm font-semibold text-[#1F1D1B]">
+            This report couldn&apos;t load
+          </p>
+          <p className="text-sm text-[#4B5563]">{message}</p>
+          <p className="text-xs text-[#6B7280]">
+            Nothing is shown below because the data never arrived — this is not
+            a statement that there was no activity in this range.
+          </p>
+          <Button variant="outline" size="sm" onClick={onRetry}>
+            <RefreshCw className="h-3.5 w-3.5" /> Retry
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -328,6 +436,7 @@ function SalesReportTab() {
     writePersistedDateRange("reports:sales:dateRange", from, to);
   }, [from, to]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<{
     orders: SalesOrder[];
     invoices: Invoice[];
@@ -335,21 +444,27 @@ function SalesReportTab() {
 
   const generate = useCallback(async () => {
     setLoading(true);
-    try {
-      const [soJson, invJson] = await Promise.all([
-        cachedFetchJson<{ data?: SalesOrder[] }>("/api/sales-orders"),
-        cachedFetchJson<{ data?: Invoice[] }>("/api/invoices"),
-      ]);
-      const orders: SalesOrder[] = (soJson?.data || []).filter(
-        (o: SalesOrder) => o.companySODate >= from && o.companySODate <= to
-      );
-      const invoices: Invoice[] = (invJson?.data || []).filter(
-        (i: Invoice) => i.invoiceDate >= from && i.invoiceDate <= to
-      );
-      setData({ orders, invoices });
-    } catch {
-      setData({ orders: [], invoices: [] });
+    setError(null);
+    const [soRes, invRes] = await Promise.all([
+      cachedFetchJsonResult<{ data?: SalesOrder[] }>("/api/sales-orders"),
+      cachedFetchJsonResult<{ data?: Invoice[] }>("/api/invoices"),
+    ]);
+    // Half a report is still a wrong report — an invoice count computed over a
+    // failed sales-order fetch reads as fact. Fail the whole tab.
+    const failure = firstError(soRes, invRes);
+    if (failure || !soRes.ok || !invRes.ok) {
+      setData(null);
+      setError(failure);
+      setLoading(false);
+      return;
     }
+    const orders: SalesOrder[] = (soRes.data?.data || []).filter(
+      (o: SalesOrder) => o.companySODate >= from && o.companySODate <= to
+    );
+    const invoices: Invoice[] = (invRes.data?.data || []).filter(
+      (i: Invoice) => i.invoiceDate >= from && i.invoiceDate <= to
+    );
+    setData({ orders, invoices });
     setLoading(false);
   }, [from, to]);
 
@@ -369,6 +484,7 @@ function SalesReportTab() {
             <FileSpreadsheet className="h-4 w-4" /> Generate
           </Button>
         </div>
+        {error && <ReportError message={error} onRetry={generate} />}
       </div>
     );
   }
@@ -555,19 +671,29 @@ function ProductionReportTab() {
     writePersistedDateRange("reports:production:dateRange", from, to);
   }, [from, to]);
   const [loading, setLoading] = useState(false);
-  const [data, setData] = useState<ProductionOrder[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [data, setData] = useState<ProductionSummary | null>(null);
 
+  // ONE scoped, server-aggregated request. This tab used to fetch bare
+  // `/api/production-orders` — the whole org, every PO, every job card — and
+  // add it up here: 30,012 ms on prod, killed by api-client's 30 s global
+  // abort, after which the report printed "No data available" over the corpse.
+  // BUG-2026-08-13-005; same family as -001 / -002 / -003.
   const generate = useCallback(async () => {
     setLoading(true);
-    try {
-      const json = await cachedFetchJson<{ data?: ProductionOrder[] }>("/api/production-orders");
-      const all: ProductionOrder[] = (json?.data || []).filter(
-        (p: ProductionOrder) => p.startDate >= from && p.startDate <= to
-      );
-      setData(all);
-    } catch {
-      setData([]);
+    setError(null);
+    const res = await cachedFetchJsonResult<ProductionSummary>(
+      `/api/production-orders/report-summary?from=${encodeURIComponent(
+        from,
+      )}&to=${encodeURIComponent(to)}`,
+    );
+    if (!res.ok || !res.data?.totals) {
+      setData(null);
+      setError(res.ok ? "The server sent an unexpected reply." : res.error);
+      setLoading(false);
+      return;
     }
+    setData(res.data);
     setLoading(false);
   }, [from, to]);
 
@@ -587,95 +713,51 @@ function ProductionReportTab() {
             <FileSpreadsheet className="h-4 w-4" /> Generate
           </Button>
         </div>
+        {error && <ReportError message={error} onRetry={generate} />}
       </div>
     );
   }
 
-  const totalPOs = data.length;
-  const completed = data.filter((p) => p.status === "COMPLETED").length;
-  const inProgress = data.filter((p) => p.status === "IN_PROGRESS").length;
-
-  // Average completion time (days) for completed orders
-  const completedOrders = data.filter(
-    (p) => p.status === "COMPLETED" && p.completedDate
-  );
-  const avgCompletionDays =
-    completedOrders.length > 0
-      ? completedOrders.reduce((s, p) => {
-          const start = new Date(p.startDate).getTime();
-          const end = new Date(p.completedDate!).getTime();
-          return s + (end - start) / (1000 * 60 * 60 * 24);
-        }, 0) / completedOrders.length
-      : 0;
+  const totalPOs = data.totals.totalOrders;
+  const completed = data.totals.completed;
+  const inProgress = data.totals.inProgress;
+  const avgCompletionDays = data.totals.avgCompletionDays;
 
   // Department efficiency.
   //
   // An efficiency ratio's denominator must be a MEASUREMENT, and both sides of
-  // the ratio must cover the SAME cards. This table broke both rules: it summed
-  // each completed card's actual minutes OR-ed with its estimate into one
-  // total, summed the estimates into the other, and divided. On any card with
-  // no recorded duration — the majority — the fallback fired and that card
-  // contributed its own estimate to both sides, i.e. the estimate divided by
-  // itself, pinning the department at ~100%.
+  // the ratio must cover the SAME cards. This table used to break both rules —
+  // it summed each completed card's actual minutes OR-ed with its estimate into
+  // one total, summed the estimates into the other, and divided, so every
+  // unmeasured card contributed its own estimate to BOTH sides and pinned the
+  // department at ~100% (BUG-2026-08-13-004).
   //
-  // The recordings are real and partial. On prod 2026-08-13: 4,340 of 36,796
-  // job cards carry a non-null `actualMinutes`, 4,289 of them non-zero. So
-  // there IS something to report — it must simply be reported over the cards
-  // that have it, never smeared across the ones that don't.
-  //
-  // Fix: a card is credited to the ratio ONLY when it carries a real duration,
-  // and then it contributes to BOTH sides (its estimate to the numerator, its
-  // measurement to the denominator). Departments with no recorded card read
-  // "—" rather than a manufactured 100%, and the Measured column says how many
-  // of the completed cards the percentage actually rests on, so nobody reads a
-  // 12-card sample as a departmental KPI.
+  // The paired accumulation that fixed it now runs in SQL — see
+  // `GET /api/production-orders/report-summary`. The rule is unchanged and the
+  // guard travelled with it: a completed card enters the ratio ONLY when it
+  // recorded a duration, and then it enters BOTH subtotals. There is no
+  // `actualMinutes -> estMinutes` fallback on either side, in either place.
   //
   // `productionTimeMinutes` is deliberately NOT used as a stand-in: it equals
   // `estMinutes` on every row, so it is the standard time wearing another name.
   //
   // The genuine, fully-measured efficiency figure lives elsewhere and is NOT
   // affected: /api/department-performance (and the employee / department /
-  // payslip surfaces on it) divides production minutes by CLOCKED time from
-  // `working_hour_entries`.
-  const deptStats: Record<
-    string,
-    {
-      name: string;
-      orders: number;
-      stdMin: number;
-      // The paired subtotals — only cards that actually recorded a duration.
-      measuredCards: number;
-      measuredStdMin: number;
-      measuredActualMin: number;
-    }
-  > = {};
-  data.forEach((po) =>
-    po.jobCards.forEach((jc) => {
-      if (!deptStats[jc.departmentCode])
-        deptStats[jc.departmentCode] = {
-          name: jc.departmentName,
-          orders: 0,
-          stdMin: 0,
-          measuredCards: 0,
-          measuredStdMin: 0,
-          measuredActualMin: 0,
-        };
-      if (jc.status === "COMPLETED") {
-        const d = deptStats[jc.departmentCode];
-        d.orders += 1;
-        d.stdMin += jc.estMinutes ?? 0;
-        // Deliberately NO `?? jc.estMinutes` fallback here — that is what
-        // silently turned an unmeasured card into a 100% one.
-        const actual = jc.actualMinutes ?? 0;
-        if (actual > 0) {
-          d.measuredCards += 1;
-          d.measuredStdMin += jc.estMinutes ?? 0;
-          d.measuredActualMin += actual;
-        }
-      }
-    })
-  );
-  const deptRows = Object.values(deptStats)
+  // payslip surfaces on it, including this page's Employee tab) divides
+  // production minutes by CLOCKED time from `working_hour_entries`.
+  const deptStats = data.departments.map((d) => ({
+    name: d.departmentName || d.departmentCode,
+    orders: d.completedCards,
+    stdMin: d.stdMinutes,
+    // The paired subtotals — only cards that actually recorded a duration.
+    measuredCards: d.measuredCards,
+    measuredStdMin: d.measuredStdMinutes,
+    measuredActualMin: d.measuredActualMinutes,
+    // ...of which the recording DIFFERS from the estimate. See below.
+    measuredDistinctCards: d.measuredDistinctCards,
+  }));
+  const deptRows = deptStats
+    .slice()
     .sort((a, b) => b.orders - a.orders)
     .map((d) => {
       // Standard (spec) minutes per completed card — an estimate, and now
@@ -684,32 +766,35 @@ function ProductionReportTab() {
       const avgStdTime = d.orders > 0 ? Math.round(d.stdMin / d.orders) : 0;
       const measured =
         d.measuredCards > 0 ? `${d.measuredCards} / ${d.orders}` : "—";
-      const efficiency =
+      const ratio =
         d.measuredActualMin > 0
           ? ((d.measuredStdMin / d.measuredActualMin) * 100).toFixed(1) + "%"
           : "—";
+      // Second honesty gate, added with BUG-2026-08-13-005 after counting the
+      // column on prod: all 4,289 non-zero `actualMinutes` values are
+      // byte-identical to that card's own `estMinutes` (4,289 of 4,289). The
+      // column is populated, but with a COPY of the standard time — so the
+      // ratio above is 100.0% by construction, which is the SAME fabricated
+      // number BUG-2026-08-13-004 removed, arriving by a different route.
+      // Publish a percentage only once at least one card's recording actually
+      // differs from its estimate.
+      const efficiency = d.measuredDistinctCards > 0 ? ratio : "—";
       return [d.name, d.orders, avgStdTime, measured, efficiency];
     });
-  // Drives the explanatory caption under the table — shown only while not one
-  // completed card in range carries a duration, so the note disappears by
-  // itself as soon as the report has something real to stand on.
-  const anyActualMinutesRecorded = Object.values(deptStats).some(
-    (d) => d.measuredCards > 0,
+  // Drives the explanatory caption under the table.
+  const anyActualMinutesRecorded = deptStats.some((d) => d.measuredCards > 0);
+  const anyDistinctRecording = deptStats.some(
+    (d) => d.measuredDistinctCards > 0,
   );
 
-  // Overdue orders
-  const today = new Date();
-  const overdueOrders = data
-    .filter(
-      (p) => p.status !== "COMPLETED" && p.status !== "CANCELLED" && new Date(p.targetEndDate) < today
-    )
-    .map((p) => {
-      const daysOverdue = Math.ceil(
-        (today.getTime() - new Date(p.targetEndDate).getTime()) /
-          (1000 * 60 * 60 * 24)
-      );
-      return [p.poNo, p.productName, daysOverdue, p.currentDepartment];
-    });
+  // Overdue orders — the whole predicate (not COMPLETED / not CANCELLED,
+  // targetEndDate strictly before today) now runs in SQL, so this is a render.
+  const overdueOrders = data.overdue.map((p) => [
+    p.poNo,
+    p.productName,
+    p.daysOverdue,
+    p.currentDepartment,
+  ]);
 
   return (
     <div className="space-y-6">
@@ -731,7 +816,16 @@ function ProductionReportTab() {
         <SummaryCard label="In Progress" value={inProgress} />
         <SummaryCard
           label="Avg Completion Time"
-          value={`${avgCompletionDays.toFixed(1)} days`}
+          value={
+            avgCompletionDays === null
+              ? "—"
+              : `${avgCompletionDays.toFixed(1)} days`
+          }
+          sub={
+            avgCompletionDays === null
+              ? "No completed order in this range carries a completion date"
+              : `Over ${data.totals.completedWithDates} completed orders`
+          }
         />
       </div>
 
@@ -759,24 +853,33 @@ function ProductionReportTab() {
             align={["left", "right", "right", "right", "right"]}
           />
           <p className="mt-2 text-xs text-[#6B7280]">
-            {anyActualMinutesRecorded ? (
+            {anyDistinctRecording ? (
               <>
                 Efficiency is standard minutes ÷ recorded minutes, over the
                 completed job cards that actually recorded a duration —
                 “Measured Cards” says how many that is. Most cards record none,
                 so treat a small sample as an indication, not a departmental
-                KPI. For a fully measured figure use Employees › Department
-                Performance, which divides production minutes by clocked
-                working hours.
+                KPI. For a fully measured figure use the Employee tab, which
+                divides production minutes by clocked working hours.
+              </>
+            ) : anyActualMinutesRecorded ? (
+              <>
+                Efficiency reads “—” even though {" "}
+                {deptStats.reduce((s, d) => s + d.measuredCards, 0)} completed
+                job cards in this range carry a recorded duration: on every one
+                of them the recorded minutes are identical to the standard
+                minutes, so the recording is a copy of the estimate rather than
+                a measurement, and the ratio would be exactly 100% by
+                construction. For a genuinely measured figure use the Employee
+                tab, which divides production minutes by clocked working hours.
               </>
             ) : (
               <>
                 Efficiency reads “—” because no completed job card in this date
                 range recorded how long it actually took. It is never filled in
                 from the standard time — that would just show 100% for every
-                department. For a measured figure use Employees › Department
-                Performance, which divides production minutes by clocked
-                working hours.
+                department. For a measured figure use the Employee tab, which
+                divides production minutes by clocked working hours.
               </>
             )}
           </p>
@@ -818,16 +921,22 @@ function ProductionReportTab() {
 
 function InventoryReportTab() {
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [products, setProducts] = useState<Product[] | null>(null);
 
   const generate = useCallback(async () => {
     setLoading(true);
-    try {
-      const json = await cachedFetchJson<{ data?: Product[] }>("/api/products");
-      setProducts(json?.data || []);
-    } catch {
-      setProducts([]);
+    setError(null);
+    const res = await cachedFetchJsonResult<{ data?: Product[] }>(
+      "/api/products",
+    );
+    if (!res.ok) {
+      setProducts(null);
+      setError(res.error);
+      setLoading(false);
+      return;
     }
+    setProducts(res.data?.data || []);
     setLoading(false);
   }, []);
 
@@ -839,6 +948,7 @@ function InventoryReportTab() {
         <Button variant="primary" onClick={generate}>
           <FileSpreadsheet className="h-4 w-4" /> Generate Inventory Report
         </Button>
+        {error && <ReportError message={error} onRetry={generate} />}
       </div>
     );
   }
@@ -949,6 +1059,7 @@ function InventoryReportTab() {
 
 function FinancialReportTab() {
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<{
     invoices: Invoice[];
     purchaseOrders: PurchaseOrder[];
@@ -956,18 +1067,24 @@ function FinancialReportTab() {
 
   const generate = useCallback(async () => {
     setLoading(true);
-    try {
-      const [invJson, poJson] = await Promise.all([
-        cachedFetchJson<{ data?: Invoice[] }>("/api/invoices"),
-        cachedFetchJson<{ data?: PurchaseOrder[] }>("/api/purchase-orders"),
-      ]);
-      setData({
-        invoices: invJson?.data || [],
-        purchaseOrders: poJson?.data || [],
-      });
-    } catch {
-      setData({ invoices: [], purchaseOrders: [] });
+    setError(null);
+    const [invRes, poRes] = await Promise.all([
+      cachedFetchJsonResult<{ data?: Invoice[] }>("/api/invoices"),
+      cachedFetchJsonResult<{ data?: PurchaseOrder[] }>("/api/purchase-orders"),
+    ]);
+    // A P&L whose revenue side loaded and whose payable side did not is not
+    // "partially available" — it is wrong, and it is money. Fail the tab.
+    const failure = firstError(invRes, poRes);
+    if (failure || !invRes.ok || !poRes.ok) {
+      setData(null);
+      setError(failure);
+      setLoading(false);
+      return;
     }
+    setData({
+      invoices: invRes.data?.data || [],
+      purchaseOrders: poRes.data?.data || [],
+    });
     setLoading(false);
   }, []);
 
@@ -979,6 +1096,7 @@ function FinancialReportTab() {
         <Button variant="primary" onClick={generate}>
           <FileSpreadsheet className="h-4 w-4" /> Generate Financial Report
         </Button>
+        {error && <ReportError message={error} onRetry={generate} />}
       </div>
     );
   }
@@ -1210,22 +1328,62 @@ function EmployeeReportTab() {
     writePersistedDateRange("reports:employee:dateRange", from, to);
   }, [from, to]);
   const [loading, setLoading] = useState(false);
-  const [workers, setWorkers] = useState<Worker[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [data, setData] = useState<{
+    workers: Worker[];
+    perf: DeptPerformanceSummary;
+    attendance: AttendanceRecord[];
+  } | null>(null);
 
+  // Three REAL sources, all windowed by the date range this tab already had
+  // (and previously ignored):
+  //   /api/workers                                  — the roster
+  //   /api/department-performance?view=summary      — clocked working minutes
+  //       vs production minutes per worker. Its denominator is
+  //       `working_hour_entries`, i.e. time people actually punched.
+  //   /api/attendance?from&to                       — punch records
+  // Nothing on this tab is derived from anything else. See BUG-2026-08-13-006.
   const generate = useCallback(async () => {
     setLoading(true);
-    try {
-      const json = await cachedFetchJson<{ data?: Worker[] }>("/api/workers");
-      setWorkers(json?.data || []);
-    } catch {
-      setWorkers([]);
+    setError(null);
+    const [wRes, pRes, aRes] = await Promise.all([
+      cachedFetchJsonResult<{ data?: Worker[] }>("/api/workers"),
+      cachedFetchJsonResult<{ data?: DeptPerformanceSummary }>(
+        `/api/department-performance?view=summary&from=${encodeURIComponent(
+          from,
+        )}&to=${encodeURIComponent(to)}`,
+      ),
+      cachedFetchJsonResult<{ data?: AttendanceRecord[] }>(
+        `/api/attendance?from=${encodeURIComponent(
+          from,
+        )}&to=${encodeURIComponent(to)}`,
+      ),
+    ]);
+    const failure = firstError(wRes, pRes, aRes);
+    if (failure || !wRes.ok || !pRes.ok || !aRes.ok) {
+      setData(null);
+      setError(failure);
+      setLoading(false);
+      return;
     }
+    const perf = pRes.data?.data;
+    if (!perf?.totals || !Array.isArray(perf.workers)) {
+      setData(null);
+      setError("The server sent an unexpected reply.");
+      setLoading(false);
+      return;
+    }
+    setData({
+      workers: wRes.data?.data || [],
+      perf,
+      attendance: aRes.data?.data || [],
+    });
     setLoading(false);
-  }, []);
+  }, [from, to]);
 
   if (loading) return <Spinner />;
 
-  if (!workers) {
+  if (!data) {
     return (
       <div className="space-y-4">
         <div className="flex items-end gap-4 flex-wrap">
@@ -1239,10 +1397,12 @@ function EmployeeReportTab() {
             <FileSpreadsheet className="h-4 w-4" /> Generate
           </Button>
         </div>
+        {error && <ReportError message={error} onRetry={generate} />}
       </div>
     );
   }
 
+  const { workers, perf, attendance } = data;
   const totalWorkers = workers.length;
   const activeWorkers = workers.filter((w) => w.status === "ACTIVE").length;
 
@@ -1252,29 +1412,59 @@ function EmployeeReportTab() {
     deptCount[w.departmentCode] = (deptCount[w.departmentCode] || 0) + 1;
   });
 
-  // Attendance placeholder stats
-  const workingDays = 22;
-  const presentRate = 94.5;
-  const avgHoursPerDay = 8.7;
+  // ── Attendance, from `attendance_records` ──────────────────────────
+  //
+  // What this table can and cannot answer, checked on prod 2026-08-13.
+  //
+  // CAN: how many days were recorded, how many punch records exist, how long
+  // people were on the clock, and how much overtime was booked.
+  //
+  // CANNOT: an attendance RATE. A row is written when somebody punches, so
+  // every row is a presence — 2,780 of 2,780 records across all of 2026 carry
+  // status PRESENT, and there is not one ABSENT row in the table (absence is
+  // derived elsewhere, by `labor-engine.ts`, from a day having no logged
+  // hours; it is never materialised here). present ÷ records is therefore
+  // 100% by construction, and the "94.5%" that used to sit in this card was
+  // simply typed into the source. The card now reads "—" and says why.
+  const attendanceDates = new Set(attendance.map((r) => r.date));
+  const recordedDays = attendanceDates.size;
+  const withMinutes = attendance.filter((r) => r.workingMinutes > 0);
+  const clockedMinutes = withMinutes.reduce(
+    (s, r) => s + r.workingMinutes,
+    0,
+  );
+  const avgHoursPerRecordedDay =
+    withMinutes.length > 0 ? clockedMinutes / withMinutes.length / 60 : null;
+  const overtimeMinutes = attendance.reduce(
+    (s, r) => s + (r.overtimeMinutes || 0),
+    0,
+  );
+  const attendingWorkers = new Set(attendance.map((r) => r.employeeId)).size;
+  const avgOvertimeHours =
+    attendingWorkers > 0 ? overtimeMinutes / attendingWorkers / 60 : null;
 
-  // Efficiency table (placeholder data per worker based on available info)
-  const seed = (s: string) => {
-    let h = 0;
-    for (let i = 0; i < s.length; i++) {
-      h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
-    }
-    return Math.abs(h);
-  };
-
-  const effRows = workers
-    .filter((w) => w.status === "ACTIVE")
-    .map((w) => {
-      const s = seed(w.id);
-      const hours = 180 + (s % 40);
-      const items = 30 + (s % 25);
-      const eff = ((items / (hours / 9)) * 10).toFixed(1);
-      return [w.name, w.departmentCode, hours, items, eff + "%"];
-    });
+  // ── Worker efficiency, from clocked time ──────────────────────────
+  //
+  // Every column here used to come out of `seed(w.id)` — a hash of the
+  // worker's own id, so the same person showed the same invented hours and the
+  // same invented efficiency forever, and it moved only if the id changed.
+  // BUG-2026-08-13-006.
+  //
+  // The replacement is /api/department-performance, whose denominator is
+  // clocked time from `working_hour_entries`. Prod for 2026-06-14 → 2026-08-13
+  // returns 38 workers spanning 28%–186% efficiency and 312–2,270 job cards —
+  // it varies, which the hash never did in any way related to the factory.
+  //
+  // A worker who clocked nothing in the range gets "—", not 0% and not a
+  // plausible number: the row exists, the measurement does not.
+  const deptByWorkerId = new Map(workers.map((w) => [w.id, w.departmentCode]));
+  const effRows = perf.workers.map((w) => [
+    w.workerName || w.workerId,
+    deptByWorkerId.get(w.workerId) ?? "—",
+    w.workingMinutes > 0 ? (w.workingMinutes / 60).toFixed(1) : "—",
+    w.jobCards,
+    w.workingMinutes > 0 ? `${w.efficiencyPct}%` : "—",
+  ]);
 
   return (
     <div className="space-y-6">
@@ -1294,13 +1484,22 @@ function EmployeeReportTab() {
         <SummaryCard label="Total Workers" value={totalWorkers} sub={`Active: ${activeWorkers}`} />
         <SummaryCard label="Departments" value={Object.keys(deptCount).length} />
         <SummaryCard
-          label="Attendance Rate"
-          value={`${presentRate}%`}
-          sub={`${workingDays} working days this month`}
+          label="Days With Attendance"
+          value={recordedDays}
+          sub={`${attendance.length} punch records in range`}
         />
         <SummaryCard
-          label="Avg Hours/Day"
-          value={avgHoursPerDay.toFixed(1)}
+          label="Avg Hours / Recorded Day"
+          value={
+            avgHoursPerRecordedDay === null
+              ? "—"
+              : avgHoursPerRecordedDay.toFixed(1)
+          }
+          sub={
+            avgHoursPerRecordedDay === null
+              ? "No punch in range has a clock-out to measure"
+              : `Over ${withMinutes.length} records with a clock-out`
+          }
         />
       </div>
 
@@ -1332,21 +1531,38 @@ function EmployeeReportTab() {
       <Card>
         <CardHeader className="pb-2">
           <CardTitle className="text-base">
-            Attendance Overview (This Month)
+            Attendance Overview ({from} to {to})
           </CardTitle>
         </CardHeader>
         <CardContent>
           <ReportTable
             headers={["Metric", "Value"]}
             rows={[
-              ["Working Days", workingDays],
-              ["Average Attendance Rate", `${presentRate}%`],
-              ["Total Present Days", Math.round(totalWorkers * workingDays * presentRate / 100)],
-              ["Total Absent Days", Math.round(totalWorkers * workingDays * (100 - presentRate) / 100)],
-              ["Average OT Hours / Worker", "12.5"],
+              ["Days With Attendance Recorded", recordedDays],
+              ["Punch Records", attendance.length],
+              ["Workers Who Punched", attendingWorkers],
+              [
+                "Total Clocked Hours",
+                clockedMinutes > 0 ? (clockedMinutes / 60).toFixed(1) : "—",
+              ],
+              [
+                "Average OT Hours / Worker",
+                avgOvertimeHours === null ? "—" : avgOvertimeHours.toFixed(1),
+              ],
+              ["Average Attendance Rate", "—"],
             ]}
             align={["left", "right"]}
           />
+          <p className="mt-2 text-xs text-[#6B7280]">
+            Attendance Rate reads “—” because it cannot be computed from this
+            data: <code>attendance_records</code> gets a row only when somebody
+            punches, so every row is a presence — all {attendance.length} rows
+            in this range, and all 2,780 in 2026, carry status PRESENT and
+            there is no ABSENT row anywhere in the table. A rate would be 100%
+            by construction. Absence is derived separately by payroll, from a
+            day having no logged hours. Everything above is counted from the
+            punch records themselves.
+          </p>
         </CardContent>
       </Card>
 
@@ -1360,7 +1576,7 @@ function EmployeeReportTab() {
             onClick={() =>
               downloadCSV(
                 "worker-efficiency.csv",
-                ["Worker Name", "Department", "Hours Worked", "Items Completed", "Efficiency %"],
+                ["Worker Name", "Department", "Clocked Hours", "Job Cards Completed", "Efficiency %"],
                 effRows.map((r) => r.map(String))
               )
             }
@@ -1373,13 +1589,27 @@ function EmployeeReportTab() {
             headers={[
               "Worker Name",
               "Department",
-              "Hours Worked",
-              "Items Completed",
+              "Clocked Hours",
+              "Job Cards Completed",
               "Efficiency %",
             ]}
             rows={effRows}
             align={["left", "left", "right", "right", "right"]}
           />
+          <p className="mt-2 text-xs text-[#6B7280]">
+            Efficiency is production minutes ÷ clocked minutes over{" "}
+            {from} to {to}, from the same engine as Employees › Department
+            Performance — the denominator is time actually punched
+            (<code>working_hour_entries</code>), never an estimate. Clocked
+            Hours is that denominator; Job Cards Completed counts the distinct
+            cards the worker was credited on. Over 100% means the standard
+            minutes on the cards they finished exceeded the hours they clocked.
+            A worker who clocked nothing in this range reads “—”. Range total:{" "}
+            {perf.totals.workingMinutes > 0
+              ? `${perf.totals.efficiencyPct}% across ${perf.totals.workerCount} workers`
+              : "no clocked time recorded"}
+            .
+          </p>
         </CardContent>
       </Card>
     </div>

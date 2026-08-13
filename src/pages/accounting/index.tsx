@@ -88,6 +88,11 @@ function CompanySelect({
   onChange: (v: string) => void;
   options: CompanyOption[];
 }) {
+  // A single-option selector is a control that cannot change anything. Since
+  // BUG-2026-08-13-051 the only truthful option is the consolidated group
+  // figure (see useCompanyOptions in ./shared for why), so render nothing
+  // rather than a dead dropdown that implies a per-company breakdown exists.
+  if (options.length <= 1) return null;
   return (
     <div className="flex items-center gap-2">
       <label className="text-xs font-semibold text-[#1F1D1B]">Company</label>

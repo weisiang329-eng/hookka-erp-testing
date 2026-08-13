@@ -1227,7 +1227,22 @@ app.get("/", async (c) => {
         .bind(...grnIds)
         .all<GRNItemRow>()
     : { results: [] as GRNItemRow[] };
-  const data = grnRows.map((g) => rowToGRN(g, itemsRes.results ?? []));
+  // Bucket the items by grnId ONCE (was O(GRNs×items): rowToGRN re-filtered
+  // the whole items array for every GRN). Byte-identical — rowToGRN still
+  // filters and sorts by poItemIndex, now over the pre-scoped bucket;
+  // `.filter()` copies before `.sort()`, so the bucket is never reordered.
+  //
+  // Measured on prod 2026-08-13: 37 GRNs × 45 items = 1,665 comparisons,
+  // 0.1 ms. Cheap today; fixed because this list has no LIMIT unless the caller
+  // opts into ?page, so the cost is ~1.2·N² in GRN count and grows with
+  // receiving forever — the same reason the items fetch above was narrowed.
+  const itemsByGrnId = new Map<string, GRNItemRow[]>();
+  for (const it of itemsRes.results ?? []) {
+    const arr = itemsByGrnId.get(it.grnId);
+    if (arr) arr.push(it);
+    else itemsByGrnId.set(it.grnId, [it]);
+  }
+  const data = grnRows.map((g) => rowToGRN(g, itemsByGrnId.get(g.id) ?? []));
   await fillGrnSupplierSku(c.var.DB, data);
   return c.json(
     paginate

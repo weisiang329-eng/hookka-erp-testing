@@ -513,11 +513,34 @@ app.get("/", async (c) => {
     bomMinutesByCode.set(t.productCode, bomTotalMinutes(l1, wips));
   }
 
+  // Bucket the two child arrays by productId ONCE (was O(products×boms) +
+  // O(products×dwts): rowToProduct re-filtered BOTH whole arrays for every
+  // product). Byte-identical — rowToProduct still filters, now over the
+  // pre-scoped bucket, so the emitted rows and their order are unchanged.
+  //
+  // Measured on prod 2026-08-13: 365 ACTIVE products × 1,697 dept_working_times
+  // = 619,405 comparisons, 18.2 ms → 0.7 ms. Small today, but this is the
+  // quadratic that grows fastest: the list has no LIMIT and dwts run ~4.65 per
+  // SKU, so the cost is ~4.65·N² in catalog size — at 2,000 SKUs it is 18.6M
+  // comparisons. bom_components is empty on prod today (0 rows), so that half
+  // costs nothing yet and would grow the same way once BOMs are populated.
+  const bomsByProductId = new Map<string, BomComponentRow[]>();
+  for (const b of boms.results ?? []) {
+    const arr = bomsByProductId.get(b.productId);
+    if (arr) arr.push(b);
+    else bomsByProductId.set(b.productId, [b]);
+  }
+  const dwtsByProductId = new Map<string, DeptWorkingTimeRow[]>();
+  for (const d of dwts.results ?? []) {
+    const arr = dwtsByProductId.get(d.productId);
+    if (arr) arr.push(d);
+    else dwtsByProductId.set(d.productId, [d]);
+  }
   const data = (products.results ?? []).map((p) =>
     rowToProduct(
       p,
-      boms.results ?? [],
-      dwts.results ?? [],
+      bomsByProductId.get(p.id) ?? [],
+      dwtsByProductId.get(p.id) ?? [],
       bomMinutesByCode,
       priceOverlays.get(p.id),
     ),

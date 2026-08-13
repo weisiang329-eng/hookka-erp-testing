@@ -10,6 +10,7 @@ That instruction is unusable without a list of the instances. `BUG-HISTORY.md` i
 | server trusts a client-supplied price | 3 | only the one column that had been noticed |
 | write path skips the dept-sheet cache wipe | 3 | only the one file someone was looking at |
 | fallback to the customer's DEFAULT hub | 3 | only the one document that printed wrong |
+| a child array scanned once per parent row (C14) | 3 | only the one list endpoint that was slow that week — the third miss was the hottest path in the app |
 
 The 2026-07-17 fix header literally reads *"This is the same bug class as the 2026-07-14
 totalHeightPriceSen fix"* — the author saw the class, and still fixed one column. The sibling
@@ -498,6 +499,94 @@ it failed the operator, and every refusal is asserted to pass `looksTechnical ==
 **Finding the next one.** Start from the SCHEMA, not the screen: list the FK / NOT NULL columns
 a route writes, then find the control that feeds each one and read its label. A field the user
 can leave blank must map to a column that accepts blank — or the screen must say so.
+
+---
+
+## C14 — A child array scanned once per parent row
+
+**Shape.** A LIST handler fetches its rows' children in ONE batched query, then
+hands the **whole** child array to a per-row mapper whose first act is
+`children.filter(c => c.parentFk === row.id)`. That is a full scan of the child
+array for every parent — O(N×M) — and it reads as correct, because it *is*
+correct. Only the cost is wrong, and nothing about the code says so.
+
+**Why it keeps happening.** Three reinforcing reasons:
+
+1. **The batched fetch looks like the fix.** Most of these sites were *already*
+   improved once, by narrowing `SELECT * FROM child` to `WHERE fk IN (...)`. That
+   removes the wire cost and leaves the join cost, and the commit reads as done.
+2. **It never fails, it only gets slower** — so there is no bug report, no stack
+   trace, and no date on which it started. It is found by reading or by
+   measuring, never by an incident, until it crosses the cliff.
+3. **The failure is a CLIFF, not a slope.** Cost is quadratic while the cache
+   window is constant, so the endpoint is fine, fine, fine, then unusable. The
+   dashboard broke exactly this way when sales orders grew 720 → 1,334 in two
+   months.
+
+**The rule.** Bucket the child array into a `Map<parentId, child[]>` **once** at
+the handler, and hand each mapper its own bucket. Keep the mapper's internal
+`.filter()` — as a passthrough it makes the change byte-identical by
+construction, and because `.filter()` copies before any following `.sort()`, the
+shared bucket can never be reordered under another row.
+
+Use the *other* shape — an optional pre-grouped `Map` parameter on the mapper
+(`groupJobCardsByPoId` / `rowToMinimalPO`) — only when the mapper also has
+single-record callers that must keep the legacy filter. That variant DOES need
+an explicit `.slice()` before sorting, because it drops the filter.
+
+**Instances**
+
+| # | site | fixed | scale when measured |
+|---|---|---|---|
+| 1 | production orders, NON-minimal path (`rowsToPOsBatch`) | ✅ 2026-05-21 | 530 PO × 2,200 JC ≈ 1.16 M |
+| 2 | sales orders full list (`itemsBySO`) | ✅ 2026-06-04 | — |
+| 3 | `customers.ts` hubs · `suppliers.ts` materials · `warehouse.ts` rack items · `consignment-orders.ts` items · `delivery-orders.ts` items | ✅ (caller-side buckets) | all small |
+| 4 | production orders, **MINIMAL** path (`rowToMinimalPO`) | ✅ 2026-08-13 (#275) | **957 PO × 36,796 JC ≈ 35 M — 6,473 ms of a 9,587 ms `/planning` cold call** |
+| 5 | `qc-inspections.ts` defects + items | ✅ 2026-08-13 | 500 × 2,151 = 1,075,500 — 20.8 ms |
+| 6 | `products.ts` boms + dept_working_times | ✅ 2026-08-13 | 365 × 1,697 = 619,405 — 18.2 ms |
+| 7 | `purchase-orders.ts` items | ✅ 2026-08-13 | 165 × 369 = 60,885 — 1.3 ms |
+| 8 | `grn.ts` items | ✅ 2026-08-13 | 37 × 45 = 1,665 — 0.1 ms |
+| 9 | `accounting.ts:190` + `cash-flow.ts:185` journal lines | ⬜ **open, deliberate** | 2 entries × 50 lines = 100 |
+| 10 | `qc-templates.ts:91` · `qc-pending.ts:388` · `service-cases.ts:494,506` · `service-orders.ts:311,325` · `rd-projects.ts:166` · `consignment-note-shared.ts:132` | ⬜ measured-and-cheap | ≤ 7,781 cmp each, 2026-08-13 |
+
+Row 4 is why this class exists: rows 1 and 2 fixed the same shape twice and
+neither author looked for row 4, which was on the hottest path in the app.
+
+**Row 9 is the one to watch.** Both fetch the ENTIRE `journal_lines` table with
+no scoping and put no `LIMIT` on the entries — the exact pair of defects #275
+fixed — and are trivial only because the GL is unused (2 entries). Fix it when
+the GL is adopted, and fix it by **reusing the entries query's own `WHERE`** as a
+sub-select: that query carries a `LEFT JOIN document_lifecycle`, and
+hand-writing a second predicate that can drift from the first is the specific
+trap #275 documented (a child fetch scoped to a different parent set than the
+parent fetch silently drops rows).
+
+**Row 10 is closed, not unexamined.** Every one was measured on prod on
+2026-08-13 and costs under 7,781 comparisons over a structurally small parent
+set. If a grep brings you back to one of those lines, that is the answer — do
+not re-audit them.
+
+**Not instances** (checked 2026-08-13, and each says so in place): `invoices.ts`
+— the LIST passes `[]`, only the single-invoice read passes real arrays;
+`production-orders/_helpers.ts:422,923` — the documented single-PO path, every
+batched caller goes through `rowsToPOsBatch`; `wip-expected.ts:103`,
+`assistant-tools.ts:1696`, `worker.ts:2762`, `_helpers.ts:3858` — each is
+already handed a per-parent bucket, a one-document set, or a `LIMIT 100`.
+
+**Enforced by** `tests/list-endpoint-child-grouping.test.mjs` — part 1 pins the
+equivalence every fix in this class rests on (`bucket[id].filter(pred)` is
+element-for-element the same objects, in the same order, as
+`all.filter(pred)`) against an adversarial fixture; part 2 is a per-site source
+guard that fails if a handler goes back to passing the whole array. All four
+2026-08-13 guards were proved by reintroducing the bug and watching them go red.
+`tests/production-orders-jobcard-grouping.test.mjs` covers row 4's own shape.
+
+**Finding the next one.** Grep `\.(filter|find)\(...=== \w+\.\w*[Ii]d\)` under
+`src/api` — but a match is not a bug. Establish, in this order: (a) is it inside
+a per-row `.map()`/loop, or a single-record path? (b) how many parents and
+children does the real prod payload have? (c) is the parent set **bounded** (a
+`LIMIT`, a work queue that drains) or unbounded? An unbounded list is worth
+fixing at any size; a bounded one is worth fixing only for what it costs today.
 
 ---
 

@@ -359,8 +359,23 @@ app.get("/", async (c) => {
         .bind(...poIds)
         .all<PurchaseOrderItemRow>()
     : { results: [] as PurchaseOrderItemRow[] };
+  // Bucket the items by purchaseOrderId ONCE (was O(POs×items): rowToPO
+  // re-filtered the whole items array for every PO). Byte-identical — rowToPO
+  // still filters, now over the pre-scoped bucket, so PO_ITEMS_ORDER's ordering
+  // rides through untouched.
+  //
+  // Measured on prod 2026-08-13: 165 POs × 369 items = 60,885 comparisons,
+  // 1.3 ms → 0.1 ms. Cheap today; fixed because this list has no LIMIT unless
+  // the caller opts into ?page, so the cost is ~2.24·N² in PO count and grows
+  // with purchasing forever.
+  const itemsByPoId = new Map<string, PurchaseOrderItemRow[]>();
+  for (const it of items.results ?? []) {
+    const arr = itemsByPoId.get(it.purchaseOrderId);
+    if (arr) arr.push(it);
+    else itemsByPoId.set(it.purchaseOrderId, [it]);
+  }
   const data = poRows.map((p) =>
-    rowToPO(p, items.results ?? []),
+    rowToPO(p, itemsByPoId.get(p.id) ?? []),
   );
   // Recover blank line Supplier SKUs from the supplier bindings (one query for
   // every supplier in the page). See loadSupplierSkuBindings / BUG-2026-07-02-002.

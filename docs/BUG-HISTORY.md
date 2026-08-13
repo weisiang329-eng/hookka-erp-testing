@@ -34,6 +34,67 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-003 — Class sweep: every remaining quadratic list join, measured. Four fixed, twelve proven cheap, one doc correction `performance` `data-integrity` 🟢
+
+**Why this entry exists.** BUG-2026-08-13-002 (below) was the **third** time this repo fixed the same shape — `children.filter(c => c.parentFk === row.id)` evaluated inside a `.map()` over parent rows — and the third time the fix repaired only the instance in front of the author. `BUG-CLASSES.md` says the response to that is to enumerate the class, not to patch again. So this is the enumeration: **every** site of that shape in `src/api`, measured against live prod, ranked, and either fixed or written off with a number attached. The class is now **C14**.
+
+**Headline, stated honestly: nothing left was expensive.** After #275 the largest surviving instance costs **20.8 ms**. There is no second `/planning` hiding in here, and this entry should not be read as if there were. What was fixed was fixed for **slope**, not for today's milliseconds — this system's failure mode is a cliff (sales orders went 720 → 1,334 in two months and the dashboard stopped working), and a quadratic that is 18 ms at 365 rows is 2 s at 3,500.
+
+**Ranked — all 20 candidate sites plus 10 the original grep missed.** Row counts read live from prod 2026-08-13; "cmp" is parents × children on the real list payload.
+
+| # | site | parents × children | cmp | measured | verdict |
+|---|---|---|---|---|---|
+| 1 | `qc-inspections.ts:109` items | 500 × 2,151 | 1,075,500 | 20.8 ms | ✅ **fixed** |
+| 2 | `products.ts:180` dept_working_times | 365 × 1,697 | 619,405 | 18.2 ms | ✅ **fixed** |
+| 3 | `purchase-orders.ts:117` items | 165 × 369 | 60,885 | 1.3 ms | ✅ **fixed** |
+| 4 | `qc-templates.ts:91` items | 31 × 251 | 7,781 | — | cheap, bounded |
+| 5 | `qc-pending.ts:388` items | 26 × 133 | 3,458 | — | cheap; parent set is a drained work queue |
+| 6 | `grn.ts:385` items | 37 × 45 | 1,665 | 0.1 ms | ✅ **fixed** |
+| 7 | `service-cases.ts:506` SV orders | 37 × 23 | 851 | — | cheap |
+| 8 | `service-cases.ts:494` service orders | 37 × 10 | 370 | — | cheap |
+| 9 | `consignment-note-shared.ts:132` items | 11 × 33 | 363 | — | cheap |
+| 10 | `service-orders.ts:311` lines | 10 × 11 | 110 | — | cheap |
+| 11 | `accounting.ts:190` journal lines | 2 × 50 | 100 | — | cheap **today**; see the warning below |
+| 12 | `cash-flow.ts:185` journal lines | 2 × 50 | 100 | — | same |
+| 13 | `rd-projects.ts:166` prototypes | 21 × 3 | 63 | — | cheap |
+| 14 | `products.ts:169` boms | 365 × 0 | 0 | — | ✅ fixed with #2 (`bom_components` is empty on prod) |
+| 15 | `qc-inspections.ts:100` defects | 500 × 0 | 0 | — | ✅ fixed with #1 (`qc_defects` is empty) |
+| 16 | `service-orders.ts:325` returns | 10 × 0 | 0 | — | cheap |
+| 17 | `consignment-orders.ts:199,249`; `customers.ts:294`; `suppliers.ts:161`; `warehouse.ts:121`; `delivery-orders/_helpers.ts:475,538,545`; `sales-orders/_helpers.ts:264` | — | — | — | **already fixed** — the caller passes a bucket; the mapper's `.filter()` is a passthrough |
+| 18 | `invoices.ts:377,388` | — | — | — | **not an instance** — the LIST passes `[]` (`rowToInvoiceList`); the only caller with real arrays is the single-invoice detail read |
+| 19 | `production-orders/_helpers.ts:422,923` | — | — | — | **not an instance** — the documented single-PO path; every batched caller goes through `rowsToPOsBatch` / `groupJobCardsByPoId` |
+| 20 | `wip-expected.ts:103`; `assistant-tools.ts:1696`; `_helpers.ts:3858`; `worker.ts:2762`; `_helpers.ts:2493` | — | — | — | **not an instance** — each is already fed a per-parent bucket, a one-document set, or a `LIMIT 100` |
+
+**Fix.** The four fixed sites all use this repo's established caller-side pattern (the one `customers.ts`, `suppliers.ts`, `warehouse.ts`, `consignment-orders.ts`, `delivery-orders.ts` and `sales-orders.ts` already use): bucket the batched child array into a `Map<parentId, child[]>` **once** at the handler, and hand each mapper its own bucket. The mapper's internal `.filter()` is deliberately **left in place** as a passthrough — which is what makes the change byte-identical by construction, and is also why none of these needed the `.slice()` that #275 did: `.filter()` returns a new array, so a following `.sort()` can never reorder the shared bucket.
+
+Deliberately **not** used here: #275's other shape (an optional pre-grouped `Map` argument on the mapper). That shape exists because `rowToMinimalPO` has single-PO callers that must keep the legacy filter. These four mappers have no such caller that takes a large array, so the simpler caller-side change is correct and touches less.
+
+**Verified — byte-identical, on real prod rows, end to end.** Both the pre-fix (HEAD) and post-fix copy of each of the four route files were imported side by side and driven through their **real Hono `GET /` handler** against a deterministic mock D1 seeded with the actual prod rows each handler reads, then the full response body was hashed:
+
+| endpoint | rows | bytes | sha-256 (pre / post) | warm best-of-5 |
+|---|---|---|---|---|
+| `/api/products` | 365 | 319,231 | `ca46f4e03cbc56a2` / `ca46f4e03cbc56a2` | 19.5 ms → **12.8 ms** |
+| `/api/qc-inspections` | 500 | 1,098,833 | `64a853a212d4e2c7` / `64a853a212d4e2c7` | 21.6 ms → **11.5 ms** |
+| `/api/purchase-orders` | 165 | 158,763 | `c3c358b6811b70c7` / `c3c358b6811b70c7` | 3.0 ms → **2.5 ms** |
+| `/api/grn` | 37 | 40,245 | `84d7c420f309a025` / `84d7c420f309a025` | 0.4 ms → 0.4 ms |
+
+Timings are best-of-5 with both sides warmed and alternated — the first naive run showed products at 87.8 → 22.9 ms, which was mostly the baseline eating JIT warmup because it ran first. The honest figure is the smaller one; it is reported here rather than the flattering one.
+
+Independently, the isolated joins were replayed against the same prod rows asserting **element-for-element object identity** (not deep equality) between `all.filter(pred)` and `bucket.filter(pred)`, with matching content fingerprints: `qc-inspections` 20.8 → 1.1 ms, `products` 18.2 → 0.7 ms, `purchase-orders` 1.3 → 0.1 ms, `grn` 0.1 → 0.0 ms. The premise this rests on was checked by reading each mapper: **all four use their child-array parameter exactly once**, in the `.filter(fk === row.id)` position, and nowhere else.
+
+`tests/list-endpoint-child-grouping.test.mjs` (11 tests) pins both halves — the equivalence property itself against an adversarial fixture (unsorted input, a stable-sort tie, a childless parent, an orphan child, non-mutation of both the bucket and the caller array), and a per-site source guard. **Each of the four guards was proved by putting the bug back**: reverting a site turns its test red with a message naming the exact call it expected, and green again on restore. `npx tsc -p tsconfig.app.json --noEmit` exit 0; `npx eslint` on the changed files 0 errors; full suite green.
+
+**Not deployed.** Actions is billing-blocked, so no figure here was taken from a running deploy — the endpoint numbers above are real handler executions over real prod rows, in-process.
+
+**Deliberately NOT fixed, with reasons.**
+
+* **`accounting.ts:190` / `cash-flow.ts:185` (the GL).** Both fetch **the entire `journal_lines` table with no scoping** and put no `LIMIT` on the entries — the exact pair of defects #275 fixed — but prod holds **2 journal entries and 50 lines**, so today it is 100 comparisons. This is the site with the highest slope in the table if the GL is ever adopted, and it should be fixed *then*. Narrowing the child fetch here is also not the one-liner it looks like: the entries query carries a `LEFT JOIN document_lifecycle`, so deriving a sub-select means re-deriving that predicate — and hand-writing a second predicate that can drift from the first is precisely the trap #275 documented. Do it by reusing the entries query's own `WHERE`, or not at all.
+* **Everything else in rows 4–13, 16.** Structurally small parent sets (10–37 rows) over structurally small child tables. Recorded here **with their numbers** so nobody re-audits them: if you are reading this because a grep matched one of those lines, the answer is that it was measured on 2026-08-13 and cost under 8 K comparisons.
+
+**Doc correction — the prod DSN note in BUG-2026-08-13-002 is wrong for the current tree.** That entry says a working DSN is hardcoded in `scripts/*.mjs`. It is not: the 2026-08-05 refactor moved every script to `scripts/_db.mjs`, which reads `HOOKKA_PROD_DB_URL` from the environment and **refuses to guess**. 69 scripts use `prodUrl()` correctly. Ten older ones (`audit-billable-2026-07-22.mjs`, `audit-do-hub-composition-2026-07-22.mjs`, `audit-price-components-2026-07-22.mjs`, `audit-so-pricing-vs-list-2026-07-22.mjs`, `audit-sofa-combo-2026-07-22.mjs`, `audit-underbilled-2026-07-22.mjs`, `backfill-height-surcharge-2026-07-22.mjs`, `plan-height-backfill-2026-07-22.mjs` and siblings) still fall back to **scraping a DSN out of `scripts/audit-wip-both-dbs.mjs`** — which no longer contains one, so that fallback is dead and those scripts now fail unless `DATABASE_URL` is exported. Set `HOOKKA_PROD_DB_URL` and use `_db.mjs`; the rotation item those credentials created still stands and is unaffected.
+
+---
+
 ## BUG-2026-08-13-002 — `/planning` cold start took 9.6 s because the PO list joined its job cards with a per-PO full scan `performance` `production-orders` 🟢
 
 **Symptom.** Opening `/planning` blocked ~10 s whenever the list snapshot was cold. Measured on prod: `GET /api/production-orders?fields=minimal&include=jobCards-lite&excludeCompleted=true` took **9,587 ms / 4.3 MB** on the first call and **554 ms** on the second. The snapshot invalidates on any `production_orders` / `job_cards` write, which during a working day is constant, so operators paid the cold rebuild repeatedly. A cache-busting param made no difference — not a measurement artifact.

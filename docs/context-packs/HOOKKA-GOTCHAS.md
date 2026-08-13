@@ -151,3 +151,70 @@ generic context packs.
 - **Shared UI primitives** (don't hand-roll): `ObjectPageHeader`/`PageHeader`,
   `useConfirm`, `DataGrid`, `MoneyInput`, `DiscountInput`, `SearchableSelect`;
   one shared PDF letterhead via `drawLetterhead`. See `docs/UI-CONVENTIONS.md`.
+
+## Diagnosing performance / data problems — how the WRONG answer gets produced
+
+On 2026-08-13 a single session produced **eight** confidently-stated findings
+that were false. Every one traced back to three habits, not eight mistakes.
+They are written here because the investigation itself is the dangerous part:
+a wrong diagnosis, stated with confidence, sends whoever reads it down a road
+that costs far more than having no diagnosis at all.
+
+### 1. Measure the call the PRODUCT makes — not one that is convenient
+Four of the eight came from probing something no page ever does:
+
+- Adding a cache-buster (`&x=Date.now()`) to "get a clean number" measures the
+  cold path. Real users hit the cache. Reported "30 s, the page cannot load";
+  the truth was ~1.5 s, and the page in question was **dead code no route
+  reached**.
+- Calling `/api/attendance` bare gives 1.7–6.3 s / 1.28 MB. Every caller passes
+  `?date=` or `?from=&to=` — as actually called it is **126 ms**. Nearly filed
+  as a P1.
+- Grepping a URL string found "45 call sites"; almost all were
+  `invalidateCachePrefix(...)`, which sends no request at all.
+- Setting `el.scrollTop` without dispatching `scroll` does not advance a
+  virtualised list. Concluded windowing was broken; it was correct.
+
+**Rule:** before filing a perf bug, find a live caller and copy its exact query
+string. Verify the code path is REACHABLE (check the route table — this repo
+has redirect-only routes and files nothing imports).
+
+### 2. A sample is not the population, and a count is not the meaning
+`actualMinutes` was diagnosed three times before it was right:
+- v1: 5 orders sampled, all NULL → "the factory records nothing." **Wrong.**
+- v2: counted the column, 4,340 non-null → "so it does record." Count right,
+  **inference wrong.**
+- v3: every one of the 4,289 non-zero values is **byte-identical to that same
+  card's `estMinutes`** — a copy of the standard time, carrying no information.
+
+**Rule:** to claim a column is empty, count it. To claim it is USEFUL, check the
+distribution — a fully-populated column can still be meaningless, and that is
+exactly how a KPI ends up pinned at 100%.
+
+### 3. Do not relay an unverified claim as fact
+- A code comment said the morning brief "is emailed at 07:00", so it was written
+  off as a cron nobody waits on. People open the HTML in a tab to read and
+  print it; it was the worst user-facing wait in the app.
+- A sub-agent reported a live DB credential sitting in ~113 tracked
+  `scripts/*.mjs`. It is a **placeholder inside a help message**
+  (`postgresql://postgres:<PASSWORD>@db.<ref>...`). Repeated to the owner as a
+  security incident before anyone opened the file.
+
+**Rule:** a comment describes intent, not behaviour, and least of all human
+behaviour. Findings inherited from another agent get re-verified before they are
+repeated — especially security claims, where a false alarm burns real trust.
+
+### What actually works
+Capture a fingerprint of the live response BEFORE deploying, then compare after
+— identical hash proves a projection changed nothing:
+
+```js
+const flat = (j.data||[]).map(o => o.id + '|' + (o.items||[]).map(i => i.productCode+':'+i.unitPriceSen).join(','));
+let h = 0; const s = flat.join(';');
+for (let i = 0; i < s.length; i++) h = ((h<<5) - h + s.charCodeAt(i)) | 0;
+```
+
+This caught every real regression risk in that session, and its absence produced
+every false one. State plainly which numbers are MEASURED and which are
+PROJECTED; if you could not verify something, say so rather than rounding it up
+to a fact.

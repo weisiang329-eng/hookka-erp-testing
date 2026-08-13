@@ -14,9 +14,11 @@
 //   5. Customer Maintenance Config (Bedframe / Sofa / Common sub-blocks)
 //   6. Footer (page numbers + "Prices effective on <asOf>")
 //
-// The legacy generate-customer-quotation-pdf.ts is intentionally untouched
-// so any other callers (sales / SO export paths) keep working — this file
-// is the new path the customers page calls.
+// This is the ONLY customer-quotation generator. The legacy
+// generate-customer-quotation-pdf.ts was left in place when this file landed,
+// on the assumption that "other callers (sales / SO export paths)" still used
+// it — they did not; it had zero importers and was deleted in
+// chore/dead-code-sweep.
 // ---------------------------------------------------------------------------
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";

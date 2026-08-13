@@ -34,6 +34,44 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-072 — the "delivered with issues" billing hold had never fired, in five places at once `money` `delivery-orders` `invoices` `data-integrity` 🟢
+
+**Symptom.** A delivery marked DELIVERED WITH ISSUES is supposed to block invoicing until
+an operator resolves the paperwork. It never did. The flag also never reached the UI, and
+the recovery endpoint rejected every attempt to clear it.
+
+**Mechanism.** `delivery_incomplete` is absent from `column-rename-map.json`, so
+`db-pg.ts`'s `columnFrom` falls through to `postgres.toCamel` and the row arrives as
+`deliveryIncomplete`. Every reader used the snake_case spelling, so each got `undefined`:
+
+| read | result |
+| --- | --- |
+| `Number(undefined) === 1` | false → the invoice hold never engaged |
+| `Number(undefined) !== 1` | true → resolve-incomplete rejected everything |
+| `!!Number(undefined)` | false → the flag never reached the UI |
+
+**Why it survived.** Two comments actively defended the wrong spelling — one called it a
+"folded-lowercase runtime column", another said snake_case was chosen "so the
+unquoted-identifier fold can't split read/write keys". Folding applies to unquoted
+MIXED-CASE identifiers; this name has an underscore and is never folded. And the row type
+declared only one spelling, so the typechecker CERTIFIED all five wrong reads instead of
+catching them — the same mechanism as BUG-2026-08-13-034 (RM 0.00 credit notes).
+
+**Blast radius: none.** Verified on prod 2026-08-13 — the delivery-orders list carries the
+key `deliveryIncomplete` (the shim's behaviour, live) and **zero** delivery orders are
+flagged. So no invoice ever slipped a hold. That also made the fix safe: turning the guard
+on blocks nothing that currently succeeds. The agent that found it declined to fix it for
+exactly that risk; measuring the row count resolved it.
+
+**Fix.** All five sites dual-keyed (`row.deliveryIncomplete ?? row.delivery_incomplete`),
+both spellings declared on both row types.
+
+**Guard.** `tests/delivery-incomplete-dual-key.test.mjs`. Worth keeping: the first version
+of the guard used `(?!s*??)` and flagged the very fix it protects — in `A ?? B` the
+`B` half has no `??` after it. It failed against known-good code, which is the harmless
+direction; inverted, it would have gone green against a broken one. Rewritten to blank out
+correct pairs first, then look for leftovers.
+
 ## BUG-2026-08-13-070 — the audit trail had no permission check and no org filter, and its own header claimed otherwise `security` `access-control` `multi-tenant` 🟢
 
 **Symptom.** `GET /api/audit-events?resource=X&resourceId=Y` returned the before/after

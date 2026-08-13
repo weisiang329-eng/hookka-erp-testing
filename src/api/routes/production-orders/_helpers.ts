@@ -578,6 +578,26 @@ export type MinimalPOOut = {
   completedDate: string | null;
   lineNo: number;
   targetEndDate: string;
+  // Has this PO already been stocked into the warehouse? `production_orders`
+  // stores it as INTEGER 0/1 (NOT one of the ten real BOOLEAN columns — see
+  // tests/db-boolean-columns.json), so it is emitted as a JS boolean exactly
+  // the way the full `rowToPO` does.
+  //
+  // BUG-2026-08-13-050: this key was on the payload until b7d00c78
+  // (2026-05-23) moved src/pages/warehouse.tsx from the bare
+  // `/api/production-orders` (full rowToPO shape) to
+  // `?fields=minimal&include=`. That commit audited each consumer for
+  // `.jobCards` only, so the page's `po.status === "COMPLETED" &&
+  // !po.stockedIn` filter (warehouse.tsx:609-611) silently began reading
+  // `undefined` — every already-stocked PO stayed selectable in the Stock-In
+  // dropdown, and picking one wrote a SECOND rack_items row plus a SECOND
+  // STOCK_IN stock_movements row for stock that only moved once. Restoring
+  // the key restores the pre-2026-05-23 behaviour exactly; it is NOT a new
+  // filter. (Unlike `actualMinutes` — BUG-2026-08-13-005 — this is a real
+  // flag with distinct writers, not a copy of another column: the warehouse
+  // PUT sets it from the operator's stock-in, and cascadeUpholsteryToSO /
+  // ...ToCO set and CLEAR it as the upholstery set completes and reverts.)
+  stockedIn: boolean;
   jobCards: MinimalJobCardOut[];
 };
 
@@ -898,6 +918,10 @@ export function rowToMinimalPO(
     completedDate: row.completedDate ?? null,
     lineNo: row.lineNo,
     targetEndDate: row.targetEndDate ?? "",
+    // Same expression as rowToPO:978 — the column is INTEGER 0/1, so the
+    // Boolean() cast is what makes the two shapes agree. See the MinimalPOOut
+    // comment (BUG-2026-08-13-050) for why the key has to be here.
+    stockedIn: Boolean(row.stockedIn),
     jobCards: myJCs,
   };
 }

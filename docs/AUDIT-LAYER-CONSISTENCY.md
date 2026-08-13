@@ -1,5 +1,7 @@
 # Layer-consistency audit — frontend ⟷ API ⟷ database
 
+> **Last verified: 2026-08-13** against `src/api/routes/*.ts`, `src/pages/**`, `src/types/index.ts` and `tests/db-schema.json` (INSERT/UPDATE column lists checked against the prod schema snapshot).
+
 **Date:** 2026-08-13 · **Branch:** `audit/frontend-backend-db` · **Prod access:** none
 (`.dev.vars` is rotated dead, no browser session). Everything below is proven from
 source unless a row says **NEEDS PROD CHECK**, in which case §5 gives the exact

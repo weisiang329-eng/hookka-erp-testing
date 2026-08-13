@@ -1,0 +1,53 @@
+# ---------------------------------------------------------------------------
+# Docs freshness gate
+#
+# Written 2026-08-13 after measuring the last 40 commits on main: 26 touched
+# src/, and 11 of those (42%) shipped with no docs/ change. "Update-on-touch"
+# had been written in CLAUDE.md for months — a convention nobody is stopped by
+# is a wish, not a rule.
+#
+# The damage is not untidiness. README.md told every reader "Every API route
+# trusts the caller" while the app had had auth since April; docs/API.md
+# documented 4 of 136 endpoints; SYMBOLS.md's file:line index was 75% wrong.
+# That is why the same question got three different answers depending on which
+# source the reader happened to weight.
+#
+# This gate is deliberately easy to satisfy and impossible to skip SILENTLY:
+# touch a doc, or write "[no-docs] <reason>" in a commit. The opt-out is a
+# record, not a loophole — `git log --grep="\[no-docs\]"` should read as a list
+# of decisions someone was willing to sign.
+# ---------------------------------------------------------------------------
+name: Docs freshness
+
+on:
+  pull_request:
+    branches: [main, staging]
+  push:
+    branches: [main]
+
+jobs:
+  docs-freshness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need history for the base..HEAD diff; a shallow clone makes the
+          # pairing check silently compare against nothing and always pass.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Stamp coverage — every doc says when it was last checked
+        run: node scripts/check-docs-freshness.mjs --stamps
+
+      - name: Pairing — a source change ships with a doc change or a recorded reason
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=0
+          node scripts/check-docs-freshness.mjs --base "origin/${{ github.base_ref }}"
+
+      - name: API.md is generated, not hand-written
+        run: node scripts/gen-api-docs.mjs --check

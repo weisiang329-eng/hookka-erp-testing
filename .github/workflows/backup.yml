@@ -50,10 +50,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Install postgresql-client-16
+      # Supabase runs Postgres 17.6; ubuntu-latest ships pg_dump 16, and pg_dump
+      # REFUSES to dump a newer server ("aborting because of server version
+      # mismatch"). The client major must be >= the server major, so take it
+      # from the official PGDG apt repo rather than whatever the runner image
+      # happens to carry — otherwise the next Postgres upgrade breaks backups
+      # again, silently, at 19:00 every night.
+      - name: Install postgresql-client-17 (PGDG)
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-client-16
+          sudo apt-get install -y curl ca-certificates gnupg lsb-release
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /usr/share/keyrings/pgdg.gpg
+          echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
+          pg_dump --version
 
       - name: Verify required secrets are set
         env:

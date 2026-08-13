@@ -396,11 +396,18 @@ app.post("/", async (c) => {
     // ghost A/R. Force to 0 at creation; the value will move only
     // through the invoice / payment / CN / DN routes' atomic SQL.
     await c.var.DB.prepare(
+      // orgId is stamped explicitly rather than left to the column DEFAULT.
+      // GET / (above) reads `WHERE orgId = ?` off getOrgId(c), so a customer
+      // created by a user in any org other than the DEFAULT would save, 201,
+      // and then be invisible to the very list that created it. Identical on
+      // prod today — DEFAULT_ORG_ID and the migration-0049 column DEFAULT are
+      // both 'hookka' — so this is byte-identical now and correct later.
+      // Same reasoning, and the same wording, as the delivery_hubs stamp below.
       `INSERT INTO customers (id, code, name, ssmNo, companyAddress, creditTerms,
          creditLimitSen, outstandingSen, isActive, contactName, phone, email,
          default_company_code, group_org_code, oem_marking,
-         customer_stage, salesperson_user_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         customer_stage, salesperson_user_id, orgId)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -425,6 +432,7 @@ app.post("/", async (c) => {
         // is saved — they would watch their own work vanish.
         forcedSalespersonOnCreate(c) ??
           (String(body.salespersonUserId ?? body.salesperson_user_id ?? "").trim() || null),
+        getOrgId(c),
       )
       .run();
 

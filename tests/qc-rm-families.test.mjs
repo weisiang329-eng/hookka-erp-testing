@@ -8,8 +8,10 @@
 // 检查什么东西？"
 //
 // The taxonomy is the one already in the repo — `StockCategory`
-// (src/types/index.ts) and CATEGORY_TO_ITEM_GROUPS (src/lib/material-lookup.ts)
-// — read in the routing direction. Routing off the group is what makes a NEW
+// (src/types/index.ts) read in the routing direction. (The forward map used to
+// live in src/lib/material-lookup.ts; that file had no importer and was
+// deleted, so ITEM_GROUP_TO_FAMILY is now the only copy.)
+// Routing off the group is what makes a NEW
 // material code inherit the right checks the moment it is filed correctly.
 // ---------------------------------------------------------------------------
 import test from "node:test";
@@ -25,8 +27,8 @@ import {
 } from "../src/api/lib/qc-rm-families.ts";
 
 test("every item group in the material taxonomy routes to a family", () => {
-  // These are the groups CATEGORY_TO_ITEM_GROUPS maps the BOM's StockCategory
-  // onto. B.OTHERS is deliberately not in the direct table — it holds two
+  // These are the groups the BOM's StockCategory maps onto.
+  // B.OTHERS is deliberately not in the direct table — it holds two
   // families and is handled separately below.
   const groups = [
     "B.M-FABR", "S.M-FABR", "S-FABR", "PLYWOOD",

@@ -1,6 +1,7 @@
 # Procurement — Module Guide
 
 > **Last verified: 2026-08-13** against `src/api/routes/{purchase-orders,grn,purchase-invoices,three-way-match,supplier-payments}.ts`, `src/lib/{convert-chain,purchase-edit-rules,pi-posting}.ts`, `src/pages/procurement/*`, and `tests/`.
+> Re-verified 2026-08-13 (chore/dead-code-sweep): `/procurement/in-transit` is a `<Navigate>` redirect and `src/pages/procurement/in-transit.tsx` had no importer — the page is deleted, the redirect and the `goods-in-transit` API kept.
 > Corrected 2026-08-13: `grn.ts` is 2,592 lines (was 1988), `purchase-invoices.ts` 2,869 (was 2110), `purchase-orders.ts` 1,177 (was 1016). Handler anchors had drifted 100–450 lines — GRN create is :1300 (was 1094), GRN edit :1789 (was 1459), GRN arrival :2174 (was 1807), PI create :1047 (was 729), PI edit :1900 (was 1458). All five named tests exist.
 
 > Self-navigating docs (L2). Repo-wide map: [[CODEBASE-MAP]]. Never grep the whole repo — use the file:line below.
@@ -16,7 +17,7 @@ Owns the buy-side document chain: **Purchase Orders** (PO) → **Goods Receipt N
   - `/procurement/grn` → `src/pages/procurement/grn.tsx:347` (`GRNPage` — GRN list)
   - GRN create → `src/pages/procurement/grn/create.tsx:103` (`GRNCreatePage`; manual default + "Convert from PO")
   - GRN detail → `src/pages/procurement/grn-detail.tsx:129` (`GRNDetailPage`; Edit Quantities → POSTED-line compensating cascade)
-  - `/procurement/in-transit` → `src/pages/procurement/in-transit.tsx:118` (`GoodsInTransitPage`)
+  - ~~`/procurement/in-transit`~~ — page **DELETED** (chore/dead-code-sweep). The route has been a bare `<Navigate to="/procurement/grn">` (`src/dashboard-routes.tsx:378`) with no sidebar entry and no importer, so `in-transit.tsx` (869 lines) was unreachable. The redirect stays for bookmarks; the `goods_in_transit` API (`src/api/routes/goods-in-transit.ts`) is untouched.
   - PI list/create/detail → `src/pages/procurement/pi.tsx:93` (`PurchaseInvoicesPage`), `pi/create.tsx:116` (`CreatePurchaseInvoicePage`), `PurchaseInvoiceDetail.tsx:137` (`PurchaseInvoiceDetailPage`; editable DRAFT+APPROVED)
   - Bindings mgmt → `src/pages/procurement/maintenance.tsx:858` (`SupplierMaintenancePage`); SKU/supplier modals `sku-form-dialog.tsx` / `supplier-form-dialog.tsx`
   - Supplier profile/scorecard/price-history → `src/pages/suppliers/detail.tsx:156` (`SupplierDetailPage`)

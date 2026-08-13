@@ -74,15 +74,14 @@ test("job-card-id: DEPT_CODE2 gets FOAM_CUTTING on a free 2-digit code", () => {
   assert.ok(!["01", "02", "03", "04", "05", "06", "07", "08"].includes(code), `FOAM_CUTTING code ${code} collides with an existing dept`);
 });
 
-test("sticker PDF: colors + names + dept-specific switch cover FOAM_CUTTING; FOAM reads Foam Bonding", () => {
-  const src = read("src/lib/generate-sticker-pdf.ts");
-  assertAll(src, "generate-sticker-pdf.ts", [
-    "FOAM_CUTTING:", // DEPT_COLORS + DEPT_NAMES
-    'FOAM_CUTTING: "Foam Cut"',
-    'FOAM: "Foam Bonding"',
-    'case "FOAM_CUTTING"', // getDeptSpecificFields switch
-  ]);
-});
+// The "sticker PDF" case that used to sit here read
+// `src/lib/generate-sticker-pdf.ts`, which was deleted in
+// chore/dead-code-sweep: it had no importer anywhere. The stickers the factory
+// actually prints are rendered by `src/pages/production/index.tsx`, off
+// `generateStickerData` in `src/lib/qr-utils.ts` — a completely separate
+// implementation. The test was pinning FOAM_CUTTING into a file no print path
+// ever reached, which is worse than no test: it read as coverage of the sticker
+// dept labels while the live renderer was unpinned.
 
 test("sidebar: Foam Cutting child added, Foam relabeled Foam Bonding, active-route wired", () => {
   const src = read("src/components/layout/sidebar.tsx");

@@ -249,8 +249,10 @@ ${unmounted.length ? unmounted.map((f) => `- \`${f}\``).join("\n") : "_(none)_"}
 - **Migrations do not auto-apply on deploy.** A new column reaches production only
   via runtime self-apply (\`ALTER TABLE … ADD COLUMN IF NOT EXISTS\`, awaited before
   the first write). See \`src/api/lib/self-apply.ts\`.
-- **Validation** is per-route. Shared Zod schemas live in \`src/lib/validation.ts\`
-  and \`src/lib/schemas/\`; many routes still do ad-hoc checks.
+- **Validation** is per-route. Shared Zod schemas live in \`src/lib/schemas/\`;
+  many routes still do ad-hoc checks. (\`src/lib/validation.ts\`, listed here
+  until chore/dead-code-sweep, held hand-rolled validators — not Zod — and had
+  no importer; it was deleted.)
 
 ## Regenerating
 

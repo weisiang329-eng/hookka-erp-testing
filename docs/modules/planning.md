@@ -1,6 +1,7 @@
 # Planning — Module Guide
 
 > **Last verified: 2026-08-13** against `src/pages/planning/*`, `src/api/routes/{planning-schedule,schedule-proposals,production-leadtimes,mrp,scheduling,agent-console}.ts`, `src/api/lib/{planning-capacity,planning-chain,planning-scheduler,lead-times,schedule-proposals,agent-console}.ts`, `src/api/worker.ts`, and `tests/`.
+> Re-verified 2026-08-13 (chore/dead-code-sweep): all nine `src/pages/planning/dept/*.tsx` import `_DepartmentSchedulePage`; the `_PlainDeptSchedulePage.tsx` variant this guide listed had no importer and is deleted.
 > Corrected 2026-08-13: `computeChain` is at `planning-chain.ts:2418`, not :1775 (the file is 2,517 lines); `scheduleCutting`/`runCutting` moved to :972/:631; `production-orders.ts` is **3,903 lines, not 7,606** — it was split, with the helpers now in `src/api/routes/production-orders/_helpers.ts` (5,799). Both `production-leadtimes` mounts confirmed (`worker.ts:1360` and `:1361`). All three named tests exist.
 
 > Self-navigating docs (L2). Repo-wide map: [[CODEBASE-MAP]]. Never grep the whole repo — use the file:line below.
@@ -13,7 +14,7 @@ Owns production **planning, scheduling, MRP and lead times** — the read-mostly
   - `/planning` → `src/pages/planning/index.tsx:444` (`PlanningPage` — one 4,060-line file, 5 tab-gated render blocks)
   - MRP view → `src/pages/planning/mrp.tsx` (reads/posts `/api/mrp`)
   - Lead-time history + scheduled changes → `src/pages/planning/LeadTimeHistoryDialog.tsx`
-  - Per-dept daily schedule (shared renderer) → `src/pages/planning/dept/_DepartmentSchedulePage.tsx` (+ `_PlainDeptSchedulePage.tsx` plain-table variant)
+  - Per-dept daily schedule (shared renderer) → `src/pages/planning/dept/_DepartmentSchedulePage.tsx` — the ONLY renderer; all nine dept pages import it. (`_PlainDeptSchedulePage.tsx`, a plain-table variant this line used to list, had no importer and was deleted in chore/dead-code-sweep.)
   - Dept config shells (one per dept, no logic) → `src/pages/planning/dept/{fabric-cutting,fabric-sewing,wood-cutting,foam-bonding,foam-cutting,framing,webbing,upholstery,packing}.tsx`
   - Agent Console (SUPER_ADMIN) → `src/pages/agents/index.tsx`
 - API routes (mounts in `src/api/worker.ts`)

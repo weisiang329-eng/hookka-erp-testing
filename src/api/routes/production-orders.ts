@@ -13,11 +13,15 @@
 // Deferred to later phases:
 //   - TODO(phase-5): FIFO raw-material consumption on PO completion
 //     (fg_batches/rm_batches/cost_ledger are present in schema but the
-//     lookup helpers in src/lib/material-lookup + src/lib/costing haven't
-//     been ported to D1 yet).
-//   - TODO(phase-5): jobCard/PO override persistence (job-card-persistence.ts)
-//     — D1 writes are already durable so overrides become redundant, but the
-//     module is still called by the in-memory route. Not needed here.
+//     lookup helpers in src/lib/costing haven't been ported yet).
+//     `src/lib/material-lookup` was also named here; it read the in-memory
+//     mock-data fixtures, had no importer, and was deleted in
+//     chore/dead-code-sweep — do not resurrect it for this.
+//   - ~~TODO(phase-5): jobCard/PO override persistence~~ — CLOSED. The
+//     `job-card-persistence.ts` overlay was deleted in chore/dead-code-sweep:
+//     it overlaid the in-memory mock-data arrays, and the "in-memory route"
+//     this note said still called it has not existed since the move to
+//     Supabase Postgres. DB writes are durable; there is nothing to overlay.
 //
 // JSON columns: none on production_orders/job_cards themselves. piece_pics is
 // its own table in the schema.

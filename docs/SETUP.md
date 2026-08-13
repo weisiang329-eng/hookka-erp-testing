@@ -2,6 +2,7 @@
 
 > **Last verified: 2026-08-13** against `package.json` (scripts block), `vite.config.ts:215-224`, `src/api/worker.ts`, `wrangler.toml`, and `ls src/api/`.
 > Corrected 2026-08-13: the whole "run the API with `npm run api` / `src/api/index.ts`" workflow was fiction — neither the script nor the file exists; the API is a Cloudflare Pages Function (`functions/api/[[route]].ts` → `src/api/worker.ts`) and is run locally with `npm run dev:worker`.
+> Re-verified 2026-08-13 (chore/dead-code-sweep): the `/api` → `localhost:3001` proxy this doc flagged as vestigial has now been REMOVED from `vite.config.ts`, so the line reference is gone with it. `npm run dev` behaviour is unchanged (the proxy never reached anything).
 
 Everything you need to go from a fresh machine to a running dev environment.
 
@@ -58,11 +59,12 @@ in-memory API server.
 npm run dev        # Vite on http://localhost:3000
 ```
 
-Note: `vite.config.ts:221` proxies `/api` to `http://localhost:3001`, but
-**nothing in this repo listens on 3001** — the standalone Node API server
-(`src/api/index.ts`, `npm run api`) was removed when the app moved to
-Cloudflare Pages Functions. That proxy line is vestigial; `/api/*` calls
-under plain `npm run dev` will fail to connect.
+Note: this serves the UI only — `/api/*` calls have no backend here. Until
+chore/dead-code-sweep `vite.config.ts` proxied `/api` to
+`http://localhost:3001`, but **nothing in this repo has listened on 3001**
+since the standalone Node API server (`src/api/index.ts`, `npm run api`) was
+removed for Cloudflare Pages Functions. The proxy is gone; the behaviour is
+unchanged (it never reached anything).
 
 ### Full stack (SPA + real Hono API)
 

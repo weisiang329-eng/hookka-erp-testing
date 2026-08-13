@@ -21,6 +21,25 @@ on:
       - main
   workflow_dispatch:
 
+# Without this, nothing here was ever cancelled. Measured 2026-08-13: 65 runs
+# in 24h at ~6 minutes each, and pushing three commits in a row left three full
+# deploys of the same branch running to completion when only the last one could
+# possibly matter.
+#
+# The group deliberately includes `event_name`. An open PR on a `claude/**`
+# branch fires BOTH a push run and a pull_request run for the same commit, and
+# they are NOT duplicates — the push run deploys a branch preview
+# (`--branch=<ref_name>`) and the PR run deploys a canary
+# (`--branch=canary-<pr>`), two different URLs. Grouping them together would
+# make one silently cancel the other and delete a preview someone is using.
+#
+# cancel-in-progress is OFF for main and ON everywhere else: a preview
+# superseded a minute later is worth nothing, but a production deploy killed
+# half-way is worth less than nothing.
+concurrency:
+  group: deploy-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   deploy:
     runs-on: ubuntu-latest

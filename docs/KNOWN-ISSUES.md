@@ -19,6 +19,51 @@ react-hooks/set-state-in-effect       2
 
 Treat the buckets below as *rationale* for why each rule is tolerated, not as a count. Re-measure before quoting a number.
 
+## 0. Test fidelity: 57% of the suite reads source text instead of running it
+
+Measured 2026-08-13 against `origin/main`, while comparing this repo's CI with
+Houzs ERP's:
+
+```text
+tests/*.test.mjs                    381 files
+  use readFileSync on a source file 218   (57%)
+  import and execute the code       235
+  exercise a real database            2
+```
+
+The suite is fast — `node --test` boots once, no runtime per file — and a large
+part of the reason is that more than half of it never executes the code it
+covers. A test shaped like
+
+```js
+const users = readFileSync("src/api/routes/users.ts", "utf8");
+test("creating an account still requires a password", () => { /* assert on text */ });
+```
+
+catches *"someone deleted the password check"*. It cannot catch *"the password
+check is wrong"*, and it goes green against code that would throw on the first
+request.
+
+**Why this is on the list now.** The sibling repo hit a bug on 2026-08-13 that
+this shape cannot see: a migration deleted parent rows and relied on
+`ON DELETE CASCADE` to clear two child tables, so the behaviour depended
+entirely on whether the engine enforced foreign keys. Only executing it against
+a real database shows that. This repo runs on Cloudflare Workers against
+Postgres through Hyperdrive, and **two** test files touch a database at all.
+
+**What good looks like here** — not a rewrite, and explicitly *not* adopting the
+sibling's Workers-pool harness, which costs ~1.76s of runtime startup per file
+and was itself the subject of `docs/ci-capacity-coe.md` over there. The narrow
+version: an integration suite against an ephemeral Postgres service container,
+covering the routes where a wrong answer reaches money or stock — the same shape
+as that repo's `test:pg` / `backend-postgres` job. Source-text tests stay where
+they are useful (guarding a convention, pinning a config), and stop being the
+only evidence for behaviour.
+
+**Do not "fix" this by counting.** Converting source-text tests wholesale would
+trade a fast suite for a slow one and buy little; the value is concentrated in
+the handful of paths where an error is expensive. Pick those first.
+
 ## 1. `react-hooks/set-state-in-effect` — 2 remaining (was ~62)
 
 The React 19 hooks plugin (still labelled experimental in `eslint-plugin-react-hooks@next`)

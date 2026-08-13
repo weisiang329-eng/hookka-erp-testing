@@ -7632,7 +7632,7 @@ app.get("/pl-statement", async (c) => {
   const unresMap = new Map<string, { source: string; code: string }>();
   for (const w of [p.materialWarnings, y.materialWarnings]) {
     for (const n of w.negatives) negMap.set(n.rmId, { itemCode: n.itemCode, units: n.units });
-    for (const u of w.unresolved) unresMap.set(`${u.source} ${u.code}`, u);
+    for (const u of w.unresolved) unresMap.set(`${u.source}\u0000${u.code}`, u);
   }
   const materialWarnings = {
     negatives: [...negMap.entries()].map(([rmId, v]) => ({ rmId, itemCode: v.itemCode, units: v.units })),

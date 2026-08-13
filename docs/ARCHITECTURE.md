@@ -183,9 +183,12 @@ Windowing/virtualisation primitives for large grids: `src/lib/virtual-window.ts`
 A few pieces of ambient state:
 
 - **Toasts** — `ToastProvider` + `useToast()` in `src/components/ui/toast.tsx`.
-- **Persisted job-card state** — `src/api/lib/job-card-persistence.ts` stashes
-  shop-floor form state in `localStorage` so workers don't lose in-progress
-  entries on a tab reload.
+- ~~Persisted job-card state~~ — `src/api/lib/job-card-persistence.ts` was
+  **deleted** in chore/dead-code-sweep. It had no importer, and the description
+  here was wrong twice over: it was not `localStorage` (it wrote
+  `.data/job-card-overrides.json` via `node:fs`) and it overlaid the in-memory
+  `src/lib/mock-data.ts` arrays, which stopped being the data source when the
+  app moved to Supabase Postgres. Job-card state is durable in the DB now.
 
 ### Styling
 
@@ -343,7 +346,6 @@ The non-UI heart of the app. A selected tour:
 | `email-outbox.ts`             | `enqueueEmail` + `processOutbox` (retry-with-backoff)      |
 | `supabase-compat.ts`          | D1-shaped facade over `postgres.js`; batch = transaction   |
 | `monitoring.ts`               | Optional toucan-js error capture in worker                 |
-| `job-card-persistence.ts`     | Shop-floor localStorage overlay (server-only deps)         |
 
 ### Currency and dates
 

@@ -3,7 +3,8 @@
 // the browser "Download PDF" and the backend customer-notify auto-email, so the
 // customer always receives EXACTLY what the operator sees. Replaces the split
 // jsPDF (browser-only src/lib/generate-do-pdf.ts / generate-invoice-pdf.ts) +
-// the simplified backend fallback (branded-fallback-pdf.ts). pdf-lib runs on
+// the simplified backend fallback (branded-fallback-pdf.ts, since deleted —
+// it had no importer left once this file took over). pdf-lib runs on
 // both Cloudflare Workers and the browser, so a single file is the source of
 // truth — a future template edit is a one-file change (owner 2026-07-02).
 //

@@ -297,6 +297,82 @@ app.get("/", async (c) => {
     // Shares the existing snapshot TABLE under a distinct cache_key, so it
     // needs no new table (migrations are inert on deploy) and never collides
     // with the full-list payload.
+    // ?fields=delivery-refs carries the SAME latent cliff as price-index below:
+    // it also projected computeFullList, so the Delivery page paid the whole
+    // SELECT * rebuild on any snapshot miss. Same narrow treatment, same
+    // shared snapshot table under its own cache_key. Every scalar it returns is
+    // a straight passthrough in rowToSO (`row.X ?? ""`), and its items are
+    // sorted by lineNo — both reproduced below, so output is unchanged.
+    if (c.req.query("fields") === "delivery-refs" && !includeArchive && serviceOrderFilter === "false" && !isCustomerScoped(c)) {
+      const computeDeliveryRefs = async () => {
+        const [sos, items] = await Promise.all([
+          db
+            .prepare(
+              `SELECT id, company_so_id, customer_id, customer_so, customer_so_id,
+                      customer_po, customer_po_id, reference, hookka_expected_dd
+                 FROM ${soSourceSql} ${orgWhere}${fullClause}
+                ORDER BY created_at DESC, id DESC`,
+            )
+            .bind(...orgParams, ...fullScope.binds)
+            .all<Record<string, unknown>>(),
+          db
+            .prepare(
+              `SELECT salesOrderId, productCode, unitPriceSen, lineNo FROM ${itemsSourceSql}
+                WHERE salesOrderId IN (SELECT id FROM ${soSourceSql} ${orgWhere}${fullClause})`,
+            )
+            .bind(...orgParams, ...fullScope.binds)
+            .all<Record<string, unknown>>(),
+        ]);
+        // Dual-keyed reads: the pg shim camelCases columns, but never assume it.
+        const g = (r: Record<string, unknown>, camel: string, snake: string) =>
+          (r[camel] ?? r[snake]) as unknown;
+        const bySO = new Map<string, Array<{ productCode: string; unitPriceSen: number | undefined; lineNo: number }>>();
+        for (const r of items.results ?? []) {
+          const soId = String(g(r, "salesOrderId", "sales_order_id") ?? "");
+          if (!soId) continue;
+          const row = {
+            productCode: String(g(r, "productCode", "product_code") ?? ""),
+            unitPriceSen: g(r, "unitPriceSen", "unit_price_sen") as number | undefined,
+            lineNo: Number(g(r, "lineNo", "line_no") ?? 0),
+          };
+          const arr = bySO.get(soId);
+          if (arr) arr.push(row);
+          else bySO.set(soId, [row]);
+        }
+        const str = (r: Record<string, unknown>, camel: string, snake: string) =>
+          String(g(r, camel, snake) ?? "");
+        const data = (sos.results ?? []).map((s) => {
+          const id = String(g(s, "id", "id") ?? "");
+          return {
+            id,
+            companySOId: str(s, "companySOId", "company_so_id"),
+            customerId: g(s, "customerId", "customer_id"),
+            customerSO: str(s, "customerSO", "customer_so"),
+            customerSOId: str(s, "customerSOId", "customer_so_id"),
+            customerPO: str(s, "customerPO", "customer_po"),
+            customerPOId: str(s, "customerPOId", "customer_po_id"),
+            reference: str(s, "reference", "reference"),
+            hookkaExpectedDD: str(s, "hookkaExpectedDD", "hookka_expected_dd"),
+            items: (bySO.get(id) ?? [])
+              .sort((a, b) => a.lineNo - b.lineNo)
+              .map((it) => ({ productCode: it.productCode, unitPriceSen: it.unitPriceSen })),
+          };
+        });
+        return { success: true as const, data, total: data.length };
+      };
+      const { withSnapshot } = await import("../lib/snapshot");
+      return c.json(
+        await withSnapshot(
+          db,
+          { tableName: "sales_orders_list_snapshot", sourceTables: ["sales_orders", "sales_order_items"] },
+          getOrgId(c),
+          computeDeliveryRefs,
+          "delivery-refs",
+          c,
+        ),
+      );
+    }
+
     if (c.req.query("fields") === "price-index" && !includeArchive && serviceOrderFilter === "false" && !isCustomerScoped(c)) {
       const computePriceIndex = async () => {
         const [sos, items] = await Promise.all([

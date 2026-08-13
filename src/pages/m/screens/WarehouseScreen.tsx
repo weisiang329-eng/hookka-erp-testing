@@ -141,7 +141,10 @@ export function WarehouseScreen() {
   } | null>(null);
 
   // Item-QR target list — real finished-good codes.
-  const { data: invResp } = useCachedJson<InventoryResp>("/api/inventory");
+  // perf 2026-08-13 (BUG-2026-08-13-021): `?buckets=finishedProducts` — only
+  // that bucket is read (and then only its first 24 rows), so the RM and WIP
+  // buckets no longer ride along on a factory phone.
+  const { data: invResp } = useCachedJson<InventoryResp>("/api/inventory?buckets=finishedProducts");
   const fgItems = invResp?.data?.finishedProducts ?? [];
 
   const openRackQr = (r: Rack) => {

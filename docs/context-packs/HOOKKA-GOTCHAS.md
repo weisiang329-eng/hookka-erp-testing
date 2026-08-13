@@ -10,6 +10,10 @@
 >
 > **Canonical path is `docs/context-packs/HOOKKA-GOTCHAS.md`.** Several docs used to link
 > the old root-level HOOKKA-GOTCHAS path, which does not exist; those links were repaired 2026-08-13.
+>
+> **2026-08-13, branch `fix/stock-grn-org-filter`:** added the duplicate-rename-map-key
+> trap to the schema section (verified against `column-rename-map.json:815-816`,
+> `db-pg.ts:57` and the prod snapshot `tests/db-schema.json`). Nothing else changed.
 
 Read this BEFORE touching schema, money, SQL, or shipping. These are the
 non-obvious traps that have repeatedly cost real time and, in one case, nearly
@@ -29,6 +33,21 @@ generic context packs.
   and the first write 500s on a missing column (BUG-2026-06-20-002 — caught in
   verify-live, one step from a broken prod). Still write the migration file too
   (record + SQLite test mirror), but the runtime self-apply is what's load-bearing.
+
+- **Two rename-map entries can point at ONE column, and only the LAST one wins on
+  read.** `columnFrom` (`src/api/lib/db-pg.ts:57`) resolves a `SELECT *` column
+  through `snakeToCamel`, which is
+  `Object.fromEntries(Object.entries(renameMap).map(([camel, snake]) => [snake, camel]))`.
+  `Object.fromEntries` keeps the **last** duplicate key. `column-rename-map.json`
+  maps **both** `"supplierSKU"` (line 815) and `"supplierSku"` (line 816) to
+  `supplier_sku`, so every `SELECT *` row delivers **`supplierSku`** and any
+  `r.supplierSKU` read is permanently `undefined` — no error, just a blank field
+  or, worse, a `""` written onward. This has produced at least three live defects
+  (`purchase-orders.ts:98` PO Supplier SKU, `three-way-match.ts:380` bucketing,
+  and `grn.ts:1574`, which stores `grn_items.material_code = ""` on every
+  PO-sourced line — BUG-2026-08-13-052). **Check the map for a duplicate target
+  before trusting an acronym-cased key**, and read rows dual-keyed
+  (`r.camelCase ?? r.snake_case`) so it does not matter which spelling won.
 
 - **Make new columns snake_case.** Route SQL is written camelCase and translated
   to snake_case by `src/api/lib/supabase-compat.ts` using

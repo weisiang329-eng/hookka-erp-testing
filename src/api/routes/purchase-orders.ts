@@ -56,14 +56,27 @@ type PurchaseOrderItemRow = {
   material_code?: string | null;
   materialCode?: string | null;
   materialName: string | null;
-  // The DB column was created as camelCase `supplierSKU` (migration 0001),
-  // which Postgres folds to all-lowercase `suppliersku` (NO underscore). The
-  // rename-map lists `supplier_sku` (wrong — that column never existed), so the
-  // adapter can't restore the casing and `r.supplierSKU` was always undefined →
-  // every PO showed a blank Supplier SKU though the value was stored fine. Keep
-  // both keys so the dual-key read below works regardless of adapter casing.
+  // CORRECTION 2026-08-13: the comment that stood here was wrong on its central
+  // claim, and it has been used to reason about this column at least twice. It
+  // said the column was created as camelCase `supplierSKU` and folded to
+  // `suppliersku`, and that the rename-map entry `supplier_sku` names a column
+  // that "never existed". The physical column IS `supplier_sku` —
+  // `0001_init.sql:458` creates it and the production schema snapshot
+  // `tests/db-schema.json` lists it under `purchase_order_items`.
+  //
+  // What that means for the read below: the pg shim's `columnFrom`
+  // (`db-pg.ts:57`) resolves `supplier_sku` through the INVERSE of
+  // `column-rename-map.json`, which has TWO entries pointing at it —
+  // `"supplierSKU"` (line 815) and `"supplierSku"` (line 816). `Object.fromEntries`
+  // keeps the LAST, so the driver delivers **`supplierSku`**. Both spellings
+  // declared here are therefore dead, and `rowToItem`'s
+  // `r.supplierSKU ?? r.suppliersku` never sees the stored value. Left as-is
+  // deliberately — that is the layer audit's row 18 and fixing the read changes
+  // what the PO detail derives per line; see BUG-2026-08-13-052 for the sibling
+  // on the GRN side and why the pair needs one coupled change.
   supplierSKU?: string | null;
   suppliersku?: string | null;
+  supplierSku?: string | null;
   quantity: number;
   unitPriceSen: number;
   totalSen: number;

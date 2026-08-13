@@ -1845,7 +1845,32 @@ app.get("/", async (c) => {
     itemsResults = itemRes.results ?? [];
   }
 
-  const data = inspections.map((r) => rowToInspection(r, itemsResults));
+  // C14 — bucket the checklist items by inspection ONCE instead of letting
+  // rowToInspection re-scan the whole flat array per row. The batched
+  // `WHERE inspectionId IN (...)` above removed the WIRE cost and left the
+  // JOIN cost: this list has no LIMIT, and the backlog is 2,839 PENDING /
+  // IN_PROGRESS rows (measured on prod 2026-08-01, see quality.tsx's
+  // slot-card geometry note), so at ~10 checklist items per inspection the
+  // per-row filter was ~2,839 x ~28,000 = ~80M comparisons per page load —
+  // and the page calls this endpoint with NO query string, so no filter
+  // narrows the parent set.
+  //
+  // rowToInspection KEEPS its internal `.filter()`. Over a bucket that
+  // already contains only this inspection's rows it is a passthrough, which
+  // makes the change byte-identical by construction, and because `.filter()`
+  // copies before the following `.sort()`, the shared bucket can never be
+  // reordered under another row. The single-record caller below (`:2345`)
+  // is unaffected — it passes one inspection's own items.
+  const itemsByInspection = new Map<string, InspectionItemRow[]>();
+  for (const it of itemsResults) {
+    const bucket = itemsByInspection.get(it.inspectionId);
+    if (bucket) bucket.push(it);
+    else itemsByInspection.set(it.inspectionId, [it]);
+  }
+
+  const data = inspections.map((r) =>
+    rowToInspection(r, itemsByInspection.get(r.id) ?? []),
+  );
   return c.json({ success: true, data, total: data.length });
 });
 

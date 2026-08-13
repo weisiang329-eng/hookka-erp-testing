@@ -76,10 +76,16 @@ function rowToInspection(
     productCode: row.productCode ?? "",
     productName: row.productName ?? "",
     customerName: row.customerName ?? "",
-    department: row.department ?? "UPHOLSTERY",
+    // C15 — never invent a department or a verdict. These two used to
+    // default to the literals "UPHOLSTERY" and "PASS", so a legacy row
+    // (this route deliberately returns rows with a NULL `status`, see the
+    // history query below) rendered as a real UPHOLSTERY inspection that a
+    // real inspector had PASSED. A quality record nobody filled in must not
+    // display as one that passed. Blank flows through to the grid's "—".
+    department: row.department ?? "",
     inspectorId: row.inspectorId ?? "",
     inspectorName: row.inspectorName ?? "",
-    result: row.result ?? "PASS",
+    result: row.result ?? "",
     notes: row.notes ?? "",
     inspectionDate: row.inspectionDate ?? "",
     createdAt: row.createdAt ?? "",

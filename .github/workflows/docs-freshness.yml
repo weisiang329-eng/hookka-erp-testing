@@ -46,7 +46,12 @@ jobs:
       - name: Pairing — a source change ships with a doc change or a recorded reason
         if: github.event_name == 'pull_request'
         run: |
-          git fetch origin "${{ github.base_ref }}" --depth=0
+          # checkout above already used fetch-depth: 0, so the base ref is
+          # present. An extra `git fetch --depth=0` is not just redundant, it
+          # is INVALID (git wants --unshallow) and exits 128 — which reads in
+          # the UI as "the docs check failed" when nothing was ever checked.
+          # A gate that fails for its own reasons teaches people to ignore it.
+          git rev-parse --verify "origin/${{ github.base_ref }}" >/dev/null
           node scripts/check-docs-freshness.mjs --base "origin/${{ github.base_ref }}"
 
       - name: API.md is generated, not hand-written

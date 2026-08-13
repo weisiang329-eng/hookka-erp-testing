@@ -409,16 +409,23 @@ app.get("/overdue-counts", async (c) => {
 //   ?fields=minimal&include=jobCards-lite&...   -> 13,315ms / 4.27 MB
 // Counting in SQL returns the same numbers in one small payload.
 //
-// DELIBERATELY OMITS actual-hours and efficiency. Verified on prod across 5
-// COMPLETED orders (14-26 finished job cards each): job_cards.actualMinutes is
-// NULL on every finished card, and productionTimeMinutes is not a substitute —
-// it equals estMinutes exactly on every row (it is the standard time, not the
-// measured one). tracker.tsx computed efficiency as
-// `(actualMinutes || estMinutes)`, so it compared the estimate against itself
-// and rendered exactly 100% for every department, always. Publishing that as a
-// KPI is worse than not publishing it, so the real metrics below are counts and
-// dates only. Capturing true durations needs floor-side start/stop capture —
-// a process change, not a query.
+// DELIBERATELY OMITS actual-hours and efficiency — but NOT for the reason the
+// first version of this comment gave. That version claimed "the factory does not
+// record actual work duration at all", generalised from a 5-order sample that
+// happened to be all-NULL. A full column count disproves it:
+// **4,340 of 36,796 job cards carry a non-null actualMinutes; 4,289 non-zero.**
+// Never assert a column is empty from a handful of rows.
+//
+// What IS true: `productionTimeMinutes` is not a substitute (it equals
+// estMinutes exactly on every row — standard time, not measured), and any UI
+// computing `(actualMinutes || estMinutes)` divides the estimate by itself and
+// prints exactly 100% forever. That is why the retired tracker.tsx showed 100%
+// for every department.
+//
+// So this endpoint stays counts-and-dates because an efficiency number belongs
+// where its denominator is honest — /api/department-performance, which divides
+// by real clocked time from working_hour_entries — not because the measurements
+// are missing. See docs/BUG-HISTORY.md BUG-2026-08-13-004.
 // ---------------------------------------------------------------------------
 app.get("/tracker-summary", async (c) => {
   const denied = await requirePermission(c, "production-orders", "read");

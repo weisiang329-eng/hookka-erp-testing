@@ -1036,6 +1036,1106 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 **Start here:** For QC work open `src/api/routes/qc-pending.ts` + `src/pages/quality.tsx`; for warehouse/stock-scan work open `src/api/routes/public-rack-qr.ts` (the auth-bypassed stock-in flow) and `src/pages/warehouse.tsx`; for platform/admin work start at `src/api/routes/admin-health.ts`.
 
+
+## Previously unmapped modules (added 2026-08-13)
+
+These sections cover ~35,000 lines of routes and pages that this map had never
+named — including `login.tsx` at 1,289 lines and the 15,279-line `/api/import`
+family. They were written by reading each file, not by summarising its header
+comments: several of those comments turned out to be wrong, and are corrected in
+place below.
+### Map fragment — Historical Import & Backfill (`/api/import`)
+
+> **Last verified: 2026-08-13** — every claim below was read out of the code, not out of the
+> header comments above each handler. All 65 handlers, all 9 files (15,279 lines) were opened;
+> route lines, permission gates, dry-run defaults, SQL write statements and idempotency guards
+> were each checked at the line cited. Helper idempotency was chased into
+> `src/api/lib/po-cost-cascade.ts` and `src/api/routes/production-orders/_helpers.ts`.
+>
+> **This section is a fragment for assembly into `docs/CODEBASE-MAP.md`.** It exists because the
+> map has never mentioned this family — ~15k lines that no reader could find.
+
+---
+
+## Historical Import & Backfill (`/api/import` — one-shot migration endpoints)
+
+**Status: (a) LIVE AND CALLABLE — every one of the 65 handlers.** None is dead code, none is
+commented out, none is feature-flagged. The barrel `src/api/routes/import-completion.ts` (65
+lines) mounts all eight sub-routers at `/` (`import-completion.ts:56`-`:63`) and
+`src/api/worker.ts:1411` mounts that barrel at `/api/import` — **after** the global auth gate at
+`src/api/worker.ts:913`, and `/api/import` is in no PUBLIC_PATHS/PUBLIC_PREFIXES list. So every
+endpoint requires a logged-in session, and 64 of 65 additionally call `requirePermission`.
+
+**No frontend page calls any of them** — there is no UI surface. The only callers in the tree are
+11 hand-run driver scripts (`scripts/import-historical-purchases.py`,
+`scripts/import-prod-completions-2026-04-30.mjs`, `scripts/fix-so-088.mjs`,
+`scripts/smoke-*.mjs`, `scripts/sweep-audit-po-alignment.mjs`,
+`scripts/summarize-regen-fg-units.mjs`). They are written as one-shots for the 2026-04→08
+data migration — several hard-code a document id (`/backfill-5543-co2606002`) or a date clamp —
+but **the code cannot tell you whether a given one already ran, and nothing prevents it running
+again.** Treat every entry here as a loaded gun that is still on the table.
+
+| File | Lines | What it does | Endpoints | Tests |
+|---|---|---|---|---|
+| `src/api/routes/import-completion/_shared.ts` | 2109 | No routes. Types, constants, lookup helpers, and `processRow` — the per-row engine that flips a JC to COMPLETED and fires the WIP + labor + PO-completion cascades | 0 | **NONE** |
+| `src/api/routes/import-completion/wip-fixes.ts` | 2890 | WIP-inventory repair: pofold backfills, refund/dedupe/zero/rebuild of `wip_items`, JC time + label refresh, JC/FG deletes | 11 | **NONE** |
+| `src/api/routes/import-completion/procurement-backfills.ts` | 2384 | Supplier/binding seeding, historical PO+GRN+PI+stock import, PO status recompute, PO line-no + SKU backfills | 12 | `tests/sql-identifier-safety.test.mjs:84` (dropped-column guard only) |
+| `src/api/routes/import-completion/sofa-pricing.ts` | 1950 | Price-history seeding, the Houzs sofa price sheet, SO/CO sofa re-pricing and total resync, size/leg-height migrations | 9 | `tests/sofa-combo-drift-guard.test.mjs` (guards the *canonical* engine, not these routes — see gotchas) |
+| `src/api/routes/import-completion/so-co-do-backfills.ts` | 1802 | DO migration from Excel, DO revert, SO field backfills (expected DD, product name, reference, OCR fields), PO rebuild, line-qty cascade | 11 | **NONE** |
+| `src/api/routes/import-completion/fg-fabric.ts` | 1679 | FAB_CUT merge, FC label refresh, multi-qty PO split, fabric-code audit/fix, `fg_units` delete/regen, pillow PACKING JC | 8 | **NONE** |
+| `src/api/routes/import-completion/date-fixes.ts` | 1013 | Maintenance-history sync, snapshot cleanup, misparsed DD/MM date repair, full-width paren normalisation, `updated_at` indexes, punch autofill | 7 | **NONE** |
+| `src/api/routes/import-completion/completion-cascades.ts` | 962 | The original importer (`/job-card-completion`) plus the anchor-relative cascade fills and the future-date cleanup | 4 | **NONE** |
+| `src/api/routes/import-completion/audits.ts` | 490 | Read-only integrity probes (PO duplicates, procurement invariants, SO↔PO alignment) | 3 | **NONE** |
+
+### 🚩 Read this before calling anything here
+
+1. **`/backfill-fabcut-rm-issue` (`wip-fixes.ts:1843`) has NO `requirePermission` call** — it is the
+   only handler in the family without one, and it is one of the handlers that moves raw-material
+   **stock and money** (`rm_batches`, `raw_materials.balanceQty`, `cost_ledger` RM_ISSUE, via
+   `consumeRawMaterialsForPO` — `src/api/lib/po-cost-cascade.ts:671`). Any authenticated user of
+   any role can fire it. It is *safe on re-run* (see below), but the missing gate is real: line
+   1844 goes straight to `const dryRun = …` with no `denied` check above it.
+2. **Most endpoints default to LIVE WRITE — 49 of the 65.** The dominant idiom is
+   `c.req.query("dryRun") === "true"`, which means **a bare POST with no query string and no body
+   writes to production.** The exact split: **39** derive `dryRun` with a `=== true` form (live
+   unless you opt out), **10 more have no dry-run code path at all** (`procurement-backfills.ts`
+   :110, :180, :330; `so-co-do-backfills.ts` :335, :404, :444, :745, :830, :953;
+   `sofa-pricing.ts` :1690), **12 are safe-by-default** (8 use the `!== false` form, 4 are
+   audit-first behind `{"apply":true,"confirm":…}`), and **4 are read-only**. The four different
+   dryRun spellings in this family
+   (`=== "true"`, `!== "false"`, `body.dryRun === true`, `body.dryRun !== false`) mean muscle
+   memory from one endpoint produces a live write on the next.
+3. **Two endpoints are NOT idempotent and corrupt data on a second run** — see the table below.
+4. **Test coverage is essentially zero.** Two test files touch this family and neither exercises a
+   handler. Nothing else in `tests/` does.
+
+### The non-idempotent ones (a second run does damage)
+
+| Endpoint | Why it breaks | Undo |
+|---|---|---|
+| `/refund-backfill-overconsume` `wip-fixes.ts:590` | `wip-fixes.ts:824` is `UPDATE wip_items SET stockQty = stockQty + ?` — a raw delta with no marker row. The candidate SELECT keys on fields the endpoint never mutates, so run #2 builds the identical plan and credits every WIP label a second time. Defaults to LIVE (`:595`). | `?revert=true` (`:801`) flips the sign — the built-in one-shot undo |
+| `/queen-price-correction-rm5` `sofa-pricing.ts:315` | `sofa-pricing.ts:454` binds `r.basePriceSen - 500` and `:412` computes `active.basePriceSen - 500` — read-then-subtract off *current* DB state. Every run removes another RM5 from every Queen `product_prices` row at `effectiveFrom='2026-04-26'` and from each customer's active price row. Defaults to LIVE (`:320`). Worse: the customer side targets "newest row with `effectiveFrom <= today`" (`:396`-`:401`), so the target row can change between runs. | none |
+
+Also delta-shaped, but self-limiting rather than broken:
+`/migrate-do-from-excel` (`so-co-do-backfills.ts:28`) appends `SET totalM3 = totalM3 + ?,
+totalItems = totalItems + ?` at `so-co-do-backfills.ts:246`, and its skip guard
+(`:122`) only fires when **every** PO of the SO is already migrated — a partially-migrated SO
+double-adds its DO header totals and blind-INSERTs duplicate `delivery_order_items`
+(`:282`, random id, no `ON CONFLICT`). `/correct-so-line-qty-cascade`
+(`so-co-do-backfills.ts:1487`) computes `so.subtotalSen + lineTotalDelta` (`:1564`) but is saved by
+a no-op guard at `:1539` plus a PO selector that stops matching after the first run.
+
+### Endpoints that write money or stock tables
+
+`cost_ledger` / `rm_batches` / `raw_materials` / `purchase_invoices` / `product_prices` /
+`customer_product_prices` / `wip_items` / `fg_units` — anything below is a money or stock write.
+
+| Endpoint | Money/stock tables written | Default | Re-run safe? |
+|---|---|---|---|
+| `/historical-purchases-backfill` `procurement-backfills.ts:330` | `purchase_orders` :489, `purchase_order_items` :519, `grns` :541, `grn_items` :569, **`rm_batches`** :593, **`cost_ledger`** :611, **`raw_materials`** :630, **`purchase_invoices`** :641, `purchase_invoice_items` :686 | **no dry-run exists — always live** | only via ONE guard: `SELECT id FROM purchase_invoices WHERE piNo = ?` at :412. See gotchas |
+| `/backfill-fabcut-rm-issue` `wip-fixes.ts:1843` | `rm_batches`, `cost_ledger`, `raw_materials` (via `consumeRawMaterialsForPO`) | dry-run (`:1844` uses `!== "false"`) | **yes** — double-guarded (`NOT EXISTS` on the RM_ISSUE ledger row at :1864, plus the helper's own check at `po-cost-cascade.ts:681`) |
+| `/refund-backfill-overconsume` `wip-fixes.ts:590` | `wip_items` :824 | **live** | **NO — double-credits** |
+| `/dedupe-wip-items` `wip-fixes.ts:886` | `wip_items` UPDATE :1091, DELETE :1095 | **live** | yes (absolute `stockQty = ?`; the `HAVING COUNT(*) > 1` driver returns nothing on run #2) |
+| `/zero-out-negative-wips` `wip-fixes.ts:1159` | `wip_items` :1206 (`SET stockQty = 0 WHERE stockQty < 0`) | **live** | yes (self-negating predicate) — but irreversibly destroys the negative balances that are the evidence of an upstream bug |
+| `/rebuild-wip-from-jcs` `wip-fixes.ts:1219` | `wip_items` UPDATE :1741, INSERT :1749 (`ON CONFLICT … DO UPDATE`), DELETE :1767 | **live** | yes — full absolute rewrite recomputed from `job_cards` |
+| `/queen-price-correction-rm5` `sofa-pricing.ts:315` | `product_prices` :453, `customer_product_prices` :458 | **live** | **NO — subtracts RM5 every run** |
+| `/derive-historical-price-baselines` `sofa-pricing.ts:10` | `customer_product_prices` :234, `product_prices` :258 | **live** | yes (pre-existence SELECT at :227/:251, all rows pinned to `PRICE_BASELINE_DATE`) |
+| `/apply-houzs-sofa-pricesheet` `sofa-pricing.ts:481` | `product_prices` :588/:597, `customer_product_prices` :631/:640, `customer_products` :657, `products` :674 | **live**, `scope` defaults to `both` | yes — values come from a static in-code sheet, `effectiveFrom` hard-coded |
+| `/recompute-so-sofa-prices` `sofa-pricing.ts:689` | `sales_order_items` :1165, `sales_orders` :1200 | **live**, all active statuses | yes arithmetically — but `:1204` binds `sub, sub`, forcing `totalSen = subtotalSen` and discarding any tax/discount |
+| `/recompute-co-sofa-prices` `sofa-pricing.ts:1228` | `consignment_order_items` :1559, `consignment_orders` :1573 | **live** | same as above, same tax/discount flattening |
+| `/resync-so-totals` `sofa-pricing.ts:1624` / `/resync-co-totals` `sofa-pricing.ts:1583` | `sales_orders` :1661 / `consignment_orders` :1605 | **live** | yes (absolute `SUM(lineTotalSen)`, skip-if-equal) — same `total := subtotal` flattening |
+| `/correct-so-line-qty-cascade` `so-co-do-backfills.ts:1487` | `sales_order_items` :1766, `sales_orders` :1771, `production_orders` :1776, `job_cards` :1783 | **live** | delta-based but no-op-guarded — see above |
+| `/rebuild-production-orders-from-soi` `so-co-do-backfills.ts:1211` | DELETE `fg_units` :1409, `job_cards` :1415, `production_orders` :1420, then rebuild | **live** | converges, but the FG stubs never come back — see gotchas |
+| `/backfill-split-multi-qty` `fg-fabric.ts:516` | DELETE `fg_units` :805, `production_orders` :810, then rebuild | **live** | same FG-loss shape; pre-flight guards at :570/:588/:610/:637/:660 |
+| `/delete-fg-units-by-ids` `fg-fabric.ts:1191` | DELETE `fg_units` :1259 | **live** (body with `unitIds`, no `dryRun`) | yes (explicit id list) — refuses DELIVERED/RETURNED/LOADED at :1229 |
+| `/regen-fg-units` `fg-fabric.ts:1307` | DELETE `fg_units` :1415 + INSERT via `generateFGUnitsForPO` (`src/api/routes/fg-units.ts:326`) | dry-run (`:1317`) | converges but re-mints serials/ids each run |
+| `/cleanup-headboard-only-divans` `wip-fixes.ts:2727` | DELETE `job_cards` :2839, `fg_units` :2855 | dry-run (`:2737`) | yes; skips COMPLETED JCs (:2831) and non-PENDING units (:2847) |
+| `/job-card-completion` `completion-cascades.ts:17` + `/cascade-upstream-completion` `completion-cascades.ts:199` | `job_cards`, `production_orders`, then `wip_items` + `cost_ledger` (+ `fg_units`/`fg_batches`/`rm_batches` on PO completion) via the cascade helpers | **live** | yes — see the cascade-guard note below |
+| `/cleanup-snapshot-from-master-rows` `date-fixes.ts:141` | DELETE `customer_product_prices` :177 | **live** | yes (`WHERE notes LIKE 'Snapshot from Master%'`) |
+| `/normalize-fullwidth-parens` `date-fixes.ts:561` | `wip_items` merge `stockQty = stockQty + ?` :803 then DELETE :808, orphan rename :818 | **live** | yes — the merge is pair-driven and the full-width row is deleted in the same atomic `db.batch` (:824), so run #2 finds no pairs |
+
+### Read-only endpoints (safe to call)
+
+`audits.ts` is the only fully read-only file — all three handlers issue SELECTs and nothing else:
+`GET /po-no-duplicates` `audits.ts:22`, `POST /audit-procurement-integrity` `audits.ts:44` (10
+named invariant checks), `GET /audit-po-alignment` `audits.ts:441` (delegates to
+`loadAndValidatePOAlignment` — `src/api/lib/po-alignment-validator.ts:228`, zero write statements
+in that file). Also read-only despite its POST verb and `production-orders:update` gate:
+`/audit-orphan-fabric-codes` `fg-fabric.ts:862`.
+
+### Remaining endpoints (no money/stock table)
+
+- `wip-fixes.ts` — `/uph-pofold-backfill` :14, `/fab-cut-pofold-backfill` :289 (both flip
+  `job_cards` then fire the WIP + labor cascades), `/backfill-jc-production-time-from-bom` :1967
+  (`includeCompleted` defaults **true**, so it rewrites minutes on already-COMPLETED cards),
+  `/refresh-jcs-by-id` :2256, `/delete-jcs-by-ids` :2613 (refuses COMPLETED/TRANSFERRED at :2657).
+- `procurement-backfills.ts` — `/cancel-leaked-co-pos` :24, `/suppliers-from-history` :110
+  (no dry-run), `/supplier-bindings-from-history` :180 (no dry-run),
+  `/backfill-supplier-material-bindings` :864, `/backfill-supplier-bindings-multi` :991,
+  `/backfill-historical-grns` :1308 (writes `grns`/`grn_items` only, `NOT EXISTS`-guarded at
+  :1338), `/recompute-po-status-progress` :1508, `/backfill-po-from-so-lines` :1699,
+  `/append-missing-pos` :1999, `/backfill-po-line-no` :2129 (dry-run default),
+  `/backfill-supplier-sku-1to1` :2304 (dry-run default).
+- `so-co-do-backfills.ts` — `/migrate-do-from-excel` :28, `/revert-dos-to-draft` :335 (**no
+  dry-run path; an empty POST reverts every LOADED DO to DRAFT**), `/backfill-so-expected-dd` :404,
+  `/backfill-so-item-product-name` :444, `/backfill-5543-co2606002` :505 and
+  `/backfill-complete-stray-jc-co2606002` :657 (both audit-first: need
+  `{"apply":true,"confirm":…}`), `/backfill-downstream-product-names` :745 (touches
+  `invoice_items.productName` at :812), `/backfill-so-reference` :830,
+  `/backfill-ocr-so-fields` :953.
+- `fg-fabric.ts` — `/backfill-fab-cut-merge` :13 (DELETEs sibling `job_cards` at :256 including
+  COMPLETED ones), `/backfill-fc-label-refresh` :283, `/apply-fabric-code-fixes` :1008,
+  `/backfill-pillow-packing-jc` :1470 (DELETEs PACKING `job_cards` at :1597 with no status guard,
+  then blind-INSERTs at :1605).
+- `date-fixes.ts` — `/sync-maintenance-history-from-kv` :23, `/fix-misparsed-jan-dates` :192,
+  `/fix-misparsed-dates` :376 (dry-run default), `/create-updated-at-indexes` :860 and
+  `/backfill-punch-autofill-blocked` :934 (both audit-first, gated `users:create` +
+  `{"apply":true,"confirm":…}`).
+- `completion-cascades.ts` — `/clear-future-completions` :129, `/cascade-leak-pass` :683.
+
+**Gotchas**
+
+- **`/historical-purchases-backfill` (`procurement-backfills.ts:330`) is the single widest blast
+  radius in the repo's backfill surface and has no dry-run.** It writes nine tables including
+  `cost_ledger`, `rm_batches` and `raw_materials` (`balanceQty = balanceQty + ?` at :630 — a blind
+  delta), in one atomic `db.batch` at :706. Its *only* duplicate defence is a pre-existence check
+  on the invoice number (`piNo`) at :412. Everything else uses fresh random UUIDs (:475-:480), so
+  the "deterministic" ids (`rmb-grn-${grnId}-…` :587) are derived from a random parent and are not
+  stable dedupe keys across runs. Consequences that follow directly from that: the same physical
+  invoice under a renamed `docNo` duplicates PO+GRN+batch+ledger and adds stock twice; deleting or
+  voiding the PI row and re-running does the same; and a first run with `skipStock:true` still
+  writes the PI, so the corrective re-run with `skipStock:false` is **skipped and the stock never
+  lands** (silent under-apply). `poNo` is deterministic (`PO-IMPORT-${docNo}` :476) but is never
+  checked in this loop.
+- **The WIP + labor cascades ARE replay-guarded, but only when `orgId` is threaded.**
+  `applyWipInventoryChange` (`src/api/routes/production-orders/_helpers.ts:2574`) claims an
+  idempotency ticket by INSERTing into `wip_cascade_log` (:2645) and returns early when it loses
+  the race — but that whole block is wrapped in `if (options.orgId)` at :2635. `processRow`
+  (`src/api/routes/import-completion/_shared.ts:317`) passes `{ orgId, source: "BACKFILL" }` at
+  :529 and `/cascade-upstream-completion` passes it at `completion-cascades.ts:642`, so both are
+  covered. `postJobCardLabor` (`src/api/lib/po-cost-cascade.ts:953`) is independently guarded on an
+  existing LABOR_POSTED row (:966). **If you add a new backfill that calls the WIP cascade, pass
+  `orgId` or you silently get no guard at all.**
+- **`/cascade-leak-pass` (`completion-cascades.ts:683`) flips `job_cards` to COMPLETED and fires
+  NOTHING else.** Its only write is the UPDATE at :927. Compare `/cascade-upstream-completion`,
+  which after its own UPDATE (:559) deliberately calls `applyWipInventoryChange` (:635) and
+  `postJobCardLabor` (:653) — the comment at :579 records that the metadata-only version left ~1300
+  phantom consumes without compensating producer-adds. The leak pass still has that shape. Running
+  it produces COMPLETED cards with no producer-add in `wip_items` and no labor row in
+  `cost_ledger`.
+- **`/clear-future-completions` (`completion-cascades.ts:129`) reverses only the metadata.** Its
+  UPDATE at :171 resets status/date/PIC/minutes on `job_cards`, and the handler does nothing else —
+  the `wip_items` movements and `cost_ledger` LABOR_POSTED rows that those completions already
+  created are left behind.
+- **`CASCADE_DATE_CLAMP` is a hand-maintained constant, currently `"2026-05-11"`
+  (`src/api/routes/import-completion/_shared.ts:684`).** Both cascade endpoints clamp every
+  backfilled completion date to it (`completion-cascades.ts:412` and `:837`). The comment above it
+  records that it was already stale once. Re-running a cascade today without bumping it pins every
+  backfilled date to 2026-05-11.
+- **The two rebuild endpoints delete `fg_units` and never recreate them.**
+  `/rebuild-production-orders-from-soi` (`so-co-do-backfills.ts:1211`) and
+  `/backfill-split-multi-qty` (`fg-fabric.ts:516`) both DELETE the SO's entire `fg_units` set
+  (:1409 / :805) and then rebuild from `createProductionOrdersForOrder`, which emits only
+  `production_orders` and `job_cards` INSERTs — no `fg_units`. The split endpoint at least gates on
+  every unit being PENDING (`fg-fabric.ts:637`); the SO rebuild has **no `fg_units` status check at
+  all**, only a JC-status one at :1297.
+- **`/migrate-nonstandard-sofa-sizes` (`sofa-pricing.ts:1690`) has no dry-run of any kind** and
+  blanks both `sizeLabel` and `sizeCode` (:1750, :1761). `sizeCode` is the sofa *seat height* that
+  `/recompute-so-sofa-prices` requires — it skips lines with `missing sizeCode (seat height)`
+  (`sofa-pricing.ts:896`). Running the size migration before a re-price silently converts priced
+  sofa lines into un-repriceable ones. Its `sales_order_items` SELECT is org-scoped (:1707) but the
+  `production_orders` UPDATE at :1761 matches on `salesOrderId` + `lineNo` with no org filter.
+- **Sofa combo maths is re-implemented inline here, not imported.** The canonical engine is
+  `applySofaCombos` (`src/api/lib/sofa-combo.ts`); `/recompute-so-sofa-prices` and
+  `/recompute-co-sofa-prices` carry their own copy with a *deliberate* divergence (no round-up to
+  whole ringgit) documented at `sofa-pricing.ts:927`. `tests/sofa-combo-drift-guard.test.mjs` pins
+  the canonical engine only — it does **not** execute either endpoint, and its header comment still
+  points at the pre-split `import-completion.ts`. Treat it as a drift alarm on the source of truth,
+  not as coverage of these routes.
+- **`/append-missing-pos` (`procurement-backfills.ts:1999`) runs DDL even on a dry run.** It calls
+  `createProductionOrdersForSO` at :2068 before checking `dryRun`, and that helper's inner
+  `createProductionOrdersForOrder` executes `ALTER TABLE production_orders ADD COLUMN IF NOT EXISTS
+  repairScope` (`src/api/routes/_shared/production-builder.ts:389`). Same for the two rebuild
+  endpoints. A "dry run" here is not side-effect-free.
+- **Three binding writers disagree about `orgId`.** `/supplier-bindings-from-history` (:294) and
+  `/backfill-supplier-material-bindings` (:942) INSERT `supplier_material_bindings` without an
+  `orgId` column, while `/backfill-supplier-bindings-multi` probes existing rows with
+  `WHERE orgId = ?` (:1135) and inserts *with* `orgId` (:1206). Rows written by the first two are
+  invisible to the third, which will then insert duplicate bindings for the same
+  (materialCode, supplierId).
+- `/regen-fg-units` queries `fg_units … WHERE poId = ?` (`fg-fabric.ts:1415`) while every other
+  `fg_units` write in this family uses `po_id` (`fg-fabric.ts:805`, `so-co-do-backfills.ts:1409`).
+  Both work only because of `src/api/lib/column-rename-map.json` — see the camelCase rule in
+  `CLAUDE.md` before adding another.
+
+**Start here:** `src/api/routes/import-completion.ts` (the 65-line barrel) tells you which
+sub-router owns a path. For the completion engine itself read `processRow`
+(`src/api/routes/import-completion/_shared.ts:317`) — it is the one function the whole family's
+riskiest behaviour flows through. Before running ANY endpoint here, find its row above and check
+the Default column: assume live-write unless the table says otherwise.
+
+### Map fragment — unmapped pages + their paired routes
+
+> **Last verified: 2026-08-13** against every file cited below, read in full (not grepped).
+> Line counts re-derived with `wc -l`; every `file:LINE` opened and checked; route paths
+> checked against `src/dashboard-routes.tsx` / `src/router.tsx`; the Hono route-ordering
+> claim in §8 was **executed** against `hono@4.12.14` from this repo's lockfile, not inferred.
+>
+> **This is a FRAGMENT, not a doc.** It is written to be pasted into
+> `docs/CODEBASE-MAP.md` by the assembling session, in the map's own table format
+> (`Frontend page | API route | Primary tables | Tests`). Delete this file once merged in.
+
+## What was NOT in the map before this fragment
+
+| File | Lines | Prior mention in `CODEBASE-MAP.md` |
+|---|---|---|
+| `src/pages/login.tsx` | 1288 | **none** |
+| `src/pages/finance-dashboard.tsx` | 1263 | **none** |
+| `src/pages/leads/index.tsx` | 929 | **none** |
+| `src/pages/hookka-report-editions.tsx` | 697 | **none** |
+| `src/pages/forecast.tsx` | 575 | **none** |
+| `src/pages/component-kits/index.tsx` | 502 | **none** |
+| `src/pages/invoices/debit-notes.tsx` | 500 | only as the bare shorthand `debit-notes.tsx` (map L277), no full path, no route/table/test row |
+| `src/api/routes/debit-notes.ts` | 450 | named twice (map L143, L277) but never described |
+| `src/pages/delivery-returns/index.tsx` | 419 | **none** |
+| `src/api/routes/delivery-returns.ts` | 483 | one clause inside the FG-stock-events gotcha (map L471); no row |
+| `src/api/routes/three-pl-vehicles.ts` | 446 | named in the Sales table's route column (map L222); never described |
+| `src/api/routes/equipment.ts` | 405 | **none** |
+
+Nothing here is dead code — every one is reachable. Two are **not pages** despite living
+under `src/pages/` (§4, §5); say so in the map or the next reader will hunt for their route.
+
+---
+
+## 1. Auth — Login
+
+| Frontend page | API route | Primary tables | Tests |
+|---|---|---|---|
+| `src/pages/login.tsx` — `/login`, **PUBLIC / standalone** (declared in `src/router.tsx:92`, NOT in `dashboard-routes.tsx`); email+password, remember-me, soft-2FA branch, role-aware landing (1288) | `src/api/routes/auth.ts` — `POST /login` (`:148`), `GET /me/permissions` (`:487`), `POST /change-password` (`:613`), `POST /forgot-password` (`:745`), `POST /reset-password` (`:901`) | `users` (session cookie is the credential; no client token) | **NONE dedicated.** `tests/api-rate-limit.test.mjs` and `tests/security-public-endpoints.test.mjs` touch `/api/auth/login` as an endpoint only — neither reads `src/pages/login.tsx` |
+
+**Endpoints it calls** — `POST /api/auth/login` (`src/pages/login.tsx:319`),
+`GET /api/auth/me/permissions` (`:295`, inside `landingPage()`),
+`POST /api/auth/totp/dismiss-prompt` (`:394`, fire-and-forget).
+
+**Why a login page is 1,288 lines.** The auth logic is ~110 lines (`LoginPage` L227 →
+`handleSubmit` end L417). The other ~90% is **two complete, independent presentations plus
+their palettes**, all inlined:
+
+- **L39–117 `LOGIN_PALETTE`** — a 20-key `Palette` type rendered twice (dark + light),
+  ported verbatim from the owner's design source. Every colour is a JS style value, not a
+  Tailwind class, so nothing collapses into a class string.
+- **L129–205 seeded snow** — `Flake` type, a mulberry32 LCG (`makeRng` L143), two frozen
+  flake arrays (`SNOW_BACK` 16, `SNOW_FRONT` 5) and the `SnowLayer` renderer.
+- **L420–856 the MOBILE branch** (`< 1024px`, gated by `useMediaQuery` at L245) — the
+  owner's phone-first design: `<style>` keyframe block, 64px grid, radial glow, parallax
+  snow layers, theme toggle, frosted-glass form sheet. Roughly 435 lines.
+- **L858–1274 the DESKTOP branch** (`>= 1024px`) — the older premium split-panel:
+  shimmer/orbit keyframes, three orbit rings, three orbiting dots, brand column. Roughly
+  415 lines.
+
+Both branches share ONE form state and ONE `handleSubmit`; only presentation differs. If
+you are changing auth behaviour you want L227–417 and nothing else.
+
+**Gotchas**
+
+- **`Math.random` here is NOT fabricated data.** L130 explains it: the design source used
+  `Math.random` for snowflake positions and it was replaced by a seeded LCG so flakes are
+  stable across renders. It decides pixel positions, never a figure. A fabricated-data
+  sweep will hit this line — it is a false positive, don't "fix" it.
+- **The 2FA hard gate is a documented dead end (BUG-2026-08-04-006).** The server can
+  answer `{ success:true, totpRequired:true, userId }` with **no `data` blob**; the
+  login-verify step was never built. L346–351 handles that shape explicitly and shows
+  "Two-factor sign-in isn't available yet — ask an admin to reset your 2FA". The gate is
+  currently disabled server-side; this branch exists so a stale worker or a re-enable
+  cannot white-screen login again. The `LoginResponse` union at L207–225 models all three
+  shapes — keep it that way.
+- **`/dashboard` is deliberately NOT the default landing page** (L281–305). Under the RBAC
+  policy `/dashboard` is Management + Super Admin only, so the page asks the SERVER for the
+  role's front door via `GET /api/auth/me/permissions` → `body.home`, falling back to
+  `/settings` (which everyone has). Do not reintroduce a hardcoded `/dashboard` default —
+  a salesperson would land on a screen whose every figure 403s.
+- **`rememberMe` defaults to `true`** (L240) and is a real behaviour switch, not cosmetics:
+  unchecked ⇒ session cookie + `sessionStorage`, which incognito drops on tab close
+  ("mysteriously logged out", owner 2026-06-27).
+- The right panel's `SYSTEM ONLINE` dot (L1232–1241), `ERP v2.0 // 2026` (L1255) and
+  `ISO 9001:2015` (L1269) are **static decorative strings** — no health check behind them.
+  Their bigger sibling (a `156 ACTIVE PO / 8 DEPARTMENTS / 99.7% UPTIME` stat panel) was
+  deleted 2026-05-27 for exactly that reason; the comment recording it is at L1201–1204.
+  If a live status indicator is ever wanted, it must be wired, not styled.
+
+---
+
+## 2. Forecasting — Financial Dashboard + Forecast P&L
+
+| Frontend page | API route | Primary tables | Tests |
+|---|---|---|---|
+| `src/pages/finance-dashboard.tsx` — `/finance-dashboard` (`src/dashboard-routes.tsx:472`; sidebar FORECASTING → "Dashboard"); 6 cards, monthly or calendar-quarterly (1263) | `src/api/routes/accounting.ts` — `GET /dashboard` (`:10039`), SWR-cached | `accounting_dashboard_snapshot` (runtime-created at `accounting.ts:10064`) over the ledger + `kv_config['forecast_pnl']` (`:10122`) | `tests/dashboard-forecast-pct.test.mjs` (BUG-2026-08-06-002 only) |
+| `src/pages/forecast.tsx` — `/forecast` (`src/dashboard-routes.tsx:471`; sidebar FORECASTING → "Forecast P&L"); planning grid, zero contact with the books (575) | `src/api/routes/accounting.ts` — `GET /forecast` (`:10673`), `PUT /forecast` (`:10688`), `GET /coa` (`:829`), `GET /pnl/section-map` (`:9757`), `GET /labor/departments` (`:9491`) | `kv_config` row `key='forecast_pnl'` (`:10719`) — **no forecast table exists**; plus `chart_of_accounts` for the line structure | **NONE** |
+
+> **Name collision — read this before touching either.** `/forecast` (`src/pages/forecast.tsx`,
+> the owner's keyed P&L plan) and `/analytics/forecast` (`src/pages/analytics/forecast.tsx`,
+> `dashboard-routes.tsx:548`) are **different pages with different data**. The map must not
+> collapse them. `dashboard-routes.tsx` even imports them under two names —
+> `ForecastPnl` (L143) and `Forecast` (L181).
+
+**finance-dashboard.tsx — endpoints:** exactly ONE.
+`GET /api/accounting/dashboard?granularity=&periods=&from=&to=` at
+`src/pages/finance-dashboard.tsx:262`. All six cards are `useMemo` projections of that one
+`rows` array, which is why a card can never disagree with its report.
+
+**Cards, in render order:** Income Statement (`:657`, 10 tabs from `PL_TABS` L40) → Production
+Salary stacked-by-department (`:714`) → Cost Structure (`:915`) → Material Trend (`:1074`) →
+Cash Flow with Summary/Detail (`:1133`) → Balance Sheet (`:1200`) → Financial Ratios (`:1227`).
+
+**Money / honesty notes**
+
+- Money is integer sen end to end. `rm` / `rm2` (L83–86) divide by 100 **for display only**;
+  every derived figure uses `Math.round(... * 10000) / 100` on sen ints.
+- **The forecast-percentage rule (BUG-2026-08-06-002) is load-bearing and is stated three
+  times in this file** — `csForecastSales` L468, `csData` L524–529, `csTrend` L568–573: a
+  forecast share divides by FORECAST revenue, an actual share by ACTUAL revenue. Dividing a
+  plan by a part-billed actual once read 121.30% for a target that was 15% of plan. Pinned
+  by `tests/dashboard-forecast-pct.test.mjs`.
+- **This page volunteers a known-wrong figure rather than hide it** — L906–909 renders a
+  standing warning that `RM / unit` uses completed-batch quantities that double-count some
+  completions, so the unit count runs high and the cost runs low. Do not delete that banner
+  while the defect is open; it is the difference between a weighable figure and a
+  misleading one.
+- No fabricated data anywhere in this file: `rows === null` renders "Loading…", `rows.length
+  === 0` renders "No data yet.", and every card is gated on real content
+  (`csCats.length > 0`, `labourData.some(d => d.amount !== null)`).
+
+**forecast.tsx — endpoints:** four parallel GETs on mount (`:111`, `:112`, `:113`, `:114`)
+and one `PUT /api/accounting/forecast` on Save (`:287`).
+
+**Gotchas**
+
+- **It stores nothing in a table.** The whole grid is one JSON blob in
+  `kv_config.value WHERE key='forecast_pnl'`. `PUT` is a whole-blob replace
+  (`accounting.ts:10719`, `INSERT … ON CONFLICT DO UPDATE`) — there is no per-cell write, so
+  two people saving concurrently is last-write-wins over the entire forecast.
+- **A cell is percent OR amount, never both** (L237–241 clear the other side). Storage:
+  `{ bp }` (basis points, `strToBp` L83) or `{ amtSen }` (L273–286). A **legacy third
+  shape** — a bare `bp` number — is still read at L127. Any new reader must handle all three.
+- **Department rows SUPERSEDE the 750-x labour accounts** for any month that carries one
+  (`monthHasDeptForecast` / `forecastEntryKind` from `src/lib/salary-dept.ts`, applied at
+  `forecast.tsx:227–229` and again at `:526`). The account rows stay visible, greyed, marked
+  "superseded". Summing both would double-count labour — that is what `sumGuard` (L228)
+  prevents. `finance-dashboard.tsx` reads the same blob through the same rule.
+- Pseudo-line keys are a deliberate namespace: `cat:<TYPE>` for material groups (L180–182),
+  `dept:<CODE>` for salary departments (L195). They sit in the same `pct` map as real
+  account codes. A reader that assumes every key is a COA code will break.
+
+---
+
+## 3. Sales — Sales Pipeline (Leads)
+
+| Frontend page | API route | Primary tables | Tests |
+|---|---|---|---|
+| `src/pages/leads/index.tsx` — `/leads` (`src/dashboard-routes.tsx:414`; sidebar "SALES & CUSTOMERS → Sales Pipeline"); 6-column kanban, drag-to-move, full CRM drawer, convert-to-customer (929) | `src/api/routes/sales-leads.ts` (437) — CRUD + `/:id/stage` + `/:id/convert` + `/lead-products` | runtime-created: `sales_leads` (`src/api/routes/sales-leads.ts:35`), `lead_products` (`src/api/routes/sales-leads.ts:63`); plus `customers` — a POTENTIAL row is minted with the lead (`src/api/routes/sales-leads.ts:144`) | `tests/sales-leads.test.mjs`, `tests/sales-pipeline-lead-detail.test.mjs`, `tests/lead-convert.test.mjs`, `tests/lead-catalog.test.mjs`, `tests/crm-followups.test.mjs` |
+
+**Endpoints called, with line refs in `src/pages/leads/index.tsx`**
+
+| Call | Page line | Handler |
+|---|---|---|
+| `GET /api/sales-leads` | `:70` | `sales-leads.ts:102` |
+| `GET /api/customer-crm/follow-ups` | `:81` | `src/api/routes/customer-crm.ts` |
+| `POST /api/sales-leads` | `:132` | `sales-leads.ts:155` |
+| `PUT /api/sales-leads/:id` | `:400` | `sales-leads.ts:228` |
+| `PUT /api/sales-leads/:id/stage` | `:162` | `sales-leads.ts:258` |
+| `DELETE /api/sales-leads/:id` | `:171` | `sales-leads.ts:359` |
+| `POST /api/customers` | `:594` | `src/api/routes/customers.ts` |
+| `PUT /api/customers/:id` | `:583`, `:609` | `src/api/routes/customers.ts` |
+| `POST /api/sales-leads/:id/convert` | `:631` | `sales-leads.ts:295` |
+| `GET /api/sales-leads/lead-products?leadId=` | `:740` | `sales-leads.ts:374` |
+| `POST /api/sales-leads/lead-products` | `:810` | `sales-leads.ts:389` |
+| `DELETE /api/sales-leads/lead-products/:id` | `:832` | `sales-leads.ts:427` |
+| `GET /api/products` | `:751` | `src/api/routes/products.ts` |
+
+Sub-components: `LeadDetailDrawer` (L370), `ConvertLeadDialog` (L529), `LeadCatalogPanel`
+(L719). The drawer also mounts `CrmPanel` and `KycPanel` (L512, L514) **keyed on the LEAD
+id** — those carry their own endpoints.
+
+**Gotchas**
+
+- **`STAGES` (L45–52) is the single source of every stage label on the page.** `key` is the
+  persisted value and must stay in lockstep with `LEAD_STAGES` in `sales-leads.ts:20`;
+  `label` is display-only. Owner 2026-08-01 renamed New/Won/Lost → **Potential / Confirmed /
+  Dropped** by editing labels alone — no migration. Don't "tidy" the keys.
+- **Convert PROMOTES, it does not create.** A `customers` row is minted as POTENTIAL when the
+  lead is entered (`sales-leads.ts:144`), and has been carrying SKU assignments, combos and
+  quotations ever since. `ConvertLeadDialog.submit` (L557) therefore `PUT`s that existing
+  `lead.customer_id` (L582–592) and only falls through to `POST /api/customers` (L594) for
+  pre-change leads that have none. Minting a second customer here would strand everything
+  assigned to the first.
+- **Snake-case reads here are correct, not a bug.** `sales-leads.ts:107` is
+  `SELECT * FROM sales_leads`, and the physical columns are snake_case, so the page's
+  `l.est_value_sen` / `l.next_follow_up` / `l.lost_reason` land. Do not "fix" them to
+  camelCase — the map's dual-key rule applies where a column has BOTH forms.
+- **Both writers are deliberately sequential, not `Promise.all`** — `addTicked` (L809, the
+  endpoint self-applies DDL on first write and concurrent creates race it) and the analogous
+  loop in Component Kits (§6). Keep them sequential.
+- Money is sen: `Math.round((parseFloat(...) || 0) * 100)` at L143, L411, L574.
+
+---
+
+## 4. Reports — The Hookka Report, Weekly/Monthly editions
+
+| Frontend module | API route | Primary tables | Tests |
+|---|---|---|---|
+| `src/pages/hookka-report-editions.tsx` — **NOT a page and NOT a route.** No default export; it exports `EditionToggle` (`src/pages/hookka-report-editions.tsx:145`), `OperationsEdition` (`src/pages/hookka-report-editions.tsx:223`) and the `Edition` type (line 17). Imported ONLY by `src/pages/daily-report.tsx` (import block L16-20), which renders `OperationsEdition` (`src/pages/daily-report.tsx:1092`) and `EditionToggle` (`src/pages/daily-report.tsx:1055`, `src/pages/daily-report.tsx:1131`). Reachable only via the `/daily-report` route entry — `DailyReport` (`src/dashboard-routes.tsx:474`) (697) | `src/api/routes/reports.ts` — `GET /operations.json` (`:345`), collector `src/api/lib/operations-report.ts` (1223) | `sales_orders` / `sales_order_items` / `job_cards` / `payslips` / `attendance_records` / `workers` / `products` / `raw_materials` / `rm_batches` / `cost_ledger` / `purchase_orders` / `invoices` / `invoice_payments` / `delivery_orders` / `service_cases` / `qc_inspection_items` / `price_histories` / `departments` | **NONE** |
+
+**Endpoints:** `GET /api/reports/operations.json?period=<edition>&date=<anchorYmd>`
+(`:230-231`), `GET /api/files?resourceType=modular` (`:236-237`) for the product photos,
+and `/api/files/:id/download` as an `<img src>` (`:671`).
+
+**Gotchas**
+
+- **Its file name looks like a page and it is filed under `src/pages/`.** It is a component
+  module. `node scripts/check-codebase-map.mjs --coverage` demands a map entry for it (697
+  lines > the 400 threshold) even though no route can ever point at it. Record it under
+  Reports next to `daily-report.tsx`, not as a route.
+- The `OperationsReport` interface (L54–~132) mirrors `src/api/lib/operations-report.ts`
+  field for field. Changing a collector field without changing this interface produces
+  silent `undefined`s in the newspaper, not a type error — the response is cast, not parsed.
+- Daily is a different report entirely: `GET /api/reports/compliance.json` +
+  `src/api/lib/compliance-report.ts`, rendered by `src/pages/daily-report.tsx` itself.
+  Weekly/Monthly is the only thing this module draws.
+
+---
+
+## 5. Accounting — Debit Notes
+
+| Frontend page | API route | Primary tables | Tests |
+|---|---|---|---|
+| `src/pages/invoices/debit-notes.tsx` — `/invoices/debit-notes`, gated `RequirePermission resource="invoices" action="read"` (`src/dashboard-routes.tsx:349-356`); DataGrid list + create modal + batch voucher print/export (500) | `src/api/routes/debit-notes.ts` (450) — `GET /` (`:122`), `POST /` (`:137`), `GET /:id` (`:282`), `PUT /:id` (`:302`) | `debit_notes` (items are JSON TEXT in one column), and on POSTED: `customers.outstandingSen`, `invoices.totalSen/subtotalSen/status`, the GL via `buildDebitNoteLedgerLegs` | **NONE dedicated.** Only cross-cutting sweeps name the file — `tests/tenant-isolation.test.mjs` lists it at line 151, plus `tests/security-route-coverage.test.mjs`, `tests/security-permission-matrix.test.mjs`, `tests/audit-coverage.test.mjs` |
+
+**Endpoints called:** `GET /api/debit-notes` (`:78`, via `useCachedJson`),
+`GET /api/invoices` (`:84`, only while the create modal is open),
+`POST /api/debit-notes` (`:152`).
+
+**Gotchas — three, all worth knowing before you touch this**
+
+1. **The page cannot post a debit note.** `PUT /api/debit-notes/:id` (`debit-notes.ts:302`)
+   is the ONLY transition that charges the customer (`:339` `outstandingSen + ?`), bumps the
+   linked invoice and re-opens its status (`:375-381`), and writes the GL legs (`:396-410`).
+   **No frontend calls it** — the only `/api/debit-notes` references in `src/` are the list,
+   the create, and the generic CRUD factory `src/lib/api/resources/billing.ts:36`. Every DN
+   raised from this screen stays DRAFT, while the page's own "Posted" tile (`:254`) counts a
+   status nothing in the UI can reach.
+2. **Per-id handlers are not tenant-scoped.** `GET /` scopes on `WHERE orgId = ?` (`:128`),
+   but `GET /:id` (`:287`), `PUT /:id` (`:309`, `:331`) and the POST re-read (`:257`) select
+   and update **by id alone**. `tests/tenant-isolation.test.mjs` passes anyway because it
+   only asserts each route scopes *at least one* query. This is BUG-CLASSES C12 territory —
+   check it before onboarding a second org.
+3. **Money is sen and is read dual-keyed on the way out** (`item.unitPriceSen ?? item.unitPrice`,
+   `item.totalSen ?? item.total`) at page `:49-50` and `:342-343`, and again in the route's
+   `parseItems` (`:69-70`) — the Tier-D D2 back-compat for legacy rows written before the
+   `unitPrice` → `unitPriceSen` rename. POST **rejects** a body carrying `unitPrice`
+   (`:185-193`). Keep both halves.
+
+**⚠ Read bug found — the MOBILE Debit Notes list shows RM 0.00 for every note.**
+`src/pages/m/config/modules.ts:819-838` builds its rows with `str(r,"dnNo","debitNoteNo")`
+and `num(r,"totalSen")`. The API returns **`noteNumber`** and **`totalAmount`**
+(`debit-notes.ts:80`, `:89`) — neither `dnNo`, nor `debitNoteNo`, nor `totalSen` exists in
+the response. `read()` in `src/pages/m/config/helpers.ts:35-41` returns `undefined`, so
+`num` yields `0` (`:48-52`) and `str` yields `""`. Result: the Reference column is blank,
+`code` falls back to the raw `dn-xxxxxxxx` id, and both the card amount and the Amount
+column read RM 0.00. The **credit-notes source three rows above it has the identical shape**
+(`cnNo` / `creditNoteNo` / `totalSen` vs `credit-notes.ts:87`, `:96` returning
+`noteNumber` / `totalAmount`), so this is a two-instance class — fix both or it recurs
+(fix-then-sweep, `docs/PLAYBOOKS.md`).
+
+---
+
+## 6. BOM — Component Kits
+
+| Frontend page | API route | Primary tables | Tests |
+|---|---|---|---|
+| `src/pages/component-kits/index.tsx` — `/bom/component-kits` (`src/dashboard-routes.tsx:482`; sidebar PRODUCTION → "Component Kits"); kit cards + inline editor with multi-parent create (502) | `src/api/routes/component-boms.ts` (87) — `GET /` (`:30`), `GET /:parentCode` (`:38`), `PUT /:parentCode` (`:51`), `DELETE /:parentCode` (`:75`); logic in `src/api/lib/component-bom.ts` (`saveKit`, `explodeKits`) | `component_bom_lines` (runtime-created, `src/api/lib/component-bom.ts:32`) | `tests/component-kit-subbom.test.mjs` (functional explosion math + structural pins) |
+
+**Endpoints called:** `GET /api/component-boms` (`:65`),
+`GET /api/inventory?buckets=rawMaterials` (`:69`),
+`PUT /api/component-boms/:parentCode` (`:150`),
+`DELETE /api/component-boms/:parentCode` (`:190`).
+
+**Gotchas**
+
+- **`?buckets=rawMaterials` is a measured perf fix, not decoration** (`:66-69`,
+  BUG-2026-08-13-021). Without it this uncached raw fetch pulled a 1.16 MB three-bucket
+  payload on every `reload()`. Don't drop the query param.
+- **A failed list read now THROWS on purpose** (`:75`). It used to fall through silently and
+  leave the page on "No component kits yet" — indistinguishable from a genuinely empty list,
+  which is exactly how a camelCase read bug in the backend stayed invisible *after a
+  successful save*. This is the same de-fabrication rule the map applies elsewhere: an
+  unknown must not render as a zero. Keep it loud.
+- **Multi-parent save writes sequentially and reports partials** (`:144-172`). One rejected
+  promise would hide which parents actually landed; the loop reports "3 of 4 saved, X
+  failed" and keeps the editor open to retry. The self-reference guard runs BEFORE the loop
+  (`:136-140`) so one bad pick cannot half-apply the save.
+- The kit is the orthodox multi-level-BOM / phantom pattern: every product BOM referencing
+  the parent SKU auto-explodes its children into consumption and costing via `explodeKits`
+  (`src/api/lib/component-bom.ts:221`) and `po-cost-cascade.ts`. Never re-list the children
+  in a product BOM.
+
+---
+
+## 7. Delivery — Delivery Returns
+
+| Frontend page | API route | Primary tables | Tests |
+|---|---|---|---|
+| `src/pages/delivery-returns/index.tsx` — `/delivery-returns` (`src/dashboard-routes.tsx:300`; sidebar SALES & CUSTOMERS → "Delivery Return"); DataGrid list + create-from-DO modal; `?createFrom=<doId>` deep link from a DO (419). Detail page: `src/pages/delivery-returns/detail.tsx` at `/delivery-returns/:id` (`:302`) | `src/api/routes/delivery-returns.ts` (483) — 8 handlers, see below | `delivery_returns`, `delivery_return_items` (runtime-ensured by `ensureDeliveryReturnTables`, `src/api/lib/delivery-return-create.ts`); cascades touch `fg_batches`, `fg_units`, `cost_ledger`, `fg_stock_events` | **NONE dedicated.** The file appears only inside cross-cutting suites: `tests/fg-stock-events.test.mjs`, `tests/customer-scope.test.mjs`, `tests/customer-scope-sql.test.mjs`, `tests/derived-permissions.test.mjs`, `tests/nav-permissions.test.mjs`, `tests/permission-wildcards.test.mjs`, `tests/record-load-failure-class.test.mjs`, `tests/reverse-doc-links.test.mjs` |
+
+**Route surface — `src/api/routes/delivery-returns.ts`**
+
+| Handler | Line | Note |
+|---|---|---|
+| `GET /` | `:162` | org-scoped **and** `customerScopeSql` narrowed (`:169`), `LIMIT 500` |
+| `GET /:id` | `:189` | by id only — **not** org-scoped |
+| `GET /do-items?doId=` | `:213` | enrichment for the picker — **unreachable, see below** |
+| `POST /` | `:227` | delegates to `createDeliveryReturnRecord` so the office flow and the driver "Not received" flow write an identical record |
+| `POST /:id/return-to-stock` | `:340` | reverses COGS + flags `fg_units` RETURNED + status |
+| `POST /:id/set-outcome` | `:387` | `PURE_RETURN` also runs the restock half |
+| `POST /:id/mark-redelivered` | `:444` | |
+| `POST /:id/cancel` | `:460` | refuses CLOSED / REDELIVERED / CN_ISSUED |
+
+**Endpoints called by the page:** `GET /api/delivery-returns` (`:52`),
+`GET /api/delivery-orders` (`:210-212`, filtered to DELIVERED/INVOICED at `:216`),
+`GET /api/delivery-orders/:id` (`:233`),
+`GET /api/delivery-returns/do-items?doId=` (`:243-245`),
+`POST /api/delivery-returns` (`:292`).
+
+**Gotchas**
+
+- **Restock and repair are mutually exclusive by design.** Both `return-to-stock` (`:357`)
+  and `set-outcome` (`:404`) 409 unless the DR is `OPEN`. That is what stops a unit being
+  booked back as good stock *and* remade — a double count of inventory and COGS. The
+  reversal itself is separately idempotent (`reverseFGForDeliveryReturn` no-ops on
+  `refType='DELIVERY_RETURN' AND refId=drId`). Do not relax the OPEN check.
+- `PURE_RETURN` = goods back in sellable stock **and** money refunded by CN, so `set-outcome`
+  runs the restock statements inline (`:417-421`). `REPAIR_REDELIVER` touches no inventory.
+- Creating a return invalidates the DO cache (`page :149`) because
+  `GET /api/delivery-orders/:id` now returns `linkedReturns`.
+
+**⚠ Route bug found and REPRODUCED — `GET /api/delivery-returns/do-items` is unreachable.**
+
+`app.get("/:id")` is registered at `:189`; `app.get("/do-items")` at `:213`, **24 lines
+later**. Hono matches in registration order here, so the param handler wins. Executed
+against this repo's own `hono@4.12.14`, replicating the exact registration order:
+
+```
+/          -> list
+/abc       -> byid:abc
+/do-items  -> byid:do-items      ← should be "do-items"
+```
+
+So the request lands on the `/:id` handler, looks up a delivery return whose id is the
+literal string `"do-items"`, finds none, and returns
+`404 { success:false, error:"Delivery return not found" }`.
+
+**Why nobody noticed:** the caller at `src/pages/delivery-returns/index.tsx:242-266` does not
+throw on a 404 — `r2.json()` parses fine, `j2?.data ?? []` becomes an empty array, every
+`refs.get(...)` misses, and each item is kept unmodified. No error, no toast, not even the
+`catch` fallback at `:264`. The enrichment simply never happens, silently.
+
+**What that costs:** the Cust PO / Ref line at `:383-395` is what tells two identical
+products on one DO apart. Those fields are exactly the ones the DO's own items do **not**
+carry — which is why `/do-items` was built (`:207-212`, and `:237-241`). The owner's
+2026-07-16 complaint ("要不然我怎麼知道要選那個" — how am I supposed to know which one to
+pick) is therefore still live in production. The list column at `:87-91` reads
+`row.items[0].reference` off the persisted record, so it is unaffected; only the picker is.
+
+**Fix:** move `app.get("/do-items")` above `app.get("/:id")`. The sibling route
+`src/api/routes/three-pl-vehicles.ts:153-156` already documents this exact rule in a comment
+and gets it right — cite it in the fix.
+
+---
+
+## 8. Fleet & Maintenance — 3PL Vehicles, Equipment
+
+| Frontend page | API route | Primary tables | Tests |
+|---|---|---|---|
+| No page of its own — consumed by `src/pages/delivery/index.tsx` (provider/vehicle dialogs: `:1751`, `:2036`, `:2061`), `src/pages/consignment/note.tsx` (`:873`, `:927`, `:963`) and `src/pages/m/config/modules.ts:3999` | `src/api/routes/three-pl-vehicles.ts` (446) — `GET /collisions` (`:165`), `GET /` (`:195`), `POST /` (`:211`), `GET /:id` (`:305`), `PUT /:id` (`:320`), `DELETE /:id` (`:428`) | `three_pl_vehicles` (FK to the misnamed `drivers` table = 3PL **providers**) | `tests/tenant-isolation.test.mjs`, `tests/houzs-sweep-hardening.test.mjs` — **no feature test** |
+| `src/pages/maintenance.tsx` — `/maintenance` (`src/dashboard-routes.tsx:480`); calls `/api/equipment` at `:79`, `:176`, `:211`, `:253`, `:257` | `src/api/routes/equipment.ts` (405) — `GET /` (`:110`), `POST /` (`:163`), `GET /:id` (`:213`, nested `logs`), `PUT /:id` (`:236`), `DELETE /:id` (`:389`) | `equipment`, `maintenance_logs` | `tests/equipment-assets-docs.test.mjs`, `tests/tenant-isolation.test.mjs` |
+
+**`three-pl-vehicles.ts` gotchas**
+
+- **`drivers` holds PROVIDERS, not people.** Migration 0014's naming misnomer; each provider
+  row owns many vehicles here, and pricing follows the truck (`ratePerTripSen`,
+  `ratePerExtraDropSen`) because a 3-ton and a 5-ton from the same dispatcher quote
+  different rates. DO POST/PUT looks a vehicle up here to denormalise plate + type onto the
+  DO row and recompute `deliveryCostSen`.
+- **This file is the repo's reference example of Hono route ordering** — `/collisions` is
+  mounted at `:165`, before `/:id` at `:305`, with the reason written down at `:153-156`.
+  §7 above is the same file family getting it wrong; use this one as the fix template.
+- **`plate_norm` is deliberately NON-unique** (`:55-59`). Production already contains
+  collisions and a unique index would either fail to build or start rejecting saves before
+  anyone decides which duplicate wins and what happens to the delivery history on the loser.
+  `GET /collisions` reports them; the repair is the owner's call. New duplicates are blocked
+  at POST (`:249-262`), so the list can only shrink. Renaming a plate re-normalises it
+  (`:400-402`) or the row keeps matching its old identity forever.
+- **`GET /` (`:195`) and `GET /:id` (`:305`) carry NO `requirePermission` gate**; only
+  POST/PUT/DELETE do (`lorries` create/update/delete). And only `GET /` is org-scoped
+  (`:200-201`) — `/:id`, PUT and DELETE act by id alone, and the POST duplicate check
+  (`:250`) is org-WIDE with no comment saying whether that is intentional. Contrast the
+  consignment routers, where the deliberate org-wide reads are commented in place.
+- **Minor read bug: `createdAt` / `updatedAt` are always `""` in this route's responses.**
+  `rowToVehicle` (`:128-129`) reads `row.created_at` / `row.updated_at`, but the queries are
+  `SELECT *` and the PG adapter rewrites snake→camel on read
+  (`src/api/lib/db-pg.ts:47-59`, using the inverse of `column-rename-map.json`, which maps
+  `createdAt→created_at` and `updatedAt→updated_at`). So the row keys are `createdAt` /
+  `updatedAt` and the snake reads miss. The `boxLengthFt` family two lines below is dual-keyed
+  correctly (`:133-135`) — these two were missed. No current caller displays them, hence low
+  severity; fix with `row.createdAt ?? row.created_at`.
+
+**`equipment.ts` gotchas**
+
+- `PUT /:id` is **two endpoints in one**: a `{ logMaintenance: {...} }` body appends a
+  `maintenance_logs` row, advances `lastMaintenanceDate`/`nextMaintenanceDate` by
+  `maintenanceCycleDays`, and clears MAINTENANCE/REPAIR back to OPERATIONAL (`:254-306`);
+  anything else is a partial merge update (`:308-347`). The `pick()` helper (`:311`) exists
+  so a partial PUT from one dialog cannot blank fields another dialog owns.
+- The asset-identity columns (model / serial_no / manufacturer / supplier /
+  purchase_price_sen / warranty_expiry, owner 2026-08-01) are **runtime self-applied** by
+  `ensureEquipmentAssetColumns` (`:133-155`) — migration files are inert on deploy. The memo
+  flag is set only when EVERY statement lands (`ok`, `:135`/`:154`) so a half-applied schema
+  is retried rather than remembered as done. Reads are dual-keyed (`:72`, `:77`, `:78`).
+- `maintenance_logs` has **no `created_at` column in production** — the INSERT at `:262-264`
+  omits it deliberately (BUG-2026-08-13-031); the note lives in `routes/maintenance-logs.ts`.
+- Money: `toSen` (`:158-161`) converts the form's ringgit to integer sen on the way in;
+  storage is `purchase_price_sen`. Never store the ringgit.
+- **`GET /` (`:110`) and `GET /:id` (`:213`) carry no `requirePermission` gate**; and only
+  `GET /` is org-scoped (`:114`). Same shape as the 3PL route above.
+
+---
+
+## Verification performed
+
+- `node scripts/check-codebase-map.mjs` — see the PR body for the run output.
+- `wc -l` on all 12 target files + `src/dashboard-routes.tsx`; every count in the tables above
+  is that command's output. **`wc -l` is this map's convention** — checked against a row that
+  has not drifted: the map says `src/pages/sales/index.tsx` (2181) and `wc -l` says 2181.
+  `scripts/check-codebase-map.mjs` prints counts **one higher** (`login.tsx (1289 lines)`)
+  because it measures `split(/\r?\n/).length`, which yields a trailing empty element on any
+  newline-terminated file. Both numbers are right about different things; the MAP uses
+  `wc -l`. Recording this so the two figures stop being "corrected" into each other.
+- Every `file:LINE` in this fragment was opened and read; no claim rests on grep or on a
+  comment alone.
+- The §7 routing bug was reproduced by executing the registration order against
+  `hono@4.12.14` resolved from this repo — not inferred from documentation.
+- The §5 mobile read bug was confirmed by reading `read()`/`str()`/`num()` in
+  `src/pages/m/config/helpers.ts:35-52` against the response builders in
+  `src/api/routes/debit-notes.ts:77-93` and `src/api/routes/credit-notes.ts:87,96`.
+- Fabricated-data sweep over all 12 files: **clean**. The only `Math.random` hits are
+  `src/pages/login.tsx:130` (a comment recording that it was REPLACED by a seeded LCG for
+  snowflake positions) and `src/api/routes/debit-notes.ts:100` (a comment recording a fixed
+  2026-04-28 DN-numbering bug). No mock rows, no invented document numbers, no statuses
+  rendered as real. `login.tsx:1201-1204` records an earlier fabricated stat panel that was
+  already deleted.
+- **No test names were invented.** Where a file has no test, this fragment says **NONE** and
+  names the cross-cutting suites that merely mention it.
+
+### Map fragment — Scanning Queue, OCR, Public QR, AI Assistant, TOTP, Orgs & CRM/Leads
+
+> **Last verified: 2026-08-13** against the eight route files below, `src/api/worker.ts`
+> (mount lines), `src/api/lib/auth-middleware.ts` (`PUBLIC_PATHS` / `PUBLIC_PREFIXES`),
+> `src/api/lib/rbac.ts` (`requirePermission`), `src/api/lib/tenant.ts` (`getOrgId`),
+> `src/api/lib/api-rate-limit-config.ts`, `migrations/0026_po_scan_samples.sql`,
+> `migrations/0049_multi_tenant_skeleton.sql`, `src/router.tsx`, `src/dashboard-routes.tsx`,
+> and every test named here. Every endpoint line ref was read in the file, not grepped.
+>
+> **This is a FRAGMENT** staged for assembly into `docs/CODEBASE-MAP.md` — none of these
+> eight routers had ever been named in the map. Do not treat it as a second map.
+>
+> **Line counts are `wc -l`.** Editors that count a final unterminated line report +1.
+
+**All eight routers are LIVE** (mounted in `src/api/worker.ts`). Every mount below sits
+*after* the global gate `app.use("/api/*", authMiddleware)` (`src/api/worker.ts:913`), so a
+route is public only when its path is listed in `PUBLIC_PATHS` / `PUBLIC_PREFIXES` inside
+`src/api/lib/auth-middleware.ts`. `customerScopeMiddleware` (`src/api/worker.ts:927`),
+`tenantMiddleware` (`src/api/worker.ts:934`) and `apiRateLimit` (`src/api/worker.ts:949`)
+run after it, so **public routes still pass through the rate limiter** but reach the
+handler with no `userId`, no `userRole` and no orgId on the context.
+
+| Frontend page | API route | Primary tables | Tests |
+|---|---|---|---|
+| `src/components/scan-po-modal.tsx` — customer-PO scan wizard, in-modal queue polling (3442) | `src/api/routes/scan-queue.ts` — async OCR queue for PO + supplier scans (1541); mounted `src/api/worker.ts:1406` | `scan_queue` (self-created, `src/api/routes/scan-queue.ts:108`) | `tests/ocr-accuracy-sampleid.test.mjs` |
+| `src/components/scan-supplier-modal.tsx` — supplier PI/GRN scan wizard (5876) · `src/lib/scan-queue-client.ts` — consume + source-doc upload helpers (98) | `src/api/routes/scan-po.ts` — customer-PO OCR + few-shot samples + per-customer prompt rules (1075); mounted `src/api/worker.ts:1396` | `po_scan_samples` (**no org column** — `migrations/0026_po_scan_samples.sql`) / `customers.ocrPromptRules` | `tests/ocr-accuracy-customer-grouping.test.mjs` |
+| `src/pages/do-scan.tsx` — PUBLIC driver scan page, routed `/d/:token` (`src/router.tsx:105`) (1031) | `src/api/routes/public-do-qr.ts` — **PUBLIC** DO / packing-list dispatch+deliver QR flow (1019); mounted `src/api/worker.ts:1210` | `delivery_orders` / `delivery_order_items` / `packing_lists` / `production_orders` / `sales_orders` / `job_cards` (+ everything the DO cascade writes) | `tests/do-qr-public.test.mjs` / `tests/security-public-endpoints.test.mjs` / `tests/delivery-incomplete-dual-key.test.mjs` |
+| `src/components/assistant/AssistantSlideOver.tsx` — chat panel (1318) · `src/components/assistant/FloatingChatButton.tsx` | `src/api/routes/assistant.ts` — Hookka AI SSE chat + tool loop (995); mounted `src/api/worker.ts:1441` (history router first at `src/api/worker.ts:1440`) | `audit_events` (one row per tool call) + whatever `src/api/lib/assistant-tools.ts` reads (60 tools incl. an arbitrary-SELECT tool) | `tests/assistant-agent-command-prompt.test.mjs` |
+| `src/pages/setup-2fa.tsx` — soft-prompt 2FA setup (278) · `src/pages/login.tsx` — step-2 code entry | `src/api/routes/auth-totp.ts` — TOTP enroll / verify / login-verify / disable (546); mounted `src/api/worker.ts:1278` | `users` (`totpSecret` / `totpEnrolledAt` / `totpRecoveryHashes`) / `user_sessions` / `audit_events` | **NONE** — only the public-path snapshot `tests/security-public-endpoints.test.mjs` lists `/api/auth/totp/login-verify`; no test exercises any handler |
+| `src/pages/settings/organisations.tsx` — sister-company registry (796) | `src/api/routes/organisations.ts` — org registry CRUD + active-org switch (568); mounted `src/api/worker.ts:1193` | `organisations` / `inter_company_config` / `suppliers.purchase_org_code` | **NONE** |
+| `src/components/customer/CrmPanel.tsx` — contacts + timeline (294) · `src/components/customer/KycPanel.tsx` — onboarding/KYC (124) | `src/api/routes/customer-crm.ts` — contacts / activities / follow-ups / onboarding / send-quote (509); mounted `src/api/worker.ts:1190` | `customer_contacts` / `customer_activities` / `customer_onboarding` / `customer_wishlist` (retired, rows kept) | `tests/customer-crm.test.mjs` / `tests/crm-activity-and-catalog.test.mjs` / `tests/customer-kyc.test.mjs` / `tests/customer-crm-wishlist-send.test.mjs` |
+| `src/pages/leads/index.tsx` — pipeline board, routed `/leads` (`src/dashboard-routes.tsx:414`) (929) | `src/api/routes/sales-leads.ts` — pre-sale pipeline + lead catalog + convert (437); mounted `src/api/worker.ts:1191` | `sales_leads` / `lead_products` / `customers` / `customer_products` / the four CRM side-tables | `tests/sales-leads.test.mjs` / `tests/lead-catalog.test.mjs` / `tests/lead-convert.test.mjs` |
+
+> **Every test in the right-hand column is a SOURCE-TEXT test** — it `readFileSync`s the
+> route and asserts the source contains (or no longer contains) a pattern. None of them
+> boot the worker or hit a DB. They pin shape, not behaviour: a handler can be structurally
+> correct and still return the wrong rows. Treat "covered" here as "a rename or a deletion
+> trips CI", nothing stronger.
+
+---
+
+## Endpoints + auth posture
+
+Posture is read off the handler body, not the header comment. `requirePermission`
+(`src/api/lib/rbac.ts:188`) short-circuits `null` for SUPER_ADMIN and ADMIN
+(`src/api/lib/rbac.ts:210`), so every "permission-gated" row below is fully open to those
+two roles. "Org-scoped" means the SQL carries an `org_id` / `orgId` bind.
+
+### `src/api/routes/scan-queue.ts` — async OCR queue
+
+| Method + path | Ref | Posture | Org scope |
+|---|---|---|---|
+| POST `/api/scan-queue/upload` | `src/api/routes/scan-queue.ts:698` | `purchase-orders:create` | writes `org_id` from `getOrgId` |
+| GET `/api/scan-queue/batch/:batchId` | `src/api/routes/scan-queue.ts:876` | `purchase-orders:create` | `(org_id = ? OR org_id IS NULL)` |
+| GET `/api/scan-queue/pending` | `src/api/routes/scan-queue.ts:956` | `purchase-orders:create` | org + `created_by = <caller>` |
+| GET `/api/scan-queue/:id` | `src/api/routes/scan-queue.ts:1081` | `purchase-orders:create` | org-filtered |
+| GET `/api/scan-queue/:id/bytes` | `src/api/routes/scan-queue.ts:1141` | `purchase-orders:create` | org-filtered; returns raw PDF/image bytes |
+| POST `/api/scan-queue/:id/retry` | `src/api/routes/scan-queue.ts:1201` | `purchase-orders:create` | org-filtered SELECT, then an id-only UPDATE (transitively safe) |
+| POST `/api/scan-queue/:id/consume` | `src/api/routes/scan-queue.ts:1273` | `purchase-orders:create` | org-filtered |
+
+The sweeper is **not** in this router: `sweepStuckScans` (`src/api/routes/scan-queue.ts:1414`)
+is exported and mounted by hand as `POST /api/internal/scan-queue-sweep`
+(`src/api/worker.ts:790`), registered **before** `authMiddleware` and gated by a
+constant-time `CRON_SECRET` compare that 503s when the secret is unset or under 16 chars
+(`src/api/worker.ts:791-798`). Its SQL is deliberately org-blind — it is a system sweep.
+
+Internals: `ensureScanQueueTable` (`src/api/routes/scan-queue.ts:101`) ·
+`hydrateRow` (`src/api/routes/scan-queue.ts:235`) ·
+`processBatch` (`src/api/routes/scan-queue.ts:317`) ·
+`processOneAtATime` (`src/api/routes/scan-queue.ts:328`) ·
+`sweepStuckBatch` (`src/api/routes/scan-queue.ts:1495`, the real recovery path — Pages has
+no cron, so the poll endpoints self-heal).
+
+### `src/api/routes/scan-po.ts` — customer-PO OCR
+
+| Method + path | Ref | Posture | Org scope |
+|---|---|---|---|
+| GET `/api/scan-po/catalog` | `src/api/routes/scan-po.ts:486` | `purchase-orders:create` | org-scoped catalog load |
+| POST `/api/scan-po/extract` | `src/api/routes/scan-po.ts:525` | `purchase-orders:create` **plus a secret-header bypass** (below) | reads org-scoped catalog; writes an org-less sample row |
+| POST `/api/scan-po/samples/:id/confirm` | `src/api/routes/scan-po.ts:712` | `purchase-orders:create` | **none** on the sample UPDATE; the customer-name read at `:767` is also org-blind |
+| GET `/api/scan-po/samples/by-po/:poIdentifier` | `src/api/routes/scan-po.ts:847` | `purchase-orders:create` | **none** |
+| PATCH `/api/scan-po/samples/by-po/:poIdentifier` | `src/api/routes/scan-po.ts:904` | `purchase-orders:create` | **none** |
+| GET `/api/scan-po/customer-rules/:customerId` | `src/api/routes/scan-po.ts:946` | `customers:read` | `AND orgId = ?` |
+| PUT `/api/scan-po/customer-rules/:customerId` | `src/api/routes/scan-po.ts:977` | `customers:update` | `AND orgId = ?` |
+| POST `/api/scan-po/customer-rules/:customerId/distill` | `src/api/routes/scan-po.ts:1033` | `customers:update` | orgId passed to the distiller |
+
+**The secret-header bypass is real and easy to miss.** `authMiddleware` grants a
+SUPER_ADMIN identity to any POST to exactly `/api/scan-po/extract` or
+`/api/scan-supplier/extract` that presents a matching `x-scan-worker` header
+(`src/api/lib/auth-middleware.ts:338-357`, constant-time compare, secret must be ≥16
+chars). It stamps `userId = "scan-worker"` / `userRole = "SUPER_ADMIN"`, which is what
+makes the in-route `requirePermission` pass. The comment above it describes a self-fetch
+that **no longer happens** — `src/api/routes/scan-queue.ts:690-691` records that the queue
+worker now calls `runExtract` directly, with "no self-fetch, no SCAN_WORKER_TOKEN". The
+bypass is dead code with a live key.
+
+Post-processing helpers: `reparseSpec` (`src/api/routes/scan-po.ts:115`) ·
+`applySofaLhfRhfFromTv` (`src/api/routes/scan-po.ts:176`) ·
+`normalizeForMatch` (`src/api/routes/scan-po.ts:259`) ·
+`validateAndEnrichPO` (`src/api/routes/scan-po.ts:268`).
+
+### `src/api/routes/public-do-qr.ts` — PUBLIC, unauthenticated
+
+Auth bypass is the prefix `"/api/public/do-qr/"` (`src/api/lib/auth-middleware.ts:93`).
+**The 64-hex `qrtoken` IS the entire credential** — there is no session, no CSRF (the CSRF
+check only fires when a session cookie is present, `src/api/lib/auth-middleware.ts:383`),
+and no expiry on the token. Rate limit is tightened to 30/min + 300/hr per client IP
+(`src/api/lib/api-rate-limit-config.ts:63`).
+
+| Method + path | Ref | Posture |
+|---|---|---|
+| GET `/api/public/do-qr/:token/edit` | `src/api/routes/public-do-qr.ts:616` | **PUBLIC** — DRAFT-only item-edit model |
+| GET `/api/public/do-qr/:token` | `src/api/routes/public-do-qr.ts:665` | **PUBLIC** — minimal summary |
+| POST `/api/public/do-qr/:token/advance` | `src/api/routes/public-do-qr.ts:713` | **PUBLIC** — forward-only DISPATCH / DELIVER |
+
+Token shape is pinned by a regex at `src/api/routes/public-do-qr.ts:67` and checked before
+any DB touch in all three handlers. Resolution covers both tables:
+`resolveToken` (`src/api/routes/public-do-qr.ts:187`) tries `delivery_orders.qrtoken`
+first, then `packing_lists.qrtoken` (a PL token fans out to all its member DOs).
+`summarizeDos` (`src/api/routes/public-do-qr.ts:126`) and
+`buildSummaryPayload` (`src/api/routes/public-do-qr.ts:261`) build the no-price payload.
+`loadDoEditModel` (`src/api/routes/public-do-qr.ts:322`) builds the trusted edit set.
+
+**Why the write path is safe despite being public** — worth reading before touching it:
+
+- The transition is not reimplemented. `applyDeliveryOrderUpdate` (imported from
+  `src/api/routes/delivery-orders.ts`) is the *same* function behind the office
+  `PUT /api/delivery-orders/:id`, called at `src/api/routes/public-do-qr.ts:944`, so
+  fg_units stamping, STOCK_OUT movements, the SO cascade, FIFO COGS and the auto-DRAFT
+  invoice all fire identically. A guard added to the office path protects the QR path for
+  free — and one removed there is removed here too.
+- Forward-only by table lookup at `src/api/routes/public-do-qr.ts:686`: DISPATCH is
+  DRAFT→LOADED, DELIVER is LOADED/IN_TRANSIT→DELIVERED. Past statuses are SKIPPED, not
+  errored; anything else is BLOCKED. No reversal is reachable.
+- The item edit never trusts the body. The page posts only production-order **ids**; the
+  server rebuilds each line from `allowedById` (current DO items ∪ same-customer,
+  same-state, delivery-ready POs) and 409s on an id outside that set
+  (`src/api/routes/public-do-qr.ts:836-849`).
+- Tenancy comes off the resolved row, not the request: the DO's own `orgId` is stashed onto
+  the context at `src/api/routes/public-do-qr.ts:908` before the cascade runs, and a row
+  with no org is FAILED rather than defaulted (`src/api/routes/public-do-qr.ts:899`).
+
+### `src/api/routes/assistant.ts` — Hookka AI
+
+| Method + path | Ref | Posture |
+|---|---|---|
+| POST `/api/assistant/chat` | `src/api/routes/assistant.ts:501` | **any logged-in user**; SUPER_ADMIN gets all tools, everyone else gets 3 |
+
+**The file's own header comment (`src/api/routes/assistant.ts:6`) and the mount comment
+(`src/api/worker.ts:1433`) both say "SUPER_ADMIN only". Both are stale.** The owner opened
+the chat to all staff on 2026-07-28; the code now allows any authenticated caller and
+narrows the *tools* instead, in two independent places:
+
+1. Schema filter — non-super-admins are only offered `agent_overview`, `agent_control`,
+   `teach_agent` (set at `src/api/routes/assistant.ts:544`, applied at
+   `src/api/routes/assistant.ts:738`).
+2. Dispatch guard — even a hallucinated tool name is refused at the dispatcher for a
+   non-super-admin (`src/api/routes/assistant.ts:915`).
+
+So the data / SQL / payroll tools (including the arbitrary-`SELECT` tool in
+`src/api/lib/assistant-tools.ts`) stay owner-only. Other things read from the code, not the
+comments: a kill switch fires before anything else when `ASSISTANT_ENABLED === "false"` and
+returns a normal 200 SSE stream (`src/api/routes/assistant.ts:510`); the per-user daily
+question cap is checked at `src/api/routes/assistant.ts:591` and **SUPER_ADMIN is exempt**
+(`src/api/routes/assistant.ts:588`). Wire format helper: `sseEvent`
+(`src/api/routes/assistant.ts:496`). The prompt is exported for the offline eval harness
+(`src/api/routes/assistant.ts:72`).
+
+### `src/api/routes/auth-totp.ts` — second factor
+
+| Method + path | Ref | Posture |
+|---|---|---|
+| POST `/api/auth/totp/enroll` | `src/api/routes/auth-totp.ts:77` | session required; acts on `c.get("userId")` only |
+| POST `/api/auth/totp/verify` | `src/api/routes/auth-totp.ts:134` | session required |
+| POST `/api/auth/totp/login-verify` | `src/api/routes/auth-totp.ts:183` | **PUBLIC** (`src/api/lib/auth-middleware.ts:40`) — issues a full session |
+| POST `/api/auth/totp/setup-start` | `src/api/routes/auth-totp.ts:330` | session required |
+| POST `/api/auth/totp/setup-confirm` | `src/api/routes/auth-totp.ts:406` | session required |
+| POST `/api/auth/totp/dismiss-prompt` | `src/api/routes/auth-totp.ts:477` | session required |
+| POST `/api/auth/totp/disable` | `src/api/routes/auth-totp.ts:499` | session required **+ password re-auth** |
+
+Only `/login-verify` is public, and that is explicit in the middleware — the sibling
+`/setup-start`, `/setup-confirm` and `/dismiss-prompt` are NOT public, and the middleware
+says so in place (`src/api/lib/auth-middleware.ts:41-44`). Every session-required handler
+resolves its subject from the context via `ctxUserId` (`src/api/routes/auth-totp.ts:69`) and
+never from the body, so there is no cross-user reach. `/login-verify` is throttled at 10
+attempts / 15 min keyed on `totp:<userId>` (`src/api/routes/auth-totp.ts:203-205`), burns a
+recovery-code hash on use (`src/api/routes/auth-totp.ts:234-239`), and audits both the fail
+and the success. Read the finding below before assuming it is a complete 2FA.
+
+Two schema facts that stop repeat archaeology: there is **no `user_totp_secrets` table** —
+state lives on `users`, and "pending vs enabled" is `totpEnrolledAt IS NULL` vs a timestamp
+(`src/api/routes/auth-totp.ts:312-316`). Enrollment writes the secret immediately and only
+flips `totpEnrolledAt` on a proven code, so an abandoned enrollment is inert.
+
+### `src/api/routes/organisations.ts` — org registry
+
+| Method + path | Ref | Posture | Org scope |
+|---|---|---|---|
+| GET `/api/organisations` | `src/api/routes/organisations.ts:216` | authenticated, **no `requirePermission`** | **none** |
+| POST `/api/organisations` | `src/api/routes/organisations.ts:242` | `organisations:update` | writes a hard-coded `'hookka'` org (`src/api/routes/organisations.ts:295`) |
+| PATCH `/api/organisations/:id` | `src/api/routes/organisations.ts:328` | `organisations:update` | **none** |
+| DELETE `/api/organisations/:id` | `src/api/routes/organisations.ts:429` | `organisations:update` | **none**; soft-delete, refuses the default org |
+| PUT `/api/organisations` | `src/api/routes/organisations.ts:454` | `organisations:update` | **none**; three body shapes (`orgId` switch / `organisation` patch / `interCompanyConfig`) |
+
+The GET response shape has no `success` wrapper — the Settings page and the sidebar switcher
+consume `{ organisations, activeOrgId, interCompanyConfig }` directly. It degrades in two
+steps: `loadOrganisations` (`src/api/routes/organisations.ts:161`) falls back to a legacy
+column list when migration 0142's columns are missing, then to a hardcoded two-org constant
+(`src/api/routes/organisations.ts:107`) when the table itself is absent. The new columns
+reach prod only through the runtime self-apply `ensureOrganisationRegistry`
+(`src/api/routes/organisations.ts:187`) — which is called by POST/PATCH/DELETE but **not**
+by GET, which is why GET needs the fallback at all.
+
+`inter_company_config` is a **singleton row `id = 1`**. The org switcher writes
+`active_org_id` on that one row (`src/api/routes/organisations.ts:466`), so "which org is
+active" is global state shared by every user in every tenant, not a per-user preference.
+
+### `src/api/routes/customer-crm.ts` — CRM layer
+
+| Method + path | Ref | Posture | Org scope |
+|---|---|---|---|
+| GET `/api/customer-crm/contacts` | `src/api/routes/customer-crm.ts:175` | `customers:read` | yes |
+| POST `/api/customer-crm/contacts` | `src/api/routes/customer-crm.ts:191` | `customers:update` | yes |
+| PUT `/api/customer-crm/contacts/:id` | `src/api/routes/customer-crm.ts:224` | `customers:update` | yes |
+| DELETE `/api/customer-crm/contacts/:id` | `src/api/routes/customer-crm.ts:252` | `customers:delete` | yes |
+| GET `/api/customer-crm/activities` | `src/api/routes/customer-crm.ts:266` | `customers:read` | yes |
+| POST `/api/customer-crm/activities` | `src/api/routes/customer-crm.ts:285` | `customers:update` | yes |
+| DELETE `/api/customer-crm/activities/:id` | `src/api/routes/customer-crm.ts:322` | `customers:delete` | yes |
+| GET `/api/customer-crm/follow-ups` | `src/api/routes/customer-crm.ts:336` | `customers:read` | yes |
+| GET `/api/customer-crm/onboarding` | `src/api/routes/customer-crm.ts:359` | `customers:read` | yes |
+| PUT `/api/customer-crm/onboarding` | `src/api/routes/customer-crm.ts:374` | `customers:update` | writes org, but see the upsert note |
+| POST `/api/customer-crm/send-quote` | `src/api/routes/customer-crm.ts:425` | `customers:update` | activity row carries org |
+
+This is the best-scoped router of the eight: every read and every write carries
+`AND org_id = ?`. Two edges to know. (1) The onboarding upsert is
+`ON CONFLICT(customer_id)` (`src/api/routes/customer-crm.ts:385`) and
+`customer_onboarding.customer_id` is the whole primary key
+(`src/api/routes/customer-crm.ts:109`) — the conflict target does not include `org_id`, so
+in a real second tenant two orgs sharing a customer id would overwrite each other's KYC
+block. (2) PUT/DELETE return `success: true` without checking `changes`, so a wrong id and
+a cross-org id are both reported as a successful edit.
+
+Tables are runtime self-applied by `createCrmTables`
+(`src/api/routes/customer-crm.ts:55`) behind the promise memo `ensureTables`
+(`src/api/routes/customer-crm.ts:45`) — a boolean memo here was a real bug (concurrent
+first-requests each ran the whole DDL block, and a failed round was remembered as done).
+The wishlist feature is retired but its table is deliberately kept
+(`src/api/routes/customer-crm.ts:409-413`) — do not "clean it up".
+
+### `src/api/routes/sales-leads.ts` — pre-sale pipeline
+
+| Method + path | Ref | Posture | Org scope |
+|---|---|---|---|
+| GET `/api/sales-leads` | `src/api/routes/sales-leads.ts:102` | `customers:read` | yes |
+| POST `/api/sales-leads` | `src/api/routes/sales-leads.ts:155` | `customers:update` | lead row yes; the customer it mints, **no** |
+| PUT `/api/sales-leads/:id` | `src/api/routes/sales-leads.ts:228` | `customers:update` | yes |
+| PUT `/api/sales-leads/:id/stage` | `src/api/routes/sales-leads.ts:258` | `customers:update` | yes |
+| POST `/api/sales-leads/:id/convert` | `src/api/routes/sales-leads.ts:295` | `customers:update` | side-tables yes; `customer_products` copy **no** |
+| DELETE `/api/sales-leads/:id` | `src/api/routes/sales-leads.ts:359` | `customers:delete` | yes |
+| GET `/api/sales-leads/lead-products` | `src/api/routes/sales-leads.ts:374` | `customers:read` | yes |
+| POST `/api/sales-leads/lead-products` | `src/api/routes/sales-leads.ts:389` | `customers:update` | yes |
+| DELETE `/api/sales-leads/lead-products/:id` | `src/api/routes/sales-leads.ts:427` | `customers:delete` | yes |
+
+A lead **is** a potential customer (owner 2026-08-01): POST mints a real `customers` row
+immediately via `createPotentialCustomerForLead` (`src/api/routes/sales-leads.ts:136`),
+stamped `customer_stage = 'POTENTIAL'` with no creditor code and zero credit limit, and
+links it back onto `sales_leads.customer_id`. That insert is **best-effort on purpose**
+(`src/api/routes/sales-leads.ts:199`) — losing the typed-in lead because a customer insert
+hiccuped would be worse than a lead without an account. Convert
+(`src/api/routes/sales-leads.ts:295`) never creates the customer; it re-points the four
+entity-keyed CRM side-tables listed at `src/api/routes/sales-leads.ts:288` from the lead id
+to the customer id, copies `lead_products` into `customer_products`, and stamps WON. Lead
+products live in their own table specifically so an unconfirmed lead cannot leak into the
+pricing engine (`src/api/routes/sales-leads.ts:56-60`).
+
+---
+
+## Gotchas
+
+- **`assistant.ts`'s own header says SUPER_ADMIN-only and is wrong** (`src/api/routes/assistant.ts:6`,
+  echoed at `src/api/worker.ts:1433`). The gate moved from the route to the tool list on
+  2026-07-28. Any staff role can open the chat; only the tool set differs. `tests/assistant-agent-command-prompt.test.mjs`
+  pins the current behaviour — trust the test and the code, not the two comments.
+- **`scan-queue.ts` says the browser navigates to `/scan-queue/<batchId>`** (`src/api/routes/scan-queue.ts:19`).
+  **That page does not exist** — no such route is registered in `src/router.tsx` or
+  `src/dashboard-routes.tsx`. Polling happens inside the modals: `src/components/scan-po-modal.tsx:109`
+  and `src/components/scan-supplier-modal.tsx:581` poll `/batch/:batchId`, and both resume
+  via `/pending`. Do not go looking for a queue page.
+- **`(org_id = ? OR org_id IS NULL)` is the scan-queue tenancy idiom** (seven places in
+  `src/api/routes/scan-queue.ts`). It is legacy tolerance for rows written before the
+  column existed — but it also means any row that lands with a NULL org is visible to
+  every tenant. New writes always stamp the org, so the null-tolerant half should shrink,
+  not grow.
+- **`po_scan_samples` has no org column at all** — see `migrations/0026_po_scan_samples.sql`.
+  Every read, write and the few-shot selection over that table is therefore global. This is
+  the root of finding S2 below; treat the table as a single shared pool until a column is
+  added.
+- **The DO QR token never expires and is not rotated.** Minting is authed-only (the
+  `/:id/qr-token` endpoints on the DO and PL routers) and `public-do-qr.ts` never mints —
+  `tests/do-qr-public.test.mjs` pins both properties. But a printed DO that leaves the
+  building carries a permanently valid dispatch/deliver credential for that document.
+- **`public-do-qr.ts`'s header claims "minimal exposure"** (`src/api/routes/public-do-qr.ts:19`).
+  True for `GET /:token`. **Not true for `GET /:token/edit`**, added later for the item-edit
+  flow: it also returns every *addable* production order for that customer and state — PO
+  number, product code and name, size, fabric code, quantity, racking number, SO number and
+  customer PO number (`src/api/routes/public-do-qr.ts:517-531`). Still no prices, still one
+  customer, but it is a pipeline listing, not a document summary.
+- **`delivery_incomplete` must be read dual-keyed.** The row type declares both spellings
+  with the reason in place (`src/api/routes/public-do-qr.ts:88-94`) and
+  `tests/delivery-incomplete-dual-key.test.mjs` fails any reader that drops the camelCase
+  fallback. This is the camelCase read trap from `docs/BUG-CLASSES.md`, and this column is
+  one of its recorded instances.
+- **`organisations` GET is the one unpermissioned endpoint in these eight.** Any logged-in
+  user — any role — gets the full registry including registration number, TIN, address,
+  phone and email for every organisation row. That is probably intentional (the sidebar org
+  switcher needs the list for everyone), but it is not gated and it is not org-filtered; see
+  finding S1.
+- **Active-org is global, not per-user.** `PUT /api/organisations` with `{ orgId }` writes
+  `inter_company_config.active_org_id` on the singleton row
+  (`src/api/routes/organisations.ts:466`). One user switching the org switcher changes it
+  for everybody.
+- **A lead's customer row is minted org-blind.** `createPotentialCustomerForLead`
+  (`src/api/routes/sales-leads.ts:144-150`) does not list `orgId` in its INSERT, so the row
+  takes the SQL default `'hookka'` from `migrations/0049_multi_tenant_skeleton.sql:32`
+  regardless of who created it. Same shape as the write-side gap already recorded for
+  consignments in `docs/BUG-CLASSES.md` C12 — see finding S3.
+- **`send-quote` will email an arbitrary attachment to an arbitrary address.** Recipient and
+  base64 PDF both come from the request body (`src/api/routes/customer-crm.ts:431-432`) and
+  neither the `customerId` nor the recipient is checked against the customer's stored email
+  or even against the org. Capped at ~5 MB, gated only on `customers:update`. Deliberate
+  ("the operator clicked Send"), but it is an outbound mail primitive on the company's
+  sending domain — see finding S4.
+- **Tests here pin source text, not behaviour.** `tests/sales-leads.test.mjs` asserting
+  "tenant-scoped" means the string `org_id = ?` appears in the file — it did not notice that
+  the `customers` INSERT three functions down has no org at all. When you add a scope, add
+  the assertion for *that statement*, not for the file.
+
+---
+
+## Security findings (raised to the owner 2026-08-13, not silently filed)
+
+Ranked by what an attacker actually gets. **S1–S3 are cross-tenant issues that are inert
+today because prod is a single org (`'hookka'`)** — they are pre-existing traps for the
+second tenant, not live leaks. S4 and S5 apply now.
+
+**S1 — `organisations.ts` is entirely org-blind, read AND write.** `loadOrganisations`
+(`src/api/routes/organisations.ts:161`) selects the whole table with no `WHERE org_id`,
+even though the column exists and the router itself creates a `(org_id, code)` unique index
+(`src/api/routes/organisations.ts:193`, `:201`). PATCH (`:328`), DELETE (`:429`) and PUT
+(`:454`) resolve rows by bare `id`, so `organisations:update` in one tenant edits or
+soft-deletes another tenant's company record. POST hard-codes `'hookka'` (`:295`) and its
+duplicate check is `WHERE code = ?` with no org (`:266`). GET is additionally the only
+endpoint in these eight with no `requirePermission` — every authenticated user reads every
+org's TIN and registration number. Same class as the `audit-events.ts` leak fixed earlier
+this session.
+
+**S2 — the OCR few-shot pool is a shared, unpartitioned corpus.** `po_scan_samples` has no
+org column (`migrations/0026_po_scan_samples.sql`), and `GET /api/scan-po/samples/by-po/:poIdentifier`
+(`src/api/routes/scan-po.ts:847`) returns the full extracted PO JSON — customer, PO number,
+line items, unit prices — to anyone with `purchase-orders:create` who can name the PO
+string, with no org filter. `PATCH .../by-po/:poIdentifier` (`:904`) writes across orgs the
+same way. Worse than a read: few-shot selection at `src/api/lib/scan-engine.ts:1090-1103`
+draws the top 3 confirmed samples with **no org predicate**, so one tenant's confirmed
+customer PO can be injected verbatim into another tenant's OCR prompt.
+
+**S3 — `sales-leads.ts` mints customers into the wrong org.** `createPotentialCustomerForLead`
+(`src/api/routes/sales-leads.ts:144`) omits `orgId`, which defaults to `'hookka'`
+(`migrations/0049_multi_tenant_skeleton.sql:32`). A lead created by a second tenant produces
+a customer account in tenant one. `POST /:id/convert`'s `customer_products` copy
+(`src/api/routes/sales-leads.ts:332`) has the same omission.
+
+**S4 — `POST /api/customer-crm/send-quote` is an authenticated open mail relay.** Recipient,
+subject, note and the entire base64 attachment are caller-supplied
+(`src/api/routes/customer-crm.ts:429-462`); nothing ties the recipient to the named customer
+or the caller's org. Anyone with `customers:update` can send an arbitrary ≤5 MB PDF from the
+company's configured sending identity to any address. The body note is HTML-escaped
+(`src/api/routes/customer-crm.ts:500`), so this is exfiltration/abuse surface, not injection.
+**Owner decision needed** — this may be exactly what was wanted; if so it should say so in
+the code, and if not the fix is to bind `to` to the customer's stored contacts.
+
+**S5 — 2FA step 2 does not re-check the password, by design; please confirm that is still
+what you want.** `POST /api/auth/totp/login-verify` (`src/api/routes/auth-totp.ts:183`) takes
+`{ userId, code }` and issues a full session (`src/api/routes/auth-totp.ts:255-268`). It
+never verifies that the caller completed step 1 — no pending token, no password. The
+intent is explicit at `src/api/routes/auth.ts:237-238` ("Returning userId (NOT a token) is
+intentional — userId alone is useless without a valid TOTP/recovery code"), so this is a
+recorded decision, not an oversight. The consequence is that for an enrolled user the
+password stops being a factor: possession of a valid TOTP code or one recovery code is
+sufficient, given the user id. Mitigations that hold today: user ids are UUIDs, the throttle
+is 10 attempts / 15 min per user id (`src/api/routes/auth-totp.ts:203`) which puts a 6-digit
+brute force out of reach, and recovery codes are 10 characters of CSPRNG output
+(`src/api/lib/totp.ts:98-116`). The cheap hardening, if wanted, is a short-lived
+server-side pending-2FA token minted by `/login` and required here.
+
+**Not a finding, checked and clear:** the public QR write path (org taken from the resolved
+row, forward-only, server-rebuilt item set, shared cascade); `scan-queue.ts` (org-scoped
+throughout, and the `/retry` id-only UPDATE is gated by an org-filtered SELECT above it);
+`customer-crm.ts` (org-scoped on every statement); `auth-totp.ts`'s six session-required
+handlers (subject always from the context, never the body); and the assistant's two-layer
+tool gate.
+
 ---
 
 Before schema/money/ship work read docs/HOOKKA-GOTCHAS.md; for review depth see docs/DEV-OPERATING-FRAMEWORK.md.

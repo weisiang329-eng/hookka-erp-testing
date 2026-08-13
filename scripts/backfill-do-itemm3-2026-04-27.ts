@@ -8,7 +8,7 @@
 //
 // This script updates every delivery_order_items row where item_m3 = 0 and
 // the matching products.unit_m3 > 0, then recomputes delivery_orders.total_m3
-// for every affected DO. Read-time enrichment in routes-d1/delivery-orders.ts
+// for every affected DO. Read-time enrichment in src/api/routes/delivery-orders/ (was routes-d1/, retired 2026-04-27)
 // already shows correct values; this script just persists them.
 // ---------------------------------------------------------------------------
 import fs from "node:fs";

@@ -17,7 +17,7 @@ import type { Env } from "../worker";
 //   · cost_ledger        — already queried `WHERE orgId = ?` in the material-
 //                          cost P&L path; the column is added here defensively
 //                          so that path can never 500 on a partial deploy.
-//   · journal_entries    — legacy manual adjusting-entry parent (routes-d1 JE UI).
+//   · journal_entries    — legacy manual adjusting-entry parent (the retired routes-d1 JE UI).
 //   · journal_lines      — its child rows.
 //   · ar_aging / ap_aging — dead snapshot tables today, but adding the column
 //                          keeps them consistent for any future per-org rebuild.

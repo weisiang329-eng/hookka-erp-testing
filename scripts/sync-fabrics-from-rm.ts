@@ -119,7 +119,7 @@ function execRemoteSqlFile(sqlFile: string, label: string): void {
 }
 
 function genFabricId(): string {
-  // Match pattern used in other routes-d1 (e.g. "fab-<uuid8>"), mirrors the
+  // Match pattern used in other routes (e.g. "fab-<uuid8>"), mirrors the
   // existing seed rows that use "fab-1", "fab-2", etc.
   return `fab-${crypto.randomUUID().slice(0, 8)}`;
 }

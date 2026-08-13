@@ -13,7 +13,7 @@
 > | This doc cites | Where the code actually lives (2026-08-13) |
 > |---|---|
 > | `src/api/routes-d1/*` | **The whole `routes-d1` directory is gone** — D1 was retired 2026-04-27. `src/api/` now contains only `cron/ lib/ queues/ routes/ worker.ts`. |
-> | `routes-d1/production-orders.ts:844-1309` (`applyWipInventoryChange`) | `src/api/routes/production-orders/_helpers.ts:2574` — every line number in §1a, §3, §4 and §5 is off by ~1,700 lines. Use symbol search, not the numbers. |
+> | `routes-d1/production-orders.ts:844-1309` (`applyWipInventoryChange`) | `src/api/routes/production-orders/_helpers.ts:2598` — every line number in §1a, §3, §4 and §5 is off by ~1,700 lines. Use symbol search, not the numbers. |
 > | `routes-d1/delivery-orders.ts:1109-1271` | `src/api/routes/delivery-orders/_helpers.ts` |
 > | `routes-d1/admin.ts:719-767` | `src/api/routes/admin.ts` |
 > | `routes-d1/inventory-wip.ts` / `inventory.ts` | `src/api/routes/inventory-wip.ts` / `src/api/routes/inventory.ts` |
@@ -77,11 +77,31 @@ source carry the original BUG-NNN diagnoses.
 
 ### 1a. `applyWipInventoryChange()` — the JC-status cascade
 
-`src/api/routes-d1/production-orders.ts:844-1309`. Called from two sites:
+`src/api/routes/production-orders/_helpers.ts:2598` (`applyWipInventoryChange`),
+re-exported from `src/api/routes/production-orders.ts:58`.
 
-- The PATCH `/api/production-orders/:id/job-cards/:jcId` handler at
-  `:1741` (form / dept-pivot edits, with `prevStatus`).
-- The "scan" path at `:2853` (barcode-driven JC completion).
+**Called from SIX sites, not two.** This doc said "two" and that is now wrong —
+anyone auditing the cascade on that basis would believe they had covered every
+caller and miss four of them. Re-counted from the code 2026-08-13:
+
+| caller | site |
+|---|---|
+| `production-orders.ts` | `:2316`, `:2694`, `:3158` |
+| `import-completion/_shared.ts` | `:522` |
+| `import-completion/completion-cascades.ts` | `:635` |
+| `import-completion/wip-fixes.ts` | `:245` |
+
+The three `import-completion` callers are the hand-run backfill family — they
+drive the same cascade outside any UI, so a change to the cascade's contract has
+to hold for them too.
+
+> ⚠️ **The `:NNN` refs in the numbered branches below are the ORIGINAL
+> `routes-d1` line numbers and are dead.** Two are re-verified against
+> `_helpers.ts` today — the same-status short-circuit is at **`:2612`** and the
+> PACKING bypass at **`:2722`** — the rest have not been re-derived. Use symbol
+> search, not the numbers. They are left in place because each is paired with a
+> BUG-NNN id that still resolves in `docs/BUG-HISTORY.md`, which is the durable
+> way back to the reasoning.
 
 The cascade has the following internal branches, in order:
 
@@ -158,7 +178,7 @@ The cascade has the following internal branches, in order:
 
 ### 1b. DO Dispatch (BUG-2026-04-27-021)
 
-`src/api/routes-d1/delivery-orders.ts:1109-1167` (forward) and `:1229-1271`
+`src/api/routes/delivery-orders/_helpers.ts` (forward and reverse; use symbol search — the old line ranges are meaningless in the split file)
 (reverse).
 
 - **DRAFT → LOADED (`stampedOnDispatch`)**: query `job_cards` for every
@@ -177,7 +197,7 @@ producer-add is no longer represented by anything physical we own.
 
 ### 1c. Admin DEV Clear
 
-`src/api/routes-d1/admin.ts:719-767`. Endpoint
+`src/api/routes/admin.ts`. Endpoint
 `POST /admin/clear-all-completion-dates?confirm=YES_CLEAR_ALL_COMPLETION_DATES`.
 Resets every JC + active PO + wipes cascade-written `wip_items` rows. Two
 SQL writes:
@@ -218,7 +238,7 @@ Every code path that displays / aggregates `wip_items`.
 
 ### 2a. WIP page
 
-`src/api/routes-d1/inventory-wip.ts` — `GET /api/inventory/wip`.
+`src/api/routes/inventory-wip.ts` — `GET /api/inventory/wip`.
 
 - Reads every non-zero `wip_items` row (`stockQty != 0`).
 - Joins each row to the active POs + JCs to enrich with category, sources,
@@ -240,7 +260,7 @@ This is the dual data source that BUG-017 / -018 reconcile: a UPH-coded
 
 ### 2c. `inventory.ts` master fetch
 
-`src/api/routes-d1/inventory.ts:135-146` (`GET /api/inventory`) returns
+`src/api/routes/inventory.ts` (`GET /api/inventory`) returns
 the entire `wip_items` table as `wipItems[]` for the maintenance page
 (`src/pages/procurement/maintenance.tsx`) and the BOM page
 (`src/pages/bom.tsx`). Pure pass-through, no filter.

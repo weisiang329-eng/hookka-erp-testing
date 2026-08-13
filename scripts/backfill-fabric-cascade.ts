@@ -11,7 +11,7 @@
 //
 // Targets REMOTE D1 via wrangler d1 execute. Idempotent — rerunning is safe.
 //
-// Category mapping (see src/api/routes-d1/_fabric-cascade.ts for rationale):
+// Category mapping (see src/api/routes/_fabric-cascade.ts for rationale):
 //   raw_materials.itemGroup  → fabrics.category   → fabric_trackings.fabricCategory
 //   B.M-FABR                 → BM_FABRIC          → B.M-FABR
 //   S.M-FABR                 → SM_FABRIC          → S.M-FABR

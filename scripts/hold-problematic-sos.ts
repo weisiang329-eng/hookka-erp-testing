@@ -4,7 +4,7 @@
 //
 // Rationale for ON_HOLD over DRAFT:
 //   - CONFIRMED → DRAFT would orphan already-generated POs
-//   - ON_HOLD cascade is live (src/api/routes-d1/sales-orders.ts) and locks
+//   - ON_HOLD cascade is live (src/api/routes/sales-orders.ts) and locks
 //     all descendant POs + job cards automatically
 //   - User can "Resume" once fixed → reverts to CONFIRMED + unlocks POs
 import { spawnSync } from "node:child_process";

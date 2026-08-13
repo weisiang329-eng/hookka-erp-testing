@@ -1,5 +1,29 @@
 # Publishing Hookka to Google Play (public listing)
 
+> **Last verified: 2026-08-13** against `public/.well-known/assetlinks.json`,
+> `public/privacy.html`, `public/manifest-erp.webmanifest`, `public/manifest.webmanifest`,
+> `public/pwa-icon-*.png`, `docs/play-assets/`, `mobile/package.json`,
+> `.github/workflows/ios-build.yml`.
+>
+> **This is NOT a completed one-off — it is an open owner procedure.** Both
+> `sha256_cert_fingerprints` in `public/.well-known/assetlinks.json` still read
+> `FILL_FROM_PLAY_CONSOLE_APP_SIGNING_SHA256`, so Step 4 has never been done and neither
+> TWA has been published. Steps 1–6 are still to do.
+>
+> Corrected 2026-08-13: the listing-assets claim overstated what is in the repo (no
+> screenshots), and `public/privacy` is really `public/privacy.html`.
+>
+> **Scope note:** this doc covers the *Android / TWA* path only. There is a second,
+> unrelated native path — `mobile/` (Capacitor 6 iOS shells for worker + erp) driven by
+> `.github/workflows/ios-build.yml`, which is `workflow_dispatch`-only, produces an
+> **unsigned** archive, and has no Apple Developer account wired. Neither store has a
+> shipped app.
+>
+> ⚠️ **Security:** the "App access" section below puts a live-format employee number and
+> 6-digit PIN in plain text in a repo that `ios-build.yml` describes as PUBLIC. Confirm
+> `Test-001` / `123456` is a throwaway reviewer account with no real data access, or move
+> these to a Play Console field only and delete them here.
+
 Two apps from the same PWA, wrapped as **TWAs** (Trusted Web Activity):
 
 | App | Install from URL | start_url | Suggested package | Icon |
@@ -11,7 +35,7 @@ Cost: **one-time USD $25** Google Play developer account. Publishing free apps a
 
 ## What's already prepared in the repo
 - `public/.well-known/assetlinks.json` — Digital Asset Links for both packages (fingerprints are placeholders — fill after Play App Signing, see Step 4).
-- `public/privacy` — privacy policy, lives at `https://erp.hookka.com/privacy` (required for the listing + Data Safety).
+- `public/privacy.html` — privacy policy, served at `https://erp.hookka.com/privacy` (required for the listing + Data Safety).
 - Manifests + icons already TWA-ready (`manifest-erp.webmanifest`, `manifest.webmanifest`, the pwa-icon PNGs).
 
 ## Steps (owner — account, payment, submission are yours; I can't do those)
@@ -74,4 +98,4 @@ For an internal tool, "Add to Home Screen" already installs both apps with the c
 
 **Privacy policy URL:** `https://erp.hookka.com/privacy`  ·  **Contact:** `support@hookka.com`
 
-**Listing assets prepared** (in `docs/play-assets/`): 512 icon, feature graphic 1024×500, phone screenshots.
+**Listing assets prepared** (in `docs/play-assets/`) — **corrected 2026-08-13**, the folder holds exactly three files: `icon-erp-512.png`, `icon-worker-512.png`, `feature-graphic.png`. **The phone screenshots this line used to claim are NOT in the repo** and must still be captured — Play requires at least 2 phone screenshots per app before the listing can be submitted.

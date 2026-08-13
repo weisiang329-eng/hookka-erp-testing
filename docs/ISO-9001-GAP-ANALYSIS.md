@@ -1,5 +1,37 @@
 # ISO 9001:2015 — Gap Analysis for Hookka ERP
 
+> **Last verified: 2026-08-13** against `src/api/routes/` (136 route files — no
+> `ncr`/`nonconformance`/`capa`/`internal-audit`/`management-review`/`calibration`/
+> `risk` route exists), `migrations-postgres/` (244 files — no such table exists),
+> `src/pages/quality.tsx`, `src/api/routes/qc-inspections.ts`,
+> `src/api/routes/qc-pending.ts`, `src/api/routes/fg-units.ts`,
+> `src/api/lib/fg-batch-link.ts`, `migrations-postgres/0177_document_lifecycle.sql`.
+>
+> **Every 🔴 gap is still open on 2026-08-13** — nothing from the build plan was
+> built. QC is still explicitly non-gating (`quality.tsx:16`: "Tags are informational,
+> not gating — production keeps running"), and DO dispatch still runs no QC check.
+> `0177_document_lifecycle.sql` is **not** ISO 7.5 document control: it is
+> ACTIVE/VOID/DELETED state on *financial documents* for the GL audit log.
+>
+> Corrected 2026-08-13, two "Have" descriptions have moved on:
+> - **8.6** — QC generation was reworked 2026-08-08 into three stage rhythms (RM one
+>   inspection per goods receipt per material family; WIP one slot per working
+>   department per run; FG a sampled share of units, each bound to ONE unit and its SO
+>   line — `src/api/routes/qc-pending.ts`), plus risk-weighted FG sampling
+>   (`0218_qc_fg_risk_weighted_sample.sql`, `src/api/lib/qc-fg-risk.ts`). A WIP fail
+>   now also resets the job card to BLOCKED. The clause verdict (non-gating) is
+>   unchanged; the evidence paragraph is out of date.
+> - **8.5.2** — the "`fg_units.batchId` is a random number" line is stale. The column
+>   was NULL on all 4,866 rows and is now stamped at completion and backfilled by an
+>   evidence ladder (`src/api/lib/fg-batch-link.ts`, `fg-completion.ts`,
+>   `fg-ledger-reconcile.ts`), linking a piece to its **cost lot**. The genuine gap —
+>   unit → physical *material lot* genealogy — is still open.
+>
+> > **UNVERIFIED ASSERTION** (as of 2026-08-13): the clause interpretations, the
+> > "~80% of the records" estimate, what a registrar will ask for, and the suggested
+> > build order are professional judgement, not checkable from source. Treat as owner
+> > intent, not fact.
+
 **Date:** 2026-07-18 · **Status:** assessment only — NO code changed.
 **Purpose:** owner asked whether the ERP can align to ISO 9001, and to see the gaps first.
 

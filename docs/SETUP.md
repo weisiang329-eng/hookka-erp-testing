@@ -1,5 +1,8 @@
 # Setup
 
+> **Last verified: 2026-08-13** against `package.json` (scripts block), `vite.config.ts:215-224`, `src/api/worker.ts`, `wrangler.toml`, and `ls src/api/`.
+> Corrected 2026-08-13: the whole "run the API with `npm run api` / `src/api/index.ts`" workflow was fiction — neither the script nor the file exists; the API is a Cloudflare Pages Function (`functions/api/[[route]].ts` → `src/api/worker.ts`) and is run locally with `npm run dev:worker`.
+
 Everything you need to go from a fresh machine to a running dev environment.
 
 ---
@@ -30,66 +33,71 @@ npm -v    # 10.x or later
 
 ```bash
 # 1. Clone (skip if you already have the folder)
-git clone <repo-url> hookka-erp-vite
-cd hookka-erp-vite
+git clone <repo-url> hookka-erp-testing
+cd hookka-erp-testing
 
 # 2. Install dependencies (npm, not pnpm — lockfile is package-lock.json)
 npm install
 
-# 3. Verify the type-check passes before you start hacking
-npx tsc --noEmit
+# 3. Verify the strict type-check passes before you start hacking
+npm run typecheck:app     # tsc -p tsconfig.app.json --noEmit
 ```
 
-No `.env` file is required. The API port defaults to 3001 and the Vite dev
-server to 3000; if you have a conflict see "Changing ports" below.
+For UI-only work no env file is required. For anything that touches the API
+you need `.dev.vars` with a `DATABASE_URL` pointing at a Supabase Postgres —
+copy `.dev.vars.example` and fill it in. There is no local D1/SQLite and no
+in-memory API server.
 
 ---
 
 ## Daily workflow
 
-Two long-running processes — open two terminal tabs:
-
-**Terminal 1 — API**
+### UI-only (no API)
 
 ```bash
-npm run api
+npm run dev        # Vite on http://localhost:3000
 ```
 
-Runs `npx tsx src/api/index.ts` with the app tsconfig. You should see:
+Note: `vite.config.ts:221` proxies `/api` to `http://localhost:3001`, but
+**nothing in this repo listens on 3001** — the standalone Node API server
+(`src/api/index.ts`, `npm run api`) was removed when the app moved to
+Cloudflare Pages Functions. That proxy line is vestigial; `/api/*` calls
+under plain `npm run dev` will fail to connect.
 
-```
-Hookka ERP API server starting on port 3001...
-Hookka ERP API server running at http://localhost:3001
-```
-
-**Terminal 2 — Vite dev server**
+### Full stack (SPA + real Hono API)
 
 ```bash
-npm run dev
+npm run dev:worker    # wrangler pages dev --port 8787 -- vite
 ```
 
-Then open http://localhost:3000. The Vite config proxies `/api/*` to
-`localhost:3001` so the browser always talks to relative URLs.
+This boots the Workers runtime on http://localhost:8787 with
+`functions/api/[[route]].ts` → `src/api/worker.ts` mounted at `/api/*`, and
+runs Vite behind it. The API talks to Supabase Postgres via `DATABASE_URL`
+in `.dev.vars` (Hyperdrive is only bound on Cloudflare, so local dev falls
+back to the raw URL — see `pickDbUrl` in `src/api/worker.ts:305`).
 
 ### Hot reload
 
 - Vite HMR is on for every file under `src/`. Edits to pages / components
   update without a full reload.
-- The API does **not** hot-reload. Restart `npm run api` after API-route
-  changes. (Add `tsx watch` if you want this — the tradeoff is flakier
-  behaviour on large file trees.)
+- Worker-side (`src/api/**`) changes are picked up by `wrangler pages dev`
+  on save, but a failed rebuild leaves the previous bundle serving — watch
+  the wrangler output rather than assuming.
 
 ---
 
 ## Build and preview
 
 ```bash
-npm run build       # tsc -b (type-check all references) + vite build
-npm run preview     # serve the dist/ bundle on localhost:4173
+npm run build         # vite build
+npm run build:strict  # typecheck:app && vite build  ← use this before pushing
+npm run preview       # serve the dist/ bundle on localhost:4173
 ```
 
-Production bundle lands in `dist/`. Both commands fail loud on TypeScript
-errors — `npm run build` runs `tsc -b` before `vite build`.
+Production bundle lands in `dist/`. **`npm run build` alone does NOT
+type-check** — it is a bare `vite build`. The typecheck gate is
+`npm run build:strict`, which is also what CI runs
+(`.github/workflows/deploy.yml`, step `npm run build:strict`).
 
 ---
 
@@ -124,14 +132,18 @@ is to re-export a mix of components, types, and helpers.
    modules).
 2. Add a lazy import + route entry in `src/router.tsx`.
 3. If it needs API data, add a route file in `src/api/routes/<module>.ts`
-   and mount it in `src/api/index.ts`.
+   and mount it in `src/api/worker.ts`.
 
 ### Add a new API endpoint
 
-1. Add a route handler to the relevant file in `src/api/routes/`.
-2. If it's a new resource, create the file and mount it in
-   `src/api/index.ts`.
-3. Restart `npm run api`.
+1. Add a route handler to the relevant file in `src/api/routes/` (136 route
+   files live there).
+2. If it's a new resource, create the file and `app.route("/api/<name>", …)`
+   it in `src/api/worker.ts`. Mount it **after** `app.use("/api/*",
+   authMiddleware)` (`src/api/worker.ts:913`) unless it is deliberately
+   public — public routes are mounted above that line to bypass the gate.
+3. Use `c.var.DB` (the `SupabaseAdapter` D1-shaped wrapper over Postgres),
+   never `c.env.DB` — the D1 binding was retired 2026-04-27.
 
 ### Add a new status value
 
@@ -152,17 +164,13 @@ ad-hoc `text-[#xxx]` classes in page code.
 
 ## Changing ports
 
-If 3000 or 3001 is taken:
+- **Vite** — edit `server.port` in `vite.config.ts` (currently 3000, with
+  `host: true` so phones on the same wifi can reach the `/worker` portal).
+- **Worker runtime** — edit the `--port 8787` flag in the `dev:worker`
+  script in `package.json`.
 
-- **Vite** — edit `server.port` in `vite.config.ts`.
-- **API** — set `API_PORT` before `npm run api`:
-
-  ```bash
-  API_PORT=3002 npm run api
-  ```
-
-  Also update `src/api/index.ts` → `cors.origin` to include the new Vite
-  port, and update the Vite proxy target in `vite.config.ts`.
+CORS for the deployed app is driven by the `API_CORS_ORIGIN` var in
+`wrangler.toml`, not by a hard-coded origin list in the code.
 
 ---
 
@@ -174,17 +182,10 @@ Something is on the port. Either kill it or switch ports (see above). On
 Windows:
 
 ```powershell
-# find the PID on port 3001
-Get-NetTCPConnection -LocalPort 3001 | Select-Object OwningProcess
+# find the PID on port 8787
+Get-NetTCPConnection -LocalPort 8787 | Select-Object OwningProcess
 # then Stop-Process -Id <pid>
 ```
-
-### `tsx` errors about path aliases
-
-The `@/…` aliases are resolved by `tsconfig-paths` via the tsconfig
-referenced in `npm run api`. If you see `Cannot find module '@/lib/…'`,
-make sure you ran the script via `npm run api` (not `node` or `tsx src/api/index.ts`
-directly) so the tsconfig is picked up.
 
 ### `npm install` hangs on Windows
 
@@ -203,21 +204,21 @@ jsPDF honours the system fonts embedded in `lib/pdf-utils.ts`. If a new
 generator uses a different font, add the font file to
 `src/assets/fonts/…` and register it in `pdf-utils.ts`.
 
-### Dev data resets every time I restart
-
-That's expected — `lib/mock-data.ts` is in-memory. Seed data is re-created
-on each `npm run api`. Persisting to a DB is the Extension Point #1 in
-`docs/ARCHITECTURE.md`.
-
 ### Vite dev server can't reach the API
 
-Check:
+Under plain `npm run dev` it never can — see "Daily workflow" above. Use
+`npm run dev:worker` and hit port 8787.
 
-1. Is `npm run api` actually running? (`curl http://localhost:3001/health`
-   should return `{ "status": "ok", … }`.)
-2. Is the proxy target in `vite.config.ts` still `http://localhost:3001`?
-3. Is CORS configured for your Vite origin? (See
-   `src/api/index.ts` → `cors.origin`.)
+If `npm run dev:worker` is running and `/api/*` still fails:
+
+1. `curl http://localhost:8787/api/health` — a 500 here means the DB, not
+   the routing.
+2. Is `DATABASE_URL` set in `.dev.vars`? Without it `pickDbUrl`
+   (`src/api/worker.ts:305`) has nothing to fall back to, since the
+   `HYPERDRIVE` binding only exists on Cloudflare.
+3. File-storage routes returning `503 file storage unavailable` are
+   expected locally — `SUPABASE_PROJECT_REF` / `SUPABASE_SERVICE_KEY` are
+   unset, and `src/api/lib/supabase-storage.ts` fails closed by design.
 
 ---
 

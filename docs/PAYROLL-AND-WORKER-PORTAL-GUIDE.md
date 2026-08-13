@@ -1,5 +1,26 @@
 # Payroll & Worker Portal — Explanation Guide
 
+> **Last verified: 2026-08-13** against `src/api/routes/payroll.ts`,
+> `src/api/routes/payslips.ts`, `src/api/routes/pay-rules.ts`,
+> `src/api/routes/payroll-hour-deductions.ts`, `src/api/routes/attendance.ts`,
+> `src/api/routes/worker-auth.ts`, `src/api/lib/pay-rules-store.ts`,
+> `src/api/lib/efficiency-allowance.ts`, `src/api/lib/geofence.ts`,
+> `src/api/lib/punch-autofill.ts`, `src/pages/worker/`, `src/pages/employees.tsx`.
+>
+> Spot-checks that held: the 200 m factory fence that flags but never blocks a punch
+> (`geofence.ts:19-22`, `DEFAULT_FACTORY_GEOFENCE.radiusM = 200`); the selfie being
+> mandatory to punch (`src/pages/worker/index.tsx:669`); the per-worker day-rate
+> divisor coming from `workers.workingDaysPerMonth` rather than a hardcoded 26
+> (`payroll.ts:26`, `:167`, `:212`); the efficiency allowance being a flat per-worker
+> bonus gated on a per-worker threshold and added **after** `calcStatutory` so it never
+> moves EPF/SOCSO/EIS/PCB (`efficiency-allowance.ts`); the printable **Calculation
+> Guide** button (`employees.tsx:7470`). Worker-portal pages all exist:
+> `index / pay / scan / qc / team / me / issue / login`.
+>
+> One thing this guide does not cover: `src/pages/worker/qc.tsx` and
+> `src/pages/worker/team.tsx` are live screens with no section here. Not pay-related,
+> so nothing below is wrong — only incomplete.
+
 Audience: office staff and anyone explaining pay to workers. Everything here
 matches the live engine (and the printable **Calculation Guide** button on the
 Payroll tab, which produces a worked-example handout for workers).

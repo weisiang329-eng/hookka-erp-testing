@@ -1,5 +1,9 @@
 # Handoff — invoice top-up (RM 15,480) + DB password rotation
 
+> **Last verified: 2026-08-13** against `scripts/exec-invoice-topup-2026-07-23.mjs`, `scripts/_plan-invoice-topup-2026-07-23.json`, `scripts/audit-billable-2026-07-22.mjs` and `docs/SECURITY-ROTATION-TODO.md`.
+> **STEP 2 IS STILL OPEN** — `docs/SECURITY-ROTATION-TODO.md` still exists and still reads "🔴 Secret rotation — OPEN, owner action required". The handoff's own exit condition was "rotate, then delete that TODO file", so the file's presence is the evidence: the prod Supabase password has NOT been rotated as of 2026-08-13.
+> **UNVERIFIED ASSERTION** (as of 2026-08-13): whether STEP 1 was ever executed is **not checkable from source** — the script and the frozen plan are both still on disk, but they are idempotent and re-verify live before writing, so their presence proves nothing either way. Run the dry run (`node scripts/exec-invoice-topup-2026-07-23.mjs`) and read its output before assuming the RM 15,480 gap is open or closed. Do not re-run `--execute` on the assumption it never ran.
+
 Everything from the 2026-07-22/23 pricing work is shipped **except two steps that need a
 login or a dashboard**, which is why they are handed off rather than done.
 

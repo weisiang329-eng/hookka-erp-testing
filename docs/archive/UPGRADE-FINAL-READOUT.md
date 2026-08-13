@@ -1,3 +1,9 @@
+> **ARCHIVED — HISTORY ONLY. Last had current content 2026-04-26; archived 2026-07-23.**
+> This describes work that is finished or a system that has since changed. Its file
+> paths, line numbers, counts and open items are as of the date above and were NOT
+> re-verified. **Do not use it to decide what the code does today** — read the code, or
+> `docs/CODEBASE-MAP.md`. Banner added 2026-08-13; see `docs/archive/README.md`.
+
 # 90-Day Enterprise Upgrade — Final Readout
 
 > **Window**: 2026-04-25 → 2026-04-26 (originally planned 13 weeks; compressed via parallel-agent execution)
@@ -37,7 +43,7 @@
 
 **Phase 4 — Scheduler Policy.** Primitive + ESLint guard shipped (P4.1 + P4.2). P4.3 (migrate ~30 raw call sites) is in flight; two entangled cases in `production/index.tsx` are documented as P4.3-followup with block-scoped `eslint-disable` and justifications. P4.4 (lift `useVersionCheck` to root via context) deferred to post-window.
 
-**Phase 5 — API SDK + Unified Query.** Unified API client landed (16 files / 1233 lines: `client.ts` + `request.ts` + `cache.ts` + `errors.ts` + `_crud.ts` + 11 resource modules). Per-page migration (P5.1–P5.6) audited and deferred per cost/benefit — see [SDK-MIGRATION-STATUS.md](SDK-MIGRATION-STATUS.md). Go-forward rule: new code uses `@/lib/api`; legacy `fetchJson + Zod` is sanctioned, not deprecated. P5.6 (lint-block raw `fetch(`) explicitly decided against — would force noise eslint-disables on sanctioned legacy code.
+**Phase 5 — API SDK + Unified Query.** Unified API client landed (16 files / 1233 lines: `client.ts` + `request.ts` + `cache.ts` + `errors.ts` + `_crud.ts` + 11 resource modules). Per-page migration (P5.1–P5.6) audited and deferred per cost/benefit — see [SDK-MIGRATION-STATUS.md](../SDK-MIGRATION-STATUS.md). Go-forward rule: new code uses `@/lib/api`; legacy `fetchJson + Zod` is sanctioned, not deprecated. P5.6 (lint-block raw `fetch(`) explicitly decided against — would force noise eslint-disables on sanctioned legacy code.
 
 **Phase 6 — Observability.** P6.1 done (W3C traceparent + `Server-Timing` per response). P6.2 + P6.3 landed in commit 0ab1081 — Cloudflare Analytics Engine writes per-route p50/p75/p95 + per-resource counters + audit/login/4xx/5xx counts. P6.4 (`/admin/health` page rendering on top of those queries) is in flight (untracked `src/api/routes-d1/admin-health.ts` + `src/pages/admin/` at sweep time) — slated to land before the window closes.
 

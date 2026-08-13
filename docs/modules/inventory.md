@@ -1,5 +1,8 @@
 # Inventory — Module Guide
 
+> **Last verified: 2026-08-13** against `src/pages/inventory/*`, `src/api/routes/{inventory,inventory-wip,raw-materials,fg-units,fabric-tracking,fabrics,warehouse,stock-adjustments,stock-value,rm-batches,stock-accounts,_fabric-cascade}.ts`, `src/dashboard-routes.tsx`, `src/api/worker.ts`, and `tests/`.
+> Corrected 2026-08-13: the route mounts are `worker.ts:1239-1240` (not 1135-1146/:1225); `fg-units.ts` is 1,216 lines (not 918) and its `/scan` handler is at :1047 (not :801); `dashboard-routes.tsx` registers `/inventory*` at :391-394. `GET /api/inventory/fg-source` confirmed **gone** from the tree. Every other anchor verified within ±30 lines.
+
 > Self-navigating docs (L2). Repo-wide map: [[CODEBASE-MAP]]. Never grep the whole repo — use the file:line below.
 
 ## What it does
@@ -7,19 +10,19 @@ Read-mostly stock visibility across the three stages of manufacturing: **Finishe
 
 ## Entry points
 - **Pages**
-  - `/inventory` → `src/pages/inventory/index.tsx:1009` (`InventoryPage` — 3 tabs FG/WIP/RM off one `activeTab` state at `:1012`)
-  - `/inventory/fabrics` → `src/pages/inventory/fabrics.tsx:66` (`FabricsPage` — fabric tracking)
-  - `/inventory/stock-value` → `src/pages/inventory/stock-value.tsx:76` (`StockValuePage` — valuation snapshots)
-  - `/inventory/adjustments` → `src/pages/inventory/adjustments.tsx:161` (`StockAdjustmentsPage`)
-  - Routes registered in `src/dashboard-routes.tsx:364-367`
-- **API routes** (mounted in `src/api/worker.ts:1135-1146`, `:1225`; `/wip` MUST mount before `/inventory`)
-  - Aggregate read + drill-downs → `src/api/routes/inventory.ts` (719 lines)
-  - WIP derived view → `src/api/routes/inventory-wip.ts` (665) — mounted at `/api/inventory/wip`
-  - RM CRUD + dup-code toggle → `src/api/routes/raw-materials.ts` (726)
-  - FG lifecycle + backfills + scan → `src/api/routes/fg-units.ts` (918)
-  - Active fabric CRUD → `src/api/routes/fabric-tracking.ts` (466); DEPRECATED `fabrics.ts` (68, writes 410)
+  - `/inventory` → `src/pages/inventory/index.tsx:1034` (`InventoryPage` — 3 tabs FG/WIP/RM off one `activeTab` state)
+  - `/inventory/fabrics` → `src/pages/inventory/fabrics.tsx` (`FabricsPage` — fabric tracking)
+  - `/inventory/stock-value` → `src/pages/inventory/stock-value.tsx` (`StockValuePage` — valuation snapshots)
+  - `/inventory/adjustments` → `src/pages/inventory/adjustments.tsx` (`StockAdjustmentsPage`)
+  - Routes registered in `src/dashboard-routes.tsx:391-394`
+- **API routes** (mounted in `src/api/worker.ts:1239-1240`; `/wip` MUST mount before `/inventory`)
+  - Aggregate read + drill-downs → `src/api/routes/inventory.ts` (661 lines)
+  - WIP derived view → `src/api/routes/inventory-wip.ts` (761) — mounted at `/api/inventory/wip`
+  - RM CRUD + dup-code toggle → `src/api/routes/raw-materials.ts` (776)
+  - FG lifecycle + backfills + scan → `src/api/routes/fg-units.ts` (1216)
+  - Active fabric CRUD → `src/api/routes/fabric-tracking.ts` (466); DEPRECATED `fabrics.ts` (71, writes 410)
   - Warehouse racks + movements → `src/api/routes/warehouse.ts` (801)
-  - Stock adjustments → `src/api/routes/stock-adjustments.ts` (567)
+  - Stock adjustments → `src/api/routes/stock-adjustments.ts` (583)
   - Valuation → `src/api/routes/stock-value.ts` (287); read-only `rm-batches.ts` (95), `stock-accounts.ts` (42)
   - Internal helper (NOT mounted) → `src/api/routes/_fabric-cascade.ts` (216)
 
@@ -37,58 +40,57 @@ Read-mostly stock visibility across the three stages of manufacturing: **Finishe
 
 ## Core flows
 1. **3-tab aggregate read** — `GET /api/inventory` `inventory.ts:148` returns `{finishedProducts, wipItems, rawMaterials}`. `finishedProducts.stockQty` is hard-coded 0 (`:161-164`); the real FG count comes separately.
-2. **FG stock derivation** — `GET /api/inventory/fg-stock` `inventory.ts:613` runtime-creates `inventory_fg_stock_snapshot` then serves a cache-aside snapshot (`withSnapshot`, `../lib/snapshot`) computed from `production_orders`/`fg_units`. FE consumes it as deltas (`index.tsx:1346`, `:1403`) — this replaced the old client-side `deriveFGStock` (now in shared `@/lib/fg-stock`).
-3. **WIP derivation** — `GET /api/inventory/wip` `inventory-wip.ts:158` projects non-zero `wip_items` rows, walking dept sequence. FE also derives its own view via `deriveWIPFromPO` (`index.tsx:300`) + `mergeSofaWIPSets` (`:523`, one synthetic row per SO+fabric for sofas).
+2. **FG stock derivation** — `GET /api/inventory/fg-stock` `inventory.ts:537` runtime-creates `inventory_fg_stock_snapshot` (`CREATE TABLE IF NOT EXISTS` at `:548`) then serves a cache-aside snapshot (`withSnapshot`, `../lib/snapshot`) computed from `production_orders`/`fg_units`. FE consumes it as deltas — this replaced the old client-side `deriveFGStock` (now in shared `@/lib/fg-stock`).
+3. **WIP derivation** — `GET /api/inventory/wip` `inventory-wip.ts:159` projects non-zero `wip_items` rows, walking dept sequence. FE also derives its own view via `deriveWIPFromPO` (`index.tsx:325`) + `mergeSofaWIPSets` (`:548`, one synthetic row per SO+fabric for sofas).
 4. **Shortage forecast** — `GET /api/inventory/shortage-forecast` `inventory.ts:225` walks CONFIRMED/IN_PRODUCTION SOs, sums per-RM BOM consumption via `collectBomMaterials` (`:205`), subtracts `balanceQty`, adds incoming-PO qty (≤ today+14d), returns `shortBy > 0`.
 5. **Stock adjustment** — `POST /api/stock-adjustments` `stock-adjustments.ts:209` validates type (RM/WIP/FG) + reason, then writes `stock_adjustments` (`:392`) AND `stock_movements` (`:421`) in one batch; carries `unitCostSen`/`caseId`.
-6. **Drill-downs** — `GET /rm-source/:rmId` (which `rm_batches`/GRNs stock this RM). The FG equivalent `/fg-source/:productCode` was **deleted 2026-08-08**: the Stock Breakdown panel's Movements-in lists the same production orders off the cost ledger, which is the copy that reconciles.
+6. **Drill-downs** — `GET /rm-source/:rmId` (`inventory.ts:460` — which `rm_batches`/GRNs stock this RM). The FG equivalent `/fg-source/:productCode` was **deleted 2026-08-08** (confirmed absent 2026-08-13): the Stock Breakdown panel's Movements-in lists the same production orders off the cost ledger, which is the copy that reconciles.
 
 ## Key functions / sections (locate-to-function)
 | Symbol / section | file:line | Role |
 |---|---|---|
-| `InventoryPage` | `src/pages/inventory/index.tsx:1009` | 3-tab grid host; `activeTab` at `:1012` |
+| `InventoryPage` | `src/pages/inventory/index.tsx:1034` | 3-tab grid host |
 | `StockBreakdownDrawer` | `src/pages/inventory/StockBreakdownDrawer.tsx` | The per-item panel — opened by a ROW CLICK on any tab |
 | `mergeRmReceipts` / `fgProductDetails` | `src/lib/stock-breakdown.ts` | RM lots+inbound-movements merge; the FG product-details field list |
-| `deriveWIPFromPO` | `src/pages/inventory/index.tsx:300` | Client WIP derivation across dept stages |
-| `mergeSofaWIPSets` | `src/pages/inventory/index.tsx:523` | Collapse sofa WIPs to one row per (SO, fabric) |
-| `fgColumns` / `wipColumns` / `rmColumns` | `index.tsx:634 / 741 / 951` | Per-tab column defs |
-| FG / WIP / RAW tab render | `index.tsx:1979 / 2355 / 2410` | Per-tab grid blocks |
-| `BatchEditRMDialog` | `index.tsx:3321` | Bulk RM edit dialog |
+| `deriveWIPFromPO` | `src/pages/inventory/index.tsx:325` | Client WIP derivation across dept stages |
+| `mergeSofaWIPSets` | `src/pages/inventory/index.tsx:548` | Collapse sofa WIPs to one row per (SO, fabric) |
+| `fgColumns` / `wipColumns` / `rmColumns` | `index.tsx:659 / 766 / 976` | Per-tab column defs |
+| `BatchEditRMDialog` | `index.tsx:3509` | Bulk RM edit dialog |
 | `GET /` (aggregate) | `src/api/routes/inventory.ts:148` | FG(0)/WIP/RM read |
-| `GET /fg-stock` | `inventory.ts:613` | Server snapshot; runtime-creates snapshot table |
+| `GET /fg-stock` | `inventory.ts:537` | Server snapshot; runtime-creates snapshot table |
 | `GET /shortage-forecast` | `inventory.ts:225` | SO-driven RM shortfall projection |
 | `collectBomMaterials` | `inventory.ts:205` | Recursive BOM material roll-up |
-| `GET /rm-source/:rmId` | `inventory.ts` | RM→batch drill-down (the FG twin was deleted 2026-08-08) |
-| `GET /` (WIP view) | `src/api/routes/inventory-wip.ts:158` | Derived WIP grid rows |
-| RM CRUD | `raw-materials.ts:147/162/217/318/465` | list/get/POST/PUT/DELETE |
-| `_unlock` / `_relock-duplicate-codes` | `raw-materials.ts:668 / 699` | One-shot dup-code index toggle |
+| `GET /rm-source/:rmId` | `inventory.ts:460` | RM→batch drill-down (the FG twin was deleted 2026-08-08) |
+| `GET /` (WIP view) | `src/api/routes/inventory-wip.ts:159` | Derived WIP grid rows |
+| RM CRUD | `raw-materials.ts:180/195/250/355/515` | list/get/POST/PUT/DELETE |
+| `_unlock` / `_relock-duplicate-codes` | `raw-materials.ts:707 / ~738` | One-shot dup-code index toggle |
 | `ensureDupCodesUnlocked` | `raw-materials.ts:47` | Keeps dup-code index OFF at runtime |
-| FG units list / scan / generate | `fg-units.ts:517 / 801 / 709` | Lifecycle; `backfill-*` one-shots `:610/:736` |
-| Fabric tracking CRUD | `fabric-tracking.ts:133/278/382/358` | list/POST/PUT/DELETE; `wipeFabricSnapshot` `:22` |
-| Warehouse racks + movements | `warehouse.ts:248/298/456/497` | `computeRackStatus` `:91`, `replaceRackItems` `:204` |
+| FG units list / scan | `fg-units.ts:563 / 1047` | Lifecycle; `backfill-*` one-shots `:670/:796` |
+| Fabric tracking CRUD | `fabric-tracking.ts:133/278/358` | list/POST/DELETE; `wipeFabricSnapshot` `:22` |
+| Warehouse racks + movements | `warehouse.ts:248/298/497` | `computeRackStatus` `:91`, `replaceRackItems` `:204` |
 | `POST /` (adjustment) | `stock-adjustments.ts:209` | Writes adjustment + movement together |
 | Stock value snapshots | `stock-value.ts:58/72/185` | list/POST/PUT valuation |
 
 ## Gotchas
-- **FG and WIP quantities are DERIVED, not stored.** Aggregate `GET /api/inventory` returns `stockQty:0` for FG (`inventory.ts:161`); the real count is the `/fg-stock` snapshot (server) or `deriveFGStock` in shared `@/lib/fg-stock`. WIP comes from `job_cards`/`production_orders` (`inventory-wip.ts` + `deriveWIPFromPO`). Changing production status models moves these counts.
-- **`fabrics.ts` is DEPRECATED** — POST/PUT/DELETE return HTTP 410 (`fabrics.ts:64-66`). All fabric mutation goes through `fabric-tracking.ts`. Don't add write logic to `fabrics.ts`.
-- **Dup-code unique index is intentionally OFF.** `ensureDupCodesUnlocked` (`raw-materials.ts:47`) keeps it off for distinct items sharing a code (BO315-21/23, 9MM AA/AB). `_unlock`/`_relock` (`:668/:699`) are one-shots — don't relock without owner sign-off.
-- **fg-units one-shots + public GET.** `backfill-dedupe-fg-units` (`:610`) / `backfill-hub` (`:736`) are migration endpoints; the list/get support optional-Bearer public access. COMPLETED / non-PENDING `fg_units` are inviolate.
-- **Adjustments write two tables together.** `stock_adjustments` + `stock_movements` are inserted in one batch (`stock-adjustments.ts:392/:421`); keep `unitCostSen`/`caseId` on the adjustment. Runtime `ensureStockAdjustmentColumns` (`:88`) self-applies `caseid`.
+- **FG and WIP quantities are DERIVED, not stored.** Aggregate `GET /api/inventory` (`:148`) returns `stockQty:0` for FG; the real count is the `/fg-stock` snapshot (server, `:537`) or `deriveFGStock` in shared `@/lib/fg-stock`. WIP comes from `job_cards`/`production_orders` (`inventory-wip.ts` + `deriveWIPFromPO`). Changing production status models moves these counts.
+- **`fabrics.ts` is DEPRECATED** — POST/PUT/DELETE return HTTP 410 (`fabrics.ts:67-69`). All fabric mutation goes through `fabric-tracking.ts`. Don't add write logic to `fabrics.ts`.
+- **Dup-code unique index is intentionally OFF.** `ensureDupCodesUnlocked` (`raw-materials.ts:47`) keeps it off for distinct items sharing a code (BO315-21/23, 9MM AA/AB). `_unlock`/`_relock` (`:707` and just below) are one-shots — don't relock without owner sign-off.
+- **fg-units one-shots + public GET.** `backfill-dedupe-fg-units` (`:670`) / `backfill-hub` (`:796`) are migration endpoints; the list/get support optional-Bearer public access. COMPLETED / non-PENDING `fg_units` are inviolate.
+- **Adjustments write two tables together.** `stock_adjustments` + `stock_movements` are inserted in one batch inside `POST /` (`stock-adjustments.ts:209`); keep `unitCostSen`/`caseId` on the adjustment. Runtime `ensureStockAdjustmentColumns` (`:89`) self-applies `caseid`.
 - **`rack_items` has TWO writers.** The `/r/` rack-QR stock-in AND `applyPackingRack` (`src/api/lib/packing-rack-write.ts`) both mirror rows; they share `packingPieceIdentity` (`src/api/lib/packing-piece-identity.ts`) so they converge on ONE row. Don't introduce a third identity formula. Status recomputed on read/write via `computeRackStatus` (`warehouse.ts:91`).
 - **`_fabric-cascade.ts` is not mounted** — underscore-prefixed internal helper, not a Hono router (covered by `tests/cascade-fc-aggregator.test.mjs`).
-- **`fg-stock` snapshot table is runtime-created** — migration files are inert on deploy, so the `CREATE TABLE IF NOT EXISTS` at `inventory.ts:624` is awaited before `withSnapshot`.
+- **`fg-stock` snapshot table is runtime-created** — migration files are inert on deploy, so the `CREATE TABLE IF NOT EXISTS` at `inventory.ts:548` is awaited before `withSnapshot`.
 - **`index.tsx` has a LOCAL `Product` type** differing from `@/types` Product — watch category typing under strict tsc.
 - **camelCase columns need a `column-rename-map.json` entry** or they 400; prefer snake_case for new inventory columns.
 - **ONE row click = ONE panel (owner 2026-08-08).** The Stock Breakdown drawer now also carries a finished good's own catalogue details, read-only, with an **Edit product** button that opens the existing dialog and reopens the drawer afterwards. The dialog's duplicate "Source Production Orders" table is deleted (the panel's inbound movements are the same production orders, from the cost ledger instead of `/api/inventory/fg-source` — which lost its last consumer and has since been deleted). The kebab lost "Stock breakdown" on all three tabs and "View" on FG/RM (it called the same handler as "Edit"); Edit / Delete / Refresh stay, and WIP keeps "View" because its dialog shows the GRID's own derivation, not the panel's server-side job cards.
 - **The three item types are NOT the same panel.** RM merges its FIFO lots with its inbound movements into one "Receipts & stock lots" table (`mergeRmReceipts`, pure + tested — nothing is dropped from either side) and keeps a deliberately empty Movements out; FG has NO lots section and NO COGS, just Movements in / Movements out plus a collapsed "Pieces on hand" per-serial list; WIP is unchanged. Full column lists and the reasoning are in [[CODEBASE-MAP]] under Inventory.
 
 ## Common tasks (mini-playbook)
-- **Add an RM field** → snake_case column (+ rename-map if camelCase); persist in `raw-materials.ts` POST (`:217`)/PUT (`:318`); surface in `rowToApi` (`:99`) and `rmColumns` (`index.tsx:951`).
-- **Change how FG stock counts** → edit the `/fg-stock` snapshot source (`inventory.ts:613`) AND shared `@/lib/fg-stock` (kept byte-identical to the old client rule); verify with `tests/production-wip-producer-output.test.mjs`.
-- **Change WIP derivation** → the server view (`inventory-wip.ts:158`) and the client `deriveWIPFromPO` (`index.tsx:300`) must stay in lockstep; sofa merge in `mergeSofaWIPSets` (`:523`).
+- **Add an RM field** → snake_case column (+ rename-map if camelCase); persist in `raw-materials.ts` POST (`:250`)/PUT (`:355`); surface in `rowToApi` (`:108`) and `rmColumns` (`index.tsx:976`).
+- **Change how FG stock counts** → edit the `/fg-stock` snapshot source (`inventory.ts:537`) AND shared `@/lib/fg-stock` (kept byte-identical to the old client rule); verify with `tests/production-wip-producer-output.test.mjs`.
+- **Change WIP derivation** → the server view (`inventory-wip.ts:159`) and the client `deriveWIPFromPO` (`index.tsx:325`) must stay in lockstep; sofa merge in `mergeSofaWIPSets` (`:548`).
 - **Add an adjustment reason/type** → extend `VALID_TYPES`/`VALID_REASONS` and the POST handler (`stock-adjustments.ts:209`); keep the dual `stock_adjustments`+`stock_movements` write.
-- **Touch warehouse racks** → `warehouse.ts` (racks POST `:396`, movements POST `:497`); go through `replaceRackItems` (`:204`) + `computeRackStatus` (`:91`); never bypass `packingPieceIdentity`.
+- **Touch warehouse racks** → `warehouse.ts` (racks POST `:298`, movements POST `:497`); go through `replaceRackItems` (`:204`) + `computeRackStatus` (`:91`); never bypass `packingPieceIdentity`.
 
 ## Related modules
 [[production]] [[procurement]] [[accounting]] [[sales]] [[delivery]]

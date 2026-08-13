@@ -1,5 +1,8 @@
 # Cloudflare Queues — Admin Runbook
 
+> **Last verified: 2026-08-13** against `wrangler.toml` (queue blocks still commented out under "Phase C #3 quick-win"), `src/api/lib/queue-po-emission.ts:67-78` (producer returns `{ via: "queue" | "inline" }`), and `src/api/queues/po-emission-consumer.ts` (the repo's only queue consumer).
+> Still accurate: nothing has been provisioned, the bindings are still commented out, and the producer still falls back inline.
+
 **Status:** Scaffold landed 2026-04-25. Bindings commented out in
 `wrangler.toml`; the code path is shipped behind a runtime guard so the
 build is green today and the queue activates the moment the binding is
@@ -80,7 +83,13 @@ Commit, push, let the deploy workflow promote the change.
 
 1. Create a new minimal Worker project (`wrangler init hookka-queues`).
 2. Add the same `[[queues.consumers]]` and the same env bindings the
-   consumer needs (`HYPERDRIVE`, `RESEND_API_KEY`, `RESEND_FROM_EMAIL`).
+   consumer needs (`HYPERDRIVE`, `RESEND_FROM_EMAIL`, and the mail
+   provider key — note that as of 2026-05-27 outbound mail went to Brevo:
+   `src/api/lib/email.ts` picks Brevo when `BREVO_API_KEY` is set and only
+   falls back to `RESEND_API_KEY`, so set whichever the prod worker uses).
+   There is already precedent for a sibling Worker in this repo —
+   `agent-heartbeat-worker/`, shipped by
+   `.github/workflows/deploy-cron-worker.yml`.
 3. In its `src/index.ts`, re-export our consumer:
    ```ts
    import handler from "../../hookka-erp-testing/src/api/queues/po-emission-consumer";

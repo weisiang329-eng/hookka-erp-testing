@@ -1,5 +1,14 @@
 # Engineering Onboarding and Change Impact SOP
 
+> **Last verified: 2026-08-13** against `README.md`, `docs/` file listing,
+> `docs/context-packs/`, `src/router.tsx`, `src/api/worker.ts`.
+> Corrected 2026-08-13: the onboarding table pointed at `docs/archive/MODULES.md`, which is now
+> archived as superseded and wrong.
+>
+> **Scope caveat, from `docs/DEV-OPERATING-FRAMEWORK.md`:** this SOP and the PR template
+> "describe a human-team flow we don't use (solo + AI, direct-to-main) — keep for
+> reference, don't enforce." Treat the checklists here as a thinking aid, not a gate.
+
 Purpose: explain how a new engineer or AI assistant should understand Hookka ERP without reading the whole repository, and how to evaluate impact before changing production code.
 
 ## Why we do not read the whole codebase first
@@ -17,7 +26,7 @@ For Hookka ERP, start with:
 
 | Layer | Goal | Typical files |
 | --- | --- | --- |
-| Product overview | Understand what the system does | `README.md`, `docs/MODULES.md` |
+| Product overview | Understand what the system does | `README.md`, `docs/CODEBASE-MAP.md`, `docs/modules/*.md` (**corrected 2026-08-13** — was `docs/archive/MODULES.md`, now archived/superseded) |
 | Architecture | Understand frontend/backend/DB shape | `docs/ARCHITECTURE.md`, `src/router.tsx`, `src/api/worker.ts` |
 | Domain flow | Understand business process | `docs/context-packs/core-flow.md`, module docs, target pages/routes |
 | Technical conventions | Understand how to code safely | `docs/DESIGN-SYSTEM.md`, `docs/API.md`, route README, tests |

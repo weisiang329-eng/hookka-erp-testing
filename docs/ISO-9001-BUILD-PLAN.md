@@ -1,5 +1,24 @@
 # ISO 9001:2015 — Build Plan (the QMS spine)
 
+> **Last verified: 2026-08-13** against `src/api/routes/` (136 files) and
+> `migrations-postgres/` (244 files, latest `0223_trade_finance.sql`).
+>
+> Corrected 2026-08-13: **nothing in this plan has been built.** Four weeks on, none
+> of Phase 1–4 exists in code — there is no `nonconformances` table and no
+> `nonconformance`/`ncr`/`capa`/`internal-audit`/`management-review` migration or
+> route; the only QMS-adjacent surfaces are still `qc-inspections.ts`,
+> `qc-pending.ts`, `qc-templates.ts`, `equipment.ts` and `audit-events.ts` (the
+> data-change log, explicitly *not* an internal-audit program). This is a **proposal
+> awaiting the owner's go-ahead**, not work in progress.
+>
+> The closing line "Phase 1 (NCR) mockup is already on screen" refers to a
+> `show_widget` render inside the 2026-07-18 chat session. That mockup is not in the
+> repo and cannot be recovered — a future agent must re-mock before building.
+>
+> > **UNVERIFIED ASSERTION** (as of 2026-08-13): the phase ordering, the clause
+> > mapping, and the claim that these five modules give the most certification
+> > leverage are owner/consultant judgement, not checkable from source.
+
 **Date:** 2026-07-18 · **Owner decision:** build the ISO 9001 quality modules (MFRS goes to the
 accountant, not built here — see [MFRS-GAP-ANALYSIS.md](MFRS-GAP-ANALYSIS.md)).
 **Source of gaps:** [ISO-9001-GAP-ANALYSIS.md](ISO-9001-GAP-ANALYSIS.md).

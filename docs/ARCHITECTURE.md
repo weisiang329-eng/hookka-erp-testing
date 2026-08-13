@@ -1,15 +1,22 @@
 # Architecture
 
+> **Last verified: 2026-08-13** against `src/api/worker.ts`, `functions/api/[[route]].ts`,
+> `src/api/lib/auth-middleware.ts`, `src/router.tsx`, `src/layouts/`, `src/components/ui/`,
+> `eslint.config.js`, `package.json`, `wrangler.toml`, `.github/workflows/backup.yml`.
+> Corrected 2026-08-13: this doc still described a dev-only Node API server
+> (`src/api/index.ts`, `src/api/routes-mock/`, `npm run api`), a `PortalLayout`, a
+> `/api/test/*` B-flow surface, and an unwired login page — **none of those exist**.
+> Those sections are deleted rather than paraphrased. Counts were also stale
+> (~70 routes → 139 mounts; 80+ migrations → 244).
+
 A bird's-eye view of how HOOKKA ERP is put together — the shape of the
 frontend, the Hono API on Cloudflare Pages Functions, the Postgres data
 layer, and the extension points you should know about before touching
 anything.
 
-> **2026-04-29 update** — this doc previously described a mock-data-only
-> world that's been retired since the D1→Supabase migration completed
-> 2026-04-27. The runtime now serves real data from Supabase Postgres
-> via Hyperdrive. The mock layer (`src/api/routes-mock/*` + `src/lib/mock-data.ts`)
-> is **dev-server-only** and not reachable from the deployed Pages site.
+For the endpoint-level reference, read [`API.md`](API.md) — it is **generated**
+from `worker.ts` + the route files (`node scripts/gen-api-docs.mjs`), so it does
+not drift. For where code lives, read [`CODEBASE-MAP.md`](CODEBASE-MAP.md).
 
 ---
 
@@ -40,28 +47,34 @@ anything.
 │  │   • DB injection (SupabaseAdapter wraps         │    │
 │  │     postgres.js → Hyperdrive)                   │    │
 │  │   • authMiddleware (cookie-first / Bearer)      │    │
-│  │   • tenantMiddleware (orgId from JWT)           │    │
-│  │   • ~70 route subapps from src/api/routes/      │    │
-│  │     each calls requirePermission + withOrgScope │    │
+│  │   • tenantMiddleware (orgId on the session)     │    │
+│  │   • 139 route mounts from src/api/routes/       │    │
+│  │     (136 route files) — each gates itself with  │    │
+│  │     requirePermission + org scoping             │    │
 │  └───────────────┬────────────────────────────────┘     │
 │                  │                                      │
 │  ┌───────────────▼────────────────────────────────┐     │
 │  │  Hyperdrive (Cloudflare-pooled Postgres)        │    │
 │  │   ↓                                             │    │
 │  │  Supabase Postgres (primary OLTP)               │    │
-│  │   • 80+ migrations under migrations-postgres/   │    │
-│  │   • org_id NOT NULL on all transaction tables   │    │
+│  │   • 244 migrations under migrations-postgres/   │    │
 │  │   • immutable ledger_journal_entries hash chain │    │
-│  │   • PITR (7d WAL) + daily pg_dump → R2          │    │
+│  │   • daily pg_dump → Supabase Storage            │    │
 │  └────────────────────────────────────────────────┘     │
 └─────────────────────────────────────────────────────────┘
 ```
 
 The frontend and API live in the same repo and ship together. Production
 serves real Postgres data on every `/api/*` route mounted in
-`src/api/worker.ts`. The dev-only Hono node server (`src/api/index.ts` on
-port 3001) and `src/api/routes-mock/*` are **not deployed** — they exist
-for offline development without Hyperdrive credentials.
+`src/api/worker.ts`. **There is no second API server** — no
+`src/api/index.ts`, no `src/api/routes-mock/`, no `npm run api`. Local
+development is `npm run dev` (Vite) or `npm run dev:worker`
+(`wrangler pages dev`, which talks to Supabase via `DATABASE_URL` in
+`.dev.vars`).
+
+Nightly backup: `.github/workflows/backup.yml` runs `pg_dump -Fc` and uploads
+to the Supabase Storage bucket under `backups/` (it was R2 until the
+2026-04-29 storage-supabase migration — `scripts/backup-supabase.mjs`).
 
 ---
 
@@ -72,11 +85,14 @@ for offline development without Hyperdrive credentials.
 `src/main.tsx` mounts `<RouterProvider>` with the router defined in
 `src/router.tsx`. The router is a single flat array of route objects:
 
-- Auth + public tracking live outside any layout.
+- Auth + the public QR/scan/survey pages live outside any layout.
 - Everything behind the sidebar lives under `<DashboardLayout>`
-  (`src/layouts/DashboardLayout.tsx` — wraps `<Sidebar>` + `<Topbar>` + an
-  `<Outlet>`).
-- The customer-facing self-service lives under `<PortalLayout>`.
+  (`src/layouts/DashboardLayout.tsx`), wrapped in `<RequireAuth>`
+  (`src/components/RequireAuth.tsx`).
+- The shop-floor phone portal lives under `<WorkerLayout>`
+  (`src/layouts/WorkerLayout.tsx`); the compact mobile dashboard is
+  `src/pages/m/MobileLayout.tsx`, which shares the dashboard cookie session.
+- There is **no** `PortalLayout` and no customer self-service layout.
 
 Every page is imported with `React.lazy()` and wrapped in `<Suspense>` with a
 shared skeleton fallback. Bundle chunks are per-route.
@@ -128,7 +144,7 @@ Three conventions every page follows:
 | `PageHeader`        | Title + subtitle + actions + optional breadcrumbs              |
 | `FilterBar`         | Search + arbitrary child controls + reset                      |
 | `Tabs`              | `variant="underline"` (Inventory-style) / `"pill"` (dept-style) |
-| `StatusBadge`       | `kind`-typed chip; adding a new backend enum is a compile error |
+| `StatusBadge`       | Status chip. NOTE: `value` is typed `string` and unknown values fall through to a grey NEUTRAL chip via `resolveUnknownStatus` — a new backend enum does NOT produce a compile error |
 | `DataGrid`          | TanStack-Table wrapper with double-click, sticky header, etc.  |
 | `DataTable`         | Lightweight striped table for read-only summaries              |
 | `Button`, `Input`   | Tailwind + CVA variants, with loading + icon slots             |
@@ -137,28 +153,45 @@ Three conventions every page follows:
 | `DocumentFlowDiagram` | Read-only lineage diagram (SO → PO → DO → Invoice graph)     |
 | `ErrorBoundary`     | Route-level fallback (used by `errorElement`)                  |
 | `ToastProvider`     | Top-level toast host, opened via `useToast()`                  |
+| `MoneyInput`        | RM entry/display for integer-sen fields (`money-input.tsx`)     |
+| `StatusTabStrip`    | The ONE status tab strip (count + money per state)              |
+| `DocumentDetailDrawer` | The ONE shared right slide-over document chrome              |
 
-All are re-exported from `src/components/ui/index.ts` (barrel).
+All are re-exported from `src/components/ui/index.ts` (barrel). The table above
+is a selection, not the full list — `ls src/components/ui/` is the inventory
+(38 files as of 2026-08-13).
 
 ### State and data fetching
 
-The codebase uses plain `fetch` + local `useState` + `useEffect` for most
-screens. There is **no Redux / Zustand / React Query** — every page pulls
-fresh data on mount and refetches after mutations. This is intentional for
-the mocked phase; when a real backend lands, the plan is to introduce React
-Query as a single wrapper around each `fetch` call (see "Extension points").
+There is **no Redux and no Zustand**. Most screens still use plain `fetch` +
+`useState`/`useEffect`, but the "everything is a bare fetch" claim that used to
+sit here is no longer true — three caching layers exist and new code should use
+them:
+
+- `swr` (a real dependency) with the shared fetcher in `src/lib/swr-fetcher.ts`.
+- `src/lib/cached-fetch.ts` — stale-while-revalidate + `AbortController` +
+  in-flight dedup.
+- `src/lib/api-client.ts` — patches `window.fetch` globally to attach
+  `X-CSRF-Token` to every mutating `/api/*` call. **No call site needs to add
+  CSRF headers**; an audit that reports "N fetches missing the CSRF token" is
+  reading the wrong layer.
+
+Windowing/virtualisation primitives for large grids: `src/lib/virtual-window.ts`,
+`virtual-group-window.ts`, `incremental-window.ts`, plus
+`@tanstack/react-virtual`.
 
 A few pieces of ambient state:
 
 - **Toasts** — `ToastProvider` + `useToast()` in `src/components/ui/toast.tsx`.
-- **Persisted job-card state** — `src/lib/job-card-persistence.ts` stashes
+- **Persisted job-card state** — `src/api/lib/job-card-persistence.ts` stashes
   shop-floor form state in `localStorage` so workers don't lose in-progress
   entries on a tab reload.
 
 ### Styling
 
 Tailwind CSS 4 via `@tailwindcss/vite`. Tokens live in
-`src/lib/design-tokens.ts`, not in `tailwind.config.*` — that file is a stub.
+`src/lib/design-tokens.ts` (700 lines); there is **no `tailwind.config.*` file
+at all** — Tailwind 4 is configured from `src/index.css`.
 Pages compose hex-based classes (`text-[#4F7C3A]`, `bg-[#EEF3E4]`) through
 token objects so the brand palette is the single source of truth. See
 `docs/DESIGN-SYSTEM.md` for the full rulebook.
@@ -196,11 +229,16 @@ imports `src/api/worker.ts` which is the real Hono app. Mounted middleware
    `X-CSRF-Token` header to match the `hookka_csrf` cookie.
 7. **tenantMiddleware** — resolves `users.orgId` into Hono context;
    throws `OrgIdRequiredError` (→ 401) if absent.
-8. **Route subapps** — ~70 files in `src/api/routes/` mount at `/api/<resource>`.
+8. **Route subapps** — 136 files in `src/api/routes/`, 139 `app.route(...)`
+   mounts. The full mount table with every registered path is in
+   [`API.md`](API.md) (generated).
 
-The dev server (`src/api/index.ts`, port 3001) wires a parallel Hono app on
-Node that imports `src/api/routes-mock/*` (in-memory fixtures). Start with
-`npm run api`. **This is dev-only and unreachable in production.**
+The precise public surface is not a matter of opinion: `PUBLIC_PATHS` and
+`PUBLIC_PREFIXES` in `src/api/lib/auth-middleware.ts` are the allow-lists, plus
+four regex-opened paths (`GET /api/fg-units/:id` and the three
+`/api/production-orders/:id/scan-complete*` shop-floor POSTs, each of which
+re-checks the worker token inside the handler). `API.md` reproduces both lists
+mechanically.
 
 ### Route conventions
 
@@ -245,30 +283,22 @@ have first-priority).
 ### Data model
 
 Types live in `src/types/index.ts` (canonical for both backend handlers
-and frontend pages). `src/lib/mock-data.ts` is dev-server seed data only
-and **not** shipped to the SPA bundle (ESLint `no-restricted-imports`
-rule blocks value imports of it from `src/pages/**` and
-`src/components/**`).
+and frontend pages). `src/lib/mock-data.ts` still exists as a types
+re-export + seed constants; the ESLint `no-restricted-imports` rule in
+`eslint.config.js` blocks **value** imports of `@/lib/mock-data`
+(`allowTypeImports: true`, so `import type` is still legal — several pages use
+it that way). It is not a runtime data source for anything deployed.
 
 Relationships worth calling out:
 
 - **Customer ↔ CustomerHub** — one customer, many delivery addresses
   (`CustomerHub`). Delivery orders pick a hub, never free-text addresses.
-  See `docs/MODULES.md` § Customers.
+  See `docs/archive/MODULES.md` § Customers.
 - **SO → PO → JobCard → FGUnit → DO → Invoice** — the core forward chain.
   Every PDF generator corresponds to one document on that path.
 - **BOM hierarchy** — `FG → WIP (Divan + Headboard) → RM`. WIP rows are
   built dynamically per SO variant from the department configs in the
   Production Sheet; they're not a pre-defined catalogue.
-
-### Test-flow (B-flow) routes
-
-`/api/test/production-orders`, `/api/test/fg-units`,
-`/api/test/delivery-orders` are parallel endpoints used by the
-`/production-test` and `/delivery-test` pages. They share nothing with the A
-endpoints on purpose — the test flow is sandboxing a new sticker-identity
-flow that re-labels FG units by physical batch instead of SO item. See
-`docs/B-FLOW.md`.
 
 ---
 
@@ -331,24 +361,22 @@ The non-UI heart of the app. A selected tour:
 Places explicitly designed to be swapped:
 
 1. ~~**Mock data → real database**~~ — **DONE 2026-04-27.** Production
-   serves real Postgres via Hyperdrive. The mock-data layer remains
-   only for offline dev (`npm run api`).
+   serves real Postgres via Hyperdrive.
 
-2. **`fetch` → React Query**
-   Most pages call `fetch('/api/…')` inline. Wrapping those in React Query
-   (one `useQuery` per screen) gives caching, retry, and optimistic updates
-   for free. The uniform `{ success, data }` envelope is ready for it.
+2. ~~**Auth**~~ — **DONE.** `RequireAuth` (`src/components/RequireAuth.tsx`)
+   wraps the dashboard tree in `src/router.tsx`; the API side runs
+   `authMiddleware` on `/api/*` with an explicit public allow-list, Google
+   OAuth (`routes/auth-oauth.ts`), TOTP second factor (`routes/auth-totp.ts`),
+   a separate PIN flow for the shop-floor portal (`routes/worker-auth.ts`), and
+   RBAC via `src/api/lib/rbac.ts` / `role-policy.ts`. **The login page is not a
+   stub.** Any doc or plan that says auth is unwired is describing April 2026.
 
-3. **Auth**
-   The login page is a UI stub. When wiring a real provider (OAuth, SAML),
-   add a `RequireAuth` wrapper in `router.tsx` around everything except
-   `/login`, `/track`, and `/portal/login`. The API side would gain Hono
-   middleware that verifies the token and populates `c.var.user`.
+3. **Caching wrapper consolidation**
+   Three overlapping approaches coexist (`swr`, `cached-fetch.ts`, bare
+   `fetch`). Converging on one is open work, not a described state.
 
 4. **Feature toggles**
-   `src/lib/constants.ts` is the place for environment-driven flags. The
-   test flow (`/production-test`, `/delivery-test`) is currently enabled
-   unconditionally but is a prime candidate for a flag when promoting it.
+   `src/lib/constants.ts` is the place for environment-driven flags.
 
 5. **PDF output**
    Generators in `src/lib/generate-*-pdf.ts` all take a typed payload and
@@ -373,4 +401,4 @@ Places explicitly designed to be swapped:
   page module from another page; use navigation.
 - **Backend-driven enums** — if a status value can come from the API, add
   it to the relevant `Record<Enum, SemanticStyle>` in `design-tokens.ts`
-  and use `StatusBadge kind="..."`. The TS compiler enforces coverage.
+  and use `StatusBadge kind="..."`. **The TS compiler does NOT enforce coverage** — `StatusBadgeProps.value` is `string` and an unmapped status silently renders grey (`resolveUnknownStatus`), so add the map entry deliberately.

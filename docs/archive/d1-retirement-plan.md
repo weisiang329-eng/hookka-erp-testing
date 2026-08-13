@@ -1,5 +1,8 @@
 # D1 Retirement Plan (Phase 7) — [LEGACY/HISTORICAL]
 
+> **Last verified: 2026-08-13** against `wrangler.toml` (no `[[d1_databases]]` block; the removal is documented in-file), `.github/workflows/deploy.yml` (the `wrangler d1 migrations apply` step is gone, replaced by a manual-migration notice), and `package.json` (`_LEGACY_db:migrate:local` / `_LEGACY_db:migrate:remote` are echo stubs).
+> Verdict: accurate as history. Nothing corrected. **Recommend moving to `docs/archive/`** — it is a finished one-off, and its live value (D1 is gone; use `c.var.DB`) is a one-liner that belongs in `docs/ARCHITECTURE.md`.
+
 > **Status (2026-04-27): EXECUTED.** D1 binding removed from
 > `wrangler.toml` (commit `7059259`); the `D1Database` field is gone from
 > `Bindings`; every route flows `c.var.DB → D1Compat → Postgres → Hyperdrive

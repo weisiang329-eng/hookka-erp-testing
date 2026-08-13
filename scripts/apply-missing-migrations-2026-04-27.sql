@@ -51,7 +51,7 @@
 --   * Enums / unions as TEXT (CHECK constraints omitted here — resource and
 --     action are open-ended; new modules can register without schema churn).
 --
--- Closes P3.1 in docs/UPGRADE-CONTROL-BOARD.md.
+-- Closes P3.1 in docs/archive/UPGRADE-CONTROL-BOARD.md.
 -- ---------------------------------------------------------------------------
 
 -- ============================================================================

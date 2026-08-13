@@ -1,5 +1,8 @@
 # Disaster Recovery Runbook
 
+> **Last verified: 2026-08-13** against `.github/workflows/backup.yml` (every step), `src/api/cron/daily-backup.ts:53-151`, `src/api/worker.ts:815` (`POST /api/internal/backup-prune`), `wrangler.toml` (`[triggers]` still commented out), and `ls scripts/`.
+> Corrected 2026-08-13: three load-bearing claims were false. (1) **There is no GitHub Actions artifact.** `backup.yml` contains zero `upload-artifact` steps, so the "off-vendor floor, 90-day artifact" this runbook leans on in three places does not exist. (2) Retention is no longer pruned by the Workers cron — that cron was never provisioned and never ran; `backup.yml` now calls `POST /api/internal/backup-prune` after each upload. (3) `scripts/verify-journal-hash-chain.mjs` does not exist, so drill step 6 cannot be run as written.
+
 **Status:** Phase C #7 quick-win scaffold landed 2026-04-25; rewritten to
 target Supabase Storage (was Cloudflare R2) on 2026-04-29 by the
 storage-supabase-migration. The cron trigger is still commented out in
@@ -24,12 +27,18 @@ section at the bottom.
 > **Storage trade-off (2026-04-29):** moving from R2 to Supabase Storage
 > means the daily dump now lives **in the same vendor** as the primary
 > Postgres — a true "Supabase region wipe" event would take both with
-> it. Mitigations: (a) the `.dump` is also a download artifact on every
-> GitHub Actions run for 90 days; (b) Supabase Pro PITR (7 days) covers
-> the most common "oops" failure modes; (c) a quarterly off-vendor
-> snapshot (manual download → 1Password attachment) covers the
-> doomsday case until WAL shipping lands. Document these as you turn
-> them on.
+> it. Claimed mitigations, re-checked 2026-08-13:
+> (a) ~~the `.dump` is also a download artifact on every GitHub Actions
+> run for 90 days~~ — **FALSE. There is no `actions/upload-artifact` step
+> in `.github/workflows/backup.yml`.** The dump is written to the runner's
+> working directory and discarded when the job ends. **There is currently
+> NO off-vendor copy of the backup.** This is the single largest open gap
+> in this runbook; every table below that lists an "artifact" column is
+> describing something that does not exist.
+> (b) Supabase Pro PITR (7 days) covers the most common "oops" failure
+> modes — verify in the dashboard; not checkable from source.
+> (c) a quarterly off-vendor snapshot (manual download → 1Password
+> attachment) — not implemented.
 
 ---
 
@@ -43,18 +52,22 @@ Two complementary backup paths, both writing to **Supabase Storage**
    `hookka-files/backups/supabase/`. Highest fidelity. Runs daily at
    18:00 UTC + on `workflow_dispatch`.
 
-2. **`src/api/cron/daily-backup.ts`** — Workers Cron Trigger that does
-   a logical SELECT-to-JSON-Lines dump and writes
+2. **`src/api/cron/daily-backup.ts`** — a Workers `scheduled()` handler
+   that does a logical SELECT-to-JSON-Lines dump and writes
    `hookka-files/backups/supabase/<date>.json.gz` via the Supabase
-   Storage v1 REST API. Runs entirely inside CF infrastructure, no
-   admin laptop required. Lower fidelity (no constraints, no sequences)
-   but always-on.
+   Storage v1 REST API. Lower fidelity (no constraints, no sequences).
+   **NOT RUNNING.** `[triggers] crons` is still commented out in
+   `wrangler.toml` and Pages Functions cannot host a scheduled handler,
+   so nothing invokes it. Path 1 is the only backup that actually fires.
 
-Both write to the same Storage prefix:
-`hookka-files/backups/supabase/`. Retention: **90 days**, pruned
-automatically by the Workers cron path (Supabase Storage doesn't have
-native lifecycle rules the way Cloudflare R2 did, so the prune is now a
-code-level concern only — see `daily-backup.ts:pruneOldBackups`).
+Both would write to the same Storage prefix:
+`hookka-files/backups/supabase/`. Retention: **90 days**. The prune was
+designed to run inside the Workers cron; since that cron was never
+provisioned, dumps accumulated unbounded until the 2026-07-03 IT-hygiene
+audit. It now runs from `backup.yml`'s final step, which POSTs to the
+`CRON_SECRET`-gated `POST /api/internal/backup-prune`
+(`src/api/worker.ts:815`) after each successful upload — that endpoint
+calls the same `pruneOldBackups` in `daily-backup.ts:151`.
 
 ---
 
@@ -87,7 +100,7 @@ code-level concern only — see `daily-backup.ts:pruneOldBackups`).
 
 ---
 
-## Step 1 — Schedule the Workers cron
+## Step 1 — Schedule the Workers cron (STILL NOT DONE as of 2026-08-13)
 
 Uncomment in `wrangler.toml`:
 
@@ -130,11 +143,14 @@ https://<SUPABASE_PROJECT_REF>.supabase.co/storage/v1/object/hookka-files/backup
 ```
 
 Auth is `Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY`. The
-workflow verifies the upload by HEADing the object info endpoint and
-checking the size sentinel (>1 KB).
+workflow verifies the upload by GETting the object *info* endpoint and
+checking the size sentinel (>1 KB), then runs the 90-day prune via
+`POST /api/internal/backup-prune` with the `x-cron-secret` header —
+so `CRON_SECRET` must be set as a repo secret or the workflow fails.
 
-The Workers cron is the always-on safety net; this workflow gives you a
-higher-fidelity `.dump` you can `pg_restore` with one command.
+This workflow is the **only** backup that runs. The Workers cron
+described as the "always-on safety net" has never been provisioned
+(Step 1) — do not count it.
 
 ---
 
@@ -233,8 +249,8 @@ wrangler pages deploy dist --project-name=hookka-erp-testing --branch=main
 **6. Smoke test (10 min)**
 
 ```bash
-curl https://hookka-erp-testing.pages.dev/api/pg-ping
-curl https://hookka-erp-testing.pages.dev/api/health
+curl https://erp.hookka.com/api/pg-ping
+curl https://erp.hookka.com/api/health
 
 # Login as admin, walk the dashboard. Spot-check:
 #   - Recent SO (was the last day's SOs preserved?)
@@ -280,7 +296,23 @@ support.
 5. **Restore-from-JSON tooling.** Currently the JSON-Lines fallback is
    a backup format, not a restore format. Write
    `scripts/restore-from-json.mjs` during the first drill if the
-   primary `.dump.gz` is unavailable.
+   primary `.dump.gz` is unavailable. (Moot until item 7 lands — the
+   JSON path is not running at all.)
+
+6. **An actual off-vendor copy.** Verified absent 2026-08-13: no
+   `upload-artifact` step in `backup.yml`, so today 100% of backups live
+   in the same Supabase account as the primary database. Cheapest fix is
+   one `actions/upload-artifact@v4` step in `backup.yml` (90-day
+   retention is the GitHub default cap) — that is what the rest of this
+   runbook already assumes exists.
+
+7. **Provision the Workers cron, or delete `daily-backup.ts`.** The
+   scheduled handler has never fired. Either give it a sibling Worker
+   (`agent-heartbeat-worker/` is the working precedent) or stop
+   describing it as the "always-on safety net".
+
+8. **Write `scripts/verify-journal-hash-chain.mjs`** — drill step 6
+   references it and it does not exist.
 
 ---
 
@@ -380,9 +412,17 @@ support.
    Record both result sets in the drill log.
 
 6. **Ledger hash chain integrity (5 min).**
+
+   > **BLOCKED 2026-08-13:** `scripts/verify-journal-hash-chain.mjs` does
+   > not exist — `ls scripts/` has no journal/hash/chain script at all.
+   > The hashing logic lives in `src/api/lib/journal-hash.ts`; someone
+   > must write the standalone verifier before the first drill, or this
+   > step has to be done by hand in SQL. Do not report this step as
+   > passed by skipping it.
+
    ```bash
-   DATABASE_URL=$RECOVERY_DATABASE_URL \
-     node scripts/verify-journal-hash-chain.mjs
+   # TODO — script does not exist yet:
+   # DATABASE_URL=$RECOVERY_DATABASE_URL node scripts/verify-journal-hash-chain.mjs
    ```
    Must report 0 broken hashes. If it doesn't, the dump captured a
    write mid-transaction — escalate.
@@ -433,10 +473,13 @@ then, treat the launch as gated on it.
 > **Caveat after the storage-supabase-migration:** the dumps now live
 > on Supabase Storage, in the same vendor as the primary database. A
 > full-vendor outage takes both with it. Mitigations:
-> (a) GitHub Actions retains the .dump as a workflow artifact for 90
->     days — that's an off-vendor floor accessible via `gh run download`.
+> (a) ~~GitHub Actions retains the .dump as a workflow artifact for 90
+>     days, accessible via `gh run download`~~ — **NOT TRUE. Verified
+>     2026-08-13: `backup.yml` has no `upload-artifact` step.** There is
+>     no off-vendor floor today.
 > (b) Plan a quarterly manual download → 1Password attachment for the
 >     deep-doomsday case until WAL-shipping to a third vendor lands.
+>     Not implemented.
 
 ### Enable / verify checklist
 
@@ -454,16 +497,23 @@ then, treat the launch as gated on it.
 
 ### How PITR vs Storage dumps relate
 
-| Failure mode                                  | Use PITR              | Use Storage dump       | GitHub Actions artifact |
-| --------------------------------------------- | --------------------- | ---------------------- | ----------------------- |
-| Bad migration / dropped column / typo'd UPDATE | Yes (within 7 days)  | No (overkill — 24h granularity) | No |
-| > 7-day-old data corruption notice            | No (out of window)    | Yes (90-day retention) | Yes (90 days) |
-| Supabase project hard-deleted / billing lapse | No (data is gone)     | No (Storage is gone too) | Yes — last off-vendor copy |
-| Workflow upload failed silently for a week    | Yes (PITR independent)| Possibly stale         | Yes (artifact still there) |
+> The "GitHub Actions artifact" column below describes a layer that
+> **does not exist** (verified 2026-08-13). It is kept struck-through
+> rather than deleted so nobody re-derives it as a fact. Read the third
+> column as "what we would have if item 6 under 'What MUST happen' were
+> done".
 
-The three layers cover each other's failure modes. The artifact column
-exists *because* Storage now lives in the same vendor as Postgres after
-the storage-supabase-migration — see the caveat above.
+| Failure mode                                  | Use PITR              | Use Storage dump       | ~~GitHub Actions artifact~~ (absent) |
+| --------------------------------------------- | --------------------- | ---------------------- | ----------------------- |
+| Bad migration / dropped column / typo'd UPDATE | Yes (within 7 days)  | No (overkill — 24h granularity) | n/a |
+| > 7-day-old data corruption notice            | No (out of window)    | Yes (90-day retention) | ~~Yes~~ — no artifact exists |
+| Supabase project hard-deleted / billing lapse | No (data is gone)     | No (Storage is gone too) | **NOTHING. Total loss.** |
+| Workflow upload failed silently for a week    | Yes (PITR independent)| Possibly stale         | ~~Yes~~ — no artifact exists |
+
+Only **two** layers actually exist (PITR + the Supabase-resident dump),
+and they share a vendor. The row that used to read "Yes — last off-vendor
+copy" is the reason this correction matters: in the hard-delete /
+billing-lapse scenario there is currently no recovery path at all.
 
 ---
 

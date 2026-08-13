@@ -1,5 +1,11 @@
 # AI Context Improvement Backlog
 
+> **Last verified: 2026-08-13** against `docs/context-packs/`, `docs/modules/`,
+> `docs/CODEBASE-MAP.md`, `docs/PLAYBOOKS.md`, `.github/PULL_REQUEST_TEMPLATE.md`.
+> Corrected 2026-08-13: **four of this backlog's items already shipped** and the file
+> did not know it — see the status column added to the roadmap table, and the note on
+> the "suggested module-specific packs" list, which was built at a different path.
+
 Purpose: track the next improvements after the initial LLM context strategy, development modes, onboarding SOP, and context packs. The current setup is useful, but it is not perfect; this backlog lists what would make AI-assisted development faster and more reliable over time.
 
 ## Current baseline
@@ -15,30 +21,40 @@ This is enough to stop most full-repo scans. The next step is to make the contex
 
 ## Improvement roadmap
 
-| Priority | Improvement | Why it helps | When to do it |
+| Priority | Improvement | Why it helps | Status (checked 2026-08-13) |
 | --- | --- | --- | --- |
-| P1 | Module-specific context packs | Lets AI work on one module without reading broad packs every time | When a module gets repeated work |
-| P1 | Route → frontend → DB table map | Lets AI jump directly from page to API to tables | Before major flow work |
-| P1 | Change-impact PR template | Forces concise impact analysis without long reports | Before larger team/AI parallel work |
-| P2 | Ownership map | Shows which module/domain owns each route/table/test | When module boundaries become confusing |
-| P2 | Test selection matrix | Tells AI which tests to run for each module/change type | When test suite becomes slower or harder to choose |
-| P2 | Common task playbooks | Gives step-by-step SOPs for frequent tasks | When a task is repeated 3+ times |
-| P3 | Generated dependency inventory | Keeps file/API/table relationships current automatically | When docs drift becomes a problem |
-| P3 | Architecture diagrams | Helps humans onboard faster | When non-engineers need to review flows |
+| P1 | Module-specific context packs | Lets AI work on one module without reading broad packs every time | ✅ **DONE** — shipped as `docs/modules/*.md` (15 guides), not under `context-packs/` |
+| P1 | Route → frontend → DB table map | Lets AI jump directly from page to API to tables | ✅ **DONE** — `docs/CODEBASE-MAP.md` (15 modules → pages/routes/tables/tests) |
+| P1 | Change-impact PR template | Forces concise impact analysis without long reports | ✅ **DONE** — `.github/PULL_REQUEST_TEMPLATE.md` exists |
+| P2 | Ownership map | Shows which module/domain owns each route/table/test | ⚪ open (partly covered by CODEBASE-MAP) |
+| P2 | Test selection matrix | Tells AI which tests to run for each module/change type | ⚪ open — 375 test files now, so this matters more than when written |
+| P2 | Common task playbooks | Gives step-by-step SOPs for frequent tasks | ✅ **DONE** — `docs/PLAYBOOKS.md`, 8 procedures (P1–P8) |
+| P3 | Generated dependency inventory | Keeps file/API/table relationships current automatically | 🟡 **half done 2026-08-13** — the API half is generated: `scripts/gen-api-docs.mjs` derives `docs/API.md` (139 mounts, 935 handlers, correct `:line` offsets, the real public/auth surface) from `src/api/worker.ts` + `src/api/routes/*.ts`, with a `--check` mode. It replaced the hand-maintained `docs/SYMBOLS.md`, which had drifted to ~25% line-number accuracy (94 of 891 offsets pointed past end-of-file). The table/BOM-relationship half is still open. |
+| P3 | Architecture diagrams | Helps humans onboard faster | ⚪ open |
 
-## Suggested module-specific packs
+## Suggested module-specific packs — ✅ BUILT, at a different path
 
-Create these only when the module is actively changing. Do not create all of them upfront if they will not be used.
+**Corrected 2026-08-13.** These were built, but under `docs/modules/`, not
+`docs/context-packs/`. **None of the nine `docs/context-packs/<module>.md` paths listed
+below exists** — `docs/context-packs/` holds only the 6 broad packs (architecture,
+frontend, backend, database, core-flow, security) plus `HOOKKA-GOTCHAS.md`.
 
-- `docs/context-packs/sales.md`
-- `docs/context-packs/production.md`
-- `docs/context-packs/delivery.md`
-- `docs/context-packs/invoices-accounting.md`
-- `docs/context-packs/procurement.md`
-- `docs/context-packs/inventory.md`
-- `docs/context-packs/payroll-worker.md`
-- `docs/context-packs/service-cases.md`
-- `docs/context-packs/rd.md`
+The 15 guides that actually exist, in `docs/modules/`: `accounting.md`, `customers.md`,
+`dashboard.md`, `delivery.md`, `employees.md`, `inventory.md`, `planning.md`,
+`procurement.md`, `production.md`, `products.md`, `quality-warehouse.md`, `reports.md`,
+`rnd.md`, `sales.md`, `service-repair.md`.
+
+Original (superseded) proposal, kept for history:
+
+- ~~`docs/context-packs/sales.md`~~ → `docs/modules/sales.md`
+- ~~`docs/context-packs/production.md`~~ → `docs/modules/production.md`
+- ~~`docs/context-packs/delivery.md`~~ → `docs/modules/delivery.md`
+- ~~`docs/context-packs/invoices-accounting.md`~~ → `docs/modules/accounting.md`
+- ~~`docs/context-packs/procurement.md`~~ → `docs/modules/procurement.md`
+- ~~`docs/context-packs/inventory.md`~~ → `docs/modules/inventory.md`
+- ~~`docs/context-packs/payroll-worker.md`~~ → `docs/modules/employees.md`
+- ~~`docs/context-packs/service-cases.md`~~ → `docs/modules/service-repair.md`
+- ~~`docs/context-packs/rd.md`~~ → `docs/modules/rnd.md`
 
 Each module pack should include:
 

@@ -1,5 +1,10 @@
 # Phase C — Enterprise Upgrade Arc (6-Month Roadmap)
 
+> **Last verified: 2026-08-13** against `src/api/lib/tenant.ts`, `journal-hash.ts`, `mdm-detect.ts`, `oauth-google.ts`, `totp.ts`, `src/api/queues/po-emission-consumer.ts`, `.github/workflows/backup.yml`, `migrations-postgres/0050_mv_revenue_by_month.sql` and `0123_drop_dashboard_mvs.sql`.
+> Corrected 2026-08-13: **all seven quick-win subsets have shipped**, so the "6-month dependency-ordered sequence" table below is a record of intent, not a plan to execute — check the code before starting any row. Specifically: #1 `org_id` + `withOrgScope` (`src/api/lib/tenant.ts`), #2 hash-chained journal (`src/api/lib/journal-hash.ts`), #3 PO emission on a queue (`src/api/queues/po-emission-consumer.ts`), #4 duplicate detection (`src/api/lib/mdm-detect.ts` + `src/api/routes/mdm.ts`), #5 `mv_revenue_by_month` — **shipped in 0050 and then deliberately DROPPED in `migrations-postgres/0123_drop_dashboard_mvs.sql`**, so do not assume the mart exists; #6 Google OAuth + TOTP (`src/api/lib/oauth-google.ts`, `totp.ts`, `src/api/routes/auth-oauth.ts`, `auth-totp.ts`); #7 daily backup (`.github/workflows/backup.yml`).
+> Also corrected: every "Cloudflare D1" reference below is dead. **D1 was retired 2026-04-27 (commit `7059259`)** — the live store is Supabase Postgres via Hyperdrive, so §1's "Cloudflare D1 / Postgres" and §5's "for D1 we use `--read-replication`" describe a runtime that no longer exists.
+> **UNVERIFIED ASSERTION** (as of 2026-08-13): every cost estimate, engineer-week figure and dollar/ARR number in this doc is business projection; not checkable from source; treat as owner intent, not fact.
+
 **Status:** Draft, written 2026-04-25
 **Prerequisites:** Phase A complete (TypeScript clean, RBAC matrix live, audit log writing on every mutation), Phase B complete (Workers SDK split, CI strict-build gate, OAuth-ready auth, Supabase Storage attachment store [was R2 pre-storage-supabase-migration], canary deploy pipeline)
 **Owner:** TBD (recommend a dedicated tech lead, ~0.5 FTE for the full 6 months)

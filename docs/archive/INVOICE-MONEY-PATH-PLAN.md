@@ -1,3 +1,11 @@
+> **ARCHIVED / SUPERSEDED — Task 1 shipped 2026-07-23, guard rewritten 2026-08-07.** The
+> double-invoice race this plan chases was closed by migration `0208`'s partial unique index
+> `uniq_invoice_active_delivery_order`, and the rule then deliberately CHANGED (one DO may now
+> be billed by several invoices — owner ruling). The current guard and its history are pinned
+> by `tests/invoice-dedupe-guard.test.mjs`; read that, not this. Task 2's code bug shipped as
+> `7e4ed1ad`. The RM figures here are staging counts from July and must not be quoted as prod.
+> Kept for history only. Verified 2026-08-13 against `tests/invoice-dedupe-guard.test.mjs`.
+
 # Invoice Money-Path — dedicated fix (branch: fix/invoice-money-path, off main)
 
 Owner-reported money bugs. Money-sensitive → **investigate → propose → confirm → execute**.

@@ -1,3 +1,5 @@
+> **ARCHIVED / SUPERSEDED — stopped being true 2026-08-11.** Every task shipped that day even though its checkboxes are still unticked: Task 1 `src/lib/salary-dept.ts` (added `97d50070`) + `tests/salary-dept.test.mjs`; Tasks 2/3 the `salaryByDept` payload and `GET /labor/departments` in `src/api/routes/accounting.ts`; Task 4 the `dept:` pseudo-lines at `src/pages/forecast.tsx:143,192-195`; Task 5 the stacked card at `src/pages/finance-dashboard.tsx:69,329-345`. Two details drifted from the plan: the shipped `salaryByDept` row type carries an extra `forecastSen?` field (`finance-dashboard.tsx:69`), and `salShownCount` is computed by filtering rather than by subtraction (`:335`). Do NOT re-run this as a build plan. Kept for history only; do not treat as current.
+
 # Salary by Department (Production Salary card + Forecast dept rows) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

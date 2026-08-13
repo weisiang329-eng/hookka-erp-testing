@@ -1,5 +1,8 @@
 # Google Sheets <-> ERP Bidirectional Sync
 
+> **Last verified: 2026-08-13** against `src/api/lib/sheets-sync.ts` (`syncJobCardToSheet:99`, `removeJobCardFromSheet:155`, `backfillAllJobCards:213`, `buildWebhookHmacPayload:345`, `verifyWebhookSignature:363`), `src/api/routes/sheets-sync.ts`, `scripts/apps-script-onedit.gs`, and `wrangler.toml` (all three sheets vars still commented out / unset).
+> Corrected 2026-08-13: backfill curl examples repointed at the live domain `erp.hookka.com`. Everything else matched the code as written.
+
 Operator-facing production tracking lives in Google Sheets; the ERP is the
 source of truth. This document covers the sync layer that keeps the two in
 agreement.
@@ -51,8 +54,8 @@ of these set.
 
 | Var | Where set | Notes |
 | --- | --- | --- |
-| `GOOGLE_SHEETS_SA_KEY` | `wrangler secret put` | Full service-account JSON, stringified. Created in GCP. |
-| `SHEETS_SYNC_SECRET` | `wrangler secret put` | Random hex (e.g. `openssl rand -hex 32`). Same value goes into Sheets Script Properties. |
+| `GOOGLE_SHEETS_SA_KEY` | `wrangler pages secret put` | Full service-account JSON, stringified. Created in GCP. |
+| `SHEETS_SYNC_SECRET` | `wrangler pages secret put` | Random hex (e.g. `openssl rand -hex 32`). Same value goes into Sheets Script Properties. |
 | `SHEETS_SPREADSHEET_ID` | `wrangler.toml` `[vars]` (public) | `1hDGUYeKuWHpCXKrZptFI2eIKh9yNdhw7JeKbTjxT-x8` for the production sheet. |
 
 Local dev: drop the same names into `.dev.vars`.
@@ -121,13 +124,13 @@ in one shot:
 
 ```sh
 # Dry-run first — returns counts + sample, writes nothing.
-curl -X POST https://hookka-erp-testing.pages.dev/api/sheets-sync/backfill \
+curl -X POST https://erp.hookka.com/api/sheets-sync/backfill \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"dryRun": true}'
 
 # Apply.
-curl -X POST https://hookka-erp-testing.pages.dev/api/sheets-sync/backfill \
+curl -X POST https://erp.hookka.com/api/sheets-sync/backfill \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"dryRun": false}'

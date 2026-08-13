@@ -1,5 +1,11 @@
 # AI Development Modes
 
+> **Last verified: 2026-08-13** against `docs/context-packs/` (all 7 files, including
+> `core-flow.md`), `docs/DEV-OPERATING-FRAMEWORK.md`, and `src/api/lib/supabase-compat.ts`.
+> No corrections needed — every doc path and every high-risk area this file names resolves
+> to something that exists. This document is policy, not a description of code, so most of
+> it is judgement rather than fact.
+
 Purpose: choose how much context an AI assistant should load before changing Hookka ERP. The goal is to move fast for small work, while still using deeper review when risk is high.
 
 ## Default rule

@@ -145,7 +145,7 @@ dataset = "hookka_erp_metrics"
 #
 # Until one of the above ships, dashboard tiles will reflect the MV state at
 # the last manual refresh — see migrations-postgres/README.md for the
-# Supabase migration flow and docs/d1-retirement-plan.md ([LEGACY] now
+# Supabase migration flow and docs/archive/d1-retirement-plan.md ([LEGACY] now
 # fully executed) for historical context.
 
 # ---------------------------------------------------------------------------
@@ -241,7 +241,7 @@ ENVIRONMENT = "production"
 # So: dashboard vars for this project do not survive deploys once [vars]
 # exists here. The id must be in this file, and it must be THIS id —
 # the production account (weisiang329@gmail.com), recorded in
-# docs/CLOUDFLARE_MIGRATION.md, matching the 27cd35 prefix diag showed
+# docs/archive/CLOUDFLARE_MIGRATION.md, matching the 27cd35 prefix diag showed
 # while prod was still live. An account id is not a credential; the real
 # secret (AE_QUERY_TOKEN) stays in Pages secrets.
 CF_ACCOUNT_ID = "27cd35c9d93a9f81daa809d0b800b059"

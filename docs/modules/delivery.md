@@ -1,5 +1,8 @@
 # Delivery & Consignment — Module Guide
 
+> **Last verified: 2026-08-13** against `src/api/routes/delivery-orders.ts`, `src/api/routes/delivery-orders/_helpers.ts`, `src/api/routes/{packing-lists,cn-packing-lists,delivery-agent,consignment-notes,consignment-orders,drivers,three-pl-state-rates}.ts`, `src/api/lib/delivery-agent.ts`, `src/pages/delivery/*`, `src/pages/consignment/note.tsx`, and `tests/`.
+> Corrected 2026-08-13: **`delivery-orders.ts` was split** — it is now 3,010 lines of route handlers plus `src/api/routes/delivery-orders/_helpers.ts` (5,254 lines) holding every shared helper. Fourteen anchors this doc gave as `delivery-orders.ts:NNNN` pointed past that file's end or at unrelated code; all are re-pointed at `_helpers.ts` below. CN handler anchors moved 60–120 lines.
+
 > Self-navigating docs (L2). Repo-wide map: [[CODEBASE-MAP]]. Never grep the whole repo — use the file:line below.
 
 ## What it does
@@ -14,7 +17,7 @@ deliver write `stock_movements` and read `fg_units`, and fire idempotent custome
 
 ## Entry points
 - Pages
-  - `/delivery` → `src/pages/delivery/index.tsx:826` (`DeliveryPage`) — DO workbench **and** the whole
+  - `/delivery` → `src/pages/delivery/index.tsx:882` (`DeliveryPage`) — DO workbench **and** the whole
     3PL provider UI, behind a `pageTab` toggle (`orders` | `3pl` | `agent`, URL `?section=`).
   - `/delivery/:id` → `src/pages/delivery/detail.tsx` (single DO detail; the drawer's "Open full page")
   - DO detail **drawer** (right slide-over, opened from a row) → chrome `src/components/ui/document-detail-drawer.tsx`,
@@ -23,75 +26,76 @@ deliver write `stock_movements` and read `fg_units`, and fire idempotent custome
   - `/consignment/note` → `src/pages/consignment/note.tsx:454` (`ConsignmentNotePage`; CN workbench, DO-parity)
   - CO list/create/edit/detail/return → `src/pages/consignment/{index,create,edit,detail,return}.tsx`
 - API routes
-  - DO end-to-end → `src/api/routes/delivery-orders.ts` (7145 lines)
+  - DO routes → `src/api/routes/delivery-orders.ts` (3010 lines) — **handlers only**; every shared
+    helper lives in `src/api/routes/delivery-orders/_helpers.ts` (5254). Mounted `worker.ts:1201`.
   - Delivery-side packing lists → `src/api/routes/packing-lists.ts` (802)
-  - Delivery Agent (brief / proposals / run) → `src/api/routes/delivery-agent.ts` (669) + engine `src/api/lib/delivery-agent.ts` (1258)
-  - Consignment Notes → `src/api/routes/consignment-notes.ts` (2033); CN packing lists → `src/api/routes/cn-packing-lists.ts` (730)
-  - Consignment Orders → `src/api/routes/consignment-orders.ts` (2550); legacy/aggregate → `src/api/routes/consignments.ts` (536)
+  - Delivery Agent (brief / proposals / run) → `src/api/routes/delivery-agent.ts` (780) + engine `src/api/lib/delivery-agent.ts` (1256)
+  - Consignment Notes → `src/api/routes/consignment-notes.ts` (2152); CN packing lists → `src/api/routes/cn-packing-lists.ts` (731)
+  - Consignment Orders → `src/api/routes/consignment-orders.ts` (2815); legacy/aggregate → `src/api/routes/consignments.ts` (588)
   - In-house drivers → `src/api/routes/drivers.ts` (314); 3PL → `three-pl-drivers.ts` / `three-pl-vehicles.ts` / `three-pl-state-rates.ts`
   - Shared PDF/piece helpers → `src/api/lib/print-extras-shared.ts`
 
 ## Data model
 - `delivery_orders` / `delivery_order_items` — DO header + lines. `status` follows `VALID_TRANSITIONS`
-  (`delivery-orders.ts:88`). Runtime-added notify stamps `dispatchEmailAt` / `deliveredEmailAt` and the
-  `deliveryIncomplete` flag are IF-NOT-EXISTS self-applied (`ensureNotifyEmailColumns` `:5139`, `ensureDeliveryIncompleteColumn` `:5173`).
+  (`delivery-orders/_helpers.ts:87`). Runtime-added notify stamps `dispatchEmailAt` / `deliveredEmailAt` and the
+  `deliveryIncomplete` flag are IF-NOT-EXISTS self-applied (`ensureNotifyEmailColumns` `_helpers.ts:3567`, `ensureDeliveryIncompleteColumn` `_helpers.ts:3601`).
 - `packing_lists` / `cn_packing_lists` — truck-run grouping of DOs / CNs (snake_case).
 - `consignment_notes` / `consignment_items` — CN = consignment DO-equivalent (dispatch → delivered → acknowledged / RETURNED).
-- `delivery_proposals` / `delivery_briefs` — Delivery Agent output (snake_case; created by `ensureDeliveryAgentTables` `lib/delivery-agent.ts:58`).
+- `delivery_proposals` / `delivery_briefs` — Delivery Agent output (snake_case; created by `ensureDeliveryAgentTables` in `src/api/lib/delivery-agent.ts`).
 - `drivers`, `three_pl_vehicles` / `three_pl_drivers` / `three_pl_state_rates` — fleet + per-state rate card.
 - `consignment_orders` — CO header that CNs draw value from (CO CRUD in `consignment-orders.ts`; see [[sales]]).
 - Cross-reads: `sales_orders`, `fg_units`, `stock_movements`, `invoices`, `cost_ledger` (append-only).
 - Relationships: dispatch/deliver writes `stock_movements` + reads `fg_units`; DELIVERED→INVOICED builds an
-  invoice (`buildDoDeliveredSoAndInvoice` `:924`) and cascades the SO. DOs/CNs chain through a `hubId` composition guard
-  (`validateDoComposition` `:3089` on create and edit).
-- DO ids/nos generated by `genDoId` (`:618`) / `genNextDoNo` (`:630`); rows shaped by `rowToOrder` (`:449`) / `rowToOrderList` (`:583`) / `rowToItem` (`:305`).
+  invoice (`buildDoDeliveredSoAndInvoice` `_helpers.ts:1558`) and cascades the SO. DOs/CNs chain through a `hubId` composition guard
+  (`validateDoComposition` `_helpers.ts:2035` on create and edit).
+- DO ids/nos generated by `genDoId` (`_helpers.ts:630`) / `genNextDoNo` (`:642`); rows shaped by `rowToOrder` (`:461`) / `rowToOrderList` (`:595`) / `rowToItem` (`:317`) — all in `_helpers.ts`.
 
 ## Core flows
-1. **Create DO from POs** — `app.post("/")` `delivery-orders.ts:3981` → `createDeliveryOrderForPOs` (`:3218`), after
-   `validateDoComposition` (`:3089`) enforces the hub-integrity guard. PL-first variant: `app.post("/packing-list-first")` (`:4028`).
-2. **Status transition + edit** — `app.put("/:id")` `delivery-orders.ts:6119` → `applyDeliveryOrderUpdate` (`:6153`); every
-   move is checked against `VALID_TRANSITIONS[existing.status]` (`:6208`). Bulk moves come from FE `runBulkDoTransition`
-   (`delivery/index.tsx:2936`). DELIVERED→INVOICED builds SO + invoice via `buildDoDeliveredSoAndInvoice` (`:924`) /
-   `computeDoInvoiceLines` (`:770`).
-3. **Customer notice (backend safety-net)** — any transition calls `fireCustomerNoticeBestEffort` (`delivery-orders.ts:119`),
-   which fire-and-forgets `queueDoCustomerNotice` (`:5522`). Idempotency = atomic `UPDATE … WHERE dispatchEmailAt/deliveredEmailAt IS NULL`;
-   whichever caller (QR scan, bulk action, FE button) wins the claim sends exactly one email. Manual re-send: `app.post("/:id/resend-notice")` (`:5244`).
-4. **Delivery Agent** — `app.get("/brief.json")` (`delivery-agent.ts:138`) serves `collectDeliveryBrief` (`lib/:635`);
-   `app.post("/proposals/generate")` (`:159`) → `generateDeliveryProposals` (`lib/:870`); approve/reject `:254`/`:267`;
-   `app.post("/run")` (`:346`) is the cron entry. Cheapest-3PL routing via `loadStateRateCard`/`cheapestForState` (`lib/:355`/`:396`).
-5. **Consignment Note** — `app.post("/")` `consignment-notes.ts:740` (create), `app.post("/:id/return")` (`:1015`),
-   `app.post("/:id/convert-to-invoice")` (`:1334`), `app.post("/:id/notify-customer")` (`:1658`), `app.put("/:id")` (`:1990`).
+1. **Create DO from POs** — `app.post("/")` `delivery-orders.ts:1939` → `createDeliveryOrderForPOs` (`_helpers.ts:2164`), after
+   `validateDoComposition` (`_helpers.ts:2035`) enforces the hub-integrity guard. PL-first variant: `app.post("/packing-list-first")` (`delivery-orders.ts:1986`).
+2. **Status transition + edit** — `app.put("/:id")` `delivery-orders.ts:2949` → `applyDeliveryOrderUpdate` (`_helpers.ts:4194`); every
+   move is checked against `VALID_TRANSITIONS[existing.status]` (`_helpers.ts:4249`). Bulk moves come from FE `runBulkDoTransition`
+   (`delivery/index.tsx:3002`). DELIVERED→INVOICED builds SO + invoice via `buildDoDeliveredSoAndInvoice` (`_helpers.ts:1558`) /
+   `computeDoInvoiceLines` (`_helpers.ts:1342`).
+3. **Customer notice (backend safety-net)** — any transition calls `fireCustomerNoticeBestEffort` (`_helpers.ts:131`),
+   which fire-and-forgets `queueDoCustomerNotice` (`_helpers.ts:3637`). Idempotency = atomic `UPDATE … WHERE dispatchEmailAt/deliveredEmailAt IS NULL`;
+   whichever caller (QR scan, bulk action, FE button) wins the claim sends exactly one email. Manual re-send: `app.post("/:id/resend-notice")` (`delivery-orders.ts:2536`).
+4. **Delivery Agent** — `app.get("/brief.json")` (`delivery-agent.ts:144`) serves `collectDeliveryBrief` (`lib/:633`);
+   `app.post("/proposals/generate")` (`:165`) → `generateDeliveryProposals` (`lib/:868`); approve `:260` / reject just below.
+   Cheapest-3PL routing via `loadStateRateCard` / `cheapestForState` in `src/api/lib/delivery-agent.ts`.
+5. **Consignment Note** — `app.post("/")` `consignment-notes.ts:798` (create), `app.post("/:id/return")` (`:1073`),
+   `app.post("/:id/convert-to-invoice")` (`:1419`), `app.post("/:id/notify-customer")` (`:1771`), `app.put("/:id")` (`:2109`).
 
 ## Key functions / sections (locate-to-function)
 | Symbol / section | file:line | Role |
 |---|---|---|
-| `DeliveryPage` | `src/pages/delivery/index.tsx:826` | DO workbench + 3PL + agent, `pageTab` toggle |
-| `runBulkDoTransition` | `src/pages/delivery/index.tsx:2936` | FE bulk status move (all guards/cascades) |
-| `resendCustomerNotice` / `warnIfNoCustomerEmail` | `delivery/index.tsx:2825 / :2807` | Feature A per-DO resend / Feature B no-email warning |
-| `columns` (DataGrid) | `src/pages/delivery/index.tsx:3885` | DO grid column defs |
-| `getContextMenuItems` | `src/pages/delivery/index.tsx:4365` | THE DO status table — row menu **and** the drawer's action bar |
-| `detailLive` / `detailActionBar` | `src/pages/delivery/index.tsx:~3645 / ~4605` | Drawer's document re-read from the list; its bar filtered from the row menu |
-| `lineSpec` | `src/pages/delivery/index.tsx:~3660` | One-line build spec per DO line, via the shared `buildSpec` |
+| `DeliveryPage` | `src/pages/delivery/index.tsx:882` | DO workbench + 3PL + agent, `pageTab` toggle |
+| `runBulkDoTransition` | `src/pages/delivery/index.tsx:3002` | FE bulk status move (all guards/cascades) |
+| `resendCustomerNotice` / `warnIfNoCustomerEmail` | `delivery/index.tsx:2891 / :2873` | Feature A per-DO resend / Feature B no-email warning |
+| `columns` (DataGrid) | `src/pages/delivery/index.tsx` (~3.9k) | DO grid column defs |
+| `getContextMenuItems` | `src/pages/delivery/index.tsx` (~4.4k) | THE DO status table — row menu **and** the drawer's action bar |
+| `detailLive` | `src/pages/delivery/index.tsx:3653` | Drawer's document re-read from the list; its bar filtered from the row menu |
+| `lineSpec` | `src/pages/delivery/index.tsx:3686` | One-line build spec per DO line, via the shared `buildSpec` |
 | `drawerActionBar` / `drawerLineSpec` / `DRAWER_DOC_CONFIG` | `src/lib/document-drawer.ts` | Drawer model: full-page route, action-bar filter, spec-line delegation |
 | `DocumentDetailDrawer` | `src/components/ui/document-detail-drawer.tsx` | Shared slide-over chrome (chrome only, no domain knowledge) |
-| 3PL Providers block | `src/pages/delivery/index.tsx:6509` | `pageTab==="3pl"` list + Create/Edit dialog |
+| 3PL Providers block | `src/pages/delivery/index.tsx` (~6.5k) | `pageTab==="3pl"` list + Create/Edit dialog |
 | `DeliveryAgentTab` | `src/pages/delivery/agent-tab.tsx:128` | Brief strip + proposal approve/reject |
 | `ConsignmentNotePage` | `src/pages/consignment/note.tsx:454` | CN workbench (DO-parity mirror) |
-| `VALID_TRANSITIONS` | `src/api/routes/delivery-orders.ts:88` | DO status machine |
-| `fireCustomerNoticeBestEffort` | `src/api/routes/delivery-orders.ts:119` | Backend notice safety-net (waitUntil) |
-| `createDeliveryOrderForPOs` | `src/api/routes/delivery-orders.ts:3218` | Build a DO from POs |
-| `validateDoComposition` | `src/api/routes/delivery-orders.ts:3089` | Hub-integrity composition guard |
-| `applyDeliveryOrderUpdate` | `src/api/routes/delivery-orders.ts:6153` | DO edit + transition apply |
-| `buildDoDeliveredSoAndInvoice` / `computeDoInvoiceLines` | `delivery-orders.ts:924 / 770` | DELIVERED→INVOICED SO + invoice build |
-| `queueDoCustomerNotice` | `src/api/routes/delivery-orders.ts:5522` | Recipient chain + idempotent email claim |
-| `app.post("/packing-list-first")` | `src/api/routes/delivery-orders.ts:4028` | PL-first auto-split create |
+| `VALID_TRANSITIONS` | `delivery-orders/_helpers.ts:87` | DO status machine |
+| `fireCustomerNoticeBestEffort` | `delivery-orders/_helpers.ts:131` | Backend notice safety-net (waitUntil) |
+| `createDeliveryOrderForPOs` | `delivery-orders/_helpers.ts:2164` | Build a DO from POs |
+| `validateDoComposition` | `delivery-orders/_helpers.ts:2035` | Hub-integrity composition guard |
+| `applyDeliveryOrderUpdate` | `delivery-orders/_helpers.ts:4194` | DO edit + transition apply |
+| `buildDoDeliveredSoAndInvoice` / `computeDoInvoiceLines` | `delivery-orders/_helpers.ts:1558 / 1342` | DELIVERED→INVOICED SO + invoice build |
+| `queueDoCustomerNotice` | `delivery-orders/_helpers.ts:3637` | Recipient chain + idempotent email claim |
+| `app.post("/packing-list-first")` | `src/api/routes/delivery-orders.ts:1986` | PL-first auto-split create |
 | `createPackingListCore` | `src/api/routes/packing-lists.ts:628` | Truck-run packing-list build |
-| `collectDeliveryBrief` / `generateDeliveryProposals` | `src/api/lib/delivery-agent.ts:635 / 870` | Agent brief + proposals |
-| `cheapestForState` / `loadStateRateCard` | `src/api/lib/delivery-agent.ts:396 / 355` | Cheapest-3PL routing |
-| `ensureThreePlStateRatesSchema` | `src/api/routes/three-pl-state-rates.ts:42` | 3PL rate-card self-apply |
-| `ensureDeliveryAgentTables` | `src/api/lib/delivery-agent.ts:58` | Creates `delivery_proposals` / `delivery_briefs` |
-| CN create / return / convert-to-invoice / edit | `consignment-notes.ts:740 / 1015 / 1334 / 1990` | CN lifecycle handlers |
-| CN packing list build | `src/api/routes/cn-packing-lists.ts:662` | POST create CN packing list |
+| `collectDeliveryBrief` / `generateDeliveryProposals` | `src/api/lib/delivery-agent.ts:633 / 868` | Agent brief + proposals |
+| `cheapestForState` / `loadStateRateCard` | `src/api/lib/delivery-agent.ts` | Cheapest-3PL routing |
+| `ensureThreePlStateRatesSchema` | `src/api/routes/three-pl-state-rates.ts:43` | 3PL rate-card self-apply |
+| `ensureDeliveryAgentTables` | `src/api/lib/delivery-agent.ts` | Creates `delivery_proposals` / `delivery_briefs` |
+| CN create / return / convert-to-invoice / edit | `consignment-notes.ts:798 / 1073 / 1419 / 2109` | CN lifecycle handlers |
+| CN packing list build | `src/api/routes/cn-packing-lists.ts:663` | POST create CN packing list |
 | Drivers CRUD | `src/api/routes/drivers.ts:72 / 143 / 211 / 300` | In-house driver list / create / update / delete |
 
 ## Gotchas
@@ -109,7 +113,7 @@ deliver write `stock_movements` and read `fg_units`, and fire idempotent custome
   (`src/lib/doc-line-format.ts`), the same formatter the DO / Invoice / CN / DR PDFs use. There are already three
   `describe()` copies in the PDF generators; do not make the screen a fourth. The heights / gap / category /
   special-order inputs come from `/print-extras`, i.e. the payload the PDF is built from.
-- **Status machine is a guard, not labels.** Moves must satisfy `VALID_TRANSITIONS` (`delivery-orders.ts:88`). The
+- **Status machine is a guard, not labels.** Moves must satisfy `VALID_TRANSITIONS` (`delivery-orders/_helpers.ts:87`). The
   `dispatched` tab deliberately includes IN_TRANSIT (row stays visible after loading); DB status for "dispatched" is `LOADED`. Don't bypass the guard.
 - **Notify idempotency lives in folded-lowercase cols.** `dispatchemailat` / `deliveredemailat` — db-pg `toCamel` does NOT
   recover these; read dual-keyed (`r.dispatchEmailAt ?? r.dispatchemailat`). CN dispatch uses `dispatchemailat` (mig 0163).
@@ -122,14 +126,14 @@ deliver write `stock_movements` and read `fg_units`, and fire idempotent custome
 - **QR sticker URLs encode `window.location.origin`** (print-time domain); scanning is path-based + domain-agnostic. See `tests/do-qr-public.test.mjs`.
 
 ## Common tasks (mini-playbook)
-- **Add a field to a DO** → runtime `ALTER … ADD COLUMN IF NOT EXISTS` (pattern `ensureNotifyEmailColumns` `delivery-orders.ts:5139`)
-  awaited before the first write in `app.put("/:id")` (`:6119`); persist in `applyDeliveryOrderUpdate` (`:6153`); surface in
-  `rowToOrder` (`:449`) / `rowToOrderList` (`:583`); render in `delivery/index.tsx` grid (`columns` `:3885`). snake_case + rename-map if camelCase. Mirror in CN if applicable.
-- **Change the DO status cascade** → edit `VALID_TRANSITIONS` (`:88`) + `applyDeliveryOrderUpdate` (`:6153`); keep the
-  DELIVERED→INVOICED build (`buildDoDeliveredSoAndInvoice` `:924`) and `fireCustomerNoticeBestEffort` (`:119`) in sync.
-- **Touch the notice email** → change `queueDoCustomerNotice` (`:5522`) only; never scatter new FE triggers. Verify with `tests/delivery-pipeline.test.mjs`.
-- **Adjust Delivery Agent proposals** → `generateDeliveryProposals` / `collectDeliveryBrief` (`lib/delivery-agent.ts:870 / 635`); routing in `cheapestForState` (`:396`).
-- **Touch CN flow** → mirror the DO change in `consignment-notes.ts` (create `:740`, return `:1015`, convert-to-invoice `:1334`, edit `:1990`) and `consignment/note.tsx`.
+- **Add a field to a DO** → runtime `ALTER … ADD COLUMN IF NOT EXISTS` (pattern `ensureNotifyEmailColumns` `_helpers.ts:3567`)
+  awaited before the first write in `app.put("/:id")` (`delivery-orders.ts:2949`); persist in `applyDeliveryOrderUpdate` (`_helpers.ts:4194`); surface in
+  `rowToOrder` (`_helpers.ts:461`) / `rowToOrderList` (`:595`); render in the `delivery/index.tsx` grid columns. snake_case + rename-map if camelCase. Mirror in CN if applicable.
+- **Change the DO status cascade** → edit `VALID_TRANSITIONS` (`_helpers.ts:87`) + `applyDeliveryOrderUpdate` (`_helpers.ts:4194`); keep the
+  DELIVERED→INVOICED build (`buildDoDeliveredSoAndInvoice` `_helpers.ts:1558`) and `fireCustomerNoticeBestEffort` (`_helpers.ts:131`) in sync.
+- **Touch the notice email** → change `queueDoCustomerNotice` (`_helpers.ts:3637`) only; never scatter new FE triggers. Verify with `tests/delivery-pipeline.test.mjs`.
+- **Adjust Delivery Agent proposals** → `generateDeliveryProposals` / `collectDeliveryBrief` (`lib/delivery-agent.ts:868 / 633`); routing in `cheapestForState` (same file).
+- **Touch CN flow** → mirror the DO change in `consignment-notes.ts` (create `:798`, return `:1073`, convert-to-invoice `:1419`, edit `:2109`) and `consignment/note.tsx`.
 
 ## Related modules
 [[sales]] [[accounting]] [[procurement]] [[production]] [[inventory]]

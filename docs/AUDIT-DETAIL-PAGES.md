@@ -1,5 +1,20 @@
 # Audit — detail pages, edit forms and dialogs (the "second click")
 
+> **Last verified: 2026-08-13** against `src/lib/cached-fetch.ts:478`,
+> `src/components/ui/document-chain-map.tsx:416`,
+> `src/pages/service-cases/detail.tsx:260-268`, `src/pages/inventory/adjustments.tsx`,
+> `src/api/routes/inventory.ts`.
+>
+> Same-day audit, and its spot-checks hold: `void ttlSec` is really at
+> `cached-fetch.ts:478` (the cache never suppresses the refetch);
+> `const open = openPOs[po.id] ?? true` is really at `document-chain-map.tsx:416`
+> directly under a comment claiming the opposite; the bare whole-org
+> `useCachedJson(… "/api/delivery-orders")` is really at `service-cases/detail.tsx:268`
+> while the PO fetch four lines below is `scope=`-narrowed. Nothing in it had been
+> fixed as of this verification — "Nothing was changed" is still accurate, and D1–D13
+> are all open. Its own provenance table (CODE / DOCS / ARITHMETIC, no prod timings)
+> is the right way to read it.
+
 **Date:** 2026-08-13 · **Branch:** `audit/detail-pages` · **Scope:** everything a user
 reaches by opening ONE record — detail pages, edit forms, create forms and the dialogs
 mounted inside them. Every audit before this one measured LIST pages.

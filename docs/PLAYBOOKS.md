@@ -1,9 +1,17 @@
 # Hookka ERP — Task Playbooks (the methodology)
 
+> **Last verified: 2026-08-13** against `src/lib/utils.ts` (`roundSen`,
+> `distributeRoundSen`, `roundUpToRinggitSen`, `formatRM`), `src/lib/pdf-utils.ts`
+> (`drawLetterhead` L55, `drawSectionLabel` L134, `tableTheme` L152, `drawDocFooter` L190,
+> `splitCodeName` L260), `src/components/ui/` (`money-input`, `discount-input`, `data-grid`),
+> `wrangler.toml` (`APP_URL = https://erp.hookka.com`), and a full `npm test` run.
+> Corrected 2026-08-13: the root-level HOOKKA-GOTCHAS link was broken (the file is at
+> `docs/context-packs/HOOKKA-GOTCHAS.md`) and the P3 test count was 4× stale.
+
 Fixed step-by-step procedures for recurring dev tasks. **Pick the playbook, follow the
 steps — don't re-derive the approach each time.** Each cites the exact files/helpers.
 Pair with `docs/CODEBASE-MAP.md` (where the code is) and
-`docs/HOOKKA-GOTCHAS.md` (the traps).
+`docs/context-packs/HOOKKA-GOTCHAS.md` (the traps).
 
 ---
 
@@ -28,8 +36,8 @@ Pair with `docs/CODEBASE-MAP.md` (where the code is) and
 *Refs: commit `cdfcae69` (PO `material_code` + GRN arrival), `HOOKKA-GOTCHAS.md`.*
 
 ## P3 — Ship + verify a change
-1. `npx tsc -p tsconfig.app.json --noEmit` (ignore only the 3 jsbarcode/@zxing sandbox errors).
-2. `npm test` (993 pass, 1 skip).
+1. `npx tsc -p tsconfig.app.json --noEmit` — **measured 2026-08-13 on a clean `npm install`: exit 0, ZERO errors.** The long-standing "ignore the 3 known jsbarcode / @zxing sandbox errors" instruction no longer applies here; if you see errors, they are yours.
+2. `npm test` — **3,768 tests / 3,765 pass / 3 skip / 0 fail, ~45 s** (measured 2026-08-13 on `main`). Any failure is yours; this suite is green on `main`.
 3. Commit on a branch (feature) or `main` (bugfix); `git pull --rebase origin main`; push.
 4. Watch: `gh run watch <id> --exit-status`.
 5. **Verify-live** on erp.hookka.com — check the **READ and the WRITE** path (patch → refetch → confirm). Deploy exit 0 ≠ feature works.

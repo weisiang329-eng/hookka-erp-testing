@@ -1,5 +1,26 @@
 # Audit — the routes nobody has swept
 
+> **Last verified: 2026-08-13** against `src/components/layout/sidebar.tsx:455-483`,
+> `src/lib/scheduler.ts:56` (`useInterval`), `src/api/routes/notifications.ts`,
+> `src/pages/analytics/forecast.tsx:145`, `src/dashboard-routes.tsx`,
+> `src/pages/inventory/adjustments.tsx:199-201`, `src/api/routes/inventory.ts`.
+>
+> Spot-checks hold, including the three that matter most:
+> - **Finding 1 is CORRECT and was wrongly dismissed elsewhere.** `docs/PERF-BACKLOG.md`
+>   filed it under "Not reproduced, do NOT chase" on the strength of a **50-second**
+>   idle observation. `useInterval` (`scheduler.ts:56`) defaults to
+>   `runImmediately: false`, so the first tick lands at **+60 s** — the disproof's
+>   window was shorter than the interval. That retraction is now recorded in
+>   PERF-BACKLOG. The poll is real.
+> - **Finding 3:** `return { accuracy: 84.2, count: last3.length }; // Mock accuracy`
+>   is verbatim at `analytics/forecast.tsx:145`.
+> - **Finding 4:** there is still **no `path="*"`** anywhere in `src/dashboard-routes.tsx`
+>   or `src/router.tsx`, so an unmatched dashboard URL still paints an empty `<main>`.
+> - **Finding 5:** `unitCostSen: p.basePriceSen ?? 0` is verbatim at
+>   `inventory/adjustments.tsx:201`, with `costPriceSen` sitting unused on the same row.
+>
+> Nothing in this audit had been fixed as of this verification.
+
 **Nothing in this document was measured on prod.** This branch has no
 authenticated session (login gate; `.dev.vars` credentials are rotated dead), so
 every claim here is derived from reading the code and from numbers already

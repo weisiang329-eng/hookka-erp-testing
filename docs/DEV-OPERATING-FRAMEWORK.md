@@ -1,5 +1,14 @@
 # Hookka ERP — Development Operating Framework (快 · 准 · 省)
 
+> **Last verified: 2026-08-13** against `package.json`, `tests/` (375 `*.test.mjs` files),
+> `migrations-postgres/`, `src/api/lib/` (`journal-hash.ts`, `document-lifecycle.ts`,
+> `auth-middleware.ts`, `rbac.ts`, `tenant.ts`, `supabase-compat.ts`,
+> `column-rename-map.json`), `src/lib/` and `docs/context-packs/`.
+> Corrected 2026-08-13: the test count was ~4× too low; the root-level HOOKKA-GOTCHAS path is the
+> wrong path (it lives under `docs/context-packs/`); `src/lib/payroll*` matches nothing;
+> `column-rename-map.json` is in `src/api/lib/`, not at the repo root as the bare filename
+> implied.
+
 The standing manual for **how work gets done here**: fast (快), accurate (准),
 economical (省), without breaking prod. Read this + `docs/LLM-CONTEXT-STRATEGY.md`
 at the start of every session.
@@ -13,8 +22,9 @@ at the start of every session.
 They replace manual full-review with **automated guardrails + risk-tiered review**:
 
 1. **Automated regression tests — the #1 safety net.** Tests catch breakage so you
-   don't re-inspect everything by hand. Hookka has ~993 tests + a deploy gate that
-   runs them on every push. **The rule that makes this work: when a bug slips
+   don't re-inspect everything by hand. Hookka has **375 test files carrying ~3,700
+   `test(`/`it(` cases** (counted 2026-08-13; this doc previously said "~993 tests",
+   which was ~4× low) + a deploy gate that runs them on every push. **The rule that makes this work: when a bug slips
    through, add a test that would have caught it — so it can NEVER come back.**
    That is how the net gets *stronger* over time instead of you getting more
    paranoid.
@@ -45,12 +55,12 @@ when the change touches any of these **HIGH-RISK areas** in Hookka:
 | --- | --- | --- |
 | DB schema / migrations | migrations DON'T auto-apply — must wire the runtime self-apply | `migrations-postgres/`, `ensurePendingMigrations`/`ensureGrnMigrations` |
 | Money / accounting / ledger | journal hash chain, payments, invoices | `src/api/lib/journal-hash.ts`, `accounting.ts`, `invoices.ts`, `payments.ts` |
-| Payroll engine | day-typed OT, ÷26, costing divisor | `src/lib/payroll*`, `employees.tsx` |
+| Payroll engine | day-typed OT, ÷26, costing divisor | `src/lib/pay-rules.ts`, `src/lib/generate-payslip-pdf.ts`, `src/pages/employees.tsx` (**corrected 2026-08-13 — no file matches `src/lib/payroll*`**) |
 | Inventory cascade | stock movements, batches, cost ledger | `fg-units.ts`, stock-adjustment + `applyWipInventoryChange` |
 | Status lifecycle | SO→PO→DO→Invoice transitions, delivery pipeline | `document-lifecycle.ts`, `delivery-pipeline.ts` |
 | Security / RBAC / tenancy / auth | access + isolation | `auth-middleware.ts`, `rbac.ts`, `tenant.ts`, `users.ts` |
 | Shared libs / cross-module | one edit hits many screens | `pdf-utils.ts`, `data-grid.tsx`, `utils.ts` |
-| supabase-compat camelCase layer | silent 400s + read-undefined bite here | `supabase-compat.ts`, `column-rename-map.json` |
+| supabase-compat camelCase layer | silent 400s + read-undefined bite here | `src/api/lib/supabase-compat.ts`, `src/api/lib/column-rename-map.json` |
 
 ### FAST-LANE (edit + one quick check — no broad scan, no agent)
 when **ALL** are true: no DB/schema change · no API contract change · no
@@ -74,7 +84,8 @@ for normal single-module features/bugs. This is the default for most work.
   schema feature, system-wide sweep, audit). One UI fix ≠ an agent.
 - **Batch tool calls; keep responses tight.** Less narration = fewer tokens.
 - **Don't re-derive what's already mapped** — `MEMORY.md`, `docs/BUG-HISTORY.md`,
-  `docs/HOOKKA-GOTCHAS.md`, the module/API maps in memory.
+  `docs/context-packs/HOOKKA-GOTCHAS.md` (**corrected 2026-08-13** — it is not at
+  `docs/context-packs/HOOKKA-GOTCHAS.md`), `docs/CODEBASE-MAP.md`, `docs/modules/*.md`.
 
 ## 准 — staying accurate without reviewing everything
 
@@ -94,7 +105,11 @@ items slip. Three layers:
 1. **`docs/WORK-TRACKER.md`** is the living, cross-session list of every assigned /
    in-progress / parked / shipped task (one line each, newest first). **Update it
    when a task is assigned, when it ships, when it's parked.**
-2. **In-session:** the Task tool (`TaskCreate`/`TaskUpdate`) mirrors the tracker
+2. **In-session:** > **UNVERIFIED ASSERTION** (as of 2026-08-13): the tool names
+   `TaskCreate`/`TaskUpdate` are not checkable from this repo's source and depend on the
+   agent harness in use; treat as owner intent, not fact. The intent — mirror the tracker
+   in whatever in-session task list exists — stands.
+   The Task tool (`TaskCreate`/`TaskUpdate`) mirrors the tracker
    for the current session. Code work in progress lives on a **branch/worktree** —
    a durable artifact, not just chat memory.
 3. **Periodic self-review (the cadence):** at the **START of each session** and
@@ -111,7 +126,8 @@ items slip. Three layers:
 | **THIS file** | the operating manual (review-discipline + 快准省 + tracking) |
 | `docs/LLM-CONTEXT-STRATEGY.md` + `docs/AI-DEVELOPMENT-MODES.md` | context-loading + mode framework |
 | `docs/context-packs/*` | per-area entry maps |
-| `docs/HOOKKA-GOTCHAS.md` | hard-won Hookka-specific traps |
+| `docs/context-packs/HOOKKA-GOTCHAS.md` | hard-won Hookka-specific traps |
+| `docs/CODEBASE-MAP.md` + `docs/modules/*.md` | the authoritative code map + the 15 per-module guides (added 2026-08-13 — this table predates both) |
 | `docs/UI-CONVENTIONS.md` (+ fold in `UI-DATA-DOCUMENT-STANDARDS.md`) | UI/PDF/grid standards |
 | `docs/BUG-HISTORY.md` | living bug log — source of truth |
 | `docs/WORK-TRACKER.md` | durable task tracker |

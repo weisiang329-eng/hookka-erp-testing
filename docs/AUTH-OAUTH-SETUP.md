@@ -1,8 +1,11 @@
 # Auth: Google Workspace OAuth + TOTP 2FA — admin setup guide
 
+> **Last verified: 2026-08-13** against `src/api/routes/auth-oauth.ts:54-70,127-134` (503 when `OAUTH_GOOGLE_CLIENT_ID` / `OAUTH_GOOGLE_REDIRECT_URI` / `JWT_SECRET` missing), `src/api/routes/auth-totp.ts` (`/enroll`, `/verify`, `/login-verify`, `/setup-start`, `/setup-confirm`, `/dismiss-prompt`, `/disable`), `migrations-postgres/0053_oauth_identities.sql` + `0054_user_totp.sql`, and `wrangler.toml` (OAuth vars still commented out).
+> Corrected 2026-08-13: `wrangler secret put` → `wrangler pages secret put` (Pages project); URLs updated to the live domain `erp.hookka.com`; noted the extra TOTP setup routes the doc omitted.
+
 Phase B.3 (Google Workspace SSO) and Phase C.6 (TOTP 2FA) are scaffolded but
 **inert until the credentials below are set**. The integration code reads
-them from env vars and `wrangler secret`. Follow this guide once per
+them from env vars and `wrangler pages secret`. Follow this guide once per
 environment (preview, staging, production).
 
 > Audience: Hookka platform admin. The end user (employee) only sees a
@@ -19,8 +22,9 @@ environment (preview, staging, production).
    * User type: **Internal** (locks consent to your Workspace tenant).
    * App name: `Hookka ERP`.
    * Support email: pick a Workspace mailbox you control.
-   * Authorized domains: `hookka-erp-testing.pages.dev` (or your prod
-     domain) AND your Workspace primary domain (e.g. `hookka.com`).
+   * Authorized domains: `hookka.com` (the prod domain is
+     `erp.hookka.com`) AND, if you want the legacy URL to work,
+     `hookka-erp-testing.pages.dev`.
    * Scopes: leave only `openid`, `email`, `profile`. (We do not call any
      Google APIs on behalf of the user — login only.)
    * Save.
@@ -30,11 +34,11 @@ environment (preview, staging, production).
      surgical).
    * Authorized JavaScript origins:
      ```
-     https://hookka-erp-testing.pages.dev
+     https://erp.hookka.com
      ```
    * Authorized redirect URIs:
      ```
-     https://hookka-erp-testing.pages.dev/api/auth/oauth/google/callback
+     https://erp.hookka.com/api/auth/oauth/google/callback
      ```
    * Click **Create**. Copy the **Client ID** and **Client secret**
      immediately — Google won't show the secret again.
@@ -52,7 +56,7 @@ Edit `wrangler.toml` `[vars]` block, or set per-env via the dashboard:
 ```toml
 [vars]
 OAUTH_GOOGLE_CLIENT_ID    = "<paste from step A.3>"
-OAUTH_GOOGLE_REDIRECT_URI = "https://hookka-erp-testing.pages.dev/api/auth/oauth/google/callback"
+OAUTH_GOOGLE_REDIRECT_URI = "https://erp.hookka.com/api/auth/oauth/google/callback"
 # Optional. If set, restricts login to the named Google Workspace tenant.
 # Recommended for production (locks out personal gmail accounts).
 OAUTH_GOOGLE_HOSTED_DOMAIN = "hookka.com"
@@ -62,11 +66,11 @@ OAUTH_GOOGLE_HOSTED_DOMAIN = "hookka.com"
 
 ```bash
 # OAuth client secret — paste when prompted, do NOT echo.
-wrangler secret put OAUTH_GOOGLE_CLIENT_SECRET
+wrangler pages secret put OAUTH_GOOGLE_CLIENT_SECRET
 
 # Used to sign the CSRF state token on the OAuth handshake. Generate fresh:
 #   node -e "console.log(crypto.randomBytes(48).toString('base64url'))"
-wrangler secret put JWT_SECRET
+wrangler pages secret put JWT_SECRET
 ```
 
 For local dev (`wrangler dev` / `vite + wrangler pages dev`), put the same
@@ -111,7 +115,7 @@ The migration files themselves are idempotent (`IF NOT EXISTS` /
 
 ## D. Smoke-test the flow
 
-1. Visit `https://hookka-erp-testing.pages.dev/api/auth/oauth/google/start?next=/dashboard`.
+1. Visit `https://erp.hookka.com/api/auth/oauth/google/start?next=/dashboard`.
    You should bounce to Google's account picker.
 2. Sign in with a Workspace account. The redirect should land on
    `/dashboard` and you should be logged in.
@@ -123,8 +127,8 @@ The migration files themselves are idempotent (`IF NOT EXISTS` /
    ```
    You should see your email + role.
 
-If anything fails, `wrangler tail --format=pretty` will surface the
-server-side error from `[oauth/google/callback]`.
+If anything fails, `wrangler pages deployment tail --project-name=hookka-erp-testing`
+will surface the server-side error from `[oauth/google/callback]`.
 
 ---
 
@@ -145,6 +149,11 @@ moment their next login will require both password + code.
 
 Disable: `POST /api/auth/totp/disable` with `{ password }` re-auth.
 
+The full route set on `src/api/routes/auth-totp.ts` is wider than the
+three above — there is also a guided setup pair (`POST /setup-start`,
+`POST /setup-confirm`), the login step (`POST /login-verify`), and
+`POST /dismiss-prompt` for users deferring enrollment.
+
 Recovery: at the login-verify step the user can enter a recovery code
 instead of the 6-digit TOTP. The matched code is permanently burned.
 When they're down to 0, they re-enroll (which generates fresh codes).
@@ -156,10 +165,10 @@ When they're down to 0, they re-enroll (which generates fresh codes).
 | Variable                       | Where           | Purpose                                            |
 | ------------------------------ | --------------- | -------------------------------------------------- |
 | `OAUTH_GOOGLE_CLIENT_ID`       | wrangler vars   | Google OAuth client ID (public).                   |
-| `OAUTH_GOOGLE_CLIENT_SECRET`   | wrangler secret | Google OAuth client secret. Rotates on leak.       |
+| `OAUTH_GOOGLE_CLIENT_SECRET`   | wrangler pages secret | Google OAuth client secret. Rotates on leak.       |
 | `OAUTH_GOOGLE_REDIRECT_URI`    | wrangler vars   | Callback URL — must match Google Console exactly.  |
 | `OAUTH_GOOGLE_HOSTED_DOMAIN`   | wrangler vars   | Optional. Locks login to one Workspace tenant.     |
-| `JWT_SECRET`                   | wrangler secret | HMAC secret for the OAuth CSRF state token.        |
+| `JWT_SECRET`                   | wrangler pages secret | HMAC secret for the OAuth CSRF state token.        |
 
 Until **all of the required ones above** are set, the OAuth `/start` route
 returns `503` with a pointer to this doc. The TOTP routes do NOT depend on

@@ -1,3 +1,26 @@
+> **ARCHIVED / SUPERSEDED — stopped being true 2026-06-03.** This is the 2026-05-31
+> blueprint written *before* the scheduler was built. What was actually built on
+> 2026-06-03 (`75b64b58`, `69dbbae1`) is a 1:1 TypeScript port of the owner-confirmed
+> Python cutter — `src/api/lib/planning-scheduler.ts` + `src/api/lib/planning-capacity.ts`
+> — and it contradicts this spec on every load-bearing rule:
+>
+> | This doc says | The code does (`planning-capacity.ts`, verified 2026-08-13) |
+> |---|---|
+> | Capacity is **measured** from the last 7–10 working days of completions | Capacity is a **config constant** (`DEFAULT_CAPACITY_CONFIG`), owner-confirmed, overridable at runtime via `kv_config['planning_capacity']` |
+> | Teams `SOFA / BEDFRAME / OTHER` | Lanes `BEDFRAME / SOFA / ACCESSORY` (`Lane`, :20) |
+> | FAB_CUT cap 款/天: BEDFRAME **6**, SOFA **2** | `laneCap {BEDFRAME 6, SOFA 6, ACCESSORY 8}` + a shared BF/SOFA pool with reserve tiers 7/6/5 by day index + `sofaMin 3` (:189-195) |
+> | `setupCap` SOFA 3 / BEDFRAME **5** | `setupCap {BEDFRAME 8, SOFA 3, ACCESSORY 8}` (:196) |
+> | Generic "one stage per day, next stage +1 day" | Per-stage capacities and handoffs: sew 1200/2100/240 min-day, wood 20/10 sets-day, framing 1320/480, foam 480, uph 1440/720; handoffs cut→sew +1, sew→wood +2, wood→frame +1, frame→foam +1, →uph +1 (:100-116) |
+> | Fabric cutting gated on **models/day** | Since 2026-07-11 (`e018da1b`) fabric cutting is a **CNC minutes** model: bedframe set 8 min, sofa set 20 min, accessory 4 min, fabric change 10 min, 1 machine (:203-210) |
+> | No walk-in reserve | `reserveAfterDay 3` / `reservePct 15` — owner 2026-08-04 (`69eed843`) |
+>
+> Also: STEP 4's `actualMinutes` reasoning is dead — all 4,289 `actualMinutes` values
+> are byte-identical copies of `estMinutes` (PERF-BACKLOG, 2026-08-13), and the
+> scheduler no longer derives capacity from them at all. The Snapshot reference dates
+> (June 2026) are two months in the past. Kept for history only — it records the
+> owner's reasoning about *why* cutting is gated on setups; do not treat any number,
+> field list or algorithm in it as current.
+
 # Production Planning Logic Specification
 # 生产排程逻辑规格书
 

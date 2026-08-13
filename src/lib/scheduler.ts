@@ -11,7 +11,7 @@
 // for visibility-aware polling) and `src/lib/use-version-check.ts`. Those
 // two hooks are the template; this module generalises them.
 //
-// Phase 4 (P4.1) of the enterprise upgrade — see docs/UPGRADE-CONTROL-BOARD.md.
+// Phase 4 (P4.1) of the enterprise upgrade — see docs/archive/UPGRADE-CONTROL-BOARD.md.
 // P4.2 wires up an ESLint rule that warns on raw `setInterval`/`setTimeout`.
 // P4.3 migrates the existing 30+ raw call sites to use these wrappers.
 // ---------------------------------------------------------------------------

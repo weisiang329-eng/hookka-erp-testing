@@ -8,7 +8,7 @@
 // Note: TypeScript types still reference `D1Database` because route code
 // uses the SQLite-flavoured prepare/bind/all interface. SupabaseAdapter
 // implements that interface over Postgres. There is no real D1 binding —
-// it was retired 2026-04-27 (commit 7059259); see docs/d1-retirement-plan.md.
+// it was retired 2026-04-27 (commit 7059259); see docs/archive/d1-retirement-plan.md.
 //
 // Key bindings (wrangler.toml):
 //   HYPERDRIVE       — production/preview Postgres pool to Supabase

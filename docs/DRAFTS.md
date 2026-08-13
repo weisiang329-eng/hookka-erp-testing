@@ -1,5 +1,9 @@
 # Drafts — Pending Features to Implement
 
+> **Last verified: 2026-08-13** against `src/lib/mock-data.ts` and a scan of `src/` for `STOOL`, `CSL 2 SET`, `stoolModel` / `stoolSize`.
+> Corrected 2026-08-13: the "Sofa Stool Orders" draft was resolved the way the draft itself proposed — a stool is now **its own product line**, e.g. `5537-STOOL` / "SOFA 5537 STOOL" with `sizeCode: "STOOL"` and per-seat-height prices at `src/lib/mock-data.ts:325`. There is no `stoolModel` / `stoolSize` sub-form anywhere in `src/`, so the "sub-form" alternative was NOT built and should not be listed as pending.
+> **UNVERIFIED ASSERTION** (as of 2026-08-13): the remaining two drafts (`CSL 2 SET`, the `1NA : 44"` / `2A : 32"` configuration-style tokens) leave no trace in `src/` — "CSL 2 SET" appears nowhere in the source. Whether they were decided, dropped, or are still open is not checkable from code; treat as owner intent, not fact, and ask before building.
+
 Features added by user but not yet implemented. Work on these when ready.
 
 ## Sofa Stool Orders

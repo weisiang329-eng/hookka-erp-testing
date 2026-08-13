@@ -1,3 +1,5 @@
+> **ARCHIVED / SUPERSEDED — stopped being true 2026-07-31.** All four slices shipped: `src/api/lib/purchase-return-create.ts` (added `b8d3a86c`, last touched `b11bafe6`, 511 lines) carries Slice 1 (PR-YYMM-NNN numbering, L108), Slice 2 (FIFO inventory reversal with the never-negative guard, L200-262) and Slice 3 (supplier Debit Note `SDN-` + AP debit, L309-408); `src/api/routes/purchase-returns.ts` and the Slice-4 UI at `src/pages/purchase-returns/` exist; pinned by `tests/purchase-return.test.mjs`. The three "open questions for the owner" were answered inside the shipped code (GRN-sourced returns issue no DN; a return must be STOCK_OUT before a DN). Kept for history only; do not treat as current.
+
 # Purchase Return module (owner 2026-07-30)
 
 ## The ask

@@ -1,5 +1,12 @@
 # Mid-Year Opening Support — Design (2026-07-02)
 
+> **Last verified: 2026-08-13** against the `POST /opening-balance/post` handler at `src/api/routes/accounting.ts:12452` and a repo-wide search for `opening_doc_includes` / `openingDocIncludes`.
+> Corrected 2026-08-13 — **this spec is HALF SHIPPED; the two features have opposite status:**
+> - **Feature 1 (opening form accepts P&L accounts): SHIPPED.** The `!["ASSET","LIABILITY","EQUITY"].includes(acct.type)` rejection is gone from the handler; the SDC/SCC control-account block, one-side-only check and balance check all survive as specced.
+> - **Feature 2 (opening include-list for pre-opening docs): NOT BUILT.** `opening_doc_includes` appears **nowhere** in `src/` or in `migrations-postgres/` — no table, no `ensureOpeningDocIncludes`, no route, no "Pre-opening supplier invoices" card. The 36 "Keep"-list PIs (RM 42,442.40) therefore still do **not** appear in creditor aging.
+>
+> This is the only doc in the 2026-08-13 docs audit with real unbuilt work. Feature 2's owner iron rule still stands: 之前录入的不删不改 — the marker must stay row-external.
+
 Owner-approved scope (session 2026-07-02, debtor/creditor opening工程). Two features, one branch.
 
 ## Why

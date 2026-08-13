@@ -1,5 +1,17 @@
 # Interaction Cost — what the app costs AFTER the page has loaded
 
+> **Last verified: 2026-08-13** against `src/components/ui/data-grid.tsx:330-345`,
+> `src/components/ui/toast.tsx`, `src/pages/sales/index.tsx`, `vite.config.ts`.
+>
+> Same-day audit; spot-checks hold. Suspect 4 really did ship in its own PR — the one
+> shared module-scope `const COLLATOR = new Intl.Collator(undefined, {numeric:true})`
+> is at `data-grid.tsx:345` with the reasoning above it and
+> `tests/data-grid-collator.test.mjs` behind it. Suspect 8 is still open: the toast
+> context value is still a fresh object literal (no `useMemo` in
+> `src/components/ui/toast.tsx`). Suspects 1–3, 5–7 and 9–10 are open. Read its
+> provenance table (PROD / LOCAL / CODE / REPO) before quoting any number — nothing in
+> this file except the row-count inheritances was measured on prod in that session.
+
 Every performance audit so far measured page LOAD. This one measures what a
 click and a keystroke cost once the page is already up. That dimension had
 never been looked at, and the one confirmed instance of the owner's original

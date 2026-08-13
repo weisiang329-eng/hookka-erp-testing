@@ -1,3 +1,9 @@
+> **ARCHIVED — HISTORY ONLY. Last had current content 2026-06-30; archived 2026-07-23.**
+> This describes work that is finished or a system that has since changed. Its file
+> paths, line numbers, counts and open items are as of the date above and were NOT
+> re-verified. **Do not use it to decide what the code does today** — read the code, or
+> `docs/CODEBASE-MAP.md`. Banner added 2026-08-13; see `docs/archive/README.md`.
+
 # Session Handoff — ERP slowness / login 500 / weak-wifi unusable
 
 > Pick this up in a fresh session. Self-contained: problem → confirmed diagnosis
@@ -135,10 +141,10 @@ points straight here:
 4. Tell the owner the **Supabase capacity** check (connections / compute / auto-pause).
 
 ## Other open work (separate handoff docs already in the repo)
-- `docs/PACKING-SCAN-HANDOFF.md` — packing-sticker scan + completion (mint `/p/`
+- `docs/archive/PACKING-SCAN-HANDOFF.md` — packing-sticker scan + completion (mint `/p/`
   robustness on poNo drift, `jc=` sticker fallback, completed-row-vanish, tests).
   The completion logic is CONFIRMED CORRECT (first scan completes; PIC2 = labor split).
-- `docs/PENDING-TASKS-HANDOFF.md` — remaining pending (most already shipped; the
+- `docs/archive/PENDING-TASKS-HANDOFF.md` — remaining pending (most already shipped; the
   real dev items: mint `/p/` robustness [HIGH], Packing-List stacked rack layout
   [mockup-first], regression tests).
 - An `IMPLEMENTATION-DRAFTS.md` (copy-pasteable code drafts) was in progress but
@@ -156,5 +162,5 @@ points straight here:
   print-time origin, canonicalized to `erp.hookka.com` on prod.
 - Additive, never break existing. Verify live on prod after deploy. UI mockup
   before any UI/PDF change. Bug fixes → `main`, features → `staging`. UI English.
-- Entry docs: `CLAUDE.md`, `docs/context-packs/NAVIGATION-MAP.md` (find code),
+- Entry docs: `CLAUDE.md`, `docs/CODEBASE-MAP.md` (find code),
   `docs/context-packs/HOOKKA-GOTCHAS.md` (traps), `docs/WORK-TRACKER.md` (state).

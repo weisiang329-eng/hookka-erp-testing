@@ -1,5 +1,9 @@
 # Midnight auto-refresh — investigation notes
 
+> **Last verified: 2026-08-13** against `src/lib/use-version-check.ts:30,73,81` (`intervalMs = 5 * 60 * 1000`, `setInterval`, first check at 30s), `src/api/routes/auth.ts:52`, `src/api/routes/auth-totp.ts:54`, `src/api/routes/auth-oauth.ts:40`, `src/api/routes/worker-auth.ts`, and `wrangler.toml` (`[triggers]` still commented out).
+> Corrected 2026-08-13: every `src/api/routes-d1/...` path cited here is wrong — that directory does not exist. And the "all four session-issuance points use a 30-day TTL" finding no longer holds: dashboard login is now **7 days**, and worker-portal tokens have **no expiry at all**.
+> The conclusion (no timer-driven client reload exists) still holds and was re-checked.
+
 User report: "Every midnight there's also an auto-refresh."
 
 ## What was investigated
@@ -23,11 +27,16 @@ So this hook by itself doesn't auto-refresh. But:
 
 ### 2. Cloudflare Pages / cron triggers
 
-`wrangler.toml` (lines 74-86, 133-142) documents that **Pages Functions do
-not natively support `[triggers] crons`**. The repo has a `daily-backup.ts`
-scheduled handler at `src/api/cron/daily-backup.ts`, but its `crons`
-declaration is commented out — the comment says it needs an external
-trigger (sibling Worker / cron-job.org / GitHub Action) to actually fire.
+`wrangler.toml` documents that **Pages Functions do not natively support
+`[triggers] crons`**. The repo has a `daily-backup.ts` scheduled handler at
+`src/api/cron/daily-backup.ts`, but its `crons` declaration is still
+commented out (re-checked 2026-08-13) — it needs an external trigger
+(sibling Worker / GitHub Action) to fire, and never got one.
+
+What DOES run on a schedule is GitHub Actions: 20+ workflows in
+`.github/workflows/` are `on: schedule`, including `keep-warm.yml`
+(*/5 min) and `backup.yml` (18:00 UTC = 02:00 SGT). None of them can
+cause a client-side reload — they are server-to-server HTTP calls.
 
 The backup job is purely server-side anyway (writes to Supabase
 Storage; was R2 before the storage-supabase-migration). It cannot
@@ -35,14 +44,21 @@ cause client-side refreshes.
 
 ### 3. Session TTL
 
-All four session-issuance points use a 30-day TTL:
-- `src/api/routes-d1/auth.ts:18` — `SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000`
-- `src/api/routes-d1/auth-totp.ts:45` — same
-- `src/api/routes-d1/auth-oauth.ts:37` — same
-- `src/api/routes/worker-auth.ts:85` — same
+**Re-measured 2026-08-13** — the original "all four are 30 days" claim is
+no longer true:
 
-So a daily session expiry is NOT the cause. A user logged in 3 days ago
-still has 27 days of token left.
+- `src/api/routes/auth.ts:52` — `SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000`
+  (**7 days**, not 30; password login)
+- `src/api/routes/auth-totp.ts:54` — 30 days
+- `src/api/routes/auth-oauth.ts:40` — 30 days
+- `src/api/routes/worker-auth.ts` — **no TTL at all**; `worker_tokens`
+  rows carry `issuedAt` and are never expired by the lookup
+
+Either way, a *daily* session expiry is still NOT the cause: the shortest
+of these is 7 days.
+
+Separately, `SESSION_CACHE_TTL_S = 300` (`src/api/lib/auth-middleware.ts:196`)
+is a 5-minute KV cache in front of session lookup, not a session lifetime.
 
 ### 4. Search for `setInterval` / midnight constants
 

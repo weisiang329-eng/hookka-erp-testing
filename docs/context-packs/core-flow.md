@@ -1,5 +1,7 @@
 # Context Pack: Core ERP Flow
 
+> **Last verified: 2026-08-13** — every route file, page directory and shared-logic file listed here exists (`src/api/lib/document-lifecycle.ts`, `src/lib/production-order-builder.ts`, `src/api/lib/journal-hash.ts`, the 9 route files, the 5 page directories).
+
 Use this pack for the main Hookka ERP flow: Sales Order → Production Order → Job Card → Finished Goods → Delivery Order → Invoice → Accounting.
 
 > Flow / status-transition / cascade changes are **deep review** — trace the exact flow before editing and add/keep tests. See `docs/DEV-OPERATING-FRAMEWORK.md`; `src/api/lib/document-lifecycle.ts` + `src/lib/delivery-pipeline.ts` own the transitions.

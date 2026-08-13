@@ -1,8 +1,10 @@
+> **ARCHIVED / SUPERSEDED — stopped being true 2026-06-26.** Both open tasks shipped that same day: TASK 1 (mint resolves poNo-drifted stickers) in commit `ac29f46f` — `src/api/routes/production-orders.ts:1706-1762` now carries the CI-poNo retry *and* the `SELECT poNo, poId FROM fg_units …` fallback; TASK 2 (per-piece stacked rack layout) in commit `bf7e0459` — `generatePackingListPdf(order, extras?: DOPrintExtras)` at `src/lib/generate-packing-pdf.ts:37` with 4 `componentRacks` uses. Its `docs/archive/PACKING-SCAN-HANDOFF.md` pointer is also dead (that file is now under `docs/archive/`). Kept for history only; do not treat as current.
+
 # Pending Tasks Handoff (excluding packing-scan)
 
 > Single source-of-truth for every pending Hookka ERP dev task **except** the packing-sticker
 > scanning + completion work — that has its own dedicated doc:
-> **[`docs/PACKING-SCAN-HANDOFF.md`](PACKING-SCAN-HANDOFF.md)** (mint `/p/` robustness, `jc=` sticker
+> **[`docs/archive/PACKING-SCAN-HANDOFF.md`](PACKING-SCAN-HANDOFF.md)** (mint `/p/` robustness, `jc=` sticker
 > fallback, completed-row-vanish allowlist, tests). Do not duplicate that work here.
 >
 > Verified against `main` on 2026-06-26. Each task below was re-read at `file:line` before
@@ -210,7 +212,7 @@ fails. Items reference `docs/WORK-TRACKER.md`.
 
 1. **Packing sticker scanning on staging:** owner picks Rack 9 on the packing sheet → confirm it
    appears in the Warehouse grid; preview/print is fast now. Backend shipped (`3ec97e43`,
-   `bcb000d4`, `152ad257`). Full spec in `docs/PACKING-SCAN-HANDOFF.md`.
+   `bcb000d4`, `152ad257`). Full spec in `docs/archive/PACKING-SCAN-HANDOFF.md`.
 2. **Completed-row reveal on the floor** (see Stale section): owner to confirm one-by-one and
    multi-dept completion paths keep the row visible until reload.
 3. **Document-date reporting basis:** GL/P&L now bucket by document date, not entry date
@@ -235,7 +237,7 @@ fails. Items reference `docs/WORK-TRACKER.md`.
 
 ### Pointers
 - **Packing-scan work** (mint `/p/` robustness, `jc=` sticker fallback, completed-row allowlist,
-  tests): **[`docs/PACKING-SCAN-HANDOFF.md`](PACKING-SCAN-HANDOFF.md)** — single source of truth;
+  tests): **[`docs/archive/PACKING-SCAN-HANDOFF.md`](PACKING-SCAN-HANDOFF.md)** — single source of truth;
   TASK 1 above is the mint-endpoint half of that effort surfaced here because it lives in
   `production-orders.ts`.
 - **Find the code:** `docs/CODEBASE-MAP.md`. **How to do recurring tasks:**

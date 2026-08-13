@@ -1,3 +1,9 @@
+> **ARCHIVED — HISTORY ONLY. Last had current content 2026-04-29; archived 2026-07-23.**
+> This describes work that is finished or a system that has since changed. Its file
+> paths, line numbers, counts and open items are as of the date above and were NOT
+> re-verified. **Do not use it to decide what the code does today** — read the code, or
+> `docs/CODEBASE-MAP.md`. Banner added 2026-08-13; see `docs/archive/README.md`.
+
 # Day-1 PIN Reset Broadcast — Floor Communication
 
 > Use after the foundation hardening deploy (2026-04-29). All worker PIN

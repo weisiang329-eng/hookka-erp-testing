@@ -1,5 +1,12 @@
 # Hookka ERP — Development Efficiency System (the "big plan")
 
+> **Last verified: 2026-08-13** against `docs/` (file listing), `docs/PLAYBOOKS.md`
+> (8 `##` procedures — the "8 procedures" claim is correct), `docs/context-packs/`,
+> `docs/modules/` (15 guides), `src/lib/fe-rum.ts`, `src/pages/admin/`.
+> Corrected 2026-08-13: `HOOKKA-GOTCHAS` lives at `docs/context-packs/HOOKKA-GOTCHAS.md`,
+> not `docs/`. Note also that the roadmap below is now **behind reality** — see the
+> status note added under "Build roadmap".
+
 Goal: development that is **快 (fast) · 简单 (simple) · 省 (low token) · 无 bug · 准 (accurate)**.
 This is the roadmap for our lightweight **ERP Center of Excellence (CoE)** — the system
 that makes every future task start *fast, without long searching*. Read `docs/DOCS-INDEX.md`
@@ -12,7 +19,7 @@ that makes every future task start *fast, without long searching*. Read `docs/DO
 | # | Layer | Plain meaning | Status | Assets |
 |---|---|---|---|---|
 | 1 | **Governance** | when to review-all vs not; 快准省; risk tiers | ✅ have | `DEV-OPERATING-FRAMEWORK`, `AI-DEVELOPMENT-MODES`, `LLM-CONTEXT-STRATEGY` |
-| 2 | **Knowledge** | the traps + standards, don't relearn | ✅ strong | `HOOKKA-GOTCHAS`, `BUG-HISTORY` (by date), **`BUG-CLASSES` (by class — makes P5 executable)**, `UI-CONVENTIONS`, MEMORY |
+| 2 | **Knowledge** | the traps + standards, don't relearn | ✅ strong | `context-packs/HOOKKA-GOTCHAS.md`, `BUG-HISTORY` (by date), **`BUG-CLASSES` (by class — makes P5 executable)**, `UI-CONVENTIONS`, MEMORY |
 | 3 | **Reliability / Tracking** | never forget an ask, never skip a message | ⚠️ exists — must be USED (see below) | `WORK-TRACKER` + intake discipline |
 | 4 | **Navigation** | go straight to the files — **no searching** | ✅ built | `CODEBASE-MAP.md` (**15 modules = whole system** + line-range index for ~30 monster files) |
 | 5 | **Methodology** | fixed steps for recurring tasks | ✅ built | `PLAYBOOKS.md` (8 procedures) |
@@ -38,6 +45,12 @@ This is non-negotiable and overrides the urge to "just start coding the first th
 
 ## Build roadmap (ordered by token / efficiency ROI)
 
+> **Status as of 2026-08-13 (verified against the tree):** items 1 and 2 are **done** —
+> `docs/CODEBASE-MAP.md` plus 15 per-module guides in `docs/modules/` cover navigation, and
+> `docs/PLAYBOOKS.md` ships 8 procedures (P1–P8), one more than the "~6" planned here.
+> Item 3 is **not** done: `UI-DATA-DOCUMENT-STANDARDS.md` was never folded into
+> `UI-CONVENTIONS.md` and both are still separate live docs. Item 4 is not done.
+
 1. **Navigation maps** *(now — the biggest search-killer)* — per-module map + big-file
    section indexes so any task jumps straight to the right lines.
 2. **Playbooks** *(the methodology — the biggest re-derive-killer)* — ~6 fixed procedures:
@@ -58,7 +71,17 @@ over a token-burning scheduled re-scan):
    byproduct — you're already in those files. Line numbers drift as files grow; the section
    *names* stay stable, so grep the named function near the listed line if it's off by a bit.
 2. **Knowledge self-growth.** Every bug → `BUG-HISTORY.md` + a regression test; a task done
-   3+ times → a new `PLAYBOOKS` entry; a new trap → `HOOKKA-GOTCHAS.md`.
+   3+ times → a new `PLAYBOOKS` entry; a new trap → `docs/context-packs/HOOKKA-GOTCHAS.md`.
+
+> **The "line numbers drift, grep the named function" clause above is not a small caveat —
+> it has already failed once, and the fix was to stop hand-maintaining.** Measured
+> 2026-08-13: only 24.9% of the 891 `file:line` pointers in the hand-written
+> `docs/SYMBOLS.md` still landed on a route registration, and 94 pointed past end-of-file.
+> Update-on-touch did not hold for that file, so it was **deleted** and replaced by
+> `docs/API.md`, generated from source by `node scripts/gen-api-docs.mjs`. Lesson: for any
+> index that is mechanically derivable, generate it — a discipline that has to hold across
+> 1,300 commits a month will not. Treat every remaining hand-held line number (CODEBASE-MAP,
+> the module guides) as a hint, never as an offset to `Read` at blindly.
 
 *Optional, OFF by default (costs tokens):* a scheduled monthly re-run of the mapping workflow
 for a full line-number refresh + auto-pickup of new modules. Turn on only if hands-off

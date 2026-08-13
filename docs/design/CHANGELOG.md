@@ -1,3 +1,15 @@
+> **ARCHIVED / SUPERSEDED — this is a closed session log, not current state.** It records
+> what one design session changed inside `docs/design/Hookka ERP Mobile.dc.html`; the live
+> answer to "what does the phone UI look like now" is the `.dc.html` sources themselves
+> plus `src/pages/m/`. Kept for history only; do not treat as current.
+>
+> Verified 2026-08-13: the design tokens it lists (raisin `#1F1D1B`, taupe `#6B5C32`,
+> paper `#FAF8F4`, card border `#E7E0D4`, gold `#C9A961`) all still match
+> `src/pages/m/theme-vars.css`. Its ✅/⚠️/❌ status marks describe the **prototype**
+> `.dc.html`, **not** the shipped React app — a ✅ here is not evidence a feature exists in
+> `src/pages/m/`. It also predates the dark/light mode toggle it asks for in one line and
+> the app now ships.
+
 # Hookka ERP — 手机版重新设计 Change Log
 
 > 本次 session 对设计做的所有更改。状态标记：✅ 已完成可用 ｜ ⚠️ 部分完成 ｜ ❌ 仅可看未接操作

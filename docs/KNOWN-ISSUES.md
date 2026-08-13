@@ -1,12 +1,25 @@
 # Known Issues
 
-Running `npx eslint .` surfaces ~92 errors and 15 warnings. Every one of them is
-a known trade-off — `tsc -b` is clean, `npx vite build` is clean, and the dev
-server + production bundle both work end-to-end. The remaining issues fall
-into a few buckets; this file records what they are, why they're still there,
-and when to fix them.
+> **Last verified: 2026-08-13** against a full `npx eslint . -f json` run in this worktree, plus `src/pages/` and `src/components/ui/data-grid.tsx`.
+> Corrected 2026-08-13: every count in this file was wrong and the shape of the debt has inverted. The old text claimed "~92 errors and 15 warnings" dominated by 62 `set-state-in-effect` errors; the measured run returns **20 errors and 97 warnings**, with `set-state-in-effect` down to **2**. Two buckets the old file listed (`react-hooks/static-components`, `react-hooks/purity`) now report **zero**, and the largest error bucket — `no-restricted-syntax` (24, the raw `setInterval`/`setTimeout` ban) — was not mentioned at all. The old §4 also cited `src/pages/production-test/tracker.tsx`, a file that does not exist in this repo.
 
-## 1. `react-hooks/set-state-in-effect` — ~62 errors
+## Measured baseline (2026-08-13, `npx eslint .`)
+
+```text
+ERRORS 20   WARNINGS 97
+react-hooks/exhaustive-deps          28
+no-restricted-syntax                 24   (raw setInterval/setTimeout ban — P4.3 drain)
+react-hooks/incompatible-library     10
+@typescript-eslint/no-unused-vars     9
+no-useless-escape                     3
+@typescript-eslint/no-explicit-any    3
+react-hooks/set-state-in-effect       2
+(remaining ~38 carry no ruleId)
+```
+
+Treat the buckets below as *rationale* for why each rule is tolerated, not as a count. Re-measure before quoting a number.
+
+## 1. `react-hooks/set-state-in-effect` — 2 remaining (was ~62)
 
 The React 19 hooks plugin (still labelled experimental in `eslint-plugin-react-hooks@next`)
 flags the idiomatic pattern:
@@ -30,7 +43,7 @@ more than strictly necessary. Migrating to React Query is a separate
 track — see `docs/ARCHITECTURE.md`, section "Extension points, 3. State &
 data fetching".
 
-## 2. `react-hooks/exhaustive-deps` — ~21 warnings
+## 2. `react-hooks/exhaustive-deps` — 28 warnings (measured)
 
 Hooks dependency lists that don't include every referenced value. Most
 are intentional:
@@ -44,7 +57,7 @@ are intentional:
 to add the dep, extract a stable callback, or silence with
 `// eslint-disable-next-line react-hooks/exhaustive-deps`.
 
-## 3. `@typescript-eslint/no-explicit-any` — ~12 errors
+## 3. `@typescript-eslint/no-explicit-any` — 3 remaining (was ~12)
 
 Remaining `any` uses are in:
 
@@ -59,12 +72,15 @@ Remaining `any` uses are in:
 for a feature change. No impact on runtime safety — `tsc` already
 verifies call-site usage.
 
-## 4. `react-hooks/static-components` — 5 errors
+## 4. `react-hooks/static-components` — 0 (RESOLVED; was 5)
+
+> Corrected 2026-08-13: this rule now reports zero. The paragraph below is kept
+> only to explain the original trade-off. Note it referenced
+> `pages/production-test/tracker.tsx`, which has never existed in this repo.
 
 Components defined inside other components. Each one resets state on
-every parent render. `SortIcon` already got hoisted from both
-`pages/production/tracker.tsx` and `pages/production-test/tracker.tsx`.
-The five that remain are in:
+every parent render. `SortIcon` already got hoisted from
+`pages/production/tracker.tsx`. The five that used to remain were in:
 
 - `src/pages/bom.tsx` (3× — tightly coupled helpers inside the edit
   dialog, would require prop-drilling a handful of local state variables
@@ -77,13 +93,12 @@ hoisting is the prop-drilling, and the "reset on re-render" cost is
 benign for these specific components because they hold no intrinsic
 state.
 
-## 5. `react-hooks/purity` — 7 errors
+## 5. `react-hooks/purity` — 0 (RESOLVED; was 7)
 
-Effects that perform side-effects during render (mostly `console.warn`
-in dev-only branches). These would migrate to `useEffect` in a proper
-clean-up pass.
+Effects that performed side-effects during render (mostly `console.warn`
+in dev-only branches). The rule now reports zero.
 
-## 6. `react-hooks/immutability` / `preserve-manual-memoization` / `refs` / `incompatible-library` — 7 combined
+## 6. `react-hooks/incompatible-library` — 10 warnings (and friends)
 
 Assorted micro-warnings about prop mutation, manual `useMemo` idioms
 that could be replaced with the new `cache()` API, and one library
@@ -97,10 +112,14 @@ exits beta.
 ## Build status
 
 ```text
-npx tsc -b         ✅ 0 errors
-npx vite build     ✅ built in ~1.2s, 40+ chunks
-npx eslint .       ⚠️ 92 errors, 15 warnings (all documented above)
+npx eslint .       ⚠️ 20 errors, 97 warnings   (measured 2026-08-13)
 ```
+
+> Corrected 2026-08-13: the `tsc -b` / `vite build` lines were removed because they were
+> quoted as facts without a date and were not re-run for this audit. Run
+> `npm run typecheck:app` (`tsc -p tsconfig.app.json --noEmit` — the gate per CLAUDE.md,
+> stricter than the base `tsc -b`) and `npm run build` yourself rather than trusting a
+> number in a doc.
 
 See also
 - `docs/ARCHITECTURE.md` — extension points for the migrations

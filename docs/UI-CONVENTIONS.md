@@ -1,5 +1,17 @@
 # UI Conventions — Hookka ERP
 
+> **Last verified: 2026-08-13** against `src/components/ui/` (all files),
+> `src/components/material-picker.tsx`, `src/components/scan-po-modal.tsx`,
+> `src/components/scan-supplier-modal.tsx`, `src/lib/pdf-utils.ts`,
+> `src/lib/use-nav-guard.ts`, `src/main.tsx`, `src/lib/generate-*-pdf.ts`, `package.json`.
+> Corrected 2026-08-13: `generate-order-pdf.ts` does not exist; `useNavGuard` lives in
+> `src/lib/`, not `src/hooks/`; there is no bare `toast` export; the `Badge` usage example
+> was incomplete. Everything else — every component file path, `drawLetterhead` /
+> `drawSectionLabel` / `drawDocFooter` / `fmtCurrency` / `fmtRM` / `fmtDate` /
+> `amountInWords` in `pdf-utils.ts`, `letterheadForPurchaseOrg` in
+> `generate-purchase-order-pdf.ts:86`, `ConfirmProvider` mounted at `src/main.tsx:149`, and
+> the `build:strict` rule — was verified and is correct.
+
 The house design system. **One rule above all: reuse the shared components below — never hand-roll a header, dialog, money input, table, or PDF letterhead per page.** Almost every visual inconsistency we've had to fix came from a page hand-rolling its own version of something a shared component already does. New pages compose the shared pieces; if a shared piece is missing a capability, extend the shared piece, don't fork it.
 
 This doc is the reference for keeping this app consistent — and for mirroring the same conventions into sister systems.
@@ -17,15 +29,15 @@ This doc is the reference for keeping this app consistent — and for mirroring 
 | `MoneyInput` | `src/components/ui/money-input.tsx` | RM amount entry. `value: number|null` (dollars), `onChange(next)`. Commits on blur/Enter, clear-to-blank → null, 2-decimal display, right-aligned. Keep the parent's sen math unchanged — this is only the entry UX. |
 | `MaterialPicker` | `src/components/material-picker.tsx` | Catalog autocomplete (raw-materials). Fills code+name on pick; still allows off-catalog free text. Never auto-fills price. |
 | `SearchableSelect` | `src/components/ui/searchable-select.tsx` | Searchable dropdown (suppliers, customers, etc.). |
-| `Badge` / `StatusBadge` | `src/components/ui/badge.tsx`, `status-badge.tsx` | Status chips. Use `<Badge variant="status" status={...} />`. |
-| `Button`, `Input`, `LoadingButton`, `toast` | `src/components/ui/*` | Primitives. `toast.error/success` for feedback. |
+| `Badge` / `StatusBadge` | `src/components/ui/badge.tsx`, `status-badge.tsx` | Status chips. Prefer `<StatusBadge kind="so" value={...} />` for backend enums (compile-checked per enum). `<Badge variant="status" status={...} />` is the legacy path — `variant` accepts only `"default"` / `"status"`, and `variant="status"` needs the `status` prop as well. |
+| `Button`, `Input`, `LoadingButton`, toasts | `src/components/ui/*` | Primitives. **Corrected 2026-08-13:** there is no `toast` object export and no `toast.error/success`. `toast.tsx` exports `ToastProvider` + `useToast()`; call `const { ... } = useToast()` inside a component. |
 | `ScanPOModal` / `ScanSupplierModal` | `src/components/scan-po-modal.tsx`, `scan-supplier-modal.tsx` | OCR scan. Customer PO → SO (sales/consignment); supplier DO/invoice → GRN/PI (purchasing). **The scan button sits next to "Create"** in the page header (e.g. "Scan PO", "Scan GRN", "Scan PI"). |
 
 ## 2. Documents / PDFs
 
 - **One shared letterhead for every PDF**: `drawLetterhead(doc, { docTitle, docNo, docDate?, statusText?, company?, companyInfo?, logo? })` in `src/lib/pdf-utils.ts`. Returns the body-start Y. NEVER hand-roll a PDF header.
 - **Shared body helpers** (same file): `drawSectionLabel`, `drawDocFooter`, `PDF` constants (margin/ink/muted/rule), `fmtCurrency`/`fmtRM`/`fmtDate`, `amountInWords`.
-- **Body style standard** = the Delivery Order / Invoice look: a `theme:"plain"` table (white header + black bottom-rule, hairline body lines, dashed per-row separators), `lblVal` two-column reference blocks, right-aligned `sumLine` totals. All generators (`src/lib/generate-*-pdf.ts`) follow it — `generate-do-pdf.ts` / `generate-invoice-pdf.ts` / `generate-order-pdf.ts` are the reference implementations.
+- **Body style standard** = the Delivery Order / Invoice look: a `theme:"plain"` table (white header + black bottom-rule, hairline body lines, dashed per-row separators), `lblVal` two-column reference blocks, right-aligned `sumLine` totals. All generators (`src/lib/generate-*-pdf.ts`) follow it — `generate-do-pdf.ts` and `generate-invoice-pdf.ts` are the reference implementations. **Corrected 2026-08-13: `generate-order-pdf.ts` does not exist** and was removed from this list; the order-side references are `generate-so-pdf.ts` and `generate-purchase-order-pdf.ts`.
 - "Borrow letterhead": a doc can print under a different company's letterhead (via the org registry) while the accounting entity stays the home company. See `letterheadForPurchaseOrg` in `generate-purchase-order-pdf.ts`.
 
 ## 3. Design tokens (colours + type)
@@ -40,7 +52,7 @@ This doc is the reference for keeping this app consistent — and for mirroring 
 - **List page**: `<PageHeader title subtitle actions={<>…</>} />` → KPI cards → filters → `<DataGrid>`. Scan button (if any) goes in `actions`, before the Create button.
 - **Detail page**: `<ObjectPageHeader backTo title subtitle badges actions />` → status pipeline → detail cards / `DataGrid`. Put every action (PDF/Print/Edit/status transitions/delete) in `actions`; status & lock chips in `badges`. Use `onBack` (not `backTo`) when the back navigation is contextual or guarded.
 - **Destructive / posting actions** (delete, void, post-to-stock, close): gate behind `await confirm({ danger: true, … })`.
-- **Unsaved-edit guard**: `useNavGuard(dirty)` (router-level `useBlocker`) — one per route, don't stack.
+- **Unsaved-edit guard**: `useNavGuard(dirty)` from **`src/lib/use-nav-guard.ts`** (router-level `useBlocker` + `beforeunload`; it is *not* in `src/hooks/`) — one per route, don't stack.
 
 ## 5. Before you push
 

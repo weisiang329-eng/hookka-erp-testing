@@ -168,9 +168,15 @@ There is **no Redux and no Zustand**. Most screens still use plain `fetch` +
 sit here is no longer true — three caching layers exist and new code should use
 them:
 
-- `swr` (a real dependency) with the shared fetcher in `src/lib/swr-fetcher.ts`.
+- ~~`swr` with the shared fetcher in `src/lib/swr-fetcher.ts`~~ — **the fetcher
+  was deleted in chore/dead-code-sweep.** It was the only importer of the `swr`
+  package and nothing imported it, so this "layer" had zero adopters and was a
+  third competing fetch pattern on paper only. `swr` is still listed in
+  `package.json` dependencies and is now unused — removing it is a separate
+  change (lockfile + bundle).
 - `src/lib/cached-fetch.ts` — stale-while-revalidate + `AbortController` +
-  in-flight dedup.
+  in-flight dedup. **This is the one that is actually used** (~88 pages, via
+  `useCachedJson`).
 - `src/lib/api-client.ts` — patches `window.fetch` globally to attach
   `X-CSRF-Token` to every mutating `/api/*` call. **No call site needs to add
   CSRF headers**; an audit that reports "N fetches missing the CSRF token" is
@@ -321,7 +327,6 @@ The non-UI heart of the app. A selected tour:
 | `scheduler.ts`               | `useInterval` / `useTimeout` with `pauseOnHidden`           |
 | `cached-fetch.ts`            | SWR + AbortController + in-flight dedup over `useState` cache |
 | `validation.ts`              | Shared Zod schemas (SO create body, DO create body, …)      |
-| `material-lookup.ts`         | SKU ↔ product match / fuzzy lookup                          |
 | `po-parser.ts`               | Parse supplier-PO emails / PDFs → structured items          |
 | `auth.ts`                    | `getCurrentUser`, `isAuthenticated`, login response handling |
 | `csrf.ts`                    | Read `hookka_csrf` cookie + attach `X-CSRF-Token` header    |

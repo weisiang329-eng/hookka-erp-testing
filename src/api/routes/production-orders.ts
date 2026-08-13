@@ -13,8 +13,10 @@
 // Deferred to later phases:
 //   - TODO(phase-5): FIFO raw-material consumption on PO completion
 //     (fg_batches/rm_batches/cost_ledger are present in schema but the
-//     lookup helpers in src/lib/material-lookup + src/lib/costing haven't
-//     been ported to D1 yet).
+//     lookup helpers in src/lib/costing haven't been ported yet).
+//     `src/lib/material-lookup` was also named here; it read the in-memory
+//     mock-data fixtures, had no importer, and was deleted in
+//     chore/dead-code-sweep — do not resurrect it for this.
 //   - ~~TODO(phase-5): jobCard/PO override persistence~~ — CLOSED. The
 //     `job-card-persistence.ts` overlay was deleted in chore/dead-code-sweep:
 //     it overlaid the in-memory mock-data arrays, and the "in-memory route"

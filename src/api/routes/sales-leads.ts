@@ -135,18 +135,25 @@ async function ensureLeadCustomerColumn(db: D1Database): Promise<void> {
 // can decide: no creditor code, terms default, zero credit limit, zero A/R.
 async function createPotentialCustomerForLead(
   db: D1Database,
+  orgId: string,
   f: { name: string; contactName: string; phone: string; email: string },
 ): Promise<string | null> {
   if (!f.name) return null;
   const id = `cust-${crypto.randomUUID().slice(0, 8)}`;
+  // orgId is passed in rather than defaulted. This INSERT used to omit the
+  // column entirely, so every lead-minted customer silently took the SQL
+  // default `'hookka'` (migration 0049:32) no matter who created it — a lead
+  // raised in OHANA / HOUZS / HKMFG produced a HOOKKA customer. Every other
+  // statement in this file is scoped `org_id = getOrgId(c)`; this one was the
+  // exception only because the helper took `db` and never had the context.
   await db
     .prepare(
       `INSERT INTO customers (id, code, name, ssmNo, companyAddress, creditTerms,
          creditLimitSen, outstandingSen, isActive, contactName, phone, email,
-         customer_stage)
-       VALUES (?, '', ?, '', '', 'NET30', 0, 0, 1, ?, ?, ?, 'POTENTIAL')`,
+         customer_stage, orgId)
+       VALUES (?, '', ?, '', '', 'NET30', 0, 0, 1, ?, ?, ?, 'POTENTIAL', ?)`,
     )
-    .bind(id, f.name, f.contactName, f.phone, f.email)
+    .bind(id, f.name, f.contactName, f.phone, f.email, orgId)
     .run();
   return id;
 }
@@ -204,7 +211,7 @@ app.post("/", async (c) => {
   try {
     await ensureLeadCustomerColumn(c.var.DB);
     await ensureCustomerStageColumns(c.var.DB);
-    customerId = await createPotentialCustomerForLead(c.var.DB, {
+    customerId = await createPotentialCustomerForLead(c.var.DB, getOrgId(c), {
       name: String(b.company ?? "").trim() || String(b.name ?? "").trim(),
       contactName: String(b.name ?? "").trim(),
       phone: String(b.phone ?? "").trim(),

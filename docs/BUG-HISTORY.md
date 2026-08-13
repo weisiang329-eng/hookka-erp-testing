@@ -231,6 +231,8 @@ This is the one item in the sweep that is not merely a wrong number: it is a gov
 
 **Fix.** `submit` refuses (501) and explains why. The page's `submitToLHDN` threw the response away entirely — a failure would have looked like a button that simply did nothing — so it now surfaces the refusal, and the page carries a standing notice that nothing is transmitted and that **any row already marked VALID was stamped locally**. Audit coverage on the router is preserved by adding the emit the `cancel` branch never had.
 
+**The seed fixture ships fabricated clearances too.** `src/lib/mock-data.ts` carries 15 `eInvoices` rows — **12 with a hardcoded `LHDN-SUB-…` submissionId and a 15-character uuid, 6 of them `status: "VALID"` with a `validatedAt`** — and `scripts/generate-seed-sql.ts` emits `e_invoices` into `scripts/seed.sql`. If that seed was ever applied to a real book, those rows render as cleared tax documents carrying reference numbers no government issued. The array is annotated in place rather than edited: rewriting a fixture does not clean a book it has already been applied to. **Whether prod has `e_invoices` rows marked VALID is an owner check** — this branch has no session.
+
 ### F. Two smaller ones
 
 * **`GET /api/scheduling/capacity`** computed `workerCount × 9 × 60 × 0.85` while `departments.workingHoursPerDay` — the real column — was SELECTed and discarded. It now uses the real hours, and the 0.85 is published as `assumedEfficiency` alongside the `utilization` and RAG level it produces, because a percentage whose denominator hides an assumption is this same class. (Nothing consumes this endpoint today; fixed rather than left as a trap for the next consumer.)

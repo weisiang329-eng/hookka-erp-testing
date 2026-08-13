@@ -58,11 +58,12 @@ in-memory API server.
 npm run dev        # Vite on http://localhost:3000
 ```
 
-Note: `vite.config.ts:221` proxies `/api` to `http://localhost:3001`, but
-**nothing in this repo listens on 3001** — the standalone Node API server
-(`src/api/index.ts`, `npm run api`) was removed when the app moved to
-Cloudflare Pages Functions. That proxy line is vestigial; `/api/*` calls
-under plain `npm run dev` will fail to connect.
+Note: this serves the UI only — `/api/*` calls have no backend here. Until
+chore/dead-code-sweep `vite.config.ts` proxied `/api` to
+`http://localhost:3001`, but **nothing in this repo has listened on 3001**
+since the standalone Node API server (`src/api/index.ts`, `npm run api`) was
+removed for Cloudflare Pages Functions. The proxy is gone; the behaviour is
+unchanged (it never reached anything).
 
 ### Full stack (SPA + real Hono API)
 

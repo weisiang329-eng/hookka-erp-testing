@@ -218,8 +218,14 @@ export default defineConfig({
     // tablets) can reach the dev server at http://<PC-IP>:3000 —
     // needed for the /worker shop-floor portal on personal phones.
     host: true,
-    proxy: {
-      '/api': 'http://localhost:3001', // Hono API server
-    },
+    // NO `/api` proxy. There used to be one pointing at http://localhost:3001,
+    // labelled "Hono API server" — that standalone Node server
+    // (`src/api/index.ts`, `npm run api`) was removed when the API moved to
+    // Cloudflare Pages Functions, and nothing in this repo has listened on 3001
+    // since. The line survived because a proxy to a dead port fails the same
+    // way as no proxy at all, so it never produced an error anyone could
+    // attribute to it — it just made `npm run dev` look like it had a backend.
+    // For a working API use `npm run dev:worker` (wrangler pages dev in front
+    // of Vite, which mounts functions/api/[[route]].ts → src/api/worker.ts).
   },
 })

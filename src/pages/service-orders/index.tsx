@@ -375,6 +375,9 @@ function CreateServiceOrderModal({
   const { data: coResp } = useCachedJson<{ data?: ConsignmentOrderApi[] }>(
     "/api/consignment-orders",
   );
+  // perf 2026-08-13 (BUG-2026-08-13-021, audit finding D12): `?buckets=` — only
+  // `finishedProducts` is read here, so the wip_items + raw_materials buckets no
+  // longer ride along on this list page.
   const { data: invResp } = useCachedJson<{
     data?: {
       finishedProducts?: Array<{
@@ -384,7 +387,7 @@ function CreateServiceOrderModal({
         stockQty?: number;
       }>;
     };
-  }>("/api/inventory");
+  }>("/api/inventory?buckets=finishedProducts");
 
   const sourceOptions: SourceOrderOption[] = useMemo(() => {
     if (sourceType === "SO") {

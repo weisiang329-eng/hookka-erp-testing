@@ -183,9 +183,13 @@ export default function StockAdjustmentsPage() {
   // 2026-04-28 per user.
   const { data: rmResp } = useCachedJson<{ data?: RawMaterialOpt[] }>("/api/raw-materials");
   const { data: wipResp } = useCachedJson<{ data?: WipOpt[] }>("/api/inventory/wip");
+  // perf 2026-08-13 (BUG-2026-08-13-021): `?buckets=finishedProducts` — the RM
+  // and WIP lists on this page come from their OWN endpoints (the two hooks
+  // directly above), so the three-bucket payload was shipping both of them a
+  // second time and the page used neither copy.
   const { data: invResp } = useCachedJson<{
     data?: { finishedProducts?: Array<{ id: string; code: string; name: string; category: string; stockQty?: number; basePriceSen?: number }> };
-  }>("/api/inventory");
+  }>("/api/inventory?buckets=finishedProducts");
   const { data: historyResp, refresh: refreshHistory } = useCachedJson<{
     data?: AdjustmentRow[];
   }>("/api/stock-adjustments");

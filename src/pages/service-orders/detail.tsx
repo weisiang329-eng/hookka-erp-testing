@@ -137,9 +137,13 @@ export default function ServiceOrderDetailPage() {
   );
   // Pulled here so the per-row Scrap action can show a dropdown of FG batches
   // (matches the same source the create-modal uses for STOCK_SWAP picking).
+  // perf 2026-08-13 (BUG-2026-08-13-021, audit finding D12): `?buckets=` — this
+  // reads `finishedProducts` and nothing else, so the wip_items + 279-row
+  // raw_materials buckets no longer ride along. Same SELECT, same ORDER BY,
+  // same rowToProduct for the bucket that is kept.
   const { data: invResp } = useCachedJson<{
     data?: { finishedProducts?: FgPickerOpt[] };
-  }>("/api/inventory");
+  }>("/api/inventory?buckets=finishedProducts");
   const fgList: FgPickerOpt[] = useMemo(
     () => invResp?.data?.finishedProducts ?? [],
     [invResp],

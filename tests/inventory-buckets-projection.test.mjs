@@ -4,9 +4,10 @@
 // different one.
 //
 // Why this test exists (BUG-2026-08-13-020/-021): /api/inventory is 1.16 MB
-// (PERF-BACKLOG P6) and was fetched WHOLE by fourteen call sites, not one of
-// which read more than ONE of its three buckets. The fix adds `?buckets=<csv>`
-// and points each caller at the bucket it consumes.
+// (PERF-BACKLOG P6) and was fetched WHOLE by twenty call sites, nineteen of which
+// read exactly ONE of its three buckets. The fix adds `?buckets=<csv>` and points
+// each of those nineteen at the bucket it consumes. (The twentieth,
+// inventory/index.tsx's fallback, reads two and is deliberately left whole.)
 //
 // The risk that fix carries is the one PERF-BACKLOG calls out: "a narrowed
 // query that silently drops or reorders rows is a worse bug than a slow page."
@@ -105,8 +106,8 @@ test("no param returns all three buckets — the pre-existing contract", async (
   assert.deepEqual(
     Object.keys(body.data).sort(),
     ["finishedProducts", "rawMaterials", "wipItems"],
-    "an unprojected call must still carry every bucket — fourteen call sites " +
-      "and the /m preload depend on it",
+    "an unprojected call must still carry every bucket — inventory/index.tsx's " +
+      "fallback still relies on it",
   );
   assert.equal(body.data.finishedProducts.length, 2);
   assert.equal(body.data.wipItems.length, 2);

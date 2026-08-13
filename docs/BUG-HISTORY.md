@@ -116,9 +116,11 @@ This is the third time on this codebase that a **code comment described intent r
 **Verified.** `tests/service-case-do-scope-equivalence.test.mjs` (7 tests) runs the REAL `computeCasePipeline` over a whole-org fixture and over the server-scoped subset and asserts the pipelines are `deepEqual` — with the fixture deliberately containing foreign DOs whose `deliveredAt` is LATER than the case's, so a leak would move `deliveredEnteredAt` and fail. It also pins order-independence, the blank-`salesOrderId` case, and — as source-level locks — that the page no longer requests the bare URL, that an unscoped projection returns `[]`, and that the customer-scope clause is applied.
 
 ---
-## BUG-2026-08-13-021 — fourteen pages downloaded a 1.16 MB three-bucket inventory payload; not one read more than one bucket `performance` `inventory-display` `ui-frontend` 🟢
+## BUG-2026-08-13-021 — twenty call sites downloaded a 1.16 MB three-bucket inventory payload; nineteen of them read exactly one bucket `performance` `inventory-display` `ui-frontend` 🟢
 
-**Symptom.** `GET /api/inventory` returns `products` (365 rows, 21 fields) + `wip_items` + `raw_materials` (279 rows) as three unfiltered `SELECT *`s — **1.16 MB** (PERF-BACKLOG P6). Fourteen call sites fetched it whole. Every one of them read **exactly one** bucket and discarded the other two. On `/m` it was **91%** of what remained of the Home payload after BUG-2026-08-13-011/-013.
+**Symptom.** `GET /api/inventory` returns `products` (365 rows, 21 fields) + `wip_items` + `raw_materials` (279 rows) as three unfiltered `SELECT *`s — **1.16 MB** (PERF-BACKLOG P6).
+
+**Counted, not estimated:** **20 request-issuing call sites across 17 files** (excluding the 30 `invalidateCachePrefix("/api/inventory")` lines across 11 files, which send no request — the "45 call sites" false positive in `HOOKKA-GOTCHAS.md` §1 is exactly this trap). **19 of the 20 read exactly ONE bucket** and discarded the other two. The twentieth is `inventory/index.tsx`'s fallback path, which legitimately reads two and is left whole. On `/m` it was **91%** of what remained of the Home payload after BUG-2026-08-13-011/-013.
 
 Worse, on two of them the payload was fetched for something the operator was not even looking at:
 - **`procurement/detail.tsx`** fired it **unconditionally on mount**, but every consumer of `rawMaterials` is edit-only — `filteredRMs` renders inside `{editing && isEditable && …}`. A PO detail page being **READ** downloaded, parsed and never looked at 1.16 MB.
@@ -131,7 +133,7 @@ Worse, on two of them the payload was fetched for something the operator was not
 
 **Call sites converted** (bucket in brackets): `procurement/detail` [RM, gated] · `procurement/create` [RM] · `procurement/grn/create` [RM] · `procurement/PurchaseInvoiceDetail` [RM] · `suppliers/detail` [RM+WIP, gated] · `rd/detail` [RM] · `bom.tsx` [RM] · `component-kits/index` [RM, raw fetch] · `service-orders/detail` [FG] · `service-orders/index` [FG] · `service-cases/detail` ×2 [FG] · `inventory/adjustments` [FG] · `m/screens/Home` [RM] · `m/screens/WarehouseScreen` [FG] · `m/config/modules` FG + Stock Value [FG] and WIP [WIP]. **`inventory/index.tsx`'s fallback path is left whole** — it is the one caller that legitimately reads two buckets, and it only runs when the dedicated endpoints fail.
 
-**Cache invalidation still works.** Nine files call `invalidateCachePrefix("/api/inventory")`. That matches on `startsWith` (`src/lib/cached-fetch.ts:202`), and `/api/inventory?buckets=…` starts with `/api/inventory`, so every variant is still cleared on a save.
+**Cache invalidation still works.** 30 lines across 11 files call `invalidateCachePrefix("/api/inventory")`. That matches on `startsWith` (`src/lib/cached-fetch.ts:202`), and `/api/inventory?buckets=…` starts with `/api/inventory`, so every variant is still cleared on a save.
 
 **The /m preload had to move in lockstep.** `src/pages/m/lib/preload.ts` warms by URL string; left alone it would have downloaded the 1.16 MB payload *and* Home would then have fetched the narrow one. The URL is now a single exported constant (`STOCK_ALERTS_URL`) that both files import — the same guard `ORDERS_DUE_URL` got in BUG-2026-08-13-013.
 
@@ -146,7 +148,7 @@ Worse, on two of them the payload was fetched for something the operator was not
 
 **Fix.** `?buckets=<csv>` (`finishedProducts` | `wipItems` | `rawMaterials`), documented in the route header. Each emitted bucket comes from the SAME query (same columns, same `ORDER BY`) through the SAME row mapper, so the response is a strict **subset** of today's, never a different one. No new table, no migration, no snapshot — the buckets are plain indexed reads and the cost is proportional to what was asked for.
 
-**Why a param and not a new endpoint.** `/api/raw-materials` already serves the RM bucket alone, but its `rowToApi` is a **wider** per-row shape than `inventory.ts`'s `rowToRawMaterial` (it adds `unit`, `status`, `notes`, timestamps, `uomCount`, `itemType`, `stockControl`, `mainSupplierCode`, sheet dims). Switching call sites to it would have been a **shape change requiring its own before/after measurement per page**, not a projection — audit finding D12 flagged exactly this. `?buckets=` keeps every row byte-identical, which is what made the fourteen conversions provable.
+**Why a param and not a new endpoint.** `/api/raw-materials` already serves the RM bucket alone, but its `rowToApi` is a **wider** per-row shape than `inventory.ts`'s `rowToRawMaterial` (it adds `unit`, `status`, `notes`, timestamps, `uomCount`, `itemType`, `stockControl`, `mainSupplierCode`, sheet dims). Switching call sites to it would have been a **shape change requiring its own before/after measurement per page**, not a projection — audit finding D12 flagged exactly this. `?buckets=` keeps every row byte-identical, which is what made the nineteen conversions provable.
 
 ---
 ## BUG-2026-08-13-013 — the phone downloaded 1,342 sales orders to render six cards `performance` `ui-frontend` `sales-orders` 🟢

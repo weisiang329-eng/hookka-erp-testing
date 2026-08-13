@@ -148,8 +148,9 @@ function genRmId(): string {
 // GET /api/inventory[?buckets=<csv>] — the three inventory buckets.
 //
 // perf 2026-08-13 (BUG-2026-08-13-020): this endpoint is 1.16 MB (PERF-BACKLOG
-// P6) and was fetched WHOLE by fourteen call sites, not one of which read more
-// than ONE of its three buckets. `finishedProducts` alone is the bulk — 365
+// P6) and was fetched WHOLE by twenty call sites, nineteen of which read exactly
+// ONE of its three buckets (the twentieth, inventory/index.tsx's fallback, reads
+// two and is deliberately left unprojected). `finishedProducts` alone is the bulk — 365
 // product rows, 21 fields each (for scale, /api/products measured 319,231 bytes
 // at the same 365 rows in BUG-2026-08-13-008) — so a page that only wanted the
 // 279 raw materials still decoded and retained the whole catalogue. On /m it was

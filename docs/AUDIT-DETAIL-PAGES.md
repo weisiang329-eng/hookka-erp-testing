@@ -100,7 +100,7 @@ BUG-2026-08-13-020..-026 for the full write-up of each.
 | finding | what shipped |
 | --- | --- |
 | **D1** | `GET /api/delivery-orders?fields=case-pipeline&scope=<soIds>` + the page switched to it. BUG-2026-08-13-022. |
-| **D4 + D9 + D12** | `GET /api/inventory?buckets=<csv>` + **all fourteen** call sites converted, and the two edit/modal-only ones (`procurement/detail`, `suppliers/detail`) now GATE the fetch. BUG-2026-08-13-020/-021. |
+| **D4 + D9 + D12** | `GET /api/inventory?buckets=<csv>` + **19 of the 20** request-issuing call sites converted (`inventory/index.tsx`'s fallback is the one left — it legitimately reads two buckets), and the two edit/modal-only ones (`procurement/detail`, `suppliers/detail`) now GATE the fetch. BUG-2026-08-13-020/-021. |
 | **D5** | swapped to `/api/customers/:id`. BUG-2026-08-13-023. |
 | **D9's dead key** | `finishedGoods` REMOVED (not renamed — see below). BUG-2026-08-13-024. |
 | **the /m customer panel** (noted under BUG-2026-08-13-013, not numbered here) | `GET /api/sales-orders?fields=customer-mini`. BUG-2026-08-13-026. |

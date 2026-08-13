@@ -97,6 +97,39 @@ type ProductionSummary = {
   overdue: ProductionOverdueRow[];
 };
 
+// GET /api/department-performance?view=summary — clocked working minutes vs
+// production minutes, per worker, over a date range. The ONLY trustworthy
+// efficiency source in the app: its denominator is `working_hour_entries`,
+// i.e. time people actually clocked, not an estimate.
+type WorkerPerfRow = {
+  workerId: string;
+  workerName: string;
+  workingMinutes: number;
+  productionMinutes: number;
+  efficiencyPct: number;
+  // Distinct job cards this worker was credited on across the range.
+  jobCards: number;
+};
+
+type DeptPerformanceSummary = {
+  range: { from: string; to: string };
+  totals: {
+    workingMinutes: number;
+    productionMinutes: number;
+    efficiencyPct: number;
+    workerCount: number;
+  };
+  workers: WorkerPerfRow[];
+};
+
+type AttendanceRecord = {
+  employeeId: string;
+  date: string;
+  status: string;
+  workingMinutes: number;
+  overtimeMinutes: number;
+};
+
 type Product = {
   id: string;
   code: string;
@@ -1296,27 +1329,61 @@ function EmployeeReportTab() {
   }, [from, to]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [workers, setWorkers] = useState<Worker[] | null>(null);
+  const [data, setData] = useState<{
+    workers: Worker[];
+    perf: DeptPerformanceSummary;
+    attendance: AttendanceRecord[];
+  } | null>(null);
 
+  // Three REAL sources, all windowed by the date range this tab already had
+  // (and previously ignored):
+  //   /api/workers                                  — the roster
+  //   /api/department-performance?view=summary      — clocked working minutes
+  //       vs production minutes per worker. Its denominator is
+  //       `working_hour_entries`, i.e. time people actually punched.
+  //   /api/attendance?from&to                       — punch records
+  // Nothing on this tab is derived from anything else. See BUG-2026-08-13-006.
   const generate = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const res = await cachedFetchJsonResult<{ data?: Worker[] }>(
-      "/api/workers",
-    );
-    if (!res.ok) {
-      setWorkers(null);
-      setError(res.error);
+    const [wRes, pRes, aRes] = await Promise.all([
+      cachedFetchJsonResult<{ data?: Worker[] }>("/api/workers"),
+      cachedFetchJsonResult<{ data?: DeptPerformanceSummary }>(
+        `/api/department-performance?view=summary&from=${encodeURIComponent(
+          from,
+        )}&to=${encodeURIComponent(to)}`,
+      ),
+      cachedFetchJsonResult<{ data?: AttendanceRecord[] }>(
+        `/api/attendance?from=${encodeURIComponent(
+          from,
+        )}&to=${encodeURIComponent(to)}`,
+      ),
+    ]);
+    const failure = firstError(wRes, pRes, aRes);
+    if (failure || !wRes.ok || !pRes.ok || !aRes.ok) {
+      setData(null);
+      setError(failure);
       setLoading(false);
       return;
     }
-    setWorkers(res.data?.data || []);
+    const perf = pRes.data?.data;
+    if (!perf?.totals || !Array.isArray(perf.workers)) {
+      setData(null);
+      setError("The server sent an unexpected reply.");
+      setLoading(false);
+      return;
+    }
+    setData({
+      workers: wRes.data?.data || [],
+      perf,
+      attendance: aRes.data?.data || [],
+    });
     setLoading(false);
-  }, []);
+  }, [from, to]);
 
   if (loading) return <Spinner />;
 
-  if (!workers) {
+  if (!data) {
     return (
       <div className="space-y-4">
         <div className="flex items-end gap-4 flex-wrap">
@@ -1335,6 +1402,7 @@ function EmployeeReportTab() {
     );
   }
 
+  const { workers, perf, attendance } = data;
   const totalWorkers = workers.length;
   const activeWorkers = workers.filter((w) => w.status === "ACTIVE").length;
 
@@ -1344,29 +1412,59 @@ function EmployeeReportTab() {
     deptCount[w.departmentCode] = (deptCount[w.departmentCode] || 0) + 1;
   });
 
-  // Attendance placeholder stats
-  const workingDays = 22;
-  const presentRate = 94.5;
-  const avgHoursPerDay = 8.7;
+  // ── Attendance, from `attendance_records` ──────────────────────────
+  //
+  // What this table can and cannot answer, checked on prod 2026-08-13.
+  //
+  // CAN: how many days were recorded, how many punch records exist, how long
+  // people were on the clock, and how much overtime was booked.
+  //
+  // CANNOT: an attendance RATE. A row is written when somebody punches, so
+  // every row is a presence — 2,780 of 2,780 records across all of 2026 carry
+  // status PRESENT, and there is not one ABSENT row in the table (absence is
+  // derived elsewhere, by `labor-engine.ts`, from a day having no logged
+  // hours; it is never materialised here). present ÷ records is therefore
+  // 100% by construction, and the "94.5%" that used to sit in this card was
+  // simply typed into the source. The card now reads "—" and says why.
+  const attendanceDates = new Set(attendance.map((r) => r.date));
+  const recordedDays = attendanceDates.size;
+  const withMinutes = attendance.filter((r) => r.workingMinutes > 0);
+  const clockedMinutes = withMinutes.reduce(
+    (s, r) => s + r.workingMinutes,
+    0,
+  );
+  const avgHoursPerRecordedDay =
+    withMinutes.length > 0 ? clockedMinutes / withMinutes.length / 60 : null;
+  const overtimeMinutes = attendance.reduce(
+    (s, r) => s + (r.overtimeMinutes || 0),
+    0,
+  );
+  const attendingWorkers = new Set(attendance.map((r) => r.employeeId)).size;
+  const avgOvertimeHours =
+    attendingWorkers > 0 ? overtimeMinutes / attendingWorkers / 60 : null;
 
-  // Efficiency table (placeholder data per worker based on available info)
-  const seed = (s: string) => {
-    let h = 0;
-    for (let i = 0; i < s.length; i++) {
-      h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
-    }
-    return Math.abs(h);
-  };
-
-  const effRows = workers
-    .filter((w) => w.status === "ACTIVE")
-    .map((w) => {
-      const s = seed(w.id);
-      const hours = 180 + (s % 40);
-      const items = 30 + (s % 25);
-      const eff = ((items / (hours / 9)) * 10).toFixed(1);
-      return [w.name, w.departmentCode, hours, items, eff + "%"];
-    });
+  // ── Worker efficiency, from clocked time ──────────────────────────
+  //
+  // Every column here used to come out of `seed(w.id)` — a hash of the
+  // worker's own id, so the same person showed the same invented hours and the
+  // same invented efficiency forever, and it moved only if the id changed.
+  // BUG-2026-08-13-006.
+  //
+  // The replacement is /api/department-performance, whose denominator is
+  // clocked time from `working_hour_entries`. Prod for 2026-06-14 → 2026-08-13
+  // returns 38 workers spanning 28%–186% efficiency and 312–2,270 job cards —
+  // it varies, which the hash never did in any way related to the factory.
+  //
+  // A worker who clocked nothing in the range gets "—", not 0% and not a
+  // plausible number: the row exists, the measurement does not.
+  const deptByWorkerId = new Map(workers.map((w) => [w.id, w.departmentCode]));
+  const effRows = perf.workers.map((w) => [
+    w.workerName || w.workerId,
+    deptByWorkerId.get(w.workerId) ?? "—",
+    w.workingMinutes > 0 ? (w.workingMinutes / 60).toFixed(1) : "—",
+    w.jobCards,
+    w.workingMinutes > 0 ? `${w.efficiencyPct}%` : "—",
+  ]);
 
   return (
     <div className="space-y-6">
@@ -1386,13 +1484,22 @@ function EmployeeReportTab() {
         <SummaryCard label="Total Workers" value={totalWorkers} sub={`Active: ${activeWorkers}`} />
         <SummaryCard label="Departments" value={Object.keys(deptCount).length} />
         <SummaryCard
-          label="Attendance Rate"
-          value={`${presentRate}%`}
-          sub={`${workingDays} working days this month`}
+          label="Days With Attendance"
+          value={recordedDays}
+          sub={`${attendance.length} punch records in range`}
         />
         <SummaryCard
-          label="Avg Hours/Day"
-          value={avgHoursPerDay.toFixed(1)}
+          label="Avg Hours / Recorded Day"
+          value={
+            avgHoursPerRecordedDay === null
+              ? "—"
+              : avgHoursPerRecordedDay.toFixed(1)
+          }
+          sub={
+            avgHoursPerRecordedDay === null
+              ? "No punch in range has a clock-out to measure"
+              : `Over ${withMinutes.length} records with a clock-out`
+          }
         />
       </div>
 
@@ -1424,21 +1531,38 @@ function EmployeeReportTab() {
       <Card>
         <CardHeader className="pb-2">
           <CardTitle className="text-base">
-            Attendance Overview (This Month)
+            Attendance Overview ({from} to {to})
           </CardTitle>
         </CardHeader>
         <CardContent>
           <ReportTable
             headers={["Metric", "Value"]}
             rows={[
-              ["Working Days", workingDays],
-              ["Average Attendance Rate", `${presentRate}%`],
-              ["Total Present Days", Math.round(totalWorkers * workingDays * presentRate / 100)],
-              ["Total Absent Days", Math.round(totalWorkers * workingDays * (100 - presentRate) / 100)],
-              ["Average OT Hours / Worker", "12.5"],
+              ["Days With Attendance Recorded", recordedDays],
+              ["Punch Records", attendance.length],
+              ["Workers Who Punched", attendingWorkers],
+              [
+                "Total Clocked Hours",
+                clockedMinutes > 0 ? (clockedMinutes / 60).toFixed(1) : "—",
+              ],
+              [
+                "Average OT Hours / Worker",
+                avgOvertimeHours === null ? "—" : avgOvertimeHours.toFixed(1),
+              ],
+              ["Average Attendance Rate", "—"],
             ]}
             align={["left", "right"]}
           />
+          <p className="mt-2 text-xs text-[#6B7280]">
+            Attendance Rate reads “—” because it cannot be computed from this
+            data: <code>attendance_records</code> gets a row only when somebody
+            punches, so every row is a presence — all {attendance.length} rows
+            in this range, and all 2,780 in 2026, carry status PRESENT and
+            there is no ABSENT row anywhere in the table. A rate would be 100%
+            by construction. Absence is derived separately by payroll, from a
+            day having no logged hours. Everything above is counted from the
+            punch records themselves.
+          </p>
         </CardContent>
       </Card>
 
@@ -1452,7 +1576,7 @@ function EmployeeReportTab() {
             onClick={() =>
               downloadCSV(
                 "worker-efficiency.csv",
-                ["Worker Name", "Department", "Hours Worked", "Items Completed", "Efficiency %"],
+                ["Worker Name", "Department", "Clocked Hours", "Job Cards Completed", "Efficiency %"],
                 effRows.map((r) => r.map(String))
               )
             }
@@ -1465,13 +1589,27 @@ function EmployeeReportTab() {
             headers={[
               "Worker Name",
               "Department",
-              "Hours Worked",
-              "Items Completed",
+              "Clocked Hours",
+              "Job Cards Completed",
               "Efficiency %",
             ]}
             rows={effRows}
             align={["left", "left", "right", "right", "right"]}
           />
+          <p className="mt-2 text-xs text-[#6B7280]">
+            Efficiency is production minutes ÷ clocked minutes over{" "}
+            {from} to {to}, from the same engine as Employees › Department
+            Performance — the denominator is time actually punched
+            (<code>working_hour_entries</code>), never an estimate. Clocked
+            Hours is that denominator; Job Cards Completed counts the distinct
+            cards the worker was credited on. Over 100% means the standard
+            minutes on the cards they finished exceeded the hours they clocked.
+            A worker who clocked nothing in this range reads “—”. Range total:{" "}
+            {perf.totals.workingMinutes > 0
+              ? `${perf.totals.efficiencyPct}% across ${perf.totals.workerCount} workers`
+              : "no clocked time recorded"}
+            .
+          </p>
         </CardContent>
       </Card>
     </div>

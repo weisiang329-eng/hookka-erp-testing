@@ -813,31 +813,34 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/reports.tsx` — tabbed hub (Sales/Production/Inventory/Financial/Employee) (1396) | `src/api/routes/reports.ts` — /api/reports/* efficiency/schedule/overdue (GET+JSON+send) + compliance.json (545) | `sales_orders` / `sales_order_items` / `invoices` | `tests/efficiency-allowance.test.mjs` |
+| `src/pages/reports.tsx` — tabbed hub (Sales/Production/Inventory/Financial/Employee) (1704) | `src/api/routes/reports.ts` — /api/reports/* efficiency/schedule/overdue (GET+JSON+send) + compliance.json (545) | `sales_orders` / `sales_order_items` / `invoices` | `tests/efficiency-allowance.test.mjs` · `tests/no-fabricated-efficiency.test.mjs` · `tests/no-fabricated-worker-metrics.test.mjs` · `tests/reports-failed-fetch-is-not-empty.test.mjs` · `tests/production-report-summary.test.mjs` · `tests/cached-fetch-result.test.mjs` |
 | `src/pages/daily-report.tsx` — newspaper-style compliance exceptions (1815) | `src/api/routes/dashboard-overview.ts` — single GET / consolidated dashboard payload (2009) | `purchase_orders` / `purchase_order_items` / `purchase_invoices` / `grns` | |
 | `src/pages/analytics/forecast.tsx` — demand forecast vs historical sales | `src/api/routes/forecasts.ts` — demand-forecast data (131) | `production_orders` / `job_cards` / `delivery_orders` / `delivery_order_items` | |
 | `src/pages/dashboard-b/index.tsx` — experimental Dashboard B / reporting view | | `products` / `workers` / `attendance_records` / `working_hour_entries` / `piece_pics` | |
 | `src/pages/dashboard-b/charts.tsx` — lazy recharts/d3 chart chunk | | `departments` / `bom_templates` / `rd_projects` / `cost_ledger` / `per_po` / `kv_config` / `users` | |
 
 **Big-file section index**
-- `src/pages/reports.tsx`
-  - Types mirroring API response shapes — L19-111
-  - Date helpers — L112-147
-  - CSV helper — L148-173
-  - Shared Components (Spinner / DateRangeSelector / SummaryCard / ReportTable) — L174-295
-  - Tab definitions — L296-319
-  - SalesReportTab — L320-546
-  - ProductionReportTab — L547-740
-  - InventoryReportTab — L741-871
-  - FinancialReportTab — L872-1123
-  - EmployeeReportTab — L1124-1314
-  - ReportsPage (default export, tab router + ?tab= URL sync) — L1315-1396
+- `src/pages/reports.tsx` (1704 lines, refreshed 2026-08-13)
+  - Types mirroring API response shapes — L21-163
+  - Date helpers — L164-199
+  - Fetch-result helper (`firstError`) — L200-213
+  - CSV helper — L214-239
+  - Shared Components (Spinner / **ReportError** / DateRangeSelector / SummaryCard / ReportTable) — L240-403
+  - Tab definitions — L404-427
+  - SalesReportTab — L428-662
+  - ProductionReportTab — L663-921
+  - InventoryReportTab — L922-1059
+  - FinancialReportTab — L1060-1319
+  - EmployeeReportTab — L1320-1622
+  - ReportsPage (default export, tab router + ?tab= URL sync) — L1623-1704
 
 **Gotchas**
-- No page file exceeds the ~2000-line threshold (reports.tsx 1396, daily-report.tsx 1815), so bigFileSections is only provided for reports.tsx as the highest-value map; daily-report.tsx is large but a single page. The 2009-line file is src/api/routes/dashboard-overview.ts, a ROUTE not a page.
+- No page file exceeds the ~2000-line threshold (reports.tsx 1704, daily-report.tsx 1815), so bigFileSections is only provided for reports.tsx as the highest-value map; daily-report.tsx is large but a single page. The 2009-line file is src/api/routes/dashboard-overview.ts, a ROUTE not a page.
 - reports.tsx tabs do NOT call /api/reports/* — Sales / Inventory / Financial fetch the source module's own list API (sales-orders, invoices, products, purchase-orders) and summarise client-side. Only daily-report.tsx consumes /api/reports/compliance.json. Don't expect the Reports hub and the reports.ts route to share data shapes.
 - **Production tab = ONE server aggregate, never a list read (2026-08-13, BUG-2026-08-13-005).** `GET /api/production-orders/report-summary?from=&to=` returns status counts, the average completion days, the per-department paired efficiency subtotals and the overdue list, all in SQL. It used to fetch bare `/api/production-orders` (2,539 orders × every job card) and add it up in the browser: **30,012 ms, killed by api-client's 30 s `API_TIMEOUT_MS`**, after which the page printed "No data available" over the dead request. `from`/`to` are REQUIRED and 400 if malformed — the endpoint must not be able to become an unbounded scan again. Registered before `/:id`.
 - **A failed fetch must never render as an empty result (page-wide rule).** Use `cachedFetchJsonResult` (`src/lib/cached-fetch.ts`) — `cachedFetchJson` returns `null` for a timeout, an abort, a 500 and a `_stub` body alike, so `json?.data || []` silently states "nothing happened in this range". All five tabs branch on `ok`, keep data `null` on failure and render `<ReportError>` (message + Retry + an explicit denial of the "no activity" reading). Tabs with two sources fail as a whole. Pinned by `tests/reports-failed-fetch-is-not-empty.test.mjs`.
+- **Employee tab: every figure names a source; there is no placeholder left (2026-08-13, BUG-2026-08-13-006).** Worker Efficiency / Clocked Hours / Job Cards Completed come from `GET /api/department-performance?view=summary&from=&to=`; the attendance cards come from `GET /api/attendance?from=&to=`. They used to come from `seed(w.id)` — a hash of the worker's primary key — beside hardcoded "Attendance Rate 94.5%" / "Avg Hours/Day 8.7" / "12.5 OT hours". **Attendance Rate is now "—" on purpose**: `attendance_records` gets a row only when somebody punches (2,780 of 2,780 rows in 2026 are `PRESENT`, zero `ABSENT`), so a rate is 100% by construction; absence lives in `labor-engine.ts`. A worker with no clocked time reads "—", never 0%. Tests: `tests/no-fabricated-worker-metrics.test.mjs`.
+- **`?view=summary` on `/api/department-performance` is a PROJECTION, not a second computation** (`projectPerformanceSummary`, exported for the test). It drops `daily[].jobs` + `daily[].workers[].jobs` and folds the per-day worker rows into range totals: **9,573 KB → 10 KB** on a 61-day range, identical figures. Applied at BOTH returns (a snapshot hit would otherwise still ship 9.5 MB) and deliberately NOT in the snapshot `cacheKey` — one cached full payload serves both views. Never re-express the efficiency formula here; the /employees drilldown still needs the full shape.
 - **Department Efficiency: the recorded minutes are a COPY of the standard minutes.** 4,340 of 36,796 job cards carry a non-null `actualMinutes` (4,289 non-zero) — and on **all 4,289** the value equals that card's own `estMinutes` exactly, all on orders started 2026-04/05. A ratio over them is 100.0% by construction, so `report-summary` also returns `measuredDistinctCards` (recording ≠ estimate; currently 0 org-wide) and the page shows a percentage only when that is > 0, else `"—"` plus the reason. The **Measured Cards** count is still shown. Tests: `tests/no-fabricated-efficiency.test.mjs`.
 - Heavy business logic lives in src/api/lib/* not in the route file: compliance-report.ts (1291 lines, the Daily Report engine), efficiency-report.ts (644), schedule-overdue-report.ts. The route file (reports.ts, 545) is a thin wrapper around these. Edit logic in lib, not the route.
 - Two shared client engines: src/lib/print-report.ts (305 lines, THE dashboard print/report engine — see MEMORY arch_report_print_engine; WYSIWYG, wire onFilteredDataChange for sort-follow) and src/lib/export-report.ts (74, export helper). Reuse these — don't hand-roll print/export.

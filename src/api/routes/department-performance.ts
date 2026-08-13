@@ -86,9 +86,118 @@ function ymd(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
+// ---------------------------------------------------------------------------
+// ?view=summary — the same numbers, without the two drilldown arrays.
+//
+// The full payload carries `daily[].jobs` and `daily[].workers[].jobs`, one
+// entry per job card per day: measured on prod 2026-08-13 a 61-day range is
+// **9.5 MB**. The /employees Department Performance tab wants that (it drills
+// from a low daily % straight to the worker and the card). A REPORT does not —
+// it wants per-worker totals over the whole range, and shipping 9.5 MB to get
+// them is the browser-side-aggregation habit this repo has been unwinding all
+// day (BUG-2026-08-13-001/-002/-003/-005).
+//
+// This is a PROJECTION, never a second computation. The efficiency formula is
+// not re-expressed here: `workers[]` re-adds the per-day figures the handler
+// already produced, and the range efficiency is the same
+// productionMinutes ÷ workingMinutes over those sums — so a per-worker row can
+// never disagree with the daily rows it was folded from. `jobCards` counts the
+// DISTINCT job cards a worker was credited on across the range (the per-day
+// `jobs` arrays overlap when a card spans days).
+//
+// Applied at BOTH return points, and deliberately NOT part of the snapshot
+// cacheKey: one cached full payload serves both views.
+// ---------------------------------------------------------------------------
+type FullPerfPayload = {
+  range: { from: string; to: string };
+  departmentCode: string | null;
+  category: "SOFA" | "BEDFRAME" | null;
+  totals: {
+    workingMinutes: number;
+    productionMinutes: number;
+    efficiencyPct: number;
+    workerCount: number;
+  };
+  daily: Array<{
+    date: string;
+    workingMinutes: number;
+    productionMinutes: number;
+    efficiencyPct: number;
+    workers?: Array<{
+      workerId: string;
+      workerName: string;
+      workingMinutes: number;
+      productionMinutes: number;
+      jobs?: Array<{ jobCardId: string }>;
+    }>;
+    jobs?: unknown[];
+  }>;
+};
+
+export function projectPerformanceSummary(data: FullPerfPayload) {
+  const byWorker = new Map<
+    string,
+    {
+      workerId: string;
+      workerName: string;
+      workingMinutes: number;
+      productionMinutes: number;
+      jobCardIds: Set<string>;
+    }
+  >();
+  for (const day of data.daily ?? []) {
+    for (const w of day.workers ?? []) {
+      let cell = byWorker.get(w.workerId);
+      if (!cell) {
+        cell = {
+          workerId: w.workerId,
+          workerName: w.workerName,
+          workingMinutes: 0,
+          productionMinutes: 0,
+          jobCardIds: new Set(),
+        };
+        byWorker.set(w.workerId, cell);
+      }
+      cell.workingMinutes += w.workingMinutes;
+      cell.productionMinutes += w.productionMinutes;
+      for (const j of w.jobs ?? []) cell.jobCardIds.add(j.jobCardId);
+      if (!cell.workerName && w.workerName) cell.workerName = w.workerName;
+    }
+  }
+  return {
+    range: data.range,
+    departmentCode: data.departmentCode,
+    category: data.category,
+    totals: data.totals,
+    daily: (data.daily ?? []).map((d) => ({
+      date: d.date,
+      workingMinutes: d.workingMinutes,
+      productionMinutes: d.productionMinutes,
+      efficiencyPct: d.efficiencyPct,
+    })),
+    workers: Array.from(byWorker.values())
+      .map((w) => ({
+        workerId: w.workerId,
+        workerName: w.workerName,
+        workingMinutes: w.workingMinutes,
+        productionMinutes: w.productionMinutes,
+        // Identical to the per-day expression, applied to the range sums. A
+        // worker who clocked nothing gets 0 here and the CALLER must render
+        // that as "—" rather than as zero efficiency.
+        efficiencyPct:
+          w.workingMinutes > 0
+            ? Math.round((w.productionMinutes / w.workingMinutes) * 100)
+            : 0,
+        jobCards: w.jobCardIds.size,
+      }))
+      .sort((a, b) => b.workingMinutes - a.workingMinutes),
+  };
+}
+
 app.get("/", async (c) => {
   const denied = await requirePermission(c, "workers", "read");
   if (denied) return denied;
+  const summaryView = c.req.query("view") === "summary";
 
   // Date defaults — last 7 days inclusive of today.
   const today = new Date();
@@ -129,7 +238,14 @@ app.get("/", async (c) => {
     getSourceSignature(c.var.DB, snapConfig.sourceTables),
   ]);
   if (isSnapshotFresh(_snap_check[0], _snap_check[1].maxUpdatedAt, _snap_check[1].rowCount) && _snap_check[0]) {
-    return c.json({ success: true, ..._snap_check[0].data });
+    const cachedBody = _snap_check[0].data as { data: FullPerfPayload };
+    if (summaryView) {
+      return c.json({
+        success: true,
+        data: projectPerformanceSummary(cachedBody.data),
+      });
+    }
+    return c.json({ success: true, ...cachedBody });
   }
   const _snap_currentMax = _snap_check[1].maxUpdatedAt;
   const _snap_sourceRows = _snap_check[1].rowCount;
@@ -668,6 +784,15 @@ app.get("/", async (c) => {
     }
   } catch (e) {
     console.warn("[employee-state-snapshot] capture skipped:", e);
+  }
+
+  if (summaryView) {
+    return c.json({
+      success: true,
+      data: projectPerformanceSummary(
+        _snap_payload.data as unknown as FullPerfPayload,
+      ),
+    });
   }
 
   return c.json({

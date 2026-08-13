@@ -2218,7 +2218,46 @@ pin the list.
 
 ---
 
-## BUG-2026-07-17-002 — special-order surcharges never charged on SCANNED orders: RM 8,060 under-billed across 66 SOs `money` `pricing` `sales-orders` `invoices` `under-billing` 🟢 code / 🔴 backfill pending
+## BUG-2026-07-17-002 — special-order surcharges never charged on SCANNED orders: RM 8,060 under-billed across 66 SOs `money` `pricing` `sales-orders` `invoices` `under-billing` 🟢 code / 🟢 main backfill DONE / 🔴 RM 440 SO↔invoice DIVERGENCE, owner's call
+>
+> ### CURRENT STATUS — re-verified against PROD 2026-08-13. Read this block, not the chronology below.
+>
+> This entry is 170 lines of chronology and its header used to say "🔴 backfill pending"
+> while its own body recorded both backfill phases as executed. That contradiction is the
+> exact failure mode this ledger exists to prevent, so the state is now stated up front.
+>
+> | | state | evidence |
+> |---|---|---|
+> | Code fix | ✅ done, live | server derives the surcharge when the client omits it; 20 tests |
+> | Backfill phase 1 (uninvoiced) | ✅ executed on prod 2026-07-17 | 78 SOs / 100 lines / RM 10,640 |
+> | Backfill phase 2 (10 invoices) | ✅ executed on prod 2026-07-17 | RM 1,280; `INV-2606-039` → Special 32000 |
+> | The 5 `needsManual` SOs | ✅ done, re-checked 2026-08-02 | both sides agree at the owner's `kv_config` price |
+> | **The wider-sweep 5 lines / RM 440** | ❌ **STILL OPEN — and now DIVERGENT** | measured on prod 2026-08-13, below |
+>
+> **The RM 440 is not merely unbilled — the two sides now DISAGREE.** Phase 1 re-priced the
+> sales orders; these three invoices were never corrected, so the SO says the surcharge is
+> owed and the invoice says it is zero. Measured live on prod 2026-08-13 via
+> `/api/sales-orders/:id` and `/api/invoices/:id`:
+>
+> | SO (`specialOrderPriceSen`) | invoice | invoice status | gap |
+> |---|---|---|---|
+> | SO-2604-250 — 13000 ×2 (`HB Fully Cover; Divan Full Cover`) | INV-2605-039 — 0, 0 | **PAID** | RM 260 |
+> | SO-2606-114 — 8000 (`Divan Full Cover`) | INV-2607-078 — 0 | **SENT** | RM 80 |
+> | SO-2604-095 — 5000 ×2 (`Nylon Fabric; 5537 Backrest`) | INV-2605-014 — 0, 0 | **PAID** | RM 100 |
+>
+> Not a read artefact: `specialOrderPriceSen` **exists** on invoice items, and the control
+> `INV-2606-039` (corrected in phase 2) reads **32000** on the same query. The zeros are real.
+>
+> **This is precisely the trap this entry warned about at "⚠️ TRAP CAUGHT ON STAGING"** —
+> an SO carrying the surcharge beside an invoice at 0 is a silent disagreement. It reached
+> prod anyway, because that warning was about the *executor's* `scope:"all"`, and nobody
+> re-checked the wider-sweep 5 after phase 1 moved the SO side under them.
+>
+> **NEEDS THE OWNER — do not execute unilaterally.** Two of the three invoices are **PAID**.
+> Correcting a paid invoice is an accounting decision (credit note vs re-issue vs write off
+> RM 440), and the owner's 2026-07-17 ruling ("re-price and I re-send") was given for
+> *unpaid* documents. Asked, not assumed — per the owner's own standing rule that judgement
+> calls get asked and only provable defects get fixed unilaterally.
 
 > **STATUS 2026-07-17 — code FIXED + LIVE ON PROD** (merge `efbba63e`).
 > **ROOT CAUSE (confirmed, not inferred):** two clients create SOs and only one prices the

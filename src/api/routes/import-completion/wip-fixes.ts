@@ -1841,6 +1841,14 @@ app.post("/rebuild-wip-from-jcs", async (c) => {
 // dryRun=false → executes the consume batch
 // ---------------------------------------------------------------------------
 app.post("/backfill-fabcut-rm-issue", async (c) => {
+  // This was the ONLY handler of the eleven in this file with no permission
+  // check — the other ten all gate on exactly this pair. An omission, not a
+  // decision: with `?dryRun=false` it calls consumeRawMaterialsForPO, which
+  // writes rm_batches, raw_materials.balanceQty and cost_ledger RM_ISSUE, so
+  // any authenticated user of any role could move stock and cost.
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
   const dryRun = c.req.query("dryRun") !== "false";
   const limit = Math.min(
     Math.max(Number(c.req.query("limit") ?? 200), 10),

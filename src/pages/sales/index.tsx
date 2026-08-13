@@ -304,7 +304,25 @@ export default function SalesPage() {
   // Salesperson display names for the Detail Listing export's "Agent" column.
   // Best-effort: /api/users may be admin-gated, so an empty/403 payload just
   // leaves Agent blank rather than failing the export.
-  const { data: usersResp } = useCachedJson<{ success?: boolean; data?: Array<{ id?: string; displayName?: string; email?: string }> }>("/api/users");
+  //
+  // DEFERRED off the critical load path (2026-08-13). This page already fires
+  // ~12 calls on mount and the API tier serializes them (~40ms each), so the
+  // LAST call lands ~1.2s in. Measured on prod: /api/users was the single
+  // slowest call on /sales at 1232ms — for 1KB that is only needed when the
+  // operator actually exports. Fetching it after the page is interactive keeps
+  // it out of that queue; the export lookup just resolves a moment later.
+  const [wantUsers, setWantUsers] = useState(false);
+  useEffect(() => {
+    const w = window as unknown as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number };
+    if (w.requestIdleCallback) {
+      const h = w.requestIdleCallback(() => setWantUsers(true), { timeout: 4000 });
+      return () => (window as unknown as { cancelIdleCallback?: (h: number) => void }).cancelIdleCallback?.(h);
+    }
+    // eslint-disable-next-line no-restricted-syntax -- one-shot idle fallback, not a React scheduler concern
+    const t = setTimeout(() => setWantUsers(true), 2500);
+    return () => clearTimeout(t);
+  }, []);
+  const { data: usersResp } = useCachedJson<{ success?: boolean; data?: Array<{ id?: string; displayName?: string; email?: string }> }>(wantUsers ? "/api/users" : "");
   // Multi-Company Phase 2 — company registry for the "Company" column (code →
   // name) and the company filter dropdown. Mirrors procurement/index.tsx.
   const { data: orgsResp } = useCachedJson<{ organisations?: Array<{ code?: string; name?: string; isActive?: boolean }> }>("/api/organisations");

@@ -15,13 +15,13 @@
 //   • This Month Invoices → /api/dashboard/overview?period=<YYYY-MM>
 //                           (invoicesThisMonthSen). Dashboard: KTile "This
 //                           Month Invoices". MoM delta from monthlyRevenue.
-//   • Pending Delivery    → consolidated live figure = poReadyForDelivery sum
-//                           (/api/production-orders + /api/delivery-orders/
-//                           linked-po-ids + /po-values + /api/sales-orders
-//                           price-index) + dispatch chain (DRAFT + LOADED +
-//                           IN_TRANSIT) from /api/delivery-orders/stats. SAME
-//                           computation as the dashboard's Pending Delivery
-//                           KTile (via src/lib/delivery-pipeline.ts).
+//   • Pending Delivery    → consolidated live figure = the server-computed
+//                           ready-for-DO total (/api/delivery-orders/
+//                           pending-value → pendingDeliveryValueSen) + the
+//                           dispatch chain (DRAFT + LOADED + IN_TRANSIT) from
+//                           /api/delivery-orders/stats. SAME two fetches, same
+//                           fold, as the dashboard's Pending Delivery KTile
+//                           (src/pages/dashboard-b/index.tsx).
 //   • Outstanding         → /api/sales-orders/stats (outstandingItemsSen).
 //                           Dashboard: KTile "Outstanding".
 //
@@ -167,9 +167,14 @@ type InventoryResp = {
   success?: boolean;
   data?: { rawMaterials?: RawMaterial[] };
 };
-// Pending Delivery: the ready-for-DO value comes server-side now (see the
-// /api/delivery-orders/ready-planning fetch below); only the DO dispatch-chain
-// stats shape remains client-side.
+// Pending Delivery: the ready-for-DO value arrives PRE-SUMMED from the server
+// (see the /api/delivery-orders/pending-value fetch below); only the DO
+// dispatch-chain stats shape remains client-side.
+type PendingValueResp = {
+  success?: boolean;
+  pendingDeliveryValueSen?: number;
+  readyCount?: number;
+};
 type DoStatsResp = { valueByStatus?: Record<string, number> };
 
 // Statuses excluded from the Orders-due list + on-time derivation (terminal).
@@ -294,10 +299,10 @@ export default function MobileHome() {
   // cache that preload.ts warmed at /m mount.
   const [searchOpen, setSearchOpen] = useState(false);
 
-  // ---- Pending Delivery is the ONLY expensive section of this Home: it needs
-  // five heavy fetches (production-orders + linked-po-ids + po-values +
-  // price-index + delivery stats). To keep first paint instant, we defer those
-  // five fetches until AFTER the Home is interactive: `pdEnabled` starts false
+  // ---- Pending Delivery + the analytics cards are the expensive part of this
+  // Home (Pending Delivery itself is now two small server-computed fetches:
+  // /pending-value + /stats). To keep first paint instant, we defer all of
+  // those fetches until AFTER the Home is interactive: `pdEnabled` starts false
   // (so the gated useCachedJson calls receive a null URL = skip-fetch) and
   // flips true on the first idle callback (setTimeout fallback for browsers
   // without requestIdleCallback). The cheap KPI cards + Stock alerts + Orders
@@ -338,25 +343,35 @@ export default function MobileHome() {
   const { data: soList } = useCachedJson<SOListResp>("/api/sales-orders");
   const { data: inventory } = useCachedJson<InventoryResp>("/api/inventory");
 
-  // ---- Pending Delivery — SAME fetches + computation as the dashboard's
-  // consolidated "Pending Delivery" KTile (src/lib/delivery-pipeline.ts).
+  // ---- Pending Delivery — SAME two fetches + the same fold as the dashboard's
+  // consolidated "Pending Delivery" KTile (src/pages/dashboard-b/index.tsx).
   // Lazy-loaded: each URL is gated on `pdEnabled` — until the Home is
   // interactive we pass null, which useCachedJson treats as skip-fetch (see
   // cached-fetch.ts: a null URL returns data:null/loading:false and the effect
   // early-returns without firing a request). The hooks are ALWAYS called
   // (never conditionally), only the URL flips from null to the real endpoint. ----
-  // perf 2026-07-14: Pending Delivery's "ready-for-DO" value is computed
-  // SERVER-SIDE now (the shared buildReadyPlanning behind
-  // /api/delivery-orders/ready-planning, snapshot-cached). We sum the ready
-  // list's valueSen — byte-identical to the old client loop
-  // (poReadyForDelivery + poValMap ?? SO-price fallback), and it drops the
-  // ~1.2MB production-orders+jobCards pull plus the linked-po-ids / po-values /
-  // price-index fetches that only fed that loop. Mirrors the desktop delivery
-  // page's Ready total.
-  const { data: rpRaw } = useCachedJson<{
-    success?: boolean;
-    ready?: { valueSen?: number }[];
-  }>(pdEnabled ? "/api/delivery-orders/ready-planning" : null);
+  // perf 2026-07-14: Pending Delivery's "ready-for-DO" value moved SERVER-SIDE
+  // (the shared buildReadyPlanning), dropping the ~1.2MB production-orders +
+  // jobCards pull plus the linked-po-ids / po-values / price-index fetches that
+  // only fed the old client loop.
+  //
+  // perf 2026-08-13 (BUG-2026-08-13-011): the phone was still pulling
+  // /api/delivery-orders/ready-planning — the WHOLE {ready[], planning[]} row
+  // set, every field of every row — and then throwing all of it away except
+  // Σ ready[].valueSen. The desktop Command Center hit the 30s global abort in
+  // src/lib/api-client.ts on the equivalent whole-org pull and its tile spun
+  // forever (BUG-2026-08-13-001); the factory floor is on phones and worse
+  // links, so it carries MORE of that risk, not less. /pending-value returns
+  // that one sum (a few dozen bytes) off the SAME loadDeliveryReadyPlanning() →
+  // buildReadyPlanning() → poReadyForDelivery() rows and the SAME snapshot, so
+  // the ringgit figure is unchanged by construction — it is the identical
+  // summation, just performed on the server. The dispatch-chain fold below is
+  // untouched, so the card still MEANS exactly what it meant before, and still
+  // matches the desktop KTile (which folds the same DRAFT + LOADED +
+  // IN_TRANSIT on top of the same pendingDeliveryValueSen).
+  const { data: pendingRaw } = useCachedJson<PendingValueResp>(
+    pdEnabled ? "/api/delivery-orders/pending-value" : null,
+  );
   const { data: doStatsRaw } = useCachedJson<DoStatsResp>(
     pdEnabled ? "/api/delivery-orders/stats" : null,
   );
@@ -404,26 +419,24 @@ export default function MobileHome() {
   // ---- KPI: Pending Delivery (consolidated, live) — byte-identical to the
   // dashboard: poReadyForDelivery value + DRAFT/LOADED/IN_TRANSIT DO value. ----
   const pendingDeliverySen = useMemo(() => {
-    // Guard the loading flash: bail to 0 until the server ready list lands.
-    if (!rpRaw?.success) return 0;
-    // readySen = Σ ready[].valueSen — the server ran the SAME poReadyForDelivery
-    // + poValMap ?? SO-price fallback the old client loop did.
-    const readySen = (rpRaw.ready ?? []).reduce(
-      (s, r) => s + (r.valueSen || 0),
-      0,
-    );
+    // Guard the loading flash: bail to 0 until the server figure lands.
+    if (!pendingRaw?.success) return 0;
+    // readySen = Σ ready[].valueSen, summed server-side off the SAME
+    // poReadyForDelivery + poValMap ?? SO-price-fallback rows the client used
+    // to reduce over. Integer sen in, integer sen out.
+    const readySen = pendingRaw.pendingDeliveryValueSen ?? 0;
     // Dispatch chain (owner 2026-06-11): DRAFT DOs (pending dispatch) +
     // LOADED/IN_TRANSIT (on the road) fold into Pending Delivery.
     const v = doStatsRaw?.valueByStatus ?? {};
     const dispatchChain =
       (v.DRAFT ?? 0) + (v.LOADED ?? 0) + (v.IN_TRANSIT ?? 0);
     return readySen + dispatchChain;
-  }, [rpRaw, doStatsRaw]);
+  }, [pendingRaw, doStatsRaw]);
 
-  // Pending Delivery shows a placeholder until its lazy fetches resolve: true
-  // while deferred (pdEnabled false) and while any of the five datasets is
-  // still in flight. Once all land, the real value renders (same computation).
-  const pendingDeliveryLoading = !pdEnabled || !rpRaw || !doStatsRaw;
+  // Pending Delivery shows a placeholder until its two lazy fetches resolve:
+  // true while deferred (pdEnabled false) and while either dataset is still in
+  // flight. Once both land, the real value renders (same computation).
+  const pendingDeliveryLoading = !pdEnabled || !pendingRaw || !doStatsRaw;
 
   // ---- Sales month-over-month delta (This Month Sales card) ----
   const salesDeltaPct = useMemo(() => {
@@ -982,7 +995,7 @@ export default function MobileHome() {
             icon={Package}
             accent="moss"
             label="Pending Delivery"
-            // Lazy-loaded after first paint — show a placeholder until its five
+            // Lazy-loaded after first paint — show a placeholder until its two
             // deferred fetches resolve, then the real (dashboard-identical) value.
             value={pendingDeliveryLoading ? "…" : formatCurrency(pendingDeliverySen)}
             // Live point-in-time figure — no prior-period delta (as on desktop).

@@ -105,6 +105,75 @@ The revenue line was also wrong on its own terms: it summed **every** invoice ro
 
 ---
 
+## BUG-2026-08-13-012 — one 1,036 KB PDF chunk was a STATIC dependency of 53 page chunks, because Vite's preload helper had been parked inside it `performance` `infrastructure` `ui-frontend` 🟢
+
+**Symptom.** `/employees` downloaded **`pdf-D5mT946N.js`, 1,013 KB, on mount** (measured on prod). Nothing in that page's static graph imports jspdf, pdfjs-dist or html2canvas, and its payslip generator is already behind `await import()`. The same edge sat on ~30 other page chunks.
+
+**Root cause — the chunk was not reached for its contents; it was reached for a 1 KB function.** The built page chunk contained a single import from it:
+
+```js
+employees-5Z8RXJTD.js:  import{c as r}from"./pdf-D5mT946N.js"
+```
+
+`c` is **`__vitePreload`**, the helper Vite injects for every `await import(...)`. It is a **virtual** module — `\0vite/preload-helper.js` (`vite/src/node/plugins/importAnalysisBuild.ts`) — so it has no `node_modules` path, and `vite.config.ts`'s `manualChunks` callback opened with `if (!id.includes('node_modules')) return`. The helper was therefore never named, and rolldown's automatic chunker decided where it lived: inside the `pdf` vendor chunk. **Every chunk holding any dynamic import then took a hard static edge on 1,036 KB of PDF vendor code.**
+
+Measured on the pre-fix build in this repo: **53 chunks** carried that edge — employees, accounting, customers, delivery, inventory, products, dashboard-b, consignment, invoices, procurement, grn, note, react-router and more, none of which reference a PDF library.
+
+`build.modulePreload.resolveDependencies` (which already filters `pdf|xlsx` out of the preload list) does **not** address this and never did: it strips `<link rel="modulepreload">` **hints**, not `import` **edges**. The browser still had to fetch and evaluate the chunk before the page module could run.
+
+**Fix — the helper gets its own ~1 KB chunk, via `codeSplitting.groups` (`vite.config.ts`).** The edge itself is correct — the helper genuinely is shared code — so the fix is to make it point at 1 KB instead of 1 MB:
+
+```ts
+codeSplitting: {
+  groups: [
+    { name: 'vite-preload', test: /preload-helper/, priority: 100, minSize: 0 },
+    { name: (id: string) => vendorChunkOf(id) ?? null, priority: 1, minSize: 0 },
+  ],
+}
+```
+
+**Why the API had to change, and this is the trap for the next person.** rolldown maps `manualChunks` onto a *single* `codeSplitting` group whose `name()` is the old callback — and in that shim **a name returned for the preload helper is silently ignored**. Verified on this tree: adding `if (id.includes('vite/preload-helper')) return 'vite-preload'` to `manualChunks` left the helper in the pdf chunk, emitted **no** `vite-preload` chunk, and produced a `pdf` chunk byte-identical to before (same content hash `D5mT946N`). Anchoring the group on a real module (`safe-json`, 135 B) made the *chunk* appear but still left the helper behind. A group with an explicit `test` captures it. `manualChunks` and `codeSplitting` are mutually exclusive — set both and manualChunks is dropped with a warning — so the previous chunker moved out verbatim as `vendorChunkOf()` and is passed as the second group's `name()`.
+
+**Measured, local `npm run build`, before → after** (bytes on disk; gzip computed at level 9 over each page's full static closure):
+
+| Page chunk | static closure raw | gzip |
+|---|---|---|
+| `employees` | 1,997,516 → **961,959** | 573,560 → **270,807** |
+| `customers` | 1,915,614 → **880,106** | 559,217 → **256,464** |
+| `delivery` | 2,018,429 → **982,919** | 584,170 → **281,418** |
+| `accounting` | 2,168,690 → **1,133,142** | 603,744 → **300,984** |
+| `dashboard-b` | 1,683,397 → **647,802** | 492,458 → **189,676** |
+| `inventory` | 1,920,033 → **884,485** | 554,764 → **252,001** |
+
+Static importers of the pdf chunk: **53 → 14**, and all 14 are real PDF consumers (the thirteen `generate-*-pdf` chunks plus `index.es`). Total build size is essentially unchanged — **10,207,688 → 10,209,234 bytes (+1,546)**: `pdf` −1,147, new `vite-preload` +1,193, and +9…+51 bytes on ~30 chunks whose import specifier got longer. Nothing was deleted; the graph was re-pointed.
+
+**PDF generation still works.** The dynamic-import graph is byte-for-byte the same shape before and after: **273 `import()` targets, 0 missing on disk, 50 of them into a PDF chunk**, identical counts in both builds. `dist/index.html` is unchanged apart from a new `modulepreload` for the 1.2 KB `vite-preload` chunk. `generate-so-pdf`, `generate-do-pdf`, `generate-grn-pdf`, `generate-payslip-pdf` and the other ten generators still resolve, and `resolveDependencies` still keeps `pdf`/`xlsx` out of the preload hints. **Not exercised in a browser** — this branch is not deployed and the app is behind a login gate locally, so every figure above is from the build output, not from a page load.
+
+**`scripts/check-bundle-size.mjs` still FAILS, with the SAME pre-existing drift as `main` and no new stem.** Before and after this change the gate reports the identical five: `reports` 21.20 → 26.04 KB (+22.8%), `verified-save` 1.68 → 1.95 KB (+16.0%), `cached-fetch` 4.65 → 5.04 KB (+8.3%), `BUG-HISTORY` 905.38 → 973.96 KB (+7.6%), `finance-dashboard` 29.45 → 30.94 KB (+5.1%). Those are stale-baseline drift from earlier merges (baseline generated 2026-08-11), not from this branch. The only new stem this change introduces is **`vite-preload`, 1.17 KB** — reported as informational, never a failure. **The baseline was deliberately NOT regenerated here**: `.github/workflows/refresh-bundle-baseline.yml` rewrites it on every push to `main`, so regenerating on a branch would bury the drift rather than record it.
+
+**Verified.** `tests/vite-preload-chunk.test.mjs` (5 tests) guards the config: the group exists with its `test` regex, outranks the vendor group and is not size-gated, `manualChunks` has not come back (it would silently undo the fix), all nine vendor rules survived the API move, and `resolveDependencies` is still present and still described as hint-filtering rather than the fix. Full suite green (3,745 pass / 0 fail); `npx tsc -p tsconfig.app.json --noEmit` and `npx tsc -b` clean; `npx eslint` 0 errors; `npm run build` succeeds.
+
+---
+
+## BUG-2026-08-13-011 — the phone downloaded the whole delivery ready+planning row set to add up one number `performance` `ui-frontend` `delivery-orders` 🟢
+
+**Symptom.** The `/m` Home's **Pending Delivery** KPI card. It was not deriving the figure from `/api/production-orders` any more — that came out on 2026-07-14 — but it still fetched **`GET /api/delivery-orders/ready-planning`**, the entire `{ready[], planning[]}` row set with every field of every row, and used exactly one thing from it:
+
+```ts
+const readySen = (rpRaw.ready ?? []).reduce((s, r) => s + (r.valueSen || 0), 0);
+```
+
+Everything else in that payload was discarded. The desktop Command Center's equivalent whole-org pull hit the 30 s global abort in `src/lib/api-client.ts` and left its tile spinning forever (BUG-2026-08-13-001). **The factory floor works from phones on worse links, so it carries more of that risk than the desktop did, not less.**
+
+**Fix.** `src/pages/m/screens/Home.tsx` now reads **`GET /api/delivery-orders/pending-value`** — the endpoint added for the desktop tile, which returns `{ pendingDeliveryValueSen, readyCount }` and nothing else. It is not a second computation: it runs the same `loadDeliveryReadyPlanning()` → shared `buildReadyPlanning()` → `poReadyForDelivery()` off the same snapshot, and sums the same `valueSen` field the phone was summing. The summation moved from the browser to the server; the arithmetic is identical.
+
+**The number MEANS the same thing — checked before the source was swapped.** The mobile card is `readySen + DRAFT + LOADED + IN_TRANSIT`; the desktop KTile is `pendingDeliveryValueSen + pendingDispatchSen (DRAFT) + inTransitSen (LOADED + IN_TRANSIT)`. Same fold, same dispatch-chain rule (owner 2026-06-11), same `/api/delivery-orders/stats` `valueByStatus` source. So the phone was **not** showing a different quantity from the desktop, and nothing about the definition changed here — only where the addition happens. Both `/pending-value` and `/ready-planning` derive `valueSen` from the identical `poValMap.get(po.id) ?? soLinePrice × qty` expression, so the ringgit figure is unchanged by construction. The card keeps its idle-gated lazy load (`pdEnabled`) and its `"…"` placeholder; the placeholder now waits on two fetches instead of two heavy ones.
+
+**Swept the rest of `src/pages/m/`.** No other mobile screen repeats this shape. `ProductionScreen` reads the aggregate `/api/production-orders/board`; the mobile Delivery module lists real rows from `/api/delivery-orders` and `/api/delivery-orders/pending-sos`; the Production module list genuinely renders the `?fields=minimal&include=jobCards` rows it fetches (it is a list, not a derivation). `src/pages/m/lib/preload.ts` was already slimmed to the four cheap first-paint endpoints and deliberately does not warm this one.
+
+**Verified.** `tests/pending-delivery-value.test.mjs` gains a source guard asserting the phone no longer names `/ready-planning`, does name `/pending-value`, still folds `DRAFT`/`LOADED`/`IN_TRANSIT`, and re-sums no row list. Full suite green (3,745 pass / 0 fail); `npx tsc -p tsconfig.app.json --noEmit` clean; `npx eslint src/pages/m/screens/Home.tsx` 0 errors (1 pre-existing `setTimeout` warning, unrelated, at the `pdEnabled` idle fallback); `npm run build` succeeds. **Not observed on prod** — this branch is not deployed, and the main session owns deploy + live verification. The before/after request comparison above is from reading the code and the endpoints, not from a live page load.
+
+---
 ## BUG-2026-08-13-006 — Reports › Employee showed per-worker performance computed from a hash of the worker's id `ui-frontend` `data-integrity` `audit-logging` 🟢
 
 **Symptom.** The **Worker Efficiency** table on `/reports` → **Employee** listed every active worker with Hours Worked, Items Completed and Efficiency %. None of it was data. Beside it sat summary cards reading **"Attendance Rate 94.5%"** and **"Avg Hours/Day 8.7"**, and an Attendance Overview row **"Average OT Hours / Worker 12.5"**. The owner has been reading this.

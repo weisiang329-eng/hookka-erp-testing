@@ -132,7 +132,8 @@ src/
     layout/         Sidebar, topbar, page shell
     ui/             38 shared UI primitives (DataGrid, PageHeader, FilterBar,
                     StatusBadge, MoneyInput, StatusTabStrip, …)
-  hooks/            useFormValidation, useMediaQuery
+  hooks/            useMediaQuery (the only one; useFormValidation was deleted
+                    in chore/dead-code-sweep — no importer)
   layouts/          DashboardLayout + WorkerLayout (route-level shells)
   lib/              client-side domain logic, PDF generators, formatters
   pages/            One directory per module (see table above)

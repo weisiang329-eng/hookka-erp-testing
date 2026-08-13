@@ -85,8 +85,12 @@ function genId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
 }
 
-// --- Backward schedule helpers (ported from src/lib/scheduling.ts but
-// reading lead times from D1 instead of the mock array). --------------------
+// --- Backward schedule helpers. Originally ported from a frontend copy in
+// src/lib/scheduling.ts, changed to read lead times from the DB instead of the
+// mock array. That frontend copy kept reading `deptLeadTimes` from
+// src/lib/mock-data.ts and had no importer, so the two versions could disagree
+// with only this one reachable; it was deleted in chore/dead-code-sweep. The
+// helpers below are now the only backward-scheduling implementation. ---------
 
 function subtractWorkingDays(from: Date, days: number): Date {
   const result = new Date(from);

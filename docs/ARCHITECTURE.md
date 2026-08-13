@@ -285,9 +285,12 @@ Uniform envelope:
 { "success": false, "error": "Customer not found" }
 ```
 
-Validation is opt-in via `src/lib/validation.ts` Zod schemas (broader Zod
-coverage on POST/PATCH bodies is a P2 follow-up — today money handlers
-have first-priority).
+Validation is opt-in and per-route. The reusable Zod schemas live in
+`src/lib/schemas/`; broader Zod coverage on POST/PATCH bodies is a P2
+follow-up (today money handlers have first priority). This paragraph used to
+point at `src/lib/validation.ts` and call it Zod — it was neither Zod nor
+reachable (hand-rolled `required` / `minValue` validators, zero importers) and
+was deleted in chore/dead-code-sweep.
 
 ### Data model
 
@@ -323,10 +326,8 @@ The non-UI heart of the app. A selected tour:
 | `utils.ts`                   | `cn()`, `formatCurrency()`, `formatDate()`, `getStatusColor` |
 | `pricing.ts`                 | Unit + line total calculation, seat-height price picker     |
 | `costing.ts`                 | FIFO consume + month-floating labor rate (sen integer)      |
-| `scheduling.ts`              | Capacity-aware production scheduling                        |
 | `scheduler.ts`               | `useInterval` / `useTimeout` with `pauseOnHidden`           |
 | `cached-fetch.ts`            | SWR + AbortController + in-flight dedup over `useState` cache |
-| `validation.ts`              | Shared Zod schemas (SO create body, DO create body, …)      |
 | `po-parser.ts`               | Parse supplier-PO emails / PDFs → structured items          |
 | `auth.ts`                    | `getCurrentUser`, `isAuthenticated`, login response handling |
 | `csrf.ts`                    | Read `hookka_csrf` cookie + attach `X-CSRF-Token` header    |

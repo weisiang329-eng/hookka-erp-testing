@@ -655,9 +655,17 @@ function ReturnRow({
             className="h-7 text-xs w-full rounded border border-[#E2DDD8] bg-white px-1.5"
           >
             <option value="">Write off against FG batch…</option>
+            {/* No "(N on hand)" here. This list is /api/inventory's
+                `finishedProducts` — the PRODUCTS table — which does not
+                compute finished-goods stock (`stockQty` is null). It used to
+                render `{f.stockQty ?? 0} on hand`, i.e. "(0 on hand)" beside
+                every product, forever. The sibling STOCK_SWAP dropdown in
+                this same file had that removed already; this one was missed.
+                A quantity here would have to come from
+                GET /api/inventory/fg-stock. BUG-2026-08-13-014. */}
             {fgOptions.map((f) => (
               <option key={f.id} value={f.id}>
-                {f.code} ({f.stockQty ?? 0} on hand)
+                {f.code}
               </option>
             ))}
           </select>

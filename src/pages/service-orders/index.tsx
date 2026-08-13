@@ -883,11 +883,18 @@ function CreateServiceOrderModal({
                                   className="w-full rounded border border-[#E2DDD8] bg-white px-1.5 py-1 text-[11px]"
                                 >
                                   <option value="">Select FG…</option>
+                                  {/* No "(N on hand)": /api/inventory does not
+                                      compute finished-goods stock (`stockQty`
+                                      is null), so `?? 0` printed "(0 on hand)"
+                                      against every product. A real quantity
+                                      would come from
+                                      GET /api/inventory/fg-stock.
+                                      BUG-2026-08-13-014. */}
                                   {fgList
                                     .filter((f) => f.id === it.productId || !it.productId)
                                     .map((f) => (
                                       <option key={f.id} value={f.id}>
-                                        {f.code} ({f.stockQty ?? 0} on hand)
+                                        {f.code}
                                       </option>
                                     ))}
                                 </select>

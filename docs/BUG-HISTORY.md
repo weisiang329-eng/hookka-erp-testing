@@ -58,15 +58,25 @@ This is the third time on this codebase that a **code comment described intent r
 **Numbers.** The 2.16 MB / 1,342 rows figure is **measured on prod** (BUG-2026-08-13-013, same list). The post-change size is **NOT measured** — this branch is not deployed and the prod API is behind login. The row count is unchanged by construction; only the per-row field count drops.
 
 ---
-## BUG-2026-08-13-025 — the /m WIP list has always been empty: it reads `data.wip`, a key the endpoint has never emitted `inventory-display` `ui-frontend` 🔴
+## BUG-2026-08-13-025 — the /m WIP list read `data.wip`, a key the endpoint never emitted `inventory-display` `ui-frontend` 🟢 *(superseded — fixed by #292 / BUG-2026-08-13-014)*
 
-**Symptom.** `/m` → Inventory → **WIP** renders nothing, on every load, for everyone.
+**Kept as a cross-reference, not as a claim.** This branch found the defect
+independently while converting `/m` Inventory to `?buckets=`, and originally
+logged it as 🔴 "NOT fixed here, deliberately" — reasoning that re-pointing the
+selector at `wipItems` would ADD rows *and* still render a list of dashes,
+because `toVM` read `name`/`qty` while `rowToWipItem` emits
+`relatedProduct`/`stockQty`.
 
-**Root cause.** `src/pages/m/config/modules.ts` `wipSource` does `select: selectNested("data", "wip")`. `GET /api/inventory` emits `{ finishedProducts, wipItems, rawMaterials }` (`src/api/routes/inventory.ts:170`). `selectNested` walks the path and returns `[]` when any hop is missing (`src/pages/m/config/helpers.ts:174-183`), so the list is `[]` by construction. Same class as BUG-2026-08-13-024 below — a read key that never matched a write key, failing silently as "empty" rather than as an error.
+**That reasoning was right about the shape and wrong about the outcome.** #292
+(BUG-2026-08-13-014) landed first and fixed it PROPERLY — selector, `toVM` and
+the column definitions together — so the rows now render with real values. The
+diagnosis stands; the "not fixed" status does not, and is corrected here rather
+than left in the ledger as a false open item.
 
-**NOT fixed here, deliberately.** Re-pointing the selector at `wipItems` would ADD rows (a visible behaviour change, not an output-identical projection) **and it would not actually work**: `wipSource.toVM` reads `name`/`productName` and `qty`/`quantity`, none of which `rowToWipItem` emits — it has `relatedProduct` and `stockQty`. Every row would render "—" with qty 0. That is the Phase-3 wiring the file's own `TODO` describes, not a typo fix. Recorded here so the next reader does not "fix the key" and ship a list of dashes.
-
-**What DID change.** The screen now requests `?buckets=wipItems` instead of all three buckets (BUG-2026-08-13-021), so it stops downloading 1.16 MB to render an empty list. Output is identical: `[]` before, `[]` after.
+**What this branch contributes:** the same screen now requests
+`?buckets=wipItems` instead of all three buckets, so having finally made the WIP
+rows visible, it no longer drags the 365-row product catalogue and the
+raw-material list along to show them.
 
 ---
 ## BUG-2026-08-13-024 — the supplier SKU picker read `finishedGoods`; the endpoint emits `finishedProducts`, so finished goods never appeared `ui-frontend` `data-migration` 🟢
@@ -260,6 +270,110 @@ failed fetch. That is the identical conflation one level up, and it is
 enumerated as C15 row 2 in `BUG-CLASSES.md` rather than patched blind: each
 page owns its own empty caption, and it needs its own PR with its own
 before/after.
+## BUG-2026-08-13-014 — the fabricated-figure sweep: seven more places where a number was invented, including random overtime written into payroll and a self-minted LHDN clearance `data-integrity` `money` `ui-frontend` `inventory` `payroll` 🟢
+
+**Why this is one entry.** BUG-2026-08-13-004 / -005 / -006 / -009 / -010 were five instances of a single class found in one day, and each was fixed where it stood. The owner asked for the whole app to be swept instead. This is that sweep. Every item below is the same shape — *a figure that reads as measured and is not* — so they share a class, a guard file, and one PR.
+
+**The standing rule, as the owner stated it:** where a real source exists, use it; where none exists, render "—" and say why; never a plausible-looking number. A page that admits it cannot compute something is useful. One that quietly prints a guess is worse than useless, because he acts on it.
+
+---
+
+### A. `/api/inventory` asserted that every finished product had zero on hand
+
+`src/api/routes/inventory.ts` returned `stockQty: 0` for all 380 catalog products, unconditionally, with a comment explaining that the real figure was derived elsewhere. `0` is not "unknown" — it is the claim *nothing is in stock* — and five screens printed it as a measurement:
+
+| Screen | What it showed |
+|---|---|
+| `/inventory/adjustments` | the **current balance** cell — "0 unit" for every product, on the form whose entire job is to correct a balance |
+| `/service-orders/:id` scrap dropdown | "(0 on hand)" on every option |
+| `/service-orders` STOCK_SWAP picker | "(0 on hand)" on every option |
+| `/service-cases/:id` replacement picker | "· 0 on hand", plus a confirm dialog reading "(currently 0 on hand)" while asking the operator to deduct from it |
+| `/m` Inventory → Finished Goods **and** Stock Value | "Qty 0" and "Amount RM 0.00" per SKU — the Amount being `basePriceSen × 0` |
+
+The sibling dropdown in `service-orders/detail.tsx` had already had this removed once, with a comment recording that "(0 on hand)" was always a lie. The one thirty lines away was left. That is exactly the behaviour `docs/BUG-CLASSES.md` exists to stop.
+
+**Fix.** `stockQty` is now `null` — "not computed by this endpoint" — and every consumer renders "—". The real source, `GET /api/inventory/fg-stock` (server-side `deriveFGStock`, snapshot-cached, verified byte-identical to the Inventory page's own derivation), is named in the comment and is what `/reports` now calls.
+
+**Also fixed on two of those screens: the unit COST was prefilled from the SELL price.** `adjustments.tsx` and `service-cases/detail.tsx` both read `unitCostSen: p.basePriceSen` and POSTed it to `/api/stock-adjustments`, so an FG stock adjustment or a service replacement would have been valued into the stock/cost ledger at retail. `costPriceSen` was on the same row, unused.
+
+**And one honest gain:** the mobile WIP tab selected `data.wip`, a key `/api/inventory` has never sent (it sends `wipItems`), so it had always drawn its empty state over a payload that was carrying the rows. `wip_items.stockQty` **is** a real running balance, so that tab now shows real quantities.
+
+### B. `/reports` › Inventory — a "Stock Valuation" with no quantity in it
+
+`src/pages/reports.tsx` did `categoryMap[p.category].totalValue += p.costPriceSen` — a **sum of price tags**. Adding a SKU to the catalog "increased the value of stock on hand" by that SKU's unit cost with none in the warehouse. It was titled *Stock Valuation by Category*, headed *Total Value*, and **exported to `stock-valuation.csv`**.
+
+**Fix.** Value = on-hand units × cost price, quantities from `/api/inventory/fg-stock`, with a **Valuation Basis** column (`N / M units costed`) carrying the provenance — the "Measured Cards" precedent from -004. A category with no costed unit prints "—", not RM 0.00.
+
+> **Measured on prod by the main session** (this branch has no authenticated session): `costPriceSen > 0` on **0 of 380** products. So the corrected arithmetic *also* totals RM 0.00 today — which is precisely why the "—" rule matters more than the arithmetic here. A correct-looking RM 0.00 for a factory's stock would have been worse than the old number, because it would have looked deliberate. The page now reports that the basis is missing instead.
+
+**Same table, second defect:** the header read `["…", "Cost Price", "Avg Sell Price"]` while the cells were `[…, formatCurrency(p.costPriceSen), p.sizeLabel]`. **Index 5 rendered the size label under a column captioned Avg Sell Price**, on screen and in the CSV. `products` has no average-sell-price field, so the columns are now named for what they actually show (Size Label / Cost Price / Base Price) rather than a mapping being invented to fill the gap.
+
+### C. `/analytics/forecast` — four frozen literals and a KPI that could never be anything else
+
+```ts
+const withActual = forecasts.filter((f) => f.actualQty !== null);
+if (withActual.length === 0) {
+  const last3 = historicalSales.filter((s) => s.period >= "2026-02");
+  return { accuracy: 84.2, count: last3.length }; // Mock accuracy
+}
+```
+
+rendered as a `text-3xl` KPI captioned *"Based on historical comparison"*. **The branch is always taken**: `POST /api/forecasts` inserts `actualQty` as a literal `NULL`, there is no PUT/PATCH on `forecast_entries`, and nothing in the app POSTs a forecast at all. The `last3` count computed to justify that caption was discarded unused.
+
+Three more literals on the same page: `capacity: 220` drawn as the reference line the forecast was judged against (no table, no config, no calculation behind it); a frozen `["2026-05" … "2026-10"]` window under the title "6-Month Forecast", three of whose bars were already in the past; and `period === "2026-05"` under a header reading "May Forecast".
+
+The **Accuracy** tab failed more quietly: `overallMape` returned `0` for an empty set and the card then printed `100 - 0` = **"Overall Accuracy 100%"** off zero data points. Its "Forecast Qty" column is also not a forecast anyone made — it is the SMA-3 of the three months before each row, computed now from the very actuals it is then scored against.
+
+**Fix.** Accuracy is `null` → "—" with the reason beside it; the capacity series is removed (no source exists — `departments.workingHoursPerDay` is real, but converting it to units/month needs a per-product routing assumption nobody has made); the window rolls from the current month; the back-test is captioned as a back-test. **A grain bug was fixed on the way:** `historical_sales` carries one row per product **per month per customer**, and every derivation here treated one row as one month — `slice(-3)` on a product sold to three customers in one month was that one month, three times. `byPeriod()` folds to one row per period first.
+
+**`/api/promise-date` fed the same page an org-wide constant dressed as a per-product attribute.** `materialAvailability` is ONE reading of the whole `raw_materials` table, computed once and stamped onto every product — no BOM consulted — and since 162 of 439 RM rows sit at zero it is permanently "PARTIAL" for everything. It now travels as `orgMaterialAvailability`, the per-product field is `null`, the per-product "Materials" column is gone, and the remaining card says "whole-warehouse reading — not specific to this product".
+
+### D. `POST /api/payroll` rolled dice and wrote the result into `payroll_records`
+
+```ts
+const hourlyRateSen  = worker.basicSalarySen / (26 * 9);
+const otHoursWeekday = Math.floor(Math.random() * 16) + 2;
+const otHoursSunday  = Math.random() > 0.5 ? Math.floor(Math.random() * 8) : 0;
+const otHoursHoliday = Math.random() > 0.8 ? Math.floor(Math.random() * 8) : 0;
+```
+
+multiplied by 1.5× / 2.0× / 3.0×, added to basic pay, and **INSERTed** as `otAmountSen` / `grossSalarySen` / `netPaySen`. No attendance table was read at any point. The hourly rate hardcoded a 26-day × 9-hour month while `workingDaysPerMonth` sat unused in the same SELECT, and SOCSO (745), EIS (390) and PCB (0) were flat constants regardless of salary band.
+
+No screen calls `/api/payroll` — but the route is mounted, and the assistant's `get_payroll` tool **reads `payroll_records`**, so a single call would have fed random net pay back to the owner as the answer to "what did this worker earn".
+
+**Fix: the endpoint refuses (501) and names the real one.** The genuine payroll engine is `POST /api/payslips` — `computeMonthlyLabor` over `working_hour_entries` with effective-dated pay rules, day-typed weekday / Sunday / public-holiday OT, and per-worker statutory toggles. Deriving OT here would have meant a *second* payroll engine beside the real one, which is how two net-pay figures come to disagree. GET and PUT are untouched so any pre-existing rows stay readable and auditable.
+
+### E. `PUT /api/e-invoices/:id {action:"submit"}` minted an LHDN clearance that LHDN never issued
+
+```ts
+const submissionId = `LHDN-SUB-${yyyymmdd}-${Math.floor(Math.random() * 999)}`;
+const uuid = /* 15 random chars from [A-Z0-9] */;
+// Mock auto-validation: SUBMITTED → VALID immediately
+UPDATE e_invoices SET status='VALID', submittedAt=now, validatedAt=now, submissionId=?, uuid=?
+```
+
+**There is no LHDN / MyInvois client anywhere in this repo** — the only other occurrences of "LHDN" under `src/` are a page heading, a comment, and a mail-sender regex. Nothing was ever transmitted. The row then rendered on `/invoices/e-invoice` as a green **VALID** badge carrying a fabricated government reference, and the audit journal recorded the flip under a comment describing "the LHDN transmission moment … for tax-audit traceability".
+
+This is the one item in the sweep that is not merely a wrong number: it is a government-issued identifier that no government issued, on a tax document.
+
+**Fix.** `submit` refuses (501) and explains why. The page's `submitToLHDN` threw the response away entirely — a failure would have looked like a button that simply did nothing — so it now surfaces the refusal, and the page carries a standing notice that nothing is transmitted and that **any row already marked VALID was stamped locally**. Audit coverage on the router is preserved by adding the emit the `cancel` branch never had.
+
+**The seed fixture ships fabricated clearances too.** `src/lib/mock-data.ts` carries 15 `eInvoices` rows — **12 with a hardcoded `LHDN-SUB-…` submissionId and a 15-character uuid, 6 of them `status: "VALID"` with a `validatedAt`** — and `scripts/generate-seed-sql.ts` emits `e_invoices` into `scripts/seed.sql`. If that seed was ever applied to a real book, those rows render as cleared tax documents carrying reference numbers no government issued. The array is annotated in place rather than edited: rewriting a fixture does not clean a book it has already been applied to. **Whether prod has `e_invoices` rows marked VALID is an owner check** — this branch has no session.
+
+### F. Two smaller ones
+
+* **`GET /api/scheduling/capacity`** computed `workerCount × 9 × 60 × 0.85` while `departments.workingHoursPerDay` — the real column — was SELECTed and discarded. It now uses the real hours, and the 0.85 is published as `assumedEfficiency` alongside the `utilization` and RAG level it produces, because a percentage whose denominator hides an assumption is this same class. (Nothing consumes this endpoint today; fixed rather than left as a trap for the next consumer.)
+* **`POST /api/forecasts`** defaulted `confidence` to the literal `50` when omitted — persisted, and rendered as a colour-coded badge with thresholds at 75 and 60. Nothing in the repo derives a confidence from forecast error, so the caller must now supply one.
+
+### Checked and found genuinely sourced — do not re-audit
+
+`finance-dashboard`, `/forecast` (Forecast P&L), `/kpi` + `src/api/lib/kpi-metrics.ts`, `dashboard-b`, `/agents`, `cash-flow.ts`, `department-performance.ts`, `ocr-accuracy`, `supplier-scorecards.ts`, `accounting.ts`, `dashboard-overview.ts`, `assistant-tools.ts` (which carries an explicit honesty guard requiring `promiseDate: null` plus a what-is-missing list rather than an invented date), and `rd-projects.ts` (which refuses to pro-rate part-time cost per hour because it would be "fake precision").
+
+Two are fabricated **but honestly labelled**, and were deliberately left alone: `/admin/health`'s seeded-random KPIs (tagged `_mock: true`, with an on-screen banner) and the agent console's LLM list prices + `USD_TO_MYR_EST = 4.7` (fields named `est*`, captioned "estimate" / "≈"). That the FX rate silently gates a real spend limit is noted for the owner rather than changed.
+
+**Guard.** `tests/no-fabricated-inventory-and-forecast.test.mjs` — 16 structural tests, the fifth file in the `no-fabricated-*` family. **Every assertion was proved by putting the bug back and watching it go red:** `stockQty: 0`, `Math.random()` in payroll, `LHDN-SUB-`, `totalValue += costPriceSen`, `accuracy: 84.2` and `{f.stockQty ?? 0} on hand` were each reintroduced individually, each turned its guard red, and each was reverted. The file also pins the *over-corrections*: `/api/inventory/fg-stock` must keep existing, `payslips.ts` must keep calling `computeMonthlyLabor`, and the mobile WIP source must keep reading the real `wip_items` balance — deleting a measured metric while cleaning up a fabricated one is the obvious way to make this worse.
+
+**Verified.** `npx tsc -p tsconfig.app.json --noEmit` clean (0 errors). `npm test` — **3,784 tests, 3,781 pass / 0 fail / 3 skipped**. `npx eslint` on all 16 changed files — **0 errors** (3 pre-existing `useVirtualizer` compiler warnings on files this change touched but did not introduce). **Nothing here was observed on prod:** this branch is not deployed and has no authenticated session. The prod figures quoted above (380 finished products, `costPriceSen > 0` on none of them, 277 of 439 raw materials carrying a balance) were measured by the main session, which owns deploy and live verification.
 
 ---
 

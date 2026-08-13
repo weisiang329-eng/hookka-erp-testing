@@ -2414,13 +2414,23 @@ function AffectedProductsPanel({
 // Item sources mirror the Stock Adjustments page (inventory/adjustments.tsx):
 // RM = /api/raw-materials, WIP = /api/inventory/wip, FG = /api/inventory
 // finishedProducts; unit cost prefill mirrors the same page (RM unitCostSen,
-// FG basePriceSen, WIP unknown → 0).
+// FG costPriceSen, WIP unknown → 0).
 type ReplacementType = "RM" | "WIP" | "FG";
 type ReplacementItemOpt = {
   id: string;
   code: string;
   name: string;
-  onHand: number;
+  /**
+   * Current on-hand, or `null` when nothing computed it.
+   *
+   * RM (`balanceQty`) and WIP (`wip_items.stockQty`) are real balances. FG is
+   * not: `/api/inventory` ships `stockQty: null` because it does not derive
+   * finished-goods stock (that is GET /api/inventory/fg-stock). This was
+   * `p.stockQty ?? 0`, so every FG option read "· 0 on hand" and the
+   * deduct-confirm dialog told the operator "(currently 0 on hand)" while
+   * asking them to deduct from it. BUG-2026-08-13-014.
+   */
+  onHand: number | null;
   unitCostSen: number;
 };
 type ReplacementAdjRow = {
@@ -2463,7 +2473,7 @@ function StockTopUpPanel({
     data?: Array<{ id: string; code: string; type: string; stockQty: number }>;
   }>(type === "WIP" ? "/api/inventory/wip" : null);
   const { data: invResp } = useCachedJson<{
-    data?: { finishedProducts?: Array<{ id: string; code: string; name: string; stockQty?: number; basePriceSen?: number }> };
+    data?: { finishedProducts?: Array<{ id: string; code: string; name: string; stockQty?: number | null; costPriceSen?: number; basePriceSen?: number }> };
     // perf 2026-08-13 (BUG-2026-08-13-021): `?buckets=finishedProducts` — the
     // FG branch reads that bucket only, and the sibling RM / WIP branches
     // already have their own endpoints, so the other two buckets were pure
@@ -2493,8 +2503,14 @@ function StockTopUpPanel({
       id: p.id,
       code: p.code,
       name: p.name ?? "",
-      onHand: p.stockQty ?? 0,
-      unitCostSen: p.basePriceSen ?? 0,
+      // NOT `?? 0` — see ReplacementItemOpt.onHand.
+      onHand: typeof p.stockQty === "number" ? p.stockQty : null,
+      // `basePriceSen` is the product's SELLING price. It was being posted to
+      // POST /api/stock-adjustments as `unitCostSen`, so every FG service
+      // replacement was valued into the stock/cost ledger at retail.
+      // `costPriceSen` is the cost column on the same row.
+      // BUG-2026-08-13-014.
+      unitCostSen: p.costPriceSen ?? 0,
     }));
   }, [type, rmResp, wipResp, invResp]);
 
@@ -2533,7 +2549,9 @@ function StockTopUpPanel({
               {selected.code} × {Math.abs(qtyNum)}
             </span>{" "}
             and deduct it from <span className="font-semibold">{type}</span> stock
-            (currently {selected.onHand} on hand). This writes a stock adjustment
+            (on hand:{" "}
+            {selected.onHand === null ? "not tracked here" : selected.onHand}).
+            This writes a stock adjustment
             against {caseDetail.caseNo} and can't be auto-undone.
           </>
         ),
@@ -2645,7 +2663,10 @@ function StockTopUpPanel({
                   {selected.name ? (
                     <span className="text-[#9CA3AF]"> — {selected.name}</span>
                   ) : null}
-                  <span className="text-[#9CA3AF]"> · {selected.onHand} on hand</span>
+                  <span className="text-[#9CA3AF]">
+                    {" "}
+                    · {selected.onHand === null ? "—" : selected.onHand} on hand
+                  </span>
                 </div>
                 <button
                   type="button"
@@ -2689,7 +2710,10 @@ function StockTopUpPanel({
                       >
                         <span className="text-[#6B5C32]">{o.code}</span>
                         {o.name ? <span className="text-[#9CA3AF]"> — {o.name}</span> : null}
-                        <span className="text-[#9CA3AF]"> · {o.onHand} on hand</span>
+                        <span className="text-[#9CA3AF]">
+                          {" "}
+                          · {o.onHand === null ? "—" : o.onHand} on hand
+                        </span>
                       </button>
                     ))}
                   </div>

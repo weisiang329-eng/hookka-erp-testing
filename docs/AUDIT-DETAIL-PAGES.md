@@ -118,14 +118,19 @@ emits none of them. The same is true of `wipItems`, which is why that bucket is 
 requested and still spread — dropping it would have been a row-set change resting on
 an unmeasurable assumption about how many raw materials exist.
 
-**Found while doing the work, and NOT fixed:** the `/m` WIP list reads `data.wip`, a
-key the endpoint has never emitted, so it has always been empty
-(BUG-2026-08-13-025). Re-pointing it at `wipItems` would render a list of dashes —
-`toVM` reads `name`/`qty`, which `rowToWipItem` does not emit either.
+**Found independently while doing the work — and fixed by someone else first:** the
+`/m` WIP list read `data.wip`, a key the endpoint never emitted, so it had always
+been empty. This branch logged it as not-fixable-in-isolation (re-pointing the
+selector alone would render a list of dashes, because `toVM` read `name`/`qty` and
+`rowToWipItem` emits `relatedProduct`/`stockQty`). **#292 / BUG-2026-08-13-014
+landed first and fixed all three together**, so the rows now render real values;
+BUG-2026-08-13-025 is marked superseded rather than left in the ledger as a false
+open item.
 
-**Still open from this audit:** D2, D3, D6, D7, D8, D10, D11, D13, and the
+**Still open from this audit:** D2, D6, D7, D8, D10, D11, D13, and the
 `/api/purchase-orders` halves of D9 and the /m supplier panel (that route has no
 supplier filter and no `?fields=` projection, so there is nothing to switch to).
+**D3 is no longer open** — #291 shipped the `RecordLoadError` class fix.
 
 ---
 

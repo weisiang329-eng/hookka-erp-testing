@@ -91,7 +91,18 @@ type FgBatchOpt = {
   id: string;
   productCode: string;
   productName: string;
-  remainingQty: number;
+  /**
+   * On-hand units, or `null` when nothing computed it.
+   *
+   * `/api/inventory` does NOT compute finished-goods stock — it ships
+   * `stockQty: null` and says so (see inventory.ts). This used to be
+   * `p.stockQty ?? 0`, so the "current quantity" cell showed **0 unit** for
+   * every one of the 380 products in the catalog, on the screen whose whole
+   * job is to correct a balance. A wrong current balance on an adjustment
+   * form is not a cosmetic defect: it is the number the operator adjusts
+   * FROM. Null renders "—". BUG-2026-08-13-014.
+   */
+  remainingQty: number | null;
   unitCostSen: number;
   // Product category (BEDFRAME / SOFA / ACCESSORY) for the FG filter.
   category?: string;
@@ -188,7 +199,7 @@ export default function StockAdjustmentsPage() {
   // directly above), so the three-bucket payload was shipping both of them a
   // second time and the page used neither copy.
   const { data: invResp } = useCachedJson<{
-    data?: { finishedProducts?: Array<{ id: string; code: string; name: string; category: string; stockQty?: number; basePriceSen?: number }> };
+    data?: { finishedProducts?: Array<{ id: string; code: string; name: string; category: string; stockQty?: number | null; costPriceSen?: number; basePriceSen?: number }> };
   }>("/api/inventory?buckets=finishedProducts");
   const { data: historyResp, refresh: refreshHistory } = useCachedJson<{
     data?: AdjustmentRow[];
@@ -201,8 +212,16 @@ export default function StockAdjustmentsPage() {
       id: p.id,
       productCode: p.code,
       productName: p.name,
-      remainingQty: p.stockQty ?? 0,
-      unitCostSen: p.basePriceSen ?? 0,
+      // NOT `?? 0` — see FgBatchOpt.remainingQty. An absent quantity is "—".
+      remainingQty: typeof p.stockQty === "number" ? p.stockQty : null,
+      // The COST prefill must come from the cost price. It read
+      // `p.basePriceSen` — the product's SELLING price — and posted it as
+      // `unitCostSen` into the stock/cost ledger, so every FG adjustment
+      // would have been valued at retail. `costPriceSen` is on the same row.
+      // 0 means "no cost on file": left blank rather than prefilled, because
+      // `onSelectItem` only prefills a truthy value anyway and a zero-valued
+      // adjustment should be a deliberate keystroke. BUG-2026-08-13-014.
+      unitCostSen: p.costPriceSen ?? 0,
       category: p.category,
     })),
     [invResp],
@@ -271,10 +290,13 @@ export default function StockAdjustmentsPage() {
   }
 
   // ---- derived per row ----
+  // `qty` is the item's CURRENT on-hand balance. RM (`balanceQty`) and WIP
+  // (`totalQty`) are real ledger figures; FG has no computed balance on this
+  // payload, so it is `null` and the cell reads "—" instead of "0 unit".
   function rowSelected(row: DraftRow): {
     code: string;
     name: string;
-    qty: number;
+    qty: number | null;
     uom: string;
   } | null {
     if (!row.itemId) return null;
@@ -534,7 +556,9 @@ export default function StockAdjustmentsPage() {
                       </select>
                     </td>
                     <td className="py-1 px-1 text-right font-mono text-[11px] text-[#6B7280]">
-                      {sel_ ? `${sel_.qty} ${sel_.uom}` : "—"}
+                      {sel_ && sel_.qty !== null
+                        ? `${sel_.qty} ${sel_.uom}`
+                        : "—"}
                     </td>
                     <td className="py-1 px-1">
                       <select

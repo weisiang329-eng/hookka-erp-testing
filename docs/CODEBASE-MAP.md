@@ -126,7 +126,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 | `src/pages/procurement/grn.tsx` — GRN list (1252) | `src/api/routes/purchase-invoices.ts` — PI CRUD + lifecycle | `purchase_invoices` / `purchase_invoice_items` | `tests/three-pl-state-rates.test.mjs` |
 | `src/pages/procurement/grn/create.tsx` — GRN create (1490) | `src/api/routes/three-way-match.ts` — PO↔GRN↔PI variance | `suppliers` | |
 | `src/pages/procurement/grn-detail.tsx` — GRN detail + Post-to-Stock (1332) | `src/api/routes/suppliers.ts` — supplier CRUD | `supplier_materials` / `supplier_material_bindings` | |
-| `src/pages/procurement/in-transit.tsx` — GIT list (869) | `src/api/routes/supplier-materials.ts` — bindings (autofill source) | `supplier_payments` | |
+| ~~`src/pages/procurement/in-transit.tsx`~~ — **DELETED** (chore/dead-code-sweep): `/procurement/in-transit` has been a `<Navigate>` redirect to `/procurement/grn` (`src/dashboard-routes.tsx:378`) with no sidebar entry and no importer. The `goods_in_transit` API stays. | `src/api/routes/supplier-materials.ts` — bindings (autofill source) | `supplier_payments` | |
 | `src/pages/procurement/pi.tsx` — PI list (906) | `src/api/routes/supplier-payments.ts` — payments + void + lifecycle | `price_histories` | |
 | `src/pages/procurement/pi/create.tsx` — PI create (1144) | `src/api/routes/price-history.ts` — effective-date pricing | `credit_notes` / `debit_notes` | |
 | `src/pages/procurement/PurchaseInvoiceDetail.tsx` — PI detail (editable DRAFT+APPROVED) | `src/api/routes/credit-notes.ts` / `debit-notes.ts` | `raw_materials` | |

@@ -116,7 +116,8 @@ Apply the class recipe above to each page. Pages that use only `PageHeader` + `D
 - `src/pages/consignment/create.tsx`, `edit.tsx`, `detail.tsx`, `note.tsx`, `return.tsx` — form + DataGrid
 
 **Procurement** (10 pages):
-- `src/pages/procurement/index.tsx`, `detail.tsx`, `create.tsx`, `grn.tsx`, `grn/create.tsx`, `grn-detail.tsx`, `in-transit.tsx`, `pi.tsx`, `pi/create.tsx`, `PurchaseInvoiceDetail.tsx`, `pricing.tsx`, `maintenance.tsx`
+- `src/pages/procurement/index.tsx`, `detail.tsx`, `create.tsx`, `grn.tsx`, `grn/create.tsx`, `grn-detail.tsx`, `pi.tsx`, `pi/create.tsx`, `PurchaseInvoiceDetail.tsx`, `maintenance.tsx`
+  (`pricing.tsx` and `in-transit.tsx` are gone — both routes are now `<Navigate>` redirects.)
 
 **Delivery & Consignment** (3 pages):
 - `src/pages/delivery/index.tsx`, `detail.tsx`

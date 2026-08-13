@@ -645,9 +645,11 @@ export function Sidebar({
     if (href === "/procurement/maintenance") {
       return pathname === "/procurement/maintenance" || pathname.startsWith("/procurement/maintenance/");
     }
-    if (href === "/procurement/in-transit") {
-      return pathname === "/procurement/in-transit" || pathname.startsWith("/procurement/in-transit/");
-    }
+    // No nav item points at /procurement/in-transit — the Goods-in-Transit page
+    // was retired and the route is a bare <Navigate> to /procurement/grn — so an
+    // `href === "/procurement/in-transit"` branch here could never be true. The
+    // pathname exclusion below stays: the URL IS that path for the one render
+    // before the redirect fires, and "Purchase Order" must not flash active.
     if (href === "/procurement") {
       return pathname === "/procurement" || (pathname.startsWith("/procurement/") && !pathname.startsWith("/procurement/grn") && !pathname.startsWith("/procurement/pi") && !pathname.startsWith("/procurement/maintenance") && !pathname.startsWith("/procurement/in-transit"));
     }

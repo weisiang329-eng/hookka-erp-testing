@@ -16,7 +16,7 @@ Owns the buy-side document chain: **Purchase Orders** (PO) → **Goods Receipt N
   - `/procurement/grn` → `src/pages/procurement/grn.tsx:347` (`GRNPage` — GRN list)
   - GRN create → `src/pages/procurement/grn/create.tsx:103` (`GRNCreatePage`; manual default + "Convert from PO")
   - GRN detail → `src/pages/procurement/grn-detail.tsx:129` (`GRNDetailPage`; Edit Quantities → POSTED-line compensating cascade)
-  - `/procurement/in-transit` → `src/pages/procurement/in-transit.tsx:118` (`GoodsInTransitPage`)
+  - ~~`/procurement/in-transit`~~ — page **DELETED** (chore/dead-code-sweep). The route has been a bare `<Navigate to="/procurement/grn">` (`src/dashboard-routes.tsx:378`) with no sidebar entry and no importer, so `in-transit.tsx` (869 lines) was unreachable. The redirect stays for bookmarks; the `goods_in_transit` API (`src/api/routes/goods-in-transit.ts`) is untouched.
   - PI list/create/detail → `src/pages/procurement/pi.tsx:93` (`PurchaseInvoicesPage`), `pi/create.tsx:116` (`CreatePurchaseInvoicePage`), `PurchaseInvoiceDetail.tsx:137` (`PurchaseInvoiceDetailPage`; editable DRAFT+APPROVED)
   - Bindings mgmt → `src/pages/procurement/maintenance.tsx:858` (`SupplierMaintenancePage`); SKU/supplier modals `sku-form-dialog.tsx` / `supplier-form-dialog.tsx`
   - Supplier profile/scorecard/price-history → `src/pages/suppliers/detail.tsx:156` (`SupplierDetailPage`)

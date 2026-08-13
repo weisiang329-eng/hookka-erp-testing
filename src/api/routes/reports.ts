@@ -491,7 +491,22 @@ app.get("/brief", async (c) => {
   if (denied) return denied;
   try {
     // Full HTML view includes the AI focus paragraph (one Claude call).
-    const data = await buildBrief(c, true);
+    //
+    // CACHED per (org, date) since 2026-08-13. Measured on prod: this route was
+    // 8,977ms and 10,887ms on two consecutive opens — it rebuilt everything AND
+    // made a live Claude call EVERY time, because nothing here was cached (the
+    // reports_brief_snapshot below was only ever used by /brief.json). The same
+    // underlying data served as .json answers in 527ms.
+    //
+    // People open this HTML in a tab to read/print it, so that was ~10s of
+    // staring at a blank tab, every open. A DAILY brief for a given date is
+    // stable — caching it per date is not just faster, it is more correct than
+    // regenerating a different AI paragraph on every refresh, and it stops
+    // burning a Claude call per view.
+    //
+    // Its own cache_key (`<date>|html`) so it never collides with the .json
+    // card, which caches the includeAi:false shape under `<date>`.
+    const data = await buildBriefHtmlCached(c, getOrgId(c));
     return new Response(renderBriefHtml(data), {
       status: 200,
       headers: {
@@ -707,6 +722,42 @@ async function buildBriefJsonCached(
     c,
     swr ? { staleWhileRevalidate: true } : undefined,
   );
+}
+
+/**
+ * The HTML brief's data (includeAi: true), cached per (org, date).
+ *
+ * Mirrors buildBriefJsonCached, with two deliberate differences:
+ *  - includeAi TRUE, so the cached payload carries the Claude focus paragraph
+ *    and the display-only learning pass, exactly as the uncached route did.
+ *  - cache_key `<date>|html`, so it can never be confused with the .json
+ *    card's includeAi:false payload stored under `<date>`.
+ * buildBrief is read-only on this path (config proposals are explicitly not
+ * emitted for GET), so caching it changes nothing but the cost.
+ */
+async function buildBriefHtmlCached(
+  c: Context<Env>,
+  orgId: string,
+): Promise<ReturnType<typeof buildBrief> extends Promise<infer R> ? R : never> {
+  const db = c.var.DB;
+  const date = parseDateParam(c.req.query("date"), todayYmdSgt);
+  await ensureReportSnapshotTable(db, "reports_brief_snapshot");
+  const { withSnapshot } = await import("../lib/snapshot");
+  // The snapshot layer round-trips through JSON, so it is typed as a plain
+  // record; cast back to the brief shape the renderer expects (same round-trip
+  // the .json route already relies on).
+  return (await withSnapshot<Record<string, unknown>>(
+    db,
+    {
+      tableName: "reports_brief_snapshot",
+      sourceTables: BRIEF_SOURCE_TABLES as unknown as string[],
+    },
+    orgId,
+    async () => (await buildBrief(c, true)) as unknown as Record<string, unknown>,
+    `${date}|html`,
+    c,
+    { staleWhileRevalidate: true },
+  )) as unknown as ReturnType<typeof buildBrief> extends Promise<infer R> ? R : never;
 }
 
 export async function warmBriefReport(

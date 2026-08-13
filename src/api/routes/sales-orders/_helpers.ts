@@ -345,6 +345,79 @@ export type SOListRefLike = {
   hookkaExpectedDD?: string;
   items?: Array<{ productCode?: string; unitPriceSen?: number }>;
 };
+// ---------------------------------------------------------------------------
+// soListToOrdersDue — GET /api/sales-orders?fields=orders-due projection.
+//
+// The /m Home screen's "Orders due this week" card (src/pages/m/screens/
+// Home.tsx) fetched the WHOLE bare SO list — measured on prod 2026-08-13:
+// 2.16 MB decoded / 1,342 rows, 4,108 ms on the cold first load of /m — and
+// then kept SIX rows and SEVEN fields of them. Every other byte was decoded,
+// JSON.parsed and retained on a factory phone's main thread for nothing.
+//
+// This is the EXACT derivation the screen ran client-side, moved server-side
+// verbatim so the rendered list cannot change:
+//   1. drop terminal statuses (DELIVERED / INVOICED / CLOSED / CANCELLED)
+//   2. drop rows with a blank / missing Expected DD
+//   3. sort ASCENDING by hookkaExpectedDD via localeCompare — Array.sort is
+//      stable (ES2019+), so ties keep the list endpoint's own order
+//      (created_at DESC, id DESC). Reproducing that tie-break is the whole
+//      reason this is a JS sort over pre-ordered rows and not an ORDER BY:
+//      a SQL sort would apply the DATABASE's collation to the date strings,
+//      which is not guaranteed to agree with localeCompare.
+//   4. take the first `top` (the screen renders 6)
+//
+// `overdue` is deliberately NOT computed here — the card colours the date
+// against the PHONE's local today, and the server's clock/zone is not the
+// operator's. The client still derives it from hookkaExpectedDD.
+//
+// Field-for-field passthrough of rowToSO: the three string columns keep its
+// `?? ""`, and status / customerName / totalSen are passed through RAW exactly
+// as rowToSO does (all three are NOT NULL in the schema).
+// ---------------------------------------------------------------------------
+export const ORDERS_DUE_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
+  "DELIVERED",
+  "INVOICED",
+  "CLOSED",
+  "CANCELLED",
+]);
+
+/** How many rows the /m Home "Orders due" card renders. */
+export const ORDERS_DUE_DEFAULT_TOP = 6;
+
+export type SOListDueLike = {
+  id: string;
+  companySO?: string;
+  companySOId?: string;
+  customerName?: string;
+  status?: string;
+  hookkaExpectedDD?: string;
+  totalSen?: number;
+};
+export function soListToOrdersDue(
+  list: SOListDueLike[],
+  top: number = ORDERS_DUE_DEFAULT_TOP,
+) {
+  return list
+    .filter(
+      (so) =>
+        !ORDERS_DUE_TERMINAL_STATUSES.has(so.status as string) &&
+        !!so.hookkaExpectedDD,
+    )
+    .sort((a, b) =>
+      (a.hookkaExpectedDD || "").localeCompare(b.hookkaExpectedDD || ""),
+    )
+    .slice(0, top)
+    .map((so) => ({
+      id: so.id,
+      companySO: so.companySO ?? "",
+      companySOId: so.companySOId ?? "",
+      customerName: so.customerName,
+      status: so.status,
+      hookkaExpectedDD: so.hookkaExpectedDD ?? "",
+      totalSen: so.totalSen,
+    }));
+}
+
 export function soListToDeliveryRefs(list: SOListRefLike[]) {
   return list.map((s) => ({
     id: s.id,

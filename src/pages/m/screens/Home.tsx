@@ -27,7 +27,9 @@
 //
 // Lists (kept):
 //   • Stock alerts → /api/inventory (raw materials at/below reorder / low).
-//   • Orders due   → /api/sales-orders (soonest Expected DD, non-terminal).
+//   • Orders due   → /api/sales-orders?fields=orders-due&top=6 (soonest
+//                    Expected DD, non-terminal — the SAME filter/sort/slice,
+//                    now performed server-side; see BUG-2026-08-13-013).
 //
 // Deltas: Sales / Invoices show the real month-over-month % from the same
 // monthlyRevenue series the dashboard's KTile sparkline/delta use. Pending
@@ -64,9 +66,10 @@ import {
   SO_STATUS_COLOR,
   type SemanticStyle,
 } from "@/lib/design-tokens";
-import type { SalesOrder, RawMaterial } from "@/types";
+import type { RawMaterial } from "@/types";
 import { MobileCard, StatusPill, FormSheet, Sheet } from "../components";
 import { GlobalSearchSheet } from "../components/GlobalSearchSheet";
+import { ORDERS_DUE_URL } from "../lib/preload";
 import { M, M_ACCENT, M_DELTA } from "../theme";
 import { type FormSpec } from "../config/form-types";
 import {
@@ -160,9 +163,21 @@ type WheSummaryResp = {
 type WorkersResp = {
   data?: { id: string; name: string; departmentCode?: string }[];
 };
-// Subset of /api/purchase-orders row shape — only the fields the Daily Report
-// "PO not received" chip needs.
-type SOListResp = { success?: boolean; data?: SalesOrder[] };
+// Orders-due row — the SEVEN fields OrderDueCard renders, and nothing else.
+// This is the whole payload of /api/sales-orders?fields=orders-due.
+// Field types mirror `SalesOrder` (src/types) exactly — the server projection
+// is a straight passthrough of the same columns, all of them NOT NULL or
+// `?? ""`-defaulted, so nothing here is more optional than it was before.
+type OrderDueRow = {
+  id: string;
+  companySO: string;
+  companySOId: string;
+  customerName: string;
+  status: string;
+  hookkaExpectedDD: string;
+  totalSen: number;
+};
+type OrdersDueResp = { success?: boolean; data?: OrderDueRow[] };
 type InventoryResp = {
   success?: boolean;
   data?: { rawMaterials?: RawMaterial[] };
@@ -177,13 +192,10 @@ type PendingValueResp = {
 };
 type DoStatsResp = { valueByStatus?: Record<string, number> };
 
-// Statuses excluded from the Orders-due list + on-time derivation (terminal).
-const TERMINAL_STATUSES = new Set([
-  "DELIVERED",
-  "INVOICED",
-  "CLOSED",
-  "CANCELLED",
-]);
+// The Orders-due URL (?top=6) is defined ONCE in ../lib/preload.ts and shared,
+// because the preload warms it by URL string — see ORDERS_DUE_URL there. The
+// terminal-status set that used to live here moved with the filter into
+// soListToOrdersDue (src/api/routes/sales-orders/_helpers.ts).
 
 /** Current "YYYY-MM" — the period selector's default + the dashboard's
  * Command Center period. */
@@ -338,9 +350,22 @@ export default function MobileHome() {
   const { data: overview } = useCachedJson<OverviewResp>(
     `/api/dashboard/overview?period=${period}`,
   );
-  // Whole-table SO list (server caps at 5000; current ~350 SOs). Used for the
-  // Orders-due list.
-  const { data: soList } = useCachedJson<SOListResp>("/api/sales-orders");
+  // ---- Orders due — the SIX rows this card renders, and nothing else.
+  //
+  // perf 2026-08-13 (BUG-2026-08-13-013): this was `useCachedJson("/api/
+  // sales-orders")` — the BARE whole-org list. Measured on prod: 2.16 MB
+  // decoded, 1,342 rows, 278-477 ms warm and 4,108 ms on the cold first load
+  // of /m, to render six cards of seven fields. On a factory phone that is
+  // 2.16 MB decompressed, JSON.parsed and retained on the main thread; the
+  // gzipped wire cost (138 KB) was never the problem.
+  //
+  // ?fields=orders-due runs the IDENTICAL derivation on the server
+  // (soListToOrdersDue: same terminal-status filter, same localeCompare sort
+  // on hookkaExpectedDD over rows pre-ordered created_at DESC/id DESC so ties
+  // break the same way, same slice) — the rendered list is unchanged by
+  // construction. `overdue` stays client-side because it compares against the
+  // PHONE's local today, not the server's. ----
+  const { data: soList } = useCachedJson<OrdersDueResp>(ORDERS_DUE_URL);
   const { data: inventory } = useCachedJson<InventoryResp>("/api/inventory");
 
   // ---- Pending Delivery — SAME two fetches + the same fold as the dashboard's
@@ -458,27 +483,17 @@ export default function MobileHome() {
     return Math.round(((cur - prev) / prev) * 100);
   }, [overview]);
 
-  // ---- Orders due (derived from the live SO list) ----
-  const orders = useMemo(
-    () => (soList?.success ? soList.data ?? [] : []),
-    [soList],
-  );
-
+  // ---- Orders due — the server already filtered / sorted / sliced (see the
+  // fetch above). All that is left is the overdue flag, which must be derived
+  // against the PHONE's local date. ----
   const ordersDue = useMemo(() => {
     const today = todayISO();
-    return orders
-      .filter(
-        (so) => !TERMINAL_STATUSES.has(so.status) && !!so.hookkaExpectedDD,
-      )
-      .sort((a, b) =>
-        (a.hookkaExpectedDD || "").localeCompare(b.hookkaExpectedDD || ""),
-      )
-      .slice(0, 6)
-      .map((so) => ({
-        so,
-        overdue: (so.hookkaExpectedDD || "").slice(0, 10) < today,
-      }));
-  }, [orders]);
+    const rows = soList?.success ? soList.data ?? [] : [];
+    return rows.map((so) => ({
+      so,
+      overdue: (so.hookkaExpectedDD || "").slice(0, 10) < today,
+    }));
+  }, [soList]);
 
   // ---- Daily Report — dc12 design v12 chip set (4 exceptions). ----
   // Counts come straight from the compliance engine so phone == desktop
@@ -2235,7 +2250,7 @@ function OrderDueCard({
   overdue,
   onClick,
 }: {
-  so: SalesOrder;
+  so: OrderDueRow;
   overdue: boolean;
   onClick: () => void;
 }) {

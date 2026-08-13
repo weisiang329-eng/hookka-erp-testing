@@ -34,6 +34,35 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-013 — the phone downloaded 1,342 sales orders to render six cards `performance` `ui-frontend` `sales-orders` 🟢
+
+**Symptom.** The `/m` Home's **"Orders due this week"** card. `src/pages/m/screens/Home.tsx:343` fetched **bare `/api/sales-orders`** — the whole-org list, every SO with every line item — and then kept **six rows of seven fields**:
+
+```ts
+const { data: soList } = useCachedJson<SOListResp>("/api/sales-orders");
+…
+orders.filter(so => !TERMINAL_STATUSES.has(so.status) && !!so.hookkaExpectedDD)
+      .sort((a,b) => (a.hookkaExpectedDD||"").localeCompare(b.hookkaExpectedDD||""))
+      .slice(0, 6)
+```
+
+Measured on prod: **2.16 MB decoded, 1,342 rows, 278–477 ms warm, 4,108 ms on the cold first load of `/m`.** Everything except `id`, `companySO`, `companySOId`, `customerName`, `status`, `hookkaExpectedDD` and `totalSen` on six rows was discarded. `/api/sales-orders/stats` was **already** on the same screen (line 335) for the money totals, so this second call existed purely for the due-date list.
+
+**What this actually costs — and what it does not.** The wire is gzipped (138 KB), so this is **not** a bandwidth fix and must not be reported as one. What it removes is **2.16 MB of decompression + `JSON.parse` + retained heap on a factory phone's main thread**, on the screen an operator opens first.
+
+**Fix.** New narrow projection **`GET /api/sales-orders?fields=orders-due&top=6`** (`src/api/routes/sales-orders.ts`, next to `?fields=price-index` / `?fields=delivery-refs`, same shape: a narrow `SELECT` of only the seven columns, sharing the existing `sales_orders_list_snapshot` TABLE under its own `cache_key` — `orders-due:<top>` — so no new table is needed and migrations stay inert on deploy). Archive / service-order / customer-scoped variants compute directly and are never written into the org-wide snapshot row, the same rule every other branch there follows.
+
+**The screen shows exactly what it showed — reproduced, not re-implemented.** The derivation moved verbatim into `soListToOrdersDue` (`src/api/routes/sales-orders/_helpers.ts`): the same four terminal statuses (`DELIVERED`/`INVOICED`/`CLOSED`/`CANCELLED`, so `ON_HOLD` and `SHIPPED` are still listed), the same drop of blank/NULL Expected DD, the same `.slice(0, 6)`, and — the part most likely to be broken by a "cleaner" rewrite — the same **stable `localeCompare` sort over rows pre-ordered `created_at DESC, id DESC`**. Ties on Expected DD therefore break exactly as they did in the browser. It is deliberately **not** a SQL `ORDER BY`: that would apply the database's collation to the date strings, which is not guaranteed to agree with `localeCompare`, and a quietly-reordered list is a regression, not a fix. `overdue` stays client-side because the card colours the date against the **phone's** local today, not the server's clock.
+
+**Also fixed: the preload was warming the wrong URL.** `src/pages/m/lib/preload.ts` listed the bare `/api/sales-orders` and the cache (`src/lib/cached-fetch.ts`) is keyed by URL string — left alone it would have downloaded the 2.16 MB list *and* the screen would then have fetched the narrow one. The URL is now a single exported constant (`ORDERS_DUE_URL`) that both files import, so the two cannot drift. That preload's comment also claimed the list fed the "Daily Report chips"; it has not since 2026-07-11 — the chips read `/api/reports/compliance.json`.
+
+**`/m/scan` is the same screen.** It was measured separately at **3.43 MB across 10 calls**, the heaviest mobile screen, and reported as the one the factory floor uses most. There is no `scan` route: `src/pages/m/MobileLayout.tsx:180` ends its nested `<Routes>` with `<Route path="*" element={<MobileHome />} />` and no module config has that slug, so **`/m/scan` renders MobileHome** — its 10 calls are Home's 10 fetches exactly. It inherits this fix with no second change. (Whether operators are typing `/m/scan` expecting a scanner is a separate UX question, not a perf one.)
+
+**Correction to BUG-2026-08-13-011.** That entry says "Swept the rest of `src/pages/m/`. No other mobile screen repeats this shape." That was wrong twice over: the bare `/api/sales-orders` above was on the very same component, and `src/pages/m/config/modules.ts` has three more instances — the **customer** detail pulls the entire `/api/sales-orders` **and** `/api/invoices` (lines 2990–2991) to client-filter one customer's rows and render 20, and the **supplier** detail pulls the entire `/api/purchase-orders` (line 3166) the same way. Its own comment — *"/api/sales-orders list is in localStorage cache (preloaded) so this is fast"* — has been false since the preload was route-gated to the Home landing on 2026-07-14. **Those three are NOT fixed here**: each needs a customer/supplier-scoped projection on a different route, and the "prove the rendered list is identical" bar cannot be met for them from this branch.
+
+**Verified.** `tests/sales-orders-orders-due.test.mjs` (10 tests) carries a **verbatim copy of the pre-change `Home.tsx` algorithm** and asserts the projection produces an identical id sequence and an identical rendered-content fingerprint over a fixture with tied dates, undated rows, all four terminal statuses, `ON_HOLD`/`SHIPPED`, and a missing status. Full suite green (**3,763 tests, 3,760 pass / 0 fail / 3 skipped**); `npx tsc -p tsconfig.app.json --noEmit` clean; `npx eslint` on the four changed files **0 errors** (1 pre-existing `setTimeout` warning at the unrelated `pdEnabled` idle fallback). **Payload after the fix is COMPUTED, not measured: ~1.35 KB / 6 rows** (a realistic six-row body, `JSON.stringify`d) versus the 2.16 MB / 1,342 rows measured on prod — ~1,600×. **Nothing here was observed on prod**: this branch is not deployed, the prod API returns 401 unauthenticated, and the DSN in the local `.dev.vars` fails password authentication. The main session owns deploy and live verification.
+
+---
 ## BUG-2026-08-13-009 — Reports › Financial presented an invented P&L as accounts: COGS was `revenue × 0.65` and every operating expense was a constant `ui-frontend` `money` `data-integrity` 🟢
 
 **Symptom.** `/reports` → **Financial** → **Generate Financial Report** rendered a card headed *"Profit & Loss Statement (Simplified)"* with Revenue, Cost of Goods Sold, Gross Profit, four operating-expense lines and Net Profit / (Loss), all formatted as currency in the same typeface as the AR aging beside it. Only the Revenue line touched data, and even that was wrong.

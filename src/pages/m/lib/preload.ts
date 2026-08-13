@@ -28,6 +28,17 @@
 // ============================================================================
 import { cachedFetchJson } from "@/lib/cached-fetch";
 
+/** How many Orders-due cards the /m Home renders (sent to the server as ?top=). */
+export const ORDERS_DUE_TOP = 6;
+
+/**
+ * The Orders-due URL — exported and imported by Home.tsx rather than written
+ * out twice. The localStorage cache (src/lib/cached-fetch.ts) is keyed by URL,
+ * so a preload that warms a DIFFERENT string from the one the screen requests
+ * is a silent double fetch. One constant makes that impossible.
+ */
+export const ORDERS_DUE_URL = `/api/sales-orders?fields=orders-due&top=${ORDERS_DUE_TOP}`;
+
 function buildEndpoints(): string[] {
   // Current "YYYY-MM" — the Home's default Command Center period.
   const ym = new Date().toISOString().slice(0, 7);
@@ -38,7 +49,11 @@ function buildEndpoints(): string[] {
     // preload them here either). ----
     "/api/sales-orders/stats", // Outstanding KPI + Order Pipeline
     `/api/dashboard/overview?period=${ym}`, // Sales / Invoices KPIs + analytics
-    "/api/sales-orders", // Orders-due list + Daily Report chips
+    // Orders-due card ONLY — six rows, seven fields. It used to be the BARE
+    // "/api/sales-orders" (2.16 MB decoded / 1,342 rows on prod), and the
+    // "+ Daily Report chips" half of that old comment was already stale: the
+    // chips read /api/reports/compliance.json (owner tally audit 2026-07-11).
+    ORDERS_DUE_URL,
     "/api/inventory", // Stock alerts
   ];
 }

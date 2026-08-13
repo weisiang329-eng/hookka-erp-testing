@@ -493,7 +493,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/employees.tsx` — 9-tab admin shell (10,951) | `src/api/routes/workers.ts` — employee master + salary effective-dating (1047) | `workers` / `worker_salary_history` | `tests/labor-engine.test.mjs` |
+| `src/pages/employees.tsx` — 9-tab admin shell (11,746) | `src/api/routes/workers.ts` — employee master + salary effective-dating (1047) | `workers` / `worker_salary_history` | `tests/labor-engine.test.mjs` · `tests/virtual-group-window.test.mjs` |
 | `src/pages/worker/index.tsx` — worker mobile home | `src/api/routes/worker.ts` — self-service mobile backend (2878) | `departments` / `attendance_records` | `tests/attendance-rules.test.mjs` |
 | `src/pages/worker/scan.tsx` — clock/dept-scan/packing (2816) | `src/api/routes/worker-auth.ts` — PIN auth | `working_hour_entries` | `tests/auto-attendance-deduct.test.mjs` |
 | `src/pages/worker/pay.tsx` — payslip view | `src/api/routes/attendance.ts` — admin attendance (374) | `payroll_runs` / `payroll_*` (generated) / `payroll_payslips` | `tests/worker-auth.test.mjs` |
@@ -507,28 +507,26 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 | | `src/api/routes/payslips.ts` — payslip read/persist (OT buckets) | | |
 | `src/pages/announcements.tsx` — office compose + per-card **read-receipt panel** (`ReadReceiptPanel`: lazy GET `/:id/acks`, acked/pending lists, **Remind** → POST `/:id/remind`) | `src/api/routes/announcements.ts` — admin + worker sub-apps; auto-translate on POST/PATCH via `src/api/lib/translate-announcement.ts` (Claude, ANTHROPIC_API_KEY). **Read-receipts:** worker POST `/:id/ack` (idempotent upsert), worker GET returns `ackedIds` (SERVER-driven popup gate), admin GET `/:id/acks` (acked-vs-ACTIVE-roster split), admin POST `/:id/remind` (stamps `reminded_at` → re-pop) | `announcements` (snake_case; `translations` JSONB + `reminded_at`, runtime ALTER) · `announcement_acks` (PK `announcement_id,worker_id`; runtime CREATE TABLE) | `tests/announcement-translate.test.mjs` · `tests/announcement-acks.test.mjs` |
 
-**Big-file section index**
+**Big-file section index** (re-measured 2026-08-13 — the file is 11,746 lines)
 - `src/pages/employees.tsx`
-  - WorkerDayDrillIn (per-day drill modal) — L326-528
-  - SortableHeader helper (Working Hours grid) — L540-617
-  - TAB 1: Working Hours — flat grid (WorkingHoursTab) — L618-1637
-  - Public Holidays panel (PublicHolidaysCard) — L1638-1774
-  - DepartmentMultiSelect helper — L1897-1983
-  - TAB 2: Employee Master (EmployeeMasterTab) — L1984-3613
-  - TAB 3: Efficiency Overview (EfficiencyOverviewTab) — L3624-4153
-  - TAB: Department Labor (DepartmentLaborTab) — L4186-5101
-  - TAB 4: Employee Detail (EmployeeDetailTab, guarded-unmount) — L5127-5700
-  - TAB 4b: Department Performance (DepartmentPerformanceTab) — L5761-6044
-  - DailyDrillDown helper — L6045-6189
-  - RuleDraftExplainer helper (payroll) — L6196-6265
-  - TAB 5: Payroll (PayrollTab) — L6266-7462 (+ Advance column / drift banner, 2026-08-07)
-  - TAB 5c: Salary Advances (AdvancesTab) — just above `// ========== MAIN PAGE ==========`
-  - DepartmentsManager (inside Labor Cost section) — L7558-7804
-  - TAB 5b: Labor Cost (LaborCostTab) — L7805-10003
-  - TAB 6: Leave Management (LeaveManagementTab) — L10010-10375
-  - AttLocBadge / PunchThumb helpers — L10461-10515
-  - TAB: Attendance (AttendanceTab) — L10516-10641
-  - MAIN PAGE — EmployeesPage shell + tab switch — L10642-10951
+  - SortableHeader helper (Working Hours grid) — L466
+  - TAB 1: Working Hours — flat grid (WorkingHoursTab) — L993-2077 (windowed; see gotcha below)
+  - Public Holidays panel (PublicHolidaysCard) — L2079
+  - TAB 2: Employee Master (EmployeeMasterTab) — L2342
+  - TAB 3: Efficiency Overview (EfficiencyOverviewTab) — L3772
+  - TAB: Department Labor (DepartmentLaborTab) — L4337
+  - TAB 4: Employee Detail (EmployeeDetailTab, guarded-unmount) — L5314
+  - TAB 4b: Department Performance (DepartmentPerformanceTab) — L6005
+  - DailyDrillDown helper — L6413
+  - RuleDraftExplainer helper (payroll) — L6564
+  - TAB 5: Payroll (PayrollTab) — L6634 (+ Advance column / drift banner, 2026-08-07)
+  - DepartmentsManager (inside Labor Cost section) — L8215
+  - TAB 5b: Labor Cost (LaborCostTab) — L8462
+  - TAB 6: Leave Management (LeaveManagementTab) — L10085
+  - TAB 5c: Salary Advances (AdvancesTab) — L10462
+  - MAIN PAGE — TABS array L11059, EmployeesPage shell + tab switch L11425+
+  - AttLocBadge / PunchThumb helpers — L11144
+  - TAB: Attendance (AttendanceTab) — L11199
 - `src/pages/worker/scan.tsx`
   - WorkerScanPage — single mobile clock/dept-scan/packing component (Kpi helper at 2791) — L29-2816
 
@@ -540,10 +538,11 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 - payroll_hour_deductions (mig 0152) and other module tables are runtime self-applied via ensurePendingMigrations, NOT replayed from migration files on deploy — a migration file alone is INERT. Same for employee_advances + payslips.advance_deduction_sen (mig 0211) via `ensureAdvanceTables`.
 - Salary advances are NOT a statutory deduction and NOT an earning: netPay = gross − totalDeductions − advance, and `totalDeductionsSen` stays statutory-only (folding advances in would inflate every YTD/statutory figure). The period an advance belongs to is the month of its `advance_date`. The generated payslip snapshots the figure in `advance_deduction_sen` so editing an advance later cannot move an approved net pay — the Payroll tab shows a red drift banner instead.
 - camelCase DB columns are folded-lowercase by toCamel and can silently return undefined (clockinphoto↛clockInPhoto); at-risk cols dual-keyed r.camelCase ?? r.snake_case. New columns snake_case; a write to a camelCase col needs a `column-rename-map.json` entry.
-- employees.tsx Employee Detail tab is intentionally guard-unmounted via {activeTab === 'detail' && ...} (~L10922) — don't refactor to always-mounted.
+- **The Working Hours grid is WINDOWED and its row heights are hard-coded constants.** Measured on prod 2026-08-13, a month of entries built **695 rows / 46,137 DOM nodes** (every other page in the app is 900-1,900) and a plain scroll froze the renderer for **45 s+** — the owner's "page unresponsive". The 22 API calls totalled 0.17 MB, so none of it was the network. `WorkingHoursTab` now renders only the visible window via `useVirtualGroups` (`src/components/ui/virtual-groups.tsx`, math in `src/lib/virtual-group-window.ts`), and the grid scrolls **inside its own `max-h-[70vh]` box** instead of with the page. It could not use the flat `useVirtualRows`: a worker-day's Date / Employee / Punch cells are one `<td rowSpan>`, so the window snaps to whole GROUPS, and the two row heights differ — `WH_ROW_SOLO_PX = 71` (a one-row group, whose Employee cell stacks the `<select>` above the day-total chip) vs `WH_ROW_SEG_PX = 50` per row from two rows up. **If you change the row markup, re-measure both constants** or the scrollbar drifts. Sorting / filtering / editing are untouched by this: every handler addresses `originalIdx` into the flat `rows` array, and Save All / Print read `rows` / `filteredRows`, never the DOM — so an edit on a row that scrolls out of the window survives.
+- employees.tsx Employee Detail tab is intentionally guard-unmounted via {activeTab === 'detail' && ...} (~L11700) — don't refactor to always-mounted.
 - UI must be 100% English — no Chinese strings/comments. EmployeesPage tab shell at L10642; add new tabs to both the tab array and the activeTab switch (~L10887).
 
-**Start here:** Open `src/pages/employees.tsx` (the 10,951-line tabbed shell; tab switch at L10642 / activeTab block at L10887) and jump to the specific tab via the section ranges.
+**Start here:** Open `src/pages/employees.tsx` (the 11,746-line tabbed shell; `EmployeesPage` at L11424, tab array at L11059, the `activeTab` render block at the end of the file) and jump to the specific tab via the section ranges.
 
 ---
 
@@ -985,6 +984,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 - New columns referenced in route SQL writes need a column-rename-map.json entry or they 400 'Invalid request body' (CI-guarded); prefer snake_case for new columns (arch_column_rename_map_gotcha).
 - do-scan / rack-scan are mobile-first floor tools; per-piece scan splits are tested (dept-scan-split, scan-per-piece) — keep wipKey derivation via the shared deriveTopLevelWipKey, never re-implement.
 - **The shared list-grid seams are all OPT-IN PROPS on `src/components/ui/data-grid.tsx`, and three of them spent months switched off.** (1) `gridId` is the key EVERYTHING per-grid persists under — column visibility, order, org default, print preset, and now Saved Views. A grid without one resets the operator's columns on every visit (only widths survive, via the `auto:` key derived from the column set), and RENAMING an id does not migrate a saved layout, it discards it. Ids are unique-checked by `tests/grid-ids.test.mjs`. Delivery's three grids were the last ones missing ids and got them on 2026-08-08 (`delivery-orders-list` for the DO list, `delivery-planning-pos` / `delivery-pending-delivery-pos` for the two PO queues); the DO grid also passes `valueFilterKey={activeTab}` so its four stage tabs share ONE column layout but never one value-filter selection (BUG-CLASSES C7). (2) `viewStorageKey` now DEFAULTS TO `gridId` (2026-08-08) — Saved Views was fully built (save/apply/delete/reset, per-user localStorage) and no page had ever passed the prop, so the entire feature ran zero times. (3) `exportName` / `exportSheetLabel` / `detailExport` enable the WYSIWYG export, built from `visibleColumns × sortedData` — the columns on screen over the rows the filter left. It NEVER fetches, so it cannot widen what `customer-scope.ts` already narrowed; keep it that way. A per-line `detailExport` is only honest where the LIST payload actually carries items: CO does (`rowToCOList`), Invoices and PI deliberately do not (`items: []` / `rowToPI`), and `/products` has no DataGrid at all (hand-rolled `<table>`). (4) `clearSelectionToken` (2026-08-08) is the only way to clear the grid's OWN `selectedKeys` — a page that empties its own mirror of the selection leaves every checkbox visibly ticked. `src/components/ui/bulk-action-bar.tsx` is the shared selection toolbar (first mounted on `procurement/pi.tsx`); most other list pages still render their own inline toolbars, which is why it looked unused.
+- **There are THREE ways to stop a long list from building its whole DOM, and picking the wrong one is the mistake.** (1) `<DataGrid virtualize>` — a flat list in the shared grid; it hard-disables itself when `groupBy` is on. (2) `useVirtualRows` (`src/components/ui/virtual-rows.tsx`, math in `src/lib/virtual-window.ts`) — hand-rolled `<tbody>` tables of **uniform-height** rows inside a sized scroll box (the accounting ledgers). (3) `useVirtualGroups` (`src/components/ui/virtual-groups.tsx`, math in `src/lib/virtual-group-window.ts`, 2026-08-13) — rows that come in **indivisible `rowSpan` groups of unequal height**; the /employees Working Hours grid is the case that needed it. When a list has neither a uniform height nor a sized box (Mail Center's `<li>`s), the answer is `useIncrementalList` instead, not a virtualiser. All three windowers derive their spacer heights from the CALLER's list inside the render pass, never from the virtualiser's lagging `getTotalSize()` — see the header comments for the two production bugs that rule prevents.
 - The top-bar bell (`src/components/layout/notification-bell.tsx`) and `/notifications` read ONE feed (`src/lib/notifications-feed.ts`) and mark read through ONE helper, which broadcasts to the other surface. Don't PUT `/api/notifications` directly from a page — the bell's unread dot goes stale. The dot renders only when the real unread count is > 0. `notifications.is_read` is read dual-typed (integer OR boolean): a strict `=== 1` reports every row unread, which is how the dot was permanently lit before. **Both `/api/notifications` handlers scope to `withOrgScope` + `(userId IS NULL OR userId = <caller>)`** (2026-08-08) — a NULL `user_id` is how "broadcast to the whole org" is expressed, so don't "tighten" it to a bare `userId = ?` or the bell empties. Tests: `tests/notifications-scope.test.mjs` (runs the route's real SQL on node:sqlite).
 
 - `GET /api/qc-inspections` buckets `qc_defects` + `qc_inspection_items` by parent id ONCE and hands `rowToInspection` its own buckets (BUG-2026-08-13-003, class C14). The mapper still `.filter()`s and `.sort()`s — as a passthrough, which is what keeps the payload byte-identical, and `.filter()` copies before the sort so the shared bucket is never reordered. Re-passing the whole arrays is a silent O(N×M) regression, not a compile error. At 500 inspections (the route's `LIMIT`) × 2,151 items that was **1,075,500 comparisons / 20.8 ms — the largest surviving quadratic in the app**, though a bounded one: both sides are capped by that `LIMIT` and the id-scoped child fetch. Pinned by `tests/list-endpoint-child-grouping.test.mjs`. The `qc-pending.ts:388` and `qc-templates.ts:91` filters are the same shape and were measured cheap (3.5 K / 7.8 K comparisons, 2026-08-13) — do not re-audit them.

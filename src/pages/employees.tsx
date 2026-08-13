@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, startTransition, Fragment } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef, startTransition, Fragment } from "react";
 import { usePermissions } from "@/lib/use-permission";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { humanizeError } from "@/lib/humanize-error";
@@ -27,6 +27,7 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
+import { useVirtualGroups } from "@/components/ui/virtual-groups";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MoneyInput } from "@/components/ui/money-input";
@@ -442,6 +443,14 @@ type WorkingHourEntry = {
 
 
 // --------------- TAB COMPONENTS ---------------
+
+// Rendered heights of one Working Hours grid row, measured on the live grid
+// (2026-08-13, 1280x900). A worker-day with ONE row is taller because its
+// Employee cell stacks the worker <select> above the day-total chip; from two
+// rows up, that cell spans them and each row settles at its natural height.
+// These drive the windowing spacers — if the row markup changes, re-measure.
+const WH_ROW_SOLO_PX = 71;
+const WH_ROW_SEG_PX = 50;
 
 // ========== TAB 1: WORKING HOURS — flat grid (Google Sheet style) ==========
 //
@@ -1525,6 +1534,38 @@ function WorkingHoursTab({
     return order.map((k) => ({ key: k, items: map.get(k)! }));
   }, [filteredRows]);
 
+  // ── Row windowing ─────────────────────────────────────────────────────────
+  // Measured on prod 2026-08-13: a month of entries built 695 rows / 46,137
+  // DOM nodes (every other page in the app is 900-1,900) and a plain scroll
+  // froze the renderer for 45s+ — the owner's "page unresponsive" report. The
+  // 22 API calls totalled 0.17 MB, so none of it was the network; it was the
+  // cost of laying out 46k nodes.
+  //
+  // Windowing snaps to whole GROUPS because a group's Date / Employee / Punch
+  // cells are one `<td rowSpan>` — half a group cannot be rendered. Heights
+  // below are the measured rendered heights; keep them in sync with the
+  // markup or the scrollbar drifts. Everything else — sort, filter, the
+  // originalIdx that every edit handler addresses, Save All, Print — reads
+  // `rows` / `filteredRows`, never what is on screen, so behaviour is
+  // unchanged whether a row is mounted or not.
+  const gridScrollRef = useRef<HTMLDivElement>(null);
+  const groupHeights = useMemo(
+    () =>
+      groupedRows.map((g) =>
+        g.items.length === 1 ? WH_ROW_SOLO_PX : g.items.length * WH_ROW_SEG_PX,
+      ),
+    [groupedRows],
+  );
+  const virt = useVirtualGroups({
+    groupHeights,
+    scrollRef: gridScrollRef,
+    colSpan: isMultiDay ? 8 : 7,
+  });
+  const visibleGroups = useMemo(
+    () => (virt.active ? groupedRows.slice(virt.start, virt.end + 1) : groupedRows),
+    [groupedRows, virt.active, virt.start, virt.end],
+  );
+
   // Print Report — prints exactly the on-screen rows (in current sort order)
   // for the selected working-date range. Mirrors the grid's columns; the Date
   // column is included only in multi-day mode, matching the table.
@@ -1715,7 +1756,10 @@ function WorkingHoursTab({
             </>
           )}
         </div>
-        <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
+        {/* The grid now scrolls inside its own box rather than with the page —
+            that box is what the row windowing measures against. Same pattern as
+            the accounting ledgers (src/pages/accounting/index.tsx). */}
+        <div ref={gridScrollRef} className="rounded-md border border-[#E2DDD8] overflow-auto max-h-[70vh]">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
@@ -1791,7 +1835,8 @@ function WorkingHoursTab({
                   </td>
                 </tr>
               )}
-              {groupedRows.flatMap((group) => {
+              {virt.topSpacer}
+              {visibleGroups.flatMap((group) => {
                 const first = group.items[0];
                 const gWorkerId = first.row.workerId;
                 const gWorker = gWorkerId ? workers.find((w) => w.id === gWorkerId) : undefined;
@@ -2015,6 +2060,7 @@ function WorkingHoursTab({
                   );
                 });
               })}
+              {virt.bottomSpacer}
             </tbody>
           </table>
         </div>

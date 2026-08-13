@@ -56,15 +56,6 @@ test("Reports > Department Efficiency never falls back actual → estimate", () 
     );
   }
 
-  // A card enters the ratio only when it recorded something, and then it
-  // contributes to BOTH subtotals — never one side without the other.
-  assert.match(
-    src,
-    /const actual = jc\.actualMinutes \?\? 0;[\s\S]{0,240}if \(actual > 0\) \{[\s\S]{0,240}measuredStdMin \+= jc\.estMinutes \?\? 0;[\s\S]{0,120}measuredActualMin \+= actual;/,
-    "reports.tsx: the numerator and denominator must be accumulated together, " +
-      "inside the same `actual > 0` guard",
-  );
-
   // The ratio itself reads off the paired subtotals, and degrades to a dash
   // rather than to a fabricated number.
   assert.match(
@@ -105,6 +96,62 @@ test("Reports > Department Efficiency never falls back actual → estimate", () 
     2,
     "reports.tsx: the on-screen header and the CSV header must both say " +
       "Avg Std Time (mins)",
+  );
+});
+
+// The paired accumulation this file was written to protect MOVED into SQL with
+// BUG-2026-08-13-005 — the page can no longer add job cards up in the browser
+// because it no longer downloads any (that fetch was killed by the 30 s abort).
+// The invariant is unchanged, so the guard follows it to its new home rather
+// than being deleted; a source pin that no longer covers the arithmetic it
+// names is worse than no pin at all.
+test("the report-summary SQL pairs the ratio inside one `actual > 0` guard", () => {
+  const src = read("src/api/routes/production-orders.ts");
+  const start = src.indexOf('app.get("/report-summary"');
+  assert.ok(start > 0, "GET /report-summary must exist on the PO router");
+  const body = src.slice(start, start + 8000);
+
+  // Every one of the three measured subtotals is gated on the SAME condition:
+  // this card recorded a duration. Numerator and denominator therefore cover
+  // exactly the same cards, which is the whole property.
+  const guard = /COALESCE\(jc\.actualMinutes, 0\) > 0/g;
+  assert.ok(
+    (body.match(guard) ?? []).length >= 4,
+    "report-summary: measuredCards, measuredStdMinutes, measuredActualMinutes " +
+      "and measuredDistinctCards must each be guarded on the card having " +
+      "recorded a duration",
+  );
+  assert.match(
+    body,
+    /AND COALESCE\(jc\.actualMinutes, 0\) > 0\s*\n?\s*THEN COALESCE\(jc\.estMinutes, 0\) ELSE 0 END\)\s*\n?\s*AS measured_std_minutes/,
+    "report-summary: the numerator (standard minutes) must only count cards " +
+      "that recorded a duration",
+  );
+  // No fallback may reintroduce the estimate as a stand-in for a measurement.
+  for (const bad of [
+    "COALESCE(jc.actualMinutes, jc.estMinutes)",
+    "COALESCE(jc.actualMinutes, COALESCE(jc.estMinutes, 0))",
+  ]) {
+    assert.ok(
+      !body.includes(bad),
+      `report-summary: "${bad}" is the SQL spelling of the bug — an ` +
+        "unmeasured card would divide its own estimate by itself.",
+    );
+  }
+
+  // The provenance counter that stops a copied estimate being published as a
+  // measurement (all 4,289 populated values on prod equal their own estimate).
+  assert.match(
+    body,
+    /<> COALESCE\(jc\.estMinutes, 0\)[\s\S]{0,80}AS measured_distinct_cards/,
+    "report-summary: measuredDistinctCards must count only the cards whose " +
+      "recorded minutes actually differ from the standard minutes",
+  );
+  assert.match(
+    read("src/pages/reports.tsx"),
+    /d\.measuredDistinctCards > 0 \? ratio : "—"/,
+    "reports.tsx: a percentage may only be published once at least one card's " +
+      "recording differs from its estimate",
   );
 });
 

@@ -596,3 +596,61 @@ export async function cachedFetchJson<T = unknown>(
     return cached?.data ?? null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// cachedFetchJsonResult — the same fetch, but the caller is TOLD when it failed.
+//
+// `cachedFetchJson` returns `null` on any failure (timeout, 30 s global abort,
+// HTTP 500, a degraded `_stub` body). A caller that then writes `json?.data ||
+// []` into state cannot tell "the server has nothing for this range" apart from
+// "the request died", and every report page in this repo printed the former over
+// the latter — see BUG-2026-08-13-005: Reports › Production captioned an EMPTY
+// Department Efficiency table "No data available" while `/api/production-orders`
+// was being killed at 30,012 ms.
+//
+// A report that cannot load must SAY it could not load. Use this anywhere a
+// falsy/empty response is rendered as a factual statement about the business.
+// ---------------------------------------------------------------------------
+export type CachedFetchResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: string; data: T | null };
+
+export async function cachedFetchJsonResult<T = unknown>(
+  url: string,
+): Promise<CachedFetchResult<T>> {
+  const cached = readCache<T>(url);
+  try {
+    const raw = await joinInflight<T>(url);
+    if (isDegradedResponse(raw)) {
+      // A 200 that carries the unmounted-route `_stub` envelope or
+      // `{success:false}` is a FAILURE, not an empty dataset. Saying so is the
+      // whole point of this function — never let it render as "no data".
+      const o = raw as { error?: unknown };
+      return {
+        ok: false,
+        // Route the backend string through the same display translator every
+        // toast uses, so a constraint name or a column name can never reach an
+        // operator (humanize-error.ts, owner directive 2026-06-08).
+        error: humanizeError(
+          typeof o.error === "string" && o.error.length > 0 ? o.error : null,
+        ),
+        data: cached && !isDegradedResponse(cached.data) ? cached.data : null,
+      };
+    }
+    writeCache<T>(url, raw);
+    return { ok: true, data: raw };
+  } catch (err) {
+    return {
+      ok: false,
+      // The 30 s global abort in api-client.ts surfaces as an AbortError whose
+      // message ("Aborted" / "signal is aborted without reason") reads clean
+      // enough that humanizeError would hand it straight to the operator. Name
+      // it for what it is instead — this is the exact failure that used to be
+      // rendered as "No data available".
+      error: isAbortError(err)
+        ? "This report took too long to load. Narrow the date range and try again."
+        : humanizeError(err, "Couldn't load this report. Please try again."),
+      data: cached?.data ?? null,
+    };
+  }
+}

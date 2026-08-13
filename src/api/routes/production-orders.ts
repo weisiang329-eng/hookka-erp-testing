@@ -509,6 +509,210 @@ app.get("/tracker-summary", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/production-orders/report-summary?from=YYYY-MM-DD&to=YYYY-MM-DD
+//
+// Everything Reports › Production renders, aggregated in SQL over a `startDate`
+// window. The page used to fetch **bare** `/api/production-orders` — every PO in
+// the org WITH every job card — and add it up in the browser: measured 30,012 ms
+// on prod 2026-08-13 and then killed by api-client's 30 s global abort
+// (`API_TIMEOUT_MS`), so the report rendered an EMPTY Department Efficiency table
+// captioned "No data available" over a request that had died. Same family as
+// BUG-2026-08-13-001 / -002 / -003.
+//
+// The Department Efficiency arithmetic here is BUG-2026-08-13-004's rule moved
+// verbatim into SQL: a completed card is credited to the ratio ONLY when it
+// recorded a duration, and then it contributes to BOTH sides. There is no
+// `actualMinutes -> estMinutes` fallback anywhere in this query, because that is
+// exactly what pinned every department at ~100%.
+//
+// `measuredDistinctCards` is the one thing the client could not see. On prod
+// 2026-08-13 all 4,289 non-zero `actualMinutes` values are byte-identical to
+// that card's own `estMinutes` (4,289 of 4,289) — the column is populated, but
+// with a COPY of the standard time, not with a measurement. A ratio built from
+// those is 100.0% by construction. This counts the cards where the two genuinely
+// differ so the page can refuse to publish a percentage that only looks measured.
+// ---------------------------------------------------------------------------
+app.get("/report-summary", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const db = c.var.DB;
+
+  const today = new Date().toISOString().slice(0, 10);
+  const isDate = (v: string) => /^\d{4}-\d{2}-\d{2}$/.test(v);
+  const fromRaw = (c.req.query("from") || "").trim();
+  const toRaw = (c.req.query("to") || "").trim();
+  if (!isDate(fromRaw) || !isDate(toRaw)) {
+    return c.json(
+      {
+        success: false,
+        error:
+          "from and to are required and must be YYYY-MM-DD — this report is a windowed aggregate, never a whole-org scan.",
+      },
+      400,
+    );
+  }
+  // Refuse an inverted range rather than silently returning zero rows, which
+  // would look exactly like "nothing happened".
+  const from = fromRaw <= toRaw ? fromRaw : toRaw;
+  const to = fromRaw <= toRaw ? toRaw : fromRaw;
+
+  const [statusRows, completedRows, deptRows, overdueRows] = await Promise.all([
+    db
+      .prepare(
+        `SELECT status, COUNT(*) AS n
+           FROM production_orders
+          WHERE orgId = ? AND startDate >= ? AND startDate <= ?
+          GROUP BY status`,
+      )
+      .bind(orgId, from, to)
+      .all<Record<string, unknown>>(),
+    // Only the two dates the average needs — at most a few hundred short
+    // strings. Kept in JS because date arithmetic is the one thing that does
+    // NOT port cleanly between Postgres and the node:sqlite test mocks.
+    db
+      .prepare(
+        `SELECT startDate, completedDate
+           FROM production_orders
+          WHERE orgId = ? AND startDate >= ? AND startDate <= ?
+            AND status = 'COMPLETED'
+            AND completedDate IS NOT NULL AND completedDate <> ''`,
+      )
+      .bind(orgId, from, to)
+      .all<Record<string, unknown>>(),
+    db
+      .prepare(
+        `SELECT jc.departmentCode AS dept,
+                MAX(jc.departmentName) AS dept_name,
+                SUM(CASE WHEN jc.status = 'COMPLETED' THEN 1 ELSE 0 END)
+                  AS completed_cards,
+                SUM(CASE WHEN jc.status = 'COMPLETED'
+                         THEN COALESCE(jc.estMinutes, 0) ELSE 0 END)
+                  AS std_minutes,
+                SUM(CASE WHEN jc.status = 'COMPLETED'
+                          AND COALESCE(jc.actualMinutes, 0) > 0
+                         THEN 1 ELSE 0 END)
+                  AS measured_cards,
+                SUM(CASE WHEN jc.status = 'COMPLETED'
+                          AND COALESCE(jc.actualMinutes, 0) > 0
+                         THEN COALESCE(jc.estMinutes, 0) ELSE 0 END)
+                  AS measured_std_minutes,
+                SUM(CASE WHEN jc.status = 'COMPLETED'
+                          AND COALESCE(jc.actualMinutes, 0) > 0
+                         THEN COALESCE(jc.actualMinutes, 0) ELSE 0 END)
+                  AS measured_actual_minutes,
+                SUM(CASE WHEN jc.status = 'COMPLETED'
+                          AND COALESCE(jc.actualMinutes, 0) > 0
+                          AND COALESCE(jc.actualMinutes, 0)
+                              <> COALESCE(jc.estMinutes, 0)
+                         THEN 1 ELSE 0 END)
+                  AS measured_distinct_cards
+           FROM job_cards jc
+           JOIN production_orders po ON po.id = jc.productionOrderId
+          WHERE po.orgId = ? AND po.startDate >= ? AND po.startDate <= ?
+          GROUP BY jc.departmentCode`,
+      )
+      .bind(orgId, from, to)
+      .all<Record<string, unknown>>(),
+    db
+      .prepare(
+        `SELECT poNo, productName, targetEndDate, currentDepartment
+           FROM production_orders
+          WHERE orgId = ? AND startDate >= ? AND startDate <= ?
+            AND status NOT IN ('COMPLETED','CANCELLED')
+            AND targetEndDate IS NOT NULL AND targetEndDate <> ''
+            AND targetEndDate < ?
+          ORDER BY targetEndDate ASC`,
+      )
+      .bind(orgId, from, to, today)
+      .all<Record<string, unknown>>(),
+  ]);
+
+  const num = (r: Record<string, unknown> | null, ...keys: string[]) => {
+    for (const k of keys) {
+      const v = r?.[k];
+      if (v !== null && v !== undefined) return Number(v) || 0;
+    }
+    return 0;
+  };
+  const str = (r: Record<string, unknown>, ...keys: string[]) => {
+    for (const k of keys) {
+      const v = r[k];
+      if (v !== null && v !== undefined && String(v) !== "") return String(v);
+    }
+    return "";
+  };
+
+  const statusCounts: Record<string, number> = {};
+  for (const r of statusRows.results ?? []) {
+    const s = String(r.status ?? "");
+    if (s) statusCounts[s] = num(r, "n");
+  }
+  const totalOrders = Object.values(statusCounts).reduce((a, b) => a + b, 0);
+
+  const completed = completedRows.results ?? [];
+  let dayTotal = 0;
+  let dayCount = 0;
+  for (const r of completed) {
+    const start = Date.parse(str(r, "startDate", "startdate"));
+    const end = Date.parse(str(r, "completedDate", "completeddate"));
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+    dayTotal += (end - start) / 86400000;
+    dayCount += 1;
+  }
+
+  const todayMs = Date.parse(today);
+  return c.json({
+    success: true,
+    range: { from, to },
+    totals: {
+      totalOrders,
+      completed: statusCounts.COMPLETED ?? 0,
+      inProgress: statusCounts.IN_PROGRESS ?? 0,
+      avgCompletionDays: dayCount > 0 ? dayTotal / dayCount : null,
+      completedWithDates: dayCount,
+    },
+    statusCounts,
+    departments: (deptRows.results ?? []).map((r) => ({
+      departmentCode: str(r, "dept"),
+      departmentName: str(r, "deptName", "dept_name") || str(r, "dept"),
+      // Aliases are snake_case in the SQL (an unquoted mixed-case alias folds
+      // to lower case in Postgres and reads back undefined —
+      // tests/sql-identifier-safety.test.mjs). postgres.toCamel restores the
+      // camel form on read; both spellings are accepted so the node:sqlite
+      // mocks in tests, which do no such rewrite, read the same rows.
+      completedCards: num(r, "completedCards", "completed_cards"),
+      stdMinutes: num(r, "stdMinutes", "std_minutes"),
+      measuredCards: num(r, "measuredCards", "measured_cards"),
+      measuredStdMinutes: num(r, "measuredStdMinutes", "measured_std_minutes"),
+      measuredActualMinutes: num(
+        r,
+        "measuredActualMinutes",
+        "measured_actual_minutes",
+      ),
+      measuredDistinctCards: num(
+        r,
+        "measuredDistinctCards",
+        "measured_distinct_cards",
+      ),
+    })),
+    overdue: (overdueRows.results ?? []).map((r) => {
+      const due = Date.parse(str(r, "targetEndDate", "targetenddate"));
+      return {
+        poNo: str(r, "poNo", "pono"),
+        productName: str(r, "productName", "productname"),
+        currentDepartment: str(r, "currentDepartment", "currentdepartment"),
+        targetEndDate: str(r, "targetEndDate", "targetenddate"),
+        daysOverdue:
+          Number.isFinite(due) && Number.isFinite(todayMs)
+            ? Math.round((todayMs - due) / 86400000)
+            : 0,
+      };
+    }),
+  });
+});
+
 app.get("/", async (c) => {
   const statusParam = c.req.query("status");
   const statuses = statusParam

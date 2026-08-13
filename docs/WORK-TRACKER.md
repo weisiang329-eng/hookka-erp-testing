@@ -1,6 +1,6 @@
 # Hookka ERP — Work Tracker
 
-> **Last verified: 2026-08-14** — PRs #304/#310/#312/#313/#314/#315/#316/#317 all MERGED and
+> **Last verified: 2026-08-14** — branch `fix/security-posture` added below (open, not merged). Previously: PRs #304/#310/#312/#313/#314/#315/#316/#317 all MERGED and
 > deployed; zero PRs open, one worktree. Previously verified against the merged PRs on `main` (#266-#300) plus the open PRs #304 (branch `fix/stock-grn-org-filter`) and the accounting-audit branch `fix/accounting-audit`, whose entry is the newest below. This file is a live queue — restamp it whenever you add or close an item.
 
 Durable, cross-session list of assigned / in-progress / shipped work so nothing is
@@ -9,6 +9,39 @@ shipped/parked). Re-read this + `MEMORY.md` at the start of each session and bef
 reporting "done". See `docs/DEV-OPERATING-FRAMEWORK.md` for the discipline.
 
 Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod · ⚪ queued
+
+---
+
+## 2026-08-14 — 🔵 Security posture: the three owner-authorised fixes (branch `fix/security-posture`, **NOT deployed, NOT merged**)
+
+Three findings the owner had previously been asked about and has now authorised. Framing that
+shaped every choice: HOOKKA / OHANA / HOUZS / HKMFG are one owner's companies and staff work
+across them, so the brief was least privilege **without** breaking legitimate cross-company
+work.
+
+| Ask | State | Entry |
+|---|---|---|
+| `GET /api/organisations` — no permission gate, no org filter; plus bare-`id` PATCH/DELETE/PUT and a hard-coded `'hookka'` POST | ✅ done | BUG-2026-08-13-100 |
+| `POST /api/customer-crm/send-quote` — unbound recipient | ✅ done | BUG-2026-08-13-102 |
+| TOTP step 2 does not re-check the password | ✅ done | BUG-2026-08-13-101 |
+| Report (do NOT redesign) that `inter_company_config` is a singleton, so "active org" is global | ✅ reported | commented in place; in `CODEBASE-MAP` findings |
+
+**Gates.** `npx tsc -p tsconfig.app.json --noEmit` exit 0 · `npm test` 3,908 tests / 0 fail
+(+40) · `check-docs-freshness` OK · `check-codebase-map` OK · `gen-api-docs --check` up to date.
+All 35 new assertions proved RED by 15 mutations (`node tests/security-posture-red-proof.mjs`),
+each verified to have changed bytes on disk and to have been restored byte-for-byte.
+
+**Not changed, deliberately.** The singleton `active_org_id` (product decision). `role-policy.ts`
+— the first draft granted QA `organisations: R` and `tests/role-policy.test.mjs` correctly failed
+it, because that also unhides `/settings/organisations` in QA's menu; the shipped gate is
+`purchase-orders:read`, the resource that actually prints the letterhead. Findings S2
+(`po_scan_samples` few-shot pool) and S3 (`sales-leads.ts` mints customers into `'hookka'`) —
+other routers, out of scope, still open and still inert on a single-tenant prod.
+
+**Open follow-up.** When `TOTP_LOGIN_ENFORCEMENT_ENABLED` is flipped back on, the step-2 screen
+must send `pendingToken` back to `/login-verify`; `LoginResponse` in `src/pages/login.tsx`
+carries the field and a pointer, but the screen itself still does not exist
+(BUG-2026-08-04-006).
 
 ---
 

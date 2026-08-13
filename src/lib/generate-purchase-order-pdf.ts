@@ -12,6 +12,7 @@ import {
   PDF,
 } from "@/lib/pdf-utils";
 import { COMPANY } from "@/lib/constants";
+import { hasLetterheadDetails } from "./org-letterhead-row";
 
 // Letterhead info passed in from the caller. Mirrors the COMPANY constant's
 // shape so HOOKKA/OHANA fall through directly, and the route can populate
@@ -89,7 +90,13 @@ export function letterheadForPurchaseOrg(
 ): LetterheadInfo {
   const c = (code || "HOOKKA").toUpperCase();
   const org = organisations?.find((o) => (o.code || "").toUpperCase() === c);
-  if (org && org.name) {
+  // A row from a caller who lacks `organisations:read` carries id/code/name
+  // only — the registry GET omits reg-no / TIN / address for them
+  // (BUG-2026-08-13-100). Using it would print "Reg.  | TIN " on a purchase
+  // document, which is the C16 shape: a field the projection dropped and a
+  // consumer still read. `hasLetterheadDetails` is the single decision; see
+  // src/lib/org-letterhead-row.ts.
+  if (org && org.name && hasLetterheadDetails(org)) {
     return {
       code: c,
       name: org.name,

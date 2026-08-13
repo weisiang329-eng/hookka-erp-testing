@@ -221,7 +221,11 @@ type LoginResponse =
   // userId, expecting a login-verify step that was never built — see
   // BUG-2026-08-04-006). Modelled so the handler must account for it instead of
   // blindly reading json.data.user and crashing.
-  | { success: true; totpRequired: true; userId: string }
+  // `pendingToken` is the server's proof that the password step passed; the
+  // step-2 screen (when it is finally built) must send it back to
+  // /api/auth/totp/login-verify, which refuses without it. See
+  // src/api/lib/totp-pending.ts (BUG-2026-08-13-101).
+  | { success: true; totpRequired: true; userId: string; pendingToken?: string }
   | { success: false; error?: string };
 
 export default function LoginPage() {

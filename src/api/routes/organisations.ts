@@ -19,7 +19,8 @@
 import { Hono } from "hono";
 import { runSelfApply } from "../lib/self-apply";
 import type { Env } from "../worker";
-import { requirePermission } from "../lib/rbac";
+import { hasPermission, requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -77,6 +78,38 @@ function rowToOrg(row: OrganisationRow) {
   };
 }
 
+// The SWITCHER's view of an organisation (BUG-2026-08-13-100).
+//
+// Every authenticated user needs this list — the sidebar company switcher
+// renders for all staff — but the full row is a company IDENTITY record: TIN,
+// registration number, registered address, phone and email for all four
+// companies. That is not switcher data, and it was going to every logged-in
+// user of every role.
+//
+// This projection is what the non-privileged consumers actually read, verified
+// against the real call sites rather than guessed:
+//   • sidebar.tsx:427            → id, code, name (+ top-level activeOrgId)
+//   • sales/create.tsx:238       → code, name, isActive
+//   • sales/index.tsx:331        → code, name, isActive
+//   • customers.tsx:3411         → code, name, isActive
+// `displayOrder` rides along because it is the list's own sort key and carries
+// nothing about the company.
+//
+// The sensitive keys are OMITTED, not blanked. That distinction is the whole
+// point: C16 ("a field the projection drops and a consumer still reads") is
+// exactly how `letterheadForPurchaseOrg` would have started printing
+// "Reg.  | TIN " on purchase documents. An absent key lets that resolver fall
+// back to its hardcoded letterhead; an empty string would not.
+function minimalOf(org: ReturnType<typeof rowToOrg>) {
+  return {
+    id: org.id,
+    code: org.code,
+    name: org.name,
+    isActive: org.isActive,
+    displayOrder: org.displayOrder,
+  };
+}
+
 function rowToConfig(row: InterCompanyConfigRow) {
   return {
     hookkaToOhanaRate: row.hookkaToOhanaRate,
@@ -87,9 +120,16 @@ function rowToConfig(row: InterCompanyConfigRow) {
 // Postgres raises 42703 "column ... does not exist" when migration 0142
 // hasn't been applied. We catch it and fall back to the legacy column set
 // so the GET keeps responding (and the rest of the dashboard keeps loading).
+// `org_id` is in the list for the same reason as the rest: the tenant predicate
+// added 2026-08-13 is written against a column that reaches prod through
+// `ensureOrganisationRegistry`, and an environment that has not run it yet must
+// degrade to the LEGACY (unscoped) read — not to FALLBACK_ORGS, which would
+// silently replace the real registry with two hardcoded companies.
+// (Production does have the column: `tests/db-schema.json`, regenerated from
+// prod, lists `org_id` on `organisations`.)
 function isMissingNewColumn(e: unknown): boolean {
   const msg = e instanceof Error ? e.message : String(e);
-  return /column .*(business_type|is_default|display_order|msic_code|letterhead_url).* does not exist/i.test(
+  return /column .*(business_type|is_default|display_order|msic_code|letterhead_url|org_id).* does not exist/i.test(
     msg,
   );
 }
@@ -154,15 +194,16 @@ const SELECT_COLS_NEW =
 const SELECT_COLS_LEGACY =
   "id, code, name, reg_no, tin, msic, address, phone, email, transfer_pricing_pct, is_active";
 
-const SELECT_NEW = `SELECT ${SELECT_COLS_NEW} FROM organisations ORDER BY display_order, code`;
+const SELECT_NEW = `SELECT ${SELECT_COLS_NEW} FROM organisations WHERE org_id = ? ORDER BY display_order, code`;
 const SELECT_LEGACY = `SELECT ${SELECT_COLS_LEGACY} FROM organisations ORDER BY code`;
-const SELECT_ONE_NEW = `SELECT ${SELECT_COLS_NEW} FROM organisations WHERE id = ?`;
+const SELECT_ONE_NEW = `SELECT ${SELECT_COLS_NEW} FROM organisations WHERE id = ? AND org_id = ?`;
 
 async function loadOrganisations(
   db: D1Database,
+  orgId: string,
 ): Promise<ReturnType<typeof rowToOrg>[]> {
   try {
-    const res = await db.prepare(SELECT_NEW).all<OrganisationRow>();
+    const res = await db.prepare(SELECT_NEW).bind(orgId).all<OrganisationRow>();
     return (res.results ?? []).map(rowToOrg);
   } catch (e) {
     if (isMissingNewColumn(e)) {
@@ -213,12 +254,43 @@ function ensureOrganisationRegistry(db: D1Database): Promise<void> {
 }
 
 // GET /api/organisations — list + active org + inter-company config.
+//
+// Deliberately NOT gated as a whole (BUG-2026-08-13-100). The sidebar company
+// switcher calls this on every page load for every authenticated user, and the
+// four companies are one owner's group whose staff work across all of them —
+// a fix that empties the switcher for ordinary staff would be worse than the
+// exposure it closes. So the ENDPOINT stays open to any signed-in caller and
+// the RECORD is what narrows: `organisations:read` gets the registry row,
+// everyone else gets the switcher projection.
+//
+// `purchase-orders:read` is the SECOND key, and it is not a widening: the PO /
+// GRN / PI letterhead — legal name, registration number, TIN, registered
+// address — is resolved IN THE BROWSER from this endpoint
+// (`letterheadForPurchaseOrg`, generate-purchase-order-pdf.ts). Anyone who may
+// read a purchase document already prints these fields; withholding them here
+// would not protect anything, it would print a blank Reg. No. and TIN on a
+// tax-relevant document.
+//
+// Gating on the DOCUMENT resource rather than granting QA `organisations:read`
+// is deliberate. `nav-permissions.ts` maps /settings/organisations to
+// `organisations`, and `hiddenNavPrefixes` unhides a link on `:read` — so the
+// grant would also have put the registry ADMIN page in QA's menu, a page whose
+// every button is `organisations:update` and would 403. `tests/role-policy.mjs`
+// caught exactly that.
+//
+// Net effect: SUPER_ADMIN / ADMIN (rbac wildcard), OFFICE, QA, and the
+// DB-defined roles riding rbac's `*:read` fail-safe keep the full registry.
+// SALES, HR and R&D get the projection — and none of their screens read
+// anything outside it (verified against every call site).
 app.get("/", async (c) => {
+  const full =
+    (await hasPermission(c, "organisations", "read")) ||
+    (await hasPermission(c, "purchase-orders", "read"));
   let organisations: ReturnType<typeof rowToOrg>[];
   let cfg: InterCompanyConfigRow | null = null;
   try {
     [organisations, cfg] = await Promise.all([
-      loadOrganisations(c.var.DB),
+      loadOrganisations(c.var.DB, getOrgId(c)),
       c.var.DB
         .prepare("SELECT * FROM inter_company_config WHERE id = 1")
         .first<InterCompanyConfigRow>(),
@@ -227,9 +299,23 @@ app.get("/", async (c) => {
     organisations = FALLBACK_ORGS;
     cfg = null;
   }
+  const activeOrgId = cfg?.activeOrgId ?? organisations[0]?.id ?? null;
+  if (!full) {
+    // `interCompanyConfig` is withheld with the rest: `hookkaToOhanaRate` is
+    // the inter-company transfer price. Its only reader is the Settings →
+    // Organisations page (`settings/organisations.tsx:104`), which guards on
+    // the key being present and keeps its own default when it is absent.
+    return c.json({
+      organisations: organisations.map(minimalOf),
+      activeOrgId,
+      // A consumer must be able to tell "reduced" from "blank" without
+      // inferring it from empty strings — see the C16 note on minimalOf.
+      restricted: true,
+    });
+  }
   return c.json({
     organisations,
-    activeOrgId: cfg?.activeOrgId ?? organisations[0]?.id ?? null,
+    activeOrgId,
     interCompanyConfig: cfg
       ? rowToConfig(cfg)
       : { hookkaToOhanaRate: 0.65, autoCreateMirrorDocs: true },
@@ -261,11 +347,17 @@ app.post("/", async (c) => {
   }
   // Uniqueness check (per tenant). Postgres unique index would catch it too
   // but a friendly 409 is nicer than the raw constraint error.
+  //
+  // The predicate said "per tenant" and was not: it matched `code` across the
+  // WHOLE table, so tenant B could not create HOOKKA because tenant A had one,
+  // and the 409 leaked that a code exists in a book the caller cannot see. It
+  // now matches the `(org_id, code)` unique index it is standing in front of.
+  const orgId = getOrgId(c);
   try {
     const dup = await c.var.DB.prepare(
-      "SELECT id FROM organisations WHERE code = ?",
+      "SELECT id FROM organisations WHERE code = ? AND org_id = ?",
     )
-      .bind(code)
+      .bind(code, orgId)
       .first<{ id: string }>();
     if (dup) return c.json({ error: "Organisation code already exists" }, 409);
   } catch {
@@ -292,7 +384,9 @@ app.post("/", async (c) => {
       )
       .bind(
         id,
-        "hookka",
+        // Was the literal "hookka" — a second tenant's new company would have
+        // been stamped into the first tenant's book (C12, write-side stamping).
+        orgId,
         code,
         name,
         typeof body.regNo === "string" ? body.regNo : "",
@@ -328,6 +422,12 @@ app.post("/", async (c) => {
 app.patch("/:id", async (c) => {
   const denied = await requirePermission(c, "organisations", "update");
   if (denied) return denied;
+  // The tenant predicate below is written against `org_id`; run the registry
+  // self-apply first so the column exists rather than 500-ing the save on an
+  // environment that never ran migration 0142 (CLAUDE.md — migrations are
+  // inert on deploy).
+  await ensureOrganisationRegistry(c.var.DB);
+  const orgId = getOrgId(c);
   const id = c.req.param("id");
   let body: Record<string, unknown>;
   try {
@@ -336,8 +436,8 @@ app.patch("/:id", async (c) => {
     return c.json({ error: "Invalid request body" }, 400);
   }
   const existing = await c.var.DB
-    .prepare("SELECT * FROM organisations WHERE id = ?")
-    .bind(id)
+    .prepare("SELECT * FROM organisations WHERE id = ? AND org_id = ?")
+    .bind(id, orgId)
     .first<OrganisationRow>();
   if (!existing) return c.json({ error: "Organisation not found" }, 404);
 
@@ -388,7 +488,7 @@ app.patch("/:id", async (c) => {
            code = ?, name = ?, reg_no = ?, tin = ?, msic = ?, msic_code = ?,
            address = ?, phone = ?, email = ?, business_type = ?,
            letterhead_url = ?, is_default = ?, display_order = ?, updated_at = ?
-         WHERE id = ?`,
+         WHERE id = ? AND org_id = ?`,
       )
       .bind(
         merged.code,
@@ -406,6 +506,7 @@ app.patch("/:id", async (c) => {
         merged.displayOrder,
         now,
         id,
+        orgId,
       )
       .run();
   } catch (e) {
@@ -419,7 +520,7 @@ app.patch("/:id", async (c) => {
   }
   const updated = await c.var.DB
     .prepare(SELECT_ONE_NEW)
-    .bind(id)
+    .bind(id, orgId)
     .first<OrganisationRow>();
   return c.json({ organisation: updated ? rowToOrg(updated) : null });
 });
@@ -429,10 +530,12 @@ app.patch("/:id", async (c) => {
 app.delete("/:id", async (c) => {
   const denied = await requirePermission(c, "organisations", "update");
   if (denied) return denied;
+  await ensureOrganisationRegistry(c.var.DB);
+  const orgId = getOrgId(c);
   const id = c.req.param("id");
   const existing = await c.var.DB
-    .prepare("SELECT * FROM organisations WHERE id = ?")
-    .bind(id)
+    .prepare("SELECT * FROM organisations WHERE id = ? AND org_id = ?")
+    .bind(id, orgId)
     .first<OrganisationRow>();
   if (!existing) return c.json({ error: "Organisation not found" }, 404);
   if (existing.isDefault === true || existing.isDefault === 1) {
@@ -442,8 +545,8 @@ app.delete("/:id", async (c) => {
     );
   }
   await c.var.DB
-    .prepare("UPDATE organisations SET is_active = 0 WHERE id = ?")
-    .bind(id)
+    .prepare("UPDATE organisations SET is_active = 0 WHERE id = ? AND org_id = ?")
+    .bind(id, orgId)
     .run();
   return c.json({ ok: true });
 });
@@ -454,14 +557,22 @@ app.delete("/:id", async (c) => {
 app.put("/", async (c) => {
   const denied = await requirePermission(c, "organisations", "update");
   if (denied) return denied;
+  await ensureOrganisationRegistry(c.var.DB);
+  const tenantId = getOrgId(c);
   const body = await c.req.json().catch(() => ({}));
 
   if (body.orgId) {
     const org = await c.var.DB
-      .prepare("SELECT * FROM organisations WHERE id = ?")
-      .bind(body.orgId)
+      .prepare("SELECT * FROM organisations WHERE id = ? AND org_id = ?")
+      .bind(body.orgId, tenantId)
       .first<OrganisationRow>();
     if (!org) return c.json({ error: "Organisation not found" }, 404);
+    // ⚠️ KNOWN, DELIBERATELY NOT CHANGED (2026-08-13): `inter_company_config`
+    // is a SINGLETON row (`id = 1`), so "which company is active" is GLOBAL
+    // state — one user switching company flips it for every other user, in
+    // every tenant. Making it per-user (or per-session) is a product decision
+    // about how the switcher is meant to behave, not a defect to be fixed
+    // inside a security pass. Raised to the owner; left exactly as it was.
     await c.var.DB
       .prepare("UPDATE inter_company_config SET active_org_id = ? WHERE id = 1")
       .bind(body.orgId)
@@ -473,8 +584,8 @@ app.put("/", async (c) => {
     const patch = body.organisation;
     if (!patch.id) return c.json({ error: "organisation.id required" }, 400);
     const existing = await c.var.DB
-      .prepare("SELECT * FROM organisations WHERE id = ?")
-      .bind(patch.id)
+      .prepare("SELECT * FROM organisations WHERE id = ? AND org_id = ?")
+      .bind(patch.id, tenantId)
       .first<OrganisationRow>();
     if (!existing) return c.json({ error: "Organisation not found" }, 404);
 
@@ -503,7 +614,7 @@ app.put("/", async (c) => {
            code = ?, name = ?, reg_no = ?, tin = ?, msic = ?,
            address = ?, phone = ?, email = ?,
            transfer_pricing_pct = ?, is_active = ?
-         WHERE id = ?`,
+         WHERE id = ? AND org_id = ?`,
       )
       .bind(
         merged.code,
@@ -517,12 +628,13 @@ app.put("/", async (c) => {
         merged.transferPricingPct,
         merged.isActive,
         patch.id,
+        tenantId,
       )
       .run();
 
     const updated = await c.var.DB
-      .prepare("SELECT * FROM organisations WHERE id = ?")
-      .bind(patch.id)
+      .prepare("SELECT * FROM organisations WHERE id = ? AND org_id = ?")
+      .bind(patch.id, tenantId)
       .first<OrganisationRow>();
     return c.json({ organisation: updated ? rowToOrg(updated) : null });
   }

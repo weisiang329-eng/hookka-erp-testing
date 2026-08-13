@@ -34,6 +34,27 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-002 — `/planning` cold start took 9.6 s because the PO list joined its job cards with a per-PO full scan `performance` `production-orders` 🟢
+
+**Symptom.** Opening `/planning` blocked ~10 s whenever the list snapshot was cold. Measured on prod: `GET /api/production-orders?fields=minimal&include=jobCards-lite&excludeCompleted=true` took **9,587 ms / 4.3 MB** on the first call and **554 ms** on the second. The snapshot invalidates on any `production_orders` / `job_cards` write, which during a working day is constant, so operators paid the cold rebuild repeatedly. A cache-busting param made no difference — not a measurement artifact.
+
+**Root cause — two independent costs, both in `fetchFilteredPOs`' minimal path.**
+
+1. **A quadratic join.** `rowToMinimalPO` attached a PO's cards with `jobCards.filter(j => j.productionOrderId === row.id)` — a full scan of the job-card array *per PO*. On prod that is **957 POs × 36,796 job cards ≈ 35 M comparisons**, measured at **6,473 ms**, i.e. two thirds of the whole cold call. The non-minimal path had already been batched to O(N+M) in 2026-05-21 (`rowsToPOsBatch`, "Tier B B1"); the minimal path — the one every heavy consumer actually uses — was left behind.
+2. **An unnarrowed fetch.** The no-dept / no-status branch ran `SELECT * FROM job_cards WHERE orgId = ?`, pulling **every** card in the org and discarding the ones whose PO wasn't in the result set: **36,796 rows / 30.8 MB fetched to keep 13,418 rows / 10.8 MB** (874 ms vs 203 ms).
+
+**Not the cause (checked first, because it was the proposed fix).** Narrowing the request with a `dueTo` horizon was measured and rejected: the PO set simply has no far-future tail. Every active PO's "Our Expected DD" falls between 2026-03-30 and 2026-10-19, so a +45-day horizon trims **2 of 957 rows (0.2 %)** and a +30-day one trims 19 (2.0 %) — no meaningful saving, in exchange for a risk of hiding schedulable work. Worth recording separately: the route comment still calls `dueFrom`/`dueTo` a "targetEndDate window", but since 2026-06-10 the overview branch actually filters on the SO's `hookkaExpectedDD` (`_helpers.ts` `ddExpr`). Read that code, not the comment.
+
+**Fix.** `groupJobCardsByPoId` builds one `Map<productionOrderId, JobCardRow[]>` and `rowToMinimalPO` takes it as an optional last argument (`jcByPoId`) — callers that omit it keep the legacy filter exactly, so the single-PO worker-scan path is untouched. Passed at all four minimal call sites in `fetchFilteredPOs` + `fetchPaginatedPOs`. The full-org fetch is now scoped by `jcNarrowWhere`, which reuses the PO query's own `poWhereSql` verbatim as a sub-select — one statement, so it still runs in parallel with the PO fetch, and the two predicates cannot drift apart. `src/api/routes/production-orders/_helpers.ts`.
+
+**Same family as BUG-2026-08-13-001 below, from the other end.** That one removed a browser-side whole-org PO fetch; this one makes the server-side assembly of that same payload cheap. The `/delivery` variant it also relies on (`fields=minimal&include=jobCards`, 2,539 POs) is the biggest single winner here.
+
+**Verified.** Replayed both pipelines against live prod rows: **957 POs and 13,418 attached job cards, output byte-identical** (`JSON.stringify` equal), join **6,865 ms → 8 ms**, fetch **30.77 MB → 10.76 MB**, ~**7.3 s** of server work removed. The `/delivery` variant benefits more — join **18,132 ms → 33 ms** — with its row count unchanged. The exact new SQL was run through the real `translateSql` compat layer and executed on prod: correct snake_case rewriting inside the nested sub-select, 13,418 rows, matching expectation; the `includeArchive` UNION form parses in both the existing and the new position. `tests/production-orders-jobcard-grouping.test.mjs` (6 tests) pins order-equivalence including the equal-`sequence` stable-sort tie, empty-bucket and orphan-card cases, non-mutation of the shared array, and the SQL shape. Full suite 3,690 pass / 0 fail; `npx tsc -p tsconfig.app.json --noEmit` exit 0. **Not yet observed on a running prod deploy** — Actions is billing-blocked, so the end-to-end cold-call timing is a projection from the measured server-side saving, not a measurement.
+
+**Prod DB note (corrects the entry below).** The local `.dev.vars` `DATABASE_URL` is indeed dead (`28P01`), but a **working** read-only DSN for live prod exists in the repo's own scripts (`db.vpwdqtsxexpiqxzweivd.supabase.co`, used by ~65 `scripts/*.mjs`) — that is how the live figures above were read. The second DSN in `scripts/` (`db.zaxygxwadidiqcphibma…`) is a **stale copy**, last written 2026-08-10. Both are hardcoded credentials sitting in tracked files and belong on the rotation list.
+
+---
+
 ## BUG-2026-08-13-001 — The Command Center's PENDING DELIVERY tile spun forever: it was downloading 2,539 production orders (with every job card) just to add a number up `ui-frontend` `delivery-orders` `money` `performance` 🟡
 
 **Symptom.** On `/dashboard` (prod, 2026-08-13) THIS MONTH SALES, THIS MONTH INVOICES and OUTSTANDING all painted, while **PENDING DELIVERY stayed on its loading skeleton permanently** — not slow, never resolving.

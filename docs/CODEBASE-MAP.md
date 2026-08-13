@@ -5,6 +5,10 @@
 > named beside a line ref is really defined near it. Exit 0 on this revision. Coverage gap is now
 > 13 modules (the `src/pages/m/` mobile subsystem + 3 production components), down from 44
 > mechanically against the tree; 434 exist.
+> **Restamped 2026-08-14 on branch `fix/security-posture`:** security findings S1, S4 and
+> S5 are now FIXED (BUG-2026-08-13-100 / -102 / -101) and their entries rewritten in place,
+> along with the `organisations.ts`, `auth-totp.ts` and `customer-crm.ts` route tables and
+> the three module index rows. S2, S3 and the singleton `active_org_id` stay open and say so.
 > Re-checked 2026-08-13 (BUG-2026-08-13-071): both `src/pages/consignment/return.tsx`
 > rows re-read against the file — the page is now a read-only list of recorded
 > returns (783 lines), not a "return flow"; returns are recorded from
@@ -1777,9 +1781,9 @@ handler with no `userId`, no `userRole` and no orgId on the context.
 | `src/components/scan-supplier-modal.tsx` — supplier PI/GRN scan wizard (5876) · `src/lib/scan-queue-client.ts` — consume + source-doc upload helpers (98) | `src/api/routes/scan-po.ts` — customer-PO OCR + few-shot samples + per-customer prompt rules (1075); mounted `src/api/worker.ts:1396` | `po_scan_samples` (**no org column** — `migrations/0026_po_scan_samples.sql`) / `customers.ocrPromptRules` | `tests/ocr-accuracy-customer-grouping.test.mjs` |
 | `src/pages/do-scan.tsx` — PUBLIC driver scan page, routed `/d/:token` (`src/router.tsx:105`) (1031) | `src/api/routes/public-do-qr.ts` — **PUBLIC** DO / packing-list dispatch+deliver QR flow (1019); mounted `src/api/worker.ts:1210` | `delivery_orders` / `delivery_order_items` / `packing_lists` / `production_orders` / `sales_orders` / `job_cards` (+ everything the DO cascade writes) | `tests/do-qr-public.test.mjs` / `tests/security-public-endpoints.test.mjs` / `tests/delivery-incomplete-dual-key.test.mjs` |
 | `src/components/assistant/AssistantSlideOver.tsx` — chat panel (1318) · `src/components/assistant/FloatingChatButton.tsx` | `src/api/routes/assistant.ts` — Hookka AI SSE chat + tool loop (995); mounted `src/api/worker.ts:1441` (history router first at `src/api/worker.ts:1440`) | `audit_events` (one row per tool call) + whatever `src/api/lib/assistant-tools.ts` reads (60 tools incl. an arbitrary-SELECT tool) | `tests/assistant-agent-command-prompt.test.mjs` |
-| `src/pages/setup-2fa.tsx` — soft-prompt 2FA setup (278) · `src/pages/login.tsx` — step-2 code entry | `src/api/routes/auth-totp.ts` — TOTP enroll / verify / login-verify / disable (546); mounted `src/api/worker.ts:1278` | `users` (`totpSecret` / `totpEnrolledAt` / `totpRecoveryHashes`) / `user_sessions` / `audit_events` | **NONE** — only the public-path snapshot `tests/security-public-endpoints.test.mjs` lists `/api/auth/totp/login-verify`; no test exercises any handler |
-| `src/pages/settings/organisations.tsx` — sister-company registry (796) | `src/api/routes/organisations.ts` — org registry CRUD + active-org switch (568); mounted `src/api/worker.ts:1193` | `organisations` / `inter_company_config` / `suppliers.purchase_org_code` | **NONE** |
-| `src/components/customer/CrmPanel.tsx` — contacts + timeline (294) · `src/components/customer/KycPanel.tsx` — onboarding/KYC (124) | `src/api/routes/customer-crm.ts` — contacts / activities / follow-ups / onboarding / send-quote (509); mounted `src/api/worker.ts:1190` | `customer_contacts` / `customer_activities` / `customer_onboarding` / `customer_wishlist` (retired, rows kept) | `tests/customer-crm.test.mjs` / `tests/crm-activity-and-catalog.test.mjs` / `tests/customer-kyc.test.mjs` / `tests/customer-crm-wishlist-send.test.mjs` |
+| `src/pages/setup-2fa.tsx` — soft-prompt 2FA setup (278) · `src/pages/login.tsx` — step-2 code entry | `src/api/routes/auth-totp.ts` — TOTP enroll / verify / login-verify / disable (612); mounted `src/api/worker.ts:1278` · `src/api/lib/totp-pending.ts` — pending-2FA token (the password gate) | `users` (`totpSecret` / `totpEnrolledAt` / `totpRecoveryHashes`) / `user_sessions` / `totp_pending_logins` / `audit_events` | `tests/totp-login-password-gate.test.mjs` (real handlers) · the public-path snapshot `tests/security-public-endpoints.test.mjs` |
+| `src/pages/settings/organisations.tsx` — sister-company registry (796) | `src/api/routes/organisations.ts` — org registry CRUD + active-org switch (680); mounted `src/api/worker.ts:1193` · `src/lib/org-letterhead-row.ts` — is a registry row printable? | `organisations` / `inter_company_config` / `suppliers.purchase_org_code` | `tests/organisations-registry-projection.test.mjs` |
+| `src/components/customer/CrmPanel.tsx` — contacts + timeline (294) · `src/components/customer/KycPanel.tsx` — onboarding/KYC (124) | `src/api/routes/customer-crm.ts` — contacts / activities / follow-ups / onboarding / send-quote (583); mounted `src/api/worker.ts:1190` | `customer_contacts` / `customer_activities` / `customer_onboarding` / `customers` (recipient allow-list) / `customer_wishlist` (retired, rows kept) | `tests/customer-crm.test.mjs` / `tests/crm-activity-and-catalog.test.mjs` / `tests/customer-kyc.test.mjs` / `tests/customer-crm-wishlist-send.test.mjs` / `tests/customer-crm-quote-recipient.test.mjs` |
 | `src/pages/leads/index.tsx` — pipeline board, routed `/leads` (`src/dashboard-routes.tsx:414`) (929) | `src/api/routes/sales-leads.ts` — pre-sale pipeline + lead catalog + convert (437); mounted `src/api/worker.ts:1191` | `sales_leads` / `lead_products` / `customers` / `customer_products` / the four CRM side-tables | `tests/sales-leads.test.mjs` / `tests/lead-catalog.test.mjs` / `tests/lead-convert.test.mjs` |
 
 > **Every test in the right-hand column is a SOURCE-TEXT test** — it `readFileSync`s the
@@ -1921,50 +1925,79 @@ question cap is checked at `src/api/routes/assistant.ts:591` and **SUPER_ADMIN i
 
 | Method + path | Ref | Posture |
 |---|---|---|
-| POST `/api/auth/totp/enroll` | `src/api/routes/auth-totp.ts:77` | session required; acts on `c.get("userId")` only |
-| POST `/api/auth/totp/verify` | `src/api/routes/auth-totp.ts:134` | session required |
-| POST `/api/auth/totp/login-verify` | `src/api/routes/auth-totp.ts:183` | **PUBLIC** (`src/api/lib/auth-middleware.ts:40`) — issues a full session |
-| POST `/api/auth/totp/setup-start` | `src/api/routes/auth-totp.ts:330` | session required |
-| POST `/api/auth/totp/setup-confirm` | `src/api/routes/auth-totp.ts:406` | session required |
-| POST `/api/auth/totp/dismiss-prompt` | `src/api/routes/auth-totp.ts:477` | session required |
-| POST `/api/auth/totp/disable` | `src/api/routes/auth-totp.ts:499` | session required **+ password re-auth** |
+| POST `/api/auth/totp/enroll` | `src/api/routes/auth-totp.ts:84` | session required; acts on `c.get("userId")` only |
+| POST `/api/auth/totp/verify` | `src/api/routes/auth-totp.ts:141` | session required |
+| POST `/api/auth/totp/login-verify` | `src/api/routes/auth-totp.ts:197` | **PUBLIC** (`src/api/lib/auth-middleware.ts:40`) — issues a full session, **but only against a pending-2FA token minted by `/login` when the password verified** (BUG-2026-08-13-101) |
+| POST `/api/auth/totp/setup-start` | `src/api/routes/auth-totp.ts:396` | session required |
+| POST `/api/auth/totp/setup-confirm` | `src/api/routes/auth-totp.ts:472` | session required |
+| POST `/api/auth/totp/dismiss-prompt` | `src/api/routes/auth-totp.ts:543` | session required |
+| POST `/api/auth/totp/disable` | `src/api/routes/auth-totp.ts:565` | session required **+ password re-auth** |
 
 Only `/login-verify` is public, and that is explicit in the middleware — the sibling
 `/setup-start`, `/setup-confirm` and `/dismiss-prompt` are NOT public, and the middleware
 says so in place (`src/api/lib/auth-middleware.ts:41-44`). Every session-required handler
-resolves its subject from the context via `ctxUserId` (`src/api/routes/auth-totp.ts:69`) and
+resolves its subject from the context via `ctxUserId` (`src/api/routes/auth-totp.ts:76`) and
 never from the body, so there is no cross-user reach. `/login-verify` is throttled at 10
-attempts / 15 min keyed on `totp:<userId>` (`src/api/routes/auth-totp.ts:203-205`), burns a
-recovery-code hash on use (`src/api/routes/auth-totp.ts:234-239`), and audits both the fail
-and the success. Read the finding below before assuming it is a complete 2FA.
+attempts / 15 min keyed on `totp:<userId>` (`src/api/routes/auth-totp.ts:217-219`), burns a
+recovery-code hash on use (`src/api/routes/auth-totp.ts:293-299`), and audits both the fail
+and the success.
+
+**The password gate (BUG-2026-08-13-101, fixed 2026-08-13).** `/login-verify` used to take
+`{ userId, code }` and issue a session with no proof that step 1 had happened — for an
+enrolled user a user id plus one TOTP or recovery code was the whole credential. `/login`
+now mints a short-lived (5 min), single-use, SHA-256-hashed pending token when the PASSWORD
+verifies (`src/api/lib/totp-pending.ts`, table `totp_pending_logins`, migration record
+`migrations-postgres/0225_totp_pending_logins.sql`) and `/login-verify` refuses without it.
+The check runs BEFORE the code is read, so a token-less request cannot burn a recovery code;
+the row is burned only once a session exists, so a mistyped code does not cost the operator
+their password step. Deliberately not the sessions table — a pending row must never be
+resolvable by the auth middleware. Guarded by `tests/totp-login-password-gate.test.mjs`.
 
 Two schema facts that stop repeat archaeology: there is **no `user_totp_secrets` table** —
 state lives on `users`, and "pending vs enabled" is `totpEnrolledAt IS NULL` vs a timestamp
-(`src/api/routes/auth-totp.ts:312-316`). Enrollment writes the secret immediately and only
+(`src/api/routes/auth-totp.ts:378-382`). Enrollment writes the secret immediately and only
 flips `totpEnrolledAt` on a proven code, so an abandoned enrollment is inert.
 
 ### `src/api/routes/organisations.ts` — org registry
 
 | Method + path | Ref | Posture | Org scope |
 |---|---|---|---|
-| GET `/api/organisations` | `src/api/routes/organisations.ts:216` | authenticated, **no `requirePermission`** | **none** |
-| POST `/api/organisations` | `src/api/routes/organisations.ts:242` | `organisations:update` | writes a hard-coded `'hookka'` org (`src/api/routes/organisations.ts:295`) |
-| PATCH `/api/organisations/:id` | `src/api/routes/organisations.ts:328` | `organisations:update` | **none** |
-| DELETE `/api/organisations/:id` | `src/api/routes/organisations.ts:429` | `organisations:update` | **none**; soft-delete, refuses the default org |
-| PUT `/api/organisations` | `src/api/routes/organisations.ts:454` | `organisations:update` | **none**; three body shapes (`orgId` switch / `organisation` patch / `interCompanyConfig`) |
+| GET `/api/organisations` | `src/api/routes/organisations.ts:285` | authenticated; deliberately **no `requirePermission`** — the RECORD narrows instead (see below) | `WHERE org_id = ?` |
+| POST `/api/organisations` | `src/api/routes/organisations.ts:328` | `organisations:update` | stamps `getOrgId(c)`; dedupes on `(org_id, code)` |
+| PATCH `/api/organisations/:id` | `src/api/routes/organisations.ts:422` | `organisations:update` | `id = ? AND org_id = ?` on the read, the UPDATE and the read-back |
+| DELETE `/api/organisations/:id` | `src/api/routes/organisations.ts:530` | `organisations:update` | `id = ? AND org_id = ?`; soft-delete, refuses the default org |
+| PUT `/api/organisations` | `src/api/routes/organisations.ts:557` | `organisations:update` | `id = ? AND org_id = ?`; three body shapes (`orgId` switch / `organisation` patch / `interCompanyConfig`) |
 
 The GET response shape has no `success` wrapper — the Settings page and the sidebar switcher
 consume `{ organisations, activeOrgId, interCompanyConfig }` directly. It degrades in two
-steps: `loadOrganisations` (`src/api/routes/organisations.ts:161`) falls back to a legacy
+steps: `loadOrganisations` (`src/api/routes/organisations.ts:201`) falls back to a legacy
 column list when migration 0142's columns are missing, then to a hardcoded two-org constant
-(`src/api/routes/organisations.ts:107`) when the table itself is absent. The new columns
+(`src/api/routes/organisations.ts:147`) when the table itself is absent. The new columns
 reach prod only through the runtime self-apply `ensureOrganisationRegistry`
-(`src/api/routes/organisations.ts:187`) — which is called by POST/PATCH/DELETE but **not**
-by GET, which is why GET needs the fallback at all.
+(`src/api/routes/organisations.ts:228`) — called by POST/PATCH/DELETE/PUT but **not**
+by GET, which is why GET needs the fallback at all. That legacy fallback is also why the
+`org_id` predicate degrades to an UNSCOPED read rather than to the two-org constant: losing
+the predicate is a smaller wrong than replacing a real registry with a hardcoded one.
+
+**Two response shapes (BUG-2026-08-13-100).** The endpoint stays open to every signed-in
+caller because the sidebar switcher renders for all staff — the ROW is what narrows. A
+caller holding `organisations:read` **or** `purchase-orders:read` gets the full registry row
+plus `interCompanyConfig`. Everyone else gets `{ id, code, name, isActive, displayOrder }`
+and `restricted: true`, with `tin` / `regNo` / `address` / `phone` / `email` /
+`businessType` / `transferPricingPct` / `interCompanyConfig` **omitted, not blanked** —
+because `letterheadForPurchaseOrg` prints whatever it is handed, and a blank string would
+put "Reg.  | TIN " on a purchase order (C16). The absence is what lets
+`hasLetterheadDetails` (`src/lib/org-letterhead-row.ts`) fall back to the hardcoded
+letterhead. `purchase-orders:read` is the second key precisely so QA keeps its PO letterhead
+without `organisations:read` also unhiding `/settings/organisations` in its menu
+(`nav-permissions.ts` maps that path to `organisations`, and `hiddenNavPrefixes` unhides on
+`:read`).
 
 `inter_company_config` is a **singleton row `id = 1`**. The org switcher writes
-`active_org_id` on that one row (`src/api/routes/organisations.ts:466`), so "which org is
+`active_org_id` on that one row (`src/api/routes/organisations.ts:577`), so "which org is
 active" is global state shared by every user in every tenant, not a per-user preference.
+Left as-is deliberately on 2026-08-13 and raised to the owner: making it per-user is a
+product decision about how the switcher should behave, not a defect.
 
 ### `src/api/routes/customer-crm.ts` — CRM layer
 
@@ -1980,7 +2013,7 @@ active" is global state shared by every user in every tenant, not a per-user pre
 | GET `/api/customer-crm/follow-ups` | `src/api/routes/customer-crm.ts:336` | `customers:read` | yes |
 | GET `/api/customer-crm/onboarding` | `src/api/routes/customer-crm.ts:359` | `customers:read` | yes |
 | PUT `/api/customer-crm/onboarding` | `src/api/routes/customer-crm.ts:374` | `customers:update` | writes org, but see the upsert note |
-| POST `/api/customer-crm/send-quote` | `src/api/routes/customer-crm.ts:425` | `customers:update` | activity row carries org |
+| POST `/api/customer-crm/send-quote` | `src/api/routes/customer-crm.ts:425` | `customers:update`, **and** the recipient must be an address on the customer's own file (`recipientsForCustomer`, BUG-2026-08-13-102) | customer + contacts lookups and the activity row all carry org |
 
 This is the best-scoped router of the eight: every read and every write carries
 `AND org_id = ?`. Two edges to know. (1) The onboarding upsert is
@@ -2061,26 +2094,27 @@ pricing engine (`src/api/routes/sales-leads.ts:56-60`).
   `tests/delivery-incomplete-dual-key.test.mjs` fails any reader that drops the camelCase
   fallback. This is the camelCase read trap from `docs/BUG-CLASSES.md`, and this column is
   one of its recorded instances.
-- **`organisations` GET is the one unpermissioned endpoint in these eight.** Any logged-in
-  user — any role — gets the full registry including registration number, TIN, address,
-  phone and email for every organisation row. That is probably intentional (the sidebar org
-  switcher needs the list for everyone), but it is not gated and it is not org-filtered; see
-  finding S1.
+- **`organisations` GET is still unpermissioned — deliberately — but the ROW now narrows.**
+  ✅ 2026-08-13 (BUG-2026-08-13-100). Gating the endpoint would empty the sidebar company
+  switcher for ordinary staff, so the endpoint stays open and the projection does the work:
+  registration number, TIN, address, phone, email, business type, transfer-pricing pct and
+  `interCompanyConfig` go only to `organisations:read` or `purchase-orders:read`. It is now
+  org-filtered too.
 - **Active-org is global, not per-user.** `PUT /api/organisations` with `{ orgId }` writes
   `inter_company_config.active_org_id` on the singleton row
-  (`src/api/routes/organisations.ts:466`). One user switching the org switcher changes it
-  for everybody.
+  (`src/api/routes/organisations.ts:577`). One user switching the org switcher changes it
+  for everybody. ⬜ **Open, deliberately** — raised to the owner 2026-08-13 as a product
+  decision, not touched by the security pass.
 - **A lead's customer row is minted org-blind.** `createPotentialCustomerForLead`
   (`src/api/routes/sales-leads.ts:144-150`) does not list `orgId` in its INSERT, so the row
   takes the SQL default `'hookka'` from `migrations/0049_multi_tenant_skeleton.sql:32`
   regardless of who created it. Same shape as the write-side gap already recorded for
   consignments in `docs/BUG-CLASSES.md` C12 — see finding S3.
-- **`send-quote` will email an arbitrary attachment to an arbitrary address.** Recipient and
-  base64 PDF both come from the request body (`src/api/routes/customer-crm.ts:431-432`) and
-  neither the `customerId` nor the recipient is checked against the customer's stored email
-  or even against the org. Capped at ~5 MB, gated only on `customers:update`. Deliberate
-  ("the operator clicked Send"), but it is an outbound mail primitive on the company's
-  sending domain — see finding S4.
+- **`send-quote` is bound to the customer's own addresses.** ✅ 2026-08-13
+  (BUG-2026-08-13-102). `to` must match `customers.email` or one of that customer's
+  `customer_contacts.email` rows, both looked up inside the caller's org; a customer with no
+  address on file is a clear refusal, never a fall-through to whatever the caller sent.
+  Before this it was an authenticated open mail relay — see finding S4.
 - **Tests here pin source text, not behaviour.** `tests/sales-leads.test.mjs` asserting
   "tenant-scoped" means the string `org_id = ?` appears in the file — it did not notice that
   the `customers` INSERT three functions down has no org at all. When you add a scope, add
@@ -2094,16 +2128,25 @@ Ranked by what an attacker actually gets. **S1–S3 are cross-tenant issues that
 today because prod is a single org (`'hookka'`)** — they are pre-existing traps for the
 second tenant, not live leaks. S4 and S5 apply now.
 
-**S1 — `organisations.ts` is entirely org-blind, read AND write.** `loadOrganisations`
-(`src/api/routes/organisations.ts:161`) selects the whole table with no `WHERE org_id`,
-even though the column exists and the router itself creates a `(org_id, code)` unique index
-(`src/api/routes/organisations.ts:193`, `:201`). PATCH (`:328`), DELETE (`:429`) and PUT
-(`:454`) resolve rows by bare `id`, so `organisations:update` in one tenant edits or
-soft-deletes another tenant's company record. POST hard-codes `'hookka'` (`:295`) and its
-duplicate check is `WHERE code = ?` with no org (`:266`). GET is additionally the only
-endpoint in these eight with no `requirePermission` — every authenticated user reads every
-org's TIN and registration number. Same class as the `audit-events.ts` leak fixed earlier
-this session.
+**S1 — `organisations.ts` was entirely org-blind, read AND write. ✅ FIXED 2026-08-13
+(BUG-2026-08-13-100).** `loadOrganisations` now binds `WHERE org_id = ?`; PATCH, DELETE and
+PUT all resolve `id = ? AND org_id = ?` on the read, the UPDATE and the read-back; POST
+stamps `getOrgId(c)` instead of the literal `'hookka'` and dedupes on `(org_id, code)`,
+matching the unique index the router itself creates. The three write handlers call
+`ensureOrganisationRegistry` first so the new predicate cannot 500 on an environment that
+never ran 0142.
+
+The GET is the interesting half. It is still ungated **on purpose** — the sidebar company
+switcher calls it on every page load for every user, and the four companies are one owner's
+group whose staff work across all of them, so a gate would break ordinary work to close a
+lesser exposure. Instead the RECORD narrows: `organisations:read` **or**
+`purchase-orders:read` gets the registry row, everyone else gets
+`{ id, code, name, isActive, displayOrder }` + `restricted: true`. `purchase-orders:read` is
+the second key because the PO / GRN / PI letterhead is resolved client-side from this
+endpoint — and granting QA `organisations:read` instead would have unhidden the registry
+ADMIN page in its menu, which `tests/role-policy.test.mjs` caught. The withheld keys are
+OMITTED rather than blanked, so `hasLetterheadDetails` can fall back instead of printing
+"Reg.  | TIN " (C16). Guarded by `tests/organisations-registry-projection.test.mjs`.
 
 **S2 — the OCR few-shot pool is a shared, unpartitioned corpus.** `po_scan_samples` has no
 org column (`migrations/0026_po_scan_samples.sql`), and `GET /api/scan-po/samples/by-po/:poIdentifier`
@@ -2120,28 +2163,43 @@ customer PO can be injected verbatim into another tenant's OCR prompt.
 a customer account in tenant one. `POST /:id/convert`'s `customer_products` copy
 (`src/api/routes/sales-leads.ts:332`) has the same omission.
 
-**S4 — `POST /api/customer-crm/send-quote` is an authenticated open mail relay.** Recipient,
-subject, note and the entire base64 attachment are caller-supplied
-(`src/api/routes/customer-crm.ts:429-462`); nothing ties the recipient to the named customer
-or the caller's org. Anyone with `customers:update` can send an arbitrary ≤5 MB PDF from the
-company's configured sending identity to any address. The body note is HTML-escaped
-(`src/api/routes/customer-crm.ts:500`), so this is exfiltration/abuse surface, not injection.
-**Owner decision needed** — this may be exactly what was wanted; if so it should say so in
-the code, and if not the fix is to bind `to` to the customer's stored contacts.
+**S4 — `POST /api/customer-crm/send-quote` was an authenticated open mail relay. ✅ FIXED
+2026-08-13 (BUG-2026-08-13-102), owner authorised.** Recipient, subject, note and the entire
+base64 attachment were all caller-supplied and nothing tied the recipient to the named
+customer or the caller's org, so anyone with `customers:update` could send an arbitrary
+≤5 MB PDF from the company's sending identity to any address — and log it on an unrelated
+customer's timeline. `recipientsForCustomer` now builds the allowed set from
+`customers.email` plus that customer's `customer_contacts.email` rows, both org-scoped, and
+`to` must be in it (case-insensitively). No addresses on file is a 400 that names the fix,
+never a fall-through. Both UI callers already prefill the prompt from `customer.email`, so
+the ordinary send is unchanged; sending to a new person at that company means adding them
+under Contacts first. Guarded by `tests/customer-crm-quote-recipient.test.mjs`.
 
-**S5 — 2FA step 2 does not re-check the password, by design; please confirm that is still
-what you want.** `POST /api/auth/totp/login-verify` (`src/api/routes/auth-totp.ts:183`) takes
-`{ userId, code }` and issues a full session (`src/api/routes/auth-totp.ts:255-268`). It
-never verifies that the caller completed step 1 — no pending token, no password. The
-intent is explicit at `src/api/routes/auth.ts:237-238` ("Returning userId (NOT a token) is
-intentional — userId alone is useless without a valid TOTP/recovery code"), so this is a
-recorded decision, not an oversight. The consequence is that for an enrolled user the
-password stops being a factor: possession of a valid TOTP code or one recovery code is
-sufficient, given the user id. Mitigations that hold today: user ids are UUIDs, the throttle
-is 10 attempts / 15 min per user id (`src/api/routes/auth-totp.ts:203`) which puts a 6-digit
-brute force out of reach, and recovery codes are 10 characters of CSPRNG output
-(`src/api/lib/totp.ts:98-116`). The cheap hardening, if wanted, is a short-lived
-server-side pending-2FA token minted by `/login` and required here.
+**S5 — 2FA step 2 did not re-check the password. ✅ FIXED 2026-08-13
+(BUG-2026-08-13-101), owner authorised.** `POST /api/auth/totp/login-verify` took
+`{ userId, code }` and issued a full session without ever verifying that step 1 happened, so
+for an enrolled user the password stopped being a factor: a user id plus one TOTP code or
+one recovery code was the whole credential.
+
+`/login` now mints a pending-2FA token when the PASSWORD verifies, and `/login-verify`
+requires it (`src/api/lib/totp-pending.ts`). Five-minute TTL, single-use, stored SHA-256
+hashed in its own `totp_pending_logins` table — deliberately not `user_sessions`, so a
+pending row can never be resolved as a session by the middleware. The recorded decision at
+`src/api/routes/auth.ts` is preserved rather than reversed: step 1 still hands back nothing
+that grants access to the app. The check runs before the code is read (a token-less request
+cannot burn a recovery code) and the row is burned only after a session exists (a typo does
+not cost the operator their password step). A storage failure is a 503, never a bypass.
+
+**Nobody is locked out by this.** `TOTP_LOGIN_ENFORCEMENT_ENABLED` is `false`
+(`src/api/routes/auth.ts`, the 2026-08-04 kill switch), so `/login` never returns
+`totpRequired` and no client can be mid-two-step when this deploys; `login.tsx` has no
+step-2 screen to break. The change removes the currently-live password-free path and adds
+nothing an ordinary login has to pass. Guarded by
+`tests/totp-login-password-gate.test.mjs`.
+
+**Still open after the 2026-08-13 pass: S2 and S3** — both inert on a single-tenant prod,
+both untouched, because they live in other routers and were not in scope — plus the
+singleton `active_org_id`, which is a product decision.
 
 **Not a finding, checked and clear:** the public QR write path (org taken from the resolved
 row, forward-only, server-rebuilt item set, shared cascade); `scan-queue.ts` (org-scoped

@@ -1,6 +1,12 @@
 # Recurring bug classes — the index that makes P5 executable
 
-> **Last verified: 2026-08-14** — classes C17 (a file the search tool refuses to read) and C18
+> **Last verified: 2026-08-14** — restamped on branch `fix/security-posture`: **C16 gains
+> row 7** (a projection narrowed by PERMISSION rather than payload size — the more dangerous
+> variant, because the author cannot reproduce what the affected role sees) with its
+> OMIT-do-not-BLANK corollary, and **C12 gains rows 12 and 13** (the whole `organisations.ts`
+> router; the `send-quote` recipient allow-list). Suite at that point: 3,908 tests / 0 fail.
+>
+> **Previously verified 2026-08-14** — classes C17 (a file the search tool refuses to read) and C18
 > (a per-party document and its all-party twin, only one maintained) added from the accounting
 > audit. Every one of the source/test paths this file cites
 > exists (checked mechanically against the tree), and `npm test` is green
@@ -515,6 +521,8 @@ served.
 | 5 | `GET/PUT/DELETE /api/consignments` (legacy surface, SAME tables) | ✅ fixed 2026-08-09 (BUG-2026-08-09-001) — found only by sweeping the module, not the two files named in the report |
 | 6 | `GET /api/sales-orders/:id` | ⬜ open — the LIST is org-scoped, the by-id read next to it is not. Same shape as #3, different module; not in scope for the consignment pass. Sweep sales the way consignment was swept. |
 | 8 | `POST /api/customers` | ✅ 2026-08-13 (-061) — the LIST reads `WHERE orgId = ?` while the INSERT let the column DEFAULT fill it; now stamps `getOrgId(c)`. Byte-identical today (`DEFAULT_ORG_ID` and the column DEFAULT are both `'hookka'`) |
+| 12 | `organisations.ts` — the whole router | ✅ 2026-08-13 (-100) — `loadOrganisations` selected the table unscoped; PATCH / DELETE / PUT resolved by bare `id`; POST bound the literal `'hookka'` and deduped `WHERE code = ?` across every tenant. Read scoping AND write stamping fixed in the same change, per the rule above. Note the read degrades to the LEGACY unscoped SELECT when `org_id` is missing — the alternative fallback replaces a real registry with two hardcoded companies, which is worse |
+| 13 | `customer-crm.ts:send-quote` → `customers` / `customer_contacts` | ✅ 2026-08-13 (-102) — the recipient allow-list is org-scoped on both lookups, so a customer id from another tenant resolves to an empty set (a refusal) instead of that tenant's addresses |
 | 9 | `customer-scope.ts:117-121` | ⬜ open — the choke point that narrows **every** scoped GET under 11 prefixes is unbounded (no LIMIT) and org-blind, and it filters rows **by name**, so a same-named customer in a second tenant would vanish from this tenant's lists |
 | 10 | R&D — `rd_projects` reads + all five R&D INSERTs | ⬜ open — `GET /` and `GET /:id` carry no orgId predicate though `rd_projects.org_id` exists; `rd_prototypes`, `rd_material_issuances`, `rd_labour_hours` and `rd_team_members` bind the **literal `'hookka'`**, which mislabels a second tenant's rows rather than merely defaulting them |
 | 11 | `journal_entries` / `journal_lines` | ✅ 2026-08-13 (BUG-2026-08-13-083) — the justification *"journal_entries has no orgId column (it predates multi-tenancy)"* was false: `0087_org_id_full_rollout.sql:105-106` adds `org_id TEXT NOT NULL DEFAULT 'hookka'` to both, `0206` re-applies it, `ensureFinanceOrgColumns` self-applies it at runtime, and `tests/db-schema.json` (from prod) lists it. Reads scoped **and** INSERTs stamped in the same change, per the rule below. Guard: `tests/accounting-subledger-parity.test.mjs` |
@@ -897,12 +905,30 @@ narrowing has to state what it is dropping.
 | 4 | `rackingNumber` | `rowToMinimalPO` → `buildCnReadyPlanning` | `src/lib/delivery-pipeline.ts:486` | ⬜ open, display-only — CN ready/planning rows carry `""` |
 | 5 | `createdAt` | `rowToMinimalPO` | `production/index.tsx:2862` | ⬜ open — `?axis=created_at` is a silent no-op; URL-only since the dropdown was removed 2026-05-07 |
 | 6 | `finishedGoods` / `finishedProducts` | `/api/inventory` | `suppliers/detail.tsx:214` | ✅ 2026-08-13 (-024) — and note the fix was to DELETE the read, not rename it; the two payload halves are different entities |
+| 7 | `regNo` / `tin` / `address` | the PERMISSION projection on `GET /api/organisations` | `letterheadForPurchaseOrg` → the PO / GRN / PI letterhead | ✅ 2026-08-13 (-100) — caught **before** merge, by looking for this class rather than by an incident |
+
+**Row 7 adds an axis: a projection can be narrowed by PERMISSION, not only by payload
+size, and it is the more dangerous variant.** The slim-payload kind at least drops the same
+fields for everyone, so a broken screen is broken for the author too. A permission
+projection drops them for *some* callers, so the author — usually an admin — cannot
+reproduce what the affected role sees. Row 7's consumer would have printed
+`Reg.  | TIN ` on a tax-relevant document for QA users only.
+
+**Corollary (from row 7): OMIT the key, do not blank it.** `letterheadForPurchaseOrg`
+reads `org.regNo ?? ""`, so an empty string is indistinguishable from a real one and the
+consumer proceeds. An ABSENT key is a fact the consumer can test, which is what lets
+`hasLetterheadDetails` (`src/lib/org-letterhead-row.ts`) fall back to the hardcoded
+letterhead. Where the reduced shape is not obvious from the rows themselves, say so at the
+envelope — that endpoint sets `restricted: true`.
 
 **Enforced by** the key-set assertion in `tests/minimal-po-stocked-in.test.mjs`, which
 pins every field `rowToMinimalPO` emits and asserts value-for-value agreement with
 `rowToPO` on all shared keys. Dropping any field from the minimal PO projection now fails
-CI with the list. **Other projections have no such guard yet** — add one in the same
-commit as any new `?fields=` variant.
+CI with the list. Row 7 is enforced by
+`tests/organisations-registry-projection.test.mjs`, which asserts each withheld key is
+`!(key in org)` — absent, not empty — and separately runs `hasLetterheadDetails` against a
+reduced row. **Other projections have no such guard yet** — add one in the same commit as
+any new `?fields=` variant.
 
 **Finding the next one.** For each `?fields=`/`include=` caller, diff the projection's
 key set against every `x.` read on the response object in that file. Follow the call

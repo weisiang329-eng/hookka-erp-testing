@@ -34,6 +34,166 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-100 — every logged-in user, of every role, could read all four companies' TIN, registration number and registered address `security` `access-control` `multi-tenant` `C12` `C16` 🟢
+
+**Symptom.** None visible. `GET /api/organisations` answered every authenticated session with
+the complete registry row for HOOKKA, OHANA, HOUZS and HKMFG — `tin`, `regNo`, `address`,
+`phone`, `email`, `businessType`, `transferPricingPct` — plus the inter-company transfer rate.
+It was the ONLY handler across the eight audited routers with no `requirePermission` at all,
+and `loadOrganisations` selected the whole table with no `WHERE org_id`. Nine of the sixteen
+frontend call sites need `code` + `name` + `isActive` and nothing else.
+
+**Why the obvious fix is the wrong fix.** Gating the endpoint empties the sidebar company
+switcher, which renders on every page load for every user. The four companies are one owner's
+group and staff work across all of them; a fix that breaks the switcher for ordinary staff is
+worse than the exposure. So the endpoint stays open to any signed-in caller and the RECORD
+narrows instead.
+
+**Fix.** `src/api/routes/organisations.ts`.
+* GET returns the full row + `interCompanyConfig` to `organisations:read` **or**
+  `purchase-orders:read`; everyone else gets `{ id, code, name, isActive, displayOrder }` and
+  `restricted: true`.
+* `loadOrganisations` binds `WHERE org_id = ?`, degrading to the LEGACY unscoped read (not to
+  `FALLBACK_ORGS`) if the column is absent — replacing a real registry with two hardcoded
+  companies would be the worse failure. Prod has the column (`tests/db-schema.json`).
+* PATCH / DELETE / PUT resolve `id = ? AND org_id = ?` on the read, the UPDATE and the
+  read-back, and call `ensureOrganisationRegistry` first so the predicate cannot 500 on an
+  environment that never ran 0142. POST stamps `getOrgId(c)` instead of the literal
+  `'hookka'` and dedupes on `(org_id, code)` — matching the unique index the router creates,
+  and no longer leaking "that code exists" across a tenant boundary (C12, write-side).
+
+**Two traps this walked into, both caught before merge.**
+
+1. **C16 — a field the projection drops and a consumer still reads.** `letterheadForPurchaseOrg`
+   does `regNo: org.regNo ?? ""`, so a reduced row with a `name` would have printed
+   `Reg.  | TIN ` on purchase orders, GRNs and purchase invoices. The withheld keys are
+   therefore **omitted, not blanked**, and the decision moved to `hasLetterheadDetails`
+   (`src/lib/org-letterhead-row.ts`) — its own import-free module so it can be tested by
+   running it rather than by reading the file it lives in (the PDF module imports through
+   `@/`, which the test runner cannot resolve).
+2. **The first attempt over-tightened in the other direction.** Granting QA
+   `organisations: R` in `role-policy.ts` kept its PO letterhead — and also unhid
+   `/settings/organisations` in QA's menu, because `nav-permissions.ts` maps that path to
+   `organisations` and `hiddenNavPrefixes` unhides on `:read`. `tests/role-policy.test.mjs`
+   failed on it. `role-policy.ts` is untouched in the final change; the second key is
+   `purchase-orders:read`, the resource that actually prints these fields.
+
+**Deliberately NOT changed.** `inter_company_config` is a singleton row `id = 1`, so "active
+org" is global state — one user's switch flips it for everyone, in every tenant. That is a
+product decision about how the switcher should behave, not a defect; it is commented in place
+and raised to the owner.
+
+**Guard.** `tests/organisations-registry-projection.test.mjs`, 16 tests, real handlers against
+a stub DB whose binds are applied POSITIONALLY — so deleting an `org_id = ?` predicate stops
+the filtering and the assertions fail, rather than passing over a query that no longer narrows.
+Proved red by seven mutations (see below).
+
+---
+
+## BUG-2026-08-13-101 — TOTP step 2 never checked that step 1 happened: a user id plus one code was a complete login `security` `access-control` `auth-rbac` 🟢
+
+**Symptom.** None visible, and none loggable — a successful bypass is indistinguishable in the
+audit trail from a real sign-in. `POST /api/auth/totp/login-verify` took `{ userId, code }` and
+issued a full session. It never verified a password, and nothing proved `/login` had ever been
+called. For any user with `totpEnrolledAt` set, possession of a valid TOTP code — or ONE
+recovery code — plus a user id was the entire credential. A user id is not a secret: it travels
+in audit rows, in admin screens, and in earlier API responses.
+
+**Read the recorded decision first.** `src/api/routes/auth.ts` says of the step-1 response:
+*"Returning userId (NOT a token) is intentional — userId alone is useless without a valid
+TOTP/recovery code."* That decision is about what step 1 must not hand back: anything that
+grants access to the app. It is preserved, not reversed. The converse — that a code alone was
+useless without a password — was never true, and that is the hole.
+
+Note the compounding shape: `TOTP_LOGIN_ENFORCEMENT_ENABLED` is `false` (the 2026-08-04 kill
+switch, BUG-2026-08-04-006), so an enrolled user still logs in with a password alone through
+`/login`. 2FA here was therefore not a second factor at all — it was an ADDITIONAL,
+password-free way in. Users can still reach `totpEnrolledAt` through `/setup-confirm`.
+
+**Fix.** `src/api/lib/totp-pending.ts` (new) + both routes. `/login` mints a pending-2FA token
+when the PASSWORD verifies and returns it alongside `userId`; `/login-verify` refuses without
+one. Five-minute TTL, single-use, stored SHA-256-hashed in its own `totp_pending_logins` table.
+
+Four choices worth stating:
+* **Its own table, not `user_sessions`** — a pending row must never be resolvable as a session
+  by the auth middleware.
+* **The DB, not KV** — `rate-limit.ts` fails OPEN when `SESSION_CACHE` is absent, which is right
+  for a speed bump and wrong for a credential. The DB is already load-bearing for login (the
+  password check is a `users` read), so this adds no new way for login to break.
+* **The check runs BEFORE the code is read**, so a token-less request cannot burn one of the
+  user's one-shot recovery codes.
+* **The row is burned only after the session exists.** A mistyped 6-digit code must not cost the
+  operator their password step — a gate that punishes typos is a gate that gets switched off.
+  The existing 10-attempts-per-15-minutes throttle still bounds the retries.
+
+A storage failure at either end is a 503, never a bypass and never a fall-through to the old
+shape.
+
+**Nobody is locked out, and nothing is caught mid-flight.** Because the enforcement flag is
+`false`, `/login` never returns `totpRequired` today, so no client can be part-way through a
+two-step login when this deploys — and `login.tsx` has no step-2 screen to break (it shows an
+explicit "2FA isn't available yet" message). The only behaviour that stops working is the
+password-free path itself. When the flag is eventually flipped, the step-2 screen must send
+`pendingToken` back; `LoginResponse` in `src/pages/login.tsx` now carries it, with a pointer.
+
+Schema record: `migrations-postgres/0225_totp_pending_logins.sql`. As always in this repo the
+file is a RECORD — the statement that reaches prod is the `CREATE TABLE IF NOT EXISTS` inside
+`ensureTotpPendingTable`, memoised as a promise that is DROPPED on failure (C9).
+
+**Guard.** `tests/totp-login-password-gate.test.mjs`, 13 tests, real handlers against a stub DB
+that models `totp_pending_logins` as a real table. "Did a session get issued" is asserted from
+the session rows and the `Set-Cookie` header, not from the response text.
+
+---
+
+## BUG-2026-08-13-102 — `send-quote` was an authenticated open mail relay on the company's own sending identity `security` `access-control` `multi-tenant` 🟢
+
+**Symptom.** None to the operator. `POST /api/customer-crm/send-quote` took the recipient, the
+subject, the note and a ≤5 MB base64 PDF straight from the request body, and nothing tied `to`
+to the `customerId` in the same request — or to the caller's org. Anyone holding
+`customers:update` (which SALES holds in full) could send an arbitrary PDF, with an arbitrary
+subject, from the company's configured sending domain, to any address on the internet — and the
+`QUOTE_SENT` activity would be filed on whichever customer they named.
+
+**Fix.** `recipientsForCustomer` (`src/api/routes/customer-crm.ts`) builds the allowed set from
+`customers.email` plus that customer's `customer_contacts.email` rows, both scoped by
+`getOrgId(c)`, and `to` must be in it, compared case-insensitively. A customer id from another
+tenant resolves to an EMPTY set, which is a refusal — never a licence to use the caller's
+address. A customer with no address on file returns a 400 that names the remedy rather than
+falling back to whatever was supplied.
+
+**The legitimate flow is unchanged.** Both UI callers (`handleEmailQuotationV2` and
+`askRecipient` in `src/pages/customers.tsx`) already prefill the prompt from `customer.email`.
+The operator can still correct it — to any address on that customer's file. Sending to a new
+person at that company now means adding them under Contacts first, which is where the CRM
+wanted them anyway; the refusal says so and lists the addresses that will work.
+
+**Guard.** `tests/customer-crm-quote-recipient.test.mjs`, 6 tests. The seam is global `fetch`
+(`src/api/lib/email.ts` is a plain fetch wrapper), so the assertions are on the recipient the
+handler actually handed the provider — the thing that was wrong. Nothing weaker would do: the
+bug was that the wrong address reached the sender.
+
+---
+
+## All three: how the guards were proved
+
+`tests/security-posture-red-proof.mjs` — **not** a `.test.mjs`, because it mutates source on
+disk; run it by hand with `node tests/security-posture-red-proof.mjs`. Fifteen mutations, each
+reintroducing one bug and requiring the matching suite to FAIL. All 15 went red.
+
+It exists because of the specific way this has gone wrong here before: a mutation that
+**silently does not apply** leaves the suite green and is read as proof. So every case asserts
+the anchor's occurrence count before replacing, asserts the file's **bytes on disk changed**
+after writing, and asserts the file is byte-identical to the original again after restoring —
+and a mutation that changes no bytes is reported as a HARNESS FAILURE, not as a pass. Matching
+is EOL-agnostic by construction (every newline becomes `\r?\n`, and the replacement is written
+with the file's own dominant ending), because `core.autocrlf` decides line endings per
+checkout and the files it edits are CRLF here: a literal `\n` anchor matches nothing in a CRLF
+file while looking perfectly reasonable. That is exactly the failure that has produced false
+all-clears here twice this week.
+
+---
+
 ## BUG-2026-08-13-095 — 98.5% of invoice lines carry no delivery-order link, so every SO↔invoice audit has been reading 1.5% of the data and reporting "clean" `money` `invoices` `auditability` `data-integrity` 🔴
 
 > **STATUS: IDENTIFIED, NOT FIXED. Scope is unknown and unknowable with the current

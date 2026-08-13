@@ -31,6 +31,7 @@ import {
   clientIp,
 } from "../lib/rate-limit";
 import { emitAudit } from "../lib/audit";
+import { issuePendingTotpToken } from "../lib/totp-pending";
 import {
   SESSION_COOKIE,
   CSRF_COOKIE,
@@ -236,11 +237,44 @@ app.post("/login", async (c) => {
   // /api/auth/totp/login-verify which issues the session on success.
   // Returning userId (NOT a token) is intentional — userId alone is useless
   // without a valid TOTP/recovery code.
+  //
+  // 2026-08-13 (BUG-2026-08-13-101): the reverse was ALSO true and was not
+  // intended — a valid TOTP/recovery code plus a userId was useless without…
+  // nothing. `/login-verify` never checked that this password step had
+  // happened, so 2FA was an alternative first factor rather than a second one.
+  // We now also mint a PENDING-2FA token here, which `/login-verify` requires.
+  //
+  // The recorded decision above is preserved, not reversed: what step 1 must
+  // not hand back is anything that grants access to the app. `pendingToken` is
+  // not a session — it is accepted at exactly one endpoint, it grants nothing
+  // by itself, it dies in five minutes, and it is burned when a session is
+  // issued from it. See src/api/lib/totp-pending.ts.
   if (TOTP_LOGIN_ENFORCEMENT_ENABLED && user.totpEnrolledAt) {
+    let pendingToken: string;
+    try {
+      pendingToken = await issuePendingTotpToken(c.var.DB, user.id);
+    } catch (err) {
+      // Deliberately a hard failure. The alternatives are both worse: issuing
+      // the session here skips the second factor, and returning the old
+      // `{ totpRequired, userId }` shape hands back a step-2 the caller cannot
+      // pass. "Try again" is the only safe answer.
+      console.warn(
+        "[auth/login] pending-2FA token issue failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+      return c.json(
+        {
+          success: false,
+          error: "Login service is busy right now — please try again in a moment.",
+        },
+        503,
+      );
+    }
     return c.json({
       success: true,
       totpRequired: true,
       userId: user.id,
+      pendingToken,
     });
   }
 

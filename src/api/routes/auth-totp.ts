@@ -14,10 +14,13 @@
 //                             matches the in-flight (un-confirmed) secret,
 //                             flips users.totpEnrolledAt to now. From here on
 //                             the password-login path requires TOTP.
-//   POST /login-verify     — PUBLIC. Body { userId, code }. Used right after
-//                             /api/auth/login when the response was
-//                             { totpRequired: true }. Issues a session on
-//                             success.
+//   POST /login-verify     — PUBLIC. Body { userId, code, pendingToken }.
+//                             Used right after /api/auth/login when the
+//                             response was { totpRequired: true }. The
+//                             pendingToken is that response's proof that the
+//                             PASSWORD verified — without it this endpoint was
+//                             a password-free login (BUG-2026-08-13-101).
+//                             Issues a session on success.
 //   POST /disable          — auth-required. Body { password }. Re-auth
 //                             gate, then nulls out totp* columns.
 //
@@ -48,6 +51,10 @@ import {
   sessionCookieHeader,
   csrfCookieHeader,
 } from "../lib/session-cookie";
+import {
+  checkPendingTotpToken,
+  consumePendingTotpToken,
+} from "../lib/totp-pending";
 
 const app = new Hono<Env>();
 
@@ -176,17 +183,25 @@ app.post("/verify", async (c) => {
 });
 
 // ----- POST /api/auth/totp/login-verify ------------------------------------
-// PUBLIC. Used after /api/auth/login returns { totpRequired: true, userId }.
-// Body: { userId, code }. The `code` may be either a 6-digit TOTP or a
-// recovery code (matched by length: 6-digit numeric → TOTP, anything else
+// PUBLIC. Used after /api/auth/login returns
+// { totpRequired: true, userId, pendingToken }.
+// Body: { userId, code, pendingToken }. The `code` may be either a 6-digit TOTP
+// or a recovery code (matched by length: 6-digit numeric → TOTP, anything else
 // is treated as recovery).
+//
+// `pendingToken` is REQUIRED (BUG-2026-08-13-101). Without it this endpoint
+// accepted { userId, code } and issued a full session, so for an enrolled user
+// the password was never checked at all: a user id — which is not a secret —
+// plus one TOTP code or one recovery code was the entire credential. The token
+// is the proof that step 1 happened; see src/api/lib/totp-pending.ts.
 app.post("/login-verify", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as {
     userId?: string;
     code?: string;
     rememberMe?: boolean;
+    pendingToken?: string;
   };
-  const { userId, code, rememberMe } = body;
+  const { userId, code, rememberMe, pendingToken } = body;
   // Carry "Remember me" through the 2FA step so an enrolled user gets the
   // same persist-or-session cookie choice a password-only user gets.
   const persistSession = rememberMe === true;
@@ -203,6 +218,53 @@ app.post("/login-verify", async (c) => {
   const rlKey = `totp:${userId}`;
   const rlDenied = await checkLoginRateLimit(c, rlKey);
   if (rlDenied) return rlDenied;
+
+  // Step 1 must have happened, for THIS user, within the last five minutes.
+  // Checked before anything is read about the user so a caller without the
+  // token learns nothing beyond "no" — and still spends rate-limit budget.
+  //
+  // The row is NOT burned here. A mistyped 6-digit code would otherwise cost
+  // the operator their password step, and a gate that punishes typos is a gate
+  // that gets switched back off; the 10-attempts-per-15-minutes throttle above
+  // already bounds the retries. It is burned below, once a session exists.
+  let pending: Awaited<ReturnType<typeof checkPendingTotpToken>>;
+  try {
+    pending = await checkPendingTotpToken(c.var.DB, userId, pendingToken);
+  } catch (err) {
+    console.warn(
+      "[auth-totp/login-verify] pending-token lookup failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+    // Fail CLOSED. This is the check that stands in for the password.
+    return c.json(
+      {
+        success: false,
+        error: "Sign-in service is busy right now — please try again in a moment.",
+      },
+      503,
+    );
+  }
+  if (!pending.ok) {
+    await emitAudit(c, {
+      resource: "auth-totp",
+      resourceId: userId,
+      action: "totp.login-verify.fail",
+      after: { reason: `pending-${pending.reason}` },
+    });
+    // An expired token gets its own message — "start again" is actionable,
+    // "invalid credentials" would send the operator hunting for a wrong
+    // password. Every other reason stays indistinguishable.
+    return c.json(
+      {
+        success: false,
+        error:
+          pending.reason === "expired"
+            ? "That sign-in attempt timed out. Please enter your password again."
+            : "Invalid credentials",
+      },
+      401,
+    );
+  }
 
   const user = await c.var.DB.prepare(
     "SELECT * FROM users WHERE id = ?",
@@ -266,6 +328,10 @@ app.post("/login-verify", async (c) => {
       .prepare("UPDATE users SET lastLoginAt = ? WHERE id = ?")
       .bind(now.toISOString(), userId),
   ]);
+
+  // Burn the pending token (and any sibling left by an earlier password
+  // attempt) now that the session exists — one password step, one session.
+  await consumePendingTotpToken(c.var.DB, userId);
 
   // Reset the rate-limit counter on success. waitUntil is best-effort —
   // executionCtx getter throws outside Worker isolates (tests, local node).

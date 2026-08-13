@@ -436,6 +436,43 @@ app.post("/send-quote", async (c) => {
     return c.json({ success: false, error: "a valid recipient email is required" }, 400);
   }
   if (!pdfBase64) return c.json({ success: false, error: "pdfBase64 required" }, 400);
+
+  // ── The recipient must belong to the customer ───────────────────────────────
+  // BUG-2026-08-13-102. `to` used to be whatever the caller typed, and nothing
+  // tied it to `customerId`. Anyone holding `customers:update` could therefore
+  // send an arbitrary ≤5 MB PDF, with an arbitrary subject, from the company's
+  // own sending identity, to any address on the internet — a spam and phishing
+  // relay wearing the company's From: header, with the send recorded on some
+  // unrelated customer's timeline.
+  //
+  // The allowed set is the customer's OWN addresses: the one on the customer
+  // record plus every address in their contact book. That is exactly what the
+  // legitimate flow uses — both callers in `pages/customers.tsx` prefill the
+  // prompt from `customer.email` — so the normal send is unchanged. Sending to
+  // a new person at that company means adding them under Contacts first, which
+  // is where the CRM wanted them anyway.
+  const allowed = await recipientsForCustomer(c, customerId);
+  if (allowed.size === 0) {
+    return c.json(
+      {
+        success: false,
+        error:
+          "This customer has no email address on file. Add one on the customer record (or as a contact) before sending.",
+      },
+      400,
+    );
+  }
+  if (!allowed.has(to.toLowerCase())) {
+    return c.json(
+      {
+        success: false,
+        error:
+          `${to} is not an email address on file for this customer. ` +
+          `Send to one of: ${[...allowed].join(", ")} — or add this address under Contacts first.`,
+      },
+      403,
+    );
+  }
   // Guard against oversized payloads (Workers body + provider limits). ~5 MB of
   // raw PDF ≈ 6.8 MB base64 — cap a little above that.
   if (pdfBase64.length > 7_500_000) {
@@ -494,6 +531,43 @@ app.post("/send-quote", async (c) => {
 
   return c.json({ success: true, data: { id: result.id ?? null, activityId: actId } });
 });
+
+/**
+ * Every email address this customer is reachable at, lower-cased.
+ *
+ * Two sources, both scoped to the caller's tenant so a customer id guessed from
+ * another book resolves to an EMPTY set (refusal) rather than to that tenant's
+ * addresses:
+ *   • `customers.email`          — the account's own address
+ *   • `customer_contacts.email`  — the named people at that company
+ *
+ * An empty set is a refusal, never a licence to use whatever the caller sent.
+ */
+async function recipientsForCustomer(
+  c: Context<Env>,
+  customerId: string,
+): Promise<Set<string>> {
+  const orgId = getOrgId(c);
+  const out = new Set<string>();
+  const cust = await c.var.DB.prepare(
+    "SELECT email FROM customers WHERE id = ? AND org_id = ?",
+  )
+    .bind(customerId, orgId)
+    .first<{ email?: string | null }>();
+  const primary = (cust?.email ?? "").trim().toLowerCase();
+  if (primary) out.add(primary);
+
+  const contacts = await c.var.DB.prepare(
+    "SELECT email FROM customer_contacts WHERE customer_id = ? AND org_id = ?",
+  )
+    .bind(customerId, orgId)
+    .all<{ email?: string | null }>();
+  for (const row of contacts.results ?? []) {
+    const e = (row.email ?? "").trim().toLowerCase();
+    if (e) out.add(e);
+  }
+  return out;
+}
 
 // Minimal HTML escaper for the note we inline into the email body (no external
 // dep in this route). Covers the five characters that matter for injection.

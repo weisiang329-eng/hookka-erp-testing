@@ -18,6 +18,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import { runSelfApply } from "../lib/self-apply";
+import { ensureUserActiveOrgColumn } from "../lib/ensure-user-active-org";
 import type { Env } from "../worker";
 import { hasPermission, requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
@@ -217,6 +218,81 @@ async function loadOrganisations(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Per-user active organisation (BUG-2026-08-13-097).
+//
+// The active company used to live on `inter_company_config` — a SINGLETON row
+// (id = 1) — so it was GLOBAL mutable state: one operator switching to HOUZS
+// flipped the switcher label for every other signed-in user at the same time.
+// It now lives on `users.active_org_id`.
+//
+// What this is NOT: it is not, and never was, the tenant boundary.
+// `getOrgId(c)` (lib/tenant.ts) resolves the request's org from the SESSION's
+// `users.orgId` and never reads `inter_company_config` — so switching company
+// has never rescoped a single query. This field drives the sidebar switcher's
+// label + tick (sidebar.tsx:894/949) and the highlight ring on Settings →
+// Organisations (settings/organisations.tsx:329). Those are its only readers.
+// ---------------------------------------------------------------------------
+
+type UserActiveOrgRow = {
+  activeOrgId?: string | null;
+  active_org_id?: string | null;
+};
+
+/**
+ * This user's stored pick, or null. NEVER REJECTS — it is awaited inside the
+ * same `Promise.all` as the registry read, and a rejection there would drop the
+ * whole GET into the FALLBACK_ORGS path (two hardcoded companies replacing the
+ * real registry) over a cosmetic field. A missing column — the state of any
+ * environment where the self-apply has not run yet — is exactly that case.
+ */
+async function loadUserActiveOrgId(
+  db: D1Database,
+  userId: string | null,
+): Promise<string | null> {
+  if (!userId) return null;
+  try {
+    const row = await db
+      .prepare("SELECT active_org_id FROM users WHERE id = ? LIMIT 1")
+      .bind(userId)
+      .first<UserActiveOrgRow>();
+    // Dual-keyed per CLAUDE.md: the PG adapter folds `active_org_id` back to
+    // `activeOrgId` via column-rename-map.json, but the D1/stub path does not.
+    return row?.activeOrgId ?? row?.active_org_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Which organisation the switcher should show as active, given this user's own
+ * pick and the legacy global value.
+ *
+ * Precedence, and why:
+ *   1. the user's own pick — the whole point of the fix;
+ *   2. the legacy singleton — so a user who has NEVER switched sees exactly
+ *      what they saw before this deployed, instead of being snapped back to
+ *      the first company in the list;
+ *   3. the first visible organisation.
+ *
+ * Both stored ids are checked against the organisations this caller can
+ * actually see before being used. Without that check a pick that was later
+ * deleted, or a singleton pointing at another tenant's row, resolves to an id
+ * that matches nothing — and sidebar.tsx then prints its hardcoded
+ * "HOOKKA INDUSTRIES" label for a company that is not active. Stale rows are a
+ * new possibility precisely because the value is now per-user.
+ */
+export function resolveActiveOrgId(
+  visibleOrgIds: readonly string[],
+  userPick: string | null,
+  legacyGlobal: string | null,
+): string | null {
+  const visible = new Set(visibleOrgIds);
+  if (userPick && visible.has(userPick)) return userPick;
+  if (legacyGlobal && visible.has(legacyGlobal)) return legacyGlobal;
+  return visibleOrgIds[0] ?? null;
+}
+
 // Runtime self-apply of migration 0142 (organisations registry). Migrations do
 // NOT auto-apply on deploy, so on a prod where 0142 was never pasted the table
 // still carries the legacy CHECK (code IN ('HOOKKA','OHANA')) and lacks the new
@@ -288,18 +364,31 @@ app.get("/", async (c) => {
     (await hasPermission(c, "purchase-orders", "read"));
   let organisations: ReturnType<typeof rowToOrg>[];
   let cfg: InterCompanyConfigRow | null = null;
+  // The user's own switcher pick rides in the SAME Promise.all as the registry
+  // read, so the per-user lookup costs no extra serialised round-trip on an
+  // endpoint the sidebar calls on every page load. It resolves to null rather
+  // than rejecting (see loadUserActiveOrgId).
+  let userPick: string | null = null;
+  const userId =
+    (c.get as unknown as (k: string) => string | undefined)("userId") ?? null;
   try {
-    [organisations, cfg] = await Promise.all([
+    [organisations, cfg, userPick] = await Promise.all([
       loadOrganisations(c.var.DB, getOrgId(c)),
       c.var.DB
         .prepare("SELECT * FROM inter_company_config WHERE id = 1")
         .first<InterCompanyConfigRow>(),
+      loadUserActiveOrgId(c.var.DB, userId),
     ]);
   } catch {
     organisations = FALLBACK_ORGS;
     cfg = null;
+    userPick = null;
   }
-  const activeOrgId = cfg?.activeOrgId ?? organisations[0]?.id ?? null;
+  const activeOrgId = resolveActiveOrgId(
+    organisations.map((o) => o.id),
+    userPick,
+    cfg?.activeOrgId ?? null,
+  );
   if (!full) {
     // `interCompanyConfig` is withheld with the rest: `hookkaToOhanaRate` is
     // the inter-company transfer price. Its only reader is the Settings →
@@ -567,15 +656,29 @@ app.put("/", async (c) => {
       .bind(body.orgId, tenantId)
       .first<OrganisationRow>();
     if (!org) return c.json({ error: "Organisation not found" }, 404);
-    // ⚠️ KNOWN, DELIBERATELY NOT CHANGED (2026-08-13): `inter_company_config`
-    // is a SINGLETON row (`id = 1`), so "which company is active" is GLOBAL
-    // state — one user switching company flips it for every other user, in
-    // every tenant. Making it per-user (or per-session) is a product decision
-    // about how the switcher is meant to behave, not a defect to be fixed
-    // inside a security pass. Raised to the owner; left exactly as it was.
+    // BUG-2026-08-13-097 — FIXED HERE. This used to be
+    //   UPDATE inter_company_config SET active_org_id = ? WHERE id = 1
+    // on a SINGLETON row, so one user's switch flipped the switcher for every
+    // other signed-in user in every tenant. The pick is now the USER's.
+    //
+    // `inter_company_config.active_org_id` is deliberately left alone rather
+    // than kept in sync: it is the fallback for everyone who has not switched
+    // since this shipped (see resolveActiveOrgId), and writing it here would
+    // reintroduce the exact global flip this fix removes.
+    const actorId =
+      (c.get as unknown as (k: string) => string | undefined)("userId") ?? null;
+    if (!actorId) {
+      // A caller with a ROLE but no user identity (rbac gates on `userRole`)
+      // has nowhere to store a per-user preference. Returning 200 here would
+      // report a switch that reverts on the next page load.
+      return c.json({ error: "No user context for the active organisation" }, 401);
+    }
+    // Migrations are inert on deploy — the column exists in prod only because
+    // this is awaited BEFORE the first write (CLAUDE.md).
+    await ensureUserActiveOrgColumn(c.var.DB);
     await c.var.DB
-      .prepare("UPDATE inter_company_config SET active_org_id = ? WHERE id = 1")
-      .bind(body.orgId)
+      .prepare("UPDATE users SET active_org_id = ? WHERE id = ?")
+      .bind(body.orgId, actorId)
       .run();
     return c.json({ activeOrgId: body.orgId, organisation: rowToOrg(org) });
   }

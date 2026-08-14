@@ -2001,11 +2001,33 @@ without `organisations:read` also unhiding `/settings/organisations` in its menu
 (`nav-permissions.ts` maps that path to `organisations`, and `hiddenNavPrefixes` unhides on
 `:read`).
 
-`inter_company_config` is a **singleton row `id = 1`**. The org switcher writes
-`active_org_id` on that one row (`src/api/routes/organisations.ts:577`), so "which org is
-active" is global state shared by every user in every tenant, not a per-user preference.
-Left as-is deliberately on 2026-08-13 and raised to the owner: making it per-user is a
-product decision about how the switcher should behave, not a defect.
+**The active organisation is PER USER (BUG-2026-08-13-097).** It used to be written to
+`inter_company_config`, a **singleton row `id = 1`**, so one operator switching company
+flipped the switcher for every other signed-in user in every tenant. The switcher now writes
+`users.active_org_id` for the caller (`src/api/routes/organisations.ts:680`) and reads it
+back per request (`:256`). Resolution order is `resolveActiveOrgId` (`:285`): the user's own
+pick → the legacy singleton → the first visible org, with **both stored ids checked against
+the organisations this caller can see** (a pick can now go stale, and an unresolvable id
+makes `sidebar.tsx` print its hardcoded "HOOKKA INDUSTRIES" label for a company that is not
+active). Keeping the singleton as the second rung is what stops every mid-session user from
+being snapped to a different company on deploy — nothing writes it any more, and it is
+deliberately not dropped.
+
+**This field is NOT the tenant boundary, and never was.** `getOrgId(c)`
+(`src/api/lib/tenant.ts:109`) resolves the request's org from the session's `users.orgId`
+and never reads `inter_company_config`, so switching company has never rescoped a single
+query — despite `switchOrg` in `sidebar.tsx:444` doing a full `window.location.reload()`,
+which reads as though it should. `activeOrgId` drives exactly two things: the switcher's
+label + tick (`sidebar.tsx:894`/`:949`) and the highlight ring on Settings → Organisations
+(`settings/organisations.tsx:329`). **Open owner question:** `PUT /api/organisations` is
+gated on `organisations:update`, so SALES / HR / R&D see a switcher whose clicks 403 and are
+swallowed. That was defensible for a company-wide config; for a personal UI preference it is
+probably the wrong gate — not changed unilaterally.
+
+`users.active_org_id` reaches prod via `src/api/lib/ensure-user-active-org.ts` (awaited
+before the switcher's UPDATE — migrations are inert on deploy), DDL mirrored in
+`migrations-postgres/0226_user_active_org.sql`. Tests: `tests/user-active-org.test.mjs`,
+red-proved by `tests/user-active-org-red-proof.mjs`.
 
 ### `src/api/routes/customer-crm.ts` — CRM layer
 

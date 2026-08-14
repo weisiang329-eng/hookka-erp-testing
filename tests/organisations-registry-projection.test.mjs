@@ -169,12 +169,17 @@ function makeDb() {
   return { db: { prepare }, rows, writes };
 }
 
-function wrap(routeApp, { role, orgId = "hookka" }) {
+// `userId` became load-bearing with BUG-2026-08-13-097: the switcher's active
+// organisation is stored per user (`users.active_org_id`), so PUT { orgId } now
+// needs an actor to write it against. Every real request carries one —
+// auth-middleware stashes it before this router is reached.
+function wrap(routeApp, { role, orgId = "hookka", userId = "user-a" }) {
   const parent = new Hono();
   parent.use("*", async (c, next) => {
     c.set("DB", c.env?.DB);
     c.set("userRole", role);
     c.set("orgId", orgId);
+    c.set("userId", userId);
     await next();
   });
   parent.route("/", routeApp);

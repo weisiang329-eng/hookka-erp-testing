@@ -34,6 +34,75 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-097 — the company switcher was one global row, so switching company moved it for every other logged-in user at once `multi-tenant` `ui-frontend` `data-integrity` 🟢
+
+**Symptom.** An operator picks HOUZS in the sidebar company switcher. Every other signed-in
+user's switcher changes to HOUZS too, on their next page load, across all four organisations
+and every tenant — nobody having touched anything. Reported by the owner; fix authorised.
+
+**Root cause.** `inter_company_config` is a **singleton row `id = 1`**, and the active
+organisation was stored on it. `PUT /api/organisations { orgId }` ran
+`UPDATE inter_company_config SET active_org_id = ? WHERE id = 1`, and `GET /api/organisations`
+read that one row back for everyone. It was noted and deliberately left during the
+2026-08-13 security pass (the comment at `organisations.ts:570` said so) as a product
+decision rather than a defect.
+
+**What it did NOT do, which is the load-bearing finding.** This was never the tenant
+boundary. `getOrgId(c)` (`src/api/lib/tenant.ts:109`) resolves the request's org from the
+session's `users.orgId` and never reads `inter_company_config`, so **switching company has
+never rescoped a single query** — no route, no report, no cron. The blast radius is two
+readers: the switcher's label + tick (`sidebar.tsx:894`/`:949`) and the highlight ring on
+Settings → Organisations (`settings/organisations.tsx:329`). The only other reader of the
+singleton anywhere is `purchase-orders.ts:620`, and it reads `auto_create_mirror_docs`, not
+this column. So the damage was a confusing, wrong label — not cross-company data. The
+switcher's `window.location.reload()` (`sidebar.tsx:452`) reads as though it rescopes, and
+that appearance is most of why this looked worse than it was.
+
+**Fix.** The pick moved to `users.active_org_id`. `PUT` writes the CALLER's row
+(`organisations.ts:680`) and no longer touches the singleton; `GET` reads it back in the same
+`Promise.all` as the registry so the per-user lookup costs no extra serialised round-trip on
+an endpoint the sidebar hits on every page load. `resolveActiveOrgId` (`:285`) resolves
+the user's own pick → the legacy singleton → the first visible org.
+
+**Nobody's session changes on deploy.** The singleton is deliberately kept as the second rung
+and NOT dropped: a user who has never switched keeps seeing exactly what they saw before,
+and only moves when they themselves click. A mid-session user sees no change at all — there
+is no session state to migrate, `GET` simply starts answering per-user, and the first click
+after deploy writes that user's row and nobody else's. Nothing writes the singleton any more,
+so it freezes at its last pre-deploy value, which is precisely its job as a fallback.
+
+**Both stored ids are validated against the organisations the caller can actually see.** Stale
+picks are a NEW possibility once the value is per-user (the org may be deleted, or the
+singleton may point into another tenant), and `sidebar.tsx` prints a hardcoded
+"HOOKKA INDUSTRIES" label when `activeOrgId` matches nothing — i.e. an unresolvable id shows
+a company that is not active.
+
+**Schema.** Migrations are inert on deploy, so `users.active_org_id` reaches prod through
+`src/api/lib/ensure-user-active-org.ts`, awaited before the switcher's `UPDATE`; DDL mirrored
+in `migrations-postgres/0226_user_active_org.sql`. Nullable with no default on purpose — NULL
+means "never picked one", which is what selects the fallback. `tests/db-schema.json` was
+hand-edited to add the column (one line): the fixture can only be regenerated against prod,
+which this branch must not touch. **Re-run `node scripts/refresh-db-schema-fixture.mjs` after
+deploy.** (Noted in passing: that fixture is already stale — `totp_pending_logins` from
+migration 0225 is missing from it, which silently disables the guard for that whole table.)
+
+**Deliberately NOT changed.** `PUT /api/organisations` is still gated on
+`organisations:update`, so SALES / HR / R&D see a switcher whose clicks 403 and are swallowed
+by `switchOrg`'s empty catch. That gate was defensible when this was a company-wide config;
+now that it is a personal UI preference it is probably the wrong gate — but widening who may
+call `PUT` is a judgement call, so it is raised, not decided. The switcher not actually
+rescoping anything is the second, larger question underneath it.
+
+**Guard.** `tests/user-active-org.test.mjs`, 14 behavioural tests against the real handlers
+and a stub DB that applies binds positionally and models a `users` table. Red-proved by
+`tests/user-active-org-red-proof.mjs` (run by hand — it mutates source): 9 mutations, each
+naming the SPECIFIC test that must fail, all 9 red, 0 harness failures. Naming the test
+matters: the harness caught that "GET degrades to the legacy value" was passing against a
+deleted fallback chain, because the fixture's global value happened to equal the first
+organisation. The test was fixed, not the expectation.
+
+---
+
 ## BUG-2026-08-13-100 — every logged-in user, of every role, could read all four companies' TIN, registration number and registered address `security` `access-control` `multi-tenant` `C12` `C16` 🟢
 
 **Symptom.** None visible. `GET /api/organisations` answered every authenticated session with

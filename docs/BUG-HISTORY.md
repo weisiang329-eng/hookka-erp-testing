@@ -295,9 +295,138 @@ all-clears here twice this week.
 > per-PIECE counter (`production-builder.ts:786`), while `sales_order_items.lineNo` is
 > per-LINE. They agree only when every line has quantity 1 — so a join on it attaches WRONG
 > links precisely on multi-quantity orders, and would look entirely reasonable in review.
+## BUG-2026-08-13-097 — invoice_items gains `so_item_id`: the per-line link that makes an SO↔invoice audit possible at all `money` `invoices` `auditability` `data-integrity` `schema` 🟡 code done / 🔴 backfill NOT RUN, awaiting review
+
+> **STATUS: forward fill SHIPPED, backfill written but DELIBERATELY NOT EXECUTED.**
+> No existing row was changed. The dry-run planner is
+> `POST /api/invoices/backfill-so-item-links` (dry by default; `?execute=1` to write).
+
+The fix for BUG-2026-08-13-096, which identified the problem and correctly refused to
+patch the three invoices it had found by hand.
+
+**The premise in -096 was right about the disease and wrong about the cure.** It
+proposed populating the new column "from the DO item's own SO line", reasoning from
+`delivery_order_item_id` — the only link it had measured. But that column reaches
+**1.5%** of invoice lines, because `do-partial-invoice.ts` only added it recently.
+`invoice_items.production_order_id` reaches **92.6%** (2,526 of 2,728 rows, measured
+2026-08-02 under BUG-2026-07-17-001, whose backfill created them). A production order
+records which sales order it was made for, so it is the road out — and it is
+**per line**, which means a consolidated invoice resolves each line inside its OWN
+sales order. The "-096" precondition that *the invoice must map to exactly ONE sales
+order* is therefore unnecessary; it was an artefact of reasoning through the
+document-level `delivery_order_items.sales_order_no` string.
+
+**⚠ THE TRAP THAT WOULD HAVE WRITTEN WRONG LINKS AT SCALE.**
+`production_orders.lineNo` reads exactly like the sales-order line number. It is not.
+`_shared/production-builder.ts:786` binds **`poSequence`** into it — a counter
+incremented once per PIECE, not per line:
+
+```
+for (const item of sortedItems)      // an SO line
+  for (pieceIdx of 0..pieceCount)    // one production order per unit
+    poSequence++;                    // <- stored as production_orders.lineNo
+```
+
+while `sales_order_items.lineNo` is `idx + 1` per LINE (`routes/sales-orders.ts:2025`).
+The two agree **only when every line on the order has quantity 1**. A sales order with
+line 1 x qty 3 then line 2 x qty 1 produces production orders numbered 1, 2, 3, 4 — so
+a `JOIN ... ON po.lineNo = si.lineNo` would silently attach the second SO line to a
+line 4 that does not exist, and would look completely reasonable in review. Identity is
+therefore taken from the production order's own SPEC, never from its `lineNo`. Pinned
+by a source guard in `tests/invoice-so-item-link.test.mjs`.
+
+**The rule the resolver enforces** (`src/api/lib/invoice-so-item-link.ts`) — the
+owner's standing *a migration copies, never computes; ambiguous is SKIPPED*:
+
+| tier | condition | result |
+|---|---|---|
+| `exact` | inside the PO's OWN sales order, exactly ONE line matches product+size+fabric | link |
+| `code` | that key matches nothing (spec drift) AND exactly ONE line in that sales order carries the product code | link |
+| — | two or more candidates, none, or no PO link | **NULL** |
+
+It **counts claimants** and withdraws a key the moment a second one appears. This is a
+**deliberate divergence from `priceForItem`** (`do-value.ts`), which walks the same two
+tiers over the same rows but is built first-one-wins — for a PRICE any matching line's
+value will do; for an IDENTITY it will not. First-one-wins on identity *is*
+BUG-2026-07-17-001, where three invoice lines inherited one sales order's customer PO.
+Both behaviours are pinned, because unifying them would silently break one of the two,
+and the dangerous direction produces links that look perfectly fine.
+
+**Forward fill — every path that writes a PO-linked invoice line.** All four
+DO-sourced INSERTs are fed by `computeDoInvoiceLines`, so one field on `InvItem` covers
+them; the invoice PUT re-resolves from `production_order_id` instead of carrying the old
+value forward, so an edit heals a legacy line. Enumerated and pinned from disk (class
+C1: a fix applied to the file in front of the author leaves the structural clone next
+door carrying the bug).
+
+| path | covered | how |
+|---|---|---|
+| `_helpers.ts` DO-delivered auto-create | ✅ | `computeDoInvoiceLines` -> `InvItem.soItemId` |
+| `invoices.ts` POST (manual create) | ✅ | same builder |
+| `delivery-orders.ts` x2 (under-billed repair, invoice rebuild) | ✅ | same builder |
+| `invoices.ts` PUT (re-line / edit) | ✅ | re-resolved via `resolveSoItemIdsForPoIds` |
+| the bill-the-SO-lines fallback | ✅ **exact by construction** | it bills the SO lines themselves, so it stores `si.id` — the only path whose link cannot be wrong |
+| the bill-the-SO-header-total fallback | ⬜ n/a | produces no line rows at all |
+| `consignment-notes.ts` CN->invoice | ⬜ **deliberately NULL** | a consignment note has no sales order behind it and no `production_order_id`; there is nothing to link to, and inventing one would be the exact failure this column exists to prevent |
+
+**Backfill: written, DRY-RUN BY DEFAULT, NOT EXECUTED.**
+`POST /api/invoices/backfill-so-item-links` reports every line in one of seven outcome
+buckets (`exact`, `code`, `ambiguous`, `no-po-link`, `po-unknown`, `po-has-no-so`,
+`no-so-line`) with the sen value of each — because the whole finding of -096 is that a
+bare "0 items" concealed a 98.5% blind spot, and a planner answering "N linkable" and
+nothing else would repeat that mistake in the other direction. It writes only
+`so_item_id`, only over NULL, and only tier `exact` unless `?tiers=exact,code` is
+passed. No amount, quantity, price or status is touched by construction (owner
+2026-07-23 on the sibling backfill: 「切记不要动到金额」).
+
+**⚠ The numbers in this entry are STRUCTURAL, not measured.** No prod credentials were
+available in this session (`HOOKKA_PROD_DB_URL` unset), so the linkable/ambiguous split
+has **not** been run against the real book. The 92.6% is inherited from the 2026-08-02
+measurement recorded under BUG-2026-07-17-001 and must be re-queried, not repeated as
+fact — this repo's own rule (HOOKKA-GOTCHAS, "do not relay an unverified claim as
+fact"). Run the dry run and read its `counts` before believing any figure here.
+
+**Schema.** `invoice_items.so_item_id TEXT` (nullable, indexed, snake_case so no
+`column-rename-map.json` entry is needed). Migration `0226` is the RECORD; the
+load-bearing copy is `ensureInvoiceSoItemLinkColumn`, awaited at the top of
+`computeDoInvoiceLines` and the invoice PUT — deploys do not replay migration files
+here. It throws rather than degrading (class C9): `invoice-po-link.ts` next door is
+best-effort because a missing PO link only degrades a PRINTOUT, but this column is what
+an AUDIT reads, and an audit that silently loses its column reports "clean".
+
+**Tests.** `tests/invoice-so-item-link.test.mjs` — 19 assertions, and **all 17
+mutations proved RED** by reintroducing the bug, with single-line (EOL-agnostic) anchors
+and a byte-change assertion before each run. Three drafts were BLIND on the first pass
+and are recorded in the file: the blank-key test's fixture gave its three rows three
+distinct keys, so deleting the skip changed nothing observable; the report-completeness
+test searched the whole handler for the word `counts`, which appears six times, so
+deleting it from the returned payload still passed; and one mutation produced a false
+GREEN because three endpoints share the line `const execute = c.req.query("execute") ===
+"1"` and it hit the wrong one. A guard nobody has seen fail is not a guard.
+
+**Related:** BUG-2026-08-13-096 (the finding), BUG-2026-07-17-001 (the
+`production_order_id` link this stands on), BUG-2026-07-17-002 (the RM 440 divergence
+that still needs the owner — two of the three invoices are PAID).
+
+---
+
+## BUG-2026-08-13-096 — 98.5% of invoice lines carry no delivery-order link, so every SO↔invoice audit has been reading 1.5% of the data and reporting "clean" `money` `invoices` `auditability` `data-integrity` 🔴
 
 > **STATUS: IDENTIFIED, NOT FIXED. Scope is unknown and unknowable with the current
 > schema — that is the finding.** No data was changed. Raised to the owner 2026-08-13.
+>
+> **SUPERSEDED 2026-08-14 by BUG-2026-08-13-097**, which adds
+> `invoice_items.so_item_id` and fills it forward. Two claims below are corrected
+> there and should not be carried onward:
+> * *"the only route out is `delivery_order_item_id`"* — `production_order_id` is
+>   also on that table and is **92.6% populated** against this column's 1.5%. The
+>   1.5% figure is right; the conclusion drawn from it was not.
+> * *"backfill it where unambiguous — SINGLE-SO invoices"* — unnecessary. The PO
+>   link is per LINE, so a consolidated invoice resolves each line inside its own
+>   sales order; the single-SO restriction would have discarded good links.
+>
+> Step 3 below ("only THEN re-run the surcharge reconciliation") still stands, and
+> still cannot be run: -097's backfill is written but **has not been executed**.
 
 **Measured on PROD 2026-08-13** (read-only SQL via the assistant's `run_select_query`):
 

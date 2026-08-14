@@ -47,6 +47,13 @@ import {
 import { HOOKKA_LOGO_PNG_BASE64 } from "../../lib/hookka-logo-base64";
 import { computeInvoicePrintExtras } from "../../lib/invoice-print-extras";
 import { ensureInvoicePoLinkColumn } from "../../lib/invoice-po-link";
+// The per-line link back to the SALES ORDER line (BUG-2026-08-13-096) — what
+// makes an SO↔invoice audit able to see more than the 1.5% of the book that
+// `delivery_order_item_id` reaches.
+import {
+  ensureInvoiceSoItemLinkColumn,
+  resolveSoItemId,
+} from "../../lib/invoice-so-item-link";
 // The sales-side convert chain: per-line consumed counters + the DO-line link
 // on invoice_items, so one delivery order can be billed by several invoices and
 // every increment has its paired restore. See src/api/lib/do-partial-invoice.ts.
@@ -1324,6 +1331,16 @@ export type InvItem = {
   // line's invoiced_qty, and a void / delete / line-drop decrements the same
   // one. null on the two SO-level fallbacks below, which have no DO line.
   deliveryOrderItemId: string | null;
+  // The SALES ORDER LINE this bill line bills (BUG-2026-08-13-096). Resolved
+  // from `productionOrderId` — the production order records which SO it was
+  // made for, and the line is identified inside THAT sales order by spec, never
+  // by `production_orders.lineNo` (which is a per-PIECE counter, not the SO
+  // line number — see invoice-so-item-link.ts).
+  //
+  // null whenever the answer is not unique. An audit that cannot see a line
+  // must report "cannot see"; a wrong link would make it report "clean", which
+  // is exactly how 98.5% of the book went unaudited.
+  soItemId: string | null;
   productCode: string;
   productName: string;
   sizeLabel: string;
@@ -1378,6 +1395,10 @@ export async function computeDoInvoiceLines(
   // reads delivery_order_items.invoiced_qty and writes
   // invoice_items.delivery_order_item_id, so the self-apply is awaited here.
   await ensureDoPartialInvoiceColumns(db);
+  // BUG-2026-08-13-096 — and the same rule for `invoice_items.so_item_id`.
+  // This is the choke point every DO-sourced invoice INSERT flows through, so
+  // the self-apply is awaited here, before the first write of the column.
+  await ensureInvoiceSoItemLinkColumn(db);
   if (soIds.length === 0) return { invItems: [], computedTotal: 0, draws: [] };
 
   // BUG-2026-05-18-004 fix. Price every delivered item with the EXACT same
@@ -1488,6 +1509,14 @@ export async function computeDoInvoiceLines(
       id: genInvoiceItemId(),
       productionOrderId: di.productionOrderId ?? null,
       deliveryOrderItemId: di.id,
+      // Same index, same PO id, same instant as the price above — so the line's
+      // charge and the line it is audited against can never come from two
+      // different resolutions of "which SO line is this?".
+      soItemId: resolveSoItemId(
+        idx.soItemIdentity,
+        idx.poById,
+        di.productionOrderId,
+      ).soItemId,
       productCode: di.productCode ?? "",
       productName: di.productName ?? "",
       sizeLabel: di.sizeLabel ?? "",
@@ -1516,11 +1545,12 @@ export async function computeDoInvoiceLines(
     const soPh = soIds.map(() => "?").join(",");
     const soItemsRes = await db
       .prepare(
-        `SELECT productCode, productName, sizeLabel, fabricCode, quantity, unitPriceSen, lineTotalSen
+        `SELECT id, productCode, productName, sizeLabel, fabricCode, quantity, unitPriceSen, lineTotalSen
            FROM sales_order_items WHERE salesOrderId IN (${soPh})`,
       )
       .bind(...soIds)
       .all<{
+        id: string;
         productCode: string | null;
         productName: string | null;
         sizeLabel: string | null;
@@ -1542,6 +1572,12 @@ export async function computeDoInvoiceLines(
         // exactly why `freshWholeDo` gates this branch: an invoice that
         // consumes nothing must never be raised twice against one delivery.
         deliveryOrderItemId: null,
+        // …but this one IS exact, and for once by construction rather than by
+        // resolution: this branch bills the sales-order lines THEMSELVES, so
+        // the line being billed is the line it came from. No matching, no
+        // ambiguity, no chance of a wrong link. Ironically the fallback that
+        // has no DO link at all is the only path whose SO link cannot be wrong.
+        soItemId: si.id ?? null,
         productCode: si.productCode ?? "",
         productName: si.productName ?? "",
         sizeLabel: si.sizeLabel ?? "",
@@ -1784,8 +1820,8 @@ export async function buildDoDeliveredSoAndInvoice(
             `INSERT INTO invoice_items (
                id, invoiceId, productCode, productName, sizeLabel, fabricCode,
                quantity, unitPriceSen, totalSen, production_order_id,
-               delivery_order_item_id
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               delivery_order_item_id, so_item_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             item.id,
@@ -1805,6 +1841,9 @@ export async function buildDoDeliveredSoAndInvoice(
             // re-issued; one without it reads as a legacy whole-document bill
             // and locks the DO to itself (do-partial-invoice.ts).
             item.deliveryOrderItemId,
+            // BUG-2026-08-13-096 — the link an SO↔invoice audit reads. null
+            // when the SO line could not be identified UNIQUELY; never a guess.
+            item.soItemId,
           ),
       );
     }

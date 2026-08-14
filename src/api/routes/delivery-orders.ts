@@ -1311,8 +1311,8 @@ app.post("/backfill-fix-underbilled-invoices", async (c) => {
           c.var.DB.prepare(
             `INSERT INTO invoice_items (
                id, invoiceId, productCode, productName, sizeLabel, fabricCode,
-               quantity, unitPriceSen, totalSen, production_order_id
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               quantity, unitPriceSen, totalSen, production_order_id, so_item_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             it.id,
             inv.id,
@@ -1325,6 +1325,10 @@ app.post("/backfill-fix-underbilled-invoices", async (c) => {
             it.totalSen,
             // BUG-2026-07-17-001 — carry the DO's per-line link (see InvItem).
             it.productionOrderId,
+            // BUG-2026-08-13-096 — and the SO LINE it bills, so this rebuilt
+            // invoice is auditable against its sales order. null unless the SO
+            // line resolved uniquely (invoice-so-item-link.ts).
+            it.soItemId,
           ),
         );
       }
@@ -1670,8 +1674,8 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
           c.var.DB.prepare(
             `INSERT INTO invoice_items (
                id, invoiceId, productCode, productName, sizeLabel, fabricCode,
-               quantity, unitPriceSen, totalSen, production_order_id
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               quantity, unitPriceSen, totalSen, production_order_id, so_item_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             it.id,
             newId,
@@ -1684,6 +1688,10 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
             it.totalSen,
             // BUG-2026-07-17-001 — carry the DO's per-line link (see InvItem).
             it.productionOrderId,
+            // BUG-2026-08-13-096 — and the SO LINE it bills, so this rebuilt
+            // invoice is auditable against its sales order. null unless the SO
+            // line resolved uniquely (invoice-so-item-link.ts).
+            it.soItemId,
           ),
         );
       }

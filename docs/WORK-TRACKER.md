@@ -1128,7 +1128,7 @@ tab. Left alone; only the screens that reproduce were touched.
   `/maintenance/sofa-combos` has zero RUM rows.
 
 ## 2026-07-29 — FG sticker `+2S+2S` investigated → non-bug (stale print); logged to BUG-HISTORY
-- ✅ **Sticker `5530-2S+2S+2S+2S+2S` on SO-2607-089 (Houzs KL) — NOT a bug (BUG-2026-07-29-001).**
+- ✅ **Sticker `5530-2S+2S+2S+2S+2S` on SO-2607-089 (Houzs KL) — NOT a bug (BUG-2026-07-29-001b).**
   Owner「那么多 2S?」. SO has 1 sofa (`5530-2S` ×1) + 2 pillows. Direct prod-DB read confirmed the
   sofa's FAB_CUT job card now stores the correct collapsed label `5530-2S | (28) | M2402-6 | (FC)`,
   and `job_cards WHERE wip_label LIKE '%+2S+2S%'` = 0 DB-wide. The paper sticker is a pre-fix print

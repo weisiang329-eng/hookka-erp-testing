@@ -2602,7 +2602,7 @@ One test needed a real accommodation rather than a loosened pin: `tests/co-statu
 
 **Verified.** `tsc` clean; new `tests/contact-format-phone.test.mjs` (trunk-0 drop, no dial-code stacking, split→join idempotent, foreign codes, blank) — 5/5; updated `tests/contact-standardization.test.mjs` to the fixed expectation. All 137 customer/payment/contact/phone tests green.
 
-## BUG-2026-08-04-001 — Customer Outstanding didn't refresh after a payment; no Available headroom shown `ui-frontend` `data-integrity` 🟢
+## BUG-2026-08-04-001b — Customer Outstanding didn't refresh after a payment; no Available headroom shown `ui-frontend` `data-integrity` 🟢
 
 **Symptom.** Recording a customer receipt did not update the customer's Outstanding on the Customers list, and there was no "available credit" figure at all.
 
@@ -2971,7 +2971,7 @@ gets a price column, per tier, no code change. Pinned by `tests/sofa-size-column
 
 ---
 
-## BUG-2026-07-29-001 — FG box sticker showed `5530-2S+2S+2S+2S+2S` for a 1-sofa SO — stale physical print, DB already correct (non-bug) `production` `fg-sticker` 🟢
+## BUG-2026-07-29-001b — FG box sticker showed `5530-2S+2S+2S+2S+2S` for a 1-sofa SO — stale physical print, DB already correct (non-bug) `production` `fg-sticker` 🟢
 **Owner-reported (2026-07-29, 「那么多 2S?」) on a Houzs KL box — SO-2607-089, model 5530-2S.**
 The FG sticker's WIP line read `5530-2S+2S+2S+2S+2S` (five 2S), but the SO has exactly **one**
 sofa (`5530-2S`, qty 1) plus 2 long pillows (accessory). Owner's instinct — "this was fixed
@@ -3972,7 +3972,7 @@ detail modal itself cannot resolve (April-era DO display gap, cosmetic).
 
 ---
 
-## BUG-2026-07-05-001 — Mobile Production / Warehouse / Delivery search couldn't find a record by customer PO / SO / our Company SOID `ui-frontend` `mobile` `search`
+## BUG-2026-07-05-001b — Mobile Production / Warehouse / Delivery search couldn't find a record by customer PO / SO / our Company SOID `ui-frontend` `mobile` `search`
 
 🟢 **Fixed on main**
 

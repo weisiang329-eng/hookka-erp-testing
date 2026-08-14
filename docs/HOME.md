@@ -1,5 +1,10 @@
 # Hookka ERP — Docs Home
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** — links updated for the doc-vs-code reconciliation.
 > **Check the `Last verified:` line under any doc's title before trusting it.**
 > No line, or an old date, means UNVERIFIED — read the code first.
@@ -15,7 +20,7 @@ any folder.
 - [[DOCS-INDEX]] — the full documentation index
 
 ## Product & domain reference
-- [[MODULES]] — module-by-module product reference (what each does)
+- [[CODEBASE-MAP]] — module-by-module code + product reference. (`[[MODULES]]` was REMOVED 2026-08-14: it resolves to `docs/archive/MODULES.md`, which `LLM-CONTEXT-STRATEGY.md:76` says outright not to load — it stopped being true around 2026-04/05 and still describes a `/portal` that no longer exists.)
 - Domain packs (`context-packs/`): [[architecture]] · [[backend]] · [[frontend]] · [[database]] · [[core-flow]] · [[security]]
 - [[API]] (generated — `node scripts/gen-api-docs.mjs`) · [[DESIGN-SYSTEM]] · [[UI-CONVENTIONS]] · [[BUG-HISTORY]] · [[KNOWN-ISSUES]]
 
@@ -35,4 +40,4 @@ Verified, kept-fresh; each has function→line, flows, gotchas, common tasks.
 
 ## Find fast
 - [[ONBOARDING-PATH]] — how to get productive without grepping (the reading order)
-- [[SYMBOLS]] — API endpoint index; Ctrl-F the path instead of grepping
+- [[API]] — **generated** endpoint index (`node scripts/gen-api-docs.mjs`); Ctrl-F the path instead of grepping. (`SYMBOLS.md` was DELETED 2026-08-13 — ~75% of its line offsets were wrong. This link outlived it by a day.)

@@ -26,6 +26,19 @@
 > 4,139 tests / 0 fail.
 
 > **Last verified: 2026-08-14** — restamped on branch
+> **Last verified: 2026-08-14 on branch `docs/docs-vs-code-audit`** (prose audit vs source).
+> **C20 row 3 is CLOSED, not open.** It read *"⬜ open, and it is the NEXT one"* about
+> `job_cards.actual_minutes` while `docs/context-packs/HOOKKA-GOTCHAS.md` — corrected by the
+> owner the same day — says that column equalling `est_minutes` is standard costing working as
+> designed and *"Do not 'fix' it."* Two required-reading docs, opposite orders, one column.
+> A scope box now caps the class so it cannot re-swallow the costing model. Verified separately
+> in this pass and **still accurate**: every `tests/*.test.mjs` path this file cites exists (0
+> missing); C15 row 34 (`kpi_periods` has no writer — `who-writes.mjs` finds only the
+> `CREATE TABLE` in `ensure-kpi-tables.ts:40`); C15 row 31 (all three
+> `INSERT INTO attendance_records` sites bind the literal `'PRESENT'` and nothing writes
+> `'ABSENT'`). See `docs/DOCS-VS-CODE-AUDIT.md` rows D12–D13.
+>
+> **Previously verified: 2026-08-14** — restamped on branch
 > `fix/on-time-delivery-and-decisions`: **C15 gains rows 39–41** (the Hookka Report's
 > on-time delivery %, the Daily Report's inability to say "I could not check", and the
 > customer-concentration denominator) and a **seventh corollary** — audit the DENOMINATOR
@@ -1290,6 +1303,15 @@ number reaches the database?*
 
 ## C20 — a measurement thrown away at the moment of capture
 
+> **SCOPE, set by the owner 2026-08-14.** This class is about a value the code **held and
+> discarded** (row 1: the completion instant). It is **NOT** a licence to treat standard costing
+> as a defect. Hookka credits a completing worker the **BOM standard time** on purpose and does
+> **not** compute elapsed start→end duration, so `production_time_minutes = est_minutes =
+> actual_minutes` is the model working as designed. Row 3 below was mis-filed as open on that
+> basis and is now closed. Read
+> [`docs/context-packs/HOOKKA-GOTCHAS.md`](context-packs/HOOKKA-GOTCHAS.md) §"PRODUCTION TIME IS
+> STANDARD TIME, BY DESIGN" before adding a row here about a production-time column.
+
 **Shape.** The code holds a precise value, uses a coarser projection of it for the column it is
 writing, and never stores the precise one. `nowIso.split("T")[0]` is the canonical instance: the
 full instant is in a local variable, one line above the write, and only the date survives. The
@@ -1309,10 +1331,12 @@ this leaves the screen saying "—" forever.
 1. **It never errors and never looks lossy.** `completed_date` is date-only by design; the
    truncation is the intended shape for THAT column. The defect is the absence of a second
    column, and an absent column has no text to grep for.
-2. **The count looks healthy.** `job_cards.actual_minutes` is non-null on 4,289 rows and every
-   one is byte-identical to that card's `est_minutes`. Populated, plausible, and carrying no
-   information — the same trap C15's closing note warns about: check the DISTRIBUTION, not the
-   NULL rate.
+2. **The count looks healthy.** `job_cards.actual_minutes` is non-null on 4,289 rows (measured
+   2026-08-14; **UNMEASURED since**) and every one is byte-identical to that card's
+   `est_minutes`. Populated, plausible, and carrying no *additional* information — the shape
+   C15's closing note warns about: check the DISTRIBUTION, not the NULL rate. **Here the
+   distribution is the answer, not the bug** (see the scope box above); keep the technique,
+   drop the verdict.
 3. **The other end of the interval is fine.** `distributed_at` stores a full instant, so the
    data model LOOKS like it supports duration maths. Only when you try to subtract do you find
    one end rounded to the day.
@@ -1336,7 +1360,7 @@ the coarse one, never instead of it.* Three corollaries, each of which cost some
 |---|---|---|---|
 | 1 | the completion INSTANT — 14 `.slice(0, 10)` / `split("T")[0]` truncations across the production + worker write paths | `job_cards.completed_date` | ✅ 2026-08-14 (BUG-2026-08-13-120) — `job_cards.completed_at` added beside it, written by the four observing paths only |
 | 2 | `attendance_records.production_time_minutes = working_minutes × 0.85` — the clocked span was recorded, the productive part of it never was | `attendance.ts` | ✅ 2026-08-14 by a separate change (BUG-2026-08-13-103, filed under C15 row 28). Listed here because it is the SAME root: a punch measures presence, and no writer ever measured production, so the only available figure was a ratio of the one number that WAS captured. That fix removed the false figure; **row 1 is what gives the replacement something real to divide** |
-| 3 | `job_cards.actual_minutes` — written as a copy of `est_minutes` by every path that sets it, so the column exists but measures nothing | `import-completion/_shared.ts` and the cascade backfills | ⬜ open, and it is the NEXT one: once row 1 has accumulated data, this column has a real source for the first time. Do not "fix" it by computing a duration for historical rows |
+| 3 | `job_cards.actual_minutes` — written as a copy of `est_minutes` by every path that sets it (`import-completion/_shared.ts:493` → `jc.productionTimeMinutes \|\| jc.estMinutes`; `completion-cascades.ts:424,858` and `wip-fixes.ts:116,456` → `productionTimeMinutes ?? estMinutes ?? 0`) | `import-completion/_shared.ts` and the cascade backfills | ❌ **NOT A DEFECT — closed by owner ruling, 2026-08-14.** Hookka runs **standard costing**: the BOM time IS the production hours, and a completing worker is credited that standard time; elapsed start→end duration is deliberately not computed. So `actual_minutes = est_minutes` is the intended model, not a copy someone forgot to replace. **Do not "fix" it** — read [`docs/context-packs/HOOKKA-GOTCHAS.md`](context-packs/HOOKKA-GOTCHAS.md) §"PRODUCTION TIME IS STANDARD TIME, BY DESIGN" before touching this column. *(This row was flagged OPEN — "the NEXT one" — until 2026-08-14, which ordered the opposite of what GOTCHAS orders — two required-reading docs pointing opposite ways on one column. Reopening it is the owner's call, not an engineer's.)* |
 | 4 | the rest of the app | ⬜ unswept. The shape to look for is a `.slice(0, 10)` / `split("T")[0]` / `Math.round` / `toFixed` applied to a value the code obtained precisely, where nothing else stores the precise form |
 
 **Enforced by** `tests/job-card-completed-at.test.mjs`. Four things, all EOL-agnostic (these are

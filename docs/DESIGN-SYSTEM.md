@@ -1,5 +1,10 @@
 # Design System
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/lib/design-tokens.ts`, `src/index.css`,
 > `src/components/ui/index.ts`, `src/components/ui/status-badge.tsx`,
 > `src/components/ui/badge.tsx`, `src/components/ui/button.tsx`,
@@ -170,7 +175,14 @@ enforces enum coverage at compile time.
 
 ### `<PageHeader>`
 
-Every route-level page uses this. No exceptions.
+Every **list / route-level** page uses this.
+
+**Corrected 2026-08-14 — this said "Every route-level page uses this. No exceptions."** Record
+DETAIL pages use `<ObjectPageHeader>` instead (`src/components/ui/object-page-header.tsx`,
+imported by path, not via the barrel): it adds `backTo`/`onBack`, `badges` and `pager`, and
+renders the title at `text-xl` rather than PageHeader's `text-2xl`. `src/pages/sales/detail.tsx`
+is the reference — it imports `ObjectPageHeader` and never mentions `PageHeader`. Consistent
+with `UI-CONVENTIONS.md` §1/§4 and `UI-DATA-DOCUMENT-STANDARDS.md:107`.
 
 ```tsx
 <PageHeader
@@ -273,7 +285,7 @@ From `src/components/ui/` (import via the barrel
   variants this doc used to list have never existed on this component. `variant="status"`
   also requires the separate `status` prop; it calls through to `getStatusColor()` in
   `src/lib/utils.ts:87`.
-- **`Button`** — CVA variants (`default`, `ghost`, `outline`, `destructive`,
+- **`Button`** — **SEVEN** CVA variants (`button.tsx:11-19`), not five: `default`, **`primary`** (brand gold `#6B5C32` — use this for the brand call to action, never a hand-rolled `bg-[#6B5C32]`), **`secondary`** (`#F0ECE9`), `ghost`, `outline`, `destructive`,
   `link`) + sizes (`default`, `sm`, `lg`, `icon`).
 - **`Card`, `CardHeader`, `CardTitle`, `CardDescription`, `CardContent`** —
   brand-coloured surface + heading. **Corrected 2026-08-13: `Card` has no `variant` prop.**
@@ -380,8 +392,11 @@ for free. The conventions:
 - **Muted caption** — `text-xs text-[#8A7F73]`
 - **Table cell header** — `text-xs font-medium uppercase tracking-wide text-[#6B7280]`
 - **Section gap** — `space-y-6` on the page root
-- **Card padding** — `p-6` for standard, `p-4` for dense (handled by
-  `<Card>` variants)
+- **Card padding** — `p-6`, dropping to `p-4` below the `md` breakpoint. This is
+  **responsive, not a variant**: `max-md:p-4` is baked into `CardHeader` (`card.tsx:17`)
+  and `CardContent` (`:38`). `<Card>` has **no `variant` prop and no `cva`** — pass
+  `className` to override. *(Corrected 2026-08-14: this said "handled by `<Card>` variants",
+  contradicting this same doc's correction ~100 lines above.)*
 
 Page-level spacing convention:
 

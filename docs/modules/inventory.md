@@ -1,7 +1,12 @@
 # Inventory — Module Guide
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](../DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/pages/inventory/*`, `src/api/routes/{inventory,inventory-wip,raw-materials,fg-units,fabric-tracking,fabrics,warehouse,stock-adjustments,stock-value,rm-batches,stock-accounts,_fabric-cascade}.ts`, `src/dashboard-routes.tsx`, `src/api/worker.ts`, and `tests/`.
-> Corrected 2026-08-13: the route mounts are `worker.ts:1239-1240` (not 1135-1146/:1225); `fg-units.ts` is 1,216 lines (not 918) and its `/scan` handler is at :1047 (not :801); `dashboard-routes.tsx` registers `/inventory*` at :391-394. `GET /api/inventory/fg-source` confirmed **gone** from the tree. Every other anchor verified within ±30 lines.
+> Corrected 2026-08-13: the route mounts are `worker.ts:1240-1241` (not 1135-1146/:1225); `fg-units.ts` is 1,216 lines (not 918) and its `/scan` handler is at :1047 (not :801); `dashboard-routes.tsx` registers `/inventory*` at :391-394. `GET /api/inventory/fg-source` confirmed **gone** from the tree. Every other anchor verified within ±30 lines.
 
 > Self-navigating docs (L2). Repo-wide map: [[CODEBASE-MAP]]. Never grep the whole repo — use the file:line below.
 
@@ -15,7 +20,7 @@ Read-mostly stock visibility across the three stages of manufacturing: **Finishe
   - `/inventory/stock-value` → `src/pages/inventory/stock-value.tsx` (`StockValuePage` — valuation snapshots)
   - `/inventory/adjustments` → `src/pages/inventory/adjustments.tsx` (`StockAdjustmentsPage`)
   - Routes registered in `src/dashboard-routes.tsx:391-394`
-- **API routes** (mounted in `src/api/worker.ts:1239-1240`; `/wip` MUST mount before `/inventory`)
+- **API routes** (mounted in `src/api/worker.ts:1240-1241`; `/wip` MUST mount before `/inventory`)
   - Aggregate read + drill-downs → `src/api/routes/inventory.ts` (661 lines)
   - WIP derived view → `src/api/routes/inventory-wip.ts` (761) — mounted at `/api/inventory/wip`
   - RM CRUD + dup-code toggle → `src/api/routes/raw-materials.ts` (776)
@@ -39,7 +44,7 @@ Read-mostly stock visibility across the three stages of manufacturing: **Finishe
 - Upstream feeders: `production_orders` / `job_cards` / `grns` / `cost_ledger` / `delivery_hubs`.
 
 ## Core flows
-1. **3-tab aggregate read** — `GET /api/inventory` `inventory.ts:148` returns `{finishedProducts, wipItems, rawMaterials}`. `finishedProducts.stockQty` is hard-coded 0 (`:161-164`); the real FG count comes separately.
+1. **3-tab aggregate read** — `GET /api/inventory` `inventory.ts:148` returns `{finishedProducts, wipItems, rawMaterials}`. `finishedProducts.stockQty` is deliberately **`null`** (`:215-227`) — NOT `0`. `0` asserts "nothing on hand"; `null` means "not computed by this endpoint". Consumers must render `—` and must NEVER coerce with `?? 0` (BUG-2026-08-13-014, which printed RM 0.00 on five screens). The real FG count comes from `/fg-stock`.
 2. **FG stock derivation** — `GET /api/inventory/fg-stock` `inventory.ts:537` runtime-creates `inventory_fg_stock_snapshot` (`CREATE TABLE IF NOT EXISTS` at `:548`) then serves a cache-aside snapshot (`withSnapshot`, `../lib/snapshot`) computed from `production_orders`/`fg_units`. FE consumes it as deltas — this replaced the old client-side `deriveFGStock` (now in shared `@/lib/fg-stock`).
 3. **WIP derivation** — `GET /api/inventory/wip` `inventory-wip.ts:159` projects non-zero `wip_items` rows, walking dept sequence. FE also derives its own view via `deriveWIPFromPO` (`index.tsx:325`) + `mergeSofaWIPSets` (`:548`, one synthetic row per SO+fabric for sofas).
 4. **Shortage forecast** — `GET /api/inventory/shortage-forecast` `inventory.ts:225` walks CONFIRMED/IN_PRODUCTION SOs, sums per-RM BOM consumption via `collectBomMaterials` (`:205`), subtracts `balanceQty`, adds incoming-PO qty (≤ today+14d), returns `shortBy > 0`.
@@ -72,10 +77,10 @@ Read-mostly stock visibility across the three stages of manufacturing: **Finishe
 | Stock value snapshots | `stock-value.ts:58/72/185` | list/POST/PUT valuation |
 
 ## Gotchas
-- **FG and WIP quantities are DERIVED, not stored.** Aggregate `GET /api/inventory` (`:148`) returns `stockQty:0` for FG; the real count is the `/fg-stock` snapshot (server, `:537`) or `deriveFGStock` in shared `@/lib/fg-stock`. WIP comes from `job_cards`/`production_orders` (`inventory-wip.ts` + `deriveWIPFromPO`). Changing production status models moves these counts.
+- **FG and WIP quantities are DERIVED, not stored.** Aggregate `GET /api/inventory` (`:190`) returns `stockQty: null` for FG (it was `0` until BUG-2026-08-13-014 — never re-introduce `?? 0`); the real count is the `/fg-stock` snapshot (server, `:537`) or `deriveFGStock` in shared `@/lib/fg-stock`. WIP comes from `job_cards`/`production_orders` (`inventory-wip.ts` + `deriveWIPFromPO`). Changing production status models moves these counts.
 - **`fabrics.ts` is DEPRECATED** — POST/PUT/DELETE return HTTP 410 (`fabrics.ts:67-69`). All fabric mutation goes through `fabric-tracking.ts`. Don't add write logic to `fabrics.ts`.
 - **Dup-code unique index is intentionally OFF.** `ensureDupCodesUnlocked` (`raw-materials.ts:47`) keeps it off for distinct items sharing a code (BO315-21/23, 9MM AA/AB). `_unlock`/`_relock` (`:707` and just below) are one-shots — don't relock without owner sign-off.
-- **fg-units one-shots + public GET.** `backfill-dedupe-fg-units` (`:670`) / `backfill-hub` (`:796`) are migration endpoints; the list/get support optional-Bearer public access. COMPLETED / non-PENDING `fg_units` are inviolate.
+- **fg-units one-shots + public SINGLE-UNIT GET.** `backfill-dedupe-fg-units` (`:670`) / `backfill-hub` (`:796`) are migration endpoints. **Only `GET /:id` is auth-bypassed** — `FG_UNIT_PUBLIC_GET_RE = /^/api/fg-units/[^/]+$/` (`auth-middleware.ts:128`), whose comment says it outright: *"only the single-unit GET is public … otherwise anyone on the internet can dump inventory"*. It soft-auths to pick a stripped public shape vs the full one. `GET /` and every write require auth (`GET /` calls `getOrgId(c)`, which throws without a session). COMPLETED / non-PENDING `fg_units` are inviolate.
 - **Adjustments write two tables together.** `stock_adjustments` + `stock_movements` are inserted in one batch inside `POST /` (`stock-adjustments.ts:209`); keep `unitCostSen`/`caseId` on the adjustment. Runtime `ensureStockAdjustmentColumns` (`:89`) self-applies `caseid`.
 - **`rack_items` has TWO writers.** The `/r/` rack-QR stock-in AND `applyPackingRack` (`src/api/lib/packing-rack-write.ts`) both mirror rows; they share `packingPieceIdentity` (`src/api/lib/packing-piece-identity.ts`) so they converge on ONE row. Don't introduce a third identity formula. Status recomputed on read/write via `computeRackStatus` (`warehouse.ts:91`).
 - **`_fabric-cascade.ts` is not mounted** — underscore-prefixed internal helper, not a Hono router (covered by `tests/cascade-fc-aggregator.test.mjs`).

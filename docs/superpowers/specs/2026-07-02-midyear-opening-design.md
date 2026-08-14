@@ -1,6 +1,11 @@
 # Mid-Year Opening Support — Design (2026-07-02)
 
-> **Last verified: 2026-08-13** against the `POST /opening-balance/post` handler at `src/api/routes/accounting.ts:12452` and a repo-wide search for `opening_doc_includes` / `openingDocIncludes`.
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](../../DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
+> **Last verified: 2026-08-13** against the `POST /opening-balance/post` handler at `src/api/routes/accounting.ts:12532` and a repo-wide search for `opening_doc_includes` / `openingDocIncludes`.
 > Corrected 2026-08-13 — **this spec is HALF SHIPPED; the two features have opposite status:**
 > - **Feature 1 (opening form accepts P&L accounts): SHIPPED.** The `!["ASSET","LIABILITY","EQUITY"].includes(acct.type)` rejection is gone from the handler; the SDC/SCC control-account block, one-side-only check and balance check all survive as specced.
 > - **Feature 2 (opening include-list for pre-opening docs): NOT BUILT.** `opening_doc_includes` appears **nowhere** in `src/` or in `migrations-postgres/` — no table, no `ensureOpeningDocIncludes`, no route, no "Pre-opening supplier invoices" card. The 36 "Keep"-list PIs (RM 42,442.40) therefore still do **not** appear in creditor aging.

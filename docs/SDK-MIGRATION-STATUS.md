@@ -1,6 +1,11 @@
 # SDK Migration Status — P5.1–5.6 Audit
 
-> **Last verified: 2026-08-13** against `src/lib/api/` (client.ts, request.ts, cache.ts, errors.ts, resources/), `src/lib/safe-json.ts`, and a scan of all 174 files under `src/pages/`.
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
+> **Last verified: 2026-08-13** against `src/lib/api/` (client.ts, request.ts, cache.ts, errors.ts, resources/), `src/lib/safe-json.ts`, and a scan of all **194** files under `src/pages/` (re-counted 2026-08-14; the doc said 174).
 > Corrected 2026-08-13: the **decision still holds and the headline claim is still true** — 0 of 174 page files import `@/lib/api`. The page counts were stale: the doc said "49 pages use fetchJson + Zod"; measured today it is 88 pages using `useCachedJson` and 14 using `fetchJson` (the two overlap). The `safe-json` consumer list was also wrong: it is now 3 files, not 5, and two names changed — `src/pages/quality.tsx` and `src/pages/analytics/forecast.tsx` no longer import it, `src/pages/maintenance/sofa-combos.tsx` newly does, and `src/pages/dashboard/index.tsx` does not exist at all.
 
 > **Last updated**: 2026-04-25
@@ -14,9 +19,9 @@ The unified API SDK (`src/lib/api/`) landed in commit `fecca6d` (Phase B.1). Tas
 Audited 2026-04-25, re-measured 2026-08-13:
 
 - The SDK exists and is well-scaffolded (10 resource modules covering 22 domains).
-- **Zero pages currently import from `@/lib/api`.** (Still true on 2026-08-13 — 0 of 174 page files.)
+- **Zero pages currently import from `@/lib/api`.** (Re-verified 2026-08-14 — **0 of 194** page files.)
 - **~88 pages use `useCachedJson` and 14 use `fetchJson`** (the "legacy" path). The
-  original "49 pages" figure was a 2026-04-25 count; the page tree has since grown to 174 files.
+  original "49 pages" figure was a 2026-04-25 count; the page tree has since grown to **194** files (2026-08-14).
 - The "legacy" path is itself the result of a deliberate TS-cleanup migration (commits `9dc583f`, `1fcd468`, `745801a`, `1b4619b`) that replaced raw `fetch + as Foo[]` casts with Zod-validated parses.
 
 Both paths are type-safe. The SDK provides incremental ergonomic wins (autocomplete on resource names, automatic cross-prefix cache invalidation, single `ApiError` enum). It does NOT fix any open bug or unlock any blocked feature.

@@ -1,5 +1,10 @@
 # LLM Context Strategy
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `docs/context-packs/` (architecture, frontend,
 > backend, database, core-flow, security — all 6 named packs exist, plus
 > `HOOKKA-GOTCHAS.md`), `README.md`, `docs/ARCHITECTURE.md`, `docs/API.md`,
@@ -41,8 +46,13 @@ Before loading many files, classify the task using `docs/AI-DEVELOPMENT-MODES.md
 
 1. Read `README.md`, `docs/DOCS-INDEX.md`, and `docs/ARCHITECTURE.md` only when the task is broad or architectural.
 2. For a feature request, read the matching context pack first, then only the page, route, lib, migration, and test files named by that pack.
-3. Prefer targeted search commands over opening large files end-to-end:
-   - `rg -n "<api path>|<table>|<component>|<status>" src docs tests migrations-postgres`
+3. Prefer the MAP over search — `docs/CODEBASE-MAP.md` then `docs/API.md` hand you
+   `file:line` directly. **Do NOT `rg` across `src`/`tests` as a whole: it times out on
+   this repo (2,122 tracked files), which is what `ONBOARDING-PATH.md:50`,
+   `DOCS-INDEX.md:16` and `HOME.md:11` all say. This line used to recommend exactly
+   that whole-tree search — corrected 2026-08-14.** If you must search, scope it to one
+   module:
+   - `rg -n "<symbol>" src/pages/<module> src/api/routes/<module>*.ts`
    - `rg --files src/pages/<module> src/api/routes tests | sort`
 4. Do not ask the model to "read everything" unless the deliverable is an audit report. For implementation, ask it to read the smallest module slice.
 5. When the model discovers another required file, it should explain why that file is needed before loading many more files.

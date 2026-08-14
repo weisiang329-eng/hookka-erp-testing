@@ -1,5 +1,10 @@
 # Employees & Payroll — Module Guide
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](../DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/pages/employees.tsx`, `src/lib/labor-engine.ts`, `src/lib/costing.ts`, `src/api/routes/{workers,worker,worker-auth,payslips,payroll,payroll-hour-deductions,working-hour-entries,attendance,departments,department-performance}.ts`, and `tests/labor-engine.test.mjs`.
 > Corrected 2026-08-13: `employees.tsx` is 11,746 lines (was 11002) and every tab-component anchor had drifted 130–740 lines — `EmployeesPage` is at **:11424**, not :10684. `worker.ts` is 4,130 lines (was 3539), `payslips.ts` 1,353 (was 1095), `department-performance.ts` 807 (was 680). All `labor-engine.ts` anchors were within ~45 lines and are refreshed to exact.
 
@@ -37,7 +42,7 @@ Owns the whole workforce lifecycle: the **employee master** (workers + effective
 - `departments` — department master (`isProduction` flag gates the efficiency denominator); `leaves`, `worker_issues`, `public_holidays` (via `kv_config['public_holidays']`).
 
 ## Core flows
-1. **PIN login → token** — `worker-auth.ts` `POST /login` **:124**. First login with `firstTimePin` registers the PIN; SHA-256 (`hashPin`, `src/api/lib/auth-utils.ts`); legacy cleartext rows rewritten on match; brute-force throttle 10/15 min; `must_reset` gate forces 6-digit reset. Every worker-app request then carries `X-Worker-Token`, resolved by `resolveWorkerToken` (`worker-auth.ts:337`) via `getWorker` (`worker.ts:147`), which also 403s any non-ACTIVE worker (locks a resigned phone mid-session).
+1. **PIN login → token** — `worker-auth.ts` `POST /login` **:124**. First login with `firstTimePin` registers the PIN; SHA-256 (`hashPin`, `src/api/lib/auth-utils.ts`); legacy cleartext rows rewritten on match; brute-force throttle 10/15 min; `must_reset` gate forces 6-digit reset. Every worker-app request then carries `X-Worker-Token`, resolved by `resolveWorkerToken` (`worker-auth.ts:337`) via `getWorker` (`worker.ts:160`), which also 403s any non-ACTIVE worker (locks a resigned phone mid-session).
 2. **Clock / dept-scan** — `worker.ts` `POST /clock` **:1025** (CLOCK_IN/OUT, optional geo + selfie), `POST /dept-scan` **:1288**, `GET /today` **:362**. Feeds working-hour capture and attendance.
 3. **Payslip generation (the engine)** — `payslips.ts` `POST /` **:762** calls `computeMonthlyLabor` (`labor-engine.ts:557`) once per worker (`:1006`); `GET /projected` **:503** runs the IDENTICAL engine for all ACTIVE workers (`:640`). Salary resolved via `effectiveSalarySenForMonth` (`labor-engine.ts:408`); statutory via `calcStatutory` (`payslips.ts:212`); per-day absence/OT detail via `buildDayDetailForPeriod` (`:273`). `payroll.ts POST /` **:137** is the run-header guard (blocks double-generate).
 4. **Day-typed OT** — inside `computeMonthlyLabor` (`labor-engine.ts:557`), OT hours split into weekday(1.5×)/Sunday(2×)/holiday(3×) buckets; payslips persist `otWeekday/Sunday/HolidayPaySen`. Holidays from `kv_config['public_holidays']`.
@@ -65,8 +70,8 @@ Owns the whole workforce lifecycle: the **employee master** (workers + effective
 | `computeMonthlyLabor` call sites | `src/api/routes/payslips.ts:640 / 1006` | Projected (all) + generate (per worker) |
 | `calcStatutory` / `buildDayDetailForPeriod` | `src/api/routes/payslips.ts:212 / 273` | EPF/SOCSO/EIS/PCB + per-day detail |
 | `POST /login` / `resolveWorkerToken` | `src/api/routes/worker-auth.ts:124 / 337` | PIN login + token resolution |
-| `getWorker` (token gate) | `src/api/routes/worker.ts:147` | X-Worker-Token → ACTIVE worker or 401/403 |
-| `POST /clock` / `POST /dept-scan` | `src/api/routes/worker.ts:1025 / 1288` | Clock in/out + department scan |
+| `getWorker` (token gate) | `src/api/routes/worker.ts:160` | X-Worker-Token → ACTIVE worker or 401/403 |
+| `POST /clock` / `POST /dept-scan` | `src/api/routes/worker.ts:1045 / 1302` | Clock in/out + department scan |
 | `GET /salary/effective` | `src/api/routes/workers.ts:1059` | Day-weighted salary per period |
 | `POST /auto-from-punch` / `settle-period` | `src/api/routes/payroll-hour-deductions.ts:149 / 211` | Short-hour docks |
 
@@ -77,7 +82,7 @@ Owns the whole workforce lifecycle: the **employee master** (workers + effective
 - **Three screens reconcile to the sen.** Payroll / Dept Labor / Labor Cost tie out via `roundSen` + `distributeRoundSen` (largest-remainder, `src/lib/utils.ts`); leftover sen → largest-fraction dept. Don't add per-screen ad-hoc plugs.
 - **Salary is effective-dated** (`worker_salary_history`, mig 0153) — never read one "current" salary; use `GET /salary/effective`. Join/resign does NO proration; unworked working days dock ÷26 as absences.
 - **Migrations are inert** — `payroll_hour_deductions` (0152), `worker_salary_history` (0153) etc. reach prod only via runtime `ensurePendingMigrations` self-apply, not by replaying migration files on deploy.
-- **PINs are SHA-256, unsalted by design** (10^4–10^6 space; brute-force is throttled instead). A resigned/inactive worker is locked out of the ENTIRE app mid-session via `getWorker` (`worker.ts:147`), not just at login.
+- **PINs are SHA-256, unsalted by design** (10^4–10^6 space; brute-force is throttled instead). A resigned/inactive worker is locked out of the ENTIRE app mid-session via `getWorker` (`worker.ts:160`), not just at login.
 - **camelCase DB columns fold to lowercase** and can silently return undefined (`clockinphoto ↛ clockInPhoto`); read at-risk cols dual-keyed `r.camelCase ?? r.snake_case`. New columns snake_case; a write to a camelCase col needs a `column-rename-map.json` entry.
 - **Employee Detail tab is intentionally guard-unmounted** (`{activeTab === "detail" && …}` inside `EmployeesPage`, `employees.tsx:11424`) — don't refactor to always-mounted.
 - **UI is 100% English** — no Chinese strings/comments. Add a new tab to BOTH the tab array and the `activeTab` switch inside `EmployeesPage`.
@@ -86,7 +91,7 @@ Owns the whole workforce lifecycle: the **employee master** (workers + effective
 - **Add a field to the worker master** → snake_case column self-applied via `ensurePendingMigrations`; persist in `workers.ts POST /` (:184) and `PUT /:id` (:360); surface in `rowToWorker` (:112); render in `EmployeeMasterTab` (`employees.tsx:2342`). camelCase col → `column-rename-map.json` entry.
 - **Change payroll math** → edit `computeMonthlyLabor` (`labor-engine.ts:557`) ONLY; both `payslips.ts` (generate :1006, projected :640) call it. Verify with `tests/labor-engine.test.mjs`; keep weekday-only OT byte-identical.
 - **Adjust a statutory rate** → `calcStatutory` (`payslips.ts:212`); toggles live per-worker in the master.
-- **Touch the worker app** → gate every new endpoint with `getWorker` (`worker.ts:147`); add the route to `worker.ts` and the screen under `src/pages/worker/`.
+- **Touch the worker app** → gate every new endpoint with `getWorker` (`worker.ts:160`); add the route to `worker.ts` and the screen under `src/pages/worker/`.
 - **Change efficiency** → source is `working-hour-entries.ts` (summary :499, dept-category-summary :613); only `isProduction` departments count in the denominator (nonprod approvals credit the numerator).
 
 ## Related modules

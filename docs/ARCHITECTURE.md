@@ -1,5 +1,10 @@
 # Architecture
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/api/worker.ts`, `functions/api/[[route]].ts`,
 > `src/api/lib/auth-middleware.ts`, `src/router.tsx`, `src/layouts/`, `src/components/ui/`,
 > `eslint.config.js`, `package.json`, `wrangler.toml`, `.github/workflows/backup.yml`.
@@ -61,7 +66,7 @@ not drift. For where code lives, read [`CODEBASE-MAP.md`](CODEBASE-MAP.md).
 │  │  Hyperdrive (Cloudflare-pooled Postgres)        │    │
 │  │   ↓                                             │    │
 │  │  Supabase Postgres (primary OLTP)               │    │
-│  │   • 244 migrations under migrations-postgres/   │    │
+│  │   • 251 migrations under migrations-postgres/ (2026-08-14; newest prefix 0229, shared by two files)   │    │
 │  │   • immutable ledger_journal_entries hash chain │    │
 │  │   • daily pg_dump → Supabase Storage            │    │
 │  └────────────────────────────────────────────────┘     │
@@ -384,7 +389,7 @@ Places explicitly designed to be swapped:
    stub.** Any doc or plan that says auth is unwired is describing April 2026.
 
 3. **Caching wrapper consolidation**
-   Three overlapping approaches coexist (`swr`, `cached-fetch.ts`, bare
+   **TWO** approaches coexist (corrected 2026-08-14 — `src/lib/swr-fetcher.ts` does not exist and nothing under `src/` imports `swr`; it survives only as an unused `package.json` dependency): (`cached-fetch.ts`, bare
    `fetch`). Converging on one is open work, not a described state.
 
 4. **Feature toggles**

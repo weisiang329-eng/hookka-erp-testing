@@ -1,5 +1,10 @@
 # UI Conventions — Hookka ERP
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/components/ui/` (all files),
 > `src/components/material-picker.tsx`, `src/components/scan-po-modal.tsx`,
 > `src/components/scan-supplier-modal.tsx`, `src/lib/pdf-utils.ts`,
@@ -29,7 +34,7 @@ This doc is the reference for keeping this app consistent — and for mirroring 
 | `MoneyInput` | `src/components/ui/money-input.tsx` | RM amount entry. `value: number|null` (dollars), `onChange(next)`. Commits on blur/Enter, clear-to-blank → null, 2-decimal display, right-aligned. Keep the parent's sen math unchanged — this is only the entry UX. |
 | `MaterialPicker` | `src/components/material-picker.tsx` | Catalog autocomplete (raw-materials). Fills code+name on pick; still allows off-catalog free text. Never auto-fills price. |
 | `SearchableSelect` | `src/components/ui/searchable-select.tsx` | Searchable dropdown (suppliers, customers, etc.). |
-| `Badge` / `StatusBadge` | `src/components/ui/badge.tsx`, `status-badge.tsx` | Status chips. Prefer `<StatusBadge kind="so" value={...} />` for backend enums (compile-checked per enum). `<Badge variant="status" status={...} />` is the legacy path — `variant` accepts only `"default"` / `"status"`, and `variant="status"` needs the `status` prop as well. |
+| `Badge` / `StatusBadge` | `src/components/ui/badge.tsx`, `status-badge.tsx` | Status chips. Prefer `<StatusBadge kind="so" value={...} />` for backend enums — the `kind` picks the right map. **It is NOT compile-checked** (corrected 2026-08-14): the prop is `value: string` (`status-badge.tsx:63`) and the lookup casts to `Record<string, SemanticStyle>` (`:81`), so an unmapped value renders grey with a dev-console warning instead of failing the build. `<Badge variant="status" status={...} />` is the legacy path — `variant` accepts only `"default"` / `"status"`, and `variant="status"` needs the `status` prop as well. |
 | `Button`, `Input`, `LoadingButton`, toasts | `src/components/ui/*` | Primitives. **Corrected 2026-08-13:** there is no `toast` object export and no `toast.error/success`. `toast.tsx` exports `ToastProvider` + `useToast()`; call `const { ... } = useToast()` inside a component. |
 | `ScanPOModal` / `ScanSupplierModal` | `src/components/scan-po-modal.tsx`, `scan-supplier-modal.tsx` | OCR scan. Customer PO → SO (sales/consignment); supplier DO/invoice → GRN/PI (purchasing). **The scan button sits next to "Create"** in the page header (e.g. "Scan PO", "Scan GRN", "Scan PI"). |
 
@@ -56,7 +61,7 @@ This doc is the reference for keeping this app consistent — and for mirroring 
 
 ## 5. Before you push
 
-- `npx tsc -p tsconfig.app.json --noEmit` must be clean (the strict app config; the base `tsconfig.json` is looser and misses errors the deploy fails on). Ignore only the 3 known sandbox module errors (jsbarcode, @zxing/library).
+- `npx tsc -p tsconfig.app.json --noEmit` must be clean (the strict app config; the base `tsconfig.json` is looser and misses errors the deploy fails on). **Measured clean 2026-08-14: exit 0, zero errors.** The old "ignore 3 known sandbox module errors (jsbarcode, @zxing/library)" carve-out did not reproduce and is retired — a standing licence to ignore N errors is how a real one gets waved through.
 - The pre-commit hook runs the full test suite; the deploy gate re-runs strict typecheck + tests.
 
 ## 6. Reference commits (this is how the unification was done)

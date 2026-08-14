@@ -1,5 +1,10 @@
 # Payroll & Worker Portal — Explanation Guide
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/api/routes/payroll.ts`,
 > `src/api/routes/payslips.ts`, `src/api/routes/pay-rules.ts`,
 > `src/api/routes/payroll-hour-deductions.ts`, `src/api/routes/attendance.ts`,
@@ -11,14 +16,18 @@
 > (`geofence.ts:19-22`, `DEFAULT_FACTORY_GEOFENCE.radiusM = 200`); the selfie being
 > mandatory to punch (`src/pages/worker/index.tsx:669`); the per-worker day-rate
 > divisor coming from `workers.workingDaysPerMonth` rather than a hardcoded 26
-> (`payroll.ts:26`, `:167`, `:212`); the efficiency allowance being a flat per-worker
+> (`src/lib/labor-engine.ts:563-566`, fallback constant `FALLBACK_WORKING_DAYS_PER_MONTH = 26`
+> at `:55`. **Corrected 2026-08-14** — this cited `payroll.ts:26`/`:167`/`:212`; that file is
+> 205 lines, so `:212` was past EOF, and `payroll.ts` computes no pay at all: its `POST /`
+> returns **501** (`payroll.ts:125-139`) and its own header points at `POST /api/payslips`); the efficiency allowance being a flat per-worker
 > bonus gated on a per-worker threshold and added **after** `calcStatutory` so it never
 > moves EPF/SOCSO/EIS/PCB (`efficiency-allowance.ts`); the printable **Calculation
 > Guide** button (`employees.tsx:7470`). Worker-portal pages all exist:
 > `index / pay / scan / qc / team / me / issue / login`.
 >
-> One thing this guide does not cover: `src/pages/worker/qc.tsx` and
-> `src/pages/worker/team.tsx` are live screens with no section here. Not pay-related,
+> One thing this guide does not cover: `src/pages/worker/qc.tsx`, `team.tsx` and
+> `announcement-media.tsx` are live screens with no section here (nine files in
+> `src/pages/worker/`, not eight). Not pay-related,
 > so nothing below is wrong — only incomplete.
 
 Audience: office staff and anyone explaining pay to workers. Everything here

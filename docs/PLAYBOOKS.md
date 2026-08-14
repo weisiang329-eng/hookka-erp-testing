@@ -7,6 +7,13 @@
 > `wrangler.toml` (`APP_URL = https://erp.hookka.com`), and a full `npm test` run.
 > Corrected 2026-08-13: the root-level HOOKKA-GOTCHAS link was broken (the file is at
 > `docs/context-packs/HOOKKA-GOTCHAS.md`) and the P3 test count was 4× stale.
+>
+> **Re-verified 2026-08-14** (branch `docs/docs-vs-code-audit`): P3's suite figures re-measured —
+> 4,123 tests / 0 fail; the **"~45 s"** this doc carried is a best case, not a constant (33 s
+> idle vs 208 s under concurrent load, same machine, same session). Every helper it cites
+> (`roundSen`, `roundUpToRinggitSen`, `distributeRoundSen`, `formatRM`, `drawLetterhead`,
+> `splitCodeName`, `MoneyInput`, `DiscountInput`, `DataGrid`) still exists at the named path.
+> See `docs/DOCS-VS-CODE-AUDIT.md` row D7.
 
 Fixed step-by-step procedures for recurring dev tasks. **Pick the playbook, follow the
 steps — don't re-derive the approach each time.** Each cites the exact files/helpers.
@@ -37,7 +44,7 @@ Pair with `docs/CODEBASE-MAP.md` (where the code is) and
 
 ## P3 — Ship + verify a change
 1. `npx tsc -p tsconfig.app.json --noEmit` — **measured 2026-08-13 on a clean `npm install`: exit 0, ZERO errors.** The long-standing "ignore the 3 known jsbarcode / @zxing sandbox errors" instruction no longer applies here; if you see errors, they are yours.
-2. `npm test` — **3,768 tests / 3,765 pass / 3 skip / 0 fail, ~45 s** (measured 2026-08-13 on `main`). Any failure is yours; this suite is green on `main`.
+2. `npm test` — **4,123 tests / 4,120 pass / 3 skip / 0 fail** (measured 2026-08-14 on this branch; the 2026-08-13 stamp said 3,768 — the suite grows most days, so re-measure rather than quote). **Wall-clock is not a stable number: 33 s on an idle machine, 208 s with four agents running concurrently.** The old "~45 s" is achievable but is a best case; budget minutes when anything else is running. Any failure is yours; this suite is green on `main`.
 3. Commit on a branch (feature) or `main` (bugfix); `git pull --rebase origin main`; push.
 4. Watch: `gh run watch <id> --exit-status`.
 5. **Verify-live** on erp.hookka.com — check the **READ and the WRITE** path (patch → refetch → confirm). Deploy exit 0 ≠ feature works.
@@ -61,7 +68,7 @@ Use `DataGrid` (don't hand-roll a table): stable `gridId` + `keyField` (a DB id,
 *Refs: `UI-DATA-DOCUMENT-STANDARDS.md`, `data-grid.tsx`, `arch_report_print_engine`.*
 
 ## P7 — New PDF / printout
-Never hand-roll header/footer/fonts. Use the shared helpers in `src/lib/pdf-utils.ts`: `drawLetterhead`, `drawSectionLabel`, `tableTheme`, `drawDocFooter`. Code-in-name docs (PO) split with `splitCodeName`; sales-side docs have a real code field. Money via `formatRM`. Sister companies pass `logo:false`.
+Never hand-roll header/footer/fonts. Use the shared helpers in `src/lib/pdf-utils.ts`: `drawLetterhead`, `drawSectionLabel`, `drawDocFooter`. **`tableTheme` is NOT the house style** (corrected 2026-08-14): it draws a solid bronze header band, which the owner rejected (`pdf-utils.ts:94-96`, "no coloured accent bar"), and only 2 of the 17 `generate-*-pdf.ts` call it. For the body use a `theme:"plain"` autoTable as in `generate-do-pdf.ts` / `generate-invoice-pdf.ts` — neither imports `tableTheme`. Code-in-name docs (PO) split with `splitCodeName`; sales-side docs have a real code field. Money via `formatRM`. Sister companies pass `logo:false`.
 *Refs: `arch_letterhead_unified`, `pdf-utils.ts`.*
 
 ## P8 — Touching a monster file (10k-line page)

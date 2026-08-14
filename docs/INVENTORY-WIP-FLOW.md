@@ -1,5 +1,10 @@
 # Inventory WIP Flow — `wip_items` Lifecycle
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/api/routes/production-orders/_helpers.ts`,
 > `src/api/routes/inventory-wip.ts`, `src/api/routes/inventory.ts`,
 > `src/api/routes/fg-units.ts`, `src/api/lib/wip-expected.ts`,
@@ -17,7 +22,7 @@
 > | `routes-d1/delivery-orders.ts:1109-1271` | `src/api/routes/delivery-orders/_helpers.ts` |
 > | `routes-d1/admin.ts:719-767` | `src/api/routes/admin.ts` |
 > | `routes-d1/inventory-wip.ts` / `inventory.ts` | `src/api/routes/inventory-wip.ts` / `src/api/routes/inventory.ts` |
-> | `migrations/0001_init.sql:740-748` (schema) | `migrations-postgres/` (244 files, latest `0223_trade_finance.sql`); Postgres columns are snake_case (`stock_qty`, `dept_status`) read dual-keyed. |
+> | `migrations/0001_init.sql:740-748` (schema) | `migrations-postgres/` (**251** files as at 2026-08-14; newest prefix `0229`, shared by TWO files); Postgres columns are snake_case (`stock_qty`, `dept_status`) read dual-keyed. |
 > | §2b `deriveFGStock` at `src/pages/inventory/index.tsx:259-326` | Moved to the shared pure lib `src/lib/fg-stock.ts` and is now run **server-side too** — `src/api/routes/inventory.ts:23`, `:516` uses the same function so the two agree by construction. It is no longer "a frontend roll-up". |
 >
 > Also missing from this document — added after it was written, and load-bearing:
@@ -250,8 +255,11 @@ Every code path that displays / aggregates `wip_items`.
 
 ### 2b. FG page (`deriveFGStock`)
 
-`src/pages/inventory/index.tsx:259-326`. Frontend roll-up that **does NOT
-read `wip_items`.** It iterates `productionOrders[]`, finds POs where every
+`src/lib/fg-stock.ts` — a SHARED pure lib, imported and run **server-side** by
+`src/api/routes/inventory.ts:24` / `:585` as well as by the FG page, so the two agree by
+construction. **Corrected 2026-08-14:** this said `src/pages/inventory/index.tsx:259-326`
+and called it a frontend-only roll-up; `deriveFGStock` has no definition under
+`src/pages/` at all. Roll-up that **does NOT read `wip_items`.** It iterates `productionOrders[]`, finds POs where every
 UPH JC is `COMPLETED` / `TRANSFERRED`, and emits one FG row per PO
 (adjusted by `poStatusByDO` for DRAFT-reservation vs DISPATCHED-skip).
 

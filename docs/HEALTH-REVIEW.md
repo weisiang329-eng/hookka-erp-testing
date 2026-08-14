@@ -1,5 +1,10 @@
 # System Health — coverage map, open issues, and the weekly review
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/api/routes/admin-health.ts`,
 > `src/api/routes/fe-rum.ts`, `src/lib/fe-rum.ts`, `src/pages/employees.tsx`,
 > `src/components/ui/searchable-select.tsx`, `docs/PERF-BACKLOG.md` (2026-08-13 prod
@@ -161,11 +166,15 @@ The Stock tab fires the last three together — ~2.3s of backend before it paint
 
 ### NEW monitoring gaps this exercise exposed
 
-1. **`/fe-perf` only ever returns the `longtask` metric.** There is no
-   page-load, interactive or LCP series in the response at all, so "which page
-   is slow to load" cannot be answered from the dashboard — only "which page
-   janks".
-2. **`/by-endpoint` returns only the top 10 routes by hit count.** Not one
+1. **`/fe-perf` page-load coverage — CLOSED (re-read 2026-08-14).** This said
+   *"only ever returns the `longtask` metric"*. `src/lib/fe-rum.ts` emits five:
+   `longtask` (`:417`), `lcp` (`:428`), `fcp` (`:439`), `ttfb` (`:453`) and `nav`
+   (`:460`, plus SPA nav at `:300`). Ingest is metric-agnostic (`fe-rum.ts:184`),
+   and `admin-health.ts:1622` groups by metric and ranks them through an explicit
+   `metricOrder` map (`:1662`). The 2026-08-01 reading predates those emitters.
+2. **`/by-endpoint` returns only 10 rows** — the SLOWEST by P95, drawn from the
+   top 20 by hit count (`admin-health.ts:546` `LIMIT 20`, `:613` `slice(0, 10)`),
+   not the top 10 by hit count. Not one
    accounting endpoint appears, so the four slow APIs above are invisible to
    health; they were found by hand. It ignores a `limit` param.
 3. **`/maintenance/sofa-combos` has zero RUM rows** in 7d. The owner reports it

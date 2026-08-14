@@ -1,5 +1,10 @@
 # AI Context Improvement Backlog
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `docs/context-packs/`, `docs/modules/`,
 > `docs/CODEBASE-MAP.md`, `docs/PLAYBOOKS.md`, `.github/PULL_REQUEST_TEMPLATE.md`.
 > Corrected 2026-08-13: **four of this backlog's items already shipped** and the file
@@ -27,9 +32,9 @@ This is enough to stop most full-repo scans. The next step is to make the contex
 | P1 | Route → frontend → DB table map | Lets AI jump directly from page to API to tables | ✅ **DONE** — `docs/CODEBASE-MAP.md` (15 modules → pages/routes/tables/tests) |
 | P1 | Change-impact PR template | Forces concise impact analysis without long reports | ✅ **DONE** — `.github/PULL_REQUEST_TEMPLATE.md` exists |
 | P2 | Ownership map | Shows which module/domain owns each route/table/test | ⚪ open (partly covered by CODEBASE-MAP) |
-| P2 | Test selection matrix | Tells AI which tests to run for each module/change type | ⚪ open — 375 test files now, so this matters more than when written |
+| P2 | Test selection matrix | Tells AI which tests to run for each module/change type | ⚪ open — **410** test files (re-measured 2026-08-14), so this matters more than when written |
 | P2 | Common task playbooks | Gives step-by-step SOPs for frequent tasks | ✅ **DONE** — `docs/PLAYBOOKS.md`, 8 procedures (P1–P8) |
-| P3 | Generated dependency inventory | Keeps file/API/table relationships current automatically | 🟡 **half done 2026-08-13** — the API half is generated: `scripts/gen-api-docs.mjs` derives `docs/API.md` (139 mounts, 935 handlers, correct `:line` offsets, the real public/auth surface) from `src/api/worker.ts` + `src/api/routes/*.ts`, with a `--check` mode. It replaced the hand-maintained `docs/SYMBOLS.md`, which had drifted to ~25% line-number accuracy (94 of 891 offsets pointed past end-of-file). The table/BOM-relationship half is still open. |
+| P3 | Generated dependency inventory | Keeps file/API/table relationships current automatically | 🟡 **half done 2026-08-13** — the API half is generated: `scripts/gen-api-docs.mjs` derives `docs/API.md` (139 mounts, **936** handlers, correct `:line` offsets, the real public/auth surface) from `src/api/worker.ts` + `src/api/routes/*.ts`, with a `--check` mode. It replaced the hand-maintained `docs/SYMBOLS.md`, which had drifted to ~25% line-number accuracy (94 of 891 offsets pointed past end-of-file). The table/BOM-relationship half is still open. |
 | P3 | Architecture diagrams | Helps humans onboard faster | ⚪ open |
 
 ## Suggested module-specific packs — ✅ BUILT, at a different path

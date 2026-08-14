@@ -12,14 +12,25 @@
 >   `runImmediately: false`, so the first tick lands at **+60 s** — the disproof's
 >   window was shorter than the interval. That retraction is now recorded in
 >   PERF-BACKLOG. The poll is real.
-> - **Finding 3:** `return { accuracy: 84.2, count: last3.length }; // Mock accuracy`
->   is verbatim at `analytics/forecast.tsx:145`.
+> - **Finding 3 is ✅ FIXED** (BUG-2026-08-13-014; re-read 2026-08-14). The `84.2` literal is
+>   gone — `analytics/forecast.tsx:200-204` returns `{ accuracy: null, count: 0 }` when no
+>   forecast has an actual, and the card states which input is missing. The page being
+>   UNREACHABLE is still open (owner decision: delete it or route it).
 > - **Finding 4:** there is still **no `path="*"`** anywhere in `src/dashboard-routes.tsx`
 >   or `src/router.tsx`, so an unmatched dashboard URL still paints an empty `<main>`.
-> - **Finding 5:** `unitCostSen: p.basePriceSen ?? 0` is verbatim at
->   `inventory/adjustments.tsx:201`, with `costPriceSen` sitting unused on the same row.
+> - **Finding 5 is ✅ FIXED** (re-read 2026-08-14). All three halves: the cost prefill reads
+>   `costPriceSen` (`inventory/adjustments.tsx:224`), the FG on-hand cell renders `null → "—"`
+>   (`:216`, `:290-292`), and the page fetches `?buckets=finishedProducts` (`:203`) instead of
+>   the whole 1.16 MB aggregate.
+> - **Finding 6 / §6 is ✅ FIXED** (BUG-2026-08-13-020 / -021). `/api/inventory` now accepts
+>   `?buckets=<csv>` (`src/api/routes/inventory.ts:176-189`) and **all nine** call sites pass
+>   the one bucket they read.
 >
-> Nothing in this audit had been fixed as of this verification.
+> **CORRECTED 2026-08-14: the sentence here used to read "Nothing in this audit had been fixed
+> as of this verification." That was already contradicted by this doc's own table rows 2 and 3
+> (both ✅), and items 5 and 6 have since been fixed too. Items 1, 4, 7, 8, 10, 11 and 12 were
+> re-checked against the tree on 2026-08-14 and ARE still open — see the confirmations in
+> `docs/DOCS-VS-CODE-AUDIT.md`.**
 
 **Nothing in this document was measured on prod.** This branch has no
 authenticated session (login gate; `.dev.vars` credentials are rotated dead), so

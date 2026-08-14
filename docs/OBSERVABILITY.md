@@ -1,5 +1,10 @@
 # Observability — what we emit and where
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/api/lib/observability.ts:98-135, 276-335`, `src/api/routes/admin-health.ts:82-95, 367-392`, `src/api/routes/auth.ts:199-277`, `src/api/lib/audit.ts:217,241`, `src/api/worker.ts:1082,1474`, and `wrangler.toml` (`[[analytics_engine_datasets]]`, `[vars] SENTRY_DSN`, `CF_ACCOUNT_ID`).
 > Corrected 2026-08-13: four things were wrong — (1) every `src/api/routes-d1/...` path; that directory does not exist, the files are in `src/api/routes/`. (2) "no Sentry account required" — Sentry IS wired, both worker-side and client-side. (3) `/api/admin/health/kpis` no longer always returns `_mock: true`; the real AE-SQL path shipped. (4) The AE row shapes were incomplete and the D1 caveats are dead.
 
@@ -112,7 +117,7 @@ SUPER_ADMIN-only page rendering five KPIs over the last 24 hours:
 
 - `p50`, `p75`, `p95` of `req` `double1` (request duration)
 - `longTaskCount` — count of `req` events with `double1 >= 200`
-- `cacheHitRatio` — placeholder until we instrument cache hits explicitly
+- `cacheHitRatio` — **REAL on the AE path** (corrected 2026-08-14): `hits/(hits+misses)` computed by AE SQL over the `cache.hit` / `cache.miss` counters emitted by `withSnapshot` (`src/api/lib/snapshot.ts:419,428`), aggregated at `admin-health.ts:331-348`. Coverage is PARTIAL — only snapshot callers that pass `c` emit — and it returns 0 with no data. It is a fixed placeholder ONLY in the `_mock: true` path (`admin-health.ts:83`).
 
 Backend at `src/api/routes/admin-health.ts` (`GET /api/admin/health/kpis`). The real AE-SQL path **shipped**: the route fetches the Cloudflare Analytics Engine SQL endpoint with `CF_ACCOUNT_ID` + `AE_QUERY_TOKEN`, derives percentiles and `longTaskCount` in JS over the returned samples, and returns `_mock: false` (`admin-health.ts:367-370`). It falls back to the seeded random mock with `_mock: true` (`admin-health.ts:82-95`) only when the binding or either credential is missing.
 

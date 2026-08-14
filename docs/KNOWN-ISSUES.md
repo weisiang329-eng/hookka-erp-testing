@@ -1,5 +1,10 @@
 # Known Issues
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against a full `npx eslint . -f json` run in this worktree, plus `src/pages/` and `src/components/ui/data-grid.tsx`.
 > Corrected 2026-08-13: every count in this file was wrong and the shape of the debt has inverted. The old text claimed "~92 errors and 15 warnings" dominated by 62 `set-state-in-effect` errors; the measured run returns **20 errors and 97 warnings**, with `set-state-in-effect` down to **2**. Two buckets the old file listed (`react-hooks/static-components`, `react-hooks/purity`) now report **zero**, and the largest error bucket — `no-restricted-syntax` (24, the raw `setInterval`/`setTimeout` ban) — was not mentioned at all. The old §4 also cited `src/pages/production-test/tracker.tsx`, a file that does not exist in this repo.
 
@@ -25,8 +30,8 @@ Measured 2026-08-13 against `origin/main`, while comparing this repo's CI with
 Houzs ERP's:
 
 ```text
-tests/*.test.mjs                    381 files
-  use readFileSync on a source file 218   (57%)
+tests/*.test.mjs                    410 files   (re-measured 2026-08-14)
+  use readFileSync on a source file 243   (59%)
   import and execute the code       235
   exercise a real database            2
 ```

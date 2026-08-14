@@ -1,5 +1,10 @@
 # Durable read-performance architecture — decision + plan (2026-07-13)
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/api/lib/keyset.ts`, `src/api/lib/snapshot.ts`,
 > `src/api/lib/snapshot-freshness.ts`, `src/api/routes/delivery-orders.ts`,
 > `src/api/routes/consignment-notes.ts`, `src/lib/delivery-pipeline.ts`,
@@ -11,7 +16,7 @@
 > | Item | State (code-verified 2026-08-13) |
 > |---|---|
 > | Delivery deep-fix spec (bottom section) | ✅ **SHIPPED.** `GET /api/delivery-orders/ready-planning` (`delivery-orders.ts:635`) + shared `buildReadyPlanning()` (`src/lib/delivery-pipeline.ts:374`); FE reads it (`src/pages/delivery/index.tsx:1217`); CN twin at `consignment-notes.ts:235`; Command-Center `/pending-value` at `delivery-orders.ts:666`. |
-> | P0 `keysetList()` helper | 🟡 partial. `src/api/lib/keyset.ts` exists with `tests/keyset.test.mjs`, but the export is not named `keysetList` and **exactly one route imports it** (`src/api/routes/production-orders.ts`). |
+> | P0 `keysetList()` helper | 🟡 partial. `src/api/lib/keyset.ts` exists with `tests/keyset.test.mjs`, but the export is not named `keysetList` (it is `keysetPage` / `keysetResult` / `encodeKeysetCursor` / `decodeKeysetCursor`) and **NO route imports it at all** — corrected 2026-08-14: `production-orders.ts:3338` only MENTIONS the file in a comment. Tested, unused. |
 > | P0 `sqlAggregateByStatus()` | ❌ **does not exist** anywhere in `src/`. |
 > | P0/Pillar 2 TanStack Query + `useInfiniteList` | ❌ **never adopted.** `package.json` has `@tanstack/react-table` and `@tanstack/react-virtual` but **no `@tanstack/react-query`**; `useInfiniteList` does not exist; `useCachedJson` is still imported by ~100 files. |
 > | P1 Delivery list → keyset + SQL stats | ❌ not done — `/delivery-orders` list is still page/limit + snapshot. |

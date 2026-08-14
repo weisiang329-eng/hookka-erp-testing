@@ -1,5 +1,10 @@
 # Production & BOM — Module Guide
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](../DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/api/routes/production-orders.ts`, `src/api/routes/production-orders/_helpers.ts`, `src/api/routes/{bom,bom-master-templates,job-cards,production-folders,cnc-templates,wip-times,production-leadtimes}.ts`, `src/api/lib/{bom-wip-breakdown,po-cost-cascade,packing-rack-write,packing-piece-identity,fg-completion}.ts`, `src/lib/repair-scope.ts`, `src/pages/production/*`, `src/pages/bom.tsx`, `src/dashboard-routes.tsx`, and `tests/`.
 > Corrected 2026-08-13: **`production-orders.ts` was split** — 3,903 lines of handlers plus `src/api/routes/production-orders/_helpers.ts` (5,799) holding every shared function; the 8,595-line figure and ~15 anchors were stale by 2,000–5,000 lines. `src/pages/bom.tsx` is 6,613 lines, so the old `BOMManagementPage` anchor (:6773) pointed **past end of file** — it is at :6136. **`ProductionTimesDialog` does not exist anywhere in `src/pages/` — that row is deleted, not re-pointed.** The `/production/tracker` redirect and the deletion of `production/tracker.tsx` are both confirmed true.
 
@@ -18,7 +23,7 @@ Owns the shop floor: a **dept-tabbed WIP board** (one production_order per confi
   - `/bom` → `src/pages/bom.tsx:6136` (`BOMManagementPage`) · `/cnc-templates` → `src/pages/cnc-templates.tsx`
 - API routes
   - PO / job-card / WIP / scan **handlers** → `src/api/routes/production-orders.ts` (3903 lines); every shared
-    function lives in `src/api/routes/production-orders/_helpers.ts` (5799). Mounted `worker.ts:1232`.
+    function lives in `src/api/routes/production-orders/_helpers.ts` (5799). Mounted `worker.ts:1233`.
   - BOM templates + versions → `src/api/routes/bom.ts` (1454) · master variants → `bom-master-templates.ts` (243)
   - Job-card reads + event timeline → `job-cards.ts` (804) · folders group/ungroup → `production-folders.ts` (461)
   - CNC Model→Size/Seat derive → `cnc-templates.ts` (1322) · minute counts → `wip-times.ts` (588) · due-date buffer → `production-leadtimes.ts` (625)
@@ -76,7 +81,7 @@ Owns the shop floor: a **dept-tabbed WIP board** (one production_order per confi
 - **Minute rates land in `bom_templates.wipComponents`** via `wip-times.tsx` + `wip-times.ts`; they feed `productionCostRatePerMinuteSen` in the cost cascade. (An earlier version of this doc named a `ProductionTimesDialog` in `bom.tsx` — no such component exists in the tree as of 2026-08-13.)
 - **camelCase DB columns** are dual-keyed (`r.camelCase ?? r.snake_case`); db-pg `toCamel` can't recover folded-lowercase camelCase. New columns snake_case; a camelCase write column needs a `column-rename-map.json` entry or it 400s.
 - **CNC hierarchy is FE-derived.** `cnc_templates` has no category column (from `products.category`) and `total_height` doubles as sofa seat size — no migration for the Model→Size/Seat→Files hierarchy.
-- **Packing rack → warehouse occupancy.** Office PATCH `/:id` (`:8419`), the public /p/ scan, and worker scan ALL funnel through `applyPackingRack` (`packing-rack-write.ts:72`), which also mirrors ONE `rack_items` row per piece + recomputes `rack_locations.status`. Piece identity comes from the shared `packingPieceIdentity` (`packing-piece-identity.ts:48`) — don't re-inline the formula (BUG-2026-06-25-007).
+- **Packing rack → warehouse occupancy.** Office PATCH `/:id` (`production-orders.ts:3813` — this said `:8419`, the PRE-SPLIT line, which is past the end of the 3,944-line file), the public /p/ scan, and worker scan ALL funnel through `applyPackingRack` (`packing-rack-write.ts:71`), which also mirrors ONE `rack_items` row per piece + recomputes `rack_locations.status`. Piece identity comes from the shared `packingPieceIdentity` (`packing-piece-identity.ts:48`) — don't re-inline the formula (BUG-2026-06-25-007).
 - **Overdue chips filter the main grid** (owner 2026-06-23) — clicking "Bedframe ⚠ N" / "Sofa ⚠ N" narrows the grid (`overduePanelMode` state, `filteredOrders`) to the server overdue set from `/overdue-counts` (`production-orders.ts:393`); it does NOT pop a separate panel. Don't reintroduce the drill-down panel.
 - **Combo pricing is upstream.** Sofa-combo pricing is backend-unified in `sales-orders.ts`; production reads the already-priced SO — never re-price in the production layer.
 

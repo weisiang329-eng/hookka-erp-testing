@@ -1,8 +1,13 @@
 # Planning — Module Guide
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](../DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/pages/planning/*`, `src/api/routes/{planning-schedule,schedule-proposals,production-leadtimes,mrp,scheduling,agent-console}.ts`, `src/api/lib/{planning-capacity,planning-chain,planning-scheduler,lead-times,schedule-proposals,agent-console}.ts`, `src/api/worker.ts`, and `tests/`.
 > Re-verified 2026-08-13 (chore/dead-code-sweep): all nine `src/pages/planning/dept/*.tsx` import `_DepartmentSchedulePage`; the `_PlainDeptSchedulePage.tsx` variant this guide listed had no importer and is deleted.
-> Corrected 2026-08-13: `computeChain` is at `planning-chain.ts:2418`, not :1775 (the file is 2,517 lines); `scheduleCutting`/`runCutting` moved to :972/:631; `production-orders.ts` is **3,903 lines, not 7,606** — it was split, with the helpers now in `src/api/routes/production-orders/_helpers.ts` (5,799). Both `production-leadtimes` mounts confirmed (`worker.ts:1360` and `:1361`). All three named tests exist.
+> Corrected 2026-08-13: `computeChain` is at `planning-chain.ts:2418`, not :1775 (the file is 2,517 lines); `scheduleCutting`/`runCutting` moved to :972/:631; `production-orders.ts` is **3,903 lines, not 7,606** — it was split, with the helpers now in `src/api/routes/production-orders/_helpers.ts` (5,799). Both `production-leadtimes` mounts confirmed (`worker.ts:1361` and `:1361`). All three named tests exist.
 
 > Self-navigating docs (L2). Repo-wide map: [[CODEBASE-MAP]]. Never grep the whole repo — use the file:line below.
 
@@ -79,7 +84,7 @@ Owns production **planning, scheduling, MRP and lead times** — the read-mostly
 - **Root-level `*.xlsx` and `scripts/*.py`** (`build_*_xlsx.py`, `dept_flow_scheduler.py`) are throwaway export/planning-data tooling, NOT part of this module — ignore them.
 
 ## Common tasks (mini-playbook)
-- **Change schedule/capacity math** → edit the `src/api/lib` engine (`planning-scheduler.ts` / `planning-chain.ts` / `planning-capacity.ts`), never the thin route. Verify with `tests/planning-scheduler.test.mjs`, `tests/scheduler.test.mjs`, `tests/scheduling.test.mjs`.
+- **Change schedule/capacity math** → edit the `src/api/lib` engine (`planning-scheduler.ts` / `planning-chain.ts` / `planning-capacity.ts`), never the thin route. Verify with `tests/planning-scheduler.test.mjs`, `tests/scheduler.test.mjs`, `tests/scheduler-sent-lock.test.mjs`.
 - **Adjust a lead time or DD buffer** → math in `lead-times.ts` (`leadDaysFor:147`, `hookkaDDBufferFor:220`); persist via `PUT /api/production/leadtimes`; after config changes fire `POST /recalc-all`. Keep the inline form + `LeadTimeHistoryDialog` in sync.
 - **Add a proposal field / rule** → change `generateProposals` (`lib/schedule-proposals.ts:161`); it must stay read-only. Only extend the writer inside `POST /proposals/approve` (`schedule-proposals.ts:158`). Tables self-apply in `ensureProposalTables` (`:34`).
 - **Add a Planning tab** → add to `TABS` (`index.tsx:198`) + a `{activeTab === "x" && (...)}` block; back it with a thin `app.get` in `planning-schedule.ts` calling a `src/api/lib` helper.

@@ -1,5 +1,10 @@
 # UI Data Grid, Filter, Numeric Input, and Document Layout Standards
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/components/ui/data-grid.tsx`,
 > `src/components/ui/filter-bar.tsx`, `src/lib/pdf-utils.ts`, `src/lib/utils.ts`,
 > `tests/money.test.mjs`, `tests/data-grid-fill.test.mjs`.
@@ -130,7 +135,7 @@ Frontend font family should come from the app/global Tailwind/system stack. Do n
 | Table footer | bold, 8pt | `tableTheme`. |
 | Footer fine print | 6.8pt | `drawDocFooter`. |
 
-All new PDF generators must call `drawLetterhead`, `drawSectionLabel`, `tableTheme`, and `drawDocFooter` instead of hand-rolling font sizes, headers, rules, or footers.
+All new PDF generators must call `drawLetterhead` for the header — never hand-roll one — plus `drawSectionLabel` and `drawDocFooter`. **`tableTheme` is NOT the house standard** (corrected 2026-08-14): it renders a solid bronze header band (`pdf-utils.ts:152-187`) and only 2 of the 17 `generate-*-pdf.ts` files call it. The house style, per the owner ruling recorded at `pdf-utils.ts:94-96` and `UI-CONVENTIONS.md:40`, is a `theme:"plain"` autoTable (white header + black bottom-rule) as in `generate-do-pdf.ts` / `generate-invoice-pdf.ts` — neither of which imports `tableTheme` instead of hand-rolling font sizes, headers, rules, or footers.
 
 ## Document layout standard
 

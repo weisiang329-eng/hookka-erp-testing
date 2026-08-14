@@ -10,6 +10,11 @@
 
 # Hookka ERP — 移动版 + Fold 版 · 需求与更改记录
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](../DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > 本文件记录你（客户）给出的每一条 prompt（= 需求），以及对应做了什么改动。
 > 交付物：`standalone/Hookka ERP Mobile (Phone).html`、`standalone/Hookka ERP Fold.html`（单文件、离线可用）
 > 源码：`docs/design/Hookka ERP Mobile.dc.html`、`docs/design/Hookka ERP Fold.dc.html` + `support.js` + `hookka-logo.png`
@@ -87,7 +92,7 @@
 
 **Fold 版（Samsung Fold 风格）**
 - 收起 = 手机版（底部导航）；展开 = Fold 版（左侧持久导航栏 + 宽屏内容）
-- 真实折叠屏/浏览器按视口宽度（≥700px）自动切换；顶部按钮可手动覆盖（编辑器预览用）
+- 真实折叠屏/浏览器按视口宽度（**≥720px**）自动切换（2026-08-14 更正：原写 700px；代码是 `src/pages/m/MobileLayout.tsx:87` 的 `useMediaQuery("(min-width: 720px)")`，`design/README.md:69` 一直是对的）；顶部按钮可手动覆盖（编辑器预览用）
 - 宽屏内容居中限宽，滑动不松散
 
 ---

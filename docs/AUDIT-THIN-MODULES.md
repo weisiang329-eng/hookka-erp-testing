@@ -1,5 +1,10 @@
 # Audit — the four modules no dedicated sweep had ever covered
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/api/routes/{rd-projects,rd-team-members,cash-flow,accounting,invoices,qc-pending,qc-inspections,qc-templates,warehouse,public-rack-qr,public-rack-write,public-do-qr,customers,customer-products,customer-maintenance,customer-hubs,customer-quotation}.ts`, `src/pages/{rd/*,quality,warehouse,rack-scan,do-scan,customers,accounting/cash-flow}.tsx`, `src/lib/cached-fetch.ts`, `src/api/lib/{db-pg,tenant,column-rename-map.json}`, `tests/db-schema.json` and `tests/db-boolean-columns.json`.
 > Where a claim needed live data I say so and give the probe. **No prod session existed this session** — the login gate is closed and `.dev.vars` is rotated dead. Every "measured" number below is either executed locally or quoted from an in-repo measurement with its date.
 
@@ -116,7 +121,18 @@ reasoning about it. That is the only reason finding A1 below is stated as fact.
 
 ## accounting
 
-### A1 — 🔴 the "delivered with issues" billing hold never fires (VERIFIED, not fixed)
+### A1 — ✅ FIXED (re-read 2026-08-14) — the "delivered with issues" billing hold now fires
+
+> **STATUS CORRECTED 2026-08-14.** This section read "🔴 … (VERIFIED, not fixed)". All four
+> sites named below are dual-keyed today: `invoices.ts:1795`
+> (`Number(doRow.deliveryIncomplete ?? doRow.delivery_incomplete) === 1`),
+> `delivery-orders/_helpers.ts:593` and `:4297`, and `delivery-orders.ts:2758`. The stale
+> "folded-lowercase runtime column" comment was also corrected in place at `_helpers.ts:586-592`.
+> What survives is the DATA question, not the code one: deliveries invoiced past the hold
+> **while it was dead** are still out there. That count is **UNMEASURED** — this branch has no
+> DB credentials; run `SELECT COUNT(*) FROM delivery_orders WHERE delivery_incomplete = 1`.
+
+**Original finding, kept for the record:**
 
 `src/api/routes/invoices.ts:1644` guards invoice creation with
 `if (Number(doRow.delivery_incomplete) === 1)`. The SELECT at `:1579` names the column
@@ -171,7 +187,16 @@ fixed 2026-08-13 (-010) on `/reports` › Financial. The same defect on the cash
 was not touched. Not fixed here because choosing the replacement basis (PI due dates? PI
 due dates plus un-invoiced GRNs?) is a finance decision, not a refactor.
 
-### A3 — 🟡 `journal_entries` IS org-scoped in prod; the comment saying otherwise is wrong
+### A3 — ✅ FIXED (BUG-2026-08-13-083; re-read 2026-08-14)
+
+> **STATUS CORRECTED 2026-08-14.** Both halves are closed. `GET /journals` scopes BOTH queries
+> on `orgId` (`accounting.ts:1179-1192` — `WHERE journal_entries.orgId = ?` and
+> `SELECT * FROM journal_lines WHERE orgId = ?`), and both `POST /journals` INSERTs now STAMP it
+> (`:1240`, `:1256`) under a comment saying *"read scoping without write stamping is only half a
+> boundary"*. The false "predates multi-tenancy" comment was rewritten in place. Byte-identical
+> today at one org; load-bearing the day a second tenant is seeded.
+
+**Original finding, kept for the record:**
 
 `accounting.ts:1157-1162` states "journal_entries has no orgId column (it predates
 multi-tenancy)" and uses that as the stated reason for not filtering. **`tests/db-schema.json`

@@ -12,6 +12,11 @@
 
 # Hookka ERP — 手机版重新设计 Change Log
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](../DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > 本次 session 对设计做的所有更改。状态标记：✅ 已完成可用 ｜ ⚠️ 部分完成 ｜ ❌ 仅可看未接操作
 
 ---
@@ -83,5 +88,5 @@
 
 ## 文件
 - `Hookka ERP Mobile.dc.html` — 源文件（可读可改）
-- `dist/Hookka ERP Mobile (standalone).html` — 打包版（手机直接打开）
+- `standalone/Hookka ERP Mobile (Phone).html` — 打包版（手机直接打开）（路径 2026-08-14 更正：原写作 `dist/…`，该目录不存在；`README.md:21` 一直是对的）
 - `hookka-logo.png` · `support.js` — 资源 / 运行时

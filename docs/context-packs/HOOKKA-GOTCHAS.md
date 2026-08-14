@@ -15,12 +15,25 @@
 > trap to the schema section (verified against `column-rename-map.json:815-816`,
 > `db-pg.ts:57` and the prod snapshot `tests/db-schema.json`). Nothing else changed.
 >
-> **Last verified: 2026-08-14** — added the "no production time is measured" section at
+> **Last verified: 2026-08-14 (second pass, branch `docs/docs-vs-code-audit`).** The standard-time
+> table was re-read against the source and **corrected**: its `attendance_records` row still
+> asserted a live `working_minutes × 0.85` writer at `attendance.ts:332` while the paragraph five
+> lines below said that writer was removed. `attendance.ts:332` is now a `DELETE /:id` handler,
+> all three `INSERT INTO attendance_records` sites omit the column, and no `0.85` survives in any
+> writer (the only one left in `src/api` is `scheduling.ts:291`, a labelled planning assumption).
+> Four drifted refs re-derived at the same time: `production-builder.ts:890/893` →
+> `src/lib/production-order-builder.ts:183/186` (the cited path never existed),
+> `_shared.ts:464/468` → `:493`, `completion-cascades.ts:413,838` → `:424,858`,
+> `wip-fixes.ts:112,445` → `:116,456`, `employees.tsx:4217` → `:4241`. See
+> `docs/DOCS-VS-CODE-AUDIT.md` rows D1–D3.
+>
+> **Previously verified: 2026-08-14** — added the "no production time is measured" section at
 > the top. Every claim in it was read out of the SOURCE (the binds in `bom.ts:1055-1063`
 > and BOTH builders (`src/api/routes/_shared/production-builder.ts:890/893` AND
 > `src/lib/production-order-builder.ts:183/186` — a bare filename here once resolved to a
 > path that does not exist, which is why citations are fully qualified now), the comment at
 > `import-completion/_shared.ts:464`,
+> and the card-creation builder, the comment at `import-completion/_shared.ts`,
 > the truncations at `_helpers.ts:4242/4334`,
 > the honest counter-example at `production-orders.ts:543-640`, and the schema at
 > `migrations-postgres/0001_init.sql:715-718`) — not inferred from query results. That
@@ -65,17 +78,21 @@ sources, and do not describe any of them as observed duration.
 | Column | What it really is | Source proof |
 |---|---|---|
 | `job_cards.production_time_minutes` | `= est_minutes` | `src/api/routes/bom.ts:1055-1063` binds **the same `p.target`** to both columns. **TWO builders do the same at card creation, and both are real** — `src/api/routes/_shared/production-builder.ts:890/893` (positional binds, both `p.minutes`) and `src/lib/production-order-builder.ts:183/186` (`estMinutes: p.minutes` / `productionTimeMinutes: p.minutes`). Migrations `0027`/`0029` write both from one literal `CASE`. |
-| `job_cards.actual_minutes` | `= est_minutes` | `import-completion/_shared.ts:468`, under a comment that says it outright: *"Use planned minutes as actual since we don't have real timing."* Also `completion-cascades.ts:413,838`, `wip-fixes.ts:112,445` |
-| `attendance_records.production_time_minutes` | **~~`= working_minutes × 0.85`~~ → now always NULL. FIXED #323, 2026-08-14.** | Verified 2026-08-14: `attendance.ts:332` is a `DELETE /:id` handler now; the only `0.85` left in `src/api` is `scheduling.ts:291`, a labelled *planning assumption* (`assumedEfficiency`), which is a legitimate use. All four former writers (`attendance.ts`, two in `worker.ts`, `working-hour-entries.ts`) write NULL, and `rowToAttendance` publishes `null` — "unknown" must stay distinguishable from "measured zero". |
+| `job_cards.actual_minutes` | `= est_minutes` | `import-completion/_shared.ts:493`, under a comment that says it outright: *"Use planned minutes as actual since we don't have real timing."* Also `completion-cascades.ts:424,858`, `wip-fixes.ts:116,456` — each `productionTimeMinutes ?? estMinutes ?? 0` |
+| `attendance_records.production_time_minutes` | **NULL — nothing writes it.** *(Was `working_minutes × 0.85` until #323; that is history, not current behaviour.)* | All three INSERTs — `attendance.ts:461`, `worker.ts:1151`, `working-hour-entries.ts:117` — **omit the column**, and `rowToAttendance` (`attendance.ts:200-205`) publishes `productionTimeMinutes: null`, `efficiencyPct: null`, `deptBreakdown: []` without reading the row. `0.85` no longer appears in any writer; migration `0227` dropped the NOT NULL + DEFAULT so "not measured" is expressible |
 
 They are not *coincidentally* equal — **the same variable is bound to both columns**, so
 they can never differ. That is the standard-costing model, stated in code.
 
 **The `attendance_records` row above was the real defect, and it is FIXED (#323).** It had
-nothing to do with the BOM: `attendance.ts:332` invented `working_minutes × 0.85` at
-clock-out, and `efficiencyPct` / `deptBreakdown` were derived from that constant. Four
+nothing to do with the BOM: the clock-out branch invented `working_minutes × 0.85`, and
+`efficiencyPct` / `deptBreakdown` were derived from that constant. Four
 writers carried it (`attendance.ts`, two in `worker.ts`, `working-hour-entries.ts`); all
-four now write NULL, because "unknown" must be distinguishable from "measured zero".
+four now OMIT the column, because "unknown" must be distinguishable from "measured zero".
+**The only surviving `0.85` in `src/api` is `scheduling.ts:291` `const EFFICIENCY = 0.85`** —
+a *planning assumption* on `GET /api/scheduling/capacity`, published in the response as
+`assumedEfficiency` and labelled as an assumption in the code. It is not a measurement and
+must never be described as one; nothing consumes that endpoint today.
 
 **`job_cards.completed_at` now exists (#325) — and it is NOT a contradiction of the
 standard-costing model.** It records *when* a card was completed, which the code used to
@@ -103,8 +120,10 @@ Employees → Department Performance computes (80%). **It is the soundest number
 system — do not "fix" it, and the label "Production Hours" stays (owner, 2026-08-14).**
 
 **>100% IS NORMAL AND IS GOOD.** Earned > clocked means the worker beat the standard.
-Nothing clamps it and nothing should: `employees.tsx:4217` colours `>= 100` GREEN, and the
-only flag is `< 60` (`LOW_EFFICIENCY_THRESHOLD`). **Do not treat a 101% day as bad data.**
+Nothing clamps it and nothing should: `employees.tsx:4241` colours `>= 100` GREEN (same ladder
+at `:4268`, `:5767`, `:11443` — `>=100` green, `>=60` amber, else red), and the
+only flag is `< 60` (`LOW_EFFICIENCY_THRESHOLD`, defined in `src/api/lib/efficiency-report.ts:81`
+and `compliance-report.ts:72`, not on the page). **Do not treat a 101% day as bad data.**
 I made exactly that mistake — applying *utilisation* intuition (where >100% is impossible)
 to an *efficiency* metric (where it is the point) — and the owner corrected it. The daily
 spread on this figure (101 / 71 / 84 / 76 / 80) is real signal about how the floor ran.

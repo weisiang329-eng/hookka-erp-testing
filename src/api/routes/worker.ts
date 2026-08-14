@@ -34,6 +34,9 @@ import {
   loadActiveBomRowsMemoized,
 } from "../lib/worker-perf";
 import { maybeApplyAutoPunchDock } from "../lib/attendance-deduct";
+// Shared with POST /api/attendance so both punch surfaces clear the unmeasured
+// metric columns through ONE definition (BUG-2026-08-13-103).
+import { metricsNullable } from "./attendance";
 import { applyPackingRack } from "../lib/packing-rack-write";
 import { aggregateWipTimes } from "../lib/wip-times-core";
 import {
@@ -936,21 +939,28 @@ async function autoCloseForgottenPunch(
   const endMin = rules.endMin;
   const outTime = `${String(Math.floor(endMin / 60)).padStart(2, "0")}:${String(endMin % 60).padStart(2, "0")}`;
   const stdMin = (workingHoursPerDay || 9) * 60;
-  const prodMin = Math.max(0, Math.round(stdMin * 0.85));
-  const effPct = stdMin > 0 ? Math.round((prodMin / stdMin) * 100) : 0;
+  // BUG-2026-08-13-103 (C15). This used to also derive production minutes as
+  // 85% of `stdMin`, then divide THAT by `stdMin` again for an efficiency — so
+  // EVERY auto-closed day was stamped with a flat 85% that could not vary:
+  // both sides came from the same number, so the ratio was constant by
+  // construction. workingMinutes = stdMin stays, because
+  // that one is the owner's stated RULE for a forgotten punch (2026-06-16: it
+  // pays as a normal shift, no OT, no short-hour dock) and the row says so in
+  // `notes`. A policy figure that names itself is not a fabricated measurement.
+  const clearMetrics = (await metricsNullable(db))
+    ? "productionTimeMinutes = NULL, efficiencyPct = NULL,"
+    : "";
   await db
     .prepare(
       `UPDATE attendance_records
-         SET clockOut = ?, workingMinutes = ?, productionTimeMinutes = ?,
-             efficiencyPct = ?, overtimeMinutes = 0,
+         SET clockOut = ?, workingMinutes = ?, ${clearMetrics}
+             overtimeMinutes = 0,
              notes = CASE WHEN notes IS NULL OR notes = '' THEN ? ELSE notes END
        WHERE id = ? AND clockOut IS NULL`,
     )
     .bind(
       outTime,
       stdMin,
-      prodMin,
-      effPct,
       "Forgot to punch out — auto-counted as a normal shift",
       row.id,
     )
@@ -1124,19 +1134,15 @@ app.post("/clock", async (c) => {
           .first<DepartmentRow>()
       : null;
     const id = genId("att");
-    const deptBreakdown = JSON.stringify([
-      {
-        deptCode: worker.departmentCode ?? "",
-        minutes: 0,
-        productCode: "",
-      },
-    ]);
+    // Mirrors POST /api/attendance (BUG-2026-08-13-103): the unmeasured metric
+    // columns are omitted rather than seeded with 0, and deptBreakdown starts
+    // as an empty array instead of one zero-minute home-department entry.
     await c.var.DB.prepare(
       `INSERT INTO attendance_records (
          id, employeeId, employeeName, departmentCode, departmentName,
-         date, clockIn, clockOut, status, workingMinutes, productionTimeMinutes,
-         efficiencyPct, overtimeMinutes, deptBreakdown, notes
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'PRESENT', 0, 0, 0, 0, ?, '')`,
+         date, clockIn, clockOut, status, workingMinutes,
+         overtimeMinutes, deptBreakdown, notes
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'PRESENT', 0, 0, '[]', '')`,
     )
       .bind(
         id,
@@ -1146,7 +1152,6 @@ app.post("/clock", async (c) => {
         dept?.shortName ?? "",
         date,
         time,
-        deptBreakdown,
       )
       .run();
     await stampPunchGeo(c.var.DB, id, "CLOCK_IN", lat, lng);
@@ -1167,32 +1172,31 @@ app.post("/clock", async (c) => {
     );
   }
   let workingMinutes = 0;
-  let productionTimeMinutes = 0;
-  let efficiencyPct = 0;
   let overtimeMinutes = 0;
   if (existing.clockIn) {
     const [inH, inM] = existing.clockIn.split(":").map(Number);
     const [outH, outM] = time.split(":").map(Number);
     const total = outH * 60 + outM - (inH * 60 + inM);
     workingMinutes = Math.max(0, total);
-    productionTimeMinutes = Math.max(0, Math.round(total * 0.85));
     const standardMinutes = (worker.workingHoursPerDay || 9) * 60;
-    efficiencyPct = standardMinutes > 0
-      ? Math.round((productionTimeMinutes / standardMinutes) * 100)
-      : 0;
     overtimeMinutes = otMinutesAtLeastMinimum(total - standardMinutes);
   }
+  // The SECOND copy of the same fabrication (BUG-2026-08-13-103): the phone
+  // punch computed `total × 0.85` exactly as the office punch did, so fixing
+  // only POST /api/attendance would have left every worker-app clock-out still
+  // writing it. Cleared here too — never recomputed.
+  const clockOutClear = (await metricsNullable(c.var.DB))
+    ? "productionTimeMinutes = NULL, efficiencyPct = NULL,"
+    : "";
   await c.var.DB.prepare(
     `UPDATE attendance_records
-       SET clockOut = ?, workingMinutes = ?, productionTimeMinutes = ?,
-           efficiencyPct = ?, overtimeMinutes = ?
+       SET clockOut = ?, workingMinutes = ?, ${clockOutClear}
+           overtimeMinutes = ?
      WHERE id = ?`,
   )
     .bind(
       time,
       workingMinutes,
-      productionTimeMinutes,
-      efficiencyPct,
       overtimeMinutes,
       existing.id,
     )
@@ -1494,8 +1498,14 @@ app.get("/history", async (c) => {
       clockIn: r.clockIn,
       clockOut: r.clockOut,
       workingMinutes,
-      productionTimeMinutes: r.productionTimeMinutes,
-      efficiencyPct: r.efficiencyPct,
+      // UNMEASURED — always null (BUG-2026-08-13-103). Both columns held
+      // `workingMinutes × 0.85` and a ratio of it; /worker/history used to
+      // hand them to the phone per attendance day. Nothing renders them, and
+      // nothing may: the real per-day figures on the Pay screen come from
+      // `daily[]` (completed job-card minutes ÷ clocked minutes), and the
+      // period efficiency from computeMonthlyEfficiencyByWorker.
+      productionTimeMinutes: null,
+      efficiencyPct: null,
       overtimeMinutes,
       lateMinutes,
       status: r.status,

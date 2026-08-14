@@ -290,6 +290,208 @@ this very test failed against its own explanatory note. Asserts the identifiers 
 CODE, that `loading` is `workersLoading` alone, and — the other half — that
 `refreshAttendance` STILL invalidates the attendance prefix, so "clean up the dead code" can
 never take the live part with it. Red-proved (mutation M8).
+## BUG-2026-08-13-107 — the Command Center printed a green `0` and "All clear" over a compliance read that had died `dashboard` `data-integrity` `ui-frontend` 🟢
+
+**Symptom.** The Daily Report tile on `/dashboard` — the first card under the KPI rail —
+showed a large **green `0`** captioned *"All clear — nothing flagged today"* whenever
+`/api/reports/compliance.json` timed out, 500'd, or was killed by the 30 s global abort in
+`src/lib/api-client.ts`. The owner reads that tile as a statement that the factory has no
+open exceptions, and acts on it.
+
+**Root cause.** `useCachedJson` hands a killed request back as
+`data = null, loading = false` — byte-for-byte the state a genuinely clean day produces. The
+tile destructured only `data` and `loading` and rendered `compCounts?.total ?? 0`. The hook
+publishes a classified `failure`, and `isUnknownOutcome(failure)` is the single decision that
+separates "the server said nothing is wrong" from "nobody answered" (the primitive shipped as
+BUG-2026-08-13-016) — this tile never asked.
+
+**The same endpoint, the honest sibling.** `/daily-report` reads the *identical* URL and gets
+it right: *"Could not load the report. Please try again."* (`daily-report.tsx:1105-1122`).
+Same data, two screens, one of them lying — which is why this is a page defect and not a
+primitive defect.
+
+**Why the class guard missed it.** `tests/record-load-failure-class.test.mjs` grows by scanning
+for pages that print the string *"not found"*. This page's false sentence is *"All clear"*.
+The guard was pattern-matched to the first instance instead of to the shape, so the dashboard
+was never in the map.
+
+**Fix.** `src/pages/dashboard-b/index.tsx` — destructure `failure` + `refresh`, derive
+`compFailed = !compCounts && failure != null && isUnknownOutcome(failure)`, render **"—"** and
+*"Couldn't load — this is not a clean day, it is an unknown one"* plus a Retry chip. A genuine
+`0` from a 2xx body still reads "All clear", which is the point: only an observed answer
+licenses the words.
+
+---
+
+## BUG-2026-08-13-104 — the OCR card said "No scans yet" over a request that never answered `dashboard` `data-integrity` `ui-frontend` 🟢
+
+**Symptom.** `OcrAccuracyCard` at the foot of the Command Center printed *"No scans yet. Once
+you scan and import orders / supplier docs, the accuracy shows here automatically."* on any
+failed fetch — a statement that the scanner has never been used in the selected period.
+
+**Root cause.** Identical shape to -103: `!d` is true for a 30 s abort and for an empty 2xx
+body alike, and the card branched on `!d || d.overall.total === 0`.
+
+**Fix.** `src/pages/dashboard-b/OcrAccuracyCard.tsx` — `loadFailed` gate through
+`isUnknownOutcome(failure)`, an honest failure panel carrying `failure.message`, the sentence
+*"This is not a statement that nothing was scanned — the data never arrived"*, and a Retry.
+
+---
+
+## BUG-2026-08-13-105 — the OCR sample-size guard was missing from the one panel it was written for `dashboard` `data-integrity` 🟢
+
+**Symptom.** A supplier with a single scanned document rendered a confident **red 0%** in the
+Supplier table — no grey, no `*`, no sample-size caveat — beside customer rows that did carry
+one.
+
+**Root cause.** `MIN_SAMPLE = 5` greys a rate and appends `*` when `total < 5`, and both
+helpers take the total as an optional second argument. Every table forwards it —
+`rateColor(b.rate, b.total)`, `rateColor(t.rate, t.total)` — **except the by-Supplier rows**,
+which called `rateColor(s.rate)` / `pct(s.rate)`. The guard was live everywhere except where
+it was needed: the comment above `MIN_SAMPLE` records that it was introduced *because the
+Supplier panel read a red 0% off ONE document* (owner 2026-08-05).
+
+**Fix.** Pass `s.total` to both helpers. The guard test now rejects **any** single-argument
+`rateColor(...)` / `pct(...)` call in the file, so a new table cannot reopen the hole.
+
+---
+
+## BUG-2026-08-13-106 — the printed Hookka Report dropped a whole receivables bucket, and shifted every remaining label `reports` `data-integrity` 🟢
+
+**Symptom.** The Billing Desk strip on the printed Hookka Report showed four aging boxes —
+Current / 31–60d / 61–90d / 90d+ — which **did not add up to the "Receivables" total printed
+beside them**.
+
+**Root cause.** `operations-report.ts:919-923` computes **five** buckets from
+`monthsOverdue(invoiceDate)`: `currentSen` (mo ≤ 0), `d30Sen` (mo 1), `d60Sen` (mo 2),
+`d90Sen` (mo 3), `over90Sen`. The strip rendered four of them and **omitted `d30Sen`
+entirely**, so every invoice exactly one month overdue vanished from a printed financial
+statement. With it went the labels: what read "31–60d" was `d60Sen` — two months — so each
+caption named the bucket one to its left. The captions also asserted *days* over a
+whole-month calculation.
+
+**Fix.** `src/pages/hookka-report-editions.tsx` — five columns, all five buckets, captions
+that say what the maths does (Current / 1 mth / 2 mth / 3 mth / 3 mth+).
+
+**Guard.** `tests/dashboard-truthfulness.test.mjs` derives the bucket set from
+`operations-report.ts` itself (`aging.<x>Sen +=`) rather than hardcoding five names, so
+adding a sixth bucket to the aggregator without rendering it fails the build.
+
+---
+
+## All four (-103 … -106): how the guards were proved
+
+`tests/dashboard-truthfulness.test.mjs` is structural — `readFileSync` assertions on the
+source — because none of these is a runtime error. `0` is a valid number, *"All clear"* is
+valid copy, and a four-column grid is valid markup; a plausible screen is exactly what each
+bug produced.
+
+Each assertion was proved RED by **reintroducing the exact removed expression** and watching
+the file fail: the `?? 0` headline, the ungated *"All clear"* caption, the `loadFailed`
+derivation, the single-argument `rateColor(s.rate)`, and the four-bucket strip. Five
+mutations, five failures, files restored byte-identical afterwards.
+
+**The first run of that proof reported three SETUP FAILs, not three REDs** — the anchors used
+literal `\n` and these files are CRLF on disk, so the mutations were never applied and would
+have "passed" as evidence of nothing. That is the EOL trap `docs/BUG-CLASSES.md` names, hit
+in the act of guarding against it; the harness now derives its line ending from the file it is
+mutating.
+
+Full context for all four, plus the 40-odd findings this pass did **not** fix, is in
+[`docs/DASHBOARD-DATA-AUDIT.md`](DASHBOARD-DATA-AUDIT.md).
+## BUG-2026-08-13-103 — "production time" and every efficiency built on it were `clocked × 0.85`; a punch has never measured production `data-integrity` `attendance` `reporting` 🟢
+
+**Symptom.** None — which is the point. Attendance carried a per-day "Production Time" and
+an "Efficiency %" for every worker, every day, in the same typeface as the real figures
+beside them, and the numbers were plausible. Nothing 500'd, nothing rendered blank.
+
+**Root cause.** `src/api/routes/attendance.ts` CLOCK_OUT:
+
+```js
+workingMinutes        = Math.max(0, total);                      // REAL: out − in
+productionTimeMinutes = Math.max(0, Math.round(total * 0.85));   // FABRICATED
+efficiencyPct         = Math.round((productionTimeMinutes / standardMinutes) * 100);
+deptBreakdown         = JSON.stringify([{ deptCode, minutes: productionTimeMinutes,
+                                          productCode: "" }]);
+```
+
+`attendance_records.production_time_minutes` has **never been measured**. It is
+`working_minutes × 0.85`. Measured on prod for August 2026: 180,928 / 212,850 =
+**0.85005** — the constant showing through. Consequently `efficiencyPct` measured
+ATTENDANCE LENGTH wearing the word "efficiency" (`0.85 × clocked ÷ standard`), and
+`deptBreakdown` published a per-department split that was the same fabricated number under
+an **empty** `productCode`.
+
+**Three writers, not one.** Grepping the constant rather than the endpoint found the same
+ratio in:
+
+1. `attendance.ts` — `POST /api/attendance` CLOCK_OUT (the office punch).
+2. `worker.ts` — `POST /api/worker/clock` CLOCK_OUT (the phone punch), an exact copy.
+3. `worker.ts` `autoCloseForgottenPunch` — the midnight cron + next-day self-heal, which
+   computed `stdMin × 0.85` and then divided it by `stdMin`, so **every** auto-closed day
+   was stamped a flat **85%** that could not vary by construction.
+
+A fourth path, `working-hour-entries.ts`, seeded the columns with `0` on the attendance row
+it auto-creates — the quieter form of the same defect (C15: *`0` is a claim, not a blank*).
+
+**Blast radius — what it did NOT reach, which took the longest to establish.** Payroll does
+**not** touch these columns. `payroll-hour-deductions.ts:282` selects only
+`employeeId, date, clockIn, clockOut`; the efficiency ALLOWANCE
+(`src/api/lib/efficiency-allowance.ts`, real money, gated on a threshold) uses
+`job_cards.productionTimeMinutes × wipQty` over `working_hour_entries.hours` — a different
+`productionTimeMinutes`, on a different table. **No pay figure was ever computed from the
+fabricated column.** Nor did any screen render it: the Employee Detail tab dropped the
+attendance-sourced rows in 2026-05, `reports.tsx` reads only `workingMinutes` /
+`overtimeMinutes` from attendance, and the mobile card shows clock-in/out/hours. It was
+exposed on `GET /api/attendance` and `GET /api/worker/history`, typed in four frontend
+files, and one API-doc comment advertised `efficiencyPct` as a "real field" — i.e. it was
+sitting there waiting for the next screen to pick it up.
+
+**Fix.**
+* All four writers stop computing it. The punch now records only what a punch observes:
+  clock in, clock out, the minutes between, and the OT rule applied to those minutes.
+* `production_time_minutes` / `efficiency_pct` are **cleared to NULL** at clock-out (so a
+  re-punch scrubs what a pre-fix clock-out wrote) and **omitted** from both INSERT paths.
+  `migrations-postgres/0227_attendance_unmeasured_metrics_nullable.sql` drops their
+  `NOT NULL` + `DEFAULT 0` so "unknown" is expressible at all; it also runs at runtime via
+  `ensureAttendanceMetricsNullable` because migrations are inert on deploy here. If that DDL
+  cannot apply, the write paths **omit** the columns — the fallback is silence, never a
+  number.
+* Both readers (`rowToAttendance`, `/api/worker/history`) publish `null` / `[]`
+  **unconditionally**. Every stored value is fabricated, so a passthrough would republish
+  the fabrication for the ~2,780 historic rows.
+* The migration deliberately does **not** UPDATE those historic rows to NULL — irreversible,
+  not needed for correctness (nothing can read them now), and the owner's call. The exact
+  statement is written in the migration's header for when he decides.
+
+**Deliberately left alone.** `autoCloseForgottenPunch` still writes
+`workingMinutes = stdMin`. That is the owner's stated RULE (2026-06-16: a forgotten punch
+pays as a normal shift — no OT, no short-hour dock), the row says so in `notes`, and
+BUG-2026-08-01-004 depends on it. A policy figure that names itself is not a fabricated
+measurement.
+
+**The metric that survived, now labelled honestly.** `/api/department-performance` is
+untouched: it divides job-card minutes by REAL clocked time from `working_hour_entries`.
+But its numerator is `actualMinutes ?? estMinutes`, and recorded durations collapsed in
+May 2026 (Jan 100% → Apr 72.6% → May 6.2% → Jun–Aug ~0%; **0 of 3,475** August job cards
+carry one), so in practice it is EARNED STANDARD time — earned-vs-actual labour efficiency,
+a legitimate metric, but not measured production pace. The endpoint now returns
+`totals.cards` / `totals.measuredCards` (a card counts as measured only when its recorded
+duration DIFFERS from its own standard — 4,289 populated values on prod are byte-identical
+copies of their estimate), and both surfaces caption it *"standard minutes earned ÷ clocked
+minutes"* with the coverage printed beside it, plus an explicit warning not to trend it
+against a period when capture was real.
+
+**Verified.** `tests/no-fabricated-attendance-production-time.test.mjs` — 7 structural
+tests, 13 assertions. Every one proved RED by reintroducing the bug, with **bytes-changed-
+on-disk asserted before each run** and byte-identical restore after. Reads are CRLF-
+normalised and the prose assertions run against a whitespace-collapsed copy, because a
+literal `\n` anchor matches nothing in these files. Two of the thirteen were **blind on the
+first draft**: the caption checks matched a sentence JSX had wrapped across lines, and the
+anti-over-correction pin on `/api/department-performance` matched only ONE of the two places
+that formula lives — it stayed green with the other site's denominator replaced by a
+literal. `npx tsc -p tsconfig.app.json --noEmit` exit 0. **Not deployed** — no prod
+verification claimed.
 
 ---
 

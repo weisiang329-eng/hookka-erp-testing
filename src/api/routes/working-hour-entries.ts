@@ -111,11 +111,14 @@ async function resolveOrCreateAttendance(
   const id = genAttId();
   await c.var.DB
     .prepare(
+      // productionTimeMinutes / efficiencyPct omitted, not seeded with 0
+      // (BUG-2026-08-13-103) — this row exists only to hang working-hour
+      // entries off; nothing about production has been measured for it.
       `INSERT INTO attendance_records (
          id, employeeId, employeeName, departmentCode, departmentName,
-         date, clockIn, clockOut, status, workingMinutes, productionTimeMinutes,
-         efficiencyPct, overtimeMinutes, deptBreakdown, notes
-       ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 'PRESENT', 0, 0, 0, 0, '[]', '')`,
+         date, clockIn, clockOut, status, workingMinutes,
+         overtimeMinutes, deptBreakdown, notes
+       ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 'PRESENT', 0, 0, '[]', '')`,
     )
     .bind(
       id,

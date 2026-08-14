@@ -10,13 +10,88 @@ import { otMinutesAtLeastMinimum } from "../../lib/attendance-rules";
 //
 // `deptBreakdown` is stored as JSON in the DB and parsed back into an array
 // in the response so the frontend can render per-department minutes.
+//
+// ── production_time_minutes / efficiency_pct / dept_breakdown are NOT measured ──
+// BUG-2026-08-13-103 (C15). Until this fix the CLOCK_OUT branch below wrote
+//
+//     productionTimeMinutes = round(workingMinutes × 0.85)
+//     efficiencyPct         = productionTimeMinutes ÷ standardMinutes × 100
+//     deptBreakdown         = one entry carrying that same figure again, under
+//                             the worker's home dept and an EMPTY productCode
+//
+// i.e. a FIXED RATIO of the clock time, published under three captions that all
+// read as measured production. Measured on prod for August 2026:
+// 180,928 / 212,850 = 0.85005 — the constant showing through. There has never
+// been a writer that measured production time here, so EVERY value this column
+// has ever held is `clocked × 0.85`; there is nothing to preserve.
+//
+// The punch now records only what a punch can observe — clock in, clock out,
+// the minutes between them, and the overtime rule applied to those minutes —
+// and leaves the three derived columns unwritten. `rowToAttendance` publishes
+// them as null / [] so an unknown is never mistaken for a measurement.
+// The real labour-efficiency metric lives on /api/department-performance
+// (earned standard minutes ÷ clocked minutes) and is untouched by this file.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
+import { runSelfApply } from "../lib/self-apply";
 
 const app = new Hono<Env>();
+
+// ---------------------------------------------------------------------------
+// Runtime self-apply — make the two unmeasured metric columns NULLABLE.
+//
+// 0018_attendance.sql declared them `INTEGER NOT NULL DEFAULT 0`, so "not
+// measured" could not be expressed: the only writable values were a number.
+// A stored 0 is a claim ("zero production time"), which is the same C15 defect
+// one step quieter — so the columns are widened to accept NULL and their
+// DEFAULT is dropped, letting an omitted column mean "unknown".
+//
+// Both statements are idempotent: DROP NOT NULL / DROP DEFAULT on a column
+// that already permits NULL / has no default is a no-op in Postgres.
+//
+// Deliberately NOT awaited as a hard precondition — a punch must never fail
+// because a DDL round tripped. `metricsNullable()` reports whether NULL is
+// writable, and the write paths below fall back to leaving the columns ALONE
+// (never to writing a number) when it is not.
+// ---------------------------------------------------------------------------
+const NULLABLE_METRIC_DDL = [
+  `ALTER TABLE attendance_records ALTER COLUMN production_time_minutes DROP NOT NULL`,
+  `ALTER TABLE attendance_records ALTER COLUMN production_time_minutes DROP DEFAULT`,
+  `ALTER TABLE attendance_records ALTER COLUMN efficiency_pct DROP NOT NULL`,
+  `ALTER TABLE attendance_records ALTER COLUMN efficiency_pct DROP DEFAULT`,
+];
+
+let _pendingNullableMetrics: Promise<void> | null = null;
+export function ensureAttendanceMetricsNullable(db: D1Database): Promise<void> {
+  if (_pendingNullableMetrics) return _pendingNullableMetrics;
+  _pendingNullableMetrics = (async () => {
+    await runSelfApply(db, "attendance", NULLABLE_METRIC_DDL);
+  })().catch((err) => {
+    // A FAILED round must not be remembered as done — dropping the memo lets
+    // the next punch retry (same contract as every other self-apply here).
+    _pendingNullableMetrics = null;
+    throw err;
+  });
+  return _pendingNullableMetrics;
+}
+
+/**
+ * True when `production_time_minutes` / `efficiency_pct` can be written NULL.
+ * On failure returns false — the caller then OMITS the columns from its write.
+ * It must never respond by computing a value: that is the bug this fixes.
+ */
+export async function metricsNullable(db: D1Database): Promise<boolean> {
+  try {
+    await ensureAttendanceMetricsNullable(db);
+    return true;
+  } catch (e) {
+    console.warn("[attendance] metric columns still NOT NULL; leaving them unwritten:", e);
+    return false;
+  }
+}
 
 type AttendanceRow = {
   id: string;
@@ -57,19 +132,17 @@ type DepartmentRow = {
   shortName: string;
 };
 
-function parseDeptBreakdown(raw: string): Array<{
+// The per-department split the response shape still declares. `parseDeptBreakdown`
+// — which read `dept_breakdown` back out of the row — was DELETED with
+// BUG-2026-08-13-103 rather than left unused: the only thing that column has
+// ever held is one entry carrying the fabricated production minutes under an
+// empty productCode, so a parser for it is a loaded gun. Restoring per-department
+// minutes means a writer that measures them first.
+type DeptBreakdownEntry = {
   deptCode: string;
   minutes: number;
   productCode: string;
-}> {
-  if (!raw) return [];
-  try {
-    const v = JSON.parse(raw);
-    return Array.isArray(v) ? v : [];
-  } catch {
-    return [];
-  }
-}
+};
 
 function rowToAttendance(r: AttendanceRow) {
   // Runtime-added columns (geo + punch selfie) were created through the
@@ -114,10 +187,23 @@ function rowToAttendance(r: AttendanceRow) {
       !!dual(r.clockOutPhoto, "clockoutphoto"),
     status: r.status,
     workingMinutes: r.workingMinutes,
-    productionTimeMinutes: r.productionTimeMinutes,
-    efficiencyPct: r.efficiencyPct,
+    // ── UNMEASURED — always null. See the file header (BUG-2026-08-13-103). ──
+    // These are not read from the row on purpose. Every value the column has
+    // ever held was `workingMinutes × 0.85` (a constant, not an observation),
+    // so publishing the stored number would republish the fabrication for the
+    // ~2,780 historic rows that still carry it. There is no measured value to
+    // fall back to, so the honest answer is "unknown": null, rendered "—".
+    //
+    // Restoring a number here requires a WRITER that measures production time
+    // (a scan-in/scan-out per department, or job-card actual durations keyed to
+    // the day) — not a ratio of the clock time.
+    productionTimeMinutes: null,
+    efficiencyPct: null,
+    // Same story: the split was one entry carrying that same fabricated number
+    // under an EMPTY productCode. An empty array says "no per-department split
+    // was recorded", which is true; the stored JSON says something false.
+    deptBreakdown: [] as DeptBreakdownEntry[],
     overtimeMinutes: r.overtimeMinutes,
-    deptBreakdown: parseDeptBreakdown(r.deptBreakdown),
     notes: r.notes,
   };
 }
@@ -364,19 +450,19 @@ app.post("/", async (c) => {
         : null;
 
       const id = genId();
-      const deptBreakdown = JSON.stringify([
-        {
-          deptCode: worker.departmentCode ?? "",
-          minutes: 0,
-          productCode: "",
-        },
-      ]);
+      // productionTimeMinutes / efficiencyPct are OMITTED from the column list:
+      // at clock-in nothing about production has been observed yet, and an
+      // explicit 0 would claim "no production time" (C15's first corollary).
+      // With the self-apply above they land NULL; without it they land on the
+      // legacy DEFAULT 0 — either way this route never publishes them.
+      // deptBreakdown starts as an empty array rather than one zero-minute
+      // entry for the worker's home department, for the same reason.
       await c.var.DB.prepare(
         `INSERT INTO attendance_records (
            id, employeeId, employeeName, departmentCode, departmentName,
-           date, clockIn, clockOut, status, workingMinutes, productionTimeMinutes,
-           efficiencyPct, overtimeMinutes, deptBreakdown, notes
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'PRESENT', 0, 0, 0, 0, ?, '')`,
+           date, clockIn, clockOut, status, workingMinutes,
+           overtimeMinutes, deptBreakdown, notes
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'PRESENT', 0, 0, '[]', '')`,
       )
         .bind(
           id,
@@ -386,7 +472,6 @@ app.post("/", async (c) => {
           dept?.shortName ?? "",
           date,
           time,
-          deptBreakdown,
         )
         .run();
 
@@ -408,44 +493,42 @@ app.post("/", async (c) => {
 
       const clockIn = existing.clockIn;
       let workingMinutes = 0;
-      let productionTimeMinutes = 0;
-      let efficiencyPct = 0;
       let overtimeMinutes = 0;
-      let deptBreakdown = existing.deptBreakdown;
 
       if (clockIn) {
         const [inH, inM] = clockIn.split(":").map(Number);
         const [outH, outM] = time.split(":").map(Number);
         const total = outH * 60 + outM - (inH * 60 + inM);
+        // The two things a punch actually measures: how long the worker was on
+        // the clock, and how much of that is overtime under the shift rules.
         workingMinutes = Math.max(0, total);
-        productionTimeMinutes = Math.max(0, Math.round(total * 0.85));
         const standardMinutes = (worker.workingHoursPerDay ?? 9) * 60;
-        efficiencyPct = Math.round((productionTimeMinutes / standardMinutes) * 100);
         // Same 30-minute OT minimum the payroll engine and the punch use.
         overtimeMinutes = otMinutesAtLeastMinimum(total - standardMinutes);
-        deptBreakdown = JSON.stringify([
-          {
-            deptCode: worker.departmentCode ?? "",
-            minutes: productionTimeMinutes,
-            productCode: "",
-          },
-        ]);
       }
+
+      // productionTimeMinutes / efficiencyPct / deptBreakdown are CLEARED, not
+      // computed (BUG-2026-08-13-103). Clearing rather than leaving them lets a
+      // re-punch scrub the fabricated value a pre-fix clock-out already wrote.
+      // If the columns are still NOT NULL (self-apply could not run) they are
+      // dropped from the SET list entirely — the fallback is silence, never a
+      // number. `metricsNullable` is a fixed internal literal, not user input.
+      const canNull = await metricsNullable(c.var.DB);
+      const clearMetrics = canNull
+        ? "productionTimeMinutes = NULL, efficiencyPct = NULL, deptBreakdown = '[]',"
+        : "deptBreakdown = '[]',";
 
       await c.var.DB.prepare(
         `UPDATE attendance_records
-           SET clockOut = ?, workingMinutes = ?, productionTimeMinutes = ?,
-               efficiencyPct = ?, overtimeMinutes = ?, deptBreakdown = ?,
+           SET clockOut = ?, workingMinutes = ?, ${clearMetrics}
+               overtimeMinutes = ?,
                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
          WHERE id = ?`,
       )
         .bind(
           time,
           workingMinutes,
-          productionTimeMinutes,
-          efficiencyPct,
           overtimeMinutes,
-          deptBreakdown,
           existing.id,
         )
         .run();

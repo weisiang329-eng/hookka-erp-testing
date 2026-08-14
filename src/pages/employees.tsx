@@ -89,8 +89,12 @@ type AttendanceRecord = {
   clockOut: string | null;
   status: AttendanceStatus;
   workingMinutes: number;
-  productionTimeMinutes: number;
-  efficiencyPct: number;
+  // ALWAYS null / empty — see src/types/index.ts AttendanceRecord and
+  // BUG-2026-08-13-103. A punch measures clock time and overtime, nothing
+  // about production. Kept on the type (rather than deleted) so a future
+  // reader has to confront the null instead of re-inventing the field.
+  productionTimeMinutes: number | null;
+  efficiencyPct: number | null;
   overtimeMinutes: number;
   deptBreakdown: { deptCode: string; minutes: number; productCode: string }[];
   notes: string;
@@ -6013,6 +6017,13 @@ type DeptPerfResponse = {
       productionMinutes: number;
       efficiencyPct: number;
       workerCount: number;
+      // Numerator provenance (BUG-2026-08-13-103): completed job cards in the
+      // range, and how many recorded a duration that differs from their own
+      // standard. Optional — a payload from the snapshot cache written before
+      // this shipped has neither, and the caption falls back to the generic
+      // wording rather than printing "0 of 0".
+      cards?: number;
+      measuredCards?: number;
     };
     daily: DeptPerfDailyRow[];
   };
@@ -6330,6 +6341,40 @@ function DepartmentPerformanceTab({
           </CardContent>
         </Card>
       </div>
+
+      {/* Provenance caption (BUG-2026-08-13-103). "Efficiency" here is
+          EARNED-vs-ACTUAL labour efficiency: the numerator is the STANDARD
+          minutes of the job cards completed in the range (a card's recorded
+          duration is used only when it has one), and the denominator is real
+          clocked time from working_hour_entries. It is not measured production
+          time, and captured durations collapsed in May 2026 — so the ratio of
+          measured to total cards is printed beside the figure rather than left
+          for the reader to assume. C15's third corollary: publish the
+          provenance next to the number. */}
+      <p className="text-xs text-[#6B7280] -mt-1">
+        Efficiency = standard minutes earned ÷ clocked minutes (from working
+        hour entries). Not measured production time.
+        {typeof totals?.cards === "number" && totals.cards > 0 ? (
+          <>
+            {" "}
+            <span
+              className={
+                (totals.measuredCards ?? 0) === 0
+                  ? "font-medium text-[#9A3A2D]"
+                  : "font-medium text-[#1F1D1B]"
+              }
+              title="A job card counts as measured only when it recorded a duration that differs from its own standard time — a copied estimate is the standard under another name."
+            >
+              {(totals.measuredCards ?? 0).toLocaleString()} of{" "}
+              {totals.cards.toLocaleString()} job cards in this period carry a
+              measured duration
+            </span>
+            {(totals.measuredCards ?? 0) === 0
+              ? " — every minute above is standard time, so this figure tracks output volume against attendance, not pace."
+              : "; the rest contribute their standard time."}
+          </>
+        ) : null}
+      </p>
 
       {/* Daily Breakdown Table — expandable rows. Click row OR caret to drill
           into who logged hours and which job cards completed on that date.

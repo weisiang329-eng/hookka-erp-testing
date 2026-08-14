@@ -13,7 +13,7 @@ import { Link } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { formatCurrency } from "@/lib/utils";
 import { Skeleton, SkeletonDashboard } from "@/components/ui/skeleton";
-import { useCachedJson } from "@/lib/cached-fetch";
+import { useCachedJson, isUnknownOutcome } from "@/lib/cached-fetch";
 import { OcrAccuracyCard } from "./OcrAccuracyCard";
 // recharts (~357 KB) is loaded lazily so the KPI numbers paint first; the
 // chart code streams in behind a placeholder. See ./charts.tsx.
@@ -727,9 +727,21 @@ export default function DashboardBPage() {
     useCachedJson<WorkersResp>("/api/workers");
   // Daily Report summary — independent fetch (own loading state), so it paints
   // the instant its data lands without blocking the rest of the dashboard.
-  const { data: compRaw, loading: compL } =
-    useCachedJson<ComplianceResp>("/api/reports/compliance.json");
+  const {
+    data: compRaw,
+    loading: compL,
+    failure: compFailure,
+    refresh: compRefresh,
+  } = useCachedJson<ComplianceResp>("/api/reports/compliance.json");
   const compCounts = compRaw?.data?.counts;
+  // A dead read must not become a green "All clear". `compCounts?.total ?? 0`
+  // printed a large green 0 under "All clear — nothing flagged today" whenever
+  // the fetch timed out, 500'd or was aborted — the same state a genuinely
+  // clean day produces, and the exact C15 shape /daily-report itself already
+  // guards against ("Could not load the report"). Same data, two screens, and
+  // only one of them was honest. Only a 2xx body licenses the words.
+  const compFailed =
+    !compCounts && compFailure != null && isUnknownOutcome(compFailure);
   // Progressive render — the page used to block on ALL nine fetches before
   // painting anything. Now it gates only on the overview fetch, which is
   // snapshot-accelerated (fast). Every other section renders the instant ITS
@@ -1127,6 +1139,10 @@ export default function DashboardBPage() {
                 </p>
                 {compL && !compCounts ? (
                   <Skeleton height={30} width={64} className="mt-1" />
+                ) : compFailed ? (
+                  <p className="mt-0.5 text-3xl font-[800] tabular-nums leading-none text-[#9CA3AF]">
+                    —
+                  </p>
                 ) : (
                   <p
                     className={`mt-0.5 text-3xl font-[800] tabular-nums leading-none ${
@@ -1139,14 +1155,25 @@ export default function DashboardBPage() {
                   </p>
                 )}
                 <p className="text-xs text-[#9CA3AF] mt-1">
-                  {(compCounts?.total ?? 0) === 0
-                    ? "All clear — nothing flagged today"
-                    : "process & SOP exceptions to action today"}
+                  {compFailed
+                    ? "Couldn't load — this is not a clean day, it is an unknown one"
+                    : (compCounts?.total ?? 0) === 0
+                      ? "All clear — nothing flagged today"
+                      : "process & SOP exceptions to action today"}
                 </p>
               </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
+              {compFailed && (
+                <button
+                  type="button"
+                  onClick={compRefresh}
+                  className="inline-flex items-center gap-1 rounded-full border border-[#FDBA74] bg-[#FFF7ED] px-2.5 py-1 text-[11px] font-semibold text-[#C2410C]"
+                >
+                  Retry
+                </button>
+              )}
               {compCounts &&
                 (
                   // Every category behind the headline, biggest first.

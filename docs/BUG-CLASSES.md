@@ -1,6 +1,14 @@
 # Recurring bug classes — the index that makes P5 executable
 
-> **Last verified: 2026-08-14** — restamped on branch `fix/security-posture`: **C16 gains
+> **Last verified: 2026-08-14** — restamped on branch `docs/dashboard-data-audit`:
+> the system-wide dashboard audit (`docs/DASHBOARD-DATA-AUDIT.md`) adds **C15 rows
+> 28–38** and a **sixth corollary** (a class guard that grows by matching the first
+> instance's WORDS does not grow — the Command Center's false sentence was "All
+> clear", not "not found", so it was never in the map). Rows 28–30 are fixed and
+> guarded by `tests/dashboard-truthfulness.test.mjs`; 31–38 are open and each is
+> traced to file:line in the audit doc.
+>
+> **Previously verified 2026-08-14** — restamped on branch `fix/security-posture`: **C16 gains
 > row 7** (a projection narrowed by PERMISSION rather than payload size — the more dangerous
 > variant, because the author cannot reproduce what the affected role sees) with its
 > OMIT-do-not-BLANK corollary, and **C12 gains rows 12 and 13** (the whole `organisations.ts`
@@ -832,8 +840,19 @@ place: `/api/department-performance` must keep dividing by clocked time,
 | 25 | "Revenue (MTD)" · "Expenses (MTD)" · "Net Profit" | `/accounting` › Overview | `Σ chart_of_accounts.balanceSen`, a column ONLY the manual-JV paths write — so hand-keyed journals were reported as the company's revenue; "(MTD)" with no date filter anywhere in the component; and the whole `COST` type dropped from the expense side | ✅ 2026-08-13 (-091) — now `GET /accounting/pl`, dash for an unposted category |
 | 26 | every material group's green "✓" | `/accounting` › Stock Summary | `balanced = opening + purchases − consumption === closing` where consumption IS `opening + purchase − closing` → `closing === closing`, true forever. A verification nobody performed, printed on a stock valuation | ✅ 2026-08-13 (-093) |
 | 27 | the whole Cash Flow statement on a Quarter / Full-year period | `/accounting` › Cash Flow | `fyMonths` parses `YYYY-MM`, so `"2026-Q1"` keyed all 13 columns `"2026-NaN"`: every income and expense line rendered `-` while `balBefore` string-compared TRUE against every real month and printed a large, REAL Bank b/f + c/f | ✅ 2026-08-13 (-092) |
+| 28 | Daily Report headline · OCR Accuracy caption | `/dashboard` (Command Center) | a dead read rendered as an answer — a **green `0` + "All clear — nothing flagged today"**, and *"No scans yet."* Same endpoint as `/daily-report`, which said *"Could not load"* correctly | ✅ 2026-08-14 (-103, -104) |
+| 29 | Supplier OCR success rate | `/dashboard` › OCR Accuracy | `rateColor(s.rate)` / `pct(s.rate)` with no `total` — the `MIN_SAMPLE` guard, added **because that panel printed a red 0% off ONE document**, was the one call site that never forwarded the sample size | ✅ 2026-08-14 (-105) |
+| 30 | printed receivables aging strip | Hookka Report › Billing Desk | five buckets computed, **four printed** — `d30Sen` (one month overdue) silently dropped, so the boxes did not tie to the total beside them, and every surviving caption named the bucket one to its left | ✅ 2026-08-14 (-106) |
+| 31 | **"Attendance %"** | Hookka Report › Workforce | `SUM(status='PRESENT')/COUNT(*)` where **every writer of `attendance_records.status` writes the literal `'PRESENT'`** and nothing writes `'ABSENT'`; absence creates no row → **100.0% by construction**, on a printed report | ⬜ open — `docs/DASHBOARD-DATA-AUDIT.md` |
+| 32 | **"Current Cash Position"** + the 12-week Running Balance | `/accounting/cash-flow` | `bank_accounts.balanceSen`, whose only writers are **migration seed fixtures** and that page's own Add-Transaction form. No invoice, receipt or payment touches it | ⬜ open — owner decision (wire it, or label the tab a scratchpad) |
+| 33 | MRP Net Req · Shortage · Sugg. PO · "14d lead" | `/planning/mrp` | `const onOrder = 0`, `moq \|\| 50`, `leadTimeDays \|\| 14` — material already on an open PO reports as a full shortage; the invented MOQ and lead time print under the supplier's name | ⬜ open |
+| 34 | KPI "last month" score + ↑/↓ delta + "settled" | `/kpi` | `kpi_periods` has **no writer anywhere** (DDL + two SELECTs), so `isLocked` can never be true: every settled month is silently recomputed against today's data | ⬜ open |
+| 35 | Labor Cost **"Reconciled · 0 difference"** ✓ | `/employees` › Labor Cost | overhead is the closing plug, so `reconciledSum ≡ totalPayrollCost` and the diff is **algebraically 0 forever** — a verification no input can turn red, printed on a payroll report | ⬜ open |
+| 36 | **PCB** on every payslip | `/employees` › Payroll | `pcb: pcbOn ? 0 : 0` — hardcoded on both branches, feeds `totalDeductions → netPay`, under a tooltip that lists PCB as included | ⬜ open |
+| 37 | Balance-sheet **"balanced ✓"**, AR/AP Outstanding, Opening-Balance **"Balanced ✓" + enabled Post** | `/accounting` | all render `RM 0.00` / a green tick over a **failed** fetch — the same page already publishes `NO_FIGURE = "—"` for three other cards | ⬜ open — row 28's shape, on a second page |
+| 38 | Trade Finance *"Draws + unallocated = account balance"* | `/accounting` › Trade Finance | `unallocated = net − Σ outstanding` and `total = Σ outstanding`, so the identity holds in integer sen **always**; the red branch is unreachable | ⬜ open |
 
-**Enforced by** five files, all structural (`readFileSync` source assertions),
+**Enforced by** six files, all structural (`readFileSync` source assertions),
 because nothing else can catch a number that is merely wrong-but-plausible:
 `tests/no-fabricated-efficiency.test.mjs` (rows 1–2),
 `tests/no-fabricated-worker-metrics.test.mjs` (row 3),
@@ -841,8 +860,28 @@ because nothing else can catch a number that is merely wrong-but-plausible:
 `tests/no-fabricated-inventory-and-forecast.test.mjs` (rows 6–16),
 `tests/no-fabricated-consignment-returns.test.mjs` (row 23),
 `tests/accounting-ui-truthfulness.test.mjs` (rows 25–27, plus the two
-non-figure defects the same accounting-page audit found — see below).
-Rows 17–22 are open or deliberate and carry no guard yet.
+non-figure defects the same accounting-page audit found — see below),
+`tests/dashboard-truthfulness.test.mjs` (rows 28–30).
+Rows 17–22 and 31–38 are open or deliberate and carry no guard yet.
+
+⚠️ **`tests/no-fabricated-efficiency.test.mjs:6-10` states something false in
+prose** — *"Real work time IS being recorded, on a minority of cards."* It was
+refuted by the later prod count at `src/pages/reports.tsx:782-786` (4,289 of
+4,289 non-zero `actualMinutes` byte-identical to `estMinutes`). A wrong claim
+inside a **test file** is the worst place for one, because it reads as verified.
+
+**A sixth corollary, from rows 28–30 (the dashboard audit, 2026-08-14).** *A
+class guard that grows by matching the first instance's WORDS will not grow.*
+`tests/record-load-failure-class.test.mjs` enumerates new members of the
+dead-request class by scanning for the string *"not found"* — so the Command
+Center, whose false sentences are *"All clear — nothing flagged today"* and
+*"No scans yet."*, was never in the map, on the most-read screen in the app.
+When a class guard scans for text, scan for the SHAPE (a cached read whose empty
+branch renders a factual claim), or accept that it only ever finds re-runs of
+the case you already fixed. Corollary to the corollary: the honest sibling was
+right there — `/daily-report` reads the **same endpoint** and says *"Could not
+load the report."* **Two screens on one endpoint disagreeing about whether the
+data arrived is a cheap thing to grep for and a reliable smell.**
 
 **A fourth corollary, from row 23.** *Real money on an invented status is more
 dangerous than fully fake data.* The `/consignment/return` grid carried the real

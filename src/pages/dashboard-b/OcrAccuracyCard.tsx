@@ -7,8 +7,8 @@
 // ---------------------------------------------------------------------------
 import { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
-import { useCachedJson } from "@/lib/cached-fetch";
-import { ChevronRight, ChevronDown, ScanLine } from "lucide-react";
+import { useCachedJson, isUnknownOutcome } from "@/lib/cached-fetch";
+import { AlertTriangle, ChevronRight, ChevronDown, RefreshCw, ScanLine } from "lucide-react";
 
 type Bucket = {
   key: string;
@@ -137,9 +137,17 @@ export function OcrAccuracyCard({
   range?: { from: string; to: string } | null;
 }) {
   const qs = range ? `?from=${range.from}&to=${range.to}` : "";
-  const { data, loading } = useCachedJson<Resp>(`/api/ocr-accuracy${qs}`);
+  const { data, loading, failure, refresh } = useCachedJson<Resp>(
+    `/api/ocr-accuracy${qs}`,
+  );
   const d = data?.data;
   const periodLabel = period === "all" ? "All-time" : period;
+  // "No scans yet." is a STATEMENT ABOUT THE BUSINESS — it tells the owner the
+  // scanner has never been used this period. A killed request produced exactly
+  // that sentence, because `d` is undefined for a 30 s abort and for a genuine
+  // empty answer alike (C15 / BUG-2026-08-13-016, same shape one card down).
+  // Only a 2xx body licenses the empty caption.
+  const loadFailed = !d && failure != null && isUnknownOutcome(failure);
 
   return (
     <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
@@ -155,6 +163,25 @@ export function OcrAccuracyCard({
 
         {loading && !d ? (
           <div className="py-10 text-center text-sm text-[#9CA3AF]">Loading…</div>
+        ) : loadFailed ? (
+          <div className="py-10 text-center text-sm">
+            <AlertTriangle className="mx-auto mb-2 h-5 w-5 text-[#C2410C]" />
+            <p className="font-semibold text-[#1F1D1B]">
+              OCR accuracy couldn&apos;t be loaded
+            </p>
+            <p className="mt-1 text-[#4B5563]">{failure?.message}</p>
+            <p className="mt-1 text-xs text-[#6B7280]">
+              This is not a statement that nothing was scanned — the data never
+              arrived.
+            </p>
+            <button
+              type="button"
+              onClick={refresh}
+              className="mt-3 inline-flex items-center gap-1 rounded-md border border-[#E2DDD8] px-3 py-1.5 text-xs font-semibold text-[#5A5550] hover:bg-[#F5F2ED]"
+            >
+              <RefreshCw className="h-3.5 w-3.5" /> Retry
+            </button>
+          </div>
         ) : !d || d.overall.total === 0 ? (
           <div className="py-10 text-center text-sm text-[#9CA3AF]">
             No scans yet. Once you scan and import orders / supplier docs, the accuracy shows here automatically.
@@ -274,7 +301,13 @@ export function OcrAccuracyCard({
                         <tr key={s.key} className="border-t border-[#F0ECE3]">
                           <td className="px-3 py-2 font-medium text-[#1F1D1B]">{s.key}</td>
                           <td className="px-2 py-2 text-right tabular-nums text-[#6B7280]">{countWithUnit(s.total, s.unit)}</td>
-                          <td className="px-2 py-2 text-right tabular-nums font-semibold" style={{ color: rateColor(s.rate) }}>{pct(s.rate)}</td>
+                          {/* `s.total` must be passed: MIN_SAMPLE was added
+                              BECAUSE this very panel printed a red 0% off ONE
+                              document (owner 2026-08-05), and this row was the
+                              one call site that never forwarded the sample
+                              size — so the guard was live everywhere except
+                              where it was asked for. */}
+                          <td className="px-2 py-2 text-right tabular-nums font-semibold" style={{ color: rateColor(s.rate, s.total) }}>{pct(s.rate, s.total)}</td>
                           <td className="px-3 py-2 text-[#8A8577] text-xs">{s.topFails.length ? s.topFails.join(" · ") : "—"}</td>
                         </tr>
                       ))}

@@ -36,7 +36,7 @@
 // ---------------------------------------------------------------------------
 
 import { execSync } from "node:child_process";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 const STALE_DAYS = 120;
@@ -108,6 +108,43 @@ if (unstamped.length) {
 if (stale.length) {
   console.log(`\nadvisory — ${stale.length} doc(s) stamped over ${STALE_DAYS} days ago:`);
   stale.slice(0, 10).forEach(warn);
+}
+
+// ---- 1b. UNIQUE BUG IDS --------------------------------------------------
+// A bug id is a REFERENCE — code comments, commit messages and other entries
+// cite it. Two entries sharing one id makes every citation ambiguous: the
+// reader cannot tell which bug `BUG-2026-07-29-001` in a code comment means.
+//
+// This is not hypothetical and not rare. Five collisions accumulated unnoticed
+// between June and August 2026, and I then created two more IN ONE DAY by
+// resolving BUG-HISTORY rebase conflicts with keep-both — the right default for
+// an append-only ledger, and exactly wrong for the one line that must be
+// unique. Twice. Hence a check rather than a resolution to be careful.
+//
+// The `b` suffix (BUG-2026-06-24-009b) is the repo's existing convention for a
+// deliberate second entry on a date, so it is a distinct id, not a collision.
+{
+  const LEDGER = "docs/BUG-HISTORY.md";
+  if (existsSync(LEDGER)) {
+    // An ADDENDUM deliberately reuses its parent's id — BUG-2026-07-17-001 has a
+    // dated `完成注记` follow-up recording that the backfill ran. That is the same
+    // bug, so sharing the id is correct, and flagging it would train people to
+    // disable this check. Only headings that claim to be a NEW bug are compared.
+    const ADDENDUM = /完成注记|addendum|follow-?up|后续|補記|補记/i;
+    const ids = [...readFileSync(LEDGER, "utf8").matchAll(/^## (BUG-\d{4}-\d{2}-\d{2}-\d+[a-z]?)(.*)$/gm)]
+      .filter((m) => !ADDENDUM.test(m[2]))
+      .map((m) => m[1]);
+    const seen = new Set();
+    const dupes = [...new Set(ids.filter((id) => (seen.has(id) ? true : (seen.add(id), false))))];
+    if (dupes.length) {
+      failed = true;
+      console.log(`\nFAIL — ${dupes.length} duplicate bug id(s) in ${LEDGER}:`);
+      dupes.forEach((d) => console.log(`  ${d}`));
+      console.log("  Every citation of a duplicated id is ambiguous. Give the entry with the");
+      console.log("  FEWER inbound references a `b` suffix (the existing convention), and update");
+      console.log("  those references — renaming the well-cited one leaves pointers aiming wrong.");
+    }
+  }
 }
 
 // ---- 2. PAIRING ----------------------------------------------------------

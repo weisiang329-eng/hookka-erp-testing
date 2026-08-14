@@ -295,7 +295,7 @@ all-clears here twice this week.
 > per-PIECE counter (`production-builder.ts:786`), while `sales_order_items.lineNo` is
 > per-LINE. They agree only when every line has quantity 1 — so a join on it attaches WRONG
 > links precisely on multi-quantity orders, and would look entirely reasonable in review.
-## BUG-2026-08-13-097 — invoice_items gains `so_item_id`: the per-line link that makes an SO↔invoice audit possible at all `money` `invoices` `auditability` `data-integrity` `schema` 🟡 code done / 🔴 backfill NOT RUN, awaiting review
+## BUG-2026-08-13-098 — invoice_items gains `so_item_id`: the per-line link that makes an SO↔invoice audit possible at all `money` `invoices` `auditability` `data-integrity` `schema` 🟡 code done / 🔴 backfill NOT RUN, awaiting review
 
 > **STATUS: forward fill SHIPPED, backfill written but DELIBERATELY NOT EXECUTED.**
 > No existing row was changed. The dry-run planner is
@@ -407,91 +407,6 @@ GREEN because three endpoints share the line `const execute = c.req.query("execu
 **Related:** BUG-2026-08-13-096 (the finding), BUG-2026-07-17-001 (the
 `production_order_id` link this stands on), BUG-2026-07-17-002 (the RM 440 divergence
 that still needs the owner — two of the three invoices are PAID).
-
----
-
-## BUG-2026-08-13-096 — 98.5% of invoice lines carry no delivery-order link, so every SO↔invoice audit has been reading 1.5% of the data and reporting "clean" `money` `invoices` `auditability` `data-integrity` 🔴
-
-> **STATUS: IDENTIFIED, NOT FIXED. Scope is unknown and unknowable with the current
-> schema — that is the finding.** No data was changed. Raised to the owner 2026-08-13.
->
-> **SUPERSEDED 2026-08-14 by BUG-2026-08-13-097**, which adds
-> `invoice_items.so_item_id` and fills it forward. Two claims below are corrected
-> there and should not be carried onward:
-> * *"the only route out is `delivery_order_item_id`"* — `production_order_id` is
->   also on that table and is **92.6% populated** against this column's 1.5%. The
->   1.5% figure is right; the conclusion drawn from it was not.
-> * *"backfill it where unambiguous — SINGLE-SO invoices"* — unnecessary. The PO
->   link is per LINE, so a consolidated invoice resolves each line inside its own
->   sales order; the single-SO restriction would have discarded good links.
->
-> Step 3 below ("only THEN re-run the surcharge reconciliation") still stands, and
-> still cannot be run: -097's backfill is written but **has not been executed**.
-
-**Measured on PROD 2026-08-13** (read-only SQL via the assistant's `run_select_query`):
-
-```
-total invoice lines            2,897
-delivery_order_item_id IS NULL 2,854   (98.5%)
-value on those unlinked lines  RM 1,584,007.08
-```
-
-**Why this matters more than any single wrong figure.** Every automated check that
-compares a sales order against the invoice it produced has to get from the invoice line
-back to the SO line. There is no direct link — `invoice_items` has **no `so_item_id`**
-(19 columns; the only route out is `delivery_order_item_id`). And
-`delivery_order_items` has no `so_item_id` either — it carries only `sales_order_no`, a
-**document-level string**. So the chain is:
-
-    invoice_items → delivery_order_items → sales_order_no → sales_orders
-
-…document-level at best, and **available for only 1.5% of invoice lines**.
-
-**How this was found, and why it is not theoretical.** Chasing the RM 440 remainder of
-BUG-2026-07-17-002, I ran both of the system's own read-only planners:
-
-| planner | result |
-|---|---|
-| `GET /api/admin/backfill-special-order-surcharge` | `plan: 0 items` |
-| `GET /api/admin/backfill-invoiced-plan` | `fixes: 0, needsManual: 0` |
-
-Both said there was nothing to fix. **Both were wrong**, and not by a little: three
-invoices (`INV-2605-039` PAID, `INV-2607-078` SENT, `INV-2605-014` PAID) carry
-`special_order_price_sen = 0` while their sales orders carry 13000×2, 8000 and 5000×2.
-I verified those by reading both documents directly, and the control `INV-2606-039`
-reads 32000 on the same query, so the zeros are real rather than a dual-key artefact.
-
-A system-wide query for the same divergence over the joinable population returned
-**0 rows** — because all five of those lines have `delivery_order_item_id IS NULL` and
-are therefore outside the join entirely.
-
-> **"0 items" from these planners means "cannot see", not "nothing wrong."** That is the
-> dangerous part. A clean report from a tool that structurally cannot observe 98.5% of
-> the rows is not evidence of correctness, and it has been read as such.
-
-**This is the argument BUG-2026-07-17-001 already made**, and it is now measured: *"the
-other ~94 lines cannot be measured at all while `invoice_items` carries no per-line SO
-link — every audit of them is the same first-one-wins guess. Fixing that bug is not only
-about what prints on the page; it is what makes this auditable."*
-
-**Why no fix was attempted.** The obvious move — patch the three invoices — would have
-been the wrong one. It corrects the three instances that happened to be found by hand
-while leaving the reason they were found by hand entirely in place, and it would produce
-a second "all clean" report that is just as blind as the first. It is the same
-fix-the-instance-not-the-class error recorded as C15/C17.
-
-**What would actually fix it** (owner's call — this is schema work on the money path):
-1. Add `invoice_items.so_item_id`, populated at invoice creation from the DO item's own
-   SO line, so the link exists going forward.
-2. Backfill it where it is unambiguous — single-SO invoices matched on
-   product+fabric+size — and leave genuinely ambiguous rows NULL rather than guessing.
-   A wrong link is worse than a missing one: it makes a bad audit look authoritative.
-3. Only THEN re-run the surcharge reconciliation. Until step 1 exists, any number it
-   reports covers 1.5% of the book.
-
-**Related:** BUG-2026-07-17-001 (per-line PO refs, the original diagnosis),
-BUG-2026-07-17-002 (the RM 440 remainder that led here), C15 (fabricated/derived figures
-presented as measured), C17 (a check that cannot observe what it claims to check).
 
 ---
 

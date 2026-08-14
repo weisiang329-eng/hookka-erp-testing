@@ -263,7 +263,38 @@ all-clears here twice this week.
 
 ---
 
-## BUG-2026-08-13-096 — 98.5% of invoice lines carry no delivery-order link, so every SO↔invoice audit has been reading 1.5% of the data and reporting "clean" `money` `invoices` `auditability` `data-integrity` 🔴
+## BUG-2026-08-13-096 — the SO↔invoice audits report "clean" because they cannot see; my first diagnosis of WHY was wrong `money` `invoices` `auditability` `data-integrity` 🔴
+
+> ### ⚠️ CORRECTION 2026-08-14 — the headline below was WRONG. Read this first.
+>
+> This entry originally claimed the data is **unauditable**: 98.5% of invoice lines have
+> no `delivery_order_item_id`, therefore no route back to the sales order. The first half
+> is true and the conclusion does not follow.
+>
+> **`invoice_items.production_order_id` reaches 92.9% of lines** — measured on prod
+> 2026-08-14: 2,692 of 2,897, against 43 (1.5%) for `delivery_order_item_id`. There has
+> been a good route the whole time, and it is per-LINE, so a consolidated invoice resolves
+> each line inside its own sales order. The "invoice must map to exactly ONE sales order"
+> restriction I derived was unnecessary and would have discarded valid links.
+>
+> **How I got it wrong is the useful part.** I listed all 19 columns of `invoice_items`,
+> printed `production_order_id` in that output, measured only the column I had already
+> formed a theory about, and published the conclusion. The evidence that refuted me was in
+> my own terminal. Same failure as the NUL byte (fixed one file, five more existed) and the
+> credential (declared rotation done without checking for a newer credential) — see
+> [[claim-before-check-failure-mode]].
+>
+> **What survives unchanged:** the planners really do report `0 items` while three invoices
+> demonstrably diverge from their sales orders; "0 items" really does mean *cannot see*
+> rather than *nothing wrong*; and a per-line `so_item_id` is still worth adding, because
+> `production_order_id` gives you the ORDER, not the LINE. But the scale is "a link exists
+> for 92.9% and nobody used it", not "the book is unauditable".
+>
+> **A trap found while fixing it, worth more than the original finding:**
+> `production_orders.lineNo` is NOT the sales-order line number. It is `poSequence`, a
+> per-PIECE counter (`production-builder.ts:786`), while `sales_order_items.lineNo` is
+> per-LINE. They agree only when every line has quantity 1 — so a join on it attaches WRONG
+> links precisely on multi-quantity orders, and would look entirely reasonable in review.
 
 > **STATUS: IDENTIFIED, NOT FIXED. Scope is unknown and unknowable with the current
 > schema — that is the finding.** No data was changed. Raised to the owner 2026-08-13.

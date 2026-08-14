@@ -98,8 +98,20 @@ function rowToAttendance(r: AttendanceRow) {
     clockOutLng: dual(r.clockOutLng, "clockoutlng"),
     // Punch selfies: the list returns only a HAS-flag (the base64 image is heavy,
     // fetched on demand via GET /:id/photo when the operator clicks to view).
-    hasClockInPhoto: !!dual(r.clockInPhoto, "clockinphoto"),
-    hasClockOutPhoto: !!dual(r.clockOutPhoto, "clockoutphoto"),
+    //
+    // THREE key spellings, in order (BUG-2026-08-13-113). The list query no
+    // longer SELECTs the blob at all — it asks Postgres for
+    // `(clockInPhoto IS NOT NULL) AS hasclockinphoto` — so the flag arrives
+    // pre-computed under that alias. The two `dual()` reads behind it are what
+    // the POST responses and the fallback `SELECT *` path still return, and
+    // they must keep working: a `??` chain, not `||`, because `false` is a
+    // legitimate answer from the aliased form and would be swallowed by `||`.
+    hasClockInPhoto:
+      (rr.hasclockinphoto as boolean | undefined) ??
+      !!dual(r.clockInPhoto, "clockinphoto"),
+    hasClockOutPhoto:
+      (rr.hasclockoutphoto as boolean | undefined) ??
+      !!dual(r.clockOutPhoto, "clockoutphoto"),
     status: r.status,
     workingMinutes: r.workingMinutes,
     productionTimeMinutes: r.productionTimeMinutes,
@@ -142,9 +154,86 @@ app.get("/", async (c) => {
     binds.push(employeeId);
   }
   const orderBy = date && !employeeId ? "employeeId" : "date DESC, employeeId";
-  const sql = `SELECT * FROM attendance_records WHERE ${clauses.join(" AND ")} ORDER BY ${orderBy}`;
-  const res = await c.var.DB.prepare(sql).bind(...binds).all<AttendanceRow>();
-  const data = (res.results ?? []).map(rowToAttendance);
+  // ---------------------------------------------------------------------
+  // BUG-2026-08-13-113 — do NOT `SELECT *` here.
+  //
+  // A punch selfie is REQUIRED to clock in or out (worker/index.tsx:669) and
+  // is stored INLINE on the row as a base64 JPEG data URL, capped at 600 KB
+  // (worker.ts:stampPunchPhoto). `SELECT *` therefore drags two image blobs
+  // per worker-day out of Postgres, across Hyperdrive, into the isolate — and
+  // then `rowToAttendance` throws them away and returns a boolean. The
+  // response is ~460 bytes/row; the READ behind it is orders of magnitude
+  // larger, which is why this endpoint costs ~1.2 ms per row for a payload
+  // that size (prod: 2,818 rows → 1.28 MB but 1.7–6.3 s).
+  //
+  // The Working Hours tab — the DEFAULT tab of /employees — asks for a whole
+  // month, so every visit used to pull a month of selfies for every worker.
+  //
+  // The projection is explicit and the aliases carry the has-flags. Two things
+  // make an explicit projection safe here even though the comment on
+  // `/:id/photo` warns against one:
+  //   * every STATIC column below is in column-rename-map.json, so
+  //     supabase-compat rewrites it to the right snake_case name, and the
+  //     driver's `transform.column.from` maps it back (db-pg.ts:57).
+  //   * the RUNTIME-added geo/photo columns are not in the map, so they pass
+  //     through bare and Postgres folds them to all-lowercase — which is
+  //     exactly the name they were CREATED with through this same path. The
+  //     `dual()` reads in rowToAttendance already expect the folded key.
+  // What an explicit projection cannot survive is a database where the runtime
+  // columns do not exist yet (nobody has punched): naming a missing column is
+  // a hard error where `SELECT *` simply omits it. Hence the fallback below —
+  // worst case is exactly today's behaviour, one wasted query later.
+  // ---------------------------------------------------------------------
+  const NARROW_COLS = [
+    "id",
+    "employeeId",
+    "employeeName",
+    "departmentCode",
+    "departmentName",
+    "date",
+    "clockIn",
+    "clockOut",
+    "status",
+    "workingMinutes",
+    "productionTimeMinutes",
+    "efficiencyPct",
+    "overtimeMinutes",
+    "deptBreakdown",
+    "notes",
+    "clockInLat",
+    "clockInLng",
+    "clockOutLat",
+    "clockOutLng",
+    "(clockInPhoto IS NOT NULL) AS hasclockinphoto",
+    "(clockOutPhoto IS NOT NULL) AS hasclockoutphoto",
+  ].join(", ");
+  const where = `WHERE ${clauses.join(" AND ")} ORDER BY ${orderBy}`;
+  let results: AttendanceRow[];
+  try {
+    const res = await c.var.DB.prepare(
+      `SELECT ${NARROW_COLS} FROM attendance_records ${where}`,
+    )
+      .bind(...binds)
+      .all<AttendanceRow>();
+    results = res.results ?? [];
+  } catch (e) {
+    // Fall back ONLY for "that column does not exist" (Postgres 42703) — a cold
+    // database where nobody has punched yet, so the runtime-added geo/photo
+    // columns have not been self-applied. A bare `catch {}` here would also
+    // swallow a transient pooler failure and answer it with a second heavy
+    // query instead of the 503 isTransientDbError() exists to produce, so
+    // anything else is rethrown unchanged.
+    const code = (e as { code?: string } | null)?.code ?? "";
+    const msg = e instanceof Error ? e.message : String(e);
+    if (code !== "42703" && !/column .* does not exist/i.test(msg)) throw e;
+    const res = await c.var.DB.prepare(
+      `SELECT * FROM attendance_records ${where}`,
+    )
+      .bind(...binds)
+      .all<AttendanceRow>();
+    results = res.results ?? [];
+  }
+  const data = results.map(rowToAttendance);
   return c.json({ success: true, data, total: data.length });
 });
 

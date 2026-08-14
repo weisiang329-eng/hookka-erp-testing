@@ -5421,15 +5421,30 @@ function EmployeeDetailTab({
   // Self-fetches the same dateFrom/dateTo window the jobs and working-hours
   // sources use, rather than reading a page-wide all-attendance prop. Still
   // needed for the Daily Breakdown table and for OT.
-  const attUrl = `/api/attendance?from=${dateFrom}&to=${dateTo}`;
+  //
+  // PERF 2026-08-14 (BUG-2026-08-13-111): scoped to `employeeId` server-side,
+  // and skipped entirely when no worker is picked — the two lines above it
+  // (`jcUrl`, `wheUrl`) already do both. This tab shows ONE worker, but the
+  // fetch used to pull EVERY worker's punches for the window and drop ~49/50ths
+  // of them in the `empRecords` filter below. `GET /api/attendance` has
+  // supported `?employeeId=` since the mobile employee card (dc12) needed it —
+  // attendance.ts:126-143 composes it with from/to in the same WHERE, and the
+  // ORDER BY is unchanged (`date DESC, employeeId` in both cases, because the
+  // `date` query param is absent here either way). `empRecords` re-sorts by
+  // date anyway, so the rendered rows are identical — just fewer bytes.
+  const attUrl = selectedEmployeeId
+    ? `/api/attendance?employeeId=${encodeURIComponent(selectedEmployeeId)}&from=${dateFrom}&to=${dateTo}`
+    : "";
   const { data: attResp } = useCachedJson<{ data?: AttendanceRecord[] }>(attUrl);
   const rangeAttendance: AttendanceRecord[] = useMemo(
     () => (attResp?.data ?? []),
     [attResp]
   );
 
-  // Filter the range attendance down to this employee (client-side) — the
-  // fetch already scoped it to dateFrom..dateTo.
+  // Filter the range attendance down to this employee. The fetch now scopes to
+  // (employeeId × dateFrom..dateTo) server-side, so this is a belt-and-braces
+  // no-op guard against a stale cache entry from a previous selection being
+  // painted for one frame (useCachedJson seeds from cache on URL change).
   const empRecords = useMemo(
     () =>
       rangeAttendance
@@ -11245,8 +11260,15 @@ function AttendanceTab({
   // minutes) — the unified company-wide definition (owner 2026-07-11). The
   // old per-worker mean-of-ratios let a 5-minute worker weigh as much as a
   // 200-hour one (87.4% here vs 92% there for the same month).
+  //
+  // PERF 2026-08-14 (BUG-2026-08-13-110): `view=summary`. `monthKpis` below
+  // reads exactly one number off this response —
+  // `monthPerfResp.data.totals.efficiencyPct` — but the full payload carries a
+  // per-job-card drilldown for every day in the WHOLE CALENDAR MONTH. That is
+  // the single fattest read on this page. `projectPerformanceSummary` returns
+  // `data.totals` unchanged, so the KPI is byte-identical.
   const { data: monthPerfResp } = useCachedJson<DeptPerfResponse>(
-    `/api/department-performance?from=${monthFrom}&to=${monthTo}`,
+    `/api/department-performance?view=summary&from=${monthFrom}&to=${monthTo}`,
   );
   const monthKpis = useMemo(() => {
     const prodCodes = productionDeptCodes.size > 0 ? productionDeptCodes : PRODUCTION_DEPT_CODES;
@@ -11427,7 +11449,6 @@ function AttendanceTab({
 
 export default function EmployeesPage() {
   const [activeTab, setActiveTab] = useState<TabKey>("working-hours");
-  const [, setDateAttendance] = useState<AttendanceRecord[]>([]);
   // When the operator double-clicks a row on Efficiency Overview we stash the
   // workerId here and flip to the "detail" (Employee Performance) tab. The
   // detail tab is guarded by {activeTab === "detail" && ...} so it unmounts
@@ -11436,10 +11457,23 @@ export default function EmployeesPage() {
   const [pendingDetailWorkerId, setPendingDetailWorkerId] = useState<string | undefined>(undefined);
 
   const { data: workersResp, loading: workersLoading, refresh: refreshWorkersHook } = useCachedJson<{ data?: Worker[] }>("/api/workers");
-  // Page-level attendance is only used for the four today-summary cards, so it
-  // only fetches TODAY. The Working Hours and Employee Detail tabs each
-  // self-fetch the date range they actually display.
-  const { data: attendanceResp, loading: attendanceLoading, refresh: refreshAttendanceHook } = useCachedJson<{ data?: AttendanceRecord[] }>(`/api/attendance?date=${todayStr()}`);
+  // NO page-level attendance fetch (BUG-2026-08-13-114, removed 2026-08-14).
+  // There used to be a `useCachedJson('/api/attendance?date=' + todayStr())`
+  // here. Its comment said it fed "the four today-summary cards" — it had not
+  // done that for some time: the cards read `summaryTotals` off
+  // /api/department-performance (below). What the response actually reached was
+  // `todayAttendance` → `setDateAttendance` → a `useState` whose VALUE was
+  // never destructured (`const [, setDateAttendance]`), i.e. nothing.
+  //
+  // Its `loading` flag, however, was ANDed into the page-level `loading` that
+  // renders the full-screen "Loading employee data..." block, so the entire
+  // Employees page waited for a read nobody consumed — on the serialised API
+  // queue that is this app's bottleneck, and behind a whole-org attendance
+  // query. Deleting it removes a request AND unblocks first paint.
+  //
+  // The cache invalidations it was tangled up with are NOT dead and are kept
+  // below: they are what makes the Attendance / Employee Performance tabs
+  // re-read after the Working Hours grid saves a row.
   // /api/departments is the source of truth for which dept codes exist + which
   // are production. Replaces the formerly-hardcoded ALL_DEPARTMENTS and
   // PRODUCTION_DEPT_CODES constants — new depts added via the Manage UI on the
@@ -11460,13 +11494,8 @@ export default function EmployeesPage() {
     () => new Set(departments.filter((d) => d.isProduction).map((d) => d.code)),
     [departments]
   );
-  const todayAttendance: AttendanceRecord[] = useMemo(
-    () => ((attendanceResp as { data?: AttendanceRecord[] } | AttendanceRecord[] | null)
-      ? ((attendanceResp as { data?: AttendanceRecord[] }).data ?? (Array.isArray(attendanceResp) ? (attendanceResp as AttendanceRecord[]) : []))
-      : []),
-    [attendanceResp]
-  );
-  const loading = workersLoading || attendanceLoading;
+  // First paint now waits on the worker list ONLY — see the note above.
+  const loading = workersLoading;
 
   // ── Summary-card date — mirrors the Working Hours tab's date picker so the
   //    four cards at the top reflect the day the operator selected, instead
@@ -11506,8 +11535,20 @@ export default function EmployeesPage() {
   // The summary cards read real working_hour_entries + job-card figures for
   // the selected day via /api/department-performance — Present, Working
   // Hours, Avg Efficiency — instead of the near-empty attendance table.
+  //
+  // PERF 2026-08-14 (BUG-2026-08-13-110): `view=summary`. This hook reads ONE
+  // field — `data.totals` — but used to pull the FULL payload, which carries
+  // `daily[].jobs[]` and `daily[].workers[].jobs[]`, one entry per job card per
+  // day (department-performance.ts:91-98 measured 9.5 MB for a 61-day range on
+  // prod). It fires on EVERY /employees mount and again whenever the operator
+  // switches to a tab with a different persisted date range, so it competes for
+  // slots in the serialized API queue that is this app's real bottleneck.
+  // `projectPerformanceSummary` passes `totals` through by reference
+  // (department-performance.ts:171) — the cards' figures cannot change. The
+  // snapshot cacheKey deliberately excludes `view`, so the Department
+  // Performance tab's full-payload request still shares one cached compute.
   const { data: summaryPerfResp } = useCachedJson<DeptPerfResponse>(
-    `/api/department-performance?from=${summaryRange.from}&to=${summaryRange.to}`,
+    `/api/department-performance?view=summary&from=${summaryRange.from}&to=${summaryRange.to}`,
   );
   const summaryTotals = summaryPerfResp?.data?.totals;
 
@@ -11518,33 +11559,17 @@ export default function EmployeesPage() {
     refreshWorkersHook();
   }, [refreshWorkersHook]);
 
-  const fetchTodayAttendance = useCallback(() => {
+  // Called by the Working Hours grid after it saves a row that had no id yet
+  // (a punch-derived draft). Its job is INVALIDATION: every attendance reader
+  // on this page goes through useCachedJson, so clearing the prefix is what
+  // makes the Attendance tab and the Employee Performance tab pick the new row
+  // up. The `date` argument is accepted and unused on purpose — the prefix
+  // invalidation covers every date window at once, and the two raw fetches that
+  // used to sit here wrote into state nobody read (BUG-2026-08-13-114).
+  const refreshAttendance = useCallback((_date: string) => {
     invalidateCachePrefix("/api/attendance");
     invalidateCachePrefix("/api/workers");
-    refreshAttendanceHook();
-  }, [refreshAttendanceHook]);
-
-  const fetchDateAttendance = useCallback((date: string) => {
-    fetch(`/api/attendance?date=${date}`)
-      .then((r) => r.json() as Promise<{ data?: AttendanceRecord[] } | AttendanceRecord[]>)
-      .then((res) => setDateAttendance(Array.isArray(res) ? res : (res.data ?? [])))
-      .catch(() => {});
   }, []);
-
-  /* eslint-disable react-hooks/set-state-in-effect -- derived: today's rows for the working hours tab */
-  useEffect(() => {
-    // Page-level attendance is already scoped to today, so this is just a copy.
-    setDateAttendance(todayAttendance);
-  }, [todayAttendance]);
-  /* eslint-enable react-hooks/set-state-in-effect */
-
-  const refreshAttendance = useCallback(
-    (date: string) => {
-      fetchDateAttendance(date);
-      fetchTodayAttendance();
-    },
-    [fetchDateAttendance, fetchTodayAttendance]
-  );
 
   // Summary stats — driven by `summaryRange` (the Working Hours date pick).
   // Headcount counts only currently-employed staff: resigned (and otherwise

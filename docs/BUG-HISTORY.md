@@ -34,6 +34,265 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-110 — the Employees page asked for a 5 MB job-card drilldown to render three KPI numbers `performance` `ui-frontend` 🟡
+
+**Symptom.** The owner: "有一些在效率方面好像确实有点卡" — the Employees / efficiency
+screens feel laggy. No error, nothing hangs; the page just takes a long beat to settle.
+
+**Root cause.** `GET /api/department-performance` returns, for every day in the window,
+`daily[].jobs[]` and `daily[].workers[].jobs[]` — one entry per job card per day. The route's
+own comment records the prod measurement: **a 61-day range is 9.5 MB**
+(`src/api/routes/department-performance.ts:91-98`, measured 2026-08-13). A `?view=summary`
+projection was added the same day to spare a report from that, and had exactly one caller
+(`src/pages/reports.tsx:1743`).
+
+Two callers on `/employees` kept asking for the full payload while reading **only
+`data.totals`**:
+
+| caller | window it asks for | what it actually reads |
+| --- | --- | --- |
+| `employees.tsx:11544` — the four KPI cards at the top of the page | follows the ACTIVE TAB's persisted range (a calendar month by default, owner ruling 2026-07-11) | `data.totals` — Present / Working Hours / Avg Efficiency |
+| `employees.tsx:11271` — Attendance tab month dashboard | the whole calendar month containing the picked date | `data.totals.efficiencyPct` — **one number** |
+
+The first fires on **every** `/employees` mount, and again on every tab switch that changes
+the persisted range. This matters more than its own latency: the API tier serialises
+concurrent requests (docs/PERF-BACKLOG.md, "THE ROOT CAUSE"), so a fat read does not just
+cost its own bytes, it holds a slot in the queue everything else is waiting behind.
+
+**Fix.** Both callers now pass `?view=summary`. The Department Performance TAB
+(`employees.tsx:6065`) deliberately keeps the FULL payload — it is the one caller that
+renders `daily[].workers[].jobs[]`, when the operator expands a day. The snapshot `cacheKey`
+excludes `view` (`department-performance.ts:235`), so the tab and the cards still share one
+cached compute; this is a projection at serialisation time, not a second query.
+
+**Equivalence.** `projectPerformanceSummary` returns `totals: data.totals` — the SAME OBJECT,
+by reference (`department-performance.ts:171`). The KPI figures cannot drift, and
+`tests/dept-perf-summary-projection.test.mjs` asserts the reference identity rather than a
+deep-equal, so a future refactor to `{ ...data.totals }` fails the test even though the
+numbers would still match that day. A fingerprint over `range + departmentCode + category +
+totals + daily[].{date,workingMinutes,productionMinutes,efficiencyPct}` is byte-identical
+across the two views.
+
+**Measured.** `full` vs `summary` bytes, computed by running the real
+`projectPerformanceSummary` over a synthetic payload in the handler's exact shape, with the
+job-cards-per-day parameter calibrated so a 61-day window lands on the 9.5 MB prod figure
+above (the calibration and the table are printed by the test, so they can be re-derived):
+
+| window | full | summary | ratio |
+| --- | --- | --- | --- |
+| 61 days | 9,760 KB | 12.3 KB | 791x |
+| **31 days (what these callers ask for)** | **4,960 KB** | **9.7 KB** | **511x** |
+| 7 days | 1,120 KB | 7.4 KB | 150x |
+| 1 day | 160 KB | 6.8 KB | 23x |
+
+**Not yet verified on prod.** This branch is not deployed and the prod API is behind login.
+The "before" column is anchored to a real prod measurement; the "after" column is COMPUTED
+from the real projection code, not observed. Re-measure on prod after deploy.
+
+**Guard.** `tests/dept-perf-summary-projection.test.mjs` — 8 tests: the reference-identity and
+fingerprint equivalence checks, the per-worker rollup, the measurement, and source locks on
+every narrowed caller PLUS a negative lock that fails if anyone narrows the Department
+Performance tab. Red-proved by `tests/dept-perf-summary-red-proof.mjs` (run by hand, it
+mutates source): 9 mutations across both suites, each naming the specific test that must
+fail, **9/9 red, 0 harness failures**. The harness normalises CRLF->LF before searching, because every source
+file in this repo is CRLF on disk and a multi-line anchor written with `\n` matches nothing —
+which would have shown up as "the guard held" when in fact the bug was never reintroduced.
+
+---
+
+## BUG-2026-08-13-111 — the Employee Performance tab downloaded every worker's punches to show one worker's `performance` `ui-frontend` 🟡
+
+**Symptom.** Same "卡" as -110, on the tab that shows a single employee.
+
+**Root cause.** `src/pages/employees.tsx:5435` (`EmployeeDetailTab`) fetched
+`/api/attendance?from=…&to=…` — the whole organisation's punches for the window — and then
+threw away everything but one worker:
+
+```
+rangeAttendance.filter((a) => a.employeeId === selectedEmployeeId)
+```
+
+The two data sources on the lines directly above it (`jcUrl`, `wheUrl`) both already scope
+server-side by worker, so this one line was the odd one out. `GET /api/attendance` has
+supported `?employeeId=` since the mobile employee card (dc12) needed it —
+`src/api/routes/attendance.ts:126-143` composes it with `from`/`to` in the same WHERE.
+
+**Not the same thing as the "/api/attendance is NOT slow" note in PERF-BACKLOG.** That note
+is correct and still stands: a bare unparameterised call is a false alarm because no caller
+makes one. This is the opposite failure — a caller that IS date-scoped, so it never looked
+suspicious, but that pulls ~50x the rows it renders because the WORKER dimension was left to
+the browser.
+
+**Fix.** `?employeeId=` added, and the fetch skipped entirely (URL `""`) when no worker is
+selected — again matching `jcUrl`/`wheUrl`. Ordering is untouched: with `from`/`to` set and
+no `date` param, `orderBy` is `date DESC, employeeId` in both the old and new call
+(`attendance.ts:144`), and `empRecords` re-sorts by date regardless. The client-side filter is
+KEPT as a no-op guard — `useCachedJson` reseeds from cache on URL change, so a stale entry
+from the previously-selected worker could otherwise paint for one frame.
+
+**Not yet verified on prod** (not deployed; prod is behind login). The row-count reduction is
+structural — the WHERE clause gained a column — rather than measured.
+
+**Guard.** Covered by `tests/dept-perf-summary-projection.test.mjs`: a positive lock on the
+scoped URL and an explicit negative lock on the old unscoped string, so a revert cannot pass
+by resembling it. Red-proved (mutation M4).
+
+---
+
+## BUG-2026-08-13-112 — three mobile screens downloaded a multi-MB payload to render zero rows `performance` `ui-frontend` 🟡
+
+**Symptom.** On `/m`, Planning › Capacity Overview, Planning › Capacity Loading and
+Employees › Dept Perf are empty. Nobody had connected that to the phones feeling slow.
+
+**Root cause — two independent defects stacked.** All three sources
+(`src/pages/m/config/modules.ts`, `planningCapacitySource` / `planningLoadSource` /
+`deptPerfSource`) fetch `/api/department-performance` for the current month, i.e. the same
+full per-job-card payload as -110. Then each `select` peels `data.departments`:
+
+```
+const list = (o.data?.departments ?? o.departments) as unknown;
+```
+
+The endpoint's payload is `{ range, departmentCode, category, totals, daily }`. There is no
+`departments` key, and there never has been — in either view. So the select always yields
+`[]` and every one of the three screens renders nothing, having first downloaded up to
+several MB to do it. The comment above `deptPerfSource` describes a
+`{ data: { departments: [...] } }` shape that the route does not produce; it is documenting
+an intention, not the code.
+
+**Fix (performance only).** All three now pass `?view=summary`, cutting the download by
+~500x over a month window (measurement table in -110). This changes nothing that renders:
+the response was unusable before and is unusable after. It matters because these are the
+phones on the factory floor, on the worst networks in the building, and because every one of
+those requests occupies a slot in a serialised queue.
+
+**Deliberately NOT fixed: the empty screens.** Making them render would mean choosing what
+"department capacity", "capacity loading" and "dept performance" should show on a phone and
+how to derive it from `daily[]` / the summary view's `workers[]` — a product decision, and the
+owner's to make. Fabricating a mapping to make three screens look populated is exactly the
+failure this repo logged three times on 2026-08-13 (Worker Efficiency from a hash, Department
+Efficiency dividing an estimate by itself, a P&L with hardcoded expenses). Raised in
+docs/PERF-BACKLOG.md as an open item, with the honest note that the screens are empty today.
+
+**Guard.** `tests/dept-perf-summary-projection.test.mjs` counts the
+`/api/department-performance` sources in `modules.ts` (expects exactly 3, so a fourth added
+later cannot slip past unnarrowed) and asserts each carries `view=summary`. Red-proved
+(mutation M5).
+
+---
+
+## BUG-2026-08-13-113 — every attendance list read dragged two base64 JPEGs per worker-day out of Postgres and threw them away `performance` `data-migration` 🟡
+
+**Symptom.** `GET /api/attendance` is disproportionately expensive for what it returns.
+Measured on prod 2026-08-13 (already in docs/PERF-BACKLOG.md): 2,818 rows → **1.28 MB but
+1.7–6.3 s**, and a 30-day window is 1,081 ms against 126 ms for a single day. A 1.28 MB
+response has no business taking six seconds on an endpoint with no joins and no aggregation.
+
+**Root cause.** The handler ran `SELECT * FROM attendance_records`. A punch selfie is
+**REQUIRED** to clock in or out (`src/pages/worker/index.tsx:669`) and is stored **inline on
+the row** as a base64 JPEG data URL, capped at 600 KB
+(`src/api/routes/worker.ts` → `stampPunchPhoto`). So every list read pulled two image blobs
+per worker-day out of Postgres, across Hyperdrive, into the isolate — and then
+`rowToAttendance` reduced each one to a boolean and dropped it. The response is ~460
+bytes/row; the READ behind it is orders of magnitude larger. That gap is the missing seconds,
+and it is invisible from the network tab, which is why the endpoint had already been
+(correctly) cleared as "not slow" on the basis of its payload size.
+
+Who pays: the Working Hours tab — the **DEFAULT tab of /employees** — fetches
+`/api/attendance?from=&to=` for a whole month on mount, so opening the Employees page pulled
+a month of selfies for every worker in the company.
+
+**Fix.** An explicit projection that never selects the blobs, asking Postgres for the
+has-flags instead:
+
+```
+(clockInPhoto IS NOT NULL) AS hasclockinphoto
+```
+
+`rowToAttendance` now reads the flag from three key spellings in order — the SQL alias
+first, then the two `dual()` blob reads the POST responses and the fallback path still
+return. It is a `??` chain, not `||`: `false` is a legitimate answer from the aliased form
+and `||` would swallow it.
+
+**Why an explicit projection is safe here** even though the comment on `/:id/photo` warns
+against one. Every STATIC column named is in `column-rename-map.json`, so `supabase-compat`
+rewrites it to the right snake_case name and the driver maps it back (`db-pg.ts:57`). The
+RUNTIME-added geo/photo columns are NOT in the map, so they pass through bare and Postgres
+folds them to all-lowercase — which is exactly the name they were CREATED with through the
+same path, and exactly what the existing `dual()` reads already expect.
+
+**What it cannot survive, and the fallback.** A database where the runtime columns do not
+exist yet (nobody has punched): naming a missing column is a hard error where `SELECT *`
+simply omits it. So a Postgres **42703** — and ONLY a 42703 — falls back to the original
+whole-row read. Worst case is exactly today's behaviour, one wasted query later. A bare
+`catch {}` was deliberately not used: it would also swallow a transient pooler failure and
+answer it with a second heavy query and a 200, hiding an outage that
+`isTransientDbError()` exists to report as a 503.
+
+**Not verified on prod, and the win is NOT quantified.** The saving is in Postgres→Worker
+bytes, which cannot be observed from the browser at all, and this branch is not deployed.
+What is proved is that the blobs are no longer requested and that the response is unchanged.
+Treat "how much faster" as an open question to answer on prod, not a claim made here.
+
+**Guard.** `tests/attendance-list-no-photo-blobs.test.mjs` — 5 BEHAVIOURAL tests against the
+real Hono handler with a stub DB, not a source grep, because what must be proved is an
+equivalence: the narrow read and the whole-row read produce **byte-identical JSON**. Also
+covers the 42703 fallback, the non-42703 rethrow, and that `?employeeId=` composes with the
+date window without changing ORDER BY. Red-proved (mutations M6, M7).
+
+---
+
+## BUG-2026-08-13-114 — the Employees page held its first paint behind a fetch whose result nothing read `performance` `ui-frontend` 🟡
+
+**Symptom.** `/employees` shows "Loading employee data..." for longer than it should, then
+everything appears at once.
+
+**Root cause.** `EmployeesPage` fetched `/api/attendance?date=<today>` at page level. Its
+comment claimed it fed "the four today-summary cards"; it had not done that for some time —
+those cards read `summaryTotals` off `/api/department-performance`. What the response
+actually reached was:
+
+```
+attendanceResp → todayAttendance → setDateAttendance
+```
+
+…and `dateAttendance` was declared `const [, setDateAttendance] = useState(...)`. **The value
+was never destructured.** Every write went nowhere. A second raw `fetch` in
+`fetchDateAttendance` wrote into the same dead state on every Working Hours row save.
+
+The request was not free, though: its `loading` flag was ORed into the page-level `loading`
+that renders the full-screen block, so the ENTIRE page waited for a whole-org attendance
+read — the exact read fixed in -113 — before painting anything. On a serialised request
+queue it also held a slot the rest of the mount burst was waiting behind.
+
+**How it survived review.** Nothing about the fetch looks wrong in isolation: it is
+date-scoped, it has an explanatory comment, and its result flows into a `useState`. The
+defect is only visible by following that state to its declaration and noticing the empty
+first slot of the destructuring. This is the "read the code, not the comment" case in its
+purest form — the comment described a wiring that had been replaced.
+
+**Fix.** The hook, the memo, the copy-effect, the dead raw fetch and the dead state are
+removed; `loading` is `workersLoading` alone. `refreshAttendance(date)` is KEPT and still
+invalidates the `/api/attendance` and `/api/workers` cache prefixes — that half was never
+dead: it is what makes the Attendance and Employee Performance tabs re-read after the
+Working Hours grid saves a punch-derived row. Its `date` argument is now unused (the prefix
+invalidation covers every window at once) and is named `_date` to say so.
+
+**Net effect on the mount burst:** one fewer request, and first paint no longer blocked on
+one.
+
+**Not yet verified on prod** (not deployed). The removal is provable by reading the code; the
+timing improvement is not measured.
+
+**Guard.** In `tests/dept-perf-summary-projection.test.mjs`. It strips comments before
+searching — the fix left a comment that NAMES `setDateAttendance`, and the first version of
+this very test failed against its own explanatory note. Asserts the identifiers are gone from
+CODE, that `loading` is `workersLoading` alone, and — the other half — that
+`refreshAttendance` STILL invalidates the attendance prefix, so "clean up the dead code" can
+never take the live part with it. Red-proved (mutation M8).
+
+---
+
 ## BUG-2026-08-13-097 — the company switcher was one global row, so switching company moved it for every other logged-in user at once `multi-tenant` `ui-frontend` `data-integrity` 🟢
 
 **Symptom.** An operator picks HOUZS in the sidebar company switcher. Every other signed-in

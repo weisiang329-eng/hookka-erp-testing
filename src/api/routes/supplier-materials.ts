@@ -202,9 +202,20 @@ app.post("/", async (c) => {
         body.supplierDescription != null ? String(body.supplierDescription) : "",
       unitPrice: Number(unitPrice),
       currency: body.currency === "RMB" ? "RMB" : "MYR",
-      leadTimeDays: Number(body.leadTimeDays) || 7,
+      // BUG-2026-08-13-154. These were `|| 7` and `|| 1`: leaving the fields
+      // blank on the create form stored a lead time and an MOQ the supplier
+      // never gave, and `/planning/mrp` then printed them UNDER THE SUPPLIER'S
+      // NAME. The read side now renders "—" for the never-filled value, but a
+      // read-side "—" cannot undo a literal already written to the table.
+      //
+      // 0 is the never-filled representation: both columns are
+      // `INTEGER NOT NULL DEFAULT 0` (migrations 0001_init.sql:273,275), so
+      // blank has no other encoding, and 0 is what the MRP read path already
+      // treats as unknown. The PUT path (:336-341) was always honest — it
+      // writes only what was supplied — so this makes POST match it.
+      leadTimeDays: Number(body.leadTimeDays) || 0,
       paymentTerms: body.paymentTerms ?? "NET30",
-      moq: Number(body.moq) || 1,
+      moq: Number(body.moq) || 0,
       effectiveFrom: String(effectiveFrom),
       isMainSupplier: body.isMainSupplier ? 1 : 0,
     };

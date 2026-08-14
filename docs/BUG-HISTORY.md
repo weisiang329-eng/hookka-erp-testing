@@ -34,6 +34,53 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-154 — creating a supplier binding invented a 7-day lead time and an MOQ of 1, and `/planning/mrp` printed them under the supplier's name `procurement` `mrp` `data-integrity` 🟢
+
+> **The write-side half of BUG-2026-08-13-145.** That entry fixed the READ: `/planning/mrp`
+> now renders `MOQ —` / `lead time —` instead of an invented 50 and 14. This is the other
+> half, and it is the reason a read-side fix was not enough:
+>
+> **A read-side "—" cannot undo a literal already written to the table.**
+
+**Root cause.** `POST /api/supplier-materials` (`src/api/routes/supplier-materials.ts:205,207`):
+
+```js
+leadTimeDays: Number(body.leadTimeDays) || 7,
+moq:          Number(body.moq)          || 1,
+```
+
+Leaving either field blank on the create form stored **7 days** and **MOQ 1** — values the
+supplier never gave. `/planning/mrp` then printed them beside the supplier's name and
+derived an "Order By" date from them, so the figure read as the supplier's own term.
+
+**Why the read fix does not cover it.** The MRP read path treats **0** as never-filled
+(both columns are `INTEGER NOT NULL DEFAULT 0`, `migrations-postgres/0001_init.sql:273,275`,
+so 0 is the only encoding "blank" has). But `|| 7` and `|| 1` do not write 0 — they write
+7 and 1, which are indistinguishable from a real 7-day lead time and a real MOQ of 1.
+
+**The PUT path was always honest** (`:336-341`): it writes only what was supplied and
+otherwise keeps the existing value. So the two halves of the same resource disagreed —
+create invented, update did not.
+
+**Fix.** POST now writes `|| 0` for both, matching what the read path already understands
+as unknown, and matching PUT's honesty. The columns are still written (they are NOT NULL,
+so omitting the bind would fail the insert rather than record "unknown").
+
+**Not done, and it needs the owner: existing rows are not corrected.** Any binding created
+through POST while `|| 7` was live still carries a 7 that cannot be distinguished from a
+real one — the information to tell them apart was never recorded. Restating them would be
+inventing a second time. **UNMEASURED**: how many rows carry exactly 7 / exactly 1 needs a
+live query; run it before deciding whether a correction pass is even possible.
+
+**Guard.** `tests/supplier-material-no-invented-terms.test.mjs` — 4 assertions, all proved
+RED by restoring `|| 7` / `|| 1` with the mutation asserted to have applied first. It pins
+the PUT path too, so a future "make POST and PUT consistent" pass cannot level them by
+making PUT invent defaults as well.
+
+**Class:** C15 (a value presented as observed when it was supplied by the code).
+
+---
+
 ## BUG-2026-08-13-144 — `/planning/mrp` computed every shortage as if nothing were on order: `const onOrder = 0;` `data-integrity` `production-orders` 🟢
 
 **Symptom.** The Material Requirements table reported a **full shortage** for material that

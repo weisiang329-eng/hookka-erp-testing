@@ -61,6 +61,36 @@ Doc map: [`docs/DOCS-INDEX.md`](docs/DOCS-INDEX.md). The big picture: [`docs/DEV
   `docs/BUG-HISTORY.md` and add a regression test.
 - **UI is 100% English.** Bug fixes merge straight to `main`; features go to `staging`.
 
+## NEVER STATE PROD STATE YOU DID NOT MEASURE
+
+**A migration file tells you what happened once. It does not tell you what is true now.**
+
+2026-08-14, the PCB work: an agent wrote *"Live effect today is zero — migration 0136
+set `pcb_enabled = FALSE` on every worker, so all resolve to DISABLED."* Measured against
+prod: **1 of 42 workers had it TRUE.** Someone turned it on after that migration ran. The
+agent had no DB credentials, so it could not have known — and instead of saying so, it
+published an inference as a measurement. Had nobody checked, a payslip would have changed
+for a real person under a "zero effect" banner.
+
+The rule, and it is cheap:
+
+> **Any claim about the CURRENT state of production is either MEASURED, or it carries the
+> word UNMEASURED.** No third option. "The migration set it to X" is a claim about
+> history; "it is X today" is a claim about production and needs a query.
+
+**The right shape already exists in-house.** The same day, the leave-entitlement agent
+wrote: *"The no-op proof is only half done, and I won't overstate it. The logic is proven
+in tests. **Prod impact is UNMEASURED** — the local credential is rotated (`28P01`), so I
+could not query the live DB. I shipped `scripts/check-leave-balance-fingerprint.mjs`
+instead of guessing; it must be run before deploy."* That is the standard: name the gap,
+ship the tool that closes it, refuse to fill it with a plausible number.
+
+**If you have no prod access** (most agents do not): say so, state what you would run, and
+leave it for the session that does. **The main session must verify any prod-state claim
+before deploying** — this one was caught only because someone re-checked, which is luck,
+not process. Related: [[docs/BUG-CLASSES.md]] C15, and BUG-2026-08-13-096 where a
+planner's "0 items" meant *cannot see*, not *nothing wrong*.
+
 ## Working discipline
 - Classify each task → use the SMALLEST mode. Don't spawn agents / broad-grep for small fixes.
 - **Log every ask from a multi-part message into `docs/WORK-TRACKER.md` FIRST**, before working

@@ -42,6 +42,18 @@ Rollback notes:
 
 - 
 
+## Production-state claims
+
+Every statement about what is TRUE ON PROD RIGHT NOW is either measured or labelled
+UNMEASURED. A migration file is history, not current state — 2026-08-14 a PR said
+"live effect is zero, the migration disabled it for everyone" while 1 of 42 workers
+had since been re-enabled, and a real payslip would have changed.
+
+- [ ] No prod-state claim in this PR, or every one of them is MEASURED (say how)
+- [ ] Any claim I could not verify is written as UNMEASURED, with the command to run
+- [ ] If this changes what a person is paid, owes, or is owed: the affected rows are
+      counted BEFORE deploy, not estimated
+
 ## Testing
 
 - [ ] `git diff --check`

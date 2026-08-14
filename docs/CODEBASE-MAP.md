@@ -563,7 +563,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/employees.tsx` — 9-tab admin shell (11,746) | `src/api/routes/workers.ts` — employee master + salary effective-dating (1047) | `workers` / `worker_salary_history` | `tests/labor-engine.test.mjs` · `tests/virtual-group-window.test.mjs` |
+| `src/pages/employees.tsx` — 9-tab admin shell (11,784) | `src/api/routes/workers.ts` — employee master + salary effective-dating (1047) | `workers` / `worker_salary_history` | `tests/labor-engine.test.mjs` · `tests/virtual-group-window.test.mjs` |
 | `src/pages/worker/index.tsx` — worker mobile home | `src/api/routes/worker.ts` — self-service mobile backend (4130) | `departments` / `attendance_records` | `tests/attendance-rules.test.mjs` |
 | `src/pages/worker/scan.tsx` — clock/dept-scan/packing (3203) | `src/api/routes/worker-auth.ts` — PIN auth | `working_hour_entries` | `tests/auto-attendance-deduct.test.mjs` |
 | `src/pages/worker/pay.tsx` — payslip view | `src/api/routes/attendance.ts` — admin attendance (374) | `payroll_runs` / `payroll_*` (generated) / `payroll_payslips` | `tests/worker-auth.test.mjs` |
@@ -577,28 +577,45 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 | | `src/api/routes/payslips.ts` — payslip read/persist (OT buckets) | | |
 | `src/pages/announcements.tsx` — office compose + per-card **read-receipt panel** (`ReadReceiptPanel`: lazy GET `/:id/acks`, acked/pending lists, **Remind** → POST `/:id/remind`) | `src/api/routes/announcements.ts` — admin + worker sub-apps; auto-translate on POST/PATCH via `src/api/lib/translate-announcement.ts` (Claude, ANTHROPIC_API_KEY). **Read-receipts:** worker POST `/:id/ack` (idempotent upsert), worker GET returns `ackedIds` (SERVER-driven popup gate), admin GET `/:id/acks` (acked-vs-ACTIVE-roster split), admin POST `/:id/remind` (stamps `reminded_at` → re-pop) | `announcements` (snake_case; `translations` JSONB + `reminded_at`, runtime ALTER) · `announcement_acks` (PK `announcement_id,worker_id`; runtime CREATE TABLE) | `tests/announcement-translate.test.mjs` · `tests/announcement-acks.test.mjs` |
 
-**Big-file section index** (re-measured 2026-08-13 — the file is 11,746 lines)
+**Big-file section index** (re-measured 2026-08-14 — the file is 11,784 lines.
+Every number below is the line of the `function` keyword, read out of the file,
+not carried forward: the previous stamp was 3 lines light on every entry.)
 - `src/pages/employees.tsx`
-  - SortableHeader helper (Working Hours grid) — L466
-  - TAB 1: Working Hours — flat grid (WorkingHoursTab) — L993-2077 (windowed; see gotcha below)
-  - Public Holidays panel (PublicHolidaysCard) — L2079
-  - TAB 2: Employee Master (EmployeeMasterTab) — L2342
-  - TAB 3: Efficiency Overview (EfficiencyOverviewTab) — L3772
-  - TAB: Department Labor (DepartmentLaborTab) — L4337
-  - TAB 4: Employee Detail (EmployeeDetailTab, guarded-unmount) — L5314
-  - TAB 4b: Department Performance (DepartmentPerformanceTab) — L6005
-  - DailyDrillDown helper — L6413
-  - RuleDraftExplainer helper (payroll) — L6564
-  - TAB 5: Payroll (PayrollTab) — L6634 (+ Advance column / drift banner, 2026-08-07)
-  - DepartmentsManager (inside Labor Cost section) — L8215
-  - TAB 5b: Labor Cost (LaborCostTab) — L8462
-  - TAB 6: Leave Management (LeaveManagementTab) — L10085
-  - TAB 5c: Salary Advances (AdvancesTab) — L10462
-  - MAIN PAGE — TABS array L11059, EmployeesPage shell + tab switch L11425+
-  - AttLocBadge / PunchThumb helpers — L11144
-  - TAB: Attendance (AttendanceTab) — L11199
+  - SortableHeader helper (Working Hours grid) — L469
+  - TAB 1: Working Hours — flat grid (WorkingHoursTab) — L996-2080 (windowed; see gotcha below)
+  - Public Holidays panel (PublicHolidaysCard) — L2082
+  - TAB 2: Employee Master (EmployeeMasterTab) — L2345
+  - TAB 3: Efficiency Overview (EfficiencyOverviewTab) — L3776
+  - TAB: Department Labor (DepartmentLaborTab) — L4341
+  - TAB 4: Employee Detail (EmployeeDetailTab, guarded-unmount) — L5318
+  - TAB 4b: Department Performance (DepartmentPerformanceTab) — L6024
+  - DailyDrillDown helper — L6432
+  - RuleDraftExplainer helper (payroll) — L6583
+  - TAB 5: Payroll (PayrollTab) — L6653 (+ Advance column / drift banner, 2026-08-07)
+  - DepartmentsManager (inside Labor Cost section) — L8234
+  - TAB 5b: Labor Cost (LaborCostTab) — L8481
+  - TAB 6: Leave Management (LeaveManagementTab) — L10104
+  - TAB 5c: Salary Advances (AdvancesTab) — L10481
+  - MAIN PAGE — TABS array L11078, EmployeesPage shell + tab switch L11450+
+  - AttLocBadge / PunchThumb helpers — L11163
+  - TAB: Attendance (AttendanceTab) — L11218
+
 - `src/pages/worker/scan.tsx`
   - WorkerScanPage — single mobile clock/dept-scan/packing component (Kpi helper at 2791) — L29-2816
+
+**This page's reads are narrow on purpose (2026-08-14, BUG-2026-08-13-110/-104).**
+Three of its fetches used to pull whole-org / whole-drilldown payloads and throw
+almost all of it away in the browser:
+- the page-level KPI cards (L11544) and the Attendance tab's month efficiency
+  (L11271) read ONLY `data.totals` off `/api/department-performance`, so both ask
+  for `?view=summary`. The **Department Performance tab itself (L6065) must keep
+  the FULL payload** — it is the one caller that renders
+  `daily[].workers[].jobs[]` when the operator expands a day.
+- the Employee Performance tab (L5435) scopes its attendance read with
+  `?employeeId=`, matching the `jcUrl` / `wheUrl` lines directly above it.
+`tests/dept-perf-summary-projection.test.mjs` locks all four (three positive, one
+negative); `tests/dept-perf-summary-red-proof.mjs` is the by-hand mutation harness
+that proves those locks can actually go red.
 
 **Gotchas**
 - The payroll/cost math is the single most coupled and fragile part. THE engine is `src/lib/labor-engine.ts`; costing divisor logic is `src/lib/costing.ts`. Pay side = unified ÷26 (workingDaysPerMonth) for absence, late/short docks, OT base; hourly = ÷26 ÷ the worker's DAY SPAN (daily hours + lunch, e.g. 9h→÷10). Cost side = ÷ ACTUAL Mon-Sat working days minus holidays (countElapsedWorkingDays / costingDailyRateSen). NEVER revert either to fixed-26 or ÷calendar.
@@ -610,9 +627,9 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 - camelCase DB columns are folded-lowercase by toCamel and can silently return undefined (clockinphoto↛clockInPhoto); at-risk cols dual-keyed r.camelCase ?? r.snake_case. New columns snake_case; a write to a camelCase col needs a `column-rename-map.json` entry.
 - **The Working Hours grid is WINDOWED and its row heights are hard-coded constants.** Measured on prod 2026-08-13, a month of entries built **695 rows / 46,137 DOM nodes** (every other page in the app is 900-1,900) and a plain scroll froze the renderer for **45 s+** — the owner's "page unresponsive". The 22 API calls totalled 0.17 MB, so none of it was the network. `WorkingHoursTab` now renders only the visible window via `useVirtualGroups` (`src/components/ui/virtual-groups.tsx`, math in `src/lib/virtual-group-window.ts`), and the grid scrolls **inside its own `max-h-[70vh]` box** instead of with the page. It could not use the flat `useVirtualRows`: a worker-day's Date / Employee / Punch cells are one `<td rowSpan>`, so the window snaps to whole GROUPS, and the two row heights differ — `WH_ROW_SOLO_PX = 71` (a one-row group, whose Employee cell stacks the `<select>` above the day-total chip) vs `WH_ROW_SEG_PX = 50` per row from two rows up. **If you change the row markup, re-measure both constants** or the scrollbar drifts. Sorting / filtering / editing are untouched by this: every handler addresses `originalIdx` into the flat `rows` array, and Save All / Print read `rows` / `filteredRows`, never the DOM — so an edit on a row that scrolls out of the window survives.
 - employees.tsx Employee Detail tab is intentionally guard-unmounted via {activeTab === 'detail' && ...} (~L11700) — don't refactor to always-mounted.
-- UI must be 100% English — no Chinese strings/comments. EmployeesPage tab shell at L10642; add new tabs to both the tab array and the activeTab switch (~L10887).
+- UI must be 100% English — no Chinese strings/comments. EmployeesPage tab shell at L11450; add new tabs to both the TABS array (L11078) and the activeTab render block near the end of the file.
 
-**Start here:** Open `src/pages/employees.tsx` (the 11,746-line tabbed shell; `EmployeesPage` at L11424, tab array at L11059, the `activeTab` render block at the end of the file) and jump to the specific tab via the section ranges.
+**Start here:** Open `src/pages/employees.tsx` (the 11,784-line tabbed shell; `EmployeesPage` at L11450, tab array at L11078, the `activeTab` render block at the end of the file) and jump to the specific tab via the section ranges.
 
 ---
 

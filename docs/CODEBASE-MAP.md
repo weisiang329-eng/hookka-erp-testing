@@ -575,7 +575,8 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 | `src/pages/worker/login.tsx` — PIN login | `src/api/routes/payroll-hour-deductions.ts` — short-hour dock (418) | `employee_advances` (salary advances) | `tests/employee-advances.test.mjs` |
 | | `src/api/routes/employee-advances.ts` — advance CRUD + HR payout listing; maths + runtime self-apply in `src/api/lib/employee-advances.ts` | `payslips.advance_deduction_sen` (mig 0211, runtime ALTER) | |
 | | `src/api/routes/department-performance.ts` — read-only aggregate (807) | | |
-| | `src/api/routes/leaves.ts` — leave CRUD | | |
+| | `src/api/routes/leaves.ts` — leave CRUD + `GET /balances` (server-computed) | `workers.annual_leave_entitlement_days` / `.medical_leave_entitlement_days` (mig 0229, runtime ALTER via `src/api/lib/ensure-leave-columns.ts`) | `tests/leave-entitlement.test.mjs` |
+| | `src/lib/leave-entitlement.ts` — **the ONE leave policy module** (entitlement, leave year, holiday exclusion); called by `leaves.ts`, `worker.ts` and `employees.tsx` | | |
 | | `src/api/routes/payslips.ts` — payslip read/persist (OT buckets) | | |
 | `src/pages/announcements.tsx` — office compose + per-card **read-receipt panel** (`ReadReceiptPanel`: lazy GET `/:id/acks`, acked/pending lists, **Remind** → POST `/:id/remind`) | `src/api/routes/announcements.ts` — admin + worker sub-apps; auto-translate on POST/PATCH via `src/api/lib/translate-announcement.ts` (Claude, ANTHROPIC_API_KEY). **Read-receipts:** worker POST `/:id/ack` (idempotent upsert), worker GET returns `ackedIds` (SERVER-driven popup gate), admin GET `/:id/acks` (acked-vs-ACTIVE-roster split), admin POST `/:id/remind` (stamps `reminded_at` → re-pop) | `announcements` (snake_case; `translations` JSONB + `reminded_at`, runtime ALTER) · `announcement_acks` (PK `announcement_id,worker_id`; runtime CREATE TABLE) | `tests/announcement-translate.test.mjs` · `tests/announcement-acks.test.mjs` |
 
@@ -596,7 +597,9 @@ not carried forward: the previous stamp was 3 lines light on every entry.)
   - TAB 5: Payroll (PayrollTab) — L6653 (+ Advance column / drift banner, 2026-08-07)
   - DepartmentsManager (inside Labor Cost section) — L8234
   - TAB 5b: Labor Cost (LaborCostTab) — L8481
-  - TAB 6: Leave Management (LeaveManagementTab) — L10104
+  - TAB 6: Leave Management (LeaveManagementTab) — L10104. **Entitlement is no
+    longer a constant in this file** — it is per-worker data and the balance is
+    read from `GET /api/leaves/balances`. See `src/lib/leave-entitlement.ts`.
   - TAB 5c: Salary Advances (AdvancesTab) — L10481
   - MAIN PAGE — TABS array L11078, EmployeesPage shell + tab switch L11450+
   - AttLocBadge / PunchThumb helpers — L11163

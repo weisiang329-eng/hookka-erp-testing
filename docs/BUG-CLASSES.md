@@ -9,9 +9,20 @@
 > `tests/compliance-unknown-outcome.test.mjs` and the concentration block in
 > `tests/dashboard-truthfulness.test.mjs`; all 31 assertions proved RED by reintroducing
 > the bug with the file's bytes asserted changed on disk first. Suite at that point:
-> 4,051 tests / 0 fail.
+> 4,078 tests / 0 fail (post-merge with `main`).
 >
-> **Last verified: 2026-08-14** — restamped on branch `feat/job-card-completed-at`: adds
+> **Previously verified: 2026-08-14** — restamped on branch `feat/leave-entitlement`:
+> **C4 gains row 4** (leave entitlement — a POLICY, not a price list, with the office on
+> 8 annual days and the worker's phone on 14, invisible because the two numbers never
+> share a screen). BUG-2026-08-13-130…133; enforced by `tests/leave-entitlement.test.mjs`.
+> All 21 mutations proved RED with bytes-changed asserted first, and that run caught
+> **four blind guards** — including a single-site `computeLeaveBalance(` check that stayed
+> green while one of its two required call sites was deleted (the same shape C15 records),
+> and two substring matches satisfied by a longer string (`"/api/leaves/balancesXX"`,
+> `"public_holidays_v2"`). **A source guard that matches a substring is not a guard: anchor
+> it to a complete quoted string.** Suite at that point: 4,048 tests / 0 fail.
+>
+> **Previously verified: 2026-08-14** — restamped on branch `feat/job-card-completed-at`: adds
 > **C20 (a measurement thrown away at the moment of capture)**, the class UPSTREAM of C15.
 > `job_cards.completed_date` was written as `nowIso.split("T")[0]` by 14 sites while the full
 > instant sat in a local variable one line above, so no job's duration was ever derivable and
@@ -252,6 +263,20 @@ list.
 | 1 | `kv_config variants-config.specials` / `.divanHeights` / `.legHeights` | **everything** | ✅ the source of truth |
 | 2 | `src/lib/pricing-options.ts` | the silent fallback when the config fails to load | ✅ realigned 2026-07-23 — had drifted a whole price increase behind |
 | 3 | `variants-config.bedframeSpecialOrders` / `.sofaSpecialOrders` | **nothing** | ✅ deleted 2026-07-22; the seeder stopped writing them 2026-07-23 |
+| 4 | **leave entitlement** — `LEAVE_ENTITLEMENTS = {ANNUAL:8, MEDICAL:14}` (`employees.tsx`) vs `annualEntitlement = 14` / `medicalEntitlement = 14` (`worker.ts`) | the office screen read one, the worker's phone read the other | ✅ 2026-08-14 (BUG-2026-08-13-133) — both now call `src/lib/leave-entitlement.ts`; entitlement moved into `workers.*_leave_entitlement_days` |
+
+**Row 4 is the class's cheapest lesson and its loudest.** It was not a price list, it
+was a POLICY, and the two copies disagreed on the headline number — 14 annual days on
+the worker's phone against 8 in the office — for as long as the worker endpoint has
+existed. Nobody reported it because the two numbers are never on one screen: the
+worker sees theirs, the approver sees theirs, and each looks entirely reasonable
+alone. That is the signature of this class, and it is why the fix is a shared module
+rather than "make the second literal say 8".
+
+Note also what the class test must check. The first draft of the guard asserted
+`/computeLeaveBalance\s*\(/` over the whole file — a **single-site** check that stayed
+green when one of the two required calls was deleted, because the other still matched.
+A class guard has to name each site it is protecting; the same trap is recorded on C15.
 
 Copy 3 cost real money: the 2026-07-17 backfill priced from it and had to be topped up RM 30
 after read-back. It survived because **one script planted it while another weeded it**

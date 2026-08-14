@@ -1,6 +1,6 @@
 # Hookka ERP — Work Tracker
 
-> **Last verified: 2026-08-14** — branch `feat/job-card-completed-at` added below (open, not merged, its entry is the newest). Previously: branch `fix/security-posture` added below (open, not merged). Previously: PRs #304/#310/#312/#313/#314/#315/#316/#317 all MERGED and
+> **Last verified: 2026-08-14** — branch `fix/on-time-delivery-and-decisions` added below (open, not merged, its entry is the newest; its bug ids were renumbered 130-133 → 140-143 because `feat/leave-entitlement` claimed 130-133 and merged to `main` first). Previously: branch `feat/leave-entitlement` (MERGED as #326). Previously: branch `feat/job-card-completed-at` added below (open, not merged). Previously: branch `fix/security-posture` added below (open, not merged). Previously: PRs #304/#310/#312/#313/#314/#315/#316/#317 all MERGED and
 > **Last verified: 2026-08-14** — restamped on branch `fix/money-input-parsing` (its entry is the newest below, not yet deployed). PRs #304/#310/#312/#313/#314/#315/#316/#317 all MERGED and
 > deployed; zero PRs open, one worktree. Previously verified against the merged PRs on `main` (#266-#300) plus the open PRs #304 (branch `fix/stock-grn-org-filter`) and the accounting-audit branch `fix/accounting-audit`, whose entry is the newest below. This file is a live queue — restamp it whenever you add or close an item.
 
@@ -25,10 +25,10 @@ them. It closes items 7, 8, 10 and 14 of `docs/DASHBOARD-DATA-AUDIT.md` Part 6.
 | …keep the production-timeliness metric if it has other consumers | ✅ honoured | `agent-learning.ts` adherence untouched — it feeds the morning brief's *"Plan vs Actual"* section and was never labelled delivery (the brief's claim that it was is wrong; see the bug entry) |
 | **The compliance report must be able to say "I could not check"** | ✅ done | BUG-2026-08-13-141 · 15 checks rethrow; `runCheck` records; counts `number \| null`; `checksRun`/`checksTotal`/`unavailable` published; both renderers refuse a clean headline over a partial sweep |
 | **Concentration denominator → TOTAL revenue**, surface largest-customer % and top-10 % | ✅ done | BUG-2026-08-13-142 · computed server-side over all customers; one denominator on the card; KV key bumped v22→v23 |
-| **Delete the dead `/api/reports/brief.json`** plus what it makes dead; regenerate `docs/API.md` | ✅ done | BUG-2026-08-13-143 · route + `buildBriefJsonCached` + `warmBriefReport` + its `worker.ts` call; API.md regenerated (936→935) |
+| **Delete the dead `/api/reports/brief.json`** plus what it makes dead; regenerate `docs/API.md` | ✅ done | BUG-2026-08-13-143 · route + `buildBriefJsonCached` + `warmBriefReport` + its `worker.ts` call; API.md regenerated (one handler removed) |
 | …do NOT touch the delivery-agent brief.json or the LIVE HTML brief | ✅ honoured | both guarded by `tests/reports-brief-json-removed.test.mjs`, one test per direction of the confusion |
 
-**Gates:** `npx tsc -p tsconfig.app.json --noEmit` exit 0 · `npm test` 4,051 tests / 0 fail ·
+**Gates:** `npx tsc -p tsconfig.app.json --noEmit` exit 0 · `npm test` 4,078 tests / 0 fail (post-merge with `main`) ·
 `check-docs-freshness` OK · `check-codebase-map` OK · `check-secrets` OK ·
 `gen-api-docs --check` up to date. **31 mutations proved RED** (bytes-changed-on-disk asserted
 before each run). NOT deployed — no prod verification has been done.
@@ -38,6 +38,33 @@ before each run). NOT deployed — no prod verification has been done.
 came from `operations-report.ts:873-876`; (b) the compliance report has **15** checks, not 13.
 
 ---
+## 2026-08-14 — 🔵 Leave entitlement into data + year reset + public holidays (branch `feat/leave-entitlement`, **NOT deployed, NOT merged**)
+
+The owner's ask: leave must respect the public holidays he configures — 「应该根据我在
+employee 那边放的 public holiday」. Acting on it surfaced three more defects in the same area.
+
+| Ask | State | Entry |
+|---|---|---|
+| Move entitlement out of the frontend constant into data, so it can differ per employee | ✅ done | BUG-2026-08-13-130 · `workers.annual_leave_entitlement_days` / `.medical_leave_entitlement_days` (nullable, no default) · migration 0229 · runtime self-apply `src/api/lib/ensure-leave-columns.ts` |
+| Default must exactly match today's 8 / 14 — do NOT silently grant more leave | ✅ honoured | NULL → the existing defaults; statutory tiers exported + tested but deliberately NOT wired into resolution |
+| Exclude public holidays (and rest days if modelled) from days consumed | ✅ done | BUG-2026-08-13-132 · reads the EXISTING `kv_config['public_holidays']`, no second list. **Rest days deliberately not excluded — this codebase has no rest-day model at all** |
+| Implement the year reset, and say which boundary and why | ✅ done | BUG-2026-08-13-131 · **calendar year of the start date**, the boundary `worker.ts` already shipped; anniversary-of-join left as an owner decision |
+| Prove nobody's balance moves on deploy | ⚠️ **partly** | Deterministic no-op proof in the test suite. **Prod impact UNMEASURED** — the local DB credential is rotated and auth fails. `scripts/check-leave-balance-fingerprint.mjs` (read-only) is the measurement, for whoever holds the credential |
+| — found in passing — | ✅ fixed | BUG-2026-08-13-133 (class C4): `worker.ts` used `annualEntitlement = 14` while the office used 8, so the worker's phone and the approver disagreed by 6 days per person |
+
+**Owner decisions outstanding.** (1) flat 8 vs statutory tiers (<2y 8 · 2–5y 12 · >5y 16) vs
+per-employee overrides — the mechanism is built, the policy is his; (2) calendar year vs
+anniversary of `join_date`; (3) the worker-app annual figure necessarily drops 14 → 8 when the
+two surfaces are unified — 8 is the statutory floor and the office's number, but workers have
+been shown 14.
+
+**Gates.** `npx tsc -p tsconfig.app.json --noEmit` exit 0 · `npm test` 4,048 pass / 0 fail
+(+27) · `check-docs-freshness` OK · `check-codebase-map` OK · `check-secrets` OK ·
+`gen-api-docs --check` up to date. All **21** mutations proved RED with bytes-on-disk asserted
+changed first; that run caught **4 blind guards** which have been fixed and re-proved.
+
+---
+
 ## 2026-08-14 — 🔵 Capture the job-card completion INSTANT (branch `feat/job-card-completed-at`, **NOT deployed, NOT merged**)
 
 The owner's own diagnosis: the factory cannot measure how long any job takes — not because

@@ -32,11 +32,32 @@ generic context packs.
 
 ---
 
-## ⛔ NO "PRODUCTION TIME" IN THIS SYSTEM IS MEASURED (verified 2026-08-14)
+## "PRODUCTION TIME" IS STANDARD TIME, BY DESIGN — not a measurement, and not a bug
 
-**Every column that sounds like measured work time is the ESTIMATE, by construction.**
-Three columns, three names, one number. Do not build a metric on any of them believing
-it observes what the factory actually did.
+> **CORRECTED 2026-08-14 by the owner, after this section first framed it as a defect.**
+> **Read the correction before acting on anything below.**
+>
+> Hookka runs **standard costing**. The owner's rule, verbatim:
+> 「我们的 BOM 那边已经有给一个时间了（也就是 production hours）。然后再来，当他
+> complete 的时候，我们就会记录这一个员工他用的时间多少，**我们不会去计算他 start from
+> 或者 end from 的**」
+>
+> So: the BOM time **IS** the production hours. On completion the worker is credited that
+> standard time. Elapsed start→end duration is deliberately NOT computed. That makes
+> `actual_minutes = est_minutes` **correct and intended** — it is how the model works, not
+> a copy someone forgot to replace.
+>
+> **Do not "fix" it.** An earlier version of this section called it fabrication; that was
+> me not understanding the costing model, and it would have sent the next reader to
+> re-plumb something that is working as designed.
+>
+> **What follows is still worth knowing** — the columns really are one number, so never
+> treat them as three independent sources or as evidence of what the floor actually did.
+> **The one genuine defect in this area was `attendance_records`, and it is FIXED** (see
+> the last row): a hardcoded `× 0.85` that had nothing to do with the BOM.
+
+**All three columns carry the same standard time.** Do not treat them as independent
+sources, and do not describe any of them as observed duration.
 
 | Column | What it really is | Source proof |
 |---|---|---|
@@ -45,36 +66,53 @@ it observes what the factory actually did.
 | `attendance_records.production_time_minutes` | `= working_minutes × 0.85` | `attendance.ts:332` — a hardcoded constant. `efficiencyPct` and `deptBreakdown` on that row derive from it |
 
 They are not *coincidentally* equal — **the same variable is bound to both columns**, so
-they can never differ. `migrations-postgres/0001_init.sql:715-718` confirms there is no
-default and no trigger on `actual_minutes`: nothing at the schema level measures it
-either. **No writer anywhere in the repo observes elapsed time.**
+they can never differ. That is the standard-costing model, stated in code.
 
-**WHY IT IS THIS WAY, AND IT IS NOT LAZINESS.** The completion timestamp is *captured and
-then discarded*: `_helpers.ts:4334` computes `nowIso` and immediately does
-`nowIso.split("T")[0]`; `:4242` does `new Date().toISOString().slice(0, 10)`. There are
-**14** such truncations across the production and worker write paths. `distributed_at` IS
-a full timestamp and is 100% populated — only the completion end of the interval is
-thrown away. The owner diagnosed this himself: *"这就是数据问题而已"*.
+**The `attendance_records` row above was the real defect, and it is FIXED (#323).** It had
+nothing to do with the BOM: `attendance.ts:332` invented `working_minutes × 0.85` at
+clock-out, and `efficiencyPct` / `deptBreakdown` were derived from that constant. Four
+writers carried it (`attendance.ts`, two in `worker.ts`, `working-hour-entries.ts`); all
+four now write NULL, because "unknown" must be distinguishable from "measured zero".
 
-**THE HONEST PATTERN ALREADY EXISTS — COPY IT.** `production-orders.ts /report-summary`
-(`:543-640`) credits a card **only** when `actual_minutes > 0`, applies **no**
-`?? estMinutes` fallback, and publishes `measuredDistinctCards` (cards where actual and
-est differ) expressly, in its own words, *"so the page can refuse to publish a percentage
-that only looks measured."* On current data that count is **0** — which is the correct
-answer, honestly stated. `/tracker-summary` (`:444`) likewise stays on counts and dates.
+**`job_cards.completed_at` now exists (#325) — and it is NOT a contradiction of the
+standard-costing model.** It records *when* a card was completed, which the code used to
+capture and throw away (`_helpers.ts:4334` computed `nowIso` then did
+`nowIso.split("T")[0]`; 14 such truncations). It exists so a completion can be placed in
+time — for sequencing, for throughput, for tying work to a shift. **It is NOT there to
+replace the BOM time as the basis of production hours**, and no efficiency calculation
+reads it. Historical rows are NULL on purpose and must never be back-filled from a date:
+`reconcileCompletedAt` is property-tested to prove it can only return an observed instant
+or null.
 
-**WHAT YOU MAY LEGITIMATELY COMPUTE.** `Σ(standard minutes of cards a worker completed)
-÷ their real clocked minutes` is a genuine **earned-vs-actual** labour-efficiency metric
-and both sides are real data — the numerator is *supposed* to be standard time. That is
-what Employees → Department Performance computes (80%). It is defensible. What is NOT
-defensible is calling the numerator "Production Hours" or "actual", or comparing the
-figure across months as though the metric's character were constant.
+**A NOTE ON `/report-summary`.** `production-orders.ts:543-640` credits a card only when
+`actual_minutes > 0` and publishes `measuredDistinctCards` (cards where actual differs
+from est) so a page can *"refuse to publish a percentage that only looks measured."* On
+current data that count is **0**. Under standard costing that is the EXPECTED result, not
+a warning — actual is supposed to equal standard. The pattern is still the right one to
+copy whenever a figure's coverage is genuinely partial (see BUG-2026-08-13-096, where a
+planner's "0 items" meant *cannot see* rather than *nothing wrong*); just don't read its
+zero here as evidence that something is broken.
+
+**THE METRIC THAT IS CORRECT.** `Σ(standard minutes of cards a worker completed) ÷ their
+real clocked minutes` is textbook **earned-vs-actual** labour efficiency, both sides are
+real data, and the numerator is *supposed* to be standard time. That is exactly what
+Employees → Department Performance computes (80%). **It is the soundest number in the
+system — do not "fix" it, and the label "Production Hours" stays (owner, 2026-08-14).**
+
+**>100% IS NORMAL AND IS GOOD.** Earned > clocked means the worker beat the standard.
+Nothing clamps it and nothing should: `employees.tsx:4217` colours `>= 100` GREEN, and the
+only flag is `< 60` (`LOW_EFFICIENCY_THRESHOLD`). **Do not treat a 101% day as bad data.**
+I made exactly that mistake — applying *utilisation* intuition (where >100% is impossible)
+to an *efficiency* metric (where it is the point) — and the owner corrected it. The daily
+spread on this figure (101 / 71 / 84 / 76 / 80) is real signal about how the floor ran.
 
 **One caveat on the denominator:** `punch-autofill.ts:273` writes the *contracted shift*
 when a punch-out is missing (`"(no punch-out — standard shift)"`), and aggregates sum
 those identically to real punches. So the denominator is mostly-but-not-entirely clocked.
 
-Class **C15** (fabricated data presented as measured). See `docs/BUG-CLASSES.md`.
+The `attendance` `× 0.85` instance was class **C15** (fabricated data presented as
+measured) and is fixed. The BOM standard time is **not** a C15 instance — it is the
+costing model. See `docs/BUG-CLASSES.md`.
 
 ## Schema / migrations (the #1 trap)
 

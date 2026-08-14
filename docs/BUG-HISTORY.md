@@ -190,6 +190,75 @@ snapshot key hot on every warm-lists cron run for a reader that no longer existe
 confusion, plus a sweep of `src/**` for any caller of the removed path. 4 mutations proved RED,
 including "the LIVE html brief is deleted by mistake" and "the delivery-agent brief.json is
 deleted by mistake".
+## BUG-2026-08-13-130…133 — leave entitlement was a frontend constant, never reset, charged public holidays, and disagreed with the worker's phone `payroll` `data-integrity` 🟢
+
+**Symptom.** Four defects in one area, found while acting on the owner's request that
+leave respect the public holidays he configures: 「应该根据我在 employee 那边放的 public
+holiday」.
+
+- **-130 — entitlement could not vary per employee.** `src/pages/employees.tsx:10147`
+  held `const LEAVE_ENTITLEMENTS = { ANNUAL: 8, MEDICAL: 14 }`. It was a frontend
+  constant: there was no column, so no employee could ever have a different figure —
+  not a senior worker, not a probationer, not anyone.
+- **-131 — the balance never reset.** It was `ENTITLEMENT − Σ approved days` over ALL
+  history (`employees.tsx:10184-10196`), so it only ever decreased. A worker who used
+  8 annual days in 2025 showed 0 remaining in 2026, and would forever.
+- **-132 — public holidays consumed annual leave.** `leaveBalances` summed `l.days`
+  with no filter, so a holiday inside an approved range was charged to the worker.
+  The owner maintains the list in Employees (`kv_config['public_holidays']`) and it
+  was being ignored by the one screen that most needed it.
+- **-133 — the office and the worker's phone disagreed.** `src/api/routes/worker.ts`
+  carried its OWN `const annualEntitlement = 14` (with `medicalEntitlement = 14`)
+  while the office used 8. A worker read 14 annual days on their phone and the
+  approver read 8 for the same person, for as long as that endpoint has existed.
+  Bug class **C4** — two copies of one policy, only one maintained.
+
+**Root cause.** The policy lived in three places that could not see each other: two
+sets of hardcoded literals plus a server that stored whatever `days` the client posted
+(class C1 — `leaves.ts` did `Number(days) || 1`, while the two clients computed the
+span with `Math.ceil` and `Math.round` respectively).
+
+**Fix.** One pure module, `src/lib/leave-entitlement.ts`, owns entitlement resolution,
+the leave-year boundary and the holiday exclusion; `leaves.ts`, `worker.ts` and
+`employees.tsx` all call it (the C13 shape — one module, screen and route both call
+it). Entitlement moved into data: `workers.annual_leave_entitlement_days` /
+`.medical_leave_entitlement_days`, both **nullable with no default**, so NULL means
+"use the system default" and every existing row keeps exactly 8 / 14. Columns reach
+prod through the runtime self-apply `src/api/lib/ensure-leave-columns.ts` (migration
+`0229` is inert on deploy, as always here) awaited before every handler that names
+them — including the READS, because a SELECT of a missing column fails just like an
+INSERT. Balances are now served by `GET /api/leaves/balances`.
+
+**Leave-year boundary: the CALENDAR year of the request's start date.** Not a new
+invention — it is the rule already shipped in `worker.ts`
+(`startDate.startsWith(String(new Date().getFullYear()))`). The office simply had no
+boundary at all. The alternative (anniversary of `join_date`) is left as an owner
+decision: nothing else in this codebase does anniversary-based accounting.
+
+**Deliberately NOT done.** Weekends/rest days are not excluded — this codebase has no
+rest-day model of any kind, and inventing one would be fabricating policy. The
+Employment Act service tiers (<2y 8 · 2–5y 12 · >5y 16) are exported as
+`STATUTORY_ANNUAL_TIERS` and tested, but are **not wired into resolution**: switching
+them on grants people more leave and is the owner's call.
+
+**Verified.** `tests/leave-entitlement.test.mjs` — 27 assertions, including a no-op
+proof that with no override and no holiday overlap the balance is identical to the old
+arithmetic. **All 21 mutations proved RED** by reintroducing each bug, with the bytes
+on disk asserted changed before each run; that run caught **four blind guards** that
+had passed over live bugs (a substring match satisfied by `"/api/leaves/balancesXX"`,
+a single-site `computeLeaveBalance(` check that stayed green while one of the two
+calls was deleted, a file-wide `calendarLeaveDays(` check satisfied by the PUT while
+the POST went back to trusting the client, and `public_holidays` matching inside
+`"public_holidays_v2"`). Suite: 4,048 pass / 0 fail.
+
+**⚠️ Prod impact UNMEASURED at time of writing.** This was developed without live DB
+access (the credential in the local `.dev.vars` is rotated and authentication fails),
+so no claim is made about whose balance moves on this database. Run
+`scripts/check-leave-balance-fingerprint.mjs` (read-only) before deploying: it prints
+an OLD-vs-NEW fingerprint per worker and explains every difference as `year-reset`,
+`holiday`, `per-worker override` or `UNEXPLAINED`. Fixing -131 and -132 *does* raise
+balances for anyone who had old-year leave or holiday-overlapping leave — that is the
+requested fix, not a regression, but the owner should see the list first.
 
 ---
 

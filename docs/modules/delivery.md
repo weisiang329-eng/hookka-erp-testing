@@ -1,5 +1,10 @@
 # Delivery & Consignment — Module Guide
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](../DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/api/routes/delivery-orders.ts`, `src/api/routes/delivery-orders/_helpers.ts`, `src/api/routes/{packing-lists,cn-packing-lists,delivery-agent,consignment-notes,consignment-orders,drivers,three-pl-state-rates}.ts`, `src/api/lib/delivery-agent.ts`, `src/pages/delivery/*`, `src/pages/consignment/note.tsx`, and `tests/`.
 > Corrected 2026-08-13: **`delivery-orders.ts` was split** — it is now 3,010 lines of route handlers plus `src/api/routes/delivery-orders/_helpers.ts` (5,254 lines) holding every shared helper. Fourteen anchors this doc gave as `delivery-orders.ts:NNNN` pointed past that file's end or at unrelated code; all are re-pointed at `_helpers.ts` below. CN handler anchors moved 60–120 lines.
 
@@ -7,7 +12,11 @@
 
 ## What it does
 Owns the goods-out lifecycle: **Delivery Orders** (DO) from confirmed SOs through the status
-machine (DRAFT → LOADED → IN_TRANSIT → DELIVERED → INVOICED), the driver-sticker QR scan path,
+machine (DRAFT → LOADED → IN_TRANSIT → DELIVERED → INVOICED **plus two non-linear edges added
+2026-08-07, both in `VALID_TRANSITIONS` at `delivery-orders/_helpers.ts:94-108`: CANCELLED is
+reachable from EVERY live status and is terminal, and INVOICED → DELIVERED exists so a voided
+invoice hands the DO back — without them a DO past DRAFT was immortal and a voided invoice lost
+the revenue**), the driver-sticker QR scan path,
 **packing lists** (truck-run grouping), **3PL provider management** (vehicles / in-house + 3PL
 drivers / per-state rate cards), and the **Consignment Note** (CN) track — an intentional DO-parity
 mirror for consignment stock. A **Delivery Agent** (AI ops layer) generates a daily brief +
@@ -27,7 +36,7 @@ deliver write `stock_movements` and read `fg_units`, and fire idempotent custome
   - CO list/create/edit/detail/return → `src/pages/consignment/{index,create,edit,detail,return}.tsx`
 - API routes
   - DO routes → `src/api/routes/delivery-orders.ts` (3010 lines) — **handlers only**; every shared
-    helper lives in `src/api/routes/delivery-orders/_helpers.ts` (5254). Mounted `worker.ts:1201`.
+    helper lives in `src/api/routes/delivery-orders/_helpers.ts` (5254). Mounted `worker.ts:1202`.
   - Delivery-side packing lists → `src/api/routes/packing-lists.ts` (802)
   - Delivery Agent (brief / proposals / run) → `src/api/routes/delivery-agent.ts` (780) + engine `src/api/lib/delivery-agent.ts` (1256)
   - Consignment Notes → `src/api/routes/consignment-notes.ts` (2152); CN packing lists → `src/api/routes/cn-packing-lists.ts` (731)

@@ -5,6 +5,16 @@
 > `/production` Overview and `/production/wip-times` observability rows (-146 / -147),
 > including the new `coverage.productsWithoutActiveBom` on `GET /api/wip-times`.
 
+> **Last verified: 2026-08-14 on branch `docs/docs-vs-code-audit`** — a PROSE audit (the
+> machine gate `check-codebase-map.mjs` only validates `path`, `file:LINE` and symbol anchors;
+> it is blind to sentences and to `L1-7606`-style ranges written in prose). Four fixes:
+> the Sales table and its "Start here" both still called `sales-orders.ts` **5318 lines** —
+> the exact figure this file's own header calls stale, and it is now 5,704; the Planning entry
+> pointed a reader at `production-orders.ts` **L1-7606** when that file is 3,944 lines, so the
+> range ran ~3,600 lines past EOF; the three "Actually" line counts in the header table had
+> drifted 1–3%; and the intro named this file as both its own former name and a retired
+> duplicate of itself. See `docs/DOCS-VS-CODE-AUDIT.md` rows D8–D11.
+>
 > **Restamped 2026-08-14 on branch `fix/efficiency-fabrication`:** the Reports/Employees
 > section gains the `attendance_records` warning — that table carries no production or
 > efficiency data and never has (BUG-2026-08-13-103).
@@ -44,11 +54,11 @@
 > with `wc -l`. Two of them were not drift but a **file split nothing in the docs mentioned**,
 > and it is the single biggest source of wrong line anchors in this repo's docs:
 >
-> | Handler file | Was documented as | Actually | Its helpers now live in |
+> | Handler file | Was documented as | Actually (`wc -l`, 2026-08-14) | Its helpers now live in |
 > |---|---|---|---|
-> | `src/api/routes/delivery-orders.ts` | 6,189 lines | **3,010** | `src/api/routes/delivery-orders/_helpers.ts` (5,254) |
-> | `src/api/routes/production-orders.ts` | 7,606 lines | **3,903** | `src/api/routes/production-orders/_helpers.ts` (5,799) |
-> | `src/api/routes/sales-orders.ts` | 5,318 lines | **5,626** | `src/api/routes/sales-orders/_helpers.ts` (1,452) |
+> | `src/api/routes/delivery-orders.ts` | 6,189 lines | **3,095** | `src/api/routes/delivery-orders/_helpers.ts` (5,313) |
+> | `src/api/routes/production-orders.ts` | 7,606 lines | **3,944** | `src/api/routes/production-orders/_helpers.ts` (5,882) |
+> | `src/api/routes/sales-orders.ts` | 5,318 lines | **5,704** | `src/api/routes/sales-orders/_helpers.ts` (1,462) |
 >
 > Every anchor above the real length pointed **past end-of-file**; the rest landed on
 > unrelated code. If a function you expect is not in the handler file, look in its sibling
@@ -64,9 +74,12 @@
 **This is THE code map — read it before touching any module; there is no other.** Look up the
 module here and go straight to the listed files and line ranges. `Grep`/`Glob` over the whole
 repo **time out** (large tree + many worktrees), so use the file:line entries below with
-`Read offset/limit` instead of searching. Formerly `docs/CODEBASE-MAP.md`.
-Retired duplicates now pointing here: `docs/CODEBASE-MAP.md`; the code-location role of
+`Read offset/limit` instead of searching.
+Retired duplicate now pointing here: the code-location role of
 `docs/archive/MODULES.md` (MODULES stays as the higher-level *product* reference).
+*(Until 2026-08-14 these two lines read "Formerly `docs/CODEBASE-MAP.md`. Retired duplicates
+now pointing here: `docs/CODEBASE-MAP.md`" — a rename left the file naming ITSELF as both its
+former name and a retired duplicate of itself.)*
 
 ## 📖 Per-module deep guides — open these FIRST
 
@@ -96,7 +109,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/sales/index.tsx` — SO list (2181), dual-mode SO vs service-order | `src/api/routes/sales-orders.ts` — 5318 lines; SO CRUD + status cascades + snapshot | `sales_orders` / `sales_order_items` / `so_status_changes` | `tests/sofa-combo.test.mjs` |
+| `src/pages/sales/index.tsx` — SO list (2181), dual-mode SO vs service-order | `src/api/routes/sales-orders.ts` — 5,704 lines (+ `sales-orders/_helpers.ts`, 1,462); SO CRUD + status cascades + snapshot | `sales_orders` / `sales_order_items` / `so_status_changes` | `tests/sofa-combo.test.mjs` |
 | `src/pages/sales/create.tsx` — Create SO (3710); OCR/scan-PO lands here | `src/api/routes/consignment-orders.ts` — CO CRUD + co_status_changes (2815) | `consignment_orders` / `consignment_order_items` / `co_status_changes` | `tests/so-category.test.mjs` |
 | `src/pages/sales/detail.tsx` — SO detail (1637); linked POs/JCs/DOs/invoices | `src/api/routes/consignment-notes.ts` — CN (DO-equiv) dispatch/delivered (2152) | `consignment_notes` / `consignment_items` | |
 | `src/pages/sales/edit.tsx` — Edit SO (1634); re-runs sofa-combo on save; unit price + build-up via `@/lib/pricing` | `src/api/routes/consignments.ts` — legacy/shared reads (536) | `sofa_combo_rules` / `customer_products` / `price_overrides` | |
@@ -151,7 +164,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 - **Status tab strips (count + money per state)** are ONE component: `src/components/ui/status-tab-strip.tsx` + `src/lib/status-tab-strip.ts`. Feed it `tabTotals(rowsThisTabLists, valueOf)` so the badge and the RM figure can never describe different rows; a bucket that sums to nothing renders its count alone (never RM 0.00). Do not hand-roll a new one.
 
-**Start here:** Open `src/api/routes/sales-orders.ts` (the 5318-line backend owning SO CRUD, status cascades, snapshot logic) first; pair with `src/pages/sales/create.tsx` for UI or `src/api/lib/sofa-combo.ts` for any pricing work.
+**Start here:** Open `src/api/routes/sales-orders.ts` (the 5,704-line backend owning SO CRUD, status cascades, snapshot logic — its helpers live in the sibling `sales-orders/_helpers.ts`, 1,462 lines) first; pair with `src/pages/sales/create.tsx` for UI or `src/api/lib/sofa-combo.ts` for any pricing work.
 
 ---
 
@@ -731,7 +744,7 @@ that proves those locks can actually go red.
   - Tab: Schedule Proposals mount — L3147; ScheduleProposalsTab component — L3208-3505
   - DrilldownModal component — L3507-4004
 - `src/api/routes/production-orders.ts`
-  - NOTE: 7606-line route — Planning only READS it (production_orders/job_cards for capacity, tracker, lead-time recalc). Not a Planning-owned file; grep targeted handlers rather than reading whole. — L1-7606
+  - NOTE: 3,944-line route (its helpers were split out into `production-orders/_helpers.ts`, 5,882 lines) — Planning only READS it (production_orders/job_cards for capacity, tracker, lead-time recalc). Not a Planning-owned file; grep targeted handlers rather than reading whole. — L1-3944. **This entry said "7606-line … L1-7606" until 2026-08-14: that is the PRE-SPLIT length, so the range ran ~3,600 lines past EOF — exactly the failure this file's header warns about.**
 
 **Gotchas**
 - Backend planning logic lives in `src/api/lib` (NOT routes): planning-capacity.ts, planning-chain.ts, planning-scheduler.ts, lead-times.ts — change schedule/capacity math there, the routes are thin.

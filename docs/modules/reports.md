@@ -1,7 +1,12 @@
 # Reports & Analytics — Module Guide
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](../DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/pages/{reports,daily-report}.tsx`, `src/pages/analytics/forecast.tsx`, `src/api/routes/{reports,forecasts,dashboard-overview}.ts`, `src/api/lib/{compliance-report,efficiency-report,schedule-overdue-report,operations-report,production-brief}.ts`, `src/lib/{print-report,export-report}.ts`, and `src/api/worker.ts`.
-> Corrected 2026-08-13: `ReportsPage` is at `reports.tsx:1855`, not :1315, and all five tab components had drifted 108–428 lines. `reports.ts` handler anchors shifted ~108 lines (mount is `worker.ts:1430`, internal `:1431`; `/api/forecasts` `:1345`; `/api/dashboard/overview` `:1303`). All five `src/api/lib/*-report.ts` collectors verified within ±15 lines.
+> Corrected 2026-08-13: `ReportsPage` is at `reports.tsx:1855`, not :1315, and all five tab components had drifted 108–428 lines. `reports.ts` handler anchors shifted ~108 lines (mount is `worker.ts:1431`, internal `:1432`; `/api/forecasts` `:1345`; `/api/dashboard/overview` `:1304`). All five `src/api/lib/*-report.ts` collectors verified within ±15 lines.
 
 > Self-navigating docs (L2). Repo-wide map: [[CODEBASE-MAP]]. Never grep the whole repo — use the file:line below.
 
@@ -17,8 +22,8 @@ Two unrelated report worlds share the name **Reports**:
   - `/analytics/forecast` → `src/pages/analytics/forecast.tsx:17` (`ForecastPage` — demand forecast vs historical sales)
   - `/dashboard-b` → `src/pages/dashboard-b/index.tsx` (the production dashboard; `/dashboard-b` redirects to `/dashboard` — `dashboard-routes.tsx:233`. See [[dashboard]].)
 - API routes (mounted in `src/api/worker.ts`)
-  - `/api/reports/*` → `src/api/routes/reports.ts` (1016 lines) — mount `worker.ts:1430`
-  - `/api/internal/reports/*` → `internal` export of `reports.ts` (cron triggers) — mount `worker.ts:1431`
+  - `/api/reports/*` → `src/api/routes/reports.ts` (1016 lines) — mount `worker.ts:1431`
+  - `/api/internal/reports/*` → `internal` export of `reports.ts` (cron triggers) — mount `worker.ts:1432`
   - `/api/forecasts` → `src/api/routes/forecasts.ts` (131) — mount `worker.ts:1345`
   - `/api/dashboard/overview` → `src/api/routes/dashboard-overview.ts` (2249) — mount `worker.ts:1303`
 - Report engines (logic lives here, not in the route)

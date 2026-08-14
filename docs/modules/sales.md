@@ -1,5 +1,10 @@
 # Sales — Module Guide
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](../DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/api/routes/sales-orders.ts`, `src/api/routes/sales-orders/_helpers.ts`, `src/api/routes/{consignment-orders,consignment-notes,sofa-combos}.ts`, `src/api/lib/{sofa-combo,sofa-combo-pass}.ts`, `src/pages/sales/*`, `src/pages/consignment/note.tsx`, `src/pages/maintenance/sofa-combos.tsx`, and `tests/sofa-combo.test.mjs`.
 > Corrected 2026-08-13: **`sales-orders.ts` was split** — 5,626 lines of handlers plus `src/api/routes/sales-orders/_helpers.ts` (1,452) holding `rowToSO`/`rowToSOList`/`createProductionOrdersForSO`/`cascadeSOStatusToPOs`/`ensurePendingMigrations`. Handler anchors moved 250–500 lines up (SO create :1503, confirm :2284, edit :2886). The `~:5853` snapshot-invalidation pointer was **past end of file**. `consignment/note.tsx:505` corrected to :454, matching [[delivery]].
 
@@ -19,7 +24,7 @@ Owns the customer-facing order lifecycle: **Sales Orders** (SO) and their line i
   - Sofa combo grid → `src/pages/maintenance/sofa-combos.tsx:370` (`SofaCombosPage`)
 - API routes
   - SO **handlers** → `src/api/routes/sales-orders.ts` (5626 lines); shared helpers in
-    `src/api/routes/sales-orders/_helpers.ts` (1452). Mounted `worker.ts:1194`.
+    `src/api/routes/sales-orders/_helpers.ts` (1452). Mounted `worker.ts:1195`.
   - Consignment Orders + `co_status_changes` → `src/api/routes/consignment-orders.ts` (2815)
   - Consignment Notes (dispatch/delivered) → `src/api/routes/consignment-notes.ts` (2152)
   - Sofa combo rule CRUD → `src/api/routes/sofa-combos.ts`

@@ -1,5 +1,10 @@
 # Auth: Google Workspace OAuth + TOTP 2FA — admin setup guide
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/api/routes/auth-oauth.ts:54-70,127-134` (503 when `OAUTH_GOOGLE_CLIENT_ID` / `OAUTH_GOOGLE_REDIRECT_URI` / `JWT_SECRET` missing), `src/api/routes/auth-totp.ts` (`/enroll`, `/verify`, `/login-verify`, `/setup-start`, `/setup-confirm`, `/dismiss-prompt`, `/disable`), `migrations-postgres/0053_oauth_identities.sql` + `0054_user_totp.sql`, and `wrangler.toml` (OAuth vars still commented out).
 > Corrected 2026-08-13: `wrangler secret put` → `wrangler pages secret put` (Pages project); URLs updated to the live domain `erp.hookka.com`; noted the extra TOTP setup routes the doc omitted.
 
@@ -140,7 +145,7 @@ There is no admin step to "turn on TOTP" — it is opt-in per user. The
 1. Generates a fresh TOTP secret + 8 single-use recovery codes.
 2. Returns `{ otpauthUrl, qrUrl, secret, recoveryCodes }`.
 3. **Recovery codes are shown ONCE.** The frontend MUST display them with a
-   "save these" warning. Subsequent calls return only the QR (the codes
+   "save these" warning. **Subsequent calls return HTTP 409, not the QR** (corrected 2026-08-14): once `totpEnrolledAt` is set, `/enroll` refuses — *"TOTP already enrolled. Use /api/auth/totp/disable first to rotate."* (`auth-totp.ts:96-104`). There is no way to re-fetch the QR or the codes; rotate by disabling (password re-auth) and enrolling again. A UI built to the old sentence ships a "re-show my QR" button that can only 409. ~~(the codes
    are gone — already hashed and persisted).
 
 The user scans the QR with Google Authenticator / Authy / 1Password,

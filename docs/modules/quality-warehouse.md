@@ -1,7 +1,12 @@
 # Quality, Warehouse, Scanning & Platform — Module Guide
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](../DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/api/routes/{qc-pending,qc-inspections,qc-templates,warehouse,public-rack-qr,public-rack-write,public-do-qr,auth}.ts`, `src/api/lib/{auth-middleware,rbac,packing-rack-write,packing-piece-identity}.ts`, `src/api/worker.ts`, `src/pages/{quality,warehouse,rack-scan,do-scan}.tsx`, and `tests/`.
-> Corrected 2026-08-13: **`qc-pending.ts` is 2,494 lines, not 741** — every QC anchor was stale by 200–1,900 lines (`currentSlotIso` :310, `generatePendingForSlot` :1699, `/:id/start` :1943, `/:id/complete` :2371). The cron trigger is `worker.ts:756`. Warehouse, both public-scan routes, auth-middleware and RBAC anchors all verified within ±60 lines. All four named tests exist.
+> Corrected 2026-08-13: **`qc-pending.ts` is 2,494 lines, not 741** — every QC anchor was stale by 200–1,900 lines (`currentSlotIso` :310, `generatePendingForSlot` :1699, `/:id/start` :1943, `/:id/complete` :2371). The cron trigger is `worker.ts:757`. Warehouse, both public-scan routes, auth-middleware and RBAC anchors all verified within ±60 lines. All four named tests exist.
 
 > Self-navigating docs (L2). Repo-wide map: [[CODEBASE-MAP]]. Never grep the whole repo — use the file:line below.
 
@@ -49,7 +54,7 @@ is enforced by hand in the handler, not by the middleware.
 - Cross-refs: scanning flows read/write `fg_units`, `job_cards`, `production_orders`, `delivery_orders`.
 
 ## Core flows
-1. **QC cron → PENDING inspections** — external cron hits `POST /api/qc-pending/trigger` (`worker.ts:756`,
+1. **QC cron → PENDING inspections** — external cron hits `POST /api/qc-pending/trigger` (`worker.ts:757`,
    own CRON_SECRET check) → `generatePendingForSlot` (`qc-pending.ts:1699`) using `currentSlotIso`
    (`:310`, UTC+8 slots: 12:00 / 16:00, else yesterday 16:00). One PENDING inspection per active
    template per slot; the `scheduledSlotAt` dedupe set (`:1710`) makes re-triggers idempotent.
@@ -59,7 +64,7 @@ is enforced by hand in the handler, not by the middleware.
    → `findRack` (`:211`) → PER-PIECE: each scanned sticker = one `rack_items` row, qty forced to 1 →
    `buildRackStockInStatements` (`:131`) is move-aware + idempotent (also touches `fg_units`/`job_cards`).
 4. **Piece-sticker → rack (public `/p/`)** — `POST /api/public/rack-write/:token/rack` (`public-rack-write.ts:228`)
-   → `resolveCard` (`:80`, archive-aware) → `applyPackingRack` (`packing-rack-write.ts:72`) sets/clears the
+   → `resolveCard` (`:80`, archive-aware) → `applyPackingRack` (`packing-rack-write.ts:71`) sets/clears the
    rackingNumber AND mirrors `rack_items`. Both `/r/` and `/p/` (plus office + worker) build the move-match
    key via `packingPieceIdentity` (`packing-piece-identity.ts:48`) — never re-inline it.
 5. **DO dispatch/deliver (public `/do-qr/`)** — `POST /api/public/do-qr/:token/advance` (`public-do-qr.ts:707`)
@@ -86,7 +91,7 @@ is enforced by hand in the handler, not by the middleware.
 | `POST /:token/rack` | `src/api/routes/public-rack-write.ts:228` | Public `/p/` set/clear rackingNumber |
 | `POST /:token/advance` | `src/api/routes/public-do-qr.ts:707` | Public DO forward transition (dispatch/deliver) |
 | `resolveToken` | `src/api/routes/public-do-qr.ts:181` | 64-hex qrtoken → DO(s) resolver |
-| `applyPackingRack` | `src/api/lib/packing-rack-write.ts:72` | Rack set/clear + `rack_items` occupancy mirror |
+| `applyPackingRack` | `src/api/lib/packing-rack-write.ts:71` | Rack set/clear + `rack_items` occupancy mirror |
 | `ensurePiecePicsRackingColumn` | `src/api/lib/packing-rack-write.ts:35` | Shared mig-0192 DDL self-apply |
 | `packingPieceIdentity` | `src/api/lib/packing-piece-identity.ts:48` | Shared description + notes move-match key |
 | `POST /login` | `src/api/routes/auth.ts:148` | Session + CSRF cookie issue (TOTP-aware) |
@@ -112,7 +117,7 @@ is enforced by hand in the handler, not by the middleware.
 - **QR/sticker URLs encode the print-time origin.** Scanning is path-based + domain-agnostic and resolves against the
   DB of whatever site you scan ON — a prod-printed token scanned on staging FAILS (different DB). Prod fallback origin
   is canonicalized → `erp.hookka.com` (`src/lib/app-origin.ts`).
-- **CSRF is GLOBAL, not per-call.** `src/lib/api-client.ts:58` monkey-patches `window.fetch` to auto-inject
+- **CSRF is GLOBAL, not per-call.** `src/lib/api-client.ts:76` monkey-patches `window.fetch` to auto-inject
   `X-CSRF-Token`. NO raw fetch is ever "missing CSRF"; an audit flagging N such fetches is ALL false positives — never
   add `csrfHeaders()` to "fix" it (a rack CSRF "fix" shipped then proved a no-op).
 - **RBAC: SUPER_ADMIN + ADMIN unconditionally bypass** (inside `requirePermission`, `rbac.ts:188`) so a never-seeded permission can't 403 them;
@@ -127,8 +132,8 @@ is enforced by hand in the handler, not by the middleware.
 - **Add a QC template field** → column self-apply + persist in `qc-templates.ts` POST (`:164`) / PUT (`:266`); surface
   in `rowToTemplate` (`:77`) and the Templates tab in `quality.tsx`. New column = snake_case (+ rename-map if camelCase).
 - **Change the QC cron slot logic** → edit `currentSlotIso` (`qc-pending.ts:310`) and keep `generatePendingForSlot`
-  (`:1699`) dedupe on `scheduledSlotAt`; verify the trigger in `worker.ts:756` still does its CRON_SECRET check.
-- **Touch a rack stock-in path** → change the shared `applyPackingRack` (`packing-rack-write.ts:72`) /
+  (`:1699`) dedupe on `scheduledSlotAt`; verify the trigger in `worker.ts:757` still does its CRON_SECRET check.
+- **Touch a rack stock-in path** → change the shared `applyPackingRack` (`packing-rack-write.ts:71`) /
   `buildRackStockInStatements` (`public-rack-qr.ts:131`); NEVER re-implement `packingPieceIdentity`. Verify with
   `tests/rack-qr-per-piece.test.mjs` / `tests/packing-piece-identity.test.mjs`.
 - **Add a public (no-login) scan endpoint** → add it under an existing `PUBLIC_PREFIXES` entry ONLY with a manual

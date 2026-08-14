@@ -1,5 +1,10 @@
 # Setup
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `package.json` (scripts block), `vite.config.ts:215-224`, `src/api/worker.ts`, `wrangler.toml`, and `ls src/api/`.
 > Corrected 2026-08-13: the whole "run the API with `npm run api` / `src/api/index.ts`" workflow was fiction — neither the script nor the file exists; the API is a Cloudflare Pages Function (`functions/api/[[route]].ts` → `src/api/worker.ts`) and is run locally with `npm run dev:worker`.
 > Re-verified 2026-08-13 (chore/dead-code-sweep): the `/api` → `localhost:3001` proxy this doc flagged as vestigial has now been REMOVED from `vite.config.ts`, so the line reference is gone with it. `npm run dev` behaviour is unchanged (the proxy never reached anything).
@@ -149,12 +154,21 @@ is to re-export a mix of components, types, and helpers.
 
 ### Add a new status value
 
-Two-step, enforced by the compiler:
+Two-step, and **the compiler does NOT enforce either half** (corrected 2026-08-14 —
+this said "enforced by the compiler" / "TypeScript will red-underline until you do"):
 
 1. Add the value to the `type` union in `src/types/index.ts` (or the
    relevant interface in `mock-data.ts`).
 2. Add a row in the matching `*_STATUS_COLOR` record in
-   `src/lib/design-tokens.ts`. TypeScript will red-underline until you do.
+   `src/lib/design-tokens.ts`.
+
+**Why there is no red underline:** `design-tokens.ts` imports nothing from
+`src/types/index.ts` — `SO_STATUS_COLOR` (`:427`) re-declares the union as an inline
+literal, so step 1 cannot fail step 2. And the lookup erases the union anyway:
+`status-badge.tsx:63` types the prop as `value: string`, and `:81` does
+`(map as Record<string, SemanticStyle>)[value] ?? resolveUnknownStatus(...)`.
+A missing row therefore ships as a **grey NEUTRAL chip** with a DEV-only
+`console.warn` and no build error. Check both files by hand.
 
 ### Add a new colour token
 
@@ -205,6 +219,13 @@ as `src/components/ui/index.ts`).
 jsPDF honours the system fonts embedded in `lib/pdf-utils.ts`. If a new
 generator uses a different font, add the font file to
 `src/assets/fonts/…` and register it in `pdf-utils.ts`.
+
+> **CORRECTED 2026-08-14 — neither the directory nor the mechanism exists.** Every generator
+> uses jsPDF's built-in `helvetica` (`pdf-utils.ts` calls `doc.setFont("helvetica", …)` and
+> nothing else). `src/assets/` holds exactly `hero.png`, `hookka-logo.png`, `vite.svg` — there
+> is **no `fonts/` directory** — and `pdf-utils.ts` has zero `addFont` / `addFileToVFS` calls,
+> so there is nothing to register into. If a document ever needs a real embedded face, that
+> mechanism has to be built first; do not assume it is there.
 
 ### Vite dev server can't reach the API
 

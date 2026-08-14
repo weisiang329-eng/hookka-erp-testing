@@ -1,5 +1,10 @@
 # ERP Feature Gap Analysis
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against HEAD `145af0b9`, by reading route handlers, libs,
 > migrations, workflows and `wrangler.toml` directly. Every "exists" and "does not exist"
 > claim below carries a `file:line`. Route inventory taken from the generated
@@ -148,7 +153,7 @@ delivery agent, agent heartbeat, counter rebuilds. Anyone looking for cron in
 | **Audit trail** | The write helper is excellent — full before/after JSON in the **same batch** as the mutation, with actor name snapshotted so it survives user deletion. Coverage is the problem (§3, second tier) | `src/api/lib/audit.ts:87`, `:112-135` |
 | **RBAC** | ~75 resources, 5 code-defined roles + 7 DB-resolved, `NEVER_WILDCARD` on `users` so a broad role cannot promote its own holder. Row-level scoping exists for SALES only; field-level exists at exactly two call sites | `src/api/lib/role-policy.ts:76-136`, `:354-360`; `src/api/lib/customer-scope.ts:33`; `src/api/lib/rbac.ts:264-283` |
 | **Multi-company** | "Company" (HOOKKA / OHANA / HOUZS / HKMFG) is a **display and filter dimension** on documents (`sales_org_code`, `purchase_org_code`), explicitly independent of the tenant-isolation `orgId`. The registry carries regNo/TIN/MSIC and a transfer-pricing % | `src/lib/company-dimension.ts:1-20`; `src/api/routes/organisations.ts:26-50` |
-| **Leave** | A request record — type, dates, days, status, approver — with **no entitlement, balance or accrual** of any kind | `src/api/routes/leaves.ts:16-42` |
+| **Leave** | **CORRECTED 2026-08-14** — no longer "no entitlement of any kind". A request record **plus** per-worker entitlement (`workers.annual_leave_entitlement_days` / `.medical_leave_entitlement_days`, NULL → statutory default), a calendar leave-year boundary, public-holiday exclusion and computed balances, all in ONE shared module used by both the office and the phone. Still absent: monthly **accrual** and **carry-forward**. | `src/lib/leave-entitlement.ts`; `GET /api/leaves/balances` (`src/api/routes/leaves.ts:106-160`) |
 
 ### 1.3 Where the code actually lives
 
@@ -277,7 +282,15 @@ document the day it is not.
 
 ### 2.2 Live shells, ranked by how likely they are to be believed
 
-**① Consignment Returns page — random business numbers, rendered and exportable.**
+**① Consignment Returns page — ✅ FIXED 2026-08-13 (BUG-2026-08-13-071), re-read 2026-08-14.**
+`buildMockCRs` is GONE. The page now reads `/api/consignments` via `useCachedJson`, the invented
+four-stage PENDING→INSPECTED→ACCEPTED→RESTOCKED pipeline was deleted rather than stubbed, and
+where it cannot source a figure it renders `—` with a "Value Basis" column publishing how many
+lines carried a price. No `Math.random()` survives outside the explanatory header. **The claim
+below that this is "the only place in the system still rendering random business figures" is
+therefore no longer true of this page.** Original finding kept for the record:
+
+**① (as originally written) Consignment Returns page — random business numbers, rendered and exportable.**
 `src/pages/consignment/return.tsx` is routed (`src/dashboard-routes.tsx:545`) and in the
 sidebar (`src/components/layout/sidebar.tsx:98`). Everything on it is fabricated client-side
 by `buildMockCRs` (`:52`; the comment at `:47` reads "Mock CR data generator"):
@@ -658,7 +671,7 @@ subsystem.
 | **No unrealised FX / period-end retranslation; AR is MYR-only** | `revalu*\|unrealis*` → zero matches in routes, libs, migrations, pages. `currency\|fx_rate` → zero in `invoices.ts` and `payments.ts` | Open foreign PIs stay at historic rate; the whole FX effect lands at settlement |
 | **Ledger tamper-detection is never run; immutability is app-layer only** | `CREATE TRIGGER` → **no matches** anywhere in `migrations-postgres/`. `verifyJournalChain` (`journal-hash.ts:309`) has **no production caller** — only its definition, a comment, and `tests/hash-chain.test.mjs` | "Append-only" is a convention plus a detector that is never invoked. Also in `MFRS-GAP-ANALYSIS.md` |
 | **Audit coverage is 33 of 136 route files** | Measured 2026-08-13: 33 of the 136 top-level files in `src/api/routes/` import `src/api/lib/audit.ts` (`emitAudit`/`buildAuditStatement`, `:87`, `:154`). `products.ts` (1,245 lines) has **zero**; so do `customers.ts`, `inventory.ts`, `suppliers.ts`, `price-history.ts`, `pay-rules.ts`, `organisations.ts`. Documents and user accounts are well covered (`sales-orders.ts:4350`, `users.ts:521-540`) | Master data, pricing, inventory quantities and pay rates are largely unaudited |
-| **The audit read endpoint has no authorization** | `src/api/routes/audit-events.ts:47-92` — no `requirePermission`, no org filter. The header at `:14-18` claims it piggybacks on the resource's read permission; no code implements that | Any authenticated session can read `resource=users&resourceId=<id>` before/after snapshots. **Small change, real exposure — worth doing quickly** |
+| ~~**The audit read endpoint has no authorization**~~ **✅ CLOSED — re-read 2026-08-14** | `audit-events.ts:68` is `const denied = await requirePermission(c, resource, "read"); if (denied) return denied;`, and the org filter exists too — `getOrgId(c)` at `:78` feeding `AND (orgId = ? OR orgId IS NULL)` at `:88` (NULL admitted for rows written before the column was populated). | No exposure. This row asserted "no `requirePermission`, no org filter" against code that has both. |
 | **No retention policy, and archiving is disabled** | `gdpr\|pdpa\|retention polic` → nothing in `src/api` or `docs`. User deletion is soft (`users.ts:12`). Archive returns 410 (§2.2 ⑥) | No subject-erasure path, no maximum age on any table |
 | **No subcontracting** | `subcontract\|outsource\|toll` in routes matches only 3PL *delivery* and `workers.isOutsource` (outsourced labour on the payroll, `workers.ts:587-595`) | No way to send WIP out, hold it at a third party, receive it back, or cost the service |
 | **No work centres or machines in planning** | `work.?cent\|machine_id\|workcenter` → **zero** across routes and libs. `equipment.department` is free text and no planning lib reads it | Capacity is per department, per lane. Reasonable at this scale; note it before anyone plans machine-level |

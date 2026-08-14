@@ -1,5 +1,10 @@
 # Hookka ERP — Start Here (read before any task)
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](docs/DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/lib/api-client.ts` (global `window.fetch`
 > CSRF patch), `src/api/lib/column-rename-map.json`, `src/lib/utils.ts` (`roundSen`),
 > `src/components/ui/money-input.tsx`, `tsconfig.app.json`, `src/api/lib/self-apply.ts`,
@@ -15,7 +20,8 @@
 
 This repo has a lightweight **ERP Center of Excellence** that keeps work fast / accurate /
 low-token. **Before any development task, consult the map — do NOT `grep`/`glob` the whole
-repo: they TIME OUT on this repo's size (~1,600 tracked files). Use the map's file:line +
+repo: they TIME OUT on this repo's size — **2,122 tracked files** (`git ls-files | wc -l`,
+measured 2026-08-14; this line said "~1,600"). Use the map's file:line +
 `Read offset/limit` to jump straight in:**
 
 1. **Find the code** → [`docs/CODEBASE-MAP.md`](docs/CODEBASE-MAP.md)
@@ -35,8 +41,10 @@ repo: they TIME OUT on this repo's size (~1,600 tracked files). Use the map's fi
 
 5. **Which endpoint** → [`docs/API.md`](docs/API.md) — **generated** from
    `src/api/worker.ts` + `src/api/routes/*.ts` by `node scripts/gen-api-docs.mjs`
-   (139 mounts, 935 handlers, plus the exact public/auth surface). Regenerate it
-   instead of hand-editing; `--check` tells you if it is stale.
+   (139 mounts, **936** handlers, 1 unmounted route file, plus the exact public/auth surface).
+   Regenerate it instead of hand-editing; `--check` tells you if it is stale — **it WAS stale
+   on `main` on 2026-08-14**, and the committed copy carried four duplicated mount rows with
+   two different line sets for the same handlers. Run `--check` before trusting it.
 
 Doc map: [`docs/DOCS-INDEX.md`](docs/DOCS-INDEX.md). The big picture: [`docs/DEV-EFFICIENCY-SYSTEM.md`](docs/DEV-EFFICIENCY-SYSTEM.md).
 

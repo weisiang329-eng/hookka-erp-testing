@@ -1,7 +1,12 @@
 # Dashboard & Command Center — Module Guide
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](../DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/pages/dashboard-b/{index,charts}.tsx`, `src/api/routes/dashboard-overview.ts`, `src/api/lib/dashboard-snapshot.ts`, `src/api/lib/dashboard-state-snapshot.ts`, `src/dashboard-routes.tsx`, `src/api/worker.ts`, and `tests/`.
-> Corrected 2026-08-13: the `/api/dashboard/overview` mount is `worker.ts:1303` (was 1195); `dashboard-overview.ts` is 2,249 lines (was 2043) and its past-month / write-back anchors moved ~200 lines. Everything else (all page symbols, both snapshot libs, both named tests, the `/dashboard-b`→`/dashboard` redirect) verified correct.
+> Corrected 2026-08-13: the `/api/dashboard/overview` mount is `worker.ts:1304` (was 1195); `dashboard-overview.ts` is 2,249 lines (was 2043) and its past-month / write-back anchors moved ~200 lines. Everything else (all page symbols, both snapshot libs, both named tests, the `/dashboard-b`→`/dashboard` redirect) verified correct.
 
 > Self-navigating docs (L2). Repo-wide map: [[CODEBASE-MAP]]. Never grep the whole repo — use the file:line below.
 
@@ -15,7 +20,7 @@ The homepage **Command Center** at `/dashboard`: a KPI rail (Sales · Invoices �
   - Lazy recharts wrappers → `src/pages/dashboard-b/charts.tsx` (`RevenueChart:60`, `CustomerPieChart:149`)
   - Route + prefetch wiring → `src/dashboard-routes.tsx:20` (lazy import), `:572` (chunk prefetch map)
 - API routes
-  - Overview aggregate (single GET) → `src/api/routes/dashboard-overview.ts` (2249 lines), mounted at `/api/dashboard/overview` (`src/api/worker.ts:1303`)
+  - Overview aggregate (single GET) → `src/api/routes/dashboard-overview.ts` (2249 lines), mounted at `/api/dashboard/overview` (`src/api/worker.ts:1304`)
   - Read-through snapshot lib → `src/api/lib/dashboard-snapshot.ts` (272)
   - Daily point-in-time state snapshot lib → `src/api/lib/dashboard-state-snapshot.ts` (148)
   - Nightly cron invalidation → `app.post("/api/internal/rebuild-dashboard-snapshot")` `src/api/worker.ts:387`
@@ -23,7 +28,7 @@ The homepage **Command Center** at `/dashboard`: a KPI rail (Sales · Invoices �
 ## Data model
 - `dashboard_snapshot` — one row per `org_id`; the `built_from` column makes it data-change-aware (freshness Layer 1). `readSnapshot`/`writeSnapshot`, `ON CONFLICT (org_id)` upsert.
 - `dashboard_state_snapshot` — daily point-in-time counts (backlog / active jobs / workforce); PK `(org_id, snap_date)`, idempotent UPSERT. Powers past-month history for state widgets.
-- `kv_config` — the 60s KV cache layer (`cached(...)`, key `dashboard:overview:<org>:v22:<period>`).
+- `kv_config` — the 60s KV cache layer (`cached(...)`, key `dashboard:overview:<org>:v23:<period>`).
 - Read-only source tables (no writes from this module): `sales_orders` / `sales_order_items`, `invoices`, `delivery_orders` / `delivery_order_items`, `consignment_order_items`, `production_orders` / `job_cards`, `cost_ledger`, `purchase_orders` / `purchase_order_items` / `grns`, `products` / `raw_materials` / `workers`.
 - The overview endpoint is READ-ONLY over business data — it only writes the two snapshot/cache tables.
 
@@ -57,7 +62,7 @@ The homepage **Command Center** at `/dashboard`: a KPI rail (Sales · Invoices �
 
 ## Gotchas
 - **`dashboard-b` IS the production dashboard.** The old `/dashboard` page was retired 2026-05-21; `/dashboard` lazy-loads `dashboard-b`, and `/dashboard-b` just redirects (`dashboard-routes.tsx:233`). There is no separate `dashboard` page.
-- **The whole backend is ONE GET `/` handler** (~2000 lines, no sub-routes) — every dashboard number flows through it. It is **60s KV-cached on top of a data-change-aware snapshot**, so edits can take up to a minute to reflect live (bump the `v22` cache key or hit the rebuild cron to force a refresh).
+- **The whole backend is ONE GET `/` handler** (~2000 lines, no sub-routes) — every dashboard number flows through it. It is **60s KV-cached on top of a data-change-aware snapshot**, so edits can take up to a minute to reflect live (bump the `v23` cache key or hit the rebuild cron to force a refresh).
 - **Three-layer freshness, not just a cache.** Layer 1 = `dashboard_snapshot` (`built_from` vs `getMaxSourceUpdatedAt`); Layer 2 = 60s KV; Layer 3 = full compute. An admin script that UPDATEs a source table WITHOUT bumping its `updated_at` escapes Layer 1/2 — the nightly `rebuild-dashboard-snapshot` cron is the safety net. The snapshot path only runs for `period=all`; any month filter skips straight to KV + compute.
 - **Never write a past-month state snapshot back as "today".** `captureTodayState` is guarded (`:137`, `:2243`) so only a live (`period=all`/current-month) payload is persisted; past-month reads override state widgets from stored history (`:1930`) and must not be re-captured.
 - **KPI semantics are owner-pinned** (2026-06-12): Sales = confirmed-SO value; Invoices = Σ invoice totals by invoice date (excl. cancelled); Pending Delivery = consolidated made-but-not-shipped; Outstanding = point-in-time/live. Don't redefine these card sources.
@@ -67,10 +72,10 @@ The homepage **Command Center** at `/dashboard`: a KPI rail (Sales · Invoices �
 - **Only snapshot freshness is test-covered** — `tests/snapshot-freshness.test.mjs` + `tests/snapshot-freshness-latestts.test.mjs`. The KPI math itself has no unit tests; verify live on prod.
 
 ## Common tasks (mini-playbook)
-- **Add a KPI/widget** → compute it inside the single `app.get("/")` (`dashboard-overview.ts:49`) and add it to the returned payload; type it in the `Overview` type (`index.tsx:58`); render via `KTile`/`SectionTitle` in `DashboardBPage`. Bump the cache key `v22` if the payload shape changes, so stale snapshots don't serve the old shape.
+- **Add a KPI/widget** → compute it inside the single `app.get("/")` (`dashboard-overview.ts:49`) and add it to the returned payload; type it in the `Overview` type (`index.tsx:58`); render via `KTile`/`SectionTitle` in `DashboardBPage`. Bump the cache key `v23` if the payload shape changes, so stale snapshots don't serve the old shape.
 - **Add a chart** → put the recharts component in `charts.tsx` and lazy-import it (keep recharts out of `index.tsx`); pass computed data + colors as props (parent owns the numbers).
 - **Change a point-in-time (state) metric** → update the `DashboardStateMetrics` shape (`dashboard-state-snapshot.ts:37`), the `captureTodayState` extractor (`dashboard-overview.ts:78`), AND the past-month override (`:1930`) so history and live stay consistent.
-- **Force a live refresh** → hit `POST /api/internal/rebuild-dashboard-snapshot` (`worker.ts:387`, CRON_SECRET) or bump the `v22` KV key; remember the 60s KV TTL.
+- **Force a live refresh** → hit `POST /api/internal/rebuild-dashboard-snapshot` (`worker.ts:387`, CRON_SECRET) or bump the `v23` KV key; remember the 60s KV TTL.
 - **Debug stale numbers** → check freshness order: `dashboard_snapshot.built_from` vs `getMaxSourceUpdatedAt` (`dashboard-snapshot.ts:155`), then the 60s KV key, then whether a source `updated_at` was bumped on the last write.
 
 ## Related modules

@@ -1,7 +1,12 @@
 # Service & Repair — Module Guide
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](../DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/api/routes/{service-cases,service-orders,sales-orders,stock-adjustments}.ts`, `src/lib/{repair-scope,so-mode}.ts`, `src/api/lib/bom-wip-breakdown.ts`, `src/pages/{service-cases,service-orders,service-order}/*`, `src/api/worker.ts`, and `tests/`.
-> Corrected 2026-08-13: `/api/service-cases` and `/api/service-orders` mount at `worker.ts:1418-1419`, not 1301-1302. `service-orders.ts` is 1,859 lines (was 1569) and its handler anchors drifted 120–290 lines. Every `sales-orders.ts:22xx` anchor is stale — that file was split and SO create is now at `:1503`; the service-order branch sits around `:1751-1760`. All four page files and all four named tests verified to exist.
+> Corrected 2026-08-13: `/api/service-cases` and `/api/service-orders` mount at `worker.ts:1419-1420`, not 1301-1302. `service-orders.ts` is 1,859 lines (was 1569) and its handler anchors drifted 120–290 lines. Every `sales-orders.ts:22xx` anchor is stale — that file was split and SO create is now at `:1503`; the service-order branch sits around `:1751-1760`. All four page files and all four named tests verified to exist.
 
 > Self-navigating docs (L2). Repo-wide map: [[CODEBASE-MAP]]. Never grep the whole repo — use the file:line below.
 
@@ -36,7 +41,7 @@ legacy path) plus component-level picks on `affectedProducts[].components`, all 
   - Repair-scope engine (serialize/parse/validate/filter) → `src/lib/repair-scope.ts`
   - Shared WIP-key derivation → `src/api/lib/bom-wip-breakdown.ts:125` (`deriveTopLevelWipKey`)
   - Replacement-part top-ups → `src/api/routes/stock-adjustments.ts` (reason `SERVICE_REPLACEMENT` + `caseId`)
-  - Registration → `src/api/worker.ts:1418` (`/api/service-cases`) · `:1419` (`/api/service-orders`)
+  - Registration → `src/api/worker.ts:1419` (`/api/service-cases`) · `:1420` (`/api/service-orders`)
 
 ## Data model
 - `service_cases` — the case header (source SO/CO/EXTERNAL, status OPEN→IN_PROGRESS→CLOSED/CANCELLED, issue, RCA JSON, `affectedProducts` JSON, photos).

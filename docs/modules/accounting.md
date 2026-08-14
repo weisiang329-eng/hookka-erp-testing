@@ -1,5 +1,10 @@
 # Accounting & Invoicing — Module Guide
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](../DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/pages/accounting/index.tsx`, `src/api/routes/accounting.ts`, `src/api/routes/invoices.ts`, `src/api/routes/supplier-payments.ts`, `src/lib/pi-posting.ts`, `src/api/lib/journal-hash.ts`, `src/api/worker.ts`, and `tests/`.
 > Corrected 2026-08-13: file sizes for `accounting.ts` (11.5k→13.1k) and `invoices.ts` (2.2k→3.0k) were understated, and ~25 line anchors had drifted 100–800 lines (all verified anchors below re-derived by grep). Unverified anchors are marked ±.
 
@@ -32,7 +37,7 @@ read-only/append-only. Money is integer sen throughout.
     `credit-notes.tsx` / `debit-notes.tsx`, `e-invoice.tsx` (MyInvois).
 - **API routes**
   - `/api/accounting/*` → `src/api/routes/accounting.ts` (13,054 lines, Hono `app`), mounted at
-    `worker.ts:1326`. Verified anchors: AR control **L1672**, AP control **L2470**; AP/AR
+    `worker.ts:1327`. Verified anchors: AR control **L1672**, AP control **L2470**; AP/AR
     reconciliation **L2704 / L2879**; trial-balance **L4792**; year-close **L5235**;
     stock-summary **L5819**; pl-statement **L7578**; P&L **L7840** (also serves balance sheet);
     labour post **L9499**; opening-balance post **L12452**; stock-take **L12617** +
@@ -99,7 +104,7 @@ read-only/append-only. Money is integer sen throughout.
 - **Money = integer sen** (`amountSen`, `discount_sen`); never floats — round via `roundSen` / `distributeRoundSen` in `src/lib/utils.ts`.
 - **`document_lifecycle` JOIN is load-bearing** — list endpoints must return `lifecycleState` or the FE shows void/delete on already-voided docs (F3 hotfix, commit 8221d726).
 - **`journal_entries` (journal module) ≠ `ledger_journal_entries` (posted GL)** — reports read the ledger; don't cross the wires.
-- **`cost_ledger` is append-only** — written side-effectually by GRN / production / DO. Accounting reads only; never write it from these routes.
+- **`cost_ledger` is append-only** — written side-effectually by GRN / production / DO, **plus ONE accounting writer: `POST /landed-cost` (`accounting.ts:10907`)**, which UPDATEs `rm_batches.unitCostSen` and APPENDs an `ADJUSTMENT` / `LANDED_COST` row per batch (`:10950`). Every OTHER accounting route reads only, and no route may ever mutate an existing ledger row. (`monthly_stock_values` and `stock_accounts` really are read-only from here — enumerated, zero writes.)
 - **P&L reads the FIFO engine, NOT `cost_ledger` perpetual totals** (ledger stopped being fed after 2026-03). `computePnlWindow` uses `loadMaterialCostData`; only closing-stock journal legs still use `stockSummaryRange`.
 - **Ledger is immutable + hash-chained** — post new legs, never mutate; idempotency via `ledgerHasSource(...,sourceType,id)`.
 - **Migrations are inert** unless runtime self-applied — new columns reach prod only via `ALTER TABLE … ADD COLUMN IF NOT EXISTS` awaited inside the route before the first write (e.g. `invoices.ts:1463` for `discount_sen`).

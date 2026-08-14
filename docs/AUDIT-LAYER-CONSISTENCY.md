@@ -1,5 +1,10 @@
 # Layer-consistency audit — frontend ⟷ API ⟷ database
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/api/routes/*.ts`, `src/pages/**`,
 > `src/types/index.ts` and `tests/db-schema.json` (INSERT/UPDATE column lists checked
 > against the prod schema snapshot).
@@ -102,7 +107,7 @@ spellings stay as deprecated optionals so no other consumer breaks.
 
 | # | Site | Column named | Reality | Effect |
 |---|---|---|---|---|
-| 6 | `src/api/routes/import-completion/so-co-do-backfills.ts:795` | `delivery_order_items.sizeCode`, `.salesOrderId`, `.lineNo` | the table has `size_label` and `sales_order_no`; it has **no** `size_code`, `sales_order_id` or `line_no` | `.catch(() => ({meta:{changes:0}}))` swallows it, so `POST /api/import/backfill-downstream-product-names` returns `deliveryOrderItemsUpdated: 0` **always** — indistinguishable from "nothing needed fixing" |
+| 6 | `src/api/routes/import-completion/so-co-do-backfills.ts:810` | `delivery_order_items.sizeCode`, `.salesOrderId`, `.lineNo` | the table has `size_label` and `sales_order_no`; it has **no** `size_code`, `sales_order_id` or `line_no` | `.catch(() => ({meta:{changes:0}}))` swallows it, so `POST /api/import/backfill-downstream-product-names` returns `deliveryOrderItemsUpdated: 0` **always** — indistinguishable from "nothing needed fixing" |
 | 7 | same file `:812` | `invoice_items.salesOrderId`, `.lineNo` | neither column exists | `invoiceItemsUpdated: 0` always, same swallow. Only the `production_orders` branch of that loop can ever match |
 | 8 | `src/api/routes/consignment-notes.ts:1331` (CN `/return`) | `UPDATE customers SET outstandingSen = …, updated_at = ?` | `customers` has no `updated_at` — never created, no migration adds one | The statement is inside `DB.batch(statements)` at `:1337`, which is atomic. So a return on a CN that had already been converted to an invoice fails **entirely** and the A/R refund never posts. **Money path — not fixed here on purpose** |
 | 9 | `src/api/routes/grn.ts:2048-2069` | the DRAFT re-line branch of `PUT /api/grn/:id` DELETEs and re-INSERTs `grn_items` **without** `po_id` / `po_item_id` | both columns exist in prod | Per-line PO ownership recorded at create is wiped by any draft edit, and resolution falls back to positional matching against the header PO — the exact failure `po_item_id` was added to prevent |

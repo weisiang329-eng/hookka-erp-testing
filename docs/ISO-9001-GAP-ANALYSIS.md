@@ -1,5 +1,10 @@
 # ISO 9001:2015 — Gap Analysis for Hookka ERP
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/api/routes/` (136 route files — no
 > `ncr`/`nonconformance`/`capa`/`internal-audit`/`management-review`/`calibration`/
 > `risk` route exists), `migrations-postgres/` (244 files — no such table exists),
@@ -22,8 +27,12 @@
 >   now also resets the job card to BLOCKED. The clause verdict (non-gating) is
 >   unchanged; the evidence paragraph is out of date.
 > - **8.5.2** — the "`fg_units.batchId` is a random number" line is stale. The column
->   was NULL on all 4,866 rows and is now stamped at completion and backfilled by an
->   evidence ladder (`src/api/lib/fg-batch-link.ts`, `fg-completion.ts`,
+>   was NULL on all 4,866 rows and now has a WRITER — stamped at completion, with a
+>   backfill ladder available and a backfill endpoint at `fg-units.ts:998-1021`.
+>   **Whether that backfill has been RUN on prod is UNMEASURED** (this branch has no DB
+>   credentials); the in-repo note at `stock-breakdown.ts:509-516` says it had NOT been as
+>   of 2026-08-08, which is what `ERP-FEATURE-GAP.md` still reports — the two docs
+>   disagreed, and the honest answer is UNMEASURED. The ladder is (`src/api/lib/fg-batch-link.ts`, `fg-completion.ts`,
 >   `fg-ledger-reconcile.ts`), linking a piece to its **cost lot**. The genuine gap —
 >   unit → physical *material lot* genealogy — is still open.
 >
@@ -81,7 +90,7 @@ Strong foundations: 8.5.2 (document chain), 8.4 (supplier performance / 3-way ma
 + QR sticker per finished unit with PACK→LOAD→DELIVER→RETURN timestamps and packer identity
 (`fg-units.ts:439/798-897`). Fabric identification by code (`fabric-tracking.ts:38`,
 `production-orders.ts:293`).
-**Gap:** a finished unit's `fg_units.batchId` is a **random number**, not the consumed fabric
+**Gap:** a finished unit's `fg_units.batchId` — **corrected 2026-08-14: not a random number.** It has a real writer (see the banner); the surviving gap is that unit → physical *material lot* genealogy is still not
 roll / GRN batch (`fg-units.ts:415`) — there is no link from the unit to the physical
 material lot. FIFO material consumption at PO completion is a deferred TODO
 (`production-orders.ts:13-17`). Scan state is overwrite-in-place, not an append-only scan log.

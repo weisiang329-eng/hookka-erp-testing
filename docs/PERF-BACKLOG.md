@@ -1,5 +1,10 @@
 # Performance & Correctness Backlog
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-14** against `src/pages/employees.tsx`,
 > `src/pages/m/config/modules.ts`, `src/api/routes/attendance.ts`,
 > `src/api/routes/department-performance.ts`, `src/api/lib/supabase-compat.ts`,
@@ -260,12 +265,19 @@ before filing a performance bug.
 
 - Dead code: the two `?fields=` projection blocks in `src/api/routes/sales-orders.ts`
   after the snapshot call are now unreachable (the fast paths cover the same cases).
-- `node scripts/check-bundle-size.mjs` FAILS on main: `finance-dashboard`
-  29.45 → 30.94 KB (+5.1%) from bf08623b, baseline not regenerated. Fix with
-  `--write-baseline` + commit `.bundle-baseline.json`.
-- **GitHub Actions is billing-blocked** — private repo, metered minutes. Deploys are
-  currently manual (see below). Do NOT "solve" this by making the repo public: git
-  history contains full prod and staging Postgres connection strings **with
+- ~~`check-bundle-size.mjs` FAILS on main~~ **RESOLVED (re-read 2026-08-14).**
+  `.bundle-baseline.json` already carries `finance-dashboard: 31684` (= 30.94 KB) and is
+  **auto-regenerated and committed on every push to `main`** by
+  `.github/workflows/refresh-bundle-baseline.yml:26`. Do not hand-edit it. The `deploy.yml`
+  bundle gate is still `continue-on-error: true`.
+- **⚠️ CORRECTED 2026-08-14 — THE REPO IS ALREADY PUBLIC, and Actions IS running.**
+  `docs/runbooks/ROTATE-DB-PASSWORDS.md:51` says so outright ("Treat both passwords as
+  **already disclosed**"), and `ios-build.yml:14` / `secret-hygiene.yml:11-14` describe it
+  as public in the present tense; `deploy.yml` and `refresh-bundle-baseline.yml` both fire
+  on push to `main`. This bullet said the repo was PRIVATE and warned against making it
+  public — a reader trusting it concludes the credentials are still contained. **They are
+  not: rotation is outstanding REMEDIATION, not hygiene.** The original wording, for the
+  record: git history contains full prod and staging Postgres connection strings **with
   passwords** (commits titled "remove embedded database credentials" — removal from
   HEAD does not remove them from history) plus ~12 other secret-pattern hits.
   **Those credentials should be rotated regardless.**
@@ -280,7 +292,7 @@ before filing a performance bug.
 3. Change it.
 4. Prove equivalence — same rows, same totals, same fingerprint. For anything with
    a ringgit figure this is mandatory, not optional.
-5. Gates: `npx tsc -p tsconfig.app.json --noEmit` (ignore only the 3 jsbarcode/@zxing
+5. Gates: `npx tsc -p tsconfig.app.json --noEmit` — **measured clean 2026-08-14: exit 0, zero errors. The carve-out below is RETIRED; treat every error as yours.** ~~(ignore only the 3 jsbarcode/@zxing
    errors), `npm test`, `npx eslint <changed>`.
 6. PR describing what changed and how it was verified.
 

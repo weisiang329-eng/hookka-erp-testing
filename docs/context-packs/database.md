@@ -1,6 +1,11 @@
 # Context Pack: Database
 
-> **Last verified: 2026-08-13** against `migrations-postgres/0001_init.sql` (present; 244 migration files, latest `0223_trade_finance.sql`), `src/api/lib/supabase-compat.ts`, `db-pg.ts`, `tenant.ts`. Broken link to the old root-level HOOKKA-GOTCHAS path repaired.
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](../DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
+> **Last verified: 2026-08-13** against `migrations-postgres/0001_init.sql` (present; **251** migration files; the newest prefix is **`0229`, and TWO files share it** — `0229_pcb_tax_profile.sql` and `0229_worker_leave_entitlements.sql`), `src/api/lib/supabase-compat.ts`, `db-pg.ts`, `tenant.ts`. Broken link to the old root-level HOOKKA-GOTCHAS path repaired.
 
 Use this pack for schema, migrations, tenancy, indexes, constraints, data repair, or query behavior.
 

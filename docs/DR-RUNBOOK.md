@@ -1,5 +1,10 @@
 # Disaster Recovery Runbook
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `.github/workflows/backup.yml` (every step), `src/api/cron/daily-backup.ts:53-151`, `src/api/worker.ts:815` (`POST /api/internal/backup-prune`), `wrangler.toml` (`[triggers]` still commented out), and `ls scripts/`.
 > Corrected 2026-08-13: three load-bearing claims were false. (1) **There is no GitHub Actions artifact.** `backup.yml` contains zero `upload-artifact` steps, so the "off-vendor floor, 90-day artifact" this runbook leans on in three places does not exist. (2) Retention is no longer pruned by the Workers cron — that cron was never provisioned and never ran; `backup.yml` now calls `POST /api/internal/backup-prune` after each upload. (3) `scripts/verify-journal-hash-chain.mjs` does not exist, so drill step 6 cannot be run as written.
 
@@ -81,22 +86,26 @@ calls the same `pruneOldBackups` in `daily-backup.ts:151`.
      anything` policy exists; service_role bypasses RLS but explicit
      policies make audits cleaner.
 * **GitHub repo secrets** (set BEFORE the daily backup ever fires):
-  * `SUPABASE_PROD_URL` — pooler connection string for `pg_dump`.
+  * `PROD_DATABASE_URL` — pooler connection string for `pg_dump`. **(Corrected 2026-08-14: this said `SUPABASE_PROD_URL`, which exists in NO workflow — `backup.yml:78,94` reads `secrets.PROD_DATABASE_URL` and its own guard at `:83-85` errors on that name.)**
     Supabase dashboard → Project Settings → Database → Pooler URL.
     MUST include `?sslmode=require`.
   * `SUPABASE_PROJECT_REF` — slug before `.supabase.co` in your project
     URL. Not a hard secret on its own but kept here so prod / preview
     can swap independently.
-  * `SUPABASE_SERVICE_ROLE_KEY` — service_role key from Project
+  * `SUPABASE_SERVICE_KEY` — service_role key from Project **(Corrected 2026-08-14: the SECRET is named `SUPABASE_SERVICE_KEY` — `backup.yml:80,121,158`. `SUPABASE_SERVICE_ROLE_KEY` is only the step-local env var the workflow maps it onto, and provisioning under that name leaves the backup job failing at step 2, silently, until a restore is needed.)**
     Settings → API. Treat like a root password.
   * `CRON_SECRET` — `openssl rand -hex 32`, mirror to CF Pages.
 * **Wrangler secrets** for the Workers cron path:
   * `wrangler secret put SUPABASE_SERVICE_KEY` — same service_role key
     as above. (`SUPABASE_PROJECT_REF` lives in `wrangler.toml [vars]`.)
 * `pg_dump` installed on whichever runner does the .dump path. The
-  GitHub Actions workflow auto-installs `postgresql-client-16`; if you
-  re-introduce a Node script, install it locally (Postgres 16 matches
-  Supabase's current major version).
+  GitHub Actions workflow installs **`postgresql-client-17`** from the PGDG apt
+  repo (`backup.yml:59-68`). Supabase runs Postgres 17.6 and `pg_dump` **REFUSES**
+  to dump a newer server, so a local client must be **17 or higher** — and on Ubuntu
+  you must put `/usr/lib/postgresql/17/bin` ahead of `/usr/bin` or pg_wrapper keeps
+  handing you 16. **(Corrected 2026-08-14: this said `postgresql-client-16` and
+  "Postgres 16 matches Supabase's current major version" — following it produces no
+  dump at all.)**
 
 ---
 
@@ -139,7 +148,22 @@ The repo ships the GitHub Actions workflow at
 the Supabase Storage REST endpoint:
 
 ```
-https://<SUPABASE_PROJECT_REF>.supabase.co/storage/v1/object/hookka-files/backups/supabase/backup-YYYY-MM-DD.dump
+https://<SUPABASE_PROJECT_REF>.supabase.co/storage/v1/object/hookka-files/backups/supabase/backup-YYYY-MM-DD.dump.part-NNN
+
+> ⚠️ **CORRECTED 2026-08-14 — the dump is uploaded SPLIT, and `backup-<date>.dump`
+> is NEVER uploaded.** `backup.yml:125` does `split -b 40M -a 3 -d` and uploads
+> `backup-<date>.dump.part-000`, `-001`, … plus a `.manifest`; the single-object
+> endpoint returned `413 EntityTooLarge` on the ~400 MB dump, and `backup.yml:167-169`
+> says asking for the whole object would 404. **The restore commands below that grep
+> for `"backup-[0-9-]+.dump"` match zero part files**, so `LATEST` comes back empty
+> and the download 404s — in the middle of an outage. Reassemble first:
+>
+> ```bash
+> LATEST_DATE=$(echo "$LIST" | grep -oE 'backup-[0-9-]+.dump' | sort -u | tail -1)
+> # download every ${LATEST_DATE}.part-* for that date, then:
+> cat ${LATEST_DATE}.part-* > recovery.dump
+> pg_restore --verbose --no-owner --no-acl --jobs=4 --dbname="$RECOVERY_DATABASE_URL" ./recovery.dump
+> ```
 ```
 
 Auth is `Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY`. The

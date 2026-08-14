@@ -1,17 +1,24 @@
 # GitHub Workflow Governance
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `.github/` (contains exactly
 > `PULL_REQUEST_TEMPLATE.md` + `workflows/`) and all 24 files in `.github/workflows/`.
 > No corrections needed. `PULL_REQUEST_TEMPLATE.md`, `deploy.yml` and `sync-staging.yml`
 > all exist as named, there is no `ISSUE_TEMPLATE/` (correct — this doc says it is optional
 > and not needed), and `docs/BUG-HISTORY.md` is still the live bug log.
 >
-> For completeness, the 24 workflows present on 2026-08-13 are: agent-heartbeat,
+> For completeness, the **26** workflows present on 2026-08-14 are: agent-heartbeat,
 > analyze-staging, auto-clockout, backup, daily-reports, delivery-agent,
-> deploy-cron-worker, deploy, distill-ocr-rules, ios-build, keep-warm, mail-sync,
-> nightly-counter-rebuild, nightly-pi-gl-backfill, process-email-outbox,
-> push-clock-reminder, qc-cron, rebuild-dashboard-snapshot, refresh-bundle-baseline,
-> replay-audit-dlq, scan-queue-sweep, sync-staging, trim-staging, warm-lists.
+> deploy-cron-worker, deploy, distill-ocr-rules, **docs-freshness**, ios-build,
+> keep-warm, mail-sync, nightly-counter-rebuild, nightly-pi-gl-backfill,
+> process-email-outbox, push-clock-reminder, qc-cron, rebuild-dashboard-snapshot,
+> refresh-bundle-baseline, replay-audit-dlq, scan-queue-sweep, **secret-hygiene**,
+> sync-staging, trim-staging, warm-lists. *(The list said 24 and omitted exactly the
+> two gates this repo relies on for doc freshness and secret hygiene.)*
 > Note `ios-build.yml` (Capacitor iOS, `workflow_dispatch` only, unsigned archive) predates
 > this doc's "canary deploys on pull requests" framing and is not covered by it.
 

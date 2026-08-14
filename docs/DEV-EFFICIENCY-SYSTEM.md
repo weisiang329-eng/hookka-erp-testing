@@ -1,5 +1,10 @@
 # Hookka ERP — Development Efficiency System (the "big plan")
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `docs/` (file listing), `docs/PLAYBOOKS.md`
 > (8 `##` procedures — the "8 procedures" claim is correct), `docs/context-packs/`,
 > `docs/modules/` (15 guides), `src/lib/fe-rum.ts`, `src/pages/admin/`.
@@ -95,8 +100,8 @@ automation is worth the token cost.
 |---|---|---|
 | Governance / Change management | the rules for making changes | ✅ have |
 | Knowledge base / runbooks | SOPs + hard-won traps | ✅ have |
-| Navigation / integration catalog | find the code fast | 🔨 building |
-| Methodology / SOPs | fixed steps per task type | ⏭️ next |
+| Navigation / integration catalog | find the code fast | ✅ have (`CODEBASE-MAP.md` + 15 `modules/*.md`) |
+| Methodology / SOPs | fixed steps per task type | ✅ have (`PLAYBOOKS.md`, 8 procedures P1–P8) |
 | **Data dictionary / glossary** | business terms → meaning (WIP, landed cost, consignment…) | ⚪ build — cheap, helps 准 |
 | **ERD / data model map** | tables + relationships + FKs | ⚪ build — mostly in MEMORY already |
 | Master Data Management (MDM) | clean, unique canonical codes | 🟡 partial (#3 code field, dup-merge) |
@@ -105,7 +110,7 @@ automation is worth the token cost.
 | Observability + incident / DR | know when prod breaks + what to do | 🟡 partial (admin/health, fe-rum, `DR-RUNBOOK`) |
 | Security / RBAC / audit | access control + audit trail | ✅ have |
 | Config / feature-flag management | safe toggles | 🟡 partial (`kv-config`) |
-| Backlog / roadmap governance | what's next, single source of truth | ✅ have (`PROGRAM-90D`, this doc) |
+| Backlog / roadmap governance | what's next, single source of truth | ✅ have (`WORK-TRACKER.md`, this doc). **`PROGRAM-90D` was archived 2026-08-13** — its 90 days elapsed in July; do not cite it as current. |
 | Performance budgets | speed targets | ⏭️ skip — premature for us |
 | CAB / formal release boards | committee sign-off on changes | ⏭️ skip — doesn't fit solo + AI + direct-to-main |
 

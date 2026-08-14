@@ -1,5 +1,10 @@
 # Infra Resilience & Performance Playbook
 
+> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
+> source by the prose audit; the row(s) touched here are itemised in
+> [`docs/DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
+> re-verified; the rest of this file still carries its earlier stamp.
+
 > **Last verified: 2026-08-13** against `src/api/lib/supabase-compat.ts:256` (`withConnRetry`, wired into every query path at :285-312), `src/api/routes/auth.ts:174-193` (graceful 503 on login), `.github/workflows/keep-warm.yml` (`*/5 * * * *` → `GET /api/pg-ping`), `wrangler.toml` (`[vars] SENTRY_DSN` set), and `src/api/worker.ts:1082,1474`.
 > Corrected 2026-08-13: the status columns were four levers behind. `withConnRetry` and the graceful-503 login are **shipped, not "written, not deployed"**; the keep-warm heartbeat is **live** as a GitHub Action; and the Sentry DSN **is set**, worker-side and client-side.
 > **UNVERIFIED ASSERTION** (as of 2026-08-13): everything in the Supabase dashboard — pool size 50, compute tier, PITR, the platform-incident block — cannot be checked from this repo. Treat those rows as the owner's last-known state, not fact.
@@ -55,7 +60,7 @@ Status legend: ✅ live · ⚠️ written, not deployed · ⏳ blocked/waiting �
 |---|---|---|---|---|
 | Retry a failed DB **connection** once | **Retry / fault tolerance / resilience** | A transient "couldn't create a connection" becomes a successful (slightly slower) request instead of a hard 500. Safe because it only retries *connection-establishment* errors (nothing was executed yet → no double-writes) | `src/api/lib/supabase-compat.ts:256` → `withConnRetry`, wrapping every query path at :285-312 | ✅ **shipped** (committed and on `main`) |
 | Graceful login fallback | **Graceful degradation** | If the DB is truly down, login shows "busy, try again" (HTTP 503) instead of a raw 500 white screen | `src/api/routes/auth.ts:174-193` — try/catch → 503 with the "login can't reach the DB" comment | ✅ **shipped** |
-| Don't logout on a transient failure | **Fault tolerance** | A laggy request no longer force-bounces the user to `/login`. Backend returns 503 (retriable), frontend retries before clearing the session | backend: return 503 not 401 when the DB errors during session verify (`auth-middleware.ts`); frontend: retry once before `clearAuth()` (`api-client.ts`) | ⬜ not started (re-checked 2026-08-13) |
+| Don't logout on a transient failure | **Fault tolerance** | A laggy request no longer force-bounces the user to `/login`. Backend returns 503 (retriable), frontend retries before clearing the session | backend: return 503 not 401 when the DB errors during session verify (`auth-middleware.ts`); frontend: retry once before `clearAuth()` (`api-client.ts`) | **SPLIT — re-checked 2026-08-14.** Backend ✅ **SHIPPED**: the session-verify `catch` returns 503, not 401 (`auth-middleware.ts:415-431`, *"returning 401 here would force-bounce an authenticated user to /login on a momentary DB blip"*). Frontend ⬜ not started: `api-client.ts:168-178` still clears auth immediately on 401 — but the transient case now arrives as 503, so it no longer logs anyone out. |
 | Keep-warm heartbeat | **Warm-up / keep-alive** | The DB connection never goes cold, so the *first* user after a quiet spell doesn't pay the 20–30 s cold-start | `.github/workflows/keep-warm.yml` — `cron: '*/5 * * * *'`, curls the public `GET /api/pg-ping`, 3 attempts, best-effort | ✅ **live** (GitHub Action, since 2026-06-30) |
 
 ### Tier 2 — Knowing before it breaks (observability)

@@ -259,6 +259,108 @@ an OLD-vs-NEW fingerprint per worker and explains every difference as `year-rese
 `holiday`, `per-worker override` or `UNEXPLAINED`. Fixing -131 and -132 *does* raise
 balances for anyone who had old-year leave or holiday-overlapping leave — that is the
 requested fix, not a regression, but the owner should see the list first.
+## BUG-2026-08-13-121 — PCB was never calculated, so net pay on every payslip was overstated by the tax that should have been withheld `payroll` `money` `C15` 🟢
+
+**Symptom.** None. That is the whole problem — the figure was silent by construction. Every
+payslip this system has ever produced printed **PCB RM 0.00** (or a dash), the office Payroll
+grid summed a Total PCB of zero, the CSV exported `0.00`, the printed slip carried a
+`PCB (income tax)` line at zero, and the worker's phone showed the same — all beside real EPF,
+real SOCSO, real EIS, and a **Net Pay with nothing withheld for tax**. Nothing errored, nothing
+looked wrong, and no operator could have told from any screen that no calculation had ever run.
+
+**Root cause.** `calcStatutory` in `src/api/routes/payslips.ts` read the per-worker toggle and
+returned the same number on both branches:
+
+```ts
+pcb: pcbOn ? 0 : 0, // PCB still 0 baseline; flag is forward-compat for when PCB calc lands.
+```
+
+The toggle (`workers.pcb_enabled`, migration 0131) existed and worked; only the calculation was
+missing. The comment says so honestly — and it sat a few lines from a Payroll tooltip telling
+the operator *"Statutory ON — EPF / SOCSO / EIS / PCB will deduct on next payslip"*, which was
+false for PCB and only for PCB.
+
+**C15 row 36**: a figure that reads as measured and is not. This instance is the class's first
+corollary at the highest stake in the app — **`0` is a claim, not a blank.** "RM 0.00 withheld"
+and "no withholding was computed" are different statements about somebody's pay, and only one of
+them was true.
+
+**What was missing, and what is now refused.** LHDN's monthly deduction is not a function of
+salary. It needs the employee's **tax residency**, **marital category** and **declared child
+relief**, and none of those existed anywhere on `workers` (checked against the live schema
+fixture: 31 columns, no marital status, no dependants, no residency). Migration 0229 adds them
+as **nullable columns with no DEFAULT**, because there is no safe default: assuming RESIDENT
+under-withholds from a non-resident by 30% of gross; assuming SINGLE over-withholds from a
+married sole earner. `nationality` cannot stand in for residency — a foreign worker present
+≥182 days in the basis year IS a tax resident.
+
+So the engine (`src/lib/pcb.ts`) never returns a bare number. It returns a status:
+
+| status | meaning | what the screens print |
+|---|---|---|
+| `DISABLED` | `pcb_enabled = false` — not registered for PCB | `—` + "no tax is withheld for this employee" |
+| `COMPUTED` | a complete declaration; LHDN's computerised calculation ran | the amount |
+| `ZERO_PROVEN` | the declaration is incomplete, but nothing is due under the **least-relief** profile any resident could have — so nothing is due under any of them | `RM 0.00` |
+| `UNKNOWN` | an input the calculation needs is missing | `—`, and the slip states that net pay includes no tax withholding |
+
+`ZERO_PROVEN` is a proof, not a shortcut: relief only ever reduces chargeable income and the
+spouse rebate only ever reduces tax, so Category 1 with no child relief is the ceiling over the
+whole profile grid. `tests/pcb-calculation.test.mjs` asserts that monotonicity across
+3 categories × 5 reliefs × 12 months × 68 pay levels rather than arguing it, and asserts the
+counter-case: at RM 3,500/month a married sole earner with two children owes nothing while a
+single employee owes ~RM 11.67, so the answer DEPENDS on the missing declaration and the engine
+refuses instead of resolving to zero.
+
+**The method.** LHDN's Computerised Calculation for a normal remuneration month,
+`MTD = [((P − M) × R + B) − (Z + X)] ÷ (n + 1)`, in integer sen, rounded up to the next 5 sen.
+`((P − M) × R + B)` is computed as *progressive tax on P minus the rebate* rather than by typing
+LHDN's pre-computed **B** column in as constants — a constant typed from memory is
+unverifiable, arithmetic over a rate schedule is checkable, and the test cross-checks the derived
+B values (−400, −400, −250, 600, 1,500, 3,700, 9,400, 84,400, 136,400, 528,400) against the
+published Category 1 & 3 figures. The schedule is **effective-dated by year of assessment**:
+outside `RESIDENT_SCHEDULE_FIRST_YA … LAST_YA` the engine returns `UNKNOWN`, so a year Parliament
+has re-rated refuses rather than quietly applying a stale table. Additional remuneration
+(bonus/arrears — a separate LHDN procedure), TP1 reliefs, zakat and CP38 are named as NOT
+implemented in `PCB_NOT_IMPLEMENTED` so nobody mistakes silence for coverage.
+
+**A second bug, caught by an existing class guard.** The year-to-date query was first written
+with `AS grossSen` / `AS allowanceSen` / `AS epfSen`. Postgres folds an unquoted mixed-case alias
+to lower case and `postgres.toCamel` cannot restore it, so all three would have read back
+`undefined`, the year-to-date would have been zero, every month's projection would have restarted
+at January, and the withholding would have been silently **too low**.
+`tests/sql-identifier-safety.test.mjs` failed the moment the suite ran. Aliases are snake_case
+now and read dual-keyed. That guard earned its keep.
+
+**Blast radius, measured rather than assumed.** `pcb_sen` is read by the payslips list / detail /
+projected estimate, the office Payroll grid + CSV + print, the payslip PDF, the worker phone
+(`/api/worker/payslips`, `/api/worker/payslip/:period`), and `totalDeductions → netPay`. It is
+**not** read by the labour GL posting (`aggregateLabour` in `accounting.ts` debits `grossPaySen`
+plus the three EMPLOYER contributions and credits the accrual — PCB is an employee deduction
+inside gross, so no journal amount moves), not by `operations-report.ts` (gross only), and there
+is **no CP39 / EA / statutory-report export anywhere in the repo** to update. Nothing restates an
+already-issued payslip: `pcb_status` is NULL on every historical row, which renders as "this
+payslip was generated before PCB was calculated", and the stored net pay is untouched.
+
+**Live effect today: none, deliberately.** Migration 0136 set `pcb_enabled = FALSE` on every
+existing worker and `POST /api/workers` defaults new ones to FALSE, so every current employee
+resolves to `DISABLED`. PCB starts being withheld only when the owner ticks PCB for someone AND
+records their tax declaration — which is what the Employee drawer's new "PCB tax declaration"
+section is for.
+
+**Regression cover.** `tests/pcb-calculation.test.mjs` (behaviour: the schedule, the B identity,
+known monthly figures, the projection, the EPF cap, the 5-sen rounding, non-residents, and every
+refusal) and `tests/pcb-not-fabricated.test.mjs` (source guard: the calculation exists and stays
+in one place, the figure and its provenance travel in one statement, no tax column gets a
+DEFAULT, every screen gates on `pcbHasFigure`, and a NEW file that formats a PCB amount fails
+until it is enumerated). **19 mutations were applied to disk, the bytes asserted changed, and
+each one made the suite go red** — two guards were BLIND on the first draft and were rewritten:
+one accepted a `throw` sitting behind `if (0)`, and one counted only a single `pcbHasFigure` call
+in the payslip PDF, so the amount could go back to ungated while the footnote kept the count up.
+
+**Owner decisions raised, not taken** (see the PR): whether the efficiency allowance counts as
+normal remuneration for PCB — the owner's standing 「不算法定纯额外奖金」 rule says no, LHDN's
+definition of normal remuneration says a regular monthly allowance does — and confirmation of the
+rate schedule with his tax agent before PCB is switched on for anybody.
 
 ---
 

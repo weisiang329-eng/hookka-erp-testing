@@ -25,6 +25,11 @@
 import type { PayslipDetail } from "@/types";
 import { translateFor, type WorkerLang } from "@/lib/worker-i18n";
 import { paymentMethodLabel, normalizePaymentMethod } from "@/lib/payment-method";
+import {
+  normalizeStoredPcbStatus,
+  pcbHasFigure,
+  PCB_STATUS_NOTE,
+} from "@/lib/pcb";
 
 export type PayslipYTD = {
   basicSalary: number;
@@ -82,6 +87,12 @@ export type PayslipDocData = PayslipDetail & {
   otDays?: Array<{ date: string; hours: number }>;
   paymentMethod?: string;
   bankName?: string;
+  /** How the `pcb` figure on this slip was arrived at ('COMPUTED' /
+   *  'ZERO_PROVEN' / 'DISABLED' / 'UNKNOWN'). Absent on a slip fetched through
+   *  an older path, which reads as NOT_RECORDED — the honest answer, because
+   *  those slips were issued before PCB was computed at all, so their 0 is not
+   *  a statement that no tax was due. */
+  pcbStatus?: string | null;
   /** Salary advance already handed to the worker during the period, in sen.
    *  Recovered AFTER the statutory block — it never touches gross or EPF. */
   advanceDeductionSen?: number;
@@ -171,6 +182,15 @@ export function generatePayslipHTML(
   const employerSen =
     (payslip.epfEmployer || 0) + (payslip.socsoEmployer || 0) + (payslip.eisEmployer || 0);
   const isCash = normalizePaymentMethod(payslip.paymentMethod) === "CASH";
+  // PCB. A payslip that prints "RM 0.00" against income tax is telling the
+  // worker no tax was due on their pay — so the amount is printed ONLY when
+  // something was actually computed, and the slip says so plainly otherwise.
+  // Net pay carries the same caveat, because it is the figure the worker
+  // checks against the money in their hand.
+  const pcbStatus = normalizeStoredPcbStatus(payslip.pcbStatus);
+  const pcbCaveat = pcbHasFigure(pcbStatus)
+    ? ""
+    : `<p class="pcb-note">Income tax (PCB): ${esc(PCB_STATUS_NOTE[pcbStatus])}</p>`;
 
   const chips = (items: string[], cls = "") =>
     items.length
@@ -313,6 +333,7 @@ export function generatePayslipHTML(
   .why{margin:6px 0 10px;font-size:10.5px;color:#4B5563;padding-left:10px;border-left:2px solid var(--line)}
   .why b{color:var(--ink)}
   .rule-note{display:block;font-size:9.5px;color:var(--mut);margin-top:1px}
+  .pcb-note{margin-top:6px;font-size:9.5px;color:var(--mut);line-height:1.45;font-style:italic}
   .foot{margin-top:20px;padding-top:9px;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:16px;font-size:9px;color:#9CA3AF}
   @media print{body{background:#fff;padding:0}.sheet{box-shadow:none;width:auto;padding:0}@page{size:${pageSize};margin:${marginMm}mm}}
   @media (max-width:560px){
@@ -373,7 +394,9 @@ export function generatePayslipHTML(
         <tr><td>EPF (employee)</td><td class="num">${money(payslip.epfEmployee)}</td></tr>
         <tr><td>SOCSO (employee)</td><td class="num">${money(payslip.socsoEmployee)}</td></tr>
         <tr><td>EIS (employee)</td><td class="num">${money(payslip.eisEmployee)}</td></tr>
-        <tr><td>PCB (income tax)</td><td class="num">${money(payslip.pcb)}</td></tr>
+        <tr><td>PCB (income tax)</td><td class="num">${
+          pcbHasFigure(pcbStatus) ? money(payslip.pcb) : "&mdash;"
+        }</td></tr>
         <tr class="rule"><td>Total deductions</td><td class="num">${money(payslip.totalDeductions)}</td></tr>
         ${
           advanceSen > 0
@@ -399,6 +422,7 @@ export function generatePayslipHTML(
     <span class="l">Net pay${lang ? `<span class="alt">${esc(translateFor(lang, "pay.thisMonth"))}</span>` : ""}</span>
     <span class="v">RM ${money(payslip.netPay)}</span>
   </div>
+  ${pcbCaveat}
 
   ${ytdBlock}
 

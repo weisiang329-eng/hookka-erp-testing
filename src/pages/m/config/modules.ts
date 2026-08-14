@@ -21,6 +21,7 @@ import {
   type RowVM,
 } from "./types";
 import { logHoursSpec, hubFormSpec, addAffectedProductSpec } from "./forms";
+import { normalizeStoredPcbStatus, pcbHasFigure } from "@/lib/pcb";
 import {
   type DetailConfig,
   type FlowStep,
@@ -2724,7 +2725,16 @@ const payslipDetail: DetailConfig = {
       { label: "EPF (employee)", value: money(num(d, "epfEmployee", "epfEmployeeSen")) },
       { label: "SOCSO (employee)", value: money(num(d, "socsoEmployee", "socsoEmployeeSen")) },
       { label: "EIS (employee)", value: money(num(d, "eisEmployee", "eisEmployeeSen")) },
-      { label: "PCB (tax)", value: money(num(d, "pcb", "pcbSen")) },
+      {
+        label: "PCB (tax)",
+        // "RM 0.00" here states that no income tax was due on this pay. Print
+        // it only when something was actually computed; otherwise a dash, so
+        // the worker is not told a withholding happened that never did.
+        // src/lib/pcb.ts.
+        value: pcbHasFigure(normalizeStoredPcbStatus(d.pcbStatus ?? d.pcb_status))
+          ? money(num(d, "pcb", "pcbSen"))
+          : "—",
+      },
     ];
     const absence = num(d, "absenceDeductionSen");
     if (absence > 0) {

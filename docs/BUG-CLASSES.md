@@ -907,7 +907,7 @@ place: `/api/department-performance` must keep dividing by clocked time,
 | 33 | MRP Net Req · Shortage · Sugg. PO · "14d lead" | `/planning/mrp` | `const onOrder = 0`, `moq \|\| 50`, `leadTimeDays \|\| 14` — material already on an open PO reports as a full shortage; the invented MOQ and lead time print under the supplier's name | ⬜ open |
 | 34 | KPI "last month" score + ↑/↓ delta + "settled" | `/kpi` | `kpi_periods` has **no writer anywhere** (DDL + two SELECTs), so `isLocked` can never be true: every settled month is silently recomputed against today's data | ⬜ open |
 | 35 | Labor Cost **"Reconciled · 0 difference"** ✓ | `/employees` › Labor Cost | overhead is the closing plug, so `reconciledSum ≡ totalPayrollCost` and the diff is **algebraically 0 forever** — a verification no input can turn red, printed on a payroll report | ⬜ open |
-| 36 | **PCB** on every payslip | `/employees` › Payroll | `pcb: pcbOn ? 0 : 0` — hardcoded on both branches, feeds `totalDeductions → netPay`, under a tooltip that lists PCB as included | ⬜ open |
+| 36 | **PCB** on every payslip | `/employees` › Payroll, the CSV, the printed slip, the worker phone | `pcb: pcbOn ? 0 : 0` — hardcoded on both branches, feeds `totalDeductions → netPay`, under a tooltip that lists PCB as included. **The inputs LHDN's calculation needs (tax residency, marital category, child relief) did not exist on `workers` at all**, so there was nothing to compute from either | ✅ 2026-08-14 (-121) — `src/lib/pcb.ts` returns a STATUS, never a bare number: `DISABLED` / `COMPUTED` / `ZERO_PROVEN` / `UNKNOWN`, and every screen prints `—` unless something was actually worked out |
 | 37 | Balance-sheet **"balanced ✓"**, AR/AP Outstanding, Opening-Balance **"Balanced ✓" + enabled Post** | `/accounting` | all render `RM 0.00` / a green tick over a **failed** fetch — the same page already publishes `NO_FIGURE = "—"` for three other cards | ⬜ open — row 28's shape, on a second page |
 | 38 | Trade Finance *"Draws + unallocated = account balance"* | `/accounting` › Trade Finance | `unallocated = net − Σ outstanding` and `total = Σ outstanding`, so the identity holds in integer sen **always**; the red branch is unreachable | ⬜ open |
 | 39 | **"On-time delivery %"** — lead headline, Logistics desk AND Production desk | Hookka Report | scored `dispatched_at` (not delivery) against `hookka_expected_dd` (OUR back-derived target, which `kpi-metrics.ts:18-19` forbids scoring), over a population requiring `dispatched_at IS NOT NULL` — so an order NEVER DISPATCHED, the worst case, could not appear and lateness could only be under-reported. `production.onTimePct = delivery.onTimePct` printed one number twice, as if two desks agreed | ✅ 2026-08-14 (-131) — `delivered_at` vs `customer_delivery_date` per SO, last delivery counts, every exclusion counted and published |
@@ -924,8 +924,35 @@ because nothing else can catch a number that is merely wrong-but-plausible:
 `tests/no-fabricated-consignment-returns.test.mjs` (row 23),
 `tests/accounting-ui-truthfulness.test.mjs` (rows 25–27, plus the two
 non-figure defects the same accounting-page audit found — see below),
-`tests/dashboard-truthfulness.test.mjs` (rows 28–30).
-Rows 17–22 and 31–38 are open or deliberate and carry no guard yet.
+`tests/dashboard-truthfulness.test.mjs` (rows 28–30),
+`tests/pcb-not-fabricated.test.mjs` (row 36 — with the behaviour proved
+separately in `tests/pcb-calculation.test.mjs`).
+Rows 17–22, 31–35 and 37–38 are open or deliberate and carry no guard yet.
+
+**A seventh corollary, from row 36 (PCB, 2026-08-14).** *When no real source
+exists, the fix is a REFUSAL with a name — and the refusal has to be
+representable.* Every earlier fix in this class had somewhere honest to read
+from. PCB had nowhere: the inputs LHDN's calculation needs were not columns
+anybody had ever added, so there was no "use the real source" available.
+Deleting the fabricated `0` was not enough either — a blank in a Deductions
+column reads as *nothing was due*, which is the same false claim in a quieter
+font. Three things make a refusal survive contact with the rest of the app:
+
+* **The figure and its provenance travel together.** `pcb_sen` is meaningless
+  without `pcb_status` beside it in the *same* INSERT (C20's lesson), and
+  `pcbHasFigure(status)` is the single decision every screen asks before
+  printing an amount. Without the second column, a later reader has no way to
+  tell a computed zero from an uncomputed one — which is where this bug came
+  from in the first place.
+* **A new input column gets no DEFAULT.** A default silently manufactures the
+  very declaration the refusal exists to demand, and does it for every row at
+  once.
+* **A partially-unknown input can still yield a real answer — if that is
+  PROVED.** Here, relief only ever reduces the tax, so the least-relief profile
+  is a ceiling: when it computes to zero, zero is the answer whatever the
+  missing declaration says. That is `ZERO_PROVEN`, and it is only allowed
+  because a test asserts the monotonicity it rests on across the whole profile
+  grid — an argument in a comment would not have been enough.
 
 ⚠️ **`tests/no-fabricated-efficiency.test.mjs:6-10` states something false in
 prose** — *"Real work time IS being recorded, on a minority of cards."* It was

@@ -10,6 +10,7 @@ import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { normalizePaymentMethod } from "../../lib/payment-method";
 import { ensurePaymentColumns } from "../lib/payment-columns";
+import { ensureLeaveEntitlementColumns } from "../lib/ensure-leave-columns";
 import { effectiveSalarySenForMonth } from "../../lib/labor-engine";
 import { emitAudit } from "../lib/audit";
 import { hashPin } from "../lib/auth-utils";
@@ -70,7 +71,41 @@ type WorkerRow = {
   pay_mode?: string | null;
   dailyRateSen?: number | null;
   daily_rate_sen?: number | null;
+  // Per-worker leave entitlement overrides (migration 0229, self-applied by
+  // src/api/lib/ensure-leave-columns.ts). NULL = no override, i.e. the system
+  // default resolved by src/lib/leave-entitlement.ts. Dual-keyed per
+  // HOOKKA-GOTCHAS, because a `SELECT *` arrives renamed and an explicit
+  // snake_case SELECT does not.
+  annualLeaveEntitlementDays?: number | null;
+  annual_leave_entitlement_days?: number | null;
+  medicalLeaveEntitlementDays?: number | null;
+  medical_leave_entitlement_days?: number | null;
 };
+
+/**
+ * Resolve a per-worker leave entitlement override for the UPDATE.
+ *
+ * `undefined` (field absent from the body) keeps whatever is stored;
+ * `null` / `""` CLEARS the override back to the system default;
+ * a finite number >= 0 sets it.
+ *
+ * A non-numeric or negative value is rejected into "keep existing" rather than
+ * being coerced — `Number("abc")` is NaN, and binding NaN would silently null
+ * the column and hand that worker the default without anyone asking for it.
+ */
+function resolveEntitlementOverride(
+  incoming: unknown,
+  existing: number | null | undefined,
+): number | null {
+  const current = existing === null || existing === undefined ? null : Number(existing);
+  if (incoming === undefined) return current !== null && Number.isFinite(current) ? current : null;
+  if (incoming === null || incoming === "") return null;
+  const n = Number(incoming);
+  if (!Number.isFinite(n) || n < 0) {
+    return current !== null && Number.isFinite(current) ? current : null;
+  }
+  return Math.floor(n);
+}
 
 type DepartmentRow = {
   id: string;
@@ -361,6 +396,10 @@ app.put("/:id", async (c) => {
   const denied = await requirePermission(c, "workers", "update");
   if (denied) return denied;
   const id = c.req.param("id");
+  // Awaited BEFORE the UPDATE below, which writes the two entitlement-override
+  // columns. Migrations are inert on deploy here; this is the only path by
+  // which those columns exist in production.
+  await ensureLeaveEntitlementColumns(c.var.DB);
   try {
     const existing = await c.var.DB.prepare(
       "SELECT * FROM workers WHERE id = ?",
@@ -542,6 +581,22 @@ app.put("/:id", async (c) => {
       resignedAt: nextResignedAt,
       efficiencyAllowanceSen: nextEffAllowanceSen,
       efficiencyThresholdPct: nextEffThresholdPct,
+      // Per-worker leave entitlement overrides. NULL means "no override — use
+      // the system default" (8 annual / 14 medical), which is what every row
+      // holds today, so leaving these alone changes nobody's balance.
+      //
+      // Deliberately NOT the `body.x ?? existing.x` idiom used above: `??`
+      // cannot express "clear this back to the default", because an explicit
+      // null would fall through to the existing value and the override could
+      // never be removed once set.
+      annualLeaveEntitlementDays: resolveEntitlementOverride(
+        body.annualLeaveEntitlementDays,
+        existing.annual_leave_entitlement_days ?? existing.annualLeaveEntitlementDays,
+      ),
+      medicalLeaveEntitlementDays: resolveEntitlementOverride(
+        body.medicalLeaveEntitlementDays,
+        existing.medical_leave_entitlement_days ?? existing.medicalLeaveEntitlementDays,
+      ),
     };
 
     await c.var.DB.prepare(
@@ -553,7 +608,8 @@ app.put("/:id", async (c) => {
          joinDate = ?, icNumber = ?, passportNumber = ?, nationality = ?, resignedAt = ?,
          efficiencyAllowanceSen = ?, efficiencyThresholdPct = ?,
          paymentMethod = ?, bankName = ?, bankAccount = ?,
-         isOutsource = ?, payMode = ?, dailyRateSen = ?
+         isOutsource = ?, payMode = ?, dailyRateSen = ?,
+         annual_leave_entitlement_days = ?, medical_leave_entitlement_days = ?
        WHERE id = ?`,
     )
       .bind(
@@ -596,6 +652,8 @@ app.put("/:id", async (c) => {
         // Only DAILY is special; anything else means the ordinary monthly rule.
         String(merged.payMode ?? "MONTHLY") === "DAILY" ? "DAILY" : "MONTHLY",
         Math.max(0, Math.round(Number(merged.dailyRateSen) || 0)),
+        merged.annualLeaveEntitlementDays,
+        merged.medicalLeaveEntitlementDays,
         id,
       )
       .run();

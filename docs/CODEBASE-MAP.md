@@ -1,7 +1,7 @@
 # Hookka ERP — Codebase Map (the single authoritative map)
 
 > **Restamped 2026-08-14 on branch `fix/dashboard-tiles`:** Planning gains the MRP
-> `onOrder` / MOQ / lead-time rows (BUG-2026-08-13-144 / -145) and Production/BOM gains the
+> `onOrder` / MOQ / lead-time rows (BUG-2026-08-13-150 / -145) and Production/BOM gains the
 > `/production` Overview and `/production/wip-times` observability rows (-146 / -147),
 > including the new `coverage.productsWithoutActiveBom` on `GET /api/wip-times`.
 

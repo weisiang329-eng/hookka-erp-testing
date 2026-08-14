@@ -684,10 +684,32 @@ app.get("/scan-lookup", async (c) => {
                 departmentCode: string | null;
               }>()
           ).results ?? [];
-        const hit = cand.find(
+        // BUG-2026-08-13-152. COUNT the claimants — this was `.find(...)`,
+        // first-one-wins on a NON-UNIQUE key. `deriveBarcodeToken` is an
+        // 8-digit FNV-1a fold (`% 100_000_000`), and the comment above it
+        // justifies the collision risk as "bounded by current WIP for one
+        // dept". The SELECT here has NO status filter — deliberately, so a
+        // finished card reports "already done" instead of "Not found" — so the
+        // real population is every job card the department has EVER had, and
+        // the justification does not hold for it. Two cards folding to the same
+        // 8 digits made the scanner silently open the WRONG one, which then
+        // gets completed and paid.
+        //
+        // A collision is now a refusal: `hit` stays undefined, the lookup
+        // returns empty and the worker sees "Not found" and can retry with the
+        // QR. "Cannot resolve this barcode" is a bad day; "resolved to someone
+        // else's card" is a wrong stock movement and a wrong piece count.
+        const tokenHits = cand.filter(
           (j) =>
             deriveBarcodeToken(j.id, j.departmentCode ?? deptCode) === term,
         );
+        if (tokenHits.length > 1) {
+          console.warn(
+            "[scan-lookup] barcode token is ambiguous — refusing to guess:",
+            { term, count: tokenHits.length },
+          );
+        }
+        const hit = tokenHits.length === 1 ? tokenHits[0] : undefined;
         if (hit) {
           poRows =
             (

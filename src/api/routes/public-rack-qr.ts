@@ -333,10 +333,21 @@ async function resolvePo(
                 wipLabel: string | null;
               }>()
           ).results ?? [];
-        const hit = cand.find(
+        // BUG-2026-08-13-146, second site. Same non-unique key, and here the
+        // resolved card id is STAMPED onto a stock-in (`jobCardId: hit.id`), so
+        // a collision files someone else's piece into the rack. Exactly one
+        // claimant or nothing — see the twin in `worker.ts`.
+        const tokenHits = cand.filter(
           (j) =>
             deriveBarcodeToken(j.id, j.departmentCode ?? deptCode) === term,
         );
+        if (tokenHits.length > 1) {
+          console.warn(
+            "[public-rack-qr] barcode token is ambiguous — refusing to guess:",
+            { term, count: tokenHits.length },
+          );
+        }
+        const hit = tokenHits.length === 1 ? tokenHits[0] : undefined;
         if (hit) {
           row = await db
             .prepare(

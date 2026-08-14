@@ -1,5 +1,12 @@
 # Performance & Correctness Backlog
 
+> **Last verified: 2026-08-14** against `src/pages/employees.tsx`,
+> `src/pages/m/config/modules.ts`, `src/api/routes/attendance.ts`,
+> `src/api/routes/department-performance.ts`, `src/api/lib/supabase-compat.ts`,
+> `src/api/lib/db-pg.ts` and `src/lib/cached-fetch.ts` — the `/employees` pass
+> (P13, BUG-2026-08-13-110…-114). The 2026-08-13 verification below still holds
+> for everything else in this file.
+>
 > **Last verified: 2026-08-13** against `vite.config.ts`, `src/pages/m/screens/Home.tsx`,
 > `src/pages/reports.tsx`, `src/components/layout/sidebar.tsx`, `src/lib/scheduler.ts`,
 > `src/lib/cached-fetch.ts`, `src/components/ui/data-grid.tsx`,
@@ -58,6 +65,56 @@ suddenly did not: `git log -S "720 SOs"` shows the dashboard projection was writ
 ~2 months). Expect other snapshot-backed paths to hit the same cliff as data grows.
 
 ---
+
+## P13 — /employees + the efficiency screens  🟡 BRANCH `perf/dashboard-lag`, NOT DEPLOYED
+
+The owner's "有一些在效率方面好像确实有点卡". Five findings, all **fan-out and payload**,
+none of them a slow endpoint — exactly the shape this file says to hunt.
+Full detail in docs/BUG-HISTORY.md BUG-2026-08-13-110 … -114.
+
+| # | what | before | after | how the "after" was obtained |
+| --- | --- | --- | --- | --- |
+| -110 | `/employees` KPI cards + Attendance-tab month KPI pulled the FULL `/api/department-performance` payload to read `data.totals` | **4,960 KB** (31-day window) | **9.7 KB** | COMPUTED — ran the real `projectPerformanceSummary` over a synthetic payload in the handler's shape, calibrated so 61 days = the 9.5 MB prod figure |
+| -111 | Employee Performance tab pulled EVERY worker's punches for its window, filtered to one in the browser | all workers | 1 worker | STRUCTURAL — `?employeeId=` added to the WHERE |
+| -112 | 3 mobile `/m` sources pulled the same full payload | up to several MB | ~10 KB | same computation as -110 |
+| -113 | `GET /api/attendance` ran `SELECT *`, so every list read pulled two base64 JPEG punch selfies **per worker-day** out of Postgres and discarded them | prod: 2,818 rows = 1.28 MB response but **1.7–6.3 s** | blobs no longer read | NOT QUANTIFIED — the saving is Postgres→Worker bytes, invisible from the browser |
+| -114 | `/employees` held its FIRST PAINT behind an `/api/attendance?date=today` fetch whose result nothing read (`const [, setDateAttendance]`) | 1 blocking request | 0 | reading the code |
+
+**Every "after" here is computed or structural. Nothing in this row was measured on prod** —
+the branch is not deployed and prod is behind login. The "before" figures are the prod
+measurements already in this file. Re-measure after deploy before repeating any of these
+numbers to the owner.
+
+**-113 is the one to re-measure first.** It is the only finding whose size is unknown, and
+it is the best candidate for the actual "卡": a punch selfie is REQUIRED to clock in/out and
+is stored inline on the row, and the Working Hours tab (the DEFAULT tab of `/employees`)
+asks for a whole month of them on mount. It also explains the standing oddity that this
+endpoint took seconds to return a 1.28 MB body.
+
+### Found on this page and deliberately NOT changed
+
+- **The three `/m` department-performance screens render ZERO rows and always have.** Their
+  `select` peels `data.departments`; the endpoint returns
+  `{range, departmentCode, category, totals, daily}` and never had that key, in either view.
+  `view=summary` cuts what they download; it does not make them work. Deciding what
+  "capacity / loading / dept performance" should show on a phone is a product call, and
+  inventing a mapping to make three screens look populated is the failure logged three times
+  on 2026-08-13 (hashed Worker Efficiency, self-dividing Department Efficiency, hardcoded
+  P&L). **Owner decision.**
+- **The Department Performance TAB still requests the FULL payload, on purpose.** It is the
+  one caller that renders `daily[].workers[].jobs[]` when the operator expands a day.
+  There is a NEGATIVE lock test so a future sweep cannot "consistently" narrow it too.
+- **`useCachedJson` always re-fetches on mount** (P7 below) — untouched. It is the systemic
+  lever for the whole app, not a `/employees` fix, and changing it belongs in its own change
+  with its own before/after.
+- **The Working Hours tab fires three parallel `nonprod-requests` calls** (PENDING /
+  APPROVED / REJECTED), i.e. three slots in the serialised queue for one panel. Collapsing
+  them needs an endpoint that returns all three statuses in one response, and the existing
+  route has a LIMIT 200 whose semantics per-status vs combined are not obviously equivalent.
+  Not worth a correctness risk without a measurement.
+- **`GET /api/attendance` still has no LIMIT.** Left alone deliberately: after -113 the row
+  is small, every real caller is date-scoped, and adding a cap risks silently truncating a
+  month view. Revisit only with a measurement that says the row count itself is the problem.
 
 ## P1–P5 — ALL SHIPPED 2026-08-13 (see the table at the bottom)
 
@@ -180,6 +237,18 @@ only remaining hot spots are P1–P3.
 1.7–6.3 s / 1.28 MB, but no page ever makes one: every caller in
 `src/pages/employees.tsx` passes `?date=` or `?from=&to=`. As actually called it is
 **126 ms**; a 30-day range is 1,081 ms. This was very nearly filed as a P1.
+
+> **AMENDED 2026-08-14 — the note above is still right and was still hiding two
+> real defects.** "Nobody makes the bare call" remains true and is why this was
+> correctly not a P1. But (a) a caller can be date-scoped and STILL over-fetch on
+> a different axis — the Employee Performance tab pulled every worker's punches
+> to render one worker's (BUG-2026-08-13-111); and (b) the numbers in this very
+> paragraph contain a clue that went unread for a day: **1.28 MB should not take
+> 6 seconds** on a table with no joins. It was `SELECT *` hauling two base64
+> punch selfies per worker-day out of Postgres and discarding them
+> (BUG-2026-08-13-113). "Not slow as called" answered the question that was
+> asked; the ratio between the payload and the time was the question nobody
+> asked. Both are fixed on `perf/dashboard-lag`, neither is deployed.
 
 **Measure the call the APP makes, not a convenient one.** Three separate false
 alarms this session came from probes the product never issues — a cache-busted URL

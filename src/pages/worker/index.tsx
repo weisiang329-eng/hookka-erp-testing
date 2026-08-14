@@ -109,8 +109,12 @@ type AttendanceRow = {
   clockIn: string | null;
   clockOut: string | null;
   workingMinutes: number;
-  productionTimeMinutes: number;
-  efficiencyPct: number;
+  // ALWAYS null (BUG-2026-08-13-103) — the punch never measured production
+  // time; these were `workingMinutes × 0.85` and a ratio of it. The per-day
+  // production hours + efficiency the Pay screen shows come from `daily[]`
+  // (completed job-card minutes ÷ clocked minutes), not from here.
+  productionTimeMinutes: number | null;
+  efficiencyPct: number | null;
   overtimeMinutes: number;
   /** Raw lateness past the grace, minutes (server-computed with the
    *  effective-dated rules — same figure the office sees). Optional so an

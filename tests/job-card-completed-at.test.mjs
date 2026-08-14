@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// job-card-completed-at.test.mjs — BUG-2026-08-13-103.
+// job-card-completed-at.test.mjs — BUG-2026-08-13-120.
 //
 // The factory could not measure how long any job takes, and not because nobody
 // records it — because the system threw the time away at the moment of capture.
@@ -61,7 +61,7 @@ const read = (rel) => readFileSync(join(ROOT, rel), "utf8").replace(/\r\n/g, "\n
 
 const HELPERS = "src/api/routes/production-orders/_helpers.ts";
 const ROUTES = "src/api/routes/production-orders.ts";
-const MIGRATION = "migrations-postgres/0227_job_cards_completed_at.sql";
+const MIGRATION = "migrations-postgres/0228_job_cards_completed_at.sql";
 
 // ---------------------------------------------------------------------------
 // 1. The decision function cannot invent an instant.

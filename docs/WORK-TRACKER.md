@@ -22,7 +22,7 @@ timestamp in scope every time.
 
 | Ask | State | Entry |
 |---|---|---|
-| Add `job_cards.completed_at` (timestamp, nullable, snake_case, indexed) ALONGSIDE `completed_date`, arriving via the runtime self-apply | ✅ done | BUG-2026-08-13-103 · `src/api/lib/job-card-completed-at.ts` · migration 0227 (record only) |
+| Add `job_cards.completed_at` (timestamp, nullable, snake_case, indexed) ALONGSIDE `completed_date`, arriving via the runtime self-apply | ✅ done | BUG-2026-08-13-120 · `src/api/lib/job-card-completed-at.ts` · migration 0227 (record only) |
 | Find EVERY completion write path, not just the quoted one | ✅ done | 19 sites enumerated in the bug entry; `worker.ts` proved to be a READER, not a writer |
 | Do NOT backfill history — leave it NULL and make that visible | ✅ done | guarded: the migration test fails on any `UPDATE`, and `reconcileCompletedAt` is property-tested to prove it can never derive an instant from a date |
 | Do NOT change any efficiency calculation | ✅ honoured | `attendance.ts` CLOCK_OUT and `src/api/lib/efficiency-report.ts` untouched (owned by another agent in flight) |

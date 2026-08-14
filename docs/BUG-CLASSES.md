@@ -5,13 +5,33 @@
 > `job_cards.completed_date` was written as `nowIso.split("T")[0]` by 14 sites while the full
 > instant sat in a local variable one line above, so no job's duration was ever derivable and
 > every "production time" figure downstream HAD to be an estimate — `production_time_minutes =
-> est_minutes` on all 36,796 rows. BUG-2026-08-13-103 adds `job_cards.completed_at` beside it
+> est_minutes` on all 36,796 rows. BUG-2026-08-13-120 adds `job_cards.completed_at` beside it
 > (additive; `completed_date` untouched) and enforces "the pair travels in one statement" across
 > all of `src/api` via `tests/job-card-completed-at.test.mjs`. Historical rows stay NULL on
 > purpose — backfilling them would BE C15. Suite at that point: 3,998 tests / 0 fail; all 11
 > assertions proved RED by mutation.
 >
-> **Previously verified 2026-08-14** — restamped on branch `fix/security-posture`: **C16 gains
+> **Last verified: 2026-08-14** — restamped on branch `docs/dashboard-data-audit`:
+> the system-wide dashboard audit (`docs/DASHBOARD-DATA-AUDIT.md`) adds **C15 rows
+> 28–38** and a **sixth corollary** (a class guard that grows by matching the first
+> instance's WORDS does not grow — the Command Center's false sentence was "All
+> clear", not "not found", so it was never in the map). Rows 28–30 are fixed and
+> guarded by `tests/dashboard-truthfulness.test.mjs`; 31–38 are open and each is
+> traced to file:line in the audit doc.
+>
+> **Last verified: 2026-08-14** — restamped on branch `fix/efficiency-fabrication`:
+> **C15 gains row 28** (BUG-2026-08-13-103) — `attendance_records.production_time_minutes`
+> was `working_minutes × 0.85` on every row ever written, and the `efficiencyPct` and
+> `deptBreakdown` published beside it were derived from that constant. Prod, August 2026:
+> 180,928 / 212,850 = 0.85005. It adds a **sixth corollary** (below the table): *a metric
+> can be honest arithmetic on a dishonest input — audit the DISTRIBUTION of the source
+> column, not the formula.* Three writers carried the same ratio, not one, and the guard
+> that pinned the surviving real metric was **single-site** — it passed while the OTHER
+> copy of the formula had its denominator replaced with a literal. Enforced by
+> `tests/no-fabricated-attendance-production-time.test.mjs`; all 13 assertions proved RED
+> by reintroducing the bug (bytes-changed-on-disk asserted before each run).
+>
+> **Previously verified: 2026-08-14** — restamped on branch `fix/security-posture`: **C16 gains
 > row 7** (a projection narrowed by PERMISSION rather than payload size — the more dangerous
 > variant, because the author cannot reproduce what the affected role sees) with its
 > OMIT-do-not-BLANK corollary, and **C12 gains rows 12 and 13** (the whole `organisations.ts`
@@ -843,8 +863,20 @@ place: `/api/department-performance` must keep dividing by clocked time,
 | 25 | "Revenue (MTD)" · "Expenses (MTD)" · "Net Profit" | `/accounting` › Overview | `Σ chart_of_accounts.balanceSen`, a column ONLY the manual-JV paths write — so hand-keyed journals were reported as the company's revenue; "(MTD)" with no date filter anywhere in the component; and the whole `COST` type dropped from the expense side | ✅ 2026-08-13 (-091) — now `GET /accounting/pl`, dash for an unposted category |
 | 26 | every material group's green "✓" | `/accounting` › Stock Summary | `balanced = opening + purchases − consumption === closing` where consumption IS `opening + purchase − closing` → `closing === closing`, true forever. A verification nobody performed, printed on a stock valuation | ✅ 2026-08-13 (-093) |
 | 27 | the whole Cash Flow statement on a Quarter / Full-year period | `/accounting` › Cash Flow | `fyMonths` parses `YYYY-MM`, so `"2026-Q1"` keyed all 13 columns `"2026-NaN"`: every income and expense line rendered `-` while `balBefore` string-compared TRUE against every real month and printed a large, REAL Bank b/f + c/f | ✅ 2026-08-13 (-092) |
+| 28 | Daily Report headline · OCR Accuracy caption | `/dashboard` (Command Center) | a dead read rendered as an answer — a **green `0` + "All clear — nothing flagged today"**, and *"No scans yet."* Same endpoint as `/daily-report`, which said *"Could not load"* correctly | ✅ 2026-08-14 (-103, -104) |
+| 29 | Supplier OCR success rate | `/dashboard` › OCR Accuracy | `rateColor(s.rate)` / `pct(s.rate)` with no `total` — the `MIN_SAMPLE` guard, added **because that panel printed a red 0% off ONE document**, was the one call site that never forwarded the sample size | ✅ 2026-08-14 (-105) |
+| 30 | printed receivables aging strip | Hookka Report › Billing Desk | five buckets computed, **four printed** — `d30Sen` (one month overdue) silently dropped, so the boxes did not tie to the total beside them, and every surviving caption named the bucket one to its left | ✅ 2026-08-14 (-106) |
+| 31 | **"Attendance %"** | Hookka Report › Workforce | `SUM(status='PRESENT')/COUNT(*)` where **every writer of `attendance_records.status` writes the literal `'PRESENT'`** and nothing writes `'ABSENT'`; absence creates no row → **100.0% by construction**, on a printed report | ⬜ open — `docs/DASHBOARD-DATA-AUDIT.md` |
+| 32 | **"Current Cash Position"** + the 12-week Running Balance | `/accounting/cash-flow` | `bank_accounts.balanceSen`, whose only writers are **migration seed fixtures** and that page's own Add-Transaction form. No invoice, receipt or payment touches it | ⬜ open — owner decision (wire it, or label the tab a scratchpad) |
+| 33 | MRP Net Req · Shortage · Sugg. PO · "14d lead" | `/planning/mrp` | `const onOrder = 0`, `moq \|\| 50`, `leadTimeDays \|\| 14` — material already on an open PO reports as a full shortage; the invented MOQ and lead time print under the supplier's name | ⬜ open |
+| 34 | KPI "last month" score + ↑/↓ delta + "settled" | `/kpi` | `kpi_periods` has **no writer anywhere** (DDL + two SELECTs), so `isLocked` can never be true: every settled month is silently recomputed against today's data | ⬜ open |
+| 35 | Labor Cost **"Reconciled · 0 difference"** ✓ | `/employees` › Labor Cost | overhead is the closing plug, so `reconciledSum ≡ totalPayrollCost` and the diff is **algebraically 0 forever** — a verification no input can turn red, printed on a payroll report | ⬜ open |
+| 36 | **PCB** on every payslip | `/employees` › Payroll | `pcb: pcbOn ? 0 : 0` — hardcoded on both branches, feeds `totalDeductions → netPay`, under a tooltip that lists PCB as included | ⬜ open |
+| 37 | Balance-sheet **"balanced ✓"**, AR/AP Outstanding, Opening-Balance **"Balanced ✓" + enabled Post** | `/accounting` | all render `RM 0.00` / a green tick over a **failed** fetch — the same page already publishes `NO_FIGURE = "—"` for three other cards | ⬜ open — row 28's shape, on a second page |
+| 38 | Trade Finance *"Draws + unallocated = account balance"* | `/accounting` › Trade Finance | `unallocated = net − Σ outstanding` and `total = Σ outstanding`, so the identity holds in integer sen **always**; the red branch is unreachable | ⬜ open |
+| 28 | `production_time_minutes`, the `efficiencyPct` and the `deptBreakdown` on EVERY attendance row | `POST /api/attendance` + `POST /api/worker/clock` + the midnight auto-close → `GET /api/attendance`, `GET /api/worker/history` | `round(workingMinutes × 0.85)` — a fixed ratio of the clock time, written at clock-out and captioned as production. The efficiency divided it by the standard day, so it measured ATTENDANCE LENGTH; the dept split republished the same number under an EMPTY productCode. Prod Aug 2026: 180,928 / 212,850 = **0.85005**. Three writers, one of which (the forgotten-punch auto-close) produced a flat **85%** that could not vary — both sides came from `stdMin` | ✅ 2026-08-13 (-103) — writers cleared, readers publish `null` / `[]`, column made nullable |
 
-**Enforced by** five files, all structural (`readFileSync` source assertions),
+**Enforced by** six files, all structural (`readFileSync` source assertions),
 because nothing else can catch a number that is merely wrong-but-plausible:
 `tests/no-fabricated-efficiency.test.mjs` (rows 1–2),
 `tests/no-fabricated-worker-metrics.test.mjs` (row 3),
@@ -852,7 +884,31 @@ because nothing else can catch a number that is merely wrong-but-plausible:
 `tests/no-fabricated-inventory-and-forecast.test.mjs` (rows 6–16),
 `tests/no-fabricated-consignment-returns.test.mjs` (row 23),
 `tests/accounting-ui-truthfulness.test.mjs` (rows 25–27, plus the two
-non-figure defects the same accounting-page audit found — see below).
+non-figure defects the same accounting-page audit found — see below),
+`tests/dashboard-truthfulness.test.mjs` (rows 28–30).
+Rows 17–22 and 31–38 are open or deliberate and carry no guard yet.
+
+⚠️ **`tests/no-fabricated-efficiency.test.mjs:6-10` states something false in
+prose** — *"Real work time IS being recorded, on a minority of cards."* It was
+refuted by the later prod count at `src/pages/reports.tsx:782-786` (4,289 of
+4,289 non-zero `actualMinutes` byte-identical to `estMinutes`). A wrong claim
+inside a **test file** is the worst place for one, because it reads as verified.
+
+**A sixth corollary, from rows 28–30 (the dashboard audit, 2026-08-14).** *A
+class guard that grows by matching the first instance's WORDS will not grow.*
+`tests/record-load-failure-class.test.mjs` enumerates new members of the
+dead-request class by scanning for the string *"not found"* — so the Command
+Center, whose false sentences are *"All clear — nothing flagged today"* and
+*"No scans yet."*, was never in the map, on the most-read screen in the app.
+When a class guard scans for text, scan for the SHAPE (a cached read whose empty
+branch renders a factual claim), or accept that it only ever finds re-runs of
+the case you already fixed. Corollary to the corollary: the honest sibling was
+right there — `/daily-report` reads the **same endpoint** and says *"Could not
+load the report."* **Two screens on one endpoint disagreeing about whether the
+data arrived is a cheap thing to grep for and a reliable smell.**
+`tests/no-fabricated-attendance-production-time.test.mjs` (row 28 — all three
+writers, both readers, AND the capture-coverage caption on the metric that
+survived).
 Rows 17–22 are open or deliberate and carry no guard yet.
 
 **A fourth corollary, from row 23.** *Real money on an invented status is more
@@ -872,6 +928,29 @@ closing` (BUG-2026-08-13-093). Neither is a number, and both told the owner some
 with the same confidence a fabricated figure does. When auditing a screen, ask of every
 control *"what would prove this did what it says?"* and of every tick *"what input makes this
 go red?"* — if the answer is "nothing", it belongs in this class.
+
+**A sixth corollary, from row 28.** *A metric can be honest arithmetic on a dishonest
+input.* Nothing in the attendance efficiency formula was wrong —
+`productionTimeMinutes ÷ standardMinutes × 100` is exactly how you compute an efficiency.
+The defect was one level down, in what `productionTimeMinutes` HELD. Reviewing the formula
+is therefore not a check; the check is on the SOURCE COLUMN, and the test is its
+**distribution**: divide the column by its supposed input across the whole table and see
+whether a constant falls out. Here 180,928 ÷ 212,850 = 0.85005 and the fabrication was
+visible in one query. Three further lessons this row paid for:
+
+* **Count the writers before fixing one.** The same ratio lived in the office punch, the
+  phone punch and the midnight forgotten-punch auto-close. Fixing the file you were pointed
+  at would have left two live fabricators — and the auto-close was the worst of them,
+  producing a flat 85% that could not vary because both sides of the ratio came from
+  `stdMin`. Grep for the CONSTANT, not for the endpoint.
+* **A column with no measuring writer will not announce itself by being NULL.** This one was
+  100% populated. So was `job_cards.actualMinutes`, whose 4,289 populated values are copies
+  of their own `estMinutes`. Ask "what code path could ever have OBSERVED this?" — if there
+  is none, coverage is zero however full the column looks.
+* **A single-site source pin is not a pin.** The guard protecting the surviving real metric
+  matched one of the two places the formula lives, and stayed green while the other had its
+  denominator swapped for a literal. Count occurrences; do not `assert.match` a formula that
+  appears more than once.
 
 **Finding these two shapes.** For an action: follow the endpoint to the TABLE it writes, then
 grep for a reader of that table — a write nobody reads is inert however healthy the HTTP
@@ -1144,8 +1223,8 @@ the coarse one, never instead of it.* Three corollaries, each of which cost some
 
 | # | discarded value | where | state |
 |---|---|---|---|
-| 1 | the completion INSTANT — 14 `.slice(0, 10)` / `split("T")[0]` truncations across the production + worker write paths | `job_cards.completed_date` | ✅ 2026-08-14 (BUG-2026-08-13-103) — `job_cards.completed_at` added beside it, written by the four observing paths only |
-| 2 | the CLOCK-OUT instant → `attendance_records.production_time_minutes = working_minutes × 0.85` | `attendance.ts` | ⬜ open — owned by a separate in-flight change; listed here so the class is complete, not to be fixed twice |
+| 1 | the completion INSTANT — 14 `.slice(0, 10)` / `split("T")[0]` truncations across the production + worker write paths | `job_cards.completed_date` | ✅ 2026-08-14 (BUG-2026-08-13-120) — `job_cards.completed_at` added beside it, written by the four observing paths only |
+| 2 | `attendance_records.production_time_minutes = working_minutes × 0.85` — the clocked span was recorded, the productive part of it never was | `attendance.ts` | ✅ 2026-08-14 by a separate change (BUG-2026-08-13-103, filed under C15 row 28). Listed here because it is the SAME root: a punch measures presence, and no writer ever measured production, so the only available figure was a ratio of the one number that WAS captured. That fix removed the false figure; **row 1 is what gives the replacement something real to divide** |
 | 3 | `job_cards.actual_minutes` — written as a copy of `est_minutes` by every path that sets it, so the column exists but measures nothing | `import-completion/_shared.ts` and the cascade backfills | ⬜ open, and it is the NEXT one: once row 1 has accumulated data, this column has a real source for the first time. Do not "fix" it by computing a duration for historical rows |
 | 4 | the rest of the app | ⬜ unswept. The shape to look for is a `.slice(0, 10)` / `split("T")[0]` / `Math.round` / `toFixed` applied to a value the code obtained precisely, where nothing else stores the precise form |
 

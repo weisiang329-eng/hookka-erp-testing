@@ -34,7 +34,7 @@ Entries themselves stay newest-first.
 
 ---
 
-## BUG-2026-08-13-103 — the factory cannot measure how long any job takes, because the system throws the time away at the moment of capture `production-orders` `data-integrity` 🟢
+## BUG-2026-08-13-120 — the factory cannot measure how long any job takes, because the system throws the time away at the moment of capture `production-orders` `data-integrity` 🟢
 
 **Symptom.** There is no honest answer anywhere in the app to "how long did this card take?",
 "how many productive minutes did this worker actually put in today?", or "is this department
@@ -73,7 +73,7 @@ because the only real input was thrown away before anything could read it.
 holding a full ISO-8601 instant, snake_case, indexed) added ALONGSIDE `completed_date`, which is
 untouched. Migrations are inert on deploy, so the column arrives via `ensureJobCardCompletedAt`
 (`src/api/lib/job-card-completed-at.ts`), awaited at the top of every handler that writes it;
-`migrations-postgres/0227_job_cards_completed_at.sql` is the record.
+`migrations-postgres/0228_job_cards_completed_at.sql` is the record.
 
 The rule the module enforces: **`completed_at` is a MEASUREMENT, never a derivation.** The full
 `nowIso` is stored ONLY by the four paths that observe a completion happen —
@@ -141,6 +141,468 @@ still reads NULL.
 **Not changed, deliberately.** Every efficiency calculation, `attendance.ts`'s CLOCK_OUT branch
 and `src/api/lib/efficiency-report.ts` — making those honest is separate work, in flight
 elsewhere. This change only starts recording the truth so a real measurement becomes possible.
+
+---
+
+## BUG-2026-08-13-110 — the Employees page asked for a 5 MB job-card drilldown to render three KPI numbers `performance` `ui-frontend` 🟡
+
+**Symptom.** The owner: "有一些在效率方面好像确实有点卡" — the Employees / efficiency
+screens feel laggy. No error, nothing hangs; the page just takes a long beat to settle.
+
+**Root cause.** `GET /api/department-performance` returns, for every day in the window,
+`daily[].jobs[]` and `daily[].workers[].jobs[]` — one entry per job card per day. The route's
+own comment records the prod measurement: **a 61-day range is 9.5 MB**
+(`src/api/routes/department-performance.ts:91-98`, measured 2026-08-13). A `?view=summary`
+projection was added the same day to spare a report from that, and had exactly one caller
+(`src/pages/reports.tsx:1743`).
+
+Two callers on `/employees` kept asking for the full payload while reading **only
+`data.totals`**:
+
+| caller | window it asks for | what it actually reads |
+| --- | --- | --- |
+| `employees.tsx:11544` — the four KPI cards at the top of the page | follows the ACTIVE TAB's persisted range (a calendar month by default, owner ruling 2026-07-11) | `data.totals` — Present / Working Hours / Avg Efficiency |
+| `employees.tsx:11271` — Attendance tab month dashboard | the whole calendar month containing the picked date | `data.totals.efficiencyPct` — **one number** |
+
+The first fires on **every** `/employees` mount, and again on every tab switch that changes
+the persisted range. This matters more than its own latency: the API tier serialises
+concurrent requests (docs/PERF-BACKLOG.md, "THE ROOT CAUSE"), so a fat read does not just
+cost its own bytes, it holds a slot in the queue everything else is waiting behind.
+
+**Fix.** Both callers now pass `?view=summary`. The Department Performance TAB
+(`employees.tsx:6065`) deliberately keeps the FULL payload — it is the one caller that
+renders `daily[].workers[].jobs[]`, when the operator expands a day. The snapshot `cacheKey`
+excludes `view` (`department-performance.ts:235`), so the tab and the cards still share one
+cached compute; this is a projection at serialisation time, not a second query.
+
+**Equivalence.** `projectPerformanceSummary` returns `totals: data.totals` — the SAME OBJECT,
+by reference (`department-performance.ts:171`). The KPI figures cannot drift, and
+`tests/dept-perf-summary-projection.test.mjs` asserts the reference identity rather than a
+deep-equal, so a future refactor to `{ ...data.totals }` fails the test even though the
+numbers would still match that day. A fingerprint over `range + departmentCode + category +
+totals + daily[].{date,workingMinutes,productionMinutes,efficiencyPct}` is byte-identical
+across the two views.
+
+**Measured.** `full` vs `summary` bytes, computed by running the real
+`projectPerformanceSummary` over a synthetic payload in the handler's exact shape, with the
+job-cards-per-day parameter calibrated so a 61-day window lands on the 9.5 MB prod figure
+above (the calibration and the table are printed by the test, so they can be re-derived):
+
+| window | full | summary | ratio |
+| --- | --- | --- | --- |
+| 61 days | 9,760 KB | 12.3 KB | 791x |
+| **31 days (what these callers ask for)** | **4,960 KB** | **9.7 KB** | **511x** |
+| 7 days | 1,120 KB | 7.4 KB | 150x |
+| 1 day | 160 KB | 6.8 KB | 23x |
+
+**Not yet verified on prod.** This branch is not deployed and the prod API is behind login.
+The "before" column is anchored to a real prod measurement; the "after" column is COMPUTED
+from the real projection code, not observed. Re-measure on prod after deploy.
+
+**Guard.** `tests/dept-perf-summary-projection.test.mjs` — 8 tests: the reference-identity and
+fingerprint equivalence checks, the per-worker rollup, the measurement, and source locks on
+every narrowed caller PLUS a negative lock that fails if anyone narrows the Department
+Performance tab. Red-proved by `tests/dept-perf-summary-red-proof.mjs` (run by hand, it
+mutates source): 9 mutations across both suites, each naming the specific test that must
+fail, **9/9 red, 0 harness failures**. The harness normalises CRLF->LF before searching, because every source
+file in this repo is CRLF on disk and a multi-line anchor written with `\n` matches nothing —
+which would have shown up as "the guard held" when in fact the bug was never reintroduced.
+
+---
+
+## BUG-2026-08-13-111 — the Employee Performance tab downloaded every worker's punches to show one worker's `performance` `ui-frontend` 🟡
+
+**Symptom.** Same "卡" as -110, on the tab that shows a single employee.
+
+**Root cause.** `src/pages/employees.tsx:5435` (`EmployeeDetailTab`) fetched
+`/api/attendance?from=…&to=…` — the whole organisation's punches for the window — and then
+threw away everything but one worker:
+
+```
+rangeAttendance.filter((a) => a.employeeId === selectedEmployeeId)
+```
+
+The two data sources on the lines directly above it (`jcUrl`, `wheUrl`) both already scope
+server-side by worker, so this one line was the odd one out. `GET /api/attendance` has
+supported `?employeeId=` since the mobile employee card (dc12) needed it —
+`src/api/routes/attendance.ts:126-143` composes it with `from`/`to` in the same WHERE.
+
+**Not the same thing as the "/api/attendance is NOT slow" note in PERF-BACKLOG.** That note
+is correct and still stands: a bare unparameterised call is a false alarm because no caller
+makes one. This is the opposite failure — a caller that IS date-scoped, so it never looked
+suspicious, but that pulls ~50x the rows it renders because the WORKER dimension was left to
+the browser.
+
+**Fix.** `?employeeId=` added, and the fetch skipped entirely (URL `""`) when no worker is
+selected — again matching `jcUrl`/`wheUrl`. Ordering is untouched: with `from`/`to` set and
+no `date` param, `orderBy` is `date DESC, employeeId` in both the old and new call
+(`attendance.ts:144`), and `empRecords` re-sorts by date regardless. The client-side filter is
+KEPT as a no-op guard — `useCachedJson` reseeds from cache on URL change, so a stale entry
+from the previously-selected worker could otherwise paint for one frame.
+
+**Not yet verified on prod** (not deployed; prod is behind login). The row-count reduction is
+structural — the WHERE clause gained a column — rather than measured.
+
+**Guard.** Covered by `tests/dept-perf-summary-projection.test.mjs`: a positive lock on the
+scoped URL and an explicit negative lock on the old unscoped string, so a revert cannot pass
+by resembling it. Red-proved (mutation M4).
+
+---
+
+## BUG-2026-08-13-112 — three mobile screens downloaded a multi-MB payload to render zero rows `performance` `ui-frontend` 🟡
+
+**Symptom.** On `/m`, Planning › Capacity Overview, Planning › Capacity Loading and
+Employees › Dept Perf are empty. Nobody had connected that to the phones feeling slow.
+
+**Root cause — two independent defects stacked.** All three sources
+(`src/pages/m/config/modules.ts`, `planningCapacitySource` / `planningLoadSource` /
+`deptPerfSource`) fetch `/api/department-performance` for the current month, i.e. the same
+full per-job-card payload as -110. Then each `select` peels `data.departments`:
+
+```
+const list = (o.data?.departments ?? o.departments) as unknown;
+```
+
+The endpoint's payload is `{ range, departmentCode, category, totals, daily }`. There is no
+`departments` key, and there never has been — in either view. So the select always yields
+`[]` and every one of the three screens renders nothing, having first downloaded up to
+several MB to do it. The comment above `deptPerfSource` describes a
+`{ data: { departments: [...] } }` shape that the route does not produce; it is documenting
+an intention, not the code.
+
+**Fix (performance only).** All three now pass `?view=summary`, cutting the download by
+~500x over a month window (measurement table in -110). This changes nothing that renders:
+the response was unusable before and is unusable after. It matters because these are the
+phones on the factory floor, on the worst networks in the building, and because every one of
+those requests occupies a slot in a serialised queue.
+
+**Deliberately NOT fixed: the empty screens.** Making them render would mean choosing what
+"department capacity", "capacity loading" and "dept performance" should show on a phone and
+how to derive it from `daily[]` / the summary view's `workers[]` — a product decision, and the
+owner's to make. Fabricating a mapping to make three screens look populated is exactly the
+failure this repo logged three times on 2026-08-13 (Worker Efficiency from a hash, Department
+Efficiency dividing an estimate by itself, a P&L with hardcoded expenses). Raised in
+docs/PERF-BACKLOG.md as an open item, with the honest note that the screens are empty today.
+
+**Guard.** `tests/dept-perf-summary-projection.test.mjs` counts the
+`/api/department-performance` sources in `modules.ts` (expects exactly 3, so a fourth added
+later cannot slip past unnarrowed) and asserts each carries `view=summary`. Red-proved
+(mutation M5).
+
+---
+
+## BUG-2026-08-13-113 — every attendance list read dragged two base64 JPEGs per worker-day out of Postgres and threw them away `performance` `data-migration` 🟡
+
+**Symptom.** `GET /api/attendance` is disproportionately expensive for what it returns.
+Measured on prod 2026-08-13 (already in docs/PERF-BACKLOG.md): 2,818 rows → **1.28 MB but
+1.7–6.3 s**, and a 30-day window is 1,081 ms against 126 ms for a single day. A 1.28 MB
+response has no business taking six seconds on an endpoint with no joins and no aggregation.
+
+**Root cause.** The handler ran `SELECT * FROM attendance_records`. A punch selfie is
+**REQUIRED** to clock in or out (`src/pages/worker/index.tsx:669`) and is stored **inline on
+the row** as a base64 JPEG data URL, capped at 600 KB
+(`src/api/routes/worker.ts` → `stampPunchPhoto`). So every list read pulled two image blobs
+per worker-day out of Postgres, across Hyperdrive, into the isolate — and then
+`rowToAttendance` reduced each one to a boolean and dropped it. The response is ~460
+bytes/row; the READ behind it is orders of magnitude larger. That gap is the missing seconds,
+and it is invisible from the network tab, which is why the endpoint had already been
+(correctly) cleared as "not slow" on the basis of its payload size.
+
+Who pays: the Working Hours tab — the **DEFAULT tab of /employees** — fetches
+`/api/attendance?from=&to=` for a whole month on mount, so opening the Employees page pulled
+a month of selfies for every worker in the company.
+
+**Fix.** An explicit projection that never selects the blobs, asking Postgres for the
+has-flags instead:
+
+```
+(clockInPhoto IS NOT NULL) AS hasclockinphoto
+```
+
+`rowToAttendance` now reads the flag from three key spellings in order — the SQL alias
+first, then the two `dual()` blob reads the POST responses and the fallback path still
+return. It is a `??` chain, not `||`: `false` is a legitimate answer from the aliased form
+and `||` would swallow it.
+
+**Why an explicit projection is safe here** even though the comment on `/:id/photo` warns
+against one. Every STATIC column named is in `column-rename-map.json`, so `supabase-compat`
+rewrites it to the right snake_case name and the driver maps it back (`db-pg.ts:57`). The
+RUNTIME-added geo/photo columns are NOT in the map, so they pass through bare and Postgres
+folds them to all-lowercase — which is exactly the name they were CREATED with through the
+same path, and exactly what the existing `dual()` reads already expect.
+
+**What it cannot survive, and the fallback.** A database where the runtime columns do not
+exist yet (nobody has punched): naming a missing column is a hard error where `SELECT *`
+simply omits it. So a Postgres **42703** — and ONLY a 42703 — falls back to the original
+whole-row read. Worst case is exactly today's behaviour, one wasted query later. A bare
+`catch {}` was deliberately not used: it would also swallow a transient pooler failure and
+answer it with a second heavy query and a 200, hiding an outage that
+`isTransientDbError()` exists to report as a 503.
+
+**Not verified on prod, and the win is NOT quantified.** The saving is in Postgres→Worker
+bytes, which cannot be observed from the browser at all, and this branch is not deployed.
+What is proved is that the blobs are no longer requested and that the response is unchanged.
+Treat "how much faster" as an open question to answer on prod, not a claim made here.
+
+**Guard.** `tests/attendance-list-no-photo-blobs.test.mjs` — 5 BEHAVIOURAL tests against the
+real Hono handler with a stub DB, not a source grep, because what must be proved is an
+equivalence: the narrow read and the whole-row read produce **byte-identical JSON**. Also
+covers the 42703 fallback, the non-42703 rethrow, and that `?employeeId=` composes with the
+date window without changing ORDER BY. Red-proved (mutations M6, M7).
+
+---
+
+## BUG-2026-08-13-114 — the Employees page held its first paint behind a fetch whose result nothing read `performance` `ui-frontend` 🟡
+
+**Symptom.** `/employees` shows "Loading employee data..." for longer than it should, then
+everything appears at once.
+
+**Root cause.** `EmployeesPage` fetched `/api/attendance?date=<today>` at page level. Its
+comment claimed it fed "the four today-summary cards"; it had not done that for some time —
+those cards read `summaryTotals` off `/api/department-performance`. What the response
+actually reached was:
+
+```
+attendanceResp → todayAttendance → setDateAttendance
+```
+
+…and `dateAttendance` was declared `const [, setDateAttendance] = useState(...)`. **The value
+was never destructured.** Every write went nowhere. A second raw `fetch` in
+`fetchDateAttendance` wrote into the same dead state on every Working Hours row save.
+
+The request was not free, though: its `loading` flag was ORed into the page-level `loading`
+that renders the full-screen block, so the ENTIRE page waited for a whole-org attendance
+read — the exact read fixed in -113 — before painting anything. On a serialised request
+queue it also held a slot the rest of the mount burst was waiting behind.
+
+**How it survived review.** Nothing about the fetch looks wrong in isolation: it is
+date-scoped, it has an explanatory comment, and its result flows into a `useState`. The
+defect is only visible by following that state to its declaration and noticing the empty
+first slot of the destructuring. This is the "read the code, not the comment" case in its
+purest form — the comment described a wiring that had been replaced.
+
+**Fix.** The hook, the memo, the copy-effect, the dead raw fetch and the dead state are
+removed; `loading` is `workersLoading` alone. `refreshAttendance(date)` is KEPT and still
+invalidates the `/api/attendance` and `/api/workers` cache prefixes — that half was never
+dead: it is what makes the Attendance and Employee Performance tabs re-read after the
+Working Hours grid saves a punch-derived row. Its `date` argument is now unused (the prefix
+invalidation covers every window at once) and is named `_date` to say so.
+
+**Net effect on the mount burst:** one fewer request, and first paint no longer blocked on
+one.
+
+**Not yet verified on prod** (not deployed). The removal is provable by reading the code; the
+timing improvement is not measured.
+
+**Guard.** In `tests/dept-perf-summary-projection.test.mjs`. It strips comments before
+searching — the fix left a comment that NAMES `setDateAttendance`, and the first version of
+this very test failed against its own explanatory note. Asserts the identifiers are gone from
+CODE, that `loading` is `workersLoading` alone, and — the other half — that
+`refreshAttendance` STILL invalidates the attendance prefix, so "clean up the dead code" can
+never take the live part with it. Red-proved (mutation M8).
+## BUG-2026-08-13-107 — the Command Center printed a green `0` and "All clear" over a compliance read that had died `dashboard` `data-integrity` `ui-frontend` 🟢
+
+**Symptom.** The Daily Report tile on `/dashboard` — the first card under the KPI rail —
+showed a large **green `0`** captioned *"All clear — nothing flagged today"* whenever
+`/api/reports/compliance.json` timed out, 500'd, or was killed by the 30 s global abort in
+`src/lib/api-client.ts`. The owner reads that tile as a statement that the factory has no
+open exceptions, and acts on it.
+
+**Root cause.** `useCachedJson` hands a killed request back as
+`data = null, loading = false` — byte-for-byte the state a genuinely clean day produces. The
+tile destructured only `data` and `loading` and rendered `compCounts?.total ?? 0`. The hook
+publishes a classified `failure`, and `isUnknownOutcome(failure)` is the single decision that
+separates "the server said nothing is wrong" from "nobody answered" (the primitive shipped as
+BUG-2026-08-13-016) — this tile never asked.
+
+**The same endpoint, the honest sibling.** `/daily-report` reads the *identical* URL and gets
+it right: *"Could not load the report. Please try again."* (`daily-report.tsx:1105-1122`).
+Same data, two screens, one of them lying — which is why this is a page defect and not a
+primitive defect.
+
+**Why the class guard missed it.** `tests/record-load-failure-class.test.mjs` grows by scanning
+for pages that print the string *"not found"*. This page's false sentence is *"All clear"*.
+The guard was pattern-matched to the first instance instead of to the shape, so the dashboard
+was never in the map.
+
+**Fix.** `src/pages/dashboard-b/index.tsx` — destructure `failure` + `refresh`, derive
+`compFailed = !compCounts && failure != null && isUnknownOutcome(failure)`, render **"—"** and
+*"Couldn't load — this is not a clean day, it is an unknown one"* plus a Retry chip. A genuine
+`0` from a 2xx body still reads "All clear", which is the point: only an observed answer
+licenses the words.
+
+---
+
+## BUG-2026-08-13-104 — the OCR card said "No scans yet" over a request that never answered `dashboard` `data-integrity` `ui-frontend` 🟢
+
+**Symptom.** `OcrAccuracyCard` at the foot of the Command Center printed *"No scans yet. Once
+you scan and import orders / supplier docs, the accuracy shows here automatically."* on any
+failed fetch — a statement that the scanner has never been used in the selected period.
+
+**Root cause.** Identical shape to -103: `!d` is true for a 30 s abort and for an empty 2xx
+body alike, and the card branched on `!d || d.overall.total === 0`.
+
+**Fix.** `src/pages/dashboard-b/OcrAccuracyCard.tsx` — `loadFailed` gate through
+`isUnknownOutcome(failure)`, an honest failure panel carrying `failure.message`, the sentence
+*"This is not a statement that nothing was scanned — the data never arrived"*, and a Retry.
+
+---
+
+## BUG-2026-08-13-105 — the OCR sample-size guard was missing from the one panel it was written for `dashboard` `data-integrity` 🟢
+
+**Symptom.** A supplier with a single scanned document rendered a confident **red 0%** in the
+Supplier table — no grey, no `*`, no sample-size caveat — beside customer rows that did carry
+one.
+
+**Root cause.** `MIN_SAMPLE = 5` greys a rate and appends `*` when `total < 5`, and both
+helpers take the total as an optional second argument. Every table forwards it —
+`rateColor(b.rate, b.total)`, `rateColor(t.rate, t.total)` — **except the by-Supplier rows**,
+which called `rateColor(s.rate)` / `pct(s.rate)`. The guard was live everywhere except where
+it was needed: the comment above `MIN_SAMPLE` records that it was introduced *because the
+Supplier panel read a red 0% off ONE document* (owner 2026-08-05).
+
+**Fix.** Pass `s.total` to both helpers. The guard test now rejects **any** single-argument
+`rateColor(...)` / `pct(...)` call in the file, so a new table cannot reopen the hole.
+
+---
+
+## BUG-2026-08-13-106 — the printed Hookka Report dropped a whole receivables bucket, and shifted every remaining label `reports` `data-integrity` 🟢
+
+**Symptom.** The Billing Desk strip on the printed Hookka Report showed four aging boxes —
+Current / 31–60d / 61–90d / 90d+ — which **did not add up to the "Receivables" total printed
+beside them**.
+
+**Root cause.** `operations-report.ts:919-923` computes **five** buckets from
+`monthsOverdue(invoiceDate)`: `currentSen` (mo ≤ 0), `d30Sen` (mo 1), `d60Sen` (mo 2),
+`d90Sen` (mo 3), `over90Sen`. The strip rendered four of them and **omitted `d30Sen`
+entirely**, so every invoice exactly one month overdue vanished from a printed financial
+statement. With it went the labels: what read "31–60d" was `d60Sen` — two months — so each
+caption named the bucket one to its left. The captions also asserted *days* over a
+whole-month calculation.
+
+**Fix.** `src/pages/hookka-report-editions.tsx` — five columns, all five buckets, captions
+that say what the maths does (Current / 1 mth / 2 mth / 3 mth / 3 mth+).
+
+**Guard.** `tests/dashboard-truthfulness.test.mjs` derives the bucket set from
+`operations-report.ts` itself (`aging.<x>Sen +=`) rather than hardcoding five names, so
+adding a sixth bucket to the aggregator without rendering it fails the build.
+
+---
+
+## All four (-103 … -106): how the guards were proved
+
+`tests/dashboard-truthfulness.test.mjs` is structural — `readFileSync` assertions on the
+source — because none of these is a runtime error. `0` is a valid number, *"All clear"* is
+valid copy, and a four-column grid is valid markup; a plausible screen is exactly what each
+bug produced.
+
+Each assertion was proved RED by **reintroducing the exact removed expression** and watching
+the file fail: the `?? 0` headline, the ungated *"All clear"* caption, the `loadFailed`
+derivation, the single-argument `rateColor(s.rate)`, and the four-bucket strip. Five
+mutations, five failures, files restored byte-identical afterwards.
+
+**The first run of that proof reported three SETUP FAILs, not three REDs** — the anchors used
+literal `\n` and these files are CRLF on disk, so the mutations were never applied and would
+have "passed" as evidence of nothing. That is the EOL trap `docs/BUG-CLASSES.md` names, hit
+in the act of guarding against it; the harness now derives its line ending from the file it is
+mutating.
+
+Full context for all four, plus the 40-odd findings this pass did **not** fix, is in
+[`docs/DASHBOARD-DATA-AUDIT.md`](DASHBOARD-DATA-AUDIT.md).
+## BUG-2026-08-13-103 — "production time" and every efficiency built on it were `clocked × 0.85`; a punch has never measured production `data-integrity` `attendance` `reporting` 🟢
+
+**Symptom.** None — which is the point. Attendance carried a per-day "Production Time" and
+an "Efficiency %" for every worker, every day, in the same typeface as the real figures
+beside them, and the numbers were plausible. Nothing 500'd, nothing rendered blank.
+
+**Root cause.** `src/api/routes/attendance.ts` CLOCK_OUT:
+
+```js
+workingMinutes        = Math.max(0, total);                      // REAL: out − in
+productionTimeMinutes = Math.max(0, Math.round(total * 0.85));   // FABRICATED
+efficiencyPct         = Math.round((productionTimeMinutes / standardMinutes) * 100);
+deptBreakdown         = JSON.stringify([{ deptCode, minutes: productionTimeMinutes,
+                                          productCode: "" }]);
+```
+
+`attendance_records.production_time_minutes` has **never been measured**. It is
+`working_minutes × 0.85`. Measured on prod for August 2026: 180,928 / 212,850 =
+**0.85005** — the constant showing through. Consequently `efficiencyPct` measured
+ATTENDANCE LENGTH wearing the word "efficiency" (`0.85 × clocked ÷ standard`), and
+`deptBreakdown` published a per-department split that was the same fabricated number under
+an **empty** `productCode`.
+
+**Three writers, not one.** Grepping the constant rather than the endpoint found the same
+ratio in:
+
+1. `attendance.ts` — `POST /api/attendance` CLOCK_OUT (the office punch).
+2. `worker.ts` — `POST /api/worker/clock` CLOCK_OUT (the phone punch), an exact copy.
+3. `worker.ts` `autoCloseForgottenPunch` — the midnight cron + next-day self-heal, which
+   computed `stdMin × 0.85` and then divided it by `stdMin`, so **every** auto-closed day
+   was stamped a flat **85%** that could not vary by construction.
+
+A fourth path, `working-hour-entries.ts`, seeded the columns with `0` on the attendance row
+it auto-creates — the quieter form of the same defect (C15: *`0` is a claim, not a blank*).
+
+**Blast radius — what it did NOT reach, which took the longest to establish.** Payroll does
+**not** touch these columns. `payroll-hour-deductions.ts:282` selects only
+`employeeId, date, clockIn, clockOut`; the efficiency ALLOWANCE
+(`src/api/lib/efficiency-allowance.ts`, real money, gated on a threshold) uses
+`job_cards.productionTimeMinutes × wipQty` over `working_hour_entries.hours` — a different
+`productionTimeMinutes`, on a different table. **No pay figure was ever computed from the
+fabricated column.** Nor did any screen render it: the Employee Detail tab dropped the
+attendance-sourced rows in 2026-05, `reports.tsx` reads only `workingMinutes` /
+`overtimeMinutes` from attendance, and the mobile card shows clock-in/out/hours. It was
+exposed on `GET /api/attendance` and `GET /api/worker/history`, typed in four frontend
+files, and one API-doc comment advertised `efficiencyPct` as a "real field" — i.e. it was
+sitting there waiting for the next screen to pick it up.
+
+**Fix.**
+* All four writers stop computing it. The punch now records only what a punch observes:
+  clock in, clock out, the minutes between, and the OT rule applied to those minutes.
+* `production_time_minutes` / `efficiency_pct` are **cleared to NULL** at clock-out (so a
+  re-punch scrubs what a pre-fix clock-out wrote) and **omitted** from both INSERT paths.
+  `migrations-postgres/0227_attendance_unmeasured_metrics_nullable.sql` drops their
+  `NOT NULL` + `DEFAULT 0` so "unknown" is expressible at all; it also runs at runtime via
+  `ensureAttendanceMetricsNullable` because migrations are inert on deploy here. If that DDL
+  cannot apply, the write paths **omit** the columns — the fallback is silence, never a
+  number.
+* Both readers (`rowToAttendance`, `/api/worker/history`) publish `null` / `[]`
+  **unconditionally**. Every stored value is fabricated, so a passthrough would republish
+  the fabrication for the ~2,780 historic rows.
+* The migration deliberately does **not** UPDATE those historic rows to NULL — irreversible,
+  not needed for correctness (nothing can read them now), and the owner's call. The exact
+  statement is written in the migration's header for when he decides.
+
+**Deliberately left alone.** `autoCloseForgottenPunch` still writes
+`workingMinutes = stdMin`. That is the owner's stated RULE (2026-06-16: a forgotten punch
+pays as a normal shift — no OT, no short-hour dock), the row says so in `notes`, and
+BUG-2026-08-01-004 depends on it. A policy figure that names itself is not a fabricated
+measurement.
+
+**The metric that survived, now labelled honestly.** `/api/department-performance` is
+untouched: it divides job-card minutes by REAL clocked time from `working_hour_entries`.
+But its numerator is `actualMinutes ?? estMinutes`, and recorded durations collapsed in
+May 2026 (Jan 100% → Apr 72.6% → May 6.2% → Jun–Aug ~0%; **0 of 3,475** August job cards
+carry one), so in practice it is EARNED STANDARD time — earned-vs-actual labour efficiency,
+a legitimate metric, but not measured production pace. The endpoint now returns
+`totals.cards` / `totals.measuredCards` (a card counts as measured only when its recorded
+duration DIFFERS from its own standard — 4,289 populated values on prod are byte-identical
+copies of their estimate), and both surfaces caption it *"standard minutes earned ÷ clocked
+minutes"* with the coverage printed beside it, plus an explicit warning not to trend it
+against a period when capture was real.
+
+**Verified.** `tests/no-fabricated-attendance-production-time.test.mjs` — 7 structural
+tests, 13 assertions. Every one proved RED by reintroducing the bug, with **bytes-changed-
+on-disk asserted before each run** and byte-identical restore after. Reads are CRLF-
+normalised and the prose assertions run against a whitespace-collapsed copy, because a
+literal `\n` anchor matches nothing in these files. Two of the thirteen were **blind on the
+first draft**: the caption checks matched a sentence JSX had wrapped across lines, and the
+anti-over-correction pin on `/api/department-performance` matched only ONE of the two places
+that formula lives — it stayed green with the other site's denominator replaced by a
+literal. `npx tsc -p tsconfig.app.json --noEmit` exit 0. **Not deployed** — no prod
+verification claimed.
+
 
 ---
 

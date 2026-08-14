@@ -65,7 +65,7 @@ let completedAtMigration: Promise<void> | null = null;
  * Self-apply `job_cards.completed_at`.
  *
  * Migrations are INERT on deploy in this repo (CLAUDE.md): the migration file
- * `migrations-postgres/0227_job_cards_completed_at.sql` is the record, this is
+ * `migrations-postgres/0228_job_cards_completed_at.sql` is the record, this is
  * the mechanism. Await it at the TOP of every handler that writes the column,
  * before the first statement that mentions it.
  *

@@ -1,5 +1,9 @@
 # Hookka ERP — Codebase Map (the single authoritative map)
 
+> **Restamped 2026-08-14 on branch `fix/efficiency-fabrication`:** the Reports/Employees
+> section gains the `attendance_records` warning — that table carries no production or
+> efficiency data and never has (BUG-2026-08-13-103).
+>
 > **Last verified: 2026-08-14** — re-checked mechanically by `node scripts/check-codebase-map.mjs`,
 > which validates that every cited path resolves, every `file:LINE` is in range, and every symbol
 > named beside a line ref is really defined near it. Exit 0 on this revision. Coverage gap is now
@@ -436,7 +440,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 - wipKey is derived by a SINGLE shared helper `deriveTopLevelWipKey` (FAB_SEW splits on '::'[2], etc.). Never re-implement; stale picks throw at confirm.
 - Repair scope: `production_orders.repairscope` stamps partial repairs (FULL=null=byte-identical). Component-scope picks DROP unowned material lines — not cosmetic.
 - COMPLETED job_cards / non-PENDING fg_units are inviolate (production locks). Suggest a UI fix instead.
-- **A job card now carries TWO completion columns and they mean different things (2026-08-14, BUG-2026-08-13-103).** `job_cards.completed_date` is the DAY the completion is filed under — date-only by design, and depended on by the efficiency scan, the dept sheets, the list filters, the archive union and every `substr(completedDate::text,1,10)` comparison; unchanged. `job_cards.completed_at` (nullable TEXT, ISO-8601, indexed; self-applied by `ensureJobCardCompletedAt`, migration 0227 is the RECORD only) is the INSTANT the system OBSERVED the card complete. **It is written ONLY by the four paths that watch a completion happen** — `/scan-complete`, `/scan-complete-dept`, `/scan-complete-shared` and the office PATCH's auto-stamp (`applyPoUpdate`, `if (isDone)`). Every other writer — a typed date, the Sheets webhook, every import/backfill — goes through `reconcileCompletedAt`, which can only KEEP an existing instant (same day) or DROP it, never mint one. **Historical rows are deliberately NULL and are not backfilled**: the time is gone, and a plausible 09:00 would be C15. The invariant `completedAt travels with completedDate in the SAME statement` is enforced across all of `src/api` by `tests/job-card-completed-at.test.mjs` — a new completion writer fails CI until it is wired. TEXT rather than TIMESTAMPTZ so it is the same shape as `job_cards.distributed_at`, which is what it exists to be subtracted from.
+- **A job card now carries TWO completion columns and they mean different things (2026-08-14, BUG-2026-08-13-120).** `job_cards.completed_date` is the DAY the completion is filed under — date-only by design, and depended on by the efficiency scan, the dept sheets, the list filters, the archive union and every `substr(completedDate::text,1,10)` comparison; unchanged. `job_cards.completed_at` (nullable TEXT, ISO-8601, indexed; self-applied by `ensureJobCardCompletedAt`, migration 0228 is the RECORD only) is the INSTANT the system OBSERVED the card complete. **It is written ONLY by the four paths that watch a completion happen** — `/scan-complete`, `/scan-complete-dept`, `/scan-complete-shared` and the office PATCH's auto-stamp (`applyPoUpdate`, `if (isDone)`). Every other writer — a typed date, the Sheets webhook, every import/backfill — goes through `reconcileCompletedAt`, which can only KEEP an existing instant (same day) or DROP it, never mint one. **Historical rows are deliberately NULL and are not backfilled**: the time is gone, and a plausible 09:00 would be C15. The invariant `completedAt travels with completedDate in the SAME statement` is enforced across all of `src/api` by `tests/job-card-completed-at.test.mjs` — a new completion writer fails CI until it is wired. TEXT rather than TIMESTAMPTZ so it is the same shape as `job_cards.distributed_at`, which is what it exists to be subtracted from.
 - camelCase DB columns: most at-risk WIP/production cols are dual-keyed (r.camelCase ?? r.snake_case); db-pg toCamel can't recover folded-lowercase camelCase. New columns snake_case; a camelCase write column needs a `column-rename-map.json` entry.
 - BOM production-time / minute rates written into `bom_templates.wipComponents` from BOTH bom.tsx (ProductionTimesDialog) and wip-times.tsx/route — keep consistent; feed productionCostRatePerMinuteSen in the PO cost cascade.
 - EditBOMDialog's WIP tab is TWO-PANE (2026-08-03): `flattenWipTree` turns the recursive tree into indented rows on the left (selection + collapse, addressed by a `wi.path` key), and `WipNodeDetail` edits the SELECTED node on the right at full width. It replaced an inline recursive render inside a fixed 720px dialog, where each nesting level stole ~20px and the category select clipped to "CAT 3" by level 3, with four clashing background fills stacked inside one another. Depth now reads as a 3px left colour bar. The dialog is `w-[min(1160px,95vw)]` and the WIP tab owns its own scrolling (the body switches to `overflow-hidden` so each pane scrolls independently). Because ONE detail pane serves every depth, EditBOMDialog carries depth-agnostic adapters (`nUpdate`, `nAddProcess`, `nMove`, …) that dispatch on `path.length === 0` between the `xxxWIP(wi,…)` and `xxxAtPath(wi,path,…)` handler families — BOTH families are still live and must stay in sync. MasterTemplatesDialog still uses the old recursive `SubWIPTree`. Pins: `tests/bom-editor-reorder.test.mjs`.
@@ -561,7 +565,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/employees.tsx` — 9-tab admin shell (11,746) | `src/api/routes/workers.ts` — employee master + salary effective-dating (1047) | `workers` / `worker_salary_history` | `tests/labor-engine.test.mjs` · `tests/virtual-group-window.test.mjs` |
+| `src/pages/employees.tsx` — 9-tab admin shell (11,784) | `src/api/routes/workers.ts` — employee master + salary effective-dating (1047) | `workers` / `worker_salary_history` | `tests/labor-engine.test.mjs` · `tests/virtual-group-window.test.mjs` |
 | `src/pages/worker/index.tsx` — worker mobile home | `src/api/routes/worker.ts` — self-service mobile backend (4130) | `departments` / `attendance_records` | `tests/attendance-rules.test.mjs` |
 | `src/pages/worker/scan.tsx` — clock/dept-scan/packing (3203) | `src/api/routes/worker-auth.ts` — PIN auth | `working_hour_entries` | `tests/auto-attendance-deduct.test.mjs` |
 | `src/pages/worker/pay.tsx` — payslip view | `src/api/routes/attendance.ts` — admin attendance (374) | `payroll_runs` / `payroll_*` (generated) / `payroll_payslips` | `tests/worker-auth.test.mjs` |
@@ -575,28 +579,45 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 | | `src/api/routes/payslips.ts` — payslip read/persist (OT buckets) | | |
 | `src/pages/announcements.tsx` — office compose + per-card **read-receipt panel** (`ReadReceiptPanel`: lazy GET `/:id/acks`, acked/pending lists, **Remind** → POST `/:id/remind`) | `src/api/routes/announcements.ts` — admin + worker sub-apps; auto-translate on POST/PATCH via `src/api/lib/translate-announcement.ts` (Claude, ANTHROPIC_API_KEY). **Read-receipts:** worker POST `/:id/ack` (idempotent upsert), worker GET returns `ackedIds` (SERVER-driven popup gate), admin GET `/:id/acks` (acked-vs-ACTIVE-roster split), admin POST `/:id/remind` (stamps `reminded_at` → re-pop) | `announcements` (snake_case; `translations` JSONB + `reminded_at`, runtime ALTER) · `announcement_acks` (PK `announcement_id,worker_id`; runtime CREATE TABLE) | `tests/announcement-translate.test.mjs` · `tests/announcement-acks.test.mjs` |
 
-**Big-file section index** (re-measured 2026-08-13 — the file is 11,746 lines)
+**Big-file section index** (re-measured 2026-08-14 — the file is 11,784 lines.
+Every number below is the line of the `function` keyword, read out of the file,
+not carried forward: the previous stamp was 3 lines light on every entry.)
 - `src/pages/employees.tsx`
-  - SortableHeader helper (Working Hours grid) — L466
-  - TAB 1: Working Hours — flat grid (WorkingHoursTab) — L993-2077 (windowed; see gotcha below)
-  - Public Holidays panel (PublicHolidaysCard) — L2079
-  - TAB 2: Employee Master (EmployeeMasterTab) — L2342
-  - TAB 3: Efficiency Overview (EfficiencyOverviewTab) — L3772
-  - TAB: Department Labor (DepartmentLaborTab) — L4337
-  - TAB 4: Employee Detail (EmployeeDetailTab, guarded-unmount) — L5314
-  - TAB 4b: Department Performance (DepartmentPerformanceTab) — L6005
-  - DailyDrillDown helper — L6413
-  - RuleDraftExplainer helper (payroll) — L6564
-  - TAB 5: Payroll (PayrollTab) — L6634 (+ Advance column / drift banner, 2026-08-07)
-  - DepartmentsManager (inside Labor Cost section) — L8215
-  - TAB 5b: Labor Cost (LaborCostTab) — L8462
-  - TAB 6: Leave Management (LeaveManagementTab) — L10085
-  - TAB 5c: Salary Advances (AdvancesTab) — L10462
-  - MAIN PAGE — TABS array L11059, EmployeesPage shell + tab switch L11425+
-  - AttLocBadge / PunchThumb helpers — L11144
-  - TAB: Attendance (AttendanceTab) — L11199
+  - SortableHeader helper (Working Hours grid) — L469
+  - TAB 1: Working Hours — flat grid (WorkingHoursTab) — L996-2080 (windowed; see gotcha below)
+  - Public Holidays panel (PublicHolidaysCard) — L2082
+  - TAB 2: Employee Master (EmployeeMasterTab) — L2345
+  - TAB 3: Efficiency Overview (EfficiencyOverviewTab) — L3776
+  - TAB: Department Labor (DepartmentLaborTab) — L4341
+  - TAB 4: Employee Detail (EmployeeDetailTab, guarded-unmount) — L5318
+  - TAB 4b: Department Performance (DepartmentPerformanceTab) — L6024
+  - DailyDrillDown helper — L6432
+  - RuleDraftExplainer helper (payroll) — L6583
+  - TAB 5: Payroll (PayrollTab) — L6653 (+ Advance column / drift banner, 2026-08-07)
+  - DepartmentsManager (inside Labor Cost section) — L8234
+  - TAB 5b: Labor Cost (LaborCostTab) — L8481
+  - TAB 6: Leave Management (LeaveManagementTab) — L10104
+  - TAB 5c: Salary Advances (AdvancesTab) — L10481
+  - MAIN PAGE — TABS array L11078, EmployeesPage shell + tab switch L11450+
+  - AttLocBadge / PunchThumb helpers — L11163
+  - TAB: Attendance (AttendanceTab) — L11218
+
 - `src/pages/worker/scan.tsx`
   - WorkerScanPage — single mobile clock/dept-scan/packing component (Kpi helper at 2791) — L29-2816
+
+**This page's reads are narrow on purpose (2026-08-14, BUG-2026-08-13-110/-104).**
+Three of its fetches used to pull whole-org / whole-drilldown payloads and throw
+almost all of it away in the browser:
+- the page-level KPI cards (L11544) and the Attendance tab's month efficiency
+  (L11271) read ONLY `data.totals` off `/api/department-performance`, so both ask
+  for `?view=summary`. The **Department Performance tab itself (L6065) must keep
+  the FULL payload** — it is the one caller that renders
+  `daily[].workers[].jobs[]` when the operator expands a day.
+- the Employee Performance tab (L5435) scopes its attendance read with
+  `?employeeId=`, matching the `jcUrl` / `wheUrl` lines directly above it.
+`tests/dept-perf-summary-projection.test.mjs` locks all four (three positive, one
+negative); `tests/dept-perf-summary-red-proof.mjs` is the by-hand mutation harness
+that proves those locks can actually go red.
 
 **Gotchas**
 - The payroll/cost math is the single most coupled and fragile part. THE engine is `src/lib/labor-engine.ts`; costing divisor logic is `src/lib/costing.ts`. Pay side = unified ÷26 (workingDaysPerMonth) for absence, late/short docks, OT base; hourly = ÷26 ÷ the worker's DAY SPAN (daily hours + lunch, e.g. 9h→÷10). Cost side = ÷ ACTUAL Mon-Sat working days minus holidays (countElapsedWorkingDays / costingDailyRateSen). NEVER revert either to fixed-26 or ÷calendar.
@@ -608,9 +629,9 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 - camelCase DB columns are folded-lowercase by toCamel and can silently return undefined (clockinphoto↛clockInPhoto); at-risk cols dual-keyed r.camelCase ?? r.snake_case. New columns snake_case; a write to a camelCase col needs a `column-rename-map.json` entry.
 - **The Working Hours grid is WINDOWED and its row heights are hard-coded constants.** Measured on prod 2026-08-13, a month of entries built **695 rows / 46,137 DOM nodes** (every other page in the app is 900-1,900) and a plain scroll froze the renderer for **45 s+** — the owner's "page unresponsive". The 22 API calls totalled 0.17 MB, so none of it was the network. `WorkingHoursTab` now renders only the visible window via `useVirtualGroups` (`src/components/ui/virtual-groups.tsx`, math in `src/lib/virtual-group-window.ts`), and the grid scrolls **inside its own `max-h-[70vh]` box** instead of with the page. It could not use the flat `useVirtualRows`: a worker-day's Date / Employee / Punch cells are one `<td rowSpan>`, so the window snaps to whole GROUPS, and the two row heights differ — `WH_ROW_SOLO_PX = 71` (a one-row group, whose Employee cell stacks the `<select>` above the day-total chip) vs `WH_ROW_SEG_PX = 50` per row from two rows up. **If you change the row markup, re-measure both constants** or the scrollbar drifts. Sorting / filtering / editing are untouched by this: every handler addresses `originalIdx` into the flat `rows` array, and Save All / Print read `rows` / `filteredRows`, never the DOM — so an edit on a row that scrolls out of the window survives.
 - employees.tsx Employee Detail tab is intentionally guard-unmounted via {activeTab === 'detail' && ...} (~L11700) — don't refactor to always-mounted.
-- UI must be 100% English — no Chinese strings/comments. EmployeesPage tab shell at L10642; add new tabs to both the tab array and the activeTab switch (~L10887).
+- UI must be 100% English — no Chinese strings/comments. EmployeesPage tab shell at L11450; add new tabs to both the TABS array (L11078) and the activeTab render block near the end of the file.
 
-**Start here:** Open `src/pages/employees.tsx` (the 11,746-line tabbed shell; `EmployeesPage` at L11424, tab array at L11059, the `activeTab` render block at the end of the file) and jump to the specific tab via the section ranges.
+**Start here:** Open `src/pages/employees.tsx` (the 11,784-line tabbed shell; `EmployeesPage` at L11450, tab array at L11078, the `activeTab` render block at the end of the file) and jump to the specific tab via the section ranges.
 
 ---
 
@@ -793,6 +814,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 | ↳ PENDING DELIVERY tile only — **and the `/m` Home card of the same name** (`src/pages/m/screens/Home.tsx`), which folds the identical dispatch chain on top | `src/api/routes/delivery-orders.ts` — `GET /pending-value` (Σ ready-row `valueSen`, server-side). Neither surface may go back to `/ready-planning`: that returns the whole row set to be re-summed in the browser (BUG-2026-08-13-011) | `production_orders` / `job_cards` / `delivery_order_items` | `tests/pending-delivery-value.test.mjs` |
 | ↳ `/m` Home **"Orders due this week"** card only (`src/pages/m/screens/Home.tsx`) — URL is the shared `ORDERS_DUE_URL` in `src/pages/m/lib/preload.ts`, imported by both so preload + screen can never warm different cache keys | `src/api/routes/sales-orders.ts` — `GET /?fields=orders-due&top=N` → `soListToOrdersDue` in `sales-orders/_helpers.ts`. Never go back to the BARE `/api/sales-orders` here: that ships 1,342 rows to render 6 (BUG-2026-08-13-013). The sort MUST stay a stable `localeCompare` over rows pre-ordered `created_at DESC, id DESC` — a SQL `ORDER BY` breaks ties under the DB's collation instead | `sales_orders` (+ `sales_orders_list_snapshot`, `cache_key = orders-due:<top>`) | `tests/sales-orders-orders-due.test.mjs` |
 | ↓ `/m` Home **Stock alerts** card (`src/pages/m/screens/Home.tsx`) — URL is the shared `STOCK_ALERTS_URL` in `src/pages/m/lib/preload.ts`, imported by both for the same reason as `ORDERS_DUE_URL` above | `src/api/routes/inventory.ts` — `GET /?buckets=rawMaterials`. Never go back to the BARE `/api/inventory`: that is 1.16 MB / three buckets to read one (BUG-2026-08-13-021) | `raw_materials` | `tests/inventory-buckets-projection.test.mjs` |
+| `src/pages/dashboard-b/OcrAccuracyCard.tsx` — self-contained OCR-accuracy block at the foot of the Command Center; owns its own fetch and follows the page's `period` selector | `src/api/routes/ocr-accuracy.ts` — `GET /` (`?from=&to=`) | `ocr_*` scan/import audit rows | `tests/dashboard-truthfulness.test.mjs` |
 | `src/pages/dashboard-b/charts.tsx` — lazy recharts wrappers (RevenueChart, CustomerPieChart) (240) | `src/api/lib/dashboard-snapshot.ts` — daily snapshot for cumulative revenue | `invoices` / `delivery_orders` / `delivery_order_items` / `consignment_order_items` | `tests/snapshot-freshness-latestts.test.mjs` |
 | `src/dashboard-routes.tsx` — maps /dashboard → dashboard-b; redirects legacy /dashboard-b → /dashboard | `src/api/lib/dashboard-state-snapshot.ts` — daily point-in-time state snapshot (upsert on org_id+snap_date) | `production_orders` / `job_cards` / `cost_ledger` | |
 | | | `purchase_orders` / `purchase_order_items` / `grns` | |
@@ -823,6 +845,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 
 **Gotchas**
 - Naming trap: the file/folder is 'dashboard-b' and the API file is 'dashboard-overview', but this IS the production Command Center on the '/dashboard' route — there is no separate 'dashboard' page. '/dashboard-b' just redirects to '/dashboard' (src/dashboard-routes.tsx:203).
+- **Data-truth trap (audited 2026-08-14, `docs/DASHBOARD-DATA-AUDIT.md`):** "Daily Capacity", the Plant Load gauge and "Worker Efficiency" are built on `job_cards.estMinutes` — a dept×category constant from `kv_config['variants-config'].productionTimes`. `actualMinutes` and `productionTimeMinutes` are byte-identical copies of it (`src/api/routes/production-orders.ts:441`), so **no tile here reports a measured duration**, whatever its caption says. Only the Worker-Efficiency DENOMINATOR (clocked hours from `working_hour_entries`) is measured. Also: none of the page's eight `useCachedJson` calls reads `failure`, so a dead fetch still paints `RM 0.00` / `0d` / `0` on the money tiles and the gauge — the Daily Report and OCR tiles were fixed (BUG-2026-08-13-120/-104), the rest are open.
 - The entire backend is ONE GET '/' handler ~2000 lines with no sub-routes — every dashboard number flows through it. It's 60s KV-cached, so edits won't reflect for up to a minute on live.
 - Month-awareness is snapshot-driven: current-state-only tables (pending delivery, outstanding) are captured into a DAILY snapshot (dashboard-state-snapshot, upsert on org_id+snap_date). For a PAST month it serves the stored snapshot; never write an old snapshot back as 'today' (guarded in the handler ~line 77). Snapshot freshness is the only thing the two tests cover.
 - KPI semantics are owner-pinned (2026-06-12, see MEMORY): Sales = confirmed-SO value; Invoices = invoice-sourced (Σ invoice totals by invoice date, excl. cancelled); Pending Delivery is the consolidated made-but-not-shipped card; Outstanding is point-in-time/'live'. Don't redefine these card sources.
@@ -916,6 +939,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 - **Employee tab: every figure names a source; there is no placeholder left (2026-08-13, BUG-2026-08-13-006).** Worker Efficiency / Clocked Hours / Job Cards Completed come from `GET /api/department-performance?view=summary&from=&to=`; the attendance cards come from `GET /api/attendance?from=&to=`. They used to come from `seed(w.id)` — a hash of the worker's primary key — beside hardcoded "Attendance Rate 94.5%" / "Avg Hours/Day 8.7" / "12.5 OT hours". **Attendance Rate is now "—" on purpose**: `attendance_records` gets a row only when somebody punches (2,780 of 2,780 rows in 2026 are `PRESENT`, zero `ABSENT`), so a rate is 100% by construction; absence lives in `labor-engine.ts`. A worker with no clocked time reads "—", never 0%. Tests: `tests/no-fabricated-worker-metrics.test.mjs`.
 - **`?view=summary` on `/api/department-performance` is a PROJECTION, not a second computation** (`projectPerformanceSummary`, exported for the test). It drops `daily[].jobs` + `daily[].workers[].jobs` and folds the per-day worker rows into range totals: **9,573 KB → 10 KB** on a 61-day range, identical figures. Applied at BOTH returns (a snapshot hit would otherwise still ship 9.5 MB) and deliberately NOT in the snapshot `cacheKey` — one cached full payload serves both views. Never re-express the efficiency formula here; the /employees drilldown still needs the full shape.
 - **Department Efficiency: the recorded minutes are a COPY of the standard minutes.** 4,340 of 36,796 job cards carry a non-null `actualMinutes` (4,289 non-zero) — and on **all 4,289** the value equals that card's own `estMinutes` exactly, all on orders started 2026-04/05. A ratio over them is 100.0% by construction, so `report-summary` also returns `measuredDistinctCards` (recording ≠ estimate; currently 0 org-wide) and the page shows a percentage only when that is > 0, else `"—"` plus the reason. The **Measured Cards** count is still shown. Tests: `tests/no-fabricated-efficiency.test.mjs`.
+- **`attendance_records` has NO production/efficiency data — do not build one off it (2026-08-14, BUG-2026-08-13-103, class C15).** `production_time_minutes` was `working_minutes × 0.85` on every row ever written (prod Aug 2026: 180,928/212,850 = 0.85005), `efficiency_pct` was that number ÷ the standard day, and `dept_breakdown` republished it under an empty `productCode`. All four writers — `POST /api/attendance`, `POST /api/worker/clock`, `autoCloseForgottenPunch` (which produced a flat, unvarying **85%**) and the auto-created row in `working-hour-entries.ts` — now leave the columns unwritten, and BOTH readers (`rowToAttendance`, `GET /api/worker/history`) publish `null` / `[]` **unconditionally** because every stored value is fabricated. Column made nullable by `migrations-postgres/0227_*` + the runtime `ensureAttendanceMetricsNullable`. **No pay figure ever read these** (`payroll-hour-deductions.ts` takes only clock in/out; the efficiency ALLOWANCE uses `job_cards.productionTimeMinutes` ÷ `working_hour_entries.hours` — a different column on a different table). The real labour-efficiency metric is `/api/department-performance`, which now also returns `totals.cards` / `totals.measuredCards` so both surfaces can caption it *"standard minutes earned ÷ clocked minutes"* with its actual-capture coverage. Tests: `tests/no-fabricated-attendance-production-time.test.mjs`.
 - Heavy business logic lives in src/api/lib/* not in the route file: compliance-report.ts (1291 lines, the Daily Report engine), efficiency-report.ts (644), schedule-overdue-report.ts. The route file (reports.ts, 545) is a thin wrapper around these. Edit logic in lib, not the route.
 - Two shared client engines: src/lib/print-report.ts (305 lines, THE dashboard print/report engine — see MEMORY arch_report_print_engine; WYSIWYG, wire onFilteredDataChange for sort-follow) and src/lib/export-report.ts (74, export helper). Reuse these — don't hand-roll print/export.
 - dashboard-b/ is explicitly disposable/experimental and mirrors /dashboard numbers; charts.tsx is lazy-loaded to defer the ~357KB recharts/d3 bundle. Don't import recharts eagerly into index.tsx or you reintroduce the load-order regression.
@@ -1322,7 +1346,7 @@ the Default column: assume live-write unless the table says otherwise.
 | `src/pages/login.tsx` | 1288 | **none** |
 | `src/pages/finance-dashboard.tsx` | 1263 | **none** |
 | `src/pages/leads/index.tsx` | 929 | **none** |
-| `src/pages/hookka-report-editions.tsx` | 697 | **none** |
+| `src/pages/hookka-report-editions.tsx` | 697 | `tests/dashboard-truthfulness.test.mjs` — receivables aging strip only (BUG-2026-08-13-106) |
 | `src/pages/forecast.tsx` | 575 | **none** |
 | `src/pages/component-kits/index.tsx` | 502 | **none** |
 | `src/pages/invoices/debit-notes.tsx` | 500 | only as the bare shorthand `debit-notes.tsx` (map L277), no full path, no route/table/test row |

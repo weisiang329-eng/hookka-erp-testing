@@ -1,6 +1,6 @@
--- 0227_job_cards_completed_at.sql
+-- 0228_job_cards_completed_at.sql
 --
--- BUG-2026-08-13-103 — the factory cannot measure how long any job takes,
+-- BUG-2026-08-13-120 — the factory cannot measure how long any job takes,
 -- because the system throws the time away at the moment of capture.
 --
 -- Measured on prod 2026-08-14:

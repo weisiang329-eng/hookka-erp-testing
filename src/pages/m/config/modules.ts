@@ -1432,10 +1432,21 @@ export const productionConfig: ModuleConfig = {
 // cap + load share the same /api/department-performance source; sub-tab
 // label changes + meta labels swap. Capacity = Backlog/Used, Loading =
 // Workers/Plan.
+// PERF 2026-08-14 (BUG-2026-08-13-112): `view=summary` on all three
+// /api/department-performance mobile sources below. The full payload carries a
+// per-job-card drilldown for every day in the window (9.5 MB for 61 days,
+// measured on prod — see department-performance.ts:91-98); the `select` on each
+// of these three sources peels `data.departments`, a key the endpoint has never
+// returned in EITHER view (its payload is `{range, departmentCode, category,
+// totals, daily}`), so every one of them renders zero rows today. Switching to
+// the summary projection is therefore a pure download saving with no render
+// change at all — and it matters most here, on phones on the factory floor.
+// The empty-render defect is tracked separately in docs/PERF-BACKLOG.md; it is a
+// data-mapping bug, not a performance one, and is deliberately NOT fixed here.
 const planningCapacitySource: DataSource = {
   url: (() => {
     const w = thisMonthWindow();
-    return `/api/department-performance?from=${w.from}&to=${w.to}`;
+    return `/api/department-performance?view=summary&from=${w.from}&to=${w.to}`;
   })(),
   select: (resp) => {
     if (!resp || typeof resp !== "object") return [];
@@ -1469,9 +1480,10 @@ const planningCapacitySource: DataSource = {
 };
 
 const planningLoadSource: DataSource = {
+  // view=summary — see the comment on planningCapacitySource above.
   url: (() => {
     const w = thisMonthWindow();
-    return `/api/department-performance?from=${w.from}&to=${w.to}`;
+    return `/api/department-performance?view=summary&from=${w.from}&to=${w.to}`;
   })(),
   select: (resp) => {
     if (!resp || typeof resp !== "object") return [];
@@ -2191,7 +2203,13 @@ const attendanceSource: DataSource = {
   select: selectData,
   // CHANGELOG #19 — read-only attendance with GPS indicator + selfie flag.
   // Real fields per attendance.ts response: clockInLat/Lng, hasClockInPhoto,
-  // workingMinutes, efficiencyPct. Read-only on mobile (just view data).
+  // workingMinutes. Read-only on mobile (just view data).
+  //
+  // NOT efficiencyPct / productionTimeMinutes — the response always returns
+  // null for those (BUG-2026-08-13-103): a punch measures clock time, never
+  // production time, and the old values were `workingMinutes × 0.85`. Do not
+  // add them to `metas`; the honest per-worker efficiency is the Working Hours
+  // sub-tab's engine (/api/department-performance), not a punch row.
   toVM: (r): RowVM => {
     const gps = num(r, "clockInLat") !== 0 || num(r, "clockInLng") !== 0;
     const photo = read(r, "hasClockInPhoto") === true;
@@ -2419,9 +2437,10 @@ const efficiencySource: DataSource = {
 // per-department utilization + output aggregates for the date range.
 // dc13 v13 sync.
 const deptPerfSource: DataSource = {
+  // view=summary — see the comment on planningCapacitySource above.
   url: (() => {
     const w = thisMonthWindow();
-    return `/api/department-performance?from=${w.from}&to=${w.to}`;
+    return `/api/department-performance?view=summary&from=${w.from}&to=${w.to}`;
   })(),
   // Response shape: { success, data: { departments: [{ departmentCode,
   // departmentName, totalHours, efficiency%, ... }] } } — peel the

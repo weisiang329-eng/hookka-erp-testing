@@ -12,6 +12,35 @@ by handling the value.
 
 ---
 
+## STATUS 2026-08-14 — read this first, the situation is not what it was
+
+The 2026-07-20 leak (commits `1294db69` / `76687226`) **was already rotated.** Proven
+by fingerprint without printing any value: those commits carry `276404ee6640` (direct)
+and `cd9baa74ed36` (pooler); the credential the system actually used afterwards
+fingerprints `ab5df625bc76` — a different, later value. The stale copy still in
+`.dev.vars` is one of the leaked pair, which is exactly why it now fails `28P01
+password authentication failed`.
+
+**But the rotation created a second, worse exposure.** The replacement password was
+written into `export HOOKKA_PROD_DB_URL=…` example comments in three tracked scripts
+(`scripts/_db.mjs`, `check-fg-ledger.mjs`, `reset-wip-quantities.mjs`). When the repo
+went public those comments went with it, so the **live** production password was
+readable by anyone on GitHub until it was scrubbed on 2026-08-14.
+
+So the rotation below is still required — not for the old leak, which is dead, but for
+`ab5df625bc76`, which must be assumed captured. Removing it from HEAD does not remove
+it from history.
+
+A gate now exists so this cannot recur silently: `scripts/check-secrets.mjs` +
+`.github/workflows/secret-hygiene.yml`, plus a pre-commit hook. A workflow of that name
+existed before and was deleted; if it disappears again, that deletion is the incident.
+
+**This file supersedes `docs/SECURITY-ROTATION-TODO.md` and
+`docs/SECURITY-db-credential-rotation.md`, both deleted 2026-08-14** — three documents
+on one open item is how the item stayed open.
+
+---
+
 ## Why this is outstanding work, not a precaution
 
 Git history contains full prod **and** staging Postgres connection strings, passwords

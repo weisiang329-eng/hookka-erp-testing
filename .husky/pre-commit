@@ -10,3 +10,8 @@ npx lint-staged --no-stash || exit 1
 # land. --silent suppresses npm's own preamble; the test runner's own
 # pass/fail still prints. Exit non-zero on any failure to abort the commit.
 npm test --silent || exit 1
+# Secret hygiene (2026-08-14). CI catches this too, but CI runs AFTER the push —
+# and a push to a public repo is the moment the credential becomes readable.
+# Catching it here is the difference between "fix the file" and "rotate the
+# production database password".
+node scripts/check-secrets.mjs --staged || exit 1

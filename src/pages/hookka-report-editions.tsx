@@ -516,16 +516,26 @@ export function OperationsEdition({
         </Desk>
 
         <Desk desk="Billing Desk" headline="Receivables">
-          <div className="mb-2 grid grid-cols-4 border border-[#1F1D1B] text-center">
+          {/* Five buckets, because the aggregator computes five.
+              This strip used to render FOUR and skip `d30Sen` entirely, so
+              every invoice exactly one month overdue vanished from a printed
+              receivables statement and the boxes did not add up to the
+              "Receivables" total beside them. The labels were shifted one
+              bucket with it: what read "31–60d" was `d60Sen`, i.e. TWO months.
+              They also claimed days while `monthsOverdue` (operations-report.ts
+              :919-923) buckets by whole months — so the captions now say what
+              the maths does. */}
+          <div className="mb-2 grid grid-cols-5 border border-[#1F1D1B] text-center">
             {[
               ["Current", r.receivables.aging.currentSen, ""],
-              ["31–60d", r.receivables.aging.d60Sen, ""],
-              ["61–90d", r.receivables.aging.d90Sen, "text-[#8A6A15]"],
-              ["90d+", r.receivables.aging.over90Sen, "text-[#9A3A2D]"],
+              ["1 mth", r.receivables.aging.d30Sen, ""],
+              ["2 mth", r.receivables.aging.d60Sen, ""],
+              ["3 mth", r.receivables.aging.d90Sen, "text-[#8A6A15]"],
+              ["3 mth+", r.receivables.aging.over90Sen, "text-[#9A3A2D]"],
             ].map(([lab, val, cls], i) => (
               <div
                 key={i}
-                className={`px-1 py-1.5 ${i < 3 ? "border-r border-[#D8CFB9]" : ""}`}
+                className={`px-1 py-1.5 ${i < 4 ? "border-r border-[#D8CFB9]" : ""}`}
               >
                 <div className="text-[9px] uppercase text-[#6B7280]">{lab as string}</div>
                 <div className={`text-[13px] font-bold tabular-nums ${cls as string}`}>

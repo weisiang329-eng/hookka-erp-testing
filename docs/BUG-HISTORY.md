@@ -34,6 +34,118 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-103 — the Command Center printed a green `0` and "All clear" over a compliance read that had died `dashboard` `data-integrity` `ui-frontend` 🟢
+
+**Symptom.** The Daily Report tile on `/dashboard` — the first card under the KPI rail —
+showed a large **green `0`** captioned *"All clear — nothing flagged today"* whenever
+`/api/reports/compliance.json` timed out, 500'd, or was killed by the 30 s global abort in
+`src/lib/api-client.ts`. The owner reads that tile as a statement that the factory has no
+open exceptions, and acts on it.
+
+**Root cause.** `useCachedJson` hands a killed request back as
+`data = null, loading = false` — byte-for-byte the state a genuinely clean day produces. The
+tile destructured only `data` and `loading` and rendered `compCounts?.total ?? 0`. The hook
+publishes a classified `failure`, and `isUnknownOutcome(failure)` is the single decision that
+separates "the server said nothing is wrong" from "nobody answered" (the primitive shipped as
+BUG-2026-08-13-016) — this tile never asked.
+
+**The same endpoint, the honest sibling.** `/daily-report` reads the *identical* URL and gets
+it right: *"Could not load the report. Please try again."* (`daily-report.tsx:1105-1122`).
+Same data, two screens, one of them lying — which is why this is a page defect and not a
+primitive defect.
+
+**Why the class guard missed it.** `tests/record-load-failure-class.test.mjs` grows by scanning
+for pages that print the string *"not found"*. This page's false sentence is *"All clear"*.
+The guard was pattern-matched to the first instance instead of to the shape, so the dashboard
+was never in the map.
+
+**Fix.** `src/pages/dashboard-b/index.tsx` — destructure `failure` + `refresh`, derive
+`compFailed = !compCounts && failure != null && isUnknownOutcome(failure)`, render **"—"** and
+*"Couldn't load — this is not a clean day, it is an unknown one"* plus a Retry chip. A genuine
+`0` from a 2xx body still reads "All clear", which is the point: only an observed answer
+licenses the words.
+
+---
+
+## BUG-2026-08-13-104 — the OCR card said "No scans yet" over a request that never answered `dashboard` `data-integrity` `ui-frontend` 🟢
+
+**Symptom.** `OcrAccuracyCard` at the foot of the Command Center printed *"No scans yet. Once
+you scan and import orders / supplier docs, the accuracy shows here automatically."* on any
+failed fetch — a statement that the scanner has never been used in the selected period.
+
+**Root cause.** Identical shape to -103: `!d` is true for a 30 s abort and for an empty 2xx
+body alike, and the card branched on `!d || d.overall.total === 0`.
+
+**Fix.** `src/pages/dashboard-b/OcrAccuracyCard.tsx` — `loadFailed` gate through
+`isUnknownOutcome(failure)`, an honest failure panel carrying `failure.message`, the sentence
+*"This is not a statement that nothing was scanned — the data never arrived"*, and a Retry.
+
+---
+
+## BUG-2026-08-13-105 — the OCR sample-size guard was missing from the one panel it was written for `dashboard` `data-integrity` 🟢
+
+**Symptom.** A supplier with a single scanned document rendered a confident **red 0%** in the
+Supplier table — no grey, no `*`, no sample-size caveat — beside customer rows that did carry
+one.
+
+**Root cause.** `MIN_SAMPLE = 5` greys a rate and appends `*` when `total < 5`, and both
+helpers take the total as an optional second argument. Every table forwards it —
+`rateColor(b.rate, b.total)`, `rateColor(t.rate, t.total)` — **except the by-Supplier rows**,
+which called `rateColor(s.rate)` / `pct(s.rate)`. The guard was live everywhere except where
+it was needed: the comment above `MIN_SAMPLE` records that it was introduced *because the
+Supplier panel read a red 0% off ONE document* (owner 2026-08-05).
+
+**Fix.** Pass `s.total` to both helpers. The guard test now rejects **any** single-argument
+`rateColor(...)` / `pct(...)` call in the file, so a new table cannot reopen the hole.
+
+---
+
+## BUG-2026-08-13-106 — the printed Hookka Report dropped a whole receivables bucket, and shifted every remaining label `reports` `data-integrity` 🟢
+
+**Symptom.** The Billing Desk strip on the printed Hookka Report showed four aging boxes —
+Current / 31–60d / 61–90d / 90d+ — which **did not add up to the "Receivables" total printed
+beside them**.
+
+**Root cause.** `operations-report.ts:919-923` computes **five** buckets from
+`monthsOverdue(invoiceDate)`: `currentSen` (mo ≤ 0), `d30Sen` (mo 1), `d60Sen` (mo 2),
+`d90Sen` (mo 3), `over90Sen`. The strip rendered four of them and **omitted `d30Sen`
+entirely**, so every invoice exactly one month overdue vanished from a printed financial
+statement. With it went the labels: what read "31–60d" was `d60Sen` — two months — so each
+caption named the bucket one to its left. The captions also asserted *days* over a
+whole-month calculation.
+
+**Fix.** `src/pages/hookka-report-editions.tsx` — five columns, all five buckets, captions
+that say what the maths does (Current / 1 mth / 2 mth / 3 mth / 3 mth+).
+
+**Guard.** `tests/dashboard-truthfulness.test.mjs` derives the bucket set from
+`operations-report.ts` itself (`aging.<x>Sen +=`) rather than hardcoding five names, so
+adding a sixth bucket to the aggregator without rendering it fails the build.
+
+---
+
+## All four (-103 … -106): how the guards were proved
+
+`tests/dashboard-truthfulness.test.mjs` is structural — `readFileSync` assertions on the
+source — because none of these is a runtime error. `0` is a valid number, *"All clear"* is
+valid copy, and a four-column grid is valid markup; a plausible screen is exactly what each
+bug produced.
+
+Each assertion was proved RED by **reintroducing the exact removed expression** and watching
+the file fail: the `?? 0` headline, the ungated *"All clear"* caption, the `loadFailed`
+derivation, the single-argument `rateColor(s.rate)`, and the four-bucket strip. Five
+mutations, five failures, files restored byte-identical afterwards.
+
+**The first run of that proof reported three SETUP FAILs, not three REDs** — the anchors used
+literal `\n` and these files are CRLF on disk, so the mutations were never applied and would
+have "passed" as evidence of nothing. That is the EOL trap `docs/BUG-CLASSES.md` names, hit
+in the act of guarding against it; the harness now derives its line ending from the file it is
+mutating.
+
+Full context for all four, plus the 40-odd findings this pass did **not** fix, is in
+[`docs/DASHBOARD-DATA-AUDIT.md`](DASHBOARD-DATA-AUDIT.md).
+
+---
+
 ## BUG-2026-08-13-097 — the company switcher was one global row, so switching company moved it for every other logged-in user at once `multi-tenant` `ui-frontend` `data-integrity` 🟢
 
 **Symptom.** An operator picks HOUZS in the sidebar company switcher. Every other signed-in

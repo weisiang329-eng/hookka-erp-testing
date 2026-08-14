@@ -290,7 +290,7 @@ Part 6, unfixed, per the owner's standing rule.
 
 | bug | fix |
 |---|---|
-| **BUG-2026-08-13-103** | Command Center Daily Report tile: a failed read now renders **"—"** and *"Couldn't load — this is not a clean day, it is an unknown one"* with a Retry, instead of a green `0` / *"All clear"*. Gated on `isUnknownOutcome(failure)` — the repo's existing single decision. |
+| BUG-2026-08-13-107 | Command Center Daily Report tile: a failed read now renders **"—"** and *"Couldn't load — this is not a clean day, it is an unknown one"* with a Retry, instead of a green `0` / *"All clear"*. Gated on `isUnknownOutcome(failure)` — the repo's existing single decision. |
 | **BUG-2026-08-13-104** | `OcrAccuracyCard`: *"No scans yet."* now renders only for an observed 2xx empty body; a dead read gets an honest failure card with a Retry. |
 | **BUG-2026-08-13-105** | `OcrAccuracyCard` by-Supplier rows now pass `s.total` to `rateColor()` / `pct()`. `MIN_SAMPLE` was added **because that panel printed a red 0% off one document** (owner 2026-08-05) — and it was the one call site that never forwarded the sample size, so the guard was live everywhere except where it was asked for. |
 | **BUG-2026-08-13-106** | The Hookka Report's printed Receivables strip now renders **all five** aging buckets. `d30Sen` — invoices exactly one month overdue — was computed and never printed, so that money vanished from a printed statement and the four boxes did not tie to the "Receivables" total beside them. The surviving labels were each shifted one bucket and claimed *days* over a whole-month calculation; they now say what the maths does. |

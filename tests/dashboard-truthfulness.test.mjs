@@ -2,7 +2,7 @@
 // dashboard-truthfulness.test.mjs — the Command Center (`/dashboard`) audit of
 // 2026-08-14. Pins three defects, all in docs/BUG-CLASSES.md C15:
 //
-//   BUG-2026-08-13-103  C15 — a dead read rendered as an answer, on the
+//   BUG-2026-08-13-107  C15 — a dead read rendered as an answer, on the
 //                       highest-traffic screen in the app. The Daily Report
 //                       tile printed `compCounts?.total ?? 0` — a large GREEN
 //                       0 captioned "All clear — nothing flagged today" —
@@ -76,7 +76,7 @@ const dash = () => stripComments(read(DASH));
 const ocr = () => stripComments(read(OCR));
 
 // ===========================================================================
-// BUG-2026-08-13-103 — the Daily Report tile
+// BUG-2026-08-13-107 — the Daily Report tile
 // ===========================================================================
 
 test("the Daily Report tile classifies its failure before printing a count", () => {

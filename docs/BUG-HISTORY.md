@@ -34,7 +34,7 @@ Entries themselves stay newest-first.
 
 ---
 
-## BUG-2026-08-13-103 — the Command Center printed a green `0` and "All clear" over a compliance read that had died `dashboard` `data-integrity` `ui-frontend` 🟢
+## BUG-2026-08-13-107 — the Command Center printed a green `0` and "All clear" over a compliance read that had died `dashboard` `data-integrity` `ui-frontend` 🟢
 
 **Symptom.** The Daily Report tile on `/dashboard` — the first card under the KPI rail —
 showed a large **green `0`** captioned *"All clear — nothing flagged today"* whenever

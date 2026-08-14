@@ -12,7 +12,7 @@
 // routes/wip-times.ts for the rationale.
 // ---------------------------------------------------------------------------
 import { useCallback, useMemo, useState } from "react";
-import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix, isUnknownOutcome } from "@/lib/cached-fetch";
 import { humanizeError } from "@/lib/humanize-error";
 import { DataGrid, type Column } from "@/components/ui/data-grid";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -46,6 +46,16 @@ type WipTimeRow = {
 type WipTimeResponse = {
   success?: boolean;
   data?: WipTimeRow[];
+  // BUG-2026-08-13-147. What the rows above structurally CANNOT contain: a
+  // product with no ACTIVE BOM template emits no process node, so it can never
+  // appear in `data` and can never be counted as "missing BOM time" — even
+  // though it is the most complete form of it. `null` = the server could not
+  // measure it, which is not 0.
+  coverage?: {
+    productsWithoutActiveBom?: number | null;
+    productsWithoutActiveBomScope?: string;
+    deptFilterApplied?: boolean;
+  };
 };
 
 function rowKey(r: WipTimeRow): string {
@@ -206,7 +216,38 @@ export default function WipTimesPage() {
     return qs ? `/api/wip-times?${qs}` : "/api/wip-times";
   }, [dept, category]);
 
-  const { data: resp, loading } = useCachedJson<WipTimeResponse>(url);
+  const {
+    data: resp,
+    loading,
+    failure,
+    refresh: refreshRows,
+  } = useCachedJson<WipTimeResponse>(url);
+  // BUG-2026-08-13-147 (docs/BUG-CLASSES.md C15). `loading` was destructured
+  // here and used only for the export button (:811) and the table (:1313) —
+  // never to guard the four totals tiles. So during the fetch, on a dead read
+  // and on an empty response all four printed `0`, and the "⚠️ Missing BOM
+  // time" tile printed its 0 in the NEUTRAL colour (it goes amber only when
+  // `> 0`): a failed load was pixel-identical to "all clear".
+  //
+  // `isUnknownOutcome` is the repo's single decision for "the request died vs
+  // the server said nothing" (BUG-2026-08-13-107 / -016) and is reused here
+  // rather than inventing a second mechanism. Only an observed 2xx body
+  // licenses a number — `resp?.data` being a real array is that observation.
+  const rowsFailed = isUnknownOutcome(failure);
+  const rowsObserved = !rowsFailed && Array.isArray(resp?.data);
+  const totalsUnavailableReason = rowsObserved
+    ? null
+    : rowsFailed
+      ? "couldn't load — unknown, not clear"
+      : loading
+        ? "loading…"
+        : "no rows in the response body";
+  // The blind spot the row walk cannot see — see WipTimeResponse.coverage.
+  // `undefined` (an older server, or a cached body from before this field
+  // existed) is treated exactly like `null`: not measured, never 0.
+  const noBomProducts = resp?.coverage?.productsWithoutActiveBom;
+  const noBomScope = resp?.coverage?.productsWithoutActiveBomScope ?? "products";
+  const noBomDeptFiltered = resp?.coverage?.deptFilterApplied === true;
   // wipType filter is client-side — server returns wipType per row so we
   // filter in JS rather than re-fetch. Keeps the cache hit when the user
   // toggles between types within the same dept/category scope.
@@ -907,28 +948,56 @@ export default function WipTimesPage() {
         </CardContent>
       </Card>
 
-      {/* Totals strip */}
+      {/* A dead read gets a stated failure and a retry, not four grey dashes
+          the operator has to interpret (BUG-2026-08-13-147). */}
+      {rowsFailed && (
+        <div className="flex items-center justify-between gap-3 rounded-md border border-[#FDBA74] bg-[#FFF7ED] px-3 py-2 text-xs text-[#C2410C]">
+          <span>
+            Couldn&apos;t load WIP times — the figures below are unknown, not clear.
+          </span>
+          <button
+            type="button"
+            onClick={refreshRows}
+            className="rounded-full border border-[#FDBA74] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#C2410C]"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {/* Totals strip. Every tile renders "—" unless `rowsObserved` — see
+          BUG-2026-08-13-147 where all four printed 0 during the fetch, on a
+          dead read and on an empty body alike. */}
       <div className="grid gap-3 grid-cols-4">
         <Card>
           <CardContent className="p-3 text-center">
-            <p className="text-xl font-bold text-[#1F1D1B] tabular-nums">
-              {totals.wips.toLocaleString()}
+            <p
+              className={`text-xl font-bold tabular-nums ${rowsObserved ? "text-[#1F1D1B]" : "text-[#9CA3AF]"}`}
+              title={totalsUnavailableReason ?? undefined}
+            >
+              {rowsObserved ? totals.wips.toLocaleString() : "—"}
             </p>
             <p className="text-xs text-[#6B7280] mt-0.5">WIPs in scope</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-3 text-center">
-            <p className="text-xl font-bold text-[#1F1D1B] tabular-nums">
-              {totals.productAppearances.toLocaleString()}
+            <p
+              className={`text-xl font-bold tabular-nums ${rowsObserved ? "text-[#1F1D1B]" : "text-[#9CA3AF]"}`}
+              title={totalsUnavailableReason ?? undefined}
+            >
+              {rowsObserved ? totals.productAppearances.toLocaleString() : "—"}
             </p>
             <p className="text-xs text-[#6B7280] mt-0.5">Product appearances</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-3 text-center">
-            <p className="text-xl font-bold text-[#1F1D1B] tabular-nums">
-              {fmtMinutes(totals.avgMinutes)}
+            <p
+              className={`text-xl font-bold tabular-nums ${rowsObserved ? "text-[#1F1D1B]" : "text-[#9CA3AF]"}`}
+              title={totalsUnavailableReason ?? undefined}
+            >
+              {rowsObserved ? fmtMinutes(totals.avgMinutes) : "—"}
             </p>
             <p className="text-xs text-[#6B7280] mt-0.5">Avg across WIPs</p>
           </CardContent>
@@ -959,17 +1028,43 @@ export default function WipTimesPage() {
           }
         >
           <CardContent className="p-3 text-center">
+            {/* The most dangerous of the four: it went AMBER only when `> 0`,
+                so a failed load rendered its 0 in the neutral colour and read
+                as "all clear". "—" is grey on purpose — grey means unknown,
+                and unknown must never wear the all-clear colour. */}
             <p
               className={`text-xl font-bold tabular-nums ${
-                totals.missing > 0 ? "text-[#C99A3F]" : "text-[#1F1D1B]"
+                !rowsObserved
+                  ? "text-[#9CA3AF]"
+                  : totals.missing > 0
+                    ? "text-[#C99A3F]"
+                    : "text-[#1F1D1B]"
               }`}
+              title={totalsUnavailableReason ?? undefined}
             >
-              {totals.missing.toLocaleString()}
+              {rowsObserved ? totals.missing.toLocaleString() : "—"}
             </p>
             <p className="text-xs text-[#6B7280] mt-0.5">
               ⚠️ Missing BOM time
               {missingOnly && " · filter on"}
             </p>
+            {/* Coverage, published beside the figure (C15's third corollary).
+                This tile counts WIPs whose process carries 0 minutes; it can
+                NEVER count a product with no active BOM template at all,
+                because such a product emits no row to count. Without this line
+                a "0" here reads as "every product has its times", which the
+                query cannot establish. */}
+            {rowsObserved && (
+              <p className="text-[10px] text-[#9CA3AF] mt-1 leading-snug">
+                {noBomProducts === null || noBomProducts === undefined
+                  ? "Products with no active BOM at all: — (not measured) — they emit no row, so this count excludes them"
+                  : noBomProducts > 0
+                    ? `Excludes ${noBomProducts} ${noBomScope} with no active BOM at all${
+                        noBomDeptFiltered ? " (whole category, not this dept)" : ""
+                      } — they emit no row to count`
+                    : `No ${noBomScope} lack an active BOM, so nothing is hidden from this count`}
+              </p>
+            )}
           </CardContent>
         </Card>
       </div>

@@ -19,6 +19,9 @@ type DbLike = {
   prepare: (sql: string) => {
     bind: (...args: unknown[]) => {
       all: <T>() => Promise<{ results?: T[] }>;
+      // Added for countProductsWithoutActiveBom (BUG-2026-08-13-147), which
+      // reads a single aggregate row rather than a result set.
+      first: <T>() => Promise<T | null>;
     };
   };
 };
@@ -194,6 +197,58 @@ export async function loadActiveBomRows(
   `;
   const result = await db.prepare(sql).bind(...bindings).all<BomRow>();
   return result.results ?? [];
+}
+
+// ---------------------------------------------------------------------------
+// BUG-2026-08-13-147 coverage — the blind spot in "⚠️ Missing BOM time".
+//
+// `loadActiveBomRows` above reads ONLY `versionStatus = 'ACTIVE'` templates,
+// and `walkTree` emits a row only for a `processes[]` entry that carries a
+// `deptCode`. Between them, a product with NO active BOM template at all —
+// which is the most complete form of "missing BOM time" — produces zero rows,
+// so it can never be counted by the tile that exists to count exactly that.
+// A tile reporting "0 missing" while structurally unable to observe the worst
+// case is BUG-2026-08-13-096's shape.
+//
+// This counts what the walk cannot see, so the page can publish it beside the
+// figure instead of implying full coverage. It is deliberately NOT folded into
+// `missing`: these are different facts (a WIP whose process has 0 minutes vs a
+// product with no template to hold a process at all) and adding them would
+// launder one into the other.
+//
+// NOTE ON SCOPE: this count is category-scoped only, never dept-scoped. A
+// product with no BOM has no process nodes, so it has no department — there is
+// nothing to filter it by. Any caller narrowing to one dept must say that this
+// figure is the whole category, not that dept.
+export async function countProductsWithoutActiveBom(
+  db: DbLike,
+  orgId: string | null,
+  category?: string | null,
+): Promise<number> {
+  const where = ["UPPER(COALESCE(p.status, '')) = 'ACTIVE'"];
+  const bindings: unknown[] = [];
+  if (orgId) {
+    where.push("p.orgId = ?");
+    bindings.push(orgId);
+  }
+  if (category) {
+    where.push("UPPER(p.category) = ?");
+    bindings.push(category);
+  }
+  const sql = `
+    SELECT COUNT(*) AS n
+      FROM products p
+     WHERE ${where.join(" AND ")}
+       AND NOT EXISTS (
+         SELECT 1
+           FROM bom_templates bt
+          WHERE bt.productCode = p.code
+            AND bt.orgId = p.orgId
+            AND UPPER(COALESCE(bt.versionStatus, '')) = 'ACTIVE'
+       )
+  `;
+  const row = await db.prepare(sql).bind(...bindings).first<{ n: number }>();
+  return Number(row?.n) || 0;
 }
 
 // Walk + dedup + aggregate the BOM rows into the per-(wipLabel × dept) reference

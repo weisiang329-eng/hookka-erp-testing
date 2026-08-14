@@ -1,5 +1,32 @@
 # Dashboard Data Audit — can every number on a tile be traced to a real event?
 
+> **Restamped 2026-08-14 (third pass)** on branch `fix/dashboard-tiles`, which CLOSES the
+> three tiles this audit left unfixed: `/planning/mrp`'s `const onOrder = 0` plus its
+> invented MOQ / lead time (BUG-2026-08-13-144 / -145), `/production` Overview's
+> "0 of 0 work orders · 0/0 cells complete" on a cold landing (-146), and
+> `/production/wip-times`' four tiles including the Missing-BOM tile's own blind spot
+> (-147). Verified against `src/api/routes/mrp.ts`, `src/pages/planning/mrp.tsx`,
+> `src/pages/production/index.tsx`, `src/pages/production/wip-times.tsx`,
+> `src/api/lib/wip-times-core.ts`, `src/api/routes/wip-times.ts`,
+> `src/api/lib/fabric-usage.ts`, `src/api/routes/purchase-orders.ts`,
+> `src/api/routes/supplier-materials.ts` and `migrations/0001_init.sql`.
+>
+> **THREE claims in earlier passes were WRONG or incomplete and are corrected in place:**
+> (1) `|| 50` was said to override "a genuine stored MOQ of 0" — it cannot, the column is
+> `INTEGER NOT NULL DEFAULT 0` so 0 IS the never-filled-in value and no genuine 0 can
+> exist; (2) the `/production` row named only the matrix footer — the Overview tab and
+> all eight department tabs printed the same unsourceable fraction, plus the header count
+> and the "No production orders found." caption; (3) the wip-times row implied `loading`
+> was the missing guard — gating on `!loading` alone would NOT have fixed it, because a
+> dead read also ends with `loading === false`. **Verify against source before relying on
+> any row here.**
+>
+> **No production database was available in this pass either.** Every prod-state question
+> raised by these fixes — how many materials have open-PO quantity, how many main
+> supplier bindings hold 0 in `moq` / `leadTimeDays`, how many products have no ACTIVE BOM
+> template — is **UNMEASURED**. Each is now computed at runtime and printed on its own
+> page, so the first real page view answers it; none is estimated here.
+
 > **Last verified: 2026-08-14** — restamped on branch `fix/on-time-delivery-and-decisions`,
 > which CLOSES Part-6 items 7, 8, 10 and 14 (BUG-2026-08-13-140/-141/-142/-143) and
 > corrects item 14's premise: a customer-committed date did exist all along
@@ -55,9 +82,10 @@ and each is provably not a measurement:
    writers of `bank_accounts.balanceSen` are migration fixtures and that page's
    own Add-Transaction form. It is also the opening value of the whole 12-week
    projection.
-4. **`/planning/mrp` shortages ignore everything already on order** —
-   `const onOrder = 0;` (`mrp.ts:701`) — with an invented `|| 50` MOQ and
-   `|| 14` day lead time printed under the supplier's name.
+4. ~~**`/planning/mrp` shortages ignore everything already on order**~~ —
+   `const onOrder = 0;` (`mrp.ts:701`), with an invented `|| 50` MOQ and `|| 14` day
+   lead time printed under the supplier's name. **FIXED 2026-08-14 as
+   BUG-2026-08-13-144 / -145.**
 
 ---
 
@@ -195,11 +223,11 @@ Lead items first: these are what the owner is looking at every day.
 | `/accounting` › Opening Balance | **"Total DR / Total CR / Balanced ✓"** and an **enabled Post button** | `index.tsx:10087-10089, 10272-10279`; loader `.catch` at `:9991` | With the fetch failed every control leg is 0, `diff === 0`, the header claims **Balanced ✓**, and `disabled={posting \|\| diff !== 0 …}` **enables Post** on a sheet that never loaded. |
 | `/accounting` › General Ledger (grouped) | **TOTAL DR / TOTAL CR / Diff** + **Balanced ✓** | `index.tsx:7446-7451`; `accounting.ts:11085-11089` | `grandDr += totalDr` runs **before** the 4,000-row budget `break`, so the grand totals include one account whose rows are not rendered and exclude every account after it — a confident red `Diff` off a self-inconsistent pair. The badge also asserts double-entry balance when the user has filtered to one ledger or two accounts, where balance is impossible by construction. |
 | `/kpi` › People | **"Last month" score, the ↑/↓ delta, "settled"** | `kpi.ts:144-156` reads `kpi_periods … lockedAt IS NOT NULL` | **`kpi_periods` has no writer** — verified: DDL at `ensure-kpi-tables.ts:40` and two SELECTs (`kpi.ts:146`, `:413`), no INSERT or UPDATE anywhere in the repo. `isLocked` can never be true, so every "settled" historical month is silently recomputed against **today's** data and the delta compares two live recomputations. |
-| `/planning/mrp` | **Net Req · Shortage · "Shortages Found" · Sugg. PO qty · "Order By" / "14d lead"** | `mrp.ts:701` `const onOrder = 0;`; `:710` `moq = mainBinding?.moq \|\| 50`; `:714` `leadTimeDays = … \|\| 14` | Material already on an open PO reports as a **full shortage** (the real on-order figure exists at `fabric-usage.ts:551`). The suggested quantity rounds to an invented **50** (and `\|\| 50` also overrides a genuine stored MOQ of 0); the deadline that turns red is built on a literal **14 days** printed under the supplier's name. Acting on this re-orders inbound stock. |
+| ✅ FIXED 2026-08-14 (-144, -145) — `/planning/mrp` | **Net Req · Shortage · "Shortages Found" · Sugg. PO qty · "Order By" / "14d lead"** | `mrp.ts:701` `const onOrder = 0;`; `:710` `moq = mainBinding?.moq \|\| 50`; `:714` `leadTimeDays = … \|\| 14` | Material already on an open PO reports as a **full shortage** (the real on-order figure exists at `fabric-usage.ts:551`). The suggested quantity rounds to an invented **50** (and `\|\| 50` also overrides a genuine stored MOQ of 0); the deadline that turns red is built on a literal **14 days** printed under the supplier's name. Acting on this re-orders inbound stock. **Fixed:** `onOrder` now sums open PO lines (`purchase_order_items` × `purchase_orders`, status NOT IN RECEIVED/CANCELLED/CLOSED, `quantity − receivedQty` floored at 0) using the SAME definition the Fabric tab already uses, and is rendered in a new **On Order** column. MOQ and lead time are `number | null` and render "—". **Correction to this row's premise:** both columns are `INTEGER NOT NULL DEFAULT 0`, so a stored 0 is indistinguishable from never-filled-in and is read as UNSTATED — `|| 50` was not overriding "a genuine stored MOQ of 0", because the column cannot express one. Open PO lines that resolve to no material code are counted and published (`meta.onOrderUnresolvedLines`), so On Order is stated as a floor when it is. |
 | `/planning/mrp` | **"This Wk"**, bold red | `mrp.ts:198-207` `dateToBucket(null) → "THIS_WEEK"` | Undated demand is bucketed into *this week* and styled most-urgent. A PO with no dates contributes its whole BOM to the most alarming column. |
 | `/planning/mrp` | **"On Hand"** | `mrp.ts:698` `onHand = rm ? rm.balanceQty : 0` — exact-string lookup, no `normCode` | A code-format mismatch renders "On Hand 0" plus a full shortage, indistinguishable from an empty bin. |
-| `/production` Overview (cold landing) | **"0/0 cells complete"** | `production/index.tsx:8331`; matrix gated on `activeTab`, not `shouldFetch` (default `false`, `:588`) | The page says *"No orders loaded yet"* and, in the same view, asserts `0/0 complete`. |
-| `/production/wip-times` | **all four tiles**, incl. **"Missing BOM time"** | `wip-times.tsx:225-243`; `loading` destructured at `:209` and never used to guard | During the fetch, on failure and on empty, all four render `0` — and "Missing BOM time" renders its `0` in **neutral** colour (amber only when `> 0`), i.e. visually all-clear. |
+| ✅ FIXED 2026-08-14 (-146) — `/production` Overview (cold landing) | **"0/0 cells complete"** | `production/index.tsx:8331`; matrix gated on `activeTab`, not `shouldFetch` (default `false`, `:588`) | The page says *"No orders loaded yet"* and, in the same view, asserts `0/0 complete`. **Fixed:** one `ordersObserved` predicate over `isUnknownOutcome(ordersFailure)` now gates the footer, the header count, the *"No production orders found."* caption **and all nine tab fractions** — this row named only the footer; the Overview tab and the eight dept tabs carried the identical unsourceable `0/0`. Each replacement names which of the three cases it is in (never fetched / in flight / dead read). |
+| ✅ FIXED 2026-08-14 (-147) — `/production/wip-times` | **all four tiles**, incl. **"Missing BOM time"** | `wip-times.tsx:225-243`; `loading` destructured at `:209` and never used to guard | During the fetch, on failure and on empty, all four render `0` — and "Missing BOM time" renders its `0` in **neutral** colour (amber only when `> 0`), i.e. visually all-clear. **Fixed:** gated on `!isUnknownOutcome(failure) && Array.isArray(resp?.data)` — `!loading` alone would NOT have fixed it, because a dead read also ends with `loading === false`. The unknown branch is tested before the `> 0` branch so it can never wear the all-clear colour, and a dead read gets a stated banner + Retry. |
 
 ### 2b. MISLABELLED
 
@@ -268,7 +296,7 @@ from a query that structurally cannot observe the problem.
 | Daily Report | *"N on the Floor Below Pace Yesterday"* | `addDaysYmd(todayYmd, -1)` while the sibling entry point uses the holiday-aware `previousWorkingDay`. On Mondays and post-holiday days it reads a day nobody worked → `0`. |
 | `/planning/mrp` | *"Shortages Found: 0"* | POs with no BOM are skipped. The server **computes and emits** the caveat (`meta.matchedPOs` / `unmatchedPOs` + a warning); **`mrp.tsx` never reads `meta`** — it is typed away at `:95`. "0 shortages" is indistinguishable from "no PO had a usable BOM". |
 | `/production` | **"Bedframe ⚠ N / Sofa ⚠ N"** overdue chips | overdue requires the SO's `hookkaExpectedDD` to be non-empty **AND** an open UPHOLSTERY card. POs with no UPHOLSTERY stage, CO-origin POs and blank Expected DD **cannot** be counted — yet the zero-state tooltip asserts *"No overdue Bedframe pieces system-wide"*. ACCESSORY has no chip at all. |
-| `/production/wip-times` | **"⚠️ Missing BOM time"** | filters `versionStatus='ACTIVE'`, so a product with **no active BOM template** — the most complete form of "missing BOM time" — produces no row and is invisible. |
+| ✅ FIXED 2026-08-14 (-147) — `/production/wip-times` | **"⚠️ Missing BOM time"** | filters `versionStatus='ACTIVE'`, so a product with **no active BOM template** — the most complete form of "missing BOM time" — produces no row and is invisible. (`walkTree` also drops any `processes[]` entry with no `deptCode`, a second door out.) **Made observable:** `countProductsWithoutActiveBom()` mirrors that exact filter and the endpoint publishes it; the tile prints it as an EXCLUSION beside the figure, never folded into `missing` (a WIP with 0 minutes and a product with no template are different facts). `number | null` — a failed coverage query reads "—", never 0. The caption states the count is category-scoped and can never be dept-scoped, since a product with no BOM has no department. |
 | `/kpi` | every AUTO metric on a historical month | `kpi_periods` is never written, so a "settled" month is recomputed against today's data (see Part 2a). |
 
 ---
@@ -300,11 +328,24 @@ from a query that structurally cannot observe the problem.
    file is stale and will mislead the next reader — a comment in a **test** is
    the worst place for a wrong claim, because it reads as verified.
 
-4. **`GET /api/cash-flow` has no `requirePermission` gate**
+4. **The MOQ / lead-time fabrication has a WRITE side too, and it is the worse
+   half.** `POST /api/supplier-materials` persists
+   `leadTimeDays: Number(body.leadTimeDays) || 7` and `moq: Number(body.moq) || 1`
+   (`src/api/routes/supplier-materials.ts:206,208`). A binding created through that
+   form can never hold 0, and a user who deliberately types 0 gets **1** written. The
+   PUT path (`:337,341`) is honest and passes the value through, so the two writers
+   disagree. This matters because a read-side "—" cannot undo a literal already in
+   the table: BUG-2026-08-13-145 makes the MRP page stop *inventing* 50 and 14, but
+   any row this form wrote will keep reading as a stated 7 / 1. **Not edited here on
+   purpose** — it needs an owner ruling on what a blank field should mean (refuse
+   the save? persist NULL? the columns are `NOT NULL DEFAULT 0`, so "blank" has no
+   representation today), and it is one change across both writers plus a migration.
+
+5. **`GET /api/cash-flow` has no `requirePermission` gate**
    (`src/api/routes/cash-flow.ts:153`), unlike every `/accounting/*` report.
    Not a data-truth defect; found on the way and worth someone's attention.
 
-5. **The forbidden `actualMinutes ?? estMinutes` survives at ~30 sites**,
+6. **The forbidden `actualMinutes ?? estMinutes` survives at ~30 sites**,
    including `planning/index.tsx` ×8, `dashboard-overview.ts` ×3 and
    `planning-adaptive-capacity.ts:324`. `tests/no-fabricated-efficiency.test.mjs`
    covers only three files. This is why "Daily Capacity" is **two different
@@ -401,7 +442,19 @@ provable defect that can be fixed unilaterally.
 15. **AR aging vs AP aging vs the controls** — three "what we are owed / what we
     owe" numbers with different definitions on one page. Which one is *the*
     number?
-16. **The GL grouped-view 4,000-row budget** — raise it, paginate it, or stop
+16. **Does a DRAFT purchase order count as "on order"?** *(new 2026-08-14, raised by
+    BUG-2026-08-13-144.)* `/planning/mrp` now subtracts open-PO quantity from the
+    shortage, using the definition the Fabric tab of the same page already uses:
+    everything except RECEIVED / CANCELLED / CLOSED — which **includes DRAFT**, i.e. a
+    PO placed with nobody. Keeping the two tabs of one page consistent was the higher
+    value and is why it was not changed unilaterally, but it means a draft someone
+    abandoned suppresses a real shortage. The alternatives are (a) leave as is,
+    (b) exclude DRAFT from the netting, (c) net only placed POs and show DRAFT
+    separately. Note the same question is already answered *differently* elsewhere:
+    `/accounting/cash-flow`'s forecast was criticised in Part 3 precisely for counting
+    DRAFT/SUBMITTED POs as future cash out. One ruling should cover both.
+
+17. **The GL grouped-view 4,000-row budget** — raise it, paginate it, or stop
     printing a grand total when the render is capped. Today the totals and the
     rows describe different populations.
 

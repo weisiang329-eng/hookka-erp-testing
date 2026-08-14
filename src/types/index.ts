@@ -899,6 +899,16 @@ export type MaterialRequirement = {
   suggestedPOQty: number;
   preferredSupplierId?: string;
   preferredSupplierName?: string;
+  byBucket?: Record<string, number>;
+  // BUG-2026-08-13-145. `null` = the main supplier binding states no minimum
+  // order quantity / no lead time; `undefined` = the server did not send the
+  // field (a run persisted before this shape existed). BOTH render "—". These
+  // are NOT optional-with-a-fallback fields: `/planning/mrp` used to print a
+  // literal 50 and a literal 14 in their place, on the row carrying the
+  // supplier's own name, so any `?? <number>` on these is the bug returning.
+  moq?: number | null;
+  leadTimeDays?: number | null;
+  suggestedOrderDate?: string;
 };
 
 export type MRPRun = {

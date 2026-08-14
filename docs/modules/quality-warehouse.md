@@ -58,9 +58,9 @@ is enforced by hand in the handler, not by the middleware.
    own CRON_SECRET check) → `generatePendingForSlot` (`qc-pending.ts:1699`) using `currentSlotIso`
    (`:310`, UTC+8 slots: 12:00 / 16:00, else yesterday 16:00). One PENDING inspection per active
    template per slot; the `scheduledSlotAt` dedupe set (`:1710`) makes re-triggers idempotent.
-2. **QC inspect → complete** — `POST /:id/start` (`qc-pending.ts:1943`) → `POST /:id/complete` (`:2371`)
+2. **QC inspect → complete** — `POST /:id/start` (`qc-pending.ts:1969`) → `POST /:id/complete` (`:2409`)
    records PASS/FAIL/NA per item and writes one `qc_tags` row per FAIL — those tags stay hidden.
-3. **Rack stock-in (public `/r/`)** — `POST /api/public/rack-qr/:rackId/stock-in` (`public-rack-qr.ts:776`)
+3. **Rack stock-in (public `/r/`)** — `POST /api/public/rack-qr/:rackId/stock-in` (`public-rack-qr.ts:787`)
    → `findRack` (`:211`) → PER-PIECE: each scanned sticker = one `rack_items` row, qty forced to 1 →
    `buildRackStockInStatements` (`:131`) is move-aware + idempotent (also touches `fg_units`/`job_cards`).
 4. **Piece-sticker → rack (public `/p/`)** — `POST /api/public/rack-write/:token/rack` (`public-rack-write.ts:228`)
@@ -78,15 +78,15 @@ is enforced by hand in the handler, not by the middleware.
 |---|---|---|
 | `currentSlotIso` | `src/api/routes/qc-pending.ts:310` | UTC+8 12:00/16:00 slot resolver |
 | `generatePendingForSlot` | `src/api/routes/qc-pending.ts:1699` | Insert one PENDING inspection per active template |
-| `POST /:id/start` | `src/api/routes/qc-pending.ts:1943` | Begin an inspection |
-| `POST /:id/complete` | `src/api/routes/qc-pending.ts:2371` | Record results + write qc_tags on FAIL |
+| `POST /:id/start` | `src/api/routes/qc-pending.ts:1969` | Begin an inspection |
+| `POST /:id/complete` | `src/api/routes/qc-pending.ts:2409` | Record results + write qc_tags on FAIL |
 | `POST /` (inspection create) | `src/api/routes/qc-inspections.ts:255` | Ad-hoc QC inspection CRUD |
 | `POST /` (template create) | `src/api/routes/qc-templates.ts:164` | Checklist template + items |
 | `GET /` (racks list) | `src/api/routes/warehouse.ts:248` | Rack grid + occupancy read |
 | `replaceRackItems` | `src/api/routes/warehouse.ts:204` | Rewrite a rack's `rack_items` set |
 | `POST /movements` | `src/api/routes/warehouse.ts:497` | Stock in/out movement ledger write |
 | `buildRackStockInStatements` | `src/api/routes/public-rack-qr.ts:131` | Move-aware idempotent per-piece stock-in |
-| `POST /:rackId/stock-in` | `src/api/routes/public-rack-qr.ts:776` | Public rack QR stock-in handler |
+| `POST /:rackId/stock-in` | `src/api/routes/public-rack-qr.ts:787` | Public rack QR stock-in handler |
 | `resolveCard` | `src/api/routes/public-rack-write.ts:80` | Archive-aware token → packing card |
 | `POST /:token/rack` | `src/api/routes/public-rack-write.ts:228` | Public `/p/` set/clear rackingNumber |
 | `POST /:token/advance` | `src/api/routes/public-do-qr.ts:707` | Public DO forward transition (dispatch/deliver) |
@@ -95,7 +95,7 @@ is enforced by hand in the handler, not by the middleware.
 | `ensurePiecePicsRackingColumn` | `src/api/lib/packing-rack-write.ts:35` | Shared mig-0192 DDL self-apply |
 | `packingPieceIdentity` | `src/api/lib/packing-piece-identity.ts:48` | Shared description + notes move-match key |
 | `POST /login` | `src/api/routes/auth.ts:148` | Session + CSRF cookie issue (TOTP-aware) |
-| `GET /me/permissions` | `src/api/routes/auth.ts:487` | Effective permission set for the FE |
+| `GET /me/permissions` | `src/api/routes/auth.ts:521` | Effective permission set for the FE |
 | `authMiddleware` | `src/api/lib/auth-middleware.ts` | Auth gate + double-submit CSRF |
 | `PUBLIC_PREFIXES` | `src/api/lib/auth-middleware.ts:66` | Prefix allow-list that bypasses the gate |
 | `requirePermission` | `src/api/lib/rbac.ts:188` | Per-resource:action RBAC (ADMIN/SUPER_ADMIN bypass) |

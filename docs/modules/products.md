@@ -81,7 +81,7 @@ Money is integer sen; many product columns are legacy camelCase.
 - **Catalog tiles are AUTO-DERIVED** from each distinct `baseModel` in `products` (no dedicated table); `baseProductCode` splits on the first dash (helper near the top of `index.tsx`). Modular photos go through `/api/files` `resourceType=modular`, not a products column — and `files.ts` serves them with attachment disposition yet `<img>` still renders, so don't change that disposition.
 - **MDM is DETECTION-ONLY.** `merge`/`dismiss` just close the flag (set `status`); the real record merge happens in the existing customer/supplier UI. Detection-run is admin-gated to stop non-admins flooding the queue.
 - **camelCase columns need a `column-rename-map.json` entry** (`basePriceSen`, `seatHeightPrices`, `effectiveFrom`, …) or the write 400s "Invalid request body". Prefer snake_case for NEW columns; read dual-keyed `r.camelCase ?? r.snake_case`.
-- **`index.tsx` is a 5,307-line single page** — three views share one `ProductsPage` (`:2004`); `MaintenanceView` (`:1109`) and `VariantEditorDialog` (`:651`) are large sub-components ABOVE the default export, not separate files.
+- **`index.tsx` is a 5,316-line single page** — three views share one `ProductsPage` (`:2004`); `MaintenanceView` (`:1109`) and `VariantEditorDialog` (`:651`) are large sub-components ABOVE the default export, not separate files.
 
 ## Common tasks (mini-playbook)
 - **Add a field to a product** → column self-apply near `ensureProductCreatedAtColumn` (`products.ts:28`); persist in `app.post("/")` (`:584`) + `app.put("/:id")` (`:730`); surface in `rowToProduct` (`:161`); render in `VariantEditorDialog` (`index.tsx:651`). New column = snake_case (+ rename-map if camelCase). Verify BOM math with `tests/bom-explosion.test.mjs`.

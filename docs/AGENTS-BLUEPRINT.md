@@ -32,12 +32,12 @@ Owner + Fable 5 定稿于 2026-07-12。这是全公司 Agent 化的执行大纲�
 
 | 组件 | 状态 | 说明 |
 |---|---|---|
-| LLM 大脑 | ✅ 已接 | Claude API（assistant.ts + anthropic-client.ts），66 个只读工具 + 多轮循环 |
+| LLM 大脑 | ✅ 已接 | Claude API（assistant.ts + anthropic-client.ts），**69 个工具**（实数，`assistant-tools.ts:6692` 的 `TOOLS` 数组）+ 多轮循环。**其中 6 个不是只读**：`agentControlTool`（`:6368`，调 `setAgentControl` `:6418`、全局 kill switch `:6431`、run_now）、`teachAgentTool`（`:6495`，写入常驻规则）、`setCapacityTool`（`:6583`，钉部门产能）、以及 `generateCsv/Excel/PdfTool`。*（原文写“66 个只读工具”，两半都不对 — 2026-08-14 逐项数过。）* |
 | 定时运行器 | ✅ 已有 | GH Actions cron 模式（mail-sync / production-brief 先例） |
 | 提案-审批框架 | 🔄 P2 已建原型 | schedule_proposals 模式：Agent 出提案 → 人一键批准 → 写入 + 快照留痕。**要泛化成通用 proposals 框架**供全部 Agent 用 |
 | 通知层 | 🔄 邮件已通 | Brevo 邮件（晨报）；WhatsApp Business API 待开（utility ≈ RM0.056/条，Meta 商业账号验证后接） |
 | 学习环模式 | 🔄 骨架已有 | 漂移检查（配置 vs 实际）→ AI 归因 → 调参提案 → 批准生效（kv 配置在线改） |
-| 权限/审计 | ✅ 已有 | RBAC + audit_events 每个工具调用留痕；写动作全部走审批 |
+| 权限/审计 | ⚠️ 部分 | RBAC + audit_events 每个工具调用留痕；**业务数据**的写动作走提案审批。**但“写动作全部走审批”今天不成立**：上行的 v1.9 控制工具从聊天直接写入（有审计、无审批），且 `assistant-tools.ts:6400-6403` 记录 owner 已将 pause/resume/auto_on/auto_off/run_now 与教学开放给全体员工（2026-07-28），仅全局 kill switch 保留 SUPER_ADMIN。这是本文 铁规 #1 的已知例外，不是缺陷。 |
 
 ## 1. Production Agent ⭐ 进行中（模板工程，验证整套打法）
 
@@ -236,8 +236,15 @@ PL-first+hub 完整性已上线、Dispatch/Delivered 客户通知邮件已上线
 
 **Owner ruling（写进铁规）: Agent 的作息由 Agent 自己决定，不由人排。**
 
-- **自主排班（self-scheduling）**: GH Actions 每 30 分钟发一个"哑心跳"
-  (`agent-heartbeat.yml` → `/api/internal/agents/heartbeat`, CRON_SECRET)。
+- **自主排班（self-scheduling）**: 心跳的**真正驱动是独立的 Cloudflare Cron
+  Worker `agent-heartbeat-worker/`**（`wrangler.toml:51` = `["*/30 * * * *",
+  "*/5 * * * *"]`）；`agent-heartbeat.yml`（`:32` = `7,27,47 * * * *`，一小时三跳）
+  自 2026-07-17 起降级为兜底 —— 其文件头 `:26-31` 写明 GitHub cron 实测漂移到
+  2–3.5 小时，端点自去重所以两者同时打是无害的。两条路都打
+  `/api/internal/agents/heartbeat`（CRON_SECRET）。
+  *（原文写“GH Actions 每 30 分钟”，两处都不对：既不是 30 分钟，GH Actions 也
+  不再是驱动方 —— 2026-08-14 更正。照原文只查 GitHub Actions 的人，永远不会
+  知道还有一个 Cloudflare Worker。）*
   节奏知识全在 `lib/agent-scheduler.ts`: 每一跳 Agent 自己看厂里脉搏
   （上次跑后送达/发车了几单、新 SO 几张、离上次跑多久、今天跑过几次）决定
   跑不跑；跑/不跑的理由写进 agent_runs → Console 可见。owner 只留三个否决:
@@ -253,6 +260,6 @@ PL-first+hub 完整性已上线、Dispatch/Delivered 客户通知邮件已上线
   `cs.transitDays.<STATE>` 参数提案，批准落 kv['cs-agent']（Delivery 教 CS）。
 - **CS 进化**: cs_promise_log 承诺台账（每次回答落一行: 渠道/SO/承诺日/置信）
   → Console CS 卡显示 30 天问答量 + ENGINE 级占比；送达数据积累后开达成率 KPI。
-- **Console 补齐**: 11 张卡全亮相（4 现役 + 7 蓝图 COMING SOON 带 JD 简介）;
+- **Console 补齐**: 11 张卡全亮相（**今天 6 现役 + 5 蓝图**；2026-07-12 当时是 4 + 7。现役 = `AGENT_FAMILIES`（`agent-console.ts:28-36`）PRODUCTION / DELIVERY / CS / EMPLOYEE / SERVICE / PROCUREMENT）;
   Delivery 卡有 Run now / Pause / 最近一跑；config-proposals 审批白名单扩展
   cs.transitDays.*（0-10 天，state 校验，拒绝一切白名单外 key）。

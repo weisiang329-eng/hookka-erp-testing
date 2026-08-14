@@ -10,18 +10,18 @@ Owns **customers** (the debtor master) and the **platform plumbing** every other
 
 ## Entry points
 - Pages
-  - `/customers` → `src/pages/customers.tsx:3405` (`CustomersPage` — list/KPI/CRUD + nested pricing/maintenance/combo panels)
+  - `/customers` → `src/pages/customers.tsx:3416` (`CustomersPage` — list/KPI/CRUD + nested pricing/maintenance/combo panels)
   - Users/Org/Mailbox → `src/pages/settings/Users.tsx:226` (`UsersPage`; SUPER_ADMIN-gated account admin)
   - `src/pages/settings/index.tsx` (settings shell) · `src/pages/settings/organisations.tsx` (sister-company config)
   - Mail Center → `src/pages/mail-center/index.tsx` (Gmail-style shell) + `detail.tsx` / `compose.tsx`
   - Master config editors (config only, NOT combo math): `src/pages/maintenance.tsx`, `src/pages/maintenance/sofa-combos.tsx`
 - API routes
-  - Customer CRUD → `src/api/routes/customers.ts` (795 lines)
+  - Customer CRUD → `src/api/routes/customers.ts` (803 lines)
   - Per-customer pricing + bulk/copy → `src/api/routes/customer-products.ts` (1235)
   - Per-customer config snapshot mirror → `src/api/routes/customer-maintenance.ts` (185)
   - Per-customer hubs → `src/api/routes/customer-hubs.ts` (75) · quotation pricing → `src/api/routes/customer-quotation.ts` (268)
   - User accounts (SUPER_ADMIN gate) → `src/api/routes/users.ts` (1037)
-  - Office auth → `src/api/routes/auth.ts` (1201) + `auth-oauth.ts` (240) / `auth-totp.ts` (546)
+  - Office auth → `src/api/routes/auth.ts` (1235) + `auth-oauth.ts` (240) / `auth-totp.ts` (612)
   - Factory-worker auth (separate system) → `src/api/routes/worker-auth.ts` (349)
   - Mail engine → `src/api/routes/mail-center.ts` (2476) · files → `files.ts` (571) · KV → `kv-config.ts` (117)
 
@@ -44,12 +44,12 @@ Owns **customers** (the debtor master) and the **platform plumbing** every other
 ## Key functions / sections (locate-to-function)
 | Symbol / section | file:line | Role |
 |---|---|---|
-| `CustomersPage` | `src/pages/customers.tsx:3405` | List/KPI/columns/CRUD/context menu (default export) |
+| `CustomersPage` | `src/pages/customers.tsx:3416` | List/KPI/columns/CRUD/context menu (default export) |
 | `CustomerProductsPanel` | `src/pages/customers.tsx:192` | Per-customer pricing (mirrors Products bulk-edit) |
-| `CustomerMaintenancePanel` | `src/pages/customers.tsx:1628` | Per-customer config snapshot tabs |
-| `CustomerSofaCombosPanel` | `src/pages/customers.tsx:2392` | Per-customer combo pricing (config editor) |
-| `CustomerPriceHistoryDialog` | `src/pages/customers.tsx:2681` | Price-history viewer |
-| `AssignSkuModal` | `src/pages/customers.tsx:3207` | SKU assignment modal |
+| `CustomerMaintenancePanel` | `src/pages/customers.tsx:1639` | Per-customer config snapshot tabs |
+| `CustomerSofaCombosPanel` | `src/pages/customers.tsx:2403` | Per-customer combo pricing (config editor) |
+| `CustomerPriceHistoryDialog` | `src/pages/customers.tsx:2692` | Price-history viewer |
+| `AssignSkuModal` | `src/pages/customers.tsx:3216` | SKU assignment modal |
 | `UsersPage` | `src/pages/settings/Users.tsx:226` | Users/Org/Mailbox tab shell |
 | `validateDebtorCode` | `src/api/routes/customers.ts:76` | Debtor-code validation on create/edit |
 | `rowToCustomer` | `src/api/routes/customers.ts:271` | Dual-key row → customer, buckets hubs |
@@ -76,7 +76,7 @@ Owns **customers** (the debtor master) and the **platform plumbing** every other
 - **Mail Center is Gmail-style with 3 client-side view toggles** (`mail-prefs.ts`): density, reading-pane, category-tabs. The Primary/Notifications split is a client heuristic (`classifyCategory`) — no backend columns, threads API unchanged. Don't move the heuristic server-side.
 
 ## Common tasks (mini-playbook)
-- **Add a field to the customer** → runtime `ALTER … ADD COLUMN IF NOT EXISTS` helper next to `ensureCustomerCompanyColumn` (`customers.ts:39`); persist in POST (`:350`) and PUT (`:500`); surface in `rowToCustomer` (`:271`); render in `customers.tsx:3405`. snake_case (+ rename-map if camelCase).
+- **Add a field to the customer** → runtime `ALTER … ADD COLUMN IF NOT EXISTS` helper next to `ensureCustomerCompanyColumn` (`customers.ts:39`); persist in POST (`:350`) and PUT (`:500`); surface in `rowToCustomer` (`:271`); render in `customers.tsx:3416`. snake_case (+ rename-map if camelCase).
 - **Adjust per-customer pricing** → backend in `customer-products.ts` (prices `:434`, bulk-assign `:743`, copy-from-master `:833`, resolve `:1004`); FE in `CustomerProductsPanel` (`customers.tsx:192`) — mirror the Products bulk-edit pattern. Test `tests/customer-notify.test.mjs`.
 - **Change account/RBAC rules** → keep the `requireSuperAdmin(c)` gate on every `users.ts` mutation and the matching UI hide in `Users.tsx`; verify with `tests/worker-auth-default-protect.test.mjs`.
 - **Touch customer hubs** → `customer-hubs.ts` (75 lines — read it whole) + the master hub config; re-run `tests/hub-cascade-completeness.test.mjs` and `tests/service-hub-chain.test.mjs`.

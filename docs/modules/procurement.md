@@ -22,7 +22,7 @@ Owns the buy-side document chain: **Purchase Orders** (PO) → **Goods Receipt N
   - Bindings mgmt → `src/pages/procurement/maintenance.tsx:858` (`SupplierMaintenancePage`); SKU/supplier modals `sku-form-dialog.tsx` / `supplier-form-dialog.tsx`
   - Supplier profile/scorecard/price-history → `src/pages/suppliers/detail.tsx:156` (`SupplierDetailPage`)
 - API routes
-  - PO CRUD + status lifecycle → `src/api/routes/purchase-orders.ts` (1177)
+  - PO CRUD + status lifecycle → `src/api/routes/purchase-orders.ts` (1190)
   - GRN CRUD + arrival + Post-to-Stock cascade → `src/api/routes/grn.ts` (2592)
   - PI CRUD + lifecycle + GL post → `src/api/routes/purchase-invoices.ts` (2869)
   - Suppliers → `src/api/routes/suppliers.ts`; bindings (autofill source) → `src/api/routes/supplier-materials.ts`
@@ -42,7 +42,7 @@ Owns the buy-side document chain: **Purchase Orders** (PO) → **Goods Receipt N
 - Relationships: PO→GRN keys lines to ONE parent PO by `poItemIndex` (`grns.poId` single column) — pickers are single-source; multi-source consolidation is a follow-up.
 
 ## Core flows
-1. **Create PO** — `app.post("/")` `purchase-orders.ts:417`. Takes `body.status` verbatim (MANUAL create sends `CONFIRMED`; defaults DRAFT only when omitted). Fills blank supplier SKUs from bindings (`fillBlankSupplierSku` `:172`); column self-apply in `ensurePendingMigrations` (`:1050`).
+1. **Create PO** — `app.post("/")` `purchase-orders.ts:430`. Takes `body.status` verbatim (MANUAL create sends `CONFIRMED`; defaults DRAFT only when omitted). Fills blank supplier SKUs from bindings (`fillBlankSupplierSku` `:172`); column self-apply in `ensurePendingMigrations` (`:1063`).
 2. **Receive → Post-to-Stock cascade** — GRN status derives from ARRIVAL on create (`grn.ts:1300`): local-in-hand (arrival ARRIVED) is born POSTED and posts immediately; OCR/import → DRAFT. Crossing to POSTED calls `postGRNToStock` (`:521`, resolves RM via `resolveRmForGRNItem` `:473`, bumps `raw_materials.balanceQty`, writes `cost_ledger`) then `cascadePOStatusAfterGRNPost` (`:811`, flips PO → RECEIVED/PARTIAL_RECEIVED). `COMMITTED_STATUSES = {CONFIRMED,POSTED}` (`:305`).
 3. **Edit a POSTED GRN line** — `app.put("/:id")` `grn.ts:1789`; when prev+new both committed, `buildPostedGRNStockAdjustment` (`:670`) posts only the DELTA via the same helpers, and `cascadePOReceivedQtyDelta` (`:1085`) moves the parent PO line. Blocked when `newAccepted < invoiced_qty` or lines added/removed (`checkGrnLineQtyEdit` in `purchase-edit-rules.ts:135`).
 4. **PI create → convert-chain + GL post** — `app.post("/")` `purchase-invoices.ts:1047`; `ensurePiMigrations` is defined at `:49` and awaited inside. MANUAL → PENDING_APPROVAL, OCR (`ocrUsed`) → DRAFT. `checkConvertAvailability` (`convert-chain.ts:81`) line-level 409 guard; increments `grn_items.invoiced_qty`. Reaching APPROVED posts AP legs via `mapPurchaseLinesToAccounts` (`:170`) → `buildPiApprovalLegs` (`pi-posting.ts:35`).
@@ -56,9 +56,9 @@ Owns the buy-side document chain: **Purchase Orders** (PO) → **Goods Receipt N
 | `POFormDialog` | `src/pages/procurement/index.tsx:63` | Create/edit PO modal (deep-link prefill) |
 | `PurchaseOrderDetailPage` | `src/pages/procurement/detail.tsx:111` | PO detail; status actions, 412-requiresGrn guard |
 | `ThreeWayMatchPanel` | `src/pages/procurement/detail.tsx:1349` | PO↔GRN↔PI variance panel (derived) |
-| `app.post("/")` (PO create) | `src/api/routes/purchase-orders.ts:417` | PO create; `body.status` verbatim |
-| `app.put("/:id")` (PO edit) | `src/api/routes/purchase-orders.ts:747` | PO edit + status lifecycle |
-| `ensurePendingMigrations` (PO) | `src/api/routes/purchase-orders.ts:1050` | Runtime column self-apply |
+| `app.post("/")` (PO create) | `src/api/routes/purchase-orders.ts:430` | PO create; `body.status` verbatim |
+| `app.put("/:id")` (PO edit) | `src/api/routes/purchase-orders.ts:760` | PO edit + status lifecycle |
+| `ensurePendingMigrations` (PO) | `src/api/routes/purchase-orders.ts:1063` | Runtime column self-apply |
 | `postGRNToStock` | `src/api/routes/grn.ts:521` | Post GRN lines to stock + cost_ledger |
 | `cascadePOStatusAfterGRNPost` | `src/api/routes/grn.ts:811` | Flip parent PO → RECEIVED/PARTIAL_RECEIVED |
 | `buildPostedGRNStockAdjustment` | `src/api/routes/grn.ts:670` | Compensating DELTA for POSTED-line edit |
@@ -74,7 +74,7 @@ Owns the buy-side document chain: **Purchase Orders** (PO) → **Goods Receipt N
 | `buildPiApprovalLegs` | `src/lib/pi-posting.ts:35` | PI AP GL legs on APPROVED |
 | `isPiEditable` / `checkGrnLineQtyEdit` | `src/lib/purchase-edit-rules.ts:34 / 135` | Shared FE+BE edit gates |
 | `checkConvertAvailability` / `clampDecrement` | `src/lib/convert-chain.ts:81 / 138` | Line-level 409 guard + floor |
-| `app.get("/by-po/:poId")` | `src/api/routes/three-way-match.ts:269` | PO-scoped variance read |
+| `app.get("/by-po/:poId")` | `src/api/routes/three-way-match.ts:303` | PO-scoped variance read |
 | `app.post("/")` / `/knock-off` / `/un-knock` | `src/api/routes/supplier-payments.ts:124 / 572 / 733` | Pay PIs, apply/reverse advance |
 | `buildSupplierPaymentLifecycle` | `src/api/routes/supplier-payments.ts:827` | Void/delete/unvoid shared core |
 

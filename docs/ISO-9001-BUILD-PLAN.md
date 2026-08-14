@@ -1,7 +1,7 @@
 # ISO 9001:2015 — Build Plan (the QMS spine)
 
 > **Last verified: 2026-08-13** against `src/api/routes/` (136 files) and
-> `migrations-postgres/` (244 files, latest `0223_trade_finance.sql`).
+> `migrations-postgres/` (**252** files as at 2026-08-14; newest prefix `0230_mrp_on_order_and_moq.sql`, and `0229` is shared by TWO files). *(This said "244 files, latest `0223_trade_finance.sql`" — the same stale figure D42 corrected in three other docs on 2026-08-14 without reaching this one.)*
 >
 > Corrected 2026-08-13: **nothing in this plan has been built.** Four weeks on, none
 > of Phase 1–4 exists in code — there is no `nonconformances` table and no

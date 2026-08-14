@@ -61,7 +61,7 @@ deliver write `stock_movements` and read `fg_units`, and fire idempotent custome
 
 ## Core flows
 1. **Create DO from POs** — `app.post("/")` `delivery-orders.ts:1939` → `createDeliveryOrderForPOs` (`_helpers.ts:2164`), after
-   `validateDoComposition` (`_helpers.ts:2035`) enforces the hub-integrity guard. PL-first variant: `app.post("/packing-list-first")` (`delivery-orders.ts:1986`).
+   `validateDoComposition` (`_helpers.ts:2035`) enforces the hub-integrity guard. PL-first variant: `app.post("/packing-list-first")` (`delivery-orders.ts:2067`).
 2. **Status transition + edit** — `app.put("/:id")` `delivery-orders.ts:2949` → `applyDeliveryOrderUpdate` (`_helpers.ts:4194`); every
    move is checked against `VALID_TRANSITIONS[existing.status]` (`_helpers.ts:4249`). Bulk moves come from FE `runBulkDoTransition`
    (`delivery/index.tsx:3002`). DELIVERED→INVOICED builds SO + invoice via `buildDoDeliveredSoAndInvoice` (`_helpers.ts:1558`) /
@@ -97,7 +97,7 @@ deliver write `stock_movements` and read `fg_units`, and fire idempotent custome
 | `applyDeliveryOrderUpdate` | `delivery-orders/_helpers.ts:4194` | DO edit + transition apply |
 | `buildDoDeliveredSoAndInvoice` / `computeDoInvoiceLines` | `delivery-orders/_helpers.ts:1558 / 1342` | DELIVERED→INVOICED SO + invoice build |
 | `queueDoCustomerNotice` | `delivery-orders/_helpers.ts:3637` | Recipient chain + idempotent email claim |
-| `app.post("/packing-list-first")` | `src/api/routes/delivery-orders.ts:1986` | PL-first auto-split create |
+| `app.post("/packing-list-first")` | `src/api/routes/delivery-orders.ts:2067` | PL-first auto-split create |
 | `createPackingListCore` | `src/api/routes/packing-lists.ts:628` | Truck-run packing-list build |
 | `collectDeliveryBrief` / `generateDeliveryProposals` | `src/api/lib/delivery-agent.ts:633 / 868` | Agent brief + proposals |
 | `cheapestForState` / `loadStateRateCard` | `src/api/lib/delivery-agent.ts` | Cheapest-3PL routing |

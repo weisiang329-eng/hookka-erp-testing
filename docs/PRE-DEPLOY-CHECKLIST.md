@@ -31,7 +31,7 @@
    `HYPERDRIVE_STAGING` in `wrangler.toml` (Supabase project
    `zaxygxwadidiqcphibma`). Any `*.hookka-erp-testing.pages.dev` preview
    URL, including a PR canary, routes to it automatically
-   (`isPreviewHostname` / `pickDbUrl`, `src/api/worker.ts:293-311`).
+   (`isPreviewHostname` / `pickDbUrl`, `src/api/worker.ts:294-310`).
    Confirm it holds a representative slice of production data before
    trusting a walkthrough against it; `.github/workflows/sync-staging.yml`
    and `trim-staging.yml` maintain it.
@@ -86,10 +86,16 @@
 
 ## Process integration
 
-- The PR template MUST include a section: "Schema diff verified
+- The PR template SHOULD include a section: "Schema diff verified
   against production: [paste output]" + "Critical paths verified end
-  to end: [list]".
-- The reviewer MUST refuse to merge until both checkboxes are filled.
+  to end: [list]". **It does not today** — checked 2026-08-14 against
+  `.github/PULL_REQUEST_TEMPLATE.md`, which carries `## Impact check`
+  (`Database/migrations:`), `## Production-state claims` and `## Testing`,
+  but neither of these two strings. Until the template carries them, paste
+  the two lines into the PR body by hand.
+- The reviewer MUST refuse to merge until both are filled — **these are not
+  template checkboxes yet**, so there is nothing pre-rendered for the
+  reviewer to look for.
 - For database-touching PRs, attach a screenshot of the staging
   browser test (not a GIF, not a description — a real screenshot).
 

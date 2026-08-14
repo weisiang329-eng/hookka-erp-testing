@@ -3,7 +3,7 @@
 > **Last verified: 2026-08-13** against `src/api/routes/accounting.ts`,
 > `src/api/lib/journal-hash.ts`, `src/api/lib/trade-finance.ts`,
 > `src/api/routes/invoices.ts`, `src/api/routes/supplier-payments.ts`,
-> `migrations-postgres/` (244 files), plus a targeted re-grep of `src/api/`.
+> `migrations-postgres/` (**252** files as at 2026-08-14), plus a targeted re-grep of `src/api/`.
 >
 > **Every 🔴 gap is still open on 2026-08-13.** Re-grepped across `src/api/routes/`
 > and `src/api/lib/`: `NRV` / `write-down` / `obsolescence` → 0 hits;
@@ -151,7 +151,10 @@ settlement. (SST is Customs law rather than MFRS, but it rides the same posting 
 
 ### MFRS 119 Employee benefits — 🟡 partial
 **Have:** payslips compute the full statutory split incl. employer EPF/SOCSO/EIS + PCB
-(`payroll.ts:41-47`). Month-end **Labour** run posts to the GL — DR each dept labour account /
+— in **`src/api/routes/payslips.ts`** (`calcStatutory`, `:295`; PCB via `resolvePcb`,
+`src/lib/pcb.ts:352`). *(This cited `payroll.ts:41-47`, which is a `PayrollRow` **type
+declaration**, not a computation: `POST /api/payroll` returns **501** unconditionally
+(`payroll.ts:125-139`) and that route computes no pay at all — corrected 2026-08-14.)* Month-end **Labour** run posts to the GL — DR each dept labour account /
 CR **410-0010 "ACCRUAL - SALARY"** (`accounting.ts:9138-9194`), idempotent per month, later cleared
 against the bank on payment.
 **Gaps:** `payroll.ts` itself posts **no GL legs** — recognition depends on a **separate, manual,

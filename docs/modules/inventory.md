@@ -44,7 +44,7 @@ Read-mostly stock visibility across the three stages of manufacturing: **Finishe
 - Upstream feeders: `production_orders` / `job_cards` / `grns` / `cost_ledger` / `delivery_hubs`.
 
 ## Core flows
-1. **3-tab aggregate read** — `GET /api/inventory` `inventory.ts:148` returns `{finishedProducts, wipItems, rawMaterials}`. `finishedProducts.stockQty` is deliberately **`null`** (`:215-227`) — NOT `0`. `0` asserts "nothing on hand"; `null` means "not computed by this endpoint". Consumers must render `—` and must NEVER coerce with `?? 0` (BUG-2026-08-13-014, which printed RM 0.00 on five screens). The real FG count comes from `/fg-stock`.
+1. **3-tab aggregate read** — `GET /api/inventory` `inventory.ts:190` returns `{finishedProducts, wipItems, rawMaterials}`. `finishedProducts.stockQty` is deliberately **`null`** (`:215-227`) — NOT `0`. `0` asserts "nothing on hand"; `null` means "not computed by this endpoint". Consumers must render `—` and must NEVER coerce with `?? 0` (BUG-2026-08-13-014, which printed RM 0.00 on five screens). The real FG count comes from `/fg-stock`.
 2. **FG stock derivation** — `GET /api/inventory/fg-stock` `inventory.ts:537` runtime-creates `inventory_fg_stock_snapshot` (`CREATE TABLE IF NOT EXISTS` at `:548`) then serves a cache-aside snapshot (`withSnapshot`, `../lib/snapshot`) computed from `production_orders`/`fg_units`. FE consumes it as deltas — this replaced the old client-side `deriveFGStock` (now in shared `@/lib/fg-stock`).
 3. **WIP derivation** — `GET /api/inventory/wip` `inventory-wip.ts:159` projects non-zero `wip_items` rows, walking dept sequence. FE also derives its own view via `deriveWIPFromPO` (`index.tsx:325`) + `mergeSofaWIPSets` (`:548`, one synthetic row per SO+fabric for sofas).
 4. **Shortage forecast** — `GET /api/inventory/shortage-forecast` `inventory.ts:225` walks CONFIRMED/IN_PRODUCTION SOs, sums per-RM BOM consumption via `collectBomMaterials` (`:205`), subtracts `balanceQty`, adds incoming-PO qty (≤ today+14d), returns `shortBy > 0`.
@@ -61,7 +61,7 @@ Read-mostly stock visibility across the three stages of manufacturing: **Finishe
 | `mergeSofaWIPSets` | `src/pages/inventory/index.tsx:548` | Collapse sofa WIPs to one row per (SO, fabric) |
 | `fgColumns` / `wipColumns` / `rmColumns` | `index.tsx:659 / 766 / 976` | Per-tab column defs |
 | `BatchEditRMDialog` | `index.tsx:3509` | Bulk RM edit dialog |
-| `GET /` (aggregate) | `src/api/routes/inventory.ts:148` | FG(0)/WIP/RM read |
+| `GET /` (aggregate) | `src/api/routes/inventory.ts:190` | FG(0)/WIP/RM read |
 | `GET /fg-stock` | `inventory.ts:537` | Server snapshot; runtime-creates snapshot table |
 | `GET /shortage-forecast` | `inventory.ts:225` | SO-driven RM shortfall projection |
 | `collectBomMaterials` | `inventory.ts:205` | Recursive BOM material roll-up |

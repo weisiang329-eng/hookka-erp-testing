@@ -48,8 +48,13 @@ Completion Date, PIC 1, PIC 2 (columns I, J, K).
 
 ## Required environment variables
 
-All three optional during rollout — when any is missing the helpers no-op
-silently and the routes return 503. The build is safe to deploy with none
+Optional during rollout, but **they do not gate as one unit** (corrected
+2026-08-14): `GOOGLE_SHEETS_SA_KEY` + `SHEETS_SPREADSHEET_ID` gate the
+ERP→Sheets helpers and the backfill route (`sheets-sync.ts:106-120`, `:219-223`);
+`SHEETS_SYNC_SECRET` independently gates ONLY the Sheets→ERP webhook
+(`routes/sheets-sync.ts:70-83`). Set the first two and not the third and
+ERP→Sheets goes live while Sheets→ERP 503s. Missing any one degrades only its
+own direction. The build is safe to deploy with none
 of these set.
 
 | Var | Where set | Notes |
@@ -113,9 +118,11 @@ with HMAC-SHA256, hex-encoded, using `SHEETS_SYNC_SECRET` as the key.
 - `completionDate` is normalised to `YYYY-MM-DD` before signing; otherwise the value passes through verbatim.
 
 The ERP-side verifier (`buildWebhookHmacPayload` + `verifyWebhookSignature`
-in `src/api/lib/sheets-sync.ts`) reconstructs the same string and rejects
-the request if the signature mismatches OR if the timestamp drift exceeds 5
-minutes.
+in `src/api/lib/sheets-sync.ts`) reconstructs the same string and rejects the
+request if the signature mismatches. **The 5-minute drift check is NOT in those
+functions** (corrected 2026-08-14) — it lives in the route:
+`WEBHOOK_TIMESTAMP_WINDOW_MS = 5 * 60 * 1000` (`src/api/routes/sheets-sync.ts:55`),
+applied at `:106-116`, and it fires **before** signature verification at `:146`.
 
 ## Running the backfill
 
@@ -145,8 +152,13 @@ makes progress.
 By design, only request-driven JC mutations push to Sheets. The following
 bulk paths leave Sheets stale; rerun the backfill if you use them:
 
-- `POST /api/production-orders/:poId/regen-job-cards`
-- `POST /api/sales-orders/regen-job-cards` (admin bulk)
+- ~~`POST /api/production-orders/:poId/regen-job-cards`~~ and
+  ~~`POST /api/sales-orders/regen-job-cards`~~ — **both DELETED 2026-05-09**
+  (corrected 2026-08-14). `grep -rn "regen-job-cards" src/` returns only the two
+  removal comments at `production-orders.ts:1859-1860`: zero route registrations,
+  zero callers. Regeneration now goes through
+  `createProductionOrdersForOrder({ appendOnly: true })`, which is **also** not
+  Sheets-hooked — so the warning still applies, to a different entry point.
 - SO cancel cascade (sets PO to CANCELLED but doesn't touch Sheets)
 
 ## Troubleshooting

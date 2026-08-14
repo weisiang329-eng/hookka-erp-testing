@@ -49,7 +49,7 @@ Cost: **one-time USD $25** Google Play developer account. Publishing free apps a
 
 **3. In Play Console, create each app** → upload its `.aab` to a release (start with **Internal testing**, promote to Production after it works).
 
-**4. Wire Digital Asset Links** — in Play Console → your app → **Setup → App integrity → App signing** → copy the **SHA-256 certificate fingerprint**. Paste it into BOTH entries of `public/.well-known/assetlinks.json` (each app uses its own app's fingerprint). Tell me and I'll deploy to prod so `https://erp.hookka.com/.well-known/assetlinks.json` serves the real value → the app then opens full-screen with no browser bar.
+**4. Wire Digital Asset Links** — in Play Console → your app → **Setup → App integrity → App signing** → copy the **SHA-256 certificate fingerprint**. Do this **once per app**: paste each app's OWN SHA-256 into that app's entry in `public/.well-known/assetlinks.json` — two Play Console visits, two different fingerprints. *(This read "paste it into BOTH entries", which contradicted its own next clause; one fingerprint in both entries leaves the Worker TWA unverified and it opens with the browser bar — the exact failure this step prevents. Corrected 2026-08-14; each entry's `_comment` in the JSON says "paste **this app's** … SHA-256 here".)* Tell me and I'll deploy to prod so `https://erp.hookka.com/.well-known/assetlinks.json` serves the real value → the app then opens full-screen with no browser bar.
 
 **5. Fill the store listing** (copy below) → set **Privacy policy URL** = `https://erp.hookka.com/privacy` → complete **Data safety**, **Content rating** (Everyone / business), **Target audience** (adults).
 

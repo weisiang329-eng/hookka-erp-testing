@@ -77,7 +77,23 @@ if (existsSync("CLAUDE.md")) live.push("CLAUDE.md");
 const AUDIT = "docs/DOCS-VS-CODE-AUDIT.md";
 let audited = new Set();
 if (existsSync(AUDIT)) {
-  const t = readFileSync(AUDIT, "utf8");
+  let t = readFileSync(AUDIT, "utf8");
+
+  // Expand brace notation before matching. The audit writes
+  // `docs/context-packs/{architecture,backend,core-flow,security}.md` for four
+  // files it opened; a literal match missed all four and this report said
+  // "69 of 82" while the audit said 81 of 81. The audit was right.
+  //
+  // Worth stating: the tool built to stop me guessing was itself guessing, and
+  // it erred toward "less verified than reality" — the safe direction, but a
+  // number that is wrong either way is a number nobody can act on.
+  t = t.replace(/([A-Za-z0-9/._-]*)\{([^}]+)\}([A-Za-z0-9._-]*)/g, (_m, pre, inner, post) =>
+    inner
+      .split(",")
+      .map((x) => `${pre}${x.trim()}${post}`)
+      .join(" "),
+  );
+
   for (const f of live) if (t.includes(f)) audited.add(f);
 }
 const unread = live.filter((f) => !audited.has(f) && f !== AUDIT);
@@ -103,12 +119,28 @@ for (const f of live) {
     continue;
   }
   unmeasured += (t.match(/UNMEASURED/g) ?? []).length;
-  decisions += (t.match(/owner decision|needs the owner|OWNER DECISION/gi) ?? []).length;
+
+}
+
+// Open decisions come from ONE register, counted as ROWS — not by grepping prose
+// across the tree. Pattern-matching wording gave 53, then 8, then ~30 for the
+// same question inside one conversation: the ledger's closed rulings inflated it,
+// and scattering the real ones across six files deflated it. A backlog nobody can
+// count is a backlog nobody can clear.
+const REGISTER = "docs/OWNER-DECISIONS.md";
+let registerFound = false;
+if (existsSync(REGISTER)) {
+  registerFound = true;
+  const t = readFileSync(REGISTER, "utf8");
+  // Rows are `| **A1** | …` — the id column is what makes one countable.
+  decisions = (t.match(/^\|\s*\*\*[A-D]\d+\*\*\s*\|/gm) ?? []).length;
 }
 
 console.log("\n=== 3. DECLARED GAPS — labelled, not hidden ===\n");
 console.log(`  ${unmeasured} UNMEASURED markers (need a live query to resolve)`);
-console.log(`  ${decisions} open owner decisions`);
+console.log(registerFound
+    ? `  ${decisions} open owner decisions — see docs/OWNER-DECISIONS.md`
+    : "  owner decisions: NO REGISTER FOUND (docs/OWNER-DECISIONS.md missing)");
 console.log(
   "\n  These are the SAFE state. A gap that is labelled can be acted on;\n" +
     "  a gap that looks like an answer is what does the damage.",

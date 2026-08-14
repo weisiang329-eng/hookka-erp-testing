@@ -26,7 +26,8 @@
     "_LEGACY_db:create": "echo 'LEGACY: D1 retired. To create a new Supabase project, see docs/archive/CLOUDFLARE_MIGRATION.md and migrations-postgres/README.md.'",
     "_LEGACY_db:seed:local": "echo 'LEGACY: D1 retired. Local Postgres seeding is via apply-postgres-migrations.mjs --reset (which also seeds via migrations-postgres/*.sql).'",
     "_LEGACY_db:studio": "echo 'LEGACY: D1 retired. Inspect Supabase via the Supabase dashboard or psql with DATABASE_URL from .dev.vars.'",
-    "prepare": "husky"
+    "prepare": "husky",
+    "trust": "node scripts/trust-report.mjs"
   },
   "lint-staged": {
     "*.{ts,tsx}": "eslint"

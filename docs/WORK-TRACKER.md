@@ -1,6 +1,6 @@
 # Hookka ERP — Work Tracker
 
-> **Last verified: 2026-08-14** — branch `fix/security-posture` added below (open, not merged). Previously: PRs #304/#310/#312/#313/#314/#315/#316/#317 all MERGED and
+> **Last verified: 2026-08-14** — branch `feat/job-card-completed-at` added below (open, not merged, its entry is the newest). Previously: branch `fix/security-posture` added below (open, not merged). Previously: PRs #304/#310/#312/#313/#314/#315/#316/#317 all MERGED and
 > **Last verified: 2026-08-14** — restamped on branch `fix/money-input-parsing` (its entry is the newest below, not yet deployed). PRs #304/#310/#312/#313/#314/#315/#316/#317 all MERGED and
 > deployed; zero PRs open, one worktree. Previously verified against the merged PRs on `main` (#266-#300) plus the open PRs #304 (branch `fix/stock-grn-org-filter`) and the accounting-audit branch `fix/accounting-audit`, whose entry is the newest below. This file is a live queue — restamp it whenever you add or close an item.
 
@@ -10,6 +10,39 @@ shipped/parked). Re-read this + `MEMORY.md` at the start of each session and bef
 reporting "done". See `docs/DEV-OPERATING-FRAMEWORK.md` for the discipline.
 
 Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod · ⚪ queued
+
+---
+
+## 2026-08-14 — 🔵 Capture the job-card completion INSTANT (branch `feat/job-card-completed-at`, **NOT deployed, NOT merged**)
+
+The owner's own diagnosis: the factory cannot measure how long any job takes — not because
+nobody records it, but because the system throws the time away at the moment of capture.
+`nowIso.split("T")[0]` in 14 places across the production and worker write paths, with the full
+timestamp in scope every time.
+
+| Ask | State | Entry |
+|---|---|---|
+| Add `job_cards.completed_at` (timestamp, nullable, snake_case, indexed) ALONGSIDE `completed_date`, arriving via the runtime self-apply | ✅ done | BUG-2026-08-13-120 · `src/api/lib/job-card-completed-at.ts` · migration 0227 (record only) |
+| Find EVERY completion write path, not just the quoted one | ✅ done | 19 sites enumerated in the bug entry; `worker.ts` proved to be a READER, not a writer |
+| Do NOT backfill history — leave it NULL and make that visible | ✅ done | guarded: the migration test fails on any `UPDATE`, and `reconcileCompletedAt` is property-tested to prove it can never derive an instant from a date |
+| Do NOT change any efficiency calculation | ✅ honoured | `attendance.ts` CLOCK_OUT and `src/api/lib/efficiency-report.ts` untouched (owned by another agent in flight) |
+| Say what becomes computable once data accumulates | ✅ done | real per-card duration · real per-worker daily production minutes (`pic1_id`/`pic2_id` are on the card) · genuine efficiency = real production ÷ real clocked |
+
+**Gates.** `npx tsc -p tsconfig.app.json --noEmit` exit 0 · `npm test` 3,998 tests / 0 fail
+(+12) · `check-docs-freshness` OK · `check-codebase-map` OK · `check-secrets` OK ·
+`gen-api-docs --check` up to date. All 11 new assertions proved RED by 11 mutations, each
+asserting the bytes on disk changed FIRST and restored byte-for-byte after.
+
+**Note for whoever refreshes the schema fixture.** `tests/db-schema.json` gained
+`job_cards.completed_at` by hand, because `sql-columns-exist.test.mjs` checks flat SELECTs
+against a prod snapshot and the column does not exist on prod until this deploys. Re-run
+`node scripts/refresh-db-schema-fixture.mjs` after deploy to confirm prod agrees.
+
+**Deliberately left open** (recorded as C20 rows 2–4): `attendance_records.production_time_minutes
+= working_minutes × 0.85`, `job_cards.actual_minutes` being a copy of `est_minutes`, and the
+unswept rest of the app. Row 3 is the natural next step — it has a real source for the first
+time once this has accumulated data, and it must NOT be "fixed" by computing durations for
+historical rows.
 
 ---
 

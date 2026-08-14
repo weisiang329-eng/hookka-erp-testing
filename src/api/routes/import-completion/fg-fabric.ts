@@ -4,6 +4,7 @@ import { requirePermission } from "../../lib/rbac";
 import { generateFGUnitsForPO } from "../fg-units";
 import { createProductionOrdersForOrder } from "../_shared/production-builder";
 import { getOrgId } from "../../lib/tenant";
+import { ensureJobCardCompletedAt } from "../../lib/job-card-completed-at";
 import { validateFabricCodes } from "../../lib/fabric-validation";
 import { type FcRow, joinModelLabel, buildFcWipLabel, type FcRefreshJcRow, type PoRow, type SplitCandidatePo } from "./_shared";
 
@@ -14,6 +15,9 @@ app.post("/backfill-fab-cut-merge", async (c) => {
   const denied = await requirePermission(c, "production-orders", "update");
   if (denied) return denied;
   const db = c.var.DB;
+  // Migrations are inert on deploy (CLAUDE.md) — awaited before the anchor
+  // UPDATE below mentions completed_at.
+  await ensureJobCardCompletedAt(db);
   const dryRun = c.req.query("dryRun") === "true";
 
   // Pull every FAB_CUT JC with its PO context + bom_templates baseModel in
@@ -227,12 +231,16 @@ app.post("/backfill-fab-cut-merge", async (c) => {
     try {
       const stmts: D1PreparedStatement[] = [
         db
+          // completedAt travels with completedDate in every statement that
+          // writes the date. This merge rebuilds an anchor card from a PLAN
+          // (the earliest sibling's date), not from an observation, so the
+          // instant is dropped rather than guessed.
           .prepare(
             `UPDATE job_cards
                 SET wipKey = ?, wipLabel = ?, wipType = ?, wipQty = ?,
                     productionTimeMinutes = ?, estMinutes = ?,
                     actualMinutes = ?,
-                    status = ?, completedDate = ?, dueDate = ?,
+                    status = ?, completedDate = ?, completedAt = NULL, dueDate = ?,
                     sequence = 0, prerequisiteMet = 1,
                     branchKey = ''
               WHERE id = ?`,

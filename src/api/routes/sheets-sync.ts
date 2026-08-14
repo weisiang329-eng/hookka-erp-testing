@@ -28,6 +28,15 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { invalidateProductionListCaches } from "../lib/po-list-cache";
+// job_cards.completed_at. A date keyed into a spreadsheet is an ASSERTION about
+// a day, never an observation of an instant, so this path never MINTS one — it
+// only decides whether the instant already on the row still describes the date
+// being written (and a revert to not-done drops it).
+import {
+  ensureJobCardCompletedAt,
+  readCompletedAt,
+  reconcileCompletedAt,
+} from "../lib/job-card-completed-at";
 import { tryGetOrgId, DEFAULT_ORG_ID } from "../lib/tenant";
 import { DEPT_ORDER } from "../lib/lead-times";
 import {
@@ -140,10 +149,13 @@ app.post("/apps-script-webhook", async (c) => {
   }
 
   const db = c.var.DB;
+  // Migrations are inert on deploy (CLAUDE.md) — awaited before the SELECT that
+  // reads the column and the UPDATE that writes it.
+  await ensureJobCardCompletedAt(db);
   const jc = await db
     .prepare(
-      `SELECT id, productionOrderId, status, completedDate, pic1Id, pic1Name,
-              pic2Id, pic2Name, overdue
+      `SELECT id, productionOrderId, status, completedDate, completedAt,
+              pic1Id, pic1Name, pic2Id, pic2Name, overdue
          FROM job_cards WHERE id = ?`,
     )
     .bind(jobCardId)
@@ -152,6 +164,8 @@ app.post("/apps-script-webhook", async (c) => {
       productionOrderId: string;
       status: string;
       completedDate: string | null;
+      completedAt?: string | null;
+      completed_at?: string | null;
       pic1Id: string | null;
       pic1Name: string | null;
       pic2Id: string | null;
@@ -169,6 +183,13 @@ app.post("/apps-script-webhook", async (c) => {
   // WAITING/IN_PROGRESS based on whether any PIC slot is filled).
   const newCompletionDate =
     completionDate === undefined ? jc.completedDate : completionDate;
+  // Nothing is measured here. Carry a previously OBSERVED instant forward only
+  // while it still describes the date being stored: an unchanged date keeps it,
+  // a re-dated card drops it, and clearing the date clears it.
+  const newCompletedAt = reconcileCompletedAt(
+    newCompletionDate,
+    readCompletedAt(jc),
+  );
   const newPic1Name = pic1Name === undefined ? jc.pic1Name : (pic1Name ?? "");
   const newPic2Name = pic2Name === undefined ? jc.pic2Name : (pic2Name ?? "");
 
@@ -199,12 +220,15 @@ app.post("/apps-script-webhook", async (c) => {
 
   await db
     .prepare(
-      `UPDATE job_cards SET completedDate = ?, pic1Name = ?, pic2Name = ?,
+      // completedAt travels with completedDate in every statement that writes
+      // the date — the two must never be able to disagree.
+      `UPDATE job_cards SET completedDate = ?, completedAt = ?, pic1Name = ?, pic2Name = ?,
                             status = ?, overdue = ?
          WHERE id = ?`,
     )
     .bind(
       newCompletionDate,
+      newCompletedAt,
       newPic1Name ?? "",
       newPic2Name ?? "",
       newStatus,

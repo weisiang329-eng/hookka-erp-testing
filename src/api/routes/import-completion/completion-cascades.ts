@@ -6,6 +6,7 @@ import { applyWipInventoryChange, type JobCardRow, type ProductionOrderRow } fro
 import { postJobCardLabor } from "../../lib/po-cost-cascade";
 import { loadLeadTimes, type LeadTimeMap } from "../../lib/lead-times";
 import { getOrgId } from "../../lib/tenant";
+import { ensureJobCardCompletedAt } from "../../lib/job-card-completed-at";
 import { type RequestBody, type PicWarning, type ErrorEntry, type WorkerCache, findJobCardsByPO, loadProductionOrderById, processRow, CASCADE_DATE_CLAMP, cascadeAllowed, type CandidateRow, type AnchorRow, type CandidatePlan, addDaysISO, type LeakAnchorRow, type LeakCandidatePlan } from "./_shared";
 
 const app = new Hono<Env>();
@@ -131,6 +132,9 @@ app.post("/clear-future-completions", async (c) => {
   if (denied) return denied;
 
   const db = c.var.DB;
+  // Migrations are inert on deploy (CLAUDE.md) — awaited before the UPDATE
+  // below clears the column.
+  await ensureJobCardCompletedAt(db);
   const dryRun = c.req.query("dryRun") === "true";
   const today = new Date().toISOString().slice(0, 10);
 
@@ -168,8 +172,12 @@ app.post("/clear-future-completions", async (c) => {
     try {
       await db
         .prepare(
+          // completedAt travels with completedDate in every statement that
+          // writes the date. This endpoint UN-completes the card, so the
+          // instant it was observed at describes nothing any more.
           `UPDATE job_cards
               SET status = 'WAITING', completedDate = NULL,
+                  completedAt = NULL,
                   actualMinutes = NULL,
                   pic1Id = NULL, pic1Name = '',
                   pic2Id = NULL, pic2Name = '',
@@ -201,6 +209,9 @@ app.post("/cascade-upstream-completion", async (c) => {
   if (denied) return denied;
 
   const db = c.var.DB;
+  // Migrations are inert on deploy (CLAUDE.md) — awaited before the UPDATE
+  // below mentions completed_at.
+  await ensureJobCardCompletedAt(db);
   const dryRun = c.req.query("dryRun") === "true";
 
   // Load production_lead_times into the (cat, dept) → days map BEFORE we
@@ -558,9 +569,15 @@ app.post("/cascade-upstream-completion", async (c) => {
     try {
       await db
         .prepare(
+          // completedAt travels with completedDate in every statement that
+          // writes the date. This is a BACKFILL: the date is derived from a
+          // downstream anchor, not observed, so there is no instant to record
+          // and NULL is the honest value. Inventing a time of day here is the
+          // C15 class (a figure that reads as measured and is not).
           `UPDATE job_cards
               SET status = 'COMPLETED',
                   completedDate = ?,
+                  completedAt = NULL,
                   actualMinutes = ?,
                   overdue = 'COMPLETED'
             WHERE id = ?`,
@@ -685,6 +702,9 @@ app.post("/cascade-leak-pass", async (c) => {
   if (denied) return denied;
 
   const db = c.var.DB;
+  // Migrations are inert on deploy (CLAUDE.md) — awaited before the UPDATE
+  // below mentions completed_at.
+  await ensureJobCardCompletedAt(db);
   const dryRun = c.req.query("dryRun") === "true";
 
   const leadTimes: LeadTimeMap = await loadLeadTimes(db);
@@ -926,9 +946,15 @@ app.post("/cascade-leak-pass", async (c) => {
     try {
       await db
         .prepare(
+          // completedAt travels with completedDate in every statement that
+          // writes the date. This is a BACKFILL: the date is derived from a
+          // downstream anchor, not observed, so there is no instant to record
+          // and NULL is the honest value. Inventing a time of day here is the
+          // C15 class (a figure that reads as measured and is not).
           `UPDATE job_cards
               SET status = 'COMPLETED',
                   completedDate = ?,
+                  completedAt = NULL,
                   actualMinutes = ?,
                   overdue = 'COMPLETED'
             WHERE id = ?`,

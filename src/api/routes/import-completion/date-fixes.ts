@@ -2,6 +2,11 @@ import { Hono } from "hono";
 import type { Env } from "../../worker";
 import { requirePermission } from "../../lib/rbac";
 import { autofillWorkingHoursFromPunch } from "../../lib/punch-autofill";
+// Both date-fix endpoints below RE-DATE an already-completed card (a plan only
+// exists where the proposed day differs from the stored one). A completion
+// INSTANT observed on the old day cannot describe the new one, so it is
+// dropped, never rewritten — see src/api/lib/job-card-completed-at.ts.
+import { ensureJobCardCompletedAt } from "../../lib/job-card-completed-at";
 import { FIX_DATE_TODAY_CLAMP, type SuspiciousDateRow, type SwapPlan, type FixDatesCandidateRow, type FixDatesPlan } from "./_shared";
 
 const app = new Hono<Env>();
@@ -194,6 +199,9 @@ app.post("/fix-misparsed-jan-dates", async (c) => {
   if (denied) return denied;
 
   const db = c.var.DB;
+  // Migrations are inert on deploy (CLAUDE.md) — awaited before the UPDATE
+  // below mentions the column.
+  await ensureJobCardCompletedAt(db);
   const dryRun = c.req.query("dryRun") === "true";
 
   // Find all JCs whose completedDate is in 2026-01-xx or 2026-02-xx where the
@@ -348,7 +356,11 @@ app.post("/fix-misparsed-jan-dates", async (c) => {
   for (const p of plans) {
     try {
       await db
-        .prepare(`UPDATE job_cards SET completedDate = ? WHERE id = ?`)
+        // completedAt travels with completedDate. The card is being moved to a
+        // DIFFERENT day, so any instant on the row belongs to the old one.
+        .prepare(
+          `UPDATE job_cards SET completedDate = ?, completedAt = NULL WHERE id = ?`,
+        )
         .bind(p.proposed, p.jcId)
         .run();
       updated++;
@@ -378,6 +390,9 @@ app.post("/fix-misparsed-dates", async (c) => {
   if (denied) return denied;
 
   const db = c.var.DB;
+  // Migrations are inert on deploy (CLAUDE.md) — awaited before the UPDATE
+  // below mentions the column.
+  await ensureJobCardCompletedAt(db);
   const dryRun = c.req.query("dryRun") !== "false";
 
   // 1. Pull every JC in the 2026-01/2026-02 window where day & month are
@@ -501,7 +516,9 @@ app.post("/fix-misparsed-dates", async (c) => {
     try {
       await db
         .prepare(
-          `UPDATE job_cards SET completedDate = ?, updated_at = ? WHERE id = ?`,
+          // completedAt travels with completedDate — the card is being moved to
+          // a DIFFERENT day, so any instant on the row belongs to the old one.
+          `UPDATE job_cards SET completedDate = ?, completedAt = NULL, updated_at = ? WHERE id = ?`,
         )
         .bind(p.proposed, nowIso, p.jcId)
         .run();

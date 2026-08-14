@@ -68,6 +68,7 @@ import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { recomputePoStatusAndProgress } from "./production-orders";
 import { ensureQcGenerationSchema } from "../lib/qc-generation-schema";
+import { ensureJobCardCompletedAt } from "../lib/job-card-completed-at";
 import {
   drawReasonSummary,
   scoreFgUnit,
@@ -2099,6 +2100,12 @@ export async function completeInspection(
   id: string,
   input: CompleteInspectionInput,
 ): Promise<CompleteInspectionResult> {
+  // A WIP FAIL below resets the job card and must clear job_cards.completed_at
+  // alongside completed_date. Migrations are inert on deploy (CLAUDE.md), so
+  // the column reaches prod only through this awaited self-apply — placed at
+  // the top of the shared entry point so BOTH callers (the desktop QC page and
+  // the worker app's inspection submit) are covered.
+  await ensureJobCardCompletedAt(db);
   const existing = await db
     .prepare("SELECT * FROM qc_inspections WHERE id = ?")
     .bind(id)
@@ -2293,9 +2300,15 @@ export async function completeInspection(
     stmts.push(
       db
         .prepare(
+          // completedAt travels with completedDate in every statement that
+          // writes the date. A QC fail un-does the completion, so the instant
+          // it was observed at no longer describes anything — leaving it behind
+          // would let a later reader compute a duration for work that is now
+          // BLOCKED and being reworked.
           `UPDATE job_cards SET
              status = 'BLOCKED',
              completedDate = NULL,
+             completedAt = NULL,
              wipQty = 0,
              actualMinutes = NULL,
              productionTimeMinutes = 0

@@ -5,8 +5,9 @@ import { applyWipInventoryChange, type JobCardRow, type ProductionOrderRow } fro
 import { consumeRawMaterialsForPO, postJobCardLabor } from "../../lib/po-cost-cascade";
 import { loadLeadTimes, type LeadTimeMap } from "../../lib/lead-times";
 import { getOrgId } from "../../lib/tenant";
+import { ensureJobCardCompletedAt } from "../../lib/job-card-completed-at";
 import { breakBomIntoWips, type BomVariantContext } from "../../lib/bom-wip-breakdown";
-import { findJobCardsByPO, loadProductionOrderById, CASCADE_DATE_CLAMP, addDaysISO, UPH_POFOLD_TARGET_DEPTS, UPH_POFOLD_DEPT_ORDER, type UphPofoldCandidate, type FcCandidate, type RefundCandidateRow, type RefundSiblingRow, type RebuildJcRow, type RebuildPoRow, type RebuildWipRow, buildFcWipLabel, type JcBackfillRow, type DriftSample, ACTIVE_JC_STATUSES, COMPLETED_JC_STATUSES, type RefreshJcRow } from "./_shared";
+import { findJobCardsByPO, loadProductionOrderById, CASCADE_DATE_CLAMP, addDaysISO, UPH_POFOLD_TARGET_DEPTS, UPH_POFOLD_DEPT_ORDER, type UphPofoldCandidate, type FcCandidate, type RefundCandidateRow, type RefundSiblingRow, type RebuildJcRow, type RebuildPoRow, type RebuildWipRow, type JcBackfillRow, type DriftSample, ACTIVE_JC_STATUSES, COMPLETED_JC_STATUSES, type RefreshJcRow } from "./_shared";
 
 const app = new Hono<Env>();
 
@@ -16,6 +17,9 @@ app.post("/uph-pofold-backfill", async (c) => {
   if (denied) return denied;
 
   const db = c.var.DB;
+  // Migrations are inert on deploy (CLAUDE.md) — awaited before the UPDATE
+  // below mentions completed_at.
+  await ensureJobCardCompletedAt(db);
   const dryRun = c.req.query("dryRun") === "true";
 
   const leadTimes: LeadTimeMap = await loadLeadTimes(db);
@@ -192,9 +196,13 @@ app.post("/uph-pofold-backfill", async (c) => {
     try {
       await db
         .prepare(
+          // completedAt travels with completedDate in every statement that
+          // writes the date. BACKFILL — the date is derived, not observed, so
+          // NULL is the honest value; see src/api/lib/job-card-completed-at.ts.
           `UPDATE job_cards
               SET status = 'COMPLETED',
                   completedDate = ?,
+                  completedAt = NULL,
                   actualMinutes = ?,
                   overdue = 'COMPLETED'
             WHERE id = ?`,
@@ -291,6 +299,9 @@ app.post("/fab-cut-pofold-backfill", async (c) => {
   if (denied) return denied;
 
   const db = c.var.DB;
+  // Migrations are inert on deploy (CLAUDE.md) — awaited before the UPDATE
+  // below mentions completed_at.
+  await ensureJobCardCompletedAt(db);
   const dryRun = c.req.query("dryRun") === "true";
 
   // 1. Pull all WAITING FAB_CUT JCs + their owning PO context. Avoid
@@ -498,9 +509,13 @@ app.post("/fab-cut-pofold-backfill", async (c) => {
     try {
       await db
         .prepare(
+          // completedAt travels with completedDate in every statement that
+          // writes the date. BACKFILL — the date is derived, not observed, so
+          // NULL is the honest value; see src/api/lib/job-card-completed-at.ts.
           `UPDATE job_cards
               SET status = 'COMPLETED',
                   completedDate = ?,
+                  completedAt = NULL,
                   actualMinutes = ?,
                   overdue = 'COMPLETED'
             WHERE id = ?`,

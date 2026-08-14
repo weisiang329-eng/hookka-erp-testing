@@ -10144,7 +10144,27 @@ function LaborCostTab({
 
 const LEAVE_TYPES: LeaveRecord["type"][] = ["ANNUAL", "MEDICAL", "UNPAID", "EMERGENCY", "PUBLIC_HOLIDAY"];
 const LEAVE_STATUSES: LeaveRecord["status"][] = ["PENDING", "APPROVED", "REJECTED"];
-const LEAVE_ENTITLEMENTS = { ANNUAL: 8, MEDICAL: 14 };
+
+// Entitlement is NO LONGER a constant here. It lives in data
+// (`workers.annual_leave_entitlement_days` / `.medical_leave_entitlement_days`,
+// NULL = the system default) and the balance — entitlement, leave-year
+// boundary and public-holiday exclusion — is computed by ONE shared module,
+// `src/lib/leave-entitlement.ts`, behind `GET /api/leaves/balances`.
+//
+// The old constant pair `{ ANNUAL: 8, MEDICAL: 14 }` disagreed with the
+// worker's phone (which used 14 annual), summed usage over ALL history so a
+// balance only ever fell, and charged public holidays against annual leave.
+type LeaveBalanceRow = {
+  workerId: string;
+  workerName: string;
+  leaveYear: number;
+  annualUsed: number;
+  annualEntitlement: number;
+  annualRemaining: number;
+  medicalUsed: number;
+  medicalEntitlement: number;
+  medicalRemaining: number;
+};
 
 function LeaveManagementTab({ workers }: { workers: Worker[] }) {
   const { toast } = useToast();
@@ -10163,11 +10183,24 @@ function LeaveManagementTab({ workers }: { workers: Worker[] }) {
 
   const { data: leavesResp, loading: loadingLeaves, refresh: refreshLeavesHook } = useCachedJson<unknown>("/api/leaves");
   const leaveData: LeaveRecord[] = useMemo(() => asArray(leavesResp) as LeaveRecord[], [leavesResp]);
+
+  // Leave balances — computed SERVER-side so the office and the worker's phone
+  // read one number from one policy, instead of each doing its own arithmetic
+  // against its own hardcoded entitlement.
+  const { data: balancesResp, refresh: refreshBalancesHook } = useCachedJson<{
+    data?: LeaveBalanceRow[];
+    leaveYear?: number;
+  }>("/api/leaves/balances");
+
   const fetchLeaves = useCallback(() => {
     invalidateCachePrefix("/api/leaves");
     invalidateCachePrefix("/api/workers");
     refreshLeavesHook();
-  }, [refreshLeavesHook]);
+    // Approving or rejecting a request moves a balance, so the balance table
+    // has to be refetched too — it is a separate endpoint, and without this it
+    // kept showing the pre-approval figure until the cache aged out.
+    refreshBalancesHook();
+  }, [refreshLeavesHook, refreshBalancesHook]);
 
   const filteredLeaves = useMemo(() => {
     let result = leaveData;
@@ -10180,23 +10213,11 @@ function LeaveManagementTab({ workers }: { workers: Worker[] }) {
     return result;
   }, [leaveData, filterStatus, filterWorker]);
 
-  // Calculate leave balances per worker
-  const leaveBalances = useMemo(() => {
-    const activeWorkers = workers.filter((w) => w.status === "ACTIVE");
-    return activeWorkers.map((w) => {
-      const workerLeaves = leaveData.filter((l) => l.workerId === w.id && l.status === "APPROVED");
-      const annualUsed = workerLeaves.filter((l) => l.type === "ANNUAL").reduce((s, l) => s + l.days, 0);
-      const medicalUsed = workerLeaves.filter((l) => l.type === "MEDICAL").reduce((s, l) => s + l.days, 0);
-      return {
-        workerId: w.id,
-        workerName: w.name,
-        annualUsed,
-        annualRemaining: LEAVE_ENTITLEMENTS.ANNUAL - annualUsed,
-        medicalUsed,
-        medicalRemaining: LEAVE_ENTITLEMENTS.MEDICAL - medicalUsed,
-      };
-    });
-  }, [workers, leaveData]);
+  const leaveBalances: LeaveBalanceRow[] = useMemo(
+    () => (Array.isArray(balancesResp?.data) ? balancesResp.data : []),
+    [balancesResp],
+  );
+  const balanceLeaveYear = balancesResp?.leaveYear ?? new Date().getFullYear();
 
   const calculateDays = (start: string, end: string): number => {
     const s = new Date(start);
@@ -10448,6 +10469,9 @@ function LeaveManagementTab({ workers }: { workers: Worker[] }) {
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2">
             <CalendarDays className="h-5 w-5 text-[#6B5C32]" /> Leave Balance Summary
+            <span className="ml-2 text-xs font-normal text-[#6B7280]">
+              Leave year {balanceLeaveYear} · public holidays excluded
+            </span>
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -10456,8 +10480,11 @@ function LeaveManagementTab({ workers }: { workers: Worker[] }) {
               <thead>
                 <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
                   <th className="h-10 px-4 text-left font-medium text-[#374151]">Worker</th>
-                  <th className="h-10 px-3 text-center font-medium text-[#374151]" colSpan={3}>Annual Leave (8 days)</th>
-                  <th className="h-10 px-3 text-center font-medium text-[#374151]" colSpan={3}>Medical Leave (14 days)</th>
+                  {/* No fixed "(8 days)" / "(14 days)" here any more — entitlement
+                      is per-worker data now, so it is shown per row instead of
+                      asserted once in the header for everyone. */}
+                  <th className="h-10 px-3 text-center font-medium text-[#374151]" colSpan={3}>Annual Leave</th>
+                  <th className="h-10 px-3 text-center font-medium text-[#374151]" colSpan={3}>Medical Leave</th>
                 </tr>
                 <tr className="border-b border-[#E2DDD8] bg-[#FAF9F7]">
                   <th className="h-8 px-4"></th>
@@ -10473,7 +10500,10 @@ function LeaveManagementTab({ workers }: { workers: Worker[] }) {
                 {leaveBalances.map((b) => (
                   <tr key={b.workerId} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors">
                     <td className="h-10 px-4 font-medium text-[#1F1D1B]">{b.workerName}</td>
-                    <td className="h-10 px-3 text-center">{b.annualUsed}</td>
+                    <td className="h-10 px-3 text-center">
+                      {b.annualUsed}
+                      <span className="text-xs text-[#9CA3AF]"> / {b.annualEntitlement}</span>
+                    </td>
                     <td className="h-10 px-3 text-center font-medium">
                       <span className={b.annualRemaining <= 2 ? "text-[#9A3A2D]" : "text-[#4F7C3A]"}>
                         {b.annualRemaining}
@@ -10483,11 +10513,14 @@ function LeaveManagementTab({ workers }: { workers: Worker[] }) {
                       <div className="w-20 h-2 bg-gray-200 rounded-full mx-auto">
                         <div
                           className="h-2 bg-[#3E6570] rounded-full"
-                          style={{ width: `${Math.min(100, (b.annualUsed / LEAVE_ENTITLEMENTS.ANNUAL) * 100)}%` }}
+                          style={{ width: `${b.annualEntitlement > 0 ? Math.min(100, (b.annualUsed / b.annualEntitlement) * 100) : 0}%` }}
                         />
                       </div>
                     </td>
-                    <td className="h-10 px-3 text-center">{b.medicalUsed}</td>
+                    <td className="h-10 px-3 text-center">
+                      {b.medicalUsed}
+                      <span className="text-xs text-[#9CA3AF]"> / {b.medicalEntitlement}</span>
+                    </td>
                     <td className="h-10 px-3 text-center font-medium">
                       <span className={b.medicalRemaining <= 3 ? "text-[#9A3A2D]" : "text-[#4F7C3A]"}>
                         {b.medicalRemaining}
@@ -10497,7 +10530,7 @@ function LeaveManagementTab({ workers }: { workers: Worker[] }) {
                       <div className="w-20 h-2 bg-gray-200 rounded-full mx-auto">
                         <div
                           className="h-2 bg-[#6B4A6D] rounded-full"
-                          style={{ width: `${Math.min(100, (b.medicalUsed / LEAVE_ENTITLEMENTS.MEDICAL) * 100)}%` }}
+                          style={{ width: `${b.medicalEntitlement > 0 ? Math.min(100, (b.medicalUsed / b.medicalEntitlement) * 100) : 0}%` }}
                         />
                       </div>
                     </td>

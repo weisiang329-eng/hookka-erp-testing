@@ -26,6 +26,14 @@ import { computeMonthlyLabor, computeAttendanceDayDetail, absenceCutoffDay, effe
 import { jcMinutesTotal } from "../../lib/job-card-minutes";
 import { deriveBarcodeToken, deptOfBarcodeToken, isBarcodeToken } from "../../lib/job-card-id";
 import { computeMonthlyEfficiencyByWorker, resolveEfficiencyAllowanceSen, monthBounds } from "../lib/efficiency-allowance";
+import { ensureLeaveEntitlementColumns } from "../lib/ensure-leave-columns";
+import {
+  calendarLeaveDays,
+  computeLeaveBalance,
+  currentLeaveYear,
+  parsePublicHolidays,
+  type WorkerEntitlementFields,
+} from "../../lib/leave-entitlement";
 import {
   ensureWorkerPerfIndices,
   ensureWorkerSnapshotTables,
@@ -2451,6 +2459,11 @@ app.get("/leaves", async (c) => {
   if (!auth.ok) return auth.response;
   const { workerId } = auth;
 
+  // The entitlement-override columns are read below; migrations are inert on
+  // deploy here, so the runtime self-apply must land before the SELECT names
+  // them.
+  await ensureLeaveEntitlementColumns(c.var.DB);
+
   const res = await c.var.DB.prepare(
     "SELECT * FROM leaves WHERE workerId = ? ORDER BY startDate DESC",
   )
@@ -2469,36 +2482,61 @@ app.get("/leaves", async (c) => {
     approvedBy: r.approvedBy ?? undefined,
   }));
 
-  // YTD usage
-  const yearPrefix = String(new Date().getFullYear());
-  const usedAnnual = mine
-    .filter(
-      (r) =>
-        r.type === "ANNUAL" &&
-        r.status === "APPROVED" &&
-        r.startDate.startsWith(yearPrefix),
-    )
-    .reduce((s, r) => s + (r.days || 0), 0);
-  const usedMedical = mine
-    .filter(
-      (r) =>
-        r.type === "MEDICAL" &&
-        r.status === "APPROVED" &&
-        r.startDate.startsWith(yearPrefix),
-    )
-    .reduce((s, r) => s + (r.days || 0), 0);
+  // Balance for the CURRENT leave year, from the one shared policy module.
+  //
+  // This used to be a local pair of literals — `annualEntitlement = 14`,
+  // `medicalEntitlement = 14` — while the office screen used 8 / 14. So the
+  // worker's phone showed 14 annual days and the office showed 8 for the same
+  // person, for as long as this endpoint has existed. That is bug class C4 (two
+  // copies of one policy, only one maintained); both surfaces now call
+  // `computeLeaveBalance`, so they cannot drift again.
+  //
+  // The calendar-year boundary that was already here is KEPT and is the
+  // precedent the office screen now adopts.
+  const leaveYear = currentLeaveYear();
+  const publicHolidays = parsePublicHolidays(
+    (
+      await c.var.DB.prepare("SELECT value FROM kv_config WHERE key = ?")
+        .bind("public_holidays")
+        .first<{ value: string | null }>()
+    )?.value ?? null,
+  );
 
-  const annualEntitlement = 14;
-  const medicalEntitlement = 14;
+  const workerRow = await c.var.DB.prepare(
+    `SELECT annual_leave_entitlement_days, medical_leave_entitlement_days
+       FROM workers WHERE id = ?`,
+  )
+    .bind(workerId)
+    .first<WorkerEntitlementFields>();
+
+  const annual = computeLeaveBalance({
+    leaves: mine,
+    worker: workerRow,
+    type: "ANNUAL",
+    leaveYear,
+    publicHolidays,
+  });
+  const medical = computeLeaveBalance({
+    leaves: mine,
+    worker: workerRow,
+    type: "MEDICAL",
+    leaveYear,
+    publicHolidays,
+  });
 
   return c.json({
     success: true,
     data: {
       balance: {
-        annualRemaining: Math.max(0, annualEntitlement - usedAnnual),
-        medicalRemaining: Math.max(0, medicalEntitlement - usedMedical),
-        annualEntitlement,
-        medicalEntitlement,
+        // Still clamped at 0 for the worker's own phone: this is the screen a
+        // worker reads, and a negative number there is alarming without being
+        // actionable. The office balance is deliberately NOT clamped, because
+        // the approver is the person who needs to see an over-draw.
+        annualRemaining: Math.max(0, annual.remainingDays),
+        medicalRemaining: Math.max(0, medical.remainingDays),
+        annualEntitlement: annual.entitlementDays,
+        medicalEntitlement: medical.entitlementDays,
+        leaveYear,
       },
       history: mine,
     },
@@ -2527,7 +2565,10 @@ app.post("/leaves", async (c) => {
   if (isNaN(s.getTime()) || isNaN(e.getTime()) || e < s) {
     return c.json({ success: false, error: "Invalid date range" }, 400);
   }
-  const days = Math.round((e.getTime() - s.getTime()) / 86400000) + 1;
+  // One span helper for every writer — this used to be `Math.round` here and
+  // `Math.ceil` in the office screen, against a server that stored whichever
+  // arrived.
+  const days = calendarLeaveDays(startDate, endDate);
 
   const id = genId("lv");
   const now = new Date().toISOString();

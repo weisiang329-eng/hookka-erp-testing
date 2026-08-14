@@ -3592,6 +3592,7 @@
     "worker_id"
   ],
   "workers": [
+    "annual_leave_entitlement_days",
     "bank_account",
     "bank_name",
     "basic_salary_sen",
@@ -3609,6 +3610,7 @@
     "id",
     "is_outsource",
     "join_date",
+    "medical_leave_entitlement_days",
     "name",
     "nationality",
     "ot_multiplier",

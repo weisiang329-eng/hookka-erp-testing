@@ -34,7 +34,7 @@ Entries themselves stay newest-first.
 
 ---
 
-## BUG-2026-08-13-103 — the Command Center printed a green `0` and "All clear" over a compliance read that had died `dashboard` `data-integrity` `ui-frontend` 🟢
+## BUG-2026-08-13-107 — the Command Center printed a green `0` and "All clear" over a compliance read that had died `dashboard` `data-integrity` `ui-frontend` 🟢
 
 **Symptom.** The Daily Report tile on `/dashboard` — the first card under the KPI rail —
 showed a large **green `0`** captioned *"All clear — nothing flagged today"* whenever
@@ -143,6 +143,99 @@ mutating.
 
 Full context for all four, plus the 40-odd findings this pass did **not** fix, is in
 [`docs/DASHBOARD-DATA-AUDIT.md`](DASHBOARD-DATA-AUDIT.md).
+## BUG-2026-08-13-103 — "production time" and every efficiency built on it were `clocked × 0.85`; a punch has never measured production `data-integrity` `attendance` `reporting` 🟢
+
+**Symptom.** None — which is the point. Attendance carried a per-day "Production Time" and
+an "Efficiency %" for every worker, every day, in the same typeface as the real figures
+beside them, and the numbers were plausible. Nothing 500'd, nothing rendered blank.
+
+**Root cause.** `src/api/routes/attendance.ts` CLOCK_OUT:
+
+```js
+workingMinutes        = Math.max(0, total);                      // REAL: out − in
+productionTimeMinutes = Math.max(0, Math.round(total * 0.85));   // FABRICATED
+efficiencyPct         = Math.round((productionTimeMinutes / standardMinutes) * 100);
+deptBreakdown         = JSON.stringify([{ deptCode, minutes: productionTimeMinutes,
+                                          productCode: "" }]);
+```
+
+`attendance_records.production_time_minutes` has **never been measured**. It is
+`working_minutes × 0.85`. Measured on prod for August 2026: 180,928 / 212,850 =
+**0.85005** — the constant showing through. Consequently `efficiencyPct` measured
+ATTENDANCE LENGTH wearing the word "efficiency" (`0.85 × clocked ÷ standard`), and
+`deptBreakdown` published a per-department split that was the same fabricated number under
+an **empty** `productCode`.
+
+**Three writers, not one.** Grepping the constant rather than the endpoint found the same
+ratio in:
+
+1. `attendance.ts` — `POST /api/attendance` CLOCK_OUT (the office punch).
+2. `worker.ts` — `POST /api/worker/clock` CLOCK_OUT (the phone punch), an exact copy.
+3. `worker.ts` `autoCloseForgottenPunch` — the midnight cron + next-day self-heal, which
+   computed `stdMin × 0.85` and then divided it by `stdMin`, so **every** auto-closed day
+   was stamped a flat **85%** that could not vary by construction.
+
+A fourth path, `working-hour-entries.ts`, seeded the columns with `0` on the attendance row
+it auto-creates — the quieter form of the same defect (C15: *`0` is a claim, not a blank*).
+
+**Blast radius — what it did NOT reach, which took the longest to establish.** Payroll does
+**not** touch these columns. `payroll-hour-deductions.ts:282` selects only
+`employeeId, date, clockIn, clockOut`; the efficiency ALLOWANCE
+(`src/api/lib/efficiency-allowance.ts`, real money, gated on a threshold) uses
+`job_cards.productionTimeMinutes × wipQty` over `working_hour_entries.hours` — a different
+`productionTimeMinutes`, on a different table. **No pay figure was ever computed from the
+fabricated column.** Nor did any screen render it: the Employee Detail tab dropped the
+attendance-sourced rows in 2026-05, `reports.tsx` reads only `workingMinutes` /
+`overtimeMinutes` from attendance, and the mobile card shows clock-in/out/hours. It was
+exposed on `GET /api/attendance` and `GET /api/worker/history`, typed in four frontend
+files, and one API-doc comment advertised `efficiencyPct` as a "real field" — i.e. it was
+sitting there waiting for the next screen to pick it up.
+
+**Fix.**
+* All four writers stop computing it. The punch now records only what a punch observes:
+  clock in, clock out, the minutes between, and the OT rule applied to those minutes.
+* `production_time_minutes` / `efficiency_pct` are **cleared to NULL** at clock-out (so a
+  re-punch scrubs what a pre-fix clock-out wrote) and **omitted** from both INSERT paths.
+  `migrations-postgres/0227_attendance_unmeasured_metrics_nullable.sql` drops their
+  `NOT NULL` + `DEFAULT 0` so "unknown" is expressible at all; it also runs at runtime via
+  `ensureAttendanceMetricsNullable` because migrations are inert on deploy here. If that DDL
+  cannot apply, the write paths **omit** the columns — the fallback is silence, never a
+  number.
+* Both readers (`rowToAttendance`, `/api/worker/history`) publish `null` / `[]`
+  **unconditionally**. Every stored value is fabricated, so a passthrough would republish
+  the fabrication for the ~2,780 historic rows.
+* The migration deliberately does **not** UPDATE those historic rows to NULL — irreversible,
+  not needed for correctness (nothing can read them now), and the owner's call. The exact
+  statement is written in the migration's header for when he decides.
+
+**Deliberately left alone.** `autoCloseForgottenPunch` still writes
+`workingMinutes = stdMin`. That is the owner's stated RULE (2026-06-16: a forgotten punch
+pays as a normal shift — no OT, no short-hour dock), the row says so in `notes`, and
+BUG-2026-08-01-004 depends on it. A policy figure that names itself is not a fabricated
+measurement.
+
+**The metric that survived, now labelled honestly.** `/api/department-performance` is
+untouched: it divides job-card minutes by REAL clocked time from `working_hour_entries`.
+But its numerator is `actualMinutes ?? estMinutes`, and recorded durations collapsed in
+May 2026 (Jan 100% → Apr 72.6% → May 6.2% → Jun–Aug ~0%; **0 of 3,475** August job cards
+carry one), so in practice it is EARNED STANDARD time — earned-vs-actual labour efficiency,
+a legitimate metric, but not measured production pace. The endpoint now returns
+`totals.cards` / `totals.measuredCards` (a card counts as measured only when its recorded
+duration DIFFERS from its own standard — 4,289 populated values on prod are byte-identical
+copies of their estimate), and both surfaces caption it *"standard minutes earned ÷ clocked
+minutes"* with the coverage printed beside it, plus an explicit warning not to trend it
+against a period when capture was real.
+
+**Verified.** `tests/no-fabricated-attendance-production-time.test.mjs` — 7 structural
+tests, 13 assertions. Every one proved RED by reintroducing the bug, with **bytes-changed-
+on-disk asserted before each run** and byte-identical restore after. Reads are CRLF-
+normalised and the prose assertions run against a whitespace-collapsed copy, because a
+literal `\n` anchor matches nothing in these files. Two of the thirteen were **blind on the
+first draft**: the caption checks matched a sentence JSX had wrapped across lines, and the
+anti-over-correction pin on `/api/department-performance` matched only ONE of the two places
+that formula lives — it stayed green with the other site's denominator replaced by a
+literal. `npx tsc -p tsconfig.app.json --noEmit` exit 0. **Not deployed** — no prod
+verification claimed.
 
 ---
 

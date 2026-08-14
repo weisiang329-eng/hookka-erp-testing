@@ -9,6 +9,19 @@
 > traced to file:line in the audit doc.
 >
 > **Previously verified 2026-08-14** — restamped on branch `fix/security-posture`: **C16 gains
+> **Last verified: 2026-08-14** — restamped on branch `fix/efficiency-fabrication`:
+> **C15 gains row 28** (BUG-2026-08-13-103) — `attendance_records.production_time_minutes`
+> was `working_minutes × 0.85` on every row ever written, and the `efficiencyPct` and
+> `deptBreakdown` published beside it were derived from that constant. Prod, August 2026:
+> 180,928 / 212,850 = 0.85005. It adds a **sixth corollary** (below the table): *a metric
+> can be honest arithmetic on a dishonest input — audit the DISTRIBUTION of the source
+> column, not the formula.* Three writers carried the same ratio, not one, and the guard
+> that pinned the surviving real metric was **single-site** — it passed while the OTHER
+> copy of the formula had its denominator replaced with a literal. Enforced by
+> `tests/no-fabricated-attendance-production-time.test.mjs`; all 13 assertions proved RED
+> by reintroducing the bug (bytes-changed-on-disk asserted before each run).
+>
+> **Previously verified: 2026-08-14** — restamped on branch `fix/security-posture`: **C16 gains
 > row 7** (a projection narrowed by PERMISSION rather than payload size — the more dangerous
 > variant, because the author cannot reproduce what the affected role sees) with its
 > OMIT-do-not-BLANK corollary, and **C12 gains rows 12 and 13** (the whole `organisations.ts`
@@ -851,6 +864,7 @@ place: `/api/department-performance` must keep dividing by clocked time,
 | 36 | **PCB** on every payslip | `/employees` › Payroll | `pcb: pcbOn ? 0 : 0` — hardcoded on both branches, feeds `totalDeductions → netPay`, under a tooltip that lists PCB as included | ⬜ open |
 | 37 | Balance-sheet **"balanced ✓"**, AR/AP Outstanding, Opening-Balance **"Balanced ✓" + enabled Post** | `/accounting` | all render `RM 0.00` / a green tick over a **failed** fetch — the same page already publishes `NO_FIGURE = "—"` for three other cards | ⬜ open — row 28's shape, on a second page |
 | 38 | Trade Finance *"Draws + unallocated = account balance"* | `/accounting` › Trade Finance | `unallocated = net − Σ outstanding` and `total = Σ outstanding`, so the identity holds in integer sen **always**; the red branch is unreachable | ⬜ open |
+| 28 | `production_time_minutes`, the `efficiencyPct` and the `deptBreakdown` on EVERY attendance row | `POST /api/attendance` + `POST /api/worker/clock` + the midnight auto-close → `GET /api/attendance`, `GET /api/worker/history` | `round(workingMinutes × 0.85)` — a fixed ratio of the clock time, written at clock-out and captioned as production. The efficiency divided it by the standard day, so it measured ATTENDANCE LENGTH; the dept split republished the same number under an EMPTY productCode. Prod Aug 2026: 180,928 / 212,850 = **0.85005**. Three writers, one of which (the forgotten-punch auto-close) produced a flat **85%** that could not vary — both sides came from `stdMin` | ✅ 2026-08-13 (-103) — writers cleared, readers publish `null` / `[]`, column made nullable |
 
 **Enforced by** six files, all structural (`readFileSync` source assertions),
 because nothing else can catch a number that is merely wrong-but-plausible:
@@ -882,6 +896,10 @@ the case you already fixed. Corollary to the corollary: the honest sibling was
 right there — `/daily-report` reads the **same endpoint** and says *"Could not
 load the report."* **Two screens on one endpoint disagreeing about whether the
 data arrived is a cheap thing to grep for and a reliable smell.**
+`tests/no-fabricated-attendance-production-time.test.mjs` (row 28 — all three
+writers, both readers, AND the capture-coverage caption on the metric that
+survived).
+Rows 17–22 are open or deliberate and carry no guard yet.
 
 **A fourth corollary, from row 23.** *Real money on an invented status is more
 dangerous than fully fake data.* The `/consignment/return` grid carried the real
@@ -900,6 +918,29 @@ closing` (BUG-2026-08-13-093). Neither is a number, and both told the owner some
 with the same confidence a fabricated figure does. When auditing a screen, ask of every
 control *"what would prove this did what it says?"* and of every tick *"what input makes this
 go red?"* — if the answer is "nothing", it belongs in this class.
+
+**A sixth corollary, from row 28.** *A metric can be honest arithmetic on a dishonest
+input.* Nothing in the attendance efficiency formula was wrong —
+`productionTimeMinutes ÷ standardMinutes × 100` is exactly how you compute an efficiency.
+The defect was one level down, in what `productionTimeMinutes` HELD. Reviewing the formula
+is therefore not a check; the check is on the SOURCE COLUMN, and the test is its
+**distribution**: divide the column by its supposed input across the whole table and see
+whether a constant falls out. Here 180,928 ÷ 212,850 = 0.85005 and the fabrication was
+visible in one query. Three further lessons this row paid for:
+
+* **Count the writers before fixing one.** The same ratio lived in the office punch, the
+  phone punch and the midnight forgotten-punch auto-close. Fixing the file you were pointed
+  at would have left two live fabricators — and the auto-close was the worst of them,
+  producing a flat 85% that could not vary because both sides of the ratio came from
+  `stdMin`. Grep for the CONSTANT, not for the endpoint.
+* **A column with no measuring writer will not announce itself by being NULL.** This one was
+  100% populated. So was `job_cards.actualMinutes`, whose 4,289 populated values are copies
+  of their own `estMinutes`. Ask "what code path could ever have OBSERVED this?" — if there
+  is none, coverage is zero however full the column looks.
+* **A single-site source pin is not a pin.** The guard protecting the surviving real metric
+  matched one of the two places the formula lives, and stayed green while the other had its
+  denominator swapped for a literal. Count occurrences; do not `assert.match` a formula that
+  appears more than once.
 
 **Finding these two shapes.** For an action: follow the endpoint to the TABLE it writes, then
 grep for a reader of that table — a write nobody reads is inert however healthy the HTTP

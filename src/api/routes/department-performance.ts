@@ -117,6 +117,11 @@ type FullPerfPayload = {
     productionMinutes: number;
     efficiencyPct: number;
     workerCount: number;
+    // Numerator provenance — completed cards in range, and how many of those
+    // recorded a duration that differs from their own standard. Optional
+    // because a payload served from the pre-fix SNAPSHOT cache predates them.
+    cards?: number;
+    measuredCards?: number;
   };
   daily: Array<{
     date: string;
@@ -302,6 +307,28 @@ app.get("/", async (c) => {
   // and as the input to the worker-name batch lookup.
   const workerIds = new Set<string>();
 
+  // ---- Measured-duration COVERAGE (BUG-2026-08-13-103) -----------------------
+  // This endpoint's numerator is `jcMinutesTotal(actualMinutes ?? estMinutes)`.
+  // When a card carries no recorded duration it contributes its STANDARD time,
+  // so the ratio silently becomes "standard minutes earned ÷ clocked minutes"
+  // — a legitimate industrial metric (earned-vs-actual labour efficiency), but
+  // NOT measured production time, and the screen said nothing about which one
+  // the operator was reading.
+  //
+  // Real capture collapsed in May 2026 (Jan 100% → Apr 72.6% → May 6.2% →
+  // Jun–Aug ~0%), so a period-over-period comparison silently changes what the
+  // numerator MEANS. These two counters travel with the figure so the caption
+  // can say so, and so a trend against a month with real capture is visible as
+  // a coverage change rather than a productivity change.
+  //
+  // `measuredCards` uses the repo's established provenance test rather than a
+  // NULL check: on prod 4,289 populated `actualMinutes` values are byte-
+  // identical copies of that card's own `estMinutes` (see
+  // tests/no-fabricated-efficiency.test.mjs), so non-null is NOT evidence of a
+  // measurement. Only a value that DIFFERS from the standard proves one.
+  let cardsInRange = 0;
+  let cardsWithMeasuredActual = 0;
+
   // CANONICAL-denominator restriction (unified 2026-06-27). The efficiency
   // denominator must count ONLY isProduction departments — the same set
   // computeMonthlyEfficiencyByWorker / the Efficiency Overview use. When the
@@ -459,6 +486,14 @@ app.get("/", async (c) => {
       // the per-SET total already (wipQty = piece count), so the helper skips
       // the ×wipQty there to avoid a 3× over-count in dept Production Minutes.
       const mins = jcMinutesTotal(jc.actualMinutes ?? jc.estMinutes ?? 0, jc);
+      // Coverage tally — see the declaration above. A card counts as MEASURED
+      // only when it recorded a positive duration that differs from its own
+      // standard; a copied estimate is the standard under another name.
+      cardsInRange += 1;
+      const actual = jc.actualMinutes ?? null;
+      if (actual !== null && actual > 0 && actual !== (jc.estMinutes ?? 0)) {
+        cardsWithMeasuredActual += 1;
+      }
       const day = ensure(date);
       day.productionMinutes += mins;
 
@@ -723,6 +758,12 @@ app.get("/", async (c) => {
             ? Math.round((totalProduction / totalWorking) * 100)
             : 0,
         workerCount: workerIds.size,
+        // Provenance of the numerator (BUG-2026-08-13-103). `productionMinutes`
+        // is EARNED STANDARD time for every card outside `measuredCards`, so
+        // the caption must say "standard vs clocked" whenever measuredCards is
+        // small — and this pair is what lets it.
+        cards: cardsInRange,
+        measuredCards: cardsWithMeasuredActual,
       },
       daily,
     },

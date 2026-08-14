@@ -2191,7 +2191,13 @@ const attendanceSource: DataSource = {
   select: selectData,
   // CHANGELOG #19 — read-only attendance with GPS indicator + selfie flag.
   // Real fields per attendance.ts response: clockInLat/Lng, hasClockInPhoto,
-  // workingMinutes, efficiencyPct. Read-only on mobile (just view data).
+  // workingMinutes. Read-only on mobile (just view data).
+  //
+  // NOT efficiencyPct / productionTimeMinutes — the response always returns
+  // null for those (BUG-2026-08-13-103): a punch measures clock time, never
+  // production time, and the old values were `workingMinutes × 0.85`. Do not
+  // add them to `metas`; the honest per-worker efficiency is the Working Hours
+  // sub-tab's engine (/api/department-performance), not a punch row.
   toVM: (r): RowVM => {
     const gps = num(r, "clockInLat") !== 0 || num(r, "clockInLng") !== 0;
     const photo = read(r, "hasClockInPhoto") === true;

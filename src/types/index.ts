@@ -519,9 +519,18 @@ export type AttendanceRecord = {
   clockOut: string | null;
   status: AttendanceStatus;
   workingMinutes: number;
-  productionTimeMinutes: number;
-  efficiencyPct: number;
+  /**
+   * ALWAYS null — a punch has never measured production time.
+   * BUG-2026-08-13-103 (C15): this was `workingMinutes × 0.85`, a constant
+   * dressed as a measurement. The API now publishes null so "unknown" is
+   * distinguishable; render it as "—", never as 0 and never as a percentage.
+   * The real labour-efficiency figure is /api/department-performance.
+   */
+  productionTimeMinutes: number | null;
+  /** ALWAYS null — was derived from the fabricated field above. */
+  efficiencyPct: number | null;
   overtimeMinutes: number;
+  /** ALWAYS empty — the stored split was the same fabricated number. */
   deptBreakdown: { deptCode: string; minutes: number; productCode: string }[];
   notes: string;
 };

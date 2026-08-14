@@ -103,9 +103,19 @@ type ProductionSummary = {
 };
 
 // GET /api/department-performance?view=summary — clocked working minutes vs
-// production minutes, per worker, over a date range. The ONLY trustworthy
-// efficiency source in the app: its denominator is `working_hour_entries`,
-// i.e. time people actually clocked, not an estimate.
+// production minutes, per worker, over a date range. The only efficiency source
+// in the app with a MEASURED denominator: `working_hour_entries`, i.e. time
+// people actually clocked, not an estimate.
+//
+// The NUMERATOR is not measured, and the caption below says so
+// (BUG-2026-08-13-103). `productionMinutes` takes a card's recorded duration
+// when it HAS one and its standard time otherwise — and recorded durations
+// collapsed in May 2026, so in practice this is EARNED
+// STANDARD time. That makes the ratio earned-vs-actual labour efficiency (a
+// real industrial metric), NOT measured production pace, and `totals.
+// measuredCards / totals.cards` is rendered beside it so nobody reads it as
+// the latter. It must also not be trended against months when capture was real:
+// the coverage change moves the number on its own.
 type WorkerPerfRow = {
   workerId: string;
   workerName: string;
@@ -123,6 +133,10 @@ type DeptPerformanceSummary = {
     productionMinutes: number;
     efficiencyPct: number;
     workerCount: number;
+    // Numerator provenance — see the block comment above. Optional: a payload
+    // served from the snapshot cache written before this shipped has neither.
+    cards?: number;
+    measuredCards?: number;
   };
   workers: WorkerPerfRow[];
 };
@@ -1988,14 +2002,34 @@ function EmployeeReportTab() {
             align={["left", "left", "right", "right", "right"]}
           />
           <p className="mt-2 text-xs text-[#6B7280]">
-            Efficiency is production minutes ÷ clocked minutes over{" "}
-            {from} to {to}, from the same engine as Employees › Department
+            Efficiency is <strong>standard minutes earned ÷ clocked minutes</strong>{" "}
+            over {from} to {to}, from the same engine as Employees › Department
             Performance — the denominator is time actually punched
-            (<code>working_hour_entries</code>), never an estimate. Clocked
-            Hours is that denominator; Job Cards Completed counts the distinct
-            cards the worker was credited on. Over 100% means the standard
-            minutes on the cards they finished exceeded the hours they clocked.
-            A worker who clocked nothing in this range reads “—”. Range total:{" "}
+            (<code>working_hour_entries</code>), never an estimate. The
+            numerator is <em>not</em> measured production time: a job card
+            contributes its recorded duration only if it has one, and otherwise
+            its standard time.{" "}
+            {typeof perf.totals.cards === "number" && perf.totals.cards > 0 ? (
+              <span
+                className={
+                  (perf.totals.measuredCards ?? 0) === 0
+                    ? "font-medium text-[#9A3A2D]"
+                    : "font-medium text-[#1F1D1B]"
+                }
+              >
+                {(perf.totals.measuredCards ?? 0).toLocaleString()} of{" "}
+                {perf.totals.cards.toLocaleString()} job cards in this range
+                carry a measured duration
+                {(perf.totals.measuredCards ?? 0) === 0
+                  ? " — so every minute here is standard time. Do not compare this against a period when durations were being captured."
+                  : "."}
+              </span>
+            ) : null}{" "}
+            Clocked Hours is that denominator; Job Cards Completed counts the
+            distinct cards the worker was credited on. Over 100% means the
+            standard minutes on the cards they finished exceeded the hours they
+            clocked. A worker who clocked nothing in this range reads “—”.
+            Range total:{" "}
             {perf.totals.workingMinutes > 0
               ? `${perf.totals.efficiencyPct}% across ${perf.totals.workerCount} workers`
               : "no clocked time recorded"}

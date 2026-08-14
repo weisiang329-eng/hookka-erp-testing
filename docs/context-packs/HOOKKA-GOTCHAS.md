@@ -14,11 +14,67 @@
 > **2026-08-13, branch `fix/stock-grn-org-filter`:** added the duplicate-rename-map-key
 > trap to the schema section (verified against `column-rename-map.json:815-816`,
 > `db-pg.ts:57` and the prod snapshot `tests/db-schema.json`). Nothing else changed.
+>
+> **Last verified: 2026-08-14** — added the "no production time is measured" section at
+> the top. Every claim in it was read out of the SOURCE (the binds in `bom.ts:1055-1063`
+> and `production-builder.ts:890/893`, the comment at `import-completion/_shared.ts:464`,
+> the constant at `attendance.ts:332`, the truncations at `_helpers.ts:4242/4334`,
+> the honest counter-example at `production-orders.ts:543-640`, and the schema at
+> `migrations-postgres/0001_init.sql:715-718`) — not inferred from query results. That
+> distinction matters here: the same conclusion was reached twice from data alone and was
+> WRONG both times, once claiming the metric was measured historically and once claiming
+> nobody records anything. The binds are what settle it.
 
 Read this BEFORE touching schema, money, SQL, or shipping. These are the
 non-obvious traps that have repeatedly cost real time and, in one case, nearly
 shipped a broken prod. They are Hookka-specific and intentionally NOT in the
 generic context packs.
+
+---
+
+## ⛔ NO "PRODUCTION TIME" IN THIS SYSTEM IS MEASURED (verified 2026-08-14)
+
+**Every column that sounds like measured work time is the ESTIMATE, by construction.**
+Three columns, three names, one number. Do not build a metric on any of them believing
+it observes what the factory actually did.
+
+| Column | What it really is | Source proof |
+|---|---|---|
+| `job_cards.production_time_minutes` | `= est_minutes` | `bom.ts:1055-1063` binds **the same `p.target`** to both columns; `production-builder.ts:890/893` binds the same `p.minutes` to both at card creation; migrations `0027`/`0029` write both from one literal `CASE` |
+| `job_cards.actual_minutes` | `= est_minutes` | `import-completion/_shared.ts:468`, under a comment that says it outright: *"Use planned minutes as actual since we don't have real timing."* Also `completion-cascades.ts:413,838`, `wip-fixes.ts:112,445` |
+| `attendance_records.production_time_minutes` | `= working_minutes × 0.85` | `attendance.ts:332` — a hardcoded constant. `efficiencyPct` and `deptBreakdown` on that row derive from it |
+
+They are not *coincidentally* equal — **the same variable is bound to both columns**, so
+they can never differ. `migrations-postgres/0001_init.sql:715-718` confirms there is no
+default and no trigger on `actual_minutes`: nothing at the schema level measures it
+either. **No writer anywhere in the repo observes elapsed time.**
+
+**WHY IT IS THIS WAY, AND IT IS NOT LAZINESS.** The completion timestamp is *captured and
+then discarded*: `_helpers.ts:4334` computes `nowIso` and immediately does
+`nowIso.split("T")[0]`; `:4242` does `new Date().toISOString().slice(0, 10)`. There are
+**14** such truncations across the production and worker write paths. `distributed_at` IS
+a full timestamp and is 100% populated — only the completion end of the interval is
+thrown away. The owner diagnosed this himself: *"这就是数据问题而已"*.
+
+**THE HONEST PATTERN ALREADY EXISTS — COPY IT.** `production-orders.ts /report-summary`
+(`:543-640`) credits a card **only** when `actual_minutes > 0`, applies **no**
+`?? estMinutes` fallback, and publishes `measuredDistinctCards` (cards where actual and
+est differ) expressly, in its own words, *"so the page can refuse to publish a percentage
+that only looks measured."* On current data that count is **0** — which is the correct
+answer, honestly stated. `/tracker-summary` (`:444`) likewise stays on counts and dates.
+
+**WHAT YOU MAY LEGITIMATELY COMPUTE.** `Σ(standard minutes of cards a worker completed)
+÷ their real clocked minutes` is a genuine **earned-vs-actual** labour-efficiency metric
+and both sides are real data — the numerator is *supposed* to be standard time. That is
+what Employees → Department Performance computes (80%). It is defensible. What is NOT
+defensible is calling the numerator "Production Hours" or "actual", or comparing the
+figure across months as though the metric's character were constant.
+
+**One caveat on the denominator:** `punch-autofill.ts:273` writes the *contracted shift*
+when a punch-out is missing (`"(no punch-out — standard shift)"`), and aggregates sum
+those identically to real punches. So the denominator is mostly-but-not-entirely clocked.
+
+Class **C15** (fabricated data presented as measured). See `docs/BUG-CLASSES.md`.
 
 ## Schema / migrations (the #1 trap)
 

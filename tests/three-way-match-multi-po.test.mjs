@@ -50,19 +50,28 @@ test("a line is scored against its OWN order's line", () => {
     /poItems\[gi\.poItemIndex\]/,
     "indexing the header order's lines is exactly the bug",
   );
-  assert.match(SRC, /poItemById\.get\(lineItemId\)/, "an explicit line id is unambiguous");
-  assert.match(
-    SRC,
-    /\(itemsByPo\.get\(ownerPoId\) \?\? \[\]\)\[gi\.poItemIndex\]/,
-    "the index must be read on the line's own order",
-  );
+  // ⚠ REWRITTEN 2026-08-14 (BUG-2026-08-13-144). This test used to pin the
+  // resolution EXPRESSIONS inline in the route — `poItemById.get(lineItemId)`
+  // and `(itemsByPo.get(ownerPoId) ?? [])[gi.poItemIndex]`. Both were correct
+  // as far as they went and both are gone, because `ownerPoId` fell back to
+  // `headerPo.id` (= `pos[0]`, an arbitrary order) whenever the line named no
+  // order of its own. The resolution now lives in `src/api/lib/grn-po-line-link.ts`,
+  // which COUNTS the claimants and refuses; the rule itself is driven
+  // behaviourally in `tests/first-one-wins-refusal.test.mjs`.
+  assert.match(SRC, /resolveGrnPoLine\(lineIdx,\s*gi\)/);
+  assert.match(SRC, /buildPoLineIndex\(/);
 });
 
 test("per-line PO columns are read dual-keyed", () => {
   // They are snake_case in the schema; a driver or view may hand them back
   // camelCased, and a one-sided read silently sees null and falls back.
-  assert.match(SRC, /gi\.po_id \?\? gi\.poId/);
-  assert.match(SRC, /gi\.po_item_id \?\? gi\.poItemId/);
+  // The dual read moved into the resolver with the rest of the logic.
+  const LINK = readFileSync(
+    resolve(process.cwd(), "src/api/lib/grn-po-line-link.ts"),
+    "utf8",
+  );
+  assert.match(LINK, /line\.po_id \?\? line\.poId/);
+  assert.match(LINK, /line\.po_item_id \?\? line\.poItemId/);
 });
 
 test("poTotal covers every order the receipt draws down", () => {
@@ -71,7 +80,16 @@ test("poTotal covers every order the receipt draws down", () => {
 });
 
 test("the header PO is preserved, so single-PO matches are unchanged", () => {
-  assert.match(SRC, /const headerPo = pos\.find\(\(p\) => p\.id === grn\.poId\) \?\? pos\[0\];/);
+  // ⚠ REWRITTEN 2026-08-14 (BUG-2026-08-13-144). The old assertion pinned
+  // `?? pos[0]` as if it were the fix. It was the second guess: `pos` is loaded
+  // from the LINE orders, so on a receipt whose header order is not among them
+  // the `.find` misses — the case this code exists for — and `pos[0]` is
+  // whichever row `IN (...)` happened to return first. One claimant is kept
+  // (single-PO behaviour is bit-identical); several is a refusal.
+  assert.match(
+    SRC,
+    /pos\.find\(\(p\) => p\.id === grn\.poId\) \?\? \(pos\.length === 1 \? pos\[0\] : null\)/,
+  );
 });
 
 test("the match row records every order, and still names one as the header", () => {
@@ -80,7 +98,13 @@ test("the match row records every order, and still names one as the header", () 
   // involved.
   assert.match(SRC, /INSERT INTO three_way_matches \(id, poId, po_ids, poNumber/);
   assert.match(SRC, /JSON\.stringify\(pos\.map\(\(p\) => p\.id\)\)/);
-  assert.match(SRC, /poNumbers\.length > 1 \? poNumbers\.join\(", "\) : headerPo\.poNo/);
+  // `headerPo` is nullable since BUG-2026-08-13-144 — a receipt whose header
+  // order is not among its line orders has no single header to name, and
+  // `poNumber` already lists every order when there is more than one.
+  assert.match(
+    SRC,
+    /poNumbers\.length > 1 \? poNumbers\.join\(", "\) : \(headerPo\?\.poNo \?\? ""\)/,
+  );
 });
 
 test("reads expose the full set and fall back for older rows", () => {

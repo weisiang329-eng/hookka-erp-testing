@@ -1006,8 +1006,23 @@ export default function WorkerScanPage() {
         setRackSaved(false);
         try {
           const matches = await findMatches(barcodeJcId);
+          // BUG-2026-08-13-145. This was `… ?? matches[0]`, and `matches[0]`
+          // is NOT interchangeable with "the card that was scanned".
+          // `findMatches` has two branches: an id/token branch that returns the
+          // ONE exact hit, and a PO-number branch that returns EVERY job card
+          // on the order. The `.find` misses on the token form (the match was
+          // on `deriveBarcodeToken`, not on the stored id), so `matches[0]` was
+          // the working path — and it is also what a many-card result hands
+          // back, arbitrarily. The card then went out under `wholeCard: true`,
+          // i.e. the worker completes an entire card they never scanned.
+          //
+          // So accept `matches[0]` only when it is the ONLY claimant. Being the
+          // sole candidate is an observation; being first in a list of several
+          // is a guess. Same rule the `parsed.jobCardId` path 50 lines below
+          // already applies by having no fallback at all.
           const hit =
-            matches.find((m) => m.jobCard.id === barcodeJcId) ?? matches[0];
+            matches.find((m) => m.jobCard.id === barcodeJcId) ??
+            (matches.length === 1 ? matches[0] : undefined);
           if (hit) {
             if (await blockIfWrongDept(hit.jobCard)) return;
             setResult({ kind: "lookup", ...hit, wholeCard: true });

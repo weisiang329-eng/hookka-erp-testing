@@ -17,6 +17,13 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
+import { PO_ITEMS_ORDER, ensurePoItemLineNo } from "./purchase-orders";
+import {
+  buildPoLineIndex,
+  resolveGrnPoLine,
+  isResolvedGrnPoLine,
+  type GrnPoLineOutcome,
+} from "../lib/grn-po-line-link";
 
 const app = new Hono<Env>();
 
@@ -66,13 +73,23 @@ type ThreeWayMatchRow = {
 
 type MatchItem = {
   materialCode: string;
-  poQty: number;
+  /**
+   * NULL means the receipt line could not be resolved to ONE purchase-order
+   * line — it was NOT compared. It used to be `0`, which reads as "ordered
+   * none" and is indistinguishable from a real finding. See `resolution`.
+   */
+  poQty: number | null;
   grnQty: number;
   invoiceQty: number | null;
-  poPrice: number;
+  /** NULL for the same reason as `poQty` — never `0` as a stand-in. */
+  poPrice: number | null;
   grnPrice: number;
   invoicePrice: number | null;
   matched: boolean;
+  /** The purchase-order line this receipt line was scored against, or NULL. */
+  poItemId?: string | null;
+  /** WHY it did or did not resolve — reported verbatim, never summarised away. */
+  resolution: GrnPoLineOutcome;
 };
 
 type GrnItemRow = {
@@ -111,7 +128,24 @@ type PoItemRow = {
 function parseItems(raw: string | null): MatchItem[] {
   if (!raw) return [];
   try {
-    return JSON.parse(raw) as MatchItem[];
+    const rows = JSON.parse(raw) as Partial<MatchItem>[];
+    if (!Array.isArray(rows)) return [];
+    // Rows written before BUG-2026-08-13-144 carry no `resolution` and cannot
+    // now be told apart from a resolved one — the guess that produced them left
+    // no trace. They are reported as `legacy-unknown` rather than silently
+    // labelled `id`, which would be the same lie one layer up.
+    return rows.map((r) => ({
+      materialCode: r.materialCode ?? "",
+      poQty: r.poQty ?? null,
+      grnQty: r.grnQty ?? 0,
+      invoiceQty: r.invoiceQty ?? null,
+      poPrice: r.poPrice ?? null,
+      grnPrice: r.grnPrice ?? 0,
+      invoicePrice: r.invoicePrice ?? null,
+      matched: r.matched === true,
+      poItemId: r.poItemId ?? null,
+      resolution: r.resolution ?? "legacy-unknown",
+    }));
   } catch {
     return [];
   }
@@ -556,6 +590,15 @@ app.post("/", async (c) => {
       return c.json({ error: "Related PO not found" }, 404);
     }
 
+    // `poItemIndex` is a POSITION, and a position is meaningless without the
+    // order it was taken against. `purchase-orders.ts` states that order once
+    // (`PO_ITEMS_ORDER = "ORDER BY line_no NULLS LAST, id"`) and `grn.ts:930`
+    // — the stock draw-down — reads the index against it. This file used a
+    // plain `ORDER BY id`, so the moment a PO's lines were reordered
+    // (`line_no` is written from the request's array index on POST/PUT) the
+    // same receipt line drew stock from one PO line and was PRICED against a
+    // different one, on a single-PO receipt, with nothing logged.
+    await ensurePoItemLineNo(c.var.DB);
     const placeholders = poIds.map(() => "?").join(",");
     const [posRes, poItemsRes] = await Promise.all([
       c.var.DB.prepare(
@@ -564,7 +607,7 @@ app.post("/", async (c) => {
         .bind(...poIds)
         .all<{ id: string; poNo: string; totalSen: number }>(),
       c.var.DB.prepare(
-        `SELECT * FROM purchase_order_items WHERE purchaseOrderId IN (${placeholders}) ORDER BY id`,
+        `SELECT * FROM purchase_order_items WHERE purchaseOrderId IN (${placeholders}) ${PO_ITEMS_ORDER}`,
       )
         .bind(...poIds)
         .all<PoItemRow>(),
@@ -573,53 +616,69 @@ app.post("/", async (c) => {
     if (pos.length === 0) return c.json({ error: "Related PO not found" }, 404);
     const poItems = poItemsRes.results ?? [];
 
-    // Per-order line lists, so an index is read on the line's OWN purchase
-    // order, plus a direct id lookup for lines that recorded one.
-    const itemsByPo = new Map<string, PoItemRow[]>();
+    // COUNT the claimants, never pick one. `resolveGrnPoLine` links a receipt
+    // line to its PO line by identity (`po_item_id`), or positionally when the
+    // owning order is not in doubt, and returns NULL with a reason for
+    // everything else. See grn-po-line-link.ts — a wrong match reports
+    // "checked, all fine" on an overcharge, which is worse than "cannot check".
+    const lineIdx = buildPoLineIndex(
+      poItems.map((it) => ({
+        id: String(it.id),
+        purchaseOrderId: String(it.purchaseOrderId ?? ""),
+      })),
+      pos.map((p) => p.id),
+    );
     const poItemById = new Map<string, PoItemRow>();
-    for (const it of poItems) {
-      const owner = String(it.purchaseOrderId ?? "");
-      const arr = itemsByPo.get(owner) ?? [];
-      arr.push(it);
-      itemsByPo.set(owner, arr);
-      poItemById.set(String(it.id), it);
-    }
+    for (const it of poItems) poItemById.set(String(it.id), it);
 
     // The header PO stays whatever the GRN records, so existing single-PO
-    // matches are unchanged.
-    const headerPo = pos.find((p) => p.id === grn.poId) ?? pos[0];
+    // matches are unchanged. When the GRN's header order is NOT among the ones
+    // its lines draw on there is no header to name — `pos` came from
+    // `IN (...)`, which carries no ORDER BY, so `pos[0]` was an arbitrary
+    // purchase order. One claimant is an observation; two is a refusal.
+    const headerPo =
+      pos.find((p) => p.id === grn.poId) ?? (pos.length === 1 ? pos[0] : null);
+    const headerPoId = headerPo?.id ?? grn.poId ?? null;
 
     const TOLERANCE = 0.02;
 
     const matchItems: MatchItem[] = grnItems.map((gi) => {
-      const lineItemId = (gi.po_item_id ?? gi.poItemId ?? "").trim();
-      const ownerPoId = (gi.po_id ?? gi.poId ?? "").trim() || headerPo.id;
-      const poItem =
-        (lineItemId ? poItemById.get(lineItemId) : undefined) ??
-        (gi.poItemIndex !== null && gi.poItemIndex !== undefined
-          ? (itemsByPo.get(ownerPoId) ?? [])[gi.poItemIndex]
-          : undefined);
+      const link = resolveGrnPoLine(lineIdx, gi);
+      const poItem = link.poItemId
+        ? poItemById.get(link.poItemId)
+        : undefined;
+      const resolved = isResolvedGrnPoLine(link.outcome) && !!poItem;
       const invItem = (
         invoiceItems as
           | { materialCode: string; quantity: number; unitPrice: number }[]
           | undefined
       )?.find((ii) => ii.materialCode === gi.materialCode);
 
-      const poQty = poItem?.quantity ?? 0;
+      // NULL, not 0, when the PO line could not be resolved. `?? 0` was the
+      // second half of the money bug: an unresolved line printed "ordered 0 @
+      // RM 0.00" beside a real receipt, which reads as a finding rather than as
+      // "this line was never checked".
+      const poQty = resolved ? (poItem?.quantity ?? null) : null;
       const grnQty = gi.acceptedQty;
       const invoiceQty = invItem?.quantity ?? null;
-      const poPrice = poItem?.unitPriceSen ?? 0;
+      const poPrice = resolved ? (poItem?.unitPriceSen ?? null) : null;
       const grnPrice = gi.unitPrice;
       const invPrice = invItem?.unitPrice ?? null;
 
+      // An unresolved line is never `matched`. It has not been compared, and
+      // `allMatched` below is what gates FULL_MATCH.
       const qtyMatch =
-        invoiceQty !== null
-          ? poQty === grnQty && grnQty === invoiceQty
-          : poQty === grnQty;
+        poQty === null
+          ? false
+          : invoiceQty !== null
+            ? poQty === grnQty && grnQty === invoiceQty
+            : poQty === grnQty;
       const priceMatch =
-        invoiceQty !== null
-          ? poPrice === grnPrice && grnPrice === (invPrice ?? 0)
-          : poPrice === grnPrice;
+        poPrice === null
+          ? false
+          : invoiceQty !== null
+            ? poPrice === grnPrice && grnPrice === (invPrice ?? 0)
+            : poPrice === grnPrice;
 
       return {
         materialCode: gi.materialCode ?? "",
@@ -630,8 +689,13 @@ app.post("/", async (c) => {
         grnPrice,
         invoicePrice: invPrice,
         matched: qtyMatch && priceMatch,
+        poItemId: link.poItemId,
+        resolution: link.outcome,
       };
     });
+    const unresolvedLines = matchItems.filter(
+      (i) => !isResolvedGrnPoLine(i.resolution),
+    ).length;
 
     // Every order this receipt draws down, not just the header — otherwise the
     // variance measures one order's value against goods that partly belong to
@@ -654,7 +718,11 @@ app.post("/", async (c) => {
     const variancePercent = poTotal > 0 ? (variance / poTotal) * 100 : 0;
     const withinTolerance = variancePercent <= TOLERANCE * 100;
 
-    const allMatched = matchItems.every((i) => i.matched);
+    // An unresolved line is `matched: false` above, so it cannot reach
+    // FULL_MATCH through this gate. Stated separately because that is the whole
+    // point of the change: the old code priced such a line off another order
+    // and could therefore call the match FULL.
+    const allMatched = unresolvedLines === 0 && matchItems.every((i) => i.matched);
     let matchStatus:
       | "FULL_MATCH"
       | "PARTIAL_MATCH"
@@ -678,7 +746,8 @@ app.post("/", async (c) => {
     // all, because a match row that names one of two orders reads as if the
     // other were never involved.
     const poNumbers = pos.map((p) => p.poNo).filter(Boolean);
-    const poNumberOut = poNumbers.length > 1 ? poNumbers.join(", ") : headerPo.poNo;
+    const poNumberOut =
+      poNumbers.length > 1 ? poNumbers.join(", ") : (headerPo?.poNo ?? "");
 
     await c.var.DB.prepare(
       `INSERT INTO three_way_matches (id, poId, po_ids, poNumber, grnId, grnNumber,
@@ -689,7 +758,7 @@ app.post("/", async (c) => {
     )
       .bind(
         id,
-        headerPo.id,
+        headerPoId,
         JSON.stringify(pos.map((p) => p.id)),
         poNumberOut,
         grn.id,
@@ -711,7 +780,7 @@ app.post("/", async (c) => {
 
     const newMatch = {
       id,
-      poId: headerPo.id,
+      poId: headerPoId,
       poIds: pos.map((p) => p.id),
       poNumber: poNumberOut,
       grnId: grn.id,
@@ -728,6 +797,10 @@ app.post("/", async (c) => {
       variancePercent: variancePercentRounded,
       withinTolerance,
       items: matchItems,
+      // How many receipt lines were NOT checked, surfaced beside the verdict.
+      // A caller that never sees this number reads "MISMATCH on 1 line" the
+      // same way whether the other lines were compared or skipped.
+      unresolvedLines,
     };
     return c.json(newMatch, 201);
   } catch {

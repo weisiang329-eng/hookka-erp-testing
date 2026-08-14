@@ -254,6 +254,160 @@ a query; the endpoint now computes it on every load, so the first real page view
 
 **Verified.** 6 assertions, each proved RED — including one that reintroduces
 `rowsObserved = !loading` and one that removes the unknown-first colour branch.
+## BUG-2026-08-13-144 — the three-way match priced a receipt line against ANOTHER purchase order's line at the same position `procurement` `data-integrity` 🟢
+
+**Class:** [C21 — first-one-wins](BUG-CLASSES.md#c21--first-one-wins-taking-0-when-several-rows-could-answer),
+the class BUG-2026-07-17-001 named. New instance, on the money path.
+
+**Symptom.** None. That is the point — the three-way match reports a verdict, and a
+verdict computed off the wrong purchase-order line looks exactly like one computed off the
+right one.
+
+**Root cause — two guesses stacked** (`three-way-match.ts:590-601`, before this change):
+
+```js
+const headerPo  = pos.find((p) => p.id === grn.poId) ?? pos[0];       // guess 1
+const ownerPoId = (gi.po_id ?? gi.poId ?? "").trim() || headerPo.id;
+const poItem    = (itemsByPo.get(ownerPoId) ?? [])[gi.poItemIndex];   // guess 2
+const poPrice   = poItem?.unitPriceSen ?? 0;                          // ← compared
+```
+
+`pos` is loaded from the LINE purchase orders — the file's own comment says so, because a
+receipt may span several orders (owner 2026-08-04). So on a consolidated receipt whose
+header order is not among them, `pos.find(...)` **misses**, which is precisely the case
+this code exists to handle, and `pos[0]` is an arbitrary order: `WHERE id IN (...)` carries
+no `ORDER BY`. A receipt line with no `po_id` of its own was then priced against that
+order's line **at the same numeric position**.
+
+Both halves fail in the expensive direction. A wrong `poPrice` can report `FULL_MATCH` on
+an overcharge; an index miss makes `poPrice` **0**, which invents a 100% variance against
+`TOLERANCE = 0.02` and blocks a correct invoice. Neither logs anything.
+
+**A third fault, found while verifying the above and not in the original report.**
+`poItemIndex` is a POSITION, and a position only means something against a stated order.
+`purchase-orders.ts:267` states it once — `PO_ITEMS_ORDER = "ORDER BY line_no NULLS LAST, id"`
+— and `grn.ts:930`, the stock draw-down, reads the index against it. This file used a plain
+`ORDER BY id`. `line_no` is written from the request's array index on POST/PUT, i.e. the
+PAPER order, so the two diverge the first time a purchase order's lines are reordered. The
+same receipt line could therefore draw stock from one PO line and be PRICED against a
+different one — **on a single-PO receipt**, with nothing logged.
+
+**Fix.** `src/api/lib/grn-po-line-link.ts` — a pure resolver that COUNTS claimants and
+REFUSES, mirroring `invoice-so-item-link.ts` (shipped the day before for the invoice → sales
+order link) and the deliberate opposite of `priceForItem`'s first-one-wins over the same
+kind of rows (`do-value.ts:37-41` — for a PRICE LOOKUP any matching line's value will do;
+for IDENTITY it will not).
+
+| tier | condition | result |
+|---|---|---|
+| `id` | `grn_items.po_item_id` names a loaded PO line | link |
+| `positional` | no line id, and the owning order is not in doubt (the line names it, **or** the whole receipt draws on exactly ONE order) — and the index is in range | link |
+| `unknown-line` | a `po_item_id` is recorded but no loaded order carries it | **NULL** |
+| `contested-po` | the line names no order and the receipt spans two or more | **NULL** |
+| `index-missing` / `index-out-of-range` / `no-po` | as named | **NULL** |
+
+Route changes (`three-way-match.ts`): PO lines are now read with `PO_ITEMS_ORDER` after
+`await ensurePoItemLineNo` (migrations are inert on deploy, so the column has to be
+self-applied before the `ORDER BY` names it); an unresolved line carries `poQty`/`poPrice`
+as **NULL, not 0** — `0` reads as "ordered none", which is indistinguishable from a real
+finding; every line records `resolution` (the outcome verbatim) and `poItemId`; the response
+publishes `unresolvedLines`; and `allMatched` requires `unresolvedLines === 0`, so a receipt
+with an unchecked line **cannot** reach `FULL_MATCH`. The header PO keeps one claimant and
+refuses several. Match rows persisted before this change carry no `resolution` and are read
+back as `legacy-unknown` rather than relabelled `id` — they were scored by the guess and
+cannot now be told apart from a resolved one.
+
+**Blast radius: UNMEASURED.** This branch was developed with no database credential, so how
+many receipts and how many persisted verdicts sit in each of these conditions is not known
+and is not estimated here. `scripts/check-first-one-wins-blast-radius.mjs` (read-only) is
+the measurement — sections 1–4 count exactly the conditions above, and section 4 breaks the
+persisted verdicts down by `matchStatus` because a `FULL_MATCH` over a guessed price is the
+only row that actively asserts correctness. **Run it before quoting any number.**
+
+**Verified.** `tests/first-one-wins-refusal.test.mjs` — 8 behavioural assertions driving the
+pure resolver with adversarial fixtures (two orders with the SAME line count, so a
+positional read against the wrong one succeeds instead of falling off the end — that is what
+made it silent) plus 6 structural ones on the route. `tests/three-way-match-multi-po.test.mjs`
+rewritten: three of its assertions pinned the buggy expressions themselves, including
+`?? pos[0]` as if it were the fix. All proved RED by reintroducing each removed expression
+with the file's bytes asserted changed on disk first. `npx tsc -p tsconfig.app.json --noEmit`
+exit 0; `npm test` 4,139 tests / 0 fail.
+
+---
+
+## BUG-2026-08-13-145 — a scanned schedule barcode could open a DIFFERENT job card, and mark the whole card done `production-orders` `data-integrity` 🟢
+
+**Class:** C21.
+
+**Root cause** (`src/pages/worker/scan.tsx:1009-1010`, before this change):
+
+```js
+const matches = await findMatches(barcodeJcId);
+const hit = matches.find((m) => m.jobCard.id === barcodeJcId) ?? matches[0];
+…
+setResult({ kind: "lookup", ...hit, wholeCard: true });
+```
+
+`findMatches` has two branches. An id/token branch returns the ONE exact hit — and it may
+have matched on `deriveBarcodeToken(j.id, j.departmentCode)` rather than on the stored id,
+so `.find` on `m.jobCard.id` **misses** and `matches[0]` was the working path. A PO-number
+branch returns **every job card on the order**, and `matches[0]` there is arbitrary. The
+card then went out under `wholeCard: true`, so the worker completes an entire card they
+never scanned.
+
+**Fix.** `matches[0]` is accepted only when it is the ONLY claimant. Being the sole
+candidate is an observation; being first in a list of several is a guess. The
+`parsed.jobCardId` path fifty lines below already had the right shape — no fallback at all.
+
+---
+
+## BUG-2026-08-13-146 — an 8-digit hash used as an identity, resolved by `.find` over every job card in a department `production-orders` `data-integrity` 🟢
+
+**Class:** C21 — the dangerous variant: a match on a **non-unique key** deciding identity.
+
+**Root cause.** `deriveBarcodeToken` (`src/lib/job-card-id.ts:110`) folds the job-card id to
+8 digits (`fnv1a32(id) % 100_000_000`). Two sites resolved a scanned token with
+`cand.find((j) => deriveBarcodeToken(j.id, …) === term)` — `src/api/routes/worker.ts:687`
+(scan-lookup) and `src/api/routes/public-rack-qr.ts:337` (rack stock-in, which stamps the
+resolved `hit.id` onto the movement).
+
+The comment above the derivation justifies the collision risk as *"resolved ONLY by
+re-deriving across the department's OPEN cards … a set of at most current WIP for one
+dept."* **Read the SELECT: there is no status filter**, and the comment beside it says so
+explicitly — completed cards are included on purpose, so a finished card reports "already
+done" instead of a baffling "Not found". The real population is therefore every job card the
+department has ever had, and the stated justification does not hold for it.
+
+**Fix.** Both sites `filter` and accept only `length === 1`, logging the refusal. A
+collision now yields "Not found" and the worker retries with the QR. *Cannot resolve this
+barcode* is a bad day; *resolved to someone else's card* is a wrong stock movement, a wrong
+piece count and a wrong payslip.
+
+**Whether any collision exists in prod today is UNMEASURED** — section 5 of
+`scripts/check-first-one-wins-blast-radius.mjs` re-derives every token and reports the
+groups. The refusal is required either way: the population grows with every job card.
+
+---
+
+## BUG-2026-08-13-147 — a scan of piece 5 completed piece 1 `production-orders` `data-integrity` 🟢
+
+**Class:** C21.
+
+**Root cause** (`src/api/routes/production-orders.ts:2063`, before this change):
+
+```js
+const targetSlot = slots.find((s) => s.pieceNo === pieceNo) ?? slots[0];
+```
+
+`ensurePiecePicsForJc` numbers slots `1..wipQty`, so the `.find` misses exactly when the
+scanned sticker names a piece the card no longer has — its `wipQty` shrank after the
+stickers were printed. The fallback then bound the sticker to slot 1, completed piece 1 and
+credited the scanning worker on piece 1, and returned success.
+
+**Fix.** A one-slot card has exactly one candidate, so taking it is an observation and the
+single-piece flow is unchanged; two or more is a refusal. The 400 branch already existed —
+it was simply unreachable — and now names the piece and the card's real count so a shrunk
+`wipQty` is diagnosable instead of silent.
 
 ---
 

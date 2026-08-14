@@ -37,6 +37,17 @@
 > `CREATE TABLE` in `ensure-kpi-tables.ts:40`); C15 row 31 (all three
 > `INSERT INTO attendance_records` sites bind the literal `'PRESENT'` and nothing writes
 > `'ABSENT'`). See `docs/DOCS-VS-CODE-AUDIT.md` rows D12–D13.
+> **Last verified: 2026-08-14** — restamped on branch `fix/first-one-wins-sweep`:
+> adds **C21 — first-one-wins: taking `[0]` when several rows could answer**, the class
+> BUG-2026-07-17-001 named and never got an index entry. 15 rows: five FIXED
+> (BUG-2026-08-13-144…147, incl. the three-way match pricing a receipt line against another
+> ORDER's line at the same position), two left OPEN with reasons, and eight classified
+> BENIGN **with the reason**, so the next sweep does not re-litigate them. Enforced by
+> `tests/first-one-wins-refusal.test.mjs`; all 23 mutations proved RED with bytes-changed
+> asserted first, and that run caught one **blind** assertion (a bare-substring match on
+> `await ensurePoItemLineNo(...)` that stayed green with the call commented out). Suite at
+> that point: 4,139 tests / 0 fail. Prod blast radius is **UNMEASURED** — no DB credential
+> on that branch; `scripts/check-first-one-wins-blast-radius.mjs` is the measurement.
 >
 > **Previously verified: 2026-08-14** — restamped on branch
 > `fix/on-time-delivery-and-decisions`: **C15 gains rows 39–41** (the Hookka Report's
@@ -1380,6 +1391,84 @@ happened?* If yes, check whether the code held something more precise at the mom
 The tell is a sibling column that IS precise (`distributed_at` next to `completed_date`,
 `last_scan_at` next to a date) — a table that measures one end of an interval to the millisecond
 and the other to the day cannot answer the question it looks like it can.
+
+---
+
+## C21 — first-one-wins: taking `[0]` when several rows could answer
+
+**Shape.** Code needs ONE row. Several could answer, or none exactly does, and it takes the
+first: `xs.find(exact) ?? xs[0]`, or a `.find` on a key that is not unique. The pick is
+silent, and it is not even stable — `WHERE id IN (...)` and a `.filter` carry no order
+anyone chose. Every consumer downstream then reads the result as if it had been *looked up*.
+
+**Why it is the expensive direction.** A MISSING answer says "cannot check". A WRONG answer
+says "checked, all fine". The first is a bad day; the second is how a mispriced receipt gets
+a `FULL_MATCH`, a worker completes a card they never scanned, and an audit reports clean over
+a comparison that did not happen. BUG-2026-07-17-001 named this class ("first-one-wins
+guess") when three invoice lines inherited one sales order's customer PO.
+
+**The rule — count the claimants and REFUSE.** The reference implementation is
+`src/api/lib/invoice-so-item-link.ts`: exactly one match → link; contested → NULL **with a
+reason**; and no fall-through from a tight key to a looser one, because *a key that two rows
+answer to does not become decidable by asking a vaguer question*. `src/api/lib/grn-po-line-link.ts`
+applies the same discipline to the receipt → purchase-order-line link.
+
+> **Being the ONLY candidate is an observation. Being FIRST in a list of several is a guess.**
+> So `xs.length === 1 ? xs[0] : undefined` is legitimate and `?? xs[0]` is not — and the
+> single-candidate branch is what keeps every legacy single-document flow bit-identical.
+
+**⚠ Not every `[0]` is this class.** Three shapes are fine and "fixing" them is a regression:
+
+* a **visible, editable default** on a form the user is about to review (`defaultBankCode`,
+  the BOM template picker, the main-supplier pre-fill — the full candidate list is rendered
+  beside it);
+* a **display truncation that admits it** — `accounting.ts:11043` prints `"Cash +2"`, so the
+  reader can see something was dropped;
+* a **deliberate one, labelled as deliberate** — `priceForItem`'s maps in `do-value.ts` are
+  first-one-wins on purpose, because for a PRICE LOOKUP any matching line's value will do.
+  Its identity twin next door counts instead, and both say so in comments. If that annotation
+  disappears, the next reader "fixes" the wrong one.
+
+The dangerous shape is a fallback to `[0]`, **or a match on a NON-UNIQUE key**, deciding
+IDENTITY or MONEY.
+
+| # | site | what `[0]` decided | state |
+|---|---|---|---|
+| 1 | `three-way-match.ts:590/596/600` — `pos.find(p => p.id === grn.poId) ?? pos[0]`, then a POSITIONAL index into that order | the PO **price** a receipt line is matched against | ✅ 2026-08-14 (BUG-2026-08-13-144) — `grn-po-line-link.ts`; unresolved lines price NULL, carry a `resolution`, and cannot reach `FULL_MATCH` |
+| 2 | same site — `poItemIndex` read against `ORDER BY id` while `grn.ts:930` reads it against `PO_ITEMS_ORDER` | which PO line was **priced** vs which was **drawn down** | ✅ 2026-08-14 (BUG-2026-08-13-144) — both now read `PO_ITEMS_ORDER` |
+| 3 | `worker/scan.tsx:1010` — `matches.find(exact) ?? matches[0]`, then `wholeCard: true` | which job card a worker **completes** | ✅ 2026-08-14 (BUG-2026-08-13-145) — sole claimant only |
+| 4 | `worker.ts:687` + `public-rack-qr.ts:337` — `cand.find(deriveBarcodeToken(...) === term)` over EVERY card in a dept | which physical piece a scan refers to, and which card a stock-in is stamped with | ✅ 2026-08-14 (BUG-2026-08-13-146) — `filter` + `length === 1`, refusal logged |
+| 5 | `production-orders.ts:2063` — `slots.find(s => s.pieceNo === pieceNo) ?? slots[0]` | which **piece** gets completed and who is credited | ✅ 2026-08-14 (BUG-2026-08-13-147) — sole-slot cards only |
+| 6 | `production/scan.tsx:186` — `order.jobCards.find(IN_PROGRESS\|WAITING) \|\| order.jobCards[0]` on a PO-number search | which job card the production floor opens | ⬜ **open** — same shape as row 3 on the desktop scan page. Not touched on 2026-08-14 because `src/pages/production/` was owned by another branch that day |
+| 7 | `service-cases/detail.tsx:270` — `hubs.find(h => h.isDefault) ?? hubs[0]` | the **Deliver-To address printed** on a service report | ⬜ **open, and it is also C3.** C3's rule is *derive the hub from the document's own contents* — the case's SV orders carry one. Left for the owner: whether a service report may print a hub the customer never flagged is a judgement call, not a provable defect (owner rule: ask when unsure) |
+| 8 | `admin.ts:1229`, `delivery-orders/_helpers.ts:1419` — `inv.salesOrderId ?? soIds[0]` as `priceForItem`'s `fallbackSoId` | a price, but only for lines with **no production-order link** | ⬜ **deliberate, do not "fix" in isolation** — this is `priceForItem`'s documented first-one-wins, whose last resort is `byAnyCode` anyway. Closed as the price half of BUG-2026-07-17-001 (2026-08-07) |
+| 9 | `delivery-orders/_helpers.ts:1741`, `delivery-orders.ts:1651` — `doRow.salesOrderId \|\| soIds[0]` | the **header** SO id on a combined invoice | ✅ benign, and labelled in place: the authoritative link is `deliveryOrderId`, and identity is per-line via `invoice_items.so_item_id` |
+| 10 | `worker/scan.tsx:1107` — `?? wkCards[0]` | which card of a compartment is DISPLAYED | ✅ benign: `wkCards` is already filtered to ONE production order **and** ONE `wipKey`, so every candidate is the same physical compartment, and the server decides the completion from the worker's token |
+| 11 | `purchase-invoices.ts:1178`, `sales-orders.ts:1653` — `?? dupNums[0]` | which reference is **named** in a duplicate-rejection message | ✅ benign: the `.find` covers the real case and the authoritative `duplicateOf` is exact. (Sub-note: their `LIMIT 1` has no `ORDER BY`, so with two duplicates it names an arbitrary one — still a rejection either way) |
+| 12 | `mail-center.ts:401` — `recipients.find(/@hookka\.com/) \|\| recipients[0]` | which mailbox an inbound email is filed under | ✅ low-risk: a stated preference rule, no configured mailbox matched, and the message is stored intact |
+| 13 | UI selection defaults — `default-bank.ts:12`, `bom.tsx` ×6, `procurement/{create,detail,index}.tsx` + `pi/create.tsx` (`bindings.find(isMainSupplier) ?? bindings[0]`), `employees.tsx:5376`, `finance-dashboard.tsx:549`, `leads/index.tsx:402`, `m/FormSheet.tsx:527`, `m/ModuleListScreen.tsx:220-221`, `mail-center/index.tsx:3301`, `maintenance/sofa-combos.tsx:1212`, `inventory/index.tsx:2607`, `scan-supplier-modal.tsx` ×4 (`activeOrgs[0]?.code ?? "HOOKKA"`) | a **pre-filled** value the user sees and can change before saving | ✅ benign — see "Not every `[0]` is this class" above |
+| 14 | `accounting.ts:11043` (`others[0]` + `"+N"`), `delivery-orders.ts:2274` (error text) | display only, and the truncation is visible | ✅ benign |
+| 15 | grep false positives — `web-push.ts:107` (`pub[0] !== 0x04`, a byte), `do-component-breakdown.ts:102` (`a[0]`/`b[0]`, Map-entry tuples in a comparator), `sales/index.tsx:250-251` (`_flStatus[0]`, "any filter active?") | nothing | ✅ not this class |
+
+**Enforced by** `tests/first-one-wins-refusal.test.mjs` — 8 behavioural assertions driving
+the pure resolver with adversarial fixtures (two orders with the SAME line count, so a
+positional read against the wrong one *succeeds* instead of falling off the end: that is what
+made row 1 silent), plus structural assertions at each of rows 1–5 and one that keeps row 8's
+"deliberate" annotation alive. Every pattern is written with `\s` / `[\s\S]`, never a literal
+newline — this tree is CRLF. All 23 mutations proved RED with the file's bytes asserted
+changed on disk first, and that run caught a **blind** assertion: `await ensurePoItemLineNo(...)`
+matched as a bare substring and stayed green with the call commented out. **A guard that
+matches a substring is not a guard** — anchor it to the line (the same trap C4 and C15 record).
+
+**Blast radius on prod is UNMEASURED** — this branch had no database credential.
+`scripts/check-first-one-wins-blast-radius.mjs` (read-only) counts rows 1–5's exact
+conditions, including persisted `three_way_matches` verdicts broken down by `matchStatus`,
+because a `FULL_MATCH` over a guessed price is the only row that actively asserts correctness.
+
+**Finding the next one.** `?? xs[0]` / `|| xs[0]` finds the obvious half. The other half has
+no `[0]` in it at all: a `.find` on a key that is not unique — a truncated hash, a product
+code inside the wrong scope, a `LIMIT 1` with no `ORDER BY`. Ask of every such lookup: *if
+two rows answered, would anything downstream notice?* If the answer is no, it belongs here.
 
 ---
 

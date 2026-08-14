@@ -2060,10 +2060,26 @@ app.post("/:id/scan-complete", async (c) => {
     }
   }
   // Target THIS sticker's piece (its pieceNo on the scanned JC).
-  const targetSlot = slots.find((s) => s.pieceNo === pieceNo) ?? slots[0];
+  //
+  // BUG-2026-08-13-147. This was `… ?? slots[0]`. `ensurePiecePicsForJc`
+  // numbers slots 1..wipQty, so the `.find` misses exactly when the scanned
+  // sticker names a piece the card no longer has (its `wipQty` shrank after the
+  // stickers were printed). The fallback then completed PIECE 1 and credited
+  // the worker on piece 1 for a scan of piece 5 — a wrong completion record and
+  // a wrong piece count, reported as success.
+  //
+  // A one-slot card has exactly one candidate, so taking it is an observation
+  // and the legacy single-piece flow is unchanged. Two or more is a guess, and
+  // the 400 below already exists to say so.
+  const targetSlot =
+    slots.find((s) => s.pieceNo === pieceNo) ??
+    (slots.length === 1 ? slots[0] : undefined);
   if (!targetSlot) {
     return c.json(
-      { success: false, error: "No piece slot found for this sticker." },
+      {
+        success: false,
+        error: `This sticker is for piece ${pieceNo}, which isn't on this job card (it has ${slots.length}). Re-print the sticker.`,
+      },
       400,
     );
   }

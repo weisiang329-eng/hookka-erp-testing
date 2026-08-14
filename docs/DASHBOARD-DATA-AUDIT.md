@@ -1,5 +1,14 @@
 # Dashboard Data Audit — can every number on a tile be traced to a real event?
 
+> **Restamped 2026-08-14 (second pass).** Owner decisions are now recorded inline on
+> items 1, 7-14. TWO claims in the first pass were WRONG and are corrected in place:
+> S1 framed standard costing as a defect, and item 14 said no customer-committed date
+> exists (`sales_orders.customerDeliveryDate` does exist). A third claim I tried to
+> "correct" was right all along — the 8-vs-14 annual-leave split is real
+> (`worker.ts:2491` = 14 on the phone vs `employees.tsx:10147` = 8 in the
+> office); I had grepped only the frontend, and the audit was right. Verify against source
+> before relying on any row here.
+>
 > **Last verified: 2026-08-14** against `src/pages/dashboard-b/index.tsx`,
 > `src/pages/dashboard-b/OcrAccuracyCard.tsx`, `src/pages/finance-dashboard.tsx`,
 > `src/pages/employees.tsx`, `src/pages/accounting/index.tsx`,
@@ -68,7 +77,25 @@ input**; **publish the provenance beside the figure**.
 These are not individual bugs. Each one is a *shape* that recurs across screens,
 and each is why a reader cannot tell the good figures from the bad.
 
-### S1. Nothing in this factory measures time. Ten tiles say it does.
+### S1. Production time is STANDARD time — by design. Ten tiles imply it is measured.
+
+> **CORRECTED 2026-08-14 by the owner.** This section originally read "Nothing in this
+> factory measures time", which framed a deliberate design as a defect.
+>
+> Hookka runs **standard costing**. The owner's rule, verbatim: 「我们的 BOM 那边已经有
+> 给一个时间了（也就是 production hours）。然后再来，当他 complete 的时候，我们就会记录
+> 这一个员工他用的时间多少，**我们不会去计算他 start from 或者 end from 的**」
+>
+> The BOM time **is** the production hours; completing a card credits that standard time;
+> elapsed start→end duration is deliberately not computed. **`actualMinutes = estMinutes`
+> is therefore correct and intended.** Do not "fix" it.
+>
+> **The finding that survives is the LABEL, not the number** — and even that is now
+> settled: the owner ruled the labels stay («Production hours 不要 换名字»). So the
+> remaining action here is provenance beside a figure where it helps, never a rename.
+>
+> The one true fabrication in this area was `attendance_records` (`× 0.85`), which was
+> unrelated to the BOM and is fixed in #323.
 
 `job_cards` has three time columns and **none of them is a measurement**:
 
@@ -306,7 +333,9 @@ proved RED by reintroducing the exact removed expression and watching it fail.
 Each of these needs a ruling on what the metric should *mean*. None is a
 provable defect that can be fixed unilaterally.
 
-1. **Do the "Production Hours / Production Time / Daily Capacity" captions get
+1. **[DECIDED 2026-08-14 — the owner ruled the LABELS STAY: 「Production hours 不要 换名字」.
+   Add provenance BESIDE a figure if it helps, but do not rename anything user-facing.
+   Confirmed no rename shipped.]** Do the "Production Hours / Production Time / Daily Capacity" captions get
    relabelled to say "standard"?** The arithmetic is defensible; the wording is
    not. Renaming ten tiles changes what the owner reads every day, so it is his
    call, not an editor's.
@@ -326,33 +355,41 @@ provable defect that can be fixed unilaterally.
    `inflow`/`outflow` and the line to `net` (`finance-dashboard.tsx:1143-1145`).
    A user switching tabs sees an unchanged chart and concludes the sections are
    equal. Fix the chart, or drop the tabs.
-7. **Should the compliance report be able to say "I could not check"?** Today a
+7. **[DECIDED 2026-08-14 — owner said OK, being implemented.]** Should the compliance report be able to say "I could not check"?** Today a
    thrown check is a silent `0`. Surfacing it changes what the Daily Report
    headline number means.
-8. **The Sales-by-Customer "Total" / concentration denominator** — top 12, or all
+8. **[DECIDED 2026-08-14 — denominator becomes TOTAL revenue for the period; also surfacing largest-single-customer % and top-10 %. Being implemented.]** The Sales-by-Customer "Total" / concentration denominator** — top 12, or all
    customers? `aovCompany.totalSen` (the real total) is already in the payload.
-9. **ROE / ROA** — annualise and fix the equity basis, or remove until the
+9. **[CLOSED 2026-08-14 — owner: handled by someone else, out of scope.]** ROE / ROA — annualise and fix the equity basis, or remove until the
    year-end close is part of the flow.
-10. **`GET /api/reports/brief.json` has no page consumer** (grep across `src/`).
+10. **[DECIDED 2026-08-14 — DELETE it. Verified no caller: the only brief.json fetch is  calling the DIFFERENT . The HTML  is live and emailed 07:00 MYT — untouched.]** `GET /api/reports/brief.json` has no page consumer** (grep across `src/`).
     The HTML brief is opened directly in a tab per
     `docs/context-packs/HOOKKA-GOTCHAS.md`; the JSON twin appears to be
     maintained for a dashboard card removed on 2026-08-05.
-11. **`/accounting/cash-flow`'s bank module** — is it meant to be live? Today its
+11. **[CLOSED 2026-08-14 — owner: 「cashflow 不管 别人会看」, out of scope.]** `/accounting/cash-flow`'s bank module — is it meant to be live? Today its
     balances are a demo seed plus this page's own form, and its Bank
     Reconciliation reads a demo account code out of the manual-JV tables. Either
     wire it to `ledger_journal_entries` + the real `SBK`/`SCH` accounts, or
     label the whole tab a scratchpad. **It should not sit under "Current Cash
     Position" as it stands.**
-12. **`/kpi`'s per-person figures** — should an AUTO metric be per-user at all?
+12. **[DEFERRED 2026-08-14 — owner: still in progress, do not touch.]** `/kpi`'s per-person figures — should an AUTO metric be per-user at all?
     All five are company-wide, and a bonus is priced off them. Either scope the
     queries to the user or say on the card that the figure is factory-wide.
-13. **Should a "settled" KPI month actually settle?** `kpi_periods` exists, has
+13. **[DEFERRED 2026-08-14 — owner: still in progress, do not touch.]** Should a "settled" KPI month actually settle?** `kpi_periods` exists, has
     a unique index, and has no writer. Either write it at month end or delete
     the lock path and the "settled" wording.
-14. **Hookka Report "On-time delivery %"** — there is no customer-committed date
-    being scored today. Pick the field that should be scored (the customer's
-    date, not `hookka_expected_dd`) and decide whether never-dispatched orders
-    count as late. Until then the figure flatters, and it is printed twice.
+14. ~~**Hookka Report "On-time delivery %"** — there is no customer-committed date~~
+    **DECIDED 2026-08-14 by the owner, and the premise above was WRONG.** The
+    customer's date exists: `sales_orders.customerDeliveryDate`
+    (`sales-orders.ts:2174`, `:2214`), and the actual delivery exists as
+    `delivery_orders.deliveredAt` (`delivery-orders.ts:193`, `:208-209`). The
+    owner's rule: 「看我们送货的时间减掉我们顾客的 delivery date」 —
+    **on-time = `deliveredAt` ≤ `customerDeliveryDate`.** What ships today scores
+    something else entirely: `agent-learning.ts:458` compares job-card
+    `completedDate` to a PRODUCTION due date — production timeliness wearing the
+    delivery label. Being implemented on `fix/on-time-delivery-and-decisions`;
+    never-delivered orders are excluded rather than counted late, and orders with
+    no customer date are excluded WITH the excluded count published.
 15. **AR aging vs AP aging vs the controls** — three "what we are owed / what we
     owe" numbers with different definitions on one page. Which one is *the*
     number?

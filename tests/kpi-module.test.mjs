@@ -330,15 +330,20 @@ test("production efficiency: 100% is full marks, 80% is the floor, 75% is nothin
 test("pending time-adjustment requests are a daily-report exception", () => {
   // Owner 2026-08-07: "either reject or approve 而不是 hanging 在那边."
   const src = readFileSync(resolve(process.cwd(), "src/api/lib/compliance-report.ts"), "utf8");
-  assert.match(src, /pendingTimeAdjustments: number;/, "it must be a counted category");
-  assert.match(src, /pendingTimeAdjustments: pendingTimeAdjustments\.length/,
-    "it must be in the counts block");
-  // Parse the total expression rather than matching on position — see the note
-  // in cogs-integrity.test.mjs for why the positional form is a trap.
-  const total = src.match(/total:\s*\n([\s\S]*?);/)?.[1] ?? "";
+  // `number | null` since BUG-2026-08-13-141: null = the check could not run.
+  assert.match(
+    src,
+    /pendingTimeAdjustments: number \| null;/,
+    "it must be a counted category, and able to report that it could not be checked",
+  );
+  assert.match(src, /pendingTimeAdjustments: n\("pendingTimeAdjustments", pendingTimeAdjustments\)/,
+    "it must be in the counts block, through the failure-recording wrapper");
+  // Membership in `perCheck` rather than position in a hand-written sum — see
+  // the note in cogs-integrity.test.mjs for why the positional form is a trap.
+  const perCheck = src.match(/const perCheck = \{([\s\S]*?)\n  \};/)?.[1] ?? "";
   assert.ok(
-    total.includes("pendingTimeAdjustments.length"),
-    "and inside the total, or the KPI's burn-down will never see it",
+    perCheck.includes('pendingTimeAdjustments: n("pendingTimeAdjustments", pendingTimeAdjustments)'),
+    "and inside perCheck, which the total reduces over, or the KPI's burn-down will never see it",
   );
   // The columns this reads are real ones — worker_nonprod_requests stores
   // hours and worker_id, not minutes and workerName. The first draft asked for

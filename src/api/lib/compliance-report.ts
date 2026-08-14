@@ -17,8 +17,28 @@
 //     don't either; staying consistent.
 //   - app-level SQL uses camelCase column names; the SupabaseAdapter rewrites
 //     them to snake_case at runtime (see src/api/lib/supabase-compat.ts).
-//   - Each check is wrapped in its own try/catch returning [] on failure, so
-//     one broken query can't 500 the whole report.
+//   - One broken query still cannot 500 the whole report — but it no longer
+//     reports CLEAN either. See below.
+//
+// THE REPORT CAN SAY "I COULD NOT CHECK" (2026-08-14, BUG-2026-08-13-141)
+//
+// Every check used to end `catch (err) { console.error(…); return []; }`. That
+// made a check which THREW byte-identical to a check which ran and found
+// nothing: its chip showed 0, it added 0 to the headline, and the Daily Report
+// printed a green `0` under "A Quiet Day on the Floor" over a sweep that had
+// partly not happened. The owner reads that number every morning.
+//
+// Now: each check RETHROWS, `runCheck` (bottom of this file) records the
+// failure, the check's count becomes `null` — never `0` — and the key is listed
+// in `ComplianceData.unavailable`. `counts.checksRun` / `counts.checksTotal`
+// publish the coverage beside the headline, so a partial report states that it
+// is partial. This is C15 (`docs/BUG-CLASSES.md`): `0` is a claim, not a blank,
+// and a percentage or a count over an incomplete population must publish that
+// population.
+//
+// A check that legitimately finds nothing still returns `[]` and counts `0`.
+// The distinction is the entire point; do not "simplify" `number | null` back
+// to `number`.
 // ---------------------------------------------------------------------------
 
 import {
@@ -265,32 +285,49 @@ export interface PendingTimeAdjustmentRow {
   daysWaiting: number;
 }
 
+/**
+ * Per-check counts.
+ *
+ * Every per-check field is `number | null`. **`null` means the check could not
+ * run** — the query threw — and is the whole point of BUG-2026-08-13-141: a
+ * failed check used to report `0`, which is a claim ("we looked, and this is
+ * clean"), not a blank. Render `null` as "—" / "couldn't check", never as 0.
+ *
+ * `total` stays a plain number and is the sum over the checks that ACTUALLY
+ * RAN. It is therefore a floor, not a total, whenever `checksRun < checksTotal`
+ * — which is exactly why those two fields travel beside it and why no caller
+ * may print a clean headline without reading them.
+ */
 export interface ComplianceCounts {
   total: number;
-  doPendingDispatch: number;
-  doNotDelivered: number;
-  doNotInvoiced: number;
-  soNoDo: number;
-  soNoInvoice: number;
-  overdueOrders: number;
-  poNotReceived: number;
-  lowEfficiencyWorkers: number;
-  processSkips: number;
-  missingWipTimes: number;
-  incompleteBoms: number;
-  rdStalled: number;
+  /** How many of the checks completed. */
+  checksRun: number;
+  /** How many checks exist. `checksRun < checksTotal` ⇒ partial coverage. */
+  checksTotal: number;
+  doPendingDispatch: number | null;
+  doNotDelivered: number | null;
+  doNotInvoiced: number | null;
+  soNoDo: number | null;
+  soNoInvoice: number | null;
+  overdueOrders: number | null;
+  poNotReceived: number | null;
+  lowEfficiencyWorkers: number | null;
+  processSkips: number | null;
+  missingWipTimes: number | null;
+  incompleteBoms: number | null;
+  rdStalled: number | null;
   /** Time-adjustment requests left PENDING. Owner 2026-08-07: "either reject
    *  or approve 而不是 hanging 在那边" — an unanswered request is a worker's
    *  pay sitting in limbo, and it silently distorts efficiency too, because the
    *  minutes are neither counted nor refused. */
-  pendingTimeAdjustments: number;
+  pendingTimeAdjustments: number | null;
   /** Money invariants (src/api/lib/pricing-integrity.ts). Three price defects
    *  ran for months unseen because nothing checked the DATA daily. */
-  pricingIssues: number;
+  pricingIssues: number | null;
   /** Delivered units with no cost layer behind them (cogs-integrity.ts). The
    *  cascade already computes the shortfall and the caller drops it, so the
    *  only place this is visible is here. */
-  cogsIssues: number;
+  cogsIssues: number | null;
 }
 
 export interface ComplianceGroups {
@@ -311,11 +348,36 @@ export interface ComplianceGroups {
   cogsIssues: CogsIssueRow[];
 }
 
+/** The keys of every individual check, i.e. of ComplianceGroups. */
+export type ComplianceCheckKey = keyof ComplianceGroups;
+
+/** One check that could not run. `message` is for the operator, not a stack. */
+export interface ComplianceCheckFailure {
+  check: ComplianceCheckKey;
+  message: string;
+}
+
 export interface ComplianceData {
   generatedAtIso: string;
   today: string;
   counts: ComplianceCounts;
   groups: ComplianceGroups;
+  /**
+   * BUG-2026-08-13-141 — the report's ability to say "I could not check".
+   *
+   * Every check used to catch its own error and return `[]`, so a query that
+   * threw contributed 0 to its chip AND to the headline, indistinguishable from
+   * a check that ran and found nothing. The Daily Report then printed a green
+   * `0` under "A Quiet Day on the Floor" over a report that had partly not
+   * happened.
+   *
+   * A failed check now appears here, its group stays `[]` (there are no rows to
+   * show — that much is honest) and its count is `null`, never `0`. `counts`
+   * additionally publishes `checksRun` / `checksTotal` so the headline can state
+   * its own coverage: the lesson of BUG-2026-08-13-096 is that "0 items" meant
+   * "cannot see", not "nothing wrong".
+   */
+  unavailable: ComplianceCheckFailure[];
 }
 
 // ─── Date helpers (YMD-anchored, UTC midnight) ─────────────────────────────
@@ -386,7 +448,7 @@ async function checkDoPendingDispatch(
     }));
   } catch (err) {
     console.error("[compliance] doPendingDispatch failed:", err);
-    return [];
+    throw err;
   }
 }
 
@@ -427,7 +489,7 @@ async function checkDoNotDelivered(
       }));
   } catch (err) {
     console.error("[compliance] doNotDelivered failed:", err);
-    return [];
+    throw err;
   }
 }
 
@@ -488,7 +550,7 @@ async function checkDoNotInvoiced(
       }));
   } catch (err) {
     console.error("[compliance] doNotInvoiced failed:", err);
-    return [];
+    throw err;
   }
 }
 
@@ -591,7 +653,7 @@ async function checkSoNoDo(
       .filter((s) => s.days >= graceDays);
   } catch (err) {
     console.error("[compliance] soNoDo failed:", err);
-    return [];
+    throw err;
   }
 }
 
@@ -769,7 +831,7 @@ async function checkSoNoInvoice(
       .filter((s) => s.days === undefined || s.days >= graceDays);
   } catch (err) {
     console.error("[compliance] soNoInvoice failed:", err);
-    return [];
+    throw err;
   }
 }
 
@@ -862,7 +924,7 @@ async function checkPoNotReceived(
       }));
   } catch (err) {
     console.error("[compliance] poNotReceived failed:", err);
-    return [];
+    throw err;
   }
 }
 
@@ -876,7 +938,7 @@ async function checkOverdueOrders(
     return report.rows;
   } catch (err) {
     console.error("[compliance] overdueOrders failed:", err);
-    return [];
+    throw err;
   }
 }
 
@@ -894,7 +956,7 @@ async function checkLowEfficiencyWorkers(
     );
   } catch (err) {
     console.error("[compliance] lowEfficiencyWorkers failed:", err);
-    return [];
+    throw err;
   }
 }
 
@@ -1057,7 +1119,7 @@ async function checkProcessSkips(
     return rows;
   } catch (err) {
     console.error("[compliance] processSkips failed:", err);
-    return [];
+    throw err;
   }
 }
 
@@ -1134,7 +1196,7 @@ async function checkMissingWipTimes(db: DbLike): Promise<MissingWipTimeRow[]> {
     return [...seen.values()];
   } catch (err) {
     console.error("[compliance] missingWipTimes failed:", err);
-    return [];
+    throw err;
   }
 }
 
@@ -1192,7 +1254,7 @@ async function checkIncompleteBoms(db: DbLike): Promise<IncompleteBomRow[]> {
       }));
   } catch (err) {
     console.error("[compliance] incompleteBoms failed:", err);
-    return [];
+    throw err;
   }
 }
 
@@ -1243,7 +1305,7 @@ async function checkRdStalled(
     });
   } catch (err) {
     console.error("[compliance] rdStalled failed:", err);
-    return [];
+    throw err;
   }
 }
 
@@ -1295,11 +1357,43 @@ async function checkPendingTimeAdjustments(
     });
   } catch (err) {
     console.error("[compliance] pendingTimeAdjustments failed:", err);
-    return [];
+    throw err;
   }
 }
 
 // ─── Top-level collector ───────────────────────────────────────────────────
+
+/**
+ * The outcome of ONE check: either the rows it found, or the reason it could
+ * not look. There is no third state, and in particular there is no "empty
+ * because it broke" — that conflation is BUG-2026-08-13-141.
+ */
+type CheckOutcome<T> =
+  | { ok: true; rows: T[] }
+  | { ok: false; message: string };
+
+/**
+ * Run one check, converting a throw into a RECORDED failure.
+ *
+ * Each check rethrows now instead of returning `[]` (see the rethrow sites
+ * above), so the decision of what an unreadable check means is made in exactly
+ * one place — here — rather than fifteen times by fifteen catch blocks that all
+ * happened to choose "clean".
+ */
+async function runCheck<T>(
+  key: ComplianceCheckKey,
+  fn: () => Promise<T[]>,
+): Promise<CheckOutcome<T>> {
+  try {
+    return { ok: true, rows: await fn() };
+  } catch (err) {
+    console.error(`[compliance] check '${key}' unavailable:`, err);
+    return {
+      ok: false,
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
 
 export async function collectComplianceData(
   db: DbLike,
@@ -1326,77 +1420,100 @@ export async function collectComplianceData(
     cogsIssues,
     pendingTimeAdjustments,
   ] = await Promise.all([
-    checkDoPendingDispatch(db, todayYmd, graceDays.doPendingDispatch),
-    checkDoNotDelivered(db, todayYmd, graceDays.doNotDelivered),
-    checkDoNotInvoiced(db, todayYmd, graceDays.doNotInvoiced),
-    checkSoNoDo(db, todayYmd, graceDays.soWithoutDo),
-    checkSoNoInvoice(db, todayYmd, graceDays.soWithoutInvoice),
-    checkOverdueOrders(db, todayYmd),
-    checkPoNotReceived(db, todayYmd, graceDays.poNotReceived),
-    checkLowEfficiencyWorkers(db, todayYmd),
-    checkProcessSkips(db, todayYmd, graceDays.processSkips),
-    checkMissingWipTimes(db),
-    checkIncompleteBoms(db),
-    checkRdStalled(db, todayYmd),
-    checkPricingIntegrity(db),
-    checkCogsIntegrity(db),
-    checkPendingTimeAdjustments(db, todayYmd),
+    runCheck("doPendingDispatch", () =>
+      checkDoPendingDispatch(db, todayYmd, graceDays.doPendingDispatch),
+    ),
+    runCheck("doNotDelivered", () =>
+      checkDoNotDelivered(db, todayYmd, graceDays.doNotDelivered),
+    ),
+    runCheck("doNotInvoiced", () =>
+      checkDoNotInvoiced(db, todayYmd, graceDays.doNotInvoiced),
+    ),
+    runCheck("soNoDo", () => checkSoNoDo(db, todayYmd, graceDays.soWithoutDo)),
+    runCheck("soNoInvoice", () =>
+      checkSoNoInvoice(db, todayYmd, graceDays.soWithoutInvoice),
+    ),
+    runCheck("overdueOrders", () => checkOverdueOrders(db, todayYmd)),
+    runCheck("poNotReceived", () =>
+      checkPoNotReceived(db, todayYmd, graceDays.poNotReceived),
+    ),
+    runCheck("lowEfficiencyWorkers", () =>
+      checkLowEfficiencyWorkers(db, todayYmd),
+    ),
+    runCheck("processSkips", () =>
+      checkProcessSkips(db, todayYmd, graceDays.processSkips),
+    ),
+    runCheck("missingWipTimes", () => checkMissingWipTimes(db)),
+    runCheck("incompleteBoms", () => checkIncompleteBoms(db)),
+    runCheck("rdStalled", () => checkRdStalled(db, todayYmd)),
+    runCheck("pricingIssues", () => checkPricingIntegrity(db)),
+    runCheck("cogsIssues", () => checkCogsIntegrity(db)),
+    runCheck("pendingTimeAdjustments", () =>
+      checkPendingTimeAdjustments(db, todayYmd),
+    ),
   ]);
 
+  const unavailable: ComplianceCheckFailure[] = [];
+  // A failed check contributes NOTHING to the total — not a zero, an absence.
+  // Its count is null and its key is listed above, so no reader can mistake the
+  // gap for a clean result.
+  const n = (key: ComplianceCheckKey, o: CheckOutcome<unknown>): number | null => {
+    if (o.ok) return o.rows.length;
+    unavailable.push({ check: key, message: o.message });
+    return null;
+  };
+  const rows = <T>(o: CheckOutcome<T>): T[] => (o.ok ? o.rows : []);
+
+  const perCheck = {
+    doPendingDispatch: n("doPendingDispatch", doPendingDispatch),
+    doNotDelivered: n("doNotDelivered", doNotDelivered),
+    doNotInvoiced: n("doNotInvoiced", doNotInvoiced),
+    soNoDo: n("soNoDo", soNoDo),
+    soNoInvoice: n("soNoInvoice", soNoInvoice),
+    overdueOrders: n("overdueOrders", overdueOrders),
+    poNotReceived: n("poNotReceived", poNotReceived),
+    lowEfficiencyWorkers: n("lowEfficiencyWorkers", lowEfficiencyWorkers),
+    processSkips: n("processSkips", processSkips),
+    missingWipTimes: n("missingWipTimes", missingWipTimes),
+    incompleteBoms: n("incompleteBoms", incompleteBoms),
+    rdStalled: n("rdStalled", rdStalled),
+    pricingIssues: n("pricingIssues", pricingIssues),
+    cogsIssues: n("cogsIssues", cogsIssues),
+    pendingTimeAdjustments: n("pendingTimeAdjustments", pendingTimeAdjustments),
+  };
+
+  const checkKeys = Object.keys(perCheck) as ComplianceCheckKey[];
   const counts: ComplianceCounts = {
-    doPendingDispatch: doPendingDispatch.length,
-    doNotDelivered: doNotDelivered.length,
-    doNotInvoiced: doNotInvoiced.length,
-    soNoDo: soNoDo.length,
-    soNoInvoice: soNoInvoice.length,
-    overdueOrders: overdueOrders.length,
-    poNotReceived: poNotReceived.length,
-    lowEfficiencyWorkers: lowEfficiencyWorkers.length,
-    processSkips: processSkips.length,
-    missingWipTimes: missingWipTimes.length,
-    incompleteBoms: incompleteBoms.length,
-    rdStalled: rdStalled.length,
-    pricingIssues: pricingIssues.length,
-    cogsIssues: cogsIssues.length,
-    pendingTimeAdjustments: pendingTimeAdjustments.length,
-    total:
-      doPendingDispatch.length +
-      doNotDelivered.length +
-      doNotInvoiced.length +
-      soNoDo.length +
-      soNoInvoice.length +
-      overdueOrders.length +
-      poNotReceived.length +
-      lowEfficiencyWorkers.length +
-      processSkips.length +
-      missingWipTimes.length +
-      incompleteBoms.length +
-      rdStalled.length +
-      pricingIssues.length +
-      cogsIssues.length +
-      pendingTimeAdjustments.length,
+    ...perCheck,
+    checksTotal: checkKeys.length,
+    checksRun: checkKeys.length - unavailable.length,
+    // Σ over the checks that ran. With any failure this is a FLOOR on the
+    // number of exceptions, not the number — `checksRun`/`checksTotal` beside
+    // it is what makes that readable, and every renderer must read them.
+    total: checkKeys.reduce((s, k) => s + (perCheck[k] ?? 0), 0),
   };
 
   return {
     generatedAtIso: new Date().toISOString(),
     today: todayYmd,
     counts,
+    unavailable,
     groups: {
-      doPendingDispatch,
-      doNotDelivered,
-      doNotInvoiced,
-      soNoDo,
-      soNoInvoice,
-      overdueOrders,
-      poNotReceived,
-      lowEfficiencyWorkers,
-      processSkips,
-      missingWipTimes,
-      incompleteBoms,
-      rdStalled,
-      pricingIssues,
-      cogsIssues,
-      pendingTimeAdjustments,
+      doPendingDispatch: rows(doPendingDispatch),
+      doNotDelivered: rows(doNotDelivered),
+      doNotInvoiced: rows(doNotInvoiced),
+      soNoDo: rows(soNoDo),
+      soNoInvoice: rows(soNoInvoice),
+      overdueOrders: rows(overdueOrders),
+      poNotReceived: rows(poNotReceived),
+      lowEfficiencyWorkers: rows(lowEfficiencyWorkers),
+      processSkips: rows(processSkips),
+      missingWipTimes: rows(missingWipTimes),
+      incompleteBoms: rows(incompleteBoms),
+      rdStalled: rows(rdStalled),
+      pricingIssues: rows(pricingIssues),
+      cogsIssues: rows(cogsIssues),
+      pendingTimeAdjustments: rows(pendingTimeAdjustments),
     },
   };
 }

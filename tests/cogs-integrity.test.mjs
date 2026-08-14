@@ -94,8 +94,19 @@ test("the driver's camelCase keys are read too", async () => {
   assert.equal(r.estimatedMissingSen, 1000);
 });
 
-test("it never throws — one bad query cannot take the daily sweep down", async () => {
-  assert.deepEqual(await checkCogsIntegrity(db([], { throwOn: true })), []);
+test("a broken query is an UNKNOWN, not an empty result", async () => {
+  // CHANGED 2026-08-14 (BUG-2026-08-13-141). This used to assert
+  // `deepEqual(…, [])` — "it never throws". That WAS the bug: an `[]` from a
+  // failed query is indistinguishable from an `[]` meaning "every delivered
+  // unit is costed", and the daily report printed the second sentence over the
+  // first. The sweep still cannot 500 — `collectComplianceData`'s `runCheck`
+  // catches this rejection and records the check as unavailable — but the
+  // decision is made THERE, once, instead of here, silently.
+  await assert.rejects(
+    () => checkCogsIntegrity(db([], { throwOn: true })),
+    /boom/,
+    "a failed COGS query must propagate so the report can say it could not check",
+  );
 });
 
 test("the summary separates what can be valued from what cannot", () => {
@@ -123,13 +134,26 @@ test("the detector writes NOTHING", () => {
 test("it is wired into the daily report AND reachable on demand", () => {
   const compliance = readFileSync("src/api/lib/compliance-report.ts", "utf8");
   assert.match(compliance, /checkCogsIntegrity\(db\)/);
-  assert.match(compliance, /cogsIssues: cogsIssues\.length/);
-  // Read the `total:` expression itself rather than asserting cogsIssues is
-  // the LAST term in it. The positional form broke the moment another category
-  // was appended after it (pendingTimeAdjustments, 2026-08-07) — a green test
-  // that fails on an unrelated correct change is worse than no test.
-  const total = compliance.match(/total:\s*\n([\s\S]*?);/)?.[1] ?? "";
-  assert.ok(total.includes("cogsIssues.length"), "must count toward the total");
+  // The count goes through `n(key, outcome)`, which returns `null` for a check
+  // that could not run (BUG-2026-08-13-141). A bare `.length` here would mean
+  // the outcome was unwrapped without recording the failure.
+  assert.match(compliance, /cogsIssues: n\("cogsIssues", cogsIssues\)/);
+  // It must still reach the headline total. The total is now a reduce over the
+  // per-check map rather than a hand-written sum, so assert on membership in
+  // that map — the positional form broke the moment another category was
+  // appended (pendingTimeAdjustments, 2026-08-07) and a hardcoded sum broke
+  // again here.
+  const perCheck = compliance.match(/const perCheck = \{([\s\S]*?)\n  \};/)?.[1] ?? "";
+  assert.ok(
+    perCheck.includes('cogsIssues: n("cogsIssues", cogsIssues)'),
+    "must be in perCheck, which is what the total reduces over",
+  );
+  assert.match(
+    compliance,
+    /total: checkKeys\.reduce\(\(s, k\) => s \+ \(perCheck\[k\] \?\? 0\), 0\)/,
+    "the total must sum perCheck — an unavailable check contributes nothing, " +
+      "not a zero it never measured",
+  );
 
   // The on-demand endpoint is the point: sizing a money exposure needs live
   // data, not yesterday's cached snapshot.

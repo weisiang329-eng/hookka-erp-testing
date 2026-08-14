@@ -147,21 +147,31 @@ interface RdStalledRow {
 interface ComplianceData {
   generatedAtIso: string;
   today: string;
+  // BUG-2026-08-13-141 — every per-check count is `number | null`, and `null`
+  // means the check could not RUN. `0` is now only ever an observed clean
+  // result. `checksRun`/`checksTotal` are the coverage the headline must state.
   counts: {
     total: number;
-    doPendingDispatch: number;
-    doNotDelivered: number;
-    doNotInvoiced: number;
-    soNoDo: number;
-    soNoInvoice: number;
-    overdueOrders: number;
-    poNotReceived: number;
-    lowEfficiencyWorkers: number;
-    processSkips: number;
-    missingWipTimes: number;
-    incompleteBoms: number;
-    rdStalled: number;
+    checksRun?: number;
+    checksTotal?: number;
+    doPendingDispatch: number | null;
+    doNotDelivered: number | null;
+    doNotInvoiced: number | null;
+    soNoDo: number | null;
+    soNoInvoice: number | null;
+    overdueOrders: number | null;
+    poNotReceived: number | null;
+    lowEfficiencyWorkers: number | null;
+    processSkips: number | null;
+    missingWipTimes: number | null;
+    incompleteBoms: number | null;
+    rdStalled: number | null;
+    pendingTimeAdjustments?: number | null;
+    pricingIssues?: number | null;
+    cogsIssues?: number | null;
   };
+  /** Checks that threw. Empty ⇒ the sweep is complete. */
+  unavailable?: { check: string; message: string }[];
   groups: {
     doPendingDispatch: DoPendingDispatchRow[];
     doNotDelivered: DoNotDeliveredRow[];
@@ -341,7 +351,8 @@ function CountTile({
   onClick,
 }: {
   label: string;
-  value: number;
+  /** `null` = this check could not run. Renders "—", never a green 0. */
+  value: number | null;
   icon: React.ElementType;
   highlight?: boolean;
   // True when this tile's detail is the one currently open — draws a ring so
@@ -351,52 +362,63 @@ function CountTile({
   // reveals its detail section. Zero-count tiles are inert.
   onClick?: () => void;
 }) {
+  // BUG-2026-08-13-141: an unavailable check is NOT a clear one. `value === 0`
+  // used to be reached by both, painting the tile green either way.
+  const unknown = value == null;
   const clear = value === 0;
-  const interactive = !highlight && !clear && !!onClick;
+  const interactive = !highlight && !clear && !unknown && !!onClick;
 
   // Severity escalation for non-zero, non-total tiles: the bigger the backlog,
   // the louder the tile. Keeps "needs attention" weighting obvious at a glance.
   const sev = highlight
     ? null
-    : clear
-      ? "clear"
-      : value >= 10
-        ? "red"
-        : value >= 5
-          ? "orange"
-          : "amber";
+    : unknown
+      ? "unknown"
+      : clear
+        ? "clear"
+        : value >= 10
+          ? "red"
+          : value >= 5
+            ? "orange"
+            : "amber";
 
   const tone =
     highlight
       ? "bg-[#1F1D1B] text-white border-[#1F1D1B]"
-      : sev === "red"
-        ? "bg-[#FEF2F2] border-[#FCA5A5]"
-        : sev === "orange"
-          ? "bg-[#FFF7ED] border-[#FED7AA]"
-          : sev === "amber"
-            ? "bg-[#FFFBEB] border-[#FDE68A]"
-            : "bg-white";
+      : sev === "unknown"
+        ? "bg-[#F4F4F5] border-[#D4D4D8] border-dashed"
+        : sev === "red"
+          ? "bg-[#FEF2F2] border-[#FCA5A5]"
+          : sev === "orange"
+            ? "bg-[#FFF7ED] border-[#FED7AA]"
+            : sev === "amber"
+              ? "bg-[#FFFBEB] border-[#FDE68A]"
+              : "bg-white";
 
   const valueColor =
     highlight
       ? "text-white"
-      : clear
-        ? "text-[#15803D]"
-        : sev === "red"
-          ? "text-[#B91C1C]"
-          : sev === "orange"
-            ? "text-[#C2410C]"
-            : "text-[#A16207]";
+      : sev === "unknown"
+        ? "text-[#71717A]"
+        : clear
+          ? "text-[#15803D]"
+          : sev === "red"
+            ? "text-[#B91C1C]"
+            : sev === "orange"
+              ? "text-[#C2410C]"
+              : "text-[#A16207]";
 
   const iconColor = highlight
     ? "text-[#C9A24B]"
-    : sev === "red"
-      ? "text-[#B91C1C]"
-      : sev === "orange"
-        ? "text-[#C2410C]"
-        : sev === "amber"
-          ? "text-[#A16207]"
-          : "text-[#6B5C32]";
+    : sev === "unknown"
+      ? "text-[#71717A]"
+      : sev === "red"
+        ? "text-[#B91C1C]"
+        : sev === "orange"
+          ? "text-[#C2410C]"
+          : sev === "amber"
+            ? "text-[#A16207]"
+            : "text-[#6B5C32]";
 
   const card = (
     <Card
@@ -424,8 +446,14 @@ function CountTile({
         <p
           className={`mt-1.5 text-2xl font-[800] tabular-nums leading-none ${valueColor}`}
         >
-          {value}
+          {unknown ? "—" : value}
         </p>
+        {unknown && (
+          <p className="mt-1 text-[10px] leading-tight text-[#71717A]">
+            Couldn&apos;t check — this is not a clear result, it is an unknown
+            one.
+          </p>
+        )}
       </CardContent>
     </Card>
   );
@@ -458,7 +486,8 @@ function Section({
   id: string;
   title: string;
   subtitle: string;
-  count: number;
+  /** `null` = the check could not run; the badge says so instead of "Clear". */
+  count: number | null;
   icon: React.ElementType;
   children: React.ReactNode;
 }) {
@@ -477,7 +506,11 @@ function Section({
             <p className="text-xs text-[#9CA3AF] mt-0.5">{subtitle}</p>
           </div>
         </div>
-        {count > 0 ? (
+        {count == null ? (
+          <Badge className="bg-[#F4F4F5] text-[#71717A] border-[#D4D4D8]">
+            Couldn&apos;t check
+          </Badge>
+        ) : count > 0 ? (
           <Badge className="bg-[#FEE2E2] text-[#B91C1C] border-[#FCA5A5] tabular-nums">
             {count}
           </Badge>
@@ -768,9 +801,18 @@ const plS = (n: number) => (n === 1 ? "" : "s");
 // no data fetching. Severity weights put money + delivery stories up top and
 // data-hygiene stories at the bottom; ties break on count.
 function buildHookkaArticles(
-  counts: ComplianceData["counts"],
+  rawCounts: ComplianceData["counts"],
   groups: ComplianceData["groups"],
 ): NewsArticle[] {
+  // Every article below is gated on `groups.X.length`, and a group only has
+  // rows when its check RAN — so inside those branches the count is never null.
+  // Normalising here keeps each headline byte-identical while letting
+  // ComplianceCounts carry the `null` that BUG-2026-08-13-141 needs. An
+  // unavailable check produces no article at all, which is correct: there is no
+  // story to tell, and the coverage banner above the fold says why.
+  const counts = Object.fromEntries(
+    Object.entries(rawCounts).map(([k, v]) => [k, v ?? 0]),
+  ) as { [K in keyof ComplianceData["counts"]]-?: number };
   const arts: NewsArticle[] = [];
 
   if (groups.overdueOrders.length) {
@@ -1125,6 +1167,13 @@ export default function DailyReportPage() {
 
   const { counts, groups } = data;
   const articles = buildHookkaArticles(counts, groups);
+  // Coverage of the sweep itself. Falls back to counting the null counts when
+  // the payload predates `unavailable` (a cached pre-fix snapshot), so an old
+  // body still cannot claim completeness it never had.
+  const unavailableCount =
+    data.unavailable?.length ??
+    Object.values(counts).filter((v) => v === null).length;
+  const checksTotal = counts.checksTotal ?? 15;
 
   return (
     <div className="space-y-6">
@@ -1157,17 +1206,66 @@ export default function DailyReportPage() {
         <div className="mt-1 flex items-center justify-center gap-3 border-t border-[#1F1D1B] pt-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#6B7280]">
           <span>{formatDateLong(data.today)}</span>
           <span className="text-[#C9A24B]">◆</span>
-          <span>{counts.total} {counts.total === 1 ? "Story" : "Stories"} on the Floor</span>
+          <span>
+            {counts.total}
+            {unavailableCount > 0 ? "+" : ""}{" "}
+            {counts.total === 1 ? "Story" : "Stories"} on the Floor
+          </span>
+          {unavailableCount > 0 && (
+            <>
+              <span className="text-[#C9A24B]">◆</span>
+              <span className="text-[#9A3A2D]">
+                {unavailableCount} of {checksTotal} checks could not run
+              </span>
+            </>
+          )}
         </div>
       </header>
 
+      {/* Coverage banner — a report that only partly ran says so at the top,
+          above every figure it produced. BUG-2026-08-13-141. */}
+      {unavailableCount > 0 && (
+        <div className="border border-[#D4D4D8] bg-[#F4F4F5] p-4">
+          <p className="font-serif text-sm font-bold text-[#3F3F46]">
+            This report is incomplete: {unavailableCount} of {checksTotal} checks
+            could not run.
+          </p>
+          <p className="mt-1 text-xs text-[#52525B]">
+            The count above is a floor, not a total, and the affected sections
+            below show &ldquo;Couldn&apos;t check&rdquo; rather than
+            &ldquo;Clear&rdquo;. A check that failed has found nothing because it
+            did not look.
+          </p>
+          <ul className="mt-2 space-y-0.5 text-[11px] text-[#52525B]">
+            {(data.unavailable ?? []).map((u) => (
+              <li key={u.check}>
+                <span className="font-semibold">{u.check}</span> — {u.message}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {/* ── Front page ───────────────────────────────────────────── */}
-      {counts.total === 0 ? (
+      {/* "A Quiet Day" requires BOTH nothing found AND every check having run —
+          a silent zero off a half-finished sweep is the exact defect. */}
+      {counts.total === 0 && unavailableCount === 0 ? (
         <div className="border border-[#DCF1E3] bg-[#F7FBF8] p-8 text-center">
           <CheckCircle2 className="mx-auto mb-2 h-8 w-8 text-[#15803D]" />
           <h2 className="font-serif text-2xl font-bold text-[#15803D]">A Quiet Day on the Floor</h2>
           <p className="mt-1 text-sm text-[#4B7A58]">
             Nothing flagged across delivery, billing, production or the supply line. The presses are quiet.
+          </p>
+        </div>
+      ) : counts.total === 0 ? (
+        <div className="border border-[#D4D4D8] bg-[#FAFAFA] p-8 text-center">
+          <h2 className="font-serif text-2xl font-bold text-[#3F3F46]">
+            An Unknown Day on the Floor
+          </h2>
+          <p className="mt-1 text-sm text-[#52525B]">
+            The checks that ran found nothing — but {unavailableCount} of{" "}
+            {checksTotal} did not run, so this is not a quiet day. It is a day we
+            cannot see.
           </p>
         </div>
       ) : (

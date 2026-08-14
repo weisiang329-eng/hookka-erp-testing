@@ -47,8 +47,9 @@
 //     case and the adapter only re-camelCases names containing an underscore,
 //     so `AS shortQty` would read back undefined and the number would silently
 //     be 0. Guarded by scripts/audit-sql-aliases.mjs.
-//   * every check is its own try/catch returning [] so one bad query cannot
-//     take down the daily report.
+//   * a failed query used to be caught and reported as [] — "nothing uncosted".
+//     It now RETHROWS and the daily report marks the check UNAVAILABLE
+//     (2026-08-14, BUG-2026-08-13-141): silence about money is not a clean bill.
 // ---------------------------------------------------------------------------
 
 export type CogsIssueKind =
@@ -175,8 +176,12 @@ export async function checkCogsIntegrity(db: DbLike): Promise<CogsIssueRow[]> {
       });
     }
     return out;
-  } catch {
-    return [];
+  } catch (err) {
+    // Rethrow (2026-08-14, BUG-2026-08-13-141): `[]` here rendered as "every
+    // delivered unit is costed", which is a money statement, made by a query
+    // that failed. The caller records this check as UNAVAILABLE instead.
+    console.error("[cogs-integrity] checkCogsIntegrity failed:", err);
+    throw err;
   }
 }
 

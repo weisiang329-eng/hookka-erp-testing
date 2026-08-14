@@ -452,9 +452,18 @@ app.get("/overdue.json", async (c) => {
 // ---------------------------------------------------------------------------
 // Production Morning Brief (Production Agent Phase 1).
 //   GET  /api/reports/brief        — HTML (open in tab / print)
-//   GET  /api/reports/brief.json   — JSON for the dashboard card
 //   POST /api/reports/brief/send   — manual send-now
 //   POST /api/internal/reports/brief-trigger — 07:00 MYT cron (see below)
+//
+// `GET /api/reports/brief.json` was DELETED on 2026-08-14 (BUG-2026-08-13-143).
+// It served a Command Center card that was removed on 2026-08-05, and nothing
+// has called it since: the only `brief.json` fetch left in the app is
+// `src/pages/delivery/agent-tab.tsx`, and that one hits
+// `/api/delivery-agent/brief.json`, a DIFFERENT endpoint on a different router.
+// Its snapshot warmer (`warmBriefReport`) went with it — it was keeping the
+// `<date>` cache key hot for a reader that no longer exists. The HTML brief is
+// untouched: it is emailed at 07:00 MYT and opened in a tab, and it caches under
+// its own `<date>|html` key.
 // ---------------------------------------------------------------------------
 
 async function buildBrief(
@@ -516,20 +525,6 @@ app.get("/brief", async (c) => {
     });
   } catch (err) {
     console.error("[reports/brief] failed:", err);
-    return c.json({ success: false, error: "report generation failed" }, 500);
-  }
-});
-
-app.get("/brief.json", async (c) => {
-  const denied = await requirePermission(c, "production-orders", "read");
-  if (denied) return denied;
-  try {
-    // Dashboard-card variant: NO AI call (fast + free on every page load).
-    // Snapshot-cached + serve-stale so the ~4.4s cold compute never blocks.
-    const data = await buildBriefJsonCached(c, getOrgId(c));
-    return c.json({ success: true, data });
-  } catch (err) {
-    console.error("[reports/brief.json] failed:", err);
     return c.json({ success: false, error: "report generation failed" }, 500);
   }
 });
@@ -689,51 +684,26 @@ export async function warmComplianceReport(
   }
 }
 
-// Snapshot-cached + serve-stale wrapper for the DASHBOARD-CARD brief (buildBrief
-// with includeAi=false — the no-LLM, no-WRITE variant loaded on every page open,
-// ~4.4s cold). Same rationale as compliance: read-only point-in-time report,
-// byte-identical numbers, recompute moved off the request path. Keyed by the
-// resolved date param; freshness tracks the tables collectBriefData reads. The AI
-// HTML variant (/brief) is NOT cached here (LLM output + separate concern).
+// Freshness sources for the HTML brief's snapshot — the tables
+// collectBriefData reads.
 const BRIEF_SOURCE_TABLES = [
   "production_orders",
   "job_cards",
   "schedule_proposals",
 ] as const;
 
-async function buildBriefJsonCached(
-  c: Context<Env>,
-  orgId: string,
-  swr = true,
-) {
-  const db = c.var.DB;
-  const date = parseDateParam(c.req.query("date"), todayYmdSgt);
-  await ensureReportSnapshotTable(db, "reports_brief_snapshot");
-  const { withSnapshot } = await import("../lib/snapshot");
-  return withSnapshot<Record<string, unknown>>(
-    db,
-    {
-      tableName: "reports_brief_snapshot",
-      sourceTables: BRIEF_SOURCE_TABLES as unknown as string[],
-    },
-    orgId,
-    async () => (await buildBrief(c, false)) as unknown as Record<string, unknown>,
-    date,
-    c,
-    swr ? { staleWhileRevalidate: true } : undefined,
-  );
-}
-
 /**
  * The HTML brief's data (includeAi: true), cached per (org, date).
  *
- * Mirrors buildBriefJsonCached, with two deliberate differences:
- *  - includeAi TRUE, so the cached payload carries the Claude focus paragraph
- *    and the display-only learning pass, exactly as the uncached route did.
- *  - cache_key `<date>|html`, so it can never be confused with the .json
- *    card's includeAi:false payload stored under `<date>`.
+ * includeAi is TRUE, so the cached payload carries the Claude focus paragraph
+ * and the display-only learning pass, exactly as the uncached route did.
  * buildBrief is read-only on this path (config proposals are explicitly not
  * emitted for GET), so caching it changes nothing but the cost.
+ *
+ * The cache_key keeps its `<date>|html` suffix even though the `<date>` key it
+ * was written to avoid colliding with is now unused (the .json card that owned
+ * it was deleted — see the header above). Changing the key would only orphan
+ * every already-stored row for no gain.
  */
 async function buildBriefHtmlCached(
   c: Context<Env>,
@@ -758,19 +728,6 @@ async function buildBriefHtmlCached(
     c,
     { staleWhileRevalidate: true },
   )) as unknown as ReturnType<typeof buildBrief> extends Promise<infer R> ? R : never;
-}
-
-export async function warmBriefReport(
-  c: Context<Env>,
-  orgId: string,
-): Promise<{ ok: boolean }> {
-  try {
-    await buildBriefJsonCached(c, orgId, false);
-    return { ok: true };
-  } catch (e) {
-    console.error("[warm] brief failed:", e);
-    return { ok: false };
-  }
 }
 
 // ---------------------------------------------------------------------------

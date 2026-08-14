@@ -1,6 +1,10 @@
 # Dashboard Data Audit — can every number on a tile be traced to a real event?
 
-> **Last verified: 2026-08-14** against `src/pages/dashboard-b/index.tsx`,
+> **Last verified: 2026-08-14** — restamped on branch `fix/on-time-delivery-and-decisions`,
+> which CLOSES Part-6 items 7, 8, 10 and 14 (BUG-2026-08-13-141/-131/-132/-133) and
+> corrects item 14's premise: a customer-committed date did exist all along
+> (`sales_orders.customer_delivery_date`, 99.8% populated). Also verified against
+> `src/pages/dashboard-b/index.tsx`,
 > `src/pages/dashboard-b/OcrAccuracyCard.tsx`, `src/pages/finance-dashboard.tsx`,
 > `src/pages/employees.tsx`, `src/pages/accounting/index.tsx`,
 > `src/pages/daily-report.tsx`, `src/api/routes/dashboard-overview.ts`,
@@ -175,7 +179,7 @@ Lead items first: these are what the owner is looking at every day.
 |---|---|---|---|
 | Command Center | **Daily Capacity · 7-day avg** (`190h`) + the drill-down column **"Production time"** | Σ *standard* minutes of the job cards completed that day ÷ working days. A throughput proxy in standard-minutes, not plant hours. | `dashboard-overview.ts:945, 973`; `dashboard-b/index.tsx:1354` |
 | Command Center | **Worker Efficiency** — *"production mins ÷ clocked hours"* | standard minutes **earned** ÷ clocked hours. Denominator is real (`working_hour_entries`), numerator is the master config. | `dashboard-b/index.tsx:785`; `job-cards.ts:317-351` |
-| Command Center | *"Top 3 = N% … **of total customer revenue** (RM X)"* + the card's **Total** chip | Only the **top 12** customers. `dashboard-overview.ts:1350` does `.slice(0, 12)`; the frontend sums exactly those 12 into `totalCustRev`. A truncated denominator **inflates** the concentration %, and the "All customers" row directly above uses the real all-customer total (`aovCompany.totalSen`) — two different totals on one card. | `dashboard-b/index.tsx:917, 1929`; `dashboard-overview.ts:1340-1350` |
+| ✅ FIXED 2026-08-14 (-132) — Command Center | *"Top 3 = N% … **of total customer revenue** (RM X)"* + the card's **Total** chip | Only the **top 12** customers. `dashboard-overview.ts:1350` does `.slice(0, 12)`; the frontend sums exactly those 12 into `totalCustRev`. A truncated denominator **inflates** the concentration %, and the "All customers" row directly above uses the real all-customer total (`aovCompany.totalSen`) — two different totals on one card. | `dashboard-b/index.tsx:917, 1929`; `dashboard-overview.ts:1340-1350` |
 | `/employees` header | **"Present" N/M** | Numerator = union of {WHE rows in production depts} ∪ {workers on completed JCs} ∪ {ADD_PROD approvals}, **unfiltered by status**. Denominator = `ACTIVE && !TEST`. Never reads `attendance_records`. A resigned worker with one job card inflates it (Present can exceed Total); a worker who clocked in but was credited on nothing is "absent". | `employees.tsx:11554`; `department-performance.ts:725` |
 | `/employees` | **two different "Avg Efficiency" figures**, and one of them gates money | Header uses `pic1 + pic2 + piece_pics`; the Efficiency Overview and **`resolveEfficiencyAllowanceSen` (the bonus gate)** use `pic1/pic2` only. `production-orders.ts:2262` rolls piece scans up to the **first two distinct people**, so a 3rd worker on a multi-piece card is invisible to the bonus — **a real RM loss**. | `department-performance.ts:474`; `efficiency-allowance.ts:78-101` |
 | `/employees` › Payroll, printed **Salary Calculation Guide** | *"Efficiency allowance — flat bonus … **(no proration)**"* | The engine **does** pro-rate: `allow × (workingDays − absentDays) / workingDays` (`efficiency-allowance.ts:296`, applied `payslips.ts:677`). The guide handed to staff states the opposite of what they are paid. | `employees.tsx:7288` |
@@ -191,7 +195,7 @@ Lead items first: these are what the owner is looking at every day.
 | `/finance-dashboard` › Income Statement | **"Stock Movement"** | a residual: `cogs − materials − labour − overhead`. Every misclassification anywhere in COGS lands here under a name implying an inventory swing. | `accounting.ts:10417` |
 | `/finance-dashboard` › Production Salary | **Headcount** / **RM per head** | `SELECT joinDate, resignedAt FROM workers` with **no status filter** (deliberate, owner's ruling) — but a worker with a blank `joinDate` passes the "not hired yet" test and is counted in **every month of history**. | `accounting.ts:10315` |
 | **Hookka Report** › Billing Desk | the **Receivables aging strip** | **five buckets are computed, four were printed.** `d30Sen` (exactly one month overdue) was never rendered, so it vanished from a printed statement and the boxes did not add up to the "Receivables" total beside them — and every remaining label was shifted one bucket ("31–60d" was `d60Sen`, i.e. two months). The captions also claimed *days* while `monthsOverdue` buckets by whole months. **Fixed in this PR.** | `hookka-report-editions.tsx:519-524`; `operations-report.ts:919-923` |
-| **Hookka Report** › Logistics **and** Production | **"On-time delivery %"** — printed twice, on two desks | scores our own internal estimate against itself: `dispatchedAt` vs `delivery_orders.hookka_expected_dd`. `kpi-metrics.ts:18-19` states the rule outright — *"`hookka_expected_dd` is OUR internal estimate and must never be scored against"*. The denominator also requires `dispatched_at IS NOT NULL`, so **an order never dispatched — the worst case — is excluded** and lateness can only be under-reported. And `operations-report.ts:1202` does `production.onTimePct = delivery.onTimePct` — the two desks print **one number twice**, appearing to corroborate each other. | `operations-report.ts:873-876, 1202` |
+| ✅ FIXED 2026-08-14 (-131) — **Hookka Report** › Logistics **and** Production | **"On-time delivery %"** — printed twice, on two desks | scores our own internal estimate against itself: `dispatchedAt` vs `delivery_orders.hookka_expected_dd`. `kpi-metrics.ts:18-19` states the rule outright — *"`hookka_expected_dd` is OUR internal estimate and must never be scored against"*. The denominator also requires `dispatched_at IS NOT NULL`, so **an order never dispatched — the worst case — is excluded** and lateness can only be under-reported. And `operations-report.ts:1202` does `production.onTimePct = delivery.onTimePct` — the two desks print **one number twice**, appearing to corroborate each other. | `operations-report.ts:873-876, 1202` |
 | `/planning` › Capacity Overview | **"Daily Capacity — 7-day rolling *actual* avg"** | `slimJobCardsToPlanningLite` (`production-orders/_helpers.ts:5311`) does not emit `actualMinutes` at all, so the `useActual` branch is **dead code** and the figure is pure `estMinutes`. The caption is false by construction. `BUG-CLASSES.md:912` already records the owed fix ("removing the `useActual` branch") — still open. | `planning/index.tsx:948, 988` |
 | `/planning` › Capacity Loading | **"Past avg (N%)"** | `producedMinutes / dailyCap`, where `dailyCap` **is the rolling average of those same past days** (`:1179`). Numerator and denominator come from one dataset: a factory that halved output still reads ~100% after 7 days, because the denominator falls with it. It cannot detect a sustained decline. | `planning/index.tsx:1179, 1219` |
 | `/planning/mrp` › Fabric | **"1 Week / 2 Week / 1 Month Usage"** | the source fields are commented **"forecast"**. Forecast demand printed under "Usage"; the genuine consumption figure (`lastMonthUsage`, from `cost_ledger` RM_ISSUE) exists and is not rendered. | `fabric-usage.ts:388-391` |
@@ -219,7 +223,7 @@ from a query that structurally cannot observe the problem.
 
 | Screen | Figure | What it cannot see |
 |---|---|---|
-| Command Center + `/daily-report` | the **Daily Report headline count** and every chip | **All thirteen checks swallow their own errors.** `checkOverdueOrders`, `checkLowEfficiencyWorkers`, `checkProcessSkips`, `checkMissingWipTimes`, … each `catch { console.error(...); return []; }` (`compliance-report.ts:387, 428, 489, 592, 770, 863, 877, 895, 1058, 1135, 1193, 1244, 1296`). A check that throws contributes **0** to the total and to its chip, indistinguishable from a check that ran clean. The payload has no way to say "3 of 13 could not run". **Both** the tile and the printed Hookka Report inherit this. |
+| ✅ FIXED 2026-08-14 (-130) — Command Center + `/daily-report` | the **Daily Report headline count** and every chip | **All thirteen checks swallow their own errors.** `checkOverdueOrders`, `checkLowEfficiencyWorkers`, `checkProcessSkips`, `checkMissingWipTimes`, … each `catch { console.error(...); return []; }` (`compliance-report.ts:387, 428, 489, 592, 770, 863, 877, 895, 1058, 1135, 1193, 1244, 1296`). A check that throws contributes **0** to the total and to its chip, indistinguishable from a check that ran clean. The payload has no way to say "3 of 13 could not run". **Both** the tile and the printed Hookka Report inherit this. |
 | Morning brief §8 | *"Forward OT Outlook — all clear"* | `agent-learning.ts:809` `if (capacity <= 0) continue;` — a department with **no completions in the window is skipped entirely**, so the department that produced nothing can never raise a signal. Load counts only `status = 'WAITING'` cards (`:764`): IN_PROGRESS, PAUSED, BLOCKED and already-overdue work contribute zero. |
 | Morning brief §1 | *"Nothing due today."* | `WHERE jc.dueDate = ?` — exact equality (`schedule-overdue-report.ts:117`). Cards due last week are invisible; the line can print over a backlogged floor. |
 | Command Center | **Delivered**, **Outstanding**, **Pending Delivery** | `priceForItem` ends `return idx.byAnyCode.get(code) ?? 0` (`do-value.ts:77`) — a delivered line whose price cannot be resolved contributes **RM 0** silently. And `outstandingItemsSen = Math.max(0, csRevenue − deliveredItems)` (`sales-orders.ts:1031`) subtracts an **item-level** valuation from **SO-header** totals; the `max(0, …)` clamp floors any basis mismatch to a confident `RM 0.00`. How many lines fail to resolve: **unmeasured**. |
@@ -326,17 +330,23 @@ provable defect that can be fixed unilaterally.
    `inflow`/`outflow` and the line to `net` (`finance-dashboard.tsx:1143-1145`).
    A user switching tabs sees an unchanged chart and concludes the sections are
    equal. Fix the chart, or drop the tabs.
-7. **Should the compliance report be able to say "I could not check"?** Today a
-   thrown check is a silent `0`. Surfacing it changes what the Daily Report
-   headline number means.
-8. **The Sales-by-Customer "Total" / concentration denominator** — top 12, or all
-   customers? `aovCompany.totalSen` (the real total) is already in the payload.
+7. ~~**Should the compliance report be able to say "I could not check"?**~~ **DECIDED
+   YES, 2026-08-14 — shipped as BUG-2026-08-13-141.** Checks rethrow; `runCheck` records
+   the failure; per-check counts are `number | null` (null = could not run, never 0);
+   `counts.checksRun` / `checksTotal` / `data.unavailable` publish the coverage. The
+   headline number now means "exceptions found by the checks that ran", and both
+   renderers say so when that is fewer than all of them.
+8. ~~**The Sales-by-Customer "Total" / concentration denominator** — top 12, or all
+   customers?~~ **DECIDED: all customers, 2026-08-14 — shipped as BUG-2026-08-13-142.**
+   Denominator is the period's TOTAL revenue across every customer, computed server-side;
+   the card publishes the largest single customer's share and the top ten's, with the
+   customer count beside them.
 9. **ROE / ROA** — annualise and fix the equity basis, or remove until the
    year-end close is part of the flow.
-10. **`GET /api/reports/brief.json` has no page consumer** (grep across `src/`).
-    The HTML brief is opened directly in a tab per
-    `docs/context-packs/HOOKKA-GOTCHAS.md`; the JSON twin appears to be
-    maintained for a dashboard card removed on 2026-08-05.
+10. ~~**`GET /api/reports/brief.json` has no page consumer**~~ **DECIDED: delete,
+    2026-08-14 — shipped as BUG-2026-08-13-143.** The route, `buildBriefJsonCached` and
+    `warmBriefReport` are gone. The HTML brief and `/api/delivery-agent/brief.json` are
+    untouched and guarded by `tests/reports-brief-json-removed.test.mjs`.
 11. **`/accounting/cash-flow`'s bank module** — is it meant to be live? Today its
     balances are a demo seed plus this page's own form, and its Bank
     Reconciliation reads a demo account code out of the manual-JV tables. Either
@@ -349,10 +359,14 @@ provable defect that can be fixed unilaterally.
 13. **Should a "settled" KPI month actually settle?** `kpi_periods` exists, has
     a unique index, and has no writer. Either write it at month end or delete
     the lock path and the "settled" wording.
-14. **Hookka Report "On-time delivery %"** — there is no customer-committed date
-    being scored today. Pick the field that should be scored (the customer's
-    date, not `hookka_expected_dd`) and decide whether never-dispatched orders
-    count as late. Until then the figure flatters, and it is printed twice.
+14. ~~**Hookka Report "On-time delivery %"**~~ **DECIDED + shipped 2026-08-14 as
+    BUG-2026-08-13-140.** *Correction to this row: a customer-committed date DID exist —* 
+    `sales_orders.customer_delivery_date`*, 99.8% populated, and `kpi-metrics.ts` was
+    already scoring against it. Nothing on the Hookka Report read it.* On-time is now
+    `delivery_orders.delivered_at ≤ customer_delivery_date`, per sales order, last
+    delivery counts. Never-delivered orders are EXCLUDED (a delivery that has not
+    finished is not late) and counted, as are orders with no customer date; the coverage
+    is printed beside the figure.
 15. **AR aging vs AP aging vs the controls** — three "what we are owed / what we
     owe" numbers with different definitions on one page. Which one is *the*
     number?

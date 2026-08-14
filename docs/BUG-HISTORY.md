@@ -34,6 +34,165 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-140 — "On-time delivery %" measured our own estimate, at the wrong end of the journey, over a population that excluded the worst cases `delivery-orders` `data-integrity` 🟢
+
+**Symptom.** The Hookka Report printed "On-time delivery" on two desks and on its lead
+headline. The number was real arithmetic and it was not about delivery.
+
+**Root cause — three faults in one expression** (`operations-report.ts:873-876`, before this
+change):
+
+```js
+if (r.dispatchedAt && r.expectedDd) {
+  onTimeN += 1;
+  if (r.dispatchedAt <= r.expectedDd) onTime += 1;
+}
+```
+
+1. **`hookka_expected_dd` is OURS.** It is back-derived at SO-create time from the customer's
+   date minus a per-category buffer (`sales-orders.ts:2170-2191`). Scoring against it is
+   marking our own homework, and `kpi-metrics.ts:18-19` had already written the prohibition
+   down: *"`hookka_expected_dd` is OUR internal estimate and must never be scored against"*.
+2. **Dispatch is not delivery.** Leaving the yard on time and arriving a week late scored 100%.
+3. **The denominator excluded the worst case.** The whole query required
+   `dord.dispatched_at IS NOT NULL`, so an order never dispatched at all could not appear.
+   Lateness was structurally capable only of being under-reported.
+
+And `operations-report.ts:1202` does `production.onTimePct = delivery.onTimePct`, so the two
+desks printed ONE number twice, reading as though they corroborated each other.
+
+**Owner's rule, 2026-08-14, verbatim:**
+「基本上就是看我们送货的时间减掉我们顾客的 delivery date，就会知道有没有 on-time delivery 了」
+
+**Fix.** New `src/api/lib/on-time-delivery.ts`: on-time = `delivery_orders.delivered_at` ≤
+`sales_orders.customer_delivery_date`, per SALES ORDER, judged on its LAST delivery (a customer
+promised one date and sent three lorries was let down once, not three times — the same
+reasoning `kpi-metrics.ts` records). It reuses the only join path that resolves —
+`delivery_orders → delivery_order_items.production_order_id → production_orders.sales_order_id`
+— because `delivery_orders.sales_order_id` is set on only ~166 of 361 DOs and
+`delivery_order_items.sales_order_no` is a stale denormalised string.
+
+**The exclusions, all published** (`delivery.onTime` in the payload, printed on the Logistics
+desk and abbreviated beside the headline):
+
+| case | verdict | why |
+|---|---|---|
+| not fully delivered (incl. every part-delivery) | `excludedNotDelivered` | the delivery has not finished — late is not yet a fact, and on-time would be a lie |
+| no `customer_delivery_date` | `excludedNoCustomerDate` | there is no promise to score against |
+| cancelled DO | ignored on both sides | neither a late delivery nor an outstanding one |
+
+`coveragePct` = judged ÷ population. `onTimePct` is **null**, never 0 or 100, when nothing is
+judgeable. This is BUG-2026-08-13-096's lesson: a percentage whose population is incomplete
+must publish its coverage.
+
+**Verified.** `tests/on-time-delivery.test.mjs` — 8 behavioural (boundary day, ISO-timestamp
+truncation, each exclusion, part-delivery, coverage, empty period) + 3 structural (the
+`hookka_expected_dd` read is gone, the join path is the resolving one, the printed report
+carries the coverage). All 10 mutations proved RED with the bug reintroduced and the file's
+bytes asserted changed on disk first.
+
+**Not changed, deliberately.** `agent-learning.ts:458` (job-card `completedDate` vs the
+production due date) is PRODUCTION timeliness and is correctly labelled — it feeds the morning
+brief's *"6 · Plan vs Actual … % adherence"* section, not anything called delivery. An audit
+brief claimed it was the source of the Hookka Report's "On-time delivery %"; it is not.
+
+---
+
+## BUG-2026-08-13-141 — the Daily Report could not say "I could not check", so a broken sweep printed a green zero `reports` `data-integrity` 🟢
+
+**Symptom.** *"A Quiet Day on the Floor"* over a report that had partly not happened, and the
+Command Center's *"All clear — nothing flagged today"* beside a large green `0`.
+
+**Root cause.** All fifteen checks ended the same way:
+
+```js
+} catch (err) {
+  console.error("[compliance] soNoInvoice failed:", err);
+  return [];              // ← indistinguishable from "looked, found nothing"
+}
+```
+
+A check that threw contributed 0 to its chip and 0 to the headline. The payload had no way to
+express "3 of 15 could not run", so neither renderer could have told the truth even if it had
+wanted to. `pricing-integrity.ts` and `cogs-integrity.ts` — the two MONEY detectors inside the
+same sweep — had the identical shape, and `pricing-integrity.ts`'s own header records the
+concrete case: a boolean-vs-int type error that threw on every row, was swallowed, and reported
+a clean book.
+
+**Fix.** Each check rethrows. `runCheck` in `collectComplianceData` catches once, records
+`{ check, message }` in `ComplianceData.unavailable`, and sets that check's count to **`null`,
+never `0`**. `counts.checksRun` / `counts.checksTotal` publish the coverage. The property the
+old catches existed for is kept — one bad query still cannot 500 the report — but the decision
+about what an unreadable check MEANS is made in one place instead of fifteen.
+
+Renderers: `/daily-report` gains a coverage banner listing the failed checks, an *"An Unknown
+Day on the Floor"* headline for a zero over a partial sweep, `Couldn't check` section badges,
+and `—` tiles; the Command Center tile prints `N+` with *"N of 15 checks couldn't run — this
+count is a floor, not a total"* and refuses the words "All clear". `isUnknownOutcome` continues
+to own the OTHER failure mode on that tile (the fetch itself dying, BUG-2026-08-13-107); the
+two are separate and both are now covered.
+
+**Verified.** `tests/compliance-unknown-outcome.test.mjs` — 4 behavioural against a stub DB that
+breaks exactly one check (including the key one: a clean day and a broken day produce the SAME
+`total`, and only the coverage separates them) + 5 structural. 11 mutations proved RED.
+
+---
+
+## BUG-2026-08-13-142 — customer concentration divided by its own numerator, so it could never show risk `dashboard` `data-integrity` 🟢
+
+**Symptom.** *"Top 3 = 92% · Top 5 = 98% of total customer revenue"* — a figure that sat near
+100% whatever the book actually looked like, and could not rise into a warning.
+
+**Root cause.** `dashboard-overview.ts` sends `aovByCustomer.slice(0, 12)`. The card summed
+exactly those twelve rows into `totalCustRev` and used it as the denominator. Numerator and
+denominator came from the same leaderboard, so the share was mostly an artefact of the slice.
+The card's own "All customers" row, one line above, used the real all-customer total
+(`aovCompany.totalSen`) — two different totals on one card.
+
+**Owner's decision, 2026-08-14:** denominator = TOTAL revenue for the period, all customers;
+surface the largest single customer's share and the top ten's.
+
+**Fix.** `customerConcentration` is computed server-side over `aovMap` (every customer with
+activity), per category, carrying `totalSen` / `customerCount` / `largestPct` / `largestName` /
+`top10Pct`. `largestPct` and `top10Pct` are **null, not 0**, for a period with no revenue — 0%
+concentration reads as perfectly diversified, which is a claim. The page now has ONE
+denominator, `concTotalSen`; the old `totalCustRev` is renamed `shownCustRev` and survives only
+as the pre-payload fallback. The donut headline is the largest customer's share of total, its
+"Others" wedge spans every customer outside the top six (so the ring composes the period's
+whole revenue, not a leaderboard), and the caption states the population the share was taken
+over. KV cache key bumped `v22 → v23` so a stale body cannot serve the new field as a blank.
+
+**Verified.** 3 tests appended to `tests/dashboard-truthfulness.test.mjs`, including a guard
+that `shownCustRev` appears exactly twice (its declaration and the fallback) — a third use is a
+share being taken over the visible rows again. 6 mutations proved RED.
+
+---
+
+## BUG-2026-08-13-143 — a dead authenticated endpoint, kept warm by a cron, for a card deleted three months earlier `reports` `infrastructure` 🟢
+
+**Symptom.** None visible. `GET /api/reports/brief.json` had no caller anywhere in `src/`: it
+was built for a Command Center card removed on 2026-08-05, and `warmBriefReport` was keeping its
+snapshot key hot on every warm-lists cron run for a reader that no longer existed.
+
+**Fix.** Removed the route, `buildBriefJsonCached`, `warmBriefReport`, and its call in
+`worker.ts`. `docs/API.md` regenerated (936 → 935 handlers).
+
+**Explicitly NOT touched, and the test says why:**
+* `GET /api/reports/brief` (HTML) is LIVE — emailed 07:00 MYT via
+  `.github/workflows/daily-reports.yml` → `brief-trigger`, and opened in a tab to read/print.
+  It caches under its own `<date>|html` key, which the deleted warmer never served. An earlier
+  audit wrote this endpoint off as "a cron nobody waits on" on the strength of a code comment;
+  it was in fact the worst user-facing wait in the app.
+* `GET /api/delivery-agent/brief.json` is a DIFFERENT live endpoint on a different router,
+  fetched by `src/pages/delivery/agent-tab.tsx`. A careless grep for "brief.json" hits it.
+
+**Verified.** `tests/reports-brief-json-removed.test.mjs` — 4 tests, one per direction of the
+confusion, plus a sweep of `src/**` for any caller of the removed path. 4 mutations proved RED,
+including "the LIVE html brief is deleted by mistake" and "the delivery-agent brief.json is
+deleted by mistake".
+
+---
+
 ## BUG-2026-08-13-120 — the factory cannot measure how long any job takes, because the system throws the time away at the moment of capture `production-orders` `data-integrity` 🟢
 
 **Symptom.** There is no honest answer anywhere in the app to "how long did this card take?",

@@ -509,16 +509,17 @@ app.post("/api/internal/warm-lists", async (c) => {
   }
   // 3. Daily Report (compliance) — the ~6s cold-recompute one. Warm today's key
   // so the first open of the day never blocks.
+  //
+  // The morning brief is NOT warmed here any more (BUG-2026-08-13-143): the only
+  // thing that read the warmed `<date>` key was `GET /api/reports/brief.json`,
+  // which had no caller and is gone. The HTML brief caches under `<date>|html`
+  // and was never served by this warmer.
   try {
-    const { warmComplianceReport, warmBriefReport } = await import(
-      "./routes/reports"
-    );
+    const { warmComplianceReport } = await import("./routes/reports");
     out.compliance = await warmComplianceReport(c, DEFAULT_ORG_ID);
-    out.brief = await warmBriefReport(c, DEFAULT_ORG_ID);
   } catch (e) {
     console.error("[warm-lists] reports failed:", e);
     out.compliance = { ok: false };
-    out.brief = { ok: false };
   }
   return c.json({ ok: true, elapsedMs: Date.now() - t0, ...out });
 });

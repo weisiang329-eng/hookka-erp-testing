@@ -16,9 +16,15 @@
 // DATA — a config edit, a partial migration or a new client can all break the
 // invariant without a single line of code changing.
 //
-// Read-only by construction: every check is a SELECT, wrapped in its own
-// try/catch returning [] so one bad query cannot take down the daily report
-// (the house style in compliance-report.ts).
+// Read-only by construction: every check is a SELECT.
+//
+// A CHECK THAT COULD NOT RUN NOW SAYS SO (2026-08-14, BUG-2026-08-13-141).
+// These used to catch and return [], which the daily report rendered as "no
+// pricing issues" — the strongest possible all-clear, produced by a query that
+// never completed. Trap 2 below is the proof this was not theoretical: a
+// boolean-vs-int type error threw on EVERY row, the catch ate it, and the check
+// reported a clean book. Each check now rethrows; `collectComplianceData` marks
+// it UNAVAILABLE and the report prints "could not check" instead of a zero.
 //
 // TWO Postgres-dialect traps this file was born with and now guards against
 // (both found only by running it on prod — the unit tests use a stub and can
@@ -66,8 +72,9 @@ export interface PricingIssueRow {
 
 const KV_KEY = "variants-config";
 
-/** Owner-editable height price lists. Null on any failure — a check that
- *  cannot read the config reports nothing rather than guessing. */
+/** Owner-editable height price lists. Throws when the config cannot be read —
+ *  see the CANNOT-CHECK note in the header. It used to return null, and the
+ *  caller turned that into `[]`, i.e. "no under-priced heights found". */
 async function loadHeightPrices(
   db: DbLike,
 ): Promise<{ divan: Map<number, number>; leg: Map<number, number> } | null> {
@@ -93,8 +100,9 @@ async function loadHeightPrices(
       return out;
     };
     return { divan: toMap("divanHeights"), leg: toMap("legHeights") };
-  } catch {
-    return null;
+  } catch (err) {
+    console.error("[pricing-integrity] loadHeightPrices failed:", err);
+    throw err;
   }
 }
 
@@ -133,7 +141,7 @@ async function checkUnitNotSumOfParts(db: DbLike): Promise<PricingIssueRow[]> {
     });
   } catch (err) {
     console.error("[pricing-integrity] unitNotSumOfParts failed:", err);
-    return [];
+    throw err;
   }
 }
 
@@ -141,6 +149,9 @@ async function checkUnitNotSumOfParts(db: DbLike): Promise<PricingIssueRow[]> {
  *  RM 12,455 — scanned POs post the height with no price. */
 async function checkHeightChosenButFree(db: DbLike): Promise<PricingIssueRow[]> {
   const prices = await loadHeightPrices(db);
+  // A missing/empty config is a real "nothing is priced", not a failure —
+  // loadHeightPrices THROWS if it could not read. `null` only survives when the
+  // row itself is absent.
   if (!prices) return [];
   try {
     const res = await db
@@ -178,7 +189,7 @@ async function checkHeightChosenButFree(db: DbLike): Promise<PricingIssueRow[]> 
     return out;
   } catch (err) {
     console.error("[pricing-integrity] heightChosenButFree failed:", err);
-    return [];
+    throw err;
   }
 }
 
@@ -212,7 +223,7 @@ async function checkInvoiceBelowSo(db: DbLike): Promise<PricingIssueRow[]> {
     }));
   } catch (err) {
     console.error("[pricing-integrity] invoiceBelowSo failed:", err);
-    return [];
+    throw err;
   }
 }
 

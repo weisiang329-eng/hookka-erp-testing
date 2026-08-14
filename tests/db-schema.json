@@ -2131,6 +2131,7 @@
     "payment_method",
     "payroll_run_id",
     "pcb_sen",
+    "pcb_status",
     "period",
     "socso_employee_sen",
     "socso_employer_sen",
@@ -3623,6 +3624,9 @@
     "resigned_at",
     "socso_enabled",
     "status",
+    "tax_category",
+    "tax_child_relief_sen",
+    "tax_residency",
     "working_days_per_month",
     "working_hours_per_day"
   ],

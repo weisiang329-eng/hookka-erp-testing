@@ -1787,6 +1787,12 @@ export type PayslipDetail = {
   eisEmployee: number;
   eisEmployer: number;
   pcb: number;
+  /** Provenance of `pcb` (migration 0229): 'COMPUTED' | 'ZERO_PROVEN' |
+   *  'DISABLED' | 'UNKNOWN'. Absent/NULL on a payslip generated before PCB was
+   *  calculated at all. Read it through `normalizeStoredPcbStatus` +
+   *  `pcbHasFigure` (src/lib/pcb.ts) — a `pcb` of 0 is only "no tax was due"
+   *  when the status says something was worked out. */
+  pcbStatus?: string | null;
   totalDeductions: number;
   netPay: number;
   bankAccount: string;

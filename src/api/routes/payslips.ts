@@ -27,7 +27,10 @@ import {
   monthBounds,
 } from "../lib/efficiency-allowance";
 import {
-  DEFAULT_PAY_RULES,
+  // DEFAULT_PAY_RULES is deliberately NOT imported any more: it used to be
+  // calcStatutory's default `rates` argument, and a defaulted rate set is how a
+  // caller silently prices a month against the wrong effective-dated rules.
+  // Both callers resolve their own rates as of the period's last day.
   resolvePayRulesAsOf,
   payrollDayRateSen,
   payrollHourDivisor,
@@ -36,6 +39,18 @@ import {
 import { loadPayRuleVersions } from "../lib/pay-rules-store";
 import { normalizePaymentMethod } from "../../lib/payment-method";
 import { ensurePaymentColumns } from "../lib/payment-columns";
+// PCB (Malaysian monthly tax deduction). The engine refuses to produce a
+// number when the employee's tax declaration is incomplete — see the header of
+// ../../lib/pcb.ts for why that refusal is the feature, not a gap.
+import {
+  resolvePcb,
+  normalizeStoredPcbStatus,
+  pcbHasFigure,
+  type PcbStatus,
+  type PcbTaxProfile,
+  type PcbMissingInput,
+} from "../../lib/pcb";
+import { ensurePayrollTaxColumns } from "../lib/payroll-tax-columns";
 // Salary advances — cash already handed to the worker this month. Subtracted
 // AFTER the statutory block, never folded into it. See the reasoning header in
 // ../lib/employee-advances.ts.
@@ -75,6 +90,15 @@ type WorkerRow = {
   socsoEnabled: boolean | null;
   eisEnabled: boolean | null;
   pcbEnabled: boolean | null;
+  // PCB tax declaration (migration 0229). NULL on every one of them means the
+  // employee has not declared it — never "the default". Read through
+  // `taxProfileFromWorkerRow`, which refuses to coerce a blank into a value.
+  taxResidency?: string | null;
+  tax_residency?: string | null;
+  taxCategory?: string | null;
+  tax_category?: string | null;
+  taxChildReliefSen?: number | null;
+  tax_child_relief_sen?: number | null;
   // YYYY-MM-DD last day of employment, or null for current staff (migration
   // 0143). Used only to scope which month a RESIGNED worker is still paid for.
   resignedAt: string | null;
@@ -120,6 +144,11 @@ type PayslipRow = {
   eisEmployeeSen: number;
   eisEmployerSen: number;
   pcbSen: number;
+  // How the pcbSen beside it was arrived at (migration 0229). Dual-keyed;
+  // NULL/absent on every row generated before PCB was computed at all, which
+  // is why the screens must not read a 0 there as "nothing was due".
+  pcbStatus?: string | null;
+  pcb_status?: string | null;
   totalDeductionsSen: number;
   netPaySen: number;
   // Salary advance recovered in this payslip (snake_case column
@@ -169,6 +198,10 @@ function rowToPayslip(r: PayslipRow) {
     eisEmployee: r.eisEmployeeSen,
     eisEmployer: r.eisEmployerSen,
     pcb: r.pcbSen,
+    // A stored row from before PCB existed carries no status. "NOT_RECORDED"
+    // is the honest reading of that: the payslip was issued without a PCB
+    // computation, so its 0 is not a claim that nothing was due.
+    pcbStatus: normalizeStoredPcbStatus(r.pcbStatus ?? r.pcb_status),
     totalDeductions: r.totalDeductionsSen,
     netPay: r.netPaySen,
     // Dual-keyed: camelCase from the PG driver, snake_case from any path that
@@ -209,27 +242,201 @@ type StatutoryFlags = {
   pcbEnabled?: boolean | null;
 };
 
+/**
+ * Everything PCB needs that a monthly SALARY does not tell you.
+ *
+ * Required, not optional, and deliberately so: an optional parameter is how
+ * the previous version of this function ended up returning `pcbOn ? 0 : 0` on
+ * every payslip for months. A caller that cannot supply this does not get to
+ * skip it silently — `tsc` refuses.
+ */
+export type PcbContext = {
+  /** Calendar year of the period being paid (the year of assessment). */
+  year: number;
+  /** 1–12. */
+  monthIndex: number;
+  /**
+   * This month's NORMAL remuneration for PCB, in sen.
+   *
+   * Basic earned (after absence / short-hour docks) + overtime. It does NOT
+   * include the efficiency allowance, because the owner specified that bonus
+   * as 非法定 — "纯额外奖金", outside the statutory block — and every other
+   * statutory line here already honours that (see lib/efficiency-allowance.ts).
+   * ⚠️ LHDN's own definition of normal remuneration would include a regular
+   * monthly allowance, so this is an OWNER / tax-agent decision, not a settled
+   * fact: including it would raise the withholding for anyone earning the
+   * bonus. Flagged in the PR rather than decided here.
+   */
+  remunerationSen: number;
+  profile: PcbTaxProfile;
+  /** Earlier months of the SAME year, from the payslips already issued. */
+  ytdRemunerationSen: number;
+  ytdEpfSen: number;
+  ytdPcbSen: number;
+};
+
+export type StatutoryResult = {
+  epfEmployee: number;
+  epfEmployer: number;
+  socsoEmployee: number;
+  socsoEmployer: number;
+  eisEmployee: number;
+  eisEmployer: number;
+  /** Integer sen actually withheld. Zero on every status except COMPUTED —
+   *  and a zero here is only a WITHHOLDING when `pcbStatus` says so. */
+  pcb: number;
+  /** Where the figure above came from. The screens key off this to print "—"
+   *  instead of RM 0.00 when nothing was computed. */
+  pcbStatus: PcbStatus;
+  pcbMissing: PcbMissingInput[];
+  pcbNote: string;
+};
+
 export function calcStatutory(
   basicSalarySen: number,
-  flags: StatutoryFlags = {},
+  flags: StatutoryFlags,
   // Effective-dated statutory rates (owner 2026-06-11) — resolved as of the
   // period's last day; defaults reproduce the previously-hardcoded figures.
-  rates: PayRulesConfig = DEFAULT_PAY_RULES,
-) {
+  rates: PayRulesConfig,
+  pcbContext: PcbContext,
+): StatutoryResult {
   const epfOn = flags.epfEnabled !== false;
   const socsoOn = flags.socsoEnabled !== false;
   const eisOn = flags.eisEnabled !== false;
-  const pcbOn = flags.pcbEnabled !== false;
+  const epfEmployee = epfOn
+    ? Math.round((basicSalarySen * rates.epfEmployeePct) / 100)
+    : 0;
+  // PCB used to be `pcbOn ? 0 : 0` — the toggle was read and both branches
+  // returned nothing, so net pay on every payslip was overstated by the tax
+  // that should have been withheld (BUG-2026-08-13-121, C15 row 36).
+  const pcb = resolvePcb({
+    pcbEnabled: flags.pcbEnabled,
+    year: pcbContext.year,
+    monthIndex: pcbContext.monthIndex,
+    profile: pcbContext.profile,
+    currentRemunerationSen: pcbContext.remunerationSen,
+    // The EPF actually deducted this month is the K of LHDN's formula — a
+    // worker with EPF switched off gets no EPF relief either, which is the
+    // consistent reading and the conservative one.
+    currentEpfSen: epfEmployee,
+    ytdRemunerationSen: pcbContext.ytdRemunerationSen,
+    ytdEpfSen: pcbContext.ytdEpfSen,
+    ytdPcbSen: pcbContext.ytdPcbSen,
+  });
   return {
-    epfEmployee: epfOn ? Math.round((basicSalarySen * rates.epfEmployeePct) / 100) : 0,
+    epfEmployee,
     epfEmployer: epfOn ? Math.round((basicSalarySen * rates.epfEmployerPct) / 100) : 0,
     socsoEmployee: socsoOn ? rates.socsoEmployeeSen : 0,
     socsoEmployer: socsoOn ? rates.socsoEmployerSen : 0,
     eisEmployee: eisOn ? rates.eisEmployeeSen : 0,
     eisEmployer: eisOn ? rates.eisEmployerSen : 0,
-    pcb: pcbOn ? 0 : 0, // PCB still 0 baseline; flag is forward-compat for when PCB calc lands.
+    pcb: pcb.pcbSen,
+    pcbStatus: pcb.status,
+    pcbMissing: pcb.missing,
+    pcbNote: pcb.note,
   };
 }
+
+/** The worker columns PCB reads, dual-keyed (the PG driver camelCases what it
+ *  returns, but a row that came through another path can still carry the
+ *  snake_case name). A value that is not one of the declared literals — a
+ *  typo, an empty string, a legacy blank — reads as NOT DECLARED, never as a
+ *  default. */
+export function taxProfileFromWorkerRow(row: Record<string, unknown>): PcbTaxProfile {
+  const pick = (camel: string, snake: string): unknown => row[camel] ?? row[snake];
+  const residency = String(pick("taxResidency", "tax_residency") ?? "").toUpperCase();
+  const category = String(pick("taxCategory", "tax_category") ?? "").toUpperCase();
+  const reliefRaw = pick("taxChildReliefSen", "tax_child_relief_sen");
+  const relief = Number(reliefRaw);
+  return {
+    residency:
+      residency === "RESIDENT" || residency === "NON_RESIDENT" ? residency : null,
+    category:
+      category === "SINGLE" ||
+      category === "MARRIED_SPOUSE_NOT_WORKING" ||
+      category === "MARRIED_SPOUSE_WORKING"
+        ? category
+        : null,
+    childReliefSen:
+      reliefRaw === null || reliefRaw === undefined || !Number.isFinite(relief) || relief < 0
+        ? null
+        : Math.round(relief),
+  };
+}
+
+/** Year-to-date PCB inputs for every worker, from the payslips ALREADY issued
+ *  for earlier months of the same year. LHDN's method is cumulative: without
+ *  these the projection restarts every month.
+ *
+ *  The remuneration basis excludes the efficiency allowance, matching
+ *  `PcbContext.remunerationSen` — mixing the two bases across months would
+ *  make the projection disagree with the month it is projecting from. */
+type YtdPcbInputs = { remunerationSen: number; epfSen: number; pcbSen: number };
+
+async function loadYtdPcbInputs(
+  db: D1Database,
+  period: string,
+): Promise<Map<string, YtdPcbInputs>> {
+  const out = new Map<string, YtdPcbInputs>();
+  const year = period.slice(0, 4);
+  if (!/^\d{4}$/.test(year)) return out;
+  try {
+    const res = await db
+      .prepare(
+        `SELECT employeeId,
+                COALESCE(SUM(grossPaySen), 0)    AS gross_sen,
+                COALESCE(SUM(allowancesSen), 0)  AS allowance_sen,
+                COALESCE(SUM(epfEmployeeSen), 0) AS epf_sen,
+                COALESCE(SUM(pcbSen), 0)         AS pcb_sen
+           FROM payslips
+          WHERE period >= ? AND period < ? AND status != 'CANCELLED'
+          GROUP BY employeeId`,
+      )
+      .bind(`${year}-01`, period)
+      // Aliases are snake_case, not camelCase: Postgres folds an unquoted
+      // mixed-case alias to lower case and `postgres.toCamel` cannot put it
+      // back, so `AS grossSen` reads back UNDEFINED — the year-to-date would
+      // silently be zero and every projection would restart at January,
+      // under-withholding without a single error. tests/sql-identifier-safety.
+      .all<{
+        employeeId: string;
+        gross_sen: number;
+        allowance_sen: number;
+        epf_sen: number;
+        pcb_sen: number;
+        grossSen?: number;
+        allowanceSen?: number;
+        epfSen?: number;
+        pcbSen?: number;
+      }>();
+    for (const r of res.results ?? []) {
+      // Dual-keyed: the driver camelCases a snake_case alias on the way out,
+      // but a path that hands the raw row through keeps the underscore.
+      const n = (camel: number | undefined, snake: number | undefined): number =>
+        Number(camel ?? snake ?? 0) || 0;
+      out.set(String(r.employeeId), {
+        remunerationSen: Math.max(
+          0,
+          n(r.grossSen, r.gross_sen) - n(r.allowanceSen, r.allowance_sen),
+        ),
+        epfSen: n(r.epfSen, r.epf_sen),
+        pcbSen: n(r.pcbSen, r.pcb_sen),
+      });
+    }
+  } catch (e) {
+    // A read failure here must not be laundered into "no prior months" — that
+    // would UNDER-withhold silently (the projection would restart). Rethrow so
+    // generation fails loudly instead of producing a wrong tax figure.
+    throw new Error(
+      `Could not read year-to-date payroll for ${period}, so PCB cannot be projected: ${
+        e instanceof Error ? e.message : String(e)
+      }`,
+    );
+  }
+  return out;
+}
+
+const NO_YTD: YtdPcbInputs = { remunerationSen: 0, epfSen: 0, pcbSen: 0 };
 
 // PS-YYMM-NNN sequential, bucketed by payslip period. Bug fix 2026-04-28:
 // previous PS-NNNNN format was a global counter without month context.
@@ -508,10 +715,13 @@ app.get("/projected", async (c) => {
     return c.json({ success: false, error: "Period (YYYY-MM) is required" }, 400);
   }
   await ensureAdvanceTables(c.var.DB);
+  // The worker SELECT below names the three tax-profile columns; without this
+  // the whole estimate 400s on a cold database (migrations are inert here).
+  await ensurePayrollTaxColumns(c.var.DB);
 
   // Same worker scope as POST: ACTIVE, plus RESIGNED in their final month.
   const wres = await c.var.DB.prepare(
-    "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate, efficiencyAllowanceSen, efficiencyThresholdPct, paymentMethod, bankName, bankAccount, payMode, dailyRateSen FROM workers WHERE (status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)) AND empNo NOT LIKE 'TEST%'",
+    "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, taxResidency, taxCategory, taxChildReliefSen, resignedAt, joinDate, efficiencyAllowanceSen, efficiencyThresholdPct, paymentMethod, bankName, bankAccount, payMode, dailyRateSen FROM workers WHERE (status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)) AND empNo NOT LIKE 'TEST%'",
   )
     .bind(`${period}-%`)
     .all<WorkerRow>();
@@ -609,6 +819,11 @@ app.get("/projected", async (c) => {
     effBounds.end,
   );
 
+  // LHDN's monthly deduction is CUMULATIVE across the year — it projects the
+  // annual tax and spreads what is still owed over the months that remain, so
+  // the months already paid are an input, not context. One query for everyone.
+  const ytdPcbInputs = await loadYtdPcbInputs(c.var.DB, period);
+
   // The estimate rows carry the per-day absence/OT detail (additive display
   // fields) alongside the standard payslip shape.
   const data: PayslipWithDayDetail[] = [];
@@ -684,12 +899,28 @@ app.get("/projected", async (c) => {
         absentDays: labor.payroll.absentDays,
       },
     );
-    const stat = calcStatutory(effectiveSalarySen, {
-      epfEnabled: worker.epfEnabled,
-      socsoEnabled: worker.socsoEnabled,
-      eisEnabled: worker.eisEnabled,
-      pcbEnabled: worker.pcbEnabled,
-    }, statutoryRules);
+    const ytd = ytdPcbInputs.get(worker.id) ?? NO_YTD;
+    const stat = calcStatutory(
+      effectiveSalarySen,
+      {
+        epfEnabled: worker.epfEnabled,
+        socsoEnabled: worker.socsoEnabled,
+        eisEnabled: worker.eisEnabled,
+        pcbEnabled: worker.pcbEnabled,
+      },
+      statutoryRules,
+      {
+        year: pYear,
+        monthIndex: pMonth,
+        // Basic earned + OT. The efficiency allowance is added to gross AFTER
+        // this, exactly as it is for EPF / SOCSO / EIS — see PcbContext.
+        remunerationSen: labor.payroll.grossSen,
+        profile: taxProfileFromWorkerRow(worker as unknown as Record<string, unknown>),
+        ytdRemunerationSen: ytd.remunerationSen,
+        ytdEpfSen: ytd.epfSen,
+        ytdPcbSen: ytd.pcbSen,
+      },
+    );
     const grossPay = labor.payroll.grossSen + allowances;
     const totalDeductions = stat.epfEmployee + stat.socsoEmployee + stat.eisEmployee + stat.pcb;
     // Advances are NOT added to totalDeductions — that figure is the statutory
@@ -731,6 +962,7 @@ app.get("/projected", async (c) => {
       eisEmployee: stat.eisEmployee,
       eisEmployer: stat.eisEmployer,
       pcb: stat.pcb,
+      pcbStatus: stat.pcbStatus,
       totalDeductions,
       netPay: netPayAfterAdvanceSen(grossPay, totalDeductions, advanceSen),
       advanceDeductionSen: advanceSen,
@@ -769,6 +1001,10 @@ app.post("/", async (c) => {
   // binds that column, so the DDL has to have landed first.
   await ensurePaymentColumns(c.var.DB);
   await ensureAdvanceTables(c.var.DB);
+  // Same reason: the INSERT below binds payslips.pcb_status, and the worker
+  // SELECT reads the three tax-profile columns. Migration 0229 is inert until
+  // this runs.
+  await ensurePayrollTaxColumns(c.var.DB);
   try {
     const body = await c.req.json();
     const { period, regenerate } = body;
@@ -830,7 +1066,7 @@ app.post("/", async (c) => {
       // partial, month) — the existing absence math prorates the days after
       // they left. Later months exclude them because resignedAt no longer
       // matches the period. Earlier months were generated while still ACTIVE.
-      "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate, efficiencyAllowanceSen, efficiencyThresholdPct, paymentMethod, bankName, bankAccount, payMode, dailyRateSen FROM workers WHERE (status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)) AND empNo NOT LIKE 'TEST%'",
+      "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, taxResidency, taxCategory, taxChildReliefSen, resignedAt, joinDate, efficiencyAllowanceSen, efficiencyThresholdPct, paymentMethod, bankName, bankAccount, payMode, dailyRateSen FROM workers WHERE (status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)) AND empNo NOT LIKE 'TEST%'",
     )
       .bind(`${period}-%`)
       .all<WorkerRow>();
@@ -941,6 +1177,10 @@ app.post("/", async (c) => {
     );
 
     const rows: PayslipRow[] = [];
+    // LHDN's monthly deduction is cumulative across the year: what is withheld
+    // this month depends on what was paid AND withheld in the earlier months.
+    // Read once for everyone, from the payslips already issued this year.
+    const ytdPcbInputs = await loadYtdPcbInputs(c.var.DB, period);
     // Last calendar day of the period, as YYYY-MM-DD, for join-date comparison.
     const periodLastIso = `${period}-${String(new Date(pYear, pMonth, 0).getDate()).padStart(2, "0")}`;
 
@@ -1039,12 +1279,28 @@ app.post("/", async (c) => {
       );
       // Statutory deductions computed on the month's effective monthly salary
       // (= the worker's salary, day-weighted if it changed mid-month).
-      const stat = calcStatutory(effectiveSalarySen, {
-        epfEnabled: worker.epfEnabled,
-        socsoEnabled: worker.socsoEnabled,
-        eisEnabled: worker.eisEnabled,
-        pcbEnabled: worker.pcbEnabled,
-      }, statutoryRules);
+      const ytd = ytdPcbInputs.get(worker.id) ?? NO_YTD;
+      const stat = calcStatutory(
+        effectiveSalarySen,
+        {
+          epfEnabled: worker.epfEnabled,
+          socsoEnabled: worker.socsoEnabled,
+          eisEnabled: worker.eisEnabled,
+          pcbEnabled: worker.pcbEnabled,
+        },
+        statutoryRules,
+        {
+          year: pYear,
+          monthIndex: pMonth,
+          // Basic earned + OT — the same basis the projected estimate uses, so
+          // the estimate and the generated slip cannot disagree.
+          remunerationSen: labor.payroll.grossSen,
+          profile: taxProfileFromWorkerRow(worker as unknown as Record<string, unknown>),
+          ytdRemunerationSen: ytd.remunerationSen,
+          ytdEpfSen: ytd.epfSen,
+          ytdPcbSen: ytd.pcbSen,
+        },
+      );
       // Gross = basic earned (full salary − absences) + OT + allowances.
       const grossPay = labor.payroll.grossSen + allowances;
       const totalDeductions =
@@ -1091,6 +1347,7 @@ app.post("/", async (c) => {
            hourlyRateSen, otWeekdayAmtSen, otSundayAmtSen, otPhAmtSen, totalOtSen,
            allowancesSen, grossPaySen, epfEmployeeSen, epfEmployerSen,
            socsoEmployeeSen, socsoEmployerSen, eisEmployeeSen, eisEmployerSen, pcbSen,
+           pcb_status,
            totalDeductionsSen, netPaySen, advance_deduction_sen,
            bankAccount, paymentMethod, bankName, status
          ) VALUES (
@@ -1100,6 +1357,7 @@ app.post("/", async (c) => {
            ?, ?, ?, ?, ?,
            ?, ?, ?, ?,
            ?, ?, ?, ?, ?,
+           ?,
            ?, ?, ?,
            ?, ?, ?, 'DRAFT'
          )`,
@@ -1132,6 +1390,9 @@ app.post("/", async (c) => {
           stat.eisEmployee,
           stat.eisEmployer,
           stat.pcb,
+          // The provenance travels in the SAME statement as the figure — a
+          // pcbSen stored without its status is a zero nobody can interpret.
+          stat.pcbStatus,
           totalDeductions,
           netPay,
           advanceSen,
@@ -1272,6 +1533,14 @@ app.get("/:id", async (c) => {
     },
   );
 
+  // A total inherits the weakest input (C15's second corollary): a YTD PCB
+  // figure summed over months where PCB was never computed is not a
+  // year-to-date withholding, it is a partial one wearing the same caption.
+  // The consumer decides how to render it; it does not get to assume.
+  const ytdPcbComplete = employeeSlips.every((p) =>
+    pcbHasFigure(normalizeStoredPcbStatus(p.pcbStatus ?? p.pcb_status)),
+  );
+
   // Contracted hours/day for the payslip "Hourly Rate" formula label. Not stored
   // on payslips (only the resulting hourlyRate is), so read it from the worker.
   // Display-only; a missing worker falls back to 9 in the PDF. BUG-2026-07-17-012.
@@ -1346,6 +1615,9 @@ app.get("/:id", async (c) => {
       advanceDays,
     },
     ytd,
+    /** False when any month in `ytd` carries no PCB computation, so `ytd.pcb`
+     *  must not be printed as "tax withheld this year". */
+    ytdPcbComplete,
     monthsIncluded: employeeSlips.length,
   });
 });

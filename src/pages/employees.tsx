@@ -67,6 +67,11 @@ import {
 // One money parser. NOTE: hours/day and the OT multiplier below are NOT money
 // and deliberately keep `parseFloat`.
 import { moneyFieldToSen } from "@/lib/money-field";
+import {
+  normalizeStoredPcbStatus,
+  pcbHasFigure,
+  PCB_STATUS_NOTE,
+} from "@/lib/pcb";
 
 // --------------- TYPES ---------------
 
@@ -125,6 +130,11 @@ type Worker = {
   socsoEnabled?: boolean;
   eisEnabled?: boolean;
   pcbEnabled?: boolean;
+  /** PCB tax declaration (migration 0229). `null` = not declared, which is a
+   *  state payroll acts on — it prints "—" for PCB rather than RM 0.00. */
+  taxResidency?: string | null;
+  taxCategory?: string | null;
+  taxChildReliefSen?: number | null;
   joinDate: string;
   icNumber: string;
   passportNumber: string;
@@ -208,6 +218,11 @@ type PayslipData = {
   eisEmployee: number;
   eisEmployer: number;
   pcb: number;
+  /** Provenance of `pcb` — 'COMPUTED' | 'ZERO_PROVEN' | 'DISABLED' |
+   *  'UNKNOWN', absent on a payslip generated before PCB was calculated at
+   *  all. A `pcb` of 0 is only "no tax was due" when this says something was
+   *  worked out; every render on this page goes through `pcbHasFigure`. */
+  pcbStatus?: string | null;
   totalDeductions: number;
   netPay: number;
   bankAccount: string;
@@ -2593,6 +2608,15 @@ function EmployeeMasterTab({
       socsoEnabled: w.socsoEnabled !== false,
       eisEnabled: w.eisEnabled !== false,
       pcbEnabled: w.pcbEnabled !== false,
+      // NOT defaulted the way the flags above are: `?? null` keeps
+      // "not declared" distinguishable from a declaration, which is the whole
+      // reason the payslip can say PCB could not be computed.
+      taxResidency: w.taxResidency ?? null,
+      taxCategory: w.taxCategory ?? null,
+      taxChildReliefSen:
+        w.taxChildReliefSen === null || w.taxChildReliefSen === undefined
+          ? null
+          : Number(w.taxChildReliefSen),
       joinDate: w.joinDate ?? "",
       nationality: w.nationality ?? "",
       departmentCodes:
@@ -6993,6 +7017,16 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
     );
   }, [payslipData]);
 
+  // Is `totals.pcb` a month's withholding, or a sum over rows where PCB was
+  // never worked out? Those are different figures and only one of them may be
+  // printed under the caption "Total PCB" (C15's "a total inherits the weakest
+  // input"). An employee whose tax residency / marital category / child relief
+  // has not been recorded produces no PCB figure at all — see src/lib/pcb.ts.
+  const pcbTotalComplete = useMemo(
+    () => payslipData.every((r) => pcbHasFigure(normalizeStoredPcbStatus(r.pcbStatus))),
+    [payslipData],
+  );
+
   // What the company still has to put on the table this month. Gross +
   // employer statutory is the full cost of employing everyone; the advances
   // came out of the till earlier in the month, so they are no longer part of
@@ -7144,7 +7178,10 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
         rm2(r.grossPay), rm2(r.epfEmployee),
         rm2(r.epfEmployer), rm2(r.socsoEmployee),
         rm2(r.socsoEmployer), rm2(r.eisEmployee),
-        rm2(r.eisEmployer), rm2(r.pcb),
+        rm2(r.eisEmployer),
+        // Exported the same way it is displayed: a blank, not a 0.00, when no
+        // withholding was computed for this employee.
+        pcbHasFigure(normalizeStoredPcbStatus(r.pcbStatus)) ? rm2(r.pcb) : "",
         rm2(r.totalDeductions),
         advanceSen > 0 ? rm2(advanceSen) : "",
         advanceSen > 0
@@ -7267,7 +7304,7 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
       { header: "EPF ER", align: "right", value: (r) => { const v = (r as PayslipData).epfEmployer; return v > 0 ? printMoney(v) : "-"; } },
       { header: "SOCSO", align: "right", value: (r) => { const v = (r as PayslipData).socsoEmployee; return v > 0 ? printMoney(v) : "-"; } },
       { header: "EIS", align: "right", value: (r) => { const v = (r as PayslipData).eisEmployee; return v > 0 ? printMoney(v) : "-"; } },
-      { header: "PCB", align: "right", value: (r) => { const p = r as PayslipData; return p.pcb > 0 ? printMoney(p.pcb) : "-"; } },
+      { header: "PCB", align: "right", value: (r) => { const p = r as PayslipData; return pcbHasFigure(normalizeStoredPcbStatus(p.pcbStatus)) && p.pcb > 0 ? printMoney(p.pcb) : "-"; } },
       // Between the statutory columns and Net Pay, because that is where it
       // sits in the sum: Gross − statutory − Advance = Net Pay.
       { header: "Advance", align: "right", value: (r) => { const v = (r as PayslipData).advanceDeductionSen || 0; return v > 0 ? `−${printMoney(v)}` : "-"; } },
@@ -7282,7 +7319,9 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
       { label: "Total EPF (EE+ER)", value: formatCurrency(totals.epfEmployee + totals.epfEmployer) },
       { label: "Total SOCSO", value: formatCurrency(totals.socsoEmployee + totals.socsoEmployer) },
       { label: "Total EIS", value: formatCurrency(totals.eisEmployee + totals.eisEmployer) },
-      { label: "Total PCB", value: formatCurrency(totals.pcb) },
+      // A total inherits the weakest input: summing PCB over months where it
+      // was never computed produces a complete-looking figure out of gaps.
+      { label: "Total PCB", value: pcbTotalComplete ? formatCurrency(totals.pcb) : "— not computed" },
     ];
     printReport({
       title: "Payroll",
@@ -7447,9 +7486,14 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
                   totals.eisEmployee + totals.eisEmployer +
                   totals.pcb,
                 )}
+                {/* A total inherits the weakest input. When somebody's PCB
+                    could not be computed this sum is a floor, not a figure. */}
+                {!pcbTotalComplete && (
+                  <span className="ml-1 text-[10px] font-normal text-[#9A3A2D]">+ PCB not computed</span>
+                )}
               </p>
               <p className="text-[10px] text-[#9CA3AF] mt-0.5">
-                EPF {formatCurrency(totals.epfEmployee + totals.epfEmployer)} · SOCSO {formatCurrency(totals.socsoEmployee + totals.socsoEmployer)} · EIS {formatCurrency(totals.eisEmployee + totals.eisEmployer)} · PCB {formatCurrency(totals.pcb)}
+                EPF {formatCurrency(totals.epfEmployee + totals.epfEmployer)} · SOCSO {formatCurrency(totals.socsoEmployee + totals.socsoEmployer)} · EIS {formatCurrency(totals.eisEmployee + totals.eisEmployer)} · PCB {pcbTotalComplete ? formatCurrency(totals.pcb) : "—"}
               </p>
             </CardContent>
           </Card>
@@ -7633,7 +7677,7 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
                         <td className="h-10 px-2 text-right text-[#3E6570] text-xs whitespace-nowrap">{formatCurrency(r.epfEmployer)}</td>
                         <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs whitespace-nowrap">{formatCurrency(r.socsoEmployee)}</td>
                         <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs whitespace-nowrap">{formatCurrency(r.eisEmployee)}</td>
-                        <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs whitespace-nowrap">{r.pcb > 0 ? formatCurrency(r.pcb) : "-"}</td>
+                        <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs whitespace-nowrap" title={PCB_STATUS_NOTE[normalizeStoredPcbStatus(r.pcbStatus)]}>{pcbHasFigure(normalizeStoredPcbStatus(r.pcbStatus)) ? (r.pcb > 0 ? formatCurrency(r.pcb) : "-") : "—"}</td>
                         <td className="h-10 px-3 text-right whitespace-nowrap text-[#9A3A2D]" title="Salary advance already collected this month — click the row to see the days.">
                           {(r.advanceDeductionSen ?? 0) > 0
                             ? <span>−{formatCurrency(r.advanceDeductionSen ?? 0)}{(advanceDaysByWorker.get(r.employeeId)?.length ?? 0) > 0 ? <span className="text-[10px] text-[#9CA3AF]"> ({advanceDaysByWorker.get(r.employeeId)?.length}x)</span> : null}</span>
@@ -7722,7 +7766,7 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
                                   <hr className="border-[#E2DDD8]" />
                                   <div className="flex justify-between">
                                     <span>PCB (Tax)</span>
-                                    <span className="font-semibold">{r.pcb > 0 ? fmtSen(r.pcb) : "-"}</span>
+                                    <span className="font-semibold" title={PCB_STATUS_NOTE[normalizeStoredPcbStatus(r.pcbStatus)]}>{pcbHasFigure(normalizeStoredPcbStatus(r.pcbStatus)) ? fmtSen(r.pcb) : "—"}</span>
                                   </div>
                                 </div>
                               </div>
@@ -7886,7 +7930,7 @@ function PayrollTab({ workers }: { workers: Worker[] }) {
                     <td className="h-10 px-2 text-right text-[#3E6570] text-xs">{formatCurrency(totals.epfEmployer)}</td>
                     <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs">{formatCurrency(totals.socsoEmployee)}</td>
                     <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs">{formatCurrency(totals.eisEmployee)}</td>
-                    <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs">{totals.pcb > 0 ? formatCurrency(totals.pcb) : "-"}</td>
+                    <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs" title={pcbTotalComplete ? undefined : "Not every employee's PCB could be computed, so this column is a floor, not the month's withholding."}>{!pcbTotalComplete ? "—" : totals.pcb > 0 ? formatCurrency(totals.pcb) : "-"}</td>
                     <td className="h-10 px-3 text-right text-[#9A3A2D]">{totals.advanceDeductionSen > 0 ? `−${formatCurrency(totals.advanceDeductionSen)}` : "-"}</td>
                     <td className="h-10 px-3 text-right font-bold">{formatCurrency(totals.netPay)}</td>
                     <td className="h-10 px-3 text-right font-bold text-[#6B5C32]" title="Gross + employer EPF / SOCSO / EIS — what the workforce costs. Advances are not deducted here; they come off Net Pay.">{formatCurrency(totalPayrollCost)}</td>

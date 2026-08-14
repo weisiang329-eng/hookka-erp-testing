@@ -51,6 +51,18 @@ export type EmployeeDraft = {
   socsoEnabled: boolean;
   eisEnabled: boolean;
   pcbEnabled: boolean;
+  // PCB tax declaration. `null` means the employee has not declared it, and
+  // that is a real state the payroll engine acts on: it prints "—" for PCB and
+  // says it could not be computed, rather than printing RM 0.00 and claiming
+  // no tax was due. Never pre-fill these with a plausible default — assuming
+  // RESIDENT under-withholds from a non-resident by 30% of gross, assuming
+  // SINGLE over-withholds from a married sole earner.
+  taxResidency: string | null;
+  taxCategory: string | null;
+  /** Annual child relief in SEN, or null when undeclared. `0` is a real
+   *  declaration (no children). Stored as the relief rather than a headcount
+   *  because LHDN's per-child amount depends on the child. */
+  taxChildReliefSen: number | null;
   joinDate: string;
   nationality: string;
   /** Every department the person works in; the FIRST is their primary/home. */
@@ -485,6 +497,72 @@ export function EmployeeDrawer({
               </label>
             ))}
           </Section>
+
+          {/* Only shown when PCB is ON. For everyone else the answer is
+              "no tax is withheld", and asking for a tax declaration nobody
+              will use invites someone to fill it in with a guess. */}
+          {draft.pcbEnabled && (
+            <Section title="PCB tax declaration">
+              <p className="col-span-2 text-[10px] leading-relaxed text-[#9CA3AF]">
+                LHDN&rsquo;s monthly deduction is not a function of salary alone.
+                Until these are recorded the payslip shows PCB as &ldquo;&mdash;&rdquo;
+                and states that it could not be computed &mdash; it does not show
+                RM&nbsp;0.00. Copy what the employee declared; do not estimate.
+              </p>
+              <Field label="Tax residency">
+                <select
+                  value={draft.taxResidency ?? ""}
+                  onChange={(e) => set("taxResidency", (e.target.value || null) as never)}
+                  className="mt-0.5 h-8 w-full rounded-md border border-[#D8D2CC] bg-white px-2 text-xs"
+                >
+                  <option value="">Not declared</option>
+                  <option value="RESIDENT">Resident</option>
+                  <option value="NON_RESIDENT">Non-resident (flat 30%)</option>
+                </select>
+              </Field>
+              <Field label="Marital category">
+                <select
+                  value={draft.taxCategory ?? ""}
+                  onChange={(e) => set("taxCategory", (e.target.value || null) as never)}
+                  className="mt-0.5 h-8 w-full rounded-md border border-[#D8D2CC] bg-white px-2 text-xs"
+                >
+                  <option value="">Not declared</option>
+                  <option value="SINGLE">Single</option>
+                  <option value="MARRIED_SPOUSE_NOT_WORKING">Married, spouse not working</option>
+                  <option value="MARRIED_SPOUSE_WORKING">Married, spouse working</option>
+                </select>
+              </Field>
+              <Field label="Annual child relief (RM)" full>
+                <Input
+                  inputMode="decimal"
+                  value={
+                    draft.taxChildReliefSen === null || draft.taxChildReliefSen === undefined
+                      ? ""
+                      : String(draft.taxChildReliefSen / 100)
+                  }
+                  onChange={(e) => {
+                    const raw = e.target.value.trim();
+                    // Blank clears the declaration back to "not declared";
+                    // "0" is a declaration of no children and must survive.
+                    if (raw === "") {
+                      set("taxChildReliefSen", null as never);
+                      return;
+                    }
+                    set("taxChildReliefSen", moneyFieldToSen(raw) as never);
+                  }}
+                  className="mt-0.5 h-8 text-xs"
+                  placeholder="Leave blank if not declared"
+                />
+                <p className="mt-1 text-[10px] leading-relaxed text-[#9CA3AF]">
+                  RM&nbsp;2,000 per ordinary child; RM&nbsp;8,000 for a child
+                  18+ in full-time tertiary education; RM&nbsp;6,000 disabled;
+                  RM&nbsp;14,000 disabled and in tertiary education. Enter the
+                  employee&rsquo;s declared total &mdash; a headcount &times; 2,000
+                  would over-withhold from anyone with a child at university.
+                </p>
+              </Field>
+            </Section>
+          )}
         </div>
 
         {/* Buttons sit LEFT. The toast container is fixed bottom-6 right-6 at

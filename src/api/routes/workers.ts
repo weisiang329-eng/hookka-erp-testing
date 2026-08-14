@@ -11,6 +11,10 @@ import { requirePermission } from "../lib/rbac";
 import { normalizePaymentMethod } from "../../lib/payment-method";
 import { ensurePaymentColumns } from "../lib/payment-columns";
 import { ensureLeaveEntitlementColumns } from "../lib/ensure-leave-columns";
+// PCB tax-declaration columns (migration 0229). Migrations are inert on
+// deploy here, so the PUT below can only bind tax_residency / tax_category /
+// tax_child_relief_sen because this has been awaited first.
+import { ensurePayrollTaxColumns } from "../lib/payroll-tax-columns";
 import { effectiveSalarySenForMonth } from "../../lib/labor-engine";
 import { emitAudit } from "../lib/audit";
 import { hashPin } from "../lib/auth-utils";
@@ -46,6 +50,17 @@ type WorkerRow = {
   socsoEnabled: boolean | null;
   eisEnabled: boolean | null;
   pcbEnabled: boolean | null;
+  // PCB tax declaration (migration 0229). `pcb_enabled` says WHETHER to
+  // withhold; these three say HOW MUCH, and LHDN's answer is not a function of
+  // salary alone. Every one of them is NULL until the employee declares it,
+  // and NULL is load-bearing: the payslip prints "—" and says PCB could not be
+  // computed rather than printing RM 0.00, which would claim no tax was due.
+  // Never default them — assuming RESIDENT under-withholds from a
+  // non-resident by 30% of gross, assuming SINGLE over-withholds from a
+  // married sole earner. Both are somebody's money.
+  taxResidency: string | null;
+  taxCategory: string | null;
+  taxChildReliefSen: number | null;
   joinDate: string | null;
   icNumber: string | null;
   passportNumber: string | null;
@@ -129,6 +144,36 @@ function parseDepartmentCodes(raw: string | null, fallback: string): string[] {
   return fallback ? [fallback] : [];
 }
 
+// --- PCB tax declaration (migration 0229) ----------------------------------
+// Each of these returns null for ANYTHING that is not an explicit, valid
+// declaration — a blank, a typo, a legacy empty string. There is no fallback
+// value on purpose: the engine's UNKNOWN branch is what stops a guessed tax
+// profile reaching someone's payslip, and it can only fire on a null.
+
+function normalizeTaxResidency(raw: unknown): string | null {
+  const v = String(raw ?? "").toUpperCase();
+  return v === "RESIDENT" || v === "NON_RESIDENT" ? v : null;
+}
+
+function normalizeTaxCategory(raw: unknown): string | null {
+  const v = String(raw ?? "").toUpperCase();
+  return v === "SINGLE" ||
+    v === "MARRIED_SPOUSE_NOT_WORKING" ||
+    v === "MARRIED_SPOUSE_WORKING"
+    ? v
+    : null;
+}
+
+/** Integer sen, or null when undeclared. `0` is a real declaration (no
+ *  children) and must survive — hence the explicit null/"" checks rather than
+ *  a truthiness test. */
+function normalizeChildReliefSen(raw: unknown): number | null {
+  if (raw === null || raw === undefined || raw === "") return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.round(n);
+}
+
 function parseCategories(raw: string | null): string[] {
   if (!raw) return [];
   try {
@@ -166,6 +211,20 @@ function rowToWorker(row: WorkerRow) {
     socsoEnabled: row.socsoEnabled !== false,
     eisEnabled: row.eisEnabled !== false,
     pcbEnabled: row.pcbEnabled !== false,
+    // Deliberately NOT coerced to "" or 0 the way the fields around them are:
+    // null here means "not declared", and flattening it into an empty string
+    // would let the screen render a blank dropdown as though it were a choice
+    // somebody made. Dual-keyed for a row that arrives snake_case.
+    taxResidency: normalizeTaxResidency(
+      row.taxResidency ?? (row as unknown as Record<string, unknown>).tax_residency,
+    ),
+    taxCategory: normalizeTaxCategory(
+      row.taxCategory ?? (row as unknown as Record<string, unknown>).tax_category,
+    ),
+    taxChildReliefSen: normalizeChildReliefSen(
+      row.taxChildReliefSen ??
+        (row as unknown as Record<string, unknown>).tax_child_relief_sen,
+    ),
     joinDate: row.joinDate ?? "",
     icNumber: row.icNumber ?? "",
     passportNumber: row.passportNumber ?? "",
@@ -193,6 +252,7 @@ function genId(): string {
 //   the Service Case root-cause form picks dept by code, not id).
 app.get("/", async (c) => {
   await ensurePaymentColumns(c.var.DB);
+  await ensurePayrollTaxColumns(c.var.DB);
   // RBAC gate (P3.3-followup) — workers:read.
   const denied = await requirePermission(c, "workers", "read");
   if (denied) return denied;
@@ -395,6 +455,8 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const denied = await requirePermission(c, "workers", "update");
   if (denied) return denied;
+  await ensurePaymentColumns(c.var.DB);
+  await ensurePayrollTaxColumns(c.var.DB);
   const id = c.req.param("id");
   // Awaited BEFORE the UPDATE below, which writes the two entitlement-override
   // columns. Migrations are inert on deploy here; this is the only path by
@@ -574,6 +636,22 @@ app.put("/:id", async (c) => {
         typeof body.pcbEnabled === "boolean"
           ? body.pcbEnabled
           : existing.pcbEnabled !== false,
+      // A field the body OMITS keeps what is stored (a partial PUT from
+      // another screen must not blank someone's tax declaration); a field the
+      // body sends as null / "" CLEARS it back to undeclared, which is a
+      // legitimate thing for HR to do when a declaration is withdrawn.
+      taxResidency:
+        "taxResidency" in body
+          ? normalizeTaxResidency(body.taxResidency)
+          : normalizeTaxResidency(existing.taxResidency),
+      taxCategory:
+        "taxCategory" in body
+          ? normalizeTaxCategory(body.taxCategory)
+          : normalizeTaxCategory(existing.taxCategory),
+      taxChildReliefSen:
+        "taxChildReliefSen" in body
+          ? normalizeChildReliefSen(body.taxChildReliefSen)
+          : normalizeChildReliefSen(existing.taxChildReliefSen),
       joinDate: body.joinDate ?? existing.joinDate ?? "",
       icNumber: body.icNumber ?? existing.icNumber ?? "",
       passportNumber: body.passportNumber ?? existing.passportNumber ?? "",
@@ -605,6 +683,7 @@ app.put("/:id", async (c) => {
          position = ?, phone = ?, status = ?, basicSalarySen = ?,
          workingHoursPerDay = ?, workingDaysPerMonth = ?, otMultiplier = ?,
          epfEnabled = ?, socsoEnabled = ?, eisEnabled = ?, pcbEnabled = ?,
+         taxResidency = ?, taxCategory = ?, taxChildReliefSen = ?,
          joinDate = ?, icNumber = ?, passportNumber = ?, nationality = ?, resignedAt = ?,
          efficiencyAllowanceSen = ?, efficiencyThresholdPct = ?,
          paymentMethod = ?, bankName = ?, bankAccount = ?,
@@ -630,6 +709,9 @@ app.put("/:id", async (c) => {
         merged.socsoEnabled,
         merged.eisEnabled,
         merged.pcbEnabled,
+        merged.taxResidency,
+        merged.taxCategory,
+        merged.taxChildReliefSen,
         merged.joinDate,
         merged.icNumber,
         merged.passportNumber,

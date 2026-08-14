@@ -6483,6 +6483,9 @@ export type PayslipDetail = {
   eisEmployee: number;
   eisEmployer: number;
   pcb: number; // tax deduction
+  /** Provenance of `pcb`. See src/lib/pcb.ts — a 0 is only "no tax was due"
+   *  when this says something was actually computed. */
+  pcbStatus?: string | null;
   totalDeductions: number;
   netPay: number; // gross - deductions
   bankAccount: string;
@@ -6509,7 +6512,16 @@ export function calcStatutory(basicSalarySen: number) {
     socsoEmployer: 2615,  // ~RM 26.15
     eisEmployee: 390,     // ~RM 3.90
     eisEmployer: 390,     // ~RM 3.90
-    pcb: 0,               // 0 for foreign workers at this salary range
+    // NOT a computed withholding. The comment that used to sit here asserted,
+    // as fact, that people from overseas owe nothing at this salary — a tax
+    // claim nobody had worked out, and backwards: a NON-RESIDENT is withheld
+    // a flat 30% of gross from the first ringgit. Seed rows carry no tax
+    // profile, so the real engine's answer for them is "not computed"; the
+    // status below is what makes every screen render "—" instead of RM 0.00.
+    // The live engine is resolvePcb in src/lib/pcb.ts — this helper only
+    // builds demo rows and must never grow a second tax calculation.
+    pcb: 0,
+    pcbStatus: "UNKNOWN" as const,
   };
 }
 
@@ -6560,6 +6572,7 @@ function generatePayslipForWorker(
     eisEmployee: stat.eisEmployee,
     eisEmployer: stat.eisEmployer,
     pcb: stat.pcb,
+    pcbStatus: stat.pcbStatus,
     totalDeductions,
     netPay,
     // Blank, never invented. This used to emit `CIMB-<empNo>XXXX`, which the

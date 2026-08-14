@@ -71,6 +71,8 @@ import {
   signedDownloadUrl,
 } from "../lib/supabase-storage";
 import { DEFAULT_ORG_ID } from "../lib/tenant";
+import { normalizeStoredPcbStatus } from "../../lib/pcb";
+import { ensurePayrollTaxColumns } from "../lib/payroll-tax-columns";
 // One shared completion core with the desktop QC page — see the QC-on-the-
 // phone block below for why the phone must not own a second copy.
 import { completeInspection } from "./qc-pending";
@@ -1897,6 +1899,10 @@ type PayslipRow = {
   socsoEmployeeSen: number;
   eisEmployeeSen: number;
   pcbSen: number;
+  // Provenance of pcbSen (migration 0229). Dual-keyed; NULL on every row
+  // generated before PCB was computed at all.
+  pcbStatus?: string | null;
+  pcb_status?: string | null;
   absentDays?: number | null;
   absenceDeductionSen?: number | null;
   otWeekdayHours?: number | null;
@@ -1913,6 +1919,10 @@ app.get("/payslips", async (c) => {
   // auto-replay on deploy — memoized per isolate so the warm path is a no-op).
   await ensureWorkerPerfIndices(c.var.DB);
   await ensureWorkerSnapshotTables(c.var.DB);
+  // The history SELECT below names payslips.pcb_status by hand, and
+  // migrations are inert on deploy here — without this the whole My Pay
+  // history 400s on a database where payroll has never been generated.
+  await ensurePayrollTaxColumns(c.var.DB);
 
   // Current-month key for the snapshot. Computed up front so the cache_key is
   // stable for the whole request; the live compute below re-derives the same
@@ -1958,7 +1968,7 @@ app.get("/payslips", async (c) => {
     // 「他们的迟到、OT、请假等等，全部都可以在 MyPay 那一边呈现出来」).
     `SELECT id, employeeId, period, basicSalarySen, totalOtSen, allowancesSen,
             grossPaySen, netPaySen, epfEmployeeSen, socsoEmployeeSen,
-            eisEmployeeSen, pcbSen, absentDays, absenceDeductionSen,
+            eisEmployeeSen, pcbSen, pcb_status, absentDays, absenceDeductionSen,
             otWeekdayHours, otSundayHours, otPhHours
        FROM payslips
       WHERE employeeId = ?
@@ -2027,6 +2037,9 @@ app.get("/payslips", async (c) => {
     socsoEeSen: r.socsoEmployeeSen,
     eisEeSen: r.eisEmployeeSen,
     taxSen: r.pcbSen,
+    // A 0 next to "Tax" only means "no tax was due" when something was
+    // actually computed — otherwise the phone must render a dash.
+    taxStatus: normalizeStoredPcbStatus(r.pcbStatus ?? r.pcb_status),
     // The "why is it this number" half.
     absentDays: Number(r.absentDays ?? 0),
     absenceDeductionSen: Number(r.absenceDeductionSen ?? 0),
@@ -2425,6 +2438,10 @@ app.get("/payslip/:period", async (c) => {
       eisEmployee: num("eisEmployeeSen"),
       eisEmployer: num("eisEmployerSen"),
       pcb: num("pcbSen"),
+      // The provenance travels with the figure. Without it the worker's phone
+      // shows "PCB RM 0.00" for a month where no tax was ever computed, which
+      // is a claim about their pay rather than a blank. See src/lib/pcb.ts.
+      pcbStatus: normalizeStoredPcbStatus(row.pcbStatus ?? row.pcb_status),
       totalDeductions: num("totalDeductionsSen"),
       netPay: num("netPaySen"),
       bankAccount: String(row.bankAccount ?? ""),

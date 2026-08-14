@@ -1,6 +1,7 @@
 # Hookka ERP — Work Tracker
 
 > **Last verified: 2026-08-14** — branch `fix/on-time-delivery-and-decisions` added below (open, not merged, its entry is the newest; its bug ids were renumbered 130-133 → 140-143 because `feat/leave-entitlement` claimed 130-133 and merged to `main` first). Previously: branch `feat/leave-entitlement` (MERGED as #326). Previously: branch `feat/job-card-completed-at` added below (open, not merged). Previously: branch `fix/security-posture` added below (open, not merged). Previously: PRs #304/#310/#312/#313/#314/#315/#316/#317 all MERGED and
+> **Last verified: 2026-08-14** — branch `feat/pcb-calculation` added below (open, not merged, its entry is the newest). Previously: branch `feat/job-card-completed-at` added below (open, not merged). Previously: branch `fix/security-posture` added below (open, not merged). Previously: PRs #304/#310/#312/#313/#314/#315/#316/#317 all MERGED and
 > **Last verified: 2026-08-14** — restamped on branch `fix/money-input-parsing` (its entry is the newest below, not yet deployed). PRs #304/#310/#312/#313/#314/#315/#316/#317 all MERGED and
 > deployed; zero PRs open, one worktree. Previously verified against the merged PRs on `main` (#266-#300) plus the open PRs #304 (branch `fix/stock-grn-org-filter`) and the accounting-audit branch `fix/accounting-audit`, whose entry is the newest below. This file is a live queue — restamp it whenever you add or close an item.
 
@@ -62,6 +63,52 @@ been shown 14.
 (+27) · `check-docs-freshness` OK · `check-codebase-map` OK · `check-secrets` OK ·
 `gen-api-docs --check` up to date. All **21** mutations proved RED with bytes-on-disk asserted
 changed first; that run caught **4 blind guards** which have been fixed and re-proved.
+## 2026-08-14 — 🔵 PCB is finally calculated (branch `feat/pcb-calculation`, **NOT deployed, NOT merged**)
+
+Owner-confirmed, real money on real payslips: PCB (Potongan Cukai Berjadual) has never been
+calculated. `calcStatutory` read the per-worker toggle and returned `pcb: pcbOn ? 0 : 0` — the
+same number on both branches — so **net pay on every payslip is overstated by the tax that
+should have been withheld**. The owner's rule 「有些人有 有些人没有」 was already modelled
+(`workers.pcb_enabled`, migration 0131); only the calculation was missing.
+
+| Ask | State | Entry |
+|---|---|---|
+| Enumerate EVERY site that computes or displays PCB before changing anything | ✅ done | 13 sites, listed in the PR: `payslips.ts` (calc + 2 payroll paths + INSERT + row mapper + YTD), `worker.ts` (history + detail), `employees.tsx` (grid cell · expanded row · print column · CSV · 2 totals), `generate-payslip-pdf.ts`, `m/config/modules.ts`, `mock-data.ts`, `types/index.ts`. `payroll.ts` and `assistant-tools.ts` read the legacy `payroll_records` table, whose POST already refuses |
+| Implement the calculation, gated on `workers.pcb_enabled` | ✅ done | `src/lib/pcb.ts` — LHDN Computerised Calculation, normal remuneration month, integer sen, rounded up to 5 sen. `pcb_enabled = false` → `DISABLED`, which is correct and intended, not a gap |
+| Get the tax rule right **or refuse** | ✅ refused where required | residency / marital category / child relief did not exist on `workers` and are NOT invented: migration 0229 adds them **nullable, no DEFAULT**, and an incomplete declaration yields `UNKNOWN` — the payslip prints `—` and says PCB could not be computed, never RM 0.00 |
+| Implement what IS computable | ✅ done | full computation when the declaration is complete; flat-rate for a declared non-resident; and `ZERO_PROVEN` — a PROOF that nothing is due at that pay under **any** resident profile, asserted by a monotonicity test rather than argued |
+| Report the blast radius on netPay / GL / statutory reports | ✅ done | netPay yes (unchanged today — every worker is `DISABLED`); **GL no** (`aggregateLabour` debits gross + EMPLOYER contributions only); **no CP39 / EA / statutory export exists in the repo** |
+| Do not restate issued payslips | ✅ honoured | `pcb_status` is NULL on every historical row and is never backfilled; stored net pay untouched |
+
+**Gates.** `npx tsc -p tsconfig.app.json --noEmit` exit 0 · `npm test` **4,060 tests / 0 fail**
+(+62) · `check-docs-freshness` OK · `check-codebase-map` OK · `check-secrets` OK ·
+`gen-api-docs` regenerated (line-offset shifts only). **19 mutations proved RED**, each
+asserting the bytes on disk changed FIRST and restored byte-for-byte after — and **two guards
+were BLIND on the first draft** and were rewritten (one accepted a `throw` behind `if (0)`; one
+counted a single `pcbHasFigure` in the payslip PDF, so the amount could go back to ungated while
+the footnote kept the count up).
+
+**Two existing class guards fired on my own code and both were right.**
+`tests/sql-identifier-safety.test.mjs` caught `AS grossSen` / `AS allowanceSen` / `AS epfSen` in
+the year-to-date query — those fold to lower case, read back `undefined`, and would have zeroed
+the cumulative projection and **under-withheld silently**. `tests/sql-columns-exist.test.mjs`
+caught the four new columns missing from the prod schema snapshot.
+
+**Note for whoever refreshes the schema fixture.** `tests/db-schema.json` gained
+`workers.tax_residency` / `tax_category` / `tax_child_relief_sen` and `payslips.pcb_status` by
+hand, because those columns do not exist on prod until this deploys. Re-run
+`node scripts/refresh-db-schema-fixture.mjs` after deploy.
+
+**🟡 Two owner decisions, raised not taken.**
+1. **Does the efficiency allowance count as normal remuneration for PCB?** Shipped EXCLUDING it,
+   following the owner's standing 「不算法定纯额外奖金」 rule that already governs EPF / SOCSO /
+   EIS. LHDN's definition of normal remuneration would include a regular monthly allowance, so
+   including it would raise the withholding for anyone earning the bonus. One-line change in
+   `PcbContext.remunerationSen` if he decides the other way.
+2. **Confirm the YA2023-onward rate schedule with his tax agent before PCB is switched on for
+   anybody.** The schedule is effective-dated and refuses outside its declared years, so it
+   cannot silently outlive its validity — but the first switch-on is the moment to check it.
+
 
 ---
 

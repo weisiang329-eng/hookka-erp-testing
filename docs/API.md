@@ -1,7 +1,7 @@
 # API — generated reference
 
 > **GENERATED FILE — do not hand-edit.** Regenerate with `node scripts/gen-api-docs.mjs`.
-> **Last generated: 2026-08-13** from `src/api/worker.ts` + `src/api/routes/*.ts`.
+> **Last generated: 2026-08-14** from `src/api/worker.ts` + `src/api/routes/*.ts`.
 
 The backend is a single [Hono](https://hono.dev) app in `src/api/worker.ts`, served
 as a Cloudflare Pages Function via `functions/api/[[route]].ts`. There is no
@@ -78,7 +78,7 @@ offsets pointing past the end of their own file.
 | `/api/customer-crm` | `src/api/routes/customer-crm.ts` | `GET /contacts` <sub>:175</sub><br>`POST /contacts` <sub>:191</sub><br>`PUT /contacts/:id` <sub>:224</sub><br>`DELETE /contacts/:id` <sub>:252</sub><br>`GET /activities` <sub>:266</sub><br>`POST /activities` <sub>:285</sub><br>`DELETE /activities/:id` <sub>:322</sub><br>`GET /follow-ups` <sub>:336</sub><br>`GET /onboarding` <sub>:359</sub><br>`PUT /onboarding` <sub>:374</sub><br>`POST /send-quote` <sub>:425</sub> | gated |
 | `/api/sales-leads` | `src/api/routes/sales-leads.ts` | `GET /` <sub>:102</sub><br>`POST /` <sub>:162</sub><br>`PUT /:id` <sub>:235</sub><br>`PUT /:id/stage` <sub>:265</sub><br>`POST /:id/convert` <sub>:302</sub><br>`DELETE /:id` <sub>:366</sub><br>`GET /lead-products` <sub>:381</sub><br>`POST /lead-products` <sub>:396</sub><br>`DELETE /lead-products/:id` <sub>:434</sub> | gated |
 | `/api/sofa-combos` | `src/api/routes/sofa-combos.ts` | `GET /` <sub>:118</sub><br>`POST /` <sub>:213</sub><br>`POST /copy-from-master` <sub>:362</sub><br>`PUT /:id` <sub>:498</sub><br>`DELETE /:id` <sub>:635</sub> | gated |
-| `/api/organisations` | `src/api/routes/organisations.ts` | `GET /` <sub>:285</sub><br>`POST /` <sub>:328</sub><br>`PATCH /:id` <sub>:422</sub><br>`DELETE /:id` <sub>:530</sub><br>`PUT /` <sub>:557</sub> | gated |
+| `/api/organisations` | `src/api/routes/organisations.ts` | `GET /` <sub>:361</sub><br>`POST /` <sub>:417</sub><br>`PATCH /:id` <sub>:511</sub><br>`DELETE /:id` <sub>:619</sub><br>`PUT /` <sub>:646</sub> | gated |
 | `/api/sales-orders` | `src/api/routes/sales-orders.ts` | `GET /` <sub>:165</sub><br>`POST /check-customer-pos` <sub>:742</sub><br>`POST /backfill-hub-by-state` <sub>:804</sub><br>`GET /status-changes` <sub>:925</sub><br>`GET /stats` <sub>:957</sub><br>`GET /delivery-progress` <sub>:1086</sub><br>`GET /late-to-customer` <sub>:1133</sub><br>`GET /repair-components` <sub>:1168</sub><br>`GET /:id/edit-eligibility` <sub>:1253</sub><br>`POST /:id/override-edit-lock` <sub>:1367</sub><br>`POST /` <sub>:1581</sub><br>`POST /:id/confirm` <sub>:2362</sub><br>`GET /:ref/footprint` <sub>:2705</sub><br>`GET /:id` <sub>:2712</sub><br>`PUT /:id` <sub>:2964</sub><br>`PATCH /:id/hub` <sub>:4402</sub><br>`DELETE /:id` <sub>:5066</sub><br>`POST /copy-for-service-order` <sub>:5172</sub><br>`POST /batch-company` <sub>:5554</sub> | gated |
 | `/api/purchase-orders` | `src/api/routes/purchase-orders.ts` | `GET /` <sub>:322</sub><br>`GET /stats` <sub>:415</sub><br>`POST /` <sub>:430</sub><br>`GET /:id` <sub>:701</sub><br>`PUT /:id` <sub>:760</sub><br>`POST /:id/email` <sub>:1104</sub><br>`DELETE /:id` <sub>:1165</sub> | gated |
 | `/api/purchase-invoices` | `src/api/routes/purchase-invoices.ts` | `GET /` <sub>:752</sub><br>`GET /:id` <sub>:801</sub><br>`POST /` <sub>:1047</sub><br>`POST /repair-gl-visibility` <sub>:1835</sub><br>`POST /backfill-gl-postings` <sub>:1881</sub><br>`PUT /:id` <sub>:1900</sub><br>`DELETE /:id` <sub>:2553</sub><br>`POST /:id/void` <sub>:2690</sub><br>`POST /:id/unvoid` <sub>:2795</sub> | gated |

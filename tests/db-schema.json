@@ -3445,6 +3445,7 @@
     "user_id"
   ],
   "users": [
+    "active_org_id",
     "created_at",
     "department",
     "display_name",

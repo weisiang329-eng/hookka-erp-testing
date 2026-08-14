@@ -129,17 +129,26 @@ for (const f of live) {
 // count is a backlog nobody can clear.
 const REGISTER = "docs/OWNER-DECISIONS.md";
 let registerFound = false;
+let resolvedCount = 0;
 if (existsSync(REGISTER)) {
   registerFound = true;
   const t = readFileSync(REGISTER, "utf8");
-  // Rows are `| **A1** | …` — the id column is what makes one countable.
-  decisions = (t.match(/^\|\s*\*\*[A-D]\d+\*\*\s*\|/gm) ?? []).length;
+  // Rows are `| **A1** | …`. Count only the ones still OPEN — a row the owner
+  // has ruled on carries ✅ DECIDED / ✅ DONE / ⏸️ PARKED right after the id.
+  // The first version counted every row and kept reporting 23 after three were
+  // settled, which is the same defect as counting the ledger's closed rulings:
+  // a backlog figure that does not fall when work is done teaches people to
+  // ignore it.
+  const rows = t.split(/\r?\n/).filter((l) => /^\|\s*\*\*[A-D]\d+\*\*\s*\|/.test(l));
+  const settled = rows.filter((l) => /DECIDED|DONE|PARKED|CLOSED|SHIPPED/i.test(l));
+  decisions = rows.length - settled.length;
+  resolvedCount = settled.length;
 }
 
 console.log("\n=== 3. DECLARED GAPS — labelled, not hidden ===\n");
 console.log(`  ${unmeasured} UNMEASURED markers (need a live query to resolve)`);
 console.log(registerFound
-    ? `  ${decisions} open owner decisions — see docs/OWNER-DECISIONS.md`
+    ? `  ${decisions} open owner decisions (${resolvedCount} already settled) — see docs/OWNER-DECISIONS.md`
     : "  owner decisions: NO REGISTER FOUND (docs/OWNER-DECISIONS.md missing)");
 console.log(
   "\n  These are the SAFE state. A gap that is labelled can be acted on;\n" +

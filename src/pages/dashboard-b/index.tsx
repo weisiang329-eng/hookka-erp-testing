@@ -51,6 +51,21 @@ type JobsBreakdown = {
   sofaSets: number;
   byCustomer: { customer: string; bedframeUnits: number; sofaSets: number }[];
 };
+/**
+ * One category's customer-revenue concentration, over ALL customers with
+ * revenue in the period. `largestPct` / `top10Pct` are null — never 0 — when
+ * the period has no revenue: 0% concentration reads as "perfectly spread",
+ * which is a claim, and "no revenue observed" is not that claim.
+ */
+type ConcentrationSlice = {
+  totalSen: number;
+  customerCount: number;
+  largestName: string | null;
+  largestPct: number | null;
+  largestSen: number;
+  top10Pct: number | null;
+  top10Sen: number;
+};
 type Overview = {
   success?: boolean;
   salesMonths?: string[];
@@ -115,6 +130,13 @@ type Overview = {
     sofaAvgSen: number;
     sofaSets: number;
     totalSen: number;
+  };
+  /** Server-computed over ALL customers — see dashboard-overview.ts. */
+  customerConcentration?: {
+    all: ConcentrationSlice;
+    bedframe: ConcentrationSlice;
+    sofa: ConcentrationSlice;
+    shownCount: number;
   };
   aovMonthlyByCustomer?: Record<
     string,
@@ -221,25 +243,31 @@ type WorkersResp = {
 type ComplianceResp = {
   success?: boolean;
   data?: {
+    // BUG-2026-08-13-141: each per-check count is `number | null`, and `null`
+    // means the check THREW. `0` now only ever means "looked, found nothing".
     counts: {
       total: number;
-      doPendingDispatch: number;
-      doNotDelivered: number;
-      doNotInvoiced: number;
-      soNoDo: number;
-      soNoInvoice: number;
+      /** Coverage of the sweep. `checksRun < checksTotal` ⇒ partial report. */
+      checksRun?: number;
+      checksTotal?: number;
+      doPendingDispatch: number | null;
+      doNotDelivered: number | null;
+      doNotInvoiced: number | null;
+      soNoDo: number | null;
+      soNoInvoice: number | null;
       // The two biggest categories on prod (114 + 39 of 380) and absent from
       // this projection until 2026-08-05, which is why they never reached a chip.
-      pricingIssues: number;
-      cogsIssues: number;
-      overdueOrders: number;
-      poNotReceived: number;
-      lowEfficiencyWorkers: number;
-      processSkips: number;
-      missingWipTimes: number;
-      incompleteBoms: number;
-      rdStalled: number;
+      pricingIssues: number | null;
+      cogsIssues: number | null;
+      overdueOrders: number | null;
+      poNotReceived: number | null;
+      lowEfficiencyWorkers: number | null;
+      processSkips: number | null;
+      missingWipTimes: number | null;
+      incompleteBoms: number | null;
+      rdStalled: number | null;
     };
+    unavailable?: { check: string; message: string }[];
   };
 };
 
@@ -742,6 +770,15 @@ export default function DashboardBPage() {
   // only one of them was honest. Only a 2xx body licenses the words.
   const compFailed =
     !compCounts && compFailure != null && isUnknownOutcome(compFailure);
+  // …and the SECOND way this tile could print a false all-clear: the fetch
+  // succeeds, but some of the checks inside it did not run. Until
+  // BUG-2026-08-13-141 every check swallowed its own error and reported `[]`,
+  // so `total` could be a green 0 off a sweep that had partly not happened.
+  // The server now publishes which checks failed; a partial sweep may not
+  // borrow the words "All clear".
+  const compUnavailable = compRaw?.data?.unavailable?.length ?? 0;
+  const compChecksTotal = compCounts?.checksTotal ?? 15;
+  const compPartial = !compFailed && compUnavailable > 0;
   // Progressive render — the page used to block on ALL nine fetches before
   // painting anything. Now it gates only on the overview fetch, which is
   // snapshot-accelerated (fast). Every other section renders the instant ITS
@@ -926,20 +963,41 @@ export default function DashboardBPage() {
       );
   }, [aovAll, custCat]);
 
-  const totalCustRev = useMemo(
+  // Σ of the rows this browser actually holds — the TOP TWELVE customers only
+  // (`dashboard-overview.ts` slices `aovByCustomer` to 12). It is a leaderboard
+  // subtotal, NOT the period's revenue, and it must never be a denominator: a
+  // share taken over it moves with its own numerator and can never fall.
+  // Kept solely as the pre-`customerConcentration` fallback below.
+  const shownCustRev = useMemo(
     () => aovFiltered.reduce((s, a) => s + a._catRev, 0),
     [aovFiltered],
   );
+
+  // BUG-2026-08-13-142 — the denominator every share on this card divides by:
+  // TOTAL revenue for the period across ALL customers, computed server-side
+  // because the browser cannot see past the top 12.
+  const conc = useMemo(
+    () => ov.customerConcentration?.[custCat] ?? null,
+    [ov.customerConcentration, custCat],
+  );
+  const concShown = ov.customerConcentration?.shownCount ?? null;
+  const concTotalSen = conc ? conc.totalSen : shownCustRev;
 
   const pieData = useMemo(() => {
     const src = (custCat === "all" ? aovFiltered : aovFiltered.filter((a) => a._catRev > 0))
       .map((a) => ({ name: a.customerName, value: a._catRev }));
     const top6 = src.slice(0, 6);
-    const othersRev = src.slice(6).reduce((s, a) => s + a.value, 0);
+    // "Others" spans EVERY customer outside the top 6 — including the ones past
+    // the 12 this page received — so the ring is a composition of the period's
+    // whole revenue rather than of a leaderboard. Clamped at 0 because the
+    // pre-fix fallback total cannot be smaller than its own top 6, but a stale
+    // payload could still disagree by a rounding sen.
+    const top6Sen = top6.reduce((s, a) => s + a.value, 0);
+    const othersRev = Math.max(0, concTotalSen - top6Sen);
     return othersRev > 0
       ? [...top6, { name: "Others", value: othersRev }]
       : top6;
-  }, [aovFiltered, custCat]);
+  }, [aovFiltered, custCat, concTotalSen]);
 
   // Pipeline conversion rate — follows the same period-scoped values as the
   // Order Pipeline widget (month figures for a month, all-time otherwise).
@@ -1146,20 +1204,25 @@ export default function DashboardBPage() {
                 ) : (
                   <p
                     className={`mt-0.5 text-3xl font-[800] tabular-nums leading-none ${
-                      (compCounts?.total ?? 0) === 0
+                      (compCounts?.total ?? 0) === 0 && !compPartial
                         ? "text-[#15803D]"
-                        : "text-[#1F1D1B]"
+                        : compPartial
+                          ? "text-[#71717A]"
+                          : "text-[#1F1D1B]"
                     }`}
                   >
                     {compCounts?.total ?? 0}
+                    {compPartial ? "+" : ""}
                   </p>
                 )}
                 <p className="text-xs text-[#9CA3AF] mt-1">
                   {compFailed
                     ? "Couldn't load — this is not a clean day, it is an unknown one"
-                    : (compCounts?.total ?? 0) === 0
-                      ? "All clear — nothing flagged today"
-                      : "process & SOP exceptions to action today"}
+                    : compPartial
+                      ? `${compUnavailable} of ${compChecksTotal} checks couldn't run — this count is a floor, not a total`
+                      : (compCounts?.total ?? 0) === 0
+                        ? "All clear — nothing flagged today"
+                        : "process & SOP exceptions to action today"}
                 </p>
               </div>
             </div>
@@ -1173,6 +1236,12 @@ export default function DashboardBPage() {
                 >
                   Retry
                 </button>
+              )}
+              {compPartial && (
+                <span className="inline-flex items-center gap-1 rounded-full border border-[#D4D4D8] bg-[#F4F4F5] px-2.5 py-1 text-[11px] font-semibold text-[#52525B]">
+                  Couldn&apos;t check
+                  <span className="tabular-nums">{compUnavailable}</span>
+                </span>
               )}
               {compCounts &&
                 (
@@ -1711,7 +1780,7 @@ export default function DashboardBPage() {
                 <span className="text-[11px] text-[#9CA3AF]">
                   Total{" "}
                   <span className="font-semibold text-[#1F1D1B]">
-                    {rm(totalCustRev)}
+                    {rm(concTotalSen)}
                   </span>
                 </span>
               </div>
@@ -1738,23 +1807,25 @@ export default function DashboardBPage() {
                     <CustomerPieChart
                       data={pieData}
                       pieColors={PIE_COLORS}
-                      totalCustRev={totalCustRev}
+                      totalCustRev={concTotalSen}
                     />
                   </Suspense>
+                  {/* The ring's headline is the single largest customer's share
+                      of TOTAL revenue — the standard concentration read, and the
+                      one number on this card that can actually rise into a risk.
+                      It used to be "Top 3" over the top-12 subtotal, which was
+                      ~100% by construction. */}
                   <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
                     <span className="text-[11px] uppercase tracking-wider text-[#9CA3AF]">
-                      Top 3
+                      Largest customer
                     </span>
                     <span className="text-3xl font-[800] text-[#1F1D1B]">
-                      {(
-                        (aovFiltered
-                          .filter((a) => custCat === "all" || a._catRev > 0)
-                          .slice(0, 3)
-                          .reduce((s, a) => s + a._catRev, 0) /
-                          Math.max(1, totalCustRev)) *
-                        100
-                      ).toFixed(0)}
-                      %
+                      {conc == null || conc.largestPct == null
+                        ? "—"
+                        : `${conc.largestPct.toFixed(1)}%`}
+                    </span>
+                    <span className="text-[10px] text-[#9CA3AF]">
+                      of total revenue
                     </span>
                   </div>
                 </div>
@@ -1823,14 +1894,11 @@ export default function DashboardBPage() {
                             </>
                           )}
                           <td className="py-1.5 text-right font-bold text-[#1F1D1B] tabular-nums">
-                            {/* Category modes use totalCustRev — the SAME
-                                per-customer Σ as the header Total and the
-                                rows below. Company-level avg × count rounds
-                                differently and showed a few-sen mismatch on
-                                the same card. */}
-                            {custCat === "all"
-                              ? rm(ov.aovCompany.totalSen)
-                              : rm(totalCustRev)}
+                            {/* The all-customer total for the active category —
+                                the SAME figure as the header Total chip and the
+                                concentration denominator below, so the card no
+                                longer carries two different "totals". */}
+                            {rm(concTotalSen)}
                           </td>
                         </tr>
                       )}
@@ -1949,36 +2017,41 @@ export default function DashboardBPage() {
               {/* Monthly multi-month bedframe/sofa strip removed 2026-06-05 —
                   owner views one month at a time and doesn't need the
                   cross-month breakdown here. */}
+              {/* Concentration — denominator is TOTAL revenue for the period
+                  across ALL customers, computed on the server (the browser only
+                  ever holds the top 12 rows). Rendering "—" rather than a
+                  percentage when the payload predates this field, or when the
+                  period carries no revenue, keeps a missing figure from reading
+                  as a diversified book. */}
               <p className="mt-3 text-[11px] text-[#9CA3AF]">
                 Concentration:{" "}
-                <span className="font-semibold text-[#1F1D1B]">
-                  Top 3 ={" "}
-                  {(
-                    (aovFiltered
-                      .filter((a) => custCat === "all" || a._catRev > 0)
-                      .slice(0, 3)
-                      .reduce((s, a) => s + a._catRev, 0) /
-                      Math.max(1, totalCustRev)) *
-                    100
-                  ).toFixed(0)}
-                  %
-                </span>{" "}
-                ·{" "}
-                <span className="font-semibold text-[#1F1D1B]">
-                  Top 5 ={" "}
-                  {(
-                    (aovFiltered
-                      .filter((a) => custCat === "all" || a._catRev > 0)
-                      .slice(0, 5)
-                      .reduce((s, a) => s + a._catRev, 0) /
-                      Math.max(1, totalCustRev)) *
-                    100
-                  ).toFixed(0)}
-                  %
-                </span>{" "}
-                of total{" "}
-                {custCat !== "all" ? `${custCat} ` : ""}
-                customer revenue ({rm(totalCustRev)}).
+                {conc == null || conc.largestPct == null ? (
+                  <>
+                    <span className="font-semibold text-[#1F1D1B]">—</span> no{" "}
+                    {custCat !== "all" ? `${custCat} ` : ""}revenue observed in
+                    this period, so no share of it can be stated.
+                  </>
+                ) : (
+                  <>
+                    <span className="font-semibold text-[#1F1D1B]">
+                      Largest customer = {conc.largestPct.toFixed(1)}%
+                    </span>
+                    {conc.largestName ? ` (${conc.largestName})` : ""} ·{" "}
+                    <span className="font-semibold text-[#1F1D1B]">
+                      Top 10 ={" "}
+                      {conc.top10Pct == null
+                        ? "—"
+                        : `${conc.top10Pct.toFixed(1)}%`}
+                    </span>{" "}
+                    of TOTAL {custCat !== "all" ? `${custCat} ` : ""}revenue (
+                    {rm(conc.totalSen)}) across all {conc.customerCount}{" "}
+                    customers
+                    {concShown != null && concShown < conc.customerCount
+                      ? ` — the table above lists the top ${concShown}`
+                      : ""}
+                    .
+                  </>
+                )}
               </p>
             </>
           )}

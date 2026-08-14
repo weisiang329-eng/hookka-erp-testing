@@ -24,6 +24,11 @@ import {
   type WorkerMonthlyEfficiency,
 } from "./efficiency-allowance";
 import { monthsOverdue } from "../../lib/terms";
+import {
+  collectOnTimeDelivery,
+  EMPTY_ON_TIME,
+  type OnTimeDelivery,
+} from "./on-time-delivery";
 
 // Fabric / foam item-group keys (mirror dashboard-overview.ts:43 + the foam
 // split the material section uses). Kept local so this file is self-contained.
@@ -110,7 +115,13 @@ export interface ProductionSection {
   bedframeUnits: number;
   sofaSets: number;
   overdueCount: number;
-  onTimePct: number | null; // null until the delivery pass lands
+  /**
+   * The DELIVERY section's figure, mirrored here because the Production
+   * headline reads it. It is the same number, not a second measurement — see
+   * `production.onTimePct = delivery.onTimePct` at the bottom of this file, and
+   * label it as delivery wherever it is printed.
+   */
+  onTimePct: number | null;
 }
 
 export interface ProductionCostSection {
@@ -230,7 +241,20 @@ export interface OperationsReport {
 export interface DeliverySection {
   producedToDispatchDays: number | null;
   dispatchToDeliveredDays: number | null;
+  /**
+   * On-time DELIVERY: `delivered_at` ≤ the customer's `customer_delivery_date`,
+   * per sales order, last delivery counts. See `lib/on-time-delivery.ts` for
+   * the rule and every exclusion. **Null, never 0 or 100, when nothing was
+   * judgeable** — and `onTime.coveragePct` beside it says how much of the
+   * period's delivery activity the percentage actually covers.
+   *
+   * It used to be `dispatched_at ≤ hookka_expected_dd`, i.e. our own estimate
+   * scored against itself, measured at the wrong end of the journey
+   * (BUG-2026-08-13-140).
+   */
   onTimePct: number | null;
+  /** Coverage + exclusions for `onTimePct`. */
+  onTime: OnTimeDelivery;
   stuckOver5Count: number;
   sampleSize: number;
 }
@@ -814,19 +838,23 @@ async function collectDelivery(
   db: Db,
   p: ResolvedPeriod,
 ): Promise<DeliverySection> {
-  // Greenfield — the system has no delivery-SLA metric. Two measurable stages:
-  // produced (latest PO completion on the DO's items) → dispatched (LOADED),
-  // and dispatched → delivered. On-time = dispatched on/before the internal
-  // target (hookka_expected_dd). "Ship" and "dispatch" are the same event in
-  // the system (there is no separate shipped timestamp), so it's 2 stages.
-  // delivery_orders has no org_id column, so this is not org-scoped (fine for
-  // the single operating company).
+  // Two measurable stages: produced (latest PO completion on the DO's items) →
+  // dispatched (LOADED), and dispatched → delivered. "Ship" and "dispatch" are
+  // the same event in the system (there is no separate shipped timestamp), so
+  // it's 2 stages. delivery_orders has no org_id column, so this is not
+  // org-scoped (fine for the single operating company).
+  //
+  // ON-TIME IS NOT COMPUTED HERE ANY MORE (BUG-2026-08-13-140). This query used
+  // to add `dispatchedAt <= hookka_expected_dd`, which scored our own internal
+  // target rather than the customer's date, at dispatch rather than at
+  // delivery, over a population that EXCLUDED anything never dispatched. It now
+  // comes from `collectOnTimeDelivery` — `delivered_at` vs
+  // `customer_delivery_date` — and carries its own coverage.
   const rows = await db
     .prepare(
       `SELECT dord.id AS "id",
               substr(dord.dispatched_at::text, 1, 10) AS "dispatchedAt",
               substr(dord.delivered_at::text, 1, 10) AS "deliveredAt",
-              substr(dord.hookka_expected_dd::text, 1, 10) AS "expectedDd",
               MAX(substr(po.completed_date::text, 1, 10)) AS "producedAt"
          FROM delivery_orders dord
          LEFT JOIN delivery_order_items di ON di.delivery_order_id = dord.id
@@ -835,14 +863,13 @@ async function collectDelivery(
           AND dord.status IN ('LOADED','DISPATCHED','IN_TRANSIT','SIGNED','DELIVERED','INVOICED')
           AND substr(dord.dispatched_at::text, 1, 10) >= ?
           AND substr(dord.dispatched_at::text, 1, 10) <= ?
-        GROUP BY dord.id, dord.dispatched_at, dord.delivered_at, dord.hookka_expected_dd`,
+        GROUP BY dord.id, dord.dispatched_at, dord.delivered_at`,
     )
     .bind(p.startYmd, p.endYmd)
     .all<{
       id: string;
       dispatchedAt: string | null;
       deliveredAt: string | null;
-      expectedDd: string | null;
       producedAt: string | null;
     }>();
 
@@ -850,8 +877,6 @@ async function collectDelivery(
     s1N = 0,
     s2Sum = 0,
     s2N = 0,
-    onTime = 0,
-    onTimeN = 0,
     stuck = 0;
   const all = rows.results ?? [];
   for (const r of all) {
@@ -870,17 +895,16 @@ async function collectDelivery(
         s2N += 1;
       }
     }
-    if (r.dispatchedAt && r.expectedDd) {
-      onTimeN += 1;
-      if (r.dispatchedAt <= r.expectedDd) onTime += 1;
-    }
   }
+
+  const onTime = await collectOnTimeDelivery(db, p.startYmd, p.endYmd);
 
   const round1 = (n: number) => Math.round(n * 10) / 10;
   return {
     producedToDispatchDays: s1N > 0 ? round1(s1Sum / s1N) : null,
     dispatchToDeliveredDays: s2N > 0 ? round1(s2Sum / s2N) : null,
-    onTimePct: onTimeN > 0 ? Math.round((onTime / onTimeN) * 100) : null,
+    onTimePct: onTime.onTimePct,
+    onTime,
     stuckOver5Count: stuck,
     sampleSize: all.length,
   };
@@ -1170,6 +1194,7 @@ export async function collectOperationsReport(
       producedToDispatchDays: null,
       dispatchToDeliveredDays: null,
       onTimePct: null,
+      onTime: EMPTY_ON_TIME,
       stuckOver5Count: 0,
       sampleSize: 0,
     }),

@@ -1,6 +1,17 @@
 # Recurring bug classes — the index that makes P5 executable
 
-> **Last verified: 2026-08-14** — restamped on branch `feat/leave-entitlement`:
+> **Last verified: 2026-08-14** — restamped on branch
+> `fix/on-time-delivery-and-decisions`: **C15 gains rows 39–41** (the Hookka Report's
+> on-time delivery %, the Daily Report's inability to say "I could not check", and the
+> customer-concentration denominator) and a **seventh corollary** — audit the DENOMINATOR
+> and the POPULATION, not only the numerator; ask what CANNOT appear in a figure and
+> whether its absence flatters us. Enforced by `tests/on-time-delivery.test.mjs`,
+> `tests/compliance-unknown-outcome.test.mjs` and the concentration block in
+> `tests/dashboard-truthfulness.test.mjs`; all 31 assertions proved RED by reintroducing
+> the bug with the file's bytes asserted changed on disk first. Suite at that point:
+> 4,078 tests / 0 fail (post-merge with `main`).
+>
+> **Previously verified: 2026-08-14** — restamped on branch `feat/leave-entitlement`:
 > **C4 gains row 4** (leave entitlement — a POLICY, not a price list, with the office on
 > 8 annual days and the worker's phone on 14, invisible because the two numbers never
 > share a screen). BUG-2026-08-13-130…133; enforced by `tests/leave-entitlement.test.mjs`.
@@ -899,6 +910,9 @@ place: `/api/department-performance` must keep dividing by clocked time,
 | 36 | **PCB** on every payslip | `/employees` › Payroll | `pcb: pcbOn ? 0 : 0` — hardcoded on both branches, feeds `totalDeductions → netPay`, under a tooltip that lists PCB as included | ⬜ open |
 | 37 | Balance-sheet **"balanced ✓"**, AR/AP Outstanding, Opening-Balance **"Balanced ✓" + enabled Post** | `/accounting` | all render `RM 0.00` / a green tick over a **failed** fetch — the same page already publishes `NO_FIGURE = "—"` for three other cards | ⬜ open — row 28's shape, on a second page |
 | 38 | Trade Finance *"Draws + unallocated = account balance"* | `/accounting` › Trade Finance | `unallocated = net − Σ outstanding` and `total = Σ outstanding`, so the identity holds in integer sen **always**; the red branch is unreachable | ⬜ open |
+| 39 | **"On-time delivery %"** — lead headline, Logistics desk AND Production desk | Hookka Report | scored `dispatched_at` (not delivery) against `hookka_expected_dd` (OUR back-derived target, which `kpi-metrics.ts:18-19` forbids scoring), over a population requiring `dispatched_at IS NOT NULL` — so an order NEVER DISPATCHED, the worst case, could not appear and lateness could only be under-reported. `production.onTimePct = delivery.onTimePct` printed one number twice, as if two desks agreed | ✅ 2026-08-14 (-131) — `delivered_at` vs `customer_delivery_date` per SO, last delivery counts, every exclusion counted and published |
+| 40 | the Daily Report headline, every chip, and the Command Center tile | `/daily-report` + `/dashboard` | **all 15 checks `catch → return []`**, so a check that THREW contributed 0 to its chip and 0 to the headline — a green `0` under *"A Quiet Day on the Floor"* over a sweep that had partly not happened. The payload had no way to say "3 of 15 could not run", so no renderer COULD have told the truth. Two of the fifteen are money detectors, and `pricing-integrity.ts`'s own header records the concrete case: a type error that threw on every row and reported a clean book | ✅ 2026-08-14 (-130) — checks rethrow, `runCheck` records the failure, counts are `number \| null`, `checksRun`/`checksTotal`/`unavailable` published |
+| 41 | *"Top 3 = N% … of total customer revenue"* | `/dashboard` › Sales by Customer | the denominator was the **top-12 subtotal** — the only rows the browser receives — so numerator and denominator moved together and the figure sat near 100% by construction. A concentration metric that cannot rise is not a metric. The card's own "All customers" row above it used the REAL total | ✅ 2026-08-14 (-132) — denominator is period TOTAL over all customers, computed server-side; largest-customer and top-10 shares published with `customerCount` |
 | 28 | `production_time_minutes`, the `efficiencyPct` and the `deptBreakdown` on EVERY attendance row | `POST /api/attendance` + `POST /api/worker/clock` + the midnight auto-close → `GET /api/attendance`, `GET /api/worker/history` | `round(workingMinutes × 0.85)` — a fixed ratio of the clock time, written at clock-out and captioned as production. The efficiency divided it by the standard day, so it measured ATTENDANCE LENGTH; the dept split republished the same number under an EMPTY productCode. Prod Aug 2026: 180,928 / 212,850 = **0.85005**. Three writers, one of which (the forgotten-punch auto-close) produced a flat **85%** that could not vary — both sides came from `stdMin` | ✅ 2026-08-13 (-103) — writers cleared, readers publish `null` / `[]`, column made nullable |
 
 **Enforced by** six files, all structural (`readFileSync` source assertions),
@@ -954,6 +968,22 @@ with the same confidence a fabricated figure does. When auditing a screen, ask o
 control *"what would prove this did what it says?"* and of every tick *"what input makes this
 go red?"* — if the answer is "nothing", it belongs in this class.
 
+**A seventh corollary, from rows 39–41 (2026-08-14).** *Audit the DENOMINATOR and the
+POPULATION, not only the numerator.* All three of these rows are arithmetic nobody would
+call wrong. Row 39's population silently dropped the worst case (`dispatched_at IS NOT
+NULL` — an order never dispatched cannot be late); row 40's headline summed fifteen checks
+of which any number may not have run; row 41 divided by its own numerator's source. The
+question to ask of any published share or count is **"what CANNOT appear in this figure,
+and would its absence flatter us?"** — and, having answered it, to publish the answer
+beside the number. Every one of the three fixes here ships a coverage field for exactly
+that reason (`onTime.coveragePct`, `counts.checksRun`/`checksTotal`, `customerCount`).
+
+Row 39 adds a narrower one worth stating on its own: **a target we generate is not a
+promise we made.** `hookka_expected_dd` is the customer's date minus our own buffer, so
+scoring against it can only ever measure whether we hit our own arithmetic. When a metric
+is about keeping a commitment, find the field the CUSTOMER agreed to — here
+`sales_orders.customer_delivery_date`, which existed and was 99.8% populated the whole
+time.
 **A sixth corollary, from row 28.** *A metric can be honest arithmetic on a dishonest
 input.* Nothing in the attendance efficiency formula was wrong —
 `productionTimeMinutes ÷ standardMinutes × 100` is exactly how you compute an efficiency.

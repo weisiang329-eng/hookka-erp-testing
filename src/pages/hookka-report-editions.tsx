@@ -100,6 +100,18 @@ interface OperationsReport {
     producedToDispatchDays: number | null;
     dispatchToDeliveredDays: number | null;
     onTimePct: number | null;
+    /** Coverage of `onTimePct` — see src/api/lib/on-time-delivery.ts. */
+    onTime?: {
+      onTimePct: number | null;
+      judged: number;
+      onTime: number;
+      late: number;
+      excludedNoCustomerDate: number;
+      excludedNotDelivered: number;
+      coveragePct: number | null;
+      population: number;
+      basis: string;
+    };
     stuckOver5Count: number;
     sampleSize: number;
   };
@@ -268,7 +280,25 @@ export function OperationsEdition({
   const units = r.production.bedframeUnits + r.production.sofaSets;
   const isMonthly = edition === "monthly";
 
-  const leadHeadline = `${units} Units Off the Floor · On-Time at ${
+  // On-time delivery coverage (BUG-2026-08-13-140). The percentage covers only
+  // the sales orders that are FULLY delivered AND carry a customer-committed
+  // date; everything else is excluded and counted. A share whose population is
+  // incomplete has to publish that population — BUG-2026-08-13-096 — so the
+  // coverage sentence travels with the figure on both desks that print it, and
+  // an entirely unjudgeable period prints "—", never 0% or 100%.
+  const ot = r.delivery.onTime;
+  const otCoverage = ot
+    ? ot.judged === 0
+      ? `No delivery could be scored this period: ${ot.excludedNotDelivered} order${
+          ot.excludedNotDelivered === 1 ? "" : "s"
+        } not fully delivered, ${ot.excludedNoCustomerDate} with no customer delivery date.`
+      : `${ot.onTime} of ${ot.judged} fully-delivered orders arrived on or before the customer's date` +
+        ` (${ot.late} late). Covers ${ot.coveragePct ?? "—"}% of the ${ot.population} orders` +
+        ` with a delivery this period — ${ot.excludedNotDelivered} are not fully delivered yet` +
+        ` and ${ot.excludedNoCustomerDate} carry no customer delivery date, so neither can be judged.`
+    : null;
+
+  const leadHeadline = `${units} Units Off the Floor · On-Time Delivery at ${
     r.production.onTimePct == null ? "—" : r.production.onTimePct + "%"
   }`;
   const leadBody =
@@ -282,7 +312,17 @@ export function OperationsEdition({
       : ".");
 
   const byTheNumbers: [string, React.ReactNode][] = [
-    ["On-time delivery", r.production.onTimePct == null ? "—" : `${r.production.onTimePct}%`],
+    [
+      "On-time delivery",
+      <span key="ot">
+        {r.production.onTimePct == null ? "—" : `${r.production.onTimePct}%`}
+        {ot && ot.judged > 0 && (
+          <span className="ml-1 text-[10px] font-normal text-[#6B7280]">
+            ({ot.judged} of {ot.population})
+          </span>
+        )}
+      </span>,
+    ],
     ["Units completed", units],
     ["Production cost", rmK(r.productionCost.totalSen)],
     ["Sales", rmK(r.sales.totalSen)],
@@ -386,12 +426,24 @@ export function OperationsEdition({
                   : `${r.delivery.dispatchToDeliveredDays} d`,
               ],
               [
-                "On-time",
+                "On-time delivery",
                 r.delivery.onTimePct == null ? "—" : `${r.delivery.onTimePct}%`,
               ],
+              ...(ot
+                ? ([
+                    ["… judged", `${ot.judged} of ${ot.population} orders`],
+                    ["… not fully delivered", ot.excludedNotDelivered],
+                    ["… no customer date", ot.excludedNoCustomerDate],
+                  ] as [string, React.ReactNode][])
+                : []),
               ["Stuck > 5 days after production", r.delivery.stuckOver5Count],
             ]}
           />
+          {otCoverage && (
+            <p className="mt-2 text-[10px] leading-snug text-[#6B7280]">
+              {otCoverage} Measured as {r.delivery.onTime?.basis}.
+            </p>
+          )}
         </Desk>
 
         <Desk desk="Workforce Desk" headline="Efficiency & Bonus">

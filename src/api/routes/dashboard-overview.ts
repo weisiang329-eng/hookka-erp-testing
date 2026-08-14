@@ -139,7 +139,10 @@ app.get("/", async (c) => {
     }
   }
 
-  const data = await cached(c, `dashboard:overview:${orgId}:v22:${period}`, 60, async () => {
+  // v23 (2026-08-14, BUG-2026-08-13-142): payload gained `customerConcentration`.
+  // A pre-fix body has no such key, and the card would render "—" until the 60s
+  // TTL rolled; bumping the version makes that window zero.
+  const data = await cached(c, `dashboard:overview:${orgId}:v23:${period}`, 60, async () => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -1368,6 +1371,69 @@ app.get("/", async (c) => {
         totalSen: bfVal + soVal,
       };
     })();
+
+    // ── Customer revenue concentration (BUG-2026-08-13-142) ────────────────
+    //
+    // Computed HERE, over `aovMap` — every customer with activity in the
+    // period — and not in the browser, which only ever receives the top 12
+    // rows of `aovByCustomer`. That truncation was the whole defect: the card
+    // divided the top-3 subtotal by the sum of those same 12 rows, so the
+    // denominator moved with the numerator and "Top 3 = 92%" was mostly an
+    // artefact of the slice, not a statement about risk. A concentration
+    // figure whose denominator is a leaderboard cannot fall.
+    //
+    // Owner's ask (2026-08-14) is the standard pair: the LARGEST single
+    // customer as a share of total revenue, and the TOP TEN as a share of
+    // total revenue — both over ALL customers.
+    //
+    // `customerCount` travels with each figure so the reader can see the
+    // population the percentage was taken over; a share of total is only
+    // meaningful next to how many parties that total was split between.
+    const concentrationFor = (
+      revOf: (e: { bfVal: number; soVal: number }) => number,
+    ) => {
+      const revs: { name: string; sen: number }[] = [];
+      let totalSen = 0;
+      for (const [name, e] of aovMap.entries()) {
+        const sen = revOf(e);
+        if (sen <= 0) continue;
+        revs.push({ name, sen });
+        totalSen += sen;
+      }
+      revs.sort((a, b) => b.sen - a.sen);
+      // No revenue at all in the period → null, never 0. A 0% concentration
+      // reads as "perfectly diversified", which is the opposite of "we cannot
+      // see any revenue here" (C15: `0` is a claim, not a blank).
+      if (totalSen <= 0) {
+        return {
+          totalSen: 0,
+          customerCount: 0,
+          largestName: null as string | null,
+          largestPct: null as number | null,
+          largestSen: 0,
+          top10Pct: null as number | null,
+          top10Sen: 0,
+        };
+      }
+      const top10Sen = revs.slice(0, 10).reduce((s, r) => s + r.sen, 0);
+      const pct1 = (sen: number) => Math.round((sen / totalSen) * 1000) / 10;
+      return {
+        totalSen,
+        customerCount: revs.length,
+        largestName: revs[0]?.name ?? null,
+        largestPct: revs[0] ? pct1(revs[0].sen) : null,
+        largestSen: revs[0]?.sen ?? 0,
+        top10Pct: pct1(top10Sen),
+        top10Sen,
+      };
+    };
+    const customerConcentration = {
+      all: concentrationFor((e) => e.bfVal + e.soVal),
+      bedframe: concentrationFor((e) => e.bfVal),
+      sofa: concentrationFor((e) => e.soVal),
+      /** How many of `all.customerCount` the table below actually lists. */
+      shownCount: aovByCustomer.length,
+    };
     // Per-customer monthly AOV (only the customers shown in the table).
     const aovMonthlyByCustomer: Record<
       string,
@@ -2196,6 +2262,7 @@ app.get("/", async (c) => {
       },
       aovByCustomer,
       aovCompany,
+      customerConcentration,
       aovMonthlyByCustomer,
       topSellers,
       topSellersByCustomer,

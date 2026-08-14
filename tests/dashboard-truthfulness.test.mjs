@@ -72,6 +72,7 @@ const DASH = "src/pages/dashboard-b/index.tsx";
 const OCR = "src/pages/dashboard-b/OcrAccuracyCard.tsx";
 const EDITIONS = "src/pages/hookka-report-editions.tsx";
 const AGG = "src/api/lib/operations-report.ts";
+const OVERVIEW = "src/api/routes/dashboard-overview.ts";
 const dash = () => stripComments(read(DASH));
 const ocr = () => stripComments(read(OCR));
 
@@ -203,5 +204,90 @@ test("the receivables captions do not claim days over a month-diff bucket", () =
   assert.ok(
     !/\["\d+–\d+d",\s*r\.receivables\.aging\./.test(strip),
     'a "31–60d"-style caption is back on a bucket counted in whole months',
+  );
+});
+
+// ===========================================================================
+// BUG-2026-08-13-142 — the customer-concentration denominator.
+//
+// "Top 3 = N% … of total customer revenue" divided the top-3 subtotal by the
+// sum of the TOP TWELVE customers — the only rows the browser receives
+// (`dashboard-overview.ts` slices `aovByCustomer` to 12). Numerator and
+// denominator came from the same leaderboard, so the figure sat near 100% by
+// construction and could not rise into a risk however concentrated the book
+// got. The card's own "All customers" row, one line above, used the REAL
+// all-customer total — two different totals on one card.
+//
+// Owner's decision, 2026-08-14: denominator = TOTAL revenue for the period,
+// all customers; surface the largest single customer's share and the top ten's.
+// ===========================================================================
+
+test("concentration is computed server-side, over every customer", () => {
+  const src = stripComments(read(OVERVIEW));
+  assert.ok(
+    /const customerConcentration = \{/.test(src),
+    "the figure must be computed where ALL the customers are — the browser " +
+      "only ever holds the top 12, so it structurally cannot do this",
+  );
+  assert.ok(
+    /for \(const \[name, e\] of aovMap\.entries\(\)\)/.test(src),
+    "it must iterate aovMap (every customer), not the sliced aovByCustomer",
+  );
+  assert.ok(
+    /largestPct|top10Pct/.test(src) && /customerCount/.test(src),
+    "the payload must carry the two shares AND the population they were taken " +
+      "over — a share of total means nothing without how many parties share it",
+  );
+  assert.ok(
+    /if \(totalSen <= 0\) \{/.test(src),
+    "a period with no revenue must yield null, not 0% — '0% concentrated' " +
+      "reads as perfectly diversified, which is a claim",
+  );
+});
+
+test("no share on the Sales-by-Customer card divides by the top-12 subtotal", () => {
+  const src = dash();
+  // The old denominator was `totalCustRev`, the Σ of the rows on screen. It is
+  // renamed `shownCustRev` and may survive ONLY as the pre-payload fallback —
+  // any other use is the bug returning under a new name.
+  assert.ok(
+    !/totalCustRev\b(?!=)/.test(src.replace(/totalCustRev=\{concTotalSen\}/g, "")),
+    "`totalCustRev` is back as a denominator; it is a leaderboard subtotal",
+  );
+  const uses = [...src.matchAll(/shownCustRev/g)].length;
+  assert.equal(
+    uses,
+    2,
+    "shownCustRev may appear exactly twice — its own declaration and the " +
+      "`conc ? conc.totalSen : shownCustRev` fallback. Any third use is a " +
+      "share being taken over the visible rows again",
+  );
+  assert.ok(
+    /const concTotalSen = conc \? conc\.totalSen : shownCustRev;/.test(src),
+    "one denominator, named, derived from the server figure",
+  );
+});
+
+test("the card publishes largest-customer and top-10 shares, and its coverage", () => {
+  const src = dash();
+  assert.ok(
+    /Largest customer = \{conc\.largestPct\.toFixed\(1\)\}%/.test(src),
+    "the largest single customer's share of TOTAL revenue is the standard read",
+  );
+  assert.ok(
+    /Top 10 =/.test(src),
+    "…and the top ten's, per the owner's decision",
+  );
+  assert.ok(
+    /of TOTAL \{custCat !== "all" \? `\$\{custCat\} ` : ""\}revenue/.test(src),
+    "the caption must state that the denominator is the period total",
+  );
+  assert.ok(
+    /across all \{conc\.customerCount\}\{" "\}/.test(src),
+    "and how many customers that total is spread across",
+  );
+  assert.ok(
+    /conc == null \|\| conc\.largestPct == null \?/.test(src),
+    "a missing/zero-revenue payload must render an em dash, not a percentage",
   );
 });

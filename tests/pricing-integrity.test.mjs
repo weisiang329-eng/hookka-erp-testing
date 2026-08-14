@@ -125,16 +125,26 @@ test("results are ordered worst-first", async () => {
   assert.match(out[0].ref, /SO-big/);
 });
 
-test("a broken query degrades to empty — the daily report must never 500 on this", async () => {
-  const out = await checkPricingIntegrity(
-    fakeDb({
-      throwOn: "invoice_items",
-      heightRows: [
-        { companySOId: "SO-1", status: "X", lineNo: 1, productCode: "A", quantity: 1, divanHeightInches: 10, divanPriceSen: 0, legHeightInches: null, legPriceSen: 0 },
-      ],
-    }),
+test("a broken query is an UNKNOWN, not a clean book", async () => {
+  // CHANGED 2026-08-14 (BUG-2026-08-13-141). This used to assert that a broken
+  // sub-check "contributes nothing" and that the healthy one still reported.
+  // That is exactly how RM 12,455 of unbilled surcharge could have gone on
+  // hiding: this file's own header records a boolean-vs-int type error that
+  // threw on every row, was swallowed, and reported a clean book. Silence about
+  // money is not an all-clear. The rejection is caught ONCE, in
+  // `collectComplianceData`'s `runCheck`, which marks the check unavailable —
+  // so the daily report still does not 500, and it no longer lies either.
+  await assert.rejects(
+    () =>
+      checkPricingIntegrity(
+        fakeDb({
+          throwOn: "invoice_items",
+          heightRows: [
+            { companySOId: "SO-1", status: "X", lineNo: 1, productCode: "A", quantity: 1, divanHeightInches: 10, divanPriceSen: 0, legHeightInches: null, legPriceSen: 0 },
+          ],
+        }),
+      ),
+    /boom/,
+    "a failed money invariant must propagate rather than report zero issues",
   );
-  // The healthy check still reports; the broken one contributes nothing.
-  assert.equal(out.length, 1);
-  assert.equal(out[0].kind, "HEIGHT_CHOSEN_BUT_FREE");
 });

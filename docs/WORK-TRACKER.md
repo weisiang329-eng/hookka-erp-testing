@@ -1,6 +1,6 @@
 # Hookka ERP — Work Tracker
 
-> **Last verified: 2026-08-14** — branch `feat/leave-entitlement` added below (open, not merged, its entry is the newest). Previously: branch `feat/job-card-completed-at` added below (open, not merged). Previously: branch `fix/security-posture` added below (open, not merged). Previously: PRs #304/#310/#312/#313/#314/#315/#316/#317 all MERGED and
+> **Last verified: 2026-08-14** — branch `fix/on-time-delivery-and-decisions` added below (open, not merged, its entry is the newest; its bug ids were renumbered 130-133 → 140-143 because `feat/leave-entitlement` claimed 130-133 and merged to `main` first). Previously: branch `feat/leave-entitlement` (MERGED as #326). Previously: branch `feat/job-card-completed-at` added below (open, not merged). Previously: branch `fix/security-posture` added below (open, not merged). Previously: PRs #304/#310/#312/#313/#314/#315/#316/#317 all MERGED and
 > **Last verified: 2026-08-14** — restamped on branch `fix/money-input-parsing` (its entry is the newest below, not yet deployed). PRs #304/#310/#312/#313/#314/#315/#316/#317 all MERGED and
 > deployed; zero PRs open, one worktree. Previously verified against the merged PRs on `main` (#266-#300) plus the open PRs #304 (branch `fix/stock-grn-org-filter`) and the accounting-audit branch `fix/accounting-audit`, whose entry is the newest below. This file is a live queue — restamp it whenever you add or close an item.
 
@@ -13,6 +13,31 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-14 — 🔵 Four owner-decided report/metric items (branch `fix/on-time-delivery-and-decisions`, **NOT deployed, NOT merged**)
+
+All four decisions were MADE by the owner before the work started; this branch implements
+them. It closes items 7, 8, 10 and 14 of `docs/DASHBOARD-DATA-AUDIT.md` Part 6.
+
+| Ask | State | Entry |
+|---|---|---|
+| **On-time delivery must measure delivery** — owner: 「我们送货的时间减掉我们顾客的 delivery date」 | ✅ done | BUG-2026-08-13-140 · new `src/api/lib/on-time-delivery.ts`; `delivered_at` ≤ `customer_delivery_date`, per SO, last delivery counts |
+| …state how never-delivered / no-customer-date / part-deliveries are handled, and PUBLISH the excluded counts | ✅ done | all three excluded and counted; `coveragePct` + `population` printed on the Logistics desk and abbreviated beside the headline; `onTimePct` is null (never 0/100) when nothing is judgeable |
+| …keep the production-timeliness metric if it has other consumers | ✅ honoured | `agent-learning.ts` adherence untouched — it feeds the morning brief's *"Plan vs Actual"* section and was never labelled delivery (the brief's claim that it was is wrong; see the bug entry) |
+| **The compliance report must be able to say "I could not check"** | ✅ done | BUG-2026-08-13-141 · 15 checks rethrow; `runCheck` records; counts `number \| null`; `checksRun`/`checksTotal`/`unavailable` published; both renderers refuse a clean headline over a partial sweep |
+| **Concentration denominator → TOTAL revenue**, surface largest-customer % and top-10 % | ✅ done | BUG-2026-08-13-142 · computed server-side over all customers; one denominator on the card; KV key bumped v22→v23 |
+| **Delete the dead `/api/reports/brief.json`** plus what it makes dead; regenerate `docs/API.md` | ✅ done | BUG-2026-08-13-143 · route + `buildBriefJsonCached` + `warmBriefReport` + its `worker.ts` call; API.md regenerated (one handler removed) |
+| …do NOT touch the delivery-agent brief.json or the LIVE HTML brief | ✅ honoured | both guarded by `tests/reports-brief-json-removed.test.mjs`, one test per direction of the confusion |
+
+**Gates:** `npx tsc -p tsconfig.app.json --noEmit` exit 0 · `npm test` 4,078 tests / 0 fail (post-merge with `main`) ·
+`check-docs-freshness` OK · `check-codebase-map` OK · `check-secrets` OK ·
+`gen-api-docs --check` up to date. **31 mutations proved RED** (bytes-changed-on-disk asserted
+before each run). NOT deployed — no prod verification has been done.
+
+**Two claims in the assigning brief were wrong, and are corrected in the bug entries:**
+(a) `agent-learning.ts:458` is NOT what the Hookka Report labels "On-time delivery %" — that
+came from `operations-report.ts:873-876`; (b) the compliance report has **15** checks, not 13.
+
+---
 ## 2026-08-14 — 🔵 Leave entitlement into data + year reset + public holidays (branch `feat/leave-entitlement`, **NOT deployed, NOT merged**)
 
 The owner's ask: leave must respect the public holidays he configures — 「应该根据我在

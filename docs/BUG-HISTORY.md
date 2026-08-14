@@ -34,6 +34,116 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-103 — the factory cannot measure how long any job takes, because the system throws the time away at the moment of capture `production-orders` `data-integrity` 🟢
+
+**Symptom.** There is no honest answer anywhere in the app to "how long did this card take?",
+"how many productive minutes did this worker actually put in today?", or "is this department
+faster than it was last month?". Every screen that appears to answer one is showing the
+ESTIMATE, or a fixed ratio of a different number.
+
+**Root cause — not a missing feature, a discarded measurement.** The completion write paths all
+had the full ISO timestamp in scope and stored only its first ten characters:
+
+```js
+const nowIso = new Date().toISOString();
+const today  = nowIso.split("T")[0];   // production-orders/_helpers.ts — the time is discarded
+...
+if (!updated.completedDate) updated.completedDate = today;
+```
+
+Fourteen `.slice(0, 10)` / `split("T")[0]` truncations sit across the production and worker
+write paths. Measured on prod 2026-08-14:
+
+| column | value | meaning |
+|---|---|---|
+| `job_cards.distributed_at` | `2026-08-13T01:03:11.395Z` | a FULL instant, 100% populated |
+| `job_cards.completed_date` | `2026-08-14` | date only |
+| `job_cards.production_time_minutes` | `= est_minutes` on **all 36,796 rows** (0 differ) | the estimate |
+| `job_cards.actual_minutes` | `= est_minutes` on 100% of rows carrying a value | the estimate |
+| `attendance_records.production_time_minutes` | `working_minutes × 0.85` | a hardcoded constant |
+
+So a card's elapsed time is not derivable at all: one end of the interval is recorded to the
+millisecond and the other is rounded to the day. Every "production time" figure downstream is
+therefore an estimate wearing the typeface of a measurement — which is why the department
+efficiency KPI could sit at ~100% forever (BUG-2026-08-13-004, C15 row 1). **This is the
+upstream cause of that class, not another instance of it**: those numbers are fabricated
+because the only real input was thrown away before anything could read it.
+
+**Fix — capture only. No figure is recomputed here.** `job_cards.completed_at` (nullable TEXT
+holding a full ISO-8601 instant, snake_case, indexed) added ALONGSIDE `completed_date`, which is
+untouched. Migrations are inert on deploy, so the column arrives via `ensureJobCardCompletedAt`
+(`src/api/lib/job-card-completed-at.ts`), awaited at the top of every handler that writes it;
+`migrations-postgres/0227_job_cards_completed_at.sql` is the record.
+
+The rule the module enforces: **`completed_at` is a MEASUREMENT, never a derivation.** The full
+`nowIso` is stored ONLY by the four paths that observe a completion happen —
+`POST /:id/scan-complete`, `/scan-complete-dept`, `/scan-complete-shared`
+(`production-orders.ts`) and the office PATCH's auto-stamp (`applyPoUpdate`,
+`production-orders/_helpers.ts`). Everything else routes through `reconcileCompletedAt`, which
+can only KEEP an instant already on the row (same day) or DROP it. It is property-tested over
+the whole input cross-product to prove it can never return a value derived from the date.
+
+**Deliberately NOT backfilled.** Historical `completed_at` stays NULL. The time is already gone
+for those rows and a plausible-looking `09:00` would be exactly the C15 class this system keeps
+producing. NULL is readable as "not measured"; a fabricated timestamp is not.
+
+**Every write path found, and what each does now.** The class rule is that `completedAt` must
+travel with `completedDate` in the SAME statement — otherwise the pair can drift, and a stale
+instant survives a card being re-dated, un-completed or QC-blocked.
+
+| # | site | now |
+|---|---|---|
+| 1 | `production-orders.ts` `POST /:id/scan-complete` | **OBSERVES** — `observedCompletionAt(nowIso)` |
+| 2 | `production-orders.ts` `POST /:id/scan-complete-dept` | **OBSERVES** |
+| 3 | `production-orders.ts` `POST /:id/scan-complete-shared` | **OBSERVES** |
+| 4 | `production-orders/_helpers.ts` `applyPoUpdate` — the `if (isDone)` auto-stamp | **OBSERVES** |
+| 5 | `production-orders/_helpers.ts` `applyPoUpdate` — explicit `body.completedDate` | reconciles (a typed date is an assertion about a DAY, not an observation); clearing the date clears the instant |
+| 6 | `sheets-sync.ts` apps-script webhook | reconciles; a revert to not-done clears it |
+| 7 | `qc-pending.ts` `completeInspection` — WIP FAIL resets the card | **CLEARS** |
+| 8 | `import-completion/completion-cascades.ts` `/clear-future-completions` | **CLEARS** |
+| 9 | `import-completion/_shared.ts` `processRow` (the spreadsheet importer) | reconciles |
+| 10–11 | `import-completion/date-fixes.ts` `/fix-misparsed-jan-dates`, `/fix-misparsed-dates` | NULL — a plan exists only where the DAY changes, so any instant belongs to the old one |
+| 12–13 | `import-completion/completion-cascades.ts` `/cascade-upstream-completion`, `/cascade-leak-pass` | NULL — derived date, nothing observed |
+| 14–15 | `import-completion/wip-fixes.ts` `/uph-pofold-backfill`, `/fab-cut-pofold-backfill` | NULL — same |
+| 16–18 | `import-completion/so-co-do-backfills.ts` `/migrate-do-from-excel` (×2), `/backfill-complete-stray-jc-co2606002` | NULL — a legacy DO's dispatch date / a sibling card's date |
+| 19 | `import-completion/fg-fabric.ts` `/backfill-fab-cut-merge` | NULL — rebuilds an anchor from a plan |
+
+`src/api/routes/worker.ts` was checked and is **not** a completion writer: it READS
+`completedDate` in eight places, its scans funnel into sites 1–3, and its QC submit into site 7.
+INSERT paths (`production-orders.ts:1462`, `_shared/production-builder.ts`, `jobcard-sync.ts`,
+`fg-fabric.ts`) create fresh rows where `completed_at` defaults to NULL — a new row cannot carry
+a stale instant, so they are correct unchanged.
+
+**What becomes computable once this has run for a while** (nothing is computed today — the
+column starts empty by design):
+
+- **real per-card duration** — `completed_at − distributed_at`, both full ISO instants on the
+  same row, which is why `completed_at` is TEXT and not TIMESTAMPTZ;
+- **real per-worker daily production minutes** — the card carries `pic1_id` / `pic2_id`, so
+  measured durations aggregate per person per day;
+- **genuine efficiency** — real production minutes ÷ real clocked minutes, instead of
+  `est ÷ est` or `working_minutes × 0.85`.
+
+**Verified.** `npx tsc -p tsconfig.app.json --noEmit` exit 0 · `npm test` 3,998 tests / 0 fail ·
+`check-docs-freshness` OK · `check-codebase-map` OK · `check-secrets` OK ·
+`gen-api-docs --check` up to date. All 11 assertions in `tests/job-card-completed-at.test.mjs`
+proved RED by reintroducing the bug — each mutation asserted the bytes on disk changed FIRST and
+restored them after. The guards are EOL-agnostic (every read normalises CRLF → LF before
+matching), and the class sweep asserts it found ≥ 15 completion statements so it cannot pass
+over an empty set.
+
+**NOT verified.** Nothing on prod — this branch is not deployed. The prod figures quoted above
+are the ones supplied with the finding, not re-queried in this session. After deploy the check
+is: complete one card by scan, then confirm `completed_at` carries a full instant while
+`completed_date` is still exactly ten characters, and that a card completed before the deploy
+still reads NULL.
+
+**Not changed, deliberately.** Every efficiency calculation, `attendance.ts`'s CLOCK_OUT branch
+and `src/api/lib/efficiency-report.ts` — making those honest is separate work, in flight
+elsewhere. This change only starts recording the truth so a real measurement becomes possible.
+
+---
+
 ## BUG-2026-08-13-097 — the company switcher was one global row, so switching company moved it for every other logged-in user at once `multi-tenant` `ui-frontend` `data-integrity` 🟢
 
 **Symptom.** An operator picks HOUZS in the sidebar company switcher. Every other signed-in

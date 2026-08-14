@@ -21,6 +21,15 @@ import {
   type SiblingPo,
 } from "../../lib/fabric-usage";
 import { checkProductionOrderLocked, lockedResponse } from "../../lib/lock-helpers";
+// job_cards.completed_at — the INSTANT a card completed, captured alongside the
+// date-only completed_date (which is unchanged). See the header of that module
+// for why the instant is only ever OBSERVED, never derived from a date.
+import {
+  ensureJobCardCompletedAt,
+  observedCompletionAt,
+  readCompletedAt,
+  reconcileCompletedAt,
+} from "../../lib/job-card-completed-at";
 import { emitAudit } from "../../lib/audit";
 import { applyPackingRack } from "../../lib/packing-rack-write";
 import { getOrgId, tryGetOrgId, DEFAULT_ORG_ID } from "../../lib/tenant";
@@ -336,6 +345,15 @@ export type JobCardRow = {
   pic2Id: string | null;
   pic2Name: string | null;
   completedDate: string | null;
+  // The INSTANT the system OBSERVED this card complete (full ISO-8601), as
+  // opposed to `completedDate`, which is the day it is filed under. NULL means
+  // "not measured" — every row completed before 2026-08-14, and every card
+  // whose date was typed, imported or backfilled rather than scanned. It is
+  // never derived from `completedDate`; see src/api/lib/job-card-completed-at.ts.
+  // Optional on the type because a `SELECT *` taken before the self-applying
+  // ALTER lands has no such key at all.
+  completedAt?: string | null;
+  completed_at?: string | null;
   estMinutes: number;
   actualMinutes: number | null;
   category: string | null;
@@ -4331,7 +4349,14 @@ export async function applyPoUpdate(
     }
   }
   const nowIso = new Date().toISOString();
+  // `today` still feeds completed_date, which is date-only BY DESIGN and stays
+  // that way. What was missing is the instant beside it — `nowIso` is now also
+  // stored, in job_cards.completed_at.
   const today = nowIso.split("T")[0];
+  // Migrations are inert on deploy (CLAUDE.md) — job_cards.completed_at reaches
+  // prod only through this awaited self-apply, and it must land before the
+  // first statement below that mentions the column.
+  await ensureJobCardCompletedAt(db);
 
   // Load all job cards for this PO — used for wip-cascade and progress calc.
   const jcRes = await db
@@ -4389,6 +4414,12 @@ export async function applyPoUpdate(
 
     // Mutate a shallow copy — final UPDATE statement below writes it.
     const updated: JobCardRow = { ...jcRow };
+    // Normalise the completion INSTANT onto one key up front. A `SELECT *` row
+    // can deliver it as `completedAt` (rename-map folded) or `completed_at`
+    // (raw), or not at all on an isolate whose ALTER has not landed yet — and
+    // the UPDATE below binds a single field, so a value hiding under the other
+    // spelling would be silently overwritten with NULL.
+    updated.completedAt = readCompletedAt(jcRow);
 
     if (body.status) {
       updated.status = body.status;
@@ -4406,7 +4437,16 @@ export async function applyPoUpdate(
         uphRollbackTriggered = true;
       }
       if (isDone) {
-        if (!updated.completedDate) updated.completedDate = today;
+        if (!updated.completedDate) {
+          updated.completedDate = today;
+          // The card is being observed to complete RIGHT NOW, so this is the
+          // one place on the office path where a real instant exists. `today`
+          // is the same `nowIso` with its time thrown away — keep the whole
+          // thing here. (Only stamped when we also stamp the date: if the card
+          // already carried a date, this transition is a status re-label of an
+          // earlier completion, not an observation of one.)
+          updated.completedAt = observedCompletionAt(nowIso);
+        }
         updated.overdue = "COMPLETED";
       }
       // BUG-2026-05-12: previously this branch auto-cleared completedDate
@@ -4433,6 +4473,20 @@ export async function applyPoUpdate(
       // string still clears the date as before.
       const cd = body.completedDate || null;
       updated.completedDate = cd && String(cd).slice(0, 10) > today ? today : cd;
+      // An operator typing a date is an ASSERTION about a day, not an
+      // observation of an instant — so nothing new is measured here. Keep the
+      // instant already on the row only while it still describes the date being
+      // written; clearing the date clears it, and re-dating the card to another
+      // day drops it (a timestamp contradicting its own date column is worse
+      // than no timestamp). Never invent one from the typed date.
+      // Reconciled against `updated`, not `jcRow`: when one PATCH carries both
+      // `status: COMPLETED` and today's date, the block above has already
+      // recorded a genuine observation on `updated`, and reading the pre-edit
+      // row here would throw it away.
+      updated.completedAt = reconcileCompletedAt(
+        updated.completedDate,
+        updated.completedAt,
+      );
     }
 
     // Snapshot the PICs BEFORE the body's change is applied, so a PIC swap can
@@ -4523,8 +4577,12 @@ export async function applyPoUpdate(
         // silently overwriting the FE's optimistic update with the old
         // pic1Id=null. Same fix applied to the production_orders UPDATE
         // path below for symmetry.
+        // completedAt travels with completedDate in EVERY statement that writes
+        // the date — the two must never be able to disagree. See
+        // tests/job-card-completed-at.test.mjs, which fails a completedDate
+        // write that leaves completedAt out of the same statement.
         `UPDATE job_cards SET
-           status = ?, completedDate = ?, pic1Id = ?, pic1Name = ?,
+           status = ?, completedDate = ?, completedAt = ?, pic1Id = ?, pic1Name = ?,
            pic2Id = ?, pic2Name = ?, actualMinutes = ?, dueDate = ?,
            rackingNumber = ?, overdue = ?, distributedAt = ?,
            updated_at = NOW()
@@ -4542,6 +4600,7 @@ export async function applyPoUpdate(
         // at all.
         updated.status,
         updated.completedDate ?? null,
+        updated.completedAt ?? null,
         updated.pic1Id ?? null,
         updated.pic1Name ?? null,
         updated.pic2Id ?? null,

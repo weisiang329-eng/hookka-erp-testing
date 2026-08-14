@@ -40,6 +40,14 @@ import {
   getOrCreateJobCardQrToken,
 } from "../lib/jobcard-qr-token";
 import { pickPackingCard } from "../lib/packing-card-resolve";
+// job_cards.completed_at — the INSTANT a card completed. The three scan
+// endpoints below are the shop floor OBSERVING a completion happen, which makes
+// them the only place in this file where a real instant exists.
+import {
+  ensureJobCardCompletedAt,
+  observedCompletionAt,
+  readCompletedAt,
+} from "../lib/job-card-completed-at";
 import { getOrgId } from "../lib/tenant";
 import {
   poListCacheVersion,
@@ -1876,6 +1884,10 @@ app.post("/:id/scan-complete", async (c) => {
     if (denied) return denied;
   }
   const db = c.var.DB;
+  // Migrations are inert on deploy (CLAUDE.md) — job_cards.completed_at reaches
+  // prod only through this awaited self-apply, before the first write below
+  // that mentions the column.
+  await ensureJobCardCompletedAt(db);
   const scannedId = c.req.param("id");
   const scannedPo = await db
     .prepare("SELECT * FROM production_orders WHERE id = ?")
@@ -2246,6 +2258,11 @@ app.post("/:id/scan-complete", async (c) => {
   ) {
     mergedJc.status = "COMPLETED";
     mergedJc.completedDate = today;
+    // The scan IS the observation — this is the moment the last piece of the
+    // card was recorded done. `today` is `nowIso` with the time discarded;
+    // keep the whole instant beside it so the card's real duration
+    // (completed_at − distributed_at) becomes derivable.
+    mergedJc.completedAt = observedCompletionAt(nowIso);
     mergedJc.overdue = "COMPLETED";
     jcJustCompleted = true;
   } else if (
@@ -2285,12 +2302,18 @@ app.post("/:id/scan-complete", async (c) => {
 
   await db
     .prepare(
-      `UPDATE job_cards SET status = ?, completedDate = ?, overdue = ?,
+      // completedAt travels with completedDate in every statement that writes
+      // the date — the two must never be able to disagree.
+      `UPDATE job_cards SET status = ?, completedDate = ?, completedAt = ?, overdue = ?,
          pic1Id = ?, pic1Name = ?, pic2Id = ?, pic2Name = ?, updated_at = NOW() WHERE id = ?`,
     )
     .bind(
       mergedJc.status,
       mergedJc.completedDate,
+      // Dual-keyed read: a `SELECT *` row delivers the column as `completedAt`
+      // or `completed_at`, and on an isolate whose ALTER has not landed yet,
+      // neither. Binding the bare field would erase a stored instant.
+      readCompletedAt(mergedJc),
       mergedJc.overdue,
       mergedJc.pic1Id,
       mergedJc.pic1Name ?? "",
@@ -2479,6 +2502,8 @@ app.post("/:id/scan-complete-dept", async (c) => {
     if (denied) return denied;
   }
   const db = c.var.DB;
+  // See /scan-complete — completed_at reaches prod only via this self-apply.
+  await ensureJobCardCompletedAt(db);
   const poId = c.req.param("id");
   const po = await db
     .prepare("SELECT * FROM production_orders WHERE id = ?")
@@ -2639,6 +2664,9 @@ app.post("/:id/scan-complete-dept", async (c) => {
     if (allPiecesDone && jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") {
       mergedJc.status = "COMPLETED";
       mergedJc.completedDate = today;
+      // See the scan-complete branch above — the scan is the observation, so
+      // the full instant is kept beside the date-only completedDate.
+      mergedJc.completedAt = observedCompletionAt(nowIso);
       mergedJc.overdue = "COMPLETED";
       jcJustCompleted = true;
     } else if (jc.status === "WAITING") {
@@ -2669,12 +2697,14 @@ app.post("/:id/scan-complete-dept", async (c) => {
 
     await db
       .prepare(
-        `UPDATE job_cards SET status = ?, completedDate = ?, overdue = ?,
+        // completedAt travels with completedDate — see /scan-complete above.
+        `UPDATE job_cards SET status = ?, completedDate = ?, completedAt = ?, overdue = ?,
            pic1Id = ?, pic1Name = ?, pic2Id = ?, pic2Name = ?, updated_at = NOW() WHERE id = ?`,
       )
       .bind(
         mergedJc.status,
         mergedJc.completedDate,
+        readCompletedAt(mergedJc),
         mergedJc.overdue,
         mergedJc.pic1Id,
         mergedJc.pic1Name ?? "",
@@ -2790,6 +2820,8 @@ app.post("/:id/scan-complete-dept", async (c) => {
 // ---------------------------------------------------------------------------
 app.post("/:id/scan-complete-shared", async (c) => {
   const db = c.var.DB;
+  // See /scan-complete — completed_at reaches prod only via this self-apply.
+  await ensureJobCardCompletedAt(db);
   const poId = c.req.param("id");
   const body = await c.req.json().catch(() => ({}));
   const { workerId } = (body || {}) as { workerId?: string };
@@ -3101,6 +3133,9 @@ app.post("/:id/scan-complete-shared", async (c) => {
     ) {
       mergedJc.status = "COMPLETED";
       mergedJc.completedDate = today;
+      // See the scan-complete branch above — the scan is the observation, so
+      // the full instant is kept beside the date-only completedDate.
+      mergedJc.completedAt = observedCompletionAt(nowIso);
       mergedJc.overdue = "COMPLETED";
       jcJustCompleted = true;
     } else if (card.status === "WAITING" && filled) {
@@ -3133,12 +3168,14 @@ app.post("/:id/scan-complete-shared", async (c) => {
     if (filled || jcJustCompleted) {
       await db
         .prepare(
-          `UPDATE job_cards SET status = ?, completedDate = ?, overdue = ?,
+          // completedAt travels with completedDate — see /scan-complete above.
+          `UPDATE job_cards SET status = ?, completedDate = ?, completedAt = ?, overdue = ?,
              pic1Id = ?, pic1Name = ?, pic2Id = ?, pic2Name = ?, updated_at = NOW() WHERE id = ?`,
         )
         .bind(
           mergedJc.status,
           mergedJc.completedDate,
+          readCompletedAt(mergedJc),
           mergedJc.overdue,
           mergedJc.pic1Id,
           mergedJc.pic1Name ?? "",

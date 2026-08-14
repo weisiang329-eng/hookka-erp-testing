@@ -388,6 +388,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 | `src/pages/production/fg-scan.tsx` — FG scan | `src/api/routes/inventory-wip.ts` — in-flight WIP per dept/PO | `production_lead_times_history` / `hookka_dd_buffer_history` | `tests/production-wip-producer-output.test.mjs` |
 | | `src/api/lib/packing-rack-write.ts` — `applyPackingRack(db, jc, rack, pieceNo?)` (rack set/clear + occupancy mirror; shared by office PATCH / /p/ / worker; per-PIECE rack via `piece_pics.racking_number` when pieceNo+totalPieces>1, else card-level legacy) | `rack_items` / `rack_locations` / `piece_pics.racking_number` (mig 0192) | `tests/packing-piece-identity.test.mjs` / `tests/sticker-rack-public.test.mjs` |
 | | `src/api/lib/packing-piece-identity.ts` — `packingPieceIdentity` (shared piece warehouse identity; appends `· pc N of M` to notes when pieceNo set + multi-piece) | | |
+| | `src/api/lib/job-card-completed-at.ts` — `ensureJobCardCompletedAt` / `observedCompletionAt` / `reconcileCompletedAt` / `readCompletedAt` (the completion INSTANT, beside the date-only `completed_date`) | `job_cards.completed_at` | `tests/job-card-completed-at.test.mjs` |
 | `src/pages/production/dept.tsx` / `overview.tsx` — thin wrappers | `src/api/routes/wip-times.ts` — minute counts | `kv_config` | `tests/sofa-combo.test.mjs` |
 | `src/pages/bom.tsx` — BOM Management (7211) | `src/api/routes/production-leadtimes.ts` — due-date buffer | | |
 | `src/pages/cnc-templates.tsx` — CNC drilldown | | | |
@@ -435,6 +436,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 - wipKey is derived by a SINGLE shared helper `deriveTopLevelWipKey` (FAB_SEW splits on '::'[2], etc.). Never re-implement; stale picks throw at confirm.
 - Repair scope: `production_orders.repairscope` stamps partial repairs (FULL=null=byte-identical). Component-scope picks DROP unowned material lines — not cosmetic.
 - COMPLETED job_cards / non-PENDING fg_units are inviolate (production locks). Suggest a UI fix instead.
+- **A job card now carries TWO completion columns and they mean different things (2026-08-14, BUG-2026-08-13-103).** `job_cards.completed_date` is the DAY the completion is filed under — date-only by design, and depended on by the efficiency scan, the dept sheets, the list filters, the archive union and every `substr(completedDate::text,1,10)` comparison; unchanged. `job_cards.completed_at` (nullable TEXT, ISO-8601, indexed; self-applied by `ensureJobCardCompletedAt`, migration 0227 is the RECORD only) is the INSTANT the system OBSERVED the card complete. **It is written ONLY by the four paths that watch a completion happen** — `/scan-complete`, `/scan-complete-dept`, `/scan-complete-shared` and the office PATCH's auto-stamp (`applyPoUpdate`, `if (isDone)`). Every other writer — a typed date, the Sheets webhook, every import/backfill — goes through `reconcileCompletedAt`, which can only KEEP an existing instant (same day) or DROP it, never mint one. **Historical rows are deliberately NULL and are not backfilled**: the time is gone, and a plausible 09:00 would be C15. The invariant `completedAt travels with completedDate in the SAME statement` is enforced across all of `src/api` by `tests/job-card-completed-at.test.mjs` — a new completion writer fails CI until it is wired. TEXT rather than TIMESTAMPTZ so it is the same shape as `job_cards.distributed_at`, which is what it exists to be subtracted from.
 - camelCase DB columns: most at-risk WIP/production cols are dual-keyed (r.camelCase ?? r.snake_case); db-pg toCamel can't recover folded-lowercase camelCase. New columns snake_case; a camelCase write column needs a `column-rename-map.json` entry.
 - BOM production-time / minute rates written into `bom_templates.wipComponents` from BOTH bom.tsx (ProductionTimesDialog) and wip-times.tsx/route — keep consistent; feed productionCostRatePerMinuteSen in the PO cost cascade.
 - EditBOMDialog's WIP tab is TWO-PANE (2026-08-03): `flattenWipTree` turns the recursive tree into indented rows on the left (selection + collapse, addressed by a `wi.path` key), and `WipNodeDetail` edits the SELECTED node on the right at full width. It replaced an inline recursive render inside a fixed 720px dialog, where each nesting level stole ~20px and the category select clipped to "CAT 3" by level 3, with four clashing background fills stacked inside one another. Depth now reads as a 3px left colour bar. The dialog is `w-[min(1160px,95vw)]` and the WIP tab owns its own scrolling (the body switches to `overflow-hidden` so each pane scrolls independently). Because ONE detail pane serves every depth, EditBOMDialog carries depth-agnostic adapters (`nUpdate`, `nAddProcess`, `nMove`, …) that dispatch on `path.length === 0` between the `xxxWIP(wi,…)` and `xxxAtPath(wi,path,…)` handler families — BOTH families are still live and must stay in sync. MasterTemplatesDialog still uses the old recursive `SubWIPTree`. Pins: `tests/bom-editor-reorder.test.mjs`.
@@ -1236,7 +1238,7 @@ in that file). Also read-only despite its POST verb and `production-orders:updat
   lands** (silent under-apply). `poNo` is deterministic (`PO-IMPORT-${docNo}` :476) but is never
   checked in this loop.
 - **The WIP + labor cascades ARE replay-guarded, but only when `orgId` is threaded.**
-  `applyWipInventoryChange` (`src/api/routes/production-orders/_helpers.ts:2574`) claims an
+  `applyWipInventoryChange` (`src/api/routes/production-orders/_helpers.ts:2616`) claims an
   idempotency ticket by INSERTing into `wip_cascade_log` (:2645) and returns early when it loses
   the race — but that whole block is wrapped in `if (options.orgId)` at :2635. `processRow`
   (`src/api/routes/import-completion/_shared.ts:317`) passes `{ orgId, source: "BACKFILL" }` at
@@ -1292,7 +1294,7 @@ in that file). Also read-only despite its POST verb and `production-orders:updat
   invisible to the third, which will then insert duplicate bindings for the same
   (materialCode, supplierId).
 - `/regen-fg-units` queries `fg_units … WHERE poId = ?` (`fg-fabric.ts:1415`) while every other
-  `fg_units` write in this family uses `po_id` (`fg-fabric.ts:805`, `so-co-do-backfills.ts:1409`).
+  `fg_units` write in this family uses `po_id` (`fg-fabric.ts:805`, `so-co-do-backfills.ts:1424`).
   Both work only because of `src/api/lib/column-rename-map.json` — see the camelCase rule in
   `CLAUDE.md` before adding another.
 

@@ -5,6 +5,7 @@ import { recomputePoStatusAndProgress } from "../production-orders";
 import { loadHookkaDDBuffer, hookkaDDBufferFor, addDays } from "../../lib/lead-times";
 import { createProductionOrdersForOrder } from "../_shared/production-builder";
 import { getOrgId } from "../../lib/tenant";
+import { ensureJobCardCompletedAt } from "../../lib/job-card-completed-at";
 
 const app = new Hono<Env>();
 
@@ -30,6 +31,9 @@ app.post("/migrate-do-from-excel", async (c) => {
   if (denied) return denied;
 
   const db = c.var.DB;
+  // Migrations are inert on deploy (CLAUDE.md) — awaited before the job-card
+  // stamps below mention completed_at.
+  await ensureJobCardCompletedAt(db);
   const dryRun = c.req.query("dryRun") === "true";
   const today = new Date().toISOString().slice(0, 10);
   let body: { entries?: Array<{ custPO: string; doNo: string; dispatchDate?: string }>; deliveryDate?: string };
@@ -186,7 +190,9 @@ app.post("/migrate-do-from-excel", async (c) => {
       for (const j of plan.upstreamJcsToStamp) {
         stmts.push(
           db.prepare(
-            `UPDATE job_cards SET status = 'COMPLETED', completedDate = ?, overdue = 'COMPLETED'
+            // completedAt travels with completedDate. BACKFILL — the date is
+            // the legacy DO's dispatch date, not an observed instant, so NULL.
+            `UPDATE job_cards SET status = 'COMPLETED', completedDate = ?, completedAt = NULL, overdue = 'COMPLETED'
               WHERE id = ?`,
           ).bind(planDispatchDate, j.jcId),
         );
@@ -195,7 +201,9 @@ app.post("/migrate-do-from-excel", async (c) => {
       for (const j of plan.packingJcsToStamp) {
         stmts.push(
           db.prepare(
-            `UPDATE job_cards SET status = 'COMPLETED', completedDate = ?, overdue = 'COMPLETED'
+            // completedAt travels with completedDate. BACKFILL — the date is
+            // the legacy DO's dispatch date, not an observed instant, so NULL.
+            `UPDATE job_cards SET status = 'COMPLETED', completedDate = ?, completedAt = NULL, overdue = 'COMPLETED'
               WHERE id = ?`,
           ).bind(planDispatchDate, j.jcId),
         );
@@ -658,6 +666,9 @@ app.post("/backfill-complete-stray-jc-co2606002", async (c) => {
   const denied = await requirePermission(c, "production-orders", "update");
   if (denied) return denied;
   const db = c.var.DB;
+  // Migrations are inert on deploy (CLAUDE.md) — awaited before the UPDATE
+  // below mentions completed_at.
+  await ensureJobCardCompletedAt(db);
 
   const PO_ID = "pord-co-72dcea0a-01";
   const JC_ID = "jc-1vxvn3i011nbi7-05";
@@ -718,7 +729,11 @@ app.post("/backfill-complete-stray-jc-co2606002", async (c) => {
   const doneDate = maxRow?.maxDate || new Date().toISOString().slice(0, 10);
 
   await db
-    .prepare("UPDATE job_cards SET status = 'COMPLETED', completed_date = ? WHERE id = ? AND status = 'WAITING'")
+    // completed_at travels with completed_date. The date is borrowed from a
+    // sibling card, so nothing was observed here — NULL, never a made-up time.
+    .prepare(
+      "UPDATE job_cards SET status = 'COMPLETED', completed_date = ?, completed_at = NULL WHERE id = ? AND status = 'WAITING'",
+    )
     .bind(doneDate, JC_ID)
     .run();
   const recompute = await recomputePoStatusAndProgress(db, PO_ID);

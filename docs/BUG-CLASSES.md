@@ -1,6 +1,17 @@
 # Recurring bug classes — the index that makes P5 executable
 
-> **Last verified: 2026-08-14** — restamped on branch `fix/security-posture`: **C16 gains
+> **Last verified: 2026-08-14** — restamped on branch `feat/job-card-completed-at`: adds
+> **C20 (a measurement thrown away at the moment of capture)**, the class UPSTREAM of C15.
+> `job_cards.completed_date` was written as `nowIso.split("T")[0]` by 14 sites while the full
+> instant sat in a local variable one line above, so no job's duration was ever derivable and
+> every "production time" figure downstream HAD to be an estimate — `production_time_minutes =
+> est_minutes` on all 36,796 rows. BUG-2026-08-13-103 adds `job_cards.completed_at` beside it
+> (additive; `completed_date` untouched) and enforces "the pair travels in one statement" across
+> all of `src/api` via `tests/job-card-completed-at.test.mjs`. Historical rows stay NULL on
+> purpose — backfilling them would BE C15. Suite at that point: 3,998 tests / 0 fail; all 11
+> assertions proved RED by mutation.
+>
+> **Previously verified 2026-08-14** — restamped on branch `fix/security-posture`: **C16 gains
 > row 7** (a projection narrowed by PERMISSION rather than payload size — the more dangerous
 > variant, because the author cannot reproduce what the affected role sees) with its
 > OMIT-do-not-BLANK corollary, and **C12 gains rows 12 and 13** (the whole `organisations.ts`
@@ -1084,6 +1095,77 @@ a behaviour change nobody asked for. Grep for the INPUT instead — a money-labe
 field whose element is not `type="number"` — then follow its state to whatever parses
 it. And ask the question that actually decides it: *if this box gets a comma, what
 number reaches the database?*
+
+---
+
+## C20 — a measurement thrown away at the moment of capture
+
+**Shape.** The code holds a precise value, uses a coarser projection of it for the column it is
+writing, and never stores the precise one. `nowIso.split("T")[0]` is the canonical instance: the
+full instant is in a local variable, one line above the write, and only the date survives. The
+write is CORRECT for the column it targets — `completed_date` really is a date — so nothing
+about the line looks wrong, and nothing ever fails.
+
+**Why it is worse than a wrong value.** A wrong value can be recomputed once someone notices. A
+value that was never recorded is gone: no query, no audit table, no re-derivation and no amount
+of later cleverness can recover it. C15 is about a number that reads as measured and is not —
+this class is the reason such numbers exist. When the only real input has been discarded, every
+downstream figure MUST be an estimate, a constant or a ratio of itself, and the person writing
+that dashboard has no honest option available. Fixing C15 at the display layer without fixing
+this leaves the screen saying "—" forever.
+
+**How it hides.** Three ways, all of them structural:
+
+1. **It never errors and never looks lossy.** `completed_date` is date-only by design; the
+   truncation is the intended shape for THAT column. The defect is the absence of a second
+   column, and an absent column has no text to grep for.
+2. **The count looks healthy.** `job_cards.actual_minutes` is non-null on 4,289 rows and every
+   one is byte-identical to that card's `est_minutes`. Populated, plausible, and carrying no
+   information — the same trap C15's closing note warns about: check the DISTRIBUTION, not the
+   NULL rate.
+3. **The other end of the interval is fine.** `distributed_at` stores a full instant, so the
+   data model LOOKS like it supports duration maths. Only when you try to subtract do you find
+   one end rounded to the day.
+
+**The rule.** *When a write coarsens a value the code already holds precisely, and the precise
+value is the only evidence of an event, store the precise one too — in its own column, beside
+the coarse one, never instead of it.* Three corollaries, each of which cost something here:
+
+* **Additive, never a reinterpretation.** The coarse column has consumers who depend on its
+  shape (`completed_date` is compared with `substr(…,1,10)` in a dozen queries and filtered by
+  range in the dept sheets). Widening it in place is a different, bigger change with its own
+  blast radius; adding a column beside it is not.
+* **Only OBSERVE — never derive the precise value from the coarse one.** A backfill that turns
+  `2026-08-14` into `2026-08-14T09:00:00.000Z` produces exactly the C15 figure the capture was
+  supposed to make unnecessary. Historical rows stay NULL, visibly.
+* **The pair must be written by the SAME statement.** Otherwise one moves without the other and
+  a stale instant outlives the completion it described — a card that is re-dated, un-completed
+  or QC-blocked would still hand a reader a duration.
+
+| # | discarded value | where | state |
+|---|---|---|---|
+| 1 | the completion INSTANT — 14 `.slice(0, 10)` / `split("T")[0]` truncations across the production + worker write paths | `job_cards.completed_date` | ✅ 2026-08-14 (BUG-2026-08-13-103) — `job_cards.completed_at` added beside it, written by the four observing paths only |
+| 2 | the CLOCK-OUT instant → `attendance_records.production_time_minutes = working_minutes × 0.85` | `attendance.ts` | ⬜ open — owned by a separate in-flight change; listed here so the class is complete, not to be fixed twice |
+| 3 | `job_cards.actual_minutes` — written as a copy of `est_minutes` by every path that sets it, so the column exists but measures nothing | `import-completion/_shared.ts` and the cascade backfills | ⬜ open, and it is the NEXT one: once row 1 has accumulated data, this column has a real source for the first time. Do not "fix" it by computing a duration for historical rows |
+| 4 | the rest of the app | ⬜ unswept. The shape to look for is a `.slice(0, 10)` / `split("T")[0]` / `Math.round` / `toFixed` applied to a value the code obtained precisely, where nothing else stores the precise form |
+
+**Enforced by** `tests/job-card-completed-at.test.mjs`. Four things, all EOL-agnostic (these are
+CRLF files; a literal `\n` anchor matches nothing and reports clean): the decision function is
+property-tested over its whole input cross-product to prove it can only return the instant it
+was handed or null — never one derived from a date; a source sweep over ALL of `src/api` fails
+any statement that writes `job_cards.completedDate` without writing `completedAt` in the SAME
+statement (and asserts it found at least 15 such statements, so a broken extractor cannot make
+the guard vacuous); the four observation sites must bind `nowIso`, not `today`; and no statement
+anywhere may write a full instant into `completed_date`. Every assertion was proved RED by
+reintroducing the bug, with the mutation asserting the bytes on disk changed first.
+
+**Finding the next one.** Do not grep for `slice(0, 10)` and start converting — most hits are
+formatting a date for display, which is correct and changing it is a regression nobody asked
+for. Ask instead: *what event does this row record, and is the row the only evidence it
+happened?* If yes, check whether the code held something more precise at the moment it wrote.
+The tell is a sibling column that IS precise (`distributed_at` next to `completed_date`,
+`last_scan_at` next to a date) — a table that measures one end of an interval to the millisecond
+and the other to the day cannot answer the question it looks like it can.
 
 ---
 

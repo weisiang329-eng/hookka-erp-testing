@@ -1,7 +1,19 @@
 import { applyWipInventoryChange, type JobCardRow, type ProductionOrderRow } from "../production-orders";
 import { postJobCardLabor } from "../../lib/po-cost-cascade";
 import { postProductionOrderCompletion } from "../../lib/fg-completion";
-import { createProductionOrdersForOrder } from "../_shared/production-builder";
+// (`createProductionOrdersForOrder` used to be imported here; it is referenced
+// only from a comment at :1462 and eslint blocks the commit on it. Removed as a
+// dead import, not as part of this change's subject.)
+// job_cards.completed_at. This importer stamps a HISTORICAL completion date
+// from a spreadsheet — never an observed instant — so it mints nothing. It only
+// decides whether an instant already on the row still describes the date being
+// written, so an import that re-dates a scan-completed card cannot leave a
+// timestamp pointing at a different day.
+import {
+  ensureJobCardCompletedAt,
+  readCompletedAt,
+  reconcileCompletedAt,
+} from "../../lib/job-card-completed-at";
 
 
 // ---------------------------------------------------------------------------
@@ -325,6 +337,10 @@ export async function processRow(
   // cursor-resumes could double-apply inventory changes without it).
   orgId: string,
 ): Promise<RowResult> {
+  // Migrations are inert on deploy (CLAUDE.md) — awaited before the job_cards
+  // UPDATE below mentions completed_at. Memoised per isolate, so the per-row
+  // cost after the first call is one already-resolved promise.
+  await ensureJobCardCompletedAt(db);
   const result: RowResult = {
     matched: false,
     noSoMatch: false,
@@ -445,6 +461,12 @@ export async function processRow(
       for (const jc of matchingJcs) {
         // Build the patched JC snapshot.
         const updated: JobCardRow = { ...jc };
+        // Normalise the completion INSTANT onto one key. A `SELECT *` row
+        // delivers it as `completedAt` or `completed_at` (or neither, on an
+        // isolate whose ALTER has not landed), and the UPDATE binds one field —
+        // reading through `??` later would let the raw key resurrect a value
+        // the reconcile below deliberately dropped.
+        updated.completedAt = readCompletedAt(jc);
         if (pic1) {
           updated.pic1Id = pic1.id;
           updated.pic1Name = pic1.name;
@@ -460,6 +482,13 @@ export async function processRow(
         if (setStatus) {
           updated.status = "COMPLETED";
           updated.completedDate = completedDate;
+          // A spreadsheet date is not a measurement — nothing is minted here.
+          // Keep an already-OBSERVED instant only while it still describes the
+          // date being written; a re-dated card drops it.
+          updated.completedAt = reconcileCompletedAt(
+            completedDate,
+            readCompletedAt(jc),
+          );
           updated.overdue = "COMPLETED";
           // Use planned minutes as actual since we don't have real timing.
           // The labor cascade reads jc.actualMinutes when > 0, otherwise
@@ -477,14 +506,20 @@ export async function processRow(
         try {
           await db
             .prepare(
+              // completedAt travels with completedDate in every statement that
+              // writes the date — the two must never be able to disagree.
               `UPDATE job_cards SET
-                 status = ?, completedDate = ?, pic1Id = ?, pic1Name = ?,
+                 status = ?, completedDate = ?, completedAt = ?, pic1Id = ?, pic1Name = ?,
                  pic2Id = ?, pic2Name = ?, actualMinutes = ?, overdue = ?
                WHERE id = ?`,
             )
             .bind(
               updated.status,
               updated.completedDate,
+              // A PIC-only row (setStatus false) never touched the date, so
+              // this carries the stored instant through unchanged (normalised
+              // above) rather than binding an undefined key back as NULL.
+              updated.completedAt ?? null,
               updated.pic1Id,
               updated.pic1Name ?? "",
               updated.pic2Id,

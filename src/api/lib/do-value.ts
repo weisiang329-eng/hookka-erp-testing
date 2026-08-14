@@ -19,24 +19,42 @@
 // Delivered/Outstanding split — so every surface reconciles to the cent.
 // ---------------------------------------------------------------------------
 import { withSnapshot } from "./snapshot";
+import {
+  buildSoItemIdentity,
+  type SoItemIdentityIndex,
+  type PoSpec,
+} from "./invoice-so-item-link";
 
 export type SoLinePriceIndex = {
-  poById: Map<
-    string,
-    {
-      salesOrderId: string;
-      productCode: string;
-      sizeCode: string;
-      fabricCode: string;
-    }
-  >;
+  poById: Map<string, PoSpec>;
   byFull: Map<string, number>; // `${soId}|${code}|${size}|${fab}` → unitPriceSen
   byCode: Map<string, number>; // `${soId}|${code}` → unitPriceSen
   byAnyCode: Map<string, number>; // `${code}` → unitPriceSen (last resort)
+  // IDENTITY, built from the same two reads as the prices above so an invoice
+  // line can record WHICH sales-order line it bills (BUG-2026-08-13-096) at
+  // zero extra query cost.
+  //
+  // ⚠ It is NOT the price maps' twin. Those are first-one-wins by design — for
+  // a price, any matching line's value will do. This one COUNTS claimants and
+  // resolves only unique keys, because a wrong identity makes a bad audit look
+  // authoritative. Same rows, opposite tie-breaking, on purpose. See
+  // invoice-so-item-link.ts.
+  soItemIdentity: SoItemIdentityIndex;
 };
 
+/**
+ * The subset of the index a PRICE lookup needs. Named separately because
+ * callers that build their own narrow price index (admin.ts's repair sweep)
+ * legitimately have no identity maps, and requiring them would either force a
+ * fake empty index — which resolves every line to null and looks like a real
+ * answer — or make `soItemIdentity` optional on the full type, which would let
+ * an identity consumer silently read `undefined`. Neither is acceptable, so the
+ * price resolver simply asks for less.
+ */
+export type PriceLookupIndex = Omit<SoLinePriceIndex, "soItemIdentity">;
+
 export function priceForItem(
-  idx: SoLinePriceIndex,
+  idx: PriceLookupIndex,
   productionOrderId: string | null | undefined,
   fallbackSoId: string | null | undefined,
   productCode: string | null | undefined,
@@ -80,7 +98,7 @@ export async function loadSoLinePriceIndex(
       }>(),
     db
       .prepare(
-        `SELECT si.salesOrderId AS salesOrderId, si.productCode AS productCode,
+        `SELECT si.id AS id, si.salesOrderId AS salesOrderId, si.productCode AS productCode,
                 si.sizeCode AS sizeCode, si.fabricCode AS fabricCode,
                 si.unitPriceSen AS unitPriceSen
            FROM sales_order_items si
@@ -89,6 +107,7 @@ export async function loadSoLinePriceIndex(
       )
       .bind(orgId)
       .all<{
+        id: string;
         salesOrderId: string | null;
         productCode: string | null;
         sizeCode: string | null;
@@ -126,7 +145,13 @@ export async function loadSoLinePriceIndex(
     if (!byCode.has(ck)) byCode.set(ck, up);
     if (code && !byAnyCode.has(code)) byAnyCode.set(code, up);
   }
-  return { poById, byFull, byCode, byAnyCode };
+  return {
+    poById,
+    byFull,
+    byCode,
+    byAnyCode,
+    soItemIdentity: buildSoItemIdentity(siRes.results ?? []),
+  };
 }
 
 // Per-DO exact value (item qty × its SO-line price).

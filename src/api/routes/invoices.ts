@@ -40,12 +40,20 @@ import {
 } from "../lib/journal-hash";
 import { getOpeningDate } from "./accounting";
 import { getOrgId } from "../lib/tenant";
+import { loadSoLinePriceIndex } from "../lib/do-value";
 import { checkInvoiceLocked, lockedResponse } from "../lib/lock-helpers";
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { parseDebtorCode } from "../../lib/debtor";
 import { nextMonthDueDate } from "../../lib/terms";
 import { readGstRatePct } from "../lib/note-ledger";
 import { ensureInvoicePoLinkColumn, readInvoiceItemPoLink } from "../lib/invoice-po-link";
+// BUG-2026-08-13-096 — the per-line link back to the SALES ORDER line, which is
+// what an SO<->invoice audit needs and what 98.5% of the book was missing.
+import {
+  ensureInvoiceSoItemLinkColumn,
+  resolveSoItemIdsForPoIds,
+  resolveSoItemId,
+} from "../lib/invoice-so-item-link";
 import { matchInvoiceLinesToDoLines, type BackfillInvLine, type BackfillDoLine } from "../../lib/invoice-po-backfill";
 import { compareDoLinesByCustomerPO } from "../../lib/do-item-order";
 // The sales-side convert chain — per-line consumed counters on
@@ -819,6 +827,135 @@ app.post("/backfill-po-links", async (c) => {
       linkedLines,
       unlinkableLines,
       skipped,
+    },
+  });
+});
+
+// POST /api/invoices/backfill-so-item-links
+//
+// BUG-2026-08-13-096. Fills `invoice_items.so_item_id` on EXISTING rows, so an
+// SO<->invoice audit can reach further than the 1.5% of the book that
+// `delivery_order_item_id` covers.
+//
+// DEFAULTS TO DRY-RUN, and reports a full outcome breakdown rather than one
+// number — because the whole finding behind this bug is that a single "0 items
+// to fix" concealed the fact that the check could not SEE 98.5% of the rows.
+// A planner that says "1,900 linkable" and nothing else would repeat that
+// mistake in the other direction. Every line lands in exactly one bucket and
+// the buckets sum to the scanned total, which is asserted by the tests.
+//
+// Pass ?execute=1 to write (explicit OPT-IN, never an opt-out — the 2026-07-03
+// lesson where a dry flag nobody noticed ran a live backfill).
+//
+// WHAT IT WILL NOT DO. It never picks between two candidate SO lines. The
+// resolver counts claimants and returns null for anything contested
+// (invoice-so-item-link.ts), per the owner's standing rule that a migration
+// reads the system's own value and never infers one — blank stays blank,
+// ambiguous is skipped. A wrong link is worse than a missing one: a missing
+// link makes an audit report "cannot see", a wrong one makes it report "clean".
+//
+// It also writes ONLY so_item_id, and only over NULL. No amount, quantity,
+// price or status is touched by construction (owner 2026-07-23, on the sibling
+// backfill: <<切记不要动到金额>>).
+app.post("/backfill-so-item-links", async (c) => {
+  const denied = await requirePermission(c, "invoices", "update");
+  if (denied) return denied;
+  const execute = c.req.query("execute") === "1";
+  // `exact` (default) writes only tier-1 links — one SO line matching on
+  // product+size+fabric inside the production order's OWN sales order.
+  // `exact,code` also writes tier 2, where the spec drifted but exactly ONE
+  // line in that sales order carries the product code at all. Both are
+  // uniqueness observations, not guesses; the dry run always reports the two
+  // separately so the choice is made on numbers rather than on a default.
+  const tiers = (c.req.query("tiers") ?? "exact").split(",").map((t) => t.trim());
+  const writeCodeTier = tiers.includes("code");
+
+  await ensureInvoiceSoItemLinkColumn(c.var.DB as never);
+  const orgId = getOrgId(c);
+  const idx = await loadSoLinePriceIndex(c.var.DB as never, orgId);
+
+  const rowsRes = await c.var.DB.prepare(
+    `SELECT ii.id, ii.production_order_id, ii.total_sen, i.invoiceNo, i.status
+       FROM invoice_items ii
+       JOIN invoices i ON i.id = ii.invoiceId
+      WHERE i.orgId = ? AND (ii.so_item_id IS NULL OR ii.so_item_id = '')`,
+  )
+    .bind(orgId)
+    .all<Record<string, unknown>>();
+  const rows = rowsRes.results ?? [];
+
+  const counts: Record<string, number> = {
+    exact: 0,
+    code: 0,
+    ambiguous: 0,
+    "no-po-link": 0,
+    "po-unknown": 0,
+    "po-has-no-so": 0,
+    "no-so-line": 0,
+  };
+  // Value carried by each bucket, in sen. The RM 1,584,007.08 in the bug entry
+  // is what made the blind spot legible; the same figure per bucket is what
+  // makes the remaining blind spot legible after this runs.
+  const valueSen: Record<string, number> = { ...counts };
+  const samples: Array<Record<string, unknown>> = [];
+  const statements: D1PreparedStatement[] = [];
+
+  for (const r of rows) {
+    const poId =
+      (r.productionOrderId as string | null) ??
+      (r.production_order_id as string | null) ??
+      null;
+    const res = resolveSoItemId(idx.soItemIdentity, idx.poById, poId);
+    const total = Number(r.totalSen ?? r.total_sen ?? 0) || 0;
+    counts[res.outcome] = (counts[res.outcome] ?? 0) + 1;
+    valueSen[res.outcome] = (valueSen[res.outcome] ?? 0) + total;
+
+    const writable =
+      res.soItemId != null &&
+      (res.outcome === "exact" || (res.outcome === "code" && writeCodeTier));
+    if (writable) {
+      statements.push(
+        c.var.DB.prepare(
+          `UPDATE invoice_items SET so_item_id = ?
+            WHERE id = ? AND (so_item_id IS NULL OR so_item_id = '')`,
+        ).bind(res.soItemId, String(r.id)),
+      );
+    }
+    if (samples.length < 25) {
+      samples.push({
+        invoiceItemId: String(r.id),
+        invoiceNo: String(r.invoiceNo ?? r.invoice_no ?? ""),
+        invoiceStatus: String(r.status ?? ""),
+        productionOrderId: poId,
+        outcome: res.outcome,
+        soItemId: res.soItemId,
+        totalSen: total,
+        wouldWrite: writable,
+      });
+    }
+  }
+
+  if (execute && statements.length) {
+    for (let i = 0; i < statements.length; i += 100) {
+      await c.var.DB.batch(statements.slice(i, i + 100));
+    }
+  }
+
+  const linkable = counts.exact + (writeCodeTier ? counts.code : 0);
+  return c.json({
+    success: true,
+    data: {
+      dry: !execute,
+      tiersWritten: writeCodeTier ? ["exact", "code"] : ["exact"],
+      scannedLines: rows.length,
+      wouldWriteLines: statements.length,
+      linkableLines: linkable,
+      // Everything this pass leaves NULL, and WHY. Sums with linkableLines to
+      // scannedLines — the invariant that keeps this report honest.
+      remainingNullLines: rows.length - linkable,
+      counts,
+      valueSen,
+      samples,
     },
   });
 });
@@ -1795,8 +1932,8 @@ app.post("/", async (c) => {
           `INSERT INTO invoice_items (
              id, invoiceId, productCode, productName, sizeLabel, fabricCode,
              quantity, unitPriceSen, discountSen, totalSen,
-             production_order_id, delivery_order_item_id
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             production_order_id, delivery_order_item_id, so_item_id
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           item.id,
           id,
@@ -1816,6 +1953,9 @@ app.post("/", async (c) => {
           // The convert-chain link. Without it this invoice reads as a legacy
           // whole-document bill and locks the delivery order to itself.
           item.deliveryOrderItemId,
+          // BUG-2026-08-13-096 — resolved by computeDoInvoiceLines from this
+          // line's production order, and null unless it resolved UNIQUELY.
+          item.soItemId,
         ),
       ),
       // Draw the billed quantity down on each DO line, same batch as the
@@ -2293,6 +2433,16 @@ app.put("/:id", async (c) => {
         });
       }
 
+      // BUG-2026-08-13-096 — resolve every surviving line's SALES ORDER line
+      // from its production order, in ONE narrow batch (2 queries scoped to
+      // this invoice's POs, not the whole org). Awaited before the INSERT that
+      // writes the column, because deploys do not replay migration files here.
+      await ensureInvoiceSoItemLinkColumn(c.var.DB as never);
+      const soItemIdByPo = await resolveSoItemIdsForPoIds(
+        c.var.DB as never,
+        newRows.map((r) => r.poId).filter((x): x is string => !!x),
+      );
+
       // Can the surviving lines still be covered? Project each DO line's
       // consumption as (current − what THIS invoice is handing back) and check
       // the new draw against that. A line another invoice claimed while this
@@ -2327,8 +2477,8 @@ app.put("/:id", async (c) => {
             `INSERT INTO invoice_items (
                id, invoiceId, productCode, productName, sizeLabel, fabricCode,
                quantity, unitPriceSen, discountSen, totalSen,
-               production_order_id, delivery_order_item_id
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               production_order_id, delivery_order_item_id, so_item_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             r.id,
             id,
@@ -2342,6 +2492,12 @@ app.put("/:id", async (c) => {
             r.totalSen,
             r.poId,
             r.doItemId,
+            // BUG-2026-08-13-096 — RE-RESOLVED from r.poId rather than carried
+            // over from the row being replaced. An edit is the one moment we
+            // know the current spec, so a legacy line that predates the column
+            // gains its link here instead of staying blind forever. Still null
+            // whenever the SO line is not unique.
+            soItemIdByPo.get(r.poId ?? "")?.soItemId ?? null,
           ),
         );
       }
